@@ -5,6 +5,7 @@
 | 项目 | 用途 / 分发方式 | 许可证与来源 |
 |---|---|---|
 | xterm.js 6.0.0 / addon-fit 0.11.0 | 浏览器终端；JS/CSS 及原许可证放在 `dist/vendor` | [MIT](https://github.com/xtermjs/xterm.js/blob/master/LICENSE) |
+| Playwright | 开发与 CI 的双浏览器流程验收，不随生产容器安装 | [Apache-2.0](https://github.com/microsoft/playwright/blob/main/LICENSE) |
 | Node.js | Web/API/CLI 运行时；Docker 基于 Node 24 | [MIT 及所含组件声明](https://github.com/nodejs/node/blob/main/LICENSE) |
 | Python | GPUQ 与节点桥运行时，不随源码复制解释器 | [PSF 等](https://docs.python.org/3/license.html) |
 | SQLite | Node 内置数据库后端 | [Public domain](https://www.sqlite.org/copyright.html) |
