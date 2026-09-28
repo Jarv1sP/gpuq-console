@@ -1,7 +1,7 @@
 export function terminalUI(store,toast){
   // xterm creates theme/measurement styles dynamically. Give only those styles
   // the response-specific CSP nonce via its supported documentOverride option.
-  const nonce=document.querySelector('meta[name="amax-style-nonce"]')?.content;
+  const nonce=document.querySelector('meta[name="gpuq-style-nonce"]')?.content;
   const terminalDocument=new Proxy(document,{get(target,key){
     if(key==='createElement')return(...args)=>{const element=target.createElement(...args);if(nonce&&element.tagName==='STYLE')element.nonce=nonce;return element;};
     const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;

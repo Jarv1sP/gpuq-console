@@ -1,6 +1,8 @@
-# 从零部署 AMAX Console
+# 从零部署 GPUQ Console
 
 本文面向新的实验室。已有服务请先备份、比较差异，不把示例覆盖到正在使用的 Tail 策略、GPUQ 数据库或反向代理。**所有命令里的域名、IP、账号和路径都是示例。**
+
+本文统一使用厂商无关的 `gpuq-console` 服务/目录前缀、`gpuops` 系统服务用户和 `/srv/gpu-workspaces` 工作区。已有安装不自动改名或搬迁，升级前先读[名称更新与兼容](MIGRATION.md)。
 
 ## 1. 准备条件
 
@@ -8,7 +10,7 @@
 - VPS 安装 Docker Engine / Compose v2+、Git、Node.js 24、Python 3.10+、OpenSSH client、sqlite3。
 - GPU 节点：Linux、Python 3.10+、systemd 用户服务/cgroup v2、NVIDIA 驱动、OpenSSH server、bubblewrap（`bwrap --help` 包含 `--bind-fd`）、slirp4netns、curl。
 - GPU 节点允许用户命名空间。某些 Ubuntu/AppArmor 策略会限制它；使用发行版支持的规则授权相关程序，不全局关闭系统安全机制。
-- 每台节点准备一个可信的非 root 服务用户（示例 `amax`）和只读基础 Python/Conda（示例 `/opt/conda`），其中 PyTorch/CUDA 与驱动兼容。不要给新平台普通用户发这个系统账号的密码。
+- 每台节点准备一个可信的非 root 服务用户（示例 `gpuops`）和只读基础 Python/Conda（示例 `/opt/conda`），其中 PyTorch/CUDA 与驱动兼容。不要给新平台普通用户发这个系统账号的密码。
 - 给域名 `gpu.example.com` 设置指向 VPS 的 A/AAAA；不要保留指向错误主机的 AAAA。Caddy 负责自动申请/续签证书。
 
 ## 2. Tail 管理网络
@@ -52,8 +54,8 @@ GPU 节点同理，改为自己的 hostname 与 `tag:server`。登记是一次�
 以 VPS 管理员操作：
 
 ```sh
-sudo git clone https://github.com/Jarv1sP/amax-console.git /opt/amax-console
-cd /opt/amax-console
+sudo git clone https://github.com/Jarv1sP/gpuq-console.git /opt/gpuq-console
+cd /opt/gpuq-console
 sudo cp config/inventory.example.json inventory.json
 sudoedit inventory.json
 sudo node scripts/configure.mjs inventory.json
@@ -65,17 +67,19 @@ sudo python3 deploy/init-vps.py
 
 `configure` 生成公开的机器容量表和私有 `.env`/Headscale 配置；`init-vps` 建目录、初始管理员密码、两把独立 Ed25519 密钥、systemd 单元，但不启动服务、不修改 ACL、不进入节点。
 
+`init-vps` 会把安装根目录规范为 `root:root / 0755`，私有清单与管理密钥保持 `root:root / 0600`，数据目录保持应用的 UID/GID 1000；不递归修改已有数据库、邀请码密钥或工作区。若通过压缩包交付，不要直接将带有本机 UID/目录权限的归档解压覆盖生产根目录：用 GNU tar 的 `--no-same-owner --no-overwrite-dir` 解压到独立暂存目录，核对后只安装允许更新的软件文件，排除数据、清单、密钥及根目录元数据。更新后重新检查目标目录的属主和可遍历权限，不能靠扩大服务 capability 绕过权限错误。
+
 私钥在 `collector/id_ed25519`、`executor/id_ed25519`，**永远留在 VPS**。只复制 `.pub` 到对应 GPU 节点。
 
 ## 4. 准备 GPU 节点
 
-安装系统依赖，确认驱动和现有实验正常；以 `amax` 登录，准备源码（相同版本）、自己的 `inventory.json` 以及 VPS 两个公钥。各节点只需这个清单中的自身条目和 VPS Tail IP，也可使用完整私有清单。不要复制 VPS 私钥或数据库。
+安装系统依赖，确认驱动和现有实验正常；以 `gpuops` 登录，准备源码（相同版本）、自己的 `inventory.json` 以及 VPS 两个公钥。各节点只需这个清单中的自身条目和 VPS Tail IP，也可使用完整私有清单。不要复制 VPS 私钥或数据库。
 
 首次建目录的例子，须与自己的 inventory 一致：
 
 ```sh
-sudo install -d -o amax -g amax -m 700 /srv/gpuq /srv/amax-workspaces
-sudo loginctl enable-linger amax
+sudo install -d -o gpuops -g gpuops -m 700 /srv/gpuq /srv/gpu-workspaces
+sudo loginctl enable-linger gpuops
 python3 scripts/build-gpuq.py
 python3 deploy/install-node.py --inventory inventory.json --node gpu-1 --collector-key collector.pub --executor-key executor.pub --initialize-gpuq
 ```
@@ -86,7 +90,7 @@ python3 deploy/install-node.py --inventory inventory.json --node gpu-1 --collect
 - **新 GPUQ**：显式初始化后以观察模式启动，保守检查 `nvidia-smi`、`~/bin/gpu health`、`~/bin/gpu status`；确认 GPU UUID 和现有占用后执行 `~/bin/gpu set-mode --active`。它不会为了接入而杀已有实验。
 - **可选最高权限**：同一安装命令增加 `--enable-host-root` 才安装固定 root 入口与 sudoers。这让门户 admin 获得真实宿主机 root，应只给完全受信任的人。以后重新部署仍需显式传该开关，否则节点配置关闭此能力。
 
-节点程序在 `~/.local/libexec/amax-console`，状态/数据放自己的工作区根。授权公钥带 `restrict`、VPS Tail 源地址和强制命令；不会覆盖已有 authorized_keys。修改 VPS Tail IP 后需审查并更新这些限制。
+节点程序在 `~/.local/libexec/gpuq-console`，状态/数据放自己的工作区根。授权公钥带 `restrict`、VPS Tail 源地址和强制命令；不会覆盖已有 authorized_keys。修改 VPS Tail IP 后需审查并更新这些限制。
 
 ## 5. 固定 SSH 主机指纹
 
@@ -102,8 +106,8 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 ssh-keyscan -t ed25519 100.64.10.11 > /tmp/gpu-1.hostkey
 ssh-keygen -lf /tmp/gpu-1.hostkey
 # 确认与节点输出完全相同后：
-sudo sh -c 'cat /tmp/gpu-1.hostkey >> /opt/amax-console/collector/known_hosts'
-sudo sh -c 'cat /tmp/gpu-1.hostkey >> /opt/amax-console/executor/known_hosts'
+sudo sh -c 'cat /tmp/gpu-1.hostkey >> /opt/gpuq-console/collector/known_hosts'
+sudo sh -c 'cat /tmp/gpu-1.hostkey >> /opt/gpuq-console/executor/known_hosts'
 ```
 
 对每台重复。不得把 `StrictHostKeyChecking` 改为 no。端口按当前脚本固定22；非标准端口需要先适配清单/桥并测试，不能只改 SSH alias。
@@ -111,12 +115,12 @@ sudo sh -c 'cat /tmp/gpu-1.hostkey >> /opt/amax-console/executor/known_hosts'
 ## 6. 启动后台与网页
 
 ```sh
-sudo systemctl enable --now amax-console-executor.service
-sudo systemctl start amax-console-collect.service
-sudo systemctl enable --now amax-console-collect.timer amax-console-backup.timer
-sudo cat /opt/amax-console/status/snapshot.json
-sudo docker compose up -d --build amax-console caddy
-sudo docker compose logs --tail 50 amax-console caddy
+sudo systemctl enable --now gpuq-console-executor.service
+sudo systemctl start gpuq-console-collect.service
+sudo systemctl enable --now gpuq-console-collect.timer gpuq-console-backup.timer
+sudo cat /opt/gpuq-console/status/snapshot.json
+sudo docker compose up -d --build gpuq-console caddy
+sudo docker compose logs --tail 50 gpuq-console caddy
 ```
 
 所有节点应 `reachable:true` 且 `gpuq.connected:true`。只读状态失败时别先开放公网 SSH；先核验 Tail ACL、指纹、强制命令、服务用户总线与路径。

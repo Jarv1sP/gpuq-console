@@ -98,6 +98,7 @@ def terminal_alive(folder,jid):
     except (OSError,ValueError):return False
 
 def stop_terminal(jid):
+    # Stable unit protocol shared with existing terminal pointers; not branding.
     unit='amax-term-'+jid+'.service'
     result=subprocess.run(['/usr/bin/systemctl','--user','stop',unit],env=ENV,text=True,capture_output=True,timeout=12)
     if result.returncode:

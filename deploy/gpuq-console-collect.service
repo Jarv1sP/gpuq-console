@@ -1,17 +1,17 @@
 [Unit]
-Description=Read-only AMAX GPU and GPUQ status
+Description=Read-only GPUQ GPU and GPUQ status
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /opt/amax-console/collector/collect-status.py
+ExecStart=/usr/bin/python3 /opt/gpuq-console/collector/collect-status.py
 TimeoutStartSec=35
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/amax-console/status
+ReadWritePaths=/opt/gpuq-console/status
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_CHOWN
 MemoryMax=96M

@@ -27,13 +27,44 @@ gpu submit --help
 
 以实际返回的任务 ID 为准；命令细节见 `--help`。`--json` 放在子命令之前。观察模式 `gpu set-mode --observe-only` 不启动新作业；验收后 `gpu set-mode --active` 允许调度。该模式保存在 GPUQ 状态库中；数据库必须备份。
 
-**新平台普通用户使用 `amax`，不直接获得共享服务账号下的 `gpu`。** 直接 GPUQ CLI 是可信旧用户/管理员的接口，不经过门户逐人权限验证；公开给普通用户会绕过门户额度。
+**新平台普通用户使用 `gpuctl`，不直接获得共享服务账号下的 `gpu`。** 直接 GPUQ CLI 是可信旧用户/管理员的接口，不经过门户逐人权限验证；公开给普通用户会绕过门户额度。
 
 ## 源码包含的高级能力
 
 单机整卡/固定卡、优先级与排队、保守空闲判定、取消与重试、检查点/抢占协议、弹性扩卡协调、共享/HAMi 适配、fleet/cluster、手工同步、团队消息板、可选 Telegram 通知。
 
 这些模块保留是为了兼容与后续开发，不等于门户已对外开放并审计全部功能。检查点/弹性需要训练程序配合；HAMi 需要另装上游运行库；跨机需要管理员单独定义 fleet 与互信。Telegram 需要自己的私有配置，不会自动读取任何现成凭据。先读相应模块与 CLI help，在测试节点验证后再用。
+
+### 高级 fleet / sync 的独立配置
+
+此配置只供可信管理员使用，**不是门户 `inventory.json` 的 `nodes` 清单**，两者不会自动互相生成。每个 `hosts` 条目必须显式给出目标机器上的 `binary` 与 `config` 绝对路径，不再猜测服务用户的主目录。不能用 `~` 代替绝对路径。
+
+例如将自己的 fleet 清单保存为 `~/.config/gpuq/fleet.json`：
+
+```json
+{
+  "hosts": {
+    "gpu-1": {
+      "ssh": "gpuops@100.64.10.11",
+      "binary": "/home/gpuops/bin/gpu",
+      "config": "/srv/gpuq/config.json"
+    },
+    "gpu-2": {
+      "ssh": "gpuops@100.64.10.12",
+      "binary": "/home/gpuops/bin/gpu",
+      "config": "/srv/gpuq/config.json"
+    }
+  }
+}
+```
+
+以上地址、用户和目录都是示例；按各节点实际安装位置填写，并事先确认 SSH 主机指纹与管理员自己的密钥权限。配置正确后，先做只读核验：
+
+```sh
+gpu --fleet-config "$HOME/.config/gpuq/fleet.json" --host gpu-1 status
+```
+
+`sync` 同样使用这份 fleet 清单并读取显式路径。旧清单已明确填写有效的 `binary` / `config` 时无需改动；旧版本依赖隐式默认值的清单，在升级高级工具前补齐即可。此变化不迁移或重启已部署的 GPUQ，也不影响门户普通用户的 `gpuctl` 工作流。
 
 原始代码中的历史默认目录是 `/data1/gpu-scheduler`；新部署安装器通过显式 `--config` 使用 `inventory.json` 的路径，不要求有名为 `/data1` 的硬盘。训练框架不打包进 GPUQ。
 

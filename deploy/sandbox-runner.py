@@ -29,7 +29,7 @@ def main():
     # Mount by open FD to pin the directory and avoid a path replacement race.
     workfd=os.open(workspace,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     info_r,info_w=os.pipe();block_r,block_w=os.pipe()
-    args=['/usr/bin/bwrap','--unshare-all',*([] if terminal else ['--new-session']),'--die-with-parent','--cap-drop','ALL','--hostname','amax-job',
+    args=['/usr/bin/bwrap','--unshare-all',*([] if terminal else ['--new-session']),'--die-with-parent','--cap-drop','ALL','--hostname','gpuq-job',
           '--info-fd',str(info_w),'--block-fd',str(block_r),'--ro-bind','/usr','/usr','--symlink','usr/bin','/bin','--symlink','usr/sbin','/sbin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',
           '--proc','/proc','--ro-bind','/proc/driver/nvidia','/proc/driver/nvidia','--ro-bind','/sys','/sys','--dev','/dev','--tmpfs','/dev/shm','--tmpfs','/tmp','--tmpfs','/run','--dir','/etc',
           '--ro-bind','/etc/ld.so.cache','/etc/ld.so.cache','--ro-bind','/etc/alternatives','/etc/alternatives','--ro-bind','/etc/ssl','/etc/ssl',
@@ -43,8 +43,9 @@ def main():
     # Namespace NUMA support can differ across ranks; force a consistent shared
     # memory backend instead of NCCL's per-rank cuMem-host fallback (2.28.9).
     args+=['--setenv','NCCL_CUMEM_HOST_ENABLE','0']
-    if terminal:args+=['--setenv','TERM','xterm-256color','--setenv','PS1',spec['username']+'@'+cfg.get('machine','amax')+r':\w\$ ']
-    for key,value in {'PATH':'/opt/conda/bin:/usr/bin:/bin','HOME':'/workspace','USER':spec['username'],'LOGNAME':spec['username'],'LANG':'C.UTF-8','PYTHONUNBUFFERED':'1','PYTHONUSERBASE':'/workspace/.local','OMP_NUM_THREADS':'1','SSL_CERT_FILE':'/etc/ssl/certs/ca-certificates.crt','CURL_CA_BUNDLE':'/etc/ssl/certs/ca-certificates.crt','REQUESTS_CA_BUNDLE':'/etc/ssl/certs/ca-certificates.crt','CUDA_VISIBLE_DEVICES':','.join(uuids),'NVIDIA_VISIBLE_DEVICES':','.join(uuids),'AMAX_JOB_ID':jid}.items():args+=['--setenv',key,value]
+    if terminal:args+=['--setenv','TERM','xterm-256color','--setenv','PS1',spec['username']+'@'+cfg.get('machine','gpu')+r':\w\$ ']
+    # Both names identify the same job so existing training scripts keep working.
+    for key,value in {'PATH':'/opt/conda/bin:/usr/bin:/bin','HOME':'/workspace','USER':spec['username'],'LOGNAME':spec['username'],'LANG':'C.UTF-8','PYTHONUNBUFFERED':'1','PYTHONUSERBASE':'/workspace/.local','OMP_NUM_THREADS':'1','SSL_CERT_FILE':'/etc/ssl/certs/ca-certificates.crt','CURL_CA_BUNDLE':'/etc/ssl/certs/ca-certificates.crt','REQUESTS_CA_BUNDLE':'/etc/ssl/certs/ca-certificates.crt','CUDA_VISIBLE_DEVICES':','.join(uuids),'NVIDIA_VISIBLE_DEVICES':','.join(uuids),'GPUQ_JOB_ID':jid,'AMAX_JOB_ID':jid}.items():args+=['--setenv',key,value]
     # CUDA re-enumerates the mounted device subset. A host UUID visibility filter
     # can mask that subset on some drivers; device mounts, not env vars, enforce it.
     args+=['--unsetenv','CUDA_VISIBLE_DEVICES']
@@ -59,8 +60,8 @@ def main():
         if resolvers:break
     if not resolvers:raise RuntimeError('No non-loopback uplink DNS configured')
     resolv=os.memfd_create('resolv');os.write(resolv,(''.join('nameserver '+ip+'\n' for ip in resolvers[:3])).encode());os.lseek(resolv,0,0)
-    passwd=os.memfd_create('passwd');os.write(passwd,f'{spec["username"]}:x:{os.getuid()}:{os.getgid()}:AMAX user:/workspace:/bin/bash\n'.encode());os.lseek(passwd,0,0)
-    hosts=os.memfd_create('hosts');os.write(hosts,b'127.0.0.1 localhost amax-job\n::1 localhost\n');os.lseek(hosts,0,0)
+    passwd=os.memfd_create('passwd');os.write(passwd,f'{spec["username"]}:x:{os.getuid()}:{os.getgid()}:GPUQ user:/workspace:/bin/bash\n'.encode());os.lseek(passwd,0,0)
+    hosts=os.memfd_create('hosts');os.write(hosts,b'127.0.0.1 localhost gpuq-job\n::1 localhost\n');os.lseek(hosts,0,0)
     # EOF on bwrap's block-fd also unblocks it. The independent readiness gate makes
     # a failed network setup fail closed rather than briefly starting the job.
     gatefile=tempfile.NamedTemporaryFile(prefix='.gate-',dir=root);gatefile.write(b'0');gatefile.flush();ready=gatefile.fileno()
@@ -84,4 +85,4 @@ def main():
 
 if __name__=='__main__':
     try:sys.exit(main())
-    except Exception as e:print('AMAX sandbox:',str(e),file=sys.stderr);sys.exit(125)
+    except Exception as e:print('GPUQ sandbox:',str(e),file=sys.stderr);sys.exit(125)

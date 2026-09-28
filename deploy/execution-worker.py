@@ -2,8 +2,8 @@
 """Local Unix socket -> fixed SSH forced commands. No public listener or shell."""
 import json, os, socketserver, subprocess
 from pathlib import Path
-BASE=Path('/opt/amax-console/executor')
-HOSTS={n['id']:n for n in json.loads(Path('/opt/amax-console/inventory.json').read_text())['nodes']}
+BASE=Path('/opt/gpuq-console/executor')
+HOSTS={n['id']:n for n in json.loads(Path('/opt/gpuq-console/inventory.json').read_text())['nodes']}
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.request.settimeout(35)
@@ -20,7 +20,7 @@ class Server(socketserver.ThreadingUnixStreamServer):
     daemon_threads=True
 if __name__=='__main__':
     os.umask(0o007)
-    sock='/run/amax-console-executor/bridge.sock'
+    sock='/run/gpuq-console-executor/bridge.sock'
     if os.path.exists(sock):os.unlink(sock)
     with Server(sock,Handler) as server:
         os.chmod(sock,0o660);os.chown(sock,0,1000);server.serve_forever()

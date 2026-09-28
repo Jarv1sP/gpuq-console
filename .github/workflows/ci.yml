@@ -21,5 +21,5 @@ jobs:
       - run: python3 build/gpuq.pyz --help
       - run: python3 -m compileall -q deploy gpuq scripts
       - run: git diff --check
-      - run: docker build -f deploy/Dockerfile -t amax-console:ci .
+      - run: docker build -f deploy/Dockerfile -t gpuq-console:ci .
       - run: python3 scripts/check-public-tree.py

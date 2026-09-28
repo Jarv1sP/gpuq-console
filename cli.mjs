@@ -5,44 +5,44 @@ import {randomUUID} from 'node:crypto';
 import {homedir} from 'node:os';
 import {createInterface} from 'node:readline/promises';
 
-const help=`AMAX — 个人终端与 GPUQ 训练
+const help=`GPUQ — 个人终端与 GPUQ 训练
 
-日常命令（一次安装后直接使用 amax）：
-amax login                     Sign in; remembers your account and service
-amax use gpu-1                  Select an approved server from your inventory
-amax ssh                       Interactive private workspace terminal
-amax ssh --root                Administrator: unrestricted host root terminal
-amax push .                    Upload current directory into /workspace
-amax run -g 2 -- python train.py
-amax jobs / logs JOB / cancel JOB
-amax pull results/model.pt ./model.pt
+日常命令（一次安装后直接使用 gpuctl）：
+gpuctl login                     Sign in; remembers your account and service
+gpuctl use gpu-1                  Select an approved server from your inventory
+gpuctl ssh                       Interactive private workspace terminal
+gpuctl ssh --root                Administrator: unrestricted host root terminal
+gpuctl push .                    Upload current directory into /workspace
+gpuctl run -g 2 -- python train.py
+gpuctl jobs / logs JOB / cancel JOB
+gpuctl pull results/model.pt ./model.pt
 
-amax login USERNAME              Login (hidden password prompt)
-amax register USERNAME           Register with invite + own password
-amax invites list                Administrator: invitation metadata only
-amax invites rotate member       Generate member code (old code revoked)
-amax invites disable member
-amax logout                      Invalidate current session
-amax users                       List visible accounts / quotas
-amax state                       View machines, accounts and jobs
-amax user add USERNAME           Create account; initially no access
+gpuctl login USERNAME              Login (hidden password prompt)
+gpuctl register USERNAME           Register with invite + own password
+gpuctl invites list                Administrator: invitation metadata only
+gpuctl invites rotate member       Generate member code (old code revoked)
+gpuctl invites disable member
+gpuctl logout                      Invalidate current session
+gpuctl users                       List visible accounts / quotas
+gpuctl state                       View machines, accounts and jobs
+gpuctl user add USERNAME           Create account; initially no access
                                          Optional: --role admin (full access)
-amax user reset-password USERNAME
-amax user enable|disable USERNAME
-amax user delete USERNAME       Only disabled accounts without active jobs
-amax user role USERNAME admin|member
-amax grant USERNAME --machine gpu-1=2 --total 2
-amax grant USERNAME --full       All GPU resources; NOT platform admin
-amax run auto --cards 2 --min-vram 24 -- python -m torch.distributed.run --standalone --nproc-per-node=2 train.py
-amax run gpu-1 --cards 1 --name train -- python train.py
-amax jobs
-amax logs JOB_ID
-amax cancel JOB_ID
-amax upload gpu-1 LOCAL_PATH [REMOTE_PATH]
-amax files gpu-1 [REMOTE_DIRECTORY]
-amax download gpu-1 REMOTE_FILE LOCAL_FILE
-amax request gpu-1 --cards 1  Member uses their own identity
-amax release DEMO-001
+gpuctl user reset-password USERNAME
+gpuctl user enable|disable USERNAME
+gpuctl user delete USERNAME       Only disabled accounts without active jobs
+gpuctl user role USERNAME admin|member
+gpuctl grant USERNAME --machine gpu-1=2 --total 2
+gpuctl grant USERNAME --full       All GPU resources; NOT platform admin
+gpuctl run auto --cards 2 --min-vram 24 -- python -m torch.distributed.run --standalone --nproc-per-node=2 train.py
+gpuctl run gpu-1 --cards 1 --name train -- python train.py
+gpuctl jobs
+gpuctl logs JOB_ID
+gpuctl cancel JOB_ID
+gpuctl upload gpu-1 LOCAL_PATH [REMOTE_PATH]
+gpuctl files gpu-1 [REMOTE_DIRECTORY]
+gpuctl download gpu-1 REMOTE_FILE LOCAL_FILE
+gpuctl request gpu-1 --cards 1  Member uses their own identity
+gpuctl release DEMO-001
 
 --machine may repeat; grant REPLACES the entire machine policy.
 No --machine and --total 0 revokes all future GPU access.
@@ -50,7 +50,9 @@ Global: --url http://127.0.0.1:58418 --json --session-file PATH
 Credentials: --password-stdin (one password via stdin, never an argument)
 Registration: --credentials-stdin accepts JSON {"invite":"...","password":"..."}
 Administrator: all machines as self; --as is only for the separate demo
-Default session cache: ~/.config/amax-demo/session.json (mode 0600).
+Default session cache: ~/.config/gpuq-console/session.json (mode 0600).
+GPUQ_URL / GPUQ_SESSION_FILE configure the service and cache.
+Existing legacy caches and AMAX_URL / AMAX_SESSION_FILE remain supported.
 Only loopback HTTP or HTTPS URLs accepted. The VPS portal has a shared API;
 the separate hosted static preview does not. request/release are demo-only.
 run executes on the selected server, in your private /workspace. Upload code first.
@@ -80,10 +82,13 @@ async function main(){
     if(key==='machine')options.machines.push(value);else options[key]=value;
   }
   if(options.help||!positionals.length){console.log(help);return;}
-  const sessionFile=options['session-file']||process.env.AMAX_SESSION_FILE||join(homedir(),'.config','amax-demo','session.json');
+  const explicitSession=options['session-file']||process.env.GPUQ_SESSION_FILE||process.env.AMAX_SESSION_FILE;
+  let sessionFile=explicitSession||join(homedir(),'.config','gpuq-console','session.json');
+  // Keep one cache: a previous installation continues using its existing file.
+  if(!explicitSession){try{await lstat(sessionFile);}catch(e){if(e.code!=='ENOENT')throw e;const legacy=join(homedir(),'.config','amax-demo','session.json');try{await lstat(legacy);sessionFile=legacy;}catch(old){if(old.code!=='ENOENT')throw old;}}}
   let session;try{session=JSON.parse(await readFile(sessionFile,'utf8'));}catch(e){if(e.code!=='ENOENT')fail('Unable to read session cache.');}
-  const bundled='__AMAX_PUBLIC_ORIGIN__';
-  const target=options.url||process.env.AMAX_URL||(bundled.startsWith('https://')?bundled:session?.url);
+  const bundled='__GPUQ_PUBLIC_ORIGIN__';
+  const target=options.url||process.env.GPUQ_URL||process.env.AMAX_URL||(bundled.startsWith('https://')?bundled:session?.url);
   if(!target)fail('首次运行源码客户端请指定 --url https://你的服务域名，或从门户安装客户端。');
   const base=new URL(target);
   if(base.username||base.password||base.pathname!=='/'||base.search||base.hash)fail('Use a base URL without credentials, path or query.');
@@ -91,7 +96,7 @@ async function main(){
   if(session&&session.url!==base.origin)session=undefined;
   async function post(path,body){
     const response=await fetch(new URL(`/api/${path}`,base),{method:'POST',redirect:'error',signal:AbortSignal.timeout(40000),headers:{'Content-Type':'application/json',...(session?{Authorization:`Bearer ${session.token}`}:{})},body:JSON.stringify(body)});
-    let data;try{data=await response.json();}catch{fail('Target is not an AMAX JSON API. The hosted static preview does not provide one.');}
+    let data;try{data=await response.json();}catch{fail('Target is not an GPUQ JSON API. The hosted static preview does not provide one.');}
     if(!response.ok)fail(data.error||`HTTP ${response.status}`);return data;
   }
   const call=(operation,args={})=>post('call',{operation,args});
@@ -112,10 +117,10 @@ async function main(){
     await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(session?.principal.userId===login.principal.userId&&session.machine?{machine:session.machine}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
     result={loggedIn:true,principal:login.principal};
   }else{
-    if(!session)fail('请先登录：amax login');
+    if(!session)fail('请先登录：gpuctl login');
     const state=(await call('state')).state;
-    const machineName=value=>{const exact=state.machines.find(m=>m.id===value);if(exact)return exact.id;const short=state.machines.filter(m=>m.id.startsWith('amax-')&&m.id.slice(5)===value);return short.length===1?short[0].id:value;};
-    const defaultMachine=()=>session.machine||(state.machines?.length===1?state.machines[0].id:null)||fail('先选择一次服务器：amax use gpu-1');
+    const machineName=value=>{const exact=state.machines.find(m=>m.id===value);if(exact)return exact.id;const short=state.machines.filter(m=>m.id.endsWith('-'+value));return short.length===1?short[0].id:value;};
+    const defaultMachine=()=>session.machine||(state.machines?.length===1?state.machines[0].id:null)||fail('先选择一次服务器：gpuctl use gpu-1');
     const shortcut=command;
     if(command==='ssh')command='shell';if(command==='push')command='upload';if(command==='pull')command='download';
     if(['run','shell'].includes(command)&&positionals.length===1)positionals.push(defaultMachine());
@@ -128,7 +133,7 @@ async function main(){
     if(command==='use'&&positionals.length===2){
       if(!state.machines.some(m=>m.id===positionals[1]))fail('这台机器未授权或不存在');session.machine=positionals[1];await writeFile(sessionFile,JSON.stringify(session),{mode:0o600});result={selected:session.machine};
     }else if(command==='shell'&&positionals.length===2){
-      if(!process.stdin.isTTY)fail('交互终端需要 TTY；非交互任务使用 amax run');
+      if(!process.stdin.isTTY)fail('交互终端需要 TTY；非交互任务使用 gpuctl run');
       const machine=positionals[1],hostAdmin=options.root===true;
       const opened=(await call('terminal.open',{machine,key:randomUUID(),hostAdmin})).result;
       let input=Buffer.alloc(0),offset=0,done=false,delay=250,lastSize='';
@@ -190,12 +195,12 @@ async function main(){
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='use'){console.log(`当前服务器：${result.selected}`);return;}
-  if(command==='run'){console.log(`已提交 ${result.id}\n${result.machine} · ${result.cards} 张 GPU · ${result.state}\n查看日志：amax logs ${result.id}`);return;}
+  if(command==='run'){console.log(`已提交 ${result.id}\n${result.machine} · ${result.cards} 张 GPU · ${result.state}\n查看日志：gpuctl logs ${result.id}`);return;}
   if(command==='logs'){process.stdout.write(result.text+(result.text.endsWith('\n')?'':'\n'));return;}
   if(command==='cancel'){console.log(`任务 ${result.id}：${result.state}${result.cancelRequested?'（已请求取消，等待节点确认）':''}`);return;}
   if(command==='upload'){console.log(`已上传 ${result.uploaded} 个文件到 ${result.machine} 的个人工作区。`);return;}
   if(command==='download'){console.log(`已下载：${result.downloaded}（${result.bytes} 字节）`);return;}
-  if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}\n  ${j.machine} · ${j.cards} 张 · ${j.name||'train'}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：amax jobs --json');return;}
+  if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}\n  ${j.machine} · ${j.cards} 张 · ${j.name||'train'}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
   if(command==='files'){console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');return;}
   if(command==='users'){console.log(result.map(u=>`${u.username}  ${u.role==='admin'?'管理员':'普通用户'}  ${u.enabled?'启用':'暂停'}  总额度 ${u.total} 张\n  ${Object.entries(u.limits).map(([m,n])=>`${m}: ${n}`).join('，')||'尚未授权机器'}`).join('\n'));return;}
   console.log(JSON.stringify(result,null,2));

@@ -1,34 +1,36 @@
-# AMAX Console
+# GPUQ Console
 
-为实验室搭建一套**账号 + GPU 配额 + 个人终端 + 训练队列**。普通用户从网页或自己的命令行登录，不必全部加入管理员的 VPN；管理员按服务器和 GPU 数量授权。后端复用 GPUQ，管理网络使用 Tailscale / Headscale + OpenSSH。
+为实验室搭建一套**账号 + GPU 配额 + 个人终端 + 训练队列**，与服务器厂商无关。普通用户从网页或自己的命令行登录，不必全部加入管理员的 VPN；管理员按服务器和 GPU 数量授权。后端复用 GPUQ，管理网络使用 Tailscale / Headscale + OpenSSH。
 
 本仓库包括网页、CLI、VPS 部署、Headscale 示例、节点执行桥、GPUQ 源码、用户与管理员手册。不是只有界面的演示；同时保留一个与生产隔离的本地 demo，方便贡献者开发。
 
 ## 使用是什么样
 
 ```sh
-amax login
-amax use gpu-1
-amax ssh                         # 安装个人环境、编辑代码
-amax push .                     # 在本地项目目录上传代码
-amax run -g 2 -- python train.py # 用同机两张整卡运行
-amax jobs
-amax logs 任务ID
-amax pull output/model.pt ./model.pt
+gpuctl login
+gpuctl use gpu-1
+gpuctl ssh                        # 安装个人环境、编辑代码
+gpuctl push .                     # 在本地项目目录上传代码
+gpuctl run -g 2 -- python train.py # 用同机两张整卡运行
+gpuctl jobs
+gpuctl logs 任务ID
+gpuctl pull output/model.pt ./model.pt
 ```
 
-- 邀请码注册 → 初始零权限 → 管理员分配机器、逐机卡数和总卡数。
-- 左侧切换“我的工作台”“机器资源”；管理员另有“用户授权”，自动显示待处理新用户，可查看或轮换当前注册码。
+- 注册平台账号（不是登记设备）→ 初始零权限 → 管理员分配机器、逐机卡数和总卡数。用户电脑只需 HTTPS，不用加入 Tail，也不会被自动添加为 Tail 设备。
+- “我的工作台”处理自己的终端、文件、任务和额度；“机器资源”显示逐卡利用率、显存、温度、功耗和 CUDA 计算进程（不含图形进程）。管理员看程序/用户详情并可展开原 GPUQ 队列，普通用户只看获授权机器的匿名占用。
+- 管理员专用“用户授权”处理待审批账号、角色、注册码和机器额度；帮助入口提供用户与管理员两类手册。
 - 网页与 CLI 共用权限、任务和工作区。默认输出给人看，`--json` 用于自动化。
 - 普通终端与训练共享个人 `/workspace`；安装在里面的环境不会因退出终端消失。
 - 调度支持整卡、同机多卡、最低物理显存筛选；训练代码需自行支持多卡。
-- 只有角色为 `admin` 且节点显式开启该能力，才可 `amax ssh --root` 进入真实宿主机。
-- 命名中保留 AMAX 只是项目名称；不依赖某个品牌服务器。
+- 只有角色为 `admin` 且节点显式开启该能力，才可 `gpuctl ssh --root` 进入真实宿主机。
+
+节点约每分钟采样、页面每 15 秒同步最近快照；缺失、不可达或过期状态不会显示成空闲。新用户未获批前仅查看机器容量，不获得实时节点监控或终端权限。
 
 ## 系统结构
 
 ```text
-用户网页 / amax CLI
+用户网页 / gpuctl CLI
         │ HTTPS
         ▼
 VPS: Caddy → Portal (Node.js + SQLite)
@@ -40,7 +42,7 @@ VPS: Caddy → Portal (Node.js + SQLite)
 GPU 服务器: 节点桥 → GPUQ → systemd 作业 → 个人隔离工作区 + 获配 GPU
 ```
 
-Headscale 是可选的自建控制面；已有 Tailscale 网络可直接复用。普通平台用户不需要 Tail 身份。**本系统没有把家庭代理、VPN 出口节点或校园网配置绑进训练平台。**
+Headscale 是可选的自建控制面；已有 Tailscale 网络可直接复用。Tail 仅用于 VPS 到 GPU 节点的管理通路，用户端浏览器和 CLI 通过 HTTPS 连接门户。平台注册不创建系统 SSH 账号，也不授予原有 Tail + OpenSSH 的直接登录权限；`gpuctl ssh` 提供个人工作区终端。**本系统没有把家庭代理、VPN 出口节点或校园网配置绑进训练平台。**
 
 ## 从零搭建
 
@@ -54,8 +56,8 @@ Headscale 是可选的自建控制面；已有 Tailscale 网络可直接复用�
 6. 用普通新用户实测一次授权、训练、取消、越权拒绝，再交给团队。
 
 ```sh
-git clone https://github.com/Jarv1sP/amax-console.git
-cd amax-console
+git clone https://github.com/Jarv1sP/gpuq-console.git
+cd gpuq-console
 cp config/inventory.example.json inventory.json
 # 编辑自己的域名、Tail 地址、服务用户、GPU 数量和磁盘目录
 node scripts/configure.mjs inventory.json
@@ -69,6 +71,7 @@ python3 scripts/build-gpuq.py
 | 文档 | 内容 |
 |---|---|
 | [部署手册](docs/DEPLOYMENT.md) | VPS、TLS、Tail/Headscale、GPUQ、节点、初始账号、升级与回退 |
+| [名称更新与兼容](docs/MIGRATION.md) | 旧客户端、登录缓存、邀请码及已有部署的保留规则 |
 | [用户手册](USER_README.md) | 注册、命令行、安装环境、上传、训练、下载 |
 | [管理员手册](ADMIN_README.md) | 用户授权、最高权限、邀请、备份、故障处理 |
 | [GPUQ 手册](gpuq/README.md) | 打包、单机队列、原有高级功能与门户边界 |
@@ -95,7 +98,7 @@ npm start
 ## 边界先说清
 
 - 面向互相信任的实验室，不是恶意公网多租户的 VM 级隔离。持有旧服务器 sudo/共享账号的人仍可绕过门户配额。
-- `amax ssh` 是 HTTPS PTY 的简写，不是原生 SSH 协议，暂不支持拿它直接连接 VS Code Remote-SSH / SFTP / rsync。
+- `gpuctl ssh` 是 HTTPS PTY 的简写，不是原生 SSH 协议，暂不支持拿它直接连接 VS Code Remote-SSH / SFTP / rsync。
 - 新门户仅开放整卡与同机多卡。GPUQ 已有的弹性、抢占、HAMi、跨机队列/同步仍属高级管理员工具，没有全部接入普通用户授权层。
 - 数据传输经 VPS；无每人硬磁盘配额；日志最近 200 行；5000 条门户任务记录需要维护归档。
 - root 是真实且不隔离的高风险权限；节点默认关闭，部署者明确开启后才可使用。

@@ -9,7 +9,7 @@ import {MACHINES} from '../dist/model.js';
 import {usage} from '../execution.mjs';
 const password='Only-Test-Password-Long-2026';
 async function fixture(){
-  const dir=await mkdtemp(join(tmpdir(),'amax-execution-')),database=join(dir,'db'),bootstrap=join(dir,'bootstrap'),status=join(dir,'status');
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-execution-')),database=join(dir,'db'),bootstrap=join(dir,'bootstrap'),status=join(dir,'status');
   await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:m.id==='gpu-1'?32607:24576})),gpuq:{connected:true,observeOnly:false,schedulableIndices:[0,1],jobs:[]}}))}));
   let remoteState='RUNNING',calls=[],offline=false;

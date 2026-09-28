@@ -55,6 +55,7 @@ export class PortalService extends DemoService{
     const row=this.db.prepare('SELECT role,enabled,uses,max_uses,created_at FROM invites WHERE role=?').get(role);
     return row?{role,enabled:!!row.enabled,uses:row.uses,maxUses:row.max_uses,createdAt:row.created_at,available:!!row.enabled&&(row.max_uses===null||row.uses<row.max_uses)}:{role,enabled:false,uses:0,maxUses:role==='admin'?1:null,createdAt:null,available:false};
   });}
+  // Immutable storage-format identifier: keep existing encrypted invitations valid.
   sealInvite(code){const nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',this.inviteKey,nonce);cipher.setAAD(Buffer.from('amax-invite-v1'));const data=Buffer.concat([cipher.update(code,'utf8'),cipher.final()]);return Buffer.concat([nonce,cipher.getAuthTag(),data]).toString('base64');}
   currentInvite(){const row=this.db.prepare("SELECT enabled,code_cipher FROM invites WHERE role='member'").get();if(!row?.enabled||!row.code_cipher)return null;const data=Buffer.from(row.code_cipher,'base64'),decipher=createDecipheriv('aes-256-gcm',this.inviteKey,data.subarray(0,12));decipher.setAAD(Buffer.from('amax-invite-v1'));decipher.setAuthTag(data.subarray(12,28));return Buffer.concat([decipher.update(data.subarray(28)),decipher.final()]).toString('utf8');}
   register(args){return this.enqueue(async()=>{
@@ -87,7 +88,7 @@ export class PortalService extends DemoService{
     let result;this.db.exec('BEGIN IMMEDIATE');
     try{
       if(operation==='invites.rotate'){
-        const code=`AMAX-${role==='admin'?'A':'U'}-${randomBytes(24).toString('base64url')}`;
+        const code=`GPUQ-${role==='admin'?'A':'U'}-${randomBytes(24).toString('base64url')}`;
         const digest=createHash('sha256').update(code).digest('hex');
         this.db.prepare('INSERT INTO invites(role,digest,enabled,uses,max_uses,created_at) VALUES(?,?,1,0,?,?) ON CONFLICT(role) DO UPDATE SET digest=excluded.digest,enabled=1,uses=0,max_uses=excluded.max_uses,created_at=excluded.created_at').run(role,digest,role==='admin'?1:null,new Date().toISOString());
         this.db.prepare('UPDATE invites SET code_cipher=? WHERE role=?').run(this.sealInvite(code),role);

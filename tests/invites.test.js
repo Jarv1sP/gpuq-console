@@ -9,7 +9,7 @@ import {PortalService} from '../portal-service.mjs';
 import {createPortalServer} from '../portal-server.mjs';
 const password='A-Local-Test-Password-2026';
 
-async function setup(){const dir=await mkdtemp(join(tmpdir(),'amax-invites-'));const bootstrap=join(dir,'bootstrap.json'),database=join(dir,'state.sqlite');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));return {dir,database,bootstrap};}
+async function setup(){const dir=await mkdtemp(join(tmpdir(),'gpuq-invites-'));const bootstrap=join(dir,'bootstrap.json'),database=join(dir,'state.sqlite');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));return {dir,database,bootstrap};}
 test('role comes from invite, ordinary signup has zero grants, secrets are not persisted or exposed',async()=>{
   const data=await setup();let service;
   try{

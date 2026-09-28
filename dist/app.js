@@ -2,6 +2,7 @@ import {MACHINES} from './model.js';
 import {DemoClient} from './client.js';
 import {executionUI,taskTable} from './execution-ui.js';
 import {terminalUI} from './terminal-ui.js';
+import {resourceCards,monitorSummary} from './resources-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
@@ -31,7 +32,7 @@ function render(preserve=false){
   $('#current-account').textContent=logged?`${store.principal.username} · ${admin?'管理员':'普通用户'}`:'尚未登录';
   $('#profile-name').textContent=logged?store.principal.username:'未登录';$('#profile-role').textContent=admin?'管理员':'个人工作空间';
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
-  const titles={work:['我的工作台','自己的终端、文件与训练任务。'],resources:['机器资源','查看机器与自己的可用额度。'],users:['用户授权','新用户自行注册，在这里审批机器与用卡额度。']};
+  const titles={work:['我的工作台','打开个人终端、管理文件、提交和跟踪自己的训练。'],resources:['机器资源','逐卡查看利用率、显存和计算进程，再选择要使用的机器。'],users:['用户授权','审批新用户、分配机器和卡数；这里不操作自己的训练。']};
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
   $('#mode-note').textContent=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total?'注册已完成，当前可用额度为 0。管理员审批后会自动更新，无需重复注册。':page==='users'?`${pendingUsers().length} 个新账号待处理。额度限制与管理员角色分别设置。`:'网页和命令行使用同一账号、工作区与训练队列。';
   renderResources();renderExecution();
@@ -41,9 +42,13 @@ function render(preserve=false){
   $('#self-summary').innerHTML=logged?`<div><small>可用机器</small><strong>${Object.keys(u?.limits||{}).length}</strong></div><div><small>我的预留 / 总额度</small><strong>${store.usage(u.id)} / ${u.total}<span> 张</span></strong></div><div><small>账号状态</small><strong class="summary-status">${label(u)}</strong></div>`:'<p class="muted">登录后查看自己的额度和任务。</p>';
 }
 function renderResources(){
-  const u=own(),limits=u?.limits||{},live=new Map((store.data?.gpuq?.hosts||[]).map(h=>[h.id,h]));
+  const u=own(),limits=u?.limits||{},grid=$('#machine-grid');
+  const expanded=new Set([...grid.querySelectorAll('details[open][data-resource-detail]')].map(el=>el.dataset.resourceDetail));
+  const focused=document.activeElement?.closest('details[data-resource-detail]')?.dataset.resourceDetail;
   $('#resource-summary').textContent=u?`我的额度：${u.total} 张 · 已授权 ${Object.keys(limits).length} 台 · 实验室共 ${capacity} 张`:'登录后查看个人额度';
-  $('#machine-grid').innerHTML=MACHINES.map(m=>{const h=live.get(m.id),max=limits[m.id]||0,online=h?.reachable&&h?.gpuq?.connected;return `<article class="resource-card"><div class="resource-top"><h2>${esc(m.id)}</h2><span class="badge ${max?'active':'pending'}">${max?'可使用':'未分配'}</span></div><p class="muted">${esc(m.model)} · ${esc(m.memory)} / 卡</p><div class="resource-numbers"><div><small>我的上限</small><strong>${max}<span> 张</span></strong></div><div><small>物理容量</small><strong>${m.cards}<span> 张</span></strong></div></div><div class="resource-bottom"><span class="muted">${!max?'等待管理员分配':!store.production?'演示资源':store.data?.gpuq?.stale?'状态待更新':online?'节点在线':'节点暂不可用'}</span><button class="button" data-use-machine="${esc(m.id)}" ${max?'':'disabled'}>进入工作台</button></div></article>`;}).join('');
+  $('#monitor-status').textContent=monitorSummary(store.data?.gpuq,store.production);
+  grid.innerHTML=resourceCards({machines:MACHINES,limits,snapshot:store.data?.gpuq,admin:isAdmin(),production:store.production});
+  for(const el of grid.querySelectorAll('details[data-resource-detail]')){el.open=expanded.has(el.dataset.resourceDetail);if(el.dataset.resourceDetail===focused)el.querySelector('summary').focus({preventScroll:true});}
 }
 function filteredUsers(){return [...store.users].filter(u=>filter!=='pending'||pending(u)).sort((a,b)=>Number(pending(b))-Number(pending(a))||a.username.localeCompare(b.username,'zh-CN'));}
 function renderUsers(){
@@ -95,8 +100,8 @@ $('#login-form').addEventListener('submit',async event=>{event.preventDefault();
 $('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'));await store.login(data.get('username'),data.get('password'));event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#invites-dialog').addEventListener('close',()=>{inviteCode=null;$('#invites-content').innerHTML='';});
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
-$('#cli-dialog .cli-code').textContent=`curl -fsSL ${location.origin}/install.sh | sh\n\namax login\namax use ${MACHINES[0].id}\namax ssh\namax push .\namax run -g 1 -- python train.py\namax jobs`;
-const descriptions=$('#cli-dialog').querySelectorAll('p.muted');descriptions[0].textContent='一次安装，以后直接使用 amax。需要 Node.js 22.13+。';descriptions[1].textContent='网页和命令行共用账号与额度。终端、训练共用个人工作区；无需加入管理 VPN。';
+$('#cli-dialog .cli-code').textContent=`curl -fsSL ${location.origin}/install.sh | sh\n\ngpuctl login\ngpuctl use ${MACHINES[0].id}\ngpuctl ssh\ngpuctl push .\ngpuctl run -g 1 -- python train.py\ngpuctl jobs`;
+const descriptions=$('#cli-dialog').querySelectorAll('p.muted');descriptions[0].textContent='一次安装，以后直接使用 gpuctl。需要 Node.js 22.13+。';descriptions[1].textContent='网页和命令行共用账号与额度。终端、训练共用个人工作区；无需加入管理 VPN。';
 const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','users'].includes(initialHash))page=initialHash;}render();if(!store.principal)openLogin();
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});

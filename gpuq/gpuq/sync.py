@@ -24,13 +24,13 @@ import uuid
 from typing import Any, Iterator
 
 from .config import Config
-from .fleet import load_inventory, packet, ssh_command
+from .fleet import host_paths, load_inventory, packet, ssh_command
 from .protocol import Client, ProtocolError
 from .util import atomic_write_json
 
 PARTIAL = ".gpuq-sync-partial"
 IGNORED = {PARTIAL, ".git", ".venv", "__pycache__", ".env", ".ssh"}
-BROAD = {"/", "/home", "/home/amax", "/data1", "/data2", "/tmp", "/var/tmp"}
+BROAD = {"/", "/home", "/Users", "/root", "/data1", "/data2", "/tmp", "/var/tmp"}
 PROTECTED = ("/etc", "/usr", "/bin", "/sbin", "/proc", "/sys", "/dev", "/run", "/var/lib")
 
 
@@ -42,7 +42,8 @@ def valid_path(value: str, protected_root: Path | None = None) -> Path:
     if not isinstance(value, str) or not value.startswith("/") or any(ord(c) < 32 or ord(c) == 127 for c in value):
         raise ValueError("sync path must be absolute without control characters")
     path = Path(os.path.normpath(value))
-    if ".." in Path(value).parts or str(path) in BROAD:
+    whole_home = path == Path.home() or path.parent in (Path("/home"), Path("/Users"))
+    if ".." in Path(value).parts or str(path) in BROAD or whole_home:
         raise ValueError("refusing broad/parent-traversal sync path")
     if any(p in path.parts for p in (".ssh", "anaconda3", "miniconda3", ".conda")):
         raise ValueError("credential and environment directories are not sync targets")
@@ -241,12 +242,21 @@ def forced_receiver(config_path: str) -> int | None:
     words = shlex.split(original)
     if len(words) >= 3 and words[1] == "_sync-rsync":
         return receiver(words[2], words[3:], config_path)
+    if len(words) >= 5 and words[1] == "--config" and words[3] == "_sync-rsync":
+        # The client's requested path cannot replace the SSH forced-command
+        # configuration. Match it, then pass only our trusted server-side value.
+        if words[2] != str(config_path):
+            raise ValueError("sync config does not match the forced server configuration")
+        return receiver(words[4], words[5:], config_path)
+    if "_sync-rsync" in words:
+        raise ValueError("unsupported sync receiver command layout")
     return None
 
 
 def rsync_command(source: Path, dest: str, host: dict[str, Any], meta: dict[str, Any]) -> list[str]:
     encoded = base64.urlsafe_b64encode(json.dumps(meta, separators=(",", ":")).encode()).decode()
-    remote = shlex.join([host.get("binary", "/home/amax/bin/gpu"), "_sync-rsync", encoded])
+    binary, config = host_paths(host)
+    remote = shlex.join([binary, "--config", config, "_sync-rsync", encoded])
     base = ["rsync", "-rcn", "--omit-dir-times", "--itemize-changes", "--out-format=%i|%l|%n"] if meta["phase"] == "plan" else ["rsync", "-rt", "--omit-dir-times", "--ignore-existing", "--partial-dir=" + PARTIAL, "--info=progress2"]
     for value in sorted(IGNORED):
         base += ["--exclude=" + value]

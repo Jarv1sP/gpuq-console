@@ -15,7 +15,7 @@ for binary in ('bwrap','slirp4netns','nvidia-smi','systemd-run','python3','ssh-k
 if '--bind-fd' not in run('bwrap','--help'):raise SystemExit('bubblewrap must support --bind-fd; install a recent distro build')
 if not Path('/sys/fs/cgroup/cgroup.controllers').exists():raise SystemExit('cgroup v2 is required')
 if not Path(node['conda'],'bin/python').is_file():raise SystemExit('Read-only Python/Conda distribution missing')
-os.umask(0o077);home=Path.home();dest=home/'.local/libexec/amax-console';dest.mkdir(parents=True,exist_ok=True)
+os.umask(0o077);home=Path.home();dest=home/'.local/libexec/gpuq-console';dest.mkdir(parents=True,exist_ok=True)
 root=Path(node['workspaceRoot']);root.mkdir(parents=True,exist_ok=True,mode=0o700)
 scheduler=Path(node['gpuqRoot']);config=scheduler/'config.json';binary=home/'bin/gpu'
 if not config.exists():
@@ -42,9 +42,9 @@ for item in ('node-executor.py','sandbox-runner.py','terminal-helper.py','node-p
 host_root=False
 if a.enable_host_root:
     # This is a deliberately explicit, high-trust host-root capability.
-    run('sudo','install','-D','-o','root','-g','root','-m','755',str(source/'deploy/amax-console-root-shell'),'/usr/local/libexec/amax-console-root-shell')
-    sudoers=dest/'sudoers.pending';sudoers.write_text(node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/amax-console-root-shell\n');sudoers.chmod(0o600)
-    run('sudo','visudo','-cf',str(sudoers));run('sudo','install','-o','root','-g','root','-m','440',str(sudoers),'/etc/sudoers.d/amax-console');sudoers.unlink();host_root=True
+    run('sudo','install','-D','-o','root','-g','root','-m','755',str(source/'deploy/gpuq-console-root-shell'),'/usr/local/libexec/gpuq-console-root-shell')
+    sudoers=dest/'sudoers.pending';sudoers.write_text(node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-root-shell\n');sudoers.chmod(0o600)
+    run('sudo','visudo','-cf',str(sudoers));run('sudo','install','-o','root','-g','root','-m','440',str(sudoers),'/etc/sudoers.d/gpuq-console');sudoers.unlink();host_root=True
 (dest/'node-config.json').write_text(json.dumps({'machine':a.node,'cards':node['cards'],'root':str(root),'gpu':str(binary),'database':cfg['db_path'],'slirp':shutil.which('slirp4netns'),'conda':node['conda'],'hostRoot':host_root},indent=2))
 ssh=home/'.ssh';ssh.mkdir(mode=0o700,exist_ok=True);auth=ssh/'authorized_keys'
 if auth.is_symlink() or (auth.exists() and (not auth.is_file() or auth.stat().st_uid!=os.getuid())):raise SystemExit('Unsafe authorized_keys')

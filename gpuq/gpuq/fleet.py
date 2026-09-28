@@ -16,6 +16,17 @@ ALLOWED = {"submit", "run", "status", "q", "queue", "list", "show", "cancel", "r
 MAX_PACKET = 1024 * 1024
 
 
+def host_paths(host: dict[str, Any]) -> tuple[str, str]:
+    """Require explicit remote paths; never guess the service user's home."""
+    paths = []
+    for key in ("binary", "config"):
+        value = host.get(key)
+        if not isinstance(value, str) or not value.startswith("/") or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError(f"fleet host requires explicit absolute {key} path")
+        paths.append(value)
+    return paths[0], paths[1]
+
+
 def load_inventory(path: str | Path) -> dict[str, Any]:
     data = json.loads(Path(path).read_text())
     if not isinstance(data, dict) or not isinstance(data.get("hosts"), dict) or not data["hosts"]:
@@ -26,7 +37,11 @@ def load_inventory(path: str | Path) -> dict[str, Any]:
         destination = host.get("ssh", name)
         if not isinstance(destination, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]*", destination):
             raise ValueError("invalid SSH destination")
-        for key in ("binary", "config", "identity_file", "known_hosts_file"):
+        try:
+            host_paths(host)
+        except ValueError as exc:
+            raise ValueError(f"{name}: {exc}") from exc
+        for key in ("identity_file", "known_hosts_file"):
             if key in host and (not isinstance(host[key], str) or not host[key].startswith("/") or any(ord(c) < 32 for c in host[key])):
                 raise ValueError(f"{key} must be an absolute path")
     if data.get("local_host") is not None and data["local_host"] not in data["hosts"]:
@@ -71,12 +86,13 @@ def remote_entry(config: str) -> int:
 
 
 def ssh_command(host: dict[str, Any]) -> list[str]:
+    binary, config = host_paths(host)
     cmd = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"]
     if host.get("identity_file"):
         cmd += ["-o", "IdentitiesOnly=yes", "-i", host["identity_file"]]
     if host.get("known_hosts_file"):
         cmd += ["-o", "UserKnownHostsFile=" + host["known_hosts_file"]]
-    command = [host.get("binary", "/home/amax/bin/gpu"), "--config", host.get("config", "/data1/gpu-scheduler/config.json"), "_remote"]
+    command = [binary, "--config", config, "_remote"]
     return [*cmd, host["ssh"], shlex.join(command)]
 
 
@@ -115,7 +131,7 @@ def forward(inventory: dict[str, Any], name: str, argv: list[str]) -> int:
     host = inventory["hosts"][name]
     if inventory.get("local_host") == name:
         from .cli import main
-        return main(["--config", host.get("config", "/data1/gpu-scheduler/config.json"), *argv])
+        return main(["--config", host_paths(host)[1], *argv])
     try:
         return subprocess.run(ssh_command({"ssh": name, **host}), input=packet(argv), check=False).returncode
     except KeyboardInterrupt:
@@ -131,7 +147,7 @@ def query_all(inventory: dict[str, Any], *, all_jobs: bool = False, limit: int =
             if inventory.get("local_host") == name:
                 from .config import Config
                 from .protocol import Client
-                config = Config.from_json(host.get("config", "/data1/gpu-scheduler/config.json"))
+                config = Config.from_json(host_paths(host)[1])
                 result = Client(config.socket_path, timeout=10).call("status", {"all": all_jobs, "limit": limit})
             else:
                 completed = subprocess.run(ssh_command({"ssh": name, **host}), input=packet(argv), capture_output=True, timeout=15, check=False)

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 umask 077
-base=/opt/amax-console
+base=/opt/gpuq-console
 test -f "$base/data/portal.sqlite"
 mkdir -p "$base/backups"
 chmod 700 "$base/backups"

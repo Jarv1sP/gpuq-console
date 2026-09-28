@@ -1,9 +1,11 @@
 #!/usr/bin/python3
 """Forced SSH command: read fixed GPU/GPUQ status only, never accept commands."""
 import csv
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import io
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -11,6 +13,8 @@ from pathlib import Path
 CONFIG=json.loads((Path(__file__).resolve().parent/'node-config.json').read_text())
 ENV = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "LANG": "C.UTF-8",
        "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}
+MAX_PROCESSES = 512
+MAX_GPU_PROCESSES = 128
 
 
 def command(argv, timeout=10):
@@ -20,34 +24,182 @@ def command(argv, timeout=10):
     return result.stdout
 
 
-def probe():
-    output = {"version": 1, "checkedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              "gpus": [], "gpuq": {"connected": False, "jobs": []}}
+def number(value):
+    """N/A and unsupported sensors are unknown, never a synthetic zero."""
     try:
-        rows = csv.reader(io.StringIO(command([
-            "/usr/bin/nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu",
-            "--format=csv,noheader,nounits"])))
-        output["gpus"] = [{"index": int(row[0]), "model": row[1].strip(), "memoryTotalMiB": int(row[2]),
-                           "memoryUsedMiB": int(row[3]), "utilization": int(row[4])} for row in rows]
+        result = float(value.strip())
+        return result if math.isfinite(result) and result >= 0 else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def label(value, limit=120):
+    return ''.join(c for c in str(value).strip() if ord(c) >= 32 and ord(c) != 127)[:limit]
+
+
+def parse_gpus(raw):
+    gpus, seen, malformed = [], set(), False
+    for row in csv.reader(io.StringIO(raw)):
+        if not row:
+            continue
+        try:
+            index = int(row[0].strip())
+            if len(row) != 6 or index < 0 or index in seen:
+                raise ValueError('bad row')
+            seen.add(index)
+            uuid = row[1].strip()
+            utilization = number(row[5])
+            gpus.append({'index': index, 'uuid': uuid if uuid.startswith('GPU-') else None,
+                         'model': label(row[2]), 'memoryTotalMiB': number(row[3]),
+                         'memoryUsedMiB': number(row[4]),
+                         'utilization': utilization if utilization is None or utilization <= 100 else None,
+                         'temperatureC': None, 'powerDrawW': None, 'powerLimitW': None,
+                         'processes': [], 'processesAvailable': False})
+        except (ValueError, IndexError):
+            malformed = True
+        if len(gpus) >= 64:
+            break
+    return gpus, malformed
+
+
+def parse_processes(raw):
+    processes, malformed, truncated = [], False, False
+    for row in csv.reader(io.StringIO(raw)):
+        if not row:
+            continue
+        if len(processes) >= MAX_PROCESSES:
+            truncated = True
+            break
+        try:
+            if len(row) != 4 or not row[0].strip().startswith('GPU-'):
+                raise ValueError('bad row')
+            pid = int(row[1].strip())
+            if not 0 < pid <= 2_147_483_647:
+                raise ValueError('bad pid')
+            # Driver output can contain a full executable path: keep basename only.
+            executable = row[2].strip()
+            name = None if executable.lower() in ('', '[n/a]', 'n/a', '[not supported]', 'not supported') else label(executable.rsplit('/', 1)[-1])
+            processes.append({'uuid': row[0].strip(), 'pid': pid, 'name': name,
+                              'owner': None, 'memoryUsedMiB': number(row[3]), 'type': 'compute'})
+        except (ValueError, IndexError):
+            malformed = True
+    return processes, malformed, truncated
+
+
+def process_metadata(pids):
+    if not pids:
+        return {}
+    # Fixed fields only: never args, command lines, environments or executable paths.
+    raw = command(['/usr/bin/ps', '-p', ','.join(str(pid) for pid in sorted(pids)),
+                   '-o', 'pid=,user=,comm='], 2)
+    result = {}
+    for line in raw.splitlines()[:MAX_PROCESSES]:
+        fields = line.split(None, 2)
+        if len(fields) != 3:
+            continue
+        try:
+            pid = int(fields[0])
+        except ValueError:
+            continue
+        if pid in pids:
+            result[pid] = {'owner': label(fields[1], 80), 'name': label(fields[2].rsplit('/', 1)[-1])}
+    return result
+
+
+def probe_gpus():
+    output = {'gpus': []}
+    try:
+        raw = command(['/usr/bin/nvidia-smi',
+                       '--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu',
+                       '--format=csv,noheader,nounits'], 4)
+        output['gpus'], malformed = parse_gpus(raw)
+        if malformed:
+            output['gpuError'] = 'Some GPU status rows are unavailable'
     except (ValueError, OSError, subprocess.SubprocessError):
-        output["gpuError"] = "GPU status unavailable"
+        output['gpuError'] = 'GPU status unavailable'
+        return output
+    by_uuid = {gpu['uuid']: gpu for gpu in output['gpus'] if gpu['uuid']}
+    try:
+        raw = command(['/usr/bin/nvidia-smi', '--query-gpu=uuid,temperature.gpu,power.draw,power.limit',
+                       '--format=csv,noheader,nounits'], 2)
+        for row in csv.reader(io.StringIO(raw)):
+            if len(row) == 4 and row[0].strip() in by_uuid:
+                gpu = by_uuid[row[0].strip()]
+                for key, value in zip(('temperatureC', 'powerDrawW', 'powerLimitW'), row[1:]):
+                    gpu[key] = number(value)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        # Sensor support differs by driver; keep the usable base card metrics.
+        pass
+    try:
+        raw = command(['/usr/bin/nvidia-smi',
+                       '--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory',
+                       '--format=csv,noheader,nounits'], 3)
+        processes, malformed, truncated = parse_processes(raw)
+        metadata_error = False
+        try:
+            metadata = process_metadata({p['pid'] for p in processes})
+        except (ValueError, OSError, subprocess.SubprocessError):
+            metadata, metadata_error = {}, True
+        for gpu in output['gpus']:
+            gpu['processesAvailable'] = bool(gpu['uuid']) and not malformed and not truncated
+            if not gpu['uuid']:
+                gpu['processesError'] = 'GPU process matching unavailable'
+            elif malformed or truncated:
+                gpu['processesError'] = 'GPU process list incomplete'
+            elif metadata_error:
+                gpu['processesError'] = 'Process owner metadata unavailable'
+        for process in processes:
+            gpu = by_uuid.get(process.pop('uuid'))
+            if gpu is None:
+                continue
+            if len(gpu['processes']) >= MAX_GPU_PROCESSES:
+                gpu['processesAvailable'] = False
+                gpu['processesError'] = 'GPU process list incomplete'
+                continue
+            details = metadata.get(process['pid'], {})
+            process['owner'] = details.get('owner') or None
+            process['name'] = process['name'] or details.get('name') or None
+            gpu['processes'].append(process)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        for gpu in output['gpus']:
+            gpu['processesError'] = 'GPU process status unavailable'
+    return output
+
+
+def probe_gpuq():
+    output = {'connected': False, 'jobs': []}
     if os.path.isfile(CONFIG['gpu']):
         try:
             status = json.loads(command([CONFIG['gpu'], "--json", "q", "--limit", "100"], 12))
+            if not isinstance(status, dict):
+                raise ValueError('Invalid GPUQ status')
             daemon = status.get("daemon", {})
+            jobs = status.get('jobs', [])
+            if not isinstance(daemon, dict) or not isinstance(jobs, list):
+                raise ValueError('Invalid GPUQ status')
             allowed = ("id", "name", "owner", "state", "gpu_count", "assigned_gpu_count",
                        "assigned_gpu_indices", "priority_name", "share_gpu", "created_at")
-            output["gpuq"] = {
+            output = {
                 "connected": True, "health": daemon.get("health", "unknown"),
                 "observeOnly": daemon.get("observe_only"),
                 "schedulableIndices": daemon.get("schedulable_gpu_indices", []),
-                "jobs": [{key: job.get(key) for key in allowed} for job in status.get("jobs", [])[:100]],
+                "jobs": [{key: job.get(key) for key in allowed} for job in jobs[:100] if isinstance(job, dict)],
                 "limit": 100,
             }
         except (ValueError, OSError, subprocess.SubprocessError):
-            output["gpuq"]["error"] = "GPUQ status unavailable"
+            output["error"] = "GPUQ status unavailable"
     else:
-        output["gpuq"]["error"] = "GPUQ not installed at the managed entry point"
+        output["error"] = "GPUQ not installed at the managed entry point"
+    return output
+
+
+def probe():
+    output = {"version": 1, "checkedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    # Two bounded read-only branches fit within the collector's SSH deadline.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        gpuq = pool.submit(probe_gpuq)
+        output.update(probe_gpus())
+        output['gpuq'] = gpuq.result()
     return output
 
 

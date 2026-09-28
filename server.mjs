@@ -2,7 +2,7 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {DemoService} from './dist/service.js';
-const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/service.js':'service.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js'};
+const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/service.js':'service.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js'};
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
 export async function createServer(){
   const service=await DemoService.create();
@@ -24,7 +24,7 @@ export async function createServer(){
       }
       const file=routes[path];if(!file){res.writeHead(404);return res.end('Not found');}
       let content=await readFile(new URL(`./dist/${file}`,import.meta.url));
-      if(file==='index.html')content=content.toString().replace('globalThis.AMAX_LOCAL_API=false','globalThis.AMAX_LOCAL_API=true');
+      if(file==='index.html')content=content.toString().replace('globalThis.GPUQ_LOCAL_API=false','globalThis.GPUQ_LOCAL_API=true');
       res.writeHead(200,{'Content-Type':mime[file.split('.').pop()],'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY'});res.end(content);
     }catch(e){json(e.status||400,{error:e.message});}
   });

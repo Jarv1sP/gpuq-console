@@ -1,11 +1,11 @@
 [Unit]
-Description=AMAX Console restricted execution bridge
+Description=GPUQ Console restricted execution bridge
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/amax-console/executor/execution-worker.py
+ExecStart=/usr/bin/python3 /opt/gpuq-console/executor/execution-worker.py
 Restart=on-failure
-RuntimeDirectory=amax-console-executor
+RuntimeDirectory=gpuq-console-executor
 RuntimeDirectoryMode=0750
 Group=1000
 UMask=0007
@@ -13,7 +13,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/run/amax-console-executor
+ReadWritePaths=/run/gpuq-console-executor
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 MemoryMax=128M
 TasksMax=64

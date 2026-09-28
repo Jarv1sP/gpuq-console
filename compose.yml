@@ -1,8 +1,8 @@
 services:
-  amax-console:
+  gpuq-console:
     build: {context: ., dockerfile: deploy/Dockerfile}
-    image: amax-console:local
-    container_name: amax-console
+    image: gpuq-console:local
+    container_name: gpuq-console
     restart: unless-stopped
     user: "1000:1000"
     read_only: true
@@ -19,7 +19,7 @@ services:
       BOOTSTRAP_FILE: /data/bootstrap.json
       GPUQ_STATUS_PATH: /status/snapshot.json
       EXECUTOR_SOCKET: /executor/bridge.sock
-    volumes: ["./data:/data", "./status:/status:ro", "/run/amax-console-executor:/executor:ro"]
+    volumes: ["./data:/data", "./status:/status:ro", "/run/gpuq-console-executor:/executor:ro"]
     networks: [backend]
     logging: {driver: json-file, options: {max-size: "5m", max-file: "2"}}
   caddy:

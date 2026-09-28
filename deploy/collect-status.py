@@ -8,9 +8,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-ROOT = Path("/opt/amax-console/collector")
-TARGET = Path("/opt/amax-console/status/snapshot.json")
-HOSTS = {n['id']: n for n in json.loads(Path('/opt/amax-console/inventory.json').read_text())['nodes']}
+ROOT = Path("/opt/gpuq-console/collector")
+TARGET = Path("/opt/gpuq-console/status/snapshot.json")
+HOSTS = {n['id']: n for n in json.loads(Path('/opt/gpuq-console/inventory.json').read_text())['nodes']}
 
 
 def collect(item):

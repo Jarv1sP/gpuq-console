@@ -1,7 +1,22 @@
 #!/usr/bin/python3
 """One private PTY per user/node; bounded output, no public port, cgroup lifetime."""
-import base64,fcntl,json,os,pty,select,socket,struct,subprocess,sys,termios,time
+import base64,fcntl,json,os,pty,select,socket,stat,struct,subprocess,sys,termios,time
 from pathlib import Path
+ROOT_SHELLS=('/usr/local/libexec/gpuq-console-root-shell','/usr/local/libexec/amax-console-root-shell')
+
+
+def root_shell():
+    # Only fixed root-owned entrypoints; retain the old deployed sudoers target.
+    for value in ROOT_SHELLS:
+        path=Path(value)
+        try:info=path.lstat()
+        except FileNotFoundError:continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:
+            raise ValueError('Unsafe root terminal helper')
+        return value
+    raise ValueError('Root terminal helper is not installed')
+
+
 HERE=Path(__file__).resolve().parent
 root=Path(json.loads((HERE/'node-config.json').read_text())['root'])/'terminals'
 jid=sys.argv[1];sock=root/(jid+'.sock')
@@ -10,7 +25,7 @@ master,slave=pty.openpty()
 fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',32,110,0,0))
 def session():os.setsid();fcntl.ioctl(0,termios.TIOCSCTTY,0)
 spec=json.loads((root/(jid+'.json')).read_text())
-command=['/usr/bin/sudo','-n','/usr/local/libexec/amax-console-root-shell'] if spec.get('hostAdmin') is True else ['/usr/bin/python3',str(HERE/'sandbox-runner.py'),jid,'terminal']
+command=['/usr/bin/sudo','-n',root_shell()] if spec.get('hostAdmin') is True else ['/usr/bin/python3',str(HERE/'sandbox-runner.py'),jid,'terminal']
 child=subprocess.Popen(command,stdin=slave,stdout=slave,stderr=slave,preexec_fn=session)
 os.close(slave);os.set_blocking(master,False)
 server=socket.socket(socket.AF_UNIX);server.bind(str(sock));server.listen(4)

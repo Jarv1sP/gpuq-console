@@ -1,6 +1,6 @@
 {$PORTAL_DOMAIN} {
     encode zstd gzip
-    reverse_proxy amax-console:8080 {
+    reverse_proxy gpuq-console:8080 {
         header_up X-Real-IP {remote_host}
     }
 }

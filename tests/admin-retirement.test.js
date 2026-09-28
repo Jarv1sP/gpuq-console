@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {PortalService} from '../portal-service.mjs';
 test('named administrator can retire bootstrap admin without losing administration',async()=>{
- const dir=await mkdtemp(join(tmpdir(),'amax-admin-')),db=join(dir,'db'),bootstrap=join(dir,'bootstrap'),password='A-Local-Test-Password-2026';let s;
+ const dir=await mkdtemp(join(tmpdir(),'gpuq-admin-')),db=join(dir,'db'),bootstrap=join(dir,'bootstrap'),password='A-Local-Test-Password-2026';let s;
  try{
   await writeFile(bootstrap,JSON.stringify({username:'admin',password}));s=await PortalService.open(db,bootstrap);const a=await s.login('admin',password);
   await assert.rejects(s.invoke(a.token,'users.enabled',{userId:a.principal.userId,enabled:false}),/最后一名/);
