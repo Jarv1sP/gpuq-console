@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Run as the GPUQ service user. Add scoped keys; never overwrite a GPUQ DB."""
+import argparse,fcntl,ipaddress,json,os,pwd,re,shlex,shutil,subprocess,sys,time
+from pathlib import Path
+p=argparse.ArgumentParser();p.add_argument('--inventory',required=True);p.add_argument('--node',required=True);p.add_argument('--collector-key',required=True);p.add_argument('--executor-key',required=True);p.add_argument('--initialize-gpuq',action='store_true');p.add_argument('--enable-host-root',action='store_true');a=p.parse_args()
+if os.getuid()==0:raise SystemExit('Run as the dedicated GPUQ user, not root')
+source=Path(__file__).resolve().parents[1];inventory=json.loads(Path(a.inventory).read_text());node=next(n for n in inventory['nodes'] if n['id']==a.node)
+if pwd.getpwuid(os.getuid()).pw_name!=node['user']:raise SystemExit('Wrong OS service user')
+ip=str(ipaddress.IPv4Address(inventory['vpsTailIP']))
+for key in ('workspaceRoot','gpuqRoot','conda'):
+    if not re.fullmatch(r'/[A-Za-z0-9_./-]+',node[key]) or '..' in Path(node[key]).parts or node[key]=='/':raise SystemExit('Unsafe node path')
+def run(*cmd):return subprocess.run(cmd,check=True,text=True,capture_output=True).stdout
+for binary in ('bwrap','slirp4netns','nvidia-smi','systemd-run','python3','ssh-keygen'):
+    if not shutil.which(binary):raise SystemExit('Missing prerequisite: '+binary)
+if '--bind-fd' not in run('bwrap','--help'):raise SystemExit('bubblewrap must support --bind-fd; install a recent distro build')
+if not Path('/sys/fs/cgroup/cgroup.controllers').exists():raise SystemExit('cgroup v2 is required')
+if not Path(node['conda'],'bin/python').is_file():raise SystemExit('Read-only Python/Conda distribution missing')
+os.umask(0o077);home=Path.home();dest=home/'.local/libexec/amax-console';dest.mkdir(parents=True,exist_ok=True)
+root=Path(node['workspaceRoot']);root.mkdir(parents=True,exist_ok=True,mode=0o700)
+scheduler=Path(node['gpuqRoot']);config=scheduler/'config.json';binary=home/'bin/gpu'
+if not config.exists():
+    if not a.initialize_gpuq:raise SystemExit('GPUQ absent: review and rerun with --initialize-gpuq')
+    if binary.exists():raise SystemExit('Refusing to overwrite an existing gpu command')
+    archive=source/'build/gpuq.pyz'
+    if not archive.is_file():raise SystemExit('Build GPUQ first: python3 scripts/build-gpuq.py')
+    scheduler.mkdir(parents=True,exist_ok=True,mode=0o700);current=scheduler/'current';current.mkdir(exist_ok=True)
+    shutil.copy2(archive,current/'gpuq.pyz')
+    ids=run('nvidia-smi','--query-gpu=uuid','--format=csv,noheader').strip().splitlines()
+    if len(ids)!=node['cards']:raise SystemExit('Inventory card count differs from hardware; review before activation')
+    cfg={'root':str(scheduler),'db_path':str(scheduler/'state/gpuq.db'),'log_dir':str(scheduler/'logs'),'control_dir':str(scheduler/'control'),'socket_path':f'/run/user/{os.getuid()}/gpuq/gpuq.sock','managed_gpu_uuids':ids,'allowed_uid':os.getuid(),'observe_only':True,'archive_path':str(current/'gpuq.pyz')}
+    config.write_text(json.dumps(cfg,indent=2))
+    run('/usr/bin/python3',str(current/'gpuq.pyz'),'--config',str(config),'_init')
+    binary.parent.mkdir(exist_ok=True);binary.write_text('#!/bin/sh\nexec /usr/bin/python3 '+shlex.quote(str(current/'gpuq.pyz'))+' --config '+shlex.quote(str(config))+' "$@"\n');binary.chmod(0o700)
+    units=home/'.config/systemd/user';units.mkdir(parents=True,exist_ok=True)
+    unit='[Unit]\nDescription=GPUQ scheduler\nAfter=default.target\n[Service]\nExecStart=/usr/bin/python3 '+str(current/'gpuq.pyz')+' --config '+str(config)+' daemon\nRestart=on-failure\nRuntimeDirectory=gpuq\nRuntimeDirectoryMode=0700\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n[Install]\nWantedBy=default.target\n'
+    (units/'gpuq.service').write_text(unit);run('systemctl','--user','daemon-reload');run('systemctl','--user','enable','--now','gpuq.service')
+else:
+    if a.initialize_gpuq:print('Existing GPUQ preserved; no upgrade or database initialization performed')
+    if not binary.is_file():raise SystemExit('Existing GPUQ requires its managed ~/bin/gpu command')
+cfg=json.loads(config.read_text())
+for item in ('node-executor.py','sandbox-runner.py','terminal-helper.py','node-probe.py'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
+host_root=False
+if a.enable_host_root:
+    # This is a deliberately explicit, high-trust host-root capability.
+    run('sudo','install','-D','-o','root','-g','root','-m','755',str(source/'deploy/amax-console-root-shell'),'/usr/local/libexec/amax-console-root-shell')
+    sudoers=dest/'sudoers.pending';sudoers.write_text(node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/amax-console-root-shell\n');sudoers.chmod(0o600)
+    run('sudo','visudo','-cf',str(sudoers));run('sudo','install','-o','root','-g','root','-m','440',str(sudoers),'/etc/sudoers.d/amax-console');sudoers.unlink();host_root=True
+(dest/'node-config.json').write_text(json.dumps({'machine':a.node,'cards':node['cards'],'root':str(root),'gpu':str(binary),'database':cfg['db_path'],'slirp':shutil.which('slirp4netns'),'conda':node['conda'],'hostRoot':host_root},indent=2))
+ssh=home/'.ssh';ssh.mkdir(mode=0o700,exist_ok=True);auth=ssh/'authorized_keys'
+if auth.is_symlink() or (auth.exists() and (not auth.is_file() or auth.stat().st_uid!=os.getuid())):raise SystemExit('Unsafe authorized_keys')
+with auth.open('a+') as f:
+    fcntl.flock(f,fcntl.LOCK_EX);f.seek(0);content=f.read();entries=[]
+    for keyfile,program in [(a.collector_key,'node-probe.py'),(a.executor_key,'node-executor.py')]:
+        key=Path(keyfile).read_text().strip();fields=key.split()
+        if len(fields) not in (2,3) or fields[0]!='ssh-ed25519' or '\n' in key:raise SystemExit('Expected Ed25519 public key')
+        run('ssh-keygen','-lf',keyfile)
+        entry=f'restrict,from="{ip}",command="/usr/bin/python3 {dest}/{program}" {key}'
+        if fields[1] in content and entry not in content.splitlines():raise SystemExit('This key exists with different restrictions; review manually')
+        if entry not in content.splitlines():entries.append(entry)
+    if entries:
+        if content:backup=ssh/('authorized_keys.before-console-'+str(int(time.time())));backup.write_text(content);backup.chmod(0o600)
+        f.write(('\n' if content and not content.endswith('\n') else '')+'\n'.join(entries)+'\n');f.flush();os.fsync(f.fileno())
+auth.chmod(0o600)
+print(json.dumps({'node':a.node,'rootTerminalEnabled':host_root,'gpuqObserveOnly':cfg.get('observe_only',True),'next':'Enable linger as administrator; inspect GPUQ before activating execution'}))

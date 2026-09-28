@@ -1,0 +1,9 @@
+[Unit]
+Description=AMAX portal consistent SQLite backup
+
+[Service]
+Type=oneshot
+ExecStart=/opt/amax-console/backup.sh
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

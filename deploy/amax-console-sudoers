@@ -1,0 +1,1 @@
+amax ALL=(root) NOPASSWD: /usr/local/libexec/amax-console-root-shell

@@ -1,0 +1,9 @@
+{$PORTAL_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy amax-console:8080 {
+        header_up X-Real-IP {remote_host}
+    }
+}
+{$HEADSCALE_DOMAIN} {
+    reverse_proxy headscale:8080
+}

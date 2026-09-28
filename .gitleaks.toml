@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Unmodified upstream xterm bundles; byte equality is enforced by tests/vendor.test.js"
+paths = ['''(^|/)dist/vendor/(xterm|addon-fit)\.js$''']

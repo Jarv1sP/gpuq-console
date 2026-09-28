@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh AMAX GPU status once per minute
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=amax-console-collect.service
+
+[Install]
+WantedBy=timers.target

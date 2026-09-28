@@ -1,0 +1,8 @@
+**
+!dist/**
+!*.mjs
+!package.json
+!USER_README.md
+!ADMIN_README.md
+!deploy/Dockerfile
+!deploy/install-client.sh

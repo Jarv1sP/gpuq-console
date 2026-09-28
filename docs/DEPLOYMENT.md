@@ -1,0 +1,152 @@
+# 从零部署 AMAX Console
+
+本文面向新的实验室。已有服务请先备份、比较差异，不把示例覆盖到正在使用的 Tail 策略、GPUQ 数据库或反向代理。**所有命令里的域名、IP、账号和路径都是示例。**
+
+## 1. 准备条件
+
+- 一台有公网域名的 Linux VPS；公网开放 TCP 80/443，管理 SSH 仅允许可信来源。建议至少 1 GiB 内存。
+- VPS 安装 Docker Engine / Compose v2+、Git、Node.js 24、Python 3.10+、OpenSSH client、sqlite3。
+- GPU 节点：Linux、Python 3.10+、systemd 用户服务/cgroup v2、NVIDIA 驱动、OpenSSH server、bubblewrap（`bwrap --help` 包含 `--bind-fd`）、slirp4netns、curl。
+- GPU 节点允许用户命名空间。某些 Ubuntu/AppArmor 策略会限制它；使用发行版支持的规则授权相关程序，不全局关闭系统安全机制。
+- 每台节点准备一个可信的非 root 服务用户（示例 `amax`）和只读基础 Python/Conda（示例 `/opt/conda`），其中 PyTorch/CUDA 与驱动兼容。不要给新平台普通用户发这个系统账号的密码。
+- 给域名 `gpu.example.com` 设置指向 VPS 的 A/AAAA；不要保留指向错误主机的 AAAA。Caddy 负责自动申请/续签证书。
+
+## 2. Tail 管理网络
+
+### 已有 Tail / Headscale（推荐复用）
+
+把 VPS 与 GPU 节点加入现有网络；保留其他设备和策略。VPS 用 `tag:portal`，GPU 节点用 `tag:server`。**合并** [policy.hujson](../deploy/policy.hujson) 中的必要规则，让 portal→server TCP22；管理者可单独用 `tag:owner`。实际所有者名称以自己的控制面为准。
+
+本平台使用普通 OpenSSH，不需要 Tailscale SSH；如果节点已启用 Tailscale SSH，需在已有管理通道确认 OpenSSH 可用后关闭该功能，不能在唯一远程连接上冒险切换。只打管理隧道，不宣告 exit node、不修改默认路由或 DNS。
+
+### 可选：自己新建 Headscale
+
+仓库提供 Headscale 0.29.3 的独立示例，参考 [官方配置](https://github.com/juanfont/headscale/blob/v0.29.3/config-example.yaml) 与 [策略文档](https://headscale.net/development/ref/policy/)。在同一 VPS 使用时增加 `tail.example.com` DNS。先完成下面第 3 节生成配置；启动前用自己的身份修改 `tagOwners`。
+
+```sh
+docker compose --profile headscale up -d headscale caddy
+docker compose exec headscale headscale users create owner
+docker compose exec headscale headscale users list
+```
+
+客户端安装官方 Tailscale 后运行（VPS 示范）：
+
+```sh
+sudo tailscale up --login-server=https://tail.example.com --hostname=gpu-portal --accept-dns=false --advertise-tags=tag:portal
+```
+
+在管理端按客户端返回的登记提示批准，`--user` 使用上一步真实用户 ID/名称。0.29 系列示例：
+
+```sh
+docker compose exec headscale headscale auth register --auth-id 登记请求ID --user 用户ID
+```
+
+GPU 节点同理，改为自己的 hostname 与 `tag:server`。登记是一次性受控操作，不把长期可复用授权密钥写 README 或 shell 历史。手机等个人设备不是部署必需。
+
+若策略引用用户尚不存在导致服务拒绝启动，首次启动先把策略保存为 `{"acls":[]}`（默认拒绝），创建 owner 后再恢复此仓库策略并重启 Headscale；不要临时 `*:*` 全放通。已有网络绝不执行这种初始化。
+
+已有独立 Headscale 时不启用该 Compose profile，可删除 Caddyfile 第二个域名块；它不影响已有控制面。
+
+## 3. 配置 VPS 源码
+
+以 VPS 管理员操作：
+
+```sh
+sudo git clone https://github.com/Jarv1sP/amax-console.git /opt/amax-console
+cd /opt/amax-console
+sudo cp config/inventory.example.json inventory.json
+sudoedit inventory.json
+sudo node scripts/configure.mjs inventory.json
+sudo python3 scripts/build-gpuq.py
+sudo python3 deploy/init-vps.py
+```
+
+填入 `publicOrigin`、`headscaleOrigin`、真实 `vpsTailIP`，以及每台 GPU 节点的稳定 ID、Tail IP、SSH 服务用户、卡数/型号/显存、工作区/GPUQ/Python 目录。不要用中文作系统服务用户；门户用户名可以是中文。`memory` 用例如 `24 GB`。
+
+`configure` 生成公开的机器容量表和私有 `.env`/Headscale 配置；`init-vps` 建目录、初始管理员密码、两把独立 Ed25519 密钥、systemd 单元，但不启动服务、不修改 ACL、不进入节点。
+
+私钥在 `collector/id_ed25519`、`executor/id_ed25519`，**永远留在 VPS**。只复制 `.pub` 到对应 GPU 节点。
+
+## 4. 准备 GPU 节点
+
+安装系统依赖，确认驱动和现有实验正常；以 `amax` 登录，准备源码（相同版本）、自己的 `inventory.json` 以及 VPS 两个公钥。各节点只需这个清单中的自身条目和 VPS Tail IP，也可使用完整私有清单。不要复制 VPS 私钥或数据库。
+
+首次建目录的例子，须与自己的 inventory 一致：
+
+```sh
+sudo install -d -o amax -g amax -m 700 /srv/gpuq /srv/amax-workspaces
+sudo loginctl enable-linger amax
+python3 scripts/build-gpuq.py
+python3 deploy/install-node.py --inventory inventory.json --node gpu-1 --collector-key collector.pub --executor-key executor.pub --initialize-gpuq
+```
+
+安装器在服务用户下运行，不能 `sudo python3 install-node.py`。用户 systemd 要可用：`systemctl --user status`；若第一次启用 linger 后仍无用户总线，重新登录该服务用户。
+
+- **已有 GPUQ**：不传 `--initialize-gpuq`，`gpuqRoot` 指向现有 config 所在目录，保留已有 `~/bin/gpu`。安装器不会迁移数据库、升级或重启原 GPUQ。
+- **新 GPUQ**：显式初始化后以观察模式启动，保守检查 `nvidia-smi`、`~/bin/gpu health`、`~/bin/gpu status`；确认 GPU UUID 和现有占用后执行 `~/bin/gpu set-mode --active`。它不会为了接入而杀已有实验。
+- **可选最高权限**：同一安装命令增加 `--enable-host-root` 才安装固定 root 入口与 sudoers。这让门户 admin 获得真实宿主机 root，应只给完全受信任的人。以后重新部署仍需显式传该开关，否则节点配置关闭此能力。
+
+节点程序在 `~/.local/libexec/amax-console`，状态/数据放自己的工作区根。授权公钥带 `restrict`、VPS Tail 源地址和强制命令；不会覆盖已有 authorized_keys。修改 VPS Tail IP 后需审查并更新这些限制。
+
+## 5. 固定 SSH 主机指纹
+
+在每台节点可信终端查看：
+
+```sh
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+在 VPS 获取候选公钥，与刚才指纹**逐一核对**后加入两份 known_hosts；`ssh-keyscan` 本身不验证身份：
+
+```sh
+ssh-keyscan -t ed25519 100.64.10.11 > /tmp/gpu-1.hostkey
+ssh-keygen -lf /tmp/gpu-1.hostkey
+# 确认与节点输出完全相同后：
+sudo sh -c 'cat /tmp/gpu-1.hostkey >> /opt/amax-console/collector/known_hosts'
+sudo sh -c 'cat /tmp/gpu-1.hostkey >> /opt/amax-console/executor/known_hosts'
+```
+
+对每台重复。不得把 `StrictHostKeyChecking` 改为 no。端口按当前脚本固定22；非标准端口需要先适配清单/桥并测试，不能只改 SSH alias。
+
+## 6. 启动后台与网页
+
+```sh
+sudo systemctl enable --now amax-console-executor.service
+sudo systemctl start amax-console-collect.service
+sudo systemctl enable --now amax-console-collect.timer amax-console-backup.timer
+sudo cat /opt/amax-console/status/snapshot.json
+sudo docker compose up -d --build amax-console caddy
+sudo docker compose logs --tail 50 amax-console caddy
+```
+
+所有节点应 `reachable:true` 且 `gpuq.connected:true`。只读状态失败时别先开放公网 SSH；先核验 Tail ACL、指纹、强制命令、服务用户总线与路径。
+
+访问自己的域名。初始管理员用户名 `admin`，随机密码只在 VPS 的 `data/bootstrap.json`，用 `sudo cat` 在可信终端读取；不要截图公开。数据库已存在时不会被 bootstrap 重置。首次登录更改密码，将私有密码安全保存，并删除不再需要的 bootstrap 明文（数据库备份不含明文密码）。
+
+在“用户授权 → 注册邀请”生成普通注册码；管理员以后可随时查看当前码或刷新换新。新用户自行注册后自动进入零额度资源页，管理员的“待处理”列表自动出现该账号，批准机器和卡数后即可使用。
+
+管理员也建议使用个人账号：普通注册、由初始 admin 提升角色，再用个人账号登录验证完整权限。确认无未完成任务后暂停并删除初始 admin；系统保护最后一名可登录管理员，不能删除当前自己。删除不抹除历史作业和个人工作区。
+
+注册一个普通测试账号、批准额度，执行 [完整验收](TESTING.md)。普通用户从自己的门户下载 CLI，下载内容自动带本站地址；直接从 GitHub 源码运行时首次用 `node cli.mjs --url https://gpu.example.com login`。
+
+## 7. 备份、升级与回退
+
+`backup.sh` 用 SQLite 在线备份并验证完整性，同时备份数据库旁的注册码加密密钥 `portal.sqlite.invite-key`，每日 timer、默认保留14天。恢复时数据库与密钥必须匹配；有注册码密文但密钥丢失时，服务拒绝自动生成新密钥覆盖。另备份私有 inventory/.env、Headscale 数据与密钥、节点 GPUQ 数据库、个人工作区；只有门户 SQLite 不够恢复模型和数据集。备份放离机的私有存储，定期演练恢复。
+
+升级不要对运行目录无脑 `git pull && up`：
+
+1. 记录 Git commit、镜像 ID；运行数据库备份；保留旧节点桥与 GPUQ 版本。
+2. 在独立目录检出新版，运行测试、生成自己的容量配置；比较数据库兼容性与 release notes。
+3. 只替换经审查的 Portal/节点桥。GPUQ 有在跑任务时不要更换其 archive 路径或重启用户服务。
+4. 重建/重启门户不会杀现有训练，但短暂影响登录和控制；确认状态恢复、不重复提交，再结束维护。
+5. 回退镜像前核对数据库 schema，不能把旧快照直接盖回仍有新任务的状态库。需要还原数据库时先停控制入口并逐节点核对真实作业。
+
+新加机器先部署节点、校验指纹，再更新清单并生成容量表。更改现有 machine ID 等同迁移身份，有未完成任务时不要改。删机器先清空任务/授权，再迁移数据，不直接删数据库记录。
+
+## 8. 常见阻塞
+
+- 终端打不开：`bwrap --help` 是否支持 bind-fd、用户命名空间策略、slirp4netns、服务用户 linger、基础 Python 路径。
+- 单卡正常多卡失败：先查训练程序、驱动/框架兼容与 NCCL，不能通过给普通用户全宿主机权限绕过。
+- 日志/状态 UNKNOWN：保留额度，查节点 SSH 和 GPUQ；不要手工清空预留。
+- 证书失败：DNS A/AAAA、80/443、防火墙、Caddy 持久卷；不关 TLS 校验。
+- 开源示例和既有部署路径不同是正常的；以自己的 `inventory.json` 为准，不能照抄他人地址。

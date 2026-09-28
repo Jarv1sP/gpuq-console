@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily AMAX portal account backup
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
