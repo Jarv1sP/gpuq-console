@@ -1,10 +1,48 @@
 export class DemoClient{
+  constructor(){this.authGeneration=0;this.authPending=0;this.authTail=Promise.resolve();this.inflight=new Set();this.authListeners=new Set();this.sessionToken=null;this.requestTimeoutMs=45000;}
   static async create(){const client=new DemoClient();client.remote=globalThis.GPUQ_LOCAL_API===true;client.production=globalThis.GPUQ_PRODUCTION===true;if(!client.remote){const {DemoService,DEMO_ADMIN}=await import('./service.js');client.service=await DemoService.create();await client.login(DEMO_ADMIN.username,DEMO_ADMIN.password);}else if(client.production){try{await client.refresh();}catch(e){if(e.status!==401)throw e;}}return client;}
-  async transport(path,body){const response=await fetch(`/api/${path}`,{method:'POST',headers:{'Content-Type':'application/json',...(this.token?{Authorization:`Bearer ${this.token}`}:{})},body:JSON.stringify(body)});const data=await response.json();if(!response.ok){const e=Error(data.error||'请求失败');e.status=response.status;throw e;}return data;}
-  async login(username,password){const data=this.remote?await this.transport('login',{username,password,...(this.production?{client:'browser'}:{})}):await this.service.login(username,password);this.token=data.token;this.principal=data.principal;this.data=data.state;return data.principal;}
-  register(username,password,invite){if(!this.production)throw Error('邀请码注册仅在正式后台开放。');return this.transport('register',{username,password,invite});}
-  async call(operation,args={}){const data=this.remote?await this.transport('call',{operation,args}):await this.service.invoke(this.token,operation,args);if(data.state)this.data=data.state;if(data.principal)this.principal=data.principal;return data.result;}
-  async logout(){try{await this.call('logout');}finally{this.token=null;this.principal=null;this.data=null;}}
+  stale(message='登录状态已改变，已忽略旧请求。'){const error=Error(message);error.code='STALE_SESSION';return error;}
+  async transport(path,body,token=null){
+    const controller=new AbortController();let timer;
+    const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();const error=Error('请求超时；远端操作可能仍在完成，请刷新确认。');error.code='REQUEST_TIMEOUT';reject(error);},this.requestTimeoutMs);});
+    try{return await Promise.race([(async()=>{const response=await fetch(`/api/${path}`,{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify(body)});const data=await response.json();if(!response.ok){const e=Error(data.error||'请求失败');e.status=response.status;throw e;}return data;})(),timeout]);}finally{clearTimeout(timer);}
+  }
+  track(promise){this.inflight.add(promise);promise.then(()=>this.inflight.delete(promise),()=>this.inflight.delete(promise));return promise;}
+  invoke(operation,args,token){return this.remote?this.transport('call',{operation,args},token):this.service.invoke(token,operation,args);}
+  onAuthChange(listener){this.authListeners.add(listener);return()=>this.authListeners.delete(listener);}
+  changeAuth(action){
+    const generation=++this.authGeneration,token=this.token;
+    if(!this.authPending){this.sessionToken=token;for(const listener of this.authListeners)this.track(Promise.resolve().then(()=>listener((operation,args)=>this.invoke(operation,args,token))).catch(()=>{}));}
+    this.authPending++;this.token=null;this.principal=null;this.data=null;
+    // Only identity changes are queued. Drain old requests (including bounded
+    // terminal cleanup) before a new cookie can be installed or cleared.
+    const pending=this.authTail.catch(()=>{}).then(async()=>{await Promise.allSettled([...this.inflight]);return action(generation);});
+    this.authTail=pending;return pending.finally(()=>{this.authPending--;});
+  }
+  login(username,password){return this.changeAuth(async generation=>{
+    let data;try{data=this.remote?await this.transport('login',{username,password,...(this.production?{client:'browser'}:{})}):await this.service.login(username,password);}catch(error){if(generation!==this.authGeneration)throw this.stale();throw error;}
+    this.sessionToken=data.token;
+    if(generation!==this.authGeneration)throw this.stale();
+    this.token=data.token;this.principal=data.principal;this.data=data.state;return data.principal;
+  });}
+  async register(username,password,invite){if(!this.production)throw Error('邀请码注册仅在正式后台开放。');if(this.authPending)throw this.stale();const generation=this.authGeneration;return this.track((async()=>{try{const result=await this.transport('register',{username,password,invite});if(generation!==this.authGeneration)throw this.stale();return result;}catch(error){if(generation!==this.authGeneration)throw this.stale();throw error;}})());}
+  async call(operation,args={},options={}){
+    if(operation==='logout')return this.logout();
+    if(this.authPending)throw this.stale('正在切换登录账号，请稍后重试。');
+    const generation=this.authGeneration,token=this.token;
+    return this.track((async()=>{
+      let data;try{data=await this.invoke(operation,args,token);}catch(error){if(generation!==this.authGeneration)throw this.stale(operation==='terminal.open'?'登录状态已改变，终端创建结果未确认；请原账号重新连接检查，服务端仍按期限回收。':undefined);throw error;}
+      if(generation!==this.authGeneration){
+        if(options.onStale)try{await options.onStale(data.result,(operation,args)=>this.invoke(operation,args,token));}catch{throw this.stale('登录状态已改变；旧终端关闭未确认，请原账号重新登录后结束该终端，服务端仍按期限回收。');}
+        throw this.stale();
+      }
+      if(data.state)this.data=data.state;if(data.principal)this.principal=data.principal;
+      // Register resources synchronously inside the generation fence, before
+      // callers resume and an identity transition can start.
+      options.accept?.(data.result);return data.result;
+    })());
+  }
+  logout(){return this.changeAuth(async generation=>{try{return (await this.invoke('logout',{},this.sessionToken)).result;}catch(error){if(generation!==this.authGeneration)throw this.stale();throw error;}finally{this.sessionToken=null;}});}
   async refresh(){await this.call('state');}
   get users(){return this.data?.users||[];}
   get jobs(){return this.data?.jobs||[];}

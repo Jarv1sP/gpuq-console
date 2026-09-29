@@ -12,8 +12,9 @@
 
 | 左侧入口 | 用途 |
 |---|---|
-| 我的工作台 | 自己的终端、文件、训练任务、已用和可用额度 |
+| 我的工作台 | 在手选机器中管理项目、开发终端、代码与环境版本、训练任务和结果 |
 | 机器资源 | 查看获授权机器的逐卡利用率、显存、温度、功耗与 CUDA 计算进程占用；普通用户不显示他人的程序和系统用户名 |
+| 数据集 | 在获授权机器准备固定版本的本地副本，就绪后选择用于训练 |
 | 用户授权 | 仅管理员可见，管理账号、注册码、机器授权和卡数额度 |
 
 界面帮助入口提供用户手册，管理员另有管理员手册；阅读文档不代表获得管理权限。管理员分配额度后，实际操作都在“我的工作台”，不用到用户管理页开终端或提交任务。
@@ -31,10 +32,11 @@ curl -fsSL https://gpu.example.com/install.sh | sh
 ```sh
 gpuctl login
 gpuctl use gpu-1
+gpuctl project create my-project
 gpuctl ssh
 ```
 
-`login` 会提示用户名和密码；密码不回显。`use` 记住服务器，不必每次再写；机器名称以网站和 `gpuctl status` 的实际清单为准，只允许你获批的机器。`ssh` 打开交互式命令行，不需要另配 SSH 密钥或服务器密码。用户名支持 2–24 个小写英文字母、汉字、数字、下划线和连字符，以字母或汉字开头。
+`login` 会提示用户名和密码；密码不回显。`use` 记住服务器，不必每次再写；机器名称以网站和 `gpuctl state` 的实际清单为准，只允许你获批的机器。`project create` 创建并选中该机上的项目；已有项目用 `gpuctl project use my-project`。项目名为 1–48 位小写英文字母、数字、`_` 或 `-`，以字母开头。`ssh` 打开交互式命令行，不需要另配 SSH 密钥或服务器密码。用户名支持 2–24 个小写英文字母、汉字、数字、下划线和连字符，以字母或汉字开头。
 
 安装命令适用于 macOS、Linux 和 Windows 的 WSL。这里的 `gpuctl ssh` 是通过 HTTPS 连接个人终端的快捷命令，不是原生 SSH 协议端口；暂不能作为 VS Code Remote-SSH、SFTP 或 rsync 的目标。它同样不要求你的电脑加入 Tail。
 
@@ -42,36 +44,42 @@ gpuctl ssh
 
 旧版本已安装的 `amax` 命令仍可使用；新安装统一使用 `gpuctl`。新版兼容旧登录缓存和环境变量，不需要因项目改名重新注册账号，详见[名称更新与兼容](docs/MIGRATION.md)。
 
-## 安装环境、编辑代码
+## 项目代码与环境
 
-普通终端进入个人 `/workspace`，与后续训练共用。比如：
+每个账号、每台机器、每个项目分别隔离。项目开发终端中：代码在 `/workspace`，个人环境在 `/opt/project-env`，个人目录在 `/home/gpuq`。基础 Python/Conda 只读保留在 `/opt/conda`，首次打开项目终端会准备项目自己的 venv，安装依赖不会覆盖全局 Conda 或其他项目。
 
 ```sh
-pwd
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install numpy
+gpuctl push .
+gpuctl ssh
+# 以下两条在打开的服务器终端内执行
+python -m pip install -r requirements.txt
+exit
 ```
 
-个人工作区长期保留；退出终端不会删除环境和文件。管理员提供的基础 Python/Conda 只读挂载在 `/opt/conda`；已有环境位于 `/opt/conda/envs/环境名`。可安装个人 pip/venv/conda 环境，但普通账号不能 sudo 改宿主机。
+`push .` 上传当前目录内容到选中项目的开发代码区，同名文件更新。项目模式会跳过 `.git`、`.venv`、`venv`、`node_modules`、`__pycache__`、`.ssh`、`.aws`、`.azure`、`id_rsa`、`id_ed25519`、`.env` 和 `.env.*`（保留 `.env.example`），并打印提示；不会递归跟随软链接。其他名字的敏感文件不会自动识别，上传前仍需检查。不要把 Mac 的 Python 环境打包覆盖 Linux 环境，也不要把 TB 数据集当代码上传。
+
+工作区长期保留，退出终端不会删除文件。终端中的 `/outputs` 是项目开发用临时结果区，不是某次训练的结果。训练只使用发布后的固定代码和环境版本；草稿继续修改不会改变已经发布的版本。
 
 终端本身不占 GPU，不挂载 GPU。验证 CUDA 或跑训练请用 `gpuctl run`，不能绕过队列直接在普通终端拿卡。终端上限 2 核 CPU 额度、8 GiB 内存，无输入 1 小时或累计 6 小时自动结束。`exit` 结束会话；`Ctrl+]` 仅断开，再次 `gpuctl ssh` 可接回。
 
-## 上传并训练
+## 发布并训练
 
 在自己电脑的项目目录：
 
 ```sh
-gpuctl push .
-gpuctl run -g 1 -- python train.py
+gpuctl project publish
+gpuctl project status
+# 对应版本显示 READY 后提交
+gpuctl run -g 1 -- python train.py --output /outputs
 gpuctl jobs
 gpuctl logs 任务ID
-gpuctl pull output/model.pt ./model.pt
+gpuctl files --job 任务ID
+gpuctl pull --job 任务ID model.pt ./model.pt
 ```
 
-`push .` 把当前目录内容上传到当前服务器的 `/workspace`。同名文件覆盖，软链接不跟随；请勿上传不需要的密钥、缓存或大数据。也能指定远端子目录：`gpuctl push ./myproject myproject`，训练时对应 `bash -lc 'cd myproject && python train.py'`。
+`--output` 是示例训练脚本自己的参数，请换成你的程序实际支持的输出参数。程序须把日志文件、checkpoint 等可写产物放到 `/outputs`，不能写只读代码区 `/workspace`。每次训练有独立的 `/outputs` 和临时 HOME，不与另一任务混用。标准输出仍通过 `gpuctl logs` 查看。
 
-环境安装到 `.venv` 时，用 `gpuctl run -g 1 -- .venv/bin/python train.py`。任务在服务器运行，关电脑不影响训练。日志为最近 200 行；`jobs` 查看新状态。
+`project publish` 在后台冻结当前代码和项目 venv，状态未 `READY` 时不能提交这个版本。`run` 默认使用最新 READY 版本，不会偷偷发布草稿；如需固定旧版本，加 `--release 完整64位版本号`。若新版本发布失败，但旧版本仍 READY，默认运行的是旧版本；提交前核对输出的版本号。任务在你手选的服务器中自动分配所需数量的 GPU，不会换服务器；关电脑不影响训练。日志为最近 200 行。
 
 ```sh
 gpuctl cancel 任务ID
@@ -79,16 +87,41 @@ gpuctl cancel 任务ID
 
 取消后等待 GPUQ 确认停止，再释放额度；后台子进程一起清理。任务 ID 是平台返回的 UUID，不是旧 GPUQ 的 `J...` 编号。
 
+## 使用已授权数据集
+
+数据准备与项目发布分开进行，准备期间不占 GPU。选择训练机器和项目后，从数据集目录复制完整的 `名称@64位版本`：
+
+```sh
+gpuctl use gpu-1
+gpuctl project use my-project
+gpuctl data list
+gpuctl data prepare NAME@VERSION
+gpuctl data status NAME@VERSION
+```
+
+将示例 `NAME@VERSION` 替换为目录中的真实固定版本。显示 `READY` 后再运行：
+
+```sh
+gpuctl run -g 1 --data NAME@VERSION -- python train.py --data /data2/NAME --output /outputs
+```
+
+平台的 `--data` 位于 `--` 前，训练程序参数位于后面。作业内 `/data2/NAME` 是只读本地副本，输出写入 `/outputs`。普通开发终端不自动挂载数据集。旧大数据目录不会自动搬走或删除，但登记名称不等于该机器已经准备完成。
+
+网页左侧“数据集”也可选择服务器、准备版本；显示“本机已就绪”后点“用于训练”，核对工作台机器与版本，再填写命令提交。准备过程在后台继续，状态需刷新；失败或长时间不变化时用 `data status` 查看结果，不能把“准备中”当作可训练。
+
+项目归属你明确选择的服务器；切换机器不会复制项目、环境或结果，也不会自动切到同名项目。新机器先创建/选择项目，再上传、安装依赖、发布；数据可独立准备本地副本。项目流程见 [项目手册](docs/PROJECTS.md)或本站[在线项目手册](https://gpu.example.com/guide/projects)；数据状态见 [数据集手册](docs/DATASETS.md)，或本站[在线数据集手册](https://gpu.example.com/guide/datasets)。
+
 ## 多卡与显存
 
 ```sh
 gpuctl use gpu-2
-gpuctl run -g 4 --min-vram 24 --name ddp -- python -m torch.distributed.run --standalone --nproc-per-node=4 train.py
+gpuctl project use my-project
+gpuctl run -g 4 --min-vram 24 --name ddp -- python -m torch.distributed.run --standalone --nproc-per-node=4 train.py --output /outputs
 ```
 
 `-g 4` 申请同一服务器的 4 张整卡。`--min-vram 24` 筛选每张卡物理显存至少约 24 GiB 的机型，不是显存切片；驱动预留的少量容量不影响 24/32 GiB 型号匹配。训练代码必须支持多卡，不会自动改写程序。
 
-显式 `gpuctl run auto -g 2 --min-vram 32 -- python train.py` 可在已批准的机器里自动选择；代码和数据要先准备到候选机器，不会自动搬运。首次使用建议指定机器。当前不自动将跨机显存合并或启动跨机 DDP。
+新提交不接受 `run auto`：你选择服务器，调度器在该机内分配卡，不要求你手选 GPU 编号。当前不自动将跨机显存合并或启动跨机 DDP。
 
 ## 机器与配额
 
@@ -109,11 +142,15 @@ gpuctl run -g 4 --min-vram 24 --name ddp -- python -m torch.distributed.run --st
 
 管理员设置每机用卡上限与跨机同时用卡总数。排队、启动、运行和状态待核对都计入额度，成功/失败/取消确认后释放。授权不是物理卡预留；没有空闲卡会排队，不抢占现有实验。
 
-普通终端与训练只看见个人目录，训练仅挂载获配 GPU。清空 `CUDA_VISIBLE_DEVICES` 也不能多拿其他卡。每台机器工作区独立，不自动同步。训练系统内存默认每 GPU 32 GiB、CPU 每 GPU 4 核额度；不是 GPU 显存限制。
+项目终端只看见该项目开发区；训练只读挂载发布代码、环境及显式选择、获授权且已就绪的数据集，并仅挂载获配 GPU。清空 `CUDA_VISIBLE_DEVICES` 也不能多拿其他卡。每台机器工作区独立，不自动同步。训练系统内存默认每 GPU 32 GiB、CPU 每 GPU 4 核额度；不是 GPU 显存限制。
+
+## 老工作区兼容
+
+从未选择项目的已有账号仍用原个人 `/workspace`，原上传和任务不搬走、不删除。选中项目后，`push/files/ssh/run/pull` 自动针对该机项目；临时回旧空间加 `--legacy`，例如 `gpuctl ssh --legacy`、`gpuctl run --legacy -g 1 -- python train.py`。旧模式输出仍在原工作区，没有 `--job` 结果目录；`--legacy` 不能和 `--project`/`--release` 混用，也不允许 `run auto`。新项目不会自动导入旧代码或环境。
 
 ## 网页也能做什么
 
-登录后可打开终端、上传文件、提交训练、看日志、取消任务、下载结果。网页里的“断开”保留终端，“结束终端”才关闭。浏览器下载超过 100 MiB 请用 CLI；文件经 VPS 转发，不是高速直连传输。API 单文件上限 100 GiB，磁盘剩余不足 10 GiB 拒绝新上传。
+登录后可打开终端、上传文件、提交训练、看日志、取消任务、下载结果。网页里的“断开”保留终端，“结束终端”才关闭；发布项目前需要真正结束开发终端，CLI 用 `exit` 而非 `Ctrl+]`。浏览器下载超过 100 MiB 请用 CLI；文件经 VPS 转发，不是高速直连传输。项目代码单文件上限 4 GiB，旧工作区 API 上限 100 GiB；磁盘剩余不足 10 GiB 拒绝新上传。
 
 ## 常见情况
 

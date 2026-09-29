@@ -1,0 +1,329 @@
+"""Dataset/executor boundary regression tests; no GPU, SSH or systemd writes."""
+import importlib.util
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import shutil
+import sqlite3
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+
+DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
+
+
+class NodeDatasets(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name).resolve()
+        for name in ('node-executor.py', 'dataset-cache.py', 'sandbox-runner.py'):
+            shutil.copy2(DEPLOY / name, self.base / name)
+        self.source = self.base / 'source'
+        self.source.mkdir()
+        (self.source / 'train.txt').write_text('small immutable training sample\n')
+        config = dict(root=str(self.base / 'state'), cards=4, gpu='/not/a/gpu',
+                      database=str(self.base / 'gpuq.sqlite'), datasets=dict(
+                          root=str(self.base / 'cache'), mountPoint=str(self.base),
+                          sources={'approved': str(self.source)}, reserveBytes=0))
+        (self.base / 'node-config.json').write_text(json.dumps(config))
+        spec = importlib.util.spec_from_file_location('node_dataset_test', self.base / 'node-executor.py')
+        self.node = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.node)
+        self.node.workspace('demo-user-1')
+        (self.node.ROOT / 'jobs').mkdir()
+        with closing(sqlite3.connect(config['database'])) as db:
+            db.execute('CREATE TABLE jobs (id TEXT, submit_key TEXT)')
+            db.commit()
+        self.mount_patch = patch.object(self.node, 'dataset_mount_check')
+        self.mount_patch.start()
+        self.module, self.cache = self.node.dataset_cache()
+        self.admin = self.module.Principal('builtin-admin', True)
+        self.user = self.module.Principal('demo-user-1')
+        record = self.cache.register_source(self.admin, 'example', 'approved', ['demo-user-1'])
+        self.version = record['version']
+        self.job = dict(id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', userId='demo-user-1',
+                        username='alice', cards=1, argv=['python', 'train.py'],
+                        name='dataset-test', minVramGiB=0,
+                        datasets=[dict(dataset='example', version=self.version)])
+
+    def tearDown(self):
+        self.mount_patch.stop()
+        # Published cache trees are intentionally read-only, including on macOS.
+        for directory, dirs, files in os.walk(self.base):
+            os.chmod(directory, 0o700)
+            for name in files:
+                path = Path(directory) / name
+                if not path.is_symlink():
+                    os.chmod(path, 0o600)
+        self.temp.cleanup()
+
+    def call(self, action, **args):
+        return self.node.dataset_op('datasets.' + action, {'userId': 'demo-user-1', **args})
+
+    def ready(self):
+        return self.cache.materialize(self.user, 'example', self.version)
+
+    def start_prepare(self):
+        with patch.object(self.node, 'dataset_background_active', return_value=False), \
+                patch.object(self.node, 'run', return_value='') as run:
+            response = self.call('prepare', dataset='example', version=self.version)
+        return response, run.call_args
+
+    def test_old_job_spec_remains_valid(self):
+        old = {key: value for key, value in self.job.items() if key != 'datasets'}
+        self.node.validate_job(old)
+        self.node.validate_job(self.job)
+        with self.assertRaises(ValueError):
+            self.node.validate_job(dict(old, sourcePath='/tmp'))
+
+    def test_dataset_references_are_strict(self):
+        invalid = [None, {}, [dict(dataset='../data', version=self.version)],
+                   [dict(dataset='example', version='latest')],
+                   [dict(dataset='example', version=self.version, path='/secret')],
+                   self.job['datasets'] * 2, self.job['datasets'] * 17]
+        for refs in invalid:
+            with self.subTest(refs=refs), self.assertRaises(ValueError):
+                self.node.dataset_refs(dict(self.job, datasets=refs))
+
+    def test_listing_is_authorized_and_has_no_source_paths(self):
+        result = self.call('list')
+        self.assertEqual(result['datasets'][0]['dataset'], 'example')
+        self.assertNotIn(str(self.source), json.dumps(result))
+        other = self.call('list', userId='demo-user-2')
+        self.assertEqual(other, {'datasets': []})
+
+    def test_raw_actor_admin_and_paths_are_rejected(self):
+        for extra in ({'actor': {'is_admin': True}}, {'admin': True}, {'path': '/data2'}, {'hostAdmin': 1}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.call('list', **extra)
+
+    def test_unready_job_never_calls_gpu(self):
+        with patch.object(self.node, 'gpu') as gpu, self.assertRaisesRegex(ValueError, 'not READY'):
+            self.node.process('sync', {'job': self.job})
+        gpu.assert_not_called()
+        self.assertFalse((self.node.ROOT / 'jobs' / (self.job['id'] + '.dataset-dispatch-attempted')).exists())
+
+    def test_administrator_training_still_requires_explicit_dataset_ownership(self):
+        self.ready()
+        # Management visibility is broader than personal training access. The
+        # trusted job specification never inherits a client/admin override.
+        self.assertEqual(self.cache.status(self.admin, 'example', self.version)['state'], 'READY')
+        admin_job = dict(self.job, userId='builtin-admin', username='admin')
+        with patch.object(self.node, 'gpu') as gpu, self.assertRaisesRegex(PermissionError, 'dataset owner authorization required'):
+            self.node.process('sync', {'job': admin_job})
+        gpu.assert_not_called()
+        self.cache.set_owners(self.admin, 'example', ['demo-user-1', 'builtin-admin'])
+        self.assertTrue(self.node.acquire_datasets(admin_job)[0]['readOnly'])
+
+    def test_prepare_runs_in_independent_fixed_background_unit(self):
+        response, called = self.start_prepare()
+        self.assertEqual(response['state'], 'PREPARING')
+        self.assertEqual(self.cache.status(self.user, 'example', self.version)['state'], 'REGISTERED')
+        argv = called.args[0]
+        self.assertEqual(argv[:3], ['/usr/bin/systemd-run', '--user', '--collect'])
+        self.assertIn('--property=KillMode=control-group', argv)
+        self.assertIn('--property=RuntimeMaxSec=86400', argv)
+        self.assertEqual(argv[-2:], ['--dataset-worker', response['operationId']])
+        self.assertEqual(called.kwargs['timeout'], 8)
+        self.assertNotIn(str(self.source), argv)
+
+    def test_background_prepare_completes_and_status_is_current(self):
+        response, _ = self.start_prepare()
+        self.assertEqual(self.node.dataset_worker(response['operationId']), 0)
+        result = self.call('status', operationId=response['operationId'])
+        self.assertEqual(result['state'], 'READY')
+        self.assertNotIn(str(self.source), json.dumps(result))
+        self.assertNotIn('token', result)
+        self.assertEqual(self.call('status', dataset='example', version=self.version)['state'], 'READY')
+
+    def test_completed_receipt_does_not_resurrect_evicted_cache(self):
+        response, _ = self.start_prepare()
+        self.node.dataset_worker(response['operationId'])
+        self.cache.evict(self.admin, 'example', self.version)
+        self.assertEqual(self.call('status', operationId=response['operationId'])['state'], 'REGISTERED')
+        self.assertEqual(self.call('status', dataset='example', version=self.version)['state'], 'REGISTERED')
+
+    def test_interrupted_worker_is_not_permanently_preparing(self):
+        response, _ = self.start_prepare()
+        with patch.object(self.node, 'dataset_background_active', return_value=False):
+            self.assertEqual(self.call('status', operationId=response['operationId'])['state'], 'FAILED')
+        with patch.object(self.node, 'dataset_background_active', return_value=True):
+            self.assertEqual(self.call('status', operationId=response['operationId'])['state'], 'PREPARING')
+
+    def test_list_exposes_preparing_and_retryable_failed_states(self):
+        self.start_prepare()
+        with patch.object(self.node, 'dataset_background_active', return_value=True):
+            self.assertEqual(self.call('list')['datasets'][0]['versions'][0]['state'], 'PREPARING')
+        with patch.object(self.node, 'dataset_background_active', return_value=False):
+            version = self.call('list')['datasets'][0]['versions'][0]
+            self.assertEqual(version['state'], 'FAILED')
+            self.assertNotIn(str(self.source), json.dumps(version))
+        self.ready()
+        self.assertEqual(self.call('list')['datasets'][0]['versions'][0]['state'], 'READY')
+
+    def test_shared_owner_reuses_one_active_prepare_without_identity_leak(self):
+        self.cache.register_source(self.admin, 'shared', 'approved', ['demo-user-1', 'demo-user-2'])
+        with patch.object(self.node, 'dataset_background_active', return_value=False), patch.object(self.node, 'run'):
+            first = self.call('prepare', dataset='shared', version=self.version)
+        with patch.object(self.node, 'dataset_background_active', return_value=True), patch.object(self.node, 'run') as run:
+            second = self.call('prepare', dataset='shared', version=self.version, userId='demo-user-2')
+            result = self.call('list', userId='demo-user-2')
+        run.assert_not_called()
+        self.assertEqual(first['operationId'], second['operationId'])
+        self.assertEqual(result['datasets'][0]['versions'][0]['state'], 'PREPARING')
+        self.assertNotIn('demo-user-1', json.dumps(result))
+
+    def test_operation_status_cannot_read_another_users_request(self):
+        response, _ = self.start_prepare()
+        with self.assertRaisesRegex(ValueError, 'not owned'):
+            self.call('status', operationId=response['operationId'], userId='demo-user-2')
+        with self.assertRaises(ValueError):
+            self.call('status', operationId=response['operationId'], dataset='example')
+
+    def test_register_requires_admin_approved_source_and_explicit_owners(self):
+        args = dict(dataset='other', sourceId='approved', owners=['demo-user-1'])
+        with self.assertRaisesRegex(ValueError, 'Administrator'):
+            self.call('register', **args)
+        for update in ({'sourceId': '/tmp/arbitrary'}, {'owners': []}, {'owners': ['root']}, {'path': '/tmp'}):
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                self.call('register', hostAdmin=True, **{**args, **update})
+        with patch.object(self.node, 'dataset_background_active', return_value=False), patch.object(self.node, 'run'):
+            response = self.call('register', hostAdmin=True, **args)
+        self.assertEqual(response['state'], 'REGISTERING')
+        self.assertEqual(self.node.dataset_worker(response['operationId']), 0)
+        self.assertEqual(self.call('status', operationId=response['operationId'])['state'], 'REGISTERED')
+
+    def test_worker_request_tampering_fails_before_execution(self):
+        response, _ = self.start_prepare()
+        path = self.node.ROOT / 'dataset-ops' / (response['operationId'] + '.json')
+        task = json.loads(path.read_text())
+        task['hostAdmin'] = True
+        path.write_text(json.dumps(task))
+        with self.assertRaisesRegex(ValueError, 'modified'):
+            self.node.dataset_worker(response['operationId'])
+
+    def test_mount_failure_blocks_before_cache_creation(self):
+        with patch.object(self.node, 'dataset_mount_check', side_effect=ValueError('missing mount')), \
+                patch.object(self.module, 'DatasetCache') as constructor:
+            with self.assertRaisesRegex(ValueError, 'missing mount'):
+                self.call('list')
+            constructor.assert_not_called()
+
+    def test_missing_source_worker_fails_without_private_path_leak(self):
+        response, _ = self.start_prepare()
+        shutil.rmtree(self.source)
+        self.assertEqual(self.node.dataset_worker(response['operationId']), 1)
+        result = self.call('status', operationId=response['operationId'])
+        self.assertEqual(result['state'], 'FAILED')
+        self.assertNotIn(str(self.source), json.dumps(result))
+
+    def test_lease_is_idempotent_and_prevents_eviction(self):
+        self.ready()
+        first = self.node.acquire_datasets(self.job)
+        self.assertEqual(first, self.node.acquire_datasets(self.job))
+        self.assertTrue(first[0]['readOnly'])
+        with self.assertRaisesRegex(self.module.CacheError, 'leases'):
+            self.cache.evict(self.admin, 'example', self.version)
+
+    def test_sandbox_mount_is_pinned_specific_dataset_directory(self):
+        self.ready()
+        mounts = self.node.dataset_open_mounts(self.job)
+        try:
+            self.assertEqual(len(mounts), 1)
+            fd, target = mounts[0]
+            self.assertEqual(target, '/data2/example')
+            self.assertEqual(os.listdir(fd), ['train.txt'])
+            self.assertTrue(os.fstat(fd).st_ino)
+        finally:
+            for fd, _ in mounts:
+                os.close(fd)
+        code = (DEPLOY / 'sandbox-runner.py').read_text()
+        self.assertIn("dataset_fds=[] if terminal else open_dataset_mounts(spec)", code)
+        self.assertIn("['--ro-bind-fd',str(descriptor),target]", code)
+        self.assertNotIn("'--bind','/data2'", code)
+
+    def test_running_unknown_and_incomplete_termination_retain_leases(self):
+        self.ready()
+        self.node.acquire_datasets(self.job)
+        for data in ({'job': {'state': 'RUNNING'}, 'attempts': []},
+                     {'job': {'state': 'LOST'}, 'attempts': []},
+                     {'job': {'state': 'SUCCEEDED'}},
+                     {'job': {'state': 'SUCCEEDED'}, 'attempts': [dict(state='DRAINING', unit_name='gpuq-a123')]}):
+            self.assertFalse(self.node.release_datasets(self.job, data))
+        with self.assertRaises(self.module.CacheError):
+            self.cache.evict(self.admin, 'example', self.version)
+
+    def test_confirmed_terminated_job_releases_lease(self):
+        self.ready()
+        self.node.acquire_datasets(self.job)
+        stopped = SimpleNamespace(returncode=0, stdout='LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n')
+        data = {'job': {'state': 'SUCCEEDED'}, 'attempts': [dict(state='EXITED_SUCCESS', unit_name='gpuq-a123')]}
+        with patch.object(self.node.subprocess, 'run', return_value=stopped):
+            self.assertTrue(self.node.release_datasets(self.job, data))
+        self.assertTrue(self.cache.evict(self.admin, 'example', self.version)['evicted'])
+
+    def test_unit_must_be_terminal_and_have_no_processes(self):
+        for state in ('RUNNING', 'LOST', 'KILL_REQUESTED', 'DRAINING', 'STUCK'):
+            self.assertFalse(self.node.dataset_unit_stopped(dict(state=state, unit_name='gpuq-a123')))
+        self.assertFalse(self.node.dataset_unit_stopped(dict(state='EXITED_SUCCESS', unit_name='ssh.service')))
+        for stdout in ('LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\nControlGroup=\n',
+                       'LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=/../../etc\n'):
+            with patch.object(self.node.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=stdout)):
+                self.assertFalse(self.node.dataset_unit_stopped(dict(state='EXITED_SUCCESS', unit_name='gpuq-a123')))
+
+    def test_populated_cgroup_retains_lease(self):
+        result = SimpleNamespace(returncode=0, stdout='LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=/user.slice/gpuq-a123.service\n')
+        with patch.object(self.node.subprocess, 'run', return_value=result), patch.object(Path, 'read_text', return_value='populated 1\nfrozen 0\n'):
+            self.assertFalse(self.node.dataset_unit_stopped(dict(state='EXITED_SUCCESS', unit_name='gpuq-a123')))
+
+    def test_remain_after_exit_and_collected_units_are_confirmed_stopped(self):
+        for result in (SimpleNamespace(returncode=0, stdout='LoadState=loaded\nActiveState=active\nSubState=exited\nMainPID=0\nControlGroup=\n'),
+                       SimpleNamespace(returncode=1, stdout='LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n')):
+            with patch.object(self.node.subprocess, 'run', return_value=result):
+                self.assertTrue(self.node.dataset_unit_stopped(dict(state='EXITED_SUCCESS', unit_name='gpuq-a123')))
+
+    def test_exact_mount_guard_rejects_root_same_device_readonly_and_network(self):
+        self.mount_patch.stop()
+        config = self.node.CONFIG['datasets']
+        base = '1 0 8:1 / / rw - ext4 /dev/root rw\n'
+        good = f'2 1 8:2 / {self.base} rw - ext4 /dev/data rw\n'
+        try:
+            with patch.object(Path, 'read_text', return_value=base + good):
+                self.node.dataset_mount_check(config)
+            for mount in ('', good.replace('8:2', '8:1'), good.replace(' rw ', ' ro '), good.replace('ext4', 'nfs4')):
+                with patch.object(Path, 'read_text', return_value=base + mount), self.assertRaises(ValueError):
+                    self.node.dataset_mount_check(config)
+        finally:
+            self.mount_patch.start()
+
+    def test_ambiguous_submission_cancel_retains_lease_and_quota(self):
+        self.ready()
+        self.node.acquire_datasets(self.job)
+        (self.node.ROOT / 'jobs' / (self.job['id'] + '.dataset-dispatch-attempted')).touch()
+        with patch.object(self.node, 'gpu') as gpu:
+            result = self.node.process('cancel', {'job': self.job})
+        self.assertEqual(result['state'], 'UNKNOWN')
+        gpu.assert_not_called()
+        with self.assertRaises(self.module.CacheError):
+            self.cache.evict(self.admin, 'example', self.version)
+
+    def test_cancel_before_dispatch_safely_releases_lease(self):
+        self.ready()
+        self.node.acquire_datasets(self.job)
+        with patch.object(self.node, 'gpu') as gpu:
+            self.assertEqual(self.node.process('cancel', {'job': self.job})['state'], 'CANCELED')
+        gpu.assert_not_called()
+        self.assertTrue(self.cache.evict(self.admin, 'example', self.version)['evicted'])
+
+    def test_no_datasets_preserves_legacy_execution(self):
+        old = {key: value for key, value in self.job.items() if key != 'datasets'}
+        with patch.object(self.node, 'dataset_cache', side_effect=AssertionError('must not load datasets')), \
+                patch.object(self.node, 'gpu', side_effect=[{'job_id': 'legacy'}, {'job': {'state': 'QUEUED'}, 'attempts': []}]):
+            self.assertEqual(self.node.process('sync', {'job': old})['state'], 'QUEUED')
+
+
+if __name__ == '__main__':
+    unittest.main()

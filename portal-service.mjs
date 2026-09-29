@@ -102,7 +102,7 @@ export class PortalService extends DemoService{
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
     // Execution writes its durable reservation before external side effects. Never
     // restore an older snapshot after a dispatch timeout (that would lose quota).
-    if(typeof operation==='string'&&(operation.startsWith('jobs.')||operation.startsWith('files.')||operation.startsWith('terminal.'))){
+    if(typeof operation==='string'&&(operation.startsWith('jobs.')||operation.startsWith('files.')||operation.startsWith('terminal.')||operation.startsWith('datasets.')||operation.startsWith('projects.'))){
       const result=await executionCall(this,principal,operation,args);
       return {result,state:this.state(principal),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     }

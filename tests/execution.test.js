@@ -37,7 +37,7 @@ test('atomic concurrent reservations and idempotency do not exceed global or per
    await f.grant(2,{'gpu-1':1,'gpu-2':2});
    const key=randomUUID();const both=await Promise.all([f.submit({key}),f.submit({key})]);assert.equal(both[0].result.id,both[1].result.id);assert.equal(f.s.store.jobs.length,1);
    await assert.rejects(f.submit({key,argv:['python','different.py']}),e=>e.status===409);
-   await assert.rejects(f.submit(),/没有已授权/);
+   await assert.rejects(f.submit(),/所选机器的用卡额度/);
    const requests=await Promise.allSettled([f.submit({machine:'gpu-2'}),f.submit({machine:'gpu-2'})]);assert.equal(requests.filter(r=>r.status==='fulfilled').length,1);assert.equal(usage(f.s.store.jobs,f.member.id),2);
    await assert.rejects(f.grant(1,{'gpu-1':1}),/当前预留/);
  }finally{await f.close();}
@@ -64,10 +64,11 @@ test('timeouts and LOST retain reservations, restart persists keys, disabled acc
    f.setState('SUCCEEDED');await f.s.reconcile();assert.equal(usage(f.s.store.jobs,f.member.id),0);
  }finally{await f.close();}
 });
-test('auto placement honors physical VRAM and rejects stale/offline state',async()=>{
+test('manual placement honors physical VRAM and rejects auto and stale/offline state',async()=>{
  const f=await fixture();try{
-   await f.grant();const j=(await f.submit({machine:'auto',minVramGiB:32})).result;assert.equal(j.machine,'gpu-1');await f.settle();
-   await assert.rejects(f.submit({machine:'gpu-2',minVramGiB:32}),/没有已授权/);
+   await f.grant();await assert.rejects(f.submit({machine:'auto',minVramGiB:32}),e=>e.status===400);
+   const j=(await f.submit({machine:'gpu-1',minVramGiB:32})).result;assert.equal(j.machine,'gpu-1');await f.settle();
+   await assert.rejects(f.submit({machine:'gpu-2',minVramGiB:32}),/所选机器.*显存/);
    await writeFile(f.status,'{}');await assert.rejects(f.submit(),e=>e.status===503);
  }finally{await f.close();}
 });

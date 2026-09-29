@@ -147,6 +147,22 @@ sudo docker compose logs --tail 50 gpuq-console caddy
 
 新加机器先部署节点、校验指纹，再更新清单并生成容量表。更改现有 machine ID 等同迁移身份，有未完成任务时不要改。删机器先清空任务/授权，再迁移数据，不直接删数据库记录。
 
+### 已有节点加入项目工作流
+
+先把新版源码放在节点服务用户拥有的独立目录，以该服务用户运行检查（不是 root）：
+
+```sh
+python3 deploy/upgrade-projects.py --directory "$HOME/.local/libexec/gpuq-console"
+# 检查通过后才应用
+python3 deploy/upgrade-projects.py --directory "$HOME/.local/libexec/gpuq-console" --apply
+```
+
+旧部署若使用不同程序目录，替换 `--directory`；不要为升级改名或迁移工作区。升级器备份旧文件，保持 `node-config.json`、GPUQ 数据库、旧工作区和运行任务不变，不重启调度服务。新项目放在工作区根目录的独立 `projects-v2`，不改旧 `users` 目录。
+
+所有目标节点完成后，再部署同版 VPS 执行桥与 Portal 镜像；前端、CLI、执行桥、节点四层必须匹配。门户控制服务重建会短暂影响登录，不表示可以停止节点实验。上线后按项目验收清单验证上传、开发终端、发布、单卡训练与结果下载。
+
+回退项目功能前先停止新提交、等待项目任务和开发终端结束，再恢复备份助手及旧门户镜像。保留项目文件、结果和新数据库记录，不把旧数据库覆盖回去；代码回退不等于删除数据。
+
 ## 8. 常见阻塞
 
 - 终端打不开：`bwrap --help` 是否支持 bind-fd、用户命名空间策略、slirp4netns、服务用户 linger、基础 Python 路径。

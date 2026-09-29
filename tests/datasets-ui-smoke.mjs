@@ -1,0 +1,203 @@
+// Real-browser acceptance against a disposable, loopback-only portal and fake
+// dataset bridge. No SSH, Tailscale, production accounts or GPU jobs are used.
+// CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+//   node tests/datasets-ui-smoke.mjs
+import assert from 'node:assert/strict';
+import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import net from 'node:net';
+import {chromium} from 'playwright';
+import {createPortalServer} from '../portal-server.mjs';
+import {MACHINES} from '../dist/machines.js';
+
+const dir = await mkdtemp(join(tmpdir(), 'gpuq-datasets-browser-'));
+const screenshots = process.env.UI_SCREENSHOTS || '/tmp/gpuq-datasets-ui';
+const password = 'Local-Dataset-UI-Only-Password-2026!';
+const version = 'a'.repeat(64), ref = {dataset: 'sample', version};
+const calls = [], errors = [], blocked = [], httpErrors = [], authenticated = new WeakSet(), phases = new Map([['gpu-1', 'REGISTERED']]);
+let server, browser, service, waitingList = null, listGate = null;
+const reserve = net.createServer();
+await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
+const port = reserve.address().port;
+await new Promise(resolve => reserve.close(resolve));
+const origin = `http://127.0.0.1:${port}`;
+
+try {
+  await mkdir(screenshots, {recursive: true});
+  const bootstrap = join(dir, 'bootstrap.json'), statusPath = join(dir, 'status.json');
+  await writeFile(bootstrap, JSON.stringify({username: 'admin', password}), {mode: 0o600});
+  await writeFile(statusPath, JSON.stringify({version: 1, checkedAt: new Date().toISOString(),
+    hosts: MACHINES.map(machine => ({id: machine.id, reachable: true,
+      gpus: Array.from({length: machine.cards}, (_, index) => ({index, memoryTotalMiB: 32768,
+        memoryUsedMiB: 0, utilization: 0, temperatureC: 30, powerDrawW: 15,
+        powerLimitW: 450, processesAvailable: true, processes: []})),
+      gpuq: {connected: true, observeOnly: false, schedulableIndices: [0, 1], jobs: []}}))}));
+  const bridge = async (machine, operation, args) => {
+    calls.push({machine, operation, args: structuredClone(args)});
+    assert.ok(MACHINES.some(item => item.id === machine));
+    if (operation === 'projects.list') return {projects: []};
+    if (operation === 'datasets.list') {
+      if (machine === 'gpu-2' && listGate) {waitingList?.(); await listGate;}
+      const state = phases.get(machine) || 'READY';
+      const entries = [{dataset: machine === 'gpu-1' ? 'sample' : 'another', versions: [{version, state,
+        files: 12, bytes: 128 * 1024 ** 2, ...(state === 'FAILED' ? {error: 'Test preparation interrupted; safe to retry.'} : {})}]}];
+      if (args.hostAdmin) entries.push({dataset: 'admin-private', versions: [{version: 'b'.repeat(64), state: 'READY', files: 1, bytes: 12}]});
+      return {datasets: entries};
+    }
+    if (operation === 'datasets.prepare') {
+      assert.deepEqual({dataset: args.dataset, version: args.version}, ref);
+      phases.set(machine, 'PREPARING');
+      return {...ref, state: 'PREPARING', operationId: 'c'.repeat(64)};
+    }
+    if (operation === 'datasets.status') return {...ref, state: phases.get(machine) || 'READY'};
+    if (operation === 'sync') return {state: 'PENDING', nodeJobId: 'fake-' + args.job.id, assignedIndices: []};
+    throw Error(`Unexpected fake bridge operation: ${operation}`);
+  };
+  ({server, service} = await createPortalServer({database: join(dir, 'portal.sqlite'), bootstrap, origin,
+    secure: false, statusPath, bridge}));
+  clearInterval(service.executionTimer);
+  await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
+  const adminLogin = await service.login('admin', password);
+  const user = (await service.invoke(adminLogin.token, 'users.create', {username: 'dataset-browser-user', password})).result;
+  await service.invoke(adminLogin.token, 'policy.save', {userId: user.id,
+    policyVersion: service.store.get(user.id).policyVersion, total: 2, limits: {'gpu-1': 1, 'gpu-2': 1}});
+
+  browser = await chromium.launch({headless: true,
+    executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
+  const admin = await browser.newPage({viewport: {width: 1440, height: 1000}});
+  const member = await browser.newPage({viewport: {width: 1440, height: 1000}});
+  for (const page of [admin, member]) {
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => {if (message.type() === 'error') errors.push(message.text());});
+    page.on('response', response => {
+      if (response.status() >= 400) httpErrors.push({status: response.status(),
+        path: new URL(response.url()).pathname, operation: response.request().postDataJSON()?.operation,
+        authenticated: authenticated.has(page)});
+    });
+    await page.context().route('**/*', route => {
+      if (new URL(route.request().url()).origin === origin) return route.continue();
+      blocked.push(route.request().url()); return route.abort('blockedbyclient');
+    });
+  }
+  async function login(page, username) {
+    await page.goto(origin);
+    await page.locator('#login-form [name=username]').fill(username);
+    await page.locator('#login-form [name=password]').fill(password);
+    await page.locator('#login-form [type=submit]').click();
+    await page.locator('#login-dialog').waitFor({state: 'hidden'});
+    authenticated.add(page);
+    await page.locator('[data-nav=datasets]').click();
+  }
+  async function refresh(page) {
+    await Promise.all([page.waitForResponse(response => response.url() === origin + '/api/call' &&
+      response.request().postDataJSON()?.operation === 'datasets.list'), page.locator('#datasets-refresh').click()]);
+    await page.locator('#datasets-refresh').waitFor({state: 'visible'});
+    await page.waitForFunction(() => !document.querySelector('#datasets-refresh').disabled);
+  }
+  async function capture(page, name) {
+    await page.waitForFunction(() => {
+      const toast = document.querySelector('#toast');
+      return !toast || (!toast.classList.contains('visible') && Number(getComputedStyle(toast).opacity) === 0);
+    });
+    await page.evaluate(() => scrollTo(0, 0));
+    await page.screenshot({path: join(screenshots, name), fullPage: true});
+  }
+  async function prepare(page) {
+    await Promise.all([page.waitForResponse(response => response.url() === origin + '/api/call' &&
+      response.request().postDataJSON()?.operation === 'datasets.list'),
+      page.locator('[data-prepare-dataset="sample"]').click()]);
+    await page.waitForFunction(() => document.querySelector('#dataset-catalog')?.textContent.includes('准备中'));
+  }
+  const card = page => page.locator('.dataset-card').filter({has: page.locator('h3', {hasText: /^sample$/})});
+
+  await login(admin, 'admin'); await refresh(admin);
+  assert.equal(await admin.locator('.dataset-card').count(), 2);
+  assert.match(await admin.locator('#dataset-catalog').textContent(), /admin-private/);
+  assert.equal(calls.at(-1).args.userId, 'builtin-admin'); assert.equal(calls.at(-1).args.hostAdmin, true);
+  await capture(admin, 'datasets-admin-desktop.png');
+  phases.set('gpu-2', 'STAGING');
+  await admin.locator('[name=dataset-machine]').selectOption('gpu-2');
+  await admin.locator('[data-prepare-dataset="another"]').waitFor();
+  assert.equal(await admin.locator('[data-prepare-dataset="another"]').isEnabled(), true, 'Interrupted staging must remain resumable');
+  assert.equal(await admin.locator('[data-use-dataset="another"]').isDisabled(), true);
+  phases.set('gpu-2', 'READY');
+
+  await login(member, 'dataset-browser-user'); await refresh(member);
+  assert.deepEqual(await member.locator('[name=dataset-machine] option').evaluateAll(options => options.map(option => option.value)), ['gpu-1', 'gpu-2']);
+  assert.equal(await member.locator('.dataset-card').count(), 1);
+  assert.doesNotMatch(await member.locator('#dataset-catalog').textContent(), /admin-private/);
+  assert.equal(calls.at(-1).args.userId, user.id); assert.equal(calls.at(-1).args.hostAdmin, false);
+  assert.match(await card(member).textContent(), /待准备/);
+  assert.equal(await card(member).locator('[data-prepare-dataset]').isEnabled(), true);
+  assert.equal(await card(member).locator('[data-use-dataset]').isDisabled(), true);
+  assert.equal(await card(member).locator('input[readonly]').inputValue(), 'sample@' + version);
+  const [guide] = await Promise.all([member.waitForEvent('popup'), member.locator('a[href="/guide/datasets"]:visible').click()]);
+  await guide.waitForLoadState('domcontentloaded');
+  assert.equal(new URL(guide.url()).pathname, '/guide/datasets');
+  assert.match(await guide.locator('body').textContent(), /固定版本数据集/);
+  await guide.close();
+  await capture(member, 'datasets-member-registered.png');
+
+  // Delay one machine's response: old machine entries must disappear immediately.
+  let releaseList; listGate = new Promise(resolve => {releaseList = resolve;});
+  const listStarted = new Promise(resolve => {waitingList = resolve;});
+  await member.locator('[name=dataset-machine]').selectOption('gpu-2'); await listStarted;
+  assert.equal(await member.locator('.dataset-card').count(), 0);
+  assert.equal(await member.locator('[name=dataset-machine]').isDisabled(), true);
+  releaseList(); listGate = null; waitingList = null;
+  await member.locator('.dataset-card h3', {hasText: 'another'}).waitFor();
+  assert.doesNotMatch(await member.locator('#dataset-catalog').textContent(), /sample@/);
+  await member.locator('[name=dataset-machine]').selectOption('gpu-1');
+  await card(member).waitFor();
+
+  await prepare(member);
+  assert.match(await card(member).textContent(), /准备中/);
+  assert.equal(service.store.jobs.length, 0, 'Preparing data must not reserve any GPU');
+  phases.set('gpu-1', 'FAILED'); await refresh(member);
+  assert.match(await card(member).textContent(), /准备失败/);
+  assert.match(await card(member).textContent(), /Test preparation interrupted/);
+  assert.equal(await card(member).locator('[data-prepare-dataset]').isEnabled(), true);
+  await capture(member, 'datasets-member-failed-retry.png');
+  await prepare(member);
+  assert.equal(calls.filter(call => call.operation === 'datasets.prepare').length, 2);
+  phases.set('gpu-1', 'READY'); await refresh(member);
+  assert.equal(await card(member).locator('[data-prepare-dataset]').isDisabled(), true);
+  assert.equal(await card(member).locator('[data-use-dataset]').isEnabled(), true);
+
+  await member.setViewportSize({width: 390, height: 844});
+  await capture(member, 'datasets-member-mobile-ready.png');
+  const layout = await member.evaluate(() => ({width: innerWidth, scroll: document.documentElement.scrollWidth}));
+  assert.ok(layout.scroll <= layout.width + 1, `390px dataset page overflows: ${JSON.stringify(layout)}`);
+  await card(member).locator('[data-use-dataset]').click();
+  await member.locator('#page-work').waitFor({state: 'visible'});
+  assert.equal(await member.locator('#train-form [name=machine]').inputValue(), 'gpu-1');
+  assert.equal(await member.locator('#train-form [name=datasets]').inputValue(), 'sample@' + version);
+  assert.equal(await member.locator('#train-form').evaluate(form => form.closest('details').open), true);
+  await member.locator('#train-form [name=command]').fill('python train.py --dataset /data2/sample');
+  await capture(member, 'datasets-mobile-training-form.png');
+  const trainLayout = await member.evaluate(() => ({width: innerWidth, scroll: document.documentElement.scrollWidth}));
+  assert.ok(trainLayout.scroll <= trainLayout.width + 1, `390px training page overflows: ${JSON.stringify(trainLayout)}`);
+  const submitted = member.waitForResponse(response => response.url() === origin + '/api/call' && response.request().postDataJSON()?.operation === 'jobs.submit');
+  await member.locator('#train-form [type=submit]').click();
+  const response = await submitted;
+  assert.equal(response.status(), 200, await response.text());
+  assert.equal(service.store.jobs.length, 1);
+  assert.equal(service.store.jobs[0].machine, 'gpu-1');
+  assert.deepEqual(service.store.jobs[0].spec.datasets, [ref]);
+  assert.deepEqual(service.store.jobs[0].spec.argv, ['/bin/bash', '-c', 'python train.py --dataset /data2/sample']);
+  while (service.reconciling) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(calls.find(call => call.operation === 'sync').args.job.datasets, [ref]);
+  // The client intentionally probes a previous browser login on first load.
+  // Its two pre-login 401s are expected; authenticated requests and JavaScript
+  // execution must have no errors, and no other HTTP error is allowed.
+  assert.deepEqual(httpErrors, [admin, member].map(() => ({status: 401, path: '/api/call', operation: 'state', authenticated: false})));
+  assert.deepEqual(errors.filter(message => message !== 'Failed to load resource: the server responded with a status of 401 (Unauthorized)'), [], 'Unexpected browser errors');
+  assert.equal(errors.length, 2); assert.deepEqual(blocked, [], 'Unexpected external requests');
+  console.log('DATASETS UI PASS: authenticated admin/member catalogs; authorized machine choices; no stale catalog on machine switch; registered → prepare → failed → retry → ready; interrupted staging retry; complete immutable ref and machine copied to training; exact submitted jobspec; 390px layout; no unexpected browser errors or external requests (two expected pre-login session probes returned 401).');
+  console.log(`Screenshots: ${screenshots}`);
+} finally {
+  await browser?.close();
+  if (server) await new Promise(resolve => server.close(resolve));
+  await rm(dir, {recursive: true, force: true});
+}

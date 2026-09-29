@@ -17,6 +17,9 @@ jobs:
       - run: npm run test:python
       - run: npx playwright install --with-deps chromium
       - run: node tests/ui-smoke.mjs
+      - run: node tests/datasets-ui-smoke.mjs
+      - run: node tests/projects-ui-smoke.mjs
+      - run: node tests/client-auth-smoke.mjs
       - run: python3 scripts/build-gpuq.py
       - run: python3 build/gpuq.pyz --help
       - run: python3 -m compileall -q deploy gpuq scripts

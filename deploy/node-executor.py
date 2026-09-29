@@ -1,13 +1,255 @@
 #!/usr/bin/python3
 """Forced command. Fixed GPUQ wrapper; user commands only run inside the sandbox."""
-import base64, fcntl, hashlib, json, os, re, sqlite3, stat, subprocess, sys, socket, time, uuid
+import base64, fcntl, hashlib, importlib.util, json, os, re, sqlite3, stat, subprocess, sys, socket, tempfile, time, uuid
 from pathlib import Path
+from contextlib import closing
+from types import SimpleNamespace
 HERE=Path(__file__).resolve().parent
 CONFIG=json.loads((HERE/'node-config.json').read_text())
 ROOT=Path(CONFIG['root'])
 RUNTIME=f'/run/user/{os.getuid()}'
 ENV={'PATH':'/usr/bin:/bin','HOME':str(Path.home()),'LANG':'C.UTF-8','XDG_RUNTIME_DIR':RUNTIME,'DBUS_SESSION_BUS_ADDRESS':'unix:path='+RUNTIME+'/bus'}
 UUID=re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
+DATASET_ID=re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
+DATASET_VERSION=re.compile(r'^[a-f0-9]{64}$')
+DATASET_MODULE=None
+PROJECT_OPS=None
+
+def projects():
+    global PROJECT_OPS
+    if PROJECT_OPS is None:
+        spec=importlib.util.spec_from_file_location('gpuq_project_operations',HERE/'project-ops.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        # Works both when imported for tests/runner and as the forced command.
+        PROJECT_OPS=module.ProjectOperations(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    return PROJECT_OPS
+
+def atomic_json(path,data):
+    fd,name=tempfile.mkstemp(prefix='.write-',dir=path.parent)
+    try:
+        with os.fdopen(fd,'w') as stream:json.dump(data,stream);stream.flush();os.fsync(stream.fileno())
+        os.replace(name,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:
+        if os.path.exists(name):os.unlink(name)
+
+def dataset_mount_check(config):
+    point=config.get('mountPoint','/data2');cache=config.get('root','/data2/datasets')
+    for path in (point,cache):
+        if not isinstance(path,str) or not path.startswith('/') or '..' in Path(path).parts or str(Path(path))!=path:raise ValueError('Invalid dataset storage path')
+    if point=='/' or Path(point) not in Path(cache).parents:raise ValueError('Dataset cache must be below its required data mount')
+    # Exact mountpoint and a different device from /: directory existence alone
+    # must never silently redirect dataset writes to a root-disk fallback.
+    entries=[]
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        left,right=line.split(' - ',1);a=left.split();b=right.split()
+        target=re.sub(r'\\([0-7]{3})',lambda m:chr(int(m.group(1),8)),a[4])
+        entries.append((target,a[2],a[5].split(','),b[0]))
+    root=next((entry for entry in reversed(entries) if entry[0]=='/'),None)
+    mounted=next((entry for entry in reversed(entries) if entry[0]==point),None)
+    if not root or not mounted or mounted[1]==root[1] or 'ro' in mounted[2] or mounted[3] not in ('ext4','xfs','btrfs','zfs'):
+        raise ValueError('Required local dataset mount is unavailable; refusing root-disk fallback')
+    # No symlink in the storage prefix, including ancestors.
+    cursor=Path('/')
+    for part in Path(cache).parts[1:-1]:
+        cursor/=part
+        if not stat.S_ISDIR(cursor.lstat().st_mode):raise ValueError('Dataset storage ancestors must be real directories')
+
+def dataset_cache():
+    global DATASET_MODULE
+    config=CONFIG.get('datasets')
+    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes'}:raise ValueError('Dataset storage is not configured')
+    dataset_mount_check(config)
+    if DATASET_MODULE is None:
+        module=importlib.util.spec_from_file_location('gpuq_dataset_cache',HERE/'dataset-cache.py')
+        DATASET_MODULE=importlib.util.module_from_spec(module);sys.modules[module.name]=DATASET_MODULE;module.loader.exec_module(DATASET_MODULE)
+    return DATASET_MODULE,DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=config.get('reserveBytes',10*1024**3))
+
+def dataset_refs(job):
+    refs=job.get('datasets',[])
+    if not isinstance(refs,list) or len(refs)>16:raise ValueError('Invalid dataset selection')
+    seen=set()
+    for ref in refs:
+        if not isinstance(ref,dict) or set(ref)!={'dataset','version'} or not isinstance(ref['dataset'],str) or not DATASET_ID.fullmatch(ref['dataset']) or not isinstance(ref['version'],str) or not DATASET_VERSION.fullmatch(ref['version']):raise ValueError('Invalid immutable dataset reference')
+        if ref['dataset'] in seen:raise ValueError('Only one version of each dataset may be mounted')
+        seen.add(ref['dataset'])
+    return refs
+
+def dataset_actor(module,args):
+    # userId/hostAdmin originate at the authenticated VPS execution bridge, not
+    # a client-provided Principal. Raw actor/admin/path fields are rejected below.
+    workspace(args['userId'])
+    if type(args.get('hostAdmin',False)) is not bool:raise ValueError('Invalid administrator identity')
+    return module.Principal(args['userId'],args.get('hostAdmin',False))
+
+def dataset_error(error):
+    return os.strerror(error.errno) if isinstance(error,OSError) and error.errno else str(error)[:300]
+
+def dataset_background_active(key):
+    return subprocess.run(['/usr/bin/systemctl','--user','is-active','--quiet','gpuq-data-'+key[:32]],env=ENV,timeout=4).returncode==0
+
+def dataset_background_status(folder,key,spec,cache,actor):
+    # READY is a current cache fact, never a historical worker receipt: a
+    # completed transfer may since have been evicted or its mount removed.
+    current=cache.status(actor,spec['dataset'],spec['version']) if spec['op']=='prepare' else {}
+    if current.get('state')=='READY':return {**current,'operationId':key}
+    result=folder/(key+'.result.json')
+    if result.exists():
+        receipt=json.loads(result.read_text())
+        return {**receipt,**current} if receipt.get('state')=='READY' else {**current,**receipt}
+    if dataset_background_active(key):
+        return {**current,'operationId':key,'state':'PREPARING' if spec['op']=='prepare' else 'REGISTERING'}
+    return {**current,'operationId':key,'state':'FAILED','error':'Dataset worker is not running; retry the prepare or register operation'}
+
+def dataset_prepare_pointer(folder,dataset,version):
+    identity=hashlib.sha256(json.dumps([dataset,version]).encode()).hexdigest()
+    return folder/('version-'+identity+'.current')
+
+def dataset_current_prepare(folder,dataset,version):
+    pointer=dataset_prepare_pointer(folder,dataset,version)
+    if not pointer.exists():return None
+    key=json.loads(pointer.read_text())['operationId']
+    if not isinstance(key,str) or not DATASET_VERSION.fullmatch(key):raise ValueError('Invalid dataset worker pointer')
+    spec=json.loads((folder/(key+'.json')).read_text())
+    if spec.get('op')!='prepare' or spec.get('dataset')!=dataset or spec.get('version')!=version or hashlib.sha256(json.dumps(spec,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Dataset worker identity mismatch')
+    return key,spec
+
+def dataset_op(operation,args):
+    definitions={'datasets.list':set(),'datasets.status':{'dataset','version','operationId'},'datasets.prepare':{'dataset','version'},'datasets.register':{'dataset','sourceId','owners'}}
+    if operation not in definitions or not isinstance(args,dict) or set(args)-definitions[operation]-{'userId','hostAdmin'}:raise ValueError('Invalid dataset operation fields')
+    module,cache=dataset_cache();actor=dataset_actor(module,args)
+    folder=ROOT/'dataset-ops';folder.mkdir(mode=0o700,exist_ok=True)
+    if operation=='datasets.list':
+        listing=cache.list_datasets(actor)
+        # Cache metadata does not know the detached worker's outcome. Dataset
+        # permission was checked by list_datasets; shared owners may observe a
+        # transfer without learning its initiating identity or host source.
+        for item in listing['datasets']:
+            for version in item['versions']:
+                if version['state']=='READY':continue
+                pending=dataset_current_prepare(folder,item['dataset'],version['version'])
+                if pending:
+                    current=dataset_background_status(folder,*pending,cache,actor)
+                    version.update({k:v for k,v in current.items() if k in ('state','operationId','error')})
+        return listing
+    if operation=='datasets.status' and 'operationId' in args:
+        key=args['operationId']
+        if set(args)-{'userId','hostAdmin','operationId'} or not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):raise ValueError('Invalid dataset operation ID')
+        spec=json.loads((folder/(key+'.json')).read_text())
+        if not actor.is_admin and spec['userId']!=actor.user_id:raise ValueError('Dataset operation is not owned by this user')
+        return dataset_background_status(folder,key,spec,cache,actor)
+    dataset=args.get('dataset')
+    if not isinstance(dataset,str) or not DATASET_ID.fullmatch(dataset):raise ValueError('Invalid dataset ID')
+    if operation=='datasets.register':
+        if not actor.is_admin:raise ValueError('Administrator authorization required')
+        source=args.get('sourceId');owners=args.get('owners')
+        if not isinstance(source,str) or source not in CONFIG['datasets'].get('sources',{}):raise ValueError('Source ID is not approved in node configuration')
+        if not isinstance(owners,list) or not owners or len(owners)>10000 or any(not isinstance(owner,str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',owner) for owner in owners):raise ValueError('Explicit valid dataset owners are required')
+        task={'op':'register','dataset':dataset,'sourceId':source,'owners':sorted(set(owners)),'userId':actor.user_id,'hostAdmin':True}
+    else:
+        version=args.get('version')
+        if not isinstance(version,str) or not DATASET_VERSION.fullmatch(version):raise ValueError('Invalid immutable dataset version')
+        status=cache.status(actor,dataset,version)
+        if status['state']=='READY':return status
+        task={'op':'prepare','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':actor.is_admin}
+    key=hashlib.sha256(json.dumps(task,sort_keys=True).encode()).hexdigest();unit='gpuq-data-'+key[:32]
+    spec=folder/(key+'.json');result=folder/(key+'.result.json')
+    if operation=='datasets.status':
+        pending=dataset_current_prepare(folder,dataset,version)
+        return dataset_background_status(folder,*pending,cache,actor) if pending else status
+    guard=dataset_prepare_pointer(folder,dataset,task['version']) if task['op']=='prepare' else folder/key
+    with open(str(guard)+'.lock','a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        if task['op']=='prepare':
+            pending=dataset_current_prepare(folder,dataset,task['version'])
+            if pending and dataset_background_active(pending[0]):return {'operationId':pending[0],'dataset':dataset,'version':task['version'],'state':'PREPARING'}
+        active=dataset_background_active(key)
+        if not active:
+            atomic_json(spec,task);result.unlink(missing_ok=True)
+            if task['op']=='prepare':atomic_json(dataset_prepare_pointer(folder,dataset,task['version']),{'operationId':key})
+            run(['/usr/bin/systemd-run','--user','--collect','--unit='+unit,'--property=KillMode=control-group','--property=UMask=0077','--property=CPUQuota=100%','--property=MemoryMax=1G','--property=IOWeight=10','--property=RuntimeMaxSec=86400','--property=TimeoutStopSec=20','/usr/bin/python3',str(HERE/'node-executor.py'),'--dataset-worker',key],timeout=8)
+    return {'operationId':key,'dataset':dataset,**({'version':task['version']} if task['op']=='prepare' else {}),'state':'REGISTERING' if operation=='datasets.register' else 'PREPARING'}
+
+def dataset_worker(key):
+    if not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):raise ValueError('Invalid background operation ID')
+    folder=ROOT/'dataset-ops';task=json.loads((folder/(key+'.json')).read_text())
+    if hashlib.sha256(json.dumps(task,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Background dataset request was modified')
+    try:
+        module,cache=dataset_cache();actor=dataset_actor(module,task)
+        if task['op']=='register':out=cache.register_source(actor,task['dataset'],task['sourceId'],task['owners']);out['state']='REGISTERED'
+        elif task['op']=='prepare':
+            # This first-stage implementation only materializes a configured
+            # local source; remote transport is a separate trusted operation.
+            out=cache.materialize(actor,task['dataset'],task['version'])
+        else:raise ValueError('Invalid background dataset action')
+        # Never return transfer tokens, local paths, or source IDs to callers.
+        out={k:v for k,v in out.items() if k in ('dataset','version','state','bytes','files')}
+    except Exception as error:out={'state':'FAILED','error':dataset_error(error)}
+    atomic_json(folder/(key+'.result.json'),{**out,'operationId':key})
+    return 0 if out['state']!='FAILED' else 1
+
+def acquire_datasets(job):
+    refs=dataset_refs(job)
+    if not refs:return []
+    module,cache=dataset_cache();actor=module.Principal(job['userId'],False)
+    for ref in refs:
+        if cache.status(actor,ref['dataset'],ref['version'])['state']!='READY':raise ValueError('Dataset is not READY; prepare it before reserving GPUs')
+    leases=[]
+    for ref in refs:
+        leases.append(cache.acquire_lease(actor,ref['dataset'],ref['version'],job['id']))
+        # Persist incrementally; errors deliberately retain existing leases.
+        atomic_json(ROOT/'jobs'/(job['id']+'.datasets.json'),leases)
+    return leases
+
+def dataset_open_mounts(job):
+    leases=acquire_datasets(job);opened=[]
+    try:
+        module,_=dataset_cache()
+        for lease in leases:
+            if lease.get('readOnly') is not True:raise ValueError('Dataset lease is not read-only')
+            with module._directory(Path(lease['path'])) as descriptor:fd=os.dup(descriptor)
+            opened.append((fd,'/data2/'+lease['dataset']))
+        return opened
+    except BaseException:
+        for fd,_ in opened:os.close(fd)
+        raise
+
+def dataset_unit_stopped(attempt):
+    if attempt.get('state') not in ('EXITED_SUCCESS','EXITED_FAILURE','CANCELED','PREEMPTED'):return False
+    name=attempt.get('unit_name','')
+    if not isinstance(name,str) or not re.fullmatch(r'gpuq-[a-z0-9_-]+(?:\.service)?',name):return False
+    if not name.endswith('.service'):name+='.service'
+    try:
+        result=subprocess.run(['/usr/bin/systemctl','--user','show',name,'--property=LoadState,ActiveState,SubState,MainPID,ControlGroup'],env=ENV,text=True,capture_output=True,timeout=5)
+        props=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        if set(props)!={'LoadState','ActiveState','SubState','MainPID','ControlGroup'}:return False
+        if result.returncode and not (result.returncode==1 and props['LoadState']=='not-found'):return False
+        # GPUQ uses RemainAfterExit=yes: active/exited with an empty cgroup is
+        # finished too, and a collected exact unit can report not-found/code 1.
+        quiet=props['ActiveState'] in ('inactive','failed') or (props['ActiveState']=='active' and props['SubState']=='exited')
+        if props['MainPID']!='0' or not quiet:return False
+        group=props['ControlGroup']
+        if not group:return props['LoadState'] in ('loaded','not-found')
+        if not group.startswith('/') or '..' in Path(group).parts or Path(group).name!=name:return False
+        path=Path('/sys/fs/cgroup')/group.lstrip('/')
+        try:events=path.joinpath('cgroup.events').read_text()
+        except FileNotFoundError:return not path.exists()
+        fields=dict(line.split() for line in events.splitlines())
+        return fields.get('populated')=='0'
+    except (OSError,ValueError,subprocess.SubprocessError):return False
+
+def release_datasets(job,data=None,never_dispatched=False):
+    if not dataset_refs(job):return True
+    filename=ROOT/'jobs'/(job['id']+'.datasets.json')
+    if not filename.exists():return True
+    if not never_dispatched:
+        if not isinstance(data,dict) or data.get('job',data).get('state') not in ('SUCCEEDED','FAILED','CANCELED'):return False
+        if not isinstance(data.get('attempts'),list) or not all(dataset_unit_stopped(attempt) for attempt in data['attempts']):return False
+    module,cache=dataset_cache();leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
+    for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
+    filename.unlink();return True
 
 def run(argv,timeout=18):
     p=subprocess.run(argv,env=ENV,text=True,capture_output=True,timeout=timeout)
@@ -27,8 +269,8 @@ def workspace(user):
     path.mkdir(parents=True,exist_ok=True,mode=0o700)
     return path
 
-def file_op(operation,args):
-    root=workspace(args['userId'])
+def file_op(operation,args,root=None):
+    root=workspace(args['userId']) if root is None else root
     path=args.get('path','.')
     if not isinstance(path,str) or len(path)>1024 or '\0' in path or path.startswith('/') or '\\' in path:raise ValueError('Invalid relative path')
     parts=path.split('/') if path!='.' else []
@@ -77,12 +319,25 @@ def file_op(operation,args):
     finally:os.close(fd)
 
 def validate_job(job):
-    if not isinstance(job,dict) or set(job)!={'id','userId','username','cards','argv','name','minVramGiB'}:raise ValueError('Invalid job specification')
+    required={'id','userId','username','cards','argv','name','minVramGiB'}
+    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release'}:raise ValueError('Invalid job specification')
     if not UUID.fullmatch(job['id']):raise ValueError('Invalid job ID')
     workspace(job['userId'])
     if not re.fullmatch(r'[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}',job['username']):raise ValueError('Invalid username')
     if type(job['cards'])!=int or not 1<=job['cards']<=CONFIG.get('cards',64):raise ValueError('Invalid card count')
     if not isinstance(job['argv'],list) or not 1<=len(job['argv'])<=128 or any(not isinstance(a,str) or '\0' in a for a in job['argv']) or len(json.dumps(job['argv']))>12000:raise ValueError('Invalid argv')
+    dataset_refs(job)
+    if 'project' in job or 'release' in job:
+        if not isinstance(job.get('project'),str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',job['project']) or not isinstance(job.get('release'),str) or not DATASET_VERSION.fullmatch(job['release']):raise ValueError('Invalid project release')
+
+def terminal_pointer(args):
+    suffix='host' if args.get('hostAdmin') is True else 'private'
+    if args.get('project'):
+        if args.get('hostAdmin') is True:raise ValueError('Project terminal cannot be host root')
+        projects().identity(args)
+        suffix+=':project:'+args['project']
+    identity=hashlib.sha256((args['userId']+suffix).encode()).hexdigest()[:20]
+    return ROOT/'terminals'/(identity+'.current')
 
 def terminal_alive(folder,jid):
     if not isinstance(jid,str) or not UUID.fullmatch(jid):return False
@@ -110,20 +365,22 @@ def terminal_op(operation,args):
     workspace(args['userId'])
     if not re.fullmatch(r'[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}',args['username']):raise ValueError('Invalid username')
     folder=ROOT/'terminals';folder.mkdir(mode=0o700,exist_ok=True)
-    identity=hashlib.sha256((args['userId']+('host' if args.get('hostAdmin') is True else 'private')).encode()).hexdigest()[:20]
-    pointer=folder/(identity+'.current')
+    pointer=terminal_pointer(args);identity=pointer.stem
     with open(folder/(identity+'.lock'),'a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         jid=pointer.read_text() if pointer.exists() else None
         if operation=='terminal.open':
             if not terminal_alive(folder,jid):
                 if jid and UUID.fullmatch(jid):
-                    stop_terminal(jid);(folder/(jid+'.sock')).unlink(missing_ok=True)
+                    stop_terminal(jid)
+                    if args.get('project') and not projects().terminal_stopped(jid):raise ValueError('Cannot confirm previous project terminal termination; reconnect blocked')
+                    (folder/(jid+'.sock')).unlink(missing_ok=True)
                 jid=args['key']
                 if not isinstance(jid,str) or not UUID.fullmatch(jid):raise ValueError('Invalid terminal ID')
                 if (folder/(jid+'.json')).exists():jid=str(uuid.uuid4())
                 unit='amax-term-'+jid
                 spec={'userId':args['userId'],'username':args['username'],'cards':0,'argv':['/bin/bash','--noprofile','--norc','-i'],'hostAdmin':args.get('hostAdmin') is True}
+                if args.get('project'):spec['project']=args['project']
                 with open(folder/(jid+'.json'),'x') as f:json.dump(spec,f)
                 pointer.write_text(jid)
                 command=['/usr/bin/systemd-run','--user','--collect','--unit',unit,'--property=RuntimeMaxSec=21600','--property=KillMode=control-group','--property=TimeoutStopSec=5']
@@ -136,6 +393,7 @@ def terminal_op(operation,args):
         if not jid or jid!=args.get('id'):raise ValueError('Terminal not found or not owned')
         if operation=='terminal.close':
             stop_terminal(jid)
+            if args.get('project') and not projects().terminal_stopped(jid):raise ValueError('Cannot confirm project terminal termination; retry when node services recover')
             (folder/(jid+'.sock')).unlink(missing_ok=True);pointer.unlink(missing_ok=True)
             return {'closed':True}
         request={key:args[key] for key in ('input','offset','rows','cols') if key in args}
@@ -151,8 +409,17 @@ def terminal_op(operation,args):
             return result
 
 def process(operation,args):
-    if operation in ('terminal.open','terminal.exchange','terminal.close'):return terminal_op(operation,args)
-    if operation.startswith('files.') and operation in ('files.list','files.put','files.get'):return file_op(operation,args)
+    if operation.startswith('projects.'):return projects().process(operation,args)
+    if operation in ('datasets.list','datasets.status','datasets.prepare','datasets.register'):return dataset_op(operation,args)
+    if operation in ('terminal.open','terminal.exchange','terminal.close'):
+        if args.get('project') and operation=='terminal.open':
+            ops=projects()
+            with ops.guard(args):
+                ops.writable(args);ops.store.dev_paths(*ops.identity(args))
+                return terminal_op(operation,args)
+        return terminal_op(operation,args)
+    if operation.startswith('files.') and operation in ('files.list','files.put','files.get'):
+        return projects().files(operation,args) if args.get('project') else file_op(operation,args)
     if operation not in ('sync','cancel','logs'):raise ValueError('Unknown operation')
     job=args['job'];validate_job(job);jid=job['id']
     (ROOT/'jobs').mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -164,14 +431,25 @@ def process(operation,args):
         else:
             with open(spec,'x') as f:json.dump(job,f);f.flush();os.fsync(f.fileno())
         # GPUQ is the source of truth for dispatch idempotency, including SSH failures.
-        with sqlite3.connect(f'file:{CONFIG["database"]}?mode=ro',uri=True) as db:
+        with closing(sqlite3.connect(f'file:{CONFIG["database"]}?mode=ro',uri=True)) as db:
             row=db.execute('SELECT id FROM jobs WHERE submit_key=?',(jid,)).fetchone()
         canceled=ROOT/'jobs'/f'{jid}.canceled'
+        attempted=ROOT/'jobs'/f'{jid}.dataset-dispatch-attempted'
         if not row:
             if operation=='cancel' or canceled.exists():
                 canceled.touch(mode=0o600,exist_ok=True)
+                if dataset_refs(job) and attempted.exists():return {'state':'UNKNOWN','error':'Submission may still be pending; dataset leases retained'}
+                release_datasets(job,never_dispatched=True)
                 return {'state':'CANCELED'}
             if operation=='logs':return {'text':'任务尚未提交到 GPUQ。'}
+            if job.get('project'):
+                projects().store.release(job['userId'],job['project'],job['release'])
+                projects().store.run_paths(job['userId'],job['project'],job['release'],jid)
+            if dataset_refs(job):
+                acquire_datasets(job)
+                # A timed-out submit must not allow cancellation to release a
+                # lease while the scheduler may still accept the request.
+                atomic_json(attempted,{'jobId':jid})
             result=gpu('submit','-g',str(job['cards']),'-p','P0','-m','queue','--yield','never','--restart-policy','never','-n','portal-'+jid[:8],'-u',gpuq_owner(job),'--cwd',str(workspace(job['userId'])),'--submit-key',jid,'--','/usr/bin/python3',str(HERE/'sandbox-runner.py'),jid)
             node_id=result['job_id']
         else:node_id=row[0]
@@ -183,10 +461,14 @@ def process(operation,args):
             gpu('cancel',node_id);data=gpu('show',node_id);state=data.get('job',data)
         attempts=data.get('attempts',[])
         assigned=attempts[-1].get('gpu_indices',[]) if attempts and state['state'] not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
+        if dataset_refs(job) and state['state'] in ('SUCCEEDED','FAILED','CANCELED') and not release_datasets(job,data):
+            return {'nodeJobId':node_id,'state':'UNKNOWN','assignedIndices':assigned,'error':'Job termination is not fully confirmed; dataset leases retained'}
         return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned}
 
 if __name__=='__main__':
     os.umask(0o077)
+    if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
     try:
         raw=sys.stdin.buffer.read(1600001)
         if len(raw)>1600000:raise ValueError('Request too large')

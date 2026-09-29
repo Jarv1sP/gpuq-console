@@ -18,6 +18,7 @@
     <nav aria-label="主导航">
 <a class="nav-item" href="#work" data-nav="work"><span aria-hidden="true">▣</span>我的工作台</a>
 <a class="nav-item" href="#resources" data-nav="resources"><span aria-hidden="true">▤</span>机器资源</a>
+<a class="nav-item" href="#datasets" data-nav="datasets"><span aria-hidden="true">▥</span>数据集</a>
 <a class="nav-item" href="#users" data-nav="users" data-admin-only hidden><span aria-hidden="true">♙</span>用户授权<span class="nav-count" id="pending-count" hidden>0</span></a>
 </nav>
     <div class="sidebar-bottom"><div class="integration"><span class="integration-symbol">↔</span><div>保留原来的 GPUQ<small>不更换调度器，不迁移项目</small></div></div><div class="profile"><span class="avatar admin-avatar">J</span><div><span id="profile-name">未登录</span><small id="profile-role">个人工作空间</small></div></div></div>
@@ -28,13 +29,14 @@
 <div class="page-heading"><div><div class="eyebrow">LAB WORKSPACE</div><h1 id="page-title">我的工作台</h1><p id="page-description">自己的终端、文件与训练任务。</p></div><div class="heading-actions"><button class="button ghost" id="refresh-state">刷新</button><button class="button" id="cli-help">命令行</button><button class="button" id="switch-account">登录</button></div></div>
 <div class="demo-note"><span id="mode-note">正在连接…</span></div>
 <section data-page="work" id="page-work"><div class="self-summary" id="self-summary"></div><div id="execution-host"></div></section>
+<section data-page="datasets" id="page-datasets" hidden></section>
 <section data-page="resources" id="page-resources" hidden><div class="section-kicker"><span>实验室机器</span><span id="resource-summary">我的额度：0 张</span></div><p id="monitor-status" class="monitor-status" role="status"></p><p class="resource-explainer">卡的占用是实时采样，额度是允许使用的上限，两者不是一回事；是否能启动训练仍由 GPUQ 调度。</p><div class="resource-grid" id="machine-grid"></div></section>
 <section data-page="users" id="page-users" hidden>
 <div class="management-toolbar"><div class="filter-tabs"><button id="filter-pending" aria-pressed="true">待处理 0</button><button id="filter-all" aria-pressed="false">全部账号</button></div><button class="button primary" data-action="invites">注册邀请</button></div>
 <div class="authorization-layout"><div class="panel user-panel"><div id="user-list" class="user-list"></div></div><div class="panel editor" id="editor"></div></div>
 <details class="team-jobs"><summary>全体用户的训练任务</summary><div id="all-jobs"></div></details>
 </section>
-<div class="help-links" aria-label="使用帮助"><span>使用帮助</span><a href="/guide/user" target="_blank" rel="noopener">用户手册 ↗</a><a href="/guide/admin" target="_blank" rel="noopener" data-admin-only hidden>管理员手册 ↗</a><span>网页和命令行通过 HTTPS 连接，无需在个人电脑加入 Tail。</span></div>
+<div class="help-links" aria-label="使用帮助"><span>使用帮助</span><a href="/guide/user" target="_blank" rel="noopener">用户手册 ↗</a><a href="/guide/projects" target="_blank" rel="noopener">项目手册 ↗</a><a href="/guide/datasets" target="_blank" rel="noopener">数据集手册 ↗</a><a href="/guide/admin" target="_blank" rel="noopener" data-admin-only hidden>管理员手册 ↗</a><span>网页和命令行通过 HTTPS 连接，无需在个人电脑加入 Tail。</span></div>
 <footer><span>GPUQ Console</span><span>同一账号 · 网页与命令行</span></footer>
 </main>
   </div>

@@ -1,0 +1,431 @@
+"""Project snapshots use synthetic temporary files only; never execute user code."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import uuid
+
+
+spec = importlib.util.spec_from_file_location('project_store', Path(__file__).resolve().parents[1] / 'deploy/project-store.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+
+class ProjectStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name).resolve()
+        self.root, self.base = self.path / 'service', self.path / 'approved-conda'
+        self.root.mkdir(mode=0o700)
+        self.base.mkdir()
+        (self.base / 'bin').mkdir()
+        (self.base / 'bin/python3.12').write_bytes(b'fake interpreter, never executed')
+        (self.base / 'bin/python').symlink_to('python3.12')
+        (self.base / 'conda-meta').mkdir()
+        (self.base / 'conda-meta/python-3.12.1-0.json').write_text(json.dumps({'name': 'python', 'version': '3.12.1'}))
+        (self.base / 'lib/python3.12/site-packages').mkdir(parents=True)
+        self.store = module.ProjectStore(self.root, self.base, reserve_bytes=0)
+        self.user, self.slug = 'demo-user-12', 'training'
+        self.store.create(self.user, self.slug)
+        self.dev = self.store.dev_paths(self.user, self.slug)
+        (self.dev['code'] / 'train.py').write_text('print("test")\n')
+        self.initialize_env(self.dev)
+        self.addCleanup(self.cleanup)
+
+    def cleanup(self):
+        for current, dirs, _ in os.walk(self.path, followlinks=False):
+            Path(current).chmod(0o700)
+            for name in dirs:
+                child = Path(current) / name
+                if not child.is_symlink():
+                    child.chmod(0o700)
+        self.temp.cleanup()
+
+    def initialize_env(self, dev):
+        (dev['env'] / 'pyvenv.cfg').write_text('home = /opt/conda/bin\nversion = 3.12.1\n')
+        (dev['env'] / 'bin').mkdir()
+        (dev['env'] / 'bin/python').symlink_to('/opt/conda/bin/python')
+        (dev['env'] / 'lib/python3.12/site-packages').mkdir(parents=True)
+        (dev['env'] / 'lib64').symlink_to('lib')
+
+    def publish(self):
+        return self.store.publish(self.user, self.slug)
+
+    def assert_error(self, code, function, *args):
+        with self.assertRaises(module.ProjectError) as raised:
+            function(*args)
+        self.assertEqual(raised.exception.code, code)
+
+    def test_create_idempotent_status_list_and_private_layout(self):
+        first = self.store.status(self.user, self.slug)
+        self.assertEqual(first['state'], 'DRAFT')
+        self.assertIsNone(first['latestReadyRelease'])
+        self.assertEqual(self.store.create(self.user, self.slug), first)
+        self.assertEqual(self.store.list(self.user), [first])
+        self.assertEqual(self.store.list('another-user'), [])
+        self.assertTrue(all(str(path).startswith(str(self.root / 'projects-v2')) for path in self.dev.values()))
+        self.assertFalse((self.root / 'users').exists())
+        self.assertEqual(set(self.dev), {'code', 'env', 'home', 'scratch'})
+
+    def test_validation_blocks_traversal_and_arbitrary_identity(self):
+        for slug in ('../bad', '/tmp/bad', 'bad/name', 'Bad', '.', '', 'a' * 49, '1project'):
+            self.assert_error('invalid_input', self.store.create, self.user, slug)
+        for user in ('', 'a\n', None, 'a' * 129):
+            self.assert_error('invalid_input', self.store.list, user)
+
+    def test_per_user_project_and_release_access(self):
+        info = self.publish()
+        self.assert_error('not_found', self.store.status, 'other', self.slug)
+        self.assert_error('not_found', self.store.release, 'other', self.slug, info['release'])
+        self.store.create('other', self.slug)
+        other = self.store.dev_paths('other', self.slug)
+        self.assertNotEqual(self.dev['code'], other['code'])
+        self.assert_error('not_found', self.store.release, 'other', self.slug, info['release'])
+
+    def test_publish_freezes_copies_not_hardlinks_and_preserves_execution(self):
+        script = self.dev['code'] / 'run.sh'
+        script.write_text('#!/bin/sh\necho test\n')
+        script.chmod(0o755)
+        info = self.publish()
+        release = self.store.release(self.user, self.slug, info['release'])
+        frozen = release['code'] / 'train.py'
+        self.assertNotEqual(frozen.stat().st_ino, (self.dev['code'] / 'train.py').stat().st_ino)
+        self.assertEqual(stat.S_IMODE(frozen.stat().st_mode), 0o444)
+        self.assertEqual(stat.S_IMODE((release['code'] / 'run.sh').stat().st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(release['env'].stat().st_mode), 0o555)
+        (self.dev['code'] / 'train.py').write_text('changed dev')
+        self.assertEqual(frozen.read_text(), 'print("test")\n')
+        self.assertEqual(self.store.status(self.user, self.slug)['latestReadyRelease'], info['release'])
+        self.assertIn('not all base files', info['baseFingerprint']['coverage'])
+
+    def test_identical_content_reuses_release_even_when_at_release_limit(self):
+        self.store.max_releases = 1
+        first = self.publish()
+        second = self.publish()
+        self.assertEqual(first, second)
+        (self.dev['code'] / 'train.py').write_text('different')
+        self.assert_error('limit_exceeded', self.publish)
+        self.assertEqual(len(self.store.status(self.user, self.slug)['releases']), 1)
+
+    def test_no_environment_means_not_ready_and_no_release(self):
+        (self.dev['env'] / 'pyvenv.cfg').unlink()
+        self.assert_error('environment_not_ready', self.publish)
+        self.assertEqual(self.store.status(self.user, self.slug)['state'], 'DRAFT')
+
+    def test_safe_absolute_and_relative_environment_links(self):
+        (self.dev['env'] / 'bin/python3').symlink_to('python')
+        (self.dev['env'] / 'bin/alternate').symlink_to(str(self.base / 'bin/python'))
+        (self.dev['env'] / 'bin/stable').symlink_to('/opt/project-env/bin/python')
+        self.assertEqual(self.publish()['state'], 'READY')
+
+    def test_environment_external_dangling_cycles_and_traversal_rejected(self):
+        link = self.dev['env'] / 'bad'
+        for value in ('/etc/passwd', '../../other', '/opt/conda/../etc/passwd', '/opt/project-env/../outside', 'missing', 'bad'):
+            with self.subTest(value=value):
+                link.symlink_to(value)
+                self.assert_error('unsafe_path', self.publish)
+                link.unlink()
+
+    def test_base_python_link_cannot_escape_preapproved_installation(self):
+        (self.base / 'bin/python').unlink()
+        (self.base / 'bin/python').symlink_to('/etc/passwd')
+        self.assert_error('unsafe_path', self.publish)
+
+    def test_base_python_directory_alias_is_resolved_and_deduplicated(self):
+        packages = self.base / 'lib/python3.12/site-packages'
+        dist = packages / 'demo-1.dist-info'
+        dist.mkdir()
+        (dist / 'METADATA').write_text('Name: demo\nVersion: 1\n')
+        (dist / 'RECORD').write_text('demo.py,sha256=test,4\n')
+        before = self.store.base_fingerprint()
+        # Real Conda compatibility shape: shortened Python version is a link.
+        (self.base / 'lib/python3.1').symlink_to('python3.12')
+        hashed = []
+        original = self.store._hash_base_file
+        def capture(path, *args, **kwargs):
+            hashed.append(path)
+            return original(path, *args, **kwargs)
+        with patch.object(self.store, '_hash_base_file', side_effect=capture):
+            after = self.store.base_fingerprint()
+        self.assertEqual(before, after)
+        self.assertEqual(hashed.count(dist / 'METADATA'), 1)
+        self.assertEqual(hashed.count(dist / 'RECORD'), 1)
+        self.assertEqual(self.publish()['state'], 'READY')
+
+    def test_base_lib_and_distribution_internal_aliases_are_supported(self):
+        library = self.base / 'lib'
+        library.rename(self.base / 'real-lib')
+        library.symlink_to('real-lib')
+        packages = self.base / 'real-lib/python3.12/site-packages'
+        dist = packages / 'actual-1.dist-info'
+        dist.mkdir()
+        (dist / 'METADATA').write_text('Name: actual\nVersion: 1\n')
+        (packages / 'alias-1.dist-info').symlink_to('actual-1.dist-info')
+        (self.base / 'real-lib/python3.1').symlink_to('/opt/conda/real-lib/python3.12')
+        self.assertEqual(self.publish()['state'], 'READY')
+
+    def test_base_directory_aliases_cannot_escape_or_cycle(self):
+        alias = self.base / 'lib/python3.1'
+        for destination in ('/etc', '../../outside', '/opt/conda/lib/../../outside', 'python3.1'):
+            with self.subTest(destination=destination):
+                alias.symlink_to(destination)
+                self.assert_error('unsafe_path', self.store.base_fingerprint)
+                alias.unlink()
+
+    def test_base_lib_alias_to_external_tree_is_rejected(self):
+        (self.base / 'lib').rename(self.base / 'real-lib')
+        (self.base / 'lib').symlink_to(self.path)
+        self.assert_error('unsafe_path', self.store.base_fingerprint)
+
+    def test_code_symlinks_hardlinks_fifo_are_rejected_without_following(self):
+        bad = self.dev['code'] / 'bad'
+        bad.symlink_to('/etc/passwd')
+        self.assert_error('unsafe_path', self.publish)
+        bad.unlink()
+        os.link(self.dev['code'] / 'train.py', bad)
+        self.assert_error('unsafe_path', self.publish)
+        bad.unlink()
+        os.mkfifo(bad)
+        self.assert_error('unsafe_path', self.publish)
+        bad.unlink()
+
+    def test_world_writable_or_setid_tree_rejected(self):
+        file = self.dev['code'] / 'train.py'
+        for mode in (0o666, 0o4755):
+            with self.subTest(mode=oct(mode)):
+                file.chmod(mode)
+                if mode & 0o6000 and not file.stat().st_mode & 0o6000:
+                    # Some temporary filesystems strip set-ID on chmod.
+                    info = file.stat()
+                    fake = SimpleNamespace(st_dev=info.st_dev, st_uid=info.st_uid, st_gid=info.st_gid,
+                                           st_mode=info.st_mode | mode, st_nlink=1)
+                    self.assert_error('unsafe_path', self.store._check_tree_stat, fake, info.st_dev)
+                else:
+                    self.assert_error('unsafe_path', self.publish)
+        file.chmod(0o644)
+
+    def test_private_service_group_writable_venv_templates_publish_read_only(self):
+        scripts = self.dev['env'] / 'bin'
+        scripts.chmod(0o770)
+        for name in ('activate', 'activate.csh', 'activate.fish', 'Activate.ps1'):
+            script = scripts / name
+            script.write_text('# synthetic Conda venv activation template\n')
+            script.chmod(0o664)
+            self.assertEqual(script.stat().st_gid, os.getegid())
+        result = self.publish()
+        release = self.store.release(self.user, self.slug, result['release'])
+        self.assertEqual(stat.S_IMODE(scripts.stat().st_mode), 0o770)
+        self.assertEqual(stat.S_IMODE((scripts / 'activate').stat().st_mode), 0o664)
+        self.assertEqual(stat.S_IMODE((release['env'] / 'bin').stat().st_mode), 0o555)
+        for name in ('activate', 'activate.csh', 'activate.fish', 'Activate.ps1'):
+            self.assertEqual(stat.S_IMODE((release['env'] / 'bin' / name).stat().st_mode), 0o444)
+
+    def test_group_write_requires_service_group_for_files_and_directories(self):
+        info = (self.dev['code'] / 'train.py').stat()
+        for is_directory in (False, True):
+            fake = SimpleNamespace(st_dev=info.st_dev, st_uid=os.geteuid(),
+                                   st_gid=os.getegid() + 1, st_nlink=1,
+                                   st_mode=(stat.S_IFDIR | 0o770) if is_directory else (stat.S_IFREG | 0o664))
+            with self.assertRaises(module.ProjectError) as raised:
+                self.store._check_tree_stat(fake, info.st_dev, directory=is_directory)
+            self.assertEqual(raised.exception.code, 'unsafe_path')
+            fake.st_gid = os.getegid()
+            self.store._check_tree_stat(fake, info.st_dev, directory=is_directory)
+
+    def test_group_write_exception_does_not_relax_controls_metadata_or_locks(self):
+        project = self.dev['code'].parents[1]
+        for path in (self.dev['code'], self.dev['env'], project):
+            path.chmod(0o770)
+            self.assert_error('unsafe_path', self.store.dev_paths, self.user, self.slug)
+            path.chmod(0o700)
+        meta = project / 'project.json'
+        meta.chmod(0o664)
+        self.assert_error('unsafe_path', self.store.status, self.user, self.slug)
+        meta.chmod(0o600)
+        with self.store.locked(self.user, self.slug):
+            pass
+        (project / '.lock').chmod(0o660)
+        self.assert_error('unsafe_path', self.store.fail_if_publishing, self.user, self.slug)
+        (project / '.lock').chmod(0o600)
+        published = self.publish()
+        ready = self.store.release(self.user, self.slug, published['release'])['code'].parent / 'READY.json'
+        ready.chmod(0o664)
+        self.assert_error('unsafe_path', self.store.status, self.user, self.slug)
+
+    def test_control_directory_symlink_and_wrong_permission_rejected(self):
+        code = self.dev['code']
+        code.rename(code.with_name('real-code'))
+        code.symlink_to(code.with_name('real-code'))
+        with self.assertRaises(OSError):
+            self.store.dev_paths(self.user, self.slug)
+        code.unlink()
+        code.with_name('real-code').rename(code)
+        code.chmod(0o755)
+        self.assert_error('unsafe_path', self.store.dev_paths, self.user, self.slug)
+        code.chmod(0o700)
+
+    def test_second_full_scan_detects_source_edits_and_never_publishes(self):
+        walk = self.store._walk
+        calls = 0
+        def changed(*args, **kwargs):
+            nonlocal calls
+            result = walk(*args, **kwargs)
+            calls += 1
+            if calls == 2:
+                file = self.dev['code'] / 'train.py'
+                before = file.stat()
+                file.write_text('print("evil")\n')
+                os.utime(file, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return result
+        with patch.object(self.store, '_walk', side_effect=changed):
+            self.assert_error('changed', self.publish)
+        state = self.store.status(self.user, self.slug)
+        self.assertEqual(state['releases'], [])
+        project = self.dev['code'].parents[1]
+        self.assertEqual(list((project / '.staging').iterdir()), [])
+        self.assertFalse((project / '.publishing.json').exists())
+
+    def test_base_change_during_publish_rejected(self):
+        original = self.store.base_fingerprint
+        calls = 0
+        def changing():
+            nonlocal calls
+            calls += 1
+            data = original()
+            if calls > 1:
+                data['sha256'] = '0' * 64
+            return data
+        with patch.object(self.store, 'base_fingerprint', side_effect=changing):
+            self.assert_error('base_changed', self.publish)
+
+    def test_old_release_rejected_after_interpreter_or_metadata_changes(self):
+        first = self.publish()
+        interpreter = self.base / 'bin/python3.12'
+        old = interpreter.read_bytes()
+        interpreter.write_bytes(old + b' changed')
+        self.assert_error('base_changed', self.store.release, self.user, self.slug, first['release'])
+        interpreter.write_bytes(old)
+        self.store.release(self.user, self.slug, first['release'])
+        metadata = self.base / 'lib/python3.12/site-packages/pkg-1.dist-info'
+        metadata.mkdir()
+        (metadata / 'METADATA').write_text('Name: pkg\nVersion: 1\n')
+        self.assert_error('base_changed', self.store.release, self.user, self.slug, first['release'])
+
+    def test_limits_entries_bytes_and_free_space(self):
+        self.store.max_entries = 1
+        self.assert_error('limit_exceeded', self.publish)
+        self.store.max_entries = 200000
+        self.store.max_bytes = 1
+        self.assert_error('limit_exceeded', self.publish)
+        self.store.max_bytes = 50 * 1024**3
+        self.store.reserve_bytes = 100
+        with patch.object(module.shutil, 'disk_usage', return_value=SimpleNamespace(free=99)):
+            self.assert_error('insufficient_space', self.publish)
+
+    def test_per_user_project_count(self):
+        self.store.max_projects = 1
+        self.assert_error('limit_exceeded', self.store.create, self.user, 'another')
+        self.assertEqual(self.store.create('other', 'another')['state'], 'DRAFT')
+
+    def test_lock_blocks_publish_and_upload_commit_checks(self):
+        with self.store.locked(self.user, self.slug):
+            self.assert_error('project_busy', self.publish)
+            self.assert_error('project_busy', self.store.fail_if_publishing, self.user, self.slug)
+        self.store.fail_if_publishing(self.user, self.slug)
+
+    def test_status_publishing_only_with_live_lock_and_marker(self):
+        path = self.dev['code'].parents[1]
+        with self.store.locked(self.user, self.slug):
+            module.atomic_json(path / '.publishing.json', {'startedAt': 1})
+            self.assertEqual(self.store.status(self.user, self.slug)['state'], 'PUBLISHING')
+        self.assertEqual(self.store.status(self.user, self.slug)['state'], 'DRAFT')
+
+    def test_run_paths_are_isolated_idempotent_and_globally_bound(self):
+        release = self.publish()['release']
+        job = str(uuid.uuid4())
+        paths = self.store.run_paths(self.user, self.slug, release, job)
+        self.assertEqual(set(paths), {'home', 'output'})
+        self.assertEqual(paths, self.store.run_paths(self.user, self.slug, release, job))
+        second = self.store.run_paths(self.user, self.slug, release, str(uuid.uuid4()))
+        self.assertNotEqual(paths['home'], second['home'])
+        self.assertNotEqual(paths['output'], self.dev['code'])
+        self.store.create('other', self.slug)
+        other = self.store.dev_paths('other', self.slug)
+        self.initialize_env(other)
+        other_release = self.store.publish('other', self.slug)['release']
+        self.assert_error('job_conflict', self.store.run_paths, 'other', self.slug, other_release, job)
+        (self.dev['code'] / 'train.py').write_text('new release')
+        newer = self.publish()['release']
+        self.assert_error('job_conflict', self.store.run_paths, self.user, self.slug, newer, job)
+
+    def test_invalid_run_and_release_references_rejected(self):
+        release = self.publish()['release']
+        self.assert_error('invalid_input', self.store.run_paths, self.user, self.slug, release, '../job')
+        self.assert_error('invalid_input', self.store.release, self.user, self.slug, '../release')
+        self.assert_error('not_found', self.store.release, self.user, self.slug, '0' * 64)
+
+    def test_existing_outputs_remain_accessible_after_base_upgrade(self):
+        release, job = self.publish()['release'], str(uuid.uuid4())
+        paths = self.store.run_paths(self.user, self.slug, release, job)
+        (paths['output'] / 'checkpoint.bin').write_bytes(b'previous experiment')
+        (self.base / 'bin/python3.12').write_bytes(b'upgraded base')
+        self.assert_error('base_changed', self.store.release, self.user, self.slug, release)
+        self.assertEqual(self.store.existing_run_paths(self.user, self.slug, release, job), paths)
+        self.assertEqual((paths['output'] / 'checkpoint.bin').read_bytes(), b'previous experiment')
+        self.assert_error('job_conflict', self.store.existing_run_paths, self.user, self.slug, '0' * 64, job)
+        unknown = str(uuid.uuid4())
+        self.assert_error('not_found', self.store.existing_run_paths, self.user, self.slug, release, unknown)
+        self.assertFalse((self.store.path / '.run-claims' / (unknown + '.json')).exists())
+
+    def test_existing_outputs_require_same_owner_project_and_safe_directory(self):
+        release, job = self.publish()['release'], str(uuid.uuid4())
+        paths = self.store.run_paths(self.user, self.slug, release, job)
+        self.store.create('another', self.slug)
+        self.assert_error('job_conflict', self.store.existing_run_paths, 'another', self.slug, release, job)
+        paths['output'].rename(paths['output'].with_name('actual-output'))
+        paths['output'].symlink_to(paths['output'].with_name('actual-output'))
+        with self.assertRaises(OSError):
+            self.store.existing_run_paths(self.user, self.slug, release, job)
+
+    def test_release_metadata_larger_than_default_json_limit_is_readable(self):
+        info = self.publish()
+        release = self.store.release(self.user, self.slug, info['release'])
+        meta = dict(release['meta'])
+        meta['largeRegressionField'] = 'x' * (4 * 1024 * 1024 + 10)
+        parent = release['code'].parent
+        module.atomic_json(parent / 'meta.json', meta)
+        module.atomic_json(parent / 'READY.json', self.store._ready_marker(meta))
+        self.assertEqual(self.store.release(self.user, self.slug, info['release'])['meta']['largeRegressionField'], meta['largeRegressionField'])
+
+    def test_status_does_not_load_or_rehash_full_release_manifests(self):
+        self.publish()
+        with patch.object(self.store, '_release_meta', side_effect=AssertionError('slow manifest read')), patch.object(self.store, 'base_fingerprint', side_effect=AssertionError('slow base hash')):
+            result = self.store.status(self.user, self.slug)
+        self.assertEqual(result['state'], 'READY')
+
+    def test_release_requires_atomic_ready_and_consistent_metadata(self):
+        info = self.publish()
+        release = self.store.release(self.user, self.slug, info['release'])
+        ready = release['code'].parent / 'READY.json'
+        ready.unlink()
+        self.assert_error('not_found', self.store.release, self.user, self.slug, info['release'])
+        ready.write_text('{}')
+        self.assert_error('unsafe_path', self.store.release, self.user, self.slug, info['release'])
+
+    def test_legacy_data_and_user_directories_untouched(self):
+        legacy = self.root / 'users/old-user'
+        legacy.mkdir(parents=True)
+        (legacy / 'active.py').write_text('keep running')
+        before = (legacy.stat().st_ino, (legacy / 'active.py').read_bytes())
+        self.publish()
+        self.assertEqual(before, (legacy.stat().st_ino, (legacy / 'active.py').read_bytes()))
+
+
+if __name__ == '__main__':
+    unittest.main()

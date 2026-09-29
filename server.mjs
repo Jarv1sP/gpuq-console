@@ -2,8 +2,9 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {DemoService} from './dist/service.js';
-const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/service.js':'service.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js'};
+const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/service.js':'service.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/datasets-ui.js':'datasets-ui.js'};
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
+const guides={'/guide/user':'./USER_README.md','/guide/admin':'./ADMIN_README.md','/guide/datasets':'./docs/DATASETS.md','/guide/projects':'./docs/PROJECTS.md'};
 export async function createServer(){
   const service=await DemoService.create();
   return http.createServer(async(req,res)=>{
@@ -21,6 +22,11 @@ export async function createServer(){
         if(path==='/api/login')return json(200,await service.login(data.username,data.password));
         if(path==='/api/call')return json(200,await service.invoke(req.headers.authorization?.replace(/^Bearer /,''),data.operation,data.args));
         return json(404,{error:'Not found'});
+      }
+      if(guides[path]){
+        if(!['GET','HEAD'].includes(req.method))return json(405,{error:'GET required'});
+        const content=(await readFile(new URL(guides[path],import.meta.url),'utf8')).replaceAll('https://gpu.example.com',`http://${req.headers.host}`);
+        res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY'});return res.end(req.method==='HEAD'?undefined:content);
       }
       const file=routes[path];if(!file){res.writeHead(404);return res.end('Not found');}
       let content=await readFile(new URL(`./dist/${file}`,import.meta.url));

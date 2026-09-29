@@ -1,0 +1,88 @@
+# 项目、环境与训练版本
+
+项目属于「平台账号 + 指定服务器」。用户先手选服务器，再在该机中自动调度所需卡数，不做隐式跨机运行。浏览器和 CLI 共用账号权限，通过 HTTPS 操作，用户电脑不需要加入 Tailscale。
+
+本页描述项目接口及操作约定，不代表任一现有部署已经升级；管理员需部署配套门户与节点版本后再开放。原 GPUQ 任务与旧工作区保留。Slurm/Pyxis/Enroot 的迁移不因项目接口加入而自动完成，当前不能据此宣称已经切换调度后端。
+
+## 日常最短流程
+
+安装并登录一次后：
+
+```sh
+gpuctl use gpu-1
+gpuctl project create experiment-a
+gpuctl push .
+gpuctl ssh
+```
+
+开发终端会进入代码目录，并准备项目 venv。安装 Linux 端依赖：
+
+```sh
+python -m pip install -r requirements.txt
+exit
+```
+
+回到自己电脑：
+
+```sh
+gpuctl project publish
+gpuctl project status
+# 核对需要的版本 READY 后
+gpuctl run -g 2 -- python train.py --output /outputs
+gpuctl logs 任务ID
+gpuctl pull --job 任务ID model.pt ./model.pt
+```
+
+`--output` 属于示例程序参数，不是平台必需参数；按训练代码修改，最终产物应写到 `/outputs`。日后修改代码或依赖，只需更新草稿、重新发布，然后运行；不必重建项目或账号。
+
+## 路径与隔离
+
+| 作业内路径 | 开发终端 | 训练任务 |
+|---|---|---|
+| `/workspace` | 本项目草稿代码，可写 | 指定发布版本代码，只读 |
+| `/opt/project-env` | 本项目 venv，可写 | 指定发布版本 venv，只读 |
+| `/opt/conda` | 管理员基础 Python/Conda，只读 | 同节点基础环境，只读 |
+| `/home/gpuq` | 本项目个人目录 | 本次任务独立 HOME |
+| `/outputs` | 开发 scratch，不是训练结果 | 本次任务独立可写结果目录 |
+| `/data2/数据集名称` | 默认不挂载 | 显式授权、READY、租约保护的只读本地副本 |
+
+项目 Python 优先使用 `/opt/project-env/bin`；禁用用户 site-packages，并要求 pip 在项目 venv 内安装。基础 Conda 不被用户修改。依赖安装应在开发终端完成，不在占用 GPU 的训练启动命令里临时安装。
+
+项目 venv 与代码被冻结到版本，不覆盖其他账号/项目的环境。venv 依赖同机基础 Python 和系统库；记录基础环境指纹不等于封装基础镜像全部字节，也不能保证宿主机升级后仍 bit-for-bit 可复现。该发布机制不是容器镜像，也不支持把 Mac venv 直接拿到 Linux 运行。
+
+## 命令与选择规则
+
+| 命令 | 行为 |
+|---|---|
+| `gpuctl project create NAME` | 在当前机器创建并选中项目 |
+| `gpuctl project use NAME` | 核验项目存在后选中 |
+| `gpuctl project list` | 查看当前机器的个人项目 |
+| `gpuctl project status [NAME]` | 查看草稿/发布状态、READY 版本 |
+| `gpuctl project publish [NAME]` | 后台冻结代码和环境，返回状态；不占 GPU |
+| `gpuctl files [目录]` | 浏览本项目代码 |
+| `gpuctl files --job UUID [目录]` | 浏览本项目该任务输出 |
+| `gpuctl pull --job UUID 远端文件 本地文件` | 下载指定任务产物 |
+
+项目名只用小写 ASCII 字母、数字、下划线、连字符，以字母开头，长度 1–48。机器和项目选择保存在本机登录缓存中，按服务器分别记忆；切到没有选过项目的新服务器时不会沿用另一台的项目。可用 `--project NAME` 临时覆盖，不修改记忆。登录另一账号会清除旧身份的选择。
+
+`run` 选择 `latestReadyRelease`，并核验该版本在 READY 清单中。顶层 `PUBLISHING` 不会阻止使用以前的 READY 版本，因此想运行新改动时务必先核对最新发布结果。`--release 完整64位哈希` 可显式固定版本。没有可用版本时清楚报错，绝不自动替用户发布、切机或占卡等发布。`run auto` 对新任务一律拒绝。
+
+任务提交会输出版本和 `Submission key`。请求超时重试时保留相同命令、`--key UUID` 与 `--release HASH`，避免后续发布改变“最新版本”。发布按项目维护后台状态，不使用训练提交 key；请求超时先 `project status`，仍在发布时等待，失败时查看原因再重新发布。
+
+## 上传、数据与千兆链路
+
+项目代码上传按文件校验完整 SHA-256，再分块传输；每文件有独立上传 ID，服务端最终校验后才替换草稿文件。读取过程中检测到文件变化会报错，用户应停止本地写入后重传，不能静默发布混合版本。上传不自动触发项目发布。
+
+项目模式跳过常见秘密和本地环境目录，并打印路径提示：`.git`、`.ssh`、`.aws`、`.azure`、`.venv`、`venv`、`node_modules`、`__pycache__`、`id_rsa`、`id_ed25519`、`.env`、`.env.*`（保留 `.env.example`）。不按扩展名宽泛排除所有 `.pem`，也不能自动识别所有敏感文件。上传者应先检查目录。软链接不跟随，旧模式的上传行为保持兼容。
+
+项目代码单文件上限 4 GiB，保留磁盘安全余量；大数据使用数据集入口。CLI 目前不会持久保存未完成上传的客户端偏移，失败重跑 `push` 会重新传该文件；不要把这称为通用断点续传。同路径重传替换未完成上传，不覆盖旧完整代码直到校验完成；仍有未完成上传时拒绝发布。项目发布与 `push` 也不自动删除远端草稿中本地已删掉的旧文件，可在开发终端明确删除后发布。
+
+代码和小文件可以经 HTTPS 门户上传。TB 级公共数据由管理员登记本地源，通过批准的实验室链路准备各节点副本，训练读本机缓存；不要经 VPS 逐块上传公共大数据。千兆为每条链路共享的物理上限，不会因项目抽象变成多千兆。数据版本、失败重试、权限和缓存回收边界见 [DATASETS.md](DATASETS.md)。
+
+结果存放在执行节点的对应任务目录；下载不是跨机归档。当前不自动备份 checkpoint，不自动删除旧发布版本或训练产物，也未承诺按用户硬磁盘配额。管理员应配置容量告警和独立备份，不能把同盘另一个目录当备份。
+
+## 旧接口保持
+
+未选项目时，`ssh/push/files/run/pull` 保持原个人工作区。选中项目后临时加 `--legacy` 可继续处理旧代码和任务，不迁移或删除它们。旧上传仍使用原 offset/truncate 协议；项目上传独立使用 uploadId/totalSize/sha256/final。没有 project 字段的旧 job spec 不加字段，避免改变历史幂等摘要。
+
+`--legacy` 不能同时指定项目、版本或项目输出任务 ID。旧任务日志/取消、机器额度、账号缓存、`AMAX_URL`/`AMAX_SESSION_FILE` 兼容不变。管理员 `ssh --root` 是显式宿主机维护入口，不受项目目录约束；不要把它当普通项目开发方式。

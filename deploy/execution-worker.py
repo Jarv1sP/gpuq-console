@@ -9,7 +9,7 @@ class Handler(socketserver.StreamRequestHandler):
         self.request.settimeout(35)
         try:
             data=json.loads(self.rfile.readline(1600001))
-            if data['machine'] not in HOSTS or data['operation'] not in ('sync','cancel','logs','files.list','files.put','files.get','terminal.open','terminal.exchange','terminal.close'): raise ValueError('Invalid operation')
+            if data['machine'] not in HOSTS or data['operation'] not in ('sync','cancel','logs','files.list','files.put','files.get','terminal.open','terminal.exchange','terminal.close','datasets.list','datasets.status','datasets.prepare','datasets.register','projects.list','projects.create','projects.status','projects.publish','projects.verify'): raise ValueError('Invalid operation')
             host=HOSTS[data['machine']]
             p=subprocess.run(['/usr/bin/ssh','-F','/dev/null','-T','-o','BatchMode=yes','-o','ConnectTimeout=5','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes','-o',f'UserKnownHostsFile={BASE}/known_hosts','-i',str(BASE/'id_ed25519'),host['user']+'@'+host['address']],input=json.dumps({'operation':data['operation'],'args':data['args']}),text=True,capture_output=True,timeout=27)
             if p.returncode: raise ValueError('Node connection failed')

@@ -1,0 +1,1110 @@
+#!/usr/bin/env python3
+"""Controlled, immutable node-local dataset replicas (Python standard library).
+
+The service constructs Principal from its authenticated identity, NEVER from a
+request's role/user fields. Source IDs and paths are trusted administrator config.
+This module executes no external commands. All replicas live under /data2/datasets
+by default; tests may explicitly supply an isolated root.
+
+Lifecycle: register_source / register_manifest -> plan -> put_chunk or trusted
+transport -> publish -> acquire_lease -> scheduler-confirmed release_lease.
+Only the final atomic rename makes a version READY. A staging directory, even one
+containing READY.json after a crash, is not a published version. Leases never age
+out automatically. The executor MUST bind the returned data path read-only and
+release a lease only after confirming that its job and all steps have stopped.
+
+Like gpuq/sync.py this uses a durable not-ready fence, safe paths, resume and
+source stability checks, rather than an overwrite/delete mirror. Unlike its
+rsync receiver, this library deliberately has no shell/command transport. An
+administrator can obtain prepare_transfer's target for a trusted rsync process;
+that process MUST exit and close every writer before publish. Do not expose that
+host path or an arbitrary rsync endpoint to ordinary users. A service-owned cache
+and trusted transport are assumptions, not protection from a compromised root.
+
+Local root-only CLI (JSON request on stdin, JSON result on stdout):
+  sudo python3 dataset-cache.py --config /etc/gpuq/datasets.json
+Config: {"root":"/data2/datasets", "sources":{"tiny":"/data2/imports/tiny"},
+         "reserveBytes":10737418240, "serviceUid":1000, "serviceGid":1000}
+Requests use {"op":"register_source", "dataset":"tiny", "sourceId":"tiny",
+              "owners":["demo-user-1"]}, then {"op":"materialize", ...}.
+This is a privileged operator CLI, not a setuid program or a user-facing API.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import contextlib
+import ctypes
+import errno
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import sys
+import time
+import uuid
+from typing import NamedTuple
+
+
+SCHEMA = 1
+CHUNK_BYTES = 1024 * 1024
+MAX_JSON_BYTES = 64 * 1024 * 1024
+MAX_ENTRIES = 250000
+DEFAULT_RESERVE = 10 * 1024**3
+ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+USER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
+HASH_RE = re.compile(r"[a-f0-9]{64}\Z")
+FORBIDDEN = {".ssh", ".env", ".git", ".venv", "anaconda3", "miniconda3", ".conda"}
+BROAD = {"/", "/home", "/Users", "/root", "/data1", "/data2", "/tmp", "/var/tmp"}
+SYSTEM = ("/etc", "/usr", "/bin", "/sbin", "/proc", "/sys", "/dev", "/run", "/var/lib")
+
+
+class CacheError(ValueError):
+    """A request cannot safely proceed; no version should be consumed."""
+
+
+class CacheBusy(CacheError):
+    """Another operation holds a lock; callers may retry without assuming readiness."""
+
+
+class Principal(NamedTuple):
+    user_id: str
+    is_admin: bool = False
+
+
+def _identifier(value, pattern=ID_RE):
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        raise CacheError("invalid identifier")
+    return value
+
+
+def _relative(value):
+    if (not isinstance(value, str) or not value or len(value.encode()) > 4096
+            or value.startswith("/") or "\\" in value
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise CacheError("invalid relative dataset path")
+    parts = value.split("/")
+    if any(p in {"", ".", ".."} or p in FORBIDDEN for p in parts):
+        raise CacheError("unsafe or credential/environment dataset path")
+    return value
+
+
+def _absolute(value):
+    value = os.fspath(value)
+    if (not value.startswith("/") or ".." in Path(value).parts or "\\" in value
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise CacheError("expected an absolute path without traversal")
+    return Path(value)
+
+
+@contextlib.contextmanager
+def _directory(path):
+    """Open every component without following symlinks, including ancestors."""
+    path = _absolute(path)
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _mkdir(path):
+    with _directory(path.parent) as parent:
+        try:
+            os.mkdir(path.name, 0o700, dir_fd=parent)
+            os.fsync(parent)
+        except FileExistsError:
+            pass
+        fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            info = os.fstat(fd)
+            if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise CacheError("cache directory must be owned by the service and not writable by others")
+        finally:
+            os.close(fd)
+
+
+def _json_bytes(value):
+    data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    if len(data) > MAX_JSON_BYTES:
+        raise CacheError("manifest/metadata too large")
+    return data
+
+
+def _regular(fd):
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise CacheError("dataset files must be regular files with a single link")
+    return info
+
+
+def _read_json(path):
+    with _directory(path.parent) as parent:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            info = _regular(fd)
+            if info.st_size > MAX_JSON_BYTES:
+                raise CacheError("metadata too large")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                return json.loads(stream.read(MAX_JSON_BYTES + 1))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise CacheError("corrupt dataset metadata; refusing to proceed") from exc
+        finally:
+            os.close(fd)
+
+
+def _write_json(path, value, mode=0o600):
+    data = _json_bytes(value)
+    temporary = ".write-" + uuid.uuid4().hex
+    with _directory(path.parent) as parent:
+        # An interrupted atomic metadata write may leave a private temporary
+        # file. No data files live in metadata directories; remove only this
+        # helper's exact naming pattern, after nofollow/owner/single-link checks.
+        for name in os.listdir(parent):
+            if not re.fullmatch(r"\.write-[a-f0-9]{32}", name):
+                continue
+            stale = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                if _regular(stale).st_uid != os.geteuid():
+                    raise CacheError("unexpected owner of interrupted metadata write")
+            finally:
+                os.close(stale)
+            os.unlink(name, dir_fd=parent)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
+        try:
+            with os.fdopen(fd, "wb", closefd=False) as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(fd)
+            os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            os.close(fd)
+            try:
+                os.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+
+
+def _stamp(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _digest_fd(fd, length=None):
+    before = _regular(fd)
+    digest = hashlib.sha256()
+    remaining = before.st_size if length is None else length
+    if remaining > before.st_size:
+        raise CacheError("file shorter than expected")
+    os.lseek(fd, 0, os.SEEK_SET)
+    while remaining:
+        data = os.read(fd, min(CHUNK_BYTES, remaining))
+        if not data:
+            raise CacheError("file changed while being read")
+        digest.update(data)
+        remaining -= len(data)
+    if _stamp(before) != _stamp(_regular(fd)):
+        raise CacheError("file changed while being read")
+    return digest.hexdigest(), before.st_size
+
+
+def _manifest(value):
+    if not isinstance(value, dict) or set(value) != {"schema", "directories", "files"} or value["schema"] != SCHEMA:
+        raise CacheError("unsupported manifest schema")
+    dirs, files = value["directories"], value["files"]
+    if not isinstance(dirs, list) or not isinstance(files, list) or len(dirs) + len(files) > MAX_ENTRIES:
+        raise CacheError("invalid manifest entries")
+    directories = sorted(_relative(p) for p in dirs)
+    normalized, seen = [], set(directories)
+    if len(seen) != len(directories):
+        raise CacheError("duplicate manifest directory")
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {"path", "size", "sha256"}:
+            raise CacheError("invalid manifest file")
+        path = _relative(item["path"])
+        if path in seen or type(item["size"]) is not int or not 0 <= item["size"] <= 2**63 - 1:
+            raise CacheError("duplicate path or invalid file size")
+        _identifier(item["sha256"], HASH_RE)
+        seen.add(path)
+        normalized.append(dict(path=path, size=item["size"], sha256=item["sha256"]))
+    directory_set = set(directories)
+    for path in seen:
+        parent = Path(path).parent
+        while str(parent) != ".":
+            if parent.as_posix() not in directory_set:
+                raise CacheError("manifest missing parent directory or conflicting file path")
+            parent = parent.parent
+    result = dict(schema=SCHEMA, directories=directories, files=sorted(normalized, key=lambda f: f["path"]))
+    _json_bytes(result)
+    return result
+
+
+def _scan(path):
+    directories, files = [], []
+    def visit(fd, prefix):
+        before = os.fstat(fd)
+        for name in sorted(os.listdir(fd)):
+            relative = _relative(prefix + name)
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    directories.append(relative)
+                    visit(child, relative + "/")
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode):
+                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    digest, size = _digest_fd(child)
+                    files.append(dict(path=relative, size=size, sha256=digest))
+                finally:
+                    os.close(child)
+            else:
+                raise CacheError("symlinks and special files are not supported")
+            if len(files) + len(directories) > MAX_ENTRIES:
+                raise CacheError("too many dataset entries")
+        if _stamp(before) != _stamp(os.fstat(fd)):
+            raise CacheError("directory changed while being scanned")
+    with _directory(path) as fd:
+        visit(fd, "")
+    return _manifest(dict(schema=SCHEMA, directories=directories, files=files))
+
+
+def _version(manifest):
+    return hashlib.sha256(_json_bytes(manifest)).hexdigest()
+
+
+def _rename_new(source, destination):
+    """Atomic no-replace publication, Linux and macOS; unsupported OS fails closed."""
+    with _directory(source.parent) as source_fd, _directory(destination.parent) as destination_fd:
+        if os.fstat(source_fd).st_dev != os.fstat(destination_fd).st_dev:
+            raise CacheError("staging and published version must be on the same filesystem")
+        libc = ctypes.CDLL(None, use_errno=True)
+        if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+            fn = libc.renameat2
+            flags = 1  # RENAME_NOREPLACE
+        elif sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+            fn = libc.renameatx_np
+            flags = 4  # RENAME_EXCL
+        else:
+            raise CacheError("atomic no-replace rename unavailable on this platform")
+        fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        fn.restype = ctypes.c_int
+        # Moving a directory between parents may require write permission to
+        # update '..'. Only the private wrapper is temporarily writable; the
+        # immutable data subtree stays unchanged. API readers use the same lock.
+        with _directory(source) as moved_fd:
+            mode = stat.S_IMODE(os.fstat(moved_fd).st_mode)
+            try:
+                os.fchmod(moved_fd, mode | stat.S_IWUSR)
+                result = fn(source_fd, os.fsencode(source.name), destination_fd, os.fsencode(destination.name), flags)
+                saved_errno = ctypes.get_errno()
+            finally:
+                os.fchmod(moved_fd, mode)
+                os.fsync(moved_fd)
+            ctypes.set_errno(saved_errno)
+        if result:
+            code = ctypes.get_errno()
+            if code == errno.EXDEV:
+                raise CacheError("cross-filesystem publication is forbidden")
+            raise OSError(code, os.strerror(code))
+        os.fsync(destination_fd)
+        os.fsync(source_fd)
+
+
+def _modes(path, readonly):
+    def visit(fd):
+        for name in os.listdir(fd):
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    visit(child)
+                finally:
+                    os.close(child)
+            else:
+                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    _regular(child)
+                    os.fchmod(child, 0o444 if readonly else 0o600)
+                    os.fsync(child)
+                finally:
+                    os.close(child)
+        os.fchmod(fd, 0o555 if readonly else 0o700)
+        os.fsync(fd)
+    with _directory(path) as fd:
+        visit(fd)
+
+
+def _data2_mount():
+    """Runtime guard: never fall back to a plain /data2 directory on the root disk."""
+    rows = []
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        left, separator, right = line.partition(" - ")
+        before, after = left.split(), right.split()
+        if not separator or len(before) < 6 or len(after) < 3:
+            raise CacheError("invalid mount table; refusing dataset access")
+        target = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), before[4])
+        rows.append(dict(id=before[0], device=before[2], target=target, filesystem=after[0],
+                         options=before[5].split(",") + after[2].split(",")))
+    data = [r for r in rows if r["target"] == "/data2"]
+    root = [r for r in rows if r["target"] == "/"]
+    local = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "bcachefs"}
+    if (not data or not root or data[-1]["device"] == root[-1]["device"]
+            or data[-1]["filesystem"] not in local or "ro" in data[-1]["options"]
+            or "rw" not in data[-1]["options"]):
+        raise CacheError("/data2 must be an exact writable local non-root filesystem mount")
+    cache = Path("/data2/datasets")
+    if any(Path(r["target"]) == cache or cache in Path(r["target"]).parents for r in rows):
+        raise CacheError("dataset cache submounts are not supported")
+    with _directory(Path("/data2")) as fd:
+        device = os.fstat(fd).st_dev
+    if str(os.major(device)) + ":" + str(os.minor(device)) != data[-1]["device"]:
+        raise CacheError("/data2 mount changed during inspection")
+    return data[-1]["id"], data[-1]["device"], device
+
+
+class DatasetCache:
+    def __init__(self, root="/data2/datasets", *, sources=None, reserve_bytes=DEFAULT_RESERVE, lock_timeout=2.0):
+        self.root = _absolute(root)
+        if str(self.root) in BROAD or type(reserve_bytes) is not int or reserve_bytes < 0:
+            raise CacheError("unsafe cache root or reserve")
+        self.reserve_bytes = reserve_bytes
+        if not isinstance(lock_timeout, (int, float)) or isinstance(lock_timeout, bool) or not 0 <= lock_timeout <= 60:
+            raise CacheError("invalid dataset lock timeout")
+        self.lock_timeout = lock_timeout
+        self.mount = _data2_mount() if Path("/data2") in self.root.parents else None
+        self.sources = dict(sources or {})
+        for key, value in self.sources.items():
+            _identifier(key)
+            path = _absolute(value)
+            if (str(path) in BROAD or path.parent in (Path("/home"), Path("/Users"))
+                    or any(p in FORBIDDEN for p in path.parts)
+                    or any(path == Path(p) or Path(p) in path.parents for p in SYSTEM)
+                    or path == self.root or path in self.root.parents or self.root in path.parents):
+                raise CacheError("unsafe approved source directory")
+            self.sources[key] = path
+        _mkdir(self.root)
+        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks"):
+            _mkdir(self.root / name)
+
+    @contextlib.contextmanager
+    def _lock_file(self, name):
+        if self.mount is not None and _data2_mount() != self.mount:
+            raise CacheError("/data2 mount identity changed; reopen cache after administrator verification")
+        with _directory(self.root) as root, _directory(self.root / Path(name).parent) as parent:
+            if self.mount is not None and os.fstat(root).st_dev != self.mount[2]:
+                raise CacheError("cache no longer resides on the verified /data2 mount")
+            fd = os.open(Path(name).name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
+            try:
+                _regular(fd)
+                deadline = time.monotonic() + self.lock_timeout
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise CacheBusy("dataset cache is busy; retry later without assuming READY")
+                        time.sleep(min(0.025, max(0, deadline - time.monotonic())))
+                yield
+            finally:
+                os.close(fd)
+
+    def _locked(self):
+        return self._lock_file(".lock")
+
+    @contextlib.contextmanager
+    def _version_locked(self, actor, dataset, version):
+        _identifier(dataset)
+        _identifier(version, HASH_RE)
+        # Authenticate before creating lock files; guessed IDs must not consume
+        # arbitrary filesystem entries. Recheck authorization inside the caller.
+        with self._locked():
+            self._record(actor, dataset, version)
+        with self._lock_file(".locks/" + dataset + "." + version + ".lock"):
+            yield
+
+    def _actor(self, actor, admin=False):
+        if not isinstance(actor, Principal) or type(actor.is_admin) is not bool:
+            raise CacheError("trusted Principal required")
+        _identifier(actor.user_id, USER_RE)
+        if admin and not actor.is_admin:
+            raise PermissionError("administrator authorization required")
+
+    def _paths(self, dataset, version=None):
+        _identifier(dataset)
+        if version is not None:
+            _identifier(version, HASH_RE)
+        return {name: self.root / name / dataset / version if version else self.root / name / dataset
+                for name in (".registry", ".staging", "ready", ".leases")}
+
+    def _dataset(self, actor, dataset):
+        self._actor(actor)
+        metadata = _read_json(self._paths(dataset)[".registry"] / "dataset.json")
+        if (not isinstance(metadata, dict) or set(metadata) != {"schema", "owners"}
+                or metadata["schema"] != SCHEMA):
+            raise CacheError("corrupt dataset authorization metadata")
+        self._owners(metadata["owners"])
+        if not actor.is_admin and actor.user_id not in metadata["owners"]:
+            raise PermissionError("dataset owner authorization required")
+        return metadata
+
+    @staticmethod
+    def _owners(owners):
+        if not isinstance(owners, list) or not owners or len(owners) > 10000:
+            raise CacheError("at least one dataset owner is required")
+        return sorted(set(_identifier(owner, USER_RE) for owner in owners))
+
+    def _record(self, actor, dataset, version):
+        self._dataset(actor, dataset)
+        record = _read_json(self._paths(dataset)[".registry"] / (version + ".json")) if _identifier(version, HASH_RE) else None
+        if (not isinstance(record, dict) or set(record) != {"schema", "manifest", "sourceId"}
+                or record["schema"] != SCHEMA or _version(_manifest(record["manifest"])) != version):
+            raise CacheError("corrupt version registration")
+        if record["sourceId"] is not None:
+            _identifier(record["sourceId"])
+        return record
+
+    def _free(self, needed=0):
+        with _directory(self.root) as fd:
+            info = os.fstatvfs(fd)
+        if info.f_bavail * info.f_frsize < self.reserve_bytes + needed:
+            raise CacheError("insufficient free space including safety reserve; no publication allowed")
+
+    def _register(self, actor, dataset, manifest, owners, source_id):
+        self._actor(actor, admin=True)
+        owners = self._owners(owners)
+        manifest = _manifest(manifest)
+        version = _version(manifest)
+        paths = self._paths(dataset)
+        self._free(self._reserved() + len(_json_bytes(manifest)) + 8192)
+        for path in paths.values():
+            _mkdir(path)
+        try:
+            current = self._dataset(actor, dataset)
+            if current["owners"] != owners:
+                raise CacheError("use set_owners explicitly to change dataset authorization")
+        except FileNotFoundError:
+            _write_json(paths[".registry"] / "dataset.json", dict(schema=SCHEMA, owners=owners))
+        filename = paths[".registry"] / (version + ".json")
+        record = dict(schema=SCHEMA, manifest=manifest, sourceId=source_id)
+        try:
+            existing = self._record(actor, dataset, version)
+        except FileNotFoundError:
+            _write_json(filename, record)
+        else:
+            if existing["manifest"] != manifest:
+                raise CacheError("registered version is immutable")
+            if existing["sourceId"] is None and source_id is not None:
+                _write_json(filename, record)
+            elif source_id is not None and existing["sourceId"] != source_id:
+                raise CacheError("registered source is immutable")
+        return dict(dataset=dataset, version=version, bytes=sum(f["size"] for f in manifest["files"]), files=len(manifest["files"]))
+
+    def register_source(self, actor, dataset, source_id, owners):
+        self._actor(actor, admin=True)
+        _identifier(dataset)
+        self._owners(owners)
+        _identifier(source_id)
+        if source_id not in self.sources:
+            raise PermissionError("source ID has not been approved in administrator configuration")
+        manifest = _scan(self.sources[source_id])
+        with self._locked():
+            return self._register(actor, dataset, manifest, owners, source_id)
+
+    def register_manifest(self, actor, dataset, manifest, owners):
+        """Administrator imports a manifest delivered by a trusted source node."""
+        with self._locked():
+            return self._register(actor, dataset, manifest, owners, None)
+
+    def attach_source(self, actor, dataset, version, source_id):
+        """Bind an admin-trusted manifest to an approved source, without a tree scan.
+
+        The caller authenticates the exported manifest. Materialization reads only
+        its registered files and verifies the complete local result before READY.
+        This supports a read-only LAN/NFS source without hashing it a second time.
+        """
+        self._actor(actor, admin=True)
+        _identifier(source_id)
+        if source_id not in self.sources:
+            raise PermissionError("source ID has not been approved in administrator configuration")
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            if record["sourceId"] not in (None, source_id):
+                raise CacheError("registered source is immutable")
+            record["sourceId"] = source_id
+            _write_json(self._paths(dataset)[".registry"] / (version + ".json"), record)
+            return dict(dataset=dataset, version=version, attached=True)
+
+    def set_owners(self, actor, dataset, owners):
+        with self._locked():
+            self._actor(actor, admin=True)
+            self._dataset(actor, dataset)
+            _write_json(self._paths(dataset)[".registry"] / "dataset.json", dict(schema=SCHEMA, owners=self._owners(owners)))
+            return {"updated": True}
+
+    def export_manifest(self, actor, dataset, version):
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            return dict(dataset=dataset, version=version, manifest=record["manifest"])
+
+    def list_datasets(self, actor):
+        """Authorized catalog only; never returns source IDs/paths or other owners."""
+        self._actor(actor)
+        result = []
+        with self._locked():
+            with _directory(self.root / ".registry") as fd:
+                datasets = sorted(os.listdir(fd))
+            for dataset in datasets:
+                try:
+                    self._dataset(actor, dataset)
+                except PermissionError:
+                    continue
+                folder = self._paths(dataset)[".registry"]
+                with _directory(folder) as fd:
+                    names = sorted(os.listdir(fd))
+                versions = []
+                for name in names:
+                    if name == "dataset.json":
+                        continue
+                    if re.fullmatch(r"\.write-[a-f0-9]{32}", name):
+                        continue
+                    if not name.endswith(".json"):
+                        raise CacheError("corrupt registry directory")
+                    version = name[:-5]
+                    record = self._record(actor, dataset, version)
+                    paths = self._paths(dataset, version)
+                    state = "READY" if self._ready(paths, record["manifest"], version) else "REGISTERED"
+                    with _directory(paths[".staging"].parent) as fd:
+                        if state != "READY" and version in os.listdir(fd):
+                            state = "STAGING"
+                    versions.append(dict(version=version, state=state,
+                                         bytes=sum(f["size"] for f in record["manifest"]["files"]),
+                                         files=len(record["manifest"]["files"])))
+                result.append(dict(dataset=dataset, versions=versions))
+        return {"datasets": result}
+
+    def status(self, actor, dataset, version):
+        """Lightweight metadata only: no data hashing or staging modifications."""
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            paths = self._paths(dataset, version)
+            state = "READY" if self._ready(paths, record["manifest"], version) else "REGISTERED"
+            remaining = 0 if state == "READY" else sum(f["size"] for f in record["manifest"]["files"])
+            with _directory(paths[".staging"].parent) as fd:
+                if state != "READY" and version in os.listdir(fd):
+                    state = "STAGING"
+                    remaining = self._transfer(paths[".staging"])["remainingBytes"]
+            return dict(dataset=dataset, version=version, state=state, remainingBytes=remaining)
+
+    def _transfer(self, stage):
+        value = _read_json(stage / "TRANSFER.json")
+        if (not isinstance(value, dict) or set(value) != {"schema", "owner", "token", "remainingBytes", "totalBytes"}
+                or value["schema"] != SCHEMA or type(value["remainingBytes"]) is not int
+                or type(value["totalBytes"]) is not int or not 0 <= value["remainingBytes"] <= value["totalBytes"]):
+            raise CacheError("corrupt transfer fence; administrator repair required")
+        _identifier(value["owner"], USER_RE)
+        if not isinstance(value["token"], str) or str(uuid.UUID(value["token"])) != value["token"]:
+            raise CacheError("invalid transfer token")
+        return value
+
+    def _reserved(self, except_stage=None):
+        total = 0
+        with _directory(self.root / ".staging") as fd:
+            datasets = os.listdir(fd)
+        for dataset in datasets:
+            _identifier(dataset)
+            parent = self._paths(dataset)[".staging"]
+            with _directory(parent) as fd:
+                versions = os.listdir(fd)
+            for version in versions:
+                stage = self._paths(dataset, version)[".staging"]
+                if stage != except_stage:
+                    total += self._transfer(stage)["remainingBytes"]
+        return total
+
+    def _ready(self, paths, manifest, version):
+        try:
+            marker = _read_json(paths["ready"] / "READY.json")
+        except FileNotFoundError:
+            with _directory(paths["ready"].parent) as fd:
+                if paths["ready"].name in os.listdir(fd):
+                    raise CacheError("published directory has no valid READY marker")
+            return False
+        if marker != {"schema": SCHEMA, "version": version} or _read_json(paths["ready"] / "manifest.json") != manifest:
+            raise CacheError("published version metadata is corrupt")
+        with _directory(paths["ready"]) as fd:
+            if os.fstat(fd).st_mode & 0o222:
+                raise CacheError("published version wrapper is not read-only")
+        with _directory(paths["ready"] / "data") as fd:
+            if os.fstat(fd).st_mode & 0o222:
+                raise CacheError("published data is not read-only")
+        return True
+
+    def _stage_files(self, stage, manifest, *, hashes=True):
+        wanted = {f["path"]: f for f in manifest["files"]}
+        expected_dirs = set(manifest["directories"])
+        found = {}
+        def visit(fd, prefix):
+            for name in os.listdir(fd):
+                relative = _relative(prefix + name)
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    if relative not in expected_dirs:
+                        raise CacheError("unexpected staging directory")
+                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        visit(child, relative + "/")
+                    finally:
+                        os.close(child)
+                else:
+                    if relative not in wanted:
+                        raise CacheError("unexpected staging file")
+                    child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        size = _regular(child).st_size
+                        if size > wanted[relative]["size"]:
+                            raise CacheError("staging file exceeds registered size")
+                        digest = _digest_fd(child)[0] if hashes else None
+                        if hashes and size == wanted[relative]["size"] and digest != wanted[relative]["sha256"]:
+                            raise CacheError("completed staging file checksum mismatch")
+                        found[relative] = (size, digest)
+                    finally:
+                        os.close(child)
+        with _directory(stage / "data") as fd:
+            visit(fd, "")
+        result = []
+        for entry in manifest["files"]:
+            size, digest = found.get(entry["path"], (0, hashlib.sha256(b"").hexdigest() if hashes else None))
+            result.append(dict(**entry, offset=size, prefixSha256=digest, complete=entry["path"] in found and size == entry["size"]))
+        return result
+
+    def _plan(self, actor, dataset, version):
+        record = self._record(actor, dataset, version)
+        paths = self._paths(dataset, version)
+        manifest = record["manifest"]
+        if self._ready(paths, manifest, version):
+            return dict(dataset=dataset, version=version, state="READY", files=[], remainingBytes=0)
+        stage = paths[".staging"]
+        total = sum(f["size"] for f in manifest["files"])
+        try:
+            transfer = self._transfer(stage)
+        except FileNotFoundError:
+            with _directory(stage.parent) as fd:
+                if stage.name in os.listdir(fd):
+                    raise CacheError("incomplete transfer fence; administrator repair required")
+            self._free(self._reserved() + total + 8192)
+            _mkdir(stage)
+            _mkdir(stage / "data")
+            transfer = dict(schema=SCHEMA, owner=actor.user_id, token=str(uuid.uuid4()), remainingBytes=total, totalBytes=total)
+            _write_json(stage / "TRANSFER.json", transfer)
+        if not actor.is_admin and transfer["owner"] != actor.user_id:
+            raise PermissionError("unfinished transfer belongs to another owner")
+        if transfer["totalBytes"] != total:
+            raise CacheError("transfer size differs from registered manifest")
+        # Recover a crash between fsync of data and accounting update conservatively.
+        files = self._stage_files(stage, manifest, hashes=False)
+        remaining = sum(f["size"] - f["offset"] for f in files)
+        self._free(self._reserved(except_stage=stage) + remaining + 8192)
+        with _directory(stage) as fd:
+            os.fchmod(fd, 0o700)
+        transfer["remainingBytes"] = remaining
+        _write_json(stage / "TRANSFER.json", transfer)
+        return dict(dataset=dataset, version=version, state="STAGING", token=transfer["token"],
+                    remainingBytes=remaining, chunkBytes=CHUNK_BYTES, files=files)
+
+    def plan(self, actor, dataset, version):
+        with self._version_locked(actor, dataset, version):
+            with self._locked():
+                result = self._plan(actor, dataset, version)
+                manifest = self._record(actor, dataset, version)["manifest"]
+            if result["state"] == "STAGING":
+                result["files"] = self._stage_files(self._paths(dataset, version)[".staging"], manifest)
+            return result
+
+    def prepare_transfer(self, actor, dataset, version):
+        """Privileged rsync integration only; stop/join writers before publish."""
+        self._actor(actor, admin=True)
+        plan = self.plan(actor, dataset, version)
+        if plan["state"] == "STAGING":
+            plan["stagingPath"] = str(self._paths(dataset, version)[".staging"] / "data")
+            plan["transportRequirement"] = "trusted exclusive writer; no symlinks/devices/specials; exit before publish"
+        return plan
+
+    def _authorize_transfer(self, actor, dataset, version, token):
+        record = self._record(actor, dataset, version)
+        paths = self._paths(dataset, version)
+        if self._ready(paths, record["manifest"], version):
+            raise CacheError("published version cannot be modified")
+        transfer = self._transfer(paths[".staging"])
+        if transfer["token"] != token or (not actor.is_admin and transfer["owner"] != actor.user_id):
+            raise PermissionError("transfer owner/token mismatch")
+        return record, paths, transfer
+
+    def put_chunk(self, actor, dataset, version, path, offset, data, token):
+        if type(offset) is not int or offset < 0 or not isinstance(data, bytes) or len(data) > CHUNK_BYTES:
+            raise CacheError("invalid chunk offset/data/size")
+        _relative(path)
+        with self._version_locked(actor, dataset, version), self._locked():
+            record, paths, transfer = self._authorize_transfer(actor, dataset, version, token)
+            entry = next((f for f in record["manifest"]["files"] if f["path"] == path), None)
+            if entry is None or offset + len(data) > entry["size"]:
+                raise CacheError("chunk outside registered file")
+            self._free(self._reserved() + 8192)
+            stage = paths[".staging"]
+            parent = stage / "data"
+            for part in Path(path).parts[:-1]:
+                parent = parent / part
+                _mkdir(parent)
+            with _directory(parent) as fd:
+                target = os.open(Path(path).name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=fd)
+                try:
+                    size = _regular(target).st_size
+                    if offset < size and offset + len(data) <= size:
+                        os.lseek(target, offset, os.SEEK_SET)
+                        if os.read(target, len(data)) != data:
+                            raise CacheError("retry would overwrite existing bytes")
+                        return dict(offset=size, complete=size == entry["size"])
+                    if offset != size:
+                        raise CacheError("chunk offset must match current file length")
+                    if transfer["remainingBytes"] < len(data):
+                        raise CacheError("invalid transfer space accounting")
+                    os.lseek(target, offset, os.SEEK_SET)
+                    view = memoryview(data)
+                    while view:
+                        written = os.write(target, view)
+                        if not written:
+                            raise OSError("short dataset write")
+                        view = view[written:]
+                    os.fsync(target)
+                    os.fsync(fd)
+                finally:
+                    os.close(target)
+            transfer["remainingBytes"] -= len(data)
+            _write_json(stage / "TRANSFER.json", transfer)
+            return dict(offset=offset + len(data), complete=offset + len(data) == entry["size"])
+
+    def read_chunk(self, actor, dataset, version, path, offset=0, length=CHUNK_BYTES):
+        """Only registered paths from a published replica, never arbitrary host files."""
+        _relative(path)
+        if type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= CHUNK_BYTES:
+            raise CacheError("invalid read range")
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            paths = self._paths(dataset, version)
+            if not self._ready(paths, record["manifest"], version):
+                raise CacheError("dataset version is not READY")
+            entry = next((f for f in record["manifest"]["files"] if f["path"] == path), None)
+            if entry is None or offset > entry["size"]:
+                raise CacheError("read outside registered file")
+            filename = paths["ready"] / "data" / path
+            with _directory(filename.parent) as parent:
+                fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                try:
+                    if _regular(fd).st_size != entry["size"]:
+                        raise CacheError("published file size changed")
+                    os.lseek(fd, offset, os.SEEK_SET)
+                    data = os.read(fd, length)
+                finally:
+                    os.close(fd)
+            return dict(data=base64.b64encode(data).decode(), offset=offset + len(data), eof=offset + len(data) == entry["size"])
+
+    def publish(self, actor, dataset, version, token):
+        with self._version_locked(actor, dataset, version):
+            with self._locked():
+                record = self._record(actor, dataset, version)
+                paths = self._paths(dataset, version)
+                if self._ready(paths, record["manifest"], version):
+                    return dict(dataset=dataset, version=version, state="READY")
+                record, paths, transfer = self._authorize_transfer(actor, dataset, version, token)
+            stage = paths[".staging"]
+            # Empty directories are part of the content identity too.
+            for directory in record["manifest"]["directories"]:
+                _mkdir(stage / "data" / directory)
+            actual = _scan(stage / "data")
+            if actual != record["manifest"]:
+                raise CacheError("staging checksum/tree does not match registered version")
+            with self._locked():
+                self._authorize_transfer(actor, dataset, version, token)
+                self._free(self._reserved(except_stage=stage) + len(_json_bytes(actual)) + 8192)
+                with _directory(stage) as fd:
+                    os.fchmod(fd, 0o700)
+                    names = set(os.listdir(fd))
+                if not names <= {"data", "TRANSFER.json", "manifest.json", "READY.json"}:
+                    raise CacheError("unexpected staging metadata")
+                _write_json(stage / "manifest.json", actual)
+                _write_json(stage / "READY.json", dict(schema=SCHEMA, version=version))
+            try:
+                # Hashing and chmod/fsync of many data files are protected by the
+                # version lock, not the global lock. Status/other jobs stay usable.
+                _modes(stage, True)
+                with self._locked():
+                    self._authorize_transfer(actor, dataset, version, token)
+                    self._free(self._reserved(except_stage=stage) + 8192)
+                    # The private transfer token must never enter the ready tree.
+                    with _directory(stage) as fd:
+                        os.fchmod(fd, 0o700)
+                        os.unlink("TRANSFER.json", dir_fd=fd)
+                        os.fchmod(fd, 0o555)
+                        os.fsync(fd)
+                    _rename_new(stage, paths["ready"])
+            except BaseException:
+                # On ordinary failure restore a resumable fence. A process/power
+                # crash here fails closed and requires explicit administrator cleanup.
+                try:
+                    _modes(stage, False)
+                    _write_json(stage / "TRANSFER.json", transfer)
+                except OSError:
+                    pass
+                raise
+            return dict(dataset=dataset, version=version, state="READY")
+
+    def materialize(self, actor, dataset, version):
+        """Owner may copy a previously administrator-approved source, not pass a path."""
+        self._actor(actor)
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            if self._ready(self._paths(dataset, version), record["manifest"], version):
+                return dict(dataset=dataset, version=version, state="READY")
+            source = self.sources.get(record["sourceId"])
+            if source is None:
+                raise CacheError("version has no approved local source")
+        plan = self.plan(actor, dataset, version)
+        if plan["state"] == "READY":
+            return dict(dataset=dataset, version=version, state="READY")
+        for entry in plan["files"]:
+            filename = source / entry["path"]
+            with _directory(filename.parent) as parent:
+                fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                try:
+                    before = _regular(fd)
+                    if before.st_size != entry["size"]:
+                        raise CacheError("approved source size changed since registration")
+                    if _digest_fd(fd, entry["offset"])[0] != entry["prefixSha256"]:
+                        raise CacheError("partial transfer is not a prefix of the registered source")
+                    offset = entry["offset"]
+                    os.lseek(fd, offset, os.SEEK_SET)
+                    if entry["size"] == 0 and not entry["complete"]:
+                        self.put_chunk(actor, dataset, version, entry["path"], 0, b"", plan["token"])
+                    while offset < entry["size"]:
+                        data = os.read(fd, min(CHUNK_BYTES, entry["size"] - offset))
+                        if not data:
+                            raise CacheError("source changed during copy")
+                        self.put_chunk(actor, dataset, version, entry["path"], offset, data, plan["token"])
+                        offset += len(data)
+                    if _stamp(before) != _stamp(_regular(fd)):
+                        raise CacheError("source changed during copy")
+                finally:
+                    os.close(fd)
+        # Hash the local replica once in publish. Re-hashing an immutable network
+        # source before AND after copying would triple reads on a gigabit link.
+        # Every copied source file was checked for mutation; content identity is
+        # established by the trusted manifest and the full destination checksum.
+        return self.publish(actor, dataset, version, plan["token"])
+
+    def prepare(self, actor, dataset, version):
+        """Materialize an approved local source, or return a resumable replica plan."""
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            local = record["sourceId"] in self.sources
+        return self.materialize(actor, dataset, version) if local else self.plan(actor, dataset, version)
+
+    def verify(self, actor, dataset, version):
+        with self._version_locked(actor, dataset, version):
+            with self._locked():
+                record = self._record(actor, dataset, version)
+                paths = self._paths(dataset, version)
+                if not self._ready(paths, record["manifest"], version):
+                    raise CacheError("dataset version is not READY")
+            if _scan(paths["ready"] / "data") != record["manifest"]:
+                raise CacheError("dataset is not READY or integrity verification failed")
+            return dict(dataset=dataset, version=version, state="READY", verified=True)
+
+    def _leases(self, dataset, version):
+        folder = self._paths(dataset, version)[".leases"]
+        try:
+            with _directory(folder) as fd:
+                names = os.listdir(fd)
+        except FileNotFoundError:
+            return []
+        leases = []
+        for name in names:
+            if not name.endswith(".json") or str(uuid.UUID(name[:-5])) != name[:-5]:
+                raise CacheError("corrupt lease directory; eviction forbidden")
+            lease = _read_json(folder / name)
+            if (not isinstance(lease, dict) or set(lease) != {"schema", "id", "owner", "jobId", "createdAt"}
+                    or lease["schema"] != SCHEMA or lease["id"] != name[:-5]):
+                raise CacheError("corrupt lease; eviction forbidden")
+            _identifier(lease["owner"], USER_RE)
+            _identifier(lease["jobId"], USER_RE)
+            leases.append(lease)
+        return leases
+
+    def acquire_lease(self, actor, dataset, version, job_id):
+        """Executor must validate job ownership before invoking this method."""
+        _identifier(job_id, USER_RE)
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            paths = self._paths(dataset, version)
+            if not self._ready(paths, record["manifest"], version):
+                raise CacheError("cannot lease an unready version")
+            leases = self._leases(dataset, version)
+            lease = next((l for l in leases if l["jobId"] == job_id and l["owner"] == actor.user_id), None)
+            if lease is None:
+                self._free(self._reserved() + 4096)
+                _mkdir(paths[".leases"])
+                lease = dict(schema=SCHEMA, id=str(uuid.uuid4()), owner=actor.user_id, jobId=job_id, createdAt=time.time())
+                _write_json(paths[".leases"] / (lease["id"] + ".json"), lease)
+            return dict(leaseId=lease["id"], dataset=dataset, version=version, path=str(paths["ready"] / "data"), readOnly=True)
+
+    def release_lease(self, actor, dataset, version, lease_id):
+        """Trusted scheduler/admin only, AFTER confirming the job has stopped."""
+        self._actor(actor, admin=True)
+        if not isinstance(lease_id, str) or str(uuid.UUID(lease_id)) != lease_id:
+            raise CacheError("invalid lease ID")
+        with self._locked():
+            self._record(actor, dataset, version)
+            leases = self._leases(dataset, version)
+            if not any(l["id"] == lease_id for l in leases):
+                return {"released": False}
+            folder = self._paths(dataset, version)[".leases"]
+            with _directory(folder) as fd:
+                os.unlink(lease_id + ".json", dir_fd=fd)
+                os.fsync(fd)
+            return {"released": True}
+
+    def evict(self, actor, dataset, version):
+        """Administrator cleanup only. Registration remains for later recreation."""
+        self._actor(actor, admin=True)
+        with self._version_locked(actor, dataset, version):
+            quarantined = []
+            with self._locked():
+                self._record(actor, dataset, version)
+                if self._leases(dataset, version):
+                    raise CacheError("active leases prevent eviction; leases never expire automatically")
+                for name in ("ready", ".staging"):
+                    path = self._paths(dataset, version)[name]
+                    with _directory(path.parent) as fd:
+                        if path.name not in os.listdir(fd):
+                            continue
+                    with _directory(path):
+                        pass
+                    trash = self.root / ".trash" / uuid.uuid4().hex
+                    _rename_new(path, trash)
+                    quarantined.append(trash)
+            # Once quarantined atomically, no new lease can see these paths.
+            # Large recursive cleanup need not block status/other dataset jobs.
+            for trash in quarantined:
+                _modes(trash, False)
+                shutil.rmtree(trash)
+                with _directory(trash.parent) as fd:
+                    os.fsync(fd)
+            return dict(evicted=bool(quarantined), registrationRetained=True)
+
+    def dispatch(self, actor, request):
+        """Strict JSON adapter; caller supplies the trusted Principal separately."""
+        if not isinstance(request, dict) or not isinstance(request.get("op"), str):
+            raise CacheError("invalid dataset request")
+        definitions = {
+            "list": (self.list_datasets, set()),
+            "register_source": (self.register_source, {"dataset", "sourceId", "owners"}),
+            "register_manifest": (self.register_manifest, {"dataset", "manifest", "owners"}),
+            "attach_source": (self.attach_source, {"dataset", "version", "sourceId"}),
+            "set_owners": (self.set_owners, {"dataset", "owners"}),
+            "export_manifest": (self.export_manifest, {"dataset", "version"}),
+            "plan": (self.plan, {"dataset", "version"}),
+            "status": (self.status, {"dataset", "version"}),
+            "prepare": (self.prepare, {"dataset", "version"}),
+            "prepare_transfer": (self.prepare_transfer, {"dataset", "version"}),
+            "put_chunk": (self.put_chunk, {"dataset", "version", "path", "offset", "data", "token"}),
+            "read_chunk": (self.read_chunk, {"dataset", "version", "path", "offset", "length"}),
+            "publish": (self.publish, {"dataset", "version", "token"}),
+            "materialize": (self.materialize, {"dataset", "version"}),
+            "verify": (self.verify, {"dataset", "version"}),
+            "acquire_lease": (self.acquire_lease, {"dataset", "version", "jobId"}),
+            "release_lease": (self.release_lease, {"dataset", "version", "leaseId"}),
+            "evict": (self.evict, {"dataset", "version"}),
+        }
+        if request["op"] not in definitions:
+            raise CacheError("unsupported dataset operation")
+        function, fields = definitions[request["op"]]
+        if set(request) != fields | {"op"}:
+            raise CacheError("missing or unrecognized dataset request fields")
+        args = {key: request[key] for key in fields}
+        for key, replacement in (("sourceId", "source_id"), ("jobId", "job_id"), ("leaseId", "lease_id")):
+            if key in args:
+                args[replacement] = args.pop(key)
+        if request["op"] == "put_chunk":
+            if not isinstance(args["data"], str) or len(args["data"]) > ((CHUNK_BYTES + 2) // 3) * 4:
+                raise CacheError("invalid encoded chunk size")
+            try:
+                args["data"] = base64.b64decode(args["data"], validate=True)
+            except (ValueError, UnicodeError) as exc:
+                raise CacheError("invalid base64 chunk") from exc
+        return function(actor, **args)
+
+
+def _operator_config(filename):
+    if os.geteuid() != 0:
+        raise PermissionError("dataset-cache CLI is root-only; use authenticated executor APIs for member operations")
+    path = _absolute(filename)
+    with _directory(path.parent) as parent:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            info = _regular(fd)
+            if info.st_uid != 0 or info.st_mode & 0o077:
+                raise PermissionError("dataset config must be root-owned mode 0600")
+            if info.st_size > MAX_JSON_BYTES:
+                raise CacheError("administrator dataset config too large")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                config = json.loads(stream.read(MAX_JSON_BYTES + 1))
+        finally:
+            os.close(fd)
+    if not isinstance(config, dict) or set(config) - {"root", "sources", "reserveBytes", "serviceUid", "serviceGid"}:
+        raise CacheError("invalid administrator dataset config")
+    if ("serviceUid" in config) != ("serviceGid" in config):
+        raise CacheError("serviceUid and serviceGid must be supplied together")
+    for key in ("serviceUid", "serviceGid"):
+        if key in config and (type(config[key]) is not int or not 0 <= config[key] < 2**31):
+            raise CacheError("invalid cache service identity")
+    return config
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--config", required=True, help="root-owned mode-0600 administrator config")
+    args = parser.parse_args(argv)
+    try:
+        config = _operator_config(args.config)
+        raw = sys.stdin.buffer.read(MAX_JSON_BYTES + 1)
+        if len(raw) > MAX_JSON_BYTES:
+            raise CacheError("request too large")
+        request = json.loads(raw)
+        if "serviceUid" in config:
+            os.setgroups([])
+            os.setgid(config["serviceGid"])
+            os.setuid(config["serviceUid"])
+        cache = DatasetCache(config.get("root", "/data2/datasets"), sources=config.get("sources", {}),
+                             reserve_bytes=config.get("reserveBytes", DEFAULT_RESERVE))
+        result = cache.dispatch(Principal("local-admin", True), request)
+        print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
+        return 0
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        # OSError filenames may contain private source paths; keep them out of output.
+        message = os.strerror(exc.errno) if isinstance(exc, OSError) and exc.errno else str(exc)
+        print(json.dumps({"ok": False, "error": message}, ensure_ascii=False))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
