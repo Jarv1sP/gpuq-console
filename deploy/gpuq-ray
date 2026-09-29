@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Use the selected project Python, not the host/system Python, to start Ray."""
+import runpy
+from pathlib import Path
+
+runpy.run_path(str(Path(__file__).resolve().with_name('job-resources.py')), run_name='__main__')

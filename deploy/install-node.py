@@ -2,7 +2,8 @@
 """Run as the GPUQ service user. Add scoped keys; never overwrite a GPUQ DB."""
 import argparse,fcntl,importlib.util,ipaddress,json,os,pwd,re,shlex,shutil,subprocess,sys,time
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--inventory',required=True);p.add_argument('--node',required=True);p.add_argument('--collector-key',required=True);p.add_argument('--executor-key',required=True);p.add_argument('--initialize-gpuq',action='store_true');p.add_argument('--enable-host-root',action='store_true');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--inventory',required=True);p.add_argument('--node',required=True);p.add_argument('--collector-key',required=True);p.add_argument('--executor-key',required=True);p.add_argument('--initialize-gpuq',action='store_true');p.add_argument('--enable-host-root',action='store_true');p.add_argument('--configure-cpu-delegation',action='store_true');p.add_argument('--runtime-profile',choices=('common-p0','ray-p0'),default='common-p0');a=p.parse_args()
+if a.configure_cpu_delegation and a.runtime_profile!='ray-p0':p.error('--configure-cpu-delegation requires --runtime-profile ray-p0')
 if os.getuid()==0:raise SystemExit('Run as the dedicated GPUQ user, not root')
 source=Path(__file__).resolve().parents[1];inventory=json.loads(Path(a.inventory).read_text());node=next(n for n in inventory['nodes'] if n['id']==a.node)
 if pwd.getpwuid(os.getuid()).pw_name!=node['user']:raise SystemExit('Wrong OS service user')
@@ -16,6 +17,15 @@ help_bwrap=run('bwrap','--help')
 if '--bind-fd' not in help_bwrap:raise SystemExit('bubblewrap must support --bind-fd; install a recent distro build')
 if not Path('/sys/fs/cgroup/cgroup.controllers').exists():raise SystemExit('cgroup v2 is required')
 if not Path(node['conda'],'bin/python').is_file():raise SystemExit('Read-only Python/Conda distribution missing')
+# Preflight before copying any runner or touching scheduler state. The explicit
+# root step writes only this service UID's delegation drop-in; it never reexecs
+# an active user manager. The real kernel probe, not systemctl show, is decisive.
+delegation=source/'deploy/cpu-delegation.py'
+if a.runtime_profile=='ray-p0':
+    if a.configure_cpu_delegation:print(run('sudo','/usr/bin/python3',str(delegation),'--configure',str(os.getuid())).strip())
+    try:run('/usr/bin/python3',str(delegation),'--check')
+    except subprocess.CalledProcessError as error:
+        raise SystemExit('CPU/memory/PID enforcement preflight failed; existing runner and scheduler are unchanged.\n'+(error.stderr or '')+'\nSee docs/RAY_RESOURCES.md; administrator confirmation is required before refreshing an active user manager.')
 os.umask(0o077);home=Path.home();dest=home/'.local/libexec/gpuq-console';dest.mkdir(parents=True,exist_ok=True)
 root=Path(node['workspaceRoot']);root.mkdir(parents=True,exist_ok=True,mode=0o700)
 scheduler=Path(node['gpuqRoot']);config=scheduler/'config.json';binary=home/'bin/gpu'
@@ -39,7 +49,11 @@ else:
     if a.initialize_gpuq:print('Existing GPUQ preserved; no upgrade or database initialization performed')
     if not binary.is_file():raise SystemExit('Existing GPUQ requires its managed ~/bin/gpu command')
 cfg=json.loads(config.read_text())
-for item in ('node-executor.py','sandbox-runner.py','terminal-helper.py','node-probe.py','dataset-cache.py','project-store.py','project-ops.py'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
+for item in ('node-executor.py','terminal-helper.py','node-probe.py','dataset-cache.py','project-store.py','project-ops.py','job-diagnostics.py'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
+runner_source='sandbox-runner.py' if a.runtime_profile=='ray-p0' else 'sandbox-runner-common-p0.py'
+shutil.copy2(source/'deploy'/runner_source,dest/'sandbox-runner.py');(dest/'sandbox-runner.py').chmod(0o700)
+if a.runtime_profile=='ray-p0':
+    for item in ('job-resources.py','gpuq-ray'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
 host_root=False
 if a.enable_host_root:
     # This is a deliberately explicit, high-trust host-root capability.
@@ -48,6 +62,9 @@ if a.enable_host_root:
     run('sudo','visudo','-cf',str(sudoers));run('sudo','install','-o','root','-g','root','-m','440',str(sudoers),'/etc/sudoers.d/gpuq-console');sudoers.unlink();host_root=True
 node_config={'machine':a.node,'cards':node['cards'],'root':str(root),'gpu':str(binary),'database':cfg['db_path'],'slirp':shutil.which('slirp4netns'),'conda':node['conda'],'hostRoot':host_root}
 previous=json.loads((dest/'node-config.json').read_text()) if (dest/'node-config.json').exists() else {}
+retention=node.get('diagnosticsRetentionDays',previous.get('diagnosticsRetentionDays',30))
+if type(retention) is not int or not 1<=retention<=365:raise SystemExit('Invalid diagnostics retention days (1..365)')
+node_config['diagnosticsRetentionDays']=retention
 datasets=node.get('datasets',previous.get('datasets'))
 if datasets is not None:
     if not isinstance(datasets,dict) or set(datasets)-{'root','mountPoint','sources','reserveBytes'}:raise SystemExit('Invalid node dataset configuration')
@@ -57,6 +74,9 @@ if datasets is not None:
     cache_module.DatasetCache('/data2/datasets',sources=datasets.get('sources',{}),reserve_bytes=datasets.get('reserveBytes',10*1024**3))
     node_config['datasets']=datasets
 (dest/'node-config.json').write_text(json.dumps(node_config,indent=2))
+units=home/'.config/systemd/user';units.mkdir(parents=True,exist_ok=True)
+for item in ('gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'):shutil.copy2(source/'deploy'/item,units/item)
+run('systemctl','--user','daemon-reload');run('systemctl','--user','enable','--now','gpuq-diagnostics-gc.timer')
 ssh=home/'.ssh';ssh.mkdir(mode=0o700,exist_ok=True);auth=ssh/'authorized_keys'
 if auth.is_symlink() or (auth.exists() and (not auth.is_file() or auth.stat().st_uid!=os.getuid())):raise SystemExit('Unsafe authorized_keys')
 with auth.open('a+') as f:
@@ -72,4 +92,4 @@ with auth.open('a+') as f:
         if content:backup=ssh/('authorized_keys.before-console-'+str(int(time.time())));backup.write_text(content);backup.chmod(0o600)
         f.write(('\n' if content and not content.endswith('\n') else '')+'\n'.join(entries)+'\n');f.flush();os.fsync(f.fileno())
 auth.chmod(0o600)
-print(json.dumps({'node':a.node,'rootTerminalEnabled':host_root,'gpuqObserveOnly':cfg.get('observe_only',True),'next':'Enable linger as administrator; inspect GPUQ before activating execution'}))
+print(json.dumps({'node':a.node,'runtimeProfile':a.runtime_profile,'rootTerminalEnabled':host_root,'gpuqObserveOnly':cfg.get('observe_only',True),'next':'Enable linger as administrator; inspect GPUQ before activating execution'}))

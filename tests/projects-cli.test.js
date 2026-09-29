@@ -5,7 +5,7 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,writeFile,readFile,mkdir,rm,stat,open} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 
 const RELEASE='a'.repeat(64),OLDER='b'.repeat(64),JOB='11111111-2222-4333-8444-555555555555';
 const principal={userId:'demo-user-1',username:'tester',role:'member'};
@@ -75,7 +75,7 @@ test('terminal open/exchange/close preserve selected project and use top-level r
   const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
   const preload=join(f.dir,'fake-tty.mjs');
   await writeFile(preload,'Object.defineProperty(process.stdin,"isTTY",{value:true});process.stdin.setRawMode=()=>process.stdin;');
-  f.custom.set('terminal.open',()=>({id:JOB}));
+  f.custom.set('terminal.open',()=>({id:JOB,writerToken:randomUUID()}));
   f.custom.set('terminal.exchange',()=>({offset:0,data:'',exited:true}));
   f.custom.set('terminal.close',()=>({closed:true}));
   const result=await f.cli(['ssh'],'',preload);assert.equal(result.code,0,result.stderr);
@@ -84,6 +84,33 @@ test('terminal open/exchange/close preserve selected project and use top-level r
   assert.equal(calls[1].args.cols,110);assert.equal(calls[1].args.rows,32);assert.equal('size'in calls[1].args,false);
   f.calls.length=0;assert.equal((await f.cli(['ssh','--root'],'',preload)).code,0);
   for(const c of f.calls.filter(c=>c.operation.startsWith('terminal.'))){assert.equal(c.args.hostAdmin,true);assert.equal('project'in c.args,false);}
+});
+test('same login CLI invocations create separate clients and reconnect/takeover is explicit',async t=>{
+  const f=await fixture(t),preload=join(f.dir,'isolated-tty.mjs');
+  await writeFile(preload,'Object.defineProperty(process.stdin,"isTTY",{value:true});process.stdin.setRawMode=()=>process.stdin;');
+  f.custom.set('terminal.open',args=>({id:args.id||randomUUID(),writerToken:randomUUID()}));
+  f.custom.set('terminal.exchange',()=>({offset:0,data:'',exited:true}));
+  f.custom.set('terminal.close',()=>({closed:true}));
+  for(let n=0;n<2;n++)assert.equal((await f.cli(['ssh'],'',preload)).code,0);
+  const opens=f.calls.filter(call=>call.operation==='terminal.open');
+  assert.equal(opens.length,2);assert.notEqual(opens[0].args.clientId,opens[1].args.clientId);assert.notEqual(opens[0].args.key,opens[1].args.key);
+  for(const call of opens){assert.equal(call.args.mode,'new');assert.equal('id'in call.args,false);}
+  assert.equal((await f.cli(['ssh','--reconnect',JOB,'--takeover'],'',preload)).code,0);
+  const reconnect=f.calls.filter(call=>call.operation==='terminal.open').at(-1).args;
+  assert.equal(reconnect.id,JOB);assert.equal(reconnect.mode,'reconnect');assert.equal(reconnect.takeover,true);
+  const invalid=await f.cli(['ssh','--takeover'],'',preload);assert.equal(invalid.code,1);assert.match(invalid.stderr,/requires --reconnect/);
+});
+
+test('Ctrl+] releases the writer lease instead of closing the retained PTY',async t=>{
+  const f=await fixture(t),preload=join(f.dir,'detach-tty.mjs');
+  await writeFile(preload,'Object.defineProperty(process.stdin,"isTTY",{value:true});process.stdin.setRawMode=value=>{if(value)setTimeout(()=>process.stdin.emit("data",Buffer.from([29])),30);return process.stdin;};');
+  f.custom.set('terminal.open',()=>({id:JOB,writerToken:randomUUID()}));
+  f.custom.set('terminal.exchange',()=>({offset:0,data:'',exited:false}));
+  f.custom.set('terminal.detach',()=>({detached:true}));
+  const result=await f.cli(['ssh'],'',preload);assert.equal(result.code,0,result.stderr);
+  assert.equal(f.calls.some(call=>call.operation==='terminal.close'),false);
+  assert.equal(f.calls.filter(call=>call.operation==='terminal.detach').length,1);
+  assert.match(result.stderr,/--reconnect/);
 });
 
 test('run selects latest READY release without publishing; exact argv and dataset refs preserved',async t=>{

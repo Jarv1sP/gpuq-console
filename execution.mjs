@@ -88,14 +88,27 @@ export async function executionCall(service,principal,operation,args){
     if(operation==='datasets.prepare')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
     return result;
   }
-  if(['terminal.open','terminal.exchange','terminal.close'].includes(operation)){
+  if(['terminal.open','terminal.exchange','terminal.close','terminal.detach'].includes(operation)){
     authorizedMachine(args.machine);
-    if(Object.keys(args).some(k=>!['machine','key','id','hostAdmin','input','offset','rows','cols','project'].includes(k)))fail('终端参数无效。');
+    const opening=operation==='terminal.open',mode=args.mode||'new';
+    const allowed=['machine','id','hostAdmin','project','clientId','writerToken',...(opening?['key','mode','takeover']:operation==='terminal.exchange'?['input','offset','rows','cols']:[])];
+    if(Object.keys(args).some(k=>!allowed.includes(k)))fail('终端参数无效。');
+    if(args.hostAdmin&&principal.role!=='admin')fail('宿主机 root 终端仅管理员可用。',403);
+    const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+    if(typeof args.clientId!=='string'||!uuid.test(args.clientId))fail('请升级客户端或刷新网页：终端需要独立会话和单写租约。');
+    if(opening){
+      if(!['new','reconnect'].includes(mode)||typeof args.key!=='string'||!uuid.test(args.key))fail('需明确新建或重连，并提供 UUID 连接键。');
+      if(args.takeover!==undefined&&typeof args.takeover!=='boolean'||args.takeover&&mode!=='reconnect')fail('仅显式重连可确认接管。');
+      if(mode==='new'&&(args.id!==undefined||args.writerToken!==undefined))fail('新建终端不能携带旧会话。');
+    }
+    if((!opening||mode==='reconnect')&&(typeof args.id!=='string'||!uuid.test(args.id)))fail('需指定完整终端会话 ID。');
+    if(args.writerToken!==undefined&&(typeof args.writerToken!=='string'||!uuid.test(args.writerToken)))fail('终端写入凭据无效。');
+    if(!opening&&args.writerToken===undefined)fail('缺少终端写入凭据；请显式重连。');
+    if(args.hostAdmin!==undefined&&typeof args.hostAdmin!=='boolean')fail('终端模式无效。');
     const project=projectReference(args);
     if(project.project&&args.hostAdmin)fail('项目终端与宿主机 root 维护入口分开使用。');
-    if(args.hostAdmin&&principal.role!=='admin')fail('宿主机 root 终端仅管理员可用。',403);
     if(args.input&&(typeof args.input!=='string'||args.input.length>12000))fail('终端输入过长。');
-    if(operation==='terminal.open')service.audit(principal.username,operation,args.machine,args.hostAdmin?'host-root':'private');
+    if(operation==='terminal.open')service.audit(principal.username,operation,args.machine,(args.hostAdmin?'host-root':'private')+':'+mode+(args.takeover?':takeover':''));
     return service.bridge(args.machine,operation,{...args,userId:user.id,username:user.username,hostAdmin:args.hostAdmin===true});
   }
   if(operation==='jobs.submit'){
@@ -153,6 +166,11 @@ export async function executionCall(service,principal,operation,args){
     return publicJob(job);
   }
   if(operation==='jobs.logs'){const job=jobById(args.jobId);return service.bridge(job.machine,'logs',{job:job.spec});}
+  if(operation==='jobs.diagnostics'){
+    if(Object.keys(args).some(k=>k!=='jobId'))fail('诊断参数无效。');
+    const job=jobById(args.jobId);authorizedMachine(job.machine);
+    return service.bridge(job.machine,'diagnostics',{job:job.spec});
+  }
   if(operation==='files.list'||operation==='files.put'||operation==='files.get'){
     authorizedMachine(args.machine);
     if(Object.keys(args).some(k=>!['machine','path','data','offset','truncate','project','area','runId','uploadId','totalSize','sha256','final'].includes(k)))fail('文件参数无效。');

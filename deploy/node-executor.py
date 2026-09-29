@@ -14,6 +14,23 @@ DATASET_ID=re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 DATASET_VERSION=re.compile(r'^[a-f0-9]{64}$')
 DATASET_MODULE=None
 PROJECT_OPS=None
+DIAGNOSTICS=None
+
+def job_diagnostics(job,data):
+    global DIAGNOSTICS
+    if DIAGNOSTICS is None:
+        spec=importlib.util.spec_from_file_location('gpuq_job_diagnostics',HERE/'job-diagnostics.py')
+        DIAGNOSTICS=importlib.util.module_from_spec(spec);spec.loader.exec_module(DIAGNOSTICS)
+    return DIAGNOSTICS.bundle(ROOT,job,data)
+
+def job_log_result(job,data,text):
+    try:
+        package=job_diagnostics(job,data)
+        footer=DIAGNOSTICS.summary(package)
+    except Exception:
+        footer='\n\n[GPUQ 诊断暂不可用；不据此判断 worker 健康或改变任务终态]\n查看：gpuctl diagnostics '+job['id']+' --json\n'
+    return {'text':text+footer}
+
 
 def projects():
     global PROJECT_OPS
@@ -331,11 +348,13 @@ def file_op(operation,args,root=None):
         finally:os.close(f)
     finally:os.close(fd)
 
-def validate_job(job):
+def validate_job(job,readonly=False):
     required={'id','userId','username','cards','argv','name','minVramGiB'}
     if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release'}:raise ValueError('Invalid job specification')
     if not UUID.fullmatch(job['id']):raise ValueError('Invalid job ID')
-    workspace(job['userId'])
+    if readonly:
+        if not isinstance(job['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',job['userId']):raise ValueError('Invalid identity')
+    else:workspace(job['userId'])
     if not re.fullmatch(r'[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}',job['username']):raise ValueError('Invalid username')
     if type(job['cards'])!=int or not 1<=job['cards']<=CONFIG.get('cards',64):raise ValueError('Invalid card count')
     if not isinstance(job['argv'],list) or not 1<=len(job['argv'])<=128 or any(not isinstance(a,str) or '\0' in a for a in job['argv']) or len(json.dumps(job['argv']))>12000:raise ValueError('Invalid argv')
@@ -351,6 +370,31 @@ def terminal_pointer(args):
         suffix+=':project:'+args['project']
     identity=hashlib.sha256((args['userId']+suffix).encode()).hexdigest()[:20]
     return ROOT/'terminals'/(identity+'.current')
+
+def terminal_pointers(args):
+    """Legacy and every independent session fence for this exact context."""
+    legacy=terminal_pointer(args)
+    result=[legacy] if legacy.exists() else []
+    for path in sorted(legacy.parent.glob(legacy.stem+'.*.current')):
+        if not UUID.fullmatch(path.name[len(legacy.stem)+1:-8]):raise ValueError('Invalid terminal session pointer')
+        result.append(path)
+    return result
+
+def terminal_metadata(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>16384:raise ValueError('Invalid terminal metadata')
+        with os.fdopen(fd,'r',closefd=False) as stream:return json.load(stream)
+    finally:os.close(fd)
+
+def terminal_owned(args,jid):
+    try:spec=terminal_metadata(ROOT/'terminals'/(jid+'.json'))
+    except FileNotFoundError:raise ValueError('Terminal not found or not owned') from None
+    if (spec.get('userId')!=args['userId'] or spec.get('project')!=args.get('project') or
+            (spec.get('hostAdmin') is True)!=(args.get('hostAdmin') is True)):
+        raise ValueError('Terminal not found or not owned')
+    return spec
 
 def terminal_alive(folder,jid):
     if not isinstance(jid,str) or not UUID.fullmatch(jid):return False
@@ -378,37 +422,88 @@ def terminal_op(operation,args):
     workspace(args['userId'])
     if not re.fullmatch(r'[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}',args['username']):raise ValueError('Invalid username')
     folder=ROOT/'terminals';folder.mkdir(mode=0o700,exist_ok=True)
-    pointer=terminal_pointer(args);identity=pointer.stem
-    with open(folder/(identity+'.lock'),'a') as lock:
+    legacy=terminal_pointer(args)
+    client_id=args.get('clientId')
+    if not isinstance(client_id,str) or not UUID.fullmatch(client_id):
+        raise ValueError('Terminal client upgrade required: use independent sessions and a writer lease')
+    opening=operation=='terminal.open';mode=args.get('mode','new')
+    if opening and mode not in ('new','reconnect'):raise ValueError('Choose terminal mode new or reconnect')
+    if opening and (not isinstance(args.get('key'),str) or not UUID.fullmatch(args['key'])):raise ValueError('Invalid terminal attachment key')
+    if type(args.get('takeover',False)) is not bool or (args.get('takeover') and (not opening or mode!='reconnect')):
+        raise ValueError('Takeover requires an explicit reconnect')
+    jid=args.get('key') if opening and mode=='new' else args.get('id')
+    if not isinstance(jid,str) or not UUID.fullmatch(jid):raise ValueError('Invalid terminal ID')
+    pointer=folder/(legacy.stem+'.'+jid+'.current')
+    receipt_path=folder/(jid+'.session.json')
+    with open(folder/(jid+'.lock'),'a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
-        jid=pointer.read_text() if pointer.exists() else None
-        if operation=='terminal.open':
-            if not terminal_alive(folder,jid):
-                if jid and UUID.fullmatch(jid):
-                    stop_terminal(jid)
-                    if args.get('project') and not projects().terminal_stopped(jid):raise ValueError('Cannot confirm previous project terminal termination; reconnect blocked')
-                    (folder/(jid+'.sock')).unlink(missing_ok=True)
-                jid=args['key']
-                if not isinstance(jid,str) or not UUID.fullmatch(jid):raise ValueError('Invalid terminal ID')
-                if (folder/(jid+'.json')).exists():jid=str(uuid.uuid4())
+        now=time.time()
+        receipt=terminal_metadata(receipt_path) if receipt_path.exists() else None
+        if opening:
+            if mode=='new' and not (folder/(jid+'.json')).exists():
                 unit='amax-term-'+jid
                 spec={'userId':args['userId'],'username':args['username'],'cards':0,'argv':['/bin/bash','--noprofile','--norc','-i'],'hostAdmin':args.get('hostAdmin') is True}
                 if args.get('project'):spec['project']=args['project']
-                with open(folder/(jid+'.json'),'x') as f:json.dump(spec,f)
-                pointer.write_text(jid)
+                with open(folder/(jid+'.json'),'x') as f:json.dump(spec,f);f.flush();os.fsync(f.fileno())
+                receipt={'schema':2,'originClient':client_id,'clientId':client_id,'attachKey':args['key'],'writerToken':str(uuid.uuid4()),'leaseExpiresAt':now+30,'state':'OPEN'}
+                atomic_json(receipt_path,receipt)
+                with open(pointer,'x') as f:f.write(jid);f.flush();os.fsync(f.fileno())
+                directory=os.open(folder,os.O_RDONLY|os.O_DIRECTORY)
+                try:os.fsync(directory)
+                finally:os.close(directory)
                 command=['/usr/bin/systemd-run','--user','--collect','--unit',unit,'--property=RuntimeMaxSec=21600','--property=KillMode=control-group','--property=TimeoutStopSec=5']
                 if not spec['hostAdmin']:command+=['--property=MemoryMax=8G','--property=CPUQuota=200%','--property=TasksMax=2048']
                 run(command+['/usr/bin/python3',str(HERE/'terminal-helper.py'),jid])
                 for _ in range(30):
                     if (folder/(jid+'.sock')).exists():break
                     time.sleep(0.1)
-            return {'id':jid,'hostAdmin':args.get('hostAdmin') is True}
-        if not jid or jid!=args.get('id'):raise ValueError('Terminal not found or not owned')
+            else:
+                terminal_owned(args,jid)
+                if receipt and receipt.get('state')=='CLOSED':raise ValueError('Terminal has ended; create a new session')
+                if not terminal_alive(folder,jid):raise ValueError('Terminal is not reachable; no replacement was started and no existing session was stopped')
+                if mode=='new':
+                    # Same-key retry only belongs to its original client. Never
+                    # turn an unrelated open into an implicit reconnect/takeover.
+                    if not receipt or receipt.get('originClient')!=client_id or receipt.get('clientId')!=client_id:
+                        raise ValueError('Terminal key already exists; use a new key or explicit reconnect')
+                    if receipt.get('state')!='OPEN' or receipt.get('leaseExpiresAt',0)<=now:
+                        raise ValueError('Terminal attachment expired or detached; reconnect explicitly')
+                elif receipt and receipt.get('clientId')==client_id and receipt.get('attachKey')==args.get('key') and receipt.get('state')=='OPEN' and receipt.get('leaseExpiresAt',0)>now:
+                    # Retrying the exact attachment after a lost reply must not
+                    # rotate its token again or grant a different client access.
+                    receipt['leaseExpiresAt']=now+30;atomic_json(receipt_path,receipt)
+                    return {'id':jid,'hostAdmin':args.get('hostAdmin') is True,'clientId':client_id,
+                            'writerToken':receipt['writerToken'],'leaseExpiresAt':receipt['leaseExpiresAt'],'mode':mode}
+                elif receipt is None:
+                    if not args.get('takeover'):raise ValueError('Legacy terminal requires explicit takeover; upgrade all clients before reconnecting')
+                    receipt={'schema':2,'originClient':None,'state':'OPEN'}
+                elif receipt.get('leaseExpiresAt',0)>now and not args.get('takeover'):
+                    if receipt.get('clientId')!=client_id or receipt.get('writerToken')!=args.get('writerToken'):
+                        raise ValueError('Terminal has another active writer; detach it, wait for lease expiry, or explicitly take over')
+                # Reconnect rotates the fencing token even for the same client.
+                # A delayed close/exchange from the previous attachment is stale.
+                if mode=='reconnect':receipt.update(clientId=client_id,attachKey=args.get('key'),writerToken=str(uuid.uuid4()),state='OPEN')
+                receipt['leaseExpiresAt']=now+30
+                atomic_json(receipt_path,receipt)
+            return {'id':jid,'hostAdmin':args.get('hostAdmin') is True,'clientId':client_id,
+                    'writerToken':receipt['writerToken'],'leaseExpiresAt':receipt['leaseExpiresAt'],'mode':mode}
+        terminal_owned(args,jid)
+        if (not receipt or receipt.get('clientId')!=client_id or receipt.get('writerToken')!=args.get('writerToken')
+                or receipt.get('leaseExpiresAt',0)<=now or receipt.get('state')!='OPEN'):
+            raise ValueError('Terminal writer lease expired or was taken over; reconnect explicitly (old clients must upgrade)')
+        if operation=='terminal.detach':
+            receipt.update(leaseExpiresAt=0,state='DETACHED');atomic_json(receipt_path,receipt)
+            return {'detached':True,'id':jid}
         if operation=='terminal.close':
             stop_terminal(jid)
             if args.get('project') and not projects().terminal_stopped(jid):raise ValueError('Cannot confirm project terminal termination; retry when node services recover')
             (folder/(jid+'.sock')).unlink(missing_ok=True);pointer.unlink(missing_ok=True)
+            if legacy.exists() and legacy.read_text()==jid:legacy.unlink()
+            receipt.update(leaseExpiresAt=0,state='CLOSED');atomic_json(receipt_path,receipt)
             return {'closed':True}
+        if operation!='terminal.exchange':raise ValueError('Unknown terminal operation')
+        if receipt['leaseExpiresAt']-now<15:
+            receipt['leaseExpiresAt']=now+30;atomic_json(receipt_path,receipt)
         request={key:args[key] for key in ('input','offset','rows','cols') if key in args}
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(4);client.connect(str(folder/(jid+'.sock')));client.sendall((json.dumps(request)+'\n').encode());raw=b''
@@ -422,9 +517,19 @@ def terminal_op(operation,args):
             return result
 
 def process(operation,args):
+    if operation=='diagnostics':
+        if not isinstance(args,dict) or set(args)!={'job'}:raise ValueError('Invalid diagnostic operation fields')
+        job=args['job'];validate_job(job,readonly=True)
+        spec=ROOT/'jobs'/(job['id']+'.json')
+        if spec.exists() and json.loads(spec.read_text())!=job:raise ValueError('Job identity mismatch')
+        with closing(sqlite3.connect(f'file:{CONFIG["database"]}?mode=ro',uri=True)) as db:
+            row=db.execute('SELECT id FROM jobs WHERE submit_key=?',(job['id'],)).fetchone()
+        if row and not spec.exists():raise ValueError('Job identity is unavailable')
+        data=gpu('show',row[0]) if row else {'job':{'state':'NOT_SUBMITTED'},'attempts':[]}
+        return job_diagnostics(job,data)
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation in ('datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister'):return dataset_op(operation,args)
-    if operation in ('terminal.open','terminal.exchange','terminal.close'):
+    if operation in ('terminal.open','terminal.exchange','terminal.close','terminal.detach'):
         if args.get('project') and operation=='terminal.open':
             ops=projects()
             with ops.guard(args):
@@ -454,7 +559,7 @@ def process(operation,args):
                 if dataset_refs(job) and attempted.exists():return {'state':'UNKNOWN','error':'Submission may still be pending; dataset leases retained'}
                 release_datasets(job,never_dispatched=True)
                 return {'state':'CANCELED'}
-            if operation=='logs':return {'text':'任务尚未提交到 GPUQ。'}
+            if operation=='logs':return job_log_result(job,{'job':{'state':'NOT_SUBMITTED'},'attempts':[]},'任务尚未提交到 GPUQ。')
             if job.get('project'):
                 projects().store.release(job['userId'],job['project'],job['release'])
                 projects().store.run_paths(job['userId'],job['project'],job['release'],jid)
@@ -468,8 +573,8 @@ def process(operation,args):
         else:node_id=row[0]
         data=gpu('show',node_id);state=data.get('job',data)
         if operation=='logs':
-            if not data.get('attempts'):return {'text':'任务正在排队，尚未产生运行日志。'}
-            return {'text':run([CONFIG['gpu'],'logs','-n','200',node_id])[-200000:]}
+            if not data.get('attempts'):return job_log_result(job,data,'任务正在排队，尚未产生运行日志。')
+            return job_log_result(job,data,run([CONFIG['gpu'],'logs','-n','200',node_id])[-200000:])
         if operation=='cancel' and state['state'] not in ('SUCCEEDED','FAILED','CANCELED'):
             gpu('cancel',node_id);data=gpu('show',node_id);state=data.get('job',data)
         attempts=data.get('attempts',[])

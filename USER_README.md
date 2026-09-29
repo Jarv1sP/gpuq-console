@@ -19,6 +19,8 @@
 
 界面帮助入口提供用户手册，管理员另有管理员手册；阅读文档不代表获得管理权限。管理员分配额度后，实际操作都在“我的工作台”，不用到用户管理页开终端或提交任务。
 
+新终端各自独立，重连、分离和接管见[终端会话手册](https://gpu.example.com/guide/terminal-sessions)。任务的 worker 日志与历史 GPU 分配见[诊断手册](https://gpu.example.com/guide/diagnostics)。[Ray 资源手册](https://gpu.example.com/guide/ray-resources)仅适用于管理员明确启用并验证的节点；默认公共 P0 档不启用这项资源改造，未采集到的旧任务信息仍显示未知。
+
 ## 安装命令行客户端
 
 电脑需要 Node.js 22.13+。只安装一次客户端：

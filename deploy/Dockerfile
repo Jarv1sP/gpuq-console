@@ -3,7 +3,7 @@ WORKDIR /app
 COPY --chown=root:root dist ./dist
 COPY --chown=root:root portal-server.mjs portal-service.mjs execution.mjs projects.mjs gpuq-status.mjs cli.mjs package.json ./
 COPY --chown=root:root USER_README.md ADMIN_README.md ./
-COPY --chown=root:root docs/DATASETS.md docs/PROJECTS.md ./docs/
+COPY --chown=root:root docs/DATASETS.md docs/PROJECTS.md docs/TERMINAL_SESSIONS.md docs/JOB_DIAGNOSTICS.md docs/RAY_RESOURCES.md ./docs/
 COPY --chown=root:root deploy/install-client.sh ./deploy/
 USER node
 EXPOSE 8080

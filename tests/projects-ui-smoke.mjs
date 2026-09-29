@@ -36,12 +36,13 @@ try{
       project.state='PUBLISHING';return copy(project);
     }
     if(operation==='projects.verify'){assert.ok(project?.releases.some(item=>item.release===args.release&&item.state==='READY'));return {project:args.project,release:args.release,state:'READY'};}
-    if(operation==='terminal.open'){const id=randomUUID();assert.equal(args.hostAdmin,false);terminals.set(id,{...copy(args),machine:node});return {id};}
+    if(operation==='terminal.open'){const id=args.mode==='reconnect'?args.id:randomUUID(),writerToken=randomUUID();assert.equal(args.hostAdmin,false);if(args.mode==='reconnect')assert.ok(terminals.has(id));terminals.set(id,{...copy(args),machine:node,writerToken});return {id,writerToken};}
     if(operation==='terminal.exchange'){
-      const session=terminals.get(args.id);assert.ok(session);assert.equal(args.project,session.project);assert.equal(args.hostAdmin,session.hostAdmin);assert.equal(node,session.machine);
+      const session=terminals.get(args.id);assert.ok(session);assert.equal(args.project,session.project);assert.equal(args.hostAdmin,session.hostAdmin);assert.equal(node,session.machine);assert.equal(args.writerToken,session.writerToken);
       const bytes=Buffer.from('Local mock project terminal. No shell is executed.\r\n');return {offset:bytes.length,data:args.offset?'':bytes.toString('base64'),exited:false};
     }
     if(operation==='terminal.close'){const session=terminals.get(args.id);assert.ok(session);assert.equal(args.project,session.project);assert.equal(node,session.machine);terminals.delete(args.id);return {closed:true};}
+    if(operation==='terminal.detach'){const session=terminals.get(args.id);assert.ok(session);assert.equal(args.writerToken,session.writerToken);return {detached:true};}
     if(operation==='files.put'){
       if(args.project){assert.equal(args.area,'code');assert.equal(Object.hasOwn(args,'truncate'),false);assert.match(args.uploadId,/^[a-f0-9-]{36}$/);
         const parts=uploads.get(args.uploadId)||[];assert.equal(args.offset,parts.reduce((n,part)=>n+part.length,0));parts.push(Buffer.from(args.data,'base64'));uploads.set(args.uploadId,parts);
@@ -110,9 +111,11 @@ try{
   await page.locator('#terminal-disconnect').click();assert.equal(await page.locator('#project-publish').isDisabled(),true);
   assert.equal(terminals.size,1,'disconnect keeps development session alive');
   const opened=calls.filter(call=>call.operation==='terminal.open').length;
-  await page.locator('#terminal-open').click();await page.locator('.terminal-dialog').waitFor({state:'visible'});await page.locator('#terminal-disconnect').click();
-  assert.equal(calls.filter(call=>call.operation==='terminal.open').length,opened,'reopen reconnects rather than creates a second session');
-  await action('terminal.close',()=>page.locator('#project-terminal-stop').click());assert.equal(terminals.size,0);await idle();
+  page.once('dialog',dialog=>dialog.accept([...terminals.keys()][0]));
+  await page.locator('#terminal-reconnect').click();await page.locator('.terminal-dialog').waitFor({state:'visible'});await page.locator('#terminal-disconnect').click();
+  assert.equal(calls.filter(call=>call.operation==='terminal.open').length,opened+1,'reconnect explicitly reacquires the same session');assert.equal(terminals.size,1);
+  await action('terminal.open',()=>page.locator('#terminal-open').click());await page.locator('.terminal-dialog').waitFor({state:'visible'});await page.locator('#terminal-disconnect').click();assert.equal(terminals.size,2,'new always creates an independent session');
+  await action('terminal.close',()=>page.locator('#project-terminal-stop').click());await page.locator('#project-terminal-stop').waitFor({state:'hidden'});assert.equal(terminals.size,0);await idle();
   for(const call of calls.filter(call=>call.operation.startsWith('terminal.'))){assert.equal(call.machine,machine);assert.equal(call.args.project,'vision-demo');assert.equal(call.args.hostAdmin,false);}
 
   await page.locator('#train-form').evaluate(form=>{form.closest('details').open=true;});

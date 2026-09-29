@@ -48,11 +48,29 @@ test('project jobs pin one release and verify it before quota reservation',async
 });
 test('project terminal forbids host-root combination and retains context on all operations',async()=>{
  const f=await fixture();try{
-  for(const operation of ['terminal.open','terminal.exchange','terminal.close']){
-   await f.call(operation,{project:'my-project',key:randomUUID(),id:randomUUID()});
+  for(const operation of ['terminal.open','terminal.exchange','terminal.close','terminal.detach']){
+   await f.call(operation,{project:'my-project',clientId:randomUUID(),...(operation==='terminal.open'?{mode:'new',key:randomUUID()}:{id:randomUUID(),writerToken:randomUUID()})});
    assert.equal(f.calls.at(-1).args.project,'my-project');assert.equal(f.calls.at(-1).args.userId,f.member.id);
   }
   await assert.rejects(f.call('terminal.open',{project:'my-project',key:randomUUID(),hostAdmin:true},f.admin.token));
+ }finally{await f.close();}
+});
+test('terminal API requires explicit isolated attachment and fences legacy/forged client fields',async()=>{
+ const f=await fixture();try{
+  const clientId=randomUUID(),key=randomUUID(),id=randomUUID(),writerToken=randomUUID();
+  await assert.rejects(f.call('terminal.open',{key}),/升级/);
+  for(const args of [{clientId,key,mode:'new',id},{clientId,key,mode:'new',takeover:true},{clientId,key,mode:'shared'},{clientId,key,mode:'reconnect',id,takeover:'yes'},{clientId,key,mode:'new',userId:'somebody-else'}])await assert.rejects(f.call('terminal.open',args));
+  await f.call('terminal.open',{clientId,key,mode:'new'});
+  assert.equal(f.calls.at(-1).args.clientId,clientId);assert.equal(f.calls.at(-1).args.userId,f.member.id);
+  await f.call('terminal.open',{clientId,key:randomUUID(),mode:'reconnect',id,writerToken,takeover:true});
+  assert.equal(f.calls.at(-1).args.takeover,true);
+  for(const operation of ['terminal.exchange','terminal.close','terminal.detach']){
+   await assert.rejects(f.call(operation,{clientId,id}),/凭据/);
+   await assert.rejects(f.call(operation,{clientId,id,writerToken,takeover:true}),/参数/);
+  }
+  await assert.rejects(f.call('terminal.open',{clientId,key,mode:'new',hostAdmin:true}),e=>e.status===403);
+  await f.call('terminal.open',{clientId,key,mode:'new',hostAdmin:true},f.admin.token);
+  assert.equal(f.calls.at(-1).args.userId,f.admin.principal.userId);
  }finally{await f.close();}
 });
 test('project outputs require same authenticated owner, machine, project and job',async()=>{

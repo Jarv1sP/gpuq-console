@@ -1,0 +1,15 @@
+.diagnostic-tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.diagnostic-tools [aria-pressed=true]{border-color:#365c96;background:#eef3fe}
+.diagnostic-tools p{width:100%;font-size:13px;line-height:1.7;color:#65738a}
+.job-log-dialog [hidden]{display:none!important}
+.diagnostic-summary{padding:14px;background:#f5f7fb;border-radius:8px;line-height:1.8;font-size:14px}
+.diagnostic-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:16px 0}
+.diagnostic-metrics div{min-width:0}.diagnostic-metrics dt{font-size:12px;color:#65738a}
+.diagnostic-metrics dd{margin:5px 0 0;font:14px/1.7 ui-monospace,monospace;overflow-wrap:anywhere}
+.diagnostic-history{overflow:auto;margin:14px 0 20px}.diagnostic-history table{width:100%;border-collapse:collapse;font-size:12px}
+.diagnostic-history th,.diagnostic-history td{text-align:left;vertical-align:top;border-bottom:1px solid #e5eaf2;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere}
+.diagnostic-history th{font-weight:600;color:#65738a}.diagnostic-history td:nth-child(2){font-family:ui-monospace,monospace;min-width:200px}
+.diagnostic-log{margin-top:10px;border:1px solid #dbe2ec;border-radius:8px;padding:12px}
+.diagnostic-log summary{cursor:pointer;font:12px/1.7 ui-monospace,monospace;overflow-wrap:anywhere}
+.job-log-dialog h3{margin:18px 0 8px}.job-log-dialog .modal-head{flex-wrap:wrap}.job-log-dialog .button{white-space:normal}
+@media(max-width:600px){.diagnostic-metrics{grid-template-columns:minmax(0,1fr)}.diagnostic-tools .button{flex:1;min-width:110px}.job-log-dialog{padding:20px}}

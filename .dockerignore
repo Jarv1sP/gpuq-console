@@ -6,5 +6,8 @@
 !ADMIN_README.md
 !docs/DATASETS.md
 !docs/PROJECTS.md
+!docs/TERMINAL_SESSIONS.md
+!docs/JOB_DIAGNOSTICS.md
+!docs/RAY_RESOURCES.md
 !deploy/Dockerfile
 !deploy/install-client.sh

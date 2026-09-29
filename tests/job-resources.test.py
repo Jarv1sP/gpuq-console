@@ -1,0 +1,315 @@
+"""Isolated budget/Ray adapter tests: no Ray, systemd, GPU or network required."""
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
+
+
+def module(name, filename):
+    spec = importlib.util.spec_from_file_location(name, DEPLOY / filename)
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+R = module('resource_tests', 'job-resources.py')
+S = module('resource_runner_tests', 'sandbox-runner.py')
+JOB = {'id': '11111111-1111-4111-8111-111111111111', 'cards': 8}
+UUIDS = ['GPU-' + str(n) for n in range(8)]
+
+
+class Resources(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.group = '/user.slice/gpuq-test.service'
+        self.leaf = self.root / self.group.lstrip('/')
+        self.leaf.mkdir(parents=True)
+        self.write_limits(self.leaf, '3200000 100000', str(256 * R.GIB), '2048')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_limits(self, path, cpu, memory, pids):
+        for name, value in [('cpu.max', cpu), ('memory.max', memory), ('pids.max', pids)]:
+            (path / name).write_text(value + '\n')
+
+    def budget(self, **kwargs):
+        return R.read_budget(JOB, self.group, UUIDS, root=self.root,
+                             affinity_count=128, physical_memory=512 * R.GIB, **kwargs)
+
+    def test_eight_cards_are_32_cpu_256_gib_2048_tasks_not_host_capacity(self):
+        budget = self.budget()
+        self.assertEqual(budget['cpuLimit'], 32)
+        self.assertEqual(budget['memoryLimitBytes'], 256 * R.GIB)
+        self.assertEqual(budget['pidsLimit'], 2048)
+        self.assertEqual(budget['gpuCount'], 8)
+        self.assertEqual(budget['gpuUuids'], UUIDS)
+        self.assertEqual(budget['cgroupPath'], '/sys/fs/cgroup')
+        self.assertNotIn(str(self.root), json.dumps(budget))
+
+    def test_ancestor_caps_affinity_and_physical_memory_are_conservative(self):
+        self.write_limits(self.leaf.parent, '1200000 100000', str(128 * R.GIB), '1024')
+        self.write_limits(self.root, '600000 100000', str(64 * R.GIB), '800')
+        budget = self.budget()
+        self.assertEqual((budget['cpuLimit'], budget['memoryLimitBytes'], budget['pidsLimit']),
+                         (6, 64 * R.GIB, 800))
+        budget = R.read_budget(JOB, self.group, UUIDS, root=self.root,
+                               affinity_count=4, physical_memory=32 * R.GIB)
+        self.assertEqual((budget['cpuLimit'], budget['memoryLimitBytes']), (4, 32 * R.GIB))
+
+    def test_missing_unlimited_or_excessive_leaf_limits_fail_closed(self):
+        for field, values in [('cpu.max', ['max 100000', '6400000 100000', '0 100000', '1 0', 'broken']),
+                              ('memory.max', ['max', str(512 * R.GIB), '-1', 'bad']),
+                              ('pids.max', ['max', '2049', '0', 'NaN'])]:
+            original = (self.leaf / field).read_text()
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    (self.leaf / field).write_text(value)
+                    with self.assertRaises(ValueError):
+                        self.budget()
+            (self.leaf / field).unlink()
+            with self.assertRaisesRegex(ValueError, 'Missing enforced'):
+                self.budget()
+            (self.leaf / field).write_text(original)
+
+    def test_cgroup_paths_cannot_escape_or_follow_symlinks(self):
+        for value in ('../outside', '/user.slice/../outside', '//user.slice', '/bad\x00'):
+            with self.assertRaises(ValueError):
+                R.cgroup_path(value, self.root)
+        (self.root / 'alias').symlink_to(self.leaf.parent, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            R.cgroup_path('/alias/gpuq-test.service', self.root)
+
+    def test_allocations_and_terminal_budget(self):
+        with self.assertRaises(ValueError):
+            R.read_budget(JOB, self.group, UUIDS[:-1], root=self.root)
+        with self.assertRaises(ValueError):
+            R.read_budget(JOB, self.group, [UUIDS[0]] * 8, root=self.root)
+        for cards in (None, 0, True, '8', 65):
+            with self.assertRaises(ValueError):
+                R.requested_limits({'cards': cards})
+        self.write_limits(self.leaf, '200000 100000', str(8 * R.GIB), '2048')
+        budget = R.read_budget({'id': JOB['id']}, self.group, [], terminal=True,
+                               root=self.root, affinity_count=128, physical_memory=512 * R.GIB)
+        self.assertEqual((budget['cpuLimit'], budget['memoryLimitBytes'], budget['gpuCount']),
+                         (2, 8 * R.GIB, 0))
+
+    def test_metadata_environment_is_complete_and_generic_not_ray_thread_tuning(self):
+        env = R.resource_environment(self.budget())
+        self.assertEqual(env, {'GPUQ_RESOURCES_FILE': '/run/gpuq/resources.json',
+                              'GPUQ_CPU_LIMIT': '32', 'GPUQ_MEMORY_LIMIT_BYTES': str(256 * R.GIB),
+                              'GPUQ_PIDS_LIMIT': '2048', 'GPUQ_GPU_COUNT': '8'})
+        self.assertFalse(any(key.startswith('RAY_') for key in env))
+
+    def test_ray_kwargs_and_start_include_exact_budget_with_memory_headroom(self):
+        budget = self.budget()
+        values = R.ray_init_kwargs(budget)
+        self.assertEqual((values['num_cpus'], values['num_gpus']), (32, 8))
+        self.assertIs(type(values['num_cpus']), int)
+        self.assertEqual(values['object_store_memory'], 8 * R.GIB)
+        self.assertEqual(values['object_spilling_directory'], '/tmp/gpuq-ray-spill')
+        self.assertLessEqual(values['_memory'] + values['object_store_memory'],
+                             budget['memoryLimitBytes'] - budget['memoryLimitBytes'] // 10)
+        command = R.ray_start_command(budget, ['--block'], python='/opt/project-env/bin/python',
+                                       temp_dir='/run/gpuq/runtime/ray')
+        self.assertEqual(command[:5], ['/opt/project-env/bin/python', '-m', 'ray.scripts.scripts', 'start', '--head'])
+        for value in ('--num-cpus=32', '--num-gpus=8', '--temp-dir=/run/gpuq/runtime/ray',
+                      '--object-spilling-directory=/tmp/gpuq-ray-spill',
+                      '--memory=' + str(values['_memory']), '--object-store-memory=' + str(8 * R.GIB)):
+            self.assertIn(value, command)
+        for arguments in (['--num-cpus=128'], ['--num', '128'], ['--address=auto'], ['--system-config={}'], ['--temp-dir=/tmp']):
+            with self.assertRaises(ValueError):
+                R.ray_start_command(budget, arguments)
+
+    def test_ray_cpu_budget_is_integer_and_fractional_quota_is_never_rounded_up(self):
+        for quota, logical in ((32.0, 32), (32.75, 32), (1.25, 1), (1, 1)):
+            budget = {**self.budget(), 'cpuLimit': quota}
+            with self.subTest(quota=quota):
+                values = R.ray_init_kwargs(budget)
+                self.assertIs(type(values['num_cpus']), int)
+                self.assertEqual(values['num_cpus'], logical)
+                self.assertLessEqual(values['num_cpus'], quota)
+                self.assertIn('--num-cpus=' + str(logical), R.ray_start_command(budget, []))
+                self.assertEqual(budget['cpuLimit'], quota)
+        for quota in (.1, .99):
+            budget = {**self.budget(), 'cpuLimit': quota}
+            with self.subTest(quota=quota), self.assertRaisesRegex(ValueError, 'one whole CPU'):
+                R.ray_init_kwargs(budget)
+            with self.assertRaisesRegex(ValueError, 'one whole CPU'):
+                R.ray_start_command(budget, [])
+
+    def test_ray_profile_is_opt_in_keeps_gpu_visibility_and_limits_worker_fanout(self):
+        original = {'PATH': '/opt/project-env/bin', 'CUDA_VISIBLE_DEVICES': '7',
+                    'RAY_USE_MULTIPROCESSING_CPU_COUNT': '1', 'RAY_ADDRESS': 'outside:1234',
+                    'RAY_OVERRIDE_RESOURCES': '{"CPU":128}', 'MKL_NUM_THREADS': '128',
+                    'GPUQ_RAY_TEMP_DIR': '/run/gpuq/runtime/ray', 'RAY_TMPDIR': '/tmp/stale',
+                    'RAY_object_spilling_directory': '/run/gpuq/runtime/large-spill'}
+        result = R.ray_environment(self.budget(), original)
+        self.assertEqual(original['MKL_NUM_THREADS'], '128')
+        self.assertEqual(result['CUDA_VISIBLE_DEVICES'], '7')
+        self.assertEqual(result['PATH'], original['PATH'])
+        self.assertEqual(result['MKL_NUM_THREADS'], '1')
+        self.assertEqual(result['RAY_worker_num_grpc_internal_threads'], '2')
+        self.assertEqual(result['RAY_prestart_worker_first_driver'], 'false')
+        self.assertEqual(result['RAY_TMPDIR'], '/run/gpuq/runtime')
+        self.assertEqual(result['RAY_object_spilling_directory'], '/tmp/gpuq-ray-spill')
+        self.assertNotIn('RAY_ADDRESS', result)
+        self.assertNotIn('RAY_USE_MULTIPROCESSING_CPU_COUNT', result)
+        self.assertNotIn('RAY_OVERRIDE_RESOURCES', result)
+
+    def test_cli_json_and_exec_without_importing_ray(self):
+        for action in ('resources', 'init-kwargs'):
+            output = io.StringIO()
+            with patch.object(R, 'load_budget', return_value=self.budget()), contextlib.redirect_stdout(output):
+                self.assertEqual(R.main([action]), 0)
+            data = json.loads(output.getvalue())
+            self.assertEqual(data['gpuCount' if action == 'resources' else 'num_gpus'], 8)
+        with patch.object(R, 'load_budget', return_value=self.budget()), patch.object(R.os, 'execvpe') as execute:
+            R.main(['exec', 'python', 'train.py', '--flag'])
+        self.assertEqual(execute.call_args.args[:2], ('python', ['python', 'train.py', '--flag']))
+        self.assertEqual(execute.call_args.args[2]['OPENBLAS_NUM_THREADS'], '1')
+
+    def test_invalid_metadata_and_tiny_ray_memory_fail(self):
+        for update in ({'schemaVersion': 2}, {'cpuLimit': float('inf')}, {'cpuLimit': True},
+                       {'memoryLimitBytes': '256G'}, {'pidsLimit': 0}, {'gpuCount': -1}):
+            with self.assertRaises(ValueError):
+                R.validate_budget({**self.budget(), **update})
+        with self.assertRaises(ValueError):
+            R.ray_init_kwargs({**self.budget(), 'memoryLimitBytes': 100 * 1024 ** 2})
+
+    def test_diagnostic_hook_mounts_only_valid_attempt_runtime_and_is_best_effort(self):
+        identifier = 'a' * 32
+        runtime = self.root / 'diagnostics' / JOB['id'] / identifier / 'runtime'
+        runtime.mkdir(parents=True)
+        capture = {'available': True, 'captureId': identifier, 'runtimePath': str(runtime)}
+        diagnostic = SimpleNamespace(start_capture=lambda *args: capture)
+        with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', return_value=diagnostic):
+            (self.root / 'job-diagnostics.py').touch()
+            loaded, found, descriptor = S.start_job_capture(self.root, JOB, 'gpuq-test.service', self.group, {}, [], [])
+            self.assertIs(loaded, diagnostic)
+            self.assertEqual(found, identifier)
+            self.assertEqual(os.fstat(descriptor).st_ino, runtime.stat().st_ino)
+            os.close(descriptor)
+            capture['available'] = False
+            with contextlib.redirect_stderr(io.StringIO()):
+                loaded, found, descriptor = S.start_job_capture(self.root, JOB, '', self.group, {}, [], [])
+            self.assertIs(loaded, diagnostic)
+            os.close(descriptor)
+            capture['runtimePath'] = str(self.root)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(S.start_job_capture(self.root, JOB, '', self.group, {}, [], []), (None, None, None))
+        broken = SimpleNamespace(finish_capture=lambda *args: (_ for _ in ()).throw(RuntimeError('unavailable')))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(S.finish_job_capture(broken, self.root, JOB, identifier, 42))
+
+    def runner_command(self, terminal=False, managed_runtime=False):
+        """Execute trusted runner orchestration with fake children, never bwrap/GPU."""
+        job = {**JOB, 'userId': 'demo-user-1', 'username': 'demo', 'argv': ['python', 'train.py']}
+        if terminal:
+            del job['id']
+            job['cards'] = 0
+            self.group = '/user.slice/amax-term-test.service'
+            self.leaf = self.leaf.rename(self.leaf.with_name('amax-term-test.service'))
+            self.write_limits(self.leaf, '200000 100000', str(8 * R.GIB), '2048')
+        spec_dir = self.root / ('terminals' if terminal else 'jobs')
+        spec_dir.mkdir()
+        spec_file = spec_dir / (JOB['id'] + '.json')
+        spec_file.write_text(json.dumps(job))
+        (self.root / 'node-config.json').write_text(json.dumps({'root': str(self.root), 'conda': '/opt/conda'}))
+        captured, properties, kept = [], [], []
+        path_exists, path_read = Path.exists, Path.read_text
+        def exists(path):
+            return str(path).startswith('/dev/nvidia') or str(path) == '/run/systemd/resolve/resolv.conf' or path_exists(path)
+        def read(path, *args, **kwargs):
+            if str(path) == '/proc/self/cgroup':
+                return '0::' + self.group + '\n'
+            if str(path) == '/run/systemd/resolve/resolv.conf':
+                return 'nameserver 192.0.2.53\n'
+            return path_read(path, *args, **kwargs)
+        def memfd(name):
+            return os.open(self.root / ('memfd-' + name), os.O_CREAT | os.O_RDWR, 0o600)
+        def spawn(command, **kwargs):
+            captured.append((command, kwargs))
+            if command[0] == '/usr/bin/bwrap':
+                info = int(command[command.index('--info-fd') + 1])
+                block = int(command[command.index('--block-fd') + 1])
+                kept.append(os.dup(block))
+                os.write(info, json.dumps({'child-pid': 12345}).encode())
+            else:
+                ready = int(command[command.index('--ready-fd') + 1])
+                os.write(ready, b'1')
+            return SimpleNamespace(wait=lambda *args, **kwargs: 42, poll=lambda: 42)
+        def read_budget(spec, group, uuids, terminal):
+            return R.read_budget(spec, group, uuids, terminal, root=self.root,
+                                 affinity_count=128, physical_memory=512 * R.GIB)
+        resource = SimpleNamespace(requested_limits=R.requested_limits, read_budget=read_budget,
+                                   cgroup_path=lambda group: self.leaf, resource_environment=R.resource_environment,
+                                   RESOURCE_FILE=R.RESOURCE_FILE, RAY_SPILL_DIR=R.RAY_SPILL_DIR)
+        runtime = self.root / 'diagnostic-runtime'; runtime.mkdir()
+        runtimefd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY) if managed_runtime else None
+        try:
+            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', return_value=resource), \
+                    patch.object(S, 'start_job_capture', return_value=(None, None, runtimefd)), \
+                    patch.object(S, 'project_runtime', return_value=None), \
+                    patch.object(S.sys, 'argv', ['sandbox-runner.py', JOB['id']] + (['terminal'] if terminal else [])), \
+                    patch.dict(S.os.environ, {'GPUQ_ASSIGNED_GPU_INDICES': ','.join(map(str, range(8))),
+                                              'GPUQ_ASSIGNED_GPU_UUIDS': ','.join(UUIDS)}), \
+                    patch.object(Path, 'exists', exists), patch.object(Path, 'read_text', read), \
+                    patch.object(S.os, 'memfd_create', side_effect=memfd, create=True), \
+                    patch.object(S.subprocess, 'check_output', return_value='24576\n' * 8) as gpu_check, \
+                    patch.object(S.subprocess, 'run', side_effect=lambda command, **kwargs: properties.append(command)), \
+                    patch.object(S.subprocess, 'Popen', side_effect=spawn):
+                self.assertEqual(S.main(), 42)
+                if terminal: gpu_check.assert_not_called()
+        finally:
+            for descriptor in kept:
+                os.close(descriptor)
+        self.assertEqual(json.loads(spec_file.read_text()), job)
+        return captured[0], properties
+
+    def test_runner_builds_readonly_leaf_cgroup_and_metadata_without_changing_user_command(self):
+        (args, options), properties = self.runner_command()
+        self.assertEqual(args[-2:], ['python', 'train.py'])
+        mount = args.index('/sys/fs/cgroup')
+        self.assertEqual(args[mount - 2], '--ro-bind-fd')
+        self.assertIn(int(args[mount - 1]), options['pass_fds'])
+        metadata = args.index('/run/gpuq/resources.json')
+        self.assertEqual(args[metadata - 2], '--ro-bind-data')
+        self.assertIn('--clearenv', args)
+        self.assertIn('TasksMax=2048', properties[0])
+        self.assertIn('CPUQuota=3200%', properties[0])
+        self.assertIn('MemoryMax=' + str(256 * R.GIB), properties[0])
+        env = {args[i + 1]: args[i + 2] for i, value in enumerate(args) if value == '--setenv'}
+        self.assertEqual(env['GPUQ_CPU_LIMIT'], '32')
+        self.assertEqual(env['GPUQ_GPU_COUNT'], '8')
+        self.assertFalse(any(key.startswith('RAY_') for key in env))
+
+    def test_legacy_terminal_without_id_gets_budget_without_rewriting_immutable_spec(self):
+        (args, _), properties = self.runner_command(terminal=True)
+        env = {args[i + 1]: args[i + 2] for i, value in enumerate(args) if value == '--setenv'}
+        self.assertEqual((env['GPUQ_CPU_LIMIT'], env['GPUQ_MEMORY_LIMIT_BYTES'], env['GPUQ_GPU_COUNT']),
+                         ('2', str(8 * R.GIB), '0'))
+        self.assertIn('CPUQuota=200%', properties[0])
+        budget = json.loads((self.root / 'memfd-gpuq-resources').read_text())
+        self.assertEqual(budget['jobId'], JOB['id'])
+        self.assertEqual(args[-2:], ['python', 'train.py'])
+
+    def test_managed_runtime_moves_raw_ray_spill_back_to_job_private_tmpfs(self):
+        (args, _), _ = self.runner_command(managed_runtime=True)
+        env = {args[i + 1]: args[i + 2] for i, value in enumerate(args) if value == '--setenv'}
+        self.assertEqual(env['RAY_TMPDIR'], '/run/gpuq/runtime')
+        self.assertEqual(env['RAY_object_spilling_directory'], '/tmp/gpuq-ray-spill')
+        self.assertIn('/run/gpuq/runtime', args)
+
+
+if __name__ == '__main__':
+    unittest.main()

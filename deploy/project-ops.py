@@ -126,8 +126,7 @@ class ProjectOperations:
             self.writable(args)
             # A clean exit may leave a pointer. Confirm the entire unit is
             # stopped before copying; an unavailable socket is not enough.
-            pointer = self.n.terminal_pointer(args)
-            if pointer.exists():
+            for pointer in self.n.terminal_pointers(args):
                 jid = pointer.read_text()
                 if not UUID.fullmatch(jid): raise ValueError('Invalid project terminal pointer')
                 if self.n.terminal_alive(self.n.ROOT/'terminals', jid):

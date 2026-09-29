@@ -15,10 +15,13 @@ gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
 gpuctl ssh                       Develop in the selected project's private terminal
 gpuctl ssh --root                Administrator: unrestricted host root terminal
+gpuctl ssh --reconnect SESSION   Explicitly reconnect a detached/expired session
+gpuctl ssh --reconnect SESSION --takeover  Replace its active writer explicitly
 gpuctl push .                    Upload code to the selected project's draft
 gpuctl project publish           Freeze code + private environment; wait for READY
 gpuctl run -g 2 -- python train.py
 gpuctl jobs / logs JOB / cancel JOB
+gpuctl diagnostics JOB --json    Persistent bounded worker logs, exits and resource counters
 gpuctl pull --job JOB model.pt ./model.pt
 gpuctl data list                 List authorized dataset versions on selected server
 gpuctl data prepare NAME@VERSION Prepare a local, verified copy without reserving GPUs
@@ -91,8 +94,8 @@ async function main(){
     if(args[i]==='--'){training=args.slice(i+1);break;}
     const item=args[i]==='-g'?'--cards':args[i];if(!item.startsWith('--')){positionals.push(item);continue;}
     const key=item.slice(2);
-    if(['json','password-stdin','credentials-stdin','help','full','root','legacy'].includes(key)){options[key]=true;continue;}
-    if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job'].includes(key))fail(`Unknown option: ${item}`);
+    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','takeover'].includes(key)){options[key]=true;continue;}
+    if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job','reconnect'].includes(key))fail(`Unknown option: ${item}`);
     const value=args[++i];if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
     if(key==='machine')options.machines.push(value);else if(key==='data')options.datasets.push(value);else options[key]=value;
   }
@@ -149,6 +152,7 @@ async function main(){
     const saveSession=async()=>{await writeFile(sessionFile,JSON.stringify(session),{mode:0o600});await chmod(sessionFile,0o600);};
     const shortcut=command;
     if(command==='ssh')command='shell';if(command==='push')command='upload';if(command==='pull')command='download';
+    if((options.reconnect||options.takeover)&&command!=='shell')fail('--reconnect/--takeover are only valid for ssh');
     if(['run','shell'].includes(command)&&positionals.length===1)positionals.push(defaultMachine());
     if(['push','pull'].includes(shortcut))positionals.splice(1,0,defaultMachine());
     if(shortcut==='push'&&positionals.length===3&&(await lstat(positionals[2])).isDirectory())positionals.push('.');
@@ -181,15 +185,19 @@ async function main(){
       if(!process.stdin.isTTY)fail('交互终端需要 TTY；非交互任务使用 gpuctl run');
       const machine=positionals[1],hostAdmin=options.root===true;
       if(hostAdmin&&(options.project||options.job))fail('Host root terminal does not accept --project or --job');
+      if(options.takeover&&!options.reconnect)fail('--takeover requires --reconnect SESSION');
+      if(options.reconnect&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.reconnect))fail('Reconnect requires a complete terminal UUID');
       const context=hostAdmin?{}:projectArgs(machine);
-      const opened=(await call('terminal.open',{machine,key:randomUUID(),hostAdmin,...context})).result;
-      let input=Buffer.alloc(0),offset=0,done=false,delay=250,lastSize='';
-      const sessionArgs={machine,id:opened.id,hostAdmin,...context};
-      process.stderr.write(`\r\n${machine} · ${hostAdmin?'ROOT 宿主机':context.project?'项目 '+context.project:'个人工作区'}（Ctrl+] 断开；exit 结束）\r\n`);
+      const clientId=randomUUID();
+      const opened=(await call('terminal.open',{machine,key:randomUUID(),clientId,mode:options.reconnect?'reconnect':'new',...(options.reconnect?{id:options.reconnect,takeover:options.takeover===true}:{}),hostAdmin,...context})).result;
+      if(!opened.writerToken)fail('Server terminal protocol is too old; upgrade the node before attaching. No input was sent.');
+      let input=Buffer.alloc(0),offset=0,done=false,closed=false,delay=250,lastSize='';
+      const sessionArgs={machine,id:opened.id,clientId,writerToken:opened.writerToken,hostAdmin,...context};
+      process.stderr.write(`\r\n${machine} · ${hostAdmin?'ROOT 宿主机':context.project?'项目 '+context.project:'个人工作区'} · ${opened.id}（Ctrl+] 仅断开；exit 结束此会话）\r\n`);
       process.stdin.setRawMode(true);process.stdin.resume();
       const listener=chunk=>{if(chunk.includes(29)){done=true;return;}input=Buffer.concat([input,chunk]);if(input.length>262144)process.stdin.pause();};process.stdin.on('data',listener);
-      try{while(!done){const sent=input.subarray(0,8192);input=input.subarray(sent.length);if(input.length<131072)process.stdin.resume();const size={cols:process.stdout.columns||110,rows:process.stdout.rows||32},sizeKey=JSON.stringify(size);const response=(await call('terminal.exchange',{...sessionArgs,offset,input:sent.toString('base64'),...(sizeKey===lastSize?{}:{cols:size.cols,rows:size.rows})})).result;lastSize=sizeKey;offset=response.offset;if(response.data)process.stdout.write(Buffer.from(response.data,'base64'));if(response.exited){await call('terminal.close',sessionArgs);break;}await new Promise(r=>setTimeout(r,delay));}}
-      finally{process.stdin.off('data',listener);process.stdin.setRawMode(false);process.stdin.pause();process.stderr.write('\r\n终端已断开。\r\n');}return;
+      try{while(!done){const sent=input.subarray(0,8192);input=input.subarray(sent.length);if(input.length<131072)process.stdin.resume();const size={cols:process.stdout.columns||110,rows:process.stdout.rows||32},sizeKey=JSON.stringify(size);const response=(await call('terminal.exchange',{...sessionArgs,offset,input:sent.toString('base64'),...(sizeKey===lastSize?{}:{cols:size.cols,rows:size.rows})})).result;lastSize=sizeKey;offset=response.offset;if(response.data)process.stdout.write(Buffer.from(response.data,'base64'));if(response.exited){await call('terminal.close',sessionArgs);closed=true;break;}await new Promise(r=>setTimeout(r,delay));}}
+      finally{process.stdin.off('data',listener);process.stdin.setRawMode(false);process.stdin.pause();if(!closed)try{await call('terminal.detach',sessionArgs);}catch{process.stderr.write('\r\n写入权释放未确认；等待 30 秒或明确接管后再重连。\r\n');}process.stderr.write(`\r\n${closed?'此终端已结束。':`已断开，终端继续运行。重连：gpuctl ssh ${machine}${hostAdmin?' --root':context.project?' --project '+context.project:''} --reconnect ${opened.id}`}\r\n`);}return;
     }else if(command==='invites'&&positionals[1]==='list'&&positionals.length===2)result=(await call('invites.list')).result;
     else if(command==='invites'&&['rotate','disable'].includes(positionals[1])&&['admin','member'].includes(positionals[2])&&positionals.length===3)result=(await call(`invites.${positionals[1]}`,{role:positionals[2]})).result;
     else if(command==='users'&&positionals.length===1)result=state.users;
@@ -236,6 +244,10 @@ async function main(){
       const datasets=options.datasets.map(value=>{const [dataset,version,...extra]=value.split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Use --data NAME@FULL_VERSION_HASH');return {dataset,version};});
       result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...context,...(datasets.length?{datasets}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
+    else if(command==='diagnostics'){
+      if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k)))fail('Usage: diagnostics JOB [--json]; no paths, machine or execution options');
+      result=(await call('jobs.diagnostics',{jobId:positionals[1]})).result;
+    }
     else if(['logs','cancel'].includes(command)&&positionals.length===2)result=(await call(command==='logs'?'jobs.logs':'jobs.cancel',{jobId:positionals[1]})).result;
     else if(command==='files'&&positionals.length<=3)result=(await call('files.list',{machine:positionals[1],path:positionals[2]||'.',...fileArgs(positionals[1])})).result;
     else if(command==='upload'&&positionals.length>=3&&positionals.length<=4){

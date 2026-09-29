@@ -73,12 +73,7 @@ def main():
     unit=group.rsplit('/',1)[-1]
     if not unit.startswith('amax-term-' if terminal else 'gpuq-') or not unit.endswith('.service'):raise ValueError('Not running inside an authorized job unit')
     env={'PATH':'/usr/bin:/bin','HOME':str(Path.home()),'XDG_RUNTIME_DIR':f'/run/user/{os.getuid()}','DBUS_SESSION_BUS_ADDRESS':f'unix:path=/run/user/{os.getuid()}/bus'}
-    resources=local_module('gpuq_job_resources','job-resources.py')
-    requested=resources.requested_limits(spec,terminal)
-    subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={requested["memory"]}',f'CPUQuota={requested["cpu"]*100}%','TasksMax=2048'],env=env,check=True)
-    budget=resources.read_budget({**spec,'id':jid},group,uuids,terminal)
-    cgroupfd=os.open(resources.cgroup_path(group),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-    resourcefd=os.memfd_create('gpuq-resources');os.write(resourcefd,json.dumps(budget,sort_keys=True).encode());os.lseek(resourcefd,0,0)
+    subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={8 if terminal else spec["cards"]*32}G',f'CPUQuota={200 if terminal else spec["cards"]*400}%','TasksMax=2048'],env=env,check=True)
     capture_module,capture_id,runtimefd=(None,None,None) if terminal else start_job_capture(root,spec,unit,group,env,indices,uuids)
     workspace=root/'users'/hashlib.sha256(spec['userId'].encode()).hexdigest()[:32]
     workspace.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -91,21 +86,13 @@ def main():
     info_r,info_w=os.pipe();block_r,block_w=os.pipe()
     args=['/usr/bin/bwrap','--unshare-all',*([] if terminal else ['--new-session']),'--die-with-parent','--cap-drop','ALL','--hostname','gpuq-job',
           '--info-fd',str(info_w),'--block-fd',str(block_r),'--ro-bind','/usr','/usr','--symlink','usr/bin','/bin','--symlink','usr/sbin','/sbin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',
-          '--proc','/proc','--ro-bind','/proc/driver/nvidia','/proc/driver/nvidia','--ro-bind','/sys','/sys',
-          '--ro-bind-fd',str(cgroupfd),'/sys/fs/cgroup','--dev','/dev','--tmpfs','/dev/shm','--tmpfs','/tmp','--tmpfs','/run','--dir','/run/gpuq',
-          '--ro-bind-data',str(resourcefd),resources.RESOURCE_FILE,'--dir','/etc',
+          '--proc','/proc','--ro-bind','/proc/driver/nvidia','/proc/driver/nvidia','--ro-bind','/sys','/sys','--dev','/dev','--tmpfs','/dev/shm','--tmpfs','/tmp','--tmpfs','/run','--dir','/etc',
           '--ro-bind','/etc/ld.so.cache','/etc/ld.so.cache','--ro-bind','/etc/alternatives','/etc/alternatives','--ro-bind','/etc/ssl','/etc/ssl',
           '--ro-bind-fd' if project and project['readonly'] else '--bind-fd',str(workfd),'/workspace','--chdir','/workspace','--clearenv']
     if project:
         args+=['--ro-bind-fd' if project['readonly'] else '--bind-fd',str(project_fds['env']),'/opt/project-env',
                '--bind-fd',str(project_fds['home']),'/home/gpuq','--bind-fd',str(project_fds['output']),'/outputs']
-    # Ray reads /sys/fs/cgroup/{cpu.max,memory.max} at the mount root, not the
-    # host's job-unit path. Expose only this job's real cgroup, always read-only.
-    # /proc/meminfo and os.cpu_count may still describe the physical host.
-    args+=['--dir','/opt/gpuq','--dir','/opt/gpuq/bin',
-           '--ro-bind',str(HERE/'job-resources.py'),'/opt/gpuq/bin/job-resources.py',
-           '--ro-bind',str(HERE/'gpuq-ray'),'/opt/gpuq/bin/gpuq-ray']
-    if runtimefd is not None:args+=['--bind-fd',str(runtimefd),'/run/gpuq/runtime']
+    if runtimefd is not None:args+=['--dir','/run/gpuq','--bind-fd',str(runtimefd),'/run/gpuq/runtime']
     if dataset_fds:
         args+=['--dir','/data2']
         for descriptor,target in dataset_fds:args+=['--ro-bind-fd',str(descriptor),target]
@@ -131,11 +118,10 @@ def main():
                           'GPUQ_PROJECT_RELEASE':spec.get('release','development'),'GPUQ_OUTPUT_DIR':'/outputs',
                           'XDG_CACHE_HOME':'/home/gpuq/.cache'}.items():args+=['--setenv',key,value]
         args+=['--unsetenv','PYTHONUSERBASE']
-    resource_env=resources.resource_environment(budget)
-    resource_env['PATH']=('/opt/project-env/bin:' if project else '')+'/opt/gpuq/bin:/opt/conda/bin:/usr/bin:/bin'
     if runtimefd is not None:
-        resource_env.update({'RAY_TMPDIR':'/run/gpuq/runtime','GPUQ_RAY_TEMP_DIR':'/run/gpuq/runtime/ray','RAY_object_spilling_directory':resources.RAY_SPILL_DIR})
-    for key,value in resource_env.items():args+=['--setenv',key,value]
+        # Persist only managed Ray logs; object spill stays in job-private tmpfs.
+        for key,value in {'RAY_TMPDIR':'/run/gpuq/runtime','GPUQ_RAY_TEMP_DIR':'/run/gpuq/runtime/ray',
+                          'RAY_object_spilling_directory':'/tmp/gpuq-ray-spill'}.items():args+=['--setenv',key,value]
     # Do not forward to the host's loopback-only resolved stub: host loopback is
     # intentionally inaccessible to jobs. Use the current real uplink resolvers.
     resolvers=[]
@@ -160,11 +146,10 @@ def main():
         bootstrap='import os,pathlib,subprocess,sys; p=pathlib.Path("/opt/project-env/pyvenv.cfg"); subprocess.run(["/opt/conda/bin/python","-m","venv","--system-site-packages","--copies","/opt/project-env"],check=True) if not p.exists() else None; os.execvpe(sys.argv[1],sys.argv[1:],os.environ)'
         command=['/usr/bin/python3','-c',bootstrap,*command]
     args+=['--ro-bind',gatefile.name,'/run/.ready','--ro-bind-data',str(hosts),'/etc/hosts','--ro-bind-data',str(passwd),'/etc/passwd','--ro-bind-data',str(resolv),'/etc/resolv.conf','--','/usr/bin/python3','-c',gate,*command]
-    try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,cgroupfd,resourcefd,*(() if runtimefd is None else (runtimefd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds)))
+    try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,*(() if runtimefd is None else (runtimefd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds)))
     finally:
         for descriptor,_ in dataset_fds:os.close(descriptor)
         for descriptor in project_fds.values():os.close(descriptor)
-        os.close(cgroupfd);os.close(resourcefd)
         if runtimefd is not None:os.close(runtimefd)
     os.close(info_w);os.close(block_r);os.close(workfd);os.close(resolv);os.close(passwd);os.close(hosts)
     network=None
@@ -177,7 +162,7 @@ def main():
         if not select.select([ready_r],[],[],12)[0] or os.read(ready_r,1)!=b'1':raise RuntimeError('Sandbox networking unavailable')
         os.close(ready_r);os.pwrite(ready,b'1',0);os.write(block_w,b'1');os.close(block_w)
         code=process.wait()
-        finish_job_capture(capture_module,root,spec,capture_id,code)
+        if capture_module is not None:finish_job_capture(capture_module,root,spec,capture_id,code)
         return code
     finally:
         gatefile.close()

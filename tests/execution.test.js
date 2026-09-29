@@ -104,6 +104,6 @@ test('terminal identity is server-owned and root requires administrator, not ful
    await f.s.invoke(f.admin.token,'policy.full',{userId:f.member.id,policyVersion:0});
    await assert.rejects(f.s.invoke(f.a.token,'terminal.open',{machine:'gpu-4',key:randomUUID(),hostAdmin:true}),e=>e.status===403);
    await assert.rejects(f.s.invoke(f.a.token,'terminal.open',{machine:'gpu-4',key:randomUUID(),userId:'builtin-admin'}),/参数/);
-   await assert.rejects(f.s.invoke(f.a.token,'terminal.exchange',{machine:'gpu-4',id:randomUUID(),input:'x'.repeat(13000)}),/输入过长/);
+   await assert.rejects(f.s.invoke(f.a.token,'terminal.exchange',{machine:'gpu-4',id:randomUUID(),clientId:randomUUID(),writerToken:randomUUID(),input:'x'.repeat(13000)}),/输入过长/);
  }finally{await f.close();}
 });

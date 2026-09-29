@@ -15,17 +15,18 @@ export function terminalUI(store,toast){
   let dialog,term,fit,session,timer,busy=false,input=new Uint8Array(),offset=0,closing=false,lastSize='',generation=0,currentActor=null;
   const sessions=new Map();
   const identity=value=>JSON.stringify([value.userId,value.machine,value.project||'',value.hostAdmin===true]);
-  const args=value=>{const {userId,...request}=value;return request;};
-  function announce(){document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[...sessions.values()].filter(value=>value.userId===store.principal?.userId).map(value=>({...value}))}}));}
-  function detach(){clearTimeout(timer);generation++;session=null;input=new Uint8Array();dialog?.close();}
+  const args=value=>{const {machine,project,hostAdmin,id,clientId,writerToken}=value;return {machine,...(project?{project}:{}),hostAdmin,id,clientId,writerToken};};
+  function announce(){document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[...sessions.values()].filter(value=>value.userId===store.principal?.userId).map(({writerToken,...value})=>({...value}))}}));}
+  async function detach(release=true){const previous=session;clearTimeout(timer);generation++;session=null;input=new Uint8Array();dialog?.close();if(previous&&release){previous.detached=true;try{await store.call('terminal.detach',args(previous));}catch{toast('写入权释放未确认；终端仍保留，等待 30 秒或明确接管后重连。');}}}
   store.onAuthChange?.(async call=>{
-    const targets=[...sessions.values()].filter(value=>value.userId===currentActor);currentActor=null;detach();announce();
-    for(const target of targets)try{await call('terminal.close',args(target));sessions.delete(identity(target));}catch{toast('旧终端关闭未确认；请原账号重新登录后结束该终端，服务端仍按期限回收。');}
+    const targets=[...sessions.values()].filter(value=>value.userId===currentActor);currentActor=null;detach(false);announce();
+    for(const target of targets)try{await call('terminal.detach',args(target));target.detached=true;}catch{toast('旧终端写入权释放未确认；终端未自动关闭，原账号可显式重连。');}
   });
   function enqueue(text){const data=new TextEncoder().encode(text);if(input.length+data.length>1048576){toast('终端待发送内容过多；请等待发送完成后再粘贴。');return;}const next=new Uint8Array(input.length+data.length);next.set(input);next.set(data,input.length);input=next;}
   async function closeSession(target){
-    await store.call('terminal.close',args(target));sessions.delete(identity(target));
-    if(session?.id===target.id)detach();announce();
+    if(target.detached){const result=await store.call('terminal.open',{...args(target),key:crypto.randomUUID(),mode:'reconnect'});target.writerToken=result.writerToken;target.detached=false;}
+    await store.call('terminal.close',args(target));sessions.delete(target.id);
+    if(session?.id===target.id)detach(false);announce();
   }
   async function exchange(){
     if(!session||busy||closing)return;busy=true;const target=session,turn=generation;
@@ -51,21 +52,30 @@ export function terminalUI(store,toast){
   });
   document.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
-    if(button.id==='terminal-open'){
+    if(button.id==='terminal-open'||button.id==='terminal-reconnect'){
       button.disabled=true;
       try{
         const target=terminalContext({machine:document.querySelector('[name=terminal-machine]').value,project:document.querySelector('[name=workspace-project]')?.value,hostAdmin:document.querySelector('[name=terminal-host]')?.checked===true});
         if(target.hostAdmin&&!window.confirm('打开真实宿主机 root 终端？这里的修改会影响整台服务器和其他用户。'))return;
         const userId=store.principal?.userId,authGeneration=store.authGeneration;if(!userId)throw Error('请先登录。');
-        const key=identity({...target,userId});let retained=sessions.get(key);
-        if(!retained)await store.call('terminal.open',{...target,key:crypto.randomUUID()},{
-          accept:result=>{retained={...target,id:result.id,userId};sessions.set(key,retained);announce();},
-          onStale:async(result,call)=>{const previous={...target,id:result.id,userId};try{await call('terminal.close',args(previous));}catch(error){sessions.set(key,previous);throw error;}}
-        });
+        let retained;const reconnect=button.id==='terminal-reconnect';
+        const matching=[...sessions.values()].filter(value=>identity(value)===identity({...target,userId}));
+        const id=reconnect?window.prompt('输入要重连的会话 ID。其他客户端仍持有写入权时不会自动接管。',matching.at(-1)?.id||'')?.trim():null;
+        if(reconnect&&!id)return;
+        const known=id?sessions.get(id):null,clientId=known?.clientId||crypto.randomUUID();
+        const request={...target,key:crypto.randomUUID(),clientId,mode:reconnect?'reconnect':'new',...(reconnect?{id,...(known?.writerToken?{writerToken:known.writerToken}:{})}:{})};
+        const lifecycle={
+          accept:result=>{if(!result.writerToken)throw Error('节点终端协议需升级；未发送输入，也未关闭旧终端。');retained={...target,id:result.id,userId,clientId,writerToken:result.writerToken};sessions.set(retained.id,retained);announce();},
+          onStale:async(result,call)=>{if(!result.writerToken)return;const previous={...target,id:result.id,userId,clientId,writerToken:result.writerToken};await call('terminal.detach',args(previous));sessions.set(previous.id,{...previous,detached:true});}
+        };
+        try{await store.call('terminal.open',request,lifecycle);}catch(error){
+          if(!reconnect||!/active writer|Legacy terminal/.test(error.message)||!window.confirm('明确接管这个终端？原客户端将失去输入和结束权限；已经执行的命令不会撤销。'))throw error;
+          await store.call('terminal.open',{...request,key:crypto.randomUUID(),takeover:true},lifecycle);
+        }
         if(authGeneration!==store.authGeneration||currentActor!==userId)throw Error('登录账号已改变，未在新账号下附加旧终端。');
         if(document.querySelector('[name=workspace-machine]')?.value!==target.machine||(document.querySelector('[name=workspace-project]')?.value||'')!==(target.project||'')){toast('终端保留在原工作区；回到该服务器与项目可重新连接或结束。');return;}
         session=retained;generation++;offset=0;input=new Uint8Array();closing=false;lastSize='';
-        ensureDialog();document.querySelector('#terminal-title').textContent=target.machine+(target.project?' · '+target.project+' · 开发':target.hostAdmin?' · ROOT 宿主机':' · 旧个人工作区');
+        ensureDialog();document.querySelector('#terminal-title').textContent=target.machine+(target.project?' · '+target.project+' · 开发':target.hostAdmin?' · ROOT 宿主机':' · 旧个人工作区')+' · '+retained.id;
         dialog.showModal();term?.dispose();document.querySelector('#terminal-screen').replaceChildren();
         term=new globalThis.Terminal({documentOverride:terminalDocument,cursorBlink:true,fontSize:14,scrollback:3000,theme:{background:'#111827',foreground:'#e5e7eb'},allowProposedApi:false});
         fit=new globalThis.FitAddon.FitAddon();term.loadAddon(fit);term.open(document.querySelector('#terminal-screen'));fit.fit();

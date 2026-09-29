@@ -39,6 +39,15 @@ async function check(origin) {
   assert.equal((await fetch(origin + '/guide/projects', {method:'POST'})).status, 405);
   assert.ok(userGuide.includes(origin + '/guide/projects'));
   assert.match(await (await fetch(origin)).text(), /href="\/guide\/projects"[^>]+>项目手册/);
+  for (const [route, title] of [['terminal-sessions', /终端/], ['diagnostics', /作业诊断包/], ['ray-resources', /默认.*common-p0/]]) {
+    const guide = await fetch(origin + '/guide/' + route);
+    assert.equal(guide.status, 200);
+    assert.match(guide.headers.get('content-type'), /^text\/plain; charset=utf-8$/);
+    assert.match(await guide.text(), title);
+    assert.equal(await (await fetch(origin + '/guide/' + route, {method: 'HEAD'})).text(), '');
+    assert.equal((await fetch(origin + '/guide/' + route, {method: 'POST'})).status, 405);
+    assert.ok(userGuide.includes(origin + '/guide/' + route));
+  }
 }
 
 test('production dataset guide is generic plaintext with existing public manual boundary', async () => {
@@ -72,6 +81,9 @@ test('manual online references remain generic rather than exposing deployment da
     assert.ok(text.includes('https://gpu.example.com/guide/datasets'));
   }
   const context = await readFile(new URL('../.dockerignore', import.meta.url), 'utf8');
-  for (const manual of ['DATASETS.md', 'PROJECTS.md'])
+  for (const manual of ['DATASETS.md', 'PROJECTS.md', 'TERMINAL_SESSIONS.md', 'JOB_DIAGNOSTICS.md', 'RAY_RESOURCES.md'])
     assert.ok(context.split(/\r?\n/).includes('!docs/' + manual), 'production manual must enter the Docker build context');
+  const docker = await readFile(new URL('../deploy/Dockerfile', import.meta.url), 'utf8');
+  for (const manual of ['TERMINAL_SESSIONS.md', 'JOB_DIAGNOSTICS.md', 'RAY_RESOURCES.md'])
+    assert.ok(docker.includes('docs/' + manual), 'new guides must be copied into the production image');
 });

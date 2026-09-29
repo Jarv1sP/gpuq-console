@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly GPUQ diagnostic cleanup
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+Unit=gpuq-diagnostics-gc.service
+
+[Install]
+WantedBy=timers.target
