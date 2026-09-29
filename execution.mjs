@@ -67,11 +67,20 @@ export async function executionCall(service,principal,operation,args){
     if(result===undefined)fail('未知项目操作。');
     return result;
   }
-  if(['datasets.list','datasets.status','datasets.prepare'].includes(operation)){
+  if(['datasets.list','datasets.status','datasets.prepare','datasets.unregister'].includes(operation)){
     authorizedMachine(args.machine);
-    const allowed=operation==='datasets.list'?['machine']:['machine','dataset','version'];
+    if(operation==='datasets.unregister'&&principal.role!=='admin')fail('注销数据集仅管理员可用。',403);
+    const byOperation=operation==='datasets.status'&&Object.hasOwn(args,'operationId');
+    const allowed=operation==='datasets.list'?['machine']:byOperation?['machine','operationId']:['machine','dataset','version'];
     if(Object.keys(args).some(k=>!allowed.includes(k)))fail('数据集参数无效。');
-    if(operation!=='datasets.list')datasetReferences([{dataset:args.dataset,version:args.version}]);
+    if(byOperation){
+      if(typeof args.operationId!=='string'||!/^[a-f0-9]{64}$/.test(args.operationId))fail('数据集后台操作编号无效。');
+    }else if(operation==='datasets.unregister'){
+      if(typeof args.dataset!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.dataset))fail('数据集名称无效。');
+      if(args.version!==undefined&&args.version!==null)datasetReferences([{dataset:args.dataset,version:args.version}]);
+      // Persist intent before the node may begin destructive cache cleanup.
+      service.audit(principal.username,operation,args.machine,args.dataset+(args.version?'@'+args.version:''));
+    }else if(operation!=='datasets.list')datasetReferences([{dataset:args.dataset,version:args.version}]);
     // Identity comes only from the authenticated portal; node paths and roles
     // cannot be supplied by the client. Large copies run in a node-local worker.
     const {machine,...reference}=args;

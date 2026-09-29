@@ -22,6 +22,8 @@ gpuctl jobs / logs JOB / cancel JOB
 gpuctl pull --job JOB model.pt ./model.pt
 gpuctl data list                 List authorized dataset versions on selected server
 gpuctl data prepare NAME@VERSION Prepare a local, verified copy without reserving GPUs
+gpuctl data unregister NAME[@VERSION]  Administrator: asynchronously unregister local data
+gpuctl data status OPERATION_ID   Check a background operation; accepted is not completed
 gpuctl data status NAME@VERSION  Inspect preparation state
 gpuctl run -g 2 --data NAME@VERSION -- python train.py --data /data2/NAME
 
@@ -201,11 +203,23 @@ async function main(){
       else if(action==='enable'||action==='disable')result=(await call('users.enabled',{userId:find(username),enabled:action==='enable'})).result;
       else if(action==='delete')result=(await call('users.delete',{userId:find(username)})).result;
       else fail('Unknown user command');
-    }else if(command==='data'&&['list','prepare','status'].includes(positionals[1])){
-      if(positionals.length!==(positionals[1]==='list'?2:3))fail('Usage: data list | data prepare NAME@VERSION | data status NAME@VERSION');
-      const action=positionals[1],ref=positionals[2]?.split('@');
-      if(ref&&(ref.length!==2||!ref[0]||! /^[a-f0-9]{64}$/.test(ref[1])))fail('Use NAME@FULL_VERSION_HASH from gpuctl data list');
-      result=(await call('datasets.'+action,{machine:defaultMachine(),...(ref?{dataset:ref[0],version:ref[1]}:{})})).result;
+    }else if(command==='data'&&['list','prepare','status','unregister'].includes(positionals[1])){
+      if(positionals.length!==(positionals[1]==='list'?2:3))fail('Usage: data list | data prepare NAME@VERSION | data status NAME@VERSION|OPERATION_ID | data unregister NAME[@VERSION]');
+      if(training.length||options.datasets.length||['as','project','release','job','root','legacy','cards','min-vram','name','key','total','role','full'].some(key=>Object.hasOwn(options,key)))fail('data commands accept only the dataset reference and one --machine SERVER');
+      const action=positionals[1],machine=defaultMachine(),byOperation=action==='status'&&/^[a-f0-9]{64}$/.test(positionals[2]||'');
+      if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
+      let reference={};
+      if(byOperation)reference={operationId:positionals[2]};
+      else if(action!=='list'){
+        const ref=positionals[2].split('@');
+        if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(ref[0])||ref.length>2||
+          (ref.length===2&&!/^[a-f0-9]{64}$/.test(ref[1]))||(action!=='unregister'&&ref.length!==2))fail('Use NAME@FULL_VERSION_HASH; only unregister also accepts a bare NAME');
+        reference={dataset:ref[0],...(ref.length===2?{version:ref[1]}:{})};
+      }
+      if(action==='unregister'&&session.principal.role!=='admin')fail('Dataset unregister requires an administrator account');
+      try{result=(await call('datasets.'+action,{machine,...reference})).result;}
+      catch(error){if(action==='unregister')fail(`${error.message}\nUnregister outcome is unconfirmed; a background worker may still run. Inspect node operations before retrying.`);throw error;}
+      if(action==='unregister'||byOperation){result={...result,machine};if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;}
     }else if(command==='run'&&positionals.length===2){
       if(options.as)fail('--as cannot be used for real execution');
       if(positionals[1]==='auto')fail('请手选服务器：gpuctl use gpu-1；GPU 数量由 -g 指定，在该机内自动分配');
@@ -280,6 +294,11 @@ async function main(){
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='use'){console.log(`当前服务器：${result.selected}\n${result.project?'当前项目：'+result.project:'未选择项目；可用 gpuctl project create NAME 或 project use NAME'}`);return;}
+  if(command==='data'&&(positionals[1]==='unregister'||/^[a-f0-9]{64}$/.test(positionals[2]||''))){
+    if(result.state==='UNREGISTERED')console.log(`${result.unregistered?'已注销所选本地数据集范围':'所选注册已不存在'}：${result.dataset}${result.version?'@'+result.version:''}${result.recoveryId?'\n恢复记录：'+result.recoveryId:''}`);
+    else console.log(`${result.state==='UNREGISTERING'?'已受理注销，尚未完成':result.state} · ${result.operationId}${result.error?'\n'+result.error:''}\n查看：gpuctl data status ${result.operationId} --machine ${result.machine}`);
+    return;
+  }
   if(command==='run'){console.log(`已提交 ${result.id}\n${result.machine} · ${result.cards} 张 GPU · ${result.state}\n查看日志：gpuctl logs ${result.id}`);return;}
   if(command==='logs'){process.stdout.write(result.text+(result.text.endsWith('\n')?'':'\n'));return;}
   if(command==='cancel'){console.log(`任务 ${result.id}：${result.state}${result.cancelRequested?'（已请求取消，等待节点确认）':''}`);return;}

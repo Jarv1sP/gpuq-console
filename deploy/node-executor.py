@@ -100,7 +100,9 @@ def dataset_background_status(folder,key,spec,cache,actor):
         receipt=json.loads(result.read_text())
         return {**receipt,**current} if receipt.get('state')=='READY' else {**current,**receipt}
     if dataset_background_active(key):
-        return {**current,'operationId':key,'state':'PREPARING' if spec['op']=='prepare' else 'REGISTERING'}
+        return {**current,'operationId':key,'state':{'prepare':'PREPARING','register':'REGISTERING','unregister':'UNREGISTERING'}[spec['op']]}
+    if spec['op']=='unregister':
+        return {'operationId':key,'dataset':spec['dataset'],'version':spec.get('version'),'state':'UNKNOWN','error':'Unregister worker outcome is unconfirmed; inspect this operation and its recovery journal before retrying'}
     return {**current,'operationId':key,'state':'FAILED','error':'Dataset worker is not running; retry the prepare or register operation'}
 
 def dataset_prepare_pointer(folder,dataset,version):
@@ -117,8 +119,9 @@ def dataset_current_prepare(folder,dataset,version):
     return key,spec
 
 def dataset_op(operation,args):
-    definitions={'datasets.list':set(),'datasets.status':{'dataset','version','operationId'},'datasets.prepare':{'dataset','version'},'datasets.register':{'dataset','sourceId','owners'}}
+    definitions={'datasets.list':set(),'datasets.status':{'dataset','version','operationId'},'datasets.prepare':{'dataset','version'},'datasets.register':{'dataset','sourceId','owners'},'datasets.unregister':{'dataset','version'}}
     if operation not in definitions or not isinstance(args,dict) or set(args)-definitions[operation]-{'userId','hostAdmin'}:raise ValueError('Invalid dataset operation fields')
+    if operation=='datasets.unregister' and args.get('hostAdmin') is not True:raise ValueError('Administrator authorization required')
     module,cache=dataset_cache();actor=dataset_actor(module,args)
     folder=ROOT/'dataset-ops';folder.mkdir(mode=0o700,exist_ok=True)
     if operation=='datasets.list':
@@ -138,11 +141,19 @@ def dataset_op(operation,args):
         key=args['operationId']
         if set(args)-{'userId','hostAdmin','operationId'} or not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):raise ValueError('Invalid dataset operation ID')
         spec=json.loads((folder/(key+'.json')).read_text())
+        if hashlib.sha256(json.dumps(spec,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Dataset worker identity mismatch')
+        if spec.get('op')=='unregister' and not actor.is_admin:raise ValueError('Administrator authorization required')
         if not actor.is_admin and spec['userId']!=actor.user_id:raise ValueError('Dataset operation is not owned by this user')
         return dataset_background_status(folder,key,spec,cache,actor)
     dataset=args.get('dataset')
     if not isinstance(dataset,str) or not DATASET_ID.fullmatch(dataset):raise ValueError('Invalid dataset ID')
-    if operation=='datasets.register':
+    if operation=='datasets.unregister':
+        version=args.get('version')
+        if version is not None and (not isinstance(version,str) or not DATASET_VERSION.fullmatch(version)):raise ValueError('Invalid immutable dataset version')
+        # Each explicit removal gets its own receipt. Large replica cleanup runs
+        # only in the detached worker, never inside the short SSH request.
+        task={'op':'unregister','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':True,'requestId':str(uuid.uuid4())}
+    elif operation=='datasets.register':
         if not actor.is_admin:raise ValueError('Administrator authorization required')
         source=args.get('sourceId');owners=args.get('owners')
         if not isinstance(source,str) or source not in CONFIG['datasets'].get('sources',{}):raise ValueError('Source ID is not approved in node configuration')
@@ -169,8 +180,8 @@ def dataset_op(operation,args):
         if not active:
             atomic_json(spec,task);result.unlink(missing_ok=True)
             if task['op']=='prepare':atomic_json(dataset_prepare_pointer(folder,dataset,task['version']),{'operationId':key})
-            run(['/usr/bin/systemd-run','--user','--collect','--unit='+unit,'--property=KillMode=control-group','--property=UMask=0077','--property=CPUQuota=100%','--property=MemoryMax=1G','--property=IOWeight=10','--property=RuntimeMaxSec=86400','--property=TimeoutStopSec=20','/usr/bin/python3',str(HERE/'node-executor.py'),'--dataset-worker',key],timeout=8)
-    return {'operationId':key,'dataset':dataset,**({'version':task['version']} if task['op']=='prepare' else {}),'state':'REGISTERING' if operation=='datasets.register' else 'PREPARING'}
+            run(['/usr/bin/systemd-run','--user','--collect','--unit='+unit,'--property=KillMode=control-group','--property=UMask=0077','--property=CPUQuota=100%','--property=MemoryMax=2G','--property=IOWeight=10','--property=RuntimeMaxSec=86400','--property=TimeoutStopSec=20','/usr/bin/python3',str(HERE/'node-executor.py'),'--dataset-worker',key],timeout=8)
+    return {'operationId':key,'dataset':dataset,**({'version':task['version']} if task['op'] in ('prepare','unregister') else {}),'state':{'prepare':'PREPARING','register':'REGISTERING','unregister':'UNREGISTERING'}[task['op']]}
 
 def dataset_worker(key):
     if not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):raise ValueError('Invalid background operation ID')
@@ -183,9 +194,11 @@ def dataset_worker(key):
             # This first-stage implementation only materializes a configured
             # local source; remote transport is a separate trusted operation.
             out=cache.materialize(actor,task['dataset'],task['version'])
+        elif task['op']=='unregister':
+            out=cache.unregister(actor,task['dataset'],task.get('version'));out['state']='UNREGISTERED'
         else:raise ValueError('Invalid background dataset action')
         # Never return transfer tokens, local paths, or source IDs to callers.
-        out={k:v for k,v in out.items() if k in ('dataset','version','state','bytes','files')}
+        out={k:v for k,v in out.items() if k in ('dataset','version','state','bytes','files','unregistered','registrationRetained','versions','recoveryId')}
     except Exception as error:out={'state':'FAILED','error':dataset_error(error)}
     atomic_json(folder/(key+'.result.json'),{**out,'operationId':key})
     return 0 if out['state']!='FAILED' else 1
@@ -410,7 +423,7 @@ def terminal_op(operation,args):
 
 def process(operation,args):
     if operation.startswith('projects.'):return projects().process(operation,args)
-    if operation in ('datasets.list','datasets.status','datasets.prepare','datasets.register'):return dataset_op(operation,args)
+    if operation in ('datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister'):return dataset_op(operation,args)
     if operation in ('terminal.open','terminal.exchange','terminal.close'):
         if args.get('project') and operation=='terminal.open':
             ops=projects()

@@ -53,7 +53,10 @@ from typing import NamedTuple
 SCHEMA = 1
 CHUNK_BYTES = 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
-MAX_ENTRIES = 250000
+MAX_ENTRIES = 500000
+TRANSFER_BATCH_BYTES = 64 * 1024 * 1024
+TRANSFER_BATCH_FILES = 256
+TRANSFER_BATCH_SECONDS = 1.0
 DEFAULT_RESERVE = 10 * 1024**3
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 USER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
@@ -424,15 +427,18 @@ class DatasetCache:
         return self._lock_file(".lock")
 
     @contextlib.contextmanager
-    def _version_locked(self, actor, dataset, version):
+    def _version_locked(self, actor, dataset, version, *, snapshot=False):
         _identifier(dataset)
         _identifier(version, HASH_RE)
         # Authenticate before creating lock files; guessed IDs must not consume
         # arbitrary filesystem entries. Recheck authorization inside the caller.
         with self._locked():
-            self._record(actor, dataset, version)
+            record = self._record(actor, dataset, version)
+            identity = self._record_identity(dataset, version) if snapshot else None
+            if not snapshot:
+                record = None
         with self._lock_file(".locks/" + dataset + "." + version + ".lock"):
-            yield
+            yield (record, identity) if snapshot else None
 
     def _actor(self, actor, admin=False):
         if not isinstance(actor, Principal) or type(actor.is_admin) is not bool:
@@ -474,6 +480,23 @@ class DatasetCache:
         if record["sourceId"] is not None:
             _identifier(record["sourceId"])
         return record
+
+    def _record_identity(self, dataset, version):
+        filename = self._paths(dataset)[".registry"] / (_identifier(version, HASH_RE) + ".json")
+        with _directory(filename.parent) as parent:
+            fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                return _stamp(_regular(fd))
+            finally:
+                os.close(fd)
+
+    def _check_snapshot(self, actor, dataset, version, identity):
+        # Authorization may be revoked while a long copy owns the version lock.
+        # Revalidate the small owner record and immutable registration identity,
+        # not a potentially 64 MiB manifest, under the global lock each batch.
+        self._dataset(actor, dataset)
+        if self._record_identity(dataset, version) != identity:
+            raise CacheError("version registration changed; retry the operation")
 
     def _free(self, needed=0):
         with _directory(self.root) as fd:
@@ -651,8 +674,8 @@ class DatasetCache:
                 raise CacheError("published data is not read-only")
         return True
 
-    def _stage_files(self, stage, manifest, *, hashes=True):
-        wanted = {f["path"]: f for f in manifest["files"]}
+    def _stage_files(self, stage, manifest, *, hashes=True, index=None):
+        wanted = index if index is not None else {f["path"]: f for f in manifest["files"]}
         expected_dirs = set(manifest["directories"])
         found = {}
         def visit(fd, prefix):
@@ -684,13 +707,14 @@ class DatasetCache:
         with _directory(stage / "data") as fd:
             visit(fd, "")
         result = []
+        empty_digest = hashlib.sha256(b"").hexdigest() if hashes else None
         for entry in manifest["files"]:
-            size, digest = found.get(entry["path"], (0, hashlib.sha256(b"").hexdigest() if hashes else None))
+            size, digest = found.get(entry["path"], (0, empty_digest))
             result.append(dict(**entry, offset=size, prefixSha256=digest, complete=entry["path"] in found and size == entry["size"]))
         return result
 
-    def _plan(self, actor, dataset, version):
-        record = self._record(actor, dataset, version)
+    def _plan(self, actor, dataset, version, *, record=None, index=None):
+        record = self._record(actor, dataset, version) if record is None else record
         paths = self._paths(dataset, version)
         manifest = record["manifest"]
         if self._ready(paths, manifest, version):
@@ -713,7 +737,7 @@ class DatasetCache:
         if transfer["totalBytes"] != total:
             raise CacheError("transfer size differs from registered manifest")
         # Recover a crash between fsync of data and accounting update conservatively.
-        files = self._stage_files(stage, manifest, hashes=False)
+        files = self._stage_files(stage, manifest, hashes=False, index=index)
         remaining = sum(f["size"] - f["offset"] for f in files)
         self._free(self._reserved(except_stage=stage) + remaining + 8192)
         with _directory(stage) as fd:
@@ -741,8 +765,12 @@ class DatasetCache:
             plan["transportRequirement"] = "trusted exclusive writer; no symlinks/devices/specials; exit before publish"
         return plan
 
-    def _authorize_transfer(self, actor, dataset, version, token):
-        record = self._record(actor, dataset, version)
+    def _authorize_transfer(self, actor, dataset, version, token, *, snapshot=None):
+        if snapshot is None:
+            record = self._record(actor, dataset, version)
+        else:
+            record, identity = snapshot
+            self._check_snapshot(actor, dataset, version, identity)
         paths = self._paths(dataset, version)
         if self._ready(paths, record["manifest"], version):
             raise CacheError("published version cannot be modified")
@@ -755,44 +783,58 @@ class DatasetCache:
         if type(offset) is not int or offset < 0 or not isinstance(data, bytes) or len(data) > CHUNK_BYTES:
             raise CacheError("invalid chunk offset/data/size")
         _relative(path)
-        with self._version_locked(actor, dataset, version), self._locked():
-            record, paths, transfer = self._authorize_transfer(actor, dataset, version, token)
-            entry = next((f for f in record["manifest"]["files"] if f["path"] == path), None)
-            if entry is None or offset + len(data) > entry["size"]:
-                raise CacheError("chunk outside registered file")
-            self._free(self._reserved() + 8192)
-            stage = paths[".staging"]
-            parent = stage / "data"
-            for part in Path(path).parts[:-1]:
-                parent = parent / part
-                _mkdir(parent)
-            with _directory(parent) as fd:
-                target = os.open(Path(path).name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=fd)
-                try:
-                    size = _regular(target).st_size
-                    if offset < size and offset + len(data) <= size:
-                        os.lseek(target, offset, os.SEEK_SET)
-                        if os.read(target, len(data)) != data:
-                            raise CacheError("retry would overwrite existing bytes")
-                        return dict(offset=size, complete=size == entry["size"])
-                    if offset != size:
-                        raise CacheError("chunk offset must match current file length")
-                    if transfer["remainingBytes"] < len(data):
-                        raise CacheError("invalid transfer space accounting")
+        with self._version_locked(actor, dataset, version, snapshot=True) as snapshot:
+            with self._locked():
+                record, paths, transfer = self._authorize_transfer(actor, dataset, version, token, snapshot=snapshot)
+                entry = next((f for f in record["manifest"]["files"] if f["path"] == path), None)
+                if entry is None:
+                    raise CacheError("chunk outside registered file")
+                self._free(self._reserved() + 8192)
+                result, written = self._put_chunk_data(paths[".staging"], entry, offset, data, transfer["remainingBytes"])
+                if written:
+                    transfer["remainingBytes"] -= written
+                    _write_json(paths[".staging"] / "TRANSFER.json", transfer)
+                return result
+
+    def _put_chunk_data(self, stage, entry, offset, data, remaining):
+        """Validated manifest entry, exclusive version lock, reserved capacity.
+
+        Data and directory entries reach disk before callers reduce accounting.
+        A crash before the batched fence update thus only over-reserves space;
+        _plan recovers from actual file sizes and verifies prefixes before resume.
+        """
+        if offset + len(data) > entry["size"]:
+            raise CacheError("chunk outside registered file")
+        path = entry["path"]
+        parent = stage / "data"
+        for part in Path(path).parts[:-1]:
+            parent = parent / part
+            _mkdir(parent)
+        with _directory(parent) as fd:
+            target = os.open(Path(path).name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=fd)
+            try:
+                size = _regular(target).st_size
+                if offset < size and offset + len(data) <= size:
                     os.lseek(target, offset, os.SEEK_SET)
-                    view = memoryview(data)
-                    while view:
-                        written = os.write(target, view)
-                        if not written:
-                            raise OSError("short dataset write")
-                        view = view[written:]
-                    os.fsync(target)
-                    os.fsync(fd)
-                finally:
-                    os.close(target)
-            transfer["remainingBytes"] -= len(data)
-            _write_json(stage / "TRANSFER.json", transfer)
-            return dict(offset=offset + len(data), complete=offset + len(data) == entry["size"])
+                    if os.read(target, len(data)) != data:
+                        raise CacheError("retry would overwrite existing bytes")
+                    return dict(offset=size, complete=size == entry["size"]), 0
+                if offset != size:
+                    raise CacheError("chunk offset must match current file length")
+                if remaining < len(data):
+                    raise CacheError("invalid transfer space accounting")
+                os.lseek(target, offset, os.SEEK_SET)
+                view = memoryview(data)
+                while view:
+                    written = os.write(target, view)
+                    if not written:
+                        raise OSError("short dataset write")
+                    view = view[written:]
+                os.fsync(target)
+                os.fsync(fd)
+            finally:
+                os.close(target)
+        return dict(offset=offset + len(data), complete=offset + len(data) == entry["size"]), len(data)
 
     def read_chunk(self, actor, dataset, version, path, offset=0, length=CHUNK_BYTES):
         """Only registered paths from a published replica, never arbitrary host files."""
@@ -820,103 +862,152 @@ class DatasetCache:
             return dict(data=base64.b64encode(data).decode(), offset=offset + len(data), eof=offset + len(data) == entry["size"])
 
     def publish(self, actor, dataset, version, token):
-        with self._version_locked(actor, dataset, version):
+        with self._version_locked(actor, dataset, version, snapshot=True) as snapshot:
+            return self._publish_locked(actor, dataset, version, token, snapshot)
+
+    def _publish_locked(self, actor, dataset, version, token, snapshot):
+        """Publish with the same exclusively locked, validated registration."""
+        record, identity = snapshot
+        with self._locked():
+            self._check_snapshot(actor, dataset, version, identity)
+            paths = self._paths(dataset, version)
+            if self._ready(paths, record["manifest"], version):
+                return dict(dataset=dataset, version=version, state="READY")
+            record, paths, transfer = self._authorize_transfer(actor, dataset, version, token, snapshot=snapshot)
+        stage = paths[".staging"]
+        for directory in record["manifest"]["directories"]:
+            _mkdir(stage / "data" / directory)
+        actual = _scan(stage / "data")
+        if actual != record["manifest"]:
+            raise CacheError("staging checksum/tree does not match registered version")
+        with self._locked():
+            self._authorize_transfer(actor, dataset, version, token, snapshot=snapshot)
+            self._free(self._reserved(except_stage=stage) + len(_json_bytes(actual)) + 8192)
+            with _directory(stage) as fd:
+                os.fchmod(fd, 0o700)
+                names = set(os.listdir(fd))
+            if not names <= {"data", "TRANSFER.json", "manifest.json", "READY.json"}:
+                raise CacheError("unexpected staging metadata")
+            _write_json(stage / "manifest.json", actual)
+            _write_json(stage / "READY.json", dict(schema=SCHEMA, version=version))
+        try:
+            # Hashing and chmod/fsync hold only the version lock. Other versions
+            # and lightweight status remain available throughout a long copy.
+            _modes(stage, True)
             with self._locked():
-                record = self._record(actor, dataset, version)
-                paths = self._paths(dataset, version)
-                if self._ready(paths, record["manifest"], version):
-                    return dict(dataset=dataset, version=version, state="READY")
-                record, paths, transfer = self._authorize_transfer(actor, dataset, version, token)
-            stage = paths[".staging"]
-            # Empty directories are part of the content identity too.
-            for directory in record["manifest"]["directories"]:
-                _mkdir(stage / "data" / directory)
-            actual = _scan(stage / "data")
-            if actual != record["manifest"]:
-                raise CacheError("staging checksum/tree does not match registered version")
-            with self._locked():
-                self._authorize_transfer(actor, dataset, version, token)
-                self._free(self._reserved(except_stage=stage) + len(_json_bytes(actual)) + 8192)
+                self._authorize_transfer(actor, dataset, version, token, snapshot=snapshot)
+                self._free(self._reserved(except_stage=stage) + 8192)
                 with _directory(stage) as fd:
                     os.fchmod(fd, 0o700)
-                    names = set(os.listdir(fd))
-                if not names <= {"data", "TRANSFER.json", "manifest.json", "READY.json"}:
-                    raise CacheError("unexpected staging metadata")
-                _write_json(stage / "manifest.json", actual)
-                _write_json(stage / "READY.json", dict(schema=SCHEMA, version=version))
+                    os.unlink("TRANSFER.json", dir_fd=fd)
+                    os.fchmod(fd, 0o555)
+                    os.fsync(fd)
+                _rename_new(stage, paths["ready"])
+        except BaseException:
             try:
-                # Hashing and chmod/fsync of many data files are protected by the
-                # version lock, not the global lock. Status/other jobs stay usable.
-                _modes(stage, True)
-                with self._locked():
-                    self._authorize_transfer(actor, dataset, version, token)
-                    self._free(self._reserved(except_stage=stage) + 8192)
-                    # The private transfer token must never enter the ready tree.
-                    with _directory(stage) as fd:
-                        os.fchmod(fd, 0o700)
-                        os.unlink("TRANSFER.json", dir_fd=fd)
-                        os.fchmod(fd, 0o555)
-                        os.fsync(fd)
-                    _rename_new(stage, paths["ready"])
-            except BaseException:
-                # On ordinary failure restore a resumable fence. A process/power
-                # crash here fails closed and requires explicit administrator cleanup.
-                try:
-                    _modes(stage, False)
-                    _write_json(stage / "TRANSFER.json", transfer)
-                except OSError:
-                    pass
-                raise
-            return dict(dataset=dataset, version=version, state="READY")
+                _modes(stage, False)
+                _write_json(stage / "TRANSFER.json", transfer)
+            except OSError:
+                pass
+            raise
+        return dict(dataset=dataset, version=version, state="READY")
 
     def materialize(self, actor, dataset, version):
         """Owner may copy a previously administrator-approved source, not pass a path."""
         self._actor(actor)
-        with self._locked():
-            record = self._record(actor, dataset, version)
-            if self._ready(self._paths(dataset, version), record["manifest"], version):
-                return dict(dataset=dataset, version=version, state="READY")
-            source = self.sources.get(record["sourceId"])
-            if source is None:
-                raise CacheError("version has no approved local source")
-        plan = self.plan(actor, dataset, version)
-        if plan["state"] == "READY":
-            return dict(dataset=dataset, version=version, state="READY")
-        for entry in plan["files"]:
-            filename = source / entry["path"]
-            with _directory(filename.parent) as parent:
-                fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
-                try:
-                    before = _regular(fd)
-                    if before.st_size != entry["size"]:
-                        raise CacheError("approved source size changed since registration")
-                    if _digest_fd(fd, entry["offset"])[0] != entry["prefixSha256"]:
-                        raise CacheError("partial transfer is not a prefix of the registered source")
-                    offset = entry["offset"]
-                    os.lseek(fd, offset, os.SEEK_SET)
-                    if entry["size"] == 0 and not entry["complete"]:
-                        self.put_chunk(actor, dataset, version, entry["path"], 0, b"", plan["token"])
-                    while offset < entry["size"]:
-                        data = os.read(fd, min(CHUNK_BYTES, entry["size"] - offset))
-                        if not data:
+        with self._version_locked(actor, dataset, version, snapshot=True) as snapshot:
+            record, identity = snapshot
+            index = {entry["path"]: entry for entry in record["manifest"]["files"]}
+            with self._locked():
+                self._check_snapshot(actor, dataset, version, identity)
+                paths = self._paths(dataset, version)
+                if self._ready(paths, record["manifest"], version):
+                    return dict(dataset=dataset, version=version, state="READY")
+                source = self.sources.get(record["sourceId"])
+                if source is None:
+                    raise CacheError("version has no approved local source")
+                plan = self._plan(actor, dataset, version, record=record, index=index)
+                fence = self._transfer(paths[".staging"])
+                del plan["files"]
+            stage = paths[".staging"]
+            files = self._stage_files(stage, record["manifest"], index=index)
+            # The on-disk remainingBytes intentionally stays an upper bound
+            # until fsynced chunks are checkpointed. Other versions can never
+            # spend unaccounted capacity; a killed copy remains resumable.
+            remaining = plan["remainingBytes"]
+            batch_bytes = batch_files = 0
+            checked_at = time.monotonic()
+
+            def checkpoint():
+                nonlocal fence, batch_bytes, batch_files, checked_at
+                with self._locked():
+                    _, _, current = self._authorize_transfer(actor, dataset, version, plan["token"], snapshot=snapshot)
+                    if current != fence:
+                        raise CacheError("transfer accounting changed during exclusive copy")
+                    self._free(self._reserved(except_stage=stage) + remaining + 8192)
+                    if current["remainingBytes"] != remaining:
+                        fence = dict(current, remainingBytes=remaining)
+                        _write_json(stage / "TRANSFER.json", fence)
+                batch_bytes = batch_files = 0
+                checked_at = time.monotonic()
+
+            def put_reserved(entry, offset, data):
+                # Keep live free-space/owner checks at chunk granularity. The
+                # durable fence reserves this version's entire future write,
+                # so releasing the global lock before local I/O cannot let
+                # another admission spend this capacity. Avoid counting our
+                # already-fsynced but not-yet-checkpointed bytes twice.
+                with self._locked():
+                    self._check_snapshot(actor, dataset, version, identity)
+                    self._free(self._reserved(except_stage=stage) + remaining + 8192)
+                return self._put_chunk_data(stage, entry, offset, data, remaining)
+
+            checkpoint()
+            for entry in files:
+                filename = source / entry["path"]
+                with _directory(filename.parent) as parent:
+                    fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                    try:
+                        before = _regular(fd)
+                        if before.st_size != entry["size"]:
+                            raise CacheError("approved source size changed since registration")
+                        if _digest_fd(fd, entry["offset"])[0] != entry["prefixSha256"]:
+                            raise CacheError("partial transfer is not a prefix of the registered source")
+                        offset = entry["offset"]
+                        os.lseek(fd, offset, os.SEEK_SET)
+                        if entry["size"] == 0 and not entry["complete"]:
+                            put_reserved(index[entry["path"]], 0, b"")
+                        while offset < entry["size"]:
+                            data = os.read(fd, min(CHUNK_BYTES, entry["size"] - offset))
+                            if not data:
+                                raise CacheError("source changed during copy")
+                            _, written = put_reserved(index[entry["path"]], offset, data)
+                            remaining -= written
+                            batch_bytes += written
+                            offset += len(data)
+                            if batch_bytes >= TRANSFER_BATCH_BYTES or time.monotonic() - checked_at >= TRANSFER_BATCH_SECONDS:
+                                checkpoint()
+                        if _stamp(before) != _stamp(_regular(fd)):
                             raise CacheError("source changed during copy")
-                        self.put_chunk(actor, dataset, version, entry["path"], offset, data, plan["token"])
-                        offset += len(data)
-                    if _stamp(before) != _stamp(_regular(fd)):
-                        raise CacheError("source changed during copy")
-                finally:
-                    os.close(fd)
-        # Hash the local replica once in publish. Re-hashing an immutable network
-        # source before AND after copying would triple reads on a gigabit link.
-        # Every copied source file was checked for mutation; content identity is
-        # established by the trusted manifest and the full destination checksum.
-        return self.publish(actor, dataset, version, plan["token"])
+                    finally:
+                        os.close(fd)
+                batch_files += 1
+                if batch_files >= TRANSFER_BATCH_FILES or time.monotonic() - checked_at >= TRANSFER_BATCH_SECONDS:
+                    checkpoint()
+            checkpoint()
+            # Full destination hashing is still mandatory before atomic READY;
+            # source identity and resumed-prefix checks above remain unchanged.
+            # The scan builds its own tree; do not retain a second full resume
+            # plan and path index while hashing up to half a million files.
+            del files, index
+            return self._publish_locked(actor, dataset, version, plan["token"], snapshot)
 
     def prepare(self, actor, dataset, version):
         """Materialize an approved local source, or return a resumable replica plan."""
         with self._locked():
             record = self._record(actor, dataset, version)
             local = record["sourceId"] in self.sources
+        del record
         return self.materialize(actor, dataset, version) if local else self.plan(actor, dataset, version)
 
     def verify(self, actor, dataset, version):
@@ -1011,6 +1102,240 @@ class DatasetCache:
                     os.fsync(fd)
             return dict(evicted=bool(quarantined), registrationRetained=True)
 
+    def _unregister_snapshot(self, actor, dataset, version):
+        """Small, no-follow metadata snapshot; caller holds the global lock."""
+        paths = self._paths(dataset)
+        copies = set()
+        for name in ("ready", ".staging", ".leases"):
+            try:
+                with _directory(paths[name]) as fd:
+                    names = os.listdir(fd)
+                    info = os.fstat(fd)
+                    if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                        raise CacheError("unsafe dataset cleanup directory")
+            except FileNotFoundError:
+                continue
+            for item in names:
+                _identifier(item, HASH_RE)
+                if version is None or item == version:
+                    with _directory(paths[name] / item) as fd:
+                        info = os.fstat(fd)
+                        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                            raise CacheError("unsafe dataset cleanup directory")
+                    # Empty lease folders survive release_lease; they are not
+                    # consumers and must not turn an idempotent retry into an
+                    # orphan-data error after the registration was archived.
+                    if name != ".leases" or self._leases(dataset, item):
+                        copies.add(item)
+        try:
+            with _directory(paths[".registry"]) as fd:
+                info = os.fstat(fd)
+                if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                    raise CacheError("unsafe dataset registration directory")
+                names = sorted(os.listdir(fd))
+                stamps, registered = [], []
+                for name in names:
+                    temporary = re.fullmatch(r"\.write-[a-f0-9]{32}", name)
+                    if name != "dataset.json" and not temporary:
+                        if not name.endswith(".json"):
+                            raise CacheError("corrupt registry directory")
+                        registered.append(_identifier(name[:-5], HASH_RE))
+                    child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        child_info = _regular(child)
+                        if child_info.st_uid != os.geteuid() or child_info.st_mode & 0o022:
+                            raise CacheError("unsafe dataset registration file")
+                        if version is None or name in ("dataset.json", version + ".json"):
+                            stamps.append((name, _stamp(child_info)))
+                    finally:
+                        os.close(child)
+        except FileNotFoundError:
+            if copies:
+                raise CacheError("unregistered local replicas or leases require administrator repair")
+            return None
+        metadata = self._dataset(actor, dataset)
+        if version is not None and version not in registered:
+            if copies:
+                raise CacheError("unregistered local replicas or leases require administrator repair")
+            return None
+        versions = sorted(copies | (set(registered) if version is None else {version}))
+        return dict(registry=stamps, metadata=metadata, versions=versions)
+
+    @staticmethod
+    def _unregister_move_record(source, destination):
+        """Atomic no-replace move for one registration file, never source data."""
+        with _directory(source.parent) as source_fd, _directory(destination.parent) as destination_fd:
+            child = os.open(source.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=source_fd)
+            try:
+                _regular(child)
+                if os.fstat(source_fd).st_dev != os.fstat(destination_fd).st_dev:
+                    raise CacheError("registration recovery must remain on the same filesystem")
+                libc = ctypes.CDLL(None, use_errno=True)
+                if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+                    fn, flags = libc.renameat2, 1
+                elif sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+                    fn, flags = libc.renameatx_np, 4
+                else:
+                    raise CacheError("atomic no-replace rename unavailable on this platform")
+                fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+                fn.restype = ctypes.c_int
+                if fn(source_fd, os.fsencode(source.name), destination_fd, os.fsencode(destination.name), flags):
+                    code = ctypes.get_errno()
+                    raise OSError(code, os.strerror(code))
+                os.fsync(destination_fd)
+                os.fsync(source_fd)
+            finally:
+                os.close(child)
+
+    def _unregister_transaction(self, dataset, version, snapshot):
+        """Reuse interrupted cleanup, but never overwrite an archived registration."""
+        parent = self.root / ".trash"
+        with _directory(parent) as fd:
+            names = sorted(os.listdir(fd))
+        transaction, receipt = None, None
+        for name in names:
+            if not re.fullmatch(r"unregister-[a-f0-9]{32}", name):
+                continue
+            candidate = parent / name
+            _mkdir(candidate)  # Also checks ownership, mode and symlinks.
+            try:
+                previous = _read_json(candidate / "REMOVAL.json")
+            except FileNotFoundError:
+                continue  # Crash before recording intent; never adopt unknown data.
+            if (not isinstance(previous, dict) or previous.get("schema") != SCHEMA
+                    or type(previous.get("unregistered")) is not bool):
+                raise CacheError("corrupt dataset removal journal")
+            if previous.get("dataset") != dataset or previous.get("version") != version or previous["unregistered"]:
+                continue
+            archived = candidate / "registration"
+            try:
+                with _directory(archived) as fd:
+                    # A crash after the final rename already committed removal,
+                    # even if updating REMOVAL.json did not complete.
+                    committed = version is None or version + ".json" in os.listdir(fd)
+            except FileNotFoundError:
+                committed = False
+            if not committed:
+                transaction, receipt = candidate, previous
+                break
+        if transaction is None:
+            transaction = parent / ("unregister-" + uuid.uuid4().hex)
+            _mkdir(transaction)
+            receipt = dict(schema=SCHEMA, dataset=dataset, version=version,
+                           versions=[], createdAt=time.time(), unregistered=False)
+        previous_versions = receipt.get("versions")
+        if not isinstance(previous_versions, list):
+            raise CacheError("corrupt dataset removal journal")
+        receipt["versions"] = sorted(set(_identifier(v, HASH_RE) for v in previous_versions) | set(snapshot["versions"]))
+        receipt["owners"] = snapshot["metadata"]["owners"]
+        _write_json(transaction / "REMOVAL.json", receipt)
+        _mkdir(transaction / "replicas")
+        for name in ("ready", "staging"):
+            _mkdir(transaction / "replicas" / name)
+        if version is not None:
+            _mkdir(transaction / "registration")
+            _write_json(transaction / "registration" / "dataset.json", snapshot["metadata"])
+        return transaction, receipt
+
+    def _unregister_cleanup(self, transaction):
+        """Remove only already-quarantined replicas; keep recovery metadata."""
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise CacheError("descriptor-safe recursive cleanup unavailable on this platform")
+
+        def writable_directories(fd):
+            info = os.fstat(fd)
+            if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise CacheError("unsafe quarantined dataset directory")
+            for name in os.listdir(fd):
+                child_info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(child_info.st_mode):
+                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        writable_directories(child)
+                    finally:
+                        os.close(child)
+                elif not stat.S_ISREG(child_info.st_mode) or child_info.st_nlink != 1:
+                    raise CacheError("quarantined files must be regular files with a single link")
+            # Unlink needs a writable parent, not writable files. This private
+            # tree is already fenced off and locked; syncing/chmodding every
+            # soon-to-be-deleted file adds no recovery guarantee. A crash can
+            # safely repeat this directory-only preparation on the next retry.
+            os.fchmod(fd, stat.S_IMODE(info.st_mode) | stat.S_IWUSR)
+
+        for name in ("ready", "staging"):
+            parent = transaction / "replicas" / name
+            with _directory(parent) as fd:
+                versions = sorted(os.listdir(fd))
+            for version in versions:
+                _identifier(version, HASH_RE)
+                trash = parent / version
+                with _directory(trash) as fd:
+                    writable_directories(fd)
+                shutil.rmtree(trash)
+                with _directory(parent) as fd:
+                    os.fsync(fd)
+
+    def unregister(self, actor, dataset, version=None):
+        """Admin-only reversible registration removal after unleased eviction.
+
+        Internal transfers and leases share these locks. As with evict/publish,
+        administrators MUST stop/join any external trusted rsync writer first.
+        Cleanup failures leave registration in place; retries resume the private
+        cleanup journal. Original configured source directories are never touched.
+        """
+        self._actor(actor, admin=True)
+        self._paths(dataset, version)
+        with self._locked():
+            initial = self._unregister_snapshot(actor, dataset, version)
+        if initial is None:
+            return dict(dataset=dataset, version=version, versions=[], unregistered=False,
+                        registrationRetained=False, recoveryId=None)
+
+        def recheck():
+            current = self._unregister_snapshot(actor, dataset, version)
+            if (current is None or current["registry"] != initial["registry"]
+                    or set(current["versions"]) - set(initial["versions"])):
+                raise CacheBusy("dataset registration changed during removal; retry after checking the catalog")
+            for item in initial["versions"]:
+                if self._leases(dataset, item):
+                    raise CacheError("active leases prevent unregister; leases never expire automatically")
+
+        with contextlib.ExitStack() as locks:
+            # Never wait on a version lock while holding the global lock: active
+            # materialize/publish need global metadata access before releasing it.
+            for item in initial["versions"]:
+                locks.enter_context(self._lock_file(".locks/" + dataset + "." + item + ".lock"))
+            with self._locked():
+                recheck()  # All leases checked before the first filesystem move.
+                transaction, receipt = self._unregister_transaction(dataset, version, initial)
+            self._unregister_cleanup(transaction)
+            with self._locked():
+                recheck()  # A lease may have arrived while cleaning an old journal.
+                for item in initial["versions"]:
+                    for name, bucket in (("ready", "ready"), (".staging", "staging")):
+                        path = self._paths(dataset, item)[name]
+                        try:
+                            with _directory(path):
+                                pass
+                        except FileNotFoundError:
+                            continue
+                        _rename_new(path, transaction / "replicas" / bucket / item)
+            # Recursive deletion never blocks unrelated dataset metadata calls.
+            # Version locks keep these paths absent until the final registry move.
+            self._unregister_cleanup(transaction)
+            with self._locked():
+                recheck()
+                registry = self._paths(dataset)[".registry"]
+                if version is None:
+                    _rename_new(registry, transaction / "registration")
+                else:
+                    self._unregister_move_record(registry / (version + ".json"),
+                                                 transaction / "registration" / (version + ".json"))
+                receipt["unregistered"] = True
+                _write_json(transaction / "REMOVAL.json", receipt)
+            return dict(dataset=dataset, version=version, versions=receipt["versions"], unregistered=True,
+                        registrationRetained=False, recoveryId=transaction.name)
+
     def dispatch(self, actor, request):
         """Strict JSON adapter; caller supplies the trusted Principal separately."""
         if not isinstance(request, dict) or not isinstance(request.get("op"), str):
@@ -1034,6 +1359,7 @@ class DatasetCache:
             "acquire_lease": (self.acquire_lease, {"dataset", "version", "jobId"}),
             "release_lease": (self.release_lease, {"dataset", "version", "leaseId"}),
             "evict": (self.evict, {"dataset", "version"}),
+            "unregister": (self.unregister, {"dataset", "version"} if "version" in request else {"dataset"}),
         }
         if request["op"] not in definitions:
             raise CacheError("unsupported dataset operation")
