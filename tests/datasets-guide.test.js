@@ -71,4 +71,7 @@ test('manual online references remain generic rather than exposing deployment da
     const text = await readFile(new URL('../' + name, import.meta.url), 'utf8');
     assert.ok(text.includes('https://gpu.example.com/guide/datasets'));
   }
+  const context = await readFile(new URL('../.dockerignore', import.meta.url), 'utf8');
+  for (const manual of ['DATASETS.md', 'PROJECTS.md'])
+    assert.ok(context.split(/\r?\n/).includes('!docs/' + manual), 'production manual must enter the Docker build context');
 });

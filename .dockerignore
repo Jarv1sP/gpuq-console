@@ -4,5 +4,7 @@
 !package.json
 !USER_README.md
 !ADMIN_README.md
+!docs/DATASETS.md
+!docs/PROJECTS.md
 !deploy/Dockerfile
 !deploy/install-client.sh
