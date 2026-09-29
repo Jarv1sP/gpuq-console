@@ -64,7 +64,7 @@ try{
   await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:2,limits:{[machine]:1,[other]:1}});
   projects.set(key(other,member.id,'other-project'),{project:'other-project',state:'READY',releases:[{release:nextRelease,state:'READY'}],latestReadyRelease:nextRelease});
   projects.set(key(machine,'builtin-admin','admin-project'),{project:'admin-project',state:'DRAFT',releases:[],latestReadyRelease:null});
-  browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
+  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1100}});
   async function configure(target){
     target.on('pageerror',error=>pageErrors.push(error.message));

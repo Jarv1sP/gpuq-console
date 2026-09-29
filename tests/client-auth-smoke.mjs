@@ -24,7 +24,7 @@ const server=createServer(async(req,res)=>{
 });
 try{
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin=`http://127.0.0.1:${server.address().port}`;
-  browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
+  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage();await page.context().route('**/*',route=>new URL(route.request().url()).origin===origin?route.continue():route.abort());
   await page.goto(origin);await page.waitForFunction(()=>window.client);await page.evaluate(()=>client.login('old','fixture'));
   const cookie=async()=>(await page.context().cookies()).find(item=>item.name==='fixture_session')?.value;

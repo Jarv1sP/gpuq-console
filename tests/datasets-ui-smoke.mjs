@@ -64,7 +64,7 @@ try {
     policyVersion: service.store.get(user.id).policyVersion, total: 2, limits: {'gpu-1': 1, 'gpu-2': 1}});
 
   browser = await chromium.launch({headless: true,
-    executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
+    ...(process.env.CHROME_PATH ? {executablePath: process.env.CHROME_PATH} : {})});
   const admin = await browser.newPage({viewport: {width: 1440, height: 1000}});
   const member = await browser.newPage({viewport: {width: 1440, height: 1000}});
   for (const page of [admin, member]) {
