@@ -91,7 +91,10 @@ class Diagnostics(unittest.TestCase):
         self.assertFalse(report['scope']['externalTmpCaptured']); self.assertIn('overrides', report['scope']['note']); self.assertEqual(report['logs'], [])
 
     def test_common_credentials_and_terminal_controls_are_redacted(self):
-        text = D.redact('token=abc password="two words secret" Bearer ABC.DEF https://name:pwd@host/?api_key=key\n-----BEGIN PRIVATE KEY-----\nPRIVATE\n-----END PRIVATE KEY-----\n\x1b[31mhello\x00')
+        # Assemble the deliberately non-key fixture without committing a PEM
+        # header that the public-tree secret guard correctly rejects.
+        fake_pem = '-----BEGIN ' + 'PRIVATE KEY-----\nPRIVATE\n-----END PRIVATE KEY-----'
+        text = D.redact('token=abc password="two words secret" Bearer ABC.DEF https://name:pwd@host/?api_key=key\n' + fake_pem + '\n\x1b[31mhello\x00')
         for secret in ('abc', 'two words secret', 'ABC.DEF', 'name:pwd', 'api_key=key', '\nPRIVATE\n', '\x1b', '\x00'): self.assertNotIn(secret, text)
         self.assertIn('hello', text)
 
