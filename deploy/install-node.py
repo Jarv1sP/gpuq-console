@@ -49,7 +49,7 @@ else:
     if a.initialize_gpuq:print('Existing GPUQ preserved; no upgrade or database initialization performed')
     if not binary.is_file():raise SystemExit('Existing GPUQ requires its managed ~/bin/gpu command')
 cfg=json.loads(config.read_text())
-for item in ('node-executor.py','terminal-helper.py','node-probe.py','dataset-cache.py','project-store.py','project-ops.py','job-diagnostics.py'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
+for item in ('node-executor.py','terminal-helper.py','admin-command.py','node-probe.py','dataset-cache.py','project-store.py','project-ops.py','job-diagnostics.py','gpuq-network'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
 runner_source='sandbox-runner.py' if a.runtime_profile=='ray-p0' else 'sandbox-runner-common-p0.py'
 shutil.copy2(source/'deploy'/runner_source,dest/'sandbox-runner.py');(dest/'sandbox-runner.py').chmod(0o700)
 if a.runtime_profile=='ray-p0':
@@ -58,7 +58,8 @@ host_root=False
 if a.enable_host_root:
     # This is a deliberately explicit, high-trust host-root capability.
     run('sudo','install','-D','-o','root','-g','root','-m','755',str(source/'deploy/gpuq-console-root-shell'),'/usr/local/libexec/gpuq-console-root-shell')
-    sudoers=dest/'sudoers.pending';sudoers.write_text(node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-root-shell\n');sudoers.chmod(0o600)
+    run('sudo','install','-D','-o','root','-g','root','-m','755',str(source/'deploy/admin-command.py'),'/usr/local/libexec/gpuq-console-admin-command')
+    sudoers=dest/'sudoers.pending';sudoers.write_text(node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-root-shell\n'+node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-admin-command ""\n');sudoers.chmod(0o600)
     run('sudo','visudo','-cf',str(sudoers));run('sudo','install','-o','root','-g','root','-m','440',str(sudoers),'/etc/sudoers.d/gpuq-console');sudoers.unlink();host_root=True
 node_config={'machine':a.node,'cards':node['cards'],'root':str(root),'gpu':str(binary),'database':cfg['db_path'],'slirp':shutil.which('slirp4netns'),'conda':node['conda'],'hostRoot':host_root}
 previous=json.loads((dest/'node-config.json').read_text()) if (dest/'node-config.json').exists() else {}

@@ -23,7 +23,7 @@ async function fixture(t){
       if(operation==='state'){res.end(JSON.stringify({state}));return;}
       if(custom.has(operation)){const value=await custom.get(operation)(args);res.end(JSON.stringify({result:value}));return;}
       const result=operation==='projects.list'?{projects:[{project:'alpha',state:'READY',releases,latestReadyRelease:latest}]}:
-        operation.startsWith('projects.')?{project:args.project,state:'READY',releases,latestReadyRelease:latest}:
+        operation.startsWith('projects.')?{project:args.project,state:'READY',releases,latestReadyRelease:latest,environmentMode:args.environmentMode||'shared'}:
         operation==='files.list'?{entries:[]}:
         operation==='files.get'?{data:Buffer.from('checkpoint').toString('base64'),eof:true}:
         operation==='files.put'&&args.project?{complete:args.final,size:args.offset+Buffer.from(args.data,'base64').length,...(args.final?{sha256:args.sha256}:{})}:
@@ -69,6 +69,21 @@ test('project list/status/publish use selected context; publication does not cla
   assert.equal((await f.cli(['project','publish','--key',JOB])).code,1);
   assert.equal((await f.cli(['project','status','beta','--machine','2'])).code,0);
   assert.deepEqual(f.calls.at(-1),{operation:'projects.status',args:{machine:'gpu-2',project:'beta'}});
+});
+test('project create forwards only explicit environment mode and rejects mutation on other commands',async t=>{
+  const f=await fixture(t);
+  for(const mode of ['shared','isolated']){
+    assert.equal((await f.cli(['project','create','clean','--env-mode',mode])).code,0);
+    assert.deepEqual(f.calls.at(-1),{operation:'projects.create',args:{machine:'gpu-1',project:'clean',environmentMode:mode}});
+  }
+  for(const args of [['project','create','bad','--env-mode','auto'],['project','status','clean','--env-mode','isolated'],['project','publish','clean','--env-mode','isolated'],['ssh','--env-mode','isolated']]){
+    const before=f.calls.filter(call=>call.operation!=='state').length;
+    assert.equal((await f.cli(args)).code,1);assert.equal(f.calls.filter(call=>call.operation!=='state').length,before);
+  }
+  f.custom.set('projects.create',args=>({project:args.project,state:'DRAFT'}));
+  const unsupported=await f.cli(['project','create','unsupported','--env-mode','isolated']);
+  assert.equal(unsupported.code,1);assert.match(unsupported.stderr,/did not confirm isolated/);
+  assert.notEqual(JSON.parse(await readFile(f.session,'utf8')).projectsByMachine['gpu-1'],'unsupported');
 });
 
 test('terminal open/exchange/close preserve selected project and use top-level rows/cols',async t=>{

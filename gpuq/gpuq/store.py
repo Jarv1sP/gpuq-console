@@ -52,7 +52,7 @@ from .progress import (
 from .util import reject_duplicate_json
 from .sharing import validate_sharing
 from .hami import validate_hami_request
-from .policy import validate_yield_policy
+from .policy import priority_class_contract, validate_yield_policy
 
 
 APPLICATION_ID = 0x47505131  # ASCII-ish "GPQ1"; protects against a wrong DB.
@@ -64,6 +64,8 @@ _SCHEMA_VERSION_V5 = 5
 _SCHEMA_VERSION_V6 = 6
 _SCHEMA_VERSION_V7 = 7
 _SCHEMA_VERSION_V8 = 8
+_SCHEMA_VERSION_V9 = 9
+_SCHEMA_VERSION_V10 = 10
 _SQLITE_SIGNED_INT_MAX = 2**63 - 1
 _MAX_CLAIM_ACTION_EXCLUSIONS = 1000
 _UNSET = object()
@@ -94,7 +96,8 @@ _REQUIRED_TABLES_V5 = frozenset(
         "scale_up_reservations",
     }
 )
-_REQUIRED_TABLES = frozenset({*_REQUIRED_TABLES_V5, "attempt_progress"})
+_REQUIRED_TABLES_V6_TO_V10 = frozenset({*_REQUIRED_TABLES_V5, "attempt_progress"})
+_REQUIRED_TABLES = frozenset({*_REQUIRED_TABLES_V6_TO_V10, "gpu_allocation_history"})
 
 
 class StoreError(RuntimeError):
@@ -189,6 +192,7 @@ def _submission_digest(
     hami_core: bool = False,
     sm_percent: int | None = None,
     yield_policy: str = "legacy",
+    preempt_idle_only: bool = False,
 ) -> str:
     """Build the versioned canonical submission idempotency digest."""
 
@@ -234,6 +238,8 @@ def _submission_digest(
         parts.extend(("hami-core-v1", str(sm_percent)))
     if yield_policy != "legacy":
         parts.extend(("yield-v1", yield_policy))
+    if preempt_idle_only:
+        parts.append("preempt-idle-only-v1")
     return _digest(*parts)
 
 
@@ -1208,10 +1214,47 @@ _SCHEMA_V8_TO_V9_DDL = (
        AND (yield_policy<>'save' OR checkpoint_capability='epoch-v1')
        AND (yield_policy NOT IN ('now','save') OR share_gpu=0))""",
 )
-_EXPECTED_SCHEMA_SIGNATURE = _build_expected_schema_signature((
+_EXPECTED_SCHEMA_SIGNATURE_V9 = _build_expected_schema_signature((
     *_SCHEMA_V2_TO_V3_DDL, *_SCHEMA_V3_TO_V4_DDL, *_SCHEMA_V4_TO_V5_DDL,
     *_SCHEMA_V5_TO_V6_DDL, *_SCHEMA_V6_TO_V7_DDL, *_SCHEMA_V7_TO_V8_DDL,
     *_SCHEMA_V8_TO_V9_DDL,
+))
+
+_SCHEMA_V9_TO_V10_DDL = (
+    """ALTER TABLE jobs ADD COLUMN preempt_idle_only INTEGER NOT NULL DEFAULT 0
+    CHECK (preempt_idle_only IN (0,1))""",
+)
+_EXPECTED_SCHEMA_SIGNATURE_V10 = _build_expected_schema_signature((
+    *_SCHEMA_V2_TO_V3_DDL, *_SCHEMA_V3_TO_V4_DDL, *_SCHEMA_V4_TO_V5_DDL,
+    *_SCHEMA_V5_TO_V6_DDL, *_SCHEMA_V6_TO_V7_DDL, *_SCHEMA_V7_TO_V8_DDL,
+    *_SCHEMA_V8_TO_V9_DDL, *_SCHEMA_V9_TO_V10_DDL,
+))
+
+_SCHEMA_V10_TO_V11_DDL = (
+    """CREATE TABLE gpu_allocation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        gpu_uuid TEXT NOT NULL,
+        gpu_index INTEGER NOT NULL CHECK (gpu_index>=0),
+        acquired_at REAL NOT NULL,
+        released_at REAL,
+        release_reason TEXT,
+        source TEXT NOT NULL CHECK (source IN ('observed','migrated_active')),
+        FOREIGN KEY(attempt_id, job_id) REFERENCES attempts(id, job_id)
+    )""",
+    """CREATE UNIQUE INDEX allocation_history_active_idx
+        ON gpu_allocation_history(attempt_id,gpu_uuid) WHERE released_at IS NULL""",
+    "CREATE INDEX allocation_history_job_idx ON gpu_allocation_history(job_id,id DESC)",
+    """INSERT INTO gpu_allocation_history(
+        job_id,attempt_id,gpu_uuid,gpu_index,acquired_at,source)
+        SELECT job_id,attempt_id,gpu_uuid,gpu_index,acquired_at,'migrated_active'
+        FROM leases ORDER BY acquired_at,attempt_id,gpu_index""",
+)
+_EXPECTED_SCHEMA_SIGNATURE = _build_expected_schema_signature((
+    *_SCHEMA_V2_TO_V3_DDL, *_SCHEMA_V3_TO_V4_DDL, *_SCHEMA_V4_TO_V5_DDL,
+    *_SCHEMA_V5_TO_V6_DDL, *_SCHEMA_V6_TO_V7_DDL, *_SCHEMA_V7_TO_V8_DDL,
+    *_SCHEMA_V8_TO_V9_DDL, *_SCHEMA_V9_TO_V10_DDL, *_SCHEMA_V10_TO_V11_DDL,
 ))
 
 
@@ -1411,6 +1454,12 @@ class Store:
                         version = _SCHEMA_VERSION_V8
                     if version == _SCHEMA_VERSION_V8:
                         self._migrate_v8_to_v9(connection)
+                        version = _SCHEMA_VERSION_V9
+                    if version == _SCHEMA_VERSION_V9:
+                        self._migrate_v9_to_v10(connection)
+                        version = _SCHEMA_VERSION_V10
+                    if version == _SCHEMA_VERSION_V10:
+                        self._migrate_v10_to_v11(connection)
                     self._validate_schema(connection)
                     connection.commit()
                 except BaseException:
@@ -1482,8 +1531,10 @@ class Store:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        if version in {_SCHEMA_VERSION_V6, _SCHEMA_VERSION_V7, _SCHEMA_VERSION_V8, STORE_SCHEMA_VERSION}:
+        if version == STORE_SCHEMA_VERSION:
             required_tables = _REQUIRED_TABLES
+        elif version in {_SCHEMA_VERSION_V6, _SCHEMA_VERSION_V7, _SCHEMA_VERSION_V8, _SCHEMA_VERSION_V9, _SCHEMA_VERSION_V10}:
+            required_tables = _REQUIRED_TABLES_V6_TO_V10
         elif version == _SCHEMA_VERSION_V5:
             required_tables = _REQUIRED_TABLES_V5
         else:
@@ -1762,6 +1813,22 @@ class Store:
             connection.execute(statement)
         connection.execute("UPDATE schema_meta SET schema_version=9 WHERE singleton=1")
         connection.execute("PRAGMA user_version=9")
+        self._validate_schema_version(connection, version=9, expected_signature=_EXPECTED_SCHEMA_SIGNATURE_V9)
+
+    def _migrate_v9_to_v10(self, connection: sqlite3.Connection) -> None:
+        self._validate_schema_version(connection, version=9, expected_signature=_EXPECTED_SCHEMA_SIGNATURE_V9)
+        for statement in _SCHEMA_V9_TO_V10_DDL:
+            connection.execute(statement)
+        connection.execute("UPDATE schema_meta SET schema_version=10 WHERE singleton=1")
+        connection.execute("PRAGMA user_version=10")
+        self._validate_schema_version(connection, version=10, expected_signature=_EXPECTED_SCHEMA_SIGNATURE_V10)
+
+    def _migrate_v10_to_v11(self, connection: sqlite3.Connection) -> None:
+        self._validate_schema_version(connection, version=10, expected_signature=_EXPECTED_SCHEMA_SIGNATURE_V10)
+        for statement in _SCHEMA_V10_TO_V11_DDL:
+            connection.execute(statement)
+        connection.execute("UPDATE schema_meta SET schema_version=11 WHERE singleton=1")
+        connection.execute("PRAGMA user_version=11")
         self._validate_schema(connection)
 
     @staticmethod
@@ -1949,6 +2016,7 @@ class Store:
         result["auto_scale_up"] = bool(result["auto_scale_up"])
         result["share_gpu"] = bool(result["share_gpu"])
         result["hami_core"] = bool(result["hami_core"])
+        result["preempt_idle_only"] = bool(result["preempt_idle_only"])
         result["priority_name"] = f"P{result['priority']}"
         result.pop("submit_digest", None)
         return result
@@ -1972,6 +2040,7 @@ class Store:
             )
         values.update(fields)
         allowed = {
+            "preempt_idle_only",
             "yield_policy",
             "hami_core",
             "sm_percent",
@@ -2151,9 +2220,13 @@ class Store:
             values.get("hami_core", False), values.get("sm_percent"), share_gpu, env
         )
         yield_policy = validate_yield_policy(values.get("yield_policy", "legacy"), checkpoint_capability, share_gpu)
+        preempt_idle_only = values.get("preempt_idle_only", False)
+        if not isinstance(preempt_idle_only, bool):
+            raise ValueError("preempt_idle_only must be a boolean")
         job_id = values.get("id", values.get("job_id", _new_id()))
         job_id = _nonempty(job_id, "job_id", maximum=256)
         digest = _submission_digest(
+            preempt_idle_only=preempt_idle_only,
             yield_policy=yield_policy,
             hami_core=hami_core,
             sm_percent=sm_percent,
@@ -2196,10 +2269,10 @@ class Store:
                         created_at, updated_at,
                         min_gpu_count, elastic_gpu_count,
                         target_global_batch_size, per_device_micro_batch_size,
-                        auto_scale_up, share_gpu, vram_mb, hami_core, sm_percent, yield_policy
+                        auto_scale_up, share_gpu, vram_mb, hami_core, sm_percent, yield_policy, preempt_idle_only
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -2232,6 +2305,7 @@ class Store:
                         int(hami_core),
                         sm_percent,
                         yield_policy,
+                        int(preempt_idle_only),
                     ),
                 )
                 row = connection.execute(
@@ -2404,6 +2478,71 @@ class Store:
         return self.update_job(
             job_id, priority=priority, expected_version=expected_version
         )
+
+    def set_pending_priority_class(
+        self,
+        job_id: str,
+        priority_class: str,
+        *,
+        expected: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically replace a waiting job's complete scheduling contract.
+
+        This deliberately excludes attempts/reservations/preemption already in
+        flight. A stale reader can supply all four old contract fields, so a
+        priority change never silently overrides another operator's decision.
+        """
+        contract = priority_class_contract(priority_class)
+        if expected is not None:
+            if not isinstance(expected, Mapping) or set(expected) != set(contract):
+                raise ValueError("expected must contain priority, yield_policy, restart_policy and dispatch_mode")
+            if isinstance(expected["priority"], bool) or not isinstance(expected["priority"], int):
+                raise ValueError("expected priority must be an integer P0..P4")
+            _priority(expected["priority"])
+            _choice(expected["yield_policy"], frozenset({"legacy", "never", "now", "save"}), "expected yield_policy")
+            _choice(expected["restart_policy"], _RESTART_POLICIES, "expected restart_policy")
+            _choice(expected["dispatch_mode"], _DISPATCH_MODES, "expected dispatch_mode")
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise StoreNotFoundError(f"job not found: {job_id}")
+            current = self._job(row)
+            if current["state"] != JobState.PENDING.value:
+                raise StoreConflictError("priority can only be changed while the job is PENDING")
+            before = {key: current[key] for key in contract}
+            if expected is not None and before != dict(expected):
+                raise StoreConflictError("job scheduling policy changed; refresh before retrying")
+            if current.get("auto_scale_up"):
+                raise StoreConflictError("automatic scale-up jobs cannot use the Console priority contract")
+            validate_yield_policy(contract["yield_policy"], current["checkpoint_capability"], current["share_gpu"])
+            active_states = sorted(ACTIVE_ATTEMPT_STATES)
+            active = connection.execute(
+                "SELECT 1 FROM attempts WHERE state IN (" + ",".join("?" for _ in active_states)
+                + ") AND (job_id=? OR preempt_requested_by_job_id=?) LIMIT 1",
+                (*active_states, job_id, job_id),
+            ).fetchone()
+            leases = connection.execute("SELECT 1 FROM leases WHERE job_id=? LIMIT 1", (job_id,)).fetchone()
+            scale_states = sorted(ACTIVE_SCALE_UP_STATES)
+            scale = connection.execute(
+                "SELECT 1 FROM scale_up_plans WHERE job_id=? AND state IN ("
+                + ",".join("?" for _ in scale_states) + ") LIMIT 1",
+                (job_id, *scale_states),
+            ).fetchone()
+            if active or leases or scale:
+                raise StoreConflictError("job attempt, reservation or preemption cleanup is still in progress")
+            if before == contract:
+                return current
+            cursor = connection.execute(
+                "UPDATE jobs SET priority=?, yield_policy=?, restart_policy=?, dispatch_mode=?, "
+                "updated_at=?, version=version+1 WHERE id=? AND state='PENDING' AND version=?",
+                (contract["priority"], contract["yield_policy"], contract["restart_policy"],
+                 contract["dispatch_mode"], self._now(), job_id, current["version"]),
+            )
+            if cursor.rowcount != 1:
+                raise StoreConflictError("job state/version changed concurrently")
+            self.append_event("PRIORITY_CHANGED", job_id=job_id,
+                              payload={"priority_class": priority_class, "previous": before, "current": contract})
+            return self.get_job(job_id)
 
     # --------------------------------------------------------------- attempts
 
@@ -4278,6 +4417,12 @@ class Store:
                         effective_token,
                     ),
                 )
+                connection.execute(
+                    """INSERT INTO gpu_allocation_history(
+                        job_id,attempt_id,gpu_uuid,gpu_index,acquired_at,source)
+                        VALUES(?,?,?,?,?,'observed')""",
+                    (job_id, attempt_id, gpu_uuid, gpu_index, now),
+                )
             placeholders = ",".join("?" for _ in normalized)
             rows = connection.execute(
                 f"""
@@ -4316,13 +4461,36 @@ class Store:
             )
             return int(cursor.rowcount)
 
+    def list_allocation_history(
+        self, *, job_id: str, before_id: int | None = None, limit: int = 256
+    ) -> list[dict[str, Any]]:
+        job_id = _nonempty(job_id, "job_id", maximum=256)
+        if type(limit) is not int or not 1 <= limit <= 257:
+            raise ValueError("allocation history limit must be an integer from 1 to 257")
+        if before_id is not None and (type(before_id) is not int or not 1 <= before_id <= _SQLITE_SIGNED_INT_MAX):
+            raise ValueError("allocation history cursor must be a positive SQLite integer")
+        parameters: list[Any] = [job_id]
+        clause = "job_id=?"
+        if before_id is not None:
+            clause += " AND id<?"
+            parameters.append(before_id)
+        parameters.append(limit)
+        with self._read_connection() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT id,job_id,attempt_id,gpu_uuid,gpu_index,acquired_at,released_at,release_reason,source "
+                + "FROM gpu_allocation_history WHERE " + clause + " ORDER BY id DESC LIMIT ?", parameters
+            ).fetchall()]
+
     def release_leases(
         self,
         *,
         attempt_id: str,
         gpu_uuids: Iterable[str] | None = None,
         lease_token: str | None = None,
+        reason: str | None = None,
     ) -> int:
+        if reason is not None:
+            reason = _nonempty(reason, "release reason", maximum=400)
         clauses = ["attempt_id=?"]
         parameters: list[Any] = [attempt_id]
         if gpu_uuids is not None:
@@ -4335,6 +4503,20 @@ class Store:
             clauses.append("lease_token=?")
             parameters.append(lease_token)
         with self._transaction() as connection:
+            leases = connection.execute(
+                f"SELECT * FROM leases WHERE {' AND '.join(clauses)}", parameters
+            ).fetchall()
+            released_at = self._now()
+            for lease in leases:
+                updated = connection.execute(
+                    """UPDATE gpu_allocation_history SET released_at=?,release_reason=?
+                        WHERE job_id=? AND attempt_id=? AND gpu_uuid=? AND gpu_index=?
+                        AND acquired_at=? AND released_at IS NULL""",
+                    (released_at, reason, lease['job_id'], lease['attempt_id'],
+                     lease['gpu_uuid'], lease['gpu_index'], lease['acquired_at']),
+                )
+                if updated.rowcount != 1:
+                    raise StoreCorruptError("active lease lacks exactly one allocation history record")
             cursor = connection.execute(
                 f"DELETE FROM leases WHERE {' AND '.join(clauses)}", parameters
             )

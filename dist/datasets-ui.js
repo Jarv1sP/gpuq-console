@@ -10,7 +10,7 @@ export function datasetsUI(store,toast){
     const machine=section.querySelector('[name=dataset-machine]')?.value;if(!machine)return;
     busy=true;const token=++generation,button=section.querySelector('#datasets-refresh'),select=section.querySelector('[name=dataset-machine]');button.disabled=true;select.disabled=true;
     const status=section.querySelector('#datasets-status');status.textContent='正在读取数据集状态…';section.querySelector('#dataset-catalog').replaceChildren();
-    try{const result=await store.call('datasets.list',{machine});if(token!==generation)return;section.querySelector('#dataset-catalog').innerHTML=datasetRows(result);status.textContent='已更新；准备过程不占用 GPU。';}
+    try{const result=await store.call('datasets.list',{machine});if(token!==generation)return;section.querySelector('#dataset-catalog').innerHTML=datasetRows(result);status.textContent='已更新。准备数据不占用 GPU。';}
     catch(e){if(token===generation){section.querySelector('#dataset-catalog').replaceChildren();status.textContent=e.message;}}
     finally{if(token===generation){busy=false;button.disabled=false;select.disabled=false;}}
   }
@@ -30,6 +30,6 @@ export function datasetsUI(store,toast){
   return ()=>{
     const machines=store.data?.machines||[];
     const next=JSON.stringify([store.principal?.userId,store.principal?.role,machines]);if(next===identity)return;identity=next;generation++;busy=false;
-    section.innerHTML=`<p class="muted">数据按版本准备到各服务器的 <code>/data2</code>。训练读取本机副本，不持续占用机间网络。旧数据不会自动搬移或删除。</p><div class="terminal-controls"><label>服务器<select name="dataset-machine">${machines.map(m=>`<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('')}</select></label><button class="button" id="datasets-refresh" ${store.production&&store.principal&&machines.length?'':'disabled'}>加载 / 刷新数据集</button></div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div>`;
+    section.innerHTML=`<p class="muted">选择服务器，准备所需数据版本。就绪后，训练从 <code>/data2/数据集名称</code> 只读访问本地副本。</p><div class="terminal-controls"><label>服务器<select name="dataset-machine">${machines.map(m=>`<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('')}</select></label><button class="button" id="datasets-refresh" ${store.production&&store.principal&&machines.length?'':'disabled'}>加载 / 刷新数据集</button></div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div>`;
   };
 }

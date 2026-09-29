@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import heapq
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -321,8 +322,49 @@ def observe(root, spec, capture, env, sleep=time.sleep):
         os.close(capture_lock)
 
 
+def allocation_history(scheduler):
+    """Only real scheduler lease boundaries; never infer from attempt timestamps."""
+    result = {'historyAvailable': False, 'allocationHistory': [], 'historyTruncated': False,
+              'historyNextBeforeId': None,
+              'historyNote': 'Lease acquisition/release times are scheduler records, not first/last GPU kernel times. Historical releases before collection began are unavailable.'}
+    rows = scheduler.get('allocation_history')
+    if scheduler.get('allocation_history_available') is not True or not isinstance(rows, list):
+        return result
+    job_id = scheduler.get('job', scheduler).get('id')
+    cleaned = []
+    fields = ('id', 'job_id', 'attempt_id', 'gpu_uuid', 'gpu_index', 'acquired_at',
+              'released_at', 'release_reason', 'source')
+    for row in rows[:256]:
+        if (not isinstance(row, dict) or not all(key in row for key in fields)
+                or row['job_id'] != job_id or type(row['id']) is not int or row['id'] < 1
+                or type(row['gpu_index']) is not int or row['gpu_index'] < 0
+                or any(not isinstance(row[key], str) or not 1 <= len(row[key]) <= 256
+                       for key in ('job_id', 'attempt_id', 'gpu_uuid'))
+                or row['source'] not in ('observed', 'migrated_active')
+                or any(type(row[key]) not in (int, float) or not math.isfinite(row[key])
+                       for key in ('acquired_at',) if row[key] is not None)
+                or row['acquired_at'] is None
+                or row['released_at'] is not None and (type(row['released_at']) not in (int, float)
+                                                     or not math.isfinite(row['released_at']))
+                or row['release_reason'] is not None and (not isinstance(row['release_reason'], str)
+                                                         or len(row['release_reason']) > 400)):
+            result['historyNote'] = 'Allocation history could not be validated; no allocation/release times were inferred.'
+            return result
+        value = {key: row[key] for key in fields}
+        if value['release_reason'] is not None: value['release_reason'] = redact(value['release_reason'])
+        cleaned.append(value)
+    more = scheduler.get('allocation_history_truncated') is True or len(rows) > 256
+    cursor = scheduler.get('allocation_history_next_before_id') if len(rows) <= 256 else cleaned[-1]['id']
+    if more and (type(cursor) is not int or cursor < 1):
+        cursor = None  # Explicit truncation still prevents a false complete history.
+    result.update(historyAvailable=True, allocationHistory=cleaned,
+                  historyTruncated=more, historyNextBeforeId=cursor if more else None)
+    return result
+
+
 def bundle(root, spec, scheduler):
     result = {'schema': 1, 'jobId': spec['id'], 'schedulerState': scheduler.get('job', scheduler).get('state', 'UNKNOWN'), 'state': 'UNAVAILABLE', 'captures': [], 'attempts': []}
+    result.update(allocation_history(scheduler))
     for attempt in scheduler.get('attempts', [])[:16]:
         result['attempts'].append({k: attempt[k] for k in ('id', 'state', 'exit_code', 'failure_reason', 'gpu_indices', 'gpu_uuids', 'created_at', 'started_at', 'finished_at') if k in attempt})
     try: folder = _folder(root, spec)

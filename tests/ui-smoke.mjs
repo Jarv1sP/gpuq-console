@@ -131,7 +131,7 @@ try{
  const anonymousDetail=member.locator('details[data-resource-detail="gpu-1:0"]');await anonymousDetail.locator('summary').click();
  const anonymousProcessText=await anonymousDetail.locator('.process-table').textContent();
  assert.match(anonymousProcessText,new RegExp(String(processPid)));assert.match(anonymousProcessText,/8192/);
- assert.deepEqual(await anonymousDetail.locator('.process-table th').allTextContents(),['PID','显存 MiB']);
+ assert.deepEqual(await anonymousDetail.locator('.process-table th').allTextContents(),['PID','显存 MiB','调度优先级']);
  const memberResourceText=await member.locator('#machine-grid').textContent();
  assert.ok(!memberResourceText.includes(processOwner));assert.ok(!memberResourceText.includes(processName));
  assert.equal(await member.locator('.node-queue').count(),0);

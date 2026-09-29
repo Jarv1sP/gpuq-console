@@ -6,11 +6,13 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
 
 spec = importlib.util.spec_from_file_location('upgrade_projects', Path(__file__).resolve().parents[1] / 'deploy/upgrade-projects.py')
 upgrade = importlib.util.module_from_spec(spec)
@@ -22,6 +24,13 @@ class UpgradeProjects(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
+        self.home = self.base/'home'
+        self.units = self.home/'.config/systemd/user'
+        self.units.mkdir(parents=True,mode=0o700)
+        self.home_patch = patch.object(upgrade.Path,'home',return_value=self.home)
+        self.home_patch.start();self.addCleanup(self.home_patch.stop)
+        self.timer = patch.object(upgrade,'timer_preflight')
+        self.timer_mock = self.timer.start();self.addCleanup(self.timer.stop)
         self.dest, self.source = self.base / 'node', self.base / 'source'
         self.root, self.conda = self.base / 'workspaces', self.base / 'conda'
         for directory in (self.dest, self.source, self.root, self.conda):
@@ -32,21 +41,33 @@ class UpgradeProjects(unittest.TestCase):
                                          'hostRoot': True, 'futureSetting': {'keep': 'unchanged'}}, indent=3) + '\n\n')
         self.config.chmod(0o600)
         self.old, self.new = {}, {}
-        for name in upgrade.FILES:
+        for name, source_name in upgrade.file_plan('common-p0'):
             self.new[name] = ('# new ' + name + '\nVALUE = 2\n').encode()
-            (self.source / name).write_bytes(self.new[name])
-            if name in ('sandbox-runner.py', 'node-executor.py'):
-                self.old[name] = ('# old ' + name + '\nVALUE = 1\n').encode()
+            if name == 'sandbox-runner.py':
+                self.new[name] = (DEPLOY/source_name).read_bytes()
+            (self.source / source_name).write_bytes(self.new[name])
+            if name == 'sandbox-runner.py':
+                self.old[name] = b'# Existing common P0 runner\n'+self.new[name]
                 (self.dest / name).write_bytes(self.old[name])
                 (self.dest / name).chmod(0o700)
-        self.sentinel_paths = [self.base / 'gpuq.db', self.dest / 'terminal-helper.py',
+        for name in ('sandbox-runner.py','job-resources.py','gpuq-ray','cpu-delegation.py'):
+            (self.source/name).write_bytes((DEPLOY/name).read_bytes())
+        for name in upgrade.P0_HELPERS:
+            (self.dest/name).write_bytes((DEPLOY/name).read_bytes());(self.dest/name).chmod(0o700)
+        for name in ('gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'):
+            content = (DEPLOY/name).read_text().replace('%h/.local/libexec/gpuq-console',str(self.dest))
+            (self.units/name).write_text(content)
+        self.sentinel_paths = [self.base / 'gpuq.db',
                                self.root / 'users/existing/data', self.root / 'jobs/existing.json']
         for path in self.sentinel_paths:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'Existing opaque state: must not change\n')
+        self.sentinel_paths += [self.dest/name for name in upgrade.P0_HELPERS]
+        self.sentinel_paths += list(self.units.iterdir())
 
-    def run_main(self, apply=False, directory=None, source=None):
+    def run_main(self, apply=False, directory=None, source=None, profile='common-p0'):
         arguments = ['--directory', str(directory or self.dest), '--source', str(source or self.source)]
+        if profile is not None: arguments += ['--runtime-profile',profile]
         if apply:
             arguments.append('--apply')
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -92,23 +113,27 @@ class UpgradeProjects(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((backup / name).stat().st_mode), 0o700)
         self.assertEqual(list(self.dest.rglob('.project-upgrade-*')), [])
 
-    def test_dependencies_are_durable_before_dispatcher_install(self):
+    def test_dependencies_are_durable_before_runner_and_dispatcher_never_changes(self):
         installed = []
         actual = upgrade.atomic_copy
+        dispatcher = (self.dest/'node-executor.py').read_bytes()
         def inspect(source, destination, **kwargs):
             if destination.parent == self.dest:
-                if destination.name == 'node-executor.py':
-                    self.assertEqual(installed, ['project-store.py', 'project-ops.py', 'sandbox-runner.py'])
+                if destination.name == 'sandbox-runner.py':
+                    self.assertEqual(installed, ['project-store.py', 'gpuq-network'])
                     for name in installed:
                         self.assertEqual((self.dest / name).read_bytes(), self.new[name])
+                if destination.name == 'project-ops.py':
+                    self.assertEqual(installed, ['project-store.py','gpuq-network','sandbox-runner.py'])
                 installed.append(destination.name)
             return actual(source, destination, **kwargs)
         with patch.object(upgrade, 'atomic_copy', side_effect=inspect):
             self.run_main(apply=True)
         self.assertEqual(installed, list(upgrade.FILES))
+        self.assertEqual((self.dest/'node-executor.py').read_bytes(),dispatcher)
 
     def test_compile_failure_in_last_file_prevents_every_change_and_backup(self):
-        (self.source / 'node-executor.py').write_text('def syntax error!\n')
+        (self.source / 'project-ops.py').write_text('def syntax error!\n')
         before = self.snapshot()
         with self.assertRaises(SyntaxError):
             self.run_main(apply=True)
@@ -130,7 +155,7 @@ class UpgradeProjects(unittest.TestCase):
             nonlocal changed
             if not changed:
                 changed = True
-                for name in upgrade.FILES:
+                for _,name in upgrade.file_plan('common-p0'):
                     (self.source / name).write_text('uncompiled invalid syntax !!!')
             return actual(source, destination, **kwargs)
         with patch.object(upgrade, 'atomic_copy', side_effect=mutate_after_compile):
@@ -260,13 +285,165 @@ class UpgradeProjects(unittest.TestCase):
         with patch.object(upgrade, 'atomic_copy', side_effect=fail_install), self.assertRaisesRegex(SystemExit, 'did not finish.*no service was restarted'):
             self.run_main(apply=True)
         self.assertEqual(len(list(self.dest.glob('before-projects-*'))), 1)
-        self.assertEqual((self.dest / 'node-executor.py').read_bytes(), self.old['node-executor.py'])
+        self.assertEqual((self.dest / 'node-executor.py').read_bytes(), (DEPLOY/'node-executor.py').read_bytes())
         self.assertEqual((self.dest / 'sandbox-runner.py').read_bytes(), self.old['sandbox-runner.py'])
 
     def test_oversized_source_rejected_before_any_backup(self):
         with patch.object(upgrade, 'MAX_FILE_BYTES', 32), self.assertRaisesRegex(SystemExit, 'oversized'):
             self.run_main(apply=True)
         self.assertEqual(list(self.dest.glob('before-projects-*')), [])
+
+    def test_runtime_profile_is_required_and_configuration_authority_is_not_exposed(self):
+        before = self.snapshot()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.run_main(apply=True,profile=None)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            upgrade.main(['--directory',str(self.dest),'--runtime-profile','ray-p0','--configure-cpu-delegation'])
+        self.assertEqual(before,self.snapshot())
+
+    def test_common_plan_has_complete_dependencies_without_cpu_probe_or_ray_install(self):
+        with patch.object(upgrade,'cpu_preflight',side_effect=AssertionError('common must not probe CPU')):
+            result = self.run_main(apply=True)
+        self.assertEqual(result['runtimeProfile'],'common-p0')
+        self.assertTrue(result['dispatcherUnchanged'])
+        self.assertTrue(result['p0PrerequisitesVerified'])
+        self.assertIsNone(result['kernelEnforcement'])
+        self.assertTrue((self.dest/'gpuq-network').exists())
+        self.assertFalse((self.dest/'job-resources.py').exists())
+        self.assertFalse((self.dest/'gpuq-ray').exists())
+        self.assertEqual(upgrade.runner_profile((self.dest/'sandbox-runner.py').read_bytes()),'common-p0')
+
+    def test_real_source_common_bundle_is_self_contained_without_replacing_p0_helpers(self):
+        for name, source_name in upgrade.file_plan('common-p0'):
+            self.new[name] = (DEPLOY/source_name).read_bytes()
+            (self.source/source_name).write_bytes(self.new[name])
+        before = {path:path.read_bytes() for path in self.sentinel_paths}
+        self.run_main(apply=True)
+        self.assertEqual(before,{path:path.read_bytes() for path in self.sentinel_paths})
+        for name,_ in upgrade.file_plan('common-p0'):
+            self.assertEqual((self.dest/name).read_bytes(),self.new[name])
+
+    def test_ray_plan_probes_before_backup_and_installs_resource_helpers_before_runner(self):
+        proof = {'cpuMax':'100000 100000','memoryMax':134217728,'pidsMax':32}
+        order = []
+        actual = upgrade.atomic_copy
+        def probe(payload):
+            self.assertEqual(payload,(DEPLOY/'cpu-delegation.py').read_bytes())
+            self.assertEqual(list(self.dest.glob('before-projects-*')),[])
+            order.append('checked')
+            return proof
+        def install(payload,destination,**kwargs):
+            self.assertEqual(order[0],'checked')
+            if destination.parent == self.dest:
+                if destination.name == 'sandbox-runner.py':
+                    for name in upgrade.RAY_FILES:self.assertEqual((self.dest/name).read_bytes(),(DEPLOY/name).read_bytes())
+                order.append(destination.name)
+            return actual(payload,destination,**kwargs)
+        with patch.object(upgrade,'cpu_preflight',side_effect=probe),patch.object(upgrade,'atomic_copy',side_effect=install):
+            result = self.run_main(apply=True,profile='ray-p0')
+        self.assertEqual(result['kernelEnforcement'],proof)
+        self.assertEqual(result['files'],['project-store.py','gpuq-network','job-resources.py','gpuq-ray','sandbox-runner.py','project-ops.py'])
+        self.assertEqual(upgrade.runner_profile((self.dest/'sandbox-runner.py').read_bytes()),'ray-p0')
+
+    def test_ray_probe_failure_rejects_before_any_write_or_backup(self):
+        for error in (subprocess.CalledProcessError(1,['check']),subprocess.TimeoutExpired(['check'],30),ValueError('kernel mismatch')):
+            before = self.snapshot()
+            with self.subTest(error=type(error).__name__),patch.object(upgrade,'cpu_preflight',side_effect=error),self.assertRaisesRegex(SystemExit,'before any write'):
+                self.run_main(apply=True,profile='ray-p0')
+            self.assertEqual(before,self.snapshot())
+            self.assertEqual(list(self.dest.glob('before-projects-*')),[])
+
+    def test_installed_ray_profile_cannot_be_downgraded_through_project_upgrade(self):
+        (self.dest/'sandbox-runner.py').write_bytes((DEPLOY/'sandbox-runner.py').read_bytes())
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit,'cannot downgrade'):
+            self.run_main(apply=True,profile='common-p0')
+        self.assertEqual(before,self.snapshot())
+
+    def test_missing_p0_helper_or_gc_unit_is_rejected_with_install_node_direction(self):
+        for path in [*(self.dest/name for name in upgrade.P0_HELPERS),self.dest/'sandbox-runner.py',*(self.units/name for name in ('gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'))]:
+            payload = path.read_bytes();mode = stat.S_IMODE(path.stat().st_mode);path.unlink()
+            before = self.snapshot()
+            with self.subTest(file=path.name),self.assertRaisesRegex(SystemExit,'install-node.py'):
+                self.run_main(apply=True)
+            self.assertEqual(before,self.snapshot())
+            path.write_bytes(payload);path.chmod(mode)
+
+    def test_legacy_terminal_or_diagnostic_contract_rejected_without_executing_helpers(self):
+        cases = [('node-executor.py',b"def terminal_op(a,b): pass\n"),
+                 ('terminal-helper.py',b"FIELDS=['data','offset']\n"),
+                 ('job-diagnostics.py',b"def bundle(a,b,c): return {}\n")]
+        for name,payload in cases:
+            path = self.dest/name;original = path.read_bytes();path.write_bytes(payload)
+            before = self.snapshot()
+            with self.subTest(file=name),self.assertRaisesRegex(SystemExit,'install-node.py'):
+                self.run_main(apply=True)
+            self.assertEqual(before,self.snapshot());path.write_bytes(original)
+
+    def test_compatible_helper_contract_accepts_extra_optional_parameters_and_revision(self):
+        path = self.dest/'job-diagnostics.py'
+        content = path.read_text().replace('def summary(package):','def summary(package, future_option=None):')
+        path.write_text('# Local compatible future revision\n'+content)
+        self.assertTrue(self.run_main()['p0PrerequisitesVerified'])
+        content = content.replace('def summary(package, future_option=None):','def summary(package, *, mandatory):')
+        path.write_text(content)
+        with self.assertRaisesRegex(SystemExit,'install-node.py'):
+            self.run_main()
+
+    def test_gc_timer_must_be_installed_enabled_and_active_for_same_directory(self):
+        self.timer_mock.side_effect = subprocess.CalledProcessError(1,['systemctl','is-active'])
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit,'install-node.py'):
+            self.run_main(apply=True)
+        self.assertEqual(before,self.snapshot());self.timer_mock.side_effect = None
+        path = self.units/'gpuq-diagnostics-gc.service'
+        path.write_text(path.read_text().replace(str(self.dest),'/wrong/program/directory'))
+        with self.assertRaisesRegex(SystemExit,'install-node.py'):
+            self.run_main(apply=True)
+
+    def test_timer_checks_only_read_state_and_never_enable_or_restart(self):
+        self.timer.stop()
+        with patch.object(upgrade.subprocess,'run',return_value=SimpleNamespace(returncode=0)) as run:
+            upgrade.timer_preflight()
+        self.assertEqual([call.args[0][2] for call in run.call_args_list],['is-enabled','is-active'])
+        for call in run.call_args_list:self.assertEqual(call.kwargs['timeout'],5)
+        self.timer_mock = self.timer.start()
+
+    def test_cpu_check_uses_pinned_bytes_check_only_bounded_and_validates_kernel_proof(self):
+        payload = (DEPLOY/'cpu-delegation.py').read_bytes()
+        proof = {'cpuMax':'100000 100000','memoryMax':134217728,'pidsMax':32}
+        with patch.object(upgrade.subprocess,'run',return_value=SimpleNamespace(stdout=json.dumps(proof))) as run:
+            self.assertEqual(upgrade.cpu_preflight(payload),proof)
+        self.assertEqual(run.call_args.args[0],['/usr/bin/python3','-c',payload.decode(),'--check'])
+        self.assertEqual(run.call_args.kwargs['timeout'],30)
+        for invalid in ({**proof,'cpuMax':'max 100000'},{**proof,'cpuMax':'200000 100000'},{**proof,'memoryMax':0},{**proof,'pidsMax':2048},{**proof,'memoryMax':True},{**proof,'cpuMax':[]},[]):
+            with patch.object(upgrade.subprocess,'run',return_value=SimpleNamespace(stdout=json.dumps(invalid))),self.assertRaises(ValueError):
+                upgrade.cpu_preflight(payload)
+
+    def test_changed_p0_prerequisite_during_backup_is_preserved_and_stops_install(self):
+        actual = upgrade.atomic_copy
+        path = self.dest/'node-executor.py';changed = path.read_bytes()+b'\n# external maintenance\n'
+        def mutate(payload,destination,**kwargs):
+            result = actual(payload,destination,**kwargs)
+            if destination.parent != self.dest and destination.name == 'node-config.json':path.write_bytes(changed)
+            return result
+        with patch.object(upgrade,'atomic_copy',side_effect=mutate),self.assertRaisesRegex(SystemExit,'changed while backing up'):
+            self.run_main(apply=True)
+        self.assertEqual(path.read_bytes(),changed)
+        self.assertFalse((self.dest/'gpuq-network').exists())
+        self.assertEqual((self.dest/'sandbox-runner.py').read_bytes(),self.old['sandbox-runner.py'])
+
+    def test_mismatched_source_runner_and_missing_ray_dependencies_reject_before_write(self):
+        path = self.source/'sandbox-runner-common-p0.py';original = path.read_bytes()
+        path.write_bytes((DEPLOY/'sandbox-runner.py').read_bytes())
+        with self.assertRaisesRegex(SystemExit,'does not match'):
+            self.run_main(apply=True)
+        path.write_bytes(original)
+        for name in ('job-resources.py','gpuq-ray','cpu-delegation.py'):
+            path = self.source/name;payload = path.read_bytes();path.unlink()
+            with self.subTest(file=name),patch.object(upgrade,'cpu_preflight',side_effect=AssertionError('must validate all files first')),self.assertRaises(FileNotFoundError):
+                self.run_main(apply=True,profile='ray-p0')
+            self.assertEqual(list(self.dest.glob('before-projects-*')),[]);path.write_bytes(payload)
 
 
 if __name__ == '__main__':

@@ -1061,6 +1061,7 @@ def prepare_submission(args: argparse.Namespace) -> tuple[Config, dict[str, Any]
         "priority": args.priority,
         "dispatch_mode": args.mode,
         "yield_policy": getattr(args, "yield_policy", "legacy"),
+        "preempt_idle_only": bool(getattr(args, "preempt_idle_only", False)),
         "checkpoint_capability": (
             CheckpointCapability.EPOCH_V1.value
             if args.checkpointable
@@ -1185,7 +1186,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_show(args: argparse.Namespace) -> int:
-    result = get_client(args).call("show", {"job_id": args.job_id})
+    arguments = {"job_id": args.job_id}
+    for name in ("history_before_id", "history_limit"):
+        if getattr(args, name, None) is not None:
+            arguments[name] = getattr(args, name)
+    result = get_client(args).call("show", arguments)
     print_result(result, args.json)
     return 0
 
@@ -1198,6 +1203,23 @@ def cmd_cancel(args: argparse.Namespace) -> int:
 
 def cmd_retry(args: argparse.Namespace) -> int:
     result = get_client(args).call("retry", {"job_id": args.job_id})
+    print_result(result, args.json)
+    return 0
+
+
+def cmd_set_priority(args: argparse.Namespace) -> int:
+    arguments: dict[str, Any] = {"job_id": args.job_id, "priority_class": args.priority_class}
+    expected = {
+        "priority": args.expected_priority,
+        "yield_policy": args.expected_yield,
+        "restart_policy": args.expected_restart_policy,
+        "dispatch_mode": args.expected_mode,
+    }
+    if any(value is not None for value in expected.values()):
+        if any(value is None for value in expected.values()):
+            raise ValueError("supply all four --expected-* scheduling policy flags together")
+        arguments["expected"] = expected
+    result = get_client(args).call("set_priority", arguments)
     print_result(result, args.json)
     return 0
 
@@ -1382,6 +1404,8 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--checkpointable", action="store_true")
     submit.add_argument("--yield", dest="yield_policy", choices=["legacy", "never", "now", "save"], default="legacy",
                         help="victim policy: legacy behavior, protected, immediate yield, or checkpoint-only yield")
+    submit.add_argument("--preempt-idle-only", action="store_true",
+                        help="only displace explicit P0 / yield-now / restart-never jobs; protect existing checkpoint-yield jobs")
     submit.add_argument(
         "--hami",
         action="store_true",
@@ -1460,6 +1484,8 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(func=cmd_status)
 
     show = subparsers.add_parser("show")
+    show.add_argument("--history-before-id", type=int)
+    show.add_argument("--history-limit", type=int)
     show.add_argument("job_id")
     show.set_defaults(func=cmd_show)
 
@@ -1470,6 +1496,15 @@ def build_parser() -> argparse.ArgumentParser:
     retry = subparsers.add_parser("retry")
     retry.add_argument("job_id")
     retry.set_defaults(func=cmd_retry)
+
+    priority = subparsers.add_parser("set-priority", help="change a pending job's complete priority/yield contract")
+    priority.add_argument("job_id")
+    priority.add_argument("priority_class", choices=["idle", "normal", "high"])
+    priority.add_argument("--expected-priority", type=parse_priority)
+    priority.add_argument("--expected-yield", choices=["legacy", "never", "now", "save"])
+    priority.add_argument("--expected-restart-policy", choices=[item.value for item in RestartPolicy])
+    priority.add_argument("--expected-mode", choices=[item.value for item in DispatchMode])
+    priority.set_defaults(func=cmd_set_priority)
 
     logs = subparsers.add_parser("logs")
     logs.add_argument("job_id")

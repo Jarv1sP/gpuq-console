@@ -1,15 +1,17 @@
 import {MACHINES} from './model.js';
 import {DemoClient} from './client.js';
-import {executionUI,taskTable} from './execution-ui.js';
+import {executionUI,renderTaskTable} from './execution-ui.js';
 import {terminalUI} from './terminal-ui.js';
 import {resourceCards,monitorSummary} from './resources-ui.js';
 import {datasetsUI} from './datasets-ui.js';
+import {createCommunityUI} from './community-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
 let page='work',selected=null,draft=null,filter='pending',toastTimer,confirmAction,inviteCode=null,refreshing=false;
 const renderExecution=executionUI(store,()=>render(true),toast);
 const renderDatasets=datasetsUI(store,toast);
+const renderCommunity=createCommunityUI(store,toast);
 terminalUI(store,toast);
 const isAdmin=()=>store.principal?.role==='admin';
 const own=()=>store.users.find(u=>u.id===store.principal?.userId);
@@ -34,14 +36,15 @@ function render(preserve=false){
   $('#current-account').textContent=logged?`${store.principal.username} · ${admin?'管理员':'普通用户'}`:'尚未登录';
   $('#profile-name').textContent=logged?store.principal.username:'未登录';$('#profile-role').textContent=admin?'管理员':'个人工作空间';
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
-  const titles={work:['我的工作台','打开个人终端、管理文件、提交和跟踪自己的训练。'],resources:['机器资源','逐卡查看利用率、显存和计算进程，再选择要使用的机器。'],datasets:['数据集','选择固定版本，准备到训练机器，再开始实验。'],users:['用户授权','审批新用户、分配机器和卡数；这里不操作自己的训练。']};
+  const titles={work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览','查看每张 GPU 的使用情况，选择适合的服务器。'],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
-  $('#mode-note').textContent=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total?'注册已完成，当前可用额度为 0。管理员审批后会自动更新，无需重复注册。':page==='users'?`${pendingUsers().length} 个新账号待处理。额度限制与管理员角色分别设置。`:'网页和命令行使用同一账号、工作区与训练队列。';
-  renderResources();renderExecution();renderDatasets();
+  const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
+  $('#mode-note').textContent=note;$('.demo-note').hidden=!note;
+  renderResources();renderExecution();renderDatasets();renderCommunity(page==='community');
   if(!keepDraft){const list=filteredUsers();if(!list.some(user=>user.id===selected))selected=list[0]?.id||null;draft=selected?store.get(selected):null;}
-  if(admin){renderUsers();if(!keepDraft)renderEditor();$('#all-jobs').innerHTML=taskTable(store.jobs);}
+  if(admin){renderUsers();if(!keepDraft)renderEditor();renderTaskTable($('#all-jobs'),store.jobs,{admin,userId:store.principal.userId});}
   else{$('#editor').innerHTML='';$('#user-list').innerHTML='';$('#all-jobs').innerHTML='';}
-  $('#self-summary').innerHTML=logged?`<div><small>可用机器</small><strong>${Object.keys(u?.limits||{}).length}</strong></div><div><small>我的预留 / 总额度</small><strong>${store.usage(u.id)} / ${u.total}<span> 张</span></strong></div><div><small>账号状态</small><strong class="summary-status">${label(u)}</strong></div>`:'<p class="muted">登录后查看自己的额度和任务。</p>';
+  $('#self-summary').innerHTML=logged?`<div><small>已授权服务器</small><strong>${Object.keys(u?.limits||{}).length}</strong></div><div><small>已占额度 / 上限</small><strong>${store.usage(u.id)} / ${u.total}<span> 张</span></strong></div><div><small>账号状态</small><strong class="summary-status">${label(u)}</strong></div>`:'<p class="muted">登录后查看自己的额度和任务。</p>';
 }
 function renderResources(){
   const u=own(),limits=u?.limits||{},grid=$('#machine-grid');
@@ -54,9 +57,12 @@ function renderResources(){
 }
 function filteredUsers(){return [...store.users].filter(u=>filter!=='pending'||pending(u)).sort((a,b)=>Number(pending(b))-Number(pending(a))||a.username.localeCompare(b.username,'zh-CN'));}
 function renderUsers(){
+  const list=$('#user-list'),focused=document.activeElement;
+  const focusedUser=list.contains(focused)?focused.closest('[data-user]')?.dataset.user:null;
   $('#filter-pending').textContent=`待处理 ${pendingUsers().length}`;$('#filter-all').textContent=`全部账号 ${store.users.length}`;
   $('#filter-pending').setAttribute('aria-pressed',String(filter==='pending'));$('#filter-all').setAttribute('aria-pressed',String(filter==='all'));
-  $('#user-list').innerHTML=filteredUsers().map(u=>`<button class="user-row ${u.id===selected?'selected':''}" data-user="${esc(u.id)}" aria-pressed="${u.id===selected}"><span class="avatar">${esc(u.name.slice(0,1))}</span><span class="user-details"><span class="user-name">${esc(u.name)}</span><span class="user-meta">${label(u)}${u.total?' · '+u.total+' 张':''}</span></span><span class="user-chevron">›</span></button>`).join('')||'<div class="empty">没有待处理的新账号。<br>把注册码发给同学即可自行注册。</div>';
+  list.innerHTML=filteredUsers().map(u=>`<button class="user-row ${u.id===selected?'selected':''}" data-user="${esc(u.id)}" aria-pressed="${u.id===selected}"><span class="avatar">${esc(u.name.slice(0,1))}</span><span class="user-details"><span class="user-name">${esc(u.name)}</span><span class="user-meta">${label(u)}${u.total?' · '+u.total+' 张':''}</span></span><span class="user-chevron">›</span></button>`).join('')||'<div class="empty">没有待处理的新账号。<br>把注册码发给同学即可自行注册。</div>';
+  if(focusedUser)for(const row of list.querySelectorAll('[data-user]'))if(row.dataset.user===focusedUser){row.focus({preventScroll:true});break;}
 }
 function renderEditor(){
   if(!draft){$('#editor').innerHTML='<div class="editor-empty"><h2>审批都处理好了</h2><p class="muted">新注册账号会自动出现在这里。也可以切到“全部账号”调整已有授权。</p><button class="button" data-action="invites">查看注册码</button></div>';return;}
@@ -104,8 +110,8 @@ $('#invites-dialog').addEventListener('close',()=>{inviteCode=null;$('#invites-c
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
 $('#cli-dialog .cli-code').textContent=`curl -fsSL ${location.origin}/install.sh | sh\n\ngpuctl login\ngpuctl use ${MACHINES[0].id}\ngpuctl ssh\ngpuctl push .\ngpuctl run -g 1 -- python train.py\ngpuctl jobs`;
 const descriptions=$('#cli-dialog').querySelectorAll('p.muted');descriptions[0].textContent='一次安装，以后直接使用 gpuctl。需要 Node.js 22.13+。';descriptions[1].textContent='网页和命令行共用账号与额度。终端、训练共用个人工作区；无需加入管理 VPN。';
-const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','users'].includes(initialHash))page=initialHash;}render();if(!store.principal)openLogin();
+const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','community','users'].includes(initialHash))page=initialHash;}render();if(!store.principal)openLogin();
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
-addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(['work','resources','datasets','users'].includes(next)&&next!==page)choosePage(next);});
+addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(['work','resources','datasets','community','users'].includes(next)&&next!==page)choosePage(next);});
 addEventListener('pagehide',()=>clearInterval(poll),{once:true});

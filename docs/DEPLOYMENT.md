@@ -86,6 +86,8 @@ python3 deploy/install-node.py --inventory inventory.json --node gpu-1 --collect
 
 安装器在服务用户下运行，不能 `sudo python3 install-node.py`。用户 systemd 要可用：`systemctl --user status`；若第一次启用 linger 后仍无用户总线，重新登录该服务用户。
 
+安装前会运行短暂的非 GPU 任务，读回真实 CPU / 内存 / PID 限额。若 CPU 未委派，可经管理员确认给安装命令添加 `--configure-cpu-delegation`：只为当前服务 UID 写独立、带备份的 systemd drop-in，保留原委派项并添加 CPU，不添加控制台 sudo 权限。活跃用户管理器不会被自动重启或 reexec；探针仍失败时停止替换节点程序，按 [CPU 委派与 Ray 资源说明](RAY_RESOURCES.md#安装前的-cpu-委派检查) 在维护窗口确认后完成原位刷新，再重跑安装。
+
 - **已有 GPUQ**：不传 `--initialize-gpuq`，`gpuqRoot` 指向现有 config 所在目录，保留已有 `~/bin/gpu`。安装器不会迁移数据库、升级或重启原 GPUQ。
 - **新 GPUQ**：显式初始化后以观察模式启动，保守检查 `nvidia-smi`、`~/bin/gpu health`、`~/bin/gpu status`；确认 GPU UUID 和现有占用后执行 `~/bin/gpu set-mode --active`。它不会为了接入而杀已有实验。
 - **可选最高权限**：同一安装命令增加 `--enable-host-root` 才安装固定 root 入口与 sudoers。这让门户 admin 获得真实宿主机 root，应只给完全受信任的人。以后重新部署仍需显式传该开关，否则节点配置关闭此能力。
@@ -149,15 +151,19 @@ sudo docker compose logs --tail 50 gpuq-console caddy
 
 ### 已有节点加入项目工作流
 
-先把新版源码放在节点服务用户拥有的独立目录，以该服务用户运行检查（不是 root）：
+此升级入口只用于已完成公共 P0 终端与诊断安装的节点，不负责首次安装或修复 P0 协议。先把新版源码放在节点服务用户拥有的独立目录，以该服务用户明确选择已有运行档位并检查（不是 root）：
 
 ```sh
-python3 deploy/upgrade-projects.py --directory "$HOME/.local/libexec/gpuq-console"
+python3 deploy/upgrade-projects.py --directory "$HOME/.local/libexec/gpuq-console" --runtime-profile common-p0
 # 检查通过后才应用
-python3 deploy/upgrade-projects.py --directory "$HOME/.local/libexec/gpuq-console" --apply
+python3 deploy/upgrade-projects.py --directory "$HOME/.local/libexec/gpuq-console" --runtime-profile common-p0 --apply
 ```
 
-旧部署若使用不同程序目录，替换 `--directory`；不要为升级改名或迁移工作区。升级器备份旧文件，保持 `node-config.json`、GPUQ 数据库、旧工作区和运行任务不变，不重启调度服务。新项目放在工作区根目录的独立 `projects-v2`，不改旧 `users` 目录。
+已经使用完整 Ray P0 的节点须把两条命令中的档位改为 `--runtime-profile ray-p0`；参数没有默认值，项目升级不能把已安装的 Ray runner 降级成公共档。Ray 档在任何备份或程序写入前运行有时限、无 GPU 的 CPU/内存/PID 内核限制检查；失败立即停止。升级器不接受 `--configure-cpu-delegation`，不会调用 sudo、设置委派或刷新用户管理器；需要管理员处理的前置问题见 [RAY_RESOURCES.md](RAY_RESOURCES.md)。公共档不运行该 CPU 探针。
+
+升级器只读检查现有独立终端写入租约接口、终端返回协议、诊断采集与回收接口，以及同程序目录的诊断 GC service/timer 已安装、启用且运行。缺失或不兼容时，先按经审查的 `deploy/install-node.py` 完成配套 P0 安装；不能只更新一半助手。它不会替换现有 `node-executor.py`、终端助手、诊断助手或 systemd 单元，也不会启用宿主机命令等额外权限。
+
+旧部署若使用不同程序目录，替换 `--directory`，诊断 GC service 必须已指向这个目录；不要为升级改名或迁移工作区。公共档更新项目存储、网络命令、所选 runner 与项目操作助手；Ray 档另配套安装 `job-resources.py` 和 `gpuq-ray`。依赖先落盘，runner 随后，新项目操作最后开放，避免新隔离模式落到旧 runner。所有来源先做路径、权限和语法检查并固定字节；原文件与配置保留私有备份。升级保持 `node-config.json`、GPUQ 数据库、旧工作区和运行任务不变，不重启任何服务。新项目放在工作区根目录的独立 `projects-v2`，不改旧 `users` 目录。
 
 所有目标节点完成后，再部署同版 VPS 执行桥与 Portal 镜像；前端、CLI、执行桥、节点四层必须匹配。门户控制服务重建会短暂影响登录，不表示可以停止节点实验。上线后按项目验收清单验证上传、开发终端、发布、单卡训练与结果下载。
 

@@ -4,8 +4,9 @@ import {dirname} from 'node:path';
 import {createHash,randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {DemoService,credential} from './dist/service.js';
 import {readGPUQStatus,visibleGPUQStatus} from './gpuq-status.mjs';
-import {installExecution,executionCall,publicJob,usage} from './execution.mjs';
+import {installExecution,executionCall,publicJob,usage,priorityCapable} from './execution.mjs';
 import {MACHINES,validUsername} from './dist/model.js';
+import {installCommunity,communityCall} from './community.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -16,6 +17,7 @@ export class PortalService extends DemoService{
     service.db=new DatabaseSync(path);await chmod(path,0o600);
     service.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS portal_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, subject TEXT, outcome TEXT NOT NULL);');
     service.db.exec("CREATE TABLE IF NOT EXISTS invites (role TEXT PRIMARY KEY CHECK(role IN ('admin','member')), digest TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, max_uses INTEGER, created_at TEXT NOT NULL);");
+    installCommunity(service);
     if(!service.db.prepare('PRAGMA table_info(invites)').all().some(c=>c.name==='code_cipher'))service.db.exec('ALTER TABLE invites ADD COLUMN code_cipher TEXT');
     const keyPath=path+'.invite-key';
     try{service.inviteKey=await readFile(keyPath);}catch(e){
@@ -100,9 +102,10 @@ export class PortalService extends DemoService{
   invoke(token,operation,args={}){return this.enqueue(async()=>{
     const principal=this.principal(token),actor=principal.username;
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    if(typeof operation==='string'&&operation.startsWith('community.'))return {result:communityCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     // Execution writes its durable reservation before external side effects. Never
     // restore an older snapshot after a dispatch timeout (that would lose quota).
-    if(typeof operation==='string'&&(operation.startsWith('jobs.')||operation.startsWith('files.')||operation.startsWith('terminal.')||operation.startsWith('datasets.')||operation.startsWith('projects.'))){
+    if(typeof operation==='string'&&(operation.startsWith('jobs.')||operation.startsWith('host.')||operation.startsWith('files.')||operation.startsWith('terminal.')||operation.startsWith('datasets.')||operation.startsWith('projects.'))){
       const result=await executionCall(this,principal,operation,args);
       return {result,state:this.state(principal),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     }
@@ -141,6 +144,6 @@ export class PortalService extends DemoService{
     }catch(e){this.restore(before);this.sessions=sessions;this.audit(actor,operation,args?.userId||args?.jobId,'denied');throw e;}
   });}
   async refreshGPUQ(){this.gpuq=await readGPUQStatus(this.statusPath);}
-  state(principal){const state=super.state(principal);const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);return {...state,jobs:state.jobs.map(publicJob),demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};}
+  state(principal){const state=super.state(principal);const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));return {...state,jobs:state.jobs.map(j=>({...publicJob(j),canSetPriority:principal.role==='admin'&&capabilities[j.machine]===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&j.spec?.preemptIdleOnly===true})),demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};}
   close(){this.closing=true;clearInterval(this.executionTimer);this.db.close();}
 }

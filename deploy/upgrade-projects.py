@@ -1,24 +1,119 @@
 #!/usr/bin/env python3
-"""Add project v2 beside legacy workspaces, without restarting anything.
+"""Upgrade projects on an already installed P0 node, without restarting anything.
 
 The existing config is read, backed up byte-for-byte and NEVER rewritten.
 Compile a pinned in-memory copy of every source before making any change;
-install dependencies first and the request dispatcher last. Existing GPUQ
-databases, jobs, terminal helpers and user data are not opened for modification.
+install runtime dependencies before the runner, and project operations last. Existing GPUQ databases,
+dispatchers, terminal/diagnostic protocols and user data are never modified.
 """
 import argparse
+import ast
 import contextlib
 import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import time
 
 
-FILES = ('project-store.py', 'project-ops.py', 'sandbox-runner.py', 'node-executor.py')
+FILES = ('project-store.py', 'gpuq-network', 'sandbox-runner.py', 'project-ops.py')
+RAY_FILES = ('job-resources.py', 'gpuq-ray')
+P0_HELPERS = ('node-executor.py', 'terminal-helper.py', 'job-diagnostics.py')
 MAX_FILE_BYTES = 8 * 1024 * 1024
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def file_plan(profile):
+    names = (*FILES[:2], *(RAY_FILES if profile == 'ray-p0' else ()), *FILES[2:])
+    return [(name, 'sandbox-runner-common-p0.py' if name == 'sandbox-runner.py' and profile == 'common-p0' else name) for name in names]
+
+
+def functions(payload):
+    return {node.name: node for node in ast.parse(payload).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def require_calls(payload, contracts):
+    """Check callable signatures without importing/executing a node helper."""
+    definitions = functions(payload)
+    for name, count in contracts.items():
+        node = definitions.get(name)
+        if node is None or isinstance(node,ast.AsyncFunctionDef): raise ValueError('Missing synchronous helper function: ' + name)
+        positional = len(node.args.posonlyargs) + len(node.args.args)
+        required = positional - len(node.args.defaults)
+        if required > count or positional < count and node.args.vararg is None or any(value is None for value in node.args.kw_defaults):
+            raise ValueError('Incompatible helper function: ' + name)
+    return definitions
+
+
+def strings(tree):
+    return {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+
+
+def runner_profile(payload):
+    definitions = require_calls(payload, {'main':0,'project_runtime':5,'start_job_capture':7,'finish_job_capture':5})
+    constants = strings(definitions['main'])
+    if 'job-resources.py' in constants or any(isinstance(node,ast.Attribute) and node.attr == 'read_budget' for node in ast.walk(definitions['main'])): return 'ray-p0'
+    return 'common-p0'
+
+
+def p0_prerequisites(directory):
+    """Require an existing compatible P0 installation, never half-upgrade it."""
+    observed = {}
+    try:
+        for name in (*P0_HELPERS, 'sandbox-runner.py'):
+            observed[directory/name] = checked_file(directory/name, private=False)
+        node = require_calls(observed[directory/'node-executor.py'][0], {
+            'projects':0,'terminal_op':2,'terminal_pointers':1,'terminal_alive':2,
+            'stop_terminal':1,'job_diagnostics':2,'job_log_result':3,'dataset_open_mounts':1,'process':2})
+        if not {'clientId','writerToken','leaseExpiresAt','terminal.detach'} <= strings(node['terminal_op']):
+            raise ValueError('Independent terminal writer-lease protocol is missing')
+        if not {'projects.','diagnostics','terminal.detach'} <= strings(node['process']):
+            raise ValueError('P0 project/diagnostic/terminal dispatch is missing')
+        if not {'data','offset','exited','exitCode','close','exchange'} <= strings(ast.parse(observed[directory/'terminal-helper.py'][0])):
+            raise ValueError('Terminal helper reply protocol is incompatible')
+        require_calls(observed[directory/'job-diagnostics.py'][0], {
+            'start_capture':7,'finish_capture':4,'bundle':3,'summary':1,'prune':1,'_confirmed_stopped':1})
+        profile = runner_profile(observed[directory/'sandbox-runner.py'][0])
+        units = Path.home()/'.config/systemd/user'
+        for name in ('gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'):
+            observed[units/name] = checked_file(units/name, private=False)
+        service = observed[units/'gpuq-diagnostics-gc.service'][0].decode().replace('%h',str(Path.home()))
+        timer = observed[units/'gpuq-diagnostics-gc.timer'][0].decode()
+        if ('ExecStart=/usr/bin/python3 '+str(directory/'job-diagnostics.py')+' --gc' not in service.splitlines() or
+                'KillMode=control-group' not in service.splitlines() or
+                'Unit=gpuq-diagnostics-gc.service' not in timer.splitlines()):
+            raise ValueError('Diagnostic GC unit does not match this program directory')
+        timer_preflight()
+        return observed, profile
+    except (OSError, ValueError, SyntaxError, subprocess.SubprocessError) as error:
+        raise SystemExit('Compatible P0 terminal/diagnostic prerequisites are missing or unavailable. Run the reviewed deploy/install-node.py workflow first; no files were changed. '+str(error)) from error
+
+
+def timer_preflight():
+    for action in ('is-enabled','is-active'):
+        subprocess.run(['/usr/bin/systemctl','--user',action,'--quiet','gpuq-diagnostics-gc.timer'],
+                       check=True,capture_output=True,timeout=5)
+
+
+def cpu_preflight(payload):
+    # Execute the same precompiled, pinned check bytes that were reviewed, not
+    # a source path that can be replaced after preflight. No --configure/sudo.
+    result = subprocess.run(['/usr/bin/python3','-c',payload.decode(),'--check'],
+                            check=True,text=True,capture_output=True,timeout=30)
+    proof = json.loads(result.stdout)
+    if (not isinstance(proof,dict) or not isinstance(proof.get('cpuMax'),str) or
+            type(proof.get('memoryMax')) is not int or type(proof.get('pidsMax')) is not int):
+        raise ValueError('Kernel CPU/memory/PID enforcement proof is malformed')
+    quota, period = map(int, proof['cpuMax'].split())
+    if not (0 < quota <= period and 0 < proof['memoryMax'] <= 134217728 and 0 < proof['pidsMax'] <= 32):
+        raise ValueError('Kernel CPU/memory/PID enforcement proof is invalid')
+    return proof
+
+
+def unchanged(observed):
+    return all(checked_file(path,private=False) == expected for path,expected in observed.items())
 
 
 def checked_path(path):
@@ -110,6 +205,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--directory', required=True, type=Path)
     parser.add_argument('--source', default=Path(__file__).resolve().parent, type=Path)
+    parser.add_argument('--runtime-profile', choices=('common-p0','ray-p0'), required=True)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args(argv)
     if os.getuid() == 0 or os.geteuid() != os.getuid():
@@ -127,37 +223,55 @@ def main(argv=None):
             raise SystemExit('Existing project storage/base must be an absolute directory')
         path = checked_path(Path(config[key]))
         checked_directory(path, allow_root=key == 'conda')
+    prerequisites, current_profile = p0_prerequisites(directory)
+    if current_profile == 'ray-p0' and args.runtime_profile != 'ray-p0':
+        raise SystemExit('Project upgrade cannot downgrade an installed Ray runner. Keep --runtime-profile ray-p0, or review a separate install-node.py profile change; nothing installed.')
+    plan = file_plan(args.runtime_profile)
     payloads, previous = {}, {'node-config.json': config_bytes}
-    for name in FILES:
-        payload, _ = checked_file(source_directory / name, private=False, allow_root=True)
-        compile(payload, str(source_directory / name), 'exec')
+    for name, source_name in plan:
+        payload, _ = checked_file(source_directory / source_name, private=False, allow_root=True)
+        compile(payload, str(source_directory / source_name), 'exec')
         payloads[name] = payload
         destination = directory / name
         # lexists catches dangling symlinks too: they must not be overwritten.
         if os.path.lexists(destination):
             previous[name] = checked_file(destination, private=False)[0]
-    summary = {'files': list(FILES), 'configurationUnchanged': True,
-               'schedulerUnchanged': True, 'restartRequired': False}
+    if runner_profile(payloads['sandbox-runner.py']) != args.runtime_profile:
+        raise SystemExit('Source runner does not match the explicit runtime profile; nothing installed.')
+    enforcement = None
+    if args.runtime_profile == 'ray-p0':
+        check, _ = checked_file(source_directory/'cpu-delegation.py',private=False,allow_root=True)
+        compile(check,str(source_directory/'cpu-delegation.py'),'exec')
+        try: enforcement = cpu_preflight(check)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            raise SystemExit('Ray CPU/memory/PID enforcement preflight failed before any write. No delegation was configured; see docs/RAY_RESOURCES.md and request administrator review.') from error
+    summary = {'files': [name for name,_ in plan], 'runtimeProfile':args.runtime_profile,
+               'configurationUnchanged': True, 'dispatcherUnchanged':True,
+               'schedulerUnchanged': True, 'restartRequired': False,
+               'p0PrerequisitesVerified':True,'kernelEnforcement':enforcement}
     if not args.apply:
         print(json.dumps({'dryRun': True, **summary}))
         return
 
     # Recheck the config and directory before the first write. Never overwrite
     # an operator's concurrent config update, nor pretend it was our change.
-    if checked_directory(directory, private=True) != directory_identity or checked_file(config_file) != (config_bytes, config_stamp):
-        raise SystemExit('Node configuration/directory changed during preflight; nothing installed')
+    if (checked_directory(directory, private=True) != directory_identity or
+            checked_file(config_file) != (config_bytes, config_stamp) or not unchanged(prerequisites)):
+        raise SystemExit('Node configuration/directory/P0 prerequisites changed during preflight; nothing installed')
     backup = directory / ('before-projects-' + str(time.time_ns()))
     backup.mkdir(mode=0o700)
     for name, content in previous.items():
         atomic_copy(content, backup / name, mode=0o600 if name == 'node-config.json' else 0o700)
     with opened_directory(directory) as descriptor:
         os.fsync(descriptor)
-    # Dependencies first, dispatcher last. Old running processes and old specs
-    # remain valid; no users/, jobs/, terminal pointers or GPUQ DB are modified.
+    # Runtime dependencies first, runner next, project operations last: do not
+    # expose isolated-create before the selected runner understands its mode.
+    # The existing node dispatcher is never replaced.
+    # No users/, jobs/, terminal pointers, unit definitions or GPUQ DB are changed.
     try:
-        if checked_file(config_file) != (config_bytes, config_stamp):
-            raise SystemExit('Node configuration changed while backing up; nothing installed')
-        for name in FILES:
+        if checked_file(config_file) != (config_bytes, config_stamp) or not unchanged(prerequisites):
+            raise SystemExit('Node configuration/P0 prerequisites changed while backing up; nothing installed')
+        for name, _ in plan:
             atomic_copy(payloads[name], directory / name)
     except OSError as error:
         raise SystemExit('Project upgrade did not finish; private backup retained at ' + str(backup) + '; no service was restarted') from error

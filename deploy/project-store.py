@@ -31,8 +31,9 @@ FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 class ProjectError(ValueError):
-    def __init__(self, code, message):
+    def __init__(self, code, message, details=None):
         self.code = code
+        self.details = details or {}
         super().__init__(message)
 
 
@@ -175,7 +176,12 @@ class ProjectStore:
             fail('not_found', 'Project not found for this user')
         if meta.get('schema') != 2 or meta.get('owner') != owner or meta.get('project') != slug:
             fail('unsafe_path', 'Project ownership metadata does not match')
+        if meta.get('environmentMode', 'shared') not in ('shared', 'isolated'):
+            fail('unsafe_path', 'Invalid project environment mode')
         return path, meta
+
+    def environment_mode(self, user, slug):
+        return self._project(user, slug)[1].get('environmentMode', 'shared')
 
     @contextlib.contextmanager
     def _file_lock(self, path, blocking=False):
@@ -202,14 +208,18 @@ class ProjectStore:
         with self.locked(user, slug):
             pass
 
-    def create(self, user, slug):
+    def create(self, user, slug, environment_mode=None):
+        if environment_mode is not None and environment_mode not in ('shared', 'isolated'):
+            fail('invalid_input', 'Environment mode must be shared or isolated')
         self._check_root()
         owner = self._identity(user, slug)
         parent = private_dir(self.path / owner, create=True)
         with self._file_lock(parent / '.create.lock'):
             project = parent / slug
             if project.exists() or project.is_symlink():
-                self._project(user, slug)
+                _, existing = self._project(user, slug)
+                if environment_mode is not None and existing.get('environmentMode', 'shared') != environment_mode:
+                    fail('environment_conflict', 'Existing project environment mode cannot be changed; create a new project')
                 return self.status(user, slug)
             count = sum(1 for name in os.listdir(parent) if SLUG.fullmatch(name))
             if count >= self.max_projects:
@@ -221,7 +231,8 @@ class ProjectStore:
                 for name in ('code', 'env', 'home', 'scratch'):
                     private_dir(stage / 'dev' / name, create=True)
                 atomic_json(stage / 'project.json', {'schema': 2, 'owner': owner,
-                            'project': slug, 'createdAt': int(time.time())})
+                            'project': slug, 'environmentMode': environment_mode or 'shared',
+                            'createdAt': int(time.time())})
                 os.rename(stage, project)
                 with directory(parent) as fd:
                     os.fsync(fd)
@@ -264,7 +275,9 @@ class ProjectStore:
         if latest is not None and latest not in {item['release'] for item in releases}:
             fail('unsafe_path', 'Latest release does not refer to a READY snapshot')
         return {'project': slug, 'state': state, 'createdAt': project['createdAt'],
-                'releases': releases, 'latestReadyRelease': latest}
+                'releases': releases, 'latestReadyRelease': latest,
+                'environmentMode': project.get('environmentMode', 'shared'),
+                'offlineAssetsPath': '/workspace/offline'}
 
     def dev_paths(self, user, slug):
         path, _ = self._project(user, slug)
@@ -405,6 +418,43 @@ class ProjectStore:
         if shutil.disk_usage(self.path).free < self.reserve_bytes + needed:
             fail('insufficient_space', 'Project storage would violate its free-space reserve')
 
+    def _publication_location(self, section, relative, info=None):
+        # Only project-relative paths, never host paths or file contents.
+        self._publication_context = {'path': section + '/' + (relative or '.')}
+        if info is not None:
+            kind = ('directory' if stat.S_ISDIR(info.st_mode) else
+                    'symlink' if stat.S_ISLNK(info.st_mode) else
+                    'file' if stat.S_ISREG(info.st_mode) else 'special')
+            self._publication_context.update(kind=kind, mode=oct(stat.S_IMODE(info.st_mode)),
+                                             uid=info.st_uid, gid=info.st_gid, links=info.st_nlink)
+
+    def _scan_totals(self, paths, report):
+        totals = {'entries': 0, 'bytes': 0}
+        for section, source in paths.items():
+            with directory(source) as root_fd:
+                def visit(fd, relative):
+                    for name in sorted(os.listdir(fd)):
+                        rel = relative + '/' + name if relative else name
+                        self._publication_location(section, rel)
+                        if '/' in name or '\\' in name or any(ord(c) < 32 for c in name):
+                            fail('unsafe_path', 'Unsupported filename in project snapshot')
+                        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        self._publication_location(section, rel, info)
+                        totals['entries'] += 1
+                        if stat.S_ISREG(info.st_mode): totals['bytes'] += info.st_size
+                        if totals['entries'] > self.max_entries or totals['bytes'] > self.max_bytes:
+                            fail('limit_exceeded', 'Snapshot exceeds its entry or byte limit')
+                        report('scanning', totals['entries'], totals['bytes'])
+                        if stat.S_ISDIR(info.st_mode):
+                            child = os.open(name, DIR_FLAGS, dir_fd=fd)
+                            try:
+                                if stamp(info) != stamp(os.fstat(child)):
+                                    fail('changed', 'Project changed during scan')
+                                visit(child, rel)
+                            finally: os.close(child)
+                visit(root_fd, '')
+        return totals
+
     def _walk(self, source, section, destination=None, budget=None):
         """Hash with descriptor-relative no-follow reads; optionally copy once."""
         budget = budget if budget is not None else {'entries': 0, 'bytes': 0}
@@ -421,6 +471,7 @@ class ProjectStore:
 
             def visit(fd, relative):
                 before = os.fstat(fd)
+                self._publication_location(section, relative, before)
                 self._check_tree_stat(before, root_dev, directory=True)
                 versions[relative] = stamp(before)
                 names = sorted(os.listdir(fd))
@@ -428,9 +479,11 @@ class ProjectStore:
                     if name in ('.', '..') or '/' in name or '\\' in name or any(ord(char) < 32 for char in name):
                         fail('unsafe_path', 'Unsupported filename in project snapshot')
                     rel = relative + '/' + name if relative else name
+                    self._publication_location(section, rel)
                     if len(rel.encode()) > 4096:
                         fail('limit_exceeded', 'Snapshot path is too long')
                     info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    self._publication_location(section, rel, info)
                     budget['entries'] += 1
                     if budget['entries'] > self.max_entries:
                         fail('limit_exceeded', 'Snapshot entry limit exceeded')
@@ -471,6 +524,8 @@ class ProjectStore:
                                 if size > info.st_size:
                                     fail('changed', 'Project file grew during publication')
                                 checksum.update(block)
+                                notify = getattr(self, '_publication_chunk', None)
+                                if notify: notify(len(block))
                                 if out is not None:
                                     view = memoryview(block)
                                     while view:
@@ -498,8 +553,11 @@ class ProjectStore:
                             os.symlink(value, target)
                     else:
                         fail('unsafe_path', 'Only ordinary files/directories and approved environment links may be published')
+                    self._publication_location(section, rel, info)
                     if stamp(info) != stamp(os.stat(name, dir_fd=fd, follow_symlinks=False)):
                         fail('changed', 'Project entry changed during publication')
+                    notify = getattr(self, '_publication_entry', None)
+                    if notify: notify()
                 if names != sorted(os.listdir(fd)) or stamp(before) != stamp(os.fstat(fd)):
                     fail('changed', 'Project directory changed during publication')
 
@@ -530,6 +588,8 @@ class ProjectStore:
         for item in records:
             if item['type'] != 'symlink':
                 continue
+            self._publication_context = {'path': 'env/' + item['path'], 'kind': 'symlink',
+                                         'linkTarget': item['target'][:4096]}
             rel = item['path']
             for _ in range(40):
                 current = entries.get(rel)
@@ -553,8 +613,46 @@ class ProjectStore:
             else:
                 fail('unsafe_path', 'Environment symbolic-link cycle')
 
-    def publish(self, user, slug):
+    def _validate_environment_mode(self, environment, mode):
+        # Read the already copied private snapshot, never race a mutable dev
+        # config or rewrite the user's environment. This is dependency hygiene,
+        # not a security boundary against project code deliberately importing.
+        if mode != 'isolated':
+            return
+        self._publication_context = {'path': 'env/pyvenv.cfg', 'kind': 'file'}
+        fd = os.open(environment / 'pyvenv.cfg', FILE_FLAGS)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+                fail('environment_conflict', 'Invalid isolated environment configuration')
+            config = os.read(fd, 65537).decode('utf-8')
+        finally:
+            os.close(fd)
+        values = [line.split('=', 1)[1].strip().lower() for line in config.splitlines()
+                  if '=' in line and line.split('=', 1)[0].strip().lower() == 'include-system-site-packages']
+        if values != ['false']:
+            fail('environment_conflict', 'Isolated project requires include-system-site-packages = false; do not reuse a shared venv')
+
+    def publish(self, user, slug, progress=None):
         path, project = self._project(user, slug)
+        self._publication_context = {}
+        started = int(time.time())
+        last_emit, last_phase = [0.0], [None]
+        totals, completed = {}, {'entries': 0, 'bytes': 0}
+        def report(phase, entries=0, size=0, force=False):
+            now = time.monotonic()
+            if progress and (force or phase != last_phase[0] or now-last_emit[0] >= 1):
+                value = {'phase':phase,'completedEntries':entries,'completedBytes':size,
+                         'totalEntries':totals.get('entries'),'totalBytes':totals.get('bytes'),
+                         'startedAt':started,'updatedAt':int(time.time())}
+                progress(value)
+                last_emit[0], last_phase[0] = now, phase
+        def chunk(size):
+            completed['bytes'] += size
+            report(last_phase[0] or 'copying', completed['entries'], completed['bytes'])
+        def entry():
+            completed['entries'] += 1
+            report(last_phase[0] or 'copying', completed['entries'], completed['bytes'])
         with self.locked(user, slug):
             private_dir(path / '.staging')
             private_dir(path / 'releases')
@@ -562,16 +660,24 @@ class ProjectStore:
             stage = path / '.staging' / uuid.uuid4().hex
             stage.mkdir(mode=0o700)
             try:
+                report('scanning', force=True)
                 self._space()
                 base = self.base_fingerprint()
                 dev = self.dev_paths(user, slug)
+                totals.update(self._scan_totals({name:dev[name] for name in ('code','env')},report))
+                self._publication_chunk, self._publication_entry = chunk, entry
+                report('copying', force=True)
                 content, stamps = {}, {}
                 budget = {'entries': 0, 'bytes': 0}
                 for name in ('code', 'env'):
                     (stage / name).mkdir(mode=0o700)
                     content[name], stamps[name] = self._walk(dev[name], name, stage / name, budget)
+                environment_mode = project.get('environmentMode', 'shared')
+                self._validate_environment_mode(stage / 'env', environment_mode)
                 # A second full hash pass detects changes even if size/mtime are
                 # preserved. Writers must still be stopped by the caller.
+                completed.update(entries=0, bytes=0)
+                report('verifying', force=True)
                 second_budget = {'entries': 0, 'bytes': 0}
                 for name in ('code', 'env'):
                     manifest, observed = self._walk(dev[name], name, budget=second_budget)
@@ -579,7 +685,11 @@ class ProjectStore:
                         fail('changed', 'Project changed while publishing; stop writers and retry')
                 if base != self.base_fingerprint():
                     fail('base_changed', 'Base environment changed while publishing')
+                report('publishing', completed['entries'], completed['bytes'], force=True)
                 payload = {'schema': 2, 'base': base, 'content': content}
+                # Preserve historical shared release hashes byte-for-byte.
+                if environment_mode == 'isolated':
+                    payload['environmentMode'] = environment_mode
                 version = digest(payload)
                 meta = {**payload, 'release': version, 'project': slug, 'owner': project['owner'],
                         'createdAt': int(time.time()), **budget}
@@ -606,10 +716,33 @@ class ProjectStore:
                     with directory(path / 'releases') as fd:
                         os.fsync(fd)
                 atomic_json(path / 'latest.json', {'release': version})
+                # The durable release/latest commit is authoritative. A failed
+                # final UI progress write must not turn a committed release
+                # into a false publication failure or encourage a duplicate.
+                try: report('complete', meta['entries'], meta['bytes'], force=True)
+                except Exception: pass
                 return {'project': slug, 'release': version, 'state': 'READY',
+                        'environmentMode': environment_mode, 'offlineAssetsPath': '/workspace/offline',
                         'baseFingerprint': {key: value for key, value in meta['base'].items() if key != 'basePath'}, 'bytes': meta['bytes'],
                         'entries': meta['entries'], 'createdAt': meta['createdAt']}
+            except (ProjectError, OSError) as error:
+                context = dict(self._publication_context)
+                if isinstance(error, OSError): context['errno'] = error.errno
+                code = error.code if isinstance(error,ProjectError) else 'filesystem_error'
+                message = str(error) if isinstance(error,ProjectError) else 'Project filesystem operation failed'
+                remedies = {
+                    'insufficient_space':'Free space on this project volume; do not remove another user’s data.',
+                    'changed':'Stop all writers to this project, then retry publication.',
+                    'base_changed':'Rebuild and publish the project environment against the current approved base.',
+                    'environment_not_ready':'Open the project terminal to initialize its environment before publishing.',
+                    'environment_conflict':'Keep this project venv in its original mode; create a new project to change modes. Do not overwrite an existing environment.',
+                    'limit_exceeded':'Remove build caches or move datasets/models to the dataset channel, then retry.'}
+                remedy = remedies.get(code, 'Check the reported project-relative file owner and permissions; remove external writes/set-ID bits or replace unsupported links with an independent regular copy inside this project. Do not recursively chmod system or other user paths.')
+                context['remediation'] = remedy
+                context['reason'] = message
+                raise ProjectError(code, message + (' ['+context['path']+']' if context.get('path') else ''), context) from error
             finally:
+                self._publication_chunk = self._publication_entry = None
                 if stage.exists():
                     self._remove_stage(stage)
                 (path / '.publishing.json').unlink(missing_ok=True)
@@ -646,7 +779,12 @@ class ProjectStore:
     def _release_meta(self, path, version):
         ready = self._release_summary(path, version)
         meta = read_json(path / 'meta.json', 64 * 1024 * 1024)
-        if ready != self._ready_marker(meta) or meta.get('release') != version or digest({key: meta.get(key) for key in ('schema', 'base', 'content')}) != version:
+        payload = {key: meta.get(key) for key in ('schema', 'base', 'content')}
+        if 'environmentMode' in meta:
+            if meta['environmentMode'] != 'isolated':
+                fail('unsafe_path', 'Invalid release environment mode')
+            payload['environmentMode'] = meta['environmentMode']
+        if ready != self._ready_marker(meta) or meta.get('release') != version or digest(payload) != version:
             fail('unsafe_path', 'Release is incomplete or metadata is inconsistent')
         return meta
 

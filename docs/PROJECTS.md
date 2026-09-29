@@ -48,13 +48,44 @@ gpuctl pull --job 任务ID model.pt ./model.pt
 
 项目 Python 优先使用 `/opt/project-env/bin`；禁用用户 site-packages，并要求 pip 在项目 venv 内安装。基础 Conda 不被用户修改。依赖安装应在开发终端完成，不在占用 GPU 的训练启动命令里临时安装。
 
+新建时可明确选择 `gpuctl project create clean-experiment --env-mode isolated`，网页对应“完全隔离（不继承基础包）”。它不使用 `--system-site-packages`，发布时校验 `pyvenv.cfg` 的 `include-system-site-packages = false`，PATH 不回退基础 Conda 的命令。Python、pip 及 `gpuq-ray` 仍优先使用项目解释器；需要的包须自行安装，包括 torch、Ray 等。默认 `--env-mode shared` 沿用原共享基础包行为；省略参数时兼容旧创建接口。
+
+模式仅创建时设定。旧项目/旧版本缺少模式字段时继续按共享模式处理，历史版本哈希不改变；同名项目显式指定另一模式会报错，既不重装也不迁移。已有环境不自动重建，首次初始化失败留下的非空目录需先检查，或另建项目。旧节点不支持新选项时应升级配套节点，不能静默将 isolated 降级成 shared。`project status` 返回 `environmentMode` 和离线资源约定路径。这里的“完全隔离”只指不继承 Python site-packages，不是阻止用户代码显式访问只读基础路径的安全边界。
+
 项目 venv 与代码被冻结到版本，不覆盖其他账号/项目的环境。venv 依赖同机基础 Python 和系统库；记录基础环境指纹不等于封装基础镜像全部字节，也不能保证宿主机升级后仍 bit-for-bit 可复现。该发布机制不是容器镜像，也不支持把 Mac venv 直接拿到 Linux 运行。
+
+## 显式离线资源，不继承开发缓存
+
+`/workspace/offline` 是代码树内可发布的普通目录，环境变量 `GPUQ_OFFLINE_ASSETS` 指向它；平台不会自动下载、联网安装、收集 HOME、读取开发登录 token 或复制隐藏缓存。开发 HOME 与每次训练 HOME 不同；训练不能依赖开发时的默认 Hugging Face、Torch 或 pip 缓存。只有明确放入代码树的文件随发布快照进入训练，请先检查其中没有凭据。离线资源一并计入项目容量/文件数上限；较大模型或数据应使用授权数据集渠道。
+
+需要离线安装依赖时，在有获准网络访问的**该服务器项目开发终端**中显式准备 Linux wheel；不会因本文自动执行下载：
+
+```sh
+mkdir -p /workspace/offline/wheels
+python -m pip download --only-binary=:all: --dest /workspace/offline/wheels -r requirements.txt
+python -m pip install --no-index --find-links=/workspace/offline/wheels -r requirements.txt
+python -m pip check
+```
+
+请固定依赖版本；若使用完整带哈希的锁定文件，两条 pip 命令可再加 `--require-hashes`。缺少兼容 wheel 时立即失败，不在 GPU 任务启动时临时构建/下载。不要把 Mac wheel/venv 当 Linux 环境；若从外部准备文件，必须匹配目标 Linux、Python ABI 和 CUDA 依赖。安装与验证成功后结束项目终端、发布快照；训练直接使用已发布环境，不再运行 pip。
+
+模型文件同样显式准备到 `/workspace/offline/models/模型名/`，需要配置、权重、tokenizer 等完整文件。可在获准联网的开发阶段用已安装模型工具下载到该目录，或将已取得且许可允许的文件上传到这里；不要把 `$HOME/.cache` 整目录复制进去。训练代码使用目录路径并禁用自动下载，例如已使用 Transformers 的项目：
+
+```python
+from transformers import AutoModel, AutoTokenizer
+model_dir = "/workspace/offline/models/my-model"
+tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+model = AutoModel.from_pretrained(model_dir, local_files_only=True)
+```
+
+调用训练前可显式设置 `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`，但这是 Hugging Face 库的离线开关，不是全进程网络隔离。其他库也须传入明确本地路径并关闭各自下载行为。运行时新缓存写本任务 `/home/gpuq/.cache` 或 `/outputs`；快照内 offline 只读，不能用作需要写锁/临时文件的运行缓存。发布前在未登录、无开发缓存的新 HOME 下做一次小规模离线加载验证；平台不会把开发 token 带入训练来补救缺失资源。
 
 ## 命令与选择规则
 
 | 命令 | 行为 |
 |---|---|
 | `gpuctl project create NAME` | 在当前机器创建并选中项目 |
+| `gpuctl project create NAME --env-mode isolated` | 新建不继承基础 Python 包的项目，须自行准备依赖 |
 | `gpuctl project use NAME` | 核验项目存在后选中 |
 | `gpuctl project list` | 查看当前机器的个人项目 |
 | `gpuctl project status [NAME]` | 查看草稿/发布状态、READY 版本 |
@@ -68,6 +99,8 @@ gpuctl pull --job 任务ID model.pt ./model.pt
 `run` 选择 `latestReadyRelease`，并核验该版本在 READY 清单中。顶层 `PUBLISHING` 不会阻止使用以前的 READY 版本，因此想运行新改动时务必先核对最新发布结果。`--release 完整64位哈希` 可显式固定版本。没有可用版本时清楚报错，绝不自动替用户发布、切机或占卡等发布。`run auto` 对新任务一律拒绝。
 
 任务提交会输出版本和 `Submission key`。请求超时重试时保留相同命令、`--key UUID` 与 `--release HASH`，避免后续发布改变“最新版本”。发布按项目维护后台状态，不使用训练提交 key；请求超时先 `project status`，仍在发布时等待，失败时查看原因再重新发布。
+
+配套升级后，发布状态提供扫描、复制、校验、写入版本各阶段的已处理条目/字节；扫描未完成时总量可能未知，不显示虚构百分比或预计时间。失败详情给出项目相对路径、文件类型/权限/链接数及处理建议。网页按纯文本显示，CLI `project status --json` 保留结构化 `progress`、`errorDetails`；旧节点未返回时只显示已有状态。
 
 ## 上传、数据与千兆链路
 

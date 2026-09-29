@@ -1,6 +1,7 @@
 """Read-only GPU telemetry tests with mocked fixed subprocesses, never real GPUs."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -68,6 +69,116 @@ class Probe(unittest.TestCase):
         ps = next(argv for argv, _ in self.calls if argv[0] == '/usr/bin/ps')
         self.assertEqual(ps, ['/usr/bin/ps', '-p', '321', '-o', 'pid=,user=,comm='])
         self.assertTrue(all(timeout <= 12 for _, timeout in self.calls))
+
+    def test_process_priority_requires_exact_attempt_cgroup_and_gpu_assignment(self):
+        attempt = 'A' + 'a' * 32
+        job = dict(id='J1', active_attempt_id=attempt, state='RUNNING', assigned_gpu_indices=[0], priority=2, yield_policy='never')
+        self.outputs['gpuq'] = json.dumps({'daemon': {'health': 'ok'}, 'jobs': [job]})
+        for unit in ('gpuq-' + attempt.lower() + '.service', 'gpuq-' + attempt + '.service'):
+            with patch.object(self.probe, 'process_cgroups', return_value={unit}) as membership:
+                out = self.run_probe()
+            self.assertEqual(out['gpus'][0]['processes'][0]['scheduling'], {'jobId': 'J1', 'priority': 2, 'yieldPolicy': 'never'})
+            self.assertNotIn('scheduling', out['gpus'][1]['processes'][0])
+            membership.assert_called_once_with(321)
+        for unknown in (None, set(), {'gpuq-' + attempt.lower() + '.service-evil'}, {'unrelated.service'},
+                        {'gpuq-A' + 'b' * 32 + '.service'}, {'GPUQ-' + attempt + '.service'},
+                        {'gpuq-' + attempt.upper() + '.service'}):
+            with self.subTest(unknown=unknown), patch.object(self.probe, 'process_cgroups', return_value=unknown):
+                self.assertNotIn('scheduling', self.run_probe()['gpus'][0]['processes'][0])
+
+    def test_old_nodes_default_host_commands_false_without_running_sudo(self):
+        with patch.object(self.probe, 'command') as command:
+            self.assertEqual(self.probe.probe_host_command(), {'version': 1, 'available': False})
+            command.assert_not_called()
+        self.probe.CONFIG['hostRoot'] = True
+        with patch.object(self.probe, 'helper_source', return_value=b'OLD_DISPATCHER = True'), patch.object(self.probe, 'command') as command:
+            self.assertFalse(self.probe.probe_host_command()['available']); command.assert_not_called()
+
+    def test_host_command_requires_matching_safe_helpers_and_sudo_policy(self):
+        self.probe.CONFIG['hostRoot'] = True
+        def source(path, owner, **kwargs):
+            return b"HOST_COMMAND_CAPABILITY='host-command-v1'" if path.name == 'node-executor.py' else b'helper-source'
+        policy='Sudoers entry:\n    RunAsUsers: root\n    Options: !authenticate\n    Commands:\n        '+str(self.probe.ROOT_COMMAND_HELPER)+' ""\n'
+        with patch.object(self.probe, 'helper_source', side_effect=source) as read, patch.object(self.probe, 'command', return_value=policy) as command:
+            self.assertEqual(self.probe.probe_host_command(), {'version': 1, 'available': True})
+            command.assert_called_once_with(['/usr/bin/sudo', '-n', '-ll'], 2)
+            self.assertEqual(read.call_args_list[-1].args[1], 0); self.assertTrue(read.call_args_list[-1].kwargs['executable'])
+        for unavailable in (str(self.probe.ROOT_COMMAND_HELPER), policy.replace('!authenticate','authenticate'),
+                            policy.replace('RunAsUsers: root','RunAsUsers: other'), policy.replace(' ""',' *')):
+            with patch.object(self.probe, 'helper_source', side_effect=source), patch.object(self.probe, 'command', return_value=unavailable):
+                self.assertFalse(self.probe.probe_host_command()['available'])
+        for error in (ValueError('not permitted'), subprocess.TimeoutExpired('sudo', 2), OSError('missing')):
+            with patch.object(self.probe, 'helper_source', side_effect=source), patch.object(self.probe, 'command', side_effect=error):
+                self.assertFalse(self.probe.probe_host_command()['available'])
+        with patch.object(self.probe, 'helper_source', side_effect=[b"HOST_COMMAND_CAPABILITY='host-command-v1'", b'new', b'old']), patch.object(self.probe, 'command') as command:
+            self.assertFalse(self.probe.probe_host_command()['available']); command.assert_not_called()
+        with patch.object(self.probe, 'helper_source', side_effect=OSError('unsafe helper')), patch.object(self.probe, 'command') as command:
+            self.assertFalse(self.probe.probe_host_command()['available']); command.assert_not_called()
+
+    def test_sudo_verbose_listing_matches_observed_no_command_escaped_empty_args(self):
+        self.probe.CONFIG['hostRoot'] = True
+        helper = str(self.probe.ROOT_COMMAND_HELPER)
+        # Read-only Ubuntu observation: -ll COMMAND returns just the path;
+        # -ll without COMMAND includes an escaped no-argument marker.
+        policy = ('Matching Defaults entries for service-user on node:\n    env_reset\n\n'
+                  'User service-user may run the following commands on node:\n\n'
+                  'Sudoers entry:\n    RunAsUsers: ALL\n    Options: !authenticate\n    Commands:\n        ALL\n\n'
+                  'Sudoers entry:\n    RunAsUsers: root\n    Options: !authenticate\n    Commands:\n\t'
+                  + helper + r' \"\"' + '\n')
+        def source(path, owner, **kwargs):
+            return b"HOST_COMMAND_CAPABILITY='host-command-v1'" if path.name == 'node-executor.py' else b'helper-source'
+        def sudo(argv, timeout):
+            self.assertEqual(timeout, 2)
+            self.assertEqual(argv[:3], ['/usr/bin/sudo', '-n', '-ll'])
+            return policy if len(argv) == 3 else helper + '\n'
+        with patch.object(self.probe, 'helper_source', side_effect=source), patch.object(self.probe, 'command', side_effect=sudo) as call:
+            self.assertEqual(self.probe.probe_host_command(), {'version': 1, 'available': True})
+            call.assert_called_once_with(['/usr/bin/sudo', '-n', '-ll'], 2)
+
+    def test_verbose_policy_never_combines_entries_or_accepts_broader_arguments(self):
+        self.probe.CONFIG['hostRoot'] = True
+        helper = str(self.probe.ROOT_COMMAND_HELPER)
+        def source(path, owner, **kwargs):
+            return b"HOST_COMMAND_CAPABILITY='host-command-v1'" if path.name == 'node-executor.py' else b'helper-source'
+        def entry(command, user='root', options='!authenticate'):
+            return f'Sudoers entry:\n    RunAsUsers: {user}\n    Options: {options}\n    Commands:\n        {command}\n'
+        denied = [entry(value) for value in (helper, helper+' *', helper+' --status', helper+' "" extra',
+                   helper+r' \"\" extra', helper+' "*"', '!'+helper+' ""', helper+'-other ""', 'ALL')]
+        denied += [entry(helper+' ""', user='ALL'), entry(helper+' ""', user='root, other'),
+                   entry(helper+' ""', options='authenticate'), entry(helper+' ""', options='!authenticate, authenticate'),
+                   entry('/unrelated ""')+entry(helper+' ""', options='authenticate'),
+                   entry('/unrelated ""')+entry(helper+' ""', user='other'),
+                   entry(helper+' ""').replace('    Commands:\n', ''),
+                   entry('/unrelated ""').replace('    Commands:', '        '+helper+' ""\n    Commands:')]
+        for policy in denied:
+            with self.subTest(policy=policy), patch.object(self.probe, 'helper_source', side_effect=source), patch.object(self.probe, 'command', return_value=policy):
+                self.assertFalse(self.probe.probe_host_command()['available'])
+
+    def test_helper_source_rejects_links_wrong_owner_permissions_and_oversize(self):
+        root = Path(self.temp.name); source = root / 'helper'; source.write_bytes(b'pass\n'); source.chmod(0o700)
+        self.assertEqual(self.probe.helper_source(source, os.getuid(), executable=True), b'pass\n')
+        with self.assertRaises(ValueError): self.probe.helper_source(source, os.getuid() + 1)
+        symlink = root / 'link'; symlink.symlink_to(source)
+        with self.assertRaises(OSError): self.probe.helper_source(symlink, os.getuid())
+        hardlink = root / 'hardlink'; os.link(source, hardlink)
+        with self.assertRaises(ValueError): self.probe.helper_source(source, os.getuid())
+        hardlink.unlink(); source.chmod(0o720)
+        with self.assertRaises(ValueError): self.probe.helper_source(source, os.getuid())
+        source.chmod(0o600)
+        with self.assertRaises(ValueError): self.probe.helper_source(source, os.getuid(), executable=True)
+        source.write_bytes(b'x' * (self.probe.MAX_HELPER_BYTES + 1))
+        with self.assertRaises(ValueError): self.probe.helper_source(source, os.getuid())
+
+    def test_host_capability_branch_remains_independent_of_gpuq_failure(self):
+        self.outputs['gpuq'] = ValueError('scheduler unavailable')
+        with patch.object(self.probe, 'probe_host_command', return_value={'version': 1, 'available': True}):
+            out = self.run_probe()
+        self.assertTrue(out['hostCommand']['available']); self.assertFalse(out['gpuq']['connected'])
+
+    def test_old_or_missing_queue_snapshot_does_not_guess_priority_from_owner(self):
+        self.outputs['gpuq'] = json.dumps({'daemon': {'health': 'ok'}, 'jobs': [dict(id='J1', owner='alice', state='RUNNING', assigned_gpu_indices=[0], priority=4)]})
+        with patch.object(self.probe, 'process_cgroups', return_value={'gpuq-a' + 'a' * 32 + '.service'}):
+            self.assertNotIn('scheduling', self.run_probe()['gpus'][0]['processes'][0])
 
     def test_unknown_metrics_do_not_erase_cards(self):
         self.outputs['base'] = '0, GPU-one, RTX Test, N/A, [Not Supported], N/A\n1, GPU-two, RTX Other, 32768, 8, 0\n'

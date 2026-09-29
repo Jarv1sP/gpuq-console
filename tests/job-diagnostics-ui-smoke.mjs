@@ -23,6 +23,11 @@ try{
   await page.getByRole('button',{name:'诊断包 / 历史分配'}).click();
   await page.getByText('历史 GPU 分配',{exact:true}).waitFor();
   assert.match(await page.locator('#job-diagnostic-view').innerText(),/GPU-00000000/);
+  assert.match(await page.locator('#job-diagnostic-view').innerText(),/旧任务未记录精确租约时间/);
+  assert.equal(await page.locator('.diagnostic-lease-history').count(),0);
+  await page.evaluate(()=>{const previous=window.store.call;window.store.call=async operation=>{const result=await previous(operation);if(operation==='jobs.diagnostics')Object.assign(result,{historyAvailable:true,historyTruncated:true,historyNextBeforeId:7,allocationHistory:[{id:8,attempt_id:'A1',gpu_index:0,gpu_uuid:'GPU-exact-lease',acquired_at:1790700000.125,released_at:1790700060.75,release_reason:'attempt finalized: EXITED_SUCCESS',source:'observed'},{id:7,attempt_id:'A0',gpu_index:1,gpu_uuid:'GPU-active-lease',acquired_at:1790699900,released_at:null,release_reason:null,source:'migrated_active'}]});return result;};});
+  await page.getByRole('button',{name:'诊断包 / 历史分配'}).click();await page.locator('.diagnostic-lease-history').waitFor();
+  for(const text of ['GPU-exact-lease','.125','.750','尚无释放记录','升级时补记','继续查询游标：7','运行过程历史'])assert.ok((await page.locator('#job-diagnostic-view').innerText()).includes(text),text);
   await page.getByText('worker-test.err',{exact:true}).click();
   assert.equal(await page.evaluate(()=>window.pwn),undefined);assert.equal(await page.locator('#job-diagnostic-view img').count(),0);
   await page.screenshot({path:new URL('diagnostics-desktop.png',artifact).pathname});
@@ -33,5 +38,5 @@ try{
   await page.evaluate(()=>{window.store.principal=null;window.control.sync();});
   assert.equal(await page.locator('dialog').evaluate(node=>node.open),false);
   assert.equal(await page.locator('#job-diagnostic-view').innerText(),'');
-  console.log('Diagnostic browser smoke: desktop/mobile render, escaped worker logs, JSON download, account-reset cleanup passed');
+  console.log('Diagnostic browser smoke: desktop/mobile, exact GPU leases with schema9 fallback, attempt history, escaped worker logs, JSON download, account-reset cleanup passed');
 }finally{await browser.close();}

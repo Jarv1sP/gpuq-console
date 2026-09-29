@@ -73,6 +73,47 @@ class ProjectStoreTests(unittest.TestCase):
         self.assertFalse((self.root / 'users').exists())
         self.assertEqual(set(self.dev), {'code', 'env', 'home', 'scratch'})
 
+    def test_publication_reports_stages_totals_and_keeps_snapshot_digest(self):
+        first = self.publish()
+        reports=[]
+        second=self.store.publish(self.user,self.slug,progress=reports.append)
+        self.assertEqual(first['release'],second['release'])
+        self.assertEqual([r['phase'] for r in reports],['scanning','copying','verifying','publishing','complete'])
+        for record in reports[1:]:
+            self.assertEqual(record['totalEntries'],second['entries'])
+            self.assertEqual(record['totalBytes'],second['bytes'])
+        self.assertEqual(reports[-1]['completedEntries'],second['entries'])
+        self.assertEqual(reports[-1]['completedBytes'],second['bytes'])
+        self.assertNotIn(str(self.root),json.dumps(reports))
+
+    def test_completed_progress_failure_does_not_undo_committed_release(self):
+        self.store.create(self.user,self.slug)
+        def progress(value):
+            if value['phase']=='complete': raise OSError('receipt temporarily unavailable')
+        result=self.store.publish(self.user,self.slug,progress=progress)
+        self.assertEqual(result['state'],'READY')
+        self.assertEqual(self.store.status(self.user,self.slug)['latestReadyRelease'],result['release'])
+
+    def test_publication_failure_identifies_relative_path_mode_links_and_remedy(self):
+        os.link(self.dev['code']/'train.py',self.dev['code']/'hardlink.py')
+        with self.assertRaises(module.ProjectError) as error:
+            self.publish()
+        details=error.exception.details
+        self.assertEqual(details['path'],'code/hardlink.py')
+        self.assertEqual(details['links'],2)
+        self.assertEqual(details['kind'],'file')
+        self.assertIn('mode',details)
+        self.assertIn('independent regular copy',details['remediation'])
+        self.assertNotIn(str(self.root),str(error.exception))
+
+    def test_bad_environment_link_error_has_original_link_path(self):
+        (self.dev['env']/'bad').symlink_to('../../escape')
+        with self.assertRaises(module.ProjectError) as error:
+            self.publish()
+        self.assertEqual(error.exception.details['path'],'env/bad')
+        self.assertEqual(error.exception.details['kind'],'symlink')
+        self.assertEqual(error.exception.details['linkTarget'],'../../escape')
+
     def test_validation_blocks_traversal_and_arbitrary_identity(self):
         for slug in ('../bad', '/tmp/bad', 'bad/name', 'Bad', '.', '', 'a' * 49, '1project'):
             self.assert_error('invalid_input', self.store.create, self.user, slug)

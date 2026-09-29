@@ -4,7 +4,24 @@ import {MACHINES} from './dist/model.js';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
+export const PRIORITIES=new Set(['idle','normal','high']);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
+export const priorityCapable=host=>host?.reachable===true&&host.gpuq?.connected===true&&Array.isArray(host.gpuq.capabilities)&&host.gpuq.capabilities.includes('priority-policy-v1')&&host.gpuq.capabilities.includes('preempt-idle-only-v1');
+function priorityValue(value){if(!PRIORITIES.has(value))fail('优先级必须为 idle、normal 或 high。');return value;}
+function schedulerResult(job,result){
+  job.nodeJobId=result.nodeJobId||job.nodeJobId;
+  job.state=['PENDING','STARTING','RUNNING','PREEMPTING',...TERMINAL].includes(result.state)?result.state:'UNKNOWN';
+  job.assignedIndices=result.assignedIndices||[];job.error=result.error||null;job.checkedAt=new Date().toISOString();
+  job.schedulerState=typeof result.schedulerState==='string'?result.schedulerState:result.state;
+  job.queueReason=typeof result.queueReason==='string'?result.queueReason.slice(0,400):null;
+  job.schedulerCheckedAt=job.checkedAt;
+  job.schedulerPriority=Number.isInteger(result.schedulerPriority)?result.schedulerPriority:null;
+  job.priority=PRIORITIES.has(result.priority)?result.priority:null;
+  job.schedulerPolicy=result.schedulerPolicy||null;
+  job.priorityMutable=result.priorityMutable===true;
+  job.preempted=result.preempted===true;
+  if(TERMINAL.has(job.state))job.finishedAt||=job.checkedAt;
+}
 export function bridgeClient(socketPath){
   return (machine,operation,args)=>new Promise((resolve,reject)=>{
     const socket=net.createConnection(socketPath);let raw='';
@@ -24,19 +41,17 @@ export function installExecution(service,bridge){
       const jobs=service.store.jobs.filter(j=>!TERMINAL.has(j.state));
       await Promise.all(MACHINES.map(async m=>{
         for(const job of jobs.filter(j=>j.machine===m.id)){
+          const policyRevision=job.policyRevision||0;
           try{
             const action=job.cancelRequested?'cancel':'sync';
             const result=await bridge(job.machine,action,{job:job.spec});
             await service.enqueue(()=>{
-              const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing)return;
-              current.nodeJobId=result.nodeJobId||current.nodeJobId;
-              // LOST/unknown is deliberately NOT terminal: keep the quota reserved.
-              current.state=['PENDING','STARTING','RUNNING','PREEMPTING',...TERMINAL].includes(result.state)?result.state:'UNKNOWN';
-              current.assignedIndices=result.assignedIndices||[];current.error=result.error||null;current.checkedAt=new Date().toISOString();
-              if(TERMINAL.has(current.state))current.finishedAt||=current.checkedAt;
+              const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||(current.policyRevision||0)!==policyRevision)return;
+              // LOST/unknown remains nonterminal: retain quota until confirmed.
+              schedulerResult(current,result);
               service.save();
             });
-          }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
+          }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing&&(current.policyRevision||0)===policyRevision){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
         }
       }));
     }finally{service.reconciling=false;}
@@ -44,7 +59,7 @@ export function installExecution(service,bridge){
   if(bridge){service.executionTimer=setInterval(()=>service.reconcile().catch(()=>{}),15000);service.executionTimer.unref();}
 }
 export function usage(jobs,userId,machine){return jobs.filter(j=>j.userId===userId&&!TERMINAL.has(j.state)&&(!machine||j.machine===machine)).reduce((sum,j)=>sum+j.cards,0);}
-export function publicJob(job){const {spec,digest,...safe}=job;return {...safe,command:spec.argv};}
+export function publicJob(job){const {spec,digest,schedulerPolicy,...safe}=job;return {...safe,command:spec.argv};}
 export function datasetReferences(value){
   if(value===undefined)return [];
   if(!Array.isArray(value)||value.length>8)fail('每个任务最多关联 8 个数据集版本。');
@@ -62,6 +77,28 @@ export async function executionCall(service,principal,operation,args){
   if(!user.enabled)fail('账号已暂停。',403);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   const jobById=id=>{const job=service.store.jobs.find(j=>j.id===id);if(!job||(principal.role!=='admin'&&job.userId!==user.id))fail('任务不存在或无权访问。',403);return job;};
+  if(['host.exec','host.status','host.cancel'].includes(operation)){
+    if(principal.role!=='admin')fail('宿主机命令仅管理员可用。',403);
+    authorizedMachine(args.machine);
+    const allowed=operation==='host.exec'?['machine','key','argv','cwd','timeoutSec']:['machine','id'];
+    if(Object.keys(args).some(k=>!allowed.includes(k)))fail('宿主机命令参数无效。');
+    const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+    const handle=operation==='host.exec'?args.key:args.id;
+    if(typeof handle!=='string'||!uuid.test(handle))fail('需提供有效 UUID 命令标识。');
+    if(operation==='host.exec'){
+      if(!Array.isArray(args.argv)||!args.argv.length||!args.argv[0]||args.argv.length>128||args.argv.some(a=>typeof a!=='string'||a.includes('\0'))||Buffer.byteLength(JSON.stringify(args.argv))>12000)fail('命令参数无效或过长。');
+      if(args.cwd!==undefined&&(typeof args.cwd!=='string'||!args.cwd.startsWith('/')||args.cwd.includes('\0')||args.cwd.length>1024))fail('工作目录必须为绝对路径。');
+      if(args.timeoutSec!==undefined&&(!Number.isInteger(args.timeoutSec)||args.timeoutSec<1||args.timeoutSec>86400))fail('超时时间必须为 1–86400 秒。');
+      await service.refreshGPUQ();
+      const host=service.gpuq?.hosts.find(h=>h.id===args.machine);
+      if(service.gpuq?.stale!==false||host?.reachable!==true||host.hostCommand?.version!==1||host.hostCommand?.available!==true)
+        fail('这台服务器尚未启用或尚未确认管理员非交互命令，未提交命令；请联系管理员。已有 ROOT 终端不受影响。',503);
+    }
+    const {machine,...request}=args;
+    // Never audit argument contents: operators may pass a credential in argv.
+    if(operation!=='host.status')service.audit(principal.username,operation,machine,request.key||request.id);
+    return service.bridge(machine,operation,{...request,userId:user.id,username:user.username,hostAdmin:true});
+  }
   if(operation.startsWith('projects.')){
     const result=await projectCall(service,principal,user,operation,args,authorizedMachine);
     if(result===undefined)fail('未知项目操作。');
@@ -112,7 +149,9 @@ export async function executionCall(service,principal,operation,args){
     return service.bridge(args.machine,operation,{...args,userId:user.id,username:user.username,hostAdmin:args.hostAdmin===true});
   }
   if(operation==='jobs.submit'){
-    if(Object.keys(args).some(k=>!['machine','cards','minVramGiB','argv','name','key','datasets','project','release'].includes(k)))fail('提交参数无效。');
+    if(Object.keys(args).some(k=>!['machine','cards','minVramGiB','argv','name','key','datasets','project','release','priority'].includes(k)))fail('提交参数无效。');
+    const priority=priorityValue(args.priority===undefined?'normal':args.priority);
+    if(priority==='high'&&principal.role!=='admin')fail('高优先级仅管理员可用。',403);
     // Placement is a user decision. The selected node still allocates its GPUs,
     // but a missing/auto/unknown target must never widen into a cluster search.
     if(!Object.hasOwn(args,'machine')||typeof args.machine!=='string'||args.machine==='auto'||!MACHINES.some(m=>m.id===args.machine))fail('请明确选择有效的服务器；不支持自动选机。');
@@ -124,7 +163,7 @@ export async function executionCall(service,principal,operation,args){
     const min=args.minVramGiB??0;if(typeof min!=='number'||!Number.isFinite(min)||min<0||min>128)fail('最低显存参数无效。');
     const name=args.name||'train';if(typeof name!=='string'||name.length>64||/[\x00-\x1f]/.test(name))fail('任务名称无效。');
     // Preserve legacy idempotency hashes for jobs without dataset references.
-    const digest=createHash('sha256').update(JSON.stringify([args.machine,args.cards,min,args.argv,name,...(datasets.length?[datasets]:[]),...(project.project?[project]:[])])).digest('hex');
+    const digest=createHash('sha256').update(JSON.stringify([args.machine,args.cards,min,args.argv,name,...(datasets.length?[datasets]:[]),...(project.project?[project]:[]),...(args.priority!==undefined?[{priority}]:[])])).digest('hex');
     const previous=service.store.jobs.find(j=>j.userId===user.id&&j.key===args.key);
     if(previous){if(previous.digest!==digest)fail('同一提交键不能用于不同任务。',409);return publicJob(previous);}
     if(service.store.jobs.length>=5000)fail('任务历史达到归档上限，请联系管理员归档后提交。',503);
@@ -141,6 +180,8 @@ export async function executionCall(service,principal,operation,args){
     if(!service.gpuq||service.gpuq.stale)fail('机器状态已过期，暂不接受新任务。',503);
     const host=service.gpuq.hosts.find(h=>h.id===args.machine);
     if(!host?.reachable||!host.gpuq.connected||host.gpuq.observeOnly||host.gpus.filter(g=>g.memoryTotalMiB>=min*1024-512).length<args.cards)fail('所选机器当前无法执行，或不满足卡数/显存条件；不会自动切换服务器。',409);
+    const scheduling=priorityCapable(host);
+    if(args.priority!==undefined&&!scheduling)fail('所选机器尚未确认安全优先级功能，未提交任务；请刷新或联系管理员升级。',503);
     if(datasets.length){
       // Personal training uses the same owner-only Principal as node lease
       // acquisition. Only the explicitly selected node is queried; management
@@ -154,12 +195,35 @@ export async function executionCall(service,principal,operation,args){
       if(!states.every(s=>s.state==='READY'))fail('所选机器没有完整的本地数据副本。先用 gpuctl data prepare 数据集@版本 准备数据；此时未占用 GPU，不会自动切换服务器。',409);
     }
     const machine=args.machine,id=randomUUID(),now=new Date().toISOString();
-    const spec={id,userId:user.id,username:user.username,cards:args.cards,argv:args.argv,name,minVramGiB:min,...project,...(datasets.length?{datasets}: {})};
-    const job={id,key:args.key,digest,spec,userId:user.id,username:user.username,machine,cards:args.cards,name,...project,...(datasets.length?{datasets}:{}),state:'SUBMITTING',createdAt:now,cancelRequested:false};
+    const spec={id,userId:user.id,username:user.username,cards:args.cards,argv:args.argv,name,minVramGiB:min,...project,...(datasets.length?{datasets}: {}),...(scheduling?{priority,preemptIdleOnly:true}:{})};
+    const job={id,key:args.key,digest,spec,userId:user.id,username:user.username,machine,cards:args.cards,name,...project,...(datasets.length?{datasets}:{}),priority:scheduling?priority:null,state:'SUBMITTING',createdAt:now,cancelRequested:false};
     service.db.exec('BEGIN IMMEDIATE');
     try{service.store.jobs.push(job);service.save();service.audit(principal.username,operation,id,'reserved');service.db.exec('COMMIT');}
     catch(e){service.db.exec('ROLLBACK');service.store.jobs=service.store.jobs.filter(j=>j.id!==id);throw e;}
     setImmediate(()=>service.reconcile().catch(()=>{}));return publicJob(job);
+  }
+  if(operation==='jobs.priority'){
+    if(principal.role!=='admin')fail('调整排队优先级仅管理员可用。',403);
+    if(Object.keys(args).some(k=>!['jobId','priority','expectedPriority'].includes(k)))fail('优先级参数无效。');
+    const priority=priorityValue(args.priority),job=jobById(args.jobId);
+    authorizedMachine(job.machine);
+    if(job.state!=='PENDING'||job.cancelRequested||!job.priorityMutable||!job.spec.preemptIdleOnly||!job.schedulerPolicy)fail('仅能调整已核验、尚未启动的新版平台任务；运行中或旧任务不变。',409);
+    if(args.expectedPriority!==undefined&&args.expectedPriority!==job.priority)fail('优先级已变化，请刷新后重试。',409);
+    await service.refreshGPUQ();
+    if(service.gpuq?.stale||!priorityCapable(service.gpuq?.hosts.find(h=>h.id===job.machine)))fail('调度状态不可用，未调整。',503);
+    // The immutable submit specification is never rewritten. The scheduler
+    // changes the live policy atomically after checking PENDING + expected.
+    job.policyRevision=(job.policyRevision||0)+1;service.save();
+    service.audit(principal.username,operation,job.id,priority);
+    try{
+      const result=await service.bridge(job.machine,'priority',{job:job.spec,priority,expected:job.schedulerPolicy});
+      job.policyRevision++;
+      schedulerResult(job,result);service.save();return publicJob(job);
+    }catch(error){
+      job.policyRevision++;
+      job.priorityMutable=false;job.error='优先级调整结果待核验，请刷新；不会重复提交任务。';service.save();
+      setImmediate(()=>service.reconcile().catch(()=>{}));throw error;
+    }
   }
   if(operation==='jobs.cancel'){
     const job=jobById(args.jobId);if(!TERMINAL.has(job.state)){job.cancelRequested=true;service.save();service.audit(principal.username,operation,job.id,'requested');setImmediate(()=>service.reconcile().catch(()=>{}));}

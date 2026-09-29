@@ -91,11 +91,29 @@ class ProjectOperations:
     def status(self, args):
         result = self.store.status(*self.identity(args))
         pending = self.pending(args)
+        observed = pending
         if pending.get('state') == 'PUBLISHING':
-            pending = {'state':'PUBLISHING'} if self.active(args) else {
-                'state':'FAILED','error':'Publication worker stopped; retry publication'}
-        if pending.get('state') in ('PUBLISHING', 'FAILED'):
-            result.update({k: pending[k] for k in ('state','error') if k in pending})
+            pending = pending if self.active(args) else {
+                **pending,'state':'UNKNOWN','error':'Publication worker stopped without a final receipt; inspect READY versions before retrying'}
+        # A complete callback is emitted only after the immutable release and
+        # latest pointer are committed. It is a durable per-publication proof,
+        # unlike merely finding some older READY version in this project.
+        committed = pending.get('committedRelease')
+        if (pending.get('state') in ('UNKNOWN','FAILED') and
+                isinstance(committed, str) and HASH.fullmatch(committed) and
+                committed == result.get('latestReadyRelease') and
+                any(item['release'] == committed for item in result['releases'])):
+            recovered = {k:v for k,v in pending.items() if k not in ('error','errorDetails')}
+            recovered.update(state='READY',release=committed)
+            try:
+                with self.guard(args):
+                    if self.pending(args) == observed:
+                        self.n.atomic_json(self.receipt_path(args), recovered)
+            except Exception: pass  # The on-disk commit proof remains authoritative.
+            result.update(state='READY',progress=pending.get('progress',{}))
+            return result
+        if pending.get('state') in ('PUBLISHING', 'FAILED', 'UNKNOWN'):
+            result.update({k: pending[k] for k in ('state','error','errorDetails','progress') if k in pending})
         return result
 
     def transfer_dir(self, args):
@@ -105,9 +123,12 @@ class ProjectOperations:
 
     def process(self, operation, args):
         allowed = {'userId'} if operation == 'projects.list' else {'userId','project'}
+        if operation == 'projects.create': allowed.add('environmentMode')
         if operation == 'projects.verify': allowed.add('release')
         if not isinstance(args, dict) or set(args)-allowed:
             raise ValueError('Invalid project fields')
+        if 'environmentMode' in args and args['environmentMode'] not in ('shared','isolated'):
+            raise ValueError('Environment mode must be shared or isolated')
         if operation == 'projects.list':
             self.n.workspace(args['userId'])
             result = {'projects':self.store.list(args['userId'])}
@@ -121,7 +142,7 @@ class ProjectOperations:
             release = self.store.release(*identity, args['release'])
             return {'project':args['project'],'release':args['release'],'state':'READY'}
         with self.guard(args):
-            if operation == 'projects.create': return self.store.create(*identity)
+            if operation == 'projects.create': return self.store.create(*identity, environment_mode=args.get('environmentMode'))
             if operation != 'projects.publish': raise ValueError('Unknown project operation')
             self.writable(args)
             # A clean exit may leave a pointer. Confirm the entire unit is
@@ -158,14 +179,35 @@ class ProjectOperations:
         if not HASH.fullmatch(key): raise ValueError('Invalid project worker key')
         args = json.loads((self.folder/(key+'.json')).read_text())
         if self.key(args) != key: raise ValueError('Project worker identity mismatch')
+        args = {name:args[name] for name in ('userId','project')}
+        last_progress, committed = {}, {}
+        def progress(value):
+            last_progress.update(value)
+            if value.get('phase') == 'complete':
+                status = self.store.status(*self.identity(args))
+                release = status.get('latestReadyRelease')
+                if (isinstance(release,str) and HASH.fullmatch(release) and
+                        any(item['release'] == release for item in status['releases'])):
+                    committed.update(project=args['project'],release=release,state='READY')
+            self.n.atomic_json(self.receipt_path(args), {**args,'state':'PUBLISHING','progress':value,
+                **({'committedRelease':committed['release']} if committed else {})})
         try:
-            out = self.store.publish(*self.identity(args))
-            self.n.atomic_json(self.receipt_path(args), {**args,**out,'state':'READY'})
-            return 0
+            out = self.store.publish(*self.identity(args), progress=progress)
         except Exception as error:
-            self.n.atomic_json(self.receipt_path(args), {**args,'state':'FAILED',
-                'error':str(error)[:300] if isinstance(error,ValueError) else 'Publication failed; inspect node logs'})
-            return 1
+            if not committed:
+                self.n.atomic_json(self.receipt_path(args), {**args,'state':'FAILED',
+                    'error':str(error)[:500] if isinstance(error,ValueError) else 'Publication failed; inspect node logs',
+                    'errorDetails':getattr(error,'details',{}),'progress':last_progress})
+                return 1
+            # Post-commit cleanup cannot revoke a published immutable snapshot.
+            print('GPUQ project publication committed; post-commit cleanup needs inspection',file=sys.stderr)
+            out = committed
+        try:
+            self.n.atomic_json(self.receipt_path(args), {**args,**out,'state':'READY',
+                'committedRelease':out['release'],'progress':last_progress})
+        except Exception:
+            print('GPUQ project publication committed; final receipt unavailable, query project status',file=sys.stderr)
+        return 0
 
     def files(self, operation, args):
         user, project = self.identity(args)

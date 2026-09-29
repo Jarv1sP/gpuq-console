@@ -10,6 +10,9 @@ files['/job-diagnostics-ui.js']='job-diagnostics-ui.js';files['/job-diagnostics.
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
 const guides={'/guide/user':'./USER_README.md','/guide/admin':'./ADMIN_README.md','/guide/datasets':'./docs/DATASETS.md','/guide/projects':'./docs/PROJECTS.md','/guide/terminal-sessions':'./docs/TERMINAL_SESSIONS.md','/guide/diagnostics':'./docs/JOB_DIAGNOSTICS.md','/guide/ray-resources':'./docs/RAY_RESOURCES.md'};
 files['/datasets-ui.js']='datasets-ui.js';
+files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
+guides['/guide/community']='./docs/COMMUNITY.md';
+guides['/guide/project-network']='./docs/PROJECT_NETWORK.md';
 export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge}){
   const url=new URL(origin);const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined));const rate=new Map();
   const server=http.createServer(async(req,res)=>{

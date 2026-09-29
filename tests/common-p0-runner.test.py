@@ -99,7 +99,7 @@ class CommonRunner(unittest.TestCase):
         args, env, props = self.orchestrate(terminal=True)
         self.assertIn('MemoryMax=8G', props); self.assertIn('CPUQuota=200%', props)
         self.assertIn('TasksMax=2048', props); self.assertNotIn('--new-session', args)
-        self.assertEqual(env['PATH'], '/opt/conda/bin:/usr/bin:/bin')
+        self.assertEqual(env['PATH'], '/opt/gpuq/bin:/opt/conda/bin:/usr/bin:/bin')
         self.assertFalse(any(key.startswith(('RAY_', 'GPUQ_CPU', 'GPUQ_MEMORY')) for key in env))
         self.assertNotIn('/run/gpuq/runtime', args)
 
@@ -107,7 +107,7 @@ class CommonRunner(unittest.TestCase):
         args, env, props = self.orchestrate()
         self.assertIn('MemoryMax=64G', props); self.assertIn('CPUQuota=800%', props)
         self.assertIn('TasksMax=2048', props); self.assertIn('--new-session', args)
-        self.assertEqual(env['PATH'], '/opt/conda/bin:/usr/bin:/bin')
+        self.assertEqual(env['PATH'], '/opt/gpuq/bin:/opt/conda/bin:/usr/bin:/bin')
         self.assertEqual(env['RAY_TMPDIR'], '/run/gpuq/runtime')
         self.assertEqual(env['GPUQ_RAY_TEMP_DIR'], '/run/gpuq/runtime/ray')
         self.assertEqual(env['RAY_object_spilling_directory'], '/tmp/gpuq-ray-spill')

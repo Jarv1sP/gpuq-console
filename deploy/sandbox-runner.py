@@ -50,9 +50,42 @@ def project_runtime(spec,root,cfg,jid,terminal):
     store=store_module.ProjectStore(root,cfg['conda'])
     if terminal:
         paths=store.dev_paths(spec['userId'],spec['project'])
-        return {**paths,'output':paths['scratch'],'readonly':False}
+        return {**paths,'output':paths['scratch'],'readonly':False,'environmentMode':store.environment_mode(spec['userId'],spec['project'])}
     release=store.release(spec['userId'],spec['project'],spec['release'])
-    return {**release,**store.run_paths(spec['userId'],spec['project'],spec['release'],jid),'readonly':True}
+    return {**release,**store.run_paths(spec['userId'],spec['project'],spec['release'],jid),'readonly':True,'environmentMode':release['meta'].get('environmentMode','shared')}
+
+def project_path(mode,resources=False):
+    if mode not in ('shared','isolated'):raise ValueError('Invalid project environment mode')
+    return '/opt/project-env/bin:'+('/opt/gpuq/bin:' if resources else '')+('/opt/conda/bin:' if mode=='shared' else '')+'/usr/bin:/bin'
+
+def project_bootstrap(command,mode):
+    if mode not in ('shared','isolated'):raise ValueError('Invalid project environment mode')
+    # Runs only inside the project sandbox. Never rewrite an initialized venv.
+    bootstrap='''import fcntl,os,pathlib,stat,subprocess,sys
+mode=sys.argv[1]
+root=pathlib.Path('/opt/project-env')
+p=root/'pyvenv.cfg'
+lock=os.open('/home/gpuq/.gpuq-env-init.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+try:
+    info=os.fstat(lock)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:raise RuntimeError('Unsafe environment initialization lock')
+    fcntl.flock(lock,fcntl.LOCK_EX)
+    if not p.exists() and not p.is_symlink():
+        if any(root.iterdir()):raise RuntimeError('Project environment is not empty; inspect it or create a new project, no automatic reinstall was attempted')
+        subprocess.run(['/opt/conda/bin/python','-m','venv',*(['--system-site-packages'] if mode=='shared' else []),'--copies',str(root)],check=True)
+    if mode=='isolated':
+        fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            info=os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size>65536:raise RuntimeError('Invalid project venv configuration')
+            config=os.read(fd,65537).decode('utf-8')
+        finally:os.close(fd)
+        values=[line.split('=',1)[1].strip().lower() for line in config.splitlines() if '=' in line and line.split('=',1)[0].strip().lower()=='include-system-site-packages']
+        if values!=['false']:raise RuntimeError('Isolated project venv must disable system site packages; no automatic reinstall was attempted')
+finally:os.close(lock)
+os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
+'''
+    return ['/usr/bin/python3','-c',bootstrap,mode,*command]
 
 def main():
     jid=sys.argv[1]
@@ -76,6 +109,8 @@ def main():
     resources=local_module('gpuq_job_resources','job-resources.py')
     requested=resources.requested_limits(spec,terminal)
     subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={requested["memory"]}',f'CPUQuota={requested["cpu"]*100}%','TasksMax=2048'],env=env,check=True)
+    # Legacy terminal specs intentionally have no id; use the trusted filename
+    # identity for metadata without mutating their immutable on-disk spec.
     budget=resources.read_budget({**spec,'id':jid},group,uuids,terminal)
     cgroupfd=os.open(resources.cgroup_path(group),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     resourcefd=os.memfd_create('gpuq-resources');os.write(resourcefd,json.dumps(budget,sort_keys=True).encode());os.lseek(resourcefd,0,0)
@@ -104,7 +139,8 @@ def main():
     # /proc/meminfo and os.cpu_count may still describe the physical host.
     args+=['--dir','/opt/gpuq','--dir','/opt/gpuq/bin',
            '--ro-bind',str(HERE/'job-resources.py'),'/opt/gpuq/bin/job-resources.py',
-           '--ro-bind',str(HERE/'gpuq-ray'),'/opt/gpuq/bin/gpuq-ray']
+           '--ro-bind',str(HERE/'gpuq-ray'),'/opt/gpuq/bin/gpuq-ray',
+           '--ro-bind',str(HERE/'gpuq-network'),'/opt/gpuq/bin/gpuq-network']
     if runtimefd is not None:args+=['--bind-fd',str(runtimefd),'/run/gpuq/runtime']
     if dataset_fds:
         args+=['--dir','/data2']
@@ -125,16 +161,18 @@ def main():
     # can mask that subset on some drivers; device mounts, not env vars, enforce it.
     args+=['--unsetenv','CUDA_VISIBLE_DEVICES']
     if project:
-        for key,value in {'PATH':'/opt/project-env/bin:/opt/conda/bin:/usr/bin:/bin','HOME':'/home/gpuq',
+        for key,value in {'PATH':project_path(project['environmentMode']),'HOME':'/home/gpuq',
                           'VIRTUAL_ENV':'/opt/project-env','PYTHONNOUSERSITE':'1','PYTHONDONTWRITEBYTECODE':'1',
                           'PIP_REQUIRE_VIRTUALENV':'true','GPUQ_PROJECT':spec['project'],
                           'GPUQ_PROJECT_RELEASE':spec.get('release','development'),'GPUQ_OUTPUT_DIR':'/outputs',
-                          'XDG_CACHE_HOME':'/home/gpuq/.cache'}.items():args+=['--setenv',key,value]
+                          'XDG_CACHE_HOME':'/home/gpuq/.cache','GPUQ_PROJECT_ENV_MODE':project['environmentMode'],
+                          'GPUQ_OFFLINE_ASSETS':'/workspace/offline'}.items():args+=['--setenv',key,value]
         args+=['--unsetenv','PYTHONUSERBASE']
     resource_env=resources.resource_environment(budget)
-    resource_env['PATH']=('/opt/project-env/bin:' if project else '')+'/opt/gpuq/bin:/opt/conda/bin:/usr/bin:/bin'
+    resource_env['PATH']=project_path(project['environmentMode'],resources=True) if project else '/opt/gpuq/bin:/opt/conda/bin:/usr/bin:/bin'
     if runtimefd is not None:
-        resource_env.update({'RAY_TMPDIR':'/run/gpuq/runtime','GPUQ_RAY_TEMP_DIR':'/run/gpuq/runtime/ray','RAY_object_spilling_directory':resources.RAY_SPILL_DIR})
+        resource_env.update({'RAY_TMPDIR':'/run/gpuq/runtime','GPUQ_RAY_TEMP_DIR':'/run/gpuq/runtime/ray',
+                             'RAY_object_spilling_directory':resources.RAY_SPILL_DIR})
     for key,value in resource_env.items():args+=['--setenv',key,value]
     # Do not forward to the host's loopback-only resolved stub: host loopback is
     # intentionally inaccessible to jobs. Use the current real uplink resolvers.
@@ -157,8 +195,7 @@ def main():
     if project and terminal:
         # Trusted bootstrap executes only INSIDE the namespace, with no GPU and
         # no host workspace/credentials. Never run package hooks on the host.
-        bootstrap='import os,pathlib,subprocess,sys; p=pathlib.Path("/opt/project-env/pyvenv.cfg"); subprocess.run(["/opt/conda/bin/python","-m","venv","--system-site-packages","--copies","/opt/project-env"],check=True) if not p.exists() else None; os.execvpe(sys.argv[1],sys.argv[1:],os.environ)'
-        command=['/usr/bin/python3','-c',bootstrap,*command]
+        command=project_bootstrap(command,project['environmentMode'])
     args+=['--ro-bind',gatefile.name,'/run/.ready','--ro-bind-data',str(hosts),'/etc/hosts','--ro-bind-data',str(passwd),'/etc/passwd','--ro-bind-data',str(resolv),'/etc/resolv.conf','--','/usr/bin/python3','-c',gate,*command]
     try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,cgroupfd,resourcefd,*(() if runtimefd is None else (runtimefd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds)))
     finally:

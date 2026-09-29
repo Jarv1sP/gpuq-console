@@ -10,18 +10,25 @@ const help=`GPUQ — 个人终端与 GPUQ 训练
 日常命令（一次安装后直接使用 gpuctl）：
 gpuctl login                     Sign in; remembers your account and service
 gpuctl use gpu-1                  Select an approved server from your inventory
-gpuctl project create my-project Create and select an isolated project on this server
+gpuctl project create my-project Create/select a project (shared base Python packages)
+gpuctl project create clean --env-mode isolated  New venv without base site-packages
 gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
 gpuctl ssh                       Develop in the selected project's private terminal
 gpuctl ssh --root                Administrator: unrestricted host root terminal
 gpuctl ssh --reconnect SESSION   Explicitly reconnect a detached/expired session
 gpuctl ssh --reconnect SESSION --takeover  Replace its active writer explicitly
+gpuctl exec -- id                Administrator: non-interactive host root command
+gpuctl exec --detach -- bash -lc 'long-command'
+gpuctl exec status HANDLE        Read bounded stdout, stderr, state and exit code
+gpuctl exec cancel HANDLE        Cancel this host command and confirm cleanup
 gpuctl push .                    Upload code to the selected project's draft
 gpuctl project publish           Freeze code + private environment; wait for READY
 gpuctl run -g 2 -- python train.py
 gpuctl jobs / logs JOB / cancel JOB
 gpuctl diagnostics JOB --json    Persistent bounded worker logs, exits and resource counters
+gpuctl run --priority idle -g 1 -- python train.py
+gpuctl priority JOB high         Administrator: change queued job priority
 gpuctl pull --job JOB model.pt ./model.pt
 gpuctl data list                 List authorized dataset versions on selected server
 gpuctl data prepare NAME@VERSION Prepare a local, verified copy without reserving GPUs
@@ -69,6 +76,13 @@ Only loopback HTTP or HTTPS URLs accepted. The VPS portal has a shared API;
 the separate hosted static preview does not. request/release are demo-only.
 run executes on the selected server, in your private /workspace. Upload code first.
 --key UUID allows safe submission retry. No --as impersonation for real jobs.
+run --priority idle|normal|high selects training priority (default normal).
+exec is separate from training/PTY: existing admins on hostRoot-enabled nodes only.
+exec --cwd /absolute/path --timeout SECONDS (1..86400, default 300).
+exec waits by default; --detach returns a handle. --json includes both output streams.
+Use -- bash -lc '...' only when shell syntax is intended. argv is otherwise literal.
+Host output retains the first 65536 bytes per stream; truncation is reported.
+Reuse --key after an uncertain response; never retry with a new key blindly.
 Projects are selected per server, never silently copied or moved between machines.
 --project SLUG overrides the selection; --legacy explicitly uses the old workspace.
 --release HASH pins a READY project release. Without it, run uses latest READY.
@@ -94,12 +108,16 @@ async function main(){
     if(args[i]==='--'){training=args.slice(i+1);break;}
     const item=args[i]==='-g'?'--cards':args[i];if(!item.startsWith('--')){positionals.push(item);continue;}
     const key=item.slice(2);
-    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','takeover'].includes(key)){options[key]=true;continue;}
-    if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job','reconnect'].includes(key))fail(`Unknown option: ${item}`);
+    if(Object.hasOwn(options,key)&&!['machine','data'].includes(key))fail(`Duplicate option: ${item}`);
+    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover'].includes(key)){options[key]=true;continue;}
+    if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job','priority','cwd','timeout','reconnect','env-mode'].includes(key))fail(`Unknown option: ${item}`);
     const value=args[++i];if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
     if(key==='machine')options.machines.push(value);else if(key==='data')options.datasets.push(value);else options[key]=value;
   }
   if(options.help||!positionals.length){console.log(help);return;}
+  if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
+  if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
+  if(['cwd','timeout','detach'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='exec')fail('--cwd, --timeout and --detach are only valid for exec');
   const projectSlug=value=>{if(typeof value!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(value))fail('Project must start with a lowercase letter and use 1–48 lowercase letters, digits, _ or -');return value;};
   if(options.project)projectSlug(options.project);
   if(options.project&&options.legacy)fail('--project and --legacy cannot be combined');
@@ -153,6 +171,10 @@ async function main(){
     const shortcut=command;
     if(command==='ssh')command='shell';if(command==='push')command='upload';if(command==='pull')command='download';
     if((options.reconnect||options.takeover)&&command!=='shell')fail('--reconnect/--takeover are only valid for ssh');
+    if(options['env-mode']!==undefined){
+      if(command!=='project'||positionals[1]!=='create')fail('--env-mode is only valid for project create; existing environments are never rebuilt');
+      if(!['shared','isolated'].includes(options['env-mode']))fail('--env-mode must be shared or isolated');
+    }
     if(['run','shell'].includes(command)&&positionals.length===1)positionals.push(defaultMachine());
     if(['push','pull'].includes(shortcut))positionals.splice(1,0,defaultMachine());
     if(shortcut==='push'&&positionals.length===3&&(await lstat(positionals[2])).isDirectory())positionals.push('.');
@@ -163,6 +185,49 @@ async function main(){
     const own=()=>session.principal.role==='admin'&&options.as?find(options.as):session.principal.userId;
     if(command==='use'&&positionals.length===2){
       if(!state.machines.some(m=>m.id===positionals[1]))fail('这台机器未授权或不存在');session.machine=positionals[1];await saveSession();result={selected:session.machine,project:selectedProject(session.machine)};
+    }else if(command==='exec'){
+      if(['as','project','release','job','root','legacy','cards','min-vram','name'].some(key=>Object.hasOwn(options,key))||options.datasets.length)fail('exec only accepts host-command options; project/training/impersonation flags are not supported');
+      if(session.principal.role!=='admin')fail('Host commands require an existing administrator account');
+      const action=['status','cancel'].includes(positionals[1])?positionals[1]:'exec';
+      if(options.machines.length>1||options.machines.some(value=>value.includes('=')))fail('Use exactly one --machine SERVER');
+      if(action==='exec'&&positionals.length>2||action!=='exec'&&positionals.length!==3)fail('Usage: exec [SERVER] -- argv... | exec status|cancel HANDLE [--machine SERVER]');
+      if(action==='exec'&&positionals[1]&&options.machines.length)fail('Select a server once, either positionally or with --machine');
+      const explicit=action==='exec'?positionals[1]:null;
+      const machine=machineName(explicit||options.machines[0]||session.machine||fail('Select a server explicitly: gpuctl use gpu-1, or exec --machine gpu-1'));
+      if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('This server is not explicitly selected and authorized');
+      const terminal=new Set(['SUCCEEDED','FAILED','CANCELED','TIMED_OUT']);
+      let request;
+      if(action==='exec'){
+        const host=state.gpuq?.hosts?.find(h=>h.id===machine);
+        if(state.gpuq?.stale!==false||host?.reachable!==true||host.hostCommand?.version!==1||host.hostCommand?.available!==true)
+          fail('这台服务器尚未启用或尚未确认管理员非交互命令，未提交命令；请联系管理员。已有 ROOT 终端不受影响。');
+        if(!training.length)fail('Put the host command argv after --');
+        const timeout=options.timeout===undefined?300:Number(options.timeout);
+        if(options.timeout!==undefined&&!/^\d+$/.test(options.timeout)||!Number.isInteger(timeout)||timeout<1||timeout>86400)fail('--timeout must be an integer from 1 to 86400 seconds');
+        if(options.cwd&&(!options.cwd.startsWith('/')||options.cwd.includes('\0')||options.cwd.length>1024))fail('--cwd must be an absolute path');
+        const key=options.key||randomUUID();
+        if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(key))fail('--key must be a UUID');
+        process.stderr.write(`Host command key: ${key} · server: ${machine}\n`);
+        request={machine,key,argv:training,timeoutSec:timeout,...(options.cwd?{cwd:options.cwd}:{})};
+        try{result=(await call('host.exec',request)).result;}
+        catch(error){fail(`${error.message}\nCommand state is unconfirmed, not canceled. Inspect: gpuctl exec status ${key} --machine ${machine}; retry submission only with the SAME --key ${key}.`);}
+      }else{
+        if(training.length||['key','cwd','timeout','detach'].some(key=>Object.hasOwn(options,key)))fail('exec status/cancel accepts only HANDLE and --machine');
+        const id=positionals[2];if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id))fail('Command handle must be a UUID');
+        result=(await call('host.'+action,{machine,id})).result;
+      }
+      const handle=result.id;
+      if(action==='exec'&&!options.detach){
+        try{
+          while(!terminal.has(result.state)&&result.state!=='UNKNOWN'){
+            await new Promise(resolve=>setTimeout(resolve,500));
+            result=(await call('host.status',{machine,id:handle})).result;
+          }
+        }catch(error){fail(`${error.message}\nCommand may still be running; no cancellation was sent. Inspect: gpuctl exec status ${handle} --machine ${machine}`);}
+      }
+      result={...result,machine};
+      if(terminal.has(result.state))process.exitCode=result.state==='TIMED_OUT'?124:result.state==='CANCELED'?130:Number.isInteger(result.exitCode)?Math.min(255,Math.max(0,result.exitCode)):result.signal?Math.min(255,128+result.signal):result.state==='SUCCEEDED'?0:1;
+      else if(result.state==='UNKNOWN')process.exitCode=3;
     }else if(command==='project'&&['list','create','use','status','publish'].includes(positionals[1])){
       if(options.legacy)fail('Project commands do not accept --legacy');
       const action=positionals[1],machine=defaultMachine();
@@ -175,7 +240,8 @@ async function main(){
         const project=projectSlug(positionals[2]||options.project||(['status','publish'].includes(action)?selectedProject(machine):null));
         if(positionals[2]&&options.project&&positionals[2]!==options.project)fail('Conflicting project names');
         if(options.key)fail('--key is for training submissions; publication is tracked per project with project status');
-        result=(await call(`projects.${action==='use'?'status':action}`,{machine,project})).result;
+        result=(await call(`projects.${action==='use'?'status':action}`,{machine,project,...(options['env-mode']!==undefined?{environmentMode:options['env-mode']}:{})})).result;
+        if(options['env-mode']==='isolated'&&result.environmentMode!=='isolated')fail('Node did not confirm isolated environment mode. Upgrade the node and inspect the project before installing dependencies; no shared-mode fallback was accepted.');
         if(action==='create'||action==='use'){
           session.projectsByMachine={...session.projectsByMachine,[machine]:project};await saveSession();
           result={...result,machine,selectedProject:project};
@@ -242,8 +308,13 @@ async function main(){
       }
       const key=options.key||randomUUID();process.stderr.write(`Submission key: ${key}\n`);
       const datasets=options.datasets.map(value=>{const [dataset,version,...extra]=value.split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Use --data NAME@FULL_VERSION_HASH');return {dataset,version};});
-      result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...context,...(datasets.length?{datasets}:{})})).result;
+      result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...context,...(datasets.length?{datasets}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
+    else if(command==='priority'&&positionals.length===3){
+      if(!['idle','normal','high'].includes(positionals[2]))fail('Priority must be idle, normal or high');
+      if(options.key||training.length)fail('priority does not accept a submission key or command argv');
+      result=(await call('jobs.priority',{jobId:positionals[1],priority:positionals[2]})).result;
+    }
     else if(command==='diagnostics'){
       if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k)))fail('Usage: diagnostics JOB [--json]; no paths, machine or execution options');
       result=(await call('jobs.diagnostics',{jobId:positionals[1]})).result;
@@ -312,11 +383,20 @@ async function main(){
     return;
   }
   if(command==='run'){console.log(`已提交 ${result.id}\n${result.machine} · ${result.cards} 张 GPU · ${result.state}\n查看日志：gpuctl logs ${result.id}`);return;}
+  if(command==='exec'){
+    if(result.stdout)process.stdout.write(result.stdout);
+    if(result.stderr)process.stderr.write(result.stderr);
+    process.stderr.write(`\nHost command ${result.id} · ${result.machine} · ${result.state}${result.exitCode!==null&&result.exitCode!==undefined?' · exit '+result.exitCode:''}\n`);
+    if(result.truncated?.stdout||result.truncated?.stderr)process.stderr.write('Output was truncated at 65536 bytes per stream.\n');
+    if(!['SUCCEEDED','FAILED','CANCELED','TIMED_OUT'].includes(result.state))process.stderr.write(`Inspect: gpuctl exec status ${result.id} --machine ${result.machine}\nCancel: gpuctl exec cancel ${result.id} --machine ${result.machine}\n`);
+    if(result.error)process.stderr.write(result.error+'\n');return;
+  }
+  if(command==='priority'){console.log(`任务 ${result.id}：优先级 ${result.priority||'normal'}${result.priorityPending?'（等待节点确认）':''}`);return;}
   if(command==='logs'){process.stdout.write(result.text+(result.text.endsWith('\n')?'':'\n'));return;}
   if(command==='cancel'){console.log(`任务 ${result.id}：${result.state}${result.cancelRequested?'（已请求取消，等待节点确认）':''}`);return;}
   if(command==='upload'){console.log(`已上传 ${result.uploaded} 个文件到 ${result.machine} 的${result.project?'项目 '+result.project+' 草稿':'个人工作区'}。${result.skipped?'跳过 '+result.skipped+' 项。':''}`);return;}
   if(command==='download'){console.log(`已下载：${result.downloaded}（${result.bytes} 字节）`);return;}
-  if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}\n  ${j.machine} · ${j.cards} 张 · ${j.name||'train'}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
+  if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}${j.preempted?'（让位中断，不会自动重跑）':''}\n  ${j.machine} · ${j.cards} 张 · ${j.name||'train'} · 优先级 ${['idle','normal','high'].includes(j.priority)?j.priority:'旧策略／未核验'}${j.schedulerState?' · 调度 '+j.schedulerState:''}${j.queueReason?'\n  排队原因：'+j.queueReason:''}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
   if(command==='files'){console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');return;}
   if(command==='users'){console.log(result.map(u=>`${u.username}  ${u.role==='admin'?'管理员':'普通用户'}  ${u.enabled?'启用':'暂停'}  总额度 ${u.total} 张\n  ${Object.entries(u.limits).map(([m,n])=>`${m}: ${n}`).join('，')||'尚未授权机器'}`).join('\n'));return;}
   console.log(JSON.stringify(result,null,2));

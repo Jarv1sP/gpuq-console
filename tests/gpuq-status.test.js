@@ -54,3 +54,25 @@ test('GPU process lists are bounded before returning snapshots',async()=>{
     const snapshot=await readGPUQStatus(path,now);assert.equal(snapshot.hosts[0].gpus[0].processes.length,128);assert.equal(snapshot.hosts[0].gpus[0].processesAvailable,false);assert.ok(snapshot.hosts[0].gpus[0].processesError);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('matched process scheduling priority is visible without exposing another member job identity',()=>{
+  const snap={hosts:[{id:'gpu-1',reachable:true,gpuq:{connected:true,jobs:[]},gpus:[{index:0,processes:[{pid:1,scheduling:{priority:0,jobId:'private-job',yieldPolicy:'now'}}]}]}]};
+  const member=visibleGPUQStatus(snap,{role:'member'},{'gpu-1':1});
+  assert.deepEqual(member.hosts[0].gpus[0].processes[0].scheduling,{priority:0});
+  assert.equal(JSON.stringify(member).includes('private-job'),false);
+  assert.equal(visibleGPUQStatus(snap,{role:'admin'},{}).hosts[0].gpus[0].processes[0].scheduling.jobId,'private-job');
+});
+
+test('host command readiness is explicit, fail-closed and visible only to administrators',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-host-cap-')),path=join(dir,'status.json'),now=Date.now();
+  try{
+    for(const value of [undefined,null,{},true,{version:2,available:true},{version:1,available:'true'},{version:1,available:true,secret:'not-forwarded'}]){
+      await writeFile(path,JSON.stringify({version:1,checkedAt:new Date(now).toISOString(),hosts:[{id:'gpu-1',reachable:true,hostCommand:value,gpus:[],gpuq:{connected:false,jobs:[]}}]}));
+      const snapshot=await readGPUQStatus(path,now),available=value?.version===1&&value?.available===true;
+      assert.deepEqual(snapshot.hosts[0].hostCommand,{version:1,available});
+      assert.equal(visibleGPUQStatus(snapshot,{role:'admin'},{}).hosts[0].hostCommand.available,available);
+      assert.equal(Object.hasOwn(visibleGPUQStatus(snapshot,{role:'member'},{'gpu-1':1}).hosts[0],'hostCommand'),false);
+      assert.equal((await readGPUQStatus(path,now+181000)).hosts[0].hostCommand.available,false);
+    }
+  }finally{await rm(dir,{recursive:true,force:true});}
+});

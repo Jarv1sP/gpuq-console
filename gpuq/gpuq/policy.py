@@ -6,6 +6,25 @@ from typing import Any, Iterable, Sequence
 from .constants import CheckpointCapability, DispatchMode, MAX_PRIORITY
 
 
+def priority_class_contract(value: Any) -> dict[str, Any]:
+    """The small, opt-in Console contract; legacy submissions stay unchanged."""
+    if not isinstance(value, str) or value not in {"idle", "normal", "high"}:
+        raise ValueError("priority_class must be idle, normal or high")
+    return {
+        "priority": {"idle": 0, "normal": 2, "high": 4}[value],
+        "yield_policy": "now" if value == "idle" else "never",
+        "restart_policy": "never",
+        "dispatch_mode": "queue",
+    }
+
+
+def is_idle_victim(
+    priority: int, yield_policy: str, restart_policy: str, preempt_idle_only: bool = False
+) -> bool:
+    """Do not enroll historical P0/now jobs into the new opt-in policy."""
+    return preempt_idle_only is True and priority == 0 and yield_policy == "now" and restart_policy == "never"
+
+
 @dataclass(frozen=True, slots=True)
 class VictimCandidate:
     attempt_id: str
@@ -17,6 +36,8 @@ class VictimCandidate:
     gpu_uuids: tuple[str, ...] = ()
     takeover: bool = False
     yield_policy: str = "legacy"
+    restart_policy: str = "on-preempt"
+    preempt_idle_only: bool = False
 
 
 def validate_yield_policy(value: Any, checkpoint_capability: str, share_gpu: bool) -> str:
@@ -99,6 +120,7 @@ def select_victims(
     candidates: Sequence[VictimCandidate],
     required_gpu_uuids: frozenset[str] | None = None,
     free_gpu_uuids: frozenset[str] = frozenset(),
+    preempt_idle_only: bool = False,
 ) -> tuple[VictimCandidate, ...]:
     """Choose a deterministic, minimally harmful victim set.
 
@@ -144,6 +166,10 @@ def select_victims(
         needed = len(missing_required)
     eligible: list[VictimCandidate] = []
     for candidate in candidates:
+        if preempt_idle_only and not is_idle_victim(
+            candidate.priority, candidate.yield_policy, candidate.restart_policy, candidate.preempt_idle_only
+        ):
+            continue
         if candidate.priority >= requester_priority or candidate.gpu_count <= 0:
             continue
         if candidate.state != "RUNNING":

@@ -29,11 +29,11 @@ try{
     calls.push({machine:node,operation,args:copy(args),at:Date.now()});
     const identity=key(node,args.userId,args.project),project=projects.get(identity);
     if(operation==='projects.list')return {projects:[...projects].filter(([entry])=>{const [m,u]=JSON.parse(entry);return m===node&&u===args.userId;}).map(([,value])=>copy(value))};
-    if(operation==='projects.create'){assert.ok(!project);const value={project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null};projects.set(identity,value);return copy(value);}
+    if(operation==='projects.create'){assert.ok(!project);const value={project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null,environmentMode:args.environmentMode||'shared'};projects.set(identity,value);return copy(value);}
     if(operation==='projects.status'){assert.ok(project);return copy(project);}
     if(operation==='projects.publish'){
       assert.ok(project);assert.ok(![...terminals.values()].some(value=>value.machine===node&&value.userId===args.userId&&value.project===args.project),'active dev terminal must block publish');
-      project.state='PUBLISHING';return copy(project);
+      project.state='PUBLISHING';project.progress={phase:'copying',completedEntries:12,completedBytes:512,totalEntries:20,totalBytes:1024};return copy(project);
     }
     if(operation==='projects.verify'){assert.ok(project?.releases.some(item=>item.release===args.release&&item.state==='READY'));return {project:args.project,release:args.release,state:'READY'};}
     if(operation==='terminal.open'){const id=args.mode==='reconnect'?args.id:randomUUID(),writerToken=randomUUID();assert.equal(args.hostAdmin,false);if(args.mode==='reconnect')assert.ok(terminals.has(id));terminals.set(id,{...copy(args),machine:node,writerToken});return {id,writerToken};}
@@ -88,7 +88,11 @@ try{
   await setMachine(machine);
   for(const name of ['machine','terminal-machine','file-machine'])assert.equal(await page.locator(`[name=${name}]`).inputValue(),machine);
   await page.locator('#project-create summary').click();await page.locator('[name=new-project]').fill('vision-demo');
+  assert.equal(await page.locator('[name=environment-mode]').inputValue(),'shared');
+  await page.locator('[name=environment-mode]').selectOption('isolated');
   await action('projects.create',()=>page.locator('#project-create-form [type=submit]').click());await idle();
+  assert.equal(calls.filter(call=>call.operation==='projects.create').at(-1).args.environmentMode,'isolated');
+  assert.match(await page.locator('#project-status').textContent(),/完全隔离/);
   assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   assert.match(await page.locator('#workspace-mode-note').textContent(),/\/opt\/project-env/);
@@ -122,10 +126,18 @@ try{
   await page.locator('[name=command]').fill('python train.py --output /outputs/result.json');await page.locator('[name=name]').fill('project-smoke');
   await action('projects.publish',()=>page.locator('#project-publish').click());await idle();
   assert.match(await page.locator('#project-status').textContent(),/正在发布/);assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
+  assert.match(await page.locator('#project-status').textContent(),/复制：12 \/ 20 项，512 \/ 1024 B/);
   const publication=projects.get(key(machine,member.id,'vision-demo'));publication.state='READY';publication.releases=[{release,state:'READY'}];publication.latestReadyRelease=release;
   await responseFor(page,'projects.status');await idle();
   assert.equal(await page.locator('[name=release]').inputValue(),release);assert.equal(await page.locator('#release-full').textContent(),release);
   assert.equal(await page.locator('#train-form [type=submit]').isEnabled(),true);
+  publication.state='FAILED';publication.error='mock failure';publication.errorDetails={path:'code/<img src=x onerror=alert(1)>',mode:'0o664',links:2,kind:'file',remediation:'make a private copy'};
+  await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
+  assert.match(await page.locator('#project-status').textContent(),/code\/<img src=x onerror=alert\(1\)>/);
+  assert.match(await page.locator('#project-status').textContent(),/权限：0o664.*链接数：2.*make a private copy/);
+  assert.equal(await page.locator('#project-status img').count(),0);
+  publication.state='READY';delete publication.error;delete publication.errorDetails;
+  await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
   await capture('projects-desktop-ready.png');
 
   // A newly published release never silently moves an existing draft to latest.
@@ -173,6 +185,10 @@ try{
   await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('other-project'));await idle();
   await capture('projects-mobile-ready.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px selected-project layout must not overflow');
+  await page.locator('#project-create summary').click();
+  await page.locator('[name=environment-mode]').selectOption('isolated');
+  await capture('projects-mobile-environment.png');
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px environment creation form must not overflow');
 
   const adminPage=await browser.newPage({viewport:{width:1440,height:1000}});await configure(adminPage);await login(adminPage,'admin');await setMachine(machine,adminPage);
   await adminPage.locator('[name=terminal-host]').check();await action('projects.status',()=>adminPage.locator('[name=workspace-project]').selectOption('admin-project'),adminPage);await idle(adminPage);
@@ -182,5 +198,5 @@ try{
   assert.deepEqual(httpErrors,[{status:401,operation:'state'},{status:401,operation:'state'}]);
   assert.equal(service.store.jobs.length,2);assert.equal(terminals.size,0);
   assert.ok(calls.filter(call=>call.operation==='projects.status').length<10,'publication polling stays bounded');
-  console.log(JSON.stringify({status:'passed',checks:['explicit shared machine/project','create and draft','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','390px no overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
+  console.log(JSON.stringify({status:'passed',checks:['explicit shared machine/project','create and draft','explicit isolated environment','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','390px environment form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(folder,{recursive:true,force:true});}

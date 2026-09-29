@@ -79,16 +79,21 @@ class InstallerBoundary(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError): exec(PREFLIGHT, namespace)
         self.assertEqual(run.call_count, 1)
 
-    def test_preserves_diagnostic_timer_and_excludes_unreleased_capabilities(self):
+    def test_preserves_profiles_and_root_grants_stay_explicit_and_scoped(self):
         self.assertIn("'gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'", SOURCE)
         self.assertIn("run('systemctl','--user','enable','--now','gpuq-diagnostics-gc.timer')", SOURCE)
         self.assertIn("'job-resources.py','gpuq-ray'", SOURCE)
-        for forbidden in ('admin-command', 'gpuq-network', 'environmentMode', "'daemon-reexec'", "'restart'"):
+        for forbidden in ('environmentMode', "'daemon-reexec'", "'restart'"):
             self.assertNotIn(forbidden, SOURCE)
-        # The existing explicit PTY root-shell installer remains the only sudoers grant.
+        root_gate = next(node for node in TREE.body if isinstance(node, ast.If)
+                         and isinstance(node.test, ast.Attribute) and node.test.attr == 'enable_host_root')
         grants = [node.value for node in ast.walk(TREE) if isinstance(node, ast.Constant)
                   and isinstance(node.value, str) and 'NOPASSWD:' in node.value]
-        self.assertEqual(grants, [' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-root-shell\n'])
+        gated_grants = [node.value for node in ast.walk(root_gate) if isinstance(node, ast.Constant)
+                        and isinstance(node.value, str) and 'NOPASSWD:' in node.value]
+        self.assertEqual(grants, gated_grants)
+        self.assertCountEqual(grants, [' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-root-shell\n',
+                                 ' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-admin-command ""\n'])
 
 
 if __name__ == '__main__': unittest.main()

@@ -34,6 +34,31 @@ class Diagnostics(unittest.TestCase):
     def tearDown(self):
         self.run_patch.stop(); self.show_patch.stop(); self.group_patch.stop(); self.tmp.cleanup()
 
+    def test_allocation_history_whitelists_real_lease_times_without_attempt_inference(self):
+        row = {'id': 4, 'job_id': 'J-one', 'attempt_id': 'A-one', 'gpu_uuid': 'GPU-one',
+               'gpu_index': 3, 'acquired_at': 123.25, 'released_at': 156.75,
+               'release_reason': 'attempt finalized: EXITED_SUCCESS', 'source': 'observed',
+               'lease_token': 'DO_NOT_EXPOSE', 'argv': ['private-secret']}
+        scheduler = {'job': {'id': 'J-one', 'state': 'SUCCEEDED'}, 'allocation_history': [row],
+                     'allocation_history_available': True, 'allocation_history_truncated': True,
+                     'allocation_history_next_before_id': 4}
+        package = D.bundle(self.root, self.spec, scheduler)
+        self.assertTrue(package['historyAvailable']); self.assertTrue(package['historyTruncated'])
+        self.assertEqual(package['historyNextBeforeId'], 4)
+        self.assertEqual(package['allocationHistory'][0]['acquired_at'], 123.25)
+        self.assertEqual(package['allocationHistory'][0]['released_at'], 156.75)
+        self.assertNotIn('DO_NOT_EXPOSE', json.dumps(package)); self.assertNotIn('private-secret', json.dumps(package))
+        legacy = D.bundle(self.root, self.spec, {'job': {'state': 'SUCCEEDED'},
+                          'attempts': [{'started_at': 123, 'finished_at': 156}]})
+        self.assertFalse(legacy['historyAvailable']); self.assertEqual(legacy['allocationHistory'], [])
+        row.update(source='migrated_active', released_at=None, release_reason=None)
+        self.assertIsNone(D.bundle(self.root, self.spec, scheduler)['allocationHistory'][0]['released_at'])
+        for changes in ({'job_id': 'another-owner-job'}, {'acquired_at': None}, {'released_at': float('nan')},
+                        {'gpu_index': True}, {'source': 'inferred'}):
+            bad = {**scheduler, 'allocation_history': [{**row, **changes}]}
+            self.assertFalse(D.bundle(self.root, self.spec, bad)['historyAvailable'])
+            self.assertEqual(D.bundle(self.root, self.spec, bad)['allocationHistory'], [])
+
     def start(self):
         result = D.start_capture(self.root, self.spec, UNIT, '/some/' + UNIT, {}, ['2'], ['GPU-abc'])
         self.folder = self.root / 'diagnostics' / JID / CAPTURE

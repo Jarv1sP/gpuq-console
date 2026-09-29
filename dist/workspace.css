@@ -1,4 +1,6 @@
 /* Task-oriented navigation: no motion between frequently used work pages. */
+.priority-choice{display:grid;grid-template-columns:minmax(160px,230px) minmax(0,1fr);gap:18px;align-items:start;margin:18px 0;padding:16px;background:#f5f7fb;border:1px solid #e3e8f1;border-radius:9px}.priority-note{font-size:12px;color:#536884;line-height:1.8;margin:23px 0 0;overflow-wrap:anywhere}.priority-note.priority-warning{color:#8b581e}.priority-pill{display:inline-block;border-radius:5px;padding:4px 7px;font-size:11px;font-weight:600;line-height:1.5;background:#edf1f7;color:#526581;white-space:normal}.priority-idle{background:#fff3df;color:#87561e}.priority-high{background:#eeeafd;color:#665099}.priority-unknown{background:#f0f2f5;color:#747f90}.task-table{table-layout:fixed;min-width:870px}.task-table th:nth-child(1){width:24%}.task-table th:nth-child(2){width:12%}.task-table th:nth-child(3){width:13%}.task-table th:nth-child(4){width:31%}.task-table th:nth-child(5){width:20%}.task-table td,.task-table td:not(:first-child){white-space:normal;overflow-wrap:anywhere;line-height:1.6}.task-table td:first-child{min-width:0;max-width:none}.task-table small{font-size:11px;line-height:1.65}.task-state{font-weight:600}.task-table .task-error{color:#a3434c}.task-table .scheduler-time{color:#7c889b;font-variant-numeric:tabular-nums}.task-actions{display:flex;gap:6px;flex-wrap:wrap}.task-actions .button,.priority-editor .button{font-size:12px;padding:8px 10px;min-height:36px}.priority-editor{display:flex;align-items:flex-end;gap:7px;margin-top:12px}.priority-editor label{min-width:0;flex:1}.priority-editor select{width:100%;min-width:0;min-height:36px;border:1px solid #d7deea;border-radius:6px;padding:7px;background:white;font-size:12px;color:#36445b}.priority-editor select:focus-visible{outline:2px solid #607eeb;outline-offset:3px}.node-queue .process-table{min-width:600px}.node-queue .process-table small{display:block;color:#7b8799;font-size:10px;margin-top:4px}.node-queue .queue-reason{max-width:280px}
+@media(max-width:700px){.priority-choice{grid-template-columns:minmax(0,1fr);gap:10px;padding:14px}.priority-note{margin:0}.task-table-wrap{max-height:none;border:0;background:transparent;overflow:visible}.task-table,.task-table tbody,.task-table tr,.task-table td{display:block;width:100%;min-width:0;max-width:none!important}.task-table thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.task-table tr{background:white;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;padding:5px 16px}.task-table td{padding:11px 0;border-bottom:1px solid #edf0f5}.task-table td:last-child{border-bottom:0}.task-table td[data-label]::before{content:attr(data-label);display:block;color:#75839a;font-size:11px;margin-bottom:6px}.task-table td.task-empty{padding:18px 0}.task-table small{font-size:12px}.task-actions .button,.priority-editor .button,.priority-editor select{min-height:42px}.priority-editor{max-width:100%}.task-actions .button{flex:1}.task-table .priority-pill{font-size:12px}}
 .workspace-context{border:1px solid var(--line);border-radius:12px;background:#fff;padding:24px;margin-bottom:20px;min-width:0}.workspace-context-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}.workspace-context-heading h2{font-size:18px;margin-top:8px}.workspace-context-grid,.file-location-grid,.output-run-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:16px 0}.workspace-context label{display:grid;gap:8px;font-size:13px}.workspace-context input,.workspace-context select{min-width:0;width:100%;padding:11px;border:1px solid #d7deea;border-radius:7px;background:#fff;font:inherit}.workspace-context .muted{line-height:1.8;font-size:12px;margin:12px 0}.workspace-status{min-height:22px;font-size:13px;line-height:1.7;color:#425979;overflow-wrap:anywhere}.workspace-context summary{cursor:pointer;font-size:13px;color:#365c96}.workspace-context #project-create{margin-top:16px}.workspace-context #project-create-form{display:flex;align-items:flex-end;gap:12px;margin-top:16px}.workspace-context #project-create-form label{flex:1}.project-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:18px;margin-top:20px}.project-actions .muted{margin:0}.execution-workspace .train-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.execution-workspace .terminal-controls{margin:20px 0}.execution-workspace .terminal-controls .muted{font-size:12px;line-height:1.7;flex:1;min-width:200px}.execution-workspace .host-terminal-choice{font-size:12px}.execution-workspace [hidden]{display:none!important}.execution-workspace input,.execution-workspace select,.execution-workspace textarea{min-width:0}.execution-workspace label small{color:#7b8799;line-height:1.7;font-weight:400}.release-hash{font:11px/1.7 ui-monospace,monospace;overflow-wrap:anywhere;color:#51698f;padding:9px 12px;background:#f5f7fb;border-radius:6px;min-width:0}.execution-workspace #project-release-field{margin-bottom:18px}.execution-workspace #train-form>label{margin-top:16px}.execution-workspace #train-form>p{font-size:12px;line-height:1.8;margin:10px 0}.execution-workspace #train-form>[type=submit]{margin-top:8px}.execution-workspace .section-kicker{margin-top:28px}.execution-workspace .file-actions input[type=file]{max-width:100%;font-size:12px}.execution-workspace .button{white-space:normal}.terminal-dialog .modal-head h2{font-size:16px;overflow-wrap:anywhere}.terminal-dialog .modal-head>div{display:flex;gap:6px;flex-wrap:wrap}
 @media(max-width:700px){.workspace-context{padding:18px}.workspace-context-heading{align-items:flex-start}.workspace-context-heading h2{font-size:16px}.workspace-context-grid,.file-location-grid,.output-run-fields{grid-template-columns:minmax(0,1fr);gap:12px}.workspace-context #project-create-form{align-items:stretch;flex-direction:column}.execution-workspace .train-grid{grid-template-columns:minmax(0,1fr)}.project-actions{align-items:stretch}.project-actions>.button{flex:1}.execution-workspace .terminal-controls{gap:12px}.terminal-dialog .modal-head>div{width:100%}.terminal-dialog .modal-head .button{flex:1;padding:9px 6px;font-size:12px}.terminal-dialog #terminal-screen{min-width:0;overflow:hidden}}
 .dataset-catalog{display:grid;gap:16px;margin-top:20px}.dataset-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:24px;min-width:0}.dataset-card h3{font-size:18px;margin-bottom:8px}.dataset-card .field{margin:18px 0 12px}.dataset-card input{width:100%;font-family:ui-monospace,monospace;font-size:12px}.dataset-card .file-actions{margin-top:16px}.dataset-card code{overflow-wrap:anywhere}#datasets-status{font-size:13px;color:#51698f;line-height:1.7}
@@ -11,3 +13,175 @@
 .resource-grid{grid-template-columns:minmax(0,1fr)!important}.resource-card,.gpu-table-scroll{min-width:0;max-width:100%}
 @media(max-width:700px){.project-actions>.button,.project-actions>.muted{flex:1 1 100%}}
 @media(max-width:700px){.resource-top{align-items:flex-start}.resource-top .badge{max-width:120px;text-align:center;white-space:normal}.resource-policy{gap:10px;flex-wrap:wrap}.resource-policy .button{margin-left:0}.resource-bottom{overflow-wrap:anywhere}.help-links{gap:10px 18px}.gpu-table{min-width:680px}}
+
+/* Consistent panels and information hierarchy; no metrics or actions hidden. */
+.self-summary {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;padding:24px 28px;border-radius:12px;box-shadow:0 2px 4px #172c4d03}
+.self-summary>div {min-width:0;padding:0 24px;border-left:1px solid var(--line)}
+.self-summary>div:first-child {border-left:0;padding-left:0}
+.self-summary small {font-size:12px;color:#647187;margin-bottom:7px}
+.self-summary strong {font-size:28px;line-height:1.35;font-weight:650;color:#263652}
+.self-summary .summary-status {font-size:18px;line-height:38px}
+.workspace-context,.dataset-card,.resource-card {padding:24px;border-radius:12px;box-shadow:0 2px 4px #172c4d03}
+.workspace-context-heading {margin-bottom:20px}
+.workspace-context-heading h2 {font-size:18px;margin-top:6px}
+.workspace-context label,.execution-panel label {font-size:13px;color:#45536a;font-weight:500;gap:8px}
+.workspace-context input,.workspace-context select,.execution-panel input,.execution-panel select,.execution-panel textarea,.priority-editor select,.terminal-controls select {min-height:44px;padding:11px 12px;border:1px solid #d7dfeb;border-radius:8px;background:#fff;color:var(--ink);font-size:14px;line-height:1.5;box-shadow:0 1px 2px #172c4d03;transition:border-color 140ms ease}
+.workspace-context .muted,.execution-workspace #train-form>p,.execution-workspace label small {font-size:12px;line-height:1.8;color:#647187}
+.workspace-status {font-size:13px;color:#465d82;line-height:1.8;margin-top:14px}
+.workspace-status.form-error {color:#ac3648}
+.workspace-context #project-create {margin-top:16px}
+.workspace-context #project-create summary {min-height:32px;display:list-item;line-height:32px}
+.project-actions {padding-top:20px;margin-top:20px;gap:12px}
+.execution-workspace .terminal-controls {padding:4px 0;margin:20px 0;gap:10px}
+.execution-workspace .terminal-controls .muted {line-height:1.8;color:#647187}
+.execution-workspace .host-terminal-choice {padding:8px 10px;border:1px solid #e6dfd6;border-radius:7px;background:#fcf9f4;color:#806345}
+.execution-panel {padding:20px 24px;margin:16px 0;border-color:var(--line);border-radius:12px;background:#fff;box-shadow:0 2px 4px #172c4d03}
+.execution-panel>summary {display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;min-height:28px;margin:0;font-size:15px;color:#2c3d58;font-weight:600}
+.execution-panel>summary::-webkit-details-marker {display:none}
+.execution-panel>summary::after {content:"";width:7px;height:7px;border-right:1.5px solid #6c7e99;border-bottom:1.5px solid #6c7e99;transform:rotate(45deg);margin:0 4px 4px;flex-shrink:0}
+.execution-panel[open]>summary {margin-bottom:20px;padding-bottom:17px;border-bottom:1px solid #edf0f5}
+.execution-panel[open]>summary::after {transform:rotate(225deg);margin-bottom:0}
+.file-actions {gap:10px}
+.execution-workspace .file-actions input[type=file] {background:#f8fafc;padding:5px;max-width:100%;min-height:42px;color:#657187}
+input[type=file]::file-selector-button {border:1px solid #d7dfeb;background:#fff;border-radius:5px;padding:7px 9px;margin-right:9px;color:#445572;font:inherit;cursor:pointer}
+.file-result {padding:14px 16px;margin:16px 0 0;border:1px solid #e6ebf2;border-radius:8px;background:#f8fafc;color:#53647e;font-size:12px;line-height:1.8}
+.execution-workspace .train-grid {gap:16px;margin-top:0}
+.execution-panel textarea {font:13px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace;padding:13px 14px}
+.priority-choice {padding:16px;background:#f6f8fc;border-color:#e3e9f4;border-radius:9px;align-items:center}
+.priority-note {margin:0;font-size:12px;line-height:1.8;color:#5f718c}
+.priority-note.priority-warning {color:#8b5a20}
+.release-hash {font-size:12px;color:#52688c;border:1px solid #e5eaf2;background:#f7f9fc;padding:10px 12px}
+.execution-workspace .section-kicker {margin-top:30px;font-size:13px}
+.task-table-wrap {border-radius:10px}
+.task-table td {line-height:1.75}
+.task-table small {font-size:12px;color:#67768c}
+.task-table .scheduler-time {color:#67768c}
+.task-state {font-weight:600;color:#354864}
+.task-actions {gap:7px}
+.task-actions .button,.priority-editor .button {min-height:38px;padding:8px 11px;font-size:12px}
+.priority-editor select {font-size:13px;min-height:38px;padding:8px}
+.priority-pill {font-size:11px;border:1px solid transparent;padding:4px 8px;border-radius:6px;color:#536682;background:#edf1f7}
+.priority-idle {background:#fff5e6;color:#8c6025;border-color:#f1dfc1}
+.priority-high {background:#f2edfc;color:#74539d;border-color:#e0d6f1}
+.priority-unknown {background:#f0f2f5;color:#626e80;border-color:#e1e5eb}
+.monitor-status {font-size:13px;margin:14px 0 7px;color:#465c7f}
+.resource-explainer {font-size:12px;color:#65748a;line-height:1.8;margin-bottom:24px}
+.resource-top h2 {font-size:18px;letter-spacing:-.3px}
+.resource-card .resource-spec {margin-top:7px;font-size:12px;color:#647187}
+.resource-policy {gap:28px;padding:16px 0;margin:18px 0 0;border-top:1px solid var(--line);font-size:12px}
+.resource-policy strong {font-size:14px;color:#304565;margin-left:7px}
+.resource-policy .button {font-size:12px;min-height:38px}
+.gpu-table-scroll {border:1px solid #e8edf4;border-radius:9px;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:#b6c3d8 #f3f6fa}
+.gpu-table {min-width:860px;font-size:13px}
+.gpu-table>thead>tr>th {background:#f5f7fb;font-size:11px;font-weight:600;letter-spacing:.2px;color:#596d8a;padding:12px 14px}
+.gpu-table>thead>tr>th:nth-child(1) {width:14%}
+.gpu-table>thead>tr>th:nth-child(2) {width:12%}
+.gpu-table>thead>tr>th:nth-child(3) {width:20%}
+.gpu-table>thead>tr>th:nth-child(4) {width:18%}
+.gpu-table>thead>tr>th:nth-child(5) {width:36%}
+.gpu-table>tbody>tr>th,.gpu-table>tbody>tr>td {padding:15px 14px;border-color:#edf0f5}
+.gpu-table>tbody>tr:last-child>th,.gpu-table>tbody>tr:last-child>td {border-bottom:0}
+.gpu-table small {font-size:11px;color:#69788e;line-height:1.7;margin-top:5px}
+.gpu-index {display:inline-block;min-width:28px;padding:2px 6px;background:#f0f3f9;border-radius:4px;font-size:12px;color:#455c81}
+.gpu-meter {height:5px;margin-top:10px;background:#eaf0f7}
+.gpu-meter::-webkit-progress-bar {background:#eaf0f7}
+.gpu-meter::-webkit-progress-value {background:#6682d9}
+.gpu-meter::-moz-progress-bar {background:#6682d9}
+.gpu-processes summary {font-size:12px;min-height:28px;line-height:1.8;color:#3c5b91}
+.process-table {font-size:12px;line-height:1.7}
+.process-table thead th {font-size:11px;color:#65758c}
+.gpu-table .process-table th:nth-child(n) {width:auto}
+.process-table td,.process-table th {padding:8px 6px}
+.gpu-processes .process-table td:first-child,.gpu-processes .process-table td:nth-last-child(2) {white-space:nowrap}
+.process-content>.muted {font-size:11px;line-height:1.8;color:#69788e}
+.resource-bottom {padding-top:14px;margin-top:14px;border-top:0}
+.resource-bottom .muted {font-size:11px;color:#67788f}
+.node-queue {margin-top:14px;border-top:1px solid var(--line);padding-top:14px}
+.node-queue summary {min-height:30px;font-size:12px;line-height:1.8;color:#4b6388}
+.node-queue .process-table small {font-size:11px;color:#67768c;line-height:1.7}
+.node-queue .gpu-table-scroll {padding:4px 8px}
+.monitor-empty {padding:20px;border:1px dashed #dbe3ef;border-radius:9px;background:#f8fafc;color:#62748e;font-size:13px}
+.monitor-warning {color:#8d5f28}
+.help-links {gap:12px 20px;padding:22px 0 8px;margin-top:30px;color:#62748e;font-size:12px}
+.help-links>span {color:#6c7b91}
+.help-links a {color:#436092}
+.terminal-dialog,.job-log-dialog {padding:22px;width:min(1100px,calc(100vw - 40px))}
+.terminal-dialog .modal-head {align-items:center;margin-bottom:16px}
+.terminal-dialog .modal-head h2 {font-size:15px;line-height:1.7}
+.terminal-dialog #terminal-screen {border:1px solid #2c3a50;border-radius:9px;padding:12px}
+.terminal-dialog>p {margin-top:14px;font-size:12px}
+.job-log-dialog .modal-head h2 {font-size:18px}
+.job-log-dialog pre {padding:16px;border:1px solid #e1e7ef;border-radius:8px;background:#f7f9fc;color:#334862;font:12px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace}
+.job-log-dialog .diagnostic-metrics {padding:18px;border:1px solid var(--line);background:#fafbfd;border-radius:9px}
+.job-log-dialog .diagnostic-summary {border-left:3px solid #c3cfea;border-radius:5px;background:#f1f4fa;color:#4b5e7a}
+@media(hover:hover) and (pointer:fine) {.gpu-table>tbody>tr:hover {background:#fafbfe}.gpu-processes summary:hover,.node-queue summary:hover {color:#294f9e}}
+/* The horizontal navigation starts at the same breakpoint as sidebar removal. */
+@media(max-width:900px) {
+  .sidebar {display:block;position:sticky;inset:0 auto auto;top:0;width:100%;height:auto;padding:8px 16px;z-index:20;border-right:0;border-bottom:1px solid #34435d}
+  .sidebar .brand,.sidebar .workspace,.sidebar .nav-label,.sidebar .sidebar-bottom {display:none}
+  .sidebar nav {display:flex;gap:6px;margin:0;max-width:760px;margin-inline:auto}
+  .sidebar .nav-item {flex:1;justify-content:center;min-height:46px;margin:0;padding:10px 9px;font-size:13px;gap:7px;white-space:nowrap}
+  .sidebar .nav-item svg {width:16px;height:16px}
+  .sidebar .nav-count {margin:0}
+  .shell {margin-left:0}
+  .topbar {height:60px;padding:0 24px}
+  main {padding:28px 24px 22px}
+  .toast {left:50%}
+  .gpu-table-scroll::before {content:"左右滑动，查看完整指标与进程 →";display:block;position:sticky;left:0;padding:9px 12px;background:#f8fafd;border-bottom:1px solid #e8edf4;font-size:11px;line-height:1.5;color:#637695}
+  .node-queue .gpu-table-scroll::before {content:"左右滑动，查看完整队列 →"}
+}
+@media(max-width:700px) {
+  .sidebar {padding:7px 10px}
+  .sidebar .nav-item {min-height:44px;padding:10px 6px;font-size:12px;gap:5px}
+  .sidebar .nav-item svg {display:none}
+  .topbar {padding:0 18px;height:56px;gap:16px}
+  .topbar #current-account {max-width:52%;font-size:11px}
+  main {padding:24px 16px}
+  .page-heading h1 {font-size:26px}
+  .page-heading p {max-width:100%;font-size:13px}
+  .page-heading .heading-actions {margin-top:18px;gap:8px}
+  .page-heading .heading-actions>.button {min-height:42px;font-size:13px}
+  .demo-note {padding:11px 12px;margin-bottom:20px}
+  .self-summary {padding:19px 16px;margin-bottom:20px}
+  .self-summary>div {padding:0 12px}
+  .self-summary>div:last-child {padding-right:0}
+  .self-summary small {font-size:11px;line-height:1.7}
+  .self-summary strong {font-size:23px}
+  .self-summary strong span {font-size:11px}
+  .self-summary .summary-status {font-size:15px;line-height:31px}
+  .workspace-context,.dataset-card,.resource-card {padding:18px;border-radius:11px}
+  .workspace-context-heading {gap:12px;margin-bottom:18px}
+  .workspace-context-heading h2 {font-size:16px}
+  .workspace-context-heading .button {padding:9px 11px;min-height:42px;font-size:12px}
+  .workspace-context input,.workspace-context select,.execution-panel input,.execution-panel select,.execution-panel textarea,.priority-editor select,.terminal-controls select {font-size:16px;min-height:46px}
+  .workspace-context .muted {margin:13px 0}
+  .execution-workspace .terminal-controls {gap:9px;margin:18px 0}
+  .terminal-controls>.button {flex:1;min-height:44px}
+  .execution-panel {padding:18px;margin:14px 0}
+  .execution-panel>summary {font-size:14px;min-height:30px}
+  .execution-panel[open]>summary {margin-bottom:18px}
+  .execution-workspace .train-grid {gap:14px}
+  .file-actions>.button {flex:1;min-height:44px}
+  .file-actions input[type=file] {flex:1 1 100%;width:100%;font-size:13px}
+  .file-result {padding:12px;font-size:12px}
+  .priority-choice {padding:14px}
+  .release-hash {font-size:11px}
+  .task-table tr {border-radius:11px;padding:5px 16px;margin-bottom:14px;box-shadow:0 2px 4px #172c4d03}
+  .task-table td {padding:12px 0;line-height:1.75}
+  .task-table td[data-label]::before {font-size:11px;color:#697a94;margin-bottom:6px}
+  .task-actions .button,.priority-editor .button {min-height:44px;font-size:13px}
+  .resource-top h2 {font-size:17px}
+  .resource-policy {gap:8px 18px;padding:15px 0;margin-top:16px}
+  .resource-policy .button {min-height:42px;margin:7px 0 0;width:100%}
+  .resource-policy strong {font-size:13px}
+  .gpu-table {min-width:860px}
+  .resource-bottom {padding-top:12px;margin-top:12px}
+  .filter-tabs button {min-height:42px}
+  .management-toolbar {gap:8px}
+  .management-toolbar>.button {padding:9px 12px}
+  .terminal-dialog,.job-log-dialog {width:calc(100vw - 20px);max-width:calc(100vw - 20px);padding:16px;border-radius:12px}
+  .terminal-dialog .modal-head .button {min-height:44px}
+  .terminal-dialog #terminal-screen {padding:7px;min-height:250px}
+  .help-links {gap:10px 16px;font-size:12px;line-height:1.8}
+}
+@media(max-width:360px) {.self-summary {padding:16px 12px}.self-summary>div {padding:0 8px}.self-summary small {font-size:10px}.self-summary strong {font-size:21px}.sidebar .nav-item {font-size:11px;padding-inline:4px}.sidebar .nav-count {min-width:18px;padding-inline:4px}.resource-card {padding:15px}.workspace-context-heading {align-items:flex-start}}

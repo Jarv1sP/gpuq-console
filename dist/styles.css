@@ -15,6 +15,93 @@
 .permission-name,.permission-bottom,.subtext,.policy-summary,.edit-toggle,.preview-controls label,.machine-name{font-size:14px}.permission-name,.machine-name{overflow-wrap:anywhere}.permission-top{align-items:flex-start}.permission-top input{margin-top:1px}.badge{font-size:12px}.user-meta,.save-state,.demo-note{font-size:13px}.button{font-size:14px}
 @media(max-width:900px){.sidebar{display:none}.shell{margin-left:0}.toast{left:50%}}
 @media(max-width:700px){.permissions{grid-template-columns:1fr}.permission-spec{margin-left:27px}.permission-top{align-items:center}.permission-bottom{flex-wrap:nowrap}.page-heading>.button,.editor-head .button,.footer-buttons .button{font-size:14px}.editor-footer{flex-wrap:wrap}.save-state{max-width:none}.footer-buttons{margin-left:auto}.total-limit{align-items:flex-start}.total-control{gap:5px}}
+
+/* Quiet, high-contrast foundations shared by every console surface. */
+:root {
+  --ink:#202b3b; --muted:#647187; --line:#e2e7ee;
+  --accent:#3c59c7; --blue-soft:#eef2fd; --navy:#182338;
+  --surface:#fff; --border:var(--line); --radius:14px; --sidebar-width:220px;
+  background:#f6f7fa; color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+body {line-height:1.5}
+::selection {background:#dce5ff;color:#17254a}
+h1 {font-size:30px;font-weight:700;letter-spacing:-.6px;line-height:1.3}
+h2,h3 {letter-spacing:-.2px}
+.eyebrow {color:#687791;font-size:10px;font-weight:650;letter-spacing:1.5px}
+.muted {color:var(--muted)}
+.skip-link {position:fixed;top:12px;left:12px;z-index:100;transform:translateY(-200%);padding:12px 18px;background:#fff;color:var(--accent);border:1px solid var(--accent);border-radius:8px}
+.skip-link:focus {transform:none}
+.sidebar {width:var(--sidebar-width);padding:30px 18px 24px;background:var(--navy);border-right:1px solid #263248}
+.brand {padding:0 10px;font-size:23px;gap:11px;letter-spacing:.4px}
+.brand-mark {width:35px;height:37px;border:1px solid #698cba66;border-radius:10px;background:#263750;color:#b3cbfa;font-size:24px}
+.brand-caption {color:#a3b2c9;font-size:8px;letter-spacing:2.6px;margin-top:4px}
+.workspace {padding:20px 10px;margin:28px 0 24px;border-color:#ffffff14;font-size:13px}
+.workspace-icon {color:#bfd0ed;background:#ffffff06;border-color:#ffffff16;font-size:13px}
+.workspace small {font-size:11px;line-height:1.6;color:#a3b0c6}
+.nav-label {padding:0 12px 9px;color:#94a4bd;font-size:11px;letter-spacing:.8px}
+.sidebar .nav-item {position:relative;min-height:46px;padding:12px;gap:11px;border:1px solid transparent;border-radius:9px;margin:4px 0;font-weight:500;color:#b9c7dc}
+.sidebar .nav-item svg {width:18px;height:18px;color:#91a5c5;stroke-width:1.7}
+.sidebar .nav-item[aria-current=page] {background:#2b3c5a;border-color:#405678;color:#fff;box-shadow:0 2px 5px #0b132220}
+.sidebar .nav-item[aria-current=page] svg {color:#c3d5ff}
+.nav-count {min-width:22px;text-align:center;background:#ffffff15;color:#e3ecff}
+.integration {padding:20px 10px;font-size:12px;color:#c6d0e0}
+.integration small {color:#92a4c0;line-height:1.7}
+.integration-symbol {color:#9ab8ea}
+.profile {padding:20px 10px 0;font-size:13px;border-top-color:#ffffff14}
+.admin-avatar {background:#2e415f;color:#dce8fe;border:1px solid #526785;font-size:12px}
+.shell {margin-left:var(--sidebar-width)}
+.topbar {height:66px;padding:0 36px;background:#ffffffcf;border-bottom-color:var(--line);font-size:12px}
+.topbar strong {font-weight:550;color:#445269}
+.topbar #current-account {font-size:12px;overflow-wrap:anywhere;text-align:right}
+.slash {padding:0 12px;color:#9da9ba}
+main {max-width:1540px;padding:34px 36px 24px}
+.page-heading {margin-bottom:22px;gap:24px}
+.page-heading p {margin-top:10px;font-size:14px;line-height:1.7;color:#657287}
+.heading-actions {gap:8px}
+.button {min-height:42px;border:1px solid #d7dfeb;border-radius:8px;padding:10px 15px;color:#3b4b63;background:#fff;font-size:13px;font-weight:550;line-height:1.5;box-shadow:0 1px 2px #192b4e05;transition:background-color 140ms ease,border-color 140ms ease,color 140ms ease}
+.button.primary {background:var(--accent);border-color:var(--accent);box-shadow:0 2px 4px #243c831a}
+.button.ghost {color:#52647f;box-shadow:none}
+.button.danger {background:#fff;color:#ac3648;border-color:#ebccd2}
+.button:disabled {opacity:.55}
+.button:active:not(:disabled) {transform:none}
+.button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible {outline:3px solid #8da5ed;outline-offset:3px}
+.demo-note {margin-bottom:24px;padding:11px 14px;background:#edf1f8;border:0;border-left:3px solid #c5d1e7;border-radius:6px;color:#5d6e87;font-size:12px;line-height:1.8}
+.panel {border-color:var(--line);box-shadow:0 2px 4px #172c4d03}
+.editor-head {padding:24px;border-bottom-color:var(--line)}
+.editor-body {padding:24px}
+.editor-footer {background:#fafbfd}
+.permission {padding:16px;border-radius:10px;border-color:var(--line)}
+.permission.granted {border-color:#b4c4f0;background:#f8faff}
+.permission-spec,.subtext,.user-meta,.field small {color:#69798f}
+.user-row {min-height:72px;border-radius:9px}
+.user-row.selected {background:#eef2fc;border-color:#d5dff7}
+.user-footnote {color:#65748b}
+.badge {border-radius:6px;padding:5px 8px;font-size:11px;font-weight:600;line-height:1.5;background:#edf7f2;color:#287454}
+.badge.pending {background:#fcf4e5;color:#91631f}
+.badge.paused {background:#edf0f5;color:#58667c}
+.field input,.field select,.preview-controls input,.preview-controls select {border-color:#d7dfeb;border-radius:8px;min-height:44px;box-shadow:0 1px 2px #172c4d03}
+dialog {padding:28px;border:1px solid #e4e9f1;border-radius:16px;box-shadow:0 24px 80px #12213b30}
+dialog::backdrop {background:#14203966;backdrop-filter:blur(4px)}
+.modal-head h2 {font-size:22px;font-weight:650}
+.icon-button {width:36px;height:36px;display:grid;place-items:center;color:#65748b}
+.modal-actions {gap:10px}
+.cli-code {background:#17243a;border:1px solid #2e405b;border-radius:10px;font-size:13px}
+.toast {z-index:30;background:#263752;box-shadow:0 8px 24px #14203926;line-height:1.6}
+.live-table {font-size:13px}
+.live-table th {background:#f7f9fc;color:#5f708a;font-size:12px}
+.live-table th,.live-table td {padding:14px 16px}
+footer {margin-top:20px;color:#718096;font-size:11px}
+@media(hover:hover) and (pointer:fine) {
+  .button:not(:disabled):hover {background:#f5f7fc;border-color:#aebfdc}
+  .button.primary:not(:disabled):hover {background:#304bac;border-color:#304bac}
+  .button.danger:not(:disabled):hover {background:#fff5f6;border-color:#dbaeb7}
+  .sidebar .nav-item:not([aria-current=page]):hover {background:#ffffff09;border-color:#ffffff0c;color:#f0f5ff}
+  .sidebar .nav-item[aria-current=page]:hover {background:#324664}
+}
+@media(max-width:1180px) { :root {--sidebar-width:196px} main {padding:28px 24px}.topbar {padding:0 24px}.sidebar {padding:26px 12px} }
+@media(prefers-reduced-motion:reduce) {*,*::before,*::after {animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 .execution-workspace{margin:28px 0}.execution-panel{border:1px solid var(--border,#deded9);border-radius:12px;padding:18px;margin:14px 0;background:var(--surface,#fff)}.execution-panel summary{cursor:pointer;font-weight:650;margin-bottom:14px}.train-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:16px 0}.execution-panel label{display:grid;gap:7px;font-size:13px}.execution-panel input,.execution-panel select,.execution-panel textarea{box-sizing:border-box;width:100%;padding:10px;border:1px solid #d6d6d0;border-radius:7px;background:#fff;font:inherit}.execution-panel textarea{font-family:ui-monospace,monospace;resize:vertical}.file-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.file-actions input{width:auto;max-width:320px}.file-result,.job-log-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:60vh;overflow:auto;font:12px/1.7 ui-monospace,monospace}.job-log-dialog{width:min(1000px,90vw);max-width:none}.execution-workspace .live-table td{max-width:350px;overflow-wrap:anywhere}.execution-workspace .button:active{transform:scale(.97)}@media(max-width:800px){.train-grid{grid-template-columns:1fr 1fr}}@media(prefers-reduced-motion:reduce){.execution-workspace .button:active{transform:none}}
 /* Native terminal: fixed canvas area avoids page reflow while output streams. */
 .terminal-dialog{width:min(1100px,95vw);max-width:95vw;background:#fff}.terminal-dialog #terminal-screen{height:60vh;min-height:280px;background:#111827;padding:8px}.terminal-controls{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:16px 0}.terminal-controls label{display:flex;align-items:center;gap:8px}.terminal-controls select{padding:8px;border:1px solid #d5dbe3;border-radius:6px}.terminal-dialog .modal-head{gap:12px;flex-wrap:wrap}

@@ -46,6 +46,18 @@ test('project jobs pin one release and verify it before quota reservation',async
   for(const bad of [{project:undefined},{release:undefined},{project:'../bad'},{release:'latest'}])await assert.rejects(f.call('jobs.submit',{...args,key:randomUUID(),...bad}));
  }finally{await f.close();}
 });
+test('environment mode is create-only, explicit and bound to the authenticated account',async()=>{
+ const f=await fixture();try{
+  for(const environmentMode of ['shared','isolated']){
+   await f.call('projects.create',{project:'clean-env',environmentMode});
+   assert.equal(f.calls.at(-1).args.environmentMode,environmentMode);assert.equal(f.calls.at(-1).args.userId,f.member.id);
+  }
+  for(const environmentMode of [null,true,{},['isolated'],'inherit',''])await assert.rejects(f.call('projects.create',{project:'clean-env',environmentMode}));
+  for(const op of ['projects.status','projects.list','projects.publish'])await assert.rejects(f.call(op,{project:'clean-env',environmentMode:'isolated'}));
+  await assert.rejects(f.call('projects.create',{project:'clean-env',environmentMode:'isolated',userId:'builtin-admin'}));
+  await assert.rejects(f.call('projects.create',{machine:'gpu-2',project:'clean-env',environmentMode:'isolated'}),e=>e.status===403);
+ }finally{await f.close();}
+});
 test('project terminal forbids host-root combination and retains context on all operations',async()=>{
  const f=await fixture();try{
   for(const operation of ['terminal.open','terminal.exchange','terminal.close','terminal.detach']){

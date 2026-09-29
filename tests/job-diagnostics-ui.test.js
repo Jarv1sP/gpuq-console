@@ -1,8 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {diagnosticsHTML,createJobDiagnostics} from '../dist/job-diagnostics-ui.js';
+import {diagnosticsHTML,createJobDiagnostics,allocationHistoryHTML} from '../dist/job-diagnostics-ui.js';
 const JOB='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const fixture=()=>({jobId:JOB,state:'PARTIAL',schedulerState:'RUNNING',workerErrorEvidence:true,attempts:[{id:'A1',state:'FAILED',gpu_indices:[2],gpu_uuids:['GPU-test'],started_at:1,finished_at:2,failure_reason:'worker exited'}],captures:[{updatedAt:3,runnerExit:{exitCode:137},resources:{peaks:{'memory.peak':1024**3,'pids.peak':100},counters:{'memory.events':{oom:1,oom_kill:1},'pids.events':{max:2}}},logs:[{source:'ray/session/logs/worker.err',text:'RuntimeError: test',truncated:true}]}]});
+
+test('exact lease history keeps actual acquisition/release separate from attempt times and marks truncated/migrated rows',()=>{
+  const data={...fixture(),historyAvailable:true,historyTruncated:true,historyNextBeforeId:3,allocationHistory:[{id:4,attempt_id:'A1',gpu_index:2,gpu_uuid:'GPU-real',acquired_at:123.25,released_at:456.75,release_reason:'attempt finalized',source:'observed'},{id:3,attempt_id:'A0',gpu_index:1,gpu_uuid:'GPU-active',acquired_at:120,released_at:null,source:'migrated_active'}]};
+  const html=diagnosticsHTML(data);for(const text of ['GPU-real','GPU-active','分配时间','释放时间 / 原因','attempt finalized','尚无释放记录','升级时补记的活动租约','继续查询游标：3','运行过程历史','GPU-test','.250','.750'])assert.ok(html.includes(text),text);
+});
+test('schema9 or absent history never borrows attempt timestamps or treats empty history as zero time',()=>{
+  for(const value of [undefined,false]){const html=allocationHistoryHTML({...fixture(),historyAvailable:value,allocationHistory:[{gpu_uuid:'MUST_NOT_SHOW',acquired_at:1,released_at:2}]});assert.match(html,/旧任务未记录精确租约时间/);assert.doesNotMatch(html,/MUST_NOT_SHOW|1970|分配时间<\/th>/);}
+  assert.match(allocationHistoryHTML({historyAvailable:true,allocationHistory:[]}),/不代表 GPU 占用时长为零/);
+});
+test('lease identifiers/reasons are escaped and missing release is not reported as still using GPU',()=>{
+  const html=allocationHistoryHTML({historyAvailable:true,allocationHistory:[{id:'<script>',attempt_id:'<img>',gpu_index:0,gpu_uuid:'<svg>',acquired_at:1,released_at:null,release_reason:'<button onclick=bad>'}]});
+  assert.doesNotMatch(html,/<script>|<img>|<svg>|<button onclick|正在占用/);assert.match(html,/&lt;button/);assert.match(html,/尚无释放记录/);
+});
 
 test('diagnostic view shows worker errors, resource events and durable UUID/index/start/end separately from RUNNING',()=>{
   const data=fixture(),html=diagnosticsHTML(data);

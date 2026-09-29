@@ -42,7 +42,7 @@ export function terminalUI(store,toast){
     if(turn===generation&&session)timer=setTimeout(exchange,750);
   }
   function ensureDialog(){
-    if(dialog)return;dialog=document.createElement('dialog');dialog.className='terminal-dialog';
+    if(dialog)return;dialog=document.createElement('dialog');dialog.className='terminal-dialog';dialog.setAttribute('aria-labelledby','terminal-title');
     dialog.innerHTML='<div class="modal-head"><h2 id="terminal-title"></h2><div><button class="button" id="terminal-interrupt">Ctrl+C</button> <button class="button" id="terminal-disconnect">断开</button> <button class="button danger" id="terminal-stop">结束终端</button></div></div><div id="terminal-screen"></div><p class="muted">开发终端不分配 GPU。断开会保留会话；项目发布前必须选择“结束终端”。无输入 1 小时或累计 6 小时会自动结束。</p>';
     document.body.append(dialog);dialog.addEventListener('cancel',event=>{event.preventDefault();detach();});
   }

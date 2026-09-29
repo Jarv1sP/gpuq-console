@@ -14,9 +14,11 @@ export async function projectCall(service,principal,user,operation,args,authoriz
   if(!['projects.list','projects.create','projects.status','projects.publish'].includes(operation))return undefined;
   authorizedMachine(args.machine);
   const allowed=operation==='projects.list'?['machine']:['machine','project'];
+  if(operation==='projects.create')allowed.push('environmentMode');
   if(Object.keys(args).some(k=>!allowed.includes(k)))fail('项目参数无效。');
+  if(args.environmentMode!==undefined&&!['shared','isolated'].includes(args.environmentMode))fail('环境模式只能是 shared 或 isolated。');
   const reference=operation==='projects.list'?{}:projectReference(args,{optional:false});
-  const result=await service.bridge(args.machine,operation,{...reference,userId:user.id});
+  const result=await service.bridge(args.machine,operation,{...reference,...(args.environmentMode!==undefined?{environmentMode:args.environmentMode}:{}),userId:user.id});
   if(['projects.create','projects.publish'].includes(operation))service.audit(principal.username,operation,args.machine,args.project);
   return result;
 }

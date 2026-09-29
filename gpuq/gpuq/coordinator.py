@@ -47,7 +47,7 @@ from .constants import (
 )
 from .elastic import compatible_world_sizes
 from .hami import runtime_library, runtime_environment
-from .policy import VictimCandidate, preemption_mode, select_scale_target, select_victims
+from .policy import VictimCandidate, is_idle_victim, preemption_mode, select_scale_target, select_victims
 from .progress import (
     PROGRESS_FILE_NAME,
     ProgressProtocolError,
@@ -1531,7 +1531,7 @@ class Coordinator:
                 ],
                 failure_reason=reason,
             )
-            tx.release_leases(attempt_id=attempt["id"])
+            tx.release_leases(attempt_id=attempt["id"], reason="unstarted attempt aborted")
             if (
                 scale_plan is not None
                 and scale_plan["state"] == ScaleUpState.RESTART_PLANNED.value
@@ -1600,7 +1600,7 @@ class Coordinator:
                     AttemptState.STARTING,
                 ],
             )
-            tx.release_leases(attempt_id=current["id"])
+            tx.release_leases(attempt_id=current["id"], reason="unstarted attempt canceled")
             tx.append_event(
                 "START_CANCELED",
                 job_id=current["job_id"],
@@ -1913,6 +1913,11 @@ class Coordinator:
         for candidate in victims:
             attempt = self.store.get_attempt(candidate.attempt_id)
             victim_job = self.store.get_job(candidate.job_id)
+            if requester.get("preempt_idle_only") and not is_idle_victim(
+                victim_job["priority"], victim_job.get("yield_policy", "legacy"), victim_job["restart_policy"],
+                victim_job.get("preempt_idle_only", False),
+            ):
+                raise StoreConflictError("requester may only interrupt explicit idle / yield-now / restart-never jobs")
             actual_mode = preemption_mode(requester["dispatch_mode"], candidate)
             if actual_mode is None:
                 raise StoreConflictError("victim does not allow this preemption")
@@ -2128,7 +2133,7 @@ class Coordinator:
     ) -> list[VictimCandidate]:
         """Return save waits a strictly higher hard requester may upgrade."""
 
-        if requester["dispatch_mode"] != DispatchMode.PREEMPT_NOW.value:
+        if requester.get("preempt_idle_only") or requester["dispatch_mode"] != DispatchMode.PREEMPT_NOW.value:
             return []
         candidates: list[VictimCandidate] = []
         takeover_states = {
@@ -2190,6 +2195,8 @@ class Coordinator:
                     gpu_count=candidate_gpu_count,
                     checkpoint_capability=victim_job["checkpoint_capability"],
                     yield_policy=victim_job.get("yield_policy", "legacy"),
+                    restart_policy=victim_job["restart_policy"],
+                    preempt_idle_only=victim_job.get("preempt_idle_only", False),
                     # select_victims deliberately accepts only RUNNING
                     # candidates.  These attempts are already selected
                     # victims; the synthetic state lets the same exact-set,
@@ -2215,6 +2222,13 @@ class Coordinator:
         requester = self.store.get_job(requester_id)
         if requester["state"] != JobState.PENDING.value:
             return False
+        if requester.get("preempt_idle_only"):
+            victim = self.store.get_job(attempt["job_id"])
+            if not is_idle_victim(
+                victim["priority"], victim.get("yield_policy", "legacy"), victim["restart_policy"],
+                victim.get("preempt_idle_only", False),
+            ):
+                return False
         return not bool(
             self._select_free_devices_for_job(requester, self._free_devices())
         )
@@ -2903,7 +2917,7 @@ class Coordinator:
             if attempt["state"] in ACTIVE_ATTEMPT_STATES:
                 continue
             if self._attempt_gpus_released(attempt):
-                self.store.release_leases(attempt_id=attempt_id)
+                self.store.release_leases(attempt_id=attempt_id, reason="terminal attempt GPU release confirmed")
 
     def _finalize_scale_attempt(
         self,
@@ -2975,7 +2989,7 @@ class Coordinator:
                     JobState.STARTING,
                 ],
             )
-            tx.release_leases(attempt_id=attempt["id"])
+            tx.release_leases(attempt_id=attempt["id"], reason="scale attempt finalized: " + attempt_state.value)
 
             if checkpoint_path and current_plan["state"] in {
                 ScaleUpState.SAVE_REQUESTED.value,
@@ -3160,7 +3174,7 @@ class Coordinator:
                     JobState.STARTING,
                 ],
             )
-            tx.release_leases(attempt_id=attempt["id"])
+            tx.release_leases(attempt_id=attempt["id"], reason="attempt finalized: " + attempt_state.value)
             tx.append_event(
                 "ATTEMPT_FINISHED",
                 job_id=job["id"],
@@ -3486,7 +3500,7 @@ class Coordinator:
                             AttemptState.STARTING,
                         ],
                     )
-                    tx.release_leases(attempt_id=attempt["id"])
+                    tx.release_leases(attempt_id=attempt["id"], reason="invalid launch specification")
                     tx.update_job(
                         job["id"],
                         state=JobState.FAILED,
@@ -3872,6 +3886,8 @@ class Coordinator:
                     gpu_count=len(attempt["gpu_uuids"]),
                     checkpoint_capability=job["checkpoint_capability"],
                     yield_policy=job.get("yield_policy", "legacy"),
+                    restart_policy=job["restart_policy"],
+                    preempt_idle_only=job.get("preempt_idle_only", False),
                     state=attempt["state"],
                     gpu_uuids=tuple(attempt["gpu_uuids"]),
                 )
@@ -4305,6 +4321,13 @@ class Coordinator:
             limit=10_000,
         )
         for attempt in attempts:
+            if requester.get("preempt_idle_only"):
+                victim = self.store.get_job(attempt["job_id"])
+                if not is_idle_victim(
+                    victim["priority"], victim.get("yield_policy", "legacy"), victim["restart_policy"],
+                    victim.get("preempt_idle_only", False),
+                ):
+                    continue
             if self._attempt_is_quarantine_affected(
                 attempt
             ) or self._attempt_has_sharing(attempt):
@@ -4471,6 +4494,7 @@ class Coordinator:
                     candidates=candidates,
                     required_gpu_uuids=required_uuids,
                     free_gpu_uuids=frozenset(available_uuids),
+                    preempt_idle_only=bool(job.get("preempt_idle_only", False)),
                 )
                 if victims:
                     self._plan_preemption(job, victims)
@@ -4545,6 +4569,8 @@ class Coordinator:
                 return self._api_cancel(arguments)
             if operation == "retry":
                 return self._api_retry(arguments)
+            if operation == "set_priority":
+                return self._api_set_priority(arguments)
             if operation == "log_path":
                 return self._api_log_path(arguments)
             if operation == "events":
@@ -4628,6 +4654,7 @@ class Coordinator:
             "state": job["state"],
             "priority": f"P{job['priority']}",
             "dispatch_mode": job["dispatch_mode"],
+            "preempt_idle_only": job.get("preempt_idle_only", False),
             "gpu_count": job["gpu_count"],
             "min_gpu_count": job["min_gpu_count"],
             "elastic_gpu_count": job["elastic_gpu_count"],
@@ -4667,6 +4694,7 @@ class Coordinator:
             "dispatch_mode",
             "checkpoint_capability",
             "yield_policy",
+            "preempt_idle_only",
             "restart_policy",
             "gpu_count",
             "min_gpu_count",
@@ -4764,6 +4792,7 @@ class Coordinator:
         return {
             "daemon": {
                 **self._health_payload(),
+                "capabilities": ["priority-policy-v1", "preempt-idle-only-v1"],
                 "observe_only": self._observe_only,
                 "managed_indices": managed_indices,
                 "managed_gpus": managed_gpus,
@@ -4804,13 +4833,23 @@ class Coordinator:
         return result
 
     def _api_show(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _require_exact_fields(arguments, allowed={"job_id"}, required={"job_id"})
+        _require_exact_fields(arguments, allowed={"job_id", "history_before_id", "history_limit"}, required={"job_id"})
+        history_limit = arguments.get("history_limit", 256)
+        if type(history_limit) is not int or not 1 <= history_limit <= 256:
+            raise ApiError("BAD_REQUEST", "history_limit must be an integer from 1 to 256")
         try:
             job = self.store.get_job(str(arguments["job_id"]))
         except StoreNotFoundError as exc:
             raise ApiError("NOT_FOUND", str(exc)) from exc
         plans = self.store.list_scale_up_plans(job_id=job["id"], limit=1000)
         attempts = self.store.list_attempts(job_id=job["id"], limit=1000)
+        try:
+            history = self.store.list_allocation_history(job_id=job["id"],
+                before_id=arguments.get("history_before_id"), limit=history_limit + 1)
+        except ValueError as exc:
+            raise ApiError("BAD_REQUEST", str(exc)) from exc
+        more_history = len(history) > history_limit
+        history = history[:history_limit]
         return {
             "job": {
                 **job,
@@ -4822,6 +4861,10 @@ class Coordinator:
             "attempts": attempts,
             "progress": self._progress_status(attempts[0] if attempts else None),
             "leases": self.store.list_leases(job_id=job["id"]),
+            "allocation_history": history,
+            "allocation_history_available": True,
+            "allocation_history_truncated": more_history,
+            "allocation_history_next_before_id": history[-1]["id"] if more_history else None,
             "scale_up_plans": plans,
             "scale_up_reservations": self.store.list_scale_up_reservations(
                 job_id=job["id"]
@@ -4992,6 +5035,30 @@ class Coordinator:
                 payload={"active_attempts": [item["id"] for item in attempts]},
             )
         return {"job_id": job["id"], "state": JobState.CANCELED.value}
+
+    def _api_set_priority(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        _require_exact_fields(arguments, allowed={"job_id", "priority_class", "expected"},
+                              required={"job_id", "priority_class"})
+        if not isinstance(arguments["job_id"], str) or not arguments["job_id"]:
+            raise ApiError("BAD_REQUEST", "job_id must be a non-empty string")
+        if "expected" in arguments and not isinstance(arguments["expected"], dict):
+            raise ApiError("BAD_REQUEST", "expected must be a scheduling policy object")
+        try:
+            updated = self.store.set_pending_priority_class(
+                arguments["job_id"], arguments["priority_class"], expected=arguments.get("expected")
+            )
+        except StoreNotFoundError as exc:
+            raise ApiError("NOT_FOUND", str(exc)) from exc
+        except StoreConflictError as exc:
+            raise ApiError("CONFLICT", str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError("BAD_REQUEST", str(exc)) from exc
+        return {
+            "job_id": updated["id"], "state": updated["state"],
+            "priority_class": arguments["priority_class"],
+            **{key: updated[key] for key in ("priority", "priority_name", "yield_policy", "restart_policy", "dispatch_mode")},
+            "preempt_idle_only": updated["preempt_idle_only"],
+        }
 
     def _api_retry(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_exact_fields(arguments, allowed={"job_id"}, required={"job_id"})

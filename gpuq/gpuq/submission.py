@@ -53,6 +53,7 @@ UNSUPPORTED_EXECUTABLES = {
     "su",
 }
 SUBMISSION_KEYS = {
+    "preempt_idle_only",
     "yield_policy",
     "hami_core",
     "sm_percent",
@@ -78,6 +79,7 @@ SUBMISSION_KEYS = {
     "env",
 }
 OPTIONAL_SUBMISSION_KEYS = {
+    "preempt_idle_only",
     "yield_policy",
     "hami_core",
     "sm_percent",
@@ -128,6 +130,9 @@ def validate_submission(
     name = validate_label(raw["name"], "name")
     owner = validate_label(raw["owner"], "owner")
     priority = raw["priority"]
+    preempt_idle_only = raw.get("preempt_idle_only", False)
+    if not isinstance(preempt_idle_only, bool):
+        raise ValueError("preempt_idle_only must be a boolean")
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise ValueError("priority must be an integer P0..P4")
     if not MIN_PRIORITY <= priority <= MAX_PRIORITY:
@@ -293,6 +298,7 @@ def validate_submission(
     if sum(len(k) + len(v) for k, v in env.items()) > 131_072:
         raise ValueError("env is too large")
     clean = {
+        "preempt_idle_only": preempt_idle_only,
         "yield_policy": validate_yield_policy(raw.get("yield_policy", "legacy"), checkpoint_capability, share_gpu),
         "hami_core": hami_core,
         "sm_percent": sm_percent,
