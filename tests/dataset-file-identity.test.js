@@ -1,23 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
-import {constants as fsConstants} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {basename,join,resolve} from 'node:path';
-import {createHash,randomUUID} from 'node:crypto';
-import vm from 'node:vm';
+import {join} from 'node:path';
+import {createHash} from 'node:crypto';
+import {createLocalDatasetTools} from '../client-data-upload.mjs';
 
-// Exercise the standalone CLI's implementation without running its main entry
-// point or depending on a live service/account. Inject only filesystem views.
-const cliSource=await fs.readFile(new URL('../cli.mjs',import.meta.url),'utf8');
-const source=cliSource.slice(cliSource.indexOf('function sameDatasetFile('),cliSource.indexOf('async function secret('));
+// Exercise the shared local reader used by upload and Git sync. Only filesystem
+// views/platform are injected; transport and identity checks execute unchanged.
 function client({platform=process.platform,lstat=fs.lstat,open=fs.open}={}){
-  return vm.runInNewContext(source+'\n({sameDatasetFile,scanLocalDataset,uploadLocalDataset})',{
-    Buffer,Map,Number,BigInt,JSON,process:{platform},lstat,open,readdir:fs.readdir,
-    basename,join,resolve,createHash,randomUUID,fsConstants,setTimeout,
-    DATA_CHUNK:1024*1024,DATA_MANIFEST_LIMIT:64*1024*1024,DATA_ENTRY_LIMIT:500000,
-    fail:message=>{throw Error(message);},
-  });
+  return createLocalDatasetTools({platform,lstat,open,readdir:fs.readdir});
 }
 const hash=data=>createHash('sha256').update(data).digest('hex');
 const copy=(stat,changes)=>Object.assign(Object.create(Object.getPrototypeOf(stat)),stat,changes);
