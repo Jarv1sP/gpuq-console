@@ -3,6 +3,7 @@
 import hashlib,importlib.util,json,os,re,select,subprocess,sys,time,tempfile
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
+TRAINING_CONTROL_PROTOCOL=1
 
 def local_module(name,filename):
     module=importlib.util.spec_from_file_location(name,HERE/filename)
@@ -191,9 +192,11 @@ def main():
         # Trusted bootstrap executes only INSIDE the namespace, with no GPU and
         # no host workspace/credentials. Never run package hooks on the host.
         command=project_bootstrap(command,project['environmentMode'])
-    args+=['--ro-bind',gatefile.name,'/run/.ready','--ro-bind-data',str(hosts),'/etc/hosts','--ro-bind-data',str(passwd),'/etc/passwd','--ro-bind-data',str(resolv),'/etc/resolv.conf','--','/usr/bin/python3','-c',gate,*command]
-    try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,*(() if runtimefd is None else (runtimefd,)),*(() if datafd is None else (datafd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds)))
+    control_args,control_fds=([],[]) if terminal or not cfg.get('controlRoot') else local_module('gpuq_training_control','training-control.py').prepare(cfg,spec,workspace,project,os.environ)
+    args+=control_args+['--ro-bind',gatefile.name,'/run/.ready','--ro-bind-data',str(hosts),'/etc/hosts','--ro-bind-data',str(passwd),'/etc/passwd','--ro-bind-data',str(resolv),'/etc/resolv.conf','--','/usr/bin/python3','-c',gate,*command]
+    try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,*control_fds,*(() if runtimefd is None else (runtimefd,)),*(() if datafd is None else (datafd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds)))
     finally:
+        for descriptor in control_fds:os.close(descriptor)
         for descriptor,_ in dataset_fds:os.close(descriptor)
         if datafd is not None:os.close(datafd)
         for descriptor in project_fds.values():os.close(descriptor)
