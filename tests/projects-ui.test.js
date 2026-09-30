@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {validProject,readyReleases,trainingProject,datasetReferences,uploadProjectFile,taskTable} from '../dist/execution-ui.js';
-import {terminalContext} from '../dist/terminal-ui.js';
+import {terminalContext,terminalLaunchContext} from '../dist/terminal-ui.js';
 
 const release='a'.repeat(64),future='b'.repeat(64);
 test('project slug validation is exact and never coerces paths or array values',()=>{
@@ -61,6 +61,17 @@ test('terminal identity carries the selected project but never combines it with 
   assert.throws(()=>terminalContext({machine:'gpu-1',project:'vision',hostAdmin:true}),/ROOT/);
   for(const machine of ['',undefined,'auto'])assert.throws(()=>terminalContext({machine}));
   assert.throws(()=>terminalContext({machine:'gpu-1',project:['vision']}));
+});
+test('daily terminal entry is always private for members and administrators',()=>{
+  for(const role of ['admin','member',undefined]){
+    assert.deepEqual(terminalLaunchContext({machine:'gpu-1',role}),{machine:'gpu-1',hostAdmin:false});
+    assert.deepEqual(terminalLaunchContext({machine:'gpu-1',role,project:'vision',hostAdmin:true}),{machine:'gpu-1',project:'vision',hostAdmin:false});
+  }
+});
+test('host maintenance is an explicit admin-only entry with no inherited project',()=>{
+  assert.deepEqual(terminalLaunchContext({machine:'gpu-2',role:'admin',project:'vision',entry:'host'}),{machine:'gpu-2',hostAdmin:true});
+  for(const role of ['member',undefined,null,'administrator'])assert.throws(()=>terminalLaunchContext({machine:'gpu-2',role,entry:'host'}),/仅管理员/);
+  for(const entry of ['root',true,null,{}])assert.throws(()=>terminalLaunchContext({machine:'gpu-2',role:'admin',entry}),/入口无效/);
 });
 test('project job table preserves full identity and escapes dynamic fields including GPU indices',()=>{
   const html=taskTable([{id:'job" onmouseover="bad',name:'<img src=x>',username:'<owner>',machine:'gpu-1',cards:1,assignedIndices:['<bad>'],state:'SUCCEEDED',project:'<project>',release,error:'<error>'}]);

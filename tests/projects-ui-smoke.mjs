@@ -14,7 +14,7 @@ const folder=await mkdtemp(join(tmpdir(),'gpuq-project-ui-'));
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-projects-ui';
 const password='Project-Browser-Fixture-Only-2026!',release='a'.repeat(64),nextRelease='b'.repeat(64),datasetVersion='c'.repeat(64);
 const [machine,other]=MACHINES.map(item=>item.id),calls=[],pageErrors=[],httpErrors=[],blocked=[],projects=new Map(),terminals=new Map(),uploads=new Map();
-let server,service,browser,badReceiptOnce=false;
+let server,service,browser,badReceiptOnce=false,terminalGate,releaseTerminalGate;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port,key=(node,user,project)=>JSON.stringify([node,user,project]);
 const copy=value=>structuredClone(value);
@@ -36,7 +36,7 @@ try{
       project.state='PUBLISHING';project.progress={phase:'copying',completedEntries:12,completedBytes:512,totalEntries:20,totalBytes:1024};return copy(project);
     }
     if(operation==='projects.verify'){assert.ok(project?.releases.some(item=>item.release===args.release&&item.state==='READY'));return {project:args.project,release:args.release,state:'READY'};}
-    if(operation==='terminal.open'){const id=args.mode==='reconnect'?args.id:randomUUID(),writerToken=randomUUID();assert.equal(args.hostAdmin,false);if(args.mode==='reconnect')assert.ok(terminals.has(id));terminals.set(id,{...copy(args),machine:node,writerToken});return {id,writerToken};}
+    if(operation==='terminal.open'){const id=args.mode==='reconnect'?args.id:randomUUID(),writerToken=randomUUID();if(args.hostAdmin){assert.equal(args.userId,'builtin-admin');assert.equal(args.project,undefined);}if(args.mode==='reconnect')assert.ok(terminals.has(id));terminals.set(id,{...copy(args),machine:node,writerToken});if(terminalGate){const gate=terminalGate;terminalGate=null;await gate;}return {id,writerToken};}
     if(operation==='terminal.exchange'){
       const session=terminals.get(args.id);assert.ok(session);assert.equal(args.project,session.project);assert.equal(args.hostAdmin,session.hostAdmin);assert.equal(node,session.machine);assert.equal(args.writerToken,session.writerToken);
       const bytes=Buffer.from('Local mock project terminal. No shell is executed.\r\n');return {offset:bytes.length,data:args.offset?'':bytes.toString('base64'),exited:false};
@@ -84,7 +84,8 @@ try{
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'');
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   assert.equal(await page.locator('option[value=auto]').count(),0);
-  assert.equal(await page.locator('[name=terminal-host]').isVisible(),false);
+  assert.equal(await page.locator('#host-maintenance').isVisible(),false);
+  assert.equal(await page.locator('[name=terminal-host]').count(),0,'no sticky ROOT mode switch exists');
   await setMachine(machine);
   for(const name of ['machine','terminal-machine','file-machine'])assert.equal(await page.locator(`[name=${name}]`).inputValue(),machine);
   await page.locator('#project-create summary').click();await page.locator('[name=new-project]').fill('vision-demo');
@@ -191,12 +192,91 @@ try{
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px environment creation form must not overflow');
 
   const adminPage=await browser.newPage({viewport:{width:1440,height:1000}});await configure(adminPage);await login(adminPage,'admin');await setMachine(machine,adminPage);
-  await adminPage.locator('[name=terminal-host]').check();await action('projects.status',()=>adminPage.locator('[name=workspace-project]').selectOption('admin-project'),adminPage);await idle(adminPage);
-  assert.equal(await adminPage.locator('[name=terminal-host]').isChecked(),false);assert.equal(await adminPage.locator('[name=terminal-host]').isDisabled(),true);
+  assert.equal(await adminPage.locator('#host-maintenance').isVisible(),true);
+  assert.equal(await adminPage.locator('#host-maintenance').evaluate(el=>el.open),false,'maintenance starts collapsed');
+  await action('terminal.open',()=>adminPage.locator('#terminal-open').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  assert.equal(calls.filter(call=>call.operation==='terminal.open').at(-1).args.hostAdmin,false,'admin default terminal remains private');
+  await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
+  await action('projects.status',()=>adminPage.locator('[name=workspace-project]').selectOption('admin-project'),adminPage);await idle(adminPage);
+  await adminPage.locator('#host-maintenance summary').click();
+  const beforeRoot=calls.filter(call=>call.operation==='terminal.open').length;
+  adminPage.once('dialog',dialog=>dialog.dismiss());await adminPage.locator('#terminal-root-open').click();
+  assert.equal(calls.filter(call=>call.operation==='terminal.open').length,beforeRoot,'canceling ROOT confirmation sends no API request');
+  adminPage.once('dialog',dialog=>dialog.accept());await action('terminal.open',()=>adminPage.locator('#terminal-root-open').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  const rootSession=calls.filter(call=>call.operation==='terminal.open').at(-1);assert.equal(rootSession.args.hostAdmin,true);assert.equal(rootSession.args.project,undefined);
+  assert.equal(await adminPage.locator('[name=workspace-project]').inputValue(),'admin-project','host maintenance does not change the personal project');
+  assert.match(await adminPage.locator('#terminal-session-note').textContent(),/宿主机 ROOT.*绕过 GPU 配额/);
+  assert.doesNotMatch(await adminPage.locator('#terminal-session-note').textContent(),/不分配 GPU/);
+  const rootId=[...terminals].find(([,value])=>value.hostAdmin)[0];
+  await action('terminal.detach',()=>adminPage.locator('#terminal-disconnect').click(),adminPage);
+  adminPage.once('dialog',dialog=>dialog.accept(rootId));await adminPage.locator('#terminal-reconnect').click();
+  await adminPage.waitForFunction(()=>document.querySelector('#toast')?.textContent.includes('终端类型'));
+  assert.equal(calls.filter(call=>call.operation==='terminal.open').length,beforeRoot+1,'development reconnect cannot silently attach known ROOT session');
+  adminPage.once('dialog',dialog=>{adminPage.once('dialog',next=>next.accept(rootId));return dialog.accept();});
+  await action('terminal.open',()=>adminPage.locator('#terminal-root-reconnect').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
+  await setMachine(other,adminPage);
+  await action('terminal.open',()=>adminPage.locator('#terminal-open').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  assert.equal(calls.filter(call=>call.operation==='terminal.open').at(-1).args.hostAdmin,false,'changing machine after ROOT never promotes the next development session');
+  await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
+  await setMachine(machine,adminPage);await action('projects.status',()=>adminPage.locator('[name=workspace-project]').selectOption('admin-project'),adminPage);await idle(adminPage);
   await capture('projects-admin-project.png',adminPage);
+  await adminPage.setViewportSize({width:390,height:844});await capture('projects-admin-maintenance-mobile.png',adminPage);
+  assert.ok(await adminPage.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px dual terminal entries must not overflow');
+  await adminPage.locator('[name=workspace-project]').selectOption('');await idle(adminPage);
+  terminalGate=new Promise(resolve=>{releaseTerminalGate=resolve;});
+  adminPage.once('dialog',dialog=>dialog.accept());await adminPage.locator('#terminal-root-open').click();
+  for(let wait=0;wait<100&&![...terminals.values()].some(value=>value.hostAdmin);wait++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok([...terminals.values()].some(value=>value.hostAdmin),'delayed ROOT request reached the fake node');
+  const staleRootId=[...terminals].find(([,value])=>value.hostAdmin)[0];
+  const changedMachine=responseFor(adminPage,'projects.list');await adminPage.locator('[name=workspace-machine]').selectOption(other);
+  const lateDetached=responseFor(adminPage,'terminal.detach');releaseTerminalGate();await Promise.all([lateDetached,changedMachine]);await idle(adminPage);
+  assert.equal(await adminPage.locator('.terminal-dialog').isVisible(),false,'late ROOT open cannot attach after the workspace changed');
+  assert.equal(terminals.has(staleRootId),true,'changing workspace detaches but does not destroy the old ROOT session');
+  await setMachine(machine,adminPage);
+  adminPage.once('dialog',dialog=>{adminPage.once('dialog',next=>next.accept(staleRootId));return dialog.accept();});
+  await action('terminal.open',()=>adminPage.locator('#terminal-root-reconnect').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
+  // Two independent buttons can be clicked before either open response arrives.
+  // Verify both orders through actual browser events and delayed HTTP responses.
+  for(const firstRoot of [true,false]){
+    // Hold only response delivery: the portal deliberately serializes node
+    // operations, but network responses can still reach the browser out of order.
+    const responseGate=new Promise(resolve=>{releaseTerminalGate=resolve;});let intercepted=false;
+    const holdResponse=async route=>{
+      const body=route.request().postDataJSON();
+      if(!intercepted&&body?.operation==='terminal.open'&&body.args.hostAdmin===firstRoot){
+        intercepted=true;const response=await route.fetch();await responseGate;await route.fulfill({response});
+      }else await route.continue();
+    };
+    await adminPage.route(origin+'/api/call',holdResponse);
+    const firstButton=firstRoot?'terminal-root-open':'terminal-open',secondButton=firstRoot?'terminal-open':'terminal-root-open';
+    if(firstRoot)adminPage.once('dialog',dialog=>dialog.accept());
+    await adminPage.locator('#'+firstButton).click();
+    for(let wait=0;wait<100&&terminals.size===0;wait++)await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(terminals.size,1,'first request is held at the fake node before starting the second');
+    const delayedId=[...terminals.keys()][0];
+    if(!firstRoot)adminPage.once('dialog',dialog=>dialog.accept());
+    await action('terminal.open',()=>adminPage.locator('#'+secondButton).click(),adminPage);
+    await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+    const title=await adminPage.locator('#terminal-title').textContent();assert.match(title,firstRoot?/个人开发/:/ROOT 运维/);
+    const released=responseFor(adminPage,'terminal.detach');releaseTerminalGate();await released;
+    await adminPage.waitForFunction(()=>document.querySelector('#toast')?.textContent.includes('旧终端保留'));
+    assert.equal(await adminPage.locator('#terminal-title').textContent(),title,'late response cannot replace the newest chosen privilege context');
+    assert.equal(calls.filter(call=>call.operation==='terminal.detach').at(-1).args.id,delayedId);
+    assert.equal(terminals.has(delayedId),true,'superseded terminal remains reconnectable after its writer is released');
+    await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
+    if(firstRoot)adminPage.once('dialog',dialog=>{adminPage.once('dialog',next=>next.accept(delayedId));return dialog.accept();});
+    else adminPage.once('dialog',dialog=>dialog.accept(delayedId));
+    await action('terminal.open',()=>adminPage.locator(firstRoot?'#terminal-root-reconnect':'#terminal-reconnect').click(),adminPage);
+    await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+    await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
+    assert.equal(terminals.size,0);
+    await adminPage.unroute(origin+'/api/call',holdResponse);
+  }
   assert.deepEqual(pageErrors,[]);assert.deepEqual(blocked,[]);
   assert.deepEqual(httpErrors,[{status:401,operation:'state'},{status:401,operation:'state'}]);
   assert.equal(service.store.jobs.length,2);assert.equal(terminals.size,0);
-  assert.ok(calls.filter(call=>call.operation==='projects.status').length<10,'publication polling stays bounded');
-  console.log(JSON.stringify({status:'passed',checks:['explicit shared machine/project','create and draft','explicit isolated environment','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','390px environment form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
-}finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(folder,{recursive:true,force:true});}
+  assert.ok(calls.filter(call=>call.operation==='projects.status').length<12,'publication polling stays bounded');
+  console.log(JSON.stringify({status:'passed',checks:['explicit shared machine/project','create and draft','explicit isolated environment','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','delayed ROOT/development opens cannot replace newest intent','390px environment form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
+}finally{releaseTerminalGate?.();await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(folder,{recursive:true,force:true});}
