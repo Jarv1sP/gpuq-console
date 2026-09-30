@@ -8,6 +8,7 @@
 .community-orbit::after {content:"";position:absolute;width:8px;height:8px;top:1px;left:29px;border-radius:50%;background:#6c8abe;box-shadow:0 0 0 5px #f1f5fa}
 .community-guide {white-space:nowrap;color:#4f6484;font-size:12px;text-decoration:none;padding:12px 0}
 .community-tabs {display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid #dbe3ee;margin-bottom:22px;gap:12px}
+.community-tabs.has-task-notes {grid-template-columns:repeat(4,1fr)}
 .community-tabs button {font:inherit;font-size:14px;font-weight:650;color:#65768e;background:transparent;border:0;border-bottom:2px solid transparent;padding:15px 16px;text-align:left;cursor:pointer;min-height:70px}
 .community-tabs button span {display:block;font-size:11px;font-weight:400;margin-top:7px;color:#7c8ba0}
 .community-tabs button[aria-selected=true] {color:#294f91;border-color:#426cb3}
@@ -69,8 +70,10 @@
 .chat-message.own .chat-avatar {background:#e5edf9;color:#5174a3}
 .chat-message .community-item-actions {margin-top:4px}
 .chat-new {display:block;margin:12px auto;background:#eef4fc;color:#466ca5;border-color:#d8e4f5;font-size:12px}
-#community-chat-form {margin-top:21px}
-#community-chat-form>label {font-size:12px;color:#697c95}
+#community-chat-form,#task-note-form {margin-top:21px}
+#community-chat-form>label,#task-note-form label {display:block;font-size:12px;color:#697c95;margin-top:12px}
+#task-note-form textarea,#task-note-form select {display:block;box-sizing:border-box;width:100%;font:inherit;font-size:14px;line-height:1.7;color:#30445f;background:#fcfdff;border:1px solid #d7e1ed;border-radius:8px;padding:11px 12px;margin-top:7px;resize:vertical}
+.task-note {min-width:0;overflow-wrap:anywhere}
 .chat-compose-footer {display:flex;gap:22px;align-items:center;justify-content:space-between;margin-top:13px}
 .chat-compose-footer p {font-size:11px;color:#7b899e;line-height:1.8;margin:0}
 .chat-compose-footer button {flex:none}
@@ -84,7 +87,8 @@
   .community-intro h2 {font-size:12px;font-weight:500;letter-spacing:0;margin:0}
   .community-guide {font-size:10px;padding:0;margin:0}
   .community-intro .eyebrow {display:none}
-  .community-tabs {gap:3px;margin-bottom:17px}
+  .community-tabs {grid-template-columns:repeat(2,1fr);gap:3px;margin-bottom:17px}
+  .community-tabs.has-task-notes {grid-template-columns:repeat(2,1fr)}
   .community-tabs button {font-size:13px;padding:13px 6px;min-height:68px}
   .community-tabs button span {font-size:10px;line-height:1.6}
   .community-toolbar {flex-wrap:wrap;gap:12px}
@@ -98,7 +102,7 @@
   .community-meta {font-size:10px;gap:7px 11px}
   .community-dialog {width:calc(100vw - 20px);max-height:calc(100dvh - 24px);padding:20px 17px;border-radius:12px}
   .community-dialog h2 {font-size:18px}
-  .community-dialog textarea,.community-dialog input,.community-dialog select,#community-chat-body {font-size:16px}
+  .community-dialog textarea,.community-dialog input,.community-dialog select,#community-chat-body,#task-note-form textarea,#task-note-form select {font-size:16px}
   .community-dialog .button,.community-text-button {min-height:44px}
   .community-post-actions {gap:7px}
   #community-chat {padding:18px 14px}
