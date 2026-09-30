@@ -14,6 +14,7 @@ export class PortalService extends DemoService{
   static async open(path,bootstrapPath,statusPath,bridge){
     await mkdir(dirname(path),{recursive:true,mode:0o700});
     const service=new PortalService();service.production=true;service.tail=Promise.resolve();service.pending=0;
+    service.terminalLanes=new Map();service.terminalPending=0;
     service.db=new DatabaseSync(path);await chmod(path,0o600);
     service.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS portal_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, subject TEXT, outcome TEXT NOT NULL);');
     service.db.exec("CREATE TABLE IF NOT EXISTS invites (role TEXT PRIMARY KEY CHECK(role IN ('admin','member')), digest TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, max_uses INTEGER, created_at TEXT NOT NULL);");
@@ -49,6 +50,51 @@ export class PortalService extends DemoService{
   enqueue(fn){
     if(this.pending>=24){const e=Error('服务忙，请稍后重试。');e.status=429;return Promise.reject(e);}
     this.pending++;const run=this.tail.then(fn);this.tail=run.catch(()=>{}).finally(()=>this.pending--);return run;
+  }
+  terminalPrincipal(token,args){
+    if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+    const {username,role,userId}=this.principal(token);
+    const current=this.store.users.find(user=>user.id===userId);
+    if(!current?.enabled||current.username!==username||(current.role||'member')!==role)
+      throw Object.assign(Error('终端账号权限已改变，请重新登录。'),{status:403});
+    const user=this.store.get(userId);
+    if(!MACHINES.some(machine=>machine.id===args.machine)||!user.limits[args.machine])
+      throw Object.assign(Error('这台机器未授权。'),{status:403});
+    if(args.hostAdmin&&role!=='admin')throw Object.assign(Error('宿主机 root 终端仅管理员可用。'),{status:403});
+    return {username,role,userId};
+  }
+  async terminalExchange(token,args){
+    if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    // Only streaming exchanges bypass the durable mutation queue. The node
+    // still validates ownership and fences every request with its writer lease.
+    args={...args};const admitted=this.terminalPrincipal(token,args);
+    const key=JSON.stringify([args.machine,args.id]);
+    const lane=this.terminalLanes.get(key)||{tail:Promise.resolve(),pending:0};
+    if(this.terminalPending>=24||lane.pending>=4)
+      throw Object.assign(Error('终端请求过多，请等待当前请求完成。'),{status:429});
+    this.terminalLanes.set(key,lane);this.terminalPending++;lane.pending++;
+    const run=lane.tail.then(async()=>{
+      const principal=this.terminalPrincipal(token,args);
+      if(principal.userId!==admitted.userId||principal.role!==admitted.role||principal.username!==admitted.username)
+        throw Object.assign(Error('终端登录身份已改变。'),{status:403});
+      // executionCall retains the complete trusted field/context validation and
+      // dispatches exactly once. Never retry input after an ambiguous failure.
+      let result,current;
+      try{result=await executionCall(this,principal,'terminal.exchange',args);}finally{
+        // Recheck failed responses too: node errors can contain private context.
+        current=this.terminalPrincipal(token,args);
+        if(current.userId!==principal.userId||current.role!==principal.role||current.username!==principal.username)
+          throw Object.assign(Error('终端登录身份已改变。'),{status:403});
+      }
+      // Do not send the entire GPU/account snapshot on every keystroke, or leak
+      // a delayed terminal response after logout, suspension or grant revocation.
+      return {result,principal:current};
+    });
+    lane.tail=run.catch(()=>{});
+    try{return await run;}finally{
+      this.terminalPending--;lane.pending--;
+      if(!lane.pending)this.terminalLanes.delete(key);
+    }
   }
   login(username,password){return this.enqueue(async()=>{
     try{await this.refreshGPUQ();const result=await super.login(username,password);this.audit(username,'login',null,'ok');return result;}
@@ -100,7 +146,9 @@ export class PortalService extends DemoService{
       this.audit(principal.username,operation,role,'ok');this.db.exec('COMMIT');return result;
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
-  invoke(token,operation,args={}){return this.enqueue(async()=>{
+  invoke(token,operation,args={}){
+    if(operation==='terminal.exchange')return this.terminalExchange(token,args);
+    return this.enqueue(async()=>{
     const principal=this.principal(token),actor=principal.username;
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
     if(typeof operation==='string'&&operation.startsWith('community.'))return {result:communityCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};

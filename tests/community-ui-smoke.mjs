@@ -50,7 +50,7 @@ try{
   const loaded=async()=>{await page.waitForFunction(()=>!document.querySelector('#community-status').textContent.startsWith('正在'));};
   const snapshot=async name=>{await page.evaluate(()=>{scrollTo(0,0);document.querySelector('#toast')?.classList.remove('visible');});await page.waitForTimeout(250);await page.screenshot({path:join(screenshots,name+'.png')});};
   await page.goto(origin+'/#community');await login('alice');await loaded();
-  const guide=await page.request.get(origin+'/guide/community');assert.equal(guide.status(),200);assert.match(guide.headers()['content-type'],/^text\/plain/);assert.match(await guide.text(),/公告只是通知，不会自动停机/);
+  const guide=await page.request.get(origin+'/guide/community');assert.equal(guide.status(),200);assert.match(guide.headers()['content-type'],/^text\/html/);assert.match(await guide.text(),/聊天约定不会自动改变配额/);
   assert.equal(await page.locator('#community-create').isVisible(),false,'member cannot publish announcement');
   assert.match(await page.locator('#community-posts').innerText(),/本周维护安排/);
   await snapshot('announcements-desktop');

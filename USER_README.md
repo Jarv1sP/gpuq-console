@@ -1,5 +1,7 @@
 # GPUQ Console 用户手册
 
+> 初次使用请阅读新版 [使用指南](docs/USER_GUIDE.md)：包含原生 Windows PowerShell 安装，以及开发、训练、数据集和排队流程。本页保留旧版详细说明供兼容查阅；网站只展示新版指南。
+
 入口：https://gpu.example.com 。网页、自己电脑的命令行共用账号与任务，不需要 ChatGPT 账号。你的电脑只需能通过 HTTPS 访问网站，**不需要安装或加入 Tailscale（Tail）**。
 
 ## 第一次使用
@@ -18,7 +20,7 @@
 | 协作区 | 阅读公告、发布问题反馈、回复帖子和协调使用安排；见[协作手册](https://gpu.example.com/guide/community) |
 | 成员授权 | 仅管理员可见，管理账号、注册码、机器授权和卡数额度 |
 
-界面帮助入口提供用户手册，管理员另有管理员手册；阅读文档不代表获得管理权限。管理员分配额度后，实际操作都在“我的工作台”，不用到用户管理页开终端或提交任务。
+界面只提供一个“使用指南”入口；管理员手册保留在仓库，不由网站提供。管理员分配额度后，实际操作都在“我的工作台”，不用到用户管理页开终端或提交任务。
 
 新终端各自独立，重连、分离和接管见[终端会话手册](https://gpu.example.com/guide/terminal-sessions)。任务的 worker 日志与历史 GPU 分配见[诊断手册](https://gpu.example.com/guide/diagnostics)。[Ray 资源手册](https://gpu.example.com/guide/ray-resources)仅适用于管理员明确启用并验证的节点；默认公共 P0 档不启用这项资源改造，未采集到的旧任务信息仍显示未知。
 
@@ -41,7 +43,7 @@ gpuctl ssh
 
 `login` 会提示用户名和密码；密码不回显。`use` 记住服务器，不必每次再写；机器名称以网站和 `gpuctl state` 的实际清单为准，只允许你获批的机器。`project create` 创建并选中该机上的项目；已有项目用 `gpuctl project use my-project`。项目名为 1–48 位小写英文字母、数字、`_` 或 `-`，以字母开头。`ssh` 打开交互式命令行，不需要另配 SSH 密钥或服务器密码。用户名支持 2–24 个小写英文字母、汉字、数字、下划线和连字符，以字母或汉字开头。
 
-安装命令适用于 macOS、Linux 和 Windows 的 WSL。这里的 `gpuctl ssh` 是通过 HTTPS 连接个人终端的快捷命令，不是原生 SSH 协议端口；暂不能作为 VS Code Remote-SSH、SFTP 或 rsync 的目标。它同样不要求你的电脑加入 Tail。
+上面的安装命令适用于 macOS/Linux；Windows 请使用新版 [使用指南](docs/USER_GUIDE.md) 中的原生 PowerShell 安装器，不需要 WSL。这里的 `gpuctl ssh` 是通过 HTTPS 连接个人终端的快捷命令，不是原生 SSH 协议端口；暂不能作为 VS Code Remote-SSH、SFTP 或 rsync 的目标。它同样不要求你的电脑加入 Tail。
 
 旧用户直接用 Tail + OpenSSH 登录服务器是另一套入口，继续使用需要原有网络与系统账号权限。普通平台注册不会自动获得这些权限，也不需要它们来运行平台训练任务。
 

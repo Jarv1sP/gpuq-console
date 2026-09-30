@@ -84,7 +84,6 @@ document.addEventListener('click',async event=>{
     case 'filter-pending':case 'filter-all':await guardedChange(()=>{filter=action==='filter-pending'?'pending':'all';selected=null;render();});break;
     case 'refresh-state':await refresh();toast('已更新');break;
     case 'switch-account':await guardedChange(async()=>{if(store.principal)await store.logout();selected=null;draft=null;inviteCode=null;render();openLogin();});break;
-    case 'cli-help':$('#cli-dialog').showModal();break;
     case 'open-register':$('#login-dialog').close();$('#register-form').reset();$('#register-error').textContent='';$('#register-dialog').showModal();break;
     case 'back-to-login':$('#register-dialog').close();openLogin();break;
     case 'invites':$('#invites-error').textContent='';await loadInvites();$('#invites-dialog').showModal();break;
@@ -108,8 +107,6 @@ $('#login-form').addEventListener('submit',async event=>{event.preventDefault();
 $('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'));await store.login(data.get('username'),data.get('password'));event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#invites-dialog').addEventListener('close',()=>{inviteCode=null;$('#invites-content').innerHTML='';});
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
-$('#cli-dialog .cli-code').textContent=`curl -fsSL ${location.origin}/install.sh | sh\n\ngpuctl login\ngpuctl use ${MACHINES[0].id}\ngpuctl ssh\ngpuctl push .\ngpuctl run -g 1 -- python train.py\ngpuctl jobs`;
-const descriptions=$('#cli-dialog').querySelectorAll('p.muted');descriptions[0].textContent='一次安装，以后直接使用 gpuctl。需要 Node.js 22.13+。';descriptions[1].textContent='网页和命令行共用账号与额度。终端、训练共用个人工作区；无需加入管理 VPN。';
 const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','community','users'].includes(initialHash))page=initialHash;}render();if(!store.principal)openLogin();
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
