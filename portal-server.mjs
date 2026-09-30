@@ -4,6 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {PortalService} from './portal-service.mjs';
 import {bridgeClient} from './execution.mjs';
+import {standaloneClient} from './client-bundle.mjs';
 import {guideTarget,guidePage} from './guide.mjs';
 
 const files={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/xterm.js':'vendor/xterm.js','/xterm.css':'vendor/xterm.css','/addon-fit.js':'vendor/addon-fit.js'};
@@ -17,7 +18,9 @@ files['/datasets.css']='datasets.css';
 files['/dataset-upload.js']='dataset-upload.js';
 files['/data-workspace.js']='data-workspace.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
+files['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';
 export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge}){
+  await standaloneClient();
   const url=new URL(origin);const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined));const rate=new Map();
   const server=http.createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
@@ -64,7 +67,7 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
       }
       if(req.method!=='GET'&&req.method!=='HEAD')return json(405,{error:'GET required'});
       if(path==='/runtime.js'){res.writeHead(200,{...headers,'Content-Type':mime.js});return res.end('globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;');}
-      if(path==='/gpuctl.mjs'||path==='/amaxctl.mjs'){res.writeHead(200,{...headers,'Content-Type':'text/javascript; charset=utf-8','Content-Disposition':'attachment; filename="gpuctl.mjs"'});return res.end((await readFile(new URL('./cli.mjs',import.meta.url),'utf8')).replaceAll('__GPUQ_PUBLIC_ORIGIN__',url.origin));}
+      if(path==='/gpuctl.mjs'||path==='/amaxctl.mjs'){const client=await standaloneClient(url.origin);res.writeHead(200,{...headers,'Content-Type':'text/javascript; charset=utf-8','Content-Disposition':'attachment; filename="gpuctl.mjs"'});return res.end(client);}
       if(path==='/install.sh'){res.writeHead(200,{...headers,'Content-Type':'text/plain; charset=utf-8'});return res.end((await readFile(new URL('./deploy/install-client.sh',import.meta.url),'utf8')).replaceAll('__GPUQ_PUBLIC_ORIGIN__',url.origin));}
       if(path==='/install.ps1'){res.writeHead(200,{...headers,'Content-Type':'text/plain; charset=utf-8'});return res.end(req.method==='HEAD'?undefined:(await readFile(new URL('./deploy/install-client.ps1',import.meta.url),'utf8')).replaceAll('__GPUQ_PUBLIC_ORIGIN__',url.origin));}
       // Only the beginner-facing guide is public. Operations manuals and raw

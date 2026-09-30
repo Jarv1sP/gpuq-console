@@ -2,6 +2,8 @@
 !dist/**
 !*.mjs
 !package.json
+!package-lock.json
+!scripts/build-client.mjs
 !docs/USER_GUIDE.md
 !deploy/Dockerfile
 !deploy/install-client.sh

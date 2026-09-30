@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 
 // This module owns only community_* tables. No message bodies enter portal_state
 // or the audit log. All calls run in PortalService's serialized authenticated queue.
-export const COMMUNITY_LIMITS=Object.freeze({posts:10000,comments:100000,chat:5000,keys:200000,retentionDays:30,title:120,postBody:8000,commentBody:4000,chatBody:2000,page:100});
+export const COMMUNITY_LIMITS=Object.freeze({posts:10000,comments:100000,chat:5000,notes:10000,keys:200000,retentionDays:30,title:120,postBody:8000,commentBody:4000,chatBody:2000,page:100});
 const DAY=86400000,MINUTE=60000;
 const KINDS=['feedback','discussion','announcement'],STATUSES=['open','investigating','resolved','closed'],ANNOUNCEMENTS=['notice','maintenance','outage'];
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
@@ -25,9 +25,9 @@ function view(service,row,actor,type){
   if(!row)return null;
   const common={id:String(row.id),body:row.body,author:author(service,row.author_id),createdAt:nowISO(row.created_at),updatedAt:nowISO(row.updated_at),revision:row.revision,canEdit:editable(row,actor),canDelete:deletable(row,actor)};
   if(type==='post')return {...common,kind:row.kind,title:row.title,announcementType:row.announcement_type,status:row.status,pinned:!!row.pinned,commentCount:service.db.prepare('SELECT count(*) AS n FROM community_comments WHERE post_id=?').get(row.id).n,canModerate:actor.role==='admin'};
-  return type==='comment'?{...common,postId:String(row.post_id)}:common;
+  return type==='comment'?{...common,postId:String(row.post_id)}:type==='note'?{...common,jobId:row.job_id}:common;
 }
-const tables={post:'community_posts',comment:'community_comments',message:'community_chat'};
+const tables={post:'community_posts',comment:'community_comments',message:'community_chat',note:'community_notes'};
 function get(service,type,value){return service.db.prepare(`SELECT * FROM ${tables[type]} WHERE id=?`).get(value);}
 function required(service,type,value){const row=get(service,type,id(value));if(!row)fail('内容不存在或已删除。',404);return row;}
 function admin(actor){if(actor.role!=='admin')fail('此操作需要管理员权限。',403);}
@@ -37,6 +37,33 @@ function prune(db,now){
   db.prepare('DELETE FROM community_chat WHERE created_at<?').run(before);
   db.prepare('DELETE FROM community_chat WHERE id <= COALESCE((SELECT id FROM community_chat ORDER BY id DESC LIMIT 1 OFFSET ?),0)').run(COMMUNITY_LIMITS.chat);
   db.prepare('DELETE FROM community_rate WHERE until_ms<=?').run(now);
+}
+export function pruneTaskNotes(service){
+  // Missing/UNKNOWN/LOST is NOT a confirmed end. General notes have no job_id
+  // and intentionally survive both task cleanup and the public chat's TTL.
+  const linked=service.db.prepare('SELECT DISTINCT job_id FROM community_notes WHERE job_id IS NOT NULL').all();
+  if(!linked.length)return 0;
+  // Reconciliation mutates memory before save(). A failed portal_state write
+  // must not let its finally hook (or a community read) erase durable bodies.
+  const saved=service.db.prepare('SELECT data FROM portal_state WHERE id=1').get();
+  const ended=new Set((saved?JSON.parse(saved.data).jobs:[]).filter(j=>['SUCCEEDED','FAILED','CANCELED'].includes(j.state)).map(j=>j.id));
+  if(!ended.size)return 0;
+  const ids=linked.map(r=>r.job_id).filter(id=>ended.has(id));
+  if(!ids.length)return 0;
+  const db=service.db;let removed=0;db.exec('SAVEPOINT task_notes_cleanup');
+  try{const del=db.prepare('DELETE FROM community_notes WHERE job_id=?');for(const id of ids)removed+=Number(del.run(id).changes);db.exec('RELEASE task_notes_cleanup');return removed;}
+  catch(error){db.exec('ROLLBACK TO task_notes_cleanup; RELEASE task_notes_cleanup');throw error;}
+}
+export function maintainTaskNotes(service){
+  try{
+    const removed=service.pruneTaskNotes?.();
+    service.noteCleanupPending=false;
+    return removed;
+  }catch{
+    if(!service.noteCleanupPending)console.warn('GPUQ: task note cleanup is pending; training status is preserved.');
+    service.noteCleanupPending=true;
+    return 0;
+  }
 }
 export function installCommunity(service){
   service.db.exec(`
@@ -58,6 +85,12 @@ export function installCommunity(service){
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1
     );
     CREATE INDEX IF NOT EXISTS community_chat_age ON community_chat(created_at);
+    CREATE TABLE IF NOT EXISTS community_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, author_id TEXT NOT NULL, job_id TEXT,
+      body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS community_notes_job ON community_notes(job_id);
     CREATE TABLE IF NOT EXISTS community_keys (
       author_id TEXT NOT NULL, client_key TEXT NOT NULL, operation TEXT NOT NULL,
       digest TEXT NOT NULL, entity_id INTEGER NOT NULL, created_at INTEGER NOT NULL,
@@ -72,6 +105,7 @@ export function installCommunity(service){
   // Retention is also enforced on reads; this reclaims expired content at startup
   // and on writes without a background process or a full-history JSON rewrite.
   prune(service.db,Date.now());
+  service.pruneTaskNotes=()=>pruneTaskNotes(service);
 }
 function rate(db,actor,bucket,limit,now){
   const current=db.prepare('SELECT count,until_ms FROM community_rate WHERE author_id=? AND bucket=?').get(actor.userId,bucket);
@@ -89,8 +123,8 @@ function create(service,actor,operation,args,type,canonical,now,insert){
     return {[type]:view(service,row,actor,type),id:String(existing.entity_id),deleted:!row,duplicate:true};
   }
   capacity(db,'community_keys',COMMUNITY_LIMITS.keys);
-  rate(db,actor,'writes',60,now);rate(db,actor,type,{post:3,comment:10,message:20}[type],now);
-  if(type!=='message')capacity(db,tables[type],COMMUNITY_LIMITS[type==='post'?'posts':'comments']);
+  rate(db,actor,'writes',60,now);rate(db,actor,type,{post:3,comment:10,message:20,note:20}[type],now);
+  if(type!=='message')capacity(db,tables[type],COMMUNITY_LIMITS[type==='post'?'posts':type==='note'?'notes':'comments']);
   const entityId=Number(insert());
   db.prepare('INSERT INTO community_keys(author_id,client_key,operation,digest,entity_id,created_at) VALUES(?,?,?,?,?,?)').run(actor.userId,clientKey,operation,digest,entityId,now);
   if(type==='message')prune(db,now);
@@ -160,7 +194,26 @@ function change(service,actor,operation,args,type,remove,now){
 }
 function dispatch(service,actor,operation,args,now){
   const db=service.db;
-  if(operation==='community.info'){fields(args,[]);return {enabled:true,version:1,limits:{...COMMUNITY_LIMITS,titleBytes:COMMUNITY_LIMITS.title*3,postBodyBytes:COMMUNITY_LIMITS.postBody*3,commentBodyBytes:COMMUNITY_LIMITS.commentBody*3,chatBodyBytes:COMMUNITY_LIMITS.chatBody*3,postsPerMinute:3,commentsPerMinute:10,chatPerMinute:20,writesPerMinute:60},capabilities:['posts','announcements','comments','chat','idempotency-30d','revision-check']};}
+  if(operation==='community.notes.get'){fields(args,['id']);return {note:view(service,required(service,'note',args.id),actor,'note')};}
+  if(operation==='community.notes.list'){
+    fields(args,['before','limit']);const limit=page(args.limit),before=args.before===undefined?null:id(args.before);
+    const rows=db.prepare('SELECT * FROM community_notes'+(before===null?'':' WHERE id<?')+' ORDER BY id DESC LIMIT ?').all(...(before===null?[]:[before]),limit+1);
+    const more=rows.length>limit;rows.length=Math.min(rows.length,limit);
+    return {notes:rows.map(row=>view(service,row,actor,'note')),nextCursor:more?String(rows.at(-1).id):null};
+  }
+  if(operation==='community.notes.create'){
+    fields(args,['key','body','jobId']);const body=text(args.body,COMMUNITY_LIMITS.chatBody,'留言'),jobId=args.jobId??null;
+    if(jobId!==null&&(typeof jobId!=='string'||!jobId||jobId.length>128))fail('任务 ID 无效。');
+    const task=jobId===null?null:service.store.jobs.find(j=>j.id===jobId);
+    if(jobId!==null&&(!task||(actor.role!=='admin'&&task.userId!==actor.userId)))fail('只能给自己的任务关联留言。',403);
+    return create(service,actor,operation,args,'note',{body,jobId},now,()=>{
+      // Check after deduplication: an uncertain retry after cleanup must return
+      // the old deleted receipt, never resurrect a completed task's message.
+      if(task&&['SUCCEEDED','FAILED','CANCELED'].includes(task.state))fail('任务已结束；长期通知请使用非任务留言。',409);
+      return db.prepare('INSERT INTO community_notes(author_id,job_id,body,created_at,updated_at) VALUES(?,?,?,?,?)').run(actor.userId,jobId,body,now,now).lastInsertRowid;
+    });
+  }
+  if(operation==='community.info'){fields(args,[]);return {enabled:true,version:1,limits:{...COMMUNITY_LIMITS,titleBytes:COMMUNITY_LIMITS.title*3,postBodyBytes:COMMUNITY_LIMITS.postBody*3,commentBodyBytes:COMMUNITY_LIMITS.commentBody*3,chatBodyBytes:COMMUNITY_LIMITS.chatBody*3,postsPerMinute:3,commentsPerMinute:10,chatPerMinute:20,writesPerMinute:60},capabilities:['posts','announcements','comments','chat','idempotency-30d','revision-check','task-notes-v1']};}
   if(operation==='community.posts.list')return listPosts(service,actor,args);
   if(operation==='community.posts.get'){fields(args,['id']);return {post:view(service,required(service,'post',args.id),actor,'post')};}
   if(operation==='community.comments.list')return listComments(service,actor,args);
@@ -181,7 +234,7 @@ function dispatch(service,actor,operation,args,now){
     fields(args,['key','body']);const body=text(args.body,COMMUNITY_LIMITS.chatBody,'消息');
     return create(service,actor,operation,args,'message',{body},now,()=>db.prepare('INSERT INTO community_chat(author_id,body,created_at,updated_at) VALUES(?,?,?,?)').run(actor.userId,body,now,now).lastInsertRowid);
   }
-  for(const [prefix,type] of [['posts','post'],['comments','comment'],['chat','message']]){
+  for(const [prefix,type] of [['posts','post'],['comments','comment'],['chat','message'],['notes','note']]){
     if(operation===`community.${prefix}.update`)return change(service,actor,operation,args,type,false,now);
     if(operation===`community.${prefix}.delete`)return change(service,actor,operation,args,type,true,now);
   }
@@ -192,6 +245,6 @@ export function communityCall(service,principal,operation,args){
   if(!user?.enabled)fail('账号已暂停或不存在。',403);
   if(user.role!==principal.role||user.username!==principal.username)fail('账号权限已改变，请重新登录。',401);
   const now=Date.now();service.db.exec('BEGIN IMMEDIATE');
-  try{const result=dispatch(service,principal,operation,args,now);service.db.exec('COMMIT');return {...result,serverTime:nowISO(now)};}
+  try{pruneTaskNotes(service);const result=dispatch(service,principal,operation,args,now);service.db.exec('COMMIT');return {...result,serverTime:nowISO(now)};}
   catch(error){service.db.exec('ROLLBACK');throw error;}
 }

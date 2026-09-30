@@ -444,6 +444,50 @@ class SchedulerPriorityTests(unittest.TestCase):
             self.set_priority({'id': 'Jmissing'}, 'normal')
         self.assertEqual(raised.exception.code, 'NOT_FOUND')
 
+    def test_rank_only_edit_preserves_checkpoint_restart_dispatch_and_fifo(self):
+        job = self.submit(priority=1, yield_policy='save', checkpoint_capability='epoch-v1',
+                          dispatch_mode='preempt-save', restart_policy='on-preempt')
+        for rank in [0, 1, 2, 3, 4]:
+            before = self.store.get_job(job['id'])
+            changed = self.coordinator.handle_api('set_priority_rank', {
+                'job_id': job['id'], 'priority': rank, 'expected': self.expected(before),
+            })
+            self.assertEqual(changed['priority'], rank)
+            after = self.store.get_job(job['id'])
+            for key in ('yield_policy', 'checkpoint_capability', 'restart_policy', 'dispatch_mode', 'sequence', 'preempt_idle_only'):
+                self.assertEqual(after[key], before[key], key)
+        self.assertEqual(self.store.list_actions(), [])
+
+    def test_rank_only_edit_never_opts_a_protected_job_into_yielding(self):
+        job = self.submit(yield_policy='never', restart_policy='never')
+        changed = self.coordinator.handle_api('set_priority_rank', {'job_id': job['id'], 'priority': 0})
+        self.assertEqual(changed['yield_policy'], 'never')
+        self.assertEqual(changed['restart_policy'], 'never')
+
+    def test_rank_only_edit_preserves_shared_contract(self):
+        job = self.pinned(share_gpu=True, vram_mb=1024, yield_policy='never')
+        changed = self.coordinator.handle_api('set_priority_rank', {'job_id': job['id'], 'priority': 0})
+        self.assertEqual(changed['yield_policy'], 'never')
+        self.assertTrue(self.store.get_job(job['id'])['share_gpu'])
+
+    def test_rank_only_cli_and_remote_route_use_distinct_safe_operation(self):
+        client = Mock()
+        client.call.return_value = {'state': 'PENDING'}
+        with patch('gpuq.cli.get_client', return_value=client), redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(['--json', 'set-rank', 'Jtest', 'P3']), 0)
+        client.call.assert_called_once_with('set_priority_rank', {'job_id': 'Jtest', 'priority': 3})
+        self.assertEqual(fleet.validate_remote_argv(['set-rank', 'Jtest', 'P1']), 'set-rank')
+
+    def test_rank_only_stale_and_running_updates_fail_without_policy_mutation(self):
+        job = self.submit(yield_policy='save', checkpoint_capability='epoch-v1', restart_policy='on-preempt')
+        self.coordinator.handle_api('set_priority_rank', {'job_id': job['id'], 'priority': 3, 'expected': self.expected(job)})
+        with self.assertRaises(ApiError):
+            self.coordinator.handle_api('set_priority_rank', {'job_id': job['id'], 'priority': 1, 'expected': self.expected(job)})
+        self.store.update_job(job['id'], state='RUNNING')
+        with self.assertRaises(ApiError):
+            self.coordinator.handle_api('set_priority_rank', {'job_id': job['id'], 'priority': 0})
+        self.assertEqual(self.store.get_job(job['id'])['yield_policy'], 'save')
+
     def test_set_priority_cli_sends_expected_snapshot_and_prints_json(self):
         job = self.submit()
         client = Mock()
@@ -556,7 +600,7 @@ class SchedulerPriorityTests(unittest.TestCase):
     def test_daemon_capabilities_and_status_are_explicit(self):
         job = self.submit(preempt_idle_only=True)
         result = self.coordinator.handle_api('status', {})
-        self.assertTrue({'priority-policy-v1','preempt-idle-only-v1','preempt-opt-in-only-v1'}.issubset(result['daemon']['capabilities']))
+        self.assertTrue({'priority-policy-v1','preempt-idle-only-v1','priority-rank-v1','preempt-opt-in-only-v1'}.issubset(result['daemon']['capabilities']))
         self.assertEqual(result['jobs'][0]['id'], job['id'])
         self.assertIs(result['jobs'][0]['preempt_idle_only'], True)
         parsed = cli.build_parser().parse_args(['submit', '-g', '1', '--preempt-idle-only', '--', 'python', 'train.py'])
