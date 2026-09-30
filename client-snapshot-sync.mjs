@@ -1,29 +1,75 @@
-import {mkdtemp,mkdir,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,lstat,rm} from 'node:fs/promises';
+import {createWriteStream} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
-import {execFile} from 'node:child_process';
+import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
+import {Transform} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
 import {DATA_CHUNK,dataPath,snapshotKey,scanLocalDataset,uploadDatasetSnapshot} from './client-data-upload.mjs';
 const fail=message=>{throw Error(message);};
 const runFile=promisify(execFile);
+const utf8=bytes=>new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+async function copyGitBlob(args,env,entry,filename){
+  // No checkout, archive, textconv or filters: stream exactly the fixed ODB blob.
+  const child=spawn('git',[...args,'cat-file','blob',entry.oid],{env,stdio:['ignore','pipe','pipe']});
+  let stderr='',bytes=0;const hash=createHash('sha256'),objectHash=createHash(entry.oid.length===64?'sha256':'sha1').update('blob '+entry.size+'\0');
+  child.stderr.on('data',chunk=>{if(stderr.length<4096)stderr+=chunk.toString().slice(0,4096-stderr.length);});
+  const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>code===0?resolve():reject(Error('Cannot read fixed Git blob: '+(stderr.trim()||signal||code))));});
+  const sizeCheck=new Transform({transform(chunk,encoding,done){bytes+=chunk.length;hash.update(chunk);objectHash.update(chunk);done(bytes>entry.size?Error('Git blob size changed'):null,chunk);}});
+  const copied=pipeline(child.stdout,sizeCheck,createWriteStream(filename,{flags:'wx',mode:0o600}));
+  try{
+    await Promise.all([exited,copied]);
+    if(bytes!==entry.size||objectHash.digest('hex')!==entry.oid)fail('Fixed Git blob content or size changed');
+    return hash.digest('hex');
+  }catch(error){child.kill();await Promise.allSettled([exited,copied]);throw error;}
+}
 export async function gitSnapshot(directory,ref='HEAD',progress=()=>{}){
   if(!ref||ref.startsWith('-')||ref.includes('\0'))fail('Use a Git branch/tag/ref or commit');
-  const git=async argv=>(await runFile('git',['-C',directory,...argv],{maxBuffer:64*1024**2})).stdout;
+  const args=['--no-replace-objects','--no-optional-locks','-c','core.fsmonitor=false','-c','core.attributesFile=','-C',directory],env={...process.env,GIT_NO_LAZY_FETCH:'1',GIT_ATTR_NOSYSTEM:'1'};
+  const git=async(argv,input)=>{const result=runFile('git',[...args,...argv],{env,encoding:'buffer',maxBuffer:64*1024**2});if(input!==undefined){result.child.stdin.on('error',()=>{});result.child.stdin.end(input);}return utf8((await result).stdout);};
+  // Even status may invoke clean/process filters. Disable configured commands
+  // only for our subprocesses; do not run repository code or edit user config.
+  const filters=await git(['config','--null','--name-only','--get-regexp','^filter\\..*\\.(clean|smudge|process|required)$']).catch(error=>{if(error.code===1)return '';throw error;});
+  for(const key of filters.split('\0').filter(Boolean))args.push('-c',key+'='+(/\.required$/i.test(key)?'false':''));
   const clean=async()=>{if((await git(['status','--porcelain=v1','--untracked-files=all'])).trim())fail('Git sync requires a clean worktree, including untracked files. Commit selected code first.');};
   await clean();const commit=(await git(['rev-parse','--verify','--end-of-options',ref+'^{commit}'])).trim();
   if(!/^[a-f0-9]{40}([a-f0-9]{24})?$/.test(commit))fail('Git did not resolve a complete commit');
-  const tree=(await git(['ls-tree','-r','-z','--full-tree',commit])).split('\0').filter(Boolean);
-  const executable=new Map();
-  for(const entry of tree){const match=/^(100644|100755) blob [a-f0-9]+\t(.+)$/.exec(entry);if(!match)fail('Git snapshot does not support symlinks or submodules; sync ordinary data separately');executable.set(dataPath(match[2]),match[1]==='100755');}
-  const temporary=await mkdtemp(join(tmpdir(),'gpuq-git-sync-')),code=join(temporary,'code'),archive=join(temporary,'snapshot.tar');
+  const tree=(await git(['ls-tree','-r','-l','-z','--full-tree',commit])).split('\0').filter(Boolean),entries=[],directories=new Set();
+  for(const line of tree){
+    const match=/^(100644|100755) blob ([a-f0-9]+) +([0-9]+)\t(.+)$/.exec(line);
+    if(!match)fail('Git snapshot does not support symlinks or submodules; sync ordinary data separately');
+    const path=dataPath(match[4]),size=Number(match[3]);if(!Number.isSafeInteger(size)||size>4*1024**3)fail('Git code files must be at most 4 GiB');
+    entries.push({path,oid:match[2],size,executable:match[1]==='100755'});
+    const parts=path.split('/');for(let i=1;i<parts.length;i++)directories.add(parts.slice(0,i).join('/'));
+    if(entries.length+directories.size>500000)fail('Git snapshot exceeds 500,000 entries');
+  }
+  // --source reads attributes from the selected commit, not a newer worktree.
+  // Local info/attributes takes precedence even with --source; never let it hide
+  // an export exclusion. Global/system attributes are disabled command-locally.
+  const infoAttributes=(await git(['rev-parse','--path-format=absolute','--git-path','info/attributes'])).trim();
+  if(await lstat(infoAttributes).then(()=>true,error=>{if(error.code==='ENOENT')return false;throw error;}))fail('Git sync refuses local info/attributes overrides; use a clean clone without local attribute overrides');
+  let attributes;
+  const attributePaths=[...[...directories].flatMap(path=>[path,path+'/']),...entries.map(entry=>entry.path)];
+  try{attributes=(await git(['check-attr','--source='+commit,'-z','--stdin','export-ignore','export-subst'],attributePaths.join('\0')+(attributePaths.length?'\0':''))).split('\0');}
+  catch(error){fail('Git sync requires Git with check-attr --source support to verify fixed-commit export rules: '+error.message);}
+  for(let i=0;i+2<attributes.length;i+=3)if(!['unspecified','unset'].includes(attributes[i+2]))fail('Git sync cannot import '+attributes[i+1]+' rules from the fixed commit ('+attributes[i]+'); prepare an explicit sync commit without archive transformations');
+  const temporary=await mkdtemp(join(tmpdir(),'gpuq-git-sync-')),code=join(temporary,'code');
   try{
-    await mkdir(code);await git(['archive','--format=tar','--output='+archive,commit]);
-    await runFile('tar',['--extract','--file',archive,'--directory',code,'--no-same-owner','--no-same-permissions']);
+    await mkdir(code);
+    // ASCII cache names avoid host tar decoding, case folding, reserved names
+    // and filesystem Unicode normalization. Only the manifest carries Git paths.
+    const source=new Map();
+    for(const [index,entry] of entries.entries()){const local=String(index);entry.sha256=await copyGitBlob(args,env,entry,join(code,local));source.set(local,entry);}
     const scan=await scanLocalDataset(code,progress),manifest=JSON.parse(scan.manifest);
-    // Git's fixed tree mode survives Windows and local tar/umask differences.
-    for(const entry of manifest.files){if(!executable.has(entry.path))fail('Archive file is not part of the fixed Git tree');entry.executable=executable.get(entry.path);}
-    const raw=Buffer.from(JSON.stringify(manifest));scan.manifest=raw;scan.manifestSha256=createHash('sha256').update(raw).digest('hex');scan.files=manifest.files;
+    if(manifest.files.length!==entries.length||manifest.directories.length)fail('Fixed Git cache entries changed');
+    const localFiles=new Map();
+    for(const entry of manifest.files){const fixed=source.get(entry.path);if(!fixed||entry.size!==fixed.size||entry.sha256!==fixed.sha256)fail('Fixed Git cache content changed');localFiles.set(fixed.path,{...entry});entry.path=fixed.path;entry.executable=fixed.executable;}
+    manifest.directories=[...directories].sort();manifest.files.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+    const raw=Buffer.from(JSON.stringify(manifest));if(raw.length>64*1024**2)fail('Git snapshot manifest exceeds 64 MiB');
+    const openEntry=scan.openEntry;scan.openEntry=entry=>openEntry(localFiles.get(entry.path));
+    scan.manifest=raw;scan.manifestSha256=createHash('sha256').update(raw).digest('hex');scan.files=manifest.files;scan.entries=manifest.files.length+manifest.directories.length;
     const verify=scan.verify;scan.verify=async()=>{await verify();await clean();if((await git(['rev-parse','--verify','--end-of-options',ref+'^{commit}'])).trim()!==commit)fail('Git ref changed; sync was not finalized');};
     return {...scan,source:{kind:'git',commit},cleanup:()=>rm(temporary,{recursive:true,force:true})};
   }catch(error){await rm(temporary,{recursive:true,force:true});throw error;}
