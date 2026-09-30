@@ -51,16 +51,27 @@ test('Windows installer validates before selecting an immutable release and roll
 
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 const probe = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8', timeout: 15000 });
-test('PowerShell offline installation, update and failure rollback', { skip: probe.error ? `${powershell} is not installed; run this test on Windows or a pwsh host` : false }, () => {
+function runOfflineHarness({ shortPath = false } = {}) {
   assert.equal(probe.status, 0, probe.stderr);
   const dir = mkdtempSync(join(tmpdir(), 'gpuq-windows-installer-'));
   try {
     const harness = fileURLToPath(new URL('./install-client-windows.ps1', import.meta.url));
     // -Command keeps the test independent of script-file execution policy, without changing it.
     const quote = value => `'${value.replaceAll("'", "''")}'`;
-    const command = `& ([scriptblock]::Create([IO.File]::ReadAllText(${quote(harness)}))) -Installer ${quote(installerPath)} -NodePath ${quote(process.execPath)} -TestRoot ${quote(dir)}`;
+    const command = `& ([scriptblock]::Create([IO.File]::ReadAllText(${quote(harness)}))) -Installer ${quote(installerPath)} -NodePath ${quote(process.execPath)} -TestRoot ${quote(dir)}${shortPath ? ' -ShortPathRegression' : ''}`;
     const run = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 90000 });
     assert.equal(run.status, 0, `${run.error || ''}\n${run.stdout}\n${run.stderr}`);
-    assert.match(run.stdout, /PASS: fake-download Windows installer lifecycle/);
+    return run.stdout;
   } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('PowerShell offline installation, update and failure rollback', { skip: probe.error ? `${powershell} is not installed; run this test on Windows or a pwsh host` : false }, () => {
+  assert.match(runOfflineHarness(), /PASS: fake-download Windows installer lifecycle/);
+});
+
+test('PowerShell lifecycle also accepts a real Windows 8.3 TEMP alias', { skip: process.platform !== 'win32' ? 'Requires Windows 8.3 filesystem paths' : probe.error ? 'Windows PowerShell is not installed' : false }, t => {
+  const output = runOfflineHarness({ shortPath: true });
+  if (output.includes('SKIP: this filesystem does not expose an 8.3 alias')) { t.skip('8.3 alias creation is disabled on this test filesystem'); return; }
+  assert.match(output, /TESTING: 8\.3 short-path installation root/);
+  assert.match(output, /PASS: fake-download Windows installer lifecycle/);
 });

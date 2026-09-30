@@ -1,10 +1,26 @@
 param(
     [Parameter(Mandatory = $true)][string]$Installer,
     [Parameter(Mandatory = $true)][string]$NodePath,
-    [Parameter(Mandatory = $true)][string]$TestRoot
+    [Parameter(Mandatory = $true)][string]$TestRoot,
+    [switch]$ShortPathRegression
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+if ($ShortPathRegression) {
+    if ($env:OS -ne 'Windows_NT') { throw '8.3 path regression requires Windows.' }
+    $filesystem = New-Object -ComObject Scripting.FileSystemObject
+    try { $shortRoot = $filesystem.GetFolder($TestRoot).ShortPath }
+    finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($filesystem) }
+    if ([string]::Equals($shortRoot, $TestRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Output 'SKIP: this filesystem does not expose an 8.3 alias for the test directory'
+        return
+    }
+    $TestRoot = $shortRoot
+    Write-Output 'TESTING: 8.3 short-path installation root'
+}
+# GitHub runners can supply TEMP through an 8.3 alias (for example RUNNER~1).
+# Normalize the existing parent before deriving expected paths for new children.
+$TestRoot = [IO.Path]::GetFullPath($TestRoot)
 . ([scriptblock]::Create([IO.File]::ReadAllText($Installer)))
 
 function Assert-True {
