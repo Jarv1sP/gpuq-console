@@ -108,6 +108,30 @@ export async function executionCall(service,principal,operation,args){
     if(result===undefined)fail('未知项目操作。');
     return result;
   }
+  if(operation.startsWith('datasets.workspace.')){
+    authorizedMachine(args.machine);
+    const action=operation.slice('datasets.workspace.'.length);
+    const fields={list:['path'],get:['path','offset'],put:['path','offset','data','truncate'],status:['operationId'],publish:['path','name','key']}[action];
+    if(!fields||Object.keys(args).some(k=>!['machine',...fields].includes(k)))fail('个人数据目录参数无效。');
+    const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+    if(action!=='status'){
+      const path=args.path??(action==='list'?'.':undefined);
+      if(typeof path!=='string'||!path||Buffer.byteLength(path)>1024||/[\\\x00-\x1f\x7f]/.test(path)||
+          (path!=='.'&&path.split('/').some(p=>!p||p==='.'||p==='..'||Buffer.byteLength(p)>255))||
+          (path==='.'&&['put','get','publish'].includes(action)))fail('请使用个人 /data2 内的相对路径，不要填写宿主机路径。');
+    }
+    if(args.offset!==undefined&&(!Number.isSafeInteger(args.offset)||args.offset<0||args.offset>100*1024**3))fail('文件偏移量无效。');
+    if(action==='put'){
+      if(!Number.isSafeInteger(args.offset)||args.truncate!==undefined&&typeof args.truncate!=='boolean'||args.truncate&&args.offset!==0)fail('上传偏移或覆盖参数无效。');
+      if(typeof args.data!=='string'||args.data.length>1398104||args.data.length%4!==0||/[^A-Za-z0-9+/=]/.test(args.data)||Buffer.from(args.data,'base64').toString('base64')!==args.data||Buffer.from(args.data,'base64').length>1024*1024)fail('上传分块最多 1 MiB，且需使用规范 Base64。');
+      if(args.offset+Buffer.from(args.data,'base64').length>100*1024**3)fail('单文件上限 100 GiB；更大文件请联系管理员本地导入。');
+    }
+    if(action==='publish'&&(!uuid.test(args.key||'')||typeof args.name!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(args.name)))fail('发布需提供连接键和有效的数据集名称。');
+    if(action==='status'&&args.operationId!==undefined&&!uuid.test(args.operationId))fail('发布操作编号无效。');
+    const {machine,...request}=args;
+    if(action==='publish')service.audit(principal.username,operation,machine,args.name);
+    return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
+  }
   if(operation.startsWith('datasets.upload.')){
     authorizedMachine(args.machine);
     const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId']};
@@ -159,7 +183,7 @@ export async function executionCall(service,principal,operation,args){
   if(['terminal.open','terminal.exchange','terminal.close','terminal.detach'].includes(operation)){
     authorizedMachine(args.machine);
     const opening=operation==='terminal.open',mode=args.mode||'new';
-    const allowed=['machine','id','hostAdmin','project','clientId','writerToken',...(opening?['key','mode','takeover']:operation==='terminal.exchange'?['input','offset','rows','cols']:[])];
+    const allowed=['machine','id','hostAdmin','project','dataWorkspace','clientId','writerToken',...(opening?['key','mode','takeover']:operation==='terminal.exchange'?['input','offset','rows','cols']:[])];
     if(Object.keys(args).some(k=>!allowed.includes(k)))fail('终端参数无效。');
     if(args.hostAdmin&&principal.role!=='admin')fail('宿主机 root 终端仅管理员可用。',403);
     const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -173,10 +197,12 @@ export async function executionCall(service,principal,operation,args){
     if(args.writerToken!==undefined&&(typeof args.writerToken!=='string'||!uuid.test(args.writerToken)))fail('终端写入凭据无效。');
     if(!opening&&args.writerToken===undefined)fail('缺少终端写入凭据；请显式重连。');
     if(args.hostAdmin!==undefined&&typeof args.hostAdmin!=='boolean')fail('终端模式无效。');
+    if(args.dataWorkspace!==undefined&&typeof args.dataWorkspace!=='boolean')fail('数据终端模式无效。');
     const project=projectReference(args);
     if(project.project&&args.hostAdmin)fail('项目终端与宿主机 root 维护入口分开使用。');
+    if(args.dataWorkspace&&(project.project||args.hostAdmin))fail('个人数据终端与项目、ROOT 终端分开使用。');
     if(args.input&&(typeof args.input!=='string'||args.input.length>12000))fail('终端输入过长。');
-    if(operation==='terminal.open')service.audit(principal.username,operation,args.machine,(args.hostAdmin?'host-root':'private')+':'+mode+(args.takeover?':takeover':''));
+    if(operation==='terminal.open')service.audit(principal.username,operation,args.machine,(args.hostAdmin?'host-root':args.dataWorkspace?'private-data':'private')+':'+mode+(args.takeover?':takeover':''));
     return service.bridge(args.machine,operation,{...args,userId:user.id,username:user.username,hostAdmin:args.hostAdmin===true});
   }
   if(operation==='jobs.submit'){
