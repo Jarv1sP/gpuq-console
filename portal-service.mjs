@@ -4,14 +4,15 @@ import {dirname} from 'node:path';
 import {createHash,randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {DemoService,credential} from './dist/service.js';
 import {readGPUQStatus,visibleGPUQStatus} from './gpuq-status.mjs';
-import {installExecution,executionCall,publicJob,usage,priorityCapable} from './execution.mjs';
+import {installExecution,executionCall,publicJob,usage,priorityCapable,priorityRankCapable} from './execution.mjs';
 import {MACHINES,validUsername} from './dist/model.js';
-import {installCommunity,communityCall} from './community.mjs';
+import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
+import {installJobNotifications} from './job-notifications.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
 export class PortalService extends DemoService{
-  static async open(path,bootstrapPath,statusPath,bridge){
+  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig){
     await mkdir(dirname(path),{recursive:true,mode:0o700});
     const service=new PortalService();service.production=true;service.tail=Promise.resolve();service.pending=0;
     service.terminalLanes=new Map();service.terminalPending=0;
@@ -39,7 +40,8 @@ export class PortalService extends DemoService{
     // Public registration never grants administrative authority.
     service.db.prepare("UPDATE invites SET enabled=0 WHERE role='admin'").run();
     for(const user of service.store.users)user.policyVersion??=0;
-    service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);
+    maintainTaskNotes(service);
+    service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installJobNotifications(service,notificationConfig);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -150,6 +152,7 @@ export class PortalService extends DemoService{
     return this.enqueue(async()=>{
     const principal=this.principal(token),actor=principal.username;
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    if(operation==='notifications.job')return {result:this.configureJobNotification(principal,args),state:this.state(principal)};
     if(typeof operation==='string'&&operation.startsWith('community.'))return {result:communityCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     // Execution writes its durable reservation before external side effects. Never
     // restore an older snapshot after a dispatch timeout (that would lose quota).
@@ -192,6 +195,6 @@ export class PortalService extends DemoService{
     }catch(e){this.restore(before);this.sessions=sessions;this.audit(actor,operation,args?.userId||args?.jobId,'denied');throw e;}
   });}
   async refreshGPUQ(){this.gpuq=await readGPUQStatus(this.statusPath);}
-  state(principal){const state=super.state(principal);const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));return {...state,jobs:state.jobs.map(j=>({...publicJob(j),canSetPriority:principal.role==='admin'&&capabilities[j.machine]===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&j.spec?.preemptIdleOnly===true})),demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};}
-  close(){this.closing=true;clearInterval(this.executionTimer);this.db.close();}
+  state(principal){const state=super.state(principal);const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));return {...state,jobs:state.jobs.map(j=>({...publicJob(j),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};}
+  close(){this.closing=true;clearInterval(this.executionTimer);clearInterval(this.notificationTimer);this.db.close();}
 }

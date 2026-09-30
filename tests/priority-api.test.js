@@ -9,7 +9,7 @@ import {MACHINES} from '../dist/model.js';
 import {usage} from '../execution.mjs';
 
 const password='Priority-Only-Test-Password-2026!';
-const CAPABILITIES=['priority-policy-v1','preempt-idle-only-v1'];
+const CAPABILITIES=['priority-policy-v1','preempt-idle-only-v1','priority-rank-v1'];
 const policy=priority=>({priority:{idle:0,normal:2,high:4}[priority],yield_policy:priority==='idle'?'now':'never',restart_policy:'never',dispatch_mode:'queue'});
 async function fixture(t){
   const dir=await mkdtemp(join(tmpdir(),'gpuq-priority-api-')),database=join(dir,'database'),bootstrap=join(dir,'bootstrap'),status=join(dir,'status');
@@ -24,7 +24,11 @@ async function fixture(t){
     if(handlers.has(operation))return handlers.get(operation)(machine,args);
     const id=args.job.id;
     if(!remote.has(id))remote.set(id,result(id,args.job.priority||'normal'));
-    if(operation==='priority')remote.set(id,result(id,args.priority));
+    if(operation==='priority'){
+      assert.equal(args.rankOnly,true);
+      const rank={idle:0,normal:2,high:4,P0:0,P1:1,P2:2,P3:3,P4:4}[args.priority];
+      remote.set(id,{...remote.get(id),priority:args.priority,schedulerPriority:rank,schedulerPolicy:{...remote.get(id).schedulerPolicy,priority:rank}});
+    }
     return structuredClone(remote.get(id));
   };
   let s=await PortalService.open(database,bootstrap,status,bridge);clearInterval(s.executionTimer);
@@ -41,6 +45,40 @@ async function fixture(t){
   };
 }
 
+test('rank edits preserve yield and restart and expose intermediate P1/P3',async t=>{
+  const f=await fixture(t),id=(await f.submit({priority:'idle'})).result.id;await f.settle();
+  for(const priority of ['P1','P3','high','normal']){
+    const updated=(await f.s.invoke(f.admin.token,'jobs.priority',{jobId:id,priority})).result;
+    assert.equal(updated.yieldPolicy,'now');
+    assert.equal(updated.restartPolicy,'never');
+    assert.equal(updated.dispatchMode,'queue');
+  }
+  assert.equal(f.s.store.jobs[0].spec.priority,'idle');
+});
+test('old capability cannot invoke the policy-changing fallback',async t=>{
+  const f=await fixture(t),id=(await f.submit({priority:'idle'})).result.id;await f.settle();
+  await f.snapshot({capabilities:['priority-policy-v1','preempt-idle-only-v1']});
+  await assert.rejects(f.s.invoke(f.admin.token,'jobs.priority',{jobId:id,priority:'high'}),e=>e.status===503);
+  assert.equal(f.calls.filter(c=>c.operation==='priority').length,0);
+});
+test('explicit scheduling jobs expose admin rank edits and preserve immutable save/resume policy',async t=>{
+  const f=await fixture(t),scheduling={rank:'P1',yieldPolicy:'save',restartPolicy:'on-preempt',checkpointable:true};
+  await f.snapshot({capabilities:[...CAPABILITIES,'console-yield-v1']});
+  const id=(await f.submit({scheduling})).result.id;await f.settle();
+  const remotePolicy={priority:1,yield_policy:'save',restart_policy:'on-preempt',dispatch_mode:'queue'};
+  f.remote.set(id,f.result(id,'P1',{schedulerPriority:1,schedulerPolicy:remotePolicy}));
+  await f.s.reconcile();
+  const job=f.s.store.jobs[0],spec=structuredClone(job.spec),digest=job.digest;
+  assert.equal((await f.s.invoke(f.admin.token,'state')).state.jobs[0].canSetPriority,true);
+  assert.equal((await f.s.invoke(f.user.token,'state')).state.jobs[0].canSetPriority,false);
+  await assert.rejects(f.s.invoke(f.user.token,'jobs.priority',{jobId:id,priority:'P3'}),e=>e.status===403);
+  for(const rank of ['P3','P0']){
+    const result=(await f.s.invoke(f.admin.token,'jobs.priority',{jobId:id,priority:rank})).result;
+    assert.equal(result.schedulerPriority,Number(rank[1]));assert.equal(result.yieldPolicy,'save');
+    assert.equal(result.restartPolicy,'on-preempt');assert.equal(result.dispatchMode,'queue');
+  }
+  assert.deepEqual(job.spec,spec);assert.equal(job.digest,digest);assert.equal(usage(f.s.store.jobs,f.member.id),1);
+});
 test('members can submit idle/normal but cannot submit high or alter anyone’s priority',async t=>{
   const f=await fixture(t);
   await assert.rejects(f.submit({priority:'high'}),error=>error.status===403);

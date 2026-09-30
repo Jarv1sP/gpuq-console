@@ -212,7 +212,7 @@ class Resources(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertIsNone(S.finish_job_capture(broken, self.root, JOB, identifier, 42))
 
-    def runner_command(self, terminal=False, managed_runtime=False, data_workspace=False, allocated_cards=8):
+    def runner_command(self, terminal=False, managed_runtime=False, data_workspace=False, training_control=False, allocated_cards=8):
         """Execute trusted runner orchestration with fake children, never bwrap/GPU."""
         job = {**JOB, 'userId': 'demo-user-1', 'username': 'demo', 'argv': ['python', 'train.py']}
         if data_workspace:job['dataWorkspace']=True
@@ -229,7 +229,9 @@ class Resources(unittest.TestCase):
         spec_dir.mkdir()
         spec_file = spec_dir / (JOB['id'] + '.json')
         spec_file.write_text(json.dumps(job))
-        (self.root / 'node-config.json').write_text(json.dumps({'root': str(self.root), 'conda': '/opt/conda'}))
+        config={'root':str(self.root),'conda':'/opt/conda'}
+        if training_control:config.update(controlRoot=str(self.root/'not-for-terminals'),gpuqArchive=str(self.root/'must-not-mount-sdk.pyz'),trainingControlProtocol=1)
+        (self.root / 'node-config.json').write_text(json.dumps(config))
         captured, properties, kept = [], [], []
         path_exists, path_read = Path.exists, Path.read_text
         def exists(path):
@@ -335,12 +337,16 @@ class Resources(unittest.TestCase):
         self.assertIn(datafd,options['pass_fds'])
         self.assertNotIn(datalock,options['pass_fds'])
         self.assertNotIn('--dev-bind',args)
+        self.assertNotIn('/run/gpuq/control',args)
+        self.assertNotIn('/opt/gpuq/sdk.pyz',args)
+        env={args[i+1]:args[i+2] for i,value in enumerate(args) if value=='--setenv'}
+        self.assertNotIn('GPUQ_CONTROL_DIR',env);self.assertNotIn('PYTHONPATH',env)
         self.assertIn(['--chdir','/data2'],[args[i:i+2] for i in range(len(args)-1)])
         for descriptor in self.data_descriptors:
             with self.assertRaises(OSError):os.fstat(descriptor)
 
     def test_data_terminal_mounts_only_private_fd_without_gpu_or_lock_escape(self):
-        (args,options),_=self.runner_command(terminal=True,data_workspace=True)
+        (args,options),_=self.runner_command(terminal=True,data_workspace=True,training_control=True)
         self.data_mount_assertions(args,options)
 
     def test_common_p0_data_terminal_has_identical_private_mount_boundary(self):
@@ -348,7 +354,7 @@ class Resources(unittest.TestCase):
         original=S
         try:
             S=module('common_p0_data_runner_test','sandbox-runner-common-p0.py')
-            (args,options),_=self.runner_command(terminal=True,data_workspace=True)
+            (args,options),_=self.runner_command(terminal=True,data_workspace=True,training_control=True)
             self.data_mount_assertions(args,options)
         finally:S=original
 

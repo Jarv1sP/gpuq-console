@@ -1,4 +1,5 @@
 import {createJobDiagnostics} from './job-diagnostics-ui.js';
+import {jobProgressHTML,jobNotificationHTML} from './job-progress-ui.js';
 import {yieldCapable} from './scheduling-policy.js';
 import {schedulingFields,schedulingFromForm,schedulingSummary} from './scheduling-ui.js';
 import {elasticCapable,placementCapable} from './gpu-allocation.js';
@@ -12,6 +13,11 @@ export function priorityLabel(value){return priorities[value]?.label||(Number.is
 export function priorityOptions(admin=false,selected='normal'){return ['normal','idle',...(admin?['high']:[])].map(value=>`<option value="${value}" ${value===selected?'selected':''}>${priorities[value].label}</option>`).join('');}
 export function trainingPriority(value,admin=false){if(!Object.hasOwn(priorities,value)||value==='high'&&!admin)throw Error('请选择允许的任务优先级；高优先级仅供管理员使用。');return value;}
 export function priorityDescription(value){return priorities[value]?.description||'优先级尚未确认。';}
+const rankLabels=['P0 最低','P1 低','P2 普通','P3 较高','P4 最高'];
+export function priorityRankOptions(selected){return ['idle','P1','normal','P3','high'].map((value,i)=>`<option value="${value}" ${value===selected?'selected':''}>${rankLabels[i]}</option>`).join('');}
+export function priorityRankValue(value){if(!['idle','P1','normal','P3','high','P0','P2','P4'].includes(value))throw Error('请选择 P0–P4 排队等级。');return value;}
+export function priorityRankLabel(job){return job.priority!=null&&Number.isInteger(job.schedulerPriority)&&job.schedulerPriority>=0&&job.schedulerPriority<=4?rankLabels[job.schedulerPriority]:priorityLabel(job.priority);}
+export function schedulingContractLabel(policy){if(!policy)return '让位/恢复策略未确认';return `${({never:'不让位',now:'允许立即让位',save:'保存后让位',legacy:'旧版让位策略'})[policy.yield_policy]||'让位方式未知'} · ${policy.restart_policy==='on-preempt'?'被抢占后重新排队':policy.restart_policy==='never'?'被抢占后不重排':'重启方式未知'}`;}
 export function sampleTime(value){
   const date=typeof value==='number'?new Date(value*1000):new Date(value);
   return value!==null&&value!==undefined&&value!==''&&Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{hour12:false}):'未提供';
@@ -94,7 +100,7 @@ export function executionUI(store,refresh,toast){
     const release=query('[name=release]');release.disabled=!project||locked||!readyReleases(info).length;
     const custom=query('[name=custom-policy]'),customOn=custom.checked;
     custom.disabled=!available||locked;
-    for(const name of ['queue-rank','yield-policy','restart-policy','checkpointable'])query(`[name=${name}]`).disabled=!available||locked||!customOn;
+    for(const name of ['queue-rank','yield-policy','restart-policy','checkpointable','request-mode'])query(`[name=${name}]`).disabled=!available||locked||!customOn;
     query('#custom-policy-note').textContent=customAvailable()?'等级与让位独立。只抢占严格低等级且明确允许让位的任务；保存失败或超时不会强制杀掉保存任务。':'节点尚未确认训练控制通道，不能提交自定义策略；不会自动降级。';
     const elastic=query('[name=elastic]'),elasticOn=elastic.checked;
     elastic.disabled=!available||locked;
@@ -172,13 +178,18 @@ export function executionUI(store,refresh,toast){
     const button=event.target.closest('button');if(!button||button.disabled)return;
     if(button.dataset.useMachine&&section&&actor)queueMicrotask(()=>selectMachine(button.dataset.useMachine).catch(error=>toast(error.message)));
     if(button.dataset.jobLogs)guarded(button,()=>diagnostics.openLogs(button.dataset.jobLogs));
+    if(button.dataset.jobNotify)guarded(button,async()=>{
+      const job=store.jobs.find(item=>item.id===button.dataset.jobNotify);
+      if(!job||job.userId!==store.principal?.userId)throw Error('只能订阅自己的任务。');
+      const enabled=job.notifications?.enabled!==true;
+      await call('notifications.job',{jobId:job.id,enabled});refresh();toast(enabled?'Telegram 任务通知已开启。':'Telegram 任务通知已关闭。');
+    });
     if(button.dataset.jobCancel&&window.confirm('取消这个训练任务？已保存的文件保留，确认停止后才释放额度。'))guarded(button,async()=>{await call('jobs.cancel',{jobId:button.dataset.jobCancel});refresh();toast('已请求取消；等待 GPUQ 确认释放。');});
     if(button.dataset.jobPrioritySave)guarded(button,async()=>{
       if(store.principal?.role!=='admin')throw Error('只有管理员可以调整排队任务优先级。');
       const jobId=button.dataset.jobPrioritySave,job=store.jobs.find(item=>item.id===jobId),control=button.closest('[data-priority-editor]')?.querySelector('select');
       if(!job||!canEditPriority(job,true)||!control)throw Error('任务已不在可调整的队列状态，请刷新后核对。');
-      const priority=trainingPriority(control.value,true);if(priority===job.priority){toast('优先级未改变。');return;}
-      if(priority==='idle'&&!window.confirm('将这个排队任务设为最低、允许中断？后续让位会结束进程，已写入的输出保留，不自动恢复训练。'))return;
+      const priority=priorityRankValue(control.value);if(priority===job.priority){toast('优先级未改变。');return;}
       await call('jobs.priority',{jobId,priority,expectedPriority:control.dataset.originalPriority});control.dataset.originalPriority=priority;refresh();toast('已请求调整优先级；以下次调度核对结果为准。');
     });
     if(button.id==='close-job-log')log.close();
@@ -210,6 +221,7 @@ export function executionUI(store,refresh,toast){
       const customOn=query('[name=custom-policy]').checked;
       if(customOn&&!customAvailable())throw Error('节点未接通训练控制通道，不能降级提交。');
       const scheduling=customOn?schedulingFromForm(form,store.principal?.role==='admin'):null;
+      if(scheduling?.mode&&scheduling.mode!=='queue'&&!store.data?.gpuq?.hosts?.find(h=>h.id===machine)?.gpuq?.capabilities?.includes('preempt-opt-in-only-v1'))throw Error('节点未接通抢占模式，请先升级。');
       const elastic=elasticFromForm(form,Number(form.get('cards')),scheduling);
       if(customOn&&!scheduling)throw Error('请重新核对自定义调度选项。');
       const priority=customOn?'normal':trainingPriority(form.get('priority'),store.principal?.role==='admin');if(!customOn&&priority!=='normal'&&!priorityAvailable())throw Error('尚未确认这台服务器支持优先级控制，请刷新核对或明确选择普通优先级。');
@@ -223,7 +235,7 @@ export function executionUI(store,refresh,toast){
     if(name==='workspace-project')selectProject(event.target.value);
     if(name==='release'){query('#release-full').textContent=event.target.value;query('#release-full').title=event.target.value;submitKey=crypto.randomUUID();updateControls();}
     if(name==='priority'){submitKey=crypto.randomUUID();updateControls();}
-    if(['custom-policy','queue-rank','yield-policy','restart-policy','checkpointable','elastic','auto-expand'].includes(name)){submitKey=crypto.randomUUID();updateControls();}
+    if(['custom-policy','queue-rank','yield-policy','restart-policy','checkpointable','request-mode','elastic','auto-expand'].includes(name)){submitKey=crypto.randomUUID();updateControls();}
     if(name==='file-area'){query('[name=file-path]').value='.';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('#workspace-result').textContent='已切换文件区域。';updateControls();}
     if(name==='file-run')query('[name=file-run-id]').value=event.target.value;
   });
@@ -251,8 +263,8 @@ export function executionUI(store,refresh,toast){
   };
 }
 
-export function canEditPriority(job,admin=false){return admin&&job.canSetPriority===true&&['PENDING','QUEUED'].includes(job.state)&&!job.cancelRequested&&Object.hasOwn(priorities,job.priority);}
-export function taskTable(jobs,{admin=false,userId}={}){return `<div class="live-table-wrap task-table-wrap"><table class="live-table task-table"><caption class="sr-only">训练任务、优先级与最近调度结果</caption><thead><tr><th>任务 / 用户</th><th>机器 / 卡数</th><th>状态</th><th>优先级 / 调度</th><th>操作</th></tr></thead><tbody>${[...jobs].reverse().map(job=>`<tr><td data-label="任务 / 用户"><strong>${escape(job.name)}</strong><small>${escape(job.username)} · ${escape(job.id)}</small>${job.project?`<small>${escape(job.project)} · ${escape(job.release||'')}</small>`:''}</td><td data-label="机器 / 卡数">${escape(job.machine)}${allocationSummary(job)}${placementSummary(job)}</td><td data-label="状态"><span class="task-state">${escape(taskStateLabel(job))}</span><small>${escape(job.state)}${job.cancelRequested&&!terminal.has(job.state)?' · 正在取消':''}</small>${job.preempted?'<small>已写入的输出保留，不自动恢复。</small>':''}${job.error?`<small class="task-error">${escape(job.error)}</small>`:''}</td><td data-label="优先级 / 调度"><span class="priority-pill priority-${Object.hasOwn(priorities,job.priority)?job.priority:'unknown'}">${escape(priorityLabel(job.priority))}</span>${schedulingSummary(job)}${Number.isInteger(job.schedulerPriority)?`<small>节点优先级：P${escape(job.schedulerPriority)}</small>`:''}<small>调度状态：${escape(job.schedulerState||'未提供')}</small><small class="queue-reason">${escape(job.queueReason||'暂无调度说明。')}</small><small class="scheduler-time">核对时间：${escape(sampleTime(job.schedulerCheckedAt))}</small>${canEditPriority(job,admin)?`<div class="priority-editor" data-priority-editor><label><span class="sr-only">${escape(job.name)} 的排队优先级</span><select data-job-priority="${escape(job.id)}" data-original-priority="${escape(job.priority)}">${priorityOptions(true,job.priority)}</select></label><button class="button" data-job-priority-save="${escape(job.id)}">保存</button></div>`:''}</td><td data-label="操作"><div class="task-actions"><button class="button" data-job-logs="${escape(job.id)}">日志</button>${job.project&&(!userId||job.userId===userId)?`<button class="button" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button danger" data-job-cancel="${escape(job.id)}" ${terminal.has(job.state)||job.cancelRequested?'disabled':''}>取消</button></div></td></tr>`).join('')||'<tr><td colspan="5" class="task-empty">暂无任务。先选择服务器，准备代码，再提交训练。</td></tr>'}</tbody></table></div>`;}
+export function canEditPriority(job,admin=false){return admin&&job.canSetPriority===true&&['PENDING','QUEUED'].includes(job.state)&&!job.cancelRequested&&['idle','P1','normal','P3','high'].includes(job.priority);}
+export function taskTable(jobs,{admin=false,userId}={}){return `<div class="live-table-wrap task-table-wrap"><table class="live-table task-table"><caption class="sr-only">训练任务、优先级与最近调度结果</caption><thead><tr><th>任务 / 用户</th><th>机器 / 卡数</th><th>状态</th><th>优先级 / 调度</th><th>操作</th></tr></thead><tbody>${[...jobs].reverse().map(job=>`<tr><td data-label="任务 / 用户"><strong>${escape(job.name)}</strong><small>${escape(job.username)} · ${escape(job.id)}</small>${job.project?`<small>${escape(job.project)} · ${escape(job.release||'')}</small>`:''}</td><td data-label="机器 / 卡数">${escape(job.machine)}${allocationSummary(job)}${placementSummary(job)}</td><td data-label="状态"><span class="task-state">${escape(taskStateLabel(job))}</span><small>${escape(job.state)}${job.cancelRequested&&!terminal.has(job.state)?' · 正在取消':''}</small>${job.preempted?'<small>已写入的输出保留，不自动恢复。</small>':''}${job.error?`<small class="task-error">${escape(job.error)}</small>`:''}${jobProgressHTML(job)}</td><td data-label="优先级 / 调度"><span class="priority-pill priority-${Object.hasOwn(priorities,job.priority)?job.priority:'unknown'}">${escape(priorityRankLabel(job))}</span>${schedulingSummary(job)}${Number.isInteger(job.schedulerPriority)?`<small>节点优先级：P${escape(job.schedulerPriority)}</small>`:''}<small>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</small><small>调度状态：${escape(job.schedulerState||'未提供')}</small><small class="queue-reason">${escape(job.queueReason||'暂无调度说明。')}</small><small class="scheduler-time">核对时间：${escape(sampleTime(job.schedulerCheckedAt))}</small>${canEditPriority(job,admin)?`<div class="priority-editor" data-priority-editor><label><span class="sr-only">${escape(job.name)} 的排队优先级</span><select data-job-priority="${escape(job.id)}" data-original-priority="${escape(job.priority)}">${priorityRankOptions(job.priority)}</select></label><button class="button" data-job-priority-save="${escape(job.id)}">保存优先级</button><small>仅改排队顺序，不改变让位和重启方式。</small></div>`:''}</td><td data-label="操作"><div class="task-actions">${jobNotificationHTML(job,userId)}<button class="button" data-job-logs="${escape(job.id)}">日志</button>${job.project&&(!userId||job.userId===userId)?`<button class="button" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button danger" data-job-cancel="${escape(job.id)}" ${terminal.has(job.state)||job.cancelRequested?'disabled':''}>取消</button></div></td></tr>`).join('')||'<tr><td colspan="5" class="task-empty">暂无任务。先选择服务器，准备代码，再提交训练。</td></tr>'}</tbody></table></div>`;}
 export function renderTaskTable(container,jobs,options={}){
   const drafts=new Map([...container.querySelectorAll('[data-job-priority]')].filter(input=>input.value!==input.dataset.originalPriority).map(input=>[input.dataset.jobPriority,{value:input.value,original:input.dataset.originalPriority}]));
   const active=container.ownerDocument.activeElement,focus=active?.dataset?.jobPriority?['jobPriority',active.dataset.jobPriority]:active?.dataset?.jobPrioritySave?['jobPrioritySave',active.dataset.jobPrioritySave]:null;

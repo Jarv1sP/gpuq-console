@@ -249,7 +249,7 @@ def probe_gpuq():
             output = {
                 "connected": True, "health": daemon.get("health", "unknown"),
                 "observeOnly": daemon.get("observe_only"),
-                "capabilities": [c for c in (daemon.get('capabilities') if isinstance(daemon.get('capabilities'), list) else []) if c in ('priority-policy-v1','preempt-idle-only-v1','elastic-batch-v1','gpu-placement-v1','gpu-sharing-v1')],
+                "capabilities": [c for c in (daemon.get('capabilities') if isinstance(daemon.get('capabilities'), list) else []) if c in ('priority-policy-v1','preempt-idle-only-v1','priority-rank-v1','preempt-opt-in-only-v1','elastic-batch-v1','gpu-placement-v1','gpu-sharing-v1')],
                 "schedulableIndices": daemon.get("schedulable_gpu_indices", []),
                 "jobs": [{key: job.get(key) for key in allowed} for job in jobs[:100] if isinstance(job, dict)],
                 "limit": 100,

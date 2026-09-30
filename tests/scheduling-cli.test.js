@@ -23,10 +23,11 @@ test('standalone downloaded CLI sends canonical scheduling and preserves argv af
   assert.equal(submit.key,key);assert.equal(Object.hasOwn(submit,'priority'),false);
   assert.deepEqual(submit.argv,['python','train.py','--rank','123']);
   assert.equal((await run(args)).code,0);assert.equal(calls.filter(x=>x.operation==='jobs.submit').at(-1).args.key,key);
-  const elasticArgs=['run','-g','8','--min-cards','1','--global-batch','256','--micro-batch','8','--auto-expand','--rank','P1','--yield','save','--checkpointable','--restart-policy','on-preempt','--','python','train.py','--auto-expand'];
+  const elasticArgs=['run','-g','8','--min-cards','1','--global-batch','256','--micro-batch','8','--auto-expand','--rank','P1','--yield','save','--checkpointable','--restart-policy','on-preempt','--mode','preempt1','--','python','train.py','--auto-expand'];
   assert.equal((await run(elasticArgs)).code,0);
   const elasticSubmit=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
   assert.deepEqual(elasticSubmit.elastic,{minCards:1,globalBatch:256,microBatch:8,autoExpand:true});
+  assert.equal(elasticSubmit.scheduling.mode,'preempt-save');
   assert.deepEqual(elasticSubmit.argv,['python','train.py','--auto-expand']);
   assert.equal((await run(['run','--gpu','2,0','--','python','train.py'])).code,0);
   let selected=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
@@ -34,7 +35,13 @@ test('standalone downloaded CLI sends canonical scheduling and preserves argv af
   assert.equal((await run(['run','--gpu','3','--share','--vram-mib','4096','--hami','--sm-percent','50','--','python','small.py'])).code,0);
   selected=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
   assert.equal(selected.cards,1);assert.deepEqual(selected.placement,{gpuIndices:[3],shared:true,vramMiB:4096,hami:true,smPercent:50});
+  for(const [mode,canonical] of [['queue',null],['preempt1','preempt-save'],['preempt2','preempt-now'],['preempt-save','preempt-save'],['preempt-now','preempt-now']]){
+    assert.equal((await run(['run','--mode',mode,'--','python','urgent.py','--mode','literal-training-arg'])).code,0,mode);
+    const request=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
+    assert.deepEqual(request.argv,['python','urgent.py','--mode','literal-training-arg']);
+    if(canonical)assert.equal(request.scheduling.mode,canonical);else assert.equal(Object.hasOwn(request.scheduling,'mode'),false);
+  }
   const count=calls.length;
-  for(const invalid of [['jobs','--gpu','3'],['jobs','--hami'],['jobs','--auto-expand'],['jobs','--min-cards','1'],['jobs','--rank','P1'],['run','--yield','save','--','python'],['run','--yield','now','--restart-policy','on-preempt','--','python'],['run','--rank','P1','--priority','idle','--','python']])assert.notEqual((await run(invalid)).code,0);
+  for(const invalid of [['jobs','--gpu','3'],['jobs','--hami'],['jobs','--auto-expand'],['jobs','--min-cards','1'],['jobs','--rank','P1'],['run','--yield','save','--','python'],['run','--yield','now','--restart-policy','on-preempt','--','python'],['run','--rank','P1','--priority','idle','--','python'],['run','--mode','bad','--','python'],['jobs','--mode','queue']])assert.notEqual((await run(invalid)).code,0);
   assert.equal(calls.length,count,'invalid options fail before any request');
 });

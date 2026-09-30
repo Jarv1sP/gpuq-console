@@ -9,6 +9,7 @@ import {MACHINES} from '../dist/machines.js';
 
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-priority-ui',errors=[],blocked=[],calls=[];
 const [machine,legacy]=MACHINES.map(item=>item.id),checkedAt='2026-09-29T08:00:00Z';
+const ranks={idle:0,P1:1,normal:2,P3:3,high:4};
 const baseJob={machine,cards:1,schedulerCheckedAt:checkedAt,schedulerState:'PENDING',queueReason:'等待空闲 GPU；已有普通任务不会自动中断。',state:'PENDING',priority:'normal',schedulerPriority:2,canSetPriority:true};
 const jobs=[{...baseJob,id:'queue-1',userId:'admin',username:'admin',name:'长名称训练任务 / priority draft fixture'},
   {...baseJob,id:'running-1',userId:'member',username:'member',name:'normal-running',state:'RUNNING',schedulerState:'RUNNING',queueReason:'任务正在运行',canSetPriority:false},
@@ -40,7 +41,7 @@ try{
         const job=jobs.find(item=>item.id===args.jobId);
         if(role!=='admin'||!job?.canSetPriority){status=403;error='排队优先级不可修改';}
         else if(job.priority!==args.expectedPriority){status=409;error='优先级已改变，请刷新并重新选择。';}
-        else{job.priority=args.priority;job.schedulerPriority={idle:0,normal:2,high:4}[args.priority];result=job;}
+        else{job.priority=args.priority;job.schedulerPriority=ranks[args.priority];result=job;}
       }else if(operation!=='state'){status=400;error='Unexpected mock operation: '+operation;}
       return route.fulfill({status,contentType:'application/json',body:JSON.stringify(error?{error}:{result,state:state(),principal})});
     });
@@ -73,6 +74,14 @@ try{
   let saved=responseFor(admin,'jobs.priority');await admin.locator('#all-jobs [data-job-priority-save="queue-1"]').click();assert.equal((await saved).status(),409);assert.equal(await select.inputValue(),'high');assert.match(await admin.locator('#toast').textContent(),/已改变/);
   jobs[0].priority='normal';await refresh(admin);saved=responseFor(admin,'jobs.priority');await admin.locator('#all-jobs [data-job-priority-save="queue-1"]').click();assert.equal((await saved).status(),200);assert.equal(jobs[0].priority,'high');
   assert.deepEqual(calls.findLast(item=>item.operation==='jobs.priority').args,{jobId:'queue-1',priority:'high',expectedPriority:'normal'});
+  let dialogs=0;admin.on('dialog',dialog=>{dialogs++;dialog.dismiss();});
+  for(const rank of ['P1','P3','idle']){
+    await refresh(admin);const expected=jobs[0].priority;await select.selectOption(rank);
+    const updated=responseFor(admin,'jobs.priority');await admin.locator('#all-jobs [data-job-priority-save="queue-1"]').click();
+    assert.equal((await updated).status(),200);assert.equal(jobs[0].priority,rank);assert.equal(jobs[0].schedulerPriority,ranks[rank]);
+    assert.deepEqual(calls.findLast(item=>item.operation==='jobs.priority').args,{jobId:'queue-1',priority:rank,expectedPriority:expected});
+  }
+  assert.equal(dialogs,0,'rank edits do not request consent to change yielding');
   await capture(admin,'priority-admin-desktop.png');await admin.setViewportSize({width:390,height:844});await capture(admin,'priority-admin-mobile.png');assert.ok(await admin.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   const oldAdmin=await open('admin',null);await selectMachine(oldAdmin,machine);await oldAdmin.locator('#train-form').evaluate(form=>form.closest('details').open=true);
   for(const priority of ['idle','high'])assert.equal(await oldAdmin.locator('[name=priority] option[value='+priority+']').evaluate(node=>node.disabled),true);

@@ -50,6 +50,26 @@ class ExplicitPolicy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'not ready'):self.node.process('sync',{'job':self.job})
         self.assertNotIn('submit',[cmd[0] for cmd in self.commands])
 
+    def test_requester_mode_requires_live_native_scope_capability(self):
+        request={**self.job,'scheduling':{**self.policy,'mode':'preempt-now'}}
+        with patch.object(self.node.SCHEDULING,'ready',return_value=True),self.assertRaisesRegex(ValueError,'capability'):
+            self.node.process('sync',{'job':request})
+        self.assertNotIn('submit',[cmd[0] for cmd in self.commands])
+
+    def test_requester_mode_is_forwarded_with_native_opt_in_guard(self):
+        commands=self.commands
+        original=self.node.run
+        def run(command,**kwargs):
+            if command[2]=='status':
+                commands.append(command[2:]);return json.dumps({'daemon':{'capabilities':['priority-policy-v1','preempt-idle-only-v1','preempt-opt-in-only-v1']}})
+            return original(command,**kwargs)
+        request={**self.job,'scheduling':{**self.policy,'mode':'preempt-save'}}
+        with patch.object(self.node.SCHEDULING,'ready',return_value=True),patch.object(self.node,'run',side_effect=run):
+            self.node.process('sync',{'job':request})
+        submitted=next(cmd for cmd in commands if cmd[0]=='submit')
+        self.assertEqual(submitted[submitted.index('-m')+1],'preempt-save')
+        self.assertIn('--preempt-opt-in-only',submitted);self.assertIn('--checkpointable',submitted)
+
     def test_node_rejects_mixed_or_incomplete_contract(self):
         for policy in ({**self.policy,'checkpointable':False},{**self.policy,'yieldPolicy':'now'},{**self.policy,'rank':'P5'},{'rank':'P1'}):
             with self.subTest(policy=policy),self.assertRaises(ValueError):self.node.validate_job({**self.job,'scheduling':policy})
