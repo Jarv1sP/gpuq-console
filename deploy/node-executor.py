@@ -22,6 +22,7 @@ DIAGNOSTICS=None
 policy_module=importlib.util.spec_from_file_location('gpuq_console_scheduling',HERE/'scheduling-policy.py')
 SCHEDULING=importlib.util.module_from_spec(policy_module);policy_module.loader.exec_module(SCHEDULING)
 PRIORITIES=SCHEDULING.PRIORITY_PRESETS
+PRIORITY_RANKS={'idle':0,'normal':2,'high':4,**{'P'+str(i):i for i in range(5)}}
 
 def job_diagnostics(job,data):
     global DIAGNOSTICS
@@ -45,16 +46,17 @@ def host_command(operation,args):
         ADMIN_COMMAND=importlib.util.module_from_spec(spec);sys.modules[spec.name]=ADMIN_COMMAND;spec.loader.exec_module(ADMIN_COMMAND)
     return ADMIN_COMMAND.process(CONFIG,operation,args)
 
-def priority_capability():
+def priority_capability(rank_only=False):
     capabilities=gpu('status').get('daemon',{}).get('capabilities',[])
     if not isinstance(capabilities,list) or not all(c in capabilities for c in ('priority-policy-v1','preempt-idle-only-v1')):
         raise ValueError('Scheduler priority capability is not available; no policy was changed')
+    if rank_only and 'priority-rank-v1' not in capabilities:
+        raise ValueError('Scheduler rank-only capability is not available; refusing a policy-changing fallback')
 
 def scheduling_status(job,data):
     state=data.get('job',data);attempts=data.get('attempts',[])
     policy={k:state.get(k) for k in ('priority','yield_policy','restart_policy','dispatch_mode')}
-    priority=next((name for name,(level,yield_policy) in PRIORITIES.items() if
-                   policy=={'priority':level,'yield_policy':yield_policy,'restart_policy':'never','dispatch_mode':'queue'}),None)
+    priority=next((name for name,level in PRIORITY_RANKS.items() if policy['priority']==level),None)
     # Classification never rewrites an old task. Editing is only enabled for
     # explicit new Console jobs whose persistent scheduler scope is verified.
     mutable=state.get('state')=='PENDING' and job.get('preemptIdleOnly') is True and state.get('preempt_idle_only') is True
@@ -321,13 +323,27 @@ def dataset_unit_stopped(attempt):
         return fields.get('populated')=='0'
     except (OSError,ValueError,subprocess.SubprocessError):return False
 
+def scheduler_terminal_confirmed(data):
+    """A cancel receipt is not evidence that its attempt/leases have drained.
+
+    Native GPUQ finalizes an attempt and releases its leases atomically. All
+    jobs, including jobs without datasets and intentionally shared GPUs, use
+    that same proof before the Portal may retire their card reservation.
+    """
+    if not isinstance(data,dict):return False
+    native=data.get('job');attempts=data.get('attempts');leases=data.get('leases');reservations=data.get('scale_up_reservations')
+    if not isinstance(native,dict) or native.get('state') not in ('SUCCEEDED','FAILED','CANCELED'):return False
+    if native.get('active_attempt_id') not in (None,'') or data.get('active_attempt_id') not in (None,''):return False
+    if not isinstance(attempts,list) or not isinstance(leases,list) or leases or not isinstance(reservations,list) or reservations:return False
+    return all(isinstance(a,dict) and a.get('state') in ('EXITED_SUCCESS','EXITED_FAILURE','CANCELED','PREEMPTED') for a in attempts)
+
 def release_datasets(job,data=None,never_dispatched=False):
     if not dataset_refs(job):return True
     filename=ROOT/'jobs'/(job['id']+'.datasets.json')
     if not filename.exists():return True
     if not never_dispatched:
-        if not isinstance(data,dict) or data.get('job',data).get('state') not in ('SUCCEEDED','FAILED','CANCELED'):return False
-        if not isinstance(data.get('attempts'),list) or not all(dataset_unit_stopped(attempt) for attempt in data['attempts']):return False
+        if not scheduler_terminal_confirmed(data):return False
+        if not all(dataset_unit_stopped(attempt) for attempt in data['attempts']):return False
     module,cache=dataset_cache();leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
     for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
     filename.unlink();return True
@@ -607,7 +623,7 @@ def process(operation,args):
     if operation.startswith('files.') and operation in ('files.list','files.put','files.get'):
         return projects().files(operation,args) if args.get('project') else file_op(operation,args)
     if operation not in ('sync','cancel','logs','priority'):raise ValueError('Unknown operation')
-    if not isinstance(args,dict) or set(args)-({'job','priority','expected'} if operation=='priority' else {'job'}):raise ValueError('Invalid job operation fields')
+    if not isinstance(args,dict) or set(args)-({'job','priority','expected','rankOnly'} if operation=='priority' else {'job'}):raise ValueError('Invalid job operation fields')
     job=args['job'];policy=validate_job(job);jid=job['id']
     (ROOT/'jobs').mkdir(parents=True,exist_ok=True,mode=0o700)
     with open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
@@ -647,11 +663,12 @@ def process(operation,args):
         data=gpu('show',node_id);state=data.get('job',data)
         if operation=='priority':
             expected=args.get('expected');priority=args.get('priority')
-            if not isinstance(priority,str) or priority not in PRIORITIES or not isinstance(expected,dict) or set(expected)!={'priority','yield_policy','restart_policy','dispatch_mode'}:raise ValueError('Invalid expected priority policy')
+            if args.get('rankOnly') is not True:raise ValueError('Rank-only priority update required; upgrade the portal before editing priorities')
+            if not isinstance(priority,str) or priority not in PRIORITY_RANKS or not isinstance(expected,dict) or set(expected)!={'priority','yield_policy','restart_policy','dispatch_mode'}:raise ValueError('Invalid expected priority policy')
             if not scheduling_status(job,data)['priorityMutable']:raise ValueError('Only pending safe-policy Console jobs can change priority')
             if expected!={k:state.get(k) for k in expected}:raise ValueError('Priority changed; refresh before retrying')
-            priority_capability()
-            gpu('set-priority',node_id,priority,'--expected-priority','P'+str(expected['priority']),
+            priority_capability(rank_only=True)
+            gpu('set-rank',node_id,'P'+str(PRIORITY_RANKS[priority]),'--expected-priority','P'+str(expected['priority']),
                 '--expected-yield',expected['yield_policy'],'--expected-restart-policy',expected['restart_policy'],'--expected-mode',expected['dispatch_mode'])
             data=gpu('show',node_id);state=data.get('job',data)
         if operation=='logs':
@@ -661,6 +678,9 @@ def process(operation,args):
             gpu('cancel',node_id);data=gpu('show',node_id);state=data.get('job',data)
         attempts=data.get('attempts',[])
         assigned=attempts[0].get('gpu_indices',[]) if attempts and state['state'] not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
+        if state['state'] in ('SUCCEEDED','FAILED','CANCELED') and not scheduler_terminal_confirmed(data):
+            return {'nodeJobId':node_id,'state':'UNKNOWN','assignedIndices':attempts[0].get('gpu_indices',[]) if attempts else [],
+                    **scheduling_status(job,data),'error':'Job termination is not fully confirmed; card reservation retained'}
         if dataset_refs(job) and state['state'] in ('SUCCEEDED','FAILED','CANCELED') and not release_datasets(job,data):
             return {'nodeJobId':node_id,'state':'UNKNOWN','assignedIndices':assigned,'error':'Job termination is not fully confirmed; dataset leases retained'}
         return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data)}

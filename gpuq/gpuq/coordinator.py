@@ -4571,6 +4571,8 @@ class Coordinator:
                 return self._api_retry(arguments)
             if operation == "set_priority":
                 return self._api_set_priority(arguments)
+            if operation == "set_priority_rank":
+                return self._api_set_priority(arguments, rank_only=True)
             if operation == "log_path":
                 return self._api_log_path(arguments)
             if operation == "events":
@@ -4792,7 +4794,7 @@ class Coordinator:
         return {
             "daemon": {
                 **self._health_payload(),
-                "capabilities": ["priority-policy-v1", "preempt-idle-only-v1"],
+                "capabilities": ["priority-policy-v1", "preempt-idle-only-v1", "priority-rank-v1"],
                 "observe_only": self._observe_only,
                 "managed_indices": managed_indices,
                 "managed_gpus": managed_gpus,
@@ -5036,17 +5038,17 @@ class Coordinator:
             )
         return {"job_id": job["id"], "state": JobState.CANCELED.value}
 
-    def _api_set_priority(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _require_exact_fields(arguments, allowed={"job_id", "priority_class", "expected"},
-                              required={"job_id", "priority_class"})
+    def _api_set_priority(self, arguments: dict[str, Any], *, rank_only: bool = False) -> dict[str, Any]:
+        field = "priority" if rank_only else "priority_class"
+        _require_exact_fields(arguments, allowed={"job_id", field, "expected"},
+                              required={"job_id", field})
         if not isinstance(arguments["job_id"], str) or not arguments["job_id"]:
             raise ApiError("BAD_REQUEST", "job_id must be a non-empty string")
         if "expected" in arguments and not isinstance(arguments["expected"], dict):
             raise ApiError("BAD_REQUEST", "expected must be a scheduling policy object")
         try:
-            updated = self.store.set_pending_priority_class(
-                arguments["job_id"], arguments["priority_class"], expected=arguments.get("expected")
-            )
+            method = self.store.set_pending_priority_rank if rank_only else self.store.set_pending_priority_class
+            updated = method(arguments["job_id"], arguments[field], expected=arguments.get("expected"))
         except StoreNotFoundError as exc:
             raise ApiError("NOT_FOUND", str(exc)) from exc
         except StoreConflictError as exc:
@@ -5055,7 +5057,7 @@ class Coordinator:
             raise ApiError("BAD_REQUEST", str(exc)) from exc
         return {
             "job_id": updated["id"], "state": updated["state"],
-            "priority_class": arguments["priority_class"],
+            **({} if rank_only else {"priority_class": arguments["priority_class"]}),
             **{key: updated[key] for key in ("priority", "priority_name", "yield_policy", "restart_policy", "dispatch_mode")},
             "preempt_idle_only": updated["preempt_idle_only"],
         }
