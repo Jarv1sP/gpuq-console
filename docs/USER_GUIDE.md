@@ -150,6 +150,24 @@ gpuctl run -g 4 --min-vram 24 -- python -m torch.distributed.run --standalone --
 
 这会在**同一台服务器**申请 4 张卡，每张至少约 24 GiB 物理显存。程序本身必须支持多卡；平台不会自动改写单卡代码，也不会将几张卡的显存合成一张大卡，或自动启动跨服务器训练。
 
+### 弹性卡数与保存扩卡
+
+`-g` 表示最大卡数，`--min-cards` 表示最少启动卡数；声明 global/micro batch 后，只选能整除的卡数，并按当前最多可用合法卡数启动：
+
+```sh
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
+```
+
+此例合法卡数为 1、2、4、8；空闲 3 张时启动 2 张。个人额度始终预留最大值，任务列表另显示实际分配。
+
+```sh
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
+```
+
+自动扩卡会先保存当前轮次、结束旧 attempt，再从 checkpoint 启动更大的合法卡数；不是给原进程热挂显卡。训练需按实际卡数启动 DDP，用 `gpuq.elastic.plan_elastic_batch()` 计算梯度累积，并接入 checkpoint/完整恢复适配器。global batch 固定时 LR 不变，平台不会自动改训练代码。排队任务先调度，扩卡可能延迟；保存失败不会强制杀训练。
+
+网页“弹性卡数”提供相同选项。节点未确认弹性/控制通道时拒绝提交，不静默退回固定卡数。
+
 ### 停止任务
 
 ```sh

@@ -4,7 +4,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {elasticAllocation,elasticCapable} from '../dist/gpu-allocation.js';
+import {elasticAllocation,elasticCapable,allocationLabel} from '../dist/gpu-allocation.js';
 import {elasticFromForm,allocationSummary} from '../dist/gpu-allocation-ui.js';
 import {normalizeJobSubmission} from '../job-submission.mjs';
 import {PortalService} from '../portal-service.mjs';
@@ -21,6 +21,9 @@ test('elastic world sizes keep an exact global batch including unsafe product ed
   assert.deepEqual(elasticAllocation({minCards:1,globalBatch:Number.MAX_SAFE_INTEGER,microBatch:Number.MAX_SAFE_INTEGER},8).allowed,[1]);
   for(const value of [{...elastic,minCards:9},{...elastic,globalBatch:7,microBatch:8},{...elastic,autoExpand:1},{...elastic,globalBatch:1.5},{...elastic,owner:'x'}])assert.throws(()=>elasticAllocation(value,8,scheduling));
   assert.throws(()=>elasticAllocation(elastic,8,{...scheduling,restartPolicy:'never'}),/自动扩卡/);
+  for(const policy of [{checkpointable:true,restartPolicy:'on-preempt',yieldPolicy:'now'},{checkpointable:true,restartPolicy:'on-preempt',yieldPolicy:'never'},{checkpointable:'true',restartPolicy:'on-preempt',yieldPolicy:'save'},{...scheduling,unexpected:true}])assert.throws(()=>elasticAllocation(elastic,8,policy),/自动扩卡/);
+  assert.deepEqual(elasticAllocation({...elastic,globalBatch:512,minCards:32,autoExpand:false},64).allowed,[32,64]);
+  assert.throws(()=>elasticAllocation({...elastic,autoExpand:false},65));
   assert.throws(()=>elasticAllocation({...elastic,minCards:8},8,scheduling),/至少两种/);
 });
 
@@ -33,6 +36,7 @@ test('canonical allocation participates in identity without changing historical 
   const form=new FormData();for(const [k,v] of Object.entries({elastic:'on','min-cards':'1','global-batch':'256','micro-batch':'8','auto-expand':'on'}))form.set(k,v);
   assert.deepEqual(elasticFromForm(form,8,scheduling),elastic);
   assert.match(allocationSummary({cards:8,elastic,allowedGpuCounts:a.allowedGpuCounts,actualCards:2}),/当前 2 张/);
+  assert.match(allocationLabel({cards:8,elastic,allowedGpuCounts:a.allowedGpuCounts,actualCards:2}),/弹性 1–8 张 · 当前 2 张 · 合法卡数 1,2,4,8/);
   assert.equal(elasticCapable({reachable:true,gpuq:{connected:true,capabilities:['elastic-batch-v1']}}),false);
 });
 

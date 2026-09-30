@@ -1,15 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,copyFile,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
+import {buildClient} from '../scripts/build-client.mjs';
 
 test('standalone downloaded CLI sends canonical scheduling and preserves argv after --',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-policy-cli-')),file=join(dir,'gpuctl.mjs'),session=join(dir,'session.json'),calls=[];
-  await copyFile(new URL('../cli.mjs',import.meta.url),file);
+  await buildClient({outfile:file});
   const server=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const data=JSON.parse(raw);calls.push(data);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(data.operation==='state'?{state:{machines:[{id:'gpu-1'}],jobs:[]}}:{result:{id:'job',state:'PENDING'}}));});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   await writeFile(session,JSON.stringify({url:`http://127.0.0.1:${server.address().port}`,token:'test-only',machine:'gpu-1',principal:{role:'member',username:'alice',userId:'alice'}}));
@@ -22,7 +23,12 @@ test('standalone downloaded CLI sends canonical scheduling and preserves argv af
   assert.equal(submit.key,key);assert.equal(Object.hasOwn(submit,'priority'),false);
   assert.deepEqual(submit.argv,['python','train.py','--rank','123']);
   assert.equal((await run(args)).code,0);assert.equal(calls.filter(x=>x.operation==='jobs.submit').at(-1).args.key,key);
+  const elasticArgs=['run','-g','8','--min-cards','1','--global-batch','256','--micro-batch','8','--auto-expand','--rank','P1','--yield','save','--checkpointable','--restart-policy','on-preempt','--','python','train.py','--auto-expand'];
+  assert.equal((await run(elasticArgs)).code,0);
+  const elasticSubmit=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
+  assert.deepEqual(elasticSubmit.elastic,{minCards:1,globalBatch:256,microBatch:8,autoExpand:true});
+  assert.deepEqual(elasticSubmit.argv,['python','train.py','--auto-expand']);
   const count=calls.length;
-  for(const invalid of [['jobs','--rank','P1'],['run','--yield','save','--','python'],['run','--yield','now','--restart-policy','on-preempt','--','python'],['run','--rank','P1','--priority','idle','--','python']])assert.notEqual((await run(invalid)).code,0);
+  for(const invalid of [['jobs','--auto-expand'],['jobs','--min-cards','1'],['jobs','--rank','P1'],['run','--yield','save','--','python'],['run','--yield','now','--restart-policy','on-preempt','--','python'],['run','--rank','P1','--priority','idle','--','python']])assert.notEqual((await run(invalid)).code,0);
   assert.equal(calls.length,count,'invalid options fail before any request');
 });
