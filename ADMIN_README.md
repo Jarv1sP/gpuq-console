@@ -113,6 +113,17 @@ gpuctl jobs
 
 最低任务让位默认结束并保留已有输出，不重新排队、不自动 checkpoint。只有节点确证后，`CANCELED` 任务才带 `preempted` 标记并显示“让位结束”；终止状态尚未确认时保留额度。管理员调队列也不意味着瞬间释放 GPU，必须等待节点核对时间和真实调度结果。上线前须在隔离任务上验收，不能用正在运行的他人实验测试抢占。
 
+### 独立调档与部署顺序
+
+`gpuctl priority JOB P0..P4` / 网页排队编辑器现在只调整排序，不改变让位或重启合同。
+`idle/normal/high` 在**调档命令**中是 P0/P2/P4 的兼容别名，不是重新套用提交预设。
+管理员权限、任务归属、PENDING/CAS 校验与配额规则保持不变。
+
+先升级 GPUQ 核心及节点桥并确认 `priority-rank-v1`，再发布门户/客户端。混合版本时
+调档会明确拒绝；不会调用旧 `set-priority` 作为 fallback。无需迁移数据库或修改旧任务。
+可信管理员直接使用底层 CLI 时，应使用 `gpu set-rank JOB P3`。
+旧 `gpu set-priority JOB idle|normal|high` 仍是显式修改整套预设的兼容命令，不宜用于只调 P 值。
+
 ## 邀请码
 
 ```sh
