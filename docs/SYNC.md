@@ -4,7 +4,9 @@
 
 ## 从 Git 导入代码
 
-需要本地 `git` 和 `tar`，仓库必须干净（包含未跟踪文件）。固定分支、tag 或 commit；不上传 `.git`、符号链接、submodule、Conda/venv。Git archive 的 export-ignore/export-subst 规则生效；Git LFS 指针不会自动下载实体。
+需要支持 `check-attr --source` 的本地 Git，不支持该检查的版本会明确拒绝同步，不需要 tar。仓库必须干净（包含未跟踪文件）。固定分支、tag 或 commit；按该 commit 的原始 blob、UTF-8 路径与可执行位同步全部普通文件，不做 checkout/archive 换行、编码或 filter 转换，不受 Windows `core.autocrlf` 影响。不上传 `.git`、符号链接、submodule、Conda/venv；Git LFS 指针不会自动下载实体。Git filters 和 fsmonitor 命令在同步子进程中禁用；若工作树只有通过本地 filter 转换才与 commit 一致，请使用未经 filter 转换的干净 clone。
+
+为避免意外上传原本会被归档排除的内容，固定 commit 中对文件或目录生效的 `export-ignore` / `export-subst` 规则会直接拒绝同步（不会静默忽略规则或转换 blob）；请准备明确选择文件、无这些归档转换规则的同步 commit。仓库本地 `info/attributes` 覆盖也会拒绝，建议使用无本地属性覆盖的干净 clone。检查只读取固定 commit，不使用当前工作树、系统或全局 attributes 改变它；命令不修改用户 Git 配置。
 
 ```sh
 gpuctl sync git ./my-repo --ref HEAD --to gpu-2 --project vision --dry-run
