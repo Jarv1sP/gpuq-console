@@ -5,6 +5,8 @@ import {randomUUID,createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {createInterface} from 'node:readline/promises';
 import {constants as fsConstants} from 'node:fs';
+import {realpathSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
 
 const help=`GPUQ — 个人终端与 GPUQ 训练
 
@@ -29,6 +31,7 @@ gpuctl run -g 2 -- python train.py
 gpuctl jobs / logs JOB / cancel JOB
 gpuctl diagnostics JOB --json    Persistent bounded worker logs, exits and resource counters
 gpuctl run --priority idle -g 1 -- python train.py
+gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
 gpuctl priority JOB high         Administrator: change queued job priority
 gpuctl notes                     Shared task / persistent general notes
 gpuctl note --job JOB "message"  Deleted when the task is confirmed finished
@@ -103,9 +106,32 @@ Projects are selected per server, never silently copied or moved between machine
 Choose a server explicitly: new jobs do not accept auto.
 Existing users without a selected project keep their legacy workspace.
 The standard Python environment is /opt/conda; never modify global Conda.`;
-const args=process.argv.slice(2),positionals=[],options={machines:[],datasets:[]};let training=[];
+const args=process.argv.slice(2);let options,positionals,training;
 let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).includes('--json');
 function fail(message){throw Error(message);}
+const CLI_OPTIONS=new Map([
+  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable'].map(key=>[key,'flag']),
+  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy'].map(key=>[key,'value']),
+  ['machine','machines'],['data','datasets'],
+]);
+
+export function parseCLIOptions(argv){
+  const options={machines:[],datasets:[]},positionals=[];
+  for(let i=0;i<argv.length;i++){
+    if(argv[i]==='--')return {options,positionals,training:argv.slice(i+1)};
+    const item=argv[i]==='-g'?'--cards':argv[i];
+    if(!item.startsWith('--')){positionals.push(item);continue;}
+    const key=item.slice(2),kind=CLI_OPTIONS.get(key);
+    if(!kind)fail(`Unknown option: ${item}`);
+    if(Object.hasOwn(options,key))fail(`Duplicate option: ${item}`);
+    if(kind==='flag'){options[key]=true;continue;}
+    const value=argv[++i];
+    if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
+    if(kind==='value')options[key]=value;
+    else options[kind].push(value);
+  }
+  return {options,positionals,training:[]};
+}
 const DATA_CHUNK=1024*1024,DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
 function sameDatasetFile(a,b,{pathToHandle=false}={}){
   // Older Windows libuv lstat can return dev=0 or a 64-bit serial while fstat
@@ -215,22 +241,21 @@ async function secret(label='Password'){
   });
 }
 async function main(){
-  for(let i=0;i<args.length;i++){
-    if(args[i]==='--'){training=args.slice(i+1);break;}
-    const item=args[i]==='-g'?'--cards':args[i];if(!item.startsWith('--')){positionals.push(item);continue;}
-    const key=item.slice(2);
-    if(Object.hasOwn(options,key)&&!['machine','data'].includes(key))fail(`Duplicate option: ${item}`);
-    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','overwrite'].includes(key)){options[key]=true;continue;}
-    if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job','priority','cwd','timeout','reconnect','env-mode'].includes(key))fail(`Unknown option: ${item}`);
-    const value=args[++i];if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
-    if(key==='machine')options.machines.push(value);else if(key==='data')options.datasets.push(value);else options[key]=value;
-  }
+  ({options,positionals,training}=parseCLIOptions(args));
   if(options.help||!positionals.length){console.log(help);return;}
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
   if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(['cwd','timeout','detach'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='exec')fail('--cwd, --timeout and --detach are only valid for exec');
+  const customScheduling=['rank','yield','restart-policy','checkpointable'].some(k=>Object.hasOwn(options,k));
+  if(customScheduling&&(positionals[0]!=='run'||options.priority))fail('Custom scheduling is only valid for run and cannot mix with --priority presets');
+  const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
+  if(scheduling){
+    if(!/^P[0-4]$/.test(scheduling.rank)||!['never','now','save'].includes(scheduling.yieldPolicy)||!['never','on-preempt'].includes(scheduling.restartPolicy))fail('Use --rank P0..P4, --yield never|now|save, --restart-policy never|on-preempt');
+    if(scheduling.yieldPolicy==='save'&&!scheduling.checkpointable)fail('--yield save requires --checkpointable and an epoch checkpoint adapter');
+    if(scheduling.restartPolicy==='on-preempt'&&(scheduling.yieldPolicy!=='save'||!scheduling.checkpointable))fail('Automatic resume requires --yield save --checkpointable');
+  }
   const projectSlug=value=>{if(typeof value!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(value))fail('Project must start with a lowercase letter and use 1–48 lowercase letters, digits, _ or -');return value;};
   if(options.project)projectSlug(options.project);
   if(options.project&&options.legacy)fail('--project and --legacy cannot be combined');
@@ -459,7 +484,7 @@ async function main(){
       }
       const key=options.key||randomUUID();process.stderr.write(`Submission key: ${key}\n`);
       const datasets=options.datasets.map(value=>{const [dataset,version,...extra]=value.split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Use --data NAME@FULL_VERSION_HASH');return {dataset,version};});
-      result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...context,...(datasets.length?{datasets}:{})})).result;
+      result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...context,...(datasets.length?{datasets}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');
@@ -568,4 +593,6 @@ async function main(){
   if(command==='users'){console.log(result.map(u=>`${u.username}  ${u.role==='admin'?'管理员':'普通用户'}  ${u.enabled?'启用':'暂停'}  总额度 ${u.total} 张\n  ${Object.entries(u.limits).map(([m,n])=>`${m}: ${n}`).join('，')||'尚未授权机器'}`).join('\n'));return;}
   console.log(JSON.stringify(result,null,2));
 }
-main().catch(error=>{console.error(wantsJSON?JSON.stringify({ok:false,error:error.message}):`Error: ${error.message}`);process.exitCode=1;});
+if(process.argv[1]&&fileURLToPath(import.meta.url)===realpathSync(process.argv[1])){
+  main().catch(error=>{console.error(wantsJSON?JSON.stringify({ok:false,error:error.message}):`Error: ${error.message}`);process.exitCode=1;});
+}

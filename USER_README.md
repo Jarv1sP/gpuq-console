@@ -144,6 +144,9 @@ gpuctl run -g 4 --min-vram 24 --name ddp -- python -m torch.distributed.run --st
 
 ## 任务优先级与排队
 
+需要独立选择 P0–P4、“立即/保存后让位”和 checkpoint 恢复时，使用网页“自定义 GPUQ 调度”
+或 CLI `--rank/--yield/--restart-policy`，见[简明用法](docs/SCHEDULING.md)。以下旧预设保持兼容。
+
 支持新版优先级策略的节点提供以下选择。网页“提交训练”可选择，CLI 在 `--` 前加 `--priority`：
 
 | 档位 | 谁可选择 | 含义 |

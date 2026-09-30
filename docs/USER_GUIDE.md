@@ -301,6 +301,18 @@ gpuctl run -g 1 --priority idle -- python disposable_trial.py --output /outputs
 
 管理员可在任务表调整已核验、尚未启动任务的 P0–P4 排队等级，也可执行 `gpuctl priority JOB_ID P1`（例如 P1 或 P3）。此操作只改变排队顺序，不改变原任务的让位、保存和恢复约定，也不要求重新确认让位。节点尚未支持独立改等级时，入口不可用；运行中任务不能这样修改。
 
+### 自定义等级、让位与恢复
+
+网页展开“提交训练 → 自定义 GPUQ 调度”。P0–P4只改变排序，不表示同意中断；成员可选P0–P2。节点缺能力时明确拒绝，不降级。
+
+```sh
+gpuctl run --rank P1 --yield never -g 1 -- python train.py
+gpuctl run --rank P1 --yield now -g 1 -- python disposable.py
+gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -g 2 -- python train.py
+```
+
+`save`须训练适配checkpoint并恢复完整状态，DDP所有rank协同。低等级save任务整体保存后让位，on-preempt随后排队恢复；保存失败不强杀，手动取消或失败不自动重跑。`--checkpointable`不是自动改写代码。
+
 ### 协调使用安排
 
 “协作区”包含维护公告、问题反馈和公共交流。可以说明预计结束时间、协商释放资源或说明紧急实验，但聊天约定不会自动改变配额、队列或取消任务。

@@ -7,6 +7,8 @@ const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.
 routes['/dataset-upload.js']='dataset-upload.js';
 routes['/data-workspace.js']='data-workspace.js';
 routes['/job-diagnostics-ui.js']='job-diagnostics-ui.js';routes['/job-diagnostics.css']='job-diagnostics.css';
+routes['/scheduling-policy.js']='scheduling-policy.js';
+routes['/scheduling-ui.js']='scheduling-ui.js';
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
 routes['/guide.css']='guide.css';routes['/guide.js']='guide.js';
 routes['/community-ui.js']='community-ui.js';routes['/community.css']='community.css';

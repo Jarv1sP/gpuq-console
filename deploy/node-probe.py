@@ -254,6 +254,13 @@ def probe_gpuq():
                 "jobs": [{key: job.get(key) for key in allowed} for job in jobs[:100] if isinstance(job, dict)],
                 "limit": 100,
             }
+            helper=Path(__file__).resolve().parent/'scheduling-policy.py'
+            if helper.is_file():
+                import importlib.util
+                module=importlib.util.spec_from_file_location('gpuq_console_scheduling',helper)
+                policy=importlib.util.module_from_spec(module);module.loader.exec_module(policy)
+                if policy.ready(CONFIG,helper.parent) and all(c in output['capabilities'] for c in ('priority-policy-v1','preempt-idle-only-v1')):
+                    output['capabilities'].append('console-yield-v1')
         except (ValueError, OSError, subprocess.SubprocessError):
             output["error"] = "GPUQ status unavailable"
     else:

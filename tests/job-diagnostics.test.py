@@ -288,7 +288,7 @@ class NodeDiagnostics(unittest.TestCase):
     def test_read_only_operation_never_submits_and_checks_immutable_spec(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve(); root = base / 'state'; root.mkdir(mode=0o700)
-            for name in ('node-executor.py', 'job-diagnostics.py'): shutil.copy2(DEPLOY / name, base / name)
+            for name in ('node-executor.py', 'scheduling-policy.py', 'job-diagnostics.py'): shutil.copy2(DEPLOY / name, base / name)
             database = base / 'gpuq.db'
             with sqlite3.connect(database) as db: db.execute('CREATE TABLE jobs (id TEXT, submit_key TEXT)')
             (base / 'node-config.json').write_text(json.dumps({'root': str(root), 'database': str(database), 'gpu': '/no/gpu'}))
