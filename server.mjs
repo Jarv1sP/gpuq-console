@@ -2,14 +2,14 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {DemoService} from './dist/service.js';
-const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/service.js':'service.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/datasets-ui.js':'datasets-ui.js'};
+import {guideTarget,guidePage} from './guide.mjs';
+const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/datasets.css':'datasets.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/service.js':'service.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/datasets-ui.js':'datasets-ui.js'};
 routes['/dataset-upload.js']='dataset-upload.js';
 routes['/job-diagnostics-ui.js']='job-diagnostics-ui.js';routes['/job-diagnostics.css']='job-diagnostics.css';
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
-const guides={'/guide/user':'./USER_README.md','/guide/admin':'./ADMIN_README.md','/guide/datasets':'./docs/DATASETS.md','/guide/projects':'./docs/PROJECTS.md','/guide/terminal-sessions':'./docs/TERMINAL_SESSIONS.md','/guide/diagnostics':'./docs/JOB_DIAGNOSTICS.md','/guide/ray-resources':'./docs/RAY_RESOURCES.md'};
+routes['/guide.css']='guide.css';routes['/guide.js']='guide.js';
 routes['/community-ui.js']='community-ui.js';routes['/community.css']='community.css';
 routes['/task-notes-ui.js']='task-notes-ui.js';routes['/submission-keys.js']='submission-keys.js';
-guides['/guide/community']='./docs/COMMUNITY.md';
 export async function createServer(){
   const service=await DemoService.create();
   return http.createServer(async(req,res)=>{
@@ -28,10 +28,12 @@ export async function createServer(){
         if(path==='/api/call')return json(200,await service.invoke(req.headers.authorization?.replace(/^Bearer /,''),data.operation,data.args));
         return json(404,{error:'Not found'});
       }
-      if(guides[path]){
+      const guide=guideTarget(path);
+      if(guide){
         if(!['GET','HEAD'].includes(req.method))return json(405,{error:'GET required'});
-        const content=(await readFile(new URL(guides[path],import.meta.url),'utf8')).replaceAll('https://gpu.example.com',`http://${req.headers.host}`);
-        res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY'});return res.end(req.method==='HEAD'?undefined:content);
+        if(guide.redirect){res.writeHead(302,{'Location':guide.redirect,'Cache-Control':'no-store'});return res.end();}
+        const content=await guidePage(guide.chapter,`http://${req.headers.host}`);
+        res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY'});return res.end(req.method==='HEAD'?undefined:content);
       }
       const file=routes[path];if(!file){res.writeHead(404);return res.end('Not found');}
       let content=await readFile(new URL(`./dist/${file}`,import.meta.url));

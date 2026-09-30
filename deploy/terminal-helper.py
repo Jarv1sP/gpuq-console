@@ -30,23 +30,27 @@ child=subprocess.Popen(command,stdin=slave,stdout=slave,stderr=slave,preexec_fn=
 os.close(slave);os.set_blocking(master,False)
 server=socket.socket(socket.AF_UNIX);server.bind(str(sock));server.listen(4)
 buffer=b'';pending=b'';start=0;last_input=time.monotonic();began=last_input;ended=None;size=(32,110);eof=False
+def transfer(ready,writable):
+ global pending,buffer,start,eof
+ if master in writable:
+  try:pending=pending[os.write(master,pending):]
+  except BlockingIOError:pass
+ if master in ready:
+  try:data=os.read(master,65536)
+  except BlockingIOError:data=None
+  except OSError:data=b''
+  if data==b'':eof=True
+  if data:
+   buffer+=data
+   if len(buffer)>524288:cut=len(buffer)-524288;buffer=buffer[cut:];start+=cut
+
 try:
  while time.monotonic()-began<21600 and time.monotonic()-last_input<3600:
   if child.poll() is not None:
    ended=ended or time.monotonic()
    if time.monotonic()-ended>60:break
   ready,writable,_=select.select([server,*([master] if not eof else [])],[master] if pending and not ended else [],[],0.2)
-  if master in writable:
-   try:pending=pending[os.write(master,pending):]
-   except BlockingIOError:pass
-  if master in ready:
-   try:data=os.read(master,65536)
-   except BlockingIOError:data=None
-   except OSError:data=b''
-   if data==b'':eof=True
-   if data:
-    buffer+=data
-    if len(buffer)>524288:cut=len(buffer)-524288;buffer=buffer[cut:];start+=cut
+  transfer(ready,writable)
   if server in ready:
    client,_=server.accept();client.settimeout(3)
    try:
@@ -64,6 +68,15 @@ try:
      pending+=data;last_input=time.monotonic()
     rows=max(8,min(100,int(req.get('rows',size[0]))));cols=max(20,min(250,int(req.get('cols',size[1]))))
     if (rows,cols)!=size:fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',rows,cols,0,0));size=(rows,cols)
+    if data and not ended:
+     # Flush accepted input and include its first prompt/echo in this response
+     # when available, avoiding another HTTP + SSH round trip. Never retry input
+     # or wait indefinitely for silent commands; read-only polls stay immediate.
+     deadline=time.monotonic()+0.03;before=start+len(buffer)
+     while not eof and time.monotonic()<deadline:
+      ready,writable,_=select.select([master],[master] if pending else [],[],max(0,deadline-time.monotonic()))
+      transfer(ready,writable)
+      if start+len(buffer)>before:break
     offset=max(start,min(start+len(buffer),int(req.get('offset',0))))
     out={'data':base64.b64encode(buffer[offset-start:]).decode(),'offset':start+len(buffer),'exited':ended is not None and eof,'exitCode':child.poll()}
     client.sendall((json.dumps(out)+'\n').encode())
