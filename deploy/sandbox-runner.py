@@ -3,6 +3,7 @@
 import hashlib,importlib.util,json,os,re,select,subprocess,sys,time,tempfile
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
+TRAINING_CONTROL_PROTOCOL=1
 
 def local_module(name,filename):
     module=importlib.util.spec_from_file_location(name,HERE/filename)

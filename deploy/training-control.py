@@ -4,6 +4,7 @@ GPUQ stores checkpoint paths as opaque resume tokens. ACKs can use persistent
 sandbox paths; the host coordinator does not need a global /outputs mount.
 """
 import os
+import ast
 from pathlib import Path
 import re
 import sqlite3
@@ -12,12 +13,30 @@ from contextlib import closing
 
 CONTROL = '/run/gpuq/control'
 SDK = '/opt/gpuq/sdk.pyz'
+PROTOCOL_VERSION = 1
 COUNTERS = (
     'GPUQ_ASSIGNED_GPU_COUNT', 'GPUQ_ACTUAL_GPU_COUNT', 'GPUQ_MIN_GPU_COUNT',
     'GPUQ_MAX_GPU_COUNT', 'GPUQ_PREVIOUS_GPU_COUNT', 'GPUQ_WORLD_SIZE',
     'GPUQ_MIN_WORLD_SIZE', 'GPUQ_MAX_WORLD_SIZE', 'GPUQ_PREVIOUS_WORLD_SIZE',
     'GPUQ_TARGET_GLOBAL_BATCH_SIZE', 'GPUQ_PER_DEVICE_MICRO_BATCH_SIZE',
 )
+
+
+def ready(config, here):
+    """One versioned readiness check shared by admission and node probing."""
+    try:
+        if type(config.get('trainingControlProtocol')) is not int or config['trainingControlProtocol'] != PROTOCOL_VERSION:
+            return False
+        root, archive = Path(config['controlRoot']), Path(config['gpuqArchive'])
+        if not root.is_absolute() or root.is_symlink() or not root.is_dir() or not archive.is_absolute() or archive.is_symlink() or not archive.is_file():
+            return False
+        tree = ast.parse((here / 'sandbox-runner.py').read_text())
+        versions = [node.value.value for node in tree.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == 'TRAINING_CONTROL_PROTOCOL' for target in node.targets)
+                    and isinstance(node.value, ast.Constant)]
+        return len(versions) == 1 and type(versions[0]) is int and versions[0] == PROTOCOL_VERSION
+    except (KeyError, OSError, TypeError, SyntaxError):
+        return False
 
 
 def resume_path(value, mounts):

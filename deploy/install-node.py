@@ -62,7 +62,7 @@ if a.enable_host_root:
     sudoers=dest/'sudoers.pending';sudoers.write_text(node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-root-shell\n'+node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-admin-command ""\n');sudoers.chmod(0o600)
     run('sudo','visudo','-cf',str(sudoers));run('sudo','install','-o','root','-g','root','-m','440',str(sudoers),'/etc/sudoers.d/gpuq-console');sudoers.unlink();host_root=True
 node_config={'machine':a.node,'cards':node['cards'],'root':str(root),'gpu':str(binary),'database':cfg['db_path'],'slirp':shutil.which('slirp4netns'),'conda':node['conda'],'hostRoot':host_root}
-node_config.update(controlRoot=cfg.get('control_dir',str(scheduler/'control')),gpuqArchive=cfg.get('archive_path',str(scheduler/'current/gpuq.pyz')))
+node_config.update(trainingControlProtocol=1,controlRoot=cfg.get('control_dir',str(scheduler/'control')),gpuqArchive=cfg.get('archive_path',str(scheduler/'current/gpuq.pyz')))
 previous=json.loads((dest/'node-config.json').read_text()) if (dest/'node-config.json').exists() else {}
 retention=node.get('diagnosticsRetentionDays',previous.get('diagnosticsRetentionDays',30))
 if type(retention) is not int or not 1<=retention<=365:raise SystemExit('Invalid diagnostics retention days (1..365)')

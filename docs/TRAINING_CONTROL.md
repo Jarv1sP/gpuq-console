@@ -20,6 +20,7 @@
 - 终端不会得到训练控制目录。更新只作用于以后启动的 attempt。
 
 发布时由维护者手动更新 helper、选定 profile 的 runner 和 node-config 中的
-`controlRoot`/`gpuqArchive`（对应实际 GPUQ 配置）。旧配置没有 `controlRoot` 时保持旧行为；
+`trainingControlProtocol: 1`、`controlRoot`/`gpuqArchive`（对应实际 GPUQ 配置）。探针与提交端
+共用 helper 的协议版本检查，不再通过源码包含某个字符串猜测能力。旧配置没有 `controlRoot` 时保持旧行为；
 一旦配置，缺失/不匹配的 attempt、SDK、恢复文件都会阻止该次训练启动。
 回退 runner/config 不会删 checkpoint；需要恢复/保存让位的任务不应在回退后继续提交。

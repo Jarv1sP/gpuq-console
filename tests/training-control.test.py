@@ -34,7 +34,7 @@ class TrainingControl(unittest.TestCase):
         with zipfile.ZipFile(self.archive, 'w') as archive:
             for path in (ROOT / 'gpuq').rglob('*.py'):
                 archive.write(path, str(path.relative_to(ROOT / 'gpuq')))
-        self.config = {'controlRoot': str(self.control.parent), 'database': str(self.root / 'state.db'), 'gpuqArchive': str(self.archive)}
+        self.config = {'trainingControlProtocol': 1, 'controlRoot': str(self.control.parent), 'database': str(self.root / 'state.db'), 'gpuqArchive': str(self.archive)}
         with closing(sqlite3.connect(self.config['database'])) as db:
             db.execute('CREATE TABLE jobs(id TEXT, submit_key TEXT)')
             db.execute('CREATE TABLE attempts(id TEXT, job_id TEXT, control_dir TEXT)')
@@ -68,6 +68,17 @@ class TrainingControl(unittest.TestCase):
 
     def test_old_configuration_is_a_noop(self):
         self.assertEqual(C.prepare({}, self.spec, self.workspace, None, {}), ([], []))
+
+    def test_readiness_uses_declared_protocol_not_source_substrings(self):
+        runner=self.root/'sandbox-runner.py'
+        for name in ('sandbox-runner.py','sandbox-runner-common-p0.py'):
+            shutil.copy2(ROOT/'deploy'/name,runner)
+            self.assertTrue(C.ready(self.config,self.root))
+        for source in ('# gpuq_training_control\n','TRAINING_CONTROL_PROTOCOL=2\n','TRAINING_CONTROL_PROTOCOL=True\n','TRAINING_CONTROL_PROTOCOL=1\nTRAINING_CONTROL_PROTOCOL=2\n'):
+            runner.write_text(source);self.assertFalse(C.ready(self.config,self.root))
+        runner.write_text('TRAINING_CONTROL_PROTOCOL=1\n')
+        self.assertFalse(C.ready({**self.config,'trainingControlProtocol':None},self.root))
+        self.assertFalse(C.ready({**self.config,'controlRoot':str(self.root/'absent')},self.root))
 
     def test_wrong_attempt_job_or_portal_binding_never_mounts(self):
         for changes in ({'GPUQ_ATTEMPT_ID': '../other'}, {'GPUQ_JOB_ID': 'J0000'},
