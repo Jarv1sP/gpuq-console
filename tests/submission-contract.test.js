@@ -19,6 +19,17 @@ test('one CLI option registry handles old/new flags, aliases, repetition and lit
   for(const args of [['-g','1','--cards','2'],['--rank','P1','--rank','P2'],['--checkpointable','--checkpointable'],['--rank'],['--rank','--json'],['--unknown']])assert.throws(()=>parseCLIOptions(args));
 });
 
+test('maintenance shares the CLI registry without losing approval fields or duplicate checks',()=>{
+  const request=parseCLIOptions(['maintenance','request','--name','Review','--reason','Needs approval','--script-file','request.sh','--parent','parent-id','--cwd','/root','--timeout','60']);
+  assert.deepEqual(request.positionals,['maintenance','request']);
+  assert.deepEqual(request.options,{machines:[],datasets:[],name:'Review',reason:'Needs approval','script-file':'request.sh',parent:'parent-id',cwd:'/root',timeout:'60'});
+  const approval=parseCLIOptions(['maintenance','approve','request-id','--revision','1','--preview-token','frozen-token','--ack-unknown']);
+  assert.equal(approval.options.revision,'1');assert.equal(approval.options['preview-token'],'frozen-token');assert.equal(approval.options['ack-unknown'],true);
+  assert.equal(parseCLIOptions(['maintenance','list','--cursor','20','--limit','5']).options.limit,'5');
+  for(const args of [['--reason','one','--reason','two'],['--ack-unknown','--ack-unknown'],['--preview-token'],['--revision','--json']])assert.throws(()=>parseCLIOptions(args));
+  assert.deepEqual(parseCLIOptions(['run','--','python','--reason','literal','--ack-unknown']).training,['python','--reason','literal','--ack-unknown']);
+});
+
 test('standalone CLI entry point still runs through the installed symlink',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-cli-entry-'));t.after(()=>rm(dir,{recursive:true,force:true}));
   await buildClient({outfile:join(dir,'client.mjs')});await symlink(join(dir,'client.mjs'),join(dir,'gpuctl'));

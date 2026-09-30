@@ -327,6 +327,25 @@ gpuctl pull --job JOB_ID model.pt ./model.pt
 
 ## 排队与协作 {#queue}
 
+### 申请系统维修
+
+需要安装系统库或其他 root 操作时，到网页「维护申请」填写机器、原因和脚本；管理员可以批准执行或附理由退回。普通开发和训练无需申请，也不会因此获得 root 权限。
+
+CLI 在自己的电脑上提交脚本文件，文件内容会冻结到申请里，不会立即执行：
+
+```sh
+gpuctl maintenance request --name "检查系统依赖" --reason "缺少系统库，需要检查" --script-file ./maintenance.sh
+gpuctl maintenance list
+gpuctl maintenance show REQUEST_ID
+gpuctl maintenance withdraw REQUEST_ID --revision N
+```
+
+创建使用当前选中的机器，也可加 `--machine MACHINE_ID`。将编号和版本替换为 `show` 返回的值；只有待确认申请可撤回。退回后修改脚本再提交新申请，可加 `--parent REQUEST_ID` 引用旧记录。响应不明时使用提示中的原 `--key UUID` 重试相同内容。
+
+批准后即使关闭网页，操作也会继续核对；刷新申请查看结果或退回理由。`UNKNOWN` 不代表没有执行，不要另建申请盲目重跑。上次节点回执不是当前状态保证；CLI 查询／审批接口成功也不等于操作成功，要看申请状态和退出码。脚本和输出仅申请者与管理员可见；不要填写密码或令牌。
+
+### 任务进度与通知
+
 持续查看任务进度用 `gpuctl watch 任务ID`，默认每 5 秒核对，Ctrl+C 只停止查看。
 完成、失败、取消或状态未知时会反馈并退出；不因查看而重试或取消训练。网页任务表显示相同轮次、步数和训练自报 ETA。未接入进度 SDK 的训练显示“进度未上报”，仍可看调度状态和日志；训练自报 100% 或异常不等于调度器确认终态。
 取消回执不代表进程已退出：训练尝试、显卡租约或扩卡预留尚未清理，或节点查询失败时，仍显示 `UNKNOWN` 并保留用卡额度；确认清理后才显示终态。
