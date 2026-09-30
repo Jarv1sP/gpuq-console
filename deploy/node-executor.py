@@ -73,6 +73,8 @@ def scheduling_status(job,data):
     return {'schedulerState':state.get('state'),'schedulerPriority':state.get('priority'),
             'priority':priority,'schedulerPolicy':policy,'priorityMutable':mutable,
             'queueReason':state.get('state_reason'),
+            'progress':data.get('progress'),
+            'latestAttempt':({k:attempts[0].get(k) for k in ('id','ordinal','state','exit_code','failure_reason','started_at','finished_at')} if attempts else None),
             'preempted':opted_in and state.get('state')=='CANCELED' and bool(attempts) and attempts[0].get('state')=='PREEMPTED'}
 
 def projects():
@@ -602,7 +604,7 @@ def terminal_op(operation,args):
             return result
 
 def process(operation,args):
-    if operation=='diagnostics':
+    if operation in ('diagnostics','watch'):
         if not isinstance(args,dict) or set(args)!={'job'}:raise ValueError('Invalid diagnostic operation fields')
         job=args['job'];validate_job(job,readonly=True)
         spec=ROOT/'jobs'/(job['id']+'.json')
@@ -611,7 +613,19 @@ def process(operation,args):
             row=db.execute('SELECT id FROM jobs WHERE submit_key=?',(job['id'],)).fetchone()
         if row and not spec.exists():raise ValueError('Job identity is unavailable')
         data=gpu('show',row[0]) if row else {'job':{'state':'NOT_SUBMITTED'},'attempts':[]}
-        return job_diagnostics(job,data)
+        if operation=='diagnostics':return job_diagnostics(job,data)
+        state=data.get('job',data);attempts=data.get('attempts',[])
+        assigned=attempts[0].get('gpu_indices',[]) if attempts and state.get('state') not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
+        if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and not scheduler_terminal_confirmed(data):
+            return {'nodeJobId':row[0],'state':'UNKNOWN','assignedIndices':attempts[0].get('gpu_indices',[]) if attempts else [],
+                    **scheduling_status(job,data),'error':'Job termination is not fully confirmed; card reservation retained'}
+        if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and dataset_refs(job) and (ROOT/'jobs'/(job['id']+'.datasets.json')).exists():
+            # The periodic lifecycle reconciliation must confirm process
+            # cleanup and release leases. A viewer cannot release them.
+            return {'nodeJobId':row[0],'state':'UNKNOWN','assignedIndices':[],
+                    'error':'Dataset lease cleanup awaits scheduler reconciliation',**scheduling_status(job,data)}
+        return {'nodeJobId':row[0] if row else None,'state':state['state'] if row else 'PENDING',
+                'assignedIndices':assigned,**scheduling_status(job,data)}
     if operation in ('host.exec','host.status','host.cancel'):return host_command(operation,args)
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
