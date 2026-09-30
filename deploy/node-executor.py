@@ -13,6 +13,7 @@ UUID=re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$
 DATASET_ID=re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 DATASET_VERSION=re.compile(r'^[a-f0-9]{64}$')
 DATASET_MODULE=None
+DATASET_UPLOADS=None
 PROJECT_OPS=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
@@ -104,12 +105,22 @@ def dataset_mount_check(config):
 def dataset_cache():
     global DATASET_MODULE
     config=CONFIG.get('datasets')
-    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes'}:raise ValueError('Dataset storage is not configured')
+    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads'}:raise ValueError('Dataset storage is not configured')
     dataset_mount_check(config)
     if DATASET_MODULE is None:
         module=importlib.util.spec_from_file_location('gpuq_dataset_cache',HERE/'dataset-cache.py')
         DATASET_MODULE=importlib.util.module_from_spec(module);sys.modules[module.name]=DATASET_MODULE;module.loader.exec_module(DATASET_MODULE)
     return DATASET_MODULE,DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=config.get('reserveBytes',10*1024**3))
+
+def dataset_uploads():
+    global DATASET_UPLOADS
+    if DATASET_UPLOADS is None:
+        spec=importlib.util.spec_from_file_location('gpuq_dataset_upload',HERE/'dataset-upload.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        DATASET_UPLOADS=module.DatasetUploads(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    # Revalidate the current data mount even for compact upload status requests.
+    dataset_mount_check(CONFIG['datasets'])
+    return DATASET_UPLOADS
 
 def dataset_refs(job):
     refs=job.get('datasets',[])
@@ -558,6 +569,7 @@ def process(operation,args):
         return job_diagnostics(job,data)
     if operation in ('host.exec','host.status','host.cancel'):return host_command(operation,args)
     if operation.startswith('projects.'):return projects().process(operation,args)
+    if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation in ('datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister'):return dataset_op(operation,args)
     if operation in ('terminal.open','terminal.exchange','terminal.close','terminal.detach'):
         if args.get('project') and operation=='terminal.open':
@@ -632,6 +644,7 @@ def process(operation,args):
 if __name__=='__main__':
     os.umask(0o077)
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
+    if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
     try:
         raw=sys.stdin.buffer.read(1600001)

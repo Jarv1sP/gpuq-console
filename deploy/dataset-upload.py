@@ -1,0 +1,751 @@
+#!/usr/bin/python3
+"""Authenticated personal dataset uploads; no user-supplied host paths.
+
+Large manifests are separately streamed and sealed in a bounded worker. The
+immutable SQLite path index keeps chunk requests independent of manifest size.
+Only cache.publish can make a version READY; upload receipts are not readiness.
+"""
+import base64
+from contextlib import closing, contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import stat
+import subprocess
+import time
+import uuid
+
+NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,39}\Z')
+UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z')
+HASH = re.compile(r'[a-f0-9]{64}\Z')
+TRANSIENT = {'SEALING': 'RECEIVING_MANIFEST', 'PUBLISHING': 'UPLOADING', 'DISCARDING': 'DISCARDING'}
+DEFAULTS = {'maxUploadBytes': 1024**4, 'maxUserBytes': 2*1024**4,
+            'maxUserUploads': 256, 'maxActiveUploads': 4, 'maxUserSessions': 1024,
+            'maxUserEntries': 2000000}
+
+
+class DatasetUploads:
+    def __init__(self, executor):
+        self.n = executor
+        self.d, self.cache = executor.dataset_cache()
+        configured = executor.CONFIG['datasets'].get('uploads', {})
+        if (not isinstance(configured, dict) or set(configured)-set(DEFAULTS)
+                or any(type(v) is not int or not 1 <= v <= 2**63-1 for v in configured.values())):
+            raise ValueError('Invalid personal dataset upload limits')
+        self.limits = {**DEFAULTS, **configured}
+        self.root = self.cache.root/'.uploads'
+        self.d._mkdir(self.root)
+        self.d._mkdir(self.root/'bindings')
+
+    def actor(self, user):
+        self.n.workspace(user)
+        return self.d.Principal(user, False)
+
+    def folder(self, user, upload, *, create=False):
+        self.actor(user)
+        if not isinstance(upload, str) or not UUID.fullmatch(upload):
+            raise ValueError('Invalid upload ID')
+        parent = self.root/hashlib.sha256(user.encode()).hexdigest()
+        target = parent/upload
+        if create:
+            self.d._mkdir(parent)
+            self.d._mkdir(target)
+        return target
+
+    def key(self, user, upload):
+        return hashlib.sha256(json.dumps([user, upload], separators=(',', ':')).encode()).hexdigest()
+
+    def reservation(self, user, upload):
+        return self.cache.root/'.upload-reservations'/(self.key(user, upload)+'.json')
+
+    def reservation_value(self, session, *, sealed=False):
+        return {'bytes': session['reserveBytes']-(session['totalBytes'] if sealed else 0),
+                'inodes': session['entries']+16}
+
+    def ensure_reservation(self, session):
+        """Caller holds the cache lock; repair interrupted admission safely."""
+        if 'version' in session and self._exists(self.cache._paths(session['dataset'], session['version'])['.staging']):
+            return
+        path = self.reservation(session['userId'], session['uploadId'])
+        try:
+            value = self.d._read_json(path)
+        except FileNotFoundError:
+            self.cache._free(self.cache._reserved()+session['reserveBytes'], needed_inodes=session['entries']+16)
+            self.d._write_json(path, self.reservation_value(session))
+        else:
+            if value not in (self.reservation_value(session), self.reservation_value(session, sealed=True)):
+                raise ValueError('Personal upload reservation changed')
+
+    @contextmanager
+    def guard(self, user, upload):
+        # Authenticate the session before creating an attacker-chosen lock.
+        self.load(user, upload)
+        with self.cache._lock_file('.locks/upload-'+self.key(user, upload)+'.lock'):
+            yield
+
+    def load(self, user, upload):
+        value = self.d._read_json(self.folder(user, upload)/'session.json')
+        if (not isinstance(value, dict) or value.get('schema') != 1
+                or value.get('userId') != user or value.get('uploadId') != upload
+                or not isinstance(value.get('name'), str) or not NAME.fullmatch(value['name'])
+                or value.get('state') not in {'RECEIVING_MANIFEST', 'SEALING', 'UPLOADING', 'PUBLISHING', 'READY', 'DISCARDING', 'DISCARDED', 'FAILED'}
+                or any(type(value.get(k)) is not int or value[k] < 0 for k in ('manifestBytes', 'totalBytes', 'entries', 'reserveBytes'))
+                or not 1 <= value['manifestBytes'] <= self.d.MAX_JSON_BYTES
+                or value['entries'] > self.d.MAX_ENTRIES or value['totalBytes'] > 2**63-1
+                or value['reserveBytes'] != value['totalBytes']+value['manifestBytes']*4+value['entries']*8192+65536
+                or not isinstance(value.get('manifestSha256'), str) or not HASH.fullmatch(value['manifestSha256'])):
+            raise ValueError('Corrupt personal upload identity')
+        return value
+
+    def save(self, session):
+        session['updatedAt'] = time.time()
+        self.d._write_json(self.folder(session['userId'], session['uploadId'])/'session.json', session)
+
+    def active(self, user, upload):
+        return subprocess.run(['/usr/bin/systemctl', '--user', 'is-active', '--quiet',
+            'gpuq-upload-'+self.key(user, upload)[:32]], env=self.n.ENV,
+            stdout=subprocess.DEVNULL, timeout=4).returncode == 0
+
+    def _exists(self, path):
+        try:
+            with self.d._directory(path):
+                pass
+            return True
+        except FileNotFoundError:
+            return False
+
+    def _unlink(self, path):
+        with self.d._directory(path.parent) as fd:
+            try:
+                os.unlink(path.name, dir_fd=fd)
+                os.fsync(fd)
+            except FileNotFoundError:
+                pass
+
+    def _size(self, path, *, missing=0):
+        try:
+            with self.d._directory(path.parent) as parent:
+                fd = os.open(path.name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+                try:
+                    return self.d._regular(fd).st_size
+                finally:
+                    os.close(fd)
+        except FileNotFoundError:
+            return missing
+
+    def _ready(self, session):
+        if 'version' not in session:
+            return False
+        actor = self.actor(session['userId'])
+        try:
+            self.cache._dataset(actor, session['dataset'])
+        except FileNotFoundError:
+            return False
+        if 'registrationIdentity' in session:
+            try:
+                self.cache._check_snapshot(actor, session['dataset'], session['version'], tuple(session['registrationIdentity']))
+            except FileNotFoundError:
+                return False
+        paths = self.cache._paths(session['dataset'], session['version'])
+        if not self._exists(paths['ready']):
+            return False
+        marker = self.d._read_json(paths['ready']/'READY.json')
+        if marker != {'schema': self.d.SCHEMA, 'version': session['version']}:
+            raise ValueError('Published dataset marker is invalid')
+        for path in (paths['ready'], paths['ready']/'data'):
+            with self.d._directory(path) as fd:
+                if os.fstat(fd).st_mode & 0o222:
+                    raise ValueError('Published dataset is not read-only')
+        return True
+
+    def retire_unregistered(self, session):
+        """Reclaim only this session's metadata after confirmed admin removal.
+
+        Caller holds the cache lock. A missing READY directory alone is eviction,
+        not deletion: its registration continues to count toward personal quota.
+        Any residual replica/lease, I/O error or authorization mismatch fails
+        closed. This never removes cache registrations, replicas or leases.
+        """
+        if session['state'] != 'READY' or 'registrationIdentity' not in session:
+            return session
+        dataset, version = session['dataset'], session['version']
+        expected = 'u-'+hashlib.sha256(session['userId'].encode()).hexdigest()[:16]+'-'+session['name']
+        if dataset != expected:
+            raise ValueError('Personal upload namespace changed')
+        try:
+            self.cache._record_identity(dataset, version)
+            return session
+        except FileNotFoundError:
+            pass
+        try:
+            owners = self.cache._dataset(self.actor(session['userId']), dataset)['owners']
+            if owners != [session['userId']]:
+                raise PermissionError('Personal dataset ownership changed')
+        except FileNotFoundError:
+            pass
+        paths = self.cache._paths(dataset, version)
+        if (self._exists(paths['ready']) or self._exists(paths['.staging'])
+                or self.cache._leases(dataset, version)):
+            raise ValueError('Unregistered dataset still has replicas or leases; administrator inspection required')
+        binding = self.binding(dataset, version)
+        try:
+            if self.d._read_json(binding) == {'userId': session['userId'], 'uploadId': session['uploadId']}:
+                self._unlink(binding)
+        except FileNotFoundError:
+            pass
+        self._unlink(self.reservation(session['userId'], session['uploadId']))
+        for name in ('manifest.part', 'index.sqlite', 'index.pending', 'chunk.json'):
+            self._unlink(self.folder(session['userId'], session['uploadId'])/name)
+        session = dict(session, state='DISCARDED')
+        session.pop('error', None)
+        session.pop('resumeState', None)
+        self.save(session)
+        return session
+
+    def effective(self, session):
+        result = dict(session)
+        if 'version' in session and session['state'] != 'DISCARDED':
+            with self.cache._locked():
+                session = self.retire_unregistered(session)
+                if session['state'] == 'DISCARDED':
+                    return session
+                if self._ready(session):
+                    self._unlink(self.reservation(session['userId'], session['uploadId']))
+                    result['state'] = 'READY'
+                    result.pop('error', None)
+                    result.pop('resumeState', None)
+                    # Recover a committed publish whose worker died before its
+                    # receipt. Persist the confirmed state so future admission
+                    # does not keep charging a dead PUBLISHING worker as active.
+                    # A live worker owns the session writer lock and will write
+                    # its own receipt; never race its atomic metadata writer.
+                    if (session['state'] != 'READY' or 'error' in session or 'resumeState' in session) and not self.active(session['userId'], session['uploadId']):
+                        self.save(result)
+                    return result
+        if session['state'] in TRANSIENT and not self.active(session['userId'], session['uploadId']):
+            result.update(state='FAILED', resumeState=TRANSIENT[session['state']],
+                error='Upload worker is not running; retry the pending action or discard this unfinished upload')
+        elif session['state'] == 'READY':
+            result.update(state='FAILED', resumeState='RECEIVING_MANIFEST',
+                error='Published data is no longer present; reseal and upload the original files again')
+        return result
+
+    def result(self, session):
+        result = {k: session[k] for k in ('uploadId', 'name', 'state', 'manifestBytes', 'totalBytes',
+            'entries', 'dataset', 'version', 'error', 'resumeState') if k in session}
+        result.update(manifestOffset=self._size(self.folder(session['userId'], session['uploadId'])/'manifest.part'),
+                      chunkBytes=self.d.CHUNK_BYTES)
+        if session['state'] == 'READY':
+            result['remainingBytes'] = 0
+        elif 'version' in session and session['state'] != 'DISCARDED':
+            try:
+                stage = self.cache._paths(session['dataset'], session['version'])['.staging']
+                result['remainingBytes'] = self.cache._transfer(stage)['remainingBytes']
+            except FileNotFoundError:
+                pass
+        return result
+
+    def _admit(self, user, args):
+        name, upload = args.get('name'), args.get('key')
+        if not isinstance(name, str) or not NAME.fullmatch(name):
+            raise ValueError('Personal dataset name must be 1-40 ASCII letters, digits, underscores or hyphens')
+        folder = self.folder(user, upload)
+        for field, maximum in (('manifestBytes', self.d.MAX_JSON_BYTES),
+                               ('totalBytes', self.limits['maxUploadBytes']), ('entries', self.d.MAX_ENTRIES)):
+            value = args.get(field)
+            if type(value) is not int or not 0 <= value <= maximum or (field == 'manifestBytes' and value == 0):
+                raise ValueError('Invalid upload '+field+' or configured limit exceeded')
+        digest = args.get('manifestSha256')
+        if not isinstance(digest, str) or not HASH.fullmatch(digest):
+            raise ValueError('Invalid manifest SHA256')
+        specification = {k: args[k] for k in ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')}
+        with self.cache._locked():
+            try:
+                prior = self.load(user, upload)
+            except FileNotFoundError:
+                prior = None
+            if prior is not None:
+                if any(prior.get(k) != v for k, v in specification.items()):
+                    raise ValueError('Upload key already exists with a different specification')
+                prior = self.retire_unregistered(prior)
+                if (prior['state'] in ('RECEIVING_MANIFEST', 'SEALING')
+                        or prior['state'] == 'FAILED' and prior.get('resumeState') == 'RECEIVING_MANIFEST'):
+                    self.ensure_reservation(prior)
+                return prior
+            parent = folder.parent
+            sessions = []
+            if self._exists(parent):
+                with self.d._directory(parent) as fd:
+                    names = os.listdir(fd)
+                for item in names:
+                    if not UUID.fullmatch(item):
+                        raise ValueError('Corrupt personal upload directory')
+                    try:
+                        sessions.append(self.retire_unregistered(self.load(user, item)))
+                    except FileNotFoundError:
+                        # A killed first admission can leave an empty private
+                        # session directory, before any reservation or payload.
+                        with self.d._directory(parent/item) as fd:
+                            debris = os.listdir(fd)
+                        if any(not re.fullmatch(r'\.write-[a-f0-9]{32}', entry) for entry in debris):
+                            raise ValueError('Incomplete upload admission needs inspection')
+            # Cancellation releases payload quota, not an unlimited supply of
+            # private lock files and recovery receipts. Bound lifetime sessions
+            # too; intentional administrator archival can reset that history.
+            if len(sessions) >= self.limits['maxUserSessions']:
+                raise ValueError('Upload session history limit reached; administrator archival required')
+            retained = [s for s in sessions if s['state'] != 'DISCARDED']
+            if len(retained) >= self.limits['maxUserUploads']:
+                raise ValueError('Personal dataset upload count limit reached')
+            if sum(s['state'] != 'READY' for s in retained) >= self.limits['maxActiveUploads']:
+                raise ValueError('Too many unfinished personal dataset uploads')
+            # Account for raw/canonical manifests, the immutable path index and
+            # future payload before any public or personal transfer can spend it.
+            reserve = args['totalBytes']+args['manifestBytes']*4+args['entries']*8192+65536
+            if reserve > 2**63-1:
+                raise ValueError('Upload reservation exceeds supported size')
+            if sum(s['reserveBytes'] for s in retained)+reserve > self.limits['maxUserBytes']:
+                raise ValueError('Personal dataset storage quota reached (including metadata allowance)')
+            if sum(s['entries'] for s in retained)+args['entries'] > self.limits['maxUserEntries']:
+                raise ValueError('Personal dataset entry quota reached')
+            self.cache._free(self.cache._reserved()+reserve, needed_inodes=args['entries']+16)
+            self.folder(user, upload, create=True)
+            session = dict(schema=1, userId=user, uploadId=upload, **specification,
+                state='RECEIVING_MANIFEST', createdAt=time.time(), reserveBytes=reserve)
+            self.save(session)
+            self.d._write_json(self.reservation(user, upload), self.reservation_value(session))
+            return session
+
+    def begin(self, user, args):
+        # effective() has its own short cache lock; do not nest it in admission.
+        return self.result(self.effective(self._admit(user, args)))
+
+    def decoded(self, args):
+        value, offset = args.get('data'), args.get('offset')
+        if type(offset) is not int or offset < 0 or not isinstance(value, str) or len(value) > ((self.d.CHUNK_BYTES+2)//3)*4:
+            raise ValueError('Invalid upload chunk encoding or offset')
+        try:
+            data = base64.b64decode(value, validate=True)
+        except (ValueError, UnicodeError):
+            raise ValueError('Invalid upload chunk encoding') from None
+        if len(data) > self.d.CHUNK_BYTES:
+            raise ValueError('Upload chunk too large')
+        return offset, data
+
+    def manifest(self, user, args):
+        upload = args['uploadId']
+        offset, data = self.decoded(args)
+        with self.guard(user, upload):
+            session = self.effective(self.load(user, upload))
+            if session['state'] not in ('RECEIVING_MANIFEST', 'FAILED') or session.get('resumeState', 'RECEIVING_MANIFEST') != 'RECEIVING_MANIFEST':
+                raise ValueError('Manifest is already sealed or being processed')
+            if offset+len(data) > session['manifestBytes']:
+                raise ValueError('Manifest chunk exceeds declared length')
+            with self.cache._locked():
+                self.ensure_reservation(session)
+                self.cache._free(self.cache._reserved()+8192)
+                with self.d._directory(self.folder(user, upload)) as parent:
+                    fd = os.open('manifest.part', os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK, 0o600, dir_fd=parent)
+                    try:
+                        size = self.d._regular(fd).st_size
+                        if offset+len(data) <= size and os.pread(fd, len(data), offset) == data:
+                            pass
+                        elif offset == size:
+                            os.lseek(fd, offset, os.SEEK_SET)
+                            view = memoryview(data)
+                            while view:
+                                written = os.write(fd, view)
+                                if not written:
+                                    raise OSError('Short manifest write')
+                                view = view[written:]
+                            os.fsync(fd)
+                            os.fsync(parent)
+                        else:
+                            raise ValueError('Manifest retry differs or offset does not match; discard and restart if content changed')
+                        size = self.d._regular(fd).st_size
+                    finally:
+                        os.close(fd)
+            if session['state'] == 'FAILED':
+                session.update(state='RECEIVING_MANIFEST')
+                session.pop('error', None)
+                session.pop('resumeState', None)
+                self.save(session)
+            return {**self.result(session), 'offset': size, 'complete': size == session['manifestBytes']}
+
+    def _entry(self, session, path):
+        self.d._relative(path)
+        index = self.folder(session['userId'], session['uploadId'])/'index.sqlite'
+        with self.d._directory(index.parent) as parent:
+            fd = os.open(index.name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+            try:
+                if list(self.d._stamp(self.d._regular(fd))) != session['indexIdentity']:
+                    raise ValueError('Upload file index changed')
+            finally:
+                os.close(fd)
+        with closing(sqlite3.connect(index.as_uri()+'?mode=ro&immutable=1', uri=True)) as db:
+            row = db.execute('SELECT size,sha256 FROM files WHERE path=?', (path,)).fetchone()
+        if row is None:
+            raise ValueError('Upload path is not in the sealed manifest')
+        return {'path': path, 'size': row[0], 'sha256': row[1]}
+
+    def _check(self, session, *, transfer=True):
+        actor = self.actor(session['userId'])
+        dataset, version = session['dataset'], session['version']
+        metadata = self.cache._dataset(actor, dataset)
+        expected = 'u-'+hashlib.sha256(actor.user_id.encode()).hexdigest()[:16]+'-'+session['name']
+        if dataset != expected or metadata['owners'] != [actor.user_id]:
+            raise PermissionError('Upload is not an exclusively owned personal dataset')
+        self.cache._check_snapshot(actor, dataset, version, tuple(session['registrationIdentity']))
+        paths = self.cache._paths(dataset, version)
+        if self._exists(paths['ready']):
+            raise ValueError('Published version cannot be changed or discarded')
+        if not transfer:
+            return paths, None
+        fence = self.cache._transfer(paths['.staging'])
+        if fence['owner'] != actor.user_id or fence['token'] != session['transferToken']:
+            raise PermissionError('Upload transfer identity changed')
+        return paths, fence
+
+    @contextmanager
+    def version_guard(self, session):
+        with self.cache._locked():
+            self._check(session)
+        with self.cache._lock_file('.locks/'+session['dataset']+'.'+session['version']+'.lock'):
+            yield
+
+    def recover_chunk(self, session, paths, fence):
+        """Repair only this version's bounded last write, not its whole tree.
+
+        A crash between data fsync and TRANSFER accounting otherwise leaks a
+        reservation forever. This private intent is persisted before the write.
+        """
+        journal = self.folder(session['userId'], session['uploadId'])/'chunk.json'
+        try:
+            pending = self.d._read_json(journal)
+        except FileNotFoundError:
+            return fence
+        if (not isinstance(pending, dict) or set(pending) != {'path', 'beforeOffset', 'beforeRemaining', 'length', 'token'}
+                or pending['token'] != session['transferToken']
+                or any(type(pending[k]) is not int or pending[k] < 0 for k in ('beforeOffset', 'beforeRemaining', 'length'))
+                or pending['length'] > self.d.CHUNK_BYTES):
+            raise ValueError('Invalid interrupted chunk journal')
+        entry = self._entry(session, pending['path'])
+        size = self._size(paths['.staging']/'data'/entry['path'])
+        delta = size-pending['beforeOffset']
+        if size > entry['size'] or not 0 <= delta <= pending['length'] or delta > pending['beforeRemaining']:
+            raise ValueError('Interrupted chunk size cannot be reconciled')
+        expected = pending['beforeRemaining']-delta
+        if fence['remainingBytes'] == pending['beforeRemaining']:
+            fence = dict(fence, remainingBytes=expected)
+            self.d._write_json(paths['.staging']/'TRANSFER.json', fence)
+        elif fence['remainingBytes'] != expected:
+            raise ValueError('Interrupted chunk accounting changed')
+        self._unlink(journal)
+        return fence
+
+    def chunk(self, user, args):
+        upload = args['uploadId']
+        offset, data = self.decoded(args)
+        with self.guard(user, upload):
+            session = self.effective(self.load(user, upload))
+            if session['state'] != 'UPLOADING' and not (session['state'] == 'FAILED' and session.get('resumeState') == 'UPLOADING'):
+                raise ValueError('Upload is not accepting data; finish sealing or wait for publication')
+            entry = self._entry(session, args.get('path'))
+            with self.version_guard(session), self.cache._locked():
+                paths, fence = self._check(session)
+                fence = self.recover_chunk(session, paths, fence)
+                self.cache._free(self.cache._reserved()+8192)
+                journal = self.folder(user, upload)/'chunk.json'
+                self.d._write_json(journal, {'path': entry['path'],
+                    'beforeOffset': self._size(paths['.staging']/'data'/entry['path']),
+                    'beforeRemaining': fence['remainingBytes'], 'length': len(data), 'token': session['transferToken']})
+                result, written = self.cache._put_chunk_data(paths['.staging'], entry, offset, data, fence['remainingBytes'])
+                if written:
+                    fence['remainingBytes'] -= written
+                    self.d._write_json(paths['.staging']/'TRANSFER.json', fence)
+                self._unlink(journal)
+            if session['state'] == 'FAILED':
+                session.update(state='UPLOADING')
+                session.pop('error', None)
+                session.pop('resumeState', None)
+                self.save(session)
+            return {**self.result(session), **result}
+
+    def status(self, user, args):
+        session = self.effective(self.load(user, args['uploadId']))
+        result = self.result(session)
+        if 'path' in args:
+            if session['state'] not in ('UPLOADING', 'READY', 'FAILED') or 'indexIdentity' not in session:
+                raise ValueError('Upload manifest has not been sealed')
+            entry = self._entry(session, args['path'])
+            with self.cache._locked():
+                self.cache._dataset(self.actor(user), session['dataset'])
+                paths = self.cache._paths(session['dataset'], session['version'])
+                root = paths['ready'] if session['state'] == 'READY' else paths['.staging']
+                actual = self._size(root/'data'/entry['path'], missing=None)
+                offset = 0 if actual is None else actual
+            if offset > entry['size']:
+                raise ValueError('Uploaded file exceeds registered size')
+            result['file'] = {**entry, 'offset': offset,
+                'complete': actual is not None and offset == entry['size']}
+        return result
+
+    def start(self, user, args, action):
+        upload = args['uploadId']
+        with self.guard(user, upload):
+            session = self.effective(self.load(user, upload))
+            if session['state'] == 'READY':
+                if action == 'discard':
+                    raise ValueError('Cannot discard a published dataset; no data was deleted')
+                return self.result(session)
+            if session['state'] == 'DISCARDED':
+                if action != 'discard':
+                    raise ValueError('This upload was discarded; use a new upload key')
+                return self.result(session)
+            target = {'seal': 'SEALING', 'commit': 'PUBLISHING', 'discard': 'DISCARDING'}[action]
+            if session['state'] in TRANSIENT:
+                if session['state'] == target:
+                    return self.result(session)
+                raise ValueError('Another upload operation is running')
+            previous = session.get('resumeState', session['state']) if session['state'] == 'FAILED' else session['state']
+            if action == 'seal' and previous != 'RECEIVING_MANIFEST':
+                if session['state'] == 'UPLOADING':
+                    return self.result(session)
+                raise ValueError('Upload manifest is already sealed')
+            if action == 'commit' and previous != 'UPLOADING':
+                raise ValueError('Seal the manifest before publishing')
+            if action == 'seal' and self._size(self.folder(user, upload)/'manifest.part') != session['manifestBytes']:
+                raise ValueError('Manifest upload is incomplete')
+            session.update(state=target, action=action)
+            session.pop('error', None)
+            session.pop('resumeState', None)
+            self.save(session)
+            try:
+                self.n.run(['/usr/bin/systemd-run', '--user', '--collect',
+                    '--unit=gpuq-upload-'+self.key(user, upload)[:32], '--property=KillMode=control-group',
+                    '--property=UMask=0077', '--property=CPUQuota=100%', '--property=MemoryMax=2G',
+                    '--property=IOWeight=10', '--property=RuntimeMaxSec=86400', '--property=TimeoutStopSec=20',
+                    '/usr/bin/python3', str(self.n.HERE/'node-executor.py'), '--dataset-upload-worker', user, upload, action], timeout=8)
+            except Exception:
+                session.update(state='FAILED', resumeState=previous, error='Unable to start upload worker')
+                self.save(session)
+                raise
+            return self.result(session)
+
+    def binding(self, dataset, version):
+        return self.root/'bindings'/(hashlib.sha256((dataset+'@'+version).encode()).hexdigest()+'.json')
+
+    def seal(self, session):
+        user, upload = session['userId'], session['uploadId']
+        folder = self.folder(user, upload)
+        with self.d._directory(folder) as parent:
+            fd = os.open('manifest.part', os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+            try:
+                digest, size = self.d._digest_fd(fd)
+                if size != session['manifestBytes'] or digest != session['manifestSha256']:
+                    raise ValueError('Manifest length or SHA256 does not match')
+                os.lseek(fd, 0, os.SEEK_SET)
+                with os.fdopen(os.dup(fd), 'rb') as stream:
+                    manifest = self.d._manifest(json.load(stream))
+            finally:
+                os.close(fd)
+        if (len(manifest['files'])+len(manifest['directories']) != session['entries']
+                or sum(f['size'] for f in manifest['files']) != session['totalBytes']):
+            raise ValueError('Manifest totals differ from the admitted upload')
+        dataset = 'u-'+hashlib.sha256(user.encode()).hexdigest()[:16]+'-'+session['name']
+        version = self.d._version(manifest)
+        actor = self.actor(user)
+        index = folder/'index.sqlite'
+        temporary = folder/'index.pending'
+        self._unlink(temporary)
+        fd = os.open(temporary, os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        try:
+            with closing(sqlite3.connect(temporary)) as db:
+                db.execute('PRAGMA journal_mode=OFF')
+                db.execute('PRAGMA synchronous=OFF')
+                db.execute('CREATE TABLE files(path TEXT PRIMARY KEY,size INTEGER NOT NULL,sha256 TEXT NOT NULL) WITHOUT ROWID')
+                db.executemany('INSERT INTO files VALUES(?,?,?)',
+                    ((f['path'], f['size'], f['sha256']) for f in manifest['files']))
+                db.commit()
+            with self.d._directory(folder) as parent:
+                fd = os.open(temporary.name, os.O_RDONLY|os.O_NOFOLLOW, dir_fd=parent)
+                try:
+                    self.d._regular(fd)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.replace(temporary.name, index.name, src_dir_fd=parent, dst_dir_fd=parent)
+                os.fsync(parent)
+            session.update(dataset=dataset, version=version)
+            session['indexIdentity'] = list(self.d._stamp(index.stat(follow_symlinks=False)))
+            # A kill after any cache mutation must still leave enough durable
+            # identity for discard/retry to find precisely this upload's work.
+            self.save(session)
+            with self.cache._locked():
+                binding = self.binding(dataset, version)
+                try:
+                    existing = self.d._read_json(binding)
+                except FileNotFoundError:
+                    existing = None
+                if existing is not None and existing != {'userId': user, 'uploadId': upload}:
+                    if not self._ready(session):
+                        raise ValueError('This personal dataset version already has another unfinished upload')
+                    session.update(state='READY', registrationIdentity=list(self.cache._record_identity(dataset, version)))
+                    self._unlink(self.reservation(user, upload))
+                    self.save(session)
+                    return
+                try:
+                    record = self.cache._record(actor, dataset, version)
+                    if record['sourceId'] is not None:
+                        raise ValueError('Personal upload cannot replace an approved source registration')
+                    if existing is None and not self._ready(session):
+                        raise ValueError('An existing unowned transfer cannot be adopted by this upload')
+                except FileNotFoundError:
+                    pass
+                try:
+                    metadata = self.cache._dataset(actor, dataset)
+                    if metadata['owners'] != [user]:
+                        raise PermissionError('Personal dataset owner differs')
+                except FileNotFoundError:
+                    pass
+                self.d._write_json(binding, {'userId': user, 'uploadId': upload})
+                # All authorization, quota admission and reservation conversion
+                # are service-owned. No public operation receives an admin actor.
+                try:
+                    self.cache._register(self.d.Principal(user, True), dataset, manifest, [user], None)
+                    session['registrationIdentity'] = list(self.cache._record_identity(dataset, version))
+                    self.save(session)
+                    self.d._write_json(self.reservation(user, upload), self.reservation_value(session, sealed=True))
+                    plan = self.cache._plan(actor, dataset, version)
+                except BaseException:
+                    self.d._write_json(self.reservation(user, upload), self.reservation_value(session))
+                    raise
+                if plan['state'] == 'READY':
+                    session.update(state='READY')
+                    self._unlink(self.reservation(user, upload))
+                else:
+                    session.update(state='UPLOADING', transferToken=plan['token'])
+                self.save(session)
+        finally:
+            self._unlink(temporary)
+
+    def discard(self, session):
+        user, upload = session['userId'], session['uploadId']
+        if 'version' in session:
+            owned = False
+            with self.cache._locked():
+                binding = self.binding(session['dataset'], session['version'])
+                try:
+                    owned = self.d._read_json(binding) == {'userId': user, 'uploadId': upload}
+                except FileNotFoundError:
+                    pass
+                if owned:
+                    try:
+                        record = self.cache._record(self.actor(user), session['dataset'], session['version'])
+                    except FileNotFoundError:
+                        owned = False
+                    else:
+                        if record['sourceId'] is not None:
+                            raise ValueError('Personal upload source registration changed')
+                        if 'registrationIdentity' not in session:
+                            session['registrationIdentity'] = list(self.cache._record_identity(session['dataset'], session['version']))
+                        paths, _ = self._check(session, transfer=False)
+                        if self._exists(paths['.staging']) and 'transferToken' not in session:
+                            fence = self.cache._transfer(paths['.staging'])
+                            if fence['owner'] != user:
+                                raise PermissionError('Upload transfer belongs to another user')
+                            session['transferToken'] = fence['token']
+                        self.save(session)
+            def guard():
+                paths, _ = self._check(session, transfer=False)
+                if self._exists(paths['.staging']):
+                    self._check(session)
+            # The cache rechecks this guard inside every deletion transaction
+            # checkpoint. An owner/source/registration/READY change fails closed.
+            if owned:
+                self.cache.unregister(self.d.Principal(user, True), session['dataset'], session['version'], _guard=guard)
+            with self.cache._locked():
+                binding = self.binding(session['dataset'], session['version'])
+                try:
+                    if self.d._read_json(binding) == {'userId': user, 'uploadId': upload}:
+                        self._unlink(binding)
+                except FileNotFoundError:
+                    pass
+        with self.cache._locked():
+            self._unlink(self.reservation(user, upload))
+        for name in ('manifest.part', 'index.sqlite', 'index.pending', 'chunk.json'):
+            self._unlink(self.folder(user, upload)/name)
+        session.update(state='DISCARDED')
+        session.pop('error', None)
+        session.pop('resumeState', None)
+        self.save(session)
+
+    def worker(self, user, upload, action):
+        self.actor(user)
+        if action not in ('seal', 'commit', 'discard'):
+            raise ValueError('Invalid upload worker action')
+        with self.guard(user, upload):
+            session = self.load(user, upload)
+            expected = {'seal': 'SEALING', 'commit': 'PUBLISHING', 'discard': 'DISCARDING'}[action]
+            if session['state'] != expected or session.get('action') != action:
+                raise ValueError('Upload worker request changed')
+            try:
+                if action == 'seal':
+                    self.seal(session)
+                elif action == 'commit':
+                    actor = self.actor(user)
+                    with self.version_guard(session):
+                        with self.cache._locked():
+                            paths, fence = self._check(session)
+                            self.recover_chunk(session, paths, fence)
+                            record = self.cache._record(actor, session['dataset'], session['version'])
+                            identity = self.cache._record_identity(session['dataset'], session['version'])
+                        # Retain the same version lock and recheck exclusive
+                        # personal ownership at every publish checkpoint, even
+                        # if an administrator changes authorization mid-hash.
+                        self.cache._publish_locked(actor, session['dataset'], session['version'],
+                            session['transferToken'], (record, identity), _guard=lambda: self._check(session))
+                    session.update(state='READY')
+                    with self.cache._locked():
+                        self._unlink(self.reservation(user, upload))
+                    self.save(session)
+                else:
+                    self.discard(session)
+            except Exception as error:
+                with self.cache._locked():
+                    committed = 'version' in session and self._ready(session)
+                    if committed:
+                        self._unlink(self.reservation(user, upload))
+                if committed:
+                    session.update(state='READY')
+                    session.pop('error', None)
+                    session.pop('resumeState', None)
+                else:
+                    message = (os.strerror(error.errno) if isinstance(error, OSError) and error.errno
+                        else str(error) if isinstance(error, ValueError) else 'Upload operation failed; inspect node logs')
+                    session.update(state='FAILED', resumeState=TRANSIENT[expected], error=message[:300])
+                self.save(session)
+                return 0 if committed else 1
+            return 0
+
+    def process(self, operation, args):
+        fields = {'begin': {'name', 'key', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries'},
+                  'manifest': {'uploadId', 'offset', 'data'}, 'seal': {'uploadId'},
+                  'status': {'uploadId', 'path'}, 'chunk': {'uploadId', 'path', 'offset', 'data'},
+                  'commit': {'uploadId'}, 'discard': {'uploadId'}}
+        action = operation.removeprefix('datasets.upload.')
+        if (action not in fields or not isinstance(args, dict) or set(args)-fields[action]-{'userId', 'hostAdmin'}
+                or ('hostAdmin' in args and args['hostAdmin'] is not False)):
+            raise ValueError('Invalid personal upload fields')
+        required = fields[action]-({'path'} if action == 'status' else set())
+        if not required <= set(args) or 'userId' not in args:
+            raise ValueError('Missing personal upload fields')
+        user = args['userId']
+        self.actor(user)
+        if action in ('seal', 'commit', 'discard'):
+            return self.start(user, args, action)
+        return getattr(self, action)(user, args)

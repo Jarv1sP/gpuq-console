@@ -95,6 +95,49 @@ test('dataset endpoints reject identity/path spoofing, unauthorized machines and
   }finally{await f.close();}
 });
 
+test('personal upload API is member-accessible and always derives an unprivileged owner',async()=>{
+  const f=await fixture();try{
+    await f.grant();const key=randomUUID();
+    const requests={begin:{name:'my-data',key,manifestBytes:99,manifestSha256:version,totalBytes:64,entries:1},manifest:{uploadId:key,offset:0,data:Buffer.from('{}').toString('base64')},seal:{uploadId:key},status:{uploadId:key,path:'a/b.txt'},chunk:{uploadId:key,path:'a/b.txt',offset:0,data:Buffer.alloc(1024*1024).toString('base64')},commit:{uploadId:key},discard:{uploadId:key}};
+    for(const [action,args] of Object.entries(requests)){
+      const response=await f.post('datasets.upload.'+action,{machine:'gpu-1',...args});
+      assert.equal(response.status,200,JSON.stringify(response.data));
+      assert.deepEqual(f.calls.at(-1),{machine:'gpu-1',operation:'datasets.upload.'+action,args:{...args,userId:f.member.id,hostAdmin:false}});
+    }
+    await f.post('datasets.upload.begin',{machine:'gpu-1',...requests.begin},f.admin.token);
+    assert.equal(f.calls.at(-1).args.hostAdmin,false);
+    assert.equal(f.calls.at(-1).args.userId,'builtin-admin');
+    assert.equal(f.service.store.jobs.length,0);
+  }finally{await f.close();}
+});
+
+test('personal upload rejects identity injection and revoked machine access before any node request',async()=>{
+  const f=await fixture();try{
+    await f.grant();const key=randomUUID();
+    for(const action of ['begin','manifest','seal','status','chunk','commit','discard']){
+      const args=action==='begin'?{machine:'gpu-1',name:'data',key,manifestBytes:1,manifestSha256:version,totalBytes:0,entries:0}:action==='manifest'?{machine:'gpu-1',uploadId:key,offset:0,data:''}:action==='chunk'?{machine:'gpu-1',uploadId:key,path:'a',offset:0,data:''}:{machine:'gpu-1',uploadId:key};
+      for(const extra of [{userId:f.other.id},{hostAdmin:true},{sourceId:'source'},{owners:[f.member.id]},{root:'/tmp'},{dataset:'other'},{version}])assert.equal((await f.post('datasets.upload.'+action,{...args,...extra})).status,400);
+      assert.equal((await f.post('datasets.upload.'+action,{...args,machine:'gpu-4'})).status,403);
+      assert.equal((await f.post('datasets.upload.'+action,args,f.outsider.token)).status,403);
+      assert.equal((await f.post('datasets.upload.'+action,args,null)).status,401);
+    }
+    assert.equal(f.calls.length,0);
+  }finally{await f.close();}
+});
+
+test('personal upload bounds request metadata, chunk encoding and relative paths',async()=>{
+  const f=await fixture();try{
+    await f.grant();const uploadId=randomUUID(),base={machine:'gpu-1',uploadId,path:'file',offset:0,data:'YQ=='};
+    for(const path of ['/etc/passwd','../foo','a/../b','a//b','a\\b','.ssh/key','a\0b','x'.repeat(4097)])assert.equal((await f.post('datasets.upload.chunk',{...base,path})).status,400);
+    for(const data of ['YQ=','YR==','!!!!','YQ==\n',Buffer.alloc(1024*1024+1).toString('base64')])assert.equal((await f.post('datasets.upload.chunk',{...base,data})).status,400);
+    for(const offset of [-1,0.5,Number.MAX_SAFE_INTEGER+1,'0'])assert.equal((await f.post('datasets.upload.chunk',{...base,offset})).status,400);
+    const begin={machine:'gpu-1',name:'data',key:uploadId,manifestBytes:1,manifestSha256:version,totalBytes:0,entries:0};
+    for(const extra of [{name:'../x'},{name:'x'.repeat(41)},{manifestBytes:64*1024*1024+1},{manifestSha256:'short'},{entries:500001},{totalBytes:-1},{key:'bad'}])assert.equal((await f.post('datasets.upload.begin',{...begin,...extra})).status,400);
+    assert.equal((await f.post('datasets.upload.unknown',{machine:'gpu-1',uploadId})).status,400);
+    assert.equal(f.calls.length,0);
+  }finally{await f.close();}
+});
+
 test('dataset reference validation rejects coerced names/hashes, duplicate names, paths and additional properties',()=>{
   for(const datasets of [null,{},[{dataset:123,version}],[{dataset:['sample'],version}],[{dataset:'sample',version:[version]}],
     [{dataset:['sample'],version},{dataset:['sample'],version}], [{...reference,path:'/tmp/source'}],

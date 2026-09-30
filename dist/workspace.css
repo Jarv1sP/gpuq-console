@@ -185,3 +185,7 @@ input[type=file]::file-selector-button {border:1px solid #d7dfeb;background:#fff
   .help-links {gap:10px 16px;font-size:12px;line-height:1.8}
 }
 @media(max-width:360px) {.self-summary {padding:16px 12px}.self-summary>div {padding:0 8px}.self-summary small {font-size:10px}.self-summary strong {font-size:21px}.sidebar .nav-item {font-size:11px;padding-inline:4px}.sidebar .nav-count {min-width:18px;padding-inline:4px}.resource-card {padding:15px}.workspace-context-heading {align-items:flex-start}}
+#page-datasets #dataset-upload-form {min-width:0;max-width:100%}
+#page-datasets #dataset-upload-status,#page-datasets #dataset-upload-form .muted {overflow-wrap:anywhere;min-width:0}
+#page-datasets #dataset-upload-progress {display:block;width:100%;max-width:100%;margin:12px 0}
+#page-datasets #dataset-upload-form input[type=file] {width:100%;min-width:0;max-width:100%}

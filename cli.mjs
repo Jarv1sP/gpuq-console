@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import {readFile,mkdir,writeFile,chmod,unlink,open,lstat,readdir} from 'node:fs/promises';
-import {dirname,join,basename} from 'node:path';
+import {dirname,join,basename,resolve} from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {createInterface} from 'node:readline/promises';
+import {constants as fsConstants} from 'node:fs';
 
 const help=`GPUQ — 个人终端与 GPUQ 训练
 
@@ -31,6 +32,9 @@ gpuctl run --priority idle -g 1 -- python train.py
 gpuctl priority JOB high         Administrator: change queued job priority
 gpuctl pull --job JOB model.pt ./model.pt
 gpuctl data list                 List authorized dataset versions on selected server
+gpuctl data upload LOCAL_DIR --name NAME  Upload private data; repeat to resume
+gpuctl data upload-status UPLOAD_ID  Inspect this account's upload and verification
+gpuctl data upload-discard UPLOAD_ID  Cancel an unfinished upload (not a READY dataset)
 gpuctl data prepare NAME@VERSION Prepare a local, verified copy without reserving GPUs
 gpuctl data unregister NAME[@VERSION]  Administrator: asynchronously unregister local data
 gpuctl data status OPERATION_ID   Check a background operation; accepted is not completed
@@ -93,6 +97,70 @@ The standard Python environment is /opt/conda; never modify global Conda.`;
 const args=process.argv.slice(2),positionals=[],options={machines:[],datasets:[]};let training=[];
 let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).includes('--json');
 function fail(message){throw Error(message);}
+const DATA_CHUNK=1024*1024,DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
+const sameFile=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs&&a.nlink===b.nlink;
+function dataPath(path){if(!path||Buffer.byteLength(path)>4096||path.startsWith('/')||/[\\\x00-\x1f\x7f]/.test(path)||path.split('/').some(p=>['','.','..','.ssh','.env','.git','.venv','anaconda3','miniconda3','.conda'].includes(p)))fail('Unsafe, credential or environment dataset path: '+path);return path;}
+async function scanLocalDataset(root,progress){
+  dataPath(basename(resolve(root)));
+  const directories=[],files=[],local=new Map(),directoryStamps=new Map();let totalBytes=0,manifestEstimate=42,hashed=0;
+  const account=entry=>{manifestEstimate+=Buffer.byteLength(JSON.stringify(entry))+1;if(manifestEstimate>DATA_MANIFEST_LIMIT)fail('Dataset manifest exceeds 64 MiB; split it by data scope');if(directories.length+files.length>DATA_ENTRY_LIMIT)fail('Dataset manifest exceeds 500,000 entries');};
+  const top=await lstat(root);if(!top.isDirectory()||top.isSymbolicLink())fail('data upload requires a real local directory, not a file or symlink');
+  async function visit(folder,prefix=''){
+    const before=await lstat(folder);if(!before.isDirectory()||before.isSymbolicLink())fail('Local directory changed or is a symlink');directoryStamps.set(folder,before);
+    for(const name of (await readdir(folder)).sort()){
+      const path=dataPath(prefix?prefix+'/'+name:name),filename=join(folder,name),info=await lstat(filename);
+      if(info.isSymbolicLink())fail('Symlink dataset upload is not supported: '+path);
+      if(info.isDirectory()){directories.push(path);account(path);await visit(filename,path);continue;}
+      if(!info.isFile()||info.nlink!==1)fail('Only regular, single-link dataset files are supported: '+path);
+      if(!Number.isSafeInteger(info.size)||!Number.isSafeInteger(totalBytes+info.size))fail('Dataset size exceeds safe integer range');totalBytes+=info.size;
+      const file=await open(filename,fsConstants.O_RDONLY|fsConstants.O_NOFOLLOW|fsConstants.O_NONBLOCK);let sha256;
+      try{const initial=await file.stat();if(!initial.isFile()||!sameFile(info,initial))fail('Local file changed before hashing: '+path);const hash=createHash('sha256'),buffer=Buffer.alloc(DATA_CHUNK);let offset=0;while(offset<info.size){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,info.size-offset),offset);if(!bytesRead)fail('Local file changed during hashing: '+path);hash.update(buffer.subarray(0,bytesRead));offset+=bytesRead;progress('HASHING',{path,bytes:hashed+offset});}if(!sameFile(info,await file.stat()))fail('Local file changed during hashing: '+path);sha256=hash.digest('hex');}finally{await file.close();}
+      const entry={path,size:info.size,sha256};files.push(entry);account(entry);local.set(path,{filename,info});hashed+=info.size;
+    }
+    if(!sameFile(before,await lstat(folder)))fail('Local directory changed during scan: '+folder);
+  }
+  await visit(root);directories.sort();files.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+  const manifest=Buffer.from(JSON.stringify({schema:1,directories,files}));if(manifest.length>DATA_MANIFEST_LIMIT)fail('Dataset manifest exceeds 64 MiB');
+  return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files,local,directoryStamps,totalBytes,entries:files.length+directories.length};
+}
+async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore}){
+  const scan=await scanLocalDataset(directory,progress),h=createHash('sha256').update(JSON.stringify([userId,machine,name,scan.manifestSha256])).digest('hex'),key=`${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;
+  let uploadId,state;
+  const request=async(action,args={})=>(await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'?{uploadId}:{}),...args})).result;
+  const report=value=>{state=value;progress(value.state,value);};
+  const ready=()=>{if(state.state!=='READY'||!state.dataset||!/^[a-f0-9]{64}$/.test(state.version||''))fail('Server did not confirm a complete verified dataset');return {...state,machine};};
+  const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){await new Promise(resolve=>setTimeout(resolve,1500));report(await request('status'));}if(state.state==='FAILED')fail(state.error||'Dataset verification failed; repeat the same upload after fixing the cause');if(state.state==='DISCARDED')fail('Upload was discarded');};
+  const begin={name,key:keyStore.get(key)||key,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries};
+  report(await request('begin',begin));if(state.state==='DISCARDED'){begin.key=randomUUID();await keyStore.set(key,begin.key);report(await request('begin',begin));}
+  uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)fail('Server did not return an upload identifier');progress('HANDLE',{uploadId,machine});
+  try{
+    if(state.state==='FAILED'&&state.resumeState==='SEALING')report(await request('seal'));
+    if(state.state==='FAILED'&&state.resumeState==='PUBLISHING')report(await request('commit'));
+    if(state.state==='FAILED'&&['RECEIVING_MANIFEST','UPLOADING'].includes(state.resumeState))state={...state,state:state.resumeState};
+    if(state.state==='RECEIVING_MANIFEST'){
+      let offset=state.manifestOffset;if(!Number.isSafeInteger(offset)||offset<0||offset>scan.manifest.length)fail('Invalid manifest resume offset');
+      while(offset<scan.manifest.length){const bytes=scan.manifest.subarray(offset,offset+DATA_CHUNK),result=await request('manifest',{offset,data:bytes.toString('base64')});if(result.offset!==offset+bytes.length)fail('Server did not confirm the manifest chunk');offset=result.offset;progress('RECEIVING_MANIFEST',{bytes:offset,totalBytes:scan.manifest.length});}
+      report(await request('seal'));
+    }
+    await waitFor();if(state.state==='READY')return ready();if(state.state!=='UPLOADING')fail('Upload state is unconfirmed; repeat the same command to inspect and resume');
+    let transferred=0;
+    for(const entry of scan.files){
+      const response=await request('status',{path:entry.path}),remote=response.file;
+      if(!remote||remote.path!==entry.path||remote.size!==entry.size||remote.sha256!==entry.sha256||!Number.isSafeInteger(remote.offset)||remote.offset<0||remote.offset>entry.size)fail('Server file resume metadata does not match the manifest');
+      const {filename,info}=scan.local.get(entry.path),file=await open(filename,fsConstants.O_RDONLY|fsConstants.O_NOFOLLOW|fsConstants.O_NONBLOCK);
+      try{
+        if(!sameFile(info,await file.stat()))fail('Local file changed after hashing: '+entry.path);let offset=remote.offset;
+        if(!entry.size&&!remote.complete){const result=await request('chunk',{path:entry.path,offset:0,data:''});if(result.offset!==0||result.complete!==true)fail('Server did not confirm the empty file');}
+        while(offset<entry.size){const buffer=Buffer.alloc(DATA_CHUNK),{bytesRead}=await file.read(buffer,0,Math.min(buffer.length,entry.size-offset),offset);if(!bytesRead)fail('Local file changed during upload: '+entry.path);const result=await request('chunk',{path:entry.path,offset,data:buffer.subarray(0,bytesRead).toString('base64')});if(result.offset!==offset+bytesRead)fail('Server did not confirm the file chunk');offset=result.offset;progress('UPLOADING',{path:entry.path,bytes:transferred+offset,totalBytes:scan.totalBytes});}
+        if(!sameFile(info,await file.stat()))fail('Local file changed during upload; no publication was requested: '+entry.path);
+      }finally{await file.close();}transferred+=entry.size;
+    }
+    // A directory edit or any previously uploaded file change invalidates this local snapshot.
+    for(const [folder,info] of scan.directoryStamps)if(!sameFile(info,await lstat(folder)))fail('Local directory changed; no publication was requested');
+    for(const {filename,info} of scan.local.values())if(!sameFile(info,await lstat(filename)))fail('Local file changed; no publication was requested');
+    report(await request('commit'));await waitFor();return ready();
+  }catch(error){fail(`${error.message}\nUpload: ${uploadId} on ${machine}. Repeat the same data upload command to resume; check with gpuctl data upload-status ${uploadId} --machine ${machine}. Do not assume an interrupted request canceled server verification.`);}
+}
 async function secret(label='Password'){
   if(options['password-stdin']){let value='';for await(const chunk of process.stdin){value+=chunk;if(value.length>1024)fail('Password input too long');}return value.replace(/\r?\n$/,'');}
   if(!process.stdin.isTTY)fail('Use --password-stdin for non-interactive password input.');
@@ -156,7 +224,7 @@ async function main(){
     mode={demo:login.state.demo,gpuqConnected:login.state.gpuqConnected===true};
     await mkdir(dirname(sessionFile),{recursive:true,mode:0o700});
     const previous=session?.principal?.userId===login.principal.userId?session:null;
-    await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(previous?.machine?{machine:previous.machine}:{}),...(previous?.projectsByMachine?{projectsByMachine:previous.projectsByMachine}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
+    await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(previous?.machine?{machine:previous.machine}:{}),...(previous?.projectsByMachine?{projectsByMachine:previous.projectsByMachine}:{}),...(previous?.datasetUploadKeys?{datasetUploadKeys:previous.datasetUploadKeys}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
     result={loggedIn:true,principal:login.principal};
   }else{
     if(!session)fail('请先登录：gpuctl login');
@@ -277,6 +345,17 @@ async function main(){
       else if(action==='enable'||action==='disable')result=(await call('users.enabled',{userId:find(username),enabled:action==='enable'})).result;
       else if(action==='delete')result=(await call('users.delete',{userId:find(username)})).result;
       else fail('Unknown user command');
+    }else if(command==='data'&&positionals[1]==='upload'){
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','name'].includes(k)))fail('Usage: data upload LOCAL_DIR --name NAME [--machine SERVER]');
+      if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Dataset name must be 1–40 ASCII letters, digits, _ or -, beginning with a letter or digit');
+      const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
+      let last=0,phase='';const progress=(next,value)=>{if(next==='HANDLE'){process.stderr.write(`Upload: ${value.uploadId} · ${value.machine}\n`);return;}const now=Date.now();if(next!==phase||now-last>1000){phase=next;last=now;process.stderr.write(`${next}${value.bytes!==undefined?' · '+value.bytes+(value.totalBytes!==undefined?' / '+value.totalBytes:'')+' bytes':''}${value.path?' · '+value.path:''}\n`);}};
+      const keyStore={get:key=>session.datasetUploadKeys?.[key],set:async(key,value)=>{session.datasetUploadKeys={...session.datasetUploadKeys,[key]:value};await saveSession();}};
+      result=await uploadLocalDataset(call,{machine,name:options.name,userId:session.principal.userId,directory:positionals[2],progress,keyStore});
+    }else if(command==='data'&&['upload-status','upload-discard'].includes(positionals[1])){
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: data upload-status|upload-discard UPLOAD_ID [--machine SERVER]');
+      const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
+      result={...(await call('datasets.upload.'+(positionals[1]==='upload-status'?'status':'discard'),{machine,uploadId:positionals[2]})).result,machine};if(result.state==='FAILED')process.exitCode=1;
     }else if(command==='data'&&['list','prepare','status','unregister'].includes(positionals[1])){
       if(positionals.length!==(positionals[1]==='list'?2:3))fail('Usage: data list | data prepare NAME@VERSION | data status NAME@VERSION|OPERATION_ID | data unregister NAME[@VERSION]');
       if(training.length||options.datasets.length||['as','project','release','job','root','legacy','cards','min-vram','name','key','total','role','full'].some(key=>Object.hasOwn(options,key)))fail('data commands accept only the dataset reference and one --machine SERVER');
@@ -377,6 +456,8 @@ async function main(){
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='use'){console.log(`当前服务器：${result.selected}\n${result.project?'当前项目：'+result.project:'未选择项目；可用 gpuctl project create NAME 或 project use NAME'}`);return;}
+  if(command==='data'&&positionals[1]==='upload'){console.log(`数据集已就绪：${result.machine}\n${result.dataset}@${result.version}\n训练只读路径：/data2/${result.dataset}\n可在 run 中使用 --data ${result.dataset}@${result.version}`);return;}
+  if(command==='data'&&['upload-status','upload-discard'].includes(positionals[1])){console.log(`${result.state} · ${result.uploadId} · ${result.machine}${result.error?'\n'+result.error:''}${result.state==='READY'?'\n'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
   if(command==='data'&&(positionals[1]==='unregister'||/^[a-f0-9]{64}$/.test(positionals[2]||''))){
     if(result.state==='UNREGISTERED')console.log(`${result.unregistered?'已注销所选本地数据集范围':'所选注册已不存在'}：${result.dataset}${result.version?'@'+result.version:''}${result.recoveryId?'\n恢复记录：'+result.recoveryId:''}`);
     else console.log(`${result.state==='UNREGISTERING'?'已受理注销，尚未完成':result.state} · ${result.operationId}${result.error?'\n'+result.error:''}\n查看：gpuctl data status ${result.operationId} --machine ${result.machine}`);

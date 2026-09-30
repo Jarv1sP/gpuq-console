@@ -397,7 +397,7 @@ class DatasetCache:
                 raise CacheError("unsafe approved source directory")
             self.sources[key] = path
         _mkdir(self.root)
-        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks"):
+        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations"):
             _mkdir(self.root / name)
 
     @contextlib.contextmanager
@@ -498,11 +498,13 @@ class DatasetCache:
         if self._record_identity(dataset, version) != identity:
             raise CacheError("version registration changed; retry the operation")
 
-    def _free(self, needed=0):
+    def _free(self, needed=0, needed_inodes=0):
         with _directory(self.root) as fd:
             info = os.fstatvfs(fd)
         if info.f_bavail * info.f_frsize < self.reserve_bytes + needed:
             raise CacheError("insufficient free space including safety reserve; no publication allowed")
+        if getattr(info, 'f_files', 0) > 0 and info.f_favail < 1024 + needed_inodes + self._upload_reserved()[1]:
+            raise CacheError("insufficient free inodes including upload reservations")
 
     def _register(self, actor, dataset, manifest, owners, source_id):
         self._actor(actor, admin=True)
@@ -612,6 +614,7 @@ class DatasetCache:
                         if state != "READY" and version in os.listdir(fd):
                             state = "STAGING"
                     versions.append(dict(version=version, state=state,
+                                         canPrepare=record['sourceId'] in self.sources,
                                          bytes=sum(f["size"] for f in record["manifest"]["files"]),
                                          files=len(record["manifest"]["files"])))
                 result.append(dict(dataset=dataset, versions=versions))
@@ -641,8 +644,27 @@ class DatasetCache:
             raise CacheError("invalid transfer token")
         return value
 
+    def _upload_reserved(self):
+        total = inodes = 0
+        # Member uploads reserve future payload before their large manifest is
+        # sealed. Public-source materialization must see those reservations too.
+        with _directory(self.root / ".upload-reservations") as fd:
+            reservations = os.listdir(fd)
+        for name in reservations:
+            if re.fullmatch(r"\.write-[a-f0-9]{32}", name):
+                continue
+            if not re.fullmatch(r"[a-f0-9]{64}\.json", name):
+                raise CacheError("corrupt upload reservation directory")
+            value = _read_json(self.root / ".upload-reservations" / name)
+            if (not isinstance(value, dict) or set(value) not in ({"bytes"}, {"bytes", "inodes"})
+                    or any(type(number) is not int or not 0 <= number <= 2**63-1 for number in value.values())):
+                raise CacheError("corrupt upload reservation")
+            total += value["bytes"]
+            inodes += value.get('inodes', 0)
+        return total, inodes
+
     def _reserved(self, except_stage=None):
-        total = 0
+        total = self._upload_reserved()[0]
         with _directory(self.root / ".staging") as fd:
             datasets = os.listdir(fd)
         for dataset in datasets:
@@ -865,15 +887,21 @@ class DatasetCache:
         with self._version_locked(actor, dataset, version, snapshot=True) as snapshot:
             return self._publish_locked(actor, dataset, version, token, snapshot)
 
-    def _publish_locked(self, actor, dataset, version, token, snapshot):
+    def _publish_locked(self, actor, dataset, version, token, snapshot, *, _guard=None):
         """Publish with the same exclusively locked, validated registration."""
         record, identity = snapshot
         with self._locked():
+            if _guard is not None:
+                _guard()
             self._check_snapshot(actor, dataset, version, identity)
             paths = self._paths(dataset, version)
             if self._ready(paths, record["manifest"], version):
                 return dict(dataset=dataset, version=version, state="READY")
             record, paths, transfer = self._authorize_transfer(actor, dataset, version, token, snapshot=snapshot)
+            # Empty directories are real disk/inode allocations too. Reserve
+            # their worst-case metadata before creating a large empty tree.
+            self._free(self._reserved()+8192*len(record['manifest']['directories'])+8192,
+                       needed_inodes=len(record['manifest']['directories']))
         stage = paths[".staging"]
         for directory in record["manifest"]["directories"]:
             _mkdir(stage / "data" / directory)
@@ -881,6 +909,8 @@ class DatasetCache:
         if actual != record["manifest"]:
             raise CacheError("staging checksum/tree does not match registered version")
         with self._locked():
+            if _guard is not None:
+                _guard()
             self._authorize_transfer(actor, dataset, version, token, snapshot=snapshot)
             self._free(self._reserved(except_stage=stage) + len(_json_bytes(actual)) + 8192)
             with _directory(stage) as fd:
@@ -895,6 +925,8 @@ class DatasetCache:
             # and lightweight status remain available throughout a long copy.
             _modes(stage, True)
             with self._locked():
+                if _guard is not None:
+                    _guard()
                 self._authorize_transfer(actor, dataset, version, token, snapshot=snapshot)
                 self._free(self._reserved(except_stage=stage) + 8192)
                 with _directory(stage) as fd:
@@ -1275,7 +1307,7 @@ class DatasetCache:
                 with _directory(parent) as fd:
                     os.fsync(fd)
 
-    def unregister(self, actor, dataset, version=None):
+    def unregister(self, actor, dataset, version=None, *, _guard=None):
         """Admin-only reversible registration removal after unleased eviction.
 
         Internal transfers and leases share these locks. As with evict/publish,
@@ -1286,12 +1318,16 @@ class DatasetCache:
         self._actor(actor, admin=True)
         self._paths(dataset, version)
         with self._locked():
+            if _guard is not None:
+                _guard()
             initial = self._unregister_snapshot(actor, dataset, version)
         if initial is None:
             return dict(dataset=dataset, version=version, versions=[], unregistered=False,
                         registrationRetained=False, recoveryId=None)
 
         def recheck():
+            if _guard is not None:
+                _guard()
             current = self._unregister_snapshot(actor, dataset, version)
             if (current is None or current["registry"] != initial["registry"]
                     or set(current["versions"]) - set(initial["versions"])):

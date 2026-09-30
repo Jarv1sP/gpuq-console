@@ -18,6 +18,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: node tests/ui-smoke.mjs
       - run: node tests/datasets-ui-smoke.mjs
+      - run: node tests/dataset-upload-ui-smoke.mjs
       - run: node tests/projects-ui-smoke.mjs
       - run: node tests/priority-ui-smoke.mjs
       - run: node tests/community-ui-smoke.mjs

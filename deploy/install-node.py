@@ -49,7 +49,7 @@ else:
     if a.initialize_gpuq:print('Existing GPUQ preserved; no upgrade or database initialization performed')
     if not binary.is_file():raise SystemExit('Existing GPUQ requires its managed ~/bin/gpu command')
 cfg=json.loads(config.read_text())
-for item in ('node-executor.py','terminal-helper.py','admin-command.py','node-probe.py','dataset-cache.py','project-store.py','project-ops.py','job-diagnostics.py','gpuq-network'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
+for item in ('node-executor.py','terminal-helper.py','admin-command.py','node-probe.py','dataset-cache.py','dataset-upload.py','project-store.py','project-ops.py','job-diagnostics.py','gpuq-network'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
 runner_source='sandbox-runner.py' if a.runtime_profile=='ray-p0' else 'sandbox-runner-common-p0.py'
 shutil.copy2(source/'deploy'/runner_source,dest/'sandbox-runner.py');(dest/'sandbox-runner.py').chmod(0o700)
 if a.runtime_profile=='ray-p0':
@@ -68,7 +68,7 @@ if type(retention) is not int or not 1<=retention<=365:raise SystemExit('Invalid
 node_config['diagnosticsRetentionDays']=retention
 datasets=node.get('datasets',previous.get('datasets'))
 if datasets is not None:
-    if not isinstance(datasets,dict) or set(datasets)-{'root','mountPoint','sources','reserveBytes'}:raise SystemExit('Invalid node dataset configuration')
+    if not isinstance(datasets,dict) or set(datasets)-{'root','mountPoint','sources','reserveBytes','uploads'}:raise SystemExit('Invalid node dataset configuration')
     if datasets.get('mountPoint','/data2')!='/data2' or datasets.get('root','/data2/datasets')!='/data2/datasets':raise SystemExit('Managed dataset storage must use /data2/datasets on the verified /data2 mount')
     if '--ro-bind-fd' not in help_bwrap:raise SystemExit('Datasets require bubblewrap --ro-bind-fd support')
     module=importlib.util.spec_from_file_location('gpuq_install_dataset_cache',dest/'dataset-cache.py');cache_module=importlib.util.module_from_spec(module);sys.modules[module.name]=cache_module;module.loader.exec_module(cache_module)

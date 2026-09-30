@@ -13,3 +13,9 @@ test('only ready datasets can be used and failed preparations can be retried',()
  assert.doesNotMatch(failed,/data-prepare-dataset="tiny"[^>]+disabled/);assert.match(failed,/data-use-dataset="tiny"[^>]+disabled/);
  assert.match(datasetRows({datasets:[]}),/还没有分配/);
 });
+test('personal uploads without a configured source show resume guidance instead of a broken prepare action',()=>{
+ const staging=datasetRows({datasets:[{dataset:'u-user-private',versions:[{version:'a'.repeat(64),state:'STAGING',canPrepare:false}]}]});
+ assert.doesNotMatch(staging,/data-prepare-dataset/);assert.match(staging,/重新选择同一目录继续上传/);assert.match(staging,/data-use-dataset="u-user-private"[^>]+disabled/);
+ const ready=datasetRows({datasets:[{dataset:'u-user-private',versions:[{version:'a'.repeat(64),state:'READY',canPrepare:false}]}]});
+ assert.doesNotMatch(ready,/data-prepare-dataset/);assert.doesNotMatch(ready,/data-use-dataset="u-user-private"[^>]+disabled/);
+});

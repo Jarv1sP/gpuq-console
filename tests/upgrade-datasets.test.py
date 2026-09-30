@@ -49,6 +49,7 @@ class UpgradeDatasets(unittest.TestCase):
         (self.source / 'dataset-cache.py').write_text('def _data2_mount(): return None\nclass DatasetCache:\n def __init__(self, root): pass\n')
         (self.source / 'sandbox-runner.py').write_text('# new runner needs cfg conda\n')
         (self.source / 'node-executor.py').write_text('# new executor\n')
+        (self.source / 'dataset-upload.py').write_text('# member upload helper\n')
 
     def inferred(self, config=None):
         return upgrade.upgraded_config(self.config if config is None else config, self.runner, self.cache)
@@ -142,7 +143,7 @@ class UpgradeDatasets(unittest.TestCase):
         cfg = json.loads(self.path.read_text())
         for key, value in self.config.items():
             self.assertEqual(cfg[key], value)
-        self.assertEqual(copied, ['dataset-cache.py', 'sandbox-runner.py', 'node-executor.py'])
+        self.assertEqual(copied, ['dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py', 'node-executor.py'])
         self.assertEqual(self.broker.stat().st_ino, broker_inode)
         self.assertEqual((Path(result['backup']) / 'node-config.json').read_bytes(), original)
         self.assertFalse(result['restartRequired'])

@@ -104,6 +104,33 @@ export async function executionCall(service,principal,operation,args){
     if(result===undefined)fail('未知项目操作。');
     return result;
   }
+  if(operation.startsWith('datasets.upload.')){
+    authorizedMachine(args.machine);
+    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId']};
+    const action=operation.slice('datasets.upload.'.length),allowed=fields[action];
+    if(!allowed||Object.keys(args).some(k=>k!=='machine'&&!allowed.includes(k)))fail('个人数据集上传参数无效。');
+    const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+    const id=action==='begin'?args.key:args.uploadId;
+    if(typeof id!=='string'||!uuid.test(id))fail('上传编号必须为完整 UUID。');
+    if(action==='begin'){
+      if(typeof args.name!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(args.name))fail('名称请用 1–40 位字母、数字、短横线或下划线。');
+      if(!Number.isSafeInteger(args.manifestBytes)||args.manifestBytes<1||args.manifestBytes>64*1024*1024||typeof args.manifestSha256!=='string'||!/^[a-f0-9]{64}$/.test(args.manifestSha256))fail('数据清单大小或校验值无效（上限 64 MiB）。');
+      if(!Number.isSafeInteger(args.totalBytes)||args.totalBytes<0||!Number.isSafeInteger(args.entries)||args.entries<0||args.entries>500000)fail('数据容量或条目数无效（上限 50 万条）。');
+    }
+    if(action==='chunk'||Object.hasOwn(args,'path')){
+      if(typeof args.path!=='string'||!args.path||Buffer.byteLength(args.path)>4096||/[\\\x00-\x1f\x7f]/.test(args.path)||args.path.split('/').some(p=>!p||p==='.'||p==='..'||['.ssh','.env','.git','.venv','anaconda3','miniconda3','.conda'].includes(p)))fail('只能上传数据目录内的安全相对路径。');
+    }
+    if(action==='manifest'||action==='chunk'){
+      if(!Number.isSafeInteger(args.offset)||args.offset<0||typeof args.data!=='string'||args.data.length>1398104||args.data.length%4!==0||/[^A-Za-z0-9+/=]/.test(args.data))fail('上传分块参数无效。');
+      const data=Buffer.from(args.data,'base64');
+      if(data.length>1024*1024||data.toString('base64')!==args.data)fail('上传分块最多 1 MiB，且需使用规范 Base64。');
+    }
+    const {machine,...request}=args;
+    // Every upload is personal, including uploads made by administrators. No
+    // client-provided role, source mapping or filesystem path crosses the bridge.
+    if(['begin','seal','commit','discard'].includes(action))service.audit(principal.username,operation,machine,id);
+    return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
+  }
   if(['datasets.list','datasets.status','datasets.prepare','datasets.unregister'].includes(operation)){
     authorizedMachine(args.machine);
     if(operation==='datasets.unregister'&&principal.role!=='admin')fail('注销数据集仅管理员可用。',403);

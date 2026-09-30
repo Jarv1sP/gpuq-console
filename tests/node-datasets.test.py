@@ -19,7 +19,7 @@ class NodeDatasets(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
-        for name in ('node-executor.py', 'dataset-cache.py', 'sandbox-runner.py'):
+        for name in ('node-executor.py', 'dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py'):
             shutil.copy2(DEPLOY / name, self.base / name)
         self.source = self.base / 'source'
         self.source.mkdir()
@@ -78,6 +78,23 @@ class NodeDatasets(unittest.TestCase):
         self.node.validate_job(self.job)
         with self.assertRaises(ValueError):
             self.node.validate_job(dict(old, sourcePath='/tmp'))
+
+    def test_personal_upload_node_routing_never_inherits_administrator(self):
+        import hashlib
+        manifest = b'{"schema":1,"directories":[],"files":[]}'
+        args = dict(userId='demo-user-1',hostAdmin=False,name='mine',
+            key='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',manifestBytes=len(manifest),
+            manifestSha256=hashlib.sha256(manifest).hexdigest(),totalBytes=0,entries=0)
+        with patch.object(self.node, 'gpu') as gpu:
+            result = self.node.process('datasets.upload.begin', args)
+            self.assertEqual(result['state'], 'RECEIVING_MANIFEST')
+            gpu.assert_not_called()
+        for value in (True, 0, 1, 'false'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.node.process('datasets.upload.begin', dict(args,hostAdmin=value))
+        with patch.object(self.node, 'dataset_mount_check', side_effect=ValueError('missing mount')):
+            with self.assertRaisesRegex(ValueError, 'missing mount'):
+                self.node.process('datasets.upload.status', dict(userId='demo-user-1',uploadId=args['key']))
 
     def test_dataset_references_are_strict(self):
         invalid = [None, {}, [dict(dataset='../data', version=self.version)],
