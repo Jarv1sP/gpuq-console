@@ -41,9 +41,14 @@ function prune(db,now){
 export function pruneTaskNotes(service){
   // Missing/UNKNOWN/LOST is NOT a confirmed end. General notes have no job_id
   // and intentionally survive both task cleanup and the public chat's TTL.
-  const ended=new Set((service.store?.jobs||[]).filter(j=>['SUCCEEDED','FAILED','CANCELED'].includes(j.state)).map(j=>j.id));
+  const linked=service.db.prepare('SELECT DISTINCT job_id FROM community_notes WHERE job_id IS NOT NULL').all();
+  if(!linked.length)return 0;
+  // Reconciliation mutates memory before save(). A failed portal_state write
+  // must not let its finally hook (or a community read) erase durable bodies.
+  const saved=service.db.prepare('SELECT data FROM portal_state WHERE id=1').get();
+  const ended=new Set((saved?JSON.parse(saved.data).jobs:[]).filter(j=>['SUCCEEDED','FAILED','CANCELED'].includes(j.state)).map(j=>j.id));
   if(!ended.size)return 0;
-  const ids=service.db.prepare('SELECT DISTINCT job_id FROM community_notes WHERE job_id IS NOT NULL').all().map(r=>r.job_id).filter(id=>ended.has(id));
+  const ids=linked.map(r=>r.job_id).filter(id=>ended.has(id));
   if(!ids.length)return 0;
   const db=service.db;let removed=0;db.exec('SAVEPOINT task_notes_cleanup');
   try{const del=db.prepare('DELETE FROM community_notes WHERE job_id=?');for(const id of ids)removed+=Number(del.run(id).changes);db.exec('RELEASE task_notes_cleanup');return removed;}

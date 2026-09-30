@@ -104,3 +104,20 @@ test('cleanup failure preserves the real training failure and retries without ch
   assert.equal(service.noteCleanupPending,false);assert.equal(job.error,cause);assert.equal(job.state,'FAILED');
   assert.equal(service.db.prepare('SELECT count(*) n FROM community_notes').get().n,0);
 });
+
+test('an unpersisted terminal result cannot delete task note bodies',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-note-state-save-failure-')),bootstrap=join(dir,'bootstrap'),password=randomUUID()+randomUUID();
+  await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
+  const service=await PortalService.open(join(dir,'db'),bootstrap,undefined,async()=>({state:'SUCCEEDED',nodeJobId:'Jsave',assignedIndices:[]}));clearInterval(service.executionTimer);
+  t.after(async()=>{service.close();await rm(dir,{recursive:true,force:true});});
+  const admin=await service.login('admin',password),job={id:randomUUID(),userId:admin.principal.userId,username:'admin',machine:MACHINES[0].id,cards:1,state:'RUNNING',name:'training',spec:{argv:['python','train.py']}};
+  service.store.jobs.push(job);service.save();await service.invoke(admin.token,'community.notes.create',{key:randomUUID(),jobId:job.id,body:'keep until durable completion'});
+  service.db.exec("CREATE TEMP TRIGGER fail_state_save BEFORE UPDATE ON portal_state BEGIN SELECT RAISE(ABORT,'simulated state save failure'); END;");
+  await assert.rejects(service.reconcile(),/simulated state save failure/);
+  assert.equal(job.state,'SUCCEEDED');assert.equal(JSON.parse(service.db.prepare('SELECT data FROM portal_state WHERE id=1').get().data).jobs[0].state,'RUNNING');
+  assert.equal(service.db.prepare('SELECT count(*) n FROM community_notes').get().n,1);
+  // A subsequent community read must not treat in-memory state as durable.
+  assert.equal((await service.invoke(admin.token,'community.notes.list',{})).result.notes.length,1);
+  service.db.exec('DROP TRIGGER fail_state_save');service.save();await service.reconcile();
+  assert.equal(service.db.prepare('SELECT count(*) n FROM community_notes').get().n,0);
+});
