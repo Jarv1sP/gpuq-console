@@ -588,6 +588,10 @@ def process(operation,args):
         data=gpu('show',row[0]) if row else {'job':{'state':'NOT_SUBMITTED'},'attempts':[]}
         return job_diagnostics(job,data)
     if operation in ('host.exec','host.status','host.cancel'):return host_command(operation,args)
+    if operation.startswith(('projects.snapshot.','projects.sync.','datasets.snapshot.')):
+        spec=importlib.util.spec_from_file_location('gpuq_snapshot_sync',HERE/'snapshot-sync.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        return module.SnapshotSync(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())).process(operation,args)
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)

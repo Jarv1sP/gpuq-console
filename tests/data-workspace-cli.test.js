@@ -3,12 +3,11 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import * as fs from 'node:fs/promises';
-import {constants as fsConstants} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomBytes,randomUUID} from 'node:crypto';
-import vm from 'node:vm';
+import {createLocalDatasetTools} from '../client-data-upload.mjs';
 
 const chunk=1024*1024;
 async function fixture(t){
@@ -75,9 +74,8 @@ test('data workspace CLI preserves relative paths and publication handles, rejec
 
 test('data put supports old Windows path/handle device pairing but rejects subsequent identity changes and oversized files',async t=>{
   const dir=await fs.mkdtemp(join(tmpdir(),'gpuq-workspace-stat-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));const path=join(dir,'image.zip');await fs.writeFile(path,'payload');
-  const text=await fs.readFile(new URL('../cli.mjs',import.meta.url),'utf8'),source=text.slice(text.indexOf('function sameDatasetFile('),text.indexOf('async function scanLocalDataset('));
   const copy=(info,changes)=>Object.assign(Object.create(Object.getPrototypeOf(info)),info,changes);
-  const client=(overrides={})=>vm.runInNewContext(source+'\n({putWorkspaceData})',{Buffer,BigInt,Number,Date,process:{platform:'win32',stderr:{write(){}}},lstat:async(...args)=>copy(await fs.lstat(...args),{dev:0n}),open:fs.open,fsConstants,DATA_CHUNK:chunk,fail:message=>{throw Error(message);},...overrides});
+  const client=(overrides={})=>createLocalDatasetTools({platform:'win32',lstat:async(...args)=>copy(await fs.lstat(...args),{dev:0n}),open:fs.open,...overrides});
   const calls=[],call=async(operation,args)=>{calls.push({operation,args});return {result:{size:args.offset+Buffer.from(args.data,'base64').length}};};
   assert.equal((await client().putWorkspaceData(call,'gpu-1',path,'image.zip',false)).bytes,7);assert.equal(calls.length,1);
   let reads=0;calls.length=0;
