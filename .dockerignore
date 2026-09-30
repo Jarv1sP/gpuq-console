@@ -4,14 +4,7 @@
 !package.json
 !package-lock.json
 !scripts/build-client.mjs
-!USER_README.md
-!ADMIN_README.md
-!docs/DATASETS.md
-!docs/PROJECTS.md
-!docs/PROJECT_NETWORK.md
-!docs/TERMINAL_SESSIONS.md
-!docs/JOB_DIAGNOSTICS.md
-!docs/RAY_RESOURCES.md
-!docs/COMMUNITY.md
+!docs/USER_GUIDE.md
 !deploy/Dockerfile
 !deploy/install-client.sh
+!deploy/install-client.ps1

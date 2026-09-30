@@ -5,16 +5,16 @@ import {pathToFileURL} from 'node:url';
 import {PortalService} from './portal-service.mjs';
 import {bridgeClient} from './execution.mjs';
 import {standaloneClient} from './client-bundle.mjs';
+import {guideTarget,guidePage} from './guide.mjs';
 
 const files={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/xterm.js':'vendor/xterm.js','/xterm.css':'vendor/xterm.css','/addon-fit.js':'vendor/addon-fit.js'};
 files['/job-diagnostics-ui.js']='job-diagnostics-ui.js';files['/job-diagnostics.css']='job-diagnostics.css';
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
-const guides={'/guide/user':'./USER_README.md','/guide/admin':'./ADMIN_README.md','/guide/datasets':'./docs/DATASETS.md','/guide/projects':'./docs/PROJECTS.md','/guide/terminal-sessions':'./docs/TERMINAL_SESSIONS.md','/guide/diagnostics':'./docs/JOB_DIAGNOSTICS.md','/guide/ray-resources':'./docs/RAY_RESOURCES.md'};
+files['/guide.css']='guide.css';files['/guide.js']='guide.js';
 files['/datasets-ui.js']='datasets-ui.js';
+files['/datasets.css']='datasets.css';
 files['/dataset-upload.js']='dataset-upload.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
-guides['/guide/community']='./docs/COMMUNITY.md';
-guides['/guide/project-network']='./docs/PROJECT_NETWORK.md';
 export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge}){
   await standaloneClient();
   const url=new URL(origin);const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined));const rate=new Map();
@@ -65,9 +65,14 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
       if(path==='/runtime.js'){res.writeHead(200,{...headers,'Content-Type':mime.js});return res.end('globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;');}
       if(path==='/gpuctl.mjs'||path==='/amaxctl.mjs'){const client=await standaloneClient(url.origin);res.writeHead(200,{...headers,'Content-Type':'text/javascript; charset=utf-8','Content-Disposition':'attachment; filename="gpuctl.mjs"'});return res.end(client);}
       if(path==='/install.sh'){res.writeHead(200,{...headers,'Content-Type':'text/plain; charset=utf-8'});return res.end((await readFile(new URL('./deploy/install-client.sh',import.meta.url),'utf8')).replaceAll('__GPUQ_PUBLIC_ORIGIN__',url.origin));}
-      // Generic repository manuals follow the same public-read rule; no node
-      // inventories, credentials or private deployment records are served.
-      if(guides[path]){const text=(await readFile(new URL(guides[path],import.meta.url),'utf8')).replaceAll('https://gpu.example.com',url.origin);res.writeHead(200,{...headers,'Content-Type':'text/plain; charset=utf-8'});return res.end(req.method==='HEAD'?undefined:text);}
+      if(path==='/install.ps1'){res.writeHead(200,{...headers,'Content-Type':'text/plain; charset=utf-8'});return res.end(req.method==='HEAD'?undefined:(await readFile(new URL('./deploy/install-client.ps1',import.meta.url),'utf8')).replaceAll('__GPUQ_PUBLIC_ORIGIN__',url.origin));}
+      // Only the beginner-facing guide is public. Operations manuals and raw
+      // repository documentation are never served, even to logged-in admins.
+      const guide=guideTarget(path);
+      if(guide){
+        if(guide.redirect){res.writeHead(302,{...headers,Location:guide.redirect});return res.end();}
+        const text=await guidePage(guide.chapter,url.origin);res.writeHead(200,{...headers,'Content-Type':mime.html});return res.end(req.method==='HEAD'?undefined:text);
+      }
       const file=files[path];if(!file)return json(404,{error:'Not found'});
       let content=await readFile(new URL(`./dist/${file}`,import.meta.url));
       if(file==='index.html')content=content.toString().replace('</head>',`<meta name="gpuq-style-nonce" content="${styleNonce}"><link rel="stylesheet" href="/xterm.css"><script src="/xterm.js"></script><script src="/addon-fit.js"></script></head>`);

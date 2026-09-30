@@ -189,3 +189,16 @@ input[type=file]::file-selector-button {border:1px solid #d7dfeb;background:#fff
 #page-datasets #dataset-upload-status,#page-datasets #dataset-upload-form .muted {overflow-wrap:anywhere;min-width:0}
 #page-datasets #dataset-upload-progress {display:block;width:100%;max-width:100%;margin:12px 0}
 #page-datasets #dataset-upload-form input[type=file] {width:100%;min-width:0;max-width:100%}
+.personal-terminal {margin:20px 0;padding:20px;border:1px solid var(--line);border-radius:12px;background:#fff}
+.terminal-heading {display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.terminal-heading h3 {margin:0;font-size:15px}
+.terminal-scope {font-size:11px;color:#4e6470;background:#eef5f2;border-radius:20px;padding:5px 9px}
+.personal-terminal>.muted {font-size:12px;line-height:1.8;margin:12px 0 0;color:#647187}
+.execution-workspace .personal-terminal .terminal-controls {margin:16px 0 0}
+.host-maintenance {margin:0 0 20px;padding:14px 18px;border:1px solid #e6d8c7;border-radius:10px;background:#fcfaf6}
+.host-maintenance summary {cursor:pointer;font-size:13px;color:#735738;line-height:1.8}
+.host-maintenance p {font-size:12px;color:#6d604f;line-height:1.8;overflow-wrap:anywhere}
+.execution-workspace .host-maintenance .terminal-controls {margin:12px 0 0}
+.host-terminal-dialog {border:2px solid #bd8050}
+.host-terminal-dialog #terminal-session-note {color:#86562d}
+@media(max-width:700px){.personal-terminal{padding:18px}.terminal-heading{align-items:flex-start}.personal-terminal .terminal-controls>.button,.host-maintenance .terminal-controls>.button{flex:1}.host-maintenance{padding:14px 16px}}
