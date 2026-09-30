@@ -38,6 +38,7 @@ export class PortalService extends DemoService{
     // Public registration never grants administrative authority.
     service.db.prepare("UPDATE invites SET enabled=0 WHERE role='admin'").run();
     for(const user of service.store.users)user.policyVersion??=0;
+    service.pruneTaskNotes();
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
