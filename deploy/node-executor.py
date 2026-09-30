@@ -20,6 +20,7 @@ ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DIAGNOSTICS=None
 PRIORITIES={'idle':(0,'now'),'normal':(2,'never'),'high':(4,'never')}
+PRIORITY_RANKS={'idle':0,'normal':2,'high':4,**{'P'+str(i):i for i in range(5)}}
 
 def job_diagnostics(job,data):
     global DIAGNOSTICS
@@ -43,16 +44,17 @@ def host_command(operation,args):
         ADMIN_COMMAND=importlib.util.module_from_spec(spec);sys.modules[spec.name]=ADMIN_COMMAND;spec.loader.exec_module(ADMIN_COMMAND)
     return ADMIN_COMMAND.process(CONFIG,operation,args)
 
-def priority_capability():
+def priority_capability(rank_only=False):
     capabilities=gpu('status').get('daemon',{}).get('capabilities',[])
     if not isinstance(capabilities,list) or not all(c in capabilities for c in ('priority-policy-v1','preempt-idle-only-v1')):
         raise ValueError('Scheduler priority capability is not available; no policy was changed')
+    if rank_only and 'priority-rank-v1' not in capabilities:
+        raise ValueError('Scheduler rank-only capability is not available; refusing a policy-changing fallback')
 
 def scheduling_status(job,data):
     state=data.get('job',data);attempts=data.get('attempts',[])
     policy={k:state.get(k) for k in ('priority','yield_policy','restart_policy','dispatch_mode')}
-    priority=next((name for name,(level,yield_policy) in PRIORITIES.items() if
-                   policy=={'priority':level,'yield_policy':yield_policy,'restart_policy':'never','dispatch_mode':'queue'}),None)
+    priority=next((name for name,level in PRIORITY_RANKS.items() if policy['priority']==level),None)
     # Classification never rewrites an old task. Editing is only enabled for
     # explicit new Console jobs whose persistent scheduler scope is verified.
     mutable=state.get('state')=='PENDING' and job.get('preemptIdleOnly') is True and state.get('preempt_idle_only') is True
@@ -618,7 +620,7 @@ def process(operation,args):
     if operation.startswith('files.') and operation in ('files.list','files.put','files.get'):
         return projects().files(operation,args) if args.get('project') else file_op(operation,args)
     if operation not in ('sync','cancel','logs','priority'):raise ValueError('Unknown operation')
-    if not isinstance(args,dict) or set(args)-({'job','priority','expected'} if operation=='priority' else {'job'}):raise ValueError('Invalid job operation fields')
+    if not isinstance(args,dict) or set(args)-({'job','priority','expected','rankOnly'} if operation=='priority' else {'job'}):raise ValueError('Invalid job operation fields')
     job=args['job'];validate_job(job);jid=job['id']
     (ROOT/'jobs').mkdir(parents=True,exist_ok=True,mode=0o700)
     with open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
@@ -660,11 +662,12 @@ def process(operation,args):
         data=gpu('show',node_id);state=data.get('job',data)
         if operation=='priority':
             expected=args.get('expected');priority=args.get('priority')
-            if not isinstance(priority,str) or priority not in PRIORITIES or not isinstance(expected,dict) or set(expected)!={'priority','yield_policy','restart_policy','dispatch_mode'}:raise ValueError('Invalid expected priority policy')
+            if args.get('rankOnly') is not True:raise ValueError('Rank-only priority update required; upgrade the portal before editing priorities')
+            if not isinstance(priority,str) or priority not in PRIORITY_RANKS or not isinstance(expected,dict) or set(expected)!={'priority','yield_policy','restart_policy','dispatch_mode'}:raise ValueError('Invalid expected priority policy')
             if not scheduling_status(job,data)['priorityMutable']:raise ValueError('Only pending safe-policy Console jobs can change priority')
             if expected!={k:state.get(k) for k in expected}:raise ValueError('Priority changed; refresh before retrying')
-            priority_capability()
-            gpu('set-priority',node_id,priority,'--expected-priority','P'+str(expected['priority']),
+            priority_capability(rank_only=True)
+            gpu('set-rank',node_id,'P'+str(PRIORITY_RANKS[priority]),'--expected-priority','P'+str(expected['priority']),
                 '--expected-yield',expected['yield_policy'],'--expected-restart-policy',expected['restart_policy'],'--expected-mode',expected['dispatch_mode'])
             data=gpu('show',node_id);state=data.get('job',data)
         if operation=='logs':

@@ -457,7 +457,7 @@ async function main(){
       result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...context,...(datasets.length?{datasets}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
-      if(!['idle','normal','high'].includes(positionals[2]))fail('Priority must be idle, normal or high');
+      if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');
       if(options.key||training.length)fail('priority does not accept a submission key or command argv');
       result=(await call('jobs.priority',{jobId:positionals[1],priority:positionals[2]})).result;
     }
