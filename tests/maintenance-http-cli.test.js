@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,rm,readFile,mkdir,cp} from 'node:fs/promises';
-import {join} from 'node:path';
+import {mkdtemp,writeFile,rm,readFile,mkdir,cp,access} from 'node:fs/promises';
+import {join,basename,dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
 import {randomUUID,createHash} from 'node:crypto';
@@ -9,6 +9,8 @@ import net from 'node:net';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/model.js';
 import {pathToFileURL} from 'node:url';
+import {standaloneClient} from '../client-bundle.mjs';
+import {buildClient} from '../scripts/build-client.mjs';
 
 const password='Maintenance-HTTP-Fixture-2026!';
 test('real cookie API and downloaded standalone CLI share requests/decisions, never root before approval',async t=>{
@@ -30,7 +32,8 @@ test('real cookie API and downloaded standalone CLI share requests/decisions, ne
   await service.invoke(admin.token,'policy.full',{userId:owner.id,policyVersion:0});
   const member=await service.login(owner.username,password),session=join(dir,'member-session.json'),adminSession=join(dir,'admin-session.json');
   await writeFile(session,JSON.stringify({url:origin,token:member.token,principal:member.principal,machine:'gpu-1'}));await writeFile(adminSession,JSON.stringify({url:origin,token:admin.token,principal:admin.principal,machine:'gpu-1'}));
-  const cliFile=join(dir,'gpuctl.mjs');await writeFile(cliFile,await(await fetch(origin+'/gpuctl.mjs')).text());
+  const cliFile=join(dir,'gpuctl.mjs'),download=await fetch(origin+'/gpuctl.mjs');assert.equal(download.status,200);
+  const clientSource=await download.text();assert.equal(clientSource,await standaloneClient(origin));assert.doesNotMatch(clientSource,/__GPUQ_PUBLIC_ORIGIN__/);await writeFile(cliFile,clientSource);
   const cli=(args,file=session,json=true)=>new Promise((resolve,reject)=>{const p=spawn(process.execPath,[cliFile,'--url',origin,'--session-file',file,...(json?['--json']:[]),...args]);let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('error',reject);p.on('close',code=>resolve({code,err,out,data:json&&out?JSON.parse(out).data:null}));p.stdin.end();});
   const key=randomUUID(),args=['maintenance','request','--name','检查测试依赖','--reason','需要管理员检查','--script-file',scriptFile,'--key',key];
   const submitted=await cli(args);assert.equal(submitted.code,0,submitted.err);assert.equal(submitted.data.state,'PENDING');assert.equal(calls.length,0);
@@ -99,19 +102,30 @@ test('approval snapshot round-trips through existing Python Commands receipt/own
   await s.invoke(a.token,'maintenance.approve',{id:r.id,revision:r.revision,previewToken:p.previewToken});assert.equal(calls.filter(c=>c.operation==='host.exec').length,1);
 });
 test('Docker COPY-only runtime starts and serves maintenance assets without source tree or node_modules',async t=>{
-  const dir=await mkdtemp(join(tmpdir(),'gpuq-maintenance-runtime-'));let server;
-  t.after(async()=>{if(server)await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});});
+  const fixture=await mkdtemp(join(tmpdir(),'gpuq-maintenance-runtime-')),dir=join(fixture,'runtime'),builtClient=join(fixture,'builder/gpuctl.mjs');let server;
+  t.after(async()=>{if(server)await new Promise(r=>server.close(r));await rm(fixture,{recursive:true,force:true});});
+  await buildClient({outfile:builtClient});
   const docker=await readFile(new URL('../deploy/Dockerfile',import.meta.url),'utf8');
-  for(const line of docker.split('\n').filter(s=>s.startsWith('COPY '))){
+  // Reproduce the final image only. The build stage legitimately contains the
+  // source graph and esbuild, neither of which should leak into the runtime.
+  const stages=docker.split(/^FROM\s+/m).slice(1);assert.equal(stages.length,2);assert.match(stages[0],/\bAS client-builder\b/);
+  for(const line of stages.at(-1).split('\n').filter(s=>s.startsWith('COPY '))){
     const parts=line.split(/\s+/).slice(1).filter(s=>!s.startsWith('--'));
-    const destination=parts.pop(),directory=join(dir,destination);await mkdir(directory,{recursive:true});
-    for(const source of parts){const input=new URL('../'+source,import.meta.url),target=destination.endsWith('/')?join(directory,source.split('/').at(-1)):directory;await cp(input,target,{recursive:true});}
+    const destination=parts.pop(),from=line.match(/--from=([^\s]+)/)?.[1];
+    if(from){assert.equal(from,'client-builder');assert.deepEqual(parts,['/app/build/gpuctl.mjs']);}
+    for(const source of parts){
+      const input=from?builtClient:new URL('../'+source,import.meta.url),target=destination.endsWith('/')?join(dir,destination,basename(source)):join(dir,destination);
+      await mkdir(dirname(target),{recursive:true});await cp(input,target,{recursive:true});
+    }
   }
+  for(const absent of ['node_modules','scripts','tests'])await assert.rejects(access(join(dir,absent)),{code:'ENOENT'});
   const bootstrap=join(dir,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   const reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));
   const origin='http://127.0.0.1:'+port,runtime=await import(pathToFileURL(join(dir,'portal-server.mjs')));
   const created=await runtime.createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false});server=created.server;await new Promise(r=>server.listen(port,'127.0.0.1',r));
   const login=await created.service.login('admin',password);assert.equal(login.state.maintenance.version,1);assert.equal((await created.service.invoke(login.token,'maintenance.list',{})).result.items.length,0);
   for(const path of ['/','/maintenance-ui.js','/maintenance.css','/community-ui.js','/gpuctl.mjs','/guide/queue'])assert.equal((await fetch(origin+path)).status,200,path);
+  const artifactReader=await import(pathToFileURL(join(dir,'client-bundle.mjs')));
+  assert.equal(await(await fetch(origin+'/gpuctl.mjs')).text(),await artifactReader.standaloneClient(origin));
   assert.ok((await(await fetch(origin+'/guide/queue')).text()).includes('申请系统维修'));
 });
