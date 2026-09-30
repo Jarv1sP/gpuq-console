@@ -12,6 +12,7 @@ export function schedulingPolicy(value,admin=false){
     const modes={queue:'queue','preempt1':'preempt-save','preempt2':'preempt-now','preempt-save':'preempt-save','preempt-now':'preempt-now'};
     if(typeof value.mode!=='string'||!Object.hasOwn(modes,value.mode))throw Error('模式须为 queue、preempt1 或 preempt2。');
     policy.mode=modes[value.mode];
+    if(policy.mode==='queue')delete policy.mode; // Preserve historical default retry identities and old-node wire.
   }
   if(typeof rank!=='string'||!/^P[0-4]$/.test(rank))throw Error('排队等级必须为 P0–P4。');
   if(Number(rank[1])>2&&!admin)throw Object.assign(Error('P3/P4 仅管理员可用。'),{status:403});
