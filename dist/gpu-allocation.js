@@ -33,7 +33,7 @@ export function gpuPlacement(value,cards,elastic,scheduling,priority){
   if(shared){
     if(cards!==1||!Number.isInteger(value.vramMiB)||value.vramMiB<1||value.vramMiB>2**31-1)throw Error('共享需明确选择一张卡并声明正整数 MiB 显存预算。');
     const policy=scheduling===undefined||scheduling===null?null:schedulingPolicy(scheduling,true);
-    if(policy&&(policy.yieldPolicy!=='never'||policy.restartPolicy!=='never')||priority==='idle')throw Error('共享任务使用普通排队，且不支持自动让位或恢复。');
+    if(policy&&(policy.yieldPolicy!=='never'||policy.restartPolicy!=='never'||(policy.mode??'queue')!=='queue')||priority==='idle')throw Error('共享任务使用普通排队，且不支持自动让位或恢复。');
     Object.assign(placement,{vramMiB:value.vramMiB,hami});
     if(hami){if(!Number.isInteger(smPercent)||smPercent<1||smPercent>100)throw Error('HAMi SM 百分比须为 1–100 的整数。');placement.smPercent=smPercent;}
     else if(value.smPercent!==undefined)throw Error('SM 限制需要启用 HAMi。');
