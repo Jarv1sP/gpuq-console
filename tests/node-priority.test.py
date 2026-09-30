@@ -254,6 +254,34 @@ class NodePriority(unittest.TestCase):
         self.assertEqual(result['schedulerPolicy'], {**before, 'priority': 1})
         self.assertEqual(result['priority'], 'P1')
 
+    def test_explicit_submission_can_change_rank_without_rewriting_its_contract(self):
+        self.job = {key:value for key,value in self.job.items() if key not in ('priority','preemptIdleOnly')}
+        self.job['scheduling'] = {'rank':'P1','yieldPolicy':'save','restartPolicy':'on-preempt','checkpointable':True}
+        self.data['job'].update(priority=1,yield_policy='save',restart_policy='on-preempt',
+                                checkpoint_capability='epoch-v1',preempt_idle_only=False)
+        self.register(); original = deepcopy(self.job)
+        for rank in ('P3','P0'):
+            before = self.policy()
+            result = self.call('priority',priority=rank,expected=before)
+            self.assertEqual(result['schedulerPolicy'],{**before,'priority':int(rank[1])})
+            self.assertTrue(result['priorityMutable'])
+        self.assertEqual(self.job,original)
+        self.assertEqual(json.loads((self.node.ROOT/'jobs'/f"{self.job['id']}.json").read_text()),original)
+
+    def test_explicit_rank_edit_rejects_unverified_native_contract(self):
+        self.job = {key:value for key,value in self.job.items() if key not in ('priority','preemptIdleOnly')}
+        self.job['scheduling'] = {'rank':'P1','yieldPolicy':'save','restartPolicy':'on-preempt','checkpointable':True}
+        self.data['job'].update(priority=1,yield_policy='save',restart_policy='on-preempt',
+                                checkpoint_capability='epoch-v1',preempt_idle_only=False)
+        self.register(); original = deepcopy(self.data['job'])
+        for change in ({'yield_policy':'now'},{'restart_policy':'never'},{'dispatch_mode':'preempt-now'},
+                       {'checkpoint_capability':'none'},{'preempt_idle_only':True},{'preempt_opt_in_only':True}):
+            with self.subTest(change=change):
+                self.data['job']={**original,**change};self.commands.clear()
+                with self.assertRaisesRegex(ValueError,'safe-policy'):
+                    self.call('priority',priority='P3',expected=self.policy())
+                self.assertEqual(self.operations(),['show'])
+
     def test_old_core_or_old_portal_cannot_fall_back_to_preset(self):
         self.register()
         with self.assertRaisesRegex(ValueError, 'Rank-only'):

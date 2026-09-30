@@ -61,6 +61,24 @@ test('old capability cannot invoke the policy-changing fallback',async t=>{
   await assert.rejects(f.s.invoke(f.admin.token,'jobs.priority',{jobId:id,priority:'high'}),e=>e.status===503);
   assert.equal(f.calls.filter(c=>c.operation==='priority').length,0);
 });
+test('explicit scheduling jobs expose admin rank edits and preserve immutable save/resume policy',async t=>{
+  const f=await fixture(t),scheduling={rank:'P1',yieldPolicy:'save',restartPolicy:'on-preempt',checkpointable:true};
+  await f.snapshot({capabilities:[...CAPABILITIES,'console-yield-v1']});
+  const id=(await f.submit({scheduling})).result.id;await f.settle();
+  const remotePolicy={priority:1,yield_policy:'save',restart_policy:'on-preempt',dispatch_mode:'queue'};
+  f.remote.set(id,f.result(id,'P1',{schedulerPriority:1,schedulerPolicy:remotePolicy}));
+  await f.s.reconcile();
+  const job=f.s.store.jobs[0],spec=structuredClone(job.spec),digest=job.digest;
+  assert.equal((await f.s.invoke(f.admin.token,'state')).state.jobs[0].canSetPriority,true);
+  assert.equal((await f.s.invoke(f.user.token,'state')).state.jobs[0].canSetPriority,false);
+  await assert.rejects(f.s.invoke(f.user.token,'jobs.priority',{jobId:id,priority:'P3'}),e=>e.status===403);
+  for(const rank of ['P3','P0']){
+    const result=(await f.s.invoke(f.admin.token,'jobs.priority',{jobId:id,priority:rank})).result;
+    assert.equal(result.schedulerPriority,Number(rank[1]));assert.equal(result.yieldPolicy,'save');
+    assert.equal(result.restartPolicy,'on-preempt');assert.equal(result.dispatchMode,'queue');
+  }
+  assert.deepEqual(job.spec,spec);assert.equal(job.digest,digest);assert.equal(usage(f.s.store.jobs,f.member.id),1);
+});
 test('members can submit idle/normal but cannot submit high or alter anyone’s priority',async t=>{
   const f=await fixture(t);
   await assert.rejects(f.submit({priority:'high'}),error=>error.status===403);

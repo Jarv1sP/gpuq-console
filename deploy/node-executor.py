@@ -59,7 +59,16 @@ def scheduling_status(job,data):
     priority=next((name for name,level in PRIORITY_RANKS.items() if policy['priority']==level),None)
     # Classification never rewrites an old task. Editing is only enabled for
     # explicit new Console jobs whose persistent scheduler scope is verified.
-    mutable=state.get('state')=='PENDING' and job.get('preemptIdleOnly') is True and state.get('preempt_idle_only') is True
+    verified=job.get('preemptIdleOnly') is True and state.get('preempt_idle_only') is True
+    if 'scheduling' in job:
+        submitted=SCHEDULING.normalize_job_policy(job)
+        # Rank is deliberately excluded: previous rank-only edits leave the
+        # immutable submission unchanged. Verify the rest of the contract.
+        verified=(all(state.get(key)==submitted[key] for key in ('yield_policy','restart_policy','dispatch_mode'))
+                  and state.get('checkpoint_capability')==('epoch-v1' if submitted['checkpointable'] else 'none')
+                  and state.get('preempt_idle_only') is submitted['preempt_idle_only']
+                  and state.get('preempt_opt_in_only',False) is submitted.get('preempt_opt_in_only',False))
+    mutable=state.get('state')=='PENDING' and verified
     opted_in='scheduling' in job or (job.get('preemptIdleOnly') is True and state.get('preempt_idle_only') is True)
     return {'schedulerState':state.get('state'),'schedulerPriority':state.get('priority'),
             'priority':priority,'schedulerPolicy':policy,'priorityMutable':mutable,

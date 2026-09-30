@@ -243,7 +243,7 @@ export async function executionCall(service,principal,operation,args){
     if(Object.keys(args).some(k=>!['jobId','priority','expectedPriority'].includes(k)))fail('优先级参数无效。');
     const priority=rankValue(args.priority),job=jobById(args.jobId);
     authorizedMachine(job.machine);
-    if(job.state!=='PENDING'||job.cancelRequested||!job.priorityMutable||!job.spec.preemptIdleOnly||!job.schedulerPolicy)fail('仅能调整已核验、尚未启动的新版平台任务；运行中或旧任务不变。',409);
+    if(job.state!=='PENDING'||job.cancelRequested||!job.priorityMutable||!(job.spec.preemptIdleOnly===true||job.spec.scheduling)||!job.schedulerPolicy)fail('仅能调整已核验、尚未启动的新版平台任务；运行中或旧任务不变。',409);
     if(args.expectedPriority!==undefined&&args.expectedPriority!==job.priority)fail('优先级已变化，请刷新后重试。',409);
     await service.refreshGPUQ();
     if(service.gpuq?.stale||!priorityRankCapable(service.gpuq?.hosts.find(h=>h.id===job.machine)))fail('节点未确认只改优先级能力，未调整；不会回退到改变整套策略的接口。',503);
