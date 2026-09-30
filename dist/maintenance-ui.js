@@ -1,6 +1,7 @@
 import {createSubmissionKeys} from './community-ui.js';
 
-const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const visible=v=>String(v??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
+const esc=v=>visible(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const done=new Set(['RETURNED','WITHDRAWN','SUCCEEDED','FAILED','CANCELED','TIMED_OUT']);
 const labels={PENDING:'待管理员确认',RETURNED:'已退回',WITHDRAWN:'已撤回',DISPATCHING:'派发待核对',RUNNING:'执行中',CANCELING:'停止待确认',SUCCEEDED:'已完成',FAILED:'执行失败',CANCELED:'已停止',TIMED_OUT:'已超时',UNKNOWN:'结果待核对'};
 
@@ -52,7 +53,7 @@ export function maintenanceUI(store,toast){
   function detail(){
     if(!selected)return;const r=selected,admin=store.principal.role==='admin';
     q('#maintenance-detail').innerHTML=`<article class="maintenance-detail"><h3>${esc(r.title)}</h3><p>${esc(r.machine)} · ${esc(r.owner.username)} · ${esc(labels[r.state]||r.state)} · v${r.revision}</p><p class="muted">${esc(r.id)}</p>
-      <p>申请原因：${esc(r.reason)}</p><p>目录：${esc(r.cwd)} · 超时 ${r.timeoutSec}s</p><p class="maintenance-hash">脚本 SHA256：${esc(r.scriptSha256)}</p><pre tabindex="0">${esc(r.script)}</pre>
+      <p>申请原因：${esc(r.reason)}</p><p>目录：${esc(r.cwd)} · 超时 ${r.timeoutSec}s</p><p class="maintenance-hash">脚本 SHA256：${esc(r.scriptSha256)}</p><p class="muted">不可见/方向控制字符以 Unicode 转义显示；执行仍绑定此摘要的冻结脚本。</p><pre tabindex="0">${esc(r.script)}</pre>
       ${r.execution?`<p class="maintenance-hash">原执行键：${esc(r.execution.id)}（只用于核对原操作）</p>`:''}
       ${r.decision?`<p>处理人：${esc(r.decision.by.username)}${r.decision.reason?' · 退回理由：'+esc(r.decision.reason):''}</p>`:''}${r.error?`<p role="status">${esc(r.error)}</p>`:''}
       ${r.result?`<p>上次节点回执：${esc(labels[r.result.state]||r.result.state)} · 退出码 ${r.result.exitCode??'未确认'} · ${esc(r.result.checkedAt)}</p><h4>标准输出</h4><pre tabindex="0">${esc(r.result.stdout)}</pre><h4>错误输出</h4><pre tabindex="0">${esc(r.result.stderr)}</pre>${r.result.truncated.stdout||r.result.truncated.stderr?'<p>输出已截断，每路最多 64 KiB。</p>':''}`:''}

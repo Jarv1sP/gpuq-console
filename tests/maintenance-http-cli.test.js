@@ -4,7 +4,7 @@ import {mkdtemp,writeFile,rm,readFile,mkdir,cp} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawn} from 'node:child_process';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import net from 'node:net';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/model.js';
@@ -31,7 +31,7 @@ test('real cookie API and downloaded standalone CLI share requests/decisions, ne
   const member=await service.login(owner.username,password),session=join(dir,'member-session.json'),adminSession=join(dir,'admin-session.json');
   await writeFile(session,JSON.stringify({url:origin,token:member.token,principal:member.principal,machine:'gpu-1'}));await writeFile(adminSession,JSON.stringify({url:origin,token:admin.token,principal:admin.principal,machine:'gpu-1'}));
   const cliFile=join(dir,'gpuctl.mjs');await writeFile(cliFile,await(await fetch(origin+'/gpuctl.mjs')).text());
-  const cli=(args,file=session)=>new Promise((resolve,reject)=>{const p=spawn(process.execPath,[cliFile,'--url',origin,'--session-file',file,'--json',...args]);let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('error',reject);p.on('close',code=>resolve({code,err,data:out?JSON.parse(out).data:null}));p.stdin.end();});
+  const cli=(args,file=session,json=true)=>new Promise((resolve,reject)=>{const p=spawn(process.execPath,[cliFile,'--url',origin,'--session-file',file,...(json?['--json']:[]),...args]);let out='',err='';p.stdout.on('data',c=>out+=c);p.stderr.on('data',c=>err+=c);p.on('error',reject);p.on('close',code=>resolve({code,err,out,data:json&&out?JSON.parse(out).data:null}));p.stdin.end();});
   const key=randomUUID(),args=['maintenance','request','--name','检查测试依赖','--reason','需要管理员检查','--script-file',scriptFile,'--key',key];
   const submitted=await cli(args);assert.equal(submitted.code,0,submitted.err);assert.equal(submitted.data.state,'PENDING');assert.equal(calls.length,0);
   assert.equal((await cli(args)).data.id,submitted.data.id);assert.equal((await cli(['maintenance','list'])).data.items.length,1);
@@ -49,6 +49,30 @@ test('real cookie API and downloaded standalone CLI share requests/decisions, ne
   assert.equal(calls.filter(c=>c.operation==='host.exec').length,1);assert.equal(calls[0].args.userId,'builtin-admin');
   assert.equal((await cli(['maintenance','approve',next.data.id,'--revision','1','--preview-token',p.data.previewToken],adminSession)).code,0);
   assert.equal(calls.filter(c=>c.operation==='host.exec').length,1);
+  // Simulate a pre-fix stored request: display must remain safe even though new
+  // requests now reject bare CR. The real TTY approval below explicitly declines.
+  const legacy=(await service.invoke(member.token,'maintenance.create',{key:randomUUID(),machine:'gpu-1',title:'Display fixture',reason:'Display fixture',script:'printf "fixture only\\n"'})).result;
+  const stored=JSON.parse(service.db.prepare('SELECT data FROM maintenance_requests WHERE id=?').get(legacy.id).data);
+  Object.assign(stored.payload,{title:'title\u202e\rMASK',reason:'reason\u2066\u0085',script:'printf "UNREVIEWED\\n"; #\rprintf "SAFE\\n"                    \n#\u202e\u0085\t'});
+  stored.scriptSha256=createHash('sha256').update(stored.payload.script).digest('hex');
+  service.db.prepare('UPDATE maintenance_requests SET data=?,digest=? WHERE id=?').run(JSON.stringify(stored),createHash('sha256').update(JSON.stringify(stored.payload)).digest('hex'),legacy.id);
+  for(const action of ['show','preview']){
+    const human=await cli(['maintenance',action,legacy.id],adminSession,false);assert.equal(human.code,0,human.err);
+    assert.ok(human.out.includes('UNREVIEWED'));assert.ok(human.out.includes('SAFE'));assert.ok(human.out.includes('\\u{000d}'));assert.ok(human.out.includes('\\u{202e}'));assert.ok(human.out.includes('\\u{2066}'));assert.ok(human.out.includes('\\u{0085}'));
+    assert.doesNotMatch(human.out,/[\r\u202e\u2066\u0085]/u);
+  }
+  const listing=await cli(['maintenance','list'],adminSession,false);assert.ok(listing.out.includes('title\\u{202e}\\u{000d}MASK'));assert.doesNotMatch(listing.out,/[\r\u202e]/u);
+  const json=await cli(['maintenance','preview',legacy.id],adminSession);assert.equal(json.data.request.script,stored.payload.script);assert.doesNotMatch(json.out,/[\u202e\u2066\u0085]/u);
+  if(process.platform!=='win32'){
+    const terminal=await new Promise((resolve,reject)=>{
+      const child=spawn('python3',[new URL('./maintenance-cli-pty.py',import.meta.url).pathname,process.execPath,cliFile,'--url',origin,'--session-file',adminSession,'maintenance','approve',legacy.id]);let out='',err='';
+      child.stdout.on('data',c=>out+=c);child.stderr.on('data',c=>err+=c);child.on('error',reject);child.on('close',code=>{if(code)reject(Error(err||out));else resolve(JSON.parse(out));});
+    });
+    assert.equal(terminal.exitCode,1);assert.ok(terminal.output.includes('未批准，未执行'));
+    assert.ok(terminal.output.includes('UNREVIEWED'));assert.ok(terminal.output.includes('\\u{000d}'));assert.ok(terminal.output.includes('\\u{202e}'));assert.doesNotMatch(terminal.output,/[\u202e\u2066\u0085]/u);
+    assert.ok(terminal.output.includes('printf "UNREVIEWED\\n"; #\\u{000d}printf "SAFE\\n"                    '),'the actual approval script must not retain a line-overwriting CR');
+  }
+  assert.equal(calls.filter(c=>c.operation==='host.exec').length,1,'viewing and declining do not execute the display fixture');
   for(const path of ['/maintenance-ui.js','/maintenance.css'])assert.equal((await fetch(origin+path)).status,200);
   for(const path of ['/maintenance.mjs','/docs/PRIVILEGED_REQUESTS_DESIGN.md','/portal.sqlite'])assert.equal((await fetch(origin+path)).status,404);
   const docker=await readFile(new URL('../deploy/Dockerfile',import.meta.url),'utf8');assert.match(docker,/COPY[^\n]*maintenance\.mjs/);

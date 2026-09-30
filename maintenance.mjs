@@ -10,11 +10,16 @@ const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 const hash=value=>createHash('sha256').update(typeof value==='string'?value:JSON.stringify(value)).digest('hex');
 const argv=script=>['/bin/bash','--noprofile','--norc','-c',script];
+// Match admin-command.py's json.dumps(..., ensure_ascii=False), including the
+// separator spaces. A compact JSON length could pass here but fail after approval.
+const argvBytes=script=>Buffer.byteLength('['+argv(script).map(value=>JSON.stringify(value)).join(', ')+']');
 function fields(args,names){if(Object.keys(args).some(k=>!names.includes(k)))fail('维护申请参数无效。');}
 function uuid(value){if(typeof value!=='string'||!UUID.test(value))fail('需要完整 UUID 编号。');return value;}
 function revision(value){if(!Number.isSafeInteger(value)||value<1)fail('需要当前申请版本号。');return value;}
+function normalizedLines(value){return typeof value==='string'?value.replaceAll('\r\n','\n'):value;}
 function text(value,max,label){
-  if(typeof value!=='string'||!value.isWellFormed()||value.length>max*2||/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)||[...value].length>max||!value.trim())fail(`${label}须为 1–${max} 字。`);
+  value=normalizedLines(value);
+  if(typeof value!=='string'||!value.isWellFormed()||value.length>max*2||/[\x00-\x08\x0b-\x1f\x7f]/.test(value)||[...value].length>max||!value.trim())fail(`${label}须为 1–${max} 字。`);
   return value.trim();
 }
 function admin(principal){if(principal.role!=='admin')fail('此操作仅管理员可用。',403);}
@@ -119,8 +124,10 @@ export async function maintenanceCall(service,principal,operation,args){
   if(operation==='maintenance.create'){
     fields(args,['key','machine','title','reason','script','cwd','timeoutSec','parentId']);
     authorized(service,current,args.machine);const key=uuid(args.key);
-    const script=args.script;
-    if(typeof script!=='string'||!script.isWellFormed()||!script.trim()||/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(script)||Buffer.byteLength(script)>MAINTENANCE_LIMITS.scriptBytes||Buffer.byteLength(JSON.stringify(argv(script)))>12000)fail('脚本正文为空、格式无效或超过执行器大小上限（最多 8 KiB）。');
+    // Canonicalize before hashing/freezing/previewing. A bare CR can overwrite
+    // the administrator's terminal line without changing bash's command text.
+    const script=normalizedLines(args.script);
+    if(typeof script!=='string'||!script.isWellFormed()||!script.trim()||/[\x00-\x08\x0b-\x1f\x7f]/.test(script)||Buffer.byteLength(script)>MAINTENANCE_LIMITS.scriptBytes||argvBytes(script)>12000)fail('脚本正文为空、格式无效或超过执行器大小上限（最多 8 KiB）；不允许独立回车控制字符。');
     const cwd=args.cwd??'/root',timeoutSec=args.timeoutSec??300;
     if(typeof cwd!=='string'||!cwd.isWellFormed()||!cwd.startsWith('/')||cwd.length>1024||/[\x00-\x1f\x7f]/.test(cwd))fail('工作目录必须是有效绝对路径。');
     if(!Number.isInteger(timeoutSec)||timeoutSec<1||timeoutSec>86400)fail('超时须为 1–86400 秒。');

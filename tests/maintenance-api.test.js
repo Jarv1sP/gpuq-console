@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {randomUUID,createHmac} from 'node:crypto';
+import {randomUUID,createHmac,createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
 
@@ -160,4 +162,56 @@ test('UTF8 output bounds hold and unchanged state polling does not append endles
   f.receipts.set(running.execution.id,{id:running.execution.id,state:'SUCCEEDED',stdout:'中'.repeat(30000),stderr:'错'.repeat(30000),exitCode:0});
   const result=(await f.call('get',{id:r.id})).result;
   assert.ok(Buffer.byteLength(result.stdout)<=65536);assert.ok(Buffer.byteLength(result.stderr)<=65536);assert.equal(result.truncated.stdout,true);assert.equal(result.truncated.stderr,true);
+});
+
+test('CRLF is canonical before identity, preview and frozen execution; bare carriage returns never reach approval',async t=>{
+  const f=await fixture(t),key=randomUUID(),script='printf "reviewed\\n"\r\n# ordinary CRLF comment\r\n';
+  const canonical=script.replaceAll('\r\n','\n');
+  const r=await f.create({key,script,title:'line one\r\nline two',reason:'reason one\r\nreason two'});
+  assert.equal(r.script,canonical);assert.equal(r.title,'line one\nline two');assert.equal(r.reason,'reason one\nreason two');
+  assert.equal(r.scriptSha256,createHash('sha256').update(canonical).digest('hex'));
+  const retry=await f.create({key,script:canonical,title:'line one\nline two',reason:'reason one\nreason two'});assert.equal(retry.id,r.id);
+  const p=await f.preview(r.id);assert.equal(p.request.script,canonical);assert.equal(p.request.scriptSha256,r.scriptSha256);
+  await f.approve(p);assert.equal(f.calls.find(c=>c.operation==='host.exec').args.argv[4],p.request.script);
+  const saved=JSON.parse(f.s.db.prepare('SELECT data FROM maintenance_requests WHERE id=?').get(r.id).data);
+  assert.equal(saved.payload.script,canonical);assert.equal(saved.scriptSha256,r.scriptSha256);
+  const count=f.s.db.prepare('SELECT count(*) n FROM maintenance_requests').get().n,calls=f.calls.length;
+  for(const extra of [{script:'printf "UNREVIEWED\\n"; #\rprintf "SAFE\\n"                    '},{title:'hidden\rshown'},{reason:'hidden\rshown'}])await assert.rejects(f.create(extra),e=>e.status===400);
+  assert.equal(f.s.db.prepare('SELECT count(*) n FROM maintenance_requests').get().n,count);assert.equal(f.calls.length,calls);
+  const pending=await f.create();
+  await assert.rejects(f.call('return',{id:pending.id,revision:1,reason:'hidden\rshown'},f.a.token),e=>e.status===400);
+  assert.equal((await f.call('get',{id:pending.id})).state,'PENDING');
+  const returned=await f.call('return',{id:pending.id,revision:1,reason:'line one\r\nline two'},f.a.token);
+  assert.equal(returned.decision.reason,'line one\nline two');assert.equal(f.calls.length,calls);
+});
+
+test('creation matches the real native argv byte boundary before approval or dispatch',async t=>{
+  const f=await fixture(t),argv=script=>['/bin/bash','--noprofile','--norc','-c',script];
+  const overhead=Buffer.byteLength(JSON.stringify(argv(''))),newlines=12000-overhead-8192;
+  // Both bodies fit 8 KiB, but Python's separators add four bytes to argv.
+  const oversized='#'+'a'.repeat(8191-newlines)+'\n'.repeat(newlines),exact=oversized.slice(0,-4);
+  assert.equal(Buffer.byteLength(oversized),8192);assert.equal(Buffer.byteLength(JSON.stringify(argv(oversized))),12000);
+  const validate=script=>{
+    const native=spawnSync('python3',['-c',`
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('native_admin_command', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+args = json.load(sys.stdin)
+# Pure validation only: do not instantiate Commands or invoke process/worker.
+try:
+    module.validate('host.exec', args, identity=False)
+    print(json.dumps({'valid': True, 'bytes': len(json.dumps(args['argv'], ensure_ascii=False).encode())}))
+except ValueError as error:
+    print(json.dumps({'valid': False, 'error': str(error)}))
+`,fileURLToPath(new URL('../deploy/admin-command.py',import.meta.url))],{input:JSON.stringify({key:randomUUID(),argv:argv(script),cwd:'/root',timeoutSec:300}),encoding:'utf8'});
+    assert.equal(native.status,0,native.stderr);return JSON.parse(native.stdout);
+  };
+  assert.deepEqual(validate(exact),{valid:true,bytes:11996});
+  assert.equal(validate(oversized).valid,false);
+  // Adding two newline bytes adds four serialized bytes: exactly 12000 is valid.
+  const boundary=exact+'\n\n';assert.deepEqual(validate(boundary),{valid:true,bytes:12000});
+  const request=await f.create({script:boundary});assert.equal(request.script,boundary);
+  for(const script of [boundary+'\n',oversized])await assert.rejects(f.create({script}),e=>e.status===400);
+  assert.equal(f.s.db.prepare('SELECT count(*) n FROM maintenance_requests').get().n,1);assert.equal(f.calls.length,0);
 });

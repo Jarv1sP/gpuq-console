@@ -6,6 +6,11 @@ import {homedir} from 'node:os';
 import {createInterface} from 'node:readline/promises';
 import {constants as fsConstants} from 'node:fs';
 
+// Approval text is member-controlled. Never let terminal controls or bidi
+// formatting hide/reorder the frozen script (including older stored requests).
+const maintenanceVisible=(value,multiline=false)=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>multiline&&c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
+const maintenanceJSON=value=>JSON.stringify(value).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>c.split('').map(unit=>'\\u'+unit.charCodeAt(0).toString(16).padStart(4,'0')).join(''));
+
 const help=`GPUQ — 个人终端与 GPUQ 训练
 
 日常命令（一次安装后直接使用 gpuctl）：
@@ -334,7 +339,7 @@ async function main(){
         else{
           if(!process.stdin.isTTY)fail('请先 maintenance preview ID --json；非交互批准需 --revision N --preview-token TOKEN，未知占用另加 --ack-unknown。');
           const p=(await call('maintenance.preview',{id})).result;
-          process.stderr.write(`${p.request.title} · ${p.request.machine} · ${p.request.owner.username}\n原因：${p.request.reason}\n目录：${p.request.cwd} · 超时 ${p.request.timeoutSec}s\nSHA256：${p.request.scriptSha256}\n${p.request.script}\n占用：${JSON.stringify(p.impact)}\nROOT 操作可能影响全机，失败不回滚。\n`);
+          process.stderr.write(`${maintenanceVisible(p.request.title)} · ${maintenanceVisible(p.request.machine)} · ${maintenanceVisible(p.request.owner.username)}\n原因：${maintenanceVisible(p.request.reason)}\n目录：${maintenanceVisible(p.request.cwd)} · 超时 ${p.request.timeoutSec}s\nSHA256：${maintenanceVisible(p.request.scriptSha256)}\n脚本快照（不可见/方向控制字符以 Unicode 转义显示，执行仍绑定此摘要）：\n${maintenanceVisible(p.request.script,true)}\n占用：${maintenanceJSON(p.impact)}\nROOT 操作可能影响全机，失败不回滚。\n`);
           const rl=createInterface({input:process.stdin,output:process.stderr});let answer;try{answer=await rl.question(p.impact.complete?'输入 EXECUTE 批准并执行，其他输入取消：':'占用不完整。输入 EXECUTE-UNKNOWN 仍批准执行，其他输入取消：');}finally{rl.close();}
           if(answer!==(p.impact.complete?'EXECUTE':'EXECUTE-UNKNOWN'))fail('未批准，未执行。');
           request={id,revision:p.request.revision,previewToken:p.previewToken,acknowledgeUnknown:!p.impact.complete};
@@ -565,7 +570,7 @@ async function main(){
     }else if(command==='release'&&positionals.length===2)result=(await call('release',{userId:own(),jobId:positionals[1]})).result;
     else fail('Unknown command. Use --help.');
   }
-  if(options.json){console.log(JSON.stringify({ok:true,...mode,data:result}));return;}
+  if(options.json){console.log((command==='maintenance'?maintenanceJSON:JSON.stringify)({ok:true,...mode,data:result}));return;}
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='use'){console.log(`当前服务器：${result.selected}\n${result.project?'当前项目：'+result.project:'未选择项目；可用 gpuctl project create NAME 或 project use NAME'}`);return;}
@@ -595,11 +600,12 @@ async function main(){
   if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}${j.preempted?'（让位中断，不会自动重跑）':''}\n  ${j.machine} · ${j.cards} 张 · ${j.name||'train'} · 优先级 ${['idle','normal','high'].includes(j.priority)?j.priority:'旧策略／未核验'}${j.schedulerState?' · 调度 '+j.schedulerState:''}${j.queueReason?'\n  排队原因：'+j.queueReason:''}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
   if(command==='files'){console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');return;}
   if(command==='maintenance'){
-    if(result.items){console.log(result.items.map(r=>`${r.id}  ${r.state}  v${r.revision}\n  ${r.machine} · ${r.owner.username} · ${r.title}`).join('\n')||'暂无维护申请。');if(result.nextCursor)console.log('下一页：gpuctl maintenance list --cursor '+result.nextCursor);return;}
-    const r=result.request||result;console.log(`${r.id} · ${r.state} · v${r.revision}\n${r.machine} · ${r.owner.username} · ${r.title}\n原因：${r.reason}\n目录：${r.cwd} · 超时 ${r.timeoutSec}s\n脚本 SHA256：${r.scriptSha256}\n${r.script}`);
-    if(r.decision?.reason)console.log('退回理由：'+r.decision.reason);if(r.error)console.log(r.error);
-    if(r.result){console.log(`上次节点回执：${r.result.state} · exit=${r.result.exitCode??'未确认'} · ${r.result.checkedAt}`);process.stdout.write(r.result.stdout);process.stderr.write(r.result.stderr);if(r.result.truncated.stdout||r.result.truncated.stderr)console.log('\n输出已截断（每路最多 64 KiB）。');}
-    if(result.previewToken){console.log('当前占用：'+JSON.stringify(result.impact));console.log('预览凭据（120秒有效）：'+result.previewToken);}
+    const v=maintenanceVisible;
+    if(result.items){console.log(result.items.map(r=>`${v(r.id)}  ${v(r.state)}  v${r.revision}\n  ${v(r.machine)} · ${v(r.owner.username)} · ${v(r.title)}`).join('\n')||'暂无维护申请。');if(result.nextCursor)console.log('下一页：gpuctl maintenance list --cursor '+v(result.nextCursor));return;}
+    const r=result.request||result;console.log(`${v(r.id)} · ${v(r.state)} · v${r.revision}\n${v(r.machine)} · ${v(r.owner.username)} · ${v(r.title)}\n原因：${v(r.reason)}\n目录：${v(r.cwd)} · 超时 ${r.timeoutSec}s\n脚本 SHA256：${v(r.scriptSha256)}\n脚本快照（不可见/方向控制字符以 Unicode 转义显示，执行仍绑定此摘要）：\n${v(r.script,true)}`);
+    if(r.decision?.reason)console.log('退回理由：'+v(r.decision.reason));if(r.error)console.log(v(r.error));
+    if(r.result){console.log(`上次节点回执：${v(r.result.state)} · exit=${r.result.exitCode??'未确认'} · ${v(r.result.checkedAt)}`);process.stdout.write(v(r.result.stdout,true));process.stderr.write(v(r.result.stderr,true));if(r.result.truncated.stdout||r.result.truncated.stderr)console.log('\n输出已截断（每路最多 64 KiB）。');}
+    if(result.previewToken){console.log('当前占用：'+maintenanceJSON(result.impact));console.log('预览凭据（120秒有效）：'+v(result.previewToken));}
     return;
   }
   if(command==='users'){console.log(result.map(u=>`${u.username}  ${u.role==='admin'?'管理员':'普通用户'}  ${u.enabled?'启用':'暂停'}  总额度 ${u.total} 张\n  ${Object.entries(u.limits).map(([m,n])=>`${m}: ${n}`).join('，')||'尚未授权机器'}`).join('\n'));return;}
