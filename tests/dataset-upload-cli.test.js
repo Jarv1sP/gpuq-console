@@ -5,6 +5,7 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,writeFile,readFile,mkdir,rm,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {createHash,randomBytes} from 'node:crypto';
 const hash=data=>createHash('sha256').update(data).digest('hex'),chunk=1024*1024;
 async function fixture(t){
@@ -29,7 +30,7 @@ async function fixture(t){
   }catch(error){res.statusCode=400;res.end(JSON.stringify({error:error.message}));}});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const url=`http://127.0.0.1:${server.address().port}`;
   await writeFile(session,JSON.stringify({url,token:'test-only',principal:{userId:'demo-user-1',username:'tester',role:'member'},machine:'gpu-1'}),{mode:0o600});
-  const cli=args=>new Promise((resolve,reject)=>{const p=spawn(process.execPath,[new URL('../cli.mjs',import.meta.url).pathname,'--url',url,'--session-file',session,'--json',...args]);let stdout='',stderr='';p.stdout.on('data',s=>stdout+=s);p.stderr.on('data',s=>stderr+=s);p.on('error',reject);p.on('close',code=>resolve({code,stdout,stderr,result:stdout?JSON.parse(stdout).data:null}));});
+  const cli=args=>new Promise((resolve,reject)=>{const p=spawn(process.execPath,[fileURLToPath(new URL('../cli.mjs',import.meta.url)),'--url',url,'--session-file',session,'--json',...args]);let stdout='',stderr='';p.stdout.on('data',s=>stdout+=s);p.stderr.on('data',s=>stderr+=s);p.on('error',reject);p.on('close',code=>resolve({code,stdout,stderr,result:stdout?JSON.parse(stdout).data:null}));});
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});});return {dir,data,session,calls,uploads,cli,failChunk:()=>{failAfterChunk=true;},onBegin:fn=>{onBegin=fn;}};
 }
 test('standalone CLI uploads a directory with empty files/directories and resumes a lost chunk response',async t=>{

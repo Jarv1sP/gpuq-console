@@ -5,6 +5,7 @@ import {DemoService} from './dist/service.js';
 import {guideTarget,guidePage} from './guide.mjs';
 const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/datasets.css':'datasets.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/service.js':'service.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/datasets-ui.js':'datasets-ui.js'};
 routes['/dataset-upload.js']='dataset-upload.js';
+routes['/data-workspace.js']='data-workspace.js';
 routes['/job-diagnostics-ui.js']='job-diagnostics-ui.js';routes['/job-diagnostics.css']='job-diagnostics.css';
 routes['/scheduling-policy.js']='scheduling-policy.js';
 routes['/scheduling-ui.js']='scheduling-ui.js';

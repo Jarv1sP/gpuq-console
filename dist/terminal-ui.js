@@ -1,16 +1,18 @@
-export function terminalContext({machine,project,hostAdmin=false}){
+export function terminalContext({machine,project,hostAdmin=false,dataWorkspace=false}){
   if(typeof machine!=='string'||!machine||machine==='auto')throw Error('先选择一台服务器，再打开终端。');
   if(project!==undefined&&project!==''&&(typeof project!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(project)))throw Error('项目名称无效。');
   if(project&&hostAdmin)throw Error('项目终端不能使用宿主机 ROOT 模式。');
-  return {machine,hostAdmin:hostAdmin===true,...(project?{project}:{})};
+  if(dataWorkspace&&(project||hostAdmin))throw Error('个人数据终端不能与项目或 ROOT 模式混用。');
+  return {machine,hostAdmin:hostAdmin===true,...(project?{project}:{}),...(dataWorkspace?{dataWorkspace:true}:{})};
 }
 
 export function terminalLaunchContext({machine,project,role,entry='development'}){
-  if(!['development','host'].includes(entry))throw Error('终端入口无效。');
+  if(!['development','host','data'].includes(entry))throw Error('终端入口无效。');
   if(entry==='host'){
     if(role!=='admin')throw Error('宿主机 ROOT 运维仅管理员可用。');
     return terminalContext({machine,hostAdmin:true});
   }
+  if(entry==='data')return terminalContext({machine,dataWorkspace:true});
   return terminalContext({machine,project,hostAdmin:false});
 }
 
@@ -23,8 +25,8 @@ export function terminalUI(store,toast){
   }});
   let dialog,term,fit,session,timer,inputScheduled=false,idleDelay=80,busy=false,input=new Uint8Array(),offset=0,closing=false,lastSize='',generation=0,currentActor=null,currentWorkspace='',workspaceGeneration=0,openingGeneration=0;
   const sessions=new Map();
-  const identity=value=>JSON.stringify([value.userId,value.machine,value.project||'',value.hostAdmin===true]);
-  const args=value=>{const {machine,project,hostAdmin,id,clientId,writerToken}=value;return {machine,...(project?{project}:{}),hostAdmin,id,clientId,writerToken};};
+  const identity=value=>JSON.stringify([value.userId,value.machine,value.project||'',value.hostAdmin===true,value.dataWorkspace===true]);
+  const args=value=>{const {machine,project,hostAdmin,dataWorkspace,id,clientId,writerToken}=value;return {machine,...(project?{project}:{}),...(dataWorkspace?{dataWorkspace:true}:{}),hostAdmin,id,clientId,writerToken};};
   function announce(){document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[...sessions.values()].filter(value=>value.userId===store.principal?.userId).map(({writerToken,...value})=>({...value}))}}));}
   async function detach(release=true,invalidateOpening=true){if(invalidateOpening)openingGeneration++;const previous=session;clearTimeout(timer);inputScheduled=false;generation++;session=null;input=new Uint8Array();dialog?.close();if(previous&&release){previous.detached=true;try{await store.call('terminal.detach',args(previous));}catch{toast('写入权释放未确认；终端仍保留，等待 30 秒或明确接管后重连。');}}}
   store.onAuthChange?.(async call=>{
@@ -66,12 +68,19 @@ export function terminalUI(store,toast){
     const {userId,machine,project}=event.detail,next=JSON.stringify([userId,machine,project||'']);
     if(currentActor!==userId||currentWorkspace!==next){currentActor=userId;currentWorkspace=next;workspaceGeneration++;detach();announce();}
   });
+  document.addEventListener('gpuq-data-workspace-context',()=>{
+    // Changing the data machine invalidates pending opens without touching an
+    // already-attached development/ROOT terminal from the workbench.
+    openingGeneration++;
+    if(session?.dataWorkspace)detach();
+  });
   document.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
-    if(['terminal-open','terminal-reconnect','terminal-root-open','terminal-root-reconnect'].includes(button.id)){
+    if(['terminal-open','terminal-reconnect','terminal-root-open','terminal-root-reconnect','terminal-data-open','terminal-data-reconnect'].includes(button.id)){
       button.disabled=true;
       try{
-        const target=terminalLaunchContext({machine:document.querySelector('[name=terminal-machine]').value,project:document.querySelector('[name=workspace-project]')?.value,role:store.principal?.role,entry:button.id.startsWith('terminal-root-')?'host':'development'});
+        const entry=button.id.startsWith('terminal-data-')?'data':button.id.startsWith('terminal-root-')?'host':'development';
+        const target=terminalLaunchContext({machine:document.querySelector(entry==='data'?'[name=dataset-machine]':'[name=terminal-machine]')?.value,project:document.querySelector('[name=workspace-project]')?.value,role:store.principal?.role,entry});
         if(target.hostAdmin&&!window.confirm(`进入 ${target.machine} 的宿主机 ROOT 运维？可修改整机、影响他人任务，并能绕过 GPU 配额。日常开发请使用个人开发终端。`))return;
         const userId=store.principal?.userId,authGeneration=store.authGeneration,workspace=workspaceGeneration;if(!userId)throw Error('请先登录。');
         let retained;const reconnect=button.id.endsWith('-reconnect');
@@ -82,7 +91,7 @@ export function terminalUI(store,toast){
         if(known&&identity(known)!==identity({...target,userId}))throw Error('会话属于另一台服务器、项目或终端类型；请返回对应入口重连。');
         const clientId=known?.clientId||crypto.randomUUID();
         const request={...target,key:crypto.randomUUID(),clientId,mode:reconnect?'reconnect':'new',...(reconnect?{id,...(known?.writerToken?{writerToken:known.writerToken}:{})}:{})};
-        // All four entries share one intent fence. A slow ROOT response must
+        // All six entries share one intent fence. A slow ROOT response must
         // never replace a development terminal opened by a later click.
         const opening=++openingGeneration;
         const current=()=>opening===openingGeneration&&workspace===workspaceGeneration&&authGeneration===store.authGeneration&&currentActor===userId;
@@ -99,8 +108,8 @@ export function terminalUI(store,toast){
         if(authGeneration!==store.authGeneration||currentActor!==userId)throw Error('登录账号已改变，未在新账号下附加旧终端。');
         if(!current()){retained.detached=true;try{await store.call('terminal.detach',args(retained));}catch{toast('原终端写入权释放未确认；请回到对应入口显式重连。');}toast('终端选择已改变；旧终端保留在原入口，没有自动连接。');return;}
         session=retained;generation++;offset=0;input=new Uint8Array();closing=false;lastSize='';idleDelay=80;
-        ensureDialog();dialog.classList.toggle('host-terminal-dialog',target.hostAdmin);document.querySelector('#terminal-title').textContent=target.machine+(target.hostAdmin?' · ROOT 运维':target.project?' · '+target.project+' · 个人开发':' · 个人开发')+' · '+retained.id;
-        document.querySelector('#terminal-session-note').textContent=target.hostAdmin?'宿主机 ROOT：可修改整机并绕过 GPU 配额，不是个人开发环境。断开保留会话；完成维护请结束终端。':`个人开发终端不分配 GPU。${target.project?'项目发布前请结束终端。':''}断开保留会话；无输入 1 小时或累计 6 小时自动结束。`;
+        ensureDialog();dialog.classList.toggle('host-terminal-dialog',target.hostAdmin);document.querySelector('#terminal-title').textContent=target.machine+(target.hostAdmin?' · ROOT 运维':target.dataWorkspace?' · 个人数据 /data2':target.project?' · '+target.project+' · 个人开发':' · 个人开发')+' · '+retained.id;
+        document.querySelector('#terminal-session-note').textContent=target.hostAdmin?'宿主机 ROOT：可修改整机并绕过 GPU 配额，不是个人开发环境。断开保留会话；完成维护请结束终端。':target.dataWorkspace?'这里只挂载你在本机的个人数据目录 /data2，不分配 GPU。可手动解压和整理；发布前结束所有数据终端，单纯断开不会结束。':`个人开发终端不分配 GPU。${target.project?'项目发布前请结束终端。':''}断开保留会话；无输入 1 小时或累计 6 小时自动结束。`;
         dialog.showModal();term?.dispose();document.querySelector('#terminal-screen').replaceChildren();
         term=new globalThis.Terminal({documentOverride:terminalDocument,cursorBlink:true,fontSize:14,scrollback:3000,theme:{background:'#111827',foreground:'#e5e7eb'},allowProposedApi:false});
         fit=new globalThis.FitAddon.FitAddon();term.loadAddon(fit);term.open(document.querySelector('#terminal-screen'));fit.fit();
