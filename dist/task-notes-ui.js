@@ -19,7 +19,9 @@ export function createTaskNotesUI(root,store,toast){
   const error=(text='')=>{q('#task-note-error').textContent=text;};
   function stop(){clearTimeout(timer);timer=null;}
   function arm(){stop();if(active&&enabled&&!document.hidden)timer=setTimeout(()=>load(),5000);}
-  function jobOptions(){const select=q('#task-note-job'),selected=select.value;jobs(selectableNoteJobs(store));select.value=selected;
+  // A task can finish during a send or lost reply; keep its original option
+  // until that exact idempotent request is acknowledged by the backend.
+  function jobOptions(){if(busy||keys.hasUncertain('note'))return;const select=q('#task-note-job'),selected=select.value;jobs(selectableNoteJobs(store));select.value=selected;
     function jobs(items){select.replaceChildren(element('option',items.length?'选择任务':'没有未结束任务'));select.firstChild.value='';for(const job of items){const option=element('option',`${job.name||'训练'} · ${job.machine} · ${job.state} · ${job.id}`);option.value=job.id;select.append(option);}}
   }
   function controls(){const uncertain=keys.hasUncertain('note');q('#task-note-lifetime').disabled=!enabled||busy||uncertain;q('#task-note-job').disabled=!enabled||busy||uncertain;q('#task-note-body').readOnly=busy||uncertain;q('#task-note-form [type=submit]').disabled=!enabled||busy;q('#notes-refresh').disabled=!enabled;q('#notes-more').disabled=!enabled||loading;q('#task-note-job-field').hidden=q('#task-note-lifetime').value!=='task';q('#task-note-job').required=q('#task-note-lifetime').value==='task';}

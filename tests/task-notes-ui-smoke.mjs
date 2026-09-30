@@ -26,5 +26,15 @@ try{
   const note=service.db.prepare('SELECT id,revision FROM community_notes WHERE body=?').get('长期通知');const token=(await service.login('alice',password)).token;await service.invoke(token,'community.notes.update',{id:String(note.id),revision:note.revision,body:'另一客户端已改'});
   await page.locator('#task-note-editor [type=submit]').click();await page.locator('[data-note-edit-error]').filter({hasText:'留言已被修改'}).waitFor();assert.equal(await page.locator('#task-note-editor [name=body]').inputValue(),'保留未提交草稿');await page.locator('[data-note-close]').click();
   job.state='SUCCEEDED';service.save();service.pruneTaskNotes();await page.locator('#notes-refresh').click();await page.waitForFunction(()=>document.querySelectorAll('.task-note').length===1);assert.match(await page.locator('.task-note').innerText(),/另一客户端已改/);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
-  await page.locator('.task-note').getByRole('button',{name:'删除',exact:true}).click();await page.locator('#task-notes-list .community-empty').waitFor();assert.deepEqual(errors,[]);console.log(JSON.stringify({status:'passed',checks:['explicit lifetime','own task names','same-key lost reply retry','plain text','stale edit preserves draft','terminal cleanup','persistent general note','manual deletion','390px layout']}));
+  // A task may finish after the server saves a note but before its lost reply
+  // can be retried. Refresh must keep the frozen binding for that exact retry.
+  const endingJob={...job,id:randomUUID(),name:'即将结束的训练',state:'RUNNING'};service.store.jobs.push(endingJob);service.save();
+  await page.locator('#refresh-state').click();await page.locator('#task-note-lifetime').selectOption('task');await page.locator('#task-note-job').selectOption(endingJob.id);await page.locator('#task-note-body').fill('结束前丢失响应');drop=true;
+  await page.locator('#task-note-form [type=submit]').click();await page.locator('#task-note-error').filter({hasText:'发送结果未确认'}).waitFor();
+  const uncertain=sent.filter(x=>x.operation==='community.notes.create').at(-1).args;endingJob.state='FAILED';service.save();service.pruneTaskNotes();
+  await page.locator('#refresh-state').click();await page.locator('#notes-refresh').click();
+  assert.equal(await page.locator('#task-note-job').inputValue(),endingJob.id,'terminal refresh must preserve the uncertain task binding');
+  await page.locator('#task-note-form [type=submit]').click();await page.waitForFunction(()=>document.querySelector('#task-note-body').value==='');
+  assert.deepEqual(sent.filter(x=>x.operation==='community.notes.create').at(-1).args,uncertain);assert.equal(await page.locator('.task-note').count(),1);
+  await page.locator('.task-note').getByRole('button',{name:'删除',exact:true}).click();await page.locator('#task-notes-list .community-empty').waitFor();assert.deepEqual(errors,[]);console.log(JSON.stringify({status:'passed',checks:['explicit lifetime','own task names','same-key lost reply retry','terminal task lost-reply retry','plain text','stale edit preserves draft','terminal cleanup','persistent general note','manual deletion','390px layout']}));
 }finally{await browser?.close();await new Promise(resolve=>server?.close(resolve)||resolve());await rm(dir,{recursive:true,force:true});}
