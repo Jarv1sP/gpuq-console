@@ -10,7 +10,7 @@ import {uploadLocalDataset,workspaceDataPath,putWorkspaceData} from './client-da
 import {runManualSync} from './client-snapshot-sync.mjs';
 import {watchJob} from './job-watch.mjs';
 import {progressText} from './dist/job-progress.js';
-import {elasticAllocation,allocationLabel} from './dist/gpu-allocation.js';
+import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
 
 const help=`GPUQ — 个人终端与 GPUQ 训练
 
@@ -43,6 +43,9 @@ gpuctl run --priority idle -g 1 -- python train.py
 gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
 gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
 gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
+gpuctl run --gpu 0,2 -- python train.py
+gpuctl run --gpu 3 --share --vram-mib 4096 -- python small.py
+gpuctl run --gpu 3 --share --vram-mib 4096 --hami --sm-percent 50 -- python small.py
 gpuctl priority JOB high         Administrator: change queued job priority
 gpuctl notes                     Shared task / persistent general notes
 gpuctl note --job JOB "message"  Deleted when the task is confirmed finished
@@ -121,8 +124,8 @@ const args=process.argv.slice(2);let options,positionals,training;
 let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).includes('--json');
 function fail(message){throw Error(message);}
 const CLI_OPTIONS=new Map([
-  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run'].map(key=>[key,'flag']),
-  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project'].map(key=>[key,'value']),
+  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami'].map(key=>[key,'flag']),
+  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
 
@@ -173,6 +176,8 @@ async function main(){
   const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
   if(options.mode){const modes={queue:'queue',preempt1:'preempt-save',preempt2:'preempt-now','preempt-save':'preempt-save','preempt-now':'preempt-now'};if(!Object.hasOwn(modes,options.mode))fail('Use --mode queue|preempt1|preempt2');if(modes[options.mode]!=='queue')scheduling.mode=modes[options.mode];}
   const elasticKeys=['min-cards','global-batch','micro-batch','auto-expand'];
+  const placementKeys=['gpu','share','vram-mib','hami','sm-percent'];
+  if(placementKeys.some(k=>Object.hasOwn(options,k))&&positionals[0]!=='run')fail('Placement options are only valid for run');
   if(elasticKeys.some(k=>Object.hasOwn(options,k))&&positionals[0]!=='run')fail('Elastic GPU options are only valid for run');
   if(scheduling){
     if(!/^P[0-4]$/.test(scheduling.rank)||!['never','now','save'].includes(scheduling.yieldPolicy)||!['never','on-preempt'].includes(scheduling.restartPolicy))fail('Use --rank P0..P4, --yield never|now|save, --restart-policy never|on-preempt');
@@ -409,8 +414,10 @@ async function main(){
       }
       const key=options.key||randomUUID();process.stderr.write(`Submission key: ${key}\n`);
       const datasets=options.datasets.map(value=>{const [dataset,version,...extra]=value.split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Use --data NAME@FULL_VERSION_HASH');return {dataset,version};});
-      const elastic=elasticKeys.some(k=>Object.hasOwn(options,k))?elasticAllocation({minCards:Number(options['min-cards']),globalBatch:Number(options['global-batch']),microBatch:Number(options['micro-batch']),autoExpand:options['auto-expand']===true},Number(options.cards||1),scheduling).elastic:null;
-      result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...context,...(datasets.length?{datasets}:{})})).result;
+      const indices=options.gpu?.split(',').map(n=>/^\d+$/.test(n)?Number(n):NaN),cards=Number(options.cards||indices?.length||1);
+      const elastic=elasticKeys.some(k=>Object.hasOwn(options,k))?elasticAllocation({minCards:Number(options['min-cards']),globalBatch:Number(options['global-batch']),microBatch:Number(options['micro-batch']),autoExpand:options['auto-expand']===true},cards,scheduling).elastic:null;
+      const placement=placementKeys.some(k=>Object.hasOwn(options,k))?gpuPlacement({gpuIndices:indices,shared:options.share===true,...(options['vram-mib']?{vramMiB:Number(options['vram-mib'])}:{}),hami:options.hami===true,...(options['sm-percent']?{smPercent:Number(options['sm-percent'])}:{})},cards,elastic,scheduling,options.priority):null;
+      result=(await call('jobs.submit',{machine:positionals[1],cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');

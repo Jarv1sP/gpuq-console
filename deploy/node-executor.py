@@ -428,7 +428,7 @@ def file_op(operation,args,root=None):
 
 def validate_job(job,readonly=False):
     required={'id','userId','username','cards','argv','name','minVramGiB'}
-    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly','scheduling','elastic'}:raise ValueError('Invalid job specification')
+    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly','scheduling','elastic','placement'}:raise ValueError('Invalid job specification')
     if not UUID.fullmatch(job['id']):raise ValueError('Invalid job ID')
     if readonly:
         if not isinstance(job['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',job['userId']):raise ValueError('Invalid identity')
@@ -439,6 +439,7 @@ def validate_job(job,readonly=False):
     dataset_refs(job)
     policy=SCHEDULING.normalize_job_policy(job)
     SCHEDULING.elastic_allocation(job)
+    SCHEDULING.gpu_placement(job)
     if 'project' in job or 'release' in job:
         if not isinstance(job.get('project'),str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',job['project']) or not isinstance(job.get('release'),str) or not DATASET_VERSION.fullmatch(job['release']):raise ValueError('Invalid project release')
     return policy
@@ -679,6 +680,10 @@ def process(operation,args):
             if policy['kind']=='explicit' and not SCHEDULING.ready(CONFIG,HERE):raise ValueError('Training control channel is not ready; no submission attempted')
             if 'elastic' in job:
                 if not SCHEDULING.allocation_ready(CONFIG,HERE) or 'elastic-batch-v1' not in gpu('status').get('daemon',{}).get('capabilities',[]):raise ValueError('Elastic scheduler/control channel is not ready; no submission attempted')
+            if 'placement' in job:
+                placement=job['placement'];caps=gpu('status').get('daemon',{}).get('capabilities',[])
+                if not SCHEDULING.allocation_ready(CONFIG,HERE,2) or 'gpu-placement-v1' not in caps or placement['shared'] and 'gpu-sharing-v1' not in caps:raise ValueError('GPU placement/sharing channel is not ready; no submission attempted')
+                if placement.get('hami') and not SCHEDULING.hami_ready(CONFIG,HERE,placement['smPercent']):raise ValueError('HAMi runtime is not ready; no submission attempted')
             if job.get('project'):
                 projects().store.release(job['userId'],job['project'],job['release'])
                 projects().store.run_paths(job['userId'],job['project'],job['release'],jid)
