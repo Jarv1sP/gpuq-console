@@ -28,7 +28,12 @@ class NativeTerminal(unittest.TestCase):
         config=Config(root=self.root,db_path=self.root/'native.db',log_dir=self.root/'logs',control_dir=self.root/'control',socket_path=Path(f'/run/user/{os.getuid()}/terminal-proof-test.sock'),managed_gpu_uuids=('GPU-test',),allowed_uid=os.getuid(),observe_only=False)
         config.log_dir.mkdir();config.control_dir.mkdir();self.store=Store(config.db_path).initialize();self.addCleanup(self.store.close)
         self.core=Coordinator(config,self.store,Mock(),Mock(),boot_id='test-boot');self.core._snapshot=(GpuDevice(3,'GPU-test',24576,0,24576,0,()),)
-        for name in ('node-executor.py','scheduling-policy.py'):shutil.copy2(ROOT/'deploy'/name,self.root/name)
+        for name in ('node-executor.py','scheduling-policy.py'):
+            # The baseline inlines policy; #5 installs a shared policy module.
+            # Use the actual current node's imports without making the drain
+            # fix depend on the optional scheduling-feature PR.
+            source=ROOT/'deploy'/name
+            if source.exists():shutil.copy2(source,self.root/name)
         (self.root/'node-config.json').write_text(json.dumps({'root':str(self.root/'console'),'cards':1,'gpu':'/not/a/gpu','database':str(config.db_path)}))
         module=importlib.util.spec_from_file_location('node_terminal_fixture',self.root/'node-executor.py');self.node=importlib.util.module_from_spec(module);module.loader.exec_module(self.node)
         self.job={'id':str(uuid.uuid4()),'userId':'demo-user-1','username':'alice','cards':1,'argv':['python','train.py'],'name':'terminal-test','minVramGiB':0,'priority':'normal','preemptIdleOnly':True}
