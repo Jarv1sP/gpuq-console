@@ -23,6 +23,7 @@ jobs:
       - run: node tests/projects-ui-smoke.mjs
       - run: node tests/priority-ui-smoke.mjs
       - run: node tests/scheduling-ui-smoke.mjs
+      - run: node tests/allocation-ui-smoke.mjs
       - run: node tests/community-ui-smoke.mjs
       - run: node tests/task-notes-legacy-ui-smoke.mjs
       - run: node tests/task-notes-ui-smoke.mjs

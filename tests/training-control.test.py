@@ -69,6 +69,13 @@ class TrainingControl(unittest.TestCase):
     def test_old_configuration_is_a_noop(self):
         self.assertEqual(C.prepare({}, self.spec, self.workspace, None, {}), ([], []))
 
+    def test_native_batch_counter_range_is_preserved(self):
+        args,fds=self.prepare(GPUQ_TARGET_GLOBAL_BATCH_SIZE=str(2**63-1))
+        try:self.assertEqual(args[args.index('GPUQ_TARGET_GLOBAL_BATCH_SIZE')+1],str(2**63-1))
+        finally:
+            for fd in fds:os.close(fd)
+        with self.assertRaises(ValueError):self.prepare(GPUQ_TARGET_GLOBAL_BATCH_SIZE=str(2**63))
+
     def test_readiness_uses_declared_protocol_not_source_substrings(self):
         runner=self.root/'sandbox-runner.py'
         for name in ('sandbox-runner.py','sandbox-runner-common-p0.py'):

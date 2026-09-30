@@ -86,7 +86,7 @@ def prepare(config, spec, workspace, project, environment):
     for key in COUNTERS:
         if key in environment:
             value = environment[key]
-            if not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,12}', value):
+            if not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,19}', value) or int(value)>2**63-1:
                 raise ValueError('Invalid scheduler counter: ' + key)
             env[key] = value
     if 'GPUQ_ALLOWED_GPU_COUNTS' in environment:
