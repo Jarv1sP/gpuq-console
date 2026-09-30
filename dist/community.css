@@ -87,7 +87,7 @@
   .community-intro h2 {font-size:12px;font-weight:500;letter-spacing:0;margin:0}
   .community-guide {font-size:10px;padding:0;margin:0}
   .community-intro .eyebrow {display:none}
-  .community-tabs {grid-template-columns:repeat(2,1fr);gap:3px;margin-bottom:17px}
+  .community-tabs {gap:3px;margin-bottom:17px}
   .community-tabs.has-task-notes {grid-template-columns:repeat(2,1fr)}
   .community-tabs button {font-size:13px;padding:13px 6px;min-height:68px}
   .community-tabs button span {font-size:10px;line-height:1.6}
