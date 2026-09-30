@@ -313,6 +313,17 @@ gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -
 
 `save`须训练适配checkpoint并恢复完整状态，DDP所有rank协同。低等级save任务整体保存后让位，on-preempt随后排队恢复；保存失败不强杀，手动取消或失败不自动重跑。`--checkpointable`不是自动改写代码。
 
+请求方可主动选抢占1/2；自己的rank、是否愿意被中断、之后是否恢复仍是独立选择。
+
+```sh
+gpuctl run --rank P2 --mode preempt1 -g 1 -- python urgent.py
+gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
+```
+
+模式1只选愿意让位且能保存的低等级任务；模式2对now任务立即让位，但save任务仍先保存。
+旧任务、never、共享或外部进程不会被新模式强杀；同等级不互抢。节点缺新能力时明确拒绝，
+`queue`或省略mode保留旧默认格式，同key重试不能换成不同抢占模式。
+
 ### 协调使用安排
 
 “协作区”包含维护公告、问题反馈和公共交流。可以说明预计结束时间、协商释放资源或说明紧急实验，但聊天约定不会自动改变配额、队列或取消任务。

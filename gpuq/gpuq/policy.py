@@ -25,6 +25,14 @@ def is_idle_victim(
     return preempt_idle_only is True and priority == 0 and yield_policy == "now" and restart_policy == "never"
 
 
+def victim_in_scope(requester: dict[str, Any], victim: dict[str, Any]) -> bool:
+    if requester.get('preempt_idle_only') and not is_idle_victim(
+        victim['priority'], victim.get('yield_policy','legacy'), victim['restart_policy'], victim.get('preempt_idle_only',False)
+    ):
+        return False
+    return not requester.get('preempt_opt_in_only') or victim.get('yield_policy','legacy') in {'now','save'}
+
+
 @dataclass(frozen=True, slots=True)
 class VictimCandidate:
     attempt_id: str
@@ -121,6 +129,7 @@ def select_victims(
     required_gpu_uuids: frozenset[str] | None = None,
     free_gpu_uuids: frozenset[str] = frozenset(),
     preempt_idle_only: bool = False,
+    preempt_opt_in_only: bool = False,
 ) -> tuple[VictimCandidate, ...]:
     """Choose a deterministic, minimally harmful victim set.
 
@@ -166,6 +175,8 @@ def select_victims(
         needed = len(missing_required)
     eligible: list[VictimCandidate] = []
     for candidate in candidates:
+        if preempt_opt_in_only and candidate.yield_policy not in {'now','save'}:
+            continue
         if preempt_idle_only and not is_idle_victim(
             candidate.priority, candidate.yield_policy, candidate.restart_policy, candidate.preempt_idle_only
         ):
