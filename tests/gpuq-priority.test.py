@@ -556,7 +556,7 @@ class SchedulerPriorityTests(unittest.TestCase):
     def test_daemon_capabilities_and_status_are_explicit(self):
         job = self.submit(preempt_idle_only=True)
         result = self.coordinator.handle_api('status', {})
-        self.assertEqual(result['daemon']['capabilities'], ['priority-policy-v1', 'preempt-idle-only-v1', 'elastic-batch-v1'])
+        self.assertEqual(result['daemon']['capabilities'], ['priority-policy-v1', 'preempt-idle-only-v1', 'elastic-batch-v1', 'gpu-placement-v1', 'gpu-sharing-v1'])
         self.assertEqual(result['jobs'][0]['id'], job['id'])
         self.assertIs(result['jobs'][0]['preempt_idle_only'], True)
         parsed = cli.build_parser().parse_args(['submit', '-g', '1', '--preempt-idle-only', '--', 'python', 'train.py'])

@@ -3,7 +3,7 @@ import {MACHINES} from './dist/model.js';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
 import {yieldCapable} from './dist/scheduling-policy.js';
 import {normalizeJobSubmission,createSubmittedJob,datasetReferences} from './job-submission.mjs';
-import {elasticCapable} from './dist/gpu-allocation.js';
+import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 export {datasetReferences} from './job-submission.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
@@ -213,6 +213,11 @@ export async function executionCall(service,principal,operation,args){
     if(!service.gpuq||service.gpuq.stale)fail('机器状态已过期，暂不接受新任务。',503);
     const host=service.gpuq.hosts.find(h=>h.id===request.machine);
     if(request.elastic&&!elasticCapable(host))fail('节点未确认弹性分配和训练控制通道，未提交任务。',503);
+    if(request.placement){
+      if(!placementCapable(host,request.placement))fail('节点尚未确认指定显卡/共享或 HAMi 能力，未提交任务。',503);
+      const selected=request.placement.gpuIndices.map(index=>host.gpus.find(g=>g.index===index));
+      if(selected.some(g=>!g||g.memoryTotalMiB<min*1024-512)||request.placement.shared&&selected[0].memoryTotalMiB<request.placement.vramMiB)fail('指定显卡不存在或不满足显存要求。',409);
+    }
     if(!host?.reachable||!host.gpuq.connected||host.gpuq.observeOnly||host.gpus.filter(g=>g.memoryTotalMiB>=min*1024-512).length<request.cards)fail('所选机器当前无法执行，或不满足卡数/显存条件；不会自动切换服务器。',409);
     const prioritySupported=priorityCapable(host);
     if(explicit&&(!prioritySupported||!yieldCapable(host)))fail('节点未接通独立让位与 checkpoint 控制通道；未提交任务。',503);
