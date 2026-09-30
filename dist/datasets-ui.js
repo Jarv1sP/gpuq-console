@@ -66,7 +66,19 @@ export function datasetsUI(store,toast){
     const machines=store.data?.machines||[];
     const next=account(),ids=JSON.stringify(machines.map(m=>m.id));
     if(next!==identity){controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;identity=next;generation++;busy=false;machineIds='';
-      section.innerHTML=`<p class="muted">上传自己的数据，或准备已分配的数据。就绪后，训练只读访问本机副本。</p><div class="terminal-controls"><label>服务器<select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新数据集</button></div><form id="dataset-upload-form"><h3>上传我的数据集</h3><p class="muted">仅自己可用，上传到所选服务器。目录内容不会自动分享或跨机同步。</p><label class="field">数据集名称<input name="dataset-name" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" placeholder="my-data" required></label><label class="field">本机目录<input type="file" name="dataset-directory" webkitdirectory multiple></label><div class="file-actions"><button class="button primary" type="submit" id="dataset-upload-start">上传 / 继续</button><button class="button" type="button" id="dataset-upload-pause" hidden>暂停传输</button><button class="button" type="button" id="dataset-upload-discard" hidden>取消未完成上传</button></div><progress id="dataset-upload-progress" aria-label="数据集上传进度" hidden></progress><p id="dataset-upload-status" role="status">选择目录后开始；同一目录可断点续传。</p><p class="muted">关闭页面会停止传输，已开始的服务器校验会继续。大目录建议使用 <code>gpuctl data upload</code>；网页选择不包含空目录。</p></form><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div>`;
+      section.innerHTML=`<p class="muted datasets-intro">上传自己的数据，或准备已分配的数据。就绪后，训练只读访问本机副本。</p>
+        <div class="terminal-controls datasets-controls"><label>服务器<select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新数据集</button></div>
+        <form id="dataset-upload-form" aria-labelledby="dataset-upload-heading">
+          <div class="dataset-upload-heading"><h3 id="dataset-upload-heading">上传我的数据集</h3><p class="muted">仅自己可用，保存到所选服务器；不会自动分享或跨机同步。</p></div>
+          <div class="dataset-upload-fields">
+            <label class="field">数据集名称<input name="dataset-name" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" placeholder="my-data" aria-describedby="dataset-name-help" required><small id="dataset-name-help">1–40 位字母、数字、下划线或连字符。</small></label>
+            <label class="field">本机目录<input type="file" name="dataset-directory" webkitdirectory multiple aria-describedby="dataset-directory-help"><small id="dataset-directory-help">选择整个目录；网页上传不包含空目录。</small></label>
+          </div>
+          <div class="file-actions dataset-upload-actions"><button class="button primary" type="submit" id="dataset-upload-start">上传 / 继续</button><button class="button" type="button" id="dataset-upload-pause" hidden>暂停传输</button><button class="button" type="button" id="dataset-upload-discard" hidden>取消未完成上传</button></div>
+          <div class="dataset-upload-feedback"><progress id="dataset-upload-progress" aria-label="数据集上传进度" hidden></progress><p id="dataset-upload-status" role="status">选择目录后开始；同一目录可断点续传。</p></div>
+          <div class="dataset-upload-notes"><p class="muted">关闭页面会停止传输，已开始的服务器校验会继续。</p><p class="muted">大目录建议使用 <code>gpuctl data upload</code>。</p></div>
+        </form>
+        <p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div>`;
     }
     if(ids!==machineIds){const select=section.querySelector('[name=dataset-machine]'),selected=select.value;select.innerHTML=machines.map(m=>`<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');if(machines.some(m=>m.id===selected))select.value=selected;else if(selected){controller?.abort();active=null;generation++;busy=false;section.querySelector('#dataset-catalog').replaceChildren();}machineIds=ids;}
     controls();
