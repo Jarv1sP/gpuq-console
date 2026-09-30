@@ -168,6 +168,25 @@ gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand -
 
 网页“弹性卡数”提供相同选项。节点未确认弹性/控制通道时拒绝提交，不静默退回固定卡数。
 
+### 固定显卡与主动挤挤
+
+先到“算力总览”观察逐卡显存/进程，再选服务器上的物理卡号：
+
+```sh
+gpuctl run --gpu 0,2 -- python train.py
+gpuctl run --gpu 3 --share --vram-mib 4096 -- python small.py
+```
+
+固定卡号登记时绑定物理 UUID；编号重排仍用同一物理设备。共享只需新任务提交者同意，可与外部任务或已运行的普通 GPUQ 任务共存；预算不足会排队。共享仍占1张个人额度，不支持弹性/自动让位/自动恢复。
+
+普通共享的 MiB 预算只是准入估计，没有硬显存限制。节点已安装并验证 HAMi 时可追加 `--hami`；SM百分比还需该节点验证过SM功能：
+
+```sh
+gpuctl run --gpu 3 --share --vram-mib 4096 --hami --sm-percent 50 -- python small.py
+```
+
+HAMi 只约束这项任务，不约束同卡外部任务，也不保证性能比例；库/能力缺失拒绝提交，不会降级为普通共享。网页“固定/共享选卡”提供同样入口。
+
 ### 停止任务
 
 ```sh

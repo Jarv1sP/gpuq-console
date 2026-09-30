@@ -18,6 +18,8 @@ test('fixed selection is canonical; shared consent and hardware caps are explici
   assert.throws(()=>gpuPlacement({gpuIndices:[3]},1,{}),/弹性/);
   assert.throws(()=>gpuPlacement({gpuIndices:[3],shared:true,vramMiB:4096},1,null,{yieldPolicy:'now',restartPolicy:'never'}),/自动让位/);
   assert.throws(()=>gpuPlacement({gpuIndices:[3],shared:true,vramMiB:4096},1,null,null,'idle'),/自动让位/);
+  for(const policy of [{rank:'P1',yieldPolicy:'now'},{rank:'P1',yieldPolicy:'save',checkpointable:true,restartPolicy:'on-preempt'},{rank:'P1',mode:'preempt-now'},{rank:'P1',unknown:true}])assert.throws(()=>gpuPlacement({gpuIndices:[3],shared:true,vramMiB:4096},1,null,policy));
+  assert.deepEqual(gpuPlacement({gpuIndices:[100000]},1),{gpuIndices:[100000],shared:false});
   const host={reachable:true,gpuq:{connected:true,capabilities:['console-placement-v1','console-sharing-v1','console-hami-v1']}};
   assert.equal(placementCapable(host,shared),true);assert.equal(placementCapable(host,{...shared,smPercent:50}),false);
   const form=new FormData();for(const [k,v] of Object.entries({'gpu-placement':'shared','gpu-indices':'3','vram-mib':'4096'}))form.set(k,v);

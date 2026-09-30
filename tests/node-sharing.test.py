@@ -18,6 +18,8 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'gpuq'))
 from gpuq.backends import GpuDevice
 from gpuq.coordinator import Coordinator
 from gpuq.hami import runtime_environment
+from gpuq.store import Store
+from gpuq.submission import validate_submission
 
 def load(name,filename):
     spec=importlib.util.spec_from_file_location(name,ROOT/'deploy'/filename);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
@@ -45,6 +47,20 @@ class Sharing(unittest.TestCase):
             self.assertEqual(P.allocated_spec(job,['4'],['GPU-physical'],config,env)['cards'],1)
             for indices,uuids,who in ((['3'],['GPU-physical'],env),(['4'],['GPU-other'],env),(['4'],['GPU-physical'],{**env,'GPUQ_JOB_ID':'Jother'})):
                 with self.assertRaises(ValueError):P.allocated_spec(job,indices,uuids,config,who)
+
+    def test_uuid_binding_uses_a_real_private_native_schema_without_migration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);database=root/'native.db';store=Store(database).initialize()
+            try:
+                submit_key=str(uuid.uuid4());raw={'submit_key':submit_key,'name':'pinned-test','owner':'alice','priority':2,'dispatch_mode':'queue','yield_policy':'never','checkpoint_capability':'none','restart_policy':'never','gpu_count':1,'placement':'pinned','requested_gpu_uuids':['GPU-0'],'argv':[sys.executable,'-c','pass'],'cwd':str(root),'env':{}}
+                native=store.submit_job(validate_submission(raw,1,managed_gpu_uuids=('GPU-0',)));aid='A'+uuid.uuid4().hex
+                attempt=store.create_attempt(native['id'],attempt_id=aid,state='RUNNING',gpu_uuids=['GPU-0'],gpu_indices=[4],unit_name='gpuq-'+aid.lower(),unit_token='own-test',boot_id='test-boot',control_dir=str(root/'control'),log_path=str(root/'log'))
+                store.acquire_leases(native['id'],aid,{'GPU-0':4})
+                job={**self.job(),'id':submit_key};env={'GPUQ_ATTEMPT_ID':aid,'GPUQ_JOB_ID':native['id']}
+                self.assertEqual(P.allocated_spec(job,['4'],['GPU-0'],{'database':str(database)},env)['cards'],1)
+                with self.assertRaises(ValueError):P.allocated_spec({**job,'id':str(uuid.uuid4())},['4'],['GPU-0'],{'database':str(database)},env)
+                self.assertEqual(store.check_integrity()['schema_version'],11)
+            finally:store.close()
 
     def coordinator(self,leases=(),holder_shared=False):
         device=GpuDevice(index=3,uuid='GPU-test',memory_total_mib=24576,memory_used_mib=8192,memory_free_mib=16384,utilization_percent=25,compute_pids=(123,))
@@ -97,7 +113,7 @@ class Sharing(unittest.TestCase):
             with closing(sqlite3.connect(config['database'])) as db:
                 db.execute('CREATE TABLE jobs(id TEXT, submit_key TEXT)');db.execute('CREATE TABLE attempts(id TEXT,job_id TEXT,control_dir TEXT)');db.execute('INSERT INTO jobs VALUES (?,?)',(jobid,jid));db.execute('INSERT INTO attempts VALUES (?,?,?)',(control.name,jobid,str(control)))
                 db.commit()
-            native={'hami_core':True,'vram_mb':4096,'sm_percent':50};env={'GPUQ_CONTROL_DIR':str(control),'GPUQ_JOB_ID':jobid,'GPUQ_ATTEMPT_ID':control.name,**runtime_environment(archive,{'control_dir':str(control)},native)}
+            native={'hami_core':True,'vram_mb':4096,'sm_percent':50};env={'GPUQ_CONTROL_DIR':str(control),'GPUQ_JOB_ID':jobid,'GPUQ_ATTEMPT_ID':control.name,'UNRELATED_TOKEN':'must-not-forward',**runtime_environment(archive,{'control_dir':str(control)},native)}
             spec={'id':jid,'placement':{'gpuIndices':[3],'shared':True,'vramMiB':4096,'hami':True,'smPercent':50}}
             args,fds=C.prepare(config,spec,workspace,None,env)
             try:
@@ -105,6 +121,8 @@ class Sharing(unittest.TestCase):
                 self.assertEqual(mapped['LD_PRELOAD'],'/opt/gpuq/libvgpu.so');self.assertEqual(mapped['CUDA_DEVICE_MEMORY_SHARED_CACHE'],'/run/gpuq/control/hami/usage.cache')
                 self.assertEqual(mapped['CUDA_DEVICE_MEMORY_LIMIT'],'4096m');self.assertEqual(mapped['CUDA_DEVICE_SM_LIMIT'],'50')
                 self.assertEqual(os.fstat(fds[-1]).st_ino,library.stat().st_ino)
+                self.assertNotIn('UNRELATED_TOKEN',mapped);self.assertEqual(args[args.index('/opt/gpuq/libvgpu.so')-2],'--ro-bind-data')
+                with self.assertRaises(OSError):os.write(fds[-1],b'cannot-edit-library')
             finally:
                 for fd in fds:os.close(fd)
             with self.assertRaises(ValueError):C.prepare(config,spec,workspace,None,{**env,'LD_PRELOAD':'/unrelated/library.so'})
