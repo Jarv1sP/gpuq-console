@@ -394,6 +394,15 @@ async function main(){
       const datasets=options.datasets.map(value=>{const [dataset,version,...extra]=value.split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Use --data NAME@FULL_VERSION_HASH');return {dataset,version};});
       result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...context,...(datasets.length?{datasets}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
+    else if(command==='priority'&&positionals.length===3){
+      if(!['idle','normal','high'].includes(positionals[2]))fail('Priority must be idle, normal or high');
+      if(options.key||training.length)fail('priority does not accept a submission key or command argv');
+      result=(await call('jobs.priority',{jobId:positionals[1],priority:positionals[2]})).result;
+    }
+    else if(command==='diagnostics'){
+      if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k)))fail('Usage: diagnostics JOB [--json]; no paths, machine or execution options');
+      result=(await call('jobs.diagnostics',{jobId:positionals[1]})).result;
+    }
     else if(command==='notes'&&positionals.length===1){
       result=(await call('community.notes.list',{})).result;
     }else if(command==='note'&&positionals.length===2){
@@ -403,14 +412,6 @@ async function main(){
     }else if(command==='note-delete'&&positionals.length===2){
       const {note}=(await call('community.notes.get',{id:positionals[1]})).result;
       result=(await call('community.notes.delete',{id:note.id,revision:note.revision})).result;
-    }else if(command==='priority'&&positionals.length===3){
-      if(!['idle','normal','high'].includes(positionals[2]))fail('Priority must be idle, normal or high');
-      if(options.key||training.length)fail('priority does not accept a submission key or command argv');
-      result=(await call('jobs.priority',{jobId:positionals[1],priority:positionals[2]})).result;
-    }
-    else if(command==='diagnostics'){
-      if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k)))fail('Usage: diagnostics JOB [--json]; no paths, machine or execution options');
-      result=(await call('jobs.diagnostics',{jobId:positionals[1]})).result;
     }
     else if(['logs','cancel'].includes(command)&&positionals.length===2)result=(await call(command==='logs'?'jobs.logs':'jobs.cancel',{jobId:positionals[1]})).result;
     else if(command==='files'&&positionals.length<=3)result=(await call('files.list',{machine:positionals[1],path:positionals[2]||'.',...fileArgs(positionals[1])})).result;
