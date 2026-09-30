@@ -8,6 +8,7 @@ import {bridgeClient} from './execution.mjs';
 const files={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/xterm.js':'vendor/xterm.js','/xterm.css':'vendor/xterm.css','/addon-fit.js':'vendor/addon-fit.js'};
 files['/job-diagnostics-ui.js']='job-diagnostics-ui.js';files['/job-diagnostics.css']='job-diagnostics.css';
 files['/scheduling-policy.js']='scheduling-policy.js';
+files['/scheduling-ui.js']='scheduling-ui.js';
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
 const guides={'/guide/user':'./USER_README.md','/guide/admin':'./ADMIN_README.md','/guide/datasets':'./docs/DATASETS.md','/guide/projects':'./docs/PROJECTS.md','/guide/terminal-sessions':'./docs/TERMINAL_SESSIONS.md','/guide/diagnostics':'./docs/JOB_DIAGNOSTICS.md','/guide/ray-resources':'./docs/RAY_RESOURCES.md'};
 files['/datasets-ui.js']='datasets-ui.js';

@@ -6,6 +6,7 @@ const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.
 routes['/dataset-upload.js']='dataset-upload.js';
 routes['/job-diagnostics-ui.js']='job-diagnostics-ui.js';routes['/job-diagnostics.css']='job-diagnostics.css';
 routes['/scheduling-policy.js']='scheduling-policy.js';
+routes['/scheduling-ui.js']='scheduling-ui.js';
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
 const guides={'/guide/user':'./USER_README.md','/guide/admin':'./ADMIN_README.md','/guide/datasets':'./docs/DATASETS.md','/guide/projects':'./docs/PROJECTS.md','/guide/terminal-sessions':'./docs/TERMINAL_SESSIONS.md','/guide/diagnostics':'./docs/JOB_DIAGNOSTICS.md','/guide/ray-resources':'./docs/RAY_RESOURCES.md'};
 routes['/community-ui.js']='community-ui.js';routes['/community.css']='community.css';

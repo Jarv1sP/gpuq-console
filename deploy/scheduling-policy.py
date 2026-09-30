@@ -1,13 +1,15 @@
 """Explicit queue rank and voluntary yielding; no legacy-victim takeover."""
-from pathlib import Path
+import importlib.util
+
+PRIORITY_PRESETS = {'idle': (0, 'now'), 'normal': (2, 'never'), 'high': (4, 'never')}
 
 
 def ready(config, here):
     try:
-        return (Path(config['controlRoot']).is_dir() and Path(config['gpuqArchive']).is_file()
-                and (here/'training-control.py').is_file()
-                and 'gpuq_training_control' in (here/'sandbox-runner.py').read_text())
-    except (KeyError, OSError, TypeError):
+        spec=importlib.util.spec_from_file_location('gpuq_training_control',here/'training-control.py')
+        control=importlib.util.module_from_spec(spec);spec.loader.exec_module(control)
+        return control.ready(config,here)
+    except (OSError, ImportError, AttributeError, SyntaxError, TypeError):
         return False
 
 
@@ -24,9 +26,33 @@ def validate(value):
     return value
 
 
-def arguments(value):
-    policy = validate(value)
+def normalize_job_policy(job):
+    policy = {'kind': 'legacy', 'priority': 0, 'dispatch_mode': 'queue',
+              'yield_policy': 'never', 'restart_policy': 'never',
+              'checkpointable': False, 'preempt_idle_only': False}
+    if 'scheduling' in job:
+        if 'priority' in job or 'preemptIdleOnly' in job:
+            raise ValueError('Cannot mix scheduling contracts')
+        value = validate(job['scheduling'])
+        policy.update(kind='explicit', priority=int(value['rank'][1]),
+                      yield_policy=value['yieldPolicy'], restart_policy=value['restartPolicy'],
+                      checkpointable=value['checkpointable'])
+    elif 'priority' in job or 'preemptIdleOnly' in job:
+        name = job.get('priority')
+        if not isinstance(name, str) or name not in PRIORITY_PRESETS or job.get('preemptIdleOnly') is not True:
+            raise ValueError('Explicit safe scheduling policy required')
+        rank, yielding = PRIORITY_PRESETS[name]
+        policy.update(kind='preset', priority=rank, yield_policy=yielding, preempt_idle_only=True)
+    return policy
+
+
+def submit_arguments(policy):
     # queue already preempts strictly lower-ranked explicit now/save volunteers.
     # It never interprets legacy jobs as having opted into interruption.
-    return ['-p',policy['rank'],'-m','queue','--yield',policy['yieldPolicy'],
-            '--restart-policy',policy['restartPolicy'],*(['--checkpointable'] if policy['checkpointable'] else [])]
+    result = ['-p', 'P'+str(policy['priority']), '-m', policy['dispatch_mode'],
+              '--yield', policy['yield_policy'], '--restart-policy', policy['restart_policy']]
+    if policy['preempt_idle_only']:
+        result.append('--preempt-idle-only')
+    if policy['checkpointable']:
+        result.append('--checkpointable')
+    return result

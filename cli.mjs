@@ -5,6 +5,8 @@ import {randomUUID,createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {createInterface} from 'node:readline/promises';
 import {constants as fsConstants} from 'node:fs';
+import {realpathSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
 
 const help=`GPUQ — 个人终端与 GPUQ 训练
 
@@ -95,9 +97,32 @@ Projects are selected per server, never silently copied or moved between machine
 Choose a server explicitly: new jobs do not accept auto.
 Existing users without a selected project keep their legacy workspace.
 The standard Python environment is /opt/conda; never modify global Conda.`;
-const args=process.argv.slice(2),positionals=[],options={machines:[],datasets:[]};let training=[];
+const args=process.argv.slice(2);let options,positionals,training;
 let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).includes('--json');
 function fail(message){throw Error(message);}
+const CLI_OPTIONS=new Map([
+  ...['json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','checkpointable'].map(key=>[key,'flag']),
+  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy'].map(key=>[key,'value']),
+  ['machine','machines'],['data','datasets'],
+]);
+
+export function parseCLIOptions(argv){
+  const options={machines:[],datasets:[]},positionals=[];
+  for(let i=0;i<argv.length;i++){
+    if(argv[i]==='--')return {options,positionals,training:argv.slice(i+1)};
+    const item=argv[i]==='-g'?'--cards':argv[i];
+    if(!item.startsWith('--')){positionals.push(item);continue;}
+    const key=item.slice(2),kind=CLI_OPTIONS.get(key);
+    if(!kind)fail(`Unknown option: ${item}`);
+    if(Object.hasOwn(options,key))fail(`Duplicate option: ${item}`);
+    if(kind==='flag'){options[key]=true;continue;}
+    const value=argv[++i];
+    if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
+    if(kind==='value')options[key]=value;
+    else options[kind].push(value);
+  }
+  return {options,positionals,training:[]};
+}
 const DATA_CHUNK=1024*1024,DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
 const sameFile=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs&&a.nlink===b.nlink;
 function dataPath(path){if(!path||Buffer.byteLength(path)>4096||path.startsWith('/')||/[\\\x00-\x1f\x7f]/.test(path)||path.split('/').some(p=>['','.','..','.ssh','.env','.git','.venv','anaconda3','miniconda3','.conda'].includes(p)))fail('Unsafe, credential or environment dataset path: '+path);return path;}
@@ -173,22 +198,7 @@ async function secret(label='Password'){
   });
 }
 async function main(){
-  for(let i=0;i<args.length;i++){
-    if(args[i]==='--'){training=args.slice(i+1);break;}
-    const item=args[i]==='-g'?'--cards':args[i];if(!item.startsWith('--')){positionals.push(item);continue;}
-    if(['--rank','--yield','--restart-policy','--checkpointable'].includes(item)){
-      const key=item.slice(2);if(Object.hasOwn(options,key))fail(`Duplicate option: ${item}`);
-      if(key==='checkpointable'){options[key]=true;continue;}
-      const value=args[++i];if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
-      options[key]=value;continue;
-    }
-    const key=item.slice(2);
-    if(Object.hasOwn(options,key)&&!['machine','data'].includes(key))fail(`Duplicate option: ${item}`);
-    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover'].includes(key)){options[key]=true;continue;}
-    if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job','priority','cwd','timeout','reconnect','env-mode'].includes(key))fail(`Unknown option: ${item}`);
-    const value=args[++i];if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
-    if(key==='machine')options.machines.push(value);else if(key==='data')options.datasets.push(value);else options[key]=value;
-  }
+  ({options,positionals,training}=parseCLIOptions(args));
   if(options.help||!positionals.length){console.log(help);return;}
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
@@ -497,4 +507,6 @@ async function main(){
   if(command==='users'){console.log(result.map(u=>`${u.username}  ${u.role==='admin'?'管理员':'普通用户'}  ${u.enabled?'启用':'暂停'}  总额度 ${u.total} 张\n  ${Object.entries(u.limits).map(([m,n])=>`${m}: ${n}`).join('，')||'尚未授权机器'}`).join('\n'));return;}
   console.log(JSON.stringify(result,null,2));
 }
-main().catch(error=>{console.error(wantsJSON?JSON.stringify({ok:false,error:error.message}):`Error: ${error.message}`);process.exitCode=1;});
+if(process.argv[1]&&fileURLToPath(import.meta.url)===realpathSync(process.argv[1])){
+  main().catch(error=>{console.error(wantsJSON?JSON.stringify({ok:false,error:error.message}):`Error: ${error.message}`);process.exitCode=1;});
+}

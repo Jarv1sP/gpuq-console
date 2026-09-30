@@ -18,19 +18,9 @@ PROJECT_OPS=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DIAGNOSTICS=None
-PRIORITIES={'idle':(0,'now'),'normal':(2,'never'),'high':(4,'never')}
-
-def explicit_scheduling(value, require_ready=False):
-    module=importlib.util.spec_from_file_location('gpuq_console_scheduling',HERE/'scheduling-policy.py')
-    policy=importlib.util.module_from_spec(module);module.loader.exec_module(policy)
-    policy.validate(value)
-    if require_ready and not policy.ready(CONFIG,HERE):raise ValueError('Training control channel is not ready; no submission attempted')
-    return policy.arguments(value)
-
-def explicit_status(job,data):
-    if 'scheduling' not in job:return {}
-    state=data.get('job',data);attempts=data.get('attempts',[])
-    return {'preempted':state.get('state')=='CANCELED' and bool(attempts) and attempts[0].get('state')=='PREEMPTED'}
+policy_module=importlib.util.spec_from_file_location('gpuq_console_scheduling',HERE/'scheduling-policy.py')
+SCHEDULING=importlib.util.module_from_spec(policy_module);policy_module.loader.exec_module(SCHEDULING)
+PRIORITIES=SCHEDULING.PRIORITY_PRESETS
 
 def job_diagnostics(job,data):
     global DIAGNOSTICS
@@ -67,10 +57,11 @@ def scheduling_status(job,data):
     # Classification never rewrites an old task. Editing is only enabled for
     # explicit new Console jobs whose persistent scheduler scope is verified.
     mutable=state.get('state')=='PENDING' and job.get('preemptIdleOnly') is True and state.get('preempt_idle_only') is True
+    opted_in='scheduling' in job or (job.get('preemptIdleOnly') is True and state.get('preempt_idle_only') is True)
     return {'schedulerState':state.get('state'),'schedulerPriority':state.get('priority'),
             'priority':priority,'schedulerPolicy':policy,'priorityMutable':mutable,
             'queueReason':state.get('state_reason'),
-            'preempted':job.get('preemptIdleOnly') is True and state.get('preempt_idle_only') is True and state.get('state')=='CANCELED' and bool(attempts) and attempts[0].get('state')=='PREEMPTED'}
+            'preempted':opted_in and state.get('state')=='CANCELED' and bool(attempts) and attempts[0].get('state')=='PREEMPTED'}
 
 def projects():
     global PROJECT_OPS
@@ -409,13 +400,10 @@ def validate_job(job,readonly=False):
     if type(job['cards'])!=int or not 1<=job['cards']<=CONFIG.get('cards',64):raise ValueError('Invalid card count')
     if not isinstance(job['argv'],list) or not 1<=len(job['argv'])<=128 or any(not isinstance(a,str) or '\0' in a for a in job['argv']) or len(json.dumps(job['argv']))>12000:raise ValueError('Invalid argv')
     dataset_refs(job)
-    if 'scheduling' in job:
-        if 'priority' in job or 'preemptIdleOnly' in job:raise ValueError('Cannot mix scheduling contracts')
-        explicit_scheduling(job['scheduling'])
-    if 'priority' in job or 'preemptIdleOnly' in job:
-        if job.get('priority') not in PRIORITIES or job.get('preemptIdleOnly') is not True:raise ValueError('Explicit safe scheduling policy required')
+    policy=SCHEDULING.normalize_job_policy(job)
     if 'project' in job or 'release' in job:
         if not isinstance(job.get('project'),str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',job['project']) or not isinstance(job.get('release'),str) or not DATASET_VERSION.fullmatch(job['release']):raise ValueError('Invalid project release')
+    return policy
 
 def terminal_pointer(args):
     suffix='host' if args.get('hostAdmin') is True else 'private'
@@ -597,7 +585,7 @@ def process(operation,args):
         return projects().files(operation,args) if args.get('project') else file_op(operation,args)
     if operation not in ('sync','cancel','logs','priority'):raise ValueError('Unknown operation')
     if not isinstance(args,dict) or set(args)-({'job','priority','expected'} if operation=='priority' else {'job'}):raise ValueError('Invalid job operation fields')
-    job=args['job'];validate_job(job);jid=job['id']
+    job=args['job'];policy=validate_job(job);jid=job['id']
     (ROOT/'jobs').mkdir(parents=True,exist_ok=True,mode=0o700)
     with open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -619,8 +607,8 @@ def process(operation,args):
                 release_datasets(job,never_dispatched=True)
                 return {'state':'CANCELED'}
             if operation=='logs':return job_log_result(job,{'job':{'state':'NOT_SUBMITTED'},'attempts':[]},'任务尚未提交到 GPUQ。')
-            if 'priority' in job or 'scheduling' in job:priority_capability()
-            if 'scheduling' in job:explicit_scheduling(job['scheduling'],require_ready=True)
+            if policy['kind']!='legacy':priority_capability()
+            if policy['kind']=='explicit' and not SCHEDULING.ready(CONFIG,HERE):raise ValueError('Training control channel is not ready; no submission attempted')
             if job.get('project'):
                 projects().store.release(job['userId'],job['project'],job['release'])
                 projects().store.run_paths(job['userId'],job['project'],job['release'],jid)
@@ -629,11 +617,7 @@ def process(operation,args):
                 # A timed-out submit must not allow cancellation to release a
                 # lease while the scheduler may still accept the request.
                 atomic_json(attempted,{'jobId':jid})
-            scheduling=['-p','P0','-m','queue','--yield','never','--restart-policy','never']
-            if 'scheduling' in job:scheduling=explicit_scheduling(job['scheduling'])
-            if 'priority' in job:
-                level,yield_policy=PRIORITIES[job['priority']]
-                scheduling=['-p','P'+str(level),'-m','queue','--yield',yield_policy,'--restart-policy','never','--preempt-idle-only']
+            scheduling=SCHEDULING.submit_arguments(policy)
             result=gpu('submit','-g',str(job['cards']),*scheduling,'-n','portal-'+jid[:8],'-u',gpuq_owner(job),'--cwd',str(workspace(job['userId'])),'--submit-key',jid,'--','/usr/bin/python3',str(HERE/'sandbox-runner.py'),jid)
             node_id=result['job_id']
         else:node_id=row[0]
@@ -656,7 +640,7 @@ def process(operation,args):
         assigned=attempts[0].get('gpu_indices',[]) if attempts and state['state'] not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
         if dataset_refs(job) and state['state'] in ('SUCCEEDED','FAILED','CANCELED') and not release_datasets(job,data):
             return {'nodeJobId':node_id,'state':'UNKNOWN','assignedIndices':assigned,'error':'Job termination is not fully confirmed; dataset leases retained'}
-        return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data),**explicit_status(job,data)}
+        return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data)}
 
 if __name__=='__main__':
     os.umask(0o077)

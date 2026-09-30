@@ -6,7 +6,8 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
-import {schedulingPolicy,schedulingFields,schedulingFromForm,yieldCapable,appendSchedulingDetails} from '../dist/scheduling-policy.js';
+import {schedulingPolicy,yieldCapable} from '../dist/scheduling-policy.js';
+import {schedulingFields,schedulingFromForm,schedulingSummary} from '../dist/scheduling-ui.js';
 import {usage} from '../execution.mjs';
 
 const save={rank:'P1',yieldPolicy:'save',restartPolicy:'on-preempt',checkpointable:true};
@@ -38,8 +39,8 @@ test('UI fields and form parsing preserve explicit consent; unknown capability i
   for(const [key,value] of Object.entries({'custom-policy':'on','queue-rank':'P1','yield-policy':'save','restart-policy':'on-preempt',checkpointable:'on'}))form.set(key,value);
   assert.deepEqual(schedulingFromForm(form),save);form.delete('checkpointable');assert.throws(()=>schedulingFromForm(form));
   for(const host of [null,{}, {reachable:true,gpuq:{connected:true,capabilities:[]}}])assert.equal(yieldCapable(host),false);
-  const notes=[],cell={append:n=>notes.push(n.textContent)},container={ownerDocument:{createElement:()=>({})},querySelectorAll:()=>[{dataset:{jobLogs:'x'},closest:()=>({querySelector:()=>cell})}]};
-  appendSchedulingDetails(container,[{id:'x',scheduling:save}]);assert.match(notes[0],/P1 · 让位 save · 恢复 on-preempt/);
+  assert.match(schedulingSummary({scheduling:save}),/P1 · 让位 save · 恢复 on-preempt/);
+  assert.match(schedulingSummary({scheduling:{...save,rank:'<script>'}}),/&lt;script&gt;/);
 });
 
 test('API persists independent policy, retains quota and deduplicates immutable retries',async t=>{

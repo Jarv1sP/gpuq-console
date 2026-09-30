@@ -38,7 +38,8 @@ class ExplicitPolicy(unittest.TestCase):
         mock=patch.object(self.node,'run',side_effect=run);mock.start();self.addCleanup(mock.stop)
 
     def test_node_forwards_exact_policy_without_enrolling_legacy_jobs(self):
-        self.node.process('sync',{'job':self.job})
+        with patch.object(self.node.SCHEDULING,'ready',return_value=True):
+            self.node.process('sync',{'job':self.job})
         submit=next(cmd for cmd in self.commands if cmd[0]=='submit')
         self.assertEqual(submit[3:12],['-p','P1','-m','queue','--yield','save','--restart-policy','on-preempt','--checkpointable'])
         self.assertNotIn('--preempt-idle-only',submit)
@@ -63,7 +64,7 @@ class ExplicitPolicy(unittest.TestCase):
                 if selected:self.assertEqual(preemption_mode('queue',victim),'preempt-save' if yielding=='save' else 'preempt-now')
 
     def test_finished_preemption_is_not_mislabeled_as_manual_cancel(self):
-        self.assertTrue(self.node.explicit_status(self.job,{'job':{'state':'CANCELED'},'attempts':[{'state':'PREEMPTED'}]})['preempted'])
-        self.assertFalse(self.node.explicit_status(self.job,{'job':{'state':'PENDING'},'attempts':[{'state':'PREEMPTED'}]})['preempted'])
+        self.assertTrue(self.node.scheduling_status(self.job,{'job':{'state':'CANCELED'},'attempts':[{'state':'PREEMPTED'}]})['preempted'])
+        self.assertFalse(self.node.scheduling_status(self.job,{'job':{'state':'PENDING'},'attempts':[{'state':'PREEMPTED'}]})['preempted'])
 
 if __name__=='__main__':unittest.main()
