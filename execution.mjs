@@ -1,5 +1,6 @@
 import net from 'node:net';
 import {MACHINES} from './dist/model.js';
+import {applyJobFeedback} from './dist/job-progress.js';
 import {maintainTaskNotes} from './community.mjs';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
 import {yieldCapable} from './dist/scheduling-policy.js';
@@ -15,7 +16,7 @@ export const priorityRankCapable=host=>priorityCapable(host)&&host.gpuq.capabili
 const RANKS={idle:0,normal:2,high:4,P0:0,P1:1,P2:2,P3:3,P4:4};
 function rankValue(value){if(typeof value!=='string'||!Object.hasOwn(RANKS,value))fail('排队优先级必须为 P0–P4（或 idle/normal/high）。');return value;}
 function priorityValue(value){if(!PRIORITIES.has(value))fail('优先级必须为 idle、normal 或 high。');return value;}
-function schedulerResult(job,result){
+export function schedulerResult(job,result){
   job.nodeJobId=result.nodeJobId||job.nodeJobId;
   job.state=['PENDING','STARTING','RUNNING','PREEMPTING',...TERMINAL].includes(result.state)?result.state:'UNKNOWN';
   job.assignedIndices=result.assignedIndices||[];job.error=result.error||null;job.checkedAt=new Date().toISOString();
@@ -28,7 +29,16 @@ function schedulerResult(job,result){
   job.schedulerPolicy=result.schedulerPolicy||null;
   job.priorityMutable=result.priorityMutable===true;
   job.preempted=result.preempted===true;
+  applyJobFeedback(job,result);
   if(TERMINAL.has(job.state))job.finishedAt||=job.checkedAt;
+}
+function persistSchedulerResult(service,job,result){
+  const before=structuredClone(job);
+  try{schedulerResult(job,result);service.save();}
+  catch(error){
+    for(const key of Object.keys(job))if(!Object.hasOwn(before,key))delete job[key];
+    Object.assign(job,before);throw error;
+  }
 }
 export function bridgeClient(socketPath){
   return (machine,operation,args)=>new Promise((resolve,reject)=>{
@@ -49,20 +59,18 @@ export function installExecution(service,bridge){
       const jobs=service.store.jobs.filter(j=>!TERMINAL.has(j.state));
       await Promise.all(MACHINES.map(async m=>{
         for(const job of jobs.filter(j=>j.machine===m.id)){
+          if(TERMINAL.has(job.state))continue;
           const policyRevision=job.policyRevision||0;
           try{
             const action=job.cancelRequested?'cancel':'sync';
             const result=await bridge(job.machine,action,{job:job.spec});
             await service.enqueue(()=>{
-              const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||(current.policyRevision||0)!==policyRevision)return;
+              const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||TERMINAL.has(current.state)||(current.policyRevision||0)!==policyRevision)return;
               // LOST/unknown remains nonterminal: retain quota until confirmed.
-              schedulerResult(current,result);
-              service.save();
-              // Bodies live outside portal_state/audit. Delete only after a
-              // confirmed terminal result has been persisted by reconciliation.
+              persistSchedulerResult(service,current,result);
               maintainTaskNotes(service);
             });
-          }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing&&(current.policyRevision||0)===policyRevision){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
+          }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing&&!TERMINAL.has(current.state)&&(current.policyRevision||0)===policyRevision){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
         }
       }));
     }finally{maintainTaskNotes(service);service.reconciling=false;}
@@ -288,6 +296,23 @@ export async function executionCall(service,principal,operation,args){
     return publicJob(job);
   }
   if(operation==='jobs.logs'){const job=jobById(args.jobId);return service.bridge(job.machine,'logs',{job:job.spec});}
+  if(operation==='jobs.watch'){
+    if(Object.keys(args).some(k=>k!=='jobId'))fail('进度查询参数无效。');
+    const job=jobById(args.jobId);
+    if(!job.machine||TERMINAL.has(job.state))return publicJob(job);
+    authorizedMachine(job.machine);
+    let result;
+    try{result=await service.bridge(job.machine,'watch',{job:job.spec});}
+    catch{return {...publicJob(job),state:'UNKNOWN',error:'节点进度查询失败，任务状态待核对。',checkedAt:new Date().toISOString()};}
+    if(!result?.nodeJobId)return publicJob(job);
+    try{persistSchedulerResult(service,job,result);return publicJob(job);}
+    catch{
+      // Keep advisory progress inspectable, but never treat an observation as
+      // a saved lifecycle result or release the restored reservation.
+      const observed={...job};applyJobFeedback(observed,result);
+      return {...publicJob(observed),state:'UNKNOWN',notSaved:true,error:'节点观察结果未保存，任务状态待核对。',checkedAt:new Date().toISOString()};
+    }
+  }
   if(operation==='jobs.diagnostics'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('诊断参数无效。');
     const job=jobById(args.jobId);authorizedMachine(job.machine);
