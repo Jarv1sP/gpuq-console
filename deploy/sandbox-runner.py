@@ -43,6 +43,13 @@ def open_dataset_mounts(spec):
     executor=importlib.util.module_from_spec(module);module.loader.exec_module(executor)
     return executor.dataset_open_mounts(spec)
 
+def open_data_workspace(spec,jid,terminal):
+    if not spec.get('dataWorkspace'):return None,None
+    if not terminal:raise ValueError('Mutable data workspace is only available to personal terminals')
+    module=importlib.util.spec_from_file_location('gpuq_node_data_workspace',HERE/'node-executor.py')
+    executor=importlib.util.module_from_spec(module);module.loader.exec_module(executor)
+    return executor.data_workspaces().terminal_mount(spec,jid)
+
 def project_runtime(spec,root,cfg,jid,terminal):
     """Old jobs never enter this branch or acquire new default spec fields."""
     if not spec.get('project'):return None
@@ -124,6 +131,7 @@ def main():
     workfd=os.open(workspace,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     project_fds={name:os.open(project[name],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW) for name in ('env','home','output')} if project else {}
     dataset_fds=[] if terminal else open_dataset_mounts(spec)
+    datafd,datalock=open_data_workspace(spec,jid,terminal)
     info_r,info_w=os.pipe();block_r,block_w=os.pipe()
     args=['/usr/bin/bwrap','--unshare-all',*([] if terminal else ['--new-session']),'--die-with-parent','--cap-drop','ALL','--hostname','gpuq-job',
           '--info-fd',str(info_w),'--block-fd',str(block_r),'--ro-bind','/usr','/usr','--symlink','usr/bin','/bin','--symlink','usr/sbin','/sbin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',
@@ -146,6 +154,8 @@ def main():
     if dataset_fds:
         args+=['--dir','/data2']
         for descriptor,target in dataset_fds:args+=['--ro-bind-fd',str(descriptor),target]
+    if datafd is not None:
+        args+=['--bind-fd',str(datafd),'/data2','--chdir','/data2','--setenv','GPUQ_DATA_WORKSPACE','/data2']
     for source in ([] if terminal else ['/dev/nvidiactl','/dev/nvidia-uvm','/dev/nvidia-uvm-tools']+[f'/dev/nvidia{i}' for i in indices]):
         if not Path(source).exists():raise ValueError('Allocated GPU device missing')
         args+=['--dev-bind',source,source]
@@ -199,10 +209,11 @@ def main():
         command=project_bootstrap(command,project['environmentMode'])
     control_args,control_fds=([],[]) if terminal or not cfg.get('controlRoot') else local_module('gpuq_training_control','training-control.py').prepare(cfg,spec,workspace,project,os.environ)
     args+=control_args+['--ro-bind',gatefile.name,'/run/.ready','--ro-bind-data',str(hosts),'/etc/hosts','--ro-bind-data',str(passwd),'/etc/passwd','--ro-bind-data',str(resolv),'/etc/resolv.conf','--','/usr/bin/python3','-c',gate,*command]
-    try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,cgroupfd,resourcefd,*control_fds,*(() if runtimefd is None else (runtimefd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds)))
+    try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,cgroupfd,resourcefd,*control_fds,*(() if runtimefd is None else (runtimefd,)),*(() if datafd is None else (datafd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds)))
     finally:
         for descriptor in control_fds:os.close(descriptor)
         for descriptor,_ in dataset_fds:os.close(descriptor)
+        if datafd is not None:os.close(datafd)
         for descriptor in project_fds.values():os.close(descriptor)
         os.close(cgroupfd);os.close(resourcefd)
         if runtimefd is not None:os.close(runtimefd)
@@ -223,6 +234,7 @@ def main():
         gatefile.close()
         if process.poll() is None:process.kill();process.wait()
         if network and network.poll() is None:network.terminate();network.wait(timeout=5)
+        if datalock is not None:os.close(datalock)
 
 if __name__=='__main__':
     try:sys.exit(main())
