@@ -73,6 +73,8 @@ def scheduling_status(job,data):
     return {'schedulerState':state.get('state'),'schedulerPriority':state.get('priority'),
             'priority':priority,'schedulerPolicy':policy,'priorityMutable':mutable,
             'queueReason':state.get('state_reason'),
+            'progress':data.get('progress'),
+            'latestAttempt':({k:attempts[0].get(k) for k in ('id','ordinal','state','exit_code','failure_reason','started_at','finished_at')} if attempts else None),
             'preempted':opted_in and state.get('state')=='CANCELED' and bool(attempts) and attempts[0].get('state')=='PREEMPTED'}
 
 def projects():
@@ -426,7 +428,7 @@ def file_op(operation,args,root=None):
 
 def validate_job(job,readonly=False):
     required={'id','userId','username','cards','argv','name','minVramGiB'}
-    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly','scheduling'}:raise ValueError('Invalid job specification')
+    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly','scheduling','elastic','placement'}:raise ValueError('Invalid job specification')
     if not UUID.fullmatch(job['id']):raise ValueError('Invalid job ID')
     if readonly:
         if not isinstance(job['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',job['userId']):raise ValueError('Invalid identity')
@@ -436,6 +438,8 @@ def validate_job(job,readonly=False):
     if not isinstance(job['argv'],list) or not 1<=len(job['argv'])<=128 or any(not isinstance(a,str) or '\0' in a for a in job['argv']) or len(json.dumps(job['argv']))>12000:raise ValueError('Invalid argv')
     dataset_refs(job)
     policy=SCHEDULING.normalize_job_policy(job)
+    SCHEDULING.elastic_allocation(job)
+    SCHEDULING.gpu_placement(job)
     if 'project' in job or 'release' in job:
         if not isinstance(job.get('project'),str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',job['project']) or not isinstance(job.get('release'),str) or not DATASET_VERSION.fullmatch(job['release']):raise ValueError('Invalid project release')
     return policy
@@ -602,7 +606,7 @@ def terminal_op(operation,args):
             return result
 
 def process(operation,args):
-    if operation=='diagnostics':
+    if operation in ('diagnostics','watch'):
         if not isinstance(args,dict) or set(args)!={'job'}:raise ValueError('Invalid diagnostic operation fields')
         job=args['job'];validate_job(job,readonly=True)
         spec=ROOT/'jobs'/(job['id']+'.json')
@@ -611,8 +615,24 @@ def process(operation,args):
             row=db.execute('SELECT id FROM jobs WHERE submit_key=?',(job['id'],)).fetchone()
         if row and not spec.exists():raise ValueError('Job identity is unavailable')
         data=gpu('show',row[0]) if row else {'job':{'state':'NOT_SUBMITTED'},'attempts':[]}
-        return job_diagnostics(job,data)
+        if operation=='diagnostics':return job_diagnostics(job,data)
+        state=data.get('job',data);attempts=data.get('attempts',[])
+        assigned=attempts[0].get('gpu_indices',[]) if attempts and state.get('state') not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
+        if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and not scheduler_terminal_confirmed(data):
+            return {'nodeJobId':row[0],'state':'UNKNOWN','assignedIndices':attempts[0].get('gpu_indices',[]) if attempts else [],
+                    **scheduling_status(job,data),'error':'Job termination is not fully confirmed; card reservation retained'}
+        if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and dataset_refs(job) and (ROOT/'jobs'/(job['id']+'.datasets.json')).exists():
+            # The periodic lifecycle reconciliation must confirm process
+            # cleanup and release leases. A viewer cannot release them.
+            return {'nodeJobId':row[0],'state':'UNKNOWN','assignedIndices':[],
+                    'error':'Dataset lease cleanup awaits scheduler reconciliation',**scheduling_status(job,data)}
+        return {'nodeJobId':row[0] if row else None,'state':state['state'] if row else 'PENDING',
+                'assignedIndices':assigned,**scheduling_status(job,data)}
     if operation in ('host.exec','host.status','host.cancel'):return host_command(operation,args)
+    if operation.startswith(('projects.snapshot.','projects.sync.','datasets.snapshot.')):
+        spec=importlib.util.spec_from_file_location('gpuq_snapshot_sync',HERE/'snapshot-sync.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        return module.SnapshotSync(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())).process(operation,args)
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)
@@ -656,7 +676,14 @@ def process(operation,args):
                 return {'state':'CANCELED'}
             if operation=='logs':return job_log_result(job,{'job':{'state':'NOT_SUBMITTED'},'attempts':[]},'任务尚未提交到 GPUQ。')
             if policy['kind']!='legacy':priority_capability()
+            if policy['preempt_opt_in_only'] and 'preempt-opt-in-only-v1' not in gpu('status').get('daemon',{}).get('capabilities',[]):raise ValueError('Requester opt-in scope capability unavailable')
             if policy['kind']=='explicit' and not SCHEDULING.ready(CONFIG,HERE):raise ValueError('Training control channel is not ready; no submission attempted')
+            if 'elastic' in job:
+                if not SCHEDULING.allocation_ready(CONFIG,HERE) or 'elastic-batch-v1' not in gpu('status').get('daemon',{}).get('capabilities',[]):raise ValueError('Elastic scheduler/control channel is not ready; no submission attempted')
+            if 'placement' in job:
+                placement=job['placement'];caps=gpu('status').get('daemon',{}).get('capabilities',[])
+                if not SCHEDULING.allocation_ready(CONFIG,HERE,2) or 'gpu-placement-v1' not in caps or placement['shared'] and 'gpu-sharing-v1' not in caps:raise ValueError('GPU placement/sharing channel is not ready; no submission attempted')
+                if placement.get('hami') and not SCHEDULING.hami_ready(CONFIG,HERE,placement['smPercent']):raise ValueError('HAMi runtime is not ready; no submission attempted')
             if job.get('project'):
                 projects().store.release(job['userId'],job['project'],job['release'])
                 projects().store.run_paths(job['userId'],job['project'],job['release'],jid)
@@ -666,7 +693,7 @@ def process(operation,args):
                 # lease while the scheduler may still accept the request.
                 atomic_json(attempted,{'jobId':jid})
             scheduling=SCHEDULING.submit_arguments(policy)
-            result=gpu('submit','-g',str(job['cards']),*scheduling,'-n','portal-'+jid[:8],'-u',gpuq_owner(job),'--cwd',str(workspace(job['userId'])),'--submit-key',jid,'--','/usr/bin/python3',str(HERE/'sandbox-runner.py'),jid)
+            result=gpu('submit',*SCHEDULING.allocation_arguments(job),*scheduling,'-n','portal-'+jid[:8],'-u',gpuq_owner(job),'--cwd',str(workspace(job['userId'])),'--submit-key',jid,'--','/usr/bin/python3',str(HERE/'sandbox-runner.py'),jid)
             node_id=result['job_id']
         else:node_id=row[0]
         data=gpu('show',node_id);state=data.get('job',data)

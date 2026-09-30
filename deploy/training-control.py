@@ -5,6 +5,8 @@ sandbox paths; the host coordinator does not need a global /outputs mount.
 """
 import os
 import ast
+import hashlib
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -20,6 +22,44 @@ COUNTERS = (
     'GPUQ_MIN_WORLD_SIZE', 'GPUQ_MAX_WORLD_SIZE', 'GPUQ_PREVIOUS_WORLD_SIZE',
     'GPUQ_TARGET_GLOBAL_BATCH_SIZE', 'GPUQ_PER_DEVICE_MICRO_BATCH_SIZE',
 )
+
+
+def hami_library(config,sm_percent):
+    """The release-pinned native runtime, checked again before a sandbox bind."""
+    directory=Path(config['gpuqArchive']).resolve(strict=True).parent/'hami'
+    manifest=json.loads((directory/'manifest.json').read_text())
+    sha=manifest.get('sha256')
+    if not isinstance(sha,str) or not re.fullmatch('[a-f0-9]{64}',sha) or type(sm_percent) is not int or not 1<=sm_percent<=100 or sm_percent<100 and manifest.get('sm_supported') is not True:
+        raise ValueError('HAMi runtime/SM validation unavailable')
+    descriptor=os.open(directory/'libvgpu.so',os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or not 4<=info.st_size<=64*1024**2:raise ValueError('Invalid HAMi library')
+        first=os.read(descriptor,4);digest=hashlib.sha256(first)
+        while chunk:=os.read(descriptor,1024**2):digest.update(chunk)
+        if first!=b'\x7fELF' or digest.hexdigest()!=sha:raise ValueError('HAMi library checksum/format mismatch')
+        os.lseek(descriptor,0,os.SEEK_SET);return descriptor,sha
+    except BaseException:
+        os.close(descriptor);raise
+
+
+def hami_environment(config,spec,environment):
+    placement=spec.get('placement',{})
+    if not placement.get('hami'):return {},None
+    fd,sha=hami_library(config,placement['smPercent'])
+    try:
+        expected=str(Path(config['gpuqArchive']).resolve(strict=True).parent/'hami/libvgpu.so')
+        cache=str(Path(environment['GPUQ_CONTROL_DIR'])/'hami/usage.cache')
+        if environment.get('LD_PRELOAD')!=expected or environment.get('GPUQ_HAMI_LIBRARY_SHA256')!=sha or environment.get('CUDA_DEVICE_MEMORY_SHARED_CACHE')!=cache or environment.get('ACTIVE_OOM_KILLER')!='false':raise ValueError('HAMi environment does not belong to scheduler attempt')
+        budget=f"{placement['vramMiB']}m";sm=str(placement['smPercent'])
+        return {'LD_PRELOAD':'/opt/gpuq/libvgpu.so','GPUQ_HAMI_LIBRARY_SHA256':sha,
+                'CUDA_DEVICE_MEMORY_LIMIT':budget,'CUDA_DEVICE_MEMORY_LIMIT_0':budget,
+                'CUDA_DEVICE_SM_LIMIT':sm,'CUDA_DEVICE_SM_LIMIT_0':sm,
+                'CUDA_DEVICE_MEMORY_SHARED_CACHE':CONTROL+'/hami/usage.cache',
+                'GPU_CORE_UTILIZATION_POLICY':'force' if placement['smPercent']<100 else 'disable',
+                'HAMI_HOST_PID_MODE':'self','ACTIVE_OOM_KILLER':'false','LIBCUDA_LOG_LEVEL':'0'},fd
+    except BaseException:
+        os.close(fd);raise
 
 
 def ready(config, here):
@@ -86,7 +126,7 @@ def prepare(config, spec, workspace, project, environment):
     for key in COUNTERS:
         if key in environment:
             value = environment[key]
-            if not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,12}', value):
+            if not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,19}', value) or int(value)>2**63-1:
                 raise ValueError('Invalid scheduler counter: ' + key)
             env[key] = value
     if 'GPUQ_ALLOWED_GPU_COUNTS' in environment:
@@ -109,6 +149,9 @@ def prepare(config, spec, workspace, project, environment):
             raise ValueError('Scheduler SDK is not a regular archive')
         args = ['--dir', '/run/gpuq', '--bind-fd', str(descriptors[0]), CONTROL,
                 '--ro-bind-data', str(archive), SDK]
+        runtime_env,library=hami_environment(config,spec,environment)
+        if library is not None:
+            descriptors.append(library);args+=['--ro-bind-data',str(library),'/opt/gpuq/libvgpu.so'];env.update(runtime_env)
         for key, value in env.items():
             args += ['--setenv', key, value]
         return args, descriptors

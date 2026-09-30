@@ -23,6 +23,7 @@ jobs:
       - run: node tests/projects-ui-smoke.mjs
       - run: node tests/priority-ui-smoke.mjs
       - run: node tests/scheduling-ui-smoke.mjs
+      - run: node tests/allocation-ui-smoke.mjs
       - run: node tests/community-ui-smoke.mjs
       - run: node tests/maintenance-ui-smoke.mjs
       - run: node tests/task-notes-legacy-ui-smoke.mjs
@@ -30,6 +31,9 @@ jobs:
       - run: node tests/guide-ui-smoke.mjs
       - run: node tests/ui-polish-smoke.mjs
       - run: node tests/job-diagnostics-ui-smoke.mjs
+      - run: node tests/job-notifications-ui-smoke.mjs
+      - run: node tests/job-progress-ui-smoke.mjs
+      - run: node tests/placement-ui-smoke.mjs
       - run: node tests/client-auth-smoke.mjs
       - run: python3 scripts/build-gpuq.py
       - run: python3 build/gpuq.pyz --help
@@ -44,4 +48,6 @@ jobs:
         with: {persist-credentials: false}
       - uses: actions/setup-node@v4
         with: {node-version: '24'}
-      - run: node --test tests/install-client-windows.test.js tests/cli-native-platform.test.js tests/dataset-file-identity.test.js tests/dataset-upload-cli.test.js tests/data-workspace-cli.test.js
+      - run: npm ci --ignore-scripts
+      - run: npm run build:client
+      - run: node --test tests/install-client-windows.test.js tests/cli-native-platform.test.js tests/dataset-file-identity.test.js tests/dataset-upload-cli.test.js tests/data-workspace-cli.test.js tests/snapshot-sync-cli.test.js

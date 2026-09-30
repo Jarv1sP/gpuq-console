@@ -4,6 +4,7 @@ import hashlib,importlib.util,json,os,re,select,subprocess,sys,time,tempfile
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
 TRAINING_CONTROL_PROTOCOL=1
+GPU_ALLOCATION_PROTOCOL=2
 
 def local_module(name,filename):
     module=importlib.util.spec_from_file_location(name,HERE/filename)
@@ -104,7 +105,7 @@ def main():
     indices=os.environ.get('GPUQ_ASSIGNED_GPU_INDICES','').split(',')
     uuids=os.environ.get('GPUQ_ASSIGNED_GPU_UUIDS','').split(',')
     if terminal:indices=[];uuids=[]
-    elif len(indices)!=spec['cards'] or len(uuids)!=len(indices) or any(not re.fullmatch('[0-9]+',i) for i in indices) or any(not u.startswith('GPU-') for u in uuids):raise ValueError('Missing GPUQ allocation')
+    else:runtime_spec=local_module('gpuq_allocation','scheduling-policy.py').allocated_spec(spec,indices,uuids,cfg,os.environ)
     if not terminal:
         memory=subprocess.check_output(['/usr/bin/nvidia-smi','--id',','.join(indices),'--query-gpu=memory.total','--format=csv,noheader,nounits'],text=True)
         sizes=[int(line.strip()) for line in memory.splitlines()]
@@ -114,7 +115,7 @@ def main():
     unit=group.rsplit('/',1)[-1]
     if not unit.startswith('amax-term-' if terminal else 'gpuq-') or not unit.endswith('.service'):raise ValueError('Not running inside an authorized job unit')
     env={'PATH':'/usr/bin:/bin','HOME':str(Path.home()),'XDG_RUNTIME_DIR':f'/run/user/{os.getuid()}','DBUS_SESSION_BUS_ADDRESS':f'unix:path=/run/user/{os.getuid()}/bus'}
-    subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={8 if terminal else spec["cards"]*32}G',f'CPUQuota={200 if terminal else spec["cards"]*400}%','TasksMax=2048'],env=env,check=True)
+    subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={8 if terminal else runtime_spec["cards"]*32}G',f'CPUQuota={200 if terminal else runtime_spec["cards"]*400}%','TasksMax=2048'],env=env,check=True)
     capture_module,capture_id,runtimefd=(None,None,None) if terminal else start_job_capture(root,spec,unit,group,env,indices,uuids)
     workspace=root/'users'/hashlib.sha256(spec['userId'].encode()).hexdigest()[:32]
     workspace.mkdir(parents=True,exist_ok=True,mode=0o700)

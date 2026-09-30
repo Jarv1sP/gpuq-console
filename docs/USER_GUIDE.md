@@ -142,6 +142,15 @@ gpuctl jobs
 
 日常修改的顺序是：保存代码 → `gpuctl push .` → 必要时安装依赖 → 结束开发终端 → 发布到 `READY` → 提交训练。新加的数据集还需[在训练机器上准备就绪](/guide/data)。
 
+### 手动同步代码到另一台服务器
+
+```sh
+gpuctl sync git ./my-repo --ref HEAD --to gpu-2 --project new-project --dry-run
+gpuctl sync code --from gpu-1 --to gpu-2 --project my-project --release FULL_HASH --target-project new-project --dry-run
+```
+
+主动选择来源、目标和固定版本，先预览，再去掉 `--dry-run` 执行；目标必须是新项目，重复原命令可续传。Git 仓库先提交干净，导出固定 commit，不复制 `.git`、环境或未提交内容。完成 `CODE_READY` 仅代表代码已校验；在目标 `project use`、`ssh` 准备环境、退出后 `project publish`，等 `READY` 再训练。私人数据终端、手动解压与原上传流程保持可用。
+
 ### 多卡训练
 
 ```sh
@@ -149,6 +158,43 @@ gpuctl run -g 4 --min-vram 24 -- python -m torch.distributed.run --standalone --
 ```
 
 这会在**同一台服务器**申请 4 张卡，每张至少约 24 GiB 物理显存。程序本身必须支持多卡；平台不会自动改写单卡代码，也不会将几张卡的显存合成一张大卡，或自动启动跨服务器训练。
+
+### 弹性卡数与保存扩卡
+
+`-g` 表示最大卡数，`--min-cards` 表示最少启动卡数；声明 global/micro batch 后，只选能整除的卡数，并按当前最多可用合法卡数启动：
+
+```sh
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
+```
+
+此例合法卡数为 1、2、4、8；空闲 3 张时启动 2 张。个人额度始终预留最大值，任务列表另显示实际分配。
+
+```sh
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
+```
+
+自动扩卡会先保存当前轮次、结束旧 attempt，再从 checkpoint 启动更大的合法卡数；不是给原进程热挂显卡。训练需按实际卡数启动 DDP，用 `gpuq.elastic.plan_elastic_batch()` 计算梯度累积，并接入 checkpoint/完整恢复适配器。global batch 固定时 LR 不变，平台不会自动改训练代码。排队任务先调度，扩卡可能延迟；保存失败不会强制杀训练。
+
+网页“弹性卡数”提供相同选项。节点未确认弹性/控制通道时拒绝提交，不静默退回固定卡数。
+
+### 固定显卡与主动挤挤
+
+先到“算力总览”观察逐卡显存/进程，再选服务器上的物理卡号：
+
+```sh
+gpuctl run --gpu 0,2 -- python train.py
+gpuctl run --gpu 3 --share --vram-mib 4096 -- python small.py
+```
+
+固定卡号登记时绑定物理 UUID；编号重排仍用同一物理设备。共享只需新任务提交者同意，可与外部任务或已运行的普通 GPUQ 任务共存；预算不足会排队。共享仍占1张个人额度，不支持弹性/自动让位/自动恢复。
+
+普通共享的 MiB 预算只是准入估计，没有硬显存限制。节点已安装并验证 HAMi 时可追加 `--hami`；SM百分比还需该节点验证过SM功能：
+
+```sh
+gpuctl run --gpu 3 --share --vram-mib 4096 --hami --sm-percent 50 -- python small.py
+```
+
+HAMi 只约束这项任务，不约束同卡外部任务，也不保证性能比例；库/能力缺失拒绝提交，不会降级为普通共享。网页“固定/共享选卡”提供同样入口。
 
 ### 停止任务
 
@@ -215,6 +261,8 @@ gpuctl data workspace-status OPERATION_ID
 `gpuctl data files` 查看目录；`gpuctl data shell --reconnect SESSION_ID` 重连。单文件上传上限 100 GiB，压缩包不会自动解压；中断后检查远端文件，用 `gpuctl data put samples.zip --overwrite` 明确覆盖重传，此入口暂不自动续传。原来的 `data upload` 目录上传仍支持续传。
 
 ### 大数据如何传
+
+已在一台节点 `READY` 的普通数据，也可 `gpuctl sync data SOURCE_ID@FULL_VERSION --from gpu-1 --to gpu-2 --name my-data --dry-run` 预览，去掉 `--dry-run` 后复用校验与断点续传上传。使用输出的目标完整 `名称@版本` 训练；共享来源转个人副本时名称可能改变，内容版本必须相同。不会自动选择节点、解包、删除目标其他内容或申请 GPU。
 
 网页和 CLI 上传都会经过平台服务器中转，**不是你到 GPU 服务器的高速直连**。数百 GB、TB 级或大量小文件，先与管理员约定通过实验室内网或外接硬盘导入，再由管理员登记、校验并授予使用权限。不要把大数据集当项目代码上传。
 
@@ -296,6 +344,14 @@ gpuctl maintenance withdraw REQUEST_ID --revision N
 
 批准后即使关闭网页，操作也会继续核对；刷新申请查看结果或退回理由。`UNKNOWN` 不代表没有执行，不要另建申请盲目重跑。上次节点回执不是当前状态保证；CLI 查询／审批接口成功也不等于操作成功，要看申请状态和退出码。脚本和输出仅申请者与管理员可见；不要填写密码或令牌。
 
+### 任务进度与通知
+
+持续查看任务进度用 `gpuctl watch 任务ID`，默认每 5 秒核对，Ctrl+C 只停止查看。
+完成、失败、取消或状态未知时会反馈并退出；不因查看而重试或取消训练。网页任务表显示相同轮次、步数和训练自报 ETA。未接入进度 SDK 的训练显示“进度未上报”，仍可看调度状态和日志；训练自报 100% 或异常不等于调度器确认终态。
+取消回执不代表进程已退出：训练尝试、显卡租约或扩卡预留尚未清理，或节点查询失败时，仍显示 `UNKNOWN` 并保留用卡额度；确认清理后才显示终态。
+
+管理员配置自己的 Telegram 收件人后，可用 `gpuctl notify 任务ID on` 或任务表开关订阅完成、失败、训练自报警告/异常及停滞通知；默认关闭。`status` 看待发/失败数量，`off` 关闭。消息状态不改变训练状态，不会取消或重启任务。
+
 ### 授权不等于占住显卡
 
 每台机器的卡数上限限制你在该机同时申请多少张卡；所有机器合计上限限制你跨机器同时申请的总卡数。例如每台最多 4 张、总共最多 6 张，可以一台申请 4 张，另一台申请 2 张。
@@ -329,6 +385,17 @@ gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -
 ```
 
 `save`须训练适配checkpoint并恢复完整状态，DDP所有rank协同。低等级save任务整体保存后让位，on-preempt随后排队恢复；保存失败不强杀，手动取消或失败不自动重跑。`--checkpointable`不是自动改写代码。
+
+请求方可主动选抢占1/2；自己的rank、是否愿意被中断、之后是否恢复仍是独立选择。
+
+```sh
+gpuctl run --rank P2 --mode preempt1 -g 1 -- python urgent.py
+gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
+```
+
+模式1只选愿意让位且能保存的低等级任务；模式2对now任务立即让位，但save任务仍先保存。
+旧任务、never、共享或外部进程不会被新模式强杀；同等级不互抢。节点缺新能力时明确拒绝，
+`queue`或省略mode保留旧默认格式，同key重试不能换成不同抢占模式。
 
 ### 协调使用安排
 

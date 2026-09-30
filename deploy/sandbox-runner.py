@@ -4,6 +4,7 @@ import hashlib,importlib.util,json,os,re,select,subprocess,sys,time,tempfile
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
 TRAINING_CONTROL_PROTOCOL=1
+GPU_ALLOCATION_PROTOCOL=2
 
 def local_module(name,filename):
     module=importlib.util.spec_from_file_location(name,HERE/filename)
@@ -104,7 +105,7 @@ def main():
     indices=os.environ.get('GPUQ_ASSIGNED_GPU_INDICES','').split(',')
     uuids=os.environ.get('GPUQ_ASSIGNED_GPU_UUIDS','').split(',')
     if terminal:indices=[];uuids=[]
-    elif len(indices)!=spec['cards'] or len(uuids)!=len(indices) or any(not re.fullmatch('[0-9]+',i) for i in indices) or any(not u.startswith('GPU-') for u in uuids):raise ValueError('Missing GPUQ allocation')
+    else:runtime_spec=local_module('gpuq_allocation','scheduling-policy.py').allocated_spec(spec,indices,uuids,cfg,os.environ)
     if not terminal:
         memory=subprocess.check_output(['/usr/bin/nvidia-smi','--id',','.join(indices),'--query-gpu=memory.total','--format=csv,noheader,nounits'],text=True)
         sizes=[int(line.strip()) for line in memory.splitlines()]
@@ -115,11 +116,11 @@ def main():
     if not unit.startswith('amax-term-' if terminal else 'gpuq-') or not unit.endswith('.service'):raise ValueError('Not running inside an authorized job unit')
     env={'PATH':'/usr/bin:/bin','HOME':str(Path.home()),'XDG_RUNTIME_DIR':f'/run/user/{os.getuid()}','DBUS_SESSION_BUS_ADDRESS':f'unix:path=/run/user/{os.getuid()}/bus'}
     resources=local_module('gpuq_job_resources','job-resources.py')
-    requested=resources.requested_limits(spec,terminal)
+    requested=resources.requested_limits(spec if terminal else runtime_spec,terminal)
     subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={requested["memory"]}',f'CPUQuota={requested["cpu"]*100}%','TasksMax=2048'],env=env,check=True)
     # Legacy terminal specs intentionally have no id; use the trusted filename
     # identity for metadata without mutating their immutable on-disk spec.
-    budget=resources.read_budget({**spec,'id':jid},group,uuids,terminal)
+    budget=resources.read_budget({**(spec if terminal else runtime_spec),'id':jid},group,uuids,terminal)
     cgroupfd=os.open(resources.cgroup_path(group),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     resourcefd=os.memfd_create('gpuq-resources');os.write(resourcefd,json.dumps(budget,sort_keys=True).encode());os.lseek(resourcefd,0,0)
     capture_module,capture_id,runtimefd=(None,None,None) if terminal else start_job_capture(root,spec,unit,group,env,indices,uuids)

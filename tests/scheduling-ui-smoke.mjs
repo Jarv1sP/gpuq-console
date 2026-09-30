@@ -5,8 +5,8 @@ import {readFile} from 'node:fs/promises';
 import {chromium} from 'playwright';
 import {MACHINES} from '../dist/machines.js';
 const machine=MACHINES[0].id,calls=[],errors=[],principal={userId:'alice',username:'alice',role:'member'};
-let capable=true,browser,server;
-const state=()=>({machines:MACHINES,users:[{id:'alice',username:'alice',role:'member',enabled:true,total:4,limits:{[machine]:4}}],jobs:[],executionEnabled:true,execution:{priorityCapabilities:{[machine]:true}},gpuq:{stale:false,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:[],gpuq:{connected:true,jobs:[],capabilities:capable?['console-yield-v1']:[]}}))}});
+let capable=true,requestModes=true,browser,server;
+const state=()=>({machines:MACHINES,users:[{id:'alice',username:'alice',role:'member',enabled:true,total:4,limits:{[machine]:4}}],jobs:[],executionEnabled:true,execution:{priorityCapabilities:{[machine]:true}},gpuq:{stale:false,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:[],gpuq:{connected:true,jobs:[],capabilities:capable?['console-yield-v1',...(requestModes?['preempt-opt-in-only-v1']:[])]:[]}}))}});
 try{
   server=createServer(async(req,res)=>{const name=new URL(req.url,'http://localhost').pathname.slice(1)||'index.html';if(!/^(index\.html|[a-z-]+\.(js|css))$/.test(name)){res.writeHead(404);res.end();return;}try{let content=await readFile(new URL('../dist/'+name,import.meta.url));if(name==='index.html')content=content.toString().replace('globalThis.GPUQ_LOCAL_API=false;','globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;');res.writeHead(200,{'Content-Type':name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});res.end(content);}catch{res.writeHead(404);res.end();}});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin=`http://127.0.0.1:${server.address().port}`;
@@ -23,6 +23,17 @@ try{
   const submitted=page.waitForResponse(r=>r.url()===origin+'/api/call'&&r.request().postDataJSON()?.operation==='jobs.submit');await page.locator('#train-form [type=submit]').click();await submitted;
   assert.deepEqual(calls.find(x=>x.operation==='jobs.submit').args.scheduling,{rank:'P1',yieldPolicy:'save',restartPolicy:'on-preempt',checkpointable:true});
   assert.equal(Object.hasOwn(calls.find(x=>x.operation==='jobs.submit').args,'priority'),false);
+  for(const [mode,canonical] of [['preempt1','preempt-save'],['preempt2','preempt-now']]){
+    await page.locator('[name=request-mode]').selectOption(mode);
+    const sent=page.waitForResponse(r=>r.url()===origin+'/api/call'&&r.request().postDataJSON()?.operation==='jobs.submit');
+    await page.locator('#train-form [type=submit]').click();await sent;
+    assert.equal(calls.filter(x=>x.operation==='jobs.submit').at(-1).args.scheduling.mode,canonical);
+  }
+  requestModes=false;await page.locator('#refresh-state').click();
+  const before=calls.filter(x=>x.operation==='jobs.submit').length;
+  await page.locator('#train-form [type=submit]').click();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('抢占模式'));
+  assert.equal(calls.filter(x=>x.operation==='jobs.submit').length,before);
+  assert.equal(await page.locator('[name=request-mode]').inputValue(),'preempt2');
   capable=false;await page.locator('#refresh-state').click();await page.waitForFunction(()=>document.querySelector('#custom-policy-note').textContent.includes('尚未确认'));
   assert.equal(await page.locator('[name=custom-policy]').isChecked(),true);assert.equal(await page.locator('[name=queue-rank]').inputValue(),'P1');assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));

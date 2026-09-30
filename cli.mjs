@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 import {readFile,mkdir,writeFile,chmod,unlink,open,lstat,readdir} from 'node:fs/promises';
-import {dirname,join,basename,resolve} from 'node:path';
+import {dirname,join,basename} from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {createInterface} from 'node:readline/promises';
-import {constants as fsConstants} from 'node:fs';
 import {realpathSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
+import {uploadLocalDataset,workspaceDataPath,putWorkspaceData} from './client-data-upload.mjs';
+import {runManualSync} from './client-snapshot-sync.mjs';
+import {watchJob} from './job-watch.mjs';
+import {progressText} from './dist/job-progress.js';
+import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
 
 // Approval text is member-controlled. Never let terminal controls or bidi
 // formatting hide/reorder the frozen script (including older stored requests).
@@ -40,11 +44,21 @@ gpuctl maintenance return ID --revision N --reason REASON
 gpuctl maintenance cancel ID --revision N  Administrator: stop the original operation
 gpuctl push .                    Upload code to the selected project's draft
 gpuctl project publish           Freeze code + private environment; wait for READY
+gpuctl sync git LOCAL_REPO --to SERVER --project NEW --ref HEAD --dry-run
+gpuctl sync code --from SOURCE --to TARGET --project SOURCE --target-project NEW --release HASH
+gpuctl sync data NAME@VERSION --from SOURCE --to TARGET --name NAME --dry-run
 gpuctl run -g 2 -- python train.py
 gpuctl jobs / logs JOB / cancel JOB
+gpuctl watch JOB                 Watch progress / completion / failure over SSH
+gpuctl notify JOB on|off|status  Opt into your configured Telegram destination
 gpuctl diagnostics JOB --json    Persistent bounded worker logs, exits and resource counters
 gpuctl run --priority idle -g 1 -- python train.py
 gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
+gpuctl run --gpu 0,2 -- python train.py
+gpuctl run --gpu 3 --share --vram-mib 4096 -- python small.py
+gpuctl run --gpu 3 --share --vram-mib 4096 --hami --sm-percent 50 -- python small.py
 gpuctl priority JOB high         Administrator: change queued job priority
 gpuctl notes                     Shared task / persistent general notes
 gpuctl note --job JOB "message"  Deleted when the task is confirmed finished
@@ -123,8 +137,8 @@ const args=process.argv.slice(2);let options,positionals,training;
 let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).includes('--json');
 function fail(message){throw Error(message);}
 const CLI_OPTIONS=new Map([
-  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','ack-unknown'].map(key=>[key,'flag']),
-  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
+  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown'].map(key=>[key,'flag']),
+  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
 
@@ -145,104 +159,6 @@ export function parseCLIOptions(argv){
   }
   return {options,positionals,training:[]};
 }
-const DATA_CHUNK=1024*1024,DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
-function sameDatasetFile(a,b,{pathToHandle=false}={}){
-  // Older Windows libuv lstat can return dev=0 or a 64-bit serial while fstat
-  // returns the low 32 bits. Allow that only when pairing a path with a handle;
-  // later path/path and handle/handle checks keep the complete device value.
-  // BigInt stats preserve NTFS file IDs and sub-millisecond timestamps.
-  const sameDevice=a.dev===b.dev||(pathToHandle&&process.platform==='win32'&&(a.dev===0n||BigInt.asUintN(32,a.dev)===BigInt.asUintN(32,b.dev)));
-  return sameDevice&&a.ino===b.ino&&a.mode===b.mode&&a.size===b.size&&a.mtimeNs===b.mtimeNs&&a.ctimeNs===b.ctimeNs&&a.nlink===b.nlink;
-}
-function dataPath(path){if(!path||Buffer.byteLength(path)>4096||path.startsWith('/')||/[\\\x00-\x1f\x7f]/.test(path)||path.split('/').some(p=>['','.','..','.ssh','.env','.git','.venv','anaconda3','miniconda3','.conda'].includes(p)))fail('Unsafe, credential or environment dataset path: '+path);return path;}
-function workspaceDataPath(path,{directory=false}={}){
-  if(directory&&path==='.')return path;
-  if(typeof path!=='string'||!path||Buffer.byteLength(path)>1024||/[\\\x00-\x1f\x7f]/.test(path)||path.split('/').some(p=>!p||p==='.'||p==='..'||Buffer.byteLength(p)>255))fail('Use a relative path inside your private /data2');
-  return path;
-}
-async function putWorkspaceData(call,machine,local,path,overwrite){
-  workspaceDataPath(path);
-  const before=await lstat(local,{bigint:true});
-  if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n||before.size>100n*1024n**3n)fail('data put requires one regular unlinked file, at most 100 GiB');
-  const file=await open(local,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW||0));let offset=0,last=0;
-  try{
-    const initial=await file.stat({bigint:true});
-    if(!sameDatasetFile(before,initial,{pathToHandle:true}))fail('Local file changed before upload');
-    const size=Number(initial.size),buffer=Buffer.alloc(DATA_CHUNK);
-    do{
-      const {bytesRead}=await file.read(buffer,0,Math.min(DATA_CHUNK,size-offset),offset);
-      if(!bytesRead&&offset<size)fail('Local file changed during upload');
-      if(!sameDatasetFile(initial,await file.stat({bigint:true}))||!sameDatasetFile(before,await lstat(local,{bigint:true})))fail('Local file changed during upload; partial remote file remains, not published');
-      const result=(await call('datasets.workspace.put',{machine,path,offset,data:buffer.subarray(0,bytesRead).toString('base64'),...(offset===0?{truncate:overwrite===true}:{})})).result;
-      if(result?.size!==offset+bytesRead)fail('Upload result is unconfirmed; inspect the remote file before using --overwrite to restart');
-      offset+=bytesRead;
-      if(Date.now()-last>1000||offset===size){last=Date.now();process.stderr.write(`${path} · ${offset} / ${size} bytes\n`);}
-    }while(offset<size);
-    if(!sameDatasetFile(initial,await file.stat({bigint:true}))||!sameDatasetFile(before,await lstat(local,{bigint:true})))fail('Local file changed during upload; remote file was not published');
-    return {machine,path:'/data2/'+path,bytes:offset,extracted:false,published:false};
-  }finally{await file.close();}
-}
-async function scanLocalDataset(root,progress){
-  dataPath(basename(resolve(root)));
-  const directories=[],files=[],local=new Map(),directoryStamps=new Map();let totalBytes=0,manifestEstimate=42,hashed=0;
-  const account=entry=>{manifestEstimate+=Buffer.byteLength(JSON.stringify(entry))+1;if(manifestEstimate>DATA_MANIFEST_LIMIT)fail('Dataset manifest exceeds 64 MiB; split it by data scope');if(directories.length+files.length>DATA_ENTRY_LIMIT)fail('Dataset manifest exceeds 500,000 entries');};
-  const top=await lstat(root,{bigint:true});if(!top.isDirectory()||top.isSymbolicLink())fail('data upload requires a real local directory, not a file or symlink');
-  async function visit(folder,prefix=''){
-    const before=await lstat(folder,{bigint:true});if(!before.isDirectory()||before.isSymbolicLink())fail('Local directory changed or is a symlink');directoryStamps.set(folder,before);
-    for(const name of (await readdir(folder)).sort()){
-      const path=dataPath(prefix?prefix+'/'+name:name),filename=join(folder,name),info=await lstat(filename,{bigint:true});
-      if(info.isSymbolicLink())fail('Symlink dataset upload is not supported: '+path);
-      if(info.isDirectory()){directories.push(path);account(path);await visit(filename,path);continue;}
-      if(!info.isFile()||info.nlink!==1n)fail('Only regular, single-link dataset files are supported: '+path);
-      const size=Number(info.size);if(!Number.isSafeInteger(size)||!Number.isSafeInteger(totalBytes+size))fail('Dataset size exceeds safe integer range');totalBytes+=size;
-      const file=await open(filename,fsConstants.O_RDONLY|fsConstants.O_NOFOLLOW|fsConstants.O_NONBLOCK);let sha256,handleInfo;
-      try{handleInfo=await file.stat({bigint:true});if(!handleInfo.isFile()||!sameDatasetFile(info,handleInfo,{pathToHandle:true}))fail('Local file changed before hashing: '+path);const hash=createHash('sha256'),buffer=Buffer.alloc(DATA_CHUNK);let offset=0;while(offset<size){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,size-offset),offset);if(!bytesRead)fail('Local file changed during hashing: '+path);hash.update(buffer.subarray(0,bytesRead));offset+=bytesRead;progress('HASHING',{path,bytes:hashed+offset});}if(!sameDatasetFile(handleInfo,await file.stat({bigint:true})))fail('Local file changed during hashing: '+path);sha256=hash.digest('hex');}finally{await file.close();}
-      const entry={path,size,sha256};files.push(entry);account(entry);local.set(path,{filename,info,handleDev:handleInfo.dev});hashed+=size;
-    }
-    if(!sameDatasetFile(before,await lstat(folder,{bigint:true})))fail('Local directory changed during scan: '+folder);
-  }
-  await visit(root);directories.sort();files.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
-  const manifest=Buffer.from(JSON.stringify({schema:1,directories,files}));if(manifest.length>DATA_MANIFEST_LIMIT)fail('Dataset manifest exceeds 64 MiB');
-  return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files,local,directoryStamps,totalBytes,entries:files.length+directories.length};
-}
-async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore}){
-  const scan=await scanLocalDataset(directory,progress),h=createHash('sha256').update(JSON.stringify([userId,machine,name,scan.manifestSha256])).digest('hex'),key=`${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;
-  let uploadId,state;
-  const request=async(action,args={})=>(await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'?{uploadId}:{}),...args})).result;
-  const report=value=>{state=value;progress(value.state,value);};
-  const ready=()=>{if(state.state!=='READY'||!state.dataset||!/^[a-f0-9]{64}$/.test(state.version||''))fail('Server did not confirm a complete verified dataset');return {...state,machine};};
-  const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){await new Promise(resolve=>setTimeout(resolve,1500));report(await request('status'));}if(state.state==='FAILED')fail(state.error||'Dataset verification failed; repeat the same upload after fixing the cause');if(state.state==='DISCARDED')fail('Upload was discarded');};
-  const begin={name,key:keyStore.get(key)||key,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries};
-  report(await request('begin',begin));if(state.state==='DISCARDED'){begin.key=randomUUID();await keyStore.set(key,begin.key);report(await request('begin',begin));}
-  uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)fail('Server did not return an upload identifier');progress('HANDLE',{uploadId,machine});
-  try{
-    if(state.state==='FAILED'&&state.resumeState==='SEALING')report(await request('seal'));
-    if(state.state==='FAILED'&&state.resumeState==='PUBLISHING')report(await request('commit'));
-    if(state.state==='FAILED'&&['RECEIVING_MANIFEST','UPLOADING'].includes(state.resumeState))state={...state,state:state.resumeState};
-    if(state.state==='RECEIVING_MANIFEST'){
-      let offset=state.manifestOffset;if(!Number.isSafeInteger(offset)||offset<0||offset>scan.manifest.length)fail('Invalid manifest resume offset');
-      while(offset<scan.manifest.length){const bytes=scan.manifest.subarray(offset,offset+DATA_CHUNK),result=await request('manifest',{offset,data:bytes.toString('base64')});if(result.offset!==offset+bytes.length)fail('Server did not confirm the manifest chunk');offset=result.offset;progress('RECEIVING_MANIFEST',{bytes:offset,totalBytes:scan.manifest.length});}
-      report(await request('seal'));
-    }
-    await waitFor();if(state.state==='READY')return ready();if(state.state!=='UPLOADING')fail('Upload state is unconfirmed; repeat the same command to inspect and resume');
-    let transferred=0;
-    for(const entry of scan.files){
-      const response=await request('status',{path:entry.path}),remote=response.file;
-      if(!remote||remote.path!==entry.path||remote.size!==entry.size||remote.sha256!==entry.sha256||!Number.isSafeInteger(remote.offset)||remote.offset<0||remote.offset>entry.size)fail('Server file resume metadata does not match the manifest');
-      const {filename,info,handleDev}=scan.local.get(entry.path),handleInfo={...info,dev:handleDev},file=await open(filename,fsConstants.O_RDONLY|fsConstants.O_NOFOLLOW|fsConstants.O_NONBLOCK);
-      try{
-        if(!sameDatasetFile(handleInfo,await file.stat({bigint:true})))fail('Local file changed after hashing: '+entry.path);let offset=remote.offset;
-        if(!entry.size&&!remote.complete){const result=await request('chunk',{path:entry.path,offset:0,data:''});if(result.offset!==0||result.complete!==true)fail('Server did not confirm the empty file');}
-        while(offset<entry.size){const buffer=Buffer.alloc(DATA_CHUNK),{bytesRead}=await file.read(buffer,0,Math.min(buffer.length,entry.size-offset),offset);if(!bytesRead)fail('Local file changed during upload: '+entry.path);const result=await request('chunk',{path:entry.path,offset,data:buffer.subarray(0,bytesRead).toString('base64')});if(result.offset!==offset+bytesRead)fail('Server did not confirm the file chunk');offset=result.offset;progress('UPLOADING',{path:entry.path,bytes:transferred+offset,totalBytes:scan.totalBytes});}
-        if(!sameDatasetFile(handleInfo,await file.stat({bigint:true})))fail('Local file changed during upload; no publication was requested: '+entry.path);
-      }finally{await file.close();}transferred+=entry.size;
-    }
-    // A directory edit or any previously uploaded file change invalidates this local snapshot.
-    for(const [folder,info] of scan.directoryStamps)if(!sameDatasetFile(info,await lstat(folder,{bigint:true})))fail('Local directory changed; no publication was requested');
-    for(const {filename,info} of scan.local.values())if(!sameDatasetFile(info,await lstat(filename,{bigint:true})))fail('Local file changed; no publication was requested');
-    report(await request('commit'));await waitFor();return ready();
-  }catch(error){fail(`${error.message}\nUpload: ${uploadId} on ${machine}. Repeat the same data upload command to resume; check with gpuctl data upload-status ${uploadId} --machine ${machine}. Do not assume an interrupted request canceled server verification.`);}
-}
 async function secret(label='Password'){
   if(options['password-stdin']){let value='';for await(const chunk of process.stdin){value+=chunk;if(value.length>1024)fail('Password input too long');}return value.replace(/\r?\n$/,'');}
   if(!process.stdin.isTTY)fail('Use --password-stdin for non-interactive password input.');
@@ -256,15 +172,27 @@ async function secret(label='Password'){
 async function main(){
   ({options,positionals,training}=parseCLIOptions(args));
   if(options.help||!positionals.length){console.log(help);return;}
+  if(['from','to','ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync')fail('--from, --to, --ref, --target-project and --dry-run are only valid for sync');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
+  if(options.interval!==undefined&&positionals[0]!=='watch')fail('--interval is only valid for watch');
+  if(positionals[0]==='watch'){
+    if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file','interval'].includes(k)))fail('Usage: watch JOB [--interval 1..60] [--json]');
+    if(options.interval!==undefined&&(!Number.isFinite(Number(options.interval))||Number(options.interval)<1||Number(options.interval)>60))fail('--interval must be 1–60 seconds');
+  }
+  if(positionals[0]==='notify'&&(positionals.length!==3||!['on','off','status'].includes(positionals[2])||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k))))fail('Usage: notify JOB on|off|status');
   if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(['cwd','timeout'].some(key=>Object.hasOwn(options,key))&&!['exec','maintenance'].includes(positionals[0])||options.detach&&positionals[0]!=='exec')fail('--cwd/--timeout are for exec or maintenance; --detach is only for exec');
   if(['reason','script-file','revision','preview-token','parent','cursor','limit','ack-unknown'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='maintenance')fail('Maintenance options are only valid for maintenance');
-  const customScheduling=['rank','yield','restart-policy','checkpointable'].some(k=>Object.hasOwn(options,k));
+  const customScheduling=['rank','yield','restart-policy','checkpointable','mode'].some(k=>Object.hasOwn(options,k));
   if(customScheduling&&(positionals[0]!=='run'||options.priority))fail('Custom scheduling is only valid for run and cannot mix with --priority presets');
   const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
+  if(options.mode){const modes={queue:'queue',preempt1:'preempt-save',preempt2:'preempt-now','preempt-save':'preempt-save','preempt-now':'preempt-now'};if(!Object.hasOwn(modes,options.mode))fail('Use --mode queue|preempt1|preempt2');if(modes[options.mode]!=='queue')scheduling.mode=modes[options.mode];}
+  const elasticKeys=['min-cards','global-batch','micro-batch','auto-expand'];
+  const placementKeys=['gpu','share','vram-mib','hami','sm-percent'];
+  if(placementKeys.some(k=>Object.hasOwn(options,k))&&positionals[0]!=='run')fail('Placement options are only valid for run');
+  if(elasticKeys.some(k=>Object.hasOwn(options,k))&&positionals[0]!=='run')fail('Elastic GPU options are only valid for run');
   if(scheduling){
     if(!/^P[0-4]$/.test(scheduling.rank)||!['never','now','save'].includes(scheduling.yieldPolicy)||!['never','on-preempt'].includes(scheduling.restartPolicy))fail('Use --rank P0..P4, --yield never|now|save, --restart-policy never|on-preempt');
     if(scheduling.yieldPolicy==='save'&&!scheduling.checkpointable)fail('--yield save requires --checkpointable and an epoch checkpoint adapter');
@@ -287,12 +215,12 @@ async function main(){
   if(base.username||base.password||base.pathname!=='/'||base.search||base.hash)fail('Use a base URL without credentials, path or query.');
   if(base.protocol!=='https:'&&!(base.protocol==='http:'&&base.hostname==='127.0.0.1'))fail('Remote APIs require HTTPS.');
   if(session&&session.url!==base.origin)session=undefined;
-  async function post(path,body){
-    const response=await fetch(new URL(`/api/${path}`,base),{method:'POST',redirect:'error',signal:AbortSignal.timeout(40000),headers:{'Content-Type':'application/json',...(session?{Authorization:`Bearer ${session.token}`}:{})},body:JSON.stringify(body)});
+  async function post(path,body,requestSignal){
+    const response=await fetch(new URL(`/api/${path}`,base),{method:'POST',redirect:'error',signal:requestSignal?AbortSignal.any([requestSignal,AbortSignal.timeout(40000)]):AbortSignal.timeout(40000),headers:{'Content-Type':'application/json',...(session?{Authorization:`Bearer ${session.token}`}:{})},body:JSON.stringify(body)});
     let data;try{data=await response.json();}catch{fail('Target is not an GPUQ JSON API. The hosted static preview does not provide one.');}
     if(!response.ok)fail(data.error||`HTTP ${response.status}`);return data;
   }
-  const call=(operation,args={})=>post('call',{operation,args});
+  const call=(operation,args={},signal)=>post('call',{operation,args},signal);
   let command=positionals[0];let result,mode={demo:true,gpuqConnected:false};
   if(command==='register'){
     if(positionals.length!==2)fail('Usage: register USERNAME');
@@ -340,7 +268,9 @@ async function main(){
     mode={demo:state.demo,gpuqConnected:state.gpuqConnected===true};
     const find=username=>{const user=state.users.find(u=>u.username===username);if(!user)fail('Unknown or unauthorized username');return user.id;};
     const own=()=>session.principal.role==='admin'&&options.as?find(options.as):session.principal.userId;
-    if(command==='use'&&positionals.length===2){
+    if(command==='sync'){
+      result=await runManualSync(call,{options,positionals,training,machines:state.machines,userId:session.principal.userId});
+    }else if(command==='use'&&positionals.length===2){
       if(!state.machines.some(m=>m.id===positionals[1]))fail('这台机器未授权或不存在');session.machine=positionals[1];await saveSession();result={selected:session.machine,project:selectedProject(session.machine)};
     }else if(command==='maintenance'){
       if(state.demo||state.maintenance?.version!==1)fail('当前后台未启用维护申请；不会模拟执行 root 操作。');
@@ -535,7 +465,10 @@ async function main(){
       }
       const key=options.key||randomUUID();process.stderr.write(`Submission key: ${key}\n`);
       const datasets=options.datasets.map(value=>{const [dataset,version,...extra]=value.split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Use --data NAME@FULL_VERSION_HASH');return {dataset,version};});
-      result=(await call('jobs.submit',{machine:positionals[1],cards:Number(options.cards||1),minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...context,...(datasets.length?{datasets}:{})})).result;
+      const indices=options.gpu?.split(',').map(n=>/^\d+$/.test(n)?Number(n):NaN),cards=Number(options.cards||indices?.length||1);
+      const elastic=elasticKeys.some(k=>Object.hasOwn(options,k))?elasticAllocation({minCards:Number(options['min-cards']),globalBatch:Number(options['global-batch']),microBatch:Number(options['micro-batch']),autoExpand:options['auto-expand']===true},cards,scheduling).elastic:null;
+      const placement=placementKeys.some(k=>Object.hasOwn(options,k))?gpuPlacement({gpuIndices:indices,shared:options.share===true,...(options['vram-mib']?{vramMiB:Number(options['vram-mib'])}:{}),hami:options.hami===true,...(options['sm-percent']?{smPercent:Number(options['sm-percent'])}:{})},cards,elastic,scheduling,options.priority):null;
+      result=(await call('jobs.submit',{machine:positionals[1],cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');
@@ -546,6 +479,12 @@ async function main(){
       if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k)))fail('Usage: diagnostics JOB [--json]; no paths, machine or execution options');
       result=(await call('jobs.diagnostics',{jobId:positionals[1]})).result;
     }
+    else if(command==='watch'&&positionals.length===2){
+      const controller=new AbortController(),stop=()=>controller.abort();process.once('SIGINT',stop);process.once('SIGTERM',stop);
+      try{process.exitCode=await watchJob(call,positionals[1],{interval:options.interval===undefined?5:Number(options.interval),json:options.json===true,signal:controller.signal});}
+      finally{process.off('SIGINT',stop);process.off('SIGTERM',stop);}return;
+    }
+    else if(command==='notify'&&positionals.length===3)result=(await call('notifications.job',{jobId:positionals[1],...(positionals[2]==='status'?{}:{enabled:positionals[2]==='on'})})).result;
     else if(command==='notes'&&positionals.length===1){
       result=(await call('community.notes.list',{})).result;
     }else if(command==='note'&&positionals.length===2){
@@ -613,6 +552,12 @@ async function main(){
   if(options.json){console.log((command==='maintenance'?maintenanceJSON:JSON.stringify)({ok:true,...mode,data:result}));return;}
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
   if(command==='logout'){console.log('已退出登录。');return;}
+  if(command==='sync'){
+    if(result.state==='PREVIEW')console.log(`同步预览：${result.source?.commit||result.source?.machine||'Git'} → ${result.target}\n${result.project||result.name} · ${result.bytes} B · ${result.entries} 项\n未写入目标。去掉 --dry-run 执行，重复原命令可续传。`);
+    else if(result.state==='CODE_READY')console.log(`代码已校验：${result.machine} / ${result.project}\n在目标准备项目环境，再 project publish，等 READY 后训练。环境未复制。`);
+    else console.log(`数据已就绪：${result.machine}\n${result.dataset}@${result.version}\n训练使用 --data ${result.dataset}@${result.version}`);
+    return;
+  }
   if(command==='use'){console.log(`当前服务器：${result.selected}\n${result.project?'当前项目：'+result.project:'未选择项目；可用 gpuctl project create NAME 或 project use NAME'}`);return;}
   if(command==='data'&&positionals[1]==='put'){console.log(`已上传 ${result.bytes} 字节 → ${result.machine}:${result.path}\n未自动解压或发布。进入个人数据终端：gpuctl data shell`);return;}
   if(command==='data'&&['publish','workspace-status'].includes(positionals[1])){console.log(`${result.state} · ${result.machine}${result.error?'\n'+result.error:''}${result.operationId?'\n查看：gpuctl data workspace-status '+result.operationId+' --machine '+result.machine:''}${result.state==='READY'?'\n数据集：'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
@@ -623,7 +568,7 @@ async function main(){
     else console.log(`${result.state==='UNREGISTERING'?'已受理注销，尚未完成':result.state} · ${result.operationId}${result.error?'\n'+result.error:''}\n查看：gpuctl data status ${result.operationId} --machine ${result.machine}`);
     return;
   }
-  if(command==='run'){console.log(`已提交 ${result.id}\n${result.machine} · ${result.cards} 张 GPU · ${result.state}\n查看日志：gpuctl logs ${result.id}`);return;}
+  if(command==='run'){console.log(`已提交 ${result.id}\n${result.machine} · ${allocationLabel(result)} GPU · ${result.state}\n查看日志：gpuctl logs ${result.id}`);return;}
   if(command==='exec'){
     if(result.stdout)process.stdout.write(result.stdout);
     if(result.stderr)process.stderr.write(result.stderr);
@@ -635,11 +580,12 @@ async function main(){
   if(command==='notes'){for(const n of result.notes)console.log(`${n.id} · ${n.author.username} · ${n.jobId||'非任务留言'}\n${n.body}\n`);if(!result.notes.length)console.log('暂无留言。');if(result.nextCursor)console.log('更多留言可通过 API before='+result.nextCursor+' 查询。');return;}
   if(command==='note'||command==='note-delete'){console.log(result.deleted?`留言 ${result.id} 已删除。`:`留言 ${result.note?.id||result.id} 已保存。`);return;}
   if(command==='priority'){console.log(`任务 ${result.id}：优先级 ${result.priority||'normal'}${result.priorityPending?'（等待节点确认）':''}`);return;}
+  if(command==='notify'){console.log(`Telegram：${result.configured?'收件人已配置':'收件人尚未配置'} · ${result.degraded?'通知存储暂不可用':result.enabled?'通知已开启':'通知关闭'} · 待发 ${result.pending??'未知'} · 失败 ${result.failed??'未知'}`);return;}
   if(command==='logs'){process.stdout.write(result.text+(result.text.endsWith('\n')?'':'\n'));return;}
   if(command==='cancel'){console.log(`任务 ${result.id}：${result.state}${result.cancelRequested?'（已请求取消，等待节点确认）':''}`);return;}
   if(command==='upload'){console.log(`已上传 ${result.uploaded} 个文件到 ${result.machine} 的${result.project?'项目 '+result.project+' 草稿':'个人工作区'}。${result.skipped?'跳过 '+result.skipped+' 项。':''}`);return;}
   if(command==='download'){console.log(`已下载：${result.downloaded}（${result.bytes} 字节）`);return;}
-  if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}${j.preempted?'（让位中断，不会自动重跑）':''}\n  ${j.machine} · ${j.cards} 张 · ${j.name||'train'} · 优先级 ${['idle','normal','high'].includes(j.priority)?j.priority:'旧策略／未核验'}${j.schedulerState?' · 调度 '+j.schedulerState:''}${j.queueReason?'\n  排队原因：'+j.queueReason:''}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
+  if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}${j.preempted?'（让位中断，不会自动重跑）':''}\n  ${j.machine} · ${allocationLabel(j)} · ${j.name||'train'} · 优先级 ${['idle','normal','high'].includes(j.priority)?j.priority:'旧策略／未核验'}${j.schedulerState?' · 调度 '+j.schedulerState:''}${j.queueReason?'\n  排队原因：'+j.queueReason:''}\n  ${progressText(j.progress)}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
   if(command==='files'){console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');return;}
   if(command==='maintenance'){
     const v=maintenanceVisible;

@@ -110,6 +110,7 @@ def offer(coordinator: Any, submission: dict[str, Any], allow_preempt: bool = Tr
             required_gpu_uuids=frozenset(submission["requested_gpu_uuids"]) if submission["placement"] == "pinned" else None,
             free_gpu_uuids=frozenset(d.uuid for d in free),
             preempt_idle_only=bool(submission.get("preempt_idle_only", False)),
+            preempt_opt_in_only=bool(submission.get("preempt_opt_in_only", False)),
         )
         if victims:
             return {"kind": "preempt", "count": legal[0]}
@@ -162,6 +163,7 @@ def node_api(coordinator: Any, operation: str, arguments: dict[str, Any]) -> dic
                         required_gpu_uuids=frozenset(job["requested_gpu_uuids"]) if job["placement"] == "pinned" else None,
                         free_gpu_uuids=frozenset(d.uuid for d in free),
                         preempt_idle_only=bool(job.get("preempt_idle_only", False)),
+                        preempt_opt_in_only=bool(job.get("preempt_opt_in_only", False)),
                     )
                     if not victims:
                         raise RuntimeError("admission changed under coordinator lock")

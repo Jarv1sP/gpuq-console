@@ -1,9 +1,12 @@
 import net from 'node:net';
 import {MACHINES} from './dist/model.js';
+import {applyJobFeedback} from './dist/job-progress.js';
 import {maintainTaskNotes} from './community.mjs';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
 import {yieldCapable} from './dist/scheduling-policy.js';
 import {normalizeJobSubmission,createSubmittedJob,datasetReferences} from './job-submission.mjs';
+import {snapshotSyncCall} from './snapshot-sync.mjs';
+import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 export {datasetReferences} from './job-submission.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
@@ -14,10 +17,11 @@ export const priorityRankCapable=host=>priorityCapable(host)&&host.gpuq.capabili
 const RANKS={idle:0,normal:2,high:4,P0:0,P1:1,P2:2,P3:3,P4:4};
 function rankValue(value){if(typeof value!=='string'||!Object.hasOwn(RANKS,value))fail('排队优先级必须为 P0–P4（或 idle/normal/high）。');return value;}
 function priorityValue(value){if(!PRIORITIES.has(value))fail('优先级必须为 idle、normal 或 high。');return value;}
-function schedulerResult(job,result){
+export function schedulerResult(job,result){
   job.nodeJobId=result.nodeJobId||job.nodeJobId;
   job.state=['PENDING','STARTING','RUNNING','PREEMPTING',...TERMINAL].includes(result.state)?result.state:'UNKNOWN';
   job.assignedIndices=result.assignedIndices||[];job.error=result.error||null;job.checkedAt=new Date().toISOString();
+  job.actualCards=job.assignedIndices.length;
   job.schedulerState=typeof result.schedulerState==='string'?result.schedulerState:result.state;
   job.queueReason=typeof result.queueReason==='string'?result.queueReason.slice(0,400):null;
   job.schedulerCheckedAt=job.checkedAt;
@@ -26,7 +30,16 @@ function schedulerResult(job,result){
   job.schedulerPolicy=result.schedulerPolicy||null;
   job.priorityMutable=result.priorityMutable===true;
   job.preempted=result.preempted===true;
+  applyJobFeedback(job,result);
   if(TERMINAL.has(job.state))job.finishedAt||=job.checkedAt;
+}
+function persistSchedulerResult(service,job,result){
+  const before=structuredClone(job);
+  try{schedulerResult(job,result);service.save();}
+  catch(error){
+    for(const key of Object.keys(job))if(!Object.hasOwn(before,key))delete job[key];
+    Object.assign(job,before);throw error;
+  }
 }
 export function bridgeClient(socketPath){
   return (machine,operation,args)=>new Promise((resolve,reject)=>{
@@ -47,20 +60,18 @@ export function installExecution(service,bridge){
       const jobs=service.store.jobs.filter(j=>!TERMINAL.has(j.state));
       await Promise.all(MACHINES.map(async m=>{
         for(const job of jobs.filter(j=>j.machine===m.id)){
+          if(TERMINAL.has(job.state))continue;
           const policyRevision=job.policyRevision||0;
           try{
             const action=job.cancelRequested?'cancel':'sync';
             const result=await bridge(job.machine,action,{job:job.spec});
             await service.enqueue(()=>{
-              const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||(current.policyRevision||0)!==policyRevision)return;
+              const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||TERMINAL.has(current.state)||(current.policyRevision||0)!==policyRevision)return;
               // LOST/unknown remains nonterminal: retain quota until confirmed.
-              schedulerResult(current,result);
-              service.save();
-              // Bodies live outside portal_state/audit. Delete only after a
-              // confirmed terminal result has been persisted by reconciliation.
+              persistSchedulerResult(service,current,result);
               maintainTaskNotes(service);
             });
-          }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing&&(current.policyRevision||0)===policyRevision){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
+          }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing&&!TERMINAL.has(current.state)&&(current.policyRevision||0)===policyRevision){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
         }
       }));
     }finally{maintainTaskNotes(service);service.reconciling=false;}
@@ -78,6 +89,10 @@ export async function executionCall(service,principal,operation,args){
   if(!user.enabled)fail('账号已暂停。',403);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   const jobById=id=>{const job=service.store.jobs.find(j=>j.id===id);if(!job||(principal.role!=='admin'&&job.userId!==user.id))fail('任务不存在或无权访问。',403);return job;};
+  if(/^(projects|datasets)\.(snapshot|sync)\./.test(operation)){
+    const result=await snapshotSyncCall(service,principal,user,operation,args,authorizedMachine);
+    if(result===undefined)fail('未知同步操作。');return result;
+  }
   if(['host.exec','host.status','host.cancel'].includes(operation)){
     if(principal.role!=='admin')fail('宿主机命令仅管理员可用。',403);
     authorizedMachine(args.machine);
@@ -220,9 +235,16 @@ export async function executionCall(service,principal,operation,args){
     await service.refreshGPUQ();
     if(!service.gpuq||service.gpuq.stale)fail('机器状态已过期，暂不接受新任务。',503);
     const host=service.gpuq.hosts.find(h=>h.id===request.machine);
+    if(request.elastic&&!elasticCapable(host))fail('节点未确认弹性分配和训练控制通道，未提交任务。',503);
+    if(request.placement){
+      if(!placementCapable(host,request.placement))fail('节点尚未确认指定显卡/共享或 HAMi 能力，未提交任务。',503);
+      const selected=request.placement.gpuIndices.map(index=>host.gpus.find(g=>g.index===index));
+      if(selected.some(g=>!g||g.memoryTotalMiB<min*1024-512)||request.placement.shared&&selected[0].memoryTotalMiB<request.placement.vramMiB)fail('指定显卡不存在或不满足显存要求。',409);
+    }
     if(!host?.reachable||!host.gpuq.connected||host.gpuq.observeOnly||host.gpus.filter(g=>g.memoryTotalMiB>=min*1024-512).length<request.cards)fail('所选机器当前无法执行，或不满足卡数/显存条件；不会自动切换服务器。',409);
     const prioritySupported=priorityCapable(host);
     if(explicit&&(!prioritySupported||!yieldCapable(host)))fail('节点未接通独立让位与 checkpoint 控制通道；未提交任务。',503);
+    if(explicit?.mode&&explicit.mode!=='queue'&&!host.gpuq.capabilities.includes('preempt-opt-in-only-v1'))fail('节点尚未接通请求模式的主动让位范围限制。',503);
     if(request.priorityProvided&&!prioritySupported)fail('所选机器尚未确认安全优先级功能，未提交任务；请刷新或联系管理员升级。',503);
     if(datasets.length){
       // Personal training uses the same owner-only Principal as node lease
@@ -284,6 +306,23 @@ export async function executionCall(service,principal,operation,args){
     return publicJob(job);
   }
   if(operation==='jobs.logs'){const job=jobById(args.jobId);return service.bridge(job.machine,'logs',{job:job.spec});}
+  if(operation==='jobs.watch'){
+    if(Object.keys(args).some(k=>k!=='jobId'))fail('进度查询参数无效。');
+    const job=jobById(args.jobId);
+    if(!job.machine||TERMINAL.has(job.state))return publicJob(job);
+    authorizedMachine(job.machine);
+    let result;
+    try{result=await service.bridge(job.machine,'watch',{job:job.spec});}
+    catch{return {...publicJob(job),state:'UNKNOWN',error:'节点进度查询失败，任务状态待核对。',checkedAt:new Date().toISOString()};}
+    if(!result?.nodeJobId)return publicJob(job);
+    try{persistSchedulerResult(service,job,result);return publicJob(job);}
+    catch{
+      // Keep advisory progress inspectable, but never treat an observation as
+      // a saved lifecycle result or release the restored reservation.
+      const observed={...job};applyJobFeedback(observed,result);
+      return {...publicJob(observed),state:'UNKNOWN',notSaved:true,error:'节点观察结果未保存，任务状态待核对。',checkedAt:new Date().toISOString()};
+    }
+  }
   if(operation==='jobs.diagnostics'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('诊断参数无效。');
     const job=jobById(args.jobId);authorizedMachine(job.machine);

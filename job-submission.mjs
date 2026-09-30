@@ -2,10 +2,11 @@ import {createHash,randomUUID} from 'node:crypto';
 import {MACHINES} from './dist/model.js';
 import {projectReference} from './projects.mjs';
 import {schedulingPolicy} from './dist/scheduling-policy.js';
+import {elasticAllocation,gpuPlacement} from './dist/gpu-allocation.js';
 
 const FIELDS=new Set([
   'machine','cards','minVramGiB','argv','name','key',
-  'datasets','project','release','priority','scheduling',
+  'datasets','project','release','priority','scheduling','elastic','placement',
 ]);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 
@@ -37,12 +38,18 @@ export function normalizeJobSubmission(args,principal){
   if(typeof args.key!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(args.key))fail('需提供 UUID 提交键，重试必须复用。');
   if(!Array.isArray(args.argv)||!args.argv.length||args.argv.length>128||args.argv.some(a=>typeof a!=='string'||a.includes('\0'))||JSON.stringify(args.argv).length>12000)fail('训练命令无效或过长。');
   if(!Number.isInteger(args.cards)||args.cards<1||args.cards>Math.max(...MACHINES.map(m=>m.cards)))fail('申请卡数超出单机容量。');
+  let allocation=null;
+  if(args.elastic!==undefined){try{allocation=elasticAllocation(args.elastic,args.cards,explicit);}catch(error){fail(error.message);}}
+  let placement=null;
+  if(args.placement!==undefined){try{placement=gpuPlacement(args.placement,args.cards,allocation,explicit,priority);}catch(error){fail(error.message);}}
   const minVramGiB=args.minVramGiB??0;
   if(typeof minVramGiB!=='number'||!Number.isFinite(minVramGiB)||minVramGiB<0||minVramGiB>128)fail('最低显存参数无效。');
   const name=args.name||'train';
   if(typeof name!=='string'||name.length>64||/[\x00-\x1f]/.test(name))fail('任务名称无效。');
   const request={machine:args.machine,cards:args.cards,minVramGiB,argv:[...args.argv],name,key:args.key,
-    datasets,project,priority,priorityProvided:args.priority!==undefined,explicit};
+    datasets,project,priority,priorityProvided:args.priority!==undefined,explicit,
+    ...(placement?{placement}:{}),
+    ...(allocation?{elastic:allocation.elastic,allowedGpuCounts:allocation.allowed}:{})};
   // This positional representation is a persisted compatibility contract, not
   // a second parser. Preserve old retry identities without rewriting records.
   const identity=[request.machine,request.cards,minVramGiB,request.argv,name];
@@ -50,16 +57,19 @@ export function normalizeJobSubmission(args,principal){
   if(project.project)identity.push(project);
   if(request.priorityProvided)identity.push({priority});
   if(explicit)identity.push({scheduling:explicit});
+  if(allocation)identity.push({elastic:allocation.elastic});
+  if(placement)identity.push({placement});
   request.digest=createHash('sha256').update(JSON.stringify(identity)).digest('hex');
   return request;
 }
 
 export function createSubmittedJob(request,user,prioritySupported,{id=randomUUID(),now=new Date().toISOString()}={}){
   const {machine,cards,minVramGiB,name,key,digest,project,datasets,priority,explicit}=request;
-  const context={...project,...(datasets.length?{datasets:structuredClone(datasets)}:{})};
+  const context={...project,...(datasets.length?{datasets:structuredClone(datasets)}:{}),...(request.elastic?{elastic:structuredClone(request.elastic)}:{}),...(request.placement?{placement:structuredClone(request.placement)}:{})};
   const policy=explicit?{scheduling:structuredClone(explicit)}:prioritySupported?{priority,preemptIdleOnly:true}:{};
   const spec={id,userId:user.id,username:user.username,cards,argv:[...request.argv],name,minVramGiB,...context,...policy};
   return {id,key,digest,spec,userId:user.id,username:user.username,machine,cards,name,...context,
+    ...(request.elastic?{allowedGpuCounts:[...request.allowedGpuCounts]}:{}),
     ...(explicit?{scheduling:structuredClone(explicit)}:{}),priority:explicit?null:prioritySupported?priority:null,
     state:'SUBMITTING',createdAt:now,cancelRequested:false};
 }

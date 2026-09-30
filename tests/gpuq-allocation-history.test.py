@@ -124,6 +124,7 @@ class History(unittest.TestCase):
         source.backup(legacy)
         source.close()
         legacy.execute('DROP TABLE gpu_allocation_history')
+        legacy.execute('ALTER TABLE jobs DROP COLUMN preempt_opt_in_only')
         legacy.execute('UPDATE schema_meta SET schema_version=10')
         legacy.execute('PRAGMA user_version=10')
         legacy.commit()
@@ -140,7 +141,7 @@ class History(unittest.TestCase):
         inspect.close()
         migrated = S.Store(old).initialize()
         try:
-            self.assertEqual(migrated.check_integrity()['schema_version'], 11)
+            self.assertEqual(migrated.check_integrity()['schema_version'], S.STORE_SCHEMA_VERSION)
             self.assertEqual(migrated.list_allocation_history(job_id=job['id']), [])
             row = migrated.list_allocation_history(job_id=active['id'])[0]
             self.assertEqual(row['source'], 'migrated_active')

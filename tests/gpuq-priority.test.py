@@ -17,7 +17,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gpuq'))
 from gpuq.backends import GpuDevice, UnitIdentityError
 from gpuq.config import Config
-from gpuq.constants import AttemptState, JobState
+from gpuq.constants import AttemptState, JobState, STORE_SCHEMA_VERSION
 from gpuq.coordinator import Coordinator
 from gpuq import cli, cluster_node, fleet, store as store_module
 from gpuq.rpc import ApiError
@@ -600,7 +600,7 @@ class SchedulerPriorityTests(unittest.TestCase):
     def test_daemon_capabilities_and_status_are_explicit(self):
         job = self.submit(preempt_idle_only=True)
         result = self.coordinator.handle_api('status', {})
-        self.assertEqual(result['daemon']['capabilities'], ['priority-policy-v1', 'preempt-idle-only-v1', 'priority-rank-v1'])
+        self.assertTrue({'priority-policy-v1','preempt-idle-only-v1','priority-rank-v1','preempt-opt-in-only-v1','elastic-batch-v1','gpu-placement-v1','gpu-sharing-v1'}.issubset(result['daemon']['capabilities']))
         self.assertEqual(result['jobs'][0]['id'], job['id'])
         self.assertIs(result['jobs'][0]['preempt_idle_only'], True)
         parsed = cli.build_parser().parse_args(['submit', '-g', '1', '--preempt-idle-only', '--', 'python', 'train.py'])
@@ -636,7 +636,7 @@ class SchedulerPriorityTests(unittest.TestCase):
             legacy.close()
         migrated = Store(old_path).initialize()
         try:
-            self.assertEqual(migrated.check_integrity()['schema_version'], 11)
+            self.assertEqual(migrated.check_integrity()['schema_version'], STORE_SCHEMA_VERSION)
             self.assertEqual(migrated.get_job(job['id'])['state'], 'RUNNING')
             self.assertFalse(migrated.get_job(job['id'])['preempt_idle_only'])
             self.assertEqual(migrated.get_job(job['id'])['yield_policy'], 'save')
