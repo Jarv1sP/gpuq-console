@@ -5,6 +5,7 @@ import {pathToFileURL} from 'node:url';
 import {PortalService} from './portal-service.mjs';
 import {bridgeClient} from './execution.mjs';
 import {standaloneClient} from './client-bundle.mjs';
+import {loadTelegramNotifications} from './job-notifications.mjs';
 import {guideTarget,guidePage} from './guide.mjs';
 
 const files={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/xterm.js':'vendor/xterm.js','/xterm.css':'vendor/xterm.css','/addon-fit.js':'vendor/addon-fit.js'};
@@ -22,9 +23,10 @@ files['/dataset-upload.js']='dataset-upload.js';
 files['/data-workspace.js']='data-workspace.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
 files['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';
-export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge}){
+export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge,notificationConfigPath}){
   await standaloneClient();
-  const url=new URL(origin);const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined));const rate=new Map();
+  const url=new URL(origin);const config=await loadTelegramNotifications(notificationConfigPath);
+  const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined),config);const rate=new Map();
   const server=http.createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Content-Security-Policy':`default-src 'self'; script-src 'self'; style-src 'self' 'nonce-${styleNonce}'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`};
@@ -93,7 +95,7 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   process.umask(0o077);
-  const {server}=await createPortalServer({database:process.env.DATABASE_PATH||'/data/portal.sqlite',bootstrap:process.env.BOOTSTRAP_FILE,origin:process.env.PUBLIC_ORIGIN,statusPath:process.env.GPUQ_STATUS_PATH,bridgeSocket:process.env.EXECUTOR_SOCKET,secure:true});
+  const {server}=await createPortalServer({database:process.env.DATABASE_PATH||'/data/portal.sqlite',bootstrap:process.env.BOOTSTRAP_FILE,origin:process.env.PUBLIC_ORIGIN,statusPath:process.env.GPUQ_STATUS_PATH,bridgeSocket:process.env.EXECUTOR_SOCKET,notificationConfigPath:process.env.GPUQ_NOTIFICATIONS_CONFIG,secure:true});
   server.listen(Number(process.env.PORT||8080),process.env.LISTEN_HOST||'0.0.0.0',()=>console.log('GPUQ portal ready.'));
   for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>server.close(()=>process.exit(0)));
 }
