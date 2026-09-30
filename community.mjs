@@ -49,6 +49,17 @@ export function pruneTaskNotes(service){
   try{const del=db.prepare('DELETE FROM community_notes WHERE job_id=?');for(const id of ids)removed+=Number(del.run(id).changes);db.exec('RELEASE task_notes_cleanup');return removed;}
   catch(error){db.exec('ROLLBACK TO task_notes_cleanup; RELEASE task_notes_cleanup');throw error;}
 }
+export function maintainTaskNotes(service){
+  try{
+    const removed=service.pruneTaskNotes?.();
+    service.noteCleanupPending=false;
+    return removed;
+  }catch{
+    if(!service.noteCleanupPending)console.warn('GPUQ: task note cleanup is pending; training status is preserved.');
+    service.noteCleanupPending=true;
+    return 0;
+  }
+}
 export function installCommunity(service){
   service.db.exec(`
     CREATE TABLE IF NOT EXISTS community_posts (

@@ -83,3 +83,24 @@ test('CLI notes require explicit lifetime and preserve retry keys and revision',
   assert.notEqual((await cli(['note','--job',task,'--general','冲突选项'])).code,0);
   assert.equal(calls.filter(c=>c.operation==='community.notes.create').length,writes);
 });
+
+test('cleanup failure preserves the real training failure and retries without changing task state',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-note-cleanup-failure-')),database=join(dir,'db'),bootstrap=join(dir,'bootstrap'),password=randomUUID()+randomUUID();
+  await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
+  const cause='CUDA out of memory: original training failure';
+  const service=await PortalService.open(database,bootstrap,undefined,async()=>({state:'FAILED',error:cause,nodeJobId:'Jgc',assignedIndices:[]}));clearInterval(service.executionTimer);
+  t.after(async()=>{service.close();await rm(dir,{recursive:true,force:true});});
+  const admin=await service.login('admin',password),job={id:randomUUID(),userId:admin.principal.userId,username:'admin',machine:MACHINES[0].id,cards:1,state:'RUNNING',name:'training',spec:{argv:['python','train.py']}};
+  service.store.jobs.push(job);service.save();
+  await service.invoke(admin.token,'community.notes.create',{key:randomUUID(),jobId:job.id,body:'temporary task note'});
+  service.db.exec("CREATE TEMP TRIGGER fail_note_cleanup BEFORE DELETE ON community_notes BEGIN SELECT RAISE(ABORT,'simulated cleanup failure'); END;");
+  const warn=console.warn;console.warn=()=>{};
+  try{await service.reconcile();}finally{console.warn=warn;}
+  assert.equal(job.state,'FAILED');assert.equal(job.error,cause);
+  assert.equal(JSON.parse(service.db.prepare('SELECT data FROM portal_state WHERE id=1').get().data).jobs[0].error,cause);
+  assert.equal(service.noteCleanupPending,true);
+  assert.equal(service.db.prepare('SELECT count(*) n FROM community_notes').get().n,1);
+  service.db.exec('DROP TRIGGER fail_note_cleanup');await service.reconcile();
+  assert.equal(service.noteCleanupPending,false);assert.equal(job.error,cause);assert.equal(job.state,'FAILED');
+  assert.equal(service.db.prepare('SELECT count(*) n FROM community_notes').get().n,0);
+});
