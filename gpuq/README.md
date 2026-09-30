@@ -31,6 +31,15 @@ gpu submit --help
 
 ## Console 优先级与可中断任务契约
 
+### 独立修改排队优先级
+
+`gpu --json set-rank JOB P0..P4` 对应 RPC `set_priority_rank`（`job_id`、`priority`、
+可选完整 `expected`）。仅调整 P 值，保留 yield/restart/dispatch/checkpoint、scope 与 FIFO。
+仍原子拒绝非 PENDING、活动 attempt/lease、扩缩/抢占清理及过期 expected。
+节点能力 `priority-rank-v1` 标记这项合同；新版门户使用它，缺失时不回退到旧接口。
+旧 `set_priority` / `set-priority` 的完整预设语义保留兼容，与此接口区分。
+以下三档表格仍描述**新提交预设**，不代表独立调档会改变任务让位/恢复方式。
+
 Console 的三档优先级复用既有 GPUQ 调度器；所有新 Console 任务额外持久化 `preempt_idle_only=true`，只允许它们中断同样带此显式标记且为 P0 / `yield_policy=now` / `restart_policy=never` 的最低任务。旧 P0/now/never 也不会被自动纳入。数据库从 v9 到 v10 只增加默认 false 的布尔列，旧任务及原策略保持不变；升级须备份并显式迁移，不重新初始化或清空数据库：
 
 | Console 档位 | GPUQ priority | dispatch_mode | yield_policy | restart_policy |

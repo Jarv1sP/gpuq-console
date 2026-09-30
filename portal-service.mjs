@@ -4,7 +4,7 @@ import {dirname} from 'node:path';
 import {createHash,randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {DemoService,credential} from './dist/service.js';
 import {readGPUQStatus,visibleGPUQStatus} from './gpuq-status.mjs';
-import {installExecution,executionCall,publicJob,usage,priorityCapable} from './execution.mjs';
+import {installExecution,executionCall,publicJob,usage,priorityCapable,priorityRankCapable} from './execution.mjs';
 import {MACHINES,validUsername} from './dist/model.js';
 import {installCommunity,communityCall} from './community.mjs';
 
@@ -144,6 +144,6 @@ export class PortalService extends DemoService{
     }catch(e){this.restore(before);this.sessions=sessions;this.audit(actor,operation,args?.userId||args?.jobId,'denied');throw e;}
   });}
   async refreshGPUQ(){this.gpuq=await readGPUQStatus(this.statusPath);}
-  state(principal){const state=super.state(principal);const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));return {...state,jobs:state.jobs.map(j=>({...publicJob(j),canSetPriority:principal.role==='admin'&&capabilities[j.machine]===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&j.spec?.preemptIdleOnly===true})),demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};}
+  state(principal){const state=super.state(principal);const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));return {...state,jobs:state.jobs.map(j=>({...publicJob(j),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&j.spec?.preemptIdleOnly===true})),demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};}
   close(){this.closing=true;clearInterval(this.executionTimer);this.db.close();}
 }
