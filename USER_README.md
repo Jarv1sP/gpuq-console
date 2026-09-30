@@ -137,9 +137,15 @@ gpuctl run -g 4 --min-vram 24 --name ddp -- python -m torch.distributed.run --st
 
 `-g 4` 申请同一服务器的 4 张整卡。`--min-vram 24` 筛选每张卡物理显存至少约 24 GiB 的机型，不是显存切片；驱动预留的少量容量不影响 24/32 GiB 型号匹配。训练代码必须支持多卡，不会自动改写程序。
 
+需要接入训练进度或保存/恢复适配器时，见[训练控制通道](docs/TRAINING_CONTROL.md)。
+通道接通不等于任意脚本自动支持保存让位；当前默认提交策略不变。
+
 新提交不接受 `run auto`：你选择服务器，调度器在该机内分配卡，不要求你手选 GPU 编号。当前不自动将跨机显存合并或启动跨机 DDP。
 
 ## 任务优先级与排队
+
+需要独立选择 P0–P4、“立即/保存后让位”和 checkpoint 恢复时，使用网页“自定义 GPUQ 调度”
+或 CLI `--rank/--yield/--restart-policy`，见[简明用法](docs/SCHEDULING.md)。以下旧预设保持兼容。
 
 支持新版优先级策略的节点提供以下选择。网页“提交训练”可选择，CLI 在 `--` 前加 `--priority`：
 

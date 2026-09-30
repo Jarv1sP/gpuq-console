@@ -299,6 +299,18 @@ gpuctl run -g 1 --priority idle -- python disposable_trial.py --output /outputs
 
 任务优先级不保证准确开跑时间。查看队列与最近状态，不要仅凭一张卡的利用率暂时为 0 判断它能立即分配。
 
+### 自定义等级、让位与恢复
+
+网页展开“提交训练 → 自定义 GPUQ 调度”。P0–P4只改变排序，不表示同意中断；成员可选P0–P2。节点缺能力时明确拒绝，不降级。
+
+```sh
+gpuctl run --rank P1 --yield never -g 1 -- python train.py
+gpuctl run --rank P1 --yield now -g 1 -- python disposable.py
+gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -g 2 -- python train.py
+```
+
+`save`须训练适配checkpoint并恢复完整状态，DDP所有rank协同。低等级save任务整体保存后让位，on-preempt随后排队恢复；保存失败不强杀，手动取消或失败不自动重跑。`--checkpointable`不是自动改写代码。
+
 ### 协调使用安排
 
 “协作区”包含维护公告、问题反馈和公共交流。可以说明预计结束时间、协商释放资源或说明紧急实验，但聊天约定不会自动改变配额、队列或取消任务。
