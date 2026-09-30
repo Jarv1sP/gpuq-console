@@ -18,6 +18,7 @@ files['/datasets.css']='datasets.css';
 files['/dataset-upload.js']='dataset-upload.js';
 files['/data-workspace.js']='data-workspace.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
+files['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';
 export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge}){
   await standaloneClient();
   const url=new URL(origin);const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined));const rate=new Map();

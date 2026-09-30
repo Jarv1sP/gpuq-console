@@ -6,7 +6,7 @@ import {DemoService,credential} from './dist/service.js';
 import {readGPUQStatus,visibleGPUQStatus} from './gpuq-status.mjs';
 import {installExecution,executionCall,publicJob,usage,priorityCapable,priorityRankCapable} from './execution.mjs';
 import {MACHINES,validUsername} from './dist/model.js';
-import {installCommunity,communityCall} from './community.mjs';
+import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -39,6 +39,7 @@ export class PortalService extends DemoService{
     // Public registration never grants administrative authority.
     service.db.prepare("UPDATE invites SET enabled=0 WHERE role='admin'").run();
     for(const user of service.store.users)user.policyVersion??=0;
+    maintainTaskNotes(service);
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }

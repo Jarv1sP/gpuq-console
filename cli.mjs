@@ -33,6 +33,10 @@ gpuctl diagnostics JOB --json    Persistent bounded worker logs, exits and resou
 gpuctl run --priority idle -g 1 -- python train.py
 gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
 gpuctl priority JOB high         Administrator: change queued job priority
+gpuctl notes                     Shared task / persistent general notes
+gpuctl note --job JOB "message"  Deleted when the task is confirmed finished
+gpuctl note --general "notice"  Kept until manually deleted
+gpuctl note-delete NOTE_ID       Delete own note (or any note as admin)
 gpuctl pull --job JOB model.pt ./model.pt
 gpuctl data list                 List authorized dataset versions on selected server
 gpuctl data put ARCHIVE [REMOTE_FILE]  Upload a file to your private /data2 (no extraction)
@@ -106,7 +110,7 @@ const args=process.argv.slice(2);let options,positionals,training;
 let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).includes('--json');
 function fail(message){throw Error(message);}
 const CLI_OPTIONS=new Map([
-  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','checkpointable'].map(key=>[key,'flag']),
+  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable'].map(key=>[key,'flag']),
   ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
@@ -239,6 +243,7 @@ async function secret(label='Password'){
 async function main(){
   ({options,positionals,training}=parseCLIOptions(args));
   if(options.help||!positionals.length){console.log(help);return;}
+  if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
   if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
@@ -490,6 +495,16 @@ async function main(){
       if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k)))fail('Usage: diagnostics JOB [--json]; no paths, machine or execution options');
       result=(await call('jobs.diagnostics',{jobId:positionals[1]})).result;
     }
+    else if(command==='notes'&&positionals.length===1){
+      result=(await call('community.notes.list',{})).result;
+    }else if(command==='note'&&positionals.length===2){
+      if(Boolean(options.general)===Boolean(options.job))fail('Choose --job JOB_ID or --general for a note');
+      const key=options.key||randomUUID();process.stderr.write(`Note key: ${key}; reuse --key after an uncertain response.\n`);
+      result=(await call('community.notes.create',{body:positionals[1],key,...(options.job?{jobId:options.job}:{})})).result;
+    }else if(command==='note-delete'&&positionals.length===2){
+      const {note}=(await call('community.notes.get',{id:positionals[1]})).result;
+      result=(await call('community.notes.delete',{id:note.id,revision:note.revision})).result;
+    }
     else if(['logs','cancel'].includes(command)&&positionals.length===2)result=(await call(command==='logs'?'jobs.logs':'jobs.cancel',{jobId:positionals[1]})).result;
     else if(command==='files'&&positionals.length<=3)result=(await call('files.list',{machine:positionals[1],path:positionals[2]||'.',...fileArgs(positionals[1])})).result;
     else if(command==='upload'&&positionals.length>=3&&positionals.length<=4){
@@ -566,6 +581,8 @@ async function main(){
     if(!['SUCCEEDED','FAILED','CANCELED','TIMED_OUT'].includes(result.state))process.stderr.write(`Inspect: gpuctl exec status ${result.id} --machine ${result.machine}\nCancel: gpuctl exec cancel ${result.id} --machine ${result.machine}\n`);
     if(result.error)process.stderr.write(result.error+'\n');return;
   }
+  if(command==='notes'){for(const n of result.notes)console.log(`${n.id} · ${n.author.username} · ${n.jobId||'非任务留言'}\n${n.body}\n`);if(!result.notes.length)console.log('暂无留言。');if(result.nextCursor)console.log('更多留言可通过 API before='+result.nextCursor+' 查询。');return;}
+  if(command==='note'||command==='note-delete'){console.log(result.deleted?`留言 ${result.id} 已删除。`:`留言 ${result.note?.id||result.id} 已保存。`);return;}
   if(command==='priority'){console.log(`任务 ${result.id}：优先级 ${result.priority||'normal'}${result.priorityPending?'（等待节点确认）':''}`);return;}
   if(command==='logs'){process.stdout.write(result.text+(result.text.endsWith('\n')?'':'\n'));return;}
   if(command==='cancel'){console.log(`任务 ${result.id}：${result.state}${result.cancelRequested?'（已请求取消，等待节点确认）':''}`);return;}
