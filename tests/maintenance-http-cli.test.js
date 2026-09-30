@@ -11,6 +11,7 @@ import {MACHINES} from '../dist/model.js';
 import {pathToFileURL} from 'node:url';
 import {standaloneClient} from '../client-bundle.mjs';
 import {buildClient} from '../scripts/build-client.mjs';
+import {usage} from '../execution.mjs';
 
 const password='Maintenance-HTTP-Fixture-2026!';
 test('real cookie API and downloaded standalone CLI share requests/decisions, never root before approval',async t=>{
@@ -128,4 +129,51 @@ test('Docker COPY-only runtime starts and serves maintenance assets without sour
   const artifactReader=await import(pathToFileURL(join(dir,'client-bundle.mjs')));
   assert.equal(await(await fetch(origin+'/gpuctl.mjs')).text(),await artifactReader.standaloneClient(origin));
   assert.ok((await(await fetch(origin+'/guide/queue')).text()).includes('申请系统维修'));
+});
+
+test('real bundled approval coexists with shared training, watch, notifications, notes and snapshot reads',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-maintenance-coexist-')),bootstrap=join(dir,'bootstrap'),status=join(dir,'status'),tokenFile=join(dir,'notify-token'),config=join(dir,'notify-config');
+  const machine=MACHINES[0].id,calls=[],sent=[],originalFetch=globalThis.fetch;
+  await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
+  await writeFile(tokenFile,'123456:'+('T'.repeat(32)),{mode:0o600});await writeFile(config,JSON.stringify({tokenFile,chatByUserId:{'builtin-admin':'12345'}}),{mode:0o600});
+  await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,hostCommand:{version:1,available:true},gpus:Array.from({length:m.cards},(_,index)=>({index,uuid:'GPU-'+index,memoryTotalMiB:32768,memoryUsedMiB:0,processesAvailable:true,processes:[]})),gpuq:{connected:true,observeOnly:false,jobs:[],capabilities:['priority-policy-v1','priority-rank-v1','preempt-idle-only-v1','console-yield-v1','console-placement-v1','console-sharing-v1']}}))}));
+  const reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));const origin='http://127.0.0.1:'+port;
+  const bridge=async(machine,operation,args)=>{
+    calls.push({machine,operation,args:structuredClone(args)});
+    if(operation==='sync')return {state:'RUNNING',nodeJobId:'Jcoexist',assignedIndices:[0]};
+    if(operation==='watch')return {state:'UNKNOWN',nodeJobId:'Jcoexist',assignedIndices:[0],progress:{reported:true,stale:false,snapshot:{sequence:1,phase:'train',epochs_completed:1,epochs_total:10,steps_completed:null,steps_total:null,eta_seconds:null,metrics:{},severity:'warning',message:'fixture warning',updated_at:1}}};
+    if(operation==='projects.snapshot.info')return {state:'READY',manifestBytes:2,manifestSha256:'a'.repeat(64),totalBytes:0,entries:0};
+    assert.ok(operation.startsWith('host.'),'unapproved native operation: '+operation);
+    return new Promise((resolve,reject)=>{const child=spawn('python3',[new URL('./maintenance-native-fixture.py',import.meta.url).pathname,dir]);let out='',err='';child.stdout.on('data',c=>out+=c);child.stderr.on('data',c=>err+=c);child.on('error',reject);child.on('close',code=>{if(code)reject(Error(err));else try{resolve(JSON.parse(out));}catch(error){reject(error);}});child.stdin.end(JSON.stringify({operation,args}));});
+  };
+  // The notification sender captures this fake function during initialization;
+  // all browser/CLI requests afterwards use the ordinary localhost transport.
+  globalThis.fetch=async(url,args)=>{assert.equal(String(url),'https://api.telegram.org/bot123456:'+('T'.repeat(32))+'/sendMessage');sent.push(JSON.parse(args.body));return new Response(JSON.stringify({ok:true}),{status:200});};
+  let server,service;
+  try{({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,statusPath:status,origin,secure:false,bridge,notificationConfigPath:config}));}finally{globalThis.fetch=originalFetch;}
+  for(const timer of ['executionTimer','notificationTimer','maintenanceTimer'])clearInterval(service[timer]);
+  await new Promise(r=>server.listen(port,'127.0.0.1',r));
+  t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});});
+  const admin=await service.login('admin',password),owner=(await service.invoke(admin.token,'users.create',{username:'coexist-member',password})).result;
+  await service.invoke(admin.token,'policy.full',{userId:owner.id,policyVersion:0});const member=await service.login(owner.username,password);
+  const client=join(dir,'gpuctl.mjs'),adminSession=join(dir,'admin-session'),memberSession=join(dir,'member-session'),script=join(dir,'request.sh');
+  await writeFile(client,await(await fetch(origin+'/gpuctl.mjs')).text());await writeFile(script,'printf "native fixture\\n"');
+  for(const [file,login] of [[adminSession,admin],[memberSession,member]])await writeFile(file,JSON.stringify({url:origin,token:login.token,principal:login.principal,machine}));
+  const cli=(args,session=adminSession)=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[client,'--session-file',session,'--json',...args]);let out='',err='';child.stdout.on('data',c=>out+=c);child.stderr.on('data',c=>err+=c);child.on('error',reject);child.on('close',code=>{try{resolve({code,err,body:out.trim()?JSON.parse(out):null});}catch(error){reject(error);}});child.stdin.end();});
+  const training=await cli(['run','--legacy','--rank','P1','--gpu','0','--share','--vram-mib','4096','--','python','fixture.py']);assert.equal(training.code,0,training.err);
+  await new Promise(r=>setImmediate(r));while(service.reconciling)await new Promise(r=>setTimeout(r,2));await service.reconcile();
+  const job=service.store.jobs[0],before=structuredClone(job);assert.equal(job.state,'RUNNING');assert.equal(usage(service.store.jobs,'builtin-admin'),1);assert.equal(job.spec.placement.shared,true);
+  assert.equal((await cli(['notify',job.id,'on'])).code,0);assert.equal((await cli(['note','--general','coexistence note'])).code,0);
+  const request=await cli(['maintenance','request','--name','local protocol','--reason','coexistence fixture','--script-file',script,'--cwd',dir],memberSession);assert.equal(request.code,0,request.err);
+  const preview=await cli(['maintenance','preview',request.body.data.id]);assert.equal(preview.code,0,preview.err);assert.ok(preview.body.data.impact.platformJobs.some(item=>item.id===job.id));
+  const approveArgs=['maintenance','approve',request.body.data.id,'--revision','1','--preview-token',preview.body.data.previewToken];
+  const approved=await cli(approveArgs);assert.equal(approved.code,0,approved.err);assert.equal(approved.body.data.result.stdout,'native fixture\n');assert.equal((await cli(approveArgs)).code,0);
+  assert.deepEqual(job,before,'maintenance may not rewrite training state or its immutable spec');assert.equal(usage(service.store.jobs,'builtin-admin'),1);assert.equal(calls.filter(call=>call.operation==='host.exec').length,1);
+  const statusAfterApproval=service.state(admin.principal);assert.equal(statusAfterApproval.maintenance.version,1);assert.equal(statusAfterApproval.jobs[0].notifications.enabled,true);
+  const watched=await cli(['watch',job.id,'--interval','1']);assert.equal(watched.code,3,watched.err);assert.equal(watched.body.state,'UNKNOWN');assert.equal(watched.body.progress.snapshot.epochsCompleted,1);assert.equal(usage(service.store.jobs,'builtin-admin'),1);
+  await service.flushJobNotifications();assert.equal(sent.length,1);assert.equal(sent[0].chat_id,'12345');assert.doesNotMatch(sent[0].text,/native fixture|local protocol/);
+  assert.ok((await cli(['notes'])).body.data.notes.some(note=>note.body==='coexistence note'));
+  await service.invoke(member.token,'projects.snapshot.info',{machine,project:'fixture',release:'a'.repeat(64)});
+  assert.equal(calls.at(-1).args.userId,owner.id);assert.equal(calls.filter(call=>call.operation==='host.exec').length,1);
+  assert.equal((await cli(['maintenance','show',request.body.data.id],memberSession)).body.data.state,'SUCCEEDED');
 });
