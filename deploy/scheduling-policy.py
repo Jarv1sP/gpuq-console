@@ -1,6 +1,10 @@
 """Explicit queue rank and voluntary yielding; no legacy-victim takeover."""
 import importlib.util
 import re
+import json
+import sqlite3
+from contextlib import closing
+from pathlib import Path
 
 PRIORITY_PRESETS = {'idle': (0, 'now'), 'normal': (2, 'never'), 'high': (4, 'never')}
 
@@ -100,13 +104,25 @@ def allocation_arguments(job):
     return result
 
 
-def allocated_spec(job,indices,uuids):
+def allocated_spec(job,indices,uuids,config=None,environment=None):
     """A runtime copy only: stored cards remains the maximum quota reservation."""
     allowed=elastic_allocation(job) or [job['cards']]
     if len(indices) not in allowed or len(uuids)!=len(indices) or len(set(indices))!=len(indices) or len(set(uuids))!=len(uuids) or any(not re.fullmatch('[0-9]+',i) for i in indices) or any(not u.startswith('GPU-') for u in uuids):
         raise ValueError('Missing or incompatible GPUQ allocation')
     placement=gpu_placement(job)
-    if placement and set(map(int,indices))!=set(placement['gpuIndices']):raise ValueError('GPUQ allocation differs from requested physical GPUs')
+    if placement:
+        # Native admission resolves the selected host indices to immutable
+        # physical UUIDs. A later driver/index reorder must not silently pick
+        # a different device, or reject the same correctly leased device.
+        if not config or not environment:raise ValueError('Native pinned allocation ownership is unavailable')
+        with closing(sqlite3.connect(Path(config['database']).as_uri()+'?mode=ro',uri=True)) as db:
+            row=db.execute('SELECT a.gpu_uuids_json,a.gpu_indices_json,j.requested_gpu_uuids_json FROM attempts a JOIN jobs j ON j.id=a.job_id '
+                           "WHERE a.id=? AND j.id=? AND j.submit_key=? AND j.placement='pinned'",
+                           (environment.get('GPUQ_ATTEMPT_ID'),environment.get('GPUQ_JOB_ID'),job['id'])).fetchone()
+        if row is None:raise ValueError('Pinned allocation does not belong to this Console job')
+        assigned,native_indices,requested=(json.loads(value) for value in row)
+        if set(uuids)!=set(requested) or len(assigned)!=len(indices) or dict(zip(map(int,indices),uuids))!=dict(zip(native_indices,assigned)):
+            raise ValueError('GPUQ allocation differs from requested physical UUIDs')
     return {**job,'cards':len(indices)}
 
 

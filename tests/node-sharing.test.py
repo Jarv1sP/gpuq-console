@@ -29,10 +29,22 @@ class Sharing(unittest.TestCase):
     def test_fixed_and_shared_native_arguments_and_runtime_gpu_set(self):
         job=self.job();args=P.allocation_arguments(job)
         self.assertEqual(args,['--gpu','3','--share','--vram-gb','4.0009765625'])
-        self.assertEqual(P.allocated_spec(job,['3'],['GPU-test'])['cards'],1)
-        with self.assertRaises(ValueError):P.allocated_spec(job,['4'],['GPU-test'])
+        with self.assertRaisesRegex(ValueError,'ownership'):P.allocated_spec(job,['3'],['GPU-test'])
         for changes in ({'priority':'idle'},{'elastic':{}},{'placement':{'gpuIndices':[3,3],'shared':False}}):
             with self.assertRaises(ValueError):P.gpu_placement({**job,**changes})
+
+    def test_native_uuid_binding_survives_index_drift_but_rejects_other_gpus_or_jobs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config={'database':str(Path(temp)/'db')};job={**self.job(),'id':str(uuid.uuid4())};env={'GPUQ_ATTEMPT_ID':'A1','GPUQ_JOB_ID':'J1'}
+            with closing(sqlite3.connect(config['database'])) as db:
+                db.execute('CREATE TABLE jobs(id TEXT,submit_key TEXT,placement TEXT,requested_gpu_uuids_json TEXT)')
+                db.execute('CREATE TABLE attempts(id TEXT,job_id TEXT,gpu_uuids_json TEXT,gpu_indices_json TEXT)')
+                db.execute('INSERT INTO jobs VALUES (?,?,?,?)',('J1',job['id'],'pinned','["GPU-physical"]'))
+                db.execute('INSERT INTO attempts VALUES (?,?,?,?)',('A1','J1','["GPU-physical"]','[4]'));db.commit()
+            # The submitted GPU3 is now the same physical UUID at index4.
+            self.assertEqual(P.allocated_spec(job,['4'],['GPU-physical'],config,env)['cards'],1)
+            for indices,uuids,who in ((['3'],['GPU-physical'],env),(['4'],['GPU-other'],env),(['4'],['GPU-physical'],{**env,'GPUQ_JOB_ID':'Jother'})):
+                with self.assertRaises(ValueError):P.allocated_spec(job,indices,uuids,config,who)
 
     def coordinator(self,leases=(),holder_shared=False):
         device=GpuDevice(index=3,uuid='GPU-test',memory_total_mib=24576,memory_used_mib=8192,memory_free_mib=16384,utilization_percent=25,compute_pids=(123,))
