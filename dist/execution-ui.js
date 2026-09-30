@@ -10,6 +10,7 @@ export function trainingPriority(value,admin=false){if(!Object.hasOwn(priorities
 export function priorityDescription(value){return priorities[value]?.description||'优先级尚未确认。';}
 const rankLabels=['P0 最低','P1 低','P2 普通','P3 较高','P4 最高'];
 export function priorityRankOptions(selected){return ['idle','P1','normal','P3','high'].map((value,i)=>`<option value="${value}" ${value===selected?'selected':''}>${rankLabels[i]}</option>`).join('');}
+export function priorityRankValue(value){if(!['idle','P1','normal','P3','high','P0','P2','P4'].includes(value))throw Error('请选择 P0–P4 排队等级。');return value;}
 export function priorityRankLabel(job){return job.priority!=null&&Number.isInteger(job.schedulerPriority)&&job.schedulerPriority>=0&&job.schedulerPriority<=4?rankLabels[job.schedulerPriority]:priorityLabel(job.priority);}
 export function schedulingContractLabel(policy){if(!policy)return '让位/恢复策略未确认';return `${({never:'不让位',now:'允许立即让位',save:'保存后让位',legacy:'旧版让位策略'})[policy.yield_policy]||'让位方式未知'} · ${policy.restart_policy==='on-preempt'?'被抢占后重新排队':policy.restart_policy==='never'?'被抢占后不重排':'重启方式未知'}`;}
 export function sampleTime(value){
@@ -157,8 +158,7 @@ export function executionUI(store,refresh,toast){
       if(store.principal?.role!=='admin')throw Error('只有管理员可以调整排队任务优先级。');
       const jobId=button.dataset.jobPrioritySave,job=store.jobs.find(item=>item.id===jobId),control=button.closest('[data-priority-editor]')?.querySelector('select');
       if(!job||!canEditPriority(job,true)||!control)throw Error('任务已不在可调整的队列状态，请刷新后核对。');
-      const priority=trainingPriority(control.value,true);if(priority===job.priority){toast('优先级未改变。');return;}
-      if(priority==='idle'&&!window.confirm('将这个排队任务设为最低、允许中断？后续让位会结束进程，已写入的输出保留，不自动恢复训练。'))return;
+      const priority=priorityRankValue(control.value);if(priority===job.priority){toast('优先级未改变。');return;}
       await call('jobs.priority',{jobId,priority,expectedPriority:control.dataset.originalPriority});control.dataset.originalPriority=priority;refresh();toast('已请求调整优先级；以下次调度核对结果为准。');
     });
     if(button.id==='close-job-log')log.close();
