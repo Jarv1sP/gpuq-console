@@ -12,6 +12,9 @@ import stat
 import subprocess
 import tempfile
 import time
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import node_runtime
 
 DATASET_ROOT = Path('/data2/datasets')
 # Legacy v1 executor/broker granted the authenticated hostAdmin route through
@@ -96,12 +99,17 @@ def upgraded_config(config, old_runner, cache_root):
 def atomic_copy(source, target):
     fd, temporary = tempfile.mkstemp(prefix='.dataset-upgrade-', dir=target.parent)
     try:
-        with os.fdopen(fd, 'wb') as out, source.open('rb') as inp:
-            shutil.copyfileobj(inp, out); out.flush(); os.fsync(out.fileno())
-        os.chmod(temporary, 0o700 if target.suffix == '.py' else 0o600)
+        with os.fdopen(fd, 'wb') as out:
+            out.write(source if isinstance(source,bytes) else source.read_bytes());out.flush();os.fsync(out.fileno())
+        os.chmod(temporary, 0o700)
         os.replace(temporary, target)
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
+
+def cache_module(source):
+    spec=importlib.util.spec_from_file_location('gpuq_dataset_cache',source/'dataset-cache.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module
 
 def main(argv=None):
     p = argparse.ArgumentParser()
@@ -119,13 +127,9 @@ def main(argv=None):
     previous = json.loads(path.read_text())
     config, conda_origin = upgraded_config(previous, dest / 'sandbox-runner.py', DATASET_ROOT)
     config['hostRoot'], host_root_origin = preserved_host_root(previous, dest)
-    files = ('dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py', 'node-executor.py')
-    for name in files:
-        source = a.source / name
-        if not source.is_file() or source.is_symlink(): raise SystemExit('Missing deployment file: '+name)
-        compile(source.read_text(), str(source), 'exec')
-    spec = importlib.util.spec_from_file_location('gpuq_dataset_cache', a.source / 'dataset-cache.py')
-    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    profile=node_runtime.detected_profile((dest/'sandbox-runner.py').read_bytes())
+    plan,payloads=node_runtime.preflight(a.source,profile);files=tuple(name for name,_ in plan)
+    module=cache_module(a.source)
     module._data2_mount()
     cache_root = DATASET_ROOT
     if cache_root.is_symlink() or cache_root.stat().st_uid != os.getuid() or cache_root.stat().st_mode & 0o077:
@@ -133,7 +137,7 @@ def main(argv=None):
     if '--ro-bind-fd' not in subprocess.run(['bwrap','--help'],check=True,capture_output=True,text=True).stdout:
         raise SystemExit('bubblewrap --ro-bind-fd support is required')
     if not a.apply:
-        print(json.dumps({'dryRun': True, 'files': list(files), 'datasetsRoot': str(cache_root), 'conda': config['conda'], 'condaSource': conda_origin, 'hostRoot': config['hostRoot'], 'hostRootSource': host_root_origin, 'terminalHelperUnchanged': True, 'schedulerUnchanged': True})); return
+        print(json.dumps({'dryRun': True, 'files': list(files), 'runtimeProfile':profile,'datasetsRoot': str(cache_root), 'conda': config['conda'], 'condaSource': conda_origin, 'hostRoot': config['hostRoot'], 'hostRootSource': host_root_origin, 'terminalHelperUnchanged': False, 'schedulerUnchanged': True})); return
     module.DatasetCache(root=str(cache_root))
     backup = dest / ('before-datasets-' + str(time.time_ns())); backup.mkdir(mode=0o700)
     for name in (*files, 'node-config.json'):
@@ -153,10 +157,13 @@ def main(argv=None):
     directory=os.open(dest,os.O_RDONLY|os.O_DIRECTORY)
     try: os.fsync(directory)
     finally: os.close(directory)
-    for name in files: atomic_copy(a.source / name, dest / name)
+    for name in files:
+        target=dest/name
+        if not target.exists() or target.read_bytes()!=payloads[name]:atomic_copy(payloads[name],target)
+        else:target.chmod(0o700)
     directory=os.open(dest,os.O_RDONLY|os.O_DIRECTORY)
     try: os.fsync(directory)
     finally: os.close(directory)
-    print(json.dumps({'upgraded': True, 'backup': str(backup), 'conda': config['conda'], 'condaSource': conda_origin, 'hostRoot': config['hostRoot'], 'hostRootSource': host_root_origin, 'terminalHelperUnchanged': True, 'schedulerUnchanged': True, 'restartRequired': False}))
+    print(json.dumps({'upgraded': True, 'backup': str(backup),'runtimeProfile':profile, 'conda': config['conda'], 'condaSource': conda_origin, 'hostRoot': config['hostRoot'], 'hostRootSource': host_root_origin, 'terminalHelperUnchanged': False, 'schedulerUnchanged': True, 'restartRequired': False}))
 
 if __name__ == '__main__': main()

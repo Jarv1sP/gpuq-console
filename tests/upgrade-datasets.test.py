@@ -50,6 +50,10 @@ class UpgradeDatasets(unittest.TestCase):
         (self.source / 'sandbox-runner.py').write_text('# new runner needs cfg conda\n')
         (self.source / 'node-executor.py').write_text('# new executor\n')
         (self.source / 'dataset-upload.py').write_text('# member upload helper\n')
+        deploy=Path(__file__).resolve().parents[1]/'deploy'
+        (self.source/'node-runtime.json').write_bytes((deploy/'node-runtime.json').read_bytes())
+        for name,original in upgrade.node_runtime.runtime_plan('common-p0'):
+            if not (self.source/original).exists():(self.source/original).write_bytes((deploy/original).read_bytes())
 
     def inferred(self, config=None):
         return upgrade.upgraded_config(self.config if config is None else config, self.runner, self.cache)
@@ -124,7 +128,7 @@ class UpgradeDatasets(unittest.TestCase):
         result = self.run_main()
         self.assertTrue(result['dryRun'])
         self.assertEqual(result['condaSource'], 'legacy-sandbox-mount')
-        self.assertTrue(result['terminalHelperUnchanged'])
+        self.assertFalse(result['terminalHelperUnchanged'])
         self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_ino) for path in self.dest.iterdir()})
 
     def test_apply_preserves_paths_backups_and_broker_and_writes_config_first(self):
@@ -143,8 +147,8 @@ class UpgradeDatasets(unittest.TestCase):
         cfg = json.loads(self.path.read_text())
         for key, value in self.config.items():
             self.assertEqual(cfg[key], value)
-        self.assertEqual(copied, ['dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py', 'node-executor.py'])
-        self.assertEqual(self.broker.stat().st_ino, broker_inode)
+        self.assertEqual(copied, [name for name,_ in upgrade.node_runtime.runtime_plan('common-p0')])
+        self.assertNotEqual(self.broker.stat().st_ino, broker_inode)
         self.assertEqual((Path(result['backup']) / 'node-config.json').read_bytes(), original)
         self.assertFalse(result['restartRequired'])
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)

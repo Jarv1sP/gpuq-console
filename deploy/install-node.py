@@ -2,10 +2,15 @@
 """Run as the GPUQ service user. Add scoped keys; never overwrite a GPUQ DB."""
 import argparse,fcntl,importlib.util,ipaddress,json,os,pwd,re,shlex,shutil,subprocess,sys,time
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--inventory',required=True);p.add_argument('--node',required=True);p.add_argument('--collector-key',required=True);p.add_argument('--executor-key',required=True);p.add_argument('--initialize-gpuq',action='store_true');p.add_argument('--enable-host-root',action='store_true');p.add_argument('--configure-cpu-delegation',action='store_true');p.add_argument('--runtime-profile',choices=('common-p0','ray-p0'),default='common-p0');a=p.parse_args()
-if a.configure_cpu_delegation and a.runtime_profile!='ray-p0':p.error('--configure-cpu-delegation requires --runtime-profile ray-p0')
+p=argparse.ArgumentParser();p.add_argument('--inventory',required=True);p.add_argument('--node',required=True);p.add_argument('--collector-key',required=True);p.add_argument('--executor-key',required=True);p.add_argument('--initialize-gpuq',action='store_true');p.add_argument('--enable-host-root',action='store_true');p.add_argument('--configure-cpu-delegation',action='store_true');p.add_argument('--runtime-profile',choices=('common-p0','ray-p0'));a=p.parse_args()
 if os.getuid()==0:raise SystemExit('Run as the dedicated GPUQ user, not root')
 source=Path(__file__).resolve().parents[1];inventory=json.loads(Path(a.inventory).read_text());node=next(n for n in inventory['nodes'] if n['id']==a.node)
+sys.path.insert(0,str(source/'deploy'))
+import node_runtime
+installed_runner=Path.home()/'.local/libexec/gpuq-console/sandbox-runner.py'
+if a.runtime_profile is None:a.runtime_profile=node_runtime.detected_profile(installed_runner.read_bytes()) if installed_runner.is_file() else 'common-p0'
+if a.configure_cpu_delegation and a.runtime_profile!='ray-p0':p.error('--configure-cpu-delegation requires --runtime-profile ray-p0')
+runtime_plan,runtime_payloads=node_runtime.preflight(source/'deploy',a.runtime_profile)
 if pwd.getpwuid(os.getuid()).pw_name!=node['user']:raise SystemExit('Wrong OS service user')
 ip=str(ipaddress.IPv4Address(inventory['vpsTailIP']))
 for key in ('workspaceRoot','gpuqRoot','conda'):
@@ -49,12 +54,11 @@ else:
     if a.initialize_gpuq:print('Existing GPUQ preserved; no upgrade or database initialization performed')
     if not binary.is_file():raise SystemExit('Existing GPUQ requires its managed ~/bin/gpu command')
 cfg=json.loads(config.read_text())
-for item in ('node-executor.py','terminal-helper.py','admin-command.py','node-probe.py','dataset-cache.py','dataset-upload.py','project-store.py','project-ops.py','job-diagnostics.py','gpuq-network'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
-runner_source='sandbox-runner.py' if a.runtime_profile=='ray-p0' else 'sandbox-runner-common-p0.py'
-shutil.copy2(source/'deploy'/runner_source,dest/'sandbox-runner.py');(dest/'sandbox-runner.py').chmod(0o700)
-if a.runtime_profile=='ray-p0':
-    for item in ('job-resources.py','gpuq-ray'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
-host_root=False
+previous=json.loads((dest/'node-config.json').read_text()) if (dest/'node-config.json').exists() else {}
+if type(previous.get('hostRoot',False)) is not bool:raise SystemExit('Existing hostRoot must be an explicit boolean')
+for item,_ in runtime_plan:
+    node_runtime.atomic_install(runtime_payloads[item],dest/item)
+host_root=previous.get('hostRoot',False)
 if a.enable_host_root:
     # This is a deliberately explicit, high-trust host-root capability.
     run('sudo','install','-D','-o','root','-g','root','-m','755',str(source/'deploy/gpuq-console-root-shell'),'/usr/local/libexec/gpuq-console-root-shell')
@@ -62,8 +66,8 @@ if a.enable_host_root:
     sudoers=dest/'sudoers.pending';sudoers.write_text(node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-root-shell\n'+node['user']+' ALL=(root) NOPASSWD: /usr/local/libexec/gpuq-console-admin-command ""\n');sudoers.chmod(0o600)
     run('sudo','visudo','-cf',str(sudoers));run('sudo','install','-o','root','-g','root','-m','440',str(sudoers),'/etc/sudoers.d/gpuq-console');sudoers.unlink();host_root=True
 node_config={'machine':a.node,'cards':node['cards'],'root':str(root),'gpu':str(binary),'database':cfg['db_path'],'slirp':shutil.which('slirp4netns'),'conda':node['conda'],'hostRoot':host_root}
-previous=json.loads((dest/'node-config.json').read_text()) if (dest/'node-config.json').exists() else {}
-shutil.copy2(source/'deploy/scheduling-policy.py',dest/'scheduling-policy.py');(dest/'scheduling-policy.py').chmod(0o700)
+node_config.update(trainingControlProtocol=1,controlRoot=cfg.get('control_dir',str(scheduler/'control')),gpuqArchive=cfg.get('archive_path',str(scheduler/'current/gpuq.pyz')))
+node_config={**previous,**node_config}
 retention=node.get('diagnosticsRetentionDays',previous.get('diagnosticsRetentionDays',30))
 if type(retention) is not int or not 1<=retention<=365:raise SystemExit('Invalid diagnostics retention days (1..365)')
 node_config['diagnosticsRetentionDays']=retention
@@ -77,7 +81,7 @@ if datasets is not None:
     node_config['datasets']=datasets
 (dest/'node-config.json').write_text(json.dumps(node_config,indent=2))
 units=home/'.config/systemd/user';units.mkdir(parents=True,exist_ok=True)
-for item in ('gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'):shutil.copy2(source/'deploy'/item,units/item)
+for item in node_runtime.manifest(source/'deploy')['units']:shutil.copy2(source/'deploy'/item,units/item)
 run('systemctl','--user','daemon-reload');run('systemctl','--user','enable','--now','gpuq-diagnostics-gc.timer')
 ssh=home/'.ssh';ssh.mkdir(mode=0o700,exist_ok=True);auth=ssh/'authorized_keys'
 if auth.is_symlink() or (auth.exists() and (not auth.is_file() or auth.stat().st_uid!=os.getuid())):raise SystemExit('Unsafe authorized_keys')
