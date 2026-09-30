@@ -307,6 +307,17 @@ gpuctl run -g 1 --priority idle -- python disposable_trial.py --output /outputs
 
 协作内容对所有已登录成员可见；长期实验记录请保存在自己的项目或文档中。维护前及时保存 checkpoint，是否自动保存由训练程序决定。
 
+### 任务留言（命令行）
+
+```sh
+gpuctl notes
+gpuctl note --job JOB_ID "预计今晚结束"
+gpuctl note --general "本周维护安排"
+gpuctl note-delete NOTE_ID
+```
+
+任务留言使用 `gpuctl jobs` 返回的完整平台任务 ID，只能关联自己的未结束任务；确认完成、失败或取消后自动删除正文。排队、让位中或状态未知时保留。`--general` 是非任务留言，保留直到作者或管理员手动删除。所有登录成员可见，每条最多 2000 字符；这套 API/CLI 不改变网页原有聊天室的留存规则。
+
 ## 常见问题 {#troubleshooting}
 
 ### 刚注册，为什么没有可用显卡？
