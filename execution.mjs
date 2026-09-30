@@ -1,6 +1,7 @@
 import net from 'node:net';
 import {randomUUID,createHash} from 'node:crypto';
 import {MACHINES} from './dist/model.js';
+import {applyJobFeedback} from './dist/job-progress.js';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
@@ -8,7 +9,7 @@ export const PRIORITIES=new Set(['idle','normal','high']);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 export const priorityCapable=host=>host?.reachable===true&&host.gpuq?.connected===true&&Array.isArray(host.gpuq.capabilities)&&host.gpuq.capabilities.includes('priority-policy-v1')&&host.gpuq.capabilities.includes('preempt-idle-only-v1');
 function priorityValue(value){if(!PRIORITIES.has(value))fail('优先级必须为 idle、normal 或 high。');return value;}
-function schedulerResult(job,result){
+export function schedulerResult(job,result){
   job.nodeJobId=result.nodeJobId||job.nodeJobId;
   job.state=['PENDING','STARTING','RUNNING','PREEMPTING',...TERMINAL].includes(result.state)?result.state:'UNKNOWN';
   job.assignedIndices=result.assignedIndices||[];job.error=result.error||null;job.checkedAt=new Date().toISOString();
@@ -20,6 +21,7 @@ function schedulerResult(job,result){
   job.schedulerPolicy=result.schedulerPolicy||null;
   job.priorityMutable=result.priorityMutable===true;
   job.preempted=result.preempted===true;
+  applyJobFeedback(job,result);
   if(TERMINAL.has(job.state))job.finishedAt||=job.checkedAt;
 }
 export function bridgeClient(socketPath){
@@ -283,6 +285,17 @@ export async function executionCall(service,principal,operation,args){
     return publicJob(job);
   }
   if(operation==='jobs.logs'){const job=jobById(args.jobId);return service.bridge(job.machine,'logs',{job:job.spec});}
+  if(operation==='jobs.watch'){
+    if(Object.keys(args).some(k=>k!=='jobId'))fail('进度查询参数无效。');
+    const job=jobById(args.jobId);
+    if(!job.machine||TERMINAL.has(job.state))return publicJob(job);
+    authorizedMachine(job.machine);
+    try{
+      const result=await service.bridge(job.machine,'watch',{job:job.spec});
+      if(result.nodeJobId){schedulerResult(job,result);service.save();}
+      return publicJob(job);
+    }catch{return {...publicJob(job),state:'UNKNOWN',error:'节点进度查询失败，任务状态待核对。',checkedAt:new Date().toISOString()};}
+  }
   if(operation==='jobs.diagnostics'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('诊断参数无效。');
     const job=jobById(args.jobId);authorizedMachine(job.machine);

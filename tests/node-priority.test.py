@@ -176,6 +176,7 @@ class NodePriority(unittest.TestCase):
             'schedulerState': 'PENDING', 'schedulerPriority': 4, 'priority': 'high',
             'schedulerPolicy': {'priority': 4, 'yield_policy': 'never', 'restart_policy': 'never', 'dispatch_mode': 'queue'},
             'priorityMutable': True, 'queueReason': 'waiting for confirmed idle capacity', 'preempted': False,
+            'progress': None, 'latestAttempt': None,
         })
         self.commands.clear()
         self.assertEqual(self.call()['priority'], 'high')
