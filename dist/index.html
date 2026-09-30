@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="./workspace.css" />
   <link rel="stylesheet" href="./datasets.css" />
   <link rel="stylesheet" href="./community.css" />
+  <link rel="stylesheet" href="./maintenance.css" />
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -24,6 +25,7 @@
 <a class="nav-item" href="#datasets" data-nav="datasets"><svg aria-hidden="true" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></svg>数据集</a>
 <a class="nav-item" href="#community" data-nav="community"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18 0Z"/><path d="M7 10h8M7 14h5"/></svg>协作区</a>
 <a class="nav-item" href="#users" data-nav="users" data-admin-only hidden><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 4v2"/></svg>成员授权<span class="nav-count" id="pending-count" hidden>0</span></a>
+<a class="nav-item" href="#maintenance" data-nav="maintenance" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>维护申请</a>
 </nav>
     <div class="sidebar-bottom"><div class="integration"><span class="integration-symbol" aria-hidden="true">✳</span><div>让实验有序进行<small>计算 · 探索 · 协作</small></div></div><div class="profile"><span class="avatar admin-avatar">J</span><div><span id="profile-name">未登录</span><small id="profile-role">个人工作空间</small></div></div></div>
   </aside>
@@ -35,6 +37,7 @@
 <section data-page="work" id="page-work"><div class="self-summary" id="self-summary"></div><div id="execution-host"></div></section>
 <section data-page="datasets" id="page-datasets" hidden></section>
 <section data-page="community" id="page-community" hidden></section>
+<section data-page="maintenance" id="page-maintenance" hidden></section>
 <section data-page="resources" id="page-resources" hidden><div class="section-kicker"><span>实验室服务器</span><span id="resource-summary">我的额度：0 张</span></div><p id="monitor-status" class="monitor-status" role="status"></p><p class="resource-explainer">额度是你最多可用的卡数；当前占用见下表，提交后由调度器安排启动。</p><div class="resource-grid" id="machine-grid"></div></section>
 <section data-page="users" id="page-users" hidden>
 <div class="management-toolbar"><div class="filter-tabs"><button id="filter-pending" aria-pressed="true">待处理 0</button><button id="filter-all" aria-pressed="false">全部账号</button></div><button class="button primary" data-action="invites">注册邀请</button></div>

@@ -279,6 +279,23 @@ gpuctl pull --job JOB_ID model.pt ./model.pt
 
 ## 排队与协作 {#queue}
 
+### 申请系统维修
+
+需要安装系统库或其他 root 操作时，到网页「维护申请」填写机器、原因和脚本；管理员可以批准执行或附理由退回。普通开发和训练无需申请，也不会因此获得 root 权限。
+
+CLI 在自己的电脑上提交脚本文件，文件内容会冻结到申请里，不会立即执行：
+
+```sh
+gpuctl maintenance request --name "检查系统依赖" --reason "缺少系统库，需要检查" --script-file ./maintenance.sh
+gpuctl maintenance list
+gpuctl maintenance show REQUEST_ID
+gpuctl maintenance withdraw REQUEST_ID --revision N
+```
+
+创建使用当前选中的机器，也可加 `--machine MACHINE_ID`。将编号和版本替换为 `show` 返回的值；只有待确认申请可撤回。退回后修改脚本再提交新申请，可加 `--parent REQUEST_ID` 引用旧记录。响应不明时使用提示中的原 `--key UUID` 重试相同内容。
+
+批准后即使关闭网页，操作也会继续核对；刷新申请查看结果或退回理由。`UNKNOWN` 不代表没有执行，不要另建申请盲目重跑。上次节点回执不是当前状态保证；CLI 查询／审批接口成功也不等于操作成功，要看申请状态和退出码。脚本和输出仅申请者与管理员可见；不要填写密码或令牌。
+
 ### 授权不等于占住显卡
 
 每台机器的卡数上限限制你在该机同时申请多少张卡；所有机器合计上限限制你跨机器同时申请的总卡数。例如每台最多 4 张、总共最多 6 张，可以一台申请 4 张，另一台申请 2 张。

@@ -23,6 +23,14 @@ gpuctl exec -- id                Administrator: non-interactive host root comman
 gpuctl exec --detach -- bash -lc 'long-command'
 gpuctl exec status HANDLE        Read bounded stdout, stderr, state and exit code
 gpuctl exec cancel HANDLE        Cancel this host command and confirm cleanup
+gpuctl maintenance request --name TITLE --reason REASON --script-file FILE
+                                Request root maintenance; does NOT execute it
+gpuctl maintenance list / show ID
+gpuctl maintenance withdraw ID --revision N
+gpuctl maintenance preview ID    Administrator: inspect script + current occupancy
+gpuctl maintenance approve ID    Administrator: preview and explicitly confirm (TTY)
+gpuctl maintenance return ID --revision N --reason REASON
+gpuctl maintenance cancel ID --revision N  Administrator: stop the original operation
 gpuctl push .                    Upload code to the selected project's draft
 gpuctl project publish           Freeze code + private environment; wait for READY
 gpuctl run -g 2 -- python train.py
@@ -216,8 +224,8 @@ async function main(){
     const item=args[i]==='-g'?'--cards':args[i];if(!item.startsWith('--')){positionals.push(item);continue;}
     const key=item.slice(2);
     if(Object.hasOwn(options,key)&&!['machine','data'].includes(key))fail(`Duplicate option: ${item}`);
-    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','overwrite'].includes(key)){options[key]=true;continue;}
-    if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job','priority','cwd','timeout','reconnect','env-mode'].includes(key))fail(`Unknown option: ${item}`);
+    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','overwrite','ack-unknown'].includes(key)){options[key]=true;continue;}
+    if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job','priority','cwd','timeout','reconnect','env-mode','reason','script-file','revision','preview-token','parent','cursor','limit'].includes(key))fail(`Unknown option: ${item}`);
     const value=args[++i];if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
     if(key==='machine')options.machines.push(value);else if(key==='data')options.datasets.push(value);else options[key]=value;
   }
@@ -225,7 +233,8 @@ async function main(){
   if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
-  if(['cwd','timeout','detach'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='exec')fail('--cwd, --timeout and --detach are only valid for exec');
+  if(['cwd','timeout'].some(key=>Object.hasOwn(options,key))&&!['exec','maintenance'].includes(positionals[0])||options.detach&&positionals[0]!=='exec')fail('--cwd/--timeout are for exec or maintenance; --detach is only for exec');
+  if(['reason','script-file','revision','preview-token','parent','cursor','limit','ack-unknown'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='maintenance')fail('Maintenance options are only valid for maintenance');
   const projectSlug=value=>{if(typeof value!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(value))fail('Project must start with a lowercase letter and use 1–48 lowercase letters, digits, _ or -');return value;};
   if(options.project)projectSlug(options.project);
   if(options.project&&options.legacy)fail('--project and --legacy cannot be combined');
@@ -298,6 +307,43 @@ async function main(){
     const own=()=>session.principal.role==='admin'&&options.as?find(options.as):session.principal.userId;
     if(command==='use'&&positionals.length===2){
       if(!state.machines.some(m=>m.id===positionals[1]))fail('这台机器未授权或不存在');session.machine=positionals[1];await saveSession();result={selected:session.machine,project:selectedProject(session.machine)};
+    }else if(command==='maintenance'){
+      if(state.demo||state.maintenance?.version!==1)fail('当前后台未启用维护申请；不会模拟执行 root 操作。');
+      const action=positionals[1],actions=['request','list','show','preview','approve','return','withdraw','cancel'];
+      if(!actions.includes(action)||training.length)fail('Usage: maintenance request|list|show|preview|approve|return|withdraw|cancel');
+      const common=['machines','datasets','url','session-file','json','help'],specific={request:['name','reason','script-file','key','cwd','timeout','parent'],list:['cursor','limit'],show:[],preview:[],approve:['revision','preview-token','ack-unknown'],return:['revision','reason'],withdraw:['revision'],cancel:['revision']}[action];
+      if(options.datasets.length||Object.keys(options).some(key=>!common.includes(key)&&!specific.includes(key)))fail('维护申请参数与所选操作不匹配。');
+      if(options.machines.length>1||options.machines.some(value=>value.includes('='))||options.machines.length&&!['request'].includes(action))fail('仅创建申请接受一台 --machine；其他操作使用申请记录里的机器。');
+      if(['request','list'].includes(action)?positionals.length!==2:positionals.length!==3)fail('维护操作需要正确的申请编号或参数。');
+      const number=(value,label)=>{if(typeof value!=='string'||!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value)))fail(label+' 必须为整数');return Number(value);};
+      const id=positionals[2];
+      if(action==='request'){
+        if(!options.name||!options.reason||!options['script-file'])fail('request 需要 --name、--reason、--script-file；脚本不会立即执行。');
+        const info=await lstat(options['script-file']);if(!info.isFile()||info.size>8192)fail('脚本必须是最多 8 KiB 的普通文件');
+        const bytes=await readFile(options['script-file']);if(bytes.length>8192)fail('脚本最多 8 KiB');
+        const script=new TextDecoder('utf-8',{fatal:true}).decode(bytes),key=options.key||randomUUID();
+        process.stderr.write(`申请提交键：${key}（响应不明时保留此键）\n`);
+        result=(await call('maintenance.create',{key,machine:defaultMachine(),title:options.name,reason:options.reason,script,
+          ...(options.cwd?{cwd:options.cwd}:{}),...(options.timeout?{timeoutSec:number(options.timeout,'timeout')}:{}),...(options.parent?{parentId:options.parent}:{})})).result;
+      }else if(action==='list')result=(await call('maintenance.list',{...(options.cursor?{cursor:options.cursor}:{}),...(options.limit?{limit:number(options.limit,'limit')}:{})})).result;
+      else if(action==='show'||action==='preview')result=(await call(action==='show'?'maintenance.get':'maintenance.preview',{id})).result;
+      else if(action==='approve'){
+        if(session.principal.role!=='admin')fail('审批仅管理员可用');
+        let request;
+        if(options['preview-token']||options.revision){if(!options['preview-token']||!options.revision)fail('非交互批准需要同时提供 --revision 和 --preview-token');request={id,revision:number(options.revision,'revision'),previewToken:options['preview-token'],...(options['ack-unknown']?{acknowledgeUnknown:true}:{})};}
+        else{
+          if(!process.stdin.isTTY)fail('请先 maintenance preview ID --json；非交互批准需 --revision N --preview-token TOKEN，未知占用另加 --ack-unknown。');
+          const p=(await call('maintenance.preview',{id})).result;
+          process.stderr.write(`${p.request.title} · ${p.request.machine} · ${p.request.owner.username}\n原因：${p.request.reason}\n目录：${p.request.cwd} · 超时 ${p.request.timeoutSec}s\nSHA256：${p.request.scriptSha256}\n${p.request.script}\n占用：${JSON.stringify(p.impact)}\nROOT 操作可能影响全机，失败不回滚。\n`);
+          const rl=createInterface({input:process.stdin,output:process.stderr});let answer;try{answer=await rl.question(p.impact.complete?'输入 EXECUTE 批准并执行，其他输入取消：':'占用不完整。输入 EXECUTE-UNKNOWN 仍批准执行，其他输入取消：');}finally{rl.close();}
+          if(answer!==(p.impact.complete?'EXECUTE':'EXECUTE-UNKNOWN'))fail('未批准，未执行。');
+          request={id,revision:p.request.revision,previewToken:p.previewToken,acknowledgeUnknown:!p.impact.complete};
+        }
+        result=(await call('maintenance.approve',request)).result;
+      }else{
+        if(!options.revision)fail('请先 show ID，随后提供当前 --revision N');
+        result=(await call('maintenance.'+action,{id,revision:number(options.revision,'revision'),...(action==='return'?{reason:options.reason}:{})})).result;
+      }
     }else if(command==='exec'){
       if(['as','project','release','job','root','legacy','cards','min-vram','name'].some(key=>Object.hasOwn(options,key))||options.datasets.length)fail('exec only accepts host-command options; project/training/impersonation flags are not supported');
       if(session.principal.role!=='admin')fail('Host commands require an existing administrator account');
@@ -548,6 +594,14 @@ async function main(){
   if(command==='download'){console.log(`已下载：${result.downloaded}（${result.bytes} 字节）`);return;}
   if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}${j.preempted?'（让位中断，不会自动重跑）':''}\n  ${j.machine} · ${j.cards} 张 · ${j.name||'train'} · 优先级 ${['idle','normal','high'].includes(j.priority)?j.priority:'旧策略／未核验'}${j.schedulerState?' · 调度 '+j.schedulerState:''}${j.queueReason?'\n  排队原因：'+j.queueReason:''}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
   if(command==='files'){console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');return;}
+  if(command==='maintenance'){
+    if(result.items){console.log(result.items.map(r=>`${r.id}  ${r.state}  v${r.revision}\n  ${r.machine} · ${r.owner.username} · ${r.title}`).join('\n')||'暂无维护申请。');if(result.nextCursor)console.log('下一页：gpuctl maintenance list --cursor '+result.nextCursor);return;}
+    const r=result.request||result;console.log(`${r.id} · ${r.state} · v${r.revision}\n${r.machine} · ${r.owner.username} · ${r.title}\n原因：${r.reason}\n目录：${r.cwd} · 超时 ${r.timeoutSec}s\n脚本 SHA256：${r.scriptSha256}\n${r.script}`);
+    if(r.decision?.reason)console.log('退回理由：'+r.decision.reason);if(r.error)console.log(r.error);
+    if(r.result){console.log(`上次节点回执：${r.result.state} · exit=${r.result.exitCode??'未确认'} · ${r.result.checkedAt}`);process.stdout.write(r.result.stdout);process.stderr.write(r.result.stderr);if(r.result.truncated.stdout||r.result.truncated.stderr)console.log('\n输出已截断（每路最多 64 KiB）。');}
+    if(result.previewToken){console.log('当前占用：'+JSON.stringify(result.impact));console.log('预览凭据（120秒有效）：'+result.previewToken);}
+    return;
+  }
   if(command==='users'){console.log(result.map(u=>`${u.username}  ${u.role==='admin'?'管理员':'普通用户'}  ${u.enabled?'启用':'暂停'}  总额度 ${u.total} 张\n  ${Object.entries(u.limits).map(([m,n])=>`${m}: ${n}`).join('，')||'尚未授权机器'}`).join('\n'));return;}
   console.log(JSON.stringify(result,null,2));
 }

@@ -5,6 +5,7 @@ import {terminalUI} from './terminal-ui.js';
 import {resourceCards,monitorSummary} from './resources-ui.js';
 import {datasetsUI} from './datasets-ui.js';
 import {createCommunityUI} from './community-ui.js';
+import {maintenanceUI} from './maintenance-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
@@ -12,6 +13,7 @@ let page='work',selected=null,draft=null,filter='pending',toastTimer,confirmActi
 const renderExecution=executionUI(store,()=>render(true),toast);
 const renderDatasets=datasetsUI(store,toast);
 const renderCommunity=createCommunityUI(store,toast);
+const renderMaintenance=maintenanceUI(store,toast);
 terminalUI(store,toast);
 const isAdmin=()=>store.principal?.role==='admin';
 const own=()=>store.users.find(u=>u.id===store.principal?.userId);
@@ -36,11 +38,11 @@ function render(preserve=false){
   $('#current-account').textContent=logged?`${store.principal.username} · ${admin?'管理员':'普通用户'}`:'尚未登录';
   $('#profile-name').textContent=logged?store.principal.username:'未登录';$('#profile-role').textContent=admin?'管理员':'个人工作空间';
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
-  const titles={work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览','查看每张 GPU 的使用情况，选择适合的服务器。'],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
+  const titles={work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览','查看每张 GPU 的使用情况，选择适合的服务器。'],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['维护申请','特殊操作由管理员确认；普通训练无需审批。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
   const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
   $('#mode-note').textContent=note;$('.demo-note').hidden=!note;
-  renderResources();renderExecution();renderDatasets();renderCommunity(page==='community');
+  renderResources();renderExecution();renderDatasets();renderCommunity(page==='community');renderMaintenance(page==='maintenance');
   if(!keepDraft){const list=filteredUsers();if(!list.some(user=>user.id===selected))selected=list[0]?.id||null;draft=selected?store.get(selected):null;}
   if(admin){renderUsers();if(!keepDraft)renderEditor();renderTaskTable($('#all-jobs'),store.jobs,{admin,userId:store.principal.userId});}
   else{$('#editor').innerHTML='';$('#user-list').innerHTML='';$('#all-jobs').innerHTML='';}
@@ -107,8 +109,8 @@ $('#login-form').addEventListener('submit',async event=>{event.preventDefault();
 $('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'));await store.login(data.get('username'),data.get('password'));event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#invites-dialog').addEventListener('close',()=>{inviteCode=null;$('#invites-content').innerHTML='';});
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
-const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','community','users'].includes(initialHash))page=initialHash;}render();if(!store.principal)openLogin();
+const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','community','maintenance','users'].includes(initialHash))page=initialHash;}render();if(!store.principal)openLogin();
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
-addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(['work','resources','datasets','community','users'].includes(next)&&next!==page)choosePage(next);});
+addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(['work','resources','datasets','community','maintenance','users'].includes(next)&&next!==page)choosePage(next);});
 addEventListener('pagehide',()=>clearInterval(poll),{once:true});

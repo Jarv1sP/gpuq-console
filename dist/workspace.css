@@ -119,8 +119,8 @@ input[type=file]::file-selector-button {border:1px solid #d7dfeb;background:#fff
 @media(max-width:900px) {
   .sidebar {display:block;position:sticky;inset:0 auto auto;top:0;width:100%;height:auto;padding:8px 16px;z-index:20;border-right:0;border-bottom:1px solid #34435d}
   .sidebar .brand,.sidebar .workspace,.sidebar .nav-label,.sidebar .sidebar-bottom {display:none}
-  .sidebar nav {display:flex;gap:6px;margin:0;max-width:760px;margin-inline:auto}
-  .sidebar .nav-item {flex:1;justify-content:center;min-height:46px;margin:0;padding:10px 9px;font-size:13px;gap:7px;white-space:nowrap}
+  .sidebar nav {display:flex;gap:6px;margin:0;width:100%;max-width:760px;margin-inline:auto;overflow-x:auto;overscroll-behavior-x:contain}
+  .sidebar .nav-item {flex:1 0 auto;justify-content:center;min-height:46px;margin:0;padding:10px 9px;font-size:13px;gap:7px;white-space:nowrap}
   .sidebar .nav-item svg {width:16px;height:16px}
   .sidebar .nav-count {margin:0}
   .shell {margin-left:0}

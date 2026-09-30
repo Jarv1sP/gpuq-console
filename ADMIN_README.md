@@ -66,6 +66,28 @@ gpuctl user role alice member
 
 ## Root / sudo 宿主机终端
 
+### 特殊管理操作申请
+
+网页「维护申请」查看成员申请，先核对目标机器、脚本 SHA256、目录、超时、当前占用和将反馈给成员的输出，再「批准并执行」或附必填理由退回。脚本引用的外部文件／网络依赖不被冻结；不完整占用需额外确认仍执行，不会自动暂停别人的训练。
+
+```sh
+gpuctl maintenance list
+gpuctl maintenance show REQUEST_ID
+gpuctl maintenance approve REQUEST_ID
+gpuctl maintenance return REQUEST_ID --revision N --reason "请补充具体库名"
+gpuctl maintenance cancel REQUEST_ID --revision N
+```
+
+交互式 `approve` 先展示脚本和占用，只有输入 `EXECUTE`（占用未知时 `EXECUTE-UNKNOWN`）才批准。非交互调用先 `maintenance preview REQUEST_ID --json`，再使用其版本和 120 秒有效的凭据：`maintenance approve REQUEST_ID --revision N --preview-token TOKEN`；占用不完整另加 `--ack-unknown`。预览过期、门户重启或占用变化时重新预览。批准成功后重试同一次批准只核对原操作，不再次派发。
+
+申请者始终没有 root 权限，当前成员不能调用 `host.*`。审批确认先落盘，之后撤权／降级不自动撤销操作，现任管理员可以停止原命令；停止、失败均不是回滚。`UNKNOWN` 只核对原执行键，详情中保留该键，不要换键盲目重跑。
+
+升级门户须包含 `maintenance.mjs`、两个前端资源及新增静态路由；Docker COPY 已更新。首次启动自动新增独立 `maintenance_requests` 表，不改变训练 schema 或节点协议，升级前备份门户 SQLite。缺少现有 root 命令能力的节点不能批准，需明确启用原 `hostRoot` 入口；不用重新给成员配置 SSH 密钥。旧版／Demo 没有能力时隐藏入口。
+
+列表每页最多 50 条，每人未完成申请最多 20 条，总记录最多 10000 条，输出每路最多 64 KiB 并显示截断。审批记录不随训练结束删除，达到上限后人工归档；数据库／记录含私人脚本与输出，不能公开，也不能直接删除尚未确认结束的记录。
+
+### 直接维护终端
+
 ```sh
 gpuctl use gpu-1
 gpuctl ssh --root

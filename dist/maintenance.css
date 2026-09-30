@@ -1,0 +1,12 @@
+.maintenance-layout{display:grid;grid-template-columns:minmax(280px,1fr) minmax(320px,1.4fr);gap:20px;align-items:start}
+.maintenance-composer,.maintenance-history{padding:24px;min-width:0}
+.maintenance-pair{display:grid;grid-template-columns:1fr 140px;gap:12px}
+.maintenance-toolbar,.maintenance-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.maintenance-toolbar{justify-content:space-between}
+.maintenance-row{display:flex;flex-direction:column;align-items:flex-start;gap:6px;width:100%;padding:14px;margin:8px 0;background:var(--panel,#fff);border:1px solid var(--border,#ddd);border-radius:10px;text-align:left;cursor:pointer;overflow-wrap:anywhere}
+.maintenance-row span,.maintenance-row small{color:var(--muted,#657085)}
+.maintenance-detail{border-top:1px solid var(--border,#ddd);margin-top:20px;padding-top:20px;overflow-wrap:anywhere}
+.maintenance-detail pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg,#f5f7fb);padding:12px;border-radius:8px;max-height:320px;overflow:auto}
+.maintenance-hash{font-size:12px;overflow-wrap:anywhere}
+.maintenance-composer textarea{width:100%;box-sizing:border-box}
+@media(max-width:900px){.maintenance-layout{grid-template-columns:minmax(0,1fr)}.maintenance-composer,.maintenance-history{padding:16px}.maintenance-pair{grid-template-columns:minmax(0,1fr) 110px}}
