@@ -193,6 +193,7 @@ def _submission_digest(
     sm_percent: int | None = None,
     yield_policy: str = "legacy",
     preempt_idle_only: bool = False,
+    preempt_opt_in_only: bool = False,
 ) -> str:
     """Build the versioned canonical submission idempotency digest."""
 
@@ -240,6 +241,8 @@ def _submission_digest(
         parts.extend(("yield-v1", yield_policy))
     if preempt_idle_only:
         parts.append("preempt-idle-only-v1")
+    if preempt_opt_in_only:
+        parts.append("preempt-opt-in-only-v1")
     return _digest(*parts)
 
 
@@ -1251,10 +1254,21 @@ _SCHEMA_V10_TO_V11_DDL = (
         SELECT job_id,attempt_id,gpu_uuid,gpu_index,acquired_at,'migrated_active'
         FROM leases ORDER BY acquired_at,attempt_id,gpu_index""",
 )
+_EXPECTED_SCHEMA_SIGNATURE_V11 = _build_expected_schema_signature((
+    *_SCHEMA_V2_TO_V3_DDL, *_SCHEMA_V3_TO_V4_DDL, *_SCHEMA_V4_TO_V5_DDL,
+    *_SCHEMA_V5_TO_V6_DDL, *_SCHEMA_V6_TO_V7_DDL, *_SCHEMA_V7_TO_V8_DDL,
+    *_SCHEMA_V8_TO_V9_DDL, *_SCHEMA_V9_TO_V10_DDL, *_SCHEMA_V10_TO_V11_DDL,
+))
+
+_SCHEMA_V11_TO_V12_DDL = (
+    """ALTER TABLE jobs ADD COLUMN preempt_opt_in_only INTEGER NOT NULL DEFAULT 0
+    CHECK (preempt_opt_in_only IN (0,1))""",
+)
 _EXPECTED_SCHEMA_SIGNATURE = _build_expected_schema_signature((
     *_SCHEMA_V2_TO_V3_DDL, *_SCHEMA_V3_TO_V4_DDL, *_SCHEMA_V4_TO_V5_DDL,
     *_SCHEMA_V5_TO_V6_DDL, *_SCHEMA_V6_TO_V7_DDL, *_SCHEMA_V7_TO_V8_DDL,
     *_SCHEMA_V8_TO_V9_DDL, *_SCHEMA_V9_TO_V10_DDL, *_SCHEMA_V10_TO_V11_DDL,
+    *_SCHEMA_V11_TO_V12_DDL,
 ))
 
 
@@ -1460,6 +1474,9 @@ class Store:
                         version = _SCHEMA_VERSION_V10
                     if version == _SCHEMA_VERSION_V10:
                         self._migrate_v10_to_v11(connection)
+                        version = 11
+                    if version == 11:
+                        self._migrate_v11_to_v12(connection)
                     self._validate_schema(connection)
                     connection.commit()
                 except BaseException:
@@ -1531,7 +1548,7 @@ class Store:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        if version == STORE_SCHEMA_VERSION:
+        if version in {11, STORE_SCHEMA_VERSION}:
             required_tables = _REQUIRED_TABLES
         elif version in {_SCHEMA_VERSION_V6, _SCHEMA_VERSION_V7, _SCHEMA_VERSION_V8, _SCHEMA_VERSION_V9, _SCHEMA_VERSION_V10}:
             required_tables = _REQUIRED_TABLES_V6_TO_V10
@@ -1829,6 +1846,14 @@ class Store:
             connection.execute(statement)
         connection.execute("UPDATE schema_meta SET schema_version=11 WHERE singleton=1")
         connection.execute("PRAGMA user_version=11")
+        self._validate_schema_version(connection, version=11, expected_signature=_EXPECTED_SCHEMA_SIGNATURE_V11)
+
+    def _migrate_v11_to_v12(self, connection: sqlite3.Connection) -> None:
+        self._validate_schema_version(connection, version=11, expected_signature=_EXPECTED_SCHEMA_SIGNATURE_V11)
+        for statement in _SCHEMA_V11_TO_V12_DDL:
+            connection.execute(statement)
+        connection.execute("UPDATE schema_meta SET schema_version=12 WHERE singleton=1")
+        connection.execute("PRAGMA user_version=12")
         self._validate_schema(connection)
 
     @staticmethod
@@ -2017,6 +2042,7 @@ class Store:
         result["share_gpu"] = bool(result["share_gpu"])
         result["hami_core"] = bool(result["hami_core"])
         result["preempt_idle_only"] = bool(result["preempt_idle_only"])
+        result["preempt_opt_in_only"] = bool(result["preempt_opt_in_only"])
         result["priority_name"] = f"P{result['priority']}"
         result.pop("submit_digest", None)
         return result
@@ -2041,6 +2067,7 @@ class Store:
         values.update(fields)
         allowed = {
             "preempt_idle_only",
+            "preempt_opt_in_only",
             "yield_policy",
             "hami_core",
             "sm_percent",
@@ -2223,10 +2250,14 @@ class Store:
         preempt_idle_only = values.get("preempt_idle_only", False)
         if not isinstance(preempt_idle_only, bool):
             raise ValueError("preempt_idle_only must be a boolean")
+        preempt_opt_in_only = values.get("preempt_opt_in_only", False)
+        if not isinstance(preempt_opt_in_only, bool):
+            raise ValueError("preempt_opt_in_only must be a boolean")
         job_id = values.get("id", values.get("job_id", _new_id()))
         job_id = _nonempty(job_id, "job_id", maximum=256)
         digest = _submission_digest(
             preempt_idle_only=preempt_idle_only,
+            preempt_opt_in_only=preempt_opt_in_only,
             yield_policy=yield_policy,
             hami_core=hami_core,
             sm_percent=sm_percent,
@@ -2269,10 +2300,10 @@ class Store:
                         created_at, updated_at,
                         min_gpu_count, elastic_gpu_count,
                         target_global_batch_size, per_device_micro_batch_size,
-                        auto_scale_up, share_gpu, vram_mb, hami_core, sm_percent, yield_policy, preempt_idle_only
+                        auto_scale_up, share_gpu, vram_mb, hami_core, sm_percent, yield_policy, preempt_idle_only, preempt_opt_in_only
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -2306,6 +2337,7 @@ class Store:
                         sm_percent,
                         yield_policy,
                         int(preempt_idle_only),
+                        int(preempt_opt_in_only),
                     ),
                 )
                 row = connection.execute(
@@ -2485,6 +2517,7 @@ class Store:
         priority_class: str,
         *,
         expected: Mapping[str, Any] | None = None,
+        _rank_only: bool = False,
     ) -> dict[str, Any]:
         """Atomically replace a waiting job's complete scheduling contract.
 
@@ -2492,7 +2525,9 @@ class Store:
         flight. A stale reader can supply all four old contract fields, so a
         priority change never silently overrides another operator's decision.
         """
-        contract = priority_class_contract(priority_class)
+        contract = ({"priority": _priority(priority_class), "yield_policy": None,
+                     "restart_policy": None, "dispatch_mode": None}
+                    if _rank_only else priority_class_contract(priority_class))
         if expected is not None:
             if not isinstance(expected, Mapping) or set(expected) != set(contract):
                 raise ValueError("expected must contain priority, yield_policy, restart_policy and dispatch_mode")
@@ -2510,9 +2545,11 @@ class Store:
             if current["state"] != JobState.PENDING.value:
                 raise StoreConflictError("priority can only be changed while the job is PENDING")
             before = {key: current[key] for key in contract}
+            if _rank_only:
+                contract = {**before, "priority": contract["priority"]}
             if expected is not None and before != dict(expected):
                 raise StoreConflictError("job scheduling policy changed; refresh before retrying")
-            if current.get("auto_scale_up"):
+            if current.get("auto_scale_up") and not _rank_only:
                 raise StoreConflictError("automatic scale-up jobs cannot use the Console priority contract")
             validate_yield_policy(contract["yield_policy"], current["checkpoint_capability"], current["share_gpu"])
             active_states = sorted(ACTIVE_ATTEMPT_STATES)
@@ -2543,6 +2580,18 @@ class Store:
             self.append_event("PRIORITY_CHANGED", job_id=job_id,
                               payload={"priority_class": priority_class, "previous": before, "current": contract})
             return self.get_job(job_id)
+
+    def set_pending_priority_rank(
+        self, job_id: str, priority: int | str, *, expected: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Change only queue rank; retain yielding/restart/dispatch and FIFO.
+
+        The historical class API is retained for callers explicitly choosing a
+        preset. Reuse its transaction, CAS and in-flight activity protections.
+        """
+        return self.set_pending_priority_class(
+            job_id, f"P{_priority(priority)}", expected=expected, _rank_only=True
+        )
 
     # --------------------------------------------------------------- attempts
 

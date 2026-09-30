@@ -54,6 +54,7 @@ UNSUPPORTED_EXECUTABLES = {
 }
 SUBMISSION_KEYS = {
     "preempt_idle_only",
+    "preempt_opt_in_only",
     "yield_policy",
     "hami_core",
     "sm_percent",
@@ -80,6 +81,7 @@ SUBMISSION_KEYS = {
 }
 OPTIONAL_SUBMISSION_KEYS = {
     "preempt_idle_only",
+    "preempt_opt_in_only",
     "yield_policy",
     "hami_core",
     "sm_percent",
@@ -133,6 +135,9 @@ def validate_submission(
     preempt_idle_only = raw.get("preempt_idle_only", False)
     if not isinstance(preempt_idle_only, bool):
         raise ValueError("preempt_idle_only must be a boolean")
+    preempt_opt_in_only = raw.get("preempt_opt_in_only", False)
+    if not isinstance(preempt_opt_in_only, bool):
+        raise ValueError("preempt_opt_in_only must be a boolean")
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise ValueError("priority must be an integer P0..P4")
     if not MIN_PRIORITY <= priority <= MAX_PRIORITY:
@@ -299,6 +304,7 @@ def validate_submission(
         raise ValueError("env is too large")
     clean = {
         "preempt_idle_only": preempt_idle_only,
+        **({"preempt_opt_in_only": True} if preempt_opt_in_only else {}),
         "yield_policy": validate_yield_policy(raw.get("yield_policy", "legacy"), checkpoint_capability, share_gpu),
         "hami_core": hami_core,
         "sm_percent": sm_percent,

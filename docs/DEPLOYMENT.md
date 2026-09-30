@@ -161,9 +161,20 @@ python3 deploy/upgrade-projects.py --directory "$HOME/.local/libexec/gpuq-consol
 
 已经使用完整 Ray P0 的节点须把两条命令中的档位改为 `--runtime-profile ray-p0`；参数没有默认值，项目升级不能把已安装的 Ray runner 降级成公共档。Ray 档在任何备份或程序写入前运行有时限、无 GPU 的 CPU/内存/PID 内核限制检查；失败立即停止。升级器不接受 `--configure-cpu-delegation`，不会调用 sudo、设置委派或刷新用户管理器；需要管理员处理的前置问题见 [RAY_RESOURCES.md](RAY_RESOURCES.md)。公共档不运行该 CPU 探针。
 
-升级器只读检查现有独立终端写入租约接口、终端返回协议、诊断采集与回收接口，以及同程序目录的诊断 GC service/timer 已安装、启用且运行。缺失或不兼容时，先按经审查的 `deploy/install-node.py` 完成配套 P0 安装；不能只更新一半助手。它不会替换现有 `node-executor.py`、终端助手、诊断助手或 systemd 单元，也不会启用宿主机命令等额外权限。
+升级器只读检查现有独立终端写入租约接口、终端返回协议、诊断采集与回收接口，以及同程序目录的诊断 GC service/timer 已安装、启用且运行。缺失或不兼容时，先按经审查的 `deploy/install-node.py` 完成配套 P0 安装。三条安装/升级路径统一使用 `deploy/node-runtime.json`，配套更新运行时助手、runner 和节点入口；不会修改 systemd 单元、启动宿主机命令或赋予额外权限。
 
-旧部署若使用不同程序目录，替换 `--directory`，诊断 GC service 必须已指向这个目录；不要为升级改名或迁移工作区。公共档更新项目存储、网络命令、所选 runner 与项目操作助手；Ray 档另配套安装 `job-resources.py` 和 `gpuq-ray`。依赖先落盘，runner 随后，新项目操作最后开放，避免新隔离模式落到旧 runner。所有来源先做路径、权限和语法检查并固定字节；原文件与配置保留私有备份。升级保持 `node-config.json`、GPUQ 数据库、旧工作区和运行任务不变，不重启任何服务。新项目放在工作区根目录的独立 `projects-v2`，不改旧 `users` 目录。
+旧部署若使用不同程序目录，替换 `--directory`，诊断 GC service 必须已指向这个目录；不要为升级改名或迁移工作区。Ray 档另配套安装 `job-resources.py` 和 `gpuq-ray`。全部源码先校验并固定字节，依赖（含 scheduling-policy、project-store、training-control）先复制，runner 随后，dispatcher/probe 最后更新。任一依赖缺失或语法错误会在写入前停止；不要手工只复制 node-executor。原文件和配置保留私有备份；项目升级保持配置原字节，数据升级沿用原有 datasets/conda 增补，默认保留已有 common/Ray 档。GPUQ 数据库、旧工作区和运行任务保持不变，不重启节点服务。
+
+这是逐文件原子替换，不是整个运行时同时切换。升级前暂停新训练派发和新节点操作，禁止并发升级；已经运行的训练继续。全部入口复制完成后，先执行下面的部署检查及只读节点 probe，再恢复入口。PR #5 的保存/恢复策略依赖 PR #4 训练控制协议；此修复分支已合入该协议，维护者应先审阅该依赖。
+
+```sh
+python3 tests/node-runtime-deployment.test.py
+python3 scripts/test-python.py
+npm ci --ignore-scripts
+npm test
+```
+
+部署测试使用临时节点、真实安装/升级复制和独立 Python 进程导入入口；只模拟外部 mount/systemd/CPU 检查，不使用生产 GPU。`--reproduce-pr5` 是可选的旧故障复现，需要本地保留旧提交 834d4d6；常规测试不依赖该 Git 历史。真实节点还需在本机按实际程序目录验证入口与只读 probe，无误后恢复派发。
 
 所有目标节点完成后，再部署同版 VPS 执行桥与 Portal 镜像；前端、CLI、执行桥、节点四层必须匹配。门户控制服务重建会短暂影响登录，不表示可以停止节点实验。上线后按项目验收清单验证上传、开发终端、发布、单卡训练与结果下载。
 

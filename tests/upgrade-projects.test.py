@@ -40,6 +40,7 @@ class UpgradeProjects(unittest.TestCase):
                                          'gpu': '/operator/approved/bin/gpu', 'database': str(self.base / 'gpuq.db'),
                                          'hostRoot': True, 'futureSetting': {'keep': 'unchanged'}}, indent=3) + '\n\n')
         self.config.chmod(0o600)
+        (self.source/'node-runtime.json').write_bytes((DEPLOY/'node-runtime.json').read_bytes())
         self.old, self.new = {}, {}
         for name, source_name in upgrade.file_plan('common-p0'):
             self.new[name] = ('# new ' + name + '\nVALUE = 2\n').encode()
@@ -54,6 +55,7 @@ class UpgradeProjects(unittest.TestCase):
             (self.source/name).write_bytes((DEPLOY/name).read_bytes())
         for name in upgrade.P0_HELPERS:
             (self.dest/name).write_bytes((DEPLOY/name).read_bytes());(self.dest/name).chmod(0o700)
+            (self.source/name).write_bytes((DEPLOY/name).read_bytes());self.new[name]=(DEPLOY/name).read_bytes();self.old[name]=self.new[name]
         for name in ('gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'):
             content = (DEPLOY/name).read_text().replace('%h/.local/libexec/gpuq-console',str(self.dest))
             (self.units/name).write_text(content)
@@ -113,23 +115,23 @@ class UpgradeProjects(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((backup / name).stat().st_mode), 0o700)
         self.assertEqual(list(self.dest.rglob('.project-upgrade-*')), [])
 
-    def test_dependencies_are_durable_before_runner_and_dispatcher_never_changes(self):
+    def test_dependencies_are_durable_before_runner_and_dispatcher_activation(self):
         installed = []
         actual = upgrade.atomic_copy
         dispatcher = (self.dest/'node-executor.py').read_bytes()
         def inspect(source, destination, **kwargs):
             if destination.parent == self.dest:
                 if destination.name == 'sandbox-runner.py':
-                    self.assertEqual(installed, ['project-store.py', 'gpuq-network'])
+                    self.assertEqual(installed, [name for name in upgrade.node_runtime.manifest()['dependencies'] if name not in upgrade.P0_HELPERS])
                     for name in installed:
                         self.assertEqual((self.dest / name).read_bytes(), self.new[name])
                 if destination.name == 'project-ops.py':
-                    self.assertEqual(installed, ['project-store.py','gpuq-network','sandbox-runner.py'])
+                    self.assertEqual(installed, [*[name for name in upgrade.node_runtime.manifest()['dependencies'] if name not in upgrade.P0_HELPERS],'sandbox-runner.py'])
                 installed.append(destination.name)
             return actual(source, destination, **kwargs)
         with patch.object(upgrade, 'atomic_copy', side_effect=inspect):
             self.run_main(apply=True)
-        self.assertEqual(installed, list(upgrade.FILES))
+        self.assertEqual(installed, [name for name in upgrade.FILES if name not in upgrade.P0_HELPERS])
         self.assertEqual((self.dest/'node-executor.py').read_bytes(),dispatcher)
 
     def test_compile_failure_in_last_file_prevents_every_change_and_backup(self):
@@ -305,7 +307,7 @@ class UpgradeProjects(unittest.TestCase):
         with patch.object(upgrade,'cpu_preflight',side_effect=AssertionError('common must not probe CPU')):
             result = self.run_main(apply=True)
         self.assertEqual(result['runtimeProfile'],'common-p0')
-        self.assertTrue(result['dispatcherUnchanged'])
+        self.assertFalse(result['dispatcherUnchanged'])
         self.assertTrue(result['p0PrerequisitesVerified'])
         self.assertIsNone(result['kernelEnforcement'])
         self.assertTrue((self.dest/'gpuq-network').exists())
@@ -342,7 +344,7 @@ class UpgradeProjects(unittest.TestCase):
         with patch.object(upgrade,'cpu_preflight',side_effect=probe),patch.object(upgrade,'atomic_copy',side_effect=install):
             result = self.run_main(apply=True,profile='ray-p0')
         self.assertEqual(result['kernelEnforcement'],proof)
-        self.assertEqual(result['files'],['project-store.py','gpuq-network','job-resources.py','gpuq-ray','sandbox-runner.py','project-ops.py'])
+        self.assertEqual(result['files'],[name for name,_ in upgrade.file_plan('ray-p0')])
         self.assertEqual(upgrade.runner_profile((self.dest/'sandbox-runner.py').read_bytes()),'ray-p0')
 
     def test_ray_probe_failure_rejects_before_any_write_or_backup(self):

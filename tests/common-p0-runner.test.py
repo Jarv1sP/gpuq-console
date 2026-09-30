@@ -32,7 +32,9 @@ class CommonRunner(unittest.TestCase):
         if terminal: del job['id']; job['cards'] = 0
         spec_dir = self.root / ('terminals' if terminal else 'jobs'); spec_dir.mkdir()
         spec_file = spec_dir / (JID + '.json'); spec_file.write_text(json.dumps(job))
-        (self.root / 'node-config.json').write_text(json.dumps({'root': str(self.root), 'conda': '/opt/conda'}))
+        config={'root':str(self.root),'conda':'/opt/conda'}
+        if terminal:config.update(controlRoot=str(self.root/'not-for-terminals'),gpuqArchive=str(self.root/'must-not-mount-sdk.pyz'),trainingControlProtocol=1)
+        (self.root / 'node-config.json').write_text(json.dumps(config))
         runtime = self.root / 'diagnostics' / JID / CAPTURE / 'runtime'
         if not missing: (self.root / 'job-diagnostics.py').touch()
         def start(*args):
@@ -102,6 +104,8 @@ class CommonRunner(unittest.TestCase):
         self.assertEqual(env['PATH'], '/opt/gpuq/bin:/opt/conda/bin:/usr/bin:/bin')
         self.assertFalse(any(key.startswith(('RAY_', 'GPUQ_CPU', 'GPUQ_MEMORY')) for key in env))
         self.assertNotIn('/run/gpuq/runtime', args)
+        self.assertNotIn('/run/gpuq/control',args);self.assertNotIn('/opt/gpuq/sdk.pyz',args)
+        self.assertNotIn('GPUQ_CONTROL_DIR',env);self.assertNotIn('PYTHONPATH',env)
 
     def test_training_records_exit_and_binds_only_managed_runtime_without_budget_files(self):
         args, env, props = self.orchestrate()
