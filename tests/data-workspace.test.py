@@ -21,7 +21,7 @@ class DataWorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
-        for name in ('node-executor.py', 'dataset-cache.py', 'data-workspace.py'):
+        for name in ('node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'data-workspace.py'):
             shutil.copy2(DEPLOY/name, self.base/name)
         config = {'root': str(self.base/'state'), 'hostRoot': True,
                   'datasets': {'root': str(self.base/'cache'), 'mountPoint': str(self.base), 'sources': {}, 'reserveBytes': 0}}
