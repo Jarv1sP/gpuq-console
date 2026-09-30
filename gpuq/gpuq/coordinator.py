@@ -47,7 +47,7 @@ from .constants import (
 )
 from .elastic import compatible_world_sizes
 from .hami import runtime_library, runtime_environment
-from .policy import VictimCandidate, is_idle_victim, preemption_mode, select_scale_target, select_victims
+from .policy import VictimCandidate, victim_in_scope, preemption_mode, select_scale_target, select_victims
 from .progress import (
     PROGRESS_FILE_NAME,
     ProgressProtocolError,
@@ -1913,11 +1913,8 @@ class Coordinator:
         for candidate in victims:
             attempt = self.store.get_attempt(candidate.attempt_id)
             victim_job = self.store.get_job(candidate.job_id)
-            if requester.get("preempt_idle_only") and not is_idle_victim(
-                victim_job["priority"], victim_job.get("yield_policy", "legacy"), victim_job["restart_policy"],
-                victim_job.get("preempt_idle_only", False),
-            ):
-                raise StoreConflictError("requester may only interrupt explicit idle / yield-now / restart-never jobs")
+            if not victim_in_scope(requester,victim_job):
+                raise StoreConflictError("requester may only interrupt explicit idle / opt-in yielding jobs in its scope")
             actual_mode = preemption_mode(requester["dispatch_mode"], candidate)
             if actual_mode is None:
                 raise StoreConflictError("victim does not allow this preemption")
@@ -2147,6 +2144,8 @@ class Coordinator:
             ) or self._attempt_has_sharing(attempt):
                 continue
             victim_job = self.store.get_job(attempt["job_id"])
+            if not victim_in_scope(requester,victim_job):
+                continue
             if victim_job.get("yield_policy", "legacy") in {"save", "never"}:
                 continue
             candidate_gpu_count = len(attempt["gpu_uuids"])
@@ -2222,13 +2221,8 @@ class Coordinator:
         requester = self.store.get_job(requester_id)
         if requester["state"] != JobState.PENDING.value:
             return False
-        if requester.get("preempt_idle_only"):
-            victim = self.store.get_job(attempt["job_id"])
-            if not is_idle_victim(
-                victim["priority"], victim.get("yield_policy", "legacy"), victim["restart_policy"],
-                victim.get("preempt_idle_only", False),
-            ):
-                return False
+        if not victim_in_scope(requester,self.store.get_job(attempt["job_id"])):
+            return False
         return not bool(
             self._select_free_devices_for_job(requester, self._free_devices())
         )
@@ -4321,13 +4315,8 @@ class Coordinator:
             limit=10_000,
         )
         for attempt in attempts:
-            if requester.get("preempt_idle_only"):
-                victim = self.store.get_job(attempt["job_id"])
-                if not is_idle_victim(
-                    victim["priority"], victim.get("yield_policy", "legacy"), victim["restart_policy"],
-                    victim.get("preempt_idle_only", False),
-                ):
-                    continue
+            if not victim_in_scope(requester,self.store.get_job(attempt["job_id"])):
+                continue
             if self._attempt_is_quarantine_affected(
                 attempt
             ) or self._attempt_has_sharing(attempt):
@@ -4495,6 +4484,7 @@ class Coordinator:
                     required_gpu_uuids=required_uuids,
                     free_gpu_uuids=frozenset(available_uuids),
                     preempt_idle_only=bool(job.get("preempt_idle_only", False)),
+                    preempt_opt_in_only=bool(job.get("preempt_opt_in_only", False)),
                 )
                 if victims:
                     self._plan_preemption(job, victims)
@@ -4571,6 +4561,8 @@ class Coordinator:
                 return self._api_retry(arguments)
             if operation == "set_priority":
                 return self._api_set_priority(arguments)
+            if operation == "set_priority_rank":
+                return self._api_set_priority(arguments, rank_only=True)
             if operation == "log_path":
                 return self._api_log_path(arguments)
             if operation == "events":
@@ -4655,6 +4647,7 @@ class Coordinator:
             "priority": f"P{job['priority']}",
             "dispatch_mode": job["dispatch_mode"],
             "preempt_idle_only": job.get("preempt_idle_only", False),
+            "preempt_opt_in_only": job.get("preempt_opt_in_only", False),
             "gpu_count": job["gpu_count"],
             "min_gpu_count": job["min_gpu_count"],
             "elastic_gpu_count": job["elastic_gpu_count"],
@@ -4695,6 +4688,7 @@ class Coordinator:
             "checkpoint_capability",
             "yield_policy",
             "preempt_idle_only",
+            "preempt_opt_in_only",
             "restart_policy",
             "gpu_count",
             "min_gpu_count",
@@ -4792,7 +4786,7 @@ class Coordinator:
         return {
             "daemon": {
                 **self._health_payload(),
-                "capabilities": ["priority-policy-v1", "preempt-idle-only-v1", "elastic-batch-v1"],
+                "capabilities": ["priority-policy-v1", "preempt-idle-only-v1", "priority-rank-v1", "preempt-opt-in-only-v1", "elastic-batch-v1"],
                 "observe_only": self._observe_only,
                 "managed_indices": managed_indices,
                 "managed_gpus": managed_gpus,
@@ -5036,17 +5030,17 @@ class Coordinator:
             )
         return {"job_id": job["id"], "state": JobState.CANCELED.value}
 
-    def _api_set_priority(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _require_exact_fields(arguments, allowed={"job_id", "priority_class", "expected"},
-                              required={"job_id", "priority_class"})
+    def _api_set_priority(self, arguments: dict[str, Any], *, rank_only: bool = False) -> dict[str, Any]:
+        field = "priority" if rank_only else "priority_class"
+        _require_exact_fields(arguments, allowed={"job_id", field, "expected"},
+                              required={"job_id", field})
         if not isinstance(arguments["job_id"], str) or not arguments["job_id"]:
             raise ApiError("BAD_REQUEST", "job_id must be a non-empty string")
         if "expected" in arguments and not isinstance(arguments["expected"], dict):
             raise ApiError("BAD_REQUEST", "expected must be a scheduling policy object")
         try:
-            updated = self.store.set_pending_priority_class(
-                arguments["job_id"], arguments["priority_class"], expected=arguments.get("expected")
-            )
+            method = self.store.set_pending_priority_rank if rank_only else self.store.set_pending_priority_class
+            updated = method(arguments["job_id"], arguments[field], expected=arguments.get("expected"))
         except StoreNotFoundError as exc:
             raise ApiError("NOT_FOUND", str(exc)) from exc
         except StoreConflictError as exc:
@@ -5055,7 +5049,7 @@ class Coordinator:
             raise ApiError("BAD_REQUEST", str(exc)) from exc
         return {
             "job_id": updated["id"], "state": updated["state"],
-            "priority_class": arguments["priority_class"],
+            **({} if rank_only else {"priority_class": arguments["priority_class"]}),
             **{key: updated[key] for key in ("priority", "priority_name", "yield_policy", "restart_policy", "dispatch_mode")},
             "preempt_idle_only": updated["preempt_idle_only"],
         }

@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: {persist-credentials: false}
+        with: {persist-credentials: false, fetch-depth: 0}
       - uses: actions/setup-node@v4
         with: {node-version: '24', cache: npm}
       - uses: actions/setup-python@v5
@@ -22,7 +22,11 @@ jobs:
       - run: node tests/data-workspace-ui-smoke.mjs
       - run: node tests/projects-ui-smoke.mjs
       - run: node tests/priority-ui-smoke.mjs
+      - run: node tests/scheduling-ui-smoke.mjs
+      - run: node tests/allocation-ui-smoke.mjs
       - run: node tests/community-ui-smoke.mjs
+      - run: node tests/task-notes-legacy-ui-smoke.mjs
+      - run: node tests/task-notes-ui-smoke.mjs
       - run: node tests/guide-ui-smoke.mjs
       - run: node tests/ui-polish-smoke.mjs
       - run: node tests/job-diagnostics-ui-smoke.mjs

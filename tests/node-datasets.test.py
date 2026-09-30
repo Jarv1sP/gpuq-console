@@ -277,7 +277,7 @@ class NodeDatasets(unittest.TestCase):
         self.ready()
         self.node.acquire_datasets(self.job)
         stopped = SimpleNamespace(returncode=0, stdout='LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n')
-        data = {'job': {'state': 'SUCCEEDED'}, 'attempts': [dict(state='EXITED_SUCCESS', unit_name='gpuq-a123')]}
+        data = {'job': {'state': 'SUCCEEDED'}, 'attempts': [dict(state='EXITED_SUCCESS', unit_name='gpuq-a123')], 'leases': [], 'scale_up_reservations': []}
         with patch.object(self.node.subprocess, 'run', return_value=stopped):
             self.assertTrue(self.node.release_datasets(self.job, data))
         self.assertTrue(self.cache.evict(self.admin, 'example', self.version)['evicted'])

@@ -1,5 +1,8 @@
 // The collaboration surface talks only to authenticated, durable server APIs.
 // User content is plain text. No localStorage, markdown execution or HTML input.
+import {createSubmissionKeys} from './submission-keys.js';
+import {createTaskNotesUI,taskNotesMarkup} from './task-notes-ui.js';
+export {createSubmissionKeys} from './submission-keys.js';
 const kinds={announcement:'公告',feedback:'问题反馈',discussion:'讨论'};
 const statuses={open:'待处理',investigating:'处理中',resolved:'已解决',closed:'已关闭'};
 const types={notice:'通知',maintenance:'维护',outage:'故障'};
@@ -7,16 +10,6 @@ const date=value=>{const d=new Date(value);return Number.isFinite(d.getTime())?d
 const principal=store=>store.principal?JSON.stringify([store.principal.userId,store.principal.role]):'';
 function el(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=String(text);return node;}
 function button(text,action,className='button'){const node=el('button',className,text);node.type='button';node.addEventListener('click',action);return node;}
-export function createSubmissionKeys(){
-  const pending=new Map();
-  return {
-    request(channel,payload){const signature=JSON.stringify(payload),previous=pending.get(channel);if(previous?.uncertain&&previous.signature!==signature)throw Error('上次发送结果尚未确认。请先重试原内容，避免重复发送。');const record=previous?.signature===signature?previous:{key:crypto.randomUUID(),signature,uncertain:false};pending.set(channel,record);return {...payload,key:record.key};},
-    uncertain(channel){const record=pending.get(channel);if(record)record.uncertain=true;},
-    confirmed(channel){pending.delete(channel);},
-    hasUncertain(channel){return pending.get(channel)?.uncertain===true;},
-    reset(){pending.clear();}
-  };
-}
 export function mergeCommunityItems(previous,incoming){const seen=new Set();return [...previous,...incoming].filter(item=>!seen.has(item.id)&&seen.add(item.id));}
 export function createCommunityUI(store,toast){
   const root=document.querySelector('#page-community'),keys=createSubmissionKeys();
@@ -24,42 +17,44 @@ export function createCommunityUI(store,toast){
   let posts=[],postCursor=null,postRequest=0,selected=null,comments=[],commentCursor=null,detailRequest=0,commentRequest=0;
   const commentDrafts=new Map();
   let messages=[],chatCursor=null,chatBefore=null,chatBusy=false,history=false,unread=0,lastChatReconcile=0;
-  let detail,composer,editing=null,composeBusy=false,commentBusy=false,chatSending=false;
+  let detail,composer,notes,notesCapable=false,editing=null,composeBusy=false,commentBusy=false,chatSending=false;
   const q=selector=>root.querySelector(selector),context=()=>epoch+':'+identity;
   const valid=stamp=>stamp===context()&&identity===principal(store);
   const admin=()=>store.principal?.role==='admin';
   const message=(text,error=false)=>{q('#community-status').textContent=text;q('#community-status').classList.toggle('form-error',error);};
   function stop(){clearTimeout(timer);timer=null;}
-  function reset(){epoch++;stop();ready=false;infoBusy=false;loading=false;chatBusy=false;composeBusy=false;commentBusy=false;chatSending=false;posts=[];postCursor=null;selected=null;comments=[];messages=[];chatCursor=null;chatBefore=null;history=false;unread=0;keys.reset();commentDrafts.clear();editing=null;detail?.remove();composer?.remove();detail=null;composer=null;root.replaceChildren();}
+  function reset(){epoch++;stop();notes?.reset();notes=null;notesCapable=false;if(tab==='notes')tab='announcement';ready=false;infoBusy=false;loading=false;chatBusy=false;composeBusy=false;commentBusy=false;chatSending=false;posts=[];postCursor=null;selected=null;comments=[];messages=[];chatCursor=null;chatBefore=null;history=false;unread=0;keys.reset();commentDrafts.clear();editing=null;detail?.remove();composer?.remove();detail=null;composer=null;root.replaceChildren();}
   store.onAuthChange?.(()=>{identity='';reset();});
   function install(){
-    root.innerHTML='<div class="community-intro"><div><span class="community-orbit" aria-hidden="true"></span><div class="eyebrow">LABORATORY / COMMUNITY</div><h2>一起，让实验有序进行</h2></div></div><div class="community-tabs" role="tablist" aria-label="协作内容"><button type="button" role="tab" data-community-tab="announcement">公告<span>维护与重要通知</span></button><button type="button" role="tab" data-community-tab="feedback">问题反馈<span>记录问题，跟进处理</span></button><button type="button" role="tab" data-community-tab="chat">公共交流<span>协调排队与资源使用</span></button></div><p id="community-status" role="status" aria-live="polite"></p><section id="community-forum" role="tabpanel"><div class="community-toolbar"><label id="community-filter-label">处理状态<select id="community-filter"><option value="">全部</option><option value="open">待处理</option><option value="investigating">处理中</option><option value="resolved">已解决</option><option value="closed">已关闭</option></select></label><div><button class="button" id="community-refresh" type="button">刷新</button><button class="button primary" id="community-create" type="button">发布公告</button></div></div><div id="community-posts" class="community-posts"></div><button class="button community-more" id="community-more" type="button" hidden>加载更多</button></section><section id="community-chat" role="tabpanel" hidden><div class="chat-topline"><div><h3>公共聊天室</h3><p>告诉大家预计结束时间，或协商使用安排。</p></div><button class="button" id="chat-refresh" type="button">刷新</button></div><button class="button community-more" id="chat-older" type="button" hidden>查看更早消息</button><button class="button community-more" id="chat-latest" type="button" hidden>返回最新消息</button><div id="community-messages" class="community-messages" tabindex="0" aria-label="公共聊天消息"></div><button class="button chat-new" id="chat-new" type="button" hidden>查看新消息</button><form id="community-chat-form"><label for="community-chat-body">发送到公共聊天室</label><textarea id="community-chat-body" rows="3" maxlength="2000" required placeholder="例如：gpu-1 的训练预计 18:00 结束，需要接着使用的同学可以留言。"></textarea><div class="chat-compose-footer"><p>实验室所有登录成员可见。请勿发送密码、令牌或私密数据。</p><button class="button primary" type="submit">发送消息</button></div><p id="chat-error" class="form-error" role="status"></p></form></section>';
+    root.innerHTML='<div class="community-intro"><div><span class="community-orbit" aria-hidden="true"></span><div class="eyebrow">LABORATORY / COMMUNITY</div><h2>一起，让实验有序进行</h2></div></div><div class="community-tabs" role="tablist" aria-label="协作内容"><button type="button" role="tab" data-community-tab="announcement">公告<span>维护与重要通知</span></button><button type="button" role="tab" data-community-tab="feedback">问题反馈<span>记录问题，跟进处理</span></button><button type="button" role="tab" data-community-tab="notes">任务留言<span>结束自动清理或常驻</span></button><button type="button" role="tab" data-community-tab="chat">公共交流<span>协调排队与资源使用</span></button></div><p id="community-status" role="status" aria-live="polite"></p><section id="community-forum" role="tabpanel"><div class="community-toolbar"><label id="community-filter-label">处理状态<select id="community-filter"><option value="">全部</option><option value="open">待处理</option><option value="investigating">处理中</option><option value="resolved">已解决</option><option value="closed">已关闭</option></select></label><div><button class="button" id="community-refresh" type="button">刷新</button><button class="button primary" id="community-create" type="button">发布公告</button></div></div><div id="community-posts" class="community-posts"></div><button class="button community-more" id="community-more" type="button" hidden>加载更多</button></section><section id="community-chat" role="tabpanel" hidden><div class="chat-topline"><div><h3>公共聊天室</h3><p>告诉大家预计结束时间，或协商使用安排。</p></div><button class="button" id="chat-refresh" type="button">刷新</button></div><button class="button community-more" id="chat-older" type="button" hidden>查看更早消息</button><button class="button community-more" id="chat-latest" type="button" hidden>返回最新消息</button><div id="community-messages" class="community-messages" tabindex="0" aria-label="公共聊天消息"></div><button class="button chat-new" id="chat-new" type="button" hidden>查看新消息</button><form id="community-chat-form"><label for="community-chat-body">发送到公共聊天室</label><textarea id="community-chat-body" rows="3" maxlength="2000" required placeholder="例如：gpu-1 的训练预计 18:00 结束，需要接着使用的同学可以留言。"></textarea><div class="chat-compose-footer"><p>实验室所有登录成员可见。请勿发送密码、令牌或私密数据。</p><button class="button primary" type="submit">发送消息</button></div><p id="chat-error" class="form-error" role="status"></p></form></section>'+taskNotesMarkup;
     for(const [index,node] of [...root.querySelectorAll('[data-community-tab]')].entries()){
-      node.id='community-tab-'+node.dataset.communityTab;node.setAttribute('aria-controls',node.dataset.communityTab==='chat'?'community-chat':'community-forum');
+      node.id='community-tab-'+node.dataset.communityTab;node.setAttribute('aria-controls',['chat','notes'].includes(node.dataset.communityTab)?'community-'+node.dataset.communityTab:'community-forum');
       node.addEventListener('click',()=>selectTab(node.dataset.communityTab));
-      node.addEventListener('keydown',event=>{const all=[...root.querySelectorAll('[data-community-tab]')];let next;if(event.key==='ArrowRight')next=(index+1)%all.length;if(event.key==='ArrowLeft')next=(index+all.length-1)%all.length;if(event.key==='Home')next=0;if(event.key==='End')next=all.length-1;if(next!==undefined){event.preventDefault();all[next].focus();selectTab(all[next].dataset.communityTab);}});
+      node.addEventListener('keydown',event=>{const all=[...root.querySelectorAll('[data-community-tab]')].filter(item=>!item.hidden),current=all.indexOf(node);let next;if(event.key==='ArrowRight')next=(current+1)%all.length;if(event.key==='ArrowLeft')next=(current+all.length-1)%all.length;if(event.key==='Home')next=0;if(event.key==='End')next=all.length-1;if(next!==undefined){event.preventDefault();all[next].focus();selectTab(all[next].dataset.communityTab);}});
     }
     q('#community-filter').addEventListener('change',()=>loadPosts());q('#community-refresh').addEventListener('click',()=>loadPosts());q('#community-more').addEventListener('click',()=>loadPosts(true));q('#community-create').addEventListener('click',()=>openComposer('post'));
     q('#chat-refresh').addEventListener('click',()=>{history=false;loadChat('refresh');});q('#chat-older').addEventListener('click',()=>loadChat('older'));q('#chat-latest').addEventListener('click',()=>{history=false;loadChat('refresh');});
     q('#chat-new').addEventListener('click',()=>{q('#community-messages').scrollTop=q('#community-messages').scrollHeight;unread=0;q('#chat-new').hidden=true;});
-    q('#community-chat-form').addEventListener('submit',sendChat);setTabs();
+    notes=createTaskNotesUI(root,store,toast);q('#community-chat-form').addEventListener('submit',sendChat);setTabs();
     for(const control of root.querySelectorAll('button,input,select,textarea'))if(!control.dataset.communityTab)control.disabled=true;
   }
   function setTabs(){
+    q('[data-community-tab=notes]').hidden=!ready||!notesCapable;
+    q('.community-tabs').classList.toggle('has-task-notes',ready&&notesCapable);
     for(const node of root.querySelectorAll('[data-community-tab]')){const active=node.dataset.communityTab===tab;node.setAttribute('aria-selected',String(active));node.tabIndex=active?0:-1;}
-    q('#community-forum').hidden=tab==='chat';q('#community-chat').hidden=tab!=='chat';q('#community-filter-label').hidden=tab!=='feedback';
+    q('#community-forum').hidden=['chat','notes'].includes(tab);q('#community-chat').hidden=tab!=='chat';q('#community-notes').hidden=tab!=='notes';q('#community-filter-label').hidden=tab!=='feedback';
     q('#community-forum').setAttribute('aria-labelledby','community-tab-'+tab);q('#community-chat').setAttribute('aria-labelledby','community-tab-chat');
     q('#community-create').textContent=tab==='announcement'?'发布公告':'反馈问题';q('#community-create').hidden=tab==='announcement'&&!admin();
   }
   async function enable(){
     if(infoBusy||ready||!identity)return;infoBusy=true;const stamp=context();message('正在连接协作区…');
-    try{const info=await store.call('community.info',{});if(!valid(stamp))return;if(info?.enabled!==true)throw Error('协作区尚未启用');ready=true;for(const control of root.querySelectorAll('button,input,select,textarea'))control.disabled=false;message('');if(tab==='chat')await loadChat('refresh');else await loadPosts();}
+    try{const info=await store.call('community.info',{});if(!valid(stamp))return;if(info?.enabled!==true)throw Error('协作区尚未启用');ready=true;notesCapable=Array.isArray(info.capabilities)&&info.capabilities.includes('task-notes-v1');setTabs();for(const control of root.querySelectorAll('button,input,select,textarea'))control.disabled=false;notes.sync(visible&&tab==='notes',notesCapable);message('');if(tab==='chat')await loadChat('refresh');else if(tab!=='notes')await loadPosts();}
     catch(error){if(valid(stamp))message('协作区暂不可用，请稍后刷新。尚未发送任何内容。',true);}
     finally{if(valid(stamp))infoBusy=false;}
   }
-  function selectTab(next){if(next===tab)return;tab=next;stop();setTabs();message('');if(tab!=='chat'){posts=[];postCursor=null;renderPosts();}if(!ready){enable();return;}if(tab==='chat')loadChat(messages.length?'poll':'refresh');else loadPosts();}
+  function selectTab(next){if(next==='notes'&&(!ready||!notesCapable)||next===tab)return;tab=next;stop();setTabs();message('');notes?.sync(visible&&tab==='notes',ready&&notesCapable);if(!['chat','notes'].includes(tab)){posts=[];postCursor=null;renderPosts();}if(!ready){enable();return;}if(tab==='chat')loadChat(messages.length?'poll':'refresh');else if(tab!=='notes')loadPosts();}
   async function loadPosts(more=false){
-    if(!ready||tab==='chat'||(more&&loading))return;loading=true;const stamp=context(),request=++postRequest,kind=tab;message(more?'正在加载更多…':'正在读取'+kinds[kind]+'…');
+    if(!ready||['chat','notes'].includes(tab)||(more&&loading))return;loading=true;const stamp=context(),request=++postRequest,kind=tab;message(more?'正在加载更多…':'正在读取'+kinds[kind]+'…');
     try{const result=await store.call('community.posts.list',{kind,...(kind==='feedback'&&q('#community-filter').value?{status:q('#community-filter').value}:{}),...(more&&postCursor?{cursor:postCursor}:{}),limit:20});if(!valid(stamp)||request!==postRequest||kind!==tab)return;posts=more?mergeCommunityItems(posts,result.posts):result.posts;postCursor=result.nextCursor;renderPosts();message(posts.length?'':'这里还没有'+kinds[kind]+'。');}
     catch(error){if(valid(stamp)&&request===postRequest&&kind===tab)message('读取失败：'+error.message,true);}
     finally{if(valid(stamp)&&request===postRequest){loading=false;q('#community-refresh').disabled=false;}}
@@ -139,5 +134,5 @@ export function createCommunityUI(store,toast){
   function renderMessages(toEnd){const list=q('#community-messages'),oldTop=list.scrollTop;list.replaceChildren();for(const item of messages){const row=el('article','chat-message'+(item.author?.id===store.principal?.userId?' own':''));row.dataset.messageId=item.id;const avatar=el('span','chat-avatar',(item.author?.name||item.author?.username||'成员').slice(0,1));avatar.setAttribute('aria-hidden','true');const body=el('div','chat-message-content');body.append(el('p','community-meta',(item.author?.name||item.author?.username||'成员')+' · '+date(item.createdAt)),el('p','community-body',item.body),itemActions(item,'message'));row.append(avatar,body);list.append(row);}if(!messages.length)list.append(el('p','community-empty','还没有消息。可以先说说你的用卡计划。'));if(toEnd){list.scrollTop=list.scrollHeight;unread=0;}else list.scrollTop=oldTop;q('#chat-new').hidden=!unread;q('#chat-new').textContent=unread+' 条新消息 · 查看';}
   async function sendChat(event){event.preventDefault();if(chatSending||!ready)return;chatSending=true;const stamp=context(),form=event.currentTarget,input=q('#community-chat-body'),submit=form.querySelector('[type=submit]');submit.disabled=true;input.readOnly=true;q('#chat-error').textContent='';try{const result=await create('chat','community.chat.send',{body:input.value});if(!valid(stamp))return;input.value='';input.readOnly=false;if(result.deleted)q('#chat-error').textContent='这条消息已删除或过期，没有重新发送。';history=false;await loadChat('refresh');}catch(error){if(valid(stamp)){const unknown=keys.hasUncertain('chat');input.readOnly=unknown;q('#chat-error').textContent=unknown?'发送结果未确认。请重试原内容，不会重复发送。':error.message;}}finally{if(valid(stamp)){chatSending=false;submit.disabled=false;}}}
   document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();else if(visible&&ready&&tab==='chat'){loadChat('poll');}});
-  return function sync(isVisible){const next=principal(store);if(next!==identity){identity=next;reset();if(next)install();}visible=Boolean(isVisible&&next);if(!visible){stop();return;}if(!ready)enable();else arm();};
+  return function sync(isVisible){const next=principal(store);if(next!==identity){identity=next;reset();if(next)install();}visible=Boolean(isVisible&&next);notes?.sync(visible&&tab==='notes',ready&&notesCapable);if(!visible){stop();return;}if(!ready)enable();else arm();};
 }

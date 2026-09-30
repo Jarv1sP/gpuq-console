@@ -12,7 +12,7 @@ import sys
 import uuid
 from typing import Any, Sequence
 
-ALLOWED = {"submit", "run", "status", "q", "queue", "list", "show", "cancel", "retry", "set-priority", "logs", "events", "watch", "attach", "health", "_cluster", "_sync"}
+ALLOWED = {"submit", "run", "status", "q", "queue", "list", "show", "cancel", "retry", "set-priority", "set-rank", "logs", "events", "watch", "attach", "health", "_cluster", "_sync"}
 MAX_PACKET = 1024 * 1024
 
 

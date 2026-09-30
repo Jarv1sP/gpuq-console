@@ -28,7 +28,13 @@ test('standalone downloaded CLI sends canonical scheduling and preserves argv af
   const elasticSubmit=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
   assert.deepEqual(elasticSubmit.elastic,{minCards:1,globalBatch:256,microBatch:8,autoExpand:true});
   assert.deepEqual(elasticSubmit.argv,['python','train.py','--auto-expand']);
+  for(const [mode,canonical] of [['queue',null],['preempt1','preempt-save'],['preempt2','preempt-now'],['preempt-save','preempt-save'],['preempt-now','preempt-now']]){
+    assert.equal((await run(['run','--mode',mode,'--','python','urgent.py','--mode','literal-training-arg'])).code,0,mode);
+    const request=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
+    assert.deepEqual(request.argv,['python','urgent.py','--mode','literal-training-arg']);
+    if(canonical)assert.equal(request.scheduling.mode,canonical);else assert.equal(Object.hasOwn(request.scheduling,'mode'),false);
+  }
   const count=calls.length;
-  for(const invalid of [['jobs','--auto-expand'],['jobs','--min-cards','1'],['jobs','--rank','P1'],['run','--yield','save','--','python'],['run','--yield','now','--restart-policy','on-preempt','--','python'],['run','--rank','P1','--priority','idle','--','python']])assert.notEqual((await run(invalid)).code,0);
+  for(const invalid of [['jobs','--auto-expand'],['jobs','--min-cards','1'],['jobs','--rank','P1'],['run','--yield','save','--','python'],['run','--yield','now','--restart-policy','on-preempt','--','python'],['run','--rank','P1','--priority','idle','--','python'],['run','--mode','bad','--','python'],['jobs','--mode','queue']])assert.notEqual((await run(invalid)).code,0);
   assert.equal(calls.length,count,'invalid options fail before any request');
 });

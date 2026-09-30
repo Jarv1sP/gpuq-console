@@ -1062,6 +1062,7 @@ def prepare_submission(args: argparse.Namespace) -> tuple[Config, dict[str, Any]
         "dispatch_mode": args.mode,
         "yield_policy": getattr(args, "yield_policy", "legacy"),
         "preempt_idle_only": bool(getattr(args, "preempt_idle_only", False)),
+        "preempt_opt_in_only": bool(getattr(args, "preempt_opt_in_only", False)),
         "checkpoint_capability": (
             CheckpointCapability.EPOCH_V1.value
             if args.checkpointable
@@ -1208,7 +1209,8 @@ def cmd_retry(args: argparse.Namespace) -> int:
 
 
 def cmd_set_priority(args: argparse.Namespace) -> int:
-    arguments: dict[str, Any] = {"job_id": args.job_id, "priority_class": args.priority_class}
+    rank_only = getattr(args, "rank_only", False)
+    arguments: dict[str, Any] = {"job_id": args.job_id, "priority" if rank_only else "priority_class": args.priority_class}
     expected = {
         "priority": args.expected_priority,
         "yield_policy": args.expected_yield,
@@ -1219,7 +1221,7 @@ def cmd_set_priority(args: argparse.Namespace) -> int:
         if any(value is None for value in expected.values()):
             raise ValueError("supply all four --expected-* scheduling policy flags together")
         arguments["expected"] = expected
-    result = get_client(args).call("set_priority", arguments)
+    result = get_client(args).call("set_priority_rank" if rank_only else "set_priority", arguments)
     print_result(result, args.json)
     return 0
 
@@ -1406,6 +1408,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="victim policy: legacy behavior, protected, immediate yield, or checkpoint-only yield")
     submit.add_argument("--preempt-idle-only", action="store_true",
                         help="only displace explicit P0 / yield-now / restart-never jobs; protect existing checkpoint-yield jobs")
+    submit.add_argument("--preempt-opt-in-only", action="store_true",
+                        help="only preempt lower-ranked jobs that explicitly permit now/save yielding")
     submit.add_argument(
         "--hami",
         action="store_true",
@@ -1505,6 +1509,14 @@ def build_parser() -> argparse.ArgumentParser:
     priority.add_argument("--expected-restart-policy", choices=[item.value for item in RestartPolicy])
     priority.add_argument("--expected-mode", choices=[item.value for item in DispatchMode])
     priority.set_defaults(func=cmd_set_priority)
+    rank = subparsers.add_parser("set-rank", help="change only a pending job's P0..P4 rank, preserving its other policies")
+    rank.add_argument("job_id")
+    rank.add_argument("priority_class", type=parse_priority, metavar="P0..P4")
+    rank.add_argument("--expected-priority", type=parse_priority)
+    rank.add_argument("--expected-yield", choices=["legacy", "never", "now", "save"])
+    rank.add_argument("--expected-restart-policy", choices=[item.value for item in RestartPolicy])
+    rank.add_argument("--expected-mode", choices=[item.value for item in DispatchMode])
+    rank.set_defaults(func=cmd_set_priority, rank_only=True)
 
     logs = subparsers.add_parser("logs")
     logs.add_argument("job_id")
