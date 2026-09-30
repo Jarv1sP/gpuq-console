@@ -10,6 +10,7 @@ routes['/job-diagnostics-ui.js']='job-diagnostics-ui.js';routes['/job-diagnostic
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
 routes['/guide.css']='guide.css';routes['/guide.js']='guide.js';
 routes['/community-ui.js']='community-ui.js';routes['/community.css']='community.css';
+routes['/task-notes-ui.js']='task-notes-ui.js';routes['/submission-keys.js']='submission-keys.js';
 export async function createServer(){
   const service=await DemoService.create();
   return http.createServer(async(req,res)=>{
