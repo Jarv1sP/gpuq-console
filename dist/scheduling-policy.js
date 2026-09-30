@@ -1,5 +1,5 @@
 // Shared browser/server contract. Rendering and DOM state live in scheduling-ui.
-const FIELDS=new Set(['rank','yieldPolicy','restartPolicy','checkpointable']);
+const FIELDS=new Set(['rank','yieldPolicy','restartPolicy','checkpointable','mode']);
 const DEFAULTS=Object.freeze({rank:'P2',yieldPolicy:'never',restartPolicy:'never',checkpointable:false});
 
 export function schedulingPolicy(value,admin=false){
@@ -8,6 +8,11 @@ export function schedulingPolicy(value,admin=false){
   }
   const policy={...DEFAULTS,...value};
   const {rank,yieldPolicy,restartPolicy,checkpointable}=policy;
+  if(Object.hasOwn(value,'mode')){
+    const modes={queue:'queue','preempt1':'preempt-save','preempt2':'preempt-now','preempt-save':'preempt-save','preempt-now':'preempt-now'};
+    if(typeof value.mode!=='string'||!Object.hasOwn(modes,value.mode))throw Error('模式须为 queue、preempt1 或 preempt2。');
+    policy.mode=modes[value.mode];
+  }
   if(typeof rank!=='string'||!/^P[0-4]$/.test(rank))throw Error('排队等级必须为 P0–P4。');
   if(Number(rank[1])>2&&!admin)throw Object.assign(Error('P3/P4 仅管理员可用。'),{status:403});
   if(!['never','now','save'].includes(yieldPolicy)||!['never','on-preempt'].includes(restartPolicy)||typeof checkpointable!=='boolean'){

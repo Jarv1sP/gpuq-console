@@ -1062,6 +1062,7 @@ def prepare_submission(args: argparse.Namespace) -> tuple[Config, dict[str, Any]
         "dispatch_mode": args.mode,
         "yield_policy": getattr(args, "yield_policy", "legacy"),
         "preempt_idle_only": bool(getattr(args, "preempt_idle_only", False)),
+        "preempt_opt_in_only": bool(getattr(args, "preempt_opt_in_only", False)),
         "checkpoint_capability": (
             CheckpointCapability.EPOCH_V1.value
             if args.checkpointable
@@ -1406,6 +1407,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="victim policy: legacy behavior, protected, immediate yield, or checkpoint-only yield")
     submit.add_argument("--preempt-idle-only", action="store_true",
                         help="only displace explicit P0 / yield-now / restart-never jobs; protect existing checkpoint-yield jobs")
+    submit.add_argument("--preempt-opt-in-only", action="store_true",
+                        help="only preempt lower-ranked jobs that explicitly permit now/save yielding")
     submit.add_argument(
         "--hami",
         action="store_true",
