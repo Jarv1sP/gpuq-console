@@ -4786,7 +4786,7 @@ class Coordinator:
         return {
             "daemon": {
                 **self._health_payload(),
-                "capabilities": ["priority-policy-v1", "preempt-idle-only-v1", "priority-rank-v1", "preempt-opt-in-only-v1"],
+                "capabilities": ["priority-policy-v1", "preempt-idle-only-v1", "priority-rank-v1", "preempt-opt-in-only-v1", "elastic-batch-v1"],
                 "observe_only": self._observe_only,
                 "managed_indices": managed_indices,
                 "managed_gpus": managed_gpus,
