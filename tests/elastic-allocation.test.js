@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {elasticAllocation,elasticCapable,allocationLabel} from '../dist/gpu-allocation.js';
 import {elasticFromForm,allocationSummary} from '../dist/gpu-allocation-ui.js';
+import {taskTable} from '../dist/execution-ui.js';
 import {normalizeJobSubmission} from '../job-submission.mjs';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
@@ -14,6 +15,16 @@ import {usage} from '../execution.mjs';
 const elastic={minCards:1,globalBatch:256,microBatch:8,autoExpand:true};
 const scheduling={rank:'P1',yieldPolicy:'save',restartPolicy:'on-preempt',checkpointable:true};
 const base=()=>({machine:MACHINES[0].id,cards:8,argv:['python','train.py'],key:randomUUID()});
+
+test('elastic task rows retain rank-only controls and advisory training progress together',()=>{
+  const job={id:randomUUID(),name:'elastic-training',username:'alice',machine:MACHINES[0].id,state:'PENDING',
+    cards:8,elastic,allowedGpuCounts:[1,2,4,8],actualCards:2,priority:'P1',schedulerPriority:1,canSetPriority:true,
+    schedulerPolicy:{yield_policy:'save',restart_policy:'on-preempt'},
+    progress:{reported:true,snapshot:{phase:'train',epochsCompleted:1,epochsTotal:10,metrics:{loss:0.1},etaSeconds:null,severity:'info'}}};
+  const html=taskTable([job],{admin:true});
+  for(const pattern of [/当前 2 张/,/合法卡数 1,2,4,8/,/value="10"/,/轮次 1\/10/,/调度器确认为准/,/保存后让位/,/data-job-priority=/,/仅改排队顺序/])assert.match(html,pattern);
+  assert.doesNotMatch(taskTable([{...job,state:'RUNNING'}],{admin:true}),/data-job-priority=/);
+});
 
 test('elastic world sizes keep an exact global batch including unsafe product edges',()=>{
   assert.deepEqual(elasticAllocation(elastic,8,scheduling).allowed,[1,2,4,8]);
