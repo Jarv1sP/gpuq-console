@@ -5,6 +5,7 @@ import {maintainTaskNotes} from './community.mjs';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
 import {yieldCapable} from './dist/scheduling-policy.js';
 import {normalizeJobSubmission,createSubmittedJob,datasetReferences} from './job-submission.mjs';
+import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 export {datasetReferences} from './job-submission.mjs';
 
@@ -88,6 +89,10 @@ export async function executionCall(service,principal,operation,args){
   if(!user.enabled)fail('账号已暂停。',403);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   const jobById=id=>{const job=service.store.jobs.find(j=>j.id===id);if(!job||(principal.role!=='admin'&&job.userId!==user.id))fail('任务不存在或无权访问。',403);return job;};
+  if(/^(projects|datasets)\.(snapshot|sync)\./.test(operation)){
+    const result=await snapshotSyncCall(service,principal,user,operation,args,authorizedMachine);
+    if(result===undefined)fail('未知同步操作。');return result;
+  }
   if(['host.exec','host.status','host.cancel'].includes(operation)){
     if(principal.role!=='admin')fail('宿主机命令仅管理员可用。',403);
     authorizedMachine(args.machine);

@@ -142,6 +142,15 @@ gpuctl jobs
 
 日常修改的顺序是：保存代码 → `gpuctl push .` → 必要时安装依赖 → 结束开发终端 → 发布到 `READY` → 提交训练。新加的数据集还需[在训练机器上准备就绪](/guide/data)。
 
+### 手动同步代码到另一台服务器
+
+```sh
+gpuctl sync git ./my-repo --ref HEAD --to gpu-2 --project new-project --dry-run
+gpuctl sync code --from gpu-1 --to gpu-2 --project my-project --release FULL_HASH --target-project new-project --dry-run
+```
+
+主动选择来源、目标和固定版本，先预览，再去掉 `--dry-run` 执行；目标必须是新项目，重复原命令可续传。Git 仓库先提交干净，导出固定 commit，不复制 `.git`、环境或未提交内容。完成 `CODE_READY` 仅代表代码已校验；在目标 `project use`、`ssh` 准备环境、退出后 `project publish`，等 `READY` 再训练。私人数据终端、手动解压与原上传流程保持可用。
+
 ### 多卡训练
 
 ```sh
@@ -252,6 +261,8 @@ gpuctl data workspace-status OPERATION_ID
 `gpuctl data files` 查看目录；`gpuctl data shell --reconnect SESSION_ID` 重连。单文件上传上限 100 GiB，压缩包不会自动解压；中断后检查远端文件，用 `gpuctl data put samples.zip --overwrite` 明确覆盖重传，此入口暂不自动续传。原来的 `data upload` 目录上传仍支持续传。
 
 ### 大数据如何传
+
+已在一台节点 `READY` 的普通数据，也可 `gpuctl sync data SOURCE_ID@FULL_VERSION --from gpu-1 --to gpu-2 --name my-data --dry-run` 预览，去掉 `--dry-run` 后复用校验与断点续传上传。使用输出的目标完整 `名称@版本` 训练；共享来源转个人副本时名称可能改变，内容版本必须相同。不会自动选择节点、解包、删除目标其他内容或申请 GPU。
 
 网页和 CLI 上传都会经过平台服务器中转，**不是你到 GPU 服务器的高速直连**。数百 GB、TB 级或大量小文件，先与管理员约定通过实验室内网或外接硬盘导入，再由管理员登记、校验并授予使用权限。不要把大数据集当项目代码上传。
 

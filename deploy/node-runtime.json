@@ -3,7 +3,7 @@
   "dependencies": [
     "dataset-cache.py", "dataset-upload.py", "data-workspace.py", "project-store.py",
     "job-diagnostics.py", "training-control.py", "scheduling-policy.py",
-    "admin-command.py", "gpuq-network"
+    "admin-command.py", "gpuq-network", "snapshot-sync.py"
   ],
   "profiles": {
     "common-p0": {"runner": "sandbox-runner-common-p0.py", "extra": []},

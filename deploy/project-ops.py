@@ -83,6 +83,9 @@ class ProjectOperations:
         return events.get('populated')=='0'
 
     def writable(self, args):
+        sync=self.folder/(self.key(args)+'.sync.json')
+        if sync.exists() and json.loads(sync.read_text()).get('state')!='CODE_READY':
+            raise ValueError('Code synchronization is incomplete; repeat the original sync before editing, opening a terminal or publishing')
         pending = self.pending(args)
         if pending.get('state') == 'PUBLISHING' and self.active(args):
             raise ValueError('Project publication is running; wait before editing or uploading')
@@ -90,6 +93,11 @@ class ProjectOperations:
 
     def status(self, args):
         result = self.store.status(*self.identity(args))
+        sync=self.folder/(self.key(args)+'.sync.json')
+        if sync.exists():
+            session=json.loads(sync.read_text())
+            result['codeSync']={k:session[k] for k in ('state','source','manifestSha256')}
+            if session['state']!='CODE_READY':result.update(state='SYNCING',error='Code sync incomplete; repeat the same sync command')
         pending = self.pending(args)
         observed = pending
         if pending.get('state') == 'PUBLISHING':
