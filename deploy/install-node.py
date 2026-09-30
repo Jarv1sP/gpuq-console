@@ -49,7 +49,7 @@ else:
     if a.initialize_gpuq:print('Existing GPUQ preserved; no upgrade or database initialization performed')
     if not binary.is_file():raise SystemExit('Existing GPUQ requires its managed ~/bin/gpu command')
 cfg=json.loads(config.read_text())
-for item in ('node-executor.py','terminal-helper.py','admin-command.py','node-probe.py','dataset-cache.py','dataset-upload.py','project-store.py','project-ops.py','job-diagnostics.py','gpuq-network'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
+for item in ('node-executor.py','terminal-helper.py','admin-command.py','node-probe.py','dataset-cache.py','dataset-upload.py','data-workspace.py','project-store.py','project-ops.py','job-diagnostics.py','gpuq-network'):shutil.copy2(source/'deploy'/item,dest/item);(dest/item).chmod(0o700)
 runner_source='sandbox-runner.py' if a.runtime_profile=='ray-p0' else 'sandbox-runner-common-p0.py'
 shutil.copy2(source/'deploy'/runner_source,dest/'sandbox-runner.py');(dest/'sandbox-runner.py').chmod(0o700)
 if a.runtime_profile=='ray-p0':

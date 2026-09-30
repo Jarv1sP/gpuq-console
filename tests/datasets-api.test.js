@@ -33,6 +33,7 @@ async function fixture(){
       if(state instanceof Error)throw state;
       return {dataset:args.dataset,version:args.version,state,remainingBytes:state==='READY'?0:64};
     }
+    if(operation.startsWith('terminal.'))return {id:args.id||args.key,writerToken:randomUUID(),offset:0,data:'',exited:false};
     return {state:'PENDING',nodeJobId:'node-'+args.job.id,assignedIndices:[]};
   };
   const origin='https://gpuq.example.test';
@@ -135,6 +136,59 @@ test('personal upload bounds request metadata, chunk encoding and relative paths
     for(const extra of [{name:'../x'},{name:'x'.repeat(41)},{manifestBytes:64*1024*1024+1},{manifestSha256:'short'},{entries:500001},{totalBytes:-1},{key:'bad'}])assert.equal((await f.post('datasets.upload.begin',{...begin,...extra})).status,400);
     assert.equal((await f.post('datasets.upload.unknown',{machine:'gpu-1',uploadId})).status,400);
     assert.equal(f.calls.length,0);
+  }finally{await f.close();}
+});
+
+test('personal data workspace is member-accessible and administrator calls remain personal and unprivileged',async()=>{
+  const f=await fixture();try{
+    await f.grant();const key=randomUUID(),requests={list:{path:'.'},get:{path:'incoming/a.zip',offset:0},put:{path:'incoming/a.zip',offset:0,data:'YQ==',truncate:false},publish:{path:'prepared',name:'mine',key},status:{operationId:key}};
+    for(const [action,args] of Object.entries(requests)){
+      const response=await f.post('datasets.workspace.'+action,{machine:'gpu-1',...args});assert.equal(response.status,200,JSON.stringify(response.data));
+      assert.deepEqual(f.calls.at(-1),{machine:'gpu-1',operation:'datasets.workspace.'+action,args:{...args,userId:f.member.id,hostAdmin:false}});
+    }
+    assert.equal((await f.post('datasets.workspace.list',{machine:'gpu-1'},f.admin.token)).status,200);assert.equal(f.calls.at(-1).args.userId,'builtin-admin');assert.equal(f.calls.at(-1).args.hostAdmin,false);
+    assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+  }finally{await f.close();}
+});
+
+test('personal data workspace rejects owner, role, host paths, malformed chunks and revoked access before node calls',async()=>{
+  const f=await fixture();try{
+    await f.grant();const key=randomUUID(),requests={list:{path:'.'},get:{path:'a',offset:0},put:{path:'a',offset:0,data:'YQ=='},publish:{path:'prepared',name:'mine',key},status:{operationId:key}};
+    for(const [action,args] of Object.entries(requests)){
+      for(const extra of [{userId:f.other.id},{hostAdmin:true},{role:'admin'},{owners:[f.member.id]},{root:'/data2'},{sourceId:'other'},{project:'other'}])assert.equal((await f.post('datasets.workspace.'+action,{machine:'gpu-1',...args,...extra})).status,400);
+      assert.equal((await f.post('datasets.workspace.'+action,{machine:'gpu-4',...args})).status,403);
+      assert.equal((await f.post('datasets.workspace.'+action,{machine:'gpu-1',...args},f.outsider.token)).status,403);
+      assert.equal((await f.post('datasets.workspace.'+action,{machine:'gpu-1',...args},null)).status,401);
+    }
+    const base={machine:'gpu-1',path:'a',offset:0,data:'YQ=='};
+    for(const path of ['.','../escape','a/../b','/data2/a','a//b','a\\b','a\0b','x'.repeat(256),'a/'.repeat(512)+'b'])assert.equal((await f.post('datasets.workspace.put',{...base,path})).status,400,path);
+    for(const offset of [-1,0.1,'0',100*1024**3+1])assert.equal((await f.post('datasets.workspace.put',{...base,offset})).status,400);
+    for(const data of ['YQ=','YR==','!!!!','YQ==\n',Buffer.alloc(1024*1024+1).toString('base64')])assert.equal((await f.post('datasets.workspace.put',{...base,data})).status,400);
+    for(const extra of [{truncate:'true'},{truncate:true,offset:1},{offset:100*1024**3}])assert.equal((await f.post('datasets.workspace.put',{...base,...extra})).status,400,JSON.stringify(extra));
+    assert.equal((await f.post('datasets.workspace.publish',{machine:'gpu-1',path:'prepared',name:'../mine',key})).status,400);
+    assert.equal((await f.post('datasets.workspace.status',{machine:'gpu-1',operationId:'bad'})).status,400);
+    assert.equal(f.calls.length,0);
+    assert.equal((await f.post('datasets.workspace.put',{...base,offset:100*1024**3-1})).status,200);
+    await f.grant(0,{});const before=f.calls.length;
+    for(const [action,args] of Object.entries(requests))assert.equal((await f.post('datasets.workspace.'+action,{machine:'gpu-1',...args})).status,403);
+    assert.equal(f.calls.length,before);
+  }finally{await f.close();}
+});
+
+test('data terminal scope is separate from projects and ROOT on every operation and respects revoked permissions',async()=>{
+  const f=await fixture();try{
+    await f.grant();const common={machine:'gpu-1',dataWorkspace:true,clientId:randomUUID()},key=randomUUID(),id=randomUUID(),writerToken=randomUUID();
+    const requests={open:{...common,key,mode:'new'},exchange:{...common,id,writerToken,input:'',offset:0},detach:{...common,id,writerToken},close:{...common,id,writerToken}};
+    for(const [action,args] of Object.entries(requests)){
+      assert.equal((await f.post('terminal.'+action,args)).status,200);assert.equal(f.calls.at(-1).args.dataWorkspace,true);assert.equal(f.calls.at(-1).args.hostAdmin,false);assert.equal(f.calls.at(-1).args.userId,f.member.id);
+      const count=f.calls.length;
+      for(const extra of [{project:'project-x'},{dataWorkspace:'true'},{userId:f.other.id},{role:'admin'}])assert.equal((await f.post('terminal.'+action,{...args,...extra})).status,400);
+      assert.equal((await f.post('terminal.'+action,{...args,hostAdmin:true},f.admin.token)).status,400);
+      assert.equal(f.calls.length,count);
+    }
+    await f.grant(0,{});const before=f.calls.length;
+    for(const [action,args] of Object.entries(requests))assert.equal((await f.post('terminal.'+action,args)).status,403);
+    assert.equal(f.calls.length,before);
   }finally{await f.close();}
 });
 
