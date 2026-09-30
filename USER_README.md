@@ -107,6 +107,8 @@ reporter.update(phase="train", epochs_completed=epoch + 1,
 
 只上报数值指标和简短说明，不放令牌、个人数据或完整日志。训练上报达到 100% 并不等于调度器已经确认完成；`severity="error"` 只反馈异常，不会自动重启或释放 GPU。保存恢复继续使用原来的 checkpoint 接口，两者独立。
 
+管理员配置你的 Telegram 收件人后，可执行 `gpuctl notify 任务ID on` 开启该任务的完成、失败、训练警告/异常和进度停滞通知；网页任务表也有开关。`gpuctl notify 任务ID status` 查看待发/失败数量，`gpuctl notify 任务ID off` 关闭。关闭 SSH 不影响通知。默认不发送；节点失联本身不会通知“训练失败”。通知只影响消息，不会重启、抢占或取消训练。
+
 ## 上传自己的数据或使用已授权数据集
 
 普通成员可把本机目录上传为个人数据集；先选择已授权服务器，再执行：
