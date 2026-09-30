@@ -602,6 +602,9 @@ def process(operation,args):
         if operation=='diagnostics':return job_diagnostics(job,data)
         state=data.get('job',data);attempts=data.get('attempts',[])
         assigned=attempts[0].get('gpu_indices',[]) if attempts and state.get('state') not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
+        if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and not scheduler_terminal_confirmed(data):
+            return {'nodeJobId':row[0],'state':'UNKNOWN','assignedIndices':attempts[0].get('gpu_indices',[]) if attempts else [],
+                    **scheduling_status(job,data),'error':'Job termination is not fully confirmed; card reservation retained'}
         if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and dataset_refs(job) and (ROOT/'jobs'/(job['id']+'.datasets.json')).exists():
             # The periodic lifecycle reconciliation must confirm process
             # cleanup and release leases. A viewer cannot release them.

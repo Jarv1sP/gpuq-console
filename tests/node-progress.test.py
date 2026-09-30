@@ -22,6 +22,7 @@ class ProgressBridge(unittest.TestCase):
         spec=importlib.util.spec_from_file_location('node_progress_test',self.base/'node-executor.py');self.node=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.node)
         self.job={'id':str(uuid.uuid4()),'userId':'demo-user-1','username':'alice','cards':1,'argv':['python','train.py'],'name':'test','minVramGiB':0}
         self.data={'job':{'state':'RUNNING','priority':2},'attempts':[{'id':'Aabc','ordinal':1,'state':'RUNNING','exit_code':None,'gpu_indices':[2],'failure_reason':None,'control_dir':'/private'}],
+                   'leases':[],'scale_up_reservations':[],
                    'progress':{'reported':True,'snapshot':{'phase':'train','epochs_completed':3,'epochs_total':10}}}
         self.calls=[]
         def fake(*args):
@@ -43,6 +44,7 @@ class ProgressBridge(unittest.TestCase):
     def test_read_registered_progress_and_exit_only_show_and_bounded_attempt_fields(self):
         self.register()
         for state in ('RUNNING','FAILED','SUCCEEDED','LOST','PREEMPTING'):
+            self.data['attempts'][0]['state']={'FAILED':'EXITED_FAILURE','SUCCEEDED':'EXITED_SUCCESS'}.get(state,'RUNNING')
             self.data['job']['state']=state;result=self.node.process('watch',{'job':self.job});self.assertEqual(result['state'],state)
             self.assertEqual(result['progress'],self.data['progress']);self.assertNotIn('control_dir',result['latestAttempt'])
         self.assertEqual(self.calls,[('show','Jabc')]*5)
@@ -54,9 +56,21 @@ class ProgressBridge(unittest.TestCase):
 
     def test_terminal_watch_retains_dataset_cleanup_and_does_not_release_leases(self):
         self.job['datasets']=[{'dataset':'sample','version':'a'*64}];self.register();self.data['job']['state']='SUCCEEDED'
+        self.data['attempts'][0]['state']='EXITED_SUCCESS'
         marker=self.node.ROOT/'jobs'/(self.job['id']+'.datasets.json');marker.write_text('[]')
         with patch.object(self.node,'release_datasets') as release:
             result=self.node.process('watch',{'job':self.job})
         self.assertEqual(result['state'],'UNKNOWN');self.assertEqual(result['schedulerState'],'SUCCEEDED');release.assert_not_called();self.assertTrue(marker.exists())
+
+    def test_no_dataset_terminal_watch_requires_the_same_native_drain_proof_as_sync(self):
+        self.register();self.data['job']['state']='CANCELED';self.data['attempts'][0]['state']='TERM_REQUESTED';self.data['leases']=[{'attempt_id':'Aabc'}]
+        result=self.node.process('watch',{'job':self.job})
+        self.assertEqual(result['state'],'UNKNOWN');self.assertEqual(result['schedulerState'],'CANCELED');self.assertEqual(result['assignedIndices'],[2])
+        self.data['attempts'][0]['state']='CANCELED';self.data['leases']=[]
+        with patch.object(self.node,'release_datasets') as release:
+            result=self.node.process('watch',{'job':self.job})
+        self.assertEqual(result['state'],'CANCELED');release.assert_not_called()
+        del self.data['scale_up_reservations']
+        self.assertEqual(self.node.process('watch',{'job':self.job})['state'],'UNKNOWN')
 
 if __name__=='__main__':unittest.main()
