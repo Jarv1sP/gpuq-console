@@ -32,6 +32,11 @@ gpuctl run --priority idle -g 1 -- python train.py
 gpuctl priority JOB high         Administrator: change queued job priority
 gpuctl pull --job JOB model.pt ./model.pt
 gpuctl data list                 List authorized dataset versions on selected server
+gpuctl data put ARCHIVE [REMOTE_FILE]  Upload a file to your private /data2 (no extraction)
+gpuctl data shell                Open your private /data2 terminal (no GPU)
+gpuctl data files [DIRECTORY]    List your private data workspace
+gpuctl data publish DIRECTORY --name NAME  Publish a prepared subdirectory, after exit
+gpuctl data workspace-status [OPERATION_ID]  Inspect data workspace publication
 gpuctl data upload LOCAL_DIR --name NAME  Upload private data; repeat to resume
 gpuctl data upload-status UPLOAD_ID  Inspect this account's upload and verification
 gpuctl data upload-discard UPLOAD_ID  Cancel an unfinished upload (not a READY dataset)
@@ -107,6 +112,33 @@ function sameDatasetFile(a,b,{pathToHandle=false}={}){
   return sameDevice&&a.ino===b.ino&&a.mode===b.mode&&a.size===b.size&&a.mtimeNs===b.mtimeNs&&a.ctimeNs===b.ctimeNs&&a.nlink===b.nlink;
 }
 function dataPath(path){if(!path||Buffer.byteLength(path)>4096||path.startsWith('/')||/[\\\x00-\x1f\x7f]/.test(path)||path.split('/').some(p=>['','.','..','.ssh','.env','.git','.venv','anaconda3','miniconda3','.conda'].includes(p)))fail('Unsafe, credential or environment dataset path: '+path);return path;}
+function workspaceDataPath(path,{directory=false}={}){
+  if(directory&&path==='.')return path;
+  if(typeof path!=='string'||!path||Buffer.byteLength(path)>1024||/[\\\x00-\x1f\x7f]/.test(path)||path.split('/').some(p=>!p||p==='.'||p==='..'||Buffer.byteLength(p)>255))fail('Use a relative path inside your private /data2');
+  return path;
+}
+async function putWorkspaceData(call,machine,local,path,overwrite){
+  workspaceDataPath(path);
+  const before=await lstat(local,{bigint:true});
+  if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n||before.size>100n*1024n**3n)fail('data put requires one regular unlinked file, at most 100 GiB');
+  const file=await open(local,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW||0));let offset=0,last=0;
+  try{
+    const initial=await file.stat({bigint:true});
+    if(!sameDatasetFile(before,initial,{pathToHandle:true}))fail('Local file changed before upload');
+    const size=Number(initial.size),buffer=Buffer.alloc(DATA_CHUNK);
+    do{
+      const {bytesRead}=await file.read(buffer,0,Math.min(DATA_CHUNK,size-offset),offset);
+      if(!bytesRead&&offset<size)fail('Local file changed during upload');
+      if(!sameDatasetFile(initial,await file.stat({bigint:true}))||!sameDatasetFile(before,await lstat(local,{bigint:true})))fail('Local file changed during upload; partial remote file remains, not published');
+      const result=(await call('datasets.workspace.put',{machine,path,offset,data:buffer.subarray(0,bytesRead).toString('base64'),...(offset===0?{truncate:overwrite===true}:{})})).result;
+      if(result?.size!==offset+bytesRead)fail('Upload result is unconfirmed; inspect the remote file before using --overwrite to restart');
+      offset+=bytesRead;
+      if(Date.now()-last>1000||offset===size){last=Date.now();process.stderr.write(`${path} · ${offset} / ${size} bytes\n`);}
+    }while(offset<size);
+    if(!sameDatasetFile(initial,await file.stat({bigint:true}))||!sameDatasetFile(before,await lstat(local,{bigint:true})))fail('Local file changed during upload; remote file was not published');
+    return {machine,path:'/data2/'+path,bytes:offset,extracted:false,published:false};
+  }finally{await file.close();}
+}
 async function scanLocalDataset(root,progress){
   dataPath(basename(resolve(root)));
   const directories=[],files=[],local=new Map(),directoryStamps=new Map();let totalBytes=0,manifestEstimate=42,hashed=0;
@@ -184,12 +216,13 @@ async function main(){
     const item=args[i]==='-g'?'--cards':args[i];if(!item.startsWith('--')){positionals.push(item);continue;}
     const key=item.slice(2);
     if(Object.hasOwn(options,key)&&!['machine','data'].includes(key))fail(`Duplicate option: ${item}`);
-    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover'].includes(key)){options[key]=true;continue;}
+    if(['json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','overwrite'].includes(key)){options[key]=true;continue;}
     if(!['url','session-file','machine','total','cards','as','role','name','min-vram','key','data','project','release','job','priority','cwd','timeout','reconnect','env-mode'].includes(key))fail(`Unknown option: ${item}`);
     const value=args[++i];if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
     if(key==='machine')options.machines.push(value);else if(key==='data')options.datasets.push(value);else options[key]=value;
   }
   if(options.help||!positionals.length){console.log(help);return;}
+  if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(['cwd','timeout','detach'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='exec')fail('--cwd, --timeout and --detach are only valid for exec');
@@ -244,6 +277,11 @@ async function main(){
     const fileArgs=machine=>{const context=projectArgs(machine);if(options.job&&!context.project)fail('--job outputs require a selected project; use gpuctl project use NAME');return {...context,...(context.project?{area:options.job?'output':'code',...(options.job?{runId:options.job}:{})}:{})};};
     const saveSession=async()=>{await writeFile(sessionFile,JSON.stringify(session),{mode:0o600});await chmod(sessionFile,0o600);};
     const shortcut=command;
+    const dataTerminal=command==='data'&&positionals[1]==='shell';
+    if(dataTerminal){
+      if(positionals.length!==2||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','reconnect','takeover'].includes(k)))fail('Usage: data shell [--machine SERVER] [--reconnect SESSION] [--takeover]');
+      command='shell';positionals.splice(0,positionals.length,'shell',defaultMachine());
+    }
     if(command==='ssh')command='shell';if(command==='push')command='upload';if(command==='pull')command='download';
     if((options.reconnect||options.takeover)&&command!=='shell')fail('--reconnect/--takeover are only valid for ssh');
     if(options['env-mode']!==undefined){
@@ -328,17 +366,17 @@ async function main(){
       if(hostAdmin&&(options.project||options.job))fail('Host root terminal does not accept --project or --job');
       if(options.takeover&&!options.reconnect)fail('--takeover requires --reconnect SESSION');
       if(options.reconnect&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.reconnect))fail('Reconnect requires a complete terminal UUID');
-      const context=hostAdmin?{}:projectArgs(machine);
+      const context=dataTerminal?{dataWorkspace:true}:hostAdmin?{}:projectArgs(machine);
       const clientId=randomUUID();
       const opened=(await call('terminal.open',{machine,key:randomUUID(),clientId,mode:options.reconnect?'reconnect':'new',...(options.reconnect?{id:options.reconnect,takeover:options.takeover===true}:{}),hostAdmin,...context})).result;
       if(!opened.writerToken)fail('Server terminal protocol is too old; upgrade the node before attaching. No input was sent.');
       let input=Buffer.alloc(0),offset=0,done=false,closed=false,delay=250,lastSize='';
       const sessionArgs={machine,id:opened.id,clientId,writerToken:opened.writerToken,hostAdmin,...context};
-      process.stderr.write(`\r\n${machine} · ${hostAdmin?'ROOT 宿主机':context.project?'项目 '+context.project:'个人工作区'} · ${opened.id}（Ctrl+] 仅断开；exit 结束此会话）\r\n`);
+      process.stderr.write(`\r\n${machine} · ${dataTerminal?'个人数据 /data2':hostAdmin?'ROOT 宿主机':context.project?'项目 '+context.project:'个人工作区'} · ${opened.id}（Ctrl+] 仅断开；exit 结束此会话）\r\n`);
       process.stdin.setRawMode(true);process.stdin.resume();
       const listener=chunk=>{if(chunk.includes(29)){done=true;return;}input=Buffer.concat([input,chunk]);if(input.length>262144)process.stdin.pause();};process.stdin.on('data',listener);
       try{while(!done){const sent=input.subarray(0,8192);input=input.subarray(sent.length);if(input.length<131072)process.stdin.resume();const size={cols:process.stdout.columns||110,rows:process.stdout.rows||32},sizeKey=JSON.stringify(size);const response=(await call('terminal.exchange',{...sessionArgs,offset,input:sent.toString('base64'),...(sizeKey===lastSize?{}:{cols:size.cols,rows:size.rows})})).result;lastSize=sizeKey;offset=response.offset;if(response.data)process.stdout.write(Buffer.from(response.data,'base64'));if(response.exited){await call('terminal.close',sessionArgs);closed=true;break;}await new Promise(r=>setTimeout(r,delay));}}
-      finally{process.stdin.off('data',listener);process.stdin.setRawMode(false);process.stdin.pause();if(!closed)try{await call('terminal.detach',sessionArgs);}catch{process.stderr.write('\r\n写入权释放未确认；等待 30 秒或明确接管后再重连。\r\n');}process.stderr.write(`\r\n${closed?'此终端已结束。':`已断开，终端继续运行。重连：gpuctl ssh ${machine}${hostAdmin?' --root':context.project?' --project '+context.project:''} --reconnect ${opened.id}`}\r\n`);}return;
+      finally{process.stdin.off('data',listener);process.stdin.setRawMode(false);process.stdin.pause();if(!closed)try{await call('terminal.detach',sessionArgs);}catch{process.stderr.write('\r\n写入权释放未确认；等待 30 秒或明确接管后再重连。\r\n');}process.stderr.write(`\r\n${closed?'此终端已结束。':`已断开，终端继续运行。重连：gpuctl ${dataTerminal?'data shell --machine '+machine:'ssh '+machine+(hostAdmin?' --root':context.project?' --project '+context.project:'')} --reconnect ${opened.id}`}\r\n`);}return;
     }else if(command==='invites'&&positionals[1]==='list'&&positionals.length===2)result=(await call('invites.list')).result;
     else if(command==='invites'&&['rotate','disable'].includes(positionals[1])&&['admin','member'].includes(positionals[2])&&positionals.length===3)result=(await call(`invites.${positionals[1]}`,{role:positionals[2]})).result;
     else if(command==='users'&&positionals.length===1)result=state.users;
@@ -352,6 +390,28 @@ async function main(){
       else if(action==='enable'||action==='disable')result=(await call('users.enabled',{userId:find(username),enabled:action==='enable'})).result;
       else if(action==='delete')result=(await call('users.delete',{userId:find(username)})).result;
       else fail('Unknown user command');
+    }else if(command==='data'&&['put','files','publish','workspace-status'].includes(positionals[1])){
+      const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='put'?['overwrite']:action==='publish'?['name','key']:[])];
+      if(training.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k)))fail('Personal data commands do not accept project, root or training options');
+      const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
+      if(action==='put'){
+        if(positionals.length<3||positionals.length>4)fail('Usage: data put LOCAL_FILE [REMOTE_FILE] [--overwrite]');
+        result=await putWorkspaceData(call,machine,positionals[2],positionals[3]||basename(positionals[2]),options.overwrite);
+      }else if(action==='files'){
+        if(positionals.length>3)fail('Usage: data files [RELATIVE_DIRECTORY]');
+        result=(await call('datasets.workspace.list',{machine,path:workspaceDataPath(positionals[2]||'.',{directory:true})})).result;
+      }else if(action==='publish'){
+        if(positionals.length!==3||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Usage: data publish DIRECTORY --name NAME');
+        const path=workspaceDataPath(positionals[2]),key=options.key||randomUUID();
+        if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(key))fail('Use a UUID publication --key');
+        process.stderr.write(`Publication key: ${key}\n`);
+        result={...(await call('datasets.workspace.publish',{machine,path,name:options.name,key})).result,machine};
+      }else{
+        if(positionals.length>3)fail('Usage: data workspace-status [OPERATION_ID]');
+        if(positionals[2]&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(positionals[2]))fail('Use the complete publication UUID');
+        result={...(await call('datasets.workspace.status',{machine,...(positionals[2]?{operationId:positionals[2]}:{})})).result,machine};
+        if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
+      }
     }else if(command==='data'&&positionals[1]==='upload'){
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','name'].includes(k)))fail('Usage: data upload LOCAL_DIR --name NAME [--machine SERVER]');
       if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Dataset name must be 1–40 ASCII letters, digits, _ or -, beginning with a letter or digit');
@@ -463,6 +523,8 @@ async function main(){
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='use'){console.log(`当前服务器：${result.selected}\n${result.project?'当前项目：'+result.project:'未选择项目；可用 gpuctl project create NAME 或 project use NAME'}`);return;}
+  if(command==='data'&&positionals[1]==='put'){console.log(`已上传 ${result.bytes} 字节 → ${result.machine}:${result.path}\n未自动解压或发布。进入个人数据终端：gpuctl data shell`);return;}
+  if(command==='data'&&['publish','workspace-status'].includes(positionals[1])){console.log(`${result.state} · ${result.machine}${result.error?'\n'+result.error:''}${result.operationId?'\n查看：gpuctl data workspace-status '+result.operationId+' --machine '+result.machine:''}${result.state==='READY'?'\n数据集：'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
   if(command==='data'&&positionals[1]==='upload'){console.log(`数据集已就绪：${result.machine}\n${result.dataset}@${result.version}\n训练只读路径：/data2/${result.dataset}\n可在 run 中使用 --data ${result.dataset}@${result.version}`);return;}
   if(command==='data'&&['upload-status','upload-discard'].includes(positionals[1])){console.log(`${result.state} · ${result.uploadId} · ${result.machine}${result.error?'\n'+result.error:''}${result.state==='READY'?'\n'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
   if(command==='data'&&(positionals[1]==='unregister'||/^[a-f0-9]{64}$/.test(positionals[2]||''))){

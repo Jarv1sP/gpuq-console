@@ -14,6 +14,7 @@ DATASET_ID=re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 DATASET_VERSION=re.compile(r'^[a-f0-9]{64}$')
 DATASET_MODULE=None
 DATASET_UPLOADS=None
+DATA_WORKSPACES=None
 PROJECT_OPS=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
@@ -121,6 +122,15 @@ def dataset_uploads():
     # Revalidate the current data mount even for compact upload status requests.
     dataset_mount_check(CONFIG['datasets'])
     return DATASET_UPLOADS
+
+def data_workspaces():
+    global DATA_WORKSPACES
+    if DATA_WORKSPACES is None:
+        spec=importlib.util.spec_from_file_location('gpuq_data_workspaces',HERE/'data-workspace.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        DATA_WORKSPACES=module.DataWorkspaces(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    dataset_mount_check(CONFIG['datasets'])
+    return DATA_WORKSPACES
 
 def dataset_refs(job):
     refs=job.get('datasets',[])
@@ -404,6 +414,10 @@ def validate_job(job,readonly=False):
 
 def terminal_pointer(args):
     suffix='host' if args.get('hostAdmin') is True else 'private'
+    if type(args.get('dataWorkspace',False)) is not bool:raise ValueError('Invalid personal data terminal scope')
+    if args.get('dataWorkspace'):
+        if args.get('hostAdmin') is True or args.get('project'):raise ValueError('Data terminal cannot be a project or host root terminal')
+        suffix+=':data-workspace'
     if args.get('project'):
         if args.get('hostAdmin') is True:raise ValueError('Project terminal cannot be host root')
         projects().identity(args)
@@ -432,7 +446,8 @@ def terminal_owned(args,jid):
     try:spec=terminal_metadata(ROOT/'terminals'/(jid+'.json'))
     except FileNotFoundError:raise ValueError('Terminal not found or not owned') from None
     if (spec.get('userId')!=args['userId'] or spec.get('project')!=args.get('project') or
-            (spec.get('hostAdmin') is True)!=(args.get('hostAdmin') is True)):
+            (spec.get('hostAdmin') is True)!=(args.get('hostAdmin') is True) or
+            (spec.get('dataWorkspace') is True)!=(args.get('dataWorkspace') is True)):
         raise ValueError('Terminal not found or not owned')
     return spec
 
@@ -484,6 +499,7 @@ def terminal_op(operation,args):
                 unit='amax-term-'+jid
                 spec={'userId':args['userId'],'username':args['username'],'cards':0,'argv':['/bin/bash','--noprofile','--norc','-i'],'hostAdmin':args.get('hostAdmin') is True}
                 if args.get('project'):spec['project']=args['project']
+                if args.get('dataWorkspace') is True:spec['dataWorkspace']=True
                 with open(folder/(jid+'.json'),'x') as f:json.dump(spec,f);f.flush();os.fsync(f.fileno())
                 receipt={'schema':2,'originClient':client_id,'clientId':client_id,'attachKey':args['key'],'writerToken':str(uuid.uuid4()),'leaseExpiresAt':now+30,'state':'OPEN'}
                 atomic_json(receipt_path,receipt)
@@ -537,6 +553,7 @@ def terminal_op(operation,args):
         if operation=='terminal.close':
             stop_terminal(jid)
             if args.get('project') and not projects().terminal_stopped(jid):raise ValueError('Cannot confirm project terminal termination; retry when node services recover')
+            if args.get('dataWorkspace') and not data_workspaces().unit_stopped('amax-term-'+jid+'.service'):raise ValueError('Cannot confirm data terminal termination; retry when node services recover')
             (folder/(jid+'.sock')).unlink(missing_ok=True);pointer.unlink(missing_ok=True)
             if legacy.exists() and legacy.read_text()==jid:legacy.unlink()
             receipt.update(leaseExpiresAt=0,state='CLOSED');atomic_json(receipt_path,receipt)
@@ -570,8 +587,14 @@ def process(operation,args):
     if operation in ('host.exec','host.status','host.cancel'):return host_command(operation,args)
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
+    if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)
     if operation in ('datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister'):return dataset_op(operation,args)
     if operation in ('terminal.open','terminal.exchange','terminal.close','terminal.detach'):
+        if args.get('dataWorkspace') is True and operation=='terminal.open':
+            ops=data_workspaces()
+            with ops.guard(args):
+                ops.writable(args)
+                return terminal_op(operation,args)
         if args.get('project') and operation=='terminal.open':
             ops=projects()
             with ops.guard(args):
@@ -645,6 +668,9 @@ if __name__=='__main__':
     os.umask(0o077)
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
+    if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))
+    if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-recover':
+        print(json.dumps(data_workspaces().recover(*sys.argv[2:])));sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
     try:
         raw=sys.stdin.buffer.read(1600001)
