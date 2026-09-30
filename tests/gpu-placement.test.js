@@ -9,6 +9,29 @@ import {placementFromForm,placementSummary} from '../dist/gpu-allocation-ui.js';
 import {normalizeJobSubmission} from '../job-submission.mjs';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
+import {taskTable} from '../dist/execution-ui.js';
+
+test('shared task row retains placement, rank, progress and private notification controls',()=>{
+  const job={id:randomUUID(),userId:'alice',username:'alice',name:'shared',machine:MACHINES[0].id,state:'PENDING',cards:1,
+    placement:{gpuIndices:[3],shared:true,vramMiB:4096,hami:true,smPercent:50},
+    priority:'P1',schedulerPriority:1,canSetPriority:true,schedulerPolicy:{yield_policy:'never',restart_policy:'never'},
+    progress:{reported:true,snapshot:{phase:'train',epochsCompleted:1,epochsTotal:10,metrics:{},etaSeconds:null,severity:'info'}},
+    notifications:{configured:true,enabled:false}};
+  const html=taskTable([job],{admin:true,userId:'alice'});
+  for(const pattern of [/共享 GPU 3/,/4096 MiB/,/HAMi SM 50%/,/value="10"/,/data-job-priority=/,/data-job-notify=/,/不让位/])assert.match(html,pattern);
+  assert.doesNotMatch(taskTable([job],{admin:true,userId:'bob'}),/data-job-notify=/);
+});
+
+test('shared explicit rank remains queue-only while fixed placement accepts scoped request modes',()=>{
+  const base={machine:MACHINES[0].id,cards:1,argv:['python','train.py'],key:randomUUID()},scheduling={rank:'P1',yieldPolicy:'never',restartPolicy:'never',checkpointable:false};
+  const shared={gpuIndices:[3],shared:true,vramMiB:4096};
+  assert.equal(normalizeJobSubmission({...base,scheduling,placement:shared},{role:'member'}).explicit.rank,'P1');
+  for(const mode of ['preempt-save','preempt-now']){
+    assert.throws(()=>normalizeJobSubmission({...base,scheduling:{...scheduling,mode},placement:shared},{role:'member'}),/普通排队/);
+    const pinned=normalizeJobSubmission({...base,scheduling:{...scheduling,mode},placement:{gpuIndices:[3]}},{role:'member'});
+    assert.equal(pinned.explicit.mode,mode);assert.deepEqual(pinned.placement,{gpuIndices:[3],shared:false});
+  }
+});
 
 test('fixed selection is canonical; shared consent and hardware caps are explicit',()=>{
   assert.deepEqual(gpuPlacement({gpuIndices:[3,1]},2),{gpuIndices:[1,3],shared:false});

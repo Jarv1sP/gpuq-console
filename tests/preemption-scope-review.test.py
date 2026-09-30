@@ -20,6 +20,26 @@ class ScopeReview(unittest.TestCase):
     pinned=F.SchedulerPriorityTests.pinned
     state=F.SchedulerPriorityTests.state
 
+    def test_shared_lease_protects_a_volunteering_holder_from_scoped_preemption(self):
+        holder,attempt=self.running(priority=0,yield_policy='now')
+        self.coordinator._statuses[attempt['id']]=object()
+        shared=self.pinned(priority=1,share_gpu=True,vram_mb=1024)
+        self.coordinator._schedule_shared()
+        shared_attempt=self.store.list_attempts(job_id=shared['id'])[0]
+        self.store.update_attempt(shared_attempt['id'],state='RUNNING')
+        self.store.update_job(shared['id'],state='RUNNING')
+        self.coordinator._statuses[shared_attempt['id']]=object()
+        actions=self.store.list_actions()
+        for mode in ('preempt-save','preempt-now'):
+            requester=self.pinned(priority=4,dispatch_mode=mode,preempt_opt_in_only=True)
+            self.coordinator._schedule()
+            self.assertEqual(self.state(requester),'PENDING')
+            self.assertEqual(self.state(holder),'RUNNING');self.assertEqual(self.state(shared),'RUNNING')
+            self.assertEqual(self.store.list_actions(),actions)
+            self.assertEqual(self.coordinator._promised_preemption_gpu_uuids(requester),set())
+            self.store.update_job(requester['id'],state='CANCELED')
+        self.assertEqual(len(self.store.list_leases()),2)
+
     def test_legacy_hard_promise_is_not_reused_by_scoped_requester(self):
         old,attempt=self.running(priority=0,yield_policy='legacy')
         self.pinned(priority=2,dispatch_mode='preempt-now')

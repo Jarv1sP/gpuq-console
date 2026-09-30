@@ -30,6 +30,17 @@ P=load('placement_policy','scheduling-policy.py');C=load('placement_control','tr
 class Sharing(unittest.TestCase):
     def job(self,**changes):return {'cards':1,'priority':'normal','preemptIdleOnly':True,'placement':{'gpuIndices':[3],'shared':True,'vramMiB':4097,'hami':False},**changes}
 
+    def test_explicit_shared_rank_remains_queue_only_and_cannot_mix_elastic(self):
+        job=self.job();del job['priority'];del job['preemptIdleOnly']
+        job['scheduling']={'rank':'P3','yieldPolicy':'never','restartPolicy':'never','checkpointable':False}
+        self.assertTrue(P.gpu_placement(job)['shared'])
+        self.assertEqual(P.normalize_job_policy(job)['priority'],3)
+        for mode in ('preempt-save','preempt-now'):
+            with self.assertRaisesRegex(ValueError,'Sharing requires'):
+                P.gpu_placement({**job,'scheduling':{**job['scheduling'],'mode':mode}})
+        with self.assertRaisesRegex(ValueError,'placement'):
+            P.gpu_placement({**job,'elastic':{'minCards':1,'globalBatch':8,'microBatch':8,'autoExpand':False}})
+
     def test_fixed_and_shared_native_arguments_and_runtime_gpu_set(self):
         job=self.job();args=P.allocation_arguments(job)
         self.assertEqual(args,['--gpu','3','--share','--vram-gb','4.0009765625'])
@@ -61,7 +72,7 @@ class Sharing(unittest.TestCase):
                 job={**self.job(),'id':submit_key};env={'GPUQ_ATTEMPT_ID':aid,'GPUQ_JOB_ID':native['id']}
                 self.assertEqual(P.allocated_spec(job,['4'],['GPU-0'],{'database':str(database)},env)['cards'],1)
                 with self.assertRaises(ValueError):P.allocated_spec({**job,'id':str(uuid.uuid4())},['4'],['GPU-0'],{'database':str(database)},env)
-                self.assertEqual(store.check_integrity()['schema_version'],11)
+                self.assertEqual(store.check_integrity()['schema_version'],12)
             finally:store.close()
 
     def coordinator(self,leases=(),holder_shared=False):
@@ -106,7 +117,7 @@ class Sharing(unittest.TestCase):
                 store.update_attempt(own['id'],state=AttemptState.DRAINING,exit_code=-15);c._statuses[own['id']]=SimpleNamespace(is_cleanup_ready=True,control_group='',main_pid=0)
                 c._finalize_draining_attempts()
                 self.assertEqual(store.get_attempt(own['id'])['state'],'CANCELED');self.assertEqual([l['attempt_id'] for l in store.list_leases()],[aid])
-                self.assertEqual(store.get_job(holder['id'])['state'],'RUNNING');self.assertEqual(c._snapshot[0].compute_pids,(123,456));self.assertEqual(store.check_integrity()['schema_version'],11)
+                self.assertEqual(store.get_job(holder['id'])['state'],'RUNNING');self.assertEqual(c._snapshot[0].compute_pids,(123,456));self.assertEqual(store.check_integrity()['schema_version'],12)
             finally:store.close()
 
     def test_bridge_requires_capability_before_forwarding_explicit_sharing(self):
