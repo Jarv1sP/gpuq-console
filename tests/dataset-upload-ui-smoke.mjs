@@ -31,12 +31,12 @@ try {
     }
     if (url.pathname === '/') return route.fulfill({contentType: 'text/html', body: `<!doctype html>
       <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-      <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"></head>
+      <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"></head>
       <body><main><div class="page-heading"><div><h1>数据集</h1><p>本地浏览器验收</p></div></div>
       <section id="page-datasets"></section><button data-nav="work" hidden>工作台</button>
       <details hidden><form id="train-form"><select name="machine"><option>gpu-1</option><option>gpu-2</option></select>
       <input name="datasets"><input name="command"></form></details></main></body></html>`});
-    const names = new Set(['/datasets-ui.js', '/dataset-upload.js', '/styles.css', '/workspace.css']);
+    const names = new Set(['/datasets-ui.js', '/dataset-upload.js', '/styles.css', '/workspace.css', '/datasets.css']);
     if (names.has(url.pathname)) return route.fulfill({
       contentType: url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css',
       body: await readFile(new URL('../dist' + url.pathname, import.meta.url), 'utf8')});
@@ -126,8 +126,31 @@ try {
       }};
     window.renderDatasets = datasetsUI(store, value => toasts.push(value)); renderDatasets();
   });
+  async function assertUploadLayout(mobile = false) {
+    const layout = await page.evaluate(() => {
+      const rect = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
+      const form = rect('#dataset-upload-form'), fields = rect('.dataset-upload-fields');
+      return {width: innerWidth, scroll: document.documentElement.scrollWidth, form, fields,
+        name: rect('[name=dataset-name]'), directory: rect('[name=dataset-directory]'),
+        start: rect('#dataset-upload-start'), feedback: rect('.dataset-upload-feedback'),
+        notes: rect('.dataset-upload-notes'),
+        statusOverflows: document.querySelector('#dataset-upload-status').scrollWidth > document.querySelector('#dataset-upload-status').clientWidth + 1,
+        columns: getComputedStyle(document.querySelector('.dataset-upload-fields')).gridTemplateColumns.split(' ').length};
+    });
+    assert.ok(layout.scroll <= layout.width + 1, `Dataset upload overflows: ${JSON.stringify(layout)}`);
+    assert.ok(layout.form.width <= 800, 'Upload form must have a readable maximum width');
+    assert.equal(layout.columns, mobile ? 1 : 2, 'Upload fields should stack on mobile only');
+    assert.ok(layout.start.y - (layout.fields.y + layout.fields.height) >= 36, 'Upload actions need their own separated row');
+    assert.ok(layout.start.y - (layout.directory.y + layout.directory.height) >= 36, 'Upload button must not touch directory input');
+    assert.ok(layout.feedback.y - (layout.start.y + layout.start.height) >= 15, 'Status needs breathing room below actions');
+    assert.ok(layout.notes.y - (layout.feedback.y + layout.feedback.height) >= 15, 'Help text must be separated from status');
+    assert.ok(layout.start.height >= 44 && layout.directory.height >= 44, 'Controls need touch-friendly heights');
+    assert.equal(layout.statusOverflows, false, 'Long upload status must wrap inside the form');
+  }
   await page.locator('[name=dataset-name]').fill('browser-data');
   await page.locator('[name=dataset-directory]').setInputFiles(dataDirectory);
+  await assertUploadLayout();
+  await page.screenshot({path: join(screenshots, 'upload-selection-desktop.png'), fullPage: true});
   await page.locator('#dataset-upload-start').click();
   await page.waitForFunction(() => typeof window.releaseChunk === 'function');
   assert.equal(await page.locator('[name=dataset-machine]').isDisabled(), true);
@@ -139,6 +162,7 @@ try {
   assert.equal(await page.evaluate(() => document.querySelector('#dataset-upload-form') === originalForm), true);
   assert.equal(await page.evaluate(() => document.querySelector('[name=dataset-directory]').files.length), 2);
   assert.equal(await page.evaluate(() => document.querySelector('#dataset-upload-status').textContent === originalStatus), true);
+  await assertUploadLayout();
   await page.screenshot({path: join(screenshots, 'upload-progress-desktop.png'), fullPage: true});
 
   // Pause after the peer durably accepts a chunk but before its response arrives.
@@ -148,8 +172,16 @@ try {
   assert.equal(await page.evaluate(() => calls.length), beforePause);
   assert.match(await page.locator('#dataset-upload-status').textContent(), /暂停/);
   await page.setViewportSize({width: 390, height: 844});
+  await assertUploadLayout(true);
   await page.screenshot({path: join(screenshots, 'upload-paused-mobile.png'), fullPage: true});
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Paused upload overflows 390px');
+  // A server message may contain an unbroken file path or immutable version.
+  // Exercise text wrapping independently without changing the upload session.
+  const pausedStatus = await page.locator('#dataset-upload-status').textContent();
+  await page.locator('#dataset-upload-status').evaluate(node => {node.textContent = '校验文件 · training-data/' + 'very-long-file-name-'.repeat(12) + '.bin · ' + 'a'.repeat(64);});
+  await assertUploadLayout(true);
+  await page.screenshot({path: join(screenshots, 'upload-long-status-mobile.png'), fullPage: true});
+  await page.locator('#dataset-upload-status').evaluate((node, text) => {node.textContent = text;}, pausedStatus);
   const resumeAt = await page.evaluate(() => calls.length);
   await page.locator('#dataset-upload-start').click();
   await page.waitForFunction(() => calls.some(call => call.operation === 'datasets.upload.commit'));
@@ -158,6 +190,7 @@ try {
   assert.equal(await page.evaluate(at => calls.slice(at).some(call => call.operation === 'datasets.upload.manifest'), resumeAt), false);
   assert.match(await page.locator('#dataset-upload-status').textContent(), /校验/);
   assert.equal(await page.locator('#dataset-upload-start').isDisabled(), true);
+  await assertUploadLayout(true);
   await page.screenshot({path: join(screenshots, 'upload-publishing-mobile.png'), fullPage: true});
   await page.evaluate(() => {gates.publish = false;});
   await page.waitForFunction(() => document.querySelector('#dataset-catalog').textContent.includes('本机已就绪'));
@@ -167,6 +200,7 @@ try {
   assert.equal(await page.evaluate(() => toasts.length), 1);
   const reference = await page.locator('.dataset-card input[readonly]').inputValue();
   assert.match(reference, /^u-0123456789abcdef-browser-data@[a-f0-9]{64}$/);
+  await assertUploadLayout(true);
   await page.screenshot({path: join(screenshots, 'upload-ready-mobile.png'), fullPage: true});
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'READY upload overflows 390px');
 
@@ -189,7 +223,7 @@ try {
   assert.doesNotMatch(await page.locator('#page-datasets').textContent(), /late-old-data|browser-data@/);
   assert.equal(await page.evaluate(() => toasts.length), 1);
   assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
-  console.log('DATASET UPLOAD UI PASS: browser hashes and uploads exact bounded bytes; resource refresh preserves file selection/progress; pause after durable write resumes at confirmed offset; empty files survive; server verification precedes READY; 390px layout; late old-account response cannot send more data or update the new UI; no external requests or browser errors.');
+  console.log('DATASET UPLOAD UI PASS: browser hashes and uploads exact bounded bytes; resource refresh preserves file selection/progress; pause after durable write resumes at confirmed offset; empty files survive; server verification precedes READY; bounded desktop card, separated actions, 390px stacked fields and long-status wrapping; late old-account response cannot send more data or update the new UI; no external requests or browser errors.');
   console.log(`Screenshots: ${screenshots}`);
 } finally {
   await browser.close();

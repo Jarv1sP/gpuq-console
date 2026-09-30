@@ -87,7 +87,7 @@ try{
  assert.match(processText,new RegExp(String(processPid)));assert.match(processText,/8192/);
  assert.ok(processText.includes(processName));assert.ok(processText.includes(processOwner));
  await capture(admin,'resources-admin-desktop.png');
- await checkGuide(admin,'/guide/user');await checkGuide(admin,'/guide/admin');
+ await checkGuide(admin,'/guide');assert.equal(await admin.locator('a[href="/guide/admin"]').count(),0);
  // A real state refresh changes metrics without closing the per-card process panel.
  const updated=snapshot();updated.hosts[0].gpus[0].utilization=44;await saveSnapshot(updated);await refreshPage(admin);
  await admin.waitForFunction(()=>document.querySelector('[data-resource-machine="gpu-1"] [data-gpu-index="0"]').textContent.includes('44%'));
@@ -118,7 +118,7 @@ try{
  assert.equal(await member.locator('details[data-resource-detail]').count(),0);
  assert.ok(!(await member.locator('#machine-grid').textContent()).includes(processOwner));
  await capture(member,'resources-zero-quota-desktop.png');
- await checkGuide(member,'/guide/user');assert.equal(await member.locator('a[href="/guide/admin"]:visible').count(),0);
+ await checkGuide(member,'/guide');assert.equal(await member.locator('a[href="/guide/admin"]:visible').count(),0);
  // Verify automatic registration discovery, without pressing refresh.
  await admin.locator('[data-user]').filter({hasText:'验收同学'}).waitFor({timeout:22000});await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('[data-machine=gpu-1]').check();await admin.locator('[data-quota=gpu-1]').fill('2');await admin.locator('[data-quota=total]').fill('2');
  await admin.waitForTimeout(16000);assert.equal(await admin.locator('[data-quota=gpu-1]').inputValue(),'2');await admin.locator('[data-action=save-policy]').click();
