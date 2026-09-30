@@ -2,6 +2,7 @@ import net from 'node:net';
 import {randomUUID,createHash} from 'node:crypto';
 import {MACHINES} from './dist/model.js';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
+import {schedulingPolicy,yieldCapable} from './dist/scheduling-policy.js';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
 export const PRIORITIES=new Set(['idle','normal','high']);
@@ -176,7 +177,10 @@ export async function executionCall(service,principal,operation,args){
     return service.bridge(args.machine,operation,{...args,userId:user.id,username:user.username,hostAdmin:args.hostAdmin===true});
   }
   if(operation==='jobs.submit'){
-    if(Object.keys(args).some(k=>!['machine','cards','minVramGiB','argv','name','key','datasets','project','release','priority'].includes(k)))fail('提交参数无效。');
+    if(Object.keys(args).some(k=>!['machine','cards','minVramGiB','argv','name','key','datasets','project','release','priority','scheduling'].includes(k)))fail('提交参数无效。');
+    if(args.scheduling!==undefined&&args.priority!==undefined)fail('自定义调度不能与旧优先级预设混用。');
+    let explicit=null;
+    if(args.scheduling!==undefined){try{explicit=schedulingPolicy(args.scheduling,principal.role==='admin');}catch(error){fail(error.message,error.status||400);}}
     const priority=priorityValue(args.priority===undefined?'normal':args.priority);
     if(priority==='high'&&principal.role!=='admin')fail('高优先级仅管理员可用。',403);
     // Placement is a user decision. The selected node still allocates its GPUs,
@@ -190,7 +194,7 @@ export async function executionCall(service,principal,operation,args){
     const min=args.minVramGiB??0;if(typeof min!=='number'||!Number.isFinite(min)||min<0||min>128)fail('最低显存参数无效。');
     const name=args.name||'train';if(typeof name!=='string'||name.length>64||/[\x00-\x1f]/.test(name))fail('任务名称无效。');
     // Preserve legacy idempotency hashes for jobs without dataset references.
-    const digest=createHash('sha256').update(JSON.stringify([args.machine,args.cards,min,args.argv,name,...(datasets.length?[datasets]:[]),...(project.project?[project]:[]),...(args.priority!==undefined?[{priority}]:[])])).digest('hex');
+    const digest=createHash('sha256').update(JSON.stringify([args.machine,args.cards,min,args.argv,name,...(datasets.length?[datasets]:[]),...(project.project?[project]:[]),...(args.priority!==undefined?[{priority}]:[]),...(explicit?[{scheduling:explicit}]:[])])).digest('hex');
     const previous=service.store.jobs.find(j=>j.userId===user.id&&j.key===args.key);
     if(previous){if(previous.digest!==digest)fail('同一提交键不能用于不同任务。',409);return publicJob(previous);}
     if(service.store.jobs.length>=5000)fail('任务历史达到归档上限，请联系管理员归档后提交。',503);
@@ -208,6 +212,7 @@ export async function executionCall(service,principal,operation,args){
     const host=service.gpuq.hosts.find(h=>h.id===args.machine);
     if(!host?.reachable||!host.gpuq.connected||host.gpuq.observeOnly||host.gpus.filter(g=>g.memoryTotalMiB>=min*1024-512).length<args.cards)fail('所选机器当前无法执行，或不满足卡数/显存条件；不会自动切换服务器。',409);
     const scheduling=priorityCapable(host);
+    if(explicit&&(!scheduling||!yieldCapable(host)))fail('节点未接通独立让位与 checkpoint 控制通道；未提交任务。',503);
     if(args.priority!==undefined&&!scheduling)fail('所选机器尚未确认安全优先级功能，未提交任务；请刷新或联系管理员升级。',503);
     if(datasets.length){
       // Personal training uses the same owner-only Principal as node lease
@@ -222,8 +227,8 @@ export async function executionCall(service,principal,operation,args){
       if(!states.every(s=>s.state==='READY'))fail('所选机器没有完整的本地数据副本。先用 gpuctl data prepare 数据集@版本 准备数据；此时未占用 GPU，不会自动切换服务器。',409);
     }
     const machine=args.machine,id=randomUUID(),now=new Date().toISOString();
-    const spec={id,userId:user.id,username:user.username,cards:args.cards,argv:args.argv,name,minVramGiB:min,...project,...(datasets.length?{datasets}: {}),...(scheduling?{priority,preemptIdleOnly:true}:{})};
-    const job={id,key:args.key,digest,spec,userId:user.id,username:user.username,machine,cards:args.cards,name,...project,...(datasets.length?{datasets}:{}),priority:scheduling?priority:null,state:'SUBMITTING',createdAt:now,cancelRequested:false};
+    const spec={id,userId:user.id,username:user.username,cards:args.cards,argv:args.argv,name,minVramGiB:min,...project,...(datasets.length?{datasets}: {}),...(explicit?{scheduling:explicit}:scheduling?{priority,preemptIdleOnly:true}:{})};
+    const job={id,key:args.key,digest,spec,userId:user.id,username:user.username,machine,cards:args.cards,name,...project,...(datasets.length?{datasets}:{}),...(explicit?{scheduling:explicit}:{}),priority:explicit?null:scheduling?priority:null,state:'SUBMITTING',createdAt:now,cancelRequested:false};
     service.db.exec('BEGIN IMMEDIATE');
     try{service.store.jobs.push(job);service.save();service.audit(principal.username,operation,id,'reserved');service.db.exec('COMMIT');}
     catch(e){service.db.exec('ROLLBACK');service.store.jobs=service.store.jobs.filter(j=>j.id!==id);throw e;}

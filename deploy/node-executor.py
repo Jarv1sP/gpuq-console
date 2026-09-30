@@ -20,6 +20,18 @@ HOST_COMMAND_CAPABILITY='host-command-v1'
 DIAGNOSTICS=None
 PRIORITIES={'idle':(0,'now'),'normal':(2,'never'),'high':(4,'never')}
 
+def explicit_scheduling(value, require_ready=False):
+    module=importlib.util.spec_from_file_location('gpuq_console_scheduling',HERE/'scheduling-policy.py')
+    policy=importlib.util.module_from_spec(module);module.loader.exec_module(policy)
+    policy.validate(value)
+    if require_ready and not policy.ready(CONFIG,HERE):raise ValueError('Training control channel is not ready; no submission attempted')
+    return policy.arguments(value)
+
+def explicit_status(job,data):
+    if 'scheduling' not in job:return {}
+    state=data.get('job',data);attempts=data.get('attempts',[])
+    return {'preempted':state.get('state')=='CANCELED' and bool(attempts) and attempts[0].get('state')=='PREEMPTED'}
+
 def job_diagnostics(job,data):
     global DIAGNOSTICS
     if DIAGNOSTICS is None:
@@ -388,7 +400,7 @@ def file_op(operation,args,root=None):
 
 def validate_job(job,readonly=False):
     required={'id','userId','username','cards','argv','name','minVramGiB'}
-    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly'}:raise ValueError('Invalid job specification')
+    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly','scheduling'}:raise ValueError('Invalid job specification')
     if not UUID.fullmatch(job['id']):raise ValueError('Invalid job ID')
     if readonly:
         if not isinstance(job['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',job['userId']):raise ValueError('Invalid identity')
@@ -397,6 +409,9 @@ def validate_job(job,readonly=False):
     if type(job['cards'])!=int or not 1<=job['cards']<=CONFIG.get('cards',64):raise ValueError('Invalid card count')
     if not isinstance(job['argv'],list) or not 1<=len(job['argv'])<=128 or any(not isinstance(a,str) or '\0' in a for a in job['argv']) or len(json.dumps(job['argv']))>12000:raise ValueError('Invalid argv')
     dataset_refs(job)
+    if 'scheduling' in job:
+        if 'priority' in job or 'preemptIdleOnly' in job:raise ValueError('Cannot mix scheduling contracts')
+        explicit_scheduling(job['scheduling'])
     if 'priority' in job or 'preemptIdleOnly' in job:
         if job.get('priority') not in PRIORITIES or job.get('preemptIdleOnly') is not True:raise ValueError('Explicit safe scheduling policy required')
     if 'project' in job or 'release' in job:
@@ -604,7 +619,8 @@ def process(operation,args):
                 release_datasets(job,never_dispatched=True)
                 return {'state':'CANCELED'}
             if operation=='logs':return job_log_result(job,{'job':{'state':'NOT_SUBMITTED'},'attempts':[]},'任务尚未提交到 GPUQ。')
-            if 'priority' in job:priority_capability()
+            if 'priority' in job or 'scheduling' in job:priority_capability()
+            if 'scheduling' in job:explicit_scheduling(job['scheduling'],require_ready=True)
             if job.get('project'):
                 projects().store.release(job['userId'],job['project'],job['release'])
                 projects().store.run_paths(job['userId'],job['project'],job['release'],jid)
@@ -614,6 +630,7 @@ def process(operation,args):
                 # lease while the scheduler may still accept the request.
                 atomic_json(attempted,{'jobId':jid})
             scheduling=['-p','P0','-m','queue','--yield','never','--restart-policy','never']
+            if 'scheduling' in job:scheduling=explicit_scheduling(job['scheduling'])
             if 'priority' in job:
                 level,yield_policy=PRIORITIES[job['priority']]
                 scheduling=['-p','P'+str(level),'-m','queue','--yield',yield_policy,'--restart-policy','never','--preempt-idle-only']
@@ -639,7 +656,7 @@ def process(operation,args):
         assigned=attempts[0].get('gpu_indices',[]) if attempts and state['state'] not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
         if dataset_refs(job) and state['state'] in ('SUCCEEDED','FAILED','CANCELED') and not release_datasets(job,data):
             return {'nodeJobId':node_id,'state':'UNKNOWN','assignedIndices':assigned,'error':'Job termination is not fully confirmed; dataset leases retained'}
-        return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data)}
+        return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data),**explicit_status(job,data)}
 
 if __name__=='__main__':
     os.umask(0o077)
