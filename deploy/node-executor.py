@@ -320,13 +320,27 @@ def dataset_unit_stopped(attempt):
         return fields.get('populated')=='0'
     except (OSError,ValueError,subprocess.SubprocessError):return False
 
+def scheduler_terminal_confirmed(data):
+    """A cancel receipt is not evidence that its attempt/leases have drained.
+
+    Native GPUQ finalizes an attempt and releases its leases atomically. All
+    jobs, including jobs without datasets and intentionally shared GPUs, use
+    that same proof before the Portal may retire their card reservation.
+    """
+    if not isinstance(data,dict):return False
+    native=data.get('job');attempts=data.get('attempts');leases=data.get('leases');reservations=data.get('scale_up_reservations')
+    if not isinstance(native,dict) or native.get('state') not in ('SUCCEEDED','FAILED','CANCELED'):return False
+    if native.get('active_attempt_id') not in (None,'') or data.get('active_attempt_id') not in (None,''):return False
+    if not isinstance(attempts,list) or not isinstance(leases,list) or leases or not isinstance(reservations,list) or reservations:return False
+    return all(isinstance(a,dict) and a.get('state') in ('EXITED_SUCCESS','EXITED_FAILURE','CANCELED','PREEMPTED') for a in attempts)
+
 def release_datasets(job,data=None,never_dispatched=False):
     if not dataset_refs(job):return True
     filename=ROOT/'jobs'/(job['id']+'.datasets.json')
     if not filename.exists():return True
     if not never_dispatched:
-        if not isinstance(data,dict) or data.get('job',data).get('state') not in ('SUCCEEDED','FAILED','CANCELED'):return False
-        if not isinstance(data.get('attempts'),list) or not all(dataset_unit_stopped(attempt) for attempt in data['attempts']):return False
+        if not scheduler_terminal_confirmed(data):return False
+        if not all(dataset_unit_stopped(attempt) for attempt in data['attempts']):return False
     module,cache=dataset_cache();leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
     for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
     filename.unlink();return True
@@ -588,6 +602,9 @@ def process(operation,args):
         if operation=='diagnostics':return job_diagnostics(job,data)
         state=data.get('job',data);attempts=data.get('attempts',[])
         assigned=attempts[0].get('gpu_indices',[]) if attempts and state.get('state') not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
+        if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and not scheduler_terminal_confirmed(data):
+            return {'nodeJobId':row[0],'state':'UNKNOWN','assignedIndices':attempts[0].get('gpu_indices',[]) if attempts else [],
+                    **scheduling_status(job,data),'error':'Job termination is not fully confirmed; card reservation retained'}
         if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and dataset_refs(job) and (ROOT/'jobs'/(job['id']+'.datasets.json')).exists():
             # The periodic lifecycle reconciliation must confirm process
             # cleanup and release leases. A viewer cannot release them.
@@ -671,6 +688,9 @@ def process(operation,args):
             gpu('cancel',node_id);data=gpu('show',node_id);state=data.get('job',data)
         attempts=data.get('attempts',[])
         assigned=attempts[0].get('gpu_indices',[]) if attempts and state['state'] not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
+        if state['state'] in ('SUCCEEDED','FAILED','CANCELED') and not scheduler_terminal_confirmed(data):
+            return {'nodeJobId':node_id,'state':'UNKNOWN','assignedIndices':attempts[0].get('gpu_indices',[]) if attempts else [],
+                    **scheduling_status(job,data),'error':'Job termination is not fully confirmed; card reservation retained'}
         if dataset_refs(job) and state['state'] in ('SUCCEEDED','FAILED','CANCELED') and not release_datasets(job,data):
             return {'nodeJobId':node_id,'state':'UNKNOWN','assignedIndices':assigned,'error':'Job termination is not fully confirmed; dataset leases retained'}
         return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data)}
