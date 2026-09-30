@@ -1,21 +1,24 @@
 import {scanBrowserDirectory,uploadBrowserDataset} from './dataset-upload.js';
+import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={READY:'本机已就绪',REGISTERED:'待准备',STAGING:'未完成，可续传',PREPARING:'准备中',FAILED:'准备失败'};
 export function datasetRows(catalog){
-  return (catalog?.datasets||[]).flatMap(item=>(item.versions||[]).map(v=>`<article class="dataset-card"><div><h3>${esc(item.name||item.dataset)}</h3><p class="muted">${esc(labels[v.state]||v.state)} · ${(Number(v.bytes||0)/1024**3).toFixed(2)} GiB · ${Number(v.files||0)} 个文件</p>${v.error?`<p class="form-error" role="status">${esc(v.error)}</p>`:''}<label class="field">固定版本<input readonly value="${esc(item.dataset+'@'+v.version)}" aria-label="${esc(item.dataset)} 的固定版本" spellcheck="false"></label><p class="muted">训练路径：<code>/data2/${esc(item.dataset)}</code>（只读）</p>${v.canPrepare===false&&v.state!=='READY'?'<p class="muted">重新选择同一目录继续上传。</p>':''}</div><div class="file-actions">${v.canPrepare===false?'':`<button class="button" data-prepare-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${['READY','PREPARING'].includes(v.state)?'disabled':''}>准备到本机</button>`}<button class="button primary" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${v.state==='READY'?'':'disabled'}>用于训练</button></div></article>`)).join('')||'<div class="empty">此机器还没有分配或上传的数据集。<br>可上传自己的目录，也可使用管理员分配的数据。</div>';
+  return (catalog?.datasets||[]).flatMap(item=>(item.versions||[]).map(v=>`<article class="dataset-card"><div><h3>${esc(item.name||item.dataset)}</h3><p class="muted">${esc(labels[v.state]||v.state)} · ${(Number(v.bytes||0)/1024**3).toFixed(2)} GiB · ${Number(v.files||0)} 个文件</p>${v.error?`<p class="form-error" role="status">${esc(v.error)}</p>`:''}<label class="field">固定版本<input readonly value="${esc(item.dataset+'@'+v.version)}" aria-label="${esc(item.dataset)} 的固定版本" spellcheck="false"></label><p class="muted">训练路径：<code>/data2/${esc(item.dataset)}</code>（只读）</p>${v.canPrepare===false&&v.state!=='READY'?`<p class="muted">${String(item.dataset).startsWith('w-')?'回到个人数据空间，重新发布对应子目录。':'重新选择同一目录继续上传。'}</p>`:''}</div><div class="file-actions">${v.canPrepare===false?'':`<button class="button" data-prepare-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${['READY','PREPARING'].includes(v.state)?'disabled':''}>准备到本机</button>`}<button class="button primary" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${v.state==='READY'?'':'disabled'}>用于训练</button></div></article>`)).join('')||'<div class="empty">此机器还没有分配或上传的数据集。<br>可上传自己的目录，也可使用管理员分配的数据。</div>';
 }
 export function datasetsUI(store,toast){
   const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,controller=null,active=null,machineIds='';
   const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   const current=expected=>expected===account();
   const human=bytes=>(Number(bytes||0)/1024**3).toFixed(2)+' GiB';
+  const workspace=dataWorkspaceUI(store,section,toast,{onBusyChange:controls,refreshCatalog:load});
   function controls(){
-    const enabled=store.production&&store.principal&&(store.data?.machines||[]).length,blocked=busy||uploadBusy||discardBusy;
+    const enabled=store.production&&store.principal&&(store.data?.machines||[]).length,blocked=busy||uploadBusy||discardBusy||workspace.busy;
     for(const selector of ['#datasets-refresh','[name=dataset-machine]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||blocked;}
-    for(const selector of ['#dataset-upload-start','[name=dataset-name]','[name=dataset-directory]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||uploadBusy||discardBusy||active?.state==='DISCARDING';}
+    for(const selector of ['#dataset-upload-start','[name=dataset-name]','[name=dataset-directory]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||uploadBusy||discardBusy||workspace.busy||active?.state==='DISCARDING';}
     const pause=section.querySelector('#dataset-upload-pause'),discard=section.querySelector('#dataset-upload-discard');if(pause)pause.hidden=!uploadBusy;if(discard)discard.hidden=uploadBusy||!active?.uploadId||['READY','DISCARDED'].includes(active.state);
+    workspace.controls();
   }
-  store.onAuthChange?.(()=>{controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
+  store.onAuthChange?.(()=>{workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
   async function load(){
     if(busy||uploadBusy||discardBusy||!store.principal)return;
     const machine=section.querySelector('[name=dataset-machine]')?.value;if(!machine)return;
@@ -25,9 +28,9 @@ export function datasetsUI(store,toast){
     catch(e){if(token===generation){section.querySelector('#dataset-catalog').replaceChildren();status.textContent=e.message;}}
     finally{if(token===generation){busy=false;controls();}}
   }
-  section.addEventListener('change',e=>{if(e.target.name==='dataset-machine'){active=null;section.querySelector('#dataset-upload-status').textContent='上传到当前所选服务器；不同机器不会自动同步。';controls();load();}if(e.target.name==='dataset-directory'){const files=Array.from(e.target.files||[]),status=section.querySelector('#dataset-upload-status');status.textContent=files.length?`已选择 ${files.length} 个文件 · ${human(files.reduce((n,f)=>n+f.size,0))}。`:'请选择目录。';}});
+  section.addEventListener('change',e=>{if(e.target.name==='dataset-machine'){workspace.reset();document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));active=null;section.querySelector('#data-workspace-files-list').replaceChildren();section.querySelector('#data-workspace-status').textContent='已切换服务器；目录与数据终端不会跨机同步。';section.querySelector('#dataset-upload-status').textContent='上传到当前所选服务器；不同机器不会自动同步。';controls();load();}if(e.target.name==='dataset-directory'){const files=Array.from(e.target.files||[]),status=section.querySelector('#dataset-upload-status');status.textContent=files.length?`已选择 ${files.length} 个文件 · ${human(files.reduce((n,f)=>n+f.size,0))}。`:'请选择目录。';}});
   section.addEventListener('submit',async e=>{
-    if(e.target.id!=='dataset-upload-form')return;e.preventDefault();if(uploadBusy||discardBusy||!store.production||!store.principal)return;
+    if(e.target.id!=='dataset-upload-form')return;e.preventDefault();if(uploadBusy||discardBusy||workspace.busy||!store.production||!store.principal)return;
     const form=e.target,machine=section.querySelector('[name=dataset-machine]').value,name=form.elements['dataset-name'].value.trim(),files=form.elements['dataset-directory'].files,expected=account(),userId=store.principal.userId;
     if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name)){toast('名称需为 1–40 位字母、数字、下划线或连字符。');return;}
     if(!files?.length){toast('请先选择包含文件的目录。');return;}
@@ -65,11 +68,12 @@ export function datasetsUI(store,toast){
   return ()=>{
     const machines=store.data?.machines||[];
     const next=account(),ids=JSON.stringify(machines.map(m=>m.id));
-    if(next!==identity){controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;identity=next;generation++;busy=false;machineIds='';
+    if(next!==identity){workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;identity=next;generation++;busy=false;machineIds='';
       section.innerHTML=`<p class="muted datasets-intro">上传自己的数据，或准备已分配的数据。就绪后，训练只读访问本机副本。</p>
         <div class="terminal-controls datasets-controls"><label>服务器<select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新数据集</button></div>
+        ${dataWorkspaceHTML()}
         <form id="dataset-upload-form" aria-labelledby="dataset-upload-heading">
-          <div class="dataset-upload-heading"><h3 id="dataset-upload-heading">上传我的数据集</h3><p class="muted">仅自己可用，保存到所选服务器；不会自动分享或跨机同步。</p></div>
+          <div class="dataset-upload-heading"><h3 id="dataset-upload-heading">直接发布本机目录</h3><p class="muted">数据已在电脑上整理好？选择目录后直接上传并校验，省去终端整理步骤。</p></div>
           <div class="dataset-upload-fields">
             <label class="field">数据集名称<input name="dataset-name" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" placeholder="my-data" aria-describedby="dataset-name-help" required><small id="dataset-name-help">1–40 位字母、数字、下划线或连字符。</small></label>
             <label class="field">本机目录<input type="file" name="dataset-directory" webkitdirectory multiple aria-describedby="dataset-directory-help"><small id="dataset-directory-help">选择整个目录；网页上传不包含空目录。</small></label>
@@ -80,7 +84,7 @@ export function datasetsUI(store,toast){
         </form>
         <p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div>`;
     }
-    if(ids!==machineIds){const select=section.querySelector('[name=dataset-machine]'),selected=select.value;select.innerHTML=machines.map(m=>`<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');if(machines.some(m=>m.id===selected))select.value=selected;else if(selected){controller?.abort();active=null;generation++;busy=false;section.querySelector('#dataset-catalog').replaceChildren();}machineIds=ids;}
+    if(ids!==machineIds){const select=section.querySelector('[name=dataset-machine]'),selected=select.value;select.innerHTML=machines.map(m=>`<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');if(machines.some(m=>m.id===selected))select.value=selected;else if(selected){workspace.reset();document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));controller?.abort();active=null;generation++;busy=false;section.querySelector('#dataset-catalog').replaceChildren();}machineIds=ids;}
     controls();
   };
 }

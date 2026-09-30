@@ -19,3 +19,7 @@ test('personal uploads without a configured source show resume guidance instead 
  const ready=datasetRows({datasets:[{dataset:'u-user-private',versions:[{version:'a'.repeat(64),state:'READY',canPrepare:false}]}]});
  assert.doesNotMatch(ready,/data-prepare-dataset/);assert.doesNotMatch(ready,/data-use-dataset="u-user-private"[^>]+disabled/);
 });
+test('evicted workspace publications guide users to republish, not resume a directory upload',()=>{
+ const html=datasetRows({datasets:[{dataset:'w-user-private',versions:[{version:'a'.repeat(64),state:'REGISTERED',canPrepare:false}]}]});
+ assert.match(html,/个人数据空间.*重新发布/);assert.doesNotMatch(html,/继续上传|data-prepare-dataset/);assert.match(html,/data-use-dataset="w-user-private"[^>]+disabled/);
+});

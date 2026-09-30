@@ -119,7 +119,7 @@ def main(argv=None):
     previous = json.loads(path.read_text())
     config, conda_origin = upgraded_config(previous, dest / 'sandbox-runner.py', DATASET_ROOT)
     config['hostRoot'], host_root_origin = preserved_host_root(previous, dest)
-    files = ('dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py', 'node-executor.py')
+    files = ('dataset-cache.py', 'dataset-upload.py', 'data-workspace.py', 'sandbox-runner.py', 'node-executor.py')
     for name in files:
         source = a.source / name
         if not source.is_file() or source.is_symlink(): raise SystemExit('Missing deployment file: '+name)

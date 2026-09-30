@@ -14,6 +14,7 @@ files['/guide.css']='guide.css';files['/guide.js']='guide.js';
 files['/datasets-ui.js']='datasets-ui.js';
 files['/datasets.css']='datasets.css';
 files['/dataset-upload.js']='dataset-upload.js';
+files['/data-workspace.js']='data-workspace.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
 export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge}){
   await standaloneClient();

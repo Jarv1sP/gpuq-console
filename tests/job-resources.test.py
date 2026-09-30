@@ -211,9 +211,10 @@ class Resources(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertIsNone(S.finish_job_capture(broken, self.root, JOB, identifier, 42))
 
-    def runner_command(self, terminal=False, managed_runtime=False):
+    def runner_command(self, terminal=False, managed_runtime=False, data_workspace=False):
         """Execute trusted runner orchestration with fake children, never bwrap/GPU."""
         job = {**JOB, 'userId': 'demo-user-1', 'username': 'demo', 'argv': ['python', 'train.py']}
+        if data_workspace:job['dataWorkspace']=True
         if terminal:
             del job['id']
             job['cards'] = 0
@@ -256,10 +257,15 @@ class Resources(unittest.TestCase):
                                    RESOURCE_FILE=R.RESOURCE_FILE, RAY_SPILL_DIR=R.RAY_SPILL_DIR)
         runtime = self.root / 'diagnostic-runtime'; runtime.mkdir()
         runtimefd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY) if managed_runtime else None
+        data = self.root/'personal-data';data.mkdir()
+        datafd = os.open(data, os.O_RDONLY | os.O_DIRECTORY) if data_workspace else None
+        datalock = os.open(self.root/'personal-data.lock', os.O_CREAT | os.O_RDWR, 0o600) if data_workspace else None
+        self.data_descriptors = (datafd, datalock)
         try:
             with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', return_value=resource), \
                     patch.object(S, 'start_job_capture', return_value=(None, None, runtimefd)), \
                     patch.object(S, 'project_runtime', return_value=None), \
+                    patch.object(S, 'open_data_workspace', return_value=(datafd,datalock)), \
                     patch.object(S.sys, 'argv', ['sandbox-runner.py', JOB['id']] + (['terminal'] if terminal else [])), \
                     patch.dict(S.os.environ, {'GPUQ_ASSIGNED_GPU_INDICES': ','.join(map(str, range(8))),
                                               'GPUQ_ASSIGNED_GPU_UUIDS': ','.join(UUIDS)}), \
@@ -309,6 +315,31 @@ class Resources(unittest.TestCase):
         self.assertEqual(env['RAY_TMPDIR'], '/run/gpuq/runtime')
         self.assertEqual(env['RAY_object_spilling_directory'], '/tmp/gpuq-ray-spill')
         self.assertIn('/run/gpuq/runtime', args)
+
+    def data_mount_assertions(self,args,options):
+        mount=args.index('/data2')
+        self.assertEqual(args[mount-2],'--bind-fd')
+        datafd,datalock=self.data_descriptors
+        self.assertEqual(int(args[mount-1]),datafd)
+        self.assertIn(datafd,options['pass_fds'])
+        self.assertNotIn(datalock,options['pass_fds'])
+        self.assertNotIn('--dev-bind',args)
+        self.assertIn(['--chdir','/data2'],[args[i:i+2] for i in range(len(args)-1)])
+        for descriptor in self.data_descriptors:
+            with self.assertRaises(OSError):os.fstat(descriptor)
+
+    def test_data_terminal_mounts_only_private_fd_without_gpu_or_lock_escape(self):
+        (args,options),_=self.runner_command(terminal=True,data_workspace=True)
+        self.data_mount_assertions(args,options)
+
+    def test_common_p0_data_terminal_has_identical_private_mount_boundary(self):
+        global S
+        original=S
+        try:
+            S=module('common_p0_data_runner_test','sandbox-runner-common-p0.py')
+            (args,options),_=self.runner_command(terminal=True,data_workspace=True)
+            self.data_mount_assertions(args,options)
+        finally:S=original
 
 
 if __name__ == '__main__':
