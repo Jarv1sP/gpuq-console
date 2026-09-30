@@ -85,3 +85,11 @@ test('guide explains quotas, interruption and failure evidence without promising
   assert.match(guide, /不会自动备份/);
   assert.match(guide, /不要粘贴密码、令牌、私钥/);
 });
+
+test('personal data terminal manual extraction separates mutable drafts from immutable training data',()=>{
+  for(const command of ['gpuctl data put samples.zip','gpuctl data shell','unzip samples.zip -d samples','gpuctl data publish samples --name samples','gpuctl data workspace-status OPERATION_ID'])assert.ok(guide.includes(command));
+  assert.match(guide,/只对应\*\*你在当前服务器上的可写目录/);
+  assert.match(guide,/不会自动解压/);
+  assert.match(guide,/独立只读副本/);
+  assert.match(guide,/尚无独立磁盘硬配额/);
+});

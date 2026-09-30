@@ -15,6 +15,7 @@ function fixture(){
   }
   const elements=new Map([
     ['[name=terminal-machine]',Object.assign(new Element(),{value:'node-a'})],
+    ['[name=dataset-machine]',Object.assign(new Element(),{value:'node-b'})],
     ['[name=workspace-project]',Object.assign(new Element(),{value:'experiment'})],
     ...['terminal-title','terminal-session-note','terminal-screen'].map(id=>['#'+id,new Element(id)])
   ]);
@@ -44,6 +45,8 @@ function fixture(){
   const context=()=>listeners.get('gpuq-workspace-context')({detail:{userId:store.principal.userId,machine:elements.get('[name=terminal-machine]').value,project:elements.get('[name=workspace-project]').value}});
   context();
   return {store,calls,opens,toasts,context,terms,
+    dataContext:()=>listeners.get('gpuq-data-workspace-context')(),
+    setPrompt:value=>{globalThis.window.prompt=()=>value;},
     click:id=>listeners.get('click')({target:new Element(id)}),
     title:()=>elements.get('#terminal-title').textContent,
     visible:()=>dialog?.open===true,
@@ -69,6 +72,8 @@ function fixture(){
 for(const [first,second,label]of [
   ['terminal-root-open','terminal-open','个人开发'],
   ['terminal-open','terminal-root-open','ROOT 运维'],
+  ['terminal-root-open','terminal-data-open','个人数据'],
+  ['terminal-data-open','terminal-open','个人开发'],
 ])test(`late ${first} cannot replace newer ${second} or keep its writer`,async()=>{
   const f=fixture();try{
     const old=f.click(first);await f.settle();const latest=f.click(second);await f.settle();
@@ -237,4 +242,35 @@ test('ordinary users cannot send a ROOT request even through a forged visible bu
     f.store.principal.role='member';await f.click('terminal-root-open');
     assert.equal(f.opens.length,0);assert.ok(f.toasts.some(text=>text.includes('仅管理员')));
   }finally{f.restore();}
+});
+
+test('data terminal uses the dataset machine and propagates scope through exchange and close',async()=>{
+  const f=fixture();try{
+    f.store.principal.role='member';await attach(f,'data','terminal-data-open');
+    const open=f.opens[0].args;assert.equal(open.machine,'node-b');assert.equal(open.dataWorkspace,true);assert.equal(open.hostAdmin,false);assert.ok(!('project'in open));
+    f.input('tar --help');await f.advance(20);await f.click('terminal-stop');
+    for(const call of f.calls.filter(value=>value.operation.startsWith('terminal.')&&value.args.id==='data')){assert.equal(call.args.machine,'node-b');assert.equal(call.args.dataWorkspace,true);assert.ok(!('project'in call.args));}
+    assert.equal(f.visible(),false);
+  }finally{f.restore();}
+});
+
+test('data context change fences late data open and only releases its writer, never destroys it',async()=>{
+  const f=fixture();try{
+    const opened=f.click('terminal-data-open');await f.settle();f.dataContext();f.resolve(0,'old-data');await opened;
+    assert.equal(f.visible(),false);const detach=f.calls.find(value=>value.operation==='terminal.detach');assert.equal(detach.args.dataWorkspace,true);assert.equal(detach.args.id,'old-data');assert.equal(f.calls.some(value=>value.operation==='terminal.close'),false);
+  }finally{f.restore();}
+});
+
+test('data session cannot silently reconnect through the development or ROOT entry',async()=>{
+  const f=fixture();try{
+    await attach(f,'personal-data','terminal-data-open');await f.click('terminal-disconnect');f.setPrompt('personal-data');
+    await f.click('terminal-reconnect');await f.click('terminal-root-reconnect');
+    assert.equal(f.opens.length,1);assert.equal(f.toasts.filter(message=>message.includes('终端类型')).length,2);
+    const reconnect=f.click('terminal-data-reconnect');await f.settle();assert.equal(f.opens[1].args.dataWorkspace,true);assert.equal(f.opens[1].args.id,'personal-data');f.resolve(1,'personal-data');await reconnect;
+    assert.match(f.title(),/个人数据/);
+  }finally{f.restore();}
+});
+
+test('data machine changes do not detach an attached workbench terminal',async()=>{
+  const f=fixture();try{await attach(f);f.dataContext();assert.equal(f.visible(),true);assert.equal(f.calls.some(call=>call.operation==='terminal.detach'),false);}finally{f.restore();}
 });
