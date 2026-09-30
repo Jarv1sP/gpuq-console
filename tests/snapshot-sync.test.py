@@ -1,13 +1,18 @@
 """Two disposable nodes, immutable code/data, no SSH/GPU/systemd."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+import errno
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 import uuid
@@ -155,6 +160,71 @@ class SnapshotSyncTests(unittest.TestCase):
         with patch.object(store,'_release_meta',side_effect=AssertionError('Per-chunk large manifest parse')):
             result=n.process('projects.snapshot.get',{**args,'path':'train.py','offset':0});self.assertEqual(base64.b64decode(result['data']),b'fixed')
         with self.assertRaises(ValueError):n.process('projects.snapshot.get',{**args,'path':'../env/bin/python','offset':0})
+    def test_concurrent_source_cache_publication_reuses_complete_code_and_data_cache(self):
+        node=self.nodes[0]
+        spec=importlib.util.spec_from_file_location('concurrent_snapshot_fixture',node.HERE/'snapshot-sync.py')
+        helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+        sync=helper.SnapshotSync(node)
+        node.process('projects.create',{'userId':USER,'project':'source'})
+        paths=node.projects().store.dev_paths(USER,'source')
+        (paths['code']/'train.py').write_bytes(b'fixed')
+        (paths['env']/'bin').mkdir();(paths['env']/'bin/python').write_text('fixture interpreter')
+        (paths['env']/'pyvenv.cfg').write_text('home = /opt/conda/bin\n')
+        release=node.projects().store.publish(USER,'source')['release']
+        module,cache=node.dataset_cache();admin=module.Principal('builtin-admin',True)
+        version=cache.register_source(admin,'shared','fixture',[USER])['version'];cache.materialize(admin,'shared',version)
+        original=os.rename
+        for kind,reference in [('projects',{'userId':USER,'project':'source','release':release}),
+                               ('datasets',{'userId':USER,'dataset':'shared','version':version})]:
+            with self.subTest(kind=kind):
+                barrier=threading.Barrier(2)
+                def racing_rename(source,target,*args,**kwargs):
+                    if Path(source).parent==sync.root and Path(source).name.startswith('stage-'):
+                        barrier.wait(timeout=5)
+                    return original(source,target,*args,**kwargs)
+                with patch.object(os,'rename',side_effect=racing_rename),ThreadPoolExecutor(max_workers=2) as workers:
+                    futures=[workers.submit(sync.export,kind+'.snapshot.info',reference) for _ in range(2)]
+                    outcomes=[future.exception() or future.result() for future in futures]
+                failures=[(type(value).__name__,getattr(value,'errno',None),str(value)) for value in outcomes if isinstance(value,Exception)]
+                self.assertEqual(failures,[],'Both cold source requests must confirm the same fixed cache')
+                self.assertEqual(outcomes[0],outcomes[1]);self.assertEqual(outcomes[0]['state'],'READY')
+                self.assertFalse(list(sync.root.glob('stage-*')),'Loser removes only its own unpublished stage')
+                if kind=='datasets':
+                    cache.set_owners(admin,'shared',['demo-user-2'])
+                    with self.assertRaises(PermissionError):sync.export(kind+'.snapshot.info',reference)
+                else:
+                    with self.assertRaises(ValueError):sync.export(kind+'.snapshot.info',{**reference,'release':'latest'})
+    def test_cache_collision_requires_complete_artifacts_and_does_not_hide_other_io_errors(self):
+        node=self.nodes[0]
+        spec=importlib.util.spec_from_file_location('collision_snapshot_fixture',node.HERE/'snapshot-sync.py')
+        helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper);sync=helper.SnapshotSync(node)
+        module,cache=node.dataset_cache();admin=module.Principal('builtin-admin',True)
+        for index,(code,complete) in enumerate([(errno.EEXIST,True),(errno.ENOTEMPTY,False),(errno.EACCES,None)]):
+            with self.subTest(errno=code):
+                dataset='collision-'+str(index)
+                version=cache.register_source(admin,dataset,'fixture',[USER])['version'];cache.materialize(admin,dataset,version)
+                reference={'userId':USER,'dataset':dataset,'version':version};targets=[]
+                def collision(source,target):
+                    targets.append(Path(target))
+                    if complete is not None:
+                        shutil.copytree(source,target)
+                        if not complete:
+                            with closing(sqlite3.connect(Path(target)/'index.sqlite')) as db:
+                                db.execute('DELETE FROM files');db.commit()
+                    raise OSError(code,'synthetic publication collision',str(source))
+                before=set(sync.root.glob('stage-*'))
+                with patch.object(os,'rename',side_effect=collision):
+                    if complete:
+                        self.assertEqual(sync.export('datasets.snapshot.info',reference)['state'],'READY')
+                    else:
+                        with self.assertRaises(OSError) as error:sync.export('datasets.snapshot.info',reference)
+                        self.assertEqual(error.exception.errno,code)
+                after=set(sync.root.glob('stage-*'))
+                self.assertEqual(len(after-before),0 if complete else 1,'Cleanup is confined to a validated race loser')
+                if complete:
+                    self.assertTrue((targets[0]/'manifest.json').is_file(),'Winning fixed cache is preserved')
+                elif complete is False:
+                    with closing(sqlite3.connect(targets[0]/'index.sqlite')) as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM files').fetchone()[0],0)
     def test_seal_recovers_after_manifest_rename_before_receipt_commit(self):
         self.seal();n=self.nodes[1];receipt=n.projects().folder/(n.projects().key(self.begin)+'.sync.json');session=json.loads(receipt.read_text());session['state']='RECEIVING_MANIFEST';n.atomic_json(receipt,session)
         self.assertEqual(self.call('seal')['state'],'COPYING')

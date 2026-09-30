@@ -6,6 +6,7 @@ migration. Existing dataset uploads perform data verification/publication.
 """
 import base64
 from contextlib import closing
+import errno
 import hashlib
 import importlib.util
 import json
@@ -55,6 +56,21 @@ class SnapshotSync:
     def verified(self,folder,path,info):
         with closing(sqlite3.connect(folder/'index.sqlite')) as db:
             db.execute('UPDATE files SET verified=? WHERE path=?',(json.dumps(self.d._stamp(info)),path));db.commit()
+
+    def complete_cache(self, folder, raw, info, manifest):
+        """Accept a competing publication only if all fixed artifacts agree."""
+        try:
+            if (folder/'manifest.json').read_bytes()!=raw or json.loads((folder/'info.json').read_text())!=info:
+                return False
+            expected={f['path']:(f['size'],f['sha256'],int(f.get('executable',False))) for f in manifest['files']}
+            with closing(sqlite3.connect(f'file:{folder / "index.sqlite"}?mode=ro',uri=True)) as db:
+                count=0
+                for path,size,sha256,executable in db.execute('SELECT path,size,sha256,executable FROM files'):
+                    if expected.get(path)!=(size,sha256,executable):return False
+                    count+=1
+            return count==len(expected)
+        except (OSError,ValueError,sqlite3.Error):
+            return False
 
     def source(self, kind, args):
         actor = self.owner(args)
@@ -107,12 +123,18 @@ class SnapshotSync:
             if len(raw)>64*CHUNK: raise ValueError('Snapshot manifest exceeds 64 MiB')
             (stage/'manifest.json').write_bytes(raw)
             self.index(stage, manifest)
-            self.n.atomic_json(stage/'info.json', {'manifestBytes':len(raw),'manifestSha256':hashlib.sha256(raw).hexdigest(),
-                'totalBytes':sum(f['size'] for f in manifest['files']), 'entries':len(manifest['files'])+len(manifest['directories'])})
+            info={'manifestBytes':len(raw),'manifestSha256':hashlib.sha256(raw).hexdigest(),
+                'totalBytes':sum(f['size'] for f in manifest['files']), 'entries':len(manifest['files'])+len(manifest['directories'])}
+            self.n.atomic_json(stage/'info.json',info)
             try: os.rename(stage, folder)
-            except FileExistsError:
+            except OSError as error:
+                if error.errno not in (errno.EEXIST,errno.ENOTEMPTY) or not self.complete_cache(folder,raw,info,manifest):
+                    raise
+                # Linux reports ENOTEMPTY when another immutable nonempty cache
+                # won the rename. Never delete or replace the winner's files.
                 for child in stage.iterdir(): child.unlink()
                 stage.rmdir()
+                return self.source(kind,args)  # Recheck live ownership/readiness.
         return folder, source
 
     def export(self, operation, args):
