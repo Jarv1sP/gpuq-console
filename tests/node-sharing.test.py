@@ -16,6 +16,8 @@ import uuid
 
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'gpuq'))
 from gpuq.backends import GpuDevice
+from gpuq.config import Config
+from gpuq.constants import AttemptState,JobState
 from gpuq.coordinator import Coordinator
 from gpuq.hami import runtime_environment
 from gpuq.store import Store
@@ -80,6 +82,32 @@ class Sharing(unittest.TestCase):
         lease={'gpu_uuid':'GPU-test','attempt_id':'Aholder','job_id':'Jholder'};shared={'share_gpu':True,'requested_gpu_uuids':['GPU-test'],'vram_mb':14000}
         c,_=self.coordinator([lease],True);self.assertEqual(c._shared_devices_for_job(shared),[])
         c,_=self.coordinator([lease]);c.store.get_attempt.return_value={'id':'Aholder','state':'STARTING'};self.assertEqual(c._shared_devices_for_job(shared),[])
+
+    def test_durable_shared_cancel_signals_and_releases_only_its_own_holder(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);config=Config(root=root,db_path=root/'db',log_dir=root/'logs',control_dir=root/'control',socket_path=Path(f'/run/user/{os.getuid()}/private-sharing-test.sock'),managed_gpu_uuids=('GPU-test',),allowed_uid=os.getuid(),observe_only=False)
+            config.log_dir.mkdir();config.control_dir.mkdir();store=Store(config.db_path).initialize();systemd=Mock()
+            try:
+                c=Coordinator(config,store,Mock(),systemd,boot_id='test-boot')
+                c._snapshot=(GpuDevice(3,'GPU-test',24576,8192,16384,25,(123,456)),)
+                raw={'submit_key':str(uuid.uuid4()),'name':'ordinary','owner':'alice','priority':2,'dispatch_mode':'queue','yield_policy':'never','checkpoint_capability':'none','restart_policy':'never','gpu_count':1,'placement':'pinned','requested_gpu_uuids':['GPU-test'],'argv':[sys.executable,'-c','pass'],'cwd':str(root),'env':{}}
+                holder=store.submit_job(validate_submission(raw,1,managed_gpu_uuids=config.managed_gpu_uuids));aid='A'+uuid.uuid4().hex
+                attempt=store.create_attempt(holder['id'],attempt_id=aid,state='RUNNING',gpu_uuids=['GPU-test'],gpu_indices=[3],unit_name='ordinary-unit',unit_token='ordinary-token',invocation_id='a'*32,boot_id='test-boot',control_dir=str(root/'ordinary'),log_path=str(root/'ordinary.log'))
+                store.acquire_leases(holder['id'],aid,{'GPU-test':3});store.update_job(holder['id'],state=JobState.RUNNING);c._statuses[aid]=SimpleNamespace(is_cleanup_ready=False)
+                shared=store.submit_job(validate_submission({**raw,'submit_key':str(uuid.uuid4()),'name':'shared','share_gpu':True,'vram_mb':4096},1,managed_gpu_uuids=config.managed_gpu_uuids))
+                c._schedule_shared();own=store.list_attempts(job_id=shared['id'])[0]
+                self.assertEqual(store.get_job(shared['id'])['state'],'STARTING');self.assertEqual(len(store.list_leases()),2)
+                store.update_attempt(own['id'],state=AttemptState.RUNNING,invocation_id='b'*32);store.update_job(shared['id'],state=JobState.RUNNING)
+                c._api_cancel({'job_id':shared['id']});self.assertEqual(len(store.list_leases()),2,'cancel receipt alone does not retire leases')
+                term=next(a for a in store.list_actions(attempt_id=own['id']) if a['action_type']=='TERM_UNIT')
+                systemd.status.return_value=SimpleNamespace(is_cleanup_ready=False,main_pid=0)
+                c._execute_signal(term,kill=False)
+                systemd.terminate.assert_called_once_with(unit_name=own['unit_name'],description_token=own['unit_token'],invocation_id='b'*32);systemd.kill.assert_not_called()
+                store.update_attempt(own['id'],state=AttemptState.DRAINING,exit_code=-15);c._statuses[own['id']]=SimpleNamespace(is_cleanup_ready=True,control_group='',main_pid=0)
+                c._finalize_draining_attempts()
+                self.assertEqual(store.get_attempt(own['id'])['state'],'CANCELED');self.assertEqual([l['attempt_id'] for l in store.list_leases()],[aid])
+                self.assertEqual(store.get_job(holder['id'])['state'],'RUNNING');self.assertEqual(c._snapshot[0].compute_pids,(123,456));self.assertEqual(store.check_integrity()['schema_version'],11)
+            finally:store.close()
 
     def test_bridge_requires_capability_before_forwarding_explicit_sharing(self):
         for ready in (False,True):
