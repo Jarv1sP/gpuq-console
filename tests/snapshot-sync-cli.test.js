@@ -11,7 +11,10 @@ import {standaloneClient} from '../client-bundle.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex'),run=promisify(execFile),chunk=1024**2;
 async function fixture(t){
   const root=await mkdtemp(join(tmpdir(),'gpuq-sync-cli-')),repo=join(root,'repo 工作区'),session=join(root,'session'),client=join(root,'gpuctl.mjs'),calls=[],files=new Map();await mkdir(repo);await writeFile(client,await standaloneClient());
-  await run('git',['init',repo]);await writeFile(join(repo,'train.py'),'print("train")\n');await run('git',['-C',repo,'add','train.py']);await run('git',['-C',repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-m','fixture']);
+  await run('git',['init',repo]);
+  // Exercise the Windows Git defaults on every CI OS, without global config changes.
+  await run('git',['-C',repo,'config','core.autocrlf','true']);await run('git',['-C',repo,'config','core.eol','crlf']);
+  await writeFile(join(repo,'train.py'),'print("train")\n');await run('git',['-C',repo,'add','train.py']);await run('git',['-C',repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-m','fixture']);
   const payload=Buffer.alloc(chunk+13,123),dataManifest=Buffer.from(JSON.stringify({schema:1,directories:[],files:[{path:'samples.bin',size:payload.length,sha256:hash(payload)}]})),version=hash(dataManifest);
   const published=Buffer.from('published code'),codeManifest=Buffer.from(JSON.stringify({schema:1,directories:[],files:[{path:'train.py',size:published.length,sha256:hash(published),executable:false}]}));
   let target=null,manifest=Buffer.alloc(0),parsed=null,drop=false,upload=null;
@@ -47,13 +50,13 @@ async function fixture(t){
 }
 test('Git preview leaves target unchanged; clean commit copies code into a fenced new draft and resumes a lost reply',async t=>{
   const f=await fixture(t),args=['sync','git',f.repo,'--to','gpu-2','--project','copy','--ref','HEAD'];const preview=await f.cli([...args,'--dry-run']);assert.equal(preview.code,0,preview.stderr);assert.equal(preview.data.changes,false);assert.equal(f.calls.some(c=>c.operation==='projects.sync.begin'),false);
-  f.drop();assert.equal((await f.cli(args)).code,1);const resumed=await f.cli(args);assert.equal(resumed.code,0,resumed.stderr);assert.equal(resumed.data.state,'CODE_READY');assert.match(resumed.data.source.commit,/^[a-f0-9]{40}$/);assert.deepEqual(f.files.get('train.py'),await readFile(join(f.repo,'train.py')));assert.equal(f.calls.some(c=>/publish|terminal|host\.exec/.test(c.operation)),false);assert.equal((await run('git',['-C',f.repo,'status','--porcelain'])).stdout,'');
+  f.drop();assert.equal((await f.cli(args)).code,1);const resumed=await f.cli(args);assert.equal(resumed.code,0,resumed.stderr);assert.equal(resumed.data.state,'CODE_READY');assert.match(resumed.data.source.commit,/^[a-f0-9]{40}$/);assert.deepEqual(f.files.get('train.py'),(await run('git',['-C',f.repo,'cat-file','blob',resumed.data.source.commit+':train.py'],{encoding:'buffer'})).stdout);assert.equal(f.calls.some(c=>/publish|terminal|host\.exec/.test(c.operation)),false);assert.equal((await run('git',['-C',f.repo,'status','--porcelain'])).stdout,'');
 });
 test('dirty Git and implicit/unauthorized targets fail before starting sync',async t=>{
   const f=await fixture(t);await writeFile(join(f.repo,'train.py'),'uncommitted');for(const extras of [[],['--to','auto'],['--to','gpu-9'],['--to','gpu-2']])assert.equal((await f.cli(['sync','git',f.repo,'--project','copy',...extras])).code,1);assert.equal(f.calls.some(c=>c.operation==='projects.sync.begin'),false);
 });
 test('Git sync resolves an explicit historical commit rather than current HEAD or local draft bytes',async t=>{
-  const f=await fixture(t),commit=(await run('git',['-C',f.repo,'rev-parse','HEAD'])).stdout.trim(),original=await readFile(join(f.repo,'train.py'));
+  const f=await fixture(t),commit=(await run('git',['-C',f.repo,'rev-parse','HEAD'])).stdout.trim(),original=(await run('git',['-C',f.repo,'cat-file','blob',commit+':train.py'],{encoding:'buffer'})).stdout;
   await writeFile(join(f.repo,'train.py'),'print("new HEAD")\n');await run('git',['-C',f.repo,'add','train.py']);await run('git',['-C',f.repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-m','new head']);
   const result=await f.cli(['sync','git',f.repo,'--to','gpu-2','--project','copy','--ref',commit]);
   assert.equal(result.code,0,result.stderr);assert.equal(result.data.source.commit,commit);assert.deepEqual(f.files.get('train.py'),original);
@@ -70,7 +73,26 @@ test('Git sync preserves fixed executable modes despite local archive permission
   const manifest=JSON.parse(Buffer.concat(f.calls.filter(c=>c.operation==='projects.sync.manifest').map(c=>Buffer.from(c.args.data,'base64'))));
   assert.equal(manifest.files.find(file=>file.path===script).executable,true);
   assert.equal(manifest.files.find(file=>file.path==='train.py').executable,false);
-  assert.deepEqual(f.files.get(script),await readFile(join(f.repo,script)));
+  assert.deepEqual(f.files.get(script),(await run('git',['-C',f.repo,'cat-file','blob',result.data.source.commit+':'+script],{encoding:'buffer'})).stdout);
+});
+test('Git sync rejects effective archive transformations in the fixed historical commit before any target write',async t=>{
+  for(const [attribute,rule] of [['export-ignore','private export-ignore'],['export-ignore','private/ export-ignore'],['export-subst','private/*.txt export-subst']])await t.test(rule,async t=>{
+    const f=await fixture(t);await mkdir(join(f.repo,'private'));await writeFile(join(f.repo,'private','selected.txt'),'private code\n');
+    await writeFile(join(f.repo,'.gitattributes'),rule+'\n');
+    await run('git',['-C',f.repo,'add','.']);await run('git',['-C',f.repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-m','archive rules']);
+    const commit=(await run('git',['-C',f.repo,'rev-parse','HEAD'])).stdout.trim();
+    await writeFile(join(f.repo,'.gitattributes'),'');await run('git',['-C',f.repo,'add','.gitattributes']);await run('git',['-C',f.repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-m','new head without rules']);
+    const result=await f.cli(['sync','git',f.repo,'--to','gpu-2','--project','copy','--ref',commit]);
+    assert.equal(result.code,1);assert.match(result.stderr,new RegExp(attribute));assert.equal(f.calls.some(c=>c.operation==='projects.sync.begin'),false);
+  });
+});
+test('Git sync does not take archive rules from a newer working tree or allow local attribute overrides',async t=>{
+  const f=await fixture(t),commit=(await run('git',['-C',f.repo,'rev-parse','HEAD'])).stdout.trim();
+  await writeFile(join(f.repo,'.gitattributes'),'train.py export-ignore\n');await run('git',['-C',f.repo,'add','.gitattributes']);await run('git',['-C',f.repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-m','new head excludes file']);
+  const args=['sync','git',f.repo,'--to','gpu-2','--project','copy','--ref',commit],result=await f.cli(args);
+  assert.equal(result.code,0,result.stderr);assert.deepEqual(f.files.get('train.py'),(await run('git',['-C',f.repo,'cat-file','blob',commit+':train.py'],{encoding:'buffer'})).stdout);
+  await writeFile(join(f.repo,'.git','info','attributes'),'train.py -export-ignore\n');
+  const before=f.calls.length,blocked=await f.cli(['sync','git',f.repo,'--to','gpu-2','--project','copy']);assert.equal(blocked.code,1);assert.match(blocked.stderr,/info\/attributes/);assert.equal(f.calls.slice(before).some(c=>c.operation==='projects.sync.begin'),false);
 });
 test('explicit source node and full release copy code while retaining source provenance',async t=>{
   const f=await fixture(t),release='a'.repeat(64),result=await f.cli(['sync','code','--from','gpu-1','--to','gpu-2','--project','vision','--target-project','copy','--release',release]);assert.equal(result.code,0,result.stderr);assert.equal(result.data.state,'CODE_READY');assert.deepEqual(result.data.source,{kind:'release',machine:'gpu-1',project:'vision',release});assert.equal(f.files.get('train.py').toString(),'published code');assert.equal(f.calls.filter(c=>c.operation.startsWith('projects.snapshot')).every(c=>c.args.machine==='gpu-1'&&c.args.release===release),true);assert.equal(f.calls.filter(c=>c.operation.startsWith('projects.sync')).every(c=>c.args.machine==='gpu-2'),true);
