@@ -22,6 +22,7 @@ jobs:
       - run: node tests/projects-ui-smoke.mjs
       - run: node tests/priority-ui-smoke.mjs
       - run: node tests/community-ui-smoke.mjs
+      - run: node tests/guide-ui-smoke.mjs
       - run: node tests/ui-polish-smoke.mjs
       - run: node tests/job-diagnostics-ui-smoke.mjs
       - run: node tests/client-auth-smoke.mjs
@@ -31,3 +32,11 @@ jobs:
       - run: git diff --check
       - run: docker build -f deploy/Dockerfile -t gpuq-console:ci .
       - run: python3 scripts/check-public-tree.py
+  windows-client:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: node --test tests/install-client-windows.test.js tests/cli-native-platform.test.js tests/dataset-file-identity.test.js tests/dataset-upload-cli.test.js

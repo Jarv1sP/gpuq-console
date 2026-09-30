@@ -132,10 +132,11 @@ try {
   assert.equal(await card(member).locator('[data-prepare-dataset]').isEnabled(), true);
   assert.equal(await card(member).locator('[data-use-dataset]').isDisabled(), true);
   assert.equal(await card(member).locator('input[readonly]').inputValue(), 'sample@' + version);
-  const [guide] = await Promise.all([member.waitForEvent('popup'), member.locator('a[href="/guide/datasets"]:visible').click()]);
+  const [guide] = await Promise.all([member.waitForEvent('popup'), member.locator('a[href="/guide"]:visible').click()]);
   await guide.waitForLoadState('domcontentloaded');
-  assert.equal(new URL(guide.url()).pathname, '/guide/datasets');
-  assert.match(await guide.locator('body').textContent(), /固定版本数据集/);
+  await guide.locator('.guide-card[href="/guide/data"]').click();
+  assert.equal(new URL(guide.url()).pathname, '/guide/data');
+  assert.match(await guide.locator('body').textContent(), /上传自己的数据/);
   await guide.close();
   await capture(member, 'datasets-member-registered.png');
 

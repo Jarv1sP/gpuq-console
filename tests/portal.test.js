@@ -59,11 +59,12 @@ test('VPS HTTPS cookie boundary, CLI bearer API, private server files and produc
     const cli=await post('/api/login',{username:'admin',password});assert.equal(typeof cli.data.token,'string');
     assert.equal((await post('/api/call',{operation:'state'},{Authorization:`Bearer ${cli.data.token}`})).res.status,200);
     for(const path of ['/service.js','/portal.sqlite','/portal-service.mjs','/.git/config'])assert.equal((await fetchHost(path)).status,404);
-    for(const path of ['/install.sh','/gpuctl.mjs','/amaxctl.mjs','/guide/user','/guide/admin']){
+    for(const path of ['/install.sh','/install.ps1','/gpuctl.mjs','/amaxctl.mjs','/guide/start']){
       const asset=await fetchHost(path);assert.equal(asset.status,200);const body=await asset.text();
       assert.ok(body.includes(origin));assert.equal(body.includes('__GPUQ_PUBLIC_ORIGIN__'),false);
     }
     assert.equal((await fetchHost('/machines.js')).status,200);
+    for(const path of ['/guide/admin','/ADMIN_README.md','/docs/DEPLOYMENT.md'])assert.equal((await fetchHost(path)).status,404);
     const pageResponse=await fetchHost('/'),page=await pageResponse.text();
     assert.equal(page.includes('AMAX'),false);assert.match(page,/GPUQ Console/);
     assert.equal(page.includes('AdminDemo!2026'),false);assert.equal(page.includes('<script src="/runtime.js">'),true);
