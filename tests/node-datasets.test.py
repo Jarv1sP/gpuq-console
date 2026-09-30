@@ -19,7 +19,7 @@ class NodeDatasets(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
-        for name in ('node-executor.py', 'dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py'):
+        for name in ('node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py'):
             shutil.copy2(DEPLOY / name, self.base / name)
         self.source = self.base / 'source'
         self.source.mkdir()

@@ -8,6 +8,8 @@ import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'deploy'))
+import node_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / 'deploy/install-node.py').read_text()
@@ -47,19 +49,13 @@ class InstallerBoundary(unittest.TestCase):
         run, namespace = self.run_preflight(profile='common-p0')
         exec(PREFLIGHT, namespace)
         run.assert_not_called()
-        self.assertIn("default='common-p0'", SOURCE)
+        self.assertIn("else 'common-p0'", SOURCE)
 
     def test_profile_selects_runner_without_node_config_change(self):
-        start = next(i for i, node in enumerate(TREE.body) if isinstance(node, ast.Assign)
-                     and any(isinstance(t, ast.Name) and t.id == 'runner_source' for t in node.targets))
-        code = compile(ast.Module(body=TREE.body[start:start + 4], type_ignores=[]), '<runner selection>', 'exec')
         for profile, expected in [('common-p0', 'sandbox-runner-common-p0.py'), ('ray-p0', 'sandbox-runner.py')]:
-            copy = Mock(); destination = Mock(); destination.__truediv__ = Mock(return_value=Mock())
-            namespace = {'source': ROOT, 'dest': destination, 'a': SimpleNamespace(runtime_profile=profile),
-                         'shutil': SimpleNamespace(copy2=copy)}
-            exec(code, namespace)
-            self.assertEqual(copy.call_args_list[0].args[0], ROOT / 'deploy' / expected)
-            self.assertEqual(len(copy.call_args_list), 3 if profile == 'ray-p0' else 1)
+            plan=node_runtime.runtime_plan(profile)
+            self.assertEqual(dict(plan)['sandbox-runner.py'],expected)
+            self.assertEqual('job-resources.py' in dict(plan),profile=='ray-p0')
 
     def test_explicit_configuration_targets_current_uid_then_checks_live_limits(self):
         run, namespace = self.run_preflight(configure=True)
@@ -80,9 +76,9 @@ class InstallerBoundary(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
     def test_preserves_profiles_and_root_grants_stay_explicit_and_scoped(self):
-        self.assertIn("'gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'", SOURCE)
+        self.assertEqual(node_runtime.manifest()['units'],['gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer'])
         self.assertIn("run('systemctl','--user','enable','--now','gpuq-diagnostics-gc.timer')", SOURCE)
-        self.assertIn("'job-resources.py','gpuq-ray'", SOURCE)
+        self.assertEqual(node_runtime.manifest()['profiles']['ray-p0']['extra'],['job-resources.py','gpuq-ray'])
         for forbidden in ('environmentMode', "'daemon-reexec'", "'restart'"):
             self.assertNotIn(forbidden, SOURCE)
         root_gate = next(node for node in TREE.body if isinstance(node, ast.If)

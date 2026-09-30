@@ -8,6 +8,7 @@ class Files(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();base=Path(self.temp.name)
         shutil.copy2(Path(__file__).resolve().parents[1]/'deploy/node-executor.py',base/'node.py')
+        shutil.copy2(Path(__file__).resolve().parents[1]/'deploy/scheduling-policy.py',base/'scheduling-policy.py')
         (base/'node-config.json').write_text(json.dumps({'root':str(base/'data')}))
         spec=importlib.util.spec_from_file_location('node_test',base/'node.py');self.node=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.node)
         self.root=self.node.workspace('demo-user-1')

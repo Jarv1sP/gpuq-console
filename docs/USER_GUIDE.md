@@ -303,11 +303,38 @@ gpuctl run -g 1 --priority idle -- python disposable_trial.py --output /outputs
 
 任务优先级不保证准确开跑时间。查看队列与最近状态，不要仅凭一张卡的利用率暂时为 0 判断它能立即分配。
 
+管理员可在任务表调整已核验、尚未启动任务的 P0–P4 排队等级，也可执行 `gpuctl priority JOB_ID P1`（例如 P1 或 P3）。此操作只改变排队顺序，不改变原任务的让位、保存和恢复约定，也不要求重新确认让位。节点尚未支持独立改等级时，入口不可用；运行中任务不能这样修改。
+
+### 自定义等级、让位与恢复
+
+网页展开“提交训练 → 自定义 GPUQ 调度”。P0–P4只改变排序，不表示同意中断；成员可选P0–P2。节点缺能力时明确拒绝，不降级。
+
+```sh
+gpuctl run --rank P1 --yield never -g 1 -- python train.py
+gpuctl run --rank P1 --yield now -g 1 -- python disposable.py
+gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -g 2 -- python train.py
+```
+
+`save`须训练适配checkpoint并恢复完整状态，DDP所有rank协同。低等级save任务整体保存后让位，on-preempt随后排队恢复；保存失败不强杀，手动取消或失败不自动重跑。`--checkpointable`不是自动改写代码。
+
 ### 协调使用安排
 
 “协作区”包含维护公告、问题反馈和公共交流。可以说明预计结束时间、协商释放资源或说明紧急实验，但聊天约定不会自动改变配额、队列或取消任务。
 
+后台启用任务留言后还会显示“任务留言”：先选择“随任务结束删除”并关联自己的任务，或选择“非任务留言，手动删除”。支持刷新、编辑和删除；发送结果不确定时重试原内容。旧后台未启用时不显示此入口，原有协作功能照常使用。
+
 协作内容对所有已登录成员可见；长期实验记录请保存在自己的项目或文档中。维护前及时保存 checkpoint，是否自动保存由训练程序决定。
+
+### 任务留言（命令行）
+
+```sh
+gpuctl notes
+gpuctl note --job JOB_ID "预计今晚结束"
+gpuctl note --general "本周维护安排"
+gpuctl note-delete NOTE_ID
+```
+
+任务留言使用 `gpuctl jobs` 返回的完整平台任务 ID，只能关联自己的未结束任务；确认完成、失败或取消后自动删除正文。排队、让位中或状态未知时保留。`--general` 是非任务留言，保留直到作者或管理员手动删除。所有登录成员可见，每条最多 2000 字符；这套 API/CLI 不改变网页原有聊天室的留存规则。
 
 ## 常见问题 {#troubleshooting}
 

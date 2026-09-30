@@ -1,5 +1,14 @@
 # 测试与发布检查
 
+可选的真实训练适配器测试：在已安装 PyTorch 和 NumPy 的本地环境运行
+`python3 tests/elastic-ddp-smoke.py`。只用 CPU/Gloo 和临时目录，不提交 GPUQ
+任务、不连接服务器。覆盖 1→3 与 2→3 rank 扩容：global batch=12、micro batch=2，
+梯度累计分别为 6/3→2；实际 checkpoint 退出码为 75，恢复模型、优化器、scheduler、
+已存在 rank 的 Python/NumPy/PyTorch RNG 与 epoch，LR 保持不变；最终参数和动量与固定
+global batch 的单进程参考在 FP64 容差 1e-12 内一致。另测三 rank 保存失败共识，
+不能产生 ACK、checkpoint 或恢复成功结果。新增 rank 没有旧 RNG 状态，按 rank 确定性
+初始化；这里不承诺随机增强、Dropout、CUDA/NCCL 或真实抢占调度的逐位复现。
+
 ## 每个 PR 的离线自动测试
 
 ```sh
