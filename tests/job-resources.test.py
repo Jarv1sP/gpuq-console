@@ -22,6 +22,7 @@ def module(name, filename):
 
 R = module('resource_tests', 'job-resources.py')
 S = module('resource_runner_tests', 'sandbox-runner.py')
+P = module('resource_allocation_tests', 'scheduling-policy.py')
 JOB = {'id': '11111111-1111-4111-8111-111111111111', 'cards': 8}
 UUIDS = ['GPU-' + str(n) for n in range(8)]
 
@@ -211,10 +212,13 @@ class Resources(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertIsNone(S.finish_job_capture(broken, self.root, JOB, identifier, 42))
 
-    def runner_command(self, terminal=False, managed_runtime=False, data_workspace=False):
+    def runner_command(self, terminal=False, managed_runtime=False, data_workspace=False, training_control=False, allocated_cards=8):
         """Execute trusted runner orchestration with fake children, never bwrap/GPU."""
         job = {**JOB, 'userId': 'demo-user-1', 'username': 'demo', 'argv': ['python', 'train.py']}
         if data_workspace:job['dataWorkspace']=True
+        if allocated_cards!=8:
+            job['elastic']={'minCards':1,'globalBatch':256,'microBatch':8,'autoExpand':False}
+            self.write_limits(self.leaf,str(allocated_cards*400000)+' 100000',str(allocated_cards*32*R.GIB),'2048')
         if terminal:
             del job['id']
             job['cards'] = 0
@@ -225,7 +229,9 @@ class Resources(unittest.TestCase):
         spec_dir.mkdir()
         spec_file = spec_dir / (JOB['id'] + '.json')
         spec_file.write_text(json.dumps(job))
-        (self.root / 'node-config.json').write_text(json.dumps({'root': str(self.root), 'conda': '/opt/conda'}))
+        config={'root':str(self.root),'conda':'/opt/conda'}
+        if training_control:config.update(controlRoot=str(self.root/'not-for-terminals'),gpuqArchive=str(self.root/'must-not-mount-sdk.pyz'),trainingControlProtocol=1)
+        (self.root / 'node-config.json').write_text(json.dumps(config))
         captured, properties, kept = [], [], []
         path_exists, path_read = Path.exists, Path.read_text
         def exists(path):
@@ -262,16 +268,16 @@ class Resources(unittest.TestCase):
         datalock = os.open(self.root/'personal-data.lock', os.O_CREAT | os.O_RDWR, 0o600) if data_workspace else None
         self.data_descriptors = (datafd, datalock)
         try:
-            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', return_value=resource), \
+            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else resource), \
                     patch.object(S, 'start_job_capture', return_value=(None, None, runtimefd)), \
                     patch.object(S, 'project_runtime', return_value=None), \
                     patch.object(S, 'open_data_workspace', return_value=(datafd,datalock)), \
                     patch.object(S.sys, 'argv', ['sandbox-runner.py', JOB['id']] + (['terminal'] if terminal else [])), \
-                    patch.dict(S.os.environ, {'GPUQ_ASSIGNED_GPU_INDICES': ','.join(map(str, range(8))),
-                                              'GPUQ_ASSIGNED_GPU_UUIDS': ','.join(UUIDS)}), \
+                    patch.dict(S.os.environ, {'GPUQ_ASSIGNED_GPU_INDICES': ','.join(map(str, range(allocated_cards))),
+                                              'GPUQ_ASSIGNED_GPU_UUIDS': ','.join(UUIDS[:allocated_cards])}), \
                     patch.object(Path, 'exists', exists), patch.object(Path, 'read_text', read), \
                     patch.object(S.os, 'memfd_create', side_effect=memfd, create=True), \
-                    patch.object(S.subprocess, 'check_output', return_value='24576\n' * 8) as gpu_check, \
+                    patch.object(S.subprocess, 'check_output', return_value='24576\n' * allocated_cards) as gpu_check, \
                     patch.object(S.subprocess, 'run', side_effect=lambda command, **kwargs: properties.append(command)), \
                     patch.object(S.subprocess, 'Popen', side_effect=spawn):
                 self.assertEqual(S.main(), 42)
@@ -284,6 +290,7 @@ class Resources(unittest.TestCase):
 
     def test_runner_builds_readonly_leaf_cgroup_and_metadata_without_changing_user_command(self):
         (args, options), properties = self.runner_command()
+
         self.assertEqual(args[-2:], ['python', 'train.py'])
         mount = args.index('/sys/fs/cgroup')
         self.assertEqual(args[mount - 2], '--ro-bind-fd')
@@ -298,6 +305,12 @@ class Resources(unittest.TestCase):
         self.assertEqual(env['GPUQ_CPU_LIMIT'], '32')
         self.assertEqual(env['GPUQ_GPU_COUNT'], '8')
         self.assertFalse(any(key.startswith('RAY_') for key in env))
+
+    def test_runner_uses_two_card_budget_for_an_immutable_eight_card_elastic_request(self):
+        (args,_),properties=self.runner_command(allocated_cards=2)
+        self.assertIn('MemoryMax='+str(64*R.GIB),properties[0]);self.assertIn('CPUQuota=800%',properties[0])
+        env={args[i+1]:args[i+2] for i,item in enumerate(args) if item=='--setenv'}
+        self.assertEqual(env['GPUQ_GPU_COUNT'],'2');self.assertEqual(env['GPUQ_CPU_LIMIT'],'8')
 
     def test_legacy_terminal_without_id_gets_budget_without_rewriting_immutable_spec(self):
         (args, _), properties = self.runner_command(terminal=True)
@@ -324,12 +337,16 @@ class Resources(unittest.TestCase):
         self.assertIn(datafd,options['pass_fds'])
         self.assertNotIn(datalock,options['pass_fds'])
         self.assertNotIn('--dev-bind',args)
+        self.assertNotIn('/run/gpuq/control',args)
+        self.assertNotIn('/opt/gpuq/sdk.pyz',args)
+        env={args[i+1]:args[i+2] for i,value in enumerate(args) if value=='--setenv'}
+        self.assertNotIn('GPUQ_CONTROL_DIR',env);self.assertNotIn('PYTHONPATH',env)
         self.assertIn(['--chdir','/data2'],[args[i:i+2] for i in range(len(args)-1)])
         for descriptor in self.data_descriptors:
             with self.assertRaises(OSError):os.fstat(descriptor)
 
     def test_data_terminal_mounts_only_private_fd_without_gpu_or_lock_escape(self):
-        (args,options),_=self.runner_command(terminal=True,data_workspace=True)
+        (args,options),_=self.runner_command(terminal=True,data_workspace=True,training_control=True)
         self.data_mount_assertions(args,options)
 
     def test_common_p0_data_terminal_has_identical_private_mount_boundary(self):
@@ -337,7 +354,7 @@ class Resources(unittest.TestCase):
         original=S
         try:
             S=module('common_p0_data_runner_test','sandbox-runner-common-p0.py')
-            (args,options),_=self.runner_command(terminal=True,data_workspace=True)
+            (args,options),_=self.runner_command(terminal=True,data_workspace=True,training_control=True)
             self.data_mount_assertions(args,options)
         finally:S=original
 

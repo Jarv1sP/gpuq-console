@@ -159,6 +159,24 @@ gpuctl run -g 4 --min-vram 24 -- python -m torch.distributed.run --standalone --
 
 这会在**同一台服务器**申请 4 张卡，每张至少约 24 GiB 物理显存。程序本身必须支持多卡；平台不会自动改写单卡代码，也不会将几张卡的显存合成一张大卡，或自动启动跨服务器训练。
 
+### 弹性卡数与保存扩卡
+
+`-g` 表示最大卡数，`--min-cards` 表示最少启动卡数；声明 global/micro batch 后，只选能整除的卡数，并按当前最多可用合法卡数启动：
+
+```sh
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
+```
+
+此例合法卡数为 1、2、4、8；空闲 3 张时启动 2 张。个人额度始终预留最大值，任务列表另显示实际分配。
+
+```sh
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
+```
+
+自动扩卡会先保存当前轮次、结束旧 attempt，再从 checkpoint 启动更大的合法卡数；不是给原进程热挂显卡。训练需按实际卡数启动 DDP，用 `gpuq.elastic.plan_elastic_batch()` 计算梯度累积，并接入 checkpoint/完整恢复适配器。global batch 固定时 LR 不变，平台不会自动改训练代码。排队任务先调度，扩卡可能延迟；保存失败不会强制杀训练。
+
+网页“弹性卡数”提供相同选项。节点未确认弹性/控制通道时拒绝提交，不静默退回固定卡数。
+
 ### 停止任务
 
 ```sh
@@ -290,6 +308,10 @@ gpuctl pull --job JOB_ID model.pt ./model.pt
 
 ## 排队与协作 {#queue}
 
+持续查看任务进度用 `gpuctl watch 任务ID`，默认每 5 秒核对，Ctrl+C 只停止查看。
+完成、失败、取消或状态未知时会反馈并退出；不因查看而重试或取消训练。网页任务表显示相同轮次、步数和训练自报 ETA。未接入进度 SDK 的训练显示“进度未上报”，仍可看调度状态和日志；训练自报 100% 或异常不等于调度器确认终态。
+取消回执不代表进程已退出：训练尝试、显卡租约或扩卡预留尚未清理，或节点查询失败时，仍显示 `UNKNOWN` 并保留用卡额度；确认清理后才显示终态。
+
 ### 授权不等于占住显卡
 
 每台机器的卡数上限限制你在该机同时申请多少张卡；所有机器合计上限限制你跨机器同时申请的总卡数。例如每台最多 4 张、总共最多 6 张，可以一台申请 4 张，另一台申请 2 张。
@@ -310,6 +332,8 @@ gpuctl run -g 1 --priority idle -- python disposable_trial.py --output /outputs
 
 任务优先级不保证准确开跑时间。查看队列与最近状态，不要仅凭一张卡的利用率暂时为 0 判断它能立即分配。
 
+管理员可在任务表调整已核验、尚未启动任务的 P0–P4 排队等级，也可执行 `gpuctl priority JOB_ID P1`（例如 P1 或 P3）。此操作只改变排队顺序，不改变原任务的让位、保存和恢复约定，也不要求重新确认让位。节点尚未支持独立改等级时，入口不可用；运行中任务不能这样修改。
+
 ### 自定义等级、让位与恢复
 
 网页展开“提交训练 → 自定义 GPUQ 调度”。P0–P4只改变排序，不表示同意中断；成员可选P0–P2。节点缺能力时明确拒绝，不降级。
@@ -322,11 +346,35 @@ gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -
 
 `save`须训练适配checkpoint并恢复完整状态，DDP所有rank协同。低等级save任务整体保存后让位，on-preempt随后排队恢复；保存失败不强杀，手动取消或失败不自动重跑。`--checkpointable`不是自动改写代码。
 
+请求方可主动选抢占1/2；自己的rank、是否愿意被中断、之后是否恢复仍是独立选择。
+
+```sh
+gpuctl run --rank P2 --mode preempt1 -g 1 -- python urgent.py
+gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
+```
+
+模式1只选愿意让位且能保存的低等级任务；模式2对now任务立即让位，但save任务仍先保存。
+旧任务、never、共享或外部进程不会被新模式强杀；同等级不互抢。节点缺新能力时明确拒绝，
+`queue`或省略mode保留旧默认格式，同key重试不能换成不同抢占模式。
+
 ### 协调使用安排
 
 “协作区”包含维护公告、问题反馈和公共交流。可以说明预计结束时间、协商释放资源或说明紧急实验，但聊天约定不会自动改变配额、队列或取消任务。
 
+后台启用任务留言后还会显示“任务留言”：先选择“随任务结束删除”并关联自己的任务，或选择“非任务留言，手动删除”。支持刷新、编辑和删除；发送结果不确定时重试原内容。旧后台未启用时不显示此入口，原有协作功能照常使用。
+
 协作内容对所有已登录成员可见；长期实验记录请保存在自己的项目或文档中。维护前及时保存 checkpoint，是否自动保存由训练程序决定。
+
+### 任务留言（命令行）
+
+```sh
+gpuctl notes
+gpuctl note --job JOB_ID "预计今晚结束"
+gpuctl note --general "本周维护安排"
+gpuctl note-delete NOTE_ID
+```
+
+任务留言使用 `gpuctl jobs` 返回的完整平台任务 ID，只能关联自己的未结束任务；确认完成、失败或取消后自动删除正文。排队、让位中或状态未知时保留。`--general` 是非任务留言，保留直到作者或管理员手动删除。所有登录成员可见，每条最多 2000 字符；这套 API/CLI 不改变网页原有聊天室的留存规则。
 
 ## 常见问题 {#troubleshooting}
 

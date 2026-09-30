@@ -17,6 +17,7 @@ def load(name, filename):
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 S = load('common_p0_runner', 'sandbox-runner-common-p0.py')
+P = load('common_p0_allocation', 'scheduling-policy.py')
 D = load('common_p0_diagnostics', 'job-diagnostics.py')
 JID = '11111111-1111-4111-8111-111111111111'
 CAPTURE = 'a' * 32
@@ -32,7 +33,9 @@ class CommonRunner(unittest.TestCase):
         if terminal: del job['id']; job['cards'] = 0
         spec_dir = self.root / ('terminals' if terminal else 'jobs'); spec_dir.mkdir()
         spec_file = spec_dir / (JID + '.json'); spec_file.write_text(json.dumps(job))
-        (self.root / 'node-config.json').write_text(json.dumps({'root': str(self.root), 'conda': '/opt/conda'}))
+        config={'root':str(self.root),'conda':'/opt/conda'}
+        if terminal:config.update(controlRoot=str(self.root/'not-for-terminals'),gpuqArchive=str(self.root/'must-not-mount-sdk.pyz'),trainingControlProtocol=1)
+        (self.root / 'node-config.json').write_text(json.dumps(config))
         runtime = self.root / 'diagnostics' / JID / CAPTURE / 'runtime'
         if not missing: (self.root / 'job-diagnostics.py').touch()
         def start(*args):
@@ -66,7 +69,7 @@ class CommonRunner(unittest.TestCase):
             else: os.write(int(command[command.index('--ready-fd') + 1]), b'1')
             return SimpleNamespace(wait=lambda *args, **kwargs: 42, poll=lambda: 42)
         try:
-            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', return_value=diagnostic) as imported, \
+            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else diagnostic) as imported, \
                     patch.object(S, 'start_job_capture', wraps=S.start_job_capture) as capture, \
                     patch.object(S, 'project_runtime', return_value=None), \
                     patch.object(S.sys, 'argv', ['sandbox-runner.py', JID] + (['terminal'] if terminal else [])), \
@@ -81,7 +84,7 @@ class CommonRunner(unittest.TestCase):
                     capture.assert_not_called(); diagnostic.start_capture.assert_not_called()
                     diagnostic.finish_capture.assert_not_called(); imported.assert_not_called(); gpu.assert_not_called()
                 elif not missing and not broken:
-                    imported.assert_called_once_with('gpuq_job_diagnostics', 'job-diagnostics.py')
+                    self.assertEqual([call.args for call in imported.call_args_list],[('gpuq_allocation','scheduling-policy.py'),('gpuq_job_diagnostics','job-diagnostics.py')])
                     diagnostic.finish_capture.assert_called_once_with(self.root, job, CAPTURE, 42)
                 else: diagnostic.finish_capture.assert_not_called()
         finally:
@@ -102,6 +105,8 @@ class CommonRunner(unittest.TestCase):
         self.assertEqual(env['PATH'], '/opt/gpuq/bin:/opt/conda/bin:/usr/bin:/bin')
         self.assertFalse(any(key.startswith(('RAY_', 'GPUQ_CPU', 'GPUQ_MEMORY')) for key in env))
         self.assertNotIn('/run/gpuq/runtime', args)
+        self.assertNotIn('/run/gpuq/control',args);self.assertNotIn('/opt/gpuq/sdk.pyz',args)
+        self.assertNotIn('GPUQ_CONTROL_DIR',env);self.assertNotIn('PYTHONPATH',env)
 
     def test_training_records_exit_and_binds_only_managed_runtime_without_budget_files(self):
         args, env, props = self.orchestrate()

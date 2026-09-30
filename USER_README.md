@@ -78,6 +78,7 @@ gpuctl project status
 gpuctl run -g 1 -- python train.py --output /outputs
 gpuctl jobs
 gpuctl logs 任务ID
+gpuctl watch 任务ID
 gpuctl files --job 任务ID
 gpuctl pull --job 任务ID model.pt ./model.pt
 ```
@@ -91,6 +92,20 @@ gpuctl cancel 任务ID
 ```
 
 取消后等待 GPUQ 确认停止，再释放额度；后台子进程一起清理。任务 ID 是平台返回的 UUID，不是旧 GPUQ 的 `J...` 编号。
+
+`gpuctl watch 任务ID` 在当前 SSH/本地终端持续显示轮次、步数、训练自报 ETA，以及异常和最终状态。默认每 5 秒核对；`--interval 10` 调整间隔，`--json` 输出每次变化的 JSON 行。Ctrl+C 只停止查看。断网或节点状态 UNKNOWN 时提示重新连接，不重试提交。完成退出码为 0，失败为 1，取消为 130，状态未知为 3。网页任务表同步显示相同进度；未经适配的训练显示“进度未上报”，仍能查看调度状态与日志。
+
+轮次、指标与 ETA 来自训练自己上报，不从日志猜测。沙箱内上报需要已部署 PR #4 的训练控制/SDK 通道；本功能只读现有进度，不自行挂载该通道。未部署或未适配时显示“进度未上报”，调度状态与日志仍可查看。主进程（DDP rank 0）适配示例：
+
+```python
+from gpuq.progress import ProgressReporter
+reporter = ProgressReporter()
+# 每轮完成后：epochs_completed 是已完成轮数，不能用当前轮次推断终态
+reporter.update(phase="train", epochs_completed=epoch + 1,
+                epochs_total=epochs, metrics={"loss": float(loss)})
+```
+
+只上报数值指标和简短说明，不放令牌、个人数据或完整日志。训练上报达到 100% 并不等于调度器已经确认完成；`severity="error"` 只反馈异常，不会自动重启或释放 GPU。保存恢复继续使用原来的 checkpoint 接口，两者独立。
 
 ## 上传自己的数据或使用已授权数据集
 
@@ -167,6 +182,17 @@ gpuctl jobs
 
 尚未确认支持新版安全策略的节点不能选择最低/高档位或调整队列；默认提交保留旧流程，旧任务和外部 GPU 进程不会自动纳入新策略。管理员只能调整已确认、尚未启动的新版平台队列任务；普通用户不能自升到高优先级。调整请求仍需节点核验，若任务已经启动，需刷新后以实际状态为准。
 
+### 只调整排队顺序
+
+管理员可对尚未启动的任务执行 `gpuctl priority 任务ID P0` 至 `P4`；
+`idle`、`normal`、`high` 兼容别名分别表示 P0、P2、P4。这次操作只改队列优先级，
+不改变原来的让位、checkpoint、重启策略，也不重置 FIFO 序号。
+例如原来“保存后让位、被抢占后重排”的任务，调为 P3 后仍保持这两项约定。
+任务列表分别显示实际 P 值和让位/恢复方式；不要仅根据 P0 推断任务可中断。
+新任务提交时的三种预设本轮保持不变，独立的提交策略选项另行接入。
+
+节点必须确认 `priority-rank-v1`；旧节点不支持时拒绝修改，不回退到修改整套策略。
+
 ## 机器与配额
 
 | 名称 | GPU | 每卡显存 |
@@ -195,6 +221,40 @@ gpuctl jobs
 ## 网页也能做什么
 
 登录后可打开终端、上传文件、提交训练、看日志、取消任务、下载结果。网页里的“断开”保留终端，“结束终端”才关闭；发布项目前需要真正结束开发终端，CLI 用 `exit` 而非 `Ctrl+]`。浏览器下载超过 100 MiB 请用 CLI；文件经 VPS 转发，不是高速直连传输。项目代码单文件上限 4 GiB，旧工作区 API 上限 100 GiB；磁盘剩余不足 10 GiB 拒绝新上传。
+
+## 弹性卡数与自动扩卡
+
+`-g` 是最大卡数，`--min-cards` 是最少启动卡数。声明 global/micro batch 后，
+GPUQ 只选 `globalBatch / (实际卡数 × microBatch)` 为整数的卡数，并按当前最多可用合法卡数启动：
+
+```bash
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
+```
+
+此例合法卡数为 1、2、4、8；有 3 张空卡时先用 2 张，累积 16 次，global batch 仍为 256。
+任务始终预留最大卡数的个人额度，实际分配显示在任务列表中。
+
+空卡后来释放时，下面的选择会在 epoch 保存后重新启动 DDP，恢复模型、优化器和进度，并使用更大合法卡数：
+
+```bash
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand \
+  --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
+```
+
+训练必须按 `GPUQ_ASSIGNED_GPU_COUNT` 启动 ranks，使用 `gpuq.elastic.plan_elastic_batch()`
+的 `gradient_accumulation_steps`，并接入前述 checkpoint/恢复适配器。global batch 固定时 LR 不随卡数改变。
+保存超时不会强制杀训练；实际扩卡可能晚于空卡释放。调度器不会自动改写现有训练代码。
+网页“弹性卡数”提供相同选择；需要节点与调度器一起升级并确认能力后才可提交。
+
+## 网页任务留言
+
+后台启用任务留言后，打开“协作区 → 任务留言”。先选择“随任务结束删除”并选择自己的任务，或选择“非任务留言，手动删除”。支持刷新、编辑与删除；发送结果不确定时重试原内容。旧后台未启用时不显示此入口，公告、反馈和聊天照常使用。
+## 命令行任务留言
+
+`gpuctl notes` 查看共享留言；`gpuctl note --job 任务UUID "留言"` 关联自己的任务，
+确认完成/失败/取消后自动清理正文。排队、被抢占、失联/待核对期间保留。
+`gpuctl note --general "通知"` 是不随任务清理的长期留言；`gpuctl note-delete 编号`
+手动删除。所有登录成员可见，不要填写敏感信息。完整规则见[协作手册](docs/COMMUNITY.md)。
 
 ## 常见情况
 

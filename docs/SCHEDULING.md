@@ -26,9 +26,23 @@ gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt \
 - `--restart-policy never` 为默认，让位后结束；`on-preempt` 只接受保存让位。
   手动取消或训练失败不自动重试；排队、让位中、状态未知仍计入额度。
 - 新选项与旧 `--priority idle|normal|high` 互斥。旧预设及已存在任务完全不改写。
-- 仍使用原 GPUQ 的 `queue` 模式，按被抢占任务的明确同意自动选立即/保存让位。
-  本批没有开放可扩大历史任务抢占范围的强制请求模式，也没有修改配额或自动选服务器。
+- 默认 `queue` 按低等级任务自己的 now/save 约定让位；请求方另可主动选模式1/2。
+- `--mode preempt1` 请求保存后让位，只选明确同意且接入checkpoint的低等级任务；
+  `--mode preempt2` 对now任务立即让位，对save任务仍先保存，不越过对方保存约定。
+  never/legacy、共享任务、外部进程和同等级任务均不加入新模式抢占范围。
+  缺新鲜 `preempt-opt-in-only-v1` 能力会在预留/派发前拒绝；queue旧用法不需新能力。
+- 本批不改配额、弹性卡数或自动选服务器；原生旧请求的既有范围和幂等摘要保持兼容。
 - 断线重试复用输出的 `--key UUID`；不能用同一 key 换 rank/让位/恢复策略。
 
-API `jobs.submit` 可传 `scheduling: {rank, yieldPolicy, restartPolicy, checkpointable}`，
+```sh
+gpuctl run --rank P2 --mode preempt1 -g 1 -- python urgent.py
+gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
+```
+
+API `jobs.submit` 可传 `scheduling: {rank, yieldPolicy, restartPolicy, checkpointable, mode?}`，
 不与旧 `priority` 同时传入。该对象作为任务不可变提交内容保存；本 PR 不提供运行中修改它的接口。
+mode支持queue/preempt1/preempt2及canonical preempt-save/preempt-now；显式queue归一为旧默认格式。
+
+新模式需核心schema11→12迁移及节点/门户匹配版本：维护者先备份状态，安排核心维护窗口，
+确认native能力，再开放门户/CLI；本PR不部署、不停止生产任务。迁移不改变旧任务/attempt/lease
+或替旧任务添加同意。回退前须停止新增新模式并等其终态；不能用旧程序直接打开新schema。

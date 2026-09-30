@@ -6,11 +6,11 @@ import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
-import {standaloneClient} from '../client-bundle.mjs';
+import {buildClient} from '../scripts/build-client.mjs';
 
 test('standalone downloaded CLI sends canonical scheduling and preserves argv after --',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-policy-cli-')),file=join(dir,'gpuctl.mjs'),session=join(dir,'session.json'),calls=[];
-  await writeFile(file,await standaloneClient());
+  await buildClient({outfile:file});
   const server=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const data=JSON.parse(raw);calls.push(data);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(data.operation==='state'?{state:{machines:[{id:'gpu-1'}],jobs:[]}}:{result:{id:'job',state:'PENDING'}}));});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   await writeFile(session,JSON.stringify({url:`http://127.0.0.1:${server.address().port}`,token:'test-only',machine:'gpu-1',principal:{role:'member',username:'alice',userId:'alice'}}));
@@ -23,7 +23,19 @@ test('standalone downloaded CLI sends canonical scheduling and preserves argv af
   assert.equal(submit.key,key);assert.equal(Object.hasOwn(submit,'priority'),false);
   assert.deepEqual(submit.argv,['python','train.py','--rank','123']);
   assert.equal((await run(args)).code,0);assert.equal(calls.filter(x=>x.operation==='jobs.submit').at(-1).args.key,key);
+  const elasticArgs=['run','-g','8','--min-cards','1','--global-batch','256','--micro-batch','8','--auto-expand','--rank','P1','--yield','save','--checkpointable','--restart-policy','on-preempt','--mode','preempt1','--','python','train.py','--auto-expand'];
+  assert.equal((await run(elasticArgs)).code,0);
+  const elasticSubmit=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
+  assert.deepEqual(elasticSubmit.elastic,{minCards:1,globalBatch:256,microBatch:8,autoExpand:true});
+  assert.equal(elasticSubmit.scheduling.mode,'preempt-save');
+  assert.deepEqual(elasticSubmit.argv,['python','train.py','--auto-expand']);
+  for(const [mode,canonical] of [['queue',null],['preempt1','preempt-save'],['preempt2','preempt-now'],['preempt-save','preempt-save'],['preempt-now','preempt-now']]){
+    assert.equal((await run(['run','--mode',mode,'--','python','urgent.py','--mode','literal-training-arg'])).code,0,mode);
+    const request=calls.filter(x=>x.operation==='jobs.submit').at(-1).args;
+    assert.deepEqual(request.argv,['python','urgent.py','--mode','literal-training-arg']);
+    if(canonical)assert.equal(request.scheduling.mode,canonical);else assert.equal(Object.hasOwn(request.scheduling,'mode'),false);
+  }
   const count=calls.length;
-  for(const invalid of [['jobs','--rank','P1'],['run','--yield','save','--','python'],['run','--yield','now','--restart-policy','on-preempt','--','python'],['run','--rank','P1','--priority','idle','--','python']])assert.notEqual((await run(invalid)).code,0);
+  for(const invalid of [['jobs','--auto-expand'],['jobs','--min-cards','1'],['jobs','--rank','P1'],['run','--yield','save','--','python'],['run','--yield','now','--restart-policy','on-preempt','--','python'],['run','--rank','P1','--priority','idle','--','python'],['run','--mode','bad','--','python'],['jobs','--mode','queue']])assert.notEqual((await run(invalid)).code,0);
   assert.equal(calls.length,count,'invalid options fail before any request');
 });

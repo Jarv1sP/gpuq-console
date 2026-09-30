@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID,createHash} from 'node:crypto';
-import {mkdtemp,writeFile,symlink,rm,readFile} from 'node:fs/promises';
+import {mkdtemp,symlink,rm,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {parseCLIOptions} from '../cli.mjs';
 import {normalizeJobSubmission,createSubmittedJob} from '../job-submission.mjs';
 import {MACHINES} from '../dist/model.js';
-import {standaloneClient} from '../client-bundle.mjs';
+import {buildClient} from '../scripts/build-client.mjs';
 
 test('one CLI option registry handles old/new flags, aliases, repetition and literal training argv',()=>{
   const result=parseCLIOptions(['run','-g','2','--rank','P1','--yield','save','--checkpointable','--machine','gpu-1','--machine','gpu-2','--data','a','--data','b','--','python','train.py','--rank','99','-g','9']);
@@ -21,7 +21,7 @@ test('one CLI option registry handles old/new flags, aliases, repetition and lit
 
 test('standalone CLI entry point still runs through the installed symlink',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-cli-entry-'));t.after(()=>rm(dir,{recursive:true,force:true}));
-  await writeFile(join(dir,'client.mjs'),await standaloneClient());await symlink(join(dir,'client.mjs'),join(dir,'gpuctl'));
+  await buildClient({outfile:join(dir,'client.mjs')});await symlink(join(dir,'client.mjs'),join(dir,'gpuctl'));
   const result=spawnSync(process.execPath,[join(dir,'gpuctl'),'--help'],{encoding:'utf8'});
   assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/GPUQ/);
 });
