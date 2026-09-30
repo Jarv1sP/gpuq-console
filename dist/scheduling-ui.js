@@ -1,0 +1,11 @@
+import {schedulingPolicy} from './scheduling-policy.js';
+const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+export function schedulingFields(admin=false){return `<details id="custom-scheduling"><summary>自定义 GPUQ 调度</summary><label><input type="checkbox" name="custom-policy">使用独立排队等级与让位策略</label><label>排队等级<select name="queue-rank">${[0,1,2,...(admin?[3,4]:[])].map(n=>`<option value="P${n}" ${n===2?'selected':''}>P${n}</option>`).join('')}</select></label><label>允许高优先级任务抢占我<select name="yield-policy"><option value="never">不允许</option><option value="now">立即让位，不保存</option><option value="save">本轮保存后让位</option></select></label><label>让位后<select name="restart-policy"><option value="never">结束，不自动恢复</option><option value="on-preempt">排队并从 checkpoint 自动恢复</option></select></label><label><input type="checkbox" name="checkpointable">训练已接入 epoch checkpoint 和恢复适配器（DDP 全 rank 协同）</label><p id="custom-policy-note" class="muted"></p></details>`;}
+export function schedulingFromForm(form,admin=false){return form.get('custom-policy')?schedulingPolicy({rank:form.get('queue-rank'),yieldPolicy:form.get('yield-policy'),restartPolicy:form.get('restart-policy'),checkpointable:form.get('checkpointable')==='on'},admin):null;}
+
+export function schedulingSummary(job){
+  const policy=job.scheduling;
+  if(!policy)return '';
+  return '<small>'+escape(`申请：${policy.rank} · 让位 ${policy.yieldPolicy} · 恢复 ${policy.restartPolicy}`)+'</small>';
+}

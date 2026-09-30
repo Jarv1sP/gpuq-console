@@ -13,7 +13,7 @@ import uuid
 
 
 DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
-CAPABILITIES = ['priority-policy-v1', 'preempt-idle-only-v1']
+CAPABILITIES = ['priority-policy-v1', 'preempt-idle-only-v1', 'priority-rank-v1']
 POLICIES = {'idle': (0, 'now'), 'normal': (2, 'never'), 'high': (4, 'never')}
 
 
@@ -23,6 +23,7 @@ class NodePriority(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
         shutil.copy2(DEPLOY / 'node-executor.py', self.base / 'node-executor.py')
+        shutil.copy2(DEPLOY / 'scheduling-policy.py', self.base / 'scheduling-policy.py')
         self.config = {'root': str(self.base / 'state'), 'cards': 4,
                        'gpu': '/not/a/gpu', 'database': str(self.base / 'gpuq.db')}
         (self.base / 'node-config.json').write_text(json.dumps(self.config))
@@ -72,15 +73,14 @@ class NodePriority(unittest.TestCase):
         if args[0] == 'show':
             self.assertEqual(args[1:], [self.node_id])
             return json.dumps(self.data)
-        if args[0] == 'set-priority':
+        if args[0] == 'set-rank':
             self.assertEqual(args[1], self.node_id)
-            level, yielding = POLICIES[args[2]]
-            self.data['job'].update(priority=level, yield_policy=yielding,
-                                    restart_policy='never', dispatch_mode='queue')
+            self.data['job'].update(priority=int(args[2][1:]))
             return json.dumps({'job_id': self.node_id, 'state': 'PENDING'})
         raise AssertionError('Unexpected GPUQ action: ' + repr(args))
 
     def call(self, operation='sync', job=None, **options):
+        if operation == 'priority': options.setdefault('rankOnly', True)
         return self.node.process(operation, {'job': job or self.job, **options})
 
     def operations(self):
@@ -163,8 +163,8 @@ class NodePriority(unittest.TestCase):
         before = deepcopy(self.job)
         expected = self.policy()
         result = self.call('priority', priority='high', expected=expected)
-        self.assertEqual(self.operations(), ['show', 'status', 'set-priority', 'show'])
-        self.assertEqual(self.commands[2], [self.config['gpu'], '--json', 'set-priority', self.node_id, 'high',
+        self.assertEqual(self.operations(), ['show', 'status', 'set-rank', 'show'])
+        self.assertEqual(self.commands[2], [self.config['gpu'], '--json', 'set-rank', self.node_id, 'P4',
                                           '--expected-priority', 'P2', '--expected-yield', 'never',
                                           '--expected-restart-policy', 'never', '--expected-mode', 'queue'])
         self.assertEqual(self.job, before)
@@ -237,14 +237,59 @@ class NodePriority(unittest.TestCase):
         self.register()
         original = self.fake_run
         def racing_run(argv, **kwargs):
-            if argv[2] == 'set-priority':
+            if argv[2] == 'set-rank':
                 self.commands.append(argv)
                 raise ValueError('only a PENDING job can change priority')
             return original(argv, **kwargs)
         with patch.object(self.node, 'run', side_effect=racing_run):
             with self.assertRaisesRegex(ValueError, 'PENDING'):
                 self.call('priority', priority='idle', expected=self.policy())
-        self.assertEqual(self.operations(), ['show', 'status', 'set-priority'])
+        self.assertEqual(self.operations(), ['show', 'status', 'set-rank'])
+
+    def test_rank_change_preserves_save_resume_contract(self):
+        self.register()
+        self.data['job'].update(yield_policy='save', restart_policy='on-preempt')
+        before = self.policy()
+        result = self.call('priority', priority='P1', expected=before)
+        self.assertEqual(result['schedulerPolicy'], {**before, 'priority': 1})
+        self.assertEqual(result['priority'], 'P1')
+
+    def test_explicit_submission_can_change_rank_without_rewriting_its_contract(self):
+        self.job = {key:value for key,value in self.job.items() if key not in ('priority','preemptIdleOnly')}
+        self.job['scheduling'] = {'rank':'P1','yieldPolicy':'save','restartPolicy':'on-preempt','checkpointable':True}
+        self.data['job'].update(priority=1,yield_policy='save',restart_policy='on-preempt',
+                                checkpoint_capability='epoch-v1',preempt_idle_only=False)
+        self.register(); original = deepcopy(self.job)
+        for rank in ('P3','P0'):
+            before = self.policy()
+            result = self.call('priority',priority=rank,expected=before)
+            self.assertEqual(result['schedulerPolicy'],{**before,'priority':int(rank[1])})
+            self.assertTrue(result['priorityMutable'])
+        self.assertEqual(self.job,original)
+        self.assertEqual(json.loads((self.node.ROOT/'jobs'/f"{self.job['id']}.json").read_text()),original)
+
+    def test_explicit_rank_edit_rejects_unverified_native_contract(self):
+        self.job = {key:value for key,value in self.job.items() if key not in ('priority','preemptIdleOnly')}
+        self.job['scheduling'] = {'rank':'P1','yieldPolicy':'save','restartPolicy':'on-preempt','checkpointable':True}
+        self.data['job'].update(priority=1,yield_policy='save',restart_policy='on-preempt',
+                                checkpoint_capability='epoch-v1',preempt_idle_only=False)
+        self.register(); original = deepcopy(self.data['job'])
+        for change in ({'yield_policy':'now'},{'restart_policy':'never'},{'dispatch_mode':'preempt-now'},
+                       {'checkpoint_capability':'none'},{'preempt_idle_only':True},{'preempt_opt_in_only':True}):
+            with self.subTest(change=change):
+                self.data['job']={**original,**change};self.commands.clear()
+                with self.assertRaisesRegex(ValueError,'safe-policy'):
+                    self.call('priority',priority='P3',expected=self.policy())
+                self.assertEqual(self.operations(),['show'])
+
+    def test_old_core_or_old_portal_cannot_fall_back_to_preset(self):
+        self.register()
+        with self.assertRaisesRegex(ValueError, 'Rank-only'):
+            self.call('priority', priority='high', expected=self.policy(), rankOnly=False)
+        self.status['daemon']['capabilities'] = ['priority-policy-v1', 'preempt-idle-only-v1']
+        with self.assertRaisesRegex(ValueError, 'rank-only capability'):
+            self.call('priority', priority='high', expected=self.policy())
+        self.assertFalse(any(c[2] in ('set-rank', 'set-priority', 'submit') for c in self.commands))
 
     def test_invalid_or_partial_policy_requests_do_not_call_mutating_command(self):
         self.register()

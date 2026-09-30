@@ -3,8 +3,8 @@
 
 The existing config is read, backed up byte-for-byte and NEVER rewritten.
 Compile a pinned in-memory copy of every source before making any change;
-install runtime dependencies before the runner, and project operations last. Existing GPUQ databases,
-dispatchers, terminal/diagnostic protocols and user data are never modified.
+install the manifest's runtime dependencies before its runner and dispatchers.
+Existing GPUQ databases, unit definitions and user data are never modified.
 """
 import argparse
 import ast
@@ -16,18 +16,20 @@ import stat
 import subprocess
 import tempfile
 import time
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import node_runtime
 
 
-FILES = ('project-store.py', 'gpuq-network', 'sandbox-runner.py', 'project-ops.py')
-RAY_FILES = ('job-resources.py', 'gpuq-ray')
+FILES = tuple(name for name,_ in node_runtime.runtime_plan('common-p0'))
+RAY_FILES = tuple(node_runtime.manifest()['profiles']['ray-p0']['extra'])
 P0_HELPERS = ('node-executor.py', 'terminal-helper.py', 'job-diagnostics.py')
 MAX_FILE_BYTES = 8 * 1024 * 1024
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
-def file_plan(profile):
-    names = (*FILES[:2], *(RAY_FILES if profile == 'ray-p0' else ()), *FILES[2:])
-    return [(name, 'sandbox-runner-common-p0.py' if name == 'sandbox-runner.py' and profile == 'common-p0' else name) for name in names]
+def file_plan(profile,source=None):
+    return node_runtime.runtime_plan(profile,source or Path(__file__).resolve().parent)
 
 
 def functions(payload):
@@ -226,7 +228,7 @@ def main(argv=None):
     prerequisites, current_profile = p0_prerequisites(directory)
     if current_profile == 'ray-p0' and args.runtime_profile != 'ray-p0':
         raise SystemExit('Project upgrade cannot downgrade an installed Ray runner. Keep --runtime-profile ray-p0, or review a separate install-node.py profile change; nothing installed.')
-    plan = file_plan(args.runtime_profile)
+    plan = file_plan(args.runtime_profile,source_directory)
     payloads, previous = {}, {'node-config.json': config_bytes}
     for name, source_name in plan:
         payload, _ = checked_file(source_directory / source_name, private=False, allow_root=True)
@@ -238,6 +240,7 @@ def main(argv=None):
             previous[name] = checked_file(destination, private=False)[0]
     if runner_profile(payloads['sandbox-runner.py']) != args.runtime_profile:
         raise SystemExit('Source runner does not match the explicit runtime profile; nothing installed.')
+    node_runtime.validate_dependencies(payloads)
     enforcement = None
     if args.runtime_profile == 'ray-p0':
         check, _ = checked_file(source_directory/'cpu-delegation.py',private=False,allow_root=True)
@@ -246,7 +249,7 @@ def main(argv=None):
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             raise SystemExit('Ray CPU/memory/PID enforcement preflight failed before any write. No delegation was configured; see docs/RAY_RESOURCES.md and request administrator review.') from error
     summary = {'files': [name for name,_ in plan], 'runtimeProfile':args.runtime_profile,
-               'configurationUnchanged': True, 'dispatcherUnchanged':True,
+               'configurationUnchanged': True, 'dispatcherUnchanged':False,
                'schedulerUnchanged': True, 'restartRequired': False,
                'p0PrerequisitesVerified':True,'kernelEnforcement':enforcement}
     if not args.apply:
@@ -264,15 +267,15 @@ def main(argv=None):
         atomic_copy(content, backup / name, mode=0o600 if name == 'node-config.json' else 0o700)
     with opened_directory(directory) as descriptor:
         os.fsync(descriptor)
-    # Runtime dependencies first, runner next, project operations last: do not
-    # expose isolated-create before the selected runner understands its mode.
-    # The existing node dispatcher is never replaced.
+    # Runtime dependencies first, runner next, then dispatcher/probe activation:
+    # no entry point can start with a partially copied helper dependency graph.
     # No users/, jobs/, terminal pointers, unit definitions or GPUQ DB are changed.
     try:
         if checked_file(config_file) != (config_bytes, config_stamp) or not unchanged(prerequisites):
             raise SystemExit('Node configuration/P0 prerequisites changed while backing up; nothing installed')
         for name, _ in plan:
-            atomic_copy(payloads[name], directory / name)
+            if name not in previous or previous[name]!=payloads[name]:atomic_copy(payloads[name], directory / name)
+            else:(directory/name).chmod(0o700)
     except OSError as error:
         raise SystemExit('Project upgrade did not finish; private backup retained at ' + str(backup) + '; no service was restarted') from error
     if checked_file(config_file) != (config_bytes, config_stamp):

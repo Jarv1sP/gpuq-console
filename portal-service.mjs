@@ -4,9 +4,9 @@ import {dirname} from 'node:path';
 import {createHash,randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {DemoService,credential} from './dist/service.js';
 import {readGPUQStatus,visibleGPUQStatus} from './gpuq-status.mjs';
-import {installExecution,executionCall,publicJob,usage,priorityCapable} from './execution.mjs';
+import {installExecution,executionCall,publicJob,usage,priorityCapable,priorityRankCapable} from './execution.mjs';
 import {MACHINES,validUsername} from './dist/model.js';
-import {installCommunity,communityCall} from './community.mjs';
+import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 import {installMaintenance,maintenanceCall} from './maintenance.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
@@ -40,6 +40,7 @@ export class PortalService extends DemoService{
     // Public registration never grants administrative authority.
     service.db.prepare("UPDATE invites SET enabled=0 WHERE role='admin'").run();
     for(const user of service.store.users)user.policyVersion??=0;
+    maintainTaskNotes(service);
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installMaintenance(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
@@ -198,7 +199,7 @@ export class PortalService extends DemoService{
     const state=super.state(principal);
     const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
-    return {...state,maintenance:{version:1},jobs:state.jobs.map(j=>({...publicJob(j),canSetPriority:principal.role==='admin'&&capabilities[j.machine]===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&j.spec?.preemptIdleOnly===true})),
+    return {...state,maintenance:{version:1},jobs:state.jobs.map(j=>({...publicJob(j),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }

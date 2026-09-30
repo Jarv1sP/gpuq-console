@@ -17,7 +17,7 @@ DEPLOY=Path(__file__).resolve().parents[1]/'deploy'
 class NodeProjects(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.base=Path(self.temp.name).resolve()
-        for name in ('node-executor.py','project-ops.py','project-store.py','sandbox-runner.py'):
+        for name in ('node-executor.py','scheduling-policy.py','project-ops.py','project-store.py','sandbox-runner.py'):
             shutil.copy2(DEPLOY/name,self.base/name)
         conda=self.base/'conda';(conda/'bin').mkdir(parents=True);(conda/'bin/python').write_text('fake python')
         (conda/'conda-meta').mkdir();(conda/'lib').mkdir()

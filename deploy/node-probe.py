@@ -249,11 +249,18 @@ def probe_gpuq():
             output = {
                 "connected": True, "health": daemon.get("health", "unknown"),
                 "observeOnly": daemon.get("observe_only"),
-                "capabilities": [c for c in (daemon.get('capabilities') if isinstance(daemon.get('capabilities'), list) else []) if c in ('priority-policy-v1','preempt-idle-only-v1')],
+                "capabilities": [c for c in (daemon.get('capabilities') if isinstance(daemon.get('capabilities'), list) else []) if c in ('priority-policy-v1','preempt-idle-only-v1','priority-rank-v1')],
                 "schedulableIndices": daemon.get("schedulable_gpu_indices", []),
                 "jobs": [{key: job.get(key) for key in allowed} for job in jobs[:100] if isinstance(job, dict)],
                 "limit": 100,
             }
+            helper=Path(__file__).resolve().parent/'scheduling-policy.py'
+            if helper.is_file():
+                import importlib.util
+                module=importlib.util.spec_from_file_location('gpuq_console_scheduling',helper)
+                policy=importlib.util.module_from_spec(module);module.loader.exec_module(policy)
+                if policy.ready(CONFIG,helper.parent) and all(c in output['capabilities'] for c in ('priority-policy-v1','preempt-idle-only-v1')):
+                    output['capabilities'].append('console-yield-v1')
         except (ValueError, OSError, subprocess.SubprocessError):
             output["error"] = "GPUQ status unavailable"
     else:

@@ -1,9 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {priorityLabel,priorityOptions,priorityDescription,trainingPriority,sampleTime,taskStateLabel,canEditPriority,taskTable} from '../dist/execution-ui.js';
+import {priorityLabel,priorityOptions,priorityDescription,trainingPriority,sampleTime,taskStateLabel,canEditPriority,taskTable,priorityRankOptions,schedulingContractLabel} from '../dist/execution-ui.js';
 import {resourceCards} from '../dist/resources-ui.js';
 
 const job={id:'job-1',name:'training',username:'alice',userId:'alice-id',machine:'gpu-1',cards:1,state:'PENDING',priority:'normal',schedulerPriority:2,schedulerState:'PENDING',queueReason:'等待空闲 GPU',schedulerCheckedAt:'2026-09-29T08:00:00Z',canSetPriority:true};
+test('rank editor offers five levels and does not promise different yielding',()=>{
+  const options=priorityRankOptions('P1');assert.match(options,/value="P1" selected/);assert.match(options,/value="P3"/);assert.doesNotMatch(options,/可中断/);
+  assert.match(schedulingContractLabel({yield_policy:'save',restart_policy:'on-preempt'}),/保存后让位.*重新排队/);
+  const html=taskTable([{...job,priority:'P1',schedulerPriority:1,schedulerPolicy:{yield_policy:'never',restart_policy:'on-preempt'}}],{admin:true});
+  assert.match(html,/P1 低/);assert.match(html,/不让位.*被抢占后重新排队/);assert.match(html,/仅改排队顺序/);assert.match(html,/data-job-priority=/);
+});
 test('member choices are explicit normal/interruptible idle and never high',()=>{
   const member=priorityOptions(),admin=priorityOptions(true);
   assert.match(member,/<option value="normal" selected>/);assert.match(member,/最低 · 可中断/);assert.doesNotMatch(member,/value="high"/);assert.match(admin,/value="high"/);

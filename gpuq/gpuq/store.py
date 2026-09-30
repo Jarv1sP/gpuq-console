@@ -2485,6 +2485,7 @@ class Store:
         priority_class: str,
         *,
         expected: Mapping[str, Any] | None = None,
+        _rank_only: bool = False,
     ) -> dict[str, Any]:
         """Atomically replace a waiting job's complete scheduling contract.
 
@@ -2492,7 +2493,9 @@ class Store:
         flight. A stale reader can supply all four old contract fields, so a
         priority change never silently overrides another operator's decision.
         """
-        contract = priority_class_contract(priority_class)
+        contract = ({"priority": _priority(priority_class), "yield_policy": None,
+                     "restart_policy": None, "dispatch_mode": None}
+                    if _rank_only else priority_class_contract(priority_class))
         if expected is not None:
             if not isinstance(expected, Mapping) or set(expected) != set(contract):
                 raise ValueError("expected must contain priority, yield_policy, restart_policy and dispatch_mode")
@@ -2510,9 +2513,11 @@ class Store:
             if current["state"] != JobState.PENDING.value:
                 raise StoreConflictError("priority can only be changed while the job is PENDING")
             before = {key: current[key] for key in contract}
+            if _rank_only:
+                contract = {**before, "priority": contract["priority"]}
             if expected is not None and before != dict(expected):
                 raise StoreConflictError("job scheduling policy changed; refresh before retrying")
-            if current.get("auto_scale_up"):
+            if current.get("auto_scale_up") and not _rank_only:
                 raise StoreConflictError("automatic scale-up jobs cannot use the Console priority contract")
             validate_yield_policy(contract["yield_policy"], current["checkpoint_capability"], current["share_gpu"])
             active_states = sorted(ACTIVE_ATTEMPT_STATES)
@@ -2543,6 +2548,18 @@ class Store:
             self.append_event("PRIORITY_CHANGED", job_id=job_id,
                               payload={"priority_class": priority_class, "previous": before, "current": contract})
             return self.get_job(job_id)
+
+    def set_pending_priority_rank(
+        self, job_id: str, priority: int | str, *, expected: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Change only queue rank; retain yielding/restart/dispatch and FIFO.
+
+        The historical class API is retained for callers explicitly choosing a
+        preset. Reuse its transaction, CAS and in-flight activity protections.
+        """
+        return self.set_pending_priority_class(
+            job_id, f"P{_priority(priority)}", expected=expected, _rank_only=True
+        )
 
     # --------------------------------------------------------------- attempts
 
