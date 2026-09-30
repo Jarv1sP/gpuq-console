@@ -10,7 +10,7 @@ import {createHash} from 'node:crypto';
 import {standaloneClient} from '../client-bundle.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex'),run=promisify(execFile),chunk=1024**2;
 async function fixture(t){
-  const root=await mkdtemp(join(tmpdir(),'gpuq-sync-cli-')),repo=join(root,'repo'),session=join(root,'session'),client=join(root,'gpuctl.mjs'),calls=[],files=new Map();await mkdir(repo);await writeFile(client,await standaloneClient());
+  const root=await mkdtemp(join(tmpdir(),'gpuq-sync-cli-')),repo=join(root,'repo 工作区'),session=join(root,'session'),client=join(root,'gpuctl.mjs'),calls=[],files=new Map();await mkdir(repo);await writeFile(client,await standaloneClient());
   await run('git',['init',repo]);await writeFile(join(repo,'train.py'),'print("train")\n');await run('git',['-C',repo,'add','train.py']);await run('git',['-C',repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-m','fixture']);
   const payload=Buffer.alloc(chunk+13,123),dataManifest=Buffer.from(JSON.stringify({schema:1,directories:[],files:[{path:'samples.bin',size:payload.length,sha256:hash(payload)}]})),version=hash(dataManifest);
   const published=Buffer.from('published code'),codeManifest=Buffer.from(JSON.stringify({schema:1,directories:[],files:[{path:'train.py',size:published.length,sha256:hash(published),executable:false}]}));
@@ -58,6 +58,19 @@ test('Git sync resolves an explicit historical commit rather than current HEAD o
   const result=await f.cli(['sync','git',f.repo,'--to','gpu-2','--project','copy','--ref',commit]);
   assert.equal(result.code,0,result.stderr);assert.equal(result.data.source.commit,commit);assert.deepEqual(f.files.get('train.py'),original);
   assert.notDeepEqual(f.files.get('train.py'),await readFile(join(f.repo,'train.py')));
+});
+test('Git sync preserves fixed executable modes despite local archive permissions',async t=>{
+  const f=await fixture(t),script='启动 train.sh';await writeFile(join(f.repo,script),'#!/bin/sh\necho training\n');
+  await run('git',['-C',f.repo,'config','core.filemode','false']);await run('git',['-C',f.repo,'add',script]);
+  await run('git',['-C',f.repo,'update-index','--chmod=+x',script]);
+  await run('git',['-C',f.repo,'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-m','executable entry']);
+  // Git tree mode is portable; extraction mode is not (including Windows).
+  await run('git',['-C',f.repo,'config','tar.umask','0111']);
+  const result=await f.cli(['sync','git',f.repo,'--to','gpu-2','--project','copy']);assert.equal(result.code,0,result.stderr);
+  const manifest=JSON.parse(Buffer.concat(f.calls.filter(c=>c.operation==='projects.sync.manifest').map(c=>Buffer.from(c.args.data,'base64'))));
+  assert.equal(manifest.files.find(file=>file.path===script).executable,true);
+  assert.equal(manifest.files.find(file=>file.path==='train.py').executable,false);
+  assert.deepEqual(f.files.get(script),await readFile(join(f.repo,script)));
 });
 test('explicit source node and full release copy code while retaining source provenance',async t=>{
   const f=await fixture(t),release='a'.repeat(64),result=await f.cli(['sync','code','--from','gpu-1','--to','gpu-2','--project','vision','--target-project','copy','--release',release]);assert.equal(result.code,0,result.stderr);assert.equal(result.data.state,'CODE_READY');assert.deepEqual(result.data.source,{kind:'release',machine:'gpu-1',project:'vision',release});assert.equal(f.files.get('train.py').toString(),'published code');assert.equal(f.calls.filter(c=>c.operation.startsWith('projects.snapshot')).every(c=>c.args.machine==='gpu-1'&&c.args.release===release),true);assert.equal(f.calls.filter(c=>c.operation.startsWith('projects.sync')).every(c=>c.args.machine==='gpu-2'),true);

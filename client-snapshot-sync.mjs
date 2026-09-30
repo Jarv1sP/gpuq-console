@@ -1,4 +1,4 @@
-import {mkdtemp,mkdir,lstat,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
@@ -14,13 +14,15 @@ export async function gitSnapshot(directory,ref='HEAD',progress=()=>{}){
   await clean();const commit=(await git(['rev-parse','--verify','--end-of-options',ref+'^{commit}'])).trim();
   if(!/^[a-f0-9]{40}([a-f0-9]{24})?$/.test(commit))fail('Git did not resolve a complete commit');
   const tree=(await git(['ls-tree','-r','-z','--full-tree',commit])).split('\0').filter(Boolean);
-  for(const entry of tree){const match=/^(100644|100755) blob [a-f0-9]+\t(.+)$/.exec(entry);if(!match)fail('Git snapshot does not support symlinks or submodules; sync ordinary data separately');dataPath(match[2]);}
+  const executable=new Map();
+  for(const entry of tree){const match=/^(100644|100755) blob [a-f0-9]+\t(.+)$/.exec(entry);if(!match)fail('Git snapshot does not support symlinks or submodules; sync ordinary data separately');executable.set(dataPath(match[2]),match[1]==='100755');}
   const temporary=await mkdtemp(join(tmpdir(),'gpuq-git-sync-')),code=join(temporary,'code'),archive=join(temporary,'snapshot.tar');
   try{
     await mkdir(code);await git(['archive','--format=tar','--output='+archive,commit]);
     await runFile('tar',['--extract','--file',archive,'--directory',code,'--no-same-owner','--no-same-permissions']);
     const scan=await scanLocalDataset(code,progress),manifest=JSON.parse(scan.manifest);
-    for(const entry of manifest.files)entry.executable=((await lstat(join(code,entry.path))).mode&0o111)!==0;
+    // Git's fixed tree mode survives Windows and local tar/umask differences.
+    for(const entry of manifest.files){if(!executable.has(entry.path))fail('Archive file is not part of the fixed Git tree');entry.executable=executable.get(entry.path);}
     const raw=Buffer.from(JSON.stringify(manifest));scan.manifest=raw;scan.manifestSha256=createHash('sha256').update(raw).digest('hex');scan.files=manifest.files;
     const verify=scan.verify;scan.verify=async()=>{await verify();await clean();if((await git(['rev-parse','--verify','--end-of-options',ref+'^{commit}'])).trim()!==commit)fail('Git ref changed; sync was not finalized');};
     return {...scan,source:{kind:'git',commit},cleanup:()=>rm(temporary,{recursive:true,force:true})};
