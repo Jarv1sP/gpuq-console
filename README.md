@@ -94,6 +94,7 @@ Node.js 24 LTS、Python 3.10+；生产节点要求 Linux + systemd/cgroup v2、�
 
 ```sh
 npm ci
+npm run build:client
 npm test
 npm run test:python
 python3 scripts/build-gpuq.py
@@ -102,6 +103,11 @@ npm start
 ```
 
 `npm start` 仅监听本地的内存 demo，使用明确标识的假账号，不连接真实 GPU/SSH；**不要把 demo 暴露公网**。生产入口是 `portal-server.mjs`。GitHub CI 不连接任何真实服务器，不使用部署密钥；PR 不会自动部署生产。
+
+安装客户端是 `build/gpuctl.mjs` 单文件产物，共享源码模块由锁定版本的 esbuild 构建。
+`npm test` 自动先构建；直接运行测试或源码门户前先执行 `npm run build:client`。
+Docker 在构建阶段生成产物，运行容器不含 esbuild。源码仍可用 `node cli.mjs`；
+修改 CLI 或其共享模块后需重建下载产物，不会在每次下载时动态编译。
 
 ## 边界先说清
 
