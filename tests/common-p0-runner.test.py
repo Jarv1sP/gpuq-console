@@ -17,6 +17,7 @@ def load(name, filename):
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 S = load('common_p0_runner', 'sandbox-runner-common-p0.py')
+P = load('common_p0_allocation', 'scheduling-policy.py')
 D = load('common_p0_diagnostics', 'job-diagnostics.py')
 JID = '11111111-1111-4111-8111-111111111111'
 CAPTURE = 'a' * 32
@@ -66,7 +67,7 @@ class CommonRunner(unittest.TestCase):
             else: os.write(int(command[command.index('--ready-fd') + 1]), b'1')
             return SimpleNamespace(wait=lambda *args, **kwargs: 42, poll=lambda: 42)
         try:
-            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', return_value=diagnostic) as imported, \
+            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else diagnostic) as imported, \
                     patch.object(S, 'start_job_capture', wraps=S.start_job_capture) as capture, \
                     patch.object(S, 'project_runtime', return_value=None), \
                     patch.object(S.sys, 'argv', ['sandbox-runner.py', JID] + (['terminal'] if terminal else [])), \
@@ -81,7 +82,7 @@ class CommonRunner(unittest.TestCase):
                     capture.assert_not_called(); diagnostic.start_capture.assert_not_called()
                     diagnostic.finish_capture.assert_not_called(); imported.assert_not_called(); gpu.assert_not_called()
                 elif not missing and not broken:
-                    imported.assert_called_once_with('gpuq_job_diagnostics', 'job-diagnostics.py')
+                    self.assertEqual([call.args for call in imported.call_args_list],[('gpuq_allocation','scheduling-policy.py'),('gpuq_job_diagnostics','job-diagnostics.py')])
                     diagnostic.finish_capture.assert_called_once_with(self.root, job, CAPTURE, 42)
                 else: diagnostic.finish_capture.assert_not_called()
         finally:

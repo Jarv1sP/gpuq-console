@@ -196,6 +196,30 @@ gpuctl jobs
 
 登录后可打开终端、上传文件、提交训练、看日志、取消任务、下载结果。网页里的“断开”保留终端，“结束终端”才关闭；发布项目前需要真正结束开发终端，CLI 用 `exit` 而非 `Ctrl+]`。浏览器下载超过 100 MiB 请用 CLI；文件经 VPS 转发，不是高速直连传输。项目代码单文件上限 4 GiB，旧工作区 API 上限 100 GiB；磁盘剩余不足 10 GiB 拒绝新上传。
 
+## 弹性卡数与自动扩卡
+
+`-g` 是最大卡数，`--min-cards` 是最少启动卡数。声明 global/micro batch 后，
+GPUQ 只选 `globalBatch / (实际卡数 × microBatch)` 为整数的卡数，并按当前最多可用合法卡数启动：
+
+```bash
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
+```
+
+此例合法卡数为 1、2、4、8；有 3 张空卡时先用 2 张，累积 16 次，global batch 仍为 256。
+任务始终预留最大卡数的个人额度，实际分配显示在任务列表中。
+
+空卡后来释放时，下面的选择会在 epoch 保存后重新启动 DDP，恢复模型、优化器和进度，并使用更大合法卡数：
+
+```bash
+gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand \
+  --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
+```
+
+训练必须按 `GPUQ_ASSIGNED_GPU_COUNT` 启动 ranks，使用 `gpuq.elastic.plan_elastic_batch()`
+的 `gradient_accumulation_steps`，并接入前述 checkpoint/恢复适配器。global batch 固定时 LR 不随卡数改变。
+保存超时不会强制杀训练；实际扩卡可能晚于空卡释放。调度器不会自动改写现有训练代码。
+网页“弹性卡数”提供相同选择；需要节点与调度器一起升级并确认能力后才可提交。
+
 ## 常见情况
 
 - 超出额度：减少卡数、等待自己的任务结束，或请管理员增加额度。
