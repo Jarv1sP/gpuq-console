@@ -279,7 +279,21 @@ export async function executionCall(service,principal,operation,args){
     }
   }
   if(operation==='jobs.cancel'){
-    const job=jobById(args.jobId);if(!TERMINAL.has(job.state)){job.cancelRequested=true;service.save();service.audit(principal.username,operation,job.id,'requested');setImmediate(()=>service.reconcile().catch(()=>{}));}
+    const job=jobById(args.jobId);
+    if(!TERMINAL.has(job.state)){
+      const before=structuredClone(job);let transaction=false;
+      try{
+        service.db.exec('BEGIN IMMEDIATE');transaction=true;
+        job.cancelRequested=true;
+        service.save();service.audit(principal.username,operation,job.id,'requested');
+        service.db.exec('COMMIT');transaction=false;
+      }catch(error){
+        try{if(transaction)service.db.exec('ROLLBACK');}
+        finally{for(const key of Object.keys(job))delete job[key];Object.assign(job,before);}
+        throw error;
+      }
+      setImmediate(()=>service.reconcile().catch(()=>{}));
+    }
     return publicJob(job);
   }
   if(operation==='jobs.logs'){const job=jobById(args.jobId);return service.bridge(job.machine,'logs',{job:job.spec});}
