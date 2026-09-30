@@ -6,10 +6,11 @@ import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
+import {buildClient} from '../scripts/build-client.mjs';
 
 test('standalone downloaded CLI sends canonical scheduling and preserves argv after --',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-policy-cli-')),file=join(dir,'gpuctl.mjs'),session=join(dir,'session.json'),calls=[];
-  await copyFile(new URL('../cli.mjs',import.meta.url),file);
+  await buildClient({outfile:file});
   const server=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const data=JSON.parse(raw);calls.push(data);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(data.operation==='state'?{state:{machines:[{id:'gpu-1'}],jobs:[]}}:{result:{id:'job',state:'PENDING'}}));});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   await writeFile(session,JSON.stringify({url:`http://127.0.0.1:${server.address().port}`,token:'test-only',machine:'gpu-1',principal:{role:'member',username:'alice',userId:'alice'}}));

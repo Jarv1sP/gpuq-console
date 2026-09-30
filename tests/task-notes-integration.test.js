@@ -114,9 +114,10 @@ test('an unpersisted terminal result cannot delete task note bodies',async t=>{
   service.store.jobs.push(job);service.save();await service.invoke(admin.token,'community.notes.create',{key:randomUUID(),jobId:job.id,body:'keep until durable completion'});
   service.db.exec("CREATE TEMP TRIGGER fail_state_save BEFORE UPDATE ON portal_state BEGIN SELECT RAISE(ABORT,'simulated state save failure'); END;");
   await assert.rejects(service.reconcile(),/simulated state save failure/);
-  assert.equal(job.state,'SUCCEEDED');assert.equal(JSON.parse(service.db.prepare('SELECT data FROM portal_state WHERE id=1').get().data).jobs[0].state,'RUNNING');
+  assert.equal(job.state,'RUNNING','scheduler feedback must roll memory back when persistence fails');assert.equal(JSON.parse(service.db.prepare('SELECT data FROM portal_state WHERE id=1').get().data).jobs[0].state,'RUNNING');
   assert.equal(service.db.prepare('SELECT count(*) n FROM community_notes').get().n,1);
-  // A subsequent community read must not treat in-memory state as durable.
+  // Also defend against an unpersisted in-memory observation from another path.
+  job.state='SUCCEEDED';
   assert.equal((await service.invoke(admin.token,'community.notes.list',{})).result.notes.length,1);
   service.db.exec('DROP TRIGGER fail_state_save');service.save();await service.reconcile();
   assert.equal(service.db.prepare('SELECT count(*) n FROM community_notes').get().n,0);
