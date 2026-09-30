@@ -114,7 +114,7 @@ let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).i
 function fail(message){throw Error(message);}
 const CLI_OPTIONS=new Map([
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable'].map(key=>[key,'flag']),
-  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','interval'].map(key=>[key,'value']),
+  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','interval'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
 
@@ -256,9 +256,10 @@ async function main(){
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(['cwd','timeout','detach'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='exec')fail('--cwd, --timeout and --detach are only valid for exec');
-  const customScheduling=['rank','yield','restart-policy','checkpointable'].some(k=>Object.hasOwn(options,k));
+  const customScheduling=['rank','yield','restart-policy','checkpointable','mode'].some(k=>Object.hasOwn(options,k));
   if(customScheduling&&(positionals[0]!=='run'||options.priority))fail('Custom scheduling is only valid for run and cannot mix with --priority presets');
   const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
+  if(options.mode){const modes={queue:'queue',preempt1:'preempt-save',preempt2:'preempt-now','preempt-save':'preempt-save','preempt-now':'preempt-now'};if(!Object.hasOwn(modes,options.mode))fail('Use --mode queue|preempt1|preempt2');if(modes[options.mode]!=='queue')scheduling.mode=modes[options.mode];}
   if(scheduling){
     if(!/^P[0-4]$/.test(scheduling.rank)||!['never','now','save'].includes(scheduling.yieldPolicy)||!['never','on-preempt'].includes(scheduling.restartPolicy))fail('Use --rank P0..P4, --yield never|now|save, --restart-policy never|on-preempt');
     if(scheduling.yieldPolicy==='save'&&!scheduling.checkpointable)fail('--yield save requires --checkpointable and an epoch checkpoint adapter');

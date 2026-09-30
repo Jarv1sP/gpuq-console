@@ -231,6 +231,7 @@ export async function executionCall(service,principal,operation,args){
     if(!host?.reachable||!host.gpuq.connected||host.gpuq.observeOnly||host.gpus.filter(g=>g.memoryTotalMiB>=min*1024-512).length<request.cards)fail('所选机器当前无法执行，或不满足卡数/显存条件；不会自动切换服务器。',409);
     const prioritySupported=priorityCapable(host);
     if(explicit&&(!prioritySupported||!yieldCapable(host)))fail('节点未接通独立让位与 checkpoint 控制通道；未提交任务。',503);
+    if(explicit?.mode&&explicit.mode!=='queue'&&!host.gpuq.capabilities.includes('preempt-opt-in-only-v1'))fail('节点尚未接通请求模式的主动让位范围限制。',503);
     if(request.priorityProvided&&!prioritySupported)fail('所选机器尚未确认安全优先级功能，未提交任务；请刷新或联系管理员升级。',503);
     if(datasets.length){
       // Personal training uses the same owner-only Principal as node lease

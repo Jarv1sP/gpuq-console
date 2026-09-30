@@ -670,6 +670,7 @@ def process(operation,args):
                 return {'state':'CANCELED'}
             if operation=='logs':return job_log_result(job,{'job':{'state':'NOT_SUBMITTED'},'attempts':[]},'任务尚未提交到 GPUQ。')
             if policy['kind']!='legacy':priority_capability()
+            if policy['preempt_opt_in_only'] and 'preempt-opt-in-only-v1' not in gpu('status').get('daemon',{}).get('capabilities',[]):raise ValueError('Requester opt-in scope capability unavailable')
             if policy['kind']=='explicit' and not SCHEDULING.ready(CONFIG,HERE):raise ValueError('Training control channel is not ready; no submission attempted')
             if job.get('project'):
                 projects().store.release(job['userId'],job['project'],job['release'])

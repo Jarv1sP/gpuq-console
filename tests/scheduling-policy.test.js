@@ -71,3 +71,26 @@ test('administrator can select P3/P4 without forcing a victim or restarting from
   for(const rank of ['P3','P4'])assert.equal((await f.submit({rank}, {},f.admin.token)).result.scheduling.yieldPolicy,'never');
   await f.settle();assert.ok(f.calls.every(c=>c.args.job.scheduling.restartPolicy==='never'));
 });
+
+test('request modes canonicalize aliases and queue retains the original immutable retry identity',async t=>{
+  assert.deepEqual(schedulingPolicy({...save,mode:'queue'}),save);
+  for(const [alias,mode] of [['preempt1','preempt-save'],['preempt2','preempt-now']])assert.deepEqual(schedulingPolicy({...save,mode:alias}),{...save,mode});
+  for(const mode of [true,1,null,'bad'])assert.throws(()=>schedulingPolicy({...save,mode}));
+  const f=await fixture(t),key=randomUUID();
+  const original=(await f.submit(save,{key})).result;
+  assert.equal((await f.submit({...save,mode:'queue'},{key})).result.id,original.id);
+  assert.equal(f.s.store.jobs.length,1);assert.equal(Object.hasOwn(f.s.store.jobs[0].spec.scheduling,'mode'),false);
+});
+
+test('hard requester modes require fresh opt-in capability before reserving quota or dispatching',async t=>{
+  const f=await fixture(t);
+  await assert.rejects(f.submit({...save,mode:'preempt1'}),e=>e.status===503);
+  assert.equal(f.s.store.jobs.length,0);assert.equal(f.calls.length,0);
+  await f.snapshot(['priority-policy-v1','preempt-idle-only-v1','console-yield-v1','preempt-opt-in-only-v1']);
+  const key=randomUUID(),policy={...save,mode:'preempt-now'};
+  const result=(await f.submit(policy,{key})).result;
+  await f.settle();assert.equal(f.calls.length,1);assert.deepEqual(f.calls[0].args.job.scheduling,policy);
+  assert.equal((await f.submit({...save,mode:'preempt2'},{key})).result.id,result.id);
+  await assert.rejects(f.submit({...save,mode:'preempt1'},{key}),e=>e.status===409);
+  await f.s.invoke(f.user.token,'jobs.cancel',{jobId:result.id});assert.equal(usage(f.s.store.jobs,f.member.id),1);
+});
