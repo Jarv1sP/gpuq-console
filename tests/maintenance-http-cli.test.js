@@ -128,7 +128,7 @@ test('Docker COPY-only runtime starts and serves maintenance assets without sour
   for(const path of ['/','/maintenance-ui.js','/maintenance.css','/community-ui.js','/gpuctl.mjs','/guide/queue'])assert.equal((await fetch(origin+path)).status,200,path);
   const artifactReader=await import(pathToFileURL(join(dir,'client-bundle.mjs')));
   assert.equal(await(await fetch(origin+'/gpuctl.mjs')).text(),await artifactReader.standaloneClient(origin));
-  assert.ok((await(await fetch(origin+'/guide/queue')).text()).includes('申请系统维修'));
+  assert.ok((await(await fetch(origin+'/guide/troubleshooting')).text()).includes('申请系统维修'));
 });
 
 test('real bundled approval coexists with shared training, watch, notifications, notes and snapshot reads',async t=>{

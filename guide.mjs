@@ -3,11 +3,11 @@ import {readFile} from 'node:fs/promises';
 export const chapters=[
   {id:'start',title:'首次使用',description:'注册账号，获得额度，连上你的工作空间。'},
   {id:'development',title:'项目开发',description:'上传代码、安装依赖，准备可重复运行的版本。'},
-  {id:'training',title:'提交训练',description:'选择服务器和卡数，让平台分配空闲显卡。'},
+  {id:'training',title:'提交训练',description:'发布后运行，选择多卡、弹性或共享方式。'},
   {id:'data',title:'数据集',description:'上传、准备和使用数据；大文件也有合适的方式。'},
-  {id:'results',title:'日志与结果',description:'查看进度、下载结果，定位失败原因。'},
-  {id:'queue',title:'排队与协作',description:'看懂额度与队列，和同伴安排用卡时间。'},
-  {id:'troubleshooting',title:'常见问题',description:'从账号、环境到训练，按现象找到下一步。'},
+  {id:'results',title:'日志与结果',description:'查询进度，设置通知与留言，下载结果。'},
+  {id:'queue',title:'排队与协作',description:'分清等级、抢占、保存让位与自动恢复。'},
+  {id:'troubleshooting',title:'常见问题',description:'手动同步、排查故障，申请系统维修。'},
 ];
 const aliases={'/guide/':'/guide','/guide/user':'/guide/start','/guide/projects':'/guide/development','/guide/datasets':'/guide/data','/guide/community':'/guide/queue','/guide/terminal-sessions':'/guide/development','/guide/diagnostics':'/guide/results','/guide/ray-resources':'/guide/troubleshooting','/guide/project-network':'/guide/troubleshooting'};
 const escape=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
