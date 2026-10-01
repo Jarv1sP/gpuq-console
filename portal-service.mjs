@@ -9,6 +9,7 @@ import {MACHINES,validUsername} from './dist/model.js';
 import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 import {installMaintenance,maintenanceCall} from './maintenance.mjs';
 import {installJobNotifications} from './job-notifications.mjs';
+import {installTransfers,transferCall} from './transfers.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -43,6 +44,7 @@ export class PortalService extends DemoService{
     for(const user of service.store.users)user.policyVersion??=0;
     maintainTaskNotes(service);
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installJobNotifications(service,notificationConfig);installMaintenance(service);
+    installTransfers(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -153,6 +155,7 @@ export class PortalService extends DemoService{
     return this.enqueue(async()=>{
     const principal=this.principal(token),actor=principal.username;
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    if(typeof operation==='string'&&operation.startsWith('transfers.'))return {result:await transferCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     if(typeof operation==='string'&&operation.startsWith('maintenance.'))return {result:await maintenanceCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     if(operation==='notifications.job')return {result:this.configureJobNotification(principal,args),state:this.state(principal)};
     if(typeof operation==='string'&&operation.startsWith('community.'))return {result:communityCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
@@ -167,6 +170,7 @@ export class PortalService extends DemoService{
       if(operation==='users.delete'){
         if(principal.role!=='admin')throw Object.assign(Error('此操作需要管理员权限。'),{status:403});
         const user=this.store.get(args.userId);
+        if(this.db.prepare("SELECT 1 FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','FAILED','PAUSED','CANCELED') LIMIT 1").get(user.id))throw Error('请先确认这个账号的传输已结束，再删除账号。');
         if(user.id===principal.userId||user.enabled||usage(this.store.jobs,user.id)>0)throw Error('只能删除已暂停且没有待完成任务的非当前账号。历史任务和文件保留。');
         if(user.role==='admin'&&!this.store.users.some(u=>u.id!==user.id&&u.enabled&&u.role==='admin'))throw Error('不能删除最后一名可登录管理员。');
         this.db.exec('BEGIN IMMEDIATE');
@@ -201,9 +205,9 @@ export class PortalService extends DemoService{
     const state=super.state(principal);
     const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
-    return {...state,maintenance:{version:1},jobs:state.jobs.map(j=>({...publicJob(j),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
+    return {...state,maintenance:{version:1},transfers:{version:1},jobs:state.jobs.map(j=>({...publicJob(j),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
-  close(){this.closing=true;clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);this.db.close();}
+  close(){this.closing=true;clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);this.db.close();}
 }

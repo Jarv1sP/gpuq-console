@@ -23,6 +23,7 @@
 <a class="nav-item" href="#work" data-nav="work"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18M9 9v11"/></svg>我的工作台</a>
 <a class="nav-item" href="#resources" data-nav="resources"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01M12 6.5h4M12 17.5h4"/></svg>算力总览</a>
 <a class="nav-item" href="#datasets" data-nav="datasets"><svg aria-hidden="true" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></svg>数据集</a>
+<a class="nav-item" href="#transfers" data-nav="transfers">传输任务</a>
 <a class="nav-item" href="#community" data-nav="community"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18 0Z"/><path d="M7 10h8M7 14h5"/></svg>协作区</a>
 <a class="nav-item" href="#users" data-nav="users" data-admin-only hidden><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 4v2"/></svg>成员授权<span class="nav-count" id="pending-count" hidden>0</span></a>
 <a class="nav-item" href="#maintenance" data-nav="maintenance" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>维护申请</a>
@@ -36,6 +37,7 @@
 <div class="demo-note"><span id="mode-note">正在连接…</span></div>
 <section data-page="work" id="page-work"><div class="self-summary" id="self-summary"></div><div id="execution-host"></div></section>
 <section data-page="datasets" id="page-datasets" hidden></section>
+<section data-page="transfers" id="page-transfers" hidden></section>
 <section data-page="community" id="page-community" hidden></section>
 <section data-page="maintenance" id="page-maintenance" hidden></section>
 <section data-page="resources" id="page-resources" hidden><div class="section-kicker"><span>实验室服务器</span><span id="resource-summary">我的额度：0 张</span></div><p id="monitor-status" class="monitor-status" role="status"></p><p class="resource-explainer">额度是你最多可用的卡数；当前占用见下表，提交后由调度器安排启动。</p><div class="resource-grid" id="machine-grid"></div></section>

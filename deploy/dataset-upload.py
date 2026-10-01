@@ -105,8 +105,12 @@ class DatasetUploads:
         self.d._write_json(self.folder(session['userId'], session['uploadId'])/'session.json', session)
 
     def active(self, user, upload):
+        session = self.load(user, upload)
+        unit = session.get('workerUnit', 'gpuq-upload-'+self.key(user, upload)[:32])
+        if not re.fullmatch(r'gpuq-transfer-[a-f0-9-]{36}-[1-9][0-9]*\.service|gpuq-upload-[a-f0-9]{32}', unit):
+            raise ValueError('Invalid upload worker unit')
         return subprocess.run(['/usr/bin/systemctl', '--user', 'is-active', '--quiet',
-            'gpuq-upload-'+self.key(user, upload)[:32]], env=self.n.ENV,
+            unit], env=self.n.ENV,
             stdout=subprocess.DEVNULL, timeout=4).returncode == 0
 
     def _exists(self, path):
@@ -493,7 +497,11 @@ class DatasetUploads:
                 'complete': actual is not None and offset == entry['size']}
         return result
 
-    def start(self, user, args, action):
+    def start(self, user, args, action, *, inline_unit=None):
+        # Internal transfer worker only, never accepted in public RPC fields.
+        # Seal/publish in the SAME cgroup, so cancel cannot leave a publisher.
+        if inline_unit is not None and not re.fullmatch(r'gpuq-transfer-[a-f0-9-]{36}-[1-9][0-9]*\.service', inline_unit):
+            raise ValueError('Invalid inline worker unit')
         upload = args['uploadId']
         with self.guard(user, upload):
             session = self.effective(self.load(user, upload))
@@ -520,11 +528,16 @@ class DatasetUploads:
             if action == 'seal' and self._size(self.folder(user, upload)/'manifest.part') != session['manifestBytes']:
                 raise ValueError('Manifest upload is incomplete')
             session.update(state=target, action=action)
+            if inline_unit is None:
+                session.pop('workerUnit', None)
+            else:
+                session['workerUnit'] = inline_unit
             session.pop('error', None)
             session.pop('resumeState', None)
             self.save(session)
             try:
-                self.n.run(['/usr/bin/systemd-run', '--user', '--collect',
+                if inline_unit is None:
+                    self.n.run(['/usr/bin/systemd-run', '--user', '--collect',
                     '--unit=gpuq-upload-'+self.key(user, upload)[:32], '--property=KillMode=control-group',
                     '--property=UMask=0077', '--property=CPUQuota=100%', '--property=MemoryMax=2G',
                     '--property=IOWeight=10', '--property=RuntimeMaxSec=86400', '--property=TimeoutStopSec=20',
@@ -533,7 +546,20 @@ class DatasetUploads:
                 session.update(state='FAILED', resumeState=previous, error='Unable to start upload worker')
                 self.save(session)
                 raise
-            return self.result(session)
+            if inline_unit is None:
+                return self.result(session)
+        self.worker(user, upload, action)
+        return self.status(user, {'uploadId': upload})
+
+    def pause(self, user, args):
+        # Stop without deleting partial payload. Do not hold the writer lock
+        # while stopping the unit: its worker may itself own that lock.
+        session = self.load(user, args['uploadId'])
+        unit = session.get('workerUnit', 'gpuq-upload-'+self.key(user, args['uploadId'])[:32])
+        if 'workerUnit' in session:
+            raise ValueError('This upload is controlled by its transfer job')
+        self.n.run(['/usr/bin/systemctl', '--user', 'stop', unit], timeout=10)
+        return self.status(user, args)
 
     def binding(self, dataset, version):
         return self.root/'bindings'/(hashlib.sha256((dataset+'@'+version).encode()).hexdigest()+'.json')
@@ -736,7 +762,7 @@ class DatasetUploads:
         fields = {'begin': {'name', 'key', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries'},
                   'manifest': {'uploadId', 'offset', 'data'}, 'seal': {'uploadId'},
                   'status': {'uploadId', 'path'}, 'chunk': {'uploadId', 'path', 'offset', 'data'},
-                  'commit': {'uploadId'}, 'discard': {'uploadId'}}
+                  'commit': {'uploadId'}, 'discard': {'uploadId'}, 'pause': {'uploadId'}}
         action = operation.removeprefix('datasets.upload.')
         if (action not in fields or not isinstance(args, dict) or set(args)-fields[action]-{'userId', 'hostAdmin'}
                 or ('hostAdmin' in args and args['hostAdmin'] is not False)):

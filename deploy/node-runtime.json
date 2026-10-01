@@ -3,12 +3,13 @@
   "dependencies": [
     "dataset-cache.py", "dataset-upload.py", "data-workspace.py", "project-store.py",
     "job-diagnostics.py", "training-control.py", "scheduling-policy.py",
-    "admin-command.py", "gpuq-network", "snapshot-sync.py", "gpu-devices.py"
+    "admin-command.py", "gpuq-network", "snapshot-sync.py", "gpu-devices.py",
+    "transfer-jobs.py", "transfer-peer.py"
   ],
   "profiles": {
     "common-p0": {"runner": "sandbox-runner-common-p0.py", "extra": []},
     "ray-p0": {"runner": "sandbox-runner.py", "extra": ["job-resources.py", "gpuq-ray"]}
   },
   "activation": ["sandbox-runner.py", "project-ops.py", "terminal-helper.py", "node-executor.py", "node-probe.py"],
-  "units": ["gpuq-diagnostics-gc.service", "gpuq-diagnostics-gc.timer"]
+  "units": ["gpuq-diagnostics-gc.service", "gpuq-diagnostics-gc.timer", "gpuq-transfer-peer.service"]
 }
