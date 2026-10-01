@@ -42,4 +42,6 @@ test('guide covers merged workflow changes while keeping completion, permissions
   assert.match(chapters.get('results'),/Ctrl\+C 只停止查看/);assert.match(chapters.get('results'),/管理员为你的账号配置 Telegram/);
   for(const token of ['sync git','sync code','sync data','CODE_READY','check-attr --source','申请系统维修','maintenance request'])assert.ok(chapters.get('troubleshooting').includes(token),token);
   assert.match(chapters.get('queue'),/退出码 75/);assert.match(chapters.get('troubleshooting'),/不立即执行，也不给你 root/);
+  assert.match(chapters.get('data'),/当前没有后台 URL 下载按钮/);assert.match(chapters.get('data'),/没有整份已发布数据集的一键下载入口/);
+  assert.match(chapters.get('data'),/连续无输入 1 小时或累计 6 小时/);
 });
