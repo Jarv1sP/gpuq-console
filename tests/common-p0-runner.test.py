@@ -28,7 +28,7 @@ class CommonRunner(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
 
-    def orchestrate(self, terminal=False, available=True, missing=False, broken=False):
+    def orchestrate(self, terminal=False, available=True, missing=False, broken=False, indices='0,1', devices=None):
         job = {'id': JID, 'userId': 'demo-user-1', 'username': 'demo', 'cards': 2, 'argv': ['python', 'train.py']}
         if terminal: del job['id']; job['cards'] = 0
         spec_dir = self.root / ('terminals' if terminal else 'jobs'); spec_dir.mkdir()
@@ -42,6 +42,7 @@ class CommonRunner(unittest.TestCase):
             self.assertEqual(args[1], job); runtime.mkdir(parents=True)
             return {'captureId': CAPTURE, 'runtimePath': str(runtime), 'available': available}
         diagnostic = SimpleNamespace(start_capture=Mock(side_effect=start), finish_capture=Mock())
+        mapping = SimpleNamespace(device_paths=Mock(return_value=devices or ['/dev/nvidia3', '/dev/nvidia2']))
         if broken: diagnostic.start_capture.side_effect = RuntimeError('observer unavailable')
         captured, properties, kept, memfds = [], [], [], []
         path_exists, path_read = Path.exists, Path.read_text
@@ -69,11 +70,11 @@ class CommonRunner(unittest.TestCase):
             else: os.write(int(command[command.index('--ready-fd') + 1]), b'1')
             return SimpleNamespace(wait=lambda *args, **kwargs: 42, poll=lambda: 42)
         try:
-            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else diagnostic) as imported, \
+            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else mapping if filename=='gpu-devices.py' else diagnostic) as imported, \
                     patch.object(S, 'start_job_capture', wraps=S.start_job_capture) as capture, \
                     patch.object(S, 'project_runtime', return_value=None), \
                     patch.object(S.sys, 'argv', ['sandbox-runner.py', JID] + (['terminal'] if terminal else [])), \
-                    patch.dict(S.os.environ, {'GPUQ_ASSIGNED_GPU_INDICES': '0,1', 'GPUQ_ASSIGNED_GPU_UUIDS': 'GPU-a,GPU-b'}), \
+                    patch.dict(S.os.environ, {'GPUQ_ASSIGNED_GPU_INDICES': indices, 'GPUQ_ASSIGNED_GPU_UUIDS': 'GPU-a,GPU-b'}), \
                     patch.object(Path, 'exists', exists), patch.object(Path, 'read_text', read), \
                     patch.object(S.os, 'memfd_create', side_effect=memfd, create=True), \
                     patch.object(S.subprocess, 'check_output', return_value='24576\n24576\n') as gpu, \
@@ -84,9 +85,12 @@ class CommonRunner(unittest.TestCase):
                     capture.assert_not_called(); diagnostic.start_capture.assert_not_called()
                     diagnostic.finish_capture.assert_not_called(); imported.assert_not_called(); gpu.assert_not_called()
                 elif not missing and not broken:
-                    self.assertEqual([call.args for call in imported.call_args_list],[('gpuq_allocation','scheduling-policy.py'),('gpuq_job_diagnostics','job-diagnostics.py')])
+                    self.assertEqual([call.args for call in imported.call_args_list],[('gpuq_allocation','scheduling-policy.py'),('gpuq_gpu_devices','gpu-devices.py'),('gpuq_job_diagnostics','job-diagnostics.py')])
                     diagnostic.finish_capture.assert_called_once_with(self.root, job, CAPTURE, 42)
                 else: diagnostic.finish_capture.assert_not_called()
+                if not terminal:
+                    mapping.device_paths.assert_called_once_with(['GPU-a','GPU-b'])
+                    self.assertEqual(gpu.call_args.args[0][2], 'GPU-a,GPU-b')
         finally:
             for fd in kept: os.close(fd)
         self.assertEqual(json.loads(spec_file.read_text()), job)
@@ -117,6 +121,14 @@ class CommonRunner(unittest.TestCase):
         self.assertEqual(env['GPUQ_RAY_TEMP_DIR'], '/run/gpuq/runtime/ray')
         self.assertEqual(env['RAY_object_spilling_directory'], '/tmp/gpuq-ray-spill')
         self.assertNotIn('GPUQ_CPU_LIMIT', env)
+
+    def test_inventory_indices_are_not_used_as_device_minors(self):
+        args, _, _ = self.orchestrate(indices='2,0', devices=['/dev/nvidia1', '/dev/nvidia3'])
+        bindings = [args[i + 1:i + 3] for i, value in enumerate(args) if value == '--dev-bind']
+        self.assertIn(['/dev/nvidia1', '/dev/nvidia1'], bindings)
+        self.assertIn(['/dev/nvidia3', '/dev/nvidia3'], bindings)
+        self.assertNotIn(['/dev/nvidia2', '/dev/nvidia2'], bindings)
+        self.assertNotIn(['/dev/nvidia0', '/dev/nvidia0'], bindings)
 
     def test_observer_unavailable_retains_owned_runtime_and_finish_receipt(self):
         args, _, _ = self.orchestrate(available=False)

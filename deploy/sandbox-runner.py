@@ -107,7 +107,8 @@ def main():
     if terminal:indices=[];uuids=[]
     else:runtime_spec=local_module('gpuq_allocation','scheduling-policy.py').allocated_spec(spec,indices,uuids,cfg,os.environ)
     if not terminal:
-        memory=subprocess.check_output(['/usr/bin/nvidia-smi','--id',','.join(indices),'--query-gpu=memory.total','--format=csv,noheader,nounits'],text=True)
+        devices=local_module('gpuq_gpu_devices','gpu-devices.py').device_paths(uuids)
+        memory=subprocess.check_output(['/usr/bin/nvidia-smi','--id',','.join(uuids),'--query-gpu=memory.total','--format=csv,noheader,nounits'],text=True)
         sizes=[int(line.strip()) for line in memory.splitlines()]
         if len(sizes)!=len(indices) or any(size<spec.get('minVramGiB',0)*1024-512 for size in sizes):raise ValueError('Allocated GPU memory does not meet request')
     # Apply limits BEFORE any untrusted code runs, inside the original GPUQ unit.
@@ -157,7 +158,7 @@ def main():
         for descriptor,target in dataset_fds:args+=['--ro-bind-fd',str(descriptor),target]
     if datafd is not None:
         args+=['--bind-fd',str(datafd),'/data2','--chdir','/data2','--setenv','GPUQ_DATA_WORKSPACE','/data2']
-    for source in ([] if terminal else ['/dev/nvidiactl','/dev/nvidia-uvm','/dev/nvidia-uvm-tools']+[f'/dev/nvidia{i}' for i in indices]):
+    for source in ([] if terminal else ['/dev/nvidiactl','/dev/nvidia-uvm','/dev/nvidia-uvm-tools']+devices):
         if not Path(source).exists():raise ValueError('Allocated GPU device missing')
         args+=['--dev-bind',source,source]
     # Read-only Python distribution; host home, SSH keys, sockets and other data are absent.

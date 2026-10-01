@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
 
@@ -261,6 +261,8 @@ class Resources(unittest.TestCase):
         resource = SimpleNamespace(requested_limits=R.requested_limits, read_budget=read_budget,
                                    cgroup_path=lambda group: self.leaf, resource_environment=R.resource_environment,
                                    RESOURCE_FILE=R.RESOURCE_FILE, RAY_SPILL_DIR=R.RAY_SPILL_DIR)
+        devices = ['/dev/nvidia' + str(i) for i in [3,2,1,0,7,6,5,4][:allocated_cards]]
+        mapping = SimpleNamespace(device_paths=Mock(return_value=devices))
         runtime = self.root / 'diagnostic-runtime'; runtime.mkdir()
         runtimefd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY) if managed_runtime else None
         data = self.root/'personal-data';data.mkdir()
@@ -268,7 +270,7 @@ class Resources(unittest.TestCase):
         datalock = os.open(self.root/'personal-data.lock', os.O_CREAT | os.O_RDWR, 0o600) if data_workspace else None
         self.data_descriptors = (datafd, datalock)
         try:
-            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else resource), \
+            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else mapping if filename=='gpu-devices.py' else resource), \
                     patch.object(S, 'start_job_capture', return_value=(None, None, runtimefd)), \
                     patch.object(S, 'project_runtime', return_value=None), \
                     patch.object(S, 'open_data_workspace', return_value=(datafd,datalock)), \
@@ -282,6 +284,9 @@ class Resources(unittest.TestCase):
                     patch.object(S.subprocess, 'Popen', side_effect=spawn):
                 self.assertEqual(S.main(), 42)
                 if terminal: gpu_check.assert_not_called()
+                else:
+                    mapping.device_paths.assert_called_once_with(UUIDS[:allocated_cards])
+                    self.assertEqual(gpu_check.call_args.args[0][2], ','.join(UUIDS[:allocated_cards]))
         finally:
             for descriptor in kept:
                 os.close(descriptor)
@@ -311,6 +316,11 @@ class Resources(unittest.TestCase):
         self.assertIn('MemoryMax='+str(64*R.GIB),properties[0]);self.assertIn('CPUQuota=800%',properties[0])
         env={args[i+1]:args[i+2] for i,item in enumerate(args) if item=='--setenv'}
         self.assertEqual(env['GPUQ_GPU_COUNT'],'2');self.assertEqual(env['GPUQ_CPU_LIMIT'],'8')
+        bindings=[args[i+1:i+3] for i,value in enumerate(args) if value=='--dev-bind']
+        self.assertIn(['/dev/nvidia3','/dev/nvidia3'],bindings)
+        self.assertIn(['/dev/nvidia2','/dev/nvidia2'],bindings)
+        self.assertNotIn(['/dev/nvidia0','/dev/nvidia0'],bindings)
+        self.assertNotIn(['/dev/nvidia1','/dev/nvidia1'],bindings)
 
     def test_legacy_terminal_without_id_gets_budget_without_rewriting_immutable_spec(self):
         (args, _), properties = self.runner_command(terminal=True)
