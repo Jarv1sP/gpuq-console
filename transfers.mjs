@@ -88,7 +88,7 @@ export async function transferCall(service,principal,operation,args){
   if(operation==='transfers.list'){
     fields(args,['cursor','limit']);const cursor=args.cursor??0,limit=args.limit??25;
     if(!Number.isSafeInteger(cursor)||cursor<0||!Number.isInteger(limit)||limit<1||limit>50)fail('传输分页参数无效。');
-    const rows=service.db.prepare('SELECT * FROM transfers WHERE owner_id=? AND seq>? ORDER BY seq LIMIT ?').all(user.id,cursor,limit+1);
+    const rows=service.db.prepare('SELECT * FROM transfers WHERE owner_id=? AND seq<? ORDER BY seq DESC LIMIT ?').all(user.id,cursor||Number.MAX_SAFE_INTEGER,limit+1);
     return {transfers:rows.slice(0,limit).map(r=>view({...r,data:JSON.parse(r.data)})),nextCursor:rows.length>limit?rows[limit-1].seq:null};
   }
   if(operation==='transfers.create'){

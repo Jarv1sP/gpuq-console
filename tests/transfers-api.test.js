@@ -59,7 +59,14 @@ test('an initially uncertain cancel is reconciled to terminal without enabling I
   await assert.rejects(f.call('transfers.io',{id:row.id,action:'get',path:'x',offset:0}));
   assert.equal((await f.call('transfers.status',{id:row.id})).state,'CANCELED');assert.equal(f.calls.filter(c=>c.op==='transfers.start').length,starts);
 });
+test('new tasks remain visible after history grows; descending pagination has no duplicates',async t=>{
+  const f=await fixture(t),ids=[];
+  for(let i=0;i<8;i++){const row=await f.call('transfers.create',{key:randomUUID(),kind:'download',machine:MACHINES[0].id,dataset:'shared',version:hash});ids.push(row.id);await f.call('transfers.progress',{id:row.id,bytes:30,complete:true});}
+  const first=await f.call('transfers.list',{limit:5}),second=await f.call('transfers.list',{limit:5,cursor:first.nextCursor});
+  assert.equal(first.transfers[0].id,ids.at(-1));assert.deepEqual([...first.transfers,...second.transfers].map(r=>r.id),ids.reverse());assert.equal(second.nextCursor,null);
+});
 test('new transfer runtime is included in deployment, client and demo/Portal assets',async()=>{
   const manifest=JSON.parse(await readFile(new URL('../deploy/node-runtime.json',import.meta.url))),docker=await readFile(new URL('../deploy/Dockerfile',import.meta.url),'utf8');for(const name of ['transfer-jobs.py','transfer-peer.py'])assert.ok(manifest.dependencies.includes(name));assert.ok(manifest.units.includes('gpuq-transfer-peer.service'));assert.match(docker,/COPY[^\n]*transfers\.mjs/);
   for(const file of ['portal-server.mjs','server.mjs'])assert.match(await readFile(new URL('../'+file,import.meta.url),'utf8'),/transfer-upload\.js/);
+  const ui=await readFile(new URL('../dist/transfers-ui.js',import.meta.url),'utf8');assert.ok(ui.includes('name="transfer-machine"'));assert.ok(!ui.includes('name="machine"'),'new page must not collide with existing training controls');
 });
