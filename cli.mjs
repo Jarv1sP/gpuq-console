@@ -11,6 +11,7 @@ import {runManualSync} from './client-snapshot-sync.mjs';
 import {watchJob} from './job-watch.mjs';
 import {progressText} from './dist/job-progress.js';
 import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
+import {displayName,taskDescription} from './dist/task-metadata.js';
 
 // Approval text is member-controlled. Never let terminal controls or bidi
 // formatting hide/reorder the frozen script (including older stored requests).
@@ -21,6 +22,8 @@ const help=`GPUQ — 个人终端与 GPUQ 训练
 
 日常命令（一次安装后直接使用 gpuctl）：
 gpuctl login                     Sign in; remembers your account and service
+gpuctl profile --display-name "张三"  Set your public submitter name
+gpuctl queue [--machine SERVER]   Read authorized machines' task names and descriptions
 gpuctl use gpu-1                  Select an approved server from your inventory
 gpuctl project create my-project Create/select a project (shared base Python packages)
 gpuctl project create clean --env-mode isolated  New venv without base site-packages
@@ -97,6 +100,7 @@ gpuctl user role USERNAME admin|member
 gpuctl grant USERNAME --machine gpu-1=2 --total 2
 gpuctl grant USERNAME --full       All GPU resources; NOT platform admin
 gpuctl run gpu-1 --cards 1 --name train -- python train.py
+gpuctl run -g 1 --name baseline --description "验证新数据集" -- python train.py
 gpuctl jobs
 gpuctl logs JOB_ID
 gpuctl cancel JOB_ID
@@ -138,7 +142,7 @@ let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).i
 function fail(message){throw Error(message);}
 const CLI_OPTIONS=new Map([
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown'].map(key=>[key,'flag']),
-  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
+  ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
 
@@ -172,6 +176,8 @@ async function secret(label='Password'){
 async function main(){
   ({options,positionals,training}=parseCLIOptions(args));
   if(options.help||!positionals.length){console.log(help);return;}
+  if(options.description!==undefined&&positionals[0]!=='run')fail('--description is only valid for run');
+  if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0]))fail('--display-name is only valid for profile or register');
   if(['from','to','ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync')fail('--from, --to, --ref, --target-project and --dry-run are only valid for sync');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
   if(options.interval!==undefined&&positionals[0]!=='watch')fail('--interval is only valid for watch');
@@ -228,7 +234,7 @@ async function main(){
     let credentials;
     if(options['credentials-stdin']){let value='';for await(const chunk of process.stdin){value+=chunk;if(value.length>1024)fail('Registration input too long');}try{credentials=JSON.parse(value);}catch{fail('Expected JSON {invite,password} on stdin');}if(!credentials||typeof credentials!=='object'||Array.isArray(credentials)||Object.keys(credentials).some(key=>!['invite','password'].includes(key)))fail('Expected only invite and password');}
     else credentials={invite:await secret('Invite code'),password:await secret()};
-    result=await post('register',{username:positionals[1],...credentials});mode={demo:false,gpuqConnected:false};
+    result=await post('register',{username:positionals[1],...credentials,...(options['display-name']?{name:displayName(options['display-name'])}:{})});mode={demo:false,gpuqConnected:false};
   }else if(command==='login'){
     if(positionals.length===1&&process.stdin.isTTY){const rl=createInterface({input:process.stdin,output:process.stdout});positionals.push(await rl.question('用户名: '));rl.close();}
     if(positionals.length!==2)fail('Usage: login USERNAME');
@@ -270,6 +276,16 @@ async function main(){
     const own=()=>session.principal.role==='admin'&&options.as?find(options.as):session.principal.userId;
     if(command==='sync'){
       result=await runManualSync(call,{options,positionals,training,machines:state.machines,userId:session.principal.userId});
+    }else if(command==='queue'){
+      if(positionals.length!==1||training.length||options.datasets.length||options.machines.length>1||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: queue [--machine SERVER]');
+      if(state.taskMetadata?.version!==1)fail('当前后台尚未支持公开任务信息，请升级门户。');
+      const selected=options.machines.length?machineName(options.machines[0]):null;
+      if(selected&&!state.machines.some(m=>m.id===selected))fail('这台机器未授权或不存在');
+      result={stale:state.gpuq?.stale!==false,hosts:(state.gpuq?.hosts||[]).filter(h=>!selected||h.id===selected).map(h=>({machine:h.id,reachable:h.reachable,checkedAt:state.gpuq.checkedAt,tasks:h.tasks||[]}))};
+    }else if(command==='profile'){
+      if(positionals.length!==1||training.length||options.datasets.length||options.machines.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','display-name'].includes(k)))fail('Usage: profile [--display-name NAME]');
+      if(options['display-name']){if(state.taskMetadata?.version!==1)fail('当前后台尚未支持姓名设置，请升级门户。');result=(await call('profile.update',{name:displayName(options['display-name'])})).result;}
+      else result=state.users.find(u=>u.id===session.principal.userId);
     }else if(command==='use'&&positionals.length===2){
       if(!state.machines.some(m=>m.id===positionals[1]))fail('这台机器未授权或不存在');session.machine=positionals[1];await saveSession();result={selected:session.machine,project:selectedProject(session.machine)};
     }else if(command==='maintenance'){
@@ -468,7 +484,8 @@ async function main(){
       const indices=options.gpu?.split(',').map(n=>/^\d+$/.test(n)?Number(n):NaN),cards=Number(options.cards||indices?.length||1);
       const elastic=elasticKeys.some(k=>Object.hasOwn(options,k))?elasticAllocation({minCards:Number(options['min-cards']),globalBatch:Number(options['global-batch']),microBatch:Number(options['micro-batch']),autoExpand:options['auto-expand']===true},cards,scheduling).elastic:null;
       const placement=placementKeys.some(k=>Object.hasOwn(options,k))?gpuPlacement({gpuIndices:indices,shared:options.share===true,...(options['vram-mib']?{vramMiB:Number(options['vram-mib'])}:{}),hami:options.hami===true,...(options['sm-percent']?{smPercent:Number(options['sm-percent'])}:{})},cards,elastic,scheduling,options.priority):null;
-      result=(await call('jobs.submit',{machine:positionals[1],cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets}:{})})).result;
+      if(options.description!==undefined&&state.taskMetadata?.version!==1)fail('当前后台尚未支持任务描述；不会忽略你填写的内容。');
+      result=(await call('jobs.submit',{machine:positionals[1],cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');
@@ -551,6 +568,8 @@ async function main(){
   }
   if(options.json){console.log((command==='maintenance'?maintenanceJSON:JSON.stringify)({ok:true,...mode,data:result}));return;}
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
+  if(command==='profile'){console.log(`姓名／显示名：${result.name}\n登录用户名：${result.username}`);return;}
+  if(command==='queue'){if(result.stale)console.log('监控已过期；以下是平台记录与上次核对状态，不代表空闲。');for(const h of result.hosts){console.log(`${h.machine} · ${h.reachable?'可采集':'监控不可用'} · ${h.checkedAt||'暂无采集时间'}`);for(const t of h.tasks)console.log(`  ${t.id} · ${t.state} · ${t.name}\n  提交者：${t.submitter?.name||'未知'}${t.submitter?.username&&t.submitter.username!==t.submitter.name?'（'+t.submitter.username+'）':''}\n  描述：${t.description||'未填写描述'}\n  分配 GPU：${t.assignedGpuIndices?.join(', ')||'—'}`);if(!h.tasks.length)console.log('  暂无任务记录。');}return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='sync'){
     if(result.state==='PREVIEW')console.log(`同步预览：${result.source?.commit||result.source?.machine||'Git'} → ${result.target}\n${result.project||result.name} · ${result.bytes} B · ${result.entries} 项\n未写入目标。去掉 --dry-run 执行，重复原命令可续传。`);

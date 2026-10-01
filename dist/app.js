@@ -17,6 +17,7 @@ const renderMaintenance=maintenanceUI(store,toast);
 terminalUI(store,toast);
 const isAdmin=()=>store.principal?.role==='admin';
 const own=()=>store.users.find(u=>u.id===store.principal?.userId);
+store.onAuthChange(()=>{$('#profile-dialog').close();$('#profile-form').reset();$('#profile-error').textContent='';});
 const pending=u=>u.enabled&&u.role!=='admin'&&!u.approvedAt&&u.total===0;
 const pendingUsers=()=>store.users.filter(pending);
 const label=u=>!u.enabled?'已暂停':u.role==='admin'?'管理员':pending(u)?'待处理':u.total?'已授权':'零额度';
@@ -36,7 +37,9 @@ function render(preserve=false){
   for(const el of document.querySelectorAll('[data-nav]')){el.classList.toggle('active',el.dataset.nav===page);el.setAttribute('aria-current',el.dataset.nav===page?'page':'false');}
   $('#pending-count').textContent=pendingUsers().length;$('#pending-count').hidden=!pendingUsers().length;
   $('#current-account').textContent=logged?`${store.principal.username} · ${admin?'管理员':'普通用户'}`:'尚未登录';
-  $('#profile-name').textContent=logged?store.principal.username:'未登录';$('#profile-role').textContent=admin?'管理员':'个人工作空间';
+  $('#profile-name').textContent=logged?u?.name||store.principal.username:'未登录';$('#profile-role').textContent=admin?'管理员':'个人工作空间';
+  $('#edit-profile').hidden=!logged||store.production&&store.data?.taskMetadata?.version!==1;
+  if(!logged)$('#profile-dialog').close();
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
   const titles={work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览','查看每张 GPU 的使用情况，选择适合的服务器。'],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['维护申请','特殊操作由管理员确认；普通训练无需审批。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
@@ -105,8 +108,10 @@ document.addEventListener('click',async event=>{
 document.addEventListener('change',event=>{const id=event.target.dataset.machine;if(!id||!draft)return;if(event.target.checked){draft.limits[id]=1;if(!draft.total)draft.total=1;}else{delete draft.limits[id];draft.total=Math.min(draft.total,Object.values(draft.limits).reduce((a,b)=>a+b,0));}renderEditor();$(`[data-machine="${id}"]`).focus();});
 document.addEventListener('input',event=>{const key=event.target.dataset.quota;if(!key||!draft)return;const value=event.target.value===''?NaN:Number(event.target.value);if(key==='total')draft.total=value;else draft.limits[key]=value;updateDirty();});
 $('#password-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter;b.disabled=true;try{const self=selected===store.principal.userId;await store.reset(selected,new FormData(event.target).get('password'));event.target.reset();$('#password-dialog').close();toast('密码已重置，旧登录已失效');if(self){await store.logout().catch(()=>{});render();openLogin();}}catch(e){$('#password-error').textContent=e.message;}finally{b.disabled=false;}});
+$('#edit-profile').addEventListener('click',()=>{$('#profile-form [name=profile-name]').value=own()?.name||store.principal.username;$('#profile-error').textContent='';$('#profile-dialog').showModal();});
+$('#profile-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter;b.disabled=true;try{await store.call('profile.update',{name:new FormData(event.target).get('profile-name')});$('#profile-dialog').close();render(true);toast('姓名已保存；新任务记录提交时姓名。');}catch(e){$('#profile-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#login-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;try{await store.login(data.get('username'),data.get('password'));event.target.reset();$('#login-dialog').close();defaultPage();render();}catch(e){$('#login-error').textContent=e.message;}finally{b.disabled=false;}});
-$('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'));await store.login(data.get('username'),data.get('password'));event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
+$('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'),data.get('signup-name')||undefined);await store.login(data.get('username'),data.get('password'));event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#invites-dialog').addEventListener('close',()=>{inviteCode=null;$('#invites-content').innerHTML='';});
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
 const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','community','maintenance','users'].includes(initialHash))page=initialHash;}render();if(!store.principal)openLogin();

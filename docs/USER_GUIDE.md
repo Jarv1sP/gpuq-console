@@ -10,6 +10,8 @@
 
 新账号的用卡额度为 0。管理员批准可用服务器和卡数后，你就可以创建项目、上传数据和提交训练；等待授权期间可以查看公告、参与交流。
 
+注册时可填写姓名／显示名，已有账号点击右上角「设置姓名」，或执行 `gpuctl profile --display-name "张三"`。未设置时使用用户名；姓名不改变登录账号和权限。新任务保存提交时姓名，旧任务没有姓名快照时使用账号现有姓名。
+
 ### 找到要用的服务器
 
 在“算力总览”查看服务器型号、每张卡的显存与使用情况。复制你获准使用的**机器 ID**，后面的 `MACHINE_ID` 都要换成它；不要照抄其他人的服务器名称。
@@ -133,6 +135,8 @@ gpuctl project status
 gpuctl run -g 1 -- python train.py --output /outputs
 gpuctl jobs
 ```
+
+网页提交时填写「任务名称」和「任务描述」。CLI 可用 `gpuctl run -g 1 --name baseline --description "验证新数据集，预计两小时" -- python train.py`。描述最多 2000 字／6 KiB，同机器的授权成员可见，不要填写密码或令牌；旧客户端不填描述也能提交，旧任务显示「未填写描述」，不会拿训练命令代替。
 
 `-g 1` 申请 1 张卡，`--` 后是你自己的训练命令。示例中的 `--output` 是 `train.py` 的参数，按你的程序修改；**结果、日志文件和 checkpoint 要写入 `/outputs`**。训练中的代码目录 `/workspace` 和环境是只读的。
 
@@ -297,6 +301,8 @@ gpuctl run -g 1 --data DATASET_ID@VERSION -- python train.py --data /data2/DATAS
 ## 日志与结果 {#results}
 
 ### 查看进度与错误
+
+在「算力总览」展开任务队列或每张卡的计算进程，可以查看平台任务的提交者姓名、任务名和描述；CLI 用 `gpuctl queue`，或 `gpuctl queue --machine MACHINE_ID`。其他人的命令、日志和结果不会因此开放。外部／未关联任务不推断姓名，分配记录也不等于当前进程占用。
 
 网页在任务列表打开“日志”，或在自己的电脑执行：
 

@@ -1,5 +1,6 @@
 import {readFile,stat} from 'node:fs/promises';
 import {MACHINES} from './dist/model.js';
+import {taskCatalog} from './task-catalog.mjs';
 
 const number=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;
 const text=(value,limit=120)=>typeof value==='string'?value.replace(/[\x00-\x1f\x7f]/g,'').slice(0,limit):null;
@@ -39,14 +40,28 @@ export async function readGPUQStatus(path,now=Date.now()){
   }catch{return empty;}
 }
 
-export function visibleGPUQStatus(snapshot,principal,limits){
+export function visibleGPUQStatus(snapshot,principal,limits,context){
+  const admin=principal.role==='admin';
   const hosts=snapshot.hosts.filter(host=>principal.role==='admin'||limits[host.id]);
-  return {...snapshot,hosts:hosts.map(host=>principal.role==='admin'?structuredClone(host):{
-    id:host.id,reachable:host.reachable,gpus:host.gpus.map(gpu=>({...gpuMetrics(gpu),processesAvailable:gpu.processesAvailable===true,
-      ...(gpu.processesError?{processesError:'进程列表暂不可用或不完整'}:{}),
-      processes:(gpu.processes||[]).map(p=>({pid:p.pid,memoryUsedMiB:number(p.memoryUsedMiB),type:'compute',...(scheduling(p.scheduling,false)?{scheduling:scheduling(p.scheduling,false)}:{})}))})),
-    gpuq:{connected:host.gpuq.connected,health:host.gpuq.health,capabilities:host.gpuq.capabilities,
-      observeOnly:host.gpuq.observeOnly,schedulableIndices:host.gpuq.schedulableIndices},
-    ...(host.error?{error:host.error}:{}),...(host.gpuError?{gpuError:'部分 GPU 指标暂不可用'}:{})
+  return {...snapshot,hosts:hosts.map(host=>{
+    const catalog=context?taskCatalog(host,context,admin):null;
+    const base=admin?structuredClone(host):{
+      id:host.id,reachable:host.reachable,
+      gpuq:{connected:host.gpuq.connected,health:host.gpuq.health,capabilities:host.gpuq.capabilities,
+        observeOnly:host.gpuq.observeOnly,schedulableIndices:host.gpuq.schedulableIndices},
+      ...(host.error?{error:host.error}:{}),...(host.gpuError?{gpuError:'部分 GPU 指标暂不可用'}:{})
+    };
+    // Shared task metadata is an allowlisted catalog. OS fields still follow
+    // their old role boundary; supplying metadata never forwards a job spec.
+    base.gpus=host.gpus.map(gpu=>({
+      ...(admin?structuredClone(gpu):{...gpuMetrics(gpu),processesAvailable:gpu.processesAvailable===true,
+        ...(gpu.processesError?{processesError:'进程列表暂不可用或不完整'}:{})}),
+      processes:(gpu.processes||[]).map(p=>{
+        const task=catalog?.byNode.get(p.scheduling?.jobId),policy=scheduling(p.scheduling,false);
+        return {...(admin?structuredClone(p):{pid:p.pid,memoryUsedMiB:number(p.memoryUsedMiB),type:'compute',...(policy?{scheduling:policy}:{})}),...(task?{task}:{})};
+      })
+    }));
+    if(catalog)base.tasks=catalog.tasks;
+    return base;
   })};
 }
