@@ -554,7 +554,12 @@ class DatasetUploads:
     def pause(self, user, args):
         # Stop without deleting partial payload. Do not hold the writer lock
         # while stopping the unit: its worker may itself own that lock.
-        session = self.load(user, args['uploadId'])
+        try:
+            session = self.load(user, args['uploadId'])
+        except FileNotFoundError:
+            # begin alone cannot start an upload/verification worker. Portal
+            # permanently fences subsequent transfer I/O after cancel intent.
+            return {'uploadId': args['uploadId'], 'state': 'NOT_STARTED'}
         unit = session.get('workerUnit', 'gpuq-upload-'+self.key(user, args['uploadId'])[:32])
         if 'workerUnit' in session:
             raise ValueError('This upload is controlled by its transfer job')

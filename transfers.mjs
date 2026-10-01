@@ -25,10 +25,21 @@ function access(service,principal,row){
   for(const machine of [row.data.machine,row.data.from].filter(Boolean))authorized(service,user,machine);
 }
 async function sync(service,row,actor='transfer-reconcile'){
-  if(done.has(row.state)||row.data.cancelRequested)return row;
+  if(done.has(row.state))return row;
   const data=row.data;let state=row.state;
   try{
-    if(data.kind==='copy'){
+    if(data.cancelRequested){
+      // Reconcile the ORIGINAL cancellation, not a new execution. An early
+      // CANCELING/UNKNOWN receipt must eventually become confirmed terminal.
+      if(data.kind==='copy'){
+        const result=await service.bridge(data.machine,'transfers.cancel',{id:row.id,userId:row.owner_id});
+        if(result.id!==row.id||!states.has(result.state))throw Error('Cancel receipt mismatch');
+        data.result=result;state=['CANCELED','SUCCEEDED'].includes(result.state)?result.state:result.state==='UNKNOWN'?'UNKNOWN':'CANCELING';
+      }else if(data.kind==='upload'){
+        const result=await service.bridge(data.machine,'datasets.upload.pause',{uploadId:data.uploadId||row.client_key,userId:row.owner_id,hostAdmin:false});
+        data.result=result;state=result.state==='READY'?'SUCCEEDED':'CANCELED';
+      }else state='CANCELED';
+    }else if(data.kind==='copy'){
       const result=await service.bridge(data.machine,'transfers.status',{id:row.id,userId:row.owner_id});
       if(result.id!==row.id||!states.has(result.state))throw Error('Node receipt mismatch');
       data.result=result;state=result.state;
