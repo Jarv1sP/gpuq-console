@@ -176,8 +176,6 @@ async function secret(label='Password'){
 async function main(){
   ({options,positionals,training}=parseCLIOptions(args));
   if(options.help||!positionals.length){console.log(help);return;}
-  if(options.description!==undefined&&positionals[0]!=='run')fail('--description is only valid for run');
-  if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0]))fail('--display-name is only valid for profile or register');
   if(['from','to','ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync')fail('--from, --to, --ref, --target-project and --dry-run are only valid for sync');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
   if(options.interval!==undefined&&positionals[0]!=='watch')fail('--interval is only valid for watch');
@@ -210,6 +208,8 @@ async function main(){
   if(options.release&&!/^[a-f0-9]{64}$/.test(options.release))fail('Use --release FULL_64_CHARACTER_HASH');
   if(options.job&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.job))fail('Use --job JOB_UUID from gpuctl jobs');
   const explicitSession=options['session-file']||process.env.GPUQ_SESSION_FILE||process.env.AMAX_SESSION_FILE;
+  if(options.description!==undefined&&positionals[0]!=='run')fail('--description is only valid for run');
+  if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0]))fail('--display-name is only valid for profile or register');
   let sessionFile=explicitSession||join(homedir(),'.config','gpuq-console','session.json');
   // Keep one cache: a previous installation continues using its existing file.
   if(!explicitSession){try{await lstat(sessionFile);}catch(e){if(e.code!=='ENOENT')throw e;const legacy=join(homedir(),'.config','amax-demo','session.json');try{await lstat(legacy);sessionFile=legacy;}catch(old){if(old.code!=='ENOENT')throw old;}}}
