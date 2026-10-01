@@ -56,6 +56,12 @@ class InstallerBoundary(unittest.TestCase):
             plan=node_runtime.runtime_plan(profile)
             self.assertEqual(dict(plan)['sandbox-runner.py'],expected)
             self.assertEqual('job-resources.py' in dict(plan),profile=='ray-p0')
+            self.assertIn('gpu-devices.py',dict(plan))
+            self.assertLess([name for name,_ in plan].index('gpu-devices.py'),[name for name,_ in plan].index('sandbox-runner.py'))
+            _,payloads=node_runtime.preflight(ROOT/'deploy',profile)
+            del payloads['gpu-devices.py']
+            with self.assertRaisesRegex(SystemExit,'gpu-devices.py'):
+                node_runtime.validate_dependencies(payloads)
 
     def test_explicit_configuration_targets_current_uid_then_checks_live_limits(self):
         run, namespace = self.run_preflight(configure=True)
