@@ -38,6 +38,7 @@ gpuctl use MACHINE_ID
 - 我的工作台：选机器、创建项目、开发终端、发布和提交训练。
 - 算力总览：逐卡占用和采集时间；未知或过期不代表空闲。
 - 数据集：个人上传、数据终端、固定版本与准备进度。
+- 传输任务（需新版）：固定数据集后台复制、核对进度、终止和恢复。
 - 协作区：公告、交流和任务留言。
 - 维护申请：需要系统权限的特殊操作；普通开发和训练无需审批。
 
@@ -193,7 +194,7 @@ exit
 
 `wget` 需节点已安装；续传也需要源站支持。终端连续无输入 1 小时或累计 6 小时会结束，不是无限运行的后台下载队列。下载完成并核对来源校验值，必要时在数据终端解压，结束自己的所有数据终端后，用 `gpuctl data publish my-data --name my-data` 发布，等 `READY` 再训练。
 
-下载回自己电脑是另一条路径：项目文件／训练结果可以 `pull`，当前没有整份已发布数据集的一键下载入口；不要把 `pull --job` 当作数据集下载。
+下载回自己电脑是另一条路径：项目文件／训练结果可以 `pull`，旧后台没有整份已发布数据集的一键下载入口；传输任务新版提供下面的目录下载。不要把 `pull --job` 当作数据集下载。
 
 ### 上传目录（支持续传）
 
@@ -256,7 +257,34 @@ gpuctl run -g 1 --data DATASET_ID@VERSION -- python train.py --data /data2/DATAS
 
 自己的上传已在本机 `READY` 时不必重复准备；「已登记」「准备中」或「未知」不等于就绪。`--` 前的 `--data` 是平台挂载声明，后面的参数由自己的程序处理，路径以平台返回值为准。训练数据只读，缓存和预处理输出写 `/outputs`。
 
-网页和 CLI 都经过平台服务器中转，不是你到 GPU 服务器的高速直连。数百 GB／TB 数据先约定实验室内网或外接硬盘导入。单份清单最多 500,000 条且不超过 64 MiB，空间还受节点和账号限制；平台副本不是备份。
+本机上传／下载经过平台服务器中转，不是你到 GPU 服务器的高速直连。数百 GB／TB 本机数据先约定实验室内网或外接硬盘导入。单份清单最多 500,000 条且不超过 64 MiB，空间还受节点和账号限制；平台副本不是备份。
+
+### 持续传输（需传输任务新版）
+
+只有门户、节点和客户端已升级时才能使用；LAN copy 还需管理员启用节点间接口。没有「传输任务」入口就继续使用上面的旧命令，不代表功能已上线。下面的 VERSION 用完整 64 位版本替换。
+
+```sh
+gpuctl transfer upload ./my-data --name my-data
+gpuctl transfer download DATASET_ID@VERSION ./new-download
+gpuctl transfer list
+```
+
+上传和下载重复同一命令可续传，但电脑离线不能继续提供或接收文件。下载到新目录，不覆盖已有目录；全量 SHA256 通过才完成。网页「数据集」上传进入传输列表。
+
+```sh
+gpuctl transfer copy DATASET_ID@VERSION --from SOURCE --to TARGET --name my-data --detach
+gpuctl transfer status TRANSFER_UUID
+gpuctl transfer watch TRANSFER_UUID
+```
+
+服务器间 copy 在 LAN 后台执行，不占 GPU，关电脑仍继续；只复制固定数据集版本，不迁移训练或环境。`WAITING_CLIENT` 等待本机，`VERIFYING` 校验，`UNKNOWN` 未确认，不会自动换机或重跑。复制请求丢失时用打印的原 `--key` 重试；只在确认停止为 FAILED / PAUSED 时用 `gpuctl transfer resume TRANSFER_UUID` 恢复原任务。
+
+```sh
+# 仅在确定放弃这一项传输时执行，终止后不可恢复；保留断点供检查
+gpuctl transfer cancel TRANSFER_UUID
+```
+
+训练通过 `run` 已经持续运行，不靠 tmux；网页交互终端仍有时限。此更新不提供后台 URL 下载队列或任意长 CPU 脚本。旧 push、单文件 pull、sync git/code 保持原行为。
 
 ## 日志与结果 {#results}
 

@@ -44,4 +44,6 @@ test('guide covers merged workflow changes while keeping completion, permissions
   assert.match(chapters.get('queue'),/退出码 75/);assert.match(chapters.get('troubleshooting'),/不立即执行，也不给你 root/);
   assert.match(chapters.get('data'),/当前没有后台 URL 下载按钮/);assert.match(chapters.get('data'),/没有整份已发布数据集的一键下载入口/);
   assert.match(chapters.get('data'),/连续无输入 1 小时或累计 6 小时/);
+  for(const token of ['传输任务新版','transfer upload','transfer download','transfer copy','transfer cancel','WAITING_CLIENT'])assert.ok(chapters.get('data').includes(token),token);
+  assert.match(chapters.get('data'),/不代表功能已上线/);assert.match(chapters.get('data'),/终止后不可恢复/);
 });
