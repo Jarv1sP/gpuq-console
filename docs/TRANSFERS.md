@@ -39,6 +39,8 @@ gpuctl transfer resume 传输UUID
 
 `cancel` 是永久终止：最终为 `CANCELED`，不能再 `resume`。保留文件供检查，不代表可以恢复这个已终止任务。只想暂时断开本机传输就关客户端，不要 cancel；LAN 传输可以直接让它在后台跑。
 
+未完成文件仍占用原上传配额和空间。确认不要时，可用原 `gpuctl data upload-discard UPLOAD_ID --machine 目标机器` 清理未完成上传；本机上传的 UPLOAD_ID 在 status 回执中，LAN copy 的 UPLOAD_ID 就是传输 UUID。此操作会删除未完成数据，不能清理 READY 版本，不要跟着正常步骤一起执行。
+
 `WAITING_CLIENT`：等待本机提供/接收文件，不是后台还在下载。`VERIFYING`：后台校验/发布。`UNKNOWN`：原节点未确认，不会自动换机器、重跑或扩散传输。
 
 CLI copy 会先打印重试键；首次请求结果丢失时，重复原命令并加 `--key 原重试键`。不要新建一项来猜原任务是否启动。下载保留 `目标.gpuq-partial-UUID` 和相邻的完成回执，校验通过才改名；不要修改这些断点文件。正常中断自动释放客户端锁，若进程被强杀留下 `*.gpuq-client-lock`，确认文件里 PID 对应的旧客户端已停止后，只移除这个锁再续传。
