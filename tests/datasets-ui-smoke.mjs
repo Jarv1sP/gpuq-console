@@ -136,7 +136,9 @@ try {
   await guide.waitForLoadState('domcontentloaded');
   await guide.locator('.guide-card[href="/guide/data"]').click();
   assert.equal(new URL(guide.url()).pathname, '/guide/data');
-  assert.match(await guide.locator('body').textContent(), /上传自己的数据/);
+  assert.equal(await guide.getByRole('heading', {level: 1}).textContent(), '数据集');
+  assert.equal(await guide.locator('nav[aria-label="指南章节"] a[aria-current="page"]').getAttribute('href'), '/guide/data');
+  assert.ok((await guide.locator('.guide-prose pre code').allTextContents()).some(block => block.includes('gpuctl data upload ')), 'Dataset guide includes actionable upload instructions');
   await guide.close();
   await capture(member, 'datasets-member-registered.png');
 

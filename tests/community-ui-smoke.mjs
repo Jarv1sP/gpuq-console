@@ -50,7 +50,10 @@ try{
   const loaded=async()=>{await page.waitForFunction(()=>!document.querySelector('#community-status').textContent.startsWith('正在'));};
   const snapshot=async name=>{await page.evaluate(()=>{scrollTo(0,0);document.querySelector('#toast')?.classList.remove('visible');});await page.waitForTimeout(250);await page.screenshot({path:join(screenshots,name+'.png')});};
   await page.goto(origin+'/#community');await login('alice');await loaded();
-  const guide=await page.request.get(origin+'/guide/community');assert.equal(guide.status(),200);assert.match(guide.headers()['content-type'],/^text\/html/);assert.match(await guide.text(),/聊天约定不会自动改变配额/);
+  const guide=await page.request.get(origin+'/guide/community');assert.equal(guide.status(),200);assert.match(guide.headers()['content-type'],/^text\/html/);
+  const guideHTML=await guide.text();
+  assert.match(guideHTML,/协作区只有“帖子”和“聊天”两个入口/);
+  assert.match(guideHTML,/不会自动改变配额、队列或取消任务/,'the guide must preserve the collaboration boundary without depending on its introductory wording');
   assert.deepEqual(await page.locator('[data-community-tab]').evaluateAll(nodes=>nodes.map(node=>node.dataset.communityTab)),['posts','chat']);
   assert.equal(await page.locator('#community-create').isVisible(),true,'members can post from the unified list');
   await page.locator('#community-create').click();assert.equal(await page.locator('#community-compose-form [name=kind] option[value=announcement]').count(),0);await page.locator('.community-composer [data-compose-close]').first().click();
