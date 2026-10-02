@@ -1,0 +1,133 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,writeFile,rm,readFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {randomUUID} from 'node:crypto';
+import {PortalService} from '../portal-service.mjs';
+import {MACHINES} from '../dist/model.js';
+import {transferCall} from '../transfers.mjs';
+const hash='a'.repeat(64),info={state:'READY',manifestBytes:100,manifestSha256:hash,totalBytes:30,entries:2};
+async function fixture(t){
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-transfer-api-')),bootstrap=join(dir,'bootstrap'),password='Fixture-Transfer-API-2026!';await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
+  const calls=[],nodes=new Map();let lost=false;
+  const bridge=async(machine,op,args)=>{calls.push({machine,op,args});
+    if(op==='transfers.source.prepare')return {id:args.id,token:'x'.repeat(43),...info};
+    if(op==='transfers.start'){nodes.set(args.id,{id:args.id,state:'RUNNING',bytes:0,totalBytes:30});if(lost){lost=false;throw Error('lost accepted response');}return nodes.get(args.id);}
+    if(op==='transfers.status')return nodes.get(args.id)||{id:args.id,state:'UNKNOWN'};
+    if(op==='transfers.cancel'){nodes.set(args.id,{id:args.id,state:'CANCELED'});return nodes.get(args.id);}
+    if(op==='datasets.upload.begin')return {uploadId:args.key,state:'RECEIVING_MANIFEST',manifestOffset:0,totalBytes:30};
+    if(op==='datasets.upload.status')return {uploadId:args.uploadId,state:'UPLOADING',totalBytes:30,remainingBytes:10};
+    if(op==='datasets.upload.pause')return {uploadId:args.uploadId,state:'FAILED'};
+    if(op==='datasets.snapshot.info')return info;
+    return {offset:args.offset??0,data:''};
+  };
+  let service=await PortalService.open(join(dir,'db'),bootstrap,undefined,bridge);t.after(async()=>{service.close();await rm(dir,{recursive:true,force:true});});
+  const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'alice',password})).result;
+  await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:1,limits:{[MACHINES[0].id]:1,[MACHINES[1].id]:1}});let login=await service.login('alice',password);
+  return {calls,nodes,member,admin,get service(){return service;},call:async(op,args)=>(await service.invoke(login.token,op,args)).result,lose:()=>{lost=true;},restart:async()=>{service.close();service=await PortalService.open(join(dir,'db'),bootstrap,undefined,bridge);login=await service.login('alice',password);}};
+}
+function copy(){return {key:randomUUID(),kind:'copy',from:MACHINES[0].id,machine:MACHINES[1].id,dataset:'shared',version:hash,name:'copied'};}
+function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};}
+async function promptly(promise){let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Global control queue was blocked by transfer I/O')),1000);})]);}finally{clearTimeout(timer);}}
+test('persistent LAN reservation survives lost reply and Portal restart, never starts from status/reconcile',async t=>{
+  const f=await fixture(t),args=copy();f.lose();const unknown=await f.call('transfers.create',args);assert.equal(unknown.state,'UNKNOWN');assert.equal(JSON.stringify(unknown).includes('x'.repeat(43)),false);assert.equal(f.service.store.jobs.length,0);
+  await f.restart();assert.equal((await f.call('transfers.list',{})).transfers[0].id,unknown.id);
+  assert.equal(f.service.transferSnapshotByKey(f.member.id,args.key).id,unknown.id);
+  assert.equal(f.service.transferSnapshotByKey('another-owner',args.key),null);
+  assert.equal(f.service.transferSnapshotByKey(f.member.id,'invalid'),null);
+  assert.equal(f.service.transferSnapshotByKey(f.member.id,randomUUID()),null);
+  assert.equal(JSON.stringify(f.service.transferSnapshotByKey(f.member.id,args.key)).includes('x'.repeat(43)),false);
+  const calls=f.calls.filter(c=>c.op==='transfers.start').length;await f.service.reconcileTransfers();const result=await f.call('transfers.status',{id:unknown.id});assert.equal(result.state,'RUNNING');assert.equal(f.calls.filter(c=>c.op==='transfers.start').length,calls);
+  const retry=await f.call('transfers.create',args);assert.equal(retry.id,unknown.id);assert.equal(f.nodes.size,1);assert.equal(f.calls.filter(c=>c.op==='transfers.source.prepare').length,1);
+  await assert.rejects(f.call('transfers.create',{...args,name:'other'}),e=>e.status===409);assert.ok(f.calls.every(c=>c.args.userId===f.member.id));
+});
+test('owner and BOTH machine permissions, immutable references and typed operations are authoritative',async t=>{
+  const f=await fixture(t),args=copy();for(const extra of [{from:MACHINES[2].id},{machine:MACHINES[2].id},{version:'latest'},{userId:'builtin-admin'},{hostAdmin:true},{argv:['bash']},{timeoutSec:0}])await assert.rejects(f.call('transfers.create',{...args,...extra}));assert.equal(f.calls.length,0);
+  const row=await f.call('transfers.create',args);await assert.rejects(f.service.invoke(f.admin.token,'transfers.status',{id:row.id}),e=>e.status===404);
+  await assert.rejects(f.call('transfers.io',{id:row.id,action:'get',path:'/etc/passwd',offset:0}));
+  await f.call('transfers.cancel',{id:row.id});assert.equal((await f.call('transfers.create',args)).state,'CANCELED');await assert.rejects(f.call('transfers.resume',{id:row.id}));
+});
+test('client upload uses existing verified chunks and cancel preserves partial without discard/restart',async t=>{
+  const f=await fixture(t),args={key:randomUUID(),kind:'upload',machine:MACHINES[0].id,name:'mine',manifest:{manifestBytes:100,manifestSha256:hash,totalBytes:30,entries:2}};
+  const row=await f.call('transfers.create',args);assert.equal(row.state,'WAITING_CLIENT');assert.ok(row.uploadId);await f.call('transfers.io',{id:row.id,action:'chunk',path:'train.bin',offset:0,data:'YQ=='});
+  const last=f.calls.at(-1);assert.equal(last.op,'datasets.upload.chunk');assert.equal(last.args.uploadId,row.uploadId);assert.equal(last.args.hostAdmin,false);
+  await f.call('transfers.cancel',{id:row.id});await assert.rejects(f.call('transfers.io',{id:row.id,action:'chunk',path:'train.bin',offset:1,data:'YQ=='}));assert.equal(f.calls.some(c=>c.op==='datasets.upload.discard'),false);assert.equal((await f.call('transfers.status',{id:row.id})).state,'CANCELED');
+});
+test('download reads only its pinned snapshot; completion is explicitly client-reported',async t=>{
+  const f=await fixture(t),row=await f.call('transfers.create',{key:randomUUID(),kind:'download',machine:MACHINES[0].id,dataset:'shared',version:hash});
+  await assert.rejects(f.call('transfers.io',{id:row.id,action:'get',path:'../other',offset:0}));await assert.rejects(f.call('transfers.io',{id:row.id,action:'get',path:'train.bin',offset:0,dataset:'other'}));
+  await f.call('transfers.io',{id:row.id,action:'get',path:'train.bin',offset:0});assert.equal(f.calls.at(-1).args.version,hash);
+  await assert.rejects(f.call('transfers.progress',{id:row.id,bytes:29,complete:true}));const completed=await f.call('transfers.progress',{id:row.id,bytes:30,complete:true});assert.equal(completed.state,'SUCCEEDED');assert.equal(completed.result.clientReported,true);
+});
+test('an initially uncertain cancel is reconciled to terminal without enabling I/O or starting again',async t=>{
+  const f=await fixture(t),row=await f.call('transfers.create',copy()),original=f.service.bridge;let first=true;
+  f.service.bridge=async(machine,op,args)=>{if(op==='transfers.cancel'&&first){first=false;throw Error('cancel reply lost');}return original(machine,op,args);};
+  assert.equal((await f.call('transfers.cancel',{id:row.id})).state,'UNKNOWN');const starts=f.calls.filter(c=>c.op==='transfers.start').length;
+  await assert.rejects(f.call('transfers.io',{id:row.id,action:'get',path:'x',offset:0}));
+  assert.equal((await f.call('transfers.status',{id:row.id})).state,'CANCELED');assert.equal(f.calls.filter(c=>c.op==='transfers.start').length,starts);
+});
+test('new tasks remain visible after history grows; descending pagination has no duplicates',async t=>{
+  const f=await fixture(t),ids=[];
+  for(let i=0;i<8;i++){const row=await f.call('transfers.create',{key:randomUUID(),kind:'download',machine:MACHINES[0].id,dataset:'shared',version:hash});ids.push(row.id);await f.call('transfers.progress',{id:row.id,bytes:30,complete:true});}
+  const first=await f.call('transfers.list',{limit:5}),second=await f.call('transfers.list',{limit:5,cursor:first.nextCursor});
+  assert.equal(first.transfers[0].id,ids.at(-1));assert.deepEqual([...first.transfers,...second.transfers].map(r=>r.id),ids.reverse());assert.equal(second.nextCursor,null);
+});
+test('new transfer runtime is included in deployment, client and demo/Portal assets',async()=>{
+  const manifest=JSON.parse(await readFile(new URL('../deploy/node-runtime.json',import.meta.url))),docker=await readFile(new URL('../deploy/Dockerfile',import.meta.url),'utf8');for(const name of ['transfer-jobs.py','transfer-peer.py'])assert.ok(manifest.dependencies.includes(name));assert.ok(manifest.units.includes('gpuq-transfer-peer.service'));assert.match(docker,/COPY[^\n]*transfers\.mjs/);
+  for(const file of ['portal-server.mjs','server.mjs'])assert.match(await readFile(new URL('../'+file,import.meta.url),'utf8'),/transfer-upload\.js/);
+  const ui=await readFile(new URL('../dist/transfers-ui.js',import.meta.url),'utf8');assert.ok(ui.includes('name="transfer-machine"'));assert.ok(!ui.includes('name="machine"'),'new page must not collide with existing training controls');
+});
+test('slow source preparation never blocks account control; revoked policy fences target dispatch',async t=>{
+  const f=await fixture(t),started=deferred(),gate=deferred(),bridge=f.service.bridge;
+  f.service.bridge=async(...args)=>{if(args[1]==='transfers.source.prepare'){started.resolve();await gate.promise;}return bridge(...args);};
+  const pending=f.call('transfers.create',copy()),rejected=assert.rejects(pending,e=>e.status===403);await started.promise;
+  try{await promptly(f.service.invoke(f.admin.token,'policy.save',{userId:f.member.id,policyVersion:1,total:0,limits:{}}));}finally{gate.resolve();}
+  await rejected;assert.equal(f.calls.some(c=>c.op==='transfers.start'),false);
+});
+test('cancel intent fences a delayed source result and survives restart without launching',async t=>{
+  const f=await fixture(t),started=deferred(),gate=deferred(),bridge=f.service.bridge;
+  f.service.bridge=async(...args)=>{if(args[1]==='transfers.source.prepare'){started.resolve();await gate.promise;}return bridge(...args);};
+  const args=copy(),pending=f.call('transfers.create',args),rejected=assert.rejects(pending,e=>e.status===409);await started.promise;
+  const id=f.service.db.prepare('SELECT id FROM transfers WHERE client_key=?').get(args.key).id;
+  const cancel=f.call('transfers.cancel',{id});assert.equal(f.service.transferSnapshot(f.member.id,id).cancelRequested,true);
+  await promptly(f.service.invoke(f.admin.token,'state'));gate.resolve();await rejected;assert.equal((await cancel).state,'CANCELED');
+  await f.restart();assert.equal((await f.call('transfers.create',args)).state,'CANCELED');assert.equal(f.calls.some(c=>c.op==='transfers.start'),false);
+});
+test('internal exported callers share row serialization, bounded admission and safe owner snapshots',async t=>{
+  const f=await fixture(t),started=deferred(),gate=deferred(),bridge=f.service.bridge,args=copy(),principal={userId:f.member.id,username:f.member.username,role:'member'};
+  let active=0,maxActive=0;
+  f.service.bridge=async(...request)=>{active++;maxActive=Math.max(maxActive,active);try{if(request[1]==='transfers.source.prepare'){started.resolve();await gate.promise;}return await bridge(...request);}finally{active--;}};
+  const first=transferCall(f.service,principal,'transfers.create',args);await started.promise;
+  const second=f.service.transferCall(principal,'transfers.create',args);
+  await assert.rejects(f.service.transferCall(principal,'transfers.create',copy()),e=>e.status===429);
+  gate.resolve();const [a,b]=await Promise.all([first,second]);assert.equal(a.id,b.id);assert.equal(maxActive,1);assert.equal(f.nodes.size,1);
+  const safe=f.service.transferSnapshot(f.member.id,a.id);assert.equal(safe.id,a.id);assert.equal(JSON.stringify(safe).includes('x'.repeat(43)),false);assert.equal(f.service.transferSnapshot('another-owner',a.id),null);
+});
+test('reconciliation waits outside global control queue and serializes with same-row cancellation',async t=>{
+  const f=await fixture(t),row=await f.call('transfers.create',copy()),started=deferred(),gate=deferred(),bridge=f.service.bridge;
+  f.service.bridge=async(...args)=>{if(args[1]==='transfers.status'){started.resolve();await gate.promise;}return bridge(...args);};
+  const reconcile=f.service.reconcileTransfers();await started.promise;const cancel=f.call('transfers.cancel',{id:row.id});
+  try{await promptly(f.service.invoke(f.admin.token,'state'));}finally{gate.resolve();}await reconcile;
+  assert.equal((await cancel).state,'CANCELED');assert.equal(f.service.transferSnapshot(f.member.id,row.id).state,'CANCELED');
+});
+test('capability projection exposes only live enabled protocol and authorized machine IDs',async t=>{
+  const f=await fixture(t);f.service.bridge=async()=>({enabled:true,sourceReady:true,protocol:'lan-transfer-v1',sources:[MACHINES[0].id,MACHINES[0].id,MACHINES[1].id,MACHINES[2].id,'unknown'],address:'private-ip',token:'private-token'});
+  const value=await f.call('transfers.capabilities',{machine:MACHINES[1].id});assert.deepEqual(value,{machine:MACHINES[1].id,enabled:true,sourceReady:true,sources:[MACHINES[0].id],protocol:'lan-transfer-v1'});
+  await assert.rejects(f.call('transfers.capabilities',{machine:MACHINES[2].id}),e=>e.status===403);
+  f.service.bridge=async()=>{throw Error('old node private error');};assert.deepEqual(await f.call('transfers.capabilities',{machine:MACHINES[1].id}),{machine:MACHINES[1].id,enabled:false,sourceReady:false,sources:[],protocol:'lan-transfer-v1'});
+});
+test('policy change during capability query rejects delayed data instead of reporting an empty capability',async t=>{
+  const f=await fixture(t),started=deferred(),gate=deferred();f.service.bridge=async()=>{started.resolve();await gate.promise;return {enabled:true,sourceReady:true,sources:[],protocol:'lan-transfer-v1'};};
+  const pending=f.call('transfers.capabilities',{machine:MACHINES[0].id}),rejected=assert.rejects(pending,e=>e.status===401);await started.promise;
+  try{await promptly(f.service.invoke(f.admin.token,'users.enabled',{userId:f.member.id,enabled:false}));}finally{gate.resolve();}await rejected;
+});
+test('copy and download map logical names through the owner-scoped local receipt before fixing identity',async t=>{
+  const f=await fixture(t),seen=[];f.service.datasetPhysicalReference=(owner,machine,ref)=>{seen.push({owner,machine,ref});return {...ref,dataset:'actual-replica'};};
+  const args=copy(),row=await f.call('transfers.create',args);assert.equal(row.reference.dataset,'actual-replica');assert.equal(f.calls.find(c=>c.op==='transfers.source.prepare').args.reference.dataset,'actual-replica');
+  const download=await f.call('transfers.create',{key:randomUUID(),kind:'download',machine:MACHINES[1].id,dataset:'logical',version:hash});assert.equal(f.calls.at(-1).args.dataset,'actual-replica');assert.deepEqual(seen.map(r=>r.machine),[args.from,MACHINES[1].id]);assert.ok(seen.every(r=>r.owner===f.member.id));
+  f.service.datasetPhysicalReference=()=>{throw Error('a pinned download must never remap');};
+  await f.call('transfers.io',{id:download.id,action:'get',path:'train.bin',offset:0});assert.equal(f.calls.at(-1).args.dataset,'actual-replica');
+  f.service.datasetPhysicalReference=(_owner,_machine,ref)=>({...ref,dataset:'different-replica'});await assert.rejects(f.call('transfers.create',args),e=>e.status===409);
+  f.service.datasetPhysicalReference=(_owner,_machine,ref)=>({...ref,version:'b'.repeat(64)});await assert.rejects(f.call('transfers.create',copy()),e=>e.status===409);
+});

@@ -200,6 +200,7 @@ try {
   assert.equal(await member.locator('#train-form [name=datasets]').inputValue(), 'sample@' + version);
   assert.equal(await member.locator('#train-form').evaluate(form => form.closest('details').open), true);
   await member.locator('#train-form [name=command]').fill('python train.py --dataset /data2/sample');
+  await member.locator('#train-form [name=task-description]').fill('核对固定数据版本后的训练');
   await capture(member, 'datasets-mobile-training-form.png');
   const trainLayout = await member.evaluate(() => ({width: innerWidth, scroll: document.documentElement.scrollWidth}));
   assert.ok(trainLayout.scroll <= trainLayout.width + 1, `390px training page overflows: ${JSON.stringify(trainLayout)}`);
@@ -207,7 +208,10 @@ try {
   await member.locator('#train-form [type=submit]').click();
   const response = await submitted;
   assert.equal(response.status(), 200, await response.text());
+  assert.equal(response.request().postDataJSON().args.prepareData, true, 'Task metadata must not remove preparation-before-training');
+  assert.equal(response.request().postDataJSON().args.description, '核对固定数据版本后的训练');
   assert.equal(service.store.jobs.length, 1);
+  assert.equal(service.store.jobs[0].description, '核对固定数据版本后的训练');
   assert.equal(service.store.jobs[0].machine, 'gpu-1');
   assert.deepEqual(service.store.jobs[0].spec.datasets, [ref]);
   assert.deepEqual(service.store.jobs[0].spec.argv, ['/bin/bash', '-c', 'python train.py --dataset /data2/sample']);

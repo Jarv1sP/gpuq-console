@@ -8,16 +8,21 @@ import {realpathSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {uploadLocalDataset,workspaceDataPath,putWorkspaceData} from './client-data-upload.mjs';
 import {runManualSync} from './client-snapshot-sync.mjs';
+import {uploadTransfer,downloadTransfer,transferText} from './client-transfers.mjs';
 import {runCloudImport} from './client-cloud-import.mjs';
 import {runCommunityCommand,formatCommunityResult,communityJSON,communityHelp} from './community-cli.mjs';
 import {watchJob} from './job-watch.mjs';
 import {progressText} from './dist/job-progress.js';
 import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
+import {displayName,taskDescription} from './dist/task-metadata.js';
 
-// Approval text is member-controlled. Never let terminal controls or bidi
-// formatting hide/reorder the frozen script (including older stored requests).
+// Member metadata is untrusted even after submission validators improve: old
+// stored records and older servers can still contain C1/ANSI or bidi controls.
 const maintenanceVisible=(value,multiline=false)=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>multiline&&c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
 const maintenanceJSON=value=>JSON.stringify(value).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>c.split('').map(unit=>'\\u'+unit.charCodeAt(0).toString(16).padStart(4,'0')).join(''));
+const terminalMetadata=(value,key='')=>typeof value==='string'?maintenanceVisible(value,['description','body'].includes(key)):
+  Array.isArray(value)?value.map(item=>terminalMetadata(item,key)):
+  value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([name,item])=>[maintenanceVisible(name),terminalMetadata(item,name)])):value;
 
 const help=`GPUQ — 个人终端与 GPUQ 训练
 
@@ -25,6 +30,8 @@ ${communityHelp}
 
 日常命令（一次安装后直接使用 gpuctl）：
 gpuctl login                     Sign in; remembers your account and service
+gpuctl profile --display-name "张三"  Set your public submitter name
+gpuctl queue [--machine SERVER]   Read authorized machines' task names and descriptions
 gpuctl use gpu-1                  Select an approved server from your inventory
 gpuctl project create my-project Create/select a project (shared base Python packages)
 gpuctl project create clean --env-mode isolated  New venv without base site-packages
@@ -46,6 +53,10 @@ gpuctl sync code --from SOURCE --to TARGET --project SOURCE --target-project NEW
 gpuctl sync data NAME@VERSION --from SOURCE --to TARGET --name NAME --dry-run
 gpuctl run -g 2 -- python train.py
 gpuctl jobs / logs JOB / cancel JOB
+gpuctl transfer upload LOCAL_DIR --name NAME [--machine SERVER]
+gpuctl transfer download NAME@VERSION NEW_LOCAL_DIR [--machine SERVER]
+gpuctl transfer copy NAME@VERSION --from SOURCE --to TARGET --name NAME --detach
+gpuctl transfer list / status ID / watch ID / cancel ID / resume ID
 gpuctl watch JOB                 Watch progress / completion / failure over SSH
 gpuctl notify JOB on|off|status  Opt into your configured Telegram destination
 gpuctl diagnostics JOB --json    Persistent bounded worker logs, exits and resource counters
@@ -98,6 +109,7 @@ gpuctl user role USERNAME admin|member
 gpuctl grant USERNAME --machine gpu-1=2 --total 2
 gpuctl grant USERNAME --full       All GPU resources; NOT platform admin
 gpuctl run gpu-1 --cards 1 --name train -- python train.py
+gpuctl run -g 1 --name baseline --description "验证新数据集" -- python train.py
 gpuctl jobs
 gpuctl logs JOB_ID
 gpuctl cancel JOB_ID
@@ -141,7 +153,7 @@ const CLI_OPTIONS=new Map([
   ['pin','flag'],...['kind','status','title','body','body-file','announcement-type'].map(key=>[key,'value']),
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown'].map(key=>[key,'flag']),
-  ...['url','session-file','total','cards','as','role','name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
+  ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
 
@@ -175,9 +187,10 @@ async function secret(label='Password'){
 async function main(){
   ({options,positionals,training}=parseCLIOptions(args));
   if(options.help||!positionals.length){console.log(help);return;}
-  if(['from','to','ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync')fail('--from, --to, --ref, --target-project and --dry-run are only valid for sync');
+  const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
+  if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy)fail('--from/--to are for sync or transfer copy; ref/target-project/dry-run are only for sync');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
-  if(options.interval!==undefined&&positionals[0]!=='watch')fail('--interval is only valid for watch');
+  if(options.interval!==undefined&&positionals[0]!=='watch'&&!transferWatch)fail('--interval is only valid for watch');
   if(positionals[0]==='watch'){
     if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file','interval'].includes(k)))fail('Usage: watch JOB [--interval 1..60] [--json]');
     if(options.interval!==undefined&&(!Number.isFinite(Number(options.interval))||Number(options.interval)<1||Number(options.interval)>60))fail('--interval must be 1–60 seconds');
@@ -186,9 +199,9 @@ async function main(){
   if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
-  if(['cwd','timeout'].some(key=>Object.hasOwn(options,key))&&!['exec','maintenance'].includes(positionals[0])||options.detach&&positionals[0]!=='exec')fail('--cwd/--timeout are for exec or maintenance; --detach is only for exec');
+  if(options.cwd!==undefined&&!['exec','maintenance'].includes(positionals[0])||options.timeout!==undefined&&!['exec','maintenance'].includes(positionals[0])&&!transferCopy||options.detach&&positionals[0]!=='exec'&&!transferCopy)fail('--cwd is for exec/maintenance; timeout also supports transfer copy; detach is for exec or transfer copy');
   if(['reason','script-file','preview-token','parent','ack-unknown'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='maintenance')fail('Maintenance options are only valid for maintenance');
-  if(['revision','cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0]))fail('--revision/--cursor/--limit are for community or maintenance');
+  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0])&&!transferList)fail('--revision is for community/maintenance; cursor/limit also support transfer list');
   const customScheduling=['rank','yield','restart-policy','checkpointable','mode'].some(k=>Object.hasOwn(options,k));
   if(customScheduling&&(positionals[0]!=='run'||options.priority))fail('Custom scheduling is only valid for run and cannot mix with --priority presets');
   const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
@@ -208,6 +221,8 @@ async function main(){
   if(options.release&&!/^[a-f0-9]{64}$/.test(options.release))fail('Use --release FULL_64_CHARACTER_HASH');
   if(options.job&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.job))fail('Use --job JOB_UUID from gpuctl jobs');
   const explicitSession=options['session-file']||process.env.GPUQ_SESSION_FILE||process.env.AMAX_SESSION_FILE;
+  if(options.description!==undefined&&positionals[0]!=='run')fail('--description is only valid for run');
+  if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0]))fail('--display-name is only valid for profile or register');
   let sessionFile=explicitSession||join(homedir(),'.config','gpuq-console','session.json');
   // Keep one cache: a previous installation continues using its existing file.
   if(!explicitSession){try{await lstat(sessionFile);}catch(e){if(e.code!=='ENOENT')throw e;const legacy=join(homedir(),'.config','amax-demo','session.json');try{await lstat(legacy);sessionFile=legacy;}catch(old){if(old.code!=='ENOENT')throw old;}}}
@@ -232,7 +247,7 @@ async function main(){
     let credentials;
     if(options['credentials-stdin']){let value='';for await(const chunk of process.stdin){value+=chunk;if(value.length>1024)fail('Registration input too long');}try{credentials=JSON.parse(value);}catch{fail('Expected JSON {invite,password} on stdin');}if(!credentials||typeof credentials!=='object'||Array.isArray(credentials)||Object.keys(credentials).some(key=>!['invite','password'].includes(key)))fail('Expected only invite and password');}
     else credentials={invite:await secret('Invite code'),password:await secret()};
-    result=await post('register',{username:positionals[1],...credentials});mode={demo:false,gpuqConnected:false};
+    result=await post('register',{username:positionals[1],...credentials,...(options['display-name']?{name:displayName(options['display-name'])}:{})});mode={demo:false,gpuqConnected:false};
   }else if(command==='login'){
     if(positionals.length===1&&process.stdin.isTTY){const rl=createInterface({input:process.stdin,output:process.stdout});positionals.push(await rl.question('用户名: '));rl.close();}
     if(positionals.length!==2)fail('Usage: login USERNAME');
@@ -272,10 +287,46 @@ async function main(){
     mode={demo:state.demo,gpuqConnected:state.gpuqConnected===true};
     const find=username=>{const user=state.users.find(u=>u.username===username);if(!user)fail('Unknown or unauthorized username');return user.id;};
     const own=()=>session.principal.role==='admin'&&options.as?find(options.as):session.principal.userId;
-    if(command==='community'){
+    if(command==='transfer'){
+      const action=positionals[1],common=['machines','datasets','url','session-file','json','key'],specific={upload:['name'],download:[],copy:['from','to','name','timeout','detach'],list:['cursor','limit'],status:[],watch:['interval'],cancel:[],resume:[]}[action];
+      if(!specific||training.length||options.datasets.length||Object.keys(options).some(k=>!common.includes(k)&&!specific.includes(k)))fail('Usage: transfer upload|download|copy|list|status|watch|cancel|resume');
+      const progress=(phase,v)=>process.stderr.write(`${phase} · ${v.transferId||v.path||''}${v.bytes!==undefined?' · '+v.bytes+' / '+(v.totalBytes??'?')+' bytes':''}\n`);
+      if(action==='upload'){
+        if(positionals.length!==3)fail('Usage: transfer upload LOCAL_DIR --name NAME');
+        result=await uploadTransfer(call,{machine:defaultMachine(),name:options.name,userId:session.principal.userId,directory:positionals[2],key:options.key,progress});
+      }else if(action==='download'||action==='copy'){
+        if(positionals.length!==(action==='download'?4:3))fail('Usage: transfer download NAME@VERSION NEW_DIR | transfer copy NAME@VERSION --from SOURCE --to TARGET --name NAME');
+        const [dataset,version,...extra]=positionals[2].split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Select NAME@FULL_VERSION_HASH');
+        if(action==='download')result=await downloadTransfer(call,{machine:defaultMachine(),dataset,version,destination:positionals[3],key:options.key,progress});
+        else{
+          if(options.machines.length||!options.from||!options.to)fail('copy requires --from and --to; no auto placement');
+          const key=options.key||randomUUID();process.stderr.write('重试键：'+key+'（未确认时重复原命令并加 --key，不要换键）\n');
+          result=(await call('transfers.create',{key,kind:'copy',from:machineName(options.from),machine:machineName(options.to),name:options.name,dataset,version,...(options.timeout?{timeoutSec:Number(options.timeout)}:{})})).result;
+          if(!options.detach){while(!['SUCCEEDED','FAILED','PAUSED','CANCELED','UNKNOWN'].includes(result.state)){process.stderr.write(transferText(result)+'\n');await new Promise(r=>setTimeout(r,2000));result=(await call('transfers.status',{id:result.id})).result;}}
+        }
+      }else if(action==='list'){
+        if(positionals.length!==2)fail('Usage: transfer list');result=(await call('transfers.list',{...(options.cursor?{cursor:Number(options.cursor)}:{}),...(options.limit?{limit:Number(options.limit)}:{})})).result;
+      }else{
+        if(positionals.length!==3)fail('Usage: transfer '+action+' ID');
+        if(action==='watch'){
+          const interval=Number(options.interval??2);if(!Number.isFinite(interval)||interval<1||interval>60)fail('Watch interval must be 1–60 seconds');
+          do{result=(await call('transfers.status',{id:positionals[2]})).result;process.stderr.write(transferText(result)+'\n');if(['SUCCEEDED','FAILED','PAUSED','CANCELED','UNKNOWN','WAITING_CLIENT'].includes(result.state))break;await new Promise(r=>setTimeout(r,interval*1000));}while(true);
+        }else result=(await call('transfers.'+action,{id:positionals[2]})).result;
+      }
+    }else if(command==='community'){
       result=await runCommunityCommand({positionals,options,training,call});
     }else if(command==='sync'){
       result=await runManualSync(call,{options,positionals,training,machines:state.machines,userId:session.principal.userId});
+    }else if(command==='queue'){
+      if(positionals.length!==1||training.length||options.datasets.length||options.machines.length>1||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: queue [--machine SERVER]');
+      if(state.taskMetadata?.version!==1)fail('当前后台尚未支持公开任务信息，请升级门户。');
+      const selected=options.machines.length?machineName(options.machines[0]):null;
+      if(selected&&!state.machines.some(m=>m.id===selected))fail('这台机器未授权或不存在');
+      result={stale:state.gpuq?.stale!==false,hosts:(state.gpuq?.hosts||[]).filter(h=>!selected||h.id===selected).map(h=>({machine:h.id,reachable:h.reachable,checkedAt:state.gpuq.checkedAt,tasks:h.tasks||[]}))};
+    }else if(command==='profile'){
+      if(positionals.length!==1||training.length||options.datasets.length||options.machines.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','display-name'].includes(k)))fail('Usage: profile [--display-name NAME]');
+      if(options['display-name']){if(state.taskMetadata?.version!==1)fail('当前后台尚未支持姓名设置，请升级门户。');result=(await call('profile.update',{name:displayName(options['display-name'])})).result;}
+      else result=state.users.find(u=>u.id===session.principal.userId);
     }else if(command==='use'&&positionals.length===2){
       if(!state.machines.some(m=>m.id===positionals[1]))fail('这台机器未授权或不存在');session.machine=positionals[1];await saveSession();result={selected:session.machine,project:selectedProject(session.machine)};
     }else if(command==='maintenance'){
@@ -450,7 +501,8 @@ async function main(){
       const indices=options.gpu?.split(',').map(n=>/^\d+$/.test(n)?Number(n):NaN),cards=Number(options.cards||indices?.length||1);
       const elastic=elasticKeys.some(k=>Object.hasOwn(options,k))?elasticAllocation({minCards:Number(options['min-cards']),globalBatch:Number(options['global-batch']),microBatch:Number(options['micro-batch']),autoExpand:options['auto-expand']===true},cards,scheduling).elastic:null;
       const placement=placementKeys.some(k=>Object.hasOwn(options,k))?gpuPlacement({gpuIndices:indices,shared:options.share===true,...(options['vram-mib']?{vramMiB:Number(options['vram-mib'])}:{}),hami:options.hami===true,...(options['sm-percent']?{smPercent:Number(options['sm-percent'])}:{})},cards,elastic,scheduling,options.priority):null;
-      result=(await call('jobs.submit',{machine:positionals[1],cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{})})).result;
+      if(options.description!==undefined&&state.taskMetadata?.version!==1)fail('当前后台尚未支持任务描述；不会忽略你填写的内容。');
+      result=(await call('jobs.submit',{machine:positionals[1],cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');
@@ -531,9 +583,15 @@ async function main(){
     }else if(command==='release'&&positionals.length===2)result=(await call('release',{userId:own(),jobId:positionals[1]})).result;
     else fail('Unknown command. Use --help.');
   }
-  if(options.json){console.log((command==='maintenance'?maintenanceJSON:command==='community'?communityJSON:JSON.stringify)({ok:true,...mode,data:result}));return;}
+  // JSON escapes are lossless for callers while also safe to print in a terminal.
+  if(options.json){console.log((command==='community'?communityJSON:maintenanceJSON)({ok:true,...mode,data:result}));return;}
+  // Explicit log/host-command streams remain raw; historical maintenance and
+  // community have their own safe formatters. Never alter arguments or storage.
+  if(!['logs','exec','maintenance','community'].includes(command))result=terminalMetadata(result);
   if(command==='community'){console.log(formatCommunityResult(result));return;}
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
+  if(command==='profile'){console.log(`姓名／显示名：${result.name}\n登录用户名：${result.username}`);return;}
+  if(command==='queue'){if(result.stale)console.log('监控已过期；以下是平台记录与上次核对状态，不代表空闲。');for(const h of result.hosts){console.log(`${h.machine} · ${h.reachable?'可采集':'监控不可用'} · ${h.checkedAt||'暂无采集时间'}`);for(const t of h.tasks)console.log(`  ${t.id} · ${t.state} · ${t.name}\n  提交者：${t.submitter?.name||'未知'}${t.submitter?.username&&t.submitter.username!==t.submitter.name?'（'+t.submitter.username+'）':''}\n  描述：${t.description||'未填写描述'}\n  分配 GPU：${t.assignedGpuIndices?.join(', ')||'—'}`);if(!h.tasks.length)console.log('  暂无任务记录。');}return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='sync'){
     if(result.state==='PREVIEW')console.log(`同步预览：${result.source?.commit||result.source?.machine||'Git'} → ${result.target}\n${result.project||result.name} · ${result.bytes} B · ${result.entries} 项\n未写入目标。去掉 --dry-run 执行，重复原命令可续传。`);
@@ -552,6 +610,11 @@ async function main(){
     return;
   }
   if(command==='run'){console.log(`已提交 ${result.id}\n${result.machine} · ${allocationLabel(result)} GPU · ${result.state}\n查看日志：gpuctl logs ${result.id}`);return;}
+  if(command==='transfer'){
+    if(result.transfers){console.log(result.transfers.map(transferText).join('\n')||'暂无传输。');if(result.nextCursor)console.log('下一页：gpuctl transfer list --cursor '+result.nextCursor);}
+    else if(result.transferId)console.log(`传输 ${result.transferId} · ${result.state}\n${result.downloaded||result.dataset+'@'+result.version}`);
+    else console.log(transferText(result));return;
+  }
   if(command==='exec'){
     if(result.stdout)process.stdout.write(result.stdout);
     if(result.stderr)process.stderr.write(result.stderr);
@@ -583,5 +646,5 @@ async function main(){
   console.log(JSON.stringify(result,null,2));
 }
 if(process.argv[1]&&fileURLToPath(import.meta.url)===realpathSync(process.argv[1])){
-  main().catch(error=>{console.error(wantsJSON?JSON.stringify({ok:false,error:error.message}):`Error: ${error.message}`);process.exitCode=1;});
+  main().catch(error=>{console.error(wantsJSON?maintenanceJSON({ok:false,error:error.message}):`Error: ${maintenanceVisible(error.message)}`);process.exitCode=1;});
 }

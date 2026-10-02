@@ -658,7 +658,14 @@ def terminal_op(operation,args):
             if result.get('error'):raise ValueError(result['error'])
             return result
 
+def transfers():
+    spec=importlib.util.spec_from_file_location('gpuq_transfer_jobs',HERE/'transfer-jobs.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module.TransferJobs(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+
+
 def process(operation,args):
+    if operation.startswith('transfers.'):return transfers().process(operation,args)
     if operation in ('diagnostics','watch'):
         if not isinstance(args,dict) or set(args)!={'job'}:raise ValueError('Invalid diagnostic operation fields')
         job=args['job'];validate_job(job,readonly=True)
@@ -793,6 +800,11 @@ def process(operation,args):
 
 if __name__=='__main__':
     os.umask(0o077)
+    if len(sys.argv)==4 and sys.argv[1]=='--transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3])))
+    if len(sys.argv)==2 and sys.argv[1]=='--transfer-peer-daemon':
+        spec=importlib.util.spec_from_file_location('gpuq_transfer_peer',HERE/'transfer-peer.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        module.serve(sys.modules[__name__],transfers());sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))

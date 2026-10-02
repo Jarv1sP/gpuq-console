@@ -6,7 +6,7 @@ const project=/^[a-z][a-z0-9_-]{0,47}$/;
 const dataset=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 const fields={begin:['manifestBytes','manifestSha256','totalBytes','entries','source'],manifest:['offset','data'],seal:[],status:['path'],chunk:['path','offset','data'],finish:[]};
-export async function snapshotSyncCall(service,principal,user,operation,args,authorizedMachine){
+export async function snapshotSyncCall(service,principal,user,operation,args,authorizedMachine,{physical=false}={}){
   const match=/^(projects|datasets)\.(snapshot|sync)\.([a-z]+)$/.exec(operation);if(!match)return undefined;
   const [,kind,mode,action]=match;authorizedMachine(args.machine);
   const reference=kind==='projects'?['project',...(mode==='snapshot'?['release']:['key'])]:['dataset','version'];
@@ -32,8 +32,9 @@ export async function snapshotSyncCall(service,principal,user,operation,args,aut
     }
   }
   const {machine,...request}=args;
-  if(mode==='snapshot'&&kind==='datasets'&&service.datasetPhysicalReference){
+  if(!physical&&mode==='snapshot'&&kind==='datasets'&&service.datasetPhysicalReference){
     const mapped=service.datasetPhysicalReference(user.id,machine,{dataset:request.dataset,version:request.version});
+    if(!mapped||typeof mapped.dataset!=='string'||!dataset.test(mapped.dataset)||mapped.version!==request.version)fail('数据集逻辑引用尚未确认。',409);
     request.dataset=mapped.dataset;
   }
   const result=await service.bridge(machine,operation,{...request,userId:user.id,...(mode==='snapshot'&&kind==='datasets'?{hostAdmin:principal.role==='admin'}:{})});

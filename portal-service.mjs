@@ -9,6 +9,7 @@ import {MACHINES,validUsername} from './dist/model.js';
 import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 import {installMaintenance,maintenanceCall} from './maintenance.mjs';
 import {installJobNotifications} from './job-notifications.mjs';
+import {installTransfers,transferCall} from './transfers.mjs';
 import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
@@ -48,6 +49,7 @@ export class PortalService extends DemoService{
     for(const user of service.store.users)user.policyVersion??=0;
     maintainTaskNotes(service);
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installJobNotifications(service,notificationConfig);installMaintenance(service);
+    installTransfers(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -161,7 +163,7 @@ export class PortalService extends DemoService{
   register(args){return this.enqueue(async()=>{
     const before=structuredClone(this.export());let transaction=false;
     try{
-      if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>!['username','password','invite','client'].includes(k)))throw Error('注册参数无效；角色由邀请码决定。');
+      if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>!['username','password','invite','client','name'].includes(k)))throw Error('注册参数无效；角色由邀请码决定。');
       const {password,invite}=args,username=String(args.username??'').trim();
       if(!validUsername(username))throw Error('用户名须为 2–24 位，使用汉字或小写字母开头，可含数字、下划线和短横线。');
       if(typeof password!=='string'||password.length<8||password.length>128)throw Error('密码需为 8–128 个字符。');
@@ -175,7 +177,7 @@ export class PortalService extends DemoService{
       this.db.exec('BEGIN IMMEDIATE');transaction=true;
       const update=this.db.prepare('UPDATE invites SET uses=uses+1 WHERE role=? AND digest=? AND enabled=1 AND (max_uses IS NULL OR uses<max_uses)').run(code.role,digest);
       if(update.changes!==1)throw Error('邀请码已失效，请联系管理员。');
-      const user=this.store.create(username,username);this.store.setRole(user.id,'member');this.store.users.find(u=>u.id===user.id).policyVersion=0;this.credentials.set(username,record);
+      const user=this.store.create(args.name??username,username);this.store.setRole(user.id,'member');this.store.users.find(u=>u.id===user.id).policyVersion=0;this.credentials.set(username,record);
       this.save();this.audit(username,'register',code.role,'ok');this.db.exec('COMMIT');transaction=false;
       return {registered:true,username,role:code.role};
     }catch(e){if(transaction)this.db.exec('ROLLBACK');this.restore(before);this.audit('guest','register',null,'denied');throw e;}
@@ -200,6 +202,10 @@ export class PortalService extends DemoService{
   invoke(token,operation,args={}){
     if(operation==='terminal.exchange')return this.terminalExchange(token,args);
     if(['datasets.catalog','datasets.capacity','datasets.list','datasets.status','datasets.prepare'].includes(operation))return this.datasetRead(token,operation,args);
+    if(typeof operation==='string'&&operation.startsWith('transfers.')){
+      const principal=this.principal(token);
+      return transferCall(this,principal,operation,args,()=>this.principal(token)).then(result=>({result,principal:{username:principal.username,role:principal.role,userId:principal.userId}}));
+    }
     // Remote cloud/DNS requests do not hold the account and scheduler queue.
     if(typeof operation==='string'&&operation.startsWith('cloud.')&&!operation.startsWith('cloud.auth.'))return this.cloudExchange(token,operation,args);
     return this.enqueue(async()=>{
@@ -220,7 +226,8 @@ export class PortalService extends DemoService{
       if(operation==='users.delete'){
         if(principal.role!=='admin')throw Object.assign(Error('此操作需要管理员权限。'),{status:403});
         const user=this.store.get(args.userId);
-        if(user.id===principal.userId||user.enabled||this.store.jobs.some(job=>job.userId===user.id&&!['SUCCEEDED','FAILED','CANCELED'].includes(job.state)))throw Error('只能删除已暂停且没有待完成任务的非当前账号。历史任务和文件保留。');
+    if(user.id===principal.userId||user.enabled||this.store.jobs.some(job=>job.userId===user.id&&!['SUCCEEDED','FAILED','CANCELED'].includes(job.state)))throw Error('只能删除已暂停且没有待完成任务的非当前账号。历史任务和文件保留。');
+    if(this.db.prepare("SELECT 1 FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','FAILED','PAUSED','CANCELED') LIMIT 1").get(user.id))throw Error('请先确认这个账号的传输已结束，再删除账号。');
         if(user.role==='admin'&&!this.store.users.some(u=>u.id!==user.id&&u.enabled&&u.role==='admin'))throw Error('不能删除最后一名可登录管理员。');
         this.db.exec('BEGIN IMMEDIATE');
         try{this.invalidate(user.username);this.credentials.delete(user.username);this.store.users=this.store.users.filter(u=>u.id!==user.id);this.save();this.audit(actor,operation,user.id,'ok');this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}
@@ -252,11 +259,11 @@ export class PortalService extends DemoService{
   async refreshGPUQ(){this.gpuq=await readGPUQStatus(this.statusPath);}
   state(principal){
     const state=super.state(principal);
-    const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);
+    const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits,{jobs:this.store.jobs,users:this.store.users});
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
-    return {...state,maintenance:{version:1,retired:true,readOnly:true},jobs:state.jobs.map(j=>({...publicJob(j),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
+    return {...state,taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},jobs:state.jobs.map(j=>({...publicJob(j,this.store.users),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
-      execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};
+      execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
-  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);this.db.close();}
+  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);this.db.close();}
 }
