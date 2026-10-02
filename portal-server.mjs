@@ -22,6 +22,7 @@ files['/datasets-ui.js']='datasets-ui.js';
 files['/datasets.css']='datasets.css';
 files['/dataset-upload.js']='dataset-upload.js';
 files['/data-workspace.js']='data-workspace.js';
+files['/cloud-import-ui.js']='cloud-import-ui.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
 files['/maintenance-ui.js']='maintenance-ui.js';files['/maintenance.css']='maintenance.css';
 files['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';

@@ -19,7 +19,7 @@ function page(value,max=100){if(value===undefined)return Math.min(50,max);if(!Nu
 function revision(value){if(!Number.isSafeInteger(value)||value<1)fail('须提供当前内容 revision。');return value;}
 function choice(value,values,label){if(!values.includes(value))fail(`${label}无效。`);return value;}
 function author(service,userId){const user=service.store.users.find(u=>u.id===userId);return {id:userId,name:user?.name||'已删除账号',username:user?.username||null};}
-function editable(row,actor){return row.author_id===actor.userId&&(row.kind!=='announcement'||actor.role==='admin');}
+function editable(row,actor){return row.kind==='announcement'?actor.role==='admin':row.author_id===actor.userId;}
 function deletable(row,actor){return actor.role==='admin'||editable(row,actor);}
 function view(service,row,actor,type){
   if(!row)return null;
@@ -213,16 +213,22 @@ function dispatch(service,actor,operation,args,now){
       return db.prepare('INSERT INTO community_notes(author_id,job_id,body,created_at,updated_at) VALUES(?,?,?,?,?)').run(actor.userId,jobId,body,now,now).lastInsertRowid;
     });
   }
-  if(operation==='community.info'){fields(args,[]);return {enabled:true,version:1,limits:{...COMMUNITY_LIMITS,titleBytes:COMMUNITY_LIMITS.title*3,postBodyBytes:COMMUNITY_LIMITS.postBody*3,commentBodyBytes:COMMUNITY_LIMITS.commentBody*3,chatBodyBytes:COMMUNITY_LIMITS.chatBody*3,postsPerMinute:3,commentsPerMinute:10,chatPerMinute:20,writesPerMinute:60},capabilities:['posts','announcements','comments','chat','idempotency-30d','revision-check','task-notes-v1']};}
+  if(operation==='community.info'){fields(args,[]);return {enabled:true,version:2,limits:{...COMMUNITY_LIMITS,titleBytes:COMMUNITY_LIMITS.title*3,postBodyBytes:COMMUNITY_LIMITS.postBody*3,commentBodyBytes:COMMUNITY_LIMITS.commentBody*3,chatBodyBytes:COMMUNITY_LIMITS.chatBody*3,postsPerMinute:3,commentsPerMinute:10,chatPerMinute:20,writesPerMinute:60},capabilities:['posts','announcements','comments','chat','idempotency-30d','announcement-publish-v1','revision-check','task-notes-v1']};}
   if(operation==='community.posts.list')return listPosts(service,actor,args);
   if(operation==='community.posts.get'){fields(args,['id']);return {post:view(service,required(service,'post',args.id),actor,'post')};}
   if(operation==='community.comments.list')return listComments(service,actor,args);
   if(operation==='community.chat.list')return listChat(service,actor,args,now);
   if(operation==='community.posts.create'){
-    fields(args,['key','kind','title','body','announcementType']);const kind=choice(args.kind,KINDS,'帖子类型');
-    if(kind==='announcement')admin(actor);else if(args.announcementType!==undefined)fail('只有公告可设置公告类型。');
+    fields(args,['key','kind','title','body','announcementType','pinned']);const kind=choice(args.kind,KINDS,'帖子类型');
+    if(kind==='announcement')admin(actor);else if(args.announcementType!==undefined||args.pinned!==undefined)fail('只有管理员公告可设置公告类型或置顶。');
+    if(args.pinned!==undefined&&typeof args.pinned!=='boolean')fail('pinned 必须为布尔值。');
     const title=text(args.title,COMMUNITY_LIMITS.title,'标题'),body=text(args.body,COMMUNITY_LIMITS.postBody,'正文'),announcementType=kind==='announcement'?choice(args.announcementType??'notice',ANNOUNCEMENTS,'公告类型'):null;
-    return create(service,actor,operation,args,'post',{kind,title,body,announcementType},now,()=>db.prepare('INSERT INTO community_posts(author_id,kind,title,body,announcement_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run(actor.userId,kind,title,body,announcementType,now,now).lastInsertRowid);
+    // Omit false from the digest so retries from older clients keep matching.
+    const canonical={kind,title,body,announcementType,...(args.pinned===true?{pinned:true}:{})};
+    return create(service,actor,operation,args,'post',canonical,now,()=>{
+      if(args.pinned===true&&db.prepare('SELECT count(*) AS n FROM community_posts WHERE pinned=1').get().n>=20)fail('最多置顶 20 条公告。',409);
+      return db.prepare('INSERT INTO community_posts(author_id,kind,title,body,announcement_type,pinned,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(actor.userId,kind,title,body,announcementType,Number(args.pinned===true),now,now).lastInsertRowid;
+    });
   }
   if(operation==='community.comments.create'){
     fields(args,['key','postId','body']);const postId=id(args.postId),body=text(args.body,COMMUNITY_LIMITS.commentBody,'评论');

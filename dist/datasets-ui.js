@@ -1,5 +1,6 @@
 import {scanBrowserDirectory,uploadBrowserDataset} from './dataset-upload.js';
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
+import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={READY:'本机已就绪',REGISTERED:'待准备',STAGING:'未完成，可续传',PREPARING:'准备中',FAILED:'准备失败'};
 export function datasetRows(catalog){
@@ -11,14 +12,16 @@ export function datasetsUI(store,toast){
   const current=expected=>expected===account();
   const human=bytes=>(Number(bytes||0)/1024**3).toFixed(2)+' GiB';
   const workspace=dataWorkspaceUI(store,section,toast,{onBusyChange:controls,refreshCatalog:load});
+  const cloud=cloudImportUI(store,section,toast);
   function controls(){
     const enabled=store.production&&store.principal&&(store.data?.machines||[]).length,blocked=busy||uploadBusy||discardBusy||workspace.busy;
     for(const selector of ['#datasets-refresh','[name=dataset-machine]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||blocked;}
     for(const selector of ['#dataset-upload-start','[name=dataset-name]','[name=dataset-directory]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||uploadBusy||discardBusy||workspace.busy||active?.state==='DISCARDING';}
     const pause=section.querySelector('#dataset-upload-pause'),discard=section.querySelector('#dataset-upload-discard');if(pause)pause.hidden=!uploadBusy;if(discard)discard.hidden=uploadBusy||!active?.uploadId||['READY','DISCARDED'].includes(active.state);
     workspace.controls();
+    cloud.controls();
   }
-  store.onAuthChange?.(()=>{workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
+  store.onAuthChange?.(()=>{cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
   async function load(){
     if(busy||uploadBusy||discardBusy||!store.principal)return;
     const machine=section.querySelector('[name=dataset-machine]')?.value;if(!machine)return;
@@ -71,6 +74,7 @@ export function datasetsUI(store,toast){
     if(next!==identity){workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;identity=next;generation++;busy=false;machineIds='';
       section.innerHTML=`<p class="muted datasets-intro">上传自己的数据，或准备已分配的数据。就绪后，训练只读访问本机副本。</p>
         <div class="terminal-controls datasets-controls"><label>服务器<select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新数据集</button></div>
+        ${cloudImportHTML(store.principal?.role==='admin')}
         ${dataWorkspaceHTML()}
         <form id="dataset-upload-form" aria-labelledby="dataset-upload-heading">
           <div class="dataset-upload-heading"><h3 id="dataset-upload-heading">直接发布本机目录</h3><p class="muted">数据已在电脑上整理好？选择目录后直接上传并校验，省去终端整理步骤。</p></div>

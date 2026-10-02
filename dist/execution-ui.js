@@ -256,7 +256,6 @@ export function executionUI(store,refresh,toast){
       <details id="host-maintenance" class="host-maintenance" hidden><summary>主机运维 · 管理员 ROOT</summary><p>目标：<strong id="host-terminal-target"></strong>。不进入当前项目，可修改整机并绕过 GPU 配额；仅用于系统维护。</p><div class="terminal-controls"><button id="terminal-root-open" class="button danger">新建 ROOT 运维终端</button><button id="terminal-root-reconnect" class="button">重连 ROOT 会话</button></div></details>
       <details class="execution-panel" id="workspace-files"><summary>代码与任务输出 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">代码草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传到代码草稿</button></div><pre id="workspace-result" class="file-result" aria-live="polite">仅操作当前服务器、当前工作区。大目录请使用 CLI。</pre></details>
       <details class="execution-panel"><summary>提交训练</summary><form id="train-form">
-        ${schedulingFields(store.principal?.role==='admin')}${elasticFields()}${placementFields()}
         <select name="machine" hidden aria-label="训练服务器"></select>
         <div class="train-grid"><label>卡数<input name="cards" type="number" min="1" max="1" value="1" required></label><label>每卡最低显存 / GiB<input name="memory" type="number" min="0" max="128" value="0" step="0.5"></label><label>任务名称<input name="name" maxlength="64" value="train" required></label></div>
         <label>任务描述（同机器授权成员可见）<textarea name="task-description" rows="3" maxlength="2000" placeholder="例如：验证新数据集上的 baseline，预计运行约两小时。不要填写密码或令牌。"></textarea></label>
@@ -265,7 +264,7 @@ export function executionUI(store,refresh,toast){
         <label>训练命令<textarea name="command" rows="3" required spellcheck="false">python train.py</textarea></label>
         <p class="muted">在所选服务器自动分配 GPU，不会换机。项目训练的 /workspace 只读，环境在 /opt/project-env，请把结果写入 /outputs；个人工作区的 Python 在 /opt/conda。</p>
         <label>数据集版本（可选）<textarea name="datasets" rows="2" spellcheck="false" placeholder="从左侧「数据集」选择；多个版本用空格分隔"></textarea></label>
-        <p class="muted">只挂载你获授权且本机就绪的数据，路径 /data2/数据集名称。准备数据不占 GPU。</p><button type="submit" class="button primary">提交训练</button>
+        <p class="muted">只挂载你获授权且本机就绪的数据，路径 /data2/数据集名称。准备数据不占 GPU。</p><div class="training-advanced">${schedulingFields(store.principal?.role==='admin')}${elasticFields()}${placementFields()}</div><button type="submit" class="button primary">提交训练</button>
       </form></details>
       <div class="section-kicker"><span>我的训练任务</span><span id="my-job-count"></span></div><p class="muted">排队、运行及待核对任务均占用个人额度；取消确认后释放。<a href="/guide/user" target="_blank" rel="noopener">用户手册</a></p><div id="my-job-table"></div>`;
       notifyContext();
