@@ -9,6 +9,7 @@ import {MACHINES,validUsername} from './dist/model.js';
 import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 import {installMaintenance,maintenanceCall} from './maintenance.mjs';
 import {installJobNotifications} from './job-notifications.mjs';
+import {installTransfers,transferCall} from './transfers.mjs';
 import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
@@ -47,6 +48,7 @@ export class PortalService extends DemoService{
     for(const user of service.store.users)user.policyVersion??=0;
     maintainTaskNotes(service);
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installJobNotifications(service,notificationConfig);installMaintenance(service);
+    installTransfers(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -181,6 +183,10 @@ export class PortalService extends DemoService{
   }
   invoke(token,operation,args={}){
     if(operation==='terminal.exchange')return this.terminalExchange(token,args);
+    if(typeof operation==='string'&&operation.startsWith('transfers.')){
+      const principal=this.principal(token);
+      return transferCall(this,principal,operation,args,()=>this.principal(token)).then(result=>({result,principal:{username:principal.username,role:principal.role,userId:principal.userId}}));
+    }
     // Remote cloud/DNS requests do not hold the account and scheduler queue.
     if(typeof operation==='string'&&operation.startsWith('cloud.')&&!operation.startsWith('cloud.auth.'))return this.cloudExchange(token,operation,args);
     return this.enqueue(async()=>{
@@ -201,6 +207,7 @@ export class PortalService extends DemoService{
       if(operation==='users.delete'){
         if(principal.role!=='admin')throw Object.assign(Error('此操作需要管理员权限。'),{status:403});
         const user=this.store.get(args.userId);
+        if(this.db.prepare("SELECT 1 FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','FAILED','PAUSED','CANCELED') LIMIT 1").get(user.id))throw Error('请先确认这个账号的传输已结束，再删除账号。');
         if(user.id===principal.userId||user.enabled||usage(this.store.jobs,user.id)>0)throw Error('只能删除已暂停且没有待完成任务的非当前账号。历史任务和文件保留。');
         if(user.role==='admin'&&!this.store.users.some(u=>u.id!==user.id&&u.enabled&&u.role==='admin'))throw Error('不能删除最后一名可登录管理员。');
         this.db.exec('BEGIN IMMEDIATE');
@@ -237,7 +244,7 @@ export class PortalService extends DemoService{
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
     return {...state,taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},jobs:state.jobs.map(j=>({...publicJob(j,this.store.users),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
-      execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};
+      execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
-  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);this.db.close();}
+  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);this.db.close();}
 }

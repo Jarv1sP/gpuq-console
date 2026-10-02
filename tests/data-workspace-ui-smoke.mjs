@@ -12,7 +12,7 @@ try{
   await page.route('**/*',async route=>{
     const url=new URL(route.request().url());if(url.origin!==origin){unexpected.push(url.href);return route.abort();}
     if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><main><h1>数据集</h1><section id="page-datasets"></section></main>'});
-    if(['/datasets-ui.js','/data-workspace.js','/dataset-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
+    if(['/datasets-ui.js','/data-workspace.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
     if(url.pathname==='/favicon.ico')return route.fulfill({status:204});unexpected.push(url.href);return route.abort();
   });
   await page.goto(origin);
