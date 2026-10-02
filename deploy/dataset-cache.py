@@ -23,7 +23,7 @@ and trusted transport are assumptions, not protection from a compromised root.
 
 Local root-only CLI (JSON request on stdin, JSON result on stdout):
   sudo python3 dataset-cache.py --config /etc/gpuq/datasets.json
-Config: {"root":"/data2/datasets", "sources":{"tiny":"/data2/imports/tiny"},
+Config: {"root":"/data2/datasets", "mountPoint":"/data2", "sources":{"tiny":"/data2/imports/tiny"},
          "reserveBytes":10737418240, "serviceUid":1000, "serviceGid":1000}
 Requests use {"op":"register_source", "dataset":"tiny", "sourceId":"tiny",
               "owners":["demo-user-1"]}, then {"op":"materialize", ...}.
@@ -348,8 +348,17 @@ def _modes(path, readonly):
         visit(fd)
 
 
-def _data2_mount():
-    """Runtime guard: never fall back to a plain /data2 directory on the root disk."""
+def _storage_mount(mount_point, cache_root):
+    """Verify an exact local data mount and reject nested cache mounts.
+
+    A configurable cache root must not weaken the /data2 safety properties:
+    failed mounts cannot redirect writes to /, and a child mount cannot silently
+    put only some of a replica or workspace on another filesystem.
+    """
+    point, cache = _absolute(mount_point), _absolute(cache_root)
+    if (str(point) != os.fspath(mount_point) or str(cache) != os.fspath(cache_root)
+            or point == Path("/") or point not in cache.parents):
+        raise CacheError("cache root must be below its exact required data mount")
     rows = []
     for line in Path("/proc/self/mountinfo").read_text().splitlines():
         left, separator, right = line.partition(" - ")
@@ -359,25 +368,33 @@ def _data2_mount():
         target = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), before[4])
         rows.append(dict(id=before[0], device=before[2], target=target, filesystem=after[0],
                          options=before[5].split(",") + after[2].split(",")))
-    data = [r for r in rows if r["target"] == "/data2"]
+    data = [r for r in rows if r["target"] == str(point)]
     root = [r for r in rows if r["target"] == "/"]
     local = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "bcachefs"}
     if (not data or not root or data[-1]["device"] == root[-1]["device"]
             or data[-1]["filesystem"] not in local or "ro" in data[-1]["options"]
             or "rw" not in data[-1]["options"]):
-        raise CacheError("/data2 must be an exact writable local non-root filesystem mount")
-    cache = Path("/data2/datasets")
-    if any(Path(r["target"]) == cache or cache in Path(r["target"]).parents for r in rows):
+        raise CacheError("required data mount must be an exact writable local non-root filesystem mount")
+    if any(Path(r["target"]) != point and (Path(r["target"]) == cache
+               or cache in Path(r["target"]).parents
+               or (point in Path(r["target"]).parents and Path(r["target"]) in cache.parents))
+           for r in rows):
         raise CacheError("dataset cache submounts are not supported")
-    with _directory(Path("/data2")) as fd:
+    with _directory(point) as fd:
         device = os.fstat(fd).st_dev
     if str(os.major(device)) + ":" + str(os.minor(device)) != data[-1]["device"]:
-        raise CacheError("/data2 mount changed during inspection")
+        raise CacheError("data mount changed during inspection")
     return data[-1]["id"], data[-1]["device"], device
 
 
+def _data2_mount():
+    """Compatibility entry point for the original default storage layout."""
+    return _storage_mount("/data2", "/data2/datasets")
+
+
 class DatasetCache:
-    def __init__(self, root="/data2/datasets", *, sources=None, reserve_bytes=DEFAULT_RESERVE, lock_timeout=2.0):
+    def __init__(self, root="/data2/datasets", *, sources=None, reserve_bytes=DEFAULT_RESERVE,
+                 lock_timeout=2.0, mount_point=None):
         self.root = _absolute(root)
         if str(self.root) in BROAD or type(reserve_bytes) is not int or reserve_bytes < 0:
             raise CacheError("unsafe cache root or reserve")
@@ -385,7 +402,13 @@ class DatasetCache:
         if not isinstance(lock_timeout, (int, float)) or isinstance(lock_timeout, bool) or not 0 <= lock_timeout <= 60:
             raise CacheError("invalid dataset lock timeout")
         self.lock_timeout = lock_timeout
-        self.mount = _data2_mount() if Path("/data2") in self.root.parents else None
+        # Explicit mountPoint is mandatory for non-/data2 production layouts.
+        # Isolated temporary roots remain available to unprivileged unit tests.
+        self.mount_point = (_absolute(mount_point) if mount_point is not None
+                            else Path("/data2") if Path("/data2") in self.root.parents else None)
+        if mount_point is not None and str(self.mount_point) != os.fspath(mount_point):
+            raise CacheError("required data mount must be an exact absolute path")
+        self.mount = self._current_mount() if self.mount_point is not None else None
         self.sources = dict(sources or {})
         for key, value in self.sources.items():
             _identifier(key)
@@ -397,16 +420,30 @@ class DatasetCache:
                 raise CacheError("unsafe approved source directory")
             self.sources[key] = path
         _mkdir(self.root)
+        with _directory(self.root) as fd:
+            info = os.fstat(fd)
+            if self.mount is not None and info.st_dev != self.mount[2]:
+                raise CacheError("cache no longer resides on the verified data mount")
+            self._root_identity = info.st_dev, info.st_ino
         for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations"):
             _mkdir(self.root / name)
 
+    def _current_mount(self):
+        if self.mount_point is None or (self.mount_point == Path("/data2") and self.root == Path("/data2/datasets")):
+            return _data2_mount()
+        return _storage_mount(self.mount_point, self.root)
+
     @contextlib.contextmanager
     def _lock_file(self, name):
-        if self.mount is not None and _data2_mount() != self.mount:
-            raise CacheError("/data2 mount identity changed; reopen cache after administrator verification")
+        if self.mount is not None and self._current_mount() != self.mount:
+            raise CacheError("data mount identity changed; reopen cache after administrator verification")
         with _directory(self.root) as root, _directory(self.root / Path(name).parent) as parent:
+            if (os.fstat(root).st_dev, os.fstat(root).st_ino) != self._root_identity:
+                raise CacheError("cache directory identity changed; reopen after administrator verification")
             if self.mount is not None and os.fstat(root).st_dev != self.mount[2]:
-                raise CacheError("cache no longer resides on the verified /data2 mount")
+                raise CacheError("cache no longer resides on the verified data mount")
+            if os.fstat(parent).st_dev != os.fstat(root).st_dev:
+                raise CacheError("cache lock directory is on a different filesystem")
             fd = os.open(Path(name).name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
             try:
                 _regular(fd)
@@ -582,6 +619,28 @@ class DatasetCache:
         with self._locked():
             record = self._record(actor, dataset, version)
             return dict(dataset=dataset, version=version, manifest=record["manifest"])
+
+    def capacity(self, actor):
+        """Constant-time filesystem snapshot, not a per-user hard quota.
+
+        No manifests or data trees are scanned. usableBytes subtracts the
+        configured safety reserve only; admission still checks in-flight
+        reservations under its own lock when a transfer actually begins.
+        """
+        self._actor(actor)
+        with self._locked(), _directory(self.root) as fd:
+            info = os.fstatvfs(fd)
+            block = info.f_frsize or info.f_bsize
+            available = max(0, info.f_bavail) * block
+            inodes_known = info.f_files > 0 and 0 <= info.f_favail <= info.f_files
+            return dict(filesystemBytes=info.f_blocks * block,
+                        usedBytes=max(0, info.f_blocks - info.f_bfree) * block,
+                        availableBytes=available, reserveBytes=self.reserve_bytes,
+                        usableBytes=max(0, available - self.reserve_bytes),
+                        totalInodes=info.f_files if inodes_known else None,
+                        availableInodes=info.f_favail if inodes_known else None,
+                        inodeUsageKnown=inodes_known, guarded=self.mount is not None,
+                        scope="filesystem", activeReservationsIncluded=False)
 
     def list_datasets(self, actor):
         """Authorized catalog only; never returns source IDs/paths or other owners."""
@@ -1378,6 +1437,7 @@ class DatasetCache:
             raise CacheError("invalid dataset request")
         definitions = {
             "list": (self.list_datasets, set()),
+            "capacity": (self.capacity, set()),
             "register_source": (self.register_source, {"dataset", "sourceId", "owners"}),
             "register_manifest": (self.register_manifest, {"dataset", "manifest", "owners"}),
             "attach_source": (self.attach_source, {"dataset", "version", "sourceId"}),
@@ -1432,7 +1492,7 @@ def _operator_config(filename):
                 config = json.loads(stream.read(MAX_JSON_BYTES + 1))
         finally:
             os.close(fd)
-    if not isinstance(config, dict) or set(config) - {"root", "sources", "reserveBytes", "serviceUid", "serviceGid"}:
+    if not isinstance(config, dict) or set(config) - {"root", "mountPoint", "sources", "reserveBytes", "serviceUid", "serviceGid"}:
         raise CacheError("invalid administrator dataset config")
     if ("serviceUid" in config) != ("serviceGid" in config):
         raise CacheError("serviceUid and serviceGid must be supplied together")
@@ -1457,7 +1517,8 @@ def main(argv=None):
             os.setgid(config["serviceGid"])
             os.setuid(config["serviceUid"])
         cache = DatasetCache(config.get("root", "/data2/datasets"), sources=config.get("sources", {}),
-                             reserve_bytes=config.get("reserveBytes", DEFAULT_RESERVE))
+                             reserve_bytes=config.get("reserveBytes", DEFAULT_RESERVE),
+                             mount_point=config.get("mountPoint", "/data2"))
         result = cache.dispatch(Principal("local-admin", True), request)
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
         return 0

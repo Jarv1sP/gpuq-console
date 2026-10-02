@@ -132,7 +132,7 @@ test('run selects latest READY release without publishing; exact argv and datase
   const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
   const result=await f.cli(['run','-g','2','--key',JOB,'--data','images@'+OLDER,'--','python','train.py','-g','private','--json']);
   assert.equal(result.code,0,result.stderr);
-  assert.deepEqual(f.calls.at(-1),{operation:'jobs.submit',args:{machine:'gpu-1',cards:2,minVramGiB:0,name:'train',argv:['python','train.py','-g','private','--json'],key:JOB,project:'alpha',release:RELEASE,datasets:[{dataset:'images',version:OLDER}]}});
+  assert.deepEqual(f.calls.at(-1),{operation:'jobs.submit',args:{machine:'gpu-1',cards:2,minVramGiB:0,name:'train',argv:['python','train.py','-g','private','--json'],key:JOB,project:'alpha',release:RELEASE,datasets:[{dataset:'images',version:OLDER}],prepareData:true}});
   assert.equal(f.calls.some(c=>c.operation==='projects.publish'),false);
   assert.equal((await f.cli(['run','--release',OLDER,'--','python','train.py'])).code,0);
   assert.equal(f.calls.at(-1).args.release,OLDER);

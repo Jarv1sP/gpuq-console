@@ -107,10 +107,27 @@ class PinnedHTTPS(http.client.HTTPSConnection):
         raise ImportFailure('NETWORK', 'Download server could not be reached; retry later', 'PAUSED')
 
 
-def open_download(url, offset=0, etag=None, source_kind='https'):
+def checked_headers(value, source_kind):
+    if value is None:return {}
+    if source_kind != 'aliyun' or not isinstance(value, dict) or len(value) > 3:
+        raise ImportFailure('HEADERS', 'Download headers are not approved')
+    result={}
+    for name, content in value.items():
+        if name not in ('User-Agent', 'Referer', 'Origin') or not isinstance(content,str) or not 1 <= len(content) <= 512 or any(ord(c)<32 or ord(c)>126 for c in content):
+            raise ImportFailure('HEADERS', 'Download headers are not approved')
+        if name != 'User-Agent':
+            parsed=urlsplit(content)
+            if parsed.scheme!='https' or parsed.netloc not in ('www.alipan.com','www.aliyundrive.com') or parsed.path not in ('','/') or parsed.query or parsed.fragment:
+                raise ImportFailure('HEADERS', 'Download origin is not approved')
+        result[name]=content
+    return result
+
+
+def open_download(url, offset=0, etag=None, source_kind='https', download_headers=None):
     headers = {'User-Agent': 'GPUQ-DataImport/1.0', 'Accept-Encoding': 'identity'}
     if source_kind == 'aliyun':
         headers['Referer'] = 'https://www.alipan.com/'
+    headers.update(checked_headers(download_headers,source_kind))
     if offset:
         headers['Range'] = 'bytes=' + str(offset) + '-'
         if etag:
@@ -289,6 +306,7 @@ class DataImports:
         source = args.get('sourceKind', 'https')
         if source not in ('https', 'aliyun'):
             raise ImportFailure('SOURCE', 'Unsupported download source')
+        download_headers=checked_headers(args.get('downloadHeaders'),source)
         identity = {name: args.get(name) for name in ('path', 'sha256', 'expectedSha1', 'expectedBytes')}
         identity['sourceKind'] = source
         for field, size in (('sha256', 64), ('expectedSha1', 40)):
@@ -331,6 +349,8 @@ class DataImports:
                 'identity': identity, 'path': identity['path'], 'sourceKind': source,
                 'generation': 0, 'createdAt': time.time(), 'bytes': 0}
             task.update(state='QUEUED', url=args['url'], generation=task['generation']+1, cancelRequested=False)
+            if download_headers:task['downloadHeaders']=download_headers
+            else:task.pop('downloadHeaders',None)
             task.pop('error', None); task.pop('errorCode', None)
             self.save(task)  # durable fence before an ambiguous systemd launch
             try:
@@ -518,7 +538,7 @@ class DataImports:
                 if not (offset and offset == task.get('totalBytes')):
                     if offset and not task.get('etag') and not (task['identity']['sha256'] or task['identity']['expectedSha1']):
                         raise ImportFailure('RESUME', 'Safe resume requires a stable ETag or an expected checksum')
-                    connection, response = open_download(task['url'], offset, task.get('etag'), task['sourceKind'])
+                    connection, response = open_download(task['url'], offset, task.get('etag'), task['sourceKind'], **({'download_headers':task['downloadHeaders']} if task.get('downloadHeaders') else {}))
                     total, etag = self.response_info(task, response, offset)
                     if self.usage(user, key)+total > self.limits['maxUserBytes']:
                         raise ImportFailure('QUOTA', 'Personal data storage limit would be exceeded')
@@ -593,7 +613,7 @@ class DataImports:
 
     def process(self, operation, args):
         allowed = {
-            'datasets.import.start': {'key', 'url', 'path', 'sourceKind', 'sha256', 'expectedSha1', 'expectedBytes'},
+            'datasets.import.start': {'key', 'url', 'path', 'sourceKind', 'sha256', 'expectedSha1', 'expectedBytes', 'downloadHeaders'},
             'datasets.import.status': {'operationId'},
             'datasets.import.cancel': {'operationId'},
             'datasets.import.discard': {'operationId'},

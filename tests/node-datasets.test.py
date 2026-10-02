@@ -1,15 +1,19 @@
 """Dataset/executor boundary regression tests; no GPU, SSH or systemd writes."""
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import json
 import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from storage_test_helpers import local_data_mounts
 
 
 DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
@@ -19,6 +23,9 @@ class NodeDatasets(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
+        self.data_mount = local_data_mounts(self.base)
+        self.data_mount.start()
+        self.addCleanup(self.data_mount.stop)
         for name in ('node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py'):
             shutil.copy2(DEPLOY / name, self.base / name)
         self.source = self.base / 'source'
@@ -112,16 +119,206 @@ class NodeDatasets(unittest.TestCase):
         other = self.call('list', userId='demo-user-2')
         self.assertEqual(other, {'datasets': []})
 
+    def test_internal_mount_alias_changes_name_not_ownership_or_lease(self):
+        self.ready()
+        job=dict(self.job,datasets=[dict(dataset='example',version=self.version,mountAs='logical-data')])
+        self.node.validate_job(job)
+        opened=self.node.dataset_open_mounts(job)
+        try:
+            self.assertEqual(opened[0][1],'/data2/logical-data')
+            fd=os.open('train.txt',os.O_RDONLY,dir_fd=opened[0][0])
+            try:self.assertEqual(os.read(fd,100),b'small immutable training sample\n')
+            finally:os.close(fd)
+        finally:
+            for fd,_ in opened:os.close(fd)
+        with self.assertRaises(PermissionError):self.node.acquire_datasets(dict(job,userId='demo-user-2'))
+        for alias in ('../secret','/etc','',None):
+            with self.subTest(alias=alias),self.assertRaises(ValueError):
+                self.node.dataset_refs(dict(job,datasets=[dict(dataset='example',version=self.version,mountAs=alias)]))
+        with self.assertRaises(ValueError):
+            self.node.dataset_refs(dict(job,datasets=[dict(dataset='example',version=self.version,mountAs='same'),dict(dataset='other',version=self.version,mountAs='same')]))
+
     def test_raw_actor_admin_and_paths_are_rejected(self):
         for extra in ({'actor': {'is_admin': True}}, {'admin': True}, {'path': '/data2'}, {'hostAdmin': 1}):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 self.call('list', **extra)
 
     def test_unready_job_never_calls_gpu(self):
-        with patch.object(self.node, 'gpu') as gpu, self.assertRaisesRegex(ValueError, 'not READY'):
+        with patch.object(self.node, 'gpu') as gpu:
+            result = self.node.process('sync', {'job': self.job})
+        gpu.assert_not_called()
+        self.assertEqual(result['state'], 'FAILED')
+        self.assertTrue(result['notSubmitted'])
+        self.assertEqual(result['failureCode'], 'DATASET_NOT_READY')
+        self.assertFalse((self.node.ROOT / 'jobs' / (self.job['id'] + '.dataset-dispatch-attempted')).exists())
+
+    def test_evicted_after_preparation_is_terminal_and_cannot_submit_on_retry(self):
+        self.ready()
+        self.cache.evict(self.admin, 'example', self.version)
+        with patch.object(self.node, 'gpu') as gpu:
+            first = self.node.process('sync', {'job': self.job})
+            self.ready()
+            self.assertEqual(self.node.process('sync', {'job': self.job}), first)
+            self.assertEqual(self.node.process('cancel', {'job': self.job}), first)
+        gpu.assert_not_called()
+        self.assertTrue(first['notSubmitted'])
+        # Recovery requires a new immutable job identity, not reuse of the
+        # rejected key after the cache happens to become READY again.
+        new_job = dict(self.job, id='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+        with patch.object(self.node, 'gpu', side_effect=[{'job_id': 'new-job'}, {'job': {'state': 'QUEUED'}, 'attempts': []}]) as gpu:
+            self.assertEqual(self.node.process('sync', {'job': new_job})['state'], 'QUEUED')
+        self.assertEqual(gpu.call_args_list[0].args[0], 'submit')
+
+    def test_concurrent_same_job_rejection_is_serialized_by_real_job_flock(self):
+        entered = threading.Event()
+        proceed = threading.Event()
+        original = self.node.acquire_datasets
+
+        def paused(job):
+            entered.set()
+            if not proceed.wait(5):
+                raise AssertionError('test did not release acquisition')
+            return original(job)
+
+        with patch.object(self.node, 'acquire_datasets', side_effect=paused) as acquire, patch.object(self.node, 'gpu') as gpu, ThreadPoolExecutor(max_workers=2) as workers:
+            first = workers.submit(self.node.process, 'sync', {'job': self.job})
+            self.assertTrue(entered.wait(5))
+            second = workers.submit(self.node.process, 'sync', {'job': self.job})
+            proceed.set()
+            first_result = first.result(timeout=5)
+            self.assertEqual(second.result(timeout=5), first_result)
+        self.assertTrue(first_result['notSubmitted'])
+        self.assertEqual(acquire.call_count, 1)
+        gpu.assert_not_called()
+
+    def test_native_database_failure_does_not_issue_unsubmitted_proof(self):
+        with patch.object(self.node.sqlite3, 'connect', side_effect=sqlite3.OperationalError('unavailable')), patch.object(self.node, 'gpu') as gpu:
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'unavailable'):
+                self.node.process('sync', {'job': self.job})
+        self.assertFalse((self.node.ROOT / 'jobs' / (self.job['id'] + '.dataset-not-submitted.json')).exists())
+        gpu.assert_not_called()
+
+    def test_eviction_between_check_and_lease_cleans_only_this_jobs_partial_leases(self):
+        self.ready()
+        self.cache.register_source(self.admin, 'second', 'approved', ['demo-user-1'])
+        self.cache.materialize(self.user, 'second', self.version)
+        self.cache.set_owners(self.admin, 'example', ['demo-user-1', 'demo-user-2'])
+        other = self.cache.acquire_lease(self.module.Principal('demo-user-2'), 'example', self.version, self.job['id'])
+        other_job = self.cache.acquire_lease(self.user, 'example', self.version, 'different-job')
+        job = dict(self.job, datasets=self.job['datasets'] + [dict(dataset='second', version=self.version)])
+        original = self.module.DatasetCache.acquire_lease
+
+        def acquire(cache, actor, dataset, version, job_id):
+            if dataset == 'second':
+                self.cache.evict(self.admin, dataset, version)
+            return original(cache, actor, dataset, version, job_id)
+
+        with patch.object(self.module.DatasetCache, 'acquire_lease', new=acquire), patch.object(self.node, 'gpu') as gpu:
+            result = self.node.process('sync', {'job': job})
+        gpu.assert_not_called()
+        self.assertEqual(result['state'], 'FAILED')
+        leases = self.cache._leases('example', self.version)
+        self.assertEqual({lease['id'] for lease in leases}, {other['leaseId'], other_job['leaseId']})
+        self.assertFalse((self.node.ROOT / 'jobs' / (job['id'] + '.datasets.json')).exists())
+
+    def test_unsubmitted_rejection_recovers_unrecorded_lease_and_retries_cleanup(self):
+        self.ready()
+        self.cache.acquire_lease(self.user, 'example', self.version, self.job['id'])
+        self.cache.register_source(self.admin, 'second', 'approved', ['demo-user-1'])
+        job = dict(self.job, datasets=self.job['datasets'] + [dict(dataset='second', version=self.version)])
+        receipt = self.node.ROOT / 'jobs' / (job['id'] + '.dataset-not-submitted.json')
+        with patch.object(self.module.DatasetCache, 'release_lease', side_effect=OSError('cleanup unavailable')), patch.object(self.node, 'gpu') as gpu:
+            with self.assertRaisesRegex(OSError, 'cleanup unavailable'):
+                self.node.process('sync', {'job': job})
+        self.assertTrue(receipt.exists())
+        self.assertEqual(len(self.cache._leases('example', self.version)), 1)
+        gpu.assert_not_called()
+        self.cache.materialize(self.user, 'second', self.version)
+        with patch.object(self.node, 'gpu') as gpu:
+            result = self.node.process('sync', {'job': job})
+        self.assertTrue(result['notSubmitted'])
+        self.assertEqual(self.cache._leases('example', self.version), [])
+        gpu.assert_not_called()
+
+    def test_rejection_receipt_write_failure_does_not_release_leases_or_claim_terminal(self):
+        self.ready()
+        self.cache.acquire_lease(self.user, 'example', self.version, self.job['id'])
+        self.cache.register_source(self.admin, 'second', 'approved', ['demo-user-1'])
+        job = dict(self.job, datasets=self.job['datasets'] + [dict(dataset='second', version=self.version)])
+        with patch.object(self.node, 'atomic_json', side_effect=OSError('read only')), patch.object(self.node, 'gpu') as gpu:
+            with self.assertRaisesRegex(OSError, 'read only'):
+                self.node.process('sync', {'job': job})
+        self.assertEqual(len(self.cache._leases('example', self.version)), 1)
+        gpu.assert_not_called()
+
+    def test_dispatch_timeout_is_unknown_and_never_resubmits_or_releases(self):
+        self.ready()
+        with patch.object(self.node, 'gpu', side_effect=subprocess.TimeoutExpired('gpuq submit', 18)) as gpu:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.node.process('sync', {'job': self.job})
+        self.assertEqual(gpu.call_count, 1)
+        with patch.object(self.node, 'gpu') as gpu:
+            result = self.node.process('sync', {'job': self.job})
+            canceled = self.node.process('cancel', {'job': self.job})
+        self.assertEqual(result['state'], 'UNKNOWN')
+        self.assertEqual(canceled['state'], 'UNKNOWN')
+        self.assertNotIn('notSubmitted', result)
+        self.assertEqual(len(self.cache._leases('example', self.version)), 1)
+        gpu.assert_not_called()
+
+    def test_even_broken_dispatch_marker_blocks_terminal_claim_and_new_submission(self):
+        marker = self.node.ROOT / 'jobs' / (self.job['id'] + '.dataset-dispatch-attempted')
+        marker.symlink_to(self.base / 'absent-marker-target')
+        with patch.object(self.node, 'gpu') as gpu:
+            result = self.node.process('sync', {'job': self.job})
+        self.assertEqual(result['state'], 'UNKNOWN')
+        self.assertNotIn('notSubmitted', result)
+        gpu.assert_not_called()
+
+    def test_existing_native_submission_overrides_unready_cache(self):
+        with closing(sqlite3.connect(self.node.CONFIG['database'])) as db:
+            db.execute('INSERT INTO jobs VALUES (?, ?)', ('native-job', self.job['id']))
+            db.commit()
+        with patch.object(self.node, 'acquire_datasets', side_effect=AssertionError('already submitted')), patch.object(self.node, 'gpu', return_value={'job': {'state': 'RUNNING'}, 'attempts': []}) as gpu:
+            result = self.node.process('sync', {'job': self.job})
+        self.assertEqual(result['state'], 'RUNNING')
+        self.assertNotIn('notSubmitted', result)
+        gpu.assert_called_once_with('show', 'native-job')
+
+    def test_native_row_or_marker_appearing_during_preflight_stays_unknown(self):
+        for evidence in ('row', 'marker'):
+            with self.subTest(evidence=evidence):
+                def interrupted(job):
+                    if evidence == 'row':
+                        with closing(sqlite3.connect(self.node.CONFIG['database'])) as db:
+                            db.execute('INSERT INTO jobs VALUES (?, ?)', ('native-job', job['id']))
+                            db.commit()
+                    else:
+                        (self.node.ROOT / 'jobs' / (job['id'] + '.dataset-dispatch-attempted')).touch()
+                    raise self.node.DatasetNotReady('not READY')
+                with patch.object(self.node, 'acquire_datasets', side_effect=interrupted), patch.object(self.node, 'gpu') as gpu:
+                    result = self.node.process('sync', {'job': self.job})
+                self.assertEqual(result['state'], 'UNKNOWN')
+                self.assertNotIn('notSubmitted', result)
+                gpu.assert_not_called()
+                with closing(sqlite3.connect(self.node.CONFIG['database'])) as db:
+                    db.execute('DELETE FROM jobs');db.commit()
+
+    def test_unrelated_storage_errors_and_corrupt_receipts_fail_closed(self):
+        self.ready()
+        with patch.object(self.module.DatasetCache, 'acquire_lease', side_effect=self.module.CacheError('I/O failed')), patch.object(self.node, 'gpu') as gpu:
+            with self.assertRaisesRegex(self.module.CacheError, 'I/O failed'):
+                self.node.process('sync', {'job': self.job})
+        gpu.assert_not_called()
+        with patch.object(self.node, 'dataset_mount_check', side_effect=OSError('missing mount')), patch.object(self.node, 'gpu') as gpu:
+            with self.assertRaisesRegex(OSError, 'missing mount'):
+                self.node.process('sync', {'job': self.job})
+        gpu.assert_not_called()
+        receipt = self.node.ROOT / 'jobs' / (self.job['id'] + '.dataset-not-submitted.json')
+        receipt.write_text(json.dumps({'schema': 1, 'jobId': 'other', 'failureCode': 'DATASET_NOT_READY'}))
+        with patch.object(self.node, 'gpu') as gpu, self.assertRaisesRegex(ValueError, 'Invalid dataset rejection receipt'):
             self.node.process('sync', {'job': self.job})
         gpu.assert_not_called()
-        self.assertFalse((self.node.ROOT / 'jobs' / (self.job['id'] + '.dataset-dispatch-attempted')).exists())
 
     def test_administrator_training_still_requires_explicit_dataset_ownership(self):
         self.ready()

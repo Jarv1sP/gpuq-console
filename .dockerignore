@@ -1,6 +1,7 @@
 **
 !dist/**
 !*.mjs
+!proto/clouddrive-pilot.proto
 !package.json
 !package-lock.json
 !scripts/build-client.mjs

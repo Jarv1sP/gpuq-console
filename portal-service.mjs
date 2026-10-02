@@ -20,6 +20,7 @@ export class PortalService extends DemoService{
     const service=new PortalService();service.production=true;service.tail=Promise.resolve();service.pending=0;
     service.terminalLanes=new Map();service.terminalPending=0;
     service.cloudPending=0;service.cloudUsers=new Map();service.cloudKeys=new Set();
+    service.datasetReadPending=0;
     service.db=new DatabaseSync(path);await chmod(path,0o600);
     service.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS portal_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, subject TEXT, outcome TEXT NOT NULL);');
     service.db.exec("CREATE TABLE IF NOT EXISTS invites (role TEXT PRIMARY KEY CHECK(role IN ('admin','member')), digest TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, max_uses INTEGER, created_at TEXT NOT NULL);");
@@ -131,6 +132,23 @@ export class PortalService extends DemoService{
       if(key)this.cloudKeys.delete(key);
     }
   }
+  async datasetRead(token,operation,args){
+    if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    args=structuredClone(args);
+    const admitted=this.principal(token),policy=JSON.stringify(this.store.get(admitted.userId));
+    const check=()=>{
+      if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+      const current=this.principal(token);
+      if(current.userId!==admitted.userId||current.role!==admitted.role||current.username!==admitted.username||JSON.stringify(this.store.get(current.userId))!==policy)
+        throw Object.assign(Error('账号授权已改变，请重新加载数据集。'),{status:403});
+      return current;
+    };
+    check();
+    if(this.datasetReadPending>=4)throw Object.assign(Error('数据目录正在读取，请稍后刷新。'),{status:429});
+    this.datasetReadPending++;
+    try{let result;try{result=await executionCall(this,admitted,operation,args);}finally{check();}return {result,principal:check()};}
+    finally{this.datasetReadPending--;}
+  }
   login(username,password){return this.enqueue(async()=>{
     try{await this.refreshGPUQ();const result=await super.login(username,password);this.audit(username,'login',null,'ok');return result;}
     catch(e){this.audit(username,'login',null,'denied');throw e;}
@@ -183,6 +201,7 @@ export class PortalService extends DemoService{
   }
   invoke(token,operation,args={}){
     if(operation==='terminal.exchange')return this.terminalExchange(token,args);
+    if(['datasets.catalog','datasets.capacity','datasets.list','datasets.status','datasets.prepare'].includes(operation))return this.datasetRead(token,operation,args);
     if(typeof operation==='string'&&operation.startsWith('transfers.')){
       const principal=this.principal(token);
       return transferCall(this,principal,operation,args,()=>this.principal(token)).then(result=>({result,principal:{username:principal.username,role:principal.role,userId:principal.userId}}));
@@ -207,8 +226,8 @@ export class PortalService extends DemoService{
       if(operation==='users.delete'){
         if(principal.role!=='admin')throw Object.assign(Error('此操作需要管理员权限。'),{status:403});
         const user=this.store.get(args.userId);
-        if(this.db.prepare("SELECT 1 FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','FAILED','PAUSED','CANCELED') LIMIT 1").get(user.id))throw Error('请先确认这个账号的传输已结束，再删除账号。');
-        if(user.id===principal.userId||user.enabled||usage(this.store.jobs,user.id)>0)throw Error('只能删除已暂停且没有待完成任务的非当前账号。历史任务和文件保留。');
+    if(user.id===principal.userId||user.enabled||this.store.jobs.some(job=>job.userId===user.id&&!['SUCCEEDED','FAILED','CANCELED'].includes(job.state)))throw Error('只能删除已暂停且没有待完成任务的非当前账号。历史任务和文件保留。');
+    if(this.db.prepare("SELECT 1 FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','FAILED','PAUSED','CANCELED') LIMIT 1").get(user.id))throw Error('请先确认这个账号的传输已结束，再删除账号。');
         if(user.role==='admin'&&!this.store.users.some(u=>u.id!==user.id&&u.enabled&&u.role==='admin'))throw Error('不能删除最后一名可登录管理员。');
         this.db.exec('BEGIN IMMEDIATE');
         try{this.invalidate(user.username);this.credentials.delete(user.username);this.store.users=this.store.users.filter(u=>u.id!==user.id);this.save();this.audit(actor,operation,user.id,'ok');this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}

@@ -38,6 +38,13 @@ test('task table displays scheduler evidence without inventing sampling time or 
   const preempted=taskTable([{...job,state:'CANCELED',preempted:true}]);assert.match(preempted,/输出保留，不自动恢复/);assert.match(preempted,/data-job-cancel="job-1" disabled/);
   const unknown=taskTable([{...job,schedulerCheckedAt:null,queueReason:null,schedulerState:null}]);assert.match(unknown,/核对时间：未提供/);assert.match(unknown,/暂无调度说明/);assert.doesNotMatch(unknown,/预计.*开始/);
 });
+test('data preparation state and escaped task metadata coexist after the frontend merge',()=>{
+  const preparing={...job,state:'PREPARING_DATA',schedulerState:null,submitterName:'张三 <script>',description:'等待固定数据版本 <img src=x>',canSetPriority:false};
+  const html=taskTable([preparing],{userId:job.userId});
+  assert.equal(taskStateLabel(preparing),'准备数据 · 不占 GPU');
+  assert.match(html,/准备数据 · 不占 GPU/);assert.match(html,/张三 &lt;script&gt;/);assert.match(html,/等待固定数据版本 &lt;img src=x&gt;/);
+  assert.doesNotMatch(html,/<script>|<img|data-job-priority=/);
+});
 test('scheduler text and identities are escaped and administrators cannot open other users output',()=>{
   const html=taskTable([{...job,id:'" onfocus="bad',name:'<name>',queueReason:'<script>bad</script>',schedulerState:'<state>',schedulerCheckedAt:'<date>',project:'vision'}],{admin:true,userId:'other'});
   assert.doesNotMatch(html,/<name>|<script>|<state>|<date>|data-job-output=/);assert.match(html,/&lt;script&gt;/);

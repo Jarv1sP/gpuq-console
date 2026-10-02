@@ -125,7 +125,9 @@ test('policy change during capability query rejects delayed data instead of repo
 test('copy and download map logical names through the owner-scoped local receipt before fixing identity',async t=>{
   const f=await fixture(t),seen=[];f.service.datasetPhysicalReference=(owner,machine,ref)=>{seen.push({owner,machine,ref});return {...ref,dataset:'actual-replica'};};
   const args=copy(),row=await f.call('transfers.create',args);assert.equal(row.reference.dataset,'actual-replica');assert.equal(f.calls.find(c=>c.op==='transfers.source.prepare').args.reference.dataset,'actual-replica');
-  await f.call('transfers.create',{key:randomUUID(),kind:'download',machine:MACHINES[1].id,dataset:'logical',version:hash});assert.equal(f.calls.at(-1).args.dataset,'actual-replica');assert.deepEqual(seen.map(r=>r.machine),[args.from,MACHINES[1].id]);assert.ok(seen.every(r=>r.owner===f.member.id));
+  const download=await f.call('transfers.create',{key:randomUUID(),kind:'download',machine:MACHINES[1].id,dataset:'logical',version:hash});assert.equal(f.calls.at(-1).args.dataset,'actual-replica');assert.deepEqual(seen.map(r=>r.machine),[args.from,MACHINES[1].id]);assert.ok(seen.every(r=>r.owner===f.member.id));
+  f.service.datasetPhysicalReference=()=>{throw Error('a pinned download must never remap');};
+  await f.call('transfers.io',{id:download.id,action:'get',path:'train.bin',offset:0});assert.equal(f.calls.at(-1).args.dataset,'actual-replica');
   f.service.datasetPhysicalReference=(_owner,_machine,ref)=>({...ref,dataset:'different-replica'});await assert.rejects(f.call('transfers.create',args),e=>e.status===409);
   f.service.datasetPhysicalReference=(_owner,_machine,ref)=>({...ref,version:'b'.repeat(64)});await assert.rejects(f.call('transfers.create',copy()),e=>e.status===409);
 });

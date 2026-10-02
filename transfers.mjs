@@ -1,6 +1,7 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {MACHINES} from './dist/model.js';
 import {executionCall} from './execution.mjs';
+import {snapshotSyncCall} from './snapshot-sync.mjs';
 
 const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,hash=/^[a-f0-9]{64}$/;
 const done=new Set(['SUCCEEDED','CANCELED']),states=new Set(['RUNNING','RETRYING','VERIFYING','CANCELING','UNKNOWN','SUCCEEDED','FAILED','PAUSED','CANCELED']);
@@ -34,6 +35,12 @@ function save(service,row,state,actor,operation){
   transaction(service,()=>{service.db.prepare('UPDATE transfers SET state=?,data=?,updated_at=? WHERE id=?').run(state,JSON.stringify(row.data),Date.now(),row.id);if(state!==row.state||operation!=='transfers.sync')service.audit(actor,operation,row.id,state);});return load(service,row.id);
 }
 function authorized(service,user,machine){if(!MACHINES.some(m=>m.id===machine)||!service.store.get(user.id).limits[machine])fail('这台机器未授权。',403);}
+function pinnedSnapshot(service,principal,operation,args){
+  const user=service.store.get(principal.userId);
+  // This reference was resolved and persisted with the transfer's digest.
+  // Re-mapping on each chunk could silently switch an in-flight download.
+  return snapshotSyncCall(service,principal,user,operation,args,machine=>authorized(service,user,machine),{physical:true});
+}
 function access(service,principal,row){
   if(row.owner_id!==principal.userId)fail('传输不存在或属于其他账号。',404);
   const user=service.store.users.find(u=>u.id===principal.userId);if(!user?.enabled)fail('账号已暂停。',403);
@@ -85,7 +92,7 @@ async function dispatch(service,principal,row){
     row.data.uploadId=validId(result.uploadId);row.data.result=result;
     return save(service,row,result.state==='READY'?'SUCCEEDED':'WAITING_CLIENT',principal.username,'transfers.upload-start');
   }
-  row.data.snapshot=info(await executionCall(service,principal,'datasets.snapshot.info',{machine:data.machine,dataset:data.reference.dataset,version:data.reference.version}));
+  row.data.snapshot=info(await pinnedSnapshot(service,principal,'datasets.snapshot.info',{machine:data.machine,dataset:data.reference.dataset,version:data.reference.version}));
   return save(service,row,'WAITING_CLIENT',principal.username,'transfers.download-ready');
 }
 export function installTransfers(service){
@@ -228,7 +235,7 @@ async function transferOperation(service,principal,operation,args){
       row.data.result=result;save(service,row,result.state==='READY'?'SUCCEEDED':['SEALING','PUBLISHING'].includes(result.state)?'VERIFYING':result.state==='FAILED'?'FAILED':'WAITING_CLIENT',principal.username,'transfers.sync');
     }else if(row.data.kind==='download'){
       if(!['info','manifest','get'].includes(args.action))fail('下载仅允许读取固定快照。');
-      const {id,action,...request}=args;result=await executionCall(service,principal,'datasets.snapshot.'+action,{machine:row.data.machine,dataset:row.data.reference.dataset,version:row.data.reference.version,...request});
+      const {id,action,...request}=args;result=await pinnedSnapshot(service,principal,'datasets.snapshot.'+action,{machine:row.data.machine,dataset:row.data.reference.dataset,version:row.data.reference.version,...request});
     }else fail('LAN 传输由节点后台执行，不通过客户端搬运。');
     return result;
   }

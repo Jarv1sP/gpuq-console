@@ -22,19 +22,20 @@ async function fixture(){
     id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:32768})),
     gpuq:{connected:true,observeOnly:false,schedulableIndices:m.id==='gpu-1'?[0,1,2,3]:[0],jobs:[]}
   }))}));
-  const calls=[],states=new Map(),deniedOwners=new Set();let failure=null;
+  const calls=[],states=new Map(),deniedOwners=new Set();let failure=null,syncResult=null,syncFailure=null;
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation.startsWith('datasets.')){
       if(failure)throw failure;
       if(!args.hostAdmin&&deniedOwners.has(args.userId))throw Error('dataset owner authorization required');
-      if(operation==='datasets.list')return {datasets:[{dataset:'sample',versions:[{version,state:'READY'}]}]};
+      if(operation==='datasets.list')return {datasets:[{dataset:'sample',versions:[{version,state:states.get(machine+':sample')??'READY',canPrepare:true}]}]};
       const state=states.get(machine+':'+args.dataset)??'READY';
       if(state instanceof Error)throw state;
       return {dataset:args.dataset,version:args.version,state,remainingBytes:state==='READY'?0:64};
     }
     if(operation.startsWith('terminal.'))return {id:args.id||args.key,writerToken:randomUUID(),offset:0,data:'',exited:false};
-    return {state:'PENDING',nodeJobId:'node-'+args.job.id,assignedIndices:[]};
+    if(syncFailure)throw syncFailure;
+    return syncResult||{state:'PENDING',nodeJobId:'node-'+args.job.id,assignedIndices:[]};
   };
   const origin='https://gpuq.example.test';
   let server,service;
@@ -57,6 +58,7 @@ async function fixture(){
   });
   return {get service(){return service},get user(){return user},get admin(){return admin},outsider,member,other,calls,states,deniedOwners,post,settle,
     fail:value=>failure=value,
+    sync:result=>{syncResult=result;},syncFail:error=>{syncFailure=error;},
     grant:async(total=4,limits={'gpu-1':2,'gpu-2':2})=>service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:service.store.get(member.id).policyVersion,total,limits}),
     submit:more=>post('jobs.submit',{machine:'gpu-1',cards:1,argv:['python','train.py'],key:randomUUID(),datasets:[reference],...more}),
     reopen:async()=>{await settle();await new Promise(resolve=>server.close(resolve));await start();admin=await service.login('admin',password);user=await service.login('dataset-user',password);},
@@ -64,6 +66,84 @@ async function fixture(){
   };
 }
 
+test('opt-in dataset preparation is durable, reserves no GPU and dispatches only after local READY',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample','REGISTERED');
+    const submitted=await f.submit({prepareData:true});assert.equal(submitted.status,200,JSON.stringify(submitted.data));
+    const id=submitted.data.result.id;assert.equal(submitted.data.result.state,'PREPARING_DATA');
+    await f.settle();assert.equal(usage(f.service.store.jobs,f.member.id),0);assert.equal(f.calls.some(c=>c.operation==='sync'),false);
+    await f.reopen();assert.equal(f.service.store.jobs.find(j=>j.id===id).state,'PREPARING_DATA');
+    f.states.set('gpu-1:sample','READY');await f.service.reconcile();
+    assert.equal(f.service.store.jobs.find(j=>j.id===id).state,'SUBMITTING');assert.equal(usage(f.service.store.jobs,f.member.id),1);
+    await f.service.reconcile();assert.equal(f.calls.filter(c=>c.operation==='sync').length,1);
+  }finally{await f.close();}
+});
+test('canceling data preparation never dispatches or cancels a shared cache worker',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample','REGISTERED');
+    const j=(await f.submit({prepareData:true})).data.result;await f.settle();
+    await f.post('jobs.cancel',{jobId:j.id});await f.settle();await f.service.reconcile();
+    assert.equal(f.service.store.jobs.find(v=>v.id===j.id).state,'CANCELED');
+    assert.equal(f.calls.some(c=>['sync','cancel'].includes(c.operation)),false);
+  }finally{await f.close();}
+});
+test('proven pre-dispatch cache eviction ends cleanly, while unknown transport retains quota',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample','REGISTERED');
+    const created=await f.submit({prepareData:true});await f.settle();
+    f.states.set('gpu-1:sample','READY');await f.service.reconcile();
+    const job=f.service.store.jobs.find(value=>value.id===created.data.result.id);
+    assert.equal(job.state,'SUBMITTING');assert.equal(usage(f.service.store.jobs,f.member.id),1);
+    f.syncFail(Error('response lost'));await f.service.reconcile();
+    assert.equal(job.state,'SUBMITTING');assert.equal(usage(f.service.store.jobs,f.member.id),1);
+    f.syncFail(null);f.sync({state:'FAILED',notSubmitted:true,failureCode:'DATASET_NOT_READY',assignedIndices:[],error:'重新准备后新建任务。'});
+    await f.service.reconcile();assert.equal(job.state,'FAILED');assert.equal(job.notSubmitted,true);
+    assert.equal(job.failureCode,'DATASET_NOT_READY');assert.equal(usage(f.service.store.jobs,f.member.id),0);
+    assert.match(job.error,/重新准备/);assert.ok(job.finishedAt);
+  }finally{await f.close();}
+});
+test('administrator personal replica status prefers its verified alias over an old registered record',async()=>{
+  const f=await fixture();try{
+    f.states.set('gpu-1:sample','REGISTERED');
+    f.service.datasetPhysicalReference=(owner,machine,ref)=>owner==='builtin-admin'?{...ref,dataset:'u-personal-copy'}:ref;
+    let resolved=0;f.service.resolveDataset=async(owner,machine,ref)=>{assert.equal(owner,'builtin-admin');resolved++;return {status:{...ref,state:'READY'}};};
+    const response=await f.post('datasets.status',{machine:'gpu-1',...reference},f.admin.token);
+    assert.equal(response.status,200);assert.equal(response.data.result.state,'READY');assert.equal(resolved,1);
+    assert.equal(f.calls.some(call=>call.operation==='datasets.status'),false);
+  }finally{await f.close();}
+});
+test('preparation rechecks grants before taking a GPU reservation',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample','REGISTERED');
+    const j=(await f.submit({prepareData:true})).data.result;await f.settle();
+    await f.grant(0,{});f.states.set('gpu-1:sample','READY');await f.service.reconcile();
+    assert.equal(f.service.store.jobs.find(v=>v.id===j.id).state,'FAILED');assert.equal(f.calls.some(c=>c.operation==='sync'),false);
+  }finally{await f.close();}
+});
+test('occupied GPU quota does not block staging a next job, but staging cannot spend that quota',async()=>{
+  const f=await fixture();try{
+    await f.grant(1,{'gpu-1':1});
+    const running=await f.submit();assert.equal(running.status,200);await f.settle();
+    f.states.set('gpu-1:sample','REGISTERED');
+    const next=await f.submit({prepareData:true});assert.equal(next.status,200,JSON.stringify(next.data));await f.settle();
+    const job=f.service.store.jobs.find(value=>value.id===next.data.result.id);
+    assert.equal(job.state,'PREPARING_DATA');assert.equal(usage(f.service.store.jobs,f.member.id),1);
+    f.states.set('gpu-1:sample','READY');await f.service.reconcile();
+    assert.equal(job.state,'PREPARING_DATA');assert.match(job.queueReason,/等待个人可用卡数额度/);
+    assert.equal(f.calls.filter(call=>call.operation==='sync'&&call.args.job.id===job.id).length,0);
+    assert.equal((await f.submit({prepareData:true,cards:2})).status,409);
+  }finally{await f.close();}
+});
+test('user deletion cannot discard a pending preparation just because GPU usage is zero',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample','REGISTERED');
+    const created=await f.submit({prepareData:true});assert.equal(created.status,200);await f.settle();
+    assert.equal(usage(f.service.store.jobs,f.member.id),0);
+    f.service.store.users.find(user=>user.id===f.member.id).enabled=false;f.service.save();
+    await assert.rejects(f.service.invoke(f.admin.token,'users.delete',{userId:f.member.id}),/没有待完成任务/);
+    assert.ok(f.service.store.users.some(user=>user.id===f.member.id));
+  }finally{await f.close();}
+});
 test('dataset list/status/prepare use authenticated identity and preserve node state without reserving GPUs',async()=>{
   const f=await fixture();try{
     await f.grant();
