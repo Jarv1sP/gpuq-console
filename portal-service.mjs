@@ -9,6 +9,7 @@ import {MACHINES,validUsername} from './dist/model.js';
 import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 import {installMaintenance,maintenanceCall} from './maintenance.mjs';
 import {installJobNotifications} from './job-notifications.mjs';
+import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -17,6 +18,7 @@ export class PortalService extends DemoService{
     await mkdir(dirname(path),{recursive:true,mode:0o700});
     const service=new PortalService();service.production=true;service.tail=Promise.resolve();service.pending=0;
     service.terminalLanes=new Map();service.terminalPending=0;
+    service.cloudPending=0;service.cloudUsers=new Map();service.cloudKeys=new Set();
     service.db=new DatabaseSync(path);await chmod(path,0o600);
     service.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS portal_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, subject TEXT, outcome TEXT NOT NULL);');
     service.db.exec("CREATE TABLE IF NOT EXISTS invites (role TEXT PRIMARY KEY CHECK(role IN ('admin','member')), digest TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, max_uses INTEGER, created_at TEXT NOT NULL);");
@@ -26,9 +28,11 @@ export class PortalService extends DemoService{
     try{service.inviteKey=await readFile(keyPath);}catch(e){
       if(e.code!=='ENOENT')throw e;
       if(service.db.prepare('SELECT 1 FROM invites WHERE code_cipher IS NOT NULL LIMIT 1').get())throw Error('Invitation encryption key missing; restore it from the private backup.');
+      for(const table of ['cloud_secrets','cloud_imports'])if(service.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)&&service.db.prepare('SELECT 1 FROM '+table+' LIMIT 1').get())throw Error('Cloud encryption key missing; restore the original private key backup.');
       await writeFile(keyPath,randomBytes(32),{mode:0o600,flag:'wx'});service.inviteKey=await readFile(keyPath);
     }
     if(service.inviteKey.length!==32)throw Error('Invalid invitation encryption key');await chmod(keyPath,0o600);
+    installCloudImports(service);
     const saved=service.db.prepare('SELECT data FROM portal_state WHERE id=1').get();
     if(saved)service.restore(JSON.parse(saved.data));
     else{
@@ -98,6 +102,33 @@ export class PortalService extends DemoService{
       if(!lane.pending)this.terminalLanes.delete(key);
     }
   }
+  async cloudExchange(token,operation,args){
+    if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    args=structuredClone(args);
+    const admitted=this.principal(token);
+    const check=()=>{
+      if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+      const current=this.principal(token),user=this.store.users.find(u=>u.id===current.userId);
+      if(!user?.enabled||current.userId!==admitted.userId||current.role!==admitted.role||current.username!==admitted.username||(user.role||'member')!==current.role)
+        throw Object.assign(Error('账号权限已改变，请重新登录。'),{status:403});
+      if(args.machine&&(!MACHINES.some(m=>m.id===args.machine)||!this.store.get(current.userId).limits[args.machine]))
+        throw Object.assign(Error('这台机器未授权。'),{status:403});
+      return current;
+    };
+    check();
+    const count=this.cloudUsers.get(admitted.userId)||0;
+    const key=operation.startsWith('cloud.import.')&&(args.key||args.operationId)?JSON.stringify([admitted.userId,args.machine,args.key||args.operationId]):null;
+    if(this.cloudPending>=8||count>=2||key&&this.cloudKeys.has(key))throw Object.assign(Error('导入请求正在处理，请稍后刷新或重试。'),{status:429});
+    this.cloudPending++;this.cloudUsers.set(admitted.userId,count+1);if(key)this.cloudKeys.add(key);
+    try{
+      let result;try{result=await cloudImportCall(this,admitted,operation,args,check);}finally{check();}
+      return {result,principal:check()};
+    }finally{
+      this.cloudPending--;const remaining=this.cloudUsers.get(admitted.userId)-1;
+      if(remaining)this.cloudUsers.set(admitted.userId,remaining);else this.cloudUsers.delete(admitted.userId);
+      if(key)this.cloudKeys.delete(key);
+    }
+  }
   login(username,password){return this.enqueue(async()=>{
     try{await this.refreshGPUQ();const result=await super.login(username,password);this.audit(username,'login',null,'ok');return result;}
     catch(e){this.audit(username,'login',null,'denied');throw e;}
@@ -150,9 +181,12 @@ export class PortalService extends DemoService{
   }
   invoke(token,operation,args={}){
     if(operation==='terminal.exchange')return this.terminalExchange(token,args);
+    // Remote cloud/DNS requests do not hold the account and scheduler queue.
+    if(typeof operation==='string'&&operation.startsWith('cloud.')&&!operation.startsWith('cloud.auth.'))return this.cloudExchange(token,operation,args);
     return this.enqueue(async()=>{
     const principal=this.principal(token),actor=principal.username;
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    if(typeof operation==='string'&&operation.startsWith('cloud.auth.'))return {result:await cloudImportCall(this,principal,operation,args,()=>{if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});this.principal(token);}),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     if(typeof operation==='string'&&operation.startsWith('maintenance.'))return {result:await maintenanceCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     if(operation==='notifications.job')return {result:this.configureJobNotification(principal,args),state:this.state(principal)};
     if(typeof operation==='string'&&operation.startsWith('community.'))return {result:communityCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
@@ -201,9 +235,9 @@ export class PortalService extends DemoService{
     const state=super.state(principal);
     const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
-    return {...state,maintenance:{version:1},jobs:state.jobs.map(j=>({...publicJob(j),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
+    return {...state,maintenance:{version:1,retired:true,readOnly:true},jobs:state.jobs.map(j=>({...publicJob(j),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
-  close(){this.closing=true;clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);this.db.close();}
+  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);this.db.close();}
 }

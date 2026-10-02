@@ -40,10 +40,15 @@ test('guide covers merged workflow changes while keeping completion, permissions
   assert.match(chapters.get('training'),/1、2、4、8/);assert.match(chapters.get('training'),/空闲 3 张时启动 2 张/);
   assert.match(chapters.get('training'),/不支持弹性、自动让位、自动恢复或主动抢占/);
   assert.match(chapters.get('results'),/Ctrl\+C 只停止查看/);assert.match(chapters.get('results'),/管理员为你的账号配置 Telegram/);
-  for(const token of ['sync git','sync code','sync data','CODE_READY','check-attr --source','申请系统维修','maintenance request'])assert.ok(chapters.get('troubleshooting').includes(token),token);
-  assert.match(chapters.get('queue'),/退出码 75/);assert.match(chapters.get('troubleshooting'),/不立即执行，也不给你 root/);
-  assert.match(chapters.get('data'),/当前没有后台 URL 下载按钮/);assert.match(chapters.get('data'),/没有整份已发布数据集的一键下载入口/);
+  for(const token of ['sync git','sync code','sync data','CODE_READY','check-attr --source','缺少系统依赖','旧维护申请流程已停用'])assert.ok(chapters.get('troubleshooting').includes(token),token);
+  assert.match(chapters.get('queue'),/退出码 75/);assert.match(chapters.get('troubleshooting'),/不能提交脚本申请 root/);
+  assert.doesNotMatch(source,/gpuctl maintenance (?:request|approve|withdraw)/);
+  assert.match(chapters.get('data'),/已开始的导入在服务器后台运行/);assert.match(chapters.get('data'),/没有整份已发布数据集的一键下载入口/);
+  assert.match(chapters.get('data'),/阿里云盘是可选功能/);assert.match(chapters.get('data'),/需管理员启用可用的下载通道/);
+  for(const command of ['data import ','data imports','data import-status','data import-resume','data import-cancel','data import-discard'])assert.ok(chapters.get('data').includes(command),command);
   assert.match(chapters.get('data'),/连续无输入 1 小时或累计 6 小时/);
   for(const token of ['传输任务新版','transfer upload','transfer download','transfer copy','transfer cancel','WAITING_CLIENT'])assert.ok(chapters.get('data').includes(token),token);
   assert.match(chapters.get('data'),/不代表功能已上线/);assert.match(chapters.get('data'),/终止后不可恢复/);
+  assert.match(chapters.get('data'),/不会因更新客户端自动开放/);assert.match(chapters.get('data'),/LAN copy 还需管理员配置并核验节点间接口/);
+  assert.doesNotMatch(source,/没有后台 URL 下载按钮|不提供后台 URL 下载队列/);
 });

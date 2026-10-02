@@ -7,7 +7,7 @@ export const chapters=[
   {id:'data',title:'数据集',description:'上传、准备和使用数据；大文件也有合适的方式。'},
   {id:'results',title:'日志与结果',description:'查询进度，设置通知与留言，下载结果。'},
   {id:'queue',title:'排队与协作',description:'分清等级、抢占、保存让位与自动恢复。'},
-  {id:'troubleshooting',title:'常见问题',description:'手动同步、排查故障，申请系统维修。'},
+  {id:'troubleshooting',title:'常见问题',description:'手动同步、排查故障，反馈系统依赖问题。'},
 ];
 const aliases={'/guide/':'/guide','/guide/user':'/guide/start','/guide/projects':'/guide/development','/guide/datasets':'/guide/data','/guide/community':'/guide/queue','/guide/terminal-sessions':'/guide/development','/guide/diagnostics':'/guide/results','/guide/ray-resources':'/guide/troubleshooting','/guide/project-network':'/guide/troubleshooting'};
 const escape=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));

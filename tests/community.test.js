@@ -52,6 +52,44 @@ test('announcements are administrator-only, pinned ahead of recent posts, and fe
   assert.throws(()=>f.call('posts.delete',{id:announcement.id,revision:2}),fails(403));
 });
 
+test('announcement publish is atomic, retry-safe, and editable by fellow admins only',t=>{
+  const f=fixture(t),args={key:randomUUID(),kind:'announcement',title:'发布更新',body:'已验收能力',pinned:true};
+  const first=f.call('posts.create',args,'admin');assert.equal(first.post.pinned,true);assert.equal(first.post.revision,1);
+  assert.equal(f.call('posts.create',args,'admin').post.id,first.post.id);
+  assert.equal(f.call('posts.create',args,'admin').duplicate,true);
+  assert.throws(()=>f.call('posts.create',{...args,pinned:false},'admin'),fails(409));
+  assert.throws(()=>f.call('posts.create',{...args,key:randomUUID()}),fails(403));
+  assert.throws(()=>f.post({pinned:false}),fails(400));
+  const editor={userId:'editor',username:'editor',role:'admin'};f.service.store.users.push({id:'editor',username:'editor',role:'admin',enabled:true});
+  const call=(op,body)=>communityCall(f.service,editor,'community.'+op,body);
+  assert.equal(call('posts.get',{id:first.post.id}).post.canEdit,true);
+  const updated=call('posts.update',{id:first.post.id,revision:1,body:'管理员共同维护的公告'}).post;assert.equal(updated.revision,2);assert.equal(updated.author.id,'admin-id');
+  assert.throws(()=>call('posts.update',{id:updated.id,revision:1,body:'过期修改'}),fails(409));
+  assert.throws(()=>f.call('posts.update',{id:updated.id,revision:2,body:'成员改写'}),fails(403));
+  const memberPost=f.post();assert.throws(()=>call('posts.update',{id:memberPost.id,revision:1,body:'改写成员'}),fails(403));
+  // The original create key remains valid after another admin edited the post.
+  assert.equal(f.call('posts.create',args,'admin').post.body,updated.body);
+});
+
+test('pinned announcement capacity refusal rolls back post and receipt together',t=>{
+  const f=fixture(t),now=Date.now();
+  const insert=f.db.prepare("INSERT INTO community_posts(author_id,kind,title,body,pinned,created_at,updated_at) VALUES('admin-id','announcement','已有公告','正文',1,?,?)");
+  for(let i=0;i<20;i++)insert.run(now,now);
+  const args={key:randomUUID(),kind:'announcement',title:'新公告',body:'正文',pinned:true};
+  assert.throws(()=>f.call('posts.create',args,'admin'),fails(409));
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM community_posts').get().n,20);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM community_keys WHERE client_key=?').get(args.key).n,0);
+  f.db.exec('UPDATE community_posts SET pinned=0 WHERE id=1');
+  assert.equal(f.call('posts.create',args,'admin').post.pinned,true);
+});
+
+test('explicit pinned false keeps legacy post retry digest compatible',t=>{
+  const f=fixture(t),args={key:randomUUID(),kind:'announcement',title:'兼容公告',body:'正文'};
+  const first=f.call('posts.create',args,'admin');
+  assert.equal(f.call('posts.create',{...args,pinned:false},'admin').post.id,first.post.id);
+  assert(f.call('info').capabilities.includes('announcement-publish-v1'));
+});
+
 test('normal content edits require author and matching integer revision; stale updates cannot overwrite',t=>{
   const f=fixture(t),post=f.post();
   const updated=f.call('posts.update',{id:post.id,revision:1,title:'修改后',body:'正文2'}).post;assert.equal(updated.revision,2);assert.equal(updated.body,'正文2');
