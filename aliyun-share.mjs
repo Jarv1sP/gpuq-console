@@ -2,10 +2,20 @@
 // from itxve/aliyundriver-refresh-token (MIT, credited in THIRD_PARTY_NOTICES).
 // Only provider-owned HTTPS endpoints receive account/share credentials.
 import QRCode from 'qrcode';
-const fail=(message,status=502)=>{throw Object.assign(Error(message),{status});};
+const SAFE_FAILURE=Symbol('aliyun-safe-failure');
+const fail=(message,status=502)=>{throw Object.assign(Error(message),{status,[SAFE_FAILURE]:true});};
 const API='https://api.alipan.com';
 const QR='https://passport.aliyundrive.com/newlogin/qrcode/';
 const BASE={appName:'aliyun_drive',fromSite:'52',appEntrance:'web',isMobile:'false',lang:'zh_CN',returnUrl:'',bizParams:''};
+const STAGES=new Map([
+  [QR+'generate.do','二维码生成'],[QR+'query.do','扫码确认'],
+  ['https://auth.alipan.com/v2/account/token','令牌刷新'],
+  [API+'/v2/share_link/get_share_token','分享令牌'],
+  [API+'/adrive/v3/file/list','分享列表'],
+  [API+'/v2/file/get_share_link_download_url','分享下载'],
+]);
+const ERROR_CODES=new Set(['AccessTokenInvalid','AccessTokenExpired','InvalidRefreshToken','RefreshTokenExpired','InvalidParameter','InvalidParameter.RefreshToken','Forbidden','ForbiddenNoPermission','AccessDenied','NotFound','TooManyRequests','RequestTooFrequent','InvalidSharePwd','ShareLinkTokenInvalid','ShareLinkTokenExpired','ShareLink.Cancelled','ShareLink.Expired','ShareLink.NotFound']);
+function stageFor(value){try{const u=new URL(value);return STAGES.get(u.origin+u.pathname)||'云盘请求';}catch{return '云盘请求';}}
 export function shareReference(value,password=''){
   let url;try{url=new URL(value);}catch{fail('请填写完整的阿里云盘分享链接。',400);}
   if(url.protocol!=='https:'||!['www.alipan.com','www.aliyundrive.com','alipan.com','aliyundrive.com'].includes(url.hostname)||url.port||url.username||url.password)fail('仅支持阿里云盘官方 HTTPS 分享链接。',400);
@@ -19,12 +29,16 @@ export class AliyunShare{
   clear(){this.access=null;this.credentialGeneration++;this.loginGeneration++;this.refreshFlight=null;}
   current(generation){if(generation!==this.credentialGeneration)fail('云盘连接已更改，请重新操作。',409);}
   async json(url,body,headers={},form=false){
+    const stage=stageFor(url);
     try{
       const response=await this.request(url,{method:body===undefined?'GET':'POST',redirect:'error',signal:AbortSignal.timeout(8000),headers:{'Content-Type':form?'application/x-www-form-urlencoded;charset=UTF-8':'application/json',...headers},...(body===undefined?{}:{body:form?new URLSearchParams(body).toString():JSON.stringify(body)})});
-      if(!response.ok)fail(response.status===429?'阿里云盘请求较多，请稍后重试。':'阿里云盘暂时无法响应，请稍后重试。');
-      let bytes=0,raw='';const decoder=new TextDecoder();for await(const part of response.body){bytes+=part.length;if(bytes>1024*1024)fail('阿里云盘返回内容过大。');raw+=decoder.decode(part,{stream:true});}raw+=decoder.decode();
-      const data=JSON.parse(raw);if(data.code||data.Code)fail('阿里云盘拒绝了请求，请检查分享有效期、提取码或重新授权。');return data;
-    }catch(error){if(error.status)throw error;fail('阿里云盘连接失败，请稍后重试；未切换到平台中转下载。');}
+      const diagnostic=stage+' HTTP '+response.status;
+      let bytes=0,raw='';const decoder=new TextDecoder();for await(const part of response.body||[]){bytes+=part.length;if(bytes>1024*1024)fail('阿里云盘返回内容过大。['+diagnostic+']');raw+=decoder.decode(part,{stream:true});}raw+=decoder.decode();
+      let data;try{data=JSON.parse(raw);}catch{if(response.ok)fail('阿里云盘返回格式异常。['+diagnostic+']');}
+      const code=data?.code||data?.Code,known=ERROR_CODES.has(code)?'; '+code:code?'; 未识别的服务错误':'';
+      if(!response.ok)fail((response.status===429?'阿里云盘请求较多，请稍后重试。':'阿里云盘暂时无法响应，请稍后重试。')+'['+diagnostic+known+']');
+      if(code)fail('阿里云盘拒绝了请求，请检查分享有效期、提取码或重新授权。['+diagnostic+known+']');return data;
+    }catch(error){if(error?.[SAFE_FAILURE])throw error;fail('阿里云盘连接失败，请稍后重试；未切换到平台中转下载。['+stage+']');}
   }
   async begin(){
     const generation=this.credentialGeneration,loginGeneration=++this.loginGeneration;
@@ -90,7 +104,7 @@ export class AliyunShare{
     const generation=this.credentialGeneration;
     const access=await this.token(),share=await this.shareToken(source);
     this.current(generation);
-    const data=await this.json(API+'/v2/file/get_share_link_download_url',{share_id:source.shareId,file_id:file.id,drive_id:file.driveId,expire_sec:600},{Authorization:'Bearer '+access,'x-share-token':share});
+    const data=await this.json(API+'/v2/file/get_share_link_download_url',{share_id:source.shareId,file_id:file.id,drive_id:file.driveId,expire_sec:600},{Authorization:'Bearer '+access,'x-share-token':share,'X-Canary':'client=web,app=share,version=v2.3.1'});
     this.current(generation);
     let url;try{url=new URL(data.download_url);}catch{fail('阿里云盘没有提供下载直链，可能需要重新授权或检查会员权限。');}
     // Node independently verifies all DNS answers and every redirect before I/O.
