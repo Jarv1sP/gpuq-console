@@ -1,5 +1,6 @@
 import {scanBrowserDirectory,uploadBrowserDataset} from './dataset-upload.js';
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
+import {transferUploadCall} from './transfer-upload.js';
 import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={READY:'本机已就绪',REGISTERED:'待准备',STAGING:'未完成，可续传',PREPARING:'准备中',FAILED:'准备失败'};
@@ -45,7 +46,9 @@ export function datasetsUI(store,toast){
       status.textContent=machine+' · 正在读取目录…';
       const scan=await scanBrowserDirectory(files,{signal,onProgress:report});check();
       const keyStore={get:key=>{try{return localStorage.getItem('gpuq.dataset-upload.'+key);}catch{return null;}},set:(key,value)=>{try{localStorage.setItem('gpuq.dataset-upload.'+key,value);}catch{throw Error('浏览器无法保存续传标识，请允许本站本地存储或使用 CLI。');}}};
-      const result=await uploadBrowserDataset({userId,machine,name,scan,signal,onProgress:report,keyStore,call:async(operation,args)=>{check();const result=await store.call(operation,args);check();return result;}});check();
+      const directCall=async(operation,args)=>{check();const result=await store.call(operation,args);check();return result;};
+      const call=store.data?.transfers?.version===1?transferUploadCall(directCall,row=>{status.textContent='传输 '+row.id+' · '+row.state;}):directCall;
+      const result=await uploadBrowserDataset({userId,machine,name,scan,signal,onProgress:report,keyStore,call});check();
       active={...result,machine};status.textContent=`${machine} · 本机已就绪 · ${result.dataset}@${result.version}`;progress.value=progress.max=1;toast('数据集上传并校验完成，可以用于训练。');
     }catch(error){if(current(expected)){status.textContent=error.message+(active?.uploadId?' 重新点击“上传 / 继续”可检查并续传。':'');}}
     finally{if(current(expected)){uploadBusy=false;controller=null;controls();if(active?.state==='READY')await load();}}

@@ -17,6 +17,7 @@ COPY --chown=root:root portal-server.mjs portal-service.mjs community.mjs mainte
 COPY --chown=root:root cloud-import.mjs aliyun-share.mjs community-cli.mjs ./
 COPY --chown=root:root docs/USER_GUIDE.md ./docs/
 COPY --chown=root:root deploy/install-client.sh deploy/install-client.ps1 ./deploy/
+COPY --chown=root:root transfers.mjs ./
 USER node
 EXPOSE 8080
 CMD ["node", "portal-server.mjs"]
