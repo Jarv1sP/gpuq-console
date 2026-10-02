@@ -8,7 +8,7 @@
 
 打开平台，用管理员提供的注册码注册。新账号的用卡额度为 0；管理员授权服务器和卡数后才能训练。用户电脑不需要安装 Tailscale，也不需要服务器 SSH 密钥。
 
-自己的电脑需要 Node.js 22.13 或更高版本。Windows 可直接使用 PowerShell，不需要 WSL；从平台下载安装客户端：
+仅使用网页无需安装客户端或 Node.js。使用命令行时，自己的电脑需要 Node.js 22.13 或更高版本。Windows 可直接使用 PowerShell，不需要 WSL；从平台下载安装客户端：
 
 ```powershell
 node --version
@@ -73,7 +73,7 @@ exit
 
 代码在 `/workspace`，私人环境在 `/opt/project-env`。默认继承基础 Python 包；需要空环境时新建 `gpuctl project create clean-project --env-mode isolated`。项目名以小写字母开头，可含数字、下划线和连字符，最长 48 字符。
 
-继续已有项目用 `gpuctl project use my-project`；查看项目用 `gpuctl project list`。`push .` 跳过常见环境和秘密文件，但不能识别所有敏感内容，上传前自己检查；不会删除服务器多出来的旧文件，也不会上传数据集或替你迁移本机环境。
+继续已有项目用 `gpuctl project use my-project`；查看项目用 `gpuctl project list`。`push .` 跳过常见环境和秘密文件，但不能识别所有敏感内容，上传前自己检查；不会删除服务器多出来的旧文件，也不会登记或发布数据集、替你迁移本机环境。它不会自动排除数据目录，不要把数据集混进代码目录。
 
 ### 终端断开与重连
 

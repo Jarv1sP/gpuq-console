@@ -8,6 +8,15 @@ const source=readFileSync(new URL('../docs/USER_GUIDE.md',import.meta.url),'utf8
 const blocks=[...source.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)].map(m=>m[1]);
 const words=line=>(line.match(/"[^"\n]*"|'[^'\n]*'|[^\s]+/g)||[]).map(word=>/^['"]/.test(word)?word.slice(1,-1):word);
 
+test('guide separates optional CLI installation and code upload from dataset publishing',()=>{
+  const chapters=parseGuide(source);
+  assert.match(chapters.get('start'),/仅使用网页无需安装客户端或 Node\.js/);
+  assert.match(chapters.get('start'),/使用命令行时，自己的电脑需要 Node\.js 22\.13/);
+  assert.match(chapters.get('development'),/不会登记或发布数据集/);
+  assert.match(chapters.get('development'),/不会自动排除数据目录，不要把数据集混进代码目录/);
+  assert.doesNotMatch(chapters.get('development'),/不会上传数据集/);
+});
+
 test('guide CLI examples use registered options and optional transfer rollout is explicit',()=>{
   let parsed=0,metadata=0,transfers=0;
   for(const block of blocks)for(const line of block.trim().split('\n')){
