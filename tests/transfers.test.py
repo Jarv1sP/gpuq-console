@@ -12,6 +12,7 @@ import shutil
 import ssl
 import subprocess
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
@@ -130,5 +131,27 @@ class Transfers(unittest.TestCase):
         renewed=self.src.prepare({'id':self.key,'reference':self.args['reference'],'userId':USER,'renew':True})
         self.assertNotEqual(renewed['token'],self.args['source']['token']);self.dst.resume({**self.control(),'source':renewed});self.assertEqual(self.dst.worker(self.key,2),0)
         self.assertEqual(self.dst.status(self.control())['version'],self.version)
+
+    def test_capabilities_probe_only_pinned_peers_without_a_ticket(self):
+        manager=SimpleNamespace(returncode=0,stdout='Version=fixture-systemd\n')
+        # The source daemon and its TLS certificate must both be live/valid.
+        self.source.CONFIG['transferPeer']['port']=self.server.server_port
+        with patch.object(T.subprocess,'run',return_value=manager):
+            target=self.dst.capabilities({'userId':USER})
+            self.assertEqual(target,{'protocol':'lan-transfer-v1','enabled':True,'sourceReady':False,'sources':['gpu-1']})
+            source=self.src.capabilities({'userId':USER})
+            self.assertTrue(source['sourceReady'])
+            self.assertNotIn('address',json.dumps(target));self.assertNotIn(self.args['source']['token'],json.dumps(target))
+            self.target.CONFIG['transferPeers']['gpu-1']['certificateSha256']='0'*64
+            self.assertEqual(self.dst.capabilities({'userId':USER})['sources'],[])
+        with self.assertRaises(ValueError):self.dst.capabilities({'userId':USER,'address':'8.8.8.8'})
+
+    def test_capabilities_fail_closed_for_missing_manager_storage_and_bad_config(self):
+        with patch.object(T.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout='')):
+            result=self.dst.capabilities({'userId':USER});self.assertFalse(result['enabled']);self.assertEqual(result['sources'],[])
+        with patch.object(self.target,'dataset_uploads',side_effect=ValueError('storage unavailable')):
+            self.assertFalse(self.dst.capabilities({'userId':USER})['enabled'])
+        with patch.object(self.source,'dataset_mount_check',side_effect=ValueError('mount changed')):
+            self.assertFalse(T.PeerClient(self.target.CONFIG['transferPeers']['gpu-1'],{}).ready())
 
 if __name__=='__main__':unittest.main()

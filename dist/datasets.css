@@ -81,3 +81,4 @@
   #page-datasets .data-workspace-steps {gap:12px}
   #page-datasets .data-workspace-card .file-actions .button {flex:1 1 120px}
 }
+.cloud-import-list{list-style:none;padding:0;display:grid;gap:12px}.cloud-import-list li{display:flex;justify-content:space-between;align-items:center;gap:16px;border-top:1px solid var(--line,#dbe1eb);padding:16px 0;overflow-wrap:anywhere}.cloud-import-list p{margin:5px 0}.cloud-import #cloud-admin{margin-top:24px;border-top:1px solid var(--line,#dbe1eb);padding-top:16px}.cloud-import img{display:block;max-width:100%;margin:16px 0}.cloud-import [hidden]{display:none!important}.cloud-import details{margin:16px 0}.cloud-import #cloud-share-fields .field{gap:8px}.cloud-import #cloud-import-form>.field{margin:18px 0}@media(max-width:640px){.cloud-import-list li{display:block}.cloud-import-list .file-actions{margin-top:12px}}

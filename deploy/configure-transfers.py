@@ -39,7 +39,7 @@ def configure(args):
     if 'transferPeers' in settings:
         import importlib.util
         spec=importlib.util.spec_from_file_location('configure_transfer_client',HERE/'transfer-jobs.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        if not isinstance(settings['transferPeers'],dict):raise ValueError('transferPeers must be a machine-ID map')
+        if not isinstance(settings['transferPeers'],dict) or len(settings['transferPeers'])>16:raise ValueError('transferPeers must be a bounded machine-ID map (at most 16)')
         for name,value in settings['transferPeers'].items():
             if not isinstance(name,str) or not name or len(name)>64:raise ValueError('Invalid peer machine ID')
             module.PeerClient(value,{}).close()

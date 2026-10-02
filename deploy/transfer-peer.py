@@ -26,6 +26,25 @@ def create_server(node, jobs):
         def log_message(self, *args):
             pass  # Never log snapshot tickets or dataset paths.
 
+        def do_GET(self):
+            # No identity, inventory, paths, certificates or tickets here.
+            # The target authenticates this response with its configured pin.
+            self.close_connection = True
+            try:
+                if self.path != '/capabilities' or self.headers.get('Transfer-Encoding') or self.headers.get('Content-Length', '0') != '0':
+                    raise ValueError('Invalid capability probe')
+                node.dataset_mount_check(node.CONFIG['datasets'])
+                payload, code = {'protocol': 'lan-transfer-v1', 'sourceReady': True}, 200
+            except Exception:
+                payload, code = {'protocol': 'lan-transfer-v1', 'sourceReady': False}, 503
+            data = json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(data)
+
         def do_POST(self):
             self.close_connection = True
             try:

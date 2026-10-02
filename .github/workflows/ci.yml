@@ -21,6 +21,7 @@ jobs:
       - run: node tests/dataset-upload-ui-smoke.mjs
       - run: node tests/data-workspace-ui-smoke.mjs
       - run: node tests/transfers-http-ui-smoke.mjs
+      - run: node tests/cloud-import-ui-smoke.mjs
       - run: node tests/projects-ui-smoke.mjs
       - run: node tests/priority-ui-smoke.mjs
       - run: node tests/scheduling-ui-smoke.mjs

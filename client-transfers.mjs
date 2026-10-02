@@ -1,9 +1,9 @@
-import {mkdir,lstat,open,rename,unlink,readFile} from 'node:fs/promises';
+import {mkdir,lstat,open,rename,unlink,link} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import {resolve,dirname,join} from 'node:path';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {remoteSnapshot} from './client-snapshot-sync.mjs';
-import {dataPath,scanLocalDataset,uploadDatasetSnapshot,snapshotKey,DATA_CHUNK} from './client-data-upload.mjs';
+import {dataPath,scanLocalDataset,uploadDatasetSnapshot,snapshotKey,DATA_CHUNK,sameDatasetFile} from './client-data-upload.mjs';
 import {transferUploadCall} from './dist/transfer-upload.js';
 const fail=message=>{throw Error(message);};
 const safe=value=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>'\\u{'+c.codePointAt(0).toString(16)+'}');
@@ -16,6 +16,32 @@ export async function uploadTransfer(call,{machine,name,userId,directory,progres
 }
 async function exists(path){try{return await lstat(path);}catch(e){if(e.code==='ENOENT')return null;throw e;}}
 async function realDirectory(path){const value=await lstat(path);if(!value.isDirectory()||value.isSymbolicLink())fail('Unsafe local download directory: '+path);}
+async function readReceipt(path,expected){
+  let file;
+  try{
+    file=await open(path,constants.O_RDONLY|(constants.O_NOFOLLOW||0)|(constants.O_NONBLOCK||0));
+    const info=await file.stat({bigint:true}),named=await lstat(path,{bigint:true});
+    if(!info.isFile()||named.isSymbolicLink()||info.nlink!==1n||info.size>1024n||!sameDatasetFile(named,info,{pathToHandle:true}))fail('Unsafe download receipt');
+    const bytes=Buffer.alloc(1025),{bytesRead}=await file.read(bytes,0,bytes.length,0);
+    if(BigInt(bytesRead)!==info.size||!sameDatasetFile(info,await file.stat({bigint:true}))||!sameDatasetFile(named,await lstat(path,{bigint:true})))fail('Download receipt changed while reading');
+    const value=JSON.parse(bytes.subarray(0,bytesRead).toString('utf8'));
+    if(!value||Object.keys(value).sort().join(',')!=='id,manifestSha256'||value.id!==expected.id||value.manifestSha256!==expected.manifestSha256)fail('Existing download receipt belongs to different content; no overwrite performed');
+    return value;
+  }catch(error){if(error.code==='ENOENT')return null;throw error;}
+  finally{await file?.close();}
+}
+async function publishReceipt(path,value){
+  // A private random inode is fully written before publishing. Hard-link
+  // publication is atomic and exclusive on POSIX and Windows NTFS; unlike
+  // rename(), it cannot replace an existing destination or follow a symlink.
+  if(await readReceipt(path,value))return;
+  const pending=path+'.pending-'+randomUUID();
+  const file=await open(pending,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|(constants.O_NOFOLLOW||0),0o600);
+  try{
+    await file.writeFile(JSON.stringify(value));await file.sync();await file.close();
+    try{await link(pending,path);}catch(error){if(error.code!=='EEXIST'||!await readReceipt(path,value))throw error;}
+  }finally{await file.close().catch(()=>{});await unlink(pending);}
+}
 async function hashFile(file,size){const buffer=Buffer.alloc(DATA_CHUNK),hash=createHash('sha256');for(let at=0;at<size;){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,size-at),at);if(!bytesRead)fail('Incomplete local file');hash.update(buffer.subarray(0,bytesRead));at+=bytesRead;}return hash.digest('hex');}
 function codepointOrder(a,b){const x=Array.from(a),y=Array.from(b);for(let i=0;i<Math.min(x.length,y.length);i++){const n=x[i].codePointAt(0)-y[i].codePointAt(0);if(n)return n;}return x.length-y.length;}
 function canonicalDigest(raw){const m=JSON.parse(raw);return createHash('sha256').update(JSON.stringify({directories:m.directories.sort(codepointOrder),files:m.files.sort((a,b)=>codepointOrder(a.path,b.path)).map(({path,size,sha256})=>({path,sha256,size})),schema:1})).digest('hex');}
@@ -25,8 +51,8 @@ export async function downloadTransfer(call,{machine,dataset,version,destination
   const target=resolve(destination),partial=target+'.gpuq-partial-'+row.id;
   if(row.state==='CANCELED'||row.cancelRequested)fail('Download was canceled; partial files were retained');
   if(row.state==='UNKNOWN'||!row.snapshot)fail('Download source unconfirmed; repeat original command. Transfer: '+row.id);
-  const receiptPath=target+'.gpuq-receipt.json';let receipt;
-  if(await exists(receiptPath)){const s=await lstat(receiptPath);if(!s.isFile()||s.isSymbolicLink()||s.nlink!==1||s.size>1024)fail('Unsafe download receipt');receipt=JSON.parse(await readFile(receiptPath,'utf8'));}
+  const receiptPath=target+'.gpuq-receipt.json',expectedReceipt={id:row.id,manifestSha256:row.snapshot.manifestSha256};
+  const receipt=await readReceipt(receiptPath,expectedReceipt);
   const recovered=receipt?.id===row.id&&receipt.manifestSha256===row.snapshot.manifestSha256&&!!await exists(target);
   const finalized=row.state==='SUCCEEDED'||recovered;if(await exists(target)&&!finalized)fail('Destination already exists; choose a NEW directory (no overwrite)');
   if(!finalized){await mkdir(dirname(target),{recursive:true});await mkdir(partial,{mode:0o700,recursive:true});await realDirectory(partial);}
@@ -57,7 +83,7 @@ export async function downloadTransfer(call,{machine,dataset,version,destination
     }
     await scan.verify();
     const verified=await scanLocalDataset(root,()=>{});if(canonicalDigest(verified.manifest)!==scan.manifestSha256)fail('Local directory differs from fixed snapshot');
-    const pendingReceipt=receiptPath+'.pending';const receiptFile=await open(pendingReceipt,'w',0o600);try{await receiptFile.writeFile(JSON.stringify({id:row.id,manifestSha256:scan.manifestSha256}));await receiptFile.sync();}finally{await receiptFile.close();}await rename(pendingReceipt,receiptPath);
+    await publishReceipt(receiptPath,expectedReceipt);
     if(await exists(target))fail('Destination appeared during download; no overwrite performed');await rename(partial,target);
     await call('transfers.progress',{id:row.id,bytes:transferred,complete:true});return {transferId:row.id,state:'SUCCEEDED',downloaded:target,bytes:transferred};
   }catch(error){throw Error(error.message+'\n传输：'+row.id+'；重新执行原 download 命令续传。断点目录：'+partial);}

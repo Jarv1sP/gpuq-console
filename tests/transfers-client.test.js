@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,readFile,writeFile,stat} from 'node:fs/promises';
+import {mkdtemp,rm,readFile,writeFile,stat,symlink,link,readdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {randomUUID,createHash} from 'node:crypto';
@@ -38,4 +38,23 @@ test('shared browser/CLI upload adapter registers one task and scopes every chun
   const id=randomUUID(),calls=[],call=transferUploadCall(async(op,args)=>{calls.push({op,args});return op==='transfers.create'?{id,uploadId:randomUUID(),state:'WAITING_CLIENT',result:{state:'UPLOADING',uploadId:id}}:{offset:1};});
   await call('datasets.upload.begin',{machine:'gpu-1',name:'mine',key:randomUUID(),manifestBytes:100,manifestSha256:'a'.repeat(64),totalBytes:1,entries:1});await call('datasets.upload.chunk',{machine:'gpu-1',uploadId:id,path:'x',offset:0,data:'YQ=='});assert.equal(calls[1].op,'transfers.io');assert.equal(calls[1].args.id,id);assert.equal(calls[1].args.machine,undefined);
   const canceled=transferUploadCall(async()=>({id,state:'CANCELED'}));await assert.rejects(canceled('datasets.upload.begin',{}),/终止/);assert.doesNotMatch(transferText({id:'id',kind:'copy',machine:'x\x1b[31m',state:'UNKNOWN'}),/\x1b/);
+});
+test('download receipts never overwrite unrelated regular files, including stale pending files',async t=>{
+  const f=await fixture(t),receipt=f.options.destination+'.gpuq-receipt.json';
+  await writeFile(receipt,JSON.stringify({id:randomUUID(),manifestSha256:'f'.repeat(64)}));const original=await readFile(receipt);
+  await assert.rejects(downloadTransfer(f.call,f.options),/different content/);assert.deepEqual(await readFile(receipt),original);
+  await rm(receipt);await writeFile(receipt+'.pending','unrelated pending file');
+  await downloadTransfer(f.call,f.options);assert.equal(await readFile(receipt+'.pending','utf8'),'unrelated pending file');
+  assert.equal((await readdir(f.dir)).some(name=>name.includes('.pending-')),false);assert.equal((await stat(receipt)).nlink,1);
+});
+test('symlink and hard-link receipt targets are refused without modifying their referents',async t=>{
+  const f=await fixture(t),receipt=f.options.destination+'.gpuq-receipt.json',victim=join(f.dir,'keep.json');await writeFile(victim,'keep');
+  try{await symlink(victim,receipt);}catch(error){if(process.platform==='win32'&&error.code==='EPERM'){t.diagnostic('Windows lacks symlink privilege; hard-link protection is still tested');}else throw error;}
+  if(await stat(receipt).catch(()=>null)){await assert.rejects(downloadTransfer(f.call,f.options));assert.equal(await readFile(victim,'utf8'),'keep');await rm(receipt);}
+  await link(victim,receipt);await assert.rejects(downloadTransfer(f.call,f.options),/Unsafe/);assert.equal(await readFile(victim,'utf8'),'keep');
+});
+test('receipt appearing during download is not clobbered, and complete is never reported',async t=>{
+  const f=await fixture(t),receipt=f.options.destination+'.gpuq-receipt.json';let planted=false;
+  const call=async(op,args)=>{if(op==='transfers.io'&&args.action==='get'&&!planted){planted=true;await writeFile(receipt,JSON.stringify({id:'other',manifestSha256:'other'}));}return f.call(op,args);};
+  await assert.rejects(downloadTransfer(call,f.options),/different content/);assert.equal(JSON.parse(await readFile(receipt,'utf8')).id,'other');assert.equal(f.row.state,'WAITING_CLIENT');
 });

@@ -47,7 +47,27 @@ CLI copy 会先打印重试键；首次请求结果丢失时，重复原命令�
 
 锁在下载电脑上、断点目录或最终目录的旁边，文件中记录本机 PID；Linux/macOS 用 `ps -p PID -o pid,args`，Windows 用 `Get-Process -Id PID` 核对。UNKNOWN 先反复 status 核对原任务；节点重新可达后会据原 unit/cgroup 回执恢复状态。没有启动回执的长期 UNKNOWN 需要管理员检查原 unit，不能靠改键绕过；确认不需要后可 cancel 固定 ID，堵住迟到启动。
 
-这一版覆盖固定数据集目录；旧 `push`、单文件 `pull` 和 `sync code/git` 保持原行为，不声称已具备此后台续传能力。普通用户的任意长 CPU 脚本、URL 下载队列和跨机训练自动迁移另做，不通过给予 root 实现。
+这一版覆盖固定数据集目录；旧 `push`、单文件 `pull` 和 `sync code/git` 保持原行为，不声称已具备此后台续传能力。URL／云盘后台导入使用独立的 [云端导入接口](CLOUD_IMPORT.md)，不经 LAN copy 搬运文件。普通用户的任意长 CPU 脚本和跨机训练自动迁移不在本接口内，也不通过给予 root 实现。
+
+客户端下载回执只能独占发布到不存在的文件名；已有不同内容、软链接或硬链接会拒绝，不覆盖目标。实现使用私有随机临时文件、文件同步及原子硬链接发布；支持 POSIX 和 Windows NTFS，文件系统不支持硬链接时明确失败，不降级为覆盖写入。中断前已发布的相同回执可复用，最终目录仍须完整 SHA256 校验。
+
+## 服务端集成
+
+`transfers.capabilities {machine}` 只读查询当前账号获授权节点，返回：
+
+```json
+{"machine":"gpu-2","enabled":true,"sourceReady":false,"sources":["gpu-1"],"protocol":"lan-transfer-v1"}
+```
+
+`enabled` 表示目标的本地存储配置及用户 systemd 管理器可用；`sourceReady` 表示本节点的可选只读 TLS 监听通过实际探测；`sources` 只含本账号获授权、管理员明确配置且证书 pin 与实时只读协议探测均通过的源机器 ID。不会返回地址、证书或令牌。旧节点、离线和未配置状态默认不可用。能力不保证某个数据集的授权／容量或将来的可达性；实际创建及逐块读取仍检查固定快照权限。
+
+探测仅在明确查询时发生，不在启动时扫描网络；每节点最多配置 16 个固定 LAN peer，最多 4 个并行探测，每连接超时 2 秒。探测不带源票据，也不读取数据。不要用能力声明替代目标最终 READY 检查。
+
+`installTransfers(service)` 提供 `service.transferCall(principal, operation, args)`，与 HTTP 和导出的 `transferCall` 共用限流与串行通道：全局最多 8 个在途／排队调用，每账号和每传输最多 2 个。I/O 不持有全局账号／调度队列，每次 RPC 前后重新核对账号策略，取消先持久写入意图以阻止迟到启动。数据库事务均是无 await 的同步操作。恢复只观察原任务，不自动重派；调用者必须固定同一重试键。
+
+`service.transferSnapshot(ownerId, transferId)` 是不联网的只读安全回执；只返回该 owner 的记录，否则 null，不含源票据。内部训练准备适配器可保存逻辑源引用、重试键及 transferId，复用现有传输表和唯一核对定时器。copy 成功返回的 `result.dataset` 可能是新的私有数据集 ID；必须保存其映射，检查版本相等，再以真实目标 ID 查询 READY、申请数据租约，之后才允许申请 GPU。不得仅凭 `SUCCEEDED` 或客户端自报下载完成放行训练。
+
+若服务安装了纯本地 `datasetPhysicalReference(ownerId, sourceMachine, {dataset,version})`，手动 copy/download 会在固化请求摘要前使用已确认的 owner 专属物理 ID。映射不得改变版本；同一重试键的映射变化会拒绝，不会悄悄改源。
 
 ## 管理员启用 LAN 复制
 

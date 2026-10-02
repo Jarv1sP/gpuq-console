@@ -1,7 +1,7 @@
 import {createSubmissionKeys} from './submission-keys.js';
 
-export const taskNotesMarkup=`<section id="community-notes" role="tabpanel" aria-labelledby="community-tab-notes" hidden>
-  <div class="chat-topline"><div><h3>任务留言板</h3><p>任务留言在训练确认结束后自动删除；非任务留言一直保留，直到手动删除。</p></div><button class="button" id="notes-refresh" type="button">刷新</button></div>
+export const taskNotesMarkup=`<section id="community-notes" aria-label="任务留言">
+  <div class="chat-topline"><div><h3>关联任务的使用计划</h3><p>关联留言随任务结束清理；长期内容请发帖，也可选择手动保留。</p></div><button class="button" id="notes-refresh" type="button">刷新</button></div>
   <div id="task-notes-list" class="community-posts"></div><button class="button community-more" id="notes-more" type="button" hidden>加载更多</button>
   <form id="task-note-form"><label for="task-note-lifetime">留言保留方式</label><select id="task-note-lifetime" required><option value="">请选择</option><option value="task">随任务结束删除</option><option value="general">非任务留言，手动删除</option></select>
   <label id="task-note-job-field" hidden>我的未结束任务<select id="task-note-job"></select></label>

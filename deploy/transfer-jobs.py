@@ -5,6 +5,7 @@ Portal SSH executor alone may create/cancel jobs or mint source tickets. No
 host path, shell command, identity or peer address comes from a peer request.
 """
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -22,6 +23,7 @@ import subprocess
 import time
 
 VERSION = 1
+PROTOCOL = 'lan-transfer-v1'
 CHUNK = 1024**2
 UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z')
 HASH = re.compile(r'[a-f0-9]{64}\Z')
@@ -64,20 +66,39 @@ class PeerClient:
             self.connection.close()
         self.connection = None
 
-    def call(self, action, **fields):
-        try:
-            if not self.connection or self.connection.sock is None:
-                self.close()
-                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE  # Explicit DER pin is the trust anchor.
-                context.minimum_version = ssl.TLSVersion.TLSv1_2
-                connection = http.client.HTTPSConnection(self.config['address'], self.config['port'], timeout=25, context=context)
+    def connect(self, timeout=25):
+        if not self.connection or self.connection.sock is None:
+            self.close()
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE  # Explicit DER pin is the trust anchor.
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            connection = http.client.HTTPSConnection(self.config['address'], self.config['port'], timeout=timeout, context=context)
+            try:
                 connection.connect()
                 if not hmac.compare_digest(hashlib.sha256(connection.sock.getpeercert(binary_form=True)).hexdigest(), self.config['certificateSha256']):
-                    connection.close()
                     raise ValueError('LAN peer certificate differs from configured pin')
-                self.connection = connection
+            except Exception:
+                connection.close()
+                raise
+            self.connection = connection
+
+    def ready(self):
+        """Bounded, ticket-free probe, only to an explicitly pinned LAN peer."""
+        try:
+            self.connect(timeout=2)
+            self.connection.request('GET', '/capabilities')
+            response = self.connection.getresponse()
+            raw = response.read(257)
+            return response.status == 200 and len(raw) <= 256 and json.loads(raw) == {'protocol': PROTOCOL, 'sourceReady': True}
+        except (OSError, ValueError, http.client.HTTPException):
+            return False
+        finally:
+            self.close()
+
+    def call(self, action, **fields):
+        try:
+            self.connect()
             payload = json.dumps({'id': self.ticket['id'], 'action': action, **fields}).encode()
             self.connection.request('POST', '/snapshot', body=payload,
                 headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+self.ticket['token']})
@@ -129,6 +150,40 @@ class TransferJobs:
         if not USER.fullmatch(args.get('userId', '')) or type(args.get('hostAdmin', False)) is not bool:
             raise ValueError('Invalid transfer identity')
         self.n.workspace(args['userId'])
+
+    def capabilities(self, args):
+        if set(args) != {'userId'}:
+            raise ValueError('Capability query accepts only authenticated identity')
+        self.actor(args)
+        result = {'protocol': PROTOCOL, 'enabled': False, 'sourceReady': False, 'sources': []}
+        try:
+            self.n.dataset_uploads()  # Configured quotas and live local mount.
+            manager = subprocess.run(['/usr/bin/systemctl', '--user', 'show', '--property=Version'],
+                env=self.n.ENV, text=True, capture_output=True, timeout=3)
+            result['enabled'] = manager.returncode == 0 and manager.stdout.startswith('Version=')
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        peer = self.n.CONFIG.get('transferPeer')
+        if isinstance(peer, dict):
+            try:
+                certificate = Path(peer['certificate']).read_text()
+                pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificate)).hexdigest()
+                result['sourceReady'] = PeerClient({'address': peer['bind'], 'port': peer['port'], 'certificateSha256': pin}, {}).ready()
+            except (KeyError, OSError, ValueError, TypeError):
+                pass
+        peers = self.n.CONFIG.get('transferPeers', {})
+        if not result['enabled'] or not isinstance(peers, dict) or len(peers) > 16:
+            return result
+        def probe(item):
+            machine, config = item
+            try:
+                if isinstance(machine, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', machine) and PeerClient(config, {}).ready():
+                    return machine
+            except (ValueError, TypeError, KeyError):
+                pass
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            result['sources'] = sorted(filter(None, pool.map(probe, peers.items())))
+        return result
 
     def source(self, ref, actor, action, **fields):
         from importlib.util import spec_from_file_location, module_from_spec
@@ -488,6 +543,7 @@ class TransferJobs:
     def process(self, operation, args):
         action = operation.removeprefix('transfers.')
         if not isinstance(args, dict):raise ValueError('Invalid transfer fields')
+        if action == 'capabilities':return self.capabilities(args)
         if action == 'source.prepare':return self.prepare(args)
         if action == 'source.read':
             if set(args)-{'userId','id','action','path','offset','token'}:raise ValueError('Invalid snapshot read fields')

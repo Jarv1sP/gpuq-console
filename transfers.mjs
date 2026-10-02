@@ -8,6 +8,16 @@ const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});}
 const fields=(args,allowed)=>{if(Object.keys(args).some(k=>!allowed.includes(k)))fail('传输参数无效。');};
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const validId=value=>{if(typeof value!=='string'||!uuid.test(value))fail('需提供完整传输 UUID。');return value;};
+const lanes=new WeakMap();
+function laneState(service){let state=lanes.get(service);if(!state){state={pending:0,users:new Map(),rows:new Map()};lanes.set(service,state);}return state;}
+async function inLane(service,owner,key,run){
+  const state=laneState(service),lane=state.rows.get(key)||{tail:Promise.resolve(),pending:0},count=state.users.get(owner)||0;
+  if(state.pending>=8||count>=2||lane.pending>=2)fail('传输请求正在处理，请稍后刷新。',429);
+  state.pending++;state.users.set(owner,count+1);lane.pending++;state.rows.set(key,lane);
+  const result=lane.tail.then(run);lane.tail=result.catch(()=>{});
+  try{return await result;}finally{state.pending--;lane.pending--;const left=state.users.get(owner)-1;if(left)state.users.set(owner,left);else state.users.delete(owner);if(!lane.pending)state.rows.delete(key);}
+}
+const rowKey=row=>JSON.stringify([row.owner_id,row.client_key]);
 function info(value){
   if(value?.state!=='READY'||!hash.test(value.manifestSha256||'')||!Number.isSafeInteger(value.manifestBytes)||value.manifestBytes<1||value.manifestBytes>64*1024**2||!Number.isSafeInteger(value.totalBytes)||value.totalBytes<0||!Number.isSafeInteger(value.entries)||value.entries<0||value.entries>500000)fail('快照尚未就绪或清单无效。',409);
   return Object.fromEntries(['state','manifestBytes','manifestSha256','totalBytes','entries'].map(k=>[k,value[k]]));
@@ -16,6 +26,11 @@ function load(service,id){const row=service.db.prepare('SELECT * FROM transfers 
 function view(row){const {sourceTicket,...safe}=row.data;return {id:row.id,state:row.state,createdAt:row.created_at,updatedAt:row.updated_at,...safe};}
 function transaction(service,fn){service.db.exec('BEGIN IMMEDIATE');try{const result=fn();service.db.exec('COMMIT');return result;}catch(e){service.db.exec('ROLLBACK');throw e;}}
 function save(service,row,state,actor,operation){
+  if(service.closing)fail('服务正在关闭。',503);
+  // A cancel intent can arrive while a serialized operation is awaiting I/O.
+  // Never let that older operation overwrite the durable fence.
+  const current=load(service,row.id);
+  if(current.data.cancelRequested){row.data.cancelRequested=true;if(!done.has(state)&&state!=='UNKNOWN')state='CANCELING';}
   transaction(service,()=>{service.db.prepare('UPDATE transfers SET state=?,data=?,updated_at=? WHERE id=?').run(state,JSON.stringify(row.data),Date.now(),row.id);if(state!==row.state||operation!=='transfers.sync')service.audit(actor,operation,row.id,state);});return load(service,row.id);
 }
 function authorized(service,user,machine){if(!MACHINES.some(m=>m.id===machine)||!service.store.get(user.id).limits[machine])fail('这台机器未授权。',403);}
@@ -48,7 +63,7 @@ async function sync(service,row,actor='transfer-reconcile'){
       data.result=result;state=result.state==='READY'?'SUCCEEDED':result.state==='DISCARDED'?'CANCELED':['SEALING','PUBLISHING'].includes(result.state)?'VERIFYING':result.state==='FAILED'?'FAILED':'WAITING_CLIENT';
     }
     delete data.error;
-  }catch{state='UNKNOWN';data.error='原节点回执未确认；不会自动改机器或重复启动。';}
+  }catch(error){if(error.transferFence)throw error;state='UNKNOWN';data.error='原节点回执未确认；不会自动改机器或重复启动。';}
   return save(service,row,state,actor,'transfers.sync');
 }
 async function dispatch(service,principal,row){
@@ -76,15 +91,68 @@ async function dispatch(service,principal,row){
 export function installTransfers(service){
   service.db.exec(`CREATE TABLE IF NOT EXISTS transfers(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,owner_id TEXT NOT NULL,client_key TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,data TEXT NOT NULL,UNIQUE(owner_id,client_key));CREATE INDEX IF NOT EXISTS transfers_state ON transfers(state,updated_at);`);
   service.transfersReconciling=false;
+  service.transferCall=(principal,operation,args)=>transferCall(service,principal,operation,args);
+  service.transferSnapshot=(owner,id)=>{
+    if(service.closing||typeof id!=='string'||!uuid.test(id))return null;
+    const row=service.db.prepare('SELECT * FROM transfers WHERE id=? AND owner_id=?').get(id,owner);
+    return row?view({...row,data:JSON.parse(row.data)}):null;
+  };
   service.reconcileTransfers=async()=>{
     if(service.closing||!service.bridge||service.transfersReconciling)return;service.transfersReconciling=true;
-    try{const rows=service.db.prepare("SELECT id FROM transfers WHERE state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED') AND json_extract(data,'$.kind') != 'download' ORDER BY updated_at LIMIT 4").all();for(const {id} of rows)await service.enqueue(async()=>{if(!service.closing)await sync(service,load(service,id));});}finally{service.transfersReconciling=false;}
+    try{const rows=service.db.prepare("SELECT * FROM transfers WHERE state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED') AND json_extract(data,'$.kind') != 'download' ORDER BY updated_at LIMIT 4").all();await Promise.all(rows.map(row=>inLane(service,row.owner_id,rowKey(row),async()=>{if(!service.closing)await sync(service,load(service,row.id));}).catch(()=>{})));}finally{service.transfersReconciling=false;}
   };
   service.transferTimer=setInterval(()=>service.reconcileTransfers().catch(()=>{}),15000);service.transferTimer.unref();
 }
-export async function transferCall(service,principal,operation,args){
+// Both HTTP and internal preparation callers use this same bounded lane.
+// Database transactions below are synchronous; remote I/O never owns the
+// global account/scheduler queue. Every RPC is fenced before AND after await.
+export async function transferCall(service,principal,operation,args,assertCurrent=()=>{}){
+  if(!args||typeof args!=='object'||Array.isArray(args))fail('传输参数无效。');
+  args=structuredClone(args);principal={...principal};
+  const policy=JSON.stringify(service.store.get(principal.userId));
+  const check=()=>{
+    if(service.closing)throw Object.assign(Error('服务正在关闭。'),{status:503,transferFence:true});
+    try{assertCurrent();const user=service.store.get(principal.userId);if(!user.enabled||user.username!==principal.username||principal.role==='admin'&&user.role!=='admin'||JSON.stringify(user)!==policy)fail('账号授权已改变，请重新操作。',403);}
+    catch(error){error.transferFence=true;error.status??=403;throw error;}
+  };
+  check();let key;
+  if(operation==='transfers.create')key=JSON.stringify([principal.userId,validId(args.key)]);
+  else if(['transfers.list','transfers.capabilities'].includes(operation))key=JSON.stringify([principal.userId,operation]);
+  else{const row=load(service,args.id);access(service,principal,row);key=rowKey(row);}
+  // Persist before waiting for this transfer's active RPC; the node also has a
+  // permanent cancel marker, fencing an already in-flight start on arrival.
+  if(operation==='transfers.cancel'){
+    fields(args,['id']);const row=load(service,args.id);if(!done.has(row.state)){row.data.cancelRequested=true;save(service,row,'CANCELING',principal.username,operation);}
+  }
+  return inLane(service,principal.userId,key,async()=>{
+    const current=()=>{
+      check();
+      if(!['transfers.cancel','transfers.status','transfers.list','transfers.capabilities'].includes(operation)){
+        const row=operation==='transfers.create'?service.db.prepare('SELECT data FROM transfers WHERE owner_id=? AND client_key=?').get(principal.userId,args.key):load(service,args.id);
+        const data=typeof row?.data==='string'?JSON.parse(row.data):row?.data;
+        if(data?.cancelRequested)throw Object.assign(Error('传输已终止或正在取消。'),{status:409,transferFence:true});
+      }
+    };
+    // A narrow per-call view lets existing upload/snapshot validators use the
+    // same bridge without bypassing the policy fence or mutating shared hooks.
+    const context=Object.create(service);
+    context.bridge=async(...request)=>{current();try{return await service.bridge(...request);}finally{current();}};
+    check();try{return await transferOperation(context,principal,operation,args);}finally{check();}
+  });
+}
+async function transferOperation(service,principal,operation,args){
   if(!service.bridge)fail('节点执行桥尚未配置。',503);
   const user=service.store.get(principal.userId);if(!user.enabled)fail('账号已暂停。',403);
+  if(operation==='transfers.capabilities'){
+    fields(args,['machine']);authorized(service,user,args.machine);
+    const unavailable={machine:args.machine,enabled:false,sourceReady:false,sources:[],protocol:'lan-transfer-v1'};
+    try{
+      const value=await service.bridge(args.machine,'transfers.capabilities',{userId:user.id});
+      if(value?.protocol!=='lan-transfer-v1'||typeof value.enabled!=='boolean'||typeof value.sourceReady!=='boolean'||!Array.isArray(value.sources))return unavailable;
+      const sources=[...new Set(value.sources)].filter(id=>id!==args.machine&&MACHINES.some(m=>m.id===id)&&user.limits[id]>0);
+      return {...unavailable,enabled:value.enabled,sourceReady:value.sourceReady,sources:value.enabled?sources:[]};
+    }catch(error){if(error.transferFence)throw error;return unavailable;}
+  }
   if(operation==='transfers.list'){
     fields(args,['cursor','limit']);const cursor=args.cursor??0,limit=args.limit??25;
     if(!Number.isSafeInteger(cursor)||cursor<0||!Number.isInteger(limit)||limit<1||limit>50)fail('传输分页参数无效。');
@@ -108,6 +176,11 @@ export async function transferCall(service,principal,operation,args){
     if(args.kind!=='download'){
       if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(args.name||''))fail('目标名称需为 1–40 位字母、数字、短横线或下划线。');payload.name=args.name;
     }else if(args.name!==undefined||args.timeoutSec!==undefined)fail('下载不接受服务器任务参数。');
+    if(payload.reference&&service.datasetPhysicalReference){
+      const mapped=service.datasetPhysicalReference(user.id,payload.from||payload.machine,{dataset:args.dataset,version:args.version});
+      if(!mapped||Object.keys(mapped).sort().join(',')!=='dataset,version'||typeof mapped.dataset!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(mapped.dataset)||mapped.version!==args.version)fail('数据集逻辑引用尚未确认。',409);
+      payload.reference={kind:'datasets',dataset:mapped.dataset,version:mapped.version};
+    }
     let previous=service.db.prepare('SELECT id,digest FROM transfers WHERE owner_id=? AND client_key=?').get(user.id,args.key),row;
     if(previous){if(previous.digest!==digest(payload))fail('同一重试键不能修改传输内容。',409);row=load(service,previous.id);if(done.has(row.state)||row.data.cancelRequested)return view(row);}
     else{
@@ -115,7 +188,7 @@ export async function transferCall(service,principal,operation,args){
       if(service.db.prepare("SELECT COUNT(*) n FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED')").get(user.id).n>=20)fail('请先处理现有传输任务。',429);
       const id=randomUUID(),now=Date.now();transaction(service,()=>{service.db.prepare('INSERT INTO transfers(id,owner_id,client_key,digest,state,created_at,updated_at,data) VALUES(?,?,?,?,?,?,?,?)').run(id,user.id,args.key,digest(payload),'DISPATCHING',now,now,JSON.stringify({...payload,owner:{id:user.id,username:user.username,name:user.name}}));service.audit(principal.username,operation,id,'DISPATCHING');});row=load(service,id);
     }
-    try{return view(await dispatch(service,principal,row));}catch(error){row=load(service,row.id);row.data.error=String(error.message).slice(0,300);return view(save(service,row,'UNKNOWN',principal.username,'transfers.dispatch-unknown'));}
+    try{return view(await dispatch(service,principal,row));}catch(error){if(error.transferFence)throw error;row=load(service,row.id);row.data.error='节点传输初始化未确认，请核对原任务。';return view(save(service,row,'UNKNOWN',principal.username,'transfers.dispatch-unknown'));}
   }
   const row=load(service,args.id);access(service,principal,row);
   if(operation==='transfers.status'){fields(args,['id']);return view(await sync(service,row,principal.username));}
@@ -124,10 +197,10 @@ export async function transferCall(service,principal,operation,args){
     row.data.cancelRequested=true;
     let current=save(service,row,'CANCELING',principal.username,operation);
     if(row.data.kind==='copy'){
-      try{const result=await service.bridge(row.data.machine,'transfers.cancel',{id:row.id,userId:user.id});current.data.result=result;return view(save(service,current,result.state,principal.username,'transfers.cancel-result'));}catch{current.data.error='取消回执未确认；核对原传输，不会重启。';return view(save(service,current,'UNKNOWN',principal.username,'transfers.cancel-unknown'));}
+      try{const result=await service.bridge(row.data.machine,'transfers.cancel',{id:row.id,userId:user.id});if(result.id!==row.id||!states.has(result.state))fail('取消回执不匹配。',502);current.data.result=result;return view(save(service,current,result.state,principal.username,'transfers.cancel-result'));}catch(error){if(error.transferFence)throw error;current.data.error='取消回执未确认；核对原传输，不会重启。';return view(save(service,current,'UNKNOWN',principal.username,'transfers.cancel-unknown'));}
     }
     if(row.data.kind==='upload'){
-      try{if(!row.data.uploadId)current=await dispatch(service,principal,current);await service.bridge(row.data.machine,'datasets.upload.pause',{uploadId:current.data.uploadId,userId:user.id,hostAdmin:false});}catch{current.data.error='上传后台校验是否已停尚未确认；重试取消。';return view(save(service,current,'UNKNOWN',principal.username,'transfers.cancel-unknown'));}
+      try{const result=await service.bridge(row.data.machine,'datasets.upload.pause',{uploadId:row.data.uploadId||row.client_key,userId:user.id,hostAdmin:false});if(result.state==='READY')return view(save(service,current,'SUCCEEDED',principal.username,'transfers.canceled-ready'));}catch(error){if(error.transferFence)throw error;current.data.error='上传后台校验是否已停尚未确认；重试取消。';return view(save(service,current,'UNKNOWN',principal.username,'transfers.cancel-unknown'));}
     }
     return view(save(service,current,'CANCELED',principal.username,'transfers.canceled'));
   }
@@ -140,8 +213,8 @@ export async function transferCall(service,principal,operation,args){
     const source={id:row.id,token:ticket.token,...info(ticket)};
     if(Object.keys(current.data.sourceTicket).some(k=>k!=='token'&&current.data.sourceTicket[k]!==source[k]))fail('恢复只能读取原固定版本。',409);
     current.data.sourceTicket=source;const saved=save(service,current,'DISPATCHING',principal.username,'transfers.resume-intent');
-    try{const result=await service.bridge(row.data.machine,'transfers.resume',{id:row.id,userId:user.id,source});saved.data.result=result;return view(save(service,saved,result.state,principal.username,operation));}
-    catch{saved.data.error='恢复回执未确认；核对同一任务，不会重复启动。';return view(save(service,saved,'UNKNOWN',principal.username,'transfers.resume-unknown'));}
+    try{const result=await service.bridge(row.data.machine,'transfers.resume',{id:row.id,userId:user.id,source});if(result.id!==row.id||!states.has(result.state))fail('恢复回执不匹配。',502);saved.data.result=result;return view(save(service,saved,result.state,principal.username,operation));}
+    catch(error){if(error.transferFence)throw error;saved.data.error='恢复回执未确认；核对同一任务，不会重复启动。';return view(save(service,saved,'UNKNOWN',principal.username,'transfers.resume-unknown'));}
   }
   if(operation==='transfers.io'){
     fields(args,['id','action','path','offset','data']);if(done.has(row.state)||row.data.cancelRequested)fail('此传输已结束或正在取消。',409);

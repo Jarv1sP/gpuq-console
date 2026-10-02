@@ -20,7 +20,7 @@ try{
   ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,statusPath,bridge}));clearInterval(service.executionTimer);await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'elastic-user',password})).result;
   await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:8,limits:{[machine]:8}});
-  browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1280,height:1000}});
+  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});const page=await browser.newPage({viewport:{width:1280,height:1000}});
   page.on('pageerror',e=>errors.push(e.message));page.on('response',r=>{const path=new URL(r.url()).pathname;if(r.status()===401&&!authenticated&&path==='/api/call'&&r.request().postDataJSON()?.operation==='state')return;if(r.status()>=400)httpErrors.push({status:r.status(),path});});
   await page.route('**/*',route=>{if(new URL(route.request().url()).origin!==origin){outside.push(route.request().url());return route.abort();}return route.continue();});
   await page.goto(origin);await page.locator('#login-form [name=username]').fill('elastic-user');await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});authenticated=true;
