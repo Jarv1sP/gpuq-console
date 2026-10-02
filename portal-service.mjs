@@ -145,7 +145,7 @@ export class PortalService extends DemoService{
   register(args){return this.enqueue(async()=>{
     const before=structuredClone(this.export());let transaction=false;
     try{
-      if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>!['username','password','invite','client'].includes(k)))throw Error('注册参数无效；角色由邀请码决定。');
+      if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>!['username','password','invite','client','name'].includes(k)))throw Error('注册参数无效；角色由邀请码决定。');
       const {password,invite}=args,username=String(args.username??'').trim();
       if(!validUsername(username))throw Error('用户名须为 2–24 位，使用汉字或小写字母开头，可含数字、下划线和短横线。');
       if(typeof password!=='string'||password.length<8||password.length>128)throw Error('密码需为 8–128 个字符。');
@@ -159,7 +159,7 @@ export class PortalService extends DemoService{
       this.db.exec('BEGIN IMMEDIATE');transaction=true;
       const update=this.db.prepare('UPDATE invites SET uses=uses+1 WHERE role=? AND digest=? AND enabled=1 AND (max_uses IS NULL OR uses<max_uses)').run(code.role,digest);
       if(update.changes!==1)throw Error('邀请码已失效，请联系管理员。');
-      const user=this.store.create(username,username);this.store.setRole(user.id,'member');this.store.users.find(u=>u.id===user.id).policyVersion=0;this.credentials.set(username,record);
+      const user=this.store.create(args.name??username,username);this.store.setRole(user.id,'member');this.store.users.find(u=>u.id===user.id).policyVersion=0;this.credentials.set(username,record);
       this.save();this.audit(username,'register',code.role,'ok');this.db.exec('COMMIT');transaction=false;
       return {registered:true,username,role:code.role};
     }catch(e){if(transaction)this.db.exec('ROLLBACK');this.restore(before);this.audit('guest','register',null,'denied');throw e;}
@@ -240,9 +240,9 @@ export class PortalService extends DemoService{
   async refreshGPUQ(){this.gpuq=await readGPUQStatus(this.statusPath);}
   state(principal){
     const state=super.state(principal);
-    const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits);
+    const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits,{jobs:this.store.jobs,users:this.store.users});
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
-    return {...state,maintenance:{version:1,retired:true,readOnly:true},jobs:state.jobs.map(j=>({...publicJob(j),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
+    return {...state,taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},jobs:state.jobs.map(j=>({...publicJob(j,this.store.users),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }

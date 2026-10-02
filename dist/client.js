@@ -25,7 +25,7 @@ export class DemoClient{
     if(generation!==this.authGeneration)throw this.stale();
     this.token=data.token;this.principal=data.principal;this.data=data.state;return data.principal;
   });}
-  async register(username,password,invite){if(!this.production)throw Error('邀请码注册仅在正式后台开放。');if(this.authPending)throw this.stale();const generation=this.authGeneration;return this.track((async()=>{try{const result=await this.transport('register',{username,password,invite});if(generation!==this.authGeneration)throw this.stale();return result;}catch(error){if(generation!==this.authGeneration)throw this.stale();throw error;}})());}
+  async register(username,password,invite,name){if(!this.production)throw Error('邀请码注册仅在正式后台开放。');if(this.authPending)throw this.stale();const generation=this.authGeneration;return this.track((async()=>{try{const result=await this.transport('register',{username,password,invite,...(name?{name}:{})});if(generation!==this.authGeneration)throw this.stale();return result;}catch(error){if(generation!==this.authGeneration)throw this.stale();throw error;}})());}
   async call(operation,args={},options={}){
     if(operation==='logout')return this.logout();
     if(this.authPending)throw this.stale('正在切换登录账号，请稍后重试。');
