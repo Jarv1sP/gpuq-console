@@ -8,18 +8,19 @@ const source=readFileSync(new URL('../docs/USER_GUIDE.md',import.meta.url),'utf8
 const blocks=[...source.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)].map(m=>m[1]);
 const words=line=>(line.match(/"[^"\n]*"|'[^'\n]*'|[^\s]+/g)||[]).map(word=>/^['"]/.test(word)?word.slice(1,-1):word);
 
-test('guide CLI examples use real registered options, with pending task-metadata commands explicitly gated',()=>{
-  let parsed=0,pending=0;
+test('guide CLI examples use registered options and optional transfer rollout is explicit',()=>{
+  let parsed=0,metadata=0,transfers=0;
   for(const block of blocks)for(const line of block.trim().split('\n')){
     if(!line.startsWith('gpuctl '))continue;
     const argv=words(line).slice(1);
-    if(['profile','queue'].includes(argv[0])||argv.includes('--description')){
-      pending++;assert.match(source,/姓名与描述（需任务信息新版）/);assert.match(source,/不要把指南更新当作功能已经上线/);continue;
-    }
+    if(['profile','queue'].includes(argv[0])||argv.includes('--description'))metadata++;
+    if(argv[0]==='transfer')transfers++;
     const result=parseCLIOptions(argv);assert.ok(result.positionals.length,line);parsed++;
     if(argv[0]==='run')assert.ok(result.training.length,'run needs executable argv after --: '+line);
   }
-  assert.ok(parsed>=25);assert.equal(pending,4);
+  assert.ok(parsed>=25);assert.equal(metadata,4);assert.ok(transfers>=6);
+  assert.match(source,/姓名与描述（需任务信息新版）/);assert.match(source,/不要把指南更新当作功能已经上线/);
+  assert.match(source,/管理员启用后的可选能力/);assert.match(source,/不会因更新客户端自动开放/);
 });
 test('copy blocks never silently undo the preceding upload, subscription or note creation',()=>{
   for(const block of blocks){
