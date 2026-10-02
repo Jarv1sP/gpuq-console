@@ -1,6 +1,7 @@
 // Shared policy model; preview uses memory while the portal persists it.
 export const validUsername = value => typeof value==='string' && /^[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}$/u.test(value);
 import {MACHINES} from './machines.js';
+import {displayName} from './task-metadata.js';
 export {MACHINES};
 const clone = value => JSON.parse(JSON.stringify(value));
 export class DemoStore {
@@ -15,8 +16,7 @@ export class DemoStore {
   get(id){const u=this.users.find(u=>u.id===id);if(!u)throw Error('找不到这个演示用户。');return clone(u.role==='admin'?{...u,limits:Object.fromEntries(MACHINES.map(m=>[m.id,m.cards])),total:MACHINES.reduce((n,m)=>n+m.cards,0)}:{...u,role:'member'});}
   setRole(id,role){this.get(id);if(!['admin','member'].includes(role))throw Error('角色须为 admin 或 member。');this.users.find(u=>u.id===id).role=role;return this.get(id);}
   create(name,username){
-    name=String(name).trim();username=String(username).trim();
-    if(!name||name.length>32)throw Error('请输入 1–32 字的显示名称。');
+    name=displayName(name);username=String(username).trim();
     if(!validUsername(username))throw Error('用户名须为 2–24 位，使用汉字或小写字母开头，可含数字、下划线和短横线。');
     if(this.users.some(u=>u.username===username))throw Error('这个用户名已存在，请换一个。');
     const u={id:`demo-user-${++this.sequence}`,name,username,enabled:true,total:0,limits:{}};this.users.push(u);return clone(u);
@@ -38,6 +38,7 @@ export class DemoStore {
     const updated={...user,limits:clean,total};this.users[this.users.findIndex(u=>u.id===id)]=updated;return clone(updated);
   }
   setEnabled(id,enabled){if(typeof enabled!=='boolean')throw Error('状态无效。');this.get(id);this.users.find(u=>u.id===id).enabled=enabled;return this.get(id);}
+  setName(id,name){this.get(id);this.users.find(u=>u.id===id).name=displayName(name);return this.get(id);}
   usage(id,machine){return this.jobs.filter(j=>j.userId===id&&(!machine||j.machine===machine)).reduce((n,j)=>n+j.cards,0);}
   request(id,machine,cards){
     const user=this.get(id);const host=MACHINES.find(m=>m.id===machine);

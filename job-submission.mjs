@@ -3,9 +3,10 @@ import {MACHINES} from './dist/model.js';
 import {projectReference} from './projects.mjs';
 import {schedulingPolicy} from './dist/scheduling-policy.js';
 import {elasticAllocation,gpuPlacement} from './dist/gpu-allocation.js';
+import {taskDescription,displayName} from './dist/task-metadata.js';
 
 const FIELDS=new Set([
-  'machine','cards','minVramGiB','argv','name','key',
+  'machine','cards','minVramGiB','argv','name','description','key',
   'datasets','project','release','priority','scheduling','elastic','placement',
 ]);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
@@ -46,7 +47,8 @@ export function normalizeJobSubmission(args,principal){
   if(typeof minVramGiB!=='number'||!Number.isFinite(minVramGiB)||minVramGiB<0||minVramGiB>128)fail('最低显存参数无效。');
   const name=args.name||'train';
   if(typeof name!=='string'||name.length>64||/[\x00-\x1f]/.test(name))fail('任务名称无效。');
-  const request={machine:args.machine,cards:args.cards,minVramGiB,argv:[...args.argv],name,key:args.key,
+  const description=taskDescription(args.description);
+  const request={machine:args.machine,cards:args.cards,minVramGiB,argv:[...args.argv],name,description,key:args.key,
     datasets,project,priority,priorityProvided:args.priority!==undefined,explicit,
     ...(placement?{placement}:{}),
     ...(allocation?{elastic:allocation.elastic,allowedGpuCounts:allocation.allowed}:{})};
@@ -59,6 +61,7 @@ export function normalizeJobSubmission(args,principal){
   if(explicit)identity.push({scheduling:explicit});
   if(allocation)identity.push({elastic:allocation.elastic});
   if(placement)identity.push({placement});
+  if(description)identity.push({description});
   request.digest=createHash('sha256').update(JSON.stringify(identity)).digest('hex');
   return request;
 }
@@ -68,7 +71,9 @@ export function createSubmittedJob(request,user,prioritySupported,{id=randomUUID
   const context={...project,...(datasets.length?{datasets:structuredClone(datasets)}:{}),...(request.elastic?{elastic:structuredClone(request.elastic)}:{}),...(request.placement?{placement:structuredClone(request.placement)}:{})};
   const policy=explicit?{scheduling:structuredClone(explicit)}:prioritySupported?{priority,preemptIdleOnly:true}:{};
   const spec={id,userId:user.id,username:user.username,cards,argv:[...request.argv],name,minVramGiB,...context,...policy};
-  return {id,key,digest,spec,userId:user.id,username:user.username,machine,cards,name,...context,
+  // Human-facing metadata belongs to the portal record, not the immutable
+  // node execution spec: old nodes/receipts continue accepting the same spec.
+  return {id,key,digest,spec,userId:user.id,username:user.username,submitterName:displayName(user.name??user.username),machine,cards,name,description:request.description,...context,
     ...(request.elastic?{allowedGpuCounts:[...request.allowedGpuCounts]}:{}),
     ...(explicit?{scheduling:structuredClone(explicit)}:{}),priority:explicit?null:prioritySupported?priority:null,
     state:'SUBMITTING',createdAt:now,cancelRequested:false};

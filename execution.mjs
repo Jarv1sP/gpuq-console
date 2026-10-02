@@ -1,5 +1,6 @@
 import net from 'node:net';
 import {MACHINES} from './dist/model.js';
+import {taskIdentity} from './dist/task-metadata.js';
 import {applyJobFeedback} from './dist/job-progress.js';
 import {maintainTaskNotes} from './community.mjs';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
@@ -79,13 +80,14 @@ export function installExecution(service,bridge){
   if(bridge){service.executionTimer=setInterval(()=>service.reconcile().catch(()=>{}),15000);service.executionTimer.unref();}
 }
 export function usage(jobs,userId,machine){return jobs.filter(j=>j.userId===userId&&!TERMINAL.has(j.state)&&(!machine||j.machine===machine)).reduce((sum,j)=>sum+j.cards,0);}
-export function publicJob(job){const {spec,digest,schedulerPolicy,...safe}=job;return {...safe,command:spec.argv,
+export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,...safe}=job;return {...safe,...taskIdentity(job,users),command:spec.argv,
   yieldPolicy:['legacy','never','now','save'].includes(schedulerPolicy?.yield_policy)?schedulerPolicy.yield_policy:null,
   restartPolicy:['never','on-preempt'].includes(schedulerPolicy?.restart_policy)?schedulerPolicy.restart_policy:null,
   dispatchMode:['queue','preempt-now','preempt-save'].includes(schedulerPolicy?.dispatch_mode)?schedulerPolicy.dispatch_mode:null};}
 export async function executionCall(service,principal,operation,args){
   if(!service.bridge)fail('节点执行桥尚未配置，未启动训练。',503);
   const user=service.store.get(principal.userId);
+  const jobView=job=>publicJob(job,service.store.users);
   if(!user.enabled)fail('账号已暂停。',403);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   const jobById=id=>{const job=service.store.jobs.find(j=>j.id===id);if(!job||(principal.role!=='admin'&&job.userId!==user.id))fail('任务不存在或无权访问。',403);return job;};
@@ -221,7 +223,7 @@ export async function executionCall(service,principal,operation,args){
     const request=normalizeJobSubmission(args,principal);
     const {datasets,project,explicit,digest,minVramGiB:min}=request;
     const previous=service.store.jobs.find(j=>j.userId===user.id&&j.key===request.key);
-    if(previous){if(previous.digest!==digest)fail('同一提交键不能用于不同任务。',409);return publicJob(previous);}
+    if(previous){if(previous.digest!==digest)fail('同一提交键不能用于不同任务。',409);return jobView(previous);}
     if(service.store.jobs.length>=5000)fail('任务历史达到归档上限，请联系管理员归档后提交。',503);
     if(usage(service.store.jobs,user.id)+request.cards>user.total)fail('超出跨机器用卡总额度（排队、运行和待核对任务均计入）。',409);
     authorizedMachine(request.machine);
@@ -262,7 +264,7 @@ export async function executionCall(service,principal,operation,args){
     service.db.exec('BEGIN IMMEDIATE');
     try{service.store.jobs.push(job);service.save();service.audit(principal.username,operation,id,'reserved');service.db.exec('COMMIT');}
     catch(e){service.db.exec('ROLLBACK');service.store.jobs=service.store.jobs.filter(j=>j.id!==id);throw e;}
-    setImmediate(()=>service.reconcile().catch(()=>{}));return publicJob(job);
+    setImmediate(()=>service.reconcile().catch(()=>{}));return jobView(job);
   }
   if(operation==='jobs.priority'){
     if(principal.role!=='admin')fail('调整排队优先级仅管理员可用。',403);
@@ -280,7 +282,7 @@ export async function executionCall(service,principal,operation,args){
     try{
       const result=await service.bridge(job.machine,'priority',{job:job.spec,priority,rankOnly:true,expected:job.schedulerPolicy});
       job.policyRevision++;
-      schedulerResult(job,result);service.save();maintainTaskNotes(service);return publicJob(job);
+      schedulerResult(job,result);service.save();maintainTaskNotes(service);return jobView(job);
     }catch(error){
       job.policyRevision++;
       job.priorityMutable=false;job.error='优先级调整结果待核验，请刷新；不会重复提交任务。';service.save();
@@ -303,24 +305,24 @@ export async function executionCall(service,principal,operation,args){
       }
       setImmediate(()=>service.reconcile().catch(()=>{}));
     }
-    return publicJob(job);
+    return jobView(job);
   }
   if(operation==='jobs.logs'){const job=jobById(args.jobId);return service.bridge(job.machine,'logs',{job:job.spec});}
   if(operation==='jobs.watch'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('进度查询参数无效。');
     const job=jobById(args.jobId);
-    if(!job.machine||TERMINAL.has(job.state))return publicJob(job);
+    if(!job.machine||TERMINAL.has(job.state))return jobView(job);
     authorizedMachine(job.machine);
     let result;
     try{result=await service.bridge(job.machine,'watch',{job:job.spec});}
-    catch{return {...publicJob(job),state:'UNKNOWN',error:'节点进度查询失败，任务状态待核对。',checkedAt:new Date().toISOString()};}
-    if(!result?.nodeJobId)return publicJob(job);
-    try{persistSchedulerResult(service,job,result);return publicJob(job);}
+    catch{return {...jobView(job),state:'UNKNOWN',error:'节点进度查询失败，任务状态待核对。',checkedAt:new Date().toISOString()};}
+    if(!result?.nodeJobId)return jobView(job);
+    try{persistSchedulerResult(service,job,result);return jobView(job);}
     catch{
       // Keep advisory progress inspectable, but never treat an observation as
       // a saved lifecycle result or release the restored reservation.
       const observed={...job};applyJobFeedback(observed,result);
-      return {...publicJob(observed),state:'UNKNOWN',notSaved:true,error:'节点观察结果未保存，任务状态待核对。',checkedAt:new Date().toISOString()};
+      return {...jobView(observed),state:'UNKNOWN',notSaved:true,error:'节点观察结果未保存，任务状态待核对。',checkedAt:new Date().toISOString()};
     }
   }
   if(operation==='jobs.diagnostics'){

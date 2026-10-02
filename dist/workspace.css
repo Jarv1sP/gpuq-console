@@ -116,6 +116,7 @@ input[type=file]::file-selector-button {border:1px solid #d7dfeb;background:#fff
 .job-log-dialog .diagnostic-summary {border-left:3px solid #c3cfea;border-radius:5px;background:#f1f4fa;color:#4b5e7a}
 @media(hover:hover) and (pointer:fine) {.gpu-table>tbody>tr:hover {background:#fafbfe}.gpu-processes summary:hover,.node-queue summary:hover {color:#294f9e}}
 /* The horizontal navigation starts at the same breakpoint as sidebar removal. */
+.task-description {white-space:pre-wrap;overflow-wrap:anywhere;max-width:420px;font-size:12px;line-height:1.7;color:var(--muted);margin-top:7px}
 @media(max-width:900px) {
   .sidebar {display:block;position:sticky;inset:0 auto auto;top:0;width:100%;height:auto;padding:8px 16px;z-index:20;border-right:0;border-bottom:1px solid #34435d}
   .sidebar .brand,.sidebar .workspace,.sidebar .nav-label,.sidebar .sidebar-bottom {display:none}

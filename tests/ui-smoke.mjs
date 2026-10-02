@@ -131,10 +131,13 @@ try{
  const anonymousDetail=member.locator('details[data-resource-detail="gpu-1:0"]');await anonymousDetail.locator('summary').click();
  const anonymousProcessText=await anonymousDetail.locator('.process-table').textContent();
  assert.match(anonymousProcessText,new RegExp(String(processPid)));assert.match(anonymousProcessText,/8192/);
- assert.deepEqual(await anonymousDetail.locator('.process-table th').allTextContents(),['PID','显存 MiB','调度优先级']);
+ assert.deepEqual(await anonymousDetail.locator('.process-table th').allTextContents(),['PID','任务 / 提交者 / 描述','显存 MiB','调度优先级']);
+ assert.match(anonymousProcessText,/外部进程／未确认归属/);
  const memberResourceText=await member.locator('#machine-grid').textContent();
  assert.ok(!memberResourceText.includes(processOwner));assert.ok(!memberResourceText.includes(processName));
- assert.equal(await member.locator('.node-queue').count(),0);
+ assert.equal(await member.locator('.node-queue').count(),1);
+ assert.match(await member.locator('.node-queue').textContent(),/0 条/);
+ assert.equal(await member.locator('.node-queue [data-job-logs],.node-queue [data-job-cancel]').count(),0);
  const memberState=await member.evaluate(async()=>{
   const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'state',args:{}})});
   if(!response.ok)throw Error(`State fetch failed: ${response.status}`);return (await response.json()).state;

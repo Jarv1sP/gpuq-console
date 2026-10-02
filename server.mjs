@@ -7,6 +7,7 @@ const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.
 routes['/dataset-upload.js']='dataset-upload.js';
 routes['/data-workspace.js']='data-workspace.js';
 routes['/job-progress.js']='job-progress.js';routes['/job-progress-ui.js']='job-progress-ui.js';
+routes['/task-metadata.js']='task-metadata.js';
 routes['/job-diagnostics-ui.js']='job-diagnostics-ui.js';routes['/job-diagnostics.css']='job-diagnostics.css';
 routes['/scheduling-policy.js']='scheduling-policy.js';
 routes['/scheduling-ui.js']='scheduling-ui.js';
