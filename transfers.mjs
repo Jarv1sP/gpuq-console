@@ -92,11 +92,13 @@ export function installTransfers(service){
   service.db.exec(`CREATE TABLE IF NOT EXISTS transfers(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,owner_id TEXT NOT NULL,client_key TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,data TEXT NOT NULL,UNIQUE(owner_id,client_key));CREATE INDEX IF NOT EXISTS transfers_state ON transfers(state,updated_at);`);
   service.transfersReconciling=false;
   service.transferCall=(principal,operation,args)=>transferCall(service,principal,operation,args);
-  service.transferSnapshot=(owner,id)=>{
-    if(service.closing||typeof id!=='string'||!uuid.test(id))return null;
-    const row=service.db.prepare('SELECT * FROM transfers WHERE id=? AND owner_id=?').get(id,owner);
+  const snapshot=(owner,column,id)=>{
+    if(service.closing||typeof owner!=='string'||typeof id!=='string'||!uuid.test(id))return null;
+    const row=service.db.prepare(`SELECT * FROM transfers WHERE ${column}=? AND owner_id=?`).get(id,owner);
     return row?view({...row,data:JSON.parse(row.data)}):null;
   };
+  service.transferSnapshot=(owner,id)=>snapshot(owner,'id',id);
+  service.transferSnapshotByKey=(owner,key)=>snapshot(owner,'client_key',key);
   service.reconcileTransfers=async()=>{
     if(service.closing||!service.bridge||service.transfersReconciling)return;service.transfersReconciling=true;
     try{const rows=service.db.prepare("SELECT * FROM transfers WHERE state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED') AND json_extract(data,'$.kind') != 'download' ORDER BY updated_at LIMIT 4").all();await Promise.all(rows.map(row=>inLane(service,row.owner_id,rowKey(row),async()=>{if(!service.closing)await sync(service,load(service,row.id));}).catch(()=>{})));}finally{service.transfersReconciling=false;}

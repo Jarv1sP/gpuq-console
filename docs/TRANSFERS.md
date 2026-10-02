@@ -67,11 +67,15 @@ CLI copy 会先打印重试键；首次请求结果丢失时，重复原命令�
 
 `service.transferSnapshot(ownerId, transferId)` 是不联网的只读安全回执；只返回该 owner 的记录，否则 null，不含源票据。内部训练准备适配器可保存逻辑源引用、重试键及 transferId，复用现有传输表和唯一核对定时器。copy 成功返回的 `result.dataset` 可能是新的私有数据集 ID；必须保存其映射，检查版本相等，再以真实目标 ID 查询 READY、申请数据租约，之后才允许申请 GPU。不得仅凭 `SUCCEEDED` 或客户端自报下载完成放行训练。
 
+首次 create 回执丢失时，用 `service.transferSnapshotByKey(ownerId, clientKey)` 从同一表恢复已接受任务，不联网、不重新选择源，也不需要源节点仍在线；owner 隔离与安全字段和按 ID 查询相同。
+
 若服务安装了纯本地 `datasetPhysicalReference(ownerId, sourceMachine, {dataset,version})`，手动 copy/download 会在固化请求摘要前使用已确认的 owner 专属物理 ID。映射不得改变版本；同一重试键的映射变化会拒绝，不会悄悄改源。
 
 ## 管理员启用 LAN 复制
 
 先按 [部署说明](DEPLOYMENT.md) 部署本 PR 的 Portal、executor bridge 和**完整节点 runtime**；升级工具默认不启用 LAN 监听、不重启 GPUQ。旧配置和数据库保留。本机上传/下载不需要 peer 服务。下列命令从此仓库目录运行。
+
+所有 configure 命令默认使用 `~/.local/libexec/gpuq-console`；现有安装在其他位置时，每次传入 `--program-dir /实际绝对路径`（例如 `~/.local/libexec/amax-console` 经 shell 展开后的路径）。预览会显示核验后的 `programDir`，安装的 peer unit 使用这个目录的绝对路径，不借模板猜测；目录必须由服务账号拥有且不可被其他账号写入，控制字符会拒绝。
 
 源节点由 GPUQ 服务账号生成独立 TLS 证书/私钥，放在账号私有目录，文件权限 0600；不要复制 VPS 管理 SSH 私钥。配置文件仅含：
 

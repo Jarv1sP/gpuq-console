@@ -11,6 +11,7 @@ import ssl
 import stat
 import subprocess
 import time
+import unicodedata
 import node_runtime
 
 HERE=Path(__file__).resolve().parent
@@ -23,9 +24,28 @@ def private_file(path):
     return path.read_bytes()
 
 
+def peer_unit(directory):
+    path=str(directory/'node-executor.py')
+    if not directory.is_absolute() or any(unicodedata.category(c) in ('Cc','Cf','Cs','Zl','Zp') for c in path):
+        raise ValueError('Use an absolute program directory without control characters')
+    # ExecStart is not shell syntax. Quote one argument, then escape systemd
+    # specifiers/environment expansion separately from its C-style escaping.
+    argument='"'+path.replace('\\','\\\\').replace('"','\\"').replace('%','%%').replace('$','$$')+'"'
+    original='ExecStart=/usr/bin/python3 %h/.local/libexec/gpuq-console/node-executor.py --transfer-peer-daemon'
+    unit=(HERE/'gpuq-transfer-peer.service').read_text()
+    if [line for line in unit.splitlines() if line.startswith('ExecStart=')]!=[original]:
+        raise ValueError('Unexpected transfer peer unit template')
+    return unit.replace(original,'ExecStart=/usr/bin/python3 '+argument+' --transfer-peer-daemon').encode()
+
+
 def configure(args):
     if os.getuid()==0:raise ValueError('Run as the existing GPUQ service user, not root')
-    directory=args.program_dir.resolve();config_path=directory/'node-config.json'
+    peer_unit(args.program_dir)  # Reject unsafe input before filesystem access.
+    directory=args.program_dir.resolve(strict=True);unit=peer_unit(directory)
+    info=directory.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o022:
+        raise ValueError('Use a service-owned program directory not writable by other accounts')
+    config_path=directory/'node-config.json'
     previous=json.loads(private_file(config_path));settings=json.loads(private_file(args.peer_config))
     if not isinstance(settings,dict) or not settings or set(settings)-{'transferPeer','transferPeers'}:
         raise ValueError('Only transferPeer/transferPeers settings may be changed')
@@ -60,7 +80,7 @@ def configure(args):
     updated={**previous,**settings}
     plan={'dryRun':not args.apply,'machine':previous.get('machine'),'certificateSha256':certificate_pin,
           'listener':settings.get('transferPeer',{}).get('bind'),'peers':list(settings.get('transferPeers',{})),
-          'enablePeer':args.enable_peer,'gpuqUnchanged':True}
+          'enablePeer':args.enable_peer,'gpuqUnchanged':True,'programDir':str(directory)}
     if args.apply:
         environment={**os.environ,'XDG_RUNTIME_DIR':f'/run/user/{os.getuid()}'}
         def run(*argv):return subprocess.run(['/usr/bin/systemctl','--user',*argv],env=environment,check=True,text=True,capture_output=True,timeout=10)
@@ -70,7 +90,7 @@ def configure(args):
         backup=directory/('node-config.before-transfers-'+str(time.time_ns())+'.json');shutil.copy2(config_path,backup);backup.chmod(0o600)
         node_runtime.atomic_install(json.dumps(updated,indent=2).encode(),config_path);config_path.chmod(0o600)
         units=Path.home()/'.config/systemd/user';units.mkdir(parents=True,exist_ok=True)
-        node_runtime.atomic_install((HERE/'gpuq-transfer-peer.service').read_bytes(),units/'gpuq-transfer-peer.service')
+        node_runtime.atomic_install(unit,units/'gpuq-transfer-peer.service')
         run('daemon-reload')
         if args.enable_peer:run('enable','--now','gpuq-transfer-peer.service')
         plan['backup']=str(backup)

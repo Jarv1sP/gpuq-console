@@ -33,6 +33,11 @@ async function promptly(promise){let timer;try{return await Promise.race([promis
 test('persistent LAN reservation survives lost reply and Portal restart, never starts from status/reconcile',async t=>{
   const f=await fixture(t),args=copy();f.lose();const unknown=await f.call('transfers.create',args);assert.equal(unknown.state,'UNKNOWN');assert.equal(JSON.stringify(unknown).includes('x'.repeat(43)),false);assert.equal(f.service.store.jobs.length,0);
   await f.restart();assert.equal((await f.call('transfers.list',{})).transfers[0].id,unknown.id);
+  assert.equal(f.service.transferSnapshotByKey(f.member.id,args.key).id,unknown.id);
+  assert.equal(f.service.transferSnapshotByKey('another-owner',args.key),null);
+  assert.equal(f.service.transferSnapshotByKey(f.member.id,'invalid'),null);
+  assert.equal(f.service.transferSnapshotByKey(f.member.id,randomUUID()),null);
+  assert.equal(JSON.stringify(f.service.transferSnapshotByKey(f.member.id,args.key)).includes('x'.repeat(43)),false);
   const calls=f.calls.filter(c=>c.op==='transfers.start').length;await f.service.reconcileTransfers();const result=await f.call('transfers.status',{id:unknown.id});assert.equal(result.state,'RUNNING');assert.equal(f.calls.filter(c=>c.op==='transfers.start').length,calls);
   const retry=await f.call('transfers.create',args);assert.equal(retry.id,unknown.id);assert.equal(f.nodes.size,1);assert.equal(f.calls.filter(c=>c.op==='transfers.source.prepare').length,1);
   await assert.rejects(f.call('transfers.create',{...args,name:'other'}),e=>e.status===409);assert.ok(f.calls.every(c=>c.args.userId===f.member.id));

@@ -23,11 +23,36 @@ class Configuration(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:p.stop()
         self.temp.cleanup()
-    def args(self,**kw):return SimpleNamespace(program_dir=self.dest,peer_config=self.settings,apply=kw.get('apply',False),enable_peer=kw.get('enable_peer',False))
+    def args(self,**kw):return SimpleNamespace(program_dir=kw.get('program_dir',self.dest),peer_config=self.settings,apply=kw.get('apply',False),enable_peer=kw.get('enable_peer',False))
     def test_dry_run_has_no_writes_and_apply_preserves_gpuq_without_enabling_peer(self):
         before=self.path.read_bytes();result=C.configure(self.args());self.assertTrue(result['dryRun']);self.assertEqual(self.calls,[]);self.assertEqual(self.path.read_bytes(),before)
         result=C.configure(self.args(apply=True));current=json.loads(self.path.read_text());self.assertFalse(current['hostRoot']);self.assertEqual(current['database'],'preserve.db');self.assertEqual(current['root'],self.original['root']);self.assertEqual(Path(result['backup']).read_bytes(),before)
         self.assertEqual(self.calls,[['/usr/bin/systemctl','--user','daemon-reload']]);self.assertTrue((self.home/'.config/systemd/user/gpuq-transfer-peer.service').is_file())
+    def test_default_and_custom_legacy_directories_render_the_actual_checked_runtime(self):
+        for name in ('gpuq-console','amax-console'):
+            with self.subTest(name=name):
+                directory=self.home/'.local/libexec'/name;shutil.copytree(self.dest,directory)
+                result=C.configure(self.args(program_dir=directory,apply=True))
+                unit=(self.home/'.config/systemd/user/gpuq-transfer-peer.service').read_text()
+                expected='ExecStart=/usr/bin/python3 "'+str(directory.resolve()/'node-executor.py')+'" --transfer-peer-daemon'
+                self.assertIn(expected,unit.splitlines());self.assertNotIn('%h',unit)
+                self.assertEqual(result['programDir'],str(directory.resolve()))
+        self.assertTrue(all(call==['/usr/bin/systemctl','--user','daemon-reload'] for call in self.calls))
+    def test_unit_quotes_spaces_and_escapes_specifiers_environment_quotes_and_backslashes(self):
+        directory=Path('/srv/space %h $HOME ${VAR} "quote" \\runtime')
+        line=next(line for line in C.peer_unit(directory).decode().splitlines() if line.startswith('ExecStart='))
+        self.assertEqual(line,'ExecStart=/usr/bin/python3 "/srv/space %%h $$HOME $${VAR} \\"quote\\" \\\\runtime/node-executor.py" --transfer-peer-daemon')
+    def test_unsafe_program_directories_fail_before_config_or_unit_mutations(self):
+        before=self.path.read_bytes()
+        for directory in [Path('relative'),*(Path('/tmp/bad'+c+'unit') for c in ('\n','\r','\x00','\x7f','\u0085','\u2028'))]:
+            with self.subTest(directory=directory),self.assertRaisesRegex(ValueError,'absolute.*control'):
+                C.configure(self.args(program_dir=directory,apply=True))
+        self.dest.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(ValueError,'not writable'):C.configure(self.args(apply=True))
+        finally:self.dest.chmod(0o700)
+        self.assertEqual(self.path.read_bytes(),before);self.assertEqual(self.calls,[])
+        self.assertFalse((self.home/'.config/systemd/user/gpuq-transfer-peer.service').exists())
     def test_missing_runtime_or_privileged_fields_rejected_before_any_config_write(self):
         before=self.path.read_bytes();(self.dest/'transfer-peer.py').unlink()
         with self.assertRaises(FileNotFoundError):C.configure(self.args(apply=True))
