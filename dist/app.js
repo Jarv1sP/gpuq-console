@@ -38,7 +38,7 @@ function render(preserve=false){
   $('#current-account').textContent=logged?`${store.principal.username} · ${admin?'管理员':'普通用户'}`:'尚未登录';
   $('#profile-name').textContent=logged?store.principal.username:'未登录';$('#profile-role').textContent=admin?'管理员':'个人工作空间';
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
-  const titles={work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览','查看每张 GPU 的使用情况，选择适合的服务器。'],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['维护申请','特殊操作由管理员确认；普通训练无需审批。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
+  const titles={work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览','查看每张 GPU 的使用情况，选择适合的服务器。'],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
   const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
   $('#mode-note').textContent=note;$('.demo-note').hidden=!note;

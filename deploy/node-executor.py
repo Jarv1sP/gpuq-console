@@ -15,6 +15,7 @@ DATASET_VERSION=re.compile(r'^[a-f0-9]{64}$')
 DATASET_MODULE=None
 DATASET_UPLOADS=None
 DATA_WORKSPACES=None
+DATA_IMPORTS=None
 PROJECT_OPS=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
@@ -147,6 +148,15 @@ def data_workspaces():
         DATA_WORKSPACES=module.DataWorkspaces(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
     dataset_mount_check(CONFIG['datasets'])
     return DATA_WORKSPACES
+
+def data_imports():
+    global DATA_IMPORTS
+    if DATA_IMPORTS is None:
+        spec=importlib.util.spec_from_file_location('gpuq_data_import',HERE/'data-import.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        DATA_IMPORTS=module.DataImports(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    dataset_mount_check(CONFIG['datasets'])
+    return DATA_IMPORTS
 
 def dataset_refs(job):
     refs=job.get('datasets',[])
@@ -636,6 +646,7 @@ def process(operation,args):
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)
+    if operation.startswith('datasets.import.'):return data_imports().process(operation,args)
     if operation in ('datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister'):return dataset_op(operation,args)
     if operation in ('terminal.open','terminal.exchange','terminal.close','terminal.detach'):
         if args.get('dataWorkspace') is True and operation=='terminal.open':
@@ -726,6 +737,7 @@ if __name__=='__main__':
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))
+    if len(sys.argv)==5 and sys.argv[1]=='--data-import-worker':sys.exit(data_imports().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-recover':
         print(json.dumps(data_workspaces().recover(*sys.argv[2:])));sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
