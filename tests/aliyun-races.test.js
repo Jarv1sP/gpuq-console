@@ -9,6 +9,14 @@ const confirmed={content:{data:{qrCodeStatus:'CONFIRMED',bizExt:Buffer.from(JSON
 const token={access_token:'private-access-token',refresh_token:'rotated-private-refresh-token',expires_in:3600};
 function setup(request){let stored={refreshToken:'initial-private-refresh-token'};const writes=[];const provider=new AliyunShare({load:()=>stored,save:value=>{stored=value;writes.push(value);},request});return {provider,writes,get:()=>stored,replace:value=>{stored=value;}};}
 
+test('QR result has a finite ten-minute local lifetime',async()=>{
+  const now=1700000000000;
+  const provider=new AliyunShare({load:()=>null,save:()=>assert.fail('Generating a QR must not save credentials'),request:async()=>json(login),now:()=>now});
+  const qr=await provider.begin();
+  assert.equal(qr.expiresAt,now+10*60*1000);
+  assert.match(qr.image,/^data:image\/png;base64,/);
+});
+
 test('concurrent token requests share one rotation and persist before returning',async()=>{
   const gate=deferred();let requests=0;const {provider,writes}=setup(async()=>{requests++;return gate.promise;});
   const pending=Array.from({length:12},()=>provider.token());

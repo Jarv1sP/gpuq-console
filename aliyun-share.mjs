@@ -35,7 +35,7 @@ export class AliyunShare{
     if(url.protocol!=='https:'||!/(^|\.)(aliyundrive\.com|alipan\.com)$/.test(url.hostname)||url.username||url.password)fail('二维码不是阿里云盘官方地址。');
     const image=await QRCode.toDataURL(data.codeContent,{width:240,margin:2});
     this.current(generation);if(loginGeneration!==this.loginGeneration)fail('二维码已被新请求替代，请使用最新二维码。',409);
-    return {secret:{ck:data.ck,t:String(data.t),generation,loginGeneration},image,expiresAt:this.now()+180000};
+    return {secret:{ck:data.ck,t:String(data.t),generation,loginGeneration},image,expiresAt:this.now()+600000};
   }
   async poll(secret){
     if(!secret||secret.loginGeneration!==this.loginGeneration)fail('二维码已失效，请重新获取。',409);
