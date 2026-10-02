@@ -1,4 +1,6 @@
-# GPUQ Console
+# VELA
+
+研究计算，由此展开。VELA 是本项目的网页展示名称；仓库名 `gpuq-console`、后端 GPUQ、`gpuctl` 命令及已有登录配置保持兼容，不因视觉更新迁移或更名。
 
 为实验室搭建一套**账号 + GPU 配额 + 个人终端 + 训练队列**，与服务器厂商无关。普通用户从网页或自己的命令行登录，不必全部加入管理员的 VPN；管理员按服务器和 GPU 数量授权。后端复用 GPUQ，管理网络使用 Tailscale / Headscale + OpenSSH。
 

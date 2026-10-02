@@ -65,7 +65,8 @@ try {
         calls.push({operation, args: structuredClone(args), user});
         check(args.machine === 'gpu-1', 'Selected machine drifted during upload');
         check(!('hostAdmin' in args || 'owners' in args || 'sourceId' in args), 'Privileged browser upload fields');
-        if (operation === 'datasets.list') return {datasets: [...uploads.values()]
+        if (operation === 'datasets.capacity') return {machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3};
+        if (operation === 'datasets.catalog') return {datasets: [...uploads.values()]
           .filter(upload => upload.user === user && upload.state === 'READY')
           .map(upload => ({dataset: upload.dataset, name: upload.name,
             versions: [{version: upload.version, state: 'READY', files: upload.parsed.files.length,
@@ -126,6 +127,7 @@ try {
       }};
     window.renderDatasets = datasetsUI(store, value => toasts.push(value)); renderDatasets();
   });
+  await page.locator('#datasets-add > summary').click();
   async function assertUploadLayout(mobile = false) {
     const layout = await page.evaluate(() => {
       const rect = selector => document.querySelector(selector).getBoundingClientRect().toJSON();

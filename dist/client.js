@@ -48,7 +48,7 @@ export class DemoClient{
   get jobs(){return this.data?.jobs||[];}
   get(id){const user=this.users.find(u=>u.id===id);if(!user)throw Error('找不到用户。');return structuredClone(user);}
   snapshot(){return structuredClone(this.data);}
-  usage(id,machine){return this.jobs.filter(j=>j.userId===id&&!['SUCCEEDED','FAILED','CANCELED'].includes(j.state)&&(!machine||j.machine===machine)).reduce((n,j)=>n+j.cards,0);}
+  usage(id,machine){return this.jobs.filter(j=>j.userId===id&&!['SUCCEEDED','FAILED','CANCELED','PREPARING_DATA'].includes(j.state)&&(!machine||j.machine===machine)).reduce((n,j)=>n+j.cards,0);}
   create(username,password,role='member'){return this.call('users.create',{username,password,role});}
   setRole(id,role){return this.call('users.role',{userId:id,role});}
   reset(id,password){return this.call('users.reset',{userId:id,password});}

@@ -16,6 +16,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from storage_test_helpers import local_data_mounts
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "deploy" / "dataset-cache.py"
@@ -390,12 +391,12 @@ class DatasetCacheTests(unittest.TestCase):
             self.cache.plan({"user_id": OWNER.user_id, "is_admin": True}, "sample", version)
 
     def test_privileged_cli_json_contract_without_real_config(self):
-        # Only the root/config gate is mocked; all cache work is real in a temp dir.
-        config = {"root": str(self.root), "sources": {"sample-source": str(self.source)}, "reserveBytes": 1024}
+        # Config/host mount table are simulated; cache work uses real temp files.
+        config = {"root": str(self.root), "mountPoint": str(self.base), "sources": {"sample-source": str(self.source)}, "reserveBytes": 1024}
         request = {"op": "register_source", "dataset": "sample", "sourceId": "sample-source", "owners": [OWNER.user_id]}
         output = io.StringIO()
         stdin = SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))
-        with patch.object(D, "_operator_config", return_value=config), patch.object(D.sys, "stdin", stdin), patch.object(D.sys, "stdout", output):
+        with local_data_mounts(self.base), patch.object(D, "_operator_config", return_value=config), patch.object(D.sys, "stdin", stdin), patch.object(D.sys, "stdout", output):
             self.assertEqual(D.main(["--config", str(self.base / "unused-config")]), 0)
         result = json.loads(output.getvalue())
         self.assertTrue(result["ok"])

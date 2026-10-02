@@ -70,6 +70,18 @@ try{
   async function noPageOverflow(page,label){
     const size=await page.evaluate(()=>({viewport:innerWidth,html:document.documentElement.scrollWidth,body:document.body.scrollWidth}));
     assert.ok(size.html<=size.viewport+1&&size.body<=size.viewport+1,`${label}: ${JSON.stringify(size)}`);
+    const contrast=await page.evaluate(()=>{
+      const rgba=value=>{const v=value.match(/[\d.]+/g)?.map(Number);return v?.length>=3?[...v.slice(0,3),v[3]??1]:[255,255,255,1];};
+      const over=(fg,bg)=>fg.slice(0,3).map((c,i)=>c*fg[3]+bg[i]*(1-fg[3]));
+      const lum=rgb=>rgb.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
+      return [...document.querySelectorAll('.guide-lead,.guide-card p,.guide-number,.guide-footer,.guide-brand small,.guide-section-heading>span')].filter(el=>el.getClientRects().length).flatMap(el=>{
+        const parents=[];for(let n=el;n;n=n.parentElement)parents.unshift(n);
+        const bg=parents.reduce((color,n)=>over(rgba(getComputedStyle(n).backgroundColor),color),[255,255,255]);
+        const a=lum(over(rgba(getComputedStyle(el).color),bg)),b=lum(bg),ratio=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+        return ratio>=4.5?[]:[{className:el.className,ratio,text:el.textContent.trim().slice(0,40)}];
+      });
+    });
+    assert.deepEqual(contrast,[],`${label}: guide helper text retains AA contrast`);
   }
   async function chapter(page,index,{scripts=true}={}){
     const [id,title]=chapters[index];

@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 import uuid
+from storage_test_helpers import local_data_mounts
 
 DEPLOY = Path(__file__).resolve().parents[1]/'deploy'
 
@@ -37,6 +38,9 @@ class DataImportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
+        self.data_mount = local_data_mounts(self.base)
+        self.data_mount.start()
+        self.addCleanup(self.data_mount.stop)
         for name in ('node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'data-workspace.py', 'data-import.py'):
             shutil.copy2(DEPLOY/name, self.base/name)
         (self.base/'node-config.json').write_text(json.dumps({'root': str(self.base/'state'),
@@ -439,6 +443,97 @@ class DataImportTests(unittest.TestCase):
         first.getresponse.return_value = Response(b'', 302, {'Location': 'http://127.0.0.1/private'})
         with patch.object(self.d, 'resolve_public', return_value=['checked']), patch.object(self.d, 'PinnedHTTPS', return_value=first), self.assertRaises(ValueError):
             self.d.open_download(self.url)
+
+    def test_clouddrive_headers_are_public_allowlisted_and_never_auth(self):
+        headers={'User-Agent':'CloudDrive/1.1.1','Referer':'https://www.alipan.com/','Origin':'https://www.alipan.com'}
+        self.assertEqual(self.d.checked_headers(headers,'aliyun'),headers)
+        for bad in ({'Authorization':'Bearer private'},{'Cookie':'secret'}, {'User-Agent':'x\r\nCookie:secret'}, {'Referer':'https://evil.test/'}, {'Origin':'https://www.alipan.com/?secret=1'}):
+            with self.assertRaises(ValueError):self.d.checked_headers(bad,'aliyun')
+        with self.assertRaises(ValueError):self.d.checked_headers(headers,'https')
+        response=Response(b'ok',200,{'Content-Length':'2'});connection=MagicMock();connection.getresponse.return_value=response
+        with patch.object(self.d,'resolve_public',return_value=['checked']),patch.object(self.d,'PinnedHTTPS',return_value=connection):
+            self.d.open_download(self.url,source_kind='aliyun',download_headers=headers)
+        sent=connection.request.call_args.kwargs['headers'];self.assertEqual(sent['User-Agent'],'CloudDrive/1.1.1');self.assertNotIn('Cookie',sent)
+
+    def test_clouddrive_descriptor_headers_stay_private_and_reach_worker(self):
+        headers = {'User-Agent': 'CloudDrive/1.1.1', 'Referer': 'https://www.alipan.com/',
+                   'Origin': 'https://www.alipan.com'}
+        result = self.start(sourceKind='aliyun', expectedBytes=5,
+                            expectedSha1=hashlib.sha1(b'hello').hexdigest(), downloadHeaders=headers)
+        self.assertEqual(self.i.load(self.user, self.key)['downloadHeaders'], headers)
+        for public in (result, self.status(), self.call('list')):
+            self.assertNotIn('downloadHeaders', json.dumps(public))
+            self.assertNotIn('CloudDrive/1.1.1', json.dumps(public))
+            self.assertNotIn('NEVER-RETURN-THIS', json.dumps(public))
+        self.assertNotIn('CloudDrive/1.1.1', repr(self.starts))
+        _, _, _, folder = self.i.storage(self.user, self.key)
+        self.assertEqual((folder/'task.json').stat().st_mode & 0o777, 0o600)
+        code, opening = self.worker(Response())
+        self.assertEqual(code, 0)
+        self.assertEqual(opening.call_args.kwargs['download_headers'], headers)
+        self.assertNotIn('downloadHeaders', self.status())
+
+    def test_clouddrive_refresh_replaces_public_headers_without_changing_file_identity(self):
+        digest = hashlib.sha1(b'hello').hexdigest()
+        self.start(sourceKind='aliyun', expectedBytes=5, expectedSha1=digest,
+                   downloadHeaders={'User-Agent': 'CloudDrive/old'})
+        self.seed_partial(etag=None)
+        headers = {'User-Agent': 'CloudDrive/new', 'Origin': 'https://www.alipan.com'}
+        self.start(sourceKind='aliyun', expectedBytes=5, expectedSha1=digest,
+                   downloadHeaders=headers, url='https://other.example.com/file?sig=REFRESHED')
+        code, opening = self.worker(Response(b'lo', 206, {'Content-Range': 'bytes 3-4/5'}), '2')
+        self.assertEqual(code, 0)
+        self.assertEqual(opening.call_args.kwargs['download_headers'], headers)
+        self.assertEqual(self.status()['sha1'], digest)
+
+    def test_bad_descriptors_are_rejected_before_launch_or_private_record_change(self):
+        bad = [None, [], True, 'PRIVATE', {'Authorization': 'Bearer PRIVATE_ACCOUNT'},
+               {'Cookie': 'PRIVATE_COOKIE'}, {'Host': 'localhost'}, {'Range': 'bytes=0-'},
+               {'User-Agent': 'x'*513}, {'User-Agent': ''}, {'User-Agent': 'x\x7f'},
+               {'Referer': 'https://www.alipan.com@evil.example/'},
+               {'Origin': 'https://www.alipan.com:443/'},
+               {'Origin': 'https://www.alipan.com/?token=PRIVATE'},
+               {'Origin': 'https://www.alipan.com/#PRIVATE'}, {'origin': 'https://www.alipan.com'}]
+        # None deliberately means no provider headers; every other malformed descriptor fails.
+        self.start(sourceKind='aliyun', downloadHeaders={'User-Agent': 'CloudDrive/1'})
+        previous = self.i.load(self.user, self.key)
+        launches = len(self.starts)
+        for headers in bad[1:]:
+            with self.subTest(headers=headers), self.assertRaises(ValueError) as failure:
+                self.start(sourceKind='aliyun', downloadHeaders=headers)
+            self.assertNotIn('PRIVATE', str(failure.exception))
+            self.assertEqual(self.i.load(self.user, self.key), previous)
+            self.assertEqual(len(self.starts), launches)
+        with self.assertRaises(ValueError):
+            self.start(sourceKind='https', downloadHeaders={'User-Agent': 'CloudDrive/1'})
+
+    def test_redirects_forward_only_checked_public_headers_and_recheck_each_destination(self):
+        first, second = MagicMock(), MagicMock()
+        first.getresponse.return_value = Response(b'', 302, {'Location': 'https://other.example.com/file'})
+        second.getresponse.return_value = Response(b'hello')
+        headers = {'User-Agent': 'CloudDrive/1', 'Referer': 'https://www.alipan.com/',
+                   'Origin': 'https://www.alipan.com'}
+        with patch.object(self.d, 'resolve_public', return_value=['checked']) as resolve, \
+                patch.object(self.d, 'PinnedHTTPS', side_effect=[first, second]):
+            self.d.open_download(self.url, source_kind='aliyun', download_headers=headers)
+        self.assertEqual([call.args[0] for call in resolve.call_args_list],
+                         ['cdn.example.com', 'other.example.com'])
+        for connection in (first, second):
+            sent = connection.request.call_args.kwargs['headers']
+            self.assertEqual(set(sent), {'User-Agent', 'Referer', 'Origin', 'Accept-Encoding'})
+            self.assertEqual(sent['User-Agent'], headers['User-Agent'])
+            self.assertNotIn('Authorization', sent); self.assertNotIn('Cookie', sent)
+
+    def test_worker_revalidates_private_headers_before_network_and_sanitizes_failure(self):
+        self.start(sourceKind='aliyun', downloadHeaders={'User-Agent': 'CloudDrive/1'})
+        task = self.i.load(self.user, self.key)
+        task['downloadHeaders'] = {'Authorization': 'Bearer PRIVATE_ACCOUNT'}
+        self.i.save(task)
+        with patch.object(self.d, 'resolve_public') as resolve, patch.object(self.d, 'PinnedHTTPS') as connection:
+            self.assertEqual(self.i.worker(self.user, self.key, '1'), 1)
+        resolve.assert_not_called(); connection.assert_not_called()
+        self.assertEqual(self.status()['errorCode'], 'HEADERS')
+        self.assertNotIn('PRIVATE_ACCOUNT', json.dumps(self.status()))
 
     def test_pinned_connection_uses_validated_address_and_tls_hostname(self):
         context = MagicMock(); sock = MagicMock()

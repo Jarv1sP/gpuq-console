@@ -54,6 +54,7 @@ try{
     if(operation==='files.list')return {entries:[{type:'file',name:args.area==='output'?'metrics.json':'train.py',size:32}]};
     if(operation==='files.get')return {data:Buffer.from('{"loss":0.1}\n').toString('base64'),eof:true};
     if(operation==='datasets.list')return {datasets:[{dataset:'sample',versions:[{version:datasetVersion,state:'READY',bytes:16,files:1}]}]};
+    if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:20*1024**3,usableBytes:492*1024**3,totalInodes:100000,availableInodes:50000,inodeUsageKnown:true,guarded:true};
     if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:'READY'};
     if(operation==='sync')return {state:'SUCCEEDED',nodeJobId:'mock-'+args.job.id,assignedIndices:[0]};
     if(operation==='logs')return {text:'mock project completed'};
@@ -156,7 +157,7 @@ try{
 
   // Dataset entry keeps the same project when its explicitly chosen node is the same.
   await page.locator('[data-nav=datasets]').click();
-  await action('datasets.list',()=>page.locator('#datasets-refresh').click());
+  await action('datasets.catalog',()=>page.locator('#datasets-refresh').click());
   await page.locator('[data-use-dataset=sample]').click();
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),machine);assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
   assert.equal(await page.locator('[name=datasets]').inputValue(),'sample@'+datasetVersion);

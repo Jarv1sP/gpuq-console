@@ -11,6 +11,7 @@ import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from storage_test_helpers import local_data_mounts
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "deploy" / "dataset-cache.py"
@@ -572,10 +573,10 @@ class DatasetUnregisterTests(unittest.TestCase):
 
     def test_root_operator_main_supports_unregister_without_real_config_or_privilege(self):
         version = self.prepare()
-        config = {"root": str(self.root), "sources": {name: str(path) for name, path in self.sources.items()}, "reserveBytes": 1024}
+        config = {"root": str(self.root), "mountPoint": str(self.base), "sources": {name: str(path) for name, path in self.sources.items()}, "reserveBytes": 1024}
         request = {"op": "unregister", "dataset": "sample", "version": None}
         output = io.StringIO()
-        with patch.object(D, "_operator_config", return_value=config), \
+        with local_data_mounts(self.base), patch.object(D, "_operator_config", return_value=config), \
                 patch.object(D.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
                 patch.object(D.sys, "stdout", output):
             self.assertEqual(D.main(["--config", str(self.base / "mock-config")]), 0)

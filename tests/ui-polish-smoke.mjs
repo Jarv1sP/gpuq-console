@@ -36,6 +36,8 @@ try{
     if(operation==='projects.list')result={projects:[{project:'vision-lab',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]}]};
     else if(operation==='projects.status')result={project:'vision-lab',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
     else if(operation==='datasets.list')result={datasets:[]};
+    else if(operation==='datasets.catalog')result={machine,datasets:[{dataset:'vision-train',versions:[{version:release,state:'READY',files:18420,bytes:12*1024**3,canPrepare:false,locations:[{machine,state:'READY'}]}]},{dataset:'vision-validation',versions:[{version:'b'.repeat(64),state:'PREPARING',files:2048,bytes:2*1024**3,canPrepare:true,sourceMachine:MACHINES[1].id,locations:[{machine,state:'PREPARING'},{machine:MACHINES[1].id,state:'READY'}]}]}]};
+    else if(operation==='datasets.capacity')result={machine,available:true,filesystemBytes:4*1024**4,availableBytes:2*1024**4,reserveBytes:20*1024**3,usableBytes:2*1024**4-20*1024**3,guarded:true};
     else assert.equal(operation,'state','Visual review cannot mutate data');
     return route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal:{userId:'admin',username:'admin',role:'admin'}})});
   });
@@ -44,17 +46,43 @@ try{
   await page.locator('[name=workspace-project]').selectOption('vision-lab');
   await page.locator('#train-form').evaluate(form=>form.closest('details').open=true);
   await page.locator('[name=command]').fill('python train.py --output /outputs/result.json');
-  const capture=async name=>{await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png')});};
+  const capture=async name=>{await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});};
+  assert.match(await page.title(),/^VELA/);
+  assert.equal(await page.locator('.brand-wordmark').innerText(),'VELA');
+  const currentNav=async expected=>{
+    assert.equal(await page.locator('[data-nav][aria-current=page]').count(),1);
+    assert.equal(await page.locator('[data-nav].active').count(),1);
+    assert.equal(await page.locator('[data-nav][aria-current=page]').getAttribute('data-nav'),expected);
+    assert.equal(await page.locator('[data-nav].active').getAttribute('data-nav'),expected);
+  };
+  const textContrast=async()=>{
+    const failures=await page.evaluate(()=>{
+      const rgba=value=>{const values=value.match(/[\d.]+/g)?.map(Number);return values?.length>=3?[...values.slice(0,3),values[3]??1]:[255,255,255,1];};
+      const over=(front,back)=>front.slice(0,3).map((c,i)=>c*front[3]+back[i]*(1-front[3]));
+      const luminance=rgb=>rgb.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
+      const background=el=>{const ancestors=[];for(let n=el;n;n=n.parentElement)ancestors.unshift(n);return ancestors.reduce((bg,n)=>over(rgba(getComputedStyle(n).backgroundColor),bg),[255,255,255]);};
+      const selectors='.muted,.self-summary small,.self-summary strong span,.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small,.terminal-scope,.page-heading p,.page-heading .eyebrow,.topbar #current-account,.section-kicker,.help-links>span,.datasets-capacity,.dataset-readiness,.dataset-locations,.datasets-add>summary span,.datasets-flow,.dataset-source-tabs button';
+      return [...document.querySelectorAll(selectors)].filter(el=>el.getClientRects().length&&el.textContent.trim()&&!el.closest('[disabled]')).flatMap(el=>{
+        const bg=background(el),fg=over(rgba(getComputedStyle(el).color),bg),a=luminance(fg),b=luminance(bg),ratio=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+        return ratio>=4.5?[]:[{element:el.className||el.tagName,text:el.textContent.trim().slice(0,45),ratio:Number(ratio.toFixed(2))}];
+      });
+    });
+    assert.deepEqual(failures,[],'Helper text must retain AA contrast against its computed solid surface');
+  };
+  await currentNav('work');
+  await textContrast();
   await capture('workspace-desktop');
   assert.match(await page.locator('#self-summary').innerText(),/8/);
   assert.equal(await page.locator('[name=priority] option').count(),3);
   assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);
   await page.locator('[data-nav=resources]').click();
+  await currentNav('resources');
   assert.equal(await page.locator('[data-gpu-index]').count(),MACHINES.reduce((n,m)=>n+m.cards,0));
   const first=page.locator('[data-resource-detail="'+machine+':0"]');await first.locator('summary').click();
   await page.locator('.node-queue summary').first().click();
   for(const text of ['76%','12.5','62 °C','24018','python train.py','researcher','等待空闲 GPU'])assert.ok((await page.locator('#machine-grid').innerText()).includes(text),text);
   await capture('resources-desktop');
+  await textContrast();
   for(const width of [1024,900,820,768,390,320]){
     await page.setViewportSize({width,height:960});
     const layout=await page.evaluate(()=>({width:innerWidth,document:document.documentElement.scrollWidth,nav:[...document.querySelectorAll('[data-nav]')].filter(el=>!el.hidden).map(el=>({id:el.dataset.nav,visible:el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0,height:el.getBoundingClientRect().height}))}));
@@ -63,12 +91,19 @@ try{
     if([820,390].includes(width))await capture('resources-'+width);
     if(width===390){
       await page.locator('.gpu-table-scroll').first().evaluate(el=>el.scrollLeft=el.scrollWidth);await capture('resources-390-processes');
-      await page.locator('[data-nav=work]').click();await capture('workspace-mobile');
+      await page.locator('[data-nav=work]').click();await currentNav('work');await capture('workspace-mobile');
       assert.equal(await page.locator('[name=command]').inputValue(),'python train.py --output /outputs/result.json');
       if(!baseline)assert.equal(await page.locator('[name=workspace-machine]').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),true);
       await page.locator('[data-nav=resources]').click();
     }
   }
+  await page.setViewportSize({width:1440,height:1080});
+  await page.locator('[data-nav=datasets]').click();await currentNav('datasets');
+  await page.locator('#datasets-refresh').click();await page.locator('.dataset-readiness[data-state=PREPARING]').waitFor();
+  await textContrast();await capture('datasets-desktop');
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'vela-orbit');
+  await page.setViewportSize({width:390,height:960});await capture('datasets-mobile');
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.setViewportSize({width:820,height:960});
   if(!baseline){
     await page.keyboard.press('Tab');
@@ -77,7 +112,8 @@ try{
   }
   await page.emulateMedia({reducedMotion:'reduce'});
   if(!baseline)assert.equal(await page.locator('#refresh-state').evaluate(el=>getComputedStyle(el).transitionDuration),'0s');
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none');
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({baseline,checks,errors,external},null,2));
-  console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','reduced motion']}));
+  console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','single current navigation','VELA accessible brand','helper text AA contrast','PREPARING-only status animation','reduced motion']}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}

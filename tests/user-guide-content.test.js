@@ -80,13 +80,25 @@ test('ordinary-user datasets include resumable upload, fixed references and larg
 
 test('link-import guidance explains authorization, manual extraction and partial-data retention', () => {
   assert.match(guide, /阿里云盘分享链接或 HTTPS 文件直链/);
-  assert.match(guide, /管理员先[\s\S]*扫码授权一次/);
+  assert.match(guide, /管理员先配置并验证云盘连接/);
+  assert.match(guide, /单实例阿里云盘接入尚未完成真实分享下载验收/);
   assert.match(guide, /不能浏览管理员的云盘或取得账号令牌/);
   assert.match(guide, /当前支持分享根目录的文件，不递归导入文件夹/);
   assert.match(guide, /VPS 只传递授权、链接和进度信息，不搬运文件内容/);
   for (const command of ['gpuctl data import ', 'gpuctl data imports', 'gpuctl data import-status IMPORT_ID', 'gpuctl data import-resume IMPORT_ID', 'gpuctl data import-cancel IMPORT_ID']) assert.ok(guide.includes(command));
   assert.match(guide, /停止下载，但保留临时数据/);
   assert.match(guide, /平台不会自动解压、执行文件、发布或复制到其他机器/);
+});
+
+test('unified dataset guide distinguishes catalog, capacity and preparation from training readiness', () => {
+  assert.match(guide, /网页只有一个“数据集”入口/);
+  assert.match(guide, /相同数据集 ID 和完整版本才合并显示/);
+  assert.match(guide, /不是个人硬磁盘配额/);
+  assert.match(guide, /`PREPARING_DATA` 表示等待数据，不申请 GPU、不占用卡额度/);
+  assert.match(guide, /重新检查授权与额度，再进入显卡队列/);
+  assert.match(guide, /未登记、无来源或权限不足的版本仍拒绝提交/);
+  assert.match(guide, /不支持任意个人版本自动跨机复制/);
+  assert.match(guide, /准备失败则先用“准备到本机”或 `data prepare` 明确重试/);
 });
 
 test('collaboration uses posts and chat while root requests stay retired', () => {

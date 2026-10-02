@@ -7,6 +7,7 @@ import {elasticAllocation,gpuPlacement} from './dist/gpu-allocation.js';
 const FIELDS=new Set([
   'machine','cards','minVramGiB','argv','name','key',
   'datasets','project','release','priority','scheduling','elastic','placement',
+  'prepareData',
 ]);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 
@@ -24,6 +25,7 @@ export function datasetReferences(value){
 
 export function normalizeJobSubmission(args,principal){
   if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>!FIELDS.has(k)))fail('提交参数无效。');
+  if(args.prepareData!==undefined&&typeof args.prepareData!=='boolean')fail('数据准备选项无效。');
   if(args.scheduling!==undefined&&args.priority!==undefined)fail('自定义调度不能与旧优先级预设混用。');
   let explicit=null;
   if(args.scheduling!==undefined){
@@ -47,7 +49,7 @@ export function normalizeJobSubmission(args,principal){
   const name=args.name||'train';
   if(typeof name!=='string'||name.length>64||/[\x00-\x1f]/.test(name))fail('任务名称无效。');
   const request={machine:args.machine,cards:args.cards,minVramGiB,argv:[...args.argv],name,key:args.key,
-    datasets,project,priority,priorityProvided:args.priority!==undefined,explicit,
+    datasets,project,priority,priorityProvided:args.priority!==undefined,explicit,prepareData:args.prepareData===true,
     ...(placement?{placement}:{}),
     ...(allocation?{elastic:allocation.elastic,allowedGpuCounts:allocation.allowed}:{})};
   // This positional representation is a persisted compatibility contract, not

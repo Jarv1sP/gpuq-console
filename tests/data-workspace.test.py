@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
+from storage_test_helpers import local_data_mounts
 
 DEPLOY = Path(__file__).resolve().parents[1]/'deploy'
 
@@ -21,6 +22,9 @@ class DataWorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
+        self.data_mount = local_data_mounts(self.base)
+        self.data_mount.start()
+        self.addCleanup(self.data_mount.stop)
         for name in ('node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'data-workspace.py'):
             shutil.copy2(DEPLOY/name, self.base/name)
         config = {'root': str(self.base/'state'), 'hostRoot': True,

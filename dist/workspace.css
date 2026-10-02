@@ -202,3 +202,94 @@ input[type=file]::file-selector-button {border:1px solid #d7dfeb;background:#fff
 .host-terminal-dialog {border:2px solid #bd8050}
 .host-terminal-dialog #terminal-session-note {color:#86562d}
 @media(max-width:700px){.personal-terminal{padding:18px}.terminal-heading{align-items:flex-start}.personal-terminal .terminal-controls>.button,.host-maintenance .terminal-controls>.button{flex:1}.host-maintenance{padding:14px 16px}}
+
+/* VELA workspace: retain the controls, give each group room to breathe. */
+.self-summary {padding:25px 28px;margin-bottom:26px;border-color:#e1e7e5;border-radius:12px;background:linear-gradient(115deg,#fff 68%,#f5f8f5);box-shadow:0 3px 14px #1b334702}
+.self-summary small {font-size:11px;color:#5b6d73;margin-bottom:9px;letter-spacing:.2px}
+.self-summary strong span {color:#607078}
+.self-summary strong {font-size:30px;font-weight:500;letter-spacing:-.8px;color:#2d4956}
+.self-summary .summary-status {font-size:16px;font-weight:500;color:#537064}
+.workspace-context,.dataset-card,.resource-card,.personal-terminal,.execution-panel {border-color:#e0e7e5;box-shadow:0 3px 14px #20374703;border-radius:12px}
+.workspace-context {padding:27px 28px;margin-bottom:22px}
+.workspace-context-heading h2 {font-weight:550;color:#29434e}
+.workspace-context label,.execution-panel label {color:#52666e;font-size:12px}
+.workspace-context input,.workspace-context select,.execution-panel input,.execution-panel select,.execution-panel textarea,.priority-editor select,.terminal-controls select {border-color:#dbe3e3;box-shadow:none;color:#344e5a}
+.workspace-context .muted,.execution-workspace #train-form>p,.execution-workspace label small,.personal-terminal>.muted {color:#60747b}
+.workspace-status {color:#536d78;font-size:12px}
+.execution-panel {padding:22px 27px;margin:17px 0}
+.execution-panel>summary {font-size:14px;color:#354e59;font-weight:550}
+.execution-panel>summary::after {border-color:#94a7ad;width:6px;height:6px}
+.execution-panel[open]>summary {border-color:#edf1ee}
+.personal-terminal {padding:23px 27px;background:linear-gradient(120deg,#fff 70%,#f8faf9)}
+.terminal-heading h3 {font-weight:550;color:#354e59;font-size:14px}
+.terminal-scope {background:#f1f5ef;color:#576f59;font-size:10px;letter-spacing:.2px}
+.host-maintenance {background:#faf8f2;border-color:#e8e3d5}
+.priority-choice {background:#f5f8f7;border-color:#e1e8e5}
+.priority-note {color:#637c85}
+.release-hash,.file-result {border-color:#e3e9e6;background:#f7f9f7;color:#58717a}
+.resource-card {padding:26px 28px}
+.resource-top h2 {font-size:18px;letter-spacing:-.4px;color:#29424e;font-weight:550}
+.resource-card .resource-spec {color:#60747b;font-size:11px;margin-top:8px}
+.resource-policy {border-color:#e7edea;color:#60747b;padding-block:17px;gap:26px}
+.resource-policy strong {font-weight:550;color:#405d6a}
+.resource-card .badge.active {display:inline-flex;align-items:center;gap:7px;background:#f0f5ef;color:#58715c}
+.resource-card .badge.active::before {content:"";width:5px;height:5px;background:#819c7a;border-radius:50%;box-shadow:0 0 0 3px #91ad8612}
+.gpu-table-scroll {border-color:#e4eae8;border-radius:8px;scrollbar-color:#becfce #f5f8f6}
+.gpu-table>thead>tr>th {background:#f6f8f6;color:#5e737c;font-weight:500;font-size:10px;letter-spacing:.2px;padding:12px 15px}
+.gpu-table>tbody>tr>th,.gpu-table>tbody>tr>td {border-color:#eef1ee;padding:16px 15px;color:#445d67}
+.gpu-table strong {font-weight:550;color:#315262}
+.gpu-table small {color:#60747b}
+.gpu-index {background:#edf3f3;border:1px solid #e0e9e9;border-radius:4px;color:#637e87;font-weight:500}
+.gpu-meter {height:3px;background:#edf2ef;margin-top:11px}
+.gpu-meter::-webkit-progress-bar {background:#edf2ef}
+.gpu-meter::-webkit-progress-value {background:#93acae;transition:width 700ms ease}
+.gpu-meter::-moz-progress-bar {background:#93acae}
+.gpu-processes summary,.node-queue summary {color:#5c7b88;font-size:11px}
+.process-content>.muted,.resource-bottom .muted {color:#5e717a}
+.monitor-status {color:#607c87;font-size:12px}
+.resource-explainer {color:#60747b}
+.task-table-wrap {border-color:#e4eae7;border-radius:9px}
+.task-table thead th {background:#f5f8f6;color:#60747b;font-size:11px;font-weight:500}
+.task-state {color:#41626f;font-weight:550}
+.priority-pill {border-radius:20px;font-weight:500;background:#eff4f4;color:#59737c}
+.priority-idle {background:#f7f2e8;color:#7b633f}
+.priority-high {background:#f1eff7;color:#79708b}
+.help-links {margin-top:34px;padding-top:23px;border-color:#e0e7e2;color:#65808b}
+.help-links a {color:#486a7b;font-size:12px}
+.help-links>span {color:#64756f;font-size:11px}
+.filter-tabs {background:#eaf0ee}
+.filter-tabs button[aria-pressed=true] {color:#395d6a;box-shadow:0 1px 3px #203c4510}
+@media(max-width:900px) {
+  .sidebar {background:#192a36;border-color:#ffffff0a;padding:8px 16px}
+  .sidebar .nav-item {padding:10px 9px;min-height:46px;border-radius:7px;margin:0}
+  .sidebar .nav-item[aria-current=page] {box-shadow:none;background:#ffffff0c;border-color:#ffffff17}
+  .topbar {padding-inline:24px;height:60px}
+  main {padding:32px 24px 24px}
+}
+@media(max-width:700px) {
+  .sidebar {padding:8px 10px}
+  .sidebar .nav-item {padding:10px 6px;min-height:44px;font-size:12px}
+  .topbar {padding-inline:18px;height:58px;gap:10px}
+  .topbar-wordmark {font-size:10px;letter-spacing:.2em}
+  .topbar .slash {padding-inline:10px}
+  .topbar #current-account {font-size:10px;max-width:44%}
+  main {padding:29px 18px 22px}
+  .page-heading {margin-bottom:25px}
+  .page-heading h1 {font-size:28px;font-weight:560}
+  .page-heading .eyebrow {font-size:8px;letter-spacing:1.7px;margin-bottom:9px}
+  .page-heading p {font-size:12px;line-height:1.85;margin-top:8px}
+  .page-heading .heading-actions {margin-top:20px}
+  .self-summary {padding:22px 16px;margin-bottom:21px;gap:15px}
+  .self-summary small {font-size:10px;letter-spacing:0;line-height:1.6}
+  .self-summary strong {font-size:25px}
+  .self-summary .summary-status {font-size:14px;line-height:34px}
+  .workspace-context,.resource-card,.personal-terminal,.execution-panel {padding:21px 18px;border-radius:10px}
+  .workspace-context input,.workspace-context select,.execution-panel input,.execution-panel select,.execution-panel textarea,.priority-editor select,.terminal-controls select {font-size:16px}
+  .terminal-heading h3 {font-size:14px}
+  .resource-policy {gap:10px 20px}
+  .resource-top h2 {font-size:17px}
+  .gpu-table>tbody>tr>th,.gpu-table>tbody>tr>td {padding:15px 14px}
+  .task-table tr {border-color:#e0e7e5}
+  .help-links {margin-top:28px}
+}
+@media(prefers-reduced-motion:reduce) {*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

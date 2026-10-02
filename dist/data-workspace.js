@@ -36,7 +36,7 @@ export function workspaceEntriesHTML(result){
   }).join('')||'<li class="data-workspace-empty">此目录为空。可上传文件，或在数据终端里创建目录。</li>';
 }
 export function publicationText(status){
-  if(status.state==='READY')return `已发布：${status.dataset}@${status.version}。可在下方选择用于训练。`;
+  if(status.state==='READY')return `已发布：${status.dataset}@${status.version}。可在数据集目录选择用于训练。`;
   if(status.state==='FAILED')return '发布失败：'+(status.error||'请检查目录后重试。');
   if(status.state==='UNKNOWN')return '发布结果尚未确认，数据空间暂不可编辑。请联系管理员检查后台发布进程；不要重复发布。';
   if(status.state==='NOT_READY')return '这次发布的本机副本已不再就绪。原始数据仍保留，可从个人数据空间重新发布子目录。';

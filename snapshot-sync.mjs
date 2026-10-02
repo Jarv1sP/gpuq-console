@@ -32,6 +32,10 @@ export async function snapshotSyncCall(service,principal,user,operation,args,aut
     }
   }
   const {machine,...request}=args;
+  if(mode==='snapshot'&&kind==='datasets'&&service.datasetPhysicalReference){
+    const mapped=service.datasetPhysicalReference(user.id,machine,{dataset:request.dataset,version:request.version});
+    request.dataset=mapped.dataset;
+  }
   const result=await service.bridge(machine,operation,{...request,userId:user.id,...(mode==='snapshot'&&kind==='datasets'?{hostAdmin:principal.role==='admin'}:{})});
   if(mode==='sync'&&['begin','finish'].includes(action))service.audit(principal.username,operation,machine,args.project);
   return result;
