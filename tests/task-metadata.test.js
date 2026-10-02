@@ -16,7 +16,9 @@ test('shared validators keep unicode/plain-text metadata bounded and distinct fr
   assert.equal(displayName(' 张三 '),'张三');assert.equal(displayName('😀'.repeat(32)).length,64);
   assert.equal(taskDescription(' a\r\nb '),'a\nb');assert.equal(taskDescription(undefined),'');
   for(const n of ['',null,{},'a'.repeat(33),'\x1b[2J','名字\u202e'])assert.throws(()=>displayName(n));
-  for(const d of [null,{},'a'.repeat(2001),'😀'.repeat(2000),'\0','x\u202e'])assert.throws(()=>taskDescription(d));
+  for(const d of [null,{},'a'.repeat(2001),'😀'.repeat(2000),'\0','x\u202e','\u009b2J','\u009d52;c;c2VjcmV0\u009c','\u000b','\u000c','\u2028'])assert.throws(()=>taskDescription(d));
+  assert.equal(taskDescription('第一行\n\t第二行'),'第一行\n\t第二行');
+  for(let code=0;code<=0x9f;code++)if(/\p{Cc}/u.test(String.fromCodePoint(code))&&![9,10,13].includes(code))assert.throws(()=>taskDescription(String.fromCodePoint(code)),`U+${code.toString(16)}`);
   const request=normalizeJobSubmission({...args,description:'实验说明'},{role:'member'}),created=createSubmittedJob(request,owner,false);
   assert.equal(created.submitterName,'张三');assert.equal(created.description,'实验说明');assert.equal(created.spec.description,undefined);assert.equal(created.spec.submitterName,undefined);assert.deepEqual(created.spec.argv,args.argv);
   for(const forged of [{submitterName:'fake'},{username:'fake'},{userId:'someone'},{submitter:{name:'fake'}}])assert.throws(()=>normalizeJobSubmission({...args,...forged},{role:'member'}));

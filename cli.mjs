@@ -15,10 +15,13 @@ import {progressText} from './dist/job-progress.js';
 import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
 import {displayName,taskDescription} from './dist/task-metadata.js';
 
-// Approval text is member-controlled. Never let terminal controls or bidi
-// formatting hide/reorder the frozen script (including older stored requests).
+// Member metadata is untrusted even after submission validators improve: old
+// stored records and older servers can still contain C1/ANSI or bidi controls.
 const maintenanceVisible=(value,multiline=false)=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>multiline&&c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
 const maintenanceJSON=value=>JSON.stringify(value).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>c.split('').map(unit=>'\\u'+unit.charCodeAt(0).toString(16).padStart(4,'0')).join(''));
+const terminalMetadata=(value,key='')=>typeof value==='string'?maintenanceVisible(value,['description','body'].includes(key)):
+  Array.isArray(value)?value.map(item=>terminalMetadata(item,key)):
+  value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([name,item])=>[maintenanceVisible(name),terminalMetadata(item,name)])):value;
 
 const help=`GPUQ — 个人终端与 GPUQ 训练
 
@@ -548,7 +551,11 @@ async function main(){
     }else if(command==='release'&&positionals.length===2)result=(await call('release',{userId:own(),jobId:positionals[1]})).result;
     else fail('Unknown command. Use --help.');
   }
-  if(options.json){console.log((command==='maintenance'?maintenanceJSON:command==='community'?communityJSON:JSON.stringify)({ok:true,...mode,data:result}));return;}
+  // JSON escapes are lossless for callers while also safe to print in a terminal.
+  if(options.json){console.log((command==='community'?communityJSON:maintenanceJSON)({ok:true,...mode,data:result}));return;}
+  // Explicit log/host-command streams remain raw; historical maintenance and
+  // community have their own safe formatters. Never alter arguments or storage.
+  if(!['logs','exec','maintenance','community'].includes(command))result=terminalMetadata(result);
   if(command==='community'){console.log(formatCommunityResult(result));return;}
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
   if(command==='profile'){console.log(`姓名／显示名：${result.name}\n登录用户名：${result.username}`);return;}
@@ -602,5 +609,5 @@ async function main(){
   console.log(JSON.stringify(result,null,2));
 }
 if(process.argv[1]&&fileURLToPath(import.meta.url)===realpathSync(process.argv[1])){
-  main().catch(error=>{console.error(wantsJSON?JSON.stringify({ok:false,error:error.message}):`Error: ${error.message}`);process.exitCode=1;});
+  main().catch(error=>{console.error(wantsJSON?maintenanceJSON({ok:false,error:error.message}):`Error: ${maintenanceVisible(error.message)}`);process.exitCode=1;});
 }

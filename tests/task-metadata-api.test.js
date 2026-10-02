@@ -51,7 +51,7 @@ test('profile edits persist without changing login/role/grants, and new/old job 
   assert.equal(f.s.store.get(f.owner.id).name,'张三新姓名');
 });
 test('metadata failures neither reserve quota nor dispatch, new descriptions bind retry identity and old retries remain compatible',async t=>{
-  const f=await fixture(t);for(const extra of [{description:null},{description:'x'.repeat(2001)},{submitterName:'other'}])await assert.rejects(f.submit(extra));assert.equal(f.calls.length,0);assert.equal(f.s.store.jobs.length,0);
+  const f=await fixture(t);for(const extra of [{description:null},{description:'x'.repeat(2001)},{description:'\u009b2J'},{description:'\u009d52;c;payload\u009c'},{submitterName:'other'}])await assert.rejects(f.submit(extra));assert.equal(f.calls.length,0);assert.equal(f.s.store.jobs.length,0);
   const key=randomUUID(),original=await f.submit({key});await f.settle();
   await f.s.invoke(f.member.token,'profile.update',{name:'后来的姓名'});
   assert.equal((await f.submit({key})).id,original.id);await assert.rejects(f.submit({key,description:'另一个说明'}),e=>e.status===409);
