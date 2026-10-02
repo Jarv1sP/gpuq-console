@@ -15,10 +15,11 @@ HERE=Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('real_systemd_transfer_fixture',HERE/'transfers.test.py');F=importlib.util.module_from_spec(spec);spec.loader.exec_module(F)
 f=F.Transfers();f.setUp();units=[]
 try:
-    # Keep real production executor/worker. Replace only its fixture entrypoint
-    # to bypass the known production /data2 mount preflight in disposable /tmp.
+    # Keep the production worker and storage guards; the separate Python child
+    # needs the same synthetic mountinfo helper as the parent disposable nodes.
     shutil.move(f.target.HERE/'node-executor.py',f.target.HERE/'node-runtime-entry.py')
     shutil.copy2(HERE/'transfers-systemd-worker.py',f.target.HERE/'node-executor.py')
+    shutil.copy2(HERE/'storage_test_helpers.py',f.target.HERE/'storage_test_helpers.py')
     f.target.atomic_json(f.target.HERE/'node-config.json',f.target.CONFIG)
     for p in f.patches:p.stop()
     def wait(key,states,seconds=30):
