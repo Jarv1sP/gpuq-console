@@ -38,7 +38,7 @@ class DelegationTests(unittest.TestCase):
         self.assertFalse(self.write('new\n')['changed'])
 
     def test_does_not_change_other_dropins(self):
-        self.directory.mkdir(); unrelated = self.directory / 'custom.conf'; unrelated.write_text('keep me')
+        self.directory.mkdir(mode=0o700); unrelated = self.directory / 'custom.conf'; unrelated.write_text('keep me')
         self.write(D.delegation_content('memory pids'))
         self.assertEqual(unrelated.read_text(), 'keep me')
 
@@ -46,7 +46,7 @@ class DelegationTests(unittest.TestCase):
         outside = self.base / 'outside'; outside.mkdir()
         self.directory.symlink_to(outside, target_is_directory=True)
         with self.assertRaises(ValueError): self.write('x')
-        self.directory.unlink(); self.directory.mkdir()
+        self.directory.unlink(); self.directory.mkdir(mode=0o700)
         target = self.directory / '90-gpuq-console-cpu.conf'
         external = outside / 'file'; external.write_text('preserve')
         target.symlink_to(external)

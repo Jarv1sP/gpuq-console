@@ -20,6 +20,10 @@
 | Docker / Compose | 可选 VPS 容器部署；不分发 Docker Desktop | [Moby Apache-2.0](https://github.com/moby/moby/blob/master/LICENSE)、[Compose Apache-2.0](https://github.com/docker/compose/blob/main/LICENSE) |
 | HAMi-core | GPUQ 的可选显存共享后端，仅保留适配代码；不含其二进制 | [Apache-2.0](https://github.com/Project-HAMi/HAMi-core/blob/master/LICENSE) |
 
+新增服务端二维码依赖 [node-qrcode 1.5.4](https://github.com/soldair/node-qrcode)（MIT）；二维码在本机生成，不调用第三方二维码服务。
+
+阿里云盘分享导入的接口兼容性参考 [OpenList 的 AliyunDrive Share 驱动](https://github.com/OpenListTeam/OpenList/tree/main/drivers/aliyundrive_share)，扫码登录流程参考 [itxve/aliyundriver-refresh-token](https://github.com/itxve/aliyundriver-refresh-token)（MIT，Copyright 2022 itxve）。本仓库独立实现客户端，不打包 OpenList，不复用其账号或令牌服务。连接的是阿里云盘官方 HTTPS 端点；网页接口变动可能需要更新适配，会员权益以提供方实际支持为准。
+
 GPUQ 源码从本实验室原有、包含源码的 Python zipapp 整理而来，保留原功能模块；不是引用同名 GitHub 项目，也不声称其旧高级功能都已完成门户级授权集成。构建仅打包仓库里的 `.py` 文件。
 
 训练框架由部署者另外安装，例如 [PyTorch](https://github.com/pytorch/pytorch/blob/main/LICENSE)；可选 [Miniforge](https://github.com/conda-forge/miniforge/blob/main/LICENSE) 作为 Python 环境。NVIDIA 驱动、CUDA 及其他模型/数据遵循其各自条款，不在此 MIT 许可范围内，不随本仓库分发。安装 Anaconda 等发行版时也须自行确认其适用许可。

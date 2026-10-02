@@ -74,7 +74,26 @@ test('ordinary-user datasets include resumable upload, fixed references and larg
   assert.match(guide, /500,000/);
   assert.match(guide, /64 MiB/);
   assert.match(guide, /不必重复准备/);
-  assert.match(guide, /不是你到 GPU 服务器的高速直连/);
+  assert.match(guide, /网页上传、`data upload` 和 `data put` 仍经过平台服务器中转/);
+  assert.match(guide, /链接导入由训练服务器直下/);
+});
+
+test('link-import guidance explains authorization, manual extraction and partial-data retention', () => {
+  assert.match(guide, /阿里云盘分享链接或 HTTPS 文件直链/);
+  assert.match(guide, /管理员先[\s\S]*扫码授权一次/);
+  assert.match(guide, /不能浏览管理员的云盘或取得账号令牌/);
+  assert.match(guide, /当前支持分享根目录的文件，不递归导入文件夹/);
+  assert.match(guide, /VPS 只传递授权、链接和进度信息，不搬运文件内容/);
+  for (const command of ['gpuctl data import ', 'gpuctl data imports', 'gpuctl data import-status IMPORT_ID', 'gpuctl data import-resume IMPORT_ID', 'gpuctl data import-cancel IMPORT_ID']) assert.ok(guide.includes(command));
+  assert.match(guide, /停止下载，但保留临时数据/);
+  assert.match(guide, /平台不会自动解压、执行文件、发布或复制到其他机器/);
+});
+
+test('collaboration uses posts and chat while root requests stay retired', () => {
+  assert.match(guide, /只有“帖子”和“聊天”两个入口/);
+  assert.match(guide, /展开聊天底部的“任务留言”/);
+  assert.match(guide, /旧维护申请流程已停用/);
+  assert.match(guide, /不是完整的 OCI 容器，不能用 `sudo apt`/);
 });
 
 test('guide explains quotas, interruption and failure evidence without promising runtime health', () => {

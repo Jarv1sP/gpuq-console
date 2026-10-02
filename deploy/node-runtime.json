@@ -1,7 +1,7 @@
 {
   "version": 1,
   "dependencies": [
-    "dataset-cache.py", "dataset-upload.py", "data-workspace.py", "project-store.py",
+    "dataset-cache.py", "dataset-upload.py", "data-workspace.py", "data-import.py", "project-store.py",
     "job-diagnostics.py", "training-control.py", "scheduling-policy.py",
     "admin-command.py", "gpuq-network", "snapshot-sync.py", "gpu-devices.py"
   ],
