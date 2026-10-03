@@ -88,6 +88,7 @@ gpuctl data upload LOCAL_DIR --name NAME --via relay  Explicitly allow VPS relay
 gpuctl data upload-status UPLOAD_ID  Inspect this account's upload and verification
 gpuctl data upload-discard UPLOAD_ID  Cancel an unfinished upload (not a READY dataset)
 gpuctl data prepare NAME@VERSION Prepare a local, verified copy without reserving GPUs
+gpuctl data archive-retry NAME@VERSION  Retry long-term preservation; keeps the local original
 gpuctl data unregister NAME[@VERSION]  Administrator: asynchronously unregister local data
 gpuctl data status OPERATION_ID   Check a background operation; accepted is not completed
 gpuctl data status NAME@VERSION  Inspect preparation state
@@ -494,7 +495,7 @@ async function main(){
         ref.pinId=pinId;
       }
       result={...(await call('datasets.storage.'+action,{machine,...ref})).result,machine};
-    }else if(command==='data'&&['list','prepare','status','unregister'].includes(positionals[1])){
+    }else if(command==='data'&&['list','prepare','status','unregister','archive-retry'].includes(positionals[1])){
       if(positionals.length!==(positionals[1]==='list'?2:3))fail('Usage: data list | data prepare NAME@VERSION | data status NAME@VERSION|OPERATION_ID | data unregister NAME[@VERSION]');
       if(training.length||options.datasets.length||['as','project','release','job','root','legacy','cards','min-vram','name','key','total','role','full'].some(key=>Object.hasOwn(options,key)))fail('data commands accept only the dataset reference and one --machine SERVER');
       const action=positionals[1],machine=defaultMachine(),byOperation=action==='status'&&/^[a-f0-9]{64}$/.test(positionals[2]||'');
@@ -508,7 +509,7 @@ async function main(){
         reference={dataset:ref[0],...(ref.length===2?{version:ref[1]}:{})};
       }
       if(action==='unregister'&&session.principal.role!=='admin')fail('Dataset unregister requires an administrator account');
-      try{result=(await call('datasets.'+action,{machine,...reference})).result;}
+      try{result=(await call(action==='archive-retry'?'datasets.archive.retry':'datasets.'+action,{machine,...reference})).result;}
       catch(error){if(action==='unregister')fail(`${error.message}\nUnregister outcome is unconfirmed; a background worker may still run. Inspect node operations before retrying.`);throw error;}
       if(action==='unregister'||byOperation){result={...result,machine};if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;}
     }else if(command==='run'&&positionals.length===2){

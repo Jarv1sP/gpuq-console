@@ -813,6 +813,16 @@ class DatasetUploads:
                     self.seal(session)
                 elif action == 'commit':
                     actor = self.actor(user)
+                    archive = None
+                    # Peer copies use this same uploader but are not new user
+                    # originals. Enrolling them again would recurse forever.
+                    if (self.n.CONFIG.get('storageArchive', {}).get('enabled') is True
+                            and not session.get('workerUnit', '').startswith('gpuq-transfer-')):
+                        archive = self.n.storage_archive()
+                        intent = archive.outbox_begin({'opId': upload, 'userId': user,
+                            'reference': {'dataset': session['dataset'], 'version': session['version']}, 'origin': 'upload'})
+                        session['archiveEventId'] = intent['id']
+                        self.save(session)
                     with self.version_guard(session):
                         with self.cache._locked():
                             paths, fence = self._check(session)
@@ -828,6 +838,8 @@ class DatasetUploads:
                     with self.cache._locked():
                         self._unlink(self.reservation(user, upload))
                     self.save(session)
+                    if archive is not None:
+                        archive.outbox_ready({'opId': session['archiveEventId'], 'userId': user})
                 else:
                     self.discard(session)
             except Exception as error:

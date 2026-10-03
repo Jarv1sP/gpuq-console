@@ -9,7 +9,7 @@ import {normalizeJobSubmission,createSubmittedJob,datasetReferences} from './job
 import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 import {datasetCatalogCall} from './dataset-catalog.mjs';
-import {DATA_PREPARING,advanceDataPreparation} from './dataset-preparation.mjs';
+import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 export {datasetReferences} from './job-submission.mjs';
 
@@ -66,10 +66,13 @@ export function installExecution(service,bridge){
     if(!bridge||service.reconciling||service.closing)return;
     service.reconciling=true;
     try{
-      const jobs=service.store.jobs.filter(j=>!TERMINAL.has(j.state));
+      const jobs=service.store.jobs.filter(j=>!TERMINAL.has(j.state)||j.dataPreparationHold&&j.dataPreparationHold.state!=='RELEASED');
       await Promise.all(MACHINES.map(async m=>{
         for(const job of jobs.filter(j=>j.machine===m.id)){
-          if(TERMINAL.has(job.state))continue;
+          if(TERMINAL.has(job.state)){
+            try{await releaseDataPreparation(service,job);}catch{}
+            continue;
+          }
           const policyRevision=job.policyRevision||0;
           try{
             if(job.state===DATA_PREPARING){
@@ -84,6 +87,7 @@ export function installExecution(service,bridge){
               persistSchedulerResult(service,current,result);
               maintainTaskNotes(service);
             });
+            if(TERMINAL.has(job.state))await releaseDataPreparation(service,job);
           }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing&&!TERMINAL.has(current.state)&&(current.policyRevision||0)===policyRevision){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
         }
       }));
@@ -92,7 +96,7 @@ export function installExecution(service,bridge){
   if(bridge){service.executionTimer=setInterval(()=>service.reconcile().catch(()=>{}),15000);service.executionTimer.unref();}
 }
 export function usage(jobs,userId,machine){return jobs.filter(j=>j.userId===userId&&!TERMINAL.has(j.state)&&j.state!==DATA_PREPARING&&(!machine||j.machine===machine)).reduce((sum,j)=>sum+j.cards,0);}
-export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,...safe}=job;return {...safe,...taskIdentity(job,users),command:spec.argv,
+export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,...safe}=job;return {...safe,...taskIdentity(job,users),command:spec.argv,
   yieldPolicy:['legacy','never','now','save'].includes(schedulerPolicy?.yield_policy)?schedulerPolicy.yield_policy:null,
   restartPolicy:['never','on-preempt'].includes(schedulerPolicy?.restart_policy)?schedulerPolicy.restart_policy:null,
   dispatchMode:['queue','preempt-now','preempt-save'].includes(schedulerPolicy?.dispatch_mode)?schedulerPolicy.dispatch_mode:null};}
@@ -202,6 +206,15 @@ export async function executionCall(service,principal,operation,args){
     // client-provided role, source mapping or filesystem path crosses the bridge.
     if(['begin','seal','commit','discard','direct-ticket','direct-revoke'].includes(action))service.audit(principal.username,operation,machine,id);
     return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
+  }
+  if(operation==='datasets.archive.retry'){
+    authorizedMachine(args.machine);
+    if(Object.keys(args).sort().join(',')!=='dataset,machine,version')fail('归档重试需要固定数据集版本。');
+    datasetReferences([{dataset:args.dataset,version:args.version}]);
+    if(!service.retryStorageArchive)fail('长期归档尚未配置。',409);
+    const result=service.retryStorageArchive(user.id,args.machine,{dataset:args.dataset,version:args.version});
+    service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
+    return result;
   }
   if(['datasets.list','datasets.status','datasets.prepare','datasets.unregister'].includes(operation)){
     authorizedMachine(args.machine);

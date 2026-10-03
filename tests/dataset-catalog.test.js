@@ -25,3 +25,12 @@ test('catalog rejects client identity/path injection and unauthorized machine be
   for(const extra of [{hostAdmin:true},{userId:'other'},{path:'/data2'}])await assert.rejects(datasetCatalogCall(s,principal,'datasets.catalog',{machine:machines[0],...extra}),e=>e.status===400);
   await assert.rejects(datasetCatalogCall(s,principal,'datasets.catalog',{machine:'not-granted'}),e=>e.status===403);assert.equal(calls,0);
 });
+test('catalog and capacity discard results if machine policy changes during read',async()=>{
+  for(const operation of ['datasets.catalog','datasets.capacity']){
+    const user={id:principal.userId,enabled:true,limits:{[machines[0]]:1}},s={store:{get:()=>user},bridge:async()=>{
+      user.limits[machines[0]]=0;
+      return {datasets:[{dataset:'private',versions:[{version,state:'READY'}]}],filesystemBytes:100,availableBytes:90,reserveBytes:10,usableBytes:80};
+    }};
+    await assert.rejects(datasetCatalogCall(s,principal,operation,{machine:machines[0]}),e=>e.status===403);
+  }
+});

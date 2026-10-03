@@ -1,6 +1,7 @@
 // Durable data staging precedes scheduler submission. No GPU lease is held
 // during this phase, and a portal restart resumes observation, not a new job.
 export const DATA_PREPARING='PREPARING_DATA';
+const terminal=new Set(['CANCELED','FAILED','SUCCEEDED']);
 const inFlight=new WeakMap();
 const fingerprint=job=>JSON.stringify([job.userId,job.machine,job.cards,job.digest,job.spec,job.datasets,job.project,job.release]);
 
@@ -70,6 +71,23 @@ async function observe(service,id,usage){
       if(project?.state!=='READY'||project.project!==job.project||project.release!==job.release)failure='项目版本不可用；未启动训练。';
     }
     if(!failure)await service.refreshGPUQ();
+    if(!failure&&service.storageArchivePolicy?.enabled){
+      const leaseSpec={...job.spec,datasets:references};
+      const held=await service.enqueue(()=>{
+        const live=current(service,id,snapshot);if(!live)return false;
+        const old=live.job.dataPreparationHold;
+        if(old&&JSON.stringify(old.spec)!==JSON.stringify(leaseSpec))throw Error('准备保活绑定的版本已改变，未启动训练。');
+        if(!old)persist(service,live.job,()=>{live.job.dataPreparationHold={state:'INTENT',spec:leaseSpec};});
+        return true;
+      });
+      if(!held)return;
+      const result=await service.bridge(job.machine,'storage.lease.prepare',{job:leaseSpec});
+      if(result?.state!=='HELD'||result.jobId!==job.id)throw Error('本机数据保活尚未确认；未申请 GPU。');
+      if(!await service.enqueue(()=>{
+        const live=current(service,id,snapshot);if(!live)return false;
+        persist(service,live.job,()=>{live.job.dataPreparationHold.state='HELD';});return true;
+      }))return;
+    }
   }
   return service.enqueue(()=>{
     const live=current(service,id,snapshot);if(!live)return;
@@ -86,14 +104,35 @@ async function observe(service,id,usage){
       const host=service.gpuq?.hosts.find(h=>h.id===currentJob.machine);
       if(service.gpuq?.stale||!host?.reachable||!host.gpuq?.connected||host.gpuq.observeOnly){currentJob.queueReason='数据已就绪，等待服务器恢复；尚未申请 GPU。';return;}
       currentJob.spec.datasets=references;
+      // Promotion reserves portal quota, not proof that the scheduler accepted
+      // the job. Keep the durable hold pending until node termination cleanup;
+      // submit preflight failure/lost replies must not orphan its leases.
       currentJob.state='SUBMITTING';currentJob.queueReason='数据准备完成，等待节点调度。';currentJob.dataPreparation.finishedAt=new Date().toISOString();
     });
+  });
+}
+
+// A canceled/invalid preparation may have acquired a lease before its reply
+// was lost. Keep its original immutable spec until the node confirms the
+// permanent cancellation fence; a timeout is never proof of no reader.
+export async function releaseDataPreparation(service,job){
+  const held=job.dataPreparationHold;
+  if(service.closing||!terminal.has(job.state)||!held||held.state==='RELEASED')return;
+  const result=await service.bridge(job.machine,'storage.lease.cancel',{job:held.spec});
+  if(result?.state!=='CANCELED'||result.jobId!==job.id||result.released!==true)throw Error('准备数据的保活释放尚未确认。');
+  await service.enqueue(()=>{
+    const currentJob=service.store.jobs.find(row=>row.id===job.id);
+    if(!service.closing&&currentJob&&terminal.has(currentJob.state)&&JSON.stringify(currentJob.dataPreparationHold?.spec)===JSON.stringify(held.spec))
+      persist(service,currentJob,()=>{currentJob.dataPreparationHold.state='RELEASED';});
   });
 }
 
 export function advanceDataPreparation(service,job,usage){
   let pending=inFlight.get(service);if(!pending){pending=new Map();inFlight.set(service,pending);}
   if(pending.has(job.id))return pending.get(job.id);
-  const operation=observe(service,job.id,usage).finally(()=>{if(pending.get(job.id)===operation)pending.delete(job.id);});
+  const operation=observe(service,job.id,usage).finally(async()=>{
+    try{await releaseDataPreparation(service,job);}
+    finally{if(pending.get(job.id)===operation)pending.delete(job.id);}
+  });
   pending.set(job.id,operation);return operation;
 }
