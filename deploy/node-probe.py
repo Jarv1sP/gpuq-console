@@ -254,6 +254,15 @@ def probe_gpuq():
                 "jobs": [{key: job.get(key) for key in allowed} for job in jobs[:100] if isinstance(job, dict)],
                 "limit": 100,
             }
+            if isinstance(daemon.get('capabilities'),list) and 'job-display-v1' in daemon['capabilities']:
+                try:
+                    entry=ast.parse(helper_source(HERE/'node-executor.py',os.getuid()))
+                    helper_tree=ast.parse(helper_source(HERE/'task-display.py',os.getuid()))
+                    constants=lambda tree:{target.id:node.value.value for node in tree.body if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant) for target in node.targets if isinstance(target,ast.Name)}
+                    functions={node.name for node in helper_tree.body if isinstance(node,ast.FunctionDef)}
+                    if constants(entry).get('TASK_DISPLAY_CAPABILITY')=='console-task-display-v1' and constants(helper_tree).get('CAPABILITY')=='console-task-display-v1' and {'validate','sync'}<=functions:
+                        output['capabilities'].append('console-task-display-v1')
+                except (OSError,ValueError,SyntaxError):pass
             helper=Path(__file__).resolve().parent/'scheduling-policy.py'
             if helper.is_file():
                 import importlib.util

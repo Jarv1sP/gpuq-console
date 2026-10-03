@@ -5,7 +5,8 @@
     "job-diagnostics.py", "training-control.py", "scheduling-policy.py",
     "admin-command.py", "gpuq-network", "snapshot-sync.py", "gpu-devices.py",
     "transfer-jobs.py", "transfer-peer.py", "direct-upload.py",
-    "dataset-tier.py", "storage-node.py", "storage-authority.py", "storage-archive.py", "storage-leases.py"
+    "dataset-tier.py", "storage-node.py", "storage-authority.py", "storage-archive.py", "storage-leases.py",
+    "task-display.py"
   ],
   "profiles": {
     "common-p0": {"runner": "sandbox-runner-common-p0.py", "extra": []},
