@@ -6,7 +6,7 @@ import ssl
 import threading
 
 
-def create_server(node, jobs):
+def create_server(node, jobs, *, authority=None):
     config = node.CONFIG.get('transferPeer')
     if not isinstance(config, dict) or set(config) != {'bind', 'port', 'certificate', 'privateKey'}:
         raise ValueError('Configure transferPeer explicitly before enabling this service')
@@ -48,7 +48,7 @@ def create_server(node, jobs):
         def do_POST(self):
             self.close_connection = True
             try:
-                if self.path != '/snapshot' or self.headers.get('Transfer-Encoding'):
+                if self.path not in ('/snapshot','/authority') or self.headers.get('Transfer-Encoding'):
                     raise ValueError('Read-only snapshot endpoint')
                 length = int(self.headers.get('Content-Length', '-1'))
                 if not 1 <= length <= 8192 or not self.headers.get('Content-Type', '').startswith('application/json'):
@@ -59,7 +59,10 @@ def create_server(node, jobs):
                 auth = self.headers.get('Authorization', '')
                 if not auth.startswith('Bearer '):
                     raise ValueError('Snapshot ticket required')
-                result = jobs.read(json.loads(raw), auth[7:])
+                if self.path == '/authority':
+                    if authority is None:raise ValueError('Protected authority is not enabled')
+                    result=authority.read(json.loads(raw),auth[7:])
+                else:result = jobs.read(json.loads(raw), auth[7:])
                 payload, code = {'ok': True, 'result': result}, 200
             except Exception:
                 payload, code = {'ok': False, 'error': 'Snapshot grant or immutable source is unavailable'}, 403
@@ -99,6 +102,6 @@ def create_server(node, jobs):
     return Server((config['bind'], config['port']), Handler)
 
 
-def serve(node, jobs):
-    with create_server(node, jobs) as server:
+def serve(node, jobs, *, authority=None):
+    with create_server(node, jobs, authority=authority) as server:
         server.serve_forever()

@@ -1,5 +1,5 @@
 // Incremental SHA256 and the bounded HTTPS dataset upload protocol. No remote dependencies.
-export const CHUNK_BYTES=1024*1024,MAX_MANIFEST_BYTES=64*1024*1024,MAX_ENTRIES=500000;
+export const CHUNK_BYTES=1024*1024,MAX_MANIFEST_BYTES=64*1024*1024,MAX_ENTRIES=500000,LARGE_RELAY_BYTES=256*1024**2;
 const K=new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
 const rr=(n,b)=>(n>>>b)|(n<<(32-b));
 export class SHA256{
@@ -43,14 +43,15 @@ export async function scanBrowserDirectory(selection,{signal,onProgress=()=>{}}=
 }
 function base64(data){let value='';for(let i=0;i<data.length;i+=8192)value+=String.fromCharCode(...data.subarray(i,i+8192));return btoa(value);}
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-export async function uploadBrowserDataset({call,userId,machine,name,scan,signal,onProgress=()=>{},pollMs=1500,keyStore}){
+export async function uploadBrowserDataset({call,userId,machine,name,scan,signal,onProgress=()=>{},pollMs=1500,keyStore,allowRelay=false}){
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw Error('名称需为 1–40 位字母、数字、下划线或连字符。');
+  if(scan.totalBytes>LARGE_RELAY_BYTES&&allowRelay!==true)throw Error('超过 256 MiB 的网页上传需要明确确认 VPS 中转，或改用可直传的命令行通道。');
   let uploadId,state;
   const request=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'?{uploadId}:{}),...args});alive(signal);return result;};
   const report=(current,extra={})=>{state=current;onProgress({...current,...extra});};
   const ready=()=>{if(state.state!=='READY'||!state.dataset||!/^[a-f0-9]{64}$/.test(state.version||''))throw Error('服务器尚未确认数据集完整就绪。');return state;};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){alive(signal);await pause(pollMs);report(await request('status'));}if(state.state==='FAILED')throw Error(state.error||'服务端校验失败；修复后重新上传同一目录。');if(state.state==='DISCARDED')throw Error('这次上传已取消。');};
-  const baseKey=uploadKey(userId,machine,name,scan.manifestSha256),begin={name,key:keyStore?.get(baseKey)||baseKey,manifestBytes:scan.manifest.size,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries};
+  const baseKey=uploadKey(userId,machine,name,scan.manifestSha256),begin={name,key:keyStore?.get(baseKey)||baseKey,manifestBytes:scan.manifest.size,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(allowRelay===true?{allowRelay:true}:{})};
   report(await request('begin',begin));
   if(state.state==='DISCARDED'){
     if(!keyStore)throw Error('这次上传已取消；请使用能保存续传信息的客户端重新开始。');

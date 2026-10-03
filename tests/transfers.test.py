@@ -30,6 +30,7 @@ USER=F.USER
 class Transfers(unittest.TestCase):
     def setUp(self):
         self.fixture=F.SnapshotSyncTests();self.fixture.setUp();self.source,self.target=self.fixture.nodes
+        self.source.CONFIG['machine']='gpu-1';self.target.CONFIG['machine']='gpu-2'
         for node in (self.source,self.target):
             for name in ('transfer-jobs.py','transfer-peer.py'):shutil.copy2(DEPLOY/name,node.HERE/name)
         # Over two chunks, empty file, Chinese path and an empty directory.
@@ -52,7 +53,7 @@ class Transfers(unittest.TestCase):
         self.calls=[];self.active=False
         self.patches=[patch.object(self.dst,'activity',side_effect=lambda unit:self.active),patch.object(self.target,'run',side_effect=lambda argv,**kw:self.calls.append(argv)),patch.object(self.target.dataset_uploads(),'active',return_value=True)]
         for p in self.patches:p.start()
-        ticket=self.src.prepare({'id':self.key,'reference':{'kind':'datasets','dataset':'shared','version':self.version},'userId':USER})
+        ticket=self.src.prepare({'id':self.key,'reference':{'kind':'datasets','dataset':'shared','version':self.version},'userId':USER,'targetMachine':'gpu-2'})
         self.args={'id':self.key,'userId':USER,'sourceMachine':'gpu-1','source':ticket,'reference':{'kind':'datasets','dataset':'shared','version':self.version},'name':'copied'}
     def tearDown(self):
         self.server.shutdown();self.server.server_close();self.thread.join(2)
@@ -68,6 +69,9 @@ class Transfers(unittest.TestCase):
         self.assertEqual(len(self.calls),1,'Seal and publish must not create an independent upload service')
         session=self.target.dataset_uploads().load(USER,result['uploadId']);self.assertEqual(session['workerUnit'],self.dst.unit(self.key,1))
         self.assertEqual(self.dst.start(self.args)['state'],'SUCCEEDED');self.assertEqual(len(self.calls),1)
+        proof=self.dst.process('transfers.confirm-source-release',self.control())
+        self.assertTrue(self.src.process('transfers.release-source',{**self.control(),'confirmation':proof})['released'])
+        self.assertEqual(self.source.dataset_cache()[1]._leases('shared',self.version),[])
     def test_lost_launch_occupies_admission_and_no_second_launch(self):
         with patch.object(self.target,'run',side_effect=TimeoutError('uncertain')):
             self.dst.start(self.args)
@@ -127,8 +131,8 @@ class Transfers(unittest.TestCase):
         self.dst.start(self.args)
         ticket=self.src.load(self.key,'.ticket.json');ticket['expiresAt']=0;self.source.atomic_json(self.src.path(self.key,'.ticket.json'),ticket)
         self.assertEqual(self.dst.worker(self.key,1),1);self.assertEqual(self.dst.status(self.control())['state'],'FAILED')
-        with self.assertRaisesRegex(ValueError,'expired'):self.src.prepare({'id':self.key,'reference':self.args['reference'],'userId':USER})
-        renewed=self.src.prepare({'id':self.key,'reference':self.args['reference'],'userId':USER,'renew':True})
+        with self.assertRaisesRegex(ValueError,'expired'):self.src.prepare({'id':self.key,'reference':self.args['reference'],'userId':USER,'targetMachine':'gpu-2'})
+        renewed=self.src.prepare({'id':self.key,'reference':self.args['reference'],'userId':USER,'targetMachine':'gpu-2','renew':True})
         self.assertNotEqual(renewed['token'],self.args['source']['token']);self.dst.resume({**self.control(),'source':renewed});self.assertEqual(self.dst.worker(self.key,2),0)
         self.assertEqual(self.dst.status(self.control())['version'],self.version)
 

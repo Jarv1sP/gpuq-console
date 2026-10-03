@@ -17,6 +17,9 @@ DATASET_UPLOADS=None
 DATA_WORKSPACES=None
 DATA_IMPORTS=None
 PROJECT_OPS=None
+STORAGE_NODE=None
+STORAGE_AUTHORITY=None
+STORAGE_AUTHORITY_MODULE=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DIAGNOSTICS=None
@@ -191,6 +194,7 @@ def dataset_background_status(folder,key,spec,cache,actor):
     # completed transfer may since have been evicted or its mount removed.
     current=cache.status(actor,spec['dataset'],spec['version']) if spec['op']=='prepare' else {}
     if current.get('state')=='READY':return {**current,'operationId':key}
+    if spec['op']=='prepare' and dataset_recovery_configured(cache,actor,spec['dataset'],spec['version']):current['recoveryConfigured']=True
     result=folder/(key+'.result.json')
     if result.exists():
         receipt=json.loads(result.read_text())
@@ -214,6 +218,18 @@ def dataset_current_prepare(folder,dataset,version):
     if spec.get('op')!='prepare' or spec.get('dataset')!=dataset or spec.get('version')!=version or hashlib.sha256(json.dumps(spec,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Dataset worker identity mismatch')
     return key,spec
 
+
+def dataset_recovery_configured(cache,actor,dataset,version):
+    # Metadata-only capability hint, never a claim that a remote disk is live.
+    # The detached prepare worker authenticates the fixed authority again.
+    try:
+        node=storage_node()
+        with cache._locked():
+            cache._dataset(actor,dataset)
+            node.tier._receipt(actor,cache._tier(dataset,version),dataset,version)
+        return True
+    except (ValueError,OSError,TypeError,KeyError):return False
+
 def dataset_op(operation,args):
     definitions={'datasets.capacity':set(),'datasets.list':set(),'datasets.status':{'dataset','version','operationId'},'datasets.prepare':{'dataset','version'},'datasets.register':{'dataset','sourceId','owners'},'datasets.unregister':{'dataset','version'}}
     if operation not in definitions or not isinstance(args,dict) or set(args)-definitions[operation]-{'userId','hostAdmin'}:raise ValueError('Invalid dataset operation fields')
@@ -229,6 +245,8 @@ def dataset_op(operation,args):
         for item in listing['datasets']:
             for version in item['versions']:
                 if version['state']=='READY':continue
+                if dataset_recovery_configured(cache,actor,item['dataset'],version['version']):
+                    version.update(canPrepare=True,recoveryConfigured=True)
                 pending=dataset_current_prepare(folder,item['dataset'],version['version'])
                 if pending:
                     current=dataset_background_status(folder,*pending,cache,actor)
@@ -261,6 +279,7 @@ def dataset_op(operation,args):
         if not isinstance(version,str) or not DATASET_VERSION.fullmatch(version):raise ValueError('Invalid immutable dataset version')
         status=cache.status(actor,dataset,version)
         if status['state']=='READY':return status
+        if dataset_recovery_configured(cache,actor,dataset,version):status['recoveryConfigured']=True
         task={'op':'prepare','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':actor.is_admin}
     key=hashlib.sha256(json.dumps(task,sort_keys=True).encode()).hexdigest();unit='gpuq-data-'+key[:32]
     spec=folder/(key+'.json');result=folder/(key+'.result.json')
@@ -288,9 +307,14 @@ def dataset_worker(key):
         module,cache=dataset_cache();actor=dataset_actor(module,task)
         if task['op']=='register':out=cache.register_source(actor,task['dataset'],task['sourceId'],task['owners']);out['state']='REGISTERED'
         elif task['op']=='prepare':
-            # This first-stage implementation only materializes a configured
-            # local source; remote transport is a separate trusted operation.
-            out=cache.materialize(actor,task['dataset'],task['version'])
+            with cache._locked():
+                cache._dataset(actor,task['dataset'])
+                cached=cache._tier(task['dataset'],task['version'])['role']=='cache'
+            # Only a service-verified authority receipt may recover an evicted
+            # disposable copy. Never fall back to an old sourceId on failure.
+            if cached:
+                out=storage_node().tier.recover(module.Principal('builtin-admin',True),task['dataset'],task['version'])
+            else:out=cache.materialize(actor,task['dataset'],task['version'])
         elif task['op']=='unregister':
             out=cache.unregister(actor,task['dataset'],task.get('version'));out['state']='UNREGISTERED'
         else:raise ValueError('Invalid background dataset action')
@@ -664,7 +688,67 @@ def transfers():
     return module.TransferJobs(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
 
 
+def storage_node():
+    global STORAGE_NODE
+    if STORAGE_NODE is None:
+        spec=importlib.util.spec_from_file_location('gpuq_storage_node',HERE/'storage-node.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        configured=CONFIG.get('storageAuthorities',{})
+        if not isinstance(configured,dict) or len(configured)>16:raise ValueError('Invalid configured storage authorities')
+        authorities={}
+        if configured:
+            paths,_=dataset_cache();paths._mkdir(ROOT/'storage-grants')
+        for key,value in configured.items():
+            if (not isinstance(key,str) or not DATASET_ID.fullmatch(key) or not isinstance(value,dict)
+                    or set(value)!={'machine'} or value['machine']==CONFIG.get('machine')
+                    or value['machine'] not in CONFIG.get('transferPeers',{})):
+                raise ValueError('Storage authority needs a fixed, different, pinned LAN peer')
+            authorities[key]=storage_authority_module().RemoteAuthority(value['machine'],CONFIG['transferPeers'][value['machine']],ROOT/'storage-grants'/key,target_machine=CONFIG['machine'])
+        STORAGE_NODE=module.StorageNode.from_executor(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),authorities=authorities)
+    return STORAGE_NODE
+
+
+def storage_authority_module():
+    global STORAGE_AUTHORITY_MODULE
+    if STORAGE_AUTHORITY_MODULE is None:
+        spec=importlib.util.spec_from_file_location('gpuq_storage_authority',HERE/'storage-authority.py')
+        STORAGE_AUTHORITY_MODULE=importlib.util.module_from_spec(spec);sys.modules[spec.name]=STORAGE_AUTHORITY_MODULE;spec.loader.exec_module(STORAGE_AUTHORITY_MODULE)
+    return STORAGE_AUTHORITY_MODULE
+
+
+def storage_authority():
+    global STORAGE_AUTHORITY
+    config=CONFIG.get('storageAuthority',{'enabled':False})
+    if not isinstance(config,dict) or set(config)!={'enabled'} or type(config['enabled']) is not bool:raise ValueError('Invalid protected authority configuration')
+    if not config['enabled']:return None
+    if STORAGE_AUTHORITY is None:
+        module,cache=dataset_cache()
+        STORAGE_AUTHORITY=storage_authority_module().AuthorityStore(cache,CONFIG['machine'],ROOT/'storage-authority',principal=module.Principal('builtin-admin',True))
+    return STORAGE_AUTHORITY
+
+
+def storage_management(operation,args):
+    # This is a control-plane route, not the LAN peer or a user supplied role.
+    allowed=('datasets.storage.status','datasets.storage.plan','datasets.storage.pin','datasets.storage.unpin')
+    if operation not in allowed or not isinstance(args,dict) or args.get('hostAdmin') is not True:
+        raise ValueError('Administrator storage operation required')
+    module,_=dataset_cache();actor=dataset_actor(module,args)
+    request={k:v for k,v in args.items() if k not in ('userId','hostAdmin')}
+    if 'op' in request:raise ValueError('Storage operation cannot be overridden')
+    return storage_node().dispatch(actor,{'op':operation.rsplit('.',1)[1],**request})
+
+
+def storage_collect():
+    """Local service entry, deliberately absent from the RPC/peer allowlists."""
+    storage=storage_node()
+    if not storage.tier.enabled:
+        return {'enabled':False,'state':'DISABLED','evicted':[]}
+    module,_=dataset_cache()
+    return storage.tier.collect(module.Principal('builtin-admin',True),dry_run=False,max_versions=16)
+
+
 def process(operation,args):
+    if operation.startswith('datasets.storage.'):return storage_management(operation,args)
     if operation.startswith('transfers.'):return transfers().process(operation,args)
     if operation in ('diagnostics','watch'):
         if not isinstance(args,dict) or set(args)!={'job'}:raise ValueError('Invalid diagnostic operation fields')
@@ -800,11 +884,17 @@ def process(operation,args):
 
 if __name__=='__main__':
     os.umask(0o077)
+    if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':
+        print(json.dumps(storage_collect()));sys.exit(0)
     if len(sys.argv)==4 and sys.argv[1]=='--transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3])))
     if len(sys.argv)==2 and sys.argv[1]=='--transfer-peer-daemon':
         spec=importlib.util.spec_from_file_location('gpuq_transfer_peer',HERE/'transfer-peer.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        module.serve(sys.modules[__name__],transfers());sys.exit(0)
+        module.serve(sys.modules[__name__],transfers(),authority=storage_authority());sys.exit(0)
+    if len(sys.argv)==2 and sys.argv[1]=='--direct-upload-daemon':
+        spec=importlib.util.spec_from_file_location('gpuq_direct_upload',HERE/'direct-upload.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        module.serve(sys.modules[__name__],dataset_uploads());sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))

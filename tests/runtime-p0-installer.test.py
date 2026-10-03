@@ -82,7 +82,7 @@ class InstallerBoundary(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
     def test_preserves_profiles_and_root_grants_stay_explicit_and_scoped(self):
-        self.assertEqual(node_runtime.manifest()['units'],['gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer','gpuq-transfer-peer.service'])
+        self.assertEqual(node_runtime.manifest()['units'],['gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer','gpuq-transfer-peer.service','gpuq-direct-upload.service','gpuq-storage-gc.service','gpuq-storage-gc.timer'])
         self.assertIn("run('systemctl','--user','enable','--now','gpuq-diagnostics-gc.timer')", SOURCE)
         self.assertEqual(node_runtime.manifest()['profiles']['ray-p0']['extra'],['job-resources.py','gpuq-ray'])
         for forbidden in ('environmentMode', "'daemon-reexec'", "'restart'"):

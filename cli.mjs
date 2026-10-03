@@ -83,13 +83,18 @@ gpuctl data shell                Open your private /data2 terminal (no GPU)
 gpuctl data files [DIRECTORY]    List your private data workspace
 gpuctl data publish DIRECTORY --name NAME  Publish a prepared subdirectory, after exit
 gpuctl data workspace-status [OPERATION_ID]  Inspect data workspace publication
-gpuctl data upload LOCAL_DIR --name NAME  Upload private data; repeat to resume
+gpuctl data upload LOCAL_DIR --name NAME  Prefer direct upload; repeat to resume
+gpuctl data upload LOCAL_DIR --name NAME --via relay  Explicitly allow VPS relay
 gpuctl data upload-status UPLOAD_ID  Inspect this account's upload and verification
 gpuctl data upload-discard UPLOAD_ID  Cancel an unfinished upload (not a READY dataset)
 gpuctl data prepare NAME@VERSION Prepare a local, verified copy without reserving GPUs
 gpuctl data unregister NAME[@VERSION]  Administrator: asynchronously unregister local data
 gpuctl data status OPERATION_ID   Check a background operation; accepted is not completed
 gpuctl data status NAME@VERSION  Inspect preparation state
+gpuctl data storage status [NAME@VERSION]  Administrator: capacity and protection state
+gpuctl data storage plan         Administrator: preview cache policy; never deletes
+gpuctl data storage pin NAME@VERSION LABEL  Protect a manual job's dataset copy
+gpuctl data storage unpin NAME@VERSION LABEL  Release that manual pin after its job stops
 gpuctl run -g 2 --data NAME@VERSION -- python train.py --data /data2/NAME
 
 gpuctl login USERNAME              Login (hidden password prompt)
@@ -151,6 +156,7 @@ let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).i
 function fail(message){throw Error(message);}
 const CLI_OPTIONS=new Map([
   ['pin','flag'],...['kind','status','title','body','body-file','announcement-type'].map(key=>[key,'value']),
+  ['via','value'],
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown'].map(key=>[key,'flag']),
   ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
@@ -197,6 +203,7 @@ async function main(){
   }
   if(positionals[0]==='notify'&&(positionals.length!==3||!['on','off','status'].includes(positionals[2])||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k))))fail('Usage: notify JOB on|off|status');
   if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
+  if(options.via!==undefined&&(!((['data','transfer'].includes(positionals[0])&&positionals[1]==='upload')||(positionals[0]==='data'&&positionals[1]==='put'&&options.via!=='direct'))||!['auto','direct','relay'].includes(options.via)))fail('--via auto|direct|relay is for directory uploads; data put accepts only auto or relay');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(options.cwd!==undefined&&!['exec','maintenance'].includes(positionals[0])||options.timeout!==undefined&&!['exec','maintenance'].includes(positionals[0])&&!transferCopy||options.detach&&positionals[0]!=='exec'&&!transferCopy)fail('--cwd is for exec/maintenance; timeout also supports transfer copy; detach is for exec or transfer copy');
@@ -288,12 +295,12 @@ async function main(){
     const find=username=>{const user=state.users.find(u=>u.username===username);if(!user)fail('Unknown or unauthorized username');return user.id;};
     const own=()=>session.principal.role==='admin'&&options.as?find(options.as):session.principal.userId;
     if(command==='transfer'){
-      const action=positionals[1],common=['machines','datasets','url','session-file','json','key'],specific={upload:['name'],download:[],copy:['from','to','name','timeout','detach'],list:['cursor','limit'],status:[],watch:['interval'],cancel:[],resume:[]}[action];
+      const action=positionals[1],common=['machines','datasets','url','session-file','json','key'],specific={upload:['name','via'],download:[],copy:['from','to','name','timeout','detach'],list:['cursor','limit'],status:[],watch:['interval'],cancel:[],resume:[]}[action];
       if(!specific||training.length||options.datasets.length||Object.keys(options).some(k=>!common.includes(k)&&!specific.includes(k)))fail('Usage: transfer upload|download|copy|list|status|watch|cancel|resume');
-      const progress=(phase,v)=>process.stderr.write(`${phase} · ${v.transferId||v.path||''}${v.bytes!==undefined?' · '+v.bytes+' / '+(v.totalBytes??'?')+' bytes':''}\n`);
+      const progress=(phase,v)=>process.stderr.write(phase==='ROUTE'?(v.kind==='campus-direct'?'传输路径：直连上传节点（文件不经平台中转）\n':`传输路径：VPS 中转${v.explicit?'（已明确选择）':'（小文件通道）'}\n`):`${phase} · ${v.transferId||v.path||''}${v.bytes!==undefined?' · '+v.bytes+' / '+(v.totalBytes??'?')+' bytes':''}\n`);
       if(action==='upload'){
         if(positionals.length!==3)fail('Usage: transfer upload LOCAL_DIR --name NAME');
-        result=await uploadTransfer(call,{machine:defaultMachine(),name:options.name,userId:session.principal.userId,directory:positionals[2],key:options.key,progress});
+        result=await uploadTransfer(call,{machine:defaultMachine(),name:options.name,userId:session.principal.userId,directory:positionals[2],key:options.key,progress,via:options.via||'auto'});
       }else if(action==='download'||action==='copy'){
         if(positionals.length!==(action==='download'?4:3))fail('Usage: transfer download NAME@VERSION NEW_DIR | transfer copy NAME@VERSION --from SOURCE --to TARGET --name NAME');
         const [dataset,version,...extra]=positionals[2].split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Select NAME@FULL_VERSION_HASH');
@@ -435,12 +442,12 @@ async function main(){
       if(training.length)fail('导入不接受额外命令。');
       result=await runCloudImport({action:positionals[1],positionals,options,machine:defaultMachine(),call});
     }else if(command==='data'&&['put','files','publish','workspace-status'].includes(positionals[1])){
-      const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='put'?['overwrite']:action==='publish'?['name','key']:[])];
+      const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='put'?['overwrite','via']:action==='publish'?['name','key']:[])];
       if(training.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k)))fail('Personal data commands do not accept project, root or training options');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       if(action==='put'){
         if(positionals.length<3||positionals.length>4)fail('Usage: data put LOCAL_FILE [REMOTE_FILE] [--overwrite]');
-        result=await putWorkspaceData(call,machine,positionals[2],positionals[3]||basename(positionals[2]),options.overwrite);
+        result=await putWorkspaceData(call,machine,positionals[2],positionals[3]||basename(positionals[2]),options.overwrite,{via:options.via||'auto'});
       }else if(action==='files'){
         if(positionals.length>3)fail('Usage: data files [RELATIVE_DIRECTORY]');
         result=(await call('datasets.workspace.list',{machine,path:workspaceDataPath(positionals[2]||'.',{directory:true})})).result;
@@ -457,16 +464,36 @@ async function main(){
         if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
       }
     }else if(command==='data'&&positionals[1]==='upload'){
-      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','name'].includes(k)))fail('Usage: data upload LOCAL_DIR --name NAME [--machine SERVER]');
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','name','via'].includes(k)))fail('Usage: data upload LOCAL_DIR --name NAME [--machine SERVER] [--via auto|direct|relay]');
       if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Dataset name must be 1–40 ASCII letters, digits, _ or -, beginning with a letter or digit');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
-      let last=0,phase='';const progress=(next,value)=>{if(next==='HANDLE'){process.stderr.write(`Upload: ${value.uploadId} · ${value.machine}\n`);return;}const now=Date.now();if(next!==phase||now-last>1000){phase=next;last=now;process.stderr.write(`${next}${value.bytes!==undefined?' · '+value.bytes+(value.totalBytes!==undefined?' / '+value.totalBytes:'')+' bytes':''}${value.path?' · '+value.path:''}\n`);}};
+      let last=0,phase='';const progress=(next,value)=>{if(next==='HANDLE'){process.stderr.write(`Upload: ${value.uploadId} · ${value.machine}\n`);return;}if(next==='ROUTE'){process.stderr.write(value.kind==='campus-direct'?'传输路径：直连上传节点（文件不经平台中转）\n':`传输路径：VPS 中转${value.explicit?'（已明确选择）':'（小文件通道）'}\n`);return;}const now=Date.now();if(next!==phase||now-last>1000){phase=next;last=now;process.stderr.write(`${next}${value.bytes!==undefined?' · '+value.bytes+(value.totalBytes!==undefined?' / '+value.totalBytes:'')+' bytes':''}${value.path?' · '+value.path:''}\n`);}};
       const keyStore={get:key=>session.datasetUploadKeys?.[key],set:async(key,value)=>{session.datasetUploadKeys={...session.datasetUploadKeys,[key]:value};await saveSession();}};
-      result=await uploadLocalDataset(call,{machine,name:options.name,userId:session.principal.userId,directory:positionals[2],progress,keyStore});
+      result=await uploadLocalDataset(call,{machine,name:options.name,userId:session.principal.userId,directory:positionals[2],progress,keyStore,via:options.via||'auto'});
     }else if(command==='data'&&['upload-status','upload-discard'].includes(positionals[1])){
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: data upload-status|upload-discard UPLOAD_ID [--machine SERVER]');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       result={...(await call('datasets.upload.'+(positionals[1]==='upload-status'?'status':'discard'),{machine,uploadId:positionals[2]})).result,machine};if(result.state==='FAILED')process.exitCode=1;
+    }else if(command==='data'&&positionals[1]==='storage'){
+      if(session.principal.role!=='admin')fail('Storage management requires an administrator account');
+      if(training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Storage commands accept only one --machine SERVER and --json');
+      const action=positionals[2]||'status',machine=defaultMachine();
+      if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
+      if(!['status','plan','pin','unpin'].includes(action))fail('Usage: data storage status [NAME@VERSION] | plan | pin|unpin NAME@VERSION LABEL');
+      const expected=action==='status'?[2,3,4]:action==='plan'?[3]:[5];
+      if(!expected.includes(positionals.length))fail('Invalid number of storage command arguments');
+      let ref={};
+      if(positionals[3]){
+        const parts=positionals[3].split('@');
+        if(parts.length!==2||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(parts[0])||!/^[a-f0-9]{64}$/.test(parts[1]))fail('Use NAME@FULL_VERSION_HASH');
+        ref={dataset:parts[0],version:parts[1]};
+      }
+      if(['pin','unpin'].includes(action)){
+        const pinId=positionals[4];
+        if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(pinId)||pinId.startsWith('authority-'))fail('Use a manual pin label; authority retention cannot be removed here');
+        ref.pinId=pinId;
+      }
+      result={...(await call('datasets.storage.'+action,{machine,...ref})).result,machine};
     }else if(command==='data'&&['list','prepare','status','unregister'].includes(positionals[1])){
       if(positionals.length!==(positionals[1]==='list'?2:3))fail('Usage: data list | data prepare NAME@VERSION | data status NAME@VERSION|OPERATION_ID | data unregister NAME[@VERSION]');
       if(training.length||options.datasets.length||['as','project','release','job','root','legacy','cards','min-vram','name','key','total','role','full'].some(key=>Object.hasOwn(options,key)))fail('data commands accept only the dataset reference and one --machine SERVER');

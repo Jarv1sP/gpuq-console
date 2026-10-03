@@ -36,7 +36,7 @@ try {
       <section id="page-datasets"></section><button data-nav="work" hidden>工作台</button>
       <details hidden><form id="train-form"><select name="machine"><option>gpu-1</option><option>gpu-2</option></select>
       <input name="datasets"><input name="command"></form></details></main></body></html>`});
-    const names = new Set(['/datasets-ui.js', '/dataset-upload.js', '/data-workspace.js', '/transfer-upload.js','/cloud-import-ui.js', '/styles.css', '/workspace.css', '/datasets.css']);
+    const names = new Set(['/datasets-ui.js', '/data-route.js', '/dataset-upload.js', '/data-workspace.js', '/transfer-upload.js','/cloud-import-ui.js', '/styles.css', '/workspace.css', '/datasets.css']);
     if (names.has(url.pathname)) return route.fulfill({
       contentType: url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css',
       body: await readFile(new URL('../dist' + url.pathname, import.meta.url), 'utf8')});
@@ -153,8 +153,32 @@ try {
   await page.locator('[name=dataset-directory]').setInputFiles(dataDirectory);
   await assertUploadLayout();
   await page.screenshot({path: join(screenshots, 'upload-selection-desktop.png'), fullPage: true});
+  assert.match(await page.locator('#dataset-panel-directory .dataset-route').textContent(),/VPS 中转/);
+  assert.equal(await page.locator('[data-upload-phase][aria-current]').count(),0,'No progress before a real upload event');
+  // Synthetic size-only fixture: exercise the pre-hash consent gate without
+  // creating or sending a large test file. Restore the real File afterwards.
+  const beforeLarge = await page.evaluate(() => calls.length);
+  await page.locator('[name=dataset-directory]').evaluate(input=>{
+    Object.defineProperty(input.files[0],'size',{value:256*1024**2+1,configurable:true});
+    input.dispatchEvent(new Event('change',{bubbles:true}));
+  });
+  assert.equal(await page.locator('#dataset-relay-warning').isVisible(),true);
+  await page.locator('#dataset-upload-start').click();
+  assert.equal(await page.evaluate(()=>calls.length),beforeLarge,'No upload calls before explicit large relay consent');
+  assert.equal(await page.locator('#dataset-upload-progress').isHidden(),true);
+  assert.match(await page.evaluate(()=>toasts.at(-1)),/确认大文件传输/);
+  await page.screenshot({path:join(screenshots,'upload-large-relay-consent.png'),fullPage:true});
+  await page.locator('[name=dataset-relay-consent]').check();
+  await page.evaluate(()=>{toasts.length=0;});
+  await page.locator('[name=dataset-directory]').evaluate(input=>{
+    // Restore real bytes before scanning; keep the explicit checkbox choice
+    // so the fixture can verify consent is included in the actual begin call.
+    delete input.files[0].size;
+  });
   await page.locator('#dataset-upload-start').click();
   await page.waitForFunction(() => typeof window.releaseChunk === 'function');
+  assert.equal(await page.evaluate(()=>calls.find(c=>c.operation==='datasets.upload.begin').args.allowRelay),true);
+  assert.equal(await page.locator('[data-upload-phase][aria-current]').getAttribute('data-upload-phase'),'transfer');
   assert.equal(await page.locator('[name=dataset-machine]').isDisabled(), true);
   await page.evaluate(() => {
     window.originalForm = document.querySelector('#dataset-upload-form');
@@ -197,6 +221,7 @@ try {
   await page.evaluate(() => {gates.publish = false;});
   await page.waitForFunction(() => document.querySelector('#dataset-catalog').textContent.includes('本机已就绪'));
   assert.equal(await page.locator('[data-use-dataset]').isEnabled(), true);
+  assert.equal(await page.locator('[data-upload-phase][aria-current]').getAttribute('data-upload-phase'),'ready');
   const prepare = page.locator('[data-prepare-dataset]');
   assert.ok(!(await prepare.count()) || await prepare.isDisabled(), 'Personal data must not offer public-source prepare');
   assert.equal(await page.evaluate(() => toasts.length), 1);

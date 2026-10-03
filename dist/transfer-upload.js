@@ -4,8 +4,8 @@ export function transferUploadCall(call,onHandle=()=>{}){
   return async(operation,args)=>{
     const action=operation.slice('datasets.upload.'.length);
     if(action==='begin'){
-      const {machine,name,key,...manifest}=args;
-      const row=await call('transfers.create',{kind:'upload',machine,name,key,manifest});id=row.id;onHandle(row);
+      const {machine,name,key,allowRelay,...manifest}=args;
+      const row=await call('transfers.create',{kind:'upload',machine,name,key,manifest,...(allowRelay===true?{allowRelay:true}:{})});id=row.id;onHandle(row);
       // An explicit legacy upload-discard releases the old upload. Preserve
       // its existing new-key workflow, unlike permanent transfer cancellation.
       if(row.result?.state==='DISCARDED'&&!row.cancelRequested)return row.result;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash,randomBytes} from 'node:crypto';
-import {SHA256,hashBlob,uploadKey,datasetPath,manifestBlob,scanBrowserDirectory,uploadBrowserDataset,CHUNK_BYTES} from '../dist/dataset-upload.js';
+import {SHA256,hashBlob,uploadKey,datasetPath,manifestBlob,scanBrowserDirectory,uploadBrowserDataset,CHUNK_BYTES,LARGE_RELAY_BYTES} from '../dist/dataset-upload.js';
 const digest=data=>createHash('sha256').update(data).digest('hex');
 test('incremental browser SHA256 matches native hash at padding boundaries and random chunk boundaries',async()=>{
   for(const length of [0,1,3,55,56,63,64,65,127,128,129,1000000]){
@@ -88,4 +88,14 @@ test('failed sealing with an already complete manifest retries seal before uploa
   };
   assert.equal((await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'mine',scan,pollMs:0})).state,'READY');
   assert.deepEqual(actions,['begin','seal','status','chunk','commit']);
+});
+test('browser relay limit blocks oversized begin without consent and forwards true only',async()=>{
+  const scanned=await scanBrowserDirectory([selectedFile('a','content')]),calls=[];
+  const call=async(operation,args)=>{calls.push({operation,args});return {state:'READY',uploadId:'fixture',dataset:'u-user-mine',version:'a'.repeat(64)};};
+  const base={call,userId:'one',machine:'gpu-1',name:'mine'},large={...scanned,totalBytes:LARGE_RELAY_BYTES+1};
+  for(const allowRelay of [undefined,false,'true',1])await assert.rejects(uploadBrowserDataset({...base,scan:large,allowRelay}),/256 MiB/);
+  assert.equal(calls.length,0,'Refusal must happen before creating a transfer');
+  await uploadBrowserDataset({...base,scan:large,allowRelay:true});assert.equal(calls.at(-1).args.allowRelay,true);
+  await uploadBrowserDataset({...base,scan:{...scanned,totalBytes:LARGE_RELAY_BYTES}});assert.equal('allowRelay' in calls.at(-1).args,false,'Exactly 256 MiB stays within the small relay allowance');
+  await uploadBrowserDataset({...base,scan:scanned,allowRelay:false});assert.equal('allowRelay' in calls.at(-1).args,false);
 });

@@ -11,9 +11,15 @@ function fixture(t){
   const user={id:'demo-user-1',username:'alice',role:'admin',enabled:true,limits:{[target]:1,[source]:1},total:1};
   const f={db,user,calls:[],records:new Map(),local:false,copied:false,enabled:true,lost:false};
   f.service={db,store:{get:()=>structuredClone(user)},bridge:async(machine,operation,args)=>{
-    f.calls.push({machine,operation,args});if(f.onBridge)await f.onBridge(machine,operation);
+    f.calls.push({machine,operation,args});if(f.onBridge)await f.onBridge(machine,operation,args);
     if(operation==='datasets.list')return {datasets:machine===source?[{dataset:ref.dataset,versions:[{...ref,state:'READY'}]}]:f.local?[{dataset:ref.dataset,versions:[{...ref,state:'READY'}]}]:f.copied?[{dataset:actual,versions:[{version:ref.version,state:'READY'}]}]:[]};
-    if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:(args.dataset===ref.dataset&&f.local||args.dataset===actual&&f.copied)?'READY':'REGISTERED'};
+    if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:(args.dataset===ref.dataset&&f.local||args.dataset===actual&&f.copied)?'READY':'REGISTERED',...(f.recovery&&args.dataset===actual&&!f.copied?{recoveryConfigured:true}:{})};
+    if(operation==='datasets.prepare'){
+      if(f.recoverError)throw f.recoverError;
+      const result=f.recoverResult||{dataset:args.dataset,version:args.version,state:'PREPARING'};
+      if(result.state==='READY')f.copied=true;
+      return result;
+    }
     throw Error('unexpected '+operation);
   },transferSnapshot:(owner,id)=>[...f.records.values()].find(v=>v.id===id&&v.owner===owner),transferSnapshotByKey:(owner,key)=>{const row=f.records.get(key);return row?.owner===owner?row:null;},transferCall:async(who,operation,args)=>{
     f.calls.push({who,operation,args});assert.equal(who.role,'member');
@@ -89,4 +95,59 @@ test('revocation during catalog reads prevents a prepare side effect',async t=>{
 test('mismatched target version cannot become a training alias',async t=>{
   const f=fixture(t);await f.service.prepareDataset(f.user.id,target,ref);f.finish();f.result().result.version='b'.repeat(64);f.copied=true;
   const result=await f.service.resolveDataset(f.user.id,target,ref);assert.notEqual(result.status.state,'READY');assert.equal(f.service.datasetAliases(f.user.id,target).size,0);
+});
+
+test('evicted historical successful copy restores its exact physical receipt without another copy',async t=>{
+  const f=fixture(t);await f.service.prepareDataset(f.user.id,target,ref);f.finish();f.recovery=true;
+  const transfer=f.row().transferId,key=f.row().key,start=f.calls.length;
+  const result=await f.service.prepareDataset(f.user.id,target,ref);
+  assert.equal(result.state,'PREPARING');assert.equal(result.dataset,ref.dataset);
+  assert.deepEqual(f.calls.slice(start).filter(c=>c.operation==='datasets.prepare'),[
+    {machine:target,operation:'datasets.prepare',args:{userId:f.user.id,hostAdmin:false,dataset:actual,version:ref.version}}
+  ]);
+  assert.equal(f.row().transferId,transfer);assert.equal(f.row().key,key);assert.equal(f.records.size,1);
+  assert.equal(f.calls.slice(start).some(c=>c.operation.startsWith('transfers.')||c.operation==='datasets.list'),false);
+});
+
+test('recovery after portal restart keeps the physical alias and fixed version',async t=>{
+  const f=fixture(t);await f.service.prepareDataset(f.user.id,target,ref);f.finish();f.recovery=true;
+  f.recoverResult={dataset:actual,version:ref.version,state:'READY'};installDatasetReplication(f.service);
+  assert.equal((await f.service.prepareDataset(f.user.id,target,ref)).state,'READY');
+  assert.deepEqual((await f.service.resolveDataset(f.user.id,target,ref)).reference,{dataset:actual,version:ref.version,mountAs:ref.dataset});
+  assert.equal(f.calls.filter(c=>c.operation==='transfers.create').length,1);
+});
+
+test('concurrent receipt recovery requests coalesce before a second prepare dispatch',async t=>{
+  const f=fixture(t);await f.service.prepareDataset(f.user.id,target,ref);f.finish();f.recovery=true;
+  const result=await Promise.all([f.service.prepareDataset(f.user.id,target,ref),f.service.prepareDataset(f.user.id,target,ref)]);
+  assert.ok(result.every(r=>r.state==='PREPARING'));
+  assert.equal(f.calls.filter(c=>c.operation==='datasets.prepare').length,1);
+  assert.equal(f.calls.filter(c=>c.operation==='transfers.create').length,1);
+});
+
+test('authority or ACL rejection during recovery never falls back to another source or transfer',async t=>{
+  const f=fixture(t);await f.service.prepareDataset(f.user.id,target,ref);f.finish();f.recovery=true;
+  for(const error of [Error('authority fixed source changed'),Object.assign(Error('owner access revoked'),{status:403})]){
+    f.recoverError=error;const start=f.calls.length;
+    await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e===error);
+    assert.equal(f.calls.slice(start).filter(c=>c.operation==='datasets.prepare').length,1);
+    assert.equal(f.calls.slice(start).some(c=>c.operation.startsWith('transfers.')||c.operation==='datasets.list'),false);
+  }
+  assert.equal(f.records.size,1);
+});
+
+test('policy revocation before receipt recovery blocks the prepare side effect',async t=>{
+  const f=fixture(t);await f.service.prepareDataset(f.user.id,target,ref);f.finish();f.recovery=true;
+  f.onBridge=(_,operation,args)=>{if(operation==='datasets.status'&&args.dataset===actual)f.user.enabled=false;};
+  await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e.status===403);
+  assert.equal(f.calls.some(c=>c.operation==='datasets.prepare'),false);
+});
+
+test('recovery rejects mismatched physical name or content version from the node',async t=>{
+  const f=fixture(t);await f.service.prepareDataset(f.user.id,target,ref);f.finish();f.recovery=true;
+  for(const result of [{dataset:ref.dataset,version:ref.version,state:'READY'},{dataset:actual,version:'b'.repeat(64),state:'READY'}]){
+    f.copied=false;f.recoverResult=result;
+    await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e.status===502);
+  }
+  assert.equal(f.calls.filter(c=>c.operation==='transfers.create').length,1);
 });

@@ -65,3 +65,10 @@ test('publication receipts report current readiness and require admin inspection
   assert.match(publicationText({state:'UNAVAILABLE'}),/无权.*管理员/);
   assert.match(publicationText({state:'UNKNOWN'}),/暂不可编辑.*管理员.*不要重复发布/);
 });
+test('raw browser files require explicit relay consent above the shared 256 MiB boundary',async()=>{
+  const selected=size=>({name:'data.zip',size,slice(){throw Error('read-started');}}),call=async()=>assert.fail('No network expected in size-only fixture');
+  for(const allowRelay of [undefined,false,'true'])await assert.rejects(uploadWorkspaceFiles({machine:'node-a',files:[selected(256*1024**2+1)],allowRelay,call}),/确认 VPS 中转/);
+  await assert.rejects(uploadWorkspaceFiles({machine:'node-a',files:[selected(256*1024**2)],call}),/read-started/);
+  await assert.rejects(uploadWorkspaceFiles({machine:'node-a',files:[selected(256*1024**2+1)],allowRelay:true,call}),/read-started/);
+  assert.match(dataWorkspaceHTML(),/个人数据上传通道/);assert.match(dataWorkspaceHTML(),/data-workspace-relay-consent/);
+});
