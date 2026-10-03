@@ -47,8 +47,8 @@ try{
   await page.locator('#train-form').evaluate(form=>form.closest('details').open=true);
   await page.locator('[name=command]').fill('python train.py --output /outputs/result.json');
   const capture=async name=>{await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});};
-  assert.match(await page.title(),/^VELA/);
-  assert.equal(await page.locator('.brand-wordmark').innerText(),'VELA');
+  assert.match(await page.title(),/^STARBASE/);
+  assert.equal(await page.locator('.brand-wordmark').innerText(),'STARBASE');
   const currentNav=async expected=>{
     assert.equal(await page.locator('[data-nav][aria-current=page]').count(),1);
     assert.equal(await page.locator('[data-nav].active').count(),1);
@@ -61,7 +61,7 @@ try{
       const over=(front,back)=>front.slice(0,3).map((c,i)=>c*front[3]+back[i]*(1-front[3]));
       const luminance=rgb=>rgb.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
       const background=el=>{const ancestors=[];for(let n=el;n;n=n.parentElement)ancestors.unshift(n);return ancestors.reduce((bg,n)=>over(rgba(getComputedStyle(n).backgroundColor),bg),[255,255,255]);};
-      const selectors='.muted,.self-summary small,.self-summary strong span,.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small,.terminal-scope,.page-heading p,.page-heading .eyebrow,.topbar #current-account,.section-kicker,.help-links>span,.datasets-capacity,.dataset-readiness,.dataset-locations,.datasets-add>summary span,.datasets-flow,.dataset-source-tabs button';
+      const selectors='[data-nav],.muted,.self-summary small,.self-summary strong span,.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small,.terminal-scope,.page-heading p,.page-heading .eyebrow,.topbar #current-account,.section-kicker,.help-links>span,.datasets-capacity,.dataset-readiness,.dataset-locations,.datasets-add>summary span,.datasets-flow,.dataset-source-tabs button';
       return [...document.querySelectorAll(selectors)].filter(el=>el.getClientRects().length&&el.textContent.trim()&&!el.closest('[disabled]')).flatMap(el=>{
         const bg=background(el),fg=over(rgba(getComputedStyle(el).color),bg),a=luminance(fg),b=luminance(bg),ratio=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
         return ratio>=4.5?[]:[{element:el.className||el.tagName,text:el.textContent.trim().slice(0,45),ratio:Number(ratio.toFixed(2))}];
@@ -88,7 +88,8 @@ try{
     const layout=await page.evaluate(()=>({width:innerWidth,document:document.documentElement.scrollWidth,nav:[...document.querySelectorAll('[data-nav]')].filter(el=>!el.hidden).map(el=>({id:el.dataset.nav,visible:el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0,height:el.getBoundingClientRect().height}))}));
     checks.push(layout);
     if(!baseline){assert(layout.document<=width+1,`page overflow at ${width}`);assert(layout.nav.every(nav=>nav.visible&&nav.height>=44),`navigation unavailable at ${width}`);}
-    if([820,390].includes(width))await capture('resources-'+width);
+    await textContrast();
+    if([820,390,320].includes(width))await capture('resources-'+width);
     if(width===390){
       await page.locator('.gpu-table-scroll').first().evaluate(el=>el.scrollLeft=el.scrollWidth);await capture('resources-390-processes');
       await page.locator('[data-nav=work]').click();await currentNav('work');await capture('workspace-mobile');
@@ -96,14 +97,30 @@ try{
       if(!baseline)assert.equal(await page.locator('[name=workspace-machine]').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),true);
       await page.locator('[data-nav=resources]').click();
     }
+    if(width===320){
+      await page.locator('[data-nav=work]').click();await currentNav('work');
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+      await textContrast();await capture('workspace-320');
+      await page.locator('[data-nav=resources]').click();
+    }
   }
   await page.setViewportSize({width:1440,height:1080});
   await page.locator('[data-nav=datasets]').click();await currentNav('datasets');
   await page.locator('#datasets-refresh').click();await page.locator('.dataset-readiness[data-state=PREPARING]').waitFor();
   await textContrast();await capture('datasets-desktop');
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'vela-orbit');
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'starbase-progress');
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationIterationCount),'3','Preparing indication must not loop indefinitely');
+  await page.locator('[data-nav=work]').click();
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationPlayState),'paused','Hidden page animations pause');
+  await page.locator('[data-nav=datasets]').click();
+  await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationPlayState),'paused','Inactive tab animations pause');
+  await page.evaluate(()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'));});
   await page.setViewportSize({width:390,height:960});await capture('datasets-mobile');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await textContrast();
+  await page.setViewportSize({width:320,height:960});await capture('datasets-320');
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await textContrast();
   await page.setViewportSize({width:820,height:960});
   if(!baseline){
     await page.keyboard.press('Tab');
@@ -115,5 +132,5 @@ try{
   assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none');
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({baseline,checks,errors,external},null,2));
-  console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','single current navigation','VELA accessible brand','helper text AA contrast','PREPARING-only status animation','reduced motion']}));
+  console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','single current navigation','STARBASE accessible brand','helper text AA contrast','PREPARING-only status animation','reduced motion']}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}

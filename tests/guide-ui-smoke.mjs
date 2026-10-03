@@ -200,6 +200,13 @@ try{
     if([1,2,3,6].includes(index))await capture(guide,`guide-${chapters[index][0]}-mobile.png`);
   }
   assert.ok(scrollingCode>0,'long command lines should scroll internally without widening the page');
+  await guide.setViewportSize({width:320,height:844});
+  await guide.goto(origin+'/guide');await noPageOverflow(guide,'index 320px');await capture(guide,'guide-index-320.png');
+  for(let index=0;index<chapters.length;index++){
+    await guide.goto(origin+chapterPaths[index]);await chapter(guide,index);
+    await noPageOverflow(guide,chapters[index][0]+' 320px');
+  }
+  await capture(guide,'guide-troubleshooting-320.png');
 
   // The document and all navigation remain functional without JavaScript.
   const staticContext=await context({javaScriptEnabled:false,viewport:{width:390,height:844}});
@@ -242,7 +249,7 @@ try{
     }
   }
   assert.deepEqual(entryErrors,[]);assert.deepEqual(pageErrors,[]);assert.deepEqual(unexpectedHTTP,[]);assert.deepEqual(blocked,[]);assert.deepEqual(bridgeCalls,[]);
-  console.log(`GUIDE UI PASS: single workbench entry for member/admin; seven chapters; ${copied} exact clipboard copies; fallback, keyboard, no-JS, 390px layout, public-route parity; screenshots: ${screenshots}`);
+  console.log(`GUIDE UI PASS: single workbench entry for member/admin; seven chapters; ${copied} exact clipboard copies; fallback, keyboard, no-JS, 320/390px layout, public-route parity; screenshots: ${screenshots}`);
 }finally{
   await browser?.close();
   await closeServer(portal?.server);await closeServer(server);

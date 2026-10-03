@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="VELA 研究计算平台：准备项目与数据、提交训练、查看算力，与团队有序协作。" />
+  <meta name="description" content="STARBASE 研究计算工作台：项目、数据、训练与团队协作。独立开源项目。" />
   <meta name="color-scheme" content="light" />
-  <meta name="theme-color" content="#16232f" />
-  <title>VELA · Research Computing</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%2316232f'/%3E%3Cg transform='translate(5 3) scale(.8)' fill='%23e6ede8'%3E%3Cpath d='M5 9 18.5 34 15 14Z'/%3E%3Cpath d='m21 31 13-27-13 9Z'/%3E%3C/g%3E%3C/svg%3E" />
+  <meta name="theme-color" content="#111113" />
+  <title>STARBASE · Research Computing</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='8' fill='%23111113'/%3E%3Cpath d='M32 8H15L7 19h17l-5 7H8l-4 6h18l11-16H16l2-3h10Z' fill='%23f5f5f3'/%3E%3Cpath d='m29 5 6-3-2 7Z' fill='%23f5f5f3'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="./styles.css" />
   <link rel="stylesheet" href="./workspace.css" />
   <link rel="stylesheet" href="./datasets.css" />
@@ -17,7 +17,7 @@
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
   <aside class="sidebar">
-    <a class="brand" href="#" aria-label="VELA 工作台"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 40 40"><path d="M5 9 18.5 34 15 14Z"/><path d="m21 31 13-27-13 9Z"/></svg></span><span class="brand-wordmark"><svg aria-hidden="true" viewBox="0 0 272 58"><path d="M2 1h7l17 45L44 1h7L29 57h-7ZM77 1h38v6H84v18h27v6H84v20h31v6H77ZM148 1h7v50h32v6h-39ZM218 57l22-56h7l23 56h-7l-7-17h-26l-6 17Zm14-23h22L243 8Z"/></svg><span class="sr-only">VELA</span></span></a>
+    <a class="brand" href="#" aria-label="STARBASE 工作台"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 40 40"><path d="M32 8H15L7 19h17l-5 7H8l-4 6h18l11-16H16l2-3h10Z"/><path d="m29 5 6-3-2 7Z"/></svg></span><span class="brand-wordmark">STARBASE</span></a>
     <div class="workspace"><span class="workspace-icon" aria-hidden="true">↗</span><span>研究工作空间<small>项目 · 数据 · 训练</small></span></div>
     <div class="nav-label">工作空间</div>
     <nav aria-label="主导航">
@@ -28,14 +28,14 @@
 <a class="nav-item" href="#community" data-nav="community"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18 0Z"/><path d="M7 10h8M7 14h5"/></svg>协作区</a>
 <a class="nav-item" href="#users" data-nav="users" data-admin-only hidden><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 4v2"/></svg>成员授权<span class="nav-count" id="pending-count" hidden>0</span></a>
 </nav>
-    <div class="sidebar-bottom"><div class="integration"><div>为下一次发现。<small>RESEARCH, IN MOTION</small></div></div><div class="profile"><span class="avatar admin-avatar" aria-hidden="true">V</span><div><span id="profile-name">未登录</span><small id="profile-role">个人工作空间</small></div></div></div>
+    <div class="sidebar-bottom"><div class="integration"><div>专注下一步。<small>INDEPENDENT / OPEN SOURCE</small></div></div><div class="profile"><span class="avatar admin-avatar" aria-hidden="true">S</span><div><span id="profile-name">未登录</span><small id="profile-role">个人工作空间</small></div></div></div>
   </aside>
   <div class="shell">
-    <header class="topbar"><div class="breadcrumb-trail"><a class="topbar-wordmark" href="#">VELA</a> <span class="slash">/</span> <strong id="breadcrumb">我的工作台</strong></div><span id="current-account" class="muted">未登录</span></header>
+    <header class="topbar"><div class="breadcrumb-trail"><a class="topbar-wordmark" href="#">STARBASE</a> <span class="slash">/</span> <strong id="breadcrumb">我的工作台</strong></div><span id="current-account" class="muted">未登录</span></header>
 <main id="main-content" tabindex="-1">
-<div class="page-heading"><div><div class="eyebrow">RESEARCH IN MOTION</div><h1 id="page-title">我的工作台</h1><p id="page-description">自己的终端、文件与训练任务。</p></div><div class="heading-actions"><button class="button ghost" id="refresh-state">刷新</button><button class="button" id="edit-profile" hidden>设置姓名</button><button class="button" id="switch-account">登录</button></div></div>
+<div class="page-heading"><div><div class="eyebrow">RESEARCH / CONTROL</div><h1 id="page-title">我的工作台</h1><p id="page-description">自己的终端、文件与训练任务。</p></div><div class="heading-actions"><button class="button ghost" id="refresh-state">刷新</button><button class="button" id="edit-profile" hidden>设置姓名</button><button class="button" id="switch-account">登录</button></div></div>
 <div class="demo-note"><span id="mode-note">正在连接…</span></div>
-<section data-page="work" id="page-work"><div class="self-summary" id="self-summary"></div><div id="execution-host"></div></section>
+<section data-page="work" id="page-work"><div class="work-overview"><div class="overview-caption"><span>个人算力</span><span>ACCOUNT / OVERVIEW</span></div><div class="self-summary" id="self-summary"></div><svg class="overview-mark" aria-hidden="true" viewBox="0 0 40 40"><path d="M32 8H15L7 19h17l-5 7H8l-4 6h18l11-16H16l2-3h10Z"/><path d="m29 5 6-3-2 7Z"/></svg></div><div id="execution-host"></div></section>
 <section data-page="datasets" id="page-datasets" hidden></section>
 <section data-page="transfers" id="page-transfers" hidden></section>
 <section data-page="community" id="page-community" hidden></section>
@@ -47,11 +47,11 @@
 <details class="team-jobs"><summary>全体用户的训练任务</summary><div id="all-jobs"></div></details>
 </section>
 <div class="help-links" aria-label="使用帮助"><a href="/guide" target="_blank" rel="noopener">使用指南 ↗</a><span>从第一次登录，到一次完整训练。</span></div>
-<footer><span class="footer-wordmark">VELA</span><span>为下一次发现。</span></footer>
+<footer><span class="footer-wordmark">STARBASE</span><span>独立开源研究计算工作台</span></footer>
 </main>
   </div>
   <dialog id="password-dialog" class="modal" aria-labelledby="password-title"><form id="password-form"><div class="modal-head"><h2 id="password-title">重置密码</h2><button type="button" class="icon-button" data-close="password-dialog" aria-label="关闭">×</button></div><p class="muted" id="password-account"></p><p class="muted">旧密码不能查看。重置后，旧密码和该用户已有登录会话立即失效。</p><label class="field">新密码<input name="password" type="password" minlength="8" maxlength="128" required autocomplete="new-password" placeholder="至少 8 个字符" /></label><p class="form-error" id="password-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-close="password-dialog">取消</button><button class="button primary" type="submit">确认重置</button></div></form></dialog>
-  <dialog id="login-dialog" class="modal" aria-labelledby="login-title"><form id="login-form"><div class="modal-head"><div><div class="eyebrow">WELCOME TO VELA</div><h2 id="login-title">登录工作台</h2></div><button type="button" class="icon-button" data-close="login-dialog" aria-label="关闭">×</button></div><p class="muted">登录你的实验室账号，继续项目和训练。</p><label class="field">用户名<input name="username" required autocomplete="username" maxlength="24" /></label><label class="field">密码<input name="password" type="password" required autocomplete="current-password" maxlength="128" /></label><details class="demo-credentials"><summary>仅供试用的示例账号</summary><p>管理员：<code>admin / AdminDemo!2026</code><br>普通用户：<code>chen-research / MemberDemo!2026</code><br>请勿输入真实服务器密码。</p></details><p class="form-error" id="login-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-close="login-dialog">取消</button><button class="button primary" type="submit">登录</button></div><div class="auth-footer"><span>还没有账号？</span><button type="button" class="button ghost" id="open-register">使用注册码注册</button></div></form></dialog>
+  <dialog id="login-dialog" class="modal" aria-labelledby="login-title"><form id="login-form"><div class="modal-head"><div><div class="eyebrow">WELCOME TO STARBASE</div><h2 id="login-title">登录工作台</h2></div><button type="button" class="icon-button" data-close="login-dialog" aria-label="关闭">×</button></div><p class="muted">登录你的实验室账号，继续项目和训练。</p><label class="field">用户名<input name="username" required autocomplete="username" maxlength="24" /></label><label class="field">密码<input name="password" type="password" required autocomplete="current-password" maxlength="128" /></label><details class="demo-credentials"><summary>仅供试用的示例账号</summary><p>管理员：<code>admin / AdminDemo!2026</code><br>普通用户：<code>chen-research / MemberDemo!2026</code><br>请勿输入真实服务器密码。</p></details><p class="form-error" id="login-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-close="login-dialog">取消</button><button class="button primary" type="submit">登录</button></div><div class="auth-footer"><span>还没有账号？</span><button type="button" class="button ghost" id="open-register">使用注册码注册</button></div></form></dialog>
   <dialog id="register-dialog" class="modal" aria-labelledby="register-title"><form id="register-form"><div class="modal-head"><div><div class="eyebrow">JOIN THE LAB</div><h2 id="register-title">注册码注册</h2></div><button type="button" class="icon-button" data-close="register-dialog" aria-label="关闭注册">×</button></div><p class="muted">用管理员提供的注册码创建账号，随后等待用卡授权。</p><label class="field">邀请码<input name="invite" type="password" required maxlength="128" autocomplete="off" spellcheck="false" placeholder="向管理员获取邀请码" /><small>注册后额度为 0，由管理员审批。</small></label><label class="field">用户名<input name="username" required maxlength="24"  autocomplete="username" placeholder="例如：li-research" /><small>2–24 位，以汉字或小写字母开头，可含数字、下划线、短横线。</small></label><label class="field">姓名／显示名<input name="signup-name" maxlength="32" autocomplete="name" placeholder="例如：李明；未填写则使用用户名" /><small>提交训练时随任务展示给同机器的授权成员。</small></label><label class="field">密码<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="至少 8 个字符" /></label><label class="field">确认密码<input name="confirm" type="password" required minlength="8" maxlength="128" autocomplete="new-password" /></label><p class="form-error" id="register-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" id="back-to-login">返回登录</button><button type="submit" class="button primary">注册账号</button></div></form></dialog>
   <dialog id="profile-dialog" class="modal compact" aria-labelledby="profile-title"><form id="profile-form"><div class="modal-head"><h2 id="profile-title">设置提交者姓名</h2><button type="button" class="icon-button" data-close="profile-dialog" aria-label="关闭姓名设置">×</button></div><label class="field">姓名／显示名<input name="profile-name" maxlength="32" required autocomplete="name"></label><p class="muted">同机器授权成员可见。登录用户名和权限不变；新任务保存提交时姓名，旧任务没有姓名快照时使用现有姓名。</p><p class="form-error" id="profile-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-close="profile-dialog">取消</button><button type="submit" class="button primary">保存姓名</button></div></form></dialog>
   <dialog id="invites-dialog" class="modal preview-modal" aria-labelledby="invites-title"><div class="modal-head"><div><div class="eyebrow">INVITATION KEYS</div><h2 id="invites-title">注册码</h2></div><button type="button" class="icon-button" data-close="invites-dialog" aria-label="关闭邀请码管理">×</button></div><p class="muted">邀请码只用于注册，不是共用登录密码。重新生成或停用只影响后续注册，已注册账号不受影响。</p><div id="invites-content"></div><p class="form-error" id="invites-error" role="alert"></p></dialog>
@@ -59,6 +59,7 @@
   <dialog id="confirm-dialog" class="modal compact" aria-labelledby="confirm-title"><h2 id="confirm-title"></h2><p id="confirm-message"></p><div class="modal-actions"><button class="button" data-close="confirm-dialog">取消</button><button class="button primary" id="confirm-action">确认</button></div></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script>globalThis.GPUQ_LOCAL_API=false;</script>
+  <script src="./guide.js" defer></script>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

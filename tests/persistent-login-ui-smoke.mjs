@@ -16,7 +16,7 @@ const start=async()=>{
   service.loginSessions.now=()=>clock;await new Promise(r=>server.listen(port,'127.0.0.1',r));
 };
 const browser=async()=>{
-  context=await chromium.launchPersistentContext(profile,{headless:true,viewport:{width:1100,height:900}});
+  context=await chromium.launchPersistentContext(profile,{headless:true,executablePath:process.env.CHROME_PATH||undefined,viewport:{width:1100,height:900}});
   await context.route('**/*',route=>{if(new URL(route.request().url()).origin===origin)return route.continue();external.push(route.request().url());return route.abort();});
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));return page;
 };
