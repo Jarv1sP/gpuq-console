@@ -1264,11 +1264,22 @@ _SCHEMA_V11_TO_V12_DDL = (
     """ALTER TABLE jobs ADD COLUMN preempt_opt_in_only INTEGER NOT NULL DEFAULT 0
     CHECK (preempt_opt_in_only IN (0,1))""",
 )
-_EXPECTED_SCHEMA_SIGNATURE = _build_expected_schema_signature((
+_EXPECTED_SCHEMA_SIGNATURE_V12 = _build_expected_schema_signature((
     *_SCHEMA_V2_TO_V3_DDL, *_SCHEMA_V3_TO_V4_DDL, *_SCHEMA_V4_TO_V5_DDL,
     *_SCHEMA_V5_TO_V6_DDL, *_SCHEMA_V6_TO_V7_DDL, *_SCHEMA_V7_TO_V8_DDL,
     *_SCHEMA_V8_TO_V9_DDL, *_SCHEMA_V9_TO_V10_DDL, *_SCHEMA_V10_TO_V11_DDL,
     *_SCHEMA_V11_TO_V12_DDL,
+))
+
+_SCHEMA_V12_TO_V13_DDL = (
+    """ALTER TABLE jobs ADD COLUMN display_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (json_valid(display_json) AND json_type(display_json)='object')""",
+)
+_EXPECTED_SCHEMA_SIGNATURE = _build_expected_schema_signature((
+    *_SCHEMA_V2_TO_V3_DDL, *_SCHEMA_V3_TO_V4_DDL, *_SCHEMA_V4_TO_V5_DDL,
+    *_SCHEMA_V5_TO_V6_DDL, *_SCHEMA_V6_TO_V7_DDL, *_SCHEMA_V7_TO_V8_DDL,
+    *_SCHEMA_V8_TO_V9_DDL, *_SCHEMA_V9_TO_V10_DDL, *_SCHEMA_V10_TO_V11_DDL,
+    *_SCHEMA_V11_TO_V12_DDL, *_SCHEMA_V12_TO_V13_DDL,
 ))
 
 
@@ -1477,6 +1488,9 @@ class Store:
                         version = 11
                     if version == 11:
                         self._migrate_v11_to_v12(connection)
+                        version = 12
+                    if version == 12:
+                        self._migrate_v12_to_v13(connection)
                     self._validate_schema(connection)
                     connection.commit()
                 except BaseException:
@@ -1548,7 +1562,7 @@ class Store:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        if version in {11, STORE_SCHEMA_VERSION}:
+        if version in {11, 12, STORE_SCHEMA_VERSION}:
             required_tables = _REQUIRED_TABLES
         elif version in {_SCHEMA_VERSION_V6, _SCHEMA_VERSION_V7, _SCHEMA_VERSION_V8, _SCHEMA_VERSION_V9, _SCHEMA_VERSION_V10}:
             required_tables = _REQUIRED_TABLES_V6_TO_V10
@@ -1854,6 +1868,14 @@ class Store:
             connection.execute(statement)
         connection.execute("UPDATE schema_meta SET schema_version=12 WHERE singleton=1")
         connection.execute("PRAGMA user_version=12")
+        self._validate_schema_version(connection, version=12, expected_signature=_EXPECTED_SCHEMA_SIGNATURE_V12)
+
+    def _migrate_v12_to_v13(self, connection: sqlite3.Connection) -> None:
+        self._validate_schema_version(connection, version=12, expected_signature=_EXPECTED_SCHEMA_SIGNATURE_V12)
+        for statement in _SCHEMA_V12_TO_V13_DDL:
+            connection.execute(statement)
+        connection.execute("UPDATE schema_meta SET schema_version=13 WHERE singleton=1")
+        connection.execute("PRAGMA user_version=13")
         self._validate_schema(connection)
 
     @staticmethod
@@ -2032,6 +2054,7 @@ class Store:
     @staticmethod
     def _job(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
+        result["display_metadata"] = _json_load(result.pop("display_json"))
         result["argv"] = _json_load(result.pop("argv_json"))
         result["env"] = _json_load(result.pop("env_json"))
         result["requested_gpu_uuids"] = _json_load(
@@ -2365,6 +2388,24 @@ class Store:
             raise StoreConflictError(f"cannot insert job: {exc}") from exc
 
     create_job = submit_job
+
+    def set_job_display(self, job_id: str, metadata: Any, *, expected_submit_key: str,
+                        expected_owner: str, expected_name: str) -> dict[str, Any]:
+        from .job_display import normalize_display
+        normalized = normalize_display(metadata)
+        with self.transaction() as tx:
+            connection = tx._get_connection()
+            row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise StoreNotFoundError(f"job not found: {job_id}")
+            if (row["submit_key"], row["owner"], row["name"]) != (expected_submit_key, expected_owner, expected_name):
+                raise StoreConflictError("job display binding does not match original submission")
+            encoded = _json_dump(normalized)
+            if row["display_json"] != encoded:
+                # No updated_at, digest, state, scheduling, argv, env or lease changes.
+                connection.execute("UPDATE jobs SET display_json=? WHERE id=?", (encoded, job_id))
+                tx.append_event("JOB_DISPLAY_UPDATED", job_id=job_id)
+            return tx.get_job(job_id)
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         with self._read_connection() as connection:
