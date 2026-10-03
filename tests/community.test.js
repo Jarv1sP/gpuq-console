@@ -233,7 +233,7 @@ test('authenticated PortalService integration persists separate tables and never
   const response=await f.service.invoke(f.member.token,'community.chat.send',args);assert.equal(response.state,undefined);assert.equal(response.result.message.author.id,f.account.id);assert.equal(response.principal.userId,f.account.id);
   assert.equal(f.service.db.prepare('SELECT data FROM portal_state').get().data,before);
   assert.equal(JSON.stringify(f.service.db.prepare('SELECT * FROM audit').all()).includes(args.body),false);
-  const oldToken=f.member.token;await f.reopen();await assert.rejects(f.service.invoke(oldToken,'community.chat.list'),fails(401));
+  const oldToken=f.member.token;await f.reopen();assert.equal((await f.service.invoke(oldToken,'community.chat.list')).principal.userId,f.account.id);
   const replay=await f.service.invoke(f.member.token,'community.chat.send',args);assert.equal(replay.result.duplicate,true);assert.equal(replay.result.message.id,response.result.message.id);
   const persistedAudit=f.service.db.prepare("SELECT actor,subject,outcome FROM audit WHERE operation='community.chat.send'").all();assert.deepEqual(persistedAudit.map(row=>({...row})),[{actor:'community-user',subject:response.result.message.id,outcome:'ok'}]);
   assert.equal((await f.service.invoke(f.member.token,'community.chat.list')).result.messages[0].body,args.body);

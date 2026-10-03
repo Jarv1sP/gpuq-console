@@ -11,6 +11,7 @@ import {installMaintenance,maintenanceCall} from './maintenance.mjs';
 import {installJobNotifications} from './job-notifications.mjs';
 import {installTransfers,transferCall} from './transfers.mjs';
 import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
+import {LoginSessions} from './login-sessions.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -47,6 +48,7 @@ export class PortalService extends DemoService{
     // Public registration never grants administrative authority.
     service.db.prepare("UPDATE invites SET enabled=0 WHERE role='admin'").run();
     for(const user of service.store.users)user.policyVersion??=0;
+    service.loginSessions=new LoginSessions(service.db,id=>service.store.users.find(user=>user.id===id));
     maintainTaskNotes(service);
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installJobNotifications(service,notificationConfig);installMaintenance(service);
     installTransfers(service);
@@ -55,6 +57,10 @@ export class PortalService extends DemoService{
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
   restore(data){if(data.schema!==1)throw Error('Unsupported database version.');this.store.users=data.users;this.store.jobs=data.jobs;this.store.sequence=data.sequence;this.credentials=new Map(data.credentials.map(([name,r])=>[name,{salt:new Uint8Array(Buffer.from(r.salt,'base64')),hash:new Uint8Array(Buffer.from(r.hash,'base64')),iterations:r.iterations}]));}
   save(){this.db.prepare('INSERT INTO portal_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(JSON.stringify(this.export()));}
+  issueSession(principal){return this.loginSessions?this.loginSessions.issue(principal):super.issueSession(principal);}
+  principal(token){return this.loginSessions?this.loginSessions.principal(token):super.principal(token);}
+  revokeSession(token){if(this.loginSessions)this.loginSessions.revoke(token);else super.revokeSession(token);}
+  invalidate(username){if(this.loginSessions)this.loginSessions.invalidate(username);else super.invalidate(username);}
   audit(actor,operation,subject,outcome){this.db.prepare('INSERT INTO audit(time,actor,operation,subject,outcome) VALUES(?,?,?,?,?)').run(new Date().toISOString(),String(actor).slice(0,64),String(operation).slice(0,64),subject?String(subject).slice(0,64):null,outcome);}
   enqueue(fn){
     if(this.pending>=24){const e=Error('服务忙，请稍后重试。');e.status=429;return Promise.reject(e);}
@@ -150,8 +156,9 @@ export class PortalService extends DemoService{
     finally{this.datasetReadPending--;}
   }
   login(username,password){return this.enqueue(async()=>{
-    try{await this.refreshGPUQ();const result=await super.login(username,password);this.audit(username,'login',null,'ok');return result;}
-    catch(e){this.audit(username,'login',null,'denied');throw e;}
+    let issued;
+    try{await this.refreshGPUQ();const result=await super.login(username,password);issued=result.token;this.audit(username,'login',null,'ok');return result;}
+    catch(e){if(issued)this.revokeSession(issued);this.audit(username,'login',null,'denied');throw e;}
   });}
   invitations(){return ['member'].map(role=>{
     const row=this.db.prepare('SELECT role,enabled,uses,max_uses,created_at FROM invites WHERE role=?').get(role);

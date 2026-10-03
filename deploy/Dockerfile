@@ -21,6 +21,7 @@ COPY --chown=root:root dataset-catalog.mjs dataset-preparation.mjs dataset-repli
 COPY --chown=root:root docs/USER_GUIDE.md ./docs/
 COPY --chown=root:root deploy/install-client.sh deploy/install-client.ps1 ./deploy/
 COPY --chown=root:root transfers.mjs ./
+COPY --chown=root:root login-sessions.mjs ./
 USER node
 EXPOSE 8080
 CMD ["node", "portal-server.mjs"]

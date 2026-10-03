@@ -32,9 +32,11 @@ export class DemoService{
     const user=this.store.users.find(u=>u.username===username);if(user&&!user.enabled)throw Error('账号已暂停，请联系管理员。');
     this.failures.delete(username);
     const principal={username,role:user.role||'member',userId:user.id};
-    const token=random();this.sessions.set(token,{...principal,expires:Date.now()+8*60*60*1000});return {token,principal,state:this.state(principal)};
+    const token=this.issueSession(principal);return {token,principal,state:this.state(principal)};
   }
-  principal(token){const session=this.sessions.get(token);if(!session||session.expires<Date.now()){this.sessions.delete(token);const e=Error('请先登录，或重新登录。');e.status=401;throw e;}return session;}
+  issueSession(principal){const token=random();this.sessions.set(token,{...principal,expires:Date.now()+8*60*60*1000});return token;}
+  revokeSession(token){this.sessions.delete(token);}
+  principal(token){const session=this.sessions.get(token);if(!session||session.expires<Date.now()){this.revokeSession(token);const e=Error('请先登录，或重新登录。');e.status=401;throw e;}return session;}
   state(principal){const state=this.store.snapshot();if(principal.role!=='admin'){state.users=state.users.filter(u=>u.id===principal.userId);state.jobs=state.jobs.filter(j=>j.userId===principal.userId);state.machines=state.machines.filter(m=>state.users[0]?.limits[m.id]);}return state;}
   invalidate(username){for(const [token,session] of this.sessions)if(session.username===username)this.sessions.delete(token);}
   async invoke(token,operation,args={}){
@@ -44,7 +46,7 @@ export class DemoService{
     const subject=()=>{if(principal.role==='admin')return args.userId;if(args.userId&&args.userId!==principal.userId){const e=Error('不能操作其他用户。');e.status=403;throw e;}return principal.userId;};
     switch(operation){
       case 'state':break;
-      case 'logout':this.sessions.delete(token);return {result:{loggedOut:true}};
+      case 'logout':this.revokeSession(token);return {result:{loggedOut:true}};
       case 'users.create':{admin();validatePassword(args.password);const role=args.role||'member';if(!['admin','member'].includes(role))throw Error('角色无效。');const username=String(args.username??'').trim();if(username==='admin')throw Error('这个用户名已存在，请换一个。');const record=await credential(args.password,this.production?600000:210000);const user=this.store.create(args.name??username,username);this.credentials.set(user.username,record);result=this.store.setRole(user.id,role);break;}
       case 'profile.update':{if(Object.keys(args).some(k=>k!=='name'))throw Error('个人姓名参数无效，不能修改其他账号或权限。');const user=this.store.get(principal.userId);if(!user.enabled)throw Error('账号已暂停。');result=this.store.setName(user.id,args.name);break;}
       case 'users.reset':{admin();const user=this.store.get(args.userId);validatePassword(args.password);this.credentials.set(user.username,await credential(args.password,this.production?600000:210000));this.invalidate(user.username);result={userId:user.id,reset:true};break;}
