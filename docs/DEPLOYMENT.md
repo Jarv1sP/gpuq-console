@@ -127,6 +127,8 @@ sudo docker compose logs --tail 50 gpuq-console caddy
 
 所有节点应 `reachable:true` 且 `gpuq.connected:true`。只读状态失败时别先开放公网 SSH；先核验 Tail ACL、指纹、强制命令、服务用户总线与路径。
 
+执行桥的 `/run/gpuq-console-executor` 目录被门户绑定到 `/executor`，单元必须保留 `RuntimeDirectoryPreserve=yes`：单独的 stop/start 也不能删除并重建该目录（`restart` 取值不足以覆盖这种操作）。已有部署应先审查并更新对应执行桥单元、执行 `daemon-reload`；保留原服务名与路径，不要为此重跑首次安装器。若运行中的容器已绑定旧目录，仅修改单元不能修复：在受控维护窗口以原镜像、原数据挂载重建门户，核验宿主机与容器目录身份及登录后的只读节点请求，不能仅凭 `/healthz` 判定恢复；不回滚数据库。`/run` 在重启后仍会清空，开机时须先准备执行桥目录再创建门户容器。
+
 访问自己的域名。初始管理员用户名 `admin`，随机密码只在 VPS 的 `data/bootstrap.json`，用 `sudo cat` 在可信终端读取；不要截图公开。数据库已存在时不会被 bootstrap 重置。首次登录更改密码，将私有密码安全保存，并删除不再需要的 bootstrap 明文（数据库备份不含明文密码）。
 
 在“用户授权 → 注册邀请”生成普通注册码；管理员以后可随时查看当前码或刷新换新。新用户自行注册后自动进入零额度资源页，管理员的“待处理”列表自动出现该账号，批准机器和卡数后即可使用。
