@@ -1,0 +1,375 @@
+"""Disposable archive journal tests, including actual pinned-TLS certification.
+
+No systemd, GPU, production configuration, or remote node is used. Only the
+worker launcher/process-state probes are substituted; seal/cache/recovery are
+the real production modules and the TLS test uses a real local HTTPS server.
+"""
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
+import json
+import os
+from pathlib import Path
+import ssl
+import subprocess
+import tempfile
+import threading
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+import uuid
+
+SPEC = importlib.util.spec_from_file_location('archive_tests', Path(__file__).resolve().parents[1]/'deploy/storage-archive.py')
+M = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(M)
+A, D = M.A, M.D
+ADMIN = D.Principal('builtin-admin', True)
+USER = 'demo-user-1'
+POLICY = dict(enabled=True, machine='cold-node', authority='hdd')
+
+
+class ArchiveTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.root = Path(self.tmp.name).resolve()
+        input_path = self.root/'input'; input_path.mkdir()
+        (input_path/'file').write_bytes(b'archive fixture\x00'*2048)
+        self.cold = D.DatasetCache(self.root/'cold', sources={'input': input_path}, reserve_bytes=0)
+        self.hot = D.DatasetCache(self.root/'hot', sources={}, reserve_bytes=0)
+        self.version = self.cold.register_source(ADMIN, 'original', 'input', [USER])['version']
+        self.cold.materialize(ADMIN, 'original', self.version)
+        self.manifest = self.cold.export_manifest(ADMIN, 'original', self.version)['manifest']
+        self.hot.register_manifest(ADMIN, 'replica', self.manifest, [USER])
+        self.hot.materialize(ADMIN, 'replica', self.version, _source=input_path)
+        self.peer = dict(address='127.0.0.1', port=18443, certificateSha256='0'*64)
+        self.store = A.AuthorityStore(self.cold, 'cold-node', self.root/'authority', principal=ADMIN)
+        self.node = self.executor('cold-node', self.cold, self.root/'source-state')
+        self.node.CONFIG.update(storageAuthority={'enabled': True}, transferPeers={'hot-node': dict(self.peer)})
+        self.node.storage_authority = lambda: self.store
+        self.source = M.StorageArchive.from_executor(self.node)
+        self.source.spawn = Mock()
+        self.source.worker_state = Mock(return_value='STOPPED')
+        self.request = dict(opId=str(uuid.uuid4()), userId=USER,
+                            source={'dataset':'original', 'version':self.version}, targetMachine='hot-node')
+        self.server = None
+
+    def executor(self, machine, cache, state):
+        return SimpleNamespace(CONFIG={'machine':machine, 'storageArchive':dict(POLICY)}, ROOT=state,
+            HERE=Path(__file__).resolve().parents[1]/'deploy', ENV={}, dataset_cache=lambda:(D, cache), run=Mock())
+
+    def tearDown(self):
+        if self.server:
+            self.server.shutdown(); self.server.server_close(); self.thread.join(2)
+        for folder, _, files in os.walk(self.root):
+            os.chmod(folder, 0o700)
+            for name in files:
+                path = Path(folder)/name
+                if not path.is_symlink(): os.chmod(path, 0o600)
+        self.tmp.cleanup()
+
+    def provision(self):
+        value = self.source.provision(self.request)
+        self.assertEqual(value['state'], 'PROVISIONING')
+        self.assertEqual(self.source.worker(self.request['opId']), 0)
+        return self.source.provision(self.request)['grant']
+
+    def tls_target(self):
+        cert, key = self.root/'cert.pem', self.root/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),
+            '-out',str(cert),'-subj','/CN=archive-fixture','-days','1'], check=True, capture_output=True)
+        store = self.store; self.read_requests = []
+        requests = self.read_requests
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_POST(inner):
+                try:
+                    if inner.path != '/authority': raise ValueError('endpoint')
+                    request = json.loads(inner.rfile.read(int(inner.headers['Content-Length'])))
+                    requests.append(request)
+                    data = dict(ok=True, result=store.read(request, inner.headers['Authorization'][7:]))
+                    status = 200
+                except Exception:
+                    data = dict(ok=False, error='fixed authority refused'); status = 403
+                raw = json.dumps(data).encode(); inner.send_response(status)
+                inner.send_header('Content-Length', str(len(raw))); inner.end_headers(); inner.wfile.write(raw)
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); context.load_cert_chain(cert, key)
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+        self.peer = dict(address='127.0.0.1', port=self.server.server_port,
+                        certificateSha256=hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest())
+        remote = A.RemoteAuthority('cold-node', self.peer, self.root/'grants', target_machine='hot-node')
+        tier = A.T.DatasetTier(self.hot, authorities={'hdd': remote})
+        node = self.executor('hot-node', self.hot, self.root/'target-state')
+        node.CONFIG.update(storageAuthorities={'hdd':{'machine':'cold-node'}}, transferPeers={'cold-node':dict(self.peer)})
+        node.storage_node = lambda: SimpleNamespace(tier=tier)
+        self.target = M.StorageArchive.from_executor(node)
+        self.target_node = node
+        return self.target
+
+    def intent(self, *, dataset='original', op=None, origin='upload'):
+        return dict(opId=op or str(uuid.uuid4()), userId=USER,
+                    reference=dict(dataset=dataset, version=self.version), origin=origin)
+
+    def test_default_off_has_no_cache_or_directory_side_effects(self):
+        node = SimpleNamespace(CONFIG={}, dataset_cache=Mock(side_effect=AssertionError('cache touched')))
+        disabled = M.StorageArchive.from_executor(node)
+        self.assertEqual(disabled.outbox_list({'limit':8}), {'events':[]})
+        with self.assertRaisesRegex(ValueError, 'disabled'): disabled.provision(self.request)
+        node.dataset_cache.assert_not_called()
+
+    def test_config_and_private_requests_reject_user_paths_roles_or_peer_override(self):
+        for config in ({'enabled':1}, {**POLICY,'root':'/tmp'}, {'enabled':True,'machine':'cold-node'},
+                       {**POLICY,'authority':'../hdd'}):
+            with self.assertRaises(ValueError): M.policy(config)
+        for extra in ('hostAdmin','root','endpoint','certificateSha256','authority'):
+            with self.assertRaises(ValueError): self.source.provision({**self.request,extra:True})
+        with self.assertRaises(ValueError): self.source.provision({**self.request,'targetMachine':'unknown'})
+        with self.assertRaises(ValueError): self.source.provision({**self.request,'userId':'arbitrary-account'})
+        self.source.spawn.assert_not_called()
+
+    def test_source_requires_exact_single_owner_and_protected_ready(self):
+        self.cold.set_owners(ADMIN, 'original', [USER, 'demo-user-2'])
+        with self.assertRaises(PermissionError): self.source.provision(self.request)
+        self.cold.set_owners(ADMIN, 'original', [USER])
+        with self.cold._locked():
+            tier = self.cold._tier('original', self.version); tier['role']='cache'
+            self.cold._write_tier('original', self.version, tier)
+        with self.assertRaisesRegex(ValueError,'protected original'): self.source.provision(self.request)
+        self.source.spawn.assert_not_called()
+
+    def test_provision_is_async_intent_precedes_launch_and_poll_never_rehashes(self):
+        def check_launch(op):
+            row = A._load(self.source._op_path(op))
+            self.assertEqual(row['state'], 'PROVISIONING')
+            self.assertEqual(A._load(self.source.root/'control'/'lane'/'state.json'), {'opId':op})
+        self.source.spawn.side_effect = check_launch
+        with patch.object(D, '_scan', side_effect=AssertionError('HTTP must not hash')):
+            self.source.provision(self.request)
+            self.source.worker_state.return_value='RUNNING'
+            self.assertEqual(self.source.provision(self.request)['state'], 'PROVISIONING')
+        self.source.spawn.assert_called_once()
+        self.assertEqual(self.source.worker(self.request['opId']), 0)
+        self.source.worker_state.return_value='STOPPED'
+        with patch.object(D, '_scan', side_effect=AssertionError('issued seal must not rehash')):
+            first = self.source.provision(self.request)
+            self.assertEqual(first, self.source.provision(self.request))
+        self.assertEqual(first['grant']['id'], self.request['opId'])
+        self.assertEqual(first['grant']['receipt']['owners'], [USER])
+
+    def test_ready_survives_process_restart_without_issuing_new_grant(self):
+        grant = self.provision()
+        reopened = M.StorageArchive.from_executor(self.node); reopened.spawn=Mock()
+        with patch.object(self.store, 'seal', side_effect=AssertionError('must read existing grant')):
+            self.assertEqual(reopened.provision(self.request)['grant'], grant)
+        reopened.spawn.assert_not_called()
+        self.assertTrue(self.cold._tier('original',self.version)['pins'])
+
+    def test_same_operation_cannot_change_target_owner_or_source(self):
+        self.provision()
+        self.node.CONFIG['transferPeers']['another-node'] = dict(self.peer)
+        with self.assertRaises(ValueError): self.source.provision({**self.request,'targetMachine':'another-node'})
+        with self.assertRaises(PermissionError): self.source.provision({**self.request,'userId':'demo-user-2'})
+        changed = {**self.request,'source':{**self.request['source'],'dataset':'missing'}}
+        with self.assertRaises(FileNotFoundError): self.source.provision(changed)
+
+    def test_single_worker_lane_stays_reserved_for_unknown_or_active_process(self):
+        self.source.provision(self.request)
+        other = {**self.request,'opId':str(uuid.uuid4())}
+        for status in ('RUNNING','UNKNOWN'):
+            self.source.worker_state.return_value=status
+            self.assertEqual(self.source.provision(other)['state'], 'UNKNOWN')
+        self.source.spawn.assert_called_once()
+        self.source.worker(self.request['opId'])
+        self.source.worker_state.return_value='STOPPED'
+        self.assertEqual(self.source.provision(other)['state'], 'PROVISIONING')
+        self.assertEqual(self.source.spawn.call_count,2)
+
+    def test_ambiguous_launch_and_stopped_crash_are_never_blindly_retried(self):
+        self.source.spawn.side_effect=TimeoutError('ambiguous')
+        self.assertEqual(self.source.provision(self.request)['state'],'UNKNOWN')
+        self.assertEqual(self.source.provision({**self.request,'retry':True})['state'],'UNKNOWN')
+        self.source.spawn.assert_called_once()
+        other = {**self.request,'opId':str(uuid.uuid4())}
+        self.source.spawn.side_effect=None
+        self.assertEqual(self.source.provision(other)['state'],'UNKNOWN')
+        self.source.spawn.assert_called_once()  # Ambiguous lane never admits a second job.
+        # The original dispatch may actually have reached its worker. Only its
+        # definite completion reconciles the lane without private intervention.
+        self.assertEqual(self.source.worker(self.request['opId']),0)
+        self.source.provision(other)
+        self.assertEqual(self.source.provision(other)['state'],'UNKNOWN')
+        self.assertEqual(self.source.spawn.call_count,2)
+
+    def test_failed_worker_requires_explicit_retry_stopped_and_keeps_original_seal(self):
+        self.source.provision(self.request)
+        real = self.source._grant
+        with patch.object(self.source, '_grant', side_effect=ValueError('post-seal failure')):
+            self.assertEqual(self.source.worker(self.request['opId']),1)
+        path = self.store.root/self.request['opId']/'grant.json'
+        before = path.read_bytes()
+        self.assertEqual(self.source.provision(self.request)['state'],'FAILED')
+        self.source.spawn.assert_called_once()
+        self.source.worker_state.return_value='RUNNING'
+        self.assertEqual(self.source.provision(self.request)['state'],'UNKNOWN')
+        self.source.worker_state.return_value='UNKNOWN'
+        self.assertEqual(self.source.provision({**self.request,'retry':True})['state'],'UNKNOWN')
+        self.source.spawn.assert_called_once()
+        self.source.worker_state.return_value='STOPPED'
+        self.assertEqual(self.source.provision({**self.request,'retry':True})['state'],'PROVISIONING')
+        with patch.object(D, '_scan', side_effect=AssertionError('no reseal of durable grant')):
+            self.assertEqual(self.source.worker(self.request['opId']),0)
+        self.assertEqual(path.read_bytes(),before)
+        self.assertEqual(self.source.provision(self.request)['state'],'READY')
+
+    def test_policy_change_rejects_existing_operation_and_event(self):
+        intent = self.intent(); self.source.outbox_begin(intent); self.provision()
+        self.node.CONFIG['storageArchive'] = {**POLICY,'authority':'different'}
+        changed = M.StorageArchive.from_executor(self.node)
+        with self.assertRaises(ValueError): changed.provision(self.request)
+        with self.assertRaises(ValueError): changed.outbox_begin(intent)
+        self.assertEqual(changed.outbox_list({})['events'],[])
+
+    def test_outbox_intent_reconciles_lost_ready_reply_and_deduplicates_registration(self):
+        intent = self.intent(); event = self.source.outbox_begin(intent)
+        self.assertEqual(event, {'id':intent['opId']})
+        self.assertEqual(self.source.outbox_begin(self.intent()), event)
+        # Existing old datasets are NOT discovered; only this persisted intent.
+        events = self.source.outbox_list({'limit':8})['events']
+        self.assertEqual(events,[dict(id=intent['opId'],userId=USER,dataset='original',version=self.version,state='READY')])
+        self.assertEqual(len(self.source._ids(self.source.root/'events')),1)
+        self.source.outbox_ack({k:v for k,v in events[0].items() if k!='state'})
+        self.assertEqual(self.source.outbox_list({})['events'],[])
+        self.assertEqual(self.source.outbox_begin(self.intent()), event)
+
+    def test_publish_before_registration_binds_only_once_and_never_scans_old_ready(self):
+        intent = self.intent(dataset='new-dataset'); self.source.outbox_begin(intent)
+        self.assertEqual(self.source.outbox_list({})['events'],[])
+        self.cold.register_manifest(ADMIN,'new-dataset',self.manifest,[USER])
+        self.cold.materialize(ADMIN,'new-dataset',self.version,_source=self.root/'input')
+        event = self.source.outbox_list({})['events'][0]
+        self.assertEqual(event['dataset'],'new-dataset')
+        row = A._load(self.source._event_path(intent['opId']))
+        self.assertEqual(row['registration'],list(self.cold._record_identity('new-dataset',self.version)))
+
+    def test_outbox_rotation_prevents_unacked_old_eight_starvation(self):
+        for n in range(12):
+            dataset='dataset-'+str(n)
+            self.cold.register_manifest(ADMIN,dataset,self.manifest,[USER])
+            self.cold.materialize(ADMIN,dataset,self.version,_source=self.root/'input')
+            self.source.outbox_begin(self.intent(dataset=dataset))
+        first = self.source.outbox_list({'limit':8})['events']
+        second = self.source.outbox_list({'limit':8})['events']
+        self.assertEqual(len({e['id'] for e in first+second}),12)
+
+    def test_outbox_ack_requires_fixed_owner_reference_and_current_registration(self):
+        intent=self.intent(); self.source.outbox_begin(intent)
+        event=self.source.outbox_list({})['events'][0]; args={k:v for k,v in event.items() if k!='state'}
+        for mutation in ({'userId':'demo-user-2'},{'dataset':'different'},{'version':'a'*64}):
+            with self.assertRaises(ValueError): self.source.outbox_ack({**args,**mutation})
+        self.assertEqual(self.source.outbox_ack(args),self.source.outbox_ack(args))
+        self.cold.attach_source(ADMIN,'original',self.version,'input')
+        with self.assertRaises(ValueError): self.source.outbox_ack(args)
+        new=self.source.outbox_begin(self.intent())
+        self.assertNotEqual(new['id'],intent['opId'])
+
+    def test_outbox_concurrent_begins_deduplicate_to_one_intent(self):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(self.source.outbox_begin,[self.intent(),self.intent()]))
+        self.assertEqual(results[0],results[1])
+        self.assertEqual(len(self.source._ids(self.source.root/'events')),1)
+
+    def test_original_is_fixed_single_owner_protected_and_not_a_new_seal(self):
+        with patch.object(self.store,'seal',side_effect=AssertionError('no HTTP hash')):
+            self.assertEqual(self.source.original(dict(userId=USER,**self.request['source'])),
+                             dict(protected=True,**self.request['source']))
+        with self.assertRaises(PermissionError): self.source.original(dict(userId='demo-user-2',**self.request['source']))
+
+    def test_real_tls_provision_certify_evict_recover_then_idempotent_ack(self):
+        grant=self.provision(); target=self.tls_target()
+        intent=self.intent(dataset='replica'); event=target.outbox_begin(intent)
+        target.outbox_ready(dict(opId=event['id'],userId=USER))
+        request=dict(opId=str(uuid.uuid4()),userId=USER,target=dict(dataset='replica',version=self.version),grant=grant)
+        result=target.certify(request)
+        self.assertEqual(result['state'],'READY'); self.assertEqual(result['role'],'cache')
+        self.assertNotIn('grant',result); self.assertNotIn('token',json.dumps(result))
+        self.assertEqual(result,target.certify(request))
+        self.hot.evict(ADMIN,'replica',self.version)
+        # Certify response concerns durable proof, not a demand to copy again.
+        self.assertEqual(result,target.certify(request))
+        target.outbox_ack(dict(id=event['id'],userId=USER,dataset='replica',version=self.version))
+        self.assertEqual(target.tier.recover(ADMIN,'replica',self.version)['state'],'READY')
+        actual=self.hot._paths('replica',self.version)['ready']/'data'/'file'
+        self.assertEqual(actual.read_bytes(),(self.root/'input'/'file').read_bytes())
+        self.assertTrue(all(r['action'] in ('guard','manifest','get') for r in self.read_requests))
+        self.assertFalse(target.tier.enabled)
+
+    def test_certify_rejects_wrong_owner_reference_grant_and_keeps_protected(self):
+        grant=self.provision(); target=self.tls_target()
+        request=dict(opId=str(uuid.uuid4()),userId=USER,target=dict(dataset='replica',version=self.version),grant=grant)
+        for changed in ({'userId':'demo-user-2'}, {'grant':{**grant,'targetMachine':'other'}},
+                        {'target':{'dataset':'replica','version':'a'*64}}):
+            with self.assertRaises((ValueError,PermissionError)): target.certify({**request,**changed})
+        bad={**grant,'token':'x'*43}
+        with self.assertRaises(ValueError): target.certify({**request,'grant':bad})
+        self.assertEqual(self.hot._tier('replica',self.version)['role'],'protected')
+        with self.assertRaises(ValueError): target.certify(request)  # ID/grant immutable even on failure.
+
+    def test_certify_failed_reply_retries_same_grant_and_policy_is_fixed(self):
+        grant=self.provision(); target=self.tls_target()
+        request=dict(opId=str(uuid.uuid4()),userId=USER,target=dict(dataset='replica',version=self.version),grant=grant)
+        with patch.object(target.tier,'verify_authority',side_effect=ConnectionError('offline')):
+            with self.assertRaises(ConnectionError): target.certify(request)
+        self.assertEqual(self.hot._tier('replica',self.version)['role'],'protected')
+        self.assertEqual(target.certify({**request,'retry':True})['state'],'READY')
+        with self.assertRaises(ValueError): target.certify({**request,'grant':{**grant,'token':'z'*43}})
+
+    def test_worker_rejects_changed_peer_policy_before_seal(self):
+        self.source.provision(self.request)
+        self.node.CONFIG['transferPeers']['hot-node']['certificateSha256']='a'*64
+        with patch.object(self.store,'seal',side_effect=AssertionError('must not issue')):
+            with self.assertRaisesRegex(ValueError,'peer changed'):
+                self.source.worker(self.request['opId'])
+
+    def test_launch_uses_bounded_service_no_shell_or_gpu(self):
+        M.StorageArchive.spawn(self.source,self.request['opId'])
+        argv=self.node.run.call_args.args[0]
+        self.assertEqual(argv[:3],['/usr/bin/systemd-run','--user','--collect'])
+        self.assertIn('--property=CPUQuota=100%',argv)
+        self.assertIn('--property=MemoryMax=2G',argv)
+        self.assertIn('--property=IOWeight=10',argv)
+        self.assertIn('--property=RuntimeMaxSec=86400',argv)
+        self.assertEqual(argv[-2:],['--storage-archive-worker',self.request['opId']])
+        self.assertFalse(any('gpuq-submit' in item or 'bash' in item for item in argv))
+
+    def test_systemd_probe_failures_are_unknown_not_stopped(self):
+        for output, code, expected in (
+                ('LoadState=loaded\nActiveState=active\nSubState=running\n',0,'RUNNING'),
+                ('LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\nControlPID=0\n',0,'STOPPED'),
+                ('LoadState=not-found\nActiveState=inactive\nMainPID=0\nControlPID=0\n',1,'STOPPED'),
+                ('LoadState=loaded\nActiveState=failed\nMainPID=100\nControlPID=0\n',0,'UNKNOWN'),
+                ('',1,'UNKNOWN'),
+                ('LoadState=loaded\nActiveState=deactivating\n',0,'RUNNING')):
+            with patch.object(M.subprocess,'run',return_value=SimpleNamespace(stdout=output,returncode=code)):
+                self.assertEqual(M.StorageArchive.worker_state(self.source,self.request['opId']),expected)
+        with patch.object(M.subprocess,'run',side_effect=subprocess.TimeoutExpired('systemctl',4)):
+            self.assertEqual(M.StorageArchive.worker_state(self.source,self.request['opId']),'UNKNOWN')
+
+    def test_history_bound_denies_new_intent_without_changing_existing(self):
+        old=self.intent(); self.source.outbox_begin(old)
+        with patch.object(M,'MAX_HISTORY',1):
+            self.assertEqual(self.source.outbox_begin(old),{'id':old['opId']})
+            with self.assertRaisesRegex(ValueError,'history is full'):
+                self.source.outbox_begin(self.intent(dataset='different'))
+        self.assertEqual(len(self.source._ids(self.source.root/'events')),1)
+
+    def test_safe_private_state_rejects_symlink_and_nonprivate_root(self):
+        bad=self.root/'bad-state'; bad.mkdir(); (bad/'storage-archive').symlink_to(self.source.root)
+        node=self.executor('cold-node',self.cold,bad)
+        node.CONFIG.update(storageAuthority={'enabled':True}); node.storage_authority=lambda:self.store
+        with self.assertRaises((ValueError,OSError)): M.StorageArchive(node)
+        os.chmod(self.source.root,0o755)
+        with self.assertRaises(ValueError): M.StorageArchive(self.node)
+
+
+if __name__ == '__main__':
+    unittest.main()

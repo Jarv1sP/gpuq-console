@@ -106,6 +106,51 @@ class PersonalUploads(unittest.TestCase):
         self.assertEqual((ready/'train.txt').stat().st_mode & 0o777, 0o444)
         self.assertEqual(self.cache._reserved(), 0)
 
+    def test_archive_intent_precedes_commit_and_lost_ack_keeps_ready(self):
+        result, _, files = self.seal()
+        upload = result['uploadId']
+        self.fill(upload, files)
+        events = []
+        def begin(args):
+            self.assertEqual(self.cache.status(D.Principal(self.user), result['dataset'], result['version'])['state'], 'STAGING')
+            events.append(args)
+            return {'id': upload}
+        def ready(args):
+            self.assertEqual(self.cache.status(D.Principal(self.user), result['dataset'], result['version'])['state'], 'READY')
+            raise OSError('simulated lost acknowledgement')
+        self.node.CONFIG['storageArchive'] = {'enabled': True}
+        self.node.storage_archive = lambda: SimpleNamespace(outbox_begin=begin, outbox_ready=ready)
+        self.call('commit', uploadId=upload)
+        self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
+        self.assertEqual(self.call('status', uploadId=upload)['state'], 'READY')
+        self.assertEqual(events, [{'opId': upload, 'userId': self.user, 'reference': {'dataset': result['dataset'], 'version': result['version']}, 'origin': 'upload'}])
+        self.assertEqual(self.u.load(self.user, upload)['archiveEventId'], upload)
+
+    def test_archive_intent_failure_prevents_new_publication(self):
+        result, _, files = self.seal()
+        self.fill(result['uploadId'], files)
+        self.node.CONFIG['storageArchive'] = {'enabled': True}
+        def unavailable(args):
+            raise ValueError('outbox unavailable')
+        self.node.storage_archive = lambda: SimpleNamespace(outbox_begin=unavailable)
+        self.call('commit', uploadId=result['uploadId'])
+        self.assertEqual(self.u.worker(self.user, result['uploadId'], 'commit'), 1)
+        self.assertNotEqual(self.cache.status(D.Principal(self.user), result['dataset'], result['version'])['state'], 'READY')
+
+    def test_peer_copy_never_recursively_enrolls_archive(self):
+        result, _, files = self.seal()
+        self.fill(result['uploadId'], files)
+        self.node.CONFIG['storageArchive'] = {'enabled': True}
+        def forbidden():
+            raise AssertionError('peer copy must not create an archive intent')
+        self.node.storage_archive = forbidden
+        self.call('commit', uploadId=result['uploadId'])
+        session = self.u.load(self.user, result['uploadId'])
+        session['workerUnit'] = 'gpuq-transfer-test'
+        self.u.save(session)
+        self.assertEqual(self.u.worker(self.user, result['uploadId'], 'commit'), 0)
+        self.assertNotIn('archiveEventId', self.u.load(self.user, result['uploadId']))
+
     def test_same_name_different_users_and_spoofing(self):
         one, _, _ = self.seal()
         two, _, _ = self.seal(user='demo-user-2')

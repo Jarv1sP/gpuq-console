@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {advanceDataPreparation,DATA_PREPARING} from '../dataset-preparation.mjs';
-import {usage} from '../execution.mjs';
+import {advanceDataPreparation,DATA_PREPARING,releaseDataPreparation} from '../dataset-preparation.mjs';
+import {usage,publicJob} from '../execution.mjs';
 
 const ref={dataset:'sample',version:'a'.repeat(64)};
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
@@ -118,4 +118,71 @@ test('wrong data version, invalid project, unavailable host and shutdown fail cl
   assert.match(offline.jobs[0].queueReason,/等待服务器恢复/);
   const closed=fixture();closed.service.closing=true;
   await advanceDataPreparation(closed.service,closed.jobs[0],usage);assert.equal(closed.calls.length,0);assert.equal(closed.saves.length,0);
+});
+
+function managed(f){
+  f.service.storageArchivePolicy={enabled:true};
+  for(const job of f.jobs)Object.assign(job.spec,{id:job.id,userId:job.userId});
+  f.service.bridge=async(machine,operation,args)=>{
+    f.calls.push({machine,operation,args});
+    if(operation==='storage.lease.prepare')return {jobId:args.job.id,state:'HELD'};
+    if(operation==='storage.lease.cancel')return {jobId:args.job.id,state:'CANCELED',released:true};
+    return {...ref,state:'READY'};
+  };
+  return f;
+}
+
+test('feature-on waiting retains durable HELD leases and promotion does not pretend handoff',async()=>{
+  const f=managed(fixture({jobs:2}));
+  await Promise.all(f.jobs.map(job=>advanceDataPreparation(f.service,job,usage)));
+  assert.equal(f.jobs.filter(job=>job.state==='SUBMITTING').length,1);
+  const waiting=f.jobs.find(job=>job.state===DATA_PREPARING);
+  assert.equal(waiting.dataPreparationHold.state,'HELD');
+  assert.ok(f.jobs.every(job=>job.dataPreparationHold.state==='HELD'));
+  assert.equal(f.calls.filter(call=>call.operation==='storage.lease.prepare').length,2);
+  assert.equal(f.calls.filter(call=>call.operation==='storage.lease.cancel').length,0);
+  const promoted=f.jobs.find(job=>job!==waiting);promoted.state='SUCCEEDED';
+  await advanceDataPreparation(f.service,waiting,usage);
+  assert.equal(waiting.state,'SUBMITTING');assert.equal(waiting.dataPreparationHold.state,'HELD');
+  assert.equal(Object.hasOwn(publicJob(waiting),'dataPreparationHold'),false);
+});
+
+test('feature-on cancellation after prepare reply loss fences the original intent',async()=>{
+  const f=managed(fixture()),ready=deferred(),reply=deferred();
+  const original=f.service.bridge;
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='storage.lease.prepare'){ready.resolve();await reply.promise;throw Error('lost preparation reply');}
+    return original(machine,operation,args);
+  };
+  const work=advanceDataPreparation(f.service,f.jobs[0],usage);await ready.promise;
+  assert.equal(f.jobs[0].dataPreparationHold.state,'INTENT');
+  await f.service.enqueue(()=>{f.jobs[0].cancelRequested=true;f.jobs[0].state='CANCELED';});
+  reply.resolve();await assert.rejects(work,/lost preparation reply/);
+  assert.equal(f.jobs[0].dataPreparationHold.state,'RELEASED');
+  assert.equal(f.calls.filter(call=>call.operation==='storage.lease.cancel').length,1);
+});
+
+test('terminal preflight failure and legacy early HANDED_OFF still retry lost cancellation replies',async()=>{
+  for(const initial of ['HELD','HANDED_OFF']){
+    const f=managed(fixture());await advanceDataPreparation(f.service,f.jobs[0],usage);
+    const job=f.jobs[0];job.dataPreparationHold.state=initial;job.state='FAILED';
+    const spec=structuredClone(job.dataPreparationHold.spec),original=f.service.bridge;
+    f.service.bridge=async()=>{throw Error('lost cleanup reply');};
+    await assert.rejects(releaseDataPreparation(f.service,job),/lost cleanup reply/);
+    assert.equal(job.dataPreparationHold.state,initial);
+    f.service.bridge=original;await releaseDataPreparation(f.service,job);
+    assert.equal(job.dataPreparationHold.state,'RELEASED');
+    assert.deepEqual(f.calls.at(-1).args,{job:spec});
+    await releaseDataPreparation(f.service,job);
+    assert.equal(f.calls.filter(call=>call.operation==='storage.lease.cancel').length,1);
+  }
+});
+
+test('nonterminal or unknown submission never invokes prepare cancellation',async()=>{
+  const f=managed(fixture());await advanceDataPreparation(f.service,f.jobs[0],usage);
+  for(const state of ['SUBMITTING','PENDING','RUNNING','UNKNOWN']){
+    f.jobs[0].state=state;await releaseDataPreparation(f.service,f.jobs[0]);
+  }
+  assert.equal(f.calls.filter(call=>call.operation==='storage.lease.cancel').length,0);
+  assert.equal(f.jobs[0].dataPreparationHold.state,'HELD');
 });

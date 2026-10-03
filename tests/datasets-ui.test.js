@@ -1,6 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {datasetRows,capacityText} from '../dist/datasets-ui.js';
+import {datasetRows,capacityText,archiveStatus} from '../dist/datasets-ui.js';
+test('archive UI distinguishes confirmed preservation from local readiness and escapes errors',()=>{
+ assert.equal(archiveStatus(null),'');
+ for(const phase of ['QUEUED','COPYING','PROVISIONING','FAILED','BLOCKED']){
+   const html=archiveStatus({phase,dataset:'mine',version:'a'.repeat(64),error:'<script>'});
+   assert.match(html,/本机数据继续保留/);assert.doesNotMatch(html,/长期原件已保存|<script>/);
+   assert.equal(html.includes('data-retry-archive'),['FAILED','BLOCKED'].includes(phase));
+ }
+ assert.doesNotMatch(archiveStatus({phase:'ARCHIVED',originalRetained:false}),/长期原件已保存/);
+ assert.match(archiveStatus({phase:'ARCHIVED',originalRetained:true,archiveMachine:'cold<script>'}),/cold&lt;script&gt;/);
+});
+test('archive action belongs only to the selected machine, not another replica',()=>{
+ const catalog={machine:'gpu-1',datasets:[{dataset:'mine',versions:[{version:'a'.repeat(64),state:'READY',locations:[{machine:'gpu-2',state:'READY',storage:{phase:'FAILED',dataset:'mine',version:'a'.repeat(64)}}]}]}]};
+ assert.doesNotMatch(datasetRows(catalog),/data-retry-archive/);
+ catalog.machine='gpu-2';assert.match(datasetRows(catalog),/data-retry-archive="mine"/);
+});
 test('dataset cards keep full immutable versions and escape all text',()=>{
  const html=datasetRows({datasets:[{dataset:'<unsafe>',versions:[{version:'" onfocus="evil',state:'FAILED',bytes:1024,files:1}]}]});
  assert.ok(html.includes('&lt;unsafe&gt;'));assert.ok(html.includes('&quot; onfocus=&quot;evil'));assert.ok(!html.includes('<unsafe>'));

@@ -12,11 +12,12 @@ import {installJobNotifications} from './job-notifications.mjs';
 import {installTransfers,transferCall} from './transfers.mjs';
 import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
 import {LoginSessions} from './login-sessions.mjs';
+import {installStorageArchive} from './storage-archive.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
 export class PortalService extends DemoService{
-  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig){
+  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig,storageArchiveConfig){
     await mkdir(dirname(path),{recursive:true,mode:0o700});
     const service=new PortalService();service.production=true;service.tail=Promise.resolve();service.pending=0;
     service.terminalLanes=new Map();service.terminalPending=0;
@@ -52,6 +53,7 @@ export class PortalService extends DemoService{
     maintainTaskNotes(service);
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installJobNotifications(service,notificationConfig);installMaintenance(service);
     installTransfers(service);
+    installStorageArchive(service,storageArchiveConfig);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -272,5 +274,5 @@ export class PortalService extends DemoService{
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
-  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);this.db.close();}
+  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);this.db.close();}
 }

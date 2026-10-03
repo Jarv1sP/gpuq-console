@@ -11,10 +11,14 @@ export async function datasetCatalogCall(service,principal,operation,args){
   if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>k!=='machine'))fail('数据集目录参数无效。');
   const user=service.store.get(principal.userId);
   if(!user.enabled||!MACHINES.some(m=>m.id===args.machine)||!user.limits[args.machine])fail('这台机器未授权。',403);
+  const policy=JSON.stringify(user),checkPolicy=()=>{
+    if(service.closing||JSON.stringify(service.store.get(principal.userId))!==policy)fail('账号授权已改变，请刷新后重试。',403);
+  };
   if(!service.bridge)fail('节点执行桥尚未配置。',503);
   const owner={userId:user.id,hostAdmin:false};
   if(operation==='datasets.capacity'){
     const value=await service.bridge(args.machine,'datasets.capacity',owner);
+    checkPolicy();
     const result={machine:args.machine,available:true};
     for(const key of ['filesystemBytes','availableBytes','reserveBytes','usableBytes']){
       if(!Number.isSafeInteger(value?.[key])||value[key]<0)fail('数据盘容量暂时无法确认。',502);
@@ -27,7 +31,9 @@ export async function datasetCatalogCall(service,principal,operation,args){
     return {...result,inodeUsageKnown:value.inodeUsageKnown===true,guarded:value.guarded===true};
   }
   if(operation!=='datasets.catalog')fail('未知目录操作。');
-  const machines=MACHINES.filter(m=>user.limits[m.id]>0);
+  // A known owner's archived version is data access, not a GPU/shell grant on
+  // the storage host. Unrelated versions on that host remain invisible.
+  const machines=MACHINES.filter(m=>user.limits[m.id]>0||service.archiveMachineVisible?.(user.id,m.id));
   const listings=await Promise.all(machines.map(async m=>{
     try{
       const result=await service.bridge(m.id,'datasets.list',owner);
@@ -37,6 +43,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
   }));
   let capabilities;
   try{capabilities=await service.transferCall?.({...principal,role:'member'},'transfers.capabilities',{machine:args.machine});}catch{}
+  checkPolicy();
   const replicaSources=capabilities?.enabled===true&&Array.isArray(capabilities.sources)?capabilities.sources.filter(id=>machines.some(m=>m.id===id)):[];
   const datasets=new Map();
   const aliases=new Map(listings.map(listing=>[listing.machine,service.datasetAliases?.(user.id,listing.machine)]));
@@ -44,13 +51,15 @@ export async function datasetCatalogCall(service,principal,operation,args){
     if(!ID.test(item?.dataset)||!Array.isArray(item.versions))continue;
     for(const value of item.versions){
       if(!HASH.test(value?.version))continue;
-      const alias=aliases.get(listing.machine)?.get(item.dataset+'@'+value.version);
+      if(!user.limits[listing.machine]&&!service.archiveSourceAllowed?.(user.id,listing.machine,{dataset:item.dataset,version:value.version}))continue;
+      const alias=aliases.get(listing.machine)?.get(item.dataset+'@'+value.version)||(listing.machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(user.id)?.get(item.dataset+'@'+value.version):null);
       const name=typeof alias==='string'&&ID.test(alias)?alias:item.dataset;
       let dataset=datasets.get(name);
       if(!dataset){dataset={dataset:name,versions:new Map()};datasets.set(name,dataset);}
       let version=dataset.versions.get(value.version);
       if(!version){version={version:value.version,locations:[]};dataset.versions.set(value.version,version);}
       version.locations.push({machine:listing.machine,dataset:item.dataset,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,
+        ...(service.archiveState?.(user.id,listing.machine,{dataset:item.dataset,version:value.version})?{storage:service.archiveState(user.id,listing.machine,{dataset:item.dataset,version:value.version})}:{}),
         ...(listing.machine===args.machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})});
       if(Number.isSafeInteger(value.bytes)&&value.bytes>=0)version.bytes=value.bytes;
       if(Number.isSafeInteger(value.files)&&value.files>=0)version.files=value.files;

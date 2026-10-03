@@ -257,8 +257,23 @@ class DataWorkspaces:
             source_id = 'workspace-'+hashlib.sha256((user+'\0'+dataset).encode()).hexdigest()[:40]
             cache.sources[source_id] = source
             cache.attach_source(internal, dataset, registered['version'], source_id)
+            archive = None
+            if self.n.CONFIG.get('storageArchive', {}).get('enabled') is True:
+                archive = self.n.storage_archive()
+                intent = archive.outbox_begin({'opId': key, 'userId': user,
+                    'reference': {'dataset': dataset, 'version': registered['version']}, 'origin': 'workspace'})
             result = cache.materialize(actor, dataset, registered['version'])
             receipt = {**task, **registered, 'state': result['state'], 'completedAt': time.time()}
+            if archive is not None and result['state'] == 'READY':
+                # The durable intent also recovers a crash between publication
+                # and this acknowledgement. The writable draft is not a cache.
+                try:
+                    archive.outbox_ready({'opId': intent['id'], 'userId': user})
+                except Exception:
+                    # Publication already committed. Never misreport it as
+                    # failed or delete it because the outbox ack was lost.
+                    # The previously durable intent is reconciled separately.
+                    pass
         except Exception as error:
             receipt = {**task, 'state': 'FAILED', 'error': self.n.dataset_error(error), 'completedAt': time.time()}
         finally:

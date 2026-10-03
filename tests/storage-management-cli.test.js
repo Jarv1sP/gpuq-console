@@ -60,6 +60,16 @@ test('storage CLI rejects members before management requests',async t=>{
   assert.ok(f.calls.every(c=>c.operation==='state'));
 });
 
+test('members can request archive retry only for a fixed version on an authorized selected machine',async t=>{
+  const f=await fixture(t);await f.setRole('member');f.respond({phase:'PROVISIONING'});
+  const result=await f.cli(['data','archive-retry','mine@'+VERSION]);assert.equal(result.code,0,result.stderr);
+  assert.deepEqual(f.calls.at(-1),{operation:'datasets.archive.retry',args:{machine:'gpu-1',dataset:'mine',version:VERSION}});
+  for(const args of [['mine'],['mine@latest'],['mine@'+VERSION,'--root'],['mine@'+VERSION,'--machine','gpu-4']]){
+    assert.equal((await f.cli(['data','archive-retry',...args])).code,1);
+  }
+  assert.equal(f.calls.filter(row=>row.operation==='datasets.archive.retry').length,1);
+});
+
 test('storage CLI rejects collection authority pin traversal role proof and unrelated options',async t=>{
   const f=await fixture(t);
   const rejected=[['collect'],['recover'],['enable'],['plan','extra'],['status','sample'],['status','sample@latest'],

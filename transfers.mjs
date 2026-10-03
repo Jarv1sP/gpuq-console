@@ -10,6 +10,9 @@ const fields=(args,allowed)=>{if(Object.keys(args).some(k=>!allowed.includes(k))
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const validId=value=>{if(typeof value!=='string'||!uuid.test(value))fail('需提供完整传输 UUID。');return value;};
 const lanes=new WeakMap();
+// Never derived from HTTP arguments. Only the archive orchestrator can open a
+// copy to the configured cold store without a compute grant on that machine.
+const archiveAdmission=Symbol('trusted archive admission');
 function laneState(service){let state=lanes.get(service);if(!state){state={pending:0,users:new Map(),rows:new Map()};lanes.set(service,state);}return state;}
 async function inLane(service,owner,key,run){
   const state=laneState(service),lane=state.rows.get(key)||{tail:Promise.resolve(),pending:0},count=state.users.get(owner)||0;
@@ -39,16 +42,31 @@ function save(service,row,state,actor,operation){
   transaction(service,()=>{service.db.prepare('UPDATE transfers SET state=?,data=?,updated_at=? WHERE id=?').run(state,JSON.stringify(row.data),Date.now(),row.id);if(state!==row.state||operation!=='transfers.sync')service.audit(actor,operation,row.id,state);});return load(service,row.id);
 }
 function authorized(service,user,machine){if(!MACHINES.some(m=>m.id===machine)||!service.store.get(user.id).limits[machine])fail('这台机器未授权。',403);}
-function pinnedSnapshot(service,principal,operation,args){
+function authorizedCopy(service,user,data){
+  if(data.managedArchive===1){
+    const policy=service.storageArchivePolicy;
+    if(!policy?.enabled||data.kind!=='copy'||data.machine!==policy.machine||data.from===data.machine)fail('长期归档配置已改变。',403);
+    authorized(service,user,data.from);
+  }else{
+    authorized(service,user,data.machine);
+    if(data.from&&!user.limits[data.from]&&!service.archiveSourceAllowed?.(user.id,data.from,data.reference))fail('源机器或数据版本未授权。',403);
+  }
+}
+function pinnedSnapshot(service,principal,operation,args,row){
   const user=service.store.get(principal.userId);
   // This reference was resolved and persisted with the transfer's digest.
   // Re-mapping on each chunk could silently switch an in-flight download.
-  return snapshotSyncCall(service,principal,user,operation,args,machine=>authorized(service,user,machine),{physical:true});
+  const context=Object.create(service);
+  if(row?.data.downloadProtection?.protocol===1)context.bridge=(machine,op,request)=>{
+    const {hostAdmin,dataset,version,...safe}=request;
+    return service.bridge(machine,'storage.download.'+op.split('.').at(-1),{...safe,id:row.id,reference:{dataset,version}});
+  };
+  return snapshotSyncCall(context,principal,user,operation,args,machine=>authorized(service,user,machine),{physical:true});
 }
 function access(service,principal,row){
   if(row.owner_id!==principal.userId)fail('传输不存在或属于其他账号。',404);
   const user=service.store.users.find(u=>u.id===principal.userId);if(!user?.enabled)fail('账号已暂停。',403);
-  for(const machine of [row.data.machine,row.data.from].filter(Boolean))authorized(service,user,machine);
+  authorizedCopy(service,user,row.data);
 }
 function releaseConfirmation(row,value){
   const data=row.data,keys=['schema','id','userId','sourceMachine','targetMachine','reference','manifestSha256','attempt','state','confirmedStopped'];
@@ -61,6 +79,18 @@ function releaseConfirmation(row,value){
   return structuredClone(value);
 }
 async function releaseSource(service,row,actor='transfer-reconcile'){
+  if(row.data.kind==='download'&&done.has(row.state)&&row.data.downloadProtection?.protocol===1&&row.data.downloadProtection.state!=='RELEASED'){
+    row.data.downloadProtection={protocol:1,state:'PENDING'};
+    row=save(service,row,row.state,actor,'transfers.download-release-pending');
+    try{
+      const state=row.state==='SUCCEEDED'?'COMPLETED':'CANCELED';
+      const result=await service.bridge(row.data.machine,'storage.download.finish',{id:row.id,userId:row.owner_id,reference:{dataset:row.data.reference.dataset,version:row.data.reference.version},state});
+      if(result?.id!==row.id||result.state!==state||result.released!==true)throw Error('Download release not confirmed');
+      row.data.downloadProtection={protocol:1,state:'RELEASED'};
+      row=save(service,row,row.state,actor,'transfers.download-released');
+    }catch(error){if(error.transferFence)throw error;}
+    return row;
+  }
   // Only new, explicitly lease-aware copies participate. Never infer a source
   // lease from old terminal history or from a bearer ticket by itself.
   if(row.data.kind!=='copy'||!done.has(row.state)||row.data.sourceRelease?.protocol!==1||row.data.sourceRelease.state==='RELEASED')return row;
@@ -139,13 +169,27 @@ async function dispatch(service,principal,row){
     row.data.uploadId=validId(result.uploadId);row.data.result=result;
     return save(service,row,result.state==='READY'?'SUCCEEDED':'WAITING_CLIENT',principal.username,'transfers.upload-start');
   }
-  row.data.snapshot=info(await pinnedSnapshot(service,principal,'datasets.snapshot.info',{machine:data.machine,dataset:data.reference.dataset,version:data.reference.version}));
+  if(data.downloadProtection?.protocol===1){
+    const result=await service.bridge(data.machine,'storage.download.open',{id:row.id,userId:user.id,reference:{dataset:data.reference.dataset,version:data.reference.version}});
+    if(result?.id!==row.id||result.state!=='OPEN')fail('下载保活尚未确认。',502);
+    data.downloadProtection={protocol:1,state:'HELD'};
+    row=save(service,row,'DISPATCHING',principal.username,'transfers.download-held');
+  }
+  row.data.snapshot=info(await pinnedSnapshot(service,principal,'datasets.snapshot.info',{machine:data.machine,dataset:data.reference.dataset,version:data.reference.version},row));
   return save(service,row,'WAITING_CLIENT',principal.username,'transfers.download-ready');
 }
 export function installTransfers(service){
   service.db.exec(`CREATE TABLE IF NOT EXISTS transfers(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,owner_id TEXT NOT NULL,client_key TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,data TEXT NOT NULL,UNIQUE(owner_id,client_key));CREATE INDEX IF NOT EXISTS transfers_state ON transfers(state,updated_at);`);
   service.transfersReconciling=false;
   service.transferCall=(principal,operation,args)=>transferCall(service,principal,operation,args);
+  service.archiveTransferCall=async(principal,args,{resume=false}={})=>{
+    const policy=service.storageArchivePolicy;
+    if(!policy?.enabled||args.kind!=='copy'||args.machine!==policy.machine||args.from===args.machine||!service.archiveIntentAllowed?.(principal.userId,args))fail('归档传输缺少固定发布意图。',403);
+    const current=service.transferSnapshotByKey(principal.userId,args.key);
+    if(resume&&current&&['FAILED','PAUSED'].includes(current.state))return transferCall(service,principal,'transfers.resume',{id:current.id},()=>{},archiveAdmission);
+    if(current&&!['DISPATCHING','UNKNOWN'].includes(current.state))return transferCall(service,principal,'transfers.status',{id:current.id});
+    return transferCall(service,principal,'transfers.create',args,()=>{},archiveAdmission);
+  };
   const snapshot=(owner,column,id)=>{
     if(service.closing||typeof owner!=='string'||typeof id!=='string'||!uuid.test(id))return null;
     const row=service.db.prepare(`SELECT * FROM transfers WHERE ${column}=? AND owner_id=?`).get(id,owner);
@@ -155,14 +199,14 @@ export function installTransfers(service){
   service.transferSnapshotByKey=(owner,key)=>snapshot(owner,'client_key',key);
   service.reconcileTransfers=async()=>{
     if(service.closing||!service.bridge||service.transfersReconciling)return;service.transfersReconciling=true;
-    try{const rows=service.db.prepare("SELECT * FROM transfers WHERE (state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED') AND json_extract(data,'$.kind') != 'download') OR (state IN ('SUCCEEDED','CANCELED') AND json_extract(data,'$.kind') = 'copy' AND json_extract(data,'$.sourceRelease.protocol') = 1 AND json_extract(data,'$.sourceRelease.state') != 'RELEASED') ORDER BY updated_at LIMIT 4").all();await Promise.all(rows.map(row=>inLane(service,row.owner_id,rowKey(row),async()=>{if(!service.closing)await sync(service,load(service,row.id));}).catch(()=>{})));}finally{service.transfersReconciling=false;}
+    try{const rows=service.db.prepare("SELECT * FROM transfers WHERE (state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED') AND json_extract(data,'$.kind') != 'download') OR (state IN ('SUCCEEDED','CANCELED') AND ((json_extract(data,'$.kind') = 'copy' AND json_extract(data,'$.sourceRelease.protocol') = 1 AND json_extract(data,'$.sourceRelease.state') != 'RELEASED') OR (json_extract(data,'$.kind') = 'download' AND json_extract(data,'$.downloadProtection.protocol') = 1 AND json_extract(data,'$.downloadProtection.state') != 'RELEASED'))) ORDER BY updated_at LIMIT 4").all();await Promise.all(rows.map(row=>inLane(service,row.owner_id,rowKey(row),async()=>{if(!service.closing)await sync(service,load(service,row.id));}).catch(()=>{})));}finally{service.transfersReconciling=false;}
   };
   service.transferTimer=setInterval(()=>service.reconcileTransfers().catch(()=>{}),15000);service.transferTimer.unref();
 }
 // Both HTTP and internal preparation callers use this same bounded lane.
 // Database transactions below are synchronous; remote I/O never owns the
 // global account/scheduler queue. Every RPC is fenced before AND after await.
-export async function transferCall(service,principal,operation,args,assertCurrent=()=>{}){
+export async function transferCall(service,principal,operation,args,assertCurrent=()=>{},admission){
   if(!args||typeof args!=='object'||Array.isArray(args))fail('传输参数无效。');
   args=structuredClone(args);principal={...principal};
   const policy=JSON.stringify(service.store.get(principal.userId));
@@ -192,6 +236,7 @@ export async function transferCall(service,principal,operation,args,assertCurren
     // A narrow per-call view lets existing upload/snapshot validators use the
     // same bridge without bypassing the policy fence or mutating shared hooks.
     const context=Object.create(service);
+    context[archiveAdmission]=admission===archiveAdmission;
     context.bridge=async(...request)=>{current();try{return await service.bridge(...request);}finally{current();}};
     check();try{return await transferOperation(context,principal,operation,args);}finally{check();}
   });
@@ -205,7 +250,7 @@ async function transferOperation(service,principal,operation,args){
     try{
       const value=await service.bridge(args.machine,'transfers.capabilities',{userId:user.id});
       if(value?.protocol!=='lan-transfer-v1'||typeof value.enabled!=='boolean'||typeof value.sourceReady!=='boolean'||!Array.isArray(value.sources))return unavailable;
-      const sources=[...new Set(value.sources)].filter(id=>id!==args.machine&&MACHINES.some(m=>m.id===id)&&user.limits[id]>0);
+      const sources=[...new Set(value.sources)].filter(id=>id!==args.machine&&MACHINES.some(m=>m.id===id)&&(user.limits[id]>0||service.archiveMachineVisible?.(user.id,id)));
       return {...unavailable,enabled:value.enabled,sourceReady:value.sourceReady,sources:value.enabled?sources:[]};
     }catch(error){if(error.transferFence)throw error;return unavailable;}
   }
@@ -217,7 +262,8 @@ async function transferOperation(service,principal,operation,args){
   }
   if(operation==='transfers.create'){
     fields(args,['key','kind','machine','from','dataset','version','name','timeoutSec','manifest','allowRelay']);validId(args.key);
-    if(!['copy','upload','download'].includes(args.kind))fail('请选择 upload、download 或 copy。');authorized(service,user,args.machine);
+    if(!['copy','upload','download'].includes(args.kind))fail('请选择 upload、download 或 copy。');
+    if(!service[archiveAdmission])authorized(service,user,args.machine);
     const payload={kind:args.kind,machine:args.machine};
     if(args.kind==='upload'){
       if(args.from!==undefined||args.dataset!==undefined||args.version!==undefined||args.timeoutSec!==undefined)fail('上传只接受本机固定清单。');
@@ -228,7 +274,7 @@ async function transferOperation(service,principal,operation,args){
       if(args.allowRelay!==undefined||args.manifest!==undefined||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.dataset||'')||!hash.test(args.version||''))fail('需固定完整数据集版本。');payload.reference={kind:'datasets',dataset:args.dataset,version:args.version};
     }
     if(args.kind==='copy'){
-      authorized(service,user,args.from);if(args.from===args.machine)fail('源节点和目标节点应不同。');payload.from=args.from;payload.timeoutSec=args.timeoutSec??86400;
+      if(args.from===args.machine)fail('源节点和目标节点应不同。');payload.from=args.from;payload.timeoutSec=args.timeoutSec??86400;
       if(!Number.isInteger(payload.timeoutSec)||payload.timeoutSec<1||payload.timeoutSec>604800)fail('传输期限为 1–604800 秒。');
     }else if(args.from!==undefined)fail('只在 copy 中使用 from。');
     if(args.kind!=='download'){
@@ -239,6 +285,11 @@ async function transferOperation(service,principal,operation,args){
       if(!mapped||Object.keys(mapped).sort().join(',')!=='dataset,version'||typeof mapped.dataset!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(mapped.dataset)||mapped.version!==args.version)fail('数据集逻辑引用尚未确认。',409);
       payload.reference={kind:'datasets',dataset:mapped.dataset,version:mapped.version};
     }
+    if(service[archiveAdmission]){
+      if(!service.archiveIntentAllowed?.(user.id,args))fail('归档发布意图已改变。',403);
+      payload.managedArchive=1;
+    }
+    authorizedCopy(service,user,payload);
     let previous=service.db.prepare('SELECT id,digest FROM transfers WHERE owner_id=? AND client_key=?').get(user.id,args.key),row;
     if(previous){
       row=load(service,previous.id);
@@ -261,7 +312,7 @@ async function transferOperation(service,principal,operation,args){
     else{
       if(service.db.prepare('SELECT COUNT(*) n FROM transfers').get().n>=10000)fail('传输历史已达上限，请联系管理员归档。',429);
       if(service.db.prepare("SELECT COUNT(*) n FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED')").get(user.id).n>=20)fail('请先处理现有传输任务。',429);
-      const id=randomUUID(),now=Date.now();transaction(service,()=>{service.db.prepare('INSERT INTO transfers(id,owner_id,client_key,digest,state,created_at,updated_at,data) VALUES(?,?,?,?,?,?,?,?)').run(id,user.id,args.key,digest(payload),'DISPATCHING',now,now,JSON.stringify({...payload,owner:{id:user.id,username:user.username,name:user.name},...(payload.kind==='copy'?{sourceRelease:{protocol:1,state:'UNCONFIRMED'}}:{})}));service.audit(principal.username,operation,id,'DISPATCHING');});row=load(service,id);
+      const id=randomUUID(),now=Date.now();transaction(service,()=>{service.db.prepare('INSERT INTO transfers(id,owner_id,client_key,digest,state,created_at,updated_at,data) VALUES(?,?,?,?,?,?,?,?)').run(id,user.id,args.key,digest(payload),'DISPATCHING',now,now,JSON.stringify({...payload,owner:{id:user.id,username:user.username,name:user.name},...(payload.kind==='copy'?{sourceRelease:{protocol:1,state:'UNCONFIRMED'}}:{}),...(payload.kind==='download'&&service.storageArchivePolicy?.enabled?{downloadProtection:{protocol:1,state:'UNCONFIRMED'}}:{})}));service.audit(principal.username,operation,id,'DISPATCHING');});row=load(service,id);
     }
     try{return view(await dispatch(service,principal,row));}catch(error){
       if(error.transferFence)throw error;
@@ -286,10 +337,11 @@ async function transferOperation(service,principal,operation,args){
     if(row.data.kind==='upload'){
       try{const result=await service.bridge(row.data.machine,'datasets.upload.pause',{uploadId:row.data.uploadId||row.client_key,userId:user.id,hostAdmin:false});if(result.state==='READY')return view(save(service,current,'SUCCEEDED',principal.username,'transfers.canceled-ready'));}catch(error){if(error.transferFence)throw error;current.data.error='上传后台校验是否已停尚未确认；重试取消。';return view(save(service,current,'UNKNOWN',principal.username,'transfers.cancel-unknown'));}
     }
-    return view(save(service,current,'CANCELED',principal.username,'transfers.canceled'));
+    return view(await releaseSource(service,save(service,current,'CANCELED',principal.username,'transfers.canceled'),principal.username));
   }
   if(operation==='transfers.resume'){
     fields(args,['id']);if(done.has(row.state)||row.data.cancelRequested)fail('完成或取消的传输不能恢复。',409);
+    if(row.data.managedArchive===1&&!service[archiveAdmission])fail('请在数据集页面重试长期归档，后台会按顺序恢复同一传输。',409);
     if(row.data.kind!=='copy')return view(save(service,row,'WAITING_CLIENT',principal.username,operation));
     const current=await sync(service,row,principal.username);
     if(!['PAUSED','FAILED'].includes(current.state))fail('先确认原任务已经停止；UNKNOWN 不会启动新尝试。',409);
@@ -313,7 +365,7 @@ async function transferOperation(service,principal,operation,args){
       row.data.result=result;save(service,row,result.state==='READY'?'SUCCEEDED':['SEALING','PUBLISHING'].includes(result.state)?'VERIFYING':result.state==='FAILED'?'FAILED':'WAITING_CLIENT',principal.username,'transfers.sync');
     }else if(row.data.kind==='download'){
       if(!['info','manifest','get'].includes(args.action))fail('下载仅允许读取固定快照。');
-      const {id,action,...request}=args;result=await pinnedSnapshot(service,principal,'datasets.snapshot.'+action,{machine:row.data.machine,dataset:row.data.reference.dataset,version:row.data.reference.version,...request});
+      const {id,action,...request}=args;result=await pinnedSnapshot(service,principal,'datasets.snapshot.'+action,{machine:row.data.machine,dataset:row.data.reference.dataset,version:row.data.reference.version,...request},row);
     }else fail('LAN 传输由节点后台执行，不通过客户端搬运。');
     return result;
   }
@@ -321,7 +373,7 @@ async function transferOperation(service,principal,operation,args){
     fields(args,['id','bytes','complete']);if(row.data.kind!=='download'||done.has(row.state)||row.data.cancelRequested)fail('下载进度不可更新。');
     if(!Number.isSafeInteger(args.bytes)||args.bytes<0||args.bytes>row.data.snapshot?.totalBytes||typeof args.complete!=='boolean'||args.complete&&args.bytes!==row.data.snapshot.totalBytes)fail('下载进度无效。');
     row.data.result={bytes:args.bytes,totalBytes:row.data.snapshot.totalBytes,clientReported:true};
-    return view(save(service,row,args.complete?'SUCCEEDED':'WAITING_CLIENT',principal.username,'transfers.sync'));
+    return view(await releaseSource(service,save(service,row,args.complete?'SUCCEEDED':'WAITING_CLIENT',principal.username,'transfers.sync'),principal.username));
   }
   fail('未知传输操作。');
 }

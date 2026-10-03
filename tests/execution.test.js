@@ -107,3 +107,20 @@ test('terminal identity is server-owned and root requires administrator, not ful
    await assert.rejects(f.s.invoke(f.a.token,'terminal.exchange',{machine:'gpu-4',id:randomUUID(),clientId:randomUUID(),writerToken:randomUUID(),input:'x'.repeat(13000)}),/输入过长/);
  }finally{await f.close();}
 });
+
+test('terminal preparation holds including old HANDED_OFF retry cleanup across reconcile passes',async()=>{
+ const f=await fixture();try{
+   await f.grant();await f.submit();await f.settle();
+   const job=f.s.store.jobs[0];job.state='FAILED';
+   job.dataPreparationHold={state:'HANDED_OFF',spec:structuredClone(job.spec)};f.s.save();
+   let attempts=0;
+   f.s.bridge=async(_machine,operation,args)=>{
+     assert.equal(operation,'storage.lease.cancel');assert.deepEqual(args,{job:job.dataPreparationHold.spec});
+     attempts++;if(attempts===1)throw Error('reply lost after node cleanup');
+     return {jobId:job.id,state:'CANCELED',released:true};
+   };
+   await f.s.reconcile();assert.equal(job.dataPreparationHold.state,'HANDED_OFF');
+   await f.s.reconcile();assert.equal(job.dataPreparationHold.state,'RELEASED');
+   await f.s.reconcile();assert.equal(attempts,2);
+ }finally{await f.close();}
+});

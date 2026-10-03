@@ -217,14 +217,24 @@ class StorageManagementRoute(unittest.TestCase):
 
 class StorageBridgeAndRuntime(unittest.TestCase):
     def handler(self, operation, machine='gpu-1'):
-        # Compile only the Handler class: never load private /opt inventory or
+        # Compile only literal operation constants and Handler: never load private /opt inventory or
         # start a Unix service. All SSH process creation is a strict mock.
         tree = ast.parse((ROOT / 'deploy' / 'execution-worker.py').read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Handler')
+        constants = [n for n in tree.body if isinstance(n, ast.Assign)
+                     and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                     and n.targets[0].id == 'INTERNAL_STORAGE']
+        self.assertEqual(len(constants), 1)
+        internal = ast.literal_eval(constants[0].value)
+        self.assertEqual(set(internal), {
+            'storage.archive.events', 'storage.archive.ack', 'storage.archive.original',
+            'storage.archive.provision', 'storage.archive.certify', 'storage.lease.prepare',
+            'storage.lease.cancel', 'storage.download.open', 'storage.download.info',
+            'storage.download.manifest', 'storage.download.get', 'storage.download.finish'})
         run = Mock(return_value=SimpleNamespace(returncode=0, stdout='{"ok":true,"result":{"enabled":false}}'))
         namespace = dict(socketserver=socketserver, json=json, subprocess=SimpleNamespace(run=run),
                          BASE=Path('/fixture-only'), HOSTS={'gpu-1': {'user': 'fixture', 'address': '127.0.0.1'}})
-        exec(compile(ast.Module(body=[cls], type_ignores=[]), '<worker boundary>', 'exec'), namespace)
+        exec(compile(ast.Module(body=constants + [cls], type_ignores=[]), '<worker boundary>', 'exec'), namespace)
         handler = object.__new__(namespace['Handler'])
         handler.request = Mock()
         handler.rfile = io.BytesIO((json.dumps(dict(machine=machine, operation=operation,
@@ -249,6 +259,21 @@ class StorageBridgeAndRuntime(unittest.TestCase):
         result, run = self.handler('datasets.storage.status', machine='unknown')
         self.assertFalse(result['ok'])
         run.assert_not_called()
+
+    def test_execution_worker_allows_exact_internal_lifecycle_operations(self):
+        for operation in ('storage.archive.events', 'storage.archive.ack', 'storage.archive.original',
+                          'storage.archive.provision', 'storage.archive.certify', 'storage.lease.prepare',
+                          'storage.lease.cancel', 'storage.download.open', 'storage.download.info',
+                          'storage.download.manifest', 'storage.download.get', 'storage.download.finish'):
+            with self.subTest(operation=operation):
+                result, run = self.handler(operation)
+                self.assertTrue(result['ok'])
+                run.assert_called_once()
+        for operation in ('storage.archive.enable', 'storage.download.delete', 'storage.lease.release'):
+            with self.subTest(operation=operation):
+                result, run = self.handler(operation)
+                self.assertFalse(result['ok'])
+                run.assert_not_called()
 
     def test_runtime_ships_tier_dependencies_and_gc_unit_is_not_enabled_by_install(self):
         spec = importlib.util.spec_from_file_location('storage_runtime_test', ROOT / 'deploy' / 'node_runtime.py')

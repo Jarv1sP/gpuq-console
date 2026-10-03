@@ -20,6 +20,8 @@ PROJECT_OPS=None
 STORAGE_NODE=None
 STORAGE_AUTHORITY=None
 STORAGE_AUTHORITY_MODULE=None
+STORAGE_ARCHIVE=None
+STORAGE_LEASES=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DIAGNOSTICS=None
@@ -330,6 +332,9 @@ class DatasetNotReady(ValueError):
 def acquire_datasets(job):
     refs=dataset_refs(job)
     if not refs:return []
+    if CONFIG.get('storageArchive',{}).get('enabled') is True or os.path.lexists(ROOT/'storage-leases'):
+        prepared=storage_leases().handoff_if_present(job)
+        if prepared is not None:return prepared
     module,cache=dataset_cache();actor=module.Principal(job['userId'],False)
     for ref in refs:
         if cache.status(actor,ref['dataset'],ref['version'])['state']!='READY':raise DatasetNotReady('Dataset is not READY; prepare it before reserving GPUs')
@@ -371,6 +376,8 @@ def reject_unsubmitted_datasets(job,receipt):
                    for lease in cache._leases(ref['dataset'],ref['version'])):
                 raise ValueError('Unsubmitted dataset lease cleanup is not confirmed')
     (ROOT/'jobs'/(job['id']+'.datasets.json')).unlink(missing_ok=True)
+    if os.path.lexists(ROOT/'storage-leases'/'training'/job['id']):
+        storage_leases().finalize_training(job)
     return {'state':'FAILED','notSubmitted':True,'failureCode':'DATASET_NOT_READY','assignedIndices':[],
             'error':'数据副本在提交前已失效，未启动训练。请重新准备数据后新建任务。'}
 
@@ -426,15 +433,23 @@ def scheduler_terminal_confirmed(data):
     return all(isinstance(a,dict) and a.get('state') in ('EXITED_SUCCESS','EXITED_FAILURE','CANCELED','PREEMPTED') for a in attempts)
 
 def release_datasets(job,data=None,never_dispatched=False):
+    """Caller owns job flock and fresh no-dispatch or native terminal proof.
+
+    A prepared HELD lease precedes the scheduler .datasets receipt. Absence of
+    that receipt is not evidence of no hold. Private journal finalization also
+    fences retries after the legacy receipt has already been removed.
+    """
     if not dataset_refs(job):return True
     filename=ROOT/'jobs'/(job['id']+'.datasets.json')
-    if not filename.exists():return True
     if not never_dispatched:
         if not scheduler_terminal_confirmed(data):return False
         if not all(dataset_unit_stopped(attempt) for attempt in data['attempts']):return False
-    module,cache=dataset_cache();leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
-    for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
-    filename.unlink();return True
+    if os.path.lexists(filename):
+        module,cache=dataset_cache();leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
+        for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
+    if os.path.lexists(ROOT/'storage-leases'/'training'/job['id']):
+        storage_leases().finalize_training(job)
+    filename.unlink(missing_ok=True);return True
 
 def run(argv,timeout=18):
     p=subprocess.run(argv,env=ENV,text=True,capture_output=True,timeout=timeout)
@@ -727,6 +742,77 @@ def storage_authority():
     return STORAGE_AUTHORITY
 
 
+def storage_archive():
+    global STORAGE_ARCHIVE
+    if STORAGE_ARCHIVE is None:
+        spec=importlib.util.spec_from_file_location('gpuq_storage_archive',HERE/'storage-archive.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        STORAGE_ARCHIVE=module.StorageArchive.from_executor(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    return STORAGE_ARCHIVE
+
+
+def storage_leases():
+    global STORAGE_LEASES
+    if STORAGE_LEASES is None:
+        spec=importlib.util.spec_from_file_location('gpuq_storage_leases',HERE/'storage-leases.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        STORAGE_LEASES=module.StorageLeases(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    return STORAGE_LEASES
+
+
+def storage_lease_operation(operation,args):
+    if operation.startswith('storage.download.'):
+        action=operation.rsplit('.',1)[1]
+        if action=='open':return storage_leases().download_open(args)
+        if action=='finish':return storage_leases().download_finish(args)
+        if action in ('info','manifest','get'):return storage_leases().download_export('datasets.snapshot.'+action,args)
+        raise ValueError('Unknown protected download operation')
+    if operation not in ('storage.lease.prepare','storage.lease.cancel') or not isinstance(args,dict) or set(args)!={'job'}:
+        raise ValueError('Invalid data preparation lease request')
+    job=args['job'];validate_job(job,readonly=True);jid=job['id']
+    (ROOT/'jobs').mkdir(parents=True,exist_ok=True,mode=0o700)
+    with open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        with closing(sqlite3.connect(f'file:{CONFIG["database"]}?mode=ro',uri=True)) as db:
+            row=db.execute('SELECT id FROM jobs WHERE submit_key=?',(jid,)).fetchone()
+        spec=ROOT/'jobs'/f'{jid}.json'
+        if spec.exists() and json.loads(spec.read_text())!=job:raise ValueError('Job identity mismatch')
+        canceled=ROOT/'jobs'/f'{jid}.canceled'
+        if operation=='storage.lease.cancel':
+            if row:
+                # Cleanup request is NOT permission to cancel an actual job.
+                # Only its native terminal evidence and stopped units suffice.
+                if not release_datasets(job,gpu('show',row[0])):
+                    raise ValueError('Training termination is unconfirmed; prepared leases retained')
+            else:
+                if os.path.lexists(ROOT/'jobs'/f'{jid}.dataset-dispatch-attempted'):
+                    raise ValueError('Training dispatch is unknown; prepared leases retained')
+                canceled.touch(mode=0o600,exist_ok=True)
+                if os.path.lexists(ROOT/'storage-leases'/'training'/jid) or os.path.lexists(ROOT/'jobs'/f'{jid}.datasets.json'):
+                    release_datasets(job,never_dispatched=True)
+                else:
+                    storage_leases().cancel_prepare(job)
+            return {'jobId':jid,'state':'CANCELED','released':True}
+        if row or os.path.lexists(ROOT/'jobs'/f'{jid}.dataset-dispatch-attempted'):
+            raise ValueError('Training may already be submitted; preparation cannot change its leases')
+        if canceled.exists() or os.path.lexists(ROOT/'jobs'/f'{jid}.dataset-not-submitted.json'):
+            raise ValueError('Preparation is permanently canceled or rejected')
+        if CONFIG.get('storageArchive',{}).get('enabled') is not True:
+            raise ValueError('Managed data preparation is not enabled')
+        value=storage_leases().prepare(job)
+        return {'jobId':jid,'state':value['state']}
+
+
+def storage_archive_operation(operation,args):
+    # Private trusted bridge only. No matching operation is present in the
+    # public execution API, CLI, upload ticket or node peer allowlist.
+    methods={'storage.archive.events':'outbox_list','storage.archive.ack':'outbox_ack',
+             'storage.archive.original':'original','storage.archive.provision':'provision',
+             'storage.archive.certify':'certify'}
+    if operation not in methods:raise ValueError('Unknown internal archive operation')
+    return getattr(storage_archive(),methods[operation])(args)
+
+
 def storage_management(operation,args):
     # This is a control-plane route, not the LAN peer or a user supplied role.
     allowed=('datasets.storage.status','datasets.storage.plan','datasets.storage.pin','datasets.storage.unpin')
@@ -748,6 +834,8 @@ def storage_collect():
 
 
 def process(operation,args):
+    if operation.startswith(('storage.lease.','storage.download.')):return storage_lease_operation(operation,args)
+    if operation.startswith('storage.archive.'):return storage_archive_operation(operation,args)
     if operation.startswith('datasets.storage.'):return storage_management(operation,args)
     if operation.startswith('transfers.'):return transfers().process(operation,args)
     if operation in ('diagnostics','watch'):
@@ -884,6 +972,7 @@ def process(operation,args):
 
 if __name__=='__main__':
     os.umask(0o077)
+    if len(sys.argv)==3 and sys.argv[1]=='--storage-archive-worker':sys.exit(storage_archive().worker(sys.argv[2]))
     if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':
         print(json.dumps(storage_collect()));sys.exit(0)
     if len(sys.argv)==4 and sys.argv[1]=='--transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3])))

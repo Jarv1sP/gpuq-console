@@ -60,7 +60,12 @@ export function installDatasetReplication(service){
         const result=await service.bridge(target,'datasets.status',{userId:owner,hostAdmin:false,...request});
         check(owner,target,policy);
         if(result?.dataset!==request.dataset||result.version!==request.version)fail('本机数据版本回执不符。',502);
-        if(result.state==='READY')return {status:{...result,dataset:ref.dataset},reference:mapped};
+        if(result.state==='READY'){
+          // Certification is asynchronous; until it succeeds this complete
+          // replica remains protected and usable, never an evictable guess.
+          try{service.enqueueArchiveReplica?.(owner,target,ref,request);}catch{}
+          return {status:{...result,dataset:ref.dataset},reference:mapped};
+        }
         return {status:{...result,dataset:ref.dataset},reference:null};
       }catch(value){check(owner,target,policy);if(value.status===403)throw value;return {status:{...ref,state:'UNKNOWN'},reference:null};}
     }
@@ -106,7 +111,7 @@ export function installDatasetReplication(service){
       return service.bridge(target,'datasets.prepare',{userId:owner,hostAdmin:false,...ref});
     }
     if(!service.transferCall)fail('服务器间传输尚未启用。',503);
-    if(!authority(owner,target).limits[selected.sourceMachine])fail('源机器未授权。',403);
+    if(!authority(owner,target).limits[selected.sourceMachine]&&!service.archiveSourceAllowed?.(owner,selected.sourceMachine,{dataset:selected.sourceDataset||ref.dataset,version:ref.version}))fail('源机器未授权。',403);
     // Lost create replies reuse the durable UUID. Only an explicit retry of a
     // confirmed canceled/evicted copy receives a new transfer identity.
     if(!row||value?.state==='CANCELED'||value?.state==='SUCCEEDED'){

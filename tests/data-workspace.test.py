@@ -125,6 +125,25 @@ class DataWorkspaceTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 self.call('publish', path=path, name='sample', key=str(uuid.uuid4()))
 
+    def test_archive_intent_is_durable_before_publish_and_lost_ack_is_not_publish_failure(self):
+        self.fill()
+        result = self.publish()
+        events = []
+        def begin(args):
+            events.append(args)
+            self.assertNotEqual(self.cache.status(self.module.Principal(self.user), **args['reference'])['state'], 'READY')
+            return {'id': args['opId']}
+        def ready(args):
+            raise OSError('simulated outbox ack failure')
+        self.n.CONFIG['storageArchive'] = {'enabled': True}
+        with patch.object(self.n, 'storage_archive', return_value=SimpleNamespace(outbox_begin=begin, outbox_ready=ready)):
+            self.assertEqual(self.w.worker(self.user, result['operationId']), 0)
+        published = self.call('status', operationId=result['operationId'])
+        self.assertEqual(published['state'], 'READY')
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['origin'], 'workspace')
+        self.assertEqual(events[0]['reference'], {'dataset': published['dataset'], 'version': published['version']})
+
     def test_same_uuid_across_users_gets_distinct_worker_units(self):
         key=str(uuid.uuid4())
         self.assertNotEqual(self.w.unit(self.user,key),self.w.unit('demo-user-2',key))

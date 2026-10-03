@@ -168,7 +168,9 @@ class SnapshotSync:
                 return self.source(kind,args)  # Recheck live ownership/readiness.
         return folder, source
 
-    def export(self, operation, args, *, _transfer_lease=None):
+    def export(self, operation, args, *, _transfer_lease=None, _download_lease=None):
+        if _transfer_lease is not None and _download_lease is not None:
+            raise ValueError('Only one internal snapshot lease may be supplied')
         kind, _, action = operation.split('.')
         reference = {'project','release'} if kind=='projects' else {'dataset','version'}
         allowed = {'userId','hostAdmin'}|reference|({'offset'} if action=='manifest' else {'path','offset'} if action=='get' else set())
@@ -191,20 +193,22 @@ class SnapshotSync:
                     policy = self.n.CONFIG.get('storageTier', {})
                     if not isinstance(policy, dict) or type(policy.get('enabled', False)) is not bool:
                         raise ValueError('Invalid trusted storage tier configuration')
-                    if _transfer_lease is not None:
-                        if (not isinstance(_transfer_lease, tuple) or len(_transfer_lease) != 2
-                                or not isinstance(_transfer_lease[0], str) or not UUID.fullmatch(_transfer_lease[0])
-                                or not isinstance(_transfer_lease[1], str)):
+                    lease = _transfer_lease if _transfer_lease is not None else _download_lease
+                    if lease is not None:
+                        if (not isinstance(lease, tuple) or len(lease) != 2
+                                or not isinstance(lease[0], str) or not UUID.fullmatch(lease[0])
+                                or not isinstance(lease[1], str)):
                             raise ValueError('Invalid internal source transfer lease')
-                        key, lease_id = _transfer_lease
+                        key, lease_id = lease
+                        prefix = 'transfer:' if _transfer_lease is not None else 'download:'
                         if not any(lease['id'] == lease_id and lease['owner'] == actor.user_id
-                                   and lease['jobId'] == 'transfer:'+key
+                                   and lease['jobId'] == prefix+key
                                    for lease in cache._leases(dataset, version)):
                             raise ValueError('Persistent source transfer lease is missing; reconcile before reading')
                     elif policy.get('enabled', False) and cache._tier(dataset, version)['role'] == 'cache':
                         raise ValueError('可回收缓存不支持无租约的旧下载或 sync data；请从受保护原件读取，或使用节点间 transfer copy。')
                 return self._export(kind, action, args)
-        if _transfer_lease is not None:
+        if _transfer_lease is not None or _download_lease is not None:
             raise ValueError('Transfer leases protect datasets only')
         return self._export(kind, action, args)
 
