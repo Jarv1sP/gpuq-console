@@ -66,7 +66,7 @@ test('VPS HTTPS cookie boundary, CLI bearer API, private server files and produc
     assert.equal((await fetchHost('/machines.js')).status,200);
     for(const path of ['/guide/admin','/ADMIN_README.md','/docs/DEPLOYMENT.md'])assert.equal((await fetchHost(path)).status,404);
     const pageResponse=await fetchHost('/'),page=await pageResponse.text();
-    assert.equal(page.includes('AMAX'),false);assert.match(page,/VELA/);
+    assert.equal(page.includes('AMAX'),false);assert.match(page,/STARBASE/);
     assert.equal(page.includes('AdminDemo!2026'),false);assert.equal(page.includes('<script src="/runtime.js">'),true);
     const nonce=page.match(/name="gpuq-style-nonce" content="([^"]+)"/)[1];
     assert.ok(pageResponse.headers.get('content-security-policy').includes(`'nonce-${nonce}'`));

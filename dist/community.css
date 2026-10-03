@@ -123,3 +123,39 @@
   .chat-compose-footer button {font-size:12px;min-height:44px;padding-inline:12px}
 }
 @media(max-width:360px) {.sidebar nav {gap:1px}.sidebar .nav-item {font-size:10px;padding-inline:2px}.sidebar .nav-count {min-width:15px;font-size:9px;padding-inline:3px}.community-toolbar>div {margin-left:0}.community-meta span:last-child {margin-left:0}.community-guide {font-size:10px}}
+
+/* STARBASE collaboration: two clear rooms, one monochrome visual system. */
+.community-intro{padding:23px 27px;background:#ececea;border-color:#dfdfdb;border-radius:6px;margin-bottom:24px}
+.community-intro>div{padding-left:0}.community-orbit{display:none}
+.community-intro .eyebrow{font-size:9px;letter-spacing:1.8px;color:#626266}
+.community-intro h2{font-size:19px;font-weight:600;color:#303035}
+.community-guide{color:#515158}
+.community-tabs{gap:24px;border-color:#d5d5d1}
+.community-tabs button{font-weight:600;color:#66666c;padding:17px 1px}
+.community-tabs button span{color:#65656b;font-size:11px}
+.community-tabs button[aria-selected=true]{color:#202023;border-color:#202023}
+.community-tabs button[aria-selected=true] span{color:#55555d}
+.community-toolbar label,.community-meta,.community-excerpt,.community-compose-note,.chat-topline p,.chat-compose-footer p,#community-status{color:#626266}
+.community-post{border-color:#dfdfdd;border-radius:6px;box-shadow:none}
+.community-post-open{padding:25px 27px}.community-post h3{font-weight:600}
+.community-tag{background:#efefed;border-color:#dfdfdb;color:#5c5c62;border-radius:3px}
+.community-tag.pinned,.community-tag.notice{color:#494950;background:#ededeb;border-color:#dcdcd7}
+.community-empty{background:#f9f9f7;border-color:#d5d5d2;color:#626266;border-radius:6px}
+.community-body{color:#393940}
+.community-dialog{border-color:#dcdcd9;border-radius:9px;color:#242427;box-shadow:0 25px 90px #11111326}
+.community-dialog::backdrop{background:#11111366;backdrop-filter:blur(8px)}
+.community-dialog label,.community-chat label,#community-chat-form>label,#task-note-form label{color:#626266}
+.community-dialog textarea,.community-dialog input,.community-dialog select,#community-chat-body,#task-note-form textarea,#task-note-form select,.community-toolbar select,.community-post-actions select{background:#fff;border-color:#d4d4d0;border-radius:5px;color:#3d3d43}
+.community-dialog .community-pin input{accent-color:#303035}
+.community-task-notes,.community-replies-heading{border-color:#dfdfdd}
+.community-task-notes summary,.community-text-button{color:#55555d}
+.community-text-button.danger{color:#a33d40}
+#community-chat{border-color:#dfdfdd;border-radius:6px}
+.community-messages{border-color:#e2e2de}
+.chat-avatar,.chat-message.own .chat-avatar{background:#e8e8e5;color:#616169;border-radius:5px}
+.chat-message .community-body{background:#f1f1ee;color:#414148;border-radius:0 6px 6px 6px}
+.chat-message.own .community-body{background:#e8e8e4;color:#34343b}
+.chat-new{background:#eeeeeb;color:#494950;border-color:#d6d6d2}
+.community-tabs button:focus-visible,.community-post-open:focus-visible,.community-text-button:focus-visible,.community-messages:focus-visible,.community-guide:focus-visible{outline:3px solid #76767d}
+@media(hover:hover) and (pointer:fine){.community-post:hover{border-color:#a6a6ac}.community-tabs button:hover{color:#202023}}
+@media(max-width:700px){.community-intro{padding:16px}.community-intro h2{font-size:13px}.community-tabs{gap:12px}.community-tabs button{padding:13px 3px}.community-post-open{padding:20px 18px}.community-meta{font-size:11px}.community-guide{font-size:11px}.community-tabs button span{font-size:10px}}

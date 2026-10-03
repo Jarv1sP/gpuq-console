@@ -1,3 +1,7 @@
+// Shared presentation lifecycle; no API calls or changes to application state.
+const syncPageVisibility=()=>document.documentElement.classList.toggle('page-inactive',document.hidden);
+document.addEventListener('visibilitychange',syncPageVisibility);
+syncPageVisibility();
 document.querySelectorAll('.copy-code').forEach(button=>{
   button.hidden=false;
   button.addEventListener('click',async()=>{
