@@ -419,6 +419,52 @@ class TierTests(unittest.TestCase):
             self.assertEqual(self.tier.plan(ADMIN)["candidates"], [])
         self.assertEqual(self.hot.status(OWNER, "sample", self.version)["state"], "READY")
 
+    def test_persistent_authority_accepts_same_disk_in_another_mount_namespace(self):
+        device = self.cold.root.stat().st_dev
+        filesystem = f"{os.major(device)}:{os.minor(device)}"
+        initial = ("7117", filesystem, device)
+        self.cold.mount = initial
+        with patch.object(self.cold, "_current_mount", return_value=initial):
+            proof = self.authority.seal(ADMIN, "sample", self.version, "authority-namespaces")
+        original = D._json_bytes(proof)
+        reopened = D.DatasetCache(self.cold.root, reserve_bytes=0)
+        second = ("4574", filesystem, device)
+        reopened.mount = second
+        with patch.object(reopened, "_current_mount", return_value=second):
+            with T.LocalAuthority(reopened).guard(ADMIN, proof):
+                pass
+        # Issued sealed.json and its grant hash remain byte-for-byte valid.
+        self.assertEqual(D._json_bytes(proof), original)
+        # A remount observed by this SAME instance remains a hard failure.
+        with patch.object(reopened, "_current_mount", return_value=("4575", filesystem, device)):
+            with self.assertRaisesRegex(D.CacheError, "mount identity changed"):
+                with T.LocalAuthority(reopened).guard(ADMIN, proof):
+                    pass
+
+    def test_persistent_authority_rejects_missing_changed_or_malformed_mount(self):
+        device = self.cold.root.stat().st_dev
+        filesystem = f"{os.major(device)}:{os.minor(device)}"
+        initial = ("7117", filesystem, device)
+        self.cold.mount = initial
+        with patch.object(self.cold, "_current_mount", return_value=initial):
+            proof = self.authority.seal(ADMIN, "sample", self.version, "authority-mount-proof")
+            changed = os.makedev(os.major(device), os.minor(device) + 1)
+            variants = [None, [], ["7117", filesystem], [True, filesystem, device],
+                        ["7117", filesystem, True], ["invalid", filesystem, device],
+                        ["7117", "999:999", device], ["7117", filesystem, -1],
+                        ["7117", f"{os.major(changed)}:{os.minor(changed)}", changed]]
+            for value in variants:
+                with self.subTest(mount=value), self.assertRaises(D.CacheError):
+                    with self.authority.guard(ADMIN, {**proof, "mountIdentity": value}):
+                        pass
+            with self.assertRaises(D.CacheError):
+                with self.authority.guard(ADMIN, {**proof, "rootIdentity": [device, self.cold._root_identity[1] + 1]}):
+                    pass
+        self.cold.mount = None
+        with self.assertRaises(D.CacheError):
+            with self.authority.guard(ADMIN, proof):
+                pass
+
     def test_lru_order_and_bounded_batch(self):
         self.certify()
         for cache in (self.hot, self.cold):

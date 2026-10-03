@@ -1,4 +1,3 @@
-git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
 # 使用指南
 
 网页和 `gpuctl` 共用账号、项目与任务。下面只说明日常用法；入口是否可用，以当前门户和节点能力为准。

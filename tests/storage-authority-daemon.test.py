@@ -42,7 +42,9 @@ def fixture_daemon(root):
         raise ValueError('Refusing a non-fixture runtime')
     config = json.loads((root / 'node-config.json').read_text())
     sys.argv = [str(root / 'node-executor.py'), '--transfer-peer-daemon']
-    with local_data_mounts(config['datasets']['mountPoint']):
+    # A service mount namespace uses different IDs from the sealing process.
+    # The physical device and inode identities deliberately remain identical.
+    with local_data_mounts(config['datasets']['mountPoint'], mount_id_offset=1000):
         runpy.run_path(sys.argv[0], run_name='__main__')
 
 

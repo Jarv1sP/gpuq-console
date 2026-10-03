@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-def local_data_mounts(*points):
+def local_data_mounts(*points, mount_id_offset=0):
     """Keep real directory/FD guards while simulating dedicated test disks.
 
     Tests cannot mount actual block devices. Only /proc/self/mountinfo is
@@ -18,7 +18,7 @@ def local_data_mounts(*points):
         if str(path) != "/proc/self/mountinfo":
             return original(path, *args, **kwargs)
         rows = ["1 0 999:999 / / rw - ext4 /dev/test-root rw"]
-        for index, point in enumerate(points, start=2):
+        for index, point in enumerate(points, start=2 + mount_id_offset):
             device = point.stat().st_dev
             target = str(point).replace("\\", r"\134").replace(" ", r"\040")
             rows.append(f"{index} 1 {os.major(device)}:{os.minor(device)} / {target} rw - ext4 /dev/test-data rw")
