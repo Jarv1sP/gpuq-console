@@ -69,13 +69,16 @@ test('ordinary-user datasets include resumable upload, fixed references and larg
   for (const command of ['gpuctl data upload ./my-data --name my-data', 'gpuctl data upload-status UPLOAD_ID', 'gpuctl data upload-discard UPLOAD_ID', 'gpuctl data prepare DATASET_ID@VERSION', 'gpuctl data status DATASET_ID@VERSION']) {
     assert.ok(guide.includes(command), `Missing data command: ${command}`);
   }
-  assert.match(guide, /经过平台服务器中转/);
-  assert.match(guide, /实验室内网或外接硬盘导入/);
+  assert.match(guide, /网页上传和 `data put` 仍经过平台中转/);
+  assert.match(guide, /校内直传或外接硬盘导入/);
   assert.match(guide, /500,000/);
   assert.match(guide, /64 MiB/);
   assert.match(guide, /不必重复准备/);
-  assert.match(guide, /网页上传、`data upload` 和 `data put` 仍经过平台服务器中转/);
-  assert.match(guide, /链接导入由训练服务器直下/);
+  assert.match(guide, /`data upload` 的实际路径以客户端显示为准/);
+  assert.match(guide, /超过 256 MiB 默认停止并提示选择/);
+  assert.match(guide, /--via relay/);
+  assert.match(guide, /直传断开不会偷偷改走中转/);
+  assert.match(guide, /链接导入由服务器直接下载/);
 });
 
 test('link-import guidance explains authorization, manual extraction and partial-data retention', () => {

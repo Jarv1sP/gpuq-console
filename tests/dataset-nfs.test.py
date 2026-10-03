@@ -41,7 +41,11 @@ class DatasetNfs(unittest.TestCase):
         self.live = ''
         self.commands = []
         self.systemd_override = ''
-        self.user = SimpleNamespace(pw_name='cache-service', pw_uid=os.getuid(), pw_gid=os.getgid())
+        # macOS temporary directories may inherit the parent's group rather
+        # than the process's primary group. Model the fixture's actual service
+        # ownership; production still requires an exact UID/GID/mode match.
+        self.user = SimpleNamespace(pw_name='cache-service', pw_uid=self.cache.stat().st_uid,
+                                    pw_gid=self.cache.stat().st_gid)
         self.real_safe_text = nfs.safe_text
         self.real_trusted_info = nfs.trusted_info
         self.patches = [patch.object(nfs, 'read_mounts', side_effect=lambda: self.rows),
@@ -170,6 +174,7 @@ class DatasetNfs(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.plan()
         (self.cache / 'ready').mkdir(mode=0o755)
+        (self.cache / 'ready').chmod(0o755)
         with patch.object(nfs.os, 'chmod') as chmod, patch.object(nfs.os, 'chown') as chown, self.assertRaisesRegex(nfs.SetupError, '0700'):
             self.plan()
         chmod.assert_not_called()

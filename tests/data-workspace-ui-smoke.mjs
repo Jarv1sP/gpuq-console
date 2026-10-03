@@ -12,7 +12,7 @@ try{
   await page.route('**/*',async route=>{
     const url=new URL(route.request().url());if(url.origin!==origin){unexpected.push(url.href);return route.abort();}
     if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><main><h1>数据集</h1><section id="page-datasets"></section></main>'});
-    if(['/datasets-ui.js','/data-workspace.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
+    if(['/datasets-ui.js','/data-route.js','/data-workspace.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
     if(url.pathname==='/favicon.ico')return route.fulfill({status:204});unexpected.push(url.href);return route.abort();
   });
   await page.goto(origin);
@@ -47,6 +47,14 @@ try{
   await page.locator('[data-dataset-source=workspace]').click();
   const files=page.locator('[name=data-workspace-files]');
   await files.setInputFiles([{name:'training.zip',mimeType:'application/zip',buffer:Buffer.alloc(2*1024**2+3,7)}]);
+  const callsBeforeLarge=await page.evaluate(()=>calls.length);
+  await files.evaluate(input=>{Object.defineProperty(input.files[0],'size',{value:256*1024**2+1,configurable:true});input.dispatchEvent(new Event('change',{bubbles:true}));});
+  assert.equal(await page.locator('#data-workspace-relay-warning').isVisible(),true);
+  await page.locator('#data-workspace-upload').click();
+  await page.waitForFunction(()=>document.querySelector('#data-workspace-status').textContent.includes('确认 VPS 中转'));
+  assert.equal(await page.evaluate(()=>calls.length),callsBeforeLarge,'Oversized raw upload must not silently relay before confirmation');
+  await files.evaluate(input=>{delete input.files[0].size;input.dispatchEvent(new Event('change',{bubbles:true}));});
+  assert.equal(await page.locator('#data-workspace-relay-warning').isHidden(),true);
   await page.locator('#data-workspace-upload').click();
   await page.waitForFunction(()=>document.querySelector('#data-workspace-status').textContent.includes('已上传 1 个文件'));
   assert.deepEqual(await page.evaluate(()=>calls.filter(call=>call.operation==='datasets.workspace.put').map(call=>call.args.offset)),[0,1024**2,2*1024**2]);

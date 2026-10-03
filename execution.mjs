@@ -103,6 +103,22 @@ export async function executionCall(service,principal,operation,args){
   if(!user.enabled)fail('账号已暂停。',403);
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
+  if(operation.startsWith('datasets.storage.')){
+    if(principal.role!=='admin')fail('存储管理仅管理员可用。',403);
+    authorizedMachine(args.machine);
+    const action=operation.slice('datasets.storage.'.length);
+    const definitions={status:['dataset','version'],plan:['neededBytes'],pin:['dataset','version','pinId'],unpin:['dataset','version','pinId']};
+    const fields=Object.hasOwn(definitions,action)?definitions[action]:null;
+    if(!fields||Object.keys(args).some(k=>k!=='machine'&&!fields.includes(k)))fail('存储管理参数无效。');
+    if(action==='pin'||action==='unpin'||Object.hasOwn(args,'dataset')||Object.hasOwn(args,'version'))datasetReferences([{dataset:args.dataset,version:args.version}]);
+    if(action==='plan'&&args.neededBytes!==undefined&&(!Number.isSafeInteger(args.neededBytes)||args.neededBytes<0))fail('预计新增容量必须是非负整数字节。');
+    if(action==='pin'||action==='unpin'){
+      if(typeof args.pinId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.pinId)||args.pinId.startsWith('authority-'))fail('固定标记需为 1–64 位字母数字、短横线或下划线；不能修改归档保护。');
+      service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version+':'+args.pinId);
+    }
+    const {machine,...request}=args;
+    return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:true});
+  }
   const jobById=id=>{const job=service.store.jobs.find(j=>j.id===id);if(!job||(principal.role!=='admin'&&job.userId!==user.id))fail('任务不存在或无权访问。',403);return job;};
   if(/^(projects|datasets)\.(snapshot|sync)\./.test(operation)){
     const result=await snapshotSyncCall(service,principal,user,operation,args,authorizedMachine);
@@ -161,13 +177,14 @@ export async function executionCall(service,principal,operation,args){
   }
   if(operation.startsWith('datasets.upload.')){
     authorizedMachine(args.machine);
-    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId']};
+    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries','allowRelay'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId'],'direct-ticket':['uploadId'],'direct-revoke':['uploadId']};
     const action=operation.slice('datasets.upload.'.length),allowed=fields[action];
     if(!allowed||Object.keys(args).some(k=>k!=='machine'&&!allowed.includes(k)))fail('个人数据集上传参数无效。');
     const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
     const id=action==='begin'?args.key:args.uploadId;
     if(typeof id!=='string'||!uuid.test(id))fail('上传编号必须为完整 UUID。');
     if(action==='begin'){
+      if(args.allowRelay!==undefined&&typeof args.allowRelay!=='boolean')fail('中转确认必须是明确的布尔值。');
       if(typeof args.name!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(args.name))fail('名称请用 1–40 位字母、数字、短横线或下划线。');
       if(!Number.isSafeInteger(args.manifestBytes)||args.manifestBytes<1||args.manifestBytes>64*1024*1024||typeof args.manifestSha256!=='string'||!/^[a-f0-9]{64}$/.test(args.manifestSha256))fail('数据清单大小或校验值无效（上限 64 MiB）。');
       if(!Number.isSafeInteger(args.totalBytes)||args.totalBytes<0||!Number.isSafeInteger(args.entries)||args.entries<0||args.entries>500000)fail('数据容量或条目数无效（上限 50 万条）。');
@@ -183,7 +200,7 @@ export async function executionCall(service,principal,operation,args){
     const {machine,...request}=args;
     // Every upload is personal, including uploads made by administrators. No
     // client-provided role, source mapping or filesystem path crosses the bridge.
-    if(['begin','seal','commit','discard'].includes(action))service.audit(principal.username,operation,machine,id);
+    if(['begin','seal','commit','discard','direct-ticket','direct-revoke'].includes(action))service.audit(principal.username,operation,machine,id);
     return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
   }
   if(['datasets.list','datasets.status','datasets.prepare','datasets.unregister'].includes(operation)){

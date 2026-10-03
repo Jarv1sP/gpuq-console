@@ -36,6 +36,37 @@ class SnapshotSync:
         self.n.workspace(args['userId'])
         return self.d.Principal(args['userId'], args.get('hostAdmin') is True)
 
+    def acquire_transfer_lease(self, args, transfer_id):
+        """Internal control path; callers journal identity BEFORE acquiring."""
+        if not isinstance(transfer_id, str) or not UUID.fullmatch(transfer_id):
+            raise ValueError('Invalid transfer lease identity')
+        module, cache = self.n.dataset_cache()
+        actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
+        # UUID and its namespaced job ID both satisfy DatasetCache.USER_RE.
+        return cache.acquire_lease(actor, args['dataset'], args['version'], 'transfer:'+transfer_id)
+
+    def require_transfer_lease(self, args, transfer_id, lease_id):
+        module, cache = self.n.dataset_cache()
+        actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
+        with cache._locked():
+            cache._dataset(actor, args['dataset'])
+            if not any(lease['id'] == lease_id and lease['owner'] == actor.user_id
+                       and lease['jobId'] == 'transfer:'+transfer_id
+                       for lease in cache._leases(args['dataset'], args['version'])):
+                raise ValueError('Persistent source transfer lease is missing; reconcile before reading')
+
+    def release_transfer_lease(self, args, lease_id):
+        """Internal ONLY: TransferJobs has checked the trusted target fence."""
+        module, cache = self.n.dataset_cache()
+        # A crash after unlinking the lease may be followed by legitimate
+        # eviction/unregistration before the release receipt is saved. Absence
+        # is already the desired state; do not require a surviving registry.
+        with cache._locked():
+            if not any(lease['id'] == lease_id for lease in cache._leases(args['dataset'], args['version'])):
+                return {'released': False}
+        return cache.release_lease(module.Principal('builtin-admin', True),
+                                   args['dataset'], args['version'], lease_id)
+
     def index(self, folder, manifest):
         with closing(sqlite3.connect(folder/'index.sqlite')) as db:
             db.execute('CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, size INTEGER, sha256 TEXT, executable INTEGER, verified TEXT)')
@@ -137,11 +168,47 @@ class SnapshotSync:
                 return self.source(kind,args)  # Recheck live ownership/readiness.
         return folder, source
 
-    def export(self, operation, args):
+    def export(self, operation, args, *, _transfer_lease=None):
         kind, _, action = operation.split('.')
         reference = {'project','release'} if kind=='projects' else {'dataset','version'}
         allowed = {'userId','hostAdmin'}|reference|({'offset'} if action=='manifest' else {'path','offset'} if action=='get' else set())
         if set(args)-allowed or action not in ('info','manifest','get'): raise ValueError('Invalid snapshot operation')
+        if kind == 'datasets':
+            module, cache = self.n.dataset_cache()
+            actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
+            dataset = module._identifier(args.get('dataset'))
+            version = module._identifier(args.get('version'), module.HASH_RE)
+            with cache._locked():
+                # Check ACL and a real registration before creating a lock
+                # for an attacker-supplied dataset/version pair.
+                cache._dataset(actor, dataset)
+                cache._record_identity(dataset, version)
+            # Do not parse/hash the full manifest for every one-MiB request.
+            # The same version lock as GC spans admission AND this whole read.
+            with cache._lock_file('.locks/'+dataset+'.'+version+'.lock'):
+                with cache._locked():
+                    cache._dataset(actor, dataset)
+                    policy = self.n.CONFIG.get('storageTier', {})
+                    if not isinstance(policy, dict) or type(policy.get('enabled', False)) is not bool:
+                        raise ValueError('Invalid trusted storage tier configuration')
+                    if _transfer_lease is not None:
+                        if (not isinstance(_transfer_lease, tuple) or len(_transfer_lease) != 2
+                                or not isinstance(_transfer_lease[0], str) or not UUID.fullmatch(_transfer_lease[0])
+                                or not isinstance(_transfer_lease[1], str)):
+                            raise ValueError('Invalid internal source transfer lease')
+                        key, lease_id = _transfer_lease
+                        if not any(lease['id'] == lease_id and lease['owner'] == actor.user_id
+                                   and lease['jobId'] == 'transfer:'+key
+                                   for lease in cache._leases(dataset, version)):
+                            raise ValueError('Persistent source transfer lease is missing; reconcile before reading')
+                    elif policy.get('enabled', False) and cache._tier(dataset, version)['role'] == 'cache':
+                        raise ValueError('可回收缓存不支持无租约的旧下载或 sync data；请从受保护原件读取，或使用节点间 transfer copy。')
+                return self._export(kind, action, args)
+        if _transfer_lease is not None:
+            raise ValueError('Transfer leases protect datasets only')
+        return self._export(kind, action, args)
+
+    def _export(self, kind, action, args):
         folder, source = self.source(kind, args)
         info = json.loads((folder/'info.json').read_text())
         if action=='info': return {**info,'state':'READY'}

@@ -8,6 +8,7 @@ Only cache.publish can make a version READY; upload receipts are not readiness.
 import base64
 from contextlib import closing, contextmanager
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,7 @@ TRANSIENT = {'SEALING': 'RECEIVING_MANIFEST', 'PUBLISHING': 'UPLOADING', 'DISCAR
 DEFAULTS = {'maxUploadBytes': 1024**4, 'maxUserBytes': 2*1024**4,
             'maxUserUploads': 256, 'maxActiveUploads': 4, 'maxUserSessions': 1024,
             'maxUserEntries': 2000000}
+RELAY_LIMIT_BYTES = 256*1024**2
 
 
 class DatasetUploads:
@@ -239,7 +241,7 @@ class DatasetUploads:
 
     def result(self, session):
         result = {k: session[k] for k in ('uploadId', 'name', 'state', 'manifestBytes', 'totalBytes',
-            'entries', 'dataset', 'version', 'error', 'resumeState') if k in session}
+            'entries', 'dataset', 'version', 'error', 'resumeState', 'lastConfirmedRoute') if k in session}
         result.update(manifestOffset=self._size(self.folder(session['userId'], session['uploadId'])/'manifest.part'),
                       chunkBytes=self.d.CHUNK_BYTES)
         if session['state'] == 'READY':
@@ -325,7 +327,65 @@ class DatasetUploads:
 
     def begin(self, user, args):
         # effective() has its own short cache lock; do not nest it in admission.
-        return self.result(self.effective(self._admit(user, args)))
+        session = self.effective(self._admit(user, args))
+        if session.get('directPaused') is True or args.get('allowRelay') is True and session.get('relayAllowed') is not True:
+            with self.guard(user, session['uploadId']):
+                session = self.load(user, session['uploadId'])
+                session.pop('directPaused', None)
+                if args.get('allowRelay') is True:
+                    session['relayAllowed'] = True
+                self.save(session)
+        transport = self.direct_transport()
+        return {**self.result(session), 'uploadTransport': {
+            'protocol': 'dataset-upload-v1', 'directAvailable': transport['available'],
+            'reason': transport['reason'], 'relayLimitBytes': RELAY_LIMIT_BYTES,
+            'relayAllowed': session.get('relayAllowed') is True}}
+
+    def direct(self):
+        spec = importlib.util.spec_from_file_location('gpuq_direct_upload', self.n.HERE/'direct-upload.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.DirectUploads(self.n, self)
+
+    def direct_transport(self):
+        # Old installations can safely keep using small uploads without the
+        # optional daemon/module. Configuration alone never means reachable.
+        config = self.n.CONFIG.get('directUpload')
+        if config is None:
+            return {'available': False, 'reason': 'not-configured'}
+        if isinstance(config, dict) and config.get('enabled') is False:
+            return {'available': False, 'reason': 'disabled'}
+        try:
+            return self.direct().availability()
+        except Exception:
+            # Optional direct ingress must fail closed without disabling the
+            # explicitly permitted small-file legacy control/data path.
+            return {'available': False, 'reason': 'invalid-config'}
+
+    @contextmanager
+    def direct_guard(self, user, upload):
+        self.load(user, upload)
+        with self.cache._lock_file('.locks/direct-upload-'+self.key(user, upload)+'.lock'):
+            yield
+
+    def revoke_direct(self, user, upload, *, paused=False):
+        # Shared with the direct writer. Returning from cancellation guarantees
+        # no already-authorized raw write remains in progress.
+        try:
+            with self.direct_guard(user, upload):
+                self._unlink(self.folder(user, upload)/'direct-grant.json')
+                if paused:
+                    with self.guard(user, upload):
+                        session = self.load(user, upload)
+                        session['directPaused'] = True
+                        self.save(session)
+        except FileNotFoundError:
+            pass
+
+    def relay_allowed(self, user, upload):
+        session = self.load(user, upload)
+        if session['totalBytes'] > RELAY_LIMIT_BYTES and session.get('relayAllowed') is not True:
+            raise ValueError('Large upload requires direct transport or explicit allowRelay; no VPS fallback was performed')
 
     def decoded(self, args):
         value, offset = args.get('data'), args.get('offset')
@@ -340,8 +400,12 @@ class DatasetUploads:
         return offset, data
 
     def manifest(self, user, args):
-        upload = args['uploadId']
         offset, data = self.decoded(args)
+        return self.manifest_bytes(user, args, offset, data)
+
+    def manifest_bytes(self, user, args, offset, data, *, transport='vps-relay'):
+        upload = args['uploadId']
+        self.raw_chunk(offset, data)
         with self.guard(user, upload):
             session = self.effective(self.load(user, upload))
             if session['state'] not in ('RECEIVING_MANIFEST', 'FAILED') or session.get('resumeState', 'RECEIVING_MANIFEST') != 'RECEIVING_MANIFEST':
@@ -377,7 +441,17 @@ class DatasetUploads:
                 session.pop('error', None)
                 session.pop('resumeState', None)
                 self.save(session)
+            self.confirm_route(session, transport)
             return {**self.result(session), 'offset': size, 'complete': size == session['manifestBytes']}
+
+    def confirm_route(self, session, transport):
+        # Only a trusted ingress selects this value, after accepted data I/O.
+        # Persist once per route change, not on every chunk or status request.
+        if transport not in ('campus-direct', 'vps-relay'):
+            raise ValueError('Invalid trusted upload transport')
+        if session.get('lastConfirmedRoute') != transport:
+            session['lastConfirmedRoute'] = transport
+            self.save(session)
 
     def _entry(self, session, path):
         self.d._relative(path)
@@ -451,8 +525,16 @@ class DatasetUploads:
         return fence
 
     def chunk(self, user, args):
-        upload = args['uploadId']
         offset, data = self.decoded(args)
+        return self.chunk_bytes(user, args, offset, data)
+
+    def raw_chunk(self, offset, data):
+        if type(offset) is not int or not 0 <= offset <= 2**63-1 or not isinstance(data, bytes) or len(data) > self.d.CHUNK_BYTES:
+            raise ValueError('Invalid raw upload chunk or offset')
+
+    def chunk_bytes(self, user, args, offset, data, *, transport='vps-relay'):
+        upload = args['uploadId']
+        self.raw_chunk(offset, data)
         with self.guard(user, upload):
             session = self.effective(self.load(user, upload))
             if session['state'] != 'UPLOADING' and not (session['state'] == 'FAILED' and session.get('resumeState') == 'UPLOADING'):
@@ -476,6 +558,7 @@ class DatasetUploads:
                 session.pop('error', None)
                 session.pop('resumeState', None)
                 self.save(session)
+            self.confirm_route(session, transport)
             return {**self.result(session), **result}
 
     def status(self, user, args):
@@ -554,6 +637,7 @@ class DatasetUploads:
     def pause(self, user, args):
         # Stop without deleting partial payload. Do not hold the writer lock
         # while stopping the unit: its worker may itself own that lock.
+        self.revoke_direct(user, args['uploadId'], paused=True)
         try:
             session = self.load(user, args['uploadId'])
         except FileNotFoundError:
@@ -764,19 +848,37 @@ class DatasetUploads:
             return 0
 
     def process(self, operation, args):
-        fields = {'begin': {'name', 'key', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries'},
+        fields = {'begin': {'name', 'key', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries', 'allowRelay'},
                   'manifest': {'uploadId', 'offset', 'data'}, 'seal': {'uploadId'},
                   'status': {'uploadId', 'path'}, 'chunk': {'uploadId', 'path', 'offset', 'data'},
-                  'commit': {'uploadId'}, 'discard': {'uploadId'}, 'pause': {'uploadId'}}
+                  'commit': {'uploadId'}, 'discard': {'uploadId'}, 'pause': {'uploadId'},
+                  'direct-ticket': {'uploadId'}, 'direct-revoke': {'uploadId'}}
         action = operation.removeprefix('datasets.upload.')
         if (action not in fields or not isinstance(args, dict) or set(args)-fields[action]-{'userId', 'hostAdmin'}
                 or ('hostAdmin' in args and args['hostAdmin'] is not False)):
             raise ValueError('Invalid personal upload fields')
-        required = fields[action]-({'path'} if action == 'status' else set())
+        required = fields[action]-({'path'} if action == 'status' else {'allowRelay'} if action == 'begin' else set())
         if not required <= set(args) or 'userId' not in args:
             raise ValueError('Missing personal upload fields')
         user = args['userId']
         self.actor(user)
+        if 'allowRelay' in args and type(args['allowRelay']) is not bool:
+            raise ValueError('allowRelay must be an explicit boolean')
+        if action == 'direct-ticket':
+            self.load(user, args['uploadId'])
+            transport = self.direct_transport()
+            if not transport['available']:
+                return {'available': False, 'protocol': 'dataset-upload-v1',
+                        'reason': transport['reason'], 'relayLimitBytes': RELAY_LIMIT_BYTES}
+            return self.direct().issue(user, args['uploadId'])
+        if action == 'direct-revoke':
+            self.load(user, args['uploadId'])
+            self.revoke_direct(user, args['uploadId'], paused=True)
+            return {'uploadId': args['uploadId'], 'revoked': True}
+        if action in ('manifest', 'chunk'):
+            self.relay_allowed(user, args['uploadId'])
+        if action == 'discard':
+            self.revoke_direct(user, args['uploadId'], paused=True)
         if action in ('seal', 'commit', 'discard'):
             return self.start(user, args, action)
         return getattr(self, action)(user, args)

@@ -76,6 +76,16 @@ export function installDatasetReplication(service){
     try{resolved=await service.resolveDataset(owner,target,ref);}catch(error){if(error.status===403)throw error;}
     check(owner,target,policy);
     if(resolved?.status.state==='READY')return resolved.status;
+    if(resolved?.status.recoveryConfigured===true){
+      // A disposable copy can only be restored from its private, fixed
+      // authority receipt. Do not reselect another source or create a second
+      // logical replica merely because the historical transfer succeeded.
+      const physical=service.datasetPhysicalReference(owner,target,ref);
+      const result=await service.bridge(target,'datasets.prepare',{userId:owner,hostAdmin:false,...physical});
+      check(owner,target,policy);
+      if(result?.dataset!==physical.dataset||result.version!==physical.version)fail('缓存恢复回执不符。',502);
+      return {...result,dataset:ref.dataset};
+    }
     let row=load(owner,target,ref),value=receipt(row);
     if(row&&value&&stopped.has(value.state)&&!retry)return view(row);
     if(row&&value&&!stopped.has(value.state)&&value.state!=='SUCCEEDED'){

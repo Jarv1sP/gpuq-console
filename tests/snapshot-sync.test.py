@@ -181,7 +181,10 @@ class SnapshotSyncTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 barrier=threading.Barrier(2)
                 def racing_rename(source,target,*args,**kwargs):
-                    if Path(source).parent==sync.root and Path(source).name.startswith('stage-'):
+                    # Dataset exports now hold the GC version lock across the
+                    # request, so their first cache publication is serialized.
+                    # Code snapshots retain the competing-publication path.
+                    if kind=='projects' and Path(source).parent==sync.root and Path(source).name.startswith('stage-'):
                         barrier.wait(timeout=5)
                     return original(source,target,*args,**kwargs)
                 with patch.object(os,'rename',side_effect=racing_rename),ThreadPoolExecutor(max_workers=2) as workers:

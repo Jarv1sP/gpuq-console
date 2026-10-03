@@ -58,3 +58,15 @@ test('receipt appearing during download is not clobbered, and complete is never 
   const call=async(op,args)=>{if(op==='transfers.io'&&args.action==='get'&&!planted){planted=true;await writeFile(receipt,JSON.stringify({id:'other',manifestSha256:'other'}));}return f.call(op,args);};
   await assert.rejects(downloadTransfer(call,f.options),/different content/);assert.equal(JSON.parse(await readFile(receipt,'utf8')).id,'other');assert.equal(f.row.state,'WAITING_CLIENT');
 });
+test('download reports the fixed cache-source refusal before making any local files or IO requests',async t=>{
+  const f=await fixture(t),refused='可回收缓存不支持无租约的旧下载或 sync data；请从受保护原件读取，或使用节点间 transfer copy。',calls=[];
+  const call=async(op)=>{calls.push(op);return {result:{id:f.row.id,state:'FAILED',kind:'download',error:refused}};};
+  await assert.rejects(downloadTransfer(call,f.options),error=>error.message.includes(refused));
+  assert.deepEqual(calls,['transfers.create']);assert.deepEqual(await readdir(f.dir),[]);
+});
+test('download never exposes arbitrary unconfirmed node diagnostics as a safe cache refusal',async t=>{
+  const f=await fixture(t),privateError='private fixture diagnostic /source/path';
+  const call=async()=>({result:{id:f.row.id,state:'UNKNOWN',kind:'download',error:privateError}});
+  await assert.rejects(downloadTransfer(call,f.options),error=>!error.message.includes(privateError)&&/unconfirmed/i.test(error.message));
+  assert.deepEqual(await readdir(f.dir),[]);
+});

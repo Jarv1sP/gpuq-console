@@ -8,10 +8,10 @@ import {transferUploadCall} from './dist/transfer-upload.js';
 const fail=message=>{throw Error(message);};
 const safe=value=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>'\\u{'+c.codePointAt(0).toString(16)+'}');
 export function transferText(row){const result=row.result||{},bytes=result.bytes??(result.totalBytes!==undefined&&result.remainingBytes!==undefined?result.totalBytes-result.remainingBytes:0),total=result.totalBytes??row.snapshot?.totalBytes??row.manifest?.totalBytes;return `${safe(row.id)} · ${safe(row.kind)} · ${safe(row.from?row.from+' → '+row.machine:row.machine)} · ${safe(row.state)}\n  ${bytes} / ${total??'?'} bytes${result.path?' · '+safe(result.path):''}${row.error||result.error?'\n  '+safe(row.error||result.error):''}`;}
-export async function uploadTransfer(call,{machine,name,userId,directory,progress=()=>{},key}){
+export async function uploadTransfer(call,{machine,name,userId,directory,progress=()=>{},key,via='auto'}){
   const scan=await scanLocalDataset(directory,progress);let handle;
   const adapter=transferUploadCall(async(op,args)=>(await call(op,args)).result,row=>{handle=row;progress('HANDLE',{transferId:row.id});});
-  try{return {...await uploadDatasetSnapshot(async(op,args)=>({result:await adapter(op,args)}),{machine,name,userId,scan,progress,keyStore:{get:()=>key,set:async()=>fail('Canceled upload cannot be silently replaced')}}),transferId:handle.id};}
+  try{return {...await uploadDatasetSnapshot(async(op,args)=>({result:await adapter(op,args)}),{machine,name,userId,scan,progress,via,keyStore:{get:()=>key,set:async()=>fail('Canceled upload cannot be silently replaced')}}),transferId:handle.id};}
   catch(error){throw Error(error.message+(handle?'\n传输：'+handle.id+'；gpuctl transfer status '+handle.id:''));}
 }
 async function exists(path){try{return await lstat(path);}catch(e){if(e.code==='ENOENT')return null;throw e;}}
@@ -50,6 +50,10 @@ export async function downloadTransfer(call,{machine,dataset,version,destination
   const row=(await call('transfers.create',{key,kind:'download',machine,dataset,version})).result;progress('HANDLE',{transferId:row.id});
   const target=resolve(destination),partial=target+'.gpuq-partial-'+row.id;
   if(row.state==='CANCELED'||row.cancelRequested)fail('Download was canceled; partial files were retained');
+  if(row.state==='FAILED'){
+    const protectedSource='可回收缓存不支持无租约的旧下载或 sync data；请从受保护原件读取，或使用节点间 transfer copy。';
+    fail(row.error===protectedSource?protectedSource:'Download failed; inspect the original transfer. Transfer: '+row.id);
+  }
   if(row.state==='UNKNOWN'||!row.snapshot)fail('Download source unconfirmed; repeat original command. Transfer: '+row.id);
   const receiptPath=target+'.gpuq-receipt.json',expectedReceipt={id:row.id,manifestSha256:row.snapshot.manifestSha256};
   const receipt=await readReceipt(receiptPath,expectedReceipt);

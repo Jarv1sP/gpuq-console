@@ -28,7 +28,9 @@ CHUNK = 1024**2
 UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z')
 HASH = re.compile(r'[a-f0-9]{64}\Z')
 USER = re.compile(r'(builtin-admin|demo-user-[0-9]+)\Z')
+MACHINE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z')
 TERMINAL = {'SUCCEEDED', 'FAILED', 'PAUSED', 'CANCELED'}
+RELEASABLE = {'SUCCEEDED', 'FAILED', 'CANCELED'}
 
 
 def digest(value):
@@ -185,17 +187,31 @@ class TransferJobs:
             result['sources'] = sorted(filter(None, pool.map(probe, peers.items())))
         return result
 
-    def source(self, ref, actor, action, **fields):
+    def snapshots(self):
         from importlib.util import spec_from_file_location, module_from_spec
         spec = spec_from_file_location('gpuq_transfer_snapshots', self.n.HERE/'snapshot-sync.py')
         module = module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.SnapshotSync(self.n).export('datasets.snapshot.'+action,
+        return module.SnapshotSync(self.n)
+
+    def machine(self):
+        value = self.n.CONFIG.get('machine')
+        if not isinstance(value, str) or not MACHINE.fullmatch(value):
+            raise ValueError('Configure the exact local machine identity before source transfers')
+        return value
+
+    @staticmethod
+    def lease_args(journal):
+        return {**journal['actor'], 'dataset': journal['reference']['dataset'],
+                'version': journal['reference']['version']}
+
+    def source(self, ref, actor, action, *, _transfer_lease=None, **fields):
+        return self.snapshots().export('datasets.snapshot.'+action,
             {'dataset': ref['dataset'], 'version': ref['version'], 'userId': actor['userId'],
-             'hostAdmin': actor.get('hostAdmin', False), **fields})
+             'hostAdmin': actor.get('hostAdmin', False), **fields}, _transfer_lease=_transfer_lease)
 
     def prepare(self, args):
-        if set(args)-{'id', 'reference', 'userId', 'hostAdmin', 'timeoutSec', 'renew'} or type(args.get('renew',False)) is not bool:
+        if set(args)-{'id', 'reference', 'userId', 'hostAdmin', 'timeoutSec', 'renew', 'targetMachine'} or type(args.get('renew',False)) is not bool:
             raise ValueError('Invalid source ticket fields')
         self.actor(args)
         key, ref = identifier(args.get('id')), reference(args.get('reference'))
@@ -203,23 +219,52 @@ class TransferJobs:
         if type(timeout) is not int or not 1 <= timeout <= 604800:
             raise ValueError('Transfer timeout must be 1..604800 seconds')
         actor = {'userId': args['userId'], 'hostAdmin': args.get('hostAdmin', False)}
-        info = self.source(ref, actor, 'info')
-        payload = {'reference': ref, 'actor': actor, 'timeoutSec': timeout}
+        target = args.get('targetMachine')
+        if not isinstance(target, str) or not MACHINE.fullmatch(target) or target == self.machine():
+            raise ValueError('Bind the source ticket to a different exact target machine')
+        payload = {'reference': ref, 'actor': actor, 'timeoutSec': timeout,
+                   'sourceMachine': self.machine(), 'targetMachine': target}
         with self.lock(key, '.ticket.lock'):
             try:
                 ticket = self.load(key, '.ticket.json')
                 if ticket['digest'] != digest(payload):
                     raise ValueError('Source ticket ID belongs to different content')
-                if args.get('renew'):
-                    if ticket['info'] != info or ticket.get('revoked'):
-                        raise ValueError('Fixed source snapshot changed or grant revoked')
-                    ticket.update(token=secrets.token_urlsafe(32),expiresAt=time.time()+timeout+3600)
-                    self.n.atomic_json(self.path(key, '.ticket.json'), ticket)
             except FileNotFoundError:
                 if len(list(self.root.glob('*.ticket.json'))) >= 10000:
                     raise ValueError('Source ticket history is full')
+                ticket = None
+            try:
+                journal = self.load(key, '.source-lease.json')
+                if journal['digest'] != digest(payload):
+                    raise ValueError('Source lease ID belongs to different content')
+                if journal['state'] in ('RELEASING', 'RELEASED'):
+                    raise ValueError('Source transfer was finalized; use a new transfer ID')
+            except FileNotFoundError:
+                # Durable intent makes a crash between cache acquisition and
+                # saving leaseId recoverable by the same owner/jobId. Never TTL.
+                journal = {**payload, 'id': key, 'digest': digest(payload),
+                           'state': 'PREPARING', 'createdAt': time.time()}
+                with self.lock('00000000-0000-0000-0000-000000000000', '.source-history.lock'):
+                    if len(list(self.root.glob('*.source-lease.json'))) >= 10000:
+                        raise ValueError('Source lease history is full; reconcile before creating more transfers')
+                    self.n.atomic_json(self.path(key, '.source-lease.json'), journal)
+            snapshot = self.snapshots()
+            lease = snapshot.acquire_transfer_lease(self.lease_args(journal), key)
+            if journal.get('leaseId') not in (None, lease['leaseId']):
+                raise ValueError('Source lease identity changed; reconcile retained leases')
+            journal.update(leaseId=lease['leaseId'], state='HELD')
+            self.n.atomic_json(self.path(key, '.source-lease.json'), journal)
+            # Any failure after acquisition leaves the durable intent/lease
+            # protected and retryable; no guessed target state can release it.
+            info = self.source(ref, actor, 'info', _transfer_lease=(key, journal['leaseId']))
+            if ticket is None:
                 ticket = {**payload, 'id': key, 'digest': digest(payload), 'info': info,
                     'expiresAt': time.time()+timeout+3600, 'token': secrets.token_urlsafe(32)}
+                self.n.atomic_json(self.path(key, '.ticket.json'), ticket)
+            elif args.get('renew'):
+                if ticket['info'] != info or ticket.get('revoked'):
+                    raise ValueError('Fixed source snapshot changed or grant revoked')
+                ticket.update(token=secrets.token_urlsafe(32), expiresAt=time.time()+timeout+3600)
                 self.n.atomic_json(self.path(key, '.ticket.json'), ticket)
             if ticket['info'] != info or ticket['expiresAt'] < time.time() or ticket.get('revoked'):
                 raise ValueError('Source ticket expired, revoked or snapshot changed; inspect original transfer')
@@ -229,6 +274,13 @@ class TransferJobs:
         if not isinstance(request, dict) or set(request)-{'id', 'action', 'path', 'offset'}:
             raise ValueError('Peer may only read a granted immutable snapshot')
         key = identifier(request.get('id'))
+        # Readers and revocation share a lock; no in-flight peer read outlives
+        # confirmed revocation and lease release.
+        with self.lock(key, '.ticket.lock'):
+            return self.read_locked(request, token)
+
+    def read_locked(self, request, token):
+        key = identifier(request.get('id'))
         ticket = self.load(key, '.ticket.json')
         if (not isinstance(token, str) or not hmac.compare_digest(token, ticket['token'])
                 or ticket.get('revoked') or ticket['expiresAt'] < time.time()):
@@ -237,10 +289,102 @@ class TransferJobs:
         fields = {k: v for k, v in request.items() if k in ('path', 'offset')}
         if action not in ('info', 'manifest', 'get') or action == 'info' and fields or action == 'manifest' and 'path' in fields:
             raise ValueError('Invalid snapshot read operation')
-        info = self.source(ticket['reference'], ticket['actor'], 'info')
+        journal = self.load(key, '.source-lease.json')
+        if journal['state'] != 'HELD' or journal['digest'] != ticket['digest']:
+            raise ValueError('Source transfer is not protected by a persistent lease')
+        self.snapshots().require_transfer_lease(self.lease_args(journal), key, journal['leaseId'])
+        lease = (key, journal['leaseId'])
+        info = self.source(ticket['reference'], ticket['actor'], 'info', _transfer_lease=lease)
         if info != ticket['info']:
             raise ValueError('Fixed source snapshot changed')
-        return info if action == 'info' else self.source(ticket['reference'], ticket['actor'], action, **fields)
+        return info if action == 'info' else self.source(ticket['reference'], ticket['actor'], action, _transfer_lease=lease, **fields)
+
+    def confirm_source_release(self, args):
+        """Trusted target control: permanently fence restart BEFORE releasing."""
+        binding = {'sourceMachine', 'reference', 'manifestSha256'}
+        if set(args) not in ({'id', 'userId'}, {'id', 'userId'}|binding):
+            raise ValueError('Invalid target release confirmation fields')
+        self.actor(args)
+        with self.lock(args['id']):
+            try:
+                proof = self.load(args['id'], '.source-release.json')
+                if proof['userId'] != args['userId'] or any(proof[k] != args[k] for k in binding if k in args):
+                    raise ValueError('Target release confirmation identity cannot change')
+                return proof
+            except FileNotFoundError:
+                pass
+            try:
+                spec = self.owned(args)
+            except FileNotFoundError:
+                # Cancel-before-dispatch: cancel marker and this permanent
+                # fence serialize with start, so a delayed control cannot launch.
+                marker = self.load(args['id'], '.cancel')
+                if (marker.get('userId') != args['userId'] or not binding <= set(args)
+                        or not isinstance(args['sourceMachine'], str) or not MACHINE.fullmatch(args['sourceMachine'])
+                        or not isinstance(args['manifestSha256'], str) or not HASH.fullmatch(args['manifestSha256'])
+                        or self.activity(self.unit(args['id'], 1)) is not False):
+                    raise ValueError('Pre-dispatch cancellation requires owned binding and confirmed stopped target')
+                proof = {'schema': 1, 'id': args['id'], 'userId': args['userId'],
+                    'sourceMachine': args['sourceMachine'], 'targetMachine': self.machine(),
+                    'reference': reference(args['reference']), 'manifestSha256': args['manifestSha256'],
+                    'attempt': 0, 'state': 'CANCELED', 'confirmedStopped': True}
+                self.n.atomic_json(self.path(args['id'], '.source-release.json'), proof)
+                return proof
+            if any(args[k] != (spec['source']['manifestSha256'] if k == 'manifestSha256' else spec[k])
+                   for k in binding if k in args):
+                raise ValueError('Target release confirmation identity cannot change')
+            current = self.status(args)
+            if current['state'] not in RELEASABLE or self.activity(self.unit(spec['id'], spec['attempt'])) is not False:
+                raise ValueError('Source release requires a confirmed stopped terminal target; PAUSED/UNKNOWN retain leases')
+            confirmation = {'schema': 1, 'id': spec['id'], 'userId': spec['userId'],
+                'sourceMachine': spec['sourceMachine'], 'targetMachine': self.machine(),
+                'reference': spec['reference'], 'manifestSha256': spec['source']['manifestSha256'],
+                'attempt': spec['attempt'], 'state': current['state'], 'confirmedStopped': True}
+            self.n.atomic_json(self.path(spec['id'], '.source-release.json'), confirmation)
+            return confirmation
+
+    def release_source(self, args):
+        """SSH control ONLY; a peer bearer ticket is never release authority.
+
+        The trusted bridge must obtain confirmation from the bound target's
+        confirm-source-release action, never accept it from a public API body.
+        """
+        if set(args) != {'id', 'userId', 'confirmation'}:
+            raise ValueError('Invalid source release fields')
+        self.actor(args)
+        key = identifier(args['id'])
+        with self.lock(key, '.ticket.lock'):
+            journal = self.load(key, '.source-lease.json')
+            if journal['actor']['userId'] != args['userId']:
+                raise ValueError('Source lease belongs to another user')
+            if journal['sourceMachine'] != self.machine():
+                raise ValueError('Source machine identity changed; reconcile before releasing')
+            proof = args['confirmation']
+            ticket = self.load(key, '.ticket.json')
+            expected = {'schema': 1, 'id': key, 'userId': args['userId'],
+                'sourceMachine': journal['sourceMachine'], 'targetMachine': journal['targetMachine'],
+                'reference': journal['reference'], 'manifestSha256': ticket['info']['manifestSha256'],
+                'confirmedStopped': True}
+            if (not isinstance(proof, dict) or set(proof) != set(expected)|{'attempt', 'state'}
+                    or any(proof.get(k) != v for k, v in expected.items())
+                    or proof.get('confirmedStopped') is not True or type(proof.get('schema')) is not int
+                    or type(proof.get('attempt')) is not int or proof['attempt'] < 0 or proof['state'] not in RELEASABLE
+                    or proof['attempt'] == 0 and proof['state'] != 'CANCELED'):
+                raise ValueError('Source release requires the bound target stopped-terminal confirmation')
+            if journal.get('confirmation') not in (None, proof):
+                raise ValueError('Source release confirmation cannot change')
+            if journal['state'] == 'RELEASED':
+                return {'id': key, 'released': True}
+            # Fence future prepare/read first. A crash keeps the lease or can
+            # idempotently finish release; it can never mint another ticket.
+            journal.update(state='RELEASING', confirmation=proof)
+            self.n.atomic_json(self.path(key, '.source-lease.json'), journal)
+            ticket['revoked'] = True
+            self.n.atomic_json(self.path(key, '.ticket.json'), ticket)
+            self.snapshots().release_transfer_lease(self.lease_args(journal), journal['leaseId'])
+            journal.update(state='RELEASED', releasedAt=time.time())
+            self.n.atomic_json(self.path(key, '.source-lease.json'), journal)
+            return {'id': key, 'released': True}
 
     @staticmethod
     def unit(key, attempt):
@@ -371,6 +515,8 @@ class TransferJobs:
         payload = {k: args[k] for k in ('userId', 'sourceMachine', 'source', 'name')}
         payload.update(reference=ref, timeoutSec=timeout)
         with self.lock(key):
+            if self.path(key, '.source-release.json').exists():
+                raise ValueError('Source transfer was finalized; use a new transfer ID')
             if self.path(key, '.cancel').exists():
                 raise ValueError('Transfer ID was canceled before dispatch; it cannot start')
             try:
@@ -412,6 +558,8 @@ class TransferJobs:
     def resume(self, args):
         with self.lock(args['id']):
             spec = self.owned(args)
+            if self.path(spec['id'], '.source-release.json').exists():
+                raise ValueError('Source transfer was finalized; use a new transfer ID')
             if self.path(spec['id'], '.cancel').exists():
                 raise ValueError('Canceled jobs never resume automatically or reuse their canceled ID')
             state = self.status(args)['state']
@@ -440,7 +588,8 @@ class TransferJobs:
     def worker(self, key, attempt):
         with self.lock(key, '.worker.lock'):
             spec = self.load(key)
-            if spec['attempt'] != attempt or self.path(key, '.started-'+str(attempt)).exists():
+            if (spec['attempt'] != attempt or self.path(key, '.started-'+str(attempt)).exists()
+                    or self.path(key, '.source-release.json').exists()):
                 return 1
             self.n.atomic_json(self.path(key, '.started-'+str(attempt)), {'attempt': attempt})
             client = PeerClient(self.n.CONFIG['transferPeers'][spec['sourceMachine']], spec['source'])
@@ -545,6 +694,8 @@ class TransferJobs:
         if not isinstance(args, dict):raise ValueError('Invalid transfer fields')
         if action == 'capabilities':return self.capabilities(args)
         if action == 'source.prepare':return self.prepare(args)
+        if action == 'confirm-source-release':return self.confirm_source_release(args)
+        if action == 'release-source':return self.release_source(args)
         if action == 'source.read':
             if set(args)-{'userId','id','action','path','offset','token'}:raise ValueError('Invalid snapshot read fields')
             self.actor(args);ticket=self.load(args['id'],'.ticket.json')

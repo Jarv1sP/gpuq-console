@@ -290,6 +290,7 @@ class Adapter(unittest.TestCase):
             slurm.SlurmBackend(self.policy, alias, self.scheduler)
         public = Path(self.temp.name) / "public"
         public.mkdir(mode=0o755)
+        public.chmod(0o755)  # Explicit unsafe fixture even under umask 077.
         with self.assertRaisesRegex(slurm.ValidationError, "private"):
             slurm.SlurmBackend(self.policy, public / "ledger.db", self.scheduler)
 

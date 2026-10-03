@@ -39,6 +39,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -425,7 +426,7 @@ class DatasetCache:
             if self.mount is not None and info.st_dev != self.mount[2]:
                 raise CacheError("cache no longer resides on the verified data mount")
             self._root_identity = info.st_dev, info.st_ino
-        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations"):
+        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations", ".tiers"):
             _mkdir(self.root / name)
 
     def _current_mount(self):
@@ -563,11 +564,18 @@ class DatasetCache:
         try:
             existing = self._record(actor, dataset, version)
         except FileNotFoundError:
+            # New/re-registered content is never implicitly disposable, even
+            # when an earlier registration left a recovery receipt behind.
+            if self._tier(dataset, version)["pins"]:
+                raise CacheError("orphan persistent pins require administrator reconciliation")
+            self._write_tier(dataset, version, self._default_tier())
             _write_json(filename, record)
         else:
             if existing["manifest"] != manifest:
                 raise CacheError("registered version is immutable")
             if existing["sourceId"] is None and source_id is not None:
+                if self._authority_pins(dataset, version):
+                    raise CacheError("authority retention prevents source changes; reconcile dependents first")
                 _write_json(filename, record)
             elif source_id is not None and existing["sourceId"] != source_id:
                 raise CacheError("registered source is immutable")
@@ -604,6 +612,10 @@ class DatasetCache:
             record = self._record(actor, dataset, version)
             if record["sourceId"] not in (None, source_id):
                 raise CacheError("registered source is immutable")
+            if self._authority_pins(dataset, version):
+                if record["sourceId"] == source_id:
+                    return dict(dataset=dataset, version=version, attached=True)
+                raise CacheError("authority retention prevents source changes; reconcile dependents first")
             record["sourceId"] = source_id
             _write_json(self._paths(dataset)[".registry"] / (version + ".json"), record)
             return dict(dataset=dataset, version=version, attached=True)
@@ -611,8 +623,13 @@ class DatasetCache:
     def set_owners(self, actor, dataset, owners):
         with self._locked():
             self._actor(actor, admin=True)
-            self._dataset(actor, dataset)
-            _write_json(self._paths(dataset)[".registry"] / "dataset.json", dict(schema=SCHEMA, owners=self._owners(owners)))
+            existing = self._dataset(actor, dataset)
+            owners = self._owners(owners)
+            if existing["owners"] == owners:
+                return {"updated": True}
+            if self._authority_pins(dataset):
+                raise CacheError("authority retention prevents ACL changes; reconcile dependents first")
+            _write_json(self._paths(dataset)[".registry"] / "dataset.json", dict(schema=SCHEMA, owners=owners))
             return {"updated": True}
 
     def export_manifest(self, actor, dataset, version):
@@ -1003,18 +1020,27 @@ class DatasetCache:
             raise
         return dict(dataset=dataset, version=version, state="READY")
 
-    def materialize(self, actor, dataset, version):
-        """Owner may copy a previously administrator-approved source, not pass a path."""
+    def materialize(self, actor, dataset, version, *, _source=None, _guard=None):
+        """Copy an approved source. Private overrides are trusted tier hooks only.
+
+        dispatch never accepts _source/_guard; callers must not derive them from
+        a user request. The tier adapter supplies a protected fixed READY path
+        and checks its receipt while this method owns the destination version.
+        """
         self._actor(actor)
+        if _source is not None or _guard is not None:
+            self._actor(actor, admin=True)
         with self._version_locked(actor, dataset, version, snapshot=True) as snapshot:
             record, identity = snapshot
             index = {entry["path"]: entry for entry in record["manifest"]["files"]}
             with self._locked():
+                if _guard is not None:
+                    _guard()
                 self._check_snapshot(actor, dataset, version, identity)
                 paths = self._paths(dataset, version)
                 if self._ready(paths, record["manifest"], version):
                     return dict(dataset=dataset, version=version, state="READY")
-                source = self.sources.get(record["sourceId"])
+                source = _absolute(_source) if _source is not None else self.sources.get(record["sourceId"])
                 if source is None:
                     raise CacheError("version has no approved local source")
                 plan = self._plan(actor, dataset, version, record=record, index=index)
@@ -1032,6 +1058,8 @@ class DatasetCache:
             def checkpoint():
                 nonlocal fence, batch_bytes, batch_files, checked_at
                 with self._locked():
+                    if _guard is not None:
+                        _guard()
                     _, _, current = self._authorize_transfer(actor, dataset, version, plan["token"], snapshot=snapshot)
                     if current != fence:
                         raise CacheError("transfer accounting changed during exclusive copy")
@@ -1049,6 +1077,8 @@ class DatasetCache:
                 # another admission spend this capacity. Avoid counting our
                 # already-fsynced but not-yet-checkpointed bytes twice.
                 with self._locked():
+                    if _guard is not None:
+                        _guard()
                     self._check_snapshot(actor, dataset, version, identity)
                     self._free(self._reserved(except_stage=stage) + remaining + 8192)
                 return self._put_chunk_data(stage, entry, offset, data, remaining)
@@ -1091,7 +1121,7 @@ class DatasetCache:
             # The scan builds its own tree; do not retain a second full resume
             # plan and path index while hashing up to half a million files.
             del files, index
-            return self._publish_locked(actor, dataset, version, plan["token"], snapshot)
+            return self._publish_locked(actor, dataset, version, plan["token"], snapshot, _guard=_guard)
 
     def prepare(self, actor, dataset, version):
         """Materialize an approved local source, or return a resumable replica plan."""
@@ -1147,6 +1177,7 @@ class DatasetCache:
                 _mkdir(paths[".leases"])
                 lease = dict(schema=SCHEMA, id=str(uuid.uuid4()), owner=actor.user_id, jobId=job_id, createdAt=time.time())
                 _write_json(paths[".leases"] / (lease["id"] + ".json"), lease)
+            self._touch_locked(dataset, version)
             return dict(leaseId=lease["id"], dataset=dataset, version=version, path=str(paths["ready"] / "data"), readOnly=True)
 
     def release_lease(self, actor, dataset, version, lease_id):
@@ -1165,32 +1196,145 @@ class DatasetCache:
                 os.fsync(fd)
             return {"released": True}
 
+    @staticmethod
+    def _default_tier():
+        return dict(schema=1, role="protected", lastUsedAt=0, pins={}, recovery=None)
+
+    def _tier(self, dataset, version):
+        """Private metadata; absence on an older registration means protected.
+
+        Caller holds the global cache lock. This is separate from immutable
+        manifests, so installing this feature never mutates their identity.
+        """
+        self._paths(dataset, version)
+        try:
+            value = _read_json(self.root / ".tiers" / dataset / (version + ".json"))
+        except FileNotFoundError:
+            return self._default_tier()
+        if (not isinstance(value, dict) or set(value) != {"schema", "role", "lastUsedAt", "pins", "recovery"}
+                or value["schema"] != 1 or value["role"] not in {"protected", "cache"}
+                or type(value["lastUsedAt"]) not in (int, float)
+                or not math.isfinite(value["lastUsedAt"]) or value["lastUsedAt"] < 0
+                or not isinstance(value["pins"], dict)
+                or (value["recovery"] is not None and not isinstance(value["recovery"], dict))):
+            raise CacheError("corrupt tier metadata; cleanup forbidden")
+        for key, pin in value["pins"].items():
+            _identifier(key)
+            if (not isinstance(pin, dict) or set(pin) != {"owner", "createdAt"}
+                    or type(pin["createdAt"]) not in (int, float)
+                    or not math.isfinite(pin["createdAt"]) or pin["createdAt"] < 0):
+                raise CacheError("corrupt persistent pin; cleanup forbidden")
+            _identifier(pin["owner"], USER_RE)
+        return value
+
+    def _write_tier(self, dataset, version, value):
+        self._paths(dataset, version)
+        folder = self.root / ".tiers" / dataset
+        _mkdir(folder)
+        _write_json(folder / (version + ".json"), value)
+
+    def _authority_pins(self, dataset, version=None):
+        """Permanent recovery retention freezes ACL/source identity as well.
+
+        Caller holds global lock. These pins cannot be removed through ordinary
+        unpin: decommission needs a separate trusted dependency reconciliation.
+        Include orphan metadata so broken registration cannot erase retention.
+        """
+        self._paths(dataset, version)
+        if version is None:
+            try:
+                with _directory(self.root / ".tiers" / dataset) as fd:
+                    names = os.listdir(fd)
+            except FileNotFoundError:
+                return False
+            versions = []
+            for name in names:
+                if re.fullmatch(r"\.write-[a-f0-9]{32}", name):
+                    continue
+                if not name.endswith(".json"):
+                    raise CacheError("unknown tier metadata; retention reconciliation required")
+                versions.append(_identifier(name[:-5], HASH_RE))
+        else:
+            versions = [version]
+        return any(any(pin.startswith("authority-") for pin in self._tier(dataset, item)["pins"])
+                   for item in versions)
+
+    def _touch_locked(self, dataset, version):
+        value = self._tier(dataset, version)
+        value["lastUsedAt"] = max(value["lastUsedAt"], time.time())
+        self._write_tier(dataset, version, value)
+
+    def touch(self, actor, dataset, version):
+        """Record a real authorized use; catalog/status polls do not refresh LRU."""
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            if not self._ready(self._paths(dataset, version), record["manifest"], version):
+                raise CacheError("cannot touch an unready version")
+            self._touch_locked(dataset, version)
+            return dict(touched=True)
+
+    def pin(self, actor, dataset, version, pin_id):
+        """Trusted operator/worker protection, with no age-based expiry."""
+        self._actor(actor, admin=True)
+        _identifier(pin_id)
+        with self._locked():
+            record = self._record(actor, dataset, version)
+            if not self._ready(self._paths(dataset, version), record["manifest"], version):
+                raise CacheError("cannot pin an unready version")
+            tier = self._tier(dataset, version)
+            tier["pins"].setdefault(pin_id, dict(owner=actor.user_id, createdAt=time.time()))
+            self._write_tier(dataset, version, tier)
+            return dict(pinned=True, pinId=pin_id)
+
+    def unpin(self, actor, dataset, version, pin_id):
+        """Only after the trusted caller has confirmed the protected use ended."""
+        self._actor(actor, admin=True)
+        _identifier(pin_id)
+        if pin_id.startswith("authority-"):
+            raise CacheError("authority retention pins require explicit dependency reconciliation")
+        with self._locked():
+            self._record(actor, dataset, version)
+            tier = self._tier(dataset, version)
+            removed = tier["pins"].pop(pin_id, None) is not None
+            self._write_tier(dataset, version, tier)
+            return dict(unpinned=removed)
+
+    def _quarantine_locked(self, dataset, version, *, ready_only=False):
+        """Caller owns version + global locks; lease/pin admission is atomic."""
+        if self._leases(dataset, version):
+            raise CacheError("active leases prevent eviction; leases never expire automatically")
+        if self._tier(dataset, version)["pins"]:
+            raise CacheError("persistent pins prevent eviction; pins never expire automatically")
+        quarantined = []
+        for name in (("ready",) if ready_only else ("ready", ".staging")):
+            path = self._paths(dataset, version)[name]
+            with _directory(path.parent) as fd:
+                if path.name not in os.listdir(fd):
+                    continue
+            with _directory(path):
+                pass
+            trash = self.root / ".trash" / uuid.uuid4().hex
+            _rename_new(path, trash)
+            quarantined.append(trash)
+        return quarantined
+
+    def _remove_quarantined(self, quarantined):
+        for trash in quarantined:
+            _modes(trash, False)
+            shutil.rmtree(trash)
+            with _directory(trash.parent) as fd:
+                os.fsync(fd)
+
     def evict(self, actor, dataset, version):
         """Administrator cleanup only. Registration remains for later recreation."""
         self._actor(actor, admin=True)
         with self._version_locked(actor, dataset, version):
-            quarantined = []
             with self._locked():
                 self._record(actor, dataset, version)
-                if self._leases(dataset, version):
-                    raise CacheError("active leases prevent eviction; leases never expire automatically")
-                for name in ("ready", ".staging"):
-                    path = self._paths(dataset, version)[name]
-                    with _directory(path.parent) as fd:
-                        if path.name not in os.listdir(fd):
-                            continue
-                    with _directory(path):
-                        pass
-                    trash = self.root / ".trash" / uuid.uuid4().hex
-                    _rename_new(path, trash)
-                    quarantined.append(trash)
+                quarantined = self._quarantine_locked(dataset, version)
             # Once quarantined atomically, no new lease can see these paths.
             # Large recursive cleanup need not block status/other dataset jobs.
-            for trash in quarantined:
-                _modes(trash, False)
-                shutil.rmtree(trash)
-                with _directory(trash.parent) as fd:
-                    os.fsync(fd)
+            self._remove_quarantined(quarantined)
             return dict(evicted=bool(quarantined), registrationRetained=True)
 
     def _unregister_snapshot(self, actor, dataset, version):
@@ -1394,6 +1538,8 @@ class DatasetCache:
             for item in initial["versions"]:
                 if self._leases(dataset, item):
                     raise CacheError("active leases prevent unregister; leases never expire automatically")
+                if self._tier(dataset, item)["pins"]:
+                    raise CacheError("persistent pins prevent unregister")
 
         with contextlib.ExitStack() as locks:
             # Never wait on a version lock while holding the global lock: active

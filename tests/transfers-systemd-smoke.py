@@ -35,7 +35,7 @@ try:
     assert result['version']==f.version,result
     assert f.dst.activity(units[-1]) is False
     key=str(uuid.uuid4());args={**f.args,'id':key,'name':'cancelled'}
-    args['source']=f.src.prepare({'id':key,'userId':F.USER,'reference':args['reference']})
+    args['source']=f.src.prepare({'id':key,'userId':F.USER,'reference':args['reference'],'targetMachine':'gpu-2'})
     original=f.src.read
     def slow(request,token):
         if request.get('action')=='get':time.sleep(.8)

@@ -113,6 +113,7 @@ class PrepareDataRoot(unittest.TestCase):
 
     def test_existing_wrong_mode_is_not_repaired(self):
         self.cache.mkdir(mode=0o755)
+        self.cache.chmod(0o755)  # Explicit unsafe fixture even under umask 077.
         with patch.object(prepare.os, 'fchmod') as chmod, self.assertRaisesRegex(prepare.PreparationError, 'no automatic chown/chmod'):
             self.plan()
         chmod.assert_not_called()
