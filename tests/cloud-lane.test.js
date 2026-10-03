@@ -13,10 +13,11 @@ async function fixture(t){
   const service=await PortalService.open(join(dir,'db'),bootstrap,undefined,async(...args)=>{calls.push(args);return bridge(...args)});
   clearInterval(service.executionTimer);
   service.store.users.push({id:'member',username:'member',name:'Member',role:'member',enabled:true,limits:{'gpu-1':1},total:1});
-  for(const [token,userId,username,role] of [['owner','builtin-admin','admin','admin'],['member','member','member','member']])service.sessions.set(token,{userId,username,role,expires:Date.now()+60000});
+  const tokens={};
+  for(const [label,userId,username,role] of [['owner','builtin-admin','admin','admin'],['member','member','member','member']])tokens[label]=service.issueSession({userId,username,role});
   service.cloudProvider={connected:()=>true,clear(){},list:async()=>[{id:'file',size:4,name:'a.zip',driveId:'d'}],resolve:async()=> 'https://example.test/download'};
   t.after(async()=>{service.close();await rm(dir,{recursive:true,force:true})});
-  return {service,calls,bridge:fn=>bridge=fn,call:(op,args={},token='member')=>service.invoke(token,op,args)};
+  return {service,calls,bridge:fn=>bridge=fn,call:(op,args={},label='member')=>service.invoke(tokens[label]||label,op,args)};
 }
 test('public invoke dispatches cloud operations and returns compact response',async t=>{
   const f=await fixture(t);assert.equal((await f.call('cloud.info')).result.nodeDirect,true);
@@ -31,7 +32,7 @@ test('slow share parsing does not block account mutation queue and revocation fe
   assert.equal(f.service.pending,0);assert.equal(f.service.cloudPending,1);
   let queued=false;await f.service.enqueue(async()=>{queued=true});assert.equal(queued,true);
   f.service.store.users.find(u=>u.id==='member').enabled=false;
-  wait.resolve([{id:'file',size:4,name:'a.zip'}]);await assert.rejects(pending,e=>e.status===403);
+  wait.resolve([{id:'file',size:4,name:'a.zip'}]);await assert.rejects(pending,e=>[401,403].includes(e.status));
   assert.equal(f.service.cloudInspections.size,0);assert.equal(f.service.cloudPending,0);
 });
 test('quota revocation during short-link resolution prevents node dispatch',async t=>{

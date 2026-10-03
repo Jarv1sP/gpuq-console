@@ -37,6 +37,7 @@ jobs:
       - run: node tests/job-progress-ui-smoke.mjs
       - run: node tests/placement-ui-smoke.mjs
       - run: node tests/client-auth-smoke.mjs
+      - run: node tests/persistent-login-ui-smoke.mjs
       - run: python3 scripts/build-gpuq.py
       - run: python3 build/gpuq.pyz --help
       - run: python3 -m compileall -q deploy gpuq scripts
