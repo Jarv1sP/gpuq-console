@@ -13,6 +13,11 @@ const chapters = [
   ['常见问题', 'troubleshooting'],
 ];
 
+test('user guide source contains no captured command diagnostics', () => {
+  assert.match(guide, /^# 使用指南\r?\n/, 'The guide must begin with its user-facing title');
+  assert.doesNotMatch(guide, /^(?:git:\s+(?:warning|error):|fatal:|npm (?:WARN|ERR!)\b|Traceback \(most recent call last\):)/m);
+});
+
 test('user guide has the seven stable chapters used by the website', () => {
   const headings = [...guide.matchAll(/^## (.+) \{#([a-z-]+)\}$/gm)].map(match => [match[1], match[2]]);
   assert.deepEqual(headings, chapters);

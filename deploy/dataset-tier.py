@@ -80,6 +80,33 @@ def _readonly_tree(path):
         visit(fd)
 
 
+def _persistent_mount_identity(value):
+    """Stable part of the v1 seal's (mount ID, major:minor, st_dev).
+
+    Linux mount IDs are local to a mount namespace. A PrivateTmp systemd peer
+    sees another ID for the same disk sealed by an administrator's SSH process.
+    Keep the original proof bytes/grant hash; its ID is diagnostic, not a
+    cross-process identity. DatasetCache still checks the COMPLETE live tuple
+    on every lock against that cache instance's initial observation. Root inode,
+    registration, immutable READY identities, ACL and permanent pin checks below
+    are unchanged. This does not permit another filesystem or an unguarded root.
+    """
+    if value is None:
+        return None
+    if (not isinstance(value, (list, tuple)) or len(value) != 3
+            or not isinstance(value[0], str) or not 1 <= len(value[0]) <= 20 or not value[0].isascii()
+            or not value[0].isdecimal() or int(value[0]) <= 0
+            or not isinstance(value[1], str) or type(value[2]) is not int or value[2] < 0):
+        raise D.CacheError("invalid persistent authority mount identity")
+    try:
+        device = f"{os.major(value[2])}:{os.minor(value[2])}"
+    except (OverflowError, ValueError) as error:
+        raise D.CacheError("invalid persistent authority device") from error
+    if value[1] != device:
+        raise D.CacheError("inconsistent persistent authority device")
+    return value[1], value[2]
+
+
 class LocalAuthority:
     """A separately configured protected DatasetCache, never a request path."""
     recovery_protocol = "dataset-tier-recovery-v1"
@@ -135,10 +162,10 @@ class LocalAuthority:
         dataset, version = proof["dataset"], proof["version"]
         owners = source._dataset(actor, dataset)["owners"]
         tier = source._tier(dataset, version)
-        mount = list(source.mount) if source.mount is not None else None
+        mount = _persistent_mount_identity(source.mount)
         if (tier["role"] != "protected" or proof["pinId"] not in tier["pins"] or proof["owners"] != owners
                 or proof["rootIdentity"] != list(source._root_identity)
-                or proof["mountIdentity"] != mount
+                or _persistent_mount_identity(proof["mountIdentity"]) != mount
                 or proof["registration"] != list(source._record_identity(dataset, version))):
             raise D.CacheError("authority receipt identity or persistent protection changed")
         ready = source._paths(dataset, version)["ready"]
