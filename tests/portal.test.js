@@ -9,7 +9,7 @@ import {createPortalServer} from '../portal-server.mjs';
 
 const password='Only-A-Test-Password-2026!';
 async function setup(){const dir=await mkdtemp(join(tmpdir(),'gpuq-portal-test-'));const bootstrap=join(dir,'bootstrap.json');await writeFile(bootstrap,JSON.stringify({username:'admin',password}),{mode:0o600});return {dir,bootstrap,database:join(dir,'state.sqlite')};}
-test('VPS accounts and policies survive restart, no default demo logins or persisted tokens',async()=>{
+test('VPS accounts, policies and hashed login sessions survive restart, no default demo logins or raw tokens',async()=>{
   const data=await setup();let service;
   try{
     service=await PortalService.open(data.database,data.bootstrap);
@@ -24,7 +24,7 @@ test('VPS accounts and policies survive restart, no default demo logins or persi
     assert.equal(stored.includes(password),false);assert.equal(stored.includes('Test123456'),false);assert.equal(stored.includes(admin.token),false);
     assert.equal(service.credentials.get('persistent-user').iterations,600000);
     service.close();service=await PortalService.open(data.database); // Bootstrap intentionally absent.
-    await assert.rejects(service.invoke(member.token,'state'),e=>e.status===401);
+    assert.equal((await service.invoke(member.token,'state')).state.users[0].id,created.result.id);
     const resumed=await service.login('persistent-user','Test123456');
     assert.equal(resumed.state.users[0].total,2);assert.equal(resumed.state.jobs.length,0);
     assert.ok(service.db.prepare('SELECT count(*) AS count FROM audit').get().count>=5);
