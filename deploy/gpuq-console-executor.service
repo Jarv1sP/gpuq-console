@@ -7,6 +7,8 @@ ExecStart=/usr/bin/python3 /opt/gpuq-console/executor/execution-worker.py
 Restart=on-failure
 RuntimeDirectory=gpuq-console-executor
 RuntimeDirectoryMode=0750
+# The portal bind-mounts this directory; preserve its inode across stop/start.
+RuntimeDirectoryPreserve=yes
 Group=1000
 UMask=0007
 NoNewPrivileges=true
