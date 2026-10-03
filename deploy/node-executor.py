@@ -19,6 +19,7 @@ DATA_IMPORTS=None
 PROJECT_OPS=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
+TASK_DISPLAY_CAPABILITY='console-task-display-v1'
 DIAGNOSTICS=None
 policy_module=importlib.util.spec_from_file_location('gpuq_console_scheduling',HERE/'scheduling-policy.py')
 SCHEDULING=importlib.util.module_from_spec(policy_module);policy_module.loader.exec_module(SCHEDULING)
@@ -713,8 +714,13 @@ def process(operation,args):
     if operation.startswith('files.') and operation in ('files.list','files.put','files.get'):
         return projects().files(operation,args) if args.get('project') else file_op(operation,args)
     if operation not in ('sync','cancel','logs','priority'):raise ValueError('Unknown operation')
-    if not isinstance(args,dict) or set(args)-({'job','priority','expected','rankOnly'} if operation=='priority' else {'job'}):raise ValueError('Invalid job operation fields')
+    if not isinstance(args,dict) or set(args)-({'job','priority','expected','rankOnly','metadata'} if operation=='priority' else {'job','metadata'}):raise ValueError('Invalid job operation fields')
     job=args['job'];policy=validate_job(job);jid=job['id']
+    display=None
+    if 'metadata' in args:
+        definition=importlib.util.spec_from_file_location('gpuq_console_task_display',HERE/'task-display.py')
+        display=importlib.util.module_from_spec(definition);definition.loader.exec_module(display)
+        display.validate(job,args['metadata'])
     (ROOT/'jobs').mkdir(parents=True,exist_ok=True,mode=0o700)
     with open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -774,6 +780,12 @@ def process(operation,args):
             node_id=result['job_id']
         else:node_id=row[0]
         data=gpu('show',node_id);state=data.get('job',data)
+        presentation={'state':'LEGACY'}
+        if display is not None:
+            try:presentation=display.sync(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),job,args['metadata'],state)
+            except (ValueError,OSError,subprocess.SubprocessError):
+                presentation={'state':'UNAVAILABLE','error':'Native task display update unconfirmed; training state unchanged'}
+        # Presentation failures must never block cancel or change job lifecycle.
         if operation=='priority':
             expected=args.get('expected');priority=args.get('priority')
             if args.get('rankOnly') is not True:raise ValueError('Rank-only priority update required; upgrade the portal before editing priorities')
@@ -796,7 +808,8 @@ def process(operation,args):
                     **scheduling_status(job,data),'error':'Job termination is not fully confirmed; card reservation retained'}
         if dataset_refs(job) and state['state'] in ('SUCCEEDED','FAILED','CANCELED') and not release_datasets(job,data):
             return {'nodeJobId':node_id,'state':'UNKNOWN','assignedIndices':assigned,'error':'Job termination is not fully confirmed; dataset leases retained'}
-        return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data)}
+        return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data),
+                **({'displaySync':presentation} if display is not None else {})}
 
 if __name__=='__main__':
     os.umask(0o077)

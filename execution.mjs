@@ -1,6 +1,7 @@
 import net from 'node:net';
 import {MACHINES} from './dist/model.js';
 import {taskIdentity} from './dist/task-metadata.js';
+import {nativeJobRequest} from './native-task-metadata.mjs';
 import {applyJobFeedback} from './dist/job-progress.js';
 import {maintainTaskNotes} from './community.mjs';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
@@ -22,6 +23,8 @@ const RANKS={idle:0,normal:2,high:4,P0:0,P1:1,P2:2,P3:3,P4:4};
 function rankValue(value){if(typeof value!=='string'||!Object.hasOwn(RANKS,value))fail('排队优先级必须为 P0–P4（或 idle/normal/high）。');return value;}
 function priorityValue(value){if(!PRIORITIES.has(value))fail('优先级必须为 idle、normal 或 high。');return value;}
 export function schedulerResult(job,result){
+  if(result.displaySync&&['SYNCED','UNAVAILABLE','LEGACY'].includes(result.displaySync.state))
+    job.nativeDisplay={state:result.displaySync.state,...(typeof result.displaySync.error==='string'?{error:result.displaySync.error.slice(0,200)}:{})};
   job.nodeJobId=result.nodeJobId||job.nodeJobId;
   job.state=['PENDING','STARTING','RUNNING','PREEMPTING',...TERMINAL].includes(result.state)?result.state:'UNKNOWN';
   job.assignedIndices=result.assignedIndices||[];job.error=result.error||null;job.checkedAt=new Date().toISOString();
@@ -77,7 +80,7 @@ export function installExecution(service,bridge){
               continue;
             }
             const action=job.cancelRequested?'cancel':'sync';
-            const result=await bridge(job.machine,action,{job:job.spec});
+            const result=await bridge(job.machine,action,nativeJobRequest(service,job));
             await service.enqueue(()=>{
               const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||TERMINAL.has(current.state)||(current.policyRevision||0)!==policyRevision)return;
               // LOST/unknown remains nonterminal: retain quota until confirmed.
@@ -329,7 +332,7 @@ export async function executionCall(service,principal,operation,args){
     job.policyRevision=(job.policyRevision||0)+1;service.save();
     service.audit(principal.username,operation,job.id,priority);
     try{
-      const result=await service.bridge(job.machine,'priority',{job:job.spec,priority,rankOnly:true,expected:job.schedulerPolicy});
+      const result=await service.bridge(job.machine,'priority',nativeJobRequest(service,job,{priority,rankOnly:true,expected:job.schedulerPolicy}));
       job.policyRevision++;
       schedulerResult(job,result);service.save();maintainTaskNotes(service);return jobView(job);
     }catch(error){

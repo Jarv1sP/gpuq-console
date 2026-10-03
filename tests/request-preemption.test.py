@@ -46,6 +46,7 @@ class RequestModes(F.SchedulerPriorityTests):
         old=self.root/'v11.db';source=sqlite3.connect(self.config.db_path);target=sqlite3.connect(old)
         source.backup(target);source.close()
         target.execute('ALTER TABLE jobs DROP COLUMN preempt_opt_in_only')
+        target.execute('ALTER TABLE jobs DROP COLUMN display_json')
         target.execute('UPDATE schema_meta SET schema_version=11')
         target.execute('PRAGMA user_version=11')
         before=target.execute('SELECT * FROM leases').fetchall();target.commit();target.close()
@@ -54,7 +55,7 @@ class RequestModes(F.SchedulerPriorityTests):
             self.assertFalse(migrated.get_job(job['id'])['preempt_opt_in_only'])
             self.assertEqual(migrated.get_attempt(attempt['id']),self.store.get_attempt(attempt['id']))
             self.assertEqual(migrated.list_leases(),self.store.list_leases())
-            self.assertEqual(migrated.check_integrity()['schema_version'],12)
+            self.assertEqual(migrated.check_integrity()['schema_version'],13)
         finally:migrated.close()
 
 class ScopePolicy(unittest.TestCase):
