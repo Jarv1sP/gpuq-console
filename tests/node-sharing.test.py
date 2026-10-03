@@ -17,7 +17,7 @@ import uuid
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'gpuq'))
 from gpuq.backends import GpuDevice
 from gpuq.config import Config
-from gpuq.constants import AttemptState,JobState
+from gpuq.constants import AttemptState,JobState,STORE_SCHEMA_VERSION
 from gpuq.coordinator import Coordinator
 from gpuq.hami import runtime_environment
 from gpuq.store import Store
@@ -72,7 +72,7 @@ class Sharing(unittest.TestCase):
                 job={**self.job(),'id':submit_key};env={'GPUQ_ATTEMPT_ID':aid,'GPUQ_JOB_ID':native['id']}
                 self.assertEqual(P.allocated_spec(job,['4'],['GPU-0'],{'database':str(database)},env)['cards'],1)
                 with self.assertRaises(ValueError):P.allocated_spec({**job,'id':str(uuid.uuid4())},['4'],['GPU-0'],{'database':str(database)},env)
-                self.assertEqual(store.check_integrity()['schema_version'],12)
+                self.assertEqual(store.check_integrity()['schema_version'],STORE_SCHEMA_VERSION)
             finally:store.close()
 
     def coordinator(self,leases=(),holder_shared=False):
@@ -117,7 +117,7 @@ class Sharing(unittest.TestCase):
                 store.update_attempt(own['id'],state=AttemptState.DRAINING,exit_code=-15);c._statuses[own['id']]=SimpleNamespace(is_cleanup_ready=True,control_group='',main_pid=0)
                 c._finalize_draining_attempts()
                 self.assertEqual(store.get_attempt(own['id'])['state'],'CANCELED');self.assertEqual([l['attempt_id'] for l in store.list_leases()],[aid])
-                self.assertEqual(store.get_job(holder['id'])['state'],'RUNNING');self.assertEqual(c._snapshot[0].compute_pids,(123,456));self.assertEqual(store.check_integrity()['schema_version'],12)
+                self.assertEqual(store.get_job(holder['id'])['state'],'RUNNING');self.assertEqual(c._snapshot[0].compute_pids,(123,456));self.assertEqual(store.check_integrity()['schema_version'],STORE_SCHEMA_VERSION)
             finally:store.close()
 
     def test_bridge_requires_capability_before_forwarding_explicit_sharing(self):

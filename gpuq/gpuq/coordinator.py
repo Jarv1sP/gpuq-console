@@ -4549,6 +4549,8 @@ class Coordinator:
                 return node_api(self, operation, arguments)
             if operation == "submit":
                 return self._api_submit(arguments)
+            if operation == "set_job_display":
+                return self._api_set_job_display(arguments)
             if operation == "status":
                 return self._api_status(arguments)
             if operation == "show":
@@ -4659,6 +4661,22 @@ class Coordinator:
             "requested_gpu_uuids": job["requested_gpu_uuids"],
         }
 
+    def _api_set_job_display(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        _require_exact_fields(arguments,
+            allowed={"job_id", "metadata", "expected_submit_key", "expected_owner", "expected_name"},
+            required={"job_id", "metadata", "expected_submit_key", "expected_owner", "expected_name"})
+        try:
+            job = self.store.set_job_display(arguments["job_id"], arguments["metadata"],
+                expected_submit_key=arguments["expected_submit_key"],
+                expected_owner=arguments["expected_owner"], expected_name=arguments["expected_name"])
+        except StoreNotFoundError as exc:
+            raise ApiError("NOT_FOUND", str(exc)) from exc
+        except StoreConflictError as exc:
+            raise ApiError("CONFLICT", str(exc)) from exc
+        except (ValueError, TypeError) as exc:
+            raise ApiError("BAD_REQUEST", str(exc)) from exc
+        return {"job_id": job["id"], "display_metadata": job["display_metadata"]}
+
     def _api_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_exact_fields(arguments, allowed={"all", "limit"})
         show_all = arguments.get("all", False)
@@ -4674,6 +4692,7 @@ class Coordinator:
         states = None if show_all else _ACTIVE_JOB_STATES
         full_jobs = self.store.list_jobs(states=states, limit=limit)
         summary_fields = (
+            "display_metadata",
             "hami_core",
             "sm_percent",
             "share_gpu",
@@ -4786,7 +4805,7 @@ class Coordinator:
         return {
             "daemon": {
                 **self._health_payload(),
-                "capabilities": ["priority-policy-v1", "preempt-idle-only-v1", "priority-rank-v1", "preempt-opt-in-only-v1", "elastic-batch-v1", "gpu-placement-v1", "gpu-sharing-v1"],
+                "capabilities": ["job-display-v1", "priority-policy-v1", "preempt-idle-only-v1", "priority-rank-v1", "preempt-opt-in-only-v1", "elastic-batch-v1", "gpu-placement-v1", "gpu-sharing-v1"],
                 "observe_only": self._observe_only,
                 "managed_indices": managed_indices,
                 "managed_gpus": managed_gpus,

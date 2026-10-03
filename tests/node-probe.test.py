@@ -94,6 +94,17 @@ class Probe(unittest.TestCase):
         with patch.object(self.probe, 'helper_source', return_value=b'OLD_DISPATCHER = True'), patch.object(self.probe, 'command') as command:
             self.assertFalse(self.probe.probe_host_command()['available']); command.assert_not_called()
 
+    def test_task_display_capability_requires_native_and_complete_node_helper(self):
+        self.outputs['gpuq']=json.dumps({'daemon':{'health':'ok','capabilities':['job-display-v1']},'jobs':[]})
+        def source(path,owner,**kwargs):
+            if path.name=='node-executor.py':return b"TASK_DISPLAY_CAPABILITY='console-task-display-v1'"
+            return b"CAPABILITY='console-task-display-v1'\ndef validate(job,metadata):pass\ndef sync(node,job,metadata,native):pass"
+        with patch.object(self.probe,'helper_source',side_effect=source):self.assertIn('console-task-display-v1',self.run_probe()['gpuq']['capabilities'])
+        for bad in (b'OLD=True',b"CAPABILITY='console-task-display-v1'"):
+            with patch.object(self.probe,'helper_source',return_value=bad):self.assertNotIn('console-task-display-v1',self.run_probe()['gpuq']['capabilities'])
+        self.outputs['gpuq']=json.dumps({'daemon':{'capabilities':None},'jobs':[]})
+        self.assertTrue(self.run_probe()['gpuq']['connected']);self.assertNotIn('console-task-display-v1',self.run_probe()['gpuq']['capabilities'])
+
     def test_host_command_requires_matching_safe_helpers_and_sudo_policy(self):
         self.probe.CONFIG['hostRoot'] = True
         def source(path, owner, **kwargs):
