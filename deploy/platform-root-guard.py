@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in platform bind guard; no mkdir/chmod/mount/service writes.
+"""Opt-in platform root guard; no mkdir/chmod/mount/service writes.
 
 The root-owned /etc/gpuq-platform-root DIRECTORY enables the guard. Other nodes
 without that directory retain the legacy behavior. Once enabled, a missing pin
@@ -8,6 +8,9 @@ before any ROOT write; long-lived request handlers repeat it per operation.
 System ExecStartPre may use purpose='check-only'; runtime cannot run as root.
 This is not a sandbox against host root or a replacement for root-owned 000
 underlying mountpoints, mount-unit dependencies, and stopped cutover consumers.
+Schema 1 pins an explicit bind mount, unchanged for existing installations.
+Schema 2 with mode='direct-directory' pins a directory directly on its backing
+filesystem; it never infers this mode when a required bind mount disappears.
 """
 import json,os,re,socket,stat,sys
 from pathlib import Path
@@ -40,6 +43,7 @@ def enabled_pin():
    pin=json.loads(data)
   finally:os.close(fd)
  finally:os.close(parent)
+ need(isinstance(pin,dict),'Invalid platform root pin')
  return pin
 def mounts():
  out=[]
@@ -59,9 +63,13 @@ def check(root,*,purpose='runtime'):
  need(purpose in ('runtime','check-only'),'Invalid platform guard purpose')
  pin=enabled_pin()
  if pin is None:return None
- fields={'schema','machine','root','backingMount','sourceDirectory','filesystemUuid','rootInode','uid','fstype'}
- need(isinstance(pin,dict) and set(pin)==fields and type(pin['schema']) is int and pin['schema']==1 and pin['machine']==socket.gethostname(),'Platform pin identity mismatch')
- root=absolute(str(root));backing=absolute(pin['backingMount']);source=absolute(pin['sourceDirectory'])
+ common={'schema','machine','root','backingMount','filesystemUuid','rootInode','uid','fstype'}
+ need(isinstance(pin,dict) and type(pin.get('schema')) is int,'Platform pin identity mismatch')
+ direct=pin['schema']==2
+ fields=common|({'mode'} if direct else {'sourceDirectory'})
+ need(set(pin)==fields and pin['schema'] in (1,2) and (not direct or pin['mode']=='direct-directory') and pin['machine']==socket.gethostname(),'Platform pin identity mismatch')
+ root=absolute(str(root));backing=absolute(pin['backingMount'])
+ source=root if direct else absolute(pin['sourceDirectory'])
  need(str(root)==pin['root'] and backing in source.parents and root!=backing,'Platform root path changed')
  need(type(pin['uid']) is int and pin['uid']>0 and type(pin['rootInode']) is int and pin['rootInode']>0 and pin['fstype'] in ('ext4','xfs'),'Invalid platform root pin')
  if purpose=='runtime':need(os.geteuid()==pin['uid'],'Platform runtime must use its pinned non-root service UID')
@@ -70,15 +78,29 @@ def check(root,*,purpose='runtime'):
  def mounted():
   entries=mounts();a=[v for v in entries if v['target']==str(backing)];b=[v for v in entries if v['target']==str(root)]
   need(not any(v['target'].startswith(str(root)+'/') for v in entries),'Unapproved nested platform mount')
-  need(len(a)==len(b)==1,'Required platform bind/backing mount is missing or ambiguous')
-  need(a[0]['root']=='/' and b[0]['root']==expected_fsroot,'Platform bind source changed')
-  for v in (a[0],b[0]):need(v['device']==major_minor and v['fstype']==pin['fstype'] and 'rw' in v['options'],'Platform mounted device is wrong or read-only')
+  if direct:
+   need(len(a)==1,'Required platform backing mount is missing or ambiguous')
+   # The configured backing mount must be the *closest* mounted ancestor.
+   # Same-device overmounts are rejected too: UUID alone is not path identity.
+   ancestors=[v for v in entries if Path(v['target'])==root or Path(v['target']) in root.parents]
+   depth=max((len(Path(v['target']).parts) for v in ancestors),default=0)
+   nearest=[v for v in ancestors if len(Path(v['target']).parts)==depth]
+   need(len(nearest)==1 and nearest[0]['target']==str(backing),'Unapproved intermediate platform mount')
+   need(a[0]['root']=='/','Platform backing filesystem root changed')
+   checked=a
+  else:
+   need(len(a)==len(b)==1,'Required platform bind/backing mount is missing or ambiguous')
+   need(a[0]['root']=='/' and b[0]['root']==expected_fsroot,'Platform bind source changed')
+   checked=(a[0],b[0])
+  for v in checked:need(v['device']==major_minor and v['fstype']==pin['fstype'] and 'rw' in v['options'],'Platform mounted device is wrong or read-only')
  mounted();fd=open_directory(root)
  try:
   info=os.fstat(fd)
   need((info.st_dev,info.st_ino,info.st_uid)==(device,pin['rootInode'],pin['uid']) and not info.st_mode&0o022,'Platform directory identity or ownership changed')
   mounted();fresh=open_directory(root)
-  try:need((os.fstat(fresh).st_dev,os.fstat(fresh).st_ino)==(info.st_dev,info.st_ino),'Platform root changed during admission')
+  try:
+   after=os.fstat(fresh)
+   need((after.st_dev,after.st_ino,after.st_uid,stat.S_IMODE(after.st_mode))==(info.st_dev,info.st_ino,info.st_uid,stat.S_IMODE(info.st_mode)),'Platform root changed during admission')
   finally:os.close(fresh)
  finally:os.close(fd)
  return {'guarded':True,'root':str(root),'filesystemUuid':pin['filesystemUuid'],'rootInode':pin['rootInode'],'uid':pin['uid']}
