@@ -142,6 +142,7 @@ try {
   assert.equal(await card(member).locator('[data-use-dataset]').textContent(), '准备后训练');
   assert.equal(await card(member).locator('input[readonly]').inputValue(), 'sample@' + version);
   assert.equal(await member.locator('a[href="/guide"]').count(),1,'The workbench has exactly one reader guide entry');
+  assert.equal(await member.locator('[data-user-guide]').count(),0,'The shared entry is not duplicated by a workspace guide button');
   const [guide] = await Promise.all([member.waitForEvent('popup'), member.locator('a[href="/guide"]:visible').click()]);
   await guide.waitForLoadState('domcontentloaded');
   await guide.locator('.guide-card[href="/guide/data"]').click();
@@ -275,6 +276,34 @@ try {
   const after=await member.locator('#train-form [name=datasets]').inputValue();
   assert.equal(before,latest,'The new choice is visible before the old reply arrives');
   assert.equal(after,latest,'An older server lookup must not replace the newer fixed dataset choice');
+
+  // The same intent fence must also hold when the second choice changes node.
+  await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});
+  await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-2'),member.locator('#context-machine').selectOption('gpu-2')]);
+  const crossNodeHeld=new Promise(resolve=>{notifyHeld=resolve;});holdLookup=true;
+  await chosen('sample@'+version).click();
+  try{await Promise.race([crossNodeHeld,new Promise((_,reject)=>{heldTimeout=setTimeout(()=>reject(new Error('The cross-node first choice must request projects')),10000);})]);}
+  finally{clearTimeout(heldTimeout);}
+  await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.catalog'),member.locator('[name=dataset-machine]').selectOption('gpu-2')]);
+  await member.locator('[data-use-dataset=another]').waitFor({state:'visible'});
+  await chosen('another@'+version).click();await member.locator('#work-submit').waitFor({state:'visible'});
+  const oldReply=member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-1');
+  releaseLookup();await oldReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+  assert.equal(await member.locator('#train-form [name=machine]').inputValue(),'gpu-2','An old node lookup cannot restore its server');
+  assert.equal(await member.locator('#train-form [name=datasets]').inputValue(),'another@'+version,'The newest node and fixed version remain paired');
+
+  // Native/programmatic close must cancel pending selection, not only its button.
+  await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.catalog'),member.locator('[name=dataset-machine]').selectOption('gpu-1')]);
+  const closedHeld=new Promise(resolve=>{notifyHeld=resolve;});holdLookup=true;
+  // The existing submit sheet is modal, so use the same delegated UI event as
+  // the real dataset button without changing the sheet's native close behavior.
+  await member.evaluate(ref=>document.dispatchEvent(new CustomEvent('gpuq-open-submit',{detail:{machine:'gpu-1',datasetRef:ref}})),'sample@'+version);
+  try{await Promise.race([closedHeld,new Promise((_,reject)=>{heldTimeout=setTimeout(()=>reject(new Error('The close-race choice must request projects')),10000);})]);}
+  finally{clearTimeout(heldTimeout);}
+  await member.evaluate(()=>document.querySelector('#work-submit').close());await member.locator('#work-submit').waitFor({state:'hidden'});
+  const closedReply=member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-1');
+  releaseLookup();await closedReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+  assert.equal(await member.locator('#work-submit').isVisible(),false,'A late lookup must not reopen a generically closed submit sheet');
   console.log('DATASETS UI PASS: owner-filtered merged catalogs; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; no unexpected browser errors or external requests (two expected pre-login session probes returned 401).');
   console.log(`Screenshots: ${screenshots}`);
 } finally {

@@ -121,7 +121,11 @@ try{
   await desktop.locator('[data-job-tab=overview]').focus();await desktop.keyboard.press('ArrowRight');assert.equal(await desktop.locator('[data-job-tab=logs]').getAttribute('aria-selected'),'true');await capture(desktop,'job-logs-member-1440',true);
   await desktop.locator('[data-job-tab=diagnostics]').click();await desktop.locator('#job-diagnostic-view').filter({hasText:'本轮快照已保存'}).waitFor();await capture(desktop,'job-diagnostics-member-1440',true);
   await desktop.locator('[data-job-tab=output]').click();await desktop.locator('#workspace-result').filter({hasText:'metrics.json'}).waitFor();await capture(desktop,'job-output-member-1440',true);
-  await desktop.locator('[data-job-tab=notes]').click();await desktop.locator('#drawer-task-note-form').waitFor();await capture(desktop,'job-notes-member-1440',true);await desktop.keyboard.press('Escape');await desktop.locator('.job-sheet').waitFor({state:'hidden'});assert.equal(new URL(desktop.url()).searchParams.has('job'),false);
+  await desktop.locator('[data-job-tab=notes]').click();await desktop.locator('#drawer-task-note-form').waitFor();await capture(desktop,'job-notes-member-1440',true);await desktop.keyboard.press('Escape');await desktop.locator('.job-sheet').waitFor({state:'hidden'});
+  // Native close queues its event after hiding the dialog; await the existing
+  // close handler's URL cleanup before asserting the completed drawer state.
+  await desktop.waitForFunction(()=>!new URL(location.href).searchParams.has('job'));
+  assert.equal(new URL(desktop.url()).searchParams.has('job'),false);
   await desktop.locator('#terminal-open').click();await desktop.locator('.terminal-dialog').waitFor({state:'visible'});await capture(desktop,'terminal-member-1440',true);await desktop.locator('#terminal-collapse').click();const opens=calls.filter(row=>row.operation==='terminal.open').length;
   await desktop.locator('[data-nav=datasets]').click();await desktop.locator('#control-strip [data-control-session]').click();await desktop.locator('.terminal-dialog').waitFor({state:'visible'});assert.equal(calls.filter(row=>row.operation==='terminal.open').length,opens,'collapse keeps the same live terminal across rooms');await desktop.locator('#terminal-disconnect').click();
   await desktop.keyboard.press('Control+k');await capture(desktop,'control-command-member-1440',true);await desktop.keyboard.press('Escape');await desktop.locator('#mission-control').waitFor({state:'hidden'});

@@ -60,6 +60,16 @@ export function datasetReferences(value){return String(value||'').trim().split(/
   if(extra.length||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(dataset||'')||!hashPattern.test(version||''))throw Error('从数据集页面选择完整的名称@版本。');
   return {dataset,version};
 });}
+// A machine lookup can finish after a newer dataset choice. Keep each explicit
+// submission intent separate from project request epochs and authentication.
+export function createSubmitSelectionGuard(){
+  let generation=0,latest=null;
+  return {
+    begin(machine,datasetRef,identity){latest=Object.freeze({generation:++generation,machine,datasetRef,identity});return latest;},
+    current(value,machine,identity){return !!value&&value===latest&&value.generation===generation&&value.machine===machine&&value.identity===identity;},
+    invalidate(){generation++;latest=null;}
+  };
+}
 function base64(bytes){let value='';for(let i=0;i<bytes.length;i+=8192)value+=String.fromCharCode(...bytes.subarray(i,i+8192));return btoa(value);}
 export async function uploadProjectFile(file,context,send,progress=()=>{}){
   if(!validProject(context.project)||context.area!=='code')throw Error('项目只能上传到代码草稿。');
@@ -76,13 +86,14 @@ export async function uploadProjectFile(file,context,send,progress=()=>{}){
 
 export function executionUI(store,refresh,toast){
   let section,log,actor=null,submitKey=crypto.randomUUID(),machine='',project='',catalog=[],catalogError='',projectBusy=false,operationBusy=false;
-  let epoch=0,submitIntent=0,pollTimer=null,pollCount=0,terminalSessions=[],machineIdentity='';
+  let epoch=0,pollTimer=null,pollCount=0,terminalSessions=[],machineIdentity='';
   let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
   const jobHeading=id=>[...document.querySelectorAll('[data-workbench-job]')].find(row=>row.dataset.workbenchJob===id)?.querySelector('.wb-job-heading');
   const diagnostics=createJobDiagnostics(store,()=>log,toast,{drawer:true,header:job=>`<span class="sheet-object">${stateHTML(job,false)}<span>${escape(job.name||'训练详情')}</span></span>`,reveal:(dialog,job,origin)=>{sharedObject(origin||jobHeading(job.id),dialog.querySelector('.sheet-object'));revealSheet(dialog,{drilldown:true});},dismiss:dialog=>dismissSheet(dialog,{drilldown:true,target:jobHeading(focusedJob)}),overview:job=>jobOverviewHTML(job,{owned:job.userId===store.principal?.userId,schedulingHTML:allocationSummary(job)+placementSummary(job)+`<span>排队优先级：${escape(priorityRankLabel(job))}</span>`+schedulingSummary(job)+`<span>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</span><span>调度状态：${escape(job.schedulerState||'未提供')}</span><span>核对时间：${escape(sampleTime(job.schedulerCheckedAt))}</span>`}),output:showOutput,notes:showNotes,onView:next=>{if(next!=='notes')notes?.sync(false,true);}});
   const call=(operation,args)=>store.call(operation,args),query=selector=>section?.querySelector(selector)||submitDialog?.querySelector(selector)||settingsDialog?.querySelector(selector)||log?.querySelector(selector)||document.querySelector('#shell-context')?.querySelector(selector);
   const context=()=>({machine,...(project?{project}:{})}),currentProject=()=>catalog.find(item=>item.project===project);
   const currentToken=()=>JSON.stringify([actor,machine,project,epoch]),ownJobs=()=>store.jobs.filter(job=>job.userId===store.principal?.userId);
+  const submitSelection=createSubmitSelectionGuard(),submitIdentity=()=>JSON.stringify([currentToken(),store.principal?.userId,store.principal?.role,store.authGeneration,document.body.dataset.room]);
   const priorityAvailable=()=>store.data?.execution?.priorityCapabilities?.[machine]===true;
   const customAvailable=()=>!store.data?.gpuq?.stale&&yieldCapable(store.data?.gpuq?.hosts?.find(h=>h.id===machine));
   const enabled=()=>store.production&&!!store.principal&&store.data?.executionEnabled===true&&(store.data?.machines||[]).some(item=>item.id===machine);
@@ -111,8 +122,8 @@ export function executionUI(store,refresh,toast){
     const cli=document.createElement('details');cli.className='submit-cli';cli.innerHTML='<summary>等价命令 · 你的电脑</summary><pre id="submit-command" tabindex="0"></pre><button class="button quiet" type="button" id="copy-submit-command">复制完整命令</button><p class="muted">命令包含当前固定版本与服务器；请先在自己的电脑登录 gpuctl。</p>';
     scroll.append(checks,cli);const footer=document.createElement('div');footer.className='sheet-footer glass';footer.innerHTML='<p id="submit-summary" class="muted">提交后可关闭网页，服务器继续运行。</p>';footer.append(submit);train.append(footer);
     panel.addEventListener('toggle',()=>{if(panel.open){updatePreflight();showSheet(submitDialog);}else submitDialog.close();});
-    submitDialog.addEventListener('close',()=>{if(submitDialog.open)return;closeSettings();panel.open=false;});
-    submitDialog.addEventListener('cancel',event=>{event.preventDefault();submitIntent++;closeSettings();dismissSheet(submitDialog);});
+    submitDialog.addEventListener('close',()=>{if(submitDialog.open)return;submitSelection.invalidate();closeSettings();panel.open=false;});
+    submitDialog.addEventListener('cancel',event=>{event.preventDefault();submitSelection.invalidate();closeSettings();dismissSheet(submitDialog);});
     settingsDialog=document.createElement('dialog');settingsDialog.id='work-submit-panel';settingsDialog.className='work-sheet settings-sheet';settingsDialog.setAttribute('aria-labelledby','submit-panel-title');settingsDialog.innerHTML='<header class="sheet-header glass"><h2 id="submit-panel-title">提交设置</h2><button class="button quiet" id="close-submit-panel" type="button">返回提交</button></header><div class="sheet-scroll"></div>';document.body.append(settingsDialog);
     settingsDialog.addEventListener('cancel',event=>{event.preventDefault();dismissSheet(settingsDialog,{drilldown:true});closeSettings();});settingsDialog.addEventListener('close',()=>{if(!settingsDialog.open)closeSettings();});
     for(const detail of train.querySelectorAll('.training-advanced>details'))detail.querySelector('summary').addEventListener('click',event=>{event.preventDefault();settings(detail);});
@@ -250,9 +261,8 @@ export function executionUI(store,refresh,toast){
   async function listFiles(){const target=fileContext(),path=query('[name=file-path]').value||'.';const result=await call('files.list',{...target,path});query('#workspace-result').textContent=result.entries.map(file=>`${file.type==='directory'?'[目录]':'[文件]'} ${file.name}  ${file.type==='file'?file.size+' B':''}`).join('\n')||'目录为空';}
   document.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
-    if(button.id==='open-submit'){submitIntent++;if(submitDialog)query('#train-panel').open=true;return;}
-    if(button.hasAttribute('data-user-guide')){window.open('/guide/user','_blank','noopener');return;}
-    if(button.id==='close-submit'){submitIntent++;dismissSheet(submitDialog);return;}
+    if(button.id==='open-submit'){submitSelection.invalidate();if(submitDialog)query('#train-panel').open=true;return;}
+    if(button.id==='close-submit'){submitSelection.invalidate();dismissSheet(submitDialog);return;}
     if(button.id==='close-submit-panel'){dismissSheet(settingsDialog,{drilldown:true});closeSettings();updatePreflight();return;}
     if(button.id==='submit-check-refresh'){document.querySelector('#refresh-state').click();if(project)loadProjectStatus();updatePreflight();return;}
     if(button.id==='copy-submit-command'){navigator.clipboard.writeText(query('#submit-command').textContent).then(()=>toast('完整命令已复制。'),()=>toast('复制失败；请选中命令手动复制。'));return;}
@@ -324,18 +334,19 @@ export function executionUI(store,refresh,toast){
     if(name==='file-run')query('[name=file-run-id]').value=event.target.value;
     updatePreflight();
   });
-  document.addEventListener('input',event=>{if(!event.target.closest('#train-form,#work-submit-panel'))return;submitIntent++;submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(event.target.name==='sm-percent')updateControls();updatePreflight();});
+  document.addEventListener('input',event=>{if(!event.target.closest('#train-form,#work-submit-panel'))return;submitSelection.invalidate();submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(event.target.name==='sm-percent')updateControls();updatePreflight();});
   document.addEventListener('gpuq-open-submit',async event=>{
     if(!submitDialog||!actor)return;
-    const detail=event.detail||{},intent=++submitIntent,requestActor=actor,authGeneration=store.authGeneration;
-    // Machine selection changes context synchronously, then awaits the catalog.
-    // A later selection, edited draft or identity change supersedes that reply.
-    const selection=detail.machine&&detail.machine!==machine?selectMachine(detail.machine):null,token=currentToken();
-    const current=()=>intent===submitIntent&&token===currentToken()&&requestActor===store.principal?.userId&&authGeneration===store.authGeneration;
-    if(selection)await selection;
-    if(!current()||detail.machine&&detail.machine!==machine)return;
-    if(detail.datasetRef){query('[name=datasets]').value=detail.datasetRef;submitKey=crypto.randomUUID();}
-    query('#train-panel').open=true;updatePreflight();if(detail.origin)requestAnimationFrame(()=>{if(current()&&submitDialog?.open)sharedObject(detail.origin,query('[name=datasets]'));});if(machine)loadProjectStatus();
+    const detail=event.detail||{},selected=detail.machine||machine,ref=detail.datasetRef||'',origin=detail.origin;
+    const pending=selected!==machine?selectMachine(selected):Promise.resolve();
+    const intent=submitSelection.begin(selected,ref,submitIdentity()),valid=()=>submitSelection.current(intent,machine,submitIdentity())&&enabled();
+    try{
+      await pending;if(!valid())return;
+      if(intent.datasetRef){query('[name=datasets]').value=intent.datasetRef;submitKey=crypto.randomUUID();}
+      query('#train-panel').open=true;updatePreflight();
+      if(origin)requestAnimationFrame(()=>{if(valid()&&submitDialog?.open)sharedObject(origin,query('[name=datasets]'));});
+      if(machine)loadProjectStatus();
+    }catch(error){if(valid())toast(error.message);}
   });
   document.addEventListener('gpuq-open-job',event=>{if(!log||!store.principal)return;const {id,view,origin}=event.detail||{};if(!store.jobs.some(job=>job.id===id)){toast('任务暂未出现在当前账号的状态中，请刷新核对。');return;}focusedJob=id;diagnostics.openLogs(id,view||'overview',origin).catch(error=>toast(error.message));});
   document.addEventListener('gpuq-terminal-state',event=>{terminalSessions=event.detail.sessions||[];if(section&&actor)renderProject();});
@@ -362,7 +373,7 @@ export function executionUI(store,refresh,toast){
         <label>数据集版本（可选）<textarea name="datasets" rows="2" spellcheck="false" placeholder="从左侧「数据集」选择；多个版本用空格分隔"></textarea></label>
         <p class="muted">只挂载你获授权且本机就绪的数据，路径 /data2/数据集名称。准备数据不占 GPU。</p><div class="training-advanced">${schedulingFields(store.principal?.role==='admin')}${elasticFields()}${placementFields()}</div><button type="submit" class="button primary">提交训练</button>
       </form></details>
-      <div class="section-kicker"><span>我的训练任务</span><span id="my-job-count"></span></div><p class="muted">排队、运行及待核对任务均占用个人额度；取消确认后释放。<button type="button" class="button quiet" data-user-guide>用户手册</button></p><div id="my-job-table"></div>`;
+      <div class="section-kicker"><span>我的训练任务</span><span id="my-job-count"></span></div><p class="muted">排队、运行及待核对任务均占用个人额度；取消确认后释放。</p><div id="my-job-table"></div>`;
       adaptWorkspace();notifyContext();
     }
     const machines=store.data?.machines||[],next=JSON.stringify(machines);
