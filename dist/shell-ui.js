@@ -38,6 +38,10 @@ export function shellUI(store,{navigate,getPage,toast}){
     indicator.style.left=rect.left-parent.left+'px';indicator.style.top=rect.top-parent.top+'px';indicator.style.width=rect.width+'px';indicator.style.height=rect.height+'px';
     if(animate&&!reduced()&&previous.width)indicator.animate([{transform:`translateX(${previous.left-rect.left}px) scaleX(${previous.width/rect.width})`},{transform:'none'}],{duration:220,easing:'cubic-bezier(.2,0,0,1)'});
   }
+  function syncNavigation(){
+    const active=getPage(),selected=phone()?({transfers:'datasets',users:'me',maintenance:'me'}[active]||active):active;
+    for(const item of nav.querySelectorAll('[data-nav]')){const current=item.dataset.nav===selected;item.classList.toggle('active',current);if(current)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current');}
+  }
   function route(next,apply){
     const previous=getPage();if(previous===next){apply();return;}
     scrolls.set(previous,scrollY);roomAnimation?.cancel();headingAnimation?.cancel();ghost?.remove();
@@ -71,12 +75,12 @@ export function shellUI(store,{navigate,getPage,toast}){
     const changed=page!==null&&page!==getPage();page=getPage();document.body.dataset.room=page;
     q('#account-avatar').textContent=(store.users.find(user=>user.id===store.principal?.userId)?.name||store.principal?.username||'S').slice(0,1);
     if(notice!==q('#mode-note').textContent)notice=q('#mode-note').textContent;
-    syncContext();updateMobileAction();control.update();renderMe();updateIndicator(changed);
+    syncContext();syncNavigation();updateMobileAction();control.update();renderMe();updateIndicator(changed);
     if(page==='work')q('#page-title').classList.add('work-project-title');else q('#page-title').classList.remove('work-project-title');
   }
   function syncStatus(state,time){q('#sync-label').textContent=state==='syncing'?'正在同步':state==='failed'?'同步失败，保留已确认状态':'已同步 '+new Date(time||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});}
   const clearGhosts=()=>{roomAnimation?.cancel();headingAnimation?.cancel();ghost?.remove();for(const layer of document.querySelectorAll('.object-transition-layer'))layer.remove();};
-  addEventListener('resize',()=>{clearGhosts();updateMobileAction();control.update();updateIndicator();});
+  addEventListener('resize',()=>{clearGhosts();syncNavigation();updateMobileAction();control.update();updateIndicator();});
   store.onAuthChange(()=>{clearGhosts();control.close(true);account.open=false;scrolls.clear();context.hidden=true;});
   requestAnimationFrame(()=>{const initial=q('[data-page]:not([hidden])');initial?.animate([{opacity:0},{opacity:1}],{duration:reduced()?150:220,easing:'linear'});});
   return {update,route,syncStatus,control};
