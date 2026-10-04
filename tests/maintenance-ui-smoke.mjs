@@ -1,3 +1,4 @@
+import {accountMenu} from './starbase-workflows.mjs';
 // Real local Portal/SQLite/cookie/browser; no host, GPU or network mutations.
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,mkdir,rm} from 'node:fs/promises';
@@ -53,7 +54,7 @@ try{
       await page.locator('[data-maintenance-resume]').click();await page.waitForFunction(()=>!document.querySelector('.maintenance-banner')?.textContent.includes('全平台：'));
       assert.equal(service.maintenanceFor('gpu-2'),null);assert.ok(service.maintenanceFor('gpu-1'));
     }
-    await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});await page.setViewportSize({width:1440,height:1000});
+    await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});await page.setViewportSize({width:1440,height:1000});
   }
   assert.equal(service.db.prepare('SELECT state FROM maintenance_requests WHERE id=?').get(legacy.id).state,'PENDING');assert.deepEqual(calls,[]);assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   console.log('Maintenance browser passed: persistent escaped banner, member/admin controls, explicit restore with stale CAS rejection, scoped retention, retired history, identity switch and mobile layout.');

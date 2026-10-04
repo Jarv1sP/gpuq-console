@@ -1,3 +1,4 @@
+import {refreshVisible} from './starbase-workflows.mjs';
 // Real disposable Portal HTTP/asset graph, synthetic node only; no SSH/GPU jobs.
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
@@ -33,8 +34,8 @@ try{
   await submit();assert.deepEqual(service.store.jobs[1].spec.placement,{gpuIndices:[3],shared:true,vramMiB:4096,hami:false});assert.equal(service.store.jobs[1].actualCards,1);
   await page.locator('[name=hami]').check();await page.locator('[name=sm-percent]').fill('50');await submit();
   assert.deepEqual(service.store.jobs[2].spec.placement,{gpuIndices:[3],shared:true,vramMiB:4096,hami:true,smPercent:50});
-  await page.locator('#refresh-state').click();await page.waitForFunction(()=>document.querySelector('#my-job-table').textContent.includes('HAMi SM 50%'));
-  capable=false;await snapshot();await page.locator('#refresh-state').click();await page.waitForFunction(()=>document.querySelector('#placement-note').textContent.includes('未确认'));
+  await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#my-job-table').textContent.includes('HAMi SM 50%'));
+  capable=false;await snapshot();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#placement-note').textContent.includes('未确认'));
   assert.equal(await page.locator('[name=hami]').isChecked(),true);assert.equal(await page.locator('[name=gpu-indices]').inputValue(),'3');assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   assert.deepEqual(errors,[]);assert.deepEqual(httpErrors,[]);assert.deepEqual(outside,[]);

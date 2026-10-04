@@ -155,6 +155,38 @@ sudo docker compose logs --tail 50 gpuq-console caddy
 
 新加机器先部署节点、校验指纹，再更新清单并生成容量表。更改现有 machine ID 等同迁移身份，有未完成任务时不要改。删机器先清空任务/授权，再迁移数据，不直接删数据库记录。
 
+### 仅更新 Portal 前端
+
+前端 PR 测试通过且收到明确批准后，在 VPS 的独立源码目录构建唯一标签的新镜像。先记录正在运行的 revision、镜像 ID 和 Compose 项目，将当前镜像另打回退标签并保留。沿用已核对的原 Compose 文件、环境文件和数据挂载；前端发布要求数据库 schema 兼容。
+
+下面的 `PORTAL_*` 变量由执行者填写为已确认的原部署路径、项目名和本次唯一镜像标签；覆盖文件放在独立发布目录。先完成构建和无数据库的模块加载冒烟，再切换服务：
+
+```sh
+(
+set -eu
+PORTAL_CONTAINER_ID="$(docker compose --env-file "$PORTAL_ENV_FILE" -p "$PORTAL_COMPOSE_PROJECT" -f "$PORTAL_COMPOSE_FILE" ps -q gpuq-console)"
+PORTAL_PREVIOUS_IMAGE_ID="$(docker inspect --format '{{.Image}}' "$PORTAL_CONTAINER_ID")"
+docker image tag "$PORTAL_PREVIOUS_IMAGE_ID" "$PORTAL_ROLLBACK_IMAGE"
+docker build -f "$PORTAL_SOURCE_DIR/deploy/Dockerfile" -t "$PORTAL_NEW_IMAGE" "$PORTAL_SOURCE_DIR"
+docker run --rm --network=none --read-only --entrypoint=node "$PORTAL_NEW_IMAGE" --input-type=module -e "await import('./portal-server.mjs')"
+
+cat > "$PORTAL_IMAGE_OVERRIDE" <<'YAML'
+services:
+  gpuq-console:
+    image: ${PORTAL_RELEASE_IMAGE:?}
+YAML
+PORTAL_RELEASE_IMAGE="$PORTAL_NEW_IMAGE" docker compose --env-file "$PORTAL_ENV_FILE" -p "$PORTAL_COMPOSE_PROJECT" -f "$PORTAL_COMPOSE_FILE" -f "$PORTAL_IMAGE_OVERRIDE" up -d --no-deps --no-build --pull never gpuq-console
+)
+```
+
+构建或冒烟失败就保留当前容器。切换后验收实际域名的登录页、控制台、同源 CSS/JS/WOFF2 和 `/healthz`；确认原执行桥挂载及只读状态仍可用。失败时用保留的镜像单命令回退，保留当前数据库和数据卷：
+
+```sh
+PORTAL_RELEASE_IMAGE="$PORTAL_ROLLBACK_IMAGE" docker compose --env-file "$PORTAL_ENV_FILE" -p "$PORTAL_COMPOSE_PROJECT" -f "$PORTAL_COMPOSE_FILE" -f "$PORTAL_IMAGE_OVERRIDE" up -d --no-deps --no-build --pull never gpuq-console
+```
+
+发布和回退都只选 `gpuq-console`，保持 caddy、headscale、执行桥、节点服务与运行中训练不变。不执行迁移、初始化或卷删除。缺少已确认的部署访问或路径时，停止并向审核者报告。
+
 ### 原生队列人名与任务名（schema 13）
 
 此更新不是只换前端：需新 Portal 镜像、完整节点 runtime（task-display.py / node-executor / node-probe）和原生 GPUQ。schema 12→13 仅增加默认空对象的 jobs.display_json，原 name/owner/submit_key/digest/argv/状态/lease 不改；显示更新按原提交键、内部 owner、内部 name 三重核对。旧任务缺字段时保持原显示，升级后由门户对未结束任务定期回填，不按 GPU 或短前缀猜身份。

@@ -1,3 +1,4 @@
+import {refreshVisible} from './starbase-workflows.mjs';
 // Real disposable Portal HTTP/asset graph, synthetic node only; no SSH/GPU jobs.
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
@@ -29,10 +30,10 @@ try{
   await page.locator('[name=custom-policy]').check();await page.locator('[name=queue-rank]').selectOption('P1');await page.locator('[name=yield-policy]').selectOption('save');await page.locator('[name=restart-policy]').selectOption('on-preempt');await page.locator('[name=checkpointable]').check();
   await page.locator('[name=elastic]').check();await page.locator('[name=cards]').fill('8');await page.locator('[name=min-cards]').fill('1');await page.locator('[name=global-batch]').fill('256');await page.locator('[name=micro-batch]').fill('8');await page.locator('[name=auto-expand]').check();
   const submitted=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/call'&&r.request().postDataJSON()?.operation==='jobs.submit');await page.locator('#train-form [type=submit]').click();assert.equal((await submitted).status(),200);
-  await new Promise(resolve=>setImmediate(resolve));await service.reconcile();await page.locator('#refresh-state').click();await page.waitForFunction(()=>document.querySelector('#my-job-table').textContent.includes('当前 2 张'));
+  await new Promise(resolve=>setImmediate(resolve));await service.reconcile();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#my-job-table').textContent.includes('当前 2 张'));
   const job=service.store.jobs[0];assert.deepEqual(job.elastic,{minCards:1,globalBatch:256,microBatch:8,autoExpand:true});assert.deepEqual(job.allowedGpuCounts,[1,2,4,8]);assert.equal(job.cards,8);assert.equal(job.actualCards,2);
   assert.deepEqual(calls.find(x=>x.operation==='sync').args.job.elastic,job.elastic);
-  capable=false;await snapshot();await page.locator('#refresh-state').click();await page.waitForFunction(()=>document.querySelector('#elastic-note').textContent.includes('尚未确认'));
+  capable=false;await snapshot();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#elastic-note').textContent.includes('尚未确认'));
   assert.equal(await page.locator('[name=elastic]').isChecked(),true);assert.equal(await page.locator('[name=cards]').inputValue(),'8');assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   assert.deepEqual(errors,[]);assert.deepEqual(httpErrors,[]);assert.deepEqual(outside,[]);

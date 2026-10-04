@@ -1,3 +1,4 @@
+import {closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 // Loopback-only browser acceptance: disposable portal DB and fake project,
 // terminal, file and GPUQ operations. No real credentials, shell, SSH or GPUs.
 import assert from 'node:assert/strict';
@@ -79,7 +80,7 @@ try{
   async function action(operation,fn,target=page){const waiting=responseFor(target,operation);await fn();const response=await waiting;assert.equal(response.status(),200,await response.text());return response;}
   async function idle(target=page){await target.waitForFunction(()=>!document.querySelector('[name=workspace-machine]')?.disabled);}
   async function capture(name,target=page){await target.waitForFunction(()=>{const toast=document.querySelector('#toast');return !toast||(!toast.classList.contains('visible')&&Number(getComputedStyle(toast).opacity)===0);});await target.evaluate(()=>scrollTo(0,0));await target.screenshot({path:join(screenshots,name),fullPage:true});}
-  async function setMachine(value,target=page){await action('projects.list',()=>target.locator('[name=workspace-machine]').selectOption(value),target);await idle(target);}
+  async function setMachine(value,target=page){await closeSubmit(target);await action('projects.list',()=>target.locator('[name=workspace-machine]').selectOption(value),target);await idle(target);}
 
   await login(page,'project-user');
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'');
@@ -126,8 +127,8 @@ try{
 
   await page.locator('#train-form').evaluate(form=>{form.closest('details').open=true;});
   await page.locator('[name=command]').fill('python train.py --output /outputs/result.json');await page.locator('[name=name]').fill('project-smoke');
-  await action('projects.publish',()=>page.locator('#project-publish').click());await idle();
-  assert.match(await page.locator('#project-status').textContent(),/正在发布/);assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
+  await closeSubmit(page);await action('projects.publish',()=>page.locator('#project-publish').click());await idle();
+  assert.match(await page.locator('#project-status').textContent(),/正在生成训练版本/);assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   assert.match(await page.locator('#project-status').textContent(),/复制：12 \/ 20 项，512 \/ 1024 B/);
   const publication=projects.get(key(machine,member.id,'vision-demo'));publication.state='READY';publication.releases=[{release,state:'READY'}];publication.latestReadyRelease=release;
   await responseFor(page,'projects.status');await idle();
@@ -151,12 +152,12 @@ try{
   assert.equal(await page.locator('[name=release]').inputValue(),release,'temporarily absent release is not replaced with latest');
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   publication.releases.unshift({release,state:'READY'});await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
-  await page.locator('#refresh-state').click();await idle();
+  await refreshVisible(page);await idle();
   assert.equal(await page.locator('[name=command]').inputValue(),'python train.py --output /outputs/result.json');
   assert.equal(await page.locator('[name=name]').inputValue(),'project-smoke');
 
   // Dataset entry keeps the same project when its explicitly chosen node is the same.
-  await page.locator('[data-nav=datasets]').click();
+  await closeSubmit(page);await page.locator('[data-nav=datasets]').click();
   await action('datasets.catalog',()=>page.locator('#datasets-refresh').click());
   await page.locator('[data-use-dataset=sample]').click();
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),machine);assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
@@ -165,7 +166,7 @@ try{
   const job=(await submitted.json()).result;assert.equal(job.machine,machine);assert.equal(job.project,'vision-demo');assert.equal(job.release,release);
   assert.deepEqual(job.datasets,[{dataset:'sample',version:datasetVersion}]);assert.deepEqual(job.command,['/bin/bash','-c','python train.py --output /outputs/result.json']);
   await idle();
-  await action('files.list',()=>page.locator('#my-job-table [data-job-output]').click());await idle();
+  await closeSubmit(page);await action('files.list',()=>page.locator('#my-job-table [data-job-output]').click());await idle();
   assert.equal(await page.locator('[name=release]').inputValue(),release,'viewing output must not replace the pinned training draft with latest');
   assert.equal(await page.locator('[name=file-area]').inputValue(),'output');assert.equal(await page.locator('[name=file-run-id]').inputValue(),job.id);
   assert.equal(await page.locator('#workspace-upload').isDisabled(),true);assert.match(await page.locator('#workspace-result').textContent(),/metrics.json/);
@@ -181,10 +182,10 @@ try{
   await page.locator('[name=files]').setInputFiles({name:'legacy.py',mimeType:'text/plain',buffer:Buffer.from('legacy test')});
   await action('files.put',()=>page.locator('#workspace-upload').click());await idle();
   const legacy=calls.filter(call=>call.operation==='files.put').at(-1);assert.equal(legacy.machine,other);assert.equal(legacy.args.project,undefined);assert.equal(legacy.args.truncate,true);
-  await page.locator('[name=datasets]').fill('');await page.locator('[name=command]').fill('python legacy.py');
+  await openSubmit(page);await page.locator('[name=datasets]').fill('');await page.locator('[name=command]').fill('python legacy.py');
   const legacySubmission=await action('jobs.submit',()=>page.locator('#train-form [type=submit]').click());await idle();
   const legacyJob=(await legacySubmission.json()).result;assert.equal(legacyJob.machine,other);assert.equal(legacyJob.project,undefined);assert.equal(legacyJob.release,undefined);
-  await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('other-project'));await idle();
+  await closeSubmit(page);await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('other-project'));await idle();
   await capture('projects-mobile-ready.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px selected-project layout must not overflow');
   await page.locator('#project-create summary').click();

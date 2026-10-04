@@ -15,6 +15,8 @@ class Files(unittest.TestCase):
         (base/'node-config.json').write_text(json.dumps({'root':str(base/'data')}))
         spec=importlib.util.spec_from_file_location('node_test',base/'node.py');self.node=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.node)
         self.root=self.node.workspace('demo-user-1')
+        # Ample disk is a controlled fixture; the low-disk test overrides it.
+        space=patch.object(self.node.os,'statvfs',return_value=SimpleNamespace(f_bavail=20*1024**3//4096,f_frsize=4096));space.start();self.addCleanup(space.stop)
     def tearDown(self):self.temp.cleanup()
     def call(self,op,path='.',**kwargs):return self.node.file_op('files.'+op,dict(userId='demo-user-1',path=path,**kwargs))
     def test_roundtrip_chunks_and_offsets(self):

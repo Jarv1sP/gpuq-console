@@ -1,3 +1,4 @@
+import {refreshVisible} from './starbase-workflows.mjs';
 // Real cookie-authenticated notes, temporary SQLite, no scheduler or SSH.
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
@@ -29,10 +30,10 @@ try{
   // A task may finish after the server saves a note but before its lost reply
   // can be retried. Refresh must keep the frozen binding for that exact retry.
   const endingJob={...job,id:randomUUID(),name:'即将结束的训练',state:'RUNNING'};service.store.jobs.push(endingJob);service.save();
-  await page.locator('#refresh-state').click();await page.locator('#task-note-lifetime').selectOption('task');await page.locator('#task-note-job').selectOption(endingJob.id);await page.locator('#task-note-body').fill('结束前丢失响应');drop=true;
+  await refreshVisible(page);await page.locator('#task-note-lifetime').selectOption('task');await page.locator('#task-note-job').selectOption(endingJob.id);await page.locator('#task-note-body').fill('结束前丢失响应');drop=true;
   await page.locator('#task-note-form [type=submit]').click();await page.locator('#task-note-error').filter({hasText:'发送结果未确认'}).waitFor();
   const uncertain=sent.filter(x=>x.operation==='community.notes.create').at(-1).args;endingJob.state='FAILED';service.save();service.pruneTaskNotes();
-  await page.locator('#refresh-state').click();await page.locator('#notes-refresh').click();
+  await refreshVisible(page);await page.locator('#notes-refresh').click();
   assert.equal(await page.locator('#task-note-job').inputValue(),endingJob.id,'terminal refresh must preserve the uncertain task binding');
   await page.locator('#task-note-form [type=submit]').click();await page.waitForFunction(()=>document.querySelector('#task-note-body').value==='');
   assert.deepEqual(sent.filter(x=>x.operation==='community.notes.create').at(-1).args,uncertain);assert.equal(await page.locator('.task-note').count(),1);
