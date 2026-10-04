@@ -56,7 +56,7 @@ def project_runtime(spec,root,cfg,jid,terminal):
     if not spec.get('project'):return None
     module=importlib.util.spec_from_file_location('gpuq_project_store',HERE/'project-store.py')
     store_module=importlib.util.module_from_spec(module);sys.modules[module.name]=store_module;module.loader.exec_module(store_module)
-    store=store_module.ProjectStore(root,cfg['conda'])
+    store=store_module.ProjectStore(root,cfg['conda'],reserve_bytes=store_module.workspace_reserve_bytes(cfg))
     if terminal:
         paths=store.dev_paths(spec['userId'],spec['project'])
         return {**paths,'output':paths['scratch'],'readonly':False,'environmentMode':store.environment_mode(spec['userId'],spec['project'])}
@@ -96,6 +96,13 @@ os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
 '''
     return ['/usr/bin/python3','-c',bootstrap,mode,*command]
 
+def workspace_admission(cfg,root):
+    # Recheck when a queued job actually starts, before untrusted execution.
+    # Host-root terminals do not use this sandbox runner. No periodic policing.
+    if 'workspaceReserveBytes' not in cfg:return
+    module=local_module('gpuq_workspace_storage','project-store.py')
+    module.require_workspace_space(root,module.workspace_reserve_bytes(cfg))
+
 def main():
     jid=sys.argv[1]
     if not re.fullmatch(r'[a-f0-9-]{36}',jid):raise ValueError('Invalid job ID')
@@ -103,6 +110,7 @@ def main():
     local_module('gpuq_platform_root_guard','platform-root-guard.py').check(root)
     terminal=len(sys.argv)>2 and sys.argv[2]=='terminal'
     spec=json.loads((root/('terminals' if terminal else 'jobs')/f'{jid}.json').read_text())
+    workspace_admission(cfg,root)
     indices=os.environ.get('GPUQ_ASSIGNED_GPU_INDICES','').split(',')
     uuids=os.environ.get('GPUQ_ASSIGNED_GPU_UUIDS','').split(',')
     if terminal:indices=[];uuids=[]

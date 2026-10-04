@@ -366,7 +366,7 @@ class ProjectStoreTests(unittest.TestCase):
         self.assert_error('limit_exceeded', self.publish)
         self.store.max_bytes = 50 * 1024**3
         self.store.reserve_bytes = 100
-        with patch.object(module.shutil, 'disk_usage', return_value=SimpleNamespace(free=99)):
+        with patch.object(module.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=99, f_frsize=1)):
             self.assert_error('insufficient_space', self.publish)
 
     def test_per_user_project_count(self):

@@ -30,6 +30,7 @@ JOB_ID = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _ROOT_GUARD = None
+DEFAULT_WORKSPACE_RESERVE = 10 * 1024**3
 
 
 def check_platform_root(root):
@@ -81,6 +82,38 @@ def directory(path):
         yield fd
     finally:
         os.close(fd)
+
+
+def workspace_reserve_bytes(config):
+    """Optional node policy; absent keeps the historical 10 GiB write reserve."""
+    value = config.get('workspaceReserveBytes', DEFAULT_WORKSPACE_RESERVE)
+    if type(value) is not int or not 0 <= value <= 2**63 - 1:
+        fail('invalid_input', 'workspaceReserveBytes must be a nonnegative integer byte count')
+    return value
+
+
+def require_workspace_space(root, reserve_bytes, needed=0, *, target_fd=None):
+    """Admission, not a quota. Pin the guarded root and use ordinary-user space.
+
+    No directories are created. A supplied descriptor must be on the same
+    filesystem; it is a trusted local caller argument, never an RPC field.
+    Concurrent writers can consume space after this check; running work is
+    never killed by this policy.
+    """
+    if any(type(v) is not int or not 0 <= v <= 2**63 - 1 for v in (reserve_bytes, needed)):
+        fail('invalid_input', 'Workspace space requirements must be nonnegative integer byte counts')
+    with directory(root) as fd:
+        identity = os.fstat(fd)
+        check_platform_root(root)
+        with directory(root) as current:
+            now = os.fstat(current)
+            if (identity.st_dev, identity.st_ino) != (now.st_dev, now.st_ino):
+                fail('unsafe_path', 'Console storage root changed during space admission')
+        if target_fd is not None and os.fstat(target_fd).st_dev != identity.st_dev:
+            fail('unsafe_path', 'Workspace write target is on another filesystem')
+        space = os.fstatvfs(fd if target_fd is None else target_fd)
+        if space.f_bavail * space.f_frsize < reserve_bytes + needed:
+            fail('insufficient_space', 'Workspace storage would violate its free-space reserve')
 
 
 def stamp(info):
@@ -429,8 +462,9 @@ class ProjectStore:
                 'coverage': 'interpreter-and-package-metadata; not all base files or host libraries; same-machine validation only'}
 
     def _space(self, needed=0):
-        if shutil.disk_usage(self.path).free < self.reserve_bytes + needed:
-            fail('insufficient_space', 'Project storage would violate its free-space reserve')
+        self._check_root()
+        with directory(self.path) as target:
+            require_workspace_space(self.root, self.reserve_bytes, needed, target_fd=target)
 
     def _publication_location(self, section, relative, info=None):
         # Only project-relative paths, never host paths or file contents.

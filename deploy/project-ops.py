@@ -32,7 +32,8 @@ class ProjectOperations:
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
-        self.store = module.ProjectStore(executor.ROOT, executor.CONFIG['conda'])
+        self.store = module.ProjectStore(executor.ROOT, executor.CONFIG['conda'],
+                                        reserve_bytes=module.workspace_reserve_bytes(executor.CONFIG))
         self.folder = executor.ROOT/'project-ops'
         self.folder.mkdir(mode=0o700, exist_ok=True)
 
@@ -261,6 +262,7 @@ class ProjectOperations:
         if prior != record:
             if offset: raise ValueError('Upload identity changed; restart this file')
             if len(list(folder.glob('*.json')))>=64 and prior is None: raise ValueError('Too many unfinished uploads')
+            self.store._space(len(data))
             self.n.atomic_json(meta, record)
             part.unlink(missing_ok=True)
         fd = os.open(part,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
@@ -271,8 +273,7 @@ class ProjectOperations:
             if info.st_size >= offset+len(data) and os.pread(fd,len(data),offset)==data:
                 pass
             elif info.st_size == offset:
-                free=os.statvfs(folder)
-                if free.f_bavail*free.f_frsize<10*1024**3+len(data): raise ValueError('Workspace disk reserve reached')
+                self.store._space(len(data))
                 os.lseek(fd,offset,0)
                 view=memoryview(data)
                 while view: view=view[os.write(fd,view):]
