@@ -27,6 +27,7 @@ DEFAULTS = {'maxUploadBytes': 1024**4, 'maxUserBytes': 2*1024**4,
             'maxUserUploads': 256, 'maxActiveUploads': 4, 'maxUserSessions': 1024,
             'maxUserEntries': 2000000}
 RELAY_LIMIT_BYTES = 256*1024**2
+MAX_ACTIVE_ARCHIVES = 4  # Independent admission, never an unbounded bypass.
 
 
 class DatasetUploads:
@@ -104,6 +105,18 @@ class DatasetUploads:
                 or value['reserveBytes'] != value['totalBytes']+value['manifestBytes']*4+value['entries']*8192+65536
                 or not isinstance(value.get('manifestSha256'), str) or not HASH.fullmatch(value['manifestSha256'])):
             raise ValueError('Corrupt personal upload identity')
+        lane = value.get('archiveAdmission')
+        if lane is not None:
+            if (not isinstance(lane, dict) or set(lane) != {'schema', 'transferId', 'targetMachine', 'authority', 'sourceMachine', 'reference'}
+                    or type(lane.get('schema')) is not int or lane['schema'] != 1 or lane['transferId'] != upload
+                    or any(not isinstance(lane.get(k), str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', lane[k])
+                           for k in ('targetMachine', 'authority', 'sourceMachine'))
+                    or lane['sourceMachine'] == lane['targetMachine']
+                    or not isinstance(lane['reference'], dict) or set(lane['reference']) != {'kind', 'dataset', 'version'}
+                    or lane['reference']['kind'] != 'datasets'
+                    or not isinstance(lane['reference']['dataset'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', lane['reference']['dataset'])
+                    or not isinstance(lane['reference']['version'], str) or not HASH.fullmatch(lane['reference']['version'])):
+                raise ValueError('Corrupt managed archive upload binding')
         return value
 
     def save(self, session):
@@ -258,7 +271,31 @@ class DatasetUploads:
                 pass
         return result
 
-    def _admit(self, user, args):
+    def _archive_binding(self, user, args, transfer):
+        # This private keyword is not part of process()/HTTP. Re-read a durable
+        # copy specification and its trusted target before granting its lane.
+        if not isinstance(transfer, str) or not UUID.fullmatch(transfer) or args.get('key') != transfer:
+            raise ValueError('Managed archive upload requires its exact transfer ID')
+        jobs = self.n.transfers()
+        spec = jobs.load(transfer)
+        lane = jobs.archive_lane(spec.get('archiveLane'), spec.get('sourceMachine'))
+        source, ref = spec.get('source'), spec.get('reference')
+        if (not isinstance(source, dict) or set(source) != {'id', 'token', 'state', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries'}
+                or source.get('state') != 'READY' or not isinstance(source.get('token'), str)
+                or not re.fullmatch(r'[A-Za-z0-9_-]{43}', source['token'])
+                or not isinstance(ref, dict) or set(ref) != {'kind', 'dataset', 'version'} or ref.get('kind') != 'datasets'):
+            raise ValueError('Invalid durable managed archive copy specification')
+        self.d._identifier(ref['dataset']); self.d._identifier(ref['version'], self.d.HASH_RE)
+        payload = {k: spec[k] for k in ('userId', 'sourceMachine', 'source', 'name', 'reference', 'timeoutSec', 'archiveLane')}
+        expected_digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        if (spec.get('id') != transfer or spec.get('userId') != user or spec.get('digest') != expected_digest
+                or spec.get('name') != args.get('name') or source.get('id') != transfer
+                or any(source.get(k) != args.get(k) for k in ('manifestBytes', 'manifestSha256', 'totalBytes', 'entries'))):
+            raise ValueError('Managed archive upload differs from its durable copy specification')
+        return {'schema': 1, 'transferId': transfer, 'targetMachine': lane['targetMachine'],
+                'authority': lane['authority'], 'sourceMachine': spec['sourceMachine'], 'reference': spec['reference']}
+
+    def _admit(self, user, args, *, _archive_transfer=None):
         name, upload = args.get('name'), args.get('key')
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise ValueError('Personal dataset name must be 1-40 ASCII letters, digits, underscores or hyphens')
@@ -272,12 +309,15 @@ class DatasetUploads:
         if not isinstance(digest, str) or not HASH.fullmatch(digest):
             raise ValueError('Invalid manifest SHA256')
         specification = {k: args[k] for k in ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')}
+        archive = self._archive_binding(user, args, _archive_transfer) if _archive_transfer is not None else None
         with self.cache._locked():
             try:
                 prior = self.load(user, upload)
             except FileNotFoundError:
                 prior = None
             if prior is not None:
+                if prior.get('archiveAdmission') != archive:
+                    raise ValueError('An existing upload cannot change its admission lane')
                 if any(prior.get(k) != v for k, v in specification.items()):
                     raise ValueError('Upload key already exists with a different specification')
                 prior = self.retire_unregistered(prior)
@@ -310,8 +350,9 @@ class DatasetUploads:
             retained = [s for s in sessions if s['state'] != 'DISCARDED']
             if len(retained) >= self.limits['maxUserUploads']:
                 raise ValueError('Personal dataset upload count limit reached')
-            if sum(s['state'] != 'READY' for s in retained) >= self.limits['maxActiveUploads']:
-                raise ValueError('Too many unfinished personal dataset uploads')
+            active = [s for s in retained if s['state'] != 'READY' and (s.get('archiveAdmission') is not None) == (archive is not None)]
+            if len(active) >= (MAX_ACTIVE_ARCHIVES if archive is not None else self.limits['maxActiveUploads']):
+                raise ValueError('Too many unfinished managed archive uploads' if archive is not None else 'Too many unfinished personal dataset uploads')
             # Account for raw/canonical manifests, the immutable path index and
             # future payload before any public or personal transfer can spend it.
             reserve = args['totalBytes']+args['manifestBytes']*4+args['entries']*8192+65536
@@ -325,13 +366,15 @@ class DatasetUploads:
             self.folder(user, upload, create=True)
             session = dict(schema=1, userId=user, uploadId=upload, **specification,
                 state='RECEIVING_MANIFEST', createdAt=time.time(), reserveBytes=reserve)
+            if archive is not None:
+                session['archiveAdmission'] = archive
             self.save(session)
             self.d._write_json(self.reservation(user, upload), self.reservation_value(session))
             return session
 
-    def begin(self, user, args):
+    def begin(self, user, args, *, _archive_transfer=None):
         # effective() has its own short cache lock; do not nest it in admission.
-        session = self.effective(self._admit(user, args))
+        session = self.effective(self._admit(user, args, _archive_transfer=_archive_transfer))
         if session.get('directPaused') is True or args.get('allowRelay') is True and session.get('relayAllowed') is not True:
             with self.guard(user, session['uploadId']):
                 session = self.load(user, session['uploadId'])

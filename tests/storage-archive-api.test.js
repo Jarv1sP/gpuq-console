@@ -69,14 +69,26 @@ test('new immutable event archives through existing transfer without cold GPU pe
   f.finish();await f.service.reconcileStorageArchive();
   const finished=f.archive.rows()[0];assert.equal(finished.phase,'ARCHIVED');assert.equal(finished.eventAcknowledged,true);
   assert.equal(f.calls.find(c=>c.op==='transfers.source.prepare').args.hostAdmin,false);
+  assert.deepEqual(f.calls.find(c=>c.op==='transfers.start').args.archiveLane,{schema:1,targetMachine:cold,authority:'hdd'});
+  const transfer=f.service.transferSnapshotByKey(f.user.id,row.copyKey);
+  assert.deepEqual(transfer.archiveLane,{schema:1,targetMachine:cold,authority:'hdd'});
   assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,{dataset:'cold-copy',version:ref.version}),true);
   assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,{dataset:'not-enrolled',version:ref.version}),false);
   const durable=JSON.stringify(f.archive.rows());assert.equal(durable.includes('private-grant-token'),false);assert.equal(durable.includes('x'.repeat(43)),false);
+});
+test('fixed archive authority is rechecked after awaiting source preparation',async t=>{
+  const f=fixture(t);
+  f.onCall=(_,op)=>{if(op==='transfers.source.prepare')f.service.storageArchivePolicy={enabled:true,machine:cold,authority:'changed'};};
+  await f.service.reconcileStorageArchive();
+  assert.equal(f.calls.some(c=>c.op==='transfers.start'),false);
+  const row=f.db.prepare('SELECT data FROM transfers').get();
+  assert.equal(JSON.parse(row.data).archiveLane.authority,'hdd');
 });
 test('public copy cannot claim internal archive admission or upload to cold store',async t=>{
   const f=fixture(t),request={key:randomUUID(),kind:'copy',from:hot,machine:cold,...ref,name:'mine'};
   await assert.rejects(f.service.transferCall(f.principal,'transfers.create',request),e=>e.status===403);
   await assert.rejects(f.service.transferCall(f.principal,'transfers.create',{...request,managedArchive:1}));
+  await assert.rejects(f.service.transferCall(f.principal,'transfers.create',{...request,archiveLane:{schema:1,targetMachine:cold,authority:'hdd'}}));
   await assert.rejects(f.service.archiveTransferCall(f.principal,request),e=>e.status===403);
   assert.equal(f.transfers.size,0);
 });
@@ -165,6 +177,16 @@ test('paused managed copy resumes through the private lane, not the public trans
   f.service.retryStorageArchive(f.user.id,hot,ref);await f.service.reconcileStorageArchive();
   assert.equal(f.transfers.get(row.transferId).state,'RUNNING');assert.equal(f.transfers.size,1);
   f.finish();await f.service.reconcileStorageArchive();assert.equal(f.archive.rows()[0].phase,'ARCHIVED');
+});
+test('legacy managed copies without a durable lane are not silently relabelled on retry',async t=>{
+  const f=fixture(t);await f.service.reconcileStorageArchive();const row=f.archive.rows()[0];
+  f.transfers.get(row.transferId).state='PAUSED';await f.service.reconcileStorageArchive();
+  const durable=f.db.prepare('SELECT data FROM transfers WHERE id=?').get(row.transferId),data=JSON.parse(durable.data);
+  delete data.archiveLane;f.db.prepare('UPDATE transfers SET data=? WHERE id=?').run(JSON.stringify(data),row.transferId);
+  f.service.retryStorageArchive(f.user.id,hot,ref);await f.service.reconcileStorageArchive();
+  assert.equal(f.calls.some(c=>c.op==='transfers.resume'),false);
+  assert.equal(f.transfers.size,1);assert.equal(f.transfers.get(row.transferId).state,'PAUSED');
+  assert.equal(Object.hasOwn(JSON.parse(f.db.prepare('SELECT data FROM transfers WHERE id=?').get(row.transferId).data),'archiveLane'),false);
 });
 
 test('revoked owner keeps the active lane and must explicitly retry after authorization returns',async t=>{

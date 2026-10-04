@@ -494,7 +494,7 @@ class TransferJobs:
         self.n.atomic_json(self.path(global_id,'.slots.json'),{'slots':retained})
 
     def start(self, args):
-        if set(args)-{'id', 'userId', 'username', 'sourceMachine', 'source', 'reference', 'name', 'timeoutSec'}:
+        if set(args)-{'id', 'userId', 'username', 'sourceMachine', 'source', 'reference', 'name', 'timeoutSec', 'archiveLane'}:
             raise ValueError('Invalid LAN transfer fields')
         self.actor(args)
         key = identifier(args.get('id'))
@@ -514,6 +514,8 @@ class TransferJobs:
         PeerClient(peer, source).close()  # Validate trusted config; no connection yet.
         payload = {k: args[k] for k in ('userId', 'sourceMachine', 'source', 'name')}
         payload.update(reference=ref, timeoutSec=timeout)
+        if 'archiveLane' in args:
+            payload['archiveLane'] = self.archive_lane(args['archiveLane'], args['sourceMachine'])
         with self.lock(key):
             if self.path(key, '.source-release.json').exists():
                 raise ValueError('Source transfer was finalized; use a new transfer ID')
@@ -558,6 +560,8 @@ class TransferJobs:
     def resume(self, args):
         with self.lock(args['id']):
             spec = self.owned(args)
+            if 'archiveLane' in spec:
+                self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
             if self.path(spec['id'], '.source-release.json').exists():
                 raise ValueError('Source transfer was finalized; use a new transfer ID')
             if self.path(spec['id'], '.cancel').exists():
@@ -572,14 +576,37 @@ class TransferJobs:
                         or not isinstance(source.get('token'),str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}',source['token'])):
                     raise ValueError('Resume may renew only the SAME immutable source ticket')
                 spec['source']=source
-                spec['digest']=digest({k:spec[k] for k in ('userId','sourceMachine','source','name','reference','timeoutSec')})
+                spec['digest']=digest({k:spec[k] for k in ('userId','sourceMachine','source','name','reference','timeoutSec','archiveLane') if k in spec})
             with self.lock('00000000-0000-0000-0000-000000000000', '.admission.lock'):
                 self.admit(spec)
                 spec['attempt'] += 1
                 self.launch(spec)
             return self.status(args)
 
+    def archive_lane(self, value, source_machine):
+        # Only the authenticated internal bridge supplies this binding. Check
+        # it again against the live fixed authority, not a caller boolean.
+        policy = self.n.CONFIG.get('storageArchive')
+        if (not isinstance(value, dict) or set(value) != {'schema', 'targetMachine', 'authority'}
+                or value.get('schema') != 1 or type(value['schema']) is not int
+                or not isinstance(policy, dict) or type(policy.get('enabled')) is not bool
+                or policy != {'enabled': True, 'machine': value.get('targetMachine'), 'authority': value.get('authority')}
+                or self.n.CONFIG.get('machine') != value['targetMachine']
+                or source_machine == value['targetMachine']
+                or self.n.CONFIG.get('storageAuthority') != {'enabled': True}):
+            raise ValueError('Managed archive requires the fixed protected storage authority')
+        archive = self.n.storage_archive()
+        archive._require(source=True)
+        if (archive.policy != policy or archive.machine != value['targetMachine']
+                or archive.store is None or archive.store.machine != archive.machine
+                or archive.store.cache.root != self.n.dataset_cache()[1].root):
+            raise ValueError('Managed archive authority binding changed')
+        return dict(value)
+
     def upload(self, spec, action, **fields):
+        if action == 'begin' and 'archiveLane' in spec:
+            self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
+            return self.n.dataset_uploads().begin(spec['userId'], fields, _archive_transfer=spec['id'])
         if action in ('seal', 'commit'):
             return self.n.dataset_uploads().start(spec['userId'], fields, action,
                 inline_unit=self.unit(spec['id'], spec['attempt']))
@@ -619,6 +646,8 @@ class TransferJobs:
                         for _ in range(min(30, 2**retry)*4):
                             check();time.sleep(.25)
             try:
+                if 'archiveLane' in spec:
+                    self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
                 check()
                 info = read('info')
                 if any(info[k] != spec['source'][k] for k in ('manifestBytes', 'manifestSha256', 'totalBytes', 'entries')):

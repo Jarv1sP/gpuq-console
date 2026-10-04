@@ -46,11 +46,19 @@ function authorizedCopy(service,user,data){
   if(data.managedArchive===1){
     const policy=service.storageArchivePolicy;
     if(!policy?.enabled||data.kind!=='copy'||data.machine!==policy.machine||data.from===data.machine)fail('长期归档配置已改变。',403);
+    if(data.archiveLane!==undefined)archiveLane(service,data);
     authorized(service,user,data.from);
   }else{
     authorized(service,user,data.machine);
     if(data.from&&!user.limits[data.from]&&!service.archiveSourceAllowed?.(user.id,data.from,data.reference))fail('源机器或数据版本未授权。',403);
   }
+}
+function archiveLane(service,data){
+  const policy=service.storageArchivePolicy,value=data.archiveLane;
+  if(!policy?.enabled||!value||Object.keys(value).sort().join(',')!=='authority,schema,targetMachine'||
+    value.schema!==1||value.targetMachine!==policy.machine||value.authority!==policy.authority||data.machine!==policy.machine)
+    fail('归档传输未绑定当前固定存储；不会重标旧传输。',409);
+  return structuredClone(value);
 }
 function pinnedSnapshot(service,principal,operation,args,row){
   const user=service.store.get(principal.userId);
@@ -153,6 +161,7 @@ async function dispatch(service,principal,row){
   // Repeating create uses the SAME node ID / upload key. Never mint a second
   // execution after an ambiguous request. Source grant is durably saved first.
   if(data.kind==='copy'){
+    const lane=data.managedArchive===1?archiveLane(service,data):null;
     if(!data.sourceTicket){
       const result=await service.bridge(data.from,'transfers.source.prepare',{id:row.id,reference:data.reference,userId:user.id,hostAdmin:principal.role==='admin',timeoutSec:data.timeoutSec,targetMachine:data.machine});
       if(result?.id!==row.id||typeof result.token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(result.token))fail('源授权回执不匹配。',502);
@@ -160,7 +169,8 @@ async function dispatch(service,principal,row){
       if(data.sourceRelease?.protocol===1)data.sourceRelease={protocol:1,state:'HELD'};
       row=save(service,row,'DISPATCHING',principal.username,'transfers.source-prepared');
     }
-    const result=await service.bridge(data.machine,'transfers.start',{id:row.id,userId:user.id,sourceMachine:data.from,source:data.sourceTicket,reference:data.reference,name:data.name,timeoutSec:data.timeoutSec});
+    if(lane)archiveLane(service,data); // Recheck after source preparation I/O.
+    const result=await service.bridge(data.machine,'transfers.start',{id:row.id,userId:user.id,sourceMachine:data.from,source:data.sourceTicket,reference:data.reference,name:data.name,timeoutSec:data.timeoutSec,...(lane?{archiveLane:lane}:{})});
     if(result.id!==row.id||!states.has(result.state))fail('节点传输回执不匹配。',502);
     row.data.result=result;return releaseSource(service,save(service,row,result.state,principal.username,'transfers.dispatched'),principal.username);
   }
@@ -290,6 +300,7 @@ async function transferOperation(service,principal,operation,args){
     if(service[archiveAdmission]){
       if(!service.archiveIntentAllowed?.(user.id,args))fail('归档发布意图已改变。',403);
       payload.managedArchive=1;
+      payload.archiveLane={schema:1,targetMachine:service.storageArchivePolicy.machine,authority:service.storageArchivePolicy.authority};
     }
     authorizedCopy(service,user,payload);
     let previous=service.db.prepare('SELECT id,digest FROM transfers WHERE owner_id=? AND client_key=?').get(user.id,args.key),row;
@@ -344,12 +355,14 @@ async function transferOperation(service,principal,operation,args){
   if(operation==='transfers.resume'){
     fields(args,['id']);if(done.has(row.state)||row.data.cancelRequested)fail('完成或取消的传输不能恢复。',409);
     if(row.data.managedArchive===1&&!service[archiveAdmission])fail('请在数据集页面重试长期归档，后台会按顺序恢复同一传输。',409);
+    if(row.data.managedArchive===1)archiveLane(service,row.data);
     if(row.data.kind!=='copy')return view(save(service,row,'WAITING_CLIENT',principal.username,operation));
     const current=await sync(service,row,principal.username);
     if(!['PAUSED','FAILED'].includes(current.state))fail('先确认原任务已经停止；UNKNOWN 不会启动新尝试。',409);
     const ticket=await service.bridge(row.data.from,'transfers.source.prepare',{id:row.id,reference:row.data.reference,userId:user.id,hostAdmin:principal.role==='admin',timeoutSec:row.data.timeoutSec,targetMachine:row.data.machine,renew:true});
     const source={id:row.id,token:ticket.token,...info(ticket)};
     if(Object.keys(current.data.sourceTicket).some(k=>k!=='token'&&current.data.sourceTicket[k]!==source[k]))fail('恢复只能读取原固定版本。',409);
+    if(row.data.managedArchive===1)archiveLane(service,row.data);
     current.data.sourceTicket=source;const saved=save(service,current,'DISPATCHING',principal.username,'transfers.resume-intent');
     try{const result=await service.bridge(row.data.machine,'transfers.resume',{id:row.id,userId:user.id,source});if(result.id!==row.id||!states.has(result.state))fail('恢复回执不匹配。',502);saved.data.result=result;return view(await releaseSource(service,save(service,saved,result.state,principal.username,operation),principal.username));}
     catch(error){if(error.transferFence)throw error;saved.data.error='恢复回执未确认；核对同一任务，不会重复启动。';return view(save(service,saved,'UNKNOWN',principal.username,'transfers.resume-unknown'));}

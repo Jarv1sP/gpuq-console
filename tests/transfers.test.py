@@ -24,6 +24,7 @@ def module(name,path):
 F=module('snapshot_fixture_for_transfers',HERE/'snapshot-sync.test.py')
 T=module('transfer_worker_tests',DEPLOY/'transfer-jobs.py')
 P=module('transfer_peer_tests',DEPLOY/'transfer-peer.py')
+A=module('transfer_archive_tests',DEPLOY/'storage-archive.py')
 USER=F.USER
 
 
@@ -60,6 +61,11 @@ class Transfers(unittest.TestCase):
         for p in self.patches:p.stop()
         self.fixture.tearDown()
     def control(self):return {'id':self.key,'userId':USER}
+    def archive_target(self):
+        d,cache=self.target.dataset_cache()
+        self.target.CONFIG.update(storageArchive={'enabled':True,'machine':'gpu-2','authority':'hdd'},storageAuthority={'enabled':True})
+        store=A.A.AuthorityStore(cache,'gpu-2',self.target.ROOT/'authority-test',principal=d.Principal('builtin-admin',True))
+        with patch.object(self.target,'storage_authority',return_value=store):return A.StorageArchive.from_executor(self.target)
     def test_live_peer_rechecks_platform_mount_before_each_read(self):
         client=T.PeerClient(self.target.CONFIG['transferPeers']['gpu-1'],self.args['source'])
         with patch.object(self.source,'platform_root_check',side_effect=ValueError('platform unavailable')), \
@@ -84,6 +90,73 @@ class Transfers(unittest.TestCase):
         proof=self.dst.process('transfers.confirm-source-release',self.control())
         self.assertTrue(self.src.process('transfers.release-source',{**self.control(),'confirmation':proof})['released'])
         self.assertEqual(self.source.dataset_cache()[1]._leases('shared',self.version),[])
+    def test_trusted_archive_real_tls_copy_with_four_retained_personal_uploads(self):
+        d,cache=self.target.dataset_cache();uploads=self.target.dataset_uploads();old=[]
+        for _ in range(4):
+            key=str(uuid.uuid4());uploads.begin(USER,{'name':'retained','key':key,'manifestBytes':100,
+                'manifestSha256':'a'*64,'totalBytes':10,'entries':1});old.append(key)
+        before=[uploads.load(USER,key) for key in old]
+        archive=self.archive_target()
+        with patch.object(self.target,'storage_archive',return_value=archive):
+            args={**self.args,'archiveLane':{'schema':1,'targetMachine':'gpu-2','authority':'hdd'}}
+            self.dst.start(args);self.assertEqual(self.dst.worker(self.key,1),0)
+            result=self.dst.status(self.control());self.assertEqual(result['state'],'SUCCEEDED')
+            self.assertEqual(result['version'],self.version)
+            session=uploads.load(USER,result['uploadId']);self.assertEqual(session['archiveAdmission']['transferId'],self.key)
+            self.assertEqual([uploads.load(USER,key) for key in old],before)
+            self.assertEqual(self.dst.start(args)['state'],'SUCCEEDED')
+            with self.assertRaisesRegex(ValueError,'cannot change'):self.dst.start(self.args)
+            proof=self.dst.process('transfers.confirm-source-release',self.control())
+            self.assertTrue(self.src.process('transfers.release-source',{**self.control(),'confirmation':proof})['released'])
+            self.assertEqual(self.source.dataset_cache()[1]._leases('shared',self.version),[])
+    def test_archive_start_and_worker_recheck_fixed_authority_without_clearing_protection(self):
+        args={**self.args,'archiveLane':{'schema':1,'targetMachine':'gpu-2','authority':'hdd'}}
+        with self.assertRaisesRegex(ValueError,'fixed protected'):self.dst.start(args)
+        self.assertFalse(self.dst.path(self.key).exists())
+        # Ordinary transfers retain their ordinary admission and durable spec.
+        self.dst.start(self.args);spec=self.dst.load(self.key)
+        self.assertNotIn('archiveLane',spec)
+        self.assertEqual(self.dst.worker(self.key,1),0)
+        self.assertTrue(self.source.dataset_cache()[1]._leases('shared',self.version))
+    def test_archive_worker_disabled_after_start_retains_source_protection(self):
+        archive=self.archive_target()
+        with patch.object(self.target,'storage_archive',return_value=archive):
+            args={**self.args,'archiveLane':{'schema':1,'targetMachine':'gpu-2','authority':'hdd'}}
+            self.dst.start(args);self.target.CONFIG['storageArchive']={'enabled':False}
+            self.assertEqual(self.dst.worker(self.key,1),1)
+            result=self.dst.status(self.control());self.assertEqual(result['state'],'FAILED')
+            self.assertIn('fixed protected',result['error'])
+            self.assertTrue(self.source.dataset_cache()[1]._leases('shared',self.version))
+            with self.assertRaises(FileNotFoundError):self.target.dataset_uploads().load(USER,self.key)
+            with self.assertRaisesRegex(ValueError,'fixed protected'):self.dst.resume(self.control())
+    def test_archive_resume_renews_ticket_without_changing_bound_admission(self):
+        archive=self.archive_target()
+        with patch.object(self.target,'storage_archive',return_value=archive):
+            args={**self.args,'archiveLane':{'schema':1,'targetMachine':'gpu-2','authority':'hdd'}}
+            self.dst.start(args);original=self.dst.upload;interrupted=[False]
+            def upload(spec,action,**fields):
+                value=original(spec,action,**fields)
+                if action=='chunk' and not interrupted[0]:interrupted[0]=True;raise ConnectionError('paused after confirmed chunk')
+                return value
+            with patch.object(self.dst,'upload',side_effect=upload):self.assertEqual(self.dst.worker(self.key,1),1)
+            self.assertEqual(self.dst.status(self.control())['state'],'PAUSED')
+            before=self.target.dataset_uploads().load(USER,self.key)['archiveAdmission']
+            renewed=self.src.prepare({'id':self.key,'userId':USER,'reference':self.args['reference'],'targetMachine':'gpu-2','renew':True})
+            self.dst.resume({**self.control(),'source':renewed})
+            self.assertEqual(self.dst.worker(self.key,2),0)
+            self.assertEqual(self.target.dataset_uploads().load(USER,self.key)['archiveAdmission'],before)
+            self.assertEqual(self.dst.load(self.key)['archiveLane'],args['archiveLane'])
+    def test_managed_archive_does_not_bypass_four_global_transfer_slots(self):
+        archive=self.archive_target()
+        with patch.object(self.target,'storage_archive',return_value=archive):
+            self.dst.start({**self.args,'archiveLane':{'schema':1,'targetMachine':'gpu-2','authority':'hdd'}})
+            for _ in range(3):
+                key=str(uuid.uuid4());self.dst.start({**self.args,'id':key,'source':{**self.args['source'],'id':key}})
+            key=str(uuid.uuid4())
+            with self.assertRaisesRegex(ValueError,'Four'):
+                self.dst.start({**self.args,'id':key,'source':{**self.args['source'],'id':key},'archiveLane':{'schema':1,'targetMachine':'gpu-2','authority':'hdd'}})
+            slots=self.dst.load('00000000-0000-0000-0000-000000000000','.slots.json')['slots']
+            self.assertEqual(len(slots),4)
     def test_lost_launch_occupies_admission_and_no_second_launch(self):
         with patch.object(self.target,'run',side_effect=TimeoutError('uncertain')):
             self.dst.start(self.args)
