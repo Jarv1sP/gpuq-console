@@ -5,7 +5,7 @@ import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 import {LARGE_RELAY_BYTES,routePresentation,transferBytes,uploadPhase} from './data-route.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={READY:'本机已就绪',REGISTERED:'待准备',STAGING:'未完成，可续传',PREPARING:'准备中',FAILED:'准备失败',NOT_LOCAL:'本机没有此版本',UNKNOWN:'本机状态待确认'};
-const bytesLabel=value=>{const bytes=Number(value);if(!Number.isFinite(bytes)||bytes<0)return '未知';return bytes<1024**3?(bytes/1024**2).toFixed(1)+' MiB':(bytes/1024**3).toFixed(2)+' GiB';};
+const bytesLabel=value=>{const bytes=value;if(!Number.isFinite(bytes)||bytes<0)return '未知';return bytes<1024**3?(bytes/1024**2).toFixed(1)+' MiB':(bytes/1024**3).toFixed(2)+' GiB';};
 export function archiveStatus(storage){
   if(!storage)return '';
   const saved=storage.phase==='ARCHIVED'&&storage.originalRetained===true;
@@ -17,16 +17,37 @@ export function capacityText(capacity){
   if(!capacity||capacity.available!==true||!Number.isFinite(capacity.availableBytes)||capacity.availableBytes<0||!Number.isFinite(capacity.filesystemBytes)||capacity.filesystemBytes<0)return '容量暂未确认；上传或发布前请刷新。';
   return `本机数据盘可用 ${bytesLabel(capacity.availableBytes)} / 共 ${bytesLabel(capacity.filesystemBytes)}${Number.isFinite(capacity.usableBytes)?` · 扣除预留后 ${bytesLabel(capacity.usableBytes)}`:''}${Number.isFinite(capacity.reserveBytes)?`（安全预留 ${bytesLabel(capacity.reserveBytes)}）`:''}。共享磁盘容量，不是个人配额。`;
 }
+const locationNames={READY:'已就绪',REGISTERED:'待准备',STAGING:'未完成',PREPARING:'准备中',FAILED:'准备失败',NOT_LOCAL:'没有此版本',UNKNOWN:'目录未确认'};
+export function datasetMachines(catalog){
+  const result=new Map();
+  for(const item of catalog?.machines||[])if(typeof item.machine==='string')result.set(item.machine,item);
+  for(const dataset of catalog?.datasets||[])for(const version of dataset.versions||[])for(const location of version.locations||[])
+    if(typeof location.machine==='string'&&!result.has(location.machine))result.set(location.machine,{machine:location.machine,state:'unavailable'});
+  if(typeof catalog?.machine==='string'&&!result.has(catalog.machine))result.set(catalog.machine,{machine:catalog.machine,state:'unavailable'});
+  return [...result.values()];
+}
+export function datasetLocation(version,machine,catalog){
+  const local=(version.locations||[]).find(location=>location.machine===machine.machine);
+  // An omitted cell is absence only after that node's catalog was confirmed.
+  // The selected version state is already the server's local readiness view.
+  const state=local?.state||(machine.machine===catalog.machine?version.state:null)||(machine.state==='ok'?'NOT_LOCAL':'UNKNOWN');
+  return {state:Object.hasOwn(locationNames,state)?state:'UNKNOWN',label:locationNames[state]||locationNames.UNKNOWN};
+}
 export function datasetRows(catalog){
-  return (catalog?.datasets||[]).flatMap(item=>(item.versions||[]).map(v=>{
+  const machines=datasetMachines(catalog);
+  const rows=(catalog?.datasets||[]).flatMap(item=>(item.versions||[]).map(v=>{
     const state=v.state||'UNKNOWN',locations=Array.isArray(v.locations)?v.locations:[],remoteSource=v.canPrepare===true&&typeof v.sourceMachine==='string'&&v.sourceMachine.length>0,selectable=state==='READY'||state==='PREPARING'||v.canPrepare===true&&(['REGISTERED','STAGING'].includes(state)||state==='NOT_LOCAL'&&remoteSource);
     const ownerLabel=typeof v.ownerLabel==='string'?v.ownerLabel:'所属用户：未知';
     const differentOwners=locations.some(location=>location.ownerLabel!==v.ownerLabel);
-    const where=locations.length?`<p class="dataset-locations">副本位置：${locations.map(location=>`${esc(location.machine)} · ${esc(location.state==='READY'?'已就绪':labels[location.state]||'待确认')}${differentOwners?` · ${esc(location.ownerLabel||'所属用户：未知')}`:''}`).join('；')}</p>`:'';
+    const where=locations.length?`<p class="dataset-locations${differentOwners?'':' dataset-location-summary'}">副本位置：${locations.map(location=>`${esc(location.machine)} · ${esc(location.state==='READY'?'已就绪':labels[location.state]||'待确认')}${differentOwners?` · ${esc(location.ownerLabel||'所属用户：未知')}`:''}`).join('；')}</p>`:'';
     const storage=archiveStatus(locations.find(location=>location.machine===catalog.machine)?.storage);
     const help=v.canPrepare===false&&!['READY','PREPARING'].includes(state)?(state==='NOT_LOCAL'?'此版本没有到本机的可用共享通道；请选择已就绪机器，或在本机导入。':state==='UNKNOWN'?'本机状态尚未确认，请刷新后再操作。':String(item.dataset).startsWith('w-')?'回到个人数据空间，重新发布对应子目录。':'重新选择同一目录继续上传。'):v.sourceMachine?`将通过实验室内网从 ${esc(v.sourceMachine)} 准备固定版本，不占用 VPS 下载带宽。`:'';
-    return `<article class="dataset-card"><div><div class="dataset-card-heading"><h3>${esc(item.name||item.dataset)}</h3><span data-state="${esc(state)}" class="dataset-readiness ${state==='READY'?'ready':''}">${esc(labels[state]||state)}</span></div><p class="dataset-owner">${esc(ownerLabel)}</p><p class="muted">${esc(bytesLabel(v.bytes||0))} · ${Number(v.files||0)} 个文件</p>${where}${storage}${v.error?`<p class="form-error" role="status">${esc(v.error)}</p>`:''}<details class="dataset-version-details"><summary>版本与路径 <code>${esc(String(v.version||'').slice(0,12))}</code></summary><label class="field">固定版本<input readonly value="${esc(item.dataset+'@'+v.version)}" aria-label="${esc(item.dataset)} 的固定版本" spellcheck="false"></label><p class="muted">训练路径：<code>/data2/${esc(item.dataset)}</code>（只读）</p></details>${help?`<p class="muted">${help}</p>`:''}${selectable&&state!=='READY'?'<p class="muted">可先提交训练；数据在后台准备完成后才排 GPU，不会提前占卡。</p>':''}</div><div class="file-actions">${v.canPrepare===false?'':`<button class="button" data-prepare-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${['READY','PREPARING','UNKNOWN'].includes(state)?'disabled':''}>准备到本机</button>`}<button class="button primary" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${selectable?'':'disabled'}>${selectable&&state!=='READY'?'准备后训练':'用于训练'}</button></div></article>`;
-  })).join('')||(catalog?.partial?'<div class="empty">目录尚未完整确认，暂无可确认版本。<br>请刷新或检查机器连接；不能据此认定没有数据。</div>':'<div class="empty">还没有分配或上传的数据集。<br>从“添加数据”导入自己的数据，或联系管理员分配。</div>');
+    const cells=machines.map(machine=>{const location=datasetLocation(v,machine,catalog);return `<div class="dataset-location" data-location-state="${location.state}" role="cell" aria-label="${esc(machine.machine+' · '+location.label)}"><span class="dataset-machine-label">${esc(machine.machine)}</span><span class="dataset-location-icon" aria-hidden="true"></span><span>${esc(location.label)}</span></div>`;}).join('');
+    const files=Number.isSafeInteger(v.files)&&v.files>=0?v.files.toLocaleString('zh-CN')+' 个文件':'文件数未知';
+    return `<article class="dataset-card" role="rowgroup"><div class="dataset-matrix-row" role="row"><div class="dataset-card-heading" role="rowheader"><h3>${esc(item.name||item.dataset)}</h3><p class="dataset-owner">${esc(ownerLabel)}</p><code class="dataset-short-version">${esc(String(v.version||'').slice(0,12))}</code></div>${cells}<div class="dataset-volume" role="cell">${esc(bytesLabel(v.bytes))}<small>${esc(files)}</small></div></div><div class="dataset-row-details" role="row"><div class="dataset-actions-cell" role="cell" aria-colspan="${machines.length+2}"><span data-state="${esc(state)}" class="dataset-readiness ${state==='READY'?'ready':''}">${esc(labels[state]||state)}</span>${where}${storage}${v.error?`<p class="form-error" role="status">${esc(v.error)}</p>`:''}<details class="dataset-version-details"><summary>版本与路径 <code>${esc(String(v.version||'').slice(0,12))}</code></summary><label class="field">固定版本<input readonly value="${esc(item.dataset+'@'+v.version)}" aria-label="${esc(item.dataset)} 的固定版本" spellcheck="false"></label><p class="muted">训练路径：<code>/data2/${esc(item.dataset)}</code>（只读）</p></details>${help?`<p class="muted dataset-guidance">${help}</p>`:''}${selectable&&state!=='READY'?'<p class="muted dataset-guidance">可先提交训练；数据在后台准备完成后才排 GPU，不会提前占卡。</p>':''}<div class="file-actions">${v.canPrepare===false?'':`<button class="button quiet" data-prepare-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${['READY','PREPARING','UNKNOWN'].includes(state)?'disabled':''}>准备到本机</button>`}<button class="button" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${selectable?'':'disabled'}>${selectable&&state!=='READY'?'准备后训练':'用于训练'}</button></div></div></div></article>`;
+  })).join('');
+  if(!rows)return catalog?.partial?'<div class="empty">目录尚未完整确认，暂无可确认版本。<br>请刷新或检查机器连接；不能据此认定没有数据。</div>':'<div class="empty">还没有分配或上传的数据集。<br>从“添加数据”导入自己的数据，或联系管理员分配。</div>';
+  return `<div class="dataset-matrix" role="table" aria-label="固定数据版本的副本位置"><div class="dataset-matrix-row dataset-matrix-heading" role="row"><span role="columnheader">数据集 · 固定版本</span>${machines.map(machine=>`<span role="columnheader">${esc(machine.machine)}${machine.machine===catalog.machine?'<small>本次使用</small>':''}</span>`).join('')}<span role="columnheader">数据量</span></div>${rows}</div>`;
 }
 export function datasetsUI(store,toast){
   const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,controller=null,active=null,machineIds='';
@@ -35,6 +56,17 @@ export function datasetsUI(store,toast){
   const human=transferBytes;
   const workspace=dataWorkspaceUI(store,section,toast,{onBusyChange:controls,refreshCatalog:load});
   const cloud=cloudImportUI(store,section,toast);
+  function installAddSheet(){
+    const entry=section.querySelector('#datasets-add'),dialog=section.querySelector('#dataset-add-dialog'),controls=section.querySelector('.datasets-controls'),capacity=section.querySelector('#datasets-capacity');
+    const toolbar=document.createElement('div');toolbar.className='datasets-toolbar';controls.before(toolbar);toolbar.append(controls,entry);
+    entry.addEventListener('toggle',()=>{
+      if(!section.contains(entry))return;
+      if(entry.open&&!dialog.open){dialog.querySelector('.dataset-sheet-context').append(controls,capacity);dialog.showModal();dialog.querySelector('[data-dataset-panel]:not([hidden]) input:not([disabled])')?.focus();}
+      else if(!entry.open&&dialog.open)dialog.close();
+    });
+    dialog.addEventListener('close',()=>{if(!section.contains(entry))return;entry.open=false;toolbar.prepend(controls);toolbar.after(capacity);entry.querySelector('summary').focus({preventScroll:true});});
+    dialog.addEventListener('click',event=>{if(event.target.closest('[data-dataset-add-close]'))dialog.close();});
+  }
   function phase(state){
     const current=uploadPhase(state);
     for(const [index,item] of [...section.querySelectorAll('[data-upload-phase]')].entries()){
@@ -72,7 +104,7 @@ export function datasetsUI(store,toast){
     const valid=()=>token===generation&&current(expected)&&section.querySelector('[name=dataset-machine]')?.value===machine;
     const status=section.querySelector('#datasets-status'),capacity=section.querySelector('#datasets-capacity');status.textContent='正在汇总已授权机器的数据集…';capacity.textContent='正在读取本机容量…';section.querySelector('#dataset-catalog').replaceChildren();
     try{await Promise.all([
-      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;section.querySelector('#dataset-catalog').innerHTML=datasetRows(result);status.textContent=result.partial?'部分机器目录未确认；已显示可确认的版本。当前服务器就绪或有批准来源的版本可选入训练。':'目录已更新。就绪后训练；有批准来源的版本可先提交、后台准备，不占 GPU。位置不代表自动跨机复制。';}).catch(error=>{if(valid()){section.querySelector('#dataset-catalog').replaceChildren();status.textContent='目录未能确认：'+error.message;}}),
+      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;section.querySelector('#dataset-catalog').innerHTML=datasetRows({...result,machine});status.textContent=result.partial?'部分机器目录未确认；已显示可确认的版本。当前服务器就绪或有批准来源的版本可选入训练。':'目录已更新。就绪后训练；有批准来源的版本可先提交、后台准备，不占 GPU。位置不代表自动跨机复制。';}).catch(error=>{if(valid()){section.querySelector('#dataset-catalog').replaceChildren();status.textContent='目录未能确认：'+error.message;}}),
       store.call('datasets.capacity',{machine}).then(result=>{if(valid())capacity.textContent=capacityText(result);}).catch(()=>{if(valid())capacity.textContent=capacityText(null);})
     ]);}
     finally{if(token===generation){busy=false;controls();}}
@@ -105,6 +137,7 @@ export function datasetsUI(store,toast){
   section.addEventListener('click',async e=>{
     const b=e.target.closest('button');if(!b||b.disabled)return;
     if(b.dataset.datasetSource){source(b.dataset.datasetSource);return;}
+    if(['terminal-data-open','terminal-data-reconnect'].includes(b.id))section.querySelector('#dataset-add-dialog')?.close();
     if(b.id==='dataset-organize-next'){source('workspace');section.querySelector('#dataset-source-workspace').focus();return;}
     if(b.id==='datasets-refresh'){load();return;}
     if(b.id==='dataset-upload-pause'){controller?.abort();return;}
@@ -117,9 +150,14 @@ export function datasetsUI(store,toast){
     if(b.dataset.retryArchive){const expected=account(),token=generation;b.disabled=true;try{await store.call('datasets.archive.retry',{machine,dataset:b.dataset.retryArchive,version:b.dataset.version});if(!current(expected)||token!==generation)return;toast('已安排重新核对长期保存；本机数据继续保留。');await load();}catch(error){if(current(expected)&&token===generation){toast(error.message);b.disabled=false;}}return;}
     if(b.dataset.prepareDataset){const expected=account(),token=generation;b.disabled=true;try{const result=await store.call('datasets.prepare',{machine,dataset:b.dataset.prepareDataset,version:b.dataset.version});if(!current(expected)||token!==generation)return;toast(result.state==='READY'?'数据已经就绪。':'已开始后台准备。完成前不占 GPU，可稍后刷新查看。');await load();}catch(error){if(current(expected)&&token===generation){toast(error.message);b.disabled=false;}}}
     if(b.dataset.useDataset){
+      const datasetRef=b.dataset.useDataset+'@'+b.dataset.version;
+      document.dispatchEvent(new CustomEvent('gpuq-open-submit',{detail:{machine,datasetRef}}));
+      // PR1 keeps the submit dialog mounted above every room. The legacy
+      // details form remains supported while this stacked branch is developed.
+      if(document.querySelector('#train-form')?.closest('dialog'))return;
       document.querySelector('[data-nav=work]').click();
       const form=document.querySelector('#train-form');if(!form)return;
-      form.elements.machine.value=machine;form.elements.datasets.value=b.dataset.useDataset+'@'+b.dataset.version;
+      form.elements.machine.value=machine;form.elements.datasets.value=datasetRef;
       form.elements.datasets.dispatchEvent(new Event('input',{bubbles:true}));form.closest('details').open=true;form.elements.command.focus();
     }
   });
@@ -134,10 +172,10 @@ export function datasetsUI(store,toast){
     const next=account(),ids=JSON.stringify(machines.map(m=>m.id));
     if(next!==identity){workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;identity=next;generation++;busy=false;machineIds='';
       section.classList.add('datasets-unified');
-      section.innerHTML=`<div class="terminal-controls datasets-controls"><label>本次使用的服务器<select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新</button></div>
+      section.innerHTML=`<nav class="data-room-tabs" aria-label="数据集内容"><a href="#datasets" aria-current="page">数据集</a><a href="#transfers">传输与导入</a></nav><div class="terminal-controls datasets-controls"><label>本次使用的服务器<select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新</button></div>
         <p id="datasets-capacity" class="datasets-capacity" role="status">加载后显示本机数据盘容量；不代表个人硬配额。</p>
-        <section aria-labelledby="dataset-catalog-heading"><div class="datasets-library-heading"><h3 id="dataset-catalog-heading">我的数据集</h3><span class="muted">固定版本 · 本机就绪后训练</span></div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div></section>
-        <details id="datasets-add" class="datasets-add"><summary>添加数据 <span>从电脑上传，或让服务器直接下载</span></summary>
+        <section class="dataset-library hero-frame" aria-labelledby="dataset-catalog-heading"><span class="hero-label">DATA / LOCATIONS</span><div class="datasets-library-heading"><h3 id="dataset-catalog-heading">数据在哪里</h3><span class="muted">固定版本 · 本机就绪后训练</span></div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div></section>
+        <details id="datasets-add" class="datasets-add"><summary class="button primary">添加数据 <span class="dataset-add-hint">从电脑上传，或让服务器直接下载</span></summary><dialog id="dataset-add-dialog" class="dataset-add-sheet" aria-labelledby="dataset-add-title"><header class="dataset-sheet-head"><div><p class="data-eyebrow">DATA / IMPORT</p><h2 id="dataset-add-title">添加数据</h2><p class="muted">选择一种方式，准备本次使用的数据。</p></div><button class="button quiet" type="button" data-dataset-add-close aria-label="关闭添加数据">关闭</button></header><div class="dataset-sheet-context"></div>
         <div class="dataset-source-tabs" role="tablist" aria-label="添加数据的方式">
           <button type="button" role="tab" id="dataset-source-directory" data-dataset-source="directory" aria-controls="dataset-panel-directory" aria-selected="true"><span>本机目录</span><small>已整理好，可直接发布</small></button>
           <button type="button" role="tab" id="dataset-source-link" data-dataset-source="link" aria-controls="dataset-panel-link" aria-selected="false" tabindex="-1"><span>下载链接</span><small>云盘分享或 HTTPS 文件</small></button>
@@ -157,7 +195,8 @@ export function datasetsUI(store,toast){
           <div class="dataset-upload-notes"><p class="muted">关闭页面会暂停传输；重新选择同一目录可继续。已开始的服务器校验不受影响。</p></div>
         </form></div>
         <div id="dataset-panel-link" data-dataset-panel="link" role="tabpanel" aria-labelledby="dataset-source-link" hidden>${cloudImportHTML(store.principal?.role==='admin')}<p class="datasets-next">下载完成只代表文件已到个人空间，尚未发布训练版本。</p><button class="button" type="button" id="dataset-organize-next">下一步：手动整理与发布</button></div>
-        <div id="dataset-panel-workspace" data-dataset-panel="workspace" role="tabpanel" aria-labelledby="dataset-source-workspace" hidden>${dataWorkspaceHTML()}</div></details>`;
+        <div id="dataset-panel-workspace" data-dataset-panel="workspace" role="tabpanel" aria-labelledby="dataset-source-workspace" hidden>${dataWorkspaceHTML()}</div></dialog></details>`;
+      installAddSheet();
     }
     if(ids!==machineIds){
       const select=section.querySelector('[name=dataset-machine]'),selected=select.value,changed=machineIds!=='';

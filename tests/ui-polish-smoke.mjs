@@ -111,13 +111,13 @@ try{
   await page.locator('[data-nav=datasets]').click();await currentNav('datasets');
   await page.locator('#datasets-refresh').click();await page.locator('.dataset-readiness[data-state=PREPARING]').waitFor();
   await textContrast();await capture('datasets-desktop');
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'starbase-progress');
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationIterationCount),'3','Preparing indication must not loop indefinitely');
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','The first confirmed catalog is settled; motion requires a real state diff');
+  assert.match(await page.locator('.dataset-readiness[data-state=PREPARING]').textContent(),/准备中/,'Readiness remains clear without motion');
   await page.locator('[data-nav=work]').click();
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationPlayState),'paused','Hidden page animations pause');
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','Hidden pages never add a decorative readiness pulse');
   await page.locator('[data-nav=datasets]').click();
   await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationPlayState),'paused','Inactive tab animations pause');
+  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','Inactive tabs stay settled');
   await page.evaluate(()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'));});
   await page.setViewportSize({width:390,height:960});await capture('datasets-mobile');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));

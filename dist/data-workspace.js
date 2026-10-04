@@ -2,7 +2,7 @@
 // Raw uploads never unpack or publish a dataset automatically.
 import {CHUNK_BYTES,LARGE_RELAY_BYTES} from './dataset-upload.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const bytesLabel=value=>{const size=Number(value||0);return size<1024**2?(size/1024).toFixed(1)+' KiB':size<1024**3?(size/1024**2).toFixed(1)+' MiB':(size/1024**3).toFixed(2)+' GiB';};
+const bytesLabel=value=>{const size=value;if(!Number.isFinite(size)||size<0)return '未知';return size<1024**2?(size/1024).toFixed(1)+' KiB':size<1024**3?(size/1024**2).toFixed(1)+' MiB':(size/1024**3).toFixed(2)+' GiB';};
 export function workspacePath(value,{root=false}={}){
   if(root&&value==='.')return value;
   if(typeof value!=='string'||!value||new TextEncoder().encode(value).length>1024||/[\\\x00-\x1f\x7f]/.test(value)||value.split('/').some(bit=>!bit||bit==='.'||bit==='..'||new TextEncoder().encode(bit).length>255))throw Error('请填写 /data2 内的相对路径：不含开头斜杠或 ..，总长不超过 1024 字节、每段不超过 255 字节。');
@@ -58,7 +58,7 @@ export function dataWorkspaceHTML(){
       <div class="file-actions"><button class="button" id="data-workspace-upload" type="submit">上传到数据空间</button><button class="button" id="data-workspace-cancel" type="button" hidden>停止传输</button></div>
       <progress id="data-workspace-progress" hidden aria-label="个人数据上传进度"></progress>
     </form>
-    <div class="data-workspace-terminal"><div><h4>手动整理</h4><p class="muted">终端中的 <code>/data2</code> 就是这里。用 <code>tar</code>、<code>unzip</code> 等命令处理文件。</p></div><div class="file-actions"><button class="button primary" id="terminal-data-open" type="button">新建数据终端</button><button class="button" id="terminal-data-reconnect" type="button">重连</button></div></div>
+    <div class="data-workspace-terminal"><div><h4>手动整理</h4><p class="muted">终端中的 <code>/data2</code> 就是这里。用 <code>tar</code>、<code>unzip</code> 等命令处理文件。</p></div><div class="file-actions"><button class="button" id="terminal-data-open" type="button">新建数据终端</button><button class="button quiet" id="terminal-data-reconnect" type="button">重连</button></div></div>
     <details class="data-workspace-browser"><summary>查看文件与发布进度</summary><div class="data-workspace-browse-controls"><label class="field">目录<input name="data-workspace-browse-path" value="." aria-label="查看数据空间目录"></label><button class="button" id="data-workspace-refresh" type="button">刷新</button></div><ul id="data-workspace-files-list"></ul></details>
     <form id="data-workspace-publish-form"><h4>发布为训练数据集</h4><p class="muted">先结束此机器上的所有数据终端，再发布整理好的子目录。发布会复制并校验文件，训练使用只读版本；原目录保留。</p><div class="data-workspace-fields"><label class="field">整理好的子目录<input name="data-workspace-publish-path" placeholder="my-data" required><small>例如 /data2/my-data，填写 my-data。</small></label><label class="field">数据集名称<input name="data-workspace-name" placeholder="my-data" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" required></label></div><div class="file-actions"><button class="button primary" id="data-workspace-publish" type="submit">校验并发布</button></div></form>
     <p id="data-workspace-status" role="status">上传只保存文件；数据整理完成后再发布。</p>

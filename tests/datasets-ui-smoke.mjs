@@ -139,7 +139,7 @@ try {
   assert.equal(await card(member).locator('[data-use-dataset]').isEnabled(), true);
   assert.equal(await card(member).locator('[data-use-dataset]').textContent(), '准备后训练');
   assert.equal(await card(member).locator('input[readonly]').inputValue(), 'sample@' + version);
-  const [guide] = await Promise.all([member.waitForEvent('popup'), member.locator('a[href="/guide"]:visible').click()]);
+  const [guide] = await Promise.all([member.waitForEvent('popup'), member.locator('a[href="/guide"]:visible').first().click()]);
   await guide.waitForLoadState('domcontentloaded');
   await guide.locator('.guide-card[href="/guide/data"]').click();
   assert.equal(new URL(guide.url()).pathname, '/guide/data');
@@ -163,7 +163,8 @@ try {
   await member.locator('#dataset-source-link').press('ArrowRight');
   assert.equal(await member.locator('#dataset-source-workspace').getAttribute('aria-selected'),'true');
   assert.equal(calls.some(call=>/cloud|workspace/.test(call.operation)),false,'Selecting an import path never imports, extracts, publishes or starts a terminal');
-  await member.locator('#datasets-add > summary').click();
+  await member.locator('[data-dataset-add-close]').click();
+  assert.equal(await member.locator('#dataset-add-dialog').isVisible(),false,'The import sheet closes without discarding method drafts');
 
   // Delay one machine's response: old machine entries must disappear immediately.
   let releaseList; listGate = new Promise(resolve => {releaseList = resolve;});

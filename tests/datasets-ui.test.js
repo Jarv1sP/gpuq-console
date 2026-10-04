@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {datasetRows,capacityText,archiveStatus} from '../dist/datasets-ui.js';
+import {datasetRows,datasetMachines,datasetLocation,capacityText,archiveStatus} from '../dist/datasets-ui.js';
 test('dataset cards show one concise username label, never guess from the dataset prefix',()=>{
  const catalog={datasets:[{dataset:'u-guessed-owner-data',versions:[{version:'a'.repeat(64),state:'READY',ownerLabel:'所属用户：alice',locations:[{machine:'gpu-1',state:'READY',ownerLabel:'所属用户：alice'}]}]}]};
  const html=datasetRows(catalog);assert.match(html,/<p class="dataset-owner">所属用户：alice<\/p>/);
@@ -79,4 +79,18 @@ test('approved local preparation can be selected for training without claiming i
 });
 test('an unavailable catalog is not presented as an empty confirmed library',()=>{
  const html=datasetRows({datasets:[],partial:true});assert.match(html,/目录尚未完整确认/);assert.doesNotMatch(html,/还没有分配或上传/);
+});
+test('location matrix uses authorized catalog machines and distinguishes absence from an unavailable catalog',()=>{
+ const catalog={machine:'gpu-1',partial:true,machines:[{machine:'gpu-1',state:'ok'},{machine:'gpu-2',state:'ok'},{machine:'gpu-3',state:'unavailable'}],datasets:[{dataset:'same',versions:[{version:'a'.repeat(64),state:'REGISTERED',locations:[{machine:'gpu-1',state:'REGISTERED'}]}]}]};
+ const version=catalog.datasets[0].versions[0],machines=datasetMachines(catalog);
+ assert.deepEqual(machines.map(item=>item.machine),['gpu-1','gpu-2','gpu-3']);
+ assert.equal(datasetLocation(version,machines[1],catalog).state,'NOT_LOCAL');
+ assert.equal(datasetLocation(version,machines[2],catalog).state,'UNKNOWN');
+ const html=datasetRows(catalog);assert.match(html,/gpu-2 · 没有此版本/);assert.match(html,/gpu-3 · 目录未确认/);
+ assert.doesNotMatch(html,/gpu-4|0\.0 MiB|0 个文件/,'No unauthorized machine or invented missing size');
+});
+test('an explicit unknown local location wins over a confirmed machine catalog',()=>{
+ const machine={machine:'gpu-1',state:'ok'},catalog={machine:'gpu-1'};
+ assert.equal(datasetLocation({state:'READY',locations:[{machine:'gpu-1',state:'UNKNOWN'}]},machine,catalog).state,'UNKNOWN');
+ assert.equal(datasetLocation({state:'FUTURE_STATE'},machine,catalog).state,'UNKNOWN');
 });

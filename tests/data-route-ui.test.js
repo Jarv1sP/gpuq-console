@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {routePresentation,transferBytes,uploadPhase,LARGE_RELAY_BYTES} from '../dist/data-route.js';
-import {transferCard} from '../dist/transfers-ui.js';
+import {transferCard,transferGroups} from '../dist/transfers-ui.js';
 
 test('routes require an explicit known transport, never infer a campus path',()=>{
   for(const value of [undefined,null,{},'10.11.1.2',{url:'https://192.168.1.2'},'copy'])assert.equal(routePresentation(value).kind,'unknown');
@@ -44,4 +44,14 @@ test('browser relay requires a real consent checkbox before hashing large select
 });
 test('the presentation helper is registered in both real and demo static routers',async()=>{
   for(const file of ['portal-server.mjs','server.mjs'])assert.match(await readFile(new URL('../'+file,import.meta.url),'utf8'),/\['\/data-route\.js'\]='data-route\.js'/);
+});
+test('transfer groups prioritize decisions without dropping unknown, canceled, or paginated records',()=>{
+ const states=['SUCCEEDED','RUNNING','PAUSED','CANCELING','UNKNOWN','WAITING_CLIENT','CANCELED','FAILED','FUTURE_STATE'];
+ const rows=states.map((state,index)=>({id:String(index),state})),groups=transferGroups(rows);
+ assert.deepEqual(groups.map(group=>group.id),['attention','active','done']);
+ assert.deepEqual(groups[0].rows.map(row=>row.state),['PAUSED','UNKNOWN','WAITING_CLIENT','FAILED','FUTURE_STATE']);
+ assert.deepEqual(groups[1].rows.map(row=>row.state),['RUNNING','CANCELING']);
+ assert.deepEqual(groups[2].rows.map(row=>row.state),['SUCCEEDED','CANCELED']);
+ assert.equal(groups.flatMap(group=>group.rows).length,rows.length);
+ assert.deepEqual(transferGroups([]),[]);
 });
