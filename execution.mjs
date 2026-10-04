@@ -73,6 +73,7 @@ export function installExecution(service,bridge){
             try{await releaseDataPreparation(service,job);}catch{}
             continue;
           }
+          if(service.maintenanceFor?.(job.machine)&&!job.cancelRequested)continue;
           const policyRevision=job.policyRevision||0;
           try{
             if(job.state===DATA_PREPARING){
@@ -80,7 +81,7 @@ export function installExecution(service,bridge){
               continue;
             }
             const action=job.cancelRequested?'cancel':'sync';
-            const result=await bridge(job.machine,action,{job:job.spec});
+            const result=await service.bridge(job.machine,action,{job:job.spec});
             await service.enqueue(()=>{
               const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||TERMINAL.has(current.state)||(current.policyRevision||0)!==policyRevision)return;
               // LOST/unknown remains nonterminal: retain quota until confirmed.
@@ -105,6 +106,7 @@ export async function executionCall(service,principal,operation,args){
   const user=service.store.get(principal.userId);
   const jobView=job=>publicJob(job,service.store.users);
   if(!user.enabled)fail('账号已暂停。',403);
+  service.assertMaintenanceAllowed?.(operation,args,principal);
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   if(operation.startsWith('datasets.storage.')){

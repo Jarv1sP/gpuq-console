@@ -139,6 +139,8 @@ sudo docker compose logs --tail 50 gpuq-console caddy
 
 ## 7. 备份、升级与回退
 
+门户的持久准入维护状态位于同一 SQLite 的 `operational_maintenance` 表，与已停用的 `maintenance_requests` 申请记录独立。管理员通过网页或 `maintenance.set`（范围、原因、revision CAS）明确启用/解除，重启、任务结束或刷新页面不会自动解除；保留完整数据库备份，不能用旧账号快照覆盖维护决定。维护封锁新派发、个人终端输入和数据写入，允许只读查询、取消及终态租约收尾；后台准备/归档也在实际派发前检查。它不停止已运行训练、已有节点复制/导入 worker、直传已发行票据、GC timer 或原生 SSH，因此迁盘前仍必须由管理员完成相应节点的停止与静默核验，不能把横幅当作已静默证明。独立管理员 ROOT 运维入口仍需门户可信身份及节点既有授权检查。
+
 `backup.sh` 用 SQLite 在线备份并验证完整性，同时备份数据库旁的注册码加密密钥 `portal.sqlite.invite-key`，每日 timer、默认保留14天。恢复时数据库与密钥必须匹配；有注册码密文但密钥丢失时，服务拒绝自动生成新密钥覆盖。另备份私有 inventory/.env、Headscale 数据与密钥、节点 GPUQ 数据库、个人工作区；只有门户 SQLite 不够恢复模型和数据集。备份放离机的私有存储，定期演练恢复。
 
 升级不要对运行目录无脑 `git pull && up`：

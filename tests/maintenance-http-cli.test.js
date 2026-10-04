@@ -44,3 +44,19 @@ test('retired module and compatibility assets stay in packaged runtime',async()=
   const ui=await readFile(new URL('../dist/maintenance-ui.js',import.meta.url),'utf8');assert.doesNotMatch(ui,/maintenance\.(create|preview|approve|return|withdraw|cancel)/);assert.match(ui,/maintenance\.list/);assert.match(ui,/maintenance\.get/);
   const module=await readFile(new URL('../maintenance.mjs',import.meta.url),'utf8');assert.doesNotMatch(module,/service\.bridge\([^;]*['"]host\.(exec|cancel)['"]/);assert.match(module,/MAINTENANCE_RETIRED_MESSAGE,410/);
 });
+
+test('operational maintenance uses the same authenticated HTTP/CLI path with explicit CAS restore',async t=>{
+  const f=await fixture(t),reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));
+  const origin='http://127.0.0.1:'+port,{server,service}=await createPortalServer({database:f.database,bootstrap:f.bootstrap,statusPath:f.status,origin,secure:false,bridge:f.bridge});
+  clearInterval(service.executionTimer);await new Promise(r=>server.listen(port,'127.0.0.1',r));
+  f.cleanupWith(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));});
+  const client=join(f.dir,'operational-gpuctl.mjs'),session=join(f.dir,'operational-session');await buildClient({outfile:client});
+  const login=await service.login('admin',password);await writeFile(session,JSON.stringify({url:origin,token:login.token,principal:login.principal,machine:'gpu-1'}));
+  const cli=args=>new Promise((resolve,reject)=>{const p=spawn(process.execPath,[client,'--session-file',session,...args]);let out='',err='';p.stdout.on('data',v=>out+=v);p.stderr.on('data',v=>err+=v);p.on('error',reject);p.on('close',code=>resolve({out,err,code}));p.stdin.end();});
+  let result=await cli(['maintenance','on','all','--reason','存储维修','--revision','0']);assert.equal(result.code,0,result.err);assert.match(result.out,/存储维修/);
+  result=await cli(['maintenance','off','all','--revision','0']);assert.equal(result.code,1);assert.match(result.err,/刷新/);
+  const member=await service.login(f.owner.username,password),response=await fetch(origin+'/api/call',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+member.token},body:JSON.stringify({operation:'datasets.workspace.put',args:{machine:'gpu-1',path:'fixture',data:'eA==',offset:0}})});
+  assert.equal(response.status,503);assert.match((await response.json()).error,/全平台维护中：存储维修/);assert.deepEqual(f.calls,[]);
+  result=await cli(['maintenance','status']);assert.equal(result.code,0);assert.match(result.out,/revision 1/);
+  result=await cli(['maintenance','off','all','--revision','1']);assert.equal(result.code,0,result.err);assert.equal(service.maintenanceFor('gpu-1'),null);
+});

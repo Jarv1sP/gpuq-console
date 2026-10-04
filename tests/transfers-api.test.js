@@ -163,6 +163,17 @@ test('slow source preparation never blocks account control; revoked policy fence
   try{await promptly(f.service.invoke(f.admin.token,'policy.save',{userId:f.member.id,policyVersion:1,total:0,limits:{}}));}finally{gate.resolve();}
   await rejected;assert.equal(f.calls.some(c=>c.op==='transfers.start'),false);
 });
+test('maintenance during source preparation fences target start and preserves the original transfer identity',async t=>{
+  const f=await fixture(t),started=deferred(),gate=deferred(),bridge=f.service.bridge,args=copy();
+  f.service.bridge=async(...request)=>{const result=await bridge(...request);if(request[1]==='transfers.source.prepare'){started.resolve();await gate.promise;}return result;};
+  const pending=f.call('transfers.create',args),rejected=assert.rejects(pending,e=>e.status===503&&e.code==='MAINTENANCE_ACTIVE');await started.promise;
+  await promptly(f.service.invoke(f.admin.token,'maintenance.set',{scope:args.from,enabled:true,revision:0,reason:'source repair'}));gate.resolve();await rejected;
+  assert.equal(f.calls.some(c=>c.op==='transfers.start'),false);
+  const before=f.service.transferSnapshotByKey(f.member.id,args.key);assert.ok(before.id);assert.notEqual(before.state,'CANCELED');
+  await f.service.reconcileTransfers();assert.equal(f.calls.some(c=>c.op==='transfers.start'),false);
+  await f.service.invoke(f.admin.token,'maintenance.set',{scope:args.from,enabled:false,revision:1});
+  const resumed=await f.call('transfers.create',args);assert.equal(resumed.id,before.id);assert.equal(resumed.state,'RUNNING');assert.equal(f.nodes.size,1);
+});
 test('cancel intent fences a delayed source result and survives restart without launching',async t=>{
   const f=await fixture(t),started=deferred(),gate=deferred(),bridge=f.service.bridge;
   f.service.bridge=async(...args)=>{if(args[1]==='transfers.source.prepare'){started.resolve();await gate.promise;}return bridge(...args);};

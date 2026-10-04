@@ -6,6 +6,7 @@ import {installStorageArchive,storageArchivePolicy} from '../storage-archive.mjs
 import {installTransfers} from '../transfers.mjs';
 import {datasetCatalogCall} from '../dataset-catalog.mjs';
 import {MACHINES} from '../dist/model.js';
+import {installMaintenance} from '../maintenance.mjs';
 
 const [hot,cold,other]=MACHINES.map(m=>m.id),ref={dataset:'u-personal-new',version:'a'.repeat(64)};
 const manifest={state:'READY',manifestBytes:100,manifestSha256:'b'.repeat(64),totalBytes:30,entries:2};
@@ -49,6 +50,18 @@ function fixture(t){
 test('archive policy is explicit fixed configuration, disabled by default',()=>{
   assert.deepEqual(storageArchivePolicy(),{enabled:false});
   for(const policy of [{enabled:true,machine:'not-a-node',authority:'hdd'},{enabled:true,machine:cold,authority:'../x'},{enabled:true,machine:cold,authority:'hdd',endpoint:'https://evil'}])assert.throws(()=>storageArchivePolicy(policy));
+});
+
+test('maintenance pauses discovery and an in-flight copy cannot advance to seal/certify',async t=>{
+  const f=fixture(t);installMaintenance(f.service);
+  const enable=()=>f.db.prepare('UPDATE operational_maintenance SET data=? WHERE id=1').run(JSON.stringify({version:1,revision:1,global:{reason:'repair',since:new Date().toISOString()},machines:{}}));
+  await f.service.reconcileStorageArchive();f.finish();const before=f.archive.rows()[0];
+  f.onCall=(_,op)=>{if(op==='transfers.status')enable();};
+  await f.service.reconcileStorageArchive();
+  assert.equal(f.calls.some(c=>c.op==='storage.archive.provision'||c.op==='storage.archive.certify'),false);
+  const held=f.archive.rows()[0];assert.equal(held.phase,before.phase);assert.equal(held.failures,before.failures);
+  assert.ok(f.db.prepare('SELECT archive_id FROM storage_archive_lane').get());
+  const count=f.calls.length;await f.service.reconcileStorageArchive();assert.equal(f.calls.length,count);
 });
 test('new immutable event archives through existing transfer without cold GPU permission',async t=>{
   const f=fixture(t);await f.service.reconcileStorageArchive();assert.equal(f.transfers.size,1);

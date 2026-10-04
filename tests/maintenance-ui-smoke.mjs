@@ -19,6 +19,7 @@ try{
   const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'browser-member',password})).result;
   await service.invoke(admin.token,'policy.full',{userId:member.id,policyVersion:0});
   const legacy=seedLegacy(service,member,{title:'<img src=x onerror=alert(1)> 旧记录\u202e',script:'printf "history" #\r\u202e\u0085'});
+  await service.invoke(admin.token,'maintenance.set',{scope:'all',enabled:true,revision:0,reason:'<img src=x onerror=alert(1)> 存储维修'});
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
   await context.route('**/*',route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol))return route.continue();external.push(url.href);return route.abort();});
@@ -29,6 +30,10 @@ try{
   }
   for(const username of [member.username,'admin']){
     await login(username);await page.locator('[data-id="'+legacy.id+'"]').click();await page.locator('#maintenance-detail pre').waitFor();
+    assert.match(await page.locator('.maintenance-banner').textContent(),/存储维修/);
+    assert.match(await page.locator('.maintenance-banner').textContent(),/不会自动结束已有任务/);
+    assert.equal(await page.locator('#operational-maintenance img').count(),0);
+    assert.equal(await page.locator('.maintenance-settings').count(),username==='admin'?1:0);
     assert.equal(await page.locator('#maintenance-create,[data-maintenance=approve],[data-maintenance=cancel]').count(),0);
     assert.equal(await page.locator('#maintenance-detail img').count(),0);
     const detail=await page.locator('#maintenance-detail').textContent();assert.ok(detail.includes('\\u{000d}'));assert.ok(detail.includes('\\u{202e}'));assert.ok(detail.includes('\\u{0085}'));assert.doesNotMatch(detail,/[\r\u202e\u0085]/u);
@@ -36,8 +41,20 @@ try{
     const rejected=await page.evaluate(async id=>{const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'maintenance.approve',args:{id,revision:1,previewToken:'legacy-token'}})});return response.status;},legacy.id);assert.equal(rejected,410);
     await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile archive must not overflow');
     await mkdir('/tmp/gpuq-maintenance-ui',{recursive:true});await page.screenshot({path:'/tmp/gpuq-maintenance-ui/retired-'+username+'-mobile.png',fullPage:true});
+    if(username==='admin'){
+      await page.locator('.maintenance-settings summary').click();
+      await page.locator('.maintenance-settings [name=reason]').fill('明确维修');await page.locator('.maintenance-settings [type=submit]').click();
+      await page.waitForFunction(()=>document.querySelector('.maintenance-banner')?.textContent.includes('明确维修'));
+      await service.invoke(admin.token,'maintenance.set',{scope:'gpu-1',enabled:true,revision:2,reason:'单机继续维护'});
+      page.on('dialog',async dialog=>{assert.equal(dialog.type(),'confirm');assert.match(dialog.message(),/未取消的等待任务会继续/);assert.match(dialog.message(),/终态任务不会自动重跑/);await dialog.accept();});
+      await page.locator('[data-maintenance-resume]').click();await page.locator('[data-maintenance-error]').filter({hasText:'刷新'}).waitFor();
+      assert.ok(service.maintenanceFor('gpu-2'),'stale form must not clear newer decision');
+      await page.locator('[data-maintenance-refresh]').click();await page.waitForFunction(()=>document.querySelector('.maintenance-settings form')?.dataset.revision==='3');
+      await page.locator('[data-maintenance-resume]').click();await page.waitForFunction(()=>!document.querySelector('.maintenance-banner')?.textContent.includes('全平台：'));
+      assert.equal(service.maintenanceFor('gpu-2'),null);assert.ok(service.maintenanceFor('gpu-1'));
+    }
     await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});await page.setViewportSize({width:1440,height:1000});
   }
   assert.equal(service.db.prepare('SELECT state FROM maintenance_requests WHERE id=?').get(legacy.id).state,'PENDING');assert.deepEqual(calls,[]);assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
-  console.log('Retired maintenance browser passed: no nav/composer/approval, old bookmark history, escaped script, 410 for old browser calls, identity switch and mobile layout.');
+  console.log('Maintenance browser passed: persistent escaped banner, member/admin controls, explicit restore with stale CAS rejection, scoped retention, retired history, identity switch and mobile layout.');
 }finally{await browser?.close();if(server){server.closeAllConnections();await new Promise(r=>server.close(r));}else service?.close();await rm(dir,{recursive:true,force:true});}
