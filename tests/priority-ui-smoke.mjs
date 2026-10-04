@@ -1,3 +1,4 @@
+import {closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 // UI contract acceptance with loopback static assets and synthetic API replies.
 // No real accounts, execution bridge, SSH, shell commands or GPU jobs are used.
 import assert from 'node:assert/strict';
@@ -48,8 +49,8 @@ try{
     await page.goto(origin);await page.locator('#execution-workspace').waitFor();return page;
   }
   const responseFor=(page,operation)=>page.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation===operation);
-  async function refresh(page,keepFocus=false){const ready=responseFor(page,'state');if(keepFocus)await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));else await page.locator('#refresh-state').click();await ready;await page.waitForFunction(()=>!document.querySelector('#train-form [name=priority]').disabled||!document.querySelector('[name=workspace-machine]').value);}
-  async function selectMachine(page,value){const ready=responseFor(page,'projects.list');await page.locator('[name=workspace-machine]').selectOption(value);await ready;await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);}
+  async function refresh(page,keepFocus=false){const ready=responseFor(page,'state');if(keepFocus)await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));else await refreshVisible(page);await ready;await page.waitForFunction(()=>!document.querySelector('#train-form [name=priority]').disabled||!document.querySelector('[name=workspace-machine]').value);}
+  async function selectMachine(page,value){const wasOpen=await page.locator('#work-submit[open]').count();await closeSubmit(page);const ready=responseFor(page,'projects.list');await page.locator('[name=workspace-machine]').selectOption(value);await ready;await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);if(wasOpen)await openSubmit(page);}
   async function capture(page,name){await page.evaluate(()=>{document.querySelector('#toast').classList.remove('visible');for(const table of document.querySelectorAll('.task-table-wrap'))table.scrollTop=0;scrollTo(0,0);});await page.waitForFunction(()=>Number(getComputedStyle(document.querySelector('#toast')).opacity)===0);await page.screenshot({path:join(screenshots,name),fullPage:true});}
 
   const member=await open('member');await selectMachine(member,machine);await member.locator('#train-form').evaluate(form=>form.closest('details').open=true);

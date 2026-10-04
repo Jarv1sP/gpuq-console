@@ -1,3 +1,4 @@
+import {openSubmit} from './starbase-workflows.mjs';
 // Browser acceptance: npm ci --ignore-scripts && npx playwright install chromium
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm,mkdir} from 'node:fs/promises';
@@ -160,7 +161,7 @@ try{
  assert.ok(processBounds.x>=tableBounds.x-1&&processBounds.x+processBounds.width<=tableBounds.x+tableBounds.width+1,'Mobile users must be able to scroll to the process columns');
  await capture(member,'resources-member-mobile-processes.png');
  await member.setViewportSize({width:1440,height:1050});
- await member.locator('[data-use-machine=gpu-1]').click();await member.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-1');await member.locator('summary').filter({hasText:'提交训练'}).click();await member.locator('[name=command]').fill('python unchanged_draft.py');await member.waitForTimeout(16000);assert.equal(await member.locator('[name=command]').inputValue(),'python unchanged_draft.py');
+ await member.locator('[data-use-machine=gpu-1]').click();await member.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-1');await openSubmit(member);await member.locator('[name=command]').fill('python unchanged_draft.py');await member.waitForTimeout(16000);assert.equal(await member.locator('[name=command]').inputValue(),'python unchanged_draft.py');
  await admin.locator('#filter-all').click();await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('summary').filter({hasText:'账号权限与状态'}).click();await admin.locator('[data-action=role]').click();await admin.locator('#confirm-action').click();
  await member.reload();await member.locator('#login-dialog').waitFor();await member.locator('#login-form [name=username]').fill('验收同学');await member.locator('#login-form [name=password]').fill(password);await member.locator('#login-form [type=submit]').click();await member.locator('[data-nav=users]').click();await member.locator('#filter-all').click();await member.locator('[data-user]').filter({hasText:'管理员'}).filter({hasNotText:'验收同学'}).click();await member.locator('summary').filter({hasText:'账号权限与状态'}).click();await member.locator('[data-action=enabled]').click();await member.locator('#confirm-action').click();await member.locator('summary').filter({hasText:'账号权限与状态'}).click();await member.locator('[data-action=delete]').click();await member.locator('#confirm-action').click();
  await member.locator('#confirm-dialog').waitFor({state:'hidden'});assert.equal(portal.service.store.users.some(u=>u.username==='admin'),false);

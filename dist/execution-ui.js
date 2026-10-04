@@ -5,6 +5,9 @@ import {schedulingFields,schedulingFromForm,schedulingSummary} from './schedulin
 import {elasticCapable,placementCapable} from './gpu-allocation.js';
 import {elasticFields,elasticFromForm,allocationSummary,placementFields,placementFromForm,placementSummary} from './gpu-allocation-ui.js';
 import {taskDescription} from './task-metadata.js';
+import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout} from './workbench-ui.js';
+import {revealSheet,dismissSheet,sharedObject} from './motion-ui.js';
+import {taskNotesMarkup,createTaskNotesUI} from './task-notes-ui.js';
 const escape=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const terminal=new Set(['SUCCEEDED','FAILED','CANCELED']);
 const hashPattern=/^[a-f0-9]{64}$/;
@@ -29,7 +32,7 @@ export function taskStateLabel(job){
 }
 export const validProject=value=>typeof value==='string'&&/^[a-z][a-z0-9_-]{0,47}$/.test(value);
 export function projectStatusText(info,hasTerminal=false){
-  const labels={DRAFT:'代码草稿',READY:'已有就绪版本',PUBLISHING:'正在发布',FAILED:'发布失败'};
+  const labels={DRAFT:'代码草稿',READY:'已有就绪版本',PUBLISHING:'正在生成训练版本',FAILED:'生成训练版本失败'};
   const parts=[labels[info?.state]||'项目状态未确认'];
   if(info)parts.push(info.environmentMode==='isolated'?'环境：完全隔离（不继承基础包）':info.environmentMode==='shared'?'环境：共享基础包':'环境：共享基础包（旧默认）');
   if(info?.error)parts.push(String(info.error));
@@ -43,7 +46,7 @@ export function projectStatusText(info,hasTerminal=false){
   if(detail&&info.state==='FAILED'){
     for(const [key,label] of [['path','位置'],['kind','类型'],['mode','权限'],['links','链接数'],['remediation','处理建议']])if(detail[key]!==undefined)parts.push(label+'：'+String(detail[key]));
   }
-  if(hasTerminal)parts.push('先结束项目开发终端，再发布。');
+  if(hasTerminal)parts.push('先结束项目开发终端，再生成训练版本。');
   return parts.join(' · ');
 }
 export function readyReleases(project){return [...new Map((Array.isArray(project?.releases)?project.releases:[]).filter(item=>item?.state==='READY'&&typeof item.release==='string'&&hashPattern.test(item.release)).map(item=>[item.release,item])).values()];}
@@ -66,7 +69,7 @@ export async function uploadProjectFile(file,context,send,progress=()=>{}){
   const uploadId=crypto.randomUUID();let offset=0;
   do{const bytes=new Uint8Array(contents,offset,Math.min(1048576,file.size-offset)),final=offset+bytes.length===file.size;
     const receipt=await send({...context,uploadId,totalSize:file.size,sha256,offset,data:base64(bytes),final});
-    if(final&&(receipt?.complete!==true||receipt.size!==file.size||receipt.sha256!==sha256))throw Error('服务器尚未确认完整文件及校验和；请重新上传此文件，确认成功后再发布。');
+    if(final&&(receipt?.complete!==true||receipt.size!==file.size||receipt.sha256!==sha256))throw Error('服务器尚未确认完整文件及校验和；请重新上传此文件，确认成功后再生成训练版本。');
     offset+=bytes.length;progress(offset,file.size);
   }while(offset<file.size);
 }
@@ -74,18 +77,87 @@ export async function uploadProjectFile(file,context,send,progress=()=>{}){
 export function executionUI(store,refresh,toast){
   let section,log,actor=null,submitKey=crypto.randomUUID(),machine='',project='',catalog=[],catalogError='',projectBusy=false,operationBusy=false;
   let epoch=0,pollTimer=null,pollCount=0,terminalSessions=[],machineIdentity='';
-  const diagnostics=createJobDiagnostics(store,()=>log,toast);
-  const call=(operation,args)=>store.call(operation,args),query=selector=>section?.querySelector(selector);
+  let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
+  const jobHeading=id=>[...document.querySelectorAll('[data-workbench-job]')].find(row=>row.dataset.workbenchJob===id)?.querySelector('.wb-job-heading');
+  const diagnostics=createJobDiagnostics(store,()=>log,toast,{drawer:true,header:job=>`<span class="sheet-object">${stateHTML(job,false)}<span>${escape(job.name||'训练详情')}</span></span>`,reveal:(dialog,job,origin)=>{revealSheet(dialog,{drilldown:true});sharedObject(origin||jobHeading(job.id),dialog.querySelector('.sheet-object'));},dismiss:dialog=>dismissSheet(dialog,{drilldown:true,target:jobHeading(focusedJob)}),overview:job=>jobOverviewHTML(job,{owned:job.userId===store.principal?.userId,schedulingHTML:allocationSummary(job)+placementSummary(job)+`<span>排队优先级：${escape(priorityRankLabel(job))}</span>`+schedulingSummary(job)+`<span>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</span><span>调度状态：${escape(job.schedulerState||'未提供')}</span><span>核对时间：${escape(sampleTime(job.schedulerCheckedAt))}</span>`}),output:showOutput,notes:showNotes,onView:next=>{if(next!=='notes')notes?.sync(false,true);}});
+  const call=(operation,args)=>store.call(operation,args),query=selector=>section?.querySelector(selector)||submitDialog?.querySelector(selector)||settingsDialog?.querySelector(selector)||log?.querySelector(selector)||document.querySelector('#shell-context')?.querySelector(selector);
   const context=()=>({machine,...(project?{project}:{})}),currentProject=()=>catalog.find(item=>item.project===project);
   const currentToken=()=>JSON.stringify([actor,machine,project,epoch]),ownJobs=()=>store.jobs.filter(job=>job.userId===store.principal?.userId);
   const priorityAvailable=()=>store.data?.execution?.priorityCapabilities?.[machine]===true;
   const customAvailable=()=>!store.data?.gpuq?.stale&&yieldCapable(store.data?.gpuq?.hosts?.find(h=>h.id===machine));
-  const enabled=()=>!!store.principal&&store.data?.executionEnabled===true&&(store.data?.machines||[]).some(item=>item.id===machine);
+  const enabled=()=>store.production&&!!store.principal&&store.data?.executionEnabled===true&&(store.data?.machines||[]).some(item=>item.id===machine);
   const isVisible=()=>!document.hidden&&!section?.closest('[data-page]')?.hidden;
   const hasTerminal=()=>terminalSessions.some(item=>item.machine===machine&&item.project===project&&item.userId===actor);
   const status=(text,error=false)=>{const element=query('#project-status');if(element){element.textContent=text;element.classList.toggle('form-error',error);}};
   const stopPolling=()=>{clearTimeout(pollTimer);pollTimer=null;};
   function notifyContext(){document.dispatchEvent(new CustomEvent('gpuq-workspace-context',{detail:{userId:actor,...context()}}));}
+  const reduced=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
+  function showSheet(dialog,options={}){if(dialog.open)return;dialog.showModal();revealSheet(dialog,options);}
+  function closeSettings(){if(!settingsSource)return;const source=settingsSource;settingsSource=null;source.append(...settingsDialog.querySelector('.sheet-scroll').children);source.open=false;settingsDialog.close();}
+  function settings(source){closeSettings();settingsSource=source;settingsDialog.querySelector('h2').textContent=source.querySelector('summary').textContent;for(const control of source.querySelectorAll('input,select,textarea'))control.setAttribute('form','train-form');settingsDialog.querySelector('.sheet-scroll').append(...[...source.children].filter(child=>child.tagName!=='SUMMARY'));showSheet(settingsDialog,{drilldown:true});}
+  function adaptWorkspace(){
+    const selectors=section.querySelectorAll('.workspace-context-grid>label');
+    for(const [index,selector] of ['#context-machine','#context-project'].entries()){const proxy=document.querySelector(selector),label=selectors[index],select=label?.querySelector('select');if(proxy&&label&&select){select.id=proxy.id;proxy.closest('label').replaceWith(label);}}
+    section.querySelector('.workspace-context-grid').remove();
+    section.querySelector('.workspace-context-heading').querySelector('.eyebrow').textContent='代码与环境';
+    section.querySelector('#workspace-context-title').textContent='项目与训练版本';
+    for(const id of ['project-publish','terminal-open'])query('#'+id).classList.remove('primary');
+    const train=section.querySelector('#train-form'),panel=train.closest('details');panel.id='train-panel';panel.querySelector('summary').classList.add('sr-only');
+    submitDialog=document.createElement('dialog');submitDialog.id='work-submit';submitDialog.className='work-sheet submit-sheet';submitDialog.setAttribute('aria-labelledby','submit-title');
+    submitDialog.innerHTML='<header class="sheet-header glass"><div><p id="submit-context" class="mono"></p><h2 id="submit-title">提交训练</h2></div><button class="button quiet" type="button" id="close-submit" aria-label="关闭提交抽屉">关闭</button></header>';
+    submitDialog.append(panel);document.body.append(submitDialog);
+    const scroll=document.createElement('div');scroll.className='sheet-scroll';const submit=train.querySelector('[type=submit]');for(const child of [...train.children])if(child!==submit)scroll.append(child);train.append(scroll);
+    const checks=document.createElement('section');checks.className='submit-checks';checks.innerHTML='<div class="spread"><h3>提交前检查</h3><button class="button quiet" type="button" id="submit-check-refresh">重新核对</button></div><ul id="submit-check-list" class="checks"></ul>';
+    const cli=document.createElement('details');cli.className='submit-cli';cli.innerHTML='<summary>等价命令 · 你的电脑</summary><pre id="submit-command" tabindex="0"></pre><button class="button quiet" type="button" id="copy-submit-command">复制完整命令</button><p class="muted">命令包含当前固定版本与服务器；请先在自己的电脑登录 gpuctl。</p>';
+    scroll.append(checks,cli);const footer=document.createElement('div');footer.className='sheet-footer glass';footer.innerHTML='<p id="submit-summary" class="muted">提交后可关闭网页，服务器继续运行。</p>';footer.append(submit);train.append(footer);
+    panel.addEventListener('toggle',()=>{if(panel.open){updatePreflight();showSheet(submitDialog);}else submitDialog.close();});
+    submitDialog.addEventListener('close',()=>{if(submitDialog.open)return;closeSettings();panel.open=false;});
+    submitDialog.addEventListener('cancel',event=>{event.preventDefault();closeSettings();dismissSheet(submitDialog);});
+    settingsDialog=document.createElement('dialog');settingsDialog.id='work-submit-panel';settingsDialog.className='work-sheet settings-sheet';settingsDialog.setAttribute('aria-labelledby','submit-panel-title');settingsDialog.innerHTML='<header class="sheet-header glass"><h2 id="submit-panel-title">提交设置</h2><button class="button quiet" id="close-submit-panel" type="button">返回提交</button></header><div class="sheet-scroll"></div>';document.body.append(settingsDialog);
+    settingsDialog.addEventListener('cancel',event=>{event.preventDefault();dismissSheet(settingsDialog,{drilldown:true});closeSettings();});settingsDialog.addEventListener('close',()=>{if(!settingsDialog.open)closeSettings();});
+    for(const detail of train.querySelectorAll('.training-advanced>details'))detail.querySelector('summary').addEventListener('click',event=>{event.preventDefault();settings(detail);});
+    const layout=document.createElement('div');layout.className='wb-layout';const jobs=document.createElement('section');jobs.className='wb-jobs';jobs.setAttribute('aria-label','我的训练');const rail=document.createElement('aside');rail.className='wb-rail';rail.setAttribute('aria-label','项目、开发终端与文件');
+    const table=query('#my-job-table'),kicker=section.querySelector('.section-kicker'),explanation=kicker.nextElementSibling;explanation.className='wb-job-explanation muted';jobs.append(table,kicker,explanation);rail.append(...section.children);layout.append(jobs,rail);section.append(layout);
+  }
+  function updatePreflight(){
+    if(!submitDialog||!actor)return;query('#submit-context').textContent=(machine||'未选择服务器')+' · '+(project||'个人工作区');
+    const user=store.users.find(item=>item.id===actor),used=store.usage(actor),quota=user?.total,info=currentProject(),host=store.data?.gpuq?.hosts?.find(item=>item.id===machine),fresh=store.production&&!store.data?.gpuq?.stale&&host?.reachable===true;
+    const release=query('[name=release]').value,authorized=enabled()&&user?.limits?.[machine]>0;
+    const rows=[['服务器授权',authorized?'已授权 '+machine:'选择获授权服务器',authorized],['额度',Number.isFinite(quota)?`已占 ${used} / ${quota} 张；准备数据期间不占额度，数据就绪后由后台再次核对。`:'额度尚未确认',Number.isFinite(quota)],['训练版本',project?(readyReleases(info).some(item=>item.release===release)?'已就绪的固定版本；提交时再次校验。':'先生成可用训练版本。'):'使用个人工作区；提交时再次核对。',!project||readyReleases(info).some(item=>item.release===release)],['服务器采集',fresh?'当前采集可用；启动由调度器确认。':'采集未知或过期；不会当作空闲。',fresh],['数据集',query('[name=datasets]').value.trim()?'提交后先校验固定版本与本机副本；需要时准备数据。':'本次不挂载数据集。',!query('[name=datasets]').value.trim()]];
+    query('#submit-check-list').innerHTML=rows.map(([label,text,ok])=>`<li><span class="what">${escape(label)}<small>${escape(text)}</small></span><span class="${ok?'v-ok':'v-wait'}">${ok?'已确认':'待核对'}</span></li>`).join('');
+    query('#submit-summary').textContent=query('[name=datasets]').value.trim()?'先准备数据，再核对额度并排队。提交后可关闭网页。':'提交后由服务器继续运行，可以关闭网页。';
+    const quote=value=>"'"+String(value).replaceAll("'","'\\''")+"'",get=name=>query(`[name=${name}]`).value;
+    const args=['gpuctl run',quote(machine||'SERVER'),'-g',get('cards'),'--min-vram',get('memory'),'--name',quote(get('name'))];
+    if(project)args.push('--project',quote(project),'--release',quote(release));if(store.data?.taskMetadata?.version===1&&get('task-description').trim())args.push('--description',quote(get('task-description')));
+    if(query('[name=custom-policy]').checked){args.push('--rank',get('queue-rank'),'--yield',get('yield-policy'),'--restart-policy',get('restart-policy'));if(query('[name=checkpointable]').checked)args.push('--checkpointable');if(get('request-mode'))args.push('--mode',get('request-mode'));}else if(priorityAvailable())args.push('--priority',get('priority'));
+    if(query('[name=elastic]').checked){args.push('--min-cards',get('min-cards'),'--global-batch',get('global-batch'),'--micro-batch',get('micro-batch'));if(query('[name=auto-expand]').checked)args.push('--auto-expand');}
+    if(get('gpu-placement')!=='any'){args.push('--gpu',quote(get('gpu-indices')));if(get('gpu-placement')==='shared')args.push('--share','--vram-mib',get('vram-mib'));if(query('[name=hami]').checked)args.push('--hami','--sm-percent',get('sm-percent'));}
+    for(const ref of get('datasets').trim().split(/\s+/).filter(Boolean))args.push('--data',quote(ref));args.push('-- /bin/bash -c',quote(get('command')));query('#submit-command').textContent=args.join(' ');
+  }
+  function renderJobs(jobs){
+    const table=query('#my-job-table'),detailKey=item=>item.className+'|'+(item.closest('[data-workbench-job]')?.dataset.workbenchJob||''),details=new Map([...table.querySelectorAll('details')].map(item=>[detailKey(item),item.open])),scrolls=new Map([...table.querySelectorAll('.wb-scroll-list')].map(item=>[item.getAttribute('aria-label'),item.scrollTop])),active=document.activeElement,focus=table.contains(active)?{id:active.closest('[data-workbench-job]')?.dataset.workbenchJob,hook:[...active.attributes].find(attr=>attr.name.startsWith('data-'))?.name}:null;
+    const actions=job=>`${jobNotificationHTML(job,actor)}<button class="button quiet" data-job-logs="${escape(job.id)}">日志</button><button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="diagnostics">诊断</button>${job.project?`<button class="button quiet" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="notes">留言</button><button class="button danger" data-job-cancel="${escape(job.id)}" ${endedJob(job)||job.cancelRequested?'disabled':''}>取消</button>${canEditPriority(job,store.principal?.role==='admin')?`<details class="wb-priority" data-priority-editor><summary>排队优先级</summary><select data-job-priority="${escape(job.id)}" data-original-priority="${escape(job.priority)}">${priorityRankOptions(job.priority)}</select><button class="button quiet" data-job-priority-save="${escape(job.id)}">保存优先级</button></details>`:''}`;
+    const drafts=new Map([...table.querySelectorAll('[data-job-priority]')].map(input=>[input.dataset.jobPriority,{value:input.value,original:input.dataset.originalPriority}]));
+    const html=workbenchCards(jobs,{actions,focusId:focusedJob});if(html===jobHTML)return;jobHTML=html;table.innerHTML=html;
+    for(const detail of table.querySelectorAll('details'))if(details.has(detailKey(detail)))detail.open=details.get(detailKey(detail));
+    for(const list of table.querySelectorAll('.wb-scroll-list'))if(scrolls.has(list.getAttribute('aria-label')))list.scrollTop=scrolls.get(list.getAttribute('aria-label'));
+    for(const input of table.querySelectorAll('[data-job-priority]')){const draft=drafts.get(input.dataset.jobPriority);if(draft&&draft.value!==draft.original){input.value=draft.value;input.dataset.originalPriority=draft.original;}}
+    for(const job of jobs){const previous=lastJobs.get(job.id),row=[...table.querySelectorAll('[data-workbench-job]')].find(item=>item.dataset.workbenchJob===job.id);if(previous&&row&&previous.state!==job.state){row.animate([{outline:'1px solid var(--line-3)'},{outline:'1px solid transparent'}],{duration:reduced()?150:220});if(['RUNNING','STARTING','SUBMITTING'].includes(job.state))liveJobs.add(job.id);}if(previous&&row&&previous.percent!==trainingReadout(job).percent&&trainingReadout(job).percent!==null){row.querySelector('.wb-progress-number')?.animate(reduced()?[{opacity:.4},{opacity:1}]:[{opacity:.4,transform:`translateY(${trainingReadout(job).percent>(previous.percent??0)?3:-3}px)`},{opacity:1,transform:'none'}],{duration:reduced()?150:220});if(job.state==='RUNNING')liveJobs.add(job.id);}if(liveJobs.has(job.id)&&['st-run','st-start'].includes(stateClass(job)))row?.querySelector('.st')?.classList.add('is-live');}
+    lastJobs=new Map(jobs.map(job=>[job.id,{state:job.state,percent:trainingReadout(job).percent}]));
+    if(focus?.id&&focus.hook)for(const button of table.querySelectorAll(`[${focus.hook}]`))if(button.closest('[data-workbench-job]')?.dataset.workbenchJob===focus.id){button.focus({preventScroll:true});break;}
+  }
+  async function showOutput(id,container){
+    const job=ownJobs().find(item=>item.id===id);if(!job?.project){container.textContent='这项任务未使用项目输出目录；个人工作区文件可在工作台查看。';return;}
+    const files=query('#workspace-files');if(!outputPlace){outputPlace=document.createComment('workspace files');files.before(outputPlace);}container.append(files);files.open=true;
+    try{await selectMachine(job.machine);await selectProject(job.project);if(machine!==job.machine||project!==job.project)throw Error('无法确认任务对应的项目，请刷新项目列表。');query('[name=file-area]').value='output';query('[name=file-path]').value='.';query('[name=file-run-id]').value=job.id;renderRuns();query('[name=file-run]').value=job.id;updateControls();await listFiles();}catch(error){query('#workspace-result').textContent=error.message;}
+  }
+  async function showNotes(id,container){
+    if(notesJob===id&&notes){notes.sync(true,true);return;}notes?.reset();notes=null;notesJob=id;const generation=++notesGeneration,owner=actor;container.textContent='正在核对任务留言功能…';
+    try{const info=await call('community.info',{});if(generation!==notesGeneration||owner!==actor)return;if(info.enabled!==true||!info.capabilities?.includes('task-notes-v1')){container.textContent='当前后台尚未提供任务留言功能。';return;}
+      container.className='job-notes';container.innerHTML=taskNotesMarkup.replace(/(id|for)="([a-z][a-z-]*)"/g,(_,attribute,value)=>`${attribute}="drawer-${value}"`);notes=createTaskNotesUI(container,store,toast,{prefix:'drawer-',jobId:id});container.querySelector('#drawer-task-note-lifetime').value='task';notes.sync(true,true);
+    }catch(error){if(generation===notesGeneration&&owner===actor)container.textContent='留言暂不可用：'+error.message;}
+  }
+  document.addEventListener('gpuq-job-drawer-close',()=>{notesGeneration++;notes?.reset();notes=null;notesJob=null;const files=query('#workspace-files');if(outputPlace&&files){outputPlace.after(files);outputPlace.remove();outputPlace=null;}});
   function assertContext(){if(!enabled())throw Error('先在工作台顶部选择一台已授权服务器。');if(project&&!currentProject())throw Error('项目状态尚未读取，请刷新后再试。');return context();}
   function updateControls(){
     if(!section||!actor)return;
@@ -140,7 +212,7 @@ export function executionUI(store,refresh,toast){
     if(catalogError)status(catalogError,true);
     else if(project)status(projectStatusText(info,hasTerminal()),info?.state==='FAILED');
     else status(machine?'可直接使用个人工作区，或选择、创建独立项目。':'先选择服务器；项目、终端、文件和训练会跟随此选择。');
-    renderRuns();updateControls();armPolling();
+    renderRuns();updateControls();updatePreflight();armPolling();document.dispatchEvent(new Event('gpuq-workspace-rendered'));
   }
   function renderRuns(){
     const select=query('[name=file-run]');if(!select)return;const previous=select.value,jobs=ownJobs().filter(job=>job.machine===machine&&job.project===project);
@@ -178,8 +250,15 @@ export function executionUI(store,refresh,toast){
   async function listFiles(){const target=fileContext(),path=query('[name=file-path]').value||'.';const result=await call('files.list',{...target,path});query('#workspace-result').textContent=result.entries.map(file=>`${file.type==='directory'?'[目录]':'[文件]'} ${file.name}  ${file.type==='file'?file.size+' B':''}`).join('\n')||'目录为空';}
   document.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
+    if(button.id==='open-submit'){if(submitDialog)query('#train-panel').open=true;return;}
+    if(button.hasAttribute('data-user-guide')){window.open('/guide/user','_blank','noopener');return;}
+    if(button.id==='close-submit'){dismissSheet(submitDialog);return;}
+    if(button.id==='close-submit-panel'){dismissSheet(settingsDialog,{drilldown:true});closeSettings();updatePreflight();return;}
+    if(button.id==='submit-check-refresh'){document.querySelector('#refresh-state').click();if(project)loadProjectStatus();updatePreflight();return;}
+    if(button.id==='copy-submit-command'){navigator.clipboard.writeText(query('#submit-command').textContent).then(()=>toast('完整命令已复制。'),()=>toast('复制失败；请选中命令手动复制。'));return;}
+    if(button.dataset.jobDetail){focusedJob=button.dataset.jobDetail;document.dispatchEvent(new CustomEvent('gpuq-focused-job',{detail:{id:focusedJob}}));guarded(button,()=>diagnostics.openLogs(focusedJob,button.dataset.jobView||'overview',jobHeading(focusedJob)));return;}
     if(button.dataset.useMachine&&section&&actor)queueMicrotask(()=>selectMachine(button.dataset.useMachine).catch(error=>toast(error.message)));
-    if(button.dataset.jobLogs)guarded(button,()=>diagnostics.openLogs(button.dataset.jobLogs));
+    if(button.dataset.jobLogs){focusedJob=button.dataset.jobLogs;guarded(button,()=>diagnostics.openLogs(focusedJob,'logs',jobHeading(focusedJob)));}
     if(button.dataset.jobNotify)guarded(button,async()=>{
       const job=store.jobs.find(item=>item.id===button.dataset.jobNotify);
       if(!job||job.userId!==store.principal?.userId)throw Error('只能订阅自己的任务。');
@@ -194,29 +273,29 @@ export function executionUI(store,refresh,toast){
       const priority=priorityRankValue(control.value);if(priority===job.priority){toast('优先级未改变。');return;}
       await call('jobs.priority',{jobId,priority,expectedPriority:control.dataset.originalPriority});control.dataset.originalPriority=priority;refresh();toast('已请求调整优先级；以下次调度核对结果为准。');
     });
-    if(button.id==='close-job-log')log.close();
+    if(button.id==='close-job-log')dismissSheet(log,{drilldown:true,target:jobHeading(focusedJob)});
     if(button.id==='projects-refresh'){pollCount=0;loadProjects();}
-    if(button.id==='project-publish')guarded(button,async()=>{const target=assertContext();if(!project)throw Error('先选择项目。');if(hasTerminal())throw Error('请先结束项目开发终端；断开连接不等于结束。');const result=await call('projects.publish',target);if(result.project!==project)throw Error('项目返回身份不匹配。');catalog=catalog.map(item=>item.project===project?result:item);catalogError='';pollCount=0;renderProject();toast(result.state==='READY'?'项目已发布。训练使用选定的固定版本。':'已开始发布；可稍后刷新，不会自动切换已选版本。');});
+    if(button.id==='project-publish')guarded(button,async()=>{const target=assertContext();if(!project)throw Error('先选择项目。');if(hasTerminal())throw Error('请先结束项目开发终端；断开连接不等于结束。');const result=await call('projects.publish',target);if(result.project!==project)throw Error('项目返回身份不匹配。');catalog=catalog.map(item=>item.project===project?result:item);catalogError='';pollCount=0;renderProject();toast(result.state==='READY'?'训练版本已就绪。训练使用选定的固定版本。':'正在生成训练版本；可稍后刷新，不会自动切换已选版本。');});
     if(button.id==='workspace-list')guarded(button,listFiles);
     if(button.id==='workspace-upload')guarded(button,async()=>{
       const target=fileContext(),dir=query('[name=file-path]').value||'.',files=[...query('[name=files]').files];if(target.area==='output')throw Error('任务输出只支持查看和下载。');if(!files.length)throw Error('先选择文件。');
       for(const file of files){const path=dir==='.'?file.name:dir+'/'+file.name,progress=offset=>{query('#workspace-result').textContent=`正在上传 ${file.name}：${offset} / ${file.size} B`;};
         if(target.project)await uploadProjectFile(file,{...target,path},args=>call('files.put',args),progress);
         else{let offset=0;do{const bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());await call('files.put',{...target,path,offset,truncate:offset===0,data:base64(bytes)});offset+=bytes.length;progress(offset);}while(offset<file.size);}}
-      query('#workspace-result').textContent=`已上传 ${files.length} 个文件${project?'到项目代码草稿；发布后才能用于训练。':'。'}`;renderProject();toast('文件上传完成。');
+      query('#workspace-result').textContent=`已上传 ${files.length} 个文件${project?'到项目代码草稿；生成训练版本后才能用于训练。':'。'}`;renderProject();toast('文件上传完成。');
     });
     if(button.id==='workspace-download')guarded(button,async()=>{
       const target=fileContext(),path=query('[name=file-path]').value;if(!path||path==='.')throw Error('请填入要下载的文件相对路径。');let offset=0;const chunks=[];
       while(true){const result=await call('files.get',{...target,path,offset}),bytes=Uint8Array.from(atob(result.data),char=>char.charCodeAt(0));chunks.push(bytes);offset+=bytes.length;if(offset>100*1024*1024)throw Error('超过 100 MiB，请用 CLI 下载大文件。');if(result.eof)break;if(!bytes.length)throw Error('下载没有继续返回数据，请重试。');}
       const url=URL.createObjectURL(new Blob(chunks)),anchor=document.createElement('a');anchor.href=url;anchor.download=path.split('/').pop();anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     });
-    if(button.dataset.jobOutput){const job=ownJobs().find(item=>item.id===button.dataset.jobOutput);if(!job?.project){toast('只能打开自己的项目任务输出。');return;}(async()=>{await selectMachine(job.machine);await selectProject(job.project);if(machine!==job.machine||project!==job.project)throw Error('无法确认任务对应的项目，请先刷新项目列表。');query('[name=file-area]').value='output';query('[name=file-path]').value='.';query('[name=file-run-id]').value=job.id;renderRuns();query('[name=file-run]').value=job.id;query('#workspace-files').open=true;updateControls();await guarded(button,listFiles);})().catch(error=>toast(error.message));}
+    if(button.dataset.jobOutput)guarded(button,()=>diagnostics.openLogs(button.dataset.jobOutput,'output'));
   });
   document.addEventListener('submit',event=>{
     if(event.target.id==='project-create-form'){event.preventDefault();const slug=query('[name=new-project]').value.trim();guarded(event.target.querySelector('[type=submit]'),async()=>{
       assertContext();if(!validProject(slug))throw Error('项目名需小写字母开头，使用字母、数字、下划线或短横线，最多 48 位。');
       const environmentMode=query('[name=environment-mode]').value;if(!['shared','isolated'].includes(environmentMode))throw Error('请选择项目环境模式。');
-      const result=await call('projects.create',{machine,project:slug,environmentMode});if(result.project!==slug)throw Error('项目返回身份不匹配。');if(environmentMode==='isolated'&&result.environmentMode!=='isolated')throw Error('节点未确认完全隔离模式；请升级节点后核对项目，不要开始安装环境。');catalog=[...catalog.filter(item=>item.project!==slug),result];project=slug;epoch++;query('[name=release]').value='';clearFileContext();catalogError='';renderProject();notifyContext();query('[name=new-project]').value='';query('#project-create').open=false;submitKey=crypto.randomUUID();toast('项目已创建。上传代码、安装项目环境，然后发布。');
+      const result=await call('projects.create',{machine,project:slug,environmentMode});if(result.project!==slug)throw Error('项目返回身份不匹配。');if(environmentMode==='isolated'&&result.environmentMode!=='isolated')throw Error('节点未确认完全隔离模式；请升级节点后核对项目，不要开始安装环境。');catalog=[...catalog.filter(item=>item.project!==slug),result];project=slug;epoch++;query('[name=release]').value='';clearFileContext();catalogError='';renderProject();notifyContext();query('[name=new-project]').value='';query('#project-create').open=false;submitKey=crypto.randomUUID();toast('项目已创建。上传代码、安装项目环境，然后生成训练版本。');
     });return;}
     if(event.target.id!=='train-form')return;event.preventDefault();const form=new FormData(event.target);
     guarded(event.target.querySelector('[type=submit]'),async()=>{const target=assertContext();if(form.get('machine')!==machine)throw Error('服务器选择已改变，请核对工作台顶部后再提交。');const datasets=datasetReferences(form.get('datasets'));
@@ -232,24 +311,33 @@ export function executionUI(store,refresh,toast){
     });
   });
   document.addEventListener('change',event=>{
-    if(!event.target.closest('#execution-workspace'))return;const name=event.target.name;
-    if(['workspace-machine','machine','terminal-machine','file-machine'].includes(name))selectMachine(event.target.value);
+    if(!event.target.closest('#execution-workspace,#work-submit,#work-submit-panel,#shell-context,.job-log-dialog'))return;const name=event.target.name;
+    if(['workspace-machine','machine','terminal-machine','file-machine'].includes(name)){
+      if(event.target.value!==machine&&terminalSessions.some(item=>item.userId===actor&&!item.detached)&&!window.confirm('切换服务器不会搬运代码、环境、数据或结果。当前终端会断开连接，会话保留，可从总控重连。继续切换？')){event.target.value=machine;return;}
+      selectMachine(event.target.value);
+    }
     if(name==='workspace-project')selectProject(event.target.value);
     if(name==='release'){query('#release-full').textContent=event.target.value;query('#release-full').title=event.target.value;submitKey=crypto.randomUUID();updateControls();}
     if(name==='priority'){submitKey=crypto.randomUUID();updateControls();}
     if(['custom-policy','queue-rank','yield-policy','restart-policy','checkpointable','request-mode','elastic','auto-expand'].includes(name)){submitKey=crypto.randomUUID();updateControls();}
     if(name==='file-area'){query('[name=file-path]').value='.';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('#workspace-result').textContent='已切换文件区域。';updateControls();}
     if(name==='file-run')query('[name=file-run-id]').value=event.target.value;
+    updatePreflight();
   });
-  document.addEventListener('input',event=>{if(!event.target.closest('#train-form'))return;submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(event.target.name==='sm-percent')updateControls();});
+  document.addEventListener('input',event=>{if(!event.target.closest('#train-form,#work-submit-panel'))return;submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(event.target.name==='sm-percent')updateControls();updatePreflight();});
+  document.addEventListener('gpuq-open-submit',async event=>{
+    if(!submitDialog||!actor)return;const detail=event.detail||{};if(detail.machine&&detail.machine!==machine)await selectMachine(detail.machine);if(detail.datasetRef){query('[name=datasets]').value=detail.datasetRef;submitKey=crypto.randomUUID();}
+    query('#train-panel').open=true;updatePreflight();if(detail.origin)requestAnimationFrame(()=>sharedObject(detail.origin,query('[name=datasets]')));if(machine)loadProjectStatus();
+  });
+  document.addEventListener('gpuq-open-job',event=>{if(!log||!store.principal)return;const {id,view,origin}=event.detail||{};if(!store.jobs.some(job=>job.id===id)){toast('任务暂未出现在当前账号的状态中，请刷新核对。');return;}focusedJob=id;diagnostics.openLogs(id,view||'overview',origin).catch(error=>toast(error.message));});
   document.addEventListener('gpuq-terminal-state',event=>{terminalSessions=event.detail.sessions||[];if(section&&actor)renderProject();});
   document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPolling();else armPolling();});
   return ()=>{
-    if(!store.production)return;
     if(!section){section=document.createElement('section');section.id='execution-workspace';section.className='execution-workspace';document.querySelector('#execution-host').append(section);log=document.createElement('dialog');log.className='job-log-dialog';log.setAttribute('aria-labelledby','job-log-title');log.innerHTML='<div class="modal-head"><h2 id="job-log-title">训练日志 · 最近 200 行</h2><button class="button" id="close-job-log">关闭</button></div><pre></pre>';document.body.append(log);diagnostics.install();}
-    diagnostics.sync();section.hidden=!store.principal;if(section.hidden){diagnostics.reset();actor=null;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();section.innerHTML='';notifyContext();return;}
+    diagnostics.sync();section.hidden=!store.principal;if(section.hidden){diagnostics.reset();submitDialog?.close();settingsDialog?.close();actor=null;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();section.innerHTML='';notifyContext();return;}
     if(actor!==store.principal.userId){
       diagnostics.reset();
+      submitDialog?.close();submitDialog?.remove();settingsDialog?.close();settingsDialog?.remove();submitDialog=null;settingsDialog=null;settingsSource=null;jobHTML='';lastJobs.clear();liveJobs.clear();focusedJob=null;deepLinkHandled=false;
       actor=store.principal.userId;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();machineIdentity='';submitKey=crypto.randomUUID();operationBusy=false;projectBusy=false;
       section.innerHTML=`<section class="workspace-context" aria-labelledby="workspace-context-title"><div class="workspace-context-heading"><div><div class="eyebrow">WORKSPACE</div><h2 id="workspace-context-title">选择服务器与项目</h2></div><button class="button" id="projects-refresh">刷新项目</button></div><div class="workspace-context-grid"><label>服务器<select name="workspace-machine" aria-describedby="workspace-mode-note"></select></label><label>项目<select name="workspace-project"><option value="">个人工作区</option></select></label></div><p id="workspace-mode-note" class="muted"></p><p id="project-status" class="workspace-status" role="status" aria-live="polite"></p><details id="project-create"><summary>新建项目</summary><form id="project-create-form"><label>项目名称<input name="new-project" pattern="[a-z][a-z0-9_-]{0,47}" maxlength="48" required placeholder="例如 vision-baseline" spellcheck="false" autocomplete="off"></label><label>Python 环境<select name="environment-mode" aria-describedby="environment-mode-note"><option value="shared">共享基础包（默认）</option><option value="isolated">完全隔离（不继承基础包）</option></select></label><button type="submit" class="button">创建项目</button></form><p id="environment-mode-note" class="muted">环境模式创建后固定。完全隔离模式使用基础 Python，但依赖需自行安装。</p><p class="muted">项目名使用小写字母、数字、短横线或下划线，以字母开头。离线依赖与模型可放入 /workspace/offline；训练不继承开发 HOME 中的缓存或令牌。</p></details><div id="project-detail" class="project-actions"><button class="button primary" id="project-publish">生成训练版本</button><button class="button danger" id="project-terminal-stop" hidden>结束项目开发终端</button><span class="muted">先完成上传并结束开发终端，再保存代码与环境版本。</span></div></section>
       <section class="personal-terminal" aria-labelledby="personal-terminal-title"><div class="terminal-heading"><h3 id="personal-terminal-title">个人开发终端</h3><span class="terminal-scope">日常开发 · 不占 GPU</span></div><p id="terminal-mode-note" class="muted"></p><div class="terminal-controls"><select name="terminal-machine" hidden aria-label="终端服务器"></select><button id="terminal-open" class="button primary">新建开发终端</button><button id="terminal-reconnect" class="button">重连开发会话</button></div></section>
@@ -266,12 +354,13 @@ export function executionUI(store,refresh,toast){
         <label>数据集版本（可选）<textarea name="datasets" rows="2" spellcheck="false" placeholder="从左侧「数据集」选择；多个版本用空格分隔"></textarea></label>
         <p class="muted">只挂载你获授权且本机就绪的数据，路径 /data2/数据集名称。准备数据不占 GPU。</p><div class="training-advanced">${schedulingFields(store.principal?.role==='admin')}${elasticFields()}${placementFields()}</div><button type="submit" class="button primary">提交训练</button>
       </form></details>
-      <div class="section-kicker"><span>我的训练任务</span><span id="my-job-count"></span></div><p class="muted">排队、运行及待核对任务均占用个人额度；取消确认后释放。<a href="/guide/user" target="_blank" rel="noopener">用户手册</a></p><div id="my-job-table"></div>`;
-      notifyContext();
+      <div class="section-kicker"><span>我的训练任务</span><span id="my-job-count"></span></div><p class="muted">排队、运行及待核对任务均占用个人额度；取消确认后释放。<button type="button" class="button quiet" data-user-guide>用户手册</button></p><div id="my-job-table"></div>`;
+      adaptWorkspace();notifyContext();
     }
     const machines=store.data?.machines||[],next=JSON.stringify(machines);
     if(machineIdentity!==next){machineIdentity=next;const options='<option value="">请选择服务器</option>'+machines.map(item=>`<option value="${escape(item.id)}">${escape(item.id)}</option>`).join('');for(const name of ['workspace-machine','machine','terminal-machine','file-machine'])query(`[name=${name}]`).innerHTML=options;if(!machines.some(item=>item.id===machine)){machine='';project='';catalog=[];epoch++;clearFileContext();notifyContext();}syncMachineFields();}
-    const jobs=ownJobs();renderTaskTable(query('#my-job-table'),jobs,{admin:store.principal?.role==='admin',userId:actor});query('#my-job-count').textContent=jobs.filter(job=>!terminal.has(job.state)).length+' 个待完成任务';renderProject();
+    const jobs=ownJobs();renderJobs(jobs);query('#my-job-count').textContent=jobs.filter(job=>!terminal.has(job.state)).length+' 项进行中';renderProject();
+    if(!deepLinkHandled){deepLinkHandled=true;const id=new URL(location.href).searchParams.get('job');if(id&&store.jobs.some(job=>job.id===id))diagnostics.openLogs(id,'overview');}
   };
 }
 

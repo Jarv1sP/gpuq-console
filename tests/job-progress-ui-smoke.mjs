@@ -1,3 +1,4 @@
+import {refreshVisible} from './starbase-workflows.mjs';
 // Real PortalService / SQLite / cookie HTTP / actual static asset routing.
 // Native node observations are controlled; no real GPUs, SSH or training starts.
 import assert from 'node:assert/strict';
@@ -24,9 +25,9 @@ try{
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});const page=await browser.newPage({viewport:{width:390,height:920}});page.on('pageerror',e=>errors.push(e.message));page.on('response',response=>{if(response.url().startsWith(origin)&&response.status()>=400&&!response.url().includes('/api/'))failedAssets.push(response.url());});
   await page.goto(origin);await page.locator('#login-form [name=username]').fill('alice');await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});
   await page.locator('[data-nav=work]').click();
-  const row=page.locator('#my-job-table tr').filter({hasText:'real-progress-job'});await row.waitFor();assert.match(await row.innerText(),/轮次 3\/10.*30%/);assert.match(await row.innerText(),/进度停滞/);assert.match(await row.innerText(),/RUNNING/);assert.equal(await row.locator('progress').getAttribute('value'),'30');assert.equal(await row.locator('.task-progress img').count(),0);assert.equal(await page.evaluate(()=>window.XSS),undefined);
-  progress.snapshot.epochs_completed=10;await service.reconcile();await page.locator('#refresh-state').click();await page.waitForFunction(()=>document.querySelector('#my-job-table progress')?.value===100);assert.match(await row.innerText(),/RUNNING/);
-  state='FAILED';await service.reconcile();await page.locator('#refresh-state').click();await page.waitForFunction(()=>document.querySelector('#my-job-table').textContent.includes('native confirmed failure'));assert.match(await row.innerText(),/退出码：1/);
+  const row=page.locator('#my-job-table article[data-workbench-job]').filter({hasText:'real-progress-job'});await row.waitFor();assert.match(await row.innerText(),/上次轮次 3\/10/);assert.equal(await row.locator('.wb-progress-number').innerText(),'—');assert.match(await row.innerText(),/进度停滞/);assert.match(await row.innerText(),/RUNNING/);assert.equal(await row.locator('progress').count(),0);assert.equal(await row.locator('img,script').count(),0);assert.equal(await page.evaluate(()=>window.XSS),undefined);
+  progress.stale=false;progress.snapshot.updated_at=Date.now()/1000;progress.snapshot.epochs_completed=10;await service.reconcile();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#my-job-table progress')?.value===100);assert.match(await row.innerText(),/RUNNING/);
+  state='FAILED';await service.reconcile();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#my-job-table').textContent.includes('native confirmed failure'));assert.match(await row.innerText(),/退出码：1/);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);assert.deepEqual(failedAssets,[]);assert.ok(calls.every(op=>op==='sync'));
   console.log(JSON.stringify({status:'passed',checks:['real SQLite/cookie HTTP/assets','advisory progress does not finish or fail training','native confirmed failure+exit','escaped report message','390px no overflow','no starts/cancel/retry']}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});}

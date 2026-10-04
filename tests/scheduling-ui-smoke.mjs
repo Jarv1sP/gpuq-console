@@ -1,3 +1,4 @@
+import {refreshVisible} from './starbase-workflows.mjs';
 // Synthetic loopback portal only. Never submits a real GPU job.
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -29,12 +30,12 @@ try{
     await page.locator('#train-form [type=submit]').click();await sent;
     assert.equal(calls.filter(x=>x.operation==='jobs.submit').at(-1).args.scheduling.mode,canonical);
   }
-  requestModes=false;await page.locator('#refresh-state').click();
+  requestModes=false;await refreshVisible(page);
   const before=calls.filter(x=>x.operation==='jobs.submit').length;
   await page.locator('#train-form [type=submit]').click();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('抢占模式'));
   assert.equal(calls.filter(x=>x.operation==='jobs.submit').length,before);
   assert.equal(await page.locator('[name=request-mode]').inputValue(),'preempt2');
-  capable=false;await page.locator('#refresh-state').click();await page.waitForFunction(()=>document.querySelector('#custom-policy-note').textContent.includes('尚未确认'));
+  capable=false;await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#custom-policy-note').textContent.includes('尚未确认'));
   assert.equal(await page.locator('[name=custom-policy]').isChecked(),true);assert.equal(await page.locator('[name=queue-rank]').inputValue(),'P1');assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   assert.deepEqual(errors,[]);console.log(JSON.stringify({status:'passed',checks:['explicit consent','adapter required','canonical submit','capability loss blocks without resetting draft','390px layout','no external requests']}));

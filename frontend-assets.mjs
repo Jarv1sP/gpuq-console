@@ -2,7 +2,7 @@
 // Keep static asset registration separate from every API and execution route.
 export const STARBASE_ASSETS = Object.fromEntries([
   'fonts.css', 'starbase.css', 'shell.css', 'workbench.css',
-  'shell-ui.js', 'control-ui.js', 'workbench-ui.js',
+  'shell-ui.js', 'control-ui.js', 'workbench-ui.js', 'motion-ui.js',
   'vendor/fonts/Archivo-Variable.woff2',
   'vendor/fonts/Geist-Variable.woff2',
   'vendor/fonts/GeistMono-Variable.woff2',

@@ -21,12 +21,15 @@ export function diagnosticsHTML(bundle){
     <h3>Worker / Ray 日志尾部</h3><p class="muted">最多 32 个白名单文件，每个最多 64 KiB；只呈现有限尾部，不保证覆盖所有错误。</p>${logs.map(item=>`<details class="diagnostic-log"><summary>${esc(item.source)}${item.truncated?' · 已截断':''}</summary><pre>${esc(item.text)}</pre></details>`).join('')||'<p class="muted">暂无受管理 worker 日志；旧任务或自定义临时目录可能没有留存。</p>'}`;
 }
 
-export function createJobDiagnostics(store,getDialog,toast){
-  let generation=0,diagnosticsRequest=0,jobId=null,bundle=null,bundleIdentity=null,displayIdentity=null,view='logs',installed=false;
+export function createJobDiagnostics(store,getDialog,toast,options={}){
+  let generation=0,diagnosticsRequest=0,jobId=null,bundle=null,bundleIdentity=null,displayIdentity=null,view='logs',installed=false,readingLogs=false,loadedLogs=false;
   const principal=()=>store.principal?`${store.principal.userId}:${store.principal.role}`:null;
   const element=selector=>getDialog()?.querySelector(selector);
-  function reset(){generation++;diagnosticsRequest++;jobId=null;bundle=null;bundleIdentity=null;displayIdentity=null;view='logs';const dialog=getDialog();if(dialog){dialog.close();element('pre').textContent='';element('#job-diagnostic-view').innerHTML='';element('#job-view-status').textContent='';element('#job-diagnostic-download').disabled=true;}}
-  function switchView(next){view=next;element('#job-main-log').hidden=next!=='logs';element('#job-diagnostic-view').hidden=next!=='diagnostics';element('#job-log-view').setAttribute('aria-pressed',String(next==='logs'));element('#job-diagnostic-open').setAttribute('aria-pressed',String(next==='diagnostics'));}
+  function reset(){generation++;diagnosticsRequest++;if(options.drawer)document.dispatchEvent(new Event('gpuq-job-drawer-close'));jobId=null;bundle=null;bundleIdentity=null;displayIdentity=null;view='logs';const dialog=getDialog();if(dialog){dialog.close();element('#job-main-log').textContent='';element('#job-diagnostic-view').innerHTML='';element('#job-view-status').textContent='';element('#job-diagnostic-download').disabled=true;if(options.drawer){for(const key of ['overview','output','notes'])element('#job-'+key+'-view').replaceChildren();element('#job-log-title').textContent='训练详情';}}}
+  function switchView(next){
+    view=next;options.onView?.(next);element('#job-main-log').hidden=next!=='logs';element('#job-diagnostic-view').hidden=next!=='diagnostics';element('#job-log-view').setAttribute('aria-pressed',String(next==='logs'));element('#job-diagnostic-open').setAttribute('aria-pressed',String(next==='diagnostics'));
+    if(options.drawer){for(const key of ['overview','output','notes'])element('#job-'+key+'-view').hidden=next!==key;for(const button of getDialog().querySelectorAll('[data-job-tab]')){const selected=button.dataset.jobTab===next;button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;}if(next==='output')options.output?.(jobId,element('#job-output-view'));if(next==='notes')options.notes?.(jobId,element('#job-notes-view'));}
+  }
   async function loadDiagnostics(){
     const requested=jobId,identity=principal(),context=generation,request=++diagnosticsRequest;if(!requested||!identity)return;
     element('#job-view-status').textContent='正在读取持久诊断包…';element('#job-diagnostic-download').disabled=true;
@@ -38,24 +41,45 @@ export function createJobDiagnostics(store,getDialog,toast){
       bundle=result;bundleIdentity=identity;element('#job-diagnostic-view').innerHTML=diagnosticsHTML(result);element('#job-diagnostic-download').disabled=false;element('#job-view-status').textContent='诊断已读取；不会因此更改任务状态。';
     }catch(error){if(generation===context&&diagnosticsRequest===request&&principal()===identity){bundle=null;element('#job-diagnostic-view').textContent='诊断暂不可用：'+error.message;element('#job-view-status').textContent='主日志仍可查看；未把采集失败当作训练结果。';toast(error.message);}}
   }
+  async function loadMainLog(){
+    if(readingLogs||loadedLogs||!jobId)return;readingLogs=true;const id=jobId,identity=principal(),request=generation;
+    try{const result=await store.call('jobs.logs',{jobId:id});if(generation===request&&principal()===identity&&jobId===id){loadedLogs=true;element('#job-main-log').textContent=result.text;const preview=element('#job-log-preview');if(preview)preview.textContent=String(result.text||'暂无主日志。').split('\n').slice(0,18).join('\n');}}
+    catch(error){if(generation===request&&principal()===identity&&jobId===id){element('#job-main-log').textContent='主日志暂不可用：'+error.message;const preview=element('#job-log-preview');if(preview)preview.textContent=element('#job-main-log').textContent;toast(error.message);}}
+    finally{if(generation===request)readingLogs=false;}
+  }
   function install(){
     if(installed)return;installed=true;const dialog=getDialog(),pre=element('pre');pre.id='job-main-log';
     if(!document.querySelector('#job-diagnostic-styles')){const style=document.createElement('link');style.id='job-diagnostic-styles';style.rel='stylesheet';style.href=new URL('./job-diagnostics.css',import.meta.url).href;document.head.append(style);}
     const tools=document.createElement('div');tools.className='diagnostic-tools';tools.innerHTML='<button class="button" id="job-log-view" aria-pressed="true">主日志</button><button class="button" id="job-diagnostic-open" aria-pressed="false">诊断包 / 历史分配</button><button class="button" id="job-diagnostic-download" disabled>下载诊断 JSON</button><p id="job-view-status" role="status" aria-live="polite"></p>';
     pre.before(tools);const body=document.createElement('section');body.id='job-diagnostic-view';body.hidden=true;pre.after(body);
-    element('#job-log-view').addEventListener('click',()=>switchView('logs'));
+    if(options.drawer){
+      dialog.classList.add('work-sheet','job-sheet');dialog.querySelector('.modal-head').classList.add('sheet-header','glass');tools.classList.add('job-tabs','glass');tools.setAttribute('role','tablist');tools.setAttribute('aria-label','任务详情分区');
+      const overview=document.createElement('button');overview.type='button';overview.className='button quiet';overview.id='job-overview-tab';overview.textContent='概况';tools.prepend(overview);
+      for(const [id,key,panel] of [['job-overview-tab','overview','job-overview-view'],['job-log-view','logs','job-main-log'],['job-diagnostic-open','diagnostics','job-diagnostic-view']]){const button=element('#'+id);button.dataset.jobTab=key;button.setAttribute('role','tab');button.setAttribute('aria-controls',panel);}
+      for(const [key,label] of [['output','输出'],['notes','留言']]){const button=document.createElement('button');button.type='button';button.className='button quiet';button.textContent=label;button.dataset.jobTab=key;button.setAttribute('role','tab');button.setAttribute('aria-controls','job-'+key+'-view');tools.insertBefore(button,element('#job-diagnostic-download'));button.addEventListener('click',()=>switchView(key));}
+      overview.addEventListener('click',()=>{switchView('overview');loadMainLog();});
+      const content=document.createElement('div');content.className='sheet-scroll';for(const key of ['overview','output','notes']){const panel=document.createElement('section');panel.id='job-'+key+'-view';panel.hidden=true;panel.setAttribute('role','tabpanel');content.append(panel);}content.append(pre,body);dialog.append(content);
+      const footer=document.createElement('div');footer.className='sheet-footer glass';footer.append(element('#job-view-status'),element('#job-diagnostic-download'));dialog.append(footer);
+      tools.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const buttons=[...tools.querySelectorAll('[data-job-tab]')],index=buttons.indexOf(document.activeElement);const target=buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length];target.focus();target.click();});
+      dialog.addEventListener('click',event=>{const id=event.target.closest('[data-copy-job]')?.dataset.copyJob;if(id)navigator.clipboard.writeText(id).then(()=>toast('完整任务 ID 已复制。'),()=>toast('复制失败；请手动复制完整 ID。'));});
+      if(options.dismiss)dialog.addEventListener('cancel',event=>{event.preventDefault();options.dismiss(dialog);});
+    }
+    element('#job-log-view').addEventListener('click',()=>{switchView('logs');loadMainLog();});
     element('#job-diagnostic-open').addEventListener('click',loadDiagnostics);
     element('#job-diagnostic-download').addEventListener('click',()=>{
       if(!bundle||bundle.jobId!==jobId||principal()!==bundleIdentity)return;
       const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:'application/json'})),link=document.createElement('a');link.href=url;link.download='gpuq-diagnostics-'+jobId+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     });
-    dialog.addEventListener('close',()=>{if(dialog.open)return;generation++;diagnosticsRequest++;bundle=null;bundleIdentity=null;displayIdentity=null;jobId=null;pre.textContent='';body.innerHTML='';element('#job-diagnostic-download').disabled=true;});
+    dialog.addEventListener('close',()=>{if(dialog.open)return;generation++;diagnosticsRequest++;bundle=null;bundleIdentity=null;displayIdentity=null;jobId=null;pre.textContent='';body.innerHTML='';element('#job-diagnostic-download').disabled=true;if(options.drawer){document.dispatchEvent(new Event('gpuq-job-drawer-close'));const url=new URL(location.href);url.searchParams.delete('job');history.replaceState(null,'',url);}});
   }
-  async function openLogs(id){
-    install();const identity=principal(),request=++generation;diagnosticsRequest++;displayIdentity=identity;jobId=id;bundle=null;bundleIdentity=null;element('#job-diagnostic-download').disabled=true;element('#job-diagnostic-view').innerHTML='';switchView('logs');element('#job-main-log').textContent='正在读取主日志…';element('#job-view-status').textContent='诊断包中可查看 worker 错误、资源事件和历史分配。';
+  async function openLogs(id,next='logs',origin=null){
+    install();readingLogs=false;loadedLogs=false;const identity=principal(),request=++generation;diagnosticsRequest++;displayIdentity=identity;jobId=id;bundle=null;bundleIdentity=null;element('#job-diagnostic-download').disabled=true;element('#job-diagnostic-view').innerHTML='';
+    const job=options.drawer?(store.jobs||[]).find(item=>item.id===id):null;
+    if(options.drawer){if(!job)throw Error('任务暂未出现在当前账号的状态中，请刷新核对。');element('#job-log-title').innerHTML=options.header?.(job)||esc(job.name||'训练详情');element('#job-overview-view').innerHTML=options.overview?.(job)||'';const url=new URL(location.href);url.searchParams.set('job',id);history.replaceState(null,'',url);}
+    switchView(options.drawer?next:'logs');element('#job-main-log').textContent='正在读取主日志…';element('#job-view-status').textContent='诊断包中可查看 worker 错误、资源事件和历史分配。';
     const dialog=getDialog();if(!dialog.open)dialog.showModal();
-    try{const result=await store.call('jobs.logs',{jobId:id});if(generation===request&&principal()===identity&&jobId===id)element('#job-main-log').textContent=result.text;}
-    catch(error){if(generation===request&&principal()===identity&&jobId===id){element('#job-main-log').textContent='主日志暂不可用：'+error.message;toast(error.message);}}
+    if(options.drawer){if(options.reveal)options.reveal(dialog,job,origin);else {const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;dialog.animate(reduce?[{opacity:0},{opacity:1}]:[{transform:'translateX(100%)'},{transform:'none'}],{duration:reduce?150:320,easing:'cubic-bezier(.4,0,.2,1)'});}if(next==='diagnostics')loadDiagnostics();}
+    if(!options.drawer||['logs','overview'].includes(next))await loadMainLog();
   }
   return {install,openLogs,reset,sync(){if(displayIdentity!==null&&displayIdentity!==principal())reset();}};
 }

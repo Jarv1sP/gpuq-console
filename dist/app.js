@@ -7,10 +7,13 @@ import {datasetsUI} from './datasets-ui.js';
 import {createCommunityUI} from './community-ui.js';
 import {maintenanceUI,operationalMaintenanceUI} from './maintenance-ui.js';
 import {transfersUI} from './transfers-ui.js';
+import {shellUI} from './shell-ui.js';
+import {fadeDialog,reducedMotion} from './motion-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
 let page='work',selected=null,draft=null,filter='pending',toastTimer,confirmAction,inviteCode=null,refreshing=false;
+const shell=shellUI(store,{navigate:choosePage,getPage:()=>page,toast});
 const renderExecution=executionUI(store,()=>render(true),toast);
 const renderDatasets=datasetsUI(store,toast);
 const renderCommunity=createCommunityUI(store,toast);
@@ -25,11 +28,11 @@ const pending=u=>u.enabled&&u.role!=='admin'&&!u.approvedAt&&u.total===0;
 const pendingUsers=()=>store.users.filter(pending);
 const label=u=>!u.enabled?'已暂停':u.role==='admin'?'管理员':pending(u)?'待处理':u.total?'已授权':'零额度';
 const dirty=()=>isAdmin()&&draft&&store.users.some(u=>u.id===selected)&&(JSON.stringify(draft.limits)!==JSON.stringify(store.get(selected).limits)||draft.total!==store.get(selected).total);
-function toast(message){clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').classList.add('visible');toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),3500);}
+function toast(message){clearTimeout(toastTimer);const target=$('#toast'),shown=target.classList.contains('visible');target.textContent=message;target.classList.add('visible');if(!shown)target.animate(reducedMotion()?[{opacity:0},{opacity:1}]:[{opacity:0,transform:'translateY(10px)'},{opacity:1,transform:'none'}],{duration:reducedMotion()?150:220,easing:'cubic-bezier(.4,0,.2,1)'});toastTimer=setTimeout(()=>target.classList.remove('visible'),3500);}
 function report(error){toast(error.message);if(error.status===401){store.principal=null;store.data=null;draft=null;render();openLogin();}}
-function confirm(title,message,action){$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;confirmAction=action;$('#confirm-dialog').showModal();}
+function confirm(title,message,action){$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;confirmAction=action;$('#confirm-dialog').showModal();fadeDialog($('#confirm-dialog'));}
 function openLogin(){$('#login-form').reset();$('#login-error').textContent='';if(!$('#login-dialog').open)$('#login-dialog').showModal();}
-function choosePage(next){if(next==='users'&&!isAdmin())next='resources';if(next===page)return;if(dirty()){toast('请先保存或撤销授权草稿。');return;}page=next;history.replaceState(null,'','#'+next);render();}
+function choosePage(next){if(next==='users'&&!isAdmin())next='resources';if(next===page)return;if(dirty()){toast('请先保存或撤销授权草稿。');return;}shell.route(next,()=>{page=next;history.replaceState(null,'','#'+next);render();});}
 function defaultPage(){page=own()?.total?'work':'resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'','#'+page);}
 function render(preserve=false){
   const logged=!!store.principal,admin=isAdmin(),u=own(),keepDraft=preserve&&dirty();
@@ -47,13 +50,23 @@ function render(preserve=false){
   const titles={me:['我的','账号、额度与个人工作区。'],transfers:['传输任务','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览','查看每张 GPU 的使用情况，选择适合的服务器。'],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
   const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
-  $('#mode-note').textContent=note;$('.demo-note').hidden=!note;
+  const monitorNotice=logged&&store.production&&store.data?.gpuq?.stale?'监控已过期：显卡占用为未知；任务结束与额度释放以调度器核对为准。':'';
+  $('#mode-note').textContent=[note,monitorNotice].filter(Boolean).join(' ');$('.demo-note').hidden=!note&&!monitorNotice;
   renderOperationalMaintenance();
   renderTransfers(page==='transfers');renderResources();renderExecution();renderDatasets();renderCommunity(page==='community');renderMaintenance(page==='maintenance');
   if(!keepDraft){const list=filteredUsers();if(!list.some(user=>user.id===selected))selected=list[0]?.id||null;draft=selected?store.get(selected):null;}
   if(admin){renderUsers();if(!keepDraft)renderEditor();renderTaskTable($('#all-jobs'),store.jobs,{admin,userId:store.principal.userId});}
   else{$('#editor').innerHTML='';$('#user-list').innerHTML='';$('#all-jobs').innerHTML='';}
-  $('#self-summary').innerHTML=logged?`<div><small>已授权服务器</small><strong>${Object.keys(u?.limits||{}).length}</strong></div><div><small>已占额度 / 上限</small><strong>${store.usage(u.id)} / ${u.total}<span> 张</span></strong></div><div><small>账号状态</small><strong class="summary-status">${label(u)}</strong></div>`:'<p class="muted">登录后查看自己的额度和任务。</p>';
+  const activeJobs=store.jobs.filter(job=>job.userId===store.principal?.userId&&!['SUCCEEDED','FAILED','CANCELED'].includes(job.state));
+  const grouped=new Map();for(const job of activeJobs){const key=job.cancelRequested?'cancel':job.state;grouped.set(key,(grouped.get(key)||0)+1);}
+  const stateNames={RUNNING:['st-run','运行'],STARTING:['st-start','启动'],SUBMITTING:['st-start','提交'],PENDING:['st-queue','排队'],QUEUED:['st-queue','排队'],PREPARING_DATA:['st-prep','准备数据'],cancel:['st-cancel','正在取消'],UNKNOWN:['st-unk','待核对'],PREEMPTING:['st-cancel','正在让位'],PREEMPTED:['st-stop','让位结束']};
+  const distribution=[...grouped].map(([key,count])=>{const [css,text]=stateNames[key]||['st-unk','状态未知'];return `<span class="st ${css}"><span class="g" aria-hidden="true"></span>${count} ${text}</span>`;}).join('');
+  const used=u?store.usage(u.id):null,quota=u?.total;
+  const quotaSlots=Number.isSafeInteger(quota)&&quota>0&&quota<=64?`<span class="wb-quota-segments" aria-hidden="true">${Array.from({length:quota},(_,i)=>`<i class="${i<used?'on':''}"></i>`).join('')}</span>`:'';
+  $('#self-summary').innerHTML=logged?`<div><small>已占额度 / 上限</small><strong>${used??'—'} / ${quota??'—'}<span> 张</span></strong>${quotaSlots}</div><div><small>进行中的训练</small><strong>${activeJobs.length}<span> 项</span></strong><span class="wb-state-distribution">${distribution||'暂无进行中的训练'}</span></div><div><small>已授权服务器</small><strong>${Object.values(u?.limits||{}).filter(limit=>limit>0).length}<span> 台</span></strong><span class="wb-telemetry-note">${label(u)}</span></div>`:'';
+  $('#work-title-telemetry').hidden=page!=='work'||!logged;
+  $('#open-submit').hidden=page!=='work'||!logged;$('#open-submit').disabled=!store.production||store.data?.executionEnabled!==true;
+  shell.update();
 }
 function renderResources(){
   const u=own(),limits=u?.limits||{},grid=$('#machine-grid');
@@ -79,7 +92,7 @@ function renderEditor(){
   $('#editor').innerHTML=`<div class="editor-head"><div><h2>${esc(u.name)}</h2><p class="muted">${label(u)}${self?' · 当前账号':''}</p></div><button class="button" data-action="reset-password">重置密码</button></div><div class="editor-body">${admin?'<div class="approval-note">管理员自动拥有所有机器与最大额度。此角色还可管理用户，并访问已启用的宿主机 root 终端。</div>':`<h3>分配机器与卡数</h3><p class="subtext">勾选机器并填写并发上限；没有勾选的机器不能使用。</p><div class="permissions">${MACHINES.map(m=>`<div class="permission ${draft.limits[m.id]?'granted':''}"><label class="permission-top"><input type="checkbox" data-machine="${m.id}" ${draft.limits[m.id]?'checked':''}><span>${esc(m.id)}</span></label><p class="permission-spec">${m.cards} × ${esc(m.model)}</p><label class="permission-bottom">最多使用<input class="quota-input" type="number" min="1" max="${m.cards}" data-quota="${m.id}" value="${draft.limits[m.id]||1}" ${draft.limits[m.id]?'':'disabled'}>张</label></div>`).join('')}</div><label class="total-limit"><span><strong>所有机器合计上限</strong><small class="subtext">不是预留卡位；没有空闲 GPU 会排队。</small></span><span><input class="quota-input" type="number" min="0" max="${capacity}" data-quota="total" value="${draft.total}"> 张</span></label><div class="editor-save"><button class="button" data-action="grant-full">全部机器最大额度</button><div><button class="button ghost" data-action="reset-draft">撤销</button><button class="button primary" data-action="save-policy">${pending(u)?'批准授权':'保存额度'}</button></div></div><p class="form-error" id="policy-error" role="alert"></p><p class="save-state" id="save-state"></p>`}<details class="account-settings"><summary>账号权限与状态</summary><p class="muted">最大用卡额度 ≠ 管理员。只有完全受信任的维护者才应成为管理员。</p><div class="account-actions"><button class="button" data-action="role" ${self?'disabled':''}>${admin?'改为普通用户':'设为管理员'}</button><button class="button" data-action="enabled" ${self?'disabled':''}>${u.enabled?'暂停账号':'恢复账号'}</button><button class="button danger" data-action="delete" ${self||u.enabled?'disabled':''}>删除账号</button></div><small class="muted">先暂停、确认没有未完成任务后才能删除；数据和历史保留。最后一名管理员不能移除。</small></details></div>`;updateDirty();
 }
 function updateDirty(){const el=$('#save-state');if(el)el.textContent=dirty()?'有未保存的额度修改':'当前额度已保存';}
-async function refresh(){if(refreshing||!store.principal)return;refreshing=true;try{await store.refresh();render(true);if($('#invites-dialog').open)await loadInvites();}catch(e){report(e);}finally{refreshing=false;}}
+async function refresh(){if(refreshing||!store.principal)return;refreshing=true;shell.syncStatus('syncing');try{await store.refresh();render(true);shell.syncStatus('ready',Date.now());if($('#invites-dialog').open)await loadInvites();}catch(e){shell.syncStatus('failed');report(e);}finally{refreshing=false;}}
 async function loadInvites(){const result=await store.call('invites.list');inviteCode=result.code;const i=result.invitations[0];$('#invites-content').innerHTML=`<section class="invite-card"><div class="invite-heading"><h3>当前注册码</h3><span class="badge ${i.available?'active':'pending'}">${i.available?'可用':'未启用'}</span></div><p class="muted">新用户用此码自行注册；初始额度为 0，管理员随后审批。不会授予管理员权限。</p>${inviteCode?`<label class="field">注册码<input id="current-invite" readonly spellcheck="false" value="${esc(inviteCode)}"></label><button class="button" data-action="copy-invite">复制注册码</button>`:`<p class="approval-note">${i.available?'旧注册码仅有摘要，无法显示。请换新一次；已有账号不受影响。':'生成一个注册码后即可邀请同学。'}</p>`}<p class="muted">本码已注册 ${i.uses} 个账号。管理员重新打开此页仍可查看当前有效码。</p><div class="invite-actions"><button class="button primary" data-action="rotate-invite">${i.createdAt?'换新注册码':'生成注册码'}</button><button class="button danger" data-action="disable-invite" ${i.enabled?'':'disabled'}>停用注册</button></div></section>`;}
 async function guardedChange(action){if(dirty()){toast('请先保存或撤销额度草稿。');return;}await action();}
 document.addEventListener('click',async event=>{
@@ -114,11 +127,11 @@ document.addEventListener('input',event=>{const key=event.target.dataset.quota;i
 $('#password-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter;b.disabled=true;try{const self=selected===store.principal.userId;await store.reset(selected,new FormData(event.target).get('password'));event.target.reset();$('#password-dialog').close();toast('密码已重置，旧登录已失效');if(self){await store.logout().catch(()=>{});render();openLogin();}}catch(e){$('#password-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#edit-profile').addEventListener('click',()=>{$('#profile-form [name=profile-name]').value=own()?.name||store.principal.username;$('#profile-error').textContent='';$('#profile-dialog').showModal();});
 $('#profile-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter;b.disabled=true;try{await store.call('profile.update',{name:new FormData(event.target).get('profile-name')});$('#profile-dialog').close();render(true);toast('姓名已保存；新任务记录提交时姓名。');}catch(e){$('#profile-error').textContent=e.message;}finally{b.disabled=false;}});
-$('#login-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;try{await store.login(data.get('username'),data.get('password'));event.target.reset();$('#login-dialog').close();defaultPage();render();}catch(e){$('#login-error').textContent=e.message;}finally{b.disabled=false;}});
+$('#login-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;try{await store.login(data.get('username'),data.get('password'));event.target.reset();$('#login-dialog').close();defaultPage();render();shell.syncStatus('ready',Date.now());}catch(e){$('#login-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'),data.get('signup-name')||undefined);await store.login(data.get('username'),data.get('password'));event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#invites-dialog').addEventListener('close',()=>{inviteCode=null;$('#invites-content').innerHTML='';});
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
-const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','transfers','community','maintenance','users','me'].includes(initialHash))page=initialHash;}render();if(!store.principal)openLogin();
+const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','transfers','community','maintenance','users','me'].includes(initialHash))page=initialHash;}render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(['work','resources','datasets','transfers','community','maintenance','users','me'].includes(next)&&next!==page)choosePage(next);});

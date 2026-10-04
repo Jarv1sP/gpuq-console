@@ -1,0 +1,29 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {controlSnapshot} from '../dist/control-ui.js';
+import {trainingReadout,workbenchCards,jobOverviewHTML,stateClass} from '../dist/workbench-ui.js';
+
+function fixture(role='member'){
+  const jobs=[{id:'own-run',userId:'owner',name:'own',state:'RUNNING',machine:'gpu-1',cards:2},{id:'own-prep',userId:'owner',state:'PREPARING_DATA',cards:1},{id:'other-failed',userId:'other',state:'FAILED',cards:8}];
+  return {principal:{userId:'owner',role},production:true,jobs,users:[{id:'owner',role,total:4,limits:{'gpu-1':4}},{id:'pending',name:'待审批',role:'member',enabled:true,total:0}],data:{machines:[{id:'gpu-1',cards:2},{id:'private-node',cards:8}],gpuq:{stale:false,hosts:[{id:'gpu-1',reachable:true,gpus:[{index:0,processesAvailable:true,processes:[]},{index:1,processesAvailable:false,processes:[]}]}]}},usage:()=>2};
+}
+test('control is owner-bound and never treats an incomplete process inventory as free',()=>{
+  const store=fixture(),snapshot=controlSnapshot(store,{sessions:[{id:'mine',userId:'owner'},{id:'foreign',userId:'other'},{id:'root',userId:'owner',hostAdmin:true}],activities:[{id:'data',userId:'owner',state:'RUNNING'},{id:'foreign-data',userId:'other',state:'FAILED'}]});
+  assert.deepEqual(snapshot.jobs.map(job=>job.id),['own-run','own-prep']);assert.deepEqual(snapshot.sessions.map(row=>row.id),['mine']);assert.equal(snapshot.attention.length,0);assert.deepEqual(snapshot.servers.map(row=>row.id),['gpu-1']);assert.equal(snapshot.servers[0].busy,null);assert.equal(snapshot.dataCount,null);
+  store.data.gpuq.hosts[0].gpus[1].processesAvailable=true;assert.equal(controlSnapshot(store).servers[0].busy,0);
+  store.data.gpuq.stale=true;assert.equal(controlSnapshot(store).servers[0].busy,null);assert.equal(controlSnapshot(store).servers[0].state,'unknown');
+});
+test('only an administrator sees pending approvals, and only a complete data listing has an aggregate',()=>{
+  assert.equal(controlSnapshot(fixture()).attention.length,0);const snapshot=controlSnapshot(fixture('admin'),{activitiesComplete:true,activities:[{id:'one',userId:'owner',state:'RUNNING'},{id:'one',userId:'owner',state:'RUNNING'},{id:'two',userId:'owner',state:'FAILED'}]});assert.equal(snapshot.dataCount,1);assert.equal(snapshot.attention.length,2);
+  const store=fixture();store.principal=null;assert.deepEqual(controlSnapshot(store).jobs,[]);assert.equal(controlSnapshot(store).quota,null);
+});
+test('stale or missing self-report never becomes a progress percentage or ETA',()=>{
+  const job={progress:{reported:true,stale:true,snapshot:{epochsCompleted:12,epochsTotal:40,etaSeconds:60,updatedAt:1790700000,metrics:{loss:.4}}}};assert.equal(trainingReadout(job).percent,null);assert.equal(trainingReadout(job).eta,'');assert.deepEqual(trainingReadout(job).metrics,[]);
+  job.progress.stale=false;assert.equal(trainingReadout(job).percent,30);assert.equal(trainingReadout(job).epoch,'第 12 / 40 轮');assert.match(trainingReadout(job).eta,/自报/);
+  job.progress.snapshot.metrics={accuracy:.8,epoch:12,lr:.0003,val_acc:.7,loss:.4};assert.deepEqual(trainingReadout(job).metrics.map(([name])=>name),['loss','val_acc','lr']);
+  assert.equal(stateClass({state:'RUNNING',cancelRequested:true}),'st-cancel');
+});
+test('workbench and drawer escape task data and do not reveal another member’s command',()=>{
+  const job={id:'full-identity-123',name:'<img src=x onerror=alert(1)>',description:'<script>bad</script>',state:'RUNNING',userId:'owner',cards:1,machine:'gpu-1',argv:['PRIVATE-COMMAND']};
+  const html=workbenchCards([job]);assert.equal((html.match(/hero-frame/g)||[]).length,1);assert.doesNotMatch(html,/<img|<script/);assert.match(html,/full-identity-123/);assert.doesNotMatch(jobOverviewHTML(job,{owned:false}),/PRIVATE-COMMAND/);assert.match(jobOverviewHTML(job),/PRIVATE-COMMAND/);
+});
