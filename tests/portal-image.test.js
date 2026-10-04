@@ -1,0 +1,88 @@
+// Validate the final runtime stage, independently of the builder's broad COPY.
+// Node tests use an isolated Portal; the Dockerfile also loads the module graph
+// inside the actual image without opening a database or starting a server.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile,mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {tmpdir} from 'node:os';
+import {join,posix,matchesGlob} from 'node:path';
+import net from 'node:net';
+import {build} from 'esbuild';
+import {createPortalServer} from '../portal-server.mjs';
+import {STARBASE_ASSETS} from '../frontend-assets.mjs';
+
+const root=fileURLToPath(new URL('..',import.meta.url));
+async function importGraph(entry,platform){
+  const result=await build({absWorkingDir:root,entryPoints:[entry],bundle:true,
+    platform,format:'esm',packages:'external',write:false,metafile:true,logLevel:'silent'});
+  return Object.keys(result.metafile.inputs).map(file=>file.replaceAll('\\','/'));
+}
+async function imageLayout(){
+  const source=await readFile(new URL('../deploy/Dockerfile',import.meta.url),'utf8');
+  const runtime=source.replace(/\\\r?\n/g,' ').split(/^FROM\s+[^\n]+$/mi).at(-1);
+  const tracked=execFileSync('git',['ls-files','-z'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean),files=new Map();
+  for(const line of runtime.split(/\r?\n/)){
+    if(!/^\s*COPY\s/i.test(line)||/--from(?:=|\s)/.test(line))continue;
+    const args=line.trim().replace(/^COPY\s+/i,'').replace(/^(?:--\S+\s+)+/,'');
+    const tokens=args.startsWith('[')?JSON.parse(args):args.split(/\s+/),destination=tokens.at(-1),inputs=tokens.slice(0,-1);
+    for(const input of inputs){
+      const directory=tracked.some(file=>file.startsWith(input+'/'));
+      const matches=tracked.filter(file=>matchesGlob(file,input)||directory&&file.startsWith(input+'/'));
+      assert.ok(matches.length,'Missing runtime COPY source: '+input);
+      for(const file of matches){
+        const target=directory?posix.join(destination,file.slice(input.length+1)):
+          inputs.length>1||destination==='.'||destination.endsWith('/')?posix.join(destination,posix.basename(file)):destination;
+        files.set(posix.normalize(target),file);
+      }
+    }
+  }
+  return files;
+}
+function staticFile(value,base='index.html'){
+  const url=new URL(value,'http://runtime.fixture/'+base);
+  return url.origin==='http://runtime.fixture'&&/\.(?:js|css|woff2)$/.test(url.pathname)?url.pathname.slice(1):null;
+}
+
+test('every transitive local Portal module exists at its runtime COPY path',async t=>{
+  const graph=await importGraph('portal-server.mjs','node'),files=await imageLayout();
+  const modules=graph.filter(file=>file.endsWith('.mjs'));
+  assert.ok(modules.includes('frontend-assets.mjs'));
+  assert.ok(modules.includes('native-task-metadata.mjs'),'follow imports beyond the entry point');
+  for(const file of graph)assert.equal(files.get(file),file,'Runtime image is missing imported module: '+file);
+  t.diagnostic('Runtime COPY covers '+modules.length+' local .mjs modules and their local JS dependencies.');
+});
+
+test('client imports, styles and fonts are copied and served by the Portal whitelist',async t=>{
+  const graph=await importGraph('dist/app.js','browser'),files=await imageLayout();
+  for(const file of graph)assert.equal(files.get(file),file,'Runtime image is missing client dependency: '+file);
+  // The existing preview-only service is deliberately unavailable in Portal.
+  // /runtime.js selects remote production mode before the client is created.
+  const assets=new Set([...graph.filter(file=>file!=='dist/service.js').map(file=>file.replace(/^dist\//,'')),...Object.values(STARBASE_ASSETS)]);
+  const html=await readFile(new URL('../dist/index.html',import.meta.url),'utf8');
+  for(const match of html.matchAll(/(?:src|href)=["']([^"']+)["']/g)){const file=staticFile(match[1]);if(file)assets.add(file);}
+  for(const file of assets)if(file.endsWith('.css')){
+    const css=await readFile(join(root,'dist',file),'utf8');
+    for(const match of css.matchAll(/url\(\s*["']?([^"')\s]+)["']?\s*\)/g)){const asset=staticFile(match[1],file);if(asset)assets.add(asset);}
+  }
+  assert.ok(assets.has('control-ui.js')&&assets.has('vendor/fonts/Archivo-Variable.woff2'));
+  for(const file of assets)assert.equal(files.get('dist/'+file),'dist/'+file,'Runtime image is missing static asset: '+file);
+  const directory=await mkdtemp(join(tmpdir(),'gpuq-portal-image-'));let server;
+  t.after(async()=>{if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(directory,{recursive:true,force:true});});
+  const bootstrap=join(directory,'bootstrap.json');await writeFile(bootstrap,JSON.stringify({username:'admin',password:'Local-Image-Asset-Fixture-Only-2026!'}),{mode:0o600});
+  const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));
+  const port=reservation.address().port,origin='http://127.0.0.1:'+port;await new Promise(resolve=>reservation.close(resolve));
+  ({server}=await createPortalServer({database:join(directory,'portal.sqlite'),bootstrap,origin,secure:false}));
+  await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
+  const runtime=await fetch(origin+'/runtime.js');assert.equal(runtime.status,200);
+  assert.match(await runtime.text(),/globalThis\.GPUQ_LOCAL_API=true;globalThis\.GPUQ_PRODUCTION=true;/);
+  for(const file of assets){
+    const response=await fetch(origin+'/'+file);
+    assert.equal(response.status,200,'Static whitelist is missing /'+file);
+    const type=file.endsWith('.woff2')?'font/woff2':file.endsWith('.css')?'text/css':'text/javascript';
+    assert.ok(response.headers.get('content-type')?.startsWith(type),'Incorrect asset MIME: '+file);
+    assert.ok((await response.arrayBuffer()).byteLength>0,'Empty asset: '+file);
+  }
+  t.diagnostic('Runtime COPY and HTTP whitelist cover '+assets.size+' client assets, including all self-hosted fonts.');
+});
