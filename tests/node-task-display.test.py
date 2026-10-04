@@ -21,6 +21,7 @@ class NodeDisplay(unittest.TestCase):
     submit=F.SchedulerPriorityTests.submit
     running=F.SchedulerPriorityTests.running
     def setUp(self):
+        __import__('runpy').run_path(str(Path(__file__).with_name('storage_test_helpers.py')))['isolated_platform_pin'](self)
         F.SchedulerPriorityTests.setUp(self)
         folder=self.root/'node';folder.mkdir()
         for name in ('node-executor.py','scheduling-policy.py','task-display.py','platform-root-guard.py'):shutil.copy2(DEPLOY/name,folder/name)
