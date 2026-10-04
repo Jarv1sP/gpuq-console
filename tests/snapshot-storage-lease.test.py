@@ -23,6 +23,8 @@ J = module('snapshot_storage_transfers', HERE.parent/'deploy/transfer-jobs.py')
 
 class SnapshotStorageLeases(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.fixture = F.SnapshotSyncTests(); self.fixture.setUp()
         self.node = self.fixture.nodes[0]
         self.node.CONFIG['machine'] = 'gpu-source'

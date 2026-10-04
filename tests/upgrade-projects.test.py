@@ -21,6 +21,8 @@ spec.loader.exec_module(upgrade)
 
 class UpgradeProjects(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
@@ -53,6 +55,7 @@ class UpgradeProjects(unittest.TestCase):
                 (self.dest / name).chmod(0o700)
         for name in ('sandbox-runner.py','job-resources.py','gpuq-ray','cpu-delegation.py'):
             (self.source/name).write_bytes((DEPLOY/name).read_bytes())
+            if name=='job-resources.py':self.new[name]=(DEPLOY/name).read_bytes()
         for name in upgrade.P0_HELPERS:
             (self.dest/name).write_bytes((DEPLOY/name).read_bytes());(self.dest/name).chmod(0o700)
             (self.source/name).write_bytes((DEPLOY/name).read_bytes());self.new[name]=(DEPLOY/name).read_bytes();self.old[name]=self.new[name]
@@ -311,7 +314,9 @@ class UpgradeProjects(unittest.TestCase):
         self.assertTrue(result['p0PrerequisitesVerified'])
         self.assertIsNone(result['kernelEnforcement'])
         self.assertTrue((self.dest/'gpuq-network').exists())
-        self.assertFalse((self.dest/'job-resources.py').exists())
+        # Shared budget helpers support optional OCI; this does not enable Ray
+        # or run its CPU preflight in the common profile.
+        self.assertTrue((self.dest/'job-resources.py').exists())
         self.assertFalse((self.dest/'gpuq-ray').exists())
         self.assertEqual(upgrade.runner_profile((self.dest/'sandbox-runner.py').read_bytes()),'common-p0')
 

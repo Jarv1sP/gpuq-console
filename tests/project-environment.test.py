@@ -23,6 +23,8 @@ common_runner = load('environment_common_runner', 'sandbox-runner-common-p0.py')
 
 class EnvironmentTests(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
         self.base = self.root / 'base'

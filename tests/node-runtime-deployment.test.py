@@ -33,6 +33,8 @@ def load(path,name):
 
 class RuntimeDeployment(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.base=Path(self.temp.name)
         self.source=self.base/'source';shutil.copytree(DEPLOY,self.source)
         self.dest=self.base/'node';self.dest.mkdir(mode=0o700);self.root=self.base/'state';self.root.mkdir(mode=0o700)
@@ -125,6 +127,7 @@ class RuntimeDeployment(unittest.TestCase):
                     self.assertEqual(before,{p.name:p.read_bytes() for p in self.dest.iterdir() if p.is_file()});self.assertFalse(list(self.dest.glob('before-projects-*')))
                 finally:path.write_bytes(payload)
 
+    @unittest.skipUnless(Path('/sys/fs/cgroup/cgroup.controllers').exists(), 'fresh Linux install requires cgroup v2')
     def test_fresh_install_uses_same_preflight_and_copies_then_imports(self):
         checkout=self.base/'checkout';shutil.copytree(self.source,checkout/'deploy')
         home=self.base/'install-home';programs=home/'.local/libexec/gpuq-console';programs.mkdir(parents=True)

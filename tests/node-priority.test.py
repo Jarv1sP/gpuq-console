@@ -19,6 +19,8 @@ POLICIES = {'idle': (0, 'now'), 'normal': (2, 'never'), 'high': (4, 'never')}
 
 class NodePriority(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()

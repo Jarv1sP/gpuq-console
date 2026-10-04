@@ -16,6 +16,8 @@ import uuid
 DEPLOY=Path(__file__).resolve().parents[1]/'deploy'
 class NodeProjects(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp=tempfile.TemporaryDirectory();self.base=Path(self.temp.name).resolve()
         for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py','project-ops.py','project-store.py','sandbox-runner.py'):
             shutil.copy2(DEPLOY/name,self.base/name)

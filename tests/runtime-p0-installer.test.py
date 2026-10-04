@@ -55,7 +55,8 @@ class InstallerBoundary(unittest.TestCase):
         for profile, expected in [('common-p0', 'sandbox-runner-common-p0.py'), ('ray-p0', 'sandbox-runner.py')]:
             plan=node_runtime.runtime_plan(profile)
             self.assertEqual(dict(plan)['sandbox-runner.py'],expected)
-            self.assertEqual('job-resources.py' in dict(plan),profile=='ray-p0')
+            self.assertIn('job-resources.py',dict(plan))
+            self.assertEqual('gpuq-ray' in dict(plan),profile=='ray-p0')
             self.assertIn('gpu-devices.py',dict(plan))
             self.assertLess([name for name,_ in plan].index('gpu-devices.py'),[name for name,_ in plan].index('sandbox-runner.py'))
             _,payloads=node_runtime.preflight(ROOT/'deploy',profile)
@@ -84,7 +85,8 @@ class InstallerBoundary(unittest.TestCase):
     def test_preserves_profiles_and_root_grants_stay_explicit_and_scoped(self):
         self.assertEqual(node_runtime.manifest()['units'],['gpuq-diagnostics-gc.service','gpuq-diagnostics-gc.timer','gpuq-transfer-peer.service','gpuq-direct-upload.service','gpuq-storage-gc.service','gpuq-storage-gc.timer'])
         self.assertIn("run('systemctl','--user','enable','--now','gpuq-diagnostics-gc.timer')", SOURCE)
-        self.assertEqual(node_runtime.manifest()['profiles']['ray-p0']['extra'],['job-resources.py','gpuq-ray'])
+        self.assertIn('job-resources.py',node_runtime.manifest()['dependencies'])
+        self.assertEqual(node_runtime.manifest()['profiles']['ray-p0']['extra'],['gpuq-ray'])
         for forbidden in ('environmentMode', "'daemon-reexec'", "'restart'"):
             self.assertNotIn(forbidden, SOURCE)
         root_gate = next(node for node in TREE.body if isinstance(node, ast.If)

@@ -23,6 +23,8 @@ R=load('allocation_resources',ROOT/'deploy/job-resources.py')
 
 class Elastic(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.job={'id':str(uuid.uuid4()),'userId':'demo-user-1','username':'alice','cards':8,'argv':['python','train.py'],'name':'test','minVramGiB':0,'scheduling':{'rank':'P1','yieldPolicy':'save','restartPolicy':'on-preempt','checkpointable':True},'elastic':{'minCards':1,'globalBatch':256,'microBatch':8,'autoExpand':True}}
 
     def test_exact_counts_match_native_sdk_and_effective_batch_at_each_count(self):

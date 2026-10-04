@@ -32,6 +32,8 @@ def free(value):
 
 class Policy(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / 'root'
@@ -86,6 +88,9 @@ class Policy(unittest.TestCase):
 
 
 class Integration(unittest.TestCase):
+    def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
     def fixture(self, filename, classname):
         case = getattr(load(HERE / filename), classname)()
         case.setUp();self.addCleanup(case.tearDown)

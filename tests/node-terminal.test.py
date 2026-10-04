@@ -24,6 +24,8 @@ from gpuq.submission import validate_submission
 
 class NativeTerminal(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
         config=Config(root=self.root,db_path=self.root/'native.db',log_dir=self.root/'logs',control_dir=self.root/'control',socket_path=Path(f'/run/user/{os.getuid()}/terminal-proof-test.sock'),managed_gpu_uuids=('GPU-test',),allowed_uid=os.getuid(),observe_only=False)
         config.log_dir.mkdir();config.control_dir.mkdir();self.store=Store(config.db_path).initialize();self.addCleanup(self.store.close)

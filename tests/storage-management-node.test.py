@@ -19,6 +19,8 @@ SPEC.loader.exec_module(F)
 
 class StorageManagementRoute(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         F.NodeDatasets.setUp(self)
         for name in ('dataset-tier.py', 'storage-node.py', 'storage-authority.py', 'transfer-jobs.py'):
             shutil.copy2(ROOT / 'deploy' / name, self.base / name)

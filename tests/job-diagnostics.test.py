@@ -21,6 +21,8 @@ UNIT = 'gpuq-test.service'
 
 class Diagnostics(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve(); self.root.chmod(0o700)
         self.spec = {'id': JID, 'userId': 'demo-user-1', 'username': 'alice', 'cards': 1, 'argv': ['python', 'private-secret'], 'name': 'fixture', 'minVramGiB': 0}
@@ -303,6 +305,9 @@ class Diagnostics(unittest.TestCase):
 
 
 class NodeDiagnostics(unittest.TestCase):
+    def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
     def test_read_only_operation_never_submits_and_checks_immutable_spec(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve(); root = base / 'state'; root.mkdir(mode=0o700)

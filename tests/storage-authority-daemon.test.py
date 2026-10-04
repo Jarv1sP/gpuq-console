@@ -50,6 +50,8 @@ def fixture_daemon(root):
 
 class AuthorityDaemon(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp = tempfile.TemporaryDirectory(prefix='gpuq-authority-daemon-')
         self.root = Path(self.temp.name).resolve()
         self.mounts = local_data_mounts(self.root)

@@ -23,6 +23,9 @@ class PrepareDataRoot(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / 'data2'
         self.root.mkdir()
+        # BSD/macOS children inherit the parent's group rather than egid.
+        # This synthetic data volume represents the current service group.
+        os.chown(self.root, -1, os.getgid())
         self.cache = self.root / 'datasets'
         self.identity = {'user': 'dataset-service', 'uid': os.getuid(), 'group': 'dataset-group', 'gid': os.getgid()}
         self.mounts = [self.mount('/', '8:1', '1'), self.mount(self.root, '8:2', '2')]

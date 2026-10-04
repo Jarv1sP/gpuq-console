@@ -36,6 +36,8 @@ class Response(io.BytesIO):
 
 class DataImportTests(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
         self.data_mount = local_data_mounts(self.base)

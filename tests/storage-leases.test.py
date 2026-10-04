@@ -27,6 +27,8 @@ S = load('storage_holds', HERE.parent / 'deploy/storage-leases.py')
 
 class StorageLeaseTests(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.fixture = F.SnapshotSyncTests()
         self.fixture.setUp()
         self.node = self.fixture.nodes[0]

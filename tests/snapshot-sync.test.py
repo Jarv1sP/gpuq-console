@@ -23,6 +23,8 @@ USER='demo-user-42'
 
 class SnapshotSyncTests(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name).resolve();self.nodes=[];self.patches=[]
         for i in range(2):
             base=self.root/str(i);base.mkdir()

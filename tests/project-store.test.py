@@ -19,6 +19,8 @@ spec.loader.exec_module(module)
 
 class ProjectStoreTests(unittest.TestCase):
     def setUp(self):
+        from storage_test_helpers import isolated_platform_pin
+        isolated_platform_pin(self)
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name).resolve()
         self.root, self.base = self.path / 'service', self.path / 'approved-conda'
@@ -253,10 +255,12 @@ class ProjectStoreTests(unittest.TestCase):
 
     def test_private_service_group_writable_venv_templates_publish_read_only(self):
         scripts = self.dev['env'] / 'bin'
+        os.chown(scripts, -1, os.getegid())
         scripts.chmod(0o770)
         for name in ('activate', 'activate.csh', 'activate.fish', 'Activate.ps1'):
             script = scripts / name
             script.write_text('# synthetic Conda venv activation template\n')
+            os.chown(script, -1, os.getegid())
             script.chmod(0o664)
             self.assertEqual(script.stat().st_gid, os.getegid())
         result = self.publish()
