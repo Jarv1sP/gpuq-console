@@ -51,7 +51,8 @@ try{
   await closeSubmit(page);
   const capture=async name=>{await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});};
   assert.match(await page.title(),/^STARBASE/);
-  assert.equal(await page.locator('.brand-wordmark').innerText(),'STARBASE');
+  if(baseline)assert.equal(await page.locator('.brand-wordmark').innerText(),'STARBASE');
+  else assert.equal(await page.getByRole('link',{name:'STARBASE 工作台',exact:true}).count(),1);
   const currentNav=async expected=>{
     assert.equal(await page.locator('[data-nav][aria-current=page]').count(),1);
     assert.equal(await page.locator('[data-nav].active').count(),1);
@@ -65,7 +66,7 @@ try{
       const luminance=rgb=>rgb.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
       const background=el=>{const ancestors=[];for(let n=el;n;n=n.parentElement)ancestors.unshift(n);return ancestors.reduce((bg,n)=>over(rgba(getComputedStyle(n).backgroundColor),bg),[255,255,255]);};
       const selectors='[data-nav],.muted,.self-summary small,.self-summary strong span,.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small,.terminal-scope,.page-heading p,.page-heading .eyebrow,.topbar #current-account,.section-kicker,.help-links>span,.datasets-capacity,.dataset-readiness,.dataset-locations,.datasets-add>summary span,.datasets-flow,.dataset-source-tabs button,.user-row,.user-meta,.username,.permission-spec,.permission-bottom,.team-jobs';
-      return [...document.querySelectorAll(selectors)].filter(el=>el.getClientRects().length&&el.textContent.trim()&&!el.closest('[disabled]')).flatMap(el=>{
+      return [...document.querySelectorAll(selectors)].filter(el=>el.getClientRects().length&&el.textContent.trim()&&!el.closest('[disabled],[aria-hidden="true"],[inert]')).flatMap(el=>{
         const bg=background(el),fg=over(rgba(getComputedStyle(el).color),bg),a=luminance(fg),b=luminance(bg),ratio=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
         return ratio>=4.5?[]:[{element:el.className||el.tagName,text:el.textContent.trim().slice(0,45),ratio:Number(ratio.toFixed(2))}];
       });
@@ -90,14 +91,19 @@ try{
     await page.setViewportSize({width,height:960});
     const layout=await page.evaluate(()=>({width:innerWidth,document:document.documentElement.scrollWidth,nav:[...document.querySelectorAll('[data-nav]')].filter(el=>!el.hidden&&getComputedStyle(el).display!=='none').map(el=>({id:el.dataset.nav,visible:el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0,height:el.getBoundingClientRect().height}))}));
     checks.push(layout);
-    if(!baseline){assert(layout.document<=width+1,`page overflow at ${width}`);assert(layout.nav.every(nav=>nav.visible&&nav.height>=(width<760?44:36)),`navigation unavailable at ${width}`);if(width<760)assert.deepEqual(layout.nav.map(nav=>nav.id),['work','resources','datasets','community','me']);}
+    if(!baseline){
+      assert(layout.document<=width+1,`page overflow at ${width}`);
+      const visible=layout.nav.filter(nav=>nav.visible);
+      assert.deepEqual(visible.map(nav=>nav.id),width<760?['work','resources','datasets','community','me']:['work','resources','datasets','transfers','community','users'],`room navigation at ${width}`);
+      assert(visible.every(nav=>nav.height>=(width<760?44:36)),`navigation targets too small at ${width}`);
+    }
     await textContrast();
     if([820,390,320].includes(width))await capture('resources-'+width);
     if(width===390){
       await page.locator('.gpu-table-scroll').first().evaluate(el=>el.scrollLeft=el.scrollWidth);await capture('resources-390-processes');
       await page.locator('[data-nav=work]').click();await currentNav('work');await capture('workspace-mobile');
       assert.equal(await page.locator('[name=command]').inputValue(),'python train.py --output /outputs/result.json');
-      if(!baseline)assert.equal(await page.locator('[name=workspace-machine]').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),true);
+      if(!baseline)assert.equal(await page.locator('#context-machine').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),true);
       await page.locator('[data-nav=resources]').click();
     }
     if(width===320){
@@ -131,7 +137,7 @@ try{
     assert.equal(await page.evaluate(()=>document.activeElement.id),'main-content');
   }
   await page.emulateMedia({reducedMotion:'reduce'});
-  if(!baseline)assert.equal(await page.locator('#refresh-state').evaluate(el=>getComputedStyle(el).transitionDuration),'0s');
+  if(!baseline)assert.equal(await page.locator('#refresh-state').evaluate(el=>getComputedStyle(el).transitionProperty),'none');
   assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none');
   await page.setViewportSize({width:1440,height:1080});await page.locator('[data-nav=users]').click();await page.locator('#filter-all').click();await textContrast();await capture('users-carbon-compatibility');
   await page.setViewportSize({width:390,height:960});await page.waitForFunction(()=>document.querySelector('[data-nav=me]').getAttribute('aria-current')==='page');await currentNav('me');await textContrast();await capture('users-carbon-compatibility-390');
