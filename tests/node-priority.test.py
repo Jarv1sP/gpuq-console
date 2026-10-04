@@ -191,6 +191,22 @@ class NodePriority(unittest.TestCase):
             self.call(job={**self.job, 'priority': 'high'})
         self.assertEqual(self.commands, [])
 
+    def test_priority_ignores_optional_display_even_with_bad_metadata_or_missing_helper(self):
+        self.register()
+        original=deepcopy(self.job)
+        # This fixture deliberately has no task-display.py. Cached display
+        # support and malformed cosmetic fields must not gate rank control.
+        load=self.node.importlib.util.spec_from_file_location
+        def guard_only(name,path,*args,**kwargs):
+            if Path(path).name=='task-display.py':raise AssertionError('display import forbidden')
+            return load(name,path,*args,**kwargs)
+        with patch.object(self.node.importlib.util,'spec_from_file_location',side_effect=guard_only):
+            result=self.call('priority',priority='high',expected=self.policy(),metadata={'submitter':{'username':'forged'}})
+        self.assertEqual(result['priority'],'high')
+        self.assertEqual(self.operations(),['show','status','set-rank','show'])
+        self.assertEqual(self.job,original)
+        self.assertEqual(json.loads((self.node.ROOT/'jobs'/(self.job['id']+'.json')).read_text()),original)
+
     def test_stale_expected_policy_is_rejected_without_mutation(self):
         self.register()
         expected = {**self.policy(), 'priority': 0, 'yield_policy': 'now'}
