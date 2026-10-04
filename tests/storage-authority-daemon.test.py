@@ -1,7 +1,7 @@
 """Real executor --transfer-peer-daemon integration on disposable loopback TLS.
 
-Only /proc/self/mountinfo is synthetic: startup, config, HTTP routing, TLS,
-authority guards, grants and filesystem operations are production code. No
+Only mountinfo and the absence of a production /etc root pin are synthetic:
+startup, config, HTTP routing, TLS, authority guards, grants and filesystem operations are production code. No
 systemd units, GPUs, private inventory, production config or remote hosts used.
 """
 import base64
