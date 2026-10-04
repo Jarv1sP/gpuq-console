@@ -1,7 +1,7 @@
 {
   "version": 1,
   "dependencies": [
-    "platform-root-guard.py", "dataset-cache.py", "dataset-upload.py", "data-workspace.py", "data-import.py", "project-store.py",
+    "platform-root-guard.py", "dataset-cache.py", "dataset-upload.py", "data-workspace.py", "data-import.py", "cloud-files.py", "project-store.py",
     "job-diagnostics.py", "training-control.py", "scheduling-policy.py",
     "admin-command.py", "gpuq-network", "snapshot-sync.py", "gpu-devices.py",
     "transfer-jobs.py", "transfer-peer.py", "direct-upload.py",

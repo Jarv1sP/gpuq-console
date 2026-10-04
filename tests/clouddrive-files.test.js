@@ -155,7 +155,7 @@ test('resumed download hashes locked prefix and validates exact HTTP 206 Content
   await safeReject(s.adapter.download({ownerId: s.request.ownerId, receipt: file.receipt, offset: 10}, () => {}, {readPrefix: source(Buffer.alloc(10))}), 409);
 });
 
-test('bad local descriptors, backend-token reflections and redirects are refused', async () => {
+test('bad local descriptors, unrelated backend-token reflections and redirects are refused', async () => {
   for (const descriptor of ['https://example.com/file', '//example.com/x', '/static/../private', '/static/%252e%252e/private', '/static/x?token=' + TOKEN]) {
     const s = setup({}, (method, value) => method === 'GetDownloadUrlPath' ? {downloadUrlPath: descriptor} : value), file = await ready(s);
     await safeReject(s.adapter.download({ownerId: s.request.ownerId, receipt: file.receipt}, () => {})); assert.equal(s.calls.some(c => c.method === 'read'), false);
@@ -163,6 +163,30 @@ test('bad local descriptors, backend-token reflections and redirects are refused
   for (const status of [302, 301, 307, 403]) {
     const s = setup({}, (method, value) => method === 'read' ? {...value, status} : value), file = await ready(s);
     await safeReject(s.adapter.download({ownerId: s.request.ownerId, receipt: file.receipt}, () => {}), 502);
+  }
+});
+
+test('real CD2 scoped-token static descriptor only reads the fixed owner file on loopback', async () => {
+  const descriptor = (body, query) => '/static/{SCHEME}/{HOST}/false/' + encodeURIComponent(body.path.slice(1)) + '?' + query;
+  const s = setup({}, (method, value, body) => method === 'GetDownloadUrlPath'
+    ? {downloadUrlPath: descriptor(body, new URLSearchParams({token: TOKEN, cloudname: 'TestCloud', membership: '1'}))} : value);
+  const file = await ready(s), chunks = [];
+  const result = await s.adapter.download({ownerId: s.request.ownerId, receipt: file.receipt}, b => chunks.push(b));
+  assert.deepEqual(Buffer.concat(chunks), contents);
+  assert.equal(result.sha256Verified, true);
+  assert.ok(!JSON.stringify(result).includes(TOKEN));
+  const read = s.calls.find(c => c.method === 'read');
+  assert.ok(read.body.path.startsWith('/static/http/127.0.0.1:19798/false/'));
+  for (const change of [
+    body => descriptor({...body, path: '/another-file'}, 'token=' + TOKEN),
+    body => descriptor(body, 'token=' + TOKEN + '&token=' + TOKEN),
+    body => descriptor(body, 'token=WRONG'),
+    body => descriptor(body, 'token=' + TOKEN + '&reflection=' + TOKEN),
+  ]) {
+    const negative = setup({}, (method, value, body) => method === 'GetDownloadUrlPath' ? {downloadUrlPath: change(body)} : value);
+    const uploaded = await ready(negative);
+    await safeReject(negative.adapter.download({ownerId: negative.request.ownerId, receipt: uploaded.receipt}, () => {}), 403);
+    assert.equal(negative.calls.some(c => c.method === 'read'), false);
   }
 });
 

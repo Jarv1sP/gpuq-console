@@ -16,6 +16,7 @@ DATASET_MODULE=None
 DATASET_UPLOADS=None
 DATA_WORKSPACES=None
 DATA_IMPORTS=None
+CLOUD_FILES=None
 PROJECT_OPS=None
 STORAGE_NODE=None
 STORAGE_AUTHORITY=None
@@ -188,6 +189,15 @@ def data_imports():
         DATA_IMPORTS=module.DataImports(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
     dataset_mount_check(CONFIG['datasets'])
     return DATA_IMPORTS
+
+def cloud_files():
+    global CLOUD_FILES
+    if CLOUD_FILES is None:
+        spec=importlib.util.spec_from_file_location('gpuq_cloud_files',HERE/'cloud-files.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        CLOUD_FILES=module.CloudFiles(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    dataset_mount_check(CONFIG['datasets'])
+    return CLOUD_FILES
 
 def dataset_refs(job):
     refs=job.get('datasets',[])
@@ -906,6 +916,7 @@ def process(operation,args):
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)
     if operation.startswith('datasets.import.'):return data_imports().process(operation,args)
+    if operation.startswith('datasets.cloud.'):return cloud_files().process(operation,args)
     if operation in ('datasets.capacity','datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister'):return dataset_op(operation,args)
     if operation in ('terminal.open','terminal.exchange','terminal.close','terminal.detach'):
         if args.get('dataWorkspace') is True and operation=='terminal.open':
@@ -1027,6 +1038,7 @@ if __name__=='__main__':
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))
     if len(sys.argv)==5 and sys.argv[1]=='--data-import-worker':sys.exit(data_imports().worker(*sys.argv[2:]))
+    if len(sys.argv)==5 and sys.argv[1]=='--cloud-files-worker':sys.exit(cloud_files().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-recover':
         print(json.dumps(data_workspaces().recover(*sys.argv[2:])));sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))

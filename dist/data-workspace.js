@@ -1,6 +1,7 @@
 // Editable personal data is deliberately separate from verified training data.
 // Raw uploads never unpack or publish a dataset automatically.
 import {CHUNK_BYTES,LARGE_RELAY_BYTES} from './dataset-upload.js';
+import {cloudFilesHTML,cloudFilesUI} from './cloud-files-ui.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const bytesLabel=value=>{const size=Number(value||0);return size<1024**2?(size/1024).toFixed(1)+' KiB':size<1024**3?(size/1024**2).toFixed(1)+' MiB':(size/1024**3).toFixed(2)+' GiB';};
 export function workspacePath(value,{root=false}={}){
@@ -61,11 +62,13 @@ export function dataWorkspaceHTML(){
     <div class="data-workspace-terminal"><div><h4>手动整理</h4><p class="muted">终端中的 <code>/data2</code> 就是这里。用 <code>tar</code>、<code>unzip</code> 等命令处理文件。</p></div><div class="file-actions"><button class="button primary" id="terminal-data-open" type="button">新建数据终端</button><button class="button" id="terminal-data-reconnect" type="button">重连</button></div></div>
     <details class="data-workspace-browser"><summary>查看文件与发布进度</summary><div class="data-workspace-browse-controls"><label class="field">目录<input name="data-workspace-browse-path" value="." aria-label="查看数据空间目录"></label><button class="button" id="data-workspace-refresh" type="button">刷新</button></div><ul id="data-workspace-files-list"></ul></details>
     <form id="data-workspace-publish-form"><h4>发布为训练数据集</h4><p class="muted">先结束此机器上的所有数据终端，再发布整理好的子目录。发布会复制并校验文件，训练使用只读版本；原目录保留。</p><div class="data-workspace-fields"><label class="field">整理好的子目录<input name="data-workspace-publish-path" placeholder="my-data" required><small>例如 /data2/my-data，填写 my-data。</small></label><label class="field">数据集名称<input name="data-workspace-name" placeholder="my-data" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" required></label></div><div class="file-actions"><button class="button primary" id="data-workspace-publish" type="submit">校验并发布</button></div></form>
+    ${cloudFilesHTML()}
     <p id="data-workspace-status" role="status">上传只保存文件；数据整理完成后再发布。</p>
     <p class="muted data-workspace-footnote">上传前请确认磁盘容量；停止上传会保留已收到的文件片段。</p>
   </section>`;
 }
 export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refreshCatalog=()=>{}}={}){
+  const cloud=cloudFilesUI(store,section,toast);
   let epoch=0,working=false,controller=null;
   const element=selector=>section.querySelector(selector);
   const machine=()=>element('[name=dataset-machine]')?.value;
@@ -82,7 +85,7 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
     for(const node of section.querySelectorAll('.data-workspace-card input,.data-workspace-card button'))node.disabled=!enabled||working||external;
     const stop=element('#data-workspace-cancel');if(stop){stop.hidden=!controller;stop.disabled=!controller;}
   }
-  function reset(){epoch++;controller?.abort();controller=null;working=false;relayChoice(true);onBusyChange();}
+  function reset(){epoch++;controller?.abort();controller=null;working=false;cloud.reset();relayChoice(true);onBusyChange();}
   async function run(action){
     if(working||!store.production||!store.principal||!machine())return;
     const expected=context();working=true;onBusyChange();controls();

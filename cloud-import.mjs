@@ -39,6 +39,19 @@ function sweep(service){const now=Date.now();for(const map of [service.cloudQR,s
 function authorized(service,actor,machine){const user=service.store.get(actor.userId);if(!user.enabled||!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);if(!service.bridge)fail('节点执行桥未连接。',503);}
 export async function cloudImportCall(service,actor,operation,args,assertCurrent=()=>{}){
   service.assertMaintenanceAllowed?.(operation,args,actor);
+  if(operation.startsWith('cloud.files.')){
+    const action=operation.slice('cloud.files.'.length),allowed={info:[],list:[],status:['operationId'],cancel:['operationId'],upload:['key','path'],verify:['key','fileId'],download:['key','fileId','path']};
+    if(!Object.hasOwn(allowed,action))fail('未知云文件操作。');
+    fields(args,['machine',...allowed[action]]);authorized(service,actor,args.machine);assertCurrent();
+    for(const key of ['key','fileId','operationId'])if(allowed[action].includes(key)&&!UUID.test(args[key]||''))fail('云文件操作需要有效的完整编号。');
+    if(allowed[action].includes('path'))importPath(args.path);
+    if(['upload','verify','download'].includes(action))rate(service,actor.userId,'cloud-files',12);
+    const {machine,...payload}=args;
+    const result=await service.bridge(machine,'datasets.cloud.'+action,{...payload,userId:actor.userId,hostAdmin:false});
+    assertCurrent();
+    if(['upload','verify','download','cancel'].includes(action))service.audit(actor.username,operation,machine,args.key||args.operationId);
+    return result;
+  }
   const provider=service.cloudProvider,backend=backendOf(provider),generation=service.cloudGeneration;sweep(service);
   const current=()=>{assertCurrent();if(service.cloudProvider!==provider||service.cloudGeneration!==generation||service.cloudDisabled())fail('云盘连接已更改或停用，请重新操作。',409);};
   if(operation==='cloud.info'){

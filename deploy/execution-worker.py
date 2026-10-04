@@ -7,6 +7,8 @@ HOSTS={n['id']:n for n in json.loads(Path('/opt/gpuq-console/inventory.json').re
 INTERNAL_STORAGE=('storage.archive.events','storage.archive.ack','storage.archive.original',
     'storage.archive.provision','storage.archive.certify','storage.lease.prepare','storage.lease.cancel',
     'storage.download.open','storage.download.info','storage.download.manifest','storage.download.get','storage.download.finish')
+CLOUD_FILES=tuple('datasets.cloud.'+action for action in ('info','list','status','upload','verify','download','cancel'))
+INTERNAL_STORAGE+=CLOUD_FILES
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.request.settimeout(35)

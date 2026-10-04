@@ -10,6 +10,7 @@ import {uploadLocalDataset,workspaceDataPath,putWorkspaceData} from './client-da
 import {runManualSync,remoteSnapshot} from './client-snapshot-sync.mjs';
 import {uploadTransfer,downloadTransfer,transferText} from './client-transfers.mjs';
 import {runCloudImport} from './client-cloud-import.mjs';
+import {runCloudFiles} from './client-cloud-files.mjs';
 import {runCommunityCommand,formatCommunityResult,communityJSON,communityHelp} from './community-cli.mjs';
 import {watchJob} from './job-watch.mjs';
 import {progressText} from './dist/job-progress.js';
@@ -81,6 +82,11 @@ gpuctl pull --job JOB model.pt ./model.pt
 gpuctl data list                 List authorized dataset versions on selected server
 gpuctl data import LINK [REMOTE_FILE]  Download from Aliyun share / HTTPS to private /data2
 gpuctl data imports              List your server-side downloads
+gpuctl data cloud list           List your private cloud file operations
+gpuctl data cloud upload PATH    Save a personal /data2 file to cloud
+gpuctl data cloud verify ID      Check that the cloud copy is complete
+gpuctl data cloud download ID PATH  Restore a verified file to /data2
+gpuctl data cloud status|cancel ID  Inspect or cancel the same operation
 gpuctl data import-status|import-resume|import-cancel|import-discard ID
 gpuctl data import-resume ID --source-url HTTPS_LINK  Refresh the same file's link
 gpuctl data put ARCHIVE [REMOTE_FILE]  Upload a file to your private /data2 (no extraction)
@@ -548,6 +554,10 @@ async function main(){
       else if(action==='enable'||action==='disable')result=(await call('users.enabled',{userId:find(username),enabled:action==='enable'})).result;
       else if(action==='delete')result=(await call('users.delete',{userId:find(username)})).result;
       else fail('Unknown user command');
+    }else if(command==='data'&&positionals[1]==='cloud'){
+      if(training.length)fail('Cloud files do not accept extra commands');
+      const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
+      result=await runCloudFiles({positionals,options,machine,call});
     }else if(command==='data'&&['import','imports','import-status','import-resume','import-cancel','import-discard'].includes(positionals[1])){
       if(training.length)fail('导入不接受额外命令。');
       result=await runCloudImport({action:positionals[1],positionals,options,machine:defaultMachine(),call});

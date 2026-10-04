@@ -20,7 +20,8 @@ const READ_OR_STOP=new Set([
   'datasets.storage.status','datasets.storage.plan','terminal.close','terminal.detach',
   'transfers.list','transfers.status','transfers.capabilities','transfers.cancel','transfers.progress',
   'transfers.confirm-source-release','transfers.release-source','storage.lease.cancel','storage.download.finish',
-  'cloud.info','cloud.import.list','cloud.import.status','cloud.import.cancel'
+  'cloud.info','cloud.import.list','cloud.import.status','cloud.import.cancel',
+  'cloud.files.info','cloud.files.list','cloud.files.status','cloud.files.cancel'
 ]);
 const maintenanceError=(machine,value)=>Object.assign(Error(`${machine?'服务器 '+machine:'全平台'}维护中：${value.reason}。新任务、终端输入和数据写入已暂停，请等待管理员明确恢复；仍可查看历史、日志或取消任务。`),{status:503,code:'MAINTENANCE_ACTIVE'});
 function maintenanceState(service){

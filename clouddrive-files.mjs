@@ -133,13 +133,24 @@ export function createCloudDriveFilesTransport({endpoint, allowInsecureLoopback 
   };
 }
 
-function localStaticURL(value, endpoint, token) {
+function localStaticURL(value, endpoint, token, filePath) {
   if (!text(value, 16384) || !value.startsWith('/static/') || value.startsWith('//') || /[\\\r\n]/.test(value)) fail('CD2 没有返回节点本地文件流。', 409);
   let decoded; try { decoded = decodeURIComponent(value); } catch { fail('CD2 文件流地址无效。', 502); }
-  if (token && (value.includes(token) || decoded.includes(token)) || decoded.split(/[/?#]/).some(p => p === '.' || p === '..') || /%(?:2e|2f|5c)/i.test(decoded)) fail('CD2 文件流描述符未获允许。', 403);
+  if (decoded.split(/[/?#]/).some(p => p === '.' || p === '..') || /%(?:2e|2f|5c)/i.test(decoded)) fail('CD2 文件流描述符未获允许。', 403);
   const expanded = value.replaceAll('{SCHEME}', endpoint.protocol.slice(0, -1)).replaceAll('{HOST}', endpoint.host).replaceAll('{PREVIEW}', 'false');
   const url = new URL(expanded, endpoint);
   if (url.origin !== endpoint.origin || !url.pathname.startsWith('/static/') || url.username || url.password || url.hash) fail('CD2 文件流地址越界。', 403);
+  if (token && (url.searchParams.has('token') || value.includes(token) || decoded.includes(token))) {
+    // CD2 v1.1.1 puts its scoped API token in the local static stream's
+    // query. Permit only the exact authenticated file descriptor on the
+    // fixed loopback endpoint. It never leaves this node-local transport.
+    const rest = new URL(url); rest.searchParams.delete('token');
+    const expected = `/static/${endpoint.protocol.slice(0, -1)}/${endpoint.host}/false${filePath}`;
+    if (!['127.0.0.1', '[::1]'].includes(endpoint.hostname) || typeof filePath !== 'string'
+        || decodeURIComponent(url.pathname) !== expected
+        || url.searchParams.getAll('token').length !== 1 || url.searchParams.get('token') !== token
+        || rest.href.includes(token) || decodeURIComponent(rest.href).includes(token)) fail('CD2 文件流授权描述符未获允许。', 403);
+  }
   return url;
 }
 
@@ -301,7 +312,7 @@ export class CloudDriveFiles {
       if (count !== offset) fail('节点断点前缀不完整。', 409);
       if (offset < record.size) {
         const descriptor = await rpc('GetDownloadUrlPath', {path, preview: false, lazy_read: false, get_direct_url: false});
-        const url = localStaticURL(descriptor?.downloadUrlPath, new URL(this.#transport.endpoint), token);
+        const url = localStaticURL(descriptor?.downloadUrlPath, new URL(this.#transport.endpoint), token, path);
         await check(); const response = await this.#transport.read(url.pathname + url.search, {offset, signal});
         try {
           await check();

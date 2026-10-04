@@ -6,6 +6,7 @@
     "gpuctl": "./cli.mjs"
   },
   "scripts": {
+    "build:cloud-worker": "node scripts/build-cloud-files-worker.mjs",
     "build:client": "node scripts/build-client.mjs",
     "pretest": "npm run build:client",
     "test": "node --test tests/*.test.js",
