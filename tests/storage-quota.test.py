@@ -135,7 +135,7 @@ class QuotaTests(unittest.TestCase):
     def test_attempt_charging_rejects_hardlinks_without_deleting(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve();root.chmod(0o700)
-            (root/'one').write_bytes(b'x');os.link(root/'one',root/'two')
+            (root/'one').write_bytes(b'x');(root/'one').chmod(0o600);os.link(root/'one',root/'two')
             with q.directory(root) as fd,patch.object(q,'attribute',return_value=(10003,True)):
                 with self.assertRaisesRegex(ValueError,'explicit administration'):q.charge_attempt(fd,10003,os.getuid())
             self.assertEqual((root/'one').read_bytes(),b'x')
