@@ -53,6 +53,7 @@ cache = cache_module.DatasetCache(root/'cache', reserve_bytes=0)
 node = SimpleNamespace(CONFIG={'machine': 'gpu-4', 'datasets': {}, 'directUpload': {'enabled': True}},
                        HERE=DEPLOY, ENV={}, dataset_cache=lambda: (cache_module, cache),
                        workspace=workspace, run=lambda *_a, **_kw: None,
+                       platform_root_check=lambda: None,
                        dataset_mount_check=lambda _config: None)
 uploads = upload_module.DatasetUploads(node)
 uploads.active = lambda *_args: True
@@ -93,6 +94,13 @@ try:
             if action == 'fault':
                 fault['dropNextChunkReceipt'] = True
                 result = {'armed': True}
+            elif action == 'root-unavailable':
+                # Model the production guard failure, not a listener restart.
+                # Existing capabilities must not bypass per-request admission.
+                def unavailable():
+                    raise ValueError('Platform root unavailable')
+                node.platform_root_check = unavailable
+                result = {'blocked': True}
             else:
                 args = {**request.get('args', {}), 'userId': 'demo-user-1', 'hostAdmin': False}
                 args.pop('machine', None)

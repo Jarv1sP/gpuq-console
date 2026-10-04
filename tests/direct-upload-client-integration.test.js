@@ -69,3 +69,16 @@ test('actual TLS wrong pin is rejected before writes and revoked scoped ticket c
     await assert.rejects(transport.request('status'),/HTTP 403/);
   }finally{transport.close();}
 });
+
+test('an already issued direct ticket cannot write after platform root admission fails',{timeout:20000},async t=>{
+  const f=await fixture(t),scan=snapshot({x:Buffer.from('hello')}),uploadId=randomUUID();
+  await f.control('begin',{key:uploadId,name:'guarded',manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries});
+  const grant=await f.control('direct-ticket',{uploadId});
+  assert.equal(grant.available,true);
+  const transport=await createDirectDatasetTransport(async()=>grant,{uploadId});
+  try{
+    await f.control('root-unavailable');
+    await assert.rejects(transport.request('manifest',{offset:0,bytes:scan.manifest}),/HTTP 409/);
+    assert.equal((await f.control('status',{uploadId})).manifestOffset,0);
+  }finally{transport.close();}
+});
