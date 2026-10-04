@@ -40,7 +40,11 @@ try{
     const detail=await page.locator('#maintenance-detail').textContent();assert.ok(detail.includes('\\u{000d}'));assert.ok(detail.includes('\\u{202e}'));assert.ok(detail.includes('\\u{0085}'));assert.doesNotMatch(detail,/[\r\u202e\u0085]/u);
     assert.match(await page.locator('#page-maintenance').textContent(),/未执行（流程已停用）/);
     const rejected=await page.evaluate(async id=>{const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'maintenance.approve',args:{id,revision:1,previewToken:'legacy-token'}})});return response.status;},legacy.id);assert.equal(rejected,410);
-    await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile archive must not overflow');
+    await page.setViewportSize({width:390,height:844});
+    // The responsive shell clears transition layers from its resize handler;
+    // assert the settled archive rather than racing that queued browser event.
+    await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth+1);
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile archive must not overflow');
     await mkdir('/tmp/gpuq-maintenance-ui',{recursive:true});await page.screenshot({path:'/tmp/gpuq-maintenance-ui/retired-'+username+'-mobile.png',fullPage:true});
     if(username==='admin'){
       await page.locator('.maintenance-settings summary').click();
