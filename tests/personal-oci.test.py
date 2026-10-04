@@ -130,9 +130,13 @@ class OCITests(unittest.TestCase):
     def test_project_oci_publish_hash_and_owner_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve(); (root/'base').mkdir()
-            s = o.module('project-store'); store = s.ProjectStore(root, root/'base', reserve_bytes=0)
+            s = o.module('project-store')
             backend = Mock(); backend.publish.return_value = {'schema': 1, 'owner': hashlib.sha256(USER.encode()).hexdigest(), 'project': 'vision', 'image': 'sha256:'+SHA}
-            with patch.object(store, '_oci', return_value=backend):
+            # This is an immutable-publication unit fixture in a temporary
+            # tree, not the node's real platform root. Keep the production
+            # guard unchanged; scope its mock to only these fixture objects.
+            with patch.object(s, 'check_platform_root'), patch.object(s.ProjectStore, '_oci', return_value=backend):
+                store = s.ProjectStore(root, root/'base', reserve_bytes=0)
                 store.create(USER, 'vision', 'oci')
                 (store.dev_paths(USER, 'vision')['code']/'train.py').write_text('print(1)')
                 published = store.publish(USER, 'vision')
