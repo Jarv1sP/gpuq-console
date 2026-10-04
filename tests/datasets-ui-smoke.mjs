@@ -69,7 +69,7 @@ try {
   const admin = await browser.newPage({viewport: {width: 1440, height: 1000}});
   const member = await browser.newPage({viewport: {width: 1440, height: 1000}});
   for (const page of [admin, member]) {
-    page.on('pageerror', error => errors.push(error.message));
+    page.on('pageerror', error => {errors.push(error.message);console.error('Dataset browser error:',error.message);});
     page.on('console', message => {if (message.type() === 'error') errors.push(message.text());});
     page.on('response', response => {
       if (response.status() >= 400) httpErrors.push({status: response.status(),
@@ -139,6 +139,7 @@ try {
   assert.equal(await card(member).locator('[data-use-dataset]').isEnabled(), true);
   assert.equal(await card(member).locator('[data-use-dataset]').textContent(), '准备后训练');
   assert.equal(await card(member).locator('input[readonly]').inputValue(), 'sample@' + version);
+  assert.equal(await member.locator('a[href="/guide"]').count(),1,'The workbench has exactly one reader guide entry');
   const [guide] = await Promise.all([member.waitForEvent('popup'), member.locator('a[href="/guide"]:visible').click()]);
   await guide.waitForLoadState('domcontentloaded');
   await guide.locator('.guide-card[href="/guide/data"]').click();
@@ -156,6 +157,8 @@ try {
   await member.locator('#dataset-organize-next').click();
   assert.equal(await member.locator('#dataset-panel-workspace').isVisible(),true);
   assert.match(await member.locator('#dataset-panel-workspace').textContent(),/不会自动解压/);
+  assert.equal(await member.locator('#dataset-add-dialog #cloud-files-form').count(),1,'The import sheet preserves the private cloud file panel');
+  assert.equal(await member.locator('#dataset-add-dialog [name=cloud-files-path]').count(),1);
   await member.locator('[data-dataset-source=directory]').click();
   assert.equal(await member.locator('[name=dataset-name]').inputValue(),'preserved-draft');
   await member.locator('[data-dataset-source=link]').click();
@@ -163,7 +166,8 @@ try {
   await member.locator('#dataset-source-link').press('ArrowRight');
   assert.equal(await member.locator('#dataset-source-workspace').getAttribute('aria-selected'),'true');
   assert.equal(calls.some(call=>/cloud|workspace/.test(call.operation)),false,'Selecting an import path never imports, extracts, publishes or starts a terminal');
-  await member.locator('#datasets-add > summary').click();
+  await member.locator('[data-dataset-add-close]').click();
+  assert.equal(await member.locator('#dataset-add-dialog').isVisible(),false,'The import sheet closes without discarding method drafts');
 
   // Delay one machine's response: old machine entries must disappear immediately.
   let releaseList; listGate = new Promise(resolve => {releaseList = resolve;});

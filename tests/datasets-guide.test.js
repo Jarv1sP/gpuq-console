@@ -25,7 +25,8 @@ async function check(origin){
   }
   for(const path of ['/guide/admin','/guide/unknown','/ADMIN_README.md','/USER_README.md','/docs/USER_GUIDE.md','/docs/DATASETS.md','/guide/node-config.json'])assert.equal((await fetch(origin+path)).status,404,path);
   const page=await(await fetch(origin)).text();assert.equal((page.match(/href="\/guide(?:\/[^" ]*)?"/g)||[]).length,1);assert.match(page,/href="\/guide"[^>]+>使用指南/);
-  for(const path of ['/guide.css','/guide.js'])assert.equal((await fetch(origin+path)).status,200);
+  for(const path of ['/guide.css','/guide.js','/cloud-files-ui.js'])assert.equal((await fetch(origin+path)).status,200);
+  const cloudUI=await fetch(origin+'/cloud-files-ui.js');assert.match(cloudUI.headers.get('content-type'),/javascript/);assert.match(await cloudUI.text(),/export function cloudFilesUI/);
 }
 test('production guide serves formatted chapters and removes public operations manuals',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-guide-')),bootstrap=join(dir,'bootstrap');let server;

@@ -12,13 +12,13 @@ try{
   await page.route('**/*',async route=>{
     const url=new URL(route.request().url());if(url.origin!==origin){unexpected.push(url.href);return route.abort();}
     if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><main><h1>数据集</h1><section id="page-datasets"></section></main>'});
-    if(['/datasets-ui.js','/data-route.js','/data-workspace.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
+    if(['/datasets-ui.js','/data-route.js','/data-workspace.js','/cloud-files-ui.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
     if(url.pathname==='/favicon.ico')return route.fulfill({status:204});unexpected.push(url.href);return route.abort();
   });
   await page.goto(origin);
   await page.evaluate(async()=>{
     const {datasetsUI}=await import('/datasets-ui.js');
-    window.calls=[];window.toasts=[];window.gatePut=false;window.gatePublish=false;window.gateCatalog=false;window.capacityFail=false;window.remote=new Map();window.published=false;
+    window.calls=[];window.toasts=[];window.gatePut=false;window.gatePublish=false;window.gateCatalog=false;window.capacityFail=false;window.remote=new Map();window.cloudRows=new Map();window.published=false;
     window.store={production:true,principal:{userId:'alice',role:'member'},authGeneration:0,data:{machines:[{id:'node-a'},{id:'node-b'}]},onAuthChange(callback){this.authChanged=callback;},async call(operation,args){
       calls.push({operation,args:structuredClone(args),user:this.principal.userId});
       if(operation==='datasets.capacity'){if(capacityFail)throw Error('test capacity unavailable');return {machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3};}
@@ -38,6 +38,16 @@ try{
       if(operation==='datasets.workspace.status'){
         if(args.operationId){published=true;return {operationId:args.operationId,state:'READY',dataset:'personal-test',version:'a'.repeat(64)};}
         return {state:'EDITABLE',mountPath:'/data2'};
+      }
+      if(operation==='cloud.files.info')return {enabled:true};
+      if(operation.startsWith('cloud.files.')){
+        const scope=this.principal.userId+':'+args.machine,rows=cloudRows.get(scope)||[];
+        if(operation==='cloud.files.list')return {files:structuredClone(rows)};
+        if(operation==='cloud.files.upload')rows.push({operationId:args.key,action:'upload',name:'training.zip',path:args.path,state:'VERIFYING',bytes:2*1024**2+3,totalBytes:2*1024**2+3});
+        else if(operation==='cloud.files.verify'){const row=rows.find(row=>row.operationId===args.fileId);if(!row)throw Error('Cloud file is not owned by this account');row.state='VERIFIED';}
+        else if(operation==='cloud.files.download'){if(!rows.some(row=>row.operationId===args.fileId&&row.state==='VERIFIED'))throw Error('Cloud source is not verified');rows.push({operationId:args.key,action:'download',name:'training.zip',path:args.path,state:'READY'});}
+        else throw Error('Unexpected cloud operation '+operation);
+        cloudRows.set(scope,rows);return {operationId:args.key};
       }
       throw Error('Unexpected operation '+operation);
     }};
@@ -60,7 +70,17 @@ try{
   assert.deepEqual(await page.evaluate(()=>calls.filter(call=>call.operation==='datasets.workspace.put').map(call=>call.args.offset)),[0,1024**2,2*1024**2]);
   assert.equal(await page.evaluate(()=>calls.some(call=>call.operation.includes('publish'))),false);
   assert.equal(await page.locator('#terminal-data-open').isEnabled(),true);
-  await page.locator('.data-workspace-browser summary').click();await page.locator('#data-workspace-refresh').click();
+  const cloudEntry=page.locator('.data-workspace-browser > summary').filter({hasText:'云端副本'});
+  await cloudEntry.click();await page.locator('#cloud-files-refresh').click();
+  await page.waitForFunction(()=>document.querySelector('#cloud-files-list').textContent.includes('还没有云文件'));
+  await page.locator('[name=cloud-files-path]').fill('incoming/training.zip');await page.locator('#cloud-files-form [type=submit]').click();
+  await page.locator('[data-cloud-verify]').waitFor();await page.locator('[data-cloud-verify]').click();
+  await page.locator('[data-cloud-restore]').waitFor();page.once('dialog',dialog=>dialog.accept('restored/training.zip'));await page.locator('[data-cloud-restore]').click();
+  await page.waitForFunction(()=>document.querySelector('#cloud-files-list').textContent.includes('已保存到数据空间'));
+  assert.deepEqual(await page.evaluate(()=>calls.filter(call=>['cloud.files.upload','cloud.files.verify','cloud.files.download'].includes(call.operation)).map(call=>[call.operation,call.user,call.args.machine])),[['cloud.files.upload','alice','node-a'],['cloud.files.verify','alice','node-a'],['cloud.files.download','alice','node-a']]);
+  assert.equal(await page.evaluate(()=>calls.find(call=>call.operation==='cloud.files.download').args.path),'restored/training.zip');
+  await cloudEntry.click();
+  await page.locator('.data-workspace-browser > summary').filter({hasText:'查看文件与发布进度'}).click();await page.locator('#data-workspace-refresh').click();
   await page.waitForFunction(()=>document.querySelector('#data-workspace-files-list').textContent.includes('<unsafe>.zip'));
   assert.equal(await page.locator('#data-workspace-files-list unsafe').count(),0);
   await page.locator('[data-workspace-path="prepared"]').click();await page.waitForFunction(()=>calls.some(call=>call.operation==='datasets.workspace.list'&&call.args.path==='prepared'));

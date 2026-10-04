@@ -1,5 +1,5 @@
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const size=n=>(Number(n||0)/1024**3).toFixed(2)+' GiB';
+const size=n=>!Number.isFinite(n)||n<0?'未知':(n/1024**3).toFixed(2)+' GiB';
 const labels={QUEUED:'准备中',RUNNING:'下载中',CANCELING:'正在取消',PAUSED:'已暂停',READY:'已下载',FAILED:'失败',CANCELED:'已取消',UNKNOWN:'待核对'};
 export function checkedImportURL(value){
   let parsed;try{parsed=new URL(value);}catch{throw Error('请输入完整 HTTPS 下载链接。');}
