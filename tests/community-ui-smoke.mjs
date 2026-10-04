@@ -1,3 +1,4 @@
+import {accountMenu,refreshVisible} from './starbase-workflows.mjs';
 // Real durable community APIs, real HTTP cookie auth, disposable SQLite only.
 // No GPU executor, production data, external network, SSH or shell sessions.
 import assert from 'node:assert/strict';
@@ -101,7 +102,7 @@ try{
   await tab('chat');await page.locator('.chat-message').first().waitFor();
   assert.equal(await page.locator('.chat-message').count(),50);await page.locator('#chat-older').click();await page.locator('#chat-latest').waitFor();assert.equal(await page.locator('.chat-message').count(),55);
   await page.locator('#chat-latest').click();await page.locator('#chat-latest').waitFor({state:'hidden'});
-  await page.locator('#community-chat-body').fill('仍在编辑的排队计划');await page.locator('#refresh-state').click();assert.equal(await page.locator('#community-chat-body').inputValue(),'仍在编辑的排队计划');
+  await page.locator('#community-chat-body').fill('仍在编辑的排队计划');await refreshVisible(page);assert.equal(await page.locator('#community-chat-body').inputValue(),'仍在编辑的排队计划');
   for(let i=0;i<105;i++){clearRates();await call('chat.send',{key:randomUUID(),body:'连续新消息 '+i},bobToken);}clearRates();
   await tab('feedback');await loaded();await tab('chat');await page.waitForFunction(()=>document.querySelector('#community-messages').textContent.includes('连续新消息 104'));
   assert.equal(await page.locator('.chat-message').filter({hasText:'连续新消息 '}).count(),105,'forward polling must not skip the second/third page');
@@ -134,7 +135,7 @@ try{
   const denied=await page.evaluate(async()=>{const r=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'community.posts.create',args:{key:crypto.randomUUID(),kind:'announcement',title:'越权',body:'不可发布'}})});return r.status;});assert.equal(denied,403);
   // Leaving the account while a request is unresolved must wipe its text.
   await tab('chat');await page.locator('#community-chat-body').fill('上一账号未确认内容');heldOperation='community.chat.send';await page.locator('#community-chat-form [type=submit]').click();await page.waitForFunction(()=>document.querySelector('#community-chat-form [type=submit]').disabled);
-  await page.locator('#switch-account').click();for(let i=0;!releaseHeld&&i<30;i++)await new Promise(r=>setTimeout(r,10));assert(releaseHeld);releaseHeld();
+  await accountMenu(page);await page.locator('#switch-account').click();for(let i=0;!releaseHeld&&i<30;i++)await new Promise(r=>setTimeout(r,10));assert(releaseHeld);releaseHeld();
   await page.locator('#login-dialog').waitFor();await login('admin');await loaded();await tab('announcement');await loaded();
   assert.equal(await page.locator('#community-chat-body').inputValue(),'');assert.equal(await page.locator('#community-create').isVisible(),true);
   await page.locator('[data-post-id="'+announcement.id+'"]').click();await page.locator('#community-post-actions').getByRole('button',{name:'取消置顶',exact:true}).waitFor();
@@ -157,7 +158,9 @@ try{
   const ownMessage=page.locator('.chat-message').filter({hasText:'管理员测试消息'});await ownMessage.getByRole('button',{name:'编辑',exact:true}).click();await page.locator('#community-compose-form [name=body]').fill('管理员修改后的消息');await page.locator('#community-compose-form [type=submit]').click();await page.locator('.community-composer').waitFor({state:'hidden'});await page.locator('.chat-message').filter({hasText:'管理员修改后的消息'}).waitFor();await page.locator('.chat-message').filter({hasText:'管理员修改后的消息'}).getByRole('button',{name:'删除',exact:true}).click();await page.locator('.chat-message').filter({hasText:'管理员修改后的消息'}).waitFor({state:'hidden'});
   // Keyboard tab navigation and all five narrow-screen app entries remain usable.
   await page.locator('[data-community-tab=chat]').focus();await page.keyboard.press('Home');assert.equal(await page.locator('[data-community-tab=posts]').getAttribute('aria-selected'),'true');await loaded();
-  assert.equal(await page.locator('[data-nav]').evaluateAll(nodes=>nodes.filter(n=>!n.hidden).every(n=>n.getBoundingClientRect().height>=44)),true);
+  const phoneNav=await page.locator('[data-nav]').evaluateAll(nodes=>nodes.filter(n=>!n.hidden&&getComputedStyle(n).display!=='none').map(n=>({room:n.dataset.nav,height:n.getBoundingClientRect().height})));
+  assert.deepEqual(phoneNav.map(n=>n.room),['work','resources','datasets','community','me']);
+  assert.equal(phoneNav.every(n=>n.height>=44),true);
   // A temporarily missing backend does not pretend to publish locally.
   const unavailable=await context.newPage();await unavailable.route('**/api/call',route=>route.request().postDataJSON().operation.startsWith('community.')?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'协作维护中'})}):route.continue());await unavailable.goto(origin+'/#community');await unavailable.locator('#community-status').filter({hasText:'暂不可用'}).waitFor();assert.equal(await unavailable.locator('#community-create').isDisabled(),true);await unavailable.close();
   // Capacity refusal is a definite rollback, not an ambiguous network result.

@@ -1,3 +1,4 @@
+import {accountMenu} from './starbase-workflows.mjs';
 // Real Chrome profile cookies, Portal/SQLite and a restart at the same origin.
 // No production credentials, GPU calls, SSH or external requests.
 import assert from 'node:assert/strict';
@@ -27,9 +28,9 @@ try{
   const cookie=(await context.cookies()).find(c=>c.name==='gpuq_session');assert.ok(cookie.httpOnly);assert.ok(cookie.expires>Date.now()/1000+360*86400);assert.equal(await page.evaluate(()=>document.cookie.includes('gpuq_session')),false);
   await context.close();context=null;await new Promise(r=>server.close(r));server=null;
   clock+=9*3600_000;await start();page=await browser();await page.goto(origin);
-  await page.locator('#current-account').filter({hasText:'admin'}).waitFor();assert.equal(await page.locator('#login-dialog').isVisible(),false);
+  await accountMenu(page);await page.locator('#current-account').filter({hasText:'admin'}).waitFor();assert.equal(await page.locator('#login-dialog').isVisible(),false);
   assert.equal((await context.cookies()).find(c=>c.name==='gpuq_session').value,cookie.value,'credential is not rotated or rewritten on ordinary requests');
-  await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});
+  await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});
   await context.close();context=null;await new Promise(r=>server.close(r));server=null;
   await start();page=await browser();await page.goto(origin);await page.locator('#login-dialog').waitFor({state:'visible'});assert.equal((await context.cookies()).some(c=>c.name==='gpuq_session'),false);
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);

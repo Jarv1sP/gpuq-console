@@ -42,6 +42,11 @@ class ProjectSecurity(unittest.TestCase):
         self.node.process('projects.create', self.args)
         self.space = patch.object(self.node.os, 'statvfs', return_value=SimpleNamespace(f_bavail=100000000, f_frsize=4096))
         self.space.start()
+        # Project admission uses a pinned descriptor; keep the same synthetic
+        # capacity for that probe instead of depending on the host's disk.
+        fd_space = patch.object(self.node.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=100000000, f_frsize=4096))
+        fd_space.start()
+        self.addCleanup(fd_space.stop)
 
     def tearDown(self):
         self.space.stop()

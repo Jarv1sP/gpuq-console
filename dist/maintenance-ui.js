@@ -5,7 +5,7 @@ const labels={PENDING:'未执行（流程已停用）',RETURNED:'已退回',WITH
 export function operationalMaintenanceHTML(value){
   if(value?.version!==1)return '';
   const rows=[...(value.global?[['全平台',value.global]]:[]),...Object.entries(value.machines||{})];
-  return rows.length?`<aside class="maintenance-banner" role="status"><strong>维护中 · 暂停新任务与数据写入</strong>${rows.map(([scope,entry])=>`<p>${esc(scope)}：${esc(entry.reason)}</p>`).join('')}<p>仍可查看历史、日志或取消任务；需管理员明确恢复。开启维护不会自动结束已有任务，也不代表服务器已经停止。</p></aside>`:'';
+  return rows.length?`<aside class="maintenance-banner glass" role="status"><strong>维护中 · 暂停新任务与数据写入</strong>${rows.map(([scope,entry])=>`<p>${esc(scope)}：${esc(entry.reason)}</p>`).join('')}<p>仍可查看历史、日志或取消任务；需管理员明确恢复。开启维护不会自动结束已有任务，也不代表服务器已经停止。</p></aside>`:'';
 }
 export function operationalMaintenanceUI(store,toast){
   const host=document.querySelector('#operational-maintenance');let identity=null,revision=-1;

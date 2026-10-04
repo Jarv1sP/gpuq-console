@@ -9,6 +9,7 @@ import {loadTelegramNotifications} from './job-notifications.mjs';
 import {guideTarget,guidePage} from './guide.mjs';
 import {LOGIN_POLICY} from './login-sessions.mjs';
 import {loadStorageArchivePolicy} from './storage-archive.mjs';
+import {STARBASE_ASSETS} from './frontend-assets.mjs';
 
 const files={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/xterm.js':'vendor/xterm.js','/xterm.css':'vendor/xterm.css','/addon-fit.js':'vendor/addon-fit.js'};
 files['/job-progress.js']='job-progress.js';files['/job-progress-ui.js']='job-progress-ui.js';
@@ -18,7 +19,8 @@ files['/scheduling-policy.js']='scheduling-policy.js';
 files['/scheduling-ui.js']='scheduling-ui.js';
 files['/gpu-allocation.js']='gpu-allocation.js';
 files['/gpu-allocation-ui.js']='gpu-allocation-ui.js';
-const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8'};
+Object.assign(files,STARBASE_ASSETS);
+const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',woff2:'font/woff2'};
 files['/guide.css']='guide.css';files['/guide.js']='guide.js';
 files['/datasets-ui.js']='datasets-ui.js';
 files['/data-route.js']='data-route.js';
