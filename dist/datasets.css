@@ -94,7 +94,7 @@
 #page-datasets .field :is(input,select){width:100%;line-height:1.5;padding:9px 12px}
 #page-datasets .field small{color:var(--d-muted);font-size:12px;line-height:1.7;font-weight:400}
 #page-datasets input[type=file]{padding:6px;font-size:13px;overflow:hidden}
-#page-datasets input[type=file]::file-selector-button{min-height:32px;padding:4px 9px;background:var(--bg-3,#1E2024);color:var(--d-ink);border:0;border-radius:4px;margin-right:8px}
+#page-datasets input[type=file]::file-selector-button{min-height:32px;padding:4px 9px;background:var(--d-surface);color:var(--d-ink);border:1px solid var(--d-line);border-radius:4px;margin-right:8px}
 #page-datasets .dataset-upload-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:24px;padding-top:20px;border-top:1px solid var(--d-line)}
 #page-datasets .dataset-upload-actions .button{min-height:44px}
 #page-datasets .dataset-upload-feedback{margin-top:22px;padding:0;background:none;border:0}

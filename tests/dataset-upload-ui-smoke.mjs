@@ -151,6 +151,15 @@ try {
   }
   await page.locator('[name=dataset-name]').fill('browser-data');
   await page.locator('[name=dataset-directory]').setInputFiles(dataDirectory);
+  const fileButtonContrast = await page.locator('[name=dataset-directory]').evaluate(input => {
+    const style = getComputedStyle(input, '::file-selector-button');
+    const luminance = value => value.match(/[\d.]+/g).slice(0, 3).map(Number)
+      .map(channel => channel / 255).map(channel => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4)
+      .reduce((sum, channel, index) => sum + channel * [.2126, .7152, .0722][index], 0);
+    const foreground = luminance(style.color), background = luminance(style.backgroundColor);
+    return (Math.max(foreground, background) + .05) / (Math.min(foreground, background) + .05);
+  });
+  assert.ok(fileButtonContrast >= 4.5, 'Native file selector label must retain AA contrast');
   await assertUploadLayout();
   await page.screenshot({path: join(screenshots, 'upload-selection-desktop.png'), fullPage: true});
   assert.match(await page.locator('#dataset-panel-directory .dataset-route').textContent(),/VPS 中转/);
