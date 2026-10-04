@@ -830,7 +830,15 @@ def storage_collect():
     if not storage.tier.enabled:
         return {'enabled':False,'state':'DISABLED','evicted':[]}
     module,_=dataset_cache()
-    return storage.tier.collect(module.Principal('builtin-admin',True),dry_run=False,max_versions=16)
+    try:
+        return storage.tier.collect(module.Principal('builtin-admin',True),dry_run=False,max_versions=16)
+    except module.CacheBusy:
+        # Foreground uploads/leases win. The existing timer retries after its
+        # normal interval; do not spin or weaken the metadata lock. Contention
+        # may occur during the final inventory after some safe evictions, so
+        # deliberately do not claim an empty eviction list or zero side effects.
+        return {'enabled':True,'state':'DEFERRED','reason':'CACHE_BUSY',
+                'recheck':'NEXT_SCHEDULED_RUN','evictionOutcome':'CHECK_STATUS'}
 
 
 def process(operation,args):
