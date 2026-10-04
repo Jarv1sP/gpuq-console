@@ -174,8 +174,9 @@ def atomic_json(path, value):
 class ProjectStore:
     def __init__(self, root, base_path, reserve_bytes=10 * 1024**3, *,
                  max_entries=200000, max_bytes=50 * 1024**3,
-                 max_projects=64, max_releases=64):
+                 max_projects=64, max_releases=64, config=None):
         self.root = absolute(root)
+        self.config = config or {'root': str(self.root)}
         check_platform_root(self.root)
         self.base = absolute(base_path)
         self.path = self.root / 'projects-v2'
@@ -211,6 +212,20 @@ class ProjectStore:
             fail('invalid_input', 'Project must start with a lowercase letter and use at most 48 lowercase letters, digits, hyphens or underscores')
         return hashlib.sha256(user.encode()).hexdigest()
 
+    def _quota(self, user, path):
+        if 'storageQuota' not in self.config:
+            return
+        spec = importlib.util.spec_from_file_location('gpuq_project_quota', Path(__file__).with_name('storage-quota.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.ensure(self.config, user, path)
+
+    def _oci(self, user):
+        spec = importlib.util.spec_from_file_location('gpuq_project_oci', Path(__file__).with_name('personal-oci.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.PersonalOCI(self.config, user)
+
     def _project(self, user, slug):
         self._check_root()
         owner = self._identity(user, slug)
@@ -223,7 +238,7 @@ class ProjectStore:
             fail('not_found', 'Project not found for this user')
         if meta.get('schema') != 2 or meta.get('owner') != owner or meta.get('project') != slug:
             fail('unsafe_path', 'Project ownership metadata does not match')
-        if meta.get('environmentMode', 'shared') not in ('shared', 'isolated'):
+        if meta.get('environmentMode', 'shared') not in ('shared', 'isolated', 'oci'):
             fail('unsafe_path', 'Invalid project environment mode')
         return path, meta
 
@@ -256,11 +271,14 @@ class ProjectStore:
             pass
 
     def create(self, user, slug, environment_mode=None):
-        if environment_mode is not None and environment_mode not in ('shared', 'isolated'):
-            fail('invalid_input', 'Environment mode must be shared or isolated')
+        if environment_mode is not None and environment_mode not in ('shared', 'isolated', 'oci'):
+            fail('invalid_input', 'Environment mode must be shared, isolated or oci')
         self._check_root()
+        if environment_mode == 'oci':
+            self._oci(user).verify_host()
         owner = self._identity(user, slug)
         parent = private_dir(self.path / owner, create=True)
+        self._quota(user, parent)
         with self._file_lock(parent / '.create.lock'):
             project = parent / slug
             if project.exists() or project.is_symlink():
@@ -328,6 +346,7 @@ class ProjectStore:
 
     def dev_paths(self, user, slug):
         path, _ = self._project(user, slug)
+        self._quota(user, path.parent)
         private_dir(path / 'dev')
         return {name: private_dir(path / 'dev' / name) for name in ('code', 'env', 'home', 'scratch')}
 
@@ -683,6 +702,9 @@ class ProjectStore:
 
     def publish(self, user, slug, progress=None):
         path, project = self._project(user, slug)
+        self._quota(user, path.parent)
+        environment_mode = project.get('environmentMode', 'shared')
+        sections = ('code',) if environment_mode == 'oci' else ('code', 'env')
         self._publication_context = {}
         started = int(time.time())
         last_emit, last_phase = [0.0], [None]
@@ -710,34 +732,37 @@ class ProjectStore:
             try:
                 report('scanning', force=True)
                 self._space()
-                base = self.base_fingerprint()
+                oci = self._oci(user).publish(slug) if environment_mode == 'oci' else None
+                base = {'kind': 'oci', 'image': oci['image']} if oci else self.base_fingerprint()
                 dev = self.dev_paths(user, slug)
-                totals.update(self._scan_totals({name:dev[name] for name in ('code','env')},report))
+                totals.update(self._scan_totals({name:dev[name] for name in sections},report))
                 self._publication_chunk, self._publication_entry = chunk, entry
                 report('copying', force=True)
                 content, stamps = {}, {}
                 budget = {'entries': 0, 'bytes': 0}
                 for name in ('code', 'env'):
                     (stage / name).mkdir(mode=0o700)
+                for name in sections:
                     content[name], stamps[name] = self._walk(dev[name], name, stage / name, budget)
-                environment_mode = project.get('environmentMode', 'shared')
                 self._validate_environment_mode(stage / 'env', environment_mode)
                 # A second full hash pass detects changes even if size/mtime are
                 # preserved. Writers must still be stopped by the caller.
                 completed.update(entries=0, bytes=0)
                 report('verifying', force=True)
                 second_budget = {'entries': 0, 'bytes': 0}
-                for name in ('code', 'env'):
+                for name in sections:
                     manifest, observed = self._walk(dev[name], name, budget=second_budget)
                     if manifest != content[name] or observed != stamps[name]:
                         fail('changed', 'Project changed while publishing; stop writers and retry')
-                if base != self.base_fingerprint():
+                if not oci and base != self.base_fingerprint():
                     fail('base_changed', 'Base environment changed while publishing')
                 report('publishing', completed['entries'], completed['bytes'], force=True)
                 payload = {'schema': 2, 'base': base, 'content': content}
                 # Preserve historical shared release hashes byte-for-byte.
-                if environment_mode == 'isolated':
+                if environment_mode in ('isolated', 'oci'):
                     payload['environmentMode'] = environment_mode
+                if oci:
+                    payload['oci'] = oci
                 version = digest(payload)
                 meta = {**payload, 'release': version, 'project': slug, 'owner': project['owner'],
                         'createdAt': int(time.time()), **budget}
@@ -829,9 +854,11 @@ class ProjectStore:
         meta = read_json(path / 'meta.json', 64 * 1024 * 1024)
         payload = {key: meta.get(key) for key in ('schema', 'base', 'content')}
         if 'environmentMode' in meta:
-            if meta['environmentMode'] != 'isolated':
+            if meta['environmentMode'] not in ('isolated', 'oci'):
                 fail('unsafe_path', 'Invalid release environment mode')
             payload['environmentMode'] = meta['environmentMode']
+            if meta['environmentMode'] == 'oci':
+                payload['oci'] = meta.get('oci')
         if ready != self._ready_marker(meta) or meta.get('release') != version or digest(payload) != version:
             fail('unsafe_path', 'Release is incomplete or metadata is inconsistent')
         return meta
@@ -847,7 +874,9 @@ class ProjectStore:
             fail('not_found', 'READY project release not found')
         if meta.get('owner') != project['owner'] or meta.get('project') != slug:
             fail('unsafe_path', 'Release belongs to another project')
-        if meta['base'] != self.base_fingerprint():
+        if meta.get('environmentMode') == 'oci':
+            self._oci(user).verify_image(slug, meta.get('oci'))
+        elif meta['base'] != self.base_fingerprint():
             fail('base_changed', 'Approved base changed; rebuild and publish a new project environment')
         for name in ('code', 'env'):
             with directory(target / name) as fd:
@@ -861,6 +890,7 @@ class ProjectStore:
             fail('invalid_input', 'Invalid project job ID')
         self.release(user, slug, version)
         path, project = self._project(user, slug)
+        self._quota(user, path.parent)
         claim = {'owner': project['owner'], 'project': slug, 'release': version, 'jobId': jobid}
         claims = private_dir(self.path / '.run-claims')
         with self._file_lock(claims / '.lock'):

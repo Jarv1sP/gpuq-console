@@ -1,15 +1,15 @@
 {
   "version": 1,
   "dependencies": [
-    "platform-root-guard.py", "dataset-cache.py", "dataset-upload.py", "data-workspace.py", "data-import.py", "cloud-files.py", "project-store.py",
-    "job-diagnostics.py", "training-control.py", "scheduling-policy.py",
+    "platform-root-guard.py", "storage-quota.py", "personal-oci.py", "dataset-cache.py", "dataset-upload.py", "data-workspace.py", "data-import.py", "cloud-files.py", "project-store.py",
+    "job-diagnostics.py", "job-resources.py", "training-control.py", "scheduling-policy.py",
     "admin-command.py", "gpuq-network", "snapshot-sync.py", "gpu-devices.py",
     "transfer-jobs.py", "transfer-peer.py", "direct-upload.py",
     "dataset-tier.py", "storage-node.py", "storage-authority.py", "storage-archive.py", "storage-leases.py"
   ],
   "profiles": {
     "common-p0": {"runner": "sandbox-runner-common-p0.py", "extra": []},
-    "ray-p0": {"runner": "sandbox-runner.py", "extra": ["job-resources.py", "gpuq-ray"]}
+    "ray-p0": {"runner": "sandbox-runner.py", "extra": ["gpuq-ray"]}
   },
   "activation": ["sandbox-runner.py", "project-ops.py", "terminal-helper.py", "node-executor.py", "node-probe.py"],
   "units": ["gpuq-diagnostics-gc.service", "gpuq-diagnostics-gc.timer", "gpuq-transfer-peer.service", "gpuq-direct-upload.service", "gpuq-storage-gc.service", "gpuq-storage-gc.timer"]

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import importlib.util
 import stat
 from contextlib import closing
 
@@ -118,6 +119,10 @@ def prepare(config, spec, workspace, project, environment):
                          'WHERE a.id=? AND j.id=? AND j.submit_key=?', (attempt, job, spec['id'])).fetchone()
     if row is None or row[0] != expected:
         raise ValueError('Attempt does not belong to this Console job')
+    if 'storageQuota' in config:
+        quota_spec = importlib.util.spec_from_file_location('gpuq_training_quota', Path(__file__).with_name('storage-quota.py'))
+        quota = importlib.util.module_from_spec(quota_spec); quota_spec.loader.exec_module(quota)
+        quota.ensure(config, spec['userId'], expected)
     mounts = {'/workspace': workspace}
     if project:
         mounts['/outputs'] = project['output']

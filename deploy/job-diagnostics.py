@@ -258,6 +258,11 @@ def start_capture(root, spec, unit, control_group, env, indices, uuids):
     finally: os.close(groupfd)
     folder = _folder(root, spec, capture, True)
     runtime = folder / 'runtime'; os.close(_private(runtime, True))
+    config = json.loads((HERE / 'node-config.json').read_text()) if (HERE / 'node-config.json').exists() else {}
+    if 'storageQuota' in config:
+        quota_spec = importlib.util.spec_from_file_location('gpuq_diagnostic_quota', HERE / 'storage-quota.py')
+        quota = importlib.util.module_from_spec(quota_spec); quota_spec.loader.exec_module(quota)
+        quota.ensure(config, spec['userId'], runtime)
     identity = {**_identity(spec), 'captureId': capture, 'unit': unit, 'controlGroup': control_group, 'cgroupDevice': group_stat.st_dev, 'cgroupInode': group_stat.st_ino, 'createdAt': time.time()}
     _write(folder / 'identity.json', identity)
     report = {'schema': 1, 'jobId': spec['id'], 'captureId': capture, 'state': 'STARTING', 'createdAt': identity['createdAt'], 'retentionDays': _policy(root), 'gpuAllocation': {'indices': indices, 'uuids': uuids, 'observedAt': identity['createdAt']}, 'logs': [], 'scope': {'managedRuntime': '/run/gpuq/runtime/ray', 'externalTmpCaptured': False, 'note': 'Only managed Ray runtime is captured. RAY_TMPDIR or ray.init(_temp_dir=...) overrides outside it are not captured; no /tmp discovery.', 'redaction': 'Best effort; review before sharing. No argv or environment captured.', 'bundleLimitBytes': BUNDLE_LIMIT}}

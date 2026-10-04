@@ -160,7 +160,15 @@ def dataset_cache():
     if DATASET_MODULE is None:
         module=importlib.util.spec_from_file_location('gpuq_dataset_cache',HERE/'dataset-cache.py')
         DATASET_MODULE=importlib.util.module_from_spec(module);sys.modules[module.name]=DATASET_MODULE;module.loader.exec_module(DATASET_MODULE)
-    return DATASET_MODULE,DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=config.get('reserveBytes',10*1024**3),mount_point=config.get('mountPoint','/data2'))
+    cache=DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=config.get('reserveBytes',10*1024**3),mount_point=config.get('mountPoint','/data2'))
+    if 'storageQuota' in CONFIG:
+        def quota_guard(actor,dataset,path):
+            if CONFIG['storageQuota']=={'enabled':False}:return
+            owners=cache._dataset(actor,dataset)['owners']
+            if len(owners)!=1:raise ValueError('Shared dataset needs explicit storage billing policy')
+            return storage_quota(owners[0],path)
+        cache.quota_guard=quota_guard
+    return DATASET_MODULE,cache
 
 def dataset_uploads():
     global DATASET_UPLOADS
@@ -499,10 +507,16 @@ def gpuq_owner(job):
     # GPUQ labels are ASCII, but portal identity and ownership use immutable IDs.
     return job['username'] if re.fullmatch(r'[a-z][a-z0-9_-]{1,23}',job['username']) else 'portal-'+hashlib.sha256(job['userId'].encode()).hexdigest()[:24]
 
+def storage_quota(user,path,**kwargs):
+    spec=importlib.util.spec_from_file_location('gpuq_storage_quota',HERE/'storage-quota.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module.ensure(CONFIG,user,path,**kwargs)
+
 def workspace(user):
     if not isinstance(user,str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',user):raise ValueError('Invalid identity')
     path=ROOT/'users'/hashlib.sha256(user.encode()).hexdigest()[:32]
     path.mkdir(parents=True,exist_ok=True,mode=0o700)
+    if 'storageQuota' in CONFIG:storage_quota(user,path)
     return path
 
 def file_op(operation,args,root=None):

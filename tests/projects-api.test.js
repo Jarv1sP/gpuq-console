@@ -58,7 +58,7 @@ test('publication key is publish-only and cannot supply another owner or host pr
 });
 test('environment mode is create-only, explicit and bound to the authenticated account',async()=>{
  const f=await fixture();try{
-  for(const environmentMode of ['shared','isolated']){
+  for(const environmentMode of ['shared','isolated','oci']){
    await f.call('projects.create',{project:'clean-env',environmentMode});
    assert.equal(f.calls.at(-1).args.environmentMode,environmentMode);assert.equal(f.calls.at(-1).args.userId,f.member.id);
   }

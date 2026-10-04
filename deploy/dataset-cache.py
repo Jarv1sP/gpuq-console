@@ -837,11 +837,22 @@ class DatasetCache:
                     raise CacheError("incomplete transfer fence; administrator repair required")
             self._free(self._reserved() + total + 8192)
             _mkdir(stage)
+            if getattr(self, 'quota_guard', None):
+                try:
+                    self.quota_guard(actor, dataset, stage)
+                except Exception:
+                    # No payload/fence has been written. Remove only our empty
+                    # directory, never an unknown or retained transfer tree.
+                    try: stage.rmdir()
+                    except OSError: pass
+                    raise
             _mkdir(stage / "data")
             transfer = dict(schema=SCHEMA, owner=actor.user_id, token=str(uuid.uuid4()), remainingBytes=total, totalBytes=total)
             _write_json(stage / "TRANSFER.json", transfer)
         if not actor.is_admin and transfer["owner"] != actor.user_id:
             raise PermissionError("unfinished transfer belongs to another owner")
+        if getattr(self, 'quota_guard', None):
+            self.quota_guard(actor, dataset, stage)
         if transfer["totalBytes"] != total:
             raise CacheError("transfer size differs from registered manifest")
         # Recover a crash between fsync of data and accounting update conservatively.

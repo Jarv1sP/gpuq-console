@@ -56,6 +56,16 @@ gpuctl pull --job 任务ID model.pt ./model.pt
 
 项目 venv 与代码被冻结到版本，不覆盖其他账号/项目的环境。venv 依赖同机基础 Python 和系统库；记录基础环境指纹不等于封装基础镜像全部字节，也不能保证宿主机升级后仍 bit-for-bit 可复现。该发布机制不是容器镜像，也不支持把 Mac venv 直接拿到 Linux 运行。
 
+### 可选的个人 OCI 环境
+
+管理员完成 rootless OCI 与内核硬配额验收并显式启用后，可新建 `gpuctl project create system-env --env-mode oci`。未启用节点会拒绝，不会静默改用 venv。现有 shared/isolated 项目不转换，管理员宿主机 root 入口保持独立。
+
+OCI 开发终端内是容器 root，可安装容器系统包（例如基础镜像支持时使用 apt），不是宿主机 root：没有宿主机 Docker/Podman socket、宿主目录、宿主网络或 GPU。代码仍在 `/workspace`，私人 HOME 在 `/home/gpuq`，开发 scratch 在 `/outputs`；使用镜像自己的 Python/Conda，不再挂载宿主 `/opt/conda` 或项目 venv。每个账号的镜像、构建临时数据与可写层独立存放在数据卷，计入其硬配额。
+
+退出开发终端后再发布。发布将停止态开发容器提交成不可变镜像 ID，与代码快照共同绑定版本；重连开发终端沿用上次环境。未知容器状态/发布失败应保留现场核查，不自动创建替代环境。训练使用该发布镜像和只读代码，HOME/输出仍按任务隔离；训练临时镜像层不写回开发环境。GPU 只注入调度器本次分配的精确 UUID，开发终端不因安装 CUDA 获得 GPU。CPU、内存、PID 与取消继续由既有任务单元约束。
+
+OCI 的 `/tmp` 默认属于个人配额内的容器可写层，和 venv 沙箱的 tmpfs 不同；两者都应将需要持久保留的大文件写到明确的 HOME/输出位置。基础镜像只允许管理员固定的 digest，不接受客户端提交宿主路径、设备、特权参数或任意引擎配置。GPU 驱动或 CDI 描述变动后需管理员重新验收固定依赖，不能回落到全部 GPU。
+
 ## 显式离线资源，不继承开发缓存
 
 `/workspace/offline` 是代码树内可发布的普通目录，环境变量 `GPUQ_OFFLINE_ASSETS` 指向它；平台不会自动下载、联网安装、收集 HOME、读取开发登录 token 或复制隐藏缓存。开发 HOME 与每次训练 HOME 不同；训练不能依赖开发时的默认 Hugging Face、Torch 或 pip 缓存。只有明确放入代码树的文件随发布快照进入训练，请先检查其中没有凭据。离线资源一并计入项目容量/文件数上限；较大模型或数据应使用授权数据集渠道。
@@ -88,6 +98,7 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 |---|---|
 | `gpuctl project create NAME` | 在当前机器创建并选中项目 |
 | `gpuctl project create NAME --env-mode isolated` | 新建不继承基础 Python 包的项目，须自行准备依赖 |
+| `gpuctl project create NAME --env-mode oci` | 在已启用节点新建可安装系统包的个人 rootless 容器环境 |
 | `gpuctl project use NAME` | 核验项目存在后选中 |
 | `gpuctl project list` | 查看当前机器的个人项目 |
 | `gpuctl project status [NAME]` | 查看草稿/发布状态、READY 版本 |
@@ -118,7 +129,9 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 
 代码和小文件可以经 HTTPS 门户上传。TB 级公共数据由管理员登记本地源，通过批准的实验室链路准备各节点副本，训练读本机缓存；不要经 VPS 逐块上传公共大数据。千兆为每条链路共享的物理上限，不会因项目抽象变成多千兆。数据版本、失败重试、权限和缓存回收边界见 [DATASETS.md](DATASETS.md)。
 
-结果存放在执行节点的对应任务目录；下载不是跨机归档，发布和下载流程不自动备份 checkpoint，也不自动删除旧发布版本或训练产物，未承诺按用户硬磁盘配额。管理员应配置容量告警和[独立备份](STORAGE_BACKUP.md)；是否覆盖结果取决于实际配置的来源目录，一次小文件恢复验收不等于全部应用可恢复，不能把同盘另一个目录当备份。
+结果存放在执行节点的对应任务目录；下载不是跨机归档，发布和下载流程不自动备份 checkpoint，也不自动删除旧发布版本或训练产物。未启用内核配额的节点仍只有容量入口预留；启用后，账号在每个批准数据卷上的受管可写目录共享 byte/inode 硬上限，超限写入由内核拒绝，不会删别人的数据或自动扩大配额。已存在非空未归属目录、共享/未知 owner 数据不会猜测计费人，需管理员离线核验归属。平台数据库和调度器输出日志属于管理员控制数据池，另行限额/轮转，不把它们算作已实现的个人项目配额。
+
+管理员仍应配置容量告警和[独立备份](STORAGE_BACKUP.md)；是否覆盖结果取决于实际配置的来源目录，一次小文件恢复验收不等于全部应用可恢复，不能把同盘另一个目录当备份。
 
 ## 旧接口保持
 

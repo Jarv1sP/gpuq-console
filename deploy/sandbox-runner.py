@@ -56,7 +56,7 @@ def project_runtime(spec,root,cfg,jid,terminal):
     if not spec.get('project'):return None
     module=importlib.util.spec_from_file_location('gpuq_project_store',HERE/'project-store.py')
     store_module=importlib.util.module_from_spec(module);sys.modules[module.name]=store_module;module.loader.exec_module(store_module)
-    store=store_module.ProjectStore(root,cfg['conda'],reserve_bytes=store_module.workspace_reserve_bytes(cfg))
+    store=store_module.ProjectStore(root,cfg['conda'],reserve_bytes=store_module.workspace_reserve_bytes(cfg),config=cfg)
     if terminal:
         paths=store.dev_paths(spec['userId'],spec['project'])
         return {**paths,'output':paths['scratch'],'readonly':False,'environmentMode':store.environment_mode(spec['userId'],spec['project'])}
@@ -128,6 +128,7 @@ def main():
     resources=local_module('gpuq_job_resources','job-resources.py')
     requested=resources.requested_limits(spec if terminal else runtime_spec,terminal)
     subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={requested["memory"]}',f'CPUQuota={requested["cpu"]*100}%','TasksMax=2048'],env=env,check=True)
+    if not terminal and 'storageQuota' in cfg:local_module('gpuq_storage_quota','storage-quota.py').ensure_attempt(cfg,spec,os.environ)
     # Legacy terminal specs intentionally have no id; use the trusted filename
     # identity for metadata without mutating their immutable on-disk spec.
     budget=resources.read_budget({**(spec if terminal else runtime_spec),'id':jid},group,uuids,terminal)
@@ -136,6 +137,7 @@ def main():
     capture_module,capture_id,runtimefd=(None,None,None) if terminal else start_job_capture(root,spec,unit,group,env,indices,uuids)
     workspace=root/'users'/hashlib.sha256(spec['userId'].encode()).hexdigest()[:32]
     workspace.mkdir(parents=True,exist_ok=True,mode=0o700)
+    if 'storageQuota' in cfg:local_module('gpuq_storage_quota','storage-quota.py').ensure(cfg,spec['userId'],workspace)
     project=project_runtime(spec,root,cfg,jid,terminal)
     if project:workspace=project['code']
     # Mount by open FD to pin the directory and avoid a path replacement race.
@@ -143,6 +145,13 @@ def main():
     project_fds={name:os.open(project[name],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW) for name in ('env','home','output')} if project else {}
     dataset_fds=[] if terminal else open_dataset_mounts(spec)
     datafd,datalock=open_data_workspace(spec,jid,terminal)
+    if project and project['environmentMode']=='oci':
+        try:
+            code=local_module('gpuq_personal_oci','personal-oci.py').run_project(cfg,spec,project,terminal,uuids,workfd,project_fds,dataset_fds,datafd,runtimefd,resourcefd,cgroupfd)
+            finish_job_capture(capture_module,root,spec,capture_id,code)
+            return code
+        finally:
+            for fd in [workfd,cgroupfd,resourcefd,*project_fds.values(),*(fd for fd,_ in dataset_fds),*([datafd] if datafd is not None else []),*([runtimefd] if runtimefd is not None else []),*([datalock] if datalock is not None else [])]:os.close(fd)
     info_r,info_w=os.pipe();block_r,block_w=os.pipe()
     args=['/usr/bin/bwrap','--unshare-all',*([] if terminal else ['--new-session']),'--die-with-parent','--cap-drop','ALL','--hostname','gpuq-job',
           '--info-fd',str(info_w),'--block-fd',str(block_r),'--ro-bind','/usr','/usr','--symlink','usr/bin','/bin','--symlink','usr/sbin','/sbin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',

@@ -33,7 +33,7 @@ class ProjectOperations:
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         self.store = module.ProjectStore(executor.ROOT, executor.CONFIG['conda'],
-                                        reserve_bytes=module.workspace_reserve_bytes(executor.CONFIG))
+                                        reserve_bytes=module.workspace_reserve_bytes(executor.CONFIG), config=executor.CONFIG)
         self.folder = executor.ROOT/'project-ops'
         self.folder.mkdir(mode=0o700, exist_ok=True)
 
@@ -149,6 +149,8 @@ class ProjectOperations:
     def transfer_dir(self, args):
         path = self.folder/(self.key(args)+'.uploads')
         path.mkdir(mode=0o700, exist_ok=True)
+        if 'storageQuota' in self.n.CONFIG:
+            self.n.storage_quota(args['userId'], path, project=args['project'])
         return path
 
     def process(self, operation, args):
@@ -158,8 +160,8 @@ class ProjectOperations:
         if operation == 'projects.verify': allowed.add('release')
         if not isinstance(args, dict) or set(args)-allowed:
             raise ValueError('Invalid project fields')
-        if 'environmentMode' in args and args['environmentMode'] not in ('shared','isolated'):
-            raise ValueError('Environment mode must be shared or isolated')
+        if 'environmentMode' in args and args['environmentMode'] not in ('shared','isolated','oci'):
+            raise ValueError('Environment mode must be shared, isolated or oci')
         if 'key' in args and (not isinstance(args['key'],str) or not UUID.fullmatch(args['key'])):
             raise ValueError('Invalid publication key')
         if operation == 'projects.list':

@@ -36,6 +36,7 @@ gpuctl queue [--machine SERVER]   Read authorized machines' task names and descr
 gpuctl use gpu-1                  Select an approved server from your inventory
 gpuctl project create my-project Create/select a project (shared base Python packages)
 gpuctl project create clean --env-mode isolated  New venv without base site-packages
+gpuctl project create container --env-mode oci   Managed rootless OCI (enabled nodes only)
 gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
 gpuctl ssh                       Develop in the selected project's private terminal
@@ -388,7 +389,7 @@ async function main(){
     if((options.reconnect||options.takeover)&&command!=='shell')fail('--reconnect/--takeover are only valid for ssh');
     if(options['env-mode']!==undefined){
       if(command!=='project'||positionals[1]!=='create')fail('--env-mode is only valid for project create; existing environments are never rebuilt');
-      if(!['shared','isolated'].includes(options['env-mode']))fail('--env-mode must be shared or isolated');
+      if(!['shared','isolated','oci'].includes(options['env-mode']))fail('--env-mode must be shared, isolated or oci');
     }
     if(['run','shell'].includes(command)&&positionals.length===1)positionals.push(defaultMachine());
     if(['push','pull'].includes(shortcut))positionals.splice(1,0,defaultMachine());
@@ -518,7 +519,7 @@ async function main(){
         if(positionals[2]&&options.project&&positionals[2]!==options.project)fail('Conflicting project names');
         if(options.key)fail('--key is for training submissions; publication is tracked per project with project status');
         result=(await call(`projects.${action==='use'?'status':action}`,{machine,project,...(options['env-mode']!==undefined?{environmentMode:options['env-mode']}:{})})).result;
-        if(options['env-mode']==='isolated'&&result.environmentMode!=='isolated')fail('Node did not confirm isolated environment mode. Upgrade the node and inspect the project before installing dependencies; no shared-mode fallback was accepted.');
+        if(['isolated','oci'].includes(options['env-mode'])&&result.environmentMode!==options['env-mode'])fail('Node did not confirm '+options['env-mode']+' environment mode. Upgrade the node and inspect the project before installing dependencies; no shared-mode fallback was accepted.');
         if(action==='create'||action==='use'){
           session.projectsByMachine={...session.projectsByMachine,[machine]:project};await saveSession();
           result={...result,machine,selectedProject:project};

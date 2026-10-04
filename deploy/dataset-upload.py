@@ -54,7 +54,11 @@ class DatasetUploads:
         target = parent/upload
         if create:
             self.d._mkdir(parent)
+            if 'storageQuota' in self.n.CONFIG:
+                self.n.storage_quota(user, parent)
             self.d._mkdir(target)
+        elif 'storageQuota' in self.n.CONFIG and parent.exists():
+            self.n.storage_quota(user, parent)
         return target
 
     def key(self, user, upload):

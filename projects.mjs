@@ -18,7 +18,7 @@ export async function projectCall(service,principal,user,operation,args,authoriz
   if(operation==='projects.publish')allowed.push('key');
   if(Object.keys(args).some(k=>!allowed.includes(k)))fail('项目参数无效。');
   if(args.key!==undefined&&(typeof args.key!=='string'||!UUID.test(args.key)))fail('发布标识必须是完整 UUID。');
-  if(args.environmentMode!==undefined&&!['shared','isolated'].includes(args.environmentMode))fail('环境模式只能是 shared 或 isolated。');
+  if(args.environmentMode!==undefined&&!['shared','isolated','oci'].includes(args.environmentMode))fail('环境模式只能是 shared、isolated 或 oci。');
   const reference=operation==='projects.list'?{}:projectReference(args,{optional:false});
   const result=await service.bridge(args.machine,operation,{...reference,...(args.environmentMode!==undefined?{environmentMode:args.environmentMode}:{}),...(args.key!==undefined?{key:args.key}:{}),userId:user.id});
   if(['projects.create','projects.publish'].includes(operation))service.audit(principal.username,operation,args.machine,args.project);

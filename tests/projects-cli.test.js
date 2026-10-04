@@ -72,7 +72,7 @@ test('project list/status/publish use selected context; publication does not cla
 });
 test('project create forwards only explicit environment mode and rejects mutation on other commands',async t=>{
   const f=await fixture(t);
-  for(const mode of ['shared','isolated']){
+  for(const mode of ['shared','isolated','oci']){
     assert.equal((await f.cli(['project','create','clean','--env-mode',mode])).code,0);
     assert.deepEqual(f.calls.at(-1),{operation:'projects.create',args:{machine:'gpu-1',project:'clean',environmentMode:mode}});
   }

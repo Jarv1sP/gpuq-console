@@ -30,6 +30,8 @@ class DataWorkspaces:
         owner = root/hashlib.sha256(user.encode()).hexdigest()
         for path in (root, owner, owner/'data', owner/'operations'):
             module._mkdir(path)
+            if path == owner and 'storageQuota' in self.n.CONFIG:
+                self.n.storage_quota(user, owner)
         return module, cache, owner
 
     @staticmethod
