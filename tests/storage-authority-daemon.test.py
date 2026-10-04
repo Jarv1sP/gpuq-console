@@ -21,7 +21,7 @@ import time
 import unittest
 import uuid
 
-from storage_test_helpers import local_data_mounts
+from storage_test_helpers import isolated_platform_pin, local_data_mounts
 
 
 DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
@@ -44,8 +44,14 @@ def fixture_daemon(root):
     sys.argv = [str(root / 'node-executor.py'), '--transfer-peer-daemon']
     # A service mount namespace uses different IDs from the sealing process.
     # The physical device and inode identities deliberately remain identical.
-    with local_data_mounts(config['datasets']['mountPoint'], mount_id_offset=1000):
-        runpy.run_path(sys.argv[0], run_name='__main__')
+    # The disposable child process must not consult the host's production pin.
+    fixture = unittest.TestCase()
+    isolated_platform_pin(fixture)
+    try:
+        with local_data_mounts(config['datasets']['mountPoint'], mount_id_offset=1000):
+            runpy.run_path(sys.argv[0], run_name='__main__')
+    finally:
+        fixture.doCleanups()
 
 
 class AuthorityDaemon(unittest.TestCase):
