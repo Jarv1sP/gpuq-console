@@ -17,6 +17,14 @@ DEPLOY=Path(__file__).resolve().parents[1]/'deploy'
 class CloudFilesTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.base=Path(self.temp.name).resolve()
+        # This disposable fixture represents an independent node with no root
+        # pin installed; do not consult or modify the test host's live pin.
+        # Every other lstat and the production guard remain unchanged.
+        original_lstat=Path.lstat
+        def fixture_lstat(path,*args,**kwargs):
+            if str(path)=='/etc/gpuq-platform-root':raise FileNotFoundError(path)
+            return original_lstat(path,*args,**kwargs)
+        guard=patch.object(Path,'lstat',new=fixture_lstat);guard.start();self.addCleanup(guard.stop)
         mount=local_data_mounts(self.base);mount.start();self.addCleanup(mount.stop)
         for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py','dataset-cache.py','data-workspace.py','data-import.py','cloud-files.py'):
             shutil.copy2(DEPLOY/name,self.base/name)

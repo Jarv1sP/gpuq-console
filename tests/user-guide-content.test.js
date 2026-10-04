@@ -65,7 +65,7 @@ test('training walkthrough distinguishes local edits, published snapshots and ou
   assert.match(guide, /可能用到旧代码/);
   assert.match(guide, /结果、日志文件和 checkpoint 要写入 `\/outputs`/);
   assert.match(guide, /不会自动搬运代码、环境、数据或结果/);
-  assert.doesNotMatch(guide, /Podman|容器内.*(?:sudo|apt)/, 'Do not promise pending deployment features');
+  assert.doesNotMatch(guide, /Podman/, 'Keep engine administration out of the user guide');
 });
 
 test('run sync guide distinguishes verified publication from a mirror or environment installer', () => {
@@ -133,7 +133,18 @@ test('collaboration uses posts and chat while root requests stay retired', () =>
   assert.match(guide, /只有“帖子”和“聊天”两个入口/);
   assert.match(guide, /展开聊天底部的“任务留言”/);
   assert.match(guide, /旧维护申请流程已停用/);
-  assert.match(guide, /不是完整的 OCI 容器，不能用 `sudo apt`/);
+  assert.match(guide, /现有共享\/隔离 Python 环境继续可用，但不能通过 `sudo apt` 修改宿主机/);
+});
+
+test('optional OCI guide requires node enablement and distinguishes container from host root',()=>{
+  assert.match(guide,/管理员已启用的节点/);
+  assert.match(guide,/gpuctl project create system-project --env-mode oci/);
+  assert.match(guide,/容器内 root 不是宿主机 root，开发阶段无 GPU/);
+  assert.match(guide,/未启用节点明确拒绝，不改变原有项目/);
+  assert.match(guide,/不将本指南视为已经开通/);
+  assert.match(guide,/训练固定该镜像版本并只见调度分配的 GPU/);
+  assert.match(guide,/shared\/isolated Python 模式的 `\/tmp`/);
+  assert.match(guide,/个人配额内的容器可写层/);
 });
 
 test('guide explains quotas, interruption and failure evidence without promising runtime health', () => {
