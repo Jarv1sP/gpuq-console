@@ -48,9 +48,9 @@ class StorageNode:
             return response
         if dataset is None or version is None:
             raise ValueError("dataset and version are required together")
-        state = self.cache.status(actor, dataset, version)
+        state, identity = self.cache._status_snapshot(actor, dataset, version)
         with self.cache._locked():
-            self.cache._record(actor, dataset, version)
+            self.cache._check_snapshot(actor, dataset, version, identity)
             value = self.cache._tier(dataset, version)
             leases = self.cache._leases(dataset, version)
             receipt = None

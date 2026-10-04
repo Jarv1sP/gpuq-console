@@ -473,12 +473,12 @@ class DatasetCache:
         _identifier(version, HASH_RE)
         # Authenticate before creating lock files; guessed IDs must not consume
         # arbitrary filesystem entries. Recheck authorization inside the caller.
-        with self._locked():
-            record = self._record(actor, dataset, version)
-            identity = self._record_identity(dataset, version) if snapshot else None
-            if not snapshot:
-                record = None
+        record, identity = self._record_snapshot(actor, dataset, version)
         with self._lock_file(".locks/" + dataset + "." + version + ".lock"):
+            with self._locked():
+                self._check_snapshot(actor, dataset, version, identity)
+            if not snapshot:
+                record = None  # Do not retain a second large manifest in legacy callers.
             yield (record, identity) if snapshot else None
 
     def _actor(self, actor, admin=False):
@@ -541,6 +541,54 @@ class DatasetCache:
         self._dataset(actor, dataset)
         if self._record_identity(dataset, version) != identity:
             raise CacheError("version registration changed; retry the operation")
+
+    def _record_snapshot(self, actor, dataset, version):
+        """Validate a full immutable manifest without owning the global lock.
+
+        The service-owned registration can only be accepted if the same no-follow
+        regular file still exists at the final locked authorization check. Nothing
+        is persisted or trusted from an unvalidated summary. A replacement, even
+        byte-identical, invalidates this operation rather than silently switching
+        an in-flight reader or materializer to a different registration.
+        """
+        with self._locked():
+            self._dataset(actor, dataset)
+            identity = self._record_identity(dataset, version)
+        record = self._record(actor, dataset, version)
+        with self._locked():
+            self._check_snapshot(actor, dataset, version, identity)
+        return record, identity
+
+    def _ready_identity(self, paths):
+        """Small no-follow identities only; never parse a READY manifest here."""
+        try:
+            with _directory(paths["ready"]) as fd:
+                wrapper = _stamp(os.fstat(fd))
+                files = []
+                for name in ("READY.json", "manifest.json"):
+                    child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        files.append(_stamp(_regular(child)))
+                    finally:
+                        os.close(child)
+            with _directory(paths["ready"] / "data") as fd:
+                return wrapper, tuple(files), _stamp(os.fstat(fd))
+        except FileNotFoundError:
+            with _directory(paths["ready"].parent) as fd:
+                if paths["ready"].name in os.listdir(fd):
+                    raise CacheError("published directory has no valid READY metadata")
+            return None
+
+    def _ready_snapshot(self, paths, manifest, version):
+        identity = self._ready_identity(paths)
+        ready = self._ready(paths, manifest, version)
+        if self._ready_identity(paths) != identity:
+            raise CacheError("published version metadata changed; retry the operation")
+        return ready, identity
+
+    def _check_ready_snapshot(self, paths, identity):
+        if self._ready_identity(paths) != identity:
+            raise CacheError("published version metadata changed; retry the operation")
 
     def _free(self, needed=0, needed_inodes=0):
         with _directory(self.root) as fd:
@@ -639,8 +687,9 @@ class DatasetCache:
             return {"updated": True}
 
     def export_manifest(self, actor, dataset, version):
+        record, identity = self._record_snapshot(actor, dataset, version)
         with self._locked():
-            record = self._record(actor, dataset, version)
+            self._check_snapshot(actor, dataset, version, identity)
             return dict(dataset=dataset, version=version, manifest=record["manifest"])
 
     def capacity(self, actor):
@@ -668,56 +717,80 @@ class DatasetCache:
     def list_datasets(self, actor):
         """Authorized catalog and bounded ACL owner IDs, never source IDs/paths."""
         self._actor(actor)
-        result = []
+        snapshots = []
         with self._locked():
             with _directory(self.root / ".registry") as fd:
                 datasets = sorted(os.listdir(fd))
-            for dataset in datasets:
+        for dataset in datasets:
+            with self._locked():
                 try:
-                    metadata = self._dataset(actor, dataset)
+                    self._dataset(actor, dataset)
                 except PermissionError:
                     continue
                 folder = self._paths(dataset)[".registry"]
                 with _directory(folder) as fd:
                     names = sorted(os.listdir(fd))
-                versions = []
-                for name in names:
-                    if name == "dataset.json":
-                        continue
-                    if re.fullmatch(r"\.write-[a-f0-9]{32}", name):
-                        continue
-                    if not name.endswith(".json"):
-                        raise CacheError("corrupt registry directory")
-                    version = name[:-5]
-                    record = self._record(actor, dataset, version)
+            versions = []
+            for name in names:
+                if name == "dataset.json" or re.fullmatch(r"\.write-[a-f0-9]{32}", name):
+                    continue
+                if not name.endswith(".json"):
+                    raise CacheError("corrupt registry directory")
+                version = name[:-5]
+                record, identity = self._record_snapshot(actor, dataset, version)
+                paths = self._paths(dataset, version)
+                ready, ready_identity = self._ready_snapshot(paths, record["manifest"], version)
+                # Summation and parsing scale with the manifest; they must not
+                # delay unrelated publication/lease admission under global lock.
+                row = dict(version=version, state="READY" if ready else "REGISTERED",
+                           canPrepare=record['sourceId'] in self.sources,
+                           bytes=sum(f["size"] for f in record["manifest"]["files"]),
+                           files=len(record["manifest"]["files"]))
+                versions.append((row, identity, ready_identity))
+                del record
+            snapshots.append((dataset, versions))
+        result = []
+        with self._locked():
+            for dataset, versions in snapshots:
+                # Recheck every ACL before any catalog leaves the service. ACL
+                # revocation or metadata replacement during parsing is rejected.
+                metadata = self._dataset(actor, dataset)
+                rows = []
+                for row, identity, ready_identity in versions:
+                    version = row['version']
+                    self._check_snapshot(actor, dataset, version, identity)
                     paths = self._paths(dataset, version)
-                    state = "READY" if self._ready(paths, record["manifest"], version) else "REGISTERED"
+                    self._check_ready_snapshot(paths, ready_identity)
                     with _directory(paths[".staging"].parent) as fd:
-                        if state != "READY" and version in os.listdir(fd):
-                            state = "STAGING"
-                    versions.append(dict(version=version, state=state,
-                                         canPrepare=record['sourceId'] in self.sources,
-                                         bytes=sum(f["size"] for f in record["manifest"]["files"]),
-                                         files=len(record["manifest"]["files"])))
+                        if row['state'] != "READY" and version in os.listdir(fd):
+                            row['state'] = "STAGING"
+                    rows.append(row)
                 owners = self._owners(metadata["owners"])
                 # A display bound, not an ACL limit. Never return a truncated
                 # list that could be mistaken for the complete authorization.
-                result.append(dict(dataset=dataset, versions=versions,
+                result.append(dict(dataset=dataset, versions=rows,
                                    ownerIds=owners if len(owners) <= 64 else None))
         return {"datasets": result}
 
     def status(self, actor, dataset, version):
         """Lightweight metadata only: no data hashing or staging modifications."""
+        return self._status_snapshot(actor, dataset, version)[0]
+
+    def _status_snapshot(self, actor, dataset, version):
+        """Trusted adapter also receives the validated registration identity."""
+        record, identity = self._record_snapshot(actor, dataset, version)
+        paths = self._paths(dataset, version)
+        ready, ready_identity = self._ready_snapshot(paths, record["manifest"], version)
+        state = "READY" if ready else "REGISTERED"
+        remaining = 0 if ready else sum(f["size"] for f in record["manifest"]["files"])
         with self._locked():
-            record = self._record(actor, dataset, version)
-            paths = self._paths(dataset, version)
-            state = "READY" if self._ready(paths, record["manifest"], version) else "REGISTERED"
-            remaining = 0 if state == "READY" else sum(f["size"] for f in record["manifest"]["files"])
+            self._check_snapshot(actor, dataset, version, identity)
+            self._check_ready_snapshot(paths, ready_identity)
             with _directory(paths[".staging"].parent) as fd:
                 if state != "READY" and version in os.listdir(fd):
                     state = "STAGING"
                     remaining = self._transfer(paths[".staging"])["remainingBytes"]
-            return dict(dataset=dataset, version=version, state=state, remainingBytes=remaining)
+            return dict(dataset=dataset, version=version, state=state, remainingBytes=remaining), identity
 
     def _transfer(self, stage):
         value = _read_json(stage / "TRANSFER.json")
@@ -987,12 +1060,14 @@ class DatasetCache:
     def _publish_locked(self, actor, dataset, version, token, snapshot, *, _guard=None):
         """Publish with the same exclusively locked, validated registration."""
         record, identity = snapshot
+        paths = self._paths(dataset, version)
+        ready, ready_identity = self._ready_snapshot(paths, record["manifest"], version)
         with self._locked():
             if _guard is not None:
                 _guard()
             self._check_snapshot(actor, dataset, version, identity)
-            paths = self._paths(dataset, version)
-            if self._ready(paths, record["manifest"], version):
+            self._check_ready_snapshot(paths, ready_identity)
+            if ready:
                 return dict(dataset=dataset, version=version, state="READY")
             record, paths, transfer = self._authorize_transfer(actor, dataset, version, token, snapshot=snapshot)
             # Empty directories are real disk/inode allocations too. Reserve
@@ -1054,12 +1129,14 @@ class DatasetCache:
         with self._version_locked(actor, dataset, version, snapshot=True) as snapshot:
             record, identity = snapshot
             index = {entry["path"]: entry for entry in record["manifest"]["files"]}
+            paths = self._paths(dataset, version)
+            ready, ready_identity = self._ready_snapshot(paths, record["manifest"], version)
             with self._locked():
                 if _guard is not None:
                     _guard()
                 self._check_snapshot(actor, dataset, version, identity)
-                paths = self._paths(dataset, version)
-                if self._ready(paths, record["manifest"], version):
+                self._check_ready_snapshot(paths, ready_identity)
+                if ready:
                     return dict(dataset=dataset, version=version, state="READY")
                 source = _absolute(_source) if _source is not None else self.sources.get(record["sourceId"])
                 if source is None:
@@ -1146,8 +1223,9 @@ class DatasetCache:
 
     def prepare(self, actor, dataset, version):
         """Materialize an approved local source, or return a resumable replica plan."""
+        record, identity = self._record_snapshot(actor, dataset, version)
         with self._locked():
-            record = self._record(actor, dataset, version)
+            self._check_snapshot(actor, dataset, version, identity)
             local = record["sourceId"] in self.sources
         del record
         return self.materialize(actor, dataset, version) if local else self.plan(actor, dataset, version)
@@ -1186,10 +1264,13 @@ class DatasetCache:
     def acquire_lease(self, actor, dataset, version, job_id):
         """Executor must validate job ownership before invoking this method."""
         _identifier(job_id, USER_RE)
+        record, identity = self._record_snapshot(actor, dataset, version)
+        paths = self._paths(dataset, version)
+        ready, ready_identity = self._ready_snapshot(paths, record["manifest"], version)
         with self._locked():
-            record = self._record(actor, dataset, version)
-            paths = self._paths(dataset, version)
-            if not self._ready(paths, record["manifest"], version):
+            self._check_snapshot(actor, dataset, version, identity)
+            self._check_ready_snapshot(paths, ready_identity)
+            if not ready:
                 raise CacheError("cannot lease an unready version")
             leases = self._leases(dataset, version)
             lease = next((l for l in leases if l["jobId"] == job_id and l["owner"] == actor.user_id), None)
@@ -1206,8 +1287,9 @@ class DatasetCache:
         self._actor(actor, admin=True)
         if not isinstance(lease_id, str) or str(uuid.UUID(lease_id)) != lease_id:
             raise CacheError("invalid lease ID")
+        _, identity = self._record_snapshot(actor, dataset, version)
         with self._locked():
-            self._record(actor, dataset, version)
+            self._check_snapshot(actor, dataset, version, identity)
             leases = self._leases(dataset, version)
             if not any(l["id"] == lease_id for l in leases):
                 return {"released": False}
