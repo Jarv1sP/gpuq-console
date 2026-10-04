@@ -16,6 +16,7 @@ const screenshots = process.env.UI_SCREENSHOTS || '/tmp/gpuq-datasets-ui';
 const password = 'Local-Dataset-UI-Only-Password-2026!';
 const version = 'a'.repeat(64), ref = {dataset: 'sample', version};
 const calls = [], errors = [], blocked = [], httpErrors = [], authenticated = new WeakSet(), phases = new Map([['gpu-1', 'REGISTERED']]);
+let moreLocalVersions=false, holdLookup=false, releaseLookup=null;
 let server, browser, service, waitingList = null, listGate = null;
 const reserve = net.createServer();
 await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
@@ -43,6 +44,7 @@ try {
       const state = phases.get(machine) || 'READY';
       const entries = [{dataset: machine === 'gpu-1' ? 'sample' : 'another', ownerIds:[args.userId], versions: [{version, state,canPrepare:true,
         files: 12, bytes: 128 * 1024 ** 2, ...(state === 'FAILED' ? {error: 'Test preparation interrupted; safe to retry.'} : {})}]}];
+      if(moreLocalVersions&&machine==='gpu-1')entries[0].versions.push({version:'d'.repeat(64),state:'READY',canPrepare:true,files:4,bytes:2*1024**2});
       if (args.hostAdmin) entries.push({dataset: 'admin-private', versions: [{version: 'b'.repeat(64), state: 'READY', files: 1, bytes: 12}]});
       return {datasets: entries};
     }
@@ -102,7 +104,7 @@ try {
       return !toast || (!toast.classList.contains('visible') && Number(getComputedStyle(toast).opacity) === 0);
     });
     await page.evaluate(() => scrollTo(0, 0));
-    await page.screenshot({path: join(screenshots, name), fullPage: true});
+    await page.screenshot({path: join(screenshots, name), fullPage: await page.locator('dialog[open]').count()===0, animations: 'disabled'});
   }
   async function prepare(page) {
     await Promise.all([page.waitForResponse(response => response.url() === origin + '/api/call' &&
@@ -165,6 +167,17 @@ try {
   assert.equal(calls.some(call=>/cloud|workspace/.test(call.operation)),false,'Selecting an import path never imports, extracts, publishes or starts a terminal');
   await member.locator('[data-dataset-add-close]').click();
   assert.equal(await member.locator('#dataset-add-dialog').isVisible(),false,'The import sheet closes without discarding method drafts');
+  await member.locator('#datasets-add > summary').click();
+  await member.locator('#dataset-add-dialog').waitFor({state:'visible'});
+  await member.evaluate(()=>{location.hash='work';});
+  await member.locator('#page-work').waitFor({state:'visible'});
+  await member.locator('#dataset-add-dialog').waitFor({state:'hidden'});
+  assert.equal(await member.locator('#dataset-add-dialog').getAttribute('open'),null,'A room deep link closes the native sheet and releases background input');
+  await member.locator('[data-nav=datasets]').click();
+  await member.locator('#datasets-add > summary').click();
+  await member.locator('#dataset-add-dialog').waitFor({state:'visible'});
+  assert.equal(await member.locator('[name=dataset-name]').inputValue(),'preserved-draft','Changing rooms keeps the upload draft');
+  await member.locator('[data-dataset-add-close]').click();
 
   // Delay one machine's response: old machine entries must disappear immediately.
   let releaseList; listGate = new Promise(resolve => {releaseList = resolve;});
@@ -200,7 +213,9 @@ try {
   const layout = await member.evaluate(() => ({width: innerWidth, scroll: document.documentElement.scrollWidth}));
   assert.ok(layout.scroll <= layout.width + 1, `390px dataset page overflows: ${JSON.stringify(layout)}`);
   await card(member).locator('[data-use-dataset]').click();
-  await member.locator('#page-work').waitFor({state: 'visible'});
+  await member.locator('#work-submit').waitFor({state: 'visible'});
+  assert.equal(await member.locator('#page-datasets').isVisible(),true,'Selecting a fixed dataset opens submission above the current room');
+  assert.equal(await member.locator('#page-work').isVisible(),false,'Dataset selection preserves its page context');
   assert.equal(await member.locator('#train-form [name=machine]').inputValue(), 'gpu-1');
   assert.equal(await member.locator('#train-form [name=datasets]').inputValue(), 'sample@' + version);
   assert.equal(await member.locator('#train-form').evaluate(form => form.closest('details').open), true);
@@ -228,9 +243,39 @@ try {
   assert.deepEqual(httpErrors, [admin, member].map(() => ({status: 401, path: '/api/call', operation: 'state', authenticated: false})));
   assert.deepEqual(errors.filter(message => message !== 'Failed to load resource: the server responded with a status of 401 (Unauthorized)'), [], 'Unexpected browser errors');
   assert.equal(errors.length, 2); assert.deepEqual(blocked, [], 'Unexpected external requests');
+  // Two explicit dataset choices: the newer choice must survive an older lookup.
+  await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});
+  moreLocalVersions=true;await refresh(member);
+  await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-2'),member.locator('#context-machine').selectOption('gpu-2')]);
+  let notifyHeld,rejectHeld;const held=new Promise((resolve,reject)=>{notifyHeld=resolve;rejectHeld=reject;});
+  await member.route('**/api/call',async route=>{
+    const request=route.request().postDataJSON();
+    if(holdLookup&&request.operation==='projects.list'&&request.args.machine==='gpu-1'){
+      holdLookup=false;let response;
+      try{response=await route.fetch({timeout:10000});}catch(error){rejectHeld(error);await route.abort();return;}
+      await new Promise(resolve=>{releaseLookup=resolve;notifyHeld();});
+      await route.fulfill({response});
+    }else await route.continue();
+  });
+  holdLookup=true;
+  const chosen=value=>member.locator('article.dataset-card').filter({has:member.locator('input[value="'+value+'"]')}).locator('[data-use-dataset]');
+  await chosen('sample@'+version).click();
+  let heldTimeout;
+  try{await Promise.race([held,new Promise((_,reject)=>{heldTimeout=setTimeout(()=>reject(new Error('The first dataset choice must request its server projects')),10000);})]);}
+  finally{clearTimeout(heldTimeout);}
+  if(await member.locator('#work-submit').isVisible()){await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});}
+  const latest='sample@'+'d'.repeat(64);
+  await chosen(latest).click();await member.locator('#work-submit').waitFor({state:'visible'});
+  const before=await member.locator('#train-form [name=datasets]').inputValue();
+  const delivered=member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-1');
+  releaseLookup();await delivered;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+  const after=await member.locator('#train-form [name=datasets]').inputValue();
+  assert.equal(before,latest,'The new choice is visible before the old reply arrives');
+  assert.equal(after,latest,'An older server lookup must not replace the newer fixed dataset choice');
   console.log('DATASETS UI PASS: owner-filtered merged catalogs; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; no unexpected browser errors or external requests (two expected pre-login session probes returned 401).');
   console.log(`Screenshots: ${screenshots}`);
 } finally {
+  holdLookup=false;releaseLookup?.();
   await browser?.close();
   if (server) await new Promise(resolve => server.close(resolve));
   await rm(dir, {recursive: true, force: true});

@@ -166,7 +166,7 @@ try{
   const job=(await submitted.json()).result;assert.equal(job.machine,machine);assert.equal(job.project,'vision-demo');assert.equal(job.release,release);
   assert.deepEqual(job.datasets,[{dataset:'sample',version:datasetVersion}]);assert.deepEqual(job.command,['/bin/bash','-c','python train.py --output /outputs/result.json']);
   await idle();
-  await closeSubmit(page);await action('files.list',()=>page.locator('#my-job-table [data-job-output]').click());await idle();
+  await closeSubmit(page);await page.locator('[data-nav=work]').click();await action('files.list',()=>page.locator('#my-job-table [data-job-output]').click());await idle();
   assert.equal(await page.locator('[name=release]').inputValue(),release,'viewing output must not replace the pinned training draft with latest');
   assert.equal(await page.locator('[name=file-area]').inputValue(),'output');assert.equal(await page.locator('[name=file-run-id]').inputValue(),job.id);
   assert.equal(await page.locator('#workspace-upload').isDisabled(),true);assert.match(await page.locator('#workspace-result').textContent(),/metrics.json/);
