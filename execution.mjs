@@ -8,7 +8,7 @@ import {yieldCapable} from './dist/scheduling-policy.js';
 import {normalizeJobSubmission,createSubmittedJob,datasetReferences} from './job-submission.mjs';
 import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
-import {datasetCatalogCall} from './dataset-catalog.mjs';
+import {datasetCatalogCall,datasetListView} from './dataset-catalog.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 export {datasetReferences} from './job-submission.mjs';
@@ -247,6 +247,7 @@ export async function executionCall(service,principal,operation,args){
     try{result=await service.bridge(machine,operation,{...reference,userId:user.id,hostAdmin:principal.role==='admin'});}
     catch(error){if(operation==='datasets.status'&&!byOperation&&service.resolveDataset)return (await service.resolveDataset(user.id,machine,reference)).status;throw error;}
     if(operation==='datasets.prepare')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
+    if(operation==='datasets.list')return datasetListView(result,service.store.users);
     return result;
   }
   if(['terminal.open','terminal.exchange','terminal.close','terminal.detach'].includes(operation)){

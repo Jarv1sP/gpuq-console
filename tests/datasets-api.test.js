@@ -22,13 +22,13 @@ async function fixture(){
     id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:32768})),
     gpuq:{connected:true,observeOnly:false,schedulableIndices:m.id==='gpu-1'?[0,1,2,3]:[0],jobs:[]}
   }))}));
-  const calls=[],states=new Map(),deniedOwners=new Set();let failure=null,syncResult=null,syncFailure=null;
+  const calls=[],states=new Map(),deniedOwners=new Set();let failure=null,syncResult=null,syncFailure=null,listing=null;
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation.startsWith('datasets.')){
       if(failure)throw failure;
       if(!args.hostAdmin&&deniedOwners.has(args.userId))throw Error('dataset owner authorization required');
-      if(operation==='datasets.list')return {datasets:[{dataset:'sample',versions:[{version,state:states.get(machine+':sample')??'READY',canPrepare:true}]}]};
+      if(operation==='datasets.list')return listing||{datasets:[{dataset:'sample',versions:[{version,state:states.get(machine+':sample')??'READY',canPrepare:true}]}]};
       const state=states.get(machine+':'+args.dataset)??'READY';
       if(state instanceof Error)throw state;
       return {dataset:args.dataset,version:args.version,state,remainingBytes:state==='READY'?0:64};
@@ -58,6 +58,7 @@ async function fixture(){
   });
   return {get service(){return service},get user(){return user},get admin(){return admin},outsider,member,other,calls,states,deniedOwners,post,settle,
     fail:value=>failure=value,
+    list:value=>listing=value,
     sync:result=>{syncResult=result;},syncFail:error=>{syncFailure=error;},
     grant:async(total=4,limits={'gpu-1':2,'gpu-2':2})=>service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:service.store.get(member.id).policyVersion,total,limits}),
     submit:more=>post('jobs.submit',{machine:'gpu-1',cards:1,argv:['python','train.py'],key:randomUUID(),datasets:[reference],...more}),
@@ -173,6 +174,27 @@ test('dataset endpoints reject identity/path spoofing, unauthorized machines and
       assert.equal((await f.post(operation,args,null)).status,401);
     }
     assert.equal(f.calls.length,0);
+  }finally{await f.close();}
+});
+
+test('dataset APIs return only mapped ownership labels after normal node authorization',async()=>{
+  const f=await fixture();try{
+    await f.grant();
+    f.list({datasets:[{dataset:'sample',ownerIds:[f.member.id],ownerLabel:'forged',sourcePath:'/private',users:f.service.store.users,versions:[{version,state:'READY',sourceId:'private-source'}]}]});
+    for(const operation of ['datasets.list','datasets.catalog']){
+      const response=await f.post(operation,{machine:'gpu-1'});
+      assert.equal(response.status,200,JSON.stringify(response.data));
+      const item=response.data.result.datasets[0];
+      assert.equal(operation==='datasets.list'?item.ownerLabel:item.versions[0].ownerLabel,'所属用户：dataset-user');
+      assert.doesNotMatch(JSON.stringify(response.data.result),/ownerIds|other-user|private|forged|password|credentials/);
+    }
+    f.list({datasets:[{dataset:'sample',ownerIds:[f.member.id,f.other.id],versions:[{version,state:'READY'}]}]});
+    assert.equal((await f.post('datasets.list',{machine:'gpu-1'})).data.result.datasets[0].ownerLabel,'共享授权用户：dataset-user、other-user');
+    f.service.store.users=f.service.store.users.filter(user=>user.id!==f.other.id);
+    assert.match((await f.post('datasets.list',{machine:'gpu-1'})).data.result.datasets[0].ownerLabel,/未知用户 1 位/);
+    f.deniedOwners.add(f.member.id);
+    const denied=await f.post('datasets.list',{machine:'gpu-1'});assert.notEqual(denied.status,200);assert.doesNotMatch(JSON.stringify(denied.data),/ownerLabel|dataset-user/);
+    const admin=await f.post('datasets.list',{machine:'gpu-1'},f.admin.token);assert.equal(admin.status,200);assert.equal(f.calls.at(-1).args.hostAdmin,true);
   }finally{await f.close();}
 });
 

@@ -378,7 +378,7 @@ class NodeDatasets(unittest.TestCase):
         self.ready()
         self.assertEqual(self.call('list')['datasets'][0]['versions'][0]['state'], 'READY')
 
-    def test_shared_owner_reuses_one_active_prepare_without_identity_leak(self):
+    def test_shared_owner_reuses_one_active_prepare_without_initiator_identity(self):
         self.cache.register_source(self.admin, 'shared', 'approved', ['demo-user-1', 'demo-user-2'])
         with patch.object(self.node, 'dataset_background_active', return_value=False), patch.object(self.node, 'run'):
             first = self.call('prepare', dataset='shared', version=self.version)
@@ -388,7 +388,11 @@ class NodeDatasets(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(first['operationId'], second['operationId'])
         self.assertEqual(result['datasets'][0]['versions'][0]['state'], 'PREPARING')
-        self.assertNotIn('demo-user-1', json.dumps(result))
+        # Authorized ACL owner IDs are now deliberate node-to-portal metadata;
+        # they still do not identify which co-owner started the shared worker.
+        self.assertEqual(result['datasets'][0]['ownerIds'], ['demo-user-1', 'demo-user-2'])
+        self.assertNotIn('demo-user-1', json.dumps(result['datasets'][0]['versions']))
+        self.assertNotIn('userId', json.dumps(result))
 
     def test_operation_status_cannot_read_another_users_request(self):
         response, _ = self.start_prepare()

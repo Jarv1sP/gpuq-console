@@ -132,6 +132,28 @@ class DatasetCacheTests(unittest.TestCase):
         self.assertNotIn(str(self.source), json.dumps(result))
         self.assertEqual(self.cache.list_datasets(OWNER)["datasets"][0]["versions"][0]["state"], "READY")
 
+    def test_list_owners_only_after_authorization_without_changing_identity(self):
+        version = self.register(owners=[OTHER.user_id, OWNER.user_id, OWNER.user_id])
+        self.register("private-other", owners=["private-owner"])
+        metadata = self.root / ".registry" / "sample" / "dataset.json"
+        before = metadata.read_bytes()
+        listing = self.cache.list_datasets(OWNER)
+        self.assertEqual([item["dataset"] for item in listing["datasets"]], ["sample"])
+        self.assertEqual(listing["datasets"][0]["ownerIds"], [OWNER.user_id, OTHER.user_id])
+        self.assertEqual(listing["datasets"][0]["versions"][0]["version"], version)
+        for forbidden in ("private-other", "private-owner", "sample-source", str(self.source)):
+            self.assertNotIn(forbidden, json.dumps(listing))
+        self.assertEqual(metadata.read_bytes(), before)
+        self.assertEqual(len(self.cache.list_datasets(ADMIN)["datasets"]), 2)
+
+    def test_list_owner_display_bound_does_not_truncate_or_restrict_acl(self):
+        owners = [OWNER.user_id] + [f"reader-{i}" for i in range(63)]
+        version = self.register(owners=owners)
+        self.assertEqual(len(self.cache.list_datasets(OWNER)["datasets"][0]["ownerIds"]), 64)
+        self.cache.set_owners(ADMIN, "sample", owners + [OTHER.user_id])
+        self.assertIsNone(self.cache.list_datasets(OTHER)["datasets"][0]["ownerIds"])
+        self.assertEqual(self.cache.export_manifest(OTHER, "sample", version)["version"], version)
+
     def test_resume_plan_and_idempotent_chunks(self):
         version = self.register()
         plan = self.cache.plan(OWNER, "sample", version)

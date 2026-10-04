@@ -660,7 +660,7 @@ class DatasetCache:
                         scope="filesystem", activeReservationsIncluded=False)
 
     def list_datasets(self, actor):
-        """Authorized catalog only; never returns source IDs/paths or other owners."""
+        """Authorized catalog and bounded ACL owner IDs, never source IDs/paths."""
         self._actor(actor)
         result = []
         with self._locked():
@@ -668,7 +668,7 @@ class DatasetCache:
                 datasets = sorted(os.listdir(fd))
             for dataset in datasets:
                 try:
-                    self._dataset(actor, dataset)
+                    metadata = self._dataset(actor, dataset)
                 except PermissionError:
                     continue
                 folder = self._paths(dataset)[".registry"]
@@ -693,7 +693,11 @@ class DatasetCache:
                                          canPrepare=record['sourceId'] in self.sources,
                                          bytes=sum(f["size"] for f in record["manifest"]["files"]),
                                          files=len(record["manifest"]["files"])))
-                result.append(dict(dataset=dataset, versions=versions))
+                owners = self._owners(metadata["owners"])
+                # A display bound, not an ACL limit. Never return a truncated
+                # list that could be mistaken for the complete authorization.
+                result.append(dict(dataset=dataset, versions=versions,
+                                   ownerIds=owners if len(owners) <= 64 else None))
         return {"datasets": result}
 
     def status(self, actor, dataset, version):

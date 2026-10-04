@@ -41,7 +41,7 @@ try {
     if (operation === 'datasets.list') {
       if (machine === 'gpu-2' && listGate) {waitingList?.(); await listGate;}
       const state = phases.get(machine) || 'READY';
-      const entries = [{dataset: machine === 'gpu-1' ? 'sample' : 'another', versions: [{version, state,canPrepare:true,
+      const entries = [{dataset: machine === 'gpu-1' ? 'sample' : 'another', ownerIds:[args.userId], versions: [{version, state,canPrepare:true,
         files: 12, bytes: 128 * 1024 ** 2, ...(state === 'FAILED' ? {error: 'Test preparation interrupted; safe to retry.'} : {})}]}];
       if (args.hostAdmin) entries.push({dataset: 'admin-private', versions: [{version: 'b'.repeat(64), state: 'READY', files: 1, bytes: 12}]});
       return {datasets: entries};
@@ -115,6 +115,7 @@ try {
   await login(admin, 'admin'); await refresh(admin);
   assert.equal(await admin.locator('.dataset-card').count(), 2);
   assert.doesNotMatch(await admin.locator('#dataset-catalog').textContent(), /admin-private/);
+  assert.equal(await card(admin).locator('.dataset-owner').textContent(), '所属用户：admin');
   assert.equal(calls.at(-1).args.userId, 'builtin-admin'); assert.equal(calls.at(-1).args.hostAdmin, false);
   assert.match(await admin.locator('#datasets-capacity').textContent(),/512\.00 GiB.*不是个人配额/);
   assert.equal(await admin.locator('.dataset-card h3',{hasText:/^another$/}).count(),1,'Same dataset and version is merged across machines');
@@ -133,6 +134,7 @@ try {
   assert.doesNotMatch(await member.locator('#dataset-catalog').textContent(), /admin-private/);
   assert.equal(calls.at(-1).args.userId, user.id); assert.equal(calls.at(-1).args.hostAdmin, false);
   assert.match(await card(member).textContent(), /待准备/);
+  assert.equal(await card(member).locator('.dataset-owner').textContent(), '所属用户：dataset-browser-user');
   assert.equal(await card(member).locator('[data-prepare-dataset]').isEnabled(), true);
   assert.equal(await card(member).locator('[data-use-dataset]').isEnabled(), true);
   assert.equal(await card(member).locator('[data-use-dataset]').textContent(), '准备后训练');

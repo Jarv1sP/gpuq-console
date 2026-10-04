@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {datasetRows,capacityText,archiveStatus} from '../dist/datasets-ui.js';
+test('dataset cards show one concise username label, never guess from the dataset prefix',()=>{
+ const catalog={datasets:[{dataset:'u-guessed-owner-data',versions:[{version:'a'.repeat(64),state:'READY',ownerLabel:'所属用户：alice',locations:[{machine:'gpu-1',state:'READY',ownerLabel:'所属用户：alice'}]}]}]};
+ const html=datasetRows(catalog);assert.match(html,/<p class="dataset-owner">所属用户：alice<\/p>/);
+ assert.equal(html.split('所属用户：alice').length-1,1);
+ delete catalog.datasets[0].versions[0].ownerLabel;
+ assert.match(datasetRows(catalog),/dataset-owner">所属用户：未知/);
+});
+test('conflicting replicas retain each ownership label and escape all owner text',()=>{
+ const html=datasetRows({datasets:[{dataset:'mine',versions:[{version:'a'.repeat(64),state:'READY',ownerLabel:'各机授权不同（见副本位置）',locations:[{machine:'gpu-1',state:'READY',ownerLabel:'所属用户：<img src=x>'},{machine:'gpu-2',state:'READY',ownerLabel:'共享授权用户：alice、bob'}]}]}]});
+ assert.match(html,/各机授权不同/);assert.match(html,/gpu-1 · 已就绪 · 所属用户：&lt;img src=x&gt;/);assert.match(html,/gpu-2 · 已就绪 · 共享授权用户：alice、bob/);assert.doesNotMatch(html,/<img/);
+});
 test('archive UI distinguishes confirmed preservation from local readiness and escapes errors',()=>{
  assert.equal(archiveStatus(null),'');
  for(const phase of ['QUEUED','COPYING','PROVISIONING','FAILED','BLOCKED']){
