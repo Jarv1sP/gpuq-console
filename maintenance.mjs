@@ -101,11 +101,17 @@ async function sync(service,row){
     service.db.exec('COMMIT');return load(service,row.id);
   }catch(error){service.db.exec('ROLLBACK');throw error;}
 }
-export function installMaintenance(service){
+// Initialize only the persisted admission state before any startup retention.
+// Account/bridge-dependent interfaces remain installed later, after restore.
+export function installMaintenanceState(service){
   service.db.exec('CREATE TABLE IF NOT EXISTS operational_maintenance (id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)');
   service.db.prepare('INSERT OR IGNORE INTO operational_maintenance VALUES(1,?)').run(JSON.stringify({version:1,revision:0,global:null,machines:{}}));
   maintenanceState(service); // Invalid persisted state is never treated as off.
+  service.globalMaintenanceActive=()=>maintenanceState(service).global!==null;
   service.maintenanceFor=machine=>{const value=maintenanceState(service);return value.global||value.machines[machine]||null;};
+}
+export function installMaintenance(service){
+  installMaintenanceState(service);
   service.operationalMaintenance=principal=>{
     const value=maintenanceState(service),limits=service.store.get(principal.userId).limits;
     return {...value,machines:Object.fromEntries(Object.entries(value.machines).filter(([id])=>principal.role==='admin'||limits[id]))};
@@ -141,12 +147,12 @@ export function installMaintenance(service){
     CREATE INDEX IF NOT EXISTS maintenance_state ON maintenance_requests(state,updated_at);`);
   service.maintenanceReconciling=false;
   service.reconcileMaintenance=async()=>{
-    if(service.closing||!service.bridge||service.maintenanceReconciling)return;
+    if(service.closing||!service.bridge||service.maintenanceReconciling||service.globalMaintenanceActive())return;
     service.maintenanceReconciling=true;
     try{
       const rows=service.db.prepare("SELECT id FROM maintenance_requests WHERE state IN ('DISPATCHING','RUNNING','CANCELING','UNKNOWN') ORDER BY updated_at LIMIT 4").all();
       if(!rows.length){clearInterval(service.maintenanceTimer);service.maintenanceTimer=null;return;}
-      for(const {id} of rows){if(service.closing)break;await service.enqueue(async()=>{if(!service.closing)await sync(service,load(service,id));});}
+      for(const {id} of rows){if(service.closing||service.globalMaintenanceActive())break;await service.enqueue(async()=>{if(!service.closing&&!service.globalMaintenanceActive())await sync(service,load(service,id));});}
     }finally{service.maintenanceReconciling=false;}
   };
   // No new requests can appear; fresh installations need no polling timer.

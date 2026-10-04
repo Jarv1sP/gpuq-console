@@ -74,7 +74,9 @@ function installNotificationStore(service,config,{clock,timer}){
     CREATE TABLE IF NOT EXISTS job_notification_outbox(id INTEGER PRIMARY KEY,job_id TEXT NOT NULL,user_id TEXT NOT NULL,generation INTEGER NOT NULL,event_key TEXT NOT NULL,payload TEXT,state TEXT NOT NULL DEFAULT 'QUEUED',attempts INTEGER NOT NULL DEFAULT 0,next_at REAL NOT NULL,created_at REAL NOT NULL,error_code INTEGER,UNIQUE(job_id,generation,event_key));`);
   // A request may have reached Telegram just before a process stopped. Requeue
   // its durable receipt; Telegram has no idempotent sendMessage key.
-  db.prepare("UPDATE job_notification_outbox SET state='QUEUED' WHERE state='SENDING'").run();
+  // Preserve an ambiguous durable delivery during a full maintenance restart.
+  // The first normal flush after an explicit reopen performs the same recovery.
+  if(!service.globalMaintenanceActive?.())db.prepare("UPDATE job_notification_outbox SET state='QUEUED' WHERE state='SENDING'").run();
   service.jobNotificationState=(job,userId)=>{
     if(job.userId!==userId)return {configured:false,enabled:false,pending:0,failed:0};
     try{
@@ -98,6 +100,7 @@ function installNotificationStore(service,config,{clock,timer}){
     return service.jobNotificationState(job,user.id);
   };
   service.captureJobNotifications=()=>{
+    if(service.globalMaintenanceActive?.())return;
     const now=clock();
     db.prepare('DELETE FROM job_notification_outbox WHERE created_at<?').run(now-RETENTION);
     for(const sub of db.prepare('SELECT * FROM job_notification_subscriptions').all()){
@@ -125,20 +128,20 @@ function installNotificationStore(service,config,{clock,timer}){
   try{service.captureJobNotifications();}catch{}
   let sending=false,pausedUntil=0;
   service.flushJobNotifications=async()=>{
-    if(sending||service.closing||clock()<pausedUntil)return;
+    if(sending||service.closing||clock()<pausedUntil||service.globalMaintenanceActive?.())return;
     sending=true;
     try{
       await service.enqueue(()=>{
-        if(service.closing)return;
+        if(service.closing||service.globalMaintenanceActive?.())return;
         // Only one flusher runs. An earlier receipt write may have failed
         // after delivery; retrying is at-least-once, never exactly-once.
         db.prepare("UPDATE job_notification_outbox SET state='QUEUED' WHERE state='SENDING'").run();
         service.captureJobNotifications();
       });
       if(!config)return;
-      for(let count=0;count<20&&!service.closing;count++){
+      for(let count=0;count<20&&!service.closing&&!service.globalMaintenanceActive?.();count++){
         const row=await service.enqueue(()=>{
-          if(service.closing)return null;
+          if(service.closing||service.globalMaintenanceActive?.())return null;
           const candidate=db.prepare("SELECT * FROM job_notification_outbox WHERE state='QUEUED' AND next_at<=? ORDER BY id LIMIT 1").get(clock());
           if(candidate){
             const user=service.store.users.find(u=>u.id===candidate.user_id),job=service.store.jobs.find(j=>j.id===candidate.job_id);

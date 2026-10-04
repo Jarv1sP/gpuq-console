@@ -208,8 +208,13 @@ export function installTransfers(service){
   service.transferSnapshot=(owner,id)=>snapshot(owner,'id',id);
   service.transferSnapshotByKey=(owner,key)=>snapshot(owner,'client_key',key);
   service.reconcileTransfers=async()=>{
-    if(service.closing||!service.bridge||service.transfersReconciling)return;service.transfersReconciling=true;
-    try{const rows=service.db.prepare("SELECT * FROM transfers WHERE (state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED') AND json_extract(data,'$.kind') != 'download') OR (state IN ('SUCCEEDED','CANCELED') AND ((json_extract(data,'$.kind') = 'copy' AND json_extract(data,'$.sourceRelease.protocol') = 1 AND json_extract(data,'$.sourceRelease.state') != 'RELEASED') OR (json_extract(data,'$.kind') = 'download' AND json_extract(data,'$.downloadProtection.protocol') = 1 AND json_extract(data,'$.downloadProtection.state') != 'RELEASED'))) ORDER BY updated_at LIMIT 4").all();await Promise.all(rows.map(row=>inLane(service,row.owner_id,rowKey(row),async()=>{if(!service.closing)await sync(service,load(service,row.id));}).catch(()=>{})));}finally{service.transfersReconciling=false;}
+    // A full-platform maintenance window freezes background observations too:
+    // an idle WAITING_CLIENT upload must not become UNKNOWN, rewrite its saved
+    // node result, or refresh timestamps merely because its executor is stopped.
+    // Keep every existing row/protection intact. Explicit owner status, cancel
+    // and finalization still use their original guarded interfaces below.
+    if(service.closing||!service.bridge||service.transfersReconciling||service.globalMaintenanceActive?.())return;service.transfersReconciling=true;
+    try{const rows=service.db.prepare("SELECT * FROM transfers WHERE (state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED') AND json_extract(data,'$.kind') != 'download') OR (state IN ('SUCCEEDED','CANCELED') AND ((json_extract(data,'$.kind') = 'copy' AND json_extract(data,'$.sourceRelease.protocol') = 1 AND json_extract(data,'$.sourceRelease.state') != 'RELEASED') OR (json_extract(data,'$.kind') = 'download' AND json_extract(data,'$.downloadProtection.protocol') = 1 AND json_extract(data,'$.downloadProtection.state') != 'RELEASED'))) ORDER BY updated_at LIMIT 4").all();await Promise.all(rows.map(row=>inLane(service,row.owner_id,rowKey(row),async()=>{if(!service.closing&&!service.globalMaintenanceActive?.())await sync(service,load(service,row.id));}).catch(()=>{})));}finally{service.transfersReconciling=false;}
   };
   service.transferTimer=setInterval(()=>service.reconcileTransfers().catch(()=>{}),15000);service.transferTimer.unref();
 }

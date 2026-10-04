@@ -10,7 +10,7 @@ const denied=(message='请先登录，或重新登录。',status=401)=>{throw Ob
 const tokenHash=token=>typeof token==='string'&&/^[a-f0-9]{64}$/.test(token)?createHash('sha256').update(token).digest('hex'):null;
 
 export class LoginSessions{
-  constructor(db,userById,{now=()=>Date.now()}={}){
+  constructor(db,userById,{now=()=>Date.now(),initialPrune=true}={}){
     this.db=db;this.userById=userById;this.now=now;
     db.exec(`CREATE TABLE IF NOT EXISTS login_sessions(
       token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,username TEXT NOT NULL,
@@ -18,7 +18,9 @@ export class LoginSessions{
       touched_at INTEGER NOT NULL,expires_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS login_sessions_owner ON login_sessions(user_id);
       CREATE INDEX IF NOT EXISTS login_sessions_expiry ON login_sessions(expires_at);`);
-    this.prune();
+    // A globally held startup keeps the exact durable ledger. Authentication
+    // still checks expiry/role/owner before renewal, and issue still prunes.
+    if(initialPrune!==false)this.prune();
   }
   prune(){this.db.prepare('DELETE FROM login_sessions WHERE expires_at<=?').run(this.now());}
   issue(principal){

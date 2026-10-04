@@ -56,6 +56,7 @@ export function pruneTaskNotes(service){
 }
 export function maintainTaskNotes(service){
   try{
+    if(service.globalMaintenanceActive?.())return 0;
     const removed=service.pruneTaskNotes?.();
     service.noteCleanupPending=false;
     return removed;
@@ -104,7 +105,7 @@ export function installCommunity(service){
   `);
   // Retention is also enforced on reads; this reclaims expired content at startup
   // and on writes without a background process or a full-history JSON rewrite.
-  prune(service.db,Date.now());
+  if(!service.globalMaintenanceActive?.())prune(service.db,Date.now());
   service.pruneTaskNotes=()=>pruneTaskNotes(service);
 }
 function rate(db,actor,bucket,limit,now){
