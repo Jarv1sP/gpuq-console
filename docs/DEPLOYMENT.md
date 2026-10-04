@@ -143,6 +143,8 @@ sudo docker compose logs --tail 50 gpuq-console caddy
 
 `backup.sh` 用 SQLite 在线备份并验证完整性，同时备份数据库旁的注册码加密密钥 `portal.sqlite.invite-key`，每日 timer、默认保留14天。恢复时数据库与密钥必须匹配；有注册码密文但密钥丢失时，服务拒绝自动生成新密钥覆盖。另备份私有 inventory/.env、Headscale 数据与密钥、节点 GPUQ 数据库、个人工作区；只有门户 SQLite 不够恢复模型和数据集。备份放离机的私有存储，定期演练恢复。
 
+节点文件可另行配置 [独立磁盘备份](STORAGE_BACKUP.md)。该可选助手不随升级启用，也不替代数据库在线备份；必须逐机确认来源、独立物理盘、口令留存和真实恢复结果。
+
 升级不要对运行目录无脑 `git pull && up`：
 
 1. 记录 Git commit、镜像 ID；运行数据库备份；保留旧节点桥与 GPUQ 版本。
