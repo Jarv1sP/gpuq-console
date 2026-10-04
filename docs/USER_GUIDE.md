@@ -73,6 +73,13 @@ exit
 
 代码在 `/workspace`，私人环境在 `/opt/project-env`。默认继承基础 Python 包；需要空环境时新建 `gpuctl project create clean-project --env-mode isolated`。项目名以小写字母开头，可含数字、下划线和连字符，最长 48 字符。
 
+项目终端的 `$HOME` 是可写的 `/home/gpuq`，其缓存与私人环境使用平台工作区磁盘；`/tmp` 则是计入内存限制的临时文件系统，不是额外磁盘容量。大包构建可在项目终端把临时文件放到私人 HOME，安装完成后自行清理不再需要的临时文件：
+
+```sh
+mkdir -p "$HOME/.cache/build-tmp"
+TMPDIR="$HOME/.cache/build-tmp" python -m pip install -r requirements.txt
+```
+
 继续已有项目用 `gpuctl project use my-project`；查看项目用 `gpuctl project list`。`push .` 跳过常见环境和秘密文件，但不能识别所有敏感内容，上传前自己检查；不会删除服务器多出来的旧文件，也不会登记或发布数据集、替你迁移本机环境。它不会自动排除数据目录，不要把数据集混进代码目录。
 
 个人的小体积模型权重直接放在项目 `/workspace/weights`，随项目发布为固定版本，训练从该路径读取即可，不需要单独管理。已经在服务器项目中的权重不用每次从电脑重新上传；发布可能在服务器内部复制快照，这与电脑上传不同。新训练产生的 checkpoint 仍写每个任务独立的 `/outputs`，不要覆盖输入权重。
@@ -378,7 +385,7 @@ gpuctl files --job JOB_ID
 gpuctl pull --job JOB_ID model.pt ./model.pt
 ```
 
-保持任务原服务器和项目；不同项目或机器的输出不会自动搬运。已有同名本地文件换个名称，避免覆盖。网页能浏览和下载，超过 100 MiB 的单文件用 CLI；不会自动备份。
+保持任务原服务器和项目；不同项目或机器的输出不会自动搬运。已有同名本地文件换个名称，避免覆盖。网页能浏览和下载，超过 100 MiB 的单文件用 CLI；这些操作不会自动备份。管理员另行配置的节点备份只覆盖明确列入的目录，不代表所有机器和个人结果都有备份；重要产物应确认备份范围与恢复验收。
 
 ### 给任务留言
 
