@@ -125,6 +125,7 @@ class History(unittest.TestCase):
         source.close()
         legacy.execute('DROP TABLE gpu_allocation_history')
         legacy.execute('ALTER TABLE jobs DROP COLUMN preempt_opt_in_only')
+        legacy.execute('ALTER TABLE jobs DROP COLUMN display_json')
         legacy.execute('UPDATE schema_meta SET schema_version=10')
         legacy.execute('PRAGMA user_version=10')
         legacy.commit()

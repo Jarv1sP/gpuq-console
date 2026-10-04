@@ -93,7 +93,7 @@ class ScopeReview(unittest.TestCase):
         job=self.submit();old=self.root/'retry-v11.db'
         with closing(sqlite3.connect(self.config.db_path)) as source,closing(sqlite3.connect(old)) as target:
             source.backup(target);before=target.execute('SELECT submit_digest FROM jobs WHERE id=?',(job['id'],)).fetchone()[0]
-            target.execute('ALTER TABLE jobs DROP COLUMN preempt_opt_in_only');target.execute('UPDATE schema_meta SET schema_version=11');target.execute('PRAGMA user_version=11');target.commit()
+            target.execute('ALTER TABLE jobs DROP COLUMN display_json');target.execute('ALTER TABLE jobs DROP COLUMN preempt_opt_in_only');target.execute('UPDATE schema_meta SET schema_version=11');target.execute('PRAGMA user_version=11');target.commit()
         migrated=Store(old).initialize()
         try:
             with closing(sqlite3.connect(old)) as db:self.assertEqual(db.execute('SELECT submit_digest FROM jobs WHERE id=?',(job['id'],)).fetchone()[0],before)

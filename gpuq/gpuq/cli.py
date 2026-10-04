@@ -26,6 +26,7 @@ from .elastic import compatible_world_sizes
 from .protocol import Client, ProtocolError
 from .submission import validate_submission
 from .util import ENV_NAME_RE, json_dumps, validate_label
+from .job_display import labels as display_labels
 
 
 DEFAULT_CONFIG = Path(os.environ.get("GPUQ_CONFIG", "/data1/gpu-scheduler/config.json"))
@@ -546,8 +547,9 @@ def format_watch_line(
     assert isinstance(job, Mapping)
     current_time = time.time() if now is None else now
     job_id = _watch_text(job.get("id"), maximum=32)
-    owner = _watch_text(job.get("owner"), maximum=64)
-    name = _watch_text(job.get("name"), maximum=64)
+    submitter, task_name = display_labels(job)
+    owner = _watch_text(submitter, maximum=96)
+    name = _watch_text(task_name, maximum=64)
     state = _watch_text(job.get("state"), maximum=32)
     parts = [job_id, f"{owner}/{name}", f"state={state}"]
     started_at = _finite_number(job.get("started_at"))
@@ -642,6 +644,7 @@ def _watch_signature(result: Mapping[str, Any]) -> tuple[Any, ...]:
         job.get("id"),
         job.get("owner"),
         job.get("name"),
+        _freeze_watch_value(job.get("display_metadata")),
         job.get("state"),
         job.get("state_reason"),
         tuple(
@@ -944,8 +947,8 @@ def format_status_table(
                 _safe_display_text(job.get("dispatch_mode")),
                 _safe_display_text(_job_placement(job, current_indices)),
                 _safe_display_text(job.get("state")),
-                _safe_display_text(job.get("owner")),
-                _safe_display_text(job.get("name")),
+                _safe_display_text(display_labels(job)[0]),
+                _safe_display_text(display_labels(job)[1]),
             )
         )
     natural_widths = [
@@ -1204,6 +1207,17 @@ def cmd_cancel(args: argparse.Namespace) -> int:
 
 def cmd_retry(args: argparse.Namespace) -> int:
     result = get_client(args).call("retry", {"job_id": args.job_id})
+    print_result(result, args.json)
+    return 0
+
+
+def cmd_set_display(args: argparse.Namespace) -> int:
+    result = get_client(args).call("set_job_display", {
+        "job_id": args.job_id, "expected_submit_key": args.expected_submit_key,
+        "expected_owner": args.expected_owner, "expected_name": args.expected_name,
+        "metadata": {"name": args.name, "description": args.description,
+                     "submitter": {"name": args.submitter_name, "username": args.username}},
+    })
     print_result(result, args.json)
     return 0
 
@@ -1500,6 +1514,13 @@ def build_parser() -> argparse.ArgumentParser:
     retry = subparsers.add_parser("retry")
     retry.add_argument("job_id")
     retry.set_defaults(func=cmd_retry)
+
+    display = subparsers.add_parser("set-display", help="update human labels only, fenced to the original job")
+    display.add_argument("job_id")
+    for option in ("expected-submit-key", "expected-owner", "expected-name", "name", "submitter-name", "username"):
+        display.add_argument("--"+option, required=True)
+    display.add_argument("--description", default="")
+    display.set_defaults(func=cmd_set_display)
 
     priority = subparsers.add_parser("set-priority", help="change a pending job's complete priority/yield contract")
     priority.add_argument("job_id")

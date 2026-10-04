@@ -155,6 +155,14 @@ sudo docker compose logs --tail 50 gpuq-console caddy
 
 新加机器先部署节点、校验指纹，再更新清单并生成容量表。更改现有 machine ID 等同迁移身份，有未完成任务时不要改。删机器先清空任务/授权，再迁移数据，不直接删数据库记录。
 
+### 原生队列人名与任务名（schema 13）
+
+此更新不是只换前端：需新 Portal 镜像、完整节点 runtime（task-display.py / node-executor / node-probe）和原生 GPUQ。schema 12→13 仅增加默认空对象的 jobs.display_json，原 name/owner/submit_key/digest/argv/状态/lease 不改；显示更新按原提交键、内部 owner、内部 name 三重核对。旧任务缺字段时保持原显示，升级后由门户对未结束任务定期回填，不按 GPU 或短前缀猜身份。
+
+原生 schema 必须按[调度器维护方案](PRIORITY_RELEASE_PLAN.md)在核准窗口备份、停止仅 gpuq.service、以原 UID/配置执行新 archive 的 `_init`、核对 schema/完整性并恢复 daemon；不要直接写线上 SQL，也不要把旧数据库覆盖回去。运行中的训练 unit 是否独立必须先核验，不能据源码测试宣称实机无中断。旧 schema 的 daemon 不能直接打开 schema13；回退需单独评审。该维护未因本 PR 自动获准。
+
+只有 native 的 job-display-v1 与节点完整助手同时被 probe 确认，才宣告 console-task-display-v1；旧或未升级节点仍用原请求，不因多了 metadata 破坏提交。显示失败是独立 UNAVAILABLE 回执，不改变训练状态、用卡配额，也不阻挡取消。显示回填仅随 sync 进行，节点取消、优先级和日志请求均不执行可选的显示同步；快照能力尚未刷新但助手已缺失或损坏时，执行状态仍照常核验。助手可用时，新提交／同步仍严格拒绝不匹配的任务名或提交人，且显示更新绝不修改不可变任务 spec。
+
 ### 已有节点加入项目工作流
 
 此升级入口只用于已完成公共 P0 终端与诊断安装的节点，不负责首次安装或修复 P0 协议。先把新版源码放在节点服务用户拥有的独立目录，以该服务用户明确选择已有运行档位并检查（不是 root）：
