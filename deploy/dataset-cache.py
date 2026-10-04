@@ -62,6 +62,7 @@ DEFAULT_RESERVE = 10 * 1024**3
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 USER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
 HASH_RE = re.compile(r"[a-f0-9]{64}\Z")
+UNSAFE_RELATIVE_RE = re.compile(r"[\x00-\x1f\x7f\\]")
 FORBIDDEN = {".ssh", ".env", ".git", ".venv", "anaconda3", "miniconda3", ".conda"}
 BROAD = {"/", "/home", "/Users", "/root", "/data1", "/data2", "/tmp", "/var/tmp"}
 SYSTEM = ("/etc", "/usr", "/bin", "/sbin", "/proc", "/sys", "/dev", "/run", "/var/lib")
@@ -88,8 +89,7 @@ def _identifier(value, pattern=ID_RE):
 
 def _relative(value):
     if (not isinstance(value, str) or not value or len(value.encode()) > 4096
-            or value.startswith("/") or "\\" in value
-            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            or value.startswith("/") or UNSAFE_RELATIVE_RE.search(value)):
         raise CacheError("invalid relative dataset path")
     parts = value.split("/")
     if any(p in {"", ".", ".."} or p in FORBIDDEN for p in parts):
@@ -220,7 +220,7 @@ def _digest_fd(fd, length=None):
     return digest.hexdigest(), before.st_size
 
 
-def _manifest(value):
+def _manifest_bytes(value):
     if not isinstance(value, dict) or set(value) != {"schema", "directories", "files"} or value["schema"] != SCHEMA:
         raise CacheError("unsupported manifest schema")
     dirs, files = value["directories"], value["files"]
@@ -240,15 +240,18 @@ def _manifest(value):
         seen.add(path)
         normalized.append(dict(path=path, size=item["size"], sha256=item["sha256"]))
     directory_set = set(directories)
+    # Direct-parent closure is sufficient because directories are entries too;
+    # _relative has already rejected empty, dot and traversal components.
     for path in seen:
-        parent = Path(path).parent
-        while str(parent) != ".":
-            if parent.as_posix() not in directory_set:
-                raise CacheError("manifest missing parent directory or conflicting file path")
-            parent = parent.parent
+        parent = path.rpartition("/")[0]
+        if parent and parent not in directory_set:
+            raise CacheError("manifest missing parent directory or conflicting file path")
     result = dict(schema=SCHEMA, directories=directories, files=sorted(normalized, key=lambda f: f["path"]))
-    _json_bytes(result)
-    return result
+    return result, _json_bytes(result)
+
+
+def _manifest(value):
+    return _manifest_bytes(value)[0]
 
 
 def _scan(path):
@@ -513,7 +516,10 @@ class DatasetCache:
         self._dataset(actor, dataset)
         record = _read_json(self._paths(dataset)[".registry"] / (version + ".json")) if _identifier(version, HASH_RE) else None
         if (not isinstance(record, dict) or set(record) != {"schema", "manifest", "sourceId"}
-                or record["schema"] != SCHEMA or _version(_manifest(record["manifest"])) != version):
+                or record["schema"] != SCHEMA):
+            raise CacheError("corrupt version registration")
+        _, canonical = _manifest_bytes(record["manifest"])
+        if hashlib.sha256(canonical).hexdigest() != version:
             raise CacheError("corrupt version registration")
         if record["sourceId"] is not None:
             _identifier(record["sourceId"])

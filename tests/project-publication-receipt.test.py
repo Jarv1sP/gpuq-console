@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+import uuid
 
 source = Path(__file__).with_name('node-projects.test.py')
 spec = importlib.util.spec_from_file_location('publication_receipt_fixture', source)
@@ -116,6 +117,58 @@ class PublicationReceiptTests(unittest.TestCase):
         with patch.object(self.ops.store,'publish',side_effect=publish):
             self.assertEqual(self.ops.worker(operation),0)
         self.assertEqual(self.status()['state'],'READY')
+
+    def test_keyed_publication_retries_current_receipt_without_starting_another_worker(self):
+        key = str(uuid.uuid4())
+        with patch.object(self.n,'run',return_value='') as run,patch.object(self.ops,'active',return_value=True):
+            started = self.f.call('projects.publish',key=key)
+            repeated = self.f.call('projects.publish',key=key)
+            self.assertEqual(run.call_count,1)
+            self.assertEqual(started['publication'],{'id':key,'state':'PUBLISHING'})
+            self.assertEqual(repeated['publication'],started['publication'])
+        self.assertEqual(self.ops.worker(started['operationId']),0)
+        restarted = type(self.ops)(self.n);restarted.store.reserve_bytes=0
+        with patch.object(self.n,'run',side_effect=AssertionError('no second worker')):
+            result = restarted.process('projects.publish',{**self.args,'key':key})
+        self.assertEqual(result['publicationProtocol'],1)
+        self.assertEqual(result['publication'],{'id':key,'state':'READY','release':result['latestReadyRelease']})
+
+    def test_keyed_failure_and_unknown_never_expose_previous_ready_as_publication_release(self):
+        self.assertEqual(self.ops.worker(self.start()),0)
+        for failed in (True,False):
+            key=str(uuid.uuid4())
+            with patch.object(self.n,'run',return_value=''),patch.object(self.ops,'active',return_value=False):
+                started=self.f.call('projects.publish',key=key)
+            if failed:
+                with patch.object(self.ops.store,'publish',side_effect=ValueError('new publish failed')):
+                    self.assertEqual(self.ops.worker(started['operationId']),1)
+            status=self.status()
+            self.assertTrue(status['latestReadyRelease'])
+            self.assertEqual(status['publication'],{'id':key,'state':'FAILED' if failed else 'UNKNOWN'})
+            with patch.object(self.n,'run',side_effect=AssertionError('no retry')),patch.object(self.ops,'active',return_value=False):
+                self.assertEqual(self.f.call('projects.publish',key=key)['publication'],status['publication'])
+
+    def test_key_survives_postcommit_receipt_failure_and_only_commit_proof_recovers_it(self):
+        key=str(uuid.uuid4())
+        with patch.object(self.n,'run',return_value=''):
+            started=self.f.call('projects.publish',key=key)
+        original=self.n.atomic_json
+        with patch.object(self.n,'atomic_json',side_effect=lambda p,v: (_ for _ in ()).throw(OSError('receipt')) if v.get('state')=='READY' else original(p,v)):
+            self.assertEqual(self.ops.worker(started['operationId']),0)
+        result=self.status()
+        self.assertEqual(result['publication'],{'id':key,'state':'READY','release':result['latestReadyRelease']})
+
+    def test_corrupt_publication_identity_or_commit_is_not_a_ready_proof(self):
+        operation=self.start();self.assertEqual(self.ops.worker(operation),0)
+        original=self.ops.pending(self.args)
+        for change in ({'publicationId':'bad'},{'committedRelease':'a'*64},{'release':'b'*64},{'state':'garbage'}):
+            self.n.atomic_json(self.ops.receipt_path(self.args),{**original,**change})
+            with self.assertRaises(ValueError):self.status()
+
+    def test_publication_key_and_privilege_fields_are_strict(self):
+        for extra in ({'key':'bad'},{'key':None},{'key':True},{'publicationId':str(uuid.uuid4())},{'hostAdmin':True}):
+            with self.assertRaises(ValueError):self.f.call('projects.publish',**extra)
+        with self.assertRaises(ValueError):self.f.call('projects.status',key=str(uuid.uuid4()))
 
 
 if __name__ == '__main__': unittest.main()

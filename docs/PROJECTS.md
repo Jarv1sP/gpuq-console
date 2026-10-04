@@ -98,7 +98,11 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 
 项目名只用小写 ASCII 字母、数字、下划线、连字符，以字母开头，长度 1–48。机器和项目选择保存在本机登录缓存中，按服务器分别记忆；切到没有选过项目的新服务器时不会沿用另一台的项目。可用 `--project NAME` 临时覆盖，不修改记忆。登录另一账号会清除旧身份的选择。
 
-`run` 选择 `latestReadyRelease`，并核验该版本在 READY 清单中。顶层 `PUBLISHING` 不会阻止使用以前的 READY 版本，因此想运行新改动时务必先核对最新发布结果。`--release 完整64位哈希` 可显式固定版本。没有可用版本时清楚报错，绝不自动替用户发布、切机或占卡等发布。`run auto` 对新任务一律拒绝。
+普通 `run` 选择 `latestReadyRelease`，并核验该版本在 READY 清单中。顶层 `PUBLISHING` 不会阻止使用以前的 READY 版本，因此想运行新改动时务必先核对最新发布结果。`--release 完整64位哈希` 可显式固定版本。没有可用版本时清楚报错，普通 `run` 不会自动替用户发布、切机或占卡等发布。`run auto` 对新任务一律拒绝。
+
+显式 `gpuctl run --sync -g 1 -- python train.py` 则先上传当前目录（或 `--sync-dir "本地目录"`）到所选个人项目，复用分块 SHA256 校验和发布 worker，等待本次发布的 UUID 回执 READY；再通过固定版本清单确认已上传文件的大小／SHA，最后固定该 release 提交。发布状态未知、失败、被其他发布替换、文件变化、校验不符或有界等待超时都不会提交旧版本。不会关闭终端或自动安装依赖；必须先准备好项目环境并退出项目终端。旧节点缺少 publicationProtocol 时在上传前拒绝，不静默兼容成“运行旧代码”。`--sync` 不能与 `--release/--legacy/--root/--as/--job` 混用。
+
+该快捷入口不是增量或删除镜像：本地文件仍按原 push 流程上传，秘密／环境排除规则不变，远端额外文件保留，不迁移数据集或环境；空／全排除目录拒绝发布。Windows 原生命令行支持带空格、中文的 `--sync-dir` 双引号路径，不拼接宿主 shell。客户端退出不终止已受理的后台发布；最后提交回复丢失先查任务及原 Submission key，不换新 key 盲目重投。
 
 任务提交会输出版本和 `Submission key`。请求超时重试时保留相同命令、`--key UUID` 与 `--release HASH`，避免后续发布改变“最新版本”。发布按项目维护后台状态，不使用训练提交 key；请求超时先 `project status`，仍在发布时等待，失败时查看原因再重新发布。
 

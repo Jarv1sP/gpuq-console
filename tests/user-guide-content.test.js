@@ -65,7 +65,17 @@ test('training walkthrough distinguishes local edits, published snapshots and ou
   assert.match(guide, /可能用到旧代码/);
   assert.match(guide, /结果、日志文件和 checkpoint 要写入 `\/outputs`/);
   assert.match(guide, /不会自动搬运代码、环境、数据或结果/);
-  assert.doesNotMatch(guide, /run --sync|Podman|容器内.*(?:sudo|apt)/, 'Do not promise pending deployment features');
+  assert.doesNotMatch(guide, /Podman|容器内.*(?:sudo|apt)/, 'Do not promise pending deployment features');
+});
+
+test('run sync guide distinguishes verified publication from a mirror or environment installer', () => {
+  assert.match(guide, /gpuctl run --sync -g 1 --/);
+  assert.match(guide, /--sync-dir "C:\\研究代码\\我的项目"/);
+  assert.match(guide, /本次发布的 UUID/);
+  assert.match(guide, /不可变版本清单/);
+  assert.match(guide, /不提交训练/);
+  assert.match(guide, /不是增量镜像或删除同步/);
+  assert.match(guide, /不会替你结束终端、安装依赖/);
 });
 
 test('terminal instructions correctly separate new sessions, detach and explicit reconnect', () => {

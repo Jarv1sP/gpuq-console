@@ -7,7 +7,7 @@ import {createInterface} from 'node:readline/promises';
 import {realpathSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {uploadLocalDataset,workspaceDataPath,putWorkspaceData} from './client-data-upload.mjs';
-import {runManualSync} from './client-snapshot-sync.mjs';
+import {runManualSync,remoteSnapshot} from './client-snapshot-sync.mjs';
 import {uploadTransfer,downloadTransfer,transferText} from './client-transfers.mjs';
 import {runCloudImport} from './client-cloud-import.mjs';
 import {runCommunityCommand,formatCommunityResult,communityJSON,communityHelp} from './community-cli.mjs';
@@ -55,6 +55,8 @@ gpuctl sync git LOCAL_REPO --to SERVER --project NEW --ref HEAD --dry-run
 gpuctl sync code --from SOURCE --to TARGET --project SOURCE --target-project NEW --release HASH
 gpuctl sync data NAME@VERSION --from SOURCE --to TARGET --name NAME --dry-run
 gpuctl run -g 2 -- python train.py
+gpuctl run --sync -g 1 -- python train.py  Upload current code, publish, wait, pin this release
+gpuctl run --sync --sync-dir "LOCAL_DIR" -- python train.py
 gpuctl jobs / logs JOB / cancel JOB
 gpuctl transfer upload LOCAL_DIR --name NAME [--machine SERVER]
 gpuctl transfer download NAME@VERSION NEW_LOCAL_DIR [--machine SERVER]
@@ -151,6 +153,10 @@ Reuse --key after an uncertain response; never retry with a new key blindly.
 Projects are selected per server, never silently copied or moved between machines.
 --project SLUG overrides the selection; --legacy explicitly uses the old workspace.
 --release HASH pins a READY project release. Without it, run uses latest READY.
+run --sync uploads the current directory (or --sync-dir), then waits for its own
+publication and submits only that READY release. It requires a selected project.
+It keeps extra remote files, excludes the same secrets/environments as push,
+does not install packages, and never falls back to old code after a failed sync.
 --job UUID selects a project's per-job outputs for files / pull (read-only to CLI).
 Choose a server explicitly: new jobs do not accept auto.
 Existing users without a selected project keep their legacy workspace.
@@ -162,7 +168,8 @@ const CLI_OPTIONS=new Map([
   ['pin','flag'],...['kind','status','title','body','body-file','announcement-type'].map(key=>[key,'value']),
   ['via','value'],
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
-  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown'].map(key=>[key,'flag']),
+  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown','sync'].map(key=>[key,'flag']),
+  ['sync-dir','value'],
   ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
@@ -184,6 +191,91 @@ export function parseCLIOptions(argv){
   }
   return {options,positionals,training:[]};
 }
+export async function uploadCodeFiles(call,{machine,context,local,remote,verifyTree=false,progress=message=>process.stderr.write(message)}){
+  let count=0,skipped=0;const observed=[],files=[];
+  const excluded=name=>['.git','.ssh','.aws','.azure','.venv','venv','node_modules','__pycache__','id_rsa','id_ed25519','.env'].includes(name)||(name.startsWith('.env.')&&name!=='.env.example');
+  const stable=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs;
+  if(verifyTree&&!(await lstat(local)).isDirectory())fail('--sync-dir must be an ordinary local directory');
+  async function upload(local,path){
+    if(context.project&&excluded(basename(local))){skipped++;progress(`跳过项目上传：${local}\n`);return;}
+    const st=await lstat(local);if(st.isSymbolicLink())fail('Symlink upload is not supported');
+    if(st.isDirectory()){
+      const names=(await readdir(local)).sort();if(verifyTree)observed.push({local,st,names});
+      for(const name of names)await upload(join(local,name),path==='.'?name:`${path}/${name}`);return;
+    }
+    if(!st.isFile())fail('Only regular files/directories can be uploaded');
+    if(context.project&&st.size>4*1024**3)fail('Project code files are limited to 4 GiB; use the dataset workflow for large data');
+    const file=await open(local,'r');let offset=0;
+    try{
+      const initial=await file.stat();if(!initial.isFile()||!stable(st,initial))fail('Local file changed before upload');
+      let identity={};
+      if(context.project){
+        const hash=createHash('sha256'),buffer=Buffer.alloc(1024*1024);let at=0;
+        while(at<initial.size){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,initial.size-at),at);if(!bytesRead)fail('Local file changed during hashing');hash.update(buffer.subarray(0,bytesRead));at+=bytesRead;}
+        if(!stable(initial,await file.stat()))fail('Local file changed during hashing');
+        identity={totalSize:initial.size,sha256:hash.digest('hex'),uploadId:randomUUID()};
+      }
+      do{
+        const buffer=Buffer.alloc(1024*1024);const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,Math.max(0,initial.size-offset)),offset);
+        if(!bytesRead&&offset<initial.size)fail('Local file changed during upload');
+        const final=offset+bytesRead===initial.size;
+        if(context.project&&final&&!stable(initial,await file.stat()))fail('Local file changed during upload; no final publish was sent');
+        const response=(await call('files.put',{machine,path,offset,...context,...(context.project?{...identity,final}:{truncate:offset===0}),data:buffer.subarray(0,bytesRead).toString('base64')})).result;
+        if(context.project&&final&&(response?.complete!==true||response.sha256!==identity.sha256||response.size!==identity.totalSize))fail('Server did not confirm the complete verified upload; check and retry this file before publishing');
+        offset+=bytesRead;
+      }while(offset<initial.size);
+      if(context.project&&!stable(initial,await file.stat()))fail('Local file changed during upload; verify and upload again before project publish');
+      if(verifyTree){observed.push({local,st:initial});files.push({path,size:identity.totalSize,sha256:identity.sha256});}
+    }finally{await file.close();}count++;
+  }
+  await upload(local,remote);
+  if(verifyTree){
+    if(!count)fail('No code files were uploaded; refusing to publish or submit an old draft');
+    for(const item of observed){
+      const current=await lstat(item.local);
+      if(current.isSymbolicLink()||!stable(item.st,current)||item.names&&JSON.stringify((await readdir(item.local)).sort())!==JSON.stringify(item.names))fail('Local code tree changed during sync; no publication or job was submitted');
+    }
+  }
+  return {uploaded:count,machine,...(context.project?{project:context.project,skipped}:{}),...(verifyTree?{files}:{})};
+}
+
+export async function synchronizeProjectRun(call,{machine,project,directory=process.cwd(),key=randomUUID(),timeoutMs=7200000,pollMs=1000,progress=message=>process.stderr.write(message)}){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  const request=async(operation,args={})=>(await call(operation,{machine,project,...args},controller.signal)).result;
+  try{
+    const before=await request('projects.status');
+    if(before?.publicationProtocol!==1)fail('Node does not support confirmed run --sync publications; upgrade it first. No code was uploaded.');
+    if(!['READY','DRAFT','FAILED'].includes(before.state))fail('Project is busy or its publication outcome is unknown; inspect project status before syncing');
+    const uploaded=await uploadCodeFiles((op,args)=>call(op,args,controller.signal),{machine,context:{project,area:'code'},local:directory,remote:'.',verifyTree:true,progress});
+    progress(`Publication key: ${key}\n同步不会删除服务器多余文件；等待本次发布 READY。\n`);
+    let result=await request('projects.publish',{key});
+    while(true){
+      const proof=result?.publication;
+      if(result?.publicationProtocol!==1||proof?.id!==key)fail('This publication was not confirmed or was replaced; no job was submitted');
+      if(proof.state==='READY'){
+        if(result.state!=='READY'||!/^[a-f0-9]{64}$/.test(proof.release||'')||!result.releases?.some(r=>r.release===proof.release&&r.state==='READY'))fail('This publication has no verified READY release; no job was submitted');
+        // A concurrent editor may change the draft between upload and publish.
+        // Reuse the fixed-release export manifest to verify our actual bytes;
+        // never infer code identity from latestReadyRelease or a success label.
+        const snapshot=await remoteSnapshot((op,args)=>call(op,args,controller.signal),'projects',{machine,project,release:proof.release},()=>{});
+        try{
+          const files=new Map(snapshot.files.map(file=>[file.path,file]));
+          if(files.size!==snapshot.files.length||uploaded.files.some(file=>files.get(file.path)?.size!==file.size||files.get(file.path)?.sha256!==file.sha256))fail('Published code differs from the uploaded files; no job was submitted');
+          await snapshot.verify();
+        }finally{await snapshot.cleanup();}
+        return proof.release;
+      }
+      if(proof.state!=='PUBLISHING'||result.state!=='PUBLISHING')fail(`Publication ${proof.state||'UNKNOWN'}; no job was submitted and no older release was used. Inspect gpuctl project status.`);
+      await new Promise((resolve,reject)=>{
+        const abort=()=>{clearTimeout(wait);reject(Error('Publication wait timed out; no job was submitted'));};
+        const wait=setTimeout(()=>{controller.signal.removeEventListener('abort',abort);resolve();},pollMs);
+        controller.signal.addEventListener('abort',abort,{once:true});if(controller.signal.aborted)abort();
+      });
+      result=await request('projects.status');
+    }
+  }finally{clearTimeout(timer);}
+}
+
 async function secret(label='Password'){
   if(options['password-stdin']){let value='';for await(const chunk of process.stdin){value+=chunk;if(value.length>1024)fail('Password input too long');}return value.replace(/\r?\n$/,'');}
   if(!process.stdin.isTTY)fail('Use --password-stdin for non-interactive password input.');
@@ -197,6 +289,8 @@ async function secret(label='Password'){
 async function main(){
   ({options,positionals,training}=parseCLIOptions(args));
   if(options.help||!positionals.length){console.log(help);return;}
+  if(options.sync&&positionals[0]!=='run'||options['sync-dir']!==undefined&&!options.sync)fail('--sync is only for run; --sync-dir requires run --sync');
+  if(options.sync&&['release','legacy','root','as','job'].some(key=>Object.hasOwn(options,key)))fail('run --sync requires a personal project; cannot combine with --release/--legacy/--root/--as/--job');
   const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
   if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy)fail('--from/--to are for sync or transfer copy; ref/target-project/dry-run are only for sync');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
@@ -533,18 +627,24 @@ async function main(){
       if(!training.length)fail('Put the training command after --');
       const context=projectArgs(positionals[1]);
       if(options.release&&!context.project)fail('--release requires a selected project');
-      if(context.project){
-        const current=(await call('projects.status',{machine:positionals[1],project:context.project})).result;
-        const release=options.release||current.latestReadyRelease;
-        if(!release||!/^[a-f0-9]{64}$/.test(release)||!current.releases?.some(r=>r.release===release&&r.state==='READY'))fail('项目还没有指定的 READY 版本。先执行 gpuctl project publish，再用 gpuctl project status 确认；run 不会自动发布。');
-        context.release=release;process.stderr.write(`Project: ${context.project} · release: ${release}\n`);
-      }
+      if(options.sync&&!context.project)fail('run --sync requires a selected project; use gpuctl project create/use first');
       const key=options.key||randomUUID();process.stderr.write(`Submission key: ${key}\n`);
+      if(options.sync&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(key))fail('--key must be a UUID');
       const datasets=options.datasets.map(value=>{const [dataset,version,...extra]=value.split('@');if(extra.length||!dataset||!/^[a-f0-9]{64}$/.test(version||''))fail('Use --data NAME@FULL_VERSION_HASH');return {dataset,version};});
       const indices=options.gpu?.split(',').map(n=>/^\d+$/.test(n)?Number(n):NaN),cards=Number(options.cards||indices?.length||1);
       const elastic=elasticKeys.some(k=>Object.hasOwn(options,k))?elasticAllocation({minCards:Number(options['min-cards']),globalBatch:Number(options['global-batch']),microBatch:Number(options['micro-batch']),autoExpand:options['auto-expand']===true},cards,scheduling).elastic:null;
       const placement=placementKeys.some(k=>Object.hasOwn(options,k))?gpuPlacement({gpuIndices:indices,shared:options.share===true,...(options['vram-mib']?{vramMiB:Number(options['vram-mib'])}:{}),hami:options.hami===true,...(options['sm-percent']?{smPercent:Number(options['sm-percent'])}:{})},cards,elastic,scheduling,options.priority):null;
       if(options.description!==undefined&&state.taskMetadata?.version!==1)fail('当前后台尚未支持任务描述；不会忽略你填写的内容。');
+      if(context.project){
+        if(options.sync)context.release=await synchronizeProjectRun(call,{machine:positionals[1],project:context.project,directory:options['sync-dir']||process.cwd()});
+        else{
+          const current=(await call('projects.status',{machine:positionals[1],project:context.project})).result;
+          const release=options.release||current.latestReadyRelease;
+          if(!release||!/^[a-f0-9]{64}$/.test(release)||!current.releases?.some(r=>r.release===release&&r.state==='READY'))fail('项目还没有指定的 READY 版本。先执行 gpuctl project publish，再用 gpuctl project status 确认；run 不会自动发布。');
+          context.release=release;
+        }
+        process.stderr.write(`Project: ${context.project} · release: ${context.release}\n`);
+      }
       result=(await call('jobs.submit',{machine:positionals[1],cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
@@ -576,38 +676,8 @@ async function main(){
     else if(command==='files'&&positionals.length<=3)result=(await call('files.list',{machine:positionals[1],path:positionals[2]||'.',...fileArgs(positionals[1])})).result;
     else if(command==='upload'&&positionals.length>=3&&positionals.length<=4){
       if(options.job)fail('Job outputs cannot be uploaded; upload project code without --job');
-      const machine=positionals[1],context=fileArgs(machine);let count=0,skipped=0;
-      const excluded=name=>['.git','.ssh','.aws','.azure','.venv','venv','node_modules','__pycache__','id_rsa','id_ed25519','.env'].includes(name)||(name.startsWith('.env.')&&name!=='.env.example');
-      const stable=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs;
-      async function upload(local,path){
-        if(context.project&&excluded(basename(local))){skipped++;process.stderr.write(`跳过项目上传：${local}\n`);return;}
-        const st=await lstat(local);if(st.isSymbolicLink())fail('Symlink upload is not supported');
-        if(st.isDirectory()){for(const name of await readdir(local))await upload(join(local,name),path==='.'?name:`${path}/${name}`);return;}
-        if(!st.isFile())fail('Only regular files/directories can be uploaded');
-        if(context.project&&st.size>4*1024**3)fail('Project code files are limited to 4 GiB; use the dataset workflow for large data');
-        const file=await open(local,'r');let offset=0;
-        try{
-          const initial=await file.stat();if(!initial.isFile()||!stable(st,initial))fail('Local file changed before upload');
-          let identity={};
-          if(context.project){
-            const hash=createHash('sha256'),buffer=Buffer.alloc(1024*1024);let at=0;
-            while(at<initial.size){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,initial.size-at),at);if(!bytesRead)fail('Local file changed during hashing');hash.update(buffer.subarray(0,bytesRead));at+=bytesRead;}
-            if(!stable(initial,await file.stat()))fail('Local file changed during hashing');
-            identity={totalSize:initial.size,sha256:hash.digest('hex'),uploadId:randomUUID()};
-          }
-          do{
-            const buffer=Buffer.alloc(1024*1024);const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,Math.max(0,initial.size-offset)),offset);
-            if(!bytesRead&&offset<initial.size)fail('Local file changed during upload');
-            const final=offset+bytesRead===initial.size;
-            if(context.project&&final&&!stable(initial,await file.stat()))fail('Local file changed during upload; no final publish was sent');
-            const response=(await call('files.put',{machine,path,offset,...context,...(context.project?{...identity,final}:{truncate:offset===0}),data:buffer.subarray(0,bytesRead).toString('base64')})).result;
-            if(context.project&&final&&(response?.complete!==true||response.sha256!==identity.sha256||response.size!==identity.totalSize))fail('Server did not confirm the complete verified upload; check and retry this file before publishing');
-            offset+=bytesRead;
-          }while(offset<initial.size);
-          if(context.project&&!stable(initial,await file.stat()))fail('Local file changed during upload; verify and upload again before project publish');
-        }finally{await file.close();}count++;
-      }
-      await upload(positionals[2],positionals[3]||basename(positionals[2]));result={uploaded:count,machine,...(context.project?{project:context.project,skipped}:{})};
+      const machine=positionals[1],context=fileArgs(machine);
+      result=await uploadCodeFiles(call,{machine,context,local:positionals[2],remote:positionals[3]||basename(positionals[2])});
     }else if(command==='download'&&positionals.length===4){
       const context=fileArgs(positionals[1]);
       const file=await open(positionals[3],'wx',0o600);let offset=0;

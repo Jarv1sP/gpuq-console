@@ -94,6 +94,7 @@ class ProjectOperations:
 
     def status(self, args):
         result = self.store.status(*self.identity(args))
+        result['publicationProtocol'] = 1
         sync=self.folder/(self.key(args)+'.sync.json')
         if sync.exists():
             session=json.loads(sync.read_text())
@@ -120,9 +121,29 @@ class ProjectOperations:
                         self.n.atomic_json(self.receipt_path(args), recovered)
             except Exception: pass  # The on-disk commit proof remains authoritative.
             result.update(state='READY',progress=pending.get('progress',{}))
-            return result
+            return self.publication_status(result, recovered)
         if pending.get('state') in ('PUBLISHING', 'FAILED', 'UNKNOWN'):
             result.update({k: pending[k] for k in ('state','error','errorDetails','progress') if k in pending})
+        return self.publication_status(result, pending)
+
+    def publication_status(self, result, pending):
+        """Only this publication's durable commit proof, never an older READY."""
+        identity = pending.get('publicationId')
+        if identity is None: return result  # Historical unkeyed receipts.
+        if not isinstance(identity, str) or not UUID.fullmatch(identity):
+            raise ValueError('Invalid publication identity')
+        state = pending.get('state')
+        if state not in ('PUBLISHING', 'READY', 'FAILED', 'UNKNOWN'):
+            raise ValueError('Invalid publication state')
+        proof = {'id':identity, 'state':state}
+        if state == 'READY':
+            release = pending.get('committedRelease')
+            if (not isinstance(release, str) or not HASH.fullmatch(release) or
+                    pending.get('release') != release or
+                    not any(item['release'] == release for item in result['releases'])):
+                raise ValueError('Publication has no matching committed READY release')
+            proof['release'] = release
+        result['publication'] = proof
         return result
 
     def transfer_dir(self, args):
@@ -133,11 +154,14 @@ class ProjectOperations:
     def process(self, operation, args):
         allowed = {'userId'} if operation == 'projects.list' else {'userId','project'}
         if operation == 'projects.create': allowed.add('environmentMode')
+        if operation == 'projects.publish': allowed.add('key')
         if operation == 'projects.verify': allowed.add('release')
         if not isinstance(args, dict) or set(args)-allowed:
             raise ValueError('Invalid project fields')
         if 'environmentMode' in args and args['environmentMode'] not in ('shared','isolated'):
             raise ValueError('Environment mode must be shared or isolated')
+        if 'key' in args and (not isinstance(args['key'],str) or not UUID.fullmatch(args['key'])):
+            raise ValueError('Invalid publication key')
         if operation == 'projects.list':
             self.n.workspace(args['userId'])
             result = {'projects':self.store.list(args['userId'])}
@@ -153,6 +177,9 @@ class ProjectOperations:
         with self.guard(args):
             if operation == 'projects.create': return self.store.create(*identity, environment_mode=args.get('environmentMode'))
             if operation != 'projects.publish': raise ValueError('Unknown project operation')
+            pending = self.pending(args)
+            if 'key' in args and pending.get('publicationId') == args['key']:
+                return self.status(args)  # Lost reply: never start a second worker.
             self.writable(args)
             # A clean exit may leave a pointer. Confirm the entire unit is
             # stopped before copying; an unavailable socket is not enough.
@@ -169,7 +196,8 @@ class ProjectOperations:
             if any(uploads.glob('*.json')):
                 raise ValueError('Unfinished project upload; retry that file or discard pending uploads')
             self.store.status(*identity)
-            task = {'userId':identity[0],'project':identity[1],'state':'PUBLISHING'}
+            task = {'userId':identity[0],'project':identity[1],'state':'PUBLISHING',
+                    'publicationId':args.get('key',str(uuid.uuid4()))}
             self.n.atomic_json(self.receipt_path(args), task)
             try:
                 self.n.run(['/usr/bin/systemd-run','--user','--collect',
@@ -182,13 +210,14 @@ class ProjectOperations:
             except Exception:
                 self.n.atomic_json(self.receipt_path(args), {**task,'state':'FAILED','error':'Unable to start publication worker'})
                 raise
-            return {**self.store.status(*identity),'state':'PUBLISHING','operationId':self.key(args)}
+            return {**self.store.status(*identity),'state':'PUBLISHING','operationId':self.key(args),
+                    'publicationProtocol':1,'publication':{'id':task['publicationId'],'state':'PUBLISHING'}}
 
     def worker(self, key):
         if not HASH.fullmatch(key): raise ValueError('Invalid project worker key')
         args = json.loads((self.folder/(key+'.json')).read_text())
         if self.key(args) != key: raise ValueError('Project worker identity mismatch')
-        args = {name:args[name] for name in ('userId','project')}
+        args = {name:args[name] for name in ('userId','project','publicationId') if name in args}
         last_progress, committed = {}, {}
         def progress(value):
             last_progress.update(value)

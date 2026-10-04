@@ -46,6 +46,16 @@ test('project jobs pin one release and verify it before quota reservation',async
   for(const bad of [{project:undefined},{release:undefined},{project:'../bad'},{release:'latest'}])await assert.rejects(f.call('jobs.submit',{...args,key:randomUUID(),...bad}));
  }finally{await f.close();}
 });
+test('publication key is publish-only and cannot supply another owner or host privileges',async()=>{
+ const f=await fixture();try{
+  const key=randomUUID();await f.call('projects.publish',{project:'my-project',key});
+  assert.deepEqual(f.calls.at(-1).args,{project:'my-project',key,userId:f.member.id});
+  for(const operation of ['projects.create','projects.status','projects.list'])await assert.rejects(f.call(operation,{project:'my-project',key}));
+  for(const key of ['',null,123,'../other','a'.repeat(64)])await assert.rejects(f.call('projects.publish',{project:'my-project',key}));
+  for(const extra of [{hostAdmin:true},{userId:'builtin-admin'},{publicationId:key}])await assert.rejects(f.call('projects.publish',{project:'my-project',key,...extra}));
+  await assert.rejects(f.call('projects.publish',{machine:'gpu-2',project:'my-project',key}),e=>e.status===403);
+ }finally{await f.close();}
+});
 test('environment mode is create-only, explicit and bound to the authenticated account',async()=>{
  const f=await fixture();try{
   for(const environmentMode of ['shared','isolated']){
