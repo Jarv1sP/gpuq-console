@@ -14,8 +14,7 @@ DEPLOY=Path(__file__).resolve().parents[1]/'deploy'
 
 class ProgressBridge(unittest.TestCase):
     def setUp(self):
-        from storage_test_helpers import isolated_platform_pin
-        isolated_platform_pin(self)
+        __import__('runpy').run_path(str(Path(__file__).with_name('storage_test_helpers.py')))['isolated_platform_pin'](self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.base=Path(self.temp.name)
         shutil.copy2(DEPLOY/'node-executor.py',self.base/'node-executor.py')
         shutil.copy2(DEPLOY/'scheduling-policy.py',self.base/'scheduling-policy.py')

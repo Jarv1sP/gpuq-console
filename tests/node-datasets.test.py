@@ -21,8 +21,7 @@ DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
 
 class NodeDatasets(unittest.TestCase):
     def setUp(self):
-        from storage_test_helpers import isolated_platform_pin
-        isolated_platform_pin(self)
+        __import__('runpy').run_path(str(Path(__file__).with_name('storage_test_helpers.py')))['isolated_platform_pin'](self)
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
         self.data_mount = local_data_mounts(self.base)

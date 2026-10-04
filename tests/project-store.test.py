@@ -19,8 +19,7 @@ spec.loader.exec_module(module)
 
 class ProjectStoreTests(unittest.TestCase):
     def setUp(self):
-        from storage_test_helpers import isolated_platform_pin
-        isolated_platform_pin(self)
+        __import__('runpy').run_path(str(Path(__file__).with_name('storage_test_helpers.py')))['isolated_platform_pin'](self)
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name).resolve()
         self.root, self.base = self.path / 'service', self.path / 'approved-conda'

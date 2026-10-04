@@ -19,8 +19,7 @@ P=importlib.util.module_from_spec(spec);spec.loader.exec_module(P)
 
 class ExplicitPolicy(unittest.TestCase):
     def setUp(self):
-        from storage_test_helpers import isolated_platform_pin
-        isolated_platform_pin(self)
+        __import__('runpy').run_path(str(Path(__file__).with_name('storage_test_helpers.py')))['isolated_platform_pin'](self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
         for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py'):shutil.copy2(ROOT/'deploy'/name,self.root/name)
         (self.root/'control').mkdir();(self.root/'sdk.pyz').touch();(self.root/'training-control.py').touch();(self.root/'sandbox-runner.py').write_text('# gpuq_training_control')

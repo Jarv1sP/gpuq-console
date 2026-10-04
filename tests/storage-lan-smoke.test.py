@@ -21,8 +21,7 @@ R = load('storage_lan_acceptance_runner', HERE / 'storage-lan-smoke.py')
 
 class StorageLANRunner(unittest.TestCase):
     def setUp(self):
-        from storage_test_helpers import isolated_platform_pin
-        isolated_platform_pin(self)
+        __import__('runpy').run_path(str(Path(__file__).with_name('storage_test_helpers.py')))['isolated_platform_pin'](self)
         self.f = F.AuthorityDaemon()
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
