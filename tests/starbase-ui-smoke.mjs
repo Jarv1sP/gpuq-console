@@ -15,7 +15,7 @@ const temp=await mkdtemp(join(tmpdir(),'starbase-shell-browser-'));
 const shots=process.env.UI_SCREENSHOTS||'/tmp/starbase-ui-smoke';
 const password='Starbase-Local-Fixture-Only-2026!',release='a'.repeat(64);
 const errors=[],outside=[],assets=[],calls=[],sessions=new Map();
-let server,service,browser;
+let server,service,browser,releaseCatalog;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
 const project={project:'vision-baseline',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
@@ -87,6 +87,35 @@ try{
     await desktop.locator(selector).click();await desktop.locator('#work-submit-panel').waitFor({state:'visible'});assert.equal(await desktop.locator('#work-submit-panel .sheet-scroll input').first().getAttribute('form'),'train-form');await capture(desktop,'submit-'+name+'-1440',true);await desktop.locator('#close-submit-panel').click();assert.equal(await desktop.locator('#work-submit-panel').isVisible(),false);
   }
   await desktop.locator('#train-form .sheet-scroll').evaluate(n=>n.scrollTop=n.scrollHeight);await desktop.locator('.submit-cli summary').click();assert.match(await desktop.locator('#submit-command').innerText(),new RegExp(release));await capture(desktop,'submit-checks-cli-1440',true);await closeSubmit(desktop);
+  // Hold a completed HTTP reply, not the Portal queue. The newest intent and
+  // manual edits must win even while the previous server catalog is in flight.
+  const olderRef='sample@'+'b'.repeat(64),newerRef='sample@'+'d'.repeat(64);
+  for(const action of ['latest','edit','close']){
+    if(action!=='latest')await openSubmit(desktop);
+    let held,hold=true;const received=new Promise(resolve=>{held=resolve;});
+    const routeCatalog=async route=>{
+      const request=route.request().postDataJSON();
+      if(hold&&request?.operation==='projects.list'&&request.args.machine==='gpu-2'){
+        hold=false;const response=await route.fetch();await new Promise(resolve=>{releaseCatalog=resolve;held();});await route.fulfill({response});
+      }else await route.continue();
+    };
+    await desktop.route('**/api/call',routeCatalog);
+    await desktop.evaluate(detail=>document.dispatchEvent(new CustomEvent('gpuq-open-submit',{detail})),{machine:'gpu-2',datasetRef:olderRef});await received;
+    if(action==='latest'){
+      await desktop.evaluate(detail=>document.dispatchEvent(new CustomEvent('gpuq-open-submit',{detail})),{machine:'gpu-2',datasetRef:newerRef});await desktop.locator('#work-submit').waitFor({state:'visible'});
+      assert.equal(await desktop.locator('#train-form [name=datasets]').inputValue(),newerRef,'the newest selection appears before the old lookup is delivered');
+    }else if(action==='edit')await desktop.locator('#train-form [name=datasets]').fill(newerRef);
+    else await closeSubmit(desktop);
+    const delivered=desktop.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-2');
+    releaseCatalog();releaseCatalog=null;await delivered;await desktop.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+    if(action==='close')assert.equal(await desktop.locator('#work-submit').isVisible(),false,'a cancelled intent cannot reopen the sheet');
+    else assert.equal(await desktop.locator('#train-form [name=datasets]').inputValue(),newerRef,'a late catalog cannot overwrite the latest selection or edited draft');
+    await desktop.unroute('**/api/call',routeCatalog);await closeSubmit(desktop);
+    await desktop.locator('[name=workspace-machine]').selectOption('gpu-1');await desktop.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+    await desktop.locator('[name=workspace-project]').selectOption(project.project);await desktop.waitForFunction(()=>!document.querySelector('[name=workspace-project]').disabled);
+  }
+  await desktop.evaluate(detail=>document.dispatchEvent(new CustomEvent('gpuq-open-submit',{detail})),{machine:'gpu-1',datasetRef:newerRef});await desktop.locator('#work-submit').waitFor({state:'visible'});
+  assert.equal(await desktop.locator('[name=workspace-project]').inputValue(),project.project,'same-server submission preserves the selected project');await desktop.locator('#train-form [name=datasets]').fill('');await closeSubmit(desktop);
   await desktop.locator('.wb-focal .wb-job-name').click();await desktop.locator('.job-sheet').waitFor({state:'visible'});await desktop.locator('#job-log-preview').filter({hasText:'checkpoint saved'}).waitFor();assert.ok(new URL(desktop.url()).searchParams.get('job')===running.id);assert.equal(await desktop.locator('[data-job-tab][aria-selected=true]').getAttribute('data-job-tab'),'overview');assert.match(await desktop.locator('#job-overview-view').innerText(),new RegExp(running.id));
   await capture(desktop,'job-overview-member-1440',true);
   await desktop.locator('[data-job-tab=overview]').focus();await desktop.keyboard.press('ArrowRight');assert.equal(await desktop.locator('[data-job-tab=logs]').getAttribute('aria-selected'),'true');await capture(desktop,'job-logs-member-1440',true);
@@ -126,5 +155,5 @@ try{
   const reduced=await pageFor(390,true);await login(reduced,member.username);await reduced.locator('[data-nav=me]').click();assert.ok(await reduced.evaluate(()=>document.getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!frame.transform||frame.transform==='none'))),'reduced motion never slides');await reduced.keyboard.press('Control+k');await reduced.locator('#mission-control').waitFor({state:'visible'});await capture(reduced,'control-reduced-motion-390',true);
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);assert.ok(assets.every(asset=>asset.status<400));for(const font of ['Archivo','Geist','GeistMono'])assert.ok(assets.some(asset=>asset.path.includes(font)&&asset.path.endsWith('.woff2')));
   assert.ok(calls.every(row=>!['projects.publish','terminal.host-command','files.put','cancel'].includes(row.operation)),'acceptance uses read-only/synthetic node operations');
-  console.log(JSON.stringify({status:'passed',checks:['real Portal/CSP/cookies/assets/fonts','owner-only control and drawers','persistent control/context/room scroll','command keyboard and tab navigation','submit and three second-level panels','logs/diagnostics/output/notes','terminal collapse preserves session across rooms','maintenance admin/member hook preservation','390px tabs/live pill/full-screen control','reduced motion and no outside requests'],screenshots:shots}));
-}finally{await browser?.close();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}else service?.close();await rm(temp,{recursive:true,force:true});}
+  console.log(JSON.stringify({status:'passed',checks:['real Portal/CSP/cookies/assets/fonts','owner-only control and drawers','persistent control/context/room scroll','command keyboard and tab navigation','submit and three second-level panels','latest cross-server submission, manual draft and cancellation supersede old replies','logs/diagnostics/output/notes','terminal collapse preserves session across rooms','maintenance admin/member hook preservation','390px tabs/live pill/full-screen control','reduced motion and no outside requests'],screenshots:shots}));
+}finally{releaseCatalog?.();await browser?.close();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}else service?.close();await rm(temp,{recursive:true,force:true});}
