@@ -2,7 +2,7 @@
 // are inert, clipped to the viewport, and never carry application hooks.
 export const reducedMotion=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
 const phone=()=>matchMedia('(max-width:759px)').matches;
-const standard='cubic-bezier(.4,0,.2,1)';
+const standard='cubic-bezier(.2,0,0,1)';
 const underLayers=new Map(),entrances=new WeakMap(),boundDialogs=new WeakSet();
 const snapshotProperties=['display','position','box-sizing','width','height','min-width','min-height','max-width','max-height','top','right','bottom','left','padding','margin','border','border-radius','background-color','background-image','color','opacity','overflow','overflow-wrap','white-space','font-family','font-size','font-weight','font-stretch','font-variant-numeric','line-height','letter-spacing','text-align','text-decoration','flex','flex-direction','flex-wrap','align-items','align-content','justify-content','gap','grid-template-columns','grid-template-rows','grid-column','grid-row','list-style','box-shadow','backdrop-filter'];
 

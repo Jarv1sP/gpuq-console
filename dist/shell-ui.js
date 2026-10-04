@@ -36,7 +36,7 @@ export function shellUI(store,{navigate,getPage,toast}){
     const selected=nav.querySelector('.nav-item.active');if(!selected||phone()){indicator.hidden=true;return;}
     indicator.hidden=false;const rect=selected.getBoundingClientRect(),parent=nav.getBoundingClientRect(),previous=indicator.getBoundingClientRect();
     indicator.style.left=rect.left-parent.left+'px';indicator.style.top=rect.top-parent.top+'px';indicator.style.width=rect.width+'px';indicator.style.height=rect.height+'px';
-    if(animate&&!reduced()&&previous.width)indicator.animate([{transform:`translateX(${previous.left-rect.left}px) scaleX(${previous.width/rect.width})`},{transform:'none'}],{duration:220,easing:'cubic-bezier(.4,0,.2,1)'});
+    if(animate&&!reduced()&&previous.width)indicator.animate([{transform:`translateX(${previous.left-rect.left}px) scaleX(${previous.width/rect.width})`},{transform:'none'}],{duration:220,easing:'cubic-bezier(.2,0,0,1)'});
   }
   function route(next,apply){
     const previous=getPage();if(previous===next){apply();return;}

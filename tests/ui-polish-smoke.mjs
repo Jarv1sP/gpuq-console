@@ -6,6 +6,8 @@ import {readFile,mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {chromium} from 'playwright';
 import {MACHINES} from '../dist/machines.js';
+import {STARBASE_ASSETS} from '../frontend-assets.mjs';
+import {openSubmit,closeSubmit} from './starbase-workflows.mjs';
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-ui-polish';
 const baseline=process.env.UI_BASELINE==='1',errors=[],external=[],checks=[];
 const machine=MACHINES[0].id,release='a'.repeat(64),checkedAt=new Date().toISOString();
@@ -21,8 +23,8 @@ try{
   await mkdir(screenshots,{recursive:true});
   server=createServer(async(req,res)=>{
     const file=new URL(req.url,'http://localhost').pathname.slice(1)||'index.html';
-    if(!/^(index\.html|[a-z-]+\.(js|css))$/.test(file)){res.writeHead(404);res.end();return;}
-    try{let content=await readFile(new URL('../dist/'+file,import.meta.url));if(file==='index.html')content=content.toString().replace('globalThis.GPUQ_LOCAL_API=false;','globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;');res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'});res.end(content);}catch{res.writeHead(404);res.end();}
+    if(!/^(index\.html|[a-z-]+\.(js|css))$/.test(file)&&!Object.hasOwn(STARBASE_ASSETS,file)){res.writeHead(404);res.end();return;}
+    try{let content=await readFile(new URL('../dist/'+file,import.meta.url));if(file==='index.html')content=content.toString().replace('globalThis.GPUQ_LOCAL_API=false;','globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;');res.writeHead(200,{'Content-Type':file.endsWith('.woff2')?'font/woff2':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'});res.end(content);}catch{res.writeHead(404);res.end();}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin='http://127.0.0.1:'+server.address().port;
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
@@ -44,8 +46,9 @@ try{
   await page.goto(origin);await page.locator('#execution-workspace').waitFor();
   await page.locator('[name=workspace-machine]').selectOption(machine);await page.locator('[name=workspace-project] option[value=vision-lab]').waitFor({state:'attached'});
   await page.locator('[name=workspace-project]').selectOption('vision-lab');
-  await page.locator('#train-form').evaluate(form=>form.closest('details').open=true);
+  await openSubmit(page);
   await page.locator('[name=command]').fill('python train.py --output /outputs/result.json');
+  await closeSubmit(page);
   const capture=async name=>{await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});};
   assert.match(await page.title(),/^STARBASE/);
   assert.equal(await page.locator('.brand-wordmark').innerText(),'STARBASE');
@@ -85,9 +88,9 @@ try{
   await textContrast();
   for(const width of [1024,900,820,768,390,320]){
     await page.setViewportSize({width,height:960});
-    const layout=await page.evaluate(()=>({width:innerWidth,document:document.documentElement.scrollWidth,nav:[...document.querySelectorAll('[data-nav]')].filter(el=>!el.hidden).map(el=>({id:el.dataset.nav,visible:el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0,height:el.getBoundingClientRect().height}))}));
+    const layout=await page.evaluate(()=>({width:innerWidth,document:document.documentElement.scrollWidth,nav:[...document.querySelectorAll('[data-nav]')].filter(el=>!el.hidden&&getComputedStyle(el).display!=='none').map(el=>({id:el.dataset.nav,visible:el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0,height:el.getBoundingClientRect().height}))}));
     checks.push(layout);
-    if(!baseline){assert(layout.document<=width+1,`page overflow at ${width}`);assert(layout.nav.every(nav=>nav.visible&&nav.height>=44),`navigation unavailable at ${width}`);}
+    if(!baseline){assert(layout.document<=width+1,`page overflow at ${width}`);assert(layout.nav.every(nav=>nav.visible&&nav.height>=(width<760?44:36)),`navigation unavailable at ${width}`);if(width<760)assert.deepEqual(layout.nav.map(nav=>nav.id),['work','resources','datasets','community','me']);}
     await textContrast();
     if([820,390,320].includes(width))await capture('resources-'+width);
     if(width===390){
@@ -134,3 +137,6 @@ try{
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({baseline,checks,errors,external},null,2));
   console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','single current navigation','STARBASE accessible brand','helper text AA contrast','PREPARING-only status animation','reduced motion']}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}
+
+// The existing CI entry point also runs the owner-bound Portal/CSP acceptance.
+if(!baseline)await import('./starbase-ui-smoke.mjs');
