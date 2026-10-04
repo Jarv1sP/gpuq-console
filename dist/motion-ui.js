@@ -3,6 +3,7 @@
 export const reducedMotion=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
 const phone=()=>matchMedia('(max-width:759px)').matches;
 const standard='cubic-bezier(.4,0,.2,1)';
+const underLayers=new Map(),entrances=new WeakMap(),boundDialogs=new WeakSet();
 const snapshotProperties=['display','position','box-sizing','width','height','min-width','min-height','max-width','max-height','top','right','bottom','left','padding','margin','border','border-radius','background-color','background-image','color','opacity','overflow','overflow-wrap','white-space','font-family','font-size','font-weight','font-stretch','font-variant-numeric','line-height','letter-spacing','text-align','text-decoration','flex','flex-direction','flex-wrap','align-items','align-content','justify-content','gap','grid-template-columns','grid-template-rows','grid-column','grid-row','list-style','box-shadow','backdrop-filter'];
 
 function cleanClone(element){
@@ -19,13 +20,31 @@ function cleanClone(element){
   return clone;
 }
 function animationLayer(){
-  const layer=document.createElement('div');layer.className='object-transition-layer';layer.setAttribute('aria-hidden','true');layer.inert=true;document.body.append(layer);return layer;
+  const layer=document.createElement('div');layer.className='object-transition-layer';layer.setAttribute('aria-hidden','true');layer.setAttribute('popover','manual');layer.inert=true;document.body.append(layer);
+  // A visual-only top-layer element keeps continuity above native sheet scrims.
+  layer.showPopover?.();return layer;
 }
 function retire(layer,animation){animation.finished.then(()=>layer.remove(),()=>layer.remove());}
 
+function restoreUnderLayer(dialog){
+  const previous=underLayers.get(dialog);if(!previous)return null;
+  underLayers.delete(dialog);previous.animation.cancel();
+  return ()=>{if(previous.element.isConnected&&!reducedMotion())previous.element.animate([{transform:`translateX(${-previous.distance}px)`},{transform:'none'}],{duration:350,easing:standard});};
+}
+globalThis.addEventListener?.('resize',()=>{for(const [dialog,previous] of underLayers){previous.animation.cancel();underLayers.delete(dialog);}});
+// Native Escape must always reach the real active dialog, including while a
+// visual-only popover is finishing a previous exit.
+globalThis.addEventListener?.('keydown',event=>{if(event.key==='Escape')for(const layer of document.querySelectorAll('.object-transition-layer'))layer.remove();},{capture:true});
+
 export function revealSheet(dialog,{drilldown=false}={}){
   const reduce=reducedMotion();
-  return dialog.animate(reduce?[{opacity:0},{opacity:1}]:[{transform:phone()&&!drilldown?'translateY(100%)':'translateX(100%)'},{transform:'none'}],{duration:reduce?150:phone()?drilldown?350:380:320,easing:standard});
+  if(phone()&&drilldown&&!reduce){
+    const element=[...document.querySelectorAll('dialog[open]')].filter(layer=>layer!==dialog).at(-1)||document.querySelector('[data-page]:not([hidden])');
+    if(element){const distance=innerWidth*.3,animation=element.animate([{transform:'none'},{transform:`translateX(${-distance}px)`}],{duration:350,easing:standard,fill:'forwards'});underLayers.set(dialog,{element,distance,animation});}
+  }
+  const animation=dialog.animate(reduce?[{opacity:0},{opacity:1}]:[{transform:phone()&&!drilldown?'translateY(100%)':'translateX(100%)'},{transform:'none'}],{duration:reduce?150:phone()?drilldown?350:380:320,easing:standard});
+  entrances.set(dialog,animation);
+  if(!boundDialogs.has(dialog)){boundDialogs.add(dialog);dialog.addEventListener('close',()=>{if(dialog.open)return;entrances.get(dialog)?.cancel();restoreUnderLayer(dialog)?.();});}return animation;
 }
 export function fadeDialog(dialog){
   return dialog.animate(reducedMotion()?[{opacity:0},{opacity:1}]:[{opacity:0,transform:'scale(.98)'},{opacity:1,transform:'none'}],{duration:reducedMotion()?150:220,easing:standard});
@@ -37,11 +56,18 @@ export function captureObject(source){
 }
 export function dismissSheet(dialog,{drilldown=false,target=null}={}){
   if(!dialog?.open)return;
+  entrances.get(dialog)?.cancel();const back=restoreUnderLayer(dialog);
   const rect=dialog.getBoundingClientRect(),clone=cleanClone(dialog),layer=animationLayer();
   clone.classList.add('exiting-layer');clone.style.inset='auto';clone.style.left=rect.left+'px';clone.style.top=rect.top+'px';clone.style.width=rect.width+'px';clone.style.height=rect.height+'px';clone.style.margin='0';layer.append(clone);
   if(target)sharedObject(dialog.querySelector('.sheet-object'),target);
   dialog.close();
-  const reduce=reducedMotion();retire(layer,clone.animate(reduce?[{opacity:1},{opacity:0}]:[{transform:'none',opacity:1},{transform:phone()&&!drilldown?'translateY(100%)':'translateX(100%)',opacity:0}],{duration:reduce?150:220,easing:'cubic-bezier(.4,0,1,1)'}));
+  back?.();const reduce=reducedMotion();retire(layer,clone.animate(reduce?[{opacity:1},{opacity:0}]:[{transform:'none',opacity:1},{transform:phone()&&!drilldown?'translateY(100%)':'translateX(100%)',opacity:0}],{duration:reduce?150:phone()&&drilldown?350:220,easing:'cubic-bezier(.4,0,1,1)'}));
+}
+export function dismissReveal(dialog,element=dialog){
+  if(!dialog?.open)return null;
+  const rect=element.getBoundingClientRect(),clone=cleanClone(element),layer=animationLayer();
+  clone.style.position='absolute';clone.style.left=rect.left+'px';clone.style.top=rect.top+'px';clone.style.width=rect.width+'px';clone.style.height=rect.height+'px';clone.style.margin='0';layer.append(clone);dialog.close();
+  const animation=clone.animate(reducedMotion()?[{opacity:1},{opacity:0}]:[{clipPath:'inset(0)'},{clipPath:'inset(100% 0 0 0)'}],{duration:reducedMotion()?150:220,easing:'cubic-bezier(.4,0,1,1)'});retire(layer,animation);return animation;
 }
 export function sharedObject(source,target){
   if(!source||!target)return;

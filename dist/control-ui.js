@@ -1,5 +1,5 @@
 import {endedJob,escapeUI as esc,stateHTML,stateClass,stateWord,trainingReadout,trajectoryHTML} from './workbench-ui.js';
-import {captureObject} from './motion-ui.js';
+import {captureObject,dismissReveal} from './motion-ui.js';
 
 const finite=value=>Number.isSafeInteger(value)&&value>=0;
 const activeData=new Set(['NEW','HASHING','RECEIVING_MANIFEST','SEALING','UPLOADING','PUBLISHING','QUEUED','RUNNING','IMPORTING','DOWNLOADING','EXTRACTING','VERIFYING','PREPARING','COPYING','ARCHIVING']);
@@ -82,15 +82,15 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
     const finish=()=>{dialog.close();stripPlace.after(strip);closing=null;markOpen();returnFocus?.focus({preventScroll:true});};
     if(immediate){closing?.cancel();finish();return;}
     if(closing)return;
-    closing=dialog.animate(reduced()?[{opacity:1},{opacity:0}]:[{clipPath:'inset(0 0 0 0)'},{clipPath:'inset(100% 0 0 0)'}],{duration:reduced()?150:220,easing:'cubic-bezier(.4,0,1,1)'});
-    closing.finished.then(finish,()=>{});
+    closing=dismissReveal(dialog,content);stripPlace.after(strip);markOpen();returnFocus?.focus({preventScroll:true});
+    closing?.finished.then(()=>{closing=null;},()=>{});
   }
   function open(section='command'){
     if(!store.principal)return;
     closing?.cancel();closing=null;source=section;expanded=section==='command';commands=makeCommands();cursor=0;
-    const showing=dialog.open;if(!showing){returnFocus=document.activeElement;content.innerHTML=panelHTML();dialog.append(strip);dialog.showModal();dialog.animate(reduced()?[{opacity:0},{opacity:1}]:[{clipPath:'inset(100% 0 0 0)'},{clipPath:'inset(0 0 0 0)'}],{duration:reduced()?150:320,easing:'cubic-bezier(.2,.8,.2,1)'});}
+    const showing=dialog.open;if(!showing){returnFocus=document.activeElement;content.innerHTML=panelHTML();dialog.append(strip);dialog.showModal();content.animate(reduced()?[{opacity:0},{opacity:1}]:[{clipPath:'inset(100% 0 0 0)'},{clipPath:'inset(0 0 0 0)'}],{duration:reduced()?150:320,easing:'cubic-bezier(.2,.8,.2,1)'});}
     updateCommands();dialog.querySelector('#control-command').focus({preventScroll:true});
-    if(section!=='command')requestAnimationFrame(()=>{const target=dialog.querySelector('#control-'+section),body=dialog.querySelector('.mc-body');if(target&&body){body.scrollTop=Math.max(0,target.offsetTop-body.offsetTop-12);target.animate([{borderTopColor:'var(--ink-3)'},{borderTopColor:'var(--line)'}],{duration:reduced()?150:220});}});
+    if(section!=='command')requestAnimationFrame(()=>{const target=dialog.querySelector('#control-'+section),body=dialog.querySelector('.mc-body');if(target&&body){const top=target.getBoundingClientRect().top-body.getBoundingClientRect().top;if(top<0||top>body.clientHeight-60)body.scrollTop+=top-12;target.animate([{borderTopColor:'var(--ink-3)'},{borderTopColor:'var(--line)'}],{duration:reduced()?150:220});}});
     markOpen();
   }
   function markOpen(){for(const segment of strip.querySelectorAll('[data-control-section]'))segment.classList.toggle('is-open',dialog.open&&segment.dataset.controlSection===source);}
