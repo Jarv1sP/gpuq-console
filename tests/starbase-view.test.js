@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {controlSnapshot} from '../dist/control-ui.js';
+import {controlSnapshot,serverSlotsHTML} from '../dist/control-ui.js';
 import {trainingReadout,workbenchCards,jobOverviewHTML,stateClass} from '../dist/workbench-ui.js';
 
 function fixture(role='member'){
@@ -21,6 +21,17 @@ test('control is owner-bound and never treats an incomplete process inventory as
   assert.deepEqual(snapshot.jobs.map(job=>job.id),['own-run','own-prep']);assert.deepEqual(snapshot.sessions.map(row=>row.id),['mine']);assert.equal(snapshot.attention.length,0);assert.deepEqual(snapshot.servers.map(row=>row.id),['gpu-1']);assert.equal(snapshot.servers[0].busy,null);assert.equal(snapshot.dataCount,null);
   store.data.gpuq.hosts[0].gpus[1].processesAvailable=true;assert.equal(controlSnapshot(store).servers[0].busy,0);
   store.data.gpuq.stale=true;assert.equal(controlSnapshot(store).servers[0].busy,null);assert.equal(controlSnapshot(store).servers[0].state,'unknown');
+});
+test('individual control slots cannot look free when the full GPU inventory is unconfirmed',()=>{
+  const store=fixture(),host=store.data.gpuq.hosts[0];
+  host.gpus.forEach(gpu=>Object.assign(gpu,{processesAvailable:true,memoryUsedMiB:0,memoryTotalMiB:32768}));
+  assert.match(serverSlotsHTML(controlSnapshot(store).servers[0]),/slot free/);
+  for(const change of [()=>{host.gpus[1].index=0;},()=>{host.gpus[1].index=2;},()=>{host.gpus.pop();}]){
+    const original=structuredClone(host.gpus);change();const server=controlSnapshot(store).servers[0];
+    assert.equal(server.available,false);assert.equal(server.busy,null);
+    assert.doesNotMatch(serverSlotsHTML(server),/slot (?:free|used)/);assert.match(serverSlotsHTML(server),/占用未确认/);host.gpus=original;
+  }
+  host.gpus[0].memoryUsedMiB=-1;assert.match(serverSlotsHTML(controlSnapshot(store).servers[0]),/GPU 0 · 占用未确认/);
 });
 test('only an administrator sees pending approvals, and only a complete data listing has an aggregate',()=>{
   assert.equal(controlSnapshot(fixture()).attention.length,0);const snapshot=controlSnapshot(fixture('admin'),{activitiesComplete:true,activities:[{id:'one',userId:'owner',state:'RUNNING'},{id:'one',userId:'owner',state:'RUNNING'},{id:'two',userId:'owner',state:'FAILED'}]});assert.equal(snapshot.dataCount,1);assert.equal(snapshot.attention.length,2);

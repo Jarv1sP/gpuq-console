@@ -22,7 +22,7 @@ export function controlSnapshot(store,{sessions=[],activities=[],activitiesCompl
     const state=!fresh?'unknown':host.gpuq?.observeOnly?'observe':'online';
     const available=Array.isArray(host?.gpus)&&host.gpus.length===machine.cards&&new Set(host.gpus.map(gpu=>gpu.index)).size===machine.cards&&host.gpus.every(gpu=>Number.isSafeInteger(gpu.index)&&gpu.index>=0&&gpu.index<machine.cards&&gpu.processesAvailable===true&&Array.isArray(gpu.processes));
     const busy=fresh&&available?host.gpus.filter(gpu=>gpu.processes?.length>0).length:null;
-    return {...machine,host,fresh,state,busy,quota:finite(user?.limits?.[machine.id])?user.limits[machine.id]:null};
+    return {...machine,host,fresh,available,state,busy,quota:finite(user?.limits?.[machine.id])?user.limits[machine.id]:null};
   });
   return {jobs,active,attention,servers,sessions:ownedSessions,activities:ownedActivities,focal,quota:finite(user?.total)?user.total:null,usage:user&&typeof store.usage==='function'?store.usage(user.id):null,dataCount:activitiesComplete?ownedActivities.filter(row=>activeData.has(row.state)).length:null};
 }
@@ -45,10 +45,10 @@ function overviewHTML(snapshot){
   const states=['online','observe','unknown'].map(state=>({state,count:snapshot.servers.filter(server=>server.state===state).length,label:{online:'在线',observe:'仅观察',unknown:'无法采集'}[state]})).filter(row=>row.count);
   return `<div class="mc-overview"><div class="mc-meter"><span class="mc-meter-label">额度占用 / 上限</span><div class="mc-meter-value">${snapshot.usage??'—'} / ${snapshot.quota??'—'}<small>张</small></div></div><div class="mc-meter"><span class="mc-meter-label">进行中训练</span><div class="mc-meter-value">${snapshot.active.length}</div></div><div class="mc-meter ${snapshot.attention.length?'mc-meter-alert':''}"><span class="mc-meter-label">需处理</span><div class="mc-meter-value">${snapshot.attention.length}</div></div><div class="mc-meter"><span class="mc-meter-label">我的服务器</span><div class="mc-meter-value">${snapshot.servers.length}<small>台</small></div><div class="mc-monitor">${states.map(row=>`<span class="mc-monitor-state" role="img" aria-label="${row.count} 台${row.label}"><span class="cs-dot ${row.state==='online'?'':row.state}" aria-hidden="true"></span>${row.count}<span class="mc-monitor-word">${row.label}</span></span>`).join('')}</div></div></div>`;
 }
-function serverSlotsHTML(server){
+export function serverSlotsHTML(server){
   const gpus=new Map((server.host?.gpus||[]).map(gpu=>[gpu.index,gpu]));
   return `<div class="slots" aria-label="${esc(server.id)} 的 ${server.cards} 张显卡">${Array.from({length:finite(server.cards)?server.cards:0},(_,index)=>{
-    const gpu=gpus.get(index),known=server.fresh&&gpu?.processesAvailable===true&&Array.isArray(gpu.processes)&&Number.isFinite(gpu.memoryUsedMiB)&&Number.isFinite(gpu.memoryTotalMiB)&&gpu.memoryTotalMiB>0;
+    const gpu=gpus.get(index),known=server.fresh&&server.available===true&&gpu?.processesAvailable===true&&Array.isArray(gpu.processes)&&Number.isFinite(gpu.memoryUsedMiB)&&gpu.memoryUsedMiB>=0&&Number.isFinite(gpu.memoryTotalMiB)&&gpu.memoryTotalMiB>0;
     return `<span class="slot ${known?(gpu.processes.length?'used':'free'):'unknown hatch'}" aria-label="GPU ${index} · ${known?gpu.processes.length+' 个计算进程 · 显存 '+gpu.memoryUsedMiB+' / '+gpu.memoryTotalMiB+' MiB':'占用未确认'}">${known?`<progress class="slot-vram" aria-label="GPU ${index} 已用显存" max="${gpu.memoryTotalMiB}" value="${Math.max(0,Math.min(gpu.memoryUsedMiB,gpu.memoryTotalMiB))}"></progress>`:''}<span>${index}</span></span>`;
   }).join('')}</div>`;
 }
