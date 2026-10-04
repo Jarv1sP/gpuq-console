@@ -194,6 +194,7 @@ class DirectUploads:
         return claims['userId']
 
     def process(self, token, upload, action, args, data=b''):
+        self.n.platform_root_check()
         claims = self.claims(token)
         if claims['uploadId'] != upload:
             raise GrantError()
@@ -261,6 +262,7 @@ def create_server(node, uploads):
 
         def handle_upload(self):
             try:
+                node.platform_root_check()
                 lengths = self.headers.get_all('Content-Length', [])
                 if (self.headers.get('Transfer-Encoding') or len(lengths) > 1
                         or lengths and not re.fullmatch(r'0|[1-9][0-9]{0,7}', lengths[0])):

@@ -221,7 +221,7 @@ export class PortalService extends DemoService{
     const principal=this.principal(token),actor=principal.username;
     if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
     if(typeof operation==='string'&&operation.startsWith('cloud.auth.'))return {result:await cloudImportCall(this,principal,operation,args,()=>{if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});this.principal(token);}),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
-    if(typeof operation==='string'&&operation.startsWith('maintenance.'))return {result:await maintenanceCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
+    if(typeof operation==='string'&&operation.startsWith('maintenance.'))return {result:await maintenanceCall(this,principal,operation,args),...(operation==='maintenance.set'?{state:this.state(principal)}:{}),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     if(operation==='notifications.job')return {result:this.configureJobNotification(principal,args),state:this.state(principal)};
     if(typeof operation==='string'&&operation.startsWith('community.'))return {result:communityCall(this,principal,operation,args),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
     // Execution writes its durable reservation before external side effects. Never
@@ -270,7 +270,7 @@ export class PortalService extends DemoService{
     const state=super.state(principal);
     const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits,{jobs:this.store.jobs,users:this.store.users});
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
-    return {...state,taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},jobs:state.jobs.map(j=>({...publicJob(j,this.store.users),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
+    return {...state,taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},operationalMaintenance:this.operationalMaintenance?.(principal),jobs:state.jobs.map(j=>({...publicJob(j,this.store.users),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }

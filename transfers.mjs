@@ -209,16 +209,18 @@ export function installTransfers(service){
 export async function transferCall(service,principal,operation,args,assertCurrent=()=>{},admission){
   if(!args||typeof args!=='object'||Array.isArray(args))fail('传输参数无效。');
   args=structuredClone(args);principal={...principal};
+  let maintenanceArgs=args;
   const policy=JSON.stringify(service.store.get(principal.userId));
   const check=()=>{
     if(service.closing)throw Object.assign(Error('服务正在关闭。'),{status:503,transferFence:true});
     try{assertCurrent();const user=service.store.get(principal.userId);if(!user.enabled||user.username!==principal.username||principal.role==='admin'&&user.role!=='admin'||JSON.stringify(user)!==policy)fail('账号授权已改变，请重新操作。',403);}
     catch(error){error.transferFence=true;error.status??=403;throw error;}
+    try{service.assertMaintenanceAllowed?.(operation,maintenanceArgs,principal);}catch(error){error.transferFence=true;throw error;}
   };
   check();let key;
   if(operation==='transfers.create')key=JSON.stringify([principal.userId,validId(args.key)]);
   else if(['transfers.list','transfers.capabilities'].includes(operation))key=JSON.stringify([principal.userId,operation]);
-  else{const row=load(service,args.id);access(service,principal,row);key=rowKey(row);}
+  else{const row=load(service,args.id);access(service,principal,row);key=rowKey(row);maintenanceArgs={...args,machine:row.data.machine,from:row.data.from};check();}
   // Persist before waiting for this transfer's active RPC; the node also has a
   // permanent cancel marker, fencing an already in-flight start on arrival.
   if(operation==='transfers.cancel'){

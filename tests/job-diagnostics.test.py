@@ -164,6 +164,24 @@ class Diagnostics(unittest.TestCase):
         D.observe(self.root, self.spec, CAPTURE, {}, sleep=tick)
         self.assertEqual(calls, [2]); self.run.assert_not_called(); self.assertEqual(self.bundle()['state'], 'PARTIAL')
 
+    def test_observer_mount_loss_does_not_write_even_fallback_error_report(self):
+        self.start();lost=[False];writes=[]
+        def check(root):
+            self.assertEqual(root,self.root)
+            if lost[0]:raise ValueError('platform unavailable')
+        def tick(seconds):lost[0]=True
+        with patch.object(D,'platform_root_check',side_effect=check), patch.object(D,'_write',side_effect=lambda *args:writes.append(args)):
+            with self.assertRaisesRegex(ValueError,'platform unavailable'):
+                D.observe(self.root,self.spec,CAPTURE,{},sleep=tick)
+        self.assertEqual(len(writes),1,'No second tick or fallback error write after mount loss')
+
+    def test_prune_mount_loss_rejects_before_gc_lock_or_removal(self):
+        self.start()
+        with patch.object(D,'platform_root_check',side_effect=ValueError('platform unavailable')):
+            with self.assertRaisesRegex(ValueError,'platform unavailable'):D.prune(self.root)
+        self.assertFalse((self.root/'diagnostics'/'.gc.lock').exists())
+        self.assertTrue(self.folder.exists())
+
     def test_only_same_invocation_confirmed_terminal_unit_has_unit_exit(self):
         self.start(); (self.group / 'cgroup.events').write_text('populated 0\n')
         with patch.object(D, '_show', return_value={**self.shown, 'ActiveState': 'failed', 'MainPID': '0', 'Result': 'oom-kill', 'ExecMainStatus': '9'}): D.observe(self.root, self.spec, CAPTURE, {})
@@ -288,7 +306,7 @@ class NodeDiagnostics(unittest.TestCase):
     def test_read_only_operation_never_submits_and_checks_immutable_spec(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve(); root = base / 'state'; root.mkdir(mode=0o700)
-            for name in ('node-executor.py', 'scheduling-policy.py', 'job-diagnostics.py'): shutil.copy2(DEPLOY / name, base / name)
+            for name in ('platform-root-guard.py','node-executor.py', 'scheduling-policy.py', 'job-diagnostics.py'): shutil.copy2(DEPLOY / name, base / name)
             database = base / 'gpuq.db'
             with sqlite3.connect(database) as db: db.execute('CREATE TABLE jobs (id TEXT, submit_key TEXT)')
             (base / 'node-config.json').write_text(json.dumps({'root': str(root), 'database': str(database), 'gpu': '/no/gpu'}))

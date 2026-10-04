@@ -18,6 +18,14 @@ test('user guide source contains no captured command diagnostics', () => {
   assert.doesNotMatch(guide, /^(?:git:\s+(?:warning|error):|fatal:|npm (?:WARN|ERR!)\b|Traceback \(most recent call last\):)/m);
 });
 
+test('guide explains authorization labels and keeps small personal weights in the project',()=>{
+  assert.match(guide,/共享授权用户/);assert.match(guide,/不把授权用户当成创建者/);
+  assert.match(guide,/各机授权不同/);assert.match(guide,/旧节点未完整提供归属/);
+  assert.match(guide,/个人的小体积模型权重.*`\/workspace\/weights`/);
+  assert.match(guide,/不用每次从电脑重新上传/);assert.match(guide,/服务器内部复制快照/);
+  assert.match(guide,/新训练产生的 checkpoint 仍写每个任务独立的 `\/outputs`/);
+});
+
 test('user guide has the seven stable chapters used by the website', () => {
   const headings = [...guide.matchAll(/^## (.+) \{#([a-z-]+)\}$/gm)].map(match => [match[1], match[2]]);
   assert.deepEqual(headings, chapters);

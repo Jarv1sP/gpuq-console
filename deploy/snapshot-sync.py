@@ -67,7 +67,13 @@ class SnapshotSync:
         return cache.release_lease(module.Principal('builtin-admin', True),
                                    args['dataset'], args['version'], lease_id)
 
+    def metadata_space(self, needed):
+        # Legacy snapshot metadata reads/writes keep their historical behavior.
+        # Only explicitly configured nodes gain these additional write gates.
+        if 'workspaceReserveBytes' in self.n.CONFIG:self.ops.store._space(needed)
+
     def index(self, folder, manifest):
+        self.metadata_space(16384 + len(manifest['files']) * 4096)
         with closing(sqlite3.connect(folder/'index.sqlite')) as db:
             db.execute('CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, size INTEGER, sha256 TEXT, executable INTEGER, verified TEXT)')
             db.execute('DELETE FROM files')
@@ -149,9 +155,10 @@ class SnapshotSync:
         # source authorization/readiness is rechecked above on every request.
         if not folder.exists():
             stage = self.root/('stage-'+uuid.uuid4().hex)
-            stage.mkdir(mode=0o700)
             raw = json.dumps(manifest, sort_keys=True, separators=(',',':'), ensure_ascii=False).encode()
             if len(raw)>64*CHUNK: raise ValueError('Snapshot manifest exceeds 64 MiB')
+            self.metadata_space(len(raw) + 16384 + len(manifest['files']) * 4096)
+            stage.mkdir(mode=0o700)
             (stage/'manifest.json').write_bytes(raw)
             self.index(stage, manifest)
             info={'manifestBytes':len(raw),'manifestSha256':hashlib.sha256(raw).hexdigest(),
@@ -273,7 +280,9 @@ class SnapshotSync:
                 try:
                     size=self.d._regular(fd).st_size
                     if size>=offset+len(data) and os.pread(fd,len(data),offset)==data: pass
-                    elif size==offset: os.lseek(fd,offset,0);os.write(fd,data);os.fsync(fd)
+                    elif size==offset:
+                        self.metadata_space(len(data))
+                        os.lseek(fd,offset,0);os.write(fd,data);os.fsync(fd)
                     else: raise ValueError('Manifest offset mismatch')
                     session['manifestOffset']=os.fstat(fd).st_size
                 finally: os.close(fd)
@@ -292,6 +301,7 @@ class SnapshotSync:
                 normalized=self.d._manifest(plain)
                 if sum(f['size'] for f in normalized['files'])!=session['totalBytes'] or len(normalized['files'])+len(normalized['directories'])!=session['entries']: raise ValueError('Code manifest totals mismatch')
                 # No symlinks, hidden environment payloads, or overwrite mirror.
+                self.metadata_space(16384 + session['entries'] * 4096)
                 code=self.ops.store.dev_paths(*self.ops.identity(args))['code']
                 for path in sorted(normalized['directories'],key=lambda p:(p.count('/'),p)):
                     self.d._mkdir(code/path)
@@ -353,8 +363,7 @@ class SnapshotSync:
                 self.ops.store.create(user,project,environment_mode='isolated')
             return self.summary(session)
         if any(item['project']==project for item in self.ops.store.list(user)): raise ValueError('Sync needs a new project name; existing projects are never overwritten')
-        free=os.statvfs(self.root)
-        if free.f_bavail*free.f_frsize<args['totalBytes']+self.ops.store.reserve_bytes: raise ValueError('Insufficient free space for code snapshot')
+        self.ops.store._space(args['totalBytes'])
         folder=self.root/str(uuid.uuid4());folder.mkdir(mode=0o700)
         session={**args,'session':folder.name,'state':'RECEIVING_MANIFEST','manifestOffset':0}
         # Persist the fence before making the draft visible. A failed receipt

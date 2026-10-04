@@ -20,7 +20,7 @@ P=importlib.util.module_from_spec(spec);spec.loader.exec_module(P)
 class ExplicitPolicy(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
-        for name in ('node-executor.py','scheduling-policy.py'):shutil.copy2(ROOT/'deploy'/name,self.root/name)
+        for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py'):shutil.copy2(ROOT/'deploy'/name,self.root/name)
         (self.root/'control').mkdir();(self.root/'sdk.pyz').touch();(self.root/'training-control.py').touch();(self.root/'sandbox-runner.py').write_text('# gpuq_training_control')
         config={'root':str(self.root/'state'),'cards':4,'gpu':'/not/a/gpu','database':str(self.root/'db'),'controlRoot':str(self.root/'control'),'gpuqArchive':str(self.root/'sdk.pyz')}
         (self.root/'node-config.json').write_text(json.dumps(config))

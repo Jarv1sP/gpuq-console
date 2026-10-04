@@ -1,9 +1,45 @@
-import {MACHINES} from './dist/model.js';
+import {MACHINES,validUsername} from './dist/model.js';
 
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 const ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const HASH=/^[a-f0-9]{64}$/;
 const STATES=new Set(['READY','REGISTERED','STAGING','PREPARING','FAILED','UNKNOWN']);
+const OWNER_ID=/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$/;
+
+// Node ACLs determine visibility first. Only usernames for those returned ACLs
+// are projected from the trusted account store; IDs stay inside the portal.
+function ownerView(item,users){
+  const ids=item?.ownerIds;
+  if(!Array.isArray(ids)||!ids.length||ids.length>64||ids.some(id=>typeof id!=='string'||!OWNER_ID.test(id)))return {key:null,label:'所属用户：未知（授权信息未完整返回）'};
+  const owners=[...new Set(ids)].sort(),names=owners.map(id=>users?.find(user=>user.id===id)?.username);
+  const known=names.filter(validUsername),unknown=names.length-known.length;
+  const label=owners.length===1?`所属用户：${unknown?'未知（账号已删除或未登记）':known[0]}`:
+    `共享授权用户：${[...known,...(unknown?[`未知用户 ${unknown} 位（账号已删除或未登记）`]:[])].join('、')}`;
+  return {key:JSON.stringify(owners),label};
+}
+
+// Do not forward arbitrary node metadata, owner IDs, paths or user records.
+export function datasetListView(result,users){
+  if(!Array.isArray(result?.datasets))fail('数据集目录暂时无法确认。',502);
+  return {datasets:result.datasets.filter(item=>ID.test(item?.dataset)&&Array.isArray(item.versions)).map(item=>({
+    dataset:item.dataset,ownerLabel:ownerView(item,users).label,
+    versions:item.versions.filter(value=>HASH.test(value?.version)).map(value=>{
+      const clean={version:value.version,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true};
+      for(const field of ['bytes','files'])if(Number.isSafeInteger(value[field])&&value[field]>=0)clean[field]=value[field];
+      if(HASH.test(value.operationId))clean.operationId=value.operationId;
+      if(value.recoveryConfigured===true)clean.recoveryConfigured=true;
+      if(typeof value.error==='string')clean.error=value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300);
+      return clean;
+    })
+  }))};
+}
+
+function combinedOwnerLabel(locations,owners){
+  const views=locations.map(location=>owners.get(location)),keys=new Set(views.map(view=>view.key).filter(key=>key!==null));
+  if(keys.size>1)return '各机授权不同（见副本位置）';
+  if(views.some(view=>view.key===null))return '所属用户：未知（部分节点授权信息未完整返回）';
+  return views[0]?.label||'所属用户：未知';
+}
 
 // This is a permission-filtered view, not a second mutable source of truth.
 // Each node authenticates the same owner before returning its immutable versions.
@@ -46,6 +82,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
   checkPolicy();
   const replicaSources=capabilities?.enabled===true&&Array.isArray(capabilities.sources)?capabilities.sources.filter(id=>machines.some(m=>m.id===id)):[];
   const datasets=new Map();
+  const owners=new WeakMap();
   const aliases=new Map(listings.map(listing=>[listing.machine,service.datasetAliases?.(user.id,listing.machine)]));
   for(const listing of listings)for(const item of listing.datasets){
     if(!ID.test(item?.dataset)||!Array.isArray(item.versions))continue;
@@ -58,9 +95,11 @@ export async function datasetCatalogCall(service,principal,operation,args){
       if(!dataset){dataset={dataset:name,versions:new Map()};datasets.set(name,dataset);}
       let version=dataset.versions.get(value.version);
       if(!version){version={version:value.version,locations:[]};dataset.versions.set(value.version,version);}
-      version.locations.push({machine:listing.machine,dataset:item.dataset,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,
+      const owner=ownerView(item,service.store.users);
+      const location={machine:listing.machine,dataset:item.dataset,ownerLabel:owner.label,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,
         ...(service.archiveState?.(user.id,listing.machine,{dataset:item.dataset,version:value.version})?{storage:service.archiveState(user.id,listing.machine,{dataset:item.dataset,version:value.version})}:{}),
-        ...(listing.machine===args.machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})});
+        ...(listing.machine===args.machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})};
+      owners.set(location,owner);version.locations.push(location);
       if(Number.isSafeInteger(value.bytes)&&value.bytes>=0)version.bytes=value.bytes;
       if(Number.isSafeInteger(value.files)&&value.files>=0)version.files=value.files;
     }
@@ -71,6 +110,6 @@ export async function datasetCatalogCall(service,principal,operation,args){
       const local=version.locations.find(l=>l.machine===args.machine&&l.state==='READY')||version.locations.find(l=>l.machine===args.machine);
       const source=localAvailable&&local?.state!=='READY'&&!local?.canPrepare&&version.locations.find(l=>l.state==='READY'&&replicaSources.includes(l.machine));
       const transfer=service.datasetReplicaState?.(user.id,args.machine,{dataset:item.dataset,version:version.version});
-      return {...version,state:local?.state==='READY'?'READY':transfer?.state||local?.state||(localAvailable?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true||!!source,...(source?{sourceMachine:source.machine,sourceDataset:source.dataset}:{}),...(local?.state!=='READY'&&(transfer?.error||local?.error)?{error:transfer?.error||local?.error}:{})};
+      return {...version,ownerLabel:combinedOwnerLabel(version.locations,owners),state:local?.state==='READY'?'READY':transfer?.state||local?.state||(localAvailable?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true||!!source,...(source?{sourceMachine:source.machine,sourceDataset:source.dataset}:{}),...(local?.state!=='READY'&&(transfer?.error||local?.error)?{error:transfer?.error||local?.error}:{})};
     })}))};
 }

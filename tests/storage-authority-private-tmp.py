@@ -191,7 +191,7 @@ def execute(deploy, root):
     need(deploy != Path('/home/amax/.local/libexec/amax-console'),
          'Use a separately staged reviewed source tree, not installed production runtime')
     runtime_shas = {p.name: digest(p) for p in deploy.glob('*.py')}
-    need(all(name in runtime_shas for name in ('node-executor.py', 'dataset-cache.py',
+    need(all(name in runtime_shas for name in ('platform-root-guard.py','node-executor.py', 'dataset-cache.py',
          'dataset-tier.py', 'storage-authority.py', 'transfer-peer.py', 'scheduling-policy.py')),
          'Reviewed deploy source is incomplete')
     # Read real mountinfo before creating even the disposable tree.

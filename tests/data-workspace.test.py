@@ -25,7 +25,7 @@ class DataWorkspaceTests(unittest.TestCase):
         self.data_mount = local_data_mounts(self.base)
         self.data_mount.start()
         self.addCleanup(self.data_mount.stop)
-        for name in ('node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'data-workspace.py'):
+        for name in ('platform-root-guard.py','node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'data-workspace.py'):
             shutil.copy2(DEPLOY/name, self.base/name)
         config = {'root': str(self.base/'state'), 'hostRoot': True,
                   'datasets': {'root': str(self.base/'cache'), 'mountPoint': str(self.base), 'sources': {}, 'reserveBytes': 0}}

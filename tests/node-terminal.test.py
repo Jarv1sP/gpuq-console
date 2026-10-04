@@ -28,7 +28,7 @@ class NativeTerminal(unittest.TestCase):
         config=Config(root=self.root,db_path=self.root/'native.db',log_dir=self.root/'logs',control_dir=self.root/'control',socket_path=Path(f'/run/user/{os.getuid()}/terminal-proof-test.sock'),managed_gpu_uuids=('GPU-test',),allowed_uid=os.getuid(),observe_only=False)
         config.log_dir.mkdir();config.control_dir.mkdir();self.store=Store(config.db_path).initialize();self.addCleanup(self.store.close)
         self.core=Coordinator(config,self.store,Mock(),Mock(),boot_id='test-boot');self.core._snapshot=(GpuDevice(3,'GPU-test',24576,0,24576,0,()),)
-        for name in ('node-executor.py','scheduling-policy.py'):
+        for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py'):
             # The baseline inlines policy; #5 installs a shared policy module.
             # Use the actual current node's imports without making the drain
             # fix depend on the optional scheduling-feature PR.

@@ -48,6 +48,8 @@ gpuctl pull --job 任务ID model.pt ./model.pt
 
 项目 Python 优先使用 `/opt/project-env/bin`；禁用用户 site-packages，并要求 pip 在项目 venv 内安装。基础 Conda 不被用户修改。依赖安装应在开发终端完成，不在占用 GPU 的训练启动命令里临时安装。
 
+项目环境、HOME 缓存和输出使用平台工作区磁盘；沙箱 `/tmp` 与默认受管 Ray spill 使用 tmpfs，计入内存限制。项目训练的 `/workspace` 只读，需要较大磁盘临时空间时，可在训练程序启动时创建本次任务的 `$HOME/.cache/tmp`，并在程序内将 `TMPDIR` 指向它；只在提交命令的本机终端设置变量不会自动传入任务。开发终端也可用私人 HOME 作为 pip 构建临时目录。此设置不改变 Ray spill 的独立配置；磁盘入口预留不是硬配额，仍须关注剩余容量并清理不再需要的临时文件。
+
 新建时可明确选择 `gpuctl project create clean-experiment --env-mode isolated`，网页对应“完全隔离（不继承基础包）”。它不使用 `--system-site-packages`，发布时校验 `pyvenv.cfg` 的 `include-system-site-packages = false`，PATH 不回退基础 Conda 的命令。Python、pip 及 `gpuq-ray` 仍优先使用项目解释器；需要的包须自行安装，包括 torch、Ray 等。默认 `--env-mode shared` 沿用原共享基础包行为；省略参数时兼容旧创建接口。
 
 模式仅创建时设定。旧项目/旧版本缺少模式字段时继续按共享模式处理，历史版本哈希不改变；同名项目显式指定另一模式会报错，既不重装也不迁移。已有环境不自动重建，首次初始化失败留下的非空目录需先检查，或另建项目。旧节点不支持新选项时应升级配套节点，不能静默将 isolated 降级成 shared。`project status` 返回 `environmentMode` 和离线资源约定路径。这里的“完全隔离”只指不继承 Python site-packages，不是阻止用户代码显式访问只读基础路径的安全边界。
@@ -112,7 +114,7 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 
 代码和小文件可以经 HTTPS 门户上传。TB 级公共数据由管理员登记本地源，通过批准的实验室链路准备各节点副本，训练读本机缓存；不要经 VPS 逐块上传公共大数据。千兆为每条链路共享的物理上限，不会因项目抽象变成多千兆。数据版本、失败重试、权限和缓存回收边界见 [DATASETS.md](DATASETS.md)。
 
-结果存放在执行节点的对应任务目录；下载不是跨机归档。当前不自动备份 checkpoint，不自动删除旧发布版本或训练产物，也未承诺按用户硬磁盘配额。管理员应配置容量告警和独立备份，不能把同盘另一个目录当备份。
+结果存放在执行节点的对应任务目录；下载不是跨机归档，发布和下载流程不自动备份 checkpoint，也不自动删除旧发布版本或训练产物，未承诺按用户硬磁盘配额。管理员应配置容量告警和[独立备份](STORAGE_BACKUP.md)；是否覆盖结果取决于实际配置的来源目录，一次小文件恢复验收不等于全部应用可恢复，不能把同盘另一个目录当备份。
 
 ## 旧接口保持
 

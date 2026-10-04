@@ -5,7 +5,7 @@ import {terminalUI} from './terminal-ui.js';
 import {resourceCards,monitorSummary} from './resources-ui.js';
 import {datasetsUI} from './datasets-ui.js';
 import {createCommunityUI} from './community-ui.js';
-import {maintenanceUI} from './maintenance-ui.js';
+import {maintenanceUI,operationalMaintenanceUI} from './maintenance-ui.js';
 import {transfersUI} from './transfers-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -15,6 +15,7 @@ const renderExecution=executionUI(store,()=>render(true),toast);
 const renderDatasets=datasetsUI(store,toast);
 const renderCommunity=createCommunityUI(store,toast);
 const renderMaintenance=maintenanceUI(store,toast);
+const renderOperationalMaintenance=operationalMaintenanceUI(store,toast);
 const renderTransfers=transfersUI(store,toast);
 terminalUI(store,toast);
 const isAdmin=()=>store.principal?.role==='admin';
@@ -47,6 +48,7 @@ function render(preserve=false){
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
   const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
   $('#mode-note').textContent=note;$('.demo-note').hidden=!note;
+  renderOperationalMaintenance();
   renderTransfers(page==='transfers');renderResources();renderExecution();renderDatasets();renderCommunity(page==='community');renderMaintenance(page==='maintenance');
   if(!keepDraft){const list=filteredUsers();if(!list.some(user=>user.id===selected))selected=list[0]?.id||null;draft=selected?store.get(selected):null;}
   if(admin){renderUsers();if(!keepDraft)renderEditor();renderTaskTable($('#all-jobs'),store.jobs,{admin,userId:store.principal.userId});}

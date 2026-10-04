@@ -70,6 +70,17 @@ test('duplicate observation for one job shares one operation and cannot reserve 
   await advanceDataPreparation(f.service,f.jobs[0],usage);assert.equal(calls,1);
 });
 
+test('maintenance arriving during READY observation preserves the pending job and resumes only after explicit clear',async()=>{
+  const f=fixture(),entered=deferred(),reply=deferred();let maintained=false;
+  f.service.maintenanceFor=()=>maintained;
+  f.service.bridge=async()=>{entered.resolve();return reply.promise;};
+  const pending=advanceDataPreparation(f.service,f.jobs[0],usage);await entered.promise;
+  maintained=true;reply.resolve({...ref,state:'READY'});await pending;
+  assert.equal(f.jobs[0].state,DATA_PREPARING);assert.equal(usage(f.jobs,f.user.id),0);assert.equal(f.saves.length,0);
+  await advanceDataPreparation(f.service,f.jobs[0],usage);assert.equal(f.jobs[0].state,DATA_PREPARING);
+  maintained=false;await advanceDataPreparation(f.service,f.jobs[0],usage);assert.equal(f.jobs[0].state,'SUBMITTING');
+});
+
 test('a verified personal replica keeps the logical user path and leases its real ID',async()=>{
   const f=fixture();let observations=0;
   const actual={dataset:'u-personal-copy',version:ref.version,mountAs:ref.dataset};

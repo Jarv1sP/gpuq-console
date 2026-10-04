@@ -26,10 +26,36 @@ ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 TASK_DISPLAY_CAPABILITY='console-task-display-v1'
 DIAGNOSTICS=None
+PLATFORM_ROOT_GUARD=None
+WORKSPACE_STORAGE=None
 policy_module=importlib.util.spec_from_file_location('gpuq_console_scheduling',HERE/'scheduling-policy.py')
 SCHEDULING=importlib.util.module_from_spec(policy_module);policy_module.loader.exec_module(SCHEDULING)
 PRIORITIES=SCHEDULING.PRIORITY_PRESETS
 PRIORITY_RANKS={'idle':0,'normal':2,'high':4,**{'P'+str(i):i for i in range(5)}}
+
+def platform_root_check():
+    global PLATFORM_ROOT_GUARD
+    if PLATFORM_ROOT_GUARD is None:
+        spec=importlib.util.spec_from_file_location('gpuq_platform_root_guard',HERE/'platform-root-guard.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        PLATFORM_ROOT_GUARD=module
+    return PLATFORM_ROOT_GUARD.check(ROOT)
+
+def workspace_storage_check(needed=0, *, target_fd=None, admission=False):
+    """Only configured nodes gain new-start admission; controls stay available."""
+    global WORKSPACE_STORAGE
+    if 'workspaceReserveBytes' not in CONFIG:
+        if admission:return
+        # Preserve legacy policy and minimal legacy runtime dependencies. The
+        # write caller supplies an already-open no-follow directory descriptor.
+        space=os.statvfs(target_fd if target_fd is not None else ROOT)
+        if space.f_bavail*space.f_frsize<10*1024**3+needed:raise ValueError('Workspace disk reserve reached')
+        return
+    if WORKSPACE_STORAGE is None:
+        spec=importlib.util.spec_from_file_location('gpuq_workspace_storage',HERE/'project-store.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        WORKSPACE_STORAGE=module
+    WORKSPACE_STORAGE.require_workspace_space(ROOT,WORKSPACE_STORAGE.workspace_reserve_bytes(CONFIG),needed,target_fd=target_fd)
 
 def job_diagnostics(job,data):
     global DIAGNOSTICS
@@ -479,6 +505,10 @@ def file_op(operation,args,root=None):
     flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
     fd=os.open(root,flags)
     try:
+        if operation=='files.put':
+            data=base64.b64decode(args.get('data',''),validate=True)
+            if len(data)>1024*1024:raise ValueError('Chunk too large')
+            workspace_storage_check(len(data),target_fd=fd)
         directories=parts if operation=='files.list' else parts[:-1]
         for part in directories:
             if operation=='files.put':
@@ -500,10 +530,7 @@ def file_op(operation,args,root=None):
             if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1:raise ValueError('Only unlinked regular files allowed')
             fcntl.flock(f,(fcntl.LOCK_EX if operation=='files.put' else fcntl.LOCK_SH)|fcntl.LOCK_NB)
             if operation=='files.put':
-                data=base64.b64decode(args.get('data',''),validate=True)
-                if len(data)>1024*1024:raise ValueError('Chunk too large')
-                space=os.statvfs(root)
-                if space.f_bavail*space.f_frsize<10*1024**3+len(data):raise ValueError('Workspace disk reserve reached')
+                workspace_storage_check(len(data),target_fd=fd)
                 if args.get('truncate') is True:
                     if offset!=0:raise ValueError('Invalid truncate offset')
                     os.ftruncate(f,0);st=os.fstat(f)
@@ -621,6 +648,7 @@ def terminal_op(operation,args):
         receipt=terminal_metadata(receipt_path) if receipt_path.exists() else None
         if opening:
             if mode=='new' and not (folder/(jid+'.json')).exists():
+                if args.get('hostAdmin') is not True:workspace_storage_check(admission=True)
                 unit='amax-term-'+jid
                 spec={'userId':args['userId'],'username':args['username'],'cards':0,'argv':['/bin/bash','--noprofile','--norc','-i'],'hostAdmin':args.get('hostAdmin') is True}
                 if args.get('project'):spec['project']=args['project']
@@ -831,10 +859,19 @@ def storage_collect():
     if not storage.tier.enabled:
         return {'enabled':False,'state':'DISABLED','evicted':[]}
     module,_=dataset_cache()
-    return storage.tier.collect(module.Principal('builtin-admin',True),dry_run=False,max_versions=16)
+    try:
+        return storage.tier.collect(module.Principal('builtin-admin',True),dry_run=False,max_versions=16)
+    except module.CacheBusy:
+        # Foreground uploads/leases win. The existing timer retries after its
+        # normal interval; do not spin or weaken the metadata lock. Contention
+        # may occur during the final inventory after some safe evictions, so
+        # deliberately do not claim an empty eviction list or zero side effects.
+        return {'enabled':True,'state':'DEFERRED','reason':'CACHE_BUSY',
+                'recheck':'NEXT_SCHEDULED_RUN','evictionOutcome':'CHECK_STATUS'}
 
 
 def process(operation,args):
+    platform_root_check()
     if operation.startswith(('storage.lease.','storage.download.')):return storage_lease_operation(operation,args)
     if operation.startswith('storage.archive.'):return storage_archive_operation(operation,args)
     if operation.startswith('datasets.storage.'):return storage_management(operation,args)
@@ -931,6 +968,7 @@ def process(operation,args):
                 release_datasets(job,never_dispatched=True)
                 return {'state':'CANCELED'}
             if operation=='logs':return job_log_result(job,{'job':{'state':'NOT_SUBMITTED'},'attempts':[]},'任务尚未提交到 GPUQ。')
+            workspace_storage_check(admission=True)
             if policy['kind']!='legacy':priority_capability()
             if policy['preempt_opt_in_only'] and 'preempt-opt-in-only-v1' not in gpu('status').get('daemon',{}).get('capabilities',[]):raise ValueError('Requester opt-in scope capability unavailable')
             if policy['kind']=='explicit' and not SCHEDULING.ready(CONFIG,HERE):raise ValueError('Training control channel is not ready; no submission attempted')
@@ -994,6 +1032,7 @@ def process(operation,args):
 
 if __name__=='__main__':
     os.umask(0o077)
+    platform_root_check()
     if len(sys.argv)==3 and sys.argv[1]=='--storage-archive-worker':sys.exit(storage_archive().worker(sys.argv[2]))
     if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':
         print(json.dumps(storage_collect()));sys.exit(0)

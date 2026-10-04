@@ -33,6 +33,7 @@ def create_server(node, jobs, *, authority=None):
             try:
                 if self.path != '/capabilities' or self.headers.get('Transfer-Encoding') or self.headers.get('Content-Length', '0') != '0':
                     raise ValueError('Invalid capability probe')
+                node.platform_root_check()
                 node.dataset_mount_check(node.CONFIG['datasets'])
                 payload, code = {'protocol': 'lan-transfer-v1', 'sourceReady': True}, 200
             except Exception:
@@ -59,6 +60,7 @@ def create_server(node, jobs, *, authority=None):
                 auth = self.headers.get('Authorization', '')
                 if not auth.startswith('Bearer '):
                     raise ValueError('Snapshot ticket required')
+                node.platform_root_check()
                 if self.path == '/authority':
                     if authority is None:raise ValueError('Protected authority is not enabled')
                     result=authority.read(json.loads(raw),auth[7:])

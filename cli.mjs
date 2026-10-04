@@ -46,6 +46,9 @@ gpuctl exec --detach -- bash -lc 'long-command'
 gpuctl exec status HANDLE        Read bounded stdout, stderr, state and exit code
 gpuctl exec cancel HANDLE        Cancel this host command and confirm cleanup
 gpuctl maintenance list / show ID  Read historical records (workflow retired)
+gpuctl maintenance status          Read persistent platform/machine maintenance
+gpuctl maintenance on all --reason "存储维修" --revision N   Administrator: block new operations
+gpuctl maintenance off SERVER --revision N                 Administrator: explicitly restore this scope
 gpuctl push .                    Upload code to the selected project's draft
 gpuctl project publish           Freeze code + private environment; wait for READY
 gpuctl sync git LOCAL_REPO --to SERVER --project NEW --ref HEAD --dry-run
@@ -339,6 +342,17 @@ async function main(){
       if(!state.machines.some(m=>m.id===positionals[1]))fail('这台机器未授权或不存在');session.machine=positionals[1];await saveSession();result={selected:session.machine,project:selectedProject(session.machine)};
     }else if(command==='maintenance'){
       const action=positionals[1];
+      if(['status','on','off'].includes(action)){
+        if(state.operationalMaintenance?.version!==1)fail('当前后台尚未支持持久维护状态。');
+        const allowed=['machines','datasets','url','session-file','json',...(action==='status'?[]:['reason','revision'])];
+        if(training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k))||positionals.length!==(action==='status'?2:3))fail('Usage: maintenance status | maintenance on all|SERVER --reason TEXT --revision N | maintenance off all|SERVER --revision N');
+        if(action==='status')result=(await call('maintenance.status')).result;
+        else{
+          if(session.principal.role!=='admin')fail('仅管理员可设置或解除维护状态。');
+          if(!/^\d+$/.test(options.revision||'')||!Number.isSafeInteger(Number(options.revision)))fail('先 maintenance status，再用显示的 --revision N 明确操作。');
+          result=(await call('maintenance.set',{scope:positionals[2],enabled:action==='on',revision:Number(options.revision),...(options.reason!==undefined?{reason:options.reason}:{})})).result;
+        }
+      }else{
       if(!['list','show'].includes(action))fail('维护申请已停用，仅支持 maintenance list / show ID 查看历史。系统依赖请在协作区反馈；管理员可使用 gpuctl exec 或独立 ROOT 终端。');
       if(state.demo||state.maintenance?.version!==1)fail('当前后台不提供历史运维记录。');
       const common=['machines','datasets','url','session-file','json','help'],specific=action==='list'?['cursor','limit']:[];
@@ -347,6 +361,7 @@ async function main(){
       const number=(value,label)=>{if(typeof value!=='string'||!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value)))fail(label+' 必须为整数');return Number(value);};
       if(action==='list')result=(await call('maintenance.list',{...(options.cursor?{cursor:options.cursor}:{}),...(options.limit?{limit:number(options.limit,'limit')}:{})})).result;
       else result=(await call('maintenance.get',{id:positionals[2]})).result;
+      }
     }else if(command==='exec'){
       if(['as','project','release','job','root','legacy','cards','min-vram','name'].some(key=>Object.hasOwn(options,key))||options.datasets.length)fail('exec only accepts host-command options; project/training/impersonation flags are not supported');
       if(session.principal.role!=='admin')fail('Host commands require an existing administrator account');
@@ -663,6 +678,12 @@ async function main(){
   if(command==='files'){console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');return;}
   if(command==='maintenance'){
     const v=maintenanceVisible;
+    if(result.version===1&&Object.hasOwn(result,'global')){
+      console.log('维护状态 · revision '+result.revision);
+      const entries=[...(result.global?[['全平台',result.global]]:[]),...Object.entries(result.machines)];
+      console.log(entries.length?entries.map(([scope,entry])=>v(scope)+'：'+v(entry.reason)).join('\n'):'当前可见范围未设置维护。');
+      console.log('维护只封锁新操作，不自动结束已有任务；恢复必须管理员明确操作。');return;
+    }
     console.log('历史运维记录（只读；维护申请已停用）');
     if(result.items){console.log(result.items.map(r=>`${v(r.id)}  ${v(r.state)}${r.state==='PENDING'?'（未执行，不能再审批）':''}  v${r.revision}\n  ${v(r.machine)} · ${v(r.owner.username)} · ${v(r.title)}`).join('\n')||'暂无历史记录。');if(result.nextCursor)console.log('下一页：gpuctl maintenance list --cursor '+v(result.nextCursor));return;}
     const r=result;console.log(`${v(r.id)} · ${v(r.state)}${r.state==='PENDING'?'（未执行，不能再审批）':''} · v${r.revision}\n${v(r.machine)} · ${v(r.owner.username)} · ${v(r.title)}\n原因：${v(r.reason)}\n目录：${v(r.cwd)} · 超时 ${r.timeoutSec}s\n脚本 SHA256：${v(r.scriptSha256)}\n历史脚本（仅供查阅；不可见字符以 Unicode 转义显示）：\n${v(r.script,true)}`);

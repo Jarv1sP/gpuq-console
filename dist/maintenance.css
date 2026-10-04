@@ -6,3 +6,12 @@
 .maintenance-detail pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg,#f5f7fb);padding:12px;border-radius:8px;max-height:320px;overflow:auto}
 .maintenance-hash{font-size:12px;overflow-wrap:anywhere}
 @media(max-width:900px){.maintenance-history{padding:16px}}
+.maintenance-banner{margin:0 0 22px;padding:18px 20px;border:1px solid #be9a5b;border-left:4px solid #986723;background:#fff8e9;color:#674819;border-radius:8px;overflow-wrap:anywhere}
+.maintenance-banner p{margin:8px 0 0;font-size:13px;line-height:1.7}
+.maintenance-settings{margin:0 0 20px;padding:14px;border:1px solid var(--border,#ddd);border-radius:8px}
+.maintenance-settings summary{cursor:pointer;font-weight:600}
+.maintenance-settings p{font-size:12px;line-height:1.6}
+.maintenance-settings form{display:grid;gap:12px}
+.maintenance-settings label{display:grid;gap:6px;font-size:13px}
+.maintenance-settings input,.maintenance-settings select{box-sizing:border-box;width:100%;min-width:0;padding:10px;border:1px solid var(--border,#ddd);border-radius:6px;background:#fff}
+.maintenance-settings form>div{display:flex;gap:8px;flex-wrap:wrap}

@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """One private PTY per explicit session; the executor fences its single writer."""
-import base64,fcntl,json,os,pty,select,socket,stat,struct,subprocess,sys,termios,time
+import base64,fcntl,importlib.util,json,os,pty,select,socket,stat,struct,subprocess,sys,termios,time
 from pathlib import Path
 ROOT_SHELLS=('/usr/local/libexec/gpuq-console-root-shell','/usr/local/libexec/amax-console-root-shell')
 
@@ -18,7 +18,11 @@ def root_shell():
 
 
 HERE=Path(__file__).resolve().parent
-root=Path(json.loads((HERE/'node-config.json').read_text())['root'])/'terminals'
+platform_root=Path(json.loads((HERE/'node-config.json').read_text())['root'])
+guard_spec=importlib.util.spec_from_file_location('gpuq_platform_root_guard',HERE/'platform-root-guard.py')
+guard=importlib.util.module_from_spec(guard_spec);guard_spec.loader.exec_module(guard)
+guard.check(platform_root)
+root=platform_root/'terminals'
 jid=sys.argv[1];sock=root/(jid+'.sock')
 os.umask(0o077)
 master,slave=pty.openpty()
@@ -61,6 +65,7 @@ try:
      raw+=part
     req=json.loads(raw);action=req.get('action','exchange')
     if action=='close':client.sendall(b'{"closed":true}\n');break
+    guard.check(platform_root)
     data=base64.b64decode(req.get('input',''),validate=True)
     if len(data)>8192:raise ValueError('Input too large')
     if data and not ended:
@@ -85,6 +90,9 @@ try:
     except OSError:pass
    finally:client.close()
 finally:
- server.close();sock.unlink(missing_ok=True)
+ server.close()
+ try:
+  guard.check(platform_root);sock.unlink(missing_ok=True)
+ except (OSError,ValueError):pass  # Never unlink on an unverified fallback root.
  if child.poll() is None:child.terminate()
  os.close(master)

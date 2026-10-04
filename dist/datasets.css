@@ -133,6 +133,7 @@
 #page-datasets.datasets-unified .dataset-readiness[data-state=PREPARING]::before{content:"";display:block;box-sizing:border-box;width:8px;height:3px;border:0;border-radius:0;background:#55555d;animation:starbase-progress 1.8s ease-in-out 3}
 #page-datasets.datasets-unified .dataset-readiness[data-state=FAILED]{color:#9d4142;background:#f9eeee}
 #page-datasets.datasets-unified .dataset-locations{color:#626266;font-size:11px}
+#page-datasets.datasets-unified .dataset-owner{color:#4d4d52;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
 #page-datasets.datasets-unified .dataset-card input{background:#f7f7f5;border-color:#dcdcd8;color:#5d5d63;border-radius:4px}
 #page-datasets.datasets-unified .datasets-add{border-color:#dfdfdd;border-radius:7px;margin-top:25px;padding:22px 25px;max-width:none}
 #page-datasets.datasets-unified .datasets-add>summary{font-weight:600;font-size:15px;color:#303035}

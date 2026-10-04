@@ -17,6 +17,7 @@ function current(service,id,snapshot){
   const job=service.store.jobs.find(value=>value.id===id);
   if(service.closing||!job||job.state!==DATA_PREPARING)return null;
   if(job.cancelRequested){finish(service,job,'CANCELED',null);return null;}
+  if(service.maintenanceFor?.(job.machine))return null; // Hold identity/leases; never promote while maintained.
   let user;
   try{user=service.store.get(job.userId);}catch{finish(service,job,'FAILED','账号已移除；数据准备未转入训练。');return null;}
   if(!user.enabled||!user.limits[job.machine]||user.limits[job.machine]<job.cards||user.total<job.cards){finish(service,job,'FAILED','账号或机器授权已改变；未启动训练。');return null;}

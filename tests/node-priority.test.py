@@ -24,6 +24,7 @@ class NodePriority(unittest.TestCase):
         self.base = Path(self.temp.name).resolve()
         shutil.copy2(DEPLOY / 'node-executor.py', self.base / 'node-executor.py')
         shutil.copy2(DEPLOY / 'scheduling-policy.py', self.base / 'scheduling-policy.py')
+        shutil.copy2(DEPLOY / 'platform-root-guard.py', self.base / 'platform-root-guard.py')
         self.config = {'root': str(self.base / 'state'), 'cards': 4,
                        'gpu': '/not/a/gpu', 'database': str(self.base / 'gpuq.db')}
         (self.base / 'node-config.json').write_text(json.dumps(self.config))
@@ -195,7 +196,11 @@ class NodePriority(unittest.TestCase):
         original=deepcopy(self.job)
         # This fixture deliberately has no task-display.py. Cached display
         # support and malformed cosmetic fields must not gate rank control.
-        with patch.object(self.node.importlib.util,'spec_from_file_location',side_effect=AssertionError('display import forbidden')):
+        load=self.node.importlib.util.spec_from_file_location
+        def guard_only(name,path,*args,**kwargs):
+            if Path(path).name=='task-display.py':raise AssertionError('display import forbidden')
+            return load(name,path,*args,**kwargs)
+        with patch.object(self.node.importlib.util,'spec_from_file_location',side_effect=guard_only):
             result=self.call('priority',priority='high',expected=self.policy(),metadata={'submitter':{'username':'forged'}})
         self.assertEqual(result['priority'],'high')
         self.assertEqual(self.operations(),['show','status','set-rank','show'])

@@ -40,7 +40,7 @@ class RuntimeDeployment(unittest.TestCase):
         self.cache=self.base/'cache';self.cache.mkdir(mode=0o700);self.home=self.base/'home';self.units=self.home/'.config/systemd/user';self.units.mkdir(parents=True)
         self.config={'root':str(self.root),'gpu':'/not/a/gpu','cards':3,'database':str(self.base/'db'),'conda':str(self.conda),'hostRoot':False,'runtimeProfileMarker':'keep-exactly'}
         self.path=self.dest/'node-config.json';self.path.write_text(json.dumps(self.config));self.path.chmod(0o600)
-        for name in ('node-executor.py','terminal-helper.py','job-diagnostics.py'):shutil.copy2(DEPLOY/name,self.dest/name);(self.dest/name).chmod(0o700)
+        for name in ('platform-root-guard.py','node-executor.py','terminal-helper.py','job-diagnostics.py'):shutil.copy2(DEPLOY/name,self.dest/name);(self.dest/name).chmod(0o700)
         shutil.copy2(DEPLOY/'sandbox-runner-common-p0.py',self.dest/'sandbox-runner.py')
         for name in node_runtime.manifest()['units']:(self.units/name).write_text((DEPLOY/name).read_text().replace('%h/.local/libexec/gpuq-console',str(self.dest)))
         with closing(sqlite3.connect(self.config['database'])) as db:db.execute('CREATE TABLE jobs(id TEXT,submit_key TEXT)');db.commit()

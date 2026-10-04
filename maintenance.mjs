@@ -8,7 +8,51 @@ const DONE=new Set(['RETURNED','WITHDRAWN','SUCCEEDED','FAILED','CANCELED','TIME
 const NODE_STATES=new Set(['RUNNING','CANCELING','SUCCEEDED','FAILED','CANCELED','TIMED_OUT','UNKNOWN']);
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
-function fields(args,names){if(Object.keys(args).some(k=>!names.includes(k)))fail('历史记录查询参数无效。');}
+// Operational admission is independent of the retired privilege-request flow.
+// This row is not part of account snapshots, so an unrelated rollback cannot
+// remove a maintenance decision. No deadline or automatic unlock exists.
+const READ_OR_STOP=new Set([
+  'jobs.logs','jobs.watch','jobs.diagnostics','jobs.cancel','logs','watch','diagnostics','cancel',
+  'files.list','files.get','projects.list','projects.status','projects.verify','host.status',
+  'datasets.list','datasets.catalog','datasets.capacity','datasets.status',
+  'datasets.workspace.list','datasets.workspace.get','datasets.workspace.status','datasets.upload.status','datasets.upload.list',
+  'datasets.upload.pause','datasets.upload.direct-revoke','datasets.import.list','datasets.import.status','datasets.import.cancel',
+  'datasets.storage.status','datasets.storage.plan','terminal.close','terminal.detach',
+  'transfers.list','transfers.status','transfers.capabilities','transfers.cancel','transfers.progress',
+  'transfers.confirm-source-release','transfers.release-source','storage.lease.cancel','storage.download.finish',
+  'cloud.info','cloud.import.list','cloud.import.status','cloud.import.cancel'
+]);
+const maintenanceError=(machine,value)=>Object.assign(Error(`${machine?'服务器 '+machine:'全平台'}维护中：${value.reason}。新任务、终端输入和数据写入已暂停，请等待管理员明确恢复；仍可查看历史、日志或取消任务。`),{status:503,code:'MAINTENANCE_ACTIVE'});
+function maintenanceState(service){
+  const value=JSON.parse(service.db.prepare('SELECT data FROM operational_maintenance WHERE id=1').get().data);
+  if(value.version!==1||!Number.isSafeInteger(value.revision)||value.revision<0||!value.machines||typeof value.machines!=='object'||Array.isArray(value.machines)||Object.keys(value.machines).some(id=>!MACHINES.some(m=>m.id===id)))throw Error('维护状态损坏，需管理员核查；未自动解除。');
+  for(const entry of [value.global,...Object.values(value.machines)])if(entry!==null&&(!entry||typeof entry.reason!=='string'||!entry.reason.trim()||entry.reason.length>300||typeof entry.since!=='string'))throw Error('维护状态损坏，需管理员核查；未自动解除。');
+  return value;
+}
+function operationalCall(service,principal,operation,args){
+  if(operation==='maintenance.status'){
+    fields(args,[]);return service.operationalMaintenance(principal);
+  }
+  if(principal.role!=='admin')fail('仅管理员可设置或解除维护状态。',403);
+  fields(args,['scope','enabled','reason','revision']);
+  if(args.scope!=='all'&&!MACHINES.some(m=>m.id===args.scope)||typeof args.enabled!=='boolean'||!Number.isSafeInteger(args.revision)||args.revision<0)fail('维护范围、状态或版本无效。');
+  const reason=args.reason;
+  if(args.enabled&&(typeof reason!=='string'||!reason.trim())||reason!==undefined&&(typeof reason!=='string'||reason.length>300||/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(reason)))fail('维护原因须为 1–300 字的单行文本，不含控制字符。');
+  service.db.exec('BEGIN IMMEDIATE');
+  try{
+    const value=maintenanceState(service);
+    if(value.revision!==args.revision)fail('维护状态已由其他窗口修改，请刷新后确认。',409);
+    const entry=args.enabled?{reason:reason.trim(),since:new Date().toISOString()}:null;
+    if(args.scope==='all')value.global=entry;
+    else if(entry)value.machines[args.scope]=entry;
+    else delete value.machines[args.scope];
+    value.revision++;
+    service.db.prepare('UPDATE operational_maintenance SET data=? WHERE id=1').run(JSON.stringify(value));
+    service.audit(principal.username,operation,args.scope,JSON.stringify({enabled:args.enabled,reason:reason?.trim()||'',revision:value.revision}));
+    service.db.exec('COMMIT');return service.operationalMaintenance(principal);
+  }catch(error){service.db.exec('ROLLBACK');throw error;}
+}
+function fields(args,names){if(Object.keys(args).some(k=>!names.includes(k)))fail('维护操作参数无效。');}
 function uuid(value){if(typeof value!=='string'||!UUID.test(value))fail('需要完整 UUID 编号。');return value;}
 function user(service,principal){
   const current=service.store.users.find(u=>u.id===principal.userId);
@@ -57,6 +101,37 @@ async function sync(service,row){
   }catch(error){service.db.exec('ROLLBACK');throw error;}
 }
 export function installMaintenance(service){
+  service.db.exec('CREATE TABLE IF NOT EXISTS operational_maintenance (id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)');
+  service.db.prepare('INSERT OR IGNORE INTO operational_maintenance VALUES(1,?)').run(JSON.stringify({version:1,revision:0,global:null,machines:{}}));
+  maintenanceState(service); // Invalid persisted state is never treated as off.
+  service.maintenanceFor=machine=>{const value=maintenanceState(service);return value.global||value.machines[machine]||null;};
+  service.operationalMaintenance=principal=>{
+    const value=maintenanceState(service),limits=service.store.get(principal.userId).limits;
+    return {...value,machines:Object.fromEntries(Object.entries(value.machines).filter(([id])=>principal.role==='admin'||limits[id]))};
+  };
+  service.assertMaintenanceAllowed=(operation,args={},principal)=>{
+    // The bridge calls this again with its trusted actor, immediately before
+    // dispatch. Client-supplied role/hostAdmin alone never grants an exemption.
+    const actor=principal&&service.store.users.find(u=>u.id===principal.userId);
+    const admin=actor?.enabled&&actor.role==='admin'&&principal.role==='admin';
+    if(admin&&(operation.startsWith('host.')||operation.startsWith('terminal.')&&args.hostAdmin===true))return;
+    if(READ_OR_STOP.has(operation)||operation==='terminal.exchange'&&(args.input===undefined||args.input==='')||operation==='transfers.io'&&['status','direct-revoke'].includes(args.action))return;
+    const machines=[args.machine,args.from,args.sourceMachine,args.targetMachine,args.source?.machine,args.job?.machine].filter(id=>typeof id==='string');
+    if(args.jobId){const job=service.store.jobs.find(job=>job.id===args.jobId&&(admin||job.userId===principal?.userId));if(job)machines.push(job.machine);}
+    const value=maintenanceState(service);
+    if(value.global)throw maintenanceError(null,value.global);
+    for(const machine of machines)if(value.machines[machine]){
+      const visible=admin||actor?.enabled&&(service.store.get(actor.id).limits[machine]||service.archiveMachineVisible?.(actor.id,machine));
+      if(principal&&!visible)throw Object.assign(Error('这台机器未授权。'),{status:403,code:'MAINTENANCE_ACTIVE'});
+      throw maintenanceError(machine,value.machines[machine]);
+    }
+  };
+  const bridge=service.bridge;
+  if(bridge)service.bridge=(machine,operation,args)=>{
+    const actor=service.store.users.find(user=>user.id===(args.userId||args.job?.userId));
+    service.assertMaintenanceAllowed(operation,{...args,machine},actor?{userId:actor.id,role:actor.role||'member'}:null);
+    return bridge(machine,operation,args);
+  };
   service.db.exec(`CREATE TABLE IF NOT EXISTS maintenance_requests (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,owner_id TEXT NOT NULL,client_key TEXT NOT NULL,
     digest TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,data TEXT NOT NULL,
@@ -80,6 +155,7 @@ export function installMaintenance(service){
 }
 export async function maintenanceCall(service,principal,operation,args){
   const current=user(service,principal);
+  if(['maintenance.status','maintenance.set'].includes(operation))return operationalCall(service,principal,operation,args);
   // Reject before loading an ID or accepting old approval tokens. Only these
   // exact read operations survive; unknown/legacy writes always return 410.
   if(!['maintenance.list','maintenance.get'].includes(operation))fail(MAINTENANCE_RETIRED_MESSAGE,410);

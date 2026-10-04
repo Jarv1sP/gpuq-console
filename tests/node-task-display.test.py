@@ -23,7 +23,7 @@ class NodeDisplay(unittest.TestCase):
     def setUp(self):
         F.SchedulerPriorityTests.setUp(self)
         folder=self.root/'node';folder.mkdir()
-        for name in ('node-executor.py','scheduling-policy.py','task-display.py'):shutil.copy2(DEPLOY/name,folder/name)
+        for name in ('node-executor.py','scheduling-policy.py','task-display.py','platform-root-guard.py'):shutil.copy2(DEPLOY/name,folder/name)
         self.configNode={'root':str(folder/'state'),'cards':4,'gpu':'/not/a/gpu','database':str(self.config.db_path)}
         (folder/'node-config.json').write_text(json.dumps(self.configNode))
         spec=importlib.util.spec_from_file_location('node_display_under_test',folder/'node-executor.py');self.node=importlib.util.module_from_spec(spec);sys.modules[spec.name]=self.node;spec.loader.exec_module(self.node)
@@ -85,7 +85,11 @@ class NodeDisplay(unittest.TestCase):
         started=self.node.process('sync',{'job':self.job})
         (self.node.HERE/'task-display.py').unlink()
         # Even stale/bad presentation is not authorization or lifecycle input.
-        with patch.object(self.node.importlib.util,'spec_from_file_location',side_effect=AssertionError('optional import forbidden')):
+        load=self.node.importlib.util.spec_from_file_location
+        def guard_only(name,path,*args,**kwargs):
+            if Path(path).name=='task-display.py':raise AssertionError('optional display import forbidden')
+            return load(name,path,*args,**kwargs)
+        with patch.object(self.node.importlib.util,'spec_from_file_location',side_effect=guard_only):
             canceled=self.node.process('cancel',{'job':self.job,'metadata':{'name':'wrong'}})
         self.assertEqual(canceled['state'],'CANCELED');self.assertEqual(canceled['nodeJobId'],started['nodeJobId'])
         self.assertFalse(any(c[0]=='set-display' for c in self.commands))

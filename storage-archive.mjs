@@ -66,6 +66,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   };
   const fence=(row,snapshot)=>{
     if(service.closing||!policy.enabled)fail('Archive service is unavailable');
+    service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:row.machine,from:policy.machine});
     if(!currentPolicy(row))fail('Archive policy changed; existing intent requires administrator review');
     const user=enabledUser(row.owner,row.machine);
     if(snapshot!==undefined&&JSON.stringify(user)!==snapshot)fail('Archive owner policy changed during operation');
@@ -153,6 +154,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   }
 
   async function advance(row){
+    if(service.maintenanceFor?.(row.machine)||service.maintenanceFor?.(policy.machine))return;
     if(row.nextCheckAt>clock())return;
     if(row.phase==='FAILED'||row.phase==='BLOCKED'||row.nextCheckAt>clock())return;
     const snapshot=fence(row);
@@ -201,13 +203,14 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   }
 
   service.reconcileStorageArchive=async()=>{
-    if(reconciling||service.closing||!policy.enabled||!service.bridge)return;
+    if(reconciling||service.closing||!policy.enabled||!service.bridge||service.maintenanceFor?.(policy.machine))return;
     reconciling=true;
     try{
       // Only post-enable publish intents are enumerated. No scan of old users,
       // datasets, disks or cloud accounts creates an archive job.
       for(const machine of MACHINES){
         if(service.closing)return;
+        if(service.maintenanceFor?.(machine.id))continue;
         try{
           const value=await service.bridge(machine.id,'storage.archive.events',{limit:8});
           if(!Array.isArray(value?.events)||value.events.length>8)fail('Invalid archive outbox response');
@@ -223,8 +226,9 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       const pending=held?(heldRow?[heldRow]:[]):rows().filter(row=>row.nextCheckAt<=clock()&&(row.phase==='ARCHIVED'&&!row.eventAcknowledged||!['ARCHIVED','FAILED','BLOCKED'].includes(row.phase))).sort((a,b)=>a.updatedAt-b.updatedAt);
       for(const row of pending.slice(0,1)){
         try{await advance(row);}
-        catch{
+        catch(error){
           if(service.closing)return;
+          if(error.code==='MAINTENANCE_ACTIVE')continue; // Retain the fixed intent/lane without automatic retry or cleanup.
           row.failures=(row.failures||0)+1;
           row.nextCheckAt=clock()+Math.min(300000,15000*2**Math.min(row.failures,5));
           row.error='归档状态暂未确认；保留本机数据，稍后自动核对。';

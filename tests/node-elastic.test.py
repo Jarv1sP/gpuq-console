@@ -45,7 +45,7 @@ class Elastic(unittest.TestCase):
     def test_bridge_forwards_maximum_minimum_batch_and_checkpoint_expand_exactly(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)
-            for name in ('node-executor.py','scheduling-policy.py'):shutil.copy2(ROOT/'deploy'/name,root/name)
+            for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py'):shutil.copy2(ROOT/'deploy'/name,root/name)
             config={'root':str(root/'state'),'cards':8,'gpu':'/not/a/gpu','database':str(root/'db')};(root/'node-config.json').write_text(json.dumps(config))
             with closing(sqlite3.connect(config['database'])) as db:db.execute('CREATE TABLE jobs(id TEXT,submit_key TEXT)');db.commit()
             node=load('elastic_node_test',root/'node-executor.py');commands=[]

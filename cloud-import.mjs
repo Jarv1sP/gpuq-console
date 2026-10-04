@@ -38,6 +38,7 @@ function rate(service,user,kind,limit){const now=Date.now();for(const [key,v] of
 function sweep(service){const now=Date.now();for(const map of [service.cloudQR,service.cloudInspections])for(const [key,v] of map)if(v.expiresAt<now)map.delete(key);}
 function authorized(service,actor,machine){const user=service.store.get(actor.userId);if(!user.enabled||!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);if(!service.bridge)fail('节点执行桥未连接。',503);}
 export async function cloudImportCall(service,actor,operation,args,assertCurrent=()=>{}){
+  service.assertMaintenanceAllowed?.(operation,args,actor);
   const provider=service.cloudProvider,backend=backendOf(provider),generation=service.cloudGeneration;sweep(service);
   const current=()=>{assertCurrent();if(service.cloudProvider!==provider||service.cloudGeneration!==generation||service.cloudDisabled())fail('云盘连接已更改或停用，请重新操作。',409);};
   if(operation==='cloud.info'){

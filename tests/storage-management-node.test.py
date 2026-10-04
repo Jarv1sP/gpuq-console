@@ -119,6 +119,25 @@ class StorageManagementRoute(unittest.TestCase):
         self.assertIn('OnUnitInactiveSec=1h', timer)
         self.assertNotIn('Persistent=true', timer)
 
+    def test_local_gc_defers_lock_contention_once_without_claiming_no_evictions(self):
+        storage = self.node.storage_node()
+        storage.tier.enabled = True
+        with patch.object(storage.tier, 'collect', side_effect=self.module.CacheBusy('busy')) as collect:
+            result = self.node.storage_collect()
+        self.assertEqual(result, {'enabled':True,'state':'DEFERRED','reason':'CACHE_BUSY',
+                                  'recheck':'NEXT_SCHEDULED_RUN','evictionOutcome':'CHECK_STATUS'})
+        self.assertEqual(collect.call_count, 1)
+        self.assertNotIn('evicted', result)
+
+    def test_local_gc_does_not_hide_storage_or_authority_errors(self):
+        storage = self.node.storage_node()
+        storage.tier.enabled = True
+        for error in (self.module.CacheError('mount changed'), OSError('disk failure'), ValueError('bad policy')):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(storage.tier, 'collect', side_effect=error), \
+                    self.assertRaises(type(error)):
+                self.node.storage_collect()
+
     def configure_local_recovery(self):
         spec = importlib.util.spec_from_file_location('storage_recovery_fixture_tier', self.base / 'dataset-tier.py')
         tier_module = importlib.util.module_from_spec(spec)

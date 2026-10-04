@@ -9,7 +9,7 @@ import {yieldCapable} from './dist/scheduling-policy.js';
 import {normalizeJobSubmission,createSubmittedJob,datasetReferences} from './job-submission.mjs';
 import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
-import {datasetCatalogCall} from './dataset-catalog.mjs';
+import {datasetCatalogCall,datasetListView} from './dataset-catalog.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 export {datasetReferences} from './job-submission.mjs';
@@ -76,6 +76,7 @@ export function installExecution(service,bridge){
             try{await releaseDataPreparation(service,job);}catch{}
             continue;
           }
+          if(service.maintenanceFor?.(job.machine)&&!job.cancelRequested)continue;
           const policyRevision=job.policyRevision||0;
           try{
             if(job.state===DATA_PREPARING){
@@ -83,7 +84,7 @@ export function installExecution(service,bridge){
               continue;
             }
             const action=job.cancelRequested?'cancel':'sync';
-            const result=await bridge(job.machine,action,nativeJobRequest(service,job));
+            const result=await service.bridge(job.machine,action,nativeJobRequest(service,job));
             await service.enqueue(()=>{
               const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||TERMINAL.has(current.state)||(current.policyRevision||0)!==policyRevision)return;
               // LOST/unknown remains nonterminal: retain quota until confirmed.
@@ -108,6 +109,7 @@ export async function executionCall(service,principal,operation,args){
   const user=service.store.get(principal.userId);
   const jobView=job=>publicJob(job,service.store.users);
   if(!user.enabled)fail('账号已暂停。',403);
+  service.assertMaintenanceAllowed?.(operation,args,principal);
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   if(operation.startsWith('datasets.storage.')){
@@ -250,6 +252,7 @@ export async function executionCall(service,principal,operation,args){
     try{result=await service.bridge(machine,operation,{...reference,userId:user.id,hostAdmin:principal.role==='admin'});}
     catch(error){if(operation==='datasets.status'&&!byOperation&&service.resolveDataset)return (await service.resolveDataset(user.id,machine,reference)).status;throw error;}
     if(operation==='datasets.prepare')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
+    if(operation==='datasets.list')return datasetListView(result,service.store.users);
     return result;
   }
   if(['terminal.open','terminal.exchange','terminal.close','terminal.detach'].includes(operation)){
