@@ -28,6 +28,9 @@ def load(name,filename):
 P=load('placement_policy','scheduling-policy.py');C=load('placement_control','training-control.py')
 
 class Sharing(unittest.TestCase):
+    def setUp(self):
+        __import__('runpy').run_path(str(Path(__file__).with_name('storage_test_helpers.py')))['isolated_platform_pin'](self)
+
     def job(self,**changes):return {'cards':1,'priority':'normal','preemptIdleOnly':True,'placement':{'gpuIndices':[3],'shared':True,'vramMiB':4097,'hami':False},**changes}
 
     def test_explicit_shared_rank_remains_queue_only_and_cannot_mix_elastic(self):
