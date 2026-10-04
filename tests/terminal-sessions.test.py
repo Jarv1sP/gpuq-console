@@ -19,7 +19,7 @@ class TerminalSessions(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.base=Path(self.temp.name).resolve()
         deploy=Path(__file__).resolve().parents[1]/'deploy'
-        for name in ('node-executor.py','scheduling-policy.py','project-ops.py','project-store.py'):
+        for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py','project-ops.py','project-store.py'):
             shutil.copy2(deploy/name,self.base/name)
         conda=self.base/'conda'
         for name in ('bin','lib','conda-meta'):(conda/name).mkdir(parents=True)

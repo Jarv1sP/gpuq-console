@@ -17,6 +17,7 @@ class ProgressBridge(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.base=Path(self.temp.name)
         shutil.copy2(DEPLOY/'node-executor.py',self.base/'node-executor.py')
         shutil.copy2(DEPLOY/'scheduling-policy.py',self.base/'scheduling-policy.py')
+        shutil.copy2(DEPLOY/'platform-root-guard.py',self.base/'platform-root-guard.py')
         self.config={'root':str(self.base/'state'),'cards':8,'gpu':'/synthetic-gpu','database':str(self.base/'gpuq.db')}
         (self.base/'node-config.json').write_text(json.dumps(self.config))
         with closing(sqlite3.connect(self.config['database'])) as db:db.execute('CREATE TABLE jobs(id TEXT,submit_key TEXT)');db.commit()

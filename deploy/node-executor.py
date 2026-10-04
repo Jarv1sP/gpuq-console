@@ -25,10 +25,19 @@ STORAGE_LEASES=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DIAGNOSTICS=None
+PLATFORM_ROOT_GUARD=None
 policy_module=importlib.util.spec_from_file_location('gpuq_console_scheduling',HERE/'scheduling-policy.py')
 SCHEDULING=importlib.util.module_from_spec(policy_module);policy_module.loader.exec_module(SCHEDULING)
 PRIORITIES=SCHEDULING.PRIORITY_PRESETS
 PRIORITY_RANKS={'idle':0,'normal':2,'high':4,**{'P'+str(i):i for i in range(5)}}
+
+def platform_root_check():
+    global PLATFORM_ROOT_GUARD
+    if PLATFORM_ROOT_GUARD is None:
+        spec=importlib.util.spec_from_file_location('gpuq_platform_root_guard',HERE/'platform-root-guard.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        PLATFORM_ROOT_GUARD=module
+    return PLATFORM_ROOT_GUARD.check(ROOT)
 
 def job_diagnostics(job,data):
     global DIAGNOSTICS
@@ -842,6 +851,7 @@ def storage_collect():
 
 
 def process(operation,args):
+    platform_root_check()
     if operation.startswith(('storage.lease.','storage.download.')):return storage_lease_operation(operation,args)
     if operation.startswith('storage.archive.'):return storage_archive_operation(operation,args)
     if operation.startswith('datasets.storage.'):return storage_management(operation,args)
@@ -980,6 +990,7 @@ def process(operation,args):
 
 if __name__=='__main__':
     os.umask(0o077)
+    platform_root_check()
     if len(sys.argv)==3 and sys.argv[1]=='--storage-archive-worker':sys.exit(storage_archive().worker(sys.argv[2]))
     if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':
         print(json.dumps(storage_collect()));sys.exit(0)

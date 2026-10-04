@@ -24,6 +24,7 @@ class NodePriority(unittest.TestCase):
         self.base = Path(self.temp.name).resolve()
         shutil.copy2(DEPLOY / 'node-executor.py', self.base / 'node-executor.py')
         shutil.copy2(DEPLOY / 'scheduling-policy.py', self.base / 'scheduling-policy.py')
+        shutil.copy2(DEPLOY / 'platform-root-guard.py', self.base / 'platform-root-guard.py')
         self.config = {'root': str(self.base / 'state'), 'cards': 4,
                        'gpu': '/not/a/gpu', 'database': str(self.base / 'gpuq.db')}
         (self.base / 'node-config.json').write_text(json.dumps(self.config))

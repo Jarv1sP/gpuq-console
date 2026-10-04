@@ -60,6 +60,18 @@ class Transfers(unittest.TestCase):
         for p in self.patches:p.stop()
         self.fixture.tearDown()
     def control(self):return {'id':self.key,'userId':USER}
+    def test_live_peer_rechecks_platform_mount_before_each_read(self):
+        client=T.PeerClient(self.target.CONFIG['transferPeers']['gpu-1'],self.args['source'])
+        with patch.object(self.source,'platform_root_check',side_effect=ValueError('platform unavailable')), \
+                patch.object(self.src,'read') as read:
+            with self.assertRaisesRegex(ValueError,'unavailable'):client.call('info')
+            read.assert_not_called()
+            context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT);context.check_hostname=False;context.verify_mode=ssl.CERT_NONE
+            connection=http.client.HTTPSConnection('127.0.0.1',self.server.server_port,context=context,timeout=3)
+            try:
+                connection.request('GET','/capabilities');response=connection.getresponse()
+                self.assertEqual(response.status,503);self.assertFalse(json.loads(response.read())['sourceReady'])
+            finally:connection.close()
     def test_real_tls_copy_ready_sha_and_same_cgroup_publication(self):
         started=self.dst.start(self.args);self.assertEqual(started['state'],'UNKNOWN')
         self.assertEqual(self.dst.worker(self.key,1),0)

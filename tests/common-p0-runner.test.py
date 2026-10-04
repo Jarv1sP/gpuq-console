@@ -42,6 +42,7 @@ class CommonRunner(unittest.TestCase):
             self.assertEqual(args[1], job); runtime.mkdir(parents=True)
             return {'captureId': CAPTURE, 'runtimePath': str(runtime), 'available': available}
         diagnostic = SimpleNamespace(start_capture=Mock(side_effect=start), finish_capture=Mock())
+        guard = SimpleNamespace(check=Mock())
         mapping = SimpleNamespace(device_paths=Mock(return_value=devices or ['/dev/nvidia3', '/dev/nvidia2']))
         if broken: diagnostic.start_capture.side_effect = RuntimeError('observer unavailable')
         captured, properties, kept, memfds = [], [], [], []
@@ -70,7 +71,7 @@ class CommonRunner(unittest.TestCase):
             else: os.write(int(command[command.index('--ready-fd') + 1]), b'1')
             return SimpleNamespace(wait=lambda *args, **kwargs: 42, poll=lambda: 42)
         try:
-            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else mapping if filename=='gpu-devices.py' else diagnostic) as imported, \
+            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: guard if filename=='platform-root-guard.py' else P if filename=='scheduling-policy.py' else mapping if filename=='gpu-devices.py' else diagnostic) as imported, \
                     patch.object(S, 'start_job_capture', wraps=S.start_job_capture) as capture, \
                     patch.object(S, 'project_runtime', return_value=None), \
                     patch.object(S.sys, 'argv', ['sandbox-runner.py', JID] + (['terminal'] if terminal else [])), \
@@ -81,11 +82,12 @@ class CommonRunner(unittest.TestCase):
                     patch.object(S.subprocess, 'run', side_effect=lambda cmd, **kwargs: properties.append(cmd)), \
                     patch.object(S.subprocess, 'Popen', side_effect=spawn), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(S.main(), 42)
+                guard.check.assert_called_once_with(self.root)
                 if terminal:
                     capture.assert_not_called(); diagnostic.start_capture.assert_not_called()
-                    diagnostic.finish_capture.assert_not_called(); imported.assert_not_called(); gpu.assert_not_called()
+                    diagnostic.finish_capture.assert_not_called(); imported.assert_called_once_with('gpuq_platform_root_guard','platform-root-guard.py'); gpu.assert_not_called()
                 elif not missing and not broken:
-                    self.assertEqual([call.args for call in imported.call_args_list],[('gpuq_allocation','scheduling-policy.py'),('gpuq_gpu_devices','gpu-devices.py'),('gpuq_job_diagnostics','job-diagnostics.py')])
+                    self.assertEqual([call.args for call in imported.call_args_list],[('gpuq_platform_root_guard','platform-root-guard.py'),('gpuq_allocation','scheduling-policy.py'),('gpuq_gpu_devices','gpu-devices.py'),('gpuq_job_diagnostics','job-diagnostics.py')])
                     diagnostic.finish_capture.assert_called_once_with(self.root, job, CAPTURE, 42)
                 else: diagnostic.finish_capture.assert_not_called()
                 if not terminal:

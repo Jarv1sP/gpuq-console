@@ -24,7 +24,7 @@ class ProjectSecurity(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
-        for name in ('node-executor.py', 'scheduling-policy.py', 'project-ops.py', 'project-store.py'):
+        for name in ('platform-root-guard.py','node-executor.py', 'scheduling-policy.py', 'project-ops.py', 'project-store.py'):
             shutil.copy2(DEPLOY / name, self.root / name)
         conda = self.root / 'base'
         for name in ('bin', 'conda-meta', 'lib'):

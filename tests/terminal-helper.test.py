@@ -24,6 +24,11 @@ class TerminalHelper(unittest.TestCase):
         self.sock = self.folder / (self.jid + '.sock')
         source = Path(__file__).resolve().parents[1] / 'deploy' / 'terminal-helper.py'
         shutil.copy2(source, self.base / source.name)
+        # This disposable subprocess must never consult a production /etc pin.
+        self.guard_enable = self.base / 'guard-enable'
+        guard_source = (source.parent/'platform-root-guard.py').read_text()
+        (self.base/'platform-root-guard.py').write_text(guard_source.replace(
+            "ENABLE=Path('/etc/gpuq-platform-root')", 'ENABLE=Path('+repr(str(self.guard_enable))+')'))
         (self.base / 'node-config.json').write_text(json.dumps({'root': str(self.base / 'state')}))
         (self.folder / (self.jid + '.json')).write_text(json.dumps({'hostAdmin': False}))
         # A raw fixture deliberately disables the kernel's echo so every ACK
@@ -65,7 +70,7 @@ class TerminalHelper(unittest.TestCase):
                 self.process.wait(timeout=3)
         self.process.stderr.close()
 
-    def request(self, request):
+    def request(self, request, allow_error=False):
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(2)
             client.connect(str(self.sock))
@@ -77,7 +82,7 @@ class TerminalHelper(unittest.TestCase):
                     break
                 raw += part
         result = json.loads(raw)
-        self.assertNotIn('error', result)
+        if not allow_error:self.assertNotIn('error', result)
         return result
 
     def exchange(self, data=b'', **fields):
@@ -110,6 +115,15 @@ class TerminalHelper(unittest.TestCase):
         self.assertEqual(echo, b'7a-')
         self.assertEqual(result['offset'], latest)
         self.assertEqual(self.exchange()[0], b'')
+
+    def test_guard_loss_rejects_input_on_existing_connection_without_replay(self):
+        self.guard_enable.mkdir(mode=0o700)
+        try:
+            result=self.request({'input':base64.b64encode(b'x').decode()},allow_error=True)
+            self.assertIn('error',result)
+        finally:self.guard_enable.rmdir()
+        self.assertEqual(self.exchange()[0],b'')
+        self.assertEqual(self.exchange(b'y')[0],b'79-')
 
     def test_buffered_paste_preserves_fifo_and_never_replays_accepted_bytes(self):
         data = b'abcdefghijklmnopqrstuvwxyz' * 100

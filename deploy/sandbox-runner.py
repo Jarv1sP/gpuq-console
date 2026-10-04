@@ -100,6 +100,7 @@ def main():
     jid=sys.argv[1]
     if not re.fullmatch(r'[a-f0-9-]{36}',jid):raise ValueError('Invalid job ID')
     cfg=json.loads((HERE/'node-config.json').read_text());root=Path(cfg['root'])
+    local_module('gpuq_platform_root_guard','platform-root-guard.py').check(root)
     terminal=len(sys.argv)>2 and sys.argv[2]=='terminal'
     spec=json.loads((root/('terminals' if terminal else 'jobs')/f'{jid}.json').read_text())
     indices=os.environ.get('GPUQ_ASSIGNED_GPU_INDICES','').split(',')

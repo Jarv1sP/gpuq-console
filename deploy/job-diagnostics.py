@@ -8,6 +8,7 @@ cgroup directory, not a subprocess on each tick.
 import fcntl
 import hashlib
 import heapq
+import importlib.util
 import json
 import math
 import os
@@ -20,6 +21,18 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
+_ROOT_GUARD = None
+
+
+def platform_root_check(root):
+    global _ROOT_GUARD
+    if _ROOT_GUARD is None:
+        spec = importlib.util.spec_from_file_location('gpuq_diagnostics_root_guard', HERE/'platform-root-guard.py')
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        _ROOT_GUARD = module
+    return _ROOT_GUARD.check(root)
+
+
 BUNDLE_LIMIT = 1024 * 1024
 FILE_LIMIT = 64 * 1024
 LOG_BUDGET = 700 * 1024
@@ -114,6 +127,7 @@ def _identity(spec):
 
 
 def _folder(root, spec, capture=None, create=False):
+    platform_root_check(root)
     identity = _identity(spec)
     base = Path(root) / 'diagnostics'
     os.close(_private(base, create))
@@ -294,6 +308,7 @@ def observe(root, spec, capture, env, sleep=time.sleep):
         report['state'] = 'CAPTURING'; next_logs = 0
         deadline = report['createdAt'] + 2591900
         while True:
+            platform_root_check(root)
             now = time.time(); current = _sample(groupfd); _resources(report, current)
             ended = not current or current.get('cgroup.events', {}).get('populated') == 0
             try:
@@ -315,6 +330,9 @@ def observe(root, spec, capture, env, sleep=time.sleep):
                 _write(folder / 'report.json', report); break
             _write(folder / 'report.json', report); sleep(2)
     except (OSError, ValueError, KeyError):
+        # A missing bind is not a diagnostic failure to persist on the fallback
+        # filesystem. Recheck before the best-effort error report as well.
+        platform_root_check(root)
         _logs(report, folder); report.update(state='PARTIAL', error='Diagnostic cgroup or capture became unavailable', finalizedAt=time.time()); _write(folder / 'report.json', report)
     finally:
         if groupfd is not None: os.close(groupfd)
@@ -476,6 +494,7 @@ def _retire_capture_locked(path, claim, job, capture, now):
 
 def prune(root, now=None, max_jobs=64, max_captures=16):
     """Single bounded GC pass, resumed by timer using a persistent cursor."""
+    platform_root_check(root)
     now = time.time() if now is None else now
     base = Path(root) / 'diagnostics'
     try: os.close(_private(base))
@@ -499,6 +518,7 @@ def prune(root, now=None, max_jobs=64, max_captures=16):
                 if claim.get('jobId') != job: raise ValueError('Invalid GC job claim')
                 captures = _page(folder, CAPTURE, after, max_captures + 1)
                 for capture in captures[:max_captures]:
+                    platform_root_check(root)
                     try: _retire_capture(folder / capture, claim, job, capture, now)
                     except (OSError, ValueError, KeyError): pass
                     # Persist after each capture: a large rmtree can be killed
@@ -506,12 +526,15 @@ def prune(root, now=None, max_jobs=64, max_captures=16):
                     cursor = {'job': job, 'capture': capture, 'within': True}; _write(base / 'gc-cursor.json', cursor)
                 if len(captures) > max_captures: return
             except (OSError, ValueError, KeyError): pass
+            platform_root_check(root)
             cursor = {'job': job, 'capture': '', 'within': False}; _write(base / 'gc-cursor.json', cursor)
     finally: os.close(lock)
 
 
 if __name__ == '__main__':
     os.umask(0o077)
+    config = json.loads((HERE / 'node-config.json').read_text())
+    platform_root_check(Path(config['root']))
     if sys.argv[1:] == ['--gc']:
         config = json.loads((HERE / 'node-config.json').read_text()); prune(Path(config['root'])); raise SystemExit(0)
     if len(sys.argv) != 4 or sys.argv[1] != '--observe' or not UUID.fullmatch(sys.argv[2]) or not CAPTURE.fullmatch(sys.argv[3]): raise SystemExit(2)

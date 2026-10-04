@@ -30,6 +30,7 @@ class DirectTests(unittest.TestCase):
     def setUp(self):
         fixtures.PersonalUploads.setUp(self)
         self.node.CONFIG['machine'] = 'gpu-4'
+        self.node.platform_root_check = lambda: None
         self.mounts = []
         self.node.dataset_mount_check = lambda config: self.mounts.append(True)
         self.direct = DIRECT.DirectUploads(self.node, self.u)
@@ -49,6 +50,13 @@ class DirectTests(unittest.TestCase):
 
     def ticket(self, upload, user=None):
         return self.direct.issue(user or self.user, upload)
+
+    def test_platform_mount_loss_rejects_before_upload_read_or_write(self):
+        with patch.object(self.node, 'platform_root_check', side_effect=ValueError('platform unavailable')), \
+                patch.object(self.direct, 'claims') as claims:
+            with self.assertRaisesRegex(ValueError, 'platform unavailable'):
+                self.direct.process('unused', 'unused', 'chunk', {}, b'no write')
+            claims.assert_not_called()
 
     def raw(self, grant, upload, action, **args):
         data = args.pop('data', b'')

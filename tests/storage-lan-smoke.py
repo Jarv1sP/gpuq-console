@@ -67,7 +67,7 @@ def receipt(node, run_id, name, manifest, version):
                                      for f in manifest['files']], gcEnabled=False,
                 runnerSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 runtimeSha256={name: hashlib.sha256((node.HERE / name).read_bytes()).hexdigest()
-                               for name in ('node-executor.py', 'transfer-peer.py', 'storage-authority.py',
+                               for name in ('platform-root-guard.py','node-executor.py', 'transfer-peer.py', 'storage-authority.py',
                                             'dataset-tier.py', 'dataset-cache.py')})
 
 

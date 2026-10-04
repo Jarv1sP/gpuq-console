@@ -124,7 +124,7 @@ class Sharing(unittest.TestCase):
         for ready in (False,True):
             with self.subTest(ready=ready),tempfile.TemporaryDirectory() as temp:
                 root=Path(temp)
-                for name in ('node-executor.py','scheduling-policy.py'):shutil.copy2(ROOT/'deploy'/name,root/name)
+                for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py'):shutil.copy2(ROOT/'deploy'/name,root/name)
                 config={'root':str(root/'state'),'cards':8,'gpu':'/not/a/gpu','database':str(root/'db')};(root/'node-config.json').write_text(json.dumps(config))
                 with closing(sqlite3.connect(config['database'])) as db:db.execute('CREATE TABLE jobs(id TEXT,submit_key TEXT)');db.commit()
                 mod=importlib.util.spec_from_file_location('sharing_node_test',root/'node-executor.py');node=importlib.util.module_from_spec(mod);mod.loader.exec_module(node)

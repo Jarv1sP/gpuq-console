@@ -137,7 +137,8 @@ class GPUDevices(unittest.TestCase):
                 (jobs / (JID + '.json')).write_text(json.dumps({'id': JID, 'userId': 'demo-user-1', 'username': 'demo', 'cards': 1, 'argv': ['/usr/bin/true']}))
                 (self.root / 'node-config.json').write_text(json.dumps({'root': str(self.root), 'conda': '/opt/conda'}))
                 resolve = Mock(side_effect=ValueError('missing device UUID'))
-                modules = {'scheduling-policy.py': P, 'gpu-devices.py': SimpleNamespace(device_paths=resolve)}
+                guard = SimpleNamespace(check=Mock())
+                modules = {'platform-root-guard.py': guard, 'scheduling-policy.py': P, 'gpu-devices.py': SimpleNamespace(device_paths=resolve)}
                 with patch.object(runner, 'HERE', self.root), patch.object(runner, 'local_module', side_effect=lambda name, file: modules[file]), \
                         patch.object(runner.sys, 'argv', ['sandbox-runner.py', JID]), \
                         patch.dict(runner.os.environ, {'GPUQ_ASSIGNED_GPU_INDICES': '2', 'GPUQ_ASSIGNED_GPU_UUIDS': UUIDS[2]}), \
@@ -145,6 +146,7 @@ class GPUDevices(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'missing device UUID'):
                         runner.main()
                     resolve.assert_called_once_with([UUIDS[2]])
+                    guard.check.assert_called_once_with(self.root)
                     smi.assert_not_called(); run.assert_not_called(); spawn.assert_not_called()
 
 

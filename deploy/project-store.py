@@ -12,6 +12,7 @@ this is a same-machine venv release, not a portable/hermetic OCI image.
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -28,6 +29,17 @@ VERSION = re.compile(r'^[a-f0-9]{64}$')
 JOB_ID = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_ROOT_GUARD = None
+
+
+def check_platform_root(root):
+    global _ROOT_GUARD
+    if _ROOT_GUARD is None:
+        spec = importlib.util.spec_from_file_location('gpuq_project_root_guard', Path(__file__).resolve().parent/'platform-root-guard.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _ROOT_GUARD = module
+    return _ROOT_GUARD.check(root)
 
 
 class ProjectError(ValueError):
@@ -131,6 +143,7 @@ class ProjectStore:
                  max_entries=200000, max_bytes=50 * 1024**3,
                  max_projects=64, max_releases=64):
         self.root = absolute(root)
+        check_platform_root(self.root)
         self.base = absolute(base_path)
         self.path = self.root / 'projects-v2'
         self.reserve_bytes = reserve_bytes
@@ -150,6 +163,7 @@ class ProjectStore:
         private_dir(self.path / '.run-claims', create=True)
 
     def _check_root(self):
+        check_platform_root(self.root)
         with directory(self.root) as fd:
             info = os.fstat(fd)
             if ((info.st_dev, info.st_ino) != self.root_identity or

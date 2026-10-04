@@ -1,5 +1,7 @@
 """Workspace boundary regression tests, no remote host or GPU required."""
 import base64,importlib.util,json,os,shutil,tempfile,unittest
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from unittest.mock import patch
 from types import SimpleNamespace
 from pathlib import Path
@@ -9,6 +11,7 @@ class Files(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();base=Path(self.temp.name)
         shutil.copy2(Path(__file__).resolve().parents[1]/'deploy/node-executor.py',base/'node.py')
         shutil.copy2(Path(__file__).resolve().parents[1]/'deploy/scheduling-policy.py',base/'scheduling-policy.py')
+        shutil.copy2(Path(__file__).resolve().parents[1]/'deploy/platform-root-guard.py',base/'platform-root-guard.py')
         (base/'node-config.json').write_text(json.dumps({'root':str(base/'data')}))
         spec=importlib.util.spec_from_file_location('node_test',base/'node.py');self.node=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.node)
         self.root=self.node.workspace('demo-user-1')
@@ -29,6 +32,24 @@ class Files(unittest.TestCase):
     def test_traversal_and_absolute_paths(self):
         for path in ['../x','/etc/passwd','foo/../../x','foo//x','foo/./x','foo\\x','']:
             with self.subTest(path=path),self.assertRaises(ValueError):self.call('get',path)
+    def test_platform_mount_loss_rejects_before_operation_dispatch(self):
+        with patch.object(self.node,'platform_root_check',side_effect=ValueError('platform unavailable')), \
+                patch.object(self.node,'workspace') as workspace:
+            with self.assertRaisesRegex(ValueError,'platform unavailable'):
+                self.node.process('files.put',{'userId':'demo-user-1','path':'new','data':'eA=='})
+            workspace.assert_not_called()
+    def test_concurrent_guard_import_never_publishes_partial_module(self):
+        barrier=threading.Barrier(2)
+        def execute(module):
+            barrier.wait(timeout=2)
+            module.check=lambda root:{'checked':str(root)}
+        spec=SimpleNamespace(loader=SimpleNamespace(exec_module=execute))
+        with patch.object(self.node.importlib.util,'spec_from_file_location',return_value=spec), \
+                patch.object(self.node.importlib.util,'module_from_spec',side_effect=lambda _:SimpleNamespace()):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures=[pool.submit(self.node.platform_root_check) for _ in range(2)]
+                self.assertEqual([item.result(timeout=3) for item in futures],
+                                 [{'checked':str(self.node.ROOT)}]*2)
     def test_symlink_directory_and_file(self):
         outside=Path(self.temp.name)/'secret';outside.write_text('secret')
         (self.root/'link').symlink_to(outside);(self.root/'dir').symlink_to(outside.parent,target_is_directory=True)

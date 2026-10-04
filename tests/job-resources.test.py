@@ -263,6 +263,7 @@ class Resources(unittest.TestCase):
                                    RESOURCE_FILE=R.RESOURCE_FILE, RAY_SPILL_DIR=R.RAY_SPILL_DIR)
         devices = ['/dev/nvidia' + str(i) for i in [3,2,1,0,7,6,5,4][:allocated_cards]]
         mapping = SimpleNamespace(device_paths=Mock(return_value=devices))
+        guard = SimpleNamespace(check=Mock())
         runtime = self.root / 'diagnostic-runtime'; runtime.mkdir()
         runtimefd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY) if managed_runtime else None
         data = self.root/'personal-data';data.mkdir()
@@ -270,7 +271,7 @@ class Resources(unittest.TestCase):
         datalock = os.open(self.root/'personal-data.lock', os.O_CREAT | os.O_RDWR, 0o600) if data_workspace else None
         self.data_descriptors = (datafd, datalock)
         try:
-            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: P if filename=='scheduling-policy.py' else mapping if filename=='gpu-devices.py' else resource), \
+            with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: guard if filename=='platform-root-guard.py' else P if filename=='scheduling-policy.py' else mapping if filename=='gpu-devices.py' else resource), \
                     patch.object(S, 'start_job_capture', return_value=(None, None, runtimefd)), \
                     patch.object(S, 'project_runtime', return_value=None), \
                     patch.object(S, 'open_data_workspace', return_value=(datafd,datalock)), \
@@ -283,6 +284,7 @@ class Resources(unittest.TestCase):
                     patch.object(S.subprocess, 'run', side_effect=lambda command, **kwargs: properties.append(command)), \
                     patch.object(S.subprocess, 'Popen', side_effect=spawn):
                 self.assertEqual(S.main(), 42)
+                guard.check.assert_called_once_with(self.root)
                 if terminal: gpu_check.assert_not_called()
                 else:
                     mapping.device_paths.assert_called_once_with(UUIDS[:allocated_cards])
