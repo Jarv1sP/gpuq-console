@@ -40,7 +40,7 @@ try{
       if(mode==='unknown'&&machine!==target)throw Error('Local fixture catalog unavailable');
       return {datasets:Object.entries(states).flatMap(([dataset,values])=>{
         const state=mode==='unknown'?(machine===target?'UNKNOWN':null):values[index];if(!state)return [];
-        return [{dataset:dataset==='tiny-local'?'local-samples':dataset,ownerIds:[args.userId],versions:[{version:dataset==='validation'?second:hash,state,canPrepare:state!=='UNKNOWN',bytes:dataset==='tiny-local'?2048:7*1024**3,files:dataset==='tiny-local'?1:120,...(state==='FAILED'?{error:'本地模拟缓存取回失败，可重试。'}:{})}]}];
+        return [{dataset:dataset==='tiny-local'?'local-samples':dataset,ownerIds:[args.userId],versions:[{version:dataset==='validation'?second:hash,state,canPrepare:state!=='UNKNOWN'&&state!=='PREPARING',bytes:dataset==='tiny-local'?2048:7*1024**3,files:dataset==='tiny-local'?1:120,...(state==='FAILED'?{error:'本地模拟缓存取回失败，可重试。'}:{})}]}];
       })};
     }
     if(operation==='datasets.storage.status'){
@@ -57,6 +57,9 @@ try{
     throw Error('Unexpected local fixture operation '+operation);
   }}));clearInterval(service.executionTimer);
   service.datasetAliases=(_owner,machine)=>new Map(machine===target?[['local-samples@'+hash,'tiny-local']]:[]);
+  // Explicit local replica capability lets the real catalog supply a source;
+  // a database destination alone must never manufacture that route.
+  const originalTransferCall=service.transferCall.bind(service);service.transferCall=(principal,operation,args)=>operation==='transfers.capabilities'?Promise.resolve({enabled:true,sources:[source],targets:[target]}):originalTransferCall(principal,operation,args);
   service.archiveState=(_owner,machine,value)=>value.dataset==='local-samples'?null:{...value,phase:mode==='unknown'?'BLOCKED':value.dataset==='validation'?(databasePhase||'COPYING'):'ARCHIVED',archiveMachine:database,localMachine:machine,originalRetained:mode!=='unknown'&&value.dataset!=='validation'};
   await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'data-flow-member',password})).result;await service.invoke(admin.token,'policy.full',{userId:member.id,policyVersion:0});
   const zero=(await service.invoke(admin.token,'users.create',{username:'zero-cache-grants',password})).result;
@@ -81,6 +84,8 @@ try{
     for(const width of [1440,390,320]){await check(memberPage,'database-'+phase,width);await captureComponent(memberPage,'.dataset-library','database-'+phase+'-'+width);}
   }
   databasePhase=null;await load(memberPage);
+  const preparingDetail=memberPage.locator('.dataset-card').filter({has:memberPage.locator('.dataset-card-heading h3').filter({hasText:'scans'})}).locator('.dataset-version-details');await preparingDetail.locator('summary').click();assert.equal(await preparingDetail.locator('.dataset-flow-route .server-id').count(),2);assert.deepEqual(await preparingDetail.locator('.dataset-flow-route .server-id').evaluateAll(nodes=>nodes.map(node=>node.title)),[source,target]);assert.doesNotMatch(await preparingDetail.locator('.dataset-flow-route').innerText(),/数据库/);
+  for(const width of [1440,390,320]){await check(memberPage,'preparing-details',width);await captureComponent(memberPage,'.dataset-card:has(.dataset-flow-route)','member-preparing-details-'+width);}await preparingDetail.locator('summary').click();
   const local=memberPage.locator('.dataset-card').filter({has:memberPage.locator('[data-use-dataset="tiny-local"]')});await local.locator('.dataset-version-details>summary').click();assert.equal(await local.locator('.dataset-lifecycle li').count(),2);await local.locator('[data-copy-dataset-version]').click();await local.getByRole('button',{name:'复制完整版本'}).filter({hasText:'已复制'}).waitFor();assert.equal(await memberPage.evaluate(()=>navigator.clipboard.readText()),hash);await local.locator('.dataset-version-details>summary').click();
   await memberPage.locator('#datasets-add>summary').click();assert.equal(await memberPage.locator('.dataset-upload-journey>li').count(),3);assert.doesNotMatch(await memberPage.locator('.dataset-upload-journey').innerText(),/数据库/);
   for(const source of ['directory','link','workspace']){
@@ -133,7 +138,7 @@ try{
   }
   mode='normal';
   if(process.env.DATA_FLOW_FULL_SCAN==='1')for(const {role,views} of actors)for(const {zoom,page} of views){
-    await load(page);await page.locator('#datasets-add>summary').click();
+    await load(page);const details=page.locator('.dataset-card').filter({has:page.locator('.dataset-card-heading h3').filter({hasText:'scans'})}).locator('.dataset-version-details');await details.locator('summary').click();const detailResults=await scanGeometry(page,geometry,{zoom});await writeFile(join(out,'geometry-'+role+'-details-'+zoom+'.json'),JSON.stringify({role,zoom,results:detailResults},null,2));assert.ok(detailResults.every(row=>row.pass),JSON.stringify(detailResults.filter(row=>!row.pass).slice(0,2)));console.log('GEOMETRY',role,'details',zoom,detailResults.length,'PASS');await details.locator('summary').click();await page.locator('#datasets-add>summary').click();
     for(const source of ['directory','link','workspace']){
       await page.locator('#dataset-source-'+source).click();const results=await scanGeometry(page,geometry,{zoom});await writeFile(join(out,'geometry-'+role+'-sheet-'+source+'-'+zoom+'.json'),JSON.stringify({role,source,zoom,results},null,2));assert.ok(results.every(row=>row.pass),JSON.stringify(results.filter(row=>!row.pass).slice(0,2)));console.log('GEOMETRY',role,'sheet-'+source,zoom,results.length,'PASS');
     }

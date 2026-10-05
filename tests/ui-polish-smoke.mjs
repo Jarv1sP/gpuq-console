@@ -128,7 +128,7 @@ try{
   const preparing=page.locator('.dataset-readiness[data-state=PREPARING]');
   await preparing.waitFor({state:'attached'});
   await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').waitFor();
-  assert.match(await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').innerText(),/准备中/);
+  assert.equal(await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').innerText(),'取回中');
   await page.locator('.dataset-version-details').filter({has:preparing}).locator('summary').click();
   await preparing.waitFor();
   await textContrast();await capture('datasets-desktop');

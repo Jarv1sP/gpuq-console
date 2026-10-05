@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {databaseSummary,hasDatabaseOriginal,cacheFact,cacheProgress,cacheIconHTML,databaseGroundHTML,datasetLifecycle,datasetFlowDetailHTML,uploadJourneyHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML} from '../dist/dataset-flow.js';
+import {databaseSummary,hasDatabaseOriginal,cacheFact,cacheProgress,cacheIconHTML,databaseGroundHTML,datasetLifecycle,datasetFlowRoute,datasetFlowDetailHTML,uploadJourneyHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML} from '../dist/dataset-flow.js';
 import {cacheRetentionSession,cacheAdminHTML} from '../dist/dataset-cache-admin.js';
 import {datasetRows,archiveStatus} from '../dist/datasets-ui.js';
 const hash='a'.repeat(64),other='b'.repeat(64);
@@ -54,6 +54,14 @@ test('progress has an explicit byte contract and current catalog renders no perc
   assert.equal(cacheFact(v,'sample-training-node',{machine:'sample-training-node'},'PREPARING').progress,null);
   const stages=datasetLifecycle(v,{machine:'sample-training-node'});assert.ok(stages.some(row=>row.label.startsWith('取回到')&&row.state==='current'));assert.ok(stages.every(row=>!Object.hasOwn(row,'time')));assert.ok(!stages.some(row=>row.label==='上传'||row.label==='可用于训练'));
   const local=version(null);local.locations[0].state='READY';assert.deepEqual(datasetLifecycle(local,{machine:'sample-training-node'}).map(row=>row.label),['缓存就绪','可用于训练']);
+});
+test('preparing detail route needs the returned source, its READY location and confirmed target, without guessing a database route',()=>{
+  const catalog={machine:'sample-training-node',machines:[{machine:'sample-training-node',state:'ok'}]},v={...version(),state:'PREPARING',sourceMachine:'sample-source-node',bytes:7*1024**3};
+  v.locations.push({machine:'sample-source-node',dataset:'physical-source',state:'READY'});
+  assert.deepEqual(datasetFlowRoute(v,catalog),{source:'sample-source-node',target:catalog.machine,bytes:7*1024**3});
+  for(const changed of [{...v,sourceMachine:null},{...v,sourceMachine:catalog.machine},{...v,canPrepare:false},{...v,state:'UNKNOWN'},{...v,locations:[]}])assert.equal(datasetFlowRoute(changed,catalog),null);
+  assert.equal(datasetFlowRoute(v,{...catalog,machines:[{machine:catalog.machine,state:'unavailable'}]}),null);
+  assert.equal(datasetFlowRoute({...v,bytes:null},catalog).bytes,null);
 });
 test('upload journey has exactly three stages and cannot invent database capability or mark unknown results ready',()=>{
   for(const kind of [null,'campus-direct','vps-relay']){

@@ -6,6 +6,7 @@
 #page-datasets .dataset-help-label{font-size:14px;font-weight:500}
 #page-datasets :is(input:not([type=file]):not([type=checkbox]),select){height:40px;min-height:40px;line-height:20px;padding-block:8px}
 #page-datasets .data-workspace-card .button,#page-datasets #cloud-files .file-actions .button{min-height:48px}
+#page-datasets .cloud-import .button{min-height:48px}
 #page-datasets .dataset-source-tabs button{min-height:48px;padding:0 10px;justify-content:center}
 #page-datasets .dataset-upload-actions .button,#page-datasets #dataset-directory-picker{min-height:48px}
 #page-datasets .dataset-route-cell{min-height:40px}
@@ -40,6 +41,7 @@
 #page-datasets .dataset-target{background:var(--bg-1)}
 #page-datasets .dataset-location{position:relative;min-width:0}
 #page-datasets .dataset-location-status{min-width:0;max-width:100%}
+#page-datasets .dataset-location-fact{min-height:40px}
 #page-datasets .dataset-location-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #page-datasets .dataset-location:where([data-cache-state]) .dataset-location-icon{width:14px;height:14px;border-radius:3px;border:0;background:none;flex:none;transform:none}
 #page-datasets .dataset-location[data-cache-state=ready] .dataset-location-icon{background:var(--ink)}
@@ -50,7 +52,7 @@
 #page-datasets .dataset-location[data-cache-state=unknown] .dataset-location-icon{border:1.5px dashed var(--queue);border-radius:1px}
 #page-datasets .dataset-location[data-cache-state=staging] .dataset-location-icon{border:1px solid var(--prep);border-radius:50%}
 #page-datasets .dataset-location[data-cache-state=none] .dataset-location-icon{width:4px;height:4px;border-radius:50%;background:var(--ink-4);margin:5px}
-#page-datasets .dataset-location[data-cache-state=none] .dataset-location-text{display:none}
+#page-datasets .dataset-location[data-cache-state=none] .dataset-location-text{visibility:hidden;max-width:0}
 #page-datasets .dataset-location[data-cache-state=failed] .dataset-location-text{color:var(--err)}
 #page-datasets .dataset-cache-riser{position:absolute;left:19px;top:44px;bottom:-28px;border-left:1px dashed var(--prep);pointer-events:none;z-index:1}
 #page-datasets .dataset-cache-riser::after{content:"";position:absolute;left:-4px;bottom:-3px;width:7px;height:7px;border-radius:50%;background:var(--prep)}
@@ -142,6 +144,7 @@
   #page-datasets .copy-help-popup.ui-info-content{font-size:16px}
   #page-datasets :is(input:not([type=file]):not([type=checkbox]),select){height:44px;min-height:44px;line-height:24px}
   #page-datasets .data-workspace-card .button,#page-datasets #cloud-files .file-actions .button{min-height:44px}
+  #page-datasets .cloud-import .button,#page-datasets .dataset-location-fact{min-height:44px}
   #page-datasets .dataset-upload-actions .button,#page-datasets #dataset-directory-picker{min-height:44px}
   #page-datasets .dataset-route-cell{min-height:44px}
   #page-datasets .dataset-cache-legend{gap:10px 16px}

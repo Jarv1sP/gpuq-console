@@ -71,6 +71,15 @@ export function datasetLifecycle(version,catalog,{upload}={}){
   if(localState==='READY')stages.push({label:'可用于训练',state:'complete'});
   return stages;
 }
+// Read-only route evidence also survives an in-progress preparation. The
+// matrix's clickable route keeps its existing NOT_LOCAL admission checks.
+export function datasetFlowRoute(version,catalog){
+  if(!['NOT_LOCAL','PREPARING'].includes(version.state)||version.canPrepare!==true)return null;
+  const source=version.sourceMachine,target=catalog.machine;
+  if(typeof source!=='string'||!source||source===target||!(catalog.machines||[]).some(row=>row.machine===target&&row.state==='ok'))return null;
+  if(!(version.locations||[]).some(row=>row.machine===source&&row.state==='READY'))return null;
+  return {source,target,bytes:Number.isSafeInteger(version.bytes)&&version.bytes>=0?version.bytes:null};
+}
 export function datasetFlowDetailHTML(dataset,version,catalog,route,options={}){
   const stages=datasetLifecycle({...version,dataset},catalog,options);
   const local=(version.locations||[]).find(row=>row.machine===catalog.machine),physical=typeof local?.dataset==='string'&&local.dataset?local.dataset:null;
