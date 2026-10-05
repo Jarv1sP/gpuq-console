@@ -1,10 +1,9 @@
 // Short, on-demand explanations. They never send an application operation.
 let serial=0;
 const escape=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-export function copyHelp(label,text,chapter='',{triggerText=null,triggerLabel=label}={}){
+export function copyHelp(label,text,chapter=''){
   const id='copy-help-'+(++serial),href=/^\/guide(?:\/[a-z-]+)?(?:#section-\d+)?$/.test(chapter)?chapter:'';
-  const named=triggerText!==null,trigger=named?`<span>${escape(triggerText)}</span>`:'<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.5v4"/><circle cx="8" cy="5" r=".7" fill="currentColor" stroke="none"/></svg>';
-  return `<span class="copy-help${named?' copy-help-name':''}"><button type="button" class="copy-help-button${named?' copy-help-name-button':''}" data-copy-help aria-controls="${id}" aria-expanded="false" aria-label="${escape(triggerLabel)}">${trigger}</button><span class="copy-help-popup" id="${id}" popover="auto" role="note"><strong>${escape(label)}</strong><span>${escape(text)}</span>${href?`<a class="copy-help-guide" href="${escape(href)}" target="_blank" rel="noopener">了解更多 ↗</a>`:''}</span></span>`;
+  return `<span class="copy-help"><button type="button" class="copy-help-button" data-copy-help aria-controls="${id}" aria-expanded="false" aria-label="${escape(label)}"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.5v4"/><circle cx="8" cy="5" r=".7" fill="currentColor" stroke="none"/></svg></button><span class="copy-help-popup" id="${id}" popover="auto" role="note"><strong>${escape(label)}</strong><span>${escape(text)}</span>${href?`<a class="copy-help-guide" href="${escape(href)}" target="_blank" rel="noopener">了解更多 ↗</a>`:''}</span></span>`;
 }
 
 if(typeof document!=='undefined'){

@@ -178,7 +178,7 @@ function syncAuthGuide(){
 }
 const authGuideObserver=new MutationObserver(syncAuthGuide);
 for(const dialog of [$('#login-dialog'),$('#register-dialog')])authGuideObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
-installAuthentication(MACHINES);
+installAuthentication();
 const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','transfers','community','maintenance','users','me'].includes(initialHash))page=initialHash;}render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});

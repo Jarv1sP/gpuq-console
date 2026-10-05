@@ -19,8 +19,11 @@ export async function verifyAuthentication(page,origin,capture){
   assert.equal(await page.locator('.auth-r5-wordmark>path').count(),2);
   assert.equal(await page.locator('.auth-lambda').evaluate(node=>(node.getAttribute('d').match(/M/g)||[]).length),2,'the supplied animated path contains both Lambda glyphs');
   await page.waitForFunction(()=>!document.querySelector('#login-dialog').classList.contains('wordmark-ignition'));
-  const portraits=page.locator('[data-auth-machine]');
-  assert.deepEqual(await portraits.evaluateAll(nodes=>nodes.map(node=>({id:node.dataset.authMachine,bays:node.querySelectorAll('.auth-bay').length}))),MACHINES.map(machine=>({id:machine.id,bays:machine.cards})));
+  const portraits=page.locator('.auth-login-fleet figure');
+  assert.equal(await page.locator('.auth-login-fleet').getAttribute('aria-hidden'),'true');
+  assert.equal(await portraits.count(),4);
+  assert.deepEqual(await portraits.evaluateAll(nodes=>nodes.map(node=>node.querySelectorAll('.auth-bay').length)),[8,8,8,8],'the public decoration has fixed geometry');
+  assert.equal(await page.locator('#login-dialog [data-auth-machine],#login-dialog figcaption').count(),0);
   assert.equal(await page.locator('.auth-chassis :is(progress,[data-gpu-index],.unknown,.masked,.vram)').count(),0,'public login portraits contain no monitoring or permission readings');
   const boxes=await portraits.evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().toJSON()));
   assert.ok(boxes.every((box,index)=>!index||box.x>boxes[index-1].x));
@@ -62,33 +65,23 @@ export async function verifyAuthentication(page,origin,capture){
   }finally{await reduced.close();}
 }
 
-export async function verifyLongInventoryNames(browser,origin,capture){
-  const inventory=MACHINES.map((machine,index)=>({...machine,id:'inventory-server-with-a-very-long-directory-id-'+(index+1)}));
+export async function verifyPublicLoginInventoryPrivacy(browser,origin,capture){
+  const inventory=MACHINES.map((machine,index)=>({...machine,id:'private-directory-fixture-'+(index+1),model:'PRIVATE_MODEL_'+index,memory:(40+index)+' GB',cards:index+2}));
   const context=await browser.newContext({viewport:{width:320,height:844},reducedMotion:'reduce'}),errors=[],external=[];
   try{
     await context.route('**/*',route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol))return route.continue();external.push(url.href);return route.abort();});
     await context.route(origin+'/machines.js',route=>route.fulfill({contentType:'text/javascript',body:'export const MACHINES=Object.freeze('+JSON.stringify(inventory)+');'}));
     const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
-    await page.goto(origin);await page.locator('[data-auth-machine="'+inventory[0].id+'"]').waitFor();await page.evaluate(()=>document.fonts.ready);
-    assert.deepEqual(await page.locator('[data-auth-machine]').evaluateAll(nodes=>nodes.map(node=>node.dataset.authMachine)),inventory.map(machine=>machine.id),'names come from the loaded directory without aliases');
+    await page.goto(origin);await page.locator('.auth-chassis').first().waitFor();await page.evaluate(()=>document.fonts.ready);
+    const login=page.locator('#login-dialog'),html=await login.innerHTML();
+    for(const machine of inventory)for(const value of [machine.id,machine.model,machine.memory])assert.ok(!html.includes(value),'the public login does not expose inventory metadata');
+    assert.equal(await login.locator('[data-auth-machine],figcaption').count(),0);
+    assert.equal(await login.locator('.auth-login-fleet').getAttribute('aria-hidden'),'true');
+    assert.deepEqual(await login.locator('.auth-chassis').evaluateAll(nodes=>nodes.map(node=>({hidden:node.getAttribute('aria-hidden'),bays:node.querySelectorAll('.auth-bay').length}))),Array.from({length:4},()=>({hidden:'true',bays:8})),'decoration does not change with the loaded inventory');
     for(const width of [320,390,1440]){
       await page.setViewportSize({width,height:width===1440?1050:844});
       await page.waitForFunction(()=>document.querySelector('#login-dialog').scrollWidth<=document.querySelector('#login-dialog').clientWidth+1);
-      const first=page.locator('[data-auth-machine]').first(),button=first.locator('figcaption [data-copy-help]'),name=button.locator('span');
-      assert.equal(await name.textContent(),inventory[0].id);
-      assert.equal(await name.evaluate(node=>getComputedStyle(node).textOverflow),'ellipsis');
-      assert.ok(await name.evaluate(node=>node.scrollWidth>node.clientWidth),'long directory names actually truncate at each width');
-      assert.ok((await button.getAttribute('aria-label')).includes(inventory[0].id));
-      await capture(page,'r5-login-long-id-'+width+'.png');
-      if(width===320){
-        await button.focus();await page.keyboard.press('Enter');
-        const popup=page.locator('#'+await button.getAttribute('aria-controls'));await popup.waitFor({state:'visible'});
-        assert.equal(await popup.locator(':scope>span').innerText(),inventory[0].id);
-        const box=await popup.boundingBox();assert.ok(box.x>=0&&box.x+box.width<=320&&box.y>=0&&box.y+box.height<=844);
-        await capture(page,'r5-login-long-id-tip-320.png');
-        await page.keyboard.press('Escape');await popup.waitFor({state:'hidden'});
-        assert.equal(await page.locator('#login-dialog').evaluate(node=>node.open),true);
-      }
+      await capture(page,'r5-login-decoration-'+width+'.png');
     }
     assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   }finally{await context.close();}

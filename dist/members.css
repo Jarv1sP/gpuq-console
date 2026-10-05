@@ -145,7 +145,6 @@
 .sb #login-dialog .auth-r5-wordmark path{display:inline;fill:var(--ink);stroke:none}
 .sb #login-dialog .auth-login-fleet{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:23px;align-items:end;margin-top:clamp(32px,7dvh,70px);padding:0 4px}
 .sb #login-dialog .auth-login-fleet figure{margin:0;min-width:0}
-.sb #login-dialog .auth-login-fleet figcaption{font:11px var(--mono);color:var(--ink-2);text-align:center;margin-top:14px}
 .sb #login-dialog .auth-chassis{display:block;width:100%;height:auto;max-height:40dvh;fill:none;stroke:#45474b;stroke-width:1;stroke-linecap:butt;stroke-linejoin:miter}
 .sb #login-dialog .auth-chassis :is(path,rect,circle){vector-effect:non-scaling-stroke}
 .sb #login-dialog .auth-chassis .outer-depth{fill:#070708;stroke:#27282b}
@@ -187,7 +186,6 @@
  .sb #login-dialog .auth-login-identity{padding-top:0}
  .sb #login-dialog .auth-login-fleet{margin-top:20px;gap:12px;padding:0}
  .sb #login-dialog .auth-chassis{max-height:154px}
- .sb #login-dialog .auth-login-fleet figcaption{margin-top:8px}
  .sb #login-dialog #login-form{margin-top:24px;padding-top:14px}
  .sb #login-dialog .modal-head{margin-bottom:0}
  .sb #login-dialog .modal-head .icon-button{width:44px;min-width:44px;height:44px;min-height:44px}
@@ -197,3 +195,15 @@
  .sb #login-dialog .auth-footer{margin-top:18px;padding-top:10px}
 }
 @media(prefers-reduced-motion:reduce){.sb #login-dialog.wordmark-ignition .auth-lambda{animation:none!important;opacity:1;clip-path:none}}
+
+/* Keep one mobile control entry and fit the compact header without a second row. */
+@media(max-width:759px){
+ .sb[data-room=users] .page-heading{display:flex;flex-direction:row;align-items:center;justify-content:space-between}
+ .sb[data-room=users]:has(#mobile-control:not([hidden]) #live-pill:not([hidden])) .page-heading .heading-actions{display:none}
+}
+@media(max-width:360px){
+ .sb #app-topbar .wordmark.sm{font-size:calc(8px / .687)}
+ .sb #app-topbar .guide-link{font-size:0;width:44px;min-width:44px;justify-content:center}
+ .sb #app-topbar .guide-link::after{content:'↗';font-size:16px;line-height:1}
+ .sb #app-topbar .topbar-right{gap:8px}
+}

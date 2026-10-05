@@ -1,6 +1,6 @@
 import {openSubmit} from './starbase-workflows.mjs';
 import {resourceCard as card,resourceDetail,selectResource} from './resources-workflows.mjs';
-import {verifyAuthentication,verifyLongInventoryNames} from './auth-copy-acceptance.mjs';
+import {verifyAuthentication,verifyPublicLoginInventoryPrivacy} from './auth-copy-acceptance.mjs';
 // Browser acceptance: npm ci --ignore-scripts && npx playwright install chromium
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm,mkdir} from 'node:fs/promises';
@@ -121,7 +121,7 @@ try{
  await capture(admin,'members-invites-1440.png');await admin.setViewportSize({width:390,height:844});await capture(admin,'members-invites-390.png');await admin.setViewportSize({width:1440,height:1050});
  await admin.locator('[data-close=invites-dialog]').click();await admin.reload();await admin.locator('.management-toolbar [data-action=invites]').click();assert.equal(await admin.locator('#current-invite').inputValue(),code);await admin.locator('[data-close=invites-dialog]').click();
  await verifyAuthentication(member,origin,capture);
- await verifyLongInventoryNames(browser,origin,capture);
+ await verifyPublicLoginInventoryPrivacy(browser,origin,capture);
  await member.goto(origin);await member.locator('#login-dialog .guide-link').waitFor();assert.equal(await member.locator('.guide-link').count(),1);
  await capture(member,'login-1440.png');await member.setViewportSize({width:390,height:844});await capture(member,'login-390.png');
  assert.deepEqual(await member.locator('#login-dialog').boundingBox(),{x:0,y:0,width:390,height:844});
@@ -149,9 +149,29 @@ try{
  await admin.waitForFunction(()=>document.querySelector('[data-nav=me]').getAttribute('aria-current')==='page');
  assert.equal(await admin.locator('[data-nav=me]').getAttribute('aria-current'),'page');assert.equal(await admin.locator('#page-users').isVisible(),true);
  await admin.locator('[data-quota=gpu-1]').focus();assert.equal(await admin.locator('[data-quota=gpu-1]').inputValue(),'2');
- await capture(admin,'members-draft-390.png');await admin.setViewportSize({width:1440,height:1050});
+ await capture(admin,'members-draft-390.png');
+ await admin.setViewportSize({width:320,height:844});await admin.evaluate(()=>scrollTo(0,0));
+ await admin.waitForFunction(()=>document.querySelector('#app-topbar .wordmark').classList.contains('sm'));
+ const brandBox=await admin.locator('#app-topbar .brand').boundingBox(),guideBox=await admin.locator('#app-topbar .guide-link').boundingBox();
+ assert.ok(brandBox.x+brandBox.width<=guideBox.x,'320px brand and guide targets do not overlap');
+ assert.equal(await admin.locator('#app-topbar .guide-link').getAttribute('aria-label'),'使用指南');
+ assert.equal(await admin.locator('#app-topbar .guide-link').evaluate(node=>getComputedStyle(node).fontSize),'0px');
+ assert.ok(guideBox.width>=44&&guideBox.height>=44,'the icon-only guide keeps a phone touch target');
+ assert.ok(await admin.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+ const footerControl=await admin.locator('#mobile-control #live-pill').isVisible();
+ assert.equal(await admin.locator('.page-heading [data-shell-action=control]').isVisible(),!footerControl,'the member header has a fallback only when the footer control is absent');
+ if(!footerControl){const title=await admin.locator('#page-title').boundingBox(),control=await admin.locator('.page-heading [data-shell-action=control]').boundingBox();assert.ok(control.x>=title.x+title.width&&Math.abs(control.y+control.height/2-title.y-title.height/2)<3,'fallback control shares the title row');}
+ await admin.locator('[data-quota=gpu-1]').focus();await capture(admin,'members-draft-320.png');
+ await admin.setViewportSize({width:1440,height:1050});
  await admin.waitForTimeout(16000);assert.equal(await admin.locator('[data-quota=gpu-1]').inputValue(),'2');assert.equal(await admin.evaluate(()=>document.activeElement.dataset.quota),'gpu-1','automatic refresh preserves the dirty editor and its focused field');await admin.locator('[data-action=save-policy]').click();
  await member.waitForFunction(()=>document.querySelector('#resource-summary').textContent.includes('额度 2 张'),{},{timeout:22000});
+ await admin.setViewportSize({width:320,height:844});await admin.evaluate(()=>scrollTo(0,0));
+ await admin.waitForFunction(()=>document.querySelector('#live-pill').hidden);
+ const fallbackControl=admin.locator('.page-heading [data-shell-action=control]');
+ assert.equal(await fallbackControl.isVisible(),true,'the member page keeps control access when the footer has no activity');
+ const fallbackTitle=await admin.locator('#page-title').boundingBox(),fallbackBox=await fallbackControl.boundingBox();
+ assert.ok(fallbackBox.x>=fallbackTitle.x+fallbackTitle.width&&Math.abs(fallbackBox.y+fallbackBox.height/2-fallbackTitle.y-fallbackTitle.height/2)<3,'the fallback control stays on the title row');
+ await capture(admin,'members-saved-320.png');await admin.setViewportSize({width:1440,height:1050});
  await selectResource(member,'gpu-1',{metrics:true});
  assert.equal(await resourceDetail(member,'gpu-1').locator('[data-gpu-index]').count(),MACHINES[0].cards);
  for(const machine of MACHINES.slice(1)){
