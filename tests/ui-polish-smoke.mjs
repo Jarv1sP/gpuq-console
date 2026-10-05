@@ -9,6 +9,7 @@ import {MACHINES} from '../dist/machines.js';
 import {STARBASE_ASSETS} from '../frontend-assets.mjs';
 import {openSubmit,closeSubmit} from './starbase-workflows.mjs';
 import {selectResource,closeResource} from './resources-workflows.mjs';
+import {guardedRoute} from './browser-route-guard.mjs';
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-ui-polish';
 const baseline=process.env.UI_BASELINE==='1',errors=[],external=[],checks=[];
 const machine=MACHINES[0].id,release='a'.repeat(64),checkedAt=new Date().toISOString();
@@ -31,10 +32,10 @@ try{
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1080}});
   page.on('pageerror',e=>errors.push(e.message));
-  await page.route('**/*',async route=>{
+  await page.route('**/*',guardedRoute(async route=>{
     const url=new URL(route.request().url());
-    if(url.origin!==origin){if(['data:','blob:'].includes(url.protocol))return route.continue();external.push(url.href);return route.abort();}
-    if(url.pathname!=='/api/call')return route.continue();
+    if(url.origin!==origin){if(['data:','blob:'].includes(url.protocol)){await route.fallback();return;}external.push(url.href);await route.abort();return;}
+    if(url.pathname!=='/api/call'){await route.fallback();return;}
     const {operation}=route.request().postDataJSON();let result=null;
     if(operation==='projects.list')result={projects:[{project:'vision-lab',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]}]};
     else if(operation==='projects.status')result={project:'vision-lab',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
@@ -42,8 +43,8 @@ try{
     else if(operation==='datasets.catalog')result={machine,machines:MACHINES.map(item=>({machine:item.id,state:'ok'})),datasets:[{dataset:'vision-train',versions:[{version:release,state:'READY',files:18420,bytes:12*1024**3,canPrepare:false,locations:[{machine,state:'READY'}]}]},{dataset:'vision-validation',versions:[{version:'b'.repeat(64),state:'PREPARING',files:2048,bytes:2*1024**3,canPrepare:true,sourceMachine:MACHINES[1].id,locations:[{machine,state:'PREPARING'},{machine:MACHINES[1].id,state:'READY'}]}]}]};
     else if(operation==='datasets.capacity')result={machine,available:true,filesystemBytes:4*1024**4,availableBytes:2*1024**4,reserveBytes:20*1024**3,usableBytes:2*1024**4-20*1024**3,guarded:true};
     else assert.equal(operation,'state','Visual review cannot mutate data');
-    return route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal:{userId:'admin',username:'admin',role:'admin'}})});
-  });
+    await route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal:{userId:'admin',username:'admin',role:'admin'}})});
+  }));
   await page.goto(origin);await page.locator('#execution-workspace').waitFor();
   await page.locator('[name=workspace-machine]').selectOption(machine);await page.locator('[name=workspace-project] option[value=vision-lab]').waitFor({state:'attached'});
   await page.locator('[name=workspace-project]').selectOption('vision-lab');
@@ -158,7 +159,7 @@ try{
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({baseline,checks,errors,external},null,2));
   console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','single current navigation','STARGATE accessible brand','helper text AA contrast','confirmed readiness without decorative motion','reduced motion']}));
-}finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}
+}finally{if(browser)for(const context of browser.contexts()){await Promise.all(context.pages().map(page=>page.unrouteAll({behavior:'wait'})));await context.unrouteAll({behavior:'wait'});}await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}
 
 // The existing CI entry point runs Portal/CSP, compute, inventory names, and R5 acceptance.
 if(!baseline){
