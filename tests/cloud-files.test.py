@@ -1,6 +1,7 @@
 """Cloud admission and worker boundaries; no live account/network/systemd."""
 import importlib.util
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -88,6 +89,71 @@ class CloudFilesTests(unittest.TestCase):
             self.assertEqual(self.c.worker(self.user,key,'1'),0)
         self.assertEqual(self.c.load(self.user,self.key)['state'],'VERIFIED')
         self.assertNotIn('NEW_PRIVATE',json.dumps(self.call('list')))
+    def test_verify_timeout_is_failed_and_retained_without_touching_source_or_budget(self):
+        self.uploaded();source=(self.owner/'cloud-files'/self.key/'task.json').read_bytes()
+        ledger=(self.cache.root/'.cloud-budget.json').read_bytes()
+        key=str(uuid.uuid4());self.call('verify',key=key,fileId=self.key)
+        module=sys.modules[self.c.__class__.__module__]
+        with patch.object(self.c,'io',side_effect=module.CloudConfirmationTimeout()):
+            self.assertEqual(self.c.worker(self.user,key,'1'),1)
+        status=self.call('status',operationId=key)
+        self.assertEqual(status['state'],'FAILED');self.assertEqual(status['phase'],'CLOUD_CONFIRMATION_TIMEOUT')
+        self.assertIn('not retransmitted',status['error']);self.assertFalse(status['canResume'])
+        self.assertNotIn('PRIVATE_SEALED',json.dumps(status))
+        self.assertEqual((self.owner/'cloud-files'/self.key/'task.json').read_bytes(),source)
+        self.assertEqual((self.cache.root/'.cloud-budget.json').read_bytes(),ledger)
+        count=len(self.starts);self.call('verify',key=key,fileId=self.key);self.assertEqual(len(self.starts),count)
+        failed=(self.owner/'cloud-files'/key/'task.json').read_bytes()
+        fresh=str(uuid.uuid4());self.call('verify',key=fresh,fileId=self.key)
+        self.assertEqual(len(self.starts),count+1)
+        with patch.object(self.c,'io',return_value={'id':self.key,'state':'VERIFIED','receipt':'NEW_PRIVATE_SEALED'}):
+            self.assertEqual(self.c.worker(self.user,fresh,'1'),0)
+        self.assertEqual(self.c.load(self.user,self.key)['state'],'VERIFIED')
+        self.assertEqual((self.owner/'cloud-files'/key/'task.json').read_bytes(),failed)
+        self.assertEqual((self.cache.root/'.cloud-budget.json').read_bytes(),ledger)
+    def test_verify_may_only_publish_verified_not_unattended_pending(self):
+        self.uploaded();source=(self.owner/'cloud-files'/self.key/'task.json').read_bytes()
+        key=str(uuid.uuid4());self.call('verify',key=key,fileId=self.key)
+        with patch.object(self.c,'io',return_value={'id':self.key,'state':'VERIFYING','receipt':'PRIVATE_SEALED'}):
+            self.assertEqual(self.c.worker(self.user,key,'1'),1)
+        self.assertEqual(self.call('status',operationId=key)['state'],'FAILED')
+        self.assertEqual((self.owner/'cloud-files'/self.key/'task.json').read_bytes(),source)
+    def test_old_stopped_verifying_record_is_read_only_and_never_automatically_relaunched(self):
+        self.uploaded();key=str(uuid.uuid4());self.call('verify',key=key,fileId=self.key)
+        task=self.c.load(self.user,key);task['state']='VERIFYING';self.c.save(task)
+        path=self.owner/'cloud-files'/key/'task.json';before=path.read_bytes();starts=len(self.starts)
+        for unused in range(3):
+            self.assertEqual(self.call('status',operationId=key)['state'],'VERIFYING')
+            self.call('list');self.call('verify',key=key,fileId=self.key)
+        self.assertEqual(path.read_bytes(),before);self.assertEqual(len(self.starts),starts)
+    def test_fixed_timeout_frame_becomes_durable_safe_reason_and_progress_not_raw_worker_error(self):
+        self.uploaded();key=str(uuid.uuid4());self.call('verify',key=key,fileId=self.key)
+        read_fd,write_fd=os.pipe()
+        frames=[{'kind':'progress','stage':'VERIFYING','bytes':0},
+                {'kind':'error','errorCode':'CLOUD_CONFIRMATION_TIMEOUT','error':'UNTRUSTED_UPSTREAM_TOKEN_OR_PATH'}]
+        os.write(write_fd,b''.join(json.dumps(frame).encode()+b'\n' for frame in frames));os.close(write_fd)
+        class Process:
+            def __init__(self):self.stdin=io.BytesIO();self.stdout=os.fdopen(read_fd,'rb');self.done=False
+            def poll(self):return 1 if self.done else None
+            def terminate(self):self.done=True
+            def kill(self):self.done=True
+            def wait(self,timeout=None):self.done=True;return 1
+        process=Process()
+        with patch('subprocess.Popen',return_value=process):self.assertEqual(self.c.worker(self.user,key,'1'),1)
+        task=self.c.load(self.user,key)
+        self.assertEqual(task['state'],'FAILED');self.assertEqual(task['phase'],'CLOUD_CONFIRMATION_TIMEOUT')
+        self.assertGreater(task['updatedAt'],task['createdAt']);self.assertEqual(task['bytes'],0)
+        self.assertNotIn('UNTRUSTED_UPSTREAM',json.dumps(self.call('list')))
+    def test_timeout_cancellation_preserves_canceled_state_and_never_verifies_source(self):
+        self.uploaded();key=str(uuid.uuid4());self.call('verify',key=key,fileId=self.key)
+        module=sys.modules[self.c.__class__.__module__]
+        def failed(task,fd):
+            current=self.c.load(self.user,key);current['cancelRequested']=True;self.c.save(current)
+            raise module.CloudConfirmationTimeout()
+        with patch.object(self.c,'io',side_effect=failed):self.assertEqual(self.c.worker(self.user,key,'1'),1)
+        status=self.call('status',operationId=key);self.assertEqual(status['state'],'CANCELED')
+        self.assertNotEqual(status.get('phase'),'CLOUD_CONFIRMATION_TIMEOUT')
+        self.assertEqual(self.c.load(self.user,self.key)['state'],'VERIFYING')
     def test_download_requires_verified_file(self):
         self.uploaded()
         with self.assertRaises(ValueError):self.call('download',key=str(uuid.uuid4()),fileId=self.key,path='out.zip')

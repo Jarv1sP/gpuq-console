@@ -23,6 +23,10 @@ PUBLIC = ('operationId', 'action', 'fileId', 'name', 'path', 'state', 'phase',
           'bytes', 'totalBytes', 'sha256', 'createdAt', 'updatedAt', 'error')
 
 
+class CloudConfirmationTimeout(ValueError):
+    """Only the fixed worker deadline code may produce this public reason."""
+
+
 class CloudFiles:
     def __init__(self, executor):
         self.n, self.w, self.imports = executor, executor.data_workspaces(), executor.data_imports()
@@ -269,6 +273,10 @@ class CloudFiles:
                         self.check_current(task, bytes=size, phase=str(frame.get('stage', 'TRANSFER'))[:40])
                     elif frame.get('kind') == 'result' and result is None:
                         result = frame['result']
+                    elif (frame.get('kind') == 'error' and task['action'] == 'verify'
+                          and frame.get('errorCode') == 'CLOUD_CONFIRMATION_TIMEOUT'
+                          and set(frame) <= {'kind', 'error', 'errorCode'}):
+                        raise CloudConfirmationTimeout()
                     elif frame.get('kind') not in ('retained',):
                         raise ValueError('Cloud transfer did not return a verified result')
             if p.wait(timeout=10) != 0 or pending or not isinstance(result, dict):
@@ -330,7 +338,7 @@ class CloudFiles:
                     raise ValueError('Cloud upload receipt is invalid')
                 self.check_current(task, state='VERIFYING', bytes=task['totalBytes'], sha256=result['sha256'], receipt=result['receipt'])
             elif task['action'] == 'verify':
-                if result.get('state') not in ('VERIFYING', 'VERIFIED') or not isinstance(result.get('receipt'), str):
+                if result.get('state') != 'VERIFIED' or not isinstance(result.get('receipt'), str):
                     raise ValueError('Cloud verification receipt is invalid')
                 with self.w.guard({'userId': user}, blocking=True):
                     current = self.load(user, key)
@@ -349,13 +357,16 @@ class CloudFiles:
                 self.imports.commit(task, module, owner, folder)
                 self.check_current(task, state='READY')
             return 0
-        except Exception:
+        except Exception as error:
             if task is not None and owned:
                 with self.w.guard({'userId': user}, blocking=True):
                     current = self.load(user, key)
                     if str(current['generation']) == str(generation):
                         current.update(state='CANCELED' if current.get('cancelRequested') else ('PAUSED' if task['action'] == 'download' else 'FAILED'),
                             error='Cloud operation did not complete; existing local and cloud files are retained. Check status before retrying.')
+                        if isinstance(error, CloudConfirmationTimeout) and not current.get('cancelRequested'):
+                            current.update(phase='CLOUD_CONFIRMATION_TIMEOUT',
+                                error='Cloud confirmation timed out before the remote file/hash was available. Uploaded files are retained, not retransmitted; start a new verification later.')
                         self.save(current)
             return 1
         finally:

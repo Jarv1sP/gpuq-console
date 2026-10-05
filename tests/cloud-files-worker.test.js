@@ -45,7 +45,7 @@ test('unexpected fields, unsafe filenames, unsupported key/owner rejected',()=>{
 });
 test('verification checks file ID and needs no descriptor',async()=>{
   const request={action:'verify',ownerId:user,operationId:randomUUID(),fileId:id,receipt:'sealed'};
-  assert.equal((await runCloudFileIO(request,{adapter:{verify:async()=>({id})}})).id,id);
+  assert.equal((await runCloudFileIO(request,{adapter:{verify:async()=>({id,state:'VERIFIED'})}})).id,id);
   await assert.rejects(runCloudFileIO(request,{adapter:{verify:async()=>({id:randomUUID()})}}),/mismatch/);
 });
 test('private config rejects symlinks/public permissions and recognizes apiToken schema',t=>{

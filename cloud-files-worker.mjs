@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import {createHash} from 'node:crypto';
 import {CloudDriveFiles, createCloudDriveFilesTransport} from './clouddrive-files.mjs';
 import {pathToFileURL} from 'node:url';
+import {setTimeout as delay} from 'node:timers/promises';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const OWNER = /^(builtin-admin|demo-user-[0-9]{1,18})$/;
@@ -12,6 +13,43 @@ const need = (ok, message) => { if (!ok) throw Error(message); };
 const identity = s => [s.dev, s.ino, s.mode, s.uid, s.gid, s.size, s.mtimeNs, s.ctimeNs].map(String);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const CHUNK = 256 * 1024;
+const VERIFY_TIMEOUT_MS = 300000;
+const confirmationTimeout = () => Object.assign(Error('Cloud confirmation timed out; uploaded files are retained, not retransmitted.'), {code: 'CLOUD_CONFIRMATION_TIMEOUT'});
+const verifyClock = {now: () => performance.now(), sleep: (ms, signal) => delay(ms, undefined, {signal})};
+
+async function confirmCloudFile(r, {adapter, emit, signal, clock}) {
+  // A verify operation observes exactly one existing sealed file; it never
+  // uploads again, downloads, scans another folder or adopts another receipt.
+  const request = Object.freeze({ownerId: r.ownerId, receipt: r.receipt}), fileId = r.fileId;
+  const controller = new AbortController(), began = clock.now();
+  const active = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  const timer = setTimeout(() => controller.abort(confirmationTimeout()), VERIFY_TIMEOUT_MS);timer.unref?.();
+  let onAbort;
+  const aborted = new Promise((_, reject) => {
+    onAbort = () => reject(active.reason);
+    if(active.aborted)onAbort();else active.addEventListener('abort', onAbort, {once: true});
+  });
+  const observe = async () => {
+    let pause = 2000;
+    while(true){
+      active.throwIfAborted();
+      let remaining = VERIFY_TIMEOUT_MS-(clock.now()-began);
+      if(remaining<=0)throw confirmationTimeout();
+      await emit({kind:'progress',stage:'VERIFYING',bytes:0});
+      const result = await adapter.verify(request, {signal:active});
+      active.throwIfAborted();
+      if(clock.now()-began>=VERIFY_TIMEOUT_MS)throw confirmationTimeout();
+      need(result?.id===fileId, 'Cloud receipt identity mismatch');
+      need(['VERIFYING','VERIFIED'].includes(result.state), 'Cloud confirmation state invalid');
+      if(result.state==='VERIFIED')return result;
+      remaining=VERIFY_TIMEOUT_MS-(clock.now()-began);
+      await clock.sleep(Math.min(pause,remaining),active);
+      pause=Math.min(pause*2,15000);
+    }
+  };
+  try{return await Promise.race([observe(),aborted]);}
+  finally{clearTimeout(timer);active.removeEventListener('abort',onAbort);}
+}
 
 export function validateRequest(r) {
   need(r && typeof r === 'object' && !Array.isArray(r), 'Invalid cloud worker request');
@@ -49,7 +87,7 @@ async function* readBlocks(fd, size, signal, progress) {
 }
 
 /** All metadata, receipts and progress remain on the trusted control plane. */
-export async function runCloudFileIO(request, {fd = 3, adapter, emit = () => {}, signal} = {}) {
+export async function runCloudFileIO(request, {fd = 3, adapter, emit = () => {}, signal, clock = verifyClock} = {}) {
   const r = validateRequest(request); need(adapter, 'Cloud adapter required');
   let last = 0;
   const progress = async (stage, bytes, totalBytes) => {
@@ -57,9 +95,7 @@ export async function runCloudFileIO(request, {fd = 3, adapter, emit = () => {},
     if (now - last >= 1000 || bytes === totalBytes) { last = now; await emit({kind: 'progress', stage, bytes, totalBytes}); }
   };
   if (r.action === 'verify') {
-    const result = await adapter.verify({ownerId: r.ownerId, receipt: r.receipt}, {signal});
-    need(result.id === r.fileId, 'Cloud receipt identity mismatch');
-    return result;
+    return confirmCloudFile(r,{adapter,emit,signal,clock});
   }
   const before = fileStat(fd, r.action === 'download');
   if (r.action === 'upload') {
@@ -131,8 +167,9 @@ async function main() {
   try { const result = await runCloudFileIO(request, {fd, adapter, emit, signal: controller.signal}); await emit({kind: 'result', result}); }
   finally { adapter.close(); }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(() => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => {
   // Never print raw gRPC errors, private paths, signed URLs, account IDs or keys.
-  process.stdout.write(JSON.stringify({kind: 'error', error: '云文件传输未确认；已传内容保留，请查看任务状态。'}) + '\n');
+  const timeout=error?.code==='CLOUD_CONFIRMATION_TIMEOUT';
+  process.stdout.write(JSON.stringify({kind: 'error', error: timeout?'云端尚未确认文件或校验值；已传内容保留，未重传，请稍后重新发起验证。':'云文件传输未确认；已传内容保留，请查看任务状态。',...(timeout?{errorCode:'CLOUD_CONFIRMATION_TIMEOUT'}:{})}) + '\n');
   process.exitCode = 1;
 });
