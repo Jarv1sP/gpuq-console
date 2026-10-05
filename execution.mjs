@@ -277,6 +277,7 @@ export async function executionCall(service,principal,operation,args){
     if(project.project&&args.hostAdmin)fail('项目终端与宿主机 root 维护入口分开使用。');
     if(args.dataWorkspace&&(project.project||args.hostAdmin))fail('个人数据终端与项目、ROOT 终端分开使用。');
     if(args.input&&(typeof args.input!=='string'||args.input.length>12000))fail('终端输入过长。');
+    if(opening&&project.project)await service.ociProjectAdmission?.(args.machine,user.id,project.project);
     if(operation==='terminal.open')service.audit(principal.username,operation,args.machine,(args.hostAdmin?'host-root':args.dataWorkspace?'private-data':'private')+':'+mode+(args.takeover?':takeover':''));
     return service.bridge(args.machine,operation,{...args,userId:user.id,username:user.username,hostAdmin:args.hostAdmin===true});
   }
@@ -289,6 +290,7 @@ export async function executionCall(service,principal,operation,args){
     if(request.cards>user.total)fail('任务卡数超出跨机器用卡总额度。',409);
     authorizedMachine(request.machine);
     if(project.project){
+      await service.ociProjectAdmission?.(request.machine,user.id,project.project);
       let prepared;
       try{prepared=await service.bridge(request.machine,'projects.verify',{...project,userId:user.id});}
       catch{fail('所选服务器的项目版本不可用或基础环境已改变；请先完成项目发布。未占用 GPU。',409);}

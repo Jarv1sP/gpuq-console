@@ -13,11 +13,12 @@ import {installTransfers,transferCall} from './transfers.mjs';
 import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
 import {LoginSessions} from './login-sessions.mjs';
 import {installStorageArchive} from './storage-archive.mjs';
+import {installOciCohort} from './oci-cohort.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
 export class PortalService extends DemoService{
-  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig,storageArchiveConfig){
+  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig,storageArchiveConfig,ociCohortMachines=[]){
     await mkdir(dirname(path),{recursive:true,mode:0o700});
     const service=new PortalService();service.production=true;service.tail=Promise.resolve();service.pending=0;
     service.terminalLanes=new Map();service.terminalPending=0;
@@ -51,6 +52,7 @@ export class PortalService extends DemoService{
     for(const user of service.store.users)user.policyVersion??=0;
     service.loginSessions=new LoginSessions(service.db,id=>service.store.users.find(user=>user.id===id),{initialPrune:!service.globalMaintenanceActive()});
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installMaintenance(service);installJobNotifications(service,notificationConfig);
+    installOciCohort(service,ociCohortMachines);
     maintainTaskNotes(service);
     installTransfers(service);
     installStorageArchive(service,storageArchiveConfig);
@@ -188,6 +190,7 @@ export class PortalService extends DemoService{
       if(update.changes!==1)throw Error('邀请码已失效，请联系管理员。');
       const user=this.store.create(args.name??username,username);this.store.setRole(user.id,'member');this.store.users.find(u=>u.id===user.id).policyVersion=0;this.credentials.set(username,record);
       this.save();this.audit(username,'register',code.role,'ok');this.db.exec('COMMIT');transaction=false;
+      this.syncOciAccountEvent();
       return {registered:true,username,role:code.role};
     }catch(e){if(transaction)this.db.exec('ROLLBACK');this.restore(before);this.audit('guest','register',null,'denied');throw e;}
   });}
@@ -243,7 +246,7 @@ export class PortalService extends DemoService{
         if(user.role==='admin'&&!this.store.users.some(u=>u.id!==user.id&&u.enabled&&u.role==='admin'))throw Error('不能删除最后一名可登录管理员。');
         this.db.exec('BEGIN IMMEDIATE');
         try{this.invalidate(user.username);this.credentials.delete(user.username);this.store.users=this.store.users.filter(u=>u.id!==user.id);this.save();this.audit(actor,operation,user.id,'ok');this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}
-        return {result:{deleted:true},state:this.state(principal)};
+        this.syncOciAccountEvent();return {result:{deleted:true},state:this.state(principal)};
       }
       if(typeof operation==='string'&&operation.startsWith('invites.'))return {result:this.manageInvites(principal,operation,args),state:this.state(principal),principal:{username:principal.username,role:principal.role,userId:principal.userId}};
       if(operation==='request'||operation==='release'){const e=Error('真实 GPUQ 提交尚未开放；不会模拟占卡或启动训练。');e.status=503;throw e;}
@@ -265,6 +268,7 @@ export class PortalService extends DemoService{
       this.db.exec('BEGIN IMMEDIATE');
       try{if(operation!=='state'&&operation!=='logout')this.save();if(operation!=='state')this.audit(actor,operation,args?.userId||args?.jobId,'ok');this.db.exec('COMMIT');}
       catch(e){this.db.exec('ROLLBACK');throw e;}
+      if(['policy.save','users.create','users.enabled','users.role'].includes(operation))this.syncOciAccountEvent();
       return {...result,principal:operation==='logout'?null:{username:principal.username,role:principal.role,userId:principal.userId}};
     }catch(e){this.restore(before);this.sessions=sessions;this.audit(actor,operation,args?.userId||args?.jobId,'denied');throw e;}
   });}

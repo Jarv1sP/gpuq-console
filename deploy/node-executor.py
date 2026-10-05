@@ -929,6 +929,10 @@ def storage_collect():
 
 def process(operation,args):
     platform_root_check()
+    if operation=='projects.oci-cohort.sync':
+        spec=importlib.util.spec_from_file_location('gpuq_oci_cohort',HERE/'oci-cohort.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.sync(HERE/'node-config.json',args)
     if operation=='projects.quota':
         if not isinstance(args,dict) or set(args)!={'userId'}:raise ValueError('Invalid quota status fields')
         return storage_quota_status(args['userId'])
