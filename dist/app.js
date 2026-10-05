@@ -55,7 +55,7 @@ function render(preserve=false){
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
   const titles={me:['我的','账号、额度与个人工作区。'],transfers:['传输任务','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   const concisePage=['community','users','maintenance'].includes(page);
-  $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#page-description').hidden=concisePage;$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
+  $('#page-title').textContent=titles[page][0];$('#page-description').textContent=concisePage?'':titles[page][1];$('#page-description').hidden=concisePage;$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
   const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?page==='resources'?'演示模式，无真实采集。':'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?page==='resources'?'暂无额度，等待管理员授权。':'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
   const monitorNotice=logged&&store.production&&store.data?.gpuq?.stale&&page!=='resources'?'监控已过期：显卡占用为未知；任务结束与额度释放以调度器核对为准。':'';
   if(concisePage){

@@ -45,6 +45,7 @@ try{
   }
   for(const username of [member.username,'admin']){
     await login(username);await page.locator('[data-id="'+legacy.id+'"]').click();await page.locator('#maintenance-detail pre').waitFor();
+    assert.equal(await page.locator('.page-heading .maintenance-copy-info').count(),0,'archive header must not expose an empty explanation control during maintenance');
     assert.match(await page.locator('.maintenance-banner').textContent(),/存储维修/);
     assert.match(await page.locator('.maintenance-banner').textContent(),/不会自动结束已有任务/);
     assert.equal(await page.locator('#operational-maintenance img').count(),0);
