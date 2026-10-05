@@ -5,8 +5,9 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 HERE = Path(__file__).resolve().parents[1]/'deploy'
 spec = importlib.util.spec_from_file_location('oci_test', HERE/'personal-oci.py')
@@ -66,6 +67,49 @@ class OCITests(unittest.TestCase):
         self.assertIn('--cgroup-manager=cgroupfs', command)
         self.assertTrue(command[command.index('--root')+1].endswith(self.manager().owner+'/graph'))
         self.assertFalse(any('socket' in v or '--remote' in v for v in command))
+
+    def verify_capability(self, host):
+        manager = self.manager()
+        manager.s = SimpleNamespace(directory=MagicMock())
+        manager.run = Mock(side_effect=['5.8.8', json.dumps({'host': host})])
+        with patch.object(o, 'protected_file') as protected, \
+             patch.object(o.os, 'geteuid', return_value=1000), \
+             patch.object(o.os, 'fstat', return_value=SimpleNamespace(st_uid=0, st_mode=0o40755)), \
+             patch.object(o.os, 'listdir', side_effect=[[], ['gpuq-nvidia.json'], []]), \
+             patch.object(o.Path, 'exists', lambda p: str(p) in ('/etc/cdi', '/run/cdi')), \
+             patch.object(o.Path, 'is_symlink', return_value=False):
+            result = manager.verify_host()
+            protected.assert_any_call('/usr/bin/crun', SHA, executable=True)
+        self.assertEqual(manager.run.call_args_list[-1].args, ('info', '--format=json'))
+        return result
+
+    def test_runtime_capability_accepts_pinned_absolute_name(self):
+        for name in ('crun', '/usr/bin/crun'):
+            with self.subTest(name=name):
+                result = self.verify_capability({'security': {'rootless': True}, 'cgroupVersion': 'v2',
+                    'ociRuntime': {'name': name, 'path': '/usr/bin/crun'}})
+                self.assertEqual(result['podman'], '5.8.8')
+                self.assertIs(result['rootless'], True)
+                self.assertIs(result['gpuDevelopment'], False)
+
+    def test_runtime_capability_rejects_unpinned_alias_and_unsafe_host(self):
+        safe = {'security': {'rootless': True}, 'cgroupVersion': 'v2',
+                'ociRuntime': {'name': '/usr/bin/crun', 'path': '/usr/bin/crun'}}
+        wrong = [
+            {**safe, 'ociRuntime': {'name': 'crun', 'path': '/tmp/crun'}},
+            {**safe, 'ociRuntime': {'name': 'crun', 'path': '/usr/local/bin/crun'}},
+            {**safe, 'ociRuntime': {'name': 'crun'}},
+            {**safe, 'ociRuntime': {'name': 'crun-alias', 'path': '/usr/bin/crun'}},
+            {**safe, 'ociRuntime': {'name': '/tmp/crun', 'path': '/usr/bin/crun'}},
+            {**safe, 'security': {'rootless': False}},
+            {**safe, 'security': {'rootless': 1}},
+            {**safe, 'security': {}},
+            {**safe, 'cgroupVersion': 'v1'},
+            {**safe, 'cgroupVersion': 2},
+        ]
+        for host in wrong:
+            with self.subTest(host=host), self.assertRaisesRegex(ValueError, 'Rootless cgroup-v2/crun'):
+                self.verify_capability(host)
 
     def test_development_has_no_devices_no_host_network_or_privilege(self):
         args = self.manager().arguments({'project': 'vision', 'argv': ['/bin/bash']}, {'environmentMode': 'oci'}, True, [], [(8, '/workspace', False)])

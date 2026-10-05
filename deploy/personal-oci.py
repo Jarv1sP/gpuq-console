@@ -178,8 +178,12 @@ class PersonalOCI:
         need(match and tuple(map(int, match.groups())) >= (4, 1, 0), 'Podman >= 4.1 is required for exact CDI GPU isolation')
         value = json.loads(self.run('info', '--format=json'))
         host = value.get('host', {})
+        runtime = host.get('ociRuntime', {})
+        # An absolute --runtime is reported as the runtime name by Podman 5.x.
+        # Require the same pinned executable, not an arbitrary crun alias.
         need(host.get('security', {}).get('rootless') is True and host.get('cgroupVersion') == 'v2'
-             and host.get('ociRuntime', {}).get('name') == 'crun', 'Rootless cgroup-v2/crun capability not verified')
+             and runtime.get('name') in ('crun', '/usr/bin/crun') and runtime.get('path') == '/usr/bin/crun',
+             'Rootless cgroup-v2/crun capability not verified')
         return {'rootless': True, 'gpuDevelopment': False, 'trainingGpu': 'scheduler-exact-cdi', 'podman': version}
 
     def state_path(self, slug):
