@@ -15,6 +15,9 @@ async function check(origin){
   for(const id of ['start','development','training','data','results','queue','troubleshooting']){
     const response=await fetch(origin+'/guide/'+id);assert.equal(response.status,200);
     const html=await response.text();assert.match(html,/<article/);assert.match(html,new RegExp('href="/guide/'+id+'" aria-current="page"'));assert.doesNotMatch(html,/\{#[a-z-]+\}|```/);
+    const targets=[...html.matchAll(/<h2 id="(section-\d+)"/g)].map(match=>match[1]);
+    const contents=[...html.matchAll(/href="#(section-\d+)"/g)].map(match=>match[1]);
+    assert.ok(targets.length>0,'every chapter has usable server-rendered contents');assert.deepEqual(contents,targets);assert.equal(new Set(targets).size,targets.length);
     assert.equal(await(await fetch(origin+'/guide/'+id,{method:'HEAD'})).text(),'');
     assert.equal((await fetch(origin+'/guide/'+id,{method:'POST'})).status,405);
   }
@@ -25,7 +28,7 @@ async function check(origin){
   }
   for(const path of ['/guide/admin','/guide/unknown','/ADMIN_README.md','/USER_README.md','/docs/USER_GUIDE.md','/docs/DATASETS.md','/guide/node-config.json'])assert.equal((await fetch(origin+path)).status,404,path);
   const page=await(await fetch(origin)).text();assert.equal((page.match(/href="\/guide(?:\/[^" ]*)?"/g)||[]).length,1);assert.match(page,/href="\/guide"[^>]+>使用指南/);
-  for(const path of ['/guide.css','/guide.js','/cloud-files-ui.js'])assert.equal((await fetch(origin+path)).status,200);
+  for(const path of ['/guide.css','/guide.js','/fonts.css','/members.css','/cloud-files-ui.js'])assert.equal((await fetch(origin+path)).status,200);
   const cloudUI=await fetch(origin+'/cloud-files-ui.js');assert.match(cloudUI.headers.get('content-type'),/javascript/);assert.match(await cloudUI.text(),/export function cloudFilesUI/);
 }
 test('production guide serves formatted chapters and removes public operations manuals',async()=>{
@@ -45,4 +48,10 @@ test('production image includes only the reader guide, not operations manuals',a
   const docker=await readFile(new URL('../deploy/Dockerfile',import.meta.url),'utf8'),ignore=await readFile(new URL('../.dockerignore',import.meta.url),'utf8');
   assert.match(docker,/guide\.mjs/);assert.match(docker,/docs\/USER_GUIDE\.md/);assert.doesNotMatch(docker,/ADMIN_README|USER_README|docs\/DEPLOYMENT/);
   assert.match(ignore,/!docs\/USER_GUIDE\.md/);assert.doesNotMatch(ignore,/!ADMIN_README/);
+});
+test('guide code locations are explicit and heading targets ignore fenced code',()=>{
+  const headings=[],html=renderMarkdown('### 相同标题\n\n```sh project\n### 这行是命令内容\necho "a & b"\n```\n\n### 相同标题\n\n```sh data\npwd\n```\n\n```sh local\ngpuctl state\n```\n\n```sh guessed\nunknown\n```',{headings});
+  assert.deepEqual(headings,[{id:'section-1',title:'相同标题'},{id:'section-2',title:'相同标题'}]);
+  assert.match(html,/<span>项目开发终端<\/span>/);assert.match(html,/<span>数据终端<\/span>/);assert.match(html,/<span>本机终端<\/span>/);assert.match(html,/<span>命令示例<\/span>/);
+  assert.match(html,/### 这行是命令内容\necho &quot;a &amp; b&quot;/);assert.equal((html.match(/<h2 /g)||[]).length,2);
 });

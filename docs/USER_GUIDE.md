@@ -10,7 +10,7 @@
 
 仅使用网页无需安装客户端或 Node.js。使用命令行时，自己的电脑需要 Node.js 22.13 或更高版本。Windows 可直接使用 PowerShell，不需要 WSL；从平台下载安装客户端：
 
-```powershell
+```powershell local
 node --version
 $installer = Invoke-WebRequest 'https://gpu.example.com/install.ps1' -UseBasicParsing -MaximumRedirection 0
 & ([scriptblock]::Create($installer.Content))
@@ -18,14 +18,14 @@ $installer = Invoke-WebRequest 'https://gpu.example.com/install.ps1' -UseBasicPa
 
 macOS、Linux 或已有 WSL：
 
-```sh
+```sh local
 node --version
 curl -fsSL https://gpu.example.com/install.sh | sh
 ```
 
 将 `https://gpu.example.com` 换成自己的平台地址。安装只写用户目录；不需要管理员权限，不修改 PowerShell 执行策略。安装或更新后重新打开终端；客户端更新使用同一安装命令。
 
-```sh
+```sh local
 gpuctl login
 gpuctl state
 gpuctl use MACHINE_ID
@@ -45,7 +45,7 @@ gpuctl use MACHINE_ID
 
 只有门户和客户端支持任务信息新版时，才有「设置姓名」「任务描述」和全队列查询。没有这些入口可先用 `gpuctl state`、`gpuctl jobs`，请管理员升级；不要把指南更新当作功能已经上线。
 
-```sh
+```sh local
 gpuctl profile --display-name "张三"
 ```
 
@@ -57,7 +57,7 @@ gpuctl profile --display-name "张三"
 
 在自己电脑的代码目录执行：
 
-```sh
+```sh local
 gpuctl project create my-project
 gpuctl push .
 gpuctl ssh
@@ -65,7 +65,7 @@ gpuctl ssh
 
 进入项目终端后执行：
 
-```sh
+```sh project
 python -m pip install -r requirements.txt
 python -m pip check
 exit
@@ -79,7 +79,7 @@ exit
 
 项目终端的 `$HOME` 是可写的 `/home/gpuq`，其缓存与私人环境使用平台工作区磁盘。shared/isolated Python 模式的 `/tmp` 是计入内存限制的临时文件系统，不是额外磁盘容量；开通的 OCI 模式默认 `/tmp` 在个人配额内的容器可写层。大包构建可在项目终端把临时文件放到私人 HOME，安装完成后自行清理不再需要的临时文件：
 
-```sh
+```sh project
 mkdir -p "$HOME/.cache/build-tmp"
 TMPDIR="$HOME/.cache/build-tmp" python -m pip install -r requirements.txt
 ```
@@ -96,7 +96,7 @@ TMPDIR="$HOME/.cache/build-tmp" python -m pip install -r requirements.txt
 - `Ctrl+]` 或网页「断开」：只断开连接，会话继续运行。
 - 重连原会话：使用原服务器、项目及会话 ID；另一客户端仍在操作时，明确协调后才用 `--takeover`。
 
-```sh
+```sh local
 gpuctl ssh --reconnect SESSION_ID
 ```
 
@@ -108,14 +108,14 @@ gpuctl ssh --reconnect SESSION_ID
 
 先结束该项目的所有开发终端，不能只断开。回到自己电脑：
 
-```sh
+```sh local
 gpuctl project publish
 gpuctl project status
 ```
 
 等本次发布显示 `READY` 后，再单独执行训练；不要把发布和训练连着复制执行：
 
-```sh
+```sh local
 gpuctl run -g 1 -- python train.py --output /outputs
 gpuctl jobs
 ```
@@ -126,13 +126,13 @@ gpuctl jobs
 
 已选好服务器和个人项目、服务器项目环境也已准备好时，可以把上传、发布和等待合成一步。先退出该项目的开发终端，再在电脑代码目录执行：
 
-```sh
+```sh local
 gpuctl run --sync -g 1 -- python train.py --output /outputs
 ```
 
 也可以明确指定本地目录；Windows PowerShell 和命令提示符均用双引号包住含空格的路径，无需 Bash、rsync 或 WSL：
 
-```powershell
+```powershell local
 gpuctl run --sync --sync-dir "C:\研究代码\我的项目" --project my-project -g 1 -- python train.py --output /outputs
 ```
 
@@ -150,7 +150,7 @@ gpuctl run --sync --sync-dir "C:\研究代码\我的项目" --project my-project
 
 任务信息新版可填写任务名与自写描述，描述最多 2000 字／6000 bytes：
 
-```sh
+```sh local
 gpuctl run -g 1 --name baseline --description "验证新数据集，预计两小时" -- python train.py
 ```
 
@@ -158,7 +158,7 @@ gpuctl run -g 1 --name baseline --description "验证新数据集，预计两小
 
 ### 同机多卡
 
-```sh
+```sh local
 gpuctl run -g 4 --min-vram 24 -- python -m torch.distributed.run --standalone --nproc-per-node=4 train.py --output /outputs
 ```
 
@@ -166,7 +166,7 @@ gpuctl run -g 4 --min-vram 24 -- python -m torch.distributed.run --standalone --
 
 ### 弹性卡数与自动扩卡
 
-```sh
+```sh local
 gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
 ```
 
@@ -174,7 +174,7 @@ gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train
 
 自动扩卡还需要保存让位和恢复：
 
-```sh
+```sh local
 gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
 ```
 
@@ -184,7 +184,7 @@ gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand -
 
 先在算力总览观察空位和显存，再选物理卡号：
 
-```sh
+```sh local
 gpuctl run --gpu 0,2 -- python train.py
 gpuctl run --gpu 3 --share --vram-mib 4096 -- python small.py
 ```
@@ -193,7 +193,7 @@ gpuctl run --gpu 3 --share --vram-mib 4096 -- python small.py
 
 节点确实支持 HAMi 时可用：
 
-```sh
+```sh local
 gpuctl run --gpu 3 --share --vram-mib 4096 --hami --sm-percent 50 -- python small.py
 ```
 
@@ -201,7 +201,7 @@ HAMi 只限制这项任务，不限制同卡外部进程，也不保证性能比
 
 ### 停止一项训练
 
-```sh
+```sh local
 gpuctl cancel JOB_ID
 ```
 
@@ -221,7 +221,7 @@ gpuctl cancel JOB_ID
 
 已确认的文件也可点击“重新校验”。若下载提示“文件已变化”，先重新校验对应的云端副本，再取回到新的路径；旧下载不会自动续传，已有文件和临时内容都会保留。普通连接中断仍按原下载的编号续传，不要因此另建上传。
 
-```sh
+```sh local
 gpuctl data cloud upload incoming/data.tar
 gpuctl data cloud list
 gpuctl data cloud verify FILE_ID
@@ -236,7 +236,7 @@ gpuctl data cloud download FILE_ID restored/data.tar
 
 阿里云盘是可选功能：需管理员启用可用的下载通道，并完成后台授权和真实下载验收；成员不需要登录管理员的网盘。未启用或连接不可用时，先使用 HTTPS 直链，不要把手册命令当作已经开通。成员不能浏览管理员的云盘或取得账号令牌；只导入自己有权使用的数据。当前支持分享根目录的文件，不递归导入文件夹，大目录建议先打包。
 
-```sh
+```sh local
 gpuctl data import 'https://example.org/dataset.zip' incoming/dataset.zip
 gpuctl data imports
 gpuctl data import-status IMPORT_ID
@@ -246,13 +246,13 @@ gpuctl data import-status IMPORT_ID
 
 文件由训练服务器直接下载到个人数据目录；VPS 只传递授权、链接和进度信息，不搬运文件内容。源站仍可能限速或限制下载。中断后先查看状态，只有确认源文件未变化时才续传：
 
-```sh
+```sh local
 gpuctl data import-resume IMPORT_ID
 ```
 
 阿里云盘链接过期时会重新解析；HTTPS 链接过期可附加 `--source-url '新的HTTPS直链'`，必须仍是同一文件。只想停止下载时才执行：
 
-```sh
+```sh local
 gpuctl data import-cancel IMPORT_ID
 ```
 
@@ -268,7 +268,7 @@ gpuctl data import-cancel IMPORT_ID
 
 普通成员可以上传个人数据，不需管理员逐份代传。先选机器：
 
-```sh
+```sh local
 gpuctl data upload ./my-data --name my-data
 gpuctl data upload-status UPLOAD_ID
 ```
@@ -281,7 +281,7 @@ gpuctl data upload-status UPLOAD_ID
 
 仅当想放弃未完成上传时执行下面命令；不要跟着正常上传步骤一起运行，不删除就绪版本：
 
-```sh
+```sh local
 gpuctl data upload-discard UPLOAD_ID
 ```
 
@@ -289,14 +289,14 @@ gpuctl data upload-discard UPLOAD_ID
 
 网页「数据集 → 添加数据 → 个人数据空间」中的个人数据终端，`/data2` 只对应**你在当前服务器上的可写目录**，不是整块数据盘；其他用户的数据、已发布版本和 GPU 不可见。CLI 在自己电脑执行：
 
-```sh
+```sh local
 gpuctl data put samples.zip
 gpuctl data shell
 ```
 
 进入数据终端后：
 
-```sh
+```sh data
 mkdir -p samples
 unzip samples.zip -d samples
 exit
@@ -306,7 +306,7 @@ exit
 
 结束这台机器上自己的所有数据终端，回到自己电脑发布：
 
-```sh
+```sh local
 gpuctl data publish samples --name samples
 gpuctl data workspace-status OPERATION_ID
 ```
@@ -327,7 +327,7 @@ gpuctl data workspace-status OPERATION_ID
 
 长期保存失败时先排查提示，再在数据集页重试，或使用：
 
-```sh
+```sh local
 gpuctl data archive-retry DATASET_ID@VERSION --machine MACHINE_ID --json
 ```
 
@@ -335,7 +335,7 @@ gpuctl data archive-retry DATASET_ID@VERSION --machine MACHINE_ID --json
 
 ### 准备与提交训练
 
-```sh
+```sh local
 gpuctl data list
 gpuctl data prepare DATASET_ID@VERSION
 gpuctl data status DATASET_ID@VERSION
@@ -343,7 +343,7 @@ gpuctl data status DATASET_ID@VERSION
 
 确认所选机器的项目显示 `READY`，数据已就绪或目录明确有可用来源后，运行：
 
-```sh
+```sh local
 gpuctl run -g 1 --data DATASET_ID@VERSION -- python train.py --data /data2/DATASET_ID --output /outputs
 ```
 
@@ -357,7 +357,7 @@ gpuctl run -g 1 --data DATASET_ID@VERSION -- python train.py --data /data2/DATAS
 
 这部分是管理员启用后的可选能力，不会因更新客户端自动开放：门户、节点和客户端都需支持，LAN copy 还需管理员配置并核验节点间接口。没有「传输任务」入口时使用上面的上传和链接导入；指南包含命令不代表功能已上线。下面的 VERSION 用完整 64 位版本替换。
 
-```sh
+```sh local
 gpuctl transfer upload ./my-data --name my-data
 gpuctl transfer download DATASET_ID@VERSION ./new-download
 gpuctl transfer list
@@ -367,7 +367,7 @@ gpuctl transfer list
 
 配套新版下载在整次读取期间持有持久租约，断线不会自动过期；完成或明确取消才收尾。旧 `sync data` 没有整次读取保护，对开启 GC 的 cache 版本会明确拒绝，应改用新版 `transfer download` 或从受保护原件读取，不会自动换源。
 
-```sh
+```sh local
 gpuctl transfer copy DATASET_ID@VERSION --from SOURCE --to TARGET --name my-data --detach
 gpuctl transfer status TRANSFER_UUID
 gpuctl transfer watch TRANSFER_UUID
@@ -377,7 +377,7 @@ gpuctl transfer watch TRANSFER_UUID
 
 数据页中的“传输与导入”（左侧“传输任务”）按“需要处理”“进行中”“已完成”分组；“已加载”是当前页记录，不是所有任务总数。若还有下一页，继续加载后再核对完整记录。停止传输保留未完成文件，不会自动重跑。
 
-```sh
+```sh local
 # 仅在确定放弃这一项传输时执行，终止后不可恢复；保留断点供检查
 gpuctl transfer cancel TRANSFER_UUID
 ```
@@ -388,7 +388,7 @@ gpuctl transfer cancel TRANSFER_UUID
 
 ### 队列、进度和错误
 
-```sh
+```sh local
 gpuctl jobs
 gpuctl watch JOB_ID
 gpuctl logs JOB_ID
@@ -401,7 +401,7 @@ gpuctl diagnostics JOB_ID --json
 
 任务信息新版还可查询同机成员的公开姓名、任务名和描述：
 
-```sh
+```sh local
 gpuctl queue
 gpuctl queue --machine MACHINE_ID
 ```
@@ -414,7 +414,7 @@ gpuctl queue --machine MACHINE_ID
 
 先请管理员为你的账号配置 Telegram 收件人，再订阅自己的未结束任务：
 
-```sh
+```sh local
 gpuctl notify JOB_ID on
 gpuctl notify JOB_ID status
 ```
@@ -425,7 +425,7 @@ gpuctl notify JOB_ID status
 
 ### 下载结果
 
-```sh
+```sh local
 gpuctl files --job JOB_ID
 gpuctl pull --job JOB_ID model.pt ./model.pt
 ```
@@ -434,13 +434,13 @@ gpuctl pull --job JOB_ID model.pt ./model.pt
 
 ### 给任务留言
 
-```sh
+```sh local
 gpuctl notes
 gpuctl note --job JOB_ID "预计今晚结束"
 gpuctl note --general "本周维护安排"
 ```
 
-网页打开「协作区 → 聊天」，展开聊天底部的“任务留言”，有相同入口。任务留言只能关联自己的未结束平台任务，平台确认完成、失败或取消后自动清理正文；排队、让位中、状态未知时保留。非任务留言保留到手动删除。作者可用 `gpuctl note-delete NOTE_ID` 删除自己的留言，管理员可删除他人留言。留言对登录成员可见，每条最多 2000 字符；普通聊天消息不跟随训练结束自动清理。
+网页打开「协作区 → 聊天」，展开聊天里的“任务留言”，有相同入口。任务留言只能关联自己的未结束平台任务，平台确认完成、失败或取消后自动清理正文；排队、让位中、状态未知时保留。非任务留言保留到手动删除。作者可用 `gpuctl note-delete NOTE_ID` 删除自己的留言，管理员可删除他人留言。留言对登录成员可见，每条最多 2000 字符；普通聊天消息不跟随训练结束自动清理。
 
 ## 排队与协作 {#queue}
 
@@ -448,7 +448,7 @@ gpuctl note --general "本周维护安排"
 
 网页展开「提交训练 → 自定义 GPUQ 调度」。P0–P4 越大越优先，普通成员可提交 P0–P2，P3/P4 由管理员使用。低等级不等于同意被中断：
 
-```sh
+```sh local
 gpuctl run --rank P1 --yield never -g 1 -- python train.py
 gpuctl run --rank P1 --yield now -g 1 -- python disposable.py
 gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -g 2 -- python train.py
@@ -463,7 +463,7 @@ gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -
 
 ### 请求抢占模式
 
-```sh
+```sh local
 gpuctl run --rank P2 --mode preempt1 -g 1 -- python urgent.py
 gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
 ```
@@ -478,7 +478,7 @@ gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
 
 排队、启动、运行和状态待确认的任务都会计入你的额度；弹性任务按最大卡数预留。每台机器的卡数上限与所有机器合计上限同时生效；合计上限不会自动替你挑机器。额度不是物理预留，有额度也可能等卡。不要用瞬时 0% 利用率判断显卡空闲。
 
-协作区只有“帖子”和“聊天”两个入口：帖子用于公告和问题反馈，聊天用于即时交流；留言不会自动改变配额、队列或取消任务。反馈问题注明机器、任务 ID、时间和复现步骤，不要粘贴密码、令牌、私钥或私密训练数据。
+协作区只有“帖子”和“聊天”两个入口；桌面并排显示，手机用标签切换。帖子用于公告和问题反馈，聊天用于即时交流；留言不会自动改变配额、队列或取消任务。反馈问题注明机器、任务 ID、时间和复现步骤，不要粘贴密码、令牌、私钥或私密训练数据。
 
 ## 常见问题 {#troubleshooting}
 
@@ -494,7 +494,7 @@ gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
 
 来源、目标和固定版本由自己选择，先预览：
 
-```sh
+```sh local
 gpuctl sync git ./my-repo --ref HEAD --to TARGET --project new-project --dry-run
 gpuctl sync code --from SOURCE --to TARGET --project my-project --release FULL_HASH --target-project new-project --dry-run
 gpuctl sync data DATASET_ID@VERSION --from SOURCE --to TARGET --name my-data --dry-run
@@ -510,7 +510,7 @@ gpuctl sync data DATASET_ID@VERSION --from SOURCE --to TARGET --name my-data --d
 
 项目网络检查与一次性代理：
 
-```sh
+```sh project
 gpuq-network show
 gpuq-network check https://pypi.org/simple/
 gpuq-network exec --proxy http://PROXY_HOST:PORT -- python -m pip install -r requirements.txt

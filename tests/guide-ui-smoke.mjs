@@ -93,6 +93,10 @@ try{
     assert.equal(await nav.locator('[aria-current=page]').count(),1);
     assert.equal(await nav.locator('[aria-current=page]').getAttribute('href'),'/guide/'+id);
     assert.ok((await page.locator('.guide-prose').innerText()).length>100,`${id} must have real content`);
+    const sections=await page.locator('.guide-prose h2').evaluateAll(nodes=>nodes.map(node=>node.id));
+    assert.deepEqual(await page.locator('.guide-toc a').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('href'))),sections.map(value=>'#'+value));
+    assert.equal(new Set(sections).size,sections.length);
+    assert.equal(await page.locator('.guide-code-bar>span').evaluateAll(nodes=>nodes.every(node=>['本机终端','项目开发终端','数据终端'].includes(node.textContent))),true,'actual guide blocks state where their commands run');
     assert.equal(await page.locator('.guide-code .copy-code:visible').count(),scripts?await page.locator('.guide-code').count():0);
     const adjacent=page.getByRole('navigation',{name:'相邻章节'}).locator('a');
     assert.deepEqual(await adjacent.evaluateAll(items=>items.map(item=>item.getAttribute('href'))),
@@ -222,6 +226,10 @@ try{
   }
   await staticPage.goto(origin+'/guide/development');
   assert.match(await staticPage.locator('.guide-prose').innerText(),/gpuctl project create/);
+  await staticPage.locator('.guide-toc summary').click();
+  const destination=await staticPage.locator('.guide-toc a').last().getAttribute('href');
+  await staticPage.locator('.guide-toc a').last().click();assert.equal(new URL(staticPage.url()).hash,destination);
+  assert.equal(await staticPage.evaluate(()=>document.activeElement.id),destination.slice(1),'native contents links focus the section without JavaScript');
   await capture(staticPage,'guide-development-no-js-mobile.png');
   const adminContext=await context(),admin=await adminContext.newPage();
   await login(admin,DEMO_ADMIN.username,DEMO_ADMIN.password);

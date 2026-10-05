@@ -12,6 +12,7 @@ import {MACHINES} from '../dist/model.js';
 import {seedLegacy,password} from './maintenance-fixture.mjs';
 
 const dir=await mkdtemp(join(tmpdir(),'gpuq-retired-maintenance-browser-')),calls=[],errors=[],external=[],nodeSessions=new Map(),commandId=randomUUID();let server,service,browser;
+const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-maintenance-ui';
 const reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));const origin='http://127.0.0.1:'+port;
 try{
   const bootstrap=join(dir,'bootstrap'),status=join(dir,'status');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
@@ -52,13 +53,14 @@ try{
     assert.equal(await page.locator('#maintenance-detail img').count(),0);
     const detail=await page.locator('#maintenance-detail').textContent();assert.ok(detail.includes('\\u{000d}'));assert.ok(detail.includes('\\u{202e}'));assert.ok(detail.includes('\\u{0085}'));assert.doesNotMatch(detail,/[\r\u202e\u0085]/u);
     assert.match(await page.locator('#page-maintenance').textContent(),/未执行（流程已停用）/);
+    await mkdir(screenshots,{recursive:true});await page.evaluate(()=>document.fonts.ready);await page.screenshot({path:join(screenshots,'history-'+username+'-1440.png'),fullPage:true});
     const rejected=await page.evaluate(async id=>{const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'maintenance.approve',args:{id,revision:1,previewToken:'legacy-token'}})});return response.status;},legacy.id);assert.equal(rejected,410);
     await page.setViewportSize({width:390,height:844});
     // The responsive shell clears transition layers from its resize handler;
     // assert the settled archive rather than racing that queued browser event.
     await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth+1);
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile archive must not overflow');
-    await mkdir('/tmp/gpuq-maintenance-ui',{recursive:true});await page.screenshot({path:'/tmp/gpuq-maintenance-ui/retired-'+username+'-mobile.png',fullPage:true});
+    await page.screenshot({path:join(screenshots,'history-'+username+'-390.png'),fullPage:true});
     if(username==='admin'){
       await page.locator('.maintenance-settings summary').click();
       await page.locator('.maintenance-settings [name=reason]').fill('明确维修');await page.locator('.maintenance-settings [type=submit]').click();

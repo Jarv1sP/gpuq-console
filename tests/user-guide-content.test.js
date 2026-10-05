@@ -131,7 +131,7 @@ test('unified dataset guide distinguishes catalog, capacity and preparation from
 
 test('collaboration uses posts and chat while root requests stay retired', () => {
   assert.match(guide, /只有“帖子”和“聊天”两个入口/);
-  assert.match(guide, /展开聊天底部的“任务留言”/);
+  assert.match(guide, /展开聊天里的“任务留言”/);
   assert.match(guide, /旧维护申请流程已停用/);
   assert.match(guide, /现有共享\/隔离 Python 环境继续可用，但不能通过 `sudo apt` 修改宿主机/);
 });

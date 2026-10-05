@@ -49,9 +49,9 @@ export function maintenanceUI(store){
   function reset(){generation++;selectionSerial++;identity=null;ready=false;loading=false;cursor=null;host?.replaceChildren();}
   store.onAuthChange(reset);
   function build(){
-    host.innerHTML=`<section class="panel maintenance-history"><div class="maintenance-toolbar"><h2>历史运维记录</h2><button class="button" id="maintenance-refresh">刷新</button></div>
+    host.innerHTML=`<section class="maintenance-history"><div class="maintenance-history-focus hero-frame"><span class="hero-label">只读历史</span><div class="maintenance-toolbar"><h2>已归档的申请与回执</h2><button class="button" id="maintenance-refresh">刷新</button></div>
       <p class="muted">维护申请已停用。历史脚本和结果仅供查阅，未批准的申请不会执行；已开始的操作不会因此停止。</p>
-      <p id="maintenance-list-error" class="form-error" role="status"></p><div id="maintenance-list"></div><button class="button" id="maintenance-more" hidden>下一页</button><div id="maintenance-detail"></div></section>`;
+      <p id="maintenance-list-error" class="form-error" role="status"></p><div id="maintenance-list"></div><button class="button" id="maintenance-more" hidden>下一页</button><div id="maintenance-detail"></div></div></section>`;
     q('#maintenance-refresh').addEventListener('click',()=>load());q('#maintenance-more').addEventListener('click',()=>load(cursor));ready=true;
   }
   async function load(next){
