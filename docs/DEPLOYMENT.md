@@ -262,28 +262,30 @@ npm test
 
 先完成真实小文件保存 → 云端确认 → 取回 → SHA256，以及跨用户拒绝、取消、响应丢失后的原编号查询、断点前缀验证和已有文件保护，再启用门户策略。云传输的是服务器个人数据空间里的文件：不因此开放浏览器访问 CD2，不向成员暴露令牌，也不能宣称电脑到服务器的大文件已绕过 VPS。取消或失败保留云端内容和容量预约；管理员核查后才能清理账本，不做失败即删。
 
-### 个人 rootless OCI 与内核硬配额
+### 个人 rootless OCI 与可选内核硬配额
 
 `personalOci`、`storageQuota` 缺省均关闭。代码和模拟安装测试通过不等于实机容器、GPU 隔离或内核超限通过；原 shared/isolated 项目和旧工作区不自动转换。必须在独立维护窗口逐机验收，未通过节点保持关闭。
 
-1. 先确认数据卷真实设备、UUID、文件系统、挂载点、平台根守卫与恢复备份。清空训练、终端和所有写盘后台服务后再处理文件系统；XFS 需要干净重挂载启用项目配额，ext4 可能需要离线设置特性/配额。应用安装器不会完成这些步骤，不得强制/懒卸载或在系统盘临时兜底。
-2. 管理员离线核对已有非空目录归属，制定每个不可变 owner 在每个物理数据卷上的有限 byte/inode 限额及唯一 project ID。共享/未知数据不猜测计费人。root 策略须固定平台根、数据根、卷 UUID；如管理作业日志，固定调度器 `database`、`controlRoot`、`logRoot`。新 owner 没有已配置的政策会拒绝，不自动获得无限空间。
-3. `deploy/configure-storage-quota.py` 默认只读出计划；显式执行要求 root、维护栅栏和批准的政策 SHA。它只安装有限内核限制及窄 root broker，不改挂载、不迁移用户目录、不启用节点标志。安装路径已存在时停止供检查，不能盲目重放部分安装。
-4. 分别安装并核验 root 所有的 Podman ≥ 4.1、crun、uidmap、slirp4netns，审查精确 GPU UUID 的 NVIDIA CDI 和基础镜像固定 digest。`deploy/configure-personal-oci.py` 同样默认只读计划；显式执行只固定控制文件/空 hooks/CDI，不安装包、拉镜像或启动服务。其他 CDI 配置、二进制或驱动变更均需重新核验，不回落到全部 GPU。
-5. 在测试 owner 和隔离配置中真实验证：开发无 GPU、容器 root 不能改宿主、退出/重连保持环境、发布固定镜像+代码、训练只见分配 UUID，CPU/内存/PID 和取消仍受控；写满 byte 与 inode 限额确实得到 EDQUOT、不能改 project ID，stdout/stderr 与 OCI 可写层也正确计费。不凭 statvfs 或单元测试认定硬配额有效。
+1. 先确认数据卷真实设备、UUID、文件系统、挂载点、平台根守卫与恢复备份。只启用明确账号的个人容器，不要求先改文件系统或启用磁盘硬配额。若另需硬配额，清空相关写入服务后再处理文件系统；XFS 需要干净重挂载启用项目配额，ext4 可能需要离线设置特性。应用安装器不会完成这些步骤，不得强制/懒卸载或在系统盘临时兜底。
+2. 启用磁盘硬配额时，管理员离线核对非空目录归属，制定每个不可变 owner 在每个物理卷上的有限 byte/inode 限额及唯一 project ID。共享/未知数据不猜计费人。root 策略固定平台根、数据根、卷 UUID；如管理日志，另固定调度器 `database`、`controlRoot`、`logRoot`。
+3. `deploy/configure-storage-quota.py` 默认只读出计划；显式执行要求 root、维护栅栏和批准的政策 SHA。它只安装有限内核限制及窄 root broker，不改挂载、不迁移目录、不启用节点标志。安装路径已存在时停止供检查，不盲目重放部分安装。
+4. 分别安装并核验 root 所有的 Podman ≥ 4.1、crun、uidmap、slirp4netns，审查精确 GPU UUID 的 NVIDIA CDI 和基础镜像固定 digest。`deploy/configure-personal-oci.py` 默认只读计划；显式执行固定控制文件/空 hooks/CDI 与专用镜像策略，不安装包、拉镜像或启动服务。策略在 `/etc/gpuq-console/personal-oci-policy.json`，默认拒绝，仅允许选定基础镜像的完整 Docker digest，不修改系统 `/etc/containers/policy.json`。入口逐次核对策略属主、权限和 SHA，拉取保持 TLS 校验、匿名认证和一次尝试。其他 CDI、二进制或驱动变化均需重新核验，不回落到全部 GPU。
+5. 测试账号和隔离配置中真实验证：开发无 GPU、容器 root 不能改宿主、退出/重连保持环境、发布固定镜像+代码、训练只见分配 UUID，CPU/内存/PID 和取消仍受控。启用磁盘硬配额时还须验证 byte/inode 超限得到 EDQUOT、不能改 project ID，日志与 OCI 可写层正确计费；不凭 statvfs 或单元测试认定硬配额有效。
 6. 逐项通过后才合并开启政策，备份配置并复核 SHA。原生宿主 root/旧 sudo 仍可绕过，平台不是恶意公网 VM 级隔离；数据库和其他管理员数据另行备份/限额。失败先封锁新入口，停止测试单元，保留原件和内核归属；代码回退不解除配额、不覆盖旧数据库。
 
 节点实际启用、测试证据和剩余限制应单独记录，不将本手册当作上线回执。
 
-镜像认证使用个人配额内的私有匿名 JSON，不继承宿主登录信息、外部凭据助手或代理环境。Podman 5.x 会在主配置之外读取 `/etc/containers/registries.conf.d` 与私有 HOME 的 `.config/containers/registries.conf.d`；入口逐次核对它们为空或安全不存在。目录非空、链接、归属或身份变化会拒绝，须管理员独立评审，不会自动删除原配置。基础镜像拉取仅一次并验证 TLS；这不代替真实出口、rootless 重执行和容器业务验收。
+镜像认证使用个人私有目录内的匿名 JSON，不继承宿主登录信息、外部凭据助手或代理环境。Podman 5.x 会在主配置之外读取 `/etc/containers/registries.conf.d` 与私有 HOME 的 `.config/containers/registries.conf.d`；入口逐次核对它们为空或安全不存在。目录非空、链接、归属或身份变化会拒绝，须管理员独立评审，不会自动删除原配置。基础镜像拉取仅一次并验证 TLS；这不代替真实出口、rootless 重执行和容器业务验收。
 
 #### 小范围启用，不自动迁移旧工作区
 
-节点可配置 `storageQuota: {"enabled": true, "owners": ["demo-user-N"]}`，仅按不可变账号 ID 激活列出的用户；省略 `owners` 的旧全节点模式仍保留。列表必须非空、无重复且由管理员配置，不接受 RPC 或用户名覆盖。`personalOci.enabled` 即使为真，未纳入该列表的用户仍不能创建 OCI 工作区；容器入口在任何目录写入前验证本人已启用硬配额。节点上未激活的旧 shared/isolated 工作区继续原模式，查询明确显示未启用、用量未知，不代表零用量或无限容量。
+节点可在完整 `personalOci` 政策中添加 `owners: ["demo-user-N"]`，只允许列出的不可变账号 ID 使用个人容器；即使 `storageQuota: {"enabled": false}`，这些账号也能使用已验收的容器。此模式仍有独立工作区、rootless UID、CPU/内存/PID 限额与精确 GPU 分配，但没有磁盘硬限额，界面和运维记录不得说有。未列出的账号在任何工作区写入前被拒绝；原 shared/isolated 项目不自动迁移。
+
+`storageQuota: {"enabled": true, "owners": ["demo-user-N"]}` 单独控制磁盘内核配额。省略 `personalOci.owners` 的旧安装仍要求本人已启用硬配额，不自动扩大范围。两种名单均须非空、无重复且由管理员配置，不接受 RPC 或显示用户名覆盖。
 
 仅新增列表不是迁移：选中账号每个已有个人根仍须通过离线归属及 inode CAS；含旧 venv 软链接等未通过的目录会拒绝写入，不自动修改文件。若希望保留旧环境，应先保留该账号未激活，另用已核验的新账号/全新空工作区灰度；不要把旧根整体改 ID 或把 OCI 子目录挂载绕过平台根守卫。涉及已激活用户的数据集 staging 必须有唯一、已激活的登记计费 owner；共享/混合授权不猜归属，已有只读 READY 数据集不因此重写或重新计费。
 
-开启前仍须真实验证指定物理卷的 project quota、有限 root 政策与 broker、开发无 GPU和训练精确 GPU UUID、实际 byte/inode EDQUOT、退出及取消，再在停止所有相关写入者的维护窗口合并节点配置。该 owner 列表不是内核限额安装器，也不解除宿主 root 的运维信任边界。
+容器开启前必须实测开发无 GPU、训练精确 UUID、安装/退出/重连/发布、预算与取消。仅在同时启用磁盘硬配额时另验指定卷的 project quota、有限 root 政策/broker 与 byte/inode EDQUOT。名单不是安装器，也不解除宿主 root 的运维信任边界；涉及存储归属迁移仍须停止相关写入者。
 
 #### 已有目录与配额变更
 
