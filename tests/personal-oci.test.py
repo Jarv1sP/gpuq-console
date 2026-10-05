@@ -376,6 +376,63 @@ class OCITests(unittest.TestCase):
         self.assertEqual(systemctl.call_args.args[0][:3], ['/usr/bin/systemctl','--user','show'])
         resources.read_budget.assert_called_once_with({'project':'vision','id':'test'}, group, [], True)
 
+    def test_named_mounts_use_only_open_descriptor_sources_including_controls(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); source = manager.folder/'workspace'; source.mkdir(mode=0o700)
+            sdk = manager.folder/'sdk.pyz'; sdk.write_bytes(b'fixed sdk'); sdk.chmod(0o600)
+            directory = os.open(source, os.O_RDONLY|os.O_DIRECTORY); archive = os.open(sdk, os.O_RDONLY)
+            try:
+                sources = {directory:str(source), archive:str(sdk)}
+                with patch.object(o.os, 'readlink', side_effect=lambda name:sources[int(name.rsplit('/',1)[-1])]), \
+                     manager.named_mounts([(directory,'/workspace',False)], ['--ro-bind-data',str(archive),'/opt/gpuq/sdk.pyz']):
+                    args = manager.arguments({'project':'vision','argv':['/bin/bash']}, {'environmentMode':'oci'}, True, [], [(directory,'/workspace',False)])
+                    self.assertIn(str(source)+':/workspace:rw', args)
+                    control = o.translate_control(['--ro-bind-data',str(archive),'/opt/gpuq/sdk.pyz'], manager._mount_sources)
+                    self.assertIn(str(sdk)+':/opt/gpuq/sdk.pyz:ro', control)
+                    self.assertFalse(any('/proc/' in arg for arg in args+control))
+                self.assertEqual(manager._mount_sources, {})
+            finally: os.close(directory); os.close(archive)
+
+    def test_named_mounts_reject_path_replacement_and_writable_ancestors(self):
+        for replace in (False, True):
+            with self.subTest(replace=replace), tempfile.TemporaryDirectory() as root:
+                manager = self.anonymous_manager(root); source = manager.folder/'workspace'; source.mkdir(mode=0o700)
+                descriptor = os.open(source, os.O_RDONLY|os.O_DIRECTORY)
+                try:
+                    if not replace: manager.folder.chmod(0o777)
+                    with patch.object(o.os, 'readlink', return_value=str(source)), self.assertRaises(ValueError):
+                        with manager.named_mounts([(descriptor,'/workspace',False)], []):
+                            source.rename(manager.folder/'old-workspace'); source.mkdir(mode=0o700)
+                finally: os.close(descriptor)
+
+    def test_named_mounts_reject_symlink_and_deleted_or_client_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); source = manager.folder/'workspace'; source.mkdir(mode=0o700)
+            linked = manager.folder/'linked'; linked.symlink_to(source, target_is_directory=True)
+            descriptor = os.open(source, os.O_RDONLY|os.O_DIRECTORY)
+            try:
+                for name in (str(linked), str(source)+' (deleted)', '../host', '/tmp:rw'):
+                    with self.subTest(name=name), patch.object(o.os,'readlink',return_value=name), self.assertRaises((ValueError,OSError)):
+                        with manager.named_mounts([(descriptor,'/workspace',False)], []): self.fail('Unsafe named source accepted')
+            finally: os.close(descriptor)
+
+    def test_only_small_valid_resource_memfd_is_privately_snapshotted_and_cleaned(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); (manager.folder/'tmp').mkdir(mode=0o700)
+            path = manager.folder/'synthetic-resources'; raw = json.dumps({'schemaVersion':1,'cpuLimit':2,
+                'memoryLimitBytes':8*1024**3,'pidsLimit':2048,'gpuCount':0}).encode(); path.write_bytes(raw)
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                with patch.object(o.os,'readlink',return_value='/memfd:gpuq-resources (deleted)'):
+                    with manager.named_mounts([(descriptor,'/run/gpuq/resources.json',True)], []):
+                        snapshot = Path(manager._mount_sources[descriptor]); self.assertEqual(snapshot.read_bytes(),raw)
+                        self.assertEqual(snapshot.stat().st_mode & 0o777,0o600)
+                    self.assertFalse(snapshot.exists())
+                    for target, readonly in (('/etc/shadow',True),('/run/gpuq/resources.json',False)):
+                        with self.assertRaises(ValueError):
+                            with manager.named_mounts([(descriptor,target,readonly)], []): self.fail('Unsupported memfd accepted')
+            finally: os.close(descriptor)
+
     def test_development_rejects_scheduler_gpu_injection(self):
         with self.assertRaisesRegex(ValueError, 'cannot have GPUs'):
             self.manager().arguments({'project': 'vision', 'argv': ['/bin/bash']}, {'environmentMode': 'oci'}, True, [GPU], [])

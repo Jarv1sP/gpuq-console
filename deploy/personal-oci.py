@@ -108,7 +108,7 @@ def cdi_devices(raw, uuids):
     return ['nvidia.com/gpu='+gpu for gpu in uuids]
 
 
-def translate_control(arguments):
+def translate_control(arguments, sources=None):
     """Translate only the trusted training-control module's narrow bwrap DSL."""
     result, i = [], 0
     while i < len(arguments):
@@ -119,7 +119,8 @@ def translate_control(arguments):
             fd, target = arguments[i+1:i+3]
             need(str(int(fd)) == fd and target in ('/run/gpuq/control', '/opt/gpuq/sdk.pyz', '/opt/gpuq/libvgpu.so'),
                  'Unexpected OCI scheduler mount')
-            result += ['--volume', '/proc/'+str(os.getpid())+'/fd/'+fd+':'+target+(':'+'ro' if op == '--ro-bind-data' else ':rw')]
+            source = (sources or {}).get(int(fd), '/proc/'+str(os.getpid())+'/fd/'+fd)
+            result += ['--volume', source+':'+target+(':'+'ro' if op == '--ro-bind-data' else ':rw')]
             i += 3
         elif op == '--setenv':
             key, value = arguments[i+1:i+3]
@@ -399,7 +400,8 @@ class PersonalOCI:
         for fd, target, readonly in mounts:
             need(type(fd) is int and fd >= 0 and isinstance(target, str) and target.startswith('/')
                  and '..' not in Path(target).parts and ':' not in target, 'Unsafe OCI mount')
-            args += ['--volume', '/proc/'+str(os.getpid())+'/fd/'+str(fd)+':'+target+(':ro' if readonly else ':rw')]
+            source = getattr(self, '_mount_sources', {}).get(fd, '/proc/'+str(os.getpid())+'/fd/'+str(fd))
+            args += ['--volume', source+':'+target+(':ro' if readonly else ':rw')]
         if terminal:
             # Resource/PATH environment is useful in development too, but the
             # scheduler's writable attempt SDK is never mounted there.
@@ -410,11 +412,93 @@ class PersonalOCI:
             protected_file(CDI, self.policy['cdiSHA256'])
             for device in cdi_devices(CDI.read_bytes(), uuids):
                 args += ['--device', device]
-        args += translate_control(list(control))
+        args += translate_control(list(control), getattr(self, '_mount_sources', {}))
         return args
 
+    @contextlib.contextmanager
+    def named_mounts(self, mounts, control):
+        """Rootless re-exec needs named sources, derived only from trusted FDs.
+
+        Hold the no-follow path chain and compare each edge before/after use.
+        The client cannot supply host paths. Anonymous resource metadata alone
+        is copied into a bounded new private file; no host credentials/cache.
+        """
+        entries = list(mounts)
+        i = 0
+        while i < len(control):
+            if control[i] in ('--bind-fd', '--ro-bind-data'):
+                entries.append((int(control[i+1]), control[i+2], control[i] == '--ro-bind-data'))
+                i += 3
+            elif control[i] == '--setenv': i += 3
+            elif control[i] == '--dir': i += 2
+            else: raise ValueError('Unsupported OCI training-control mount operation')
+        sources, held, edges, snapshots = {}, [], [], []
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+        try:
+            for fd, target, readonly in entries:
+                need(type(fd) is int and fd >= 0, 'Invalid trusted OCI mount descriptor')
+                info = os.fstat(fd); name = os.readlink('/proc/self/fd/'+str(fd))
+                if name == '/memfd:gpuq-resources (deleted)':
+                    need(readonly and target == '/run/gpuq/resources.json' and stat.S_ISREG(info.st_mode)
+                         and 0 < info.st_size <= 65536, 'Unsupported anonymous OCI mount')
+                    raw = os.pread(fd, 65537, 0)
+                    need(len(raw) == info.st_size, 'OCI resource metadata changed')
+                    module('job-resources').validate_budget(json.loads(raw))
+                    path = self.folder/'tmp'/('resources-'+uuid.uuid4().hex+'.json')
+                    with self.s.directory(path.parent) as parent:
+                        parent_info = os.fstat(parent)
+                        need(parent_info.st_uid == os.geteuid() and stat.S_IMODE(parent_info.st_mode) == 0o700,
+                             'OCI resource snapshot parent is not private')
+                        copied = os.open(path.name, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                        try:
+                            offset = 0
+                            while offset < len(raw):
+                                written = os.write(copied, raw[offset:]); need(written > 0, 'OCI resource snapshot incomplete'); offset += written
+                            os.fsync(copied); copied_info = os.fstat(copied)
+                        finally: os.close(copied)
+                        snapshots.append((path, identity(copied_info))); os.fsync(parent)
+                    name = str(path); info = copied_info
+                else:
+                    need(stat.S_ISDIR(info.st_mode) or readonly and stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+                         'Unsupported OCI mount descriptor type')
+                path = Path(name)
+                need(path.is_absolute() and str(path) == name and '..' not in path.parts and ':' not in name
+                     and '\n' not in name and '\x00' not in name and not name.endswith(' (deleted)'),
+                     'OCI descriptor has no safe named source')
+                parent = os.open('/', os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); held.append(parent)
+                for index, part in enumerate(path.parts[1:]):
+                    parent_info = os.fstat(parent)
+                    child = os.stat(part, dir_fd=parent, follow_symlinks=False)
+                    need(parent_info.st_uid in (0, os.geteuid())
+                         and (not parent_info.st_mode & 0o022 or parent_info.st_uid == 0
+                              and parent_info.st_mode & stat.S_ISVTX and child.st_uid in (0, os.geteuid())),
+                         'OCI mount source parent can be replaced by another user')
+                    need(not stat.S_ISLNK(child.st_mode), 'Symlink in OCI mount source')
+                    edges.append((parent, part, identity(child)))
+                    if index < len(path.parts)-2:
+                        parent = os.open(part, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=parent); held.append(parent)
+                    else: need(identity(child) == identity(info), 'OCI named source differs from trusted descriptor')
+                need(fd not in sources or sources[fd] == name, 'Ambiguous OCI mount descriptor')
+                sources[fd] = name
+            self._mount_sources = sources
+            yield
+            for parent, name, before in edges:
+                need(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before,
+                     'OCI mount source changed during operation')
+        finally:
+            self._mount_sources = {}
+            try:
+                for path, before in snapshots:
+                    with self.s.directory(path.parent) as parent:
+                        need(identity(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == before,
+                             'OCI resource snapshot replaced before cleanup')
+                        os.unlink(path.name, dir_fd=parent); os.fsync(parent)
+            finally:
+                for fd in reversed(held): os.close(fd)
+
     def execute(self, spec, project, terminal, uuids, mounts, *, control=(), pass_fds=()):
-        with self.registry_auth() as (env, authfd):
+        with self.registry_auth() as (env, authfd), self.named_mounts(mounts, control):
             return self._execute(spec, project, terminal, uuids, mounts,
                                  control=control, pass_fds=pass_fds, registry_env=env)
 
@@ -511,8 +595,8 @@ def run_project(config, spec, project, terminal, uuids, workfd, project_fds,
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
                 extra.append(fd)
                 mounts.append((fd, '/opt/gpuq/bin/'+name, True))
-        # FDs belong to the live runner. Podman uses /proc/<runner>/fd paths,
-        # not its own re-exec fd table; untrusted code never receives these FDs.
+        # FDs belong to the trusted runner. Named sources are derived and
+        # identity-checked by execute(); untrusted code never receives these FDs.
         return owner.execute(spec, project, terminal, uuids, mounts, control=control)
     finally:
         for fd in extra:
