@@ -8,6 +8,7 @@ bounded worker; RemoteAuthority and DatasetTier authenticate/certify recovery.
 Grants are private node journal data and private RPC results, not browser data.
 """
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -171,6 +172,45 @@ class StorageArchive:
         with self.cache._locked():
             return self._single_locked(user, ref, **options)
 
+    def _registration_binding(self, user, ref, identity):
+        return A._sha(dict(binding=self.binding, userId=user, reference=ref, registration=identity))
+
+    def _expected_registration(self, args, user, ref, identity):
+        if 'expectedRegistration' not in args:
+            return None
+        expected = D._identifier(args['expectedRegistration'], D.HASH_RE)
+        with self.cache._locked():
+            if (self._single_locked(user, ref) != identity
+                    or expected != self._registration_binding(user, ref, identity)):
+                raise ValueError('Explicit archive enrollment registration changed')
+            if self.cache._version_entry_exists(self.cache._paths(**ref)['.staging']):
+                raise ValueError('Archive enrollment refuses an active or unknown staging writer')
+        return expected
+
+    def enrollment_check(self, args):
+        """Exact metadata-only probe; never enumerate data or create an outbox event.
+
+        Full payload hashing remains in the bounded authority seal worker. A
+        READY tree is immutable; an overlapping staging writer is not adopted.
+        """
+        self._require()
+        _object(args, ('userId', 'dataset', 'version'))
+        user = _user(args['userId']); ref = _ref({k: args[k] for k in ('dataset', 'version')})
+        with self.cache._locked():
+            identity = self._single_locked(user, ref, ready=True, protected=True)
+            paths = self.cache._paths(**ref)
+            if self.cache._version_entry_exists(paths['.staging']):
+                raise ValueError('Archive enrollment refuses an active or unknown staging writer')
+            if not self.source and self.cache._tier(**ref)['pins']:
+                raise ValueError('Pinned originals cannot be enrolled as disposable caches')
+            record = self.cache._record(self.admin, **ref)
+            raw = D._json_bytes(record['manifest'])
+            if len(raw) > A.MAX_MANIFEST or hashlib.sha256(raw).hexdigest() != ref['version']:
+                raise ValueError('Archive enrollment manifest is not the complete fixed version')
+            return dict(protocol=1, machine=self.machine, userId=user, **ref,
+                        state='READY', role='protected', manifestSha256=ref['version'],
+                        manifestBytes=len(raw), registration=self._registration_binding(user, ref, identity))
+
     def _op_path(self, op):
         return self.root/'operations'/J.identifier(op)/'journal.json'
 
@@ -247,9 +287,9 @@ class StorageArchive:
 
     def provision(self, args):
         self._require(source=True)
-        if not isinstance(args, dict) or set(args)-{'opId', 'userId', 'source', 'targetMachine', 'retry'}:
+        if not isinstance(args, dict) or set(args)-{'opId', 'userId', 'source', 'targetMachine', 'retry', 'expectedRegistration'}:
             raise ValueError('Unrecognized private archive provision fields')
-        _object({k: v for k, v in args.items() if k != 'retry'}, ('opId', 'userId', 'source', 'targetMachine'))
+        _object({k: v for k, v in args.items() if k not in ('retry', 'expectedRegistration')}, ('opId', 'userId', 'source', 'targetMachine'))
         retry = args.get('retry', False)
         if type(retry) is not bool:
             raise ValueError('Archive retry must be boolean')
@@ -261,6 +301,10 @@ class StorageArchive:
         J.PeerClient(peer, {}).close()
         request = dict(opId=op, userId=user, source=ref, targetMachine=target)
         identity = self._single(user, ref, ready=True, protected=True)
+        # A precondition, not a new grant identity: a previously sealed grant
+        # for this same registration must remain reusable by explicit adoption.
+        # _operation durably binds the checked identity before worker dispatch.
+        self._expected_registration(args, user, ref, identity)
         with self._lock('admission'):
             with self._lock('op-'+op):
                 row = self._operation('provision', request, identity)
@@ -342,13 +386,14 @@ class StorageArchive:
         self._require(source=False)
         if not isinstance(args, dict) or type(args.get('retry', False)) is not bool:
             raise ValueError('Invalid private archive certify request')
-        _object({k: v for k, v in args.items() if k != 'retry'}, ('opId', 'userId', 'target', 'grant'))
+        _object({k: v for k, v in args.items() if k not in ('retry', 'expectedRegistration')}, ('opId', 'userId', 'target', 'grant'))
         op = J.identifier(args['opId']); user = _user(args['userId']); ref = _ref(args['target'])
         grant = A._validate_grant(args['grant'], self.policy['machine'], self.machine)
         if grant['version'] != ref['version'] or grant['receipt']['owners'] != [user]:
             raise ValueError('Grant does not certify this fixed version and single owner')
         request = dict(opId=op, userId=user, target=ref, grant=grant)
         identity = self._single(user, ref)
+        self._expected_registration(args, user, ref, identity)
         with self._lock('admission'):
             with self._lock('op-'+op):
                 row = self._operation('certify', request, identity)

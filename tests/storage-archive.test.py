@@ -362,6 +362,87 @@ class ArchiveTests(unittest.TestCase):
                 self.source.outbox_begin(self.intent(dataset='different'))
         self.assertEqual(len(self.source._ids(self.source.root/'events')),1)
 
+    def test_explicit_enrollment_reuses_original_without_outbox_or_copy(self):
+        target = self.tls_target()
+        source_args = dict(userId=USER, dataset='original', version=self.version)
+        target_args = dict(userId=USER, dataset='replica', version=self.version)
+        source = self.source.enrollment_check(source_args)
+        replica = target.enrollment_check(target_args)
+        self.assertEqual(source['manifestSha256'], replica['manifestSha256'])
+        self.assertEqual(source['manifestBytes'], replica['manifestBytes'])
+        self.assertEqual(self.source._ids(self.source.root/'events'), [])
+        self.assertEqual(target._ids(target.root/'events'), [])
+        self.request['expectedRegistration'] = source['registration']
+        grant = self.provision()
+        request = dict(opId=str(uuid.uuid4()), userId=USER,
+                       target=dict(dataset='replica', version=self.version), grant=grant,
+                       expectedRegistration=replica['registration'])
+        self.assertEqual(target.certify(request)['state'], 'READY')
+        self.assertEqual(target.certify(request)['state'], 'READY')
+        self.assertEqual(self.cold._tier('original', self.version)['role'], 'protected')
+        self.assertEqual(self.hot._tier('replica', self.version)['role'], 'cache')
+        self.assertEqual(self.hot._dataset(ADMIN, 'replica')['owners'], [USER])
+
+    def test_enrollment_denies_wrong_or_shared_owner_pins_and_staging(self):
+        target = self.tls_target()
+        args = dict(userId=USER, dataset='replica', version=self.version)
+        with self.assertRaises(PermissionError):
+            target.enrollment_check({**args, 'userId':'demo-user-2'})
+        self.hot.set_owners(ADMIN, 'replica', [USER, 'demo-user-2'])
+        with self.assertRaises(PermissionError): target.enrollment_check(args)
+        self.hot.set_owners(ADMIN, 'replica', [USER])
+        tier = self.hot._tier('replica', self.version)
+        tier['pins']['manual'] = dict(owner=USER, createdAt=1)
+        self.hot._write_tier('replica', self.version, tier)
+        with self.assertRaisesRegex(ValueError, 'Pinned'): target.enrollment_check(args)
+        tier['pins'] = {}; self.hot._write_tier('replica', self.version, tier)
+        self.hot._paths('replica', self.version)['.staging'].mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'staging'): target.enrollment_check(args)
+        self.assertEqual(target._ids(target.root/'events'), [])
+
+    def test_enrollment_fixed_registration_rejects_change_before_provision_or_certify(self):
+        target = self.tls_target()
+        source = self.source.enrollment_check(dict(userId=USER, dataset='original', version=self.version))
+        replica = target.enrollment_check(dict(userId=USER, dataset='replica', version=self.version))
+        path = self.cold._paths('original')['.registry']/(self.version+'.json')
+        D._write_json(path, D._read_json(path))
+        with self.assertRaisesRegex(ValueError, 'registration changed'):
+            self.source.provision({**self.request, 'expectedRegistration':source['registration']})
+        self.assertEqual(self.source._ids(self.source.root/'events'), [])
+        grant = self.provision()
+        path = self.hot._paths('replica')['.registry']/(self.version+'.json')
+        D._write_json(path, D._read_json(path))
+        with self.assertRaisesRegex(ValueError, 'registration changed'):
+            target.certify(dict(opId=str(uuid.uuid4()), userId=USER,
+                target=dict(dataset='replica', version=self.version), grant=grant,
+                expectedRegistration=replica['registration']))
+        self.assertEqual(self.hot._tier('replica', self.version)['role'], 'protected')
+
+    def test_enrollment_seal_rehashes_payload_and_does_not_trust_metadata_probe(self):
+        source = self.source.enrollment_check(dict(userId=USER, dataset='original', version=self.version))
+        request = {**self.request, 'expectedRegistration':source['registration']}
+        payload = self.cold._paths('original', self.version)['ready']/'data'/'file'
+        os.chmod(payload, 0o600); payload.write_bytes(b'changed after metadata check'); os.chmod(payload, 0o400)
+        self.assertEqual(self.source.provision(request)['state'], 'PROVISIONING')
+        self.assertEqual(self.source.worker(request['opId']), 1)
+        self.assertEqual(self.source.provision(request)['state'], 'FAILED')
+        self.assertEqual(self.hot._tier('replica', self.version)['role'], 'protected')
+
+    def test_enrollment_reuses_existing_grant_without_changing_its_request_digest(self):
+        grant = self.provision()
+        proof = self.source.enrollment_check(dict(userId=USER, dataset='original', version=self.version))
+        self.assertEqual(self.source.provision({**self.request,
+            'expectedRegistration':proof['registration']})['grant'], grant)
+        with self.assertRaisesRegex(ValueError, 'registration changed'):
+            self.source.provision({**self.request, 'expectedRegistration':'0'*64})
+
+    def test_enrollment_rechecks_staging_before_dispatch(self):
+        proof = self.source.enrollment_check(dict(userId=USER, dataset='original', version=self.version))
+        self.cold._paths('original', self.version)['.staging'].mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'staging'):
+            self.source.provision({**self.request, 'expectedRegistration':proof['registration']})
+        self.source.spawn.assert_not_called()
+
     def test_safe_private_state_rejects_symlink_and_nonprivate_root(self):
         bad=self.root/'bad-state'; bad.mkdir(); (bad/'storage-archive').symlink_to(self.source.root)
         node=self.executor('cold-node',self.cold,bad)

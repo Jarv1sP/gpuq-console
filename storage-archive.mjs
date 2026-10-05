@@ -9,7 +9,7 @@ const HASH=/^[a-f0-9]{64}$/;
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const USER=/^(builtin-admin|demo-user-[0-9]+)$/;
 const key=(...parts)=>createHash('sha256').update(JSON.stringify(parts)).digest('hex');
-const fail=message=>{throw Error(message);};
+const fail=(message,status)=>{throw Object.assign(Error(message),status===undefined?{}:{status});};
 const isRef=value=>value&&ID.test(value.dataset)&&HASH.test(value.version);
 const safePhase=new Set(['QUEUED','COPYING','PROVISIONING','CERTIFYING','ARCHIVED','BLOCKED','FAILED']);
 
@@ -41,7 +41,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(service.closing)fail('Archive service is closing');
     // Copy only our defined journal fields. A grant/token/source ticket cannot
     // accidentally enter durable state through a spread of a remote response.
-    const allowed=['id','kind','owner','machine','dataset','version','eventId','sourceMachine','sourceDataset','logicalDataset','phase','copyKey','transferId','grantId','certifyId','createdAt','updatedAt','nextCheckAt','failures','error','receiptSha256','eventAcknowledged','policyKey','retryRequested','transferState','failureStage'];
+    const allowed=['id','kind','owner','machine','dataset','version','eventId','sourceMachine','sourceDataset','logicalDataset','phase','copyKey','transferId','grantId','certifyId','createdAt','updatedAt','nextCheckAt','failures','error','receiptSha256','eventAcknowledged','policyKey','retryRequested','transferState','failureStage','enrollment'];
     if(Object.keys(row).some(k=>!allowed.includes(k))||!safePhase.has(row.phase))fail('Invalid archive journal');
     row.updatedAt=clock();
     service.db.prepare('INSERT INTO storage_archives(id,owner,machine,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(row.id,row.owner,row.machine,JSON.stringify(row));
@@ -131,6 +131,62 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     save(row);return publicRow(row);
   };
 
+  const enrolling=new Map();
+  service.enrollStorageArchive=(principal,args)=>{
+    if(!args||Object.keys(args).sort().join(',')!=='dataset,key,machine,ownerId,version'||
+      !USER.test(args.ownerId||'')||!UUID.test(args.key||'')||!isRef(args)||
+      !MACHINES.some(m=>m.id===args.machine)||args.machine===policy.machine)
+      fail('Enrollment requires an exact owner, hot machine, version and UUID key.',400);
+    const {ownerId:owner,machine,dataset,version,key:requestKey}=args;
+    const admitted=service.store.get(principal.userId);
+    if(!admitted?.enabled||admitted.role!=='admin')fail('Archive enrollment requires a current administrator.',403);
+    const actorPolicy=JSON.stringify(admitted),ownerPolicy=JSON.stringify(enabledUser(owner,machine));
+    const check=()=>{
+      if(service.closing||!policy.enabled||!service.bridge||key(service.storageArchivePolicy)!==policyKey)fail('Archive enrollment is unavailable.');
+      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine,from:policy.machine});
+      if(JSON.stringify(service.store.get(principal.userId))!==actorPolicy||
+         JSON.stringify(enabledUser(owner,machine))!==ownerPolicy)fail('Archive enrollment authorization changed.',403);
+    };
+    check();
+    const id=key('explicit-enrollment',principal.userId,requestKey),binding=key(owner,machine,dataset,version,policyKey);
+    const prior=load(id);
+    if(prior){
+      if(prior.enrollment?.binding!==binding)fail('Enrollment key cannot change its owner or fixed reference.');
+      return Promise.resolve(publicRow(prior));
+    }
+    const pending=enrolling.get(id);
+    if(pending){if(pending.binding!==binding)fail('Enrollment key is already bound to another reference.');return pending.task;}
+    const task=(async()=>{
+      // No discovery scan, owners mutation, forged upload event, public grant,
+      // or automatic copy fallback. Both registered versions must already exist.
+      if(rows().some(row=>currentPolicy(row)&&row.owner===owner&&row.machine===machine&&row.dataset===dataset&&row.version===version))
+        fail('An archive intent already exists; inspect or retry that intent.');
+      const reference={userId:owner,dataset,version},proofs=[];
+      for(const target of [machine,policy.machine]){
+        const value=await service.bridge(target,'storage.archive.enrollment-check',reference);check();
+        if(!value||Object.keys(value).sort().join(',')!=='dataset,machine,manifestBytes,manifestSha256,protocol,registration,role,state,userId,version'||
+          value.protocol!==1||value.machine!==target||value.userId!==owner||value.dataset!==dataset||value.version!==version||
+          value.state!=='READY'||value.role!=='protected'||value.manifestSha256!==version||
+          !HASH.test(value.registration||'')||!Number.isSafeInteger(value.manifestBytes)||value.manifestBytes<1||value.manifestBytes>64*1024**2)
+          fail('Existing original or replica is not confirmed; no enrollment was created.');
+        proofs.push(value);
+      }
+      if(proofs[0].manifestBytes!==proofs[1].manifestBytes)fail('Complete immutable manifests do not match.');
+      check();
+      if(rows().some(row=>currentPolicy(row)&&row.owner===owner&&row.machine===machine&&row.dataset===dataset&&row.version===version))
+        fail('An archive intent was created concurrently; inspect that intent.');
+      if(rows().length>=10000)fail('Archive history limit reached');
+      const now=clock(),row={id,kind:'replica',owner,machine,dataset,version,logicalDataset:dataset,
+        sourceMachine:policy.machine,sourceDataset:dataset,phase:'PROVISIONING',copyKey:randomUUID(),transferId:null,
+        grantId:null,certifyId:randomUUID(),createdAt:now,updatedAt:now,nextCheckAt:now,failures:0,eventAcknowledged:true,policyKey,
+        enrollment:{binding,actor:principal.userId,key:requestKey,targetRegistration:proofs[0].registration,sourceRegistration:proofs[1].registration}};
+      row.grantId=grantIdentity(row);save(row);
+      service.audit(principal.username,'datasets.archive.enroll',machine,owner+':'+dataset+'@'+version);
+      return publicRow(row);
+    })().finally(()=>{if(enrolling.get(id)?.task===task)enrolling.delete(id);});
+    enrolling.set(id,{binding,task});return task;
+  };
+
   // Explicit authenticated intent, never an automatic retry or a new transfer.
   // The background lane alone consumes this flag after rechecking permission.
   service.retryStorageArchive=(owner,machine,ref)=>{
@@ -187,14 +243,16 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       if(result?.protected!==true||result.dataset!==row.dataset||result.version!==row.version)fail('Archive original is not protected');
       row.phase='ARCHIVED';delete row.error;save(row);await acknowledge(row,snapshot);releaseLane(row);return;
     }
-    const request={opId:row.grantId,userId:row.owner,source:{dataset:row.sourceDataset,version:row.version},targetMachine:row.machine,...(row.retryRequested?{retry:true}:{})};
+    const request={opId:row.grantId,userId:row.owner,source:{dataset:row.sourceDataset,version:row.version},targetMachine:row.machine,
+      ...(row.enrollment?{expectedRegistration:row.enrollment.sourceRegistration}:{}),...(row.retryRequested?{retry:true}:{})};
     const provision=await call(row,snapshot,policy.machine,'storage.archive.provision',request);
     if(provision?.opId!==row.grantId)fail('Archive provision identity mismatch');
     if(provision.state==='FAILED'){row.phase='FAILED';row.failureStage='provision';row.retryRequested=false;row.error='长期原件校验未完成，本机副本不会被清理。';save(row);releaseLane(row);return;}
     if(provision.state!=='READY'){row.phase='PROVISIONING';save(row);return;}
     if(!provision.grant||provision.grant.id!==row.grantId||provision.grant.sourceMachine!==policy.machine||provision.grant.targetMachine!==row.machine||provision.grant.dataset!==row.sourceDataset||provision.grant.version!==row.version||JSON.stringify(provision.grant.receipt?.owners)!==JSON.stringify([row.owner]))fail('Archive grant does not match the fixed owner/reference');
     row.phase='CERTIFYING';save(row);
-    const certified=await call(row,snapshot,row.machine,'storage.archive.certify',{opId:row.certifyId,userId:row.owner,target:{dataset:row.dataset,version:row.version},grant:provision.grant,...(row.retryRequested?{retry:true}:{})});
+    const certified=await call(row,snapshot,row.machine,'storage.archive.certify',{opId:row.certifyId,userId:row.owner,target:{dataset:row.dataset,version:row.version},grant:provision.grant,
+      ...(row.enrollment?{expectedRegistration:row.enrollment.targetRegistration}:{}),...(row.retryRequested?{retry:true}:{})});
     if(certified?.opId===row.certifyId&&certified.state==='FAILED'){row.phase='FAILED';row.failureStage='certify';row.retryRequested=false;row.error='缓存认证未完成；本机副本仍受保护，请检查后重试。';save(row);releaseLane(row);return;}
     if(certified?.opId!==row.certifyId||certified.state!=='READY'||certified.dataset!==row.dataset||certified.version!==row.version||certified.role!=='cache'||!HASH.test(certified.receiptSha256||''))fail('Archive cache certification not confirmed');
     row.receiptSha256=certified.receiptSha256;row.phase='ARCHIVED';row.failures=0;row.retryRequested=false;delete row.error;save(row);

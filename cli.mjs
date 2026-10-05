@@ -105,6 +105,7 @@ gpuctl data upload-status UPLOAD_ID  Inspect this account's upload and verificat
 gpuctl data upload-discard UPLOAD_ID  Cancel an unfinished upload (not a READY dataset)
 gpuctl data prepare NAME@VERSION Prepare a local, verified copy without reserving GPUs
 gpuctl data archive-retry NAME@VERSION  Retry long-term preservation; keeps the local original
+gpuctl data archive-enroll NAME@VERSION --owner-id ID --key UUID  Administrator: adopt an existing HDD original
 gpuctl data unregister NAME[@VERSION]  Administrator: asynchronously unregister local data
 gpuctl data status OPERATION_ID   Check a background operation; accepted is not completed
 gpuctl data status NAME@VERSION  Inspect preparation state
@@ -347,7 +348,7 @@ async function main(){
   const explicitSession=options['session-file']||process.env.GPUQ_SESSION_FILE||process.env.AMAX_SESSION_FILE;
   if(options.description!==undefined&&positionals[0]!=='run')fail('--description is only valid for run');
   if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0])&&!datasetLabel)fail('--display-name is only valid for profile, register or data label');
-  if(options['owner-id']!==undefined&&!datasetLabel)fail('--owner-id is only valid for administrator data label');
+  if(options['owner-id']!==undefined&&!datasetLabel&&!(positionals[0]==='data'&&positionals[1]==='archive-enroll'))fail('--owner-id is only valid for administrator data label/archive-enroll');
   let sessionFile=explicitSession||join(homedir(),'.config','gpuq-console','session.json');
   // Keep one cache: a previous installation continues using its existing file.
   if(!explicitSession){try{await lstat(sessionFile);}catch(e){if(e.code!=='ENOENT')throw e;const legacy=join(homedir(),'.config','amax-demo','session.json');try{await lstat(legacy);sessionFile=legacy;}catch(old){if(old.code!=='ENOENT')throw old;}}}
@@ -637,6 +638,13 @@ async function main(){
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: data upload-status|upload-discard UPLOAD_ID [--machine SERVER]');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       result={...(await call('datasets.upload.'+(positionals[1]==='upload-status'?'status':'discard'),{machine,uploadId:positionals[2]})).result,machine};if(result.state==='FAILED')process.exitCode=1;
+    }else if(command==='data'&&positionals[1]==='archive-enroll'){
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','owner-id','key'].includes(k)))fail('Usage: data archive-enroll NAME@VERSION --machine HOT_MACHINE --owner-id ID --key UUID');
+      const [dataset,version,...extra]=positionals[2].split('@'),machine=defaultMachine();
+      if(session.principal.role!=='admin'||!/^(builtin-admin|demo-user-[0-9]+)$/.test(options['owner-id']||''))fail('An administrator and explicit immutable --owner-id are required');
+      if(extra.length||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(dataset)||!/^[a-f0-9]{64}$/.test(version||'')||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.key||''))fail('Use NAME@FULL_VERSION_HASH and a persistent UUID --key');
+      if(machine==='auto'||options.machines.length!==1||!state.machines.some(m=>m.id===machine))fail('Select one explicit hot machine for enrollment');
+      result=(await call('datasets.archive.enroll',{machine,dataset,version,ownerId:options['owner-id'],key:options.key})).result;
     }else if(command==='data'&&positionals[1]==='storage'){
       if(session.principal.role!=='admin')fail('Storage management requires an administrator account');
       if(training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Storage commands accept only one --machine SERVER and --json');

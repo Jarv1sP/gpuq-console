@@ -48,6 +48,67 @@ function fixture(t){
   return f;
 }
 
+function enrollmentFixture(t){
+  const f=fixture(t);f.events=[];
+  f.admin={id:'demo-user-99',username:'admin',enabled:true,role:'admin',limits:{[hot]:1}};
+  f.service.store.get=id=>structuredClone(id===f.admin.id?f.admin:id===f.user.id?f.user:null);
+  f.actor={userId:f.admin.id,username:f.admin.username,role:'admin'};
+  f.request={machine:hot,...ref,ownerId:f.user.id,key:randomUUID()};
+  const bridge=f.service.bridge;
+  f.service.bridge=async(machine,op,args)=>{
+    if(op!=='storage.archive.enrollment-check')return bridge(machine,op,args);
+    f.calls.push({machine,op,args});await f.onCheck?.(machine,args);
+    return {protocol:1,machine,userId:args.userId,dataset:args.dataset,version:args.version,state:'READY',role:'protected',manifestSha256:args.version,manifestBytes:100,registration:(machine===hot?'c':'d').repeat(64),...f.probeOverride};
+  };
+  return f;
+}
+
+test('explicit admin enrollment reuses exact HDD original, not transfer or forged outbox',async t=>{
+  const f=enrollmentFixture(t);
+  const [first,again]=await Promise.all([f.service.enrollStorageArchive(f.actor,f.request),f.service.enrollStorageArchive(f.actor,f.request)]);
+  assert.deepEqual(first,again);assert.equal(first.phase,'PROVISIONING');assert.equal(f.archive.rows().length,1);
+  assert.equal(f.calls.filter(c=>c.op==='storage.archive.enrollment-check').length,2);
+  await f.service.reconcileStorageArchive();
+  const row=f.archive.rows()[0];assert.equal(row.phase,'ARCHIVED');assert.equal(row.sourceDataset,ref.dataset);
+  assert.equal(f.transfers.size,0);assert.equal(f.calls.some(c=>c.op==='storage.archive.ack'),false);
+  assert.equal(f.calls.find(c=>c.op==='storage.archive.provision').args.expectedRegistration,'d'.repeat(64));
+  assert.equal(f.calls.find(c=>c.op==='storage.archive.certify').args.expectedRegistration,'c'.repeat(64));
+  assert.equal((await f.service.enrollStorageArchive(f.actor,f.request)).phase,'ARCHIVED');
+  assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,ref),true);
+  assert.equal(f.service.archiveSourceAllowed('demo-user-2',cold,ref),false);
+});
+
+test('enrollment rejects member, disabled/revoked owner, arbitrary source and reused key',async t=>{
+  const f=enrollmentFixture(t);
+  assert.throws(()=>f.service.enrollStorageArchive(f.principal,f.request),/administrator/);
+  f.admin.role='member';assert.throws(()=>f.service.enrollStorageArchive(f.actor,f.request),/administrator/);f.admin.role='admin';
+  f.user.enabled=false;assert.throws(()=>f.service.enrollStorageArchive(f.actor,f.request),/permission changed/);f.user.enabled=true;
+  f.user.limits[hot]=0;assert.throws(()=>f.service.enrollStorageArchive(f.actor,f.request),/permission changed/);f.user.limits[hot]=1;
+  assert.throws(()=>f.service.enrollStorageArchive(f.actor,{...f.request,sourceMachine:other}),/requires/);
+  await f.service.enrollStorageArchive(f.actor,f.request);
+  assert.throws(()=>f.service.enrollStorageArchive(f.actor,{...f.request,version:'b'.repeat(64)}),/cannot change/);
+  assert.equal(f.archive.rows().length,1);
+});
+
+test('enrollment fails closed on missing, mismatched or unknown replicas and policy races',async t=>{
+  for(const override of [{userId:'demo-user-2'},{manifestSha256:'b'.repeat(64)},{state:'UNKNOWN'},{role:'cache'},{registration:null}]){
+    const f=enrollmentFixture(t);f.probeOverride=override;
+    await assert.rejects(f.service.enrollStorageArchive(f.actor,f.request),/not confirmed/);assert.equal(f.archive.rows().length,0);
+  }
+  for(const mutate of [f=>{f.admin.role='member';},f=>{f.user.enabled=false;},f=>{f.user.limits[hot]=0;}]){
+    const f=enrollmentFixture(t);f.onCheck=()=>mutate(f);
+    await assert.rejects(f.service.enrollStorageArchive(f.actor,f.request));assert.equal(f.archive.rows().length,0);
+  }
+  const f=enrollmentFixture(t);f.onCheck=()=>{throw Error('missing original');};
+  await assert.rejects(f.service.enrollStorageArchive(f.actor,f.request),/missing original/);assert.equal(f.archive.rows().length,0);
+});
+
+test('owner revocation after explicit enrollment prevents authority sealing',async t=>{
+  const f=enrollmentFixture(t);await f.service.enrollStorageArchive(f.actor,f.request);f.user.enabled=false;
+  await f.service.reconcileStorageArchive();
+  assert.equal(f.archive.rows()[0].phase,'BLOCKED');assert.equal(f.calls.some(c=>c.op==='storage.archive.provision'),false);
+});
+
 test('archive policy is explicit fixed configuration, disabled by default',()=>{
   assert.deepEqual(storageArchivePolicy(),{enabled:false});
   for(const policy of [{enabled:true,machine:'not-a-node',authority:'hdd'},{enabled:true,machine:cold,authority:'../x'},{enabled:true,machine:cold,authority:'hdd',endpoint:'https://evil'}])assert.throws(()=>storageArchivePolicy(policy));
