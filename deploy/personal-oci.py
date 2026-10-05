@@ -392,6 +392,25 @@ class PersonalOCI:
             entry = container[0]
             labels = entry.get('Config', {}).get('Labels', {})
             state = entry.get('State', {})
+            need(labels.get('io.gpuq.owner') == self.owner and labels.get('io.gpuq.project') == slug,
+                 'Development container ownership is unknown')
+            if state.get('Running') is True:
+                # A control-group stop can kill conmon before its exit event is
+                # persisted. Refresh only this dead, exactly owned runtime;
+                # never stop/remove a live container or discard its overlay.
+                identifier = entry.get('Id')
+                need(isinstance(identifier, str) and re.fullmatch('[a-f0-9]{64}', identifier)
+                     and state.get('Paused', False) is False
+                     and all(type(state.get(key)) is int and state[key] >= 0
+                             and (state[key] == 0 or not Path('/proc', str(state[key])).exists())
+                             for key in ('Pid', 'ConmonPid')), 'Development container is still running')
+                self.run('ps', '--all', '--sync', '--filter', 'id='+identifier, '--format=json')
+                refreshed = json.loads(self.run('container', 'inspect', value['container']))
+                need(len(refreshed) == 1 and refreshed[0].get('Id') == identifier,
+                     'Development container changed during runtime refresh')
+                entry = refreshed[0]
+                labels = entry.get('Config', {}).get('Labels', {})
+                state = entry.get('State', {})
             need(labels.get('io.gpuq.owner') == self.owner and labels.get('io.gpuq.project') == slug
                  and state.get('Running') is False and state.get('Paused', False) is False and state.get('Pid') == 0
                  and state.get('Status') in ('exited', 'stopped', 'created', 'configured'), 'Development container is running or ownership is unknown')

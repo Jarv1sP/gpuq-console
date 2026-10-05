@@ -559,6 +559,45 @@ class OCITests(unittest.TestCase):
                     else:
                         self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
                         self.assertEqual(m.run.call_args.args[0],'rm');write.assert_called_once()
+
+    def test_dead_conmon_state_sync_preserves_overlay_before_checkpoint(self):
+        m=self.manager();identifier='c'*64
+        m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                    'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+        stale={'Id':identifier,'Config':{'Labels':{'io.gpuq.owner':m.owner,'io.gpuq.project':'vision'}},
+               'State':{'Running':True,'Paused':False,'Pid':99999998,'ConmonPid':99999999}}
+        stopped={**stale,'State':{'Running':False,'Paused':False,'Pid':0,'Status':'stopped'}}
+        m.run=Mock(side_effect=[json.dumps([stale]),'[]',json.dumps([stopped]),SHA,''])
+        with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write:
+            self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
+        self.assertEqual(m.run.call_args_list[1].args,('ps','--all','--sync','--filter','id='+identifier,'--format=json'))
+        self.assertEqual(m.run.call_args_list[3].args[0],'commit');write.assert_called_once()
+
+    def test_dead_runtime_refresh_keeps_running_changed_paused_and_foreign_state_refused(self):
+        identifier='c'*64
+        stale={'Id':identifier,'Config':{'Labels':{'io.gpuq.owner':self.manager().owner,'io.gpuq.project':'vision'}},
+               'State':{'Running':True,'Paused':False,'Pid':99999998,'ConmonPid':99999999}}
+        variants=[stale,{**stale,'Id':'d'*64},
+                  {**stale,'State':{'Running':False,'Paused':True,'Pid':0,'Status':'stopped'}},
+                  {**stale,'Config':{'Labels':{'io.gpuq.owner':'f'*64,'io.gpuq.project':'vision'}}}]
+        for refreshed in variants:
+            with self.subTest(refreshed=refreshed):
+                m=self.manager();m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                    'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+                m.run=Mock(side_effect=[json.dumps([stale]),'[]',json.dumps([refreshed])])
+                with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write:
+                    with self.assertRaises(ValueError):m.checkpoint('vision')
+                    write.assert_not_called();self.assertEqual(m.run.call_count,3)
+
+    def test_live_kernel_pid_never_syncs_or_commits_development_container(self):
+        m=self.manager();m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                    'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+        entry={'Id':'c'*64,'Config':{'Labels':{'io.gpuq.owner':m.owner,'io.gpuq.project':'vision'}},
+               'State':{'Running':True,'Paused':False,'Pid':123,'ConmonPid':124}}
+        m.run=Mock(return_value=json.dumps([entry]))
+        with patch.object(o.Path,'exists',return_value=True),patch.object(m.s,'atomic_json') as write:
+            with self.assertRaises(ValueError):m.checkpoint('vision')
+            write.assert_not_called();self.assertEqual(m.run.call_count,1)
     def test_commit_head_is_durable_before_deleting_writable_layer(self):
         m = self.manager()
         value = {'schema': 1, 'owner': m.owner, 'project': 'vision', 'image': 'sha256:'+SHA, 'container': 'gpuq-dev-'+'c'*32}
