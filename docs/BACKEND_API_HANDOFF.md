@@ -48,6 +48,8 @@
 
 手动项目副本使用正常认证接口 `projects.replicate {from,machine,project,release,key}`，查询／取消为 `projects.replication.status {id}` 和 `projects.replication.cancel {id}`。只允许账号自身、两端机器均仍授权的固定 OCI 版本。响应包含 `id,state,from,machine,project,release,bytes?,totalBytes?,error?,developmentChanged:false`；状态包括 PREPARING、DISPATCHING、RUNNING、UNKNOWN、SUCCEEDED、FAILED、CANCELING、CANCELED。UNKNOWN 不证明未启动，不能换 key 重发。内部传输票据不会返回前端。
 
+明确失败或取消后，用户可选择 `projects.replication.retry {id,key}`，`key` 是新的重试 UUID；响应不确定时沿用这个 key。只有旧操作两端已停止、临时运输数据已清理、源票据已撤销且权限仍有效才接受；返回新复制及 `retryOf`，原失败记录不改写。不要让页面刷新自动调用 retry，也不要自动重提旧训练。后台发现撤权或取消时，先阻断源票据读取，再等目标停止和清理；目标暂时失联时继续保留收尾状态与临时文件。
+
 项目复制只复制不可变代码和镜像，不迁移正在运行的容器、草稿、开发 HOME 或训练结果。数据集使用原数据复制服务。部署方需同时启用门户模块、节点 portable-project 能力与固定 TLS peer，配置缺失时拒绝自动选机，不回退为未隔离执行。
 
 ## 终端：新建与重连分开

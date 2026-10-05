@@ -136,9 +136,11 @@ gpuctl project copy my-project --from gpu-1 --to gpu-2 --release FULL_HASH
 gpuctl project copy-status COPY_ID
 # 仅在确实要取消这笔复制时：
 gpuctl project copy-cancel COPY_ID
+# 已明确失败或取消，排查原因后才重试：
+gpuctl project copy-retry COPY_ID
 ```
 
-复制返回独立操作 ID、状态和进度；后台完成用 `SUCCEEDED` 表示。代码与镜像走已配置的节点间 TLS 连接，VPS 只处理控制请求；同版本校验完成后才可运行。复制发布版本不等于同步开发容器，结果、训练 HOME 和 `/outputs` 仍留在实际执行节点。用 `gpuctl jobs` 看机器，再用 `gpuctl pull --machine TARGET --project my-project --job JOB_ID result.pt ./result.pt` 下载结果。
+复制返回独立操作 ID、状态和进度；后台完成用 `SUCCEEDED` 表示。`copy-retry` 仅在旧操作两端确认停止并清理后才创建一次新复制，保留原失败记录；响应未确认时沿用客户端打印的重试键，不反复换键。运行中或 `UNKNOWN` 不能重试。代码与镜像走已配置的节点间 TLS 连接，VPS 只处理控制请求；同版本校验完成后才可运行。复制发布版本不等于同步开发容器，结果、训练 HOME 和 `/outputs` 仍留在实际执行节点。用 `gpuctl jobs` 看机器，再用 `gpuctl pull --machine TARGET --project my-project --job JOB_ID result.pt ./result.pt` 下载结果。
 
 显式 `gpuctl run --sync -g 1 -- python train.py` 则先上传当前目录（或 `--sync-dir "本地目录"`）到所选个人项目，复用分块 SHA256 校验和发布 worker，等待本次发布的 UUID 回执 READY；再通过固定版本清单确认已上传文件的大小／SHA，最后固定该 release 提交。发布状态未知、失败、被其他发布替换、文件变化、校验不符或有界等待超时都不会提交旧版本。不会关闭终端或自动安装依赖；必须先准备好项目环境并退出项目终端。旧节点缺少 publicationProtocol 时在上传前拒绝，不静默兼容成“运行旧代码”。`--sync` 不能与 `--release/--legacy/--root/--as/--job` 混用。
 
