@@ -21,7 +21,8 @@ import time
 
 HERE = Path(__file__).resolve().parent
 def module(name):
-    spec=importlib.util.spec_from_file_location('gpuq_copy_'+name.replace('-','_'),HERE/(name+'.py'))
+    paths={'transfer-jobs':'transfer-jobs.py','portable-project':'portable-project.py'}
+    spec=importlib.util.spec_from_file_location('gpuq_copy_'+name.replace('-','_'),HERE/paths[name])
     value=importlib.util.module_from_spec(spec);spec.loader.exec_module(value);return value
 t=module('transfer-jobs')
 p=module('portable-project')
