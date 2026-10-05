@@ -22,6 +22,7 @@ try{
     const userId='local-'+role,principal={userId,username:userId,role},calls=[],rows=new Map();
     const state={machines,executionEnabled:true,users:[{id:userId,username:userId,name:'本地验收',role,enabled:true,total:8,limits:Object.fromEntries(machines.map(m=>[m.id,m.cards]))}],jobs:[],gpuq:{checkedAt,stale:false,hosts:[]}};
     let lost=null,statusFailure=null,deny=false,cloudEnabled=true,shareEnabled=false;
+    let releaseInitialList;const initialList=new Promise(resolve=>{releaseInitialList=resolve;});
     page.on('pageerror',error=>errors.push(error.message));
     const reply=(route,result)=>route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal})});
     const reject=(route,error,status=403)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify({error})});
@@ -41,7 +42,7 @@ try{
           if(deny)return reject(route,'这台服务器未授权。');
           const records=rows.get(args.machine)||[];
           if(operation==='cloud.files.info')return reply(route,{enabled:cloudEnabled&&args.machine!==machines[1]?.id,nodeLocal:true,vpsRelay:false});
-          if(operation==='cloud.files.list')return reply(route,{files:records,total:records.length,limit:50});
+          if(operation==='cloud.files.list'){await initialList;return reply(route,{files:records,total:records.length,limit:50});}
           if(operation==='cloud.files.status'){
             if(statusFailure)return reject(route,'原操作状态暂时无法查询。',statusFailure);
             const row=records.find(row=>row.operationId===args.operationId);
@@ -70,12 +71,25 @@ try{
     });
     await page.goto(origin);await page.locator('#execution-workspace').waitFor();await page.locator('[data-nav=datasets]').click();
     await page.locator('#datasets-refresh').click();await page.locator('.dataset-matrix').waitFor();
+    await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
     assert.deepEqual(await page.locator('.dataset-matrix-heading .server-id').allTextContents(),machines.map(m=>m.id));
     const openCloud=async()=>{await page.locator('#datasets-add > summary').click();await page.locator('[data-dataset-source=workspace]').click();if(!await page.locator('#cloud-files').evaluate(el=>el.open))await page.locator('#cloud-files > summary').click();};
     const idle=()=>page.waitForFunction(()=>!document.querySelector('#cloud-files-refresh').disabled);
     const refresh=async()=>{await page.locator('#cloud-files-refresh').click();await idle();};
-    await openCloud();await idle();
-    await page.locator('[name=cloud-files-path]').fill('incoming/research-data.tar');await page.locator('#cloud-files-form [type=submit]').click();await idle();
+    const initialRead=page.waitForRequest(request=>request.url()===origin+'/api/call'&&request.postDataJSON().operation==='cloud.files.list');
+    await openCloud();await initialRead;
+    // An enabled button before the asynchronous <details> toggle starts is
+    // not proof that the initial read finished. Hold that read explicitly,
+    // check the real busy controls, then wait for the rendered list.
+    assert.equal(await page.locator('#cloud-files-refresh').isDisabled(),true);
+    assert.equal(await page.locator('#cloud-files-form [type=submit]').isDisabled(),true);
+    assert.equal(calls.some(c=>c.operation==='cloud.files.upload'),false);
+    releaseInitialList();await page.locator('#cloud-files-list li').waitFor();await idle();
+    const submitUpload=async()=>{
+      const request=page.waitForRequest(request=>request.url()===origin+'/api/call'&&request.postDataJSON().operation==='cloud.files.upload');
+      await page.locator('#cloud-files-form [type=submit]').click();await request;await idle();
+    };
+    await page.locator('[name=cloud-files-path]').fill('incoming/research-data.tar');await submitUpload();
     const upload=calls.find(c=>c.operation==='cloud.files.upload').args;
     const own=()=>rows.get(machines[0].id),uploadRow=()=>own().find(row=>row.operationId===upload.key);
     const captureState=async(name,width)=>{await page.setViewportSize({width,height:1000});await page.locator('#cloud-files').evaluate(node=>{const dialog=node.closest('dialog');dialog.scrollTop+=node.getBoundingClientRect().top-dialog.getBoundingClientRect().top-dialog.querySelector('header').getBoundingClientRect().height-16;});await page.screenshot({path:join(screenshots,name+'-'+role+'-'+width+'.png'),fullPage:true});};
@@ -98,13 +112,13 @@ try{
     assert.deepEqual(calls.slice(count,count+3).map(c=>c.operation),['cloud.files.status','cloud.files.status','cloud.files.download']);
     downloadRow.state='READY';await refresh();assert.match(await page.locator('#cloud-files-list').textContent(),/已保存到数据空间/);
     // A lost accepted reply is reconciled by status without another write.
-    lost='after';await page.locator('[name=cloud-files-path]').fill('incoming/accepted.tar');const before=calls.length;await page.locator('#cloud-files-form [type=submit]').click();await idle();
+    lost='after';await page.locator('[name=cloud-files-path]').fill('incoming/accepted.tar');const before=calls.length;await submitUpload();
     const accepted=calls.slice(before).find(c=>c.operation==='cloud.files.upload');
     assert.deepEqual(calls.slice(before).map(c=>c.operation),['cloud.files.upload','cloud.files.status']);assert.equal(calls.at(-1).args.operationId,accepted.args.key);
     assert.equal(await page.locator('#cloud-files-retry').isHidden(),true);assert.match(await page.locator('#cloud-files-status').textContent(),/等待传输/);
     // No result from a lost/unaccepted write: explicit retry still queries
     // first, and never consumes a subsequently edited destination.
-    lost='before';statusFailure=503;await page.locator('[name=cloud-files-path]').fill('incoming/uncertain.tar');await page.locator('#cloud-files-form [type=submit]').click();await idle();
+    lost='before';statusFailure=503;await page.locator('[name=cloud-files-path]').fill('incoming/uncertain.tar');await submitUpload();
     const uncertain=calls.findLast(c=>c.operation==='cloud.files.upload').args;
     assert.equal(await page.locator('#cloud-files-retry').isVisible(),true);await page.locator('[name=cloud-files-path]').fill('incoming/changed.tar');
     const writeCount=()=>calls.filter(c=>c.operation==='cloud.files.upload').length;
