@@ -81,6 +81,81 @@ function retirementFixture(t,{queued=false}={}){
   f.rowId=row.id;return f;
 }
 
+function authorityRetirementFixture(t){
+  const f=enrollmentFixture(t);f.events=[];
+  const seed=(machine,dataset,version)=>{
+    const row=f.archive.enqueueEvent(machine,{id:randomUUID(),userId:f.user.id,dataset,version,state:'READY'});
+    Object.assign(row,{phase:'ARCHIVED',sourceMachine:cold,sourceDataset:'hdd-'+dataset,
+      grantId:randomUUID(),certifyId:randomUUID(),receiptSha256:'c'.repeat(64),eventAcknowledged:true});
+    f.db.prepare('UPDATE storage_archives SET data=? WHERE id=?').run(JSON.stringify(row),row.id);
+    return row;
+  };
+  f.old=seed(hot,'old-ref','a'.repeat(64));f.replacement=seed(other,'union-ref','b'.repeat(64));
+  f.retire={machine:hot,dataset:f.old.dataset,version:f.old.version,ownerId:f.user.id,
+    recoveryId:'unregister-'+'1'.repeat(32),key:randomUUID(),
+    replacement:{machine:other,dataset:f.replacement.dataset,version:f.replacement.version}};
+  const bridge=f.service.bridge;
+  f.service.bridge=async(machine,op,args)=>{
+    if(op!=='storage.archive.retire')return bridge(machine,op,args);
+    f.calls.push({machine,op,args});await f.onRetire?.(machine,args);
+    if(args.mode==='authority-target-v1')return {protocol:1,state:'REVOKED',opId:args.opId,userId:args.userId,
+      grantId:args.grantId,sourceMachine:cold,targetMachine:hot,
+      source:{dataset:f.old.sourceDataset,version:f.old.version},target:{dataset:f.old.dataset,version:f.old.version},
+      proofSha256:'e'.repeat(64),...f.targetOverride};
+    return {protocol:1,state:'RETIRED',opId:args.opId,userId:args.userId,grantId:args.grantId,
+      source:{dataset:f.old.sourceDataset,version:f.old.version},
+      unregister:{operationId:'f'.repeat(64),state:'UNREGISTERED',unregistered:true,recoveryId:'unregister-'+'2'.repeat(32)},...f.sourceOverride};
+  };
+  return f;
+}
+
+test('authority retirement binds certified replacement and preserves unrelated archive access',async t=>{
+  const f=authorityRetirementFixture(t);
+  const result=await f.service.retireStorageAuthority(f.actor,f.retire);
+  assert.equal(result.originalRetained,false);assert.equal(result.phase,'FAILED');
+  assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,{dataset:f.old.sourceDataset,version:f.old.version}),false);
+  assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,{dataset:f.replacement.sourceDataset,version:f.replacement.version}),true);
+  const calls=f.calls.length;assert.deepEqual(await f.service.retireStorageAuthority(f.actor,f.retire),result);assert.equal(f.calls.length,calls);
+  assert.deepEqual(f.calls.filter(c=>c.op==='storage.archive.retire').map(c=>c.args.mode),['authority-target-v1','authority-source-v1']);
+  assert.equal(f.calls.at(-1).args.replacementGrantId,f.replacement.grantId);
+  assert.throws(()=>f.service.retryStorageArchive(f.user.id,hot,{dataset:f.old.dataset,version:f.old.version}),/retired|注销|退役/);
+});
+
+test('authority retirement denies member, client proof, unarchived replacement, owner change and active dependency',async t=>{
+  for(const change of [f=>[f.principal,f.retire],f=>[f.actor,{...f.retire,targetProof:{}}],
+    f=>{f.user.limits[other]=0;return [f.actor,f.retire];},
+    f=>{f.replacement.phase='COPYING';f.db.prepare('UPDATE storage_archives SET data=? WHERE id=?').run(JSON.stringify(f.replacement),f.replacement.id);return [f.actor,f.retire];},
+    f=>{const row={...f.old,id:'1'.repeat(64),machine:other};f.db.prepare('INSERT INTO storage_archives VALUES(?,?,?,?)').run(row.id,row.owner,row.machine,JSON.stringify(row));return [f.actor,f.retire];},
+    f=>{f.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run(f.old.id);return [f.actor,f.retire];}]){
+    const f=authorityRetirementFixture(t),[actor,args]=change(f);
+    assert.throws(()=>f.service.retireStorageAuthority(actor,args));assert.equal(f.calls.length,0);
+  }
+});
+
+test('authority retirement never removes source on target unknown, bad proof or mid-request revocation',async t=>{
+  for(const change of [f=>{f.targetOverride={state:'UNKNOWN'};},f=>{f.targetOverride={grantId:randomUUID()};},
+    f=>{f.onRetire=()=>{f.admin.enabled=false;};},f=>{f.onRetire=()=>{throw Error('lost ACK');};}]){
+    const f=authorityRetirementFixture(t);change(f);
+    await assert.rejects(f.service.retireStorageAuthority(f.actor,f.retire));
+    assert.equal(f.calls.some(c=>c.args.mode==='authority-source-v1'),false);
+    assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,{dataset:f.old.sourceDataset,version:f.old.version}),false);
+  }
+});
+
+test('authority retirement restarts exact intent, exposes failed or unknown worker and only forwards explicit retry key',async t=>{
+  const f=authorityRetirementFixture(t);
+  for(const state of ['UNKNOWN','FAILED']){
+    f.sourceOverride={state:'UNREGISTERING',unregister:{operationId:'f'.repeat(64),state}};
+    const result=await f.service.retireStorageAuthority(f.actor,f.retire);
+    assert.equal(result.retirement.state,state);assert.equal(result.originalRetained,false);
+    assert.equal(f.calls.at(-1).args.retryKey,undefined);f.install();
+  }
+  f.sourceOverride=undefined;const retryKey=randomUUID();
+  const result=await f.service.retireStorageAuthority(f.actor,{...f.retire,retryKey});
+  assert.equal(result.originalRetained,false);assert.equal(f.calls.at(-1).args.retryKey,retryKey);
+  assert.equal(f.calls.filter(c=>c.args.mode==='authority-target-v1').every(c=>c.args.opId===f.retire.key),true);
+});
+
 test('untouched QUEUED retirement uses source-only proof and does not disturb the running lane',async t=>{
   const f=retirementFixture(t,{queued:true});f.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run('real-copy');
   assert.equal((await f.service.retireStorageArchive(f.actor,f.retire)).phase,'FAILED');

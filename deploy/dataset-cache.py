@@ -1836,7 +1836,7 @@ class DatasetCache:
                 with _directory(parent) as fd:
                     os.fsync(fd)
 
-    def unregister(self, actor, dataset, version=None, *, _guard=None):
+    def unregister(self, actor, dataset, version=None, *, _guard=None, _expected_registration=None, _expected_owners=None):
         """Admin-only reversible registration removal after unleased eviction.
 
         Internal transfers and leases share these locks. As with evict/publish,
@@ -1846,10 +1846,21 @@ class DatasetCache:
         """
         self._actor(actor, admin=True)
         self._paths(dataset, version)
+        if _expected_registration is not None and (version is None or not isinstance(_expected_registration, list)
+                or len(_expected_registration) != 5 or any(type(item) is not int or item < 0 for item in _expected_registration)):
+            raise CacheError("invalid private unregister registration identity")
+        if _expected_owners is not None and (_expected_registration is None or not isinstance(_expected_owners,list)
+                or not _expected_owners or any(not isinstance(item,str) or not USER_RE.fullmatch(item) for item in _expected_owners)):
+            raise CacheError("invalid private unregister ownership identity")
         with self._locked():
             if _guard is not None:
                 _guard()
             initial = self._unregister_snapshot(actor, dataset, version)
+            if _expected_registration is not None and (initial is None or
+                    dict(initial['registry']).get(version + '.json') != tuple(_expected_registration)):
+                raise CacheBusy("dataset registration differs from the original retirement identity")
+            if _expected_owners is not None and initial['metadata']['owners'] != _expected_owners:
+                raise CacheBusy("dataset ownership differs from the original retirement identity")
         if initial is None:
             return dict(dataset=dataset, version=version, versions=[], unregistered=False,
                         registrationRetained=False, recoveryId=None)

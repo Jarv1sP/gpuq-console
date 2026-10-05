@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 import unittest
+import uuid
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location('node_unregister_fixture', Path(__file__).with_name('node-datasets.test.py'))
@@ -140,6 +141,34 @@ class NodeDatasetUnregister(unittest.TestCase):
             self.call('status', operationId=result['operationId'])
         with self.assertRaisesRegex(ValueError, 'modified'):
             self.node.dataset_worker(result['operationId'])
+
+    def test_private_retirement_fixed_identity_and_registration_aba(self):
+        self.ready();stamp=list(self.cache._record_identity('example',self.version));ident=str(uuid.uuid4())
+        args={'userId':'demo-user-1','hostAdmin':True,'dataset':'example','version':self.version}
+        def submit():
+            return self.node._dataset_op('datasets.unregister',args,_request_id=ident,
+                _expected_registration=stamp,_expected_owners=['demo-user-1'])
+        with patch.object(self.node,'dataset_background_active',return_value=False), patch.object(self.node,'run') as run:
+            first=submit();second=submit()
+            self.assertEqual(first['operationId'],second['operationId']);self.assertEqual(run.call_count,1)
+        manifest=self.cache._record(self.admin,'example',self.version)['manifest']
+        self.cache.unregister(self.admin,'example',self.version)
+        self.cache.register_manifest(self.admin,'example',manifest,['demo-user-1'])
+        self.assertEqual(self.node.dataset_worker(first['operationId']),1)
+        self.assertIn('retirement identity',self.call('status',operationId=first['operationId'])['error'])
+        self.assertEqual(self.cache._record(self.admin,'example',self.version)['manifest'],manifest)
+        with patch.object(self.node,'run') as run:
+            self.assertEqual(submit()['state'],'FAILED');run.assert_not_called()
+
+    def test_private_retirement_binding_cannot_be_supplied_publicly_or_change(self):
+        self.ready();stamp=list(self.cache._record_identity('example',self.version));ident=str(uuid.uuid4())
+        args={'userId':'demo-user-1','hostAdmin':True,'dataset':'example','version':self.version}
+        for field,value in [('requestId',ident),('expectedRegistration',stamp),('expectedOwners',['demo-user-1'])]:
+            with self.assertRaises(ValueError):self.node.dataset_op('datasets.unregister',{**args,field:value})
+        with patch.object(self.node,'dataset_background_active',return_value=False),patch.object(self.node,'run'):
+            self.node._dataset_op('datasets.unregister',args,_request_id=ident,_expected_registration=stamp,_expected_owners=['demo-user-1'])
+            with self.assertRaisesRegex(ValueError,'ownership identity'):
+                self.node._dataset_op('datasets.unregister',args,_request_id=ident,_expected_registration=stamp,_expected_owners=['demo-user-2'])
 
 
 if __name__ == '__main__':

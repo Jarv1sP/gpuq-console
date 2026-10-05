@@ -143,6 +143,24 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 
 个人可写数据空间的 `datasets.workspace.put` 是另一套现有操作，当前仍是门户中转，不受数据集直传票据授权。不要仅改按钮文案就声称它已直传，也不要把 dataset 票据用于任意个人文件路径。大于 256 MiB 的 `data put` 同样要求显式中转同意。
 
+## 已被新版替代的旧归档原件
+
+`datasets.archive.retire-authority` 是当前管理员的显式维护操作，不是普通删除或解除固定按钮。参数：
+
+```json
+{"machine":"<旧缓存节点>","dataset":"<旧缓存ID>","version":"<旧完整版本>","ownerId":"<所属账号>","recoveryId":"unregister-<旧缓存正常注销回执>","replacement":{"machine":"<新缓存节点>","dataset":"<新数据集ID>","version":"<新完整版本>"},"key":"<固定UUID>"}
+```
+
+服务端只接受已确认归档的同一账号旧版及已独立完成认证的新版本，不接受客户端传 grant、清单证明、路径或任意节点。新原件必须实际保留在指定 HDD、处于保护状态，完整清单包含旧版每个文件的路径、大小、SHA256 及目录；`QUEUED`、复制完成或只有 `READY` 都不能替代归档证明。旧缓存必须已经通过正常注销流程移除，其他引用、租约、固定标记、活跃或未知 worker 会阻止退役。
+
+处理顺序为持久化门户退役意图、验证旧缓存 `REMOVAL`、永久封住旧恢复授权、验证新原件、封住旧原件的再授权与读取、移除一个精确匹配的 authority 标记，最后调用正常异步注销。只针对这一旧版本；不会取消训练、移除其他标记或自动删除新副本。后台注销还绑定原登记的文件身份与单一 owner，防止同名版本被重建或共享后误删。
+
+重复相同 `key` 查询并推进原操作，超时不换 key。待确认响应保留 `phase: ARCHIVED` 但 `originalRetained: false`，并包含 `retirement.state`（如 `FENCING`、`UNREGISTERING`、`FAILED`、`UNKNOWN`）；这不是已退役。只有正常注销回执确认 `UNREGISTERED` 后才成为不可归档重试的 `phase: FAILED` / `authority-retired` 历史记录。若注销明确 `FAILED` 且 worker 已确认停止，管理员可在完全相同请求中另加 `retryKey: <新固定UUID>` 明确重试这一注销步骤；新 attempt 在派发前落盘，回包丢失沿用该 retryKey。`UNKNOWN`、仍运行、换旧 key 或换 replacement 都不能重试删除。
+
+发布此接口须先部署匹配的 `dataset-cache.py`、`storage-authority.py`、`storage-retirement.py`、`storage-archive.py`、`node-executor.py` 和 runtime 清单，再发布门户 `storage-archive.mjs` / `execution.mjs`。已有私有 `storage.archive.retire` RPC 复用，不新增公开 peer 写入口或 VPS worker 权限。源节点常驻 transfer-peer 持有旧模块实例：必须确认无活动传输/恢复/认证 worker 后，逐节点更新常驻服务并验证带认证的 `retirement-guard` 能力；仅替换磁盘上的 Python 文件不算完成。旧 peer 不提供该能力时操作拒绝，保护不变。不能在旧消费者仍运行时启用退役。
+
+回滚前先禁止新的退役请求。若已写入任何 source/target tombstone，必须保留识别这些围栏的新 native 代码及所有退役 journal；不能回滚到会忽略围栏的旧 peer，也不能删除 tombstone 或把旧数据重新登记来“恢复”。门户可停用新入口，未完成的同一意图保留待人工核验，正常数据和训练服务无需重启。
+
 ## 管理员手动缓存标记
 
 `datasets.storage.status` 可带 `{machine,dataset,version,pinId}` 查询精确标记，必须同时给完整版本；返回 `version.manualPinProtocol:1` 和 `version.manualPin:{pinId,owner,present}`。`owner` 由当前认证主体确定，不能从浏览器传入。查询不创建标记；其他账号的标记和 `authority-` 标记拒绝访问。`pin/unpin` 在节点锁内再次核验归属，不因调用者是管理员就删除他人的标记。

@@ -30,6 +30,18 @@ async function fixture(t){
     if(operation==='transfers.capabilities')return {enabled:false,sources:[]};
     assert.equal(args.userId,owner.id,'native single-owner ACL must match explicit enrollment owner');
     if(operation==='storage.archive.retire'){
+      if(args.mode==='authority-target-v1'){
+        assert.equal(machine,hot);
+        if(dropRetirement){dropRetirement=false;throw Error('native committed; reply lost');}
+        return {protocol:1,state:'REVOKED',opId:args.opId,userId:args.userId,grantId:args.grantId,
+          sourceMachine:cold,targetMachine:hot,source:{dataset:'archive-'+args.target.dataset,version:args.target.version},
+          target:args.target,proofSha256:'f'.repeat(64)};
+      }
+      if(args.mode==='authority-source-v1'){
+        assert.equal(machine,cold);
+        return {protocol:1,state:'RETIRED',opId:args.opId,userId:args.userId,grantId:args.grantId,
+          source:args.targetProof.source,unregister:{operationId:'c'.repeat(64),state:'UNREGISTERED',unregistered:true,recoveryId:'unregister-'+'2'.repeat(32)}};
+      }
       assert.equal(machine,args.mode?hot:cold);assert.equal(args.dataset,dataset);assert.equal(args.version,version);
       if(retirements.has(args.id))assert.deepEqual(retirements.get(args.id),args);else retirements.set(args.id,structuredClone(args));
       if(dropRetirement){dropRetirement=false;throw Error('native committed; reply lost');}
@@ -119,6 +131,27 @@ test('same-origin fixture discards a deliberately reset peer without replaying r
   assert.deepEqual(f.requests.slice(before).map(r=>r.path),['/api/call','/api/call']);
   assert.equal(f.requests.every(r=>r.connection==='close'),true,'POST and CLI-download GET never leave a pooled socket');
   t.diagnostic(JSON.stringify({resetPeers,requestsBefore:before,requestsAfter:f.requests.length,additionalRequests:2,loginRequests:logins}));
+});
+
+test('authenticated HTTP authority retirement is admin-only, restart-safe and does not expose native proofs',async t=>{
+  const f=await fixture(t),archive=installStorageArchive(f.service,{enabled:true,machine:cold,authority:'hdd'},{startTimer:false});
+  for(const [name,hash] of [['old-ref','a'.repeat(64)],['new-union','b'.repeat(64)]]){
+    const row=archive.enqueueEvent(hot,{id:randomUUID(),userId:f.owner.id,dataset:name,version:hash,state:'READY'});
+    Object.assign(row,{phase:'ARCHIVED',sourceDataset:'archive-'+name,grantId:randomUUID(),certifyId:randomUUID(),receiptSha256:'e'.repeat(64),eventAcknowledged:true});
+    f.service.db.prepare('UPDATE storage_archives SET data=? WHERE id=?').run(JSON.stringify(row),row.id);
+  }
+  const args={machine:hot,dataset:'old-ref',version:'a'.repeat(64),ownerId:f.owner.id,
+    key:randomUUID(),recoveryId:'unregister-'+'1'.repeat(32),replacement:{machine:hot,dataset:'new-union',version:'b'.repeat(64)}};
+  assert.equal((await f.call(f.member.token,'datasets.archive.retire-authority',args)).http,403);
+  assert.equal((await f.call(f.admin.token,'datasets.archive.retire-authority',{...args,grantId:randomUUID()})).http,400);
+  assert.notEqual((await f.call(f.admin.token,'storage.archive.retire',args)).http,200);
+  f.loseNextRetirementReply();assert.notEqual((await f.call(f.admin.token,'datasets.archive.retire-authority',args)).http,200);
+  await f.restart();
+  const done=await f.call(f.admin.token,'datasets.archive.retire-authority',args);
+  assert.equal(done.http,200);assert.equal(done.body.result.phase,'FAILED');assert.equal(done.body.result.originalRetained,false);
+  assert.equal(JSON.stringify(done.body).includes('grantId'),false);assert.equal(JSON.stringify(done.body).includes('token'),false);
+  const n=f.calls.length;assert.deepEqual((await f.call(f.admin.token,'datasets.archive.retire-authority',args)).body,done.body);assert.equal(f.calls.length,n);
+  assert.equal(f.calls.some(call=>call.operation==='transfers.start'),false);
 });
 
 test('downloaded CLI and real HTTP enroll/restart/duplicate preserve current grant and exact owner',async t=>{

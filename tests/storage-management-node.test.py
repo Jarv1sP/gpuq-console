@@ -333,7 +333,7 @@ class StorageBridgeAndRuntime(unittest.TestCase):
         for profile in ('common-p0', 'ray-p0'):
             plan, payloads = runtime.preflight(ROOT / 'deploy', profile)
             names = [name for name, original in plan]
-            for dependency in ('dataset-cache.py', 'dataset-tier.py', 'storage-node.py'):
+            for dependency in ('dataset-cache.py', 'dataset-tier.py', 'storage-node.py', 'storage-retirement.py'):
                 self.assertIn(dependency, payloads)
                 self.assertLess(names.index(dependency), names.index('node-executor.py'))
         units = runtime.manifest()['units']

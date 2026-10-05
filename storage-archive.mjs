@@ -55,6 +55,8 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   const releaseLane=row=>service.db.prepare('DELETE FROM storage_archive_lane WHERE singleton=1 AND archive_id=?').run(row.id);
   const currentPolicy=row=>row.policyKey===policyKey&&row.sourceMachine===policy.machine;
   const isCopyIntent=row=>['ingest','enrollment'].includes(row?.kind);
+  const isRetired=row=>['retired','authority-retired'].includes(row?.failureStage);
+  const availableArchive=row=>currentPolicy(row)&&row.phase==='ARCHIVED'&&!row.retirementIntent&&!isRetired(row);
   const enrollmentProof=(value,machine,owner,ref)=>{
     if(!value||Object.keys(value).sort().join(',')!=='dataset,machine,manifestBytes,manifestSha256,protocol,registration,role,state,userId,version'||
       value.protocol!==1||value.machine!==machine||value.userId!==owner||value.dataset!==ref.dataset||value.version!==ref.version||
@@ -76,7 +78,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   };
   const fence=(row,snapshot)=>{
     const current=load(row.id);
-    if(retiring.has(row.id)||current?.retirementIntent||current?.failureStage==='retired')fail('Archive retirement fences this old intent');
+    if(retiring.has(row.id)||current?.retirementIntent||isRetired(current))fail('Archive retirement fences this old intent');
     if(service.closing||!policy.enabled)fail('Archive service is unavailable');
     service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:row.machine,from:policy.machine});
     if(!currentPolicy(row))fail('Archive policy changed; existing intent requires administrator review');
@@ -92,14 +94,15 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   const publicRow=row=>row?{
     dataset:row.logicalDataset||row.dataset,version:row.version,phase:row.phase,
     archiveMachine:policy.machine,localMachine:row.machine,
-    originalRetained:row.phase==='ARCHIVED',
+    originalRetained:availableArchive(row),
+    ...(row.retirementIntent?{retirement:{state:row.retirementIntent.state||'FENCING'}}:{}),
     ...(row.error?{error:row.error}:{}),
   }:null;
 
   service.archiveState=(owner,machine,ref)=>publicRow(rows().findLast(row=>row.owner===owner&&row.machine===machine&&(row.dataset===ref.dataset||row.logicalDataset===ref.dataset)&&row.version===ref.version));
-  service.archiveSourceAllowed=(owner,machine,ref)=>policy.enabled&&machine===policy.machine&&isRef(ref)&&rows().some(row=>currentPolicy(row)&&row.owner===owner&&row.phase==='ARCHIVED'&&row.sourceMachine===machine&&row.sourceDataset===ref.dataset&&row.version===ref.version);
-  service.archiveMachineVisible=(owner,machine)=>policy.enabled&&machine===policy.machine&&rows().some(row=>currentPolicy(row)&&row.owner===owner&&row.phase==='ARCHIVED'&&row.sourceMachine===machine);
-  service.archiveAliases=owner=>new Map(rows().filter(row=>currentPolicy(row)&&row.owner===owner&&row.phase==='ARCHIVED'&&row.sourceDataset).map(row=>[row.sourceDataset+'@'+row.version,row.logicalDataset||row.dataset]));
+  service.archiveSourceAllowed=(owner,machine,ref)=>policy.enabled&&machine===policy.machine&&isRef(ref)&&rows().some(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine&&row.sourceDataset===ref.dataset&&row.version===ref.version);
+  service.archiveMachineVisible=(owner,machine)=>policy.enabled&&machine===policy.machine&&rows().some(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine);
+  service.archiveAliases=owner=>new Map(rows().filter(row=>availableArchive(row)&&row.owner===owner&&row.sourceDataset).map(row=>[row.sourceDataset+'@'+row.version,row.logicalDataset||row.dataset]));
   service.archiveIntentAllowed=(owner,args)=>{
     if(!policy.enabled||args.kind!=='copy'||args.machine!==policy.machine||args.from===args.machine||!UUID.test(args.key||'')||!isRef(args))return false;
     const row=rows().find(row=>row.owner===owner&&row.machine===args.from&&row.dataset===args.dataset&&row.version===args.version&&row.copyKey===args.key);
@@ -117,7 +120,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       return old;
     }
     if(rows().length>=10000)fail('Archive history limit reached');
-    const archived=rows().findLast(row=>currentPolicy(row)&&row.owner===event.userId&&row.machine===machine&&row.dataset===event.dataset&&row.version===event.version&&row.phase==='ARCHIVED');
+    const archived=rows().findLast(row=>availableArchive(row)&&row.owner===event.userId&&row.machine===machine&&row.dataset===event.dataset&&row.version===event.version);
     const sourceDataset=machine===policy.machine?event.dataset:archived?.sourceDataset||null;
     const now=clock(),row={id,kind:'ingest',owner:event.userId,machine,dataset:event.dataset,version:event.version,eventId:event.id,
       logicalDataset:event.dataset,sourceMachine:policy.machine,sourceDataset,
@@ -131,7 +134,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(!policy.enabled)return null;
     if(!isRef(logicalRef)||!isRef(physicalRef)||logicalRef.version!==physicalRef.version)fail('Invalid fixed archive replica');
     enabledUser(owner,machine);
-    const source=rows().findLast(row=>currentPolicy(row)&&row.owner===owner&&row.phase==='ARCHIVED'&&(row.logicalDataset||row.dataset)===logicalRef.dataset&&row.version===logicalRef.version);
+    const source=rows().findLast(row=>availableArchive(row)&&row.owner===owner&&(row.logicalDataset||row.dataset)===logicalRef.dataset&&row.version===logicalRef.version);
     if(!source)return null;
     const id=key(owner,machine,physicalRef.dataset,physicalRef.version),old=load(id);
     if(old)return publicRow(old);
@@ -144,6 +147,89 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   };
 
   const enrolling=new Map();
+  service.retireStorageAuthority=(principal,args)=>{
+    if(!args||Object.keys(args).filter(key=>key!=='retryKey').sort().join(',')!=='dataset,key,machine,ownerId,recoveryId,replacement,version'||
+      !USER.test(args.ownerId||'')||!UUID.test(args.key||'')||!isRef(args)||
+      ('retryKey' in args&&!UUID.test(args.retryKey||''))||
+      !/^unregister-[a-f0-9]{32}$/.test(args.recoveryId||'')||!MACHINES.some(m=>m.id===args.machine)||
+      !args.replacement||Object.keys(args.replacement).sort().join(',')!=='dataset,machine,version'||
+      !isRef(args.replacement)||!MACHINES.some(m=>m.id===args.replacement.machine))
+      fail('Authority retirement requires the exact removed reference, owner, receipt, replacement and UUID key.',400);
+    const actor=service.store.get(principal.userId);
+    if(!actor?.enabled||actor.role!=='admin')fail('Authority retirement requires a current administrator.',403);
+    const old=rows().findLast(row=>currentPolicy(row)&&row.owner===args.ownerId&&row.machine===args.machine&&
+      row.dataset===args.dataset&&row.version===args.version);
+    const replacement=rows().findLast(row=>availableArchive(row)&&row.owner===args.ownerId&&row.machine===args.replacement.machine&&
+      row.dataset===args.replacement.dataset&&row.version===args.replacement.version);
+    if(!old||!replacement||old.id===replacement.id||old.version===replacement.version||
+      !UUID.test(old.grantId||'')||!UUID.test(old.certifyId||'')||!HASH.test(old.receiptSha256||'')||
+      !UUID.test(replacement.grantId||'')||!HASH.test(replacement.receiptSha256||'')||!old.eventAcknowledged||!replacement.eventAcknowledged)
+      fail('Exact archived authority and independently certified replacement are required.',409);
+    const binding=key('authority-retire-v1',args.ownerId,old.id,replacement.id,args.recoveryId,args.key),snapshot=JSON.stringify(actor);
+    if(old.retirement?.mode==='authority-retire-v1'){
+      if(old.retirement.binding!==binding||old.failureStage!=='authority-retired')fail('Authority retirement identity cannot change.',409);
+      return Promise.resolve(publicRow(old));
+    }
+    if(old.phase!=='ARCHIVED'||old.retirementIntent&&old.retirementIntent.binding!==binding)
+      fail('Authority retirement identity or state changed.',409);
+    const check=()=>{
+      if(service.closing||!policy.enabled||key(service.storageArchivePolicy)!==policyKey)fail('Authority retirement is unavailable.');
+      if(JSON.stringify(service.store.get(principal.userId))!==snapshot)fail('Authority retirement authorization changed.',403);
+      enabledUser(args.ownerId,args.machine);enabledUser(args.ownerId,args.replacement.machine);
+      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:args.machine,from:policy.machine});
+      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:args.replacement.machine,from:policy.machine});
+      const current=load(old.id),fresh=load(replacement.id);
+      if(current?.retirementIntent&&current.retirementIntent.binding!==binding||
+        !availableArchive(fresh)||fresh.grantId!==replacement.grantId||fresh.receiptSha256!==replacement.receiptSha256)
+        fail('Retirement or replacement identity changed.');
+      if(rows().some(row=>row.id!==old.id&&currentPolicy(row)&&!isRetired(row)&&row.sourceDataset===old.sourceDataset&&row.version===old.version))
+        fail('Another archive depends on the old authority; explicit reconciliation is required.',409);
+      if(laneOwner()===old.id)fail('An archive worker still holds the old lane.',409);
+      for(const transfer of service.db.prepare('SELECT state,data FROM transfers').all()){
+        const data=JSON.parse(transfer.data),ref=data.reference;
+        const related=ref&&ref.version===old.version&&(
+          (data.from||data.machine)===old.sourceMachine&&ref.dataset===old.sourceDataset||
+          (data.from||data.machine)===old.machine&&ref.dataset===old.dataset);
+        if(related&&(!['SUCCEEDED','CANCELED','FAILED'].includes(transfer.state)||
+          data.kind==='copy'&&data.sourceRelease?.state!=='RELEASED'||
+          data.kind==='download'&&data.downloadProtection?.state!=='RELEASED'))
+          fail('Active or unknown transfer protection prevents authority retirement.',409);
+      }
+    };
+    check();
+    const pending=retiring.get(old.id);
+    if(pending){if(pending.binding!==binding||pending.retryKey!==args.retryKey)fail('Authority retirement identity or active retry cannot change.');return pending.task;}
+    const task=Promise.resolve().then(async()=>{
+      check();old.retirementIntent={mode:'authority-retire-v1',binding,key:args.key,replacementId:replacement.id,recoveryId:args.recoveryId,state:'FENCING'};save(old);
+      const proof=await service.bridge(old.machine,'storage.archive.retire',{
+        mode:'authority-target-v1',opId:args.key,userId:old.owner,target:{dataset:old.dataset,version:old.version},
+        grantId:old.grantId,certifyId:old.certifyId,recoveryId:args.recoveryId,receiptSha256:old.receiptSha256});
+      check();
+      if(!proof||proof.protocol!==1||proof.state!=='REVOKED'||proof.opId!==args.key||proof.userId!==old.owner||proof.grantId!==old.grantId||
+        proof.sourceMachine!==policy.machine||proof.targetMachine!==old.machine||proof.source?.dataset!==old.sourceDataset||proof.source?.version!==old.version||
+        proof.target?.dataset!==old.dataset||proof.target?.version!==old.version||!HASH.test(proof.proofSha256||''))
+        fail('Target retirement fence is not confirmed; source protection is retained.');
+      old.retirementIntent.state='REVOKING';save(old);
+      const result=await service.bridge(policy.machine,'storage.archive.retire',{
+        mode:'authority-source-v1',opId:args.key,userId:old.owner,grantId:old.grantId,replacementGrantId:replacement.grantId,targetProof:proof,
+        ...(args.retryKey?{retryKey:args.retryKey}:{})});
+      check();
+      if(!result||result.protocol!==1||result.opId!==args.key||result.userId!==old.owner||result.grantId!==old.grantId||
+        result.source?.dataset!==old.sourceDataset||result.source?.version!==old.version||
+        !HASH.test(result.unregister?.operationId||''))fail('Normal authority removal is not confirmed.');
+      if(result.state==='RETIRED'&&result.unregister.state==='UNREGISTERED'&&result.unregister.unregistered===true){
+        old.retirement={mode:'authority-retire-v1',binding,actor:principal.userId,replacementId:replacement.id,
+          targetProofSha256:proof.proofSha256,operationId:result.unregister.operationId,recoveryId:result.unregister.recoveryId};
+        old.phase='FAILED';old.failureStage='authority-retired';old.retryRequested=false;delete old.retirementIntent;
+        old.error='旧原件已由已验证的新版本替代并正常注销；旧恢复授权已永久退役。';save(old);
+      }else{
+        old.retirementIntent.state=result.unregister.state||'UNKNOWN';save(old);
+      }
+      service.audit(principal.username,'datasets.archive.retire-authority',old.machine,old.owner+':'+old.dataset+'@'+old.version);
+      return publicRow(old);
+    }).finally(()=>{if(retiring.get(old.id)?.task===task)retiring.delete(old.id);});
+    retiring.set(old.id,{binding,retryKey:args.retryKey,task});return task;
+  };
   service.retireStorageArchive=(principal,args)=>{
     if(!args||Object.keys(args).sort().join(',')!=='dataset,eventId,machine,ownerId,recoveryId,version'||
       !USER.test(args.ownerId||'')||!UUID.test(args.eventId||'')||!isRef(args)||
@@ -278,7 +364,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     enabledUser(owner,machine);
     const row=rows().findLast(value=>value.owner===owner&&value.machine===machine&&(value.dataset===ref.dataset||value.logicalDataset===ref.dataset)&&value.version===ref.version);
     if(!row)fail('Archive intent is unavailable');
-    if(row.failureStage==='retired')fail('已注销的旧归档意图不能重试；重新登记必须使用新的发布事件。');
+    if(isRetired(row))fail('已注销的旧归档意图不能重试；重新登记必须使用新的发布事件。');
     fence(row);
     if(row.transferState==='CANCELED')fail('归档传输已永久取消；原件仍受保护，请联系管理员处理。');
     if(!['FAILED','BLOCKED'].includes(row.phase))return publicRow(row);
@@ -386,7 +472,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
         try{await advance(row);}
         catch(error){
           if(service.closing)return;
-          if(retiring.has(row.id)||load(row.id)?.retirementIntent||load(row.id)?.failureStage==='retired')continue;
+          if(retiring.has(row.id)||load(row.id)?.retirementIntent||isRetired(load(row.id)))continue;
           if(error.code==='MAINTENANCE_ACTIVE')continue; // Retain the fixed intent/lane without automatic retry or cleanup.
           row.failures=(row.failures||0)+1;
           row.nextCheckAt=clock()+Math.min(300000,15000*2**Math.min(row.failures,5));

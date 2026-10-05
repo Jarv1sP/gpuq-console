@@ -294,7 +294,12 @@ def dataset_op(operation,args):
         with module.wait_for_locks(timeout=5,total=8):return _dataset_op(operation,args)
     return _dataset_op(operation,args)
 
-def _dataset_op(operation,args):
+def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_expected_owners=None):
+    # Only the private, durably fenced archive-retirement adapter supplies this
+    # identity. Public operation fields remain unchanged and reject it.
+    if _request_id is not None and (operation!='datasets.unregister' or not isinstance(_request_id,str) or str(uuid.UUID(_request_id))!=_request_id):raise ValueError('Invalid private unregister identity')
+    if _expected_registration is not None and (_request_id is None or not isinstance(_expected_registration,list) or len(_expected_registration)!=5 or any(type(item) is not int or item<0 for item in _expected_registration)):raise ValueError('Invalid private unregister registration identity')
+    if _expected_owners is not None and (_expected_registration is None or _expected_owners!=[args.get('userId')]):raise ValueError('Invalid private unregister ownership identity')
     definitions={'datasets.capacity':set(),'datasets.list':set(),'datasets.status':{'dataset','version','operationId'},'datasets.prepare':{'dataset','version'},'datasets.register':{'dataset','sourceId','owners'},'datasets.unregister':{'dataset','version'}}
     if operation not in definitions or not isinstance(args,dict) or set(args)-definitions[operation]-{'userId','hostAdmin'}:raise ValueError('Invalid dataset operation fields')
     if operation=='datasets.unregister' and args.get('hostAdmin') is not True:raise ValueError('Administrator authorization required')
@@ -332,7 +337,9 @@ def _dataset_op(operation,args):
         if version is not None and (not isinstance(version,str) or not DATASET_VERSION.fullmatch(version)):raise ValueError('Invalid immutable dataset version')
         # Each explicit removal gets its own receipt. Large replica cleanup runs
         # only in the detached worker, never inside the short SSH request.
-        task={'op':'unregister','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':True,'requestId':str(uuid.uuid4())}
+        task={'op':'unregister','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':True,'requestId':_request_id or str(uuid.uuid4())}
+        if _expected_registration is not None:task['expectedRegistration']=_expected_registration
+        if _expected_owners is not None:task['expectedOwners']=_expected_owners
     elif operation=='datasets.register':
         if not actor.is_admin:raise ValueError('Administrator authorization required')
         source=args.get('sourceId');owners=args.get('owners')
@@ -354,6 +361,9 @@ def _dataset_op(operation,args):
     guard=dataset_prepare_pointer(folder,dataset,task['version']) if task['op']=='prepare' else folder/key
     with open(str(guard)+'.lock','a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
+        if _request_id is not None and spec.exists():
+            if json.loads(spec.read_text())!=task:raise ValueError('Fixed unregister identity changed')
+            return dataset_background_status(folder,key,task,cache,actor)
         if task['op']=='prepare':
             pending=dataset_current_prepare(folder,dataset,task['version'])
             if pending and dataset_background_active(pending[0]):return {'operationId':pending[0],'dataset':dataset,'version':task['version'],'state':'PREPARING'}
@@ -382,7 +392,7 @@ def dataset_worker(key):
                     out=storage_node().tier.recover(module.Principal('builtin-admin',True),task['dataset'],task['version'])
                 else:out=cache.materialize(actor,task['dataset'],task['version'])
             elif task['op']=='unregister':
-                out=cache.unregister(actor,task['dataset'],task.get('version'));out['state']='UNREGISTERED'
+                out=cache.unregister(actor,task['dataset'],task.get('version'),_expected_registration=task.get('expectedRegistration'),_expected_owners=task.get('expectedOwners'));out['state']='UNREGISTERED'
             else:raise ValueError('Invalid background dataset action')
         # Never return transfer tokens, local paths, or source IDs to callers.
         out={k:v for k,v in out.items() if k in ('dataset','version','state','bytes','files','unregistered','registrationRetained','versions','recoveryId')}

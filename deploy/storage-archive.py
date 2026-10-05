@@ -459,6 +459,10 @@ class StorageArchive:
         A committed removal preserves the actual old registration inode. Missing
         live files alone are never proof; existing operation journals fail closed.
         """
+        if isinstance(args,dict) and args.get('mode') in ('authority-target-v1','authority-source-v1'):
+            module = A._module('gpuq_authority_retirement','storage-retirement.py')
+            retirement = module.AuthorityRetirement(self,A)
+            return retirement.target(args) if args['mode']=='authority-target-v1' else retirement.source(args)
         queued = isinstance(args, dict) and args.get('mode') == 'queued-ingest-v1'
         self._require(source=None if queued else True)
         fields = ('id', 'userId', 'dataset', 'version', 'recoveryId')

@@ -8,8 +8,8 @@ maintenance/background job, never an HTTP request. The peer calls read ONLY.
 Construct the source from an explicitly configured protected HDD DatasetCache;
 do not infer media, root paths, machines, grants or endpoints from request JSON.
 Permanent authority-* pins freeze source ACL/registration and prohibit ordinary
-unpin. There is deliberately no decommission/revoke endpoint: all dependent
-caches must first be reconciled by a separate offline administrator procedure.
+unpin. Explicit private retirement must reconcile every dependent cache and
+write permanent source/target fences before releasing any authority pin.
 """
 import base64
 import contextlib
@@ -81,19 +81,29 @@ def _sha(value):
 
 
 @contextlib.contextmanager
-def _grant_lock(root):
+def _grant_lock(root, name='.install.lock', timeout=None):
     with D._directory(root) as parent:
         # Separate exclusive creation from opening an existing lock. In
         # particular, concurrent O_CREAT|O_NOFOLLOW can report ENOENT on macOS.
         try:
-            fd = os.open('.install.lock',os.O_RDWR|os.O_CREAT|os.O_EXCL,0o600,dir_fd=parent)
+            fd = os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL,0o600,dir_fd=parent)
         except FileExistsError:
-            fd = os.open('.install.lock',os.O_RDWR|os.O_NOFOLLOW,dir_fd=parent)
+            fd = os.open(name,os.O_RDWR|os.O_NOFOLLOW,dir_fd=parent)
         try:
             info = D._regular(fd)
             if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise ValueError('Unsafe grant installation lock')
-            fcntl.flock(fd,fcntl.LOCK_EX)
+            if timeout is None:
+                fcntl.flock(fd,fcntl.LOCK_EX)
+            else:
+                deadline = time.monotonic()+timeout
+                while True:
+                    try:
+                        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise ValueError('Authority grant is busy; no retirement or replacement is permitted')
+                        time.sleep(.02)
             yield
         finally: os.close(fd)
 
@@ -130,6 +140,21 @@ class AuthorityStore:
         self.root = _private_root(private_root)
         self.local = T.LocalAuthority(cache)
 
+    def reference_lock(self, dataset, version):
+        D._identifier(dataset); D._identifier(version,D.HASH_RE)
+        return _grant_lock(self.root, '.reference-'+_sha([dataset,version])+'.lock', timeout=2)
+
+    def reference_fence(self, dataset, version):
+        D._identifier(dataset); D._identifier(version,D.HASH_RE)
+        return self.root/('.retired-'+_sha([dataset,version])+'.json')
+
+    def assert_live(self, dataset, version):
+        try:
+            _load(self.reference_fence(dataset,version))
+        except FileNotFoundError:
+            return
+        raise ValueError('Authority reference was permanently retired; it cannot be reissued')
+
     def seal(self, actor, dataset, version, grant_id, target_machine):
         """Offline/long-running ADMIN operation; never reachable via read()."""
         self.cache._actor(actor, admin=True)
@@ -139,7 +164,8 @@ class AuthorityStore:
         folder = self.root/grant_id
         # A source-cache lock file serializes retrying issuers without scanning
         # or rewriting any existing dataset or unrelated grant.
-        with self.cache._lock_file('.locks/authority-issue-'+grant_id+'.lock'):
+        with self.reference_lock(dataset,version), self.cache._lock_file('.locks/authority-issue-'+grant_id+'.lock'):
+            self.assert_live(dataset,version)
             try:
                 grant = _load(folder/'grant.json')
             except FileNotFoundError:
@@ -185,7 +211,7 @@ class AuthorityStore:
         if not isinstance(request, dict): raise ValueError('Invalid authority request')
         action = request.get('action')
         base = {'id','action','dataset','version','targetMachine'}
-        extra = {'guard': set(), 'manifest': {'offset'}, 'get': {'path','offset'}}.get(action)
+        extra = {'guard': set(), 'retirement-guard': set(), 'manifest': {'offset'}, 'get': {'path','offset'}}.get(action)
         if extra is None or set(request) != base|extra: raise ValueError('Authority endpoint is read-only')
         key = J.identifier(request['id']); folder = self.root/key
         grant = _validate_grant(_load(folder/'grant.json'), self.machine, request['targetMachine'])
@@ -196,7 +222,10 @@ class AuthorityStore:
         if _sha(proof) != grant['receipt']['sealedSha256']:
             raise ValueError('Authority seal changed')
         with self.local.guard(self.principal, proof):
+            self.assert_live(grant['dataset'],grant['version'])
             if action == 'guard': return grant['receipt']
+            if action == 'retirement-guard':
+                return dict(protocol='authority-retirement-v1',receipt=grant['receipt'])
             offset = request['offset']
             if type(offset) is not int or offset < 0: raise ValueError('Invalid authority offset')
             if action == 'manifest':
@@ -253,11 +282,25 @@ class RemoteAuthority:
         D._identifier(dataset); D._identifier(version,D.HASH_RE)
         return self.root/(_sha([self.machine,self.target_machine,dataset,version])+'.json')
 
+    def scope(self, dataset, version):
+        return _grant_lock(self.root,'.grant-'+self._path(dataset,version).stem+'.lock',timeout=2)
+
+    def fence_path(self, dataset, version):
+        return self.root/('.retired-'+self._path(dataset,version).stem+'.json')
+
+    def assert_live(self, dataset, version):
+        try:
+            _load(self.fence_path(dataset,version))
+        except FileNotFoundError:
+            return
+        raise ValueError('Installed authority grant was permanently retired')
+
     def install_grant(self, grant):
         """Trusted administrator provisioning ONLY, never a peer/public action."""
         grant = _validate_grant(grant,self.machine,self.target_machine)
         path = self._path(grant['dataset'],grant['version'])
-        with _grant_lock(self.root):
+        with self.scope(grant['dataset'],grant['version']):
+            self.assert_live(grant['dataset'],grant['version'])
             try:
                 previous = _load(path)
                 if previous != grant: raise ValueError('Installed authority grant cannot be silently replaced')
@@ -266,6 +309,7 @@ class RemoteAuthority:
         return dict(installed=True,dataset=grant['dataset'],version=grant['version'])
 
     def _grant(self, dataset, version):
+        self.assert_live(dataset,version)
         return _validate_grant(_load(self._path(dataset,version)),self.machine,self.target_machine)
 
     def _proof(self, grant):
@@ -290,16 +334,16 @@ class RemoteAuthority:
     def guard(self, actor, proof):
         _admin(actor)
         if not isinstance(proof,dict): raise ValueError('Invalid remote authority receipt')
-        grant = self._grant(proof.get('dataset'),proof.get('version'))
-        if proof != self._proof(grant): raise ValueError('Remote authority configuration or receipt changed')
-        client = AuthorityClient(self.peer,grant)
-        try:
-            self._authenticated(client,grant)
-            # Source authority-* pins CANNOT be removed or have ACL/registration
-            # changed by ordinary APIs. This permanent contract spans the gap
-            # between this bounded guard and target quarantine, unlike a TTL.
-            yield
-        finally: client.close()
+        # The same grant's retirement waits for an actual consumer, rather than
+        # assuming a previously returned network guard remains valid forever.
+        with self.scope(proof.get('dataset'),proof.get('version')):
+            grant = self._grant(proof.get('dataset'),proof.get('version'))
+            if proof != self._proof(grant): raise ValueError('Remote authority configuration or receipt changed')
+            client = AuthorityClient(self.peer,grant)
+            try:
+                self._authenticated(client,grant)
+                yield
+            finally: client.close()
 
     @staticmethod
     def _chunk(value, offset, size):
@@ -315,6 +359,10 @@ class RemoteAuthority:
 
     def recover(self, actor, proof, target_cache, target_dataset, *, validate_target):
         """One bounded TLS stream, existing reserved staging, full atomic publish."""
+        with self.scope(proof.get('dataset'),proof.get('version')):
+            return self._recover_locked(actor,proof,target_cache,target_dataset,validate_target=validate_target)
+
+    def _recover_locked(self, actor, proof, target_cache, target_dataset, *, validate_target):
         target_cache._actor(actor,admin=True)
         grant = self._grant(proof.get('dataset'),proof.get('version'))
         if proof != self._proof(grant): raise ValueError('Remote authority receipt changed')
