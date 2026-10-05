@@ -22,7 +22,7 @@ async function fixture(t){
   await writeFile(storage,JSON.stringify({enabled:true,machine:cold,authority:'hdd'}));
   const reservation=createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));
   const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve));const origin='http://127.0.0.1:'+port;
-  const calls=[],grants=new Map(),certifications=new Map(),retirements=new Map();let owner,server,service,certified=false,dropRetirement=false;
+  const calls=[],grants=new Map(),certifications=new Map(),retirements=new Map(),requests=[];let owner,server,service,certified=false,dropRetirement=false,keepNextPeerAlive=false;
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='storage.archive.events')return {events:[]};
@@ -58,14 +58,19 @@ async function fixture(t){
   };
   const start=async()=>{
     ({server,service}=await createPortalServer({database,bootstrap,origin,secure:false,bridge,storageArchiveConfigPath:storage}));
+    server.on('request',(request,response)=>{
+      requests.push({path:request.url,socket:request.socket,connection:request.headers.connection});
+      if(keepNextPeerAlive){keepNextPeerAlive=false;response.shouldKeepAlive=true;response.setHeader('Connection','keep-alive');}
+    });
     for(const field of ['executionTimer','transferTimer','storageArchiveTimer','maintenanceTimer','notificationTimer','projectCopyTimer'])clearInterval(service[field]);
     await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   };
   await start();
   const stop=async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));};
   t.after(async()=>{await stop();await rm(dir,{recursive:true,force:true});});
+  // The fixture restarts at this exact origin; do not pool any of its requests.
   const post=async(path,body,token)=>{
-    const response=await fetch(origin+path,{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(body)});
+    const response=await fetch(origin+path,{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{}),Connection:'close'},body:JSON.stringify(body)});
     return {http:response.status,body:await response.json()};
   };
   const call=(token,operation,args={})=>post('/api/call',{operation,args},token);
@@ -78,17 +83,38 @@ async function fixture(t){
   const grantKey=sha([owner.id,cold,dataset,version,hot]);
   const id=`${grantKey.slice(0,8)}-${grantKey.slice(8,12)}-5${grantKey.slice(13,16)}-a${grantKey.slice(17,20)}-${grantKey.slice(20,32)}`;
   grants.set(id,{schema:1,id,sourceMachine:cold,targetMachine:hot,dataset,version,token:'private-existing-grant-token',receipt:{owners:[owner.id]}});
-  const download=await fetch(origin+'/gpuctl.mjs');assert.equal(download.status,200);
+  const download=await fetch(origin+'/gpuctl.mjs',{headers:{Connection:'close'}});assert.equal(download.status,200);
   const cliFile=join(dir,'gpuctl.mjs'),session=join(dir,'session.json');await writeFile(cliFile,await download.text());
   await writeFile(session,JSON.stringify({url:origin,token:admin.token,principal:admin.principal}),{mode:0o600});
   const cli=args=>new Promise((resolve,reject)=>{
     const child=spawn(process.execPath,[cliFile,'--session-file',session,'--json',...args]);let stdout='',stderr='';
     child.stdout.on('data',s=>stdout+=s);child.stderr.on('data',s=>stderr+=s);child.on('error',reject);child.on('close',code=>resolve({code,stdout,stderr}));
   });
-  return {calls,owner,bob,admin,member,call,cli,grants,certifications,get service(){return service;},loseNextRetirementReply:()=>{dropRetirement=true;},
+  return {calls,owner,bob,admin,member,call,cli,grants,certifications,requests,get service(){return service;},loseNextRetirementReply:()=>{dropRetirement=true;},
+    keepNextPeerAlive:()=>{keepNextPeerAlive=true;},
     request:{machine:hot,dataset,version,ownerId:owner.id,key:randomUUID()},
     restart:async()=>{await stop();await start();}};
 }
+
+test('same-origin fixture discards a deliberately reset peer without replaying requests or login',async t=>{
+  const f=await fixture(t),before=f.requests.length,logins=f.requests.filter(r=>r.path==='/api/login').length;
+  // Retain the server end long enough to inject RST after a complete response,
+  // before undici can process the close event. No request retry is permitted.
+  f.keepNextPeerAlive();
+  const first=await f.call(f.admin.token,'state');assert.equal(first.http,200);
+  const retired=f.requests.at(-1).socket;assert.equal(retired.destroyed,false);
+  // An undici pool can alternate between two idle peers; retire every old
+  // connection so the regression cannot accidentally select the other one.
+  let resetPeers=0;
+  for(const socket of new Set(f.requests.map(r=>r.socket)))if(!socket.destroyed){socket.resetAndDestroy();resetPeers++;}
+  const second=await f.call(f.admin.token,'state');assert.equal(second.http,200);assert.deepEqual(second.body.principal,first.body.principal);
+  assert.notEqual(f.requests.at(-1).socket,retired);
+  assert.equal(f.requests.length,before+2,'one request each, without retry');
+  assert.equal(f.requests.filter(r=>r.path==='/api/login').length,logins,'authentication is not replayed');
+  assert.deepEqual(f.requests.slice(before).map(r=>r.path),['/api/call','/api/call']);
+  assert.equal(f.requests.every(r=>r.connection==='close'),true,'POST and CLI-download GET never leave a pooled socket');
+  t.diagnostic(JSON.stringify({resetPeers,requestsBefore:before,requestsAfter:f.requests.length,additionalRequests:2,loginRequests:logins}));
+});
 
 test('downloaded CLI and real HTTP enroll/restart/duplicate preserve current grant and exact owner',async t=>{
   const f=await fixture(t),args=['data','archive-enroll',dataset+'@'+version,'--machine',hot,'--owner-id',f.owner.id,'--key',f.request.key];
