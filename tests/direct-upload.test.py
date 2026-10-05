@@ -62,6 +62,39 @@ class DirectTests(unittest.TestCase):
         data = args.pop('data', b'')
         return self.direct.process(grant['ticket'], upload, action, args, data)
 
+    def fixture_grant_claims(self, grant, upload, claims):
+        # Model a ticket actually issued by an older listener, not a forged
+        # client upgrade. Only this private fixture writes the matching record.
+        token = DIRECT.encoded(claims)+'.'+grant['ticket'].split('.')[1]
+        fixtures.D._write_json(self.u.folder(self.user, upload)/'direct-grant.json',
+                              {'claims': claims, 'sha256': hashlib.sha256(token.encode()).hexdigest()})
+        return {**grant, 'ticket': token, 'expiresAt': claims['expiresAt']}
+
+    def test_file_capability_is_bound_and_legacy_tickets_keep_one_mib(self):
+        content = b'x'*(fixtures.D.CHUNK_BYTES+1)
+        result, _, _ = self.seal(files={'x': content})
+        upload = result['uploadId']; grant = self.ticket(upload)
+        claims = self.direct.claims(grant['ticket'])
+        self.assertEqual(grant['chunkBytes'], fixtures.D.CHUNK_BYTES)
+        self.assertEqual(grant['maxChunkBytes'], DIRECT.MAX_FILE_CHUNK_BYTES)
+        self.assertEqual(claims['maxChunkBytes'], grant['maxChunkBytes'])
+        self.assertEqual(fixtures.D._read_json(self.u.folder(self.user, upload)/'direct-grant.json')['claims'], claims)
+        legacy_claims = {key: value for key, value in claims.items() if key != 'maxChunkBytes'}
+        legacy = self.fixture_grant_claims(grant, upload, legacy_claims)
+        with self.assertRaises(ValueError):
+            self.raw(legacy, upload, 'chunk', path='x', offset=0, data=content)
+        # Editing a legacy opaque ticket cannot silently acquire the new cap.
+        forged = {**legacy, 'ticket': DIRECT.encoded({**legacy_claims, 'maxChunkBytes': DIRECT.MAX_FILE_CHUNK_BYTES})+'.'+legacy['ticket'].split('.')[1]}
+        with self.assertRaises(DIRECT.GrantError):
+            self.raw(forged, upload, 'chunk', path='x', offset=0, data=content)
+        self.assertEqual(self.raw(legacy, upload, 'chunk', path='x', offset=0,
+                                  data=content[:fixtures.D.CHUNK_BYTES])['offset'], fixtures.D.CHUNK_BYTES)
+        for cap in (None, True, str(DIRECT.MAX_FILE_CHUNK_BYTES), 0, DIRECT.MAX_FILE_CHUNK_BYTES+1):
+            invalid = self.fixture_grant_claims(grant, upload, {**claims, 'maxChunkBytes': cap})
+            with self.subTest(cap=cap), self.assertRaises(DIRECT.GrantError):
+                self.raw(invalid, upload, 'status')
+        self.assertEqual(self.call('status', uploadId=upload, path='x')['file']['offset'], fixtures.D.CHUNK_BYTES)
+
     def test_raw_lifecycle_uses_same_upload_and_publishes_verified_readonly(self):
         initial, args, manifest, files = self.admit()
         upload = initial['uploadId']
@@ -210,7 +243,7 @@ class DirectTests(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 self.raw(grant, upload, 'chunk', data=b'x', **args)
         with self.assertRaises(ValueError):
-            self.raw(grant, upload, 'chunk', path='train.txt', offset=0, data=b'x'*(fixtures.D.CHUNK_BYTES+1))
+            self.raw(grant, upload, 'chunk', path='train.txt', offset=0, data=b'x'*(DIRECT.MAX_FILE_CHUNK_BYTES+1))
         with patch.object(self.node, 'dataset_mount_check', side_effect=ValueError('wrong mount')):
             with self.assertRaises(ValueError):
                 self.raw(grant, upload, 'status')
@@ -426,6 +459,104 @@ class DirectTests(unittest.TestCase):
         # rejection; simulate only Python 3.10's empty strict-query behavior.
         with patch.object(DIRECT, 'parse_qs', side_effect=strict_older_python):
             self.test_local_https_raw_protocol_and_rejection_have_no_secret_logs()
+
+    def test_real_https_sixteen_mib_ack_preserves_reservation_and_full_sha_ready(self):
+        cert, key, pin = self.tls_fixture()
+        self.config.update(bind='127.0.0.1', port=0, certificate=str(cert), privateKey=str(key), certificateSha256=pin)
+        content = b'q'*DIRECT.MAX_FILE_CHUNK_BYTES+b'tail'
+        result, _, manifest, _ = self.admit(files={'large.bin': content})
+        upload = result['uploadId']
+        with patch.object(DIRECT.DirectUploads, 'configuration', side_effect=lambda: dict(self.config)):
+            server = DIRECT.create_server(self.node, self.u)
+            port = server.server_address[1]
+            self.config.update(port=port, endpoint=f'https://localhost:{port}')
+            serving = threading.Thread(target=server.serve_forever, daemon=True); serving.start()
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False; context.verify_mode = ssl.CERT_NONE
+            client = http.client.HTTPSConnection('127.0.0.1', port, context=context, timeout=5)
+            try:
+                client.connect()
+                self.assertEqual(hashlib.sha256(client.sock.getpeercert(binary_form=True)).hexdigest(), pin)
+                grant = self.ticket(upload)
+                headers = {'Authorization': 'Bearer '+grant['ticket'], 'Content-Type': 'application/octet-stream'}
+                def send(action, query, payload=None):
+                    client.request('GET' if action == 'status' else 'POST',
+                                   f'/v1/uploads/{upload}/{action}?{query}', payload, headers)
+                    reply = client.getresponse(); self.assertEqual(reply.status, 200)
+                    return json.loads(reply.read())['result']
+                self.assertEqual(send('manifest', 'offset=0', manifest)['offset'], len(manifest))
+                self.call('seal', uploadId=upload)
+                self.assertEqual(self.u.worker(self.user, upload, 'seal'), 0)
+                session = self.u.load(self.user, upload)
+                stage = self.cache._paths(session['dataset'], session['version'])['.staging']
+                first = send('chunk', 'path=large.bin&offset=0', content[:DIRECT.MAX_FILE_CHUNK_BYTES])
+                self.assertEqual(first['offset'], DIRECT.MAX_FILE_CHUNK_BYTES)
+                self.assertFalse(first['complete'])
+                self.assertEqual(self.cache._transfer(stage)['remainingBytes'], 4)
+                self.assertFalse((self.u.folder(self.user, upload)/'chunk.json').exists())
+                # Durable ACK can be checked by a fresh HTTPS status request;
+                # an identical offset retry consumes no second reservation.
+                self.assertEqual(send('status', 'path=large.bin')['file']['offset'], DIRECT.MAX_FILE_CHUNK_BYTES)
+                send('chunk', 'path=large.bin&offset=0', content[:DIRECT.MAX_FILE_CHUNK_BYTES])
+                self.assertEqual(self.cache._transfer(stage)['remainingBytes'], 4)
+                self.assertTrue(send('chunk', f'path=large.bin&offset={DIRECT.MAX_FILE_CHUNK_BYTES}', content[-4:])['complete'])
+                self.assertEqual(self.cache._transfer(stage)['remainingBytes'], 0)
+                self.call('commit', uploadId=upload)
+                self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
+                self.assertEqual(self.call('status', uploadId=upload)['state'], 'READY')
+                ready = self.cache._paths(session['dataset'], session['version'])['ready']/'data'/'large.bin'
+                self.assertEqual(hashlib.sha256(ready.read_bytes()).hexdigest(), hashlib.sha256(content).hexdigest())
+                self.assertEqual(ready.stat().st_mode & 0o777, 0o444)
+                self.assertEqual(self.cache._reserved(), 0)
+            finally:
+                client.close(); server.shutdown(); server.server_close(); serving.join(3)
+
+    def test_real_https_rejects_expired_forged_and_oversized_caps_before_body(self):
+        cert, key, pin = self.tls_fixture()
+        self.config.update(bind='127.0.0.1', port=0, certificate=str(cert), privateKey=str(key), certificateSha256=pin)
+        result, _, _, _ = self.admit(files={'x': b'x'})
+        upload = result['uploadId']
+        with patch.object(DIRECT.DirectUploads, 'configuration', side_effect=lambda: dict(self.config)):
+            server = DIRECT.create_server(self.node, self.u)
+            port = server.server_address[1]; self.config.update(port=port, endpoint=f'https://localhost:{port}')
+            serving = threading.Thread(target=server.serve_forever, daemon=True); serving.start()
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False; context.verify_mode = ssl.CERT_NONE
+            try:
+                for case in ('over-hard-limit', 'manifest-large', 'legacy-large', 'expired', 'forged-cap', 'invalid-cap', 'revoked'):
+                    grant = self.ticket(upload); claims = self.direct.claims(grant['ticket'])
+                    size = DIRECT.MAX_FILE_CHUNK_BYTES; action = 'chunk'; expected = 409
+                    if case == 'over-hard-limit': size += 1
+                    elif case == 'manifest-large': action = 'manifest'; size = fixtures.D.CHUNK_BYTES+1
+                    elif case == 'legacy-large':
+                        grant = self.fixture_grant_claims(grant, upload, {k: v for k, v in claims.items() if k != 'maxChunkBytes'})
+                        size = fixtures.D.CHUNK_BYTES+1
+                    elif case == 'expired':
+                        grant = self.fixture_grant_claims(grant, upload, {**claims, 'expiresAt': int(time.time())-1}); expected = 401
+                    elif case == 'forged-cap':
+                        grant = {**grant, 'ticket': DIRECT.encoded({**claims, 'maxChunkBytes': fixtures.D.CHUNK_BYTES})+'.'+grant['ticket'].split('.')[1]}; expected = 403
+                    elif case == 'invalid-cap':
+                        grant = self.fixture_grant_claims(grant, upload, {**claims, 'maxChunkBytes': True}); expected = 403
+                    else:
+                        self.call('direct-revoke', uploadId=upload); expected = 403
+                    client = http.client.HTTPSConnection('127.0.0.1', port, context=context, timeout=2)
+                    try:
+                        query = 'offset=0'+('&path=x' if action == 'chunk' else '')
+                        client.putrequest('POST', f'/v1/uploads/{upload}/{action}?{query}')
+                        client.putheader('Authorization', 'Bearer '+grant['ticket'])
+                        client.putheader('Content-Type', 'application/octet-stream')
+                        client.putheader('Content-Length', str(size)); client.endheaders()
+                        # Send no body at all: a timely response proves auth and
+                        # action/capacity rejection precede the blocking read.
+                        reply = client.getresponse()
+                        with self.subTest(case=case): self.assertEqual(reply.status, expected)
+                        body = reply.read().decode(); self.assertNotIn(grant['ticket'], body)
+                        self.assertEqual(self.u.load(self.user, upload)['state'], 'RECEIVING_MANIFEST')
+                        self.assertEqual(self.call('status', uploadId=upload)['manifestOffset'], 0)
+                    finally:
+                        client.close()
+            finally:
+                server.shutdown(); server.server_close(); serving.join(3)
 
 
 if __name__ == '__main__':

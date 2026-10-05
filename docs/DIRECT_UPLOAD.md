@@ -43,7 +43,7 @@ gpuctl data upload ./samples --name samples
 - 门户沿用账号和机器授权，先通过 `datasets.upload.begin` 在节点预约容量。它返回传输能力描述，但本地监听探测成功不保证客户端所在网络可达。
 - `datasets.upload.direct-ticket` 签发 5 分钟的单上传能力票据，绑定用户、机器、上传 UUID、清单哈希、容量、配置版本和固定操作范围。续期仍须经过门户授权；票据不进入传输列表、审计正文或普通日志。
 - CLI 在 TLS 握手完成后先核对门户提供的证书 SHA256，再发送票据。仅接受固定节点响应，不跟随重定向，不读取终端代理环境来中转文件。
-- 节点只接受该上传的原始清单块、文件块及状态，每块最多 1 MiB；不能新建账号、选其他 owner、发布任意路径或执行命令。发布仍走已认证控制面。
+- 节点只接受该上传的原始清单块、文件块及状态。清单块最多 1 MiB；新版票据可额外授权最多 16 MiB 的文件块，旧票据和旧客户端仍按 1 MiB 使用。不能新建账号、选其他 owner、发布任意路径或执行命令。发布仍走已认证控制面。
 - 取消／撤销与写入共用围栏；取消确认后，旧票据不能继续写入。节点禁用或配置发生变化时拒绝旧授权。断网、过期或权限错误不等于取消了服务器校验。
 - 已签发票据是短期能力凭据；仅在门户撤销账号权限不能承诺既有票据立即失效。紧急情况撤销对应上传票据或禁用专用入口，最迟在票据到期后不能继续写入。
 
@@ -57,7 +57,9 @@ gpuctl data upload ./samples --name samples
 - `POST /v1/uploads/<uploadId>/chunk?offset=<offset>&path=<encodedRelativePath>`：原始文件块。
 - `GET /v1/uploads/<uploadId>/status[?path=<encodedRelativePath>]`：节点确认的偏移／状态。
 
-请求设置 `Authorization: Bearer <ticket>`；POST 的 `Content-Type` 为 `application/octet-stream`，每块不超过票据的 `chunkBytes`。`fetch` 使用 `credentials: "omit"`，不向节点发送门户 Cookie。浏览器执行的 `OPTIONS` 只允许匹配的 origin、方法、Authorization／Content-Type 头；需要私有网络预检时仅对允许的 origin 返回同意。预检不创建工作区，也不签发票据。
+请求设置 `Authorization: Bearer <ticket>`；POST 的 `Content-Type` 为 `application/octet-stream`。`chunkBytes` 固定为 1 MiB，约束清单块；文件块使用可选的 `maxChunkBytes`，仅允许 1 或 16 MiB，缺省为 1 MiB。这个上限同时绑定票据和节点记录，客户端不能自行扩大；VPS 中转和内部复制原有的 1 MiB 接口不变。`fetch` 使用 `credentials: "omit"`，不向节点发送门户 Cookie。浏览器执行的 `OPTIONS` 只允许匹配的 origin、方法、Authorization／Content-Type 头；需要私有网络预检时仅对允许的 origin 返回同意。预检不创建工作区，也不签发票据。
+
+CLI 每个文件从 1 MiB 起步，收到耗时低于 500 ms 的确认后才升到授权上限；确认超过 8 秒则降回 1 MiB。大块仍经过原有日志、落盘确认和最终全文 SHA256 校验。网页可以继续使用兼容的 1 MiB 块；后端支持大块不等于网页已启用提速。
 
 过期／撤销响应对允许的 origin 保持可读，网页应回门户查询状态并续签，不猜测文件偏移。证书、校内可达性或跨域检查失败时明确提示选择校内网络或云盘，不自动把文件字节重发到 VPS。
 
@@ -69,3 +71,9 @@ gpuctl data upload ./samples --name samples
 - 校外使用已验证的校园 VPN／直达入口，或服务器直接拉取链接。没有可达入口时明确提示，不承诺仅装一个传输工具就能穿透任意校园 NAT。
 
 关闭专用上传服务只影响直传，不改变已发布数据或在跑训练。保留节点配置备份、证书指纹和验收回执；不要将私钥、票据或真实内部资产配置提交到公开仓库。
+
+## 大块版本升级与回滚
+
+`direct-upload.py` 的票据／监听实现与 `dataset-upload.py` 的写入／恢复实现须配套升级。在没有活动直传请求和相关上传 worker 的小窗口备份、核对两份源码，再只重启专用监听；保留其他运行时、配置和训练服务。先验收真实大块、丢失 ACK 后按节点确认偏移续传、取消及全文校验，再开放新能力。
+
+回滚前暂停新直传并核实未完成上传：16 MiB 块可能已经持久写入，而记账还留在 `chunk.json`。必须用新版恢复逻辑完成该日志对账，不能删除日志、修改 `TRANSFER.json` 或把未知 ACK 当成失败重发。确认没有超出旧版 1 MiB 范围的待恢复日志后，才回退写入实现；回退监听／客户端不影响已发布版本，但仍需重新验证票据和断点行为。

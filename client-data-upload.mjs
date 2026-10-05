@@ -39,7 +39,7 @@ export async function scanLocalDataset(root,progress,{lstat=fsLstat,open=fsOpen,
   await visit(root);directories.sort();files.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
   const manifest=Buffer.from(JSON.stringify({schema:1,directories,files}));if(manifest.length>DATA_MANIFEST_LIMIT)fail('Dataset manifest exceeds 64 MiB');
   const openEntry=async entry=>{const {filename,info,handleDev}=local.get(entry.path),handleInfo={...info,dev:handleDev},file=await open(filename,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW||0)|(fsConstants.O_NONBLOCK||0));if(!sameFile(handleInfo,await file.stat({bigint:true}))){await file.close();fail('Local file changed after hashing: '+entry.path);}return {
-    read:async offset=>{const buffer=Buffer.alloc(Math.min(DATA_CHUNK,entry.size-offset)),{bytesRead}=await file.read(buffer,0,buffer.length,offset);if(!bytesRead&&offset<entry.size)fail('Local file changed during upload: '+entry.path);return buffer.subarray(0,bytesRead);},
+    read:async(offset,chunkBytes=DATA_CHUNK)=>{if(![DATA_CHUNK,16*DATA_CHUNK].includes(chunkBytes))fail('Invalid dataset file chunk size');const buffer=Buffer.alloc(Math.min(chunkBytes,entry.size-offset)),{bytesRead}=await file.read(buffer,0,buffer.length,offset);if(!bytesRead&&offset<entry.size)fail('Local file changed during upload: '+entry.path);return buffer.subarray(0,bytesRead);},
     verify:async()=>{if(!sameFile(handleInfo,await file.stat({bigint:true}))||!sameFile(info,await lstat(filename,{bigint:true})))fail('Local file changed during upload: '+entry.path);},close:()=>file.close()};};
   const verify=async()=>{for(const [folder,info] of directoryStamps)if(!sameFile(info,await lstat(folder,{bigint:true})))fail('Local directory changed; no publication was requested');for(const {filename,info} of local.values())if(!sameFile(info,await lstat(filename,{bigint:true})))fail('Local file changed; no publication was requested');};
   return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files,totalBytes,entries:files.length+directories.length,openEntry,verify};
@@ -94,9 +94,21 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
       if(!remote||remote.path!==entry.path||remote.size!==entry.size||remote.sha256!==entry.sha256||!Number.isSafeInteger(remote.offset)||remote.offset<0||remote.offset>entry.size)fail('Server file resume metadata does not match the manifest');
       const file=await scan.openEntry(entry);
       try{
-        let offset=remote.offset;
+        let offset=remote.offset,preferredChunk=DATA_CHUNK;
         if(!entry.size&&!remote.complete){const result=await request('chunk',{path:entry.path,offset:0,bytes:Buffer.alloc(0)});if(result.offset!==0||result.complete!==true)fail('Server did not confirm the empty file');}
-        while(offset<entry.size){const bytes=await file.read(offset);if(!bytes.length)fail('Snapshot source did not return the next chunk');const result=await request('chunk',{path:entry.path,offset,bytes});if(result.offset!==offset+bytes.length)fail('Server did not confirm the file chunk');offset=result.offset;progress('UPLOADING',{path:entry.path,bytes:transferred+offset,totalBytes:scan.totalBytes});}
+        while(offset<entry.size){
+          const maximum=direct?.chunkBytes??DATA_CHUNK;if(![DATA_CHUNK,16*DATA_CHUNK].includes(maximum))fail('Invalid dataset file chunk size');
+          const chunkBytes=Math.min(maximum,preferredChunk),bytes=await file.read(offset,chunkBytes);
+          if(!bytes.length||bytes.length>chunkBytes)fail('Snapshot source did not return a bounded next chunk');
+          const started=performance.now(),result=await request('chunk',{path:entry.path,offset,bytes});
+          if(result.offset!==offset+bytes.length)fail('Server did not confirm the file chunk');
+          // Start conservatively on unknown/slow links; batch only confirmed
+          // fast writes. No retry or route switch follows an ambiguous ACK.
+          const elapsed=performance.now()-started;
+          if(bytes.length>=DATA_CHUNK&&elapsed<500)preferredChunk=16*DATA_CHUNK;
+          else if(elapsed>8000)preferredChunk=DATA_CHUNK;
+          offset=result.offset;progress('UPLOADING',{path:entry.path,bytes:transferred+offset,totalBytes:scan.totalBytes});
+        }
         await file.verify();
       }finally{await file.close();}transferred+=entry.size;
     }

@@ -337,6 +337,84 @@ class PersonalUploads(unittest.TestCase):
         self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
         self.assertEqual(self.cache._reserved(), 0)
 
+    def test_large_direct_chunk_durable_accounting_recovers_with_legacy_next_chunk(self):
+        big = U.DIRECT_FILE_CHUNK_BYTES
+        content = b'a'*big+b'legacy-resume'
+        result, _, _ = self.seal(files={'large.bin': content})
+        upload = result['uploadId']
+        args = {'uploadId': upload, 'path': 'large.bin'}
+        stage = self.cache._paths(result['dataset'], result['version'])['.staging']
+        journal = self.u.folder(self.user, upload)/'chunk.json'
+        original = D._write_json
+        def crash(path, value, *a, **kwargs):
+            if path.name == 'TRANSFER.json' and value['remainingBytes'] == len(content)-big:
+                raise KeyboardInterrupt('simulated kill after large payload fsync')
+            return original(path, value, *a, **kwargs)
+        with patch.object(D, '_write_json', side_effect=crash), self.assertRaises(KeyboardInterrupt):
+            self.u.chunk_bytes(self.user, args, 0, content[:big],
+                               transport='campus-direct', direct_chunk_limit=big)
+        self.assertEqual((stage/'data'/'large.bin').read_bytes(), content[:big])
+        self.assertEqual(self.cache._transfer(stage)['remainingBytes'], len(content))
+        self.assertEqual(D._read_json(journal)['length'], big)
+        # Status reports the durable offset, not a guessed successful response.
+        self.assertEqual(self.call('status', uploadId=upload, path='large.bin')['file']['offset'], big)
+        # A legacy 1 MiB relay request can recover an earlier direct journal;
+        # recovery does not need a new large-block capability or a manifest scan.
+        with patch.object(D, '_manifest', side_effect=AssertionError('No whole manifest reparse')):
+            response = self.call('chunk', uploadId=upload, path='large.bin', offset=big,
+                                 data=base64.b64encode(content[big:]).decode())
+        self.assertEqual(response['offset'], len(content))
+        self.assertTrue(response['complete'])
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.cache._transfer(stage)['remainingBytes'], 0)
+        self.assertGreater(self.cache._reserved(), 0)
+        self.call('commit', uploadId=upload)
+        self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
+        self.assertEqual(self.call('status', uploadId=upload)['state'], 'READY')
+        ready = self.cache._paths(result['dataset'], result['version'])['ready']/'data'/'large.bin'
+        self.assertEqual(hashlib.sha256(ready.read_bytes()).hexdigest(), hashlib.sha256(content).hexdigest())
+        self.assertEqual(self.cache._reserved(), 0)
+
+    def test_large_direct_limit_is_private_and_other_transports_remain_one_mib(self):
+        big = U.DIRECT_FILE_CHUNK_BYTES
+        result, _, _ = self.seal(files={'x': b'x'*(D.CHUNK_BYTES+1)})
+        upload = result['uploadId']; args = {'uploadId': upload, 'path': 'x'}
+        data = b'x'*(D.CHUNK_BYTES+1)
+        for transport in ('vps-relay', 'lan-peer', 'campus-direct'):
+            with self.subTest(transport=transport), patch.object(self.u, 'guard', side_effect=AssertionError('Reject before upload access')), self.assertRaises(ValueError):
+                self.u.chunk_bytes(self.user, args, 0, data, transport=transport)
+        for transport, limit in (('vps-relay', big), ('lan-peer', big),
+                                 ('campus-direct', True), ('campus-direct', str(big)),
+                                 ('campus-direct', big+1), ('campus-direct', 2*D.CHUNK_BYTES)):
+            with self.subTest(transport=transport, limit=limit), self.assertRaises(ValueError):
+                self.u.chunk_bytes(self.user, args, 0, data, transport=transport, direct_chunk_limit=limit)
+        with self.assertRaises(ValueError):
+            self.call('chunk', uploadId=upload, path='x', offset=0,
+                      data=base64.b64encode(data).decode(), direct_chunk_limit=big)
+        for transport in ('vps-relay', 'lan-peer', 'campus-direct'):
+            with self.subTest(manifest=transport), patch.object(self.u, 'guard', side_effect=AssertionError('Reject before upload access')), self.assertRaises(ValueError):
+                self.u.manifest_bytes(self.user, {'uploadId': upload}, 0, data, transport=transport)
+        self.assertEqual(self.call('status', uploadId=upload, path='x')['file']['offset'], 0)
+        with patch.object(D.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=1, f_frsize=1)):
+            with self.assertRaisesRegex(ValueError, 'free space'):
+                self.u.chunk_bytes(self.user, args, 0, data, transport='campus-direct', direct_chunk_limit=big)
+        self.assertEqual(self.call('status', uploadId=upload, path='x')['file']['offset'], 0)
+
+    def test_oversized_or_foreign_interrupted_large_journal_fails_closed(self):
+        result, _, _ = self.seal(files={'x': b'x'})
+        upload = result['uploadId']; session = self.u.load(self.user, upload)
+        journal = self.u.folder(self.user, upload)/'chunk.json'
+        stage = self.cache._paths(result['dataset'], result['version'])['.staging']
+        before = self.cache._transfer(stage)
+        pending = {'path': 'x', 'beforeOffset': 0, 'beforeRemaining': 1,
+                   'length': U.DIRECT_FILE_CHUNK_BYTES, 'token': session['transferToken']}
+        for update in ({'length': U.DIRECT_FILE_CHUNK_BYTES+1}, {'length': True}, {'token': 'foreign'}):
+            D._write_json(journal, {**pending, **update})
+            with self.subTest(update=update), self.assertRaisesRegex(ValueError, 'journal'):
+                self.call('chunk', uploadId=upload, path='x', offset=0, data='eA==')
+            self.assertEqual(self.cache._transfer(stage), before)
+            self.assertFalse((stage/'data'/'x').exists())
+
     def test_owner_change_and_symlinks_fail_closed(self):
         result, _, _ = self.seal(files={'x': b'abc'})
         upload = result['uploadId']
