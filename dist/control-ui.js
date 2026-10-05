@@ -14,7 +14,7 @@ export function controlSnapshot(store,{sessions=[],activities=[],activitiesCompl
   const ownedActivities=[...new Map(activities.filter(row=>row.userId===principal.userId&&typeof row.id==='string').map(row=>[row.id,row])).values()];
   const unread=(kind,row)=>recentFailure(row,now)&&!seen?.has(failureReadKey(kind,row)),failedJobs=jobs.filter(row=>row.state==='FAILED');
   const attention=jobs.filter(row=>row.state==='UNKNOWN'||row.state==='FAILED'&&unread('job',row)).map(row=>({id:'job:'+row.id,name:row.name||'训练',fact:row.error||row.latestAttempt?.failureReason||stateWord(row),action:row.state==='FAILED'?'查看诊断':'刷新核对',jobId:row.id,state:row.state,readKey:row.state==='FAILED'?failureReadKey('job',row):null}));
-  for(const row of ownedActivities.filter(row=>failedData.has(row.state)&&unread('data',row)))attention.push({id:'data:'+row.id,name:row.name||row.kind||'后台数据任务',fact:row.error||row.state,action:'查看数据任务',activityId:row.id,state:row.state,readKey:failureReadKey('data',row)});
+  for(const row of ownedActivities.filter(row=>failedData.has(row.state)&&(row.state!=='FAILED'||unread('data',row))))attention.push({id:'data:'+row.id,name:row.name||row.kind||'后台数据任务',fact:row.error||row.state,action:'查看数据任务',activityId:row.id,state:row.state,readKey:row.state==='FAILED'?failureReadKey('data',row):null});
   if(principal.role==='admin')for(const row of store.users.filter(row=>row.enabled&&row.role!=='admin'&&!row.approvedAt&&row.total===0))attention.push({id:'user:'+row.id,name:row.name||row.username,fact:'待审批 · 额度 0 张',action:'去审批',userId:row.id});
   const hosts=new Map((store.data?.gpuq?.hosts||[]).map(host=>[host.id,host]));
   const servers=(store.data?.machines||[]).filter(machine=>principal.role==='admin'||user?.limits?.[machine.id]>0).map(machine=>{
@@ -171,7 +171,7 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
   document.addEventListener('gpuq-focused-job',event=>{if(store.jobs.some(job=>job.id===event.detail.id&&job.userId===store.principal?.userId)){focusJobId=event.detail.id;update();}});
   document.addEventListener('gpuq-attention-viewed',event=>{
     const {userId,kind,id}=event.detail||{};if(!userId||userId!==store.principal?.userId)return;
-    const row=kind==='job'?store.jobs.find(job=>job.id===id&&job.userId===userId&&job.state==='FAILED'):kind==='data'?activities.find(item=>item.id===id&&item.userId===userId&&failedData.has(item.state)):null;
+    const row=kind==='job'?store.jobs.find(job=>job.id===id&&job.userId===userId&&job.state==='FAILED'):kind==='data'?activities.find(item=>item.id===id&&item.userId===userId&&item.state==='FAILED'):null;
     if(row&&recentFailure(row))acknowledge([failureReadKey(kind,row)]);
   });
   store.onAuthChange(()=>{close(true);naturalDraft=null;naturalGeneration++;sessions=[];activities=[];activitiesComplete=false;recent=[];focusJobId=null;actor=null;lastStrip='';previousJobs.clear();liveStates.clear();strip.replaceChildren();pill.replaceChildren();content.replaceChildren();strip.hidden=true;mobile.hidden=true;});

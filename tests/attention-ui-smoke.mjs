@@ -19,8 +19,9 @@ const password='Local-Attention-Fixture-2026!',errors=[],outside=[],requests=[];
 const layoutMachines=process.env.ATTENTION_MACHINE_MANIFEST?JSON.parse(await readFile(process.env.ATTENTION_MACHINE_MANIFEST,'utf8')):MACHINES;
 const forward=new Map(MACHINES.map((row,index)=>[row.id,layoutMachines[index].id])),reverse=new Map([...forward].map(([key,value])=>[value,key]));
 const remap=(value,map)=>typeof value==='string'?(map.get(value)||value):Array.isArray(value)?value.map(item=>remap(item,map)):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([key,item])=>[map.get(key)||key,remap(item,map)])):value;
-let server,service,browser,member,peer,adminUser,onlyFailures,manyUnknown;
+let server,service,browser,member,peer,adminUser,onlyFailures,manyUnknown,uncertainData;
 const jobs=new Map(),dataRows=new Map(),pendingName='待审批的新成员';
+const uncertainRows=[];
 try{
   await mkdir(shots,{recursive:true});
   const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));
@@ -40,6 +41,7 @@ try{
   async function create(username,name){const user=(await service.invoke(admin.token,'users.create',{username,name,password})).result;await service.invoke(admin.token,'policy.full',{userId:user.id,policyVersion:0});return user;}
   member=await create('attention-member','陈思远');peer=await create('attention-peer','另一账号');
   onlyFailures=await create('attention-only-failures','只有失败的账号');manyUnknown=await create('attention-many-unknown','状态待确认的账号');
+  uncertainData=await create('attention-uncertain-data','数据待确认的账号');
   await service.invoke(admin.token,'users.create',{username:'attention-pending',name:pendingName,password});
   const now=Date.now(),old=now-48*60*60*1000;
   function job(user,name,state,extra={}){const id=randomUUID();return {id,userId:user.id,username:user.username,name,state,machine:MACHINES[0].id,cards:1,createdAt:old/1000,priority:'normal',spec:{id,argv:['python','train.py']},...extra};}
@@ -57,6 +59,10 @@ try{
   for(const [name,state,time] of [['最近失败的数据任务','FAILED',now-60000],['历史失败的数据任务','FAILED',old],['复制进行中','RUNNING',now]]){
     const id=randomUUID(),data={owner:{id:member.id,name:member.name},name,kind:'copy',machine:MACHINES[0].id,from:MACHINES[1].id,error:state==='FAILED'?'复制被中断 <img src=x onerror=bad>':null};
     insert.run(id,member.id,randomUUID(),'local-fixture',state,old,time,JSON.stringify(data));dataRows.set(name,id);
+  }
+  for(const [state,time] of [['UNKNOWN',old],['PARTIAL',now-60000],['UNCONFIRMED',old],['FAILED',now-60000]]){
+    const id=randomUUID(),data={owner:{id:uncertainData.id,name:uncertainData.name},name:'数据待确认 '+state,kind:'copy',machine:MACHINES[0].id,from:MACHINES[1].id};
+    insert.run(id,uncertainData.id,randomUUID(),'local-fixture',state,old,time,JSON.stringify(data));uncertainRows.push({id,state});
   }
   const unchangedJobs=structuredClone(service.store.jobs);
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
@@ -79,7 +85,7 @@ try{
   async function login(page,user,hash='#resources'){
     await page.goto(origin+'/'+hash);await page.locator('#login-form [name=username]').fill(user.username);await page.locator('#login-form [name=password]').fill(password);
     await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.evaluate(()=>document.fonts.ready);
-    if(user.id===member.id){await page.evaluate(()=>{location.hash='datasets/transfers';});await page.locator('#transfer-list [data-transfer-id]').first().waitFor();await page.waitForFunction(()=>document.querySelector('#control-strip').textContent.includes('后台数据'));await page.locator('[data-nav=resources]').click();}
+    if([member.id,uncertainData.id].includes(user.id)){await page.evaluate(()=>{location.hash='datasets/transfers';});await page.locator('#transfer-list [data-transfer-id]').first().waitFor();await page.waitForFunction(()=>document.querySelector('#control-strip').textContent.includes('后台数据'));await page.locator('[data-nav=resources]').click();}
     await page.locator('#page-resources').waitFor({state:'visible'});
   }
   async function count(page,expected){
@@ -149,6 +155,22 @@ try{
   await close(zero);await zero.reload();await zero.locator('#login-dialog').waitFor({state:'hidden'});await count(zero,0);
   const many=await pageFor(390);await login(many,manyUnknown);await count(many,101);assert.match(await many.locator('#live-pill').innerText(),/需处理 99\+/);await open(many);
   assert.equal(await many.locator('#control-attention-title').innerText(),'需要处理 · 99+');assert.equal(await many.locator('.mc-meter-alert .mc-meter-value').innerText(),'99+');assert.equal(await many.locator('#control-attention .mc-attention-item').count(),101);await geometry(many);
+  // Unknown/partial data may still hold resources; neither time nor viewing a
+  // detail (or acknowledging actual failures) proves its lifecycle complete.
+  const uncertain=await pageFor(390);await login(uncertain,uncertainData);await count(uncertain,4);await open(uncertain);
+  assert.equal(await uncertain.locator('[data-control-ack]').count(),1);
+  await uncertain.locator('[data-control-ack-all]').click();await count(uncertain,3);
+  for(const row of uncertainRows.filter(row=>row.state!=='FAILED')){
+    assert.equal(await uncertain.locator('[data-control-ack]').count(),0);
+    assert.equal(await uncertain.locator('[data-control-ack-all]').count(),0);
+    await uncertain.locator(`[data-control-attention="data:${row.id}"]`).click();
+    await uncertain.locator(`[data-transfer-id="${row.id}"] .transfer-details[open]`).waitFor();await count(uncertain,3);await open(uncertain);
+  }
+  const uncertainReads=await uncertain.evaluate(key=>JSON.parse(localStorage.getItem(key)),attentionStorageKey(uncertainData.id));
+  assert.equal(uncertainReads.length,1);assert.equal(JSON.parse(uncertainReads[0])[1],uncertainRows.find(row=>row.state==='FAILED').id);
+  await close(uncertain);await uncertain.reload();await uncertain.locator('#login-dialog').waitFor({state:'hidden'});await uncertain.locator('#transfer-list [data-transfer-id]').first().waitFor();await count(uncertain,3);await open(uncertain);await geometry(uncertain);
+  assert.equal(await uncertain.locator('[data-control-ack]').count(),0);
+  await writeFile(join(shots,'attention-unconfirmed-data-checks.json'),JSON.stringify({status:'passed',states:['UNKNOWN','PARTIAL','UNCONFIRMED'],remainingAfterAcknowledgeAndDetailsAndReload:3,readMarkers:1,onlyFailedAcknowledged:true},null,2));
   assert.ok(requests.every(operation=>['state','projects.list','transfers.list','jobs.logs','jobs.diagnostics','logout'].includes(operation)),'acknowledgment and history navigation never write server state');
   assert.deepEqual(service.store.jobs,unchangedJobs);assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
   await writeFile(join(shots,'attention-checks.json'),JSON.stringify({status:'passed',historicalFailures:211,failedHistoryPerAccount:215,memberAttention:5,adminAttention:5,widths:[1440,390,320],checks:['shared desktop/pill/panel rules','24h/missing time exclusion','acknowledge one/all','opening diagnostics/logs/details marks read','data timestamps and detail navigation','UNKNOWN and approvals stay','history link and actual FAILED filter','reload and account isolation','storage read/write fallback','zero capsule hidden','99+ display','unchanged server task records','no page/card overflow, script/CSP errors or external requests'],shots},null,2));

@@ -86,6 +86,15 @@ test('attention count renders 99+ only above 99, while exact snapshot counts are
   assert.equal(controlSnapshot(store(Array.from({length:211},(_,index)=>job('unknown-'+index,'UNKNOWN'))),{now}).attention.length,211);
 });
 
+test('unconfirmed data activity remains actionable regardless of age, missing time or stale read markers',()=>{
+  for(const state of ['UNKNOWN','PARTIAL','UNCONFIRMED'])for(const updatedAt of [undefined,now-1000,now-2*ATTENTION_WINDOW]){
+    const row={id:'unconfirmed',userId:'owner',state,updatedAt};
+    const snapshot=controlSnapshot(store([]),{now,activities:[row],seen:new Set([failureReadKey('data',row)])});
+    assert.deepEqual(snapshot.attention.map(item=>item.id),['data:unconfirmed'],state+' must not be dismissed');
+    assert.equal(snapshot.attention[0].readKey,null,'only confirmed failures may be acknowledged');
+  }
+});
+
 test('the failure history filter includes every ended failure even with no active focal task',()=>{
   const jobs=[job('success','SUCCEEDED'),job('failed-old'),job('failed-last')],html=workbenchCards(jobs,{historyState:'FAILED'});
   assert.match(html,/<details class="wb-ended" open>/);assert.match(html,/已结束的训练 · 2 项/);
