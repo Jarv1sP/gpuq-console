@@ -265,8 +265,12 @@ class TerminalChannels:
         return channel.exchange(ticket,args,deadline)
 
 TERMINAL_CHANNELS=TerminalChannels(TERMINAL_CONNECTIONS)
-def terminal_exchange(host,args):
-    try:return TERMINAL_CHANNELS.call(host,args)
+def terminal_exchange(host,args,machine):
+    # execution.mjs retains its authorized machine in the trusted args envelope.
+    # Verify that duplicate routing field, then strip only it for the protocol.
+    if not isinstance(args,dict) or args.get('machine')!=machine:raise ValueError('Invalid terminal machine context')
+    normalized={key:value for key,value in args.items() if key!='machine'}
+    try:return TERMINAL_CHANNELS.call(host,normalized)
     except TerminalCapacity:
         # Only a new-context capacity refusal, before any input is dispatched.
         # A sent/unconfirmed input, handshake error or writer error never falls back.
@@ -287,7 +291,7 @@ class Handler(socketserver.StreamRequestHandler):
             if data['machine'] not in HOSTS or data['operation'] not in INTERNAL_STORAGE+('datasets.storage.status','datasets.storage.plan','datasets.storage.pin','datasets.storage.unpin','transfers.capabilities','transfers.source.prepare','transfers.confirm-source-release','transfers.release-source','transfers.start','transfers.status','transfers.cancel','transfers.resume','datasets.upload.pause','datasets.upload.direct-ticket','datasets.upload.direct-revoke','sync','cancel','logs','diagnostics','watch','priority','host.exec','host.status','host.cancel','files.list','files.put','files.get','terminal.open','terminal.exchange','terminal.close','terminal.detach','datasets.capacity','datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister','datasets.upload.begin','datasets.upload.manifest','datasets.upload.seal','datasets.upload.status','datasets.upload.chunk','datasets.upload.commit','datasets.upload.discard','datasets.workspace.list','datasets.workspace.put','datasets.workspace.get','datasets.workspace.status','datasets.workspace.publish','datasets.import.start','datasets.import.status','datasets.import.list','datasets.import.cancel','datasets.import.discard','projects.list','projects.quota','projects.create','projects.status','projects.publish','projects.verify','projects.snapshot.info','projects.snapshot.manifest','projects.snapshot.get','datasets.snapshot.info','datasets.snapshot.manifest','datasets.snapshot.get','projects.sync.begin','projects.sync.manifest','projects.sync.seal','projects.sync.status','projects.sync.chunk','projects.sync.finish'): raise ValueError('Invalid operation')
             host=HOSTS[data['machine']]
             if data['operation']=='terminal.exchange' and data['machine'] in TERMINAL_STREAM_HOSTS:
-                result=terminal_exchange(host,data['args'])
+                result=terminal_exchange(host,data['args'],data['machine'])
             else:
                 p=SSH_CONNECTIONS.call(host,{'operation':data['operation'],'args':data['args']})
                 if p.returncode: raise ValueError('Node connection failed')

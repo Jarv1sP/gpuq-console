@@ -183,14 +183,14 @@ class BridgeStreams(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unconfirmed'):channel.line(32,time.monotonic()-1)
         self.assertEqual(channel.pending,b'{"ok":true}\n')
     def test_only_unsent_new_context_capacity_can_use_one_legacy_rpc(self):
-        function=self.worker['terminal_exchange'];args={**self.ctx,'input':'a'}
+        function=self.worker['terminal_exchange'];args={**self.ctx,'machine':'amax-3090','input':'a'}
         legacy=Mock(return_value=SimpleNamespace(returncode=0,stdout='{"ok":true,"result":{}}'))
         pool=Mock();pool.call.side_effect=self.worker['TerminalCapacity']('capacity')
         with patch.dict(function.__globals__,TERMINAL_CHANNELS=pool,SSH_CONNECTIONS=SimpleNamespace(call=legacy)):
-            self.assertTrue(function(self.host,args)['ok'])
+            self.assertTrue(function(self.host,args,'amax-3090')['ok'])
             legacy.assert_called_once_with(self.host,{'operation':'terminal.exchange','args':args})
             legacy.reset_mock();pool.call.side_effect=ValueError('Terminal exchange unconfirmed')
-            with self.assertRaisesRegex(ValueError,'unconfirmed'):function(self.host,args)
+            with self.assertRaisesRegex(ValueError,'unconfirmed'):function(self.host,args,'amax-3090')
             legacy.assert_not_called()
         for _ in range(6):self.call(ctx=context())
         with self.pool.guard:
@@ -202,5 +202,13 @@ class BridgeStreams(unittest.TestCase):
         finally:
             with self.pool.guard:
                 for channel in self.pool.channels.values():channel.active=False
+    def test_actual_execution_envelope_strips_only_equal_authorized_machine(self):
+        function=self.worker['terminal_exchange'];args={**self.ctx,'machine':'amax-3090','hostAdmin':False,'input':'YQ==','offset':0,'rows':32,'cols':110}
+        with patch.dict(function.__globals__,TERMINAL_CHANNELS=self.pool):
+            self.assertEqual(function(self.host,args,'amax-3090')['result']['input'],'YQ==')
+            before=self.conn.starts
+            with self.assertRaisesRegex(ValueError,'machine context'):function(self.host,args,'amax-5090')
+            with self.assertRaisesRegex(ValueError,'stream fields'):function(self.host,{**args,'unexpected':True},'amax-3090')
+            self.assertEqual(self.conn.starts,before)
 
 if __name__=='__main__':unittest.main()
