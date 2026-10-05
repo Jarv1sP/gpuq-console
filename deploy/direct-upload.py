@@ -416,6 +416,9 @@ def create_server(node, uploads):
 
         def get_request(self):
             connection, address = super().get_request()
+            # Chunk acknowledgements are small TLS records. Do not delay them
+            # behind Nagle while the sequential sender waits for the offset.
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             connection.settimeout(15)
             return connection, address
 
