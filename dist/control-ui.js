@@ -26,8 +26,8 @@ export function controlSnapshot(store,{sessions=[],activities=[],activitiesCompl
   });
   return {jobs,active,attention,servers,sessions:ownedSessions,activities:ownedActivities,focal,quota:finite(user?.total)?user.total:null,usage:user&&typeof store.usage==='function'?store.usage(user.id):null,dataCount:activitiesComplete?ownedActivities.filter(row=>activeData.has(row.state)).length:null};
 }
-function sessionName(session){return session.hostAdmin?'ROOT 运维终端':session.dataWorkspace?'数据终端':'开发终端';}
-export function sessionStatus(session){return session.connectionState==='connecting'?'连接中':session.connectionState==='unknown'?'连接待核对':session.detached?'已断开 · 可重连':'已连接';}
+function sessionName(session){return session.hostAdmin?'ROOT 运维终端':session.dataWorkspace?'数据终端':session.environmentMode==='oci'?'容器终端 · 无 GPU':'开发终端';}
+export function sessionStatus(session){return session.connectionState==='ended'?'已结束':session.connectionState==='connecting'?'连接中':session.connectionState==='unknown'?'连接待核对':session.detached?'已断开 · 可重连':'已连接';}
 function monitorDot(server){return `<span class="cs-dot ${server.state==='online'?'':server.state}" aria-hidden="true"></span>`;}
 function serverHint(server){return server.id+' · '+(server.busy===null?'进程占用未确认':`${server.busy}/${server.cards} 张有进程`)+(server.host?.checkedAt?' · 采集 '+new Date(server.host.checkedAt).toLocaleTimeString('zh-CN',{hour12:false}):'')+(server.state==='observe'?' · 仅观察':server.state==='unknown'?' · 暂时无法采集':'');}
 function stateCounts(jobs){return ['st-run','st-start','st-queue','st-prep','st-cancel','st-unk'].map(type=>({type,count:jobs.filter(job=>stateClass(job)===type).length,label:({'st-run':'运行中','st-start':'启动中','st-queue':'排队中','st-prep':'准备数据','st-cancel':'正在取消','st-unk':'状态待核对'})[type]})).filter(row=>row.count>0);}

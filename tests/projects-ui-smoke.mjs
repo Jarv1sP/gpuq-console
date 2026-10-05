@@ -1,3 +1,4 @@
+import {terminalContractSmoke} from './terminal-contract-ui-smoke.mjs';
 import {closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 // Loopback-only browser acceptance: disposable portal DB and fake project,
 // terminal, file and GPUQ operations. No real credentials, shell, SSH or GPUs.
@@ -77,7 +78,7 @@ try{
   await configure(page);
   async function login(target,username){await target.goto(origin);await target.locator('#login-form [name=username]').fill(username);await target.locator('#login-form [name=password]').fill(password);await target.locator('#login-form [type=submit]').click();await target.locator('#login-dialog').waitFor({state:'hidden'});}
   const responseFor=(target,operation)=>target.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation===operation);
-  async function action(operation,fn,target=page){const waiting=responseFor(target,operation);await fn();const response=await waiting;assert.equal(response.status(),200,await response.text());return response;}
+  async function action(operation,fn,target=page){if(operation==='terminal.close')target.once('dialog',dialog=>{assert.equal(dialog.type(),'confirm');assert.match(dialog.message(),/结束.*终端/);return dialog.accept();});const waiting=responseFor(target,operation);await fn();const response=await waiting;assert.equal(response.status(),200,await response.text());return response;}
   async function idle(target=page){await target.waitForFunction(()=>!document.querySelector('[name=workspace-machine]')?.disabled);}
   async function capture(name,target=page){await target.waitForFunction(()=>{const toast=document.querySelector('#toast');return !toast||(!toast.classList.contains('visible')&&Number(getComputedStyle(toast).opacity)===0);});await target.evaluate(()=>scrollTo(0,0));await target.screenshot({path:join(screenshots,name),fullPage:true});}
   async function setMachine(value,target=page){await closeSubmit(target);await action('projects.list',()=>target.locator('[name=workspace-machine]').selectOption(value),target);await idle(target);}
@@ -247,7 +248,7 @@ try{
     const responseGate=new Promise(resolve=>{releaseTerminalGate=resolve;});let intercepted=false;
     const holdResponse=async route=>{
       const body=route.request().postDataJSON();
-      if(!intercepted&&body?.operation==='terminal.open'&&body.args.hostAdmin===firstRoot){
+      if(!intercepted&&body?.operation==='terminal.open'&&(body.args.hostAdmin===true)===firstRoot){
         intercepted=true;const response=await route.fetch();await responseGate;await route.fulfill({response});
       }else await route.continue();
     };
@@ -282,3 +283,6 @@ try{
   assert.ok(calls.filter(call=>call.operation==='projects.status').length<12,'publication polling stays bounded');
   console.log(JSON.stringify({status:'passed',checks:['explicit shared machine/project','create and draft','explicit isolated environment','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','delayed ROOT/development opens cannot replace newest intent','390px environment form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
 }finally{releaseTerminalGate?.();await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(folder,{recursive:true,force:true});}
+
+// Keep the terminal contract browser suite in the existing CI project entry.
+await terminalContractSmoke();
