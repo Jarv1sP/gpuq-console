@@ -157,6 +157,85 @@ class CloudFilesTests(unittest.TestCase):
     def test_download_requires_verified_file(self):
         self.uploaded()
         with self.assertRaises(ValueError):self.call('download',key=str(uuid.uuid4()),fileId=self.key,path='out.zip')
+    def test_identity_changed_download_is_retained_and_cannot_resume_or_rebind(self):
+        source=self.uploaded();source['state']='VERIFIED';self.c.save(source)
+        source_path=self.owner/'cloud-files'/self.key/'task.json';source_before=source_path.read_bytes()
+        ledger_path=self.cache.root/'.cloud-budget.json';ledger=ledger_path.read_bytes()
+        key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path='out.zip')
+        module=sys.modules[self.c.__class__.__module__]
+        with patch.object(self.c,'io',side_effect=module.CloudFileIdentityChanged('IDENTITY_BEFORE_TRANSFER')):
+            self.assertEqual(self.c.worker(self.user,key,'1'),1)
+        status=self.call('status',operationId=key)
+        self.assertEqual(status['state'],'PAUSED');self.assertEqual(status['errorCode'],'CLOUD_FILE_IDENTITY_CHANGED')
+        self.assertEqual(status['phase'],'IDENTITY_BEFORE_TRANSFER');self.assertFalse(status['canResume'])
+        self.assertIn('reverify',status['error']);self.assertFalse((self.owner/'data'/'out.zip').exists())
+        paused=self.owner/'cloud-files'/key/'task.json';old=paused.read_bytes();starts=len(self.starts)
+        with self.assertRaisesRegex(ValueError,'new download operation'):self.call('download',key=key,fileId=self.key,path='out.zip')
+        self.assertEqual(paused.read_bytes(),old);self.assertEqual(len(self.starts),starts)
+        self.assertEqual(source_path.read_bytes(),source_before);self.assertEqual(ledger_path.read_bytes(),ledger)
+        fresh_verify=str(uuid.uuid4());self.call('verify',key=fresh_verify,fileId=self.key)
+        with patch.object(self.c,'io',return_value={'id':self.key,'state':'VERIFIED','receipt':'NEW_PRIVATE_SEALED'}):
+            self.assertEqual(self.c.worker(self.user,fresh_verify,'1'),0)
+        self.assertEqual(paused.read_bytes(),old);self.assertEqual(ledger_path.read_bytes(),ledger)
+        fresh_download=str(uuid.uuid4());self.call('download',key=fresh_download,fileId=self.key,path='fresh.zip')
+        self.assertEqual(self.c.load(self.user,fresh_download)['receipt'],'NEW_PRIVATE_SEALED')
+        self.assertEqual(paused.read_bytes(),old)
+    def test_ordinary_paused_download_does_not_adopt_later_verification_receipt(self):
+        source=self.uploaded();source['state']='VERIFIED';self.c.save(source)
+        key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path='out.zip')
+        with patch.object(self.c,'io',side_effect=ValueError('upstream')):self.c.worker(self.user,key,'1')
+        path=self.owner/'cloud-files'/key/'task.json';before=path.read_bytes();starts=len(self.starts)
+        source=self.c.load(self.user,self.key);source['receipt']='NEW_SEALED';self.c.save(source)
+        with self.assertRaisesRegex(ValueError,'instead of rebinding'):self.call('download',key=key,fileId=self.key,path='out.zip')
+        self.assertEqual(path.read_bytes(),before);self.assertEqual(len(self.starts),starts)
+    def test_fixed_identity_frame_is_safe_and_typed_only_for_download(self):
+        for stage in ('IDENTITY_BEFORE_TRANSFER','IDENTITY_AFTER_TRANSFER'):
+            source=self.uploaded();source['state']='VERIFIED';self.c.save(source)
+            key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path=stage+'.zip')
+            read_fd,write_fd=os.pipe()
+            frame={'kind':'error','errorCode':'CLOUD_FILE_IDENTITY_CHANGED','errorStage':stage,'error':'UNTRUSTED_TOKEN_URL_AND_PATH'}
+            os.write(write_fd,json.dumps(frame).encode()+b'\n');os.close(write_fd)
+            class Process:
+                def __init__(self):self.stdin=io.BytesIO();self.stdout=os.fdopen(read_fd,'rb');self.done=False
+                def poll(self):return 1 if self.done else None
+                def terminate(self):self.done=True
+                def kill(self):self.done=True
+                def wait(self,timeout=None):self.done=True;return 1
+            with patch('subprocess.Popen',return_value=Process()):self.assertEqual(self.c.worker(self.user,key,'1'),1)
+            out=self.call('status',operationId=key)
+            self.assertEqual(out['errorCode'],'CLOUD_FILE_IDENTITY_CHANGED');self.assertEqual(out['phase'],stage)
+            self.assertFalse(out['canResume']);self.assertNotIn('UNTRUSTED',json.dumps(out))
+    def test_identity_frame_rejects_unknown_code_stage_fields_and_verify_action(self):
+        frames=[{'kind':'error','errorCode':'OTHER','errorStage':'IDENTITY_BEFORE_TRANSFER'},
+                {'kind':'error','errorCode':'CLOUD_FILE_IDENTITY_CHANGED','errorStage':'SECRET_PATH'},
+                {'kind':'error','errorCode':'CLOUD_FILE_IDENTITY_CHANGED','errorStage':'IDENTITY_BEFORE_TRANSFER','secret':'RAW_TOKEN'}]
+        source=self.uploaded();source['state']='VERIFIED';self.c.save(source)
+        for action,frame in [('download',f) for f in frames]+[('verify',{'kind':'error','errorCode':'CLOUD_FILE_IDENTITY_CHANGED','errorStage':'IDENTITY_BEFORE_TRANSFER'})]:
+            key=str(uuid.uuid4());args={'key':key,'fileId':self.key}
+            if action=='download':args['path']=key+'.zip'
+            self.call(action,**args);read_fd,write_fd=os.pipe()
+            os.write(write_fd,json.dumps(frame).encode()+b'\n');os.close(write_fd)
+            class Process:
+                def __init__(self):self.stdin=io.BytesIO();self.stdout=os.fdopen(read_fd,'rb');self.done=False
+                def poll(self):return 1 if self.done else None
+                def terminate(self):self.done=True
+                def kill(self):self.done=True
+                def wait(self,timeout=None):self.done=True;return 1
+            with patch('subprocess.Popen',return_value=Process()):self.assertEqual(self.c.worker(self.user,key,'1'),1)
+            out=self.call('status',operationId=key)
+            self.assertNotIn('errorCode',out);self.assertNotIn('SECRET',json.dumps(out));self.assertNotIn('TOKEN',json.dumps(out))
+        module=sys.modules[self.c.__class__.__module__]
+        with self.assertRaises(ValueError):module.CloudFileIdentityChanged('SECRET_PATH')
+    def test_identity_error_after_cancellation_never_overwrites_cancel_state(self):
+        source=self.uploaded();source['state']='VERIFIED';self.c.save(source)
+        key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path='out.zip')
+        module=sys.modules[self.c.__class__.__module__]
+        def failed(task,fd):
+            current=self.c.load(self.user,key);current['cancelRequested']=True;self.c.save(current)
+            raise module.CloudFileIdentityChanged('IDENTITY_AFTER_TRANSFER')
+        with patch.object(self.c,'io',side_effect=failed):self.assertEqual(self.c.worker(self.user,key,'1'),1)
+        out=self.call('status',operationId=key)
+        self.assertEqual(out['state'],'CANCELED');self.assertNotIn('errorCode',out)
     def test_download_commits_without_overwriting_existing(self):
         task=self.uploaded();task['state']='VERIFIED';self.c.save(task)
         key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path='out.zip')

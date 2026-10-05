@@ -6,6 +6,7 @@
 import {createHash, createCipheriv, createDecipheriv, randomBytes} from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
+import {setTimeout as delay} from 'node:timers/promises';
 import grpc from '@grpc/grpc-js';
 import protoLoader from '@grpc/proto-loader';
 
@@ -284,14 +285,28 @@ export class CloudDriveFiles {
   }
   async verify({ownerId, receipt}, options = {}) {
     const record = this.#open(ownerId, receipt);
-    return this.#operation(ownerId, record.operationId, 'verify', options, async ({rpc}) => {
+    return this.#operation(ownerId, record.operationId, 'verify', options, async ({rpc, check, signal}) => {
       const path = this.#path(record), parent = path.slice(0, path.lastIndexOf('/'));
       // Only this account's synthetic folder, never '/' or another owner.
       await rpc('GetSubFiles', {path: parent, forceRefresh: true, checkExpires: true});
       const file = this.#owned(await rpc('FindFileByPath', {parentPath: parent, path}), path);
       if (file.isLocal === true || file.isCloudFile !== true || !file.fileHashes?.['2']) return this.#public(record, receipt, 'VERIFYING');
-      if (!text(file.id, 512) || bytes(file.size) !== record.size || file.fileHashes['2'].toLowerCase() !== record.sha1 || record.cloudId && record.cloudId !== file.id) fail('CD2 文件身份或校验值已变化。', 409);
-      record.cloudId = file.id;
+      if (!text(file.id, 512) || bytes(file.size) !== record.size || file.fileHashes['2'].toLowerCase() !== record.sha1) fail('CD2 文件身份或校验值已变化。', 409);
+      if (record.cloudId && record.cloudId !== file.id && options.refreshIdentity !== true) fail('CD2 文件身份已变化；请重新校验后新建下载。', 409, {code: 'CLOUD_FILE_IDENTITY_CHANGED'});
+      const observedId = file.id;
+      // A new explicit verification may bind a fresh ID for the same signed
+      // owner/path/content. Do not assume CD2 IDs survive a cache refresh.
+      // Observe twice across a delay; never adopt a changing ID or fingerprint.
+      await check();
+      if (options.identityWait !== undefined && typeof options.identityWait !== 'function') fail('校验时钟无效。');
+      if (options.identityWait) await options.identityWait(1000, signal);
+      else await delay(1000, undefined, {signal});
+      await check();
+      const confirmed = this.#owned(await rpc('FindFileByPath', {parentPath: parent, path}), path);
+      if (confirmed.isLocal === true || confirmed.isCloudFile !== true || !confirmed.fileHashes?.['2']) return this.#public(record, receipt, 'VERIFYING');
+      if (!text(confirmed.id, 512) || bytes(confirmed.size) !== record.size || confirmed.fileHashes['2'].toLowerCase() !== record.sha1) fail('CD2 文件身份或校验值已变化。', 409);
+      if (confirmed.id !== observedId) return this.#public(record, receipt, 'VERIFYING');
+      record.cloudId = confirmed.id;
       return this.#public(record, this.#seal(record), 'VERIFIED');
     });
   }
@@ -300,11 +315,12 @@ export class CloudDriveFiles {
     if (!text(record.cloudId, 512) || typeof sink !== 'function' || offset && typeof options.readPrefix !== 'function') fail('下载须使用已验证回执及节点文件句柄；续传须校验已有前缀。', 409);
     return this.#operation(ownerId, record.operationId, 'download', options, async ({rpc, check, token, signal}) => {
       const path = this.#path(record), parent = path.slice(0, path.lastIndexOf('/'));
-      const identity = async () => {
+      const identity = async errorStage => {
         const file = this.#owned(await rpc('FindFileByPath', {parentPath: parent, path}), path);
-        if (file.id !== record.cloudId || file.isLocal === true || file.isCloudFile !== true || bytes(file.size) !== record.size || file.fileHashes?.['2']?.toLowerCase() !== record.sha1) fail('云端文件身份或内容已变化，不能续传。', 409);
+        if (file.id !== record.cloudId) fail('云端文件身份已变化；请重新校验后新建下载，现有文件和任务保留。', 409, {code: 'CLOUD_FILE_IDENTITY_CHANGED', errorStage});
+        if (file.isLocal === true || file.isCloudFile !== true || bytes(file.size) !== record.size || file.fileHashes?.['2']?.toLowerCase() !== record.sha1) fail('云端文件内容已变化，不能续传。', 409);
       };
-      await identity(); const sha256 = createHash('sha256'), sha1 = createHash('sha1'); let count = 0;
+      await identity('IDENTITY_BEFORE_TRANSFER'); const sha256 = createHash('sha256'), sha1 = createHash('sha1'); let count = 0;
       if (offset) for await (const part of await options.readPrefix({signal, bytes: offset})) {
         await check(); if (!Buffer.isBuffer(part) || part.length > 1024 * 1024 || count + part.length > offset) fail('节点断点前缀无效。', 409);
         sha256.update(part); sha1.update(part); count += part.length;
@@ -327,7 +343,7 @@ export class CloudDriveFiles {
         } finally { response?.close?.(); }
       }
       if (count !== record.size || sha256.digest('hex') !== record.sha256 || sha1.digest('hex') !== record.sha1) fail('下载完整内容校验失败，断点文件保留。', 409);
-      await identity(); await check();
+      await identity('IDENTITY_AFTER_TRANSFER'); await check();
       return {id: record.operationId, state: 'VERIFIED', bytes: count, sha256: record.sha256, sha256Verified: true, cloudColdReadVerified: false, vpsRelay: false};
     });
   }

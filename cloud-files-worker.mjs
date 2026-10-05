@@ -36,7 +36,8 @@ async function confirmCloudFile(r, {adapter, emit, signal, clock}) {
       let remaining = VERIFY_TIMEOUT_MS-(clock.now()-began);
       if(remaining<=0)throw confirmationTimeout();
       await emit({kind:'progress',stage:'VERIFYING',bytes:0});
-      const result = await adapter.verify(request, {signal:active});
+      const result = await adapter.verify(request, {signal:active, refreshIdentity:true,
+        identityWait:(ms, identitySignal)=>clock.sleep(ms, identitySignal)});
       active.throwIfAborted();
       if(clock.now()-began>=VERIFY_TIMEOUT_MS)throw confirmationTimeout();
       need(result?.id===fileId, 'Cloud receipt identity mismatch');
@@ -63,7 +64,7 @@ export function validateRequest(r) {
     need(typeof r.receipt === 'string' && r.receipt.length <= 8192 && UUID.test(r.fileId), 'Verified cloud file receipt required');
     need(r.name === undefined && r.size === undefined, 'Download fields mismatch');
     if (r.action === 'download') need(Number.isSafeInteger(r.offset) && r.offset >= 0, 'Invalid download offset');
-    else need(r.offset === undefined, 'Verify fields mismatch');
+    else need(r.offset === undefined && r.operationId !== r.fileId, 'New verification operation required');
   }
   return r;
 }
@@ -170,6 +171,7 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => {
   // Never print raw gRPC errors, private paths, signed URLs, account IDs or keys.
   const timeout=error?.code==='CLOUD_CONFIRMATION_TIMEOUT';
-  process.stdout.write(JSON.stringify({kind: 'error', error: timeout?'云端尚未确认文件或校验值；已传内容保留，未重传，请稍后重新发起验证。':'云文件传输未确认；已传内容保留，请查看任务状态。',...(timeout?{errorCode:'CLOUD_CONFIRMATION_TIMEOUT'}:{})}) + '\n');
+  const identity=error?.code==='CLOUD_FILE_IDENTITY_CHANGED' && ['IDENTITY_BEFORE_TRANSFER','IDENTITY_AFTER_TRANSFER'].includes(error.errorStage);
+  process.stdout.write(JSON.stringify({kind: 'error', error: timeout?'云端尚未确认文件或校验值；已传内容保留，未重传，请稍后重新发起验证。':identity?'云端文件身份已变化；请重新校验后新建下载，现有文件和任务保留。':'云文件传输未确认；已传内容保留，请查看任务状态。',...(timeout?{errorCode:'CLOUD_CONFIRMATION_TIMEOUT'}:identity?{errorCode:'CLOUD_FILE_IDENTITY_CHANGED',errorStage:error.errorStage}:{})}) + '\n');
   process.exitCode = 1;
 });

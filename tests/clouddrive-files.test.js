@@ -132,6 +132,61 @@ test('pending cloud metadata stays VERIFYING; hash or pinned identity changes ar
   await safeReject(s.adapter.verify({ownerId: s.request.ownerId, receipt: uploaded.receipt}), 409);
 });
 
+test('only explicit reverification binds a stable new ID; old sealed downloads still fail closed', async () => {
+  const s = setup(), file = await ready(s), previous = file.receipt;
+  const object = [...s.objects.values()].find(o => !o.isDirectory); object.id = 'new-cloud-id';
+  await safeReject(s.adapter.verify({ownerId: s.request.ownerId, receipt: previous}), 409);
+  const before = s.calls.length, waits = [];
+  const next = await s.adapter.verify({ownerId: s.request.ownerId, receipt: previous}, {refreshIdentity: true, identityWait: async(ms, signal) => {signal.throwIfAborted(); waits.push(ms);}});
+  assert.equal(next.state, 'VERIFIED'); assert.notEqual(next.receipt, previous);
+  assert.deepEqual(waits, [1000]); assert.deepEqual(s.calls.slice(before).map(c => c.method), ['GetSubFiles', 'FindFileByPath', 'FindFileByPath']);
+  const oldCalls = s.calls.length;
+  await assert.rejects(s.adapter.download({ownerId: s.request.ownerId, receipt: previous}, () => assert.fail('old receipt must not write')),
+    error => error.code === 'CLOUD_FILE_IDENTITY_CHANGED' && error.errorStage === 'IDENTITY_BEFORE_TRANSFER');
+  assert.deepEqual(s.calls.slice(oldCalls).map(c => c.method), ['FindFileByPath']);
+  const chunks = []; const result = await s.adapter.download({ownerId: s.request.ownerId, receipt: next.receipt}, b => chunks.push(b));
+  assert.equal(result.sha256Verified, true); assert.deepEqual(Buffer.concat(chunks), contents); assert.equal(file.receipt, previous);
+});
+
+test('IDs changing between delayed observations remain VERIFYING with original receipt, not adopted', async () => {
+  const s = setup(), uploaded = await s.adapter.upload(s.request, source(contents));
+  const object = [...s.objects.values()].find(o => !o.isDirectory);
+  const out = await s.adapter.verify({ownerId: s.request.ownerId, receipt: uploaded.receipt},
+    {refreshIdentity: true, identityWait: async() => {object.id = 'changed-between-observations';}});
+  assert.equal(out.state, 'VERIFYING'); assert.equal(out.receipt, uploaded.receipt);
+  assert.equal(s.calls.some(c => c.method === 'GetDownloadUrlPath' || c.method === 'read'), false);
+});
+
+test('explicit reverification never accepts changed content, owner or scope', async () => {
+  for(const mutate of [o => {o.size++;}, o => {o.fileHashes[2] = 'b'.repeat(40);}, o => {o.CloudAPI.userName = 'other';}, o => {o.fullPathName = '/other';}, o => {o.isDirectory = true;}]) {
+    const s = setup(), uploaded = await s.adapter.upload(s.request, source(contents));
+    const object = [...s.objects.values()].find(o => !o.isDirectory);
+    await safeReject(s.adapter.verify({ownerId: s.request.ownerId, receipt: uploaded.receipt},
+      {refreshIdentity: true, identityWait: async() => {mutate(object);}}));
+    assert.equal(s.calls.some(c => c.method === 'GetDownloadUrlPath' || c.method === 'read'), false);
+  }
+});
+
+test('reverification authorization or cancellation during wait stops before second query', async () => {
+  for(const cancel of [false, true]) {
+    let allowed = true; const controller = new AbortController();
+    const s = setup({authorize: async() => allowed}), uploaded = await s.adapter.upload(s.request, source(contents));
+    const before = s.calls.length;
+    await safeReject(s.adapter.verify({ownerId: s.request.ownerId, receipt: uploaded.receipt},
+      {refreshIdentity: true, signal: controller.signal, identityWait: async() => {if(cancel)controller.abort(); else allowed = false;}}), cancel ? 409 : 403);
+    assert.deepEqual(s.calls.slice(before).map(c => c.method), ['GetSubFiles', 'FindFileByPath']);
+  }
+});
+
+test('ID replacement after download bytes is diagnosed but never becomes verified success', async () => {
+  const s = setup(), file = await ready(s), chunks = [];
+  const object = [...s.objects.values()].find(o => !o.isDirectory);
+  await assert.rejects(s.adapter.download({ownerId: s.request.ownerId, receipt: file.receipt}, part => {chunks.push(part); object.id = 'replacement-after-stream';}),
+    error => error.code === 'CLOUD_FILE_IDENTITY_CHANGED' && error.errorStage === 'IDENTITY_AFTER_TRANSFER');
+  assert.deepEqual(Buffer.concat(chunks), contents);
+  assert.equal(s.reservations.size, 1); assert.equal(s.calls.some(c => /Delete/.test(c.method)), false);
+});
+
 test('receipt tamper, cross-account and cross-scope access make no calls', async () => {
   const s = setup(), file = await ready(s), before = s.calls.length;
   for (const params of [{ownerId: 'other', receipt: file.receipt}, {ownerId: s.request.ownerId, receipt: file.receipt + 'x'}]) await safeReject(s.adapter.verify(params), 404);

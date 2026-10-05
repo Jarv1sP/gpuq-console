@@ -20,11 +20,19 @@ UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}
 ACTIVE = {'QUEUED', 'RUNNING', 'CANCELING'}
 STATES = ACTIVE | {'READY', 'VERIFYING', 'VERIFIED', 'FAILED', 'CANCELED', 'PAUSED'}
 PUBLIC = ('operationId', 'action', 'fileId', 'name', 'path', 'state', 'phase',
-          'bytes', 'totalBytes', 'sha256', 'createdAt', 'updatedAt', 'error')
+          'bytes', 'totalBytes', 'sha256', 'createdAt', 'updatedAt', 'error', 'errorCode')
 
 
 class CloudConfirmationTimeout(ValueError):
     """Only the fixed worker deadline code may produce this public reason."""
+
+
+class CloudFileIdentityChanged(ValueError):
+    """Fixed typed worker reason; never expose an upstream message or ID."""
+    def __init__(self, stage):
+        if stage not in ('IDENTITY_BEFORE_TRANSFER', 'IDENTITY_AFTER_TRANSFER'):
+            raise ValueError('Invalid cloud identity stage')
+        self.stage = stage
 
 
 class CloudFiles:
@@ -87,7 +95,8 @@ class CloudFiles:
         if check and task['state'] in ACTIVE and self.stopped(task):
             result.update(state='PAUSED' if task['action'] == 'download' else 'FAILED',
                           error='Cloud worker stopped; no automatic upload retry was performed')
-        result['canResume'] = task['action'] == 'download' and result['state'] in ('PAUSED', 'FAILED', 'CANCELED')
+        result['canResume'] = (task['action'] == 'download' and result['state'] in ('PAUSED', 'FAILED', 'CANCELED')
+                               and task.get('errorCode') != 'CLOUD_FILE_IDENTITY_CHANGED')
         result['vpsRelay'] = False
         return result
 
@@ -175,6 +184,8 @@ class CloudFiles:
         if previous:
             if previous['identity'] != identity:
                 raise ValueError('Operation key belongs to a different cloud request')
+            if previous.get('errorCode') == 'CLOUD_FILE_IDENTITY_CHANGED':
+                raise ValueError('File identity changed; reverify the file, then create a new download operation')
             # Ambiguous upload never creates another cloud file. Verification
             # uses a new key; only a byte-verified download may resume this key.
             if action != 'download' or previous['state'] == 'READY' or not self.stopped(previous):
@@ -201,6 +212,8 @@ class CloudFiles:
                 cloud = self.file_record(user, identity['fileId'])
                 if action == 'download' and cloud['state'] != 'VERIFIED':
                     raise ValueError('Wait for cloud verification before downloading')
+                if previous and previous.get('receipt') != cloud['receipt']:
+                    raise ValueError('Verified receipt changed; create a new download instead of rebinding this operation')
                 task.update(fileId=cloud['operationId'], receipt=cloud['receipt'], totalBytes=cloud['totalBytes'],
                             name=cloud['name'], **({'path': identity['path']} if action == 'download' else {}))
             task.update(state='QUEUED', generation=task['generation']+1, cancelRequested=False)
@@ -277,6 +290,11 @@ class CloudFiles:
                           and frame.get('errorCode') == 'CLOUD_CONFIRMATION_TIMEOUT'
                           and set(frame) <= {'kind', 'error', 'errorCode'}):
                         raise CloudConfirmationTimeout()
+                    elif (frame.get('kind') == 'error' and task['action'] == 'download'
+                          and frame.get('errorCode') == 'CLOUD_FILE_IDENTITY_CHANGED'
+                          and frame.get('errorStage') in ('IDENTITY_BEFORE_TRANSFER', 'IDENTITY_AFTER_TRANSFER')
+                          and set(frame) <= {'kind', 'error', 'errorCode', 'errorStage'}):
+                        raise CloudFileIdentityChanged(frame['errorStage'])
                     elif frame.get('kind') not in ('retained',):
                         raise ValueError('Cloud transfer did not return a verified result')
             if p.wait(timeout=10) != 0 or pending or not isinstance(result, dict):
@@ -366,7 +384,10 @@ class CloudFiles:
                             error='Cloud operation did not complete; existing local and cloud files are retained. Check status before retrying.')
                         if isinstance(error, CloudConfirmationTimeout) and not current.get('cancelRequested'):
                             current.update(phase='CLOUD_CONFIRMATION_TIMEOUT',
-                                error='Cloud confirmation timed out before the remote file/hash was available. Uploaded files are retained, not retransmitted; start a new verification later.')
+                                error='Cloud confirmation timed out before a stable remote file identity/hash was available. Uploaded files are retained, not retransmitted; start a new verification later.')
+                        if isinstance(error, CloudFileIdentityChanged) and not current.get('cancelRequested'):
+                            current.update(phase=error.stage, errorCode='CLOUD_FILE_IDENTITY_CHANGED',
+                                error='Cloud file identity changed; reverify this file, then create a new download. Existing local/cloud files and this operation are retained.')
                         self.save(current)
             return 1
         finally:
