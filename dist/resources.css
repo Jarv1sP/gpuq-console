@@ -152,6 +152,7 @@
  .sb .resource-selection{gap:12px;font-size:13px}
  .sb .resource-selection .button{font-size:13px;min-height:44px}
  .sb .resource-fleet-actions{position:relative;left:auto;bottom:auto;font-size:13px;min-height:44px}
+ .sb .resource-fleet-actions .resource-info-content{top:auto;bottom:calc(100% + 8px)}
  .sb .resource-fleet-actions .button{display:inline-flex;font-size:14px;min-height:44px;padding:8px 12px;border:1px solid var(--line-2);background:var(--ink);border-color:var(--ink);color:var(--bg)}
  .sb .resource-mini-fleet{margin-top:24px;gap:16px}
  .sb .resource-mini h2{font-size:24px}

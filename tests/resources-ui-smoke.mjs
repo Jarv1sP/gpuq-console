@@ -185,6 +185,8 @@ try{
       const tip=page.locator(`[data-resource-info="${id}"]`);await tip.locator(':scope > summary').click();
       const box=await tip.locator('.resource-info-content').boundingBox();
       assert.ok(box.x>=0&&box.x+box.width<=width+1,`${id} tip must fit the ${width}px viewport: ${JSON.stringify(box)}`);
+      const pill=await page.locator('#live-pill').boundingBox();
+      assert.ok(box.y>=0&&box.y+box.height<=(pill?.y??844),`${id} tip must stay above the phone control layer: ${JSON.stringify(box)}`);
       assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Opening an info tip must not widen the page');
       if(id==='quota'){await refreshResources({background:true});assert.equal(await page.evaluate(()=>document.activeElement.closest('[data-resource-info]')?.dataset.resourceInfo),'quota','Background refresh preserves keyboard focus and the open explanation');assert.equal(await page.locator('[data-resource-info="quota"]').getAttribute('open'),'');}
       await page.locator(`[data-resource-info="${id}"]>summary`).click();
