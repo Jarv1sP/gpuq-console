@@ -167,3 +167,4 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 .sb #mission-control .mc-attention-actions>.button{min-height:32px;padding:0 8px;font-size:12px}
 .sb #mission-control .mc-failure-history{display:inline-flex;align-items:center;min-height:40px;margin-bottom:20px;color:var(--ink-3);font-size:12px}
 @media(max-width:759px){.sb #mission-control .mc-attention-heading>.button,.sb #mission-control .mc-attention-actions>.button,.sb #mission-control .mc-failure-history{min-height:44px}}
+.sb #mission-control .mc-footer-command{display:flex;align-items:center;flex:none;gap:8px}.sb #mission-control .mc-footer-command>.ui-info{margin:0}

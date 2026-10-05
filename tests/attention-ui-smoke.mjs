@@ -108,6 +108,11 @@ try{
     assert.doesNotMatch(await page.locator('#control-attention').innerText(),/历史失败|未记录失败时间|另一账号的最近失败/);
     if(role==='admin')assert.match(await page.locator('#control-attention').innerText(),new RegExp(pendingName));else assert.doesNotMatch(await page.locator('#control-attention').innerText(),new RegExp(pendingName));
     assert.equal(await page.locator('#mission-control img').count(),0);await geometry(page);
+    assert.equal(await page.locator('.mc-footer>.ui-info').count(),0,'no orphan footer help');
+    assert.ok(await page.locator('.mc-footer-command').evaluate(group=>{
+      const label=group.querySelector('span').getBoundingClientRect(),help=group.querySelector('summary').getBoundingClientRect();
+      return Math.abs((label.top+label.bottom-help.top-help.bottom)/2)<=1&&help.left>=label.right&&group.scrollWidth<=group.clientWidth+1;
+    }),'command label and help remain centered on the same row');
     await page.screenshot({path:join(shots,`attention-${role}-panel-${width}.png`),animations:'disabled'});
   }
   const desktop=pages.get('member-1440'),recent=jobs.get(member.id).recent;
