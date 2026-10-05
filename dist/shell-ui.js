@@ -1,8 +1,9 @@
 import {escapeUI as esc,serverSelectLabel} from './workbench-ui.js';
 import {controlUI,sessionStatus} from './control-ui.js';
 import {sharedObject,captureObject} from './motion-ui.js';
+import {roomForPage,roomOrder} from './navigation.js';
 
-const order={work:0,resources:1,datasets:2,transfers:2,community:3,users:4,me:4,maintenance:4};
+const rank=page=>{const index=roomOrder.indexOf(roomForPage(page));return index<0?roomOrder.length:index;};
 export function shellUI(store,{navigate,getPage,toast}){
   const q=selector=>document.querySelector(selector),account=q('#account-menu'),nav=q('#room-nav'),context=q('#shell-context');
   const reduced=()=>matchMedia('(prefers-reduced-motion:reduce)').matches,phone=()=>matchMedia('(max-width:759px)').matches;
@@ -40,7 +41,7 @@ export function shellUI(store,{navigate,getPage,toast}){
     if(animate&&!reduced()&&previous.width)indicator.animate([{transform:`translateX(${previous.left-rect.left}px) scaleX(${previous.width/rect.width})`},{transform:'none'}],{duration:220,easing:'cubic-bezier(.2,0,0,1)'});
   }
   function syncNavigation(){
-    const active=getPage(),selected=phone()?({transfers:'datasets',users:'me',maintenance:'me'}[active]||active):active;
+    const active=roomForPage(getPage()),selected=phone()?({users:'me',maintenance:'me'}[active]||active):active;
     for(const item of nav.querySelectorAll('[data-nav]')){const current=item.dataset.nav===selected;item.classList.toggle('active',current);if(current)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current');}
   }
   function markDesktopSlide(target,animation){
@@ -53,7 +54,11 @@ export function shellUI(store,{navigate,getPage,toast}){
     const previous=getPage();if(previous===next){apply();return;}
     document.dispatchEvent(new CustomEvent('gpuq-route-leaving',{detail:{previous,next}}));
     scrolls.set(previous,scrollY);roomAnimation?.cancel();headingAnimation?.cancel();ghost?.remove();
-    const outgoing=q(`[data-page="${CSS.escape(previous)}"]`),rect=outgoing?.getBoundingClientRect(),direction=(order[next]??0)>=(order[previous]??0)?1:-1;
+    if(roomForPage(previous)===roomForPage(next)){
+      for(const [target,animation] of routeSlides){animation.cancel();target.classList.remove('desktop-route-slide');}routeSlides.clear();
+      apply();scrollTo({top:scrolls.get(next)||0,behavior:'instant'});return;
+    }
+    const outgoing=q(`[data-page="${CSS.escape(previous)}"]`),rect=outgoing?.getBoundingClientRect(),direction=rank(next)>=rank(previous)?1:-1;
     if(outgoing&&rect.height&&!phone()&&!reduced()){
       ghost=outgoing.cloneNode(true);ghost.removeAttribute('id');ghost.removeAttribute('data-page');ghost.setAttribute('aria-hidden','true');ghost.inert=true;ghost.classList.add('room-ghost');
       const originals=[outgoing,...outgoing.querySelectorAll('*')];for(const [index,element] of [ghost,...ghost.querySelectorAll('*')].entries()){element.removeAttribute('style');for(const name of originals[index].style)element.style.setProperty(name,originals[index].style.getPropertyValue(name));for(const attr of [...element.attributes])if(['id','name','form'].includes(attr.name)||attr.name.startsWith('data-')||attr.name.startsWith('on'))element.removeAttribute(attr.name);}
@@ -81,7 +86,7 @@ export function shellUI(store,{navigate,getPage,toast}){
   }
   function update(){
     if(contextActor!==store.principal?.userId){contextActor=store.principal?.userId;scrolls.clear();context.hidden=true;}
-    const changed=page!==null&&page!==getPage();page=getPage();document.body.dataset.room=page;
+    const changed=page!==null&&roomForPage(page)!==roomForPage(getPage());page=getPage();document.body.dataset.room=roomForPage(page);
     q('#account-avatar').textContent=(store.users.find(user=>user.id===store.principal?.userId)?.name||store.principal?.username||'S').slice(0,1);
     if(notice!==q('#mode-note').textContent)notice=q('#mode-note').textContent;
     syncContext();syncNavigation();control.update();updateMobileAction();renderMe();updateIndicator(changed);

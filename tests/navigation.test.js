@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {roomOrder,pageForRoute,roomForPage,hashForPage} from '../dist/navigation.js';
+
+test('transfer routes identify the dataset room and use one canonical tab URL',()=>{
+  for(const route of ['transfers','#transfers','datasets/transfers','#datasets/transfers']){
+    const page=pageForRoute(route);assert.equal(page,'transfers');
+    assert.equal(roomForPage(page),'datasets');assert.equal(hashForPage(page),'#datasets/transfers');
+  }
+  assert.equal(pageForRoute('#datasets'),'datasets');assert.equal(hashForPage('datasets'),'#datasets');
+});
+test('room ordering excludes the transfer tab while keeping account and admin routes',()=>{
+  assert.deepEqual(roomOrder,['work','resources','datasets','community','users']);
+  for(const page of [...roomOrder,'me','maintenance']){
+    assert.equal(pageForRoute(hashForPage(page)),page);assert.equal(roomForPage(page),page);
+  }
+});
+test('native document anchors and unrecognised routes are not treated as rooms',()=>{
+  for(const route of ['',null,undefined,'#main-content','#guide-main','#datasets/missing','#missing','/#transfers'])assert.equal(pageForRoute(route),null);
+});

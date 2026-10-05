@@ -13,6 +13,7 @@ import {shellUI} from './shell-ui.js';
 import {fadeDialog,reducedMotion} from './motion-ui.js';
 import {copyHelp} from './copy-help-ui.js';
 import {installAuthentication} from './auth-ui.js';
+import {pageForRoute,hashForPage} from './navigation.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const MACHINES=[];let capacity=0;
@@ -30,7 +31,7 @@ async function loadInventory(){
   capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
 }
 await loadInventory();
-let page='work',selected=null,draft=null,filter='pending',toastTimer,confirmAction,inviteCode=null,refreshing=false;
+let page='work',pendingRoute=pageForRoute(location.hash),selected=null,draft=null,filter='pending',toastTimer,confirmAction,inviteCode=null,refreshing=false;
 const shell=shellUI(store,{navigate:choosePage,getPage:()=>page,toast});
 const renderExecution=executionUI(store,()=>render(true),toast);
 const renderDatasets=datasetsUI(store,toast);
@@ -52,8 +53,8 @@ function toast(message){clearTimeout(toastTimer);const target=$('#toast'),shown=
 function report(error){toast(error.message);if(error.status===401){store.principal=null;store.data=null;MACHINES.length=0;capacity=0;draft=null;render();openLogin();}}
 function confirm(title,message,action){$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;confirmAction=action;$('#confirm-dialog').showModal();fadeDialog($('#confirm-dialog'));}
 function openLogin(){$('#login-form').reset();$('#login-error').textContent='';if(!$('#login-dialog').open)$('#login-dialog').showModal();}
-function choosePage(next){if(next==='users'&&!isAdmin())next='resources';if(next===page)return;if(dirty()){toast('请先保存或撤销授权草稿。');return;}shell.route(next,()=>{page=next;history.replaceState(null,'','#'+next);render();});}
-function defaultPage(){page=maintenanceActive(store.data?.operationalMaintenance)||own()?.total?'work':'resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'','#'+page);}
+function choosePage(route){let next=pageForRoute(route);if(!next)return;if(next==='users'&&!isAdmin())next='resources';if(next===page){if(!store.principal)pendingRoute=next;history.replaceState(null,'',hashForPage(page));return;}if(dirty()){history.replaceState(null,'',hashForPage(page));toast('请先保存或撤销授权草稿。');return;}if(!store.principal)pendingRoute=next;shell.route(next,()=>{page=next;history.replaceState(null,'',hashForPage(next));render();});}
+function defaultPage(){page=pendingRoute||(maintenanceActive(store.data?.operationalMaintenance)||own()?.total?'work':'resources');pendingRoute=null;if(page==='users'&&!isAdmin())page='resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'',hashForPage(page));}
 function render(preserve=false){
   const logged=!!store.principal,admin=isAdmin(),u=own(),keepDraft=preserve&&dirty();
   if(logged)for(const node of document.querySelectorAll('[data-public-maintenance]')){node.textContent=store.data?.operationalMaintenance?.global?.reason||'';node.hidden=!node.textContent;}
@@ -69,7 +70,7 @@ function render(preserve=false){
   $('#edit-profile').hidden=!logged||store.production&&store.data?.taskMetadata?.version!==1;
   if(!logged)$('#profile-dialog').close();
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
-  const titles={me:['我的','账号、额度与个人工作区。'],transfers:['传输任务','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
+  const titles={me:['我的','账号、额度与个人工作区。'],transfers:['数据集','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   const concisePage=['community','users','maintenance'].includes(page);
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=concisePage?'':titles[page][1];$('#page-description').hidden=concisePage||!titles[page][1];$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
   if(!concisePage&&titles[page][1])discloseInfo($('#page-description'),'页面说明');
@@ -163,7 +164,7 @@ document.addEventListener('click',async event=>{
   try{switch(action){
     case 'filter-pending':case 'filter-all':await guardedChange(()=>{filter=action==='filter-pending'?'pending':'all';selected=null;render();});break;
     case 'refresh-state':await refresh();toast('已更新');break;
-    case 'switch-account':if(store.principal)await store.logout();selected=null;draft=null;inviteCode=null;render();openLogin();break;
+    case 'switch-account':if(store.principal)await store.logout();pendingRoute=null;selected=null;draft=null;inviteCode=null;render();openLogin();break;
     case 'open-register':$('#login-dialog').close();$('#register-form').reset();$('#register-error').textContent='';$('#register-dialog').showModal();break;
     case 'back-to-login':$('#register-dialog').close();openLogin();break;
     case 'invites':$('#invites-error').textContent='';await loadInvites();$('#invites-dialog').showModal();break;
@@ -198,8 +199,8 @@ function syncAuthGuide(){
 const authGuideObserver=new MutationObserver(syncAuthGuide);
 for(const dialog of [$('#login-dialog'),$('#register-dialog')])authGuideObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
 installAuthentication();
-const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','transfers','community','maintenance','users','me'].includes(initialHash))page=initialHash;}render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
+if(store.principal)defaultPage();render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
-addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(['work','resources','datasets','transfers','community','maintenance','users','me'].includes(next)&&next!==page)choosePage(next);});
+addEventListener('hashchange',()=>choosePage(location.hash));
 addEventListener('pagehide',()=>clearInterval(poll),{once:true});

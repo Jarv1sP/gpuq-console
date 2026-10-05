@@ -20,7 +20,7 @@ files['/scheduling-ui.js']='scheduling-ui.js';
 files['/gpu-allocation.js']='gpu-allocation.js';
 files['/gpu-allocation-ui.js']='gpu-allocation-ui.js';
 Object.assign(files,STARBASE_ASSETS);
-const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',woff2:'font/woff2',png:'image/png'};
+const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',woff2:'font/woff2',png:'image/png',svg:'image/svg+xml',ico:'image/x-icon'};
 const requestTokens=req=>({
   bearer:/^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization||'')?.[1],
   fromCookie:/(?:^|;\s*)gpuq_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie||'')?.[1]||/(?:^|;\s*)amax_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie||'')?.[1],

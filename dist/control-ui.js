@@ -61,7 +61,7 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
   function actionButton(id,label,code='',run){return {id,label,code,run};}
   function makeCommands(){
     const machine=document.querySelector('[name=workspace-machine]')?.value,project=document.querySelector('[name=workspace-project]')?.value;
-    const rows=[actionButton('work','工作台','gpuctl jobs',()=>navigate('work')),actionButton('resources','算力总览','gpuctl state',()=>navigate('resources')),actionButton('datasets','数据集','gpuctl data list',()=>navigate('datasets')),actionButton('community','协作区','',()=>navigate('community'))];
+    const rows=[actionButton('work','工作台','gpuctl jobs',()=>navigate('work')),actionButton('resources','算力总览','gpuctl state',()=>navigate('resources')),actionButton('datasets','数据集','gpuctl data list',()=>navigate('datasets')),actionButton('transfers','传输与导入','gpuctl transfer list',()=>navigate('transfers')),actionButton('community','协作区','',()=>navigate('community'))];
     if(machine&&document.querySelector('#train-form'))rows.unshift(actionButton('submit','提交训练'+(project?' · '+project:''),'gpuctl run '+machine,openSubmit));
     const terminal=document.querySelector('#terminal-open');if(terminal&&!terminal.disabled&&machine)rows.push(actionButton('terminal','打开开发终端','gpuctl ssh '+machine,()=>terminal.click()));
     const publish=document.querySelector('#project-publish');if(publish&&!publish.disabled&&project)rows.push(actionButton('publish','生成训练版本 · '+project,'gpuctl project publish --machine '+machine+' --project '+project,()=>publish.click()));
