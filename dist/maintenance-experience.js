@@ -1,4 +1,5 @@
 import {maintenanceFor,maintenanceActive,maintenanceTime,maintenanceElapsed,maintenanceConsequence,recoveryConfirmation,recoveryChecks,recoveryPlan,executeRecovery,maintenanceInfoHTML as info,maintenanceClock} from './maintenance-state.js';
+import {copyHelp} from './copy-help-ui.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pause='<span class="maintenance-pause" aria-hidden="true"></span>';
 const tag=()=>`<span class="maintenance-tag">${pause}维护中</span>`;
@@ -60,8 +61,11 @@ export function maintenanceExperienceUI(store,toast,{getPage,refresh}){
   async function refreshState(){const result=await store.call('maintenance.status');if(store.data)store.data.operationalMaintenance=result;await store.refresh();refresh();}
   async function start(scope){
     const revision=value().revision;
-    show('开始维护',`<form id="maintenance-start-form" data-revision="${revision}"><label>维护范围<select name="scope"><option value="all">全平台</option>${machines().map(machine=>`<option value="${esc(machine.id)}">${esc(machine.id)}</option>`).join('')}</select></label><label>公开维护原因<input name="reason" maxlength="300" required placeholder="单行 1–300 字；会员可见，请勿填写秘密"></label><p>暂停新提交；运行任务继续。 ${info(maintenanceConsequence,'维护影响')}</p><p class="form-error" role="alert" data-console-error></p><button class="button primary" type="submit">确认开始维护</button></form>`);
-    dialog.querySelector('[name=scope]').value=scope;dialog.querySelector('[name=reason]').focus();
+    show('开始维护',`<form id="maintenance-start-form" data-revision="${revision}"><label>维护范围<select name="scope"><option value="all">全平台</option>${machines().map(machine=>`<option value="${esc(machine.id)}">${esc(machine.id)}</option>`).join('')}</select></label><div class="maintenance-reason-field"><div class="field-caption"><label for="maintenance-start-reason">公开维护原因</label><span data-maintenance-public-reason></span></div><input id="maintenance-start-reason" name="reason" maxlength="300" required placeholder="例如：存储维护，预计今晚恢复"></div><p>暂停新提交；运行任务继续。 ${info(maintenanceConsequence,'维护影响')}</p><p class="form-error" role="alert" data-console-error></p><button class="button primary" type="submit">确认开始维护</button></form>`);
+    dialog.querySelector('[name=scope]').value=scope;updateReasonHint(scope);dialog.querySelector('[name=reason]').focus();
+  }
+  function updateReasonHint(scope){
+    dialog.querySelector('[data-maintenance-public-reason]').innerHTML=scope==='all'?copyHelp('全平台维护原因说明','全平台维护原因会公开显示在登录页，请勿写服务器名或内部信息。'):'';
   }
   function stage(){
     const ids=[...selected];if(ids.some(id=>!recoveryChecks(store.data,id,sessions).ready)){toast('有服务器尚未通过恢复前检查，请刷新核对。');return;}
@@ -92,7 +96,7 @@ export function maintenanceExperienceUI(store,toast,{getPage,refresh}){
     }
     if(button.hasAttribute('data-console-refresh')){button.disabled=true;try{await refreshState();}catch(error){toast(error.message);}finally{button.disabled=false;}}
   });
-  dialog.addEventListener('change',event=>{if(event.target.hasAttribute('data-recovery-ack'))dialog.querySelector('[data-recovery-apply]').disabled=!event.target.checked||!plan||busy;});
+  dialog.addEventListener('change',event=>{if(event.target.form?.id==='maintenance-start-form'&&event.target.name==='scope')updateReasonHint(event.target.value);if(event.target.hasAttribute('data-recovery-ack'))dialog.querySelector('[data-recovery-apply]').disabled=!event.target.checked||!plan||busy;});
   dialog.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled||busy)return;
     if(button.hasAttribute('data-maintenance-dialog-close')){close();return;}
