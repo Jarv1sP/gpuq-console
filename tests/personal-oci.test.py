@@ -55,6 +55,29 @@ class OCITests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'hard quotas'):
                 o.PersonalOCI(c, USER)
 
+    def test_explicit_oci_cohort_is_independent_of_disabled_disk_quota(self):
+        c = config(); c['storageQuota'] = {'enabled': False}; c['personalOci']['owners'] = [USER]
+        self.assertEqual(o.policy(c, USER), c['personalOci'])
+        self.assertFalse(o.module('storage-quota').ensure(c, USER, Path('/not-created'))['enabled'])
+        for user in (None, 'demo-user-4', '*', 'all', 'demo-user-3\n'):
+            with self.subTest(user=user), self.assertRaisesRegex(ValueError, 'Authenticated owner'):
+                o.policy(c, user)
+
+    def test_explicit_oci_cohort_rejects_invalid_keys_and_owner_lists(self):
+        for owners in ([], '*', ['all'], ['*'], [USER, USER], [123], ['builtin-admin-extra']):
+            c = config(); c['personalOci']['owners'] = owners
+            with self.subTest(owners=owners), self.assertRaisesRegex(ValueError, 'owner cohort'):
+                o.policy(c, USER)
+        c = config(); c['personalOci'].update(owners=[USER], socket='/var/run/docker.sock')
+        with self.assertRaisesRegex(ValueError, 'capability policy'): o.policy(c, USER)
+
+    def test_foreign_explicit_oci_owner_is_rejected_before_any_write(self):
+        c = config(); c['storageQuota'] = {'enabled': False}; c['personalOci']['owners'] = [USER]
+        with patch.object(o.os, 'open', side_effect=AssertionError), \
+             patch.object(o.Path, 'mkdir', side_effect=AssertionError):
+            with self.assertRaisesRegex(ValueError, 'Authenticated owner'):
+                o.PersonalOCI(c, 'demo-user-4')
+
     def test_config_rejects_rootful_socket_paths_tags_and_unknown_flags(self):
         for replacement in ('ubuntu:latest', '/tmp/image', 'docker.io/lib/foo@sha256:bad', '--privileged'):
             c = config(); c['personalOci']['baseImage'] = replacement
@@ -252,9 +275,68 @@ class OCITests(unittest.TestCase):
             result = manager.checkpoint('vision')
         self.assertEqual(result['image'], 'sha256:'+SHA)
         self.assertEqual(manager.run.call_args_list[0].args,
-                         ('pull', '--quiet', '--policy=missing', '--retry=0', '--tls-verify=true', manager.policy['baseImage']))
+                         ('pull', '--signature-policy', str(o.SIGNATURE_POLICY), '--quiet', '--policy=missing',
+                          '--retry=0', '--tls-verify=true', manager.policy['baseImage']))
         self.assertEqual(manager.run.call_args_list[1].args,
                          ('image', 'inspect', '--format={{.Id}}', manager.policy['baseImage']))
+
+    def test_signature_policy_allows_only_exact_approved_base_digest(self):
+        value = json.loads(o.signature_policy_raw(config()['personalOci']['baseImage']))
+        self.assertEqual(value['default'], [{'type':'reject'}])
+        self.assertEqual(value['transports'], {'docker':{config()['personalOci']['baseImage']:[{'type':'insecureAcceptAnything'}]}})
+        for image in ('ubuntu:latest', 'docker.io/library/ubuntu', 'sha256:'+SHA):
+            with self.assertRaises(ValueError): o.signature_policy_raw(image)
+
+    def test_short_runtime_owner_is_private_stable_and_not_a_database_migration(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as root:
+            manager = self.manager(); base = Path(root).resolve(); user = base/str(os.getuid()); user.mkdir(mode=0o700)
+            with patch.object(o, 'RUNTIME', base):
+                path = manager.runtime_temporary(); self.assertEqual(path, manager.runtime_temporary())
+                self.assertLess(len(os.fsencode(path))+len('/conmon-term.XXXXXX'),108)
+                self.assertEqual((path/'.owner').read_text(),manager.owner+'\n')
+                self.assertEqual(path.stat().st_mode&0o777,0o700)
+                self.assertIn(str(manager.folder/'tmp'),manager.command('version'))
+                (path/'.owner').write_text('f'*64+'\n')
+                with self.assertRaisesRegex(ValueError,'runtime owner'):manager.runtime_temporary()
+
+    def test_runtime_owner_symlink_and_mode_changes_are_rejected(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as root:
+            manager=self.manager();base=Path(root).resolve();(base/str(os.getuid())).mkdir(mode=0o700)
+            with patch.object(o,'RUNTIME',base):
+                path=manager.runtime_temporary();owner=path/'.owner';owner.chmod(0o644)
+                with self.assertRaises(ValueError):manager.runtime_temporary()
+                owner.unlink();owner.symlink_to('/etc/passwd')
+                with self.assertRaises(OSError):manager.runtime_temporary()
+
+    def test_immutable_image_id_accepts_only_full_sha256(self):
+        for value in (SHA, 'sha256:'+SHA):
+            self.assertEqual(o.immutable_image_id(value), 'sha256:'+SHA)
+        for value in ('ubuntu:latest', 'sha256:'+SHA[:12], SHA[:12], 'sha512:'+SHA,
+                      SHA.upper(), ' '+SHA, SHA+'\n', None, 123):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                o.immutable_image_id(value)
+
+    def test_base_and_published_image_accept_podman_bare_full_id(self):
+        manager = self.manager()
+        manager.load = Mock(return_value={'schema':1,'owner':manager.owner,'project':'vision',
+                                         'image':manager.policy['baseImage'],'container':None})
+        manager.run = Mock(side_effect=['', SHA])
+        with patch.object(manager.s, 'atomic_json'):
+            self.assertEqual(manager.checkpoint('vision')['image'], 'sha256:'+SHA)
+        manager.run = Mock(return_value=SHA)
+        self.assertEqual(manager.verify_image('vision', {'schema':1,'owner':manager.owner,
+                         'project':'vision','image':'sha256:'+SHA}), 'sha256:'+SHA)
+
+    def test_commit_canonicalizes_full_id_before_durable_head(self):
+        manager = self.manager()
+        manager.load = Mock(return_value={'schema':1,'owner':manager.owner,'project':'vision',
+                         'image':'sha256:'+SHA,'container':'gpuq-dev-'+'c'*32})
+        metadata={'Config':{'Labels':{'io.gpuq.owner':manager.owner,'io.gpuq.project':'vision'}},
+                  'State':{'Running':False,'Pid':0,'Status':'exited'}}
+        manager.run = Mock(side_effect=[json.dumps([metadata]), SHA, ''])
+        with patch.object(manager.s, 'atomic_json') as durable:
+            self.assertEqual(manager.checkpoint('vision')['image'], 'sha256:'+SHA)
+            self.assertEqual(durable.call_args.args[1]['image'], 'sha256:'+SHA)
 
     def verify_capability(self, host):
         manager = self.manager()
@@ -307,6 +389,78 @@ class OCITests(unittest.TestCase):
         self.assertIn('--image-volume=ignore', args)
         self.assertIn('--network=slirp4netns:allow_host_loopback=false', args)
         self.assertIn('--env=NVIDIA_VISIBLE_DEVICES=void', args)
+
+    def test_execute_reads_existing_delegate_and_enforced_kernel_budget_only(self):
+        manager = self.manager(); manager.verify_host = Mock(); manager.arguments = Mock(return_value=[])
+        group = '/user.slice/amax-term-unit-test.service'
+        state = 'Delegate=yes\nKillMode=control-group\nMemoryMax=8589934592\nTasksMax=2048\nControlGroup='+group+'\n'
+        resources = SimpleNamespace(read_budget=Mock(side_effect=ValueError('budget verified sentinel')))
+        with patch.object(o.os, 'getuid', return_value=1000), \
+             patch.object(o.Path, 'read_text', return_value='0::'+group+'\n'), \
+             patch.object(o.subprocess, 'run', return_value=SimpleNamespace(stdout=state)) as systemctl, \
+             patch.object(o, 'module', return_value=resources), \
+             self.assertRaisesRegex(ValueError, 'budget verified sentinel'):
+            manager._execute({'project':'vision','id':'test'}, {'environmentMode':'oci'}, True, [], [], registry_env={})
+        self.assertEqual(systemctl.call_count, 1)
+        self.assertEqual(systemctl.call_args.args[0][:3], ['/usr/bin/systemctl','--user','show'])
+        resources.read_budget.assert_called_once_with({'project':'vision','id':'test'}, group, [], True)
+
+    def test_named_mounts_use_only_open_descriptor_sources_including_controls(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); source = manager.folder/'workspace'; source.mkdir(mode=0o700)
+            sdk = manager.folder/'sdk.pyz'; sdk.write_bytes(b'fixed sdk'); sdk.chmod(0o600)
+            directory = os.open(source, os.O_RDONLY|os.O_DIRECTORY); archive = os.open(sdk, os.O_RDONLY)
+            try:
+                sources = {directory:str(source), archive:str(sdk)}
+                with patch.object(o.os, 'readlink', side_effect=lambda name:sources[int(name.rsplit('/',1)[-1])]), \
+                     manager.named_mounts([(directory,'/workspace',False)], ['--ro-bind-data',str(archive),'/opt/gpuq/sdk.pyz']):
+                    args = manager.arguments({'project':'vision','argv':['/bin/bash']}, {'environmentMode':'oci'}, True, [], [(directory,'/workspace',False)])
+                    self.assertIn(str(source)+':/workspace:rw', args)
+                    control = o.translate_control(['--ro-bind-data',str(archive),'/opt/gpuq/sdk.pyz'], manager._mount_sources)
+                    self.assertIn(str(sdk)+':/opt/gpuq/sdk.pyz:ro', control)
+                    self.assertFalse(any('/proc/' in arg for arg in args+control))
+                self.assertEqual(manager._mount_sources, {})
+            finally: os.close(directory); os.close(archive)
+
+    def test_named_mounts_reject_path_replacement_and_writable_ancestors(self):
+        for replace in (False, True):
+            with self.subTest(replace=replace), tempfile.TemporaryDirectory() as root:
+                manager = self.anonymous_manager(root); source = manager.folder/'workspace'; source.mkdir(mode=0o700)
+                descriptor = os.open(source, os.O_RDONLY|os.O_DIRECTORY)
+                try:
+                    if not replace: manager.folder.chmod(0o777)
+                    with patch.object(o.os, 'readlink', return_value=str(source)), self.assertRaises(ValueError):
+                        with manager.named_mounts([(descriptor,'/workspace',False)], []):
+                            source.rename(manager.folder/'old-workspace'); source.mkdir(mode=0o700)
+                finally: os.close(descriptor)
+
+    def test_named_mounts_reject_symlink_and_deleted_or_client_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); source = manager.folder/'workspace'; source.mkdir(mode=0o700)
+            linked = manager.folder/'linked'; linked.symlink_to(source, target_is_directory=True)
+            descriptor = os.open(source, os.O_RDONLY|os.O_DIRECTORY)
+            try:
+                for name in (str(linked), str(source)+' (deleted)', '../host', '/tmp:rw'):
+                    with self.subTest(name=name), patch.object(o.os,'readlink',return_value=name), self.assertRaises((ValueError,OSError)):
+                        with manager.named_mounts([(descriptor,'/workspace',False)], []): self.fail('Unsafe named source accepted')
+            finally: os.close(descriptor)
+
+    def test_only_small_valid_resource_memfd_is_privately_snapshotted_and_cleaned(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); (manager.folder/'tmp').mkdir(mode=0o700)
+            path = manager.folder/'synthetic-resources'; raw = json.dumps({'schemaVersion':1,'cpuLimit':2,
+                'memoryLimitBytes':8*1024**3,'pidsLimit':2048,'gpuCount':0}).encode(); path.write_bytes(raw)
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                with patch.object(o.os,'readlink',return_value='/memfd:gpuq-resources (deleted)'):
+                    with manager.named_mounts([(descriptor,'/run/gpuq/resources.json',True)], []):
+                        snapshot = Path(manager._mount_sources[descriptor]); self.assertEqual(snapshot.read_bytes(),raw)
+                        self.assertEqual(snapshot.stat().st_mode & 0o777,0o600)
+                    self.assertFalse(snapshot.exists())
+                    for target, readonly in (('/etc/shadow',True),('/run/gpuq/resources.json',False)):
+                        with self.assertRaises(ValueError):
+                            with manager.named_mounts([(descriptor,target,readonly)], []): self.fail('Unsupported memfd accepted')
+            finally: os.close(descriptor)
 
     def test_development_rejects_scheduler_gpu_injection(self):
         with self.assertRaisesRegex(ValueError, 'cannot have GPUs'):
