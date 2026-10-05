@@ -143,6 +143,9 @@ try{
     await phone.locator('#work-submit-panel').evaluate(async panel=>{await Promise.all([...panel.getAnimations(),...document.querySelector('#work-submit').getAnimations()].map(animation=>animation.finished));});
     assert.match(await phone.locator('#work-submit').evaluate(n=>getComputedStyle(n).transform),/-117/,'phone drill-down leaves the sheet at 30% parallax');
     await capture(phone,'submit-'+name+'-390',true);await phone.locator('#close-submit-panel').click();assert.equal(await phone.locator('#work-submit-panel').isVisible(),false);
+    // Native close hides the panel immediately; its inert exit clone and the
+    // underlying return animation must finish before testing the next drill-down.
+    await phone.evaluate(async()=>{await Promise.all([document.querySelector('#work-submit'),...document.querySelectorAll('.object-transition-layer')].flatMap(layer=>layer.getAnimations({subtree:true})).map(animation=>animation.finished));});
   }
   await phone.keyboard.press('Escape');await phone.locator('#work-submit').waitFor({state:'hidden'});await phone.locator('.wb-focal .wb-job-name').click();await capture(phone,'job-overview-member-390',true);
   for(const tab of ['logs','diagnostics','output','notes']){await phone.locator('[data-job-tab='+tab+']').click();await capture(phone,'job-'+tab+'-member-390',true);await noOverflow(phone);}
