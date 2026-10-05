@@ -70,6 +70,37 @@ test('project list/status/publish use selected context; publication does not cla
   assert.equal((await f.cli(['project','status','beta','--machine','2'])).code,0);
   assert.deepEqual(f.calls.at(-1),{operation:'projects.status',args:{machine:'gpu-2',project:'beta'}});
 });
+
+test('auto run pins the development release but sends opt-in target selection without changing saved context',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  for(const alias of ['--machine','--on']){
+    const value=await f.cli(['run',alias,'auto','--candidates','2,1','--key',JOB,'-g','2','--','python','train.py']);
+    assert.equal(value.code,0,value.stderr);
+    assert.deepEqual(f.calls.at(-2),{operation:'projects.status',args:{machine:'gpu-1',project:'alpha'}});
+    assert.deepEqual(f.calls.at(-1).args.machineSelection,{mode:'auto',candidates:['gpu-2','gpu-1']});
+    assert.equal(f.calls.at(-1).args.machine,'auto');assert.equal(f.calls.at(-1).args.release,RELEASE);assert.equal(f.calls.at(-1).args.key,JOB);
+    assert.equal(JSON.parse(await readFile(f.session,'utf8')).machine,'gpu-1');
+  }
+  for(const args of [['run','--machine','auto','--candidates','1,1'],['run','--machine','auto','--candidates','foreign'],['run','gpu-1','--machine','auto'],['run','--candidates','1']]){
+    const before=f.calls.filter(c=>c.operation==='jobs.submit').length;
+    assert.equal((await f.cli([...args,'--','true'])).code,1);assert.equal(f.calls.filter(c=>c.operation==='jobs.submit').length,before);
+  }
+});
+
+test('immutable OCI project copy uses source/target and fixed key; status/cancel remain owner-scoped handles',async t=>{
+  const f=await fixture(t);
+  f.custom.set('projects.replicate',args=>({id:args.key,...args,state:'PREPARING',developmentChanged:false}));
+  const copied=await f.cli(['project','copy','alpha','--from','1','--to','2','--release',RELEASE,'--key',JOB]);
+  assert.equal(copied.code,0,copied.stderr);assert.equal(copied.data.developmentChanged,false);
+  assert.deepEqual(f.calls.at(-1),{operation:'projects.replicate',args:{from:'gpu-1',machine:'gpu-2',project:'alpha',release:RELEASE,key:JOB}});
+  for(const [command,operation] of [['copy-status','status'],['copy-cancel','cancel']]){
+    assert.equal((await f.cli(['project',command,JOB])).code,0);
+    assert.deepEqual(f.calls.at(-1),{operation:'projects.replication.'+operation,args:{id:JOB}});
+  }
+  const before=f.calls.filter(c=>c.operation==='projects.replicate').length;
+  for(const args of [['--from','1','--to','1','--release',RELEASE],['--from','1','--to','2'],['--from','foreign','--to','2','--release',RELEASE]])assert.equal((await f.cli(['project','copy','alpha',...args])).code,1);
+  assert.equal(f.calls.filter(c=>c.operation==='projects.replicate').length,before);
+});
 test('project quota queries only the selected machine and preserves unknown disabled usage',async t=>{
  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
  f.custom.set('projects.quota',()=>({enabled:false,enforcement:null,owner:principal.userId,volumes:null}));

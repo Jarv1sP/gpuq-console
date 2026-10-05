@@ -8,7 +8,7 @@ import {taskDescription,displayName} from './dist/task-metadata.js';
 const FIELDS=new Set([
   'machine','cards','minVramGiB','argv','name','description','key',
   'datasets','project','release','priority','scheduling','elastic','placement',
-  'prepareData',
+  'prepareData','machineSelection',
 ]);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 
@@ -40,8 +40,17 @@ export function normalizeJobSubmission(args,principal){
   const priority=args.priority===undefined?'normal':args.priority;
   if(!['idle','normal','high'].includes(priority))fail('优先级必须为 idle、normal 或 high。');
   if(priority==='high'&&principal.role!=='admin')fail('高优先级仅管理员可用。',403);
-  if(!Object.hasOwn(args,'machine')||typeof args.machine!=='string'||!MACHINES.some(m=>m.id===args.machine))fail('请明确选择有效的服务器；不支持自动选机。');
+  let machineSelection;
+  if(args.machineSelection!==undefined||args.machine==='auto'){
+    const selection=args.machineSelection??{mode:'auto'};
+    if(!selection||typeof selection!=='object'||Array.isArray(selection)||Object.keys(selection).some(k=>!['mode','candidates'].includes(k))||selection.mode!=='auto'||
+      Object.hasOwn(args,'machine')&&args.machine!=='auto')fail('自动选机参数无效；不要同时指定固定服务器。');
+    const candidates=selection.candidates;
+    if(candidates!==undefined&&(!Array.isArray(candidates)||!candidates.length||candidates.length>MACHINES.length||candidates.some(id=>!MACHINES.some(m=>m.id===id))||new Set(candidates).size!==candidates.length))fail('候选服务器须为不重复的有效机器列表。');
+    machineSelection={mode:'auto',...(candidates?{candidates:[...candidates].sort()}: {})};
+  }else if(!Object.hasOwn(args,'machine')||typeof args.machine!=='string'||!MACHINES.some(m=>m.id===args.machine))fail('请选择有效的服务器，或使用 auto 自动选机。');
   const datasets=datasetReferences(args.datasets),project=projectReference(args,{release:true});
+  if(machineSelection&&!project.project)fail('自动选机需要已发布的个人容器项目和固定版本；旧工作区请手选服务器。');
   if(typeof args.key!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(args.key))fail('需提供 UUID 提交键，重试必须复用。');
   if(!Array.isArray(args.argv)||!args.argv.length||args.argv.length>128||args.argv.some(a=>typeof a!=='string'||a.includes('\0'))||JSON.stringify(args.argv).length>12000)fail('训练命令无效或过长。');
   if(!Number.isInteger(args.cards)||args.cards<1||args.cards>Math.max(...MACHINES.map(m=>m.cards)))fail('申请卡数超出单机容量。');
@@ -54,8 +63,9 @@ export function normalizeJobSubmission(args,principal){
   const name=args.name||'train';
   if(typeof name!=='string'||name.length>64||/[\x00-\x1f]/.test(name))fail('任务名称无效。');
   const description=taskDescription(args.description);
-  const request={machine:args.machine,cards:args.cards,minVramGiB,argv:[...args.argv],name,description,key:args.key,
-    datasets,project,priority,priorityProvided:args.priority!==undefined,explicit,prepareData:args.prepareData===true,
+  const request={machine:machineSelection?'auto':args.machine,cards:args.cards,minVramGiB,argv:[...args.argv],name,description,key:args.key,
+    datasets,project,priority,priorityProvided:args.priority!==undefined,explicit,prepareData:args.prepareData===true||!!machineSelection,
+    ...(machineSelection?{machineSelection}:{}),
     ...(placement?{placement}:{}),
     ...(allocation?{elastic:allocation.elastic,allowedGpuCounts:allocation.allowed}:{})};
   // This positional representation is a persisted compatibility contract, not
@@ -68,6 +78,7 @@ export function normalizeJobSubmission(args,principal){
   if(allocation)identity.push({elastic:allocation.elastic});
   if(placement)identity.push({placement});
   if(description)identity.push({description});
+  if(machineSelection)identity.push({machineSelection});
   request.digest=createHash('sha256').update(JSON.stringify(identity)).digest('hex');
   return request;
 }
@@ -80,6 +91,7 @@ export function createSubmittedJob(request,user,prioritySupported,{id=randomUUID
   // Human-facing metadata belongs to the portal record, not the immutable
   // node execution spec: old nodes/receipts continue accepting the same spec.
   return {id,key,digest,spec,userId:user.id,username:user.username,submitterName:displayName(user.name??user.username),machine,cards,name,description:request.description,...context,
+    ...(request.machineSelection?{machineSelection:structuredClone(request.machineSelection),projectPreparation:structuredClone(request.projectPreparation)}:{}),
     ...(request.elastic?{allowedGpuCounts:[...request.allowedGpuCounts]}:{}),
     ...(explicit?{scheduling:structuredClone(explicit)}:{}),priority:explicit?null:prioritySupported?priority:null,
     state:'SUBMITTING',createdAt:now,cancelRequested:false};

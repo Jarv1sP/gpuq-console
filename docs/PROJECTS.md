@@ -1,6 +1,6 @@
 # 项目、环境与训练版本
 
-项目属于「平台账号 + 指定服务器」。用户先手选服务器，再在该机中自动调度所需卡数，不做隐式跨机运行。浏览器和 CLI 共用账号权限，通过 HTTPS 操作，用户电脑不需要加入 Tailscale。
+项目的开发草稿属于「平台账号 + 指定服务器」。默认仍在手选服务器运行；已发布的个人容器项目可明确使用自动选机，或复制固定发布版本到另一台已授权服务器。浏览器和 CLI 共用账号权限，通过 HTTPS 操作，用户电脑不需要加入 Tailscale。
 
 本页描述项目接口及操作约定，不代表任一现有部署已经升级；管理员需部署配套门户与节点版本后再开放。原 GPUQ 任务与旧工作区保留。Slurm/Pyxis/Enroot 的迁移不因项目接口加入而自动完成，当前不能据此宣称已经切换调度后端。
 
@@ -111,7 +111,34 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 
 项目名只用小写 ASCII 字母、数字、下划线、连字符，以字母开头，长度 1–48。机器和项目选择保存在本机登录缓存中，按服务器分别记忆；切到没有选过项目的新服务器时不会沿用另一台的项目。可用 `--project NAME` 临时覆盖，不修改记忆。登录另一账号会清除旧身份的选择。
 
-普通 `run` 选择 `latestReadyRelease`，并核验该版本在 READY 清单中。顶层 `PUBLISHING` 不会阻止使用以前的 READY 版本，因此想运行新改动时务必先核对最新发布结果。`--release 完整64位哈希` 可显式固定版本。没有可用版本时清楚报错，普通 `run` 不会自动替用户发布、切机或占卡等发布。`run auto` 对新任务一律拒绝。
+普通 `run` 选择 `latestReadyRelease`，并核验该版本在 READY 清单中。顶层 `PUBLISHING` 不会阻止使用以前的 READY 版本，因此想运行新改动时务必先核对最新发布结果。`--release 完整64位哈希` 可显式固定版本。没有可用版本时清楚报错，普通 `run` 不会自动替用户发布、切机或占卡等发布。
+
+## 可选的自动选机与固定版本复制
+
+先在开发服务器创建、安装依赖并发布 **OCI 个人容器** 项目。保持当前 `gpuctl use` 和 `project use`，提交时只增加一个选项：
+
+```sh
+gpuctl run --machine auto -g 2 --min-vram 24 -- python train.py --output /outputs
+# 只考虑指定机器，例如同一 GPU 型号的一组节点
+gpuctl run --on auto --candidates gpu-2,gpu-3 -g 2 -- python train.py --output /outputs
+```
+
+后端先排除未授权、维护、离线、卡数／显存不足、调度能力不匹配的节点，再核对 OCI 镜像及 CPU 架构、可信复制通道和数据读取权限。优先使用项目与数据都已就绪的机器，其次减少数据搬运；队列长度只用作参考，不保证立刻获得空卡。特定 GPU 型号需求用候选机器限制，平台不推断程序对 CUDA、驱动或 GPU 架构的额外要求。
+
+目标一经提交便固定：项目代码快照、容器镜像和需要的数据先在目标准备，期间状态为 `PREPARING_DATA`，不占 GPU 额度。门户重启、复制超时或服务器暂不可用不会重投任务或改派到另一台；不确定时复用原 `--key`。全部 READY 后重新检查权限和额度，再进入该机调度。取消训练不会破坏可被其他任务共用的项目／数据副本。
+
+`--sync --machine auto` 仍先在当前开发服务器上传和发布；没有个人项目、没有固定 READY 版本、旧 shared/isolated 环境或复制能力未启用时，自动选机明确拒绝。源机器也需要本人授权。已有项目的草稿、开发终端和 HOME 不会被迁走或合并；复制目标上的同名不兼容项目会拒绝，不覆盖别人的或自己的开发内容。
+
+也可先手动准备副本，再固定机器运行：
+
+```sh
+gpuctl project copy my-project --from gpu-1 --to gpu-2 --release FULL_HASH
+gpuctl project copy-status COPY_ID
+# 仅在确实要取消这笔复制时：
+gpuctl project copy-cancel COPY_ID
+```
+
+复制返回独立操作 ID、状态和进度；后台完成用 `SUCCEEDED` 表示。代码与镜像走已配置的节点间 TLS 连接，VPS 只处理控制请求；同版本校验完成后才可运行。复制发布版本不等于同步开发容器，结果、训练 HOME 和 `/outputs` 仍留在实际执行节点。用 `gpuctl jobs` 看机器，再用 `gpuctl pull --machine TARGET --project my-project --job JOB_ID result.pt ./result.pt` 下载结果。
 
 显式 `gpuctl run --sync -g 1 -- python train.py` 则先上传当前目录（或 `--sync-dir "本地目录"`）到所选个人项目，复用分块 SHA256 校验和发布 worker，等待本次发布的 UUID 回执 READY；再通过固定版本清单确认已上传文件的大小／SHA，最后固定该 release 提交。发布状态未知、失败、被其他发布替换、文件变化、校验不符或有界等待超时都不会提交旧版本。不会关闭终端或自动安装依赖；必须先准备好项目环境并退出项目终端。旧节点缺少 publicationProtocol 时在上传前拒绝，不静默兼容成“运行旧代码”。`--sync` 不能与 `--release/--legacy/--root/--as/--job` 混用。
 

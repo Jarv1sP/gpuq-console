@@ -12,6 +12,7 @@ import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 import {datasetCatalogCall,datasetListView} from './dataset-catalog.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
+import {selectMachine} from './machine-selection.mjs';
 export {datasetReferences} from './job-submission.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
@@ -288,8 +289,9 @@ export async function executionCall(service,principal,operation,args){
     if(previous){if(previous.digest!==digest)fail('同一提交键不能用于不同任务。',409);return jobView(previous);}
     if(service.store.jobs.length>=5000)fail('任务历史达到归档上限，请联系管理员归档后提交。',503);
     if(request.cards>user.total)fail('任务卡数超出跨机器用卡总额度。',409);
+    if(request.machineSelection)Object.assign(request,await selectMachine(service,user,request,priorityCapable));
     authorizedMachine(request.machine);
-    if(project.project){
+    if(project.project&&!request.machineSelection){
       await service.ociProjectAdmission?.(request.machine,user.id,project.project);
       let prepared;
       try{prepared=await service.bridge(request.machine,'projects.verify',{...project,userId:user.id});}
@@ -311,7 +313,7 @@ export async function executionCall(service,principal,operation,args){
     if(explicit&&(!prioritySupported||!yieldCapable(host)))fail('节点未接通独立让位与 checkpoint 控制通道；未提交任务。',503);
     if(explicit?.mode&&explicit.mode!=='queue'&&!host.gpuq.capabilities.includes('preempt-opt-in-only-v1'))fail('节点尚未接通请求模式的主动让位范围限制。',503);
     if(request.priorityProvided&&!prioritySupported)fail('所选机器尚未确认安全优先级功能，未提交任务；请刷新或联系管理员升级。',503);
-    let needsPreparation=false,resolvedReferences=[];
+    let needsPreparation=!!request.machineSelection,resolvedReferences=[];
     if(datasets.length){
       // Personal training uses the same owner-only Principal as node lease
       // acquisition. Only the explicitly selected node is queried; management
@@ -341,13 +343,15 @@ export async function executionCall(service,principal,operation,args){
         needsPreparation=true;
       }
     }
+    if(needsPreparation&&service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)fail('最多保留 10 个准备中的训练，请先等待或取消。',429);
+    if(request.machineSelection&&(JSON.stringify(service.store.get(user.id))!==JSON.stringify(user)||service.maintenanceFor?.(request.machine)))fail('账号授权或机器维护状态已改变；未提交训练。',409);
     if(!needsPreparation&&!personalCardQuotaExempt(user,request)){
       if(usage(service.store.jobs,user.id)+request.cards>user.total)fail('超出跨机器用卡总额度（排队、运行和待核对任务均计入）。',409);
       if(usage(service.store.jobs,user.id,request.machine)+request.cards>user.limits[request.machine])fail('超出所选机器的用卡额度（排队、运行和待核对任务均计入）；不会自动切换服务器。',409);
     }
     const job=createSubmittedJob(request,user,prioritySupported),{id}=job;
     if(!needsPreparation&&datasets.length&&resolvedReferences.length===datasets.length)job.spec.datasets=datasets.map(ref=>resolvedReferences.find(value=>(value.mountAs||value.dataset)===ref.dataset));
-    if(needsPreparation){job.state=DATA_PREPARING;job.queueReason='等待准备本机数据；尚未申请 GPU。';job.dataPreparation={datasets:datasets.map(ref=>({...ref,state:'WAITING'}))};}
+    if(needsPreparation){job.state=DATA_PREPARING;job.queueReason='等待准备项目和本机数据；尚未申请 GPU。';job.dataPreparation={datasets:datasets.map(ref=>({...ref,state:'WAITING'}))};}
     service.db.exec('BEGIN IMMEDIATE');
     try{service.store.jobs.push(job);service.save();service.audit(principal.username,operation,id,'reserved');service.db.exec('COMMIT');}
     catch(e){service.db.exec('ROLLBACK');service.store.jobs=service.store.jobs.filter(j=>j.id!==id);throw e;}

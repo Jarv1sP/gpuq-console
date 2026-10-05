@@ -155,6 +155,25 @@ gpuctl jobs
 
 默认使用最新的 `READY` 版本；新发布失败时直接运行可能用到旧代码。要使用指定版本，使用 `gpuctl run --release FULL_HASH -g 1 -- python train.py`。
 
+### 自动选择训练服务器
+
+个人容器项目发布后，可以让平台在你有权限的机器中选择。当前开发服务器和项目保持不变，只给运行命令增加 `--machine auto`：
+
+```sh local
+gpuctl run --machine auto -g 2 --min-vram 24 -- python train.py --output /outputs
+```
+
+平台优先选择项目、数据已在本地的兼容机器；需要搬运时先准备代码、容器环境和数据，期间不占 GPU。选定后不会因忙碌、断线或重启偷偷换机。`gpuctl jobs` 可查看最终机器；输出仍保存在那台机器。
+
+只考虑某几台机器时，增加 `--candidates MACHINE_A,MACHINE_B`；`--on auto` 与 `--machine auto` 等效。未启用跨机容器能力、旧共享环境或没有 READY 项目版本时会明确拒绝，原来手选机器的命令继续可用。自动选机不等于跨服务器多卡训练，也不迁移正在运行的开发终端。
+
+手动复制一个固定的个人容器版本可用 `gpuctl project copy 项目名 --from SOURCE --to TARGET --release FULL_HASH`，随后 `gpuctl project copy-status COPY_ID` 查看进度。它只准备训练版本，不覆盖目标开发草稿；取消复制使用 `project copy-cancel COPY_ID`。
+
+```sh local
+# 从 jobs 显示的实际执行机器下载本次结果
+gpuctl pull --machine TARGET --project my-project --job JOB_ID result.pt ./result.pt
+```
+
 ### 退出项目终端后同步运行
 
 先选好服务器和个人项目，准备服务器环境，并退出该项目的开发终端。再在电脑代码目录运行同步，合并上传、发布和等待。
@@ -169,7 +188,7 @@ gpuctl run --sync -g 1 -- python train.py --output /outputs
 gpuctl run --sync --sync-dir "C:\研究代码\我的项目" --project my-project -g 1 -- python train.py --output /outputs
 ```
 
-`--sync` 复用 `push` 的分块上传与 SHA256 校验，然后按本次发布的 UUID 等待 READY 回执，并核对不可变版本清单中的已上传文件；只提交这个版本，不回退到以前的 READY。上传失败、本地文件中途变化、发布失败／状态未知、并发发布替换、校验不一致或等待超时（最多两小时）都会停止，**不提交训练**。它不会替你结束终端、安装依赖、变更权限或切换机器；旧节点尚不支持发布确认时，在上传前明确拒绝。
+`--sync` 复用 `push` 的分块上传与 SHA256 校验，然后按本次发布的 UUID 等待 READY 回执，并核对不可变版本清单中的已上传文件；只提交这个版本，不回退到以前的 READY。上传失败、本地文件中途变化、发布失败／状态未知、并发发布替换、校验不一致或等待超时（最多两小时）都会停止，**不提交训练**。它不会替你结束终端、安装依赖或变更权限；默认不切机，明确加 `--machine auto` 时仍先在当前开发服务器发布，再自动选择训练服务器。旧节点尚不支持发布确认时，在上传前明确拒绝。
 
 这是现有代码上传流程的快捷入口，**不是增量镜像或删除同步**：本次目录内的文件会重传，与 `push` 相同的秘密／环境目录会跳过，远端多余文件保留；空目录或全部被排除时不会发布旧草稿。不要把数据集混在代码目录中。服务器已有的小体积 `weights/` 可以保留，不必为本命令重新搬回电脑；发布可能在服务器内部复制代码和环境。`--sync` 不能与 `--release`、`--legacy` 或管理员宿主模式合用。
 

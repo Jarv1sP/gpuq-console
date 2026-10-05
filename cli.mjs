@@ -40,6 +40,8 @@ gpuctl project create clean --env-mode isolated  New venv without base site-pack
 gpuctl project create container --env-mode oci   Managed rootless OCI (enabled nodes only)
 gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
+gpuctl project copy NAME --from SOURCE --to TARGET --release HASH
+gpuctl project copy-status COPY_ID / copy-cancel COPY_ID
 gpuctl ssh                       Develop in the selected project's private terminal
 gpuctl ssh --root                Administrator: unrestricted host root terminal
 gpuctl ssh --reconnect SESSION   Explicitly reconnect a detached/expired session
@@ -159,7 +161,7 @@ exec waits by default; --detach returns a handle. --json includes both output st
 Use -- bash -lc '...' only when shell syntax is intended. argv is otherwise literal.
 Host output retains the first 65536 bytes per stream; truncation is reported.
 Reuse --key after an uncertain response; never retry with a new key blindly.
-Projects are selected per server, never silently copied or moved between machines.
+Projects are selected per server. Manual run keeps that server; auto is opt-in.
 --project SLUG overrides the selection; --legacy explicitly uses the old workspace.
 --release HASH pins a READY project release. Without it, run uses latest READY.
 run --sync uploads the current directory (or --sync-dir), then waits for its own
@@ -167,7 +169,12 @@ publication and submits only that READY release. It requires a selected project.
 It keeps extra remote files, excludes the same secrets/environments as push,
 does not install packages, and never falls back to old code after a failed sync.
 --job UUID selects a project's per-job outputs for files / pull (read-only to CLI).
-Choose a server explicitly: new jobs do not accept auto.
+run --machine auto (or --on auto) chooses an authorized compatible server for a
+published OCI project. --candidates SERVER,SERVER optionally narrows the set.
+Your selected server remains the development source; --sync publishes there.
+The chosen server is fixed before copies start; retries keep the SAME --key.
+Project code/image and datasets prepare before GPU allocation. Results stay
+on the chosen server, not automatically in the development workspace.
 Existing users without a selected project keep their legacy workspace.
 The standard Python environment is /opt/conda; never modify global Conda.`;
 const args=process.argv.slice(2);let options,positionals,training;
@@ -178,7 +185,7 @@ const CLI_OPTIONS=new Map([
   ['via','value'],
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown','sync'].map(key=>[key,'flag']),
-  ['sync-dir','value'],
+  ['sync-dir','value'],['candidates','value'],
   ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
@@ -187,7 +194,7 @@ export function parseCLIOptions(argv){
   const options={machines:[],datasets:[]},positionals=[];
   for(let i=0;i<argv.length;i++){
     if(argv[i]==='--')return {options,positionals,training:argv.slice(i+1)};
-    const item=argv[i]==='-g'?'--cards':argv[i];
+    const item=argv[i]==='-g'?'--cards':argv[i]==='--on'?'--machine':argv[i];
     if(!item.startsWith('--')){positionals.push(item);continue;}
     const key=item.slice(2),kind=CLI_OPTIONS.get(key);
     if(!kind)fail(`Unknown option: ${item}`);
@@ -300,8 +307,9 @@ async function main(){
   if(options.help||!positionals.length){console.log(help);return;}
   if(options.sync&&positionals[0]!=='run'||options['sync-dir']!==undefined&&!options.sync)fail('--sync is only for run; --sync-dir requires run --sync');
   if(options.sync&&['release','legacy','root','as','job'].some(key=>Object.hasOwn(options,key)))fail('run --sync requires a personal project; cannot combine with --release/--legacy/--root/--as/--job');
-  const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
-  if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy)fail('--from/--to are for sync or transfer copy; ref/target-project/dry-run are only for sync');
+  const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',projectCopy=positionals[0]==='project'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
+  if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy&&!projectCopy)fail('--from/--to are for sync, project copy or transfer copy; ref/target-project/dry-run are only for sync');
+  if(options.candidates!==undefined&&positionals[0]!=='run')fail('--candidates is only for run --machine auto');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
   if(options.interval!==undefined&&positionals[0]!=='watch'&&!transferWatch)fail('--interval is only valid for watch');
   if(positionals[0]==='watch'){
@@ -391,6 +399,7 @@ async function main(){
       if(command!=='project'||positionals[1]!=='create')fail('--env-mode is only valid for project create; existing environments are never rebuilt');
       if(!['shared','isolated','oci'].includes(options['env-mode']))fail('--env-mode must be shared, isolated or oci');
     }
+    if(command==='run'&&positionals.length>1&&options.machines.length)fail('Select a server once, either positionally or with --machine/--on');
     if(['run','shell'].includes(command)&&positionals.length===1)positionals.push(defaultMachine());
     if(['push','pull'].includes(shortcut))positionals.splice(1,0,defaultMachine());
     if(shortcut==='push'&&positionals.length===3&&(await lstat(positionals[2])).isDirectory())positionals.push('.');
@@ -506,6 +515,20 @@ async function main(){
       result={...result,machine};
       if(terminal.has(result.state))process.exitCode=result.state==='TIMED_OUT'?124:result.state==='CANCELED'?130:Number.isInteger(result.exitCode)?Math.min(255,Math.max(0,result.exitCode)):result.signal?Math.min(255,128+result.signal):result.state==='SUCCEEDED'?0:1;
       else if(result.state==='UNKNOWN')process.exitCode=3;
+    }else if(command==='project'&&['copy','copy-status','copy-cancel'].includes(positionals[1])){
+      const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='copy'?['from','to','release','key']:[])];
+      if(training.length||options.datasets.length||options.machines.length||positionals.length!==3||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: project copy NAME --from SOURCE --to TARGET --release HASH | project copy-status|copy-cancel COPY_ID');
+      const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+      if(action==='copy'){
+        const from=machineName(options.from),machine=machineName(options.to),project=projectSlug(positionals[2]),key=options.key||randomUUID();
+        if(from===machine||![from,machine].every(id=>state.machines.some(m=>m.id===id))||!uuid.test(key)||!/^[a-f0-9]{64}$/.test(options.release||''))fail('Specify authorized, different --from/--to, a full --release hash and a UUID --key');
+        process.stderr.write('项目复制重试键：'+key+'（响应不明时保留，不要换键）\n');
+        result=(await call('projects.replicate',{from,machine,project,release:options.release,key})).result;
+      }else{
+        if(!uuid.test(positionals[2]))fail('Use the complete project copy UUID');
+        result=(await call('projects.replication.'+(action==='copy-status'?'status':'cancel'),{id:positionals[2]})).result;
+      }
+      if(['FAILED','CANCELED'].includes(result.state))process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
     }else if(command==='project'&&['list','quota','create','use','status','publish'].includes(positionals[1])){
       if(options.legacy)fail('Project commands do not accept --legacy');
       const action=positionals[1],machine=defaultMachine();
@@ -634,9 +657,13 @@ async function main(){
       if(action==='unregister'||byOperation){result={...result,machine};if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;}
     }else if(command==='run'&&positionals.length===2){
       if(options.as)fail('--as cannot be used for real execution');
-      if(positionals[1]==='auto')fail('请手选服务器：gpuctl use MACHINE_ID；GPU 数量由 -g 指定，在该机内自动分配');
+      const automatic=positionals[1]==='auto';
+      if(options.candidates!==undefined&&!automatic)fail('--candidates requires --machine auto');
       if(!training.length)fail('Put the training command after --');
-      const context=projectArgs(positionals[1]);
+      const developmentMachine=automatic?selectedMachine():positionals[1],context=projectArgs(developmentMachine);
+      if(automatic&&!context.project)fail('自动选机需要已发布的个人容器项目；先选择开发服务器和项目。旧工作区请手选服务器。');
+      const candidates=options.candidates?.split(',').map(machineName);
+      if(candidates&&(!candidates.length||new Set(candidates).size!==candidates.length||candidates.some(id=>!state.machines.some(m=>m.id===id))))fail('--candidates must list unique authorized server IDs separated by commas');
       if(options.release&&!context.project)fail('--release requires a selected project');
       if(options.sync&&!context.project)fail('run --sync requires a selected project; use gpuctl project create/use first');
       const key=options.key||randomUUID();process.stderr.write(`Submission key: ${key}\n`);
@@ -647,16 +674,16 @@ async function main(){
       const placement=placementKeys.some(k=>Object.hasOwn(options,k))?gpuPlacement({gpuIndices:indices,shared:options.share===true,...(options['vram-mib']?{vramMiB:Number(options['vram-mib'])}:{}),hami:options.hami===true,...(options['sm-percent']?{smPercent:Number(options['sm-percent'])}:{})},cards,elastic,scheduling,options.priority):null;
       if(options.description!==undefined&&state.taskMetadata?.version!==1)fail('当前后台尚未支持任务描述；不会忽略你填写的内容。');
       if(context.project){
-        if(options.sync)context.release=await synchronizeProjectRun(call,{machine:positionals[1],project:context.project,directory:options['sync-dir']||process.cwd()});
+        if(options.sync)context.release=await synchronizeProjectRun(call,{machine:developmentMachine,project:context.project,directory:options['sync-dir']||process.cwd()});
         else{
-          const current=(await call('projects.status',{machine:positionals[1],project:context.project})).result;
+          const current=(await call('projects.status',{machine:developmentMachine,project:context.project})).result;
           const release=options.release||current.latestReadyRelease;
           if(!release||!/^[a-f0-9]{64}$/.test(release)||!current.releases?.some(r=>r.release===release&&r.state==='READY'))fail('项目还没有指定的 READY 版本。先执行 gpuctl project publish，再用 gpuctl project status 确认；run 不会自动发布。');
           context.release=release;
         }
         process.stderr.write(`Project: ${context.project} · release: ${context.release}\n`);
       }
-      result=(await call('jobs.submit',{machine:positionals[1],cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{})})).result;
+      result=(await call('jobs.submit',{machine:positionals[1],...(automatic?{machineSelection:{mode:'auto',...(candidates?{candidates}:{})}}:{}),cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');
