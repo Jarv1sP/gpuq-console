@@ -4,7 +4,7 @@ export const reducedMotion=()=>matchMedia('(prefers-reduced-motion:reduce)').mat
 const phone=()=>matchMedia('(max-width:759px)').matches;
 const standard='cubic-bezier(.2,0,0,1)';
 const underLayers=new Map(),entrances=new WeakMap(),boundDialogs=new WeakSet();
-const snapshotProperties=['display','position','box-sizing','width','height','min-width','min-height','max-width','max-height','top','right','bottom','left','padding','margin','border','border-radius','background-color','background-image','color','opacity','overflow','overflow-wrap','white-space','font-family','font-size','font-weight','font-stretch','font-variant-numeric','line-height','letter-spacing','text-align','text-decoration','flex','flex-direction','flex-wrap','align-items','align-content','justify-content','gap','grid-template-columns','grid-template-rows','grid-column','grid-row','list-style','box-shadow','backdrop-filter'];
+const snapshotProperties=['display','position','box-sizing','width','height','min-width','min-height','max-width','max-height','top','right','bottom','left','padding','margin','border','border-radius','background-color','background-image','color','opacity','overflow','overflow-wrap','white-space','font-family','font-size','font-weight','font-stretch','font-variation-settings','font-variant-numeric','text-overflow','line-height','letter-spacing','text-align','text-decoration','flex','flex-direction','flex-wrap','align-items','align-content','justify-content','gap','grid-template-columns','grid-template-rows','grid-column','grid-row','list-style','box-shadow','backdrop-filter'];
 
 function cleanClone(element){
   const clone=element.cloneNode(true);
@@ -69,15 +69,16 @@ export function dismissReveal(dialog,element=dialog){
   clone.style.position='absolute';clone.style.left=rect.left+'px';clone.style.top=rect.top+'px';clone.style.width=rect.width+'px';clone.style.height=rect.height+'px';clone.style.margin='0';layer.append(clone);dialog.close();
   const animation=clone.animate(reducedMotion()?[{opacity:1},{opacity:0}]:[{clipPath:'inset(0)'},{clipPath:'inset(100% 0 0 0)'}],{duration:reducedMotion()?150:220,easing:'cubic-bezier(.4,0,1,1)'});retire(layer,animation);return animation;
 }
-export function sharedObject(source,target){
+export function sharedObject(source,target,{uniformScale=false}={}){
   if(!source||!target)return;
   const saved=source.element?source:captureObject(source);if(!saved)return;
   const from=saved.rect,to=target.getBoundingClientRect();
   if(!from.width||!from.height||!to.width||!to.height)return;
   const reduce=reducedMotion();
   if(reduce){target.animate([{opacity:.4},{opacity:1}],{duration:150,easing:'linear'});return;}
-  const clone=cleanClone(saved.element),layer=animationLayer();clone.classList.add('flip-ghost');clone.style.font=saved.font;clone.style.color=saved.color;
+  const clone=cleanClone(saved.element),layer=animationLayer();clone.classList.add('flip-ghost');if(saved.font)clone.style.font=saved.font;clone.style.color=saved.color;
   clone.style.position='absolute';clone.style.left=from.left+'px';clone.style.top=from.top+'px';clone.style.width=from.width+'px';clone.style.height=from.height+'px';clone.style.transformOrigin='0 0';layer.append(clone);
-  retire(layer,clone.animate([{transform:'none',opacity:1},{transform:`translate(${to.left-from.left}px,${to.top-from.top}px) scale(${to.width/from.width},${to.height/from.height})`,opacity:0}],{duration:320,easing:standard}));
+  const scaleY=to.height/from.height,scaleX=uniformScale?scaleY:to.width/from.width;
+  retire(layer,clone.animate([{transform:'none',opacity:1},{transform:`translate(${to.left-from.left}px,${to.top-from.top}px) scale(${scaleX},${scaleY})`,opacity:0}],{duration:320,easing:standard}));
   target.animate([{opacity:.4},{opacity:1}],{duration:320,easing:standard});
 }

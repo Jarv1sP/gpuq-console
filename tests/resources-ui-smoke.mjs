@@ -87,7 +87,7 @@ try{
   assert.equal(await page.locator('.resource-chassis-bays .resource-tower').count(),8);
   assert.equal(await page.locator('.resource-chassis-linework .chassis-perforation circle').count()>0,true);
   assert.equal(await page.locator('.resource-mini-fleet .resource-card').count(),3);
-  assert.equal(await page.locator('.resource-identity').textContent(),'GPU-1');
+  assert.equal(await page.locator('.resource-identity').textContent(),MACHINES[0].id);
   assert.equal(await page.locator('#page-description').textContent(),'');
   assert.equal(await page.locator('.resource-process-list').getAttribute('open'),null);
   assert.equal(await page.locator('.resource-previous:not([hidden])').count(),0);
@@ -179,8 +179,12 @@ try{
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   for(const width of [390,320]){
     await page.setViewportSize({width,height:844});
-    const bay=await page.locator('[data-resource-card="0"]').evaluate(element=>({width:element.offsetWidth,height:element.offsetHeight}));
-    assert.ok(bay.width>=44&&bay.height>=44,`The visible hardware bays retain 44px tap targets at ${width}px: ${JSON.stringify(bay)}`);
+    const bays=await page.locator('.resource-chassis-bays [data-resource-card]').evaluateAll(elements=>elements.map(element=>{const box=element.getBoundingClientRect();return {left:box.left,right:box.right,height:element.offsetHeight};}));
+    assert.equal(bays.length,MACHINES[0].cards);
+    assert.ok(bays.every(bay=>bay.left>=0&&bay.right<=width&&bay.height>=44),`Every card must stay visible together, with 44px target height, at ${width}px: ${JSON.stringify(bays)}`);
+    const readouts=await page.locator('.resource-portrait-utils>span').evaluateAll(elements=>elements.map(element=>{const box=element.getBoundingClientRect();return {left:box.left,right:box.right,width:element.scrollWidth,available:element.clientWidth};}));
+    assert.equal(readouts.length,MACHINES[0].cards);
+    assert.ok(readouts.every(readout=>readout.left>=0&&readout.right<=width&&readout.width<=readout.available+1),'All eight utilization readings must fit without horizontal scrolling');
     for(const id of ['memory','sample','quota']){
       const tip=page.locator(`[data-resource-info="${id}"]`);await tip.locator(':scope > summary').click();
       const box=await tip.locator('.resource-info-content').boundingBox();

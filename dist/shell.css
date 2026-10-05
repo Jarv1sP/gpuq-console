@@ -24,6 +24,15 @@
 }
 .object-transition-layer{position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;padding:0;border:0;background:transparent;overflow:clip;pointer-events:none;z-index:60}.object-transition-layer::backdrop{background:transparent;pointer-events:none}.object-transition-layer>*{pointer-events:none!important}.sb .flip-ghost{color:var(--ink);background:var(--bg);border:0;box-shadow:none}.sb .exiting-layer{position:absolute!important;display:flex!important}
 .sb .mc-server .slot-vram{position:absolute;width:34px;height:20px;left:-7px;bottom:7px;appearance:none;-webkit-appearance:none;transform:rotate(-90deg);border:0;border-radius:0;background:transparent}.sb .slot-vram::-webkit-progress-bar{background:transparent}.sb .slot-vram::-webkit-progress-value{background:var(--ink-3)}.sb .slot-vram::-moz-progress-bar{background:var(--ink-3)}.sb .mc-server .slot>span{position:relative;z-index:1;padding-left:3px;color:var(--ink)}
+.sb .server-id{display:inline-block;min-width:0;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;vertical-align:bottom}
+.sb .cs-server-list{flex:1;min-width:0;overflow:hidden}
+.sb .cs-server{flex:1;min-width:0;max-width:120px}
+.sb .cs-server .cs-dot,.sb .cs-server-label{flex:none}
+.sb .mc-server-head{gap:12px;min-width:0}
+.sb .mc-server-head>strong{min-width:0}
+.sb .mc-server-head>span{flex:none}
+.sb #context-machine{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb #resource-primary{max-width:280px}
 .sb .toast{left:auto;transform:none;transition:opacity 220ms linear;z-index:65}.sb .toast.visible{transform:none}
 @keyframes starbase-live{0%,100%{opacity:.32}50%{opacity:.8}}
 @keyframes starbase-inflight{to{transform:rotate(360deg)}}

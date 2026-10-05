@@ -157,3 +157,4 @@ try{
 // The existing CI entry point also runs the owner-bound Portal/CSP acceptance.
 if(!baseline)await import('./starbase-ui-smoke.mjs');
 if(!baseline)await import('./resources-ui-smoke.mjs');
+if(!baseline)await import('./resource-ids-ui-smoke.mjs');
