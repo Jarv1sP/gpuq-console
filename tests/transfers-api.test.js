@@ -45,6 +45,60 @@ async function fixture(t){
   return {calls,nodes,member,admin,get service(){return service;},call:async(op,args)=>(await service.invoke(login.token,op,args)).result,lose:()=>{lost=true;},restart:async()=>{service.close();service=await PortalService.open(join(dir,'db'),bootstrap,undefined,bridge);login=await service.login('alice',password);}};
 }
 function copy(){return {key:randomUUID(),kind:'copy',from:MACHINES[0].id,machine:MACHINES[1].id,dataset:'shared',version:hash,name:'copied'};}
+test('administrator prepare receipts use effective permissions for same-owner transfer status and list',async t=>{
+  const f=await fixture(t),from=MACHINES[0].id,machine=MACHINES[1].id;
+  // Promotion retains an old member quota record. The administrator's
+  // effective grant is deliberately not written into that persisted record.
+  const raw=f.service.store.users.find(u=>u.id==='builtin-admin');
+  raw.limits={[machine]:2};raw.total=2;
+  assert.equal(f.service.store.get(raw.id).limits[from],MACHINES[0].cards);
+  const bridge=f.service.bridge;
+  f.service.bridge=async(host,operation,args)=>{
+    if(operation==='transfers.capabilities')return {protocol:'lan-transfer-v1',enabled:true,sourceReady:true,sources:[from]};
+    if(operation==='datasets.list')return {datasets:host===from?[{dataset:'logical-data',ownerIds:[raw.id],versions:[{version:hash,state:'READY',canPrepare:true,bytes:30,files:2}]}]:[]};
+    if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:args.dataset==='physical-replica'&&[...f.nodes.values()].some(v=>v.state==='SUCCEEDED')?'READY':'REGISTERED'};
+    return bridge(host,operation,args);
+  };
+  const prepared=(await f.service.invoke(f.admin.token,'datasets.prepare',{machine,dataset:'logical-data',version:hash})).result;
+  assert.equal(prepared.state,'PREPARING');assert.match(prepared.transferId,/^[a-f0-9-]{36}$/);
+  const status=async()=>(await f.service.invoke(f.admin.token,'transfers.status',{id:prepared.transferId})).result;
+  assert.equal((await status()).state,'RUNNING');
+  const node=f.nodes.get(prepared.transferId);Object.assign(node,{state:'SUCCEEDED',dataset:'physical-replica',version:hash});
+  const complete=await status();assert.equal(complete.state,'SUCCEEDED');assert.equal(complete.result.dataset,'physical-replica');
+  const listed=(await f.service.invoke(f.admin.token,'transfers.list',{})).result.transfers;
+  assert.equal(listed.find(row=>row.id===prepared.transferId).state,'SUCCEEDED');
+  assert.equal((await f.service.invoke(f.admin.token,'datasets.status',{machine,dataset:'logical-data',version:hash})).result.state,'READY');
+  assert.equal(f.calls.filter(c=>c.op==='transfers.start').length,1);
+  assert.equal(f.calls.filter(c=>c.op==='transfers.source.prepare').length,1);
+  assert.deepEqual(raw.limits,{[machine]:2});assert.equal(raw.total,2);
+  await assert.rejects(f.call('transfers.status',{id:prepared.transferId}),e=>e.status===404);
+  await assert.rejects(f.call('transfers.cancel',{id:prepared.transferId}),e=>e.status===404);
+});
+test('effective transfer authorization still rejects source revocation, demotion and disabled owners',async t=>{
+  const f=await fixture(t),args=copy(),row=await f.call('transfers.create',args);
+  f.service.store.users.find(u=>u.id===f.member.id).limits[args.from]=0;
+  await assert.rejects(f.call('transfers.status',{id:row.id}),e=>e.status===403);
+  await assert.rejects(f.call('transfers.cancel',{id:row.id}),e=>e.status===403);
+  const raw=f.service.store.users.find(u=>u.id==='builtin-admin');raw.limits={[args.machine]:1};
+  const own=(await f.service.invoke(f.admin.token,'transfers.create',copy())).result;
+  raw.role='member';
+  await assert.rejects(transferCall(f.service,{userId:raw.id,username:raw.username,role:'member'},'transfers.status',{id:own.id}),e=>e.status===403);
+  raw.role='admin';raw.enabled=false;
+  await assert.rejects(transferCall(f.service,{userId:raw.id,username:raw.username,role:'admin'},'transfers.status',{id:own.id}),e=>e.status===403);
+});
+test('member transfer status retains the exact owner source archive grant without compute permission',async t=>{
+  const f=await fixture(t),args=copy(),row=await f.call('transfers.create',args);
+  f.service.store.users.find(u=>u.id===f.member.id).limits[args.from]=0;
+  let version=hash,allowed=true;
+  f.service.archiveSourceAllowed=(owner,machine,reference)=>allowed&&owner===f.member.id&&machine===args.from&&reference.dataset===args.dataset&&reference.version===version;
+  assert.equal((await f.call('transfers.status',{id:row.id})).state,'RUNNING');
+  await assert.rejects(f.service.invoke(f.admin.token,'transfers.status',{id:row.id}),e=>e.status===404);
+  version='b'.repeat(64);
+  await assert.rejects(f.call('transfers.status',{id:row.id}),e=>e.status===403);
+  version=hash;allowed=false;
+  await assert.rejects(f.call('transfers.status',{id:row.id}),e=>e.status===403);
+  assert.equal(f.calls.filter(c=>c.op==='transfers.start').length,1);
+});
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};}
 async function promptly(promise){let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Global control queue was blocked by transfer I/O')),1000);})]);}finally{clearTimeout(timer);}}
 test('cache download refusal is a fixed FAILED reason retained by status list and restart',async t=>{

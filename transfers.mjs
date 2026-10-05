@@ -97,7 +97,9 @@ function pinnedSnapshot(service,principal,operation,args,row){
 function access(service,principal,row){
   if(row.owner_id!==principal.userId)fail('传输不存在或属于其他账号。',404);
   const user=service.store.users.find(u=>u.id===principal.userId);if(!user?.enabled)fail('账号已暂停。',403);
-  authorizedCopy(service,user,row.data);
+  // Match create/prepare: stored member quotas are not an admin's effective
+  // machine grants. Ownership and the current enabled account remain required.
+  authorizedCopy(service,service.store.get(principal.userId),row.data);
 }
 function releaseConfirmation(row,value){
   const data=row.data,keys=['schema','id','userId','sourceMachine','targetMachine','reference','manifestSha256','attempt','state','confirmedStopped'];
