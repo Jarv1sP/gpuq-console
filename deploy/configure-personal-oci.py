@@ -49,6 +49,7 @@ def plan(base_image, cdi_raw):
             'runtimeSHA256': binaries['/usr/bin/crun'], 'cdiSHA256': sha(cdi_raw)}
     manifest = {'schema':1,'phase':'DRY_RUN','personalOciCandidate':node,'binariesSHA256':binaries,
                 'engineSHA256':sha(o.ENGINE_RAW),'gpuUUIDs':selected,
+                'signaturePolicySHA256':sha(o.signature_policy_raw(base_image)),
                 'featuresEnabled':False,'packagesInstalled':False,'servicesStarted':False,'mountsChanged':False}
     manifest['planSHA256'] = sha(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode())
     return manifest
@@ -59,7 +60,7 @@ def execute(base_image, cdi_raw, approved):
     o.need(Path('/etc/gpuq-console-maintenance').is_file(), 'Persistent maintenance fence is required')
     value = plan(base_image,cdi_raw)
     o.need(value['planSHA256']==approved, 'Approved OCI dependency plan changed')
-    for path in (CONTROL,o.ENGINE,o.CDI,o.HOOKS):
+    for path in (CONTROL,o.ENGINE,o.CDI,o.HOOKS,o.SIGNATURE_POLICY):
         o.need(not path.exists() and not path.is_symlink(), 'OCI control path already exists; partial installation must not replay')
     for path in (o.ENGINE.parent,o.CDI.parent):
         q.protected_directory(path)
@@ -70,6 +71,7 @@ def execute(base_image, cdi_raw, approved):
     q.put_new(CONTROL/'intent.json',json.dumps(value,sort_keys=True).encode(),0o600)
     q.protected_directory(o.HOOKS)
     q.put_new(o.ENGINE,o.ENGINE_RAW,0o644)
+    q.put_new(o.SIGNATURE_POLICY,o.signature_policy_raw(base_image),0o444)
     q.put_new(o.CDI,cdi_raw,0o644)
     value['phase']='OCI_CONTROLS_INSTALLED_FEATURE_DISABLED'
     q.put_new(CONTROL/'receipt.json',json.dumps(value,sort_keys=True).encode(),0o600)
