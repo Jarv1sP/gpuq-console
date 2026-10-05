@@ -42,7 +42,7 @@ test('browser protocol resumes only confirmed offsets, handles empty files and w
   const content=randomBytes(CHUNK_BYTES+5),scan=await scanBrowserDirectory([selectedFile('data.bin',content),selectedFile('zero','')]),calls=[],progress=[];
   let state='RECEIVING_MANIFEST',manifest=Buffer.alloc(0),stored=Buffer.from(content.subarray(0,17)),zero=false;
   const call=async(operation,args)=>{
-    calls.push({operation,args});const action=operation.split('.').at(-1),common={uploadId:'upload-test',name:'mine',state,manifestOffset:manifest.length};
+    calls.push({operation,args});const action=operation.split('.').at(-1),common={uploadId:'upload-test',name:'mine',state,manifestOffset:manifest.length,totalBytes:scan.totalBytes,entries:scan.entries};
     if(action==='begin')return common;
     assert.equal(args.uploadId,'upload-test');assert.equal(args.machine,'gpu-1');
     if(action==='manifest'){assert.equal(args.offset,manifest.length);manifest=Buffer.concat([manifest,Buffer.from(args.data,'base64')]);return {...common,offset:manifest.length};}
@@ -66,13 +66,13 @@ test('abort after an in-flight response prevents all subsequent requests and cal
 test('large manifests cross the HTTP chunk boundary without a 4096 entry ceiling',async()=>{
   const files=Array.from({length:5000},(_,i)=>({path:String(i).padStart(5,'0')+'x'.repeat(200),size:0,sha256:digest('')})),manifest=manifestBlob([],files);
   assert.ok(manifest.size>CHUNK_BYTES);const scan={manifest,manifestSha256:await hashBlob(manifest),files:[],paths:new Map(),entries:files.length,totalBytes:0};let bytes=Buffer.alloc(0),chunks=0;
-  const call=async(operation,args)=>{if(operation.endsWith('.begin')){assert.equal(args.entries,5000);return {uploadId:'large',state:'RECEIVING_MANIFEST',manifestOffset:0};}if(operation.endsWith('.manifest')){const next=Buffer.from(args.data,'base64');assert.ok(next.length<=CHUNK_BYTES);assert.equal(args.offset,bytes.length);bytes=Buffer.concat([bytes,next]);chunks++;return {offset:bytes.length};}if(operation.endsWith('.seal'))return {uploadId:'large',state:'READY',dataset:'u-user-large',version:digest(bytes)};throw Error(operation);};
+  const call=async(operation,args)=>{if(operation.endsWith('.begin')){assert.equal(args.entries,5000);return {uploadId:'large',state:'RECEIVING_MANIFEST',manifestOffset:0};}if(operation.endsWith('.manifest')){const next=Buffer.from(args.data,'base64');assert.ok(next.length<=CHUNK_BYTES);assert.equal(args.offset,bytes.length);bytes=Buffer.concat([bytes,next]);chunks++;return {offset:bytes.length};}if(operation.endsWith('.seal')||operation.endsWith('.status'))return {uploadId:'large',state:'READY',dataset:'u-user-large',version:digest(bytes),totalBytes:scan.totalBytes,entries:scan.entries};throw Error(operation);};
   assert.equal((await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'large',scan})).state,'READY');assert.ok(chunks>1);assert.equal(digest(bytes),scan.manifestSha256);assert.equal(JSON.parse(bytes).files.length,5000);
 });
 test('discard restart persists its replacement key before creating the next upload and reuses it',async()=>{
   const scan=await scanBrowserDirectory([selectedFile('a','content')]),keys=new Map(),base=uploadKey('one','gpu-1','mine',scan.manifestSha256),seen=[];
   const keyStore={get:key=>keys.get(key),set:(key,value)=>keys.set(key,value)};
-  const call=async(operation,args)=>{assert.ok(operation.endsWith('.begin'));seen.push(args.key);if(args.key===base)return {state:'DISCARDED',uploadId:'old'};assert.equal(keys.get(base),args.key);assert.equal('uploadId' in args,false);return {state:'READY',uploadId:'new',dataset:'u-user-mine',version:'b'.repeat(64)};};
+  const call=async(operation,args)=>{if(operation.endsWith('.status')){assert.equal(args.uploadId,'new');return {state:'READY',uploadId:'new',dataset:'u-user-mine',version:'b'.repeat(64),totalBytes:scan.totalBytes,entries:scan.entries};}assert.ok(operation.endsWith('.begin'));seen.push(args.key);if(args.key===base)return {state:'DISCARDED',uploadId:'old'};assert.equal(keys.get(base),args.key);assert.equal('uploadId' in args,false);return {state:'READY',uploadId:'new',dataset:'u-user-mine',version:'b'.repeat(64),totalBytes:scan.totalBytes,entries:scan.entries};};
   const first=await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'mine',scan,keyStore});assert.equal(first.uploadId,'new');assert.notEqual(keys.get(base),base);
   await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'mine',scan,keyStore});assert.deepEqual(seen,[base,keys.get(base),keys.get(base)]);
 });
@@ -81,21 +81,22 @@ test('failed sealing with an already complete manifest retries seal before uploa
   const call=async(operation,args)=>{const action=operation.split('.').at(-1);actions.push(action);
     if(action==='begin')return {uploadId:'retry-seal',state:'FAILED',resumeState:'RECEIVING_MANIFEST',manifestOffset:scan.manifest.size};
     if(action==='seal')return {uploadId:'retry-seal',state:'UPLOADING'};
+    if(action==='status'&&!args.path)return {state:'READY',uploadId:'retry-seal',dataset:'u-one-mine',version:'c'.repeat(64),totalBytes:scan.totalBytes,entries:scan.entries};
     if(action==='status')return {file:{...scan.files[0],offset:0,complete:false}};
     if(action==='chunk'){stored=Buffer.from(args.data,'base64');return {offset:stored.length,complete:true};}
     if(action==='commit'){assert.equal(digest(stored),scan.files[0].sha256);return {state:'READY',dataset:'u-one-mine',version:'c'.repeat(64)};}
     throw Error('Unexpected action '+action);
   };
   assert.equal((await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'mine',scan,pollMs:0})).state,'READY');
-  assert.deepEqual(actions,['begin','seal','status','chunk','commit']);
+  assert.deepEqual(actions,['begin','seal','status','chunk','commit','status']);
 });
 test('browser relay limit blocks oversized begin without consent and forwards true only',async()=>{
   const scanned=await scanBrowserDirectory([selectedFile('a','content')]),calls=[];
-  const call=async(operation,args)=>{calls.push({operation,args});return {state:'READY',uploadId:'fixture',dataset:'u-user-mine',version:'a'.repeat(64)};};
-  const base={call,userId:'one',machine:'gpu-1',name:'mine'},large={...scanned,totalBytes:LARGE_RELAY_BYTES+1};
+  let totals;const call=async(operation,args)=>{calls.push({operation,args});if(operation.endsWith('.begin'))totals={totalBytes:args.totalBytes,entries:args.entries};return {state:'READY',uploadId:'fixture',dataset:'u-user-mine',version:'a'.repeat(64),...totals};};
+  const base={call,userId:'one',machine:'gpu-1',name:'mine',via:'relay'},large={...scanned,totalBytes:LARGE_RELAY_BYTES+1};
   for(const allowRelay of [undefined,false,'true',1])await assert.rejects(uploadBrowserDataset({...base,scan:large,allowRelay}),/256 MiB/);
   assert.equal(calls.length,0,'Refusal must happen before creating a transfer');
-  await uploadBrowserDataset({...base,scan:large,allowRelay:true});assert.equal(calls.at(-1).args.allowRelay,true);
-  await uploadBrowserDataset({...base,scan:{...scanned,totalBytes:LARGE_RELAY_BYTES}});assert.equal('allowRelay' in calls.at(-1).args,false,'Exactly 256 MiB stays within the small relay allowance');
-  await uploadBrowserDataset({...base,scan:scanned,allowRelay:false});assert.equal('allowRelay' in calls.at(-1).args,false);
+  await uploadBrowserDataset({...base,scan:large,allowRelay:true});assert.equal(calls.find(c=>c.operation.endsWith('.begin')).args.allowRelay,true);
+  await uploadBrowserDataset({...base,via:'auto',scan:{...scanned,totalBytes:LARGE_RELAY_BYTES}});assert.equal('allowRelay' in calls.findLast(c=>c.operation.endsWith('.begin')).args,false,'Exactly 256 MiB stays within the small relay allowance');
+  await uploadBrowserDataset({...base,via:'auto',scan:scanned,allowRelay:false});assert.equal('allowRelay' in calls.findLast(c=>c.operation.endsWith('.begin')).args,false);
 });

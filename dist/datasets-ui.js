@@ -1,11 +1,11 @@
 import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
-import {scanBrowserDirectory,uploadBrowserDataset} from './dataset-upload.js';
+import {scanBrowserDirectory,uploadBrowserDataset,confirmedDatasetUpload} from './dataset-upload.js';
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
 import {transferUploadCall} from './transfer-upload.js';
 import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 import {infoHTML,discloseInfo,serverIdHTML,serverSelectLabel} from './workbench-ui.js';
 import {reducedMotion} from './motion-ui.js';
-import {LARGE_RELAY_BYTES,routePresentation,transferBytes,uploadPhase} from './data-route.js';
+import {LARGE_RELAY_BYTES,transferBytes,uploadPhase} from './data-route.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={READY:'本机已就绪',REGISTERED:'待准备',STAGING:'未完成，可续传',PREPARING:'准备中',FAILED:'准备失败',NOT_LOCAL:'本机没有此版本',UNKNOWN:'本机状态待确认'};
 const bytesLabel=value=>Number.isFinite(value)&&value>=0?transferBytes(value):'未知';
@@ -74,8 +74,12 @@ export function datasetRows(catalog){
   if(!rows)return `<div class="empty">${catalog?.partial?'目录未确认，请刷新。':'还没有数据集，从“添加数据”开始。'}</div>`;
   return `<div class="dataset-matrix" data-machine-count="${machines.length}" data-selected-column="${selected}" role="table" tabindex="0" aria-label="数据版本的副本位置"><div class="dataset-matrix-row dataset-matrix-heading" role="row"><span role="columnheader">数据集 · 版本</span>${machines.map(machine=>`<span class="${machine.machine===catalog.machine?'dataset-target':''}" data-machine="${esc(machine.machine)}" title="${esc(machine.machine)}" role="columnheader">${serverIdHTML(machine.machine)}${machine.machine===catalog.machine?'<small>所选服务器</small>':''}</span>`).join('')}<span role="columnheader">数据量</span></div>${rows}<div class="dataset-copy-route" hidden aria-hidden="true"><svg><path></path></svg><span></span></div></div>`;
 }
+export function uploadRouteHTML(route,machine){
+  const direct=route?.kind==='campus-direct',relay=route?.kind==='vps-relay',known=direct||relay;
+  return `<div class="dataset-route-heading"><span class="st ${known?'st-prep':'st-unk'}"><span class="g" aria-hidden="true"></span>${direct?'直传到':relay?'经门户中转':'通道未确认'}${direct&&machine?' '+serverIdHTML(machine):''}</span><span class="dataset-route-path"><span>本机</span>${relay?'<i aria-hidden="true">→</i><span>门户</span>':''}${known?'<i aria-hidden="true">→</i>'+serverIdHTML(machine||'所选服务器'):''}</span>${infoHTML(known?direct?'文件直接发送到已授权的服务器，门户只处理确认。':'文件经过门户发送到所选服务器。':'扫描目录后确认上传通道；发送文件前会显示实际路线。','实际上传路线')}</div>`;
+}
 export function datasetsUI(store,toast){
-  const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,controller=null,active=null,machineIds='';
+  const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,queryBusy=false,controller=null,active=null,machineIds='',uploadRoute=null,lastScan=null,canRelay=false;
   const actionPlaces=new WeakMap();
   const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   const current=expected=>expected===account();
@@ -147,10 +151,15 @@ export function datasetsUI(store,toast){
       if(index===current)item.setAttribute('aria-current','step');else item.removeAttribute('aria-current');
     }
   }
+  function showUploadRoute(route=uploadRoute){
+    uploadRoute=route;
+    const node=section.querySelector('#dataset-upload-route'),machine=section.querySelector('[name=dataset-machine]')?.value;
+    if(node)node.innerHTML=uploadRouteHTML(route,machine);
+  }
   function relayChoice(reset=false){
     const files=Array.from(section.querySelector('[name=dataset-directory]')?.files||[]),total=files.reduce((n,f)=>n+f.size,0),warning=section.querySelector('#dataset-relay-warning'),check=section.querySelector('[name=dataset-relay-consent]');
     if(!warning||!check)return;
-    warning.hidden=total<=LARGE_RELAY_BYTES;
+    warning.hidden=total<=LARGE_RELAY_BYTES||section.querySelector('[name=dataset-via]')?.value==='direct';
     if(reset)check.checked=false;
     section.querySelector('#dataset-relay-size').textContent=human(total);
   }
@@ -162,17 +171,18 @@ export function datasetsUI(store,toast){
   function controls(){
     serverSelectLabel(section.querySelector('[name=dataset-machine]'));
     restoreMaintenanceControls(section);relayChoice();
-    const enabled=store.production&&store.principal&&(store.data?.machines||[]).length,blocked=busy||uploadBusy||discardBusy||workspace.busy;
+    const enabled=store.production&&store.principal&&(store.data?.machines||[]).length,blocked=busy||uploadBusy||discardBusy||queryBusy||workspace.busy;
     for(const selector of ['#datasets-refresh','[name=dataset-machine]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||blocked;}
-    for(const selector of ['#dataset-upload-start','[name=dataset-name]','[name=dataset-directory]','[name=dataset-relay-consent]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||uploadBusy||discardBusy||workspace.busy||active?.state==='DISCARDING';}
-    for(const node of section.querySelectorAll('[data-dataset-source],#dataset-organize-next'))node.disabled=!enabled||uploadBusy||discardBusy||workspace.busy;
+    for(const selector of ['#dataset-upload-start','[name=dataset-name]','[name=dataset-directory]','[name=dataset-relay-consent]','[name=dataset-via]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||uploadBusy||discardBusy||queryBusy||workspace.busy||active?.state==='DISCARDING';}
+    for(const node of section.querySelectorAll('[data-dataset-source],#dataset-organize-next'))node.disabled=!enabled||uploadBusy||discardBusy||queryBusy||workspace.busy;
     const pause=section.querySelector('#dataset-upload-pause'),discard=section.querySelector('#dataset-upload-discard');if(pause)pause.hidden=!uploadBusy;if(discard)discard.hidden=uploadBusy||!active?.uploadId||['READY','DISCARDED'].includes(active.state);
+    for(const id of ['dataset-upload-query','dataset-upload-retry-direct','dataset-upload-relay']){const node=section.querySelector('#'+id);if(node){node.disabled=!enabled||blocked;node.hidden=id==='dataset-upload-query'?!active?.uploadId||active.state==='READY':id==='dataset-upload-relay'?!canRelay:!active?.directFailed;}}
     workspace.controls();
     cloud.controls();
-    disableMaintenanceControls(section,'#dataset-upload-start,#dataset-upload-discard,[data-prepare-dataset],[data-retry-archive]',maintenanceFor(store.data?.operationalMaintenance,section.querySelector('[name=dataset-machine]')?.value));
+    disableMaintenanceControls(section,'#dataset-upload-start,#dataset-upload-discard,#dataset-upload-retry-direct,#dataset-upload-relay,[data-prepare-dataset],[data-retry-archive]',maintenanceFor(store.data?.operationalMaintenance,section.querySelector('[name=dataset-machine]')?.value));
   }
   document.addEventListener('gpuq-maintenance-state',()=>{if(section.children.length)controls();});
-  store.onAuthChange?.(()=>{cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
+  store.onAuthChange?.(()=>{cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;lastScan=null;uploadRoute=null;canRelay=false;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
   async function load(){
     if(busy||uploadBusy||discardBusy||!store.principal)return;
     const machine=section.querySelector('[name=dataset-machine]')?.value;if(!machine)return;
@@ -185,29 +195,42 @@ export function datasetsUI(store,toast){
     ]);}
     finally{if(token===generation){busy=false;controls();}}
   }
-  section.addEventListener('change',e=>{if(e.target.name==='dataset-machine'){workspace.reset();document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));active=null;relayChoice(true);phase();section.querySelector('#data-workspace-files-list').replaceChildren();section.querySelector('#data-workspace-status').textContent='已切换服务器';section.querySelector('#dataset-upload-status').textContent='选择一个目录。';controls();load();}if(e.target.name==='dataset-directory'){const files=Array.from(e.target.files||[]),status=section.querySelector('#dataset-upload-status');relayChoice(true);phase();status.textContent=files.length?`已选择 ${files.length.toLocaleString('en-US')} 个文件 · ${human(files.reduce((n,f)=>n+f.size,0))}。`:'请选择目录。';}});
+  section.addEventListener('change',e=>{
+    if(e.target.name==='dataset-machine'){
+      workspace.reset();document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));active=null;lastScan=null;canRelay=false;showUploadRoute(null);relayChoice(true);phase();
+      section.querySelector('#data-workspace-files-list').replaceChildren();section.querySelector('#data-workspace-status').textContent='已切换服务器';section.querySelector('#dataset-upload-status').textContent='选择一个目录。';controls();load();
+    }
+    if(e.target.name==='dataset-directory'){
+      active=null;lastScan=null;canRelay=false;showUploadRoute(null);relayChoice(true);phase();
+      const files=Array.from(section.querySelector('[name=dataset-directory]').files||[]),status=section.querySelector('#dataset-upload-status');
+      section.querySelector('#dataset-directory-selection').textContent=files.length?`已选 ${files.length.toLocaleString('zh-CN')} 个文件 · 共 ${human(files.reduce((n,f)=>n+f.size,0))}`:'尚未选择';
+      status.textContent=files.length?`已选择 ${files.length.toLocaleString('en-US')} 个文件 · ${human(files.reduce((n,f)=>n+f.size,0))}`:'请选择目录。';controls();
+    }
+    if(e.target.name==='dataset-via'){relayChoice(true);showUploadRoute(e.target.value==='relay'?{kind:'vps-relay'}:null);}
+  });
+  section.addEventListener('input',e=>{if(e.target.name==='dataset-name'){active=null;lastScan=null;canRelay=false;showUploadRoute(null);phase();controls();}});
   section.addEventListener('submit',async e=>{
-    if(e.target.id!=='dataset-upload-form')return;e.preventDefault();if(uploadBusy||discardBusy||workspace.busy||!store.production||!store.principal)return;
+    if(e.target.id!=='dataset-upload-form')return;e.preventDefault();if(uploadBusy||discardBusy||queryBusy||workspace.busy||!store.production||!store.principal)return;
     const form=e.target,machine=section.querySelector('[name=dataset-machine]').value,name=form.elements['dataset-name'].value.trim(),files=form.elements['dataset-directory'].files,expected=account(),userId=store.principal.userId;
     if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name)){toast('名称需为 1–40 位字母、数字、下划线或连字符。');return;}
     if(!files?.length){toast('请先选择包含文件的目录。');return;}
-    if(Array.from(files).reduce((n,f)=>n+f.size,0)>LARGE_RELAY_BYTES&&!form.elements['dataset-relay-consent'].checked){
-      toast('当前网页使用 VPS 中转。请确认大文件传输，或改用命令行检测直传通道。');
-      form.elements['dataset-relay-consent'].focus();return;
+    const via=form.elements['dataset-via'].value==='automatic'?'auto':form.elements['dataset-via'].value,allowRelay=form.elements['dataset-relay-consent'].checked===true;
+    if(via==='relay'&&Array.from(files).reduce((n,f)=>n+f.size,0)>LARGE_RELAY_BYTES&&!allowRelay){
+      toast('请先确认大文件经门户中转。');form.elements['dataset-relay-consent'].focus();return;
     }
-    controller=new AbortController();const signal=controller.signal;uploadBusy=true;active=null;controls();
+    controller=new AbortController();const signal=controller.signal;uploadBusy=true;canRelay=false;controls();
     const status=section.querySelector('#dataset-upload-status'),progress=section.querySelector('#dataset-upload-progress');progress.hidden=false;progress.removeAttribute('value');
     const check=()=>{if(!current(expected)||signal.aborted)throw Error('上传已暂停；选择同一目录可继续。');};
-    const report=value=>{check();if(value.uploadId)active={...value,machine};phase(value.state);const labels={HASHING:'计算文件校验值',RECEIVING_MANIFEST:'上传目录清单',SEALING:'校验目录清单',UPLOADING:'上传文件',PUBLISHING:'服务器完整校验',READY:'本机已就绪'};status.textContent=`${machine} · ${labels[value.state]||value.state}${value.path?' · '+value.path:''}${value.bytes!==undefined?' · '+human(value.bytes)+' / '+human(value.totalBytes):''}`;if(value.bytes!==undefined&&value.totalBytes>0){progress.max=value.totalBytes;progress.value=value.bytes;}else progress.removeAttribute('value');};
+    const report=value=>{check();if(value.uploadId)active={...value,machine,name,manifestSha256:lastScan?.manifestSha256,totalBytes:lastScan?.totalBytes,entries:lastScan?.entries};phase(value.state);const labels={HASHING:'计算文件校验值',RECEIVING_MANIFEST:'上传目录清单',SEALING:'校验目录清单',UPLOADING:'上传文件',PUBLISHING:'服务器完整校验',READY:'可用于训练',FAILED:'上传失败',UNKNOWN:'未确认'};status.dataset.state=value.state;status.textContent=`${labels[value.state]||'未确认'}${value.path?' · '+value.path:''}${value.bytes!==undefined?' · '+human(value.bytes)+' / '+human(value.totalBytes):''}`;if(value.bytes!==undefined&&value.totalBytes>0){progress.max=value.totalBytes;progress.value=value.bytes;}else progress.removeAttribute('value');};
     try{
       status.textContent=machine+' · 正在读取目录…';
-      const scan=await scanBrowserDirectory(files,{signal,onProgress:report});check();
-      const keyStore={get:key=>{try{return localStorage.getItem('gpuq.dataset-upload.'+key);}catch{return null;}},set:(key,value)=>{try{localStorage.setItem('gpuq.dataset-upload.'+key,value);}catch{throw Error('浏览器无法保存续传标识，请允许本站本地存储或使用 CLI。');}}};
+      const scan=await scanBrowserDirectory(files,{signal,onProgress:report});check();lastScan=scan;
+      const keyStore={getHandle:key=>{try{return JSON.parse(localStorage.getItem('gpuq.dataset-upload.handle.'+key));}catch{return null;}},setHandle:(key,value)=>{try{localStorage.setItem('gpuq.dataset-upload.handle.'+key,JSON.stringify(value));}catch{}},get:key=>{try{return localStorage.getItem('gpuq.dataset-upload.'+key);}catch{return null;}},set:(key,value)=>{try{localStorage.setItem('gpuq.dataset-upload.'+key,value);}catch{throw Error('浏览器无法保存续传编号，请允许本站本地存储。');}}};
       const directCall=async(operation,args)=>{check();const result=await store.call(operation,args);check();return result;};
-      const call=store.data?.transfers?.version===1?transferUploadCall(directCall,row=>{status.textContent='传输 '+row.id+' · '+row.state;}):directCall;
-      const result=await uploadBrowserDataset({userId,machine,name,scan,signal,onProgress:report,keyStore,call,allowRelay:form.elements['dataset-relay-consent'].checked===true});check();
-      active={...result,machine};phase('READY');status.textContent=`${machine} · 本机已就绪 · ${result.dataset}@${result.version}`;progress.value=progress.max=1;toast('数据集上传并校验完成，可以用于训练。');
-    }catch(error){if(current(expected)){status.textContent=error.message+(active?.uploadId?' 重新点击“上传 / 继续”可检查并续传。':'');}}
+      const call=store.data?.transfers?.version===1?transferUploadCall(directCall):directCall;
+      const result=await uploadBrowserDataset({userId,machine,name,scan,signal,onProgress:report,keyStore,call,allowRelay,via,onRoute:route=>{check();showUploadRoute(route);}});check();
+      active={...result,machine};phase('READY');status.dataset.state='READY';status.textContent=`本机已就绪 · 可用于训练 · ${result.dataset}@${result.version.slice(0,12)}`;progress.value=progress.max=1;toast('数据集上传并校验完成，可以用于训练。');
+    }catch(error){if(current(expected)){status.dataset.state=signal.aborted?'PAUSED':'UNKNOWN';status.textContent=error.message;if(error.uploadId)active={...active,uploadId:error.uploadId,machine,name,manifestSha256:lastScan?.manifestSha256,totalBytes:lastScan?.totalBytes,entries:lastScan?.entries,state:'UNKNOWN',directFailed:error.code?.startsWith('DIRECT')===true};canRelay=via==='auto'&&error.canRelay===true;}}
     finally{if(current(expected)){uploadBusy=false;controller=null;controls();if(active?.state==='READY')await load();}}
   });
   section.addEventListener('click',async e=>{
@@ -216,6 +239,24 @@ export function datasetsUI(store,toast){
     if(['terminal-data-open','terminal-data-reconnect'].includes(b.id))section.querySelector('#dataset-add-dialog')?.close();
     if(b.id==='dataset-organize-next'){source('workspace');section.querySelector('#dataset-source-workspace').focus();return;}
     if(b.id==='datasets-refresh'){load();return;}
+    if(b.id==='dataset-upload-query'){
+      const expected=account(),target={...active};if(!target.uploadId)return;
+      if(queryBusy||uploadBusy)return;queryBusy=true;controls();
+      try{
+        const result=await store.call('datasets.upload.status',{machine:target.machine,uploadId:target.uploadId});if(!current(expected))return;
+        const status=section.querySelector('#dataset-upload-status');
+        if(result.state==='READY'){
+          confirmedDatasetUpload(result,target);active={...target,...result};phase('READY');status.dataset.state='READY';status.textContent=`可用于训练 · ${result.dataset}@${result.version.slice(0,12)}`;canRelay=false;toast('数据集上传并校验完成，可以用于训练。');
+        }else{active={...target,state:result.state};phase(result.state);status.dataset.state=result.state;status.textContent=({PUBLISHING:'服务器完整校验中',SEALING:'校验目录清单中',UPLOADING:'上传未完成，可继续',RECEIVING_MANIFEST:'清单未传完，可继续',FAILED:'上传失败',DISCARDED:'上传已取消'}[result.state]||'未确认')+(result.error?' · '+result.error:'');}
+      }catch(error){if(current(expected)){section.querySelector('#dataset-upload-status').dataset.state='UNKNOWN';section.querySelector('#dataset-upload-status').textContent=error.message;}}
+      finally{if(current(expected)){queryBusy=false;controls();if(active?.state==='READY')await load();}}return;
+    }
+    if(b.id==='dataset-upload-retry-direct'){section.querySelector('[name=dataset-via]').value='direct';section.querySelector('#dataset-upload-form').requestSubmit();return;}
+    if(b.id==='dataset-upload-relay'){
+      const form=section.querySelector('#dataset-upload-form');form.elements['dataset-via'].value='relay';showUploadRoute({kind:'vps-relay'});relayChoice();
+      if(Array.from(form.elements['dataset-directory'].files||[]).reduce((n,f)=>n+f.size,0)>LARGE_RELAY_BYTES&&!form.elements['dataset-relay-consent'].checked){form.elements['dataset-relay-consent'].focus();return;}
+      form.requestSubmit();return;
+    }
     if(b.id==='dataset-upload-pause'){controller?.abort();return;}
     if(b.id==='dataset-upload-discard'){
       if(!active?.uploadId||uploadBusy||discardBusy)return;const expected=account(),target={...active};discardBusy=true;b.disabled=true;controls();
@@ -240,12 +281,12 @@ export function datasetsUI(store,toast){
   return ()=>{
     const machines=store.data?.machines||[];
     const next=account(),ids=JSON.stringify(machines.map(m=>m.id));
-    if(next!==identity){workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;identity=next;generation++;busy=false;machineIds='';
+    if(next!==identity){workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;identity=next;generation++;busy=false;machineIds='';
       section.classList.add('datasets-unified');
       section.innerHTML=`<nav class="data-room-tabs" aria-label="数据集内容"><a href="#datasets" aria-current="page">数据集</a><a href="#transfers">传输与导入</a></nav><div class="terminal-controls datasets-controls"><label><span>本次使用的服务器</span><select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新</button></div>
         <div class="datasets-ledger-strip"><div id="datasets-quota"></div><div id="datasets-capacity" class="datasets-capacity" role="status">${datasetCapacityHTML(null,machines[0]?.id)}</div></div>
         <section class="dataset-library hero-frame" aria-labelledby="dataset-catalog-heading"><div class="datasets-library-heading"><h3 id="dataset-catalog-heading">数据在哪里</h3>${infoHTML('操作列对应所选服务器，准备和训练都会使用这台机器。斜线表示目录未知，不能据此判断没有数据。','矩阵说明')}</div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div></section>
-        <details id="datasets-add" class="datasets-add"><summary class="button primary">添加数据 <span class="dataset-add-hint">从电脑上传，或让服务器直接下载</span></summary><dialog id="dataset-add-dialog" class="dataset-add-sheet" aria-labelledby="dataset-add-title"><header class="dataset-sheet-head"><div><p class="data-eyebrow">DATA / IMPORT</p><h2 id="dataset-add-title">添加数据</h2></div><button class="button quiet" type="button" data-dataset-add-close aria-label="关闭添加数据">关闭</button></header><div class="dataset-sheet-context"></div>
+        <details id="datasets-add" class="datasets-add"><summary class="button primary">添加数据 <span class="dataset-add-hint">从电脑上传，或让服务器直接下载</span></summary><dialog id="dataset-add-dialog" class="dataset-add-sheet" aria-labelledby="dataset-add-title"><header class="dataset-sheet-head"><div><h2 id="dataset-add-title">添加数据</h2></div><button class="button quiet" type="button" data-dataset-add-close aria-label="关闭添加数据">关闭</button></header><div class="dataset-sheet-context"></div>
         <div class="dataset-source-tabs" role="tablist" aria-label="添加数据的方式">
           <button type="button" role="tab" id="dataset-source-directory" data-dataset-source="directory" aria-controls="dataset-panel-directory" aria-selected="true"><span>本机目录</span></button>
           <button type="button" role="tab" id="dataset-source-link" data-dataset-source="link" aria-controls="dataset-panel-link" aria-selected="false" tabindex="-1"><span>下载链接</span></button>
@@ -254,13 +295,14 @@ export function datasetsUI(store,toast){
         <div id="dataset-panel-directory" data-dataset-panel="directory" role="tabpanel" aria-labelledby="dataset-source-directory">
         <form id="dataset-upload-form" aria-labelledby="dataset-upload-heading">
           <div class="dataset-upload-heading"><h3 id="dataset-upload-heading">上传一个数据集</h3><p class="muted">选择已整理好的目录。传输与校验完成后，即可用于训练。</p></div>
-          <aside class="dataset-route" aria-label="当前网页上传通道"><div class="dataset-route-heading"><span class="dataset-route-label">${routePresentation('vps-relay').label}</span><span class="dataset-route-path" aria-label="本机经过平台中转到目标服务器"><span>本机</span><i aria-hidden="true">→</i><span>平台中转</span><i aria-hidden="true">→</i><span>目标服务器</span></span></div><p>网页当前使用中转通道。大数据集建议使用 <code>gpuctl data upload</code> 检测可用直传通道，或从下载链接导入。</p></aside>
+          <aside id="dataset-upload-route" class="dataset-route" aria-label="当前网页上传通道">${uploadRouteHTML(null)}</aside>
+          <label class="field dataset-route-choice">上传通道 ${infoHTML('自动优先使用已授权直传；直传连接失败不会自动中转。大于 256 MiB 的中转需要额外确认。','上传通道说明')}<select name="dataset-via"><option value="automatic">自动 · 优先直传</option><option value="direct">只用直传</option><option value="relay">经门户中转</option></select></label>
           <div class="dataset-upload-fields">
-            <label class="field">数据集名称<input name="dataset-name" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" placeholder="my-data" aria-describedby="dataset-name-help" required><small id="dataset-name-help">1–40 位字母、数字、下划线或连字符。</small></label>
-            <label class="field">本机目录<input type="file" name="dataset-directory" webkitdirectory multiple aria-describedby="dataset-directory-help"><small id="dataset-directory-help">选择整个目录；网页上传不包含空目录。</small></label>
+            <div class="field"><div class="dataset-field-label"><label for="dataset-name-input">数据集名称</label></div><input id="dataset-name-input" name="dataset-name" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" placeholder="my-data" aria-describedby="dataset-name-help" required><small id="dataset-name-help">1–40 位字母、数字、下划线或连字符。</small></div>
+            <div class="field"><div class="dataset-field-label"><label for="dataset-directory-input">本机目录</label></div><div class="dataset-directory-control"><input id="dataset-directory-input" type="file" name="dataset-directory" webkitdirectory multiple aria-label="选择文件夹" aria-describedby="dataset-directory-help dataset-directory-selection"><label id="dataset-directory-picker" class="button" for="dataset-directory-input">选择文件夹</label><span id="dataset-directory-selection" aria-live="polite">尚未选择</span></div><small id="dataset-directory-help">选择整个目录；网页上传不包含空目录。</small></div>
           </div>
-          <div id="dataset-relay-warning" class="dataset-relay-warning" hidden><label><input type="checkbox" name="dataset-relay-consent"><span>我确认通过 VPS 中转上传这 <strong id="dataset-relay-size"></strong> 数据</span></label><p>所选目录超过 256 MiB；中转带宽由所有用户共享，速度可能较慢。此确认不会开启直传。</p></div>
-          <div class="file-actions dataset-upload-actions"><button class="button primary" type="submit" id="dataset-upload-start">上传 / 继续</button><button class="button" type="button" id="dataset-upload-pause" hidden>暂停传输</button><button class="button" type="button" id="dataset-upload-discard" hidden>取消未完成上传</button></div>
+          <div id="dataset-relay-warning" class="dataset-relay-warning" hidden><label><input type="checkbox" name="dataset-relay-consent"><span>我确认经门户中转上传这 <strong id="dataset-relay-size"></strong> 数据</span></label>${infoHTML('中转带宽由所有用户共享，速度可能较慢。此确认不会开启直传，也不会在直传失败后自动切换。','大文件中转说明')}</div>
+          <div class="file-actions dataset-upload-actions"><button class="button primary" type="submit" id="dataset-upload-start">上传 / 继续</button><button class="button" type="button" id="dataset-upload-pause" hidden>暂停传输</button><button class="button quiet" type="button" id="dataset-upload-query" hidden>重新查询</button><button class="button quiet" type="button" id="dataset-upload-retry-direct" hidden>重试直传</button><button class="button quiet" type="button" id="dataset-upload-relay" hidden>同意经门户中转</button><button class="button" type="button" id="dataset-upload-discard" hidden>取消未完成上传</button></div>
           <div class="dataset-upload-feedback"><ol class="dataset-upload-phases" aria-label="上传阶段"><li data-upload-phase="scan" data-status="pending">扫描</li><li data-upload-phase="transfer" data-status="pending">传输</li><li data-upload-phase="verify" data-status="pending">校验</li><li data-upload-phase="ready" data-status="pending">就绪</li></ol><progress id="dataset-upload-progress" aria-label="数据集上传进度" hidden></progress><p id="dataset-upload-status" role="status">选择一个目录。</p></div>
           <div class="dataset-upload-notes"><p class="muted">关闭页面会暂停传输；重新选择同一目录可继续。已开始的服务器校验不受影响。</p></div>
         </form></div>
@@ -268,6 +310,7 @@ export function datasetsUI(store,toast){
         <div id="dataset-panel-workspace" data-dataset-panel="workspace" role="tabpanel" aria-labelledby="dataset-source-workspace" hidden>${dataWorkspaceHTML()}</div></dialog></details>`;
       installAddSheet();
       for(const note of section.querySelectorAll('.dataset-upload-heading p,.dataset-upload-notes p,.dataset-route>p,.field>small,.data-workspace-card>p.muted,.data-workspace-terminal p.muted,#data-workspace-publish-form>p.muted,.data-workspace-footnote,.datasets-next,.cloud-import>p.muted'))discloseInfo(note,'数据操作说明');
+      for(const field of section.querySelectorAll('.dataset-upload-fields .field'))field.querySelector('.dataset-field-label').append(field.querySelector(':scope>.ui-info'));
     }
     if(ids!==machineIds){
       const select=section.querySelector('[name=dataset-machine]'),selected=select.value,changed=machineIds!=='';
@@ -279,6 +322,6 @@ export function datasetsUI(store,toast){
       if(changed){generation++;busy=false;section.querySelector('#dataset-catalog').replaceChildren();section.querySelector('#datasets-capacity').innerHTML=datasetCapacityHTML(null,select.value);section.querySelector('#datasets-status').textContent=machines.length?'机器授权已更新，请重新加载目录。':'当前没有已授权机器。';}
       machineIds=ids;
     }
-    quota();controls();
+    if(!uploadRoute)showUploadRoute();quota();controls();
   };
 }

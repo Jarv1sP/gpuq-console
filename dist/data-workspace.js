@@ -53,7 +53,7 @@ export function dataWorkspaceHTML(){
     <p class="muted">这里只有你在所选服务器上的文件。上传压缩包后，可在终端手动解压；不会自动解压或跨机同步。</p>
     <ol class="data-workspace-steps"><li>上传文件</li><li>终端整理</li><li>发布数据集</li></ol>
     <form id="data-workspace-upload-form">
-      <aside class="dataset-route" aria-label="个人数据上传通道"><div class="dataset-route-heading"><span class="dataset-route-label">VPS 中转</span><span class="dataset-route-path"><span>本机</span><i aria-hidden="true">→</i><span>平台中转</span><i aria-hidden="true">→</i><span>个人数据空间</span></span></div><p>这里上传的文件经过平台中转。大文件可改用“下载链接”，由服务器直接下载。</p></aside>
+      <aside class="dataset-route" aria-label="个人数据上传通道"><div class="dataset-route-heading"><span class="dataset-route-label">经门户中转</span><span class="dataset-route-path"><span>本机</span><i aria-hidden="true">→</i><span>平台中转</span><i aria-hidden="true">→</i><span>个人数据空间</span></span></div><p>这里上传的文件经过平台中转。大文件可改用“下载链接”，由服务器直接下载。</p></aside>
       <div class="data-workspace-fields"><label class="field">压缩包或文件<input name="data-workspace-files" type="file" multiple required><small>单个文件最多 100 GiB；不会自动解压。</small></label><label class="field">保存目录<input name="data-workspace-upload-path" value="incoming" placeholder="incoming" required><small>相对 /data2 的路径；缺少的目录会自动创建。</small></label></div>
       <label class="data-workspace-overwrite"><input type="checkbox" name="data-workspace-overwrite">覆盖所选文件在此目录里的同名文件</label>
       <div id="data-workspace-relay-warning" class="dataset-relay-warning" hidden><label><input type="checkbox" name="data-workspace-relay-consent"><span>我确认通过 VPS 中转上传这 <strong id="data-workspace-relay-size"></strong> 文件</span></label><p>所选文件合计超过 256 MiB；中转带宽由所有用户共享，速度可能较慢。</p></div>
