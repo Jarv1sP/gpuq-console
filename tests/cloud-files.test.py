@@ -66,6 +66,25 @@ class CloudFilesTests(unittest.TestCase):
         self.assertEqual(sum(r['bytes'] for r in ledger.values()),5)
         self.n.CONFIG['cloudFiles']['maxUserBytes']=5
         with self.assertRaises(ValueError):self.call('upload',key=str(uuid.uuid4()),path='source.zip')
+    def test_shared_cloud_budget_is_still_finite_without_individual_byte_caps(self):
+        self.n.CONFIG['cloudFiles'].update(maxUserBytes=0,maxTotalBytes=10,maxFileBytes=5)
+        self.assertEqual(self.c.config()['maxUserBytes'],0)
+        self.upload();self.upload()  # Same operation is charged once.
+        self.call('upload',key=str(uuid.uuid4()),path='source.zip')
+        with self.assertRaisesRegex(ValueError,'allowance'):
+            self.call('upload',key=str(uuid.uuid4()),path='source.zip')
+        ledger=self.module._read_json(self.cache.root/'.cloud-budget.json')
+        self.assertEqual(sum(row['bytes'] for row in ledger.values()),10)
+
+    def test_zero_is_only_allowed_for_cloud_personal_byte_budget(self):
+        original=dict(self.n.CONFIG['cloudFiles'])
+        for key in ('maxFileBytes','maxTotalBytes'):
+            self.n.CONFIG['cloudFiles']={**original,key:0}
+            with self.assertRaises(ValueError):self.c.config()
+        for value in (False,-1,None,'0'):
+            self.n.CONFIG['cloudFiles']={**original,'maxUserBytes':value}
+            with self.assertRaises(ValueError):self.c.config()
+
     def test_terminal_lock_blocks_upload(self):
         lock=self.c.w.lifetime(self.user)
         try:
@@ -246,6 +265,29 @@ class CloudFilesTests(unittest.TestCase):
         key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path='out.zip')
         with patch.object(self.c,'io',side_effect=io):self.assertEqual(self.c.worker(self.user,key,'1'),1)
         self.assertEqual((self.owner/'data'/'out.zip').read_bytes(),b'hello')
+    def test_download_without_personal_cap_still_reserves_physical_space(self):
+        self.c.imports.limits['maxUserBytes']=0
+        task=self.uploaded();task['state']='VERIFIED';self.c.save(task)
+        key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path='shared.zip')
+        def io(task,fd):
+            os.write(fd,b'hello');return {'id':self.key,'state':'VERIFIED','bytes':5,'sha256Verified':True,'sha256':hashlib.sha256(b'hello').hexdigest()}
+        with patch.object(self.c.imports,'usage',wraps=self.c.imports.usage) as usage:
+            with patch.object(self.c.imports,'reservation',wraps=self.c.imports.reservation) as reservation:
+                with patch.object(self.c,'io',side_effect=io):
+                    self.assertEqual(self.c.worker(self.user,key,'1'),0)
+                self.assertTrue(reservation.called)
+                usage.assert_called_once_with(self.user,key)
+        self.assertEqual((self.owner/'data'/'shared.zip').read_bytes(),b'hello')
+        key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path='full.zip')
+        with patch.object(self.c.imports,'reservation',side_effect=ValueError('Insufficient shared disk space')):
+            with patch.object(self.c,'io') as io:
+                self.assertEqual(self.c.worker(self.user,key,'1'),1);io.assert_not_called()
+        self.assertFalse((self.owner/'data'/'full.zip').exists())
+        self.c.imports.limits['maxUserEntries']=1
+        key=str(uuid.uuid4());self.call('download',key=key,fileId=self.key,path='entries.zip')
+        with patch.object(self.c,'io') as io:
+            self.assertEqual(self.c.worker(self.user,key,'1'),1);io.assert_not_called()
+        self.assertFalse((self.owner/'data'/'entries.zip').exists())
     def test_cancel_fence_and_stale_generation(self):
         self.upload();self.call('cancel',operationId=self.key)
         with patch.object(self.c,'io') as io:

@@ -50,9 +50,9 @@ class CloudFiles:
             if not isinstance(c[key], str) or not c[key].startswith('/') or '..' in Path(c[key]).parts:
                 raise ValueError('Cloud runtime paths must be installed by the administrator')
         for key in ('maxFileBytes', 'maxUserBytes', 'maxTotalBytes'):
-            if type(c[key]) is not int or not 1 <= c[key] <= 2**50:
+            if type(c[key]) is not int or not (0 if key == 'maxUserBytes' else 1) <= c[key] <= 2**50:
                 raise ValueError('Cloud storage limits are invalid')
-        if c['maxFileBytes'] > min(c['maxUserBytes'], c['maxTotalBytes'], 1024**4):
+        if c['maxFileBytes'] > min(c['maxUserBytes'] or c['maxTotalBytes'], c['maxTotalBytes'], 1024**4):
             raise ValueError('Cloud file limit exceeds the account limit')
         return c
 
@@ -139,7 +139,8 @@ class CloudFiles:
                 if ledger[key] != row:
                     raise ValueError('Cloud reservation identity changed')
                 return
-            if sum(v['bytes'] for v in ledger.values())+row['bytes'] > c['maxTotalBytes'] or sum(v['bytes'] for v in ledger.values() if v['userId'] == task['userId'])+row['bytes'] > c['maxUserBytes']:
+            if (sum(v['bytes'] for v in ledger.values())+row['bytes'] > c['maxTotalBytes']
+                    or c['maxUserBytes'] and sum(v['bytes'] for v in ledger.values() if v['userId'] == task['userId'])+row['bytes'] > c['maxUserBytes']):
                 raise ValueError('Cloud storage allowance exceeded; retained partial uploads count toward it')
             ledger[key] = row
             module._write_json(location, ledger)
@@ -341,14 +342,15 @@ class CloudFiles:
                 with module._directory(folder) as parent:
                     fd = os.open('payload.part', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
                 module._regular(fd)
-                used = self.imports.usage(user, key)
-                for other in self.tasks(user):
-                    if other['operationId'] != key:
-                        other_folder = self.storage(user, other['operationId'])[3]
-                        try:used += (other_folder/'payload.part').lstat().st_size
-                        except FileNotFoundError:pass
-                if used+task['totalBytes'] > self.imports.limits['maxUserBytes']:
-                    raise ValueError('Personal data storage allowance exceeded')
+                used = self.imports.usage(user, key)  # Retain entry/depth validation without a byte cap.
+                if self.imports.limits['maxUserBytes']:
+                    for other in self.tasks(user):
+                        if other['operationId'] != key:
+                            other_folder = self.storage(user, other['operationId'])[3]
+                            try:used += (other_folder/'payload.part').lstat().st_size
+                            except FileNotFoundError:pass
+                    if used+task['totalBytes'] > self.imports.limits['maxUserBytes']:
+                        raise ValueError('Personal data storage allowance exceeded')
                 self.imports.reservation(task, max(0, task['totalBytes']-os.fstat(fd).st_size)+65536)
             result = self.io(task, fd)
             if task['action'] == 'upload':

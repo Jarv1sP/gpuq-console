@@ -36,7 +36,8 @@ class DatasetUploads:
         self.d, self.cache = executor.dataset_cache()
         configured = executor.CONFIG['datasets'].get('uploads', {})
         if (not isinstance(configured, dict) or set(configured)-set(DEFAULTS)
-                or any(type(v) is not int or not 1 <= v <= 2**63-1 for v in configured.values())):
+                or any(type(v) is not int or not (0 if k == 'maxUserBytes' else 1) <= v <= 2**63-1
+                       for k, v in configured.items())):
             raise ValueError('Invalid personal dataset upload limits')
         self.limits = {**DEFAULTS, **configured}
         self.root = self.cache.root/'.uploads'
@@ -358,7 +359,10 @@ class DatasetUploads:
             reserve = args['totalBytes']+args['manifestBytes']*4+args['entries']*8192+65536
             if reserve > 2**63-1:
                 raise ValueError('Upload reservation exceeds supported size')
-            if sum(s['reserveBytes'] for s in retained)+reserve > self.limits['maxUserBytes']:
+            # An administrator may choose a shared-volume policy instead of
+            # per-member byte budgets. Physical free-space/inode reservation
+            # below remains mandatory; zero never disables those protections.
+            if self.limits['maxUserBytes'] and sum(s['reserveBytes'] for s in retained)+reserve > self.limits['maxUserBytes']:
                 raise ValueError('Personal dataset storage quota reached (including metadata allowance)')
             if sum(s['entries'] for s in retained)+args['entries'] > self.limits['maxUserEntries']:
                 raise ValueError('Personal dataset entry quota reached')
