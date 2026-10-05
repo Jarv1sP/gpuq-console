@@ -334,6 +334,23 @@ class Resources(unittest.TestCase):
         self.assertEqual(budget['jobId'], JOB['id'])
         self.assertEqual(args[-2:], ['python', 'train.py'])
 
+    def test_oci_terminal_runtime_uses_trusted_filename_without_mutating_legacy_spec(self):
+        spec={'userId':'demo-user-1','project':'vision','cards':0,'argv':['bash']}
+        runtime=S.oci_runtime_spec(spec,JOB['id'],True)
+        self.assertEqual(runtime,{**spec,'id':JOB['id']})
+        self.assertNotIn('id',spec)
+        self.assertIsNot(runtime,spec)
+
+    def test_oci_terminal_runtime_rejects_client_identity_by_using_validated_filename(self):
+        spec={'id':'untrusted-client-id','userId':'demo-user-1','cards':0}
+        runtime=S.oci_runtime_spec(spec,JOB['id'],True)
+        self.assertEqual(runtime['id'],JOB['id'])
+        self.assertEqual(spec['id'],'untrusted-client-id')
+
+    def test_oci_training_runtime_preserves_immutable_original_spec(self):
+        spec={**JOB,'userId':'demo-user-1'}
+        self.assertIs(S.oci_runtime_spec(spec,'different-id',False),spec)
+
     def test_managed_runtime_moves_raw_ray_spill_back_to_job_private_tmpfs(self):
         (args, _), _ = self.runner_command(managed_runtime=True)
         env = {args[i + 1]: args[i + 2] for i, value in enumerate(args) if value == '--setenv'}
