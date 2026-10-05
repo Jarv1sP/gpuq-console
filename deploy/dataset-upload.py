@@ -494,7 +494,7 @@ class DatasetUploads:
     def confirm_route(self, session, transport):
         # Only a trusted ingress selects this value, after accepted data I/O.
         # Persist once per route change, not on every chunk or status request.
-        if transport not in ('campus-direct', 'vps-relay'):
+        if transport not in ('campus-direct', 'lan-peer', 'vps-relay'):
             raise ValueError('Invalid trusted upload transport')
         if session.get('lastConfirmedRoute') != transport:
             session['lastConfirmedRoute'] = transport

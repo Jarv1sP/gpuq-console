@@ -90,6 +90,61 @@ class Transfers(unittest.TestCase):
         proof=self.dst.process('transfers.confirm-source-release',self.control())
         self.assertTrue(self.src.process('transfers.release-source',{**self.control(),'confirmation':proof})['released'])
         self.assertEqual(self.source.dataset_cache()[1]._leases('shared',self.version),[])
+    def test_large_lan_copy_does_not_enable_or_use_public_vps_relay(self):
+        # Lower only the relay boundary, not the payload/manifest/schema checks.
+        # Real pinned TLS copies >2 MiB; the ordinary RPC stays denied throughout.
+        uploads=self.target.dataset_uploads()
+        with patch.dict(uploads.relay_allowed.__globals__, {'RELAY_LIMIT_BYTES':1024}):
+            self.dst.start(self.args);spec=self.dst.load(self.key)
+            begin={k:spec['source'][k] for k in ('manifestBytes','manifestSha256','totalBytes','entries')}
+            self.dst.upload(spec,'begin',key=self.key,name=spec['name'],**begin)
+            with self.assertRaisesRegex(ValueError,'no VPS fallback'):
+                uploads.process('datasets.upload.manifest',{'userId':USER,'uploadId':self.key,'offset':0,'data':'eA=='})
+            with self.assertRaisesRegex(ValueError,'Invalid personal upload'):
+                uploads.process('datasets.upload.manifest',{'userId':USER,'uploadId':self.key,'offset':0,'data':'eA==','transport':'lan-peer'})
+            self.assertEqual(self.dst.worker(self.key,1),0)
+            result=self.dst.status(self.control());self.assertEqual(result['state'],'SUCCEEDED')
+            session=uploads.load(USER,self.key)
+            self.assertEqual(session['lastConfirmedRoute'],'lan-peer')
+            self.assertNotIn('relayAllowed',session)
+            with self.assertRaisesRegex(ValueError,'no VPS fallback'):
+                uploads.process('datasets.upload.chunk',{'userId':USER,'uploadId':self.key,'path':'sample.txt','offset':0,'data':'eA=='})
+        data=self.target.dataset_cache()[1]._paths(result['dataset'],self.version)['ready']/'data'
+        self.assertEqual((data/'sample.txt').read_bytes(),b'a'*(2*T.CHUNK+17))
+    def test_large_lan_resume_retains_same_upload_and_ordinary_admission(self):
+        uploads=self.target.dataset_uploads();original=self.dst.upload;interrupted=[False]
+        def upload(spec,action,**fields):
+            value=original(spec,action,**fields)
+            if action=='chunk' and fields['path']=='sample.txt' and not interrupted[0]:
+                interrupted[0]=True;raise ConnectionError('interrupted after acknowledged chunk')
+            return value
+        with patch.dict(uploads.relay_allowed.__globals__, {'RELAY_LIMIT_BYTES':1024}):
+            self.dst.start(self.args)
+            with patch.object(self.dst,'upload',side_effect=upload):self.assertEqual(self.dst.worker(self.key,1),1)
+            first=uploads.status(USER,{'uploadId':self.key,'path':'sample.txt'})
+            self.assertEqual(first['file']['offset'],T.CHUNK)
+            self.assertEqual(self.dst.status(self.control())['state'],'PAUSED')
+            self.dst.resume(self.control());self.assertEqual(self.dst.worker(self.key,2),0)
+            session=uploads.load(USER,self.key)
+            self.assertEqual(session['lastConfirmedRoute'],'lan-peer')
+            self.assertNotIn('archiveAdmission',session);self.assertNotIn('relayAllowed',session)
+            self.assertEqual(self.dst.status(self.control())['uploadId'],self.key)
+    def test_lan_ingress_rejects_spec_session_or_cancel_drift_before_writing(self):
+        self.dst.start(self.args);spec=self.dst.load(self.key);uploads=self.target.dataset_uploads()
+        begin={k:spec['source'][k] for k in ('manifestBytes','manifestSha256','totalBytes','entries')}
+        self.dst.upload(spec,'begin',key=self.key,name=spec['name'],**begin)
+        fields={'uploadId':self.key,'offset':0,'data':'eA=='}
+        with self.assertRaisesRegex(ValueError,'durable transfer'):
+            self.dst.upload({**spec,'name':'different'},'manifest',**fields)
+        session=uploads.load(USER,self.key);changed={**session,'totalBytes':session['totalBytes']+1};uploads.save(changed)
+        with self.assertRaisesRegex(ValueError,'Corrupt personal upload identity|immutable source'):
+            self.dst.upload(spec,'manifest',**fields)
+        uploads.save(session)
+        with self.assertRaisesRegex(ValueError,'durable transfer'):
+            self.dst.upload(spec,'manifest',**{**fields,'uploadId':str(uuid.uuid4())})
+        self.target.atomic_json(self.dst.path(self.key,'.cancel'),{})
+        with self.assertRaises(InterruptedError):self.dst.upload(spec,'manifest',**fields)
+        self.assertFalse((uploads.folder(USER,self.key)/'manifest.part').exists())
     def test_trusted_archive_real_tls_copy_with_four_retained_personal_uploads(self):
         d,cache=self.target.dataset_cache();uploads=self.target.dataset_uploads();old=[]
         for _ in range(4):
