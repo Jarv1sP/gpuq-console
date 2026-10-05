@@ -103,6 +103,11 @@ try{
       [chapterPaths[index-1],chapterPaths[index+1]].filter(Boolean));
     assert.equal(await page.locator('.guide-return').getAttribute('href'),'/');
     await noAdminLinks(page);
+    const budget=await page.evaluate(()=>[...document.querySelectorAll('.guide-prose p')].filter(node=>{
+      if(node.closest('details:not([open])'))return false;
+      const rect=node.getBoundingClientRect();return rect.bottom>0&&rect.top<innerHeight;
+    }).reduce((lines,node)=>lines+Math.ceil(node.getBoundingClientRect().height/parseFloat(getComputedStyle(node).lineHeight)),0));
+    assert.ok(budget<=(page.viewportSize().width<760?1:2),`${id}: first-screen explanations fit COPY (${budget} lines)`);
   }
 
   // Both ordinary and administrator workbenches expose the same one entry.

@@ -56,6 +56,7 @@
 .guide-prose h2{font-size:20px;font-weight:500;line-height:1.5;margin:40px 0 16px;scroll-margin-top:32px;outline:none}
 .guide-prose>h2:first-child{margin-top:0}
 .guide-prose h2:target{border-left:2px solid var(--ink);padding-left:12px}
+.guide-prose h3{font-size:16px;font-weight:500;line-height:1.5;margin:24px 0 12px}
 .guide-prose p{margin:16px 0}.guide-prose ul,.guide-prose ol{padding-left:22px;margin:16px 0}.guide-prose li{padding-left:3px;margin:8px 0}.guide-prose li::marker{color:var(--muted)}
 .guide-prose a{text-decoration:underline;text-decoration-color:#99999e;text-underline-offset:4px}
 .guide-prose code{font:12px/1.7 var(--mono);background:var(--wash);border-radius:3px;padding:2px 4px;color:var(--ink)}

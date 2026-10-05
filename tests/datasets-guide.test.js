@@ -42,6 +42,8 @@ test('guide renderer escapes raw HTML, scripts and unsafe link schemes',()=>{
   const html=renderMarkdown('### <img src=x onerror=alert(1)>\n\n**a & b** `</code><script>` [bad](javascript:alert) [file](file:///etc/passwd) [good](/guide/data)\n\n```sh\n<script>alert(1)</script>\n```');
   assert.doesNotMatch(html,/<script|<img|href="javascript|href="file:/);assert.match(html,/&lt;script&gt;/);assert.match(html,/<strong>a &amp; b<\/strong>/);assert.match(html,/href="\/guide\/data"/);
   assert.doesNotMatch(inline('[bad](//evil.example)'),/href=/);assert.doesNotMatch(inline('[bad](https:&#47;&#47;evil.example)'),/href=/);
+  const steps=renderMarkdown('#### READY 后运行 <script>\n\n! 先结束终端 <img>\n\n详细说明保留。',{condense:true});
+  assert.match(steps,/<h3>READY 后运行 &lt;script&gt;<\/h3>/);assert.match(steps,/class="guide-critical"/);assert.match(steps,/<details class="guide-explanation">/);assert.doesNotMatch(steps,/<script>|<img>/);
   assert.throws(()=>parseGuide('## Only {#start}\nmissing chapters'),/Incomplete/);assert.equal(guideTarget('/guide/admin'),null);assert.equal(guideTarget('/guide/start/../../ADMIN_README.md'),null);
 });
 test('production image includes only the reader guide, not operations manuals',async()=>{

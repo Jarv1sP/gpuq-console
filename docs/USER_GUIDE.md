@@ -113,20 +113,20 @@ gpuctl project publish
 gpuctl project status
 ```
 
-! 等本次发布 `READY` 后再训练。
+#### READY 后运行
 
 ```sh local
 gpuctl run -g 1 -- python train.py --output /outputs
 gpuctl jobs
 ```
 
-默认使用最新的 `READY` 版本；新发布失败时直接运行可能用到旧代码。要版本，使用 `gpuctl run --release FULL_HASH -g 1 -- python train.py`。
+等本次发布显示 `READY` 后再单独运行训练，不要把发布和训练连着复制执行。
 
-### 同步电脑代码并运行
+默认使用最新的 `READY` 版本；新发布失败时直接运行可能用到旧代码。要使用指定版本，使用 `gpuctl run --release FULL_HASH -g 1 -- python train.py`。
 
-! 先退出开发终端，再运行同步。
+### 退出项目终端后同步运行
 
-先选好服务器和个人项目，准备服务器环境。在电脑代码目录运行同步，合并上传、发布和等待。
+先选好服务器和个人项目，准备服务器环境，并退出该项目的开发终端。再在电脑代码目录运行同步，合并上传、发布和等待。
 
 ```sh local
 gpuctl run --sync -g 1 -- python train.py --output /outputs

@@ -42,6 +42,7 @@ export function renderMarkdown(source,{headings=[],condense=false}={}){
       output+=`<div class="guide-code"><div class="guide-code-bar"><span>${location}</span>${language}<button type="button" class="copy-code" hidden aria-label="复制这段命令">复制</button></div><pre tabindex="0"><code>${escape(code.join('\n'))}</code></pre></div>`;continue;
     }
     if(!line.trim()){flush();continue;}
+    if(line.startsWith('#### ')){flush();explain();output+=`<h3>${inline(line.slice(5))}</h3>`;continue;}
     if(line.startsWith('### ')){flush();explain();const title=line.slice(4),id='section-'+(++section);headings.push({id,title});output+=`<h2 id="${id}" tabindex="-1">${inline(title)}</h2>`;continue;}
     if(line.startsWith('! ')){flush();explain();output+=`<p class="guide-critical">${inline(line.slice(2))}</p>`;continue;}
     const item=/^(?:([-*]) |(\d+)\. )(.*)$/.exec(line);
