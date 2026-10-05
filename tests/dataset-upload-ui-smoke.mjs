@@ -36,7 +36,7 @@ try {
       <section id="page-datasets"></section><button data-nav="work" hidden>工作台</button>
       <details hidden><form id="train-form"><select name="machine"><option>gpu-1</option><option>gpu-2</option></select>
       <input name="datasets"><input name="command"></form></details></main></body></html>`});
-    const names = new Set(['/dataset-flow.js','/dataset-cache-admin.js','/manual-pin-state.js','/maintenance-state.js','/copy-help-ui.js','/datasets-ui.js','/dataset-remove-ui.js','/dataset-remove.css','/workbench-ui.js','/job-progress.js','/motion-ui.js', '/data-route.js', '/dataset-upload.js', '/data-workspace.js', '/cloud-files-ui.js', '/transfer-upload.js','/cloud-import-ui.js', '/styles.css', '/workspace.css', '/datasets.css']);
+    const names = new Set(['/dataset-flow.js','/dataset-cache-admin.js','/manual-pin-state.js','/maintenance-state.js','/copy-help-ui.js','/datasets-ui.js','/dataset-remove-ui.js','/dataset-remove.css','/workbench-ui.js','/job-progress.js','/motion-ui.js', '/data-route.js', '/dataset-upload.js', '/upload-routes.js', '/data-workspace.js', '/cloud-files-ui.js', '/transfer-upload.js','/cloud-import-ui.js', '/styles.css', '/workspace.css', '/datasets.css']);
     if (names.has(url.pathname)) return route.fulfill({
       contentType: url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css',
       body: await readFile(new URL('../dist' + url.pathname, import.meta.url), 'utf8')});
