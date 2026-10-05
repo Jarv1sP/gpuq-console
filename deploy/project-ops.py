@@ -153,6 +153,25 @@ class ProjectOperations:
             self.n.storage_quota(args['userId'], path, project=args['project'])
         return path
 
+    def environment_modes(self, user):
+        """Configured admission capability, not an engine/network probe.
+
+        Merely listing projects must not create a private OCI graph, prime an
+        image or run a container. The same strict policy used at admission
+        determines whether this authenticated owner may choose OCI.
+        """
+        modes = ['shared', 'isolated']
+        if self.n.CONFIG.get('personalOci', {}).get('enabled') is not True:
+            return modes
+        spec = importlib.util.spec_from_file_location('gpuq_project_oci_capability', self.n.HERE/'personal-oci.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            module.policy(self.n.CONFIG, user)
+        except ValueError:
+            return modes
+        return [*modes, 'oci']
+
     def process(self, operation, args):
         allowed = {'userId'} if operation == 'projects.list' else {'userId','project'}
         if operation == 'projects.create': allowed.add('environmentMode')
@@ -166,7 +185,8 @@ class ProjectOperations:
             raise ValueError('Invalid publication key')
         if operation == 'projects.list':
             self.n.workspace(args['userId'])
-            result = {'projects':self.store.list(args['userId'])}
+            result = {'projects':self.store.list(args['userId']),
+                      'environmentModes':self.environment_modes(args['userId'])}
             # Store does not know detached-worker state.
             for item in result['projects']:
                 item.update(self.status({'userId':args['userId'],'project':item['project']}))

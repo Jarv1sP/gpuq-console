@@ -6,6 +6,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -45,8 +46,25 @@ class NodeProjects(unittest.TestCase):
     def test_listing_and_isolated_owner(self):
         result=self.n.process('projects.list',{'userId':'demo-user-42'})
         self.assertEqual(result['projects'][0]['project'],'test-project')
-        self.assertEqual(self.n.process('projects.list',{'userId':'demo-user-4'}),{'projects':[]})
+        self.assertEqual(result['environmentModes'], ['shared', 'isolated'])
+        self.assertEqual(self.n.process('projects.list',{'userId':'demo-user-4'}),
+                         {'projects':[], 'environmentModes':['shared', 'isolated']})
         with self.assertRaises(ValueError):self.call('projects.status',userId='demo-user-4')
+    def test_environment_capability_is_scoped_without_engine_or_graph_creation(self):
+        for name in ('personal-oci.py', 'storage-quota.py'):
+            shutil.copy2(DEPLOY/name, self.base/name)
+        self.n.CONFIG['storageQuota'] = {'enabled':False}
+        sha = 'a'*64
+        self.n.CONFIG['personalOci'] = {'enabled':True, 'owners':['demo-user-42'],
+            'autoOwners':True, 'autoOwnersRevision':1,
+            'baseImage':'docker.io/library/python@sha256:'+sha,
+            'podmanSHA256':sha, 'runtimeSHA256':sha, 'cdiSHA256':sha}
+        with patch.object(subprocess, 'run', side_effect=AssertionError('No engine probe')):
+            self.assertEqual(self.ops.environment_modes('demo-user-42'), ['shared', 'isolated', 'oci'])
+            self.assertEqual(self.ops.environment_modes('demo-user-4'), ['shared', 'isolated'])
+            self.n.CONFIG['personalOci']['socket'] = '/var/run/docker.sock'
+            self.assertEqual(self.ops.environment_modes('demo-user-42'), ['shared', 'isolated'])
+        self.assertFalse((self.n.ROOT/'oci').exists())
     def test_quota_rpc_does_not_create_workspace_or_project_operations(self):
         value={'enabled':False,'enforcement':None,'owner':'demo-user-42','volumes':None}
         with patch.object(self.n,'storage_quota_status',return_value=value) as quota,patch.object(self.n,'workspace',side_effect=AssertionError),patch.object(self.n,'projects',side_effect=AssertionError):
