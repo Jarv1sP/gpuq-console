@@ -72,14 +72,17 @@ def policy(config, user=None):
         need(set(value) == {'enabled'}, 'Disabled OCI policy must be explicit')
         raise ValueError('Personal OCI is not enabled on this node; use shared/isolated venv mode')
     required = {'enabled', 'baseImage', 'podmanSHA256', 'runtimeSHA256', 'cdiSHA256'}
-    need(required <= set(value) <= required | {'owners'}
+    need(required <= set(value) <= required | {'owners','autoOwners','autoOwnersRevision'}
          and isinstance(value['baseImage'], str) and BASE.fullmatch(value['baseImage'])
          and all(isinstance(value[k], str) and re.fullmatch('[a-f0-9]{64}', value[k])
                  for k in ('podmanSHA256', 'runtimeSHA256', 'cdiSHA256')), 'Invalid trusted OCI capability policy')
+    need('autoOwners' not in value or type(value['autoOwners']) is bool, 'Invalid automatic OCI cohort')
+    need(not value.get('autoOwners') or 'owners' in value, 'Automatic OCI requires an explicit scoped cohort')
+    need('autoOwnersRevision' not in value or ('owners' in value and 'autoOwners' in value and type(value['autoOwnersRevision']) is int and 0<=value['autoOwnersRevision']<=9007199254740991), 'Invalid automatic OCI cohort revision')
     quota_enabled = module('storage-quota').enabled(config, user)
     if 'owners' in value:
         owners = value['owners']
-        need(isinstance(owners, list) and 1 <= len(owners) <= 10000
+        need(isinstance(owners, list) and (0 if value.get('autoOwners') is True else 1) <= len(owners) <= 10000
              and all(isinstance(owner, str) and OWNER.fullmatch(owner) for owner in owners)
              and len(set(owners)) == len(owners), 'Invalid personal OCI owner cohort')
         need(isinstance(user, str) and OWNER.fullmatch(user) and user in owners,
