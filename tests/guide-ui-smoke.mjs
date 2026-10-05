@@ -93,12 +93,21 @@ try{
     assert.equal(await nav.locator('[aria-current=page]').count(),1);
     assert.equal(await nav.locator('[aria-current=page]').getAttribute('href'),'/guide/'+id);
     assert.ok((await page.locator('.guide-prose').innerText()).length>100,`${id} must have real content`);
+    const sections=await page.locator('.guide-prose h2').evaluateAll(nodes=>nodes.map(node=>node.id));
+    assert.deepEqual(await page.locator('.guide-toc a').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('href'))),sections.map(value=>'#'+value));
+    assert.equal(new Set(sections).size,sections.length);
+    assert.equal(await page.locator('.guide-code-bar>span').evaluateAll(nodes=>nodes.every(node=>['本机终端','项目开发终端','数据终端'].includes(node.textContent))),true,'actual guide blocks state where their commands run');
     assert.equal(await page.locator('.guide-code .copy-code:visible').count(),scripts?await page.locator('.guide-code').count():0);
     const adjacent=page.getByRole('navigation',{name:'相邻章节'}).locator('a');
     assert.deepEqual(await adjacent.evaluateAll(items=>items.map(item=>item.getAttribute('href'))),
       [chapterPaths[index-1],chapterPaths[index+1]].filter(Boolean));
     assert.equal(await page.locator('.guide-return').getAttribute('href'),'/');
     await noAdminLinks(page);
+    const budget=await page.evaluate(()=>[...document.querySelectorAll('.guide-prose p')].filter(node=>{
+      if(node.closest('details:not([open])'))return false;
+      const rect=node.getBoundingClientRect();return rect.bottom>0&&rect.top<innerHeight;
+    }).reduce((lines,node)=>lines+Math.ceil(node.getBoundingClientRect().height/parseFloat(getComputedStyle(node).lineHeight)),0));
+    assert.ok(budget<=(page.viewportSize().width<760?1:2),`${id}: first-screen explanations fit COPY (${budget} lines)`);
   }
 
   // Both ordinary and administrator workbenches expose the same one entry.
@@ -111,10 +120,10 @@ try{
     await page.locator('#login-form [name=password]').fill(password);
     await page.locator('#login-form [type=submit]').click();
     await page.locator('#login-dialog').waitFor({state:'hidden'});
-    const count=await page.locator('a[href^="/guide"]').count();
+    const count=await page.locator('.guide-link').count();
     if(count!==1)entryErrors.push(`${username}: expected one workbench guide entry, found ${count}`);
     assert.equal(await page.locator('[data-user-guide]').count(),0,'no secondary execution guide button duplicates the shared entry');
-    const entries=page.locator('a[href="/guide"]');
+    const entries=page.locator('.guide-link');
     assert.equal(await entries.count(),1,'the shared guide entry must exist exactly once');
     assert.equal(await entries.getAttribute('href'),'/guide');
     assert.equal(await entries.isVisible(),true);
@@ -222,6 +231,10 @@ try{
   }
   await staticPage.goto(origin+'/guide/development');
   assert.match(await staticPage.locator('.guide-prose').innerText(),/gpuctl project create/);
+  await staticPage.locator('.guide-toc summary').click();
+  const destination=await staticPage.locator('.guide-toc a').last().getAttribute('href');
+  await staticPage.locator('.guide-toc a').last().click();assert.equal(new URL(staticPage.url()).hash,destination);
+  assert.equal(await staticPage.evaluate(()=>document.activeElement.id),destination.slice(1),'native contents links focus the section without JavaScript');
   await capture(staticPage,'guide-development-no-js-mobile.png');
   const adminContext=await context(),admin=await adminContext.newPage();
   await login(admin,DEMO_ADMIN.username,DEMO_ADMIN.password);

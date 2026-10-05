@@ -1,5 +1,6 @@
 import {openSubmit} from './starbase-workflows.mjs';
 import {resourceCard as card,resourceDetail,selectResource} from './resources-workflows.mjs';
+import {verifyAuthentication,verifyPublicLoginInventoryPrivacy} from './auth-copy-acceptance.mjs';
 // Browser acceptance: npm ci --ignore-scripts && npx playwright install chromium
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm,mkdir} from 'node:fs/promises';
@@ -65,9 +66,31 @@ try{
   if(!process.env.UI_SCREENSHOTS)return;
   await mkdir(process.env.UI_SCREENSHOTS,{recursive:true});
   await p.evaluate(()=>scrollTo(0,0));
-  await p.screenshot({path:join(process.env.UI_SCREENSHOTS,name),fullPage:true});
+  await p.screenshot({path:join(process.env.UI_SCREENSHOTS,name),fullPage:await p.locator('dialog[open]').count()===0});
  }
- await login(admin,'admin');await admin.locator('[data-nav=resources]').click();
+ await login(admin,'admin');
+ const headerUser=portal.service.store.users.find(user=>user.username==='admin'),originalName=headerUser.name;
+ const longName='超长账户名'.repeat(6)+'验证';headerUser.name=longName;portal.service.save();await refreshPage(admin);
+ await admin.waitForFunction(name=>document.querySelector('#profile-name').textContent===name,longName);
+ for(const width of [1440,390,320]){
+  await admin.setViewportSize({width,height:width===1440?1050:844});await admin.evaluate(()=>document.fonts.ready);
+  if(width<=360)await admin.waitForFunction(()=>document.querySelector('#app-topbar .wordmark').classList.contains('sm'));
+  const header=await admin.evaluate(()=>{
+   const selectors=['#app-topbar .brand','#app-topbar .guide-link','#refresh-state','#account-menu-toggle'];if(innerWidth>=760)selectors.push('#room-nav');
+   const boxes=selectors.map(selector=>({selector,...document.querySelector(selector).getBoundingClientRect().toJSON()}));
+   const name=document.querySelector('#profile-name'),style=getComputedStyle(name);
+   return{width:innerWidth,pageWidth:document.documentElement.scrollWidth,boxes,nameWidth:name.clientWidth,nameFullWidth:name.scrollWidth,nameFont:parseFloat(style.fontSize),ellipsis:style.textOverflow,title:name.title};
+  });
+  assert.ok(header.pageWidth<=header.width+1,'long account name must not cause horizontal scrolling at '+width+': '+JSON.stringify(header));
+  for(const box of header.boxes)assert.ok(box.x>=-1&&box.x+box.width<=width+1,'header target stays inside '+width+': '+box.selector);
+  for(const [index,box] of header.boxes.entries())for(const other of header.boxes.slice(index+1))assert.ok(box.x+box.width<=other.x+1||other.x+other.width<=box.x+1||box.y+box.height<=other.y+1||other.y+other.height<=box.y+1,'header targets do not overlap at '+width+': '+box.selector+' / '+other.selector);
+  assert.equal(header.title,longName,'the truncated account name keeps its full title');
+  if(width===1440){assert.equal(header.ellipsis,'ellipsis');assert.ok(header.nameWidth<=12*header.nameFont+1&&header.nameFullWidth>header.nameWidth,'desktop account name is bounded and truncated');}
+  if(process.env.UI_SCREENSHOTS){await mkdir(process.env.UI_SCREENSHOTS,{recursive:true});await admin.screenshot({path:join(process.env.UI_SCREENSHOTS,'topbar-long-account-'+width+'.png'),fullPage:false});}
+ }
+ headerUser.name=originalName;portal.service.save();await refreshPage(admin);await admin.setViewportSize({width:1440,height:1050});
+ assert.equal(await admin.locator('#profile-name').getAttribute('title'),originalName,'rerendering updates the full account-name title');
+ await admin.locator('[data-nav=resources]').click();
  assert.equal(await admin.locator('.resource-card').count(),MACHINES.length);
  assert.equal(await admin.locator('.resource-tower').count(),MACHINES.reduce((total,machine)=>total+machine.cards,0));
  assert.equal(await admin.locator('[data-resource-selected]').count(),1);
@@ -116,9 +139,20 @@ try{
  assert.match(await resourceDetail(admin,'gpu-1').textContent(),/状态未知/);
  await saveSnapshot();await refreshPage(admin);await gpu0.waitFor();
  await admin.locator('[data-nav=users]').click();assert.equal(await admin.locator('#add-user').count(),0);
- await admin.locator('.management-toolbar [data-action=invites]').click();await admin.locator('[data-action=rotate-invite]').click();await admin.locator('#confirm-action').click();const code=await admin.locator('#current-invite').inputValue();assert.ok(code.startsWith('GPUQ-U-'));
+ await admin.locator('.management-toolbar [data-action=invites]').click();await admin.locator('[data-action=rotate-invite]').click();await capture(admin,'members-invite-confirm-1440.png');await admin.locator('#confirm-action').click();const code=await admin.locator('#current-invite').inputValue();assert.ok(code.startsWith('GPUQ-U-'));
+ await capture(admin,'members-invites-1440.png');await admin.setViewportSize({width:390,height:844});await capture(admin,'members-invites-390.png');await admin.setViewportSize({width:1440,height:1050});
  await admin.locator('[data-close=invites-dialog]').click();await admin.reload();await admin.locator('.management-toolbar [data-action=invites]').click();assert.equal(await admin.locator('#current-invite').inputValue(),code);await admin.locator('[data-close=invites-dialog]').click();
- await member.goto(origin);await member.locator('#open-register').click();for(const [name,value] of Object.entries({username:'验收同学',password,confirm:password,invite:code}))await member.locator(`#register-form [name=${name}]`).fill(value);await member.locator('#register-form [type=submit]').click();await member.locator('#register-dialog').waitFor({state:'hidden'});
+ await verifyAuthentication(member,origin,capture);
+ await verifyPublicLoginInventoryPrivacy(browser,origin,capture);
+ await member.goto(origin);await member.locator('#login-dialog .guide-link').waitFor();assert.equal(await member.locator('.guide-link').count(),1);
+ await capture(member,'login-1440.png');await member.setViewportSize({width:390,height:844});await capture(member,'login-390.png');
+ assert.deepEqual(await member.locator('#login-dialog').boundingBox(),{x:0,y:0,width:390,height:844});
+ await member.locator('#open-register').click();await member.locator('#register-dialog .guide-link').waitFor();assert.equal(await member.locator('.guide-link').count(),1);
+ await capture(member,'register-390.png');await member.setViewportSize({width:320,height:844});assert.ok(await member.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+ for(const [name,value] of Object.entries({username:'验收同学',password,confirm:password,invite:code}))await member.locator(`#register-form [name=${name}]`).fill(value);
+ assert.equal(await member.locator('#register-form [name=username]').evaluate(node=>parseFloat(getComputedStyle(node).fontSize)>=16),true);
+ await member.setViewportSize({width:1440,height:1050});await capture(member,'register-1440.png');await member.locator('#register-form [type=submit]').click();await member.locator('#register-dialog').waitFor({state:'hidden'});
+ assert.equal(await member.locator('#app-topbar .guide-link').count(),1,'the one public guide entry returns to the authenticated shell');
  assert.equal(await member.locator('[data-nav=users]').isVisible(),false);assert.equal(await member.locator('#page-resources').isVisible(),true);assert.match(await member.locator('#resource-summary').textContent(),/额度 0 张/);assert.equal(await member.locator('[data-use-machine]:enabled').count(),0);
  assert.equal(await member.locator('.resource-card').count(),MACHINES.length);
  assert.equal(await member.locator('[data-gpu-index]').count(),0);
@@ -128,8 +162,38 @@ try{
  await checkGuide(member,'/guide');assert.equal(await member.locator('a[href="/guide/admin"]:visible').count(),0);
  // Verify automatic registration discovery, without pressing refresh.
  await admin.locator('[data-user]').filter({hasText:'验收同学'}).waitFor({timeout:22000});await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('[data-machine=gpu-1]').check();await admin.locator('[data-quota=gpu-1]').fill('2');await admin.locator('[data-quota=total]').fill('2');
- await admin.waitForTimeout(16000);assert.equal(await admin.locator('[data-quota=gpu-1]').inputValue(),'2');await admin.locator('[data-action=save-policy]').click();
+ await admin.evaluate(()=>scrollTo(0,0));assert.equal(await admin.locator('#page-users .primary:visible').count(),1);
+ const approval=await admin.locator('[data-action=save-policy]').boundingBox(),strip=await admin.locator('#control-strip').boundingBox();assert.ok(approval.y>=0&&approval.y+approval.height<strip.y,'approval is visible before scrolling to the per-server fields');
+ assert.equal(await admin.locator('[data-permission-meter=gpu-1] .is-on').count(),2);
+ await admin.locator('[data-quota=total]').fill('');assert.match(await admin.locator('#policy-summary').textContent(),/待校正/);assert.equal(await admin.locator('[data-permission-meter=gpu-1] .is-on').count(),2,'an invalid total does not erase the confirmed per-server draft');await admin.locator('[data-quota=total]').fill('2');
+ for(const machine of MACHINES)assert.equal(await admin.locator('[data-permission-meter='+machine.id+'] i').count(),machine.cards);
+ await capture(admin,'members-draft-1440.png');await admin.setViewportSize({width:390,height:844});assert.ok(await admin.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+ await admin.waitForFunction(()=>document.querySelector('[data-nav=me]').getAttribute('aria-current')==='page');
+ assert.equal(await admin.locator('[data-nav=me]').getAttribute('aria-current'),'page');assert.equal(await admin.locator('#page-users').isVisible(),true);
+ await admin.locator('[data-quota=gpu-1]').focus();assert.equal(await admin.locator('[data-quota=gpu-1]').inputValue(),'2');
+ await capture(admin,'members-draft-390.png');
+ await admin.setViewportSize({width:320,height:844});await admin.evaluate(()=>scrollTo(0,0));
+ await admin.waitForFunction(()=>document.querySelector('#app-topbar .wordmark').classList.contains('sm'));
+ const brandBox=await admin.locator('#app-topbar .brand').boundingBox(),guideBox=await admin.locator('#app-topbar .guide-link').boundingBox();
+ assert.ok(brandBox.x+brandBox.width<=guideBox.x,'320px brand and guide targets do not overlap');
+ assert.equal(await admin.locator('#app-topbar .guide-link').getAttribute('aria-label'),'使用指南');
+ assert.equal(await admin.locator('#app-topbar .guide-link').evaluate(node=>getComputedStyle(node).fontSize),'0px');
+ assert.ok(guideBox.width>=44&&guideBox.height>=44,'the icon-only guide keeps a phone touch target');
+ assert.ok(await admin.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+ const footerControl=await admin.locator('#mobile-control #live-pill').isVisible();
+ assert.equal(await admin.locator('.page-heading [data-shell-action=control]').isVisible(),!footerControl,'the member header has a fallback only when the footer control is absent');
+ if(!footerControl){const title=await admin.locator('#page-title').boundingBox(),control=await admin.locator('.page-heading [data-shell-action=control]').boundingBox();assert.ok(control.x>=title.x+title.width&&Math.abs(control.y+control.height/2-title.y-title.height/2)<3,'fallback control shares the title row');}
+ await admin.locator('[data-quota=gpu-1]').focus();await capture(admin,'members-draft-320.png');
+ await admin.setViewportSize({width:1440,height:1050});
+ await admin.waitForTimeout(16000);assert.equal(await admin.locator('[data-quota=gpu-1]').inputValue(),'2');assert.equal(await admin.evaluate(()=>document.activeElement.dataset.quota),'gpu-1','automatic refresh preserves the dirty editor and its focused field');await admin.locator('[data-action=save-policy]').click();
  await member.waitForFunction(()=>document.querySelector('#resource-summary').textContent.includes('额度 2 张'),{},{timeout:22000});
+ await admin.setViewportSize({width:320,height:844});await admin.evaluate(()=>scrollTo(0,0));
+ await admin.waitForFunction(()=>document.querySelector('#live-pill').hidden);
+ const fallbackControl=admin.locator('.page-heading [data-shell-action=control]');
+ assert.equal(await fallbackControl.isVisible(),true,'the member page keeps control access when the footer has no activity');
+ const fallbackTitle=await admin.locator('#page-title').boundingBox(),fallbackBox=await fallbackControl.boundingBox();
+ assert.ok(fallbackBox.x>=fallbackTitle.x+fallbackTitle.width&&Math.abs(fallbackBox.y+fallbackBox.height/2-fallbackTitle.y-fallbackTitle.height/2)<3,'the fallback control stays on the title row');
+ await capture(admin,'members-saved-320.png');await admin.setViewportSize({width:1440,height:1050});
  await selectResource(member,'gpu-1',{metrics:true});
  assert.equal(await resourceDetail(member,'gpu-1').locator('[data-gpu-index]').count(),MACHINES[0].cards);
  for(const machine of MACHINES.slice(1)){

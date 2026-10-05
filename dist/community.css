@@ -1,161 +1,149 @@
-/* Collaboration is a quiet, separate room next to the computing workspace. */
-.community-intro {display:flex;align-items:center;justify-content:space-between;gap:24px;padding:19px 27px;margin-bottom:25px;background:linear-gradient(115deg,#eff4fa,#f8fafc 72%);border:1px solid #dfe7f0;border-radius:12px;overflow:hidden}
-.community-intro>div {position:relative;padding-left:70px}
-.community-intro .eyebrow {color:#7084a0;font-size:10px;letter-spacing:.14em}
-.community-intro h2 {font-size:18px;letter-spacing:-.02em;margin:8px 0 0}
-.community-orbit {position:absolute;left:0;top:4px;width:35px;height:35px;border:1px solid #a8bbd8;border-radius:50%;transform:rotate(-28deg)}
-.community-orbit::before {content:"";position:absolute;inset:8px -9px;border:1px solid #a8bbd8;border-radius:50%}
-.community-orbit::after {content:"";position:absolute;width:8px;height:8px;top:1px;left:29px;border-radius:50%;background:#6c8abe;box-shadow:0 0 0 5px #f1f5fa}
-.community-guide {white-space:nowrap;color:#4f6484;font-size:12px;text-decoration:none;padding:12px 0}
-.community-tabs {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-bottom:1px solid #dbe3ee;margin-bottom:22px;gap:12px}
-.community-tabs button {font:inherit;font-size:14px;font-weight:650;color:#65768e;background:transparent;border:0;border-bottom:2px solid transparent;padding:15px 16px;text-align:left;cursor:pointer;min-height:70px}
-.community-tabs button span {display:block;font-size:11px;font-weight:400;margin-top:7px;color:#7c8ba0}
-.community-tabs button[aria-selected=true] {color:#294f91;border-color:#426cb3}
-.community-tabs button[aria-selected=true] span {color:#637da5}
-#community-status:empty,#chat-error:empty,#community-compose-error:empty,#community-comment-error:empty,#community-detail-status:empty {display:none}
-#community-status {font-size:13px;color:#667890;line-height:1.8;margin:0 0 18px}
-.community-toolbar,.chat-topline {display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:18px}
-.community-toolbar>div {display:flex;gap:9px;margin-left:auto}
-.community-toolbar {flex-wrap:wrap}
-.community-task-notes {margin-top:26px;border-top:1px solid #e5eaf1;padding-top:18px}
-.community-task-notes summary {cursor:pointer;font-size:14px;font-weight:600;color:#506787;padding:8px 0;min-height:32px}
-.community-task-notes[open] summary {margin-bottom:16px}
-.community-toolbar label {font-size:12px;color:#697a94;display:flex;gap:10px;align-items:center}
-.community-toolbar select,.community-post-actions select {padding:9px 30px 9px 12px;border:1px solid #d9e2ee;background:#fff;border-radius:7px;color:#344966;font:inherit;min-height:40px;max-width:100%}
-.community-posts {display:grid;grid-template-columns:1fr;gap:13px}
-.community-post {background:#fff;border:1px solid #dfe6ee;border-radius:11px;overflow:hidden;box-shadow:0 2px 5px #22365502}
-.community-post-open {border:0;background:transparent;color:inherit;font:inherit;text-align:left;display:block;width:100%;padding:23px 25px;cursor:pointer}
-.community-post-top {display:flex;gap:7px;margin-bottom:10px}
-.community-tag {display:inline-flex;align-items:center;padding:3px 8px;background:#f0f3f7;border:1px solid #e5eaf0;color:#64748a;border-radius:5px;font-size:10px;line-height:1.5}
-.community-tag.maintenance,.community-tag.investigating {color:#80622d;background:#fbf6e9;border-color:#efe4c8}
-.community-tag.outage {color:#a95056;background:#fdf1f1;border-color:#f2dede}
-.community-tag.pinned,.community-tag.notice {color:#4c6f9e;background:#eff4fc;border-color:#dce7f6}
-.community-tag.resolved {color:#427965;background:#edf7f2;border-color:#d9eae1}
-.community-post h3 {font-size:16px;font-weight:650;margin:0 0 10px;line-height:1.65;overflow-wrap:anywhere}
-.community-excerpt {margin:0 0 17px;font-size:13px;line-height:1.9;color:#6c7b8f;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;white-space:pre-wrap}
-.community-meta {display:flex;gap:14px;flex-wrap:wrap;color:#7a889c;font-size:11px;line-height:1.8;margin:0}
-.community-meta span:last-child {margin-left:auto}
-.community-empty {padding:34px 20px;text-align:center;color:#7b899a;font-size:13px;line-height:1.9;border:1px dashed #dbe3ed;border-radius:10px;background:#fafbfd}
-.community-more {display:block;margin:18px auto}
-.community-body {font-size:14px;color:#34455d;line-height:1.95;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
-.community-dialog {box-sizing:border-box;width:min(740px,calc(100vw - 40px));max-height:calc(100dvh - 64px);overflow:auto;padding:28px;border:1px solid #dce4ef;border-radius:15px;color:#233651;box-shadow:0 24px 100px #12224033;background:#fff}
-.community-dialog::backdrop {background:#17274065;backdrop-filter:blur(3px)}
-.community-dialog .modal-head {align-items:flex-start;gap:20px;margin-bottom:22px}
-.community-dialog h2 {font-size:21px;line-height:1.6;overflow-wrap:anywhere;margin:3px 0 0}
-.community-dialog .icon-button {flex:none}
-.community-dialog .modal-actions {display:flex;justify-content:flex-end;gap:9px;margin-top:15px}
-.community-dialog label,.community-chat label {display:block;font-size:12px;line-height:1.8;color:#61738d;font-weight:500}
-.community-dialog textarea,.community-dialog input,.community-dialog select,#community-chat-body {display:block;box-sizing:border-box;width:100%;font:inherit;font-size:14px;line-height:1.7;color:#30445f;background:#fcfdff;border:1px solid #d7e1ed;border-radius:8px;padding:11px 12px;margin-top:7px;resize:vertical}
-.community-dialog textarea:read-only,#community-chat-body:read-only {background:#f6f8fb;color:#74829a}
-.community-dialog .field {margin-bottom:19px}
-.community-dialog .community-pin {display:flex;align-items:center;gap:9px;margin:10px 0}
-.community-dialog .community-pin input {width:auto;margin:0;accent-color:#426cb3}
-.community-compose-note {font-size:12px;color:#7b899b;line-height:1.8}
-.community-post-actions {display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 22px}
-.community-post-actions label {display:flex;align-items:center;gap:10px}
-.community-post-actions select {width:auto;margin:0}
-#community-detail-status {font-size:12px;color:#a25e48;line-height:1.8;margin:14px 0}
-.community-replies-heading {display:flex;justify-content:space-between;align-items:center;gap:16px;margin-top:28px;padding-top:23px;border-top:1px solid #e5eaf1}
-.community-replies-heading h3 {font-size:14px;font-weight:650}
-.community-comment {padding:20px 0;border-bottom:1px solid #edf0f5}
-.community-comment .community-body {font-size:13px;margin:8px 0}
-.community-item-actions {display:flex;gap:14px;margin-top:7px}
-.community-text-button {font:inherit;font-size:11px;border:0;padding:3px 0;background:none;color:#60799e;cursor:pointer;min-height:28px}
-.community-text-button.danger {color:#a87077}
-#community-comment-form {margin-top:24px}
-.chat-topline h3 {font-size:15px;margin:0 0 7px}
-.chat-topline p {font-size:12px;line-height:1.8;color:#73849a;margin:0}
-#community-chat {padding:24px;background:#fff;border:1px solid #dfe6ee;border-radius:12px}
-.community-messages {height:440px;overflow:auto;overscroll-behavior:contain;padding:18px 8px 12px 0;scrollbar-gutter:stable;border-top:1px solid #e8edf3;border-bottom:1px solid #e8edf3}
-.chat-message {display:flex;gap:12px;margin:0 0 24px}
-.chat-avatar {display:grid;place-items:center;flex:none;width:32px;height:32px;border-radius:10px;background:#eef2f7;color:#7c8fa8;font-size:12px}
-.chat-message-content {min-width:0;max-width:90%;flex:1}
-.chat-message .community-body {display:table;margin-top:7px;padding:11px 14px;background:#f4f6f9;border-radius:0 10px 10px 10px;font-size:13px}
-.chat-message.own .community-body {background:#eef4fc;color:#36547c}
-.chat-message.own .chat-avatar {background:#e5edf9;color:#5174a3}
-.chat-message .community-item-actions {margin-top:4px}
-.chat-new {display:block;margin:12px auto;background:#eef4fc;color:#466ca5;border-color:#d8e4f5;font-size:12px}
-#community-chat-form,#task-note-form {margin-top:21px}
-#community-chat-form>label,#task-note-form label {display:block;font-size:12px;color:#697c95;margin-top:12px}
-#task-note-form textarea,#task-note-form select {display:block;box-sizing:border-box;width:100%;font:inherit;font-size:14px;line-height:1.7;color:#30445f;background:#fcfdff;border:1px solid #d7e1ed;border-radius:8px;padding:11px 12px;margin-top:7px;resize:vertical}
-.task-note {min-width:0;overflow-wrap:anywhere}
-.chat-compose-footer {display:flex;gap:22px;align-items:center;justify-content:space-between;margin-top:13px}
-.chat-compose-footer p {font-size:11px;color:#7b899e;line-height:1.8;margin:0}
-.chat-compose-footer button {flex:none}
-.community-dialog .form-error {font-size:12px;line-height:1.8}
-.community-tabs button:focus-visible,.community-post-open:focus-visible,.community-text-button:focus-visible,.community-messages:focus-visible,.community-guide:focus-visible {outline:3px solid #a6bce0;outline-offset:-3px}
-@media(hover:hover) and (pointer:fine) {.community-post:hover {border-color:#c1cfe3}.community-tabs button:hover {color:#294f91}.community-text-button:hover {text-decoration:underline}}
-@media(max-width:700px) {
-  .community-intro {padding:15px 16px;gap:12px;align-items:center;margin-bottom:14px}
-  .community-intro>div {padding-left:0}
-  .community-orbit {display:none}
-  .community-intro h2 {font-size:12px;font-weight:500;letter-spacing:0;margin:0}
-  .community-guide {font-size:10px;padding:0;margin:0}
-  .community-intro .eyebrow {display:none}
-  .community-tabs {gap:3px;margin-bottom:17px}
-  .community-tabs button {font-size:13px;padding:13px 6px;min-height:68px}
-  .community-tabs button span {font-size:10px;line-height:1.6}
-  .community-toolbar {flex-wrap:wrap;gap:12px}
-  .community-toolbar label {gap:7px;font-size:11px}
-  .community-toolbar>div {gap:7px}
-  .community-toolbar .button {padding-inline:11px;font-size:12px;min-height:44px}
-  .community-toolbar select,.community-post-actions select {font-size:16px;min-height:44px;padding-right:18px}
-  .community-post-open {padding:19px 17px}
-  .community-post h3 {font-size:15px}
-  .community-excerpt {font-size:12px}
-  .community-meta {font-size:10px;gap:7px 11px}
-  .community-dialog {width:calc(100vw - 20px);max-height:calc(100dvh - 24px);padding:20px 17px;border-radius:12px}
-  .community-dialog h2 {font-size:18px}
-  .community-dialog textarea,.community-dialog input,.community-dialog select,#community-chat-body,#task-note-form textarea,#task-note-form select {font-size:16px}
-  .community-dialog .button,.community-text-button {min-height:44px}
-  .community-post-actions {gap:7px}
-  #community-chat {padding:18px 14px}
-  .chat-topline {gap:12px}
-  .chat-topline h3 {font-size:14px}
-  .chat-topline p {font-size:11px}
-  .chat-topline .button {min-height:44px;padding-inline:12px;font-size:12px}
-  .community-messages {height:400px;padding-right:0}
-  .chat-message {gap:8px;margin-bottom:18px}
-  .chat-avatar {width:26px;height:26px;font-size:11px;border-radius:8px}
-  .chat-message .community-body {padding:9px 11px;font-size:12px}
-  .chat-compose-footer {align-items:flex-start;gap:12px}
-  .chat-compose-footer p {font-size:10px}
-  .chat-compose-footer button {font-size:12px;min-height:44px;padding-inline:12px}
+/* Confirmed notices and posts lead; chat is a live companion on desktop. */
+.sb #page-community,.sb .community-dialog{color:var(--ink);font:14px/1.7 var(--sans);min-width:0}
+.sb #page-community [hidden],.sb .community-dialog [hidden]{display:none!important}
+.sb #page-community :is(button,input,select,textarea),.sb .community-dialog :is(button,input,select,textarea){font:inherit}
+.sb #page-community button,.sb .community-dialog button{transform:none;transition:color 140ms linear,background-color 140ms linear,border-color 140ms linear}
+.sb #page-community :is(button,input,select,textarea,a,summary,[tabindex]):focus-visible,.sb .community-dialog :is(button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+.sb #page-community :is(input,select,textarea),.sb .community-dialog :is(input,select,textarea){color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:8px;min-width:0;min-height:44px;box-sizing:border-box}
+.sb #page-community textarea,.sb .community-dialog textarea{display:block;width:100%;padding:12px;resize:vertical;line-height:1.65}
+.sb #page-community :is(select,input),.sb .community-dialog :is(select,input){padding:9px 12px;max-width:100%}
+.sb #page-community :is(textarea,input):read-only,.sb .community-dialog :is(textarea,input):read-only{color:var(--ink-2);background:var(--bg-2)}
+.sb #page-community .form-error,.sb .community-dialog .form-error{color:var(--err);font-size:13px;overflow-wrap:anywhere}
+.sb #page-community :is(p,h2,h3),.sb .community-dialog :is(p,h2,h3){overflow-wrap:anywhere}
+.sb #page-community #community-status{min-height:0;font-size:13px;color:var(--ink-2);margin:0 0 16px}
+.sb #page-community #community-status:empty{display:none}
+.sb #page-community #community-status.form-error{color:var(--err)}
+.sb #page-community .community-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:36px;align-items:start}
+.sb #page-community #community-forum{min-width:0}
+.sb #page-community .community-toolbar{display:flex;align-items:end;flex-wrap:wrap;gap:16px;margin:0 0 28px}
+.sb #page-community .community-toolbar label{display:grid;gap:6px;font-size:12px;color:var(--ink-2);min-width:0}
+.sb #page-community .community-toolbar>div{display:flex;gap:10px;margin-left:auto}
+.sb #page-community .community-toolbar select{min-width:140px}
+.sb #page-community .community-feed-focus{padding:26px 28px 8px;background-color:var(--bg)}
+.sb #page-community .community-posts{min-width:0}
+.sb #page-community .community-post{border:0;border-bottom:1px solid var(--line);border-radius:0;background:none;box-shadow:none;margin:0}
+.sb #page-community .community-post:last-child{border-bottom:0}
+.sb #page-community .community-post-open{display:block;width:100%;min-height:44px;padding:20px 0;text-align:left;border:0;border-radius:0;background:none;color:var(--ink);cursor:pointer}
+.sb #page-community .community-post-open:hover h3{color:#fff}
+.sb #page-community .community-post-open h3{font-size:16px;font-weight:500;line-height:1.45;margin:10px 0;transition:color 140ms linear}
+.sb #page-community .community-post.is-focal .community-post-open{padding-top:8px;padding-bottom:28px}
+.sb #page-community .community-post.is-focal h3{font-size:28px;line-height:1.4;letter-spacing:-.02em;margin:14px 0}
+.sb #page-community .community-post-top{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.sb #page-community .community-tag,.sb .community-dialog .community-tag,.sb .task-note .community-tag{display:inline-flex;font-size:11px;line-height:1.5;color:var(--ink-2);padding:2px 0;border:0;border-radius:0;background:none}
+.sb #page-community .community-tag+.community-tag::before{content:'·';margin-right:8px;color:var(--ink-3)}
+.sb #page-community .community-tag:is(.maintenance,.investigating,.open){color:var(--queue)}
+.sb #page-community .community-tag.outage{color:var(--err)}
+.sb #page-community .community-tag.resolved{color:var(--run)}
+.sb #page-community .community-excerpt{color:var(--ink-2);font-size:14px;line-height:1.7;margin:8px 0 14px;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sb #page-community .community-meta,.sb .community-dialog .community-meta,.sb .task-note .community-meta{display:flex;gap:12px;flex-wrap:wrap;color:var(--ink-2);font-size:11px;line-height:1.7;margin:0}
+.sb #page-community .community-meta span:last-child{margin-left:auto}
+.sb #page-community .community-empty,.sb .community-dialog .community-empty{color:var(--ink-2);font-size:14px;line-height:1.7;padding:28px 0;margin:0}
+.sb #page-community .community-more{display:block;min-height:36px;margin:14px auto}
+.sb #page-community .community-tabs{display:flex;gap:24px;border-bottom:1px solid var(--line);margin:0 0 24px}
+.sb #page-community .community-tabs button{display:block;min-height:44px;padding:12px 0;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;color:var(--ink-2)}
+.sb #page-community .community-tabs button span{display:none}
+.sb #page-community .community-tabs [aria-selected=true]{color:var(--ink);border-bottom-color:var(--ink)}
+.sb #page-community #community-chat{display:flex;flex-direction:column;min-width:0;border-left:1px solid var(--line);padding-left:28px}
+.sb #page-community .chat-topline{display:flex;justify-content:space-between;gap:16px;align-items:start;margin-bottom:20px;flex:none}
+.sb #page-community .chat-topline h3{font-size:20px;font-weight:500;margin:0 0 6px}
+.sb #page-community .chat-topline p{font-size:12px;color:var(--ink-2);margin:0;line-height:1.65}
+.sb #page-community #chat-status{color:var(--ink-2);font-size:12px;line-height:1.6;margin:0 0 12px;flex:none}
+.sb #page-community #chat-status:empty{display:none}
+.sb #page-community #chat-status.form-error{color:var(--err)}
+.sb #page-community .community-messages{flex:1 1 0;min-height:200px;height:400px;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;padding:14px 0;border-block:1px solid var(--line)}
+.sb #page-community .chat-message{display:flex;gap:12px;margin:0 0 20px}
+.sb #page-community .chat-message:last-child{margin-bottom:0}
+.sb #page-community .chat-avatar{display:grid;place-items:center;flex:none;width:28px;height:28px;border-radius:50%;background:var(--bg-3);font-size:12px;color:var(--ink-2)}
+.sb #page-community .chat-message-content{flex:1;min-width:0}
+.sb #page-community .community-body,.sb .community-dialog .community-body,.sb .task-note .community-body{color:var(--ink);font-size:14px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0 0}
+.sb #page-community .chat-message.own .community-body{color:var(--ink)}
+.sb #page-community .community-item-actions,.sb .community-dialog .community-item-actions{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px}
+.sb #page-community .community-text-button,.sb .community-dialog .community-text-button,.sb .task-note .community-text-button{border:0;background:none;color:var(--ink-2);min-height:32px;padding:2px 0;font-size:12px;cursor:pointer}
+.sb #page-community .community-text-button.danger,.sb .community-dialog .community-text-button.danger{color:var(--err)}
+.sb #page-community .chat-new{margin:12px 0;text-align:center;flex:none}
+.sb #page-community #community-chat-form,.sb #page-community #task-note-form{margin-top:16px;flex:none}
+.sb #page-community :is(#community-chat-form,#task-note-form)>label{display:block;font-size:12px;color:var(--ink-2);margin:10px 0 7px}
+.sb #page-community #community-chat-body{min-height:72px;max-height:180px}
+.sb #page-community .chat-compose-footer{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:12px}
+.sb #page-community .chat-compose-footer p{font-size:11px;color:var(--ink-2);line-height:1.6;margin:0}
+.sb #page-community .chat-compose-footer button{flex:none}
+.sb #page-community .community-task-notes{border-block:1px solid var(--line);margin:0 0 12px;flex:none}
+.sb #page-community .community-task-notes>summary{min-height:44px;display:flex;align-items:center;justify-content:space-between;color:var(--ink-2);font-size:13px;list-style:none;cursor:pointer}
+.sb #page-community .community-task-notes>summary::after{content:'+';font-family:var(--mono)}
+.sb #page-community .community-task-notes[open]>summary::after{content:'−'}
+.sb #page-community .community-task-notes>summary::-webkit-details-marker{display:none}
+.sb #page-community #community-notes{padding-bottom:18px}
+.sb #page-community #community-notes .chat-topline h3{font-size:15px}
+.sb #page-community #community-notes .chat-topline p{font-size:11px}
+.sb #page-community #task-note-form select{display:block;width:100%}
+.sb .task-note{padding:14px 0;border-bottom:1px solid var(--line);min-width:0;overflow-wrap:anywhere}
+.sb .community-dialog{box-sizing:border-box;width:min(580px,calc(100% - 40px));max-width:none;max-height:calc(100dvh - 48px);padding:24px;border:1px solid var(--line-2);border-radius:14px;background:var(--bg-1);box-shadow:var(--shadow);overflow:auto}
+.sb .community-dialog::backdrop{background:var(--scrim)}
+.sb .community-dialog .modal-head{display:flex;gap:20px;justify-content:space-between;align-items:start;margin:0 0 24px}
+.sb .community-dialog h2{font-size:24px;font-weight:500;line-height:1.4;margin:8px 0 0}
+.sb .community-dialog .icon-button{flex:none;min-width:44px;min-height:44px;background:none;color:var(--ink-2);border:0;font-size:24px}
+.sb .community-dialog label{display:block;font-size:13px;color:var(--ink-2);line-height:1.65}
+.sb .community-dialog .field{display:grid;gap:8px;margin-bottom:20px}
+.sb .community-dialog .field :is(input,select,textarea){width:100%;margin:0}
+.sb .community-dialog .community-pin{display:flex;align-items:center;gap:10px}
+.sb .community-dialog .community-pin input{width:18px;height:18px;min-height:18px;margin:0;accent-color:var(--ink)}
+.sb .community-dialog .community-compose-note{font-size:12px;color:var(--ink-2);margin:18px 0}
+.sb .community-dialog .modal-actions{display:flex;justify-content:flex-end;gap:12px;margin:20px 0 0;flex:none}
+.sb .community-dialog .community-post-actions{display:flex;flex-wrap:wrap;gap:12px;margin:0 0 24px;align-items:center}
+.sb .community-dialog .community-post-actions label{display:flex;gap:10px;align-items:center}
+.sb .community-dialog .community-replies-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:28px 0 8px;padding-top:20px;border-top:1px solid var(--line)}
+.sb .community-dialog .community-replies-heading h3{font-size:16px;font-weight:500;margin:0}
+.sb .community-dialog .community-comment{padding:16px 0;border-bottom:1px solid var(--line)}
+.sb .community-dialog #community-detail-status{color:var(--ink-2);font-size:13px}
+.sb .community-dialog:is(.community-detail,.community-composer){position:fixed;inset:0 0 0 auto;margin:0;height:100dvh;max-height:100dvh;width:min(650px,100%);padding:0;border-radius:16px 0 0 16px;overflow:hidden}
+.sb .community-detail[open],.sb .community-composer[open] form{display:flex;flex-direction:column;min-height:0}
+.sb .community-composer form{height:100%;margin:0}
+.sb .community-dialog:is(.community-detail,.community-composer) .modal-head{padding:24px 28px;margin:0;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg-1) 88%,transparent);backdrop-filter:blur(22px);flex:none}
+.sb .community-sheet-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:24px 28px;scrollbar-width:thin}
+.sb .community-composer .modal-actions{padding:18px 28px;margin:0;border-top:1px solid var(--line);background:color-mix(in srgb,var(--bg-1) 88%,transparent);backdrop-filter:blur(22px)}
+.sb .community-detail #community-comment-form{padding:14px 28px 20px;border-top:1px solid var(--line);background:color-mix(in srgb,var(--bg-1) 88%,transparent);backdrop-filter:blur(22px);flex:none}
+.sb .community-detail #community-comment-form textarea{margin-top:8px;min-height:68px;max-height:100px}
+.sb .community-detail #community-comment-form .modal-actions{margin-top:10px}
+@media(min-width:1100px){
+ .sb #page-community .community-layout{grid-template-columns:minmax(0,1fr) 360px;gap:48px}
+ .sb #page-community #community-posts{max-height:760px;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
+ .sb #page-community #community-chat{position:sticky;top:88px;height:calc(100dvh - 184px);max-height:900px;overflow:auto}
+ .sb #page-community .community-messages{min-height:160px;height:auto}
 }
-@media(max-width:360px) {.sidebar nav {gap:1px}.sidebar .nav-item {font-size:10px;padding-inline:2px}.sidebar .nav-count {min-width:15px;font-size:9px;padding-inline:3px}.community-toolbar>div {margin-left:0}.community-meta span:last-child {margin-left:0}.community-guide {font-size:10px}}
-
-/* STARGATE collaboration: two clear rooms, one monochrome visual system. */
-.community-intro{padding:23px 27px;background:#ececea;border-color:#dfdfdb;border-radius:6px;margin-bottom:24px}
-.community-intro>div{padding-left:0}.community-orbit{display:none}
-.community-intro .eyebrow{font-size:9px;letter-spacing:1.8px;color:#626266}
-.community-intro h2{font-size:19px;font-weight:600;color:#303035}
-.community-guide{color:#515158}
-.community-tabs{gap:24px;border-color:#d5d5d1}
-.community-tabs button{font-weight:600;color:#66666c;padding:17px 1px}
-.community-tabs button span{color:#65656b;font-size:11px}
-.community-tabs button[aria-selected=true]{color:#202023;border-color:#202023}
-.community-tabs button[aria-selected=true] span{color:#55555d}
-.community-toolbar label,.community-meta,.community-excerpt,.community-compose-note,.chat-topline p,.chat-compose-footer p,#community-status{color:#626266}
-.community-post{border-color:#dfdfdd;border-radius:6px;box-shadow:none}
-.community-post-open{padding:25px 27px}.community-post h3{font-weight:600}
-.community-tag{background:#efefed;border-color:#dfdfdb;color:#5c5c62;border-radius:3px}
-.community-tag.pinned,.community-tag.notice{color:#494950;background:#ededeb;border-color:#dcdcd7}
-.community-empty{background:#f9f9f7;border-color:#d5d5d2;color:#626266;border-radius:6px}
-.community-body{color:#393940}
-.community-dialog{border-color:#dcdcd9;border-radius:9px;color:#242427;box-shadow:0 25px 90px #11111326}
-.community-dialog::backdrop{background:#11111366;backdrop-filter:blur(8px)}
-.community-dialog label,.community-chat label,#community-chat-form>label,#task-note-form label{color:#626266}
-.community-dialog textarea,.community-dialog input,.community-dialog select,#community-chat-body,#task-note-form textarea,#task-note-form select,.community-toolbar select,.community-post-actions select{background:#fff;border-color:#d4d4d0;border-radius:5px;color:#3d3d43}
-.community-dialog .community-pin input{accent-color:#303035}
-.community-task-notes,.community-replies-heading{border-color:#dfdfdd}
-.community-task-notes summary,.community-text-button{color:#55555d}
-.community-text-button.danger{color:#a33d40}
-#community-chat{border-color:#dfdfdd;border-radius:6px}
-.community-messages{border-color:#e2e2de}
-.chat-avatar,.chat-message.own .chat-avatar{background:#e8e8e5;color:#616169;border-radius:5px}
-.chat-message .community-body{background:#f1f1ee;color:#414148;border-radius:0 6px 6px 6px}
-.chat-message.own .community-body{background:#e8e8e4;color:#34343b}
-.chat-new{background:#eeeeeb;color:#494950;border-color:#d6d6d2}
-.community-tabs button:focus-visible,.community-post-open:focus-visible,.community-text-button:focus-visible,.community-messages:focus-visible,.community-guide:focus-visible{outline:3px solid #76767d}
-@media(hover:hover) and (pointer:fine){.community-post:hover{border-color:#a6a6ac}.community-tabs button:hover{color:#202023}}
-@media(max-width:700px){.community-intro{padding:16px}.community-intro h2{font-size:13px}.community-tabs{gap:12px}.community-tabs button{padding:13px 3px}.community-post-open{padding:20px 18px}.community-meta{font-size:11px}.community-guide{font-size:11px}.community-tabs button span{font-size:10px}}
+@media(max-width:1099px){.sb #page-community #community-chat{border:0;padding:0}.sb #page-community .community-messages{flex:none}}
+@media(max-width:759px){
+ .sb #page-community,.sb .community-dialog{font-size:16px}
+ .sb #page-community .community-toolbar{gap:12px;margin-bottom:24px}
+ .sb #page-community .community-toolbar select{font-size:16px;min-width:120px}
+ .sb #page-community .community-toolbar>div{gap:8px}
+ .sb #page-community .community-toolbar .button{font-size:13px;padding-inline:12px;min-height:44px}
+ .sb #page-community .community-feed-focus{padding:22px 0 0;background-color:transparent}
+ .sb #page-community .community-post-open{padding:20px 0}
+ .sb #page-community .community-post.is-focal h3{font-size:24px}
+ .sb #page-community .community-excerpt,.sb #page-community .community-body,.sb .community-dialog .community-body{font-size:16px}
+ .sb #page-community .community-meta{gap:8px;font-size:12px}
+ .sb #page-community .community-meta span:last-child{margin-left:0}
+ .sb #page-community .chat-topline p{font-size:13px}
+ .sb #page-community .community-messages{height:420px}
+ .sb #page-community :is(.community-more,.community-text-button),.sb .community-dialog .community-text-button{min-height:44px}
+ .sb #page-community .chat-compose-footer p{font-size:12px}
+ .sb .community-dialog{width:calc(100% - 24px);padding:20px;max-height:calc(100dvh - 24px)}
+ .sb .community-dialog :is(input,select,textarea){font-size:16px}
+ .sb .community-dialog:is(.community-detail,.community-composer){width:100%;height:100dvh;max-height:100dvh;border:0;border-radius:0}
+ .sb .community-dialog:is(.community-detail,.community-composer) .modal-head{padding:18px 20px}
+ .sb .community-dialog h2{font-size:22px}
+ .sb .community-sheet-body{padding:20px}
+ .sb .community-composer .modal-actions{padding:16px 20px}
+ .sb .community-detail #community-comment-form{padding:12px 20px 18px}
+}
+@media(prefers-reduced-motion:reduce){.sb #page-community *,.sb .community-dialog *{transition:none!important;scroll-behavior:auto!important}}
+@media(prefers-reduced-transparency:reduce){.sb .community-dialog:is(.community-detail,.community-composer) :is(.modal-head,.modal-actions,#community-comment-form){background:var(--bg-1);backdrop-filter:none;-webkit-backdrop-filter:none}}
+/* The original controller's help stays available in the scoped info control. */
+#community-task-notes #community-notes>.chat-topline p,
+#community-task-notes #task-note-form>.chat-compose-footer>p {display:none}
+.community-notes-help{display:flex;justify-content:flex-end}
+.sb #page-community .community-post:not(.is-focal) .community-post-open{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:16px}
+.sb #page-community .community-post:not(.is-focal) h3{grid-column:1;grid-row:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0}
+.sb #page-community .community-post:not(.is-focal) .community-post-top{grid-column:2;grid-row:1}
+.sb #page-community .community-post:not(.is-focal) .community-meta{grid-column:3;grid-row:1;white-space:nowrap}
+@media(max-width:759px){.sb #page-community .community-post:not(.is-focal) .community-post-open{gap:8px}.sb #page-community .community-post:not(.is-focal) .community-post-top{gap:4px}.sb #page-community .community-post:not(.is-focal) .community-post-top:has(.community-tag.open,.community-tag.investigating,.community-tag.resolved,.community-tag.closed) .community-tag.feedback{display:none}}

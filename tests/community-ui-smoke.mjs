@@ -11,7 +11,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 
 const folder=await mkdtemp(join(tmpdir(),'gpuq-community-browser-')),screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-community-ui';
-const password='Community-Browser-Fixture-Only-2026!',errors=[],external=[],sent=[];
+const password='Community-Browser-Fixture-Only-2026!',errors=[],external=[],sent=[],captures=[];
 const reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));
 const origin='http://127.0.0.1:'+port,bootstrap=join(folder,'bootstrap.json'),database=join(folder,'portal.sqlite');
 let server,service,browser,dropOperation=null,heldOperation=null,releaseHeld=null,holdDeleteId=null,releaseDelete=null;
@@ -47,17 +47,26 @@ try{
     return route.continue();
   });
   const login=async username=>{await page.locator('#login-dialog').waitFor();await page.locator('#login-form [name=username]').fill(username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=community]').click();await page.locator('#community-status').filter({hasText:'正在连接'}).waitFor({state:'hidden'});};
-  const tab=async name=>{await page.locator('[data-community-tab='+(name==='chat'?'chat':'posts')+']').click();if(name!=='chat')await page.locator('#community-kind').selectOption(name==='posts'?'':name);};
+  // Desktop exposes both live panels. Exercise the original tab/cursor flows
+  // below at tablet width, where a real user still switches those panels.
+  const tab=async name=>{if(page.viewportSize().width>=1100)await page.setViewportSize({width:820,height:1000});await page.locator('[data-community-tab='+(name==='chat'?'chat':'posts')+']').click();if(name!=='chat')await page.locator('#community-kind').selectOption(name==='posts'?'':name);};
   const loaded=async()=>{await page.waitForFunction(()=>!document.querySelector('#community-status').textContent.startsWith('正在'));};
-  const snapshot=async name=>{await page.evaluate(()=>{scrollTo(0,0);document.querySelector('#toast')?.classList.remove('visible');});await page.waitForTimeout(250);await page.screenshot({path:join(screenshots,name+'.png')});};
+  const snapshot=async name=>{const size=page.viewportSize();if(name.endsWith('-desktop'))await page.setViewportSize({width:1440,height:1000});await page.evaluate(()=>{scrollTo(0,0);document.querySelector('#toast')?.classList.remove('visible');});await page.evaluate(()=>document.fonts.ready);await page.waitForTimeout(400);await page.screenshot({path:join(screenshots,name+'.png')});captures.push({name,viewport:page.viewportSize(),...await page.evaluate(()=>({documentHeight:document.documentElement.scrollHeight,sheetHeight:document.querySelector('.community-dialog[open]')?.getBoundingClientRect().height||null}))});if(page.viewportSize().width!==size.width)await page.setViewportSize(size);};
   await page.goto(origin+'/#community');await login('alice');await loaded();
   const guide=await page.request.get(origin+'/guide/community');assert.equal(guide.status(),200);assert.match(guide.headers()['content-type'],/^text\/html/);
   const guideHTML=await guide.text();
   assert.match(guideHTML,/协作区只有“帖子”和“聊天”两个入口/);
   assert.match(guideHTML,/不会自动改变配额、队列或取消任务/,'the guide must preserve the collaboration boundary without depending on its introductory wording');
   assert.deepEqual(await page.locator('[data-community-tab]').evaluateAll(nodes=>nodes.map(node=>node.dataset.communityTab)),['posts','chat']);
+  assert.equal(await page.locator('#community-tabs').isVisible(),false,'desktop uses the visible forum and live chat rail');
+  assert.equal(await page.locator('#community-chat').isVisible(),true);
+  await page.locator('#community-messages .community-empty').waitFor();
+  await page.waitForFunction(()=>document.querySelector('#community-chat').getBoundingClientRect().bottom<=document.querySelector('#control-strip').getBoundingClientRect().top-10);
+  const live=(await call('chat.send',{key:randomUUID(),body:'桌面侧栏自动更新验证'},bobToken)).message;
+  await page.locator('.chat-message').filter({hasText:'桌面侧栏自动更新验证'}).waitFor();
+  await call('chat.delete',{id:live.id,revision:live.revision},bobToken);await page.locator('#chat-refresh').click();await page.locator('#community-messages .community-empty').waitFor();
   assert.equal(await page.locator('#community-create').isVisible(),true,'members can post from the unified list');
-  await page.locator('#community-create').click();assert.equal(await page.locator('#community-compose-form [name=kind] option[value=announcement]').count(),0);await page.locator('.community-composer [data-compose-close]').first().click();
+  await page.locator('#community-create').click();assert.equal(await page.locator('#community-compose-form [name=kind] option[value=announcement]').count(),0);await snapshot('compose-member-desktop');await page.locator('.community-composer [data-compose-close]').first().click();
   assert.match(await page.locator('#community-posts').innerText(),/本周维护安排/);
   await snapshot('announcements-desktop');
   clearRates();await page.locator('#community-create').click();await page.locator('#community-compose-form [name=kind]').selectOption('discussion');await page.locator('#community-compose-form [name=title]').fill('讨论：共享训练经验');await page.locator('#community-compose-form [name=body]').fill('欢迎补充训练环境的准备方法。');await page.locator('#community-compose-form [type=submit]').click();await page.locator('.community-composer').waitFor({state:'hidden'});await tab('discussion');await loaded();assert.equal(await page.locator('.community-post').count(),1);assert.match(await page.locator('.community-post-top').innerText(),/讨论/);assert.doesNotMatch(await page.locator('.community-post-top').innerText(),/待处理/);
@@ -131,6 +140,7 @@ try{
     if(width===390)await snapshot('chat-mobile');
   }
   await page.setViewportSize({width:390,height:920});await tab('feedback');await loaded();await snapshot('feedback-mobile');
+  await page.locator('[data-post-id="'+xss.id+'"]').click();await page.locator('#community-post-body').filter({hasText:'其他客户端先保存'}).waitFor();await snapshot('detail-member-mobile');await page.locator('[data-community-close]').click();
   // Server permission boundary, independent of hidden controls.
   const denied=await page.evaluate(async()=>{const r=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'community.posts.create',args:{key:crypto.randomUUID(),kind:'announcement',title:'越权',body:'不可发布'}})});return r.status;});assert.equal(denied,403);
   // Leaving the account while a request is unresolved must wipe its text.
@@ -148,6 +158,7 @@ try{
   await page.locator('#community-filter').selectOption('resolved');await loaded();assert.equal(await page.locator('.community-post').count(),1);
   // Admin announcement create/edit/delete goes through the same real APIs.
   await tab('announcement');await loaded();clearRates();await page.locator('#community-create').click();
+  await snapshot('compose-admin-mobile');
   await page.locator('#community-compose-form [name=title]').fill('临时测试公告');await page.locator('#community-compose-form [name=body]').fill('维护已完成');await page.locator('#community-compose-form [name=announcementType]').selectOption('notice');await page.locator('#community-compose-form [name=pinned]').check();await page.locator('#community-compose-form [type=submit]').click();await page.locator('.community-composer').waitFor({state:'hidden'});await loaded();assert.equal(service.db.prepare('SELECT pinned FROM community_posts WHERE title=?').get('临时测试公告').pinned,1);
   const temporary=service.db.prepare('SELECT id FROM community_posts WHERE title=?').get('临时测试公告');await page.locator('[data-post-id="'+temporary.id+'"]').click();await page.locator('#community-post-actions').getByRole('button',{name:'编辑',exact:true}).click();await page.locator('#community-compose-form [name=body]').fill('维护已完成，可以继续训练');await page.locator('#community-compose-form [type=submit]').click();await page.locator('.community-composer').waitFor({state:'hidden'});assert.equal(await page.locator('#community-post-body').innerText(),'维护已完成，可以继续训练');
   holdDeleteId=String(temporary.id);await page.locator('#community-post-actions').getByRole('button',{name:'删除',exact:true}).click();
@@ -174,6 +185,6 @@ try{
   assert.equal((await service.invoke(restarted,'community.posts.get',{id:xss.id})).result.post.status,'resolved');
   assert(service.db.prepare('SELECT count(*) AS n FROM community_chat').get().n>100);
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
-  await writeFile(join(screenshots,'checks.json'),JSON.stringify({status:'passed',errors,external,features:['real SQLite restart persistence','member/admin permissions','plain-text XSS','posts/comments cursor pages','105-message forward polling','unknown-send idempotent retry','deleted retry does not resurrect','409 preserves edit','429 preserves draft','auth reset','320–1440 responsive layout']},null,2));
+  await writeFile(join(screenshots,'checks.json'),JSON.stringify({status:'passed',errors,external,captures,features:['real SQLite restart persistence','member/admin permissions','plain-text XSS','posts/comments cursor pages','105-message forward polling','unknown-send idempotent retry','deleted retry does not resurrect','409 preserves edit','429 preserves draft','auth reset','320–1440 responsive layout']},null,2));
   console.log(JSON.stringify({status:'passed',screenshots,requests:sent.length}));
 }finally{await browser?.close();if(server)await stop();await rm(folder,{recursive:true,force:true});}

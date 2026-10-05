@@ -1,4 +1,5 @@
 import {maintenanceInfoHTML} from './maintenance-state.js';
+import {copyHelp} from './copy-help-ui.js';
 // Compatibility view for old bookmarks. It has no mutation controls.
 const visible=v=>String(v??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
 const esc=v=>visible(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -49,9 +50,8 @@ export function maintenanceUI(store){
   function reset(){generation++;selectionSerial++;identity=null;ready=false;loading=false;cursor=null;host?.replaceChildren();}
   store.onAuthChange(reset);
   function build(){
-    host.innerHTML=`<section class="panel maintenance-history"><div class="maintenance-toolbar"><h2>历史运维记录</h2><button class="button" id="maintenance-refresh">刷新</button></div>
-      <p class="muted">维护申请已停用。历史脚本和结果仅供查阅，未批准的申请不会执行；已开始的操作不会因此停止。</p>
-      <p id="maintenance-list-error" class="form-error" role="status"></p><div id="maintenance-list"></div><button class="button" id="maintenance-more" hidden>下一页</button><div id="maintenance-detail"></div></section>`;
+    host.innerHTML=`<section class="maintenance-history"><div class="maintenance-history-focus hero-frame"><span class="hero-label">只读历史</span><div class="maintenance-toolbar"><div class="copy-caption"><h2>历史申请与结果</h2>${copyHelp('只读历史','维护申请已停用，未批准的申请不会执行。历史脚本和结果仅供查阅，已开始的操作不会因此停止。','/guide/troubleshooting')}</div><button class="button" id="maintenance-refresh">刷新</button></div>
+      <p id="maintenance-list-error" class="form-error" role="status"></p><div id="maintenance-list"></div><button class="button" id="maintenance-more" hidden>下一页</button><div id="maintenance-detail"></div></div></section>`;
     q('#maintenance-refresh').addEventListener('click',()=>load());q('#maintenance-more').addEventListener('click',()=>load(cursor));ready=true;
   }
   async function load(next){
@@ -59,7 +59,7 @@ export function maintenanceUI(store){
     try{
       const result=await store.call('maintenance.list',next?{cursor:next}:{});if(!same(stamp))return;
       cursor=result.nextCursor;q('#maintenance-more').hidden=!cursor;q('#maintenance-list-error').textContent='';
-      q('#maintenance-list').innerHTML=result.items.map(r=>`<button class="maintenance-row" data-id="${esc(r.id)}"><strong>${esc(r.title)}</strong><span>${esc(r.machine)} · ${esc(r.owner.username)} · ${esc(labels[r.state]||r.state)}</span><small>${esc(r.id)}</small></button>`).join('')||'<p class="empty">暂无历史记录。</p>';
+      q('#maintenance-list').innerHTML=result.items.map(r=>`<button class="maintenance-row" data-id="${esc(r.id)}"><strong>${esc(r.title)}</strong><span>${esc(r.machine)} · ${esc(labels[r.state]||r.state)}</span></button>`).join('')||'<p class="empty">暂无历史记录。</p>';
       for(const node of q('#maintenance-list').querySelectorAll('[data-id]'))node.addEventListener('click',()=>show(node.dataset.id));
     }catch(error){if(same(stamp))q('#maintenance-list-error').textContent=error.message;}
     finally{if(same(stamp))loading=false;}

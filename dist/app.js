@@ -11,6 +11,8 @@ import {maintenanceActive} from './maintenance-state.js';
 import {transfersUI} from './transfers-ui.js';
 import {shellUI} from './shell-ui.js';
 import {fadeDialog,reducedMotion} from './motion-ui.js';
+import {copyHelp} from './copy-help-ui.js';
+import {installAuthentication} from './auth-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
@@ -48,14 +50,20 @@ function render(preserve=false){
   $('#pending-count').textContent=pendingUsers().length;$('#pending-count').hidden=!pendingUsers().length;
   $('#current-account').innerHTML=logged?`<span class="current-account-name">${esc(store.principal.username)}</span><span class="current-account-role">${admin?'管理员':'普通用户'}</span>`:'尚未登录';
   $('#profile-name').textContent=logged?u?.name||store.principal.username:'未登录';$('#profile-role').textContent=admin?'管理员':'个人工作空间';
+  $('#profile-name').title=$('#profile-name').textContent;
   $('#edit-profile').hidden=!logged||store.production&&store.data?.taskMetadata?.version!==1;
   if(!logged)$('#profile-dialog').close();
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
   const titles={me:['我的','账号、额度与个人工作区。'],transfers:['传输任务','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
-  $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
+  const concisePage=['community','users','maintenance'].includes(page);
+  $('#page-title').textContent=titles[page][0];$('#page-description').textContent=concisePage?'':titles[page][1];$('#page-description').hidden=concisePage;$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
   const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?page==='resources'?'演示模式，无真实采集。':'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?page==='resources'?'暂无额度，等待管理员授权。':'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
   const monitorNotice=logged&&store.production&&store.data?.gpuq?.stale&&page!=='resources'?'监控已过期：显卡占用为未知；任务结束与额度释放以调度器核对为准。':'';
-  $('#mode-note').textContent=[note,monitorNotice].filter(Boolean).join(' ');$('.demo-note').hidden=!note&&!monitorNotice;
+  if(concisePage){
+    const mode=!logged?'请登录':!store.production?'演示':note?'额度 0':'';
+    $('#mode-note').innerHTML=[mode?`<span>${mode}</span>${copyHelp('当前状态',!logged?'登录或用注册码注册后即可使用。':!store.production?'演示不会连接真实服务器或启动训练。':'获得管理员授权后才能提交训练，仍可查看资源和参与协作。','/guide/start')}`:'',monitorNotice?`<span>监控未更新</span>${copyHelp('监控未更新','显卡占用暂时未知。任务停止、额度释放以平台确认的结果为准。','/guide/troubleshooting')}`:''].filter(Boolean).join(' · ');
+  }else $('#mode-note').textContent=[note,monitorNotice].filter(Boolean).join(' ');
+  $('.demo-note').hidden=!note&&!monitorNotice;
   renderOperationalMaintenance();
   renderTransfers(page==='transfers');renderResources();renderExecution();renderDatasets();renderCommunity(page==='community');renderMaintenance(page==='maintenance');
   if(!keepDraft){const list=filteredUsers();if(!list.some(user=>user.id===selected))selected=list[0]?.id||null;draft=selected?store.get(selected):null;}
@@ -82,21 +90,46 @@ function renderResources(){
 }
 function filteredUsers(){return [...store.users].filter(u=>filter!=='pending'||pending(u)).sort((a,b)=>Number(pending(b))-Number(pending(a))||a.username.localeCompare(b.username,'zh-CN'));}
 function renderUsers(){
-  const list=$('#user-list'),focused=document.activeElement;
+  const list=$('#user-list'),focused=document.activeElement,scrollTop=list.scrollTop;
   const focusedUser=list.contains(focused)?focused.closest('[data-user]')?.dataset.user:null;
   $('#filter-pending').textContent=`待处理 ${pendingUsers().length}`;$('#filter-all').textContent=`全部账号 ${store.users.length}`;
   $('#filter-pending').setAttribute('aria-pressed',String(filter==='pending'));$('#filter-all').setAttribute('aria-pressed',String(filter==='all'));
-  list.innerHTML=filteredUsers().map(u=>`<button class="user-row ${u.id===selected?'selected':''}" data-user="${esc(u.id)}" aria-pressed="${u.id===selected}"><span class="avatar">${esc(u.name.slice(0,1))}</span><span class="user-details"><span class="user-name">${esc(u.name)}</span><span class="user-meta">${label(u)}${u.total?' · '+u.total+' 张':''}</span></span><span class="user-chevron">›</span></button>`).join('')||'<div class="empty">没有待处理的新账号。<br>把注册码发给同学即可自行注册。</div>';
+  list.innerHTML=filteredUsers().map(u=>`<button class="user-row ${u.id===selected?'selected':''}" data-user="${esc(u.id)}" aria-pressed="${u.id===selected}"><span class="avatar">${esc(u.name.slice(0,1))}</span><span class="user-details"><span class="user-name">${esc(u.name)}</span><span class="user-meta">${label(u)}${u.total?' · '+u.total+' 张':''}</span></span><span class="user-chevron">›</span></button>`).join('')||'<div class="empty">暂无待处理账号。</div>';
+  list.scrollTop=scrollTop;
   if(focusedUser)for(const row of list.querySelectorAll('[data-user]'))if(row.dataset.user===focusedUser){row.focus({preventScroll:true});break;}
 }
 function renderEditor(){
-  if(!draft){$('#editor').innerHTML='<div class="editor-empty"><h2>审批都处理好了</h2><p class="muted">新注册账号会自动出现在这里。也可以切到“全部账号”调整已有授权。</p><button class="button" data-action="invites">查看注册码</button></div>';return;}
+  if(!draft){$('#editor').innerHTML='<div class="editor-empty"><h2>审批都处理好了</h2><p class="muted">切到“全部账号”可调整已有授权。</p><button class="button" data-action="invites">查看注册码</button></div>';return;}
   const u=store.get(selected),self=u.id===store.principal.userId,admin=u.role==='admin';
-  $('#editor').innerHTML=`<div class="editor-head"><div><h2>${esc(u.name)}</h2><p class="muted">${label(u)}${self?' · 当前账号':''}</p></div><button class="button" data-action="reset-password">重置密码</button></div><div class="editor-body">${admin?'<div class="approval-note">管理员自动拥有所有机器与最大额度。此角色还可管理用户，并访问已启用的宿主机 root 终端。</div>':`<h3>分配机器与卡数</h3><p class="subtext">勾选机器并填写并发上限；没有勾选的机器不能使用。</p><div class="permissions">${MACHINES.map(m=>`<div class="permission ${draft.limits[m.id]?'granted':''}"><label class="permission-top"><input type="checkbox" data-machine="${m.id}" ${draft.limits[m.id]?'checked':''}><span>${esc(m.id)}</span></label><p class="permission-spec">${m.cards} × ${esc(m.model)}</p><label class="permission-bottom">最多使用<input class="quota-input" type="number" min="1" max="${m.cards}" data-quota="${m.id}" value="${draft.limits[m.id]||1}" ${draft.limits[m.id]?'':'disabled'}>张</label></div>`).join('')}</div><label class="total-limit"><span><strong>所有机器合计上限</strong><small class="subtext">不是预留卡位；没有空闲 GPU 会排队。</small></span><span><input class="quota-input" type="number" min="0" max="${capacity}" data-quota="total" value="${draft.total}"> 张</span></label><div class="editor-save"><button class="button" data-action="grant-full">全部机器最大额度</button><div><button class="button ghost" data-action="reset-draft">撤销</button><button class="button primary" data-action="save-policy">${pending(u)?'批准授权':'保存额度'}</button></div></div><p class="form-error" id="policy-error" role="alert"></p><p class="save-state" id="save-state"></p>`}<details class="account-settings"><summary>账号权限与状态</summary><p class="muted">最大用卡额度 ≠ 管理员。只有完全受信任的维护者才应成为管理员。</p><div class="account-actions"><button class="button" data-action="role" ${self?'disabled':''}>${admin?'改为普通用户':'设为管理员'}</button><button class="button" data-action="enabled" ${self?'disabled':''}>${u.enabled?'暂停账号':'恢复账号'}</button><button class="button danger" data-action="delete" ${self||u.enabled?'disabled':''}>删除账号</button></div><small class="muted">先暂停、确认没有未完成任务后才能删除；数据和历史保留。最后一名管理员不能移除。</small></details></div>`;updateDirty();
+  const permissionsHelp=copyHelp('服务器额度','勾选服务器后才能使用，卡数不绑定具体显卡。新账号会自动出现在待处理，额度为 0，批准后才能提交训练。','/guide/start');
+  const totalHelp=copyHelp('合计额度','排队也占用额度，所有服务器同时受这个上限限制。有额度仍可能需要等空卡。','/guide/queue');
+  const accountHelp=()=>copyHelp('账号权限','用卡额度与管理员权限分开，管理员只能授予受信任的维护者。管理员可管理账号，并访问已启用的服务器管理终端。','/guide/start');
+  const deleteHelp=copyHelp('删除条件','先暂停账号、确认没有未完成任务后才能删除，数据和历史保留。不能删除当前账号或移除最后一名管理员。','/guide/start');
+  $('#editor').innerHTML=`<span class="hero-label">${pending(u)?'待审批':'成员授权'}</span>
+    <div class="editor-head"><div><h2>${esc(u.name)}</h2><p class="muted"><span class="member-username">${esc(u.username)}</span> · ${label(u)}${self?' · 当前账号':''}</p></div><button class="button" data-action="reset-password">重置密码</button></div>
+    <div class="editor-body">${admin?`<div class="approval-note copy-caption"><span>全部服务器 · ${capacity} 张</span>${accountHelp()}</div>`:`
+      <div class="editor-save"><div><p id="policy-summary"></p><p class="save-state" id="save-state" role="status"></p></div><div><button class="button ghost" data-action="reset-draft">撤销</button><button class="button primary" data-action="save-policy">${pending(u)?'批准授权':'保存额度'}</button></div></div>
+      <p class="form-error" id="policy-error" role="alert"></p>
+      <div class="permission-heading"><div class="copy-caption"><h3>服务器额度</h3>${permissionsHelp}</div><button class="button" data-action="grant-full">全部最大额度</button></div>
+      <div class="permissions">${MACHINES.map(m=>`<div class="permission ${draft.limits[m.id]?'granted':''}"><label class="permission-top"><input type="checkbox" data-machine="${esc(m.id)}" ${draft.limits[m.id]?'checked':''}><span class="permission-name" title="${esc(m.id)}">${esc(m.id)}</span><small class="permission-spec">${m.cards} × ${esc(m.model)}</small></label><div class="permission-bottom"><span class="permission-meter" data-permission-meter="${esc(m.id)}" aria-hidden="true">${Array.from({length:m.cards},()=>'<i></i>').join('')}</span><label>最多使用<input class="quota-input" type="number" min="1" max="${m.cards}" data-quota="${esc(m.id)}" value="${draft.limits[m.id]||0}" ${draft.limits[m.id]?'':'disabled'}> / ${m.cards} 张</label></div></div>`).join('')}</div>
+      <div class="total-limit"><div class="copy-caption"><label for="member-total"><strong>合计额度</strong></label>${totalHelp}</div><span><input id="member-total" class="quota-input" type="number" min="0" max="${capacity}" data-quota="total" value="${draft.total}"> / ${capacity} 张</span></div>
+      <div class="member-draft-note copy-caption" hidden><span>刷新会丢弃修改。</span>${copyHelp('授权草稿','自动更新会保留正在填写的草稿。关闭或刷新页面会丢弃未保存的修改。','/guide/start')}</div>`}
+      <details class="account-settings"><summary>账号权限与状态</summary><div class="copy-caption"><span>管理权限</span>${accountHelp()}</div><div class="account-actions"><button class="button" data-action="role" ${self?'disabled title="不能修改当前账号"':''}>${admin?'改为普通用户':'设为管理员'}</button><button class="button" data-action="enabled" ${self?'disabled title="不能暂停当前账号"':''}>${u.enabled?'暂停账号':'恢复账号'}</button><button class="button danger" data-action="delete" ${self||u.enabled?'disabled':''} title="${self?'不能删除当前账号':u.enabled?'先暂停账号':'删除账号'}">删除账号</button>${deleteHelp}</div></details>
+    </div>`;updateDirty();
 }
-function updateDirty(){const el=$('#save-state');if(el)el.textContent=dirty()?'有未保存的额度修改':'当前额度已保存';}
+function updateDirty(){
+  const state=$('#save-state');if(state)state.textContent=dirty()?'未保存':'已保存';
+  const draftNote=$('.member-draft-note');if(draftNote)draftNote.hidden=!dirty();
+  const summary=$('#policy-summary');if(!summary||!draft)return;
+  const valid=Number.isSafeInteger(draft.total)&&draft.total>=0&&draft.total<=capacity&&MACHINES.every(m=>draft.limits[m.id]===undefined||Number.isSafeInteger(draft.limits[m.id])&&draft.limits[m.id]>=1&&draft.limits[m.id]<=m.cards);
+  summary.textContent=valid?[...MACHINES.filter(m=>draft.limits[m.id]>0).map(m=>m.id+' '+draft.limits[m.id]+' 张'),'合计 '+draft.total+' 张'].join(' · '):'额度草稿中有待校正的数值';
+  for(const meter of document.querySelectorAll('[data-permission-meter]')){
+    const count=draft.limits[meter.dataset.permissionMeter]||0,max=MACHINES.find(m=>m.id===meter.dataset.permissionMeter).cards;
+    for(const [index,tick] of [...meter.children].entries())tick.classList.toggle('is-on',Number.isSafeInteger(count)&&count>=0&&count<=max&&index<count);
+  }
+}
 async function refresh(){if(refreshing||!store.principal)return;refreshing=true;shell.syncStatus('syncing');try{await store.refresh();render(true);shell.syncStatus('ready',Date.now());if($('#invites-dialog').open)await loadInvites();}catch(e){shell.syncStatus('failed');report(e);}finally{refreshing=false;}}
-async function loadInvites(){const result=await store.call('invites.list');inviteCode=result.code;const i=result.invitations[0];$('#invites-content').innerHTML=`<section class="invite-card"><div class="invite-heading"><h3>当前注册码</h3><span class="badge ${i.available?'active':'pending'}">${i.available?'可用':'未启用'}</span></div><p class="muted">新用户用此码自行注册；初始额度为 0，管理员随后审批。不会授予管理员权限。</p>${inviteCode?`<label class="field">注册码<input id="current-invite" readonly spellcheck="false" value="${esc(inviteCode)}"></label><button class="button" data-action="copy-invite">复制注册码</button>`:`<p class="approval-note">${i.available?'旧注册码仅有摘要，无法显示。请换新一次；已有账号不受影响。':'生成一个注册码后即可邀请同学。'}</p>`}<p class="muted">本码已注册 ${i.uses} 个账号。管理员重新打开此页仍可查看当前有效码。</p><div class="invite-actions"><button class="button primary" data-action="rotate-invite">${i.createdAt?'换新注册码':'生成注册码'}</button><button class="button danger" data-action="disable-invite" ${i.enabled?'':'disabled'}>停用注册</button></div></section>`;}
+async function loadInvites(){const result=await store.call('invites.list');inviteCode=result.code;const i=result.invitations[0];$('#invites-content').innerHTML=`<section class="invite-card"><div class="invite-heading"><h3>当前注册码</h3><span class="badge ${i.available?'active':'pending'}">${i.available?'可用':'未启用'}</span></div>${copyHelp('注册码','注册码不是登录密码，新账号额度为 0，需要管理员授权，不会获得管理员权限。复制给同学即可注册，换新或停用只影响后续注册。','/guide/start')}${inviteCode?`<label class="field">注册码<input id="current-invite" readonly spellcheck="false" value="${esc(inviteCode)}"></label><button class="button" data-action="copy-invite">复制注册码</button>`:`<p class="approval-note">${i.available?'旧码无法显示，请换新一次。':'生成一个注册码后即可邀请同学。'}</p>`}<p class="muted">已注册 ${i.uses} 个账号</p><div class="invite-actions"><button class="button primary" data-action="rotate-invite">${i.createdAt?'换新注册码':'生成注册码'}</button><button class="button danger" data-action="disable-invite" ${i.enabled?'':'disabled'}>停用注册</button></div></section>`;}
 async function guardedChange(action){if(dirty()){toast('请先保存或撤销额度草稿。');return;}await action();}
 document.addEventListener('click',async event=>{
   const b=event.target.closest('button,a[data-nav]');if(!b||b.disabled)return;
@@ -138,6 +171,15 @@ $('#login-form').addEventListener('submit',async event=>{event.preventDefault();
 $('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'),data.get('signup-name')||undefined);await store.login(data.get('username'),data.get('password'));event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#invites-dialog').addEventListener('close',()=>{inviteCode=null;$('#invites-content').innerHTML='';});
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
+const publicGuide=$('.guide-link'),guideHome=publicGuide.parentNode,guideAfter=publicGuide.nextSibling;
+function syncAuthGuide(){
+  const active=$('#register-dialog').open?$('#register-dialog'):$('#login-dialog').open?$('#login-dialog'):null;
+  if(active)active.querySelector('[data-auth-guide-slot]').append(publicGuide);
+  else guideHome.insertBefore(publicGuide,guideAfter);
+}
+const authGuideObserver=new MutationObserver(syncAuthGuide);
+for(const dialog of [$('#login-dialog'),$('#register-dialog')])authGuideObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
+installAuthentication();
 const initialHash=location.hash.slice(1);if(store.principal){defaultPage();if(['work','resources','datasets','transfers','community','maintenance','users','me'].includes(initialHash))page=initialHash;}render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});

@@ -1,6 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DemoStore} from '../dist/model.js';
+import {MACHINES} from '../dist/machines.js';
+import {mkdtemp,copyFile,writeFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
+
+test('demo authorization and requests follow renamed inventory IDs',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-demo-inventory-'));
+  const inventory=MACHINES.map((machine,index)=>({...machine,id:'inventory-server-with-a-long-name-'+(index+1)}));
+  try{
+    await copyFile(new URL('../dist/model.js',import.meta.url),join(dir,'model.js'));
+    await copyFile(new URL('../dist/task-metadata.js',import.meta.url),join(dir,'task-metadata.js'));
+    await writeFile(join(dir,'package.json'),JSON.stringify({type:'module'}));
+    await writeFile(join(dir,'machines.js'),'export const MACHINES='+JSON.stringify(inventory)+';');
+    const {DemoStore:ConfiguredStore}=await import(pathToFileURL(join(dir,'model.js')).href);
+    const store=new ConfiguredStore(),user=store.get('demo-chen');
+    assert.deepEqual(Object.keys(user.limits),inventory.slice(0,3).map(machine=>machine.id));
+    assert.ok(store.snapshot().users.every(member=>Object.keys(member.limits).every(id=>inventory.some(machine=>machine.id===id))));
+    assert.equal(store.request(user.id,inventory[0].id,1).machine,inventory[0].id);
+    assert.throws(()=>store.request(user.id,MACHINES[0].id,1),/未授权/,'old example IDs must not authorize a renamed server');
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
 
 test('save per-machine permissions and enforce cross-machine total',()=>{
   const s=new DemoStore();s.save('demo-chen',{limits:{'gpu-1':2,'gpu-2':2},total:3});

@@ -67,6 +67,7 @@ try{
       else if(operation==='datasets.capacity')result={machine:args.machine,available:false};
       else if(operation==='community.info')result={enabled:true,capabilities:[]};
       else if(operation==='community.posts.list')result={posts:[],nextCursor:null};
+      else if(operation==='community.chat.list')result={messages:[],nextCursor:null,latestCursor:null,hasMore:false};
       else throw Error('Resource acceptance cannot execute '+operation);
     }
     return route.fulfill({contentType:'application/json',body:JSON.stringify({result,token:'synthetic-local-session',state:state(),principal:principal()})});

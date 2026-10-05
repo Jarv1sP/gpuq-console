@@ -54,6 +54,7 @@ test('first-time users can install and select an actual machine without joining 
   assert.match(guide, /gpuctl login[\s\S]*gpuctl state[\s\S]*gpuctl use MACHINE_ID/);
   assert.match(guide, /新账号的用卡额度为 0/);
   assert.match(guide, /机器 ID/);
+  assert.doesNotMatch(guide, /\bgpu-\d+\b/, 'server arguments use the catalog ID parameter, never an example server name');
 });
 
 test('training walkthrough distinguishes local edits, published snapshots and output files', () => {
@@ -131,7 +132,7 @@ test('unified dataset guide distinguishes catalog, capacity and preparation from
 
 test('collaboration uses posts and chat while root requests stay retired', () => {
   assert.match(guide, /只有“帖子”和“聊天”两个入口/);
-  assert.match(guide, /展开聊天底部的“任务留言”/);
+  assert.match(guide, /展开聊天里的“任务留言”/);
   assert.match(guide, /旧维护申请流程已停用/);
   assert.match(guide, /现有共享\/隔离 Python 环境继续可用，但不能通过 `sudo apt` 修改宿主机/);
 });
