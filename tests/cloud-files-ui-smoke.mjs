@@ -69,7 +69,18 @@ try{
       if(file==='index.html')body=body.toString().replace('globalThis.GPUQ_LOCAL_API=false;','globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;globalThis.GPUQ_HAS_SESSION=true;');
       return route.fulfill({contentType:file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.woff2')?'font/woff2':'text/html',body});
     });
-    await page.goto(origin);await page.locator('#execution-workspace').waitFor();await page.locator('[data-nav=datasets]').click();
+    await page.goto(origin);await page.locator('#execution-workspace').waitFor();
+    const skipBounds=()=>page.locator('.skip-link').evaluate(node=>{const rect=node.getBoundingClientRect();return {focused:document.activeElement===node,top:rect.top,bottom:rect.bottom};});
+    assert((await skipBounds()).bottom<=0);await page.locator('.skip-link').focus();
+    const focusedSkip=await skipBounds();assert.equal(focusedSkip.focused,true);assert(focusedSkip.top>=0&&focusedSkip.bottom>focusedSkip.top);
+    await page.evaluate(()=>document.activeElement?.blur());assert((await skipBounds()).bottom<=0);
+    const screenshot=async name=>{
+      // Native fixed sheets fit the real viewport. fullPage resizing can
+      // paint an unfocused, offscreen fixed skip link into the expanded image.
+      await page.evaluate(()=>{document.activeElement?.blur();scrollTo({top:0,left:0,behavior:'instant'});});
+      assert((await skipBounds()).bottom<=0);await page.screenshot({path:join(screenshots,name+'.png')});
+    };
+    await page.locator('[data-nav=datasets]').click();
     await page.locator('#datasets-refresh').click();await page.locator('.dataset-matrix').waitFor();
     await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
     assert.deepEqual(await page.locator('.dataset-matrix-heading .server-id').allTextContents(),machines.map(m=>m.id));
@@ -92,7 +103,7 @@ try{
     await page.locator('[name=cloud-files-path]').fill('incoming/research-data.tar');await submitUpload();
     const upload=calls.find(c=>c.operation==='cloud.files.upload').args;
     const own=()=>rows.get(machines[0].id),uploadRow=()=>own().find(row=>row.operationId===upload.key);
-    const captureState=async(name,width)=>{await page.setViewportSize({width,height:1000});await page.locator('#cloud-files').evaluate(node=>{const dialog=node.closest('dialog');dialog.scrollTop+=node.getBoundingClientRect().top-dialog.getBoundingClientRect().top-dialog.querySelector('header').getBoundingClientRect().height-16;});await page.screenshot({path:join(screenshots,name+'-'+role+'-'+width+'.png'),fullPage:true});};
+    const captureState=async(name,width)=>{await page.setViewportSize({width,height:1000});await page.locator('#cloud-files').evaluate(node=>{const dialog=node.closest('dialog');dialog.scrollTop+=node.getBoundingClientRect().top-dialog.getBoundingClientRect().top-dialog.querySelector('header').getBoundingClientRect().height-16;});await screenshot(name+'-'+role+'-'+width);};
     assert.equal(await page.locator('[data-cloud-restore]').count(),0);
     for(const state of ['RUNNING','VERIFYING']){uploadRow().state=state;await refresh();assert.equal(await page.locator('[data-cloud-restore]').count(),0);}
     await captureState('cloud-verifying',1440);
@@ -101,6 +112,7 @@ try{
     assert.equal(verify.fileId,upload.key);assert.notEqual(verify.key,upload.key);assert.equal(await page.locator('[data-cloud-restore]').count(),0);
     own().find(row=>row.operationId===verify.key).state='VERIFIED';uploadRow().state='VERIFIED';await refresh();
     assert.equal(await page.locator('[data-cloud-restore]').count(),1);
+    assert.deepEqual(await page.locator('#cloud-files-list > li > .mono').allTextContents(),['4.0 MiB','4.0 MiB']);
     await captureState('cloud-verified',390);await page.setViewportSize({width:1440,height:1000});
     let prompts=0;page.on('dialog',async dialog=>{prompts++;await dialog.accept('restored/research-data.tar');});
     await page.locator('[data-cloud-restore]').click();await idle();
@@ -129,17 +141,17 @@ try{
     const restore=page.locator('[data-cloud-restore]');await restore.evaluate((button,id)=>{button.dataset.cloudRestore=id;},randomUUID());
     const downloads=calls.filter(c=>c.operation==='cloud.files.download').length;await restore.click();await idle();assert.equal(calls.filter(c=>c.operation==='cloud.files.download').length,downloads);assert.equal(prompts,1);
     await refresh();
-    // Capture the full real sheet at all requested widths. Names are provided
+    // Capture the real sheet viewport at all requested widths. Names are provided
     // by inventory; they are never a constant in the product or this test.
     for(const width of [1440,390,320]){
       await page.setViewportSize({width,height:1000});await page.locator('#cloud-files').scrollIntoViewIfNeeded();await page.evaluate(()=>document.fonts.ready);
       const layout=await page.evaluate(()=>({width:innerWidth,document:document.documentElement.scrollWidth,dialog:document.querySelector('#dataset-add-dialog').scrollWidth,client:document.querySelector('#dataset-add-dialog').clientWidth,buttons:[...document.querySelectorAll('#cloud-files .button')].filter(el=>el.getClientRects().length).map(el=>({height:el.getBoundingClientRect().height,text:el.textContent}))}));
       assert(layout.document<=width+1);assert(layout.dialog<=layout.client+1);assert(layout.buttons.every(b=>b.height>=44));checks.push({role,...layout});
-      await page.screenshot({path:join(screenshots,'cloud-files-'+role+'-'+width+'.png'),fullPage:true});
+      await screenshot('cloud-files-'+role+'-'+width);
     }
     // A selected server with disabled cloud support has no fake empty list.
     cloudEnabled=false;await refresh();assert.equal(await page.locator('#cloud-files-form').isHidden(),true);assert.equal(await page.locator('#cloud-files-list li').count(),0);assert.equal(await page.locator('#cloud-files-status').textContent(),'这台服务器未开启云端文件');
-    await page.screenshot({path:join(screenshots,'cloud-files-disabled-'+role+'-320.png'),fullPage:true});
+    await screenshot('cloud-files-disabled-'+role+'-320');
     // Backend rejection remains visible for zero authorization; role cannot
     // turn it into availability or a successful operation.
     deny=true;await refresh();assert.match(await page.locator('#cloud-files-status').textContent(),/未授权/);deny=false;cloudEnabled=true;

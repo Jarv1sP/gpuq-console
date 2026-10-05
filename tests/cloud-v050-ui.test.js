@@ -26,6 +26,14 @@ test('queued, running, verifying and unknown are not reliable copies; only VERIF
   assert.match(cloudFilesRows([{operationId:randomUUID(),state:'UNRECOGNIZED'}]),/状态未确认/);
 });
 
+test('only a RUNNING transfer shows progress; verified and other states show the file size',()=>{
+  const row={operationId:randomUUID(),action:'upload',bytes:0,totalBytes:4*1024**2};
+  assert.match(cloudFilesRows([{...row,state:'RUNNING'}]),/>0\.0 \/ 4\.0 MiB</);
+  for(const state of ['QUEUED','VERIFYING','VERIFIED','READY','PAUSED','FAILED','UNKNOWN']){
+    const html=cloudFilesRows([{...row,state}]);assert.match(html,/>4\.0 MiB</);assert.doesNotMatch(html,/0\.0 \/ 4\.0/);
+  }
+});
+
 test('server-file copy has no computer file picker, account, token, or upload-to-cloud promise',()=>{
   const html=cloudFilesHTML();assert.match(html,/把服务器上的个人文件存一份到云端/);
   assert.doesNotMatch(html,/type="file"|电脑直传云盘|name="(?:token|password|account)"/);
@@ -124,4 +132,3 @@ test('unsafe and oversized UTF-8 relative paths never reach the cloud API',async
     const h=harness(()=>assert.fail('invalid path reached the API'));h.nodes['[name=cloud-files-path]'].value=path;h.submit();await drain();assert.equal(h.calls.length,0);assert.match(h.nodes['#cloud-files-status'].textContent,/相对文件路径/);
   }
 });
-
