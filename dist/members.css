@@ -197,6 +197,12 @@
 @media(prefers-reduced-motion:reduce){.sb #login-dialog.wordmark-ignition .auth-lambda{animation:none!important;opacity:1;clip-path:none}}
 
 /* Keep one mobile control entry and fit the compact header without a second row. */
+.sb #app-topbar{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr)}
+.sb #app-topbar .account-menu{min-width:0;flex:0 1 auto}
+.sb #app-topbar #account-menu-toggle{min-width:0}
+.sb #app-topbar #account-menu-toggle>span:last-child,.sb #app-topbar .av,.sb #app-topbar :is(.guide-link,.sync){flex:none}
+.sb #app-topbar .acct-t{min-width:0;max-width:12em}
+.sb #app-topbar #profile-name{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 @media(max-width:759px){
  .sb[data-room=users] .page-heading{display:flex;flex-direction:row;align-items:center;justify-content:space-between}
  .sb[data-room=users] .page-heading>div:first-child{min-width:0;flex:1}

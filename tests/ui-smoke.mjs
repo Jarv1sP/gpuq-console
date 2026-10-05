@@ -68,7 +68,28 @@ try{
   await p.evaluate(()=>scrollTo(0,0));
   await p.screenshot({path:join(process.env.UI_SCREENSHOTS,name),fullPage:await p.locator('dialog[open]').count()===0});
  }
- await login(admin,'admin');await admin.locator('[data-nav=resources]').click();
+ await login(admin,'admin');
+ const headerUser=portal.service.store.users.find(user=>user.username==='admin'),originalName=headerUser.name;
+ const longName='超长账户名'.repeat(6)+'验证';headerUser.name=longName;portal.service.save();await refreshPage(admin);
+ await admin.waitForFunction(name=>document.querySelector('#profile-name').textContent===name,longName);
+ for(const width of [1440,390,320]){
+  await admin.setViewportSize({width,height:width===1440?1050:844});await admin.evaluate(()=>document.fonts.ready);
+  if(width<=360)await admin.waitForFunction(()=>document.querySelector('#app-topbar .wordmark').classList.contains('sm'));
+  const header=await admin.evaluate(()=>{
+   const selectors=['#app-topbar .brand','#app-topbar .guide-link','#refresh-state','#account-menu-toggle'];if(innerWidth>=760)selectors.push('#room-nav');
+   const boxes=selectors.map(selector=>({selector,...document.querySelector(selector).getBoundingClientRect().toJSON()}));
+   const name=document.querySelector('#profile-name'),style=getComputedStyle(name);
+   return{width:innerWidth,pageWidth:document.documentElement.scrollWidth,boxes,nameWidth:name.clientWidth,nameFullWidth:name.scrollWidth,nameFont:parseFloat(style.fontSize),ellipsis:style.textOverflow,title:name.title};
+  });
+  assert.ok(header.pageWidth<=header.width+1,'long account name must not cause horizontal scrolling at '+width+': '+JSON.stringify(header));
+  for(const box of header.boxes)assert.ok(box.x>=-1&&box.x+box.width<=width+1,'header target stays inside '+width+': '+box.selector);
+  for(const [index,box] of header.boxes.entries())for(const other of header.boxes.slice(index+1))assert.ok(box.x+box.width<=other.x+1||other.x+other.width<=box.x+1||box.y+box.height<=other.y+1||other.y+other.height<=box.y+1,'header targets do not overlap at '+width+': '+box.selector+' / '+other.selector);
+  assert.equal(header.title,longName,'the truncated account name keeps its full title');
+  if(width===1440){assert.equal(header.ellipsis,'ellipsis');assert.ok(header.nameWidth<=12*header.nameFont+1&&header.nameFullWidth>header.nameWidth,'desktop account name is bounded and truncated');}
+  if(process.env.UI_SCREENSHOTS){await mkdir(process.env.UI_SCREENSHOTS,{recursive:true});await admin.screenshot({path:join(process.env.UI_SCREENSHOTS,'topbar-long-account-'+width+'.png'),fullPage:false});}
+ }
+ headerUser.name=originalName;portal.service.save();await refreshPage(admin);await admin.setViewportSize({width:1440,height:1050});
+ await admin.locator('[data-nav=resources]').click();
  assert.equal(await admin.locator('.resource-card').count(),MACHINES.length);
  assert.equal(await admin.locator('.resource-tower').count(),MACHINES.reduce((total,machine)=>total+machine.cards,0));
  assert.equal(await admin.locator('[data-resource-selected]').count(),1);
