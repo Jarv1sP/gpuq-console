@@ -153,6 +153,7 @@ try{
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   previous=(await page.evaluate(()=>resourceAnimations)).length;
   await selectResource(page,'gpu-1');assert.equal(await page.locator('#resource-sheet').evaluate(element=>Math.round(element.getBoundingClientRect().height)),844);
+  assert.equal(await page.locator('#resource-sheet .resource-policy [data-use-machine]').isVisible(),false,'The pinned footer owns the phone workspace action');
   assert.ok((await page.evaluate(()=>resourceAnimations)).slice(previous).some(item=>item.options.duration===350));
   await capture('resources-detail-member-390');
   await page.keyboard.press('Escape');assert.equal(await page.locator('#resource-sheet[open]').count(),0);
@@ -175,6 +176,7 @@ try{
   assert.equal(await page.locator('#host-maintenance').getAttribute('open'),'');
   assert.equal(calls.filter(call=>call.operation.startsWith('terminal.')||call.operation.startsWith('jobs.')).length,0,'ROOT entry only reveals the existing administrator controls');
   await page.locator('[data-nav=resources]').click();await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await selectResource(page,'gpu-1');await capture('resources-detail-admin-390');
+  assert.ok((await page.locator('[data-resource-root]').boundingBox()).height>=44,'Phone administrator actions retain a 44px target');
   violations.push(...await page.evaluate(()=>resourceCSP));
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(violations,[]);
   checks.push('exact physical slots','selected server only','member/admin process columns','confirmed own-task fills','stale/partial/invalid/unauthorized states','sample-gated motion and reduced fallback','Mission Control selection','terminal context cancel/accept','phone push, Escape and reserved live pill','identity reset','ROOT entry makes no execution call','Portal CSP and self-hosted assets');

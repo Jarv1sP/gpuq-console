@@ -157,6 +157,8 @@
  .sb :is(.resource-process-list,.resource-full-metrics)>summary{font-size:15px;padding-block:10px}
  .sb :is(.resource-process-list,.resource-full-metrics)>summary span{font-size:12px}
  .sb .resource-policy{font-size:13px;gap:12px}
+ .sb .resource-sheet .resource-policy [data-use-machine]{display:none}
+ .sb .resource-sheet .resource-policy .button{min-height:44px;margin-left:0}
  .sb .resource-sheet .sheet-header .button{min-height:44px;font-size:15px}
 }
 @media(prefers-reduced-motion:reduce){.sb .resource-select{transition:none}}
