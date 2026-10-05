@@ -147,9 +147,10 @@ export function executionUI(store,refresh,toast){
   function renderReceipt(){
     const root=query('#submission-receipt');if(!root)return;
     const receipt=submitReceipt&&submitReceipt.actor===receiptActor()?submitReceipt:null;root.hidden=!receipt;if(!receipt){root.replaceChildren();query('#submit-receipt-actions')?.replaceChildren();return;}
+    const retryAllowed=!operationBusy&&store.production&&store.data?.executionEnabled===true&&!maintenanceFor(store.data?.operationalMaintenance,receipt.args.machine),errorClass=receipt.maintenance?'maintenance-held':'form-error';
     const job=receipt.job,word={pending:'正在提交',confirmed:'已提交',unknown:'提交结果待确认',rejected:'未提交'}[receipt.status];
-    const sheet=query('#submit-receipt-actions');if(sheet)sheet.innerHTML=`${receipt.error?`<p class="form-error">${escape(receipt.error)}</p>`:''}${receipt.status==='unknown'?`<button class="button quiet" type="button" data-receipt-refresh ${operationBusy?'disabled':''}>刷新核对</button><button class="button quiet" type="button" data-receipt-retry ${operationBusy?'disabled':''}>原样重试</button>`:receipt.status==='confirmed'?'<button class="button quiet" type="button" data-receipt-new-draft>再次使用配置</button>':''}`;
-    root.innerHTML=`<div><strong>${word}</strong><span>${escape(receipt.args.machine)} · ${escape(receipt.args.name)}${job?.createdAt?' · '+escape(sampleTime(job.createdAt)):''}${job?.id?' · '+escape(job.id.slice(0,8)):''}</span>${receipt.error?`<p class="form-error">${escape(receipt.error)}</p>`:''}</div><div class="job-acts">${job?.id?`<button class="button quiet" type="button" data-job-detail="${escape(job.id)}">查看任务</button><button class="button quiet" type="button" id="submission-new-draft">再次使用配置</button>`:''}${receipt.status==='unknown'?`<button class="button quiet" type="button" id="submission-refresh" ${operationBusy?'disabled':''}>刷新核对</button><button class="button quiet" type="button" id="submission-retry" ${operationBusy||!store.production||store.data?.executionEnabled!==true?'disabled':''}>原样重试</button>${infoHTML('重试使用原服务器、原版本和同一个提交标识。不会重复创建同一次提交。','重试说明')}`:''}</div>`;
+    const sheet=query('#submit-receipt-actions');if(sheet)sheet.innerHTML=`${receipt.error?`<p class="${errorClass}">${escape(receipt.error)}</p>`:''}${receipt.status==='unknown'?`<button class="button quiet" type="button" data-receipt-refresh ${operationBusy?'disabled':''}>刷新核对</button><button class="button quiet" type="button" data-receipt-retry ${retryAllowed?'':'disabled'}>原样重试</button>`:receipt.status==='confirmed'?'<button class="button quiet" type="button" data-receipt-new-draft>再次使用配置</button>':''}`;
+    root.innerHTML=`<div><strong>${word}</strong><span>${escape(receipt.args.machine)} · ${escape(receipt.args.name)}${job?.createdAt?' · '+escape(sampleTime(job.createdAt)):''}${job?.id?' · '+escape(job.id.slice(0,8)):''}</span>${receipt.error?`<p class="${errorClass}">${escape(receipt.error)}</p>`:''}</div><div class="job-acts">${job?.id?`<button class="button quiet" type="button" data-job-detail="${escape(job.id)}">查看任务</button><button class="button quiet" type="button" id="submission-new-draft">再次使用配置</button>`:''}${receipt.status==='unknown'?`<button class="button quiet" type="button" id="submission-refresh" ${operationBusy?'disabled':''}>刷新核对</button><button class="button quiet" type="button" id="submission-retry" ${retryAllowed?'':'disabled'}>原样重试</button>${infoHTML('重试使用原服务器、原版本和同一个提交标识。不会重复创建同一次提交。','重试说明')}`:''}</div>`;
     updatePreflight();
   }
   async function submitRequest(args){
@@ -160,7 +161,7 @@ export function executionUI(store,refresh,toast){
       submitReceipt={actor:owner,args:structuredClone(args),status:'confirmed',job};acceptedDraft=true;submitKey=crypto.randomUUID();refresh();renderReceipt();toast('已提交。');
     }catch(error){
       if(owner!==receiptActor())return;
-      submitReceipt={actor:owner,args:structuredClone(args),status:[400,401,403,409,422,429].includes(error.status)?'rejected':'unknown',error:error.message};renderReceipt();throw error;
+      submitReceipt={actor:owner,args:structuredClone(args),status:error.code==='MAINTENANCE_ACTIVE'||[400,401,403,409,422,429].includes(error.status)?'rejected':'unknown',maintenance:error.code==='MAINTENANCE_ACTIVE',error:error.message};renderReceipt();throw error;
     }
   }
   function updatePreflight(){

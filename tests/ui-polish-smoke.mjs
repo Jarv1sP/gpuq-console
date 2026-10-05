@@ -79,7 +79,7 @@ try{
   await capture('workspace-desktop');
   assert.match(await page.locator('#self-summary').innerText(),/8/);
   assert.equal(await page.locator('[name=priority] option').count(),3);
-  assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);
+  const queueInfo=page.locator('[data-workbench-job="22222222-2222-4222-8222-222222222222"] .ui-info>summary');await queueInfo.click();assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);await queueInfo.click();
   await page.locator('[data-nav=resources]').click();
   await currentNav('resources');
   if(baseline)assert.equal(await page.locator('[data-gpu-index]').count(),MACHINES.reduce((n,m)=>n+m.cards,0));
@@ -123,7 +123,13 @@ try{
   }
   await page.setViewportSize({width:1440,height:1080});
   await page.locator('[data-nav=datasets]').click();await currentNav('datasets');
-  await page.locator('#datasets-refresh').click();await page.locator('.dataset-readiness[data-state=PREPARING]').waitFor();
+  await page.locator('#datasets-refresh').click();
+  const preparing=page.locator('.dataset-readiness[data-state=PREPARING]');
+  await preparing.waitFor({state:'attached'});
+  await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').waitFor();
+  assert.match(await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').innerText(),/准备中/);
+  await page.locator('.dataset-version-details').filter({has:preparing}).locator('summary').click();
+  await preparing.waitFor();
   await textContrast();await capture('datasets-desktop');
   assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','The first confirmed catalog is settled; motion requires a real state diff');
   assert.match(await page.locator('.dataset-readiness[data-state=PREPARING]').textContent(),/准备中/,'Readiness remains clear without motion');
@@ -154,7 +160,10 @@ try{
   console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','single current navigation','STARGATE accessible brand','helper text AA contrast','confirmed readiness without decorative motion','reduced motion']}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}
 
-// The existing CI entry point also runs the owner-bound Portal/CSP acceptance.
-if(!baseline)await import('./starbase-ui-smoke.mjs');
-if(!baseline)await import('./resources-ui-smoke.mjs');
-if(!baseline)await import('./resource-ids-ui-smoke.mjs');
+// The existing CI entry point runs Portal/CSP, compute, inventory names, and R5 acceptance.
+if(!baseline){
+  await import('./starbase-ui-smoke.mjs');
+  await import('./resources-ui-smoke.mjs');
+  await import('./resource-ids-ui-smoke.mjs');
+  await import('./r5-ui-smoke.mjs');
+}
