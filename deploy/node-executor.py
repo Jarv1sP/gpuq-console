@@ -66,6 +66,11 @@ def job_diagnostics(job,data):
         DIAGNOSTICS=importlib.util.module_from_spec(spec);spec.loader.exec_module(DIAGNOSTICS)
     return DIAGNOSTICS.bundle(ROOT,job,data)
 
+def job_observation(job,data,expected_node_id):
+    spec=importlib.util.spec_from_file_location('gpuq_job_observation',HERE/'job-observation.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module.observe(ROOT,CONFIG['database'],job,data,expected_node_id)
+
 def job_log_result(job,data,text):
     try:
         package=job_diagnostics(job,data)
@@ -977,7 +982,10 @@ def process(operation,args):
     if operation.startswith('datasets.storage.'):return storage_management(operation,args)
     if operation.startswith('transfers.'):return transfers().process(operation,args)
     if operation in ('diagnostics','watch'):
-        if not isinstance(args,dict) or set(args)!={'job'}:raise ValueError('Invalid diagnostic operation fields')
+        if not isinstance(args,dict) or 'job' not in args or set(args)-{'job','expectedNodeJobId'}:raise ValueError('Invalid diagnostic operation fields')
+        expected_node_id=args.get('expectedNodeJobId')
+        if 'expectedNodeJobId' in args and (not isinstance(expected_node_id,str) or not re.fullmatch(r'J[a-f0-9]{12}',expected_node_id)):
+            raise ValueError('Invalid expected native job identity')
         job=args['job'];validate_job(job,readonly=True)
         spec=ROOT/'jobs'/(job['id']+'.json')
         if spec.exists() and json.loads(spec.read_text())!=job:raise ValueError('Job identity mismatch')
@@ -985,19 +993,20 @@ def process(operation,args):
             row=db.execute('SELECT id FROM jobs WHERE submit_key=?',(job['id'],)).fetchone()
         if row and not spec.exists():raise ValueError('Job identity is unavailable')
         data=gpu('show',row[0]) if row else {'job':{'state':'NOT_SUBMITTED'},'attempts':[]}
-        if operation=='diagnostics':return job_diagnostics(job,data)
+        observation={'nativeObservation':job_observation(job,data,expected_node_id)} if expected_node_id is not None else {}
+        if operation=='diagnostics':return {**job_diagnostics(job,data),**observation}
         state=data.get('job',data);attempts=data.get('attempts',[])
         assigned=attempts[0].get('gpu_indices',[]) if attempts and state.get('state') not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
         if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and not scheduler_terminal_confirmed(data):
             return {'nodeJobId':row[0],'state':'UNKNOWN','assignedIndices':attempts[0].get('gpu_indices',[]) if attempts else [],
-                    **scheduling_status(job,data),'error':'Job termination is not fully confirmed; card reservation retained'}
+                    **scheduling_status(job,data),**observation,'error':'Job termination is not fully confirmed; card reservation retained'}
         if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and dataset_refs(job) and (ROOT/'jobs'/(job['id']+'.datasets.json')).exists():
             # The periodic lifecycle reconciliation must confirm process
             # cleanup and release leases. A viewer cannot release them.
             return {'nodeJobId':row[0],'state':'UNKNOWN','assignedIndices':[],
-                    'error':'Dataset lease cleanup awaits scheduler reconciliation',**scheduling_status(job,data)}
+                    'error':'Dataset lease cleanup awaits scheduler reconciliation',**scheduling_status(job,data),**observation}
         return {'nodeJobId':row[0] if row else None,'state':state['state'] if row else 'PENDING',
-                'assignedIndices':assigned,**scheduling_status(job,data)}
+                'assignedIndices':assigned,**scheduling_status(job,data),**observation}
     if operation in ('host.exec','host.status','host.cancel'):return host_command(operation,args)
     if operation.startswith(('projects.snapshot.','projects.sync.','datasets.snapshot.')):
         spec=importlib.util.spec_from_file_location('gpuq_snapshot_sync',HERE/'snapshot-sync.py')

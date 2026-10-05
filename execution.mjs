@@ -13,6 +13,7 @@ import {datasetCatalogCall,datasetListView} from './dataset-catalog.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 import {selectMachine} from './machine-selection.mjs';
+import {terminalNativeObservation,unavailableObservation,portalTerminalSnapshot} from './job-observation.mjs';
 export {datasetReferences} from './job-submission.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
@@ -419,7 +420,16 @@ export async function executionCall(service,principal,operation,args){
   if(operation==='jobs.watch'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('进度查询参数无效。');
     const job=jobById(args.jobId);
-    if(!job.machine||TERMINAL.has(job.state)||job.state===DATA_PREPARING)return jobView(job);
+    if(!job.machine||job.state===DATA_PREPARING)return jobView(job);
+    if(TERMINAL.has(job.state)){
+      authorizedMachine(job.machine);
+      const original=jobView(job);
+      if(!job.nodeJobId)return {...original,nativeObservation:unavailableObservation('NATIVE_ID_UNAVAILABLE')};
+      try{
+        const result=await service.bridge(job.machine,'watch',{job:job.spec,expectedNodeJobId:job.nodeJobId});
+        return {...original,nativeObservation:terminalNativeObservation(job,result?.nativeObservation)};
+      }catch{return {...original,nativeObservation:unavailableObservation()};}
+    }
     authorizedMachine(job.machine);
     let result;
     try{result=await service.bridge(job.machine,'watch',{job:job.spec});}
@@ -436,7 +446,11 @@ export async function executionCall(service,principal,operation,args){
   if(operation==='jobs.diagnostics'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('诊断参数无效。');
     const job=jobById(args.jobId);authorizedMachine(job.machine);
-    return service.bridge(job.machine,'diagnostics',{job:job.spec});
+    if(!TERMINAL.has(job.state))return service.bridge(job.machine,'diagnostics',{job:job.spec});
+    try{
+      const result=await service.bridge(job.machine,'diagnostics',{job:job.spec,...(job.nodeJobId?{expectedNodeJobId:job.nodeJobId}:{})});
+      return {...result,portalTerminal:portalTerminalSnapshot(job),nativeObservation:terminalNativeObservation(job,result?.nativeObservation)};
+    }catch{return {jobId:job.id,state:'UNAVAILABLE',portalTerminal:portalTerminalSnapshot(job),nativeObservation:unavailableObservation()};}
   }
   if(operation==='files.list'||operation==='files.put'||operation==='files.get'){
     authorizedMachine(args.machine);

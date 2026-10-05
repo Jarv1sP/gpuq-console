@@ -52,6 +52,12 @@
 
 项目复制只复制不可变代码和镜像，不迁移正在运行的容器、草稿、开发 HOME 或训练结果。数据集使用原数据复制服务。部署方需同时启用门户模块、节点 portable-project 能力与固定 TLS peer，配置缺失时拒绝自动选机，不回退为未隔离执行。
 
+## 终态训练的只读节点观察
+
+`jobs.watch {jobId}` 对已保存终态保留原 `state`、时间、取消与资源字段，额外返回 `nativeObservation`；`jobs.diagnostics {jobId}` 在原诊断包外增加 `portalTerminal` 与同一观察。观察为 `readOnly=true`、`status=CONFIRMED|UNKNOWN`，确认时含节点 `state`、`nativeVersion`、`observedAt`、`latestAttempt`、`latestRetry`、`retryDetected` 和 `manualRecovery`。`retryDetected` 只在原节点 ID、不可变规格、submit key、同快照版本及该节点任务的最新 `JOB_RETRIED` 事件均核对、且事件晚于原 attempt 的节点结束时间时为 true；排队重试可以尚无新 attempt。
+
+这些字段仅证明观察时刻，不是持续一致或重新执行授权。缺少旧节点能力、身份／事件／时间基线不全或查询失败不得推断任务复活；UNKNOWN 不覆盖原历史。不要用 `nativeObservation.state` 改写主 `state`、发起取消／提交、清除 `cancelRequested`、重新占用额度或重开已释放 hold。`manualRecovery.reason=HOST_RETRY_REQUIRES_EXPLICIT_RECOVERY` 表示已观察到宿主重试，`TERMINAL_DIVERGENCE_UNCONFIRMED` 表示状态差异但重试证据不足。普通请求不接受 node ID、spec、retry event、角色或宿主路径；内部只读证明不能由客户端提供。CLI `watch` 仍按门户原终态退出，并明确显示它与节点观察的区别。
+
 ## 终端：新建与重连分开
 
 所有操作均包含 `machine`。可选上下文为 `project`、`dataWorkspace`、`hostAdmin`；重连及后续操作必须保持原上下文。项目、个人数据终端和宿主机 root 入口不能混用。宿主机 root 仍受管理员身份、机器授权和节点配置约束，不等于个人容器内的 root。
