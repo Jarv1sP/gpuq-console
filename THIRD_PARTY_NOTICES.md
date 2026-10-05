@@ -30,4 +30,4 @@ GPUQ 源码从本实验室原有、包含源码的 Python zipapp 整理而来，
 
 GitHub Actions 使用上游 checkout、setup-node、setup-python，仅用于测试，不连接生产网络。依赖版本以 `package-lock.json`、Compose 与 Dockerfile 为准。
 
-Archivo、Geist 和 Geist Mono 以可变 WOFF2 字体自托管于 `dist/vendor/fonts/`；来源为 [Google Fonts 官方仓库](https://github.com/google/fonts)，各字体保留 SIL Open Font License 1.1 文件。上游提交、轴范围、原始下载链接与 SHA256 见该目录的 README.md。Archivo 的上游作者为 Omnibus-Type，Geist / Geist Mono 为 Vercel；网页运行时不请求任何第三方字体服务。
+Archivo、Geist 和 Geist Mono 以可变 WOFF2 字体自托管于 `dist/vendor/fonts/`；来源为 [Google Fonts 官方仓库](https://github.com/google/fonts)，各字体保留 SIL Open Font License 1.1 文件。上游提交、轴范围、原始下载链接与 SHA256 见该目录的 README.md。STARGATE 字标从 Archivo Expanded SemiBold 的轮廓制作，两处 A 的横画移除；沿用该字体的 OFL 1.1 授权。Archivo 的上游作者为 Omnibus-Type，Geist / Geist Mono 为 Vercel；网页运行时不请求任何第三方字体服务。

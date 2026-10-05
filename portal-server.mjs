@@ -20,7 +20,7 @@ files['/scheduling-ui.js']='scheduling-ui.js';
 files['/gpu-allocation.js']='gpu-allocation.js';
 files['/gpu-allocation-ui.js']='gpu-allocation-ui.js';
 Object.assign(files,STARBASE_ASSETS);
-const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',woff2:'font/woff2'};
+const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',woff2:'font/woff2',png:'image/png'};
 files['/guide.css']='guide.css';files['/guide.js']='guide.js';
 files['/datasets-ui.js']='datasets-ui.js';
 files['/data-route.js']='data-route.js';

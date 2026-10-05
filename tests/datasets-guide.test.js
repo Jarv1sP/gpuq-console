@@ -11,7 +11,7 @@ import {inline,renderMarkdown,parseGuide,guideTarget} from '../guide.mjs';
 async function port(){const socket=net.createServer();await new Promise(r=>socket.listen(0,'127.0.0.1',r));const number=socket.address().port;await new Promise(r=>socket.close(r));return number;}
 async function check(origin){
   const index=await fetch(origin+'/guide');assert.equal(index.status,200);assert.match(index.headers.get('content-type'),/^text\/html/);assert.equal(index.headers.get('x-content-type-options'),'nosniff');
-  const landing=await index.text();assert.match(landing,/<h1>从准备，<br>到一次训练。<\/h1>/);assert.match(landing,/STARBASE/);assert.match(landing,/按功能查阅/);assert.doesNotMatch(landing,/guide\/admin|ADMIN_README/);
+  const landing=await index.text();assert.match(landing,/<h1>从准备，<br>到一次训练。<\/h1>/);assert.match(landing,/STARGATE/);assert.match(landing,/按功能查阅/);assert.doesNotMatch(landing,/guide\/admin|ADMIN_README/);
   for(const id of ['start','development','training','data','results','queue','troubleshooting']){
     const response=await fetch(origin+'/guide/'+id);assert.equal(response.status,200);
     const html=await response.text();assert.match(html,/<article/);assert.match(html,new RegExp('href="/guide/'+id+'" aria-current="page"'));assert.doesNotMatch(html,/\{#[a-z-]+\}|```/);

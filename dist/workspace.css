@@ -204,7 +204,7 @@ input[type=file]::file-selector-button {border:1px solid #d7dfeb;background:#fff
 .host-terminal-dialog #terminal-session-note {color:#86562d}
 @media(max-width:700px){.personal-terminal{padding:18px}.terminal-heading{align-items:flex-start}.personal-terminal .terminal-controls>.button,.host-maintenance .terminal-controls>.button{flex:1}.host-maintenance{padding:14px 16px}}
 
-/* STARBASE workspace: an instrument panel, with real account metrics. */
+/* STARGATE workspace: an instrument panel, with real account metrics. */
 .sidebar .nav-item[aria-current=page]{background:#f2f2ef;border-color:#f2f2ef;color:#19191b;box-shadow:none}
 .sidebar .nav-item[aria-current=page] svg{color:#19191b}
 .button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #76767d;outline-offset:3px}

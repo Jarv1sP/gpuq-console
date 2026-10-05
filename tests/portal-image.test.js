@@ -42,7 +42,7 @@ async function imageLayout(){
 }
 function staticFile(value,base='index.html'){
   const url=new URL(value,'http://runtime.fixture/'+base);
-  return url.origin==='http://runtime.fixture'&&/\.(?:js|css|woff2)$/.test(url.pathname)?url.pathname.slice(1):null;
+  return url.origin==='http://runtime.fixture'&&/\.(?:js|css|woff2|png)$/.test(url.pathname)?url.pathname.slice(1):null;
 }
 
 test('every transitive local Portal module exists at its runtime COPY path',async t=>{
@@ -80,9 +80,14 @@ test('client imports, styles and fonts are copied and served by the Portal white
   for(const file of assets){
     const response=await fetch(origin+'/'+file);
     assert.equal(response.status,200,'Static whitelist is missing /'+file);
-    const type=file.endsWith('.woff2')?'font/woff2':file.endsWith('.css')?'text/css':'text/javascript';
+    const type=file.endsWith('.png')?'image/png':file.endsWith('.woff2')?'font/woff2':file.endsWith('.css')?'text/css':'text/javascript';
     assert.ok(response.headers.get('content-type')?.startsWith(type),'Incorrect asset MIME: '+file);
-    assert.ok((await response.arrayBuffer()).byteLength>0,'Empty asset: '+file);
+    const content=Buffer.from(await response.arrayBuffer());
+    assert.ok(content.byteLength>0,'Empty asset: '+file);
+    if(file==='apple-touch-icon.png'){
+      assert.equal(content.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
+      assert.equal(content.readUInt32BE(16),180);assert.equal(content.readUInt32BE(20),180);
+    }
   }
   t.diagnostic('Runtime COPY and HTTP whitelist cover '+assets.size+' client assets, including all self-hosted fonts.');
 });

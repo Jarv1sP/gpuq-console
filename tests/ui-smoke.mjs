@@ -58,7 +58,7 @@ try{
   try{
    await guide.waitForLoadState('domcontentloaded');
    assert.equal(new URL(guide.url()).pathname,path);
-   assert.match(await guide.locator('body').textContent(),/STARBASE/);
+   assert.match(await guide.locator('body').textContent(),/STARGATE/);
   }finally{await guide.close();}
  }
  async function capture(p,name){

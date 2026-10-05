@@ -124,7 +124,7 @@
 }
 @media(max-width:360px) {.sidebar nav {gap:1px}.sidebar .nav-item {font-size:10px;padding-inline:2px}.sidebar .nav-count {min-width:15px;font-size:9px;padding-inline:3px}.community-toolbar>div {margin-left:0}.community-meta span:last-child {margin-left:0}.community-guide {font-size:10px}}
 
-/* STARBASE collaboration: two clear rooms, one monochrome visual system. */
+/* STARGATE collaboration: two clear rooms, one monochrome visual system. */
 .community-intro{padding:23px 27px;background:#ececea;border-color:#dfdfdb;border-radius:6px;margin-bottom:24px}
 .community-intro>div{padding-left:0}.community-orbit{display:none}
 .community-intro .eyebrow{font-size:9px;letter-spacing:1.8px;color:#626266}

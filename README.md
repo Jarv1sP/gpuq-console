@@ -1,8 +1,10 @@
-# STARBASE
+# STARGATE
 
-把项目、数据与算力，放在同一个工作空间。STARBASE 是本项目的网页展示名称；仓库名 `gpuq-console`、后端 GPUQ、`gpuctl` 命令及已有登录配置保持兼容，不因视觉更新迁移或更名。
+把项目、数据与算力，放在同一个工作空间。STARGATE 是独立开源研究计算工作台，使用「Λ 门」标识。
 
-名称向 SpaceX 的 Starbase 基地致意；这是独立开源研究计算项目，与 SpaceX、Tesla 或 Elon Musk 无隶属、合作或背书关系。字标和界面为本项目原创，设计说明见 [品牌与界面](docs/BRAND.md)。
+独立开源研究计算项目；名称与 SpaceX、Tesla、Elon Musk、OpenAI 的 Stargate 计划或 MGM《星际之门》系列均无隶属、合作或背书关系。
+
+仓库为 [Jarv1sP/stargate](https://github.com/Jarv1sP/stargate)，原名 `gpuq-console`（旧 GitHub 地址会自动重定向）。后端 GPUQ、`gpuctl` 命令、已有登录配置和部署标识保持兼容。字标与界面说明见 [品牌与界面](docs/BRAND.md)。
 
 为实验室搭建一套**账号 + GPU 配额 + 个人终端 + 训练队列**，与服务器厂商无关。普通用户从网页或自己的命令行登录，不必全部加入管理员的 VPN；管理员按服务器和 GPU 数量授权。后端复用 GPUQ，管理网络使用 Tailscale / Headscale + OpenSSH。
 
@@ -12,7 +14,7 @@
 
 ```sh
 gpuctl login
-gpuctl use gpu-1
+gpuctl use MACHINE_ID
 gpuctl project create my-project # 创建并选中该机的项目
 gpuctl push .                    # 在本地项目目录上传草稿代码
 gpuctl ssh                       # 安装项目依赖，完成后 exit
@@ -69,8 +71,8 @@ Headscale 是可选的自建控制面；已有 Tailscale 网络可直接复用�
 6. 用普通新用户实测一次授权、训练、取消、越权拒绝，再交给团队。
 
 ```sh
-git clone https://github.com/Jarv1sP/gpuq-console.git
-cd gpuq-console
+git clone https://github.com/Jarv1sP/stargate.git
+cd stargate
 cp config/inventory.example.json inventory.json
 # 编辑自己的域名、Tail 地址、服务用户、GPU 数量和磁盘目录
 node scripts/configure.mjs inventory.json

@@ -54,7 +54,7 @@ GPU 节点同理，改为自己的 hostname 与 `tag:server`。登记是一次�
 以 VPS 管理员操作：
 
 ```sh
-sudo git clone https://github.com/Jarv1sP/gpuq-console.git /opt/gpuq-console
+sudo git clone https://github.com/Jarv1sP/stargate.git /opt/gpuq-console
 cd /opt/gpuq-console
 sudo cp config/inventory.example.json inventory.json
 sudoedit inventory.json

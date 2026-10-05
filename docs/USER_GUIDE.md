@@ -328,7 +328,7 @@ gpuctl data workspace-status OPERATION_ID
 长期保存失败时先排查提示，再在数据集页重试，或使用：
 
 ```sh
-gpuctl data archive-retry DATASET_ID@VERSION --machine gpu-1 --json
+gpuctl data archive-retry DATASET_ID@VERSION --machine MACHINE_ID --json
 ```
 
 不要对后台归档直接运行 `transfer resume`。未知状态会继续保留保护，已永久取消需管理员核查，不会换编号绕过取消。
