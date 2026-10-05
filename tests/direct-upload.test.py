@@ -1,8 +1,11 @@
 """Direct data-plane tests use only temporary files and a loopback TLS fixture."""
 import hashlib
+import concurrent.futures
+from contextlib import contextmanager
 import http.client
 import importlib.util
 import json
+import io
 import os
 from pathlib import Path
 import socket
@@ -557,6 +560,192 @@ class DirectTests(unittest.TestCase):
                         client.close()
             finally:
                 server.shutdown(); server.server_close(); serving.join(3)
+
+    @contextmanager
+    def admission_listener(self):
+        cert, key, pin = self.tls_fixture()
+        self.config.update(bind='127.0.0.1', port=0, certificate=str(cert),
+                           privateKey=str(key), certificateSha256=pin)
+        with patch.object(DIRECT.DirectUploads, 'configuration', side_effect=lambda: dict(self.config)):
+            server = DIRECT.create_server(self.node, self.u)
+            self.config.update(port=server.server_address[1], endpoint=f'https://localhost:{server.server_address[1]}')
+            serving = threading.Thread(target=server.serve_forever, daemon=True); serving.start()
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False; context.verify_mode = ssl.CERT_NONE
+            try:
+                yield server, context
+            finally:
+                server.shutdown(); server.server_close(); serving.join(3)
+
+    def test_real_https_rejects_header_bytes_fields_and_expect_before_body(self):
+        with self.admission_listener() as (server, context):
+            for headers, expected in (({'X-Large': 'x'*DIRECT.MAX_HEADER_BYTES}, 431),
+                                      ({'X-'+str(i): 'v' for i in range(65)}, 431),
+                                      ({'Expect': '100-continue', 'Content-Length': '100'}, 417)):
+                client = http.client.HTTPSConnection('127.0.0.1', server.server_address[1], context=context, timeout=3)
+                try:
+                    client.putrequest('GET', '/capabilities')
+                    for name, value in headers.items(): client.putheader(name, value)
+                    client.endheaders()
+                    response = client.getresponse()
+                    self.assertEqual(response.status, expected); response.read()
+                finally:
+                    client.close()
+
+    def test_real_tls_slow_handshakes_release_capacity_without_http_workers(self):
+        with patch.object(DIRECT, 'HANDSHAKE_TIMEOUT', 0.15), self.admission_listener() as (server, context):
+            slow = [socket.create_connection(server.server_address, timeout=2) for _ in range(8)]
+            try:
+                for connection in slow:
+                    connection.settimeout(2)
+                    try: self.assertEqual(connection.recv(1), b'')
+                    except ConnectionResetError: pass
+                client = http.client.HTTPSConnection('127.0.0.1', server.server_address[1], context=context, timeout=2)
+                try:
+                    client.request('GET', '/capabilities')
+                    response = client.getresponse(); self.assertEqual(response.status, 200); response.read()
+                finally:
+                    client.close()
+            finally:
+                for connection in slow: connection.close()
+
+    def test_real_https_partial_headers_expire_before_request_deadline(self):
+        with patch.object(DIRECT, 'HEADER_TIMEOUT', 0.15), self.admission_listener() as (server, context):
+            connection = context.wrap_socket(socket.create_connection(server.server_address, timeout=2), server_hostname='localhost')
+            try:
+                connection.sendall(b'GET /capabilities HTTP/1.1\r\nX-Slow: ')
+                connection.settimeout(2)
+                self.assertEqual(connection.recv(1), b'')
+            finally:
+                connection.close()
+
+    def test_real_https_stale_anonymous_connections_do_not_exclude_new_member(self):
+        with patch.object(DIRECT, 'STALE_ANONYMOUS_SECONDS', 0.05), self.admission_listener() as (server, context):
+            initial, _, _, _ = self.admit(); upload = initial['uploadId']; grant = self.ticket(upload)
+            slow = []
+            try:
+                for _ in range(8):
+                    connection = context.wrap_socket(socket.create_connection(server.server_address, timeout=3), server_hostname='localhost')
+                    connection.sendall(b'GET /capabilities HTTP/1.1\r\nX-Slow: ')
+                    slow.append(connection)
+                time.sleep(0.08)
+                client = http.client.HTTPSConnection('127.0.0.1', server.server_address[1], context=context, timeout=3)
+                try:
+                    client.request('GET', f'/v1/uploads/{upload}/status', headers={'Authorization': 'Bearer '+grant['ticket']})
+                    reply = client.getresponse(); self.assertEqual(reply.status, 200)
+                    self.assertEqual(json.loads(reply.read())['result']['manifestOffset'], 0)
+                finally:
+                    client.close()
+            finally:
+                for connection in slow: connection.close()
+
+    def test_same_nat_eight_authenticated_sixteen_mib_chunks_remain_parallel(self):
+        content = b'p'*DIRECT.MAX_FILE_CHUNK_BYTES
+        prepared = []
+        for number in range(1, 9):
+            user = 'demo-user-'+str(number)
+            response, _, _ = self.seal(files={'large.bin': content}, user=user)
+            prepared.append((user, response['uploadId']))
+        with self.admission_listener() as (server, context):
+            clients, inputs = [], []
+            for user, upload in prepared:
+                grant = self.ticket(upload, user=user)
+                client = http.client.HTTPSConnection('127.0.0.1', server.server_address[1], context=context, timeout=12)
+                client.connect(); clients.append(client)
+                inputs.append((client, user, upload, grant))
+            barrier = threading.Barrier(8, timeout=10)
+            original = self.u.chunk_bytes
+            def concurrently_authenticated(*args, **kwargs):
+                barrier.wait()
+                return original(*args, **kwargs)
+            def upload_one(item):
+                client, user, upload, grant = item
+                client.request('POST', f'/v1/uploads/{upload}/chunk?path=large.bin&offset=0', content,
+                               {'Authorization': 'Bearer '+grant['ticket'], 'Content-Type': 'application/octet-stream'})
+                reply = client.getresponse()
+                self.assertEqual(reply.status, 200)
+                self.assertEqual(json.loads(reply.read())['result']['offset'], len(content))
+                return user, upload
+            try:
+                with patch.object(self.u, 'chunk_bytes', side_effect=concurrently_authenticated), \
+                        concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                    completed = list(pool.map(upload_one, inputs))
+                self.assertEqual(len(completed), 8)
+                # The same persistent connections can continue authenticated
+                # requests; neither NAT fairness nor anonymous budgets rate-
+                # limit the data plane. Existing full-commit test checks SHA.
+                for client, user, upload, grant in inputs:
+                    client.request('GET', f'/v1/uploads/{upload}/status?path=large.bin',
+                                   headers={'Authorization': 'Bearer '+grant['ticket']})
+                    reply = client.getresponse(); self.assertEqual(reply.status, 200)
+                    self.assertEqual(json.loads(reply.read())['result']['file']['offset'], len(content))
+            finally:
+                for client in clients: client.close()
+
+
+class AdmissionUnitTests(unittest.TestCase):
+    def test_header_budget_is_aggregate_and_does_not_consume_body(self):
+        body = b'body-not-headers'
+        stream = io.BytesIO(b'X: a\r\nY: b\r\n\r\n'+body)
+        reader = DIRECT.HeaderBudget(stream)
+        self.assertEqual(http.client.parse_headers(reader)['X'], 'a')
+        self.assertEqual(stream.read(), body)
+        stream = io.BytesIO(b''.join(b'X: '+b'x'*1020+b'\r\n' for _ in range(40)))
+        with self.assertRaises(http.client.LineTooLong):
+            http.client.parse_headers(DIRECT.HeaderBudget(stream))
+
+    def test_eight_same_nat_clients_are_not_subject_to_per_ip_data_cap(self):
+        gate = DIRECT.ConnectionAdmission()
+        clients = [object() for _ in range(8)]
+        for client in clients:
+            self.assertTrue(gate.acquire(client, '192.0.2.1'))
+            self.assertTrue(gate.phase(client, True))
+        with patch.object(DIRECT.time, 'monotonic', return_value=time.monotonic()+60):
+            self.assertFalse(gate.acquire(object(), '192.0.2.2'))
+        self.assertEqual(len(gate.active), 8)
+
+    def test_stale_anonymous_replacement_fences_auth_and_waits_for_release(self):
+        gate = DIRECT.ConnectionAdmission()
+        class SlowSocket:
+            def shutdown(inner, how):
+                self.assertFalse(gate.phase(inner, True), 'retirement must win the auth race')
+                self.assertEqual(len(gate.active), 8, 'no ninth worker during retirement')
+                gate.release(inner)
+        clients = [SlowSocket() for _ in range(8)]
+        for client in clients: self.assertTrue(gate.acquire(client, '192.0.2.1'))
+        self.assertFalse(gate.acquire(object(), '192.0.2.2'), 'fresh NAT handshakes are not evicted')
+        for row in gate.active.values(): row['waiting'] -= 3
+        first_waiting = gate.active[clients[1]]['waiting']
+        self.assertTrue(gate.phase(clients[1], False))
+        self.assertEqual(gate.active[clients[1]]['waiting'], first_waiting,
+                         'repeated anonymous probes must not reset eviction age')
+        self.assertTrue(gate.phase(clients[0], True))
+        newcomer = object()
+        self.assertTrue(gate.acquire(newcomer, '192.0.2.2'))
+        self.assertIn(clients[0], gate.active, 'authenticated body must survive saturation')
+        self.assertIn(newcomer, gate.active)
+        self.assertEqual(len(gate.active), 8)
+
+    def test_handshake_and_probe_budgets_are_separate_bounded_and_refill(self):
+        gate = DIRECT.ConnectionAdmission()
+        with patch.object(DIRECT.time, 'monotonic', return_value=100):
+            for _ in range(64):
+                client = object(); self.assertTrue(gate.acquire(client, '192.0.2.1')); gate.release(client)
+            self.assertFalse(gate.acquire(object(), '192.0.2.1'))
+            for _ in range(128): self.assertTrue(gate.anonymous_request('192.0.2.1'))
+            self.assertFalse(gate.anonymous_request('192.0.2.1'))
+            # Unique chunk URLs can force a browser preflight on every 1 MiB
+            # block. This separate budget must not cap a shared gigabit NAT.
+            for _ in range(2048): self.assertTrue(gate.anonymous_request('192.0.2.1', 'preflight'))
+            self.assertFalse(gate.anonymous_request('192.0.2.1', 'preflight'))
+            other = object(); self.assertTrue(gate.acquire(other, '192.0.2.2')); gate.release(other)
+        with patch.object(DIRECT.time, 'monotonic', return_value=101):
+            client = object(); self.assertTrue(gate.acquire(client, '192.0.2.1')); gate.release(client)
+            self.assertTrue(gate.anonymous_request('192.0.2.1'))
+        for index in range(1100):
+            with patch.object(DIRECT.time, 'monotonic', return_value=200+index):
+                self.assertTrue(gate.anonymous_request(str(index)))
+        self.assertEqual(len(gate.peers), 1024)
 
 
 if __name__ == '__main__':

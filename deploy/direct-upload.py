@@ -5,6 +5,7 @@ node bridge. This listener accepts only bounded raw manifest/file chunks and
 status; it cannot create uploads, select owners, publish, or run commands.
 """
 import base64
+from collections import Counter, OrderedDict
 import hashlib
 import hmac
 import http.client
@@ -29,6 +30,127 @@ MAX_TICKET_BYTES = 4096
 MAX_FILE_CHUNK_BYTES = 16*1024*1024
 RELAY_LIMIT_BYTES = 256*1024**2
 UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z')
+MAX_HEADER_BYTES = 32*1024
+MAX_HEADER_FIELDS = 64
+HEADER_TIMEOUT = 5
+HANDSHAKE_TIMEOUT = 5
+STALE_ANONYMOUS_SECONDS = 2
+
+
+class HeaderBudget:
+    """Limit only HTTP headers, never the already bounded raw upload body."""
+    def __init__(self, stream):
+        self.stream, self.remaining, self.fields = stream, MAX_HEADER_BYTES, 0
+
+    def readline(self, size=-1):
+        limit = self.remaining+1
+        line = self.stream.readline(min(size, limit) if size >= 0 else limit)
+        self.remaining -= len(line)
+        self.fields += line not in (b'\r\n', b'\n', b'')
+        if self.remaining < 0 or self.fields > MAX_HEADER_FIELDS:
+            raise http.client.LineTooLong('request headers')
+        return line
+
+
+class ConnectionAdmission:
+    """Eight data connections, without a per-IP cap on authenticated NAT users.
+
+    At saturation a newcomer can replace a stale *unauthenticated* connection
+    from its own source, or a source with more occupied slots. Closing occurs
+    outside the lock; the old worker must release its slot before replacement.
+    New handshakes and anonymous probes have generous bounded token buckets;
+    authenticated chunks/status never consume an anonymous request budget.
+    """
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.active = {}
+        self.peers = OrderedDict()
+        self.global_tokens = {}
+
+    @staticmethod
+    def _spend(buckets, name, now, rate, burst):
+        tokens, previous = buckets.get(name, (burst, now))
+        tokens = min(burst, tokens+max(0, now-previous)*rate)
+        allowed = tokens >= 1
+        buckets[name] = (tokens-1 if allowed else tokens, now)
+        return allowed
+
+    def _budget(self, peer, name, now):
+        if peer not in self.peers:
+            if len(self.peers) >= 1024:
+                self.peers.popitem(last=False)
+            self.peers[peer] = {}
+        self.peers.move_to_end(peer)
+        # Browser preflight caches may be keyed by the full URL (each chunk's
+        # offset changes it). Do not apply the small probe budget to OPTIONS:
+        # a gigabit upload with 1 MiB blocks needs over 100 preflights/second.
+        rate, burst = {'connect': (32, 64), 'probe': (64, 128),
+                       'preflight': (1024, 2048)}[name]
+        return (self._spend(self.peers[peer], name, now, rate, burst)
+                and self._spend(self.global_tokens, name, now, rate*2, burst*2))
+
+    def anonymous_request(self, peer, kind='probe'):
+        with self.condition:
+            return self._budget(peer, kind, time.monotonic())
+
+    def acquire(self, request, peer):
+        victim = None
+        with self.condition:
+            now = time.monotonic()
+            if not self._budget(peer, 'connect', now):
+                return False
+            if len(self.active) >= 8:
+                counts = Counter(row['peer'] for row in self.active.values())
+                eligible = [row for row in self.active.values()
+                            if not row['authenticated'] and now-row['waiting'] >= STALE_ANONYMOUS_SECONDS
+                            and (row['peer'] == peer or counts[row['peer']] > counts[peer])]
+                if eligible:
+                    retiring = min(eligible, key=lambda row: (-counts[row['peer']], row['waiting']))
+                    # Fence authentication before dropping the lock: a worker
+                    # racing this choice must not begin receiving a file body.
+                    retiring['retiring'] = True
+                    victim = retiring['socket']
+                else:
+                    return False
+        if victim is not None:
+            try:
+                victim.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        with self.condition:
+            # Never start a ninth TLS/HTTP worker while a retired one exits.
+            if not self.condition.wait_for(lambda: len(self.active) < 8, timeout=0.25):
+                return False
+            self.active[request] = {'socket': request, 'peer': peer,
+                                    'authenticated': False, 'retiring': False,
+                                    'waiting': time.monotonic()}
+            return True
+
+    def replace_socket(self, request, wrapped):
+        with self.condition:
+            if self.active[request]['retiring']:
+                wrapped.close()
+                raise OSError('Anonymous connection retired')
+            self.active[request]['socket'] = wrapped
+
+    def phase(self, connection, authenticated):
+        with self.condition:
+            for row in self.active.values():
+                if row['socket'] is connection:
+                    if row['retiring']:
+                        return False
+                    # Anonymous keep-alive probes must not refresh their age
+                    # forever and monopolize all eight slots without a ticket.
+                    if authenticated or row['authenticated']:
+                        row['waiting'] = time.monotonic()
+                    row['authenticated'] = authenticated
+                    return True
+            return False
+
+    def release(self, request):
+        with self.condition:
+            self.active.pop(request, None)
+            self.condition.notify_all()
 
 
 class GrantError(PermissionError):
@@ -249,7 +371,7 @@ def create_server(node, uploads):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(config['certificate'], config['privateKey'])
-    slots = threading.BoundedSemaphore(8)
+    admission = ConnectionAdmission()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -257,18 +379,52 @@ def create_server(node, uploads):
         def handle_one_request(self):
             # Socket inactivity timeouts alone do not bound a trickling sender.
             # Cap headers plus one bounded chunk, including unauthenticated I/O.
+            if not admission.phase(self.connection, False):
+                self.close_connection = True
+                return
+            started = time.monotonic()
+            finished = threading.Event()
+            self.header_complete = False
             def expire():
+                if finished.wait(HEADER_TIMEOUT):
+                    return
+                if self.header_complete and finished.wait(max(0, 20-(time.monotonic()-started))):
+                    return
                 try:
                     self.connection.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
-            deadline = threading.Timer(20, expire)
-            deadline.daemon = True
+            # One watcher per worker, not two concurrent timers: the deployed
+            # service's TasksMax=24 still accommodates eight data connections.
+            deadline = threading.Thread(target=expire, daemon=True)
             deadline.start()
             try:
                 super().handle_one_request()
             finally:
-                deadline.cancel()
+                finished.set()
+                deadline.join(0.1)
+
+        def parse_request(self):
+            original = self.rfile
+            self.rfile = HeaderBudget(original)
+            try:
+                return super().parse_request()
+            finally:
+                self.rfile = original
+                self.header_complete = True
+
+        def handle_expect_100(self):
+            # Do not invite a body before capability authentication. Existing
+            # browser/CLI clients do not use Expect: 100-continue.
+            self.send_error(417, 'Expect is not supported')
+            return False
+
+        def admit_anonymous(self, kind='probe'):
+            if admission.anonymous_request(self.client_address[0], kind):
+                return True
+            self.close_connection = True
+            self.send_json(429, {'ok': False, 'code': 'listener-busy', 'error': 'Upload listener is busy; retry later'})
+            return False
 
         def log_message(self, *args):
             pass  # No bearer tickets, user paths, or request headers in logs.
@@ -312,6 +468,8 @@ def create_server(node, uploads):
 
         def do_OPTIONS(self):
             try:
+                if not self.admit_anonymous('preflight'):
+                    return
                 node.platform_root_check()
                 self.check_origin()
                 if not self.cors_origin:
@@ -368,6 +526,8 @@ def create_server(node, uploads):
                 if self.command == 'GET' and length or length > MAX_FILE_CHUNK_BYTES:
                     raise ValueError('Invalid request length')
                 if self.path == '/capabilities' and self.command == 'GET':
+                    if not self.admit_anonymous():
+                        return
                     current = direct.configuration()
                     node.dataset_mount_check(node.CONFIG['datasets'])
                     if current['revision'] != config['revision']:
@@ -400,6 +560,8 @@ def create_server(node, uploads):
                 # Reject unauthenticated requests before receiving file bytes.
                 claims = direct.claims(token)
                 direct.authorize(token, claims, route[1], route[2])
+                if not admission.phase(self.connection, True):
+                    raise ValueError('Anonymous connection retired before authentication')
                 if length > (claims.get('maxChunkBytes', uploads.d.CHUNK_BYTES) if route[2] == 'chunk' else uploads.d.CHUNK_BYTES):
                     raise ValueError('Request exceeds authenticated chunk limit')
                 if self.command == 'POST' and (not lengths or self.headers.get('Content-Type') != 'application/octet-stream'):
@@ -434,20 +596,28 @@ def create_server(node, uploads):
             return connection, address
 
         def process_request(self, request, address):
-            if not slots.acquire(blocking=False):
+            if not admission.acquire(request, address[0]):
                 self.shutdown_request(request)
                 return
-            super().process_request(request, address)
+            try:
+                super().process_request(request, address)
+            except Exception:
+                admission.release(request)
+                raise
 
         def process_request_thread(self, request, address):
             wrapped = request
             try:
-                wrapped = context.wrap_socket(request, server_side=True)
+                wrapped = context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+                admission.replace_socket(request, wrapped)
+                wrapped.settimeout(HANDSHAKE_TIMEOUT)
+                wrapped.do_handshake()
+                wrapped.settimeout(15)
                 super().process_request_thread(wrapped, address)
             except (OSError, ssl.SSLError):
                 self.shutdown_request(wrapped)
             finally:
-                slots.release()
+                admission.release(request)
 
     return Server((config['bind'], config['port']), Handler)
 
