@@ -69,7 +69,13 @@ try{
   async function load(page){await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);}
   async function check(page,label,width){await page.setViewportSize({width,height:width<760?900:1000});await page.evaluate(async()=>{for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(resolve=>requestAnimationFrame(resolve));});const result=await inspectGeometry(page,geometry);geometries.push({label,...result});await writeFile(join(out,'key-geometry.json'),JSON.stringify(geometries,null,2));assert.ok(result.pass,JSON.stringify({label,failures:result.failures}));}
   async function capture(page,name){await page.mouse.move(0,100);await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(out,name+'.png'),fullPage:true,animations:'disabled'});}
-  async function captureComponent(page,selector,name){await page.locator(selector).screenshot({path:join(out,name+'.png'),animations:'disabled'});}
+  async function captureComponent(page,selector,name){
+    const viewport=page.viewportSize(),element=page.locator(selector),height=Math.ceil(await element.evaluate(node=>node.getBoundingClientRect().height));
+    // A taller native viewport keeps the complete component clear of sticky
+    // navigation and the persistent bottom controls; no UI is hidden or edited.
+    try{await page.setViewportSize({width:viewport.width,height:Math.max(viewport.height,height+448)});await element.screenshot({path:join(out,name+'.png'),animations:'disabled'});}
+    finally{await page.setViewportSize(viewport);}
+  }
   const memberPage=await pageFor('member');await load(memberPage);
   const memberCalls=calls.slice();assert.ok(memberCalls.every(row=>!row.operation.startsWith('datasets.storage.')));assert.equal(await memberPage.locator('.dataset-cache-admin').count(),0);
   assert.equal(await memberPage.locator('[data-database-state=saved]').count(),2);assert.equal(await memberPage.locator('[data-database-state=pending]').count(),1);assert.equal(await memberPage.locator('[data-database-state=none]').count(),1);assert.ok(await memberPage.locator('[data-cache-state=recoverable]').count());
