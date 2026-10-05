@@ -16,6 +16,7 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
   const principal = { userId: 'offline-user', username: '测试用户', role: 'member' };
   const state = { demo: false, gpuqConnected: true, machines: [{ id: 'offline-node' }], users: [], jobs: [] };
   const codeFiles = new Map();
+  const codeUploads = new Map();
   const dataFiles = new Map();
   let manifestBytes = Buffer.alloc(0), manifest;
   const server = createServer(async (req, res) => {
@@ -37,12 +38,29 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
       let result;
       if (operation === 'state') { res.end(JSON.stringify({ state })); return; }
       if (operation === 'projects.create') result = { project: args.project, environmentMode: 'shared' };
-      else if (operation === 'files.put') {
+      else if (operation === 'files.upload.status') {
+        assert.equal(args.project, 'native-test');
+        const record = codeUploads.get(JSON.stringify([args.project,args.path]));
+        if (!record) result = { protocol: 2, state: 'ABSENT', path: args.path, complete: false, receivedBytes: 0 };
+        else {
+          assert.equal(record.totalSize,args.totalSize); assert.equal(record.sha256,args.sha256);
+          if (args.uploadId) assert.equal(record.uploadId,args.uploadId);
+          result = { protocol: 2, ...record, path: args.path, state: record.complete ? 'COMPLETE' : 'UPLOADING', resumable: true, completionPending: false };
+        }
+      } else if (operation === 'files.put') {
+        const key = JSON.stringify([args.project,args.path]),record = codeUploads.get(key);
+        if (args.project && record) {
+          assert.equal(record.uploadId,args.uploadId);assert.equal(record.totalSize,args.totalSize);assert.equal(record.sha256,args.sha256);
+        }
         const previous = args.offset ? codeFiles.get(args.path) || Buffer.alloc(0) : Buffer.alloc(0);
         assert.equal(previous.length, args.offset);
         const data = Buffer.concat([previous, Buffer.from(args.data, 'base64')]);
         codeFiles.set(args.path, data);
         result = { complete: args.final === true, size: data.length, sha256: createHash('sha256').update(data).digest('hex'), executable: args.executable };
+        if (args.project) {
+          if (args.final) { assert.equal(data.length,args.totalSize);assert.equal(result.sha256,args.sha256); }
+          codeUploads.set(key,{uploadId:args.uploadId,totalSize:args.totalSize,sha256:args.sha256,size:data.length,receivedBytes:data.length,complete:args.final===true});
+        }
       } else if (operation === 'files.list') result = { entries: [...codeFiles].map(([name, data]) => ({ name, type: 'file', size: data.length })) };
       else if (operation === 'files.get') {
         const data = codeFiles.get(args.path);
@@ -101,6 +119,10 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
     await writeFile(join(codeDir, '训练.py'), content);
     await ok(['push', codeDir]);
     assert.equal(codeFiles.get('训练.py').toString(), content);
+    const writes = requests.filter(request=>request.operation==='files.put').length;
+    await ok(['push', codeDir]);
+    assert.equal(requests.filter(request=>request.operation==='files.put').length,writes,'Verified same-identity receipt is reused without writing');
+    assert.equal((await ok(['push-status',join(codeDir,'训练.py'),'训练.py'])).json.data.files[0].state,'COMPLETE');
     assert.equal((await ok(['files'])).json.data.entries[0].name, '训练.py');
     const destination = join(dir, '下载 output.py');
     await ok(['pull', '训练.py', destination]);
