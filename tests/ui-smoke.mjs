@@ -249,9 +249,16 @@ try{
  await selectResource(member,'gpu-1',{metrics:true});
  assert.equal(await anonymousDetail.evaluate(element=>element.open),true);
  const mobileTable=resourceDetail(member,'gpu-1').locator('.gpu-table-scroll').first();
- await mobileTable.evaluate(element=>{element.scrollLeft=element.scrollWidth;});
- const tableBounds=await mobileTable.boundingBox(),processBounds=await anonymousDetail.locator('.process-table').boundingBox();
- assert.ok(processBounds.x>=tableBounds.x-1&&processBounds.x+processBounds.width<=tableBounds.x+tableBounds.width+1,'Mobile users must be able to scroll to the process columns');
+ await mobileTable.evaluate(async element=>{
+  // Geometry must describe the opened sheet, not separate frames of its entrance.
+  await Promise.all((element.closest('dialog')?.getAnimations()||[]).map(animation=>animation.finished.catch(()=>{})));
+  element.scrollLeft=element.scrollWidth;
+ });
+ const {tableBounds,processBounds}=await anonymousDetail.evaluate(element=>({
+  tableBounds:element.closest('.gpu-table-scroll').getBoundingClientRect().toJSON(),
+  processBounds:element.querySelector('.process-table').getBoundingClientRect().toJSON(),
+ }));
+ assert.ok(processBounds.x>=tableBounds.x-1&&processBounds.x+processBounds.width<=tableBounds.x+tableBounds.width+1,`Mobile users must be able to scroll to the process columns: ${JSON.stringify({tableBounds,processBounds})}`);
  await capture(member,'resources-member-mobile-processes.png');
  await member.setViewportSize({width:1440,height:1050});
  await member.locator('#resource-primary').click();await member.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-1');await openSubmit(member);await member.locator('[name=command]').fill('python unchanged_draft.py');await member.waitForTimeout(16000);assert.equal(await member.locator('[name=command]').inputValue(),'python unchanged_draft.py');
