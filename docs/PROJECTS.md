@@ -58,13 +58,15 @@ gpuctl pull --job 任务ID model.pt ./model.pt
 
 ### 可选的个人 OCI 环境
 
-管理员完成 rootless OCI 与内核硬配额验收并显式启用后，可新建 `gpuctl project create system-env --env-mode oci`。未启用节点会拒绝，不会静默改用 venv。现有 shared/isolated 项目不转换，管理员宿主机 root 入口保持独立。
+管理员完成 rootless OCI 验收并显式启用后，获准账号可新建 `gpuctl project create system-env --env-mode oci`。未启用节点或未获准账号会被拒绝，不会静默改用 venv。现有 shared/isolated 项目不转换，管理员宿主机 root 入口保持独立。
 
-OCI 开发终端内是容器 root，可安装容器系统包（例如基础镜像支持时使用 apt），不是宿主机 root：没有宿主机 Docker/Podman socket、宿主目录、宿主网络或 GPU。代码仍在 `/workspace`，私人 HOME 在 `/home/gpuq`，开发 scratch 在 `/outputs`；使用镜像自己的 Python/Conda，不再挂载宿主 `/opt/conda` 或项目 venv。每个账号的镜像、构建临时数据与可写层独立存放在数据卷，计入其硬配额。
+OCI 开发终端内是容器 root，可安装容器系统包（例如基础镜像支持时使用 apt），不是宿主机 root：没有宿主机 Docker/Podman socket、宿主目录、宿主网络或 GPU。代码仍在 `/workspace`，私人 HOME 在 `/home/gpuq`，开发 scratch 在 `/outputs`；使用镜像自己的 Python/Conda，不再挂载宿主 `/opt/conda` 或项目 venv。每个账号的镜像、构建临时数据与可写层独立存放在数据卷。
+
+容器隔离与磁盘硬配额是两件事。面向不限定账号的启用方式要求已验收的内核硬配额，受管可写数据计入账号的硬上限。管理员也可通过明确的 `personalOci.owners` 名单进行有限范围验收，而暂不启用硬配额；此时容量入口检查不等于写入硬限制，名单内用户仍可能写满共享数据卷。必须先接受并管理这一存储风险，不能对用户宣称“已限制每人磁盘容量”。无论是否启用硬配额，容器、账号目录和调度器分配 GPU 的隔离要求都不降低。实际部署范围见 [后端验收记录](BACKEND_ACCEPTANCE.md)。
 
 退出开发终端后再发布。发布将停止态开发容器提交成不可变镜像 ID，与代码快照共同绑定版本；重连开发终端沿用上次环境。未知容器状态/发布失败应保留现场核查，不自动创建替代环境。训练使用该发布镜像和只读代码，HOME/输出仍按任务隔离；训练临时镜像层不写回开发环境。GPU 只注入调度器本次分配的精确 UUID，开发终端不因安装 CUDA 获得 GPU。CPU、内存、PID 与取消继续由既有任务单元约束。
 
-OCI 的 `/tmp` 默认属于个人配额内的容器可写层，和 venv 沙箱的 tmpfs 不同；两者都应将需要持久保留的大文件写到明确的 HOME/输出位置。基础镜像只允许管理员固定的 digest，不接受客户端提交宿主路径、设备、特权参数或任意引擎配置。GPU 驱动或 CDI 描述变动后需管理员重新验收固定依赖，不能回落到全部 GPU。
+OCI 的 `/tmp` 默认属于容器可写层，和 venv 沙箱的 tmpfs 不同；启用硬配额时计入账号磁盘用量，未启用时没有个人磁盘硬上限。两者都应将需要持久保留的大文件写到明确的 HOME/输出位置。基础镜像只允许管理员固定的 digest，不接受客户端提交宿主路径、设备、特权参数或任意引擎配置。GPU 驱动或 CDI 描述变动后需管理员重新验收固定依赖，不能回落到全部 GPU。
 
 ## 显式离线资源，不继承开发缓存
 
