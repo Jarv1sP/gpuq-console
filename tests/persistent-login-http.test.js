@@ -11,17 +11,27 @@ const password='Persistent-HTTP-Fixture-2026!';
 async function fixture(t){
   const dir=await mkdtemp(join(tmpdir(),'gpuq-persistent-login-')),bootstrap=join(dir,'bootstrap'),database=join(dir,'db');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   const reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));
-  const origin='http://127.0.0.1:'+port;let server,service;
-  const start=async()=>{({server,service}=await createPortalServer({database,bootstrap,origin,secure:false}));await new Promise(r=>server.listen(port,'127.0.0.1',r));};
+  const origin='http://127.0.0.1:'+port;let server,service,requestSocket,requestCount=0;
+  const start=async()=>{({server,service}=await createPortalServer({database,bootstrap,origin,secure:false}));server.on('request',request=>{requestSocket=request.socket;requestCount++;});await new Promise(r=>server.listen(port,'127.0.0.1',r));};
   await start();t.after(async()=>{await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});});
-  const post=async(path,body,headers={})=>{const response=await fetch(origin+path,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)});return {status:response.status,data:await response.json(),headers:response.headers};};
-  return {dir,origin,post,get service(){return service;},restart:async()=>{await new Promise(r=>server.close(r));await start();}};
+  // This fixture restarts on the same origin; do not pool sockets across restarts.
+  const post=async(path,body,headers={})=>{const response=await fetch(origin+path,{method:'POST',headers:{'Content-Type':'application/json',...headers,Connection:'close'},body:JSON.stringify(body)});return {status:response.status,data:await response.json(),headers:response.headers};};
+  return {dir,origin,post,get service(){return service;},get requestSocket(){return requestSocket;},get requestCount(){return requestCount;},restart:async()=>{await new Promise(r=>server.close(r));await start();}};
 }
+test('HTTP fixture does not reuse a deliberately retired keep-alive socket or replay authentication',async t=>{
+  const f=await fixture(t),login=await f.post('/api/login',{username:'admin',password});assert.equal(login.status,200);
+  await new Promise(setImmediate);const retired=f.requestSocket;
+  // Retire the peer before fetch can process its close event, as a restart can do.
+  if(!retired.destroyed)retired.resetAndDestroy();
+  const state=await f.post('/api/call',{operation:'state'},{Authorization:'Bearer '+login.data.token});
+  assert.equal(state.status,200);assert.equal(state.data.principal.username,'admin');
+  assert.notEqual(f.requestSocket,retired);assert.equal(f.requestCount,2,'one login and one state request, without replay');
+});
 test('browser cookie and unchanged standalone CLI cache survive nine hours and Portal restart',async t=>{
   const f=await fixture(t),web=await f.post('/api/login',{username:'admin',password,client:'browser'},{Origin:f.origin});
   assert.equal(web.data.token,undefined);const setCookie=web.headers.get('set-cookie'),cookie=setCookie.split(';')[0];
   assert.match(setCookie,new RegExp('Max-Age='+LOGIN_POLICY.cookieSeconds));assert.match(setCookie,/HttpOnly; SameSite=Strict/);
-  const file=join(f.dir,'gpuctl.mjs'),session=join(f.dir,'session.json');await writeFile(file,await(await fetch(f.origin+'/gpuctl.mjs')).text());
+  const file=join(f.dir,'gpuctl.mjs'),session=join(f.dir,'session.json');await writeFile(file,await(await fetch(f.origin+'/gpuctl.mjs',{headers:{Connection:'close'}})).text());
   const cli=(...args)=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[file,'--url',f.origin,'--session-file',session,'--json',...args]);let out='',err='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>err+=b);child.once('error',reject);child.once('close',code=>resolve({code,out,err,data:out?JSON.parse(out).data:null}));child.stdin.end(args[0]==='login'?password+'\n':'');});
   const signed=await cli('login','admin','--password-stdin');assert.equal(signed.code,0,signed.err);const original=await readFile(session,'utf8');assert.ok(!original.includes(password));
   let clock=Date.now()+9*3600_000;f.service.loginSessions.now=()=>clock;
