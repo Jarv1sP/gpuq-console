@@ -175,6 +175,7 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 @media(max-width:759px){.sb #mission-control .mc-suggestion,.sb #mission-control button.mc-row-name{min-height:44px}}
 
 /* Keep confirmed counts readable when the desktop strip has less room. */
+.sb .toast{min-width:min(240px,calc(100vw - 32px));max-width:min(420px,calc(100vw - 32px));white-space:normal;overflow-wrap:anywhere}
 .sb .cstrip{container-type:inline-size;container-name:operational-strip}
 .sb .cs-focal{min-width:0}
 .sb .cs-focal .cs-progress{min-width:0}

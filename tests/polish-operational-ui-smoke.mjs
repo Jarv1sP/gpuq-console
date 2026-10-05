@@ -40,7 +40,8 @@ const workSpec={...roomSpec,roots:['#page-work','#control-strip'],
     {parent:'.wb-ledger-head',children:':scope>*',wrap:true}],
   buttonRows:[{parent:'.terminal-controls'},{parent:'.wb-job-quick'},{parent:'.job-acts',wrap:true}],
   baselines:[{parent:'.wb-job-heading',children:'.st,.wb-job-name',wrap:true}],
-  textContainment:['.project-environment-segments label>span','.cs-count-link>.st'],
+  textContainment:['.project-environment-segments label>span','.cs-count-link>.st',
+    '.wb-progress-number','.wb-progress-meta>span','.wb-metrics strong','#self-summary>div'],
   repeatedPadding:['.wb-job-compact'],repeatedGaps:['.terminal-controls'],
 };
 const computeSpec={...roomSpec,roots:['#page-resources','#control-strip'],
@@ -76,6 +77,12 @@ const scenes=[
       spec:{controls,roots:['.terminal-dialog'],scrollPanels:['.terminal-dialog','#terminal-screen .xterm-viewport'],
         viewportContainment:[{parent:'#terminal-screen',child:'#terminal-screen .xterm-screen,#terminal-screen .xterm-viewport'}],
         centers:[{parent:'.terminal-footer',children:':scope>*',wrap:true}],buttonRows:[{parent:'.terminal-dialog .modal-head>div'}]}})),
+    ...[1.25,1.5].map(zoom=>({role,room:'work',state:'normal',zoom,toast:true,
+      name:role+'-toast-'+zoom,spec:{...workSpec,textContainment:[...workSpec.textContainment,'#toast']}})),
+    ...[['work','.wb-report-label .ui-info>summary'],['control','.mc-footer-command .ui-info>summary'],
+      ['project','.project-environment-choice legend .ui-info>summary']].map(([room,help])=>({role,room,help,state:'normal',
+        name:role+'-'+room+'-help',spec:{...(room==='control'?controlSpec:workSpec),
+          viewportPanels:['.ui-info[open] .ui-info-content'],textContainment:['.ui-info[open] .ui-info-content']}})),
   ]),
   ...['work','control','compute'].map(room=>({role:'member',room,state:'normal',name:'member-'+room+'-reduced',reduced:true,
     spec:room==='work'?workSpec:room==='compute'?computeSpec:controlSpec})),
@@ -104,6 +111,11 @@ async function checkGeometryRegressions(){
     await page.locator('.xterm-viewport').evaluate(node=>node.style.overflow='auto');
     await page.locator('.xterm-screen').evaluate(node=>node.style.height='140px');
     assert.ok((await inspectOperationalGeometry(page,terminalSpec)).failures.some(row=>row.rule==='viewport-content-clipping'),'visible terminal rows outside the viewport still fail');
+    await page.setContent('<div class="popup" style="position:fixed;left:280px;top:680px;width:100px;height:100px">Full explanation</div>');
+    const popupSpec={roots:['body'],controls:'button',viewportPanels:['.popup']};
+    assert.ok((await inspectOperationalGeometry(page,popupSpec)).failures.some(row=>row.rule==='popup-clipping'),'a popup outside the viewport still fails');
+    await page.locator('.popup').evaluate(node=>{node.style.left='16px';node.style.top='16px';});
+    assert.equal((await inspectOperationalGeometry(page,popupSpec)).pass,true,'a fully reachable popup passes');
   }finally{await context.close();}
 }
 
@@ -120,7 +132,7 @@ try{
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   await checkGeometryRegressions();
   for(const scene of scenes.filter(row=>!selected||selected.includes(row.name)||selected.includes(row.room))){
-    for(const zoom of full?layoutZooms:[1]){
+    for(const zoom of scene.zoom?[scene.zoom]:full?layoutZooms:[1]){
       const context=await browser.newContext({viewport:{width:1440,height:900},deviceScaleFactor:zoom,reducedMotion:scene.reduced?'reduce':'no-preference'});
       const page=await context.newPage(),principal=principals[scene.role],state=structuredClone(service.state(principal));
       state.machines=structuredClone(inventory);state.executionEnabled=true;
@@ -190,7 +202,11 @@ try{
         if(scene.room==='submit'){await page.locator('#open-submit').click();await page.locator('#work-submit').waitFor({state:'visible'});}
         if(scene.room==='project'){await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('container-layout');await page.locator('[name=environment-choice][value=oci]').check();}
         if(scene.room==='terminal'){await page.locator('#terminal-open').click();await page.locator('.terminal-dialog').waitFor({state:'visible'});if(scene.state==='error')await page.locator('#terminal-connection-note').filter({hasText:'未确认'}).waitFor();if(scene.state==='ended')await page.locator('#terminal-connection-note').filter({hasText:'终端已结束'}).waitFor();}
+        if(scene.help)await page.locator(scene.help).click();
         await page.evaluate(()=>document.fonts.ready);
+        const toastMessage='服务器暂时没有确认这次操作；请保留原任务编号，重新查询后再决定下一步。错误详情：'+
+          'unconfirmed-'.repeat(8)+'<完整错误信息保留到这一句>';
+        if(scene.toast)await page.locator('#toast').evaluate((node,message)=>{node.textContent=message;node.classList.add('visible');},toastMessage);
         const caseRows=[];
         for(const width of [1440,390,320]){
           await page.setViewportSize({width:Math.floor(width/zoom),height:Math.floor((width<760?844:900)/zoom)});
@@ -203,12 +219,28 @@ try{
                 const box=rect(node),x=(box.left+box.right)/2,y=(box.top+box.bottom)/2,hit=document.elementFromPoint(x,y);
                 return {element:node.id||node.tagName+'.'+node.className,name:node.getAttribute('name'),rect:box,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight,
                   padding:getComputedStyle(node).padding,overflow:getComputedStyle(node).overflow,font:getComputedStyle(node).fontSize,
+                  clientWidth:node.clientWidth,scrollWidth:node.scrollWidth,minWidth:getComputedStyle(node).minWidth,maxWidth:getComputedStyle(node).maxWidth,
+                  margin:getComputedStyle(node).margin,width:getComputedStyle(node).width,
                   hit:hit?.id||hit?.tagName+'.'+hit?.className,hitSelf:!!hit&&(node===hit||node.contains(hit)),parent:node.parentElement?.id||node.parentElement?.className};
               });
-            },'#work-submit .sheet-scroll,#work-submit .sheet-footer,#work-submit input,#work-submit select,#work-submit textarea,#work-submit button,#mission-control .mc-body,#mission-control .mc-footer,#mission-control .mc-row-name,#mission-control .mc-footer .ui-info>summary,#terminal-screen,#terminal-screen .xterm,#terminal-screen .xterm-viewport,#terminal-screen .xterm-screen,.terminal-dialog .modal-head,.terminal-footer');
+            },'html,body,#toast,#work-submit .sheet-scroll,#work-submit .sheet-footer,#work-submit input,#work-submit select,#work-submit textarea,#work-submit button,#mission-control .mc-body,#mission-control .mc-footer,#mission-control .mc-row-name,#mission-control .mc-footer .ui-info>summary,#terminal-screen,#terminal-screen .xterm,#terminal-screen .xterm-viewport,#terminal-screen .xterm-screen,.terminal-dialog .modal-head,.terminal-footer');
             await writeFile(join(output,scene.name+'-'+width+'-dom.json'),JSON.stringify(geometry,null,2));
+            if(scene.toast)await writeFile(join(output,scene.name+'-'+width+'-overflow.json'),JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('*')].filter(node=>{
+              const box=node.getBoundingClientRect();return box.width&&box.right>innerWidth+1||node.clientWidth&&node.scrollWidth>node.clientWidth+1;
+            }).map(node=>{const box=node.getBoundingClientRect(),style=getComputedStyle(node);return {tag:node.tagName,id:node.id,class:String(node.className),left:box.left,right:box.right,top:box.top,width:box.width,clientWidth:node.clientWidth,scrollWidth:node.scrollWidth,overflow:style.overflow,clip:style.clip,clipPath:style.clipPath,visibility:style.visibility,closedAncestor:node.closest('details:not([open])')?.className};})),null,2));
           }
-          if(zoom===1)await page.screenshot({path:join(output,scene.name+'-'+width+'.png'),animations:'disabled'});
+          if(zoom===1||scene.toast)await page.screenshot({path:join(output,scene.name+'-'+width+'.png'),animations:'disabled'});
+        }
+        if(scene.toast)for(let cssWidth=213;cssWidth<=256;cssWidth++){
+          await page.setViewportSize({width:cssWidth,height:Math.floor(700/zoom)});
+          const measurement=await inspectOperationalGeometry(page,scene.spec);
+          const text=await page.locator('#toast').evaluate(node=>({text:node.textContent,
+            fontSize:parseFloat(getComputedStyle(node).fontSize),height:node.clientHeight,scrollHeight:node.scrollHeight,
+            lines:(()=>{const range=document.createRange();range.selectNodeContents(node);return range.getClientRects().length;})()}));
+          assert.equal(text.text,toastMessage,'long error text must remain complete');
+          assert.ok(text.fontSize>=11,'error text stays readable');
+          if(!before){assert.ok(text.lines>1,'long errors wrap');assert.ok(text.scrollHeight<=text.height+1,'long error text remains reachable');}
+          caseRows.push({cssWidth,physicalWidth:cssWidth*zoom,physicalHeight:700,zoom,toast:true,...measurement});
         }
         if(full)caseRows.push(...await scanOperationalGeometry(page,scene.spec,{widths:layoutWidths,heights:layoutHeights,zoom}));
         assert.deepEqual(await page.evaluate(()=>operationalCSP),[],'same-origin resources obey Portal CSP');

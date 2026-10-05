@@ -5,7 +5,7 @@
 import {inspectGeometry} from './layout-geometry.mjs';
 
 export async function inspectOperationalGeometry(page, specification = {}) {
-  const {scrollGroups = [], viewportContainment = [],textContainment=[], ...shared} = specification;
+  const {scrollGroups = [], viewportContainment = [],viewportPanels=[],textContainment=[], ...shared} = specification;
   const controls = shared.controls || 'button,input,textarea,select,summary,a[href]';
   const excluded = scrollGroups.map(selector => selector + ' *').join(',');
   const result = await inspectGeometry(page, {...shared,
@@ -16,7 +16,7 @@ export async function inspectOperationalGeometry(page, specification = {}) {
     result.failures.push(...area.failures);
     for (const key of Object.keys(result.counts)) result.counts[key] += area.counts[key];
   }
-  const visible = await page.evaluate(({roots, controls, viewportContainment,textContainment,checkVisibleOverlap}) => {
+  const visible = await page.evaluate(({roots, controls, viewportContainment,viewportPanels,textContainment,checkVisibleOverlap}) => {
     const failures = [], tolerance = 1;
     const rect = node => node.getBoundingClientRect();
     const name = node => node.id ? '#' + node.id : node.tagName.toLowerCase() + '.' + [...node.classList].join('.');
@@ -56,6 +56,12 @@ export async function inspectOperationalGeometry(page, specification = {}) {
           child: {left: a.left, right: a.right, top: a.top, bottom: a.bottom},
           parent: {left: b.left, right: b.right, top: b.top, bottom: b.bottom}});
     }
+    for (const selector of viewportPanels) for (const node of document.querySelectorAll(selector)) {
+      if(!visibleRect(node))continue;
+      const box=rect(node);
+      if(box.left < -tolerance || box.right > innerWidth+tolerance || box.top < -tolerance || box.bottom > innerHeight+tolerance)
+        failures.push({rule:'popup-clipping',elements:[name(node)],left:box.left,right:box.right,top:box.top,bottom:box.bottom,width:innerWidth,height:innerHeight});
+    }
     for (const selector of textContainment) for (const node of document.querySelectorAll(selector)) {
       if(!visibleRect(node))continue;
       const range=document.createRange();range.selectNodeContents(node);const box=rect(node);
@@ -63,7 +69,7 @@ export async function inspectOperationalGeometry(page, specification = {}) {
         failures.push({rule:'text-clipping',elements:[name(node)],left:line.left,right:line.right,boundaryLeft:box.left,boundaryRight:box.right});
     }
     return failures;
-  }, {roots: shared.roots || ['body'], controls, viewportContainment,textContainment,checkVisibleOverlap:scrollGroups.length>0});
+  }, {roots: shared.roots || ['body'], controls, viewportContainment,viewportPanels,textContainment,checkVisibleOverlap:scrollGroups.length>0});
   result.failures.push(...visible); result.pass = result.failures.length === 0;
   return result;
 }

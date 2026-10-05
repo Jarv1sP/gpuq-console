@@ -91,9 +91,29 @@ export function projectPublicationProgressHTML(progress){
   return `<ol class="wb-trajectory publication-trajectory" aria-label="训练版本生成阶段">${phases.map(([phase,label],index)=>`<li class="${index<active?'done':index===active?'active':''}" ${index===active?'aria-current="step"':''}><span class="d" aria-hidden="true"></span>${label}</li>`).join('')}</ol>${counts?`<span class="publication-count mono">${counts}</span>`:''}`;
 }
 export function confirmPublicationMotion(element){element?.animate([{opacity:.45},{opacity:1}],{duration:reducedMotion()?150:480,easing:'cubic-bezier(.2,0,0,1)'});}
-if(typeof document!=='undefined')document.addEventListener('click',event=>{
-  for(const help of document.querySelectorAll('.ui-info[open]'))if(!help.contains(event.target))help.open=false;
-},{capture:true});
+if(typeof document!=='undefined'){
+  let infoFrame;
+  function placeInfo(help){
+    const popup=help.querySelector(':scope>.ui-info-content');if(!popup||!help.open||!help.getClientRects().length)return;
+    popup.style.translate='none';
+    const box=popup.getBoundingClientRect(),anchor=help.getBoundingClientRect(),margin=16;
+    const left=Math.max(margin,Math.min(innerWidth-margin-box.width,box.left));
+    const preferredTop=box.bottom>innerHeight-margin?anchor.top-box.height-8:box.top;
+    const top=Math.max(margin,Math.min(innerHeight-margin-box.height,preferredTop));
+    popup.style.translate=(left-box.left)+'px '+(top-box.top)+'px';
+  }
+  function placeOpenInfo(){
+    cancelAnimationFrame(infoFrame);
+    infoFrame=requestAnimationFrame(()=>{for(const help of document.querySelectorAll('.ui-info[open]'))placeInfo(help);});
+  }
+  document.addEventListener('click',event=>{
+    for(const help of document.querySelectorAll('.ui-info[open]'))if(!help.contains(event.target))help.open=false;
+  },{capture:true});
+  document.addEventListener('toggle',event=>{if(event.target.matches?.('.ui-info'))placeOpenInfo();},{capture:true});
+  document.addEventListener('scroll',placeOpenInfo,{capture:true,passive:true});
+  globalThis.addEventListener?.('resize',placeOpenInfo);
+  document.fonts?.ready.then(placeOpenInfo);
+}
 export const endedJob=job=>['SUCCEEDED','FAILED','CANCELED'].includes(job.state);
 export function stateClass(job){
   if(job.cancelRequested&&!endedJob(job))return 'st-cancel';

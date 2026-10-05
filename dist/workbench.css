@@ -101,6 +101,7 @@
 .terminal-heading>.ui-info{flex:none}
 @media(max-width:759px){#submit-receipt-actions .button{min-height:44px}.sheet-footer>div{min-width:0;width:100%}}
 .ui-info-content{pointer-events:none}
+.sb .ui-info .ui-info-content{max-height:calc(100dvh - 32px);overflow:auto;overscroll-behavior:contain;pointer-events:auto}
 .ui-info-content :is(a,button,input,select,textarea){pointer-events:auto}
 /* Inventory IDs remain complete in accessible text and native name hints. */
 .sb .server-id:has(>.server-id-head){display:inline-flex;font-family:var(--mono)}
@@ -178,10 +179,18 @@
 .sb .project-environment-segments span{min-height:48px;padding:4px 2px;white-space:normal;line-height:18px;text-align:center}
 .sb .wb-ledger-groups>details>summary{min-height:40px}
 .sb .wb-rail #host-maintenance>summary{min-height:40px;display:flex;align-items:center}
+.sb .wb-progress-hero{container-type:inline-size}
+.sb .wb-progress-hero>div{min-width:0;max-width:100%}
+.sb .wb-progress-meta{overflow-wrap:anywhere}
+.sb .wb-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(110px,100%),1fr));gap:12px}
+.sb .wb-metrics>div{padding-inline:0;border-left:0;min-width:0}
+.sb #self-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100px,100%),1fr));gap:16px}
 @media(max-width:759px){
  .sb .wb-job-name,.sb .wb-rail #project-create>summary,.sb .wb-rail #workspace-files>summary,.sb .wb-ledger-groups>details>summary{min-height:44px}
  .sb .ui-info>summary{width:44px;height:44px}
  .sb .wb-rail #host-maintenance>summary{min-height:44px}
  .sb .project-environment-segments span{min-height:44px}
  .sb .job .job-acts .button{min-height:44px}
+ .sb .wb-progress-number{font-size:clamp(64px,42cqi,104px)}
+ .sb #self-summary>div{padding-left:0;border-left:0}
 }
