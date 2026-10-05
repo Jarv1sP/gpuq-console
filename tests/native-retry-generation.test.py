@@ -104,6 +104,45 @@ class NativeRetryGeneration(unittest.TestCase):
         self.assertEqual(self.leases()[0]['jobId'],self.job['id'])
         self.assertFalse(self.retry_record().exists())
 
+    def test_fixed_system_python_canonical_path_is_valid_for_first_and_retry_attempts(self):
+        # GPUQ persists the resolved interpreter, e.g. python3 -> python3.10.
+        # Model that exact system alias on hosts whose /usr/bin/python3 is not
+        # itself a symlink; the runner and every other path still resolve normally.
+        resolve=Path.resolve
+        def canonical(path,*args,**kwargs):
+            if path==Path('/usr/bin/python3'):return Path('/usr/bin/python3.10')
+            return resolve(path,*args,**kwargs)
+        self.sql('UPDATE jobs SET argv_json=?',(json.dumps([
+            '/usr/bin/python3.10',str(self.node.HERE/'sandbox-runner.py'),self.job['id']]),))
+        with patch.object(Path,'resolve',canonical):
+            proof=self.node.dataset_runner_proof(self.job)
+            self.assertEqual(proof['retry']['id'],10)
+            self.sql('DELETE FROM events');self.sql('DELETE FROM attempts WHERE id=?',(self.first,))
+            self.sql('UPDATE attempts SET ordinal=1')
+            self.assertIsNone(self.node.dataset_runner_proof(self.job)['retry'])
+
+    def test_current_system_python_canonical_path_works_without_resolver_mock(self):
+        canonical=str(Path('/usr/bin/python3').resolve(strict=True))
+        self.sql('UPDATE jobs SET argv_json=?',(json.dumps([
+            canonical,str(self.node.HERE/'sandbox-runner.py'),self.job['id']]),))
+        self.assertEqual(self.node.dataset_runner_proof(self.job)['nativeJobId'],self.native_id)
+
+    def test_system_python_alias_does_not_authorize_other_aliases_flags_or_wrappers(self):
+        alias=self.base/'untrusted-python';alias.symlink_to('/usr/bin/python3')
+        runner=str(self.node.HERE/'sandbox-runner.py');jid=self.job['id']
+        canonical=str(Path('/usr/bin/python3').resolve(strict=True))
+        cases=[['python3',runner,jid],[str(alias),runner,jid],
+               ['/usr/bin/../bin/python3',runner,jid],['/usr/local/bin/python3',runner,jid],
+               [canonical,'-I',runner,jid],[canonical,runner,jid,'extra'],
+               [canonical,'/tmp/sandbox-runner.py',jid],[canonical,runner,'other-job'],
+               [canonical,runner],None,{}]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.sql('UPDATE jobs SET argv_json=?',(json.dumps(argv),))
+                with self.assertRaisesRegex(ValueError,'wrapper identity differs'):
+                    self.node.dataset_runner_proof(self.job)
+        self.assertEqual(self.leases(),[])
+
     def test_legacy_absent_journal_still_acquires_but_retry_history_cannot_lose_base(self):
         self.base_record.unlink()
         self.mount();self.assertEqual(self.leases()[0]['jobId'],self.job['id'])

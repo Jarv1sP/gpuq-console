@@ -498,7 +498,11 @@ def dataset_runner_proof(job):
         if not row or row['id']!=native_id or row['owner']!=gpuq_owner(job) or row['state'] not in ('STARTING','RUNNING'):
             raise ValueError('Dataset runner native job is not the current authorized execution')
         argv=json.loads(row['argv_json'])
-        if (not isinstance(argv,list) or len(argv)!=3 or argv[0]!='/usr/bin/python3' or argv[2]!=job['id']
+        # GPUQ canonicalizes the executable when accepting a submission. Allow
+        # only our fixed system interpreter and its exact current target, not
+        # arbitrary aliases, flags, or an interpreter selected by the job.
+        interpreters=('/usr/bin/python3',str(Path('/usr/bin/python3').resolve(strict=True)))
+        if (not isinstance(argv,list) or len(argv)!=3 or argv[0] not in interpreters or argv[2]!=job['id']
                 or Path(argv[1]).resolve()!=HERE/'sandbox-runner.py'):
             raise ValueError('Dataset runner native wrapper identity differs')
         rows=[dict(value) for value in db.execute('SELECT id,job_id,ordinal,state,unit_name,control_dir,created_at,finished_at FROM attempts WHERE job_id=? ORDER BY ordinal LIMIT 1025',(native_id,))]
