@@ -103,6 +103,11 @@ def workspace_admission(cfg,root):
     module=local_module('gpuq_workspace_storage','project-store.py')
     module.require_workspace_space(root,module.workspace_reserve_bytes(cfg))
 
+def oci_runtime_spec(spec,jid,terminal):
+    # Legacy terminal metadata has no job ID. The validated on-disk filename
+    # is the trusted identity, not any optional ID supplied by the client.
+    return {**spec,'id':jid} if terminal else spec
+
 def main():
     jid=sys.argv[1]
     if not re.fullmatch(r'[a-f0-9-]{36}',jid):raise ValueError('Invalid job ID')
@@ -147,7 +152,7 @@ def main():
     datafd,datalock=open_data_workspace(spec,jid,terminal)
     if project and project['environmentMode']=='oci':
         try:
-            code=local_module('gpuq_personal_oci','personal-oci.py').run_project(cfg,spec,project,terminal,uuids,workfd,project_fds,dataset_fds,datafd,runtimefd,resourcefd,cgroupfd)
+            code=local_module('gpuq_personal_oci','personal-oci.py').run_project(cfg,oci_runtime_spec(spec,jid,terminal),project,terminal,uuids,workfd,project_fds,dataset_fds,datafd,runtimefd,resourcefd,cgroupfd)
             finish_job_capture(capture_module,root,spec,capture_id,code)
             return code
         finally:
