@@ -145,7 +145,9 @@ test('optional OCI guide requires node enablement and distinguishes container fr
   assert.match(guide,/不将本指南视为已经开通/);
   assert.match(guide,/训练固定该镜像版本并只见调度分配的 GPU/);
   assert.match(guide,/shared\/isolated Python 模式的 `\/tmp`/);
-  assert.match(guide,/个人配额内的容器可写层/);
+  assert.match(guide,/容器可写层，占用工作区磁盘，是否有个人硬配额取决于节点配置/);
+  assert.match(guide,/只有管理员另行启用并验收内核配额的节点，才具有个人磁盘硬上限/);
+  assert.match(guide,/容器已开通不等于硬配额已开通/);
 });
 
 test('guide explains quotas, interruption and failure evidence without promising runtime health', () => {

@@ -95,6 +95,7 @@ python3 scripts/build-gpuq.py
 | [GPUQ 手册](gpuq/README.md) | 打包、单机队列、原有高级功能与门户边界 |
 | [架构与安全边界](docs/ARCHITECTURE.md) | 信任关系、配额一致性、隔离与限制 |
 | [测试与发布检查](docs/TESTING.md) | CPU 自动测试与 GPU 实机验收 |
+| [0.5.0 更新说明](docs/RELEASE-0.5.0.md) | 个人容器、终端交互、升级要求与启用边界 |
 | [贡献指南](CONTRIBUTING.md) | 提 Issue / PR、分支、测试与发布流程 |
 | [开源依赖与出处](THIRD_PARTY_NOTICES.md) | 每个依赖的职责、来源、许可证 |
 
