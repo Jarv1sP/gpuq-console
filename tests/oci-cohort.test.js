@@ -3,24 +3,36 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {createHash} from 'node:crypto';
 import {cohortOwners,installOciCohort} from '../oci-cohort.mjs';
+import {DemoStore} from '../dist/model.js';
 const user=(id='demo-user-3',enabled=true,grants={'gpu-1':1})=>({id,enabled,limits:grants,role:'member'});
 const digest=owners=>createHash('sha256').update(JSON.stringify(owners)).digest('hex');
 const settled=async()=>{await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));};
+const owners=(users,machine)=>cohortOwners(users,machine,id=>users.find(user=>user.id===id));
 function fixture(machines=['gpu-1']){
   const calls=[],audits=[],db=new DatabaseSync(':memory:');
   const service={db,store:{users:[user()]},audit:(...args)=>audits.push(args),bridge:async(machine,operation,args)=>{
     calls.push({machine,operation,args});return {enabled:true,changed:true,revision:args.revision,ownersSHA256:digest(args.owners)};
   }};
+  service.store.get=id=>service.store.users.find(user=>user.id===id);
   installOciCohort(service,machines);return {service,calls,audits,close:()=>{service.closing=true;db.close();}};
 }
 test('default OFF makes no node call and does not create bookkeeping',async()=>{
   const f=fixture([]);try{f.service.store.users=[];assert.equal(f.service.syncOciAccountEvent(),undefined);await f.service.ociCohortAdmission('gpu-1','revoked');await f.service.ociProjectAdmission('gpu-1','revoked','sample',{creatingOCI:true});await f.service.ociProjectAdmission('gpu-1','revoked','sample');assert.equal(f.calls.length,0);assert.equal(f.service.db.prepare("SELECT 1 FROM sqlite_master WHERE name='oci_cohort_revision'").get(),undefined);}finally{f.close();}
 });
 test('only current enabled machine-granted immutable identities enter sorted cohort',()=>{
-  assert.deepEqual(cohortOwners([user('demo-user-4'),user('demo-user-3',false),user('demo-user-5',true,{}),user('builtin-admin')],'gpu-1'),['builtin-admin','demo-user-4']);
-  assert.deepEqual(cohortOwners([user('demo-user-3',false)],'gpu-1'),[]);
-  for(const id of ['all','*','demo-user-3\n','other'])assert.throws(()=>cohortOwners([user(id)],'gpu-1'));
-  assert.throws(()=>cohortOwners([user(),user()],'gpu-1'));
+  assert.deepEqual(owners([user('demo-user-4'),user('demo-user-3',false),user('demo-user-5',true,{}),user('builtin-admin')],'gpu-1'),['builtin-admin','demo-user-4']);
+  assert.deepEqual(owners([user('demo-user-3',false)],'gpu-1'),[]);
+  for(const id of ['all','*','demo-user-3\n','other'])assert.throws(()=>owners([user(id)],'gpu-1'));
+  assert.throws(()=>owners([user(),user()],'gpu-1'));
+});
+test('administrator effective machine permissions match store.get without changing raw grants; disabled and ungranted members deny',async()=>{
+  const f=fixture();try{
+    const store=new DemoStore();store.users=[{...user('builtin-admin',true,{}),role:'admin'},{...user('demo-user-4',false,{}),role:'admin'},user('demo-user-5',true,{})];f.service.store=store;
+    const raw=structuredClone(store.users);await f.service.ociCohortAdmission('gpu-1','builtin-admin');
+    assert.deepEqual(f.calls[0].args.owners,['builtin-admin']);assert.deepEqual(store.users,raw);
+    const count=f.calls.length;for(const id of ['demo-user-4','demo-user-5','demo-user-999'])await assert.rejects(f.service.ociCohortAdmission('gpu-1',id),e=>e.status===403);
+    assert.equal(f.calls.length,count);store.users[0].enabled=false;await assert.rejects(f.service.ociCohortAdmission('gpu-1','builtin-admin'),e=>e.status===403);
+  }finally{f.close();}
 });
 test('private control operation receives derived owners but no passwords or supplied owner',async()=>{
   const f=fixture();try{f.service.store.users[0].password='must-not-read';await f.service.ociCohortAdmission('gpu-1','demo-user-3');assert.deepEqual(f.calls,[{machine:'gpu-1',operation:'projects.oci-cohort.sync',args:{hostAdmin:true,owners:['demo-user-3'],revision:1}}]);await f.service.ociCohortAdmission('gpu-1','demo-user-3');assert.equal(f.calls.length,1);}finally{f.close();}

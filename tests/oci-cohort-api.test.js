@@ -21,18 +21,18 @@ async function fixture(machines=['gpu-1']){
 }
 test('actual account grant/revoke events and first project access sync only server-derived cohort',async()=>{
   const f=await fixture();try{
-    assert.deepEqual(f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').at(-1).args.owners,[]);
+    assert.deepEqual(f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').at(-1).args.owners,['builtin-admin']);
     await assert.rejects(f.service.invoke(f.login.token,'projects.create',{machine:'gpu-1',project:'sample',environmentMode:'oci'}),e=>e.status===403);
     await f.service.invoke(f.admin.token,'policy.save',{userId:f.member.id,policyVersion:0,total:1,limits:{'gpu-1':1}});
     await settled();
-    assert.deepEqual(f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').at(-1).args.owners,[f.member.id]);
+    assert.deepEqual(f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').at(-1).args.owners,['builtin-admin',f.member.id]);
     await f.service.invoke(f.login.token,'projects.create',{machine:'gpu-1',project:'sample',environmentMode:'oci'});
     assert.deepEqual(f.calls.at(-1).args,{project:'sample',environmentMode:'oci',userId:f.member.id});
     for(const args of [{machine:'gpu-1',project:'sample',owners:['builtin-admin']},{machine:'gpu-1',project:'sample',hostAdmin:true}])await assert.rejects(f.service.invoke(f.login.token,'projects.create',args));
     const count=f.calls.length;for(const token of [f.admin.token,f.login.token])await assert.rejects(f.service.invoke(token,'projects.oci-cohort.sync',{machine:'gpu-1',hostAdmin:true,owners:['builtin-admin'],revision:100}));assert.equal(f.calls.length,count);
     await f.service.invoke(f.admin.token,'users.enabled',{userId:f.member.id,enabled:false});
     await settled();
-    assert.deepEqual(f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').at(-1).args.owners,[]);
+    assert.deepEqual(f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').at(-1).args.owners,['builtin-admin']);
     assert.equal(f.service.store.jobs.length,0);
   }finally{await f.close();}
 });

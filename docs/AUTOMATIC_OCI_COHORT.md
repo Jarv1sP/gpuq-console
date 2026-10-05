@@ -13,8 +13,11 @@ Both ends must be enabled by an administrator after container acceptance:
   and explicit `owners` array, and add `autoOwners: true`. The backend maintains
   `autoOwnersRevision`; do not reset it while keeping the portal database.
 
-Only enabled accounts with a positive grant on that machine enter the derived
-cohort. Registration still grants zero resources. Account approval, suspension,
+Only enabled accounts with a positive effective grant on that machine enter the
+derived cohort, using the same trusted `store.get` policy as ordinary machine
+authorization. Administrators retain their existing effective machine access
+even when raw grants are empty; disabled administrators are excluded. No raw
+grants are rewritten. Registration still grants zero resources. Account approval, suspension,
 role changes and deletion notify membership asynchronously after the account
 commit. Notifications are coalesced per node; an offline node never blocks or
 rolls back registration or an account change. First OCI creation and admission
