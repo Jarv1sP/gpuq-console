@@ -91,7 +91,7 @@ export function executionUI(store,refresh,toast){
   let section,log,actor=null,submitKey=crypto.randomUUID(),machine='',project='',catalog=[],catalogError='',projectBusy=false,operationBusy=false;
   let epoch=0,pollTimer=null,pollCount=0,terminalSessions=[],machineIdentity='';
   let publicationIntent=null,publicationResult=null,publicationError='',publicationSelection=null,publicationFlash=null,recoveredActor=null;
-  const projectActivity=createProjectActivity();let projectPaused=false,pageActive=true,projectOperation=false;
+  const projectActivity=createProjectActivity(),explicitProjectReads=new Set(),closedProjectDialogs=new WeakSet();let projectPaused=false,pageActive=true,projectOperation=false,projectDialogObserver;
   const publicationCache=projectPublicationStorage({getItem:key=>localStorage.getItem(key),setItem:(key,value)=>localStorage.setItem(key,value),removeItem:key=>localStorage.removeItem(key),key:index=>localStorage.key(index),get length(){return localStorage.length;}});
   let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
   let submitReceipt=null,parsedTarget=null,acceptedDraft=false;
@@ -107,17 +107,19 @@ export function executionUI(store,refresh,toast){
   const enabled=()=>store.production&&!!store.principal&&store.data?.executionEnabled===true&&(store.data?.machines||[]).some(item=>item.id===machine);
   const isVisible=()=>section?.isConnected===true&&!section.hidden&&!document.hidden&&(!section.closest('[data-page]')?.hidden||submitDialog?.open||settingsDialog?.open||log?.open);
   const projectActive=()=>pageActive&&!projectPaused&&isVisible();
+  const projectReadable=()=>pageActive&&!document.hidden&&(projectActive()||explicitProjectReads.size>0);
   const projectCall=(operation,args)=>projectActivity.run(signal=>store.call(operation,args,{signal}));
+  async function explicitProjectRead(read){const ticket={};explicitProjectReads.add(ticket);try{return await read();}finally{explicitProjectReads.delete(ticket);}}
   const hasTerminal=()=>terminalSessions.some(item=>item.machine===machine&&item.project===project&&item.userId===actor);
   const status=(text,error=false)=>{const element=query('#project-status');if(element){element.textContent=text;element.classList.toggle('form-error',error);}};
   const stopPolling=()=>{clearTimeout(pollTimer);pollTimer=null;};
   function cancelProjectActivity(){
-    projectPaused=true;stopPolling();projectActivity.cancel();projectBusy=false;recoveredActor=null;
+    projectPaused=true;stopPolling();projectActivity.cancel();explicitProjectReads.clear();projectBusy=false;recoveredActor=null;
     if(projectOperation){operationBusy=false;projectOperation=false;}
-    if(publicationIntent&&publicationResult?.state==='REQUESTING'){publicationResult={state:'UNKNOWN'};publicationError='';}
+    if(publicationIntent&&publicationResult?.state==='REQUESTING'){publicationResult={state:'UNKNOWN'};publicationError='';status('发布结果未确认');query('#project-status')?.classList.add('publication-unknown');const actions=query('#publication-actions');if(actions)actions.hidden=false;}
     if(section&&actor)updateControls();
   }
-  function activateProjectActivity(){if(!pageActive||!isVisible())return false;projectPaused=false;recoveredActor=actor;return true;}
+  function activateProjectActivity(){flushClosedProjectDialogs();if(!pageActive||!isVisible())return false;projectPaused=false;recoveredActor=actor;return true;}
   function restorePublication(){publicationIntent=project?publicationCache.read(actor,machine,project):null;publicationResult=null;publicationError='';publicationSelection=null;publicationFlash=null;pollCount=0;}
   function observePublication(info){
     if(!publicationIntent)return;
@@ -333,15 +335,15 @@ export function executionUI(store,refresh,toast){
   async function selectMachine(value){
     if(value===machine)return;cancelProjectActivity();activateProjectActivity();machine=(store.data?.machines||[]).some(item=>item.id===value)?value:'';project='';catalog=[];catalogError='';epoch++;projectBusy=false;pollCount=0;
     restorePublication();
-    query('[name=release]').value='';syncMachineFields();clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(machine)await loadProjects();
+    query('[name=release]').value='';syncMachineFields();clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(machine)await explicitProjectRead(loadProjects);
   }
   async function selectProject(value){
     if(value&&!catalog.some(item=>item.project===value)){toast('请刷新项目列表后再选择。');return;}
-    if(value===project){activateProjectActivity();if(project)await loadProjectStatus();return;}
-    cancelProjectActivity();activateProjectActivity();project=value;epoch++;projectBusy=false;catalogError='';restorePublication();query('[name=release]').value='';clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(project)await loadProjectStatus();
+    if(value===project){activateProjectActivity();if(project)await explicitProjectRead(loadProjectStatus);return;}
+    cancelProjectActivity();activateProjectActivity();project=value;epoch++;projectBusy=false;catalogError='';restorePublication();query('[name=release]').value='';clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(project)await explicitProjectRead(loadProjectStatus);
   }
   async function loadProjects(){
-    if(!projectActive()||!enabled()||projectBusy||operationBusy)return;const token=currentToken(),selected=machine;projectBusy=true;updateControls();status('正在读取这台服务器的项目…');
+    if(!projectReadable()||!enabled()||projectBusy||operationBusy)return;const token=currentToken(),selected=machine;projectBusy=true;updateControls();status('正在读取这台服务器的项目…');
     try{const result=await projectCall('projects.list',{machine:selected});if(token!==currentToken())return;
       catalog=Array.isArray(result.projects)?result.projects.filter(item=>validProject(item?.project)):[];catalogError='';
       if(project&&!catalog.some(item=>item.project===project)){project='';restorePublication();clearFileContext();notifyContext();}
@@ -349,13 +351,13 @@ export function executionUI(store,refresh,toast){
     finally{if(token===currentToken()){projectBusy=false;renderProject();if(publicationIntent&&publicationResult?.state!=='READY'&&project&&projectActive())await loadProjectStatus();}}
   }
   async function readProjectStatus(target,token){
-    if(!projectActive()||token!==currentToken())return null;
+    if(!projectReadable()||token!==currentToken())return null;
     const result=await projectCall('projects.status',target);if(token!==currentToken())return null;
     if(result?.project!==target.project)throw Error('项目返回身份不匹配，请重新查询。');
     catalog=catalog.map(item=>item.project===target.project?result:item);catalogError='';observePublication(result);return result;
   }
   async function loadProjectStatus(poll=false){
-    if(!projectActive()||!project||!enabled()||projectBusy||operationBusy)return;const token=currentToken(),target=context();projectBusy=true;updateControls();
+    if(!projectReadable()||!project||!enabled()||projectBusy||operationBusy)return;const token=currentToken(),target=context();projectBusy=true;updateControls();
     try{await readProjectStatus(target,token);}
     catch(error){if(token===currentToken()){catalogError=error.message;if(publicationIntent){publicationResult={state:'UNKNOWN'};publicationError=error.message;}stopPolling();}}
     finally{if(token===currentToken()){projectBusy=false;if(!poll)pollCount=0;renderProject();}}
@@ -492,6 +494,7 @@ export function executionUI(store,refresh,toast){
   document.addEventListener('input',event=>{if(event.target.name==='new-project'){query('#project-create-error').hidden=true;updateControls();return;}if(!event.target.closest('#train-form,#work-submit-panel'))return;submitSelection.invalidate();acceptedDraft=false;submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(event.target.name==='sm-percent')updateControls();updatePreflight();});
   document.addEventListener('gpuq-open-submit',async event=>{
     if(!submitDialog||!actor)return;
+    flushClosedProjectDialogs();
     const detail=event.detail||{},selected=detail.machine||machine,ref=detail.datasetRef||'',origin=detail.origin,config=detail.trainingConfig;
     if(selected!==machine&&terminalSessions.some(row=>row.userId===actor&&!row.detached)&&!window.confirm('切换服务器会断开当前终端；会话保留，可重连。继续？'))return;
     const pending=selected!==machine?selectMachine(selected):Promise.resolve();
@@ -522,20 +525,24 @@ export function executionUI(store,refresh,toast){
     if(wasVisible)return;wasVisible=true;projectPaused=false;recoverIfNeeded();armPolling();
   }
   document.addEventListener('visibilitychange',visibilityChanged);
+  document.addEventListener('gpuq-route-leaving',()=>{flushClosedProjectDialogs();wasVisible=false;cancelProjectActivity();});
   window.addEventListener('pagehide',()=>{pageActive=false;wasVisible=false;cancelProjectActivity();});
   window.addEventListener('pageshow',()=>{pageActive=true;visibilityChanged();});
   // A periodic render must not resume a context that was explicitly closed.
   const projectDialogs='#work-submit,#work-submit-panel,#job-mission,.job-log-dialog,.terminal-dialog,#mission-control';
-  document.addEventListener('cancel',event=>{if(event.target.matches?.(projectDialogs))cancelProjectActivity();},true);
-  document.addEventListener('close',event=>{if(!event.target.open&&event.target.matches?.(projectDialogs))cancelProjectActivity();},true);
+  function projectDialogClosed(dialog){if(!dialog.isConnected||closedProjectDialogs.has(dialog))return;closedProjectDialogs.add(dialog);cancelProjectActivity();}
+  function processProjectDialogChanges(records){for(const {target} of records){if(!target.isConnected||!target.matches?.(projectDialogs))continue;if(target.open)closedProjectDialogs.delete(target);else projectDialogClosed(target);}}
+  function flushClosedProjectDialogs(){if(projectDialogObserver)processProjectDialogChanges(projectDialogObserver.takeRecords());}
+  document.addEventListener('cancel',event=>{if(event.target.matches?.(projectDialogs))projectDialogClosed(event.target);},true);
+  document.addEventListener('close',event=>{if(!event.target.open&&event.target.matches?.(projectDialogs))projectDialogClosed(event.target);},true);
   // The native close event is queued; invalidate requests as soon as the
   // dialog closes, including closures performed by another UI module.
-  new MutationObserver(records=>{if(records.some(({target})=>target.isConnected&&target.matches?.(projectDialogs)&&!target.open))cancelProjectActivity();}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
+  projectDialogObserver=new MutationObserver(processProjectDialogChanges);projectDialogObserver.observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
   if(workRoom)new MutationObserver(visibilityChanged).observe(workRoom,{attributes:true,attributeFilter:['hidden']});
   const enabledForRecovery=()=>store.production&&store.data?.executionEnabled===true;
   function recoverIfNeeded(){
     if(!projectActive()||!actor||recoveredActor===actor||projectBusy||operationBusy)return;
-    recoveredActor=actor;const saved=project?publicationCache.read(actor,machine,project):publicationCache.list(actor).find(item=>(store.data?.machines||[]).some(node=>node.id===item.machine));
+    recoveredActor=actor;const saved=project?publicationCache.read(actor,machine,project):!machine?publicationCache.list(actor).find(item=>(store.data?.machines||[]).some(node=>node.id===item.machine)):null;
     if(saved&&enabledForRecovery())recoverPublication(saved).catch(()=>{});
   }
   async function recoverPublication(saved){

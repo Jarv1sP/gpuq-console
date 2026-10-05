@@ -10,13 +10,14 @@ import net from 'node:net';
 import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
+import {guardedRoute} from './browser-route-guard.mjs';
 
 const dir = await mkdtemp(join(tmpdir(), 'gpuq-datasets-browser-'));
 const screenshots = process.env.UI_SCREENSHOTS || '/tmp/gpuq-datasets-ui';
 const password = 'Local-Dataset-UI-Only-Password-2026!';
 const version = 'a'.repeat(64), ref = {dataset: 'sample', version};
 const calls = [], errors = [], blocked = [], httpErrors = [], authenticated = new WeakSet(), phases = new Map([['gpu-1', 'REGISTERED']]);
-let moreLocalVersions=false, holdLookup=false, releaseLookup=null;
+let moreLocalVersions=false, holdLookup=false, releaseLookup=null,heldDelivery=null,heldRequest=null;
 let server, browser, service, waitingList = null, listGate = null;
 const reserve = net.createServer();
 await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
@@ -78,10 +79,10 @@ try {
         path: new URL(response.url()).pathname, operation: response.request().postDataJSON()?.operation,
         authenticated: authenticated.has(page)});
     });
-    await page.context().route('**/*', route => {
-      if (new URL(route.request().url()).origin === origin) return route.continue();
-      blocked.push(route.request().url()); return route.abort('blockedbyclient');
-    });
+    await page.context().route('**/*', guardedRoute(async route => {
+      if (new URL(route.request().url()).origin === origin){await route.continue();return;}
+      blocked.push(route.request().url());await route.abort('blockedbyclient');
+    }));
   }
   async function login(page, username) {
     await page.goto(origin);
@@ -251,15 +252,15 @@ try {
   moreLocalVersions=true;await refresh(member);
   await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-2'),member.locator('#context-machine').selectOption('gpu-2')]);
   let notifyHeld,rejectHeld;const held=new Promise((resolve,reject)=>{notifyHeld=resolve;rejectHeld=reject;});
-  await member.route('**/api/call',async route=>{
+  await member.route('**/api/call',guardedRoute(async route=>{
     const request=route.request().postDataJSON();
     if(holdLookup&&request.operation==='projects.list'&&request.args.machine==='gpu-1'){
       holdLookup=false;let response;
       try{response=await route.fetch({timeout:10000});}catch(error){rejectHeld(error);await route.abort();return;}
-      await new Promise(resolve=>{releaseLookup=resolve;notifyHeld();});
-      await route.fulfill({response});
-    }else await route.continue();
-  });
+      heldRequest=route.request();let complete;heldDelivery=new Promise(resolve=>{complete=resolve;});
+      try{await new Promise(resolve=>{releaseLookup=resolve;notifyHeld();});await route.fulfill({response});}finally{complete();}
+    }else await route.fallback();
+  }));
   holdLookup=true;
   const chosen=value=>member.locator('article.dataset-card').filter({has:member.locator('input[value="'+value+'"]')}).locator('[data-use-dataset]');
   await chosen('sample@'+version).click();
@@ -270,7 +271,7 @@ try {
   const latest='sample@'+'d'.repeat(64);
   await chosen(latest).click();await member.locator('#work-submit').waitFor({state:'visible'});
   const before=await member.locator('#train-form [name=datasets]').inputValue();
-  const delivered=member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-1');
+  const delivered=heldDelivery;
   releaseLookup();await delivered;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
   const after=await member.locator('#train-form [name=datasets]').inputValue();
   assert.equal(before,latest,'The new choice is visible before the old reply arrives');
@@ -286,8 +287,11 @@ try {
   await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.catalog'),member.locator('[name=dataset-machine]').selectOption('gpu-2')]);
   await member.locator('[data-use-dataset=another]').waitFor({state:'visible'});
   await chosen('another@'+version).click();await member.locator('#work-submit').waitFor({state:'visible'});
-  const oldReply=member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-1');
+  // Context changes now abort fetch. Await the controlled fixture delivery,
+  // then require cancellation as well as the original stale-intent assertions.
+  const oldReply=heldDelivery;
   releaseLookup();await oldReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+  assert.equal(await heldRequest.response(),null,'switching server cancels the older lookup');assert.ok(heldRequest.failure());
   assert.equal(await member.locator('#train-form [name=machine]').inputValue(),'gpu-2','An old node lookup cannot restore its server');
   assert.equal(await member.locator('#train-form [name=datasets]').inputValue(),'another@'+version,'The newest node and fixed version remain paired');
 
@@ -300,8 +304,9 @@ try {
   try{await Promise.race([closedHeld,new Promise((_,reject)=>{heldTimeout=setTimeout(()=>reject(new Error('The close-race choice must request projects')),10000);})]);}
   finally{clearTimeout(heldTimeout);}
   await member.evaluate(()=>document.querySelector('#work-submit').close());await member.locator('#work-submit').waitFor({state:'hidden'});
-  const closedReply=member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-1');
+  const closedReply=heldDelivery;
   releaseLookup();await closedReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+  assert.equal(await heldRequest.response(),null,'native close cancels the pending lookup');assert.ok(heldRequest.failure());
   assert.equal(await member.locator('#work-submit').isVisible(),false,'A late lookup must not reopen a generically closed submit sheet');
   console.log('DATASETS UI PASS: owner-filtered merged catalogs; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; zero HTTP or browser errors and no external requests.');
   console.log(`Screenshots: ${screenshots}`);
