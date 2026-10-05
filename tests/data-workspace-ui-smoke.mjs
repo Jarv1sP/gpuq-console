@@ -12,7 +12,7 @@ try{
   await page.route('**/*',async route=>{
     const url=new URL(route.request().url());if(url.origin!==origin){unexpected.push(url.href);return route.abort();}
     if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><main><h1>数据集</h1><section id="page-datasets"></section></main>'});
-    if(['/maintenance-state.js','/datasets-ui.js','/workbench-ui.js','/job-progress.js','/motion-ui.js','/data-route.js','/data-workspace.js','/cloud-files-ui.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
+    if(['/maintenance-state.js','/copy-help-ui.js','/datasets-ui.js','/workbench-ui.js','/job-progress.js','/motion-ui.js','/data-route.js','/data-workspace.js','/cloud-files-ui.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
     if(url.pathname==='/favicon.ico')return route.fulfill({status:204});unexpected.push(url.href);return route.abort();
   });
   await page.goto(origin);
@@ -43,11 +43,12 @@ try{
       if(operation.startsWith('cloud.files.')){
         const scope=this.principal.userId+':'+args.machine,rows=cloudRows.get(scope)||[];
         if(operation==='cloud.files.list')return {files:structuredClone(rows)};
+        if(operation==='cloud.files.status'){const row=rows.find(row=>row.operationId===args.operationId);if(!row)throw Object.assign(Error('operation not found'),{status:404});return structuredClone(row);}
         if(operation==='cloud.files.upload')rows.push({operationId:args.key,action:'upload',name:'training.zip',path:args.path,state:'VERIFYING',bytes:2*1024**2+3,totalBytes:2*1024**2+3});
         else if(operation==='cloud.files.verify'){const row=rows.find(row=>row.operationId===args.fileId);if(!row)throw Error('Cloud file is not owned by this account');row.state='VERIFIED';}
         else if(operation==='cloud.files.download'){if(!rows.some(row=>row.operationId===args.fileId&&row.state==='VERIFIED'))throw Error('Cloud source is not verified');rows.push({operationId:args.key,action:'download',name:'training.zip',path:args.path,state:'READY'});}
         else throw Error('Unexpected cloud operation '+operation);
-        cloudRows.set(scope,rows);return {operationId:args.key};
+        cloudRows.set(scope,rows);return {operationId:args.key,state:operation==='cloud.files.verify'?'VERIFIED':rows.find(row=>row.operationId===args.key)?.state};
       }
       throw Error('Unexpected operation '+operation);
     }};

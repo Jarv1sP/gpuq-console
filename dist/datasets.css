@@ -148,6 +148,15 @@
 .cloud-import img{display:block;max-width:100%;margin:16px 0}
 #page-datasets #cloud-import-pending{padding:16px;margin:20px 0;background:var(--d-bg);border:1px solid var(--d-line);border-radius:8px;font-size:13px}
 #page-datasets #cloud-import-pending p{margin-bottom:10px;line-height:1.7}
+#page-datasets #cloud-files-list{list-style:none;padding:0;margin:16px 0}
+#page-datasets #cloud-files-list>li{min-width:0;padding:20px 0;border-top:1px solid var(--d-line);overflow-wrap:anywhere}
+#page-datasets .cloud-file-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+#page-datasets .cloud-file-heading code{min-width:0;color:var(--d-ink)}
+#page-datasets .cloud-file-error{color:var(--err);line-height:1.7}
+#page-datasets .cloud-file-details>code,#page-datasets #cloud-files-pending-key{display:block;overflow-wrap:anywhere;font:12px/1.8 var(--mono)}
+#page-datasets .cloud-file-details summary{color:var(--d-muted);font-size:12px}
+#page-datasets #cloud-files-status{font-size:13px;line-height:1.8;margin-top:12px}
+#page-datasets #cloud-files .file-actions .button{min-height:44px;white-space:nowrap}
 #page-datasets .datasets-next{font-size:13px;line-height:1.7;color:var(--d-meta);margin:20px 0 12px}
 #page-transfers .transfer-section-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-top:28px}
 #page-transfers .transfer-section-heading h3{font-size:24px;font-weight:500;margin:10px 0 0}

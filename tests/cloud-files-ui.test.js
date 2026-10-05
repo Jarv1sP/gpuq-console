@@ -58,12 +58,14 @@ test('lost reverify response retains its original key, without replacing paused 
   const h=harness(async(op,args)=>{
     calls.push({op,args});
     if(op==='cloud.files.verify'){if(first){first=false;throw Error('lost');}return {operationId:args.key};}
+    if(op==='cloud.files.status')throw Object.assign(Error('operation not found'),{status:404});
     if(op==='cloud.files.info')return {enabled:true};if(op==='cloud.files.list')return {files:[]};
     throw Error('Unexpected operation');
   });
   h.click({cloudVerify:fileId});await flush();h.click({cloudVerify:fileId});await flush();
   const verifies=calls.filter(c=>c.op==='cloud.files.verify');assert.equal(verifies.length,2);
   assert.equal(verifies[0].args.key,verifies[1].args.key);assert.equal(verifies[0].args.fileId,fileId);
+  const retry=calls.indexOf(verifies[1]);assert.equal(calls[retry-1].op,'cloud.files.status');assert.equal(calls[retry-1].args.operationId,verifies[0].args.key);
   assert.equal(calls.some(c=>c.op==='cloud.files.download'||c.op.includes('resume')),false);
 });
 

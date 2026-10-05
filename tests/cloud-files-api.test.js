@@ -34,13 +34,13 @@ test('cloud UI escapes names, has a single folded entry and no credential fields
 });
 
 function uiHarness(call){
-  const listeners=new Map(),status={textContent:''},list={innerHTML:'',replaceChildren(){this.innerHTML='';}},machine={value:'gpu-1'},path={value:'incoming/data.zip'},messages=[];
-  const section={querySelector:s=>({'#cloud-files-status':status,'#cloud-files-list':list,'[name=dataset-machine]':machine,'[name=cloud-files-path]':path})[s],addEventListener:(name,callback)=>listeners.set(name,callback)};
+  const listeners=new Map(),status={textContent:''},pendingKey={textContent:''},list={innerHTML:'',replaceChildren(){this.innerHTML='';}},machine={value:'gpu-1'},path={value:'incoming/data.zip'},messages=[];
+  const section={querySelector:s=>({'#cloud-files-status':status,'#cloud-files-pending-key':pendingKey,'#cloud-files-list':list,'[name=dataset-machine]':machine,'[name=cloud-files-path]':path})[s],addEventListener:(name,callback)=>listeners.set(name,callback)};
   const store={production:true,principal:{userId:'demo-user-1'},authGeneration:1,call};
   const ui=cloudFilesUI(store,section,text=>messages.push(text));
   const submit=()=>listeners.get('submit')({target:{id:'cloud-files-form'},preventDefault(){}});
   const refresh=()=>listeners.get('click')({target:{closest:()=>({id:'cloud-files-refresh',dataset:{}})}});
-  return {store,ui,status,list,machine,path,messages,submit,refresh};
+  return {store,ui,status,pendingKey,list,machine,path,messages,submit,refresh};
 }
 const drain=()=>new Promise(resolve=>setImmediate(resolve));
 test('lost accepted response survives re-login and retries the original key, including 401/403',async()=>{
@@ -49,12 +49,13 @@ test('lost accepted response survives re-login and retries the original key, inc
     const h=uiHarness(async(op,args)=>{
       if(op==='cloud.files.upload'){keys.push(args.key);if(first){first=false;throw Object.assign(Error('authorization expired after acceptance'),{status:code});}return {operationId:args.key};}
       if(op==='cloud.files.info')return {enabled:true};
+      if(op==='cloud.files.status')throw Object.assign(Error('original operation not found'),{status:404});
       if(op==='cloud.files.list')return {files:[]};
       throw Error('unexpected operation '+op);
     });
     h.submit();await drain();assert.equal(keys.length,1);assert.match(h.status.textContent,/expired/);
     h.store.authGeneration++;h.ui.reset();h.submit();await drain();
-    assert.equal(keys.length,2);assert.equal(keys[1],keys[0]);assert.match(h.status.textContent,new RegExp(keys[0]));
+    assert.equal(keys.length,2);assert.equal(keys[1],keys[0]);assert.match(h.pendingKey.textContent,new RegExp(keys[0]));assert.match(h.status.textContent,/未确认/);
   }
 });
 test('unknown operation blocks a different upload and a mismatched status cannot clear it',async()=>{
@@ -75,11 +76,13 @@ test('old account responses cannot update a newly selected account, or discard i
     calls.push({op,args,user:h.store.principal.userId});
     if(op==='cloud.files.upload'&&h.store.principal.userId==='demo-user-1')return new Promise(resolve=>{oldResolve=resolve;});
     if(op==='cloud.files.upload')throw Error('new account response lost');
+    if(op==='cloud.files.status')throw Object.assign(Error('original operation not found'),{status:404});
     throw Error('unexpected operation');
   });
   h.submit();await drain();const oldKey=calls[0].args.key;
   h.store.principal={userId:'demo-user-2'};h.store.authGeneration++;h.ui.reset();h.submit();await drain();
   const newKey=calls[1].args.key;assert.notEqual(oldKey,newKey);const newStatus=h.status.textContent;
   oldResolve({operationId:oldKey});await drain();assert.equal(h.status.textContent,newStatus);
-  h.submit();await drain();assert.equal(calls[2].args.key,newKey);
+  h.submit();await drain();const writes=calls.filter(row=>row.op==='cloud.files.upload');assert.equal(writes[2].args.key,newKey);
+  assert.equal(calls.at(-2).op,'cloud.files.upload');assert.equal(calls.at(-1).op,'cloud.files.status');assert.equal(calls.at(-1).args.operationId,newKey);
 });
