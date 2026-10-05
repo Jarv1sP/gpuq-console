@@ -274,6 +274,91 @@ class DirectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'storage configuration changed'):
             DIRECT.DirectUploads(self.node, self.u).configuration()
 
+    def test_browser_origins_are_optional_exact_https_and_revision_bound(self):
+        cert, key, _ = self.tls_fixture()
+        direct = DIRECT.DirectUploads(self.node, self.u)
+        config = {'enabled': True, 'bind': '192.168.77.104', 'port': 18444,
+                  'endpoint': 'https://upload.example.test:18444', 'certificate': str(cert), 'privateKey': str(key)}
+        self.node.CONFIG['directUpload'] = config
+        old = direct.configuration()
+        self.assertNotIn('allowedOrigins', old)
+        self.node.CONFIG['directUpload'] = {**config, 'allowedOrigins': ['https://portal.example.test:443/']}
+        browser = direct.configuration()
+        self.assertEqual(browser['allowedOrigins'], ['https://portal.example.test'])
+        self.assertNotEqual(browser['revision'], old['revision'])
+        for value in ('*', ['*'], ['null'], ['http://portal.example.test'], ['https://*.example.test'],
+                      ['https://portal.example.test/path'], ['https://user:pass@portal.example.test'],
+                      ['https://portal.example.test?secret=x'], ['https://portal.example.test\r\nX: y'],
+                      ['https://portal.example.test']*2,
+                      ['https://portal.example.test', 'https://portal.example.test:443/'],
+                      [f'https://portal{i}.example.test' for i in range(9)]):
+            self.node.CONFIG['directUpload'] = {**config, 'allowedOrigins': value}
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                direct.configuration()
+
+    def test_browser_preflight_raw_upload_and_errors_preserve_ticket_fencing(self):
+        cert, key, pin = self.tls_fixture()
+        listener = socket.socket(); listener.bind(('127.0.0.1', 0))
+        port = listener.getsockname()[1]; listener.close()
+        origin = 'https://portal.example.test'
+        self.config.update(bind='127.0.0.1', port=port, endpoint=f'https://localhost:{port}',
+                           certificate=str(cert), privateKey=str(key), certificateSha256=pin,
+                           allowedOrigins=[origin])
+        with patch.object(DIRECT.DirectUploads, 'configuration', return_value=self.config):
+            server = DIRECT.create_server(self.node, self.u)
+            serving = threading.Thread(target=server.serve_forever, daemon=True); serving.start()
+            try:
+                initial, _, manifest, _ = self.admit(); upload = initial['uploadId']; grant = self.ticket(upload)
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.check_hostname = False; context.verify_mode = ssl.CERT_NONE
+                client = http.client.HTTPSConnection('127.0.0.1', port, context=context, timeout=3)
+                path = f'/v1/uploads/{upload}/manifest?offset=0'
+                preflight = {'Origin': origin, 'Access-Control-Request-Method': 'POST',
+                             'Access-Control-Request-Headers': 'Authorization, Content-Type',
+                             'Access-Control-Request-Private-Network': 'true'}
+                before = self.u.load(self.user, upload)
+                client.request('OPTIONS', path, headers=preflight)
+                reply = client.getresponse(); self.assertEqual(reply.status, 204)
+                self.assertEqual(reply.read(), b'')
+                self.assertEqual(reply.getheader('Access-Control-Allow-Origin'), origin)
+                self.assertEqual(reply.getheader('Access-Control-Allow-Private-Network'), 'true')
+                self.assertEqual(reply.getheader('Access-Control-Allow-Methods'), 'POST')
+                self.assertIsNone(reply.getheader('Access-Control-Allow-Credentials'))
+                self.assertEqual(self.u.load(self.user, upload), before)
+                for change, route in (({'Origin': 'https://evil.example.test'}, path),
+                                      ({'Origin': 'null'}, path),
+                                      ({'Access-Control-Request-Method': 'DELETE'}, path),
+                                      ({'Access-Control-Request-Headers': 'cookie'}, path),
+                                      ({'Access-Control-Request-Headers': 'authorization,authorization'}, path),
+                                      ({'Access-Control-Request-Private-Network': 'false'}, path),
+                                      ({}, '/v1/uploads/'+upload+'/exec')):
+                    client.request('OPTIONS', route, headers={**preflight, **change})
+                    reply = client.getresponse(); self.assertIn(reply.status, (403, 409)); reply.read()
+                    if 'Origin' in change:
+                        self.assertIsNone(reply.getheader('Access-Control-Allow-Origin'))
+                    self.assertIsNone(reply.getheader('Access-Control-Allow-Private-Network'))
+                headers = {'Origin': origin, 'Authorization': 'Bearer '+grant['ticket'],
+                           'Content-Type': 'application/octet-stream'}
+                with patch.object(self.u, 'manifest_bytes', side_effect=AssertionError('Bad Origin must not write')):
+                    client.request('POST', path, manifest, {**headers, 'Origin': 'https://evil.example.test'})
+                    reply = client.getresponse(); self.assertEqual(reply.status, 403)
+                    self.assertIsNone(reply.getheader('Access-Control-Allow-Origin')); reply.read()
+                client.request('POST', path, manifest, headers)
+                reply = client.getresponse(); self.assertEqual(reply.status, 200)
+                self.assertEqual(reply.getheader('Access-Control-Allow-Origin'), origin)
+                self.assertEqual(json.loads(reply.read())['result']['offset'], len(manifest))
+                client.request('GET', f'/v1/uploads/{upload}/status', headers={'Origin': origin, 'Authorization': headers['Authorization']})
+                reply = client.getresponse(); self.assertEqual(reply.status, 200)
+                self.assertEqual(json.loads(reply.read())['result']['manifestOffset'], len(manifest))
+                self.call('direct-revoke', uploadId=upload)
+                client.request('GET', f'/v1/uploads/{upload}/status', headers={'Origin': origin, 'Authorization': headers['Authorization']})
+                reply = client.getresponse(); self.assertEqual(reply.status, 403)
+                self.assertEqual(reply.getheader('Access-Control-Allow-Origin'), origin)
+                self.assertNotIn(grant['ticket'], reply.read().decode())
+                client.close()
+            finally:
+                server.shutdown(); server.server_close(); serving.join(3)
+
     def test_local_https_raw_protocol_and_rejection_have_no_secret_logs(self):
         cert, key, pin = self.tls_fixture()
         listener = socket.socket()
