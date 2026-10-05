@@ -11,6 +11,7 @@ import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/model.js';
+import {installStorageArchive} from '../storage-archive.mjs';
 
 const [hot,cold]=MACHINES.map(m=>m.id),dataset='legacy-original',version='a'.repeat(64);
 const sha=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -28,6 +29,11 @@ async function fixture(t){
     if(operation==='datasets.list')return {datasets:args.userId===owner?.id?[{dataset,ownerIds:[owner.id],versions:[{version,state:'READY'}]}]:[]};
     if(operation==='transfers.capabilities')return {enabled:false,sources:[]};
     assert.equal(args.userId,owner.id,'native single-owner ACL must match explicit enrollment owner');
+    if(operation==='storage.archive.retire'){
+      assert.equal(machine,cold);assert.equal(args.dataset,dataset);assert.equal(args.version,version);
+      return {protocol:1,id:args.id,userId:args.userId,dataset,version,recoveryId:args.recoveryId,
+        state:'RETIRED',neverDispatched:true,proofSha256:'f'.repeat(64)};
+    }
     if(operation==='storage.archive.enrollment-check'){
       assert.deepEqual(args,{userId:owner.id,dataset,version});
       assert.equal(certified,false,'a repeated enrollment must resolve its durable row instead of reprobe');
@@ -118,4 +124,24 @@ test('real HTTP rejects member, forged context and private bridge operations bef
   await f.service.reconcileStorageArchive();
   assert.equal(JSON.parse(f.service.db.prepare('SELECT data FROM storage_archives').get().data).phase,'BLOCKED');
   assert.equal(f.calls.some(c=>c.operation==='storage.archive.provision'),false);
+});
+
+test('real HTTP admin retirement persists terminal proof through restart and rejects private/member calls',async t=>{
+  const f=await fixture(t);
+  assert.equal((await f.call(f.admin.token,'policy.save',{userId:f.owner.id,policyVersion:1,limits:{[hot]:1,[cold]:1},total:2})).http,200);
+  const archive=installStorageArchive(f.service,{enabled:true,machine:cold,authority:'hdd'},{startTimer:false});
+  const event={id:randomUUID(),userId:f.owner.id,dataset,version,state:'READY'},row=archive.enqueueEvent(cold,event);
+  f.service.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run(row.id);
+  const args={machine:cold,ownerId:f.owner.id,dataset,version,eventId:event.id,recoveryId:'unregister-'+'1'.repeat(32)};
+  assert.equal((await f.call(f.member.token,'datasets.archive.retire',args)).http,403);
+  assert.notEqual((await f.call(f.admin.token,'storage.archive.retire',args)).http,200);
+  assert.equal((await f.call(f.admin.token,'datasets.archive.retire',{...args,grantId:row.grantId})).http,400);
+  const first=await f.call(f.admin.token,'datasets.archive.retire',args);assert.equal(first.http,200);assert.equal(first.body.result.phase,'FAILED');
+  assert.equal(f.service.db.prepare('SELECT * FROM storage_archive_lane').get(),undefined);
+  await f.restart();
+  const repeat=await f.call(f.admin.token,'datasets.archive.retire',args);assert.equal(repeat.http,200);assert.deepEqual(repeat.body,first.body);
+  assert.notEqual((await f.call(f.admin.token,'datasets.archive.retire',{...args,recoveryId:'unregister-'+'2'.repeat(32)})).http,200);
+  assert.notEqual((await f.call(f.member.token,'datasets.archive.retry',{machine:cold,dataset,version})).http,200);
+  assert.equal(f.calls.filter(c=>c.operation==='storage.archive.retire').length,1);
+  assert.equal(f.calls.some(c=>['storage.archive.original','storage.archive.provision','storage.archive.certify'].includes(c.operation)),false);
 });

@@ -8,9 +8,11 @@ bounded worker; RemoteAuthority and DatasetTier authenticate/certify recovery.
 Grants are private node journal data and private RPC results, not browser data.
 """
 import importlib.util
+import contextlib
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -424,6 +426,90 @@ class StorageArchive:
         self._single(user, ref, ready=True, protected=True)
         return dict(protected=True, **ref)
 
+    def retire(self, args):
+        """Retire only a never-dispatched, same-HDD publish after normal removal.
+
+        No discovery, data deletion, unpin, authority release or lane mutation.
+        A committed removal preserves the actual old registration inode. Missing
+        live files alone are never proof; existing operation journals fail closed.
+        """
+        self._require(source=True)
+        _object(args, ('id', 'userId', 'dataset', 'version', 'recoveryId', 'grantId', 'certifyId'))
+        op = J.identifier(args['id']); user = _user(args['userId'])
+        ref = _ref({k: args[k] for k in ('dataset', 'version')})
+        recovery = args['recoveryId']
+        if not isinstance(recovery, str) or not re.fullmatch(r'unregister-[a-f0-9]{32}', recovery):
+            raise ValueError('An exact normal unregister recovery receipt is required')
+        grant, certify = J.identifier(args['grantId']), J.identifier(args['certifyId'])
+        digest = A._sha([user, self.machine, ref['dataset'], ref['version'], self.machine])
+        expected = digest[:8]+'-'+digest[8:12]+'-5'+digest[13:16]+'-a'+digest[17:20]+'-'+digest[20:32]
+        if grant != expected or len({op, grant, certify}) != 3:
+            raise ValueError('Retirement is not the fixed same-HDD ingest identity')
+        request = A._sha(args)
+        with self._lock('outbox'), self._lock('admission'), contextlib.ExitStack() as locks:
+            for job in sorted((grant, certify)):
+                locks.enter_context(self._lock('run-'+job))
+                locks.enter_context(self._lock('op-'+job))
+            row = self._load(self._event_path(op))
+            if row is None or row.get('id') != op or row.get('userId') != user or row.get('reference') != ref:
+                raise ValueError('Retirement does not match the exact publish event')
+            self._event_binding(row)
+            if row.get('state') == 'RETIRED':
+                if row.get('retirement', {}).get('request') != request:
+                    raise ValueError('Retirement receipt cannot be changed')
+                return dict(protocol=1, id=op, userId=user, **ref, recoveryId=recovery,
+                            state='RETIRED', neverDispatched=True, proofSha256=row['retirement']['proofSha256'])
+            identity = row.get('registration')
+            if (row.get('state') != 'READY' or not isinstance(identity, list) or len(identity) != 5
+                    or any(type(n) is not int or n < 0 for n in identity)):
+                raise ValueError('Retirement requires a fixed READY registration')
+            for job in (grant, certify):
+                if os.path.lexists(self._op_path(job).parent) or self.worker_state(job) != 'STOPPED':
+                    raise ValueError('Existing or unconfirmed archive operation cannot be retired')
+            lane = self._load(self.root/'control'/'lane'/'state.json')
+            if lane is not None and lane.get('opId') in (grant, certify):
+                raise ValueError('Retirement refuses a native archive lane')
+            locks.enter_context(self.cache._lock_file('.locks/'+ref['dataset']+'.'+ref['version']+'.lock'))
+            with self.cache._locked():
+                paths = self.cache._paths(**ref)
+                try:
+                    self.cache._record_identity(**ref)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ValueError('Reference is still registered or has been recreated')
+                if (any(self.cache._version_entry_exists(paths[k]) for k in ('ready', '.staging'))
+                        or self.cache._leases(**ref) or self.cache._tier(**ref)['pins']
+                        or self.cache._tier(**ref).get('recovery') is not None):
+                    raise ValueError('Live data, leases, pins or recovery prevent retirement')
+                folder = self.cache.root/'.trash'/recovery
+                removal = D._read_json(folder/'REMOVAL.json')
+                if (removal.get('schema') != D.SCHEMA or removal.get('unregistered') is not True
+                        or removal.get('dataset') != ref['dataset'] or removal.get('version') not in (None, ref['version'])
+                        or ref['version'] not in removal.get('versions', []) or removal.get('owners') != [user]):
+                    raise ValueError('Normal unregister receipt does not prove this owner/version was removed')
+                record_path = folder/'registration'/(ref['version']+'.json')
+                with D._directory(record_path.parent) as parent:
+                    fd = os.open(record_path.name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+                    try:
+                        stamp = list(D._stamp(D._regular(fd)))
+                        # rename changes ctime; inode, length and mtime survive.
+                        if stamp[:4] != identity[:4]:
+                            raise ValueError('Removed registration is not the original publish identity')
+                    finally:
+                        os.close(fd)
+                record = D._read_json(record_path)
+                owners = D._read_json(folder/'registration'/'dataset.json')
+                if (owners.get('owners') != [user] or not isinstance(record, dict)
+                        or set(record) != {'schema','manifest','sourceId'} or record.get('schema') != D.SCHEMA
+                        or hashlib.sha256(D._manifest_bytes(record['manifest'])[1]).hexdigest() != ref['version']):
+                    raise ValueError('Removed registration owner or complete manifest differs')
+                proof = A._sha(dict(request=args, registration=identity, removal=removal, record=record))
+                row.update(state='RETIRED', retirement=dict(request=request, proofSha256=proof, at=time.time()))
+                self._save(self._event_path(op), row)
+            return dict(protocol=1, id=op, userId=user, **ref, recoveryId=recovery,
+                        state='RETIRED', neverDispatched=True, proofSha256=proof)
+
     def _event_path(self, op):
         return self.root/'events'/(J.identifier(op)+'.json')
 
@@ -438,6 +524,8 @@ class StorageArchive:
             prior = self._load(self._event_path(op))
             if prior is not None:
                 self._event_binding(prior)
+                if prior.get('state') == 'RETIRED':
+                    raise ValueError('Retired publish intent cannot be restarted')
                 if (prior['userId'], prior['reference'], prior['origin']) != (user, ref, args['origin']):
                     raise ValueError('Publish intent ID cannot change its owner/reference/origin')
                 if prior['registration'] is not None and prior['registration'] != identity:
@@ -450,7 +538,7 @@ class StorageArchive:
                 if old is None:
                     raise ValueError('Publish intent deduplication record is missing')
                 self._event_binding(old)
-                if old['registration'] == identity or old['registration'] is None:
+                if old.get('state') != 'RETIRED' and (old['registration'] == identity or old['registration'] is None):
                     return {'id': old['id']}
             if len(self._ids(self.root/'events')) >= MAX_HISTORY:
                 raise ValueError('Archive publish history is full')
@@ -466,6 +554,8 @@ class StorageArchive:
 
     def _ready_event(self, row):
         self._event_binding(row)
+        if row.get('state') not in ('PUBLISHING', 'READY'):
+            raise ValueError('Publish event is not eligible for READY')
         # READY is a durable publish event, not a new full manifest poll. After
         # certification the payload may already be evicted before ack arrives.
         identity = self._single(row['userId'], row['reference'], ready=row['state'] == 'PUBLISHING')
@@ -484,7 +574,7 @@ class StorageArchive:
             if row is None or row['userId'] != user:
                 raise PermissionError('No matching private publish intent')
             self._event_binding(row)
-            if row['state'] != 'ACKNOWLEDGED':
+            if row['state'] not in ('ACKNOWLEDGED', 'RETIRED'):
                 self._ready_event(row)
             return dict(id=op, state=row['state'])
 
@@ -509,7 +599,7 @@ class StorageArchive:
             # Fair rotation bounds work even for broken/unready old intents.
             for op in ids[:max(32, limit*4)]:
                 last = op; row = self._load(self._event_path(op))
-                if row['state'] == 'ACKNOWLEDGED':
+                if row['state'] in ('ACKNOWLEDGED', 'RETIRED'):
                     continue
                 try:
                     row = self._ready_event(row)

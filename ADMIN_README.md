@@ -221,6 +221,12 @@ gpuctl data archive-enroll DATASET_ID@FULL_VERSION --machine HOT_MACHINE --owner
 
 同次请求重试保留原 UUID。接口先核两端登记身份，再由后台完整校验并认证；只有状态为 `ARCHIVED` 才可将本机副本作为可回收缓存，HDD 原件继续保留。它不搬运数据、不改 owners、不强制解除 pin，也不接管共享多 owner、缺失、未就绪或有写入疑点的数据。HDD 没有同版原件时需另行受控导入。长期保存仍不是独立备份。
 
+### 已注销的同机旧归档意图
+
+正常 `datasets.unregister` 后，若旧的同机 HDD 发布意图仍占归档队列，当前管理员可通过认证 API 调用 `datasets.archive.retire {machine,dataset,version,ownerId,eventId,recoveryId}`。必须使用原发布事件 UUID 和正常注销返回的精确 `unregister-…` 恢复记录；不能仅凭目录不存在判断。节点核对已提交的注销记录、原登记 inode/完整清单/单 owner，并确认没有副本、写入、租约、pin、恢复依赖或曾创建的归档 worker 意图；未知状态拒绝。
+
+只支持从未启动跨机复制或 seal/certify 的同机 HDD ingest，不处理跨机任务或已有原件授权。成功后旧事件永久 `RETIRED`，门户保留 `FAILED / failureStage=retired` 历史，仅释放自己的队列占用；相同请求幂等，`archive-retry` 不会复活它。新登记须使用新发布事件，不删除任何原始数据或解除保护。
+
 ## 备份与维护
 
 ### 个人数据目录

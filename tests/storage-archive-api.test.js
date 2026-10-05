@@ -63,6 +63,67 @@ function enrollmentFixture(t){
   return f;
 }
 
+function retirementFixture(t){
+  const f=enrollmentFixture(t);f.user.limits[cold]=1;
+  const event={id:randomUUID(),userId:f.user.id,...ref,state:'READY'};
+  const row=f.archive.enqueueEvent(cold,event);
+  f.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run(row.id);
+  f.retire={machine:cold,...ref,ownerId:f.user.id,eventId:event.id,recoveryId:'unregister-'+'1'.repeat(32)};
+  const bridge=f.service.bridge;
+  f.service.bridge=async(machine,op,args)=>{
+    if(op!=='storage.archive.retire')return bridge(machine,op,args);
+    f.calls.push({machine,op,args});await f.onRetire?.();
+    return {protocol:1,id:args.id,userId:args.userId,dataset:args.dataset,version:args.version,
+      recoveryId:args.recoveryId,state:'RETIRED',neverDispatched:true,proofSha256:'f'.repeat(64),...f.retireOverride};
+  };
+  f.rowId=row.id;return f;
+}
+
+test('explicit retirement durably fails only old intent, frees its lane and never retries',async t=>{
+  const f=retirementFixture(t);
+  const [a,b]=await Promise.all([f.service.retireStorageArchive(f.actor,f.retire),f.service.retireStorageArchive(f.actor,f.retire)]);
+  assert.deepEqual(a,b);assert.equal(a.phase,'FAILED');assert.equal(f.archive.load(f.rowId).failureStage,'retired');
+  assert.equal(f.db.prepare('SELECT * FROM storage_archive_lane').get(),undefined);
+  assert.equal(f.calls.filter(c=>c.op==='storage.archive.retire').length,1);
+  assert.deepEqual(await f.service.retireStorageArchive(f.actor,{...f.retire}),a);
+  assert.throws(()=>f.service.retryStorageArchive(f.user.id,cold,ref),/不能重试/);
+  f.install();await f.service.reconcileStorageArchive();
+  assert.equal(f.archive.load(f.rowId).failureStage,'retired');
+  assert.equal(f.calls.some(c=>['storage.archive.original','storage.archive.provision','storage.archive.certify'].includes(c.op)),false);
+});
+
+test('retirement rejects missing/mismatched proof, authorization and cross-machine/seal contexts',async t=>{
+  for(const override of [{state:'UNKNOWN'},{neverDispatched:false},{userId:'demo-user-2'},{version:'b'.repeat(64)},{proofSha256:null}]){
+    const f=retirementFixture(t);f.retireOverride=override;
+    await assert.rejects(f.service.retireStorageArchive(f.actor,f.retire),/not confirmed/);
+    assert.equal(f.db.prepare('SELECT archive_id FROM storage_archive_lane').get().archive_id,f.rowId);
+    assert.equal(f.archive.load(f.rowId).phase,'PROVISIONING');
+  }
+  const f=retirementFixture(t);
+  assert.throws(()=>f.service.retireStorageArchive(f.principal,f.retire),/administrator/);
+  for(const change of [{machine:hot},{ownerId:'demo-user-2'},{eventId:randomUUID()},{hostAdmin:true}])
+    assert.throws(()=>f.service.retireStorageArchive(f.actor,{...f.retire,...change}));
+  for(const change of [{kind:'replica'},{sourceDataset:'other'},{transferId:randomUUID()},{phase:'CERTIFYING'},{eventAcknowledged:true}]){
+    const row=f.archive.load(f.rowId);f.db.prepare('UPDATE storage_archives SET data=? WHERE id=?').run(JSON.stringify({...row,...change}),f.rowId);
+    assert.throws(()=>f.service.retireStorageArchive(f.actor,f.retire),/never-dispatched/);
+    f.db.prepare('UPDATE storage_archives SET data=? WHERE id=?').run(JSON.stringify(row),f.rowId);
+  }
+  f.onRetire=()=>{f.admin.role='member';};await assert.rejects(f.service.retireStorageArchive(f.actor,f.retire),/authorization changed/);
+  assert.equal(f.archive.load(f.rowId).phase,'PROVISIONING');
+});
+
+test('retirement cannot clear another lane and a late original reply cannot resurrect the row',async t=>{
+  const f=retirementFixture(t);let entered,unblock;
+  const ready=new Promise(r=>entered=r),wait=new Promise(r=>unblock=r);
+  f.onCall=async(_,op)=>{if(op==='storage.archive.original'){entered();await wait;}};
+  const reconcile=f.service.reconcileStorageArchive();await ready;
+  f.db.prepare('UPDATE storage_archive_lane SET archive_id=?').run('another-fixed-lane');
+  await f.service.retireStorageArchive(f.actor,f.retire);
+  unblock();await reconcile;
+  assert.equal(f.archive.load(f.rowId).failureStage,'retired');assert.equal(f.archive.load(f.rowId).phase,'FAILED');
+  assert.equal(f.db.prepare('SELECT archive_id FROM storage_archive_lane').get().archive_id,'another-fixed-lane');
+});
+
 test('explicit admin enrollment reuses exact HDD original, not transfer or forged outbox',async t=>{
   const f=enrollmentFixture(t);
   const [first,again]=await Promise.all([f.service.enrollStorageArchive(f.actor,f.request),f.service.enrollStorageArchive(f.actor,f.request)]);

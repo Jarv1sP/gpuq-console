@@ -67,6 +67,14 @@ class StorageManagementRoute(unittest.TestCase):
             archive.enrollment_check.assert_called_once_with(args)
             with self.assertRaises(ValueError): self.node.process('datasets.archive.enrollment-check', args)
 
+    def test_retirement_is_only_an_internal_archive_route(self):
+        args = dict(userId='demo-user-1', dataset='example', version=self.version)
+        archive = SimpleNamespace(retire=Mock(return_value={'state':'RETIRED'}))
+        with patch.object(self.node, 'storage_archive', return_value=archive):
+            self.assertEqual(self.node.process('storage.archive.retire', args), {'state':'RETIRED'})
+            archive.retire.assert_called_once_with(args)
+            with self.assertRaises(ValueError): self.node.process('datasets.archive.retire', args)
+
     def test_authenticated_control_flag_is_exact_boolean_and_identity_is_validated(self):
         for admin in (False, None, 0, 1, 'true'):
             with self.subTest(admin=admin), self.assertRaises(ValueError):

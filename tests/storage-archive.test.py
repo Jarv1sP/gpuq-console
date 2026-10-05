@@ -117,6 +117,73 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'disabled'): disabled.provision(self.request)
         node.dataset_cache.assert_not_called()
 
+    def removed_intent(self):
+        intent = self.intent()
+        self.source.outbox_begin(intent)
+        self.source.outbox_ready(dict(opId=intent['opId'], userId=USER))
+        receipt = self.cold.unregister(ADMIN, 'original', self.version)
+        h = A._sha([USER, 'cold-node', 'original', self.version, 'cold-node'])
+        grant = h[:8]+'-'+h[8:12]+'-5'+h[13:16]+'-a'+h[17:20]+'-'+h[20:32]
+        return dict(id=intent['opId'], userId=USER, dataset='original', version=self.version,
+                    recoveryId=receipt['recoveryId'], grantId=grant, certifyId=str(uuid.uuid4()))
+
+    def test_retire_normal_removed_registration_is_durable_exact_and_idempotent(self):
+        request = self.removed_intent()
+        event = self.source._load(self.source._event_path(request['id']))
+        record = self.cold.root/'.trash'/request['recoveryId']/'registration'/(self.version+'.json')
+        self.assertEqual(list(D._stamp(record.stat()))[:4], event['registration'][:4])
+        value = self.source.retire(request)
+        self.assertEqual(value['state'], 'RETIRED'); self.assertTrue(value['neverDispatched'])
+        self.assertEqual(self.source.retire(dict(reversed(list(request.items())))), value)
+        self.assertEqual(self.source.outbox_list({'limit':8}), {'events':[]})
+        self.assertEqual(self.source.outbox_ready({'opId':request['id'],'userId':USER})['state'], 'RETIRED')
+        self.source.spawn.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'cannot be restarted'):
+            self.source.outbox_begin(self.intent(op=request['id']))
+        with self.assertRaisesRegex(ValueError, 'cannot be changed'):
+            self.source.retire({**request, 'recoveryId':'unregister-'+'0'*32})
+        # New registration gets a distinct publish event, not the retired event.
+        self.cold.register_manifest(ADMIN, 'original', self.manifest, [USER])
+        new = self.intent(); self.assertEqual(self.source.outbox_begin(new), {'id':new['opId']})
+        self.assertEqual(self.source.retire(request), value)
+
+    def test_retire_rejects_recreated_registration_missing_or_uncommitted_proof(self):
+        request = self.removed_intent()
+        folder = self.cold.root/'.trash'/request['recoveryId']
+        receipt = D._read_json(folder/'REMOVAL.json')
+        for changes in ({'unregistered':False}, {'owners':['demo-user-2']}, {'versions':[]}, {'dataset':'other'}):
+            D._write_json(folder/'REMOVAL.json', {**receipt, **changes})
+            with self.assertRaisesRegex(ValueError, 'does not prove'): self.source.retire(request)
+        D._write_json(folder/'REMOVAL.json', receipt)
+        with self.assertRaises(FileNotFoundError): self.source.retire({**request,'recoveryId':'unregister-'+'0'*32})
+        record = folder/'registration'/(self.version+'.json'); saved = record.read_bytes()
+        record.rename(record.with_suffix('.kept')); record.write_bytes(saved)
+        with self.assertRaisesRegex(ValueError, 'publish identity'): self.source.retire(request)
+        record.unlink(); record.with_suffix('.kept').rename(record)
+        self.cold.register_manifest(ADMIN, 'original', self.manifest, [USER])
+        with self.assertRaisesRegex(ValueError, 'recreated'): self.source.retire(request)
+
+    def test_retire_rejects_workers_journals_pins_unknown_and_wrong_identity(self):
+        request = self.removed_intent()
+        for state in ('RUNNING','UNKNOWN'):
+            self.source.worker_state.return_value = state
+            with self.assertRaisesRegex(ValueError, 'unconfirmed'): self.source.retire(request)
+        self.source.worker_state.return_value = 'STOPPED'
+        path = self.source._op_path(request['grantId']); path.parent.mkdir()
+        with self.assertRaisesRegex(ValueError, 'Existing'): self.source.retire(request)
+        path.parent.rmdir()
+        with self.assertRaisesRegex(ValueError, 'same-HDD'): self.source.retire({**request,'grantId':str(uuid.uuid4())})
+        with self.assertRaises(ValueError): self.source.retire({**request,'userId':'demo-user-2'})
+        lane = self.source.root/'control'/'lane'/'state.json'; self.source._save(lane,{'opId':request['certifyId']})
+        with self.assertRaisesRegex(ValueError, 'native archive lane'): self.source.retire(request)
+        lane.unlink()
+        # A valid persistent pin remains a hard veto even after an anomalous removal.
+        self.cold.register_manifest(ADMIN, 'original', self.manifest, [USER])
+        self.cold.materialize(ADMIN, 'original', self.version, _source=self.root/'input')
+        self.cold.pin(ADMIN, 'original', self.version, 'test-pin')
+        (self.cold.root/'.registry'/'original'/(self.version+'.json')).unlink()
+        with self.assertRaises(ValueError): self.source.retire(request)
+
     def test_config_and_private_requests_reject_user_paths_roles_or_peer_override(self):
         for config in ({'enabled':1}, {**POLICY,'root':'/tmp'}, {'enabled':True,'machine':'cold-node'},
                        {**POLICY,'authority':'../hdd'}):

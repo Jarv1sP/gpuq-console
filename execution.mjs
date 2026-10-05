@@ -217,6 +217,10 @@ export async function executionCall(service,principal,operation,args){
     if(!service.enrollStorageArchive)fail('长期归档尚未配置。',409);
     return service.enrollStorageArchive(principal,args);
   }
+  if(operation==='datasets.archive.retire'){
+    if(!service.retireStorageArchive)fail('长期归档尚未配置。',409);
+    return service.retireStorageArchive(principal,args);
+  }
   if(operation==='datasets.archive.retry'){
     authorizedMachine(args.machine);
     if(Object.keys(args).sort().join(',')!=='dataset,machine,version')fail('归档重试需要固定数据集版本。');
