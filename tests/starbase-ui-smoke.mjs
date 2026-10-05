@@ -137,9 +137,31 @@ try{
   await phone.locator('[name=workspace-machine]').selectOption('gpu-1');await phone.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);await phone.locator('[name=workspace-project]').selectOption(project.project);await capture(phone,'work-member-390');
   await openSubmit(phone);await capture(phone,'submit-member-390',true);
   for(const [selector,name] of [['#custom-scheduling>summary','scheduling'],['.training-advanced>details:nth-child(2)>summary','elastic'],['.training-advanced>details:nth-child(3)>summary','placement']]){
-    await phone.locator(selector).click();await phone.locator('#work-submit-panel').waitFor({state:'visible'});await capture(phone,'submit-'+name+'-390',true);
-    assert.match(await phone.locator('#work-submit').evaluate(n=>getComputedStyle(n).transform),/-117/,'phone drill-down leaves the sheet at 30% parallax');await phone.locator('#close-submit-panel').click();assert.equal(await phone.locator('#work-submit-panel').isVisible(),false);
+    await phone.locator(selector).click();await phone.locator('#work-submit-panel').waitFor({state:'visible'});
+    // Sample the completed animation, before screenshot capture can alter the
+    // viewport. A wall-clock delay does not synchronize the animation timeline.
+    await phone.locator('#work-submit-panel').evaluate(async panel=>{await Promise.all([...panel.getAnimations(),...document.querySelector('#work-submit').getAnimations()].map(animation=>animation.finished));});
+    assert.match(await phone.locator('#work-submit').evaluate(n=>getComputedStyle(n).transform),/-117/,'phone drill-down leaves the sheet at 30% parallax');
+    await capture(phone,'submit-'+name+'-390',true);await phone.locator('#close-submit-panel').click();assert.equal(await phone.locator('#work-submit-panel').isVisible(),false);
+    // Native close hides the panel immediately; its inert exit clone and the
+    // underlying return animation must finish before testing the next drill-down.
+    await phone.evaluate(async()=>{await Promise.all([document.querySelector('#work-submit'),...document.querySelectorAll('.object-transition-layer')].flatMap(layer=>layer.getAnimations({subtree:true})).map(animation=>animation.finished));});
   }
+  await phone.locator('#custom-scheduling>summary').click();
+  await phone.locator('#work-submit-panel').evaluate(async panel=>{await Promise.all([...panel.getAnimations(),...document.querySelector('#work-submit').getAnimations()].map(animation=>animation.finished));});
+  // Close and re-open through the real click handlers in one task. The prior
+  // exit is still running; this case deliberately does not await its completion.
+  const rapid=await phone.locator('#close-submit-panel').evaluate(button=>{
+    button.click();const layers=[...document.querySelectorAll('.object-transition-layer')];
+    const snapshot={exitRunning:layers.some(layer=>layer.getAnimations({subtree:true}).some(animation=>animation.playState==='running')),cloneOpen:layers.some(layer=>[...layer.querySelectorAll('dialog')].some(clone=>clone.open))};
+    document.querySelector('.training-advanced>details:nth-child(2)>summary').click();return snapshot;
+  });
+  assert.equal(rapid.exitRunning,true,'rapid re-opening must overlap the preceding exit');
+  await phone.locator('#work-submit-panel').evaluate(async panel=>{await Promise.all([...panel.getAnimations(),...document.querySelector('#work-submit').getAnimations()].map(animation=>animation.finished));});
+  assert.match(await phone.locator('#work-submit').evaluate(n=>getComputedStyle(n).transform),/-117/,'rapid phone drill-down leaves the real sheet at 30% parallax');
+  assert.equal(rapid.cloneOpen,false,'exiting visual clones never count as open dialogs');
+  await capture(phone,'submit-rapid-elastic-390',true);await phone.locator('#close-submit-panel').click();
+  await phone.evaluate(async()=>{await Promise.all([document.querySelector('#work-submit'),...document.querySelectorAll('.object-transition-layer')].flatMap(layer=>layer.getAnimations({subtree:true})).map(animation=>animation.finished));});
   await phone.keyboard.press('Escape');await phone.locator('#work-submit').waitFor({state:'hidden'});await phone.locator('.wb-focal .wb-job-name').click();await capture(phone,'job-overview-member-390',true);
   for(const tab of ['logs','diagnostics','output','notes']){await phone.locator('[data-job-tab='+tab+']').click();await capture(phone,'job-'+tab+'-member-390',true);await noOverflow(phone);}
   for(const selector of ['#drawer-task-note-lifetime','#drawer-task-note-job','#drawer-task-note-body','#drawer-task-note-form [type=submit]']){const bounds=await phone.locator(selector).boundingBox();assert.ok(bounds.x>=0&&bounds.x+bounds.width<=390,'note controls remain inside the phone sheet');}

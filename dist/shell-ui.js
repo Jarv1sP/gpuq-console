@@ -1,4 +1,4 @@
-import {escapeUI as esc} from './workbench-ui.js';
+import {escapeUI as esc,serverSelectLabel} from './workbench-ui.js';
 import {controlUI,sessionStatus} from './control-ui.js';
 import {sharedObject,captureObject} from './motion-ui.js';
 
@@ -12,7 +12,8 @@ export function shellUI(store,{navigate,getPage,toast}){
   function syncContext(){
     const machine=q('[name=workspace-machine]'),project=q('[name=workspace-project]'),active=getPage();
     context.hidden=!store.principal||!machine||!['work','datasets','transfers'].includes(active);
-    for(const [original,target] of [[machine,q('#context-machine')],[project,q('#context-project')]]){if(!original)continue;if(target.innerHTML!==original.innerHTML)target.innerHTML=original.innerHTML;target.value=original.value;target.title=target.id==='context-machine'?original.value:'';target.disabled=original.disabled;}
+    for(const [original,target] of [[machine,q('#context-machine')],[project,q('#context-project')]]){if(!original)continue;if(target.innerHTML!==original.innerHTML)target.innerHTML=original.innerHTML;target.value=original.value;target.disabled=original.disabled;target.title=original.selectedOptions[0]?.textContent||original.value;}
+    serverSelectLabel(q('#context-machine'));
     q('#context-note').textContent=project?.value?'项目':'个人工作区';
     if(active==='work'&&store.principal){q('#page-title').textContent=project?.value||'个人工作区';q('#page-description').textContent=machine?.value?machine.value+' · '+(project?.value?'项目':'个人工作区'):'选择获授权服务器，开始一次训练。';}
   }
@@ -69,7 +70,7 @@ export function shellUI(store,{navigate,getPage,toast}){
   }
   function updateMobileAction(){
     if(phoneAction&&(!phone()||getPage()!=='work')){phoneActionPlace?.after(phoneAction);phoneActionPlace?.remove();phoneActionPlace=null;phoneAction=null;}
-    const action=q('#open-submit');
+    const action=q('#open-submit'),headingControl=q('.heading-actions [data-shell-action=control]');if(headingControl)headingControl.hidden=phone()&&!q('#mobile-control').hidden;
     if(phone()&&getPage()==='work'&&action){if(!phoneAction){phoneActionPlace=document.createComment('workbench primary action');action.before(phoneActionPlace);phoneAction=action;q('#mobile-control').append(action);}action.hidden=!store.principal;}
   }
   function renderMe(){
@@ -82,12 +83,12 @@ export function shellUI(store,{navigate,getPage,toast}){
     const changed=page!==null&&page!==getPage();page=getPage();document.body.dataset.room=page;
     q('#account-avatar').textContent=(store.users.find(user=>user.id===store.principal?.userId)?.name||store.principal?.username||'S').slice(0,1);
     if(notice!==q('#mode-note').textContent)notice=q('#mode-note').textContent;
-    syncContext();syncNavigation();updateMobileAction();control.update();renderMe();updateIndicator(changed);
+    syncContext();syncNavigation();control.update();updateMobileAction();renderMe();updateIndicator(changed);
     if(page==='work')q('#page-title').classList.add('work-project-title');else q('#page-title').classList.remove('work-project-title');
   }
   function syncStatus(state,time){q('#sync-label').textContent=state==='syncing'?'正在同步':state==='failed'?'同步失败，保留已确认状态':'已同步 '+new Date(time||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});}
   const clearGhosts=()=>{roomAnimation?.cancel();headingAnimation?.cancel();ghost?.remove();for(const layer of document.querySelectorAll('.object-transition-layer'))layer.remove();};
-  addEventListener('resize',()=>{clearGhosts();syncNavigation();updateMobileAction();control.update();updateIndicator();});
+  addEventListener('resize',()=>{clearGhosts();syncNavigation();control.update();updateMobileAction();updateIndicator();});
   store.onAuthChange(()=>{clearGhosts();control.close(true);account.open=false;scrolls.clear();context.hidden=true;});
   requestAnimationFrame(()=>{const initial=q('[data-page]:not([hidden])');initial?.animate([{opacity:0},{opacity:1}],{duration:reduced()?150:220,easing:'linear'});});
   return {update,route,syncStatus,control};

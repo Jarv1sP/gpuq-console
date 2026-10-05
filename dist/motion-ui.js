@@ -1,6 +1,7 @@
 // Approved spatial transitions. State changes take effect immediately; ghosts
 // are inert, clipped to the viewport, and never carry application hooks.
 export const reducedMotion=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
+export const openDialogs=()=>[...document.querySelectorAll('dialog[open]')].filter(dialog=>!dialog.closest('[inert],[hidden]'));
 const phone=()=>matchMedia('(max-width:759px)').matches;
 const standard='cubic-bezier(.2,0,0,1)';
 const underLayers=new Map(),entrances=new WeakMap(),boundDialogs=new WeakSet();
@@ -10,6 +11,7 @@ function cleanClone(element){
   const clone=element.cloneNode(true);
   const originals=[element,...element.querySelectorAll('*')],copies=[clone,...clone.querySelectorAll('*')];
   for(const [index,node] of copies.entries()){
+    if(node.tagName==='DIALOG')node.removeAttribute('open');
     // cloneNode copies serialized style attributes, which strict CSP rejects.
     // Reapply only through the CSSOM, as with the actual application controls.
     node.removeAttribute('style');const style=originals[index].isConnected?getComputedStyle(originals[index]):originals[index].style;
@@ -39,7 +41,7 @@ globalThis.addEventListener?.('keydown',event=>{if(event.key==='Escape')for(cons
 export function revealSheet(dialog,{drilldown=false}={}){
   const reduce=reducedMotion();
   if(phone()&&drilldown&&!reduce){
-    const element=[...document.querySelectorAll('dialog[open]')].filter(layer=>layer!==dialog).at(-1)||document.querySelector('[data-page]:not([hidden])');
+    const element=openDialogs().filter(layer=>layer!==dialog).at(-1)||document.querySelector('[data-page]:not([hidden])');
     if(element){const distance=innerWidth*.3,animation=element.animate([{transform:'none'},{transform:`translateX(${-distance}px)`}],{duration:350,easing:standard,fill:'forwards'});underLayers.set(dialog,{element,distance,animation});}
   }
   const animation=dialog.animate(reduce?[{opacity:0},{opacity:1}]:[{transform:phone()&&!drilldown?'translateY(100%)':'translateX(100%)'},{transform:'none'}],{duration:reduce?150:phone()?drilldown?350:380:320,easing:standard});

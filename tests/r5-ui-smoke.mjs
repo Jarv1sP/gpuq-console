@@ -1,0 +1,227 @@
+// Actual Portal/SQLite/cookies/CSP/assets in Chromium. Node observations and
+// terminal output are synthetic; no shell, GPU, SSH or production mutation.
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import net from 'node:net';
+import {chromium} from 'playwright';
+import {createPortalServer} from '../portal-server.mjs';
+import {MACHINES} from '../dist/machines.js';
+import {accountMenu,closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
+
+const temp=await mkdtemp(join(tmpdir(),'r5-work-browser-'));
+const shots=process.env.UI_SCREENSHOTS||'/tmp/r5-ui-smoke';
+const [targetMachine,sourceMachine]=MACHINES.map(machine=>machine.id);
+const password='Starbase-Local-Fixture-Only-2026!',release='a'.repeat(64);
+const errors=[],outside=[],assets=[],calls=[],sessions=new Map();
+let server,service,browser,releaseCatalog,releaseInventory;
+const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
+const origin='http://127.0.0.1:'+port;
+async function closeRoutedContext(context){
+  await Promise.all(context.pages().map(page=>page.unrouteAll({behavior:'wait'})));
+  await context.unrouteAll({behavior:'wait'});
+  await context.close();
+}
+const project={project:'vision-baseline',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
+const status=()=>({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map((machine,position)=>({id:machine.id,checkedAt:new Date().toISOString(),reachable:position!==2,
+  gpus:position===2?[]:Array.from({length:machine.cards},(_,index)=>({index,memoryTotalMiB:(Number.parseFloat(machine.memory)||32)*1024,memoryUsedMiB:index<2?16384:0,processesAvailable:true,processes:index<2?[{pid:1000+index,memoryUsedMiB:16384}]:[]})),
+  gpuq:{connected:position!==2,health:position===2?'unknown':'ok',observeOnly:position===1,schedulableIndices:[0],jobs:[],capabilities:['priority-policy-v1','console-yield-v1','console-elastic-v1','console-placement-v1','console-sharing-v1','console-hami-v1','console-hami-sm-v1']}}))});
+try{
+  await mkdir(shots,{recursive:true});const bootstrap=join(temp,'bootstrap'),statusPath=join(temp,'status');
+  await writeFile(bootstrap,JSON.stringify({username:'admin',password}),{mode:0o600});await writeFile(statusPath,JSON.stringify(status()));
+  const bridge=async(machine,operation,args)=>{
+    calls.push({machine,operation,args:structuredClone(args)});
+    if(operation==='projects.list')return {projects:[structuredClone(project)]};
+    if(operation==='projects.verify')return {project:args.project,release:args.release,state:'READY'};
+    if(operation==='projects.status')return structuredClone(project);
+    if(operation==='datasets.list')return {datasets:machine===targetMachine?[{dataset:'tiny-local',ownerIds:[args.userId],versions:[{version:release,state:'READY',canPrepare:true,bytes:2048,files:1}]}]:machine===sourceMachine?[{dataset:'scans',ownerIds:[args.userId],versions:[{version:release,state:'READY',canPrepare:true,bytes:7*1024**3,files:120}]}]:[]};
+    if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
+    if(operation==='transfers.capabilities')return {protocol:'lan-transfer-v1',enabled:true,sourceReady:true,sources:[sourceMachine]};
+    if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:'READY'};
+    if(operation==='logs')return {text:'epoch 12/40 loss=0.438 val_acc=0.716\ncheckpoint saved\nTraining continues on the synthetic node.'};
+    if(operation==='diagnostics')return {jobId:args.job.id,state:'COMPLETE',schedulerState:'FAILED',attempts:[],captures:[],historyAvailable:true,allocationHistory:[]};
+    if(operation==='files.list')return {entries:[{name:'metrics.json',type:'file',size:32}]};
+    if(operation==='terminal.open'){const id=args.mode==='reconnect'?args.id:randomUUID(),writerToken=randomUUID();sessions.set(id,{machine,...args,writerToken});return {id,writerToken};}
+    if(operation==='terminal.exchange'){assert.ok(sessions.has(args.id));assert.equal(args.writerToken,sessions.get(args.id).writerToken);const data=Buffer.from('Synthetic local terminal · no shell executes.\r\n');return {offset:data.length,data:args.offset?'':data.toString('base64'),exited:false};}
+    if(operation==='terminal.detach')return {detached:true};
+    if(operation==='terminal.close'){sessions.delete(args.id);return {closed:true};}
+    if(operation==='sync'){const job=service.store.jobs.find(row=>row.id===args.job.id);return {state:job.state,nodeJobId:'fixture-'+job.id,assignedIndices:job.assignedIndices||[],...(job.progress?.snapshot?{progress:{reported:true,stale:false,snapshot:{sequence:1,phase:'training',epochs_completed:job.progress.snapshot.epochsCompleted,epochs_total:40,steps_completed:null,steps_total:null,metrics:job.progress.snapshot.metrics,eta_seconds:900,severity:'info',updated_at:Date.now()/1000}}}:{}),...(job.latestAttempt?.startedAt?{latestAttempt:{id:job.latestAttempt.id,started_at:job.latestAttempt.startedAt,finished_at:null,exit_code:null}}:{})};}
+    throw Error('Unexpected synthetic operation: '+operation);
+  };
+  ({server,service}=await createPortalServer({database:join(temp,'portal.db'),bootstrap,statusPath,origin,secure:false,bridge}));
+  clearInterval(service.executionTimer);await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
+  const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'chen-research',name:'陈思远',password})).result;
+  const peer=(await service.invoke(admin.token,'users.create',{username:'another-member',password})).result;
+  await service.invoke(admin.token,'users.create',{username:'li-research',name:'李明',password});
+  await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:8,limits:Object.fromEntries(MACHINES.map(machine=>[machine.id,Math.min(8,machine.cards)]))});
+  const job=(name,state,cards=2,extra={})=>{const id=randomUUID();return {id,userId:member.id,username:member.username,name,description:'本地验收数据；不启动真实训练。',machine:targetMachine,cards,state,createdAt:Date.now()/1000-3600,project:project.project,release,priority:'normal',schedulerState:state,schedulerCheckedAt:Date.now()/1000,queueReason:state==='PENDING'?'等待合法空卡':'',spec:{id,argv:['python','train.py','--epochs','40']},...extra};};
+  const running=job('baseline-lr3e-4','RUNNING',2,{assignedIndices:[0,1],latestAttempt:{id:'attempt-current',startedAt:Date.now()/1000-3255,finishedAt:null},progress:{reported:true,stale:false,snapshot:{epochsCompleted:12,epochsTotal:40,updatedAt:Date.now()/1000,etaSeconds:900,metrics:{loss:.438,val_acc:.716,lr:.0003}}}});
+  const rows=[running,job('augmentation','STARTING'),job('ablation-dropout','PENDING'),job('data-preparation','PREPARING_DATA',1),job('previous-experiment','RUNNING',2,{cancelRequested:true}),job('failed-checkpoint','FAILED',1,{error:'训练进程退出；请查看持久诊断。',latestAttempt:{id:'fixture-attempt',exitCode:1,failureReason:'checkpoint path unavailable'}})];
+  const adminRunning={...running,id:randomUUID(),userId:service.store.users.find(user=>user.username==='admin').id,username:'admin',name:'admin-baseline',spec:{id:randomUUID(),argv:['python','train.py']}};adminRunning.spec.id=adminRunning.id;
+  service.store.jobs.push(...rows,adminRunning,{...job('FORBIDDEN-PEER-TRAINING','RUNNING'),userId:peer.id,username:peer.username});service.save();
+  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
+  async function pageFor(width,reduced=false){
+    const context=await browser.newContext({viewport:{width,height:width<760?844:1080},reducedMotion:reduced?'reduce':'no-preference'});const page=await context.newPage();
+    page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error'&&!message.text().includes('401'))errors.push(message.text());});
+    page.on('response',response=>{if(response.url().startsWith(origin)&&!new URL(response.url()).pathname.startsWith('/api/'))assets.push({path:new URL(response.url()).pathname,status:response.status()});});
+    await context.route('**/*',route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol))return route.continue();outside.push(url.href);return route.abort();});
+    return page;
+  }
+  async function login(page,username){await page.goto(origin);await page.locator('#login-form [name=username]').fill(username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.evaluate(()=>document.fonts.ready);}
+  async function capture(page,name,overlay=false,fullPage=false){
+    if(!overlay)await page.evaluate(()=>{document.activeElement?.blur();scrollTo(0,0);});
+    const viewport=page.viewportSize(),expand=fullPage&&!overlay&&viewport.width<760;
+    if(expand)await page.setViewportSize({width:viewport.width,height:Math.ceil(await page.evaluate(()=>document.documentElement.scrollHeight))});
+    try{await page.waitForTimeout(400);await page.screenshot({path:join(shots,name+'.png'),fullPage:!overlay&&(fullPage||viewport.width>=760)});}finally{if(expand)await page.setViewportSize(viewport);}
+  }
+  async function noOverflow(page){assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'no horizontal overflow, including during a transition');}
+
+  // Production imports start with no inventory. Keep the member directory
+  // pending to verify that constructors and mirrors tolerate that empty phase.
+  const inventoryProbe=await pageFor(390),inventoryRequests=[];
+  inventoryProbe.on('request',request=>{const path=new URL(request.url()).pathname;if(['/machines.js','/model.js'].includes(path))inventoryRequests.push(path);});
+  const inventoryGate=new Promise(resolve=>{releaseInventory=resolve;});
+  await inventoryProbe.route(/\/machines\.js\?login=/,async route=>{await inventoryGate;await route.continue();});
+  await inventoryProbe.goto(origin);await inventoryProbe.locator('#login-dialog').waitFor({state:'visible'});
+  assert.deepEqual(inventoryRequests,[],'public R5 entry does not import the capacity directory or demo model');
+  assert.equal(await inventoryProbe.locator('.resource-card').count(),0);
+  const inventoryStarted=inventoryProbe.waitForRequest(request=>new URL(request.url()).pathname==='/machines.js');
+  await inventoryProbe.locator('#login-form [name=username]').fill(member.username);await inventoryProbe.locator('#login-form [name=password]').fill(password);await inventoryProbe.locator('#login-form [type=submit]').click();
+  await inventoryStarted;
+  assert.equal(await inventoryProbe.locator('#login-dialog').isVisible(),true,'login waits for its protected directory');
+  assert.equal(await inventoryProbe.locator('#context-machine option').count(),0,'empty inventory cannot retain a context ID');
+  assert.equal(await inventoryProbe.locator('.resource-card').count(),0);
+  releaseInventory();await inventoryProbe.locator('#login-dialog').waitFor({state:'hidden'});
+  assert.deepEqual(inventoryRequests,['/machines.js'],'member directory is fetched only after authentication');
+  assert.equal(await inventoryProbe.locator('.resource-card').count(),MACHINES.length,'the existing array reference receives the logged-in inventory');
+  await inventoryProbe.locator('[data-nav=datasets]').click();assert.equal(await inventoryProbe.locator('[name=dataset-machine] option').count(),MACHINES.length);
+  await inventoryProbe.evaluate(()=>document.querySelector('#switch-account').click());await inventoryProbe.locator('#login-dialog').waitFor({state:'visible'});
+  assert.equal(await inventoryProbe.locator('#context-machine option').count(),0);
+  assert.equal(await inventoryProbe.locator('.resource-card').count(),0);
+  assert.equal(await inventoryProbe.locator('#dataset-catalog').textContent(),'');
+  const loggedOutLabels=await inventoryProbe.locator('.server-select-label').allTextContents();
+  for(const machine of MACHINES)assert.ok(!loggedOutLabels.some(label=>label.includes(machine.id)),'logout clears mirrored server IDs: '+machine.id);
+  await login(inventoryProbe,'admin');
+  assert.deepEqual(inventoryRequests,['/machines.js'],'administrator uses state rather than importing the directory');
+  await inventoryProbe.setViewportSize({width:1440,height:1080});await inventoryProbe.locator('[data-nav=users]').click();await inventoryProbe.locator('#filter-all').click();await inventoryProbe.locator('[data-user="'+member.id+'"]').click();
+  assert.equal(await inventoryProbe.locator('[data-quota=total]').getAttribute('max'),String(MACHINES.reduce((sum,machine)=>sum+machine.cards,0)),'account capacity is recomputed after the empty login phase');
+  assert.equal(await inventoryProbe.locator('[data-permission-meter]').count(),MACHINES.length);
+  await closeRoutedContext(inventoryProbe.context());
+
+  const desktop=await pageFor(1440);await login(desktop,member.username);
+  const requests=[];desktop.on('request',request=>{if(request.url()===origin+'/api/call'){const body=request.postDataJSON();requests.push(body);}});
+  await desktop.locator('.wb-focal').waitFor();
+  await desktop.locator('[name=workspace-machine]').selectOption(targetMachine);await desktop.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);await desktop.locator('[name=workspace-project]').selectOption(project.project);
+  assert.equal(await desktop.locator('.r5-boundary-line').first().evaluate(n=>n.getAnimations().length),0,'no boundary motion on first load');
+  assert.equal(await desktop.locator('#context-machine').getAttribute('title'),targetMachine);assert.ok((await desktop.locator('.cs-server').first().getAttribute('title')).startsWith(targetMachine));
+  await capture(desktop,'r5-work-member-1440');
+  await desktop.locator('.wb-focal [data-job-mission]').click();await desktop.locator('#job-mission').waitFor({state:'visible'});
+  assert.equal(await desktop.locator('.r5-mission-percentage').innerText(),'30%');assert.equal(await desktop.locator('.mission-bay').count(),2);assert.match(await desktop.locator('[data-mission-elapsed]').innerText(),/^54:/);
+  assert.equal(await desktop.locator('.r5-mission-metrics>div').count(),3);assert.equal(await desktop.locator('#job-mission .wb-trajectory time').count(),2);
+  assert.doesNotMatch(await desktop.locator('#job-mission').innerText(),/FORBIDDEN-PEER|自报/);
+  assert.equal(await desktop.locator('#job-mission').innerText().then(text=>(text.match(/更新于/g)||[]).length),1);
+  for(const hook of ['data-job-logs','data-job-output','data-job-cancel'])assert.equal(await desktop.locator('#job-mission ['+hook+']').count(),1);
+  await desktop.locator('#job-mission [data-job-logs]').click();await desktop.locator('.job-log-dialog #job-main-log').filter({hasText:'epoch 12/40'}).waitFor();await desktop.keyboard.press('Escape');await desktop.locator('.job-log-dialog').waitFor({state:'hidden'});assert.equal(await desktop.locator('#job-mission').isVisible(),true);
+  await desktop.locator('#job-mission [data-job-output]').click();await desktop.locator('.job-log-dialog #workspace-files').waitFor();await desktop.locator('.job-log-dialog #workspace-result').filter({hasText:'metrics.json'}).waitFor();await desktop.keyboard.press('Escape');await desktop.locator('.job-log-dialog').waitFor({state:'hidden'});
+  let cancelPrompt='';desktop.once('dialog',async dialog=>{cancelPrompt=dialog.message();await dialog.dismiss();});await desktop.locator('#job-mission [data-job-cancel]').click();assert.match(cancelPrompt,/释放 2 张卡的额度/);assert.equal(requests.filter(row=>row.operation==='jobs.cancel').length,0,'dismissed mission cancellation cannot mutate');await capture(desktop,'r5-mission-member-1440',true);await desktop.keyboard.press('Escape');
+  assert.equal(await desktop.locator('#job-mission').isVisible(),false);assert.equal(await desktop.locator('.wb-focal').getAttribute('data-workbench-job'),running.id);
+  const preparing=rows.find(row=>row.state==='PREPARING_DATA');await desktop.locator('[data-workbench-job="'+preparing.id+'"] [data-job-focus]').click();assert.match(await desktop.locator('.wb-stage-hero').innerText(),/准备数据/);assert.equal(await desktop.locator('.wb-progress-number').count(),0);await capture(desktop,'r5-work-preparing-1440');
+  await desktop.evaluate(()=>{window.boundaryCalls=[];const original=Element.prototype.animate;Element.prototype.animate=function(frames,options){if(this.classList.contains('r5-boundary-line'))window.boundaryCalls.push({job:this.closest('[data-workbench-job]')?.dataset.workbenchJob,frames,options});return original.call(this,frames,options);};});
+  const starting=rows.find(row=>row.state==='STARTING');await desktop.locator('[data-workbench-job="'+starting.id+'"] [data-job-focus]').click();starting.state='RUNNING';service.save();await refreshVisible(desktop);await desktop.waitForFunction(()=>document.querySelector('.wb-focal .st')?.textContent.includes('运行中'));
+  const sweeps=await desktop.evaluate(id=>window.boundaryCalls.filter(row=>row.job===id),starting.id);assert.equal(sweeps.length,1,'only an observed STARTING → RUNNING diff sweeps');assert.equal(sweeps[0].options.duration,320);assert.equal(sweeps[0].frames[0].transform,'scaleX(0)');await refreshVisible(desktop);assert.equal(await desktop.evaluate(id=>window.boundaryCalls.filter(row=>row.job===id).length,starting.id),1,'unchanged refresh cannot repeat the sweep');starting.state='STARTING';service.save();await refreshVisible(desktop);await desktop.waitForFunction(()=>document.querySelector('.wb-stage-hero')?.textContent.includes('启动中'));
+  await desktop.locator('[data-workbench-job="'+running.id+'"] [data-job-focus]').click();
+  await desktop.keyboard.press('Control+k');await desktop.locator('#control-command').fill(targetMachine+' 两张卡 跑 python train.py 用 tiny-local');await desktop.keyboard.press('Enter');
+  await desktop.locator('#control-data-version:not([disabled])').waitFor();assert.equal(await desktop.locator('#control-data-version').inputValue(),'');assert.equal(await desktop.locator('[data-natural-use]').isDisabled(),true);
+  assert.equal(requests.filter(row=>row.operation==='jobs.submit').length,0,'parsing and lookup cannot submit');
+  await desktop.locator('#control-data-version').selectOption(release);assert.equal(await desktop.locator('[data-natural-use]').isDisabled(),true);
+  await desktop.locator('#control-confirm-fields').check();assert.equal(await desktop.locator('[data-natural-use]').isEnabled(),true);await capture(desktop,'r5-command-prefill-1440',true);
+  await desktop.locator('[data-natural-use]').click();await desktop.locator('#work-submit').waitFor({state:'visible'});
+  assert.equal(await desktop.locator('#train-form [name=cards]').inputValue(),'2');assert.equal(await desktop.locator('#train-form [name=command]').inputValue(),'python train.py');assert.equal(await desktop.locator('#train-form [name=datasets]').inputValue(),'tiny-local@'+release);assert.equal(await desktop.locator('[name=release]').inputValue(),release);
+  assert.equal(requests.filter(row=>row.operation==='jobs.submit').length,0,'prefill cannot submit');
+  await closeSubmit(desktop);await desktop.locator('[name=workspace-project]').selectOption('');await openSubmit(desktop);assert.equal(await desktop.locator('#train-form [type=submit]').isDisabled(),true,'parsed destination does not silently change');await desktop.locator('#clear-training-prefill').click();assert.equal(await desktop.locator('#train-form [type=submit]').isEnabled(),true);await closeSubmit(desktop);
+  // Free fixture reservations only by confirmed scheduler states; no real task runs.
+  for(const row of rows)if(row.id!==running.id&&!['FAILED','SUCCEEDED'].includes(row.state))row.state='SUCCEEDED';service.save();await refreshVisible(desktop);
+  await desktop.locator('[name=workspace-project]').selectOption(project.project);await openSubmit(desktop);await desktop.locator('#train-form [name=name]').fill('receipt-local');
+  let lost=true;const submitRequests=[];
+  const loseReply=async route=>{const body=route.request().postDataJSON();if(body?.operation==='jobs.submit'){submitRequests.push(structuredClone(body.args));const response=await route.fetch();assert.equal(response.status(),200,await response.text());if(lost){lost=false;await route.abort('failed');}else await route.fulfill({response});}else await route.continue();};
+  await desktop.route('**/api/call',loseReply);await desktop.locator('#train-form [type=submit]').click();await desktop.locator('[data-receipt-retry]').waitFor({state:'visible'});await desktop.waitForFunction(()=>!document.querySelector('[data-receipt-retry]').disabled);
+  const persisted=service.store.jobs.filter(row=>row.name==='receipt-local');assert.equal(persisted.length,1);assert.match(await desktop.locator('#submit-summary').innerText(),/待确认/);await capture(desktop,'r5-submit-unconfirmed-1440',true);
+  const maintenanceState=(await service.invoke(admin.token,'maintenance.status',{})).result;
+  const paused=(await service.invoke(admin.token,'maintenance.set',{scope:targetMachine,enabled:true,reason:'本地验收：暂停提交',revision:maintenanceState.revision})).result;
+  await refreshVisible(desktop);await desktop.waitForFunction(()=>document.querySelector('#submit-summary')?.textContent.includes('维护中'));assert.equal(await desktop.locator('[data-receipt-retry]').isDisabled(),true);assert.equal(submitRequests.length,1,'maintenance cannot retry an unresolved submission');
+  await service.invoke(admin.token,'maintenance.set',{scope:targetMachine,enabled:false,revision:paused.revision});await refreshVisible(desktop);await desktop.waitForFunction(()=>document.querySelector('[data-receipt-retry]')&&!document.querySelector('[data-receipt-retry]').disabled);
+  await desktop.locator('[data-receipt-retry]').click();await desktop.locator('[data-receipt-new-draft]').waitFor({state:'visible'});
+  assert.equal(submitRequests.length,2);assert.deepEqual(submitRequests[1],submitRequests[0]);assert.equal(service.store.jobs.filter(row=>row.name==='receipt-local').length,1,'explicit retry cannot duplicate the accepted task');
+  assert.match(await desktop.locator('#submit-summary').innerText(),new RegExp(persisted[0].id.slice(0,8)));assert.equal(await desktop.locator('#train-form [type=submit]').isDisabled(),true);await capture(desktop,'r5-submit-receipt-1440',true);await closeSubmit(desktop);assert.match(await desktop.locator('#submission-receipt').innerText(),/receipt-local/);await desktop.unroute('**/api/call',loseReply);
+  await desktop.locator('[data-nav=datasets]').click();await desktop.locator('[name=dataset-machine]').selectOption(targetMachine);await desktop.locator('#datasets-refresh').click();await desktop.locator('[data-route-cell]').first().waitFor();
+  const routeCell=desktop.locator('.dataset-card').filter({has:desktop.locator('h3',{hasText:/^scans$/})}).locator('[data-route-cell]').first();
+  const prepared=[];const observePrepare=async route=>{const body=route.request().postDataJSON();if(body?.operation==='datasets.prepare'){prepared.push(body.args);await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result:{dataset:body.args.dataset,version:body.args.version,state:'PREPARING'}})});}else await route.continue();};await desktop.route('**/api/call',observePrepare);
+  await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);await desktop.evaluate(()=>scrollTo(0,0));await routeCell.hover();await desktop.locator('.dataset-copy-route').waitFor({state:'visible'});assert.equal(await desktop.locator('.dataset-copy-route').innerText(),sourceMachine+' → '+targetMachine+' · 7.00 GiB');assert.doesNotMatch(await desktop.locator('.dataset-copy-route').innerText(),/实验室内网/);assert.equal(prepared.length,0,'hover is read-only');
+  assert.equal(await desktop.locator('.dataset-matrix-heading [data-machine="'+targetMachine+'"]').getAttribute('title'),targetMachine);
+  const stateTops=await routeCell.locator('..').locator('..').locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().top));assert.ok(Math.max(...stateTops)-Math.min(...stateTops)<=1,'desktop copy states align at the top of their row');
+  const routeBounds=await desktop.locator('.dataset-copy-route>span').boundingBox(),prepareBounds=await routeCell.locator('..').locator('..').locator('..').locator('[data-prepare-dataset]').boundingBox();assert.ok(routeBounds.y+routeBounds.height<=prepareBounds.y,'route label ends before preparation state');
+  assert.equal(await routeCell.locator('..').locator('..').locator('..').locator('.dataset-details-cell>.ui-info').count(),1);
+  assert.match(await desktop.locator('#datasets-status').innerText(),/^更新时间未知/);
+  assert.equal(await desktop.locator('.workspace-context-heading .ui-info').count(),1);assert.equal(await desktop.locator('.wb-publish-control>.ui-info').count(),1);
+  const band=await desktop.locator('[data-machine="'+targetMachine+'"].dataset-target').evaluateAll(nodes=>nodes.map(n=>({x:n.getBoundingClientRect().left,w:n.getBoundingClientRect().width,bg:getComputedStyle(n).backgroundColor})));assert.ok(band.length>=3&&band.every(n=>n.x===band[0].x&&n.w===band[0].w&&n.bg===band[0].bg));await capture(desktop,'r5-datasets-route-1440',true);assert.equal(await desktop.locator('.dataset-copy-route').isVisible(),true);
+  await routeCell.click();await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.deepEqual(prepared,[{machine:targetMachine,dataset:'scans',version:release}]);await desktop.unroute('**/api/call',observePrepare);
+  const phone=await pageFor(390,true);await login(phone,member.username);await phone.locator('[data-nav=work]').click();await phone.locator('.wb-focal').waitFor();await capture(phone,'r5-work-member-390');await noOverflow(phone);
+  await phone.locator('.wb-focal [data-job-mission]').click();await phone.locator('#job-mission').waitFor({state:'visible'});await capture(phone,'r5-mission-member-390',true);assert.ok(await phone.locator('#job-mission').evaluate(n=>n.scrollWidth<=n.clientWidth+1));await phone.keyboard.press('Escape');
+  await phone.keyboard.press('Control+k');await phone.locator('#control-command').fill(targetMachine+' 两张卡 跑 python train.py 用 tiny-local');await phone.keyboard.press('Enter');await phone.locator('#control-data-version:not([disabled])').waitFor();await phone.locator('#control-data-version').selectOption(release);await phone.locator('#control-confirm-fields').check();await capture(phone,'r5-command-prefill-390',true);assert.ok(await phone.locator('#mission-control').evaluate(n=>n.scrollWidth<=n.clientWidth+1));await phone.keyboard.press('Escape');
+  await phone.locator('[data-nav=datasets]').click();await phone.locator('#datasets-refresh').click();await phone.locator('[data-route-cell]').first().waitFor();await capture(phone,'r5-datasets-member-390');await noOverflow(phone);
+  const authAdmin=await pageFor(1440);await login(authAdmin,'admin');await authAdmin.locator('[data-nav=work]').click();await capture(authAdmin,'r5-work-admin-1440');await authAdmin.locator('[data-nav=datasets]').click();await authAdmin.locator('#datasets-refresh').click();await authAdmin.locator('.dataset-matrix').waitFor();await capture(authAdmin,'r5-datasets-admin-1440');await authAdmin.setViewportSize({width:390,height:844});await capture(authAdmin,'r5-datasets-admin-390');await authAdmin.locator('[data-nav=work]').click();await capture(authAdmin,'r5-work-admin-390');await noOverflow(authAdmin);
+  const reviewChecks=[];
+  for(const [page,role,fixtureJob] of [[phone,'member',running],[authAdmin,'admin',adminRunning]])for(const width of [1440,390,320]){
+    await page.setViewportSize({width,height:width<760?844:1080});await page.locator('[data-nav=work]').click();await refreshVisible(page);await noOverflow(page);
+    if(width===1440){const labels=await page.locator('.cs-server-id .server-id-head').evaluateAll(nodes=>nodes.map(n=>({text:n.textContent,available:n.clientWidth,required:n.scrollWidth})));assert.ok(labels.length===MACHINES.length&&labels.every(n=>n.required<=n.available+1),'desktop strip shows complete inventory names when room is available');}
+    if(width<760){const fields=await page.locator('.wb-focal .wb-progress-meta>span').evaluateAll(nodes=>nodes.map(n=>({text:n.textContent,height:n.getBoundingClientRect().height,line:parseFloat(getComputedStyle(n).lineHeight)||parseFloat(getComputedStyle(n).fontSize)*1.8})));assert.ok(fields.length>=2&&fields.every(n=>n.height<=n.line+1),'phone progress facts remain on readable lines: '+JSON.stringify({role,width,fields}));}
+    await capture(page,'r5-review-work-'+role+'-'+width);
+    const hasFooter=await page.locator('#mobile-control').isVisible(),hasHeading=await page.locator('.heading-actions [data-shell-action=control]').isVisible();assert.equal(hasHeading,width<760?!hasFooter:true,'one consistent control entry on work');
+    await page.keyboard.press('Control+k');await page.locator('#mission-control').waitFor();await capture(page,'r5-review-control-'+role+'-'+width,true);await page.keyboard.press('Escape');
+    for(const inventory of MACHINES){
+      fixtureJob.machine=inventory.id;service.save();await refreshVisible(page);await page.locator('[name=workspace-machine]').selectOption(inventory.id);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+      const selectedName=page.locator('#context-machine').locator('..').locator('.server-select-label');assert.equal(await selectedName.textContent(),inventory.id);assert.equal(await page.locator('#context-machine').evaluate(n=>getComputedStyle(n).color),'rgba(0, 0, 0, 0)','native selected text does not overlap the middle-ellipsis label');const suffix=selectedName.locator('.server-id-tail');if(await suffix.textContent()){const box=await suffix.boundingBox(),clip=await selectedName.boundingBox();assert.ok(box.width>0&&box.x>=clip.x-1&&box.x+box.width<=clip.x+clip.width+1,'compact selector retains the ID suffix');}
+      await capture(page,'r5-review-context-'+role+'-'+width+'-'+inventory.id);
+      const row=page.locator('[data-workbench-job="'+fixtureJob.id+'"]');await row.locator('[data-job-mission]').click();await page.locator('#job-mission').waitFor();await noOverflow(page);assert.ok(await page.locator('#job-mission').evaluate(n=>n.scrollWidth<=n.clientWidth+1));
+      const names=await page.locator('#job-mission .server-id').allTextContents();assert.ok(names.includes(inventory.id));for(const hook of ['data-job-logs','data-job-output','data-job-cancel'])assert.ok(await page.locator('#job-mission ['+hook+']').isVisible());
+      const timeline=await page.locator('#job-mission .wb-trajectory').boundingBox(),body=await page.locator('.r5-mission-body').boundingBox(),lastDot=await page.locator('#job-mission .wb-trajectory li:last-child .d').boundingBox();assert.ok(Math.abs(timeline.x+timeline.width-(body.x+body.width))<=1);assert.ok(Math.abs(lastDot.x+lastDot.width-(body.x+body.width))<=1,'timeline reaches content edge');
+      await capture(page,'r5-review-mission-'+role+'-'+width+'-'+inventory.id,true);await page.keyboard.press('Escape');
+    }
+    fixtureJob.machine=targetMachine;service.save();await refreshVisible(page);await page.locator('[name=workspace-machine]').selectOption(targetMachine);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+    await page.locator('[data-nav=datasets]').click();await page.locator('[name=dataset-machine]').selectOption(targetMachine);await page.locator('#datasets-refresh').click();await page.locator('.dataset-matrix').waitFor();await noOverflow(page);assert.equal(await page.locator('.heading-actions [data-shell-action=control]').isVisible(),width<760?!await page.locator('#mobile-control').isVisible():true,'same control entry on datasets');
+    assert.equal(await page.locator('[name=dataset-machine]').evaluate(n=>getComputedStyle(n).color),'rgba(0, 0, 0, 0)','dataset selector renders one name');assert.equal(await page.locator('.dataset-matrix-heading [data-machine]').count(),MACHINES.length);assert.equal(await page.locator('#datasets-capacity>div>strong').innerText(),'502 GiB');assert.equal(await page.locator('#datasets-capacity>div>small').innerText(),'共 1024 GiB');assert.equal(await page.locator('.dataset-library .hero-label').count(),0);
+    if(width<760){
+      assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'list');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),false);assert.equal(await page.locator('.help-links').isVisible(),false,'phone datasets have no detached footer information mark');
+      for(const card of await page.locator('.dataset-card').all()){
+        assert.equal(await card.getAttribute('role'),'listitem');assert.deepEqual(await card.locator('.dataset-machine-label').allTextContents(),MACHINES.map(row=>row.id));
+        const facts=await card.locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>({height:n.getBoundingClientRect().height,line:parseFloat(getComputedStyle(n).lineHeight),whiteSpace:getComputedStyle(n).whiteSpace})));assert.ok(facts.every(n=>n.height<=n.line+1&&n.whiteSpace==='nowrap'),'phone states stay on one line');
+        for(const location of await card.locator('.dataset-location').all()){const name=await location.locator('.dataset-machine-label').boundingBox(),state=await location.locator('.dataset-location-status').boundingBox();assert.ok(name.x+name.width<=state.x&&Math.abs(name.y+name.height/2-state.y-state.height/2)<=1,'phone ID and state share one line');}
+        const selected=card.locator('.dataset-location.dataset-target'),fact=await selected.locator('.dataset-location-fact').boundingBox(),row=await selected.boundingBox();
+        assert.equal(await selected.locator('[data-use-dataset]').count(),1);
+        const prepare=selected.locator('[data-prepare-dataset]'),use=selected.locator('[data-use-dataset]');
+        if(await selected.getAttribute('data-location-state')==='READY'){assert.equal(await prepare.isVisible(),false,'local ready cards hide redundant preparation');assert.equal(await use.isVisible(),true);}
+        const actionBounds=[];for(const button of await selected.locator('.file-actions .button:visible').all()){const bounds=await button.boundingBox();actionBounds.push(bounds);assert.ok(bounds.height>=44&&bounds.y>=fact.y+fact.height&&bounds.y+bounds.height<=row.y+row.height+1,'mobile actions keep distinct 44px targets below the status');}
+        if(actionBounds.length===2){assert.ok(actionBounds[0].x+actionBounds[0].width<=actionBounds[1].x&&Math.abs(actionBounds[0].y-actionBounds[1].y)<=1,'preparation and training are separate side-by-side buttons');assert.match(await use.getAttribute('class'),/primary/);assert.doesNotMatch(await prepare.getAttribute('class'),/quiet/);}
+        assert.ok(await card.evaluate(n=>n.scrollWidth<=n.clientWidth+1),'dataset card has no horizontal matrix scroll');
+      }
+      const mobileRoute=page.locator('.dataset-mobile-route');assert.equal(await mobileRoute.isVisible(),true);assert.match(await mobileRoute.textContent(),new RegExp(sourceMachine+'.*→.*'+targetMachine+'.*7.00 GiB'));
+      if(width===390){
+        await page.locator('[data-use-dataset]').first().evaluate(n=>globalThis.savedDatasetAction=n);await page.setViewportSize({width:1440,height:1080});await page.waitForFunction(()=>document.querySelector('.dataset-matrix')?.getAttribute('role')==='table');
+        assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'table');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),true);
+        assert.equal(await page.locator('[data-use-dataset]').first().evaluate(n=>n===globalThis.savedDatasetAction&&n.closest('.dataset-actions-cell').parentElement.classList.contains('dataset-row-details')),true,'resize restores the same action to the desktop column');
+        await page.setViewportSize({width,height:844});await page.waitForFunction(()=>document.querySelector('.dataset-matrix')?.getAttribute('role')==='list');assert.equal(await page.locator('[data-use-dataset]').first().evaluate(n=>n===globalThis.savedDatasetAction&&!!n.closest('.dataset-location.dataset-target')),true);
+      }
+    }
+    await capture(page,'r5-review-datasets-'+role+'-'+width,false,true);reviewChecks.push({role,width,inventory:MACHINES.map(row=>row.id)});
+  }
+  await writeFile(join(shots,'review-checks.json'),JSON.stringify(reviewChecks,null,2));
+  await phone.route('**/api/call',observePrepare);await phone.locator('.dataset-location.dataset-target [data-prepare-dataset="scans"]').click();await phone.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(prepared.length,2);assert.deepEqual(prepared[1],{machine:targetMachine,dataset:'scans',version:release});await phone.unroute('**/api/call',observePrepare);
+  await desktop.locator('[data-nav=work]').click();await desktop.locator('.wb-focal [data-job-mission]').click();desktop.once('dialog',async dialog=>{assert.match(dialog.message(),/释放 2 张卡的额度/);await dialog.accept();});await desktop.locator('#job-mission [data-job-cancel]').click();await desktop.waitForFunction(()=>document.querySelector('#job-mission .st')?.textContent.includes('正在取消'));assert.equal(requests.filter(row=>row.operation==='jobs.cancel').length,1);assert.equal(await desktop.locator('#job-mission [data-job-cancel]').isDisabled(),true);
+  await desktop.evaluate(()=>document.querySelector('#switch-account').click());await desktop.locator('#login-dialog').waitFor({state:'visible'});await desktop.locator('#job-mission').waitFor({state:'hidden'});assert.equal(await desktop.locator('#job-mission').innerText(),'');assert.equal(await desktop.locator('#submission-receipt').count(),0);
+  assert.deepEqual(outside,[]);assert.deepEqual(errors.filter(message=>!message.includes('ERR_FAILED')&&!message.includes('Failed to fetch')),[]);assert.ok(assets.filter(row=>row.path.endsWith('.woff2')).every(row=>row.status===200));
+  console.log(JSON.stringify({status:'passed',checks:['empty pre-login inventory + delayed member directory + admin state + logout mirrors/capacity','mission real attempt/allocated GPU/timeline/Escape/privacy','stage adaptive hero + one real state-boundary sweep','explicit Chinese parse/version/confirmation/target binding','lost submit reply + identical explicit idempotent retry + in-place receipt','operation column and read-only true-source route','1440/390/320 member/admin + all inventory names + reduced motion + CSP/self-hosted fonts'],screenshots:shots}));
+}finally{
+  releaseInventory?.();releaseCatalog?.();if(browser)await Promise.all(browser.contexts().map(closeRoutedContext));await browser?.close();if(server?.listening)await new Promise(resolve=>server.close(resolve));if(service&&!service.closing){clearInterval(service.executionTimer);await service.close();}await rm(temp,{recursive:true,force:true});
+}

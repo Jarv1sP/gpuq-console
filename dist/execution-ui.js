@@ -5,7 +5,7 @@ import {schedulingFields,schedulingFromForm,schedulingSummary} from './schedulin
 import {elasticCapable,placementCapable} from './gpu-allocation.js';
 import {elasticFields,elasticFromForm,allocationSummary,placementFields,placementFromForm,placementSummary} from './gpu-allocation-ui.js';
 import {taskDescription} from './task-metadata.js';
-import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout} from './workbench-ui.js';
+import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,boundarySweep,taskMissionUI,infoHTML,discloseInfo,jobCancelConfirmation} from './workbench-ui.js';
 import {revealSheet,dismissSheet,sharedObject} from './motion-ui.js';
 import {taskNotesMarkup,createTaskNotesUI} from './task-notes-ui.js';
 import {maintenanceFor,heldDuringMaintenance,maintenanceTime,maintenanceInfoHTML,maintenanceClock} from './maintenance-state.js';
@@ -53,7 +53,7 @@ export function projectStatusText(info,hasTerminal=false){
 export function readyReleases(project){return [...new Map((Array.isArray(project?.releases)?project.releases:[]).filter(item=>item?.state==='READY'&&typeof item.release==='string'&&hashPattern.test(item.release)).map(item=>[item.release,item])).values()];}
 export function trainingProject(project,release){
   if(!project)return {};
-  if(!validProject(project.project)||!readyReleases(project).some(item=>item.release===release))throw Error('请先发布项目，再选择一个已就绪的固定版本。');
+  if(!validProject(project.project)||!readyReleases(project).some(item=>item.release===release))throw Error('请先发布项目，再选择一个已就绪的版本。');
   return {project:project.project,release};
 }
 export function datasetReferences(value){return String(value||'').trim().split(/\s+/).filter(Boolean).map(ref=>{
@@ -89,8 +89,10 @@ export function executionUI(store,refresh,toast){
   let section,log,actor=null,submitKey=crypto.randomUUID(),machine='',project='',catalog=[],catalogError='',projectBusy=false,operationBusy=false;
   let epoch=0,pollTimer=null,pollCount=0,terminalSessions=[],machineIdentity='';
   let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
+  let submitReceipt=null,parsedTarget=null,acceptedDraft=false;
+  const mission=taskMissionUI(store,{toast,onOpen:id=>{focusedJob=id;renderJobs(ownJobs());document.dispatchEvent(new CustomEvent('gpuq-focused-job',{detail:{id}}));}});
   const jobHeading=id=>[...document.querySelectorAll('[data-workbench-job]')].find(row=>row.dataset.workbenchJob===id)?.querySelector('.wb-job-heading');
-  const diagnostics=createJobDiagnostics(store,()=>log,toast,{drawer:true,header:job=>`<span class="sheet-object">${stateHTML(job,false)}<span>${escape(job.name||'训练详情')}</span></span>`,reveal:(dialog,job,origin)=>{sharedObject(origin||jobHeading(job.id),dialog.querySelector('.sheet-object'));revealSheet(dialog,{drilldown:true});},dismiss:dialog=>dismissSheet(dialog,{drilldown:true,target:jobHeading(focusedJob)}),overview:job=>jobOverviewHTML(job,{owned:job.userId===store.principal?.userId,schedulingHTML:allocationSummary(job)+placementSummary(job)+`<span>排队优先级：${escape(priorityRankLabel(job))}</span>`+schedulingSummary(job)+`<span>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</span><span>调度状态：${escape(job.schedulerState||'未提供')}</span><span>核对时间：${escape(sampleTime(job.schedulerCheckedAt))}</span>`}),output:showOutput,notes:showNotes,onView:next=>{if(next!=='notes')notes?.sync(false,true);}});
+  const diagnostics=createJobDiagnostics(store,()=>log,toast,{drawer:true,header:job=>`<span class="sheet-object">${stateHTML(job,false)}<span>${escape(job.name||'训练详情')}</span></span>`,reveal:(dialog,job,origin)=>{sharedObject(origin||jobHeading(job.id),dialog.querySelector('.sheet-object'));revealSheet(dialog,{drilldown:true});},dismiss:dialog=>dismissSheet(dialog,{drilldown:true,target:jobHeading(focusedJob)}),overview:job=>jobOverviewHTML(job,{owned:job.userId===store.principal?.userId,schedulingHTML:allocationSummary(job)+placementSummary(job)+`<span>排队优先级：${escape(priorityRankLabel(job))}</span>`+schedulingSummary(job)+`<span>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</span><span>状态：${escape(job.schedulerState||'未提供')}</span><span>更新于 ${escape(sampleTime(job.schedulerCheckedAt))}</span>`}),output:showOutput,notes:showNotes,onView:next=>{if(next!=='notes')notes?.sync(false,true);}});
   const call=(operation,args)=>store.call(operation,args),query=selector=>section?.querySelector(selector)||submitDialog?.querySelector(selector)||settingsDialog?.querySelector(selector)||log?.querySelector(selector)||document.querySelector('#shell-context')?.querySelector(selector);
   const context=()=>({machine,...(project?{project}:{})}),currentProject=()=>catalog.find(item=>item.project===project);
   const currentToken=()=>JSON.stringify([actor,machine,project,epoch]),ownJobs=()=>store.jobs.filter(job=>job.userId===store.principal?.userId);
@@ -120,8 +122,8 @@ export function executionUI(store,refresh,toast){
     submitDialog.append(panel);document.body.append(submitDialog);
     const scroll=document.createElement('div');scroll.className='sheet-scroll';const submit=train.querySelector('[type=submit]');for(const child of [...train.children])if(child!==submit)scroll.append(child);train.append(scroll);
     const checks=document.createElement('section');checks.className='submit-checks';checks.innerHTML='<div class="spread"><h3>提交前检查</h3><button class="button quiet" type="button" id="submit-check-refresh">重新核对</button></div><ul id="submit-check-list" class="checks"></ul>';
-    const cli=document.createElement('details');cli.className='submit-cli';cli.innerHTML='<summary>等价命令 · 你的电脑</summary><pre id="submit-command" tabindex="0"></pre><button class="button quiet" type="button" id="copy-submit-command">复制完整命令</button><p class="muted">命令包含当前固定版本与服务器；请先在自己的电脑登录 gpuctl。</p>';
-    scroll.append(checks,cli);const footer=document.createElement('div');footer.className='sheet-footer glass';footer.innerHTML='<p id="submit-summary" class="muted">提交后可关闭网页，服务器继续运行。</p>';footer.append(submit);train.append(footer);
+    const cli=document.createElement('details');cli.className='submit-cli';cli.innerHTML='<summary>等价命令 · 你的电脑</summary><pre id="submit-command" tabindex="0"></pre><button class="button quiet" type="button" id="copy-submit-command">复制完整命令</button><p class="muted">命令包含当前版本与服务器；请先在自己的电脑登录 gpuctl。</p>';
+    scroll.append(checks,cli);const footer=document.createElement('div');footer.className='sheet-footer glass';footer.innerHTML='<div><p id="submit-summary" class="muted">提交到所选服务器</p><div id="submit-receipt-actions"></div></div>';footer.append(submit);train.append(footer);
     panel.addEventListener('toggle',()=>{if(panel.open){updatePreflight();showSheet(submitDialog);}else submitDialog.close();});
     submitDialog.addEventListener('close',()=>{if(submitDialog.open)return;submitSelection.invalidate();closeSettings();panel.open=false;});
     submitDialog.addEventListener('cancel',event=>{event.preventDefault();submitSelection.invalidate();closeSettings();dismissSheet(submitDialog);});
@@ -130,18 +132,54 @@ export function executionUI(store,refresh,toast){
     for(const detail of train.querySelectorAll('.training-advanced>details'))detail.querySelector('summary').addEventListener('click',event=>{event.preventDefault();settings(detail);});
     const layout=document.createElement('div');layout.className='wb-layout';const jobs=document.createElement('section');jobs.className='wb-jobs';jobs.setAttribute('aria-label','我的训练');const rail=document.createElement('aside');rail.className='wb-rail';rail.setAttribute('aria-label','项目、开发终端与文件');
     const table=query('#my-job-table'),kicker=section.querySelector('.section-kicker'),explanation=kicker.nextElementSibling;explanation.className='wb-job-explanation muted';jobs.append(table,kicker,explanation);rail.append(...section.children);layout.append(jobs,rail);section.append(layout);
+    const receipt=document.createElement('section');receipt.id='submission-receipt';receipt.className='wb-receipt';receipt.setAttribute('aria-live','polite');receipt.hidden=true;jobs.prepend(receipt);
+    const projectHelp=document.createElement('p');projectHelp.id='project-status-detail';query('#project-status').after(projectHelp);discloseInfo(projectHelp,'项目状态详情');
+    const prefill=document.createElement('div');prefill.id='submit-prefill';prefill.className='submit-prefill';prefill.hidden=true;scroll.prepend(prefill);
+    for(const [id,label] of [['workspace-mode-note','代码与环境说明'],['terminal-mode-note','开发终端说明'],['priority-note','优先级说明'],['custom-policy-note','排队与让位说明'],['elastic-note','弹性显卡说明'],['placement-note','共享显卡说明']])discloseInfo(query('#'+id),label);
+    for(const text of section.querySelectorAll('.wb-rail p.muted,.wb-rail .project-actions>span'))discloseInfo(text,'工作区说明');
+    for(const text of train.querySelectorAll('p.muted,label>small'))if(!text.closest('.submit-cli,.sheet-footer'))discloseInfo(text,'训练配置说明');
+    discloseInfo(explanation,'任务额度说明');
+    const contextInfo=query('#workspace-mode-note').closest('.ui-info'),statusInfo=query('#project-status-detail').closest('.ui-info'),contextCopy=document.createElement('div');contextCopy.className='ui-info-content';
+    for(const id of ['workspace-mode-note','project-status-detail']){const note=query('#'+id);note.classList.remove('ui-info-content');contextCopy.append(note);}contextInfo.append(contextCopy);statusInfo.remove();contextInfo.querySelector('summary').setAttribute('aria-label','项目与训练版本说明');query('.workspace-context-heading>div').append(contextInfo);
+    const publishInfo=query('#project-detail>.ui-info'),publishControl=document.createElement('div');publishControl.className='wb-publish-control';query('#project-publish').before(publishControl);publishControl.append(query('#project-publish'),publishInfo);
+    const terminalHelp=query('#terminal-mode-note')?.closest('.ui-info');if(terminalHelp)query('.terminal-heading').append(terminalHelp);
+
+  }
+  const receiptActor=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
+  function renderReceipt(){
+    const root=query('#submission-receipt');if(!root)return;
+    const receipt=submitReceipt&&submitReceipt.actor===receiptActor()?submitReceipt:null;root.hidden=!receipt;if(!receipt){root.replaceChildren();query('#submit-receipt-actions')?.replaceChildren();return;}
+    const retryAllowed=!operationBusy&&store.production&&store.data?.executionEnabled===true&&!maintenanceFor(store.data?.operationalMaintenance,receipt.args.machine),errorClass=receipt.maintenance?'maintenance-held':'form-error';
+    const job=receipt.job,word={pending:'正在提交',confirmed:'已提交',unknown:'提交结果待确认',rejected:'未提交'}[receipt.status];
+    const sheet=query('#submit-receipt-actions');if(sheet)sheet.innerHTML=`${receipt.error?`<p class="${errorClass}">${escape(receipt.error)}</p>`:''}${receipt.status==='unknown'?`<button class="button quiet" type="button" data-receipt-refresh ${operationBusy?'disabled':''}>刷新核对</button><button class="button quiet" type="button" data-receipt-retry ${retryAllowed?'':'disabled'}>原样重试</button>`:receipt.status==='confirmed'?'<button class="button quiet" type="button" data-receipt-new-draft>再次使用配置</button>':''}`;
+    root.innerHTML=`<div><strong>${word}</strong><span>${escape(receipt.args.machine)} · ${escape(receipt.args.name)}${job?.createdAt?' · '+escape(sampleTime(job.createdAt)):''}${job?.id?' · '+escape(job.id.slice(0,8)):''}</span>${receipt.error?`<p class="${errorClass}">${escape(receipt.error)}</p>`:''}</div><div class="job-acts">${job?.id?`<button class="button quiet" type="button" data-job-detail="${escape(job.id)}">查看任务</button><button class="button quiet" type="button" id="submission-new-draft">再次使用配置</button>`:''}${receipt.status==='unknown'?`<button class="button quiet" type="button" id="submission-refresh" ${operationBusy?'disabled':''}>刷新核对</button><button class="button quiet" type="button" id="submission-retry" ${retryAllowed?'':'disabled'}>原样重试</button>${infoHTML('重试使用原服务器、原版本和同一个提交标识。不会重复创建同一次提交。','重试说明')}`:''}</div>`;
+    updatePreflight();
+  }
+  async function submitRequest(args){
+    const owner=receiptActor();submitReceipt={actor:owner,args:structuredClone(args),status:'pending'};renderReceipt();
+    try{
+      const job=await call('jobs.submit',args);if(owner!==receiptActor())return;
+      if(!uuidPattern.test(job?.id||'')||job.userId!==store.principal.userId||job.machine!==args.machine||job.key!==args.key)throw Error('提交回执尚未确认，请刷新核对。');
+      submitReceipt={actor:owner,args:structuredClone(args),status:'confirmed',job};acceptedDraft=true;submitKey=crypto.randomUUID();refresh();renderReceipt();toast('已提交。');
+    }catch(error){
+      if(owner!==receiptActor())return;
+      submitReceipt={actor:owner,args:structuredClone(args),status:error.code==='MAINTENANCE_ACTIVE'||[400,401,403,409,422,429].includes(error.status)?'rejected':'unknown',maintenance:error.code==='MAINTENANCE_ACTIVE',error:error.message};renderReceipt();throw error;
+    }
   }
   function updatePreflight(){
     if(!submitDialog||!actor)return;query('#submit-context').textContent=(machine||'未选择服务器')+' · '+(project||'个人工作区');
     const user=store.users.find(item=>item.id===actor),used=store.usage(actor),quota=user?.total,info=currentProject(),host=store.data?.gpuq?.hosts?.find(item=>item.id===machine),fresh=store.production&&!store.data?.gpuq?.stale&&host?.reachable===true;
     const release=query('[name=release]').value,authorized=enabled()&&user?.limits?.[machine]>0;
-    const rows=[['服务器',authorized?machine:'选择服务器',authorized],['占用额度',Number.isFinite(quota)?`${used} / ${quota} 张`:'待确认',Number.isFinite(quota)],['版本',project?(readyReleases(info).some(item=>item.release===release)?'已就绪':'尚未发布'):'个人工作区',!project||readyReleases(info).some(item=>item.release===release)],['监控',fresh?'更新于 '+maintenanceClock(host.checkedAt||store.data.gpuq.checkedAt):'待确认',fresh],['数据集',query('[name=datasets]').value.trim()?'已选择 · 提交时检查':'未选择',!query('[name=datasets]').value.trim()]];
-    query('#submit-check-list').innerHTML=rows.map(([label,text,ok])=>`<li><span class="what">${escape(label)}<small>${escape(text)}</small></span><span class="${ok?'v-ok':'v-wait'}">${ok?'已确认':'待核对'}</span></li>`).join('');
+    const lockedTarget=parsedTarget&&(machine!==parsedTarget.machine||project!==parsedTarget.project);
+    const rows=[['服务器',authorized?machine:'选择已授权服务器',authorized],['额度',Number.isFinite(quota)?`${used} / ${quota} 张`:'待更新',Number.isFinite(quota)],['训练版本',project?(readyReleases(info).some(item=>item.release===release)?release.slice(0,12):'先生成训练版本'):'个人工作区',!project||readyReleases(info).some(item=>item.release===release)],['监控',fresh?'已更新':'待更新',fresh],['数据集',query('[name=datasets]').value.trim()?'提交时检查':'未选择',!query('[name=datasets]').value.trim()]];
+    if(lockedTarget)rows.unshift(['目标已改变',parsedTarget.machine+' / '+(parsedTarget.project||'个人工作区'),false]);
+    query('#submit-check-list').innerHTML=rows.map(([label,text,ok])=>`<li><span class="what">${escape(label)}<small>${escape(text)}</small></span><span class="${ok?'v-ok':'v-wait'}">${ok?'通过':'待确认'}</span></li>`).join('');
     const entry=maintenanceFor(store.data?.operationalMaintenance,machine);
     let maintenance=query('#submit-maintenance');if(!maintenance){maintenance=document.createElement('div');maintenance.id='submit-maintenance';query('#train-form .sheet-scroll').prepend(maintenance);}
     maintenance.hidden=!entry;
     if(entry){const alternatives=(store.data?.machines||[]).filter(item=>user?.limits?.[item.id]>0&&!maintenanceFor(store.data?.operationalMaintenance,item.id));maintenance.innerHTML=`<p><span class="maintenance-pause" aria-hidden="true"></span> ${escape(store.data.operationalMaintenance.global?'全平台':machine)}维护中 · 自 ${escape(maintenanceTime(entry.since))}</p><p>${escape(entry.reason)}</p>${maintenanceInfoHTML("换机后请检查代码、环境和数据。不会自动提交。","换机说明")}${alternatives.length?`<label>改用其他服务器<select id="submit-maintenance-machine" aria-label="选择其他服务器">${alternatives.map(item=>`<option value="${escape(item.id)}">${escape(item.id)}</option>`).join('')}</select></label><button type="button" class="button" id="submit-maintenance-switch">改用其他服务器</button>`:'<p>没有其他可用服务器。</p>'}`;}
-    query('#submit-summary').textContent=entry?'维护中，暂停提交':'';
+    query('#submit-summary').textContent=entry?'维护中，暂停提交':submitReceipt?.actor===receiptActor()&&['pending','unknown'].includes(submitReceipt.status)?(submitReceipt.status==='pending'?'正在提交':'提交结果待确认'):acceptedDraft&&submitReceipt?.job?'已提交 · '+sampleTime(submitReceipt.job.createdAt)+' · '+submitReceipt.job.id.slice(0,8):query('[name=datasets]').value.trim()?'数据就绪后排队':'提交到 '+machine;
+    const prefill=query('#submit-prefill');prefill.hidden=!parsedTarget;if(parsedTarget)prefill.innerHTML=`<span>已预填 · ${escape(parsedTarget.machine)} / ${escape(parsedTarget.project||'个人工作区')}</span>${infoHTML('识别只预填配置，不会提交训练。目标改变后，需明确改用当前目标。','预填说明')}<button type="button" class="button quiet" id="clear-training-prefill">改用当前目标</button>`;
     const quote=value=>"'"+String(value).replaceAll("'","'\\''")+"'",get=name=>query(`[name=${name}]`).value;
     const args=['gpuctl run',quote(machine||'SERVER'),'-g',get('cards'),'--min-vram',get('memory'),'--name',quote(get('name'))];
     if(project)args.push('--project',quote(project),'--release',quote(release));if(store.data?.taskMetadata?.version===1&&get('task-description').trim())args.push('--description',quote(get('task-description')));
@@ -151,14 +189,15 @@ export function executionUI(store,refresh,toast){
     for(const ref of get('datasets').trim().split(/\s+/).filter(Boolean))args.push('--data',quote(ref));args.push('-- /bin/bash -c',quote(get('command')));query('#submit-command').textContent=args.join(' ');
   }
   function renderJobs(jobs){
-    const table=query('#my-job-table'),detailKey=item=>item.className+'|'+(item.closest('[data-workbench-job]')?.dataset.workbenchJob||''),details=new Map([...table.querySelectorAll('details')].map(item=>[detailKey(item),item.open])),scrolls=new Map([...table.querySelectorAll('.wb-scroll-list')].map(item=>[item.getAttribute('aria-label'),item.scrollTop])),active=document.activeElement,focus=table.contains(active)?{id:active.closest('[data-workbench-job]')?.dataset.workbenchJob,hook:[...active.attributes].find(attr=>attr.name.startsWith('data-'))?.name}:null;
+    const table=query('#my-job-table'),detailKey=item=>item.className+'|'+(item.closest('[data-workbench-job]')?.dataset.workbenchJob||'')+'|'+(item.querySelector('summary')?.getAttribute('aria-label')||item.querySelector('summary>span')?.textContent||item.querySelector('summary')?.textContent||''),details=new Map([...table.querySelectorAll('details')].map(item=>[detailKey(item),item.open])),scrolls=new Map([...table.querySelectorAll('.wb-scroll-list')].map(item=>[item.getAttribute('aria-label'),item.scrollTop])),active=document.activeElement,focus=table.contains(active)?{id:active.closest('[data-workbench-job]')?.dataset.workbenchJob,hook:[...active.attributes].find(attr=>attr.name.startsWith('data-'))?.name}:null;
     const actions=job=>`${heldDuringMaintenance(job,store.data?.operationalMaintenance)?'<span class="maintenance-held"><span class="maintenance-pause" aria-hidden="true"></span>维护期间暂不派发</span>':''}${jobNotificationHTML(job,actor)}<button class="button quiet" data-job-logs="${escape(job.id)}">日志</button><button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="diagnostics">诊断</button>${job.project?`<button class="button quiet" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="notes">留言</button><button class="button danger" data-job-cancel="${escape(job.id)}" ${endedJob(job)||job.cancelRequested?'disabled':''}>取消</button>${canEditPriority(job,store.principal?.role==='admin')&&!maintenanceFor(store.data?.operationalMaintenance,job.machine)?`<details class="wb-priority" data-priority-editor><summary>排队优先级</summary><select data-job-priority="${escape(job.id)}" data-original-priority="${escape(job.priority)}">${priorityRankOptions(job.priority)}</select><button class="button quiet" data-job-priority-save="${escape(job.id)}">保存优先级</button></details>`:''}`;
     const drafts=new Map([...table.querySelectorAll('[data-job-priority]')].map(input=>[input.dataset.jobPriority,{value:input.value,original:input.dataset.originalPriority}]));
-    const html=workbenchCards(jobs,{actions,focusId:focusedJob,maintenance:store.data?.operationalMaintenance});if(html===jobHTML)return;jobHTML=html;table.innerHTML=html;
+    const html=workbenchCards(jobs,{actions,focusId:focusedJob,maintenance:store.data?.operationalMaintenance,ledger:quotaLedgerHTML(store,machine)});if(html===jobHTML)return;jobHTML=html;table.innerHTML=html;
     for(const detail of table.querySelectorAll('details'))if(details.has(detailKey(detail)))detail.open=details.get(detailKey(detail));
     for(const list of table.querySelectorAll('.wb-scroll-list'))if(scrolls.has(list.getAttribute('aria-label')))list.scrollTop=scrolls.get(list.getAttribute('aria-label'));
     for(const input of table.querySelectorAll('[data-job-priority]')){const draft=drafts.get(input.dataset.jobPriority);if(draft&&draft.value!==draft.original){input.value=draft.value;input.dataset.originalPriority=draft.original;}}
     for(const job of jobs){const previous=lastJobs.get(job.id),row=[...table.querySelectorAll('[data-workbench-job]')].find(item=>item.dataset.workbenchJob===job.id);if(previous&&row&&previous.state!==job.state){row.animate([{outline:'1px solid var(--line-3)'},{outline:'1px solid transparent'}],{duration:reduced()?150:220});if(['RUNNING','STARTING','SUBMITTING'].includes(job.state))liveJobs.add(job.id);}if(previous&&row&&previous.percent!==trainingReadout(job).percent&&trainingReadout(job).percent!==null){row.querySelector('.wb-progress-number')?.animate(reduced()?[{opacity:.4},{opacity:1}]:[{opacity:.4,transform:`translateY(${trainingReadout(job).percent>(previous.percent??0)?3:-3}px)`},{opacity:1,transform:'none'}],{duration:reduced()?150:220});if(job.state==='RUNNING')liveJobs.add(job.id);}if(liveJobs.has(job.id)&&['st-run','st-start'].includes(stateClass(job)))row?.querySelector('.st')?.classList.add('is-live');}
+    for(const job of jobs)if(lastJobs.get(job.id)?.state==='STARTING'&&job.state==='RUNNING')boundarySweep([...table.querySelectorAll('[data-workbench-job]')].find(row=>row.dataset.workbenchJob===job.id));
     lastJobs=new Map(jobs.map(job=>[job.id,{state:job.state,percent:trainingReadout(job).percent}]));
     if(focus?.id&&focus.hook)for(const button of table.querySelectorAll(`[${focus.hook}]`))if(button.closest('[data-workbench-job]')?.dataset.workbenchJob===focus.id){button.focus({preventScroll:true});break;}
   }
@@ -190,12 +229,12 @@ export function executionUI(store,refresh,toast){
     const custom=query('[name=custom-policy]'),customOn=custom.checked;
     custom.disabled=!available||locked;
     for(const name of ['queue-rank','yield-policy','restart-policy','checkpointable','request-mode'])query(`[name=${name}]`).disabled=!available||locked||!customOn;
-    query('#custom-policy-note').textContent=customAvailable()?'等级与让位独立。只抢占严格低等级且明确允许让位的任务；保存失败或超时不会强制杀掉保存任务。':'节点尚未确认训练控制通道，不能提交自定义策略；不会自动降级。';
+    query('#custom-policy-note').textContent=customAvailable()?'等级与让位独立。只抢占严格低等级且明确允许让位的任务；保存失败或超时不会强制杀掉保存任务。':'服务器尚未确认训练控制通道，不能提交自定义策略；不会自动降级。';
     const elastic=query('[name=elastic]'),elasticOn=elastic.checked;
     elastic.disabled=!available||locked;
     for(const name of ['min-cards','global-batch','micro-batch','auto-expand'])query(`[name=${name}]`).disabled=!available||locked||!elasticOn;
     const elasticReady=!store.data?.gpuq?.stale&&elasticCapable(store.data?.gpuq?.hosts?.find(h=>h.id===machine));
-    query('#elastic-note').textContent=elasticReady?'只选择可整除 global batch 的卡数；配额预留最大卡数。自动扩卡须接入 checkpoint、弹性 batch，启用保存让位和自动恢复。':'节点尚未确认弹性分配通道，弹性任务暂不能提交。';
+    query('#elastic-note').textContent=elasticReady?'只选择可整除 global batch 的卡数；最大卡数计入额度。自动扩卡须接入 checkpoint、弹性 batch，启用保存让位和自动恢复。':'服务器尚未确认弹性分配通道，弹性任务暂不能提交。';
     const placementMode=query('[name=gpu-placement]'),shared=placementMode.value==='shared',hami=query('[name=hami]');
     placementMode.disabled=!available||locked;
     query('[name=gpu-indices]').disabled=!available||locked||placementMode.value==='any';
@@ -203,18 +242,18 @@ export function executionUI(store,refresh,toast){
     query('[name=sm-percent]').disabled=!available||locked||!shared||!hami.checked;
     const chosenHost=store.data?.gpuq?.hosts?.find(h=>h.id===machine);
     const placementReady=placementMode.value==='any'||!store.data?.gpuq?.stale&&placementCapable(chosenHost,{shared,hami:shared&&hami.checked,smPercent:shared&&hami.checked?Number(query('[name=sm-percent]').value):100});
-    query('#placement-note').textContent=placementReady?'先在资源页观察逐卡显存和进程，再选择同卡共享。共享只需提交者同意；预算用于准入，普通共享没有硬显存限制。HAMi 只限制本任务，不限制同卡外部进程。':'节点未确认所选固定/共享或 HAMi 功能，暂不能提交。';
+    query('#placement-note').textContent=placementReady?'先在资源页观察逐卡显存和进程，再选择同卡共享。共享只需提交者同意；预算用于判断能否启动，普通共享没有硬显存限制。HAMi 只限制本任务，不限制同卡外部进程。':'服务器未确认所选固定/共享或 HAMi 功能，暂不能提交。';
     const priority=query('[name=priority]');priority.disabled=!available||locked||customOn;
     for(const option of priority.options){option.disabled=option.value!=='normal'&&!priorityAvailable();if(option.value==='normal')option.textContent=machine&&!priorityAvailable()?'默认（旧策略未确认）':'普通';}
     query('#priority-note').textContent=(!machine?'选择服务器后确认优先级能力。':!priorityAvailable()?'这台服务器尚未确认支持优先级控制。':'')+' '+(machine&&!priorityAvailable()&&priority.value==='normal'?'暂按服务器原有策略提交。':priorityDescription(priority.value));
     query('#priority-note').classList.toggle('priority-warning',priority.value==='idle'||priority.value!=='normal'&&!priorityAvailable());
     query('[name=task-description]').disabled=locked||store.data?.taskMetadata?.version!==1;
-    query('#train-form [type=submit]').disabled=!available||locked||!placementReady||(elasticOn&&!elasticReady)||(customOn?!customAvailable():priority.value!=='normal'&&!priorityAvailable())||(!!project&&(!!catalogError||!readyReleases(info).some(item=>item.release===release.value)));
+    query('#train-form [type=submit]').disabled=!available||locked||acceptedDraft||!!parsedTarget&&(machine!==parsedTarget.machine||project!==parsedTarget.project)||!placementReady||(elasticOn&&!elasticReady)||(customOn?!customAvailable():priority.value!=='normal'&&!priorityAvailable())||(!!project&&(!!catalogError||!readyReleases(info).some(item=>item.release===release.value)));
     const output=project&&query('[name=file-area]').value==='output';
     for(const id of ['workspace-list','workspace-download'])query('#'+id).disabled=!available||locked;
     query('#workspace-upload').disabled=!available||locked||output||publishing;query('[name=files]').disabled=!available||locked||output||publishing;
     query('[name=file-area]').disabled=!project||locked;query('.output-run-fields').hidden=!output;query('#project-release-field').hidden=!project;query('#project-detail').hidden=!project;
-    query('#workspace-mode-note').textContent=project?'代码草稿在 /workspace；项目环境在 /opt/project-env。发布后，训练读取固定只读版本，每项任务写入自己的 /outputs。':'个人工作区路径为 /workspace。终端、文件和训练共用此目录；新实验可单独创建项目。';
+    query('#workspace-mode-note').textContent=project?'代码在 /workspace，环境在 /opt/project-env；训练读取只读版本，输出写入 /outputs。':'终端、文件和训练共用个人 /workspace，新实验可单独创建项目。';
     query('#terminal-mode-note').textContent=project?'编辑代码、安装项目 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。':'管理个人文件和 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。';
     if(maintenanceFor(store.data?.operationalMaintenance,machine)){
       for(const selector of ['#project-create-form [type=submit]','#project-publish','#terminal-open','#terminal-reconnect','#train-form [type=submit]','#workspace-upload','[name=files]'])query(selector).disabled=true;
@@ -230,8 +269,8 @@ export function executionUI(store,refresh,toast){
     release.value=missingPrevious||releases.some(item=>item.release===previous)?previous:releases.some(item=>item.release===info?.latestReadyRelease)?info.latestReadyRelease:(releases[0]?.release||'');
     query('#release-full').textContent=release.value||'发布成功后才可提交项目训练。';query('#release-full').title=release.value;
     if(catalogError)status(catalogError,true);
-    else if(project)status(projectStatusText(info,hasTerminal()),info?.state==='FAILED');
-    else status(machine?'可直接使用个人工作区，或选择、创建独立项目。':'先选择服务器；项目、终端、文件和训练会跟随此选择。');
+    else if(project){const phase=info?.progress;const fact=({DRAFT:'代码草稿',READY:'训练版本就绪',PUBLISHING:'正在生成训练版本',FAILED:'生成训练版本失败'})[info?.state]||'项目待更新';const detail=projectStatusText(info,hasTerminal());status(info?.state==='FAILED'?detail:info?.error?fact+' · '+info.error:fact+(phase&&Number.isSafeInteger(phase.completedEntries)?' · '+phase.completedEntries+(Number.isSafeInteger(phase.totalEntries)?' / '+phase.totalEntries:'')+' 项':''),info?.state==='FAILED');query('#project-status-detail').textContent=detail;}
+    else {status(machine?'个人工作区':'请选择服务器');query('#project-status-detail').textContent='项目、终端、文件和训练使用当前服务器。';}
     renderRuns();updateControls();updatePreflight();armPolling();document.dispatchEvent(new Event('gpuq-workspace-rendered'));
   }
   function renderRuns(){
@@ -240,7 +279,7 @@ export function executionUI(store,refresh,toast){
     if(jobs.some(job=>job.id===previous))select.value=previous;
   }
   function clearFileContext(){query('[name=file-path]').value='.';query('[name=file-area]').value='code';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('[name=files]').value='';query('#workspace-result').textContent='仅操作当前服务器、当前工作区。代码上传失败后，可重新上传同一路径；未完成的上传会阻止发布。';}
-  function syncMachineFields(){for(const name of ['workspace-machine','machine','terminal-machine','file-machine'])query(`[name=${name}]`).value=machine;const selected=(store.data?.machines||[]).find(item=>item.id===machine);query('[name=cards]').max=String(selected?.cards||1);}
+  function syncMachineFields(){for(const name of ['workspace-machine','machine','terminal-machine','file-machine']){const field=query(`[name=${name}]`);field.value=machine;field.title=machine;}const selected=(store.data?.machines||[]).find(item=>item.id===machine);query('[name=cards]').max=String(selected?.cards||1);}
   async function selectMachine(value){
     if(value===machine)return;machine=(store.data?.machines||[]).some(item=>item.id===value)?value:'';project='';catalog=[];catalogError='';epoch++;projectBusy=false;stopPolling();pollCount=0;
     query('[name=release]').value='';syncMachineFields();clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(machine)await loadProjects();
@@ -265,11 +304,16 @@ export function executionUI(store,refresh,toast){
     finally{if(token===currentToken()){projectBusy=false;if(!poll)pollCount=0;renderProject();}}
   }
   function armPolling(){stopPolling();if(!isVisible()||projectBusy||operationBusy||catalogError||currentProject()?.state!=='PUBLISHING'||pollCount>=60)return;pollTimer=setTimeout(()=>{pollTimer=null;if(isVisible()){pollCount++;loadProjectStatus(true);}},5000);}
-  async function guarded(button,fn){if(operationBusy)return;operationBusy=true;button.disabled=true;updateControls();try{await fn();}catch(error){toast(error.message);status(error.message,error.code!=='MAINTENANCE_ACTIVE');}finally{operationBusy=false;if(button.isConnected)button.disabled=false;updateControls();armPolling();}}
+  async function guarded(button,fn){if(operationBusy)return;operationBusy=true;button.disabled=true;updateControls();try{await fn();}catch(error){toast(error.message);status(error.message,error.code!=='MAINTENANCE_ACTIVE');}finally{operationBusy=false;if(button.isConnected)button.disabled=false;updateControls();renderReceipt();armPolling();}}
   function fileContext(){const target=assertContext();if(!project)return target;const area=query('[name=file-area]').value;if(area==='code')return {...target,area};const runId=query('[name=file-run-id]').value.trim();if(!uuidPattern.test(runId))throw Error('请选择本项目任务，或输入完整任务 ID。');return {...target,area:'output',runId};}
   async function listFiles(){const target=fileContext(),path=query('[name=file-path]').value||'.';const result=await call('files.list',{...target,path});query('#workspace-result').textContent=result.entries.map(file=>`${file.type==='directory'?'[目录]':'[文件]'} ${file.name}  ${file.type==='file'?file.size+' B':''}`).join('\n')||'目录为空';}
   document.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
+    if(button.dataset.jobFocus){focusedJob=button.dataset.jobFocus;renderJobs(ownJobs());document.dispatchEvent(new CustomEvent('gpuq-focused-job',{detail:{id:focusedJob}}));return;}
+    if(button.id==='clear-training-prefill'){parsedTarget=null;acceptedDraft=false;updateControls();updatePreflight();return;}
+    if(button.id==='submission-new-draft'||button.hasAttribute('data-receipt-new-draft')){acceptedDraft=false;query('#train-panel').open=true;updateControls();updatePreflight();return;}
+    if((button.id==='submission-retry'||button.hasAttribute('data-receipt-retry'))&&submitReceipt?.status==='unknown'&&submitReceipt.actor===receiptActor()){const args=structuredClone(submitReceipt.args);guarded(button,()=>submitRequest(args));return;}
+    if((button.id==='submission-refresh'||button.hasAttribute('data-receipt-refresh'))&&submitReceipt?.actor===receiptActor()){const receipt=submitReceipt;guarded(button,async()=>{await store.refresh();if(receipt.actor!==receiptActor()||submitReceipt!==receipt)return;const job=store.jobs.find(job=>job.userId===store.principal.userId&&job.key===receipt.args.key);if(job){submitReceipt={...receipt,status:'confirmed',job,error:''};acceptedDraft=true;submitKey=crypto.randomUUID();}refresh();renderReceipt();});return;}
     if(button.id==='open-submit'){submitSelection.invalidate();if(submitDialog)query('#train-panel').open=true;return;}
     if(button.id==='submit-maintenance-switch'){const target=query('#submit-maintenance-machine')?.value;if(target&&(store.data?.machines||[]).some(item=>item.id===target)&&!maintenanceFor(store.data?.operationalMaintenance,target))guarded(button,async()=>{await selectMachine(target);updatePreflight();toast('已按你的选择换机。请重新核对代码、环境、数据与版本；尚未提交。');});return;}
     if(button.id==='close-submit'){submitSelection.invalidate();dismissSheet(submitDialog);return;}
@@ -284,17 +328,17 @@ export function executionUI(store,refresh,toast){
       const enabled=job.notifications?.enabled!==true;
       await call('notifications.job',{jobId:job.id,enabled});refresh();toast(enabled?'Telegram 任务通知已开启。':'Telegram 任务通知已关闭。');
     });
-    if(button.dataset.jobCancel&&window.confirm('取消这个训练任务？已保存的文件保留，确认停止后才释放额度。'))guarded(button,async()=>{await call('jobs.cancel',{jobId:button.dataset.jobCancel});refresh();toast('已请求取消；等待 GPUQ 确认释放。');});
+    if(button.dataset.jobCancel&&window.confirm(jobCancelConfirmation(store.jobs.find(job=>job.id===button.dataset.jobCancel))))guarded(button,async()=>{await call('jobs.cancel',{jobId:button.dataset.jobCancel});refresh();toast('已请求取消；等待服务器确认停止。');});
     if(button.dataset.jobPrioritySave)guarded(button,async()=>{
       if(store.principal?.role!=='admin')throw Error('只有管理员可以调整排队任务优先级。');
       const jobId=button.dataset.jobPrioritySave,job=store.jobs.find(item=>item.id===jobId),control=button.closest('[data-priority-editor]')?.querySelector('select');
       if(!job||!canEditPriority(job,true)||!control)throw Error('任务已不在可调整的队列状态，请刷新后核对。');
       const priority=priorityRankValue(control.value);if(priority===job.priority){toast('优先级未改变。');return;}
-      await call('jobs.priority',{jobId,priority,expectedPriority:control.dataset.originalPriority});control.dataset.originalPriority=priority;refresh();toast('已请求调整优先级；以下次调度核对结果为准。');
+      await call('jobs.priority',{jobId,priority,expectedPriority:control.dataset.originalPriority});control.dataset.originalPriority=priority;refresh();toast('已请求调整优先级；等待服务器更新状态。');
     });
     if(button.id==='close-job-log')dismissSheet(log,{drilldown:true,target:jobHeading(focusedJob)});
     if(button.id==='projects-refresh'){pollCount=0;loadProjects();}
-    if(button.id==='project-publish')guarded(button,async()=>{const target=assertContext();if(!project)throw Error('先选择项目。');if(hasTerminal())throw Error('请先结束项目开发终端；断开连接不等于结束。');const result=await call('projects.publish',target);if(result.project!==project)throw Error('项目返回身份不匹配。');catalog=catalog.map(item=>item.project===project?result:item);catalogError='';pollCount=0;renderProject();toast(result.state==='READY'?'训练版本已就绪。训练使用选定的固定版本。':'正在生成训练版本；可稍后刷新，不会自动切换已选版本。');});
+    if(button.id==='project-publish')guarded(button,async()=>{const target=assertContext();if(!project)throw Error('先选择项目。');if(hasTerminal())throw Error('请先结束项目开发终端；断开连接不等于结束。');const result=await call('projects.publish',target);if(result.project!==project)throw Error('项目返回身份不匹配。');catalog=catalog.map(item=>item.project===project?result:item);catalogError='';pollCount=0;renderProject();toast(result.state==='READY'?'训练版本已就绪。训练使用选定的版本。':'正在生成训练版本；可稍后刷新，不会自动切换已选版本。');});
     if(button.id==='workspace-list')guarded(button,listFiles);
     if(button.id==='workspace-upload')guarded(button,async()=>{
       const target=fileContext(),dir=query('[name=file-path]').value||'.',files=[...query('[name=files]').files];if(target.area==='output')throw Error('任务输出只支持查看和下载。');if(!files.length)throw Error('先选择文件。');
@@ -314,23 +358,24 @@ export function executionUI(store,refresh,toast){
     if(event.target.id==='project-create-form'){event.preventDefault();const slug=query('[name=new-project]').value.trim();guarded(event.target.querySelector('[type=submit]'),async()=>{
       assertContext();if(!validProject(slug))throw Error('项目名需小写字母开头，使用字母、数字、下划线或短横线，最多 48 位。');
       const environmentMode=query('[name=environment-mode]').value;if(!['shared','isolated','oci'].includes(environmentMode))throw Error('请选择项目环境模式。');
-      const result=await call('projects.create',{machine,project:slug,environmentMode});if(result.project!==slug)throw Error('项目返回身份不匹配。');if(['isolated','oci'].includes(environmentMode)&&result.environmentMode!==environmentMode)throw Error('节点未确认请求的环境模式；请升级节点后核对项目，不要开始安装环境。');catalog=[...catalog.filter(item=>item.project!==slug),result];project=slug;epoch++;query('[name=release]').value='';clearFileContext();catalogError='';renderProject();notifyContext();query('[name=new-project]').value='';query('#project-create').open=false;submitKey=crypto.randomUUID();toast('项目已创建。上传代码、安装项目环境，然后生成训练版本。');
+      const result=await call('projects.create',{machine,project:slug,environmentMode});if(result.project!==slug)throw Error('项目返回身份不匹配。');if(['isolated','oci'].includes(environmentMode)&&result.environmentMode!==environmentMode)throw Error('服务器未确认请求的环境模式；请升级节点后核对项目，不要开始安装环境。');catalog=[...catalog.filter(item=>item.project!==slug),result];project=slug;epoch++;query('[name=release]').value='';clearFileContext();catalogError='';renderProject();notifyContext();query('[name=new-project]').value='';query('#project-create').open=false;submitKey=crypto.randomUUID();toast('项目已创建。上传代码、安装项目环境，然后生成训练版本。');
     });return;}
     if(event.target.id!=='train-form')return;event.preventDefault();const form=new FormData(event.target);
-    guarded(event.target.querySelector('[type=submit]'),async()=>{const target=assertContext();if(form.get('machine')!==machine)throw Error('服务器选择已改变，请核对工作台顶部后再提交。');const datasets=datasetReferences(form.get('datasets'));
+    guarded(event.target.querySelector('[type=submit]'),async()=>{if(acceptedDraft)throw Error('此配置已提交，请先选择再次使用配置。');const target=assertContext();if(parsedTarget&&(target.machine!==parsedTarget.machine||project!==parsedTarget.project))throw Error('配置目标已改变，请先确认当前目标。');if(form.get('machine')!==machine)throw Error('服务器选择已改变，请核对工作台顶部后再提交。');const datasets=datasetReferences(form.get('datasets'));
       const customOn=query('[name=custom-policy]').checked;
-      if(customOn&&!customAvailable())throw Error('节点未接通训练控制通道，不能降级提交。');
+      if(customOn&&!customAvailable())throw Error('服务器未接通训练控制通道，不能降级提交。');
       const scheduling=customOn?schedulingFromForm(form,store.principal?.role==='admin'):null;
-      if(scheduling?.mode&&scheduling.mode!=='queue'&&!store.data?.gpuq?.hosts?.find(h=>h.id===machine)?.gpuq?.capabilities?.includes('preempt-opt-in-only-v1'))throw Error('节点未接通抢占模式，请先升级。');
+      if(scheduling?.mode&&scheduling.mode!=='queue'&&!store.data?.gpuq?.hosts?.find(h=>h.id===machine)?.gpuq?.capabilities?.includes('preempt-opt-in-only-v1'))throw Error('服务器未接通抢占模式，请先升级。');
       const elastic=elasticFromForm(form,Number(form.get('cards')),scheduling);
       if(customOn&&!scheduling)throw Error('请重新核对自定义调度选项。');
       const priority=customOn?'normal':trainingPriority(form.get('priority'),store.principal?.role==='admin');if(!customOn&&priority!=='normal'&&!priorityAvailable())throw Error('尚未确认这台服务器支持优先级控制，请刷新核对或明确选择普通优先级。');
       const placement=placementFromForm(form,Number(form.get('cards')),elastic,scheduling,priority);
-      await call('jobs.submit',{machine:target.machine,cards:Number(form.get('cards')),minVramGiB:Number(form.get('memory')),name:form.get('name')||'train',...(store.data?.taskMetadata?.version===1?{description:taskDescription(form.get('task-description')||'')}:{}),...(scheduling?{scheduling}:priorityAvailable()?{priority}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),argv:['/bin/bash','-c',String(form.get('command'))],key:submitKey,...trainingProject(project?currentProject():null,form.get('release')),...(datasets.length?{datasets,prepareData:true}:{})});submitKey=crypto.randomUUID();refresh();toast('已提交；服务器继续运行，无需保持此网页打开。');
+      await submitRequest({machine:target.machine,cards:Number(form.get('cards')),minVramGiB:Number(form.get('memory')),name:form.get('name')||'train',...(store.data?.taskMetadata?.version===1?{description:taskDescription(form.get('task-description')||'')}:{}),...(scheduling?{scheduling}:priorityAvailable()?{priority}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),argv:['/bin/bash','-c',String(form.get('command'))],key:submitKey,...trainingProject(project?currentProject():null,form.get('release')),...(datasets.length?{datasets,prepareData:true}:{})});
     });
   });
   document.addEventListener('change',event=>{
     if(!event.target.closest('#execution-workspace,#work-submit,#work-submit-panel,#shell-context,.job-log-dialog'))return;const name=event.target.name;
+    if(event.target.closest('#train-form,#work-submit-panel'))acceptedDraft=false;
     if(['workspace-machine','machine','terminal-machine','file-machine'].includes(name)){
       if(event.target.value!==machine&&terminalSessions.some(item=>item.userId===actor&&!item.detached)&&!window.confirm('切换服务器不会搬运代码、环境、数据或结果。当前终端会断开连接，会话保留，可从总控重连。继续切换？')){event.target.value=machine;return;}
       selectMachine(event.target.value);
@@ -343,40 +388,49 @@ export function executionUI(store,refresh,toast){
     if(name==='file-run')query('[name=file-run-id]').value=event.target.value;
     updatePreflight();
   });
-  document.addEventListener('input',event=>{if(!event.target.closest('#train-form,#work-submit-panel'))return;submitSelection.invalidate();submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(event.target.name==='sm-percent')updateControls();updatePreflight();});
+  document.addEventListener('input',event=>{if(!event.target.closest('#train-form,#work-submit-panel'))return;submitSelection.invalidate();acceptedDraft=false;submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(event.target.name==='sm-percent')updateControls();updatePreflight();});
   document.addEventListener('gpuq-open-submit',async event=>{
     if(!submitDialog||!actor)return;
-    const detail=event.detail||{},selected=detail.machine||machine,ref=detail.datasetRef||'',origin=detail.origin;
+    const detail=event.detail||{},selected=detail.machine||machine,ref=detail.datasetRef||'',origin=detail.origin,config=detail.trainingConfig;
+    if(selected!==machine&&terminalSessions.some(row=>row.userId===actor&&!row.detached)&&!window.confirm('切换服务器会断开当前终端；会话保留，可重连。继续？'))return;
     const pending=selected!==machine?selectMachine(selected):Promise.resolve();
     const intent=submitSelection.begin(selected,ref,submitIdentity()),valid=()=>submitSelection.current(intent,machine,submitIdentity())&&enabled();
     try{
       await pending;if(!valid())return;
+      if(config){
+        const target=(store.data?.machines||[]).find(row=>row.id===machine);
+        if(!Number.isSafeInteger(config.cards)||config.cards<1||config.cards>target?.cards||typeof config.command!=='string'||!config.command.trim())throw Error('训练配置待确认，请重新预填。');
+        if(config.project&&config.project!==project)throw Error('项目已改变，请重新确认训练配置。');
+        if(config.release&&!readyReleases(currentProject()).some(row=>row.release===config.release))throw Error('原选训练版本不可用，请重新选择。');
+      }
       if(intent.datasetRef){query('[name=datasets]').value=intent.datasetRef;submitKey=crypto.randomUUID();}
+      if(config){query('[name=cards]').value=String(config.cards);query('[name=command]').value=config.command;if(config.release)query('[name=release]').value=config.release;parsedTarget={machine,project,release:query('[name=release]').value};acceptedDraft=false;submitKey=crypto.randomUUID();updateControls();}
       query('#train-panel').open=true;updatePreflight();
       if(origin)requestAnimationFrame(()=>{if(valid()&&submitDialog?.open)sharedObject(origin,query('[name=datasets]'));});
       if(machine)loadProjectStatus();
     }catch(error){if(valid())toast(error.message);}
   });
   document.addEventListener('gpuq-open-job',event=>{if(!log||!store.principal)return;const {id,view,origin}=event.detail||{};if(!store.jobs.some(job=>job.id===id)){toast('任务暂未出现在当前账号的状态中，请刷新核对。');return;}focusedJob=id;diagnostics.openLogs(id,view||'overview',origin).catch(error=>toast(error.message));});
+  store.onAuthChange?.(()=>{submitReceipt=null;parsedTarget=null;acceptedDraft=false;query('#submission-receipt')?.replaceChildren();});
   document.addEventListener('gpuq-terminal-state',event=>{terminalSessions=event.detail.sessions||[];if(section&&actor)renderProject();});
   document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPolling();else armPolling();});
   return ()=>{
     if(!section){section=document.createElement('section');section.id='execution-workspace';section.className='execution-workspace';document.querySelector('#execution-host').append(section);log=document.createElement('dialog');log.className='job-log-dialog';log.setAttribute('aria-labelledby','job-log-title');log.innerHTML='<div class="modal-head"><h2 id="job-log-title">训练日志 · 最近 200 行</h2><button class="button" id="close-job-log">关闭</button></div><pre></pre>';document.body.append(log);diagnostics.install();}
-    diagnostics.sync();section.hidden=!store.principal;if(section.hidden){diagnostics.reset();submitDialog?.close();settingsDialog?.close();actor=null;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();section.innerHTML='';notifyContext();return;}
+    diagnostics.sync();mission.sync();renderReceipt();section.hidden=!store.principal;if(section.hidden){diagnostics.reset();submitDialog?.close();settingsDialog?.close();submitReceipt=null;parsedTarget=null;acceptedDraft=false;actor=null;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();section.innerHTML='';notifyContext();return;}
     if(actor!==store.principal.userId){
       diagnostics.reset();
       submitDialog?.close();submitDialog?.remove();settingsDialog?.close();settingsDialog?.remove();submitDialog=null;settingsDialog=null;settingsSource=null;jobHTML='';lastJobs.clear();liveJobs.clear();focusedJob=null;deepLinkHandled=false;
-      actor=store.principal.userId;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();machineIdentity='';submitKey=crypto.randomUUID();operationBusy=false;projectBusy=false;
+      submitReceipt=null;parsedTarget=null;acceptedDraft=false;actor=store.principal.userId;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();machineIdentity='';submitKey=crypto.randomUUID();operationBusy=false;projectBusy=false;
       section.innerHTML=`<section class="workspace-context" aria-labelledby="workspace-context-title"><div class="workspace-context-heading"><div><div class="eyebrow">WORKSPACE</div><h2 id="workspace-context-title">选择服务器与项目</h2></div><button class="button" id="projects-refresh">刷新项目</button></div><div class="workspace-context-grid"><label>服务器<select name="workspace-machine" aria-describedby="workspace-mode-note"></select></label><label>项目<select name="workspace-project"><option value="">个人工作区</option></select></label></div><p id="workspace-mode-note" class="muted"></p><p id="project-status" class="workspace-status" role="status" aria-live="polite"></p><details id="project-create"><summary>新建项目</summary><form id="project-create-form"><label>项目名称<input name="new-project" pattern="[a-z][a-z0-9_-]{0,47}" maxlength="48" required placeholder="例如 vision-baseline" spellcheck="false" autocomplete="off"></label><label>运行环境<select name="environment-mode" aria-describedby="environment-mode-note"><option value="shared">共享基础包（默认）</option><option value="isolated">完全隔离（不继承基础包）</option><option value="oci">个人 OCI 容器（节点须启用）</option></select></label><button type="submit" class="button">创建项目</button></form><p id="environment-mode-note" class="muted">环境模式创建后固定。完全隔离模式使用基础 Python；OCI 可在容器内安装系统包，开发无 GPU，发布后训练由调度分配 GPU。</p><p class="muted">项目名使用小写字母、数字、短横线或下划线，以字母开头。离线依赖与模型可放入 /workspace/offline；训练不继承开发 HOME 中的缓存或令牌。</p></details><div id="project-detail" class="project-actions"><button class="button primary" id="project-publish">生成训练版本</button><button class="button danger" id="project-terminal-stop" hidden>结束项目开发终端</button><span class="muted">先完成上传并结束开发终端，再保存代码与环境版本。</span></div></section>
       <section class="personal-terminal" aria-labelledby="personal-terminal-title"><div class="terminal-heading"><h3 id="personal-terminal-title">个人开发终端</h3><span class="terminal-scope">日常开发 · 不占 GPU</span></div><p id="terminal-mode-note" class="muted"></p><div class="terminal-controls"><select name="terminal-machine" hidden aria-label="终端服务器"></select><button id="terminal-open" class="button primary">新建开发终端</button><button id="terminal-reconnect" class="button">重连开发会话</button></div></section>
-      <details id="host-maintenance" class="host-maintenance" hidden><summary>主机运维 · 管理员 ROOT</summary><p>目标：<strong id="host-terminal-target"></strong>。不进入当前项目，可修改整机并绕过 GPU 配额；仅用于系统维护。</p><div class="terminal-controls"><button id="terminal-root-open" class="button danger">新建 ROOT 运维终端</button><button id="terminal-root-reconnect" class="button">重连 ROOT 会话</button></div></details>
-      <details class="execution-panel" id="workspace-files"><summary>代码与任务输出 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">代码草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传到代码草稿</button></div><pre id="workspace-result" class="file-result" aria-live="polite">仅操作当前服务器、当前工作区。大目录请使用 CLI。</pre></details>
+      <details id="host-maintenance" class="host-maintenance" hidden><summary>主机运维 · 管理员 ROOT</summary><p>目标：<strong id="host-terminal-target"></strong>。不进入当前项目，可修改整机并绕过 GPU 额度；仅用于系统维护。</p><div class="terminal-controls"><button id="terminal-root-open" class="button danger">新建 ROOT 运维终端</button><button id="terminal-root-reconnect" class="button">重连 ROOT 会话</button></div></details>
+      <details class="execution-panel" id="workspace-files"><summary>代码与任务输出 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">代码草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传到代码草稿</button></div><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
       <details class="execution-panel"><summary>提交训练</summary><form id="train-form">
         <select name="machine" hidden aria-label="训练服务器"></select>
         <div class="train-grid"><label>卡数<input name="cards" type="number" min="1" max="1" value="1" required></label><label>每卡最低显存 / GiB<input name="memory" type="number" min="0" max="128" value="0" step="0.5"></label><label>任务名称<input name="name" maxlength="64" value="train" required></label></div>
-        <label>任务描述（同机器授权成员可见）<textarea name="task-description" rows="3" maxlength="2000" placeholder="例如：验证新数据集上的 baseline，预计运行约两小时。不要填写密码或令牌。"></textarea></label>
+        <label>任务描述 ${infoHTML('同一服务器获授权的成员可以看到描述。请勿填写口令或令牌。','描述可见范围')}<textarea name="task-description" rows="3" maxlength="2000" placeholder="例如：验证新数据集上的 baseline，预计运行约两小时。不要填写密码或令牌。"></textarea></label>
         <div class="priority-choice"><label>任务优先级<select name="priority" aria-describedby="priority-note">${priorityOptions(store.principal?.role==='admin')}</select></label><p id="priority-note" class="priority-note"></p></div>
-        <label id="project-release-field">项目训练版本<select name="release"></select><code id="release-full" class="release-hash"></code><small>只使用已就绪的固定版本；刷新和发布不会替换已选版本。</small></label>
+        <label id="project-release-field">项目训练版本<select name="release"></select><code id="release-full" class="release-hash"></code><small>只使用已就绪的版本；刷新和发布不会替换已选版本。</small></label>
         <label>训练命令<textarea name="command" rows="3" required spellcheck="false">python train.py</textarea></label>
         <p class="muted">在所选服务器自动分配 GPU，不会换机。项目训练的 /workspace 只读，环境在 /opt/project-env，请把结果写入 /outputs；个人工作区的 Python 在 /opt/conda。</p>
         <label>数据集版本（可选）<textarea name="datasets" rows="2" spellcheck="false" placeholder="从左侧「数据集」选择；多个版本用空格分隔"></textarea></label>
@@ -398,7 +452,7 @@ export function taskIdentityHTML(job){
   return `<strong>${escape(job.name)}</strong><small>${escape(name)}${username&&username!==name?'（'+escape(username)+'）':''} · ${escape(job.id)}</small>
     <p class="task-description">${escape(job.description||'未填写描述')}</p>${job.source==='native'?'<small>未关联平台提交记录</small>':''}`;
 }
-export function taskTable(jobs,{admin=false,userId}={}){return `<div class="live-table-wrap task-table-wrap"><table class="live-table task-table"><caption class="sr-only">训练任务、优先级与最近调度结果</caption><thead><tr><th>任务 / 用户</th><th>机器 / 卡数</th><th>状态</th><th>优先级 / 调度</th><th>操作</th></tr></thead><tbody>${[...jobs].reverse().map(job=>`<tr><td data-label="任务 / 用户">${taskIdentityHTML(job)}${job.project?`<small>${escape(job.project)} · ${escape(job.release||'')}</small>`:''}</td><td data-label="机器 / 卡数">${escape(job.machine)}${allocationSummary(job)}${placementSummary(job)}</td><td data-label="状态"><span class="task-state">${escape(taskStateLabel(job))}</span><small>${escape(job.state)}${job.cancelRequested&&!terminal.has(job.state)?' · 正在取消':''}</small>${job.preempted?'<small>已写入的输出保留，不自动恢复。</small>':''}${job.error?`<small class="task-error">${escape(job.error)}</small>`:''}${jobProgressHTML(job)}</td><td data-label="优先级 / 调度"><span class="priority-pill priority-${Object.hasOwn(priorities,job.priority)?job.priority:'unknown'}">${escape(priorityRankLabel(job))}</span>${schedulingSummary(job)}${Number.isInteger(job.schedulerPriority)?`<small>节点优先级：P${escape(job.schedulerPriority)}</small>`:''}<small>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</small><small>调度状态：${escape(job.schedulerState||'未提供')}</small><small class="queue-reason">${escape(job.queueReason||'暂无调度说明。')}</small><small class="scheduler-time">核对时间：${escape(sampleTime(job.schedulerCheckedAt))}</small>${canEditPriority(job,admin)?`<div class="priority-editor" data-priority-editor><label><span class="sr-only">${escape(job.name)} 的排队优先级</span><select data-job-priority="${escape(job.id)}" data-original-priority="${escape(job.priority)}">${priorityRankOptions(job.priority)}</select></label><button class="button" data-job-priority-save="${escape(job.id)}">保存优先级</button><small>仅改排队顺序，不改变让位和重启方式。</small></div>`:''}</td><td data-label="操作"><div class="task-actions">${jobNotificationHTML(job,userId)}<button class="button" data-job-logs="${escape(job.id)}">日志</button>${job.project&&(!userId||job.userId===userId)?`<button class="button" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button danger" data-job-cancel="${escape(job.id)}" ${terminal.has(job.state)||job.cancelRequested?'disabled':''}>取消</button></div></td></tr>`).join('')||'<tr><td colspan="5" class="task-empty">暂无任务。先选择服务器，准备代码，再提交训练。</td></tr>'}</tbody></table></div>`;}
+export function taskTable(jobs,{admin=false,userId}={}){return `<div class="live-table-wrap task-table-wrap"><table class="live-table task-table"><caption class="sr-only">训练任务、优先级与最近调度结果</caption><thead><tr><th>任务 / 用户</th><th>机器 / 卡数</th><th>状态</th><th>优先级 / 调度</th><th>操作</th></tr></thead><tbody>${[...jobs].reverse().map(job=>`<tr><td data-label="任务 / 用户">${taskIdentityHTML(job)}${job.project?`<small>${escape(job.project)} · ${escape(job.release||'')}</small>`:''}</td><td data-label="机器 / 卡数">${escape(job.machine)}${allocationSummary(job)}${placementSummary(job)}</td><td data-label="状态"><span class="task-state">${escape(taskStateLabel(job))}</span><small>${escape(job.state)}${job.cancelRequested&&!terminal.has(job.state)?' · 正在取消':''}</small>${job.preempted?'<small>已写入的输出保留，不自动恢复。</small>':''}${job.error?`<small class="task-error">${escape(job.error)}</small>`:''}${jobProgressHTML(job)}</td><td data-label="优先级 / 调度"><span class="priority-pill priority-${Object.hasOwn(priorities,job.priority)?job.priority:'unknown'}">${escape(priorityRankLabel(job))}</span>${schedulingSummary(job)}${Number.isInteger(job.schedulerPriority)?`<small>节点优先级：P${escape(job.schedulerPriority)}</small>`:''}<small>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</small><small>状态：${escape(job.schedulerState||'未提供')}</small><small class="queue-reason">${escape(job.queueReason||'暂无调度说明。')}</small><small class="scheduler-time">更新于 ${escape(sampleTime(job.schedulerCheckedAt))}</small>${canEditPriority(job,admin)?`<div class="priority-editor" data-priority-editor><label><span class="sr-only">${escape(job.name)} 的排队优先级</span><select data-job-priority="${escape(job.id)}" data-original-priority="${escape(job.priority)}">${priorityRankOptions(job.priority)}</select></label><button class="button" data-job-priority-save="${escape(job.id)}">保存优先级</button><small>仅改排队顺序，不改变让位和重启方式。</small></div>`:''}</td><td data-label="操作"><div class="task-actions">${jobNotificationHTML(job,userId)}<button class="button" data-job-logs="${escape(job.id)}">日志</button>${job.project&&(!userId||job.userId===userId)?`<button class="button" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button danger" data-job-cancel="${escape(job.id)}" ${terminal.has(job.state)||job.cancelRequested?'disabled':''}>取消</button></div></td></tr>`).join('')||'<tr><td colspan="5" class="task-empty">暂无任务。先选择服务器，准备代码，再提交训练。</td></tr>'}</tbody></table></div>`;}
 export function renderTaskTable(container,jobs,options={}){
   const drafts=new Map([...container.querySelectorAll('[data-job-priority]')].filter(input=>input.value!==input.dataset.originalPriority).map(input=>[input.dataset.jobPriority,{value:input.value,original:input.dataset.originalPriority}]));
   const active=container.ownerDocument.activeElement,focus=active?.dataset?.jobPriority?['jobPriority',active.dataset.jobPriority]:active?.dataset?.jobPrioritySave?['jobPrioritySave',active.dataset.jobPrioritySave]:null;

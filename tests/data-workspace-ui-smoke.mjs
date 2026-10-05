@@ -12,7 +12,7 @@ try{
   await page.route('**/*',async route=>{
     const url=new URL(route.request().url());if(url.origin!==origin){unexpected.push(url.href);return route.abort();}
     if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><main><h1>数据集</h1><section id="page-datasets"></section></main>'});
-    if(['/maintenance-state.js','/datasets-ui.js','/data-route.js','/data-workspace.js','/cloud-files-ui.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
+    if(['/maintenance-state.js','/datasets-ui.js','/workbench-ui.js','/job-progress.js','/motion-ui.js','/data-route.js','/data-workspace.js','/cloud-files-ui.js','/dataset-upload.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
     if(url.pathname==='/favicon.ico')return route.fulfill({status:204});unexpected.push(url.href);return route.abort();
   });
   await page.goto(origin);
@@ -134,7 +134,7 @@ try{
   // A failed space reading is explicit but cannot erase a confirmed catalog.
   await page.evaluate(()=>{capacityFail=true;});await page.locator('#datasets-refresh').click();
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
-  assert.match(await page.locator('#datasets-capacity').textContent(),/容量暂未确认/);
+  assert.match(await page.locator('#datasets-capacity').textContent(),/容量待更新/);
   assert.equal(await page.locator('.dataset-card').count(),1);
   // Revoking a different machine invalidates the entire aggregate, even when
   // the selected machine is unchanged and an old directory reply arrives late.

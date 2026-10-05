@@ -76,7 +76,7 @@ test('watch suppresses unchanged snapshots and Ctrl+C only detaches the viewer',
 
 test('progress table escapes report text, shows stale warning and preserves advisory label',()=>{
   const f=fixture();f.job.progress=normalizeProgress({...report({phase:'<script>',severity:'error',message:'<img onerror=x>'}),stale:true});
-  const html=jobProgressHTML(f.job);assert.match(html,/&lt;script&gt;/);assert.doesNotMatch(html,/<script>|<img/);assert.match(html,/停滞/);assert.match(html,/调度器确认为准/);assert.match(html,/value="10"/);
+  const html=jobProgressHTML(f.job);assert.match(html,/&lt;script&gt;/);assert.doesNotMatch(html,/<script>|<img/);assert.match(html,/停滞/);assert.match(html,/服务器确认/);assert.match(html,/value="10"/);
 });
 
 test('downloaded client is one file, isolated module namespaces, and supports installed symlink entry',async t=>{

@@ -90,12 +90,12 @@ try{
   assert.equal(await page.locator('[name=terminal-host]').count(),0,'no sticky ROOT mode switch exists');
   await setMachine(machine);
   for(const name of ['machine','terminal-machine','file-machine'])assert.equal(await page.locator(`[name=${name}]`).inputValue(),machine);
-  await page.locator('#project-create summary').click();await page.locator('[name=new-project]').fill('vision-demo');
+  await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('vision-demo');
   assert.equal(await page.locator('[name=environment-mode]').inputValue(),'shared');
   await page.locator('[name=environment-mode]').selectOption('isolated');
   await action('projects.create',()=>page.locator('#project-create-form [type=submit]').click());await idle();
   assert.equal(calls.filter(call=>call.operation==='projects.create').at(-1).args.environmentMode,'isolated');
-  assert.match(await page.locator('#project-status').textContent(),/完全隔离/);
+  assert.match(await page.locator('#project-status-detail').textContent(),/完全隔离/);
   assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   assert.match(await page.locator('#workspace-mode-note').textContent(),/\/opt\/project-env/);
@@ -129,7 +129,7 @@ try{
   await page.locator('[name=command]').fill('python train.py --output /outputs/result.json');await page.locator('[name=name]').fill('project-smoke');
   await closeSubmit(page);await action('projects.publish',()=>page.locator('#project-publish').click());await idle();
   assert.match(await page.locator('#project-status').textContent(),/正在生成训练版本/);assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
-  assert.match(await page.locator('#project-status').textContent(),/复制：12 \/ 20 项，512 \/ 1024 B/);
+  assert.match(await page.locator('#project-status-detail').textContent(),/复制：12 \/ 20 项，512 \/ 1024 B/);
   const publication=projects.get(key(machine,member.id,'vision-demo'));publication.state='READY';publication.releases=[{release,state:'READY'}];publication.latestReadyRelease=release;
   await responseFor(page,'projects.status');await idle();
   assert.equal(await page.locator('[name=release]').inputValue(),release);assert.equal(await page.locator('#release-full').textContent(),release);
@@ -188,7 +188,7 @@ try{
   await closeSubmit(page);await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('other-project'));await idle();
   await capture('projects-mobile-ready.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px selected-project layout must not overflow');
-  await page.locator('#project-create summary').click();
+  await page.locator('#project-create>summary').click();
   await page.locator('[name=environment-mode]').selectOption('isolated');
   await capture('projects-mobile-environment.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px environment creation form must not overflow');

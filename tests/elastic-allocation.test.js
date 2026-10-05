@@ -22,7 +22,7 @@ test('elastic task rows retain rank-only controls and advisory training progress
     schedulerPolicy:{yield_policy:'save',restart_policy:'on-preempt'},
     progress:{reported:true,snapshot:{phase:'train',epochsCompleted:1,epochsTotal:10,metrics:{loss:0.1},etaSeconds:null,severity:'info'}}};
   const html=taskTable([job],{admin:true});
-  for(const pattern of [/当前 2 张/,/合法卡数 1,2,4,8/,/value="10"/,/轮次 1\/10/,/调度器确认为准/,/保存后让位/,/data-job-priority=/,/仅改排队顺序/])assert.match(html,pattern);
+  for(const pattern of [/当前 2 张/,/合法卡数 1,2,4,8/,/value="10"/,/轮次 1\/10/,/服务器确认/,/保存后让位/,/data-job-priority=/,/仅改排队顺序/])assert.match(html,pattern);
   assert.doesNotMatch(taskTable([{...job,state:'RUNNING'}],{admin:true}),/data-job-priority=/);
 });
 
