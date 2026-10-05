@@ -104,7 +104,8 @@ class ProjectCopies(t.TransferJobs):
     def start_spec(self,args,payload):
         self.identity(args);key=args['id']
         with self.lock(key):
-            p.need(not self.path(key,'.cancel').exists(),'Project copy was canceled; use a new operation ID')
+            p.need(not any(self.path(key,suffix).exists() for suffix in ('.cancel','.revoked')),
+                   'Project copy was canceled or revoked; use an explicit controlled retry')
             try:
                 spec=self.load(key);p.need(spec['digest']==t.digest(payload),'Copy ID belongs to different immutable content')
             except FileNotFoundError:
@@ -136,7 +137,8 @@ class ProjectCopies(t.TransferJobs):
         result=self.start_spec(args,{**{k:args[k] for k in ('userId','project','release','targetMachine')},'role':'export'})
         if result['state']!='READY':return result
         with self.lock(args['id'],'.ticket.lock'):
-            p.need(not self.path(args['id'],'.cancel').exists(),'Source project copy was canceled')
+            p.need(not any(self.path(args['id'],suffix).exists() for suffix in ('.cancel','.revoked')),
+                   'Source project copy was canceled or revoked')
             try:grant=self.load(args['id'],'.grant.json')
             except FileNotFoundError:
                 grant={**{k:args[k] for k in ('id','userId','project','release','targetMachine')},
@@ -196,7 +198,8 @@ class ProjectCopies(t.TransferJobs):
         with self.lock(key):
             try:spec=self.owned(args)
             except FileNotFoundError:
-                if self.path(key,'.cancel').exists():p.need(self.load(key,'.cancel')['userId']==args['userId'],'Different copy owner')
+                for suffix in ('.cancel','.revoked'):
+                    if self.path(key,suffix).exists():p.need(self.load(key,suffix)['userId']==args['userId'],'Different copy owner')
                 self.n.atomic_json(self.path(key,'.cancel'),{'userId':args['userId'],'at':time.time()})
                 return {'id':key,'state':'CANCELED','cleaned':True}
             self.n.atomic_json(self.path(key,'.cancel'),{'userId':args['userId'],'at':time.time()})
@@ -205,6 +208,35 @@ class ProjectCopies(t.TransferJobs):
             result=self.status(args)
             result['cleaned']=self.reap_stopped(spec)
             return result
+
+    def revoke(self,args):
+        """Fence source reads/late dispatch, without stopping or deleting files.
+
+        Separate from cancellation: an unreachable target may still have a
+        writer. Keep its shared export reference until normal stop/cleanup is
+        confirmed. The ticket lock drains a current bounded read first.
+        """
+        p.need(set(args)=={'id','userId'},'Invalid project source revocation fields')
+        self.actor(args);key=t.identifier(args['id'])
+        with self.lock(key):
+            try:
+                spec=self.owned(args)
+                p.need(spec['role']=='export','Only a source export can be revoked')
+            except FileNotFoundError:pass
+            with self.lock(key,'.ticket.lock'):
+                for suffix in ('.cancel','.revoked'):
+                    if self.path(key,suffix).exists():
+                        p.need(self.load(key,suffix)['userId']==args['userId'],'Different copy owner')
+                try:grant=self.load(key,'.grant.json')
+                except FileNotFoundError:grant=None
+                if grant is not None:
+                    p.need(grant['userId']==args['userId'],'Different project grant owner')
+                # Persist the permanent fence before acknowledging or changing
+                # the optional grant. It also blocks prepare delayed in transit.
+                self.n.atomic_json(self.path(key,'.revoked'),{'userId':args['userId'],'at':time.time()})
+                if grant is not None:
+                    grant['revoked']=True;self.n.atomic_json(self.path(key,'.grant.json'),grant)
+        return {'id':key,'sourceRevoked':True,'fenced':True}
 
     def release(self,args):
         """Reclaim private transport files, never published code or OCI images.
@@ -277,7 +309,8 @@ class ProjectCopies(t.TransferJobs):
             grant=self.load(key,'.grant.json')
             p.need(isinstance(token,str) and hmac.compare_digest(token,grant['token'])
                  and not grant.get('revoked') and grant['expiresAt']>time.time()
-                 and not self.path(key,'.cancel').exists(),'Project grant is invalid or expired')
+                 and not any(self.path(key,suffix).exists() for suffix in ('.cancel','.revoked')),
+                 'Project grant is invalid or expired')
             return self.portable.read(grant['userId'],grant['project'],grant['release'],request.get('action'),
                 **{k:request[k] for k in ('path','offset') if k in request})
 
@@ -288,7 +321,7 @@ class ProjectCopies(t.TransferJobs):
             p.need(spec['attempt']==attempt and not self.path(key,'.started-'+str(attempt)).exists(),'Copy worker cannot restart implicitly')
             self.n.atomic_json(self.path(key,'.started-'+str(attempt)),{'attempt':attempt})
             try:
-                if self.path(key,'.cancel').exists():raise InterruptedError()
+                if any(self.path(key,suffix).exists() for suffix in ('.cancel','.revoked')):raise InterruptedError()
                 if spec['role']=='export':
                     self.portable.export(spec['userId'],spec['project'],spec['release'],operation=key)
                     result['state']='READY'
@@ -363,6 +396,7 @@ class ProjectCopies(t.TransferJobs):
         if action=='start':return self.start(args)
         if action=='status':return self.status(args)
         if action=='cancel':return self.cancel(args)
+        if action=='revoke':return self.revoke(args)
         if action=='release':return self.release(args)
         if action=='probe':return self.probe(args)
         raise ValueError('Unknown project copy operation')

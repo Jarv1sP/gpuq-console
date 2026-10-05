@@ -42,9 +42,19 @@ async function advance(service,id){return lane(service,id,async()=>{
   const data=row.data;
   const maintained=()=>service.maintenanceFor?.(data.from)||service.maintenanceFor?.(data.machine);
   try{
+    if((data.cancelRequested||terminal.has(row.state))&&!row.data.sourceRevoked){
+      // Revoke the bearer capability before contacting a possibly unreachable
+      // target. This operation retains transport packages and never kills a
+      // worker; final cleanup still requires both sides definitely stopped.
+      try{
+        const fenced=await service.bridge(data.from,'projects.copy.revoke',control);
+        if(fenced?.id===id&&fenced.sourceRevoked===true&&fenced.fenced===true)
+          row=save(service,row,row.state,{sourceRevoked:true});
+      }catch{} // Still try to stop the target if the source itself is offline.
+    }
     if(data.cancelRequested){
       const stopped=await service.bridge(data.machine,'projects.copy.cancel',control);
-      if(stopped?.id!==id||!['CANCELED','SUCCEEDED'].includes(stopped.state))return view(save(service,row,'CANCELING'));
+      if(stopped?.id!==id||!['CANCELED','SUCCEEDED'].includes(stopped.state)||!row.data.sourceRevoked)return view(save(service,row,'CANCELING'));
       const source=await service.bridge(data.from,'projects.copy.cancel',control);
       if(source?.id!==id||!['READY','CANCELED','FAILED'].includes(source.state))return view(save(service,row,'CANCELING'));
       return view(save(service,row,stopped.state==='SUCCEEDED'?'SUCCEEDED':'CANCELED',{
@@ -52,7 +62,7 @@ async function advance(service,id){return lane(service,id,async()=>{
     }
     if(terminal.has(row.state)){
       const target=await service.bridge(data.machine,'projects.copy.cancel',control);
-      if(target?.id!==id||!['SUCCEEDED','CANCELED','FAILED'].includes(target.state))return view(row);
+      if(target?.id!==id||!['SUCCEEDED','CANCELED','FAILED'].includes(target.state)||!row.data.sourceRevoked)return view(row);
       const source=await service.bridge(data.from,'projects.copy.cancel',control);
       if(source?.id===id&&['READY','CANCELED','FAILED'].includes(source.state))row=save(service,row,row.state,{
         sourceRevoked:true,cleanupComplete:source.cleaned===true&&target.cleaned===true});
@@ -120,7 +130,8 @@ export function installProjectReplication(service){
     }
     const principal={userId:owner,role:service.store.get(owner).role||'member',username:service.store.get(owner).username};
     const result=found?await advance(service,found.id):await projectReplicationCall(service,principal,'projects.replicate',{from,machine,project,release,key:randomUUID()});
-    return {project,release,machine,state:result.state==='SUCCEEDED'?'READY':terminal.has(result.state)?'FAILED':'PREPARING',operationId:result.id,error:result.error};
+    return {project,release,machine,state:result.state==='SUCCEEDED'?'READY':terminal.has(result.state)?'FAILED':'PREPARING',operationId:result.id,
+      error:terminal.has(result.state)&&result.state!=='SUCCEEDED'?`${result.error||'项目复制未完成。'} 排查后运行 gpuctl project copy-retry ${result.id}；状态未知时不要新建复制。`:result.error};
   };
   service.prepareProject=(owner,machine,reference)=>{
     let pending=preparations.get(service);if(!pending){pending=new Map();preparations.set(service,pending);}
@@ -169,8 +180,43 @@ export async function projectReplicationCall(service,principal,operation,args,re
     service.audit(principal.username,operation,args.machine,reference.project);
     return advance(service,id);
   }
-  if(!['projects.replication.status','projects.replication.cancel'].includes(operation)||Object.keys(args).sort().join(',')!=='id'||!UUID.test(args.id||''))fail('项目复制操作无效。');
+  const retry=operation==='projects.replication.retry';
+  if(!['projects.replication.status','projects.replication.cancel','projects.replication.retry'].includes(operation)||
+    Object.keys(args).sort().join(',')!==(retry?'id,key':'id')||!UUID.test(args.id||'')||retry&&!UUID.test(args.key||''))fail('项目复制操作无效。');
   let row=read(service,args.id);if(row.owner_id!==principal.userId)fail('项目复制不存在或属于其他账号。',404);
+  if(retry){
+    authorized(service,principal.userId,row.data);
+    if(!['FAILED','CANCELED'].includes(row.state))fail('仅明确失败或取消的复制可重试；运行中或 UNKNOWN 请先查询原操作。',409);
+    if(args.key===row.client_key)fail('显式重试需要新的重试键；其响应不明时必须复用该键。',409);
+    await advance(service,row.id);
+    const retried=await lane(service,row.id,async()=>{
+      row=read(service,args.id);authorized(service,principal.userId,row.data);revalidate();
+      if(row.data.retryKey&&row.data.retryKey!==args.key)fail(`原复制已申请一次重试；请复用 --key ${row.data.retryKey} 查询原重试，不要换键。`,409);
+      if(!['FAILED','CANCELED'].includes(row.state)||!row.data.cleanupComplete||!row.data.sourceRevoked)
+        fail('旧复制尚未确认停止并清理；请稍后查询，未创建新操作。',409);
+      const control={id:row.id,userId:row.owner_id};
+      for(const machine of [row.data.machine,row.data.from]){
+        // Idempotent cancel also proves a never-dispatched target's permanent
+        // tombstone; release alone has no spec to read after export failure.
+        const proof=await service.bridge(machine,'projects.copy.cancel',control);
+        authorized(service,principal.userId,row.data);revalidate();
+        if(proof?.id!==row.id||proof.cleaned!==true||!['READY','SUCCEEDED','FAILED','CANCELED'].includes(proof.state))
+          fail('旧复制的停止与清理回执未确认，未创建新操作。',409);
+      }
+      if(!row.data.retryKey)row=save(service,row,row.state,{retryKey:args.key});
+      // A durable client key is bound to this old operation BEFORE any new
+      // remote I/O. A lost response cannot turn into another copy on restart.
+      const result=await projectReplicationCall(service,principal,'projects.replicate',{
+        from:row.data.from,machine:row.data.machine,project:row.data.project,release:row.data.release,key:args.key,
+      },revalidate);
+      save(service,row,row.state,{retryId:result.id});
+      return {...result,retryOf:row.id};
+    });
+    // Different keys may have waited on the same per-operation lane. They
+    // must not silently acquire the first caller's durable retry identity.
+    if(read(service,args.id).data.retryKey!==args.key)fail(`原复制已申请一次重试；请复用 --key ${read(service,args.id).data.retryKey} 查询原重试，不要换键。`,409);
+    return retried;
+  }
   // Losing a machine grant must not strand an owned operation. Reading its
   // history or fencing its existing workers never creates new compute access.
   if(operation.endsWith('.cancel')&&!terminal.has(row.state))row=save(service,row,'CANCELING',{cancelRequested:true});

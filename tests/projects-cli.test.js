@@ -97,6 +97,13 @@ test('immutable OCI project copy uses source/target and fixed key; status/cancel
     assert.equal((await f.cli(['project',command,JOB])).code,0);
     assert.deepEqual(f.calls.at(-1),{operation:'projects.replication.'+operation,args:{id:JOB}});
   }
+  const retryKey='00000000-0000-4000-8000-000000000123';
+  const retried=await f.cli(['project','copy-retry',JOB,'--key',retryKey]);
+  assert.equal(retried.code,0,retried.stderr);assert.match(retried.stderr,new RegExp(retryKey));
+  assert.deepEqual(f.calls.at(-1),{operation:'projects.replication.retry',args:{id:JOB,key:retryKey}});
+  for(const args of [['copy-retry','bad-id'],['copy-retry',JOB,'--key','bad-key'],['copy-retry',JOB,'--to','1']]){
+    assert.equal((await f.cli(['project',...args])).code,1);assert.equal(f.calls.filter(c=>c.operation==='projects.replication.retry').length,1);
+  }
   const before=f.calls.filter(c=>c.operation==='projects.replicate').length;
   for(const args of [['--from','1','--to','1','--release',RELEASE],['--from','1','--to','2'],['--from','foreign','--to','2','--release',RELEASE]])assert.equal((await f.cli(['project','copy','alpha',...args])).code,1);
   assert.equal(f.calls.filter(c=>c.operation==='projects.replicate').length,before);

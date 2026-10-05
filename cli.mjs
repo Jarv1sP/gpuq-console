@@ -42,6 +42,7 @@ gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
 gpuctl project copy NAME --from SOURCE --to TARGET --release HASH
 gpuctl project copy-status COPY_ID / copy-cancel COPY_ID
+gpuctl project copy-retry COPY_ID [--key UUID]
 gpuctl data label DATASET_ID --display-name "中文数据名"  Set your personal display label
 gpuctl ssh                       Develop in the selected project's private terminal
 gpuctl ssh --root                Administrator: unrestricted host root terminal
@@ -519,9 +520,9 @@ async function main(){
       result={...result,machine};
       if(terminal.has(result.state))process.exitCode=result.state==='TIMED_OUT'?124:result.state==='CANCELED'?130:Number.isInteger(result.exitCode)?Math.min(255,Math.max(0,result.exitCode)):result.signal?Math.min(255,128+result.signal):result.state==='SUCCEEDED'?0:1;
       else if(result.state==='UNKNOWN')process.exitCode=3;
-    }else if(command==='project'&&['copy','copy-status','copy-cancel'].includes(positionals[1])){
-      const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='copy'?['from','to','release','key']:[])];
-      if(training.length||options.datasets.length||options.machines.length||positionals.length!==3||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: project copy NAME --from SOURCE --to TARGET --release HASH | project copy-status|copy-cancel COPY_ID');
+    }else if(command==='project'&&['copy','copy-status','copy-cancel','copy-retry'].includes(positionals[1])){
+      const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='copy'?['from','to','release','key']:action==='copy-retry'?['key']:[])];
+      if(training.length||options.datasets.length||options.machines.length||positionals.length!==3||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: project copy NAME --from SOURCE --to TARGET --release HASH | project copy-status|copy-cancel COPY_ID | project copy-retry COPY_ID [--key UUID]');
       const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
       if(action==='copy'){
         const from=machineName(options.from),machine=machineName(options.to),project=projectSlug(positionals[2]),key=options.key||randomUUID();
@@ -530,8 +531,13 @@ async function main(){
         result=(await call('projects.replicate',{from,machine,project,release:options.release,key})).result;
       }else{
         if(!uuid.test(positionals[2]))fail('Use the complete project copy UUID');
-        result=(await call('projects.replication.'+(action==='copy-status'?'status':'cancel'),{id:positionals[2]})).result;
+        if(action==='copy-retry'){
+          const key=options.key||randomUUID();if(!uuid.test(key))fail('Use a UUID --key for the controlled retry');
+          process.stderr.write('项目复制显式重试键：'+key+'（响应不明时复用 --key，不要换键）\n');
+          result=(await call('projects.replication.retry',{id:positionals[2],key})).result;
+        }else result=(await call('projects.replication.'+(action==='copy-status'?'status':'cancel'),{id:positionals[2]})).result;
       }
+      if(['FAILED','CANCELED'].includes(result.state))process.stderr.write('修复原因后可用 gpuctl project copy-retry '+result.id+'；旧操作停止和清理未确认时不会重试。\n');
       if(['FAILED','CANCELED'].includes(result.state))process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
     }else if(command==='project'&&['list','quota','create','use','status','publish'].includes(positionals[1])){
       if(options.legacy)fail('Project commands do not accept --legacy');

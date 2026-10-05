@@ -215,7 +215,7 @@ export class PortalService extends DemoService{
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   invoke(token,operation,args={}){
-    if(operation==='projects.replicate'||operation==='projects.replication.status'||operation==='projects.replication.cancel'){
+    if(operation==='projects.replicate'||operation==='projects.replication.status'||operation==='projects.replication.cancel'||operation==='projects.replication.retry'){
       const principal=this.principal(token);
       return projectReplicationCall(this,principal,operation,args,()=>this.principal(token)).then(result=>{
         this.principal(token);

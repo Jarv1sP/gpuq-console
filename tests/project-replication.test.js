@@ -28,6 +28,7 @@ async function fixture(t){
       const result=nodes.get(args.id);if(result?.state==='SUCCEEDED')return {...result,cleaned:cleanup};
       nodes.set(args.id,{id:args.id,project,release,state:'CANCELED'});return {...nodes.get(args.id),cleaned:cleanup};
     }
+    if(op==='projects.copy.revoke')return {id:args.id,sourceRevoked:true,fenced:true};
     throw Error('Unexpected fixture operation: '+op);
   };
   let service=await PortalService.open(join(dir,'db'),bootstrap,undefined,bridge);
@@ -144,4 +145,92 @@ test('grant revoked while export reply is pending fences target before later cle
   const row=await creating;assert.equal(row.state,'CANCELING');assert.equal(row.cancellationReason,'AUTHORIZATION_REVOKED');
   await f.service.reconcileProjectCopies();assert.equal((await f.call('projects.replication.status',{id:row.id})).state,'CANCELED');
   assert.equal(f.calls.filter(c=>c.op==='projects.copy.start').length,0);
+});
+
+test('failed source export stays failed until explicit retry with a durable new key',async t=>{
+  const f=await fixture(t),args=request();f.source('FAILED');
+  const failed=await f.call('projects.replicate',args);assert.equal(failed.state,'FAILED');
+  f.source('READY');
+  const ref={from,project,release},automatic=await f.service.prepareProject(f.member.id,machine,ref);
+  assert.equal(automatic.state,'FAILED');assert.match(automatic.error,/project copy-retry/);
+  assert.equal(f.nodes.size,1); // only a cancellation tombstone, no target start
+  assert.equal(f.calls.filter(c=>c.op==='projects.copy.start').length,0);
+  const key=randomUUID(),retry=await f.call('projects.replication.retry',{id:failed.id,key});
+  assert.notEqual(retry.id,failed.id);assert.equal(retry.retryOf,failed.id);assert.equal(retry.state,'RUNNING');
+  const sourceCalls=f.calls.filter(c=>c.op==='projects.copy.prepare');
+  assert.deepEqual(new Set(sourceCalls.map(c=>c.args.id)),new Set([failed.id,retry.id]));
+  assert.equal((await f.service.prepareProject(f.member.id,machine,ref)).operationId,retry.id);
+  await f.restart();
+  assert.equal((await f.call('projects.replication.retry',{id:failed.id,key})).id,retry.id);
+  await assert.rejects(f.call('projects.replication.retry',{id:failed.id,key:randomUUID()}),e=>e.status===409);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_copies').get().n,2);
+});
+
+test('retry requires owner, current authorization, terminal state and fresh cleanup proof',async t=>{
+  const f=await fixture(t),first=await f.call('projects.replicate',request()),key=randomUUID();
+  await assert.rejects(f.call('projects.replication.retry',{id:first.id,key}),e=>e.status===409);
+  await assert.rejects(f.service.invoke(f.admin.token,'projects.replication.retry',{id:first.id,key}),e=>e.status===404);
+  await f.call('projects.replication.cancel',{id:first.id});
+  f.cleanup(false);
+  await assert.rejects(f.call('projects.replication.retry',{id:first.id,key}),/清理/);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_copies').get().n,1);
+  f.cleanup(true);f.service.store.users.find(u=>u.id===f.member.id).limits[from]=0;
+  await assert.rejects(f.call('projects.replication.retry',{id:first.id,key}),e=>e.status===403);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_copies').get().n,1);
+});
+
+test('concurrent retry keys cannot create two copies after a lost preparation reply',async t=>{
+  const f=await fixture(t);f.source('FAILED');const first=await f.call('projects.replicate',request());
+  f.source('READY');const key=randomUUID();
+  const results=await Promise.all([f.call('projects.replication.retry',{id:first.id,key}),f.call('projects.replication.retry',{id:first.id,key})]);
+  assert.equal(results[0].id,results[1].id);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_copies').get().n,2);
+  assert.equal(f.calls.filter(c=>c.op==='projects.copy.start').every(c=>c.args.id===results[0].id),true);
+});
+
+test('different concurrent retry keys cannot silently share a new operation identity',async t=>{
+  const f=await fixture(t);f.source('FAILED');const first=await f.call('projects.replicate',request());f.source('READY');
+  const results=await Promise.allSettled([f.call('projects.replication.retry',{id:first.id,key:randomUUID()}),f.call('projects.replication.retry',{id:first.id,key:randomUUID()})]);
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+  assert.equal(results.find(r=>r.status==='rejected').reason.status,409);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_copies').get().n,2);
+});
+
+test('retry key survives an ambiguous admission error before new dispatch',async t=>{
+  const f=await fixture(t);f.source('FAILED');const first=await f.call('projects.replicate',request());f.source('READY');
+  const bridge=f.service.bridge,key=randomUUID();let interrupted=true;
+  f.service.bridge=async(host,op,args)=>{if(interrupted&&op==='projects.copy.probe')throw Error('admission reply lost');return bridge(host,op,args);};
+  await assert.rejects(f.call('projects.replication.retry',{id:first.id,key}),/admission reply lost/);
+  assert.equal(JSON.parse(f.service.db.prepare('SELECT data FROM project_copies WHERE id=?').get(first.id).data).retryKey,key);
+  interrupted=false;const retried=await f.call('projects.replication.retry',{id:first.id,key});
+  assert.equal(retried.state,'RUNNING');assert.equal(retried.retryOf,first.id);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_copies').get().n,2);
+});
+
+test('authorization revocation fences source even while target is unreachable; packages wait for stopped proof',async t=>{
+  const f=await fixture(t),first=await f.call('projects.replicate',request());
+  const bridge=f.service.bridge;let unavailable=true;
+  f.service.bridge=async(host,op,args)=>{
+    if(host===machine&&op==='projects.copy.cancel'&&unavailable){f.calls.push({host,op,args});throw Error('target unreachable');}
+    return bridge(host,op,args);
+  };
+  f.service.store.users.find(u=>u.id===f.member.id).enabled=false;
+  const before=f.calls.length;await f.service.reconcileProjectCopies();
+  const attempted=f.calls.slice(before);
+  assert.equal(attempted[0].op,'projects.copy.revoke');assert.equal(attempted[0].host,from);
+  assert.equal(attempted.some(c=>c.host===from&&c.op==='projects.copy.cancel'),false);
+  let row=f.service.db.prepare('SELECT state,data FROM project_copies WHERE id=?').get(first.id),data=JSON.parse(row.data);
+  assert.equal(row.state,'CANCELING');assert.equal(data.sourceRevoked,true);assert.notEqual(data.cleanupComplete,true);
+  unavailable=false;await f.service.reconcileProjectCopies();
+  row=f.service.db.prepare('SELECT state,data FROM project_copies WHERE id=?').get(first.id);data=JSON.parse(row.data);
+  assert.equal(row.state,'CANCELED');assert.equal(data.cleanupComplete,true);
+});
+
+test('source fence failure still attempts target stop, without claiming completed cancellation',async t=>{
+  const f=await fixture(t),first=await f.call('projects.replicate',request()),bridge=f.service.bridge;
+  f.service.bridge=async(host,op,args)=>{if(op==='projects.copy.revoke')throw Error('source unreachable');return bridge(host,op,args);};
+  const result=await f.call('projects.replication.cancel',{id:first.id});
+  assert.equal(result.state,'CANCELING');assert.notEqual(result.sourceRevoked,true);
+  assert.equal(f.calls.some(c=>c.host===machine&&c.op==='projects.copy.cancel'),true);
+  assert.equal(f.calls.some(c=>c.host===from&&c.op==='projects.copy.cancel'),false);
 });

@@ -307,7 +307,7 @@ CLOUD_FILES=tuple('datasets.cloud.'+action for action in ('info','list','status'
 INTERNAL_STORAGE+=CLOUD_FILES+('projects.oci-cohort.sync',)
 # Internal bridge only; these never enter the public transfer operation list.
 INTERNAL_STORAGE+=('transfers.confirm-unprepared-cancel','transfers.release-unprepared-source')
-INTERNAL_STORAGE+=tuple('projects.copy.'+action for action in ('prepare','start','status','cancel','release','probe'))
+INTERNAL_STORAGE+=tuple('projects.copy.'+action for action in ('prepare','start','status','cancel','revoke','release','probe'))
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.request.settimeout(35)

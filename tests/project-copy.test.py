@@ -86,6 +86,75 @@ class ProjectCopyTests(unittest.TestCase):
         self.assertEqual(self.src.read({'id':other,'action':'info'},second['source']['token'])['release'],self.release)
         self.assertTrue(self.src.cancel(self.control(other))['cleaned']);self.assertFalse((parent/self.release).exists())
 
+    def test_revoke_fences_ticket_without_stopping_or_deleting_shared_export(self):
+        first=self.prepare();other=str(uuid.uuid4());second=self.prepare(other)
+        parent=self.src.portable.folder(USER,'exports',PROJECT);before=len(self.calls)
+        result=self.src.revoke(self.control())
+        self.assertTrue(result['sourceRevoked']);self.assertTrue(result['fenced'])
+        self.assertEqual(len(self.calls),before);self.assertTrue((parent/self.release).exists())
+        with self.assertRaisesRegex(ValueError,'invalid or expired'):
+            self.src.read({'id':self.key,'action':'info'},first['source']['token'])
+        self.assertEqual(self.src.read({'id':other,'action':'info'},second['source']['token'])['release'],self.release)
+        self.assertTrue(self.src.cancel(self.control(other))['cleaned'])
+        self.assertTrue((parent/self.release).exists()) # revoked is not cleaned/stopped
+        self.assertFalse(self.src.release(self.control())['cleaned'])
+        self.assertTrue(self.src.cancel(self.control())['cleaned'])
+        self.assertFalse((parent/self.release).exists())
+
+    def test_revoke_before_prepare_is_owner_bound_and_permanently_fences_late_dispatch(self):
+        self.assertTrue(self.src.revoke(self.control())['fenced'])
+        with self.assertRaisesRegex(ValueError,'revoked'):
+            self.src.prepare({**self.control(),'project':PROJECT,'release':self.release,'targetMachine':'gpu-2'})
+        for action in (self.src.revoke,self.src.cancel):
+            with self.assertRaisesRegex(ValueError,'Different copy owner'):
+                action({**self.control(),'userId':'demo-user-24'})
+        self.assertEqual(self.calls,[])
+
+    def test_revoked_oci_cohort_does_not_block_existing_operation_fence_and_cleanup(self):
+        self.start()
+        # Policy removal must not require reopening a dev container or passing
+        # compute admission merely to fence/clean an existing owner-bound copy.
+        for node in (self.source,self.target):
+            node.CONFIG['personalOci']={'enabled':False,'owners':[]}
+        with patch.object(self.fixture.source,'_oci',side_effect=ValueError('OCI owner removed')), \
+             patch.object(self.fixture.target,'_oci',side_effect=ValueError('OCI owner removed')):
+            src,dst=C.ProjectCopies(self.source),C.ProjectCopies(self.target)
+            src.activity=dst.activity=lambda unit:False
+            self.assertTrue(src.revoke(self.control())['fenced'])
+            self.assertTrue(dst.cancel(self.control())['cleaned'])
+            self.assertTrue(src.cancel(self.control())['cleaned'])
+            with self.assertRaisesRegex(ValueError,'different account'):
+                src.revoke({**self.control(),'userId':'demo-user-24'})
+
+    def test_revoke_during_export_prevents_later_ticket_without_deleting_package(self):
+        args={**self.control(),'project':PROJECT,'release':self.release,'targetMachine':'gpu-2'}
+        self.src.prepare(args)
+        original=self.src.portable.export
+        def revoked_in_export(*args,**kwargs):
+            result=original(*args,**kwargs)
+            self.assertTrue(self.src.revoke(self.control())['fenced'])
+            return result
+        with patch.object(self.src.portable,'export',side_effect=revoked_in_export):
+            self.assertEqual(self.src.worker(self.key,1),0)
+        self.assertTrue((self.src.portable.folder(USER,'exports',PROJECT)/self.release).exists())
+        with self.assertRaisesRegex(ValueError,'revoked'):self.src.prepare(args)
+        self.assertFalse(self.src.path(self.key,'.grant.json').exists())
+
+    def test_failed_export_can_retry_as_new_explicit_operation_after_cleanup(self):
+        args={**self.control(),'project':PROJECT,'release':self.release,'targetMachine':'gpu-2'}
+        self.src.prepare(args)
+        with patch.object(self.src.portable,'export',side_effect=ValueError('synthetic export failure')):
+            self.assertEqual(self.src.worker(self.key,1),1)
+        self.assertEqual(self.src.status(self.control())['state'],'FAILED')
+        self.assertTrue(self.src.revoke(self.control())['fenced'])
+        self.assertTrue(self.src.cancel(self.control())['cleaned'])
+        self.assertTrue(self.dst.cancel(self.control())['cleaned'])
+        new=str(uuid.uuid4());newargs=self.start(new)
+        self.assertEqual(self.dst.worker(new,1),0)
+        self.assertEqual(self.dst.status(self.control(new))['state'],'SUCCEEDED')
+        self.assertNotEqual(new,self.key)
+        self.assertEqual(self.fixture.target.release(USER,PROJECT,self.release)['meta']['release'],self.release)
+
     def test_unknown_and_live_workers_or_worker_lock_never_clean(self):
         self.start();spec=self.dst.load(self.key)
         folder=self.dst.portable.folder(USER,'imports')/self.key;folder.mkdir();(folder/'partial').write_bytes(b'x')
