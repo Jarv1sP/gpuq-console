@@ -10,6 +10,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {accountMenu,closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
+import {guardedRoute} from './browser-route-guard.mjs';
 
 const temp=await mkdtemp(join(tmpdir(),'r5-work-browser-'));
 const shots=process.env.UI_SCREENSHOTS||'/tmp/r5-ui-smoke';
@@ -20,10 +21,10 @@ let server,service,browser,releaseCatalog,releaseInventory;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
 async function closeRoutedContext(context){
-  // Background requests can finish after teardown has already handled them.
-  // Ignore only late route callbacks after removal, before closing the pages.
-  await Promise.all(context.pages().map(page=>page.unrouteAll({behavior:'ignoreErrors'})));
-  await context.unrouteAll({behavior:'ignoreErrors'});
+  // The handlers filter only known teardown errors. Drain them before closing;
+  // unexpected transport errors and assertions must still fail the test.
+  await Promise.all(context.pages().map(page=>page.unrouteAll({behavior:'wait'})));
+  await context.unrouteAll({behavior:'wait'});
   await context.close();
 }
 const project={project:'vision-baseline',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
@@ -68,7 +69,7 @@ try{
     const context=await browser.newContext({viewport:{width,height:width<760?844:1080},reducedMotion:reduced?'reduce':'no-preference'});const page=await context.newPage();
     page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error'&&!message.text().includes('401'))errors.push(message.text());});
     page.on('response',response=>{if(response.url().startsWith(origin)&&!new URL(response.url()).pathname.startsWith('/api/'))assets.push({path:new URL(response.url()).pathname,status:response.status()});});
-    await context.route('**/*',route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol))return route.continue();outside.push(url.href);return route.abort();});
+    await context.route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol)){await route.continue();return;}outside.push(url.href);await route.abort();}));
     return page;
   }
   async function login(page,username){await page.goto(origin);await page.locator('#login-form [name=username]').fill(username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.evaluate(()=>document.fonts.ready);}
@@ -85,7 +86,7 @@ try{
   const inventoryProbe=await pageFor(390),inventoryRequests=[];
   inventoryProbe.on('request',request=>{const path=new URL(request.url()).pathname;if(['/machines.js','/model.js'].includes(path))inventoryRequests.push(path);});
   const inventoryGate=new Promise(resolve=>{releaseInventory=resolve;});
-  await inventoryProbe.route(/\/machines\.js\?login=/,async route=>{await inventoryGate;await route.continue();});
+  await inventoryProbe.route(/\/machines\.js\?login=/,guardedRoute(async route=>{await inventoryGate;await route.fallback();}));
   await inventoryProbe.goto(origin);await inventoryProbe.locator('#login-dialog').waitFor({state:'visible'});
   assert.deepEqual(inventoryRequests,[],'public R5 entry does not import the capacity directory or demo model');
   assert.equal(await inventoryProbe.locator('.resource-card').count(),0);
@@ -147,7 +148,7 @@ try{
   for(const row of rows)if(row.id!==running.id&&!['FAILED','SUCCEEDED'].includes(row.state))row.state='SUCCEEDED';service.save();await refreshVisible(desktop);
   await desktop.locator('[name=workspace-project]').selectOption(project.project);await openSubmit(desktop);await desktop.locator('#train-form [name=name]').fill('receipt-local');
   let lost=true;const submitRequests=[];
-  const loseReply=async route=>{const body=route.request().postDataJSON();if(body?.operation==='jobs.submit'){submitRequests.push(structuredClone(body.args));const response=await route.fetch();assert.equal(response.status(),200,await response.text());if(lost){lost=false;await route.abort('failed');}else await route.fulfill({response});}else await route.continue();};
+  const loseReply=guardedRoute(async route=>{const body=route.request().postDataJSON();if(body?.operation==='jobs.submit'){submitRequests.push(structuredClone(body.args));const response=await route.fetch();assert.equal(response.status(),200,await response.text());if(lost){lost=false;await route.abort('failed');}else await route.fulfill({response});}else await route.fallback();});
   await desktop.route('**/api/call',loseReply);await desktop.locator('#train-form [type=submit]').click();await desktop.locator('[data-receipt-retry]').waitFor({state:'visible'});await desktop.waitForFunction(()=>!document.querySelector('[data-receipt-retry]').disabled);
   const persisted=service.store.jobs.filter(row=>row.name==='receipt-local');assert.equal(persisted.length,1);assert.match(await desktop.locator('#submit-summary').innerText(),/待确认/);await capture(desktop,'r5-submit-unconfirmed-1440',true);
   const maintenanceState=(await service.invoke(admin.token,'maintenance.status',{})).result;
@@ -159,7 +160,7 @@ try{
   assert.match(await desktop.locator('#submit-summary').innerText(),new RegExp(persisted[0].id.slice(0,8)));assert.equal(await desktop.locator('#train-form [type=submit]').isDisabled(),true);await capture(desktop,'r5-submit-receipt-1440',true);await closeSubmit(desktop);assert.match(await desktop.locator('#submission-receipt').innerText(),/receipt-local/);await desktop.unroute('**/api/call',loseReply);
   await desktop.locator('[data-nav=datasets]').click();await desktop.locator('[name=dataset-machine]').selectOption(targetMachine);await desktop.locator('#datasets-refresh').click();await desktop.locator('[data-route-cell]').first().waitFor();
   const routeCell=desktop.locator('.dataset-card').filter({has:desktop.locator('h3',{hasText:/^scans$/})}).locator('[data-route-cell]').first();
-  const prepared=[];const observePrepare=async route=>{const body=route.request().postDataJSON();if(body?.operation==='datasets.prepare'){prepared.push(body.args);await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result:{dataset:body.args.dataset,version:body.args.version,state:'PREPARING'}})});}else await route.continue();};await desktop.route('**/api/call',observePrepare);
+  const prepared=[];const observePrepare=guardedRoute(async route=>{const body=route.request().postDataJSON();if(body?.operation==='datasets.prepare'){prepared.push(body.args);await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result:{dataset:body.args.dataset,version:body.args.version,state:'PREPARING'}})});}else await route.fallback();});await desktop.route('**/api/call',observePrepare);
   await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);await desktop.evaluate(()=>scrollTo(0,0));await routeCell.hover();await desktop.locator('.dataset-copy-route').waitFor({state:'visible'});assert.equal(await desktop.locator('.dataset-copy-route').innerText(),sourceMachine+' → '+targetMachine+' · 7.00 GiB');assert.doesNotMatch(await desktop.locator('.dataset-copy-route').innerText(),/实验室内网/);assert.equal(prepared.length,0,'hover is read-only');
   assert.equal(await desktop.locator('.dataset-matrix-heading [data-machine="'+targetMachine+'"]').getAttribute('title'),targetMachine);
   const stateTops=await routeCell.locator('..').locator('..').locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().top));assert.ok(Math.max(...stateTops)-Math.min(...stateTops)<=1,'desktop copy states align at the top of their row');
