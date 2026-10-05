@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -138,6 +139,27 @@ class NodeDatasets(unittest.TestCase):
         self.assertNotIn(str(self.source), json.dumps(result))
         other = self.call('list', userId='demo-user-2')
         self.assertEqual(other, {'datasets': []})
+
+    def test_prepare_worker_and_status_have_bounded_contention_scopes(self):
+        task,_=self.start_prepare();self.cache.lock_timeout=.01
+        with patch.object(self.node,'dataset_cache',return_value=(self.module,self.cache)),ThreadPoolExecutor() as pool:
+            with self.cache._locked():
+                future=pool.submit(self.node.dataset_worker,task['operationId'])
+                time.sleep(.08);self.assertFalse(future.done())
+            self.assertEqual(future.result(2),0)
+            with self.cache._locked():
+                future=pool.submit(self.call,'status',dataset='example',version=self.version)
+                time.sleep(.08);self.assertFalse(future.done())
+            self.assertEqual(future.result(2)['state'],'READY')
+        self.assertIsNone(self.module._LOCK_WAIT.get())
+
+    def test_worker_mount_failure_still_records_failure_without_lock_retry(self):
+        task,_=self.start_prepare()
+        with patch.object(self.node,'dataset_mount_check',side_effect=ValueError('missing mount')) as check:
+            self.assertEqual(self.node.dataset_worker(task['operationId']),1)
+        self.assertEqual(check.call_count,1)
+        result=json.loads((self.node.ROOT/'dataset-ops'/(task['operationId']+'.result.json')).read_text())
+        self.assertEqual(result['state'],'FAILED');self.assertEqual(result['error'],'missing mount')
 
     def test_internal_mount_alias_changes_name_not_ownership_or_lease(self):
         self.ready()

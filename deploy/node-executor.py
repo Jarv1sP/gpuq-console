@@ -284,6 +284,12 @@ def dataset_recovery_configured(cache,actor,dataset,version):
     except (ValueError,OSError,TypeError,KeyError):return False
 
 def dataset_op(operation,args):
+    if operation in ('datasets.list','datasets.status'):
+        module,_=dataset_cache()
+        with module.wait_for_locks(timeout=5,total=8):return _dataset_op(operation,args)
+    return _dataset_op(operation,args)
+
+def _dataset_op(operation,args):
     definitions={'datasets.capacity':set(),'datasets.list':set(),'datasets.status':{'dataset','version','operationId'},'datasets.prepare':{'dataset','version'},'datasets.register':{'dataset','sourceId','owners'},'datasets.unregister':{'dataset','version'}}
     if operation not in definitions or not isinstance(args,dict) or set(args)-definitions[operation]-{'userId','hostAdmin'}:raise ValueError('Invalid dataset operation fields')
     if operation=='datasets.unregister' and args.get('hostAdmin') is not True:raise ValueError('Administrator authorization required')
@@ -359,19 +365,20 @@ def dataset_worker(key):
     if hashlib.sha256(json.dumps(task,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Background dataset request was modified')
     try:
         module,cache=dataset_cache();actor=dataset_actor(module,task)
-        if task['op']=='register':out=cache.register_source(actor,task['dataset'],task['sourceId'],task['owners']);out['state']='REGISTERED'
-        elif task['op']=='prepare':
-            with cache._locked():
-                cache._dataset(actor,task['dataset'])
-                cached=cache._tier(task['dataset'],task['version'])['role']=='cache'
-            # Only a service-verified authority receipt may recover an evicted
-            # disposable copy. Never fall back to an old sourceId on failure.
-            if cached:
-                out=storage_node().tier.recover(module.Principal('builtin-admin',True),task['dataset'],task['version'])
-            else:out=cache.materialize(actor,task['dataset'],task['version'])
-        elif task['op']=='unregister':
-            out=cache.unregister(actor,task['dataset'],task.get('version'));out['state']='UNREGISTERED'
-        else:raise ValueError('Invalid background dataset action')
+        with module.wait_for_locks():
+            if task['op']=='register':out=cache.register_source(actor,task['dataset'],task['sourceId'],task['owners']);out['state']='REGISTERED'
+            elif task['op']=='prepare':
+                with cache._locked():
+                    cache._dataset(actor,task['dataset'])
+                    cached=cache._tier(task['dataset'],task['version'])['role']=='cache'
+                # Only a service-verified authority receipt may recover an evicted
+                # disposable copy. Never fall back to an old sourceId on failure.
+                if cached:
+                    out=storage_node().tier.recover(module.Principal('builtin-admin',True),task['dataset'],task['version'])
+                else:out=cache.materialize(actor,task['dataset'],task['version'])
+            elif task['op']=='unregister':
+                out=cache.unregister(actor,task['dataset'],task.get('version'));out['state']='UNREGISTERED'
+            else:raise ValueError('Invalid background dataset action')
         # Never return transfer tokens, local paths, or source IDs to callers.
         out={k:v for k,v in out.items() if k in ('dataset','version','state','bytes','files','unregistered','registrationRetained','versions','recoveryId')}
     except Exception as error:out={'state':'FAILED','error':dataset_error(error)}

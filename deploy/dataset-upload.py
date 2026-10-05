@@ -862,6 +862,10 @@ class DatasetUploads:
         self.save(session)
 
     def worker(self, user, upload, action):
+        with self.d.wait_for_locks():
+            return self._worker(user, upload, action)
+
+    def _worker(self, user, upload, action):
         self.actor(user)
         if action not in ('seal', 'commit', 'discard'):
             raise ValueError('Invalid upload worker action')

@@ -9,6 +9,8 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -271,6 +273,36 @@ class DataWorkspaceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'missing mount'):self.call('list')
         (self.owner/'current.json').symlink_to(self.base/'node-config.json')
         with self.assertRaises(OSError):self.call('status')
+
+    def test_publication_survives_real_contention_longer_than_old_two_second_timeout(self):
+        self.fill();task=self.publish();out=[]
+        with self.cache._locked():
+            worker=threading.Thread(target=lambda:out.append(self.w.worker(self.user,task['operationId'])))
+            worker.start();time.sleep(2.15)
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(self.w.receipt(self.user,task['operationId'])['state'],'PUBLISHING')
+        worker.join(5)
+        self.assertFalse(worker.is_alive());self.assertEqual(out,[0])
+        self.assertEqual(self.call('status',operationId=task['operationId'])['state'],'READY')
+
+    def test_publication_wait_timeout_is_bounded_and_never_reports_ready(self):
+        self.fill();task=self.publish();out=[]
+        def run():
+            with self.module.wait_for_locks(timeout=.05,total=.05):
+                out.append(self.w.worker(self.user,task['operationId']))
+        with self.cache._locked():
+            worker=threading.Thread(target=run);worker.start();worker.join(2)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(out,[1]);receipt=self.w.receipt(self.user,task['operationId'])
+        self.assertEqual(receipt['state'],'FAILED');self.assertIn('busy',receipt['error'])
+        self.assertEqual(self.cache.list_datasets(self.module.Principal(self.user))['datasets'],[])
+
+    def test_publication_real_scan_error_is_not_retried(self):
+        self.fill();task=self.publish()
+        with patch.object(self.module,'_scan',side_effect=self.module.CacheError('corrupt source')) as scan:
+            self.assertEqual(self.w.worker(self.user,task['operationId']),1)
+        self.assertEqual(scan.call_count,1)
+        self.assertEqual(self.w.receipt(self.user,task['operationId'])['state'],'FAILED')
 
     def test_systemd_and_cgroup_stop_confirmation_is_fail_closed(self):
         self.stopped.stop()

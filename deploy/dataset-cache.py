@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import contextvars
 import ctypes
 import errno
 import fcntl
@@ -76,6 +77,30 @@ class CacheError(ValueError):
 
 class CacheBusy(CacheError):
     """Another operation holds a lock; callers may retry without assuming readiness."""
+
+
+_LOCK_WAIT = contextvars.ContextVar("dataset_lock_wait", default=None)
+
+
+@contextlib.contextmanager
+def wait_for_locks(*, timeout=30.0, total=120.0, canceled=None):
+    """Trusted worker/read scope: wait for acquisition, never replay mutations.
+
+    The total budget counts only time spent contending, not scanning/copying or
+    time holding a lock. Nested helpers share it; unrelated request threads do
+    not. No client can supply these bounds through a dataset operation.
+    """
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= limit
+           for v, limit in ((timeout, 60), (total, 300))) or (canceled is not None and not callable(canceled)):
+        raise CacheError("invalid dataset lock wait policy")
+    if _LOCK_WAIT.get() is not None:
+        yield  # A helper must not reset its caller's finite wait budget.
+        return
+    token = _LOCK_WAIT.set({"timeout": timeout, "remaining": total, "canceled": canceled})
+    try:
+        yield
+    finally:
+        _LOCK_WAIT.reset(token)
 
 
 class Principal(NamedTuple):
@@ -475,15 +500,28 @@ class DatasetCache:
             fd = os.open(Path(name).name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
             try:
                 _regular(fd)
-                deadline = time.monotonic() + self.lock_timeout
+                policy = _LOCK_WAIT.get()
+                timeout = min(policy["timeout"], policy["remaining"]) if policy else self.lock_timeout
+                deadline = time.monotonic() + timeout
+                pause = 0.025
                 while True:
+                    if policy and policy["canceled"] and policy["canceled"]():
+                        raise InterruptedError("dataset lock wait canceled")
                     try:
                         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         break
                     except BlockingIOError:
                         if time.monotonic() >= deadline:
                             raise CacheBusy("dataset cache is busy; retry later without assuming READY")
-                        time.sleep(min(0.025, max(0, deadline - time.monotonic())))
+                        started = time.monotonic()
+                        try:
+                            # This fd has NOT acquired the requested lock. Do
+                            # not catch I/O, ACL, mount, or body exceptions.
+                            time.sleep(min(pause, max(0, deadline - started)))
+                        finally:
+                            if policy:
+                                policy["remaining"] = max(0, policy["remaining"] - (time.monotonic() - started))
+                        pause = min(0.25, pause * 1.5)
                 yield
             finally:
                 os.close(fd)

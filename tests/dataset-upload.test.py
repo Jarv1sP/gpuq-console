@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 import uuid
 from types import SimpleNamespace
@@ -83,6 +85,17 @@ class PersonalUploads(unittest.TestCase):
             for offset in range(0, max(1, len(data)), D.CHUNK_BYTES):
                 self.call('chunk', user=user, uploadId=upload, path=path, offset=offset,
                     data=base64.b64encode(data[offset:offset+D.CHUNK_BYTES]).decode())
+
+    def test_commit_worker_waits_through_short_metadata_contention(self):
+        result,_,files=self.seal();upload=result['uploadId'];self.fill(upload,files)
+        self.call('commit',uploadId=upload);self.cache.lock_timeout=.01
+        with ThreadPoolExecutor() as pool:
+            with self.cache._locked():
+                future=pool.submit(self.u.worker,self.user,upload,'commit')
+                time.sleep(.08);self.assertFalse(future.done())
+            self.assertEqual(future.result(2),0)
+        self.assertEqual(self.call('status',uploadId=upload)['state'],'READY')
+        self.assertIsNone(D._LOCK_WAIT.get())
 
     def test_full_lifecycle_is_private_immutable_and_token_free(self):
         result, _, files = self.seal()

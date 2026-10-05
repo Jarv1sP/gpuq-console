@@ -165,7 +165,8 @@ class DataWorkspaces:
         if task['state'] == 'READY':
             module, cache, _ = self.storage(user)
             try:
-                current = cache.status(module.Principal(user, False), task['dataset'], task['version'])
+                with module.wait_for_locks(timeout=5, total=8):
+                    current = cache.status(module.Principal(user, False), task['dataset'], task['version'])
                 if current['state'] != 'READY':
                     result.update(state='NOT_READY', publicationState='READY',
                         error='This publication completed previously, but its local dataset copy is no longer ready. Publish the prepared personal directory again with a new request key.')
@@ -228,6 +229,11 @@ class DataWorkspaces:
             os.close(lock)
 
     def worker(self, user, key):
+        module, _ = self.n.dataset_cache()
+        with module.wait_for_locks():
+            return self._worker(user, key)
+
+    def _worker(self, user, key):
         args = {'userId': user}
         # Opening holds guard through systemd startup. Wait here; the lifetime
         # exclusive lock is acquired before guard is released for status reads.
