@@ -516,6 +516,7 @@ class OCITests(unittest.TestCase):
             m.load = Mock(return_value={'schema': 1, 'owner': m.owner, 'project': 'vision', 'image': 'sha256:'+SHA, 'container': 'gpuq-dev-'+'c'*32})
             m.run = Mock(return_value=json.dumps([{'Config': {'Labels': {'io.gpuq.owner': owner or m.owner, 'io.gpuq.project': 'vision'}}, 'State': {'Running': running, 'Pid': 0, 'Status': 'exited'}}]))
             with self.assertRaises(ValueError): m.checkpoint('vision')
+            self.assertEqual(m.run.call_count, 1)
 
     def test_podman_stopped_checkpoint_is_safe_but_live_pid_or_pause_is_not(self):
         for state in ({'Status':'stopped','Running':False,'Paused':False,'Pid':0},
@@ -533,8 +534,6 @@ class OCITests(unittest.TestCase):
                     else:
                         self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
                         self.assertEqual(m.run.call_args.args[0],'rm');write.assert_called_once()
-            self.assertEqual(m.run.call_count, 1)
-
     def test_commit_head_is_durable_before_deleting_writable_layer(self):
         m = self.manager()
         value = {'schema': 1, 'owner': m.owner, 'project': 'vision', 'image': 'sha256:'+SHA, 'container': 'gpuq-dev-'+'c'*32}
