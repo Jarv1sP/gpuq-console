@@ -1,3 +1,4 @@
+import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 import {scanBrowserDirectory,uploadBrowserDataset} from './dataset-upload.js';
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
 import {transferUploadCall} from './transfer-upload.js';
@@ -90,7 +91,7 @@ export function datasetsUI(store,toast){
     for(const panel of section.querySelectorAll('[data-dataset-panel]'))panel.hidden=panel.dataset.datasetPanel!==next;
   }
   function controls(){
-    relayChoice();
+    restoreMaintenanceControls(section);relayChoice();
     const enabled=store.production&&store.principal&&(store.data?.machines||[]).length,blocked=busy||uploadBusy||discardBusy||workspace.busy;
     for(const selector of ['#datasets-refresh','[name=dataset-machine]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||blocked;}
     for(const selector of ['#dataset-upload-start','[name=dataset-name]','[name=dataset-directory]','[name=dataset-relay-consent]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||uploadBusy||discardBusy||workspace.busy||active?.state==='DISCARDING';}
@@ -98,7 +99,9 @@ export function datasetsUI(store,toast){
     const pause=section.querySelector('#dataset-upload-pause'),discard=section.querySelector('#dataset-upload-discard');if(pause)pause.hidden=!uploadBusy;if(discard)discard.hidden=uploadBusy||!active?.uploadId||['READY','DISCARDED'].includes(active.state);
     workspace.controls();
     cloud.controls();
+    disableMaintenanceControls(section,'#dataset-upload-start,#dataset-upload-discard,[data-prepare-dataset],[data-retry-archive]',maintenanceFor(store.data?.operationalMaintenance,section.querySelector('[name=dataset-machine]')?.value));
   }
+  document.addEventListener('gpuq-maintenance-state',()=>{if(section.children.length)controls();});
   store.onAuthChange?.(()=>{cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;active=null;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
   async function load(){
     if(busy||uploadBusy||discardBusy||!store.principal)return;

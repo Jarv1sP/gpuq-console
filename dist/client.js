@@ -1,3 +1,4 @@
+import {assertMaintenanceOperation} from './maintenance-state.js';
 export class DemoClient{
   constructor(){this.authGeneration=0;this.authPending=0;this.authTail=Promise.resolve();this.inflight=new Set();this.authListeners=new Set();this.sessionToken=null;this.requestTimeoutMs=45000;}
   static async create(){const client=new DemoClient();client.remote=globalThis.GPUQ_LOCAL_API===true;client.production=globalThis.GPUQ_PRODUCTION===true;if(!client.remote){const {DemoService,DEMO_ADMIN}=await import('./service.js');client.service=await DemoService.create();await client.login(DEMO_ADMIN.username,DEMO_ADMIN.password);}else if(client.production){try{await client.refresh();}catch(e){if(e.status!==401)throw e;}}return client;}
@@ -29,6 +30,7 @@ export class DemoClient{
   async call(operation,args={},options={}){
     if(operation==='logout')return this.logout();
     if(this.authPending)throw this.stale('正在切换登录账号，请稍后重试。');
+    assertMaintenanceOperation(operation,args,this.data,this.principal);
     const generation=this.authGeneration,token=this.token;
     return this.track((async()=>{
       let data;try{data=await this.invoke(operation,args,token);}catch(error){if(generation!==this.authGeneration)throw this.stale(operation==='terminal.open'?'登录状态已改变，终端创建结果未确认；请原账号重新连接检查，服务端仍按期限回收。':undefined);throw error;}

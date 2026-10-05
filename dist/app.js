@@ -6,6 +6,8 @@ import {resourceCards,monitorSummary} from './resources-ui.js';
 import {datasetsUI} from './datasets-ui.js';
 import {createCommunityUI} from './community-ui.js';
 import {maintenanceUI,operationalMaintenanceUI} from './maintenance-ui.js';
+import {maintenanceExperienceUI} from './maintenance-experience.js';
+import {maintenanceActive} from './maintenance-state.js';
 import {transfersUI} from './transfers-ui.js';
 import {shellUI} from './shell-ui.js';
 import {fadeDialog,reducedMotion} from './motion-ui.js';
@@ -18,7 +20,8 @@ const renderExecution=executionUI(store,()=>render(true),toast);
 const renderDatasets=datasetsUI(store,toast);
 const renderCommunity=createCommunityUI(store,toast);
 const renderMaintenance=maintenanceUI(store,toast);
-const renderOperationalMaintenance=operationalMaintenanceUI(store,toast);
+const renderOperationalMaintenance=operationalMaintenanceUI(store,toast,()=>render(true));
+const renderMaintenanceExperience=maintenanceExperienceUI(store,toast,{getPage:()=>page,refresh:()=>render(true)});
 const renderTransfers=transfersUI(store,toast);
 terminalUI(store,toast);
 const isAdmin=()=>store.principal?.role==='admin';
@@ -33,7 +36,7 @@ function report(error){toast(error.message);if(error.status===401){store.princip
 function confirm(title,message,action){$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;confirmAction=action;$('#confirm-dialog').showModal();fadeDialog($('#confirm-dialog'));}
 function openLogin(){$('#login-form').reset();$('#login-error').textContent='';if(!$('#login-dialog').open)$('#login-dialog').showModal();}
 function choosePage(next){if(next==='users'&&!isAdmin())next='resources';if(next===page)return;if(dirty()){toast('请先保存或撤销授权草稿。');return;}shell.route(next,()=>{page=next;history.replaceState(null,'','#'+next);render();});}
-function defaultPage(){page=own()?.total?'work':'resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'','#'+page);}
+function defaultPage(){page=maintenanceActive(store.data?.operationalMaintenance)||own()?.total?'work':'resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'','#'+page);}
 function render(preserve=false){
   const logged=!!store.principal,admin=isAdmin(),u=own(),keepDraft=preserve&&dirty();
   if(page==='users'&&!admin)page='resources';
@@ -67,6 +70,7 @@ function render(preserve=false){
   $('#work-title-telemetry').hidden=page!=='work'||!logged;
   $('#open-submit').hidden=page!=='work'||!logged;$('#open-submit').disabled=!store.production||store.data?.executionEnabled!==true;
   shell.update();
+  renderMaintenanceExperience();
 }
 function renderResources(){
   const u=own(),limits=u?.limits||{},grid=$('#machine-grid');
@@ -74,7 +78,7 @@ function renderResources(){
   const focused=document.activeElement?.closest('details[data-resource-detail]')?.dataset.resourceDetail;
   $('#resource-summary').textContent=u?`我的额度：${u.total} 张 · 已授权 ${Object.keys(limits).length} 台 · 实验室共 ${capacity} 张`:'登录后查看个人额度';
   $('#monitor-status').textContent=monitorSummary(store.data?.gpuq,store.production);
-  grid.innerHTML=resourceCards({machines:MACHINES,limits,snapshot:store.data?.gpuq,admin:isAdmin(),production:store.production});
+  grid.innerHTML=resourceCards({machines:MACHINES,limits,snapshot:store.data?.gpuq,admin:isAdmin(),production:store.production,maintenance:store.data?.operationalMaintenance});
   for(const el of grid.querySelectorAll('details[data-resource-detail]')){el.open=expanded.has(el.dataset.resourceDetail);if(el.dataset.resourceDetail===focused)el.querySelector('summary').focus({preventScroll:true});}
 }
 function filteredUsers(){return [...store.users].filter(u=>filter!=='pending'||pending(u)).sort((a,b)=>Number(pending(b))-Number(pending(a))||a.username.localeCompare(b.username,'zh-CN'));}
@@ -105,7 +109,7 @@ document.addEventListener('click',async event=>{
   try{switch(action){
     case 'filter-pending':case 'filter-all':await guardedChange(()=>{filter=action==='filter-pending'?'pending':'all';selected=null;render();});break;
     case 'refresh-state':await refresh();toast('已更新');break;
-    case 'switch-account':await guardedChange(async()=>{if(store.principal)await store.logout();selected=null;draft=null;inviteCode=null;render();openLogin();});break;
+    case 'switch-account':if(store.principal)await store.logout();selected=null;draft=null;inviteCode=null;render();openLogin();break;
     case 'open-register':$('#login-dialog').close();$('#register-form').reset();$('#register-error').textContent='';$('#register-dialog').showModal();break;
     case 'back-to-login':$('#register-dialog').close();openLogin();break;
     case 'invites':$('#invites-error').textContent='';await loadInvites();$('#invites-dialog').showModal();break;

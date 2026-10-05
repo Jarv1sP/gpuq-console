@@ -39,7 +39,7 @@ test('only an administrator sees pending approvals, and only a complete data lis
 });
 test('stale or missing self-report never becomes a progress percentage or ETA',()=>{
   const job={progress:{reported:true,stale:true,snapshot:{epochsCompleted:12,epochsTotal:40,etaSeconds:60,updatedAt:1790700000,metrics:{loss:.4}}}};assert.equal(trainingReadout(job).percent,null);assert.equal(trainingReadout(job).eta,'');assert.deepEqual(trainingReadout(job).metrics,[]);
-  job.progress.stale=false;assert.equal(trainingReadout(job).percent,30);assert.equal(trainingReadout(job).epoch,'第 12 / 40 轮');assert.match(trainingReadout(job).eta,/自报/);
+  job.progress.stale=false;assert.equal(trainingReadout(job).percent,30);assert.equal(trainingReadout(job).epoch,'第 12 / 40 轮');assert.match(trainingReadout(job).eta,/训练上报/);
   job.progress.snapshot.metrics={accuracy:.8,epoch:12,lr:.0003,val_acc:.7,loss:.4};assert.deepEqual(trainingReadout(job).metrics.map(([name])=>name),['loss','val_acc','lr']);
   assert.equal(stateClass({state:'RUNNING',cancelRequested:true}),'st-cancel');
 });

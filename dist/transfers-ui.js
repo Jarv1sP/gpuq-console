@@ -1,3 +1,4 @@
+import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 import {uploadKey} from './dataset-upload.js';
 import {routePresentation,transferBytes} from './data-route.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -30,6 +31,14 @@ export function transfersUI(store,toast){
     if(!store.principal)return;
     document.dispatchEvent(new CustomEvent('gpuq-data-activities',{detail:{userId:store.principal.userId,items:[...records.values()].map(row=>({id:row.id,kind:row.kind,state:row.state,machine:row.machine,name:row.name||row.reference?.dataset||'数据传输'})),complete}}));
   }
+  function maintenanceControls(){
+    restoreMaintenanceControls(section);
+    const state=store.data?.operationalMaintenance;
+    disableMaintenanceControls(section,'#transfer-copy-form [type=submit]',maintenanceFor(state,section.querySelector('[name=transfer-from]')?.value)||maintenanceFor(state,section.querySelector('[name=transfer-machine]')?.value));
+    for(const button of section.querySelectorAll('[data-transfer-action=resume]')){const row=records.get(button.dataset.id);disableMaintenanceControls(section,'[data-transfer-action=resume][data-id="'+CSS.escape(button.dataset.id)+'"]',maintenanceFor(state,row?.machine)||maintenanceFor(state,row?.from));}
+  }
+  document.addEventListener('gpuq-maintenance-state',maintenanceControls);
+  section.addEventListener('change',event=>{if(['transfer-from','transfer-machine'].includes(event.target.name))maintenanceControls();});
   function renderRecords(){
     const list=section.querySelector('#transfer-list');list.replaceChildren();let first=true;
     for(const group of transferGroups([...records.values()])){
@@ -42,6 +51,7 @@ export function transfersUI(store,toast){
       }
       list.append(block);
     }
+    maintenanceControls();
   }
   store.onAuthChange?.(()=>{generation++;identity='';busy=false;records.clear();section.replaceChildren();});
   async function load(next=false){
@@ -60,6 +70,6 @@ export function transfersUI(store,toast){
   return active=>{
     const next=store.principal?JSON.stringify([store.authGeneration,store.principal.userId,(store.data?.machines||[]).map(m=>m.id)]):'';
     if(next!==identity){identity=next;generation++;busy=false;cursor=0;records.clear();activities(false);const enabled=store.production&&store.data?.transfers?.version===1,options=(store.data?.machines||[]).map(m=>`<option value="${esc(m.id)}">${esc(m.name||m.id)}</option>`).join('');section.innerHTML=`<nav class="data-room-tabs" aria-label="数据集内容"><a href="#datasets">数据集</a><a href="#transfers" aria-current="page">传输与导入</a></nav><div class="transfer-section-heading"><div><span class="data-eyebrow">DATA / ACTIVITIES</span><h3>传输记录</h3></div><button class="button quiet" id="transfer-refresh" ${enabled?'':'disabled'}>刷新状态</button></div><p id="transfer-status" role="status">${enabled?'刷新可查看已有任务。':'当前为演示或旧后台，未启用真实传输。'}</p><div id="transfer-list"></div><button class="button" id="transfer-more" hidden>下一页</button><details id="transfer-copy" class="transfer-copy"><summary class="button primary">复制到另一台服务器</summary><form id="transfer-copy-form" class="panel"><div class="transfer-form-heading"><span class="transfer-eyebrow">SERVER TO SERVER</span><h3>复制一个固定版本</h3><p>关闭网页后，后台继续传输；复制不改变原版本。</p></div><label>源服务器<select name="transfer-from">${options}</select></label><label>目标服务器<select name="transfer-machine">${options}</select></label><label>固定数据集版本<input name="transfer-reference" placeholder="数据集 ID@完整版本" required><small>从数据集卡片复制完整版本。</small></label><label>目标数据集名称<input name="transfer-name" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,39}" placeholder="my-data" required><small>1–40 位字母、数字、下划线或连字符。</small></label><button class="button primary" type="submit" ${enabled?'':'disabled'}>开始后台复制</button></form></details><details class="transfer-cli-help"><summary>在命令行中使用</summary><p>上传目录：<code>gpuctl data upload</code><br>传输操作：<code>gpuctl transfer --help</code></p></details>`;}
-    if(active&&!busy)load();
+    maintenanceControls();if(active&&!busy)load();
   };
 }
