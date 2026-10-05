@@ -25,6 +25,56 @@ export function discloseInfo(element,label='说明'){
   if(!element||element.closest('.ui-info'))return;
   const help=document.createElement('details'),summary=document.createElement('summary');help.className='ui-info';summary.textContent='ⓘ';summary.setAttribute('aria-label',label);element.before(help);help.append(summary,element);element.classList.add('ui-info-content');element.hidden=false;
 }
+export const projectEnvironments={shared:'共享',isolated:'隔离',oci:'个人容器'};
+export function projectEnvironmentLabel(mode){return mode===undefined?'共享':typeof mode==='string'&&Object.hasOwn(projectEnvironments,mode)?projectEnvironments[mode]:'环境未确认';}
+export function confirmProjectCreation(result,{project,environmentMode}){
+  if(!result||result.project!==project)throw Error('项目返回身份不匹配，请重新查询。');
+  if(!Object.hasOwn(projectEnvironments,environmentMode)||!(result.environmentMode===environmentMode||environmentMode==='shared'&&result.environmentMode===undefined))throw Error('服务器未确认所选环境，请重新查询。');
+  return result;
+}
+const publicationKey=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const projectName=/^[a-z][a-z0-9_-]{0,47}$/,releaseHash=/^[a-f0-9]{64}$/;
+const publicationPrefix='stargate.project-publication.v1:';
+// These records contain only a non-secret intent. The account is part of the
+// storage namespace, never an API argument or an authority claim.
+export function projectPublicationStorage(storage){
+  const name=(account,machine,project)=>publicationPrefix+JSON.stringify([account,machine,project]);
+  const valid=value=>value&&typeof value.machine==='string'&&value.machine&&value.machine!=='auto'&&typeof value.project==='string'&&projectName.test(value.project)&&typeof value.key==='string'&&publicationKey.test(value.key)&&Number.isSafeInteger(value.startedAt)&&value.startedAt>=0;
+  const read=(account,machine,project)=>{
+    try{const value=JSON.parse(storage.getItem(name(account,machine,project)));return valid(value)&&value.machine===machine&&value.project===project?value:null;}catch{return null;}
+  };
+  return {
+    read,
+    save(account,value){
+      if(typeof account!=='string'||!account||!valid(value))throw Error('发布请求无效，未发送。');
+      const record={machine:value.machine,project:value.project,key:value.key,startedAt:value.startedAt};
+      try{storage.setItem(name(account,record.machine,record.project),JSON.stringify(record));}catch{throw Error('无法保存发布请求，未发送。请允许本地存储后重试。');}
+      return record;
+    },
+    list(account){
+      const records=[];
+      try{for(let i=0;i<storage.length;i++){const key=storage.key(i);if(!key?.startsWith(publicationPrefix))continue;let identity;try{identity=JSON.parse(key.slice(publicationPrefix.length));}catch{continue;}if(Array.isArray(identity)&&identity.length===3&&identity[0]===account){const value=read(...identity);if(value)records.push(value);}}}catch{}
+      return records.sort((a,b)=>b.startedAt-a.startedAt);
+    },
+    clear(account,record){if(read(account,record.machine,record.project)?.key===record.key)storage.removeItem(name(account,record.machine,record.project));}
+  };
+}
+export function projectPublicationOutcome(info,record){
+  const receipt=info?.publication;
+  if(!record||!receipt||receipt.id!==record.key)return {state:'UNKNOWN'};
+  if(receipt.state==='READY'&&typeof receipt.release==='string'&&releaseHash.test(receipt.release)&&Array.isArray(info.releases)&&info.releases.some(item=>item?.state==='READY'&&item.release===receipt.release))return {state:'READY',release:receipt.release};
+  if(receipt.state==='PUBLISHING')return {state:'PUBLISHING'};
+  if(receipt.state==='FAILED')return {state:'FAILED',error:info.error?String(info.error):'生成训练版本失败',errorDetails:info.errorDetails};
+  return {state:'UNKNOWN'};
+}
+export const projectPublicationDelay=attempt=>[2000,5000,10000][Math.min(2,Math.max(0,attempt))];
+export function projectPublicationProgressHTML(progress){
+  const phases=[['scanning','扫描'],['copying','复制'],['verifying','校验'],['publishing','写入版本']],active=phases.findIndex(([phase])=>phase===progress?.phase);
+  if(active<0)return '';
+  const counts=Number.isSafeInteger(progress.completedEntries)&&progress.completedEntries>=0?`${progress.completedEntries}${Number.isSafeInteger(progress.totalEntries)&&progress.totalEntries>=0?' / '+progress.totalEntries:''} 项`:'';
+  return `<ol class="wb-trajectory publication-trajectory" aria-label="训练版本生成阶段">${phases.map(([phase,label],index)=>`<li class="${index<active?'done':index===active?'active':''}" ${index===active?'aria-current="step"':''}><span class="d" aria-hidden="true"></span>${label}</li>`).join('')}</ol>${counts?`<span class="publication-count mono">${counts}</span>`:''}`;
+}
+export function confirmPublicationMotion(element){element?.animate([{opacity:.45},{opacity:1}],{duration:reducedMotion()?150:480,easing:'cubic-bezier(.2,0,0,1)'});}
 if(typeof document!=='undefined')document.addEventListener('click',event=>{
   for(const help of document.querySelectorAll('.ui-info[open]'))if(!help.contains(event.target))help.open=false;
 },{capture:true});

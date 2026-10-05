@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {projectStatusText} from '../dist/execution-ui.js';
 test('project environment label preserves old shared default and makes isolation explicit',()=>{
   assert.match(projectStatusText({state:'DRAFT'}),/共享基础包（旧默认）/);
-  assert.match(projectStatusText({state:'READY',environmentMode:'isolated'}),/完全隔离（不继承基础包）/);
-  assert.match(projectStatusText({state:'READY',environmentMode:'oci'}),/OCI/);
+  assert.match(projectStatusText({state:'READY',environmentMode:'isolated'}),/隔离（不继承基础包）/);
+  const container=projectStatusText({state:'READY',environmentMode:'oci'});
+  assert.match(container,/个人容器（容器内 root，不是服务器 root）/);assert.doesNotMatch(container,/OCI/);
   assert.match(projectStatusText({state:'READY',environmentMode:'shared'}),/共享基础包/);
 });
 test('publication reports observed counts without inventing totals and renders error details as plain text',()=>{
