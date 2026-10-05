@@ -560,18 +560,25 @@ class OCITests(unittest.TestCase):
                         self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
                         self.assertEqual(m.run.call_args.args[0],'rm');write.assert_called_once()
 
-    def test_dead_conmon_state_sync_preserves_overlay_before_checkpoint(self):
+    def test_dead_conmon_native_stop_preserves_overlay_before_checkpoint(self):
         m=self.manager();identifier='c'*64
         m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
                     'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
         stale={'Id':identifier,'Config':{'Labels':{'io.gpuq.owner':m.owner,'io.gpuq.project':'vision'}},
                'State':{'Running':True,'Paused':False,'Pid':99999998,'ConmonPid':99999999}}
         stopped={**stale,'State':{'Running':False,'Paused':False,'Pid':0,'Status':'stopped'}}
-        m.run=Mock(side_effect=[json.dumps([stale]),'[]',json.dumps([stopped]),SHA,''])
-        with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write:
-            self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
-        self.assertEqual(m.run.call_args_list[1].args,('ps','--all','--sync','--filter','id='+identifier,'--format=json'))
-        self.assertEqual(m.run.call_args_list[3].args[0],'commit');write.assert_called_once()
+        for code in (0,125):
+            m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                        'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+            m.run=Mock(side_effect=[json.dumps([stale]),json.dumps([stopped]),SHA,''])
+            auth=MagicMock();auth.__enter__.return_value=(m.env,-1)
+            with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write, \
+                 patch.object(m,'registry_auth',return_value=auth), \
+                 patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=code,stdout=b'',stderr=b'conmon exited')) as stop:
+                self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
+            self.assertEqual(stop.call_args.args[0][-4:],['stop','--time','1',identifier])
+            self.assertEqual(stop.call_args.kwargs['env'],m.env);self.assertEqual(stop.call_args.kwargs['timeout'],30)
+            self.assertEqual(m.run.call_args_list[2].args[0],'commit');write.assert_called_once()
 
     def test_dead_runtime_refresh_keeps_running_changed_paused_and_foreign_state_refused(self):
         identifier='c'*64
@@ -584,10 +591,13 @@ class OCITests(unittest.TestCase):
             with self.subTest(refreshed=refreshed):
                 m=self.manager();m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
                     'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
-                m.run=Mock(side_effect=[json.dumps([stale]),'[]',json.dumps([refreshed])])
-                with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write:
+                m.run=Mock(side_effect=[json.dumps([stale]),json.dumps([refreshed])])
+                auth=MagicMock();auth.__enter__.return_value=(m.env,-1)
+                with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write, \
+                     patch.object(m,'registry_auth',return_value=auth), \
+                     patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=125,stdout=b'',stderr=b'conmon exited')):
                     with self.assertRaises(ValueError):m.checkpoint('vision')
-                    write.assert_not_called();self.assertEqual(m.run.call_count,3)
+                    write.assert_not_called();self.assertEqual(m.run.call_count,2)
 
     def test_live_kernel_pid_never_syncs_or_commits_development_container(self):
         m=self.manager();m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
@@ -598,6 +608,22 @@ class OCITests(unittest.TestCase):
         with patch.object(o.Path,'exists',return_value=True),patch.object(m.s,'atomic_json') as write:
             with self.assertRaises(ValueError):m.checkpoint('vision')
             write.assert_not_called();self.assertEqual(m.run.call_count,1)
+
+    def test_dead_native_stop_timeout_or_oversize_cannot_commit(self):
+        import subprocess
+        for failure in (subprocess.TimeoutExpired('podman',30),
+                        SimpleNamespace(returncode=0,stdout=b'x'*(2*1024**2),stderr=b'')):
+            m=self.manager();m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                       'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+            entry={'Id':'c'*64,'Config':{'Labels':{'io.gpuq.owner':m.owner,'io.gpuq.project':'vision'}},
+                   'State':{'Running':True,'Paused':False,'Pid':99999998,'ConmonPid':99999999}}
+            m.run=Mock(return_value=json.dumps([entry]));auth=MagicMock();auth.__enter__.return_value=(m.env,-1)
+            with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write, \
+                 patch.object(m,'registry_auth',return_value=auth),patch.object(o.subprocess,'run') as stop:
+                if isinstance(failure,Exception):stop.side_effect=failure
+                else:stop.return_value=failure
+                with self.assertRaises((ValueError,subprocess.TimeoutExpired)):m.checkpoint('vision')
+                self.assertEqual(m.run.call_count,1);write.assert_not_called()
     def test_commit_head_is_durable_before_deleting_writable_layer(self):
         m = self.manager()
         value = {'schema': 1, 'owner': m.owner, 'project': 'vision', 'image': 'sha256:'+SHA, 'container': 'gpuq-dev-'+'c'*32}

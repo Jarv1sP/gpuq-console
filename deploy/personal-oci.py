@@ -396,7 +396,7 @@ class PersonalOCI:
                  'Development container ownership is unknown')
             if state.get('Running') is True:
                 # A control-group stop can kill conmon before its exit event is
-                # persisted. Refresh only this dead, exactly owned runtime;
+                # persisted. Reconcile only this dead, exactly owned runtime;
                 # never stop/remove a live container or discard its overlay.
                 identifier = entry.get('Id')
                 need(isinstance(identifier, str) and re.fullmatch('[a-f0-9]{64}', identifier)
@@ -404,7 +404,14 @@ class PersonalOCI:
                      and all(type(state.get(key)) is int and state[key] >= 0
                              and (state[key] == 0 or not Path('/proc', str(state[key])).exists())
                              for key in ('Pid', 'ConmonPid')), 'Development container is still running')
-                self.run('ps', '--all', '--sync', '--filter', 'id='+identifier, '--format=json')
+                # Podman may report conmon's missing exit record as an error
+                # even after native stop saved Exited. Accept no state from
+                # that return code: only the fresh identity/stopped checks do.
+                with self.registry_auth() as (env, authfd):
+                    stopped = subprocess.run(self.command('stop', '--time', '1', identifier),
+                                             env=env, capture_output=True, timeout=30)
+                need(len(stopped.stdout) < 2*1024**2 and len(stopped.stderr) < 65536,
+                     'Development container stop response exceeds bound')
                 refreshed = json.loads(self.run('container', 'inspect', value['container']))
                 need(len(refreshed) == 1 and refreshed[0].get('Id') == identifier,
                      'Development container changed during runtime refresh')
