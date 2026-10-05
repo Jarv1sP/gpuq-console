@@ -32,6 +32,11 @@ test('FAILED preserves the node reason, UNKNOWN and timeouts never replay remova
     if(state==='timeout')f.fail(Error('query timeout'));else f.respond({operationId:OP,state,error:'有训练正在使用'});
     await f.api.query(row.id);assert.equal(f.api.rows[0].state,state==='timeout'?'UNKNOWN':state);assert.equal(f.done.length,0);assert.equal(f.timers.size,0);assert.equal(f.calls.filter(x=>x.operation==='datasets.unregister').length,1);f.api.stop();}
 });
+test('HTTP errors including a portal-wrapped bridge timeout do not confirm rejection or unlock the target',async()=>{
+  for(const status of [400,401,403,408,429,500,504]){const f=fixture();f.fail(Object.assign(Error('bridge outcome unavailable'),{status}));const row=await f.api.submit(target);
+    assert.equal(row.state,'UNKNOWN');assert.equal(row.operationId,null);assert.equal(f.api.blocked(target),true);assert.equal(f.done.length,0);assert.equal(f.calls.length,1);assert.equal(f.timers.size,0);
+    await assert.rejects(f.api.submit(target),/尚未确认/);assert.equal(f.calls.length,1);f.api.stop();}
+});
 test('malformed IDs, mismatched receipts and a completion without its boolean result cannot report success',async()=>{
   for(const result of [{state:'UNREGISTERED',unregistered:true},{operationId:'c'.repeat(64),state:'UNREGISTERED',unregistered:true},{operationId:OP,state:'UNREGISTERED'},{operationId:OP,state:'UNREGISTERED',unregistered:true,dataset:'other'},{operationId:OP,state:'UNREGISTERED',unregistered:true,version:'c'.repeat(64)}]){const f=fixture(),row=await f.api.submit(target);f.respond(result);await f.api.query(row.id);assert.equal(f.api.rows[0].state,'UNKNOWN');assert.equal(f.done.length,0);f.api.stop();}
 });

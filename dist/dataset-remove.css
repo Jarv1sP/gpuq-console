@@ -16,7 +16,7 @@
 .sb #page-datasets .dataset-remove-facts small{display:block;color:var(--ink-2);font:12px/1.8 var(--mono)}
 .sb #page-datasets .dataset-remove-dialog .field{display:grid;gap:12px;margin-bottom:24px;color:var(--ink-2);font-size:14px;min-width:0}
 .sb #page-datasets .dataset-remove-dialog input{width:100%;min-width:0;box-sizing:border-box;min-height:48px;padding:10px 12px;color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:8px;font:14px var(--mono)}
-.sb #page-datasets .dataset-remove-dialog .modal-actions{display:flex;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin:0}
+.sb #page-datasets .dataset-remove-dialog .modal-actions{display:flex;flex-direction:row;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin:0}
 .sb #page-datasets #dataset-removal-records{margin-top:28px;padding-top:20px;border-top:1px solid var(--line);min-width:0}
 .sb #page-datasets #dataset-removal-records>h3{font:500 16px var(--sans);margin:0 0 16px}
 .sb #page-datasets #dataset-removal-records article{min-width:0;border-top:1px solid var(--line);padding:20px 0;overflow-wrap:anywhere}

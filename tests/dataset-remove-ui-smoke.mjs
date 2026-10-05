@@ -37,7 +37,7 @@ try{
     if(operation==='datasets.unregister'){
      assert.equal(principal.role,'admin');assert.equal(args.dataset,localDataset);assert.deepEqual(Object.keys(args).sort(),args.version?['dataset','machine','version']:['dataset','machine']);
      const operationId=(++serial).toString(16).padStart(64,'0');ops.set(operationId,{...args,operationId,userId,state:'UNREGISTERING'});
-     if(lostSubmit){lostSubmit=false;return route.abort('failed');}return reply(route,{operationId,state:'UNREGISTERING',dataset:args.dataset,version:args.version??null});
+     if(lostSubmit){const failure=lostSubmit;lostSubmit=false;if(failure==='http400')return route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'节点响应超时；任务状态将自动核对。'})});return route.abort('failed');}return reply(route,{operationId,state:'UNREGISTERING',dataset:args.dataset,version:args.version??null});
     }
     if(operation==='datasets.status'){
      assert.deepEqual(Object.keys(args).sort(),['machine','operationId']);const op=ops.get(args.operationId);assert(op);assert.equal(op.machine,args.machine);assert.equal(op.userId,userId);
@@ -80,14 +80,14 @@ try{
    stateMode='UNREGISTERED';await page.locator('[data-removal-query]').click();await page.locator('#dataset-removal-records').waitFor({state:'detached'});await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(await card(V2).count(),0);assert.equal(await page.locator('[data-use-dataset=other-data]').count(),1);assert.equal(await card(V1).locator('.dataset-location[data-machine="'+machines[1].id+'"]').getAttribute('data-location-state'),'READY');
    // A completely lost submission has no operation ID. It stays locked until
    // an administrator supplies the actual ID or confirms abandoning intent.
-   deleted.delete(key(machines[0].id,localDataset,V1));await load();lostSubmit=true;stateMode='UNKNOWN';await open(V1);await page.locator('[data-remove-confirm]').click();await page.locator('.dataset-removal-state').filter({hasText:'删除请求结果未确认'}).waitFor();const count=calls.filter(x=>x.operation==='datasets.unregister').length;
+   deleted.delete(key(machines[0].id,localDataset,V1));await load();lostSubmit='http400';stateMode='UNKNOWN';await open(V1);await page.locator('[data-remove-confirm]').click();await page.locator('.dataset-removal-state').filter({hasText:'删除请求结果未确认'}).waitFor();const count=calls.filter(x=>x.operation==='datasets.unregister').length;
    await load();assert.equal(await card(V1).locator('[data-remove-version]').isDisabled(),true);await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,count);await page.locator('#dataset-removal-records').scrollIntoViewIfNeeded();await capture('lost-submit');
    await page.locator('[data-removal-abandon]').click();assert.match(await page.locator('#dataset-remove-dialog').textContent(),/再次删除可能重复执行/);await page.locator('#dataset-remove-dialog [data-remove-close]').click();assert.equal(await card(V1).locator('[data-remove-version]').isDisabled(),true);
    await page.locator('[name=operationId]').fill([...ops.keys()].at(-1));await page.locator('[data-removal-lookup] [type=submit]').click();await page.locator('[data-removal-query]').waitFor();assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,count);
    await page.locator('[data-removal-abandon]').click();await page.getByRole('button',{name:'放弃记录',exact:true}).click();await page.locator('#dataset-removal-records').waitFor({state:'detached'});assert.equal(await card(V1).locator('[data-remove-version]').isEnabled(),true);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,count);
    // A new admin login does not resume another admin's pending receipt.
    lostSubmit=true;await open(V1);await page.locator('[data-remove-confirm]').click();await page.locator('.dataset-removal-state').filter({hasText:'请求结果未确认'}).waitFor();userId='another-admin';principal={userId,username:userId,role:'admin'};await load();assert.equal(await page.locator('#dataset-removal-records').count(),0);await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,count+1);assert.equal(calls.some(x=>x.userId==='another-admin'&&x.operation==='datasets.status'),false);
-   checks.push('version scope','catalog alias resolves to the node registration name','no local registration cannot be removed','whole-name confirmation','2s then pause on leave','UNKNOWN no replay','lease FAILED reason','known receipt refresh','missing ID manual lookup','double-confirm abandon','other machines and datasets retained','cross-account isolation');
+   checks.push('version scope','catalog alias resolves to the node registration name','no local registration cannot be removed','whole-name confirmation','2s then pause on leave','UNKNOWN no replay','lease FAILED reason','known receipt refresh','HTTP 400 bridge uncertainty stays locked','missing ID manual lookup','double-confirm abandon','other machines and datasets retained','cross-account isolation');
   }
   await context.unrouteAll({behavior:'ignoreErrors'});await context.close();
  }

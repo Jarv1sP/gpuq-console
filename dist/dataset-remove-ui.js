@@ -59,7 +59,9 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
     const row={...target,id:crypto.randomUUID(),operationId:null,state:'SUBMITTING',startedAt:now(),attempt:0,error:''};
     context.rows.push(row);busy.add(row);notify(context);
     try{accept(context,row,await call('datasets.unregister',{machine:target.machine,dataset:target.dataset,...(target.version?{version:target.version}:{})}));}
-    catch(error){if(!row.discarded){row.state=error.status>=400&&error.status<500||error.code==='MAINTENANCE_ACTIVE'?'FAILED':'UNKNOWN';row.error=error.message;}}
+    // The portal can wrap a bridge timeout as HTTP 400. An HTTP error does not
+    // prove the node rejected cleanup; only the local pre-dispatch gate does.
+    catch(error){if(!row.discarded){row.state=error.code==='MAINTENANCE_ACTIVE'?'FAILED':'UNKNOWN';row.error=error.message;}}
     finally{busy.delete(row);save(context);if(active(context,stamp)&&!row.discarded){changed();if(row.state==='UNREGISTERED')completed({...row});arm();}}
     return {...row};
   }
