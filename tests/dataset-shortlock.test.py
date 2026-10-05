@@ -180,11 +180,15 @@ class DatasetShortLockTests(unittest.TestCase):
         registry.unlink();os.link(outside,registry)
         with self.assertRaisesRegex(D.CacheError,'single link'):self.cache.status(OWNER,'large',self.version)
 
-    def test_no_persistent_summary_cache_is_created(self):
+    def test_only_catalog_uses_private_disposable_summaries_not_status(self):
         before=sorted(str(p.relative_to(self.cache.root)) for p in self.cache.root.rglob('*') if p.name!='.lock')
-        self.cache.list_datasets(OWNER);self.cache.status(OWNER,'large',self.version)
+        self.cache.status(OWNER,'large',self.version)
+        self.assertEqual(before,sorted(str(p.relative_to(self.cache.root)) for p in self.cache.root.rglob('*') if p.name!='.lock'))
+        self.cache.list_datasets(OWNER)
         after=sorted(str(p.relative_to(self.cache.root)) for p in self.cache.root.rglob('*') if p.name!='.lock')
-        self.assertEqual(before,after)
+        self.assertEqual(before,[name for name in after if name!='.catalog' and not name.startswith('.catalog/')])
+        with patch.object(self.cache,'_catalog_summary',side_effect=AssertionError('status must not trust catalog')):
+            self.cache.status(OWNER,'large',self.version)
 
 
 if __name__=='__main__':unittest.main()
