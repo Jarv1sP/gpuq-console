@@ -68,6 +68,19 @@ try{
     assert.ok(links.every(href=>!/(?:\/guide\/admin(?:[/?#]|$)|ADMIN_README)/i.test(href)),JSON.stringify(links));
   }
   async function noPageOverflow(page,label){
+    // Navigation backgrounds transition for 140 ms. The chapter number changes
+    // immediately, so measure the settled colors rather than an intermediate
+    // frame whose foreground and background belong to different nav states.
+    await page.evaluate(async()=>{
+      for(;;){
+        const animations=document.getAnimations().filter(animation=>
+          animation.playState!=='finished'&&animation.effect?.getComputedTiming().iterations!==Infinity);
+        if(!animations.length)return;
+        await Promise.all(animations.map(animation=>animation.finished.catch(error=>{
+          if(error.name!=='AbortError')throw error;
+        })));
+      }
+    });
     const size=await page.evaluate(()=>({viewport:innerWidth,html:document.documentElement.scrollWidth,body:document.body.scrollWidth}));
     assert.ok(size.html<=size.viewport+1&&size.body<=size.viewport+1,`${label}: ${JSON.stringify(size)}`);
     const contrast=await page.evaluate(()=>{
@@ -253,6 +266,40 @@ try{
     await noPageOverflow(guide,chapters[index][0]+' 320px');
   }
   await capture(guide,'guide-troubleshooting-320.png');
+
+  // Force the real sidebar transition to begin at a known frame. The existing
+  // AA assertion must wait for it, but still reject genuinely unreadable text.
+  const transitioning=await guide.evaluate(()=>{
+    const link=document.querySelector('.guide-sidebar [aria-current=page]');
+    link.style.transition='none';link.removeAttribute('aria-current');
+    getComputedStyle(link).backgroundColor;
+    link.style.removeProperty('transition');link.setAttribute('aria-current','page');
+    getComputedStyle(link).backgroundColor;
+    const animations=link.getAnimations();
+    for(const animation of animations){animation.pause();animation.currentTime=0;}
+    const number=link.querySelector('.guide-number');
+    const colors={foreground:getComputedStyle(number).color,background:getComputedStyle(link).backgroundColor};
+    for(const animation of animations)animation.play();
+    return {count:animations.length,colors};
+  });
+  assert.ok(transitioning.count>0,'regression exercises the real navigation color transition');
+  await noPageOverflow(guide,'settled navigation transition 320px');
+  const unreadable=guide.locator('.guide-sidebar [aria-current=page] .guide-number');
+  await unreadable.evaluate(number=>{number.style.color=getComputedStyle(number.parentElement).backgroundColor;});
+  await assert.rejects(noPageOverflow(guide,'unreadable final color fixture'),/guide helper text retains AA contrast/,
+    'the unchanged 4.5 threshold still rejects an unreadable final color');
+  await unreadable.evaluate(number=>number.style.removeProperty('color'));
+  await noPageOverflow(guide,'restored navigation contrast 320px');
+  await writeFile(join(screenshots,'guide-navigation-contrast.json'),JSON.stringify({
+    transition:transitioning,
+    settled:await unreadable.evaluate(number=>({
+      foreground:getComputedStyle(number).color,
+      background:getComputedStyle(number.parentElement).backgroundColor,
+      animations:document.getAnimations().length,
+    })),
+    minimumContrast:4.5,
+    unreadableFinalColorRejected:true,
+  },null,2));
 
   // The document and all navigation remain functional without JavaScript.
   const staticContext=await context({javaScriptEnabled:false,viewport:{width:390,height:844}});
