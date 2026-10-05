@@ -165,7 +165,8 @@ def parse_env(items: Sequence[str]) -> dict[str, str]:
         key, value = item.split("=", 1)
         if not ENV_NAME_RE.fullmatch(key):
             raise ValueError(f"invalid environment variable name: {key!r}")
-        if key in RESERVED_ENV or key.startswith("GPUQ_"):
+        console_oci = key == "GPUQ_CONSOLE_OCI" and value == "1"
+        if key in RESERVED_ENV or (key.startswith("GPUQ_") and not console_oci):
             raise ValueError(f"environment variable is managed by gpuq: {key}")
         if "\x00" in value or "\n" in value or "\r" in value:
             raise ValueError(f"environment value contains a forbidden control: {key}")
