@@ -55,6 +55,29 @@ class OCITests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'hard quotas'):
                 o.PersonalOCI(c, USER)
 
+    def test_explicit_oci_cohort_is_independent_of_disabled_disk_quota(self):
+        c = config(); c['storageQuota'] = {'enabled': False}; c['personalOci']['owners'] = [USER]
+        self.assertEqual(o.policy(c, USER), c['personalOci'])
+        self.assertFalse(o.module('storage-quota').ensure(c, USER, Path('/not-created'))['enabled'])
+        for user in (None, 'demo-user-4', '*', 'all', 'demo-user-3\n'):
+            with self.subTest(user=user), self.assertRaisesRegex(ValueError, 'Authenticated owner'):
+                o.policy(c, user)
+
+    def test_explicit_oci_cohort_rejects_invalid_keys_and_owner_lists(self):
+        for owners in ([], '*', ['all'], ['*'], [USER, USER], [123], ['builtin-admin-extra']):
+            c = config(); c['personalOci']['owners'] = owners
+            with self.subTest(owners=owners), self.assertRaisesRegex(ValueError, 'owner cohort'):
+                o.policy(c, USER)
+        c = config(); c['personalOci'].update(owners=[USER], socket='/var/run/docker.sock')
+        with self.assertRaisesRegex(ValueError, 'capability policy'): o.policy(c, USER)
+
+    def test_foreign_explicit_oci_owner_is_rejected_before_any_write(self):
+        c = config(); c['storageQuota'] = {'enabled': False}; c['personalOci']['owners'] = [USER]
+        with patch.object(o.os, 'open', side_effect=AssertionError), \
+             patch.object(o.Path, 'mkdir', side_effect=AssertionError):
+            with self.assertRaisesRegex(ValueError, 'Authenticated owner'):
+                o.PersonalOCI(c, 'demo-user-4')
+
     def test_config_rejects_rootful_socket_paths_tags_and_unknown_flags(self):
         for replacement in ('ubuntu:latest', '/tmp/image', 'docker.io/lib/foo@sha256:bad', '--privileged'):
             c = config(); c['personalOci']['baseImage'] = replacement
@@ -337,6 +360,21 @@ class OCITests(unittest.TestCase):
         self.assertIn('--image-volume=ignore', args)
         self.assertIn('--network=slirp4netns:allow_host_loopback=false', args)
         self.assertIn('--env=NVIDIA_VISIBLE_DEVICES=void', args)
+
+    def test_execute_reads_existing_delegate_and_enforced_kernel_budget_only(self):
+        manager = self.manager(); manager.verify_host = Mock(); manager.arguments = Mock(return_value=[])
+        group = '/user.slice/amax-term-unit-test.service'
+        state = 'Delegate=yes\nKillMode=control-group\nMemoryMax=8589934592\nTasksMax=2048\nControlGroup='+group+'\n'
+        resources = SimpleNamespace(read_budget=Mock(side_effect=ValueError('budget verified sentinel')))
+        with patch.object(o.os, 'getuid', return_value=1000), \
+             patch.object(o.Path, 'read_text', return_value='0::'+group+'\n'), \
+             patch.object(o.subprocess, 'run', return_value=SimpleNamespace(stdout=state)) as systemctl, \
+             patch.object(o, 'module', return_value=resources), \
+             self.assertRaisesRegex(ValueError, 'budget verified sentinel'):
+            manager._execute({'project':'vision','id':'test'}, {'environmentMode':'oci'}, True, [], [], registry_env={})
+        self.assertEqual(systemctl.call_count, 1)
+        self.assertEqual(systemctl.call_args.args[0][:3], ['/usr/bin/systemctl','--user','show'])
+        resources.read_budget.assert_called_once_with({'project':'vision','id':'test'}, group, [], True)
 
     def test_development_rejects_scheduler_gpu_injection(self):
         with self.assertRaisesRegex(ValueError, 'cannot have GPUs'):

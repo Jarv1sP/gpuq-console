@@ -23,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 IMAGE = re.compile(r'sha256:[a-f0-9]{64}\Z')
 BASE = re.compile(r'[a-z0-9][a-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}\Z')
 GPU = re.compile(r'GPU-[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}\Z')
+OWNER = re.compile(r'builtin-admin|demo-user-[0-9]+\Z')
 HOOKS = Path('/etc/gpuq-console/empty-hooks')
 CDI = Path('/etc/cdi/gpuq-nvidia.json')
 ENGINE = Path('/etc/gpuq-console/personal-oci.conf')
@@ -61,12 +62,22 @@ def policy(config, user=None):
     if value['enabled'] is False:
         need(set(value) == {'enabled'}, 'Disabled OCI policy must be explicit')
         raise ValueError('Personal OCI is not enabled on this node; use shared/isolated venv mode')
-    need(set(value) == {'enabled', 'baseImage', 'podmanSHA256', 'runtimeSHA256', 'cdiSHA256'}
+    required = {'enabled', 'baseImage', 'podmanSHA256', 'runtimeSHA256', 'cdiSHA256'}
+    need(required <= set(value) <= required | {'owners'}
          and isinstance(value['baseImage'], str) and BASE.fullmatch(value['baseImage'])
          and all(isinstance(value[k], str) and re.fullmatch('[a-f0-9]{64}', value[k])
                  for k in ('podmanSHA256', 'runtimeSHA256', 'cdiSHA256')), 'Invalid trusted OCI capability policy')
-    need(module('storage-quota').enabled(config, user),
-         'OCI requires verified kernel hard quotas for this owner')
+    quota_enabled = module('storage-quota').enabled(config, user)
+    if 'owners' in value:
+        owners = value['owners']
+        need(isinstance(owners, list) and 1 <= len(owners) <= 10000
+             and all(isinstance(owner, str) and OWNER.fullmatch(owner) for owner in owners)
+             and len(set(owners)) == len(owners), 'Invalid personal OCI owner cohort')
+        need(isinstance(user, str) and OWNER.fullmatch(user) and user in owners,
+             'Authenticated owner is not in the personal OCI cohort')
+    else:
+        # Existing unscoped installations retain the original hard-quota gate.
+        need(quota_enabled, 'OCI requires verified kernel hard quotas for this owner')
     return value
 
 
@@ -130,7 +141,7 @@ class PersonalOCI:
         self.q = module('storage-quota')
         self.root = self.s.absolute(config['root'])
         self.s.check_platform_root(self.root)
-        need(isinstance(user, str) and re.fullmatch(r'builtin-admin|demo-user-[0-9]+', user), 'Invalid OCI owner')
+        need(isinstance(user, str) and OWNER.fullmatch(user), 'Invalid OCI owner')
         self.owner = hashlib.sha256(user.encode()).hexdigest()
         parent = self.s.private_dir(self.root/'oci', create=True)
         self.folder = self.s.private_dir(parent/self.owner, create=True)
@@ -419,8 +430,9 @@ class PersonalOCI:
                'XDG_RUNTIME_DIR': '/run/user/'+str(os.getuid()),
                'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/'+str(os.getuid())+'/bus'}
         unit = Path(group).name
-        subprocess.run(['/usr/bin/systemctl', '--user', 'set-property', '--runtime', unit, 'Delegate=yes'],
-                       env=env, check=True, timeout=5)
+        # Delegation is installed when the unit is created, not a mutable
+        # runtime property on all supported systemd versions. Never rewrite a
+        # running unit's resource budget here: inspect the existing boundary.
         shown = subprocess.run(['/usr/bin/systemctl', '--user', 'show', unit,
             '--property=Delegate,KillMode,MemoryMax,TasksMax,ControlGroup'], env=env,
             check=True, text=True, capture_output=True, timeout=5)
@@ -429,6 +441,9 @@ class PersonalOCI:
              and state.get('TasksMax') == '2048' and state.get('ControlGroup') == group
              and state.get('MemoryMax','').isdigit() and int(state['MemoryMax']) > 0,
              'OCI parent resource/cancellation boundary is not verified')
+        # Read the kernel limits too; Delegate=yes or systemctl metadata alone
+        # cannot establish the CPU, memory and PID budget of this payload.
+        module('job-resources').read_budget(spec, group, uuids, terminal)
         if terminal:
             with self.locked(spec['project']):
                 head = self.checkpoint(spec['project'])
