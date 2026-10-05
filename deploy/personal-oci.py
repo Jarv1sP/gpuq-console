@@ -333,7 +333,7 @@ class PersonalOCI:
             self.s.atomic_json(self.state_path(slug), value)
             self.run('rm', old)
         elif not IMAGE.fullmatch(value['image']):
-            self.run('pull', '--quiet', '--retry=0', '--tls-verify=true', value['image'], timeout=1800)
+            self.run('pull', '--quiet', '--policy=missing', '--retry=0', '--tls-verify=true', value['image'], timeout=1800)
             image = self.run('image', 'inspect', '--format={{.Id}}', value['image'])
             need(IMAGE.fullmatch(image), 'Approved base did not resolve to an immutable local image')
             value['image'] = image

@@ -243,7 +243,9 @@ class OCITests(unittest.TestCase):
             result = manager.checkpoint('vision')
         self.assertEqual(result['image'], 'sha256:'+SHA)
         self.assertEqual(manager.run.call_args_list[0].args,
-                         ('pull', '--quiet', '--retry=0', '--tls-verify=true', manager.policy['baseImage']))
+                         ('pull', '--quiet', '--policy=missing', '--retry=0', '--tls-verify=true', manager.policy['baseImage']))
+        self.assertEqual(manager.run.call_args_list[1].args,
+                         ('image', 'inspect', '--format={{.Id}}', manager.policy['baseImage']))
 
     def verify_capability(self, host):
         manager = self.manager()
