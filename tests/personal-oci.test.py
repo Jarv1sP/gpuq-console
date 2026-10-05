@@ -256,6 +256,36 @@ class OCITests(unittest.TestCase):
         self.assertEqual(manager.run.call_args_list[1].args,
                          ('image', 'inspect', '--format={{.Id}}', manager.policy['baseImage']))
 
+    def test_immutable_image_id_accepts_only_full_sha256(self):
+        for value in (SHA, 'sha256:'+SHA):
+            self.assertEqual(o.immutable_image_id(value), 'sha256:'+SHA)
+        for value in ('ubuntu:latest', 'sha256:'+SHA[:12], SHA[:12], 'sha512:'+SHA,
+                      SHA.upper(), ' '+SHA, SHA+'\n', None, 123):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                o.immutable_image_id(value)
+
+    def test_base_and_published_image_accept_podman_bare_full_id(self):
+        manager = self.manager()
+        manager.load = Mock(return_value={'schema':1,'owner':manager.owner,'project':'vision',
+                                         'image':manager.policy['baseImage'],'container':None})
+        manager.run = Mock(side_effect=['', SHA])
+        with patch.object(manager.s, 'atomic_json'):
+            self.assertEqual(manager.checkpoint('vision')['image'], 'sha256:'+SHA)
+        manager.run = Mock(return_value=SHA)
+        self.assertEqual(manager.verify_image('vision', {'schema':1,'owner':manager.owner,
+                         'project':'vision','image':'sha256:'+SHA}), 'sha256:'+SHA)
+
+    def test_commit_canonicalizes_full_id_before_durable_head(self):
+        manager = self.manager()
+        manager.load = Mock(return_value={'schema':1,'owner':manager.owner,'project':'vision',
+                         'image':'sha256:'+SHA,'container':'gpuq-dev-'+'c'*32})
+        metadata={'Config':{'Labels':{'io.gpuq.owner':manager.owner,'io.gpuq.project':'vision'}},
+                  'State':{'Running':False,'Pid':0,'Status':'exited'}}
+        manager.run = Mock(side_effect=[json.dumps([metadata]), SHA, ''])
+        with patch.object(manager.s, 'atomic_json') as durable:
+            self.assertEqual(manager.checkpoint('vision')['image'], 'sha256:'+SHA)
+            self.assertEqual(durable.call_args.args[1]['image'], 'sha256:'+SHA)
+
     def verify_capability(self, host):
         manager = self.manager()
         manager.s = SimpleNamespace(directory=MagicMock())

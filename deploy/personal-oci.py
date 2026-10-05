@@ -47,6 +47,14 @@ def need(condition, message):
         raise ValueError(message)
 
 
+def immutable_image_id(value):
+    """Canonicalize Podman's exact sha256 ID, never tags or partial IDs."""
+    if isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value):
+        value = 'sha256:'+value
+    need(isinstance(value, str) and IMAGE.fullmatch(value), 'Invalid immutable OCI image ID')
+    return value
+
+
 def policy(config, user=None):
     value = config.get('personalOci', {'enabled': False})
     need(isinstance(value, dict) and type(value.get('enabled')) is bool, 'Invalid personal OCI policy')
@@ -326,8 +334,7 @@ class PersonalOCI:
             need(labels.get('io.gpuq.owner') == self.owner and labels.get('io.gpuq.project') == slug
                  and state.get('Running') is False and state.get('Pid') == 0
                  and state.get('Status') in ('exited', 'created', 'configured'), 'Development container is running or ownership is unknown')
-            image = self.run('commit', '--pause=false', value['container'], timeout=1800)
-            need(IMAGE.fullmatch(image), 'OCI commit did not return an immutable image ID')
+            image = immutable_image_id(self.run('commit', '--pause=false', value['container'], timeout=1800))
             old = value['container']
             value.update(image=image, container=None)
             # Durable head before removing the only writable layer. A crash may
@@ -336,8 +343,7 @@ class PersonalOCI:
             self.run('rm', old)
         elif not IMAGE.fullmatch(value['image']):
             self.run('pull', '--quiet', '--policy=missing', '--retry=0', '--tls-verify=true', value['image'], timeout=1800)
-            image = self.run('image', 'inspect', '--format={{.Id}}', value['image'])
-            need(IMAGE.fullmatch(image), 'Approved base did not resolve to an immutable local image')
+            image = immutable_image_id(self.run('image', 'inspect', '--format={{.Id}}', value['image']))
             value['image'] = image
             self.s.atomic_json(self.state_path(slug), value)
         return value
@@ -352,7 +358,7 @@ class PersonalOCI:
         need(isinstance(receipt, dict) and set(receipt) == {'schema', 'owner', 'project', 'image'}
              and receipt['schema'] == 1 and receipt['owner'] == self.owner and receipt['project'] == slug
              and isinstance(receipt['image'], str) and IMAGE.fullmatch(receipt['image']), 'OCI release ownership mismatch')
-        need(self.run('image', 'inspect', '--format={{.Id}}', receipt['image']) == receipt['image'], 'Published OCI image is missing; no tag fallback allowed')
+        need(immutable_image_id(self.run('image', 'inspect', '--format={{.Id}}', receipt['image'])) == receipt['image'], 'Published OCI image is missing; no tag fallback allowed')
         return receipt['image']
 
     def arguments(self, spec, project, terminal, uuids, mounts, control=()):
