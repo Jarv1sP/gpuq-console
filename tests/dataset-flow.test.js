@@ -64,12 +64,14 @@ test('preparing detail route needs the returned source, its READY location and c
   assert.equal(datasetFlowRoute({...v,bytes:null},catalog).bytes,null);
 });
 test('upload journey has exactly three stages and cannot invent database capability or mark unknown results ready',()=>{
-  for(const kind of [null,'campus-direct','vps-relay']){
+  for(const kind of [null,'campus-direct','tail-upload','vps-relay']){
     const html=uploadJourneyHTML(kind?{kind}:null,'sample-node-with-long-name','UPLOADING');
     assert.equal((html.match(/<li /g)||[]).length,3);assert.match(html,/你的电脑/);assert.doesNotMatch(html,/数据库|已释放/);assert.equal((html.match(/data-stage-state="complete"/g)||[]).length,1);
   }
   assert.equal((uploadJourneyHTML({kind:'campus-direct'},'sample-node','READY').match(/data-stage-state="complete"/g)||[]).length,3);
   assert.equal((uploadJourneyHTML(null,'sample-node','UNKNOWN').match(/data-stage-state="complete"/g)||[]).length,0);
+  assert.match(uploadJourneyHTML({kind:'tail-upload'},'sample-node','UPLOADING'),/Tail 备用/);
+  assert.doesNotMatch(uploadJourneyHTML({kind:'tail-upload'},'sample-node','UPLOADING'),/通道未确认|>直传</);
 });
 test('cache budget uses plan bytes and its returned watermarks, rejects missing/inconsistent facts and disables telemetry when collection is off',()=>{
   const status={enabled:true,capacity:{usedBytes:99999999}},plan={enabled:true,usageBytes:900,budgetBytes:1000,lowWater:.61,highWater:.83,candidates:[],protectedUnknown:[{}],unavailableAuthorities:['missing']};
