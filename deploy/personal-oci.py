@@ -158,7 +158,7 @@ class PersonalOCI:
         self.q.ensure(config, user, self.folder)
         for name in ('graph', 'run', 'tmp', 'home', 'projects'):
             self.s.private_dir(self.folder/name, create=True)
-        for name in ('home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d'):
+        for name in ('home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d', 'home/containers'):
             self.s.private_dir(self.folder/name, create=True)
         self.runtime_tmp = self.runtime_temporary()
         self.env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': str(self.folder/'home'),
@@ -209,7 +209,9 @@ class PersonalOCI:
             need(self.env.get('TMPDIR') == str(self.runtime_tmp) and self.runtime_temporary() == self.runtime_tmp,
                  'OCI private runtime path changed')
         with self.registry_file(auth, ANONYMOUS_AUTH_RAW) as authfd, \
-             self.registry_file(registries, ANONYMOUS_REGISTRIES_RAW) as registriesfd:
+             self.registry_file(registries, ANONYMOUS_REGISTRIES_RAW) as registriesfd, \
+             self.registry_file('policy.json', signature_policy_raw(self.policy['baseImage']),
+                                directory=self.folder/'home/containers') as policyfd:
             # Podman 5.8 still loads both drop-in directories when an explicit
             # main config is supplied. Never let them override our helper policy.
             dropins = ((REGISTRY_DROPINS, 0),
@@ -246,9 +248,15 @@ class PersonalOCI:
                 parent = parent.parent
 
     @contextlib.contextmanager
-    def registry_file(self, name, expected):
-        path = self.folder/name
-        with self.s.directory(self.folder) as parent:
+    def registry_file(self, name, expected, *, directory=None):
+        # `commit` has no signature-policy CLI flag in Podman 5.x. Its default
+        # lookup is this fixed private XDG_CONFIG_HOME/containers path. Never
+        # inherit a host default, Docker credential or broad registry policy.
+        need(directory is None or (name == 'policy.json' and directory == self.folder/'home/containers'),
+             'Invalid private OCI policy directory')
+        folder = self.folder if directory is None else self.s.private_dir(directory, create=True)
+        path = folder/name
+        with self.s.directory(folder) as parent:
             directory = os.fstat(parent)
             need(directory.st_uid == os.geteuid() and stat.S_IMODE(directory.st_mode) == 0o700,
                  'Anonymous OCI authentication parent is not private')
@@ -385,8 +393,8 @@ class PersonalOCI:
             labels = entry.get('Config', {}).get('Labels', {})
             state = entry.get('State', {})
             need(labels.get('io.gpuq.owner') == self.owner and labels.get('io.gpuq.project') == slug
-                 and state.get('Running') is False and state.get('Pid') == 0
-                 and state.get('Status') in ('exited', 'created', 'configured'), 'Development container is running or ownership is unknown')
+                 and state.get('Running') is False and state.get('Paused', False) is False and state.get('Pid') == 0
+                 and state.get('Status') in ('exited', 'stopped', 'created', 'configured'), 'Development container is running or ownership is unknown')
             image = immutable_image_id(self.run('commit', '--pause=false', value['container'], timeout=1800))
             old = value['container']
             value.update(image=image, container=None)

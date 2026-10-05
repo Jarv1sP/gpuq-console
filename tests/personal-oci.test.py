@@ -96,7 +96,7 @@ class OCITests(unittest.TestCase):
         manager = self.manager()
         manager.folder = Path(root).resolve()/'private-oci'
         manager.folder.mkdir(mode=0o700)
-        for name in ('home', 'home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d'):
+        for name in ('home', 'home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d', 'home/containers'):
             (manager.folder/name).mkdir(mode=0o700)
         manager.env = {'PATH': '/usr/bin:/bin', 'HOME': str(manager.folder/'home'),
                        'REGISTRY_AUTH_FILE': str(manager.folder/'anonymous-registry-auth.json'),
@@ -245,6 +245,31 @@ class OCITests(unittest.TestCase):
                 manager.run('version')
             engine.assert_not_called()
             self.assertEqual(manager.registry_dropin_state.call_args.args, (o.REGISTRY_DROPINS, 0))
+
+    def test_commit_default_policy_is_private_exact_scope_and_checked_each_command(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager=self.anonymous_manager(root)
+            with manager.registry_auth():pass
+            path=manager.folder/'home/containers/policy.json'
+            self.assertEqual(path.read_bytes(),o.signature_policy_raw(manager.policy['baseImage']))
+            self.assertEqual(path.stat().st_mode&0o777,0o600)
+            policy=json.loads(path.read_bytes());self.assertEqual(policy['default'],[{'type':'reject'}])
+            self.assertEqual(set(policy['transports']['docker']),{manager.policy['baseImage']})
+            path.write_bytes(b'{"default":[{"type":"insecureAcceptAnything"}]}')
+            with patch.object(o.subprocess,'run') as engine,self.assertRaises(ValueError):manager.run('commit','own-container')
+            engine.assert_not_called()
+
+    def test_commit_private_policy_rejects_link_mode_and_replacement(self):
+        for kind in ('symlink','hardlink','mode','replace'):
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as root:
+                manager=self.anonymous_manager(root)
+                with manager.registry_auth():pass
+                path=manager.folder/'home/containers/policy.json';old=path.parent/'saved';path.rename(old)
+                if kind=='symlink':path.symlink_to(old)
+                elif kind=='hardlink':os.link(old,path)
+                else:path.write_bytes(old.read_bytes());path.chmod(0o644 if kind=='mode' else 0o600)
+                with patch.object(o.subprocess,'run') as engine,self.assertRaises((ValueError,OSError)):manager.run('commit','own-container')
+                engine.assert_not_called()
 
     def test_private_home_dropin_and_mid_operation_changes_are_refused(self):
         with tempfile.TemporaryDirectory() as root:
@@ -518,6 +543,22 @@ class OCITests(unittest.TestCase):
             with self.assertRaises(ValueError): m.checkpoint('vision')
             self.assertEqual(m.run.call_count, 1)
 
+    def test_podman_stopped_checkpoint_is_safe_but_live_pid_or_pause_is_not(self):
+        for state in ({'Status':'stopped','Running':False,'Paused':False,'Pid':0},
+                      {'Status':'stopped','Running':False,'Paused':True,'Pid':0},
+                      {'Status':'stopped','Running':False,'Paused':False,'Pid':123}):
+            with self.subTest(state=state):
+                m = self.manager(); m.load = Mock(return_value={'schema':1,'owner':m.owner,
+                    'project':'vision','container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+                entry={'Config':{'Labels':{'io.gpuq.owner':m.owner,'io.gpuq.project':'vision'}},'State':state}
+                m.run = Mock(side_effect=[json.dumps([entry]), SHA, ''])
+                with patch.object(m.s,'atomic_json') as write:
+                    if state['Paused'] or state['Pid']:
+                        with self.assertRaises(ValueError):m.checkpoint('vision')
+                        write.assert_not_called();self.assertEqual(m.run.call_count,1)
+                    else:
+                        self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
+                        self.assertEqual(m.run.call_args.args[0],'rm');write.assert_called_once()
     def test_commit_head_is_durable_before_deleting_writable_layer(self):
         m = self.manager()
         value = {'schema': 1, 'owner': m.owner, 'project': 'vision', 'image': 'sha256:'+SHA, 'container': 'gpuq-dev-'+'c'*32}
