@@ -64,7 +64,10 @@ try{
    for(const width of [1440,390,320]){await page.setViewportSize({width,height:1000});await card(V1).locator('[data-remove-more]').click();const menu=card(V1).locator('.dataset-remove-options');await menu.waitFor();assert.equal(await menu.locator('[data-remove-version] .server-id').textContent(),machines[0].id);await page.evaluate(()=>document.activeElement?.blur());await page.screenshot({path:join(shots,'more-menu-admin-'+width+'.png')});await menu.evaluate(element=>element.hidePopover());}
    await open(V1);assert.match(await page.locator('#dataset-remove-dialog').textContent(),/数据库原件、其他服务器/);assert.equal(await page.locator('#dataset-remove-dialog .server-id').textContent(),machines[0].id);await capture('version-confirm');
    await page.locator('[data-remove-confirm]').click();await page.locator('.dataset-removal-state').filter({hasText:'删除中'}).waitFor();assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,1);assert.equal(calls.find(x=>x.operation==='datasets.unregister').args.version,V1);
-   await page.clock.runFor(2000);await page.waitForFunction(()=>document.querySelector('#dataset-removal-records')?.textContent.includes('操作编号'));
+   // The initial unregister response already renders the operation number.
+   // Wait for the actual timer-driven status reply before counting requests.
+   const firstStatus=page.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.status');
+   await page.clock.runFor(2000);await firstStatus;
    assert.equal(calls.filter(x=>x.operation==='datasets.status').length,1);await page.locator('[data-nav=resources]').click();const before=calls.filter(x=>x.operation==='datasets.status').length;await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.status').length,before);await page.locator('[data-nav=datasets]').click();
    stateMode='UNKNOWN';await page.locator('[data-removal-query]').click();await page.locator('.dataset-removal-state').filter({hasText:'删除结果未确认'}).waitFor();await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,1);
    await page.locator('#dataset-removal-records').scrollIntoViewIfNeeded();await capture('unknown-receipt');
