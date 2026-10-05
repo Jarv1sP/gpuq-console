@@ -306,6 +306,13 @@ class DirectTests(unittest.TestCase):
                            allowedOrigins=[origin])
         with patch.object(DIRECT.DirectUploads, 'configuration', return_value=self.config):
             server = DIRECT.create_server(self.node, self.u)
+            accepted_options = []
+            accept = server.get_request
+            def observed_accept():
+                connection, address = accept()
+                accepted_options.append(bool(connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)))
+                return connection, address
+            server.get_request = observed_accept
             serving = threading.Thread(target=server.serve_forever, daemon=True); serving.start()
             try:
                 initial, _, manifest, _ = self.admit(); upload = initial['uploadId']; grant = self.ticket(upload)
@@ -320,6 +327,7 @@ class DirectTests(unittest.TestCase):
                 client.request('OPTIONS', path, headers=preflight)
                 reply = client.getresponse(); self.assertEqual(reply.status, 204)
                 self.assertEqual(reply.read(), b'')
+                self.assertEqual(accepted_options, [True])
                 self.assertEqual(reply.getheader('Access-Control-Allow-Origin'), origin)
                 self.assertEqual(reply.getheader('Access-Control-Allow-Private-Network'), 'true')
                 self.assertEqual(reply.getheader('Access-Control-Allow-Methods'), 'POST')
