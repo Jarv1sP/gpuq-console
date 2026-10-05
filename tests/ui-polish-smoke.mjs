@@ -8,6 +8,7 @@ import {chromium} from 'playwright';
 import {MACHINES} from '../dist/machines.js';
 import {STARBASE_ASSETS} from '../frontend-assets.mjs';
 import {openSubmit,closeSubmit} from './starbase-workflows.mjs';
+import {selectResource,closeResource} from './resources-workflows.mjs';
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-ui-polish';
 const baseline=process.env.UI_BASELINE==='1',errors=[],external=[],checks=[];
 const machine=MACHINES[0].id,release='a'.repeat(64),checkedAt=new Date().toISOString();
@@ -81,8 +82,13 @@ try{
   assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);
   await page.locator('[data-nav=resources]').click();
   await currentNav('resources');
-  assert.equal(await page.locator('[data-gpu-index]').count(),MACHINES.reduce((n,m)=>n+m.cards,0));
-  const first=page.locator('[data-resource-detail="'+machine+':0"]');await first.locator('summary').click();
+  if(baseline)assert.equal(await page.locator('[data-gpu-index]').count(),MACHINES.reduce((n,m)=>n+m.cards,0));
+  else{
+    assert.equal(await page.locator('.resource-tower').count(),MACHINES.reduce((n,m)=>n+m.cards,0));
+    for(const server of MACHINES){await selectResource(page,server.id,{metrics:true});assert.equal(await page.locator('[data-gpu-index]').count(),server.cards);}
+    await selectResource(page,machine,{metrics:true});
+  }
+  const first=page.locator('[data-resource-detail="'+machine+':0"]');await first.locator(':scope > summary').click();
   await page.locator('.node-queue summary').first().click();
   for(const text of ['76%','12.5','62 °C','24018','python train.py','researcher','等待空闲 GPU'])assert.ok((await page.locator('#machine-grid').innerText()).includes(text),text);
   await capture('resources-desktop');
@@ -100,7 +106,9 @@ try{
     await textContrast();
     if([820,390,320].includes(width))await capture('resources-'+width);
     if(width===390){
+      if(!baseline)await selectResource(page,machine,{metrics:true});
       await page.locator('.gpu-table-scroll').first().evaluate(el=>el.scrollLeft=el.scrollWidth);await capture('resources-390-processes');
+      if(!baseline)await closeResource(page);
       await page.locator('[data-nav=work]').click();await currentNav('work');await capture('workspace-mobile');
       assert.equal(await page.locator('[name=command]').inputValue(),'python train.py --output /outputs/result.json');
       if(!baseline)assert.equal(await page.locator('#context-machine').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),true);
@@ -148,3 +156,5 @@ try{
 
 // The existing CI entry point also runs the owner-bound Portal/CSP acceptance.
 if(!baseline)await import('./starbase-ui-smoke.mjs');
+if(!baseline)await import('./resources-ui-smoke.mjs');
+if(!baseline)await import('./resource-ids-ui-smoke.mjs');

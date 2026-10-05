@@ -30,7 +30,7 @@ export function shellUI(store,{navigate,getPage,toast}){
     if(action==='guide')q('.guide-link').click();
     if(action==='files'){navigate('work');const target=q('#workspace-files');if(target){target.open=true;target.scrollIntoView({block:'center',behavior:'instant'});}}
     if(event.target.closest('#edit-profile,#switch-account'))account.open=false;
-    const server=event.target.closest('[data-use-machine]');if(server){const from=captureObject(server.closest('[data-resource-machine]')?.querySelector('h2'));queueMicrotask(()=>sharedObject(from,q('#context-machine')));}
+    const server=event.target.closest('[data-use-machine]');if(server){const name=server.closest('[data-resource-machine],[data-resource-selected]')?.querySelector('h2')||q(`[data-resource-machine="${CSS.escape(server.dataset.useMachine)}"] h2`),from=captureObject(name);queueMicrotask(()=>{if(q('#context-machine')?.value===server.dataset.useMachine)sharedObject(from,q('#context-machine'));});}
   });
   function updateIndicator(animate=false){
     const selected=nav.querySelector('.nav-item.active');if(!selected||phone()){indicator.hidden=true;return;}

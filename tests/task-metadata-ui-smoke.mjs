@@ -1,4 +1,5 @@
 import {accountMenu,openSubmit,refreshVisible} from './starbase-workflows.mjs';
+import {selectResource} from './resources-workflows.mjs';
 // Actual Portal/SQLite/cookies/browser with synthetic GPU/cgroup data and mock
 // execution. No production SSH, root commands, CUDA jobs or training logs.
 import assert from 'node:assert/strict';
@@ -37,15 +38,16 @@ try{
   await new Promise(r=>setImmediate(r));while(service.reconciling)await new Promise(r=>setTimeout(r,5));const job=service.store.jobs[0];assert.equal(job.description,description);assert.equal(job.submitterName,'张三');
   native=[{id:job.nodeJobId,name:'portal-wrapper',owner:'native-wrapper-owner',state:'RUNNING',priority:2,gpu_count:2,assigned_gpu_indices:[0,1]}];await snapshot();
   await login(observer,'metadata-observer');await observer.locator('[data-nav=resources]').click();
-  const card=observer.locator('[data-resource-machine="gpu-1"]'),queue=card.locator('.node-queue');await queue.locator('summary').click();
+  const card=await selectResource(observer,'gpu-1',{metrics:true}),queue=card.locator('.node-queue');await queue.locator(':scope > summary').click();
   const text=await queue.textContent();for(const wanted of [name,description.split('\n')[0],'张三','metadata-owner','0, 1'])assert.ok(text.includes(wanted),wanted);
   for(const hidden of ['PRIVATE-BROWSER-ARGV','native-wrapper-owner','private-os-user'])assert.ok(!text.includes(hidden),hidden);
   assert.equal(await queue.locator('[data-job-cancel],[data-job-logs]').count(),0);assert.equal(await queue.locator('img,script').count(),0);
-  for(const index of [0,1]){const detail=card.locator(`[data-resource-detail="gpu-1:${index}"]`);await detail.locator('summary').click();assert.ok((await detail.textContent()).includes('张三'));assert.ok((await detail.textContent()).includes(description.split('\n')[0]));}
+  for(const index of [0,1]){const detail=card.locator(`[data-resource-detail="gpu-1:${index}"]`);await detail.locator(':scope > summary').click();assert.ok((await detail.textContent()).includes('张三'));assert.ok((await detail.textContent()).includes(description.split('\n')[0]));}
   // Refresh keeps expanded rows and the submitter's own unsent description.
   await refreshVisible(observer);await observer.waitForFunction(()=>document.querySelector('[data-resource-detail="gpu-1:0"]').open);
   await owner.locator('#train-form [name=task-description]').fill('未提交的描述草稿');await refreshVisible(owner);assert.equal(await owner.locator('#train-form [name=task-description]').inputValue(),'未提交的描述草稿');
   await observer.setViewportSize({width:390,height:844});assert.ok(await observer.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'metadata overview must not overflow mobile viewport');
+  await selectResource(observer,'gpu-1',{metrics:true});
   await mkdir('/tmp/gpuq-task-metadata-ui',{recursive:true});await observer.screenshot({path:'/tmp/gpuq-task-metadata-ui/observer-mobile.png',fullPage:true});
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);console.log('TASK METADATA UI PASS: profile, two-GPU submission, other-member queue/process metadata, escaped multiline description, private-command exclusion, draft/panel retention and 390px layout.');
 }finally{await browser?.close();if(server)await new Promise(r=>server.close(r));else service?.close();await rm(dir,{recursive:true,force:true});}
