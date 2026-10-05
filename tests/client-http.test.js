@@ -33,6 +33,13 @@ test('caller cancellation aborts the backoff and never makes another request',as
  }),/user stopped/);
  assert.equal(count,1);
 });
+test('project upload status retry keeps the exact identity and does not send file bytes',async()=>{
+ const body={operation:'files.upload.status',args:{machine:'node-a',project:'code',path:'bundle.tar',totalSize:12,sha256:'a'.repeat(64),uploadId:'11111111-1111-4111-8111-111111111111'}};
+ const f=fixture([new Response('',{status:502}),new Response('{"result":{"state":"UPLOADING","receivedBytes":8}}')]);
+ const result=await apiPost(url,'call',body,f.options);
+ assert.equal(result.result.receivedBytes,8);assert.equal(f.calls.length,2);
+ assert.deepEqual(JSON.parse(f.calls[0][1].body),body);assert.deepEqual(JSON.parse(f.calls[1][1].body),body);
+});
 test('unregister and job submission are never replayed on ambiguous gateway failure',async()=>{
  for(const operation of ['datasets.unregister','jobs.submit','datasets.upload.commit','files.put','login']){
   const f=fixture([new Response('',{status:502})]);
