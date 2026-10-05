@@ -84,14 +84,14 @@ class OCITests(unittest.TestCase):
         manager.registry_dropin_state = lambda path, uid: ('safe-system',) if path == o.REGISTRY_DROPINS else original(path, uid)
         return manager
 
-    def test_anonymous_registry_auth_is_valid_private_json_and_fd_bound(self):
+    def test_anonymous_registry_auth_is_valid_private_json_and_named_identity_bound(self):
         with tempfile.TemporaryDirectory() as root:
             manager = self.anonymous_manager(root)
             with manager.registry_auth() as (env, fd):
-                self.assertEqual(env['REGISTRY_AUTH_FILE'], '/proc/'+str(os.getpid())+'/fd/'+str(fd))
+                self.assertEqual(env['REGISTRY_AUTH_FILE'], str(manager.folder/'anonymous-registry-auth.json'))
                 self.assertEqual(json.loads(os.pread(fd, 1024, 0)), {'auths': {}})
-                registry_fd = int(env['CONTAINERS_REGISTRIES_CONF'].rsplit('/', 1)[1])
-                policy = tomllib.loads(os.pread(registry_fd, 1024, 0).decode())
+                self.assertEqual(env['CONTAINERS_REGISTRIES_CONF'], str(manager.folder/'anonymous-registries.conf'))
+                policy = tomllib.loads(Path(env['CONTAINERS_REGISTRIES_CONF']).read_text())
                 self.assertEqual(policy['credential-helpers'], ['containers-auth.json'])
                 self.assertEqual(policy['unqualified-search-registries'], [])
                 self.assertEqual(os.fstat(fd).st_mode & 0o777, 0o600)
@@ -135,20 +135,29 @@ class OCITests(unittest.TestCase):
                     path = Path(manager.env['REGISTRY_AUTH_FILE']); replacement = manager.folder/'replacement'
                     replacement.write_bytes(o.ANONYMOUS_AUTH_RAW); replacement.chmod(0o600); os.replace(replacement, path)
 
-    def test_managed_command_inherits_only_descriptor_and_no_host_credentials(self):
+    def test_managed_command_inherits_only_private_paths_and_no_host_credentials(self):
         with tempfile.TemporaryDirectory() as root:
             manager = self.anonymous_manager(root)
             def fake(*args, **kwargs):
-                fd = int(kwargs['env']['REGISTRY_AUTH_FILE'].rsplit('/', 1)[1])
-                self.assertEqual(kwargs['env']['REGISTRY_AUTH_FILE'], '/proc/'+str(os.getpid())+'/fd/'+str(fd))
+                path = Path(kwargs['env']['REGISTRY_AUTH_FILE'])
+                self.assertEqual(path, manager.folder/'anonymous-registry-auth.json')
                 self.assertNotIn('pass_fds', kwargs)
-                self.assertEqual(json.loads(os.pread(fd, 1024, 0)), {'auths': {}})
+                self.assertEqual(json.loads(path.read_bytes()), {'auths': {}})
                 self.assertNotIn('HTTP_PROXY', kwargs['env'])
                 self.assertNotIn('DOCKER_CONFIG', kwargs['env'])
                 return SimpleNamespace(returncode=0, stdout='5.8.8\n', stderr='')
             with patch.dict(os.environ, {'HTTP_PROXY': 'http://secret.invalid', 'DOCKER_CONFIG': '/private/host'}), \
                  patch.object(o.subprocess, 'run', side_effect=fake):
                 self.assertEqual(manager.run('version'), '5.8.8')
+
+    def test_private_registry_paths_cannot_be_redirected(self):
+        for key, value in (('REGISTRY_AUTH_FILE', '/dev/null'), ('REGISTRY_AUTH_FILE', '/private/host/auth.json'),
+                           ('CONTAINERS_REGISTRIES_CONF', '/etc/containers/registries.conf')):
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as root:
+                manager = self.anonymous_manager(root); manager.env[key] = value
+                with patch.object(o.subprocess, 'run') as engine, self.assertRaisesRegex(ValueError, 'path changed'):
+                    manager.run('info')
+                engine.assert_not_called()
 
     def test_anonymous_registry_create_race_fails_closed_without_overwrite(self):
         with tempfile.TemporaryDirectory() as root:

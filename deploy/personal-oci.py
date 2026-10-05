@@ -142,7 +142,7 @@ class PersonalOCI:
 
     @contextlib.contextmanager
     def registry_auth(self):
-        """Descriptor-bound anonymous JSON and no external credential helpers."""
+        """Verified private anonymous JSON and no external credential helpers."""
         auth = 'anonymous-registry-auth.json'; registries = 'anonymous-registries.conf'
         need(self.env.get('HOME') == str(self.folder/'home')
              and self.env.get('REGISTRY_AUTH_FILE') == str(self.folder/auth)
@@ -155,9 +155,11 @@ class PersonalOCI:
             dropins = ((REGISTRY_DROPINS, 0),
                        (self.folder/'home/.config/containers/registries.conf.d', os.geteuid()))
             before = [self.registry_dropin_state(path, uid) for path, uid in dropins]
-            prefix = '/proc/'+str(os.getpid())+'/fd/'
-            yield {**self.env, 'REGISTRY_AUTH_FILE': prefix+str(authfd),
-                   'CONTAINERS_REGISTRIES_CONF': prefix+str(registriesfd)}, authfd
+            # Rootless Podman re-execs inside its user namespace and cannot
+            # open the host runner's /proc/<pid>/fd entries. Use the standard
+            # service-private paths, held open and identity-checked before and
+            # after the command. No host HOME/auth path is used as a fallback.
+            yield dict(self.env), authfd
             need([self.registry_dropin_state(path, uid) for path, uid in dropins] == before,
                  'OCI registry drop-in directories changed during operation')
 
@@ -217,8 +219,8 @@ class PersonalOCI:
                 identities = getattr(self, '_registry_identities', {})
                 need(identities.get(name, identity) == identity, 'Anonymous OCI authentication file replaced')
                 self._registry_identities = {**identities, name: identity}
-                # Use the live runner's FD, like managed bind mounts. Podman's
-                # rootless re-exec may close its own inherited descriptors.
+                # Retain the verified descriptor throughout the operation and
+                # reject replacement of the exact named file before returning.
                 yield fd
                 need(self.s.stamp(os.fstat(fd)) == identity
                      and self.s.stamp(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == identity,
