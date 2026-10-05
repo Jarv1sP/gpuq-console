@@ -275,9 +275,17 @@ class OCITests(unittest.TestCase):
             result = manager.checkpoint('vision')
         self.assertEqual(result['image'], 'sha256:'+SHA)
         self.assertEqual(manager.run.call_args_list[0].args,
-                         ('pull', '--quiet', '--policy=missing', '--retry=0', '--tls-verify=true', manager.policy['baseImage']))
+                         ('pull', '--signature-policy', str(o.SIGNATURE_POLICY), '--quiet', '--policy=missing',
+                          '--retry=0', '--tls-verify=true', manager.policy['baseImage']))
         self.assertEqual(manager.run.call_args_list[1].args,
                          ('image', 'inspect', '--format={{.Id}}', manager.policy['baseImage']))
+
+    def test_signature_policy_allows_only_exact_approved_base_digest(self):
+        value = json.loads(o.signature_policy_raw(config()['personalOci']['baseImage']))
+        self.assertEqual(value['default'], [{'type':'reject'}])
+        self.assertEqual(value['transports'], {'docker':{config()['personalOci']['baseImage']:[{'type':'insecureAcceptAnything'}]}})
+        for image in ('ubuntu:latest', 'docker.io/library/ubuntu', 'sha256:'+SHA):
+            with self.assertRaises(ValueError): o.signature_policy_raw(image)
 
     def test_immutable_image_id_accepts_only_full_sha256(self):
         for value in (SHA, 'sha256:'+SHA):

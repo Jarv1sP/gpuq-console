@@ -27,6 +27,7 @@ OWNER = re.compile(r'builtin-admin|demo-user-[0-9]+\Z')
 HOOKS = Path('/etc/gpuq-console/empty-hooks')
 CDI = Path('/etc/cdi/gpuq-nvidia.json')
 ENGINE = Path('/etc/gpuq-console/personal-oci.conf')
+SIGNATURE_POLICY = Path('/etc/gpuq-console/personal-oci-policy.json')
 REGISTRY_DROPINS = Path('/etc/containers/registries.conf.d')
 ENGINE_RAW = b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n[engine]\nremote = false\n'
 ANONYMOUS_AUTH_RAW = b'{"auths":{}}\n'
@@ -54,6 +55,13 @@ def immutable_image_id(value):
         value = 'sha256:'+value
     need(isinstance(value, str) and IMAGE.fullmatch(value), 'Invalid immutable OCI image ID')
     return value
+
+
+def signature_policy_raw(base_image):
+    need(isinstance(base_image, str) and BASE.fullmatch(base_image), 'Invalid immutable base policy scope')
+    value = {'default':[{'type':'reject'}], 'transports':{'docker':{
+        base_image:[{'type':'insecureAcceptAnything'}]}}}
+    return (json.dumps(value, sort_keys=True, separators=(',',':'))+'\n').encode()
 
 
 def policy(config, user=None):
@@ -268,6 +276,7 @@ class PersonalOCI:
             need(info.st_uid == 0 and not info.st_mode & 0o022 and not os.listdir(fd), 'OCI hooks must be a root-owned empty directory')
         protected_file(CDI, self.policy['cdiSHA256'])
         protected_file(ENGINE, hashlib.sha256(ENGINE_RAW).hexdigest())
+        protected_file(SIGNATURE_POLICY, hashlib.sha256(signature_policy_raw(self.policy['baseImage'])).hexdigest())
         # Podman 4.1 searches both default CDI directories. Accept only this
         # one pinned administrator spec; do not let another spec override it.
         for directory, names in ((Path('/etc/cdi'), {'gpuq-nvidia.json'}), (Path('/run/cdi'), set())):
@@ -354,7 +363,8 @@ class PersonalOCI:
             self.s.atomic_json(self.state_path(slug), value)
             self.run('rm', old)
         elif not IMAGE.fullmatch(value['image']):
-            self.run('pull', '--quiet', '--policy=missing', '--retry=0', '--tls-verify=true', value['image'], timeout=1800)
+            self.run('pull', '--signature-policy', str(SIGNATURE_POLICY), '--quiet', '--policy=missing',
+                     '--retry=0', '--tls-verify=true', value['image'], timeout=1800)
             image = immutable_image_id(self.run('image', 'inspect', '--format={{.Id}}', value['image']))
             value['image'] = image
             self.s.atomic_json(self.state_path(slug), value)
