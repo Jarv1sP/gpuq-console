@@ -33,9 +33,13 @@ function assertCopyResult(row,result){
      !['READY','RUNNING','UNKNOWN','SUCCEEDED','FAILED','CANCELED'].includes(result.state))throw Error('项目复制回执不匹配。');
 }
 async function advance(service,id){return lane(service,id,async()=>{
-  let row=read(service,id);const data=row.data,control={id,userId:row.owner_id};
-  if(terminal.has(row.state)&&data.cleanupComplete)return view(row);
-  if(!terminal.has(row.state)&&!data.cancelRequested)authorized(service,row.owner_id,data);
+  let row=read(service,id);const control={id,userId:row.owner_id};
+  if(terminal.has(row.state)&&row.data.cleanupComplete)return view(row);
+  if(!terminal.has(row.state)&&!row.data.cancelRequested){
+    try{authorized(service,row.owner_id,row.data);}
+    catch{row=save(service,row,'CANCELING',{cancelRequested:true,cancellationReason:'AUTHORIZATION_REVOKED'});}
+  }
+  const data=row.data;
   const maintained=()=>service.maintenanceFor?.(data.from)||service.maintenanceFor?.(data.machine);
   try{
     if(data.cancelRequested){
@@ -79,8 +83,14 @@ async function advance(service,id){return lane(service,id,async()=>{
     row=save(service,row,result.state==='READY'?'SUCCEEDED':result.state,
       {bytes:result.bytes,totalBytes:result.totalBytes,error:result.error||null});
     return view(row);
-  }catch(error){return view(save(service,row,terminal.has(row.state)?row.state:'UNKNOWN',{
-    error:terminal.has(row.state)?row.data.error||null:'原节点结果未确认；请检查原复制任务，不会改派或重复创建。'}));}
+  }catch(error){
+    if(!terminal.has(row.state)){
+      try{authorized(service,row.owner_id,row.data);}
+      catch{return view(save(service,row,'CANCELING',{cancelRequested:true,cancellationReason:'AUTHORIZATION_REVOKED'}));}
+    }
+    return view(save(service,row,terminal.has(row.state)?row.state:'UNKNOWN',{
+      error:terminal.has(row.state)?row.data.error||null:'原节点结果未确认；请检查原复制任务，不会改派或重复创建。'}));
+  }
 });}
 
 export function installProjectReplication(service){
@@ -161,7 +171,8 @@ export async function projectReplicationCall(service,principal,operation,args,re
   }
   if(!['projects.replication.status','projects.replication.cancel'].includes(operation)||Object.keys(args).sort().join(',')!=='id'||!UUID.test(args.id||''))fail('项目复制操作无效。');
   let row=read(service,args.id);if(row.owner_id!==principal.userId)fail('项目复制不存在或属于其他账号。',404);
-  authorized(service,principal.userId,row.data);
+  // Losing a machine grant must not strand an owned operation. Reading its
+  // history or fencing its existing workers never creates new compute access.
   if(operation.endsWith('.cancel')&&!terminal.has(row.state))row=save(service,row,'CANCELING',{cancelRequested:true});
   return advance(service,row.id);
 }

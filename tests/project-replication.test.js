@@ -70,7 +70,7 @@ test('source, target, owner and strict fields are enforced for member and admini
   const row=await f.call('projects.replicate',args);
   await assert.rejects(f.service.invoke(f.admin.token,'projects.replication.status',{id:row.id}),e=>e.status===404);
   f.service.store.users.find(u=>u.id===f.member.id).limits[from]=0;
-  await assert.rejects(f.call('projects.replication.status',{id:row.id}),e=>e.status===403);
+  assert.equal((await f.call('projects.replication.status',{id:row.id})).state,'CANCELED');
 });
 test('source and target architecture must match before any export starts',async t=>{
   const f=await fixture(t),bridge=f.service.bridge;
@@ -116,4 +116,32 @@ test('concurrent jobs preparing the same immutable owner tuple share one copy',a
   assert.equal(new Set(results.map(r=>r.operationId)).size,1);
   assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_copies').get().n,1);
   assert.equal(f.nodes.size,1);
+});
+test('revoked machine grants still permit owner cancellation and background cleanup, never new dispatch',async t=>{
+  const f=await fixture(t),row=await f.call('projects.replicate',request());
+  const starts=f.calls.filter(c=>c.op==='projects.copy.start').length;
+  f.service.store.users.find(u=>u.id===f.member.id).limits={};
+  f.cleanup(false);
+  const canceled=await f.call('projects.replication.cancel',{id:row.id});assert.equal(canceled.state,'CANCELED');
+  assert.equal(canceled.cleanupComplete,false);
+  f.cleanup(true);await f.service.reconcileProjectCopies();
+  assert.equal((await f.call('projects.replication.status',{id:row.id})).cleanupComplete,true);
+  assert.equal(f.calls.filter(c=>c.op==='projects.copy.start').length,starts);
+});
+test('disabled owner is canceled by background reconciliation without renewed grants',async t=>{
+  const f=await fixture(t),row=await f.call('projects.replicate',request());
+  f.service.store.users.find(u=>u.id===f.member.id).enabled=false;
+  await f.service.reconcileProjectCopies();
+  const saved=f.service.db.prepare('SELECT state,data FROM project_copies WHERE id=?').get(row.id);
+  assert.equal(saved.state,'CANCELED');assert.equal(JSON.parse(saved.data).cancellationReason,'AUTHORIZATION_REVOKED');
+  assert.equal(f.calls.filter(c=>c.op==='projects.copy.start').length,1);
+});
+test('grant revoked while export reply is pending fences target before later cleanup',async t=>{
+  const f=await fixture(t),entered=deferred(),gate=deferred(),bridge=f.service.bridge;
+  f.service.bridge=async(host,op,args)=>{if(op==='projects.copy.prepare'){entered.resolve();await gate.promise;}return bridge(host,op,args);};
+  const creating=f.call('projects.replicate',request());await entered.promise;
+  f.service.store.users.find(u=>u.id===f.member.id).limits={};gate.resolve();
+  const row=await creating;assert.equal(row.state,'CANCELING');assert.equal(row.cancellationReason,'AUTHORIZATION_REVOKED');
+  await f.service.reconcileProjectCopies();assert.equal((await f.call('projects.replication.status',{id:row.id})).state,'CANCELED');
+  assert.equal(f.calls.filter(c=>c.op==='projects.copy.start').length,0);
 });
