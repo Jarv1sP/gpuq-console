@@ -1,4 +1,5 @@
 import {openSubmit} from './starbase-workflows.mjs';
+import {resourceCard as card,resourceDetail,selectResource} from './resources-workflows.mjs';
 // Browser acceptance: npm ci --ignore-scripts && npx playwright install chromium
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm,mkdir} from 'node:fs/promises';
@@ -44,7 +45,6 @@ try{
   });
  }
  async function login(p,name){await p.goto(origin);await p.locator('#login-form [name=username]').fill(name);await p.locator('#login-form [name=password]').fill(password);await p.locator('#login-form [type=submit]').click();await p.locator('#login-dialog').waitFor({state:'hidden'});}
- const card=(p,id)=>p.locator(`.resource-card[data-resource-machine="${id}"]`);
  async function refreshPage(p){
   await Promise.all([
    p.waitForResponse(response=>response.url()===`${origin}/api/call`&&response.request().postDataJSON()?.operation==='state'),
@@ -69,16 +69,20 @@ try{
  }
  await login(admin,'admin');await admin.locator('[data-nav=resources]').click();
  assert.equal(await admin.locator('.resource-card').count(),MACHINES.length);
- assert.equal(await admin.locator('[data-gpu-index]').count(),MACHINES.reduce((total,machine)=>total+machine.cards,0));
+ assert.equal(await admin.locator('.resource-tower').count(),MACHINES.reduce((total,machine)=>total+machine.cards,0));
+ assert.equal(await admin.locator('[data-resource-selected]').count(),1);
  for(const machine of MACHINES){
   const machineCard=card(admin,machine.id);
-  assert.equal(await machineCard.locator('[data-gpu-index]').count(),machine.cards);
+  const selected=await selectResource(admin,machine.id,{metrics:true});
+  assert.equal(await selected.locator('[data-gpu-index]').count(),machine.cards);
+  assert.equal(await admin.locator('[data-gpu-index]').count(),machine.cards,'Only one server detail is present');
   assert.match(await machineCard.locator('.resource-spec').textContent(),new RegExp(machine.model));
  }
- const gpu0=card(admin,'gpu-1').locator('[data-gpu-index="0"]');
+ await selectResource(admin,'gpu-1',{metrics:true});
+ const gpu0=resourceDetail(admin,'gpu-1').locator('[data-gpu-index="0"]');
  const gpuText=await gpu0.textContent();
  for(const expected of [/#0/,/RTX 5090/,/73%/,/8\.0\s*\/\s*32\.0/,/61\s*°C/,/221\s*W\s*\/\s*575\s*W/])assert.match(gpuText,expected);
- const gpu1=card(admin,'gpu-1').locator('[data-gpu-index="1"]');
+ const gpu1=resourceDetail(admin,'gpu-1').locator('[data-gpu-index="1"]');
  assert.match(await gpu1.textContent(),/0%/);assert.match(await gpu1.textContent(),/0\.0\s*\/\s*32\.0/);
  assert.match(await admin.locator('#monitor-status').textContent(),/最近采集/);
  assert.match(await admin.locator('#monitor-status').textContent(),/\d{4}/);
@@ -91,7 +95,7 @@ try{
  await checkGuide(admin,'/guide');assert.equal(await admin.locator('a[href="/guide/admin"]').count(),0);
  // A real state refresh changes metrics without closing the per-card process panel.
  const updated=snapshot();updated.hosts[0].gpus[0].utilization=44;await saveSnapshot(updated);await refreshPage(admin);
- await admin.waitForFunction(()=>document.querySelector('[data-resource-machine="gpu-1"] [data-gpu-index="0"]').textContent.includes('44%'));
+ await admin.waitForFunction(()=>document.querySelector('[data-resource-selected="gpu-1"] [data-gpu-index="0"]').textContent.includes('44%'));
  assert.equal(await detail.evaluate(element=>element.open),true);
  assert.equal(await detail.locator('.process-table').isVisible(),true);
  // Unknown metrics and failed process collection must not be shown as idle zeroes.
@@ -99,15 +103,17 @@ try{
  incomplete.hosts[3]={id:'gpu-4',reachable:false,checkedAt:incomplete.checkedAt,gpus:[],error:'Simulated unreachable node',gpuq:{connected:false,jobs:[]}};
  await saveSnapshot(incomplete);await refreshPage(admin);
  await admin.locator('[data-resource-detail="gpu-1:2"] summary').filter({hasText:'采集不可用'}).waitFor();
- const unavailable=card(admin,'gpu-1').locator('[data-gpu-index="2"]');
+ const unavailable=resourceDetail(admin,'gpu-1').locator('[data-gpu-index="2"]');
  assert.match(await unavailable.textContent(),/—/);assert.doesNotMatch(await unavailable.textContent(),/0%/);
  assert.equal(await unavailable.locator('progress').count(),0);
- assert.equal(await card(admin,'gpu-4').locator('[data-gpu-index]').count(),0);
- assert.match(await card(admin,'gpu-4').textContent(),/不代表 GPU 空闲/);
+ await selectResource(admin,'gpu-4');
+ assert.equal(await resourceDetail(admin,'gpu-4').locator('[data-gpu-index]').count(),0);
+ assert.match(await resourceDetail(admin,'gpu-4').textContent(),/不代表 GPU 空闲/);
+ await selectResource(admin,'gpu-1',{metrics:true});
  await saveSnapshot(snapshot(new Date(Date.now()-10*60*1000).toISOString()));await refreshPage(admin);
  await admin.locator('#monitor-status').filter({hasText:'已过期'}).waitFor();
  assert.equal(await admin.locator('[data-gpu-index]').count(),0);
- assert.match(await card(admin,'gpu-1').textContent(),/不代表 GPU 空闲/);
+ assert.match(await resourceDetail(admin,'gpu-1').textContent(),/不代表 GPU 空闲/);
  await saveSnapshot();await refreshPage(admin);await gpu0.waitFor();
  await admin.locator('[data-nav=users]').click();assert.equal(await admin.locator('#add-user').count(),0);
  await admin.locator('.management-toolbar [data-action=invites]').click();await admin.locator('[data-action=rotate-invite]').click();await admin.locator('#confirm-action').click();const code=await admin.locator('#current-invite').inputValue();assert.ok(code.startsWith('GPUQ-U-'));
@@ -124,7 +130,8 @@ try{
  await admin.locator('[data-user]').filter({hasText:'验收同学'}).waitFor({timeout:22000});await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('[data-machine=gpu-1]').check();await admin.locator('[data-quota=gpu-1]').fill('2');await admin.locator('[data-quota=total]').fill('2');
  await admin.waitForTimeout(16000);assert.equal(await admin.locator('[data-quota=gpu-1]').inputValue(),'2');await admin.locator('[data-action=save-policy]').click();
  await member.waitForFunction(()=>document.querySelector('#resource-summary').textContent.includes('我的额度：2'),{},{timeout:22000});
- assert.equal(await card(member,'gpu-1').locator('[data-gpu-index]').count(),MACHINES[0].cards);
+ await selectResource(member,'gpu-1',{metrics:true});
+ assert.equal(await resourceDetail(member,'gpu-1').locator('[data-gpu-index]').count(),MACHINES[0].cards);
  for(const machine of MACHINES.slice(1)){
   assert.equal(await card(member,machine.id).locator('[data-gpu-index]').count(),0);
   assert.equal(await card(member,machine.id).locator('details[data-resource-detail]').count(),0);
@@ -154,14 +161,15 @@ try{
   }).slice(0,12).map(element=>({tag:element.tagName,id:element.id,className:element.className,right:Math.round(element.getBoundingClientRect().right)})),
  }));
  assert.ok(mobileLayout.pageWidth<=mobileLayout.width+1,`Mobile resource layout must not overflow the page: ${JSON.stringify(mobileLayout)}`);
+ await selectResource(member,'gpu-1',{metrics:true});
  assert.equal(await anonymousDetail.evaluate(element=>element.open),true);
- const mobileTable=card(member,'gpu-1').locator('.gpu-table-scroll');
+ const mobileTable=resourceDetail(member,'gpu-1').locator('.gpu-table-scroll').first();
  await mobileTable.evaluate(element=>{element.scrollLeft=element.scrollWidth;});
  const tableBounds=await mobileTable.boundingBox(),processBounds=await anonymousDetail.locator('.process-table').boundingBox();
  assert.ok(processBounds.x>=tableBounds.x-1&&processBounds.x+processBounds.width<=tableBounds.x+tableBounds.width+1,'Mobile users must be able to scroll to the process columns');
  await capture(member,'resources-member-mobile-processes.png');
  await member.setViewportSize({width:1440,height:1050});
- await member.locator('[data-use-machine=gpu-1]').click();await member.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-1');await openSubmit(member);await member.locator('[name=command]').fill('python unchanged_draft.py');await member.waitForTimeout(16000);assert.equal(await member.locator('[name=command]').inputValue(),'python unchanged_draft.py');
+ await member.locator('#resource-primary').click();await member.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-1');await openSubmit(member);await member.locator('[name=command]').fill('python unchanged_draft.py');await member.waitForTimeout(16000);assert.equal(await member.locator('[name=command]').inputValue(),'python unchanged_draft.py');
  await admin.locator('#filter-all').click();await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('summary').filter({hasText:'账号权限与状态'}).click();await admin.locator('[data-action=role]').click();await admin.locator('#confirm-action').click();
  await member.reload();await member.locator('#login-dialog').waitFor();await member.locator('#login-form [name=username]').fill('验收同学');await member.locator('#login-form [name=password]').fill(password);await member.locator('#login-form [type=submit]').click();await member.locator('[data-nav=users]').click();await member.locator('#filter-all').click();await member.locator('[data-user]').filter({hasText:'管理员'}).filter({hasNotText:'验收同学'}).click();await member.locator('summary').filter({hasText:'账号权限与状态'}).click();await member.locator('[data-action=enabled]').click();await member.locator('#confirm-action').click();await member.locator('summary').filter({hasText:'账号权限与状态'}).click();await member.locator('[data-action=delete]').click();await member.locator('#confirm-action').click();
  await member.locator('#confirm-dialog').waitFor({state:'hidden'});assert.equal(portal.service.store.users.some(u=>u.username==='admin'),false);

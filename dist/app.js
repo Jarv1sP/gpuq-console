@@ -2,7 +2,7 @@ import {MACHINES} from './model.js';
 import {DemoClient} from './client.js';
 import {executionUI,renderTaskTable} from './execution-ui.js';
 import {terminalUI} from './terminal-ui.js';
-import {resourceCards,monitorSummary} from './resources-ui.js';
+import {resourcesUI,monitorSummary} from './resources-ui.js';
 import {datasetsUI} from './datasets-ui.js';
 import {createCommunityUI} from './community-ui.js';
 import {maintenanceUI,operationalMaintenanceUI} from './maintenance-ui.js';
@@ -23,6 +23,7 @@ const renderMaintenance=maintenanceUI(store,toast);
 const renderOperationalMaintenance=operationalMaintenanceUI(store,toast,()=>render(true));
 const renderMaintenanceExperience=maintenanceExperienceUI(store,toast,{getPage:()=>page,refresh:()=>render(true)});
 const renderTransfers=transfersUI(store,toast);
+const renderResourceView=resourcesUI(store,{machines:MACHINES,getPage:()=>page,navigate:choosePage});
 terminalUI(store,toast);
 const isAdmin=()=>store.principal?.role==='admin';
 const own=()=>store.users.find(u=>u.id===store.principal?.userId);
@@ -73,13 +74,10 @@ function render(preserve=false){
   renderMaintenanceExperience();
 }
 function renderResources(){
-  const u=own(),limits=u?.limits||{},grid=$('#machine-grid');
-  const expanded=new Set([...grid.querySelectorAll('details[open][data-resource-detail]')].map(el=>el.dataset.resourceDetail));
-  const focused=document.activeElement?.closest('details[data-resource-detail]')?.dataset.resourceDetail;
-  $('#resource-summary').textContent=u?`我的额度：${u.total} 张 · 已授权 ${Object.keys(limits).length} 台 · 实验室共 ${capacity} 张`:'登录后查看个人额度';
+  const u=own(),limits=u?.limits||{};
+  $('#resource-summary').textContent=u?`我的额度：${u.total} 张 · 已授权 ${Object.values(limits).filter(value=>value>0).length} 台 · 实验室共 ${capacity} 张`:'登录后查看个人额度';
   $('#monitor-status').textContent=monitorSummary(store.data?.gpuq,store.production);
-  grid.innerHTML=resourceCards({machines:MACHINES,limits,snapshot:store.data?.gpuq,admin:isAdmin(),production:store.production,maintenance:store.data?.operationalMaintenance});
-  for(const el of grid.querySelectorAll('details[data-resource-detail]')){el.open=expanded.has(el.dataset.resourceDetail);if(el.dataset.resourceDetail===focused)el.querySelector('summary').focus({preventScroll:true});}
+  renderResourceView();
 }
 function filteredUsers(){return [...store.users].filter(u=>filter!=='pending'||pending(u)).sort((a,b)=>Number(pending(b))-Number(pending(a))||a.username.localeCompare(b.username,'zh-CN'));}
 function renderUsers(){
@@ -104,7 +102,11 @@ document.addEventListener('click',async event=>{
   if(b.dataset.nav){event.preventDefault();choosePage(b.dataset.nav);return;}
   if(b.dataset.close){$('#'+b.dataset.close).close();return;}
   if(b.dataset.user){await guardedChange(()=>{selected=b.dataset.user;draft=store.get(selected);renderUsers();renderEditor();});return;}
-  if(b.dataset.useMachine){choosePage('work');for(const name of ['terminal-machine','machine','file-machine']){const el=$(`[name=${name}]`);if(el)el.value=b.dataset.useMachine;}return;}
+  if(b.dataset.useMachine){
+    const id=b.dataset.useMachine;if(!store.principal||!store.data?.machines?.some(machine=>machine.id===id)){toast('未获此服务器授权，请刷新核对。');return;}
+    choosePage('work');if(page!=='work')return;
+    const target=$('[name=workspace-machine]');if(target){target.value=id;target.dispatchEvent(new Event('change',{bubbles:true}));}return;
+  }
   const action=b.dataset.action||b.id;
   try{switch(action){
     case 'filter-pending':case 'filter-all':await guardedChange(()=>{filter=action==='filter-pending'?'pending':'all';selected=null;render();});break;

@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="./shell.css" />
   <link rel="stylesheet" href="./workbench.css" />
   <link rel="stylesheet" href="./maintenance-experience.css" />
+  <link rel="stylesheet" href="./resources.css" />
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin />
 </head>
 <body class="sb root">
@@ -56,7 +57,7 @@
 <section data-page="transfers" id="page-transfers" hidden></section>
 <section data-page="community" id="page-community" hidden></section>
 <section data-page="maintenance" id="page-maintenance" hidden></section>
-<section data-page="resources" id="page-resources" hidden><div class="section-kicker"><span>实验室服务器</span><span id="resource-summary">我的额度：0 张</span></div><p id="monitor-status" class="monitor-status" role="status"></p><p class="resource-explainer">额度是你最多可用的卡数；当前占用见下表，提交后由调度器安排启动。</p><div class="resource-grid" id="machine-grid"></div></section>
+<section data-page="resources" id="page-resources" hidden><div class="section-kicker"><span>实验室服务器</span><span id="resource-summary">我的额度：0 张</span></div><p id="monitor-status" class="monitor-status" role="status"></p><p class="resource-explainer">额度是并发上限；显存与进程反映采集时刻，任务启动仍由调度器确认。</p><div class="resource-grid" id="machine-grid"></div></section>
 <section data-page="users" id="page-users" hidden>
 <div class="management-toolbar"><div class="filter-tabs"><button id="filter-pending" aria-pressed="true">待处理 0</button><button id="filter-all" aria-pressed="false">全部账号</button></div><button class="button primary" data-action="invites">注册邀请</button></div>
 <div class="authorization-layout"><div class="panel user-panel"><div id="user-list" class="user-list"></div></div><div class="panel editor" id="editor"></div></div>
