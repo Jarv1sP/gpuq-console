@@ -103,3 +103,43 @@
  .guide-footer{margin:40px 20px 0;padding:20px 0 28px;flex-direction:column;align-items:start;gap:8px;font-size:12px}.guide-pagination{gap:16px}.guide-pagination a{font-size:16px}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}}
+
+/* Reader columns follow the reading container, including browser zoom. */
+:root{--guide-gutter:clamp(16px,4vw,48px);--guide-gap:clamp(16px,3vw,48px)}
+.guide-topbar,#guide-main,.guide-footer{max-width:calc(1280px + 2*var(--guide-gutter));margin-inline:auto;padding-inline:var(--guide-gutter)}
+#guide-main{container:reader/inline-size}
+.guide-topbar{gap:clamp(8px,2vw,24px)}
+.guide-brand{min-width:0;gap:clamp(8px,2vw,16px)}
+.guide-wordmark{font-size:clamp(11px,1.5vw,16px);max-width:100%}
+.guide-hero{padding-block:clamp(40px,6cqw,80px) clamp(32px,5cqw,64px)}
+.guide-hero h1{font-size:clamp(32px,5cqw,56px)}
+.guide-cards{grid-template-columns:repeat(auto-fit,minmax(min(100%,18rem),1fr));column-gap:var(--guide-gap)}
+.guide-card{min-height:180px;padding:24px 0 32px}
+.guide-layout{display:grid;grid-template-columns:minmax(0,.22fr) minmax(0,1fr);gap:var(--guide-gap);padding-top:clamp(24px,4cqw,48px)}
+.guide-sidebar{position:sticky;top:24px;overflow:visible;margin-bottom:0}
+.guide-sidebar nav{display:grid;overflow:visible;gap:4px;padding:0}
+.guide-article{display:block;container:chapter/inline-size;padding-top:8px}
+.guide-article h1{font-size:clamp(24px,4cqw,40px)}
+.guide-toc{position:static;margin-bottom:28px}
+.guide-toc nav{grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr));gap:4px 20px}
+.guide-prose{max-width:none}
+.guide-code-bar{flex-wrap:wrap;gap:8px 12px}
+.guide-code-bar>.copy-code{margin-left:auto;flex:none}
+.guide-code-bar>small{flex-basis:100%;order:3}
+.guide-footer{margin-top:clamp(40px,5vw,64px);gap:clamp(8px,2vw,24px)}
+@container reader (min-width:70rem){
+ .guide-article{display:grid;grid-template-columns:minmax(0,1fr) minmax(8rem,.24fr);column-gap:var(--guide-gap)}
+ .guide-toc{position:sticky;top:24px;margin-bottom:0}
+ .guide-toc nav{grid-template-columns:minmax(0,1fr)}
+}
+@container reader (max-width:48rem){
+ .guide-layout{display:block}
+ .guide-sidebar{position:static;margin-bottom:28px;overflow:hidden}
+ .guide-sidebar nav{display:flex;overflow:auto;gap:6px;padding:4px 1px 12px;scrollbar-width:thin}
+ .guide-sidebar nav a{flex:none;min-height:44px}
+ .guide-sidebar .guide-arrow{display:none}
+}
+@container chapter (max-width:24rem){
+ .guide-pagination{grid-template-columns:minmax(0,1fr);gap:16px}
+ .guide-pagination a:last-child{text-align:left}
+}
