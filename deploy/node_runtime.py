@@ -45,7 +45,7 @@ def preflight(source,profile):
 def validate_dependencies(payloads):
     for name,payload in payloads.items():
         references={node.value for node in ast.walk(ast.parse(payload)) if isinstance(node,ast.Constant) and isinstance(node.value,str)
-                    and node.value.endswith('.py') and Path(node.value).name==node.value}
+                    and node.value.endswith('.py') and node.value[:-3] and Path(node.value).name==node.value}
         missing=references-set(payloads)
         if missing:raise SystemExit('Runtime manifest misses dependencies of '+name+': '+', '.join(sorted(missing)))
 
