@@ -1,6 +1,6 @@
 import {openSubmit} from './starbase-workflows.mjs';
 import {resourceCard as card,resourceDetail,selectResource} from './resources-workflows.mjs';
-import {verifyAuthentication} from './auth-copy-acceptance.mjs';
+import {verifyAuthentication,verifyLongInventoryNames} from './auth-copy-acceptance.mjs';
 // Browser acceptance: npm ci --ignore-scripts && npx playwright install chromium
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm,mkdir} from 'node:fs/promises';
@@ -121,6 +121,7 @@ try{
  await capture(admin,'members-invites-1440.png');await admin.setViewportSize({width:390,height:844});await capture(admin,'members-invites-390.png');await admin.setViewportSize({width:1440,height:1050});
  await admin.locator('[data-close=invites-dialog]').click();await admin.reload();await admin.locator('.management-toolbar [data-action=invites]').click();assert.equal(await admin.locator('#current-invite').inputValue(),code);await admin.locator('[data-close=invites-dialog]').click();
  await verifyAuthentication(member,origin,capture);
+ await verifyLongInventoryNames(browser,origin,capture);
  await member.goto(origin);await member.locator('#login-dialog .guide-link').waitFor();assert.equal(await member.locator('.guide-link').count(),1);
  await capture(member,'login-1440.png');await member.setViewportSize({width:390,height:844});await capture(member,'login-390.png');
  assert.deepEqual(await member.locator('#login-dialog').boundingBox(),{x:0,y:0,width:390,height:844});

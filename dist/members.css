@@ -35,8 +35,9 @@
 .sb #page-users .permissions{display:block;margin:16px 0 0}
 .sb #page-users .permission,.sb #page-users .permission.granted{border:0;border-top:1px solid var(--line);border-radius:0;padding:14px 0;background:none}
 .sb #page-users .permission-top{min-height:36px;display:flex;gap:10px;align-items:center;font-size:15px;font-weight:500;color:var(--ink)}
-.sb #page-users .permission-top input{width:16px;height:16px;min-height:16px;accent-color:var(--ink);margin:0}
-.sb #page-users .permission-spec{font:11px var(--sans);color:var(--ink-2);margin:0 0 0 auto;text-align:right}
+.sb #page-users .permission-top input{width:16px;height:16px;min-height:16px;accent-color:var(--ink);margin:0;flex:none}
+.sb #page-users .permission-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb #page-users .permission-spec{font:11px var(--sans);color:var(--ink-2);margin:0 0 0 auto;text-align:right;flex:none;white-space:nowrap}
 .sb #page-users .permission-bottom{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap;border:0;margin:8px 0 0;padding:0;color:var(--ink-2);font-size:12px}
 .sb #page-users .permission-bottom label{display:flex;align-items:center;gap:8px;font-size:12px}
 .sb #page-users .permission-meter{display:flex;gap:4px;flex:1;max-width:220px;min-width:120px}

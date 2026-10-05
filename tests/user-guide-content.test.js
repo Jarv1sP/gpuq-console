@@ -54,6 +54,7 @@ test('first-time users can install and select an actual machine without joining 
   assert.match(guide, /gpuctl login[\s\S]*gpuctl state[\s\S]*gpuctl use MACHINE_ID/);
   assert.match(guide, /新账号的用卡额度为 0/);
   assert.match(guide, /机器 ID/);
+  assert.doesNotMatch(guide, /\bgpu-\d+\b/, 'server arguments use the catalog ID parameter, never an example server name');
 });
 
 test('training walkthrough distinguishes local edits, published snapshots and output files', () => {

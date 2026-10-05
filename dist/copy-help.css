@@ -2,6 +2,9 @@
 .copy-help-button{display:inline-grid;place-items:center;width:32px;min-width:32px;height:32px;min-height:32px;padding:0;border:0;border-radius:50%;background:none;color:var(--ink-2,var(--muted));font:16px var(--sans);cursor:pointer;transform:none;transition:color 140ms linear,background-color 140ms linear}
 .copy-help-button:hover{color:var(--ink);background:var(--bg-2,var(--wash))}
 .copy-help-button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.copy-help-name{display:block;min-width:0;width:100%}
+.copy-help-name .copy-help-name-button{display:block;width:100%;min-width:0;max-width:100%;padding:0 4px;border-radius:2px;font:inherit;text-align:inherit}
+.copy-help-name-button>span{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .copy-help-popup{display:none;box-sizing:border-box;position:fixed;inset:auto;margin:0;padding:18px;border:1px solid var(--line-2,var(--line));border-radius:10px;background:var(--bg-1,var(--paper));color:var(--ink);font:14px/1.7 var(--sans);box-shadow:0 10px 30px #0003;max-width:calc(100vw - 32px);max-height:calc(100dvh - 32px);overflow:auto;z-index:100}
 .copy-help-popup:popover-open,.copy-help-popup.is-open{display:grid;gap:8px}
 .copy-help-popup>strong{font-size:14px;font-weight:500}
