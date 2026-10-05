@@ -306,7 +306,10 @@
 #page-datasets .dataset-card h3{font-size:14px;margin:0}
 #page-datasets .dataset-owner{font-size:11px;margin-top:4px}
 #page-datasets .dataset-short-version{font-size:10px;margin-top:4px}
-#page-datasets .dataset-location{align-items:center;gap:7px;font-size:12px;min-height:74px}
+#page-datasets .dataset-location{align-items:flex-start;gap:7px;font-size:12px;min-height:74px}
+#page-datasets .dataset-location-fact{display:flex;align-items:center;min-height:36px;width:100%}
+#page-datasets .dataset-location-status{display:flex;align-items:center;gap:7px}
+#page-datasets .dataset-mobile-route{display:none}
 #page-datasets .dataset-target{background:var(--bg-2);color:var(--ink)}
 #page-datasets .dataset-volume{font-size:12px;padding-top:22px!important}
 #page-datasets .dataset-volume small{font-size:10px;margin-top:6px}
@@ -339,11 +342,30 @@
   #page-datasets .dataset-book>small{font-size:10px;line-height:1.5}
   #page-datasets .dataset-library{padding:16px 12px;margin-top:20px}
   #page-datasets .datasets-library-heading h3{font-size:20px}
-  #page-datasets .dataset-matrix-row{grid-template-columns:minmax(140px,1.5fr) repeat(var(--dataset-machine-count,4),minmax(120px,1fr)) minmax(92px,.7fr)}
-  #page-datasets .dataset-matrix-row{grid-template-columns:var(--dataset-columns)}
-  #page-datasets .dataset-row-details .button,#page-datasets .dataset-route-cell,#page-datasets .dataset-version-details summary{min-height:44px}
-  #page-datasets .dataset-row-details .button{font-size:12px}
-  #page-datasets .dataset-machine-label{display:none}
+  #page-datasets .dataset-library{padding-inline:0;border:0;background:none}
+  #page-datasets .dataset-matrix{overflow:visible;min-width:0}
+  #page-datasets .dataset-matrix-heading{display:none}
+  #page-datasets .dataset-card{margin:12px 0;padding:16px 12px;background:var(--bg-1);border:1px solid var(--line);border-radius:8px;min-width:0}
+  #page-datasets .dataset-card .dataset-matrix-row{display:flex;flex-direction:column;min-width:0;width:100%;gap:0}
+  #page-datasets .dataset-card .dataset-matrix-row:first-child>div{padding:0}
+  #page-datasets .dataset-card-heading{order:0;width:100%}
+  #page-datasets .dataset-card h3{font-size:18px}
+  #page-datasets .dataset-card .dataset-volume{order:1;text-align:left;padding:10px 0 16px!important}
+  #page-datasets .dataset-volume small{display:inline;margin-left:12px}
+  #page-datasets .dataset-card .dataset-matrix-row:first-child>.dataset-location{display:block;order:2;width:calc(100% + 24px);min-height:0;margin:0 -12px;padding:8px 12px;border-top:1px solid var(--line)}
+  #page-datasets .dataset-location-fact{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;min-height:44px;align-items:center}
+  #page-datasets .dataset-location .dataset-machine-label{display:inline-flex;grid-column:auto;min-width:0;font:12px var(--mono);color:var(--ink-2)}
+  #page-datasets .dataset-location-status{flex:none;font-size:12px;white-space:nowrap}
+  #page-datasets .dataset-location>.dataset-actions-cell{padding:0;border:0}
+  #page-datasets .dataset-location .file-actions{display:grid;gap:8px;margin:4px 0 6px;width:100%}
+  #page-datasets .dataset-location .file-actions .button{width:100%;min-height:44px;white-space:nowrap;font-size:13px}
+  #page-datasets .dataset-mobile-route{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto;align-items:center;gap:6px;min-width:0;padding:12px 0;border-top:1px solid var(--line);font:11px var(--mono);color:var(--ink-2)}
+  #page-datasets .dataset-mobile-route small{font:inherit;white-space:nowrap}
+  #page-datasets .dataset-card .dataset-row-details{display:block;width:100%;margin-top:4px}
+  #page-datasets .dataset-row-details>.dataset-details-cell{padding:8px 0 0;border:0;min-width:0}
+  #page-datasets .dataset-row-details>div:not(.dataset-details-cell){display:none}
+  #page-datasets .dataset-version-details summary{min-height:44px;line-height:44px}
+  #page-datasets .dataset-copy-route{display:none}
   #page-datasets .datasets-controls label{min-width:0}
   #page-datasets .datasets-toolbar{gap:12px;align-items:center}
   #page-datasets .datasets-controls{flex:1;gap:8px}

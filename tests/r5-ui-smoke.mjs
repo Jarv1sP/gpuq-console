@@ -65,7 +65,12 @@ try{
     return page;
   }
   async function login(page,username){await page.goto(origin);await page.locator('#login-form [name=username]').fill(username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.evaluate(()=>document.fonts.ready);}
-  async function capture(page,name,overlay=false){if(!overlay)await page.evaluate(()=>{document.activeElement?.blur();scrollTo(0,0);});await page.waitForTimeout(400);await page.screenshot({path:join(shots,name+'.png'),fullPage:!overlay&&page.viewportSize().width>=760});}
+  async function capture(page,name,overlay=false,fullPage=false){
+    if(!overlay)await page.evaluate(()=>{document.activeElement?.blur();scrollTo(0,0);});
+    const viewport=page.viewportSize(),expand=fullPage&&!overlay&&viewport.width<760;
+    if(expand)await page.setViewportSize({width:viewport.width,height:Math.ceil(await page.evaluate(()=>document.documentElement.scrollHeight))});
+    try{await page.waitForTimeout(400);await page.screenshot({path:join(shots,name+'.png'),fullPage:!overlay&&(fullPage||viewport.width>=760)});}finally{if(expand)await page.setViewportSize(viewport);}
+  }
   async function noOverflow(page){assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'no horizontal overflow, including during a transition');}
 
   const desktop=await pageFor(1440);await login(desktop,member.username);
@@ -118,6 +123,7 @@ try{
   const prepared=[];const observePrepare=async route=>{const body=route.request().postDataJSON();if(body?.operation==='datasets.prepare'){prepared.push(body.args);await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result:{dataset:body.args.dataset,version:body.args.version,state:'PREPARING'}})});}else await route.continue();};await desktop.route('**/api/call',observePrepare);
   await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);await desktop.evaluate(()=>scrollTo(0,0));await routeCell.hover();await desktop.locator('.dataset-copy-route').waitFor({state:'visible'});assert.equal(await desktop.locator('.dataset-copy-route').innerText(),sourceMachine+' → '+targetMachine+' · 7.00 GiB');assert.doesNotMatch(await desktop.locator('.dataset-copy-route').innerText(),/实验室内网/);assert.equal(prepared.length,0,'hover is read-only');
   assert.equal(await desktop.locator('.dataset-matrix-heading [data-machine="'+targetMachine+'"]').getAttribute('title'),targetMachine);
+  const stateTops=await routeCell.locator('..').locator('..').locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().top));assert.ok(Math.max(...stateTops)-Math.min(...stateTops)<=1,'desktop copy states align at the top of their row');
   const routeBounds=await desktop.locator('.dataset-copy-route>span').boundingBox(),prepareBounds=await routeCell.locator('..').locator('..').locator('..').locator('[data-prepare-dataset]').boundingBox();assert.ok(routeBounds.y+routeBounds.height<=prepareBounds.y,'route label ends before preparation state');
   assert.equal(await routeCell.locator('..').locator('..').locator('..').locator('.dataset-details-cell>.ui-info').count(),1);
   assert.match(await desktop.locator('#datasets-status').innerText(),/^更新时间未知/);
@@ -149,9 +155,29 @@ try{
     fixtureJob.machine=targetMachine;service.save();await refreshVisible(page);await page.locator('[name=workspace-machine]').selectOption(targetMachine);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
     await page.locator('[data-nav=datasets]').click();await page.locator('[name=dataset-machine]').selectOption(targetMachine);await page.locator('#datasets-refresh').click();await page.locator('.dataset-matrix').waitFor();await noOverflow(page);assert.equal(await page.locator('.heading-actions [data-shell-action=control]').isVisible(),width<760?!await page.locator('#mobile-control').isVisible():true,'same control entry on datasets');
     assert.equal(await page.locator('[name=dataset-machine]').evaluate(n=>getComputedStyle(n).color),'rgba(0, 0, 0, 0)','dataset selector renders one name');assert.equal(await page.locator('.dataset-matrix-heading [data-machine]').count(),MACHINES.length);assert.equal(await page.locator('#datasets-capacity>div>strong').innerText(),'502 GiB');assert.equal(await page.locator('#datasets-capacity>div>small').innerText(),'共 1024 GiB');assert.equal(await page.locator('.dataset-library .hero-label').count(),0);
-    await capture(page,'r5-review-datasets-'+role+'-'+width);reviewChecks.push({role,width,inventory:MACHINES.map(row=>row.id)});
+    if(width<760){
+      assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'list');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),false);
+      for(const card of await page.locator('.dataset-card').all()){
+        assert.equal(await card.getAttribute('role'),'listitem');assert.deepEqual(await card.locator('.dataset-machine-label').allTextContents(),MACHINES.map(row=>row.id));
+        const facts=await card.locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>({height:n.getBoundingClientRect().height,line:parseFloat(getComputedStyle(n).lineHeight),whiteSpace:getComputedStyle(n).whiteSpace})));assert.ok(facts.every(n=>n.height<=n.line+1&&n.whiteSpace==='nowrap'),'phone states stay on one line');
+        for(const location of await card.locator('.dataset-location').all()){const name=await location.locator('.dataset-machine-label').boundingBox(),state=await location.locator('.dataset-location-status').boundingBox();assert.ok(name.x+name.width<=state.x&&Math.abs(name.y+name.height/2-state.y-state.height/2)<=1,'phone ID and state share one line');}
+        const selected=card.locator('.dataset-location.dataset-target'),fact=await selected.locator('.dataset-location-fact').boundingBox(),row=await selected.boundingBox();
+        assert.equal(await selected.locator('[data-use-dataset]').count(),1);
+        for(const button of await selected.locator('.file-actions .button').all()){const bounds=await button.boundingBox();assert.ok(bounds.height>=44&&bounds.y>=fact.y+fact.height&&bounds.y+bounds.height<=row.y+row.height+1,'mobile actions occupy separate 44px rows');}
+        assert.ok(await card.evaluate(n=>n.scrollWidth<=n.clientWidth+1),'dataset card has no horizontal matrix scroll');
+      }
+      const mobileRoute=page.locator('.dataset-mobile-route');assert.equal(await mobileRoute.isVisible(),true);assert.match(await mobileRoute.textContent(),new RegExp(sourceMachine+'.*→.*'+targetMachine+'.*7.00 GiB'));
+      if(width===390){
+        await page.locator('[data-use-dataset]').first().evaluate(n=>globalThis.savedDatasetAction=n);await page.setViewportSize({width:1440,height:1080});await page.waitForFunction(()=>document.querySelector('.dataset-matrix')?.getAttribute('role')==='table');
+        assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'table');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),true);
+        assert.equal(await page.locator('[data-use-dataset]').first().evaluate(n=>n===globalThis.savedDatasetAction&&n.closest('.dataset-actions-cell').parentElement.classList.contains('dataset-row-details')),true,'resize restores the same action to the desktop column');
+        await page.setViewportSize({width,height:844});await page.waitForFunction(()=>document.querySelector('.dataset-matrix')?.getAttribute('role')==='list');assert.equal(await page.locator('[data-use-dataset]').first().evaluate(n=>n===globalThis.savedDatasetAction&&!!n.closest('.dataset-location.dataset-target')),true);
+      }
+    }
+    await capture(page,'r5-review-datasets-'+role+'-'+width,false,true);reviewChecks.push({role,width,inventory:MACHINES.map(row=>row.id)});
   }
   await writeFile(join(shots,'review-checks.json'),JSON.stringify(reviewChecks,null,2));
+  await phone.route('**/api/call',observePrepare);await phone.locator('.dataset-location.dataset-target [data-prepare-dataset="scans"]').click();await phone.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(prepared.length,2);assert.deepEqual(prepared[1],{machine:targetMachine,dataset:'scans',version:release});await phone.unroute('**/api/call',observePrepare);
   await desktop.locator('[data-nav=work]').click();await desktop.locator('.wb-focal [data-job-mission]').click();desktop.once('dialog',async dialog=>{assert.match(dialog.message(),/释放 2 张卡的额度/);await dialog.accept();});await desktop.locator('#job-mission [data-job-cancel]').click();await desktop.waitForFunction(()=>document.querySelector('#job-mission .st')?.textContent.includes('正在取消'));assert.equal(requests.filter(row=>row.operation==='jobs.cancel').length,1);assert.equal(await desktop.locator('#job-mission [data-job-cancel]').isDisabled(),true);
   await desktop.evaluate(()=>document.querySelector('#switch-account').click());await desktop.locator('#login-dialog').waitFor({state:'visible'});await desktop.locator('#job-mission').waitFor({state:'hidden'});assert.equal(await desktop.locator('#job-mission').innerText(),'');assert.equal(await desktop.locator('#submission-receipt').count(),0);
   assert.deepEqual(outside,[]);assert.deepEqual(errors.filter(message=>!message.includes('ERR_FAILED')&&!message.includes('Failed to fetch')),[]);assert.ok(assets.filter(row=>row.path.endsWith('.woff2')).every(row=>row.status===200));
