@@ -304,14 +304,16 @@ test('dataset reference validation rejects coerced names/hashes, duplicate names
   assert.deepEqual(datasetReferences([reference]),[reference]);
 });
 
-test('HTTP job submission requires an explicit machine before querying dataset readiness',async()=>{
+test('HTTP job submission rejects missing/invalid targets; explicit AUTO requires a published project before node queries',async()=>{
   const f=await fixture();try{
     await f.grant();
-    for(const machine of [undefined,'auto','',null,'unknown-machine',{},['gpu-1']]){
+    for(const machine of [undefined,'',null,'unknown-machine',{},['gpu-1']]){
       const result=await f.submit({machine});
       assert.equal(result.status,400,JSON.stringify(result.data));
-      assert.match(result.data.error,/明确选择.*服务器/);
+      assert.match(result.data.error,/请选择有效的服务器/);
     }
+    const auto=await f.submit({machine:'auto'});
+    assert.equal(auto.status,400);assert.match(auto.data.error,/自动选机需要已发布.*项目和固定版本/);
     await f.settle();assert.equal(f.calls.length,0);
     assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
   }finally{await f.close();}

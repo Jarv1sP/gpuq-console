@@ -67,11 +67,12 @@ test('manual target is mandatory and exact; invalid values cannot reserve, refre
   const f=await fixture();try{
     await f.grant();let refreshes=0;
     f.service.refreshGPUQ=async()=>{refreshes++;throw Error('invalid targets must not refresh status');};
-    for(const machine of [undefined,null,false,0,'','auto','AUTO',' '+selected,selected+' ',selected.toUpperCase(),'unknown',{},[selected]]){
-      await assert.rejects(f.submit({machine}),error=>error.status===400&&/明确选择/.test(error.message));
+    for(const machine of [undefined,null,false,0,'','AUTO',' '+selected,selected+' ',selected.toUpperCase(),'unknown',{},[selected]]){
+      await assert.rejects(f.submit({machine}),error=>error.status===400&&/请选择有效的服务器/.test(error.message));
     }
+    await assert.rejects(f.submit({machine:'auto'}),error=>error.status===400&&/自动选机需要已发布.*项目和固定版本/.test(error.message));
     const inherited=Object.assign(Object.create({machine:selected}),{cards:1,argv:['python','train.py'],key:randomUUID()});
-    await assert.rejects(f.invoke('jobs.submit',inherited),error=>error.status===400&&/明确选择/.test(error.message));
+    await assert.rejects(f.invoke('jobs.submit',inherited),error=>error.status===400&&/请选择有效的服务器/.test(error.message));
     await f.settle();assert.equal(refreshes,0);assert.equal(f.calls.length,0);
     assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
     assert.equal(f.service.db.prepare("SELECT count(*) AS n FROM audit WHERE operation='jobs.submit'").get().n,0);

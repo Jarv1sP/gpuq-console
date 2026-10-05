@@ -71,5 +71,9 @@ test('standalone CLI renders all legacy member metadata safely, including C1 CSI
   assert.doesNotMatch(json.out,/[\u009b\u009c\u009d\x1b\u202e]/u);
   assert.equal(JSON.parse(json.out).data.hosts[0].tasks[0].name,payload,'JSON remains lossless, not display-escaped data');
   failState=true;const failure=await run(['queue']);assert.equal(failure.code,1);
-  assert.doesNotMatch(failure.err,/[\u009b\u009c\u009d\x1b\u202e]/u);assert.match(failure.err,/\\u\{009b\}/);
+  // Structured metadata remains visibly escaped (above); HTTP error details
+  // are already control-sanitized by apiPost before the terminal formatter.
+  // Both representations must be inert; errors need not preserve escape codes.
+  assert.doesNotMatch(failure.err.replace(/\n$/,''),/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+  assert.equal(failure.err,'Error: state：HTTP 403 — 旧记录 2J 52;c;c2VjcmV0  [31m \n');
 });
