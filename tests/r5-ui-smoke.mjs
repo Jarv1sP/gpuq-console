@@ -101,7 +101,7 @@ try{
   assert.equal(await inventoryProbe.locator('#context-machine option').count(),0);
   assert.equal(await inventoryProbe.locator('.resource-card').count(),0);
   assert.equal(await inventoryProbe.locator('#dataset-catalog').textContent(),'');
-  const loggedOutLabels=await inventoryProbe.locator('.server-select-label').allTextContents();
+  const loggedOutLabels=await inventoryProbe.evaluate(()=>[...document.querySelectorAll('.server-select-label')].map(node=>node.textContent));
   for(const machine of MACHINES)assert.ok(!loggedOutLabels.some(label=>label.includes(machine.id)),'logout clears mirrored server IDs: '+machine.id);
   await login(inventoryProbe,'admin');
   assert.deepEqual(inventoryRequests,['/machines.js'],'administrator uses state rather than importing the directory');
@@ -175,17 +175,24 @@ try{
   const reviewChecks=[];
   for(const [page,role,fixtureJob] of [[phone,'member',running],[authAdmin,'admin',adminRunning]])for(const width of [1440,390,320]){
     await page.setViewportSize({width,height:width<760?844:1080});await page.locator('[data-nav=work]').click();await refreshVisible(page);await noOverflow(page);
-    if(width===1440){const labels=await page.locator('.cs-server-id .server-id-head').evaluateAll(nodes=>nodes.map(n=>({text:n.textContent,available:n.clientWidth,required:n.scrollWidth})));assert.ok(labels.length===MACHINES.length&&labels.every(n=>n.required<=n.available+1),'desktop strip shows complete inventory names when room is available');}
+    if(width===1440){const labels=await page.evaluate(()=>[...document.querySelectorAll('.cs-server-id .server-id-head')].map(n=>({text:n.textContent,available:n.clientWidth,required:n.scrollWidth})));assert.ok(labels.length===MACHINES.length&&labels.every(n=>n.required<=n.available+1),'desktop strip shows complete inventory names when room is available');}
     if(width<760){const fields=await page.locator('.wb-focal .wb-progress-meta>span').evaluateAll(nodes=>nodes.map(n=>({text:n.textContent,height:n.getBoundingClientRect().height,line:parseFloat(getComputedStyle(n).lineHeight)||parseFloat(getComputedStyle(n).fontSize)*1.8})));assert.ok(fields.length>=2&&fields.every(n=>n.height<=n.line+1),'phone progress facts remain on readable lines: '+JSON.stringify({role,width,fields}));}
     await capture(page,'r5-review-work-'+role+'-'+width);
     const hasFooter=await page.locator('#mobile-control').isVisible(),hasHeading=await page.locator('.heading-actions [data-shell-action=control]').isVisible();assert.equal(hasHeading,width<760?!hasFooter:true,'one consistent control entry on work');
     await page.keyboard.press('Control+k');await page.locator('#mission-control').waitFor();await capture(page,'r5-review-control-'+role+'-'+width,true);await page.keyboard.press('Escape');
     for(const inventory of MACHINES){
       fixtureJob.machine=inventory.id;service.save();await refreshVisible(page);await page.locator('[name=workspace-machine]').selectOption(inventory.id);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
-      const selectedName=page.locator('#context-machine').locator('..').locator('.server-select-label');assert.equal(await selectedName.textContent(),inventory.id);assert.equal(await page.locator('#context-machine').evaluate(n=>getComputedStyle(n).color),'rgba(0, 0, 0, 0)','native selected text does not overlap the middle-ellipsis label');const suffix=selectedName.locator('.server-id-tail');if(await suffix.textContent()){const box=await suffix.boundingBox(),clip=await selectedName.boundingBox();assert.ok(box.width>0&&box.x>=clip.x-1&&box.x+box.width<=clip.x+clip.width+1,'compact selector retains the ID suffix');}
+      // A refresh can replace the label between lookup and boundingBox(). Read
+      // the live nodes, text, styles and both rectangles in one browser task.
+      const selection=await page.evaluate(()=>{
+        const select=document.querySelector('#context-machine'),label=select.parentElement.querySelector('.server-select-label'),suffix=label.querySelector('.server-id-tail');
+        const rect=node=>{if(!node.getClientRects().length)return null;const {x,y,width,height}=node.getBoundingClientRect();return {x,y,width,height};};
+        return {name:label.textContent,color:getComputedStyle(select).color,suffix:suffix.textContent,box:rect(suffix),clip:rect(label)};
+      });
+      assert.equal(selection.name,inventory.id);assert.equal(selection.color,'rgba(0, 0, 0, 0)','native selected text does not overlap the middle-ellipsis label');if(selection.suffix){const {box,clip}=selection;assert.ok(box.width>0&&box.x>=clip.x-1&&box.x+box.width<=clip.x+clip.width+1,'compact selector retains the ID suffix');}
       await capture(page,'r5-review-context-'+role+'-'+width+'-'+inventory.id);
       const row=page.locator('[data-workbench-job="'+fixtureJob.id+'"]');await row.locator('[data-job-mission]').click();await page.locator('#job-mission').waitFor();await noOverflow(page);assert.ok(await page.locator('#job-mission').evaluate(n=>n.scrollWidth<=n.clientWidth+1));
-      const names=await page.locator('#job-mission .server-id').allTextContents();assert.ok(names.includes(inventory.id));for(const hook of ['data-job-logs','data-job-output','data-job-cancel'])assert.ok(await page.locator('#job-mission ['+hook+']').isVisible());
+      const names=await page.evaluate(()=>[...document.querySelectorAll('#job-mission .server-id')].map(node=>node.textContent));assert.ok(names.includes(inventory.id));for(const hook of ['data-job-logs','data-job-output','data-job-cancel'])assert.ok(await page.locator('#job-mission ['+hook+']').isVisible());
       const timeline=await page.locator('#job-mission .wb-trajectory').boundingBox(),body=await page.locator('.r5-mission-body').boundingBox(),lastDot=await page.locator('#job-mission .wb-trajectory li:last-child .d').boundingBox();assert.ok(Math.abs(timeline.x+timeline.width-(body.x+body.width))<=1);assert.ok(Math.abs(lastDot.x+lastDot.width-(body.x+body.width))<=1,'timeline reaches content edge');
       await capture(page,'r5-review-mission-'+role+'-'+width+'-'+inventory.id,true);await page.keyboard.press('Escape');
     }
@@ -194,10 +201,15 @@ try{
     assert.equal(await page.locator('[name=dataset-machine]').evaluate(n=>getComputedStyle(n).color),'rgba(0, 0, 0, 0)','dataset selector renders one name');assert.equal(await page.locator('.dataset-matrix-heading [data-machine]').count(),MACHINES.length);assert.equal(await page.locator('#datasets-capacity>div>strong').innerText(),'502 GiB');assert.equal(await page.locator('#datasets-capacity>div>small').innerText(),'共 1024 GiB');assert.equal(await page.locator('.dataset-library .hero-label').count(),0);
     if(width<760){
       assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'list');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),false);assert.equal(await page.locator('.help-links').isVisible(),false,'phone datasets have no detached footer information mark');
-      for(const card of await page.locator('.dataset-card').all()){
-        assert.equal(await card.getAttribute('role'),'listitem');assert.deepEqual(await card.locator('.dataset-machine-label').allTextContents(),MACHINES.map(row=>row.id));
+      for(const [cardIndex,card] of (await page.locator('.dataset-card').all()).entries()){
+        const serverRows=await page.evaluate(index=>{
+          const card=document.querySelectorAll('.dataset-card')[index];
+          const rect=node=>{if(!node.getClientRects().length)return null;const {x,y,width,height}=node.getBoundingClientRect();return {x,y,width,height};};
+          return {names:[...card.querySelectorAll('.dataset-machine-label')].map(node=>node.textContent),locations:[...card.querySelectorAll('.dataset-location')].map(location=>({name:rect(location.querySelector('.dataset-machine-label')),state:rect(location.querySelector('.dataset-location-status'))}))};
+        },cardIndex);
+        assert.equal(await card.getAttribute('role'),'listitem');assert.deepEqual(serverRows.names,MACHINES.map(row=>row.id));
         const facts=await card.locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>({height:n.getBoundingClientRect().height,line:parseFloat(getComputedStyle(n).lineHeight),whiteSpace:getComputedStyle(n).whiteSpace})));assert.ok(facts.every(n=>n.height<=n.line+1&&n.whiteSpace==='nowrap'),'phone states stay on one line');
-        for(const location of await card.locator('.dataset-location').all()){const name=await location.locator('.dataset-machine-label').boundingBox(),state=await location.locator('.dataset-location-status').boundingBox();assert.ok(name.x+name.width<=state.x&&Math.abs(name.y+name.height/2-state.y-state.height/2)<=1,'phone ID and state share one line');}
+        for(const {name,state} of serverRows.locations){assert.ok(name.x+name.width<=state.x&&Math.abs(name.y+name.height/2-state.y-state.height/2)<=1,'phone ID and state share one line');}
         const selected=card.locator('.dataset-location.dataset-target'),fact=await selected.locator('.dataset-location-fact').boundingBox(),row=await selected.boundingBox();
         assert.equal(await selected.locator('[data-use-dataset]').count(),1);
         const prepare=selected.locator('[data-prepare-dataset]'),use=selected.locator('[data-use-dataset]');
