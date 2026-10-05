@@ -137,8 +137,12 @@ try{
   await phone.locator('[name=workspace-machine]').selectOption('gpu-1');await phone.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);await phone.locator('[name=workspace-project]').selectOption(project.project);await capture(phone,'work-member-390');
   await openSubmit(phone);await capture(phone,'submit-member-390',true);
   for(const [selector,name] of [['#custom-scheduling>summary','scheduling'],['.training-advanced>details:nth-child(2)>summary','elastic'],['.training-advanced>details:nth-child(3)>summary','placement']]){
-    await phone.locator(selector).click();await phone.locator('#work-submit-panel').waitFor({state:'visible'});await capture(phone,'submit-'+name+'-390',true);
-    assert.match(await phone.locator('#work-submit').evaluate(n=>getComputedStyle(n).transform),/-117/,'phone drill-down leaves the sheet at 30% parallax');await phone.locator('#close-submit-panel').click();assert.equal(await phone.locator('#work-submit-panel').isVisible(),false);
+    await phone.locator(selector).click();await phone.locator('#work-submit-panel').waitFor({state:'visible'});
+    // Sample the completed animation, before screenshot capture can alter the
+    // viewport. A wall-clock delay does not synchronize the animation timeline.
+    await phone.locator('#work-submit-panel').evaluate(async panel=>{await Promise.all([...panel.getAnimations(),...document.querySelector('#work-submit').getAnimations()].map(animation=>animation.finished));});
+    assert.match(await phone.locator('#work-submit').evaluate(n=>getComputedStyle(n).transform),/-117/,'phone drill-down leaves the sheet at 30% parallax');
+    await capture(phone,'submit-'+name+'-390',true);await phone.locator('#close-submit-panel').click();assert.equal(await phone.locator('#work-submit-panel').isVisible(),false);
   }
   await phone.keyboard.press('Escape');await phone.locator('#work-submit').waitFor({state:'hidden'});await phone.locator('.wb-focal .wb-job-name').click();await capture(phone,'job-overview-member-390',true);
   for(const tab of ['logs','diagnostics','output','notes']){await phone.locator('[data-job-tab='+tab+']').click();await capture(phone,'job-'+tab+'-member-390',true);await noOverflow(phone);}

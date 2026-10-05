@@ -241,8 +241,13 @@ try{
   await page.locator('[data-resource-root]').click();await page.locator('#host-maintenance').waitFor();
   assert.equal(await page.locator('#host-maintenance').getAttribute('open'),'');
   assert.equal(calls.filter(call=>call.operation.startsWith('terminal.')||call.operation.startsWith('jobs.')).length,0,'ROOT entry only reveals the existing administrator controls');
-  await page.locator('[data-nav=resources]').click();await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await selectResource(page,'gpu-1');await capture('resources-detail-admin-390');
+  await page.locator('[data-nav=resources]').click();await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await selectResource(page,'gpu-1');
+  // Measure the visible, settled sheet before screenshot capture can dispatch
+  // resize events or fast-forward its animation.
+  await page.locator('[data-resource-root]').waitFor({state:'visible'});
+  await page.locator('#resource-sheet').evaluate(async sheet=>{await Promise.all(sheet.getAnimations().map(animation=>animation.finished));});
   assert.ok((await page.locator('[data-resource-root]').boundingBox()).height>=44,'Phone administrator actions retain a 44px target');
+  await capture('resources-detail-admin-390');
   violations.push(...await page.evaluate(()=>resourceCSP));
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(violations,[]);
   checks.push('exact physical slots','selected server only','member/admin process columns','confirmed own-task fills','stale/partial/invalid/unauthorized states','sample-gated motion and reduced fallback','Mission Control selection','terminal context cancel/accept','320px and 390px tap targets, info-tip bounds and refresh focus','phone push, Escape and reserved live pill','PR5 maintenance overlay, monitoring, mobile detail and recovery','identity reset','ROOT entry makes no execution call','Portal CSP and self-hosted assets');
