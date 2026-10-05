@@ -89,6 +89,7 @@ try{
   if(process.env.UI_SCREENSHOTS){await mkdir(process.env.UI_SCREENSHOTS,{recursive:true});await admin.screenshot({path:join(process.env.UI_SCREENSHOTS,'topbar-long-account-'+width+'.png'),fullPage:false});}
  }
  headerUser.name=originalName;portal.service.save();await refreshPage(admin);await admin.setViewportSize({width:1440,height:1050});
+ assert.equal(await admin.locator('#profile-name').getAttribute('title'),originalName,'rerendering updates the full account-name title');
  await admin.locator('[data-nav=resources]').click();
  assert.equal(await admin.locator('.resource-card').count(),MACHINES.length);
  assert.equal(await admin.locator('.resource-tower').count(),MACHINES.reduce((total,machine)=>total+machine.cards,0));
