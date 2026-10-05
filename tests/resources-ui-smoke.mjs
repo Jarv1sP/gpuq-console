@@ -179,6 +179,8 @@ try{
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   for(const width of [390,320]){
     await page.setViewportSize({width,height:844});
+    const bay=await page.locator('[data-resource-card="0"]').evaluate(element=>({width:element.offsetWidth,height:element.offsetHeight}));
+    assert.ok(bay.width>=44&&bay.height>=44,`The visible hardware bays retain 44px tap targets at ${width}px: ${JSON.stringify(bay)}`);
     for(const id of ['memory','sample','quota']){
       const tip=page.locator(`[data-resource-info="${id}"]`);await tip.locator(':scope > summary').click();
       const box=await tip.locator('.resource-info-content').boundingBox();
@@ -191,7 +193,6 @@ try{
   await page.setViewportSize({width:390,height:844});
   previous=(await page.evaluate(()=>resourceAnimations)).length;
   await selectResource(page,'gpu-1');assert.equal(await page.locator('#resource-sheet').evaluate(element=>Math.round(element.getBoundingClientRect().height)),844);
-  const bay=await page.locator('[data-resource-card="0"]').boundingBox();assert.ok(bay.width>=44&&bay.height>=44,'The phone hardware bays retain 44px tap targets');
   await page.locator('[data-resource-gpu-picker]').selectOption('1');assert.equal(await page.locator('[data-resource-gpu="1"]').count(),1);await page.locator('[data-resource-gpu-picker]').selectOption('0');
   assert.equal(await page.locator('#resource-sheet .resource-detail [data-use-machine]').count(),0,'The pinned footer owns the phone workspace action');
   assert.ok((await page.evaluate(()=>resourceAnimations)).slice(previous).some(item=>item.options.duration===350));
@@ -219,7 +220,7 @@ try{
   assert.ok((await page.locator('[data-resource-root]').boundingBox()).height>=44,'Phone administrator actions retain a 44px target');
   violations.push(...await page.evaluate(()=>resourceCSP));
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(violations,[]);
-  checks.push('exact physical slots','selected server only','member/admin process columns','confirmed own-task fills','stale/partial/invalid/unauthorized states','sample-gated motion and reduced fallback','Mission Control selection','terminal context cancel/accept','phone push, Escape and reserved live pill','identity reset','ROOT entry makes no execution call','Portal CSP and self-hosted assets');
+  checks.push('exact physical slots','selected server only','member/admin process columns','confirmed own-task fills','stale/partial/invalid/unauthorized states','sample-gated motion and reduced fallback','Mission Control selection','terminal context cancel/accept','320px and 390px tap targets, info-tip bounds and refresh focus','phone push, Escape and reserved live pill','identity reset','ROOT entry makes no execution call','Portal CSP and self-hosted assets');
   await writeFile(join(screenshots,'resources-checks.json'),JSON.stringify({checks,errors,external,violations},null,2));
   console.log(JSON.stringify({status:'passed',checks,screenshots}));
 }finally{
