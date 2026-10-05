@@ -287,6 +287,27 @@ class OCITests(unittest.TestCase):
         for image in ('ubuntu:latest', 'docker.io/library/ubuntu', 'sha256:'+SHA):
             with self.assertRaises(ValueError): o.signature_policy_raw(image)
 
+    def test_short_runtime_owner_is_private_stable_and_not_a_database_migration(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as root:
+            manager = self.manager(); base = Path(root).resolve(); user = base/str(os.getuid()); user.mkdir(mode=0o700)
+            with patch.object(o, 'RUNTIME', base):
+                path = manager.runtime_temporary(); self.assertEqual(path, manager.runtime_temporary())
+                self.assertLess(len(os.fsencode(path))+len('/conmon-term.XXXXXX'),108)
+                self.assertEqual((path/'.owner').read_text(),manager.owner+'\n')
+                self.assertEqual(path.stat().st_mode&0o777,0o700)
+                self.assertIn(str(manager.folder/'tmp'),manager.command('version'))
+                (path/'.owner').write_text('f'*64+'\n')
+                with self.assertRaisesRegex(ValueError,'runtime owner'):manager.runtime_temporary()
+
+    def test_runtime_owner_symlink_and_mode_changes_are_rejected(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as root:
+            manager=self.manager();base=Path(root).resolve();(base/str(os.getuid())).mkdir(mode=0o700)
+            with patch.object(o,'RUNTIME',base):
+                path=manager.runtime_temporary();owner=path/'.owner';owner.chmod(0o644)
+                with self.assertRaises(ValueError):manager.runtime_temporary()
+                owner.unlink();owner.symlink_to('/etc/passwd')
+                with self.assertRaises(OSError):manager.runtime_temporary()
+
     def test_immutable_image_id_accepts_only_full_sha256(self):
         for value in (SHA, 'sha256:'+SHA):
             self.assertEqual(o.immutable_image_id(value), 'sha256:'+SHA)

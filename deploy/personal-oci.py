@@ -29,6 +29,7 @@ CDI = Path('/etc/cdi/gpuq-nvidia.json')
 ENGINE = Path('/etc/gpuq-console/personal-oci.conf')
 SIGNATURE_POLICY = Path('/etc/gpuq-console/personal-oci-policy.json')
 REGISTRY_DROPINS = Path('/etc/containers/registries.conf.d')
+RUNTIME = Path('/run/user')
 ENGINE_RAW = b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n[engine]\nremote = false\n'
 ANONYMOUS_AUTH_RAW = b'{"auths":{}}\n'
 ANONYMOUS_REGISTRIES_RAW = (b'credential-helpers = ["containers-auth.json"]\n'
@@ -159,14 +160,42 @@ class PersonalOCI:
             self.s.private_dir(self.folder/name, create=True)
         for name in ('home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d'):
             self.s.private_dir(self.folder/name, create=True)
+        self.runtime_tmp = self.runtime_temporary()
         self.env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': str(self.folder/'home'),
                     'XDG_CONFIG_HOME': str(self.folder/'home'), 'XDG_DATA_HOME': str(self.folder/'home'),
-                    'XDG_RUNTIME_DIR': '/run/user/'+str(os.getuid()), 'TMPDIR': str(self.folder/'tmp'),
+                    'XDG_RUNTIME_DIR': '/run/user/'+str(os.getuid()), 'TMPDIR': str(self.runtime_tmp),
                     'REGISTRY_AUTH_FILE': str(self.folder/'anonymous-registry-auth.json'), 'LANG': 'C.UTF-8',
                     'CONTAINERS_REGISTRIES_CONF': str(self.folder/'anonymous-registries.conf'),
                     'CONTAINERS_CONF': str(ENGINE)}
         with self.registry_auth():
             pass
+
+    def runtime_temporary(self):
+        """Short private console-socket path; keep persistent engine DB paths."""
+        candidate = RUNTIME/str(os.getuid())/'gpuq-oci'/self.owner[:32]
+        need(len(os.fsencode(candidate)) + len('/conmon-term.XXXXXX') < 108, 'OCI runtime console path too long')
+        base = self.s.private_dir(RUNTIME/str(os.getuid()))
+        parent = self.s.private_dir(base/'gpuq-oci', create=True)
+        path = self.s.private_dir(parent/self.owner[:32], create=True)
+        expected = (self.owner+'\n').encode()
+        with self.s.directory(path) as directory:
+            try: fd = os.open('.owner', os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=directory)
+            except FileNotFoundError:
+                created = os.open('.owner', os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                try:
+                    need(os.write(created, expected) == len(expected), 'OCI runtime owner creation incomplete')
+                    os.fsync(created)
+                finally: os.close(created)
+                os.fsync(directory)
+                fd = os.open('.owner', os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=directory)
+            try:
+                before = os.fstat(fd)
+                need(stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid()
+                     and stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1
+                     and before.st_size == len(expected) and os.read(fd, len(expected)+1) == expected
+                     and self.s.stamp(os.fstat(fd)) == self.s.stamp(before), 'OCI runtime owner identity changed')
+            finally: os.close(fd)
+        return path
 
     @contextlib.contextmanager
     def registry_auth(self):
@@ -176,6 +205,9 @@ class PersonalOCI:
              and self.env.get('REGISTRY_AUTH_FILE') == str(self.folder/auth)
              and self.env.get('CONTAINERS_REGISTRIES_CONF') == str(self.folder/registries),
              'Anonymous OCI authentication path changed')
+        if hasattr(self, 'runtime_tmp'):
+            need(self.env.get('TMPDIR') == str(self.runtime_tmp) and self.runtime_temporary() == self.runtime_tmp,
+                 'OCI private runtime path changed')
         with self.registry_file(auth, ANONYMOUS_AUTH_RAW) as authfd, \
              self.registry_file(registries, ANONYMOUS_REGISTRIES_RAW) as registriesfd:
             # Podman 5.8 still loads both drop-in directories when an explicit
