@@ -330,6 +330,7 @@
 #page-datasets .dataset-source-tabs button{min-height:56px;padding:12px 10px}
 #page-datasets .dataset-upload-heading{display:flex;align-items:center;gap:10px}
 #page-datasets .dataset-upload-notes{display:flex;align-items:center;margin-top:16px}
+#page-datasets .dataset-matrix-heading>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #page-datasets .dataset-sheet-head{background:var(--bg-1)}
 @media(max-width:759px){
   #page-datasets .datasets-ledger-strip{gap:20px;grid-template-columns:1fr 1fr;padding-bottom:20px;margin-top:16px}

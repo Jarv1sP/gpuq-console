@@ -102,3 +102,16 @@
 @media(max-width:759px){#submit-receipt-actions .button{min-height:44px}.sheet-footer>div{min-width:0;width:100%}}
 .ui-info-content{pointer-events:none}
 .ui-info-content :is(a,button,input,select,textarea){pointer-events:auto}
+/* Inventory IDs remain complete in accessible text and native name hints. */
+.sb .server-id{display:inline-block;min-width:0;max-width:18ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+.sb .cs-server-list{max-width:360px;min-width:0;gap:10px}.sb .cs-server-label{flex-shrink:0}.sb .cs-server{min-width:0;flex:1 1 0}.sb .cs-server-id{min-width:0;max-width:9ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sb .cs-dot{flex-shrink:0}
+.sb .mc-server-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px}.sb .mc-server-head strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb #shell-context label{min-width:0}.sb #shell-context select{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sb .r5-mission-identity>p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .r5-mission,.sb .r5-mission::backdrop{background:#000}.sb .r5-mission-label{margin-left:auto;margin-right:32px}
+@media(min-width:1100px){
+ .sb .r5-mission-focus{grid-template-columns:minmax(0,1fr) 320px;align-items:start;gap:24px 64px}
+ .sb .r5-mission-progress{grid-column:1;grid-row:1}.sb .r5-mission-percentage{font-size:clamp(208px,20.833vw,300px);line-height:1}
+ .sb .r5-mission-time{grid-column:1;grid-row:2;grid-template-columns:1fr 1fr;border-top:1px solid var(--line);padding-top:20px;gap:32px}.sb .r5-mission-time strong{font-size:30px}
+ .sb .r5-mission-gpus{grid-column:2;grid-row:1/span 2;border-left:1px solid var(--line);padding-left:28px}.sb .r5-mission-metrics{max-width:calc(100% - 384px);margin-top:0}
+}
+@media(max-width:759px){.sb #shell-context label{flex:1;max-width:calc((100vw - 50px)/2)}.sb #shell-context select{flex:1;width:0}.sb .r5-mission-head .wordmark{display:none}.sb .r5-mission-label{margin:0 auto 0 0}}
