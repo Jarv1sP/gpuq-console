@@ -288,6 +288,55 @@ class Transfers(unittest.TestCase):
         self.assertEqual(self.dst.cancel(self.control())['state'],'CANCELING');self.active=False
         self.assertEqual(self.dst.status(self.control())['state'],'CANCELED')
         with self.assertRaisesRegex(ValueError,'Canceled'):self.dst.resume(self.control())
+    def test_confirmed_cancel_overrides_old_failure_without_rewriting_history(self):
+        self.dst.start(self.args)
+        for state in ('FAILED','PAUSED'):
+            with self.subTest(state=state):
+                result={'attempt':1,'state':state,'error':'old worker failure'}
+                self.target.atomic_json(self.dst.path(self.key,'.result.json'),result)
+                before=self.dst.path(self.key,'.result.json').read_bytes()
+                self.assertEqual(self.dst.cancel(self.control())['state'],'CANCELED')
+                self.assertEqual(self.dst.path(self.key,'.result.json').read_bytes(),before)
+                proof=self.dst.confirm_source_release(self.control())
+                self.assertEqual(proof['state'],'CANCELED');self.assertTrue(proof['confirmedStopped'])
+                self.assertTrue(self.source.dataset_cache()[1]._leases('shared',self.version))
+        with self.assertRaisesRegex(ValueError,'finalized'):self.dst.resume(self.control())
+    def test_cancel_handles_collected_unit_but_still_requires_activity_proof(self):
+        self.dst.start(self.args)
+        self.target.atomic_json(self.dst.path(self.key,'.result.json'),{'attempt':1,'state':'FAILED'})
+        with patch.object(self.target,'run',side_effect=ValueError('Unit is not loaded')):
+            for active,expected in ((False,'CANCELED'),(True,'CANCELING'),(None,'UNKNOWN')):
+                with self.subTest(active=active):
+                    self.active=active;self.assertEqual(self.dst.cancel(self.control())['state'],expected)
+                    if active is not False:
+                        with self.assertRaisesRegex(ValueError,'confirmed'):
+                            self.dst.confirm_source_release(self.control())
+        self.assertTrue(self.source.dataset_cache()[1]._leases('shared',self.version))
+        self.assertEqual(len(self.calls),1,'Cancellation must never relaunch a transfer')
+    def test_cancel_marker_preserves_success_and_ignores_stale_attempt_result(self):
+        self.dst.start(self.args)
+        self.target.atomic_json(self.dst.path(self.key,'.result.json'),{'attempt':1,'state':'SUCCEEDED'})
+        with patch.object(self.target,'run') as stop:
+            self.assertEqual(self.dst.cancel(self.control())['state'],'SUCCEEDED');stop.assert_not_called()
+        self.target.atomic_json(self.dst.path(self.key,'.cancel'),{'userId':USER})
+        self.assertEqual(self.dst.status(self.control())['state'],'SUCCEEDED')
+        self.target.atomic_json(self.dst.path(self.key,'.result.json'),{'attempt':2,'state':'SUCCEEDED'})
+        self.assertEqual(self.dst.status(self.control())['state'],'CANCELED')
+    def test_not_found_activity_requires_complete_quiescent_manager_receipt(self):
+        # Exercise the real activity parser, not the fixture's lifecycle mock.
+        probe=T.TransferJobs.__new__(T.TransferJobs);probe.n=SimpleNamespace(ENV={})
+        unit=self.dst.unit(self.key,1)
+        receipt='LoadState=not-found\nActiveState=inactive\nMainPID=0\nControlGroup=\n'
+        for code in (0,1):
+            with self.subTest(code=code),patch.object(T.subprocess,'run',return_value=SimpleNamespace(returncode=code,stdout=receipt)):
+                self.assertIs(probe.activity(unit),False)
+        for output,code,expected in ((receipt,2,None),(receipt.replace('MainPID=0\n',''),0,None),
+                (receipt.replace('MainPID=0','MainPID=123'),0,True),
+                (receipt.replace('ActiveState=inactive','ActiveState=activating'),0,True)):
+            with self.subTest(output=output,code=code),patch.object(T.subprocess,'run',return_value=SimpleNamespace(returncode=code,stdout=output)):
+                self.assertIs(probe.activity(unit),expected)
+        with patch.object(T.subprocess,'run',side_effect=subprocess.TimeoutExpired('systemctl',5)):
+            self.assertIsNone(probe.activity(unit))
     def test_pin_auth_ownership_readonly_and_identity_fences(self):
         client=T.PeerClient({**self.target.CONFIG['transferPeers']['gpu-1'],'certificateSha256':'0'*64},self.args['source'])
         with self.assertRaisesRegex(ValueError,'certificate'):client.call('info')

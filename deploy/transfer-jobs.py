@@ -440,8 +440,12 @@ class TransferJobs:
             progress = {}
         canceled = self.path(spec['id'], '.cancel').exists()
         stopped = 'PAUSED' if self.path(spec['id'], '.started-'+str(spec['attempt'])).exists() else 'UNKNOWN'
+        # A durable owner cancellation fences a stopped failed/paused attempt;
+        # its older result must not keep cancellation pending forever. Preserve
+        # completed success, and never infer a stop from the marker alone.
+        finished = 'CANCELED' if canceled and result.get('state') != 'SUCCEEDED' else result.get('state', stopped)
         state = ('CANCELING' if canceled else progress.get('state', 'RUNNING')) if active is True else (
-            result.get('state', 'CANCELED' if canceled else stopped) if active is False else 'UNKNOWN')
+            finished if active is False else 'UNKNOWN')
         if active is True and state in TERMINAL:
             state = 'VERIFYING'
         return {'id': spec['id'], 'state': state, 'attempt': spec['attempt'], 'route': 'lan',
@@ -553,7 +557,10 @@ class TransferJobs:
             self.n.atomic_json(self.path(spec['id'], '.cancel'), {'at': time.time(), 'userId': args['userId']})
             try:
                 self.n.run(['/usr/bin/systemctl', '--user', 'stop', self.unit(spec['id'], spec['attempt'])], timeout=10)
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, ValueError, subprocess.SubprocessError):
+                # The executor wraps nonzero systemctl exits as ValueError,
+                # including an already-collected unit. Fresh activity below,
+                # not the stop command's exit status, confirms termination.
                 pass
             return self.status(args)
 
