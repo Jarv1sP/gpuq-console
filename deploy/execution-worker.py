@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Local Unix socket -> fixed SSH forced commands. No public listener or shell."""
-import hashlib, ipaddress, json, os, re, select, socketserver, stat, subprocess, threading, time
+import hashlib, ipaddress, json, os, re, select, socketserver, stat, subprocess, sys, threading, time
 from collections import deque
 from pathlib import Path
 BASE=Path('/opt/gpuq-console/executor')
@@ -133,11 +133,15 @@ class TerminalChannel:
             if self.dead or len(self.waiters)>=32:raise ValueError('Terminal stream unavailable')
             ticket=object();self.waiters.append(ticket);return ticket
 
-    def retire_if_idle(self,now,force=False):
+    def retire_if_idle(self,now,force=False,*,defer_close=False):
         with self.condition:
             if self.active or self.waiters:return False
             if not force and now-self.last<14 and now-self.created<55:return False
-            self.dead=True;self.close();return True
+            # Fence reservations immediately; the owned SSH process can then
+            # be closed without holding the pool's cross-session admission lock.
+            self.dead=True
+        if not defer_close:self.close()
+        return True
 
     def close(self):
         process=self.process;self.process=None;self.pending.clear()
@@ -229,13 +233,26 @@ class TerminalChannel:
 
 class TerminalChannels:
     def __init__(self,connection):self.connection=connection;self.channels={};self.guard=threading.Lock();self.reaper=None
+    @staticmethod
+    def close_retired(channels):
+        for channel in channels:
+            try:channel.close()
+            except (OSError,subprocess.TimeoutExpired):
+                # close() releases the owned semaphore slot in finally. A
+                # cleanup failure must not strand another session's reservation.
+                print('Terminal SSH client cleanup failed',file=sys.stderr,flush=True)
     def reap(self):
         while True:
             time.sleep(1)
+            retired=[]
             with self.guard:
                 for key,channel in list(self.channels.items()):
-                    if channel.retire_if_idle(time.monotonic()):del self.channels[key]
-                if not self.channels:self.reaper=None;return
+                    if channel.retire_if_idle(time.monotonic(),defer_close=True):
+                        del self.channels[key];retired.append(channel)
+                done=not self.channels
+                if done:self.reaper=None
+            self.close_retired(retired)
+            if done:return
     def call(self,host,args):
         if not isinstance(args,dict) or not {'userId','username','id','clientId','writerToken'}<=set(args) or set(args)-TERMINAL_CONTEXT_FIELDS-{'input','offset','rows','cols'}:
             raise ValueError('Invalid terminal stream fields')
@@ -245,10 +262,10 @@ class TerminalChannels:
             raise ValueError('Invalid terminal stream context')
         name,_,_,_=self.connection.identity(host)
         key=(name,hashlib.sha256(json.dumps(context,sort_keys=True,separators=(',',':')).encode()).hexdigest())
-        deadline=time.monotonic()+27
+        deadline=time.monotonic()+27;retired=[]
         with self.guard:
-            for old,channel in list(self.channels.items()):
-                if channel.retire_if_idle(time.monotonic()):del self.channels[old]
+            # The reaper owns unrelated expired contexts. Existing exchanges
+            # must not pay another terminal's SSH shutdown latency on each key.
             channel=self.channels.get(key)
             if channel is None or channel.dead:
                 peers=[(k,v) for k,v in self.channels.items() if k[0]==name]
@@ -256,12 +273,16 @@ class TerminalChannels:
                 # Normal RPCs retain their own master and eight-channel budget.
                 if len(peers)>=6:
                     for old,candidate in sorted(peers,key=lambda item:item[1].last):
-                        if candidate.retire_if_idle(time.monotonic(),force=True):del self.channels[old];break
+                        if candidate.retire_if_idle(time.monotonic(),force=True,defer_close=True):
+                            del self.channels[old];retired.append(candidate);break
                     else:raise TerminalCapacity('Terminal stream capacity reached')
                 channel=TerminalChannel(self.connection,host,context);self.channels[key]=channel
             ticket=channel.reserve()
             if self.reaper is None:
                 self.reaper=threading.Thread(target=self.reap,daemon=True);self.reaper.start()
+        # Retired contexts keep their slot until the SSH process is closed;
+        # active/waiting contexts cannot be evicted and the eight-slot cap stays.
+        self.close_retired(retired)
         return channel.exchange(ticket,args,deadline)
 
 TERMINAL_CHANNELS=TerminalChannels(TERMINAL_CONNECTIONS)

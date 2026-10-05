@@ -169,6 +169,73 @@ class BridgeStreams(unittest.TestCase):
     def test_idle_and_ttl_rotate_before_new_input(self):
         a=self.call();channel=next(iter(self.pool.channels.values()));channel.created-=56
         b=self.call('next');self.assertNotEqual(a['result']['pid'],b['result']['pid']);self.assertEqual(self.conn.starts,2)
+    def test_reaper_closes_retired_process_outside_global_admission_lock(self):
+        self.pool.reaper=object()  # Drive one deterministic sweep, no background thread.
+        self.call();channel=next(iter(self.pool.channels.values()));channel.last-=15
+        original=channel.close
+        def checked_close():
+            acquired=self.pool.guard.acquire(blocking=False)
+            if acquired:self.pool.guard.release()
+            self.assertTrue(acquired,'SSH process cleanup must not hold every terminal admission lock')
+            original()
+        clock=SimpleNamespace(monotonic=time.monotonic,sleep=lambda _:None)
+        with patch.object(channel,'close',side_effect=checked_close),patch.dict(self.pool.reap.__globals__,time=clock):
+            self.pool.reap()
+        self.assertFalse(self.pool.channels);self.assertIsNone(self.pool.reaper)
+    def test_warm_exchange_does_not_synchronously_close_unrelated_expired_context(self):
+        self.pool.reaper=object()
+        warm=self.call();other=context();self.call(ctx=other)
+        stale=next(c for c in self.pool.channels.values() if c.context==other);stale.last-=15
+        with patch.object(stale,'close',wraps=stale.close) as close:
+            result=self.call('still-warm');close.assert_not_called()
+        self.assertEqual(result['result']['pid'],warm['result']['pid'])
+    def test_capacity_eviction_releases_global_lock_before_process_cleanup(self):
+        self.pool.reaper=object()
+        for _ in range(6):self.call(ctx=context())
+        oldest=min(self.pool.channels.values(),key=lambda c:c.last);original=oldest.close
+        def checked_close():
+            acquired=self.pool.guard.acquire(blocking=False)
+            if acquired:self.pool.guard.release()
+            self.assertTrue(acquired,'capacity cleanup must not block unrelated terminal sessions')
+            original()
+        with patch.object(oldest,'close',side_effect=checked_close):
+            self.assertEqual(self.call('new-context')['result']['input'],'new-context')
+        self.assertLessEqual(len(self.pool.channels),6)
+    def test_slow_capacity_cleanup_does_not_delay_another_live_session(self):
+        self.pool.reaper=object()
+        for _ in range(5):self.call(ctx=context())
+        warm=self.call();oldest=min(self.pool.channels.values(),key=lambda c:c.last)
+        entered=threading.Event();release=threading.Event();original=oldest.close
+        def slow_close():
+            entered.set()
+            if not release.wait(3):raise AssertionError('test cleanup was not released')
+            original()
+        with patch.object(oldest,'close',side_effect=slow_close),ThreadPoolExecutor(max_workers=2) as threads:
+            eviction=threads.submit(self.call,'new-context',context())
+            try:
+                self.assertTrue(entered.wait(1))
+                live=threads.submit(self.call,'live-input')
+                result=live.result(timeout=.5)
+                self.assertEqual(result['result']['pid'],warm['result']['pid'])
+                self.assertEqual(result['result']['input'],'live-input')
+                self.assertFalse(eviction.done(),'the old cleanup remains stalled during the live exchange')
+            finally:release.set()
+            self.assertEqual(eviction.result(timeout=2)['result']['input'],'new-context')
+    def test_retirement_fence_refuses_new_reservations_but_does_not_drop_slots_early(self):
+        self.pool.reaper=object();self.call();channel=next(iter(self.pool.channels.values()))
+        self.assertTrue(channel.retire_if_idle(time.monotonic(),force=True,defer_close=True))
+        with self.assertRaisesRegex(ValueError,'unavailable'):channel.reserve()
+        self.assertIsNotNone(channel.slot);self.assertIsNotNone(channel.process)
+        channel.close();self.assertIsNone(channel.slot);self.assertIsNone(channel.process)
+    def test_cleanup_error_does_not_strand_a_new_context_reservation(self):
+        self.pool.reaper=object()
+        for _ in range(6):self.call(ctx=context())
+        oldest=min(self.pool.channels.values(),key=lambda c:c.last);original=oldest.close
+        def failed_cleanup():original();raise OSError('synthetic cleanup failure')
+        with patch.object(oldest,'close',side_effect=failed_cleanup),patch('sys.stderr',new=io.StringIO()) as error:
+            self.assertEqual(self.call('live')['result']['input'],'live')
+        self.assertEqual(error.getvalue(),'Terminal SSH client cleanup failed\n')
+        self.assertTrue(all(not channel.waiters for channel in self.pool.channels.values()))
     def test_cap_bounded_context_and_input(self):
         with self.assertRaisesRegex(ValueError,'frame too large'):self.call('x'*32768)
         for bad in ({**self.ctx,'id':'bad'},{**self.ctx,'project':'x'*5000}):
