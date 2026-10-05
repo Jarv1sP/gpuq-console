@@ -117,6 +117,9 @@ try{
   assert.equal(await resourceCard(page,'gpu-1').locator('.resource-tower-bar.unknown').count(),8);
   assert.match(await resourceCard(page,'gpu-1').textContent(),/占用未确认/);
   await capture('resources-partial-1440');
+  const partialHeight=await page.evaluate(()=>document.documentElement.scrollHeight);
+  assert.ok(partialHeight<=2200,'Partial inventory must stay within the desktop height budget: '+partialHeight);
+  checks.push({partialHeight});
   monitor=snapshot();monitor.hosts[0].gpus.push({...monitor.hosts[0].gpus[0]});await refreshResources();
   assert.equal(await page.locator('[data-gpu-index]').count(),0);assert.equal(await resourceCard(page,'gpu-1').locator('.resource-fill').count(),0);
   monitor=snapshot();monitor.stale=true;await refreshResources();

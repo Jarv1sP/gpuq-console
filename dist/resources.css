@@ -71,7 +71,7 @@
 .sb :is(.resource-process-list,.resource-full-metrics)>summary::after,.sb .resource-detail .node-queue>summary::after{content:"›";font-size:18px;margin-left:auto}
 .sb :is(.resource-process-list,.resource-full-metrics)[open]>summary::after,.sb .resource-detail .node-queue[open]>summary::after{transform:rotate(90deg)}
 .sb :is(.resource-process-list,.resource-full-metrics)>summary span{font-size:11px;color:var(--ink-3);font-weight:400}
-.sb .resource-process-scroll{overflow:auto;max-height:320px;overscroll-behavior:contain;scrollbar-width:thin;min-width:0}
+.sb .resource-process-scroll{overflow:auto;max-height:280px;overscroll-behavior:contain;scrollbar-width:thin;min-width:0}
 .sb .resource-process-table{font-size:13px;min-width:710px}
 .sb .resource-process-table th{font-size:11px;color:var(--ink-3);font-weight:400;position:sticky;top:0;background:var(--bg);z-index:1}
 .sb .resource-process-table :is(th,td){padding:12px 10px;border-bottom:1px solid var(--line);text-align:left;line-height:1.6;vertical-align:top}
