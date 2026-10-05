@@ -53,6 +53,6 @@ test('scheduler text and identities are escaped and administrators cannot open o
 test('original node queue is readonly, reports raw priorities and unknown policy without claiming control',()=>{
   const machine={id:'gpu-1',cards:1,model:'GPU',memory:'24 GiB'},snapshot={stale:false,checkedAt:'2026-09-29T08:00:00Z',hosts:[{id:machine.id,reachable:true,gpus:[],gpuq:{connected:true,jobs:[{id:'J1',name:'legacy',state:'PENDING',priority:0,state_reason:'<pending>'},{id:'J2',name:'external',state:'RUNNING'}]}}]};
   const html=resourceCards({machines:[machine],limits:{'gpu-1':1},snapshot,admin:true,production:true});
-  assert.match(html,/调度记录，只读/);assert.match(html,/服务器原始档位/);assert.match(html,/P0（原队列）/);assert.match(html,/让位策略：未提供/);assert.match(html,/&lt;pending&gt;/);assert.doesNotMatch(html,/data-job-priority|data-job-cancel/);
+  assert.match(html,/任务记录 · 2 条/);assert.match(html,/data-resource-info="gpu-1:queue-info"/);assert.match(html,/记录只供查看/);assert.match(html,/优先级和让位方式显示服务器返回的值/);assert.match(html,/P0（原队列）/);assert.match(html,/让位策略：未提供/);assert.match(html,/&lt;pending&gt;/);assert.doesNotMatch(html,/data-job-priority|data-job-cancel/);
   const member=resourceCards({machines:[machine],limits:{'gpu-1':1},snapshot,production:true});assert.doesNotMatch(member,/legacy|external|J1|J2/);
 });

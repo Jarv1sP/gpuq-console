@@ -6,7 +6,7 @@ const snapshot={checkedAt:new Date().toISOString(),stale:false,hosts:[{id:'gpu-1
 test('process priorities are displayed only when matched; member view omits job identity',()=>{
  const data=structuredClone(snapshot);data.hosts[0].gpus[0].processes.push({pid:43,memoryUsedMiB:2,scheduling:{priority:0,jobId:'private-job'}});
  const html=resourceCards({machines:[machine],limits:{'gpu-1':1},snapshot:data,admin:true,production:true});
- assert.match(html,/P0（原队列）/);assert.match(html,/未确认 \/ 未纳管/);assert.match(html,/private-job/);
+ assert.match(html,/P0（原队列）/);assert.match(html,/未确认/);assert.match(html,/private-job/);
  const member=resourceCards({machines:[machine],limits:{'gpu-1':1},snapshot:data,production:true});assert.ok(!member.includes('private-job'));
 });
 test('resource display distinguishes zero, unknown and stale and escapes process values',()=>{
@@ -16,13 +16,13 @@ test('resource display distinguishes zero, unknown and stale and escapes process
 });
 test('resource page never renders unapproved card or private process fields for a member',()=>{
  const html=resourceCards({machines:[machine],limits:{'gpu-1':1},snapshot,production:true});assert.ok(!html.includes('other-owner'));assert.ok(!html.includes('alert(1)'));assert.match(html,/>42</);
- const denied=resourceCards({machines:[machine],snapshot,production:true});assert.ok(!denied.includes('data-gpu-index'));assert.match(denied,/未授权查看监控/);assert.match(denied,/disabled/);
+ const denied=resourceCards({machines:[machine],snapshot,production:true});assert.ok(!denied.includes('data-gpu-index'));assert.match(denied,/未授权/);assert.match(denied,/disabled/);
 });
 
 test('fleet preserves physical capacity while only the selected server reveals detail',()=>{
  const machines=[machine,{...machine,id:'gpu-2',cards:2},{...machine,id:'gpu-3',cards:6}];
  const html=resourceCards({machines,selectedMachine:'gpu-2',snapshot,production:true,admin:true});
- assert.equal((html.match(/class="resource-tower"/g)||[]).length,9);
+ assert.equal((html.match(/class="resource-tower(?: [^"]*)?"/g)||[]).length,9);
  assert.equal((html.match(/data-resource-selected=/g)||[]).length,1);
  assert.match(html,/data-resource-selected="gpu-2"/);
  assert.ok(!html.includes('>42</'),'Unselected server process data stays out of the detail');
@@ -57,7 +57,7 @@ test('unknown memory is not a zero fill and monitoring does not prove scheduler 
  const data=structuredClone(snapshot);Object.assign(data.hosts[0].gpus[0],{memoryUsedMiB:null,processes:[]});data.hosts[0].gpuq={connected:false};
  const html=resourceCards({machines:[machine],limits:{'gpu-1':1},snapshot:data,production:true});
  assert.match(html,/resource-tower-bar unknown/);assert.doesNotMatch(html,/data-resource-level=/);
- assert.match(html,/调度器不可用/);assert.match(html,/监控在线/);
+ assert.match(html,/训练连接不可用/);assert.match(html,/监控在线/);
  assert.doesNotMatch(html,/可立即启动/);
 });
 

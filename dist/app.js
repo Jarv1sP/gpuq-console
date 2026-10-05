@@ -51,10 +51,10 @@ function render(preserve=false){
   $('#edit-profile').hidden=!logged||store.production&&store.data?.taskMetadata?.version!==1;
   if(!logged)$('#profile-dialog').close();
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
-  const titles={me:['我的','账号、额度与个人工作区。'],transfers:['传输任务','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览','查看每张 GPU 的使用情况，选择适合的服务器。'],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
+  const titles={me:['我的','账号、额度与个人工作区。'],transfers:['传输任务','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=titles[page][1];$('#breadcrumb').textContent=titles[page][0];
-  const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
-  const monitorNotice=logged&&store.production&&store.data?.gpuq?.stale?'监控已过期：显卡占用为未知；任务结束与额度释放以调度器核对为准。':'';
+  const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?page==='resources'?'演示模式，无真实采集。':'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?page==='resources'?'暂无额度，等待管理员授权。':'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
+  const monitorNotice=logged&&store.production&&store.data?.gpuq?.stale&&page!=='resources'?'监控已过期：显卡占用为未知；任务结束与额度释放以调度器核对为准。':'';
   $('#mode-note').textContent=[note,monitorNotice].filter(Boolean).join(' ');$('.demo-note').hidden=!note&&!monitorNotice;
   renderOperationalMaintenance();
   renderTransfers(page==='transfers');renderResources();renderExecution();renderDatasets();renderCommunity(page==='community');renderMaintenance(page==='maintenance');
@@ -75,8 +75,9 @@ function render(preserve=false){
 }
 function renderResources(){
   const u=own(),limits=u?.limits||{};
-  $('#resource-summary').textContent=u?`我的额度：${u.total} 张 · 已授权 ${Object.values(limits).filter(value=>value>0).length} 台 · 实验室共 ${capacity} 张`:'登录后查看个人额度';
+  $('#resource-summary').textContent=u?`额度 ${u.total} 张 · ${Object.values(limits).filter(value=>value>0).length} 台已授权`:'登录后查看额度';
   $('#monitor-status').textContent=monitorSummary(store.data?.gpuq,store.production);
+  $('#monitor-status').title=store.data?.gpuq?.checkedAt||'';
   renderResourceView();
 }
 function filteredUsers(){return [...store.users].filter(u=>filter!=='pending'||pending(u)).sort((a,b)=>Number(pending(b))-Number(pending(a))||a.username.localeCompare(b.username,'zh-CN'));}

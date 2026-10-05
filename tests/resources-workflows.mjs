@@ -5,6 +5,7 @@ export const resourceDetail=(page,id)=>page.locator(`.resource-detail[data-resou
 export async function selectResource(page,id,{metrics=false}={}){
   if(await page.locator('#resource-sheet[open]').count())await page.locator('[data-resource-back]').click();
   await resourceCard(page,id).locator('.resource-select').click();
+  if(page.viewportSize()?.width<760&&await page.locator('#resource-sheet[open]').count()===0)await resourceCard(page,id).locator('.resource-select').click();
   const detail=resourceDetail(page,id);await detail.waitFor({state:'visible'});
   if(metrics){const full=detail.locator(`[data-resource-detail="${id}:metrics"]`);if(await full.count()&&await full.getAttribute('open')===null)await full.locator('summary').first().click();}
   return detail;

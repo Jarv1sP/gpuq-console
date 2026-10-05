@@ -84,10 +84,10 @@ try{
  for(const expected of [/#0/,/RTX 5090/,/73%/,/8\.0\s*\/\s*32\.0/,/61\s*°C/,/221\s*W\s*\/\s*575\s*W/])assert.match(gpuText,expected);
  const gpu1=resourceDetail(admin,'gpu-1').locator('[data-gpu-index="1"]');
  assert.match(await gpu1.textContent(),/0%/);assert.match(await gpu1.textContent(),/0\.0\s*\/\s*32\.0/);
- assert.match(await admin.locator('#monitor-status').textContent(),/最近采集/);
- assert.match(await admin.locator('#monitor-status').textContent(),/\d{4}/);
+ assert.match(await admin.locator('#monitor-status').textContent(),/更新于/);
+ assert.match(await admin.locator('#monitor-status').getAttribute('title'),/\d{4}/);
  const detail=admin.locator('details[data-resource-detail="gpu-1:0"]');
- await detail.locator('summary').click();
+ await detail.locator(':scope > summary').click();
  const processText=await detail.locator('.process-table').textContent();
  assert.match(processText,new RegExp(String(processPid)));assert.match(processText,/8192/);
  assert.ok(processText.includes(processName));assert.ok(processText.includes(processOwner));
@@ -108,18 +108,18 @@ try{
  assert.equal(await unavailable.locator('progress').count(),0);
  await selectResource(admin,'gpu-4');
  assert.equal(await resourceDetail(admin,'gpu-4').locator('[data-gpu-index]').count(),0);
- assert.match(await resourceDetail(admin,'gpu-4').textContent(),/不代表 GPU 空闲/);
+ assert.match(await resourceDetail(admin,'gpu-4').textContent(),/状态未知/);
  await selectResource(admin,'gpu-1',{metrics:true});
  await saveSnapshot(snapshot(new Date(Date.now()-10*60*1000).toISOString()));await refreshPage(admin);
  await admin.locator('#monitor-status').filter({hasText:'已过期'}).waitFor();
  assert.equal(await admin.locator('[data-gpu-index]').count(),0);
- assert.match(await resourceDetail(admin,'gpu-1').textContent(),/不代表 GPU 空闲/);
+ assert.match(await resourceDetail(admin,'gpu-1').textContent(),/状态未知/);
  await saveSnapshot();await refreshPage(admin);await gpu0.waitFor();
  await admin.locator('[data-nav=users]').click();assert.equal(await admin.locator('#add-user').count(),0);
  await admin.locator('.management-toolbar [data-action=invites]').click();await admin.locator('[data-action=rotate-invite]').click();await admin.locator('#confirm-action').click();const code=await admin.locator('#current-invite').inputValue();assert.ok(code.startsWith('GPUQ-U-'));
  await admin.locator('[data-close=invites-dialog]').click();await admin.reload();await admin.locator('.management-toolbar [data-action=invites]').click();assert.equal(await admin.locator('#current-invite').inputValue(),code);await admin.locator('[data-close=invites-dialog]').click();
  await member.goto(origin);await member.locator('#open-register').click();for(const [name,value] of Object.entries({username:'验收同学',password,confirm:password,invite:code}))await member.locator(`#register-form [name=${name}]`).fill(value);await member.locator('#register-form [type=submit]').click();await member.locator('#register-dialog').waitFor({state:'hidden'});
- assert.equal(await member.locator('[data-nav=users]').isVisible(),false);assert.equal(await member.locator('#page-resources').isVisible(),true);assert.match(await member.locator('#resource-summary').textContent(),/我的额度：0/);assert.equal(await member.locator('[data-use-machine]:enabled').count(),0);
+ assert.equal(await member.locator('[data-nav=users]').isVisible(),false);assert.equal(await member.locator('#page-resources').isVisible(),true);assert.match(await member.locator('#resource-summary').textContent(),/额度 0 张/);assert.equal(await member.locator('[data-use-machine]:enabled').count(),0);
  assert.equal(await member.locator('.resource-card').count(),MACHINES.length);
  assert.equal(await member.locator('[data-gpu-index]').count(),0);
  assert.equal(await member.locator('details[data-resource-detail]').count(),0);
@@ -129,17 +129,17 @@ try{
  // Verify automatic registration discovery, without pressing refresh.
  await admin.locator('[data-user]').filter({hasText:'验收同学'}).waitFor({timeout:22000});await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('[data-machine=gpu-1]').check();await admin.locator('[data-quota=gpu-1]').fill('2');await admin.locator('[data-quota=total]').fill('2');
  await admin.waitForTimeout(16000);assert.equal(await admin.locator('[data-quota=gpu-1]').inputValue(),'2');await admin.locator('[data-action=save-policy]').click();
- await member.waitForFunction(()=>document.querySelector('#resource-summary').textContent.includes('我的额度：2'),{},{timeout:22000});
+ await member.waitForFunction(()=>document.querySelector('#resource-summary').textContent.includes('额度 2 张'),{},{timeout:22000});
  await selectResource(member,'gpu-1',{metrics:true});
  assert.equal(await resourceDetail(member,'gpu-1').locator('[data-gpu-index]').count(),MACHINES[0].cards);
  for(const machine of MACHINES.slice(1)){
   assert.equal(await card(member,machine.id).locator('[data-gpu-index]').count(),0);
   assert.equal(await card(member,machine.id).locator('details[data-resource-detail]').count(),0);
  }
- const anonymousDetail=member.locator('details[data-resource-detail="gpu-1:0"]');await anonymousDetail.locator('summary').click();
+ const anonymousDetail=member.locator('details[data-resource-detail="gpu-1:0"]');await anonymousDetail.locator(':scope > summary').click();
  const anonymousProcessText=await anonymousDetail.locator('.process-table').textContent();
  assert.match(anonymousProcessText,new RegExp(String(processPid)));assert.match(anonymousProcessText,/8192/);
- assert.deepEqual(await anonymousDetail.locator('.process-table th').allTextContents(),['PID','任务 / 提交者 / 描述','显存 MiB','调度优先级']);
+ assert.deepEqual(await anonymousDetail.locator('.process-table th').allTextContents(),['PID','任务 / 提交者 / 描述','显存 MiB','优先级']);
  assert.match(anonymousProcessText,/外部进程／未确认归属/);
  const memberResourceText=await member.locator('#machine-grid').textContent();
  assert.ok(!memberResourceText.includes(processOwner));assert.ok(!memberResourceText.includes(processName));

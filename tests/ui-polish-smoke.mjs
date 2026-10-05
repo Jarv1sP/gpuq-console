@@ -88,7 +88,7 @@ try{
     for(const server of MACHINES){await selectResource(page,server.id,{metrics:true});assert.equal(await page.locator('[data-gpu-index]').count(),server.cards);}
     await selectResource(page,machine,{metrics:true});
   }
-  const first=page.locator('[data-resource-detail="'+machine+':0"]');await first.locator('summary').click();
+  const first=page.locator('[data-resource-detail="'+machine+':0"]');await first.locator(':scope > summary').click();
   await page.locator('.node-queue summary').first().click();
   for(const text of ['76%','12.5','62 °C','24018','python train.py','researcher','等待空闲 GPU'])assert.ok((await page.locator('#machine-grid').innerText()).includes(text),text);
   await capture('resources-desktop');
