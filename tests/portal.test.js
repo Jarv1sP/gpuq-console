@@ -146,7 +146,7 @@ test('inventory requires a current enabled principal; public maintenance HTML ex
   }finally{if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(data.dir,{recursive:true,force:true});}
 });
 
-test('late runtime hints from another tab never erase a newer login cookie',async()=>{
+test('late authentication responses from another tab never erase a newer login cookie',async()=>{
   const data=await setup(),origin='http://127.0.0.1:1',cookies=new Map();let server,release;
   try{
     ({server}=await createPortalServer({...data,origin,secure:false}));
@@ -166,21 +166,27 @@ test('late runtime hints from another tab never erase a newer login cookie',asyn
     });
     let held;
     server.prependListener('request',(req,res)=>{
-      if(!req.url.startsWith('/runtime.js?late='))return;
+      if(!req.url.startsWith('/runtime.js?late=')&&!req.url.startsWith('/api/call?late='))return;
       const writeHead=res.writeHead.bind(res),end=res.end.bind(res);let head;
       res.writeHead=(...args)=>{head=args;return res;};
       res.end=(body)=>{held.ready();held.gate.then(()=>{writeHead(...head);end(body);});return res;};
     });
-    for(const method of ['GET','HEAD']){
+    for(const entry of [
+      {path:'/runtime.js?late=get',method:'GET',status:200},
+      {path:'/runtime.js?late=head',method:'HEAD',status:200},
+      {path:'/api/call?late=state',method:'POST',status:401,headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({operation:'state',args:{}})},
+    ]){
       let ready;const captured=new Promise(resolve=>ready=resolve),gate=new Promise(resolve=>release=resolve);
       held={ready,gate};cookies.set('gpuq_session','0'.repeat(64));
-      const old=tab(`/runtime.js?late=${method}`,{method});await captured;
+      const old=tab(entry.path,entry);await captured;
       const login=await tab('/api/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({username:'admin',password,client:'browser'})});
       assert.equal(login.status,200);const fresh=cookies.get('gpuq_session');assert.match(fresh,/^[a-f0-9]{64}$/);
       release();const late=await old;
-      assert.equal(late.status,200);assert.equal(late.headers['set-cookie'],undefined,'A read-only hint must not delete another tab\'s newer login');
+      assert.equal(late.status,entry.status);assert.equal(late.headers['set-cookie'],undefined,'A stale authentication response must not delete another tab\'s newer login');
       assert.equal(cookies.get('gpuq_session'),fresh);
-      if(method==='GET')assert.match(late.body,/GPUQ_HAS_SESSION=false;/);else assert.equal(late.body,'');
+      if(entry.method==='GET')assert.match(late.body,/GPUQ_HAS_SESSION=false;/);
+      else if(entry.method==='HEAD')assert.equal(late.body,'');
+      else assert.equal(typeof JSON.parse(late.body).error,'string','The stale API request remains denied');
       const state=await tab('/api/call',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({operation:'state',args:{}})});
       assert.equal(state.status,200);assert.equal(JSON.parse(state.body).principal.role,'admin');
     }
