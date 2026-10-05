@@ -31,6 +31,17 @@ def load(path,name):
     spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 
 
+class DependencyValidation(unittest.TestCase):
+    def test_pure_python_suffix_in_a_dynamic_filename_is_not_a_dependency(self):
+        node_runtime.validate_dependencies({'worker.py':b"name = 'helper'\nfilename = name + '.py'\n"})
+
+    def test_missing_concrete_python_filename_still_fails(self):
+        source=b"filename = 'foo.py'\n"
+        with self.assertRaisesRegex(SystemExit,r'^Runtime manifest misses dependencies of worker.py: foo\.py$'):
+            node_runtime.validate_dependencies({'worker.py':source})
+        node_runtime.validate_dependencies({'worker.py':source,'foo.py':b''})
+
+
 class RuntimeDeployment(unittest.TestCase):
     def setUp(self):
         __import__('runpy').run_path(str(Path(__file__).with_name('storage_test_helpers.py')))['isolated_platform_pin'](self)
