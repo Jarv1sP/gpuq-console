@@ -6,6 +6,7 @@ const terminal=new Set(['SUCCEEDED','FAILED','CANCELED']);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const lanes=new WeakMap();
+const preparations=new WeakMap();
 const view=row=>{const {sourceTicket,...data}=row.data;return {id:row.id,state:row.state,...data};};
 function read(service,id){const row=service.db.prepare('SELECT * FROM project_copies WHERE id=?').get(id);if(!row)fail('项目复制不存在。',404);return {...row,data:JSON.parse(row.data)};}
 function save(service,row,state,change={}){
@@ -95,7 +96,7 @@ export function installProjectReplication(service){
        reference.release&&(result.release!==reference.release||!result.releaseReady))fail('项目便携能力未确认。',503);
     return result;
   };
-  service.prepareProject=async(owner,machine,reference)=>{
+  const prepareProject=async(owner,machine,reference)=>{
     const {from,project,release}=reference;authorized(service,owner,{from,machine});
     try{
       const result=await service.bridge(machine,'projects.verify',{userId:owner,project,release});
@@ -110,6 +111,14 @@ export function installProjectReplication(service){
     const principal={userId:owner,role:service.store.get(owner).role||'member',username:service.store.get(owner).username};
     const result=found?await advance(service,found.id):await projectReplicationCall(service,principal,'projects.replicate',{from,machine,project,release,key:randomUUID()});
     return {project,release,machine,state:result.state==='SUCCEEDED'?'READY':terminal.has(result.state)?'FAILED':'PREPARING',operationId:result.id,error:result.error};
+  };
+  service.prepareProject=(owner,machine,reference)=>{
+    let pending=preparations.get(service);if(!pending){pending=new Map();preparations.set(service,pending);}
+    const key=JSON.stringify([owner,machine,reference.from,reference.project,reference.release]);
+    if(pending.has(key))return pending.get(key);
+    if(pending.size>=8)return Promise.reject(Object.assign(Error('项目准备繁忙，请稍后刷新。'),{status:429}));
+    const operation=Promise.resolve().then(()=>prepareProject(owner,machine,reference)).finally(()=>pending.delete(key));
+    pending.set(key,operation);return operation;
   };
   service.reconcileProjectCopies=async()=>{
     const rows=service.db.prepare("SELECT id FROM project_copies WHERE state NOT IN ('SUCCEEDED','FAILED','CANCELED') OR COALESCE(json_extract(data,'$.cleanupComplete'),0)=0 ORDER BY updated_at LIMIT 8").all();

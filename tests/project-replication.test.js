@@ -110,3 +110,10 @@ test('slow export does not hold the global mutation/terminal queue',async t=>{
   const pending=f.call('projects.replicate',request());await entered.promise;
   assert.equal(await f.service.enqueue(()=>42),42);gate.resolve();await pending;
 });
+test('concurrent jobs preparing the same immutable owner tuple share one copy',async t=>{
+  const f=await fixture(t),reference={from,project,release};
+  const results=await Promise.all(Array.from({length:8},()=>f.service.prepareProject(f.member.id,machine,reference)));
+  assert.equal(new Set(results.map(r=>r.operationId)).size,1);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_copies').get().n,1);
+  assert.equal(f.nodes.size,1);
+});
