@@ -41,10 +41,16 @@ test('project upload status retry keeps the exact identity and does not send fil
  assert.deepEqual(JSON.parse(f.calls[0][1].body),body);assert.deepEqual(JSON.parse(f.calls[1][1].body),body);
 });
 test('unregister and job submission are never replayed on ambiguous gateway failure',async()=>{
- for(const operation of ['datasets.unregister','jobs.submit','datasets.upload.commit','files.put','login']){
+ for(const operation of ['datasets.unregister','jobs.submit','datasets.upload.commit','files.put','host.exec','host.cancel','terminal.exchange','login']){
   const f=fixture([new Response('',{status:502})]);
   await assert.rejects(apiPost(url,'call',{operation},f.options),/操作结果尚未确认/);assert.equal(f.calls.length,1);
  }
+});
+test('host status retries bridge maintenance with the same handle, never executes or cancels',async()=>{
+ const body={operation:'host.status',args:{machine:'node-a',id:'11111111-1111-4111-8111-111111111111'}};
+ const f=fixture([new Response('{"error":"bridge unavailable"}',{status:503}),new Response('{"result":{"state":"RUNNING"}}')]);
+ assert.equal((await apiPost(url,'call',body,f.options)).result.state,'RUNNING');
+ assert.equal(f.calls.length,2);assert.ok(f.calls.every(call=>JSON.stringify(JSON.parse(call[1].body))===JSON.stringify(body)));
 });
 test('malformed successful JSON and 404 are reported accurately without leaking HTML',async()=>{
  for(const status of [200,404]){

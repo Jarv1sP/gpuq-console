@@ -56,12 +56,26 @@ function persistSchedulerResult(service,job,result){
 }
 export function bridgeClient(socketPath){
   return (machine,operation,args)=>new Promise((resolve,reject)=>{
-    const socket=net.createConnection(socketPath);let raw='';
-    socket.setTimeout(32000,()=>socket.destroy(Error('节点响应超时；任务状态将自动核对。')));
+    const socket=net.createConnection(socketPath);let raw='',settled=false;
+    const finish=(error,result)=>{if(settled)return;settled=true;error?reject(error):resolve(result);};
+    const unavailable=()=>Object.assign(Error('节点执行桥暂时不可用；操作结果未确认，请查询原任务状态。'),{status:503,code:'EXECUTOR_UNAVAILABLE'});
+    // A bridge restart is infrastructure unavailability, not a bad user
+    // request. Never reconnect/replay here: input or a mutation may be sent.
+    socket.setTimeout(32000,()=>socket.destroy(Object.assign(Error('节点响应超时；操作结果未确认，请查询原任务状态。'),{status:504,code:'EXECUTOR_TIMEOUT'})));
     socket.on('connect',()=>socket.end(JSON.stringify({machine,operation,args})+'\n'));
-    socket.on('data',part=>{raw+=part;if(Buffer.byteLength(raw)>2_000_000)socket.destroy(Error('节点响应过大'));});
-    socket.on('error',reject);
-    socket.on('end',()=>{try{const data=JSON.parse(raw);if(!data.ok)throw Error(data.error||'节点操作失败');resolve(data.result);}catch(e){reject(e);}});
+    socket.on('data',part=>{raw+=part;if(Buffer.byteLength(raw)>2_000_000)socket.destroy(Object.assign(Error('节点执行桥响应过大；操作结果未确认。'),{status:502}));});
+    socket.on('error',error=>finish(Number.isInteger(error.status)?error:unavailable()));
+    socket.on('end',()=>{
+      if(!raw)return finish(unavailable());
+      let data;
+      try{data=JSON.parse(raw);if(!data||typeof data!=='object'||Array.isArray(data)||typeof data.ok!=='boolean')throw Error();}
+      catch{return finish(Object.assign(Error('节点执行桥响应不完整；操作结果未确认。'),{status:502}));}
+      // Native domain refusals keep their existing semantics, never become a
+      // transient transport error and never trigger an implicit second write.
+      if(!data.ok)return finish(Error(data.error||'节点操作失败'));
+      finish(null,data.result);
+    });
+    socket.on('close',()=>{if(!settled)finish(unavailable());});
   });
 }
 export function installExecution(service,bridge){
