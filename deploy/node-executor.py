@@ -1,11 +1,12 @@
 #!/usr/bin/python3
 """Forced command. Fixed GPUQ wrapper; user commands only run inside the sandbox."""
-import base64, fcntl, hashlib, importlib.util, json, os, re, sqlite3, stat, subprocess, sys, socket, tempfile, time, uuid
+import base64, fcntl, hashlib, importlib.util, json, os, re, select, sqlite3, stat, subprocess, sys, socket, tempfile, time, uuid
 from pathlib import Path
 from contextlib import closing
 from types import SimpleNamespace
 HERE=Path(__file__).resolve().parent
-CONFIG=json.loads((HERE/'node-config.json').read_text())
+INITIAL_CONFIG_BYTES=(HERE/'node-config.json').read_bytes()
+CONFIG=json.loads(INITIAL_CONFIG_BYTES)
 ROOT=Path(CONFIG['root'])
 RUNTIME=f'/run/user/{os.getuid()}'
 ENV={'PATH':'/usr/bin:/bin','HOME':str(Path.home()),'LANG':'C.UTF-8','XDG_RUNTIME_DIR':RUNTIME,'DBUS_SESSION_BUS_ADDRESS':'unix:path='+RUNTIME+'/bus'}
@@ -1069,6 +1070,98 @@ def process(operation,args):
         return {'nodeJobId':node_id,'state':state['state'],'assignedIndices':assigned,**scheduling_status(job,data),
                 **({'displaySync':presentation} if 'metadata' in args else {})}
 
+TERMINAL_STREAM_PROTOCOL='terminal-exchange-stream-v1'
+TERMINAL_CONTEXT_FIELDS={'userId','username','id','clientId','writerToken','hostAdmin','dataWorkspace','project'}
+TERMINAL_FRAME_BYTES=32768
+
+class BoundedRPCInput:
+    """Unbuffered framing so a prefetched second frame cannot evade idle timeout."""
+    def __init__(self,fd):self.fd=fd;self.pending=bytearray()
+    def line(self,limit,deadline):
+        while True:
+            if time.monotonic()>=deadline:raise TimeoutError('Terminal stream expired')
+            end=self.pending.find(b'\n')
+            if end>=0:
+                if end+1>limit:raise ValueError('Terminal frame too large')
+                raw=bytes(self.pending[:end+1]);del self.pending[:end+1];return raw
+            if len(self.pending)>limit:raise ValueError('Terminal frame too large')
+            remaining=deadline-time.monotonic()
+            if remaining<=0 or not select.select([self.fd],[],[],remaining)[0]:raise TimeoutError('Terminal stream expired')
+            raw=os.read(self.fd,min(65536,limit+1-len(self.pending)))
+            if not raw:
+                raw=bytes(self.pending);self.pending.clear();return raw
+            self.pending.extend(raw)
+    def rest(self,first,limit):
+        raw=bytearray(first);raw.extend(self.pending);self.pending.clear()
+        while len(raw)<=limit:
+            part=os.read(self.fd,min(65536,limit+1-len(raw)))
+            if not part:return bytes(raw)
+            raw.extend(part)
+        raise ValueError('Request too large')
+
+def terminal_runtime_stamp():
+    # Cache code, never permission. Detect replacement, modification, addition
+    # and removal across the actual local Python closure and configuration.
+    out=[]
+    for path in sorted(HERE.iterdir()):
+        if path.suffix[1:]!='py' and path.name not in ('node-config.json','node-runtime.json'):continue
+        info=path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:raise ValueError('Terminal runtime changed')
+        out.append((path.name,info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns,info.st_uid,info.st_gid,info.st_mode))
+    return tuple(out)
+
+def terminal_stream_context(context):
+    required={'userId','username','id','clientId','writerToken'}
+    if (not isinstance(context,dict) or not required<=set(context) or set(context)-TERMINAL_CONTEXT_FIELDS
+            or not all(isinstance(context[key],str) and UUID.fullmatch(context[key]) for key in ('id','clientId','writerToken'))
+            or not isinstance(context['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]{1,18})',context['userId'])
+            or not isinstance(context['username'],str) or not re.fullmatch(r'[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}',context['username'])
+            or any(type(context[key]) is not bool for key in ('hostAdmin','dataWorkspace') if key in context)):
+        raise ValueError('Invalid terminal stream context')
+    if context.get('hostAdmin') and not CONFIG.get('hostRoot',False):raise ValueError('Host root terminal is disabled on this node')
+    if context.get('project') is not None and (not isinstance(context['project'],str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',context['project'])):
+        raise ValueError('Invalid terminal stream context')
+    if context.get('dataWorkspace') and (context.get('hostAdmin') or context.get('project')):raise ValueError('Invalid terminal stream context')
+    terminal_owned(context,context['id'])
+    receipt=terminal_metadata(ROOT/'terminals'/(context['id']+'.session.json'))
+    if (receipt.get('clientId')!=context['clientId'] or receipt.get('writerToken')!=context['writerToken']
+            or receipt.get('state')!='OPEN' or receipt.get('leaseExpiresAt',0)<=time.time()):
+        raise ValueError('Terminal writer lease expired or was taken over; reconnect explicitly')
+
+def serve_terminal_stream(header,reader,write):
+    if not isinstance(header,dict) or set(header)!={'protocol','context'} or header['protocol']!=TERMINAL_STREAM_PROTOCOL:
+        raise ValueError('Invalid terminal stream handshake')
+    began=last=time.monotonic();stamp=terminal_runtime_stamp()
+    if (HERE/'node-config.json').read_bytes()!=INITIAL_CONFIG_BYTES:raise ValueError('Terminal runtime changed')
+    platform_root_check();terminal_stream_context(header['context'])
+    write({'protocol':TERMINAL_STREAM_PROTOCOL,'ready':True})
+    for sequence in range(1024):
+        raw=reader.line(TERMINAL_FRAME_BYTES,min(began+60,last+15))
+        if not raw:return
+        if not raw.endswith(b'\n'):raise ValueError('Incomplete terminal stream frame')
+        data=json.loads(raw)
+        if (not isinstance(data,dict) or set(data)!={'sequence','args'} or type(data['sequence']) is not int
+                or data['sequence']!=sequence or not isinstance(data['args'],dict)
+                or set(data['args'])-TERMINAL_CONTEXT_FIELDS-{'input','offset','rows','cols'}
+                or {key:value for key,value in data['args'].items() if key in TERMINAL_CONTEXT_FIELDS}!=header['context']):
+            raise ValueError('Terminal stream context or sequence changed')
+        if terminal_runtime_stamp()!=stamp:raise ValueError('Terminal runtime changed')
+        try:
+            # Includes root mount validation and the on-disk writer fence every
+            # time. A channel never caches the result of either authorization.
+            result=process('terminal.exchange',data['args'])
+            if terminal_runtime_stamp()!=stamp:raise ValueError('Terminal runtime changed after input; refresh without replay')
+            response={'sequence':sequence,'ok':True,'result':result}
+        except Exception as error:
+            write({'sequence':sequence,'ok':False,'error':str(error)[:400]});return
+        write(response);last=time.monotonic()
+    return
+
+def write_rpc_line(value):
+    raw=(json.dumps(value,separators=(',',':'))+'\n').encode()
+    if len(raw)>1048576:raise ValueError('Terminal response too large')
+    sys.stdout.buffer.write(raw);sys.stdout.buffer.flush()
+
 if __name__=='__main__':
     os.umask(0o077)
     platform_root_check()
@@ -1093,8 +1186,14 @@ if __name__=='__main__':
         print(json.dumps(data_workspaces().recover(*sys.argv[2:])));sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
     try:
-        raw=sys.stdin.buffer.read(1600001)
-        if len(raw)>1600000:raise ValueError('Request too large')
+        reader=BoundedRPCInput(sys.stdin.fileno())
+        first=reader.line(1600000,time.monotonic()+27)
+        try:header=json.loads(first)
+        except (ValueError,UnicodeDecodeError):header=None
+        if isinstance(header,dict) and header.get('protocol')==TERMINAL_STREAM_PROTOCOL:
+            if len(first)>TERMINAL_FRAME_BYTES or not first.endswith(b'\n'):raise ValueError('Invalid terminal stream handshake')
+            serve_terminal_stream(header,reader,write_rpc_line);sys.exit(0)
+        raw=reader.rest(first,1600000)
         data=json.loads(raw)
         result=process(data['operation'],data['args'])
         print(json.dumps({'ok':True,'result':result}))

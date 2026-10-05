@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Local Unix socket -> fixed SSH forced commands. No public listener or shell."""
-import hashlib, ipaddress, json, os, re, socketserver, stat, subprocess, threading, time
+import hashlib, ipaddress, json, os, re, select, socketserver, stat, subprocess, threading, time
+from collections import deque
 from pathlib import Path
 BASE=Path('/opt/gpuq-console/executor')
 HOSTS={n['id']:n for n in json.loads(Path('/opt/gpuq-console/inventory.json').read_text())['nodes']}
@@ -104,6 +105,179 @@ class SSHConnections:
         finally:slots.release()
 
 SSH_CONNECTIONS=SSHConnections()
+TERMINAL_STREAM_HOSTS=()  # Explicit per-node rollout; old forced commands stay unchanged.
+TERMINAL_STREAM_PROTOCOL='terminal-exchange-stream-v1'
+TERMINAL_CONTEXT_FIELDS={'userId','username','id','clientId','writerToken','hostAdmin','dataWorkspace','project'}
+
+class TerminalCapacity(ValueError):
+    """No input or handshake has been sent for this new context."""
+
+class TerminalSSHConnections(SSHConnections):
+    """Separate fixed-key mux: warm terminal sessions cannot starve job RPCs."""
+    def identity(self,host):
+        name,target,lock,slots=super().identity(host)
+        return 't-'+name,target,lock,slots
+
+TERMINAL_CONNECTIONS=TerminalSSHConnections()
+
+class TerminalChannel:
+    """One fixed context, FIFO exchanges, and no resend after any input attempt."""
+    def __init__(self,connection,host,context):
+        self.connection=connection;self.host=host;self.context=context
+        self.condition=threading.Condition();self.waiters=deque();self.active=False;self.dead=False
+        self.process=None;self.pending=bytearray();self.sequence=0;self.slot=None
+        self.created=self.last=time.monotonic()
+
+    def reserve(self):
+        with self.condition:
+            if self.dead or len(self.waiters)>=32:raise ValueError('Terminal stream unavailable')
+            ticket=object();self.waiters.append(ticket);return ticket
+
+    def retire_if_idle(self,now,force=False):
+        with self.condition:
+            if self.active or self.waiters:return False
+            if not force and now-self.last<14 and now-self.created<55:return False
+            self.dead=True;self.close();return True
+
+    def close(self):
+        process=self.process;self.process=None;self.pending.clear()
+        try:
+            if process is not None:
+                try:process.stdin.close()
+                except OSError:pass
+                if process.poll() is None:
+                    try:process.terminate()
+                    except ProcessLookupError:pass
+                    try:process.wait(timeout=.2)
+                    except subprocess.TimeoutExpired:
+                        process.kill();process.wait(timeout=1)  # Only this owned SSH client, not a node service.
+                process.stdout.close()
+        finally:
+            if self.slot is not None:self.slot.release();self.slot=None
+
+    def line(self,limit,deadline):
+        while True:
+            if time.monotonic()>=deadline:raise ValueError('Terminal exchange unconfirmed; refresh without replay')
+            end=self.pending.find(b'\n')
+            if end>=0:
+                if end+1>limit:raise ValueError('Terminal response too large')
+                raw=bytes(self.pending[:end+1]);del self.pending[:end+1];return json.loads(raw)
+            remaining=deadline-time.monotonic()
+            if len(self.pending)>limit or remaining<=0 or not select.select([self.process.stdout],[],[],remaining)[0]:
+                raise ValueError('Terminal exchange unconfirmed; refresh without replay')
+            raw=os.read(self.process.stdout.fileno(),min(65536,limit+1-len(self.pending)))
+            if not raw:raise ValueError('Terminal exchange unconfirmed; refresh without replay')
+            self.pending.extend(raw)
+
+    def send(self,value,deadline):
+        raw=(json.dumps(value,separators=(',',':'))+'\n').encode()
+        if len(raw)>32768:raise ValueError('Terminal input frame too large')
+        while raw:
+            remaining=deadline-time.monotonic()
+            if remaining<=0 or not select.select([], [self.process.stdin],[],remaining)[1]:
+                raise ValueError('Terminal exchange unconfirmed; refresh without replay')
+            count=os.write(self.process.stdin.fileno(),raw)
+            if count<=0:raise ValueError('Terminal exchange unconfirmed; refresh without replay')
+            raw=raw[count:]
+
+    def start(self,deadline):
+        name,target,lock,slots=self.connection.identity(self.host)
+        if not slots.acquire(timeout=max(0,deadline-time.monotonic())):raise ValueError('Node connection failed')
+        self.slot=slots
+        path=self.connection.control_path(name)
+        if not lock.acquire(timeout=max(0,deadline-time.monotonic())):raise ValueError('Node connection failed')
+        try:self.connection.ensure_master(target,path,deadline)
+        finally:lock.release()
+        self.process=subprocess.Popen(self.connection.rpc_command(target,path),stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,bufsize=0)
+        os.set_blocking(self.process.stdin.fileno(),False)
+        self.send({'protocol':TERMINAL_STREAM_PROTOCOL,'context':self.context},deadline)
+        ack=self.line(32768,deadline)
+        if ack!={'protocol':TERMINAL_STREAM_PROTOCOL,'ready':True}:raise ValueError('Terminal stream handshake rejected')
+        # No terminal input has been sent before the fixed protocol ACK.
+        self.created=self.last=time.monotonic();self.sequence=0
+
+    def exchange(self,ticket,args,deadline):
+        with self.condition:
+            while not self.dead and (self.active or self.waiters[0] is not ticket):
+                remaining=deadline-time.monotonic()
+                if remaining<=0:
+                    self.waiters.remove(ticket);self.condition.notify_all();raise ValueError('Terminal exchange queue expired')
+                self.condition.wait(remaining)
+            if self.dead:
+                self.waiters.remove(ticket);raise ValueError('Terminal stream unavailable')
+            self.waiters.popleft();self.active=True
+        try:
+            # Rotate before sending a new frame, never as a response to lost ACK.
+            if self.process is not None and (time.monotonic()-self.created>=55 or time.monotonic()-self.last>=14 or self.sequence>=1000):self.close()
+            if self.process is None:self.start(deadline)
+            if self.process.poll() is not None:raise ValueError('Terminal stream unavailable; refresh without replay')
+            self.send({'sequence':self.sequence,'args':args},deadline)
+            response=self.line(1048576,deadline)
+            if (not isinstance(response,dict) or type(response.get('sequence')) is not int
+                    or response['sequence']!=self.sequence or type(response.get('ok')) is not bool
+                    or set(response)!=({'sequence','ok','result'} if response['ok'] else {'sequence','ok','error'})):
+                raise ValueError('Terminal exchange unconfirmed; refresh without replay')
+            self.sequence+=1;self.last=time.monotonic()
+            del response['sequence']
+            if not response['ok']:self.dead=True;self.close()
+            return response
+        except Exception:
+            self.dead=True;self.close();raise
+        finally:
+            with self.condition:self.active=False;self.condition.notify_all()
+
+class TerminalChannels:
+    def __init__(self,connection):self.connection=connection;self.channels={};self.guard=threading.Lock();self.reaper=None
+    def reap(self):
+        while True:
+            time.sleep(1)
+            with self.guard:
+                for key,channel in list(self.channels.items()):
+                    if channel.retire_if_idle(time.monotonic()):del self.channels[key]
+                if not self.channels:self.reaper=None;return
+    def call(self,host,args):
+        if not isinstance(args,dict) or not {'userId','username','id','clientId','writerToken'}<=set(args) or set(args)-TERMINAL_CONTEXT_FIELDS-{'input','offset','rows','cols'}:
+            raise ValueError('Invalid terminal stream fields')
+        context={key:value for key,value in args.items() if key in TERMINAL_CONTEXT_FIELDS}
+        if (len(json.dumps(context).encode())>4096
+                or not all(isinstance(context[key],str) and re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}',context[key]) for key in ('id','clientId','writerToken'))):
+            raise ValueError('Invalid terminal stream context')
+        name,_,_,_=self.connection.identity(host)
+        key=(name,hashlib.sha256(json.dumps(context,sort_keys=True,separators=(',',':')).encode()).hexdigest())
+        deadline=time.monotonic()+27
+        with self.guard:
+            for old,channel in list(self.channels.items()):
+                if channel.retire_if_idle(time.monotonic()):del self.channels[old]
+            channel=self.channels.get(key)
+            if channel is None or channel.dead:
+                peers=[(k,v) for k,v in self.channels.items() if k[0]==name]
+                # At most six warm channels on the dedicated terminal master.
+                # Normal RPCs retain their own master and eight-channel budget.
+                if len(peers)>=6:
+                    for old,candidate in sorted(peers,key=lambda item:item[1].last):
+                        if candidate.retire_if_idle(time.monotonic(),force=True):del self.channels[old];break
+                    else:raise TerminalCapacity('Terminal stream capacity reached')
+                channel=TerminalChannel(self.connection,host,context);self.channels[key]=channel
+            ticket=channel.reserve()
+            if self.reaper is None:
+                self.reaper=threading.Thread(target=self.reap,daemon=True);self.reaper.start()
+        return channel.exchange(ticket,args,deadline)
+
+TERMINAL_CHANNELS=TerminalChannels(TERMINAL_CONNECTIONS)
+def terminal_exchange(host,args,machine):
+    # execution.mjs retains its authorized machine in the trusted args envelope.
+    # Verify that duplicate routing field, then strip only it for the protocol.
+    if not isinstance(args,dict) or args.get('machine')!=machine:raise ValueError('Invalid terminal machine context')
+    normalized={key:value for key,value in args.items() if key!='machine'}
+    try:return TERMINAL_CHANNELS.call(host,normalized)
+    except TerminalCapacity:
+        # Only a new-context capacity refusal, before any input is dispatched.
+        # A sent/unconfirmed input, handshake error or writer error never falls back.
+        p=SSH_CONNECTIONS.call(host,{'operation':'terminal.exchange','args':args})
+        if p.returncode:raise ValueError('Node connection failed')
+        return json.loads(p.stdout)
+
 INTERNAL_STORAGE=('storage.archive.events','storage.archive.ack','storage.archive.original',
     'storage.archive.provision','storage.archive.certify','storage.lease.prepare','storage.lease.cancel',
     'storage.download.open','storage.download.info','storage.download.manifest','storage.download.get','storage.download.finish')
@@ -116,9 +290,12 @@ class Handler(socketserver.StreamRequestHandler):
             data=json.loads(self.rfile.readline(1600001))
             if data['machine'] not in HOSTS or data['operation'] not in INTERNAL_STORAGE+('datasets.storage.status','datasets.storage.plan','datasets.storage.pin','datasets.storage.unpin','transfers.capabilities','transfers.source.prepare','transfers.confirm-source-release','transfers.release-source','transfers.start','transfers.status','transfers.cancel','transfers.resume','datasets.upload.pause','datasets.upload.direct-ticket','datasets.upload.direct-revoke','sync','cancel','logs','diagnostics','watch','priority','host.exec','host.status','host.cancel','files.list','files.put','files.get','terminal.open','terminal.exchange','terminal.close','terminal.detach','datasets.capacity','datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister','datasets.upload.begin','datasets.upload.manifest','datasets.upload.seal','datasets.upload.status','datasets.upload.chunk','datasets.upload.commit','datasets.upload.discard','datasets.workspace.list','datasets.workspace.put','datasets.workspace.get','datasets.workspace.status','datasets.workspace.publish','datasets.import.start','datasets.import.status','datasets.import.list','datasets.import.cancel','datasets.import.discard','projects.list','projects.quota','projects.create','projects.status','projects.publish','projects.verify','projects.snapshot.info','projects.snapshot.manifest','projects.snapshot.get','datasets.snapshot.info','datasets.snapshot.manifest','datasets.snapshot.get','projects.sync.begin','projects.sync.manifest','projects.sync.seal','projects.sync.status','projects.sync.chunk','projects.sync.finish'): raise ValueError('Invalid operation')
             host=HOSTS[data['machine']]
-            p=SSH_CONNECTIONS.call(host,{'operation':data['operation'],'args':data['args']})
-            if p.returncode: raise ValueError('Node connection failed')
-            result=json.loads(p.stdout)
+            if data['operation']=='terminal.exchange' and data['machine'] in TERMINAL_STREAM_HOSTS:
+                result=terminal_exchange(host,data['args'],data['machine'])
+            else:
+                p=SSH_CONNECTIONS.call(host,{'operation':data['operation'],'args':data['args']})
+                if p.returncode: raise ValueError('Node connection failed')
+                result=json.loads(p.stdout)
         except Exception as e: result={'ok':False,'error':str(e)[:200]}
         self.wfile.write((json.dumps(result)+'\n').encode())
 class Server(socketserver.ThreadingUnixStreamServer):
