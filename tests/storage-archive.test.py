@@ -147,6 +147,24 @@ class ArchiveTests(unittest.TestCase):
         new = self.intent(); self.assertEqual(self.source.outbox_begin(new), {'id':new['opId']})
         self.assertEqual(self.source.retire(request), value)
 
+    def test_queued_retire_is_source_only_and_keeps_other_native_lane(self):
+        target = self.tls_target(); intent = self.intent(dataset='replica')
+        target.outbox_begin(intent); target.outbox_ready(dict(opId=intent['opId'], userId=USER))
+        removed = self.hot.unregister(ADMIN, 'replica', self.version)
+        request = dict(id=intent['opId'], userId=USER, dataset='replica', version=self.version,
+                       recoveryId=removed['recoveryId'], mode='queued-ingest-v1')
+        lane = target.root/'control'/'lane'/'state.json'; other = {'opId':str(uuid.uuid4())};target._save(lane,other)
+        value = target.retire(request)
+        self.assertEqual(value['state'],'RETIRED');self.assertTrue(value['sourceRetired']);self.assertNotIn('neverDispatched',value)
+        self.assertEqual(target._load(lane),other);self.assertEqual(target.retire(request),value)
+        self.assertEqual(target.outbox_list({'limit':8}),{'events':[]})
+        with self.assertRaises(ValueError):target.retire({**request,'grantId':str(uuid.uuid4())})
+        with self.assertRaises(ValueError):target.retire({**request,'mode':'another-mode'})
+        # Recreated same hash cannot be certified by a new queued retirement.
+        self.hot.register_manifest(ADMIN,'replica',self.manifest,[USER])
+        new = self.intent(dataset='replica');target.outbox_begin(new)
+        with self.assertRaises(ValueError):target.retire({**request,'id':new['opId']})
+
     def test_retire_rejects_recreated_registration_missing_or_uncommitted_proof(self):
         request = self.removed_intent()
         folder = self.cold.root/'.trash'/request['recoveryId']

@@ -22,7 +22,7 @@ async function fixture(t){
   await writeFile(storage,JSON.stringify({enabled:true,machine:cold,authority:'hdd'}));
   const reservation=createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));
   const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve));const origin='http://127.0.0.1:'+port;
-  const calls=[],grants=new Map(),certifications=new Map();let owner,server,service,certified=false;
+  const calls=[],grants=new Map(),certifications=new Map(),retirements=new Map();let owner,server,service,certified=false,dropRetirement=false;
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='storage.archive.events')return {events:[]};
@@ -30,9 +30,11 @@ async function fixture(t){
     if(operation==='transfers.capabilities')return {enabled:false,sources:[]};
     assert.equal(args.userId,owner.id,'native single-owner ACL must match explicit enrollment owner');
     if(operation==='storage.archive.retire'){
-      assert.equal(machine,cold);assert.equal(args.dataset,dataset);assert.equal(args.version,version);
+      assert.equal(machine,args.mode?hot:cold);assert.equal(args.dataset,dataset);assert.equal(args.version,version);
+      if(retirements.has(args.id))assert.deepEqual(retirements.get(args.id),args);else retirements.set(args.id,structuredClone(args));
+      if(dropRetirement){dropRetirement=false;throw Error('native committed; reply lost');}
       return {protocol:1,id:args.id,userId:args.userId,dataset,version,recoveryId:args.recoveryId,
-        state:'RETIRED',neverDispatched:true,proofSha256:'f'.repeat(64)};
+        state:'RETIRED',...(args.mode?{sourceRetired:true}:{neverDispatched:true}),proofSha256:'f'.repeat(64)};
     }
     if(operation==='storage.archive.enrollment-check'){
       assert.deepEqual(args,{userId:owner.id,dataset,version});
@@ -83,7 +85,7 @@ async function fixture(t){
     const child=spawn(process.execPath,[cliFile,'--session-file',session,'--json',...args]);let stdout='',stderr='';
     child.stdout.on('data',s=>stdout+=s);child.stderr.on('data',s=>stderr+=s);child.on('error',reject);child.on('close',code=>resolve({code,stdout,stderr}));
   });
-  return {calls,owner,bob,admin,member,call,cli,grants,certifications,get service(){return service;},
+  return {calls,owner,bob,admin,member,call,cli,grants,certifications,get service(){return service;},loseNextRetirementReply:()=>{dropRetirement=true;},
     request:{machine:hot,dataset,version,ownerId:owner.id,key:randomUUID()},
     restart:async()=>{await stop();await start();}};
 }
@@ -144,4 +146,22 @@ test('real HTTP admin retirement persists terminal proof through restart and rej
   assert.notEqual((await f.call(f.member.token,'datasets.archive.retry',{machine:cold,dataset,version})).http,200);
   assert.equal(f.calls.filter(c=>c.operation==='storage.archive.retire').length,1);
   assert.equal(f.calls.some(c=>['storage.archive.original','storage.archive.provision','storage.archive.certify'].includes(c.operation)),false);
+});
+
+test('real HTTP queued retirement survives lost native reply and restart without dispatching',async t=>{
+  const f=await fixture(t),archive=installStorageArchive(f.service,{enabled:true,machine:cold,authority:'hdd'},{startTimer:false});
+  const event={id:randomUUID(),userId:f.owner.id,dataset,version,state:'READY'},row=archive.enqueueEvent(hot,event);
+  f.service.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run('legitimate-copy');
+  const args={machine:hot,ownerId:f.owner.id,dataset,version,eventId:event.id,recoveryId:'unregister-'+'1'.repeat(32)};
+  assert.equal((await f.call(f.admin.token,'datasets.archive.retire',{...args,mode:'queued-ingest-v1'})).http,400);
+  f.loseNextRetirementReply();assert.notEqual((await f.call(f.admin.token,'datasets.archive.retire',args)).http,200);
+  const pending=JSON.parse(f.service.db.prepare('SELECT data FROM storage_archives WHERE id=?').get(row.id).data);
+  assert.equal(pending.phase,'QUEUED');assert.ok(pending.retirementIntent);
+  await f.restart();await f.service.reconcileStorageArchive();
+  assert.equal(f.service.db.prepare('SELECT count(*) n FROM transfers').get().n,0);
+  const done=await f.call(f.admin.token,'datasets.archive.retire',args);assert.equal(done.http,200);assert.equal(done.body.result.phase,'FAILED');
+  assert.equal(f.service.db.prepare('SELECT archive_id FROM storage_archive_lane').get().archive_id,'legitimate-copy');
+  assert.equal(f.calls.filter(c=>c.operation==='storage.archive.retire').length,2);
+  assert.equal(f.calls.some(c=>['transfers.source.prepare','transfers.start'].includes(c.operation)),false);
+  assert.equal((await f.call(f.admin.token,'datasets.archive.retire',args)).http,200);
 });

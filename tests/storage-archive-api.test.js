@@ -63,21 +63,75 @@ function enrollmentFixture(t){
   return f;
 }
 
-function retirementFixture(t){
+function retirementFixture(t,{queued=false}={}){
   const f=enrollmentFixture(t);f.user.limits[cold]=1;
   const event={id:randomUUID(),userId:f.user.id,...ref,state:'READY'};
-  const row=f.archive.enqueueEvent(cold,event);
-  f.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run(row.id);
-  f.retire={machine:cold,...ref,ownerId:f.user.id,eventId:event.id,recoveryId:'unregister-'+'1'.repeat(32)};
+  const machine=queued?hot:cold,row=f.archive.enqueueEvent(machine,event);
+  if(!queued)f.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run(row.id);
+  f.retire={machine,...ref,ownerId:f.user.id,eventId:event.id,recoveryId:'unregister-'+'1'.repeat(32)};
   const bridge=f.service.bridge;
   f.service.bridge=async(machine,op,args)=>{
     if(op!=='storage.archive.retire')return bridge(machine,op,args);
     f.calls.push({machine,op,args});await f.onRetire?.();
     return {protocol:1,id:args.id,userId:args.userId,dataset:args.dataset,version:args.version,
-      recoveryId:args.recoveryId,state:'RETIRED',neverDispatched:true,proofSha256:'f'.repeat(64),...f.retireOverride};
+      recoveryId:args.recoveryId,state:'RETIRED',...(args.mode?{sourceRetired:true}:{neverDispatched:true}),proofSha256:'f'.repeat(64),...f.retireOverride};
   };
   f.rowId=row.id;return f;
 }
+
+test('untouched QUEUED retirement uses source-only proof and does not disturb the running lane',async t=>{
+  const f=retirementFixture(t,{queued:true});f.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run('real-copy');
+  assert.equal((await f.service.retireStorageArchive(f.actor,f.retire)).phase,'FAILED');
+  assert.equal(f.db.prepare('SELECT archive_id FROM storage_archive_lane').get().archive_id,'real-copy');
+  const call=f.calls.find(c=>c.op==='storage.archive.retire');assert.equal(call.machine,hot);
+  assert.equal(call.args.mode,'queued-ingest-v1');assert.equal(Object.hasOwn(call.args,'grantId'),false);
+  assert.equal(f.service.db.prepare('SELECT count(*) n FROM transfers').get().n,0);
+  assert.equal(f.archive.load(f.rowId).retirementIntent,undefined);
+});
+
+test('queued retirement durable fence survives a lost reply and restart without starting a transfer',async t=>{
+  const f=retirementFixture(t,{queued:true}),old=f.archive.load(f.rowId);
+  f.onRetire=()=>{throw Error('lost reply after native retirement');};
+  await assert.rejects(f.service.retireStorageArchive(f.actor,f.retire),/lost reply/);
+  assert.ok(f.archive.load(f.rowId).retirementIntent);
+  f.install();await f.service.reconcileStorageArchive();
+  assert.equal(f.service.db.prepare('SELECT count(*) n FROM transfers').get().n,0);
+  assert.equal(f.service.archiveIntentAllowed(f.user.id,{key:old.copyKey,kind:'copy',from:hot,machine:cold,...ref,name:'archive-any'}),false);
+  await assert.rejects(f.archive.advance(old),/retirement fences/);
+  assert.throws(()=>f.service.retireStorageArchive(f.actor,{...f.retire,recoveryId:'unregister-'+'2'.repeat(32)}),/binding/);
+  f.onRetire=null;assert.equal((await f.service.retireStorageArchive(f.actor,f.retire)).phase,'FAILED');
+  assert.equal(f.calls.filter(c=>c.op==='storage.archive.retire').length,2);
+});
+
+test('queued retirement rejects started, retried, lane-held, unknown and copyKey-bound transfers',async t=>{
+  for(const change of [{phase:'COPYING'},{phase:'PROVISIONING'},{phase:'BLOCKED'},{transferId:randomUUID()},
+    {sourceDataset:'cold-copy'},{grantId:randomUUID()},{retryRequested:true},{failureStage:'copy'}]){
+    const f=retirementFixture(t,{queued:true}),row=f.archive.load(f.rowId);
+    f.db.prepare('UPDATE storage_archives SET data=? WHERE id=?').run(JSON.stringify({...row,...change}),row.id);
+    assert.throws(()=>f.service.retireStorageArchive(f.actor,f.retire),/never-dispatched/);
+    assert.equal(f.calls.some(c=>c.op==='storage.archive.retire'),false);
+  }
+  const held=retirementFixture(t,{queued:true});held.db.prepare('INSERT INTO storage_archive_lane VALUES(1,?)').run(held.rowId);
+  assert.throws(()=>held.service.retireStorageArchive(held.actor,held.retire),/never-dispatched/);
+  for(const during of [false,true]){
+    const f=retirementFixture(t,{queued:true}),row=f.archive.load(f.rowId);
+    const insert=()=>f.db.prepare('INSERT INTO transfers(id,owner_id,client_key,digest,state,created_at,updated_at,data) VALUES(?,?,?,?,?,?,?,?)')
+      .run(randomUUID(),row.owner,row.copyKey,'unchanged','UNKNOWN',1,1,JSON.stringify({kind:'copy',from:hot,machine:cold,reference:{kind:'datasets',...ref}}));
+    if(during){f.onRetire=insert;await assert.rejects(f.service.retireStorageArchive(f.actor,f.retire),/admission changed/);assert.ok(f.archive.load(f.rowId).retirementIntent);}
+    else{insert();assert.throws(()=>f.service.retireStorageArchive(f.actor,f.retire),/never-dispatched/);}
+    assert.equal(f.archive.load(f.rowId).phase,'QUEUED');
+  }
+});
+
+test('queued retirement rechecks before its first native RPC if an earlier microtask binds copyKey',async t=>{
+  const f=retirementFixture(t,{queued:true}),row=f.archive.load(f.rowId);
+  const earlier=Promise.resolve().then(()=>f.db.prepare('INSERT INTO transfers(id,owner_id,client_key,digest,state,created_at,updated_at,data) VALUES(?,?,?,?,?,?,?,?)')
+    .run(randomUUID(),row.owner,row.copyKey,'unchanged','UNKNOWN',1,1,JSON.stringify({kind:'copy',from:hot,machine:cold,reference:{kind:'datasets',...ref}})));
+  const result=f.service.retireStorageArchive(f.actor,f.retire);await earlier;
+  await assert.rejects(result,/admission changed/);
+  assert.equal(f.calls.some(c=>c.op==='storage.archive.retire'),false);
+  assert.equal(f.archive.load(f.rowId).retirementIntent,undefined);
+});
 
 test('explicit retirement durably fails only old intent, frees its lane and never retries',async t=>{
   const f=retirementFixture(t);

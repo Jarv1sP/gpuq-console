@@ -42,7 +42,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(service.closing)fail('Archive service is closing');
     // Copy only our defined journal fields. A grant/token/source ticket cannot
     // accidentally enter durable state through a spread of a remote response.
-    const allowed=['id','kind','owner','machine','dataset','version','eventId','sourceMachine','sourceDataset','logicalDataset','phase','copyKey','transferId','grantId','certifyId','createdAt','updatedAt','nextCheckAt','failures','error','receiptSha256','eventAcknowledged','policyKey','retryRequested','transferState','failureStage','enrollment','retirement'];
+    const allowed=['id','kind','owner','machine','dataset','version','eventId','sourceMachine','sourceDataset','logicalDataset','phase','copyKey','transferId','grantId','certifyId','createdAt','updatedAt','nextCheckAt','failures','error','receiptSha256','eventAcknowledged','policyKey','retryRequested','transferState','failureStage','enrollment','retirement','retirementIntent'];
     if(Object.keys(row).some(k=>!allowed.includes(k))||!safePhase.has(row.phase))fail('Invalid archive journal');
     row.updatedAt=clock();
     service.db.prepare('INSERT INTO storage_archives(id,owner,machine,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(row.id,row.owner,row.machine,JSON.stringify(row));
@@ -66,7 +66,8 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     return user;
   };
   const fence=(row,snapshot)=>{
-    if(retiring.has(row.id)||load(row.id)?.failureStage==='retired')fail('Archive retirement fences this old intent');
+    const current=load(row.id);
+    if(retiring.has(row.id)||current?.retirementIntent||current?.failureStage==='retired')fail('Archive retirement fences this old intent');
     if(service.closing||!policy.enabled)fail('Archive service is unavailable');
     service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:row.machine,from:policy.machine});
     if(!currentPolicy(row))fail('Archive policy changed; existing intent requires administrator review');
@@ -93,7 +94,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   service.archiveIntentAllowed=(owner,args)=>{
     if(!policy.enabled||args.kind!=='copy'||args.machine!==policy.machine||args.from===args.machine||!UUID.test(args.key||'')||!isRef(args))return false;
     const row=rows().find(row=>row.owner===owner&&row.machine===args.from&&row.dataset===args.dataset&&row.version===args.version&&row.copyKey===args.key);
-    return row?.kind==='ingest'&&currentPolicy(row)&&row.owner===owner&&row.copyKey===args.key&&args.name==='archive-'+key(owner,args.from,args.dataset).slice(0,24);
+    return row?.kind==='ingest'&&!row.retirementIntent&&row.failureStage!=='retired'&&!retiring.has(row.id)&&currentPolicy(row)&&row.owner===owner&&row.copyKey===args.key&&args.name==='archive-'+key(owner,args.from,args.dataset).slice(0,24);
   };
 
   function enqueueEvent(machine,event){
@@ -137,8 +138,8 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   service.retireStorageArchive=(principal,args)=>{
     if(!args||Object.keys(args).sort().join(',')!=='dataset,eventId,machine,ownerId,recoveryId,version'||
       !USER.test(args.ownerId||'')||!UUID.test(args.eventId||'')||!isRef(args)||
-      !/^unregister-[a-f0-9]{32}$/.test(args.recoveryId||'')||args.machine!==policy.machine)
-      fail('Retirement requires the exact same-HDD event, owner, reference and normal unregister receipt.',400);
+      !/^unregister-[a-f0-9]{32}$/.test(args.recoveryId||'')||!MACHINES.some(m=>m.id===args.machine))
+      fail('Retirement requires the exact event, owner, reference and normal unregister receipt.',400);
     const actor=service.store.get(principal.userId);
     if(!actor?.enabled||actor.role!=='admin')fail('Archive retirement requires a current administrator.',403);
     const snapshot=JSON.stringify(actor),ownerSnapshot=JSON.stringify(enabledUser(args.ownerId,args.machine));
@@ -150,28 +151,52 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     };
     check();
     const id=key(args.ownerId,args.machine,args.dataset,args.version,args.eventId),row=load(id);
-    if(!row||!currentPolicy(row)||row.kind!=='ingest'||row.sourceMachine!==row.machine||row.sourceDataset!==row.dataset||
-      row.transferId!==null||row.grantId!==grantIdentity(row)||!UUID.test(row.certifyId||'')||
-      row.eventAcknowledged||!['PROVISIONING','BLOCKED','FAILED'].includes(row.phase))
+    if(!row||!currentPolicy(row)||row.kind!=='ingest'||row.owner!==args.ownerId||row.machine!==args.machine||
+      row.dataset!==args.dataset||row.version!==args.version||row.eventId!==args.eventId||row.eventAcknowledged)
       fail('Only a never-dispatched same-HDD ingest can be retired.');
     const binding=key(args.ownerId,args.machine,args.dataset,args.version,args.eventId,args.recoveryId),prior=row.retirement;
-    if(prior){if(prior.binding!==binding)fail('Retirement receipt cannot be changed.');return Promise.resolve(publicRow(row));}
+    if(prior){if(prior.binding!==binding||row.phase!=='FAILED'||row.failureStage!=='retired')fail('Retirement receipt cannot be changed.');return Promise.resolve(publicRow(row));}
+    const queuedSafe=value=>value?.kind==='ingest'&&value.phase==='QUEUED'&&value.sourceDataset===null&&value.transferId===null&&value.grantId===null&&
+      value.retryRequested!==true&&!value.failureStage&&UUID.test(value.copyKey||'')&&laneOwner()!==value.id&&
+      typeof service.transferSnapshotByKey==='function'&&!service.transferSnapshotByKey(value.owner,value.copyKey);
+    const queued=queuedSafe(row);
+    if(!queued&&(row.sourceMachine!==row.machine||row.sourceDataset!==row.dataset||row.transferId!==null||
+      row.grantId!==grantIdentity(row)||!UUID.test(row.certifyId||'')||!['PROVISIONING','BLOCKED','FAILED'].includes(row.phase)))
+      fail('Only a never-dispatched same-HDD or untouched QUEUED ingest can be retired.');
+    if(row.retirementIntent&&(!queued||row.retirementIntent.binding!==binding))fail('Pending retirement binding cannot be changed.');
+    const checkQueued=()=>{
+      const current=load(id);
+      if(!queuedSafe(current)||['owner','machine','dataset','version','eventId','sourceMachine','copyKey','certifyId'].some(k=>current[k]!==row[k])||
+        current.retirementIntent&&current.retirementIntent.binding!==binding)
+        fail('Queued archive admission changed; retirement remains fenced for review.');
+      return current;
+    };
     const pending=retiring.get(id);
     if(pending){if(pending.binding!==binding)fail('Retirement receipt cannot be changed.');return pending.task;}
     const task=Promise.resolve().then(async()=>{
       check();
-      const proof=await service.bridge(policy.machine,'storage.archive.retire',{
+      if(queued){
+        checkQueued();
+        // A lost RPC reply or portal restart cannot dispatch this old intent.
+        // This is a pending operator intent, never an inferred terminal proof.
+        row.retirementIntent={binding,recoveryId:args.recoveryId,mode:'queued-ingest-v1'};
+        row.error='正在核实正常注销回执；该旧意图不会启动归档。';save(row);
+      }
+      const proof=await service.bridge(row.machine,'storage.archive.retire',{
         id:row.eventId,userId:row.owner,dataset:row.dataset,version:row.version,
-        recoveryId:args.recoveryId,grantId:row.grantId,certifyId:row.certifyId});
+        recoveryId:args.recoveryId,...(queued?{mode:'queued-ingest-v1'}:{grantId:row.grantId,certifyId:row.certifyId})});
       check();
-      if(!proof||Object.keys(proof).sort().join(',')!=='dataset,id,neverDispatched,proofSha256,protocol,recoveryId,state,userId,version'||
+      if(queued&&checkQueued().retirementIntent?.binding!==binding)fail('Durable retirement fence changed.');
+      const scope=queued?'sourceRetired':'neverDispatched';
+      if(!proof||Object.keys(proof).sort().join(',')!==['dataset','id',scope,'proofSha256','protocol','recoveryId','state','userId','version'].sort().join(',')||
         proof.protocol!==1||proof.id!==row.eventId||proof.userId!==row.owner||proof.dataset!==row.dataset||proof.version!==row.version||
-        proof.recoveryId!==args.recoveryId||proof.state!=='RETIRED'||proof.neverDispatched!==true||!HASH.test(proof.proofSha256||''))
+        proof.recoveryId!==args.recoveryId||proof.state!=='RETIRED'||proof[scope]!==true||!HASH.test(proof.proofSha256||''))
         fail('Exact normal retirement is not confirmed; archive lane is retained.');
       // Save the terminal proof before compare-and-delete; restart recovery is
       // permitted only for this known never-dispatched terminal state.
       row.phase='FAILED';row.failureStage='retired';row.retryRequested=false;row.failures=0;
       row.retirement={binding,recoveryId:args.recoveryId,proofSha256:proof.proofSha256,actor:principal.userId};
+      delete row.retirementIntent;
       row.error='原登记已由管理员正常注销，旧归档意图已退役；不会自动重建或重试。';
       save(row);releaseLane(row);
       service.audit(principal.username,'datasets.archive.retire',row.machine,row.owner+':'+row.dataset+'@'+row.version);
@@ -331,12 +356,12 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       const knownStoppedFailure=heldRow?.phase==='FAILED'&&(['copy','provision','certify'].includes(heldRow.failureStage)||
         heldRow.failureStage==='retired'&&HASH.test(heldRow.retirement?.proofSha256||''));
       if(heldRow&&(heldRow.phase==='ARCHIVED'&&heldRow.eventAcknowledged||knownStoppedFailure)){releaseLane(heldRow);held=null;}
-      const pending=held?(heldRow?[heldRow]:[]):rows().filter(row=>row.nextCheckAt<=clock()&&(row.phase==='ARCHIVED'&&!row.eventAcknowledged||!['ARCHIVED','FAILED','BLOCKED'].includes(row.phase))).sort((a,b)=>a.updatedAt-b.updatedAt);
+      const pending=held?(heldRow?[heldRow]:[]):rows().filter(row=>!row.retirementIntent&&row.nextCheckAt<=clock()&&(row.phase==='ARCHIVED'&&!row.eventAcknowledged||!['ARCHIVED','FAILED','BLOCKED'].includes(row.phase))).sort((a,b)=>a.updatedAt-b.updatedAt);
       for(const row of pending.slice(0,1)){
         try{await advance(row);}
         catch(error){
           if(service.closing)return;
-          if(retiring.has(row.id)||load(row.id)?.failureStage==='retired')continue;
+          if(retiring.has(row.id)||load(row.id)?.retirementIntent||load(row.id)?.failureStage==='retired')continue;
           if(error.code==='MAINTENANCE_ACTIVE')continue; // Retain the fixed intent/lane without automatic retry or cleanup.
           row.failures=(row.failures||0)+1;
           row.nextCheckAt=clock()+Math.min(300000,15000*2**Math.min(row.failures,5));

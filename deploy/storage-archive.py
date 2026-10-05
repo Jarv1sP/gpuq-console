@@ -427,27 +427,35 @@ class StorageArchive:
         return dict(protected=True, **ref)
 
     def retire(self, args):
-        """Retire only a never-dispatched, same-HDD publish after normal removal.
+        """Retire an exact normal removal; queued mode needs portal dispatch fencing.
 
         No discovery, data deletion, unpin, authority release or lane mutation.
         A committed removal preserves the actual old registration inode. Missing
         live files alone are never proof; existing operation journals fail closed.
         """
-        self._require(source=True)
-        _object(args, ('id', 'userId', 'dataset', 'version', 'recoveryId', 'grantId', 'certifyId'))
+        queued = isinstance(args, dict) and args.get('mode') == 'queued-ingest-v1'
+        self._require(source=None if queued else True)
+        fields = ('id', 'userId', 'dataset', 'version', 'recoveryId')
+        _object(args, (*fields, 'mode') if queued else (*fields, 'grantId', 'certifyId'))
         op = J.identifier(args['id']); user = _user(args['userId'])
         ref = _ref({k: args[k] for k in ('dataset', 'version')})
         recovery = args['recoveryId']
         if not isinstance(recovery, str) or not re.fullmatch(r'unregister-[a-f0-9]{32}', recovery):
             raise ValueError('An exact normal unregister recovery receipt is required')
-        grant, certify = J.identifier(args['grantId']), J.identifier(args['certifyId'])
-        digest = A._sha([user, self.machine, ref['dataset'], ref['version'], self.machine])
-        expected = digest[:8]+'-'+digest[8:12]+'-5'+digest[13:16]+'-a'+digest[17:20]+'-'+digest[20:32]
-        if grant != expected or len({op, grant, certify}) != 3:
-            raise ValueError('Retirement is not the fixed same-HDD ingest identity')
+        jobs = []
+        if not queued:
+            grant, certify = J.identifier(args['grantId']), J.identifier(args['certifyId'])
+            digest = A._sha([user, self.machine, ref['dataset'], ref['version'], self.machine])
+            expected = digest[:8]+'-'+digest[8:12]+'-5'+digest[13:16]+'-a'+digest[17:20]+'-'+digest[20:32]
+            if grant != expected or len({op, grant, certify}) != 3:
+                raise ValueError('Retirement is not the fixed same-HDD ingest identity')
+            jobs = [grant, certify]
+        # The queued proof certifies only this source's exact normal removal.
+        # The trusted portal durably fences dispatch and proves no transfer exists.
+        scope = {'sourceRetired': True} if queued else {'neverDispatched': True}
         request = A._sha(args)
         with self._lock('outbox'), self._lock('admission'), contextlib.ExitStack() as locks:
-            for job in sorted((grant, certify)):
+            for job in sorted(jobs):
                 locks.enter_context(self._lock('run-'+job))
                 locks.enter_context(self._lock('op-'+job))
             row = self._load(self._event_path(op))
@@ -458,16 +466,16 @@ class StorageArchive:
                 if row.get('retirement', {}).get('request') != request:
                     raise ValueError('Retirement receipt cannot be changed')
                 return dict(protocol=1, id=op, userId=user, **ref, recoveryId=recovery,
-                            state='RETIRED', neverDispatched=True, proofSha256=row['retirement']['proofSha256'])
+                            state='RETIRED', **scope, proofSha256=row['retirement']['proofSha256'])
             identity = row.get('registration')
             if (row.get('state') != 'READY' or not isinstance(identity, list) or len(identity) != 5
                     or any(type(n) is not int or n < 0 for n in identity)):
                 raise ValueError('Retirement requires a fixed READY registration')
-            for job in (grant, certify):
+            for job in jobs:
                 if os.path.lexists(self._op_path(job).parent) or self.worker_state(job) != 'STOPPED':
                     raise ValueError('Existing or unconfirmed archive operation cannot be retired')
             lane = self._load(self.root/'control'/'lane'/'state.json')
-            if lane is not None and lane.get('opId') in (grant, certify):
+            if lane is not None and lane.get('opId') in jobs:
                 raise ValueError('Retirement refuses a native archive lane')
             locks.enter_context(self.cache._lock_file('.locks/'+ref['dataset']+'.'+ref['version']+'.lock'))
             with self.cache._locked():
@@ -508,7 +516,7 @@ class StorageArchive:
                 row.update(state='RETIRED', retirement=dict(request=request, proofSha256=proof, at=time.time()))
                 self._save(self._event_path(op), row)
             return dict(protocol=1, id=op, userId=user, **ref, recoveryId=recovery,
-                        state='RETIRED', neverDispatched=True, proofSha256=proof)
+                        state='RETIRED', **scope, proofSha256=proof)
 
     def _event_path(self, op):
         return self.root/'events'/(J.identifier(op)+'.json')
