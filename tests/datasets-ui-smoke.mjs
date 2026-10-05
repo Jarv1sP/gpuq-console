@@ -241,12 +241,11 @@ try {
   assert.deepEqual(service.store.jobs[0].spec.argv, ['/bin/bash', '-c', 'python train.py --dataset /data2/sample']);
   while (service.reconciling) await new Promise(resolve => setTimeout(resolve, 5));
   assert.deepEqual(calls.find(call => call.operation === 'sync').args.job.datasets, [ref]);
-  // The client intentionally probes a previous browser login on first load.
-  // Its two pre-login 401s are expected; authenticated requests and JavaScript
-  // execution must have no errors, and no other HTTP error is allowed.
-  assert.deepEqual(httpErrors, [admin, member].map(() => ({status: 401, path: '/api/call', operation: 'state', authenticated: false})));
-  assert.deepEqual(errors.filter(message => message !== 'Failed to load resource: the server responded with a status of 401 (Unauthorized)'), [], 'Unexpected browser errors');
-  assert.equal(errors.length, 2); assert.deepEqual(blocked, [], 'Unexpected external requests');
+  // Public login no longer probes authenticated state. Require zero HTTP
+  // and console errors, without the former pre-login 401 exception.
+  assert.deepEqual(httpErrors, [], 'Unexpected HTTP errors');
+  assert.deepEqual(errors, [], 'Unexpected browser errors');
+  assert.deepEqual(blocked, [], 'Unexpected external requests');
   // Two explicit dataset choices: the newer choice must survive an older lookup.
   await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});
   moreLocalVersions=true;await refresh(member);
@@ -304,7 +303,7 @@ try {
   const closedReply=member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-1');
   releaseLookup();await closedReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
   assert.equal(await member.locator('#work-submit').isVisible(),false,'A late lookup must not reopen a generically closed submit sheet');
-  console.log('DATASETS UI PASS: owner-filtered merged catalogs; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; no unexpected browser errors or external requests (two expected pre-login session probes returned 401).');
+  console.log('DATASETS UI PASS: owner-filtered merged catalogs; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; zero HTTP or browser errors and no external requests.');
   console.log(`Screenshots: ${screenshots}`);
 } finally {
   holdLookup=false;releaseLookup?.();

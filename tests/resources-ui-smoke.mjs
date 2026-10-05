@@ -1,5 +1,5 @@
 // Actual Portal static/CSP headers with read-only synthetic browser API data.
-// No production account, execution, terminal, SSH, database or network writes.
+// Disposable local accounts only; no production, terminal, SSH or node writes.
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,mkdir,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -20,7 +20,8 @@ const admin={id:'admin',name:'实验室管理员',username:'admin',role:'admin',
 const job={id:'11111111-1111-4111-8111-111111111111',machine:'gpu-1',project:'vision-baseline',release,userId:member.id,username:member.username,name:'baseline-lr3e-4',cards:2,state:'RUNNING',priority:'normal',schedulerPriority:2,assignedIndices:[0,1]};
 const ownTask={id:job.id,name:job.name,description:'主训练实验',submitter:{name:member.name,username:member.username},state:'RUNNING',priority:'normal',assignedGpuIndices:[0,1]};
 const otherTask={id:'22222222-2222-4222-8222-222222222222',name:'diffusion-ft',description:'对照实验',submitter:{name:'王可',username:'wang-research'},state:'RUNNING',priority:'normal',assignedGpuIndices:[2]};
-let actor=member,sampleNumber=0,server,browser,maintenance={version:1,revision:9,global:null,machines:{}};
+let actor=member,sampleNumber=0,server,service,browser,maintenance={version:1,revision:9,global:null,machines:{}};
+const password='Isolated-Resource-Browser-2026!';
 function snapshot(){
   const checkedAt=new Date(Date.now()+ ++sampleNumber*1000).toISOString();
   return {checkedAt,stale:false,hosts:MACHINES.map(machine=>({id:machine.id,reachable:machine.id!=='gpu-3',checkedAt,
@@ -35,11 +36,14 @@ try{
   await mkdir(screenshots,{recursive:true});
   const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));
   const port=reserve.address().port,origin='http://127.0.0.1:'+port;await new Promise(resolve=>reserve.close(resolve));
-  const bootstrap=join(directory,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password:'Isolated-Resource-Browser-2026!'}),{mode:0o600});
-  ({server}=await createPortalServer({database:join(directory,'portal.sqlite'),bootstrap,origin,secure:false}));
+  const bootstrap=join(directory,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password}),{mode:0o600});
+  ({server,service}=await createPortalServer({database:join(directory,'portal.sqlite'),bootstrap,origin,secure:false}));
+  const owner=await service.login('admin',password);await service.invoke(owner.token,'users.create',{username:member.username,password});
   await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1080}});
+  const login=await page.context().request.post(origin+'/api/login',{headers:{Origin:origin},data:{username:member.username,password,client:'browser'}});
+  assert.equal(login.status(),200,'Synthetic layout state still requires a real local session');
   await page.addInitScript(()=>{
     globalThis.resourceAnimations=[];globalThis.resourceCSP=[];
     document.addEventListener('securitypolicyviolation',event=>resourceCSP.push({directive:event.violatedDirective,blocked:event.blockedURI}));
@@ -54,11 +58,11 @@ try{
     const request=route.request(),url=new URL(request.url());
     if(url.origin!==origin){external.push(url.href);return route.abort();}
     if(!url.pathname.startsWith('/api/'))return route.continue();
-    const data=request.postDataJSON();let result=null;
-    if(url.pathname==='/api/login')actor=data.username==='admin'?admin:member;
+    const data=request.postDataJSON();let result=null,response;
+    if(url.pathname==='/api/login'){response=await route.fetch();assert.equal(response.status(),200);actor=data.username==='admin'?admin:member;}
     else{
       const {operation,args}=data;calls.push({operation,args});
-      if(operation==='logout')actor=null;
+      if(operation==='logout'){response=await route.fetch();assert.equal(response.status(),200);actor=null;}
       else if(operation==='state'){}
       else if(operation==='projects.list')result={projects:[{project:'vision-baseline',state:'READY',latestReadyRelease:release,releases:[{release,state:'READY'}]}]};
       else if(operation==='projects.status')result={project:'vision-baseline',state:'READY',latestReadyRelease:release,releases:[{release,state:'READY'}]};
@@ -70,7 +74,7 @@ try{
       else if(operation==='community.chat.list')result={messages:[],nextCursor:null,latestCursor:null,hasMore:false};
       else throw Error('Resource acceptance cannot execute '+operation);
     }
-    return route.fulfill({contentType:'application/json',body:JSON.stringify({result,token:'synthetic-local-session',state:state(),principal:principal()})});
+    return route.fulfill({...(response?{response}:{}),contentType:'application/json',body:JSON.stringify({result,state:state(),principal:principal()})});
   });
   const response=await page.goto(origin+'/#resources');
   async function refreshResources({background=false}={}){
@@ -228,7 +232,7 @@ try{
   assert.equal(await page.locator('#machine-grid .maintenance-lock-band').count(),0,'Refreshed recovery removes the old maintenance overlay');
   await page.setViewportSize({width:1440,height:1080});await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor();
   assert.equal(await page.locator('[data-resource-root]').count(),0);assert.equal(await page.locator('.resource-process-table').count(),0,'Old principal data is cleared on logout');
-  await page.locator('#login-form [name=username]').fill('admin');await page.locator('#login-form [name=password]').fill('Synthetic-Local-Password');await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=resources]').click();
+  await page.locator('#login-form [name=username]').fill('admin');await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=resources]').click();
   assert.equal(await page.locator('[data-resource-selected]').getAttribute('data-resource-selected'),'gpu-1','Identity changes discard the prior server selection');
   assert.equal(await page.locator('[data-resource-root]').count(),1);
   for(const visible of [privateProgram,privateOwner,'private-native-job'])assert.ok((await page.locator('.resource-process-table').textContent()).includes(visible),visible);

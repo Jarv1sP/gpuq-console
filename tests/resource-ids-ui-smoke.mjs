@@ -30,8 +30,12 @@ try{
   const bootstrap=join(directory,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password:'Isolated-ID-Layout-2026!'}),{mode:0o600});
   ({server}=await createPortalServer({database:join(directory,'portal.sqlite'),bootstrap,secure:false,origin}));
   await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
-  browser=await chromium.launch({headless:true});
+  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1080}});
+  // Layout data remain synthetic; public runtime now requires a real fixture
+  // session before restoring the mocked authenticated state.
+  const login=await page.context().request.post(origin+'/api/login',{headers:{Origin:origin},data:{username:'admin',password:'Isolated-ID-Layout-2026!',client:'browser'}});
+  assert.equal(login.status(),200);
   await page.addInitScript(()=>{
     globalThis.idAnimations=[];globalThis.idCSP=[];
     document.addEventListener('securitypolicyviolation',event=>idCSP.push(event.violatedDirective));

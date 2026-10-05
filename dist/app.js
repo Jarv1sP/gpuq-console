@@ -1,4 +1,3 @@
-import {MACHINES} from './model.js';
 import {DemoClient} from './client.js';
 import {executionUI,renderTaskTable} from './execution-ui.js';
 import {terminalUI} from './terminal-ui.js';
@@ -15,7 +14,21 @@ import {copyHelp} from './copy-help-ui.js';
 import {installAuthentication} from './auth-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
+const MACHINES=[];let capacity=0;
+async function loadInventory(){
+  const principal=store.principal,generation=store.authGeneration;
+  if(!principal)return;
+  const visible=store.data?.machines||[];
+  // Member state intentionally contains only authorised hosts. Load the
+  // protected capacity directory after login to retain the locked cards.
+  // Drain module requests before changing cookies. A fresh URL also permits
+  // the next login to retry an earlier failed module load.
+  const catalogue=principal.role==='admin'?visible:(await store.track(import(new URL(`./machines.js?login=${generation}`,import.meta.url).href))).MACHINES;
+  if(generation!==store.authGeneration||principal.userId!==store.principal?.userId||principal.role!==store.principal?.role)throw store.stale();
+  MACHINES.splice(0,MACHINES.length,...catalogue.map(machine=>visible.find(row=>row.id===machine.id)||machine));
+  capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
+}
+await loadInventory();
 let page='work',selected=null,draft=null,filter='pending',toastTimer,confirmAction,inviteCode=null,refreshing=false;
 const shell=shellUI(store,{navigate:choosePage,getPage:()=>page,toast});
 const renderExecution=executionUI(store,()=>render(true),toast);
@@ -29,19 +42,20 @@ const renderResourceView=resourcesUI(store,{machines:MACHINES,getPage:()=>page,n
 terminalUI(store,toast);
 const isAdmin=()=>store.principal?.role==='admin';
 const own=()=>store.users.find(u=>u.id===store.principal?.userId);
-store.onAuthChange(()=>{$('#profile-dialog').close();$('#profile-form').reset();$('#profile-error').textContent='';});
+store.onAuthChange(()=>{MACHINES.length=0;capacity=0;$('#context-machine').replaceChildren();$('#context-project').replaceChildren();$('#profile-dialog').close();$('#profile-form').reset();$('#profile-error').textContent='';});
 const pending=u=>u.enabled&&u.role!=='admin'&&!u.approvedAt&&u.total===0;
 const pendingUsers=()=>store.users.filter(pending);
 const label=u=>!u.enabled?'已暂停':u.role==='admin'?'管理员':pending(u)?'待处理':u.total?'已授权':'零额度';
 const dirty=()=>isAdmin()&&draft&&store.users.some(u=>u.id===selected)&&(JSON.stringify(draft.limits)!==JSON.stringify(store.get(selected).limits)||draft.total!==store.get(selected).total);
 function toast(message){clearTimeout(toastTimer);const target=$('#toast'),shown=target.classList.contains('visible');target.textContent=message;target.classList.add('visible');if(!shown)target.animate(reducedMotion()?[{opacity:0},{opacity:1}]:[{opacity:0,transform:'translateY(10px)'},{opacity:1,transform:'none'}],{duration:reducedMotion()?150:220,easing:'cubic-bezier(.4,0,.2,1)'});toastTimer=setTimeout(()=>target.classList.remove('visible'),3500);}
-function report(error){toast(error.message);if(error.status===401){store.principal=null;store.data=null;draft=null;render();openLogin();}}
+function report(error){toast(error.message);if(error.status===401){store.principal=null;store.data=null;MACHINES.length=0;capacity=0;draft=null;render();openLogin();}}
 function confirm(title,message,action){$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;confirmAction=action;$('#confirm-dialog').showModal();fadeDialog($('#confirm-dialog'));}
 function openLogin(){$('#login-form').reset();$('#login-error').textContent='';if(!$('#login-dialog').open)$('#login-dialog').showModal();}
 function choosePage(next){if(next==='users'&&!isAdmin())next='resources';if(next===page)return;if(dirty()){toast('请先保存或撤销授权草稿。');return;}shell.route(next,()=>{page=next;history.replaceState(null,'','#'+next);render();});}
 function defaultPage(){page=maintenanceActive(store.data?.operationalMaintenance)||own()?.total?'work':'resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'','#'+page);}
 function render(preserve=false){
   const logged=!!store.principal,admin=isAdmin(),u=own(),keepDraft=preserve&&dirty();
+  if(logged)for(const node of document.querySelectorAll('[data-public-maintenance]')){node.textContent=store.data?.operationalMaintenance?.global?.reason||'';node.hidden=!node.textContent;}
   if(page==='users'&&!admin)page='resources';
   document.body.classList.toggle('not-admin',!admin);
   for(const el of document.querySelectorAll('[data-admin-only]'))el.hidden=!admin;
@@ -167,8 +181,8 @@ document.addEventListener('input',event=>{const key=event.target.dataset.quota;i
 $('#password-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter;b.disabled=true;try{const self=selected===store.principal.userId;await store.reset(selected,new FormData(event.target).get('password'));event.target.reset();$('#password-dialog').close();toast('密码已重置，旧登录已失效');if(self){await store.logout().catch(()=>{});render();openLogin();}}catch(e){$('#password-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#edit-profile').addEventListener('click',()=>{$('#profile-form [name=profile-name]').value=own()?.name||store.principal.username;$('#profile-error').textContent='';$('#profile-dialog').showModal();});
 $('#profile-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter;b.disabled=true;try{await store.call('profile.update',{name:new FormData(event.target).get('profile-name')});$('#profile-dialog').close();render(true);toast('姓名已保存；新任务记录提交时姓名。');}catch(e){$('#profile-error').textContent=e.message;}finally{b.disabled=false;}});
-$('#login-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;try{await store.login(data.get('username'),data.get('password'));event.target.reset();$('#login-dialog').close();defaultPage();render();shell.syncStatus('ready',Date.now());}catch(e){$('#login-error').textContent=e.message;}finally{b.disabled=false;}});
-$('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'),data.get('signup-name')||undefined);await store.login(data.get('username'),data.get('password'));event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
+$('#login-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;try{await store.login(data.get('username'),data.get('password'));await loadInventory();event.target.reset();$('#login-dialog').close();defaultPage();render();shell.syncStatus('ready',Date.now());}catch(e){$('#login-error').textContent=e.message;}finally{b.disabled=false;}});
+$('#register-form').addEventListener('submit',async event=>{event.preventDefault();const b=event.submitter,data=new FormData(event.target);b.disabled=true;$('#register-error').textContent='';try{if(data.get('password')!==data.get('confirm'))throw Error('两次密码不一致。');await store.register(data.get('username'),data.get('password'),data.get('invite'),data.get('signup-name')||undefined);await store.login(data.get('username'),data.get('password'));await loadInventory();event.target.reset();$('#register-dialog').close();defaultPage();render();toast('注册成功，等待管理员分配额度');}catch(e){$('#register-error').textContent=e.message;}finally{b.disabled=false;}});
 $('#invites-dialog').addEventListener('close',()=>{inviteCode=null;$('#invites-content').innerHTML='';});
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
 const publicGuide=$('.guide-link'),guideHome=publicGuide.parentNode,guideAfter=publicGuide.nextSibling;

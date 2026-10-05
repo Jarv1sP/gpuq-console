@@ -21,6 +21,11 @@ files['/gpu-allocation.js']='gpu-allocation.js';
 files['/gpu-allocation-ui.js']='gpu-allocation-ui.js';
 Object.assign(files,STARBASE_ASSETS);
 const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',woff2:'font/woff2',png:'image/png'};
+const requestTokens=req=>({
+  bearer:/^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization||'')?.[1],
+  fromCookie:/(?:^|;\s*)gpuq_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie||'')?.[1]||/(?:^|;\s*)amax_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie||'')?.[1],
+});
+const escapeHTML=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 files['/guide.css']='guide.css';files['/guide.js']='guide.js';
 files['/datasets-ui.js']='datasets-ui.js';
 files['/data-route.js']='data-route.js';
@@ -44,12 +49,14 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
     const json=(code,data,extra={})=>{res.writeHead(code,{...headers,'Content-Type':'application/json; charset=utf-8',...extra});res.end(JSON.stringify(data));};
     const cookie=(token,name='gpuq_session')=>`${name}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${token?LOGIN_POLICY.cookieSeconds:0}${secure?'; Secure':''}`;
     const expiredCookies=()=>[cookie(''),cookie('','amax_session')];
+    let inventoryRequest=false;
     try{
       if(req.headers.host!==url.host)return json(403,{error:'Invalid host'});
       if(req.headers.origin&&req.headers.origin!==url.origin)return json(403,{error:'Cross-origin requests are not allowed'});
       const path=new URL(req.url,origin).pathname;
       if(path==='/healthz')return json(200,{ok:true,service:'gpuq-console',executionEnabled:service.executionEnabled});
       if(path.startsWith('/api/')){
+        headers['Cache-Control']='private, no-store';
         if(req.method!=='POST')return json(405,{error:'POST required'});
         if(!req.headers['content-type']?.startsWith('application/json'))return json(415,{error:'JSON required'});
         // Only our private reverse proxy can reach this server; it overwrites this header.
@@ -73,8 +80,7 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
           return json(200,login);
         }
         if(path==='/api/call'){
-          const bearer=/^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization||'')?.[1];
-          const fromCookie=/(?:^|;\s*)gpuq_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie||'')?.[1]||/(?:^|;\s*)amax_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie||'')?.[1];
+          const {bearer,fromCookie}=requestTokens(req);
           if(!bearer&&fromCookie&&req.headers.origin!==url.origin)return json(403,{error:'Browser origin required'});
           const result=await service.invoke(bearer||fromCookie,data.operation,data.args);
           return json(200,result,data.operation==='logout'?{'Set-Cookie':expiredCookies()}:{});
@@ -82,7 +88,15 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
         return json(404,{error:'Not found'});
       }
       if(req.method!=='GET'&&req.method!=='HEAD')return json(405,{error:'GET required'});
-      if(path==='/runtime.js'){res.writeHead(200,{...headers,'Content-Type':mime.js});return res.end('globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;');}
+      if(path==='/runtime.js'){
+        const {bearer,fromCookie}=requestTokens(req);let authenticated=false,extra={};
+        try{if(bearer||fromCookie){service.principal(bearer||fromCookie);authenticated=true;}}
+        catch(error){if(![401,403].includes(error.status))throw error;extra={'Set-Cookie':expiredCookies()};}
+        // Avoid an expected 401 fetch (and browser console error) on public
+        // login. This hint grants nothing: state and inventory recheck auth.
+        res.writeHead(200,{...headers,'Cache-Control':'private, no-store','Content-Type':mime.js,...extra});
+        return res.end(req.method==='HEAD'?undefined:`globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;globalThis.GPUQ_HAS_SESSION=${authenticated};`);
+      }
       if(path==='/gpuctl.mjs'||path==='/amaxctl.mjs'){const client=await standaloneClient(url.origin);res.writeHead(200,{...headers,'Content-Type':'text/javascript; charset=utf-8','Content-Disposition':'attachment; filename="gpuctl.mjs"'});return res.end(client);}
       if(path==='/install.sh'){res.writeHead(200,{...headers,'Content-Type':'text/plain; charset=utf-8'});return res.end((await readFile(new URL('./deploy/install-client.sh',import.meta.url),'utf8')).replaceAll('__GPUQ_PUBLIC_ORIGIN__',url.origin));}
       if(path==='/install.ps1'){res.writeHead(200,{...headers,'Content-Type':'text/plain; charset=utf-8'});return res.end(req.method==='HEAD'?undefined:(await readFile(new URL('./deploy/install-client.ps1',import.meta.url),'utf8')).replaceAll('__GPUQ_PUBLIC_ORIGIN__',url.origin));}
@@ -94,12 +108,27 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
         const text=await guidePage(guide.chapter,url.origin);res.writeHead(200,{...headers,'Content-Type':mime.html});return res.end(req.method==='HEAD'?undefined:text);
       }
       const file=files[path];if(!file)return json(404,{error:'Not found'});
+      inventoryRequest=file==='machines.js';
+      const {bearer,fromCookie}=inventoryRequest?requestTokens(req):{};
+      if(inventoryRequest){headers['Cache-Control']='private, no-store';service.principal(bearer||fromCookie);}
       let content=await readFile(new URL(`./dist/${file}`,import.meta.url));
+      // Revalidate after I/O so a revoked session cannot receive the catalogue.
+      if(inventoryRequest)service.principal(bearer||fromCookie);
+      if(file==='index.html'){
+        // Public HTML contains only the global reason, never host scopes,
+        // inventory, timestamps, actors or the maintenance revision.
+        const entry=service.globalMaintenanceActive()?service.maintenanceFor():null;
+        if(entry)content=content.toString().replaceAll('<p class="auth-maintenance" data-public-maintenance hidden role="status"></p>',`<p class="auth-maintenance" data-public-maintenance role="status">${escapeHTML(entry.reason)}</p>`);
+      }
       if(file==='index.html')content=content.toString().replace('</head>',`<meta name="gpuq-style-nonce" content="${styleNonce}"><link rel="stylesheet" href="/xterm.css"><script src="/xterm.js"></script><script src="/addon-fit.js"></script></head>`);
       if(file==='index.html')content=content.toString().replace('<script>globalThis.GPUQ_LOCAL_API=false;</script>','<script src="/runtime.js"></script>').replace(/<details class="demo-credentials">[\s\S]*?<\/details>/,'').replaceAll('独立演示环境','账号管理已上线').replaceAll('GPUQ 管理入口 · Demo','GPUQ 管理入口').replaceAll('管理员视角（演示）','管理员工作空间').replaceAll('列表中的用户均为演示账号。','账号与授权保存于服务器。').replaceAll('这里只用测试密码。','').replaceAll('仅演示账号和授权流程 · 尚未接入真实 GPUQ','账号与权限已持久化 · GPUQ 执行尚未接入').replace('本地 API 版的网页和 CLI 共用同一个服务与状态。当前线上静态预览不提供远程 CLI 接口。','网页和 CLI 共用此 VPS 后台；CLI 使用同一账号登录。下载客户端后指定本站地址。').replace('npm start&#10;',`curl -fsS ${url.origin}/gpuctl.mjs -o gpuctl.mjs&#10;export GPUQ_URL=${url.origin}&#10;`).replaceAll('node cli.mjs','node gpuctl.mjs');
       if(file==='index.html')content=content.toString().replace('账号与权限已持久化 · GPUQ 执行尚未接入','账号、终端与 GPUQ 训练已接入');
       res.writeHead(200,{...headers,'Content-Type':mime[file.split('.').pop()]});res.end(req.method==='HEAD'?undefined:content);
-    }catch(e){if(e.status===401)return json(401,{error:e.message},{'Set-Cookie':expiredCookies()});json(e.status||400,{error:e.message?.includes('SQLITE')?'保存失败，请联系管理员。':e.message});}
+    }catch(e){
+      // An old asset response must never clear a newer login cookie.
+      if(inventoryRequest&&(e.status===401||e.status===403)){res.writeHead(401,{...headers,'Content-Length':'0'});return res.end();}
+      if(e.status===401)return json(401,{error:e.message},{'Set-Cookie':expiredCookies()});json(e.status||400,{error:e.message?.includes('SQLITE')?'保存失败，请联系管理员。':e.message});
+    }
   });
   server.headersTimeout=10000;server.requestTimeout=45000;server.keepAliveTimeout=5000;server.maxConnections=64;
   server.on('close',()=>service.close());return {server,service};

@@ -65,7 +65,9 @@ sudo python3 deploy/init-vps.py
 
 填入 `publicOrigin`、`headscaleOrigin`、真实 `vpsTailIP`，以及每台 GPU 节点的稳定 ID、Tail IP、SSH 服务用户、卡数/型号/显存、工作区/GPUQ/Python 目录。不要用中文作系统服务用户；门户用户名可以是中文。`memory` 用例如 `24 GB`。
 
-`configure` 生成公开的机器容量表和私有 `.env`/Headscale 配置；`init-vps` 建目录、初始管理员密码、两把独立 Ed25519 密钥、systemd 单元，但不启动服务、不修改 ACL、不进入节点。
+`configure` 生成机器容量表和私有 `.env`/Headscale 配置；`init-vps` 建目录、初始管理员密码、两把独立 Ed25519 密钥、systemd 单元，但不启动服务、不修改 ACL、不进入节点。
+
+生产门户的 `/machines.js` 只向有效登录会话返回容量表，缓存为 `private, no-store`；未登录的 GET/HEAD 返回空正文 401。登录、注册和使用指南不需要这份清单；登录前的维护提示只显示全平台原因原文。生成和镜像构建流程不变。
 
 `init-vps` 会把安装根目录规范为 `root:root / 0755`，私有清单与管理密钥保持 `root:root / 0600`，数据目录保持应用的 UID/GID 1000；不递归修改已有数据库、邀请码密钥或工作区。若通过压缩包交付，不要直接将带有本机 UID/目录权限的归档解压覆盖生产根目录：用 GNU tar 的 `--no-same-owner --no-overwrite-dir` 解压到独立暂存目录，核对后只安装允许更新的软件文件，排除数据、清单、密钥及根目录元数据。更新后重新检查目标目录的属主和可遍历权限，不能靠扩大服务 capability 绕过权限错误。
 

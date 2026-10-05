@@ -277,7 +277,7 @@ try{
     await adminPage.unroute(origin+'/api/call',holdResponse);
   }
   assert.deepEqual(pageErrors,[]);assert.deepEqual(blocked,[]);
-  assert.deepEqual(httpErrors,[{status:401,operation:'state'},{status:401,operation:'state'}]);
+  assert.deepEqual(httpErrors,[],'Public login and authenticated project flows must have zero HTTP errors');
   assert.equal(service.store.jobs.length,2);assert.equal(terminals.size,0);
   assert.ok(calls.filter(call=>call.operation==='projects.status').length<12,'publication polling stays bounded');
   console.log(JSON.stringify({status:'passed',checks:['explicit shared machine/project','create and draft','explicit isolated environment','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','delayed ROOT/development opens cannot replace newest intent','390px environment form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));

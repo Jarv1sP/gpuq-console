@@ -54,6 +54,19 @@ test('every transitive local Portal module exists at its runtime COPY path',asyn
   t.diagnostic('Runtime COPY covers '+modules.length+' local .mjs modules and their local JS dependencies.');
 });
 
+test('public login static module graph never imports the inventory',async()=>{
+  const result=await build({absWorkingDir:root,entryPoints:['dist/app.js'],bundle:true,
+    platform:'browser',format:'esm',write:false,metafile:true,logLevel:'silent'});
+  const seen=new Set(),pending=['dist/app.js'];
+  while(pending.length){
+    const file=pending.pop();if(seen.has(file))continue;seen.add(file);
+    assert.notEqual(file,'dist/machines.js','Private inventory must not enter the public static module graph');
+    for(const item of result.metafile.inputs[file].imports)if(item.kind==='import-statement'&&!item.external)pending.push(item.path);
+  }
+  assert.ok(seen.has('dist/client.js')&&seen.has('dist/resources-ui.js'));
+  assert.ok(!seen.has('dist/service.js'),'The preview service is loaded only in demo mode');
+});
+
 test('client imports, styles and fonts are copied and served by the Portal whitelist',async t=>{
   const graph=await importGraph('dist/app.js','browser'),files=await imageLayout();
   for(const file of graph)assert.equal(files.get(file),file,'Runtime image is missing client dependency: '+file);
@@ -77,8 +90,13 @@ test('client imports, styles and fonts are copied and served by the Portal white
   await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   const runtime=await fetch(origin+'/runtime.js');assert.equal(runtime.status,200);
   assert.match(await runtime.text(),/globalThis\.GPUQ_LOCAL_API=true;globalThis\.GPUQ_PRODUCTION=true;/);
+  const login=await fetch(origin+'/api/login',{method:'POST',headers:{'Content-Type':'application/json',Origin:origin},body:JSON.stringify({username:'admin',password:'Local-Image-Asset-Fixture-Only-2026!',client:'browser'})});
+  assert.equal(login.status,200);const cookie=login.headers.get('set-cookie').split(';')[0];
   for(const file of assets){
-    const response=await fetch(origin+'/'+file);
+    if(file==='machines.js'){
+      const anonymous=await fetch(origin+'/'+file);assert.equal(anonymous.status,401);assert.equal(await anonymous.text(),'');
+    }
+    const response=await fetch(origin+'/'+file,file==='machines.js'?{headers:{Cookie:cookie}}:{});
     assert.equal(response.status,200,'Static whitelist is missing /'+file);
     const type=file.endsWith('.png')?'image/png':file.endsWith('.woff2')?'font/woff2':file.endsWith('.css')?'text/css':'text/javascript';
     assert.ok(response.headers.get('content-type')?.startsWith(type),'Incorrect asset MIME: '+file);

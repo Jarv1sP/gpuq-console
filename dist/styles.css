@@ -188,3 +188,5 @@ footer{border-top:1px solid var(--line);padding-top:20px;margin-top:20px;color:#
 }
 @media(max-width:1180px) and (min-width:901px){:root{--sidebar-width:212px}.sidebar{padding-inline:12px}.brand{gap:7px}.brand-wordmark{max-width:100%}main{padding:34px 28px}.topbar{padding-inline:28px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+.auth-maintenance{padding:12px 0;border-bottom:1px solid var(--line);color:var(--ink-2);font-size:14px;line-height:1.6;overflow-wrap:anywhere}

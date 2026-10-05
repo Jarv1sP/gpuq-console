@@ -38,6 +38,20 @@ try{
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
   await context.route('**/*',route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol))return route.continue();external.push(url.href);return route.abort();});
+  const publicRequests=[],publicConsole=[];
+  const onPublicRequest=request=>publicRequests.push(new URL(request.url()).pathname);
+  const onPublicConsole=message=>{if(message.type()==='error')publicConsole.push(message.text());};
+  page.on('request',onPublicRequest);page.on('console',onPublicConsole);
+  await page.goto(origin);await page.locator('#login-dialog').waitFor({state:'visible'});
+  assert.equal(await page.locator('#login-form [data-public-maintenance]').textContent(),'<img src=x onerror=alert(1)> 存储维修');
+  assert.equal(await page.locator('#login-form img').count(),0);
+  for(const machine of MACHINES)assert.ok(!(await page.locator('body').textContent()).includes(machine.id));
+  await page.locator('#open-register').click();await page.locator('#register-dialog').waitFor({state:'visible'});
+  assert.equal(await page.locator('#register-form [data-public-maintenance]').textContent(),'<img src=x onerror=alert(1)> 存储维修');
+  assert.equal(await page.locator('#register-form img').count(),0);
+  await page.goto(origin+'/guide');assert.match(await page.locator('body').textContent(),/STARGATE/);
+  assert.equal(publicRequests.includes('/machines.js'),false);assert.equal(publicRequests.includes('/api/call'),false);
+  assert.deepEqual(publicConsole,[]);page.off('request',onPublicRequest);page.off('console',onPublicConsole);
   async function login(username){
     await page.goto(origin);await page.locator('#login-form [name=username]').fill(username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});
     assert.equal(await page.locator('[data-nav=maintenance]').count(),0);

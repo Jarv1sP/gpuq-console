@@ -1,7 +1,7 @@
 import {assertMaintenanceOperation} from './maintenance-state.js';
 export class DemoClient{
   constructor(){this.authGeneration=0;this.authPending=0;this.authTail=Promise.resolve();this.inflight=new Set();this.authListeners=new Set();this.sessionToken=null;this.requestTimeoutMs=45000;}
-  static async create(){const client=new DemoClient();client.remote=globalThis.GPUQ_LOCAL_API===true;client.production=globalThis.GPUQ_PRODUCTION===true;if(!client.remote){const {DemoService,DEMO_ADMIN}=await import('./service.js');client.service=await DemoService.create();await client.login(DEMO_ADMIN.username,DEMO_ADMIN.password);}else if(client.production){try{await client.refresh();}catch(e){if(e.status!==401)throw e;}}return client;}
+  static async create(){const client=new DemoClient();client.remote=globalThis.GPUQ_LOCAL_API===true;client.production=globalThis.GPUQ_PRODUCTION===true;if(!client.remote){const {DemoService,DEMO_ADMIN}=await import('./service.js');client.service=await DemoService.create();await client.login(DEMO_ADMIN.username,DEMO_ADMIN.password);}else if(client.production&&globalThis.GPUQ_HAS_SESSION!==false){try{await client.refresh();}catch(e){if(e.status!==401)throw e;}}return client;}
   stale(message='登录状态已改变，已忽略旧请求。'){const error=Error(message);error.code='STALE_SESSION';return error;}
   async transport(path,body,token=null){
     const controller=new AbortController();let timer;
