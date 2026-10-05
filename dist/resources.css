@@ -82,7 +82,7 @@
 .sb .resource-info>summary{display:flex;align-items:center;justify-content:center;min-width:24px;min-height:24px;color:var(--ink-2);cursor:pointer;list-style:none;font:16px/1 var(--sans)}
 .sb .resource-info>summary::-webkit-details-marker{display:none}
 .sb .resource-info>summary svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round}
-.sb .resource-info-content{position:absolute;z-index:5;left:0;top:calc(100% + 8px);width:min(330px,calc(100vw - 40px));padding:14px 16px;border:1px solid var(--line-3);border-radius:6px;background:var(--bg-2);color:var(--ink-2);font:13px/1.7 var(--sans);box-shadow:none}
+.sb .resource-info-content{position:absolute;z-index:5;left:0;top:calc(100% + 8px);width:min(330px,calc(100vw - 40px));padding:14px 16px;border:1px solid var(--line-3);border-radius:6px;background:var(--bg-2);color:var(--ink-2);font:13px/1.7 var(--sans);white-space:normal;box-shadow:none}
 .sb .resource-hardware-caption>span:last-child .resource-info-content{left:auto;right:0}
 .sb .resource-detail{border-top:1px solid var(--line);padding-top:24px;margin-top:40px;min-width:0;scroll-margin-top:84px}
 .sb .resource-detail-head{display:flex;justify-content:space-between;align-items:center;gap:24px}
