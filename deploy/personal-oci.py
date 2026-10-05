@@ -26,7 +26,11 @@ GPU = re.compile(r'GPU-[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}\Z')
 HOOKS = Path('/etc/gpuq-console/empty-hooks')
 CDI = Path('/etc/cdi/gpuq-nvidia.json')
 ENGINE = Path('/etc/gpuq-console/personal-oci.conf')
+REGISTRY_DROPINS = Path('/etc/containers/registries.conf.d')
 ENGINE_RAW = b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n[engine]\nremote = false\n'
+ANONYMOUS_AUTH_RAW = b'{"auths":{}}\n'
+ANONYMOUS_REGISTRIES_RAW = (b'credential-helpers = ["containers-auth.json"]\n'
+                            b'unqualified-search-registries = []\nshort-name-mode = "enforcing"\n')
 
 
 def module(name):
@@ -125,11 +129,102 @@ class PersonalOCI:
         self.q.ensure(config, user, self.folder)
         for name in ('graph', 'run', 'tmp', 'home', 'projects'):
             self.s.private_dir(self.folder/name, create=True)
+        for name in ('home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d'):
+            self.s.private_dir(self.folder/name, create=True)
         self.env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': str(self.folder/'home'),
                     'XDG_CONFIG_HOME': str(self.folder/'home'), 'XDG_DATA_HOME': str(self.folder/'home'),
                     'XDG_RUNTIME_DIR': '/run/user/'+str(os.getuid()), 'TMPDIR': str(self.folder/'tmp'),
-                    'REGISTRY_AUTH_FILE': '/dev/null', 'LANG': 'C.UTF-8',
+                    'REGISTRY_AUTH_FILE': str(self.folder/'anonymous-registry-auth.json'), 'LANG': 'C.UTF-8',
+                    'CONTAINERS_REGISTRIES_CONF': str(self.folder/'anonymous-registries.conf'),
                     'CONTAINERS_CONF': str(ENGINE)}
+        with self.registry_auth():
+            pass
+
+    @contextlib.contextmanager
+    def registry_auth(self):
+        """Descriptor-bound anonymous JSON and no external credential helpers."""
+        auth = 'anonymous-registry-auth.json'; registries = 'anonymous-registries.conf'
+        need(self.env.get('HOME') == str(self.folder/'home')
+             and self.env.get('REGISTRY_AUTH_FILE') == str(self.folder/auth)
+             and self.env.get('CONTAINERS_REGISTRIES_CONF') == str(self.folder/registries),
+             'Anonymous OCI authentication path changed')
+        with self.registry_file(auth, ANONYMOUS_AUTH_RAW) as authfd, \
+             self.registry_file(registries, ANONYMOUS_REGISTRIES_RAW) as registriesfd:
+            # Podman 5.8 still loads both drop-in directories when an explicit
+            # main config is supplied. Never let them override our helper policy.
+            dropins = ((REGISTRY_DROPINS, 0),
+                       (self.folder/'home/.config/containers/registries.conf.d', os.geteuid()))
+            before = [self.registry_dropin_state(path, uid) for path, uid in dropins]
+            prefix = '/proc/'+str(os.getpid())+'/fd/'
+            yield {**self.env, 'REGISTRY_AUTH_FILE': prefix+str(authfd),
+                   'CONTAINERS_REGISTRIES_CONF': prefix+str(registriesfd)}, authfd
+            need([self.registry_dropin_state(path, uid) for path, uid in dropins] == before,
+                 'OCI registry drop-in directories changed during operation')
+
+    def registry_dropin_state(self, path, uid):
+        """Empty directory or safely absent; never delete operator drop-ins."""
+        parent = path
+        while True:
+            try:
+                with self.s.directory(parent) as fd:
+                    info = os.fstat(fd)
+                    need(info.st_uid in (0, uid) and not info.st_mode & 0o022,
+                         'OCI registry drop-in directory is unsafe')
+                    if parent == path:
+                        need(info.st_uid == uid and not os.listdir(fd),
+                             'OCI registry drop-in configuration requires administrator review')
+                        return ('empty', self.s.stamp(info))
+                    missing = path.relative_to(parent).parts[0]
+                    try: os.stat(missing, dir_fd=fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        return ('absent', str(parent), self.s.stamp(info), missing)
+                    raise ValueError('OCI registry drop-in path changed during inspection')
+            except FileNotFoundError:
+                need(parent != Path('/'), 'OCI registry drop-in ancestor is missing')
+                parent = parent.parent
+
+    @contextlib.contextmanager
+    def registry_file(self, name, expected):
+        path = self.folder/name
+        with self.s.directory(self.folder) as parent:
+            directory = os.fstat(parent)
+            need(directory.st_uid == os.geteuid() and stat.S_IMODE(directory.st_mode) == 0o700,
+                 'Anonymous OCI authentication parent is not private')
+            created_identity = None
+            try:
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            except FileNotFoundError:
+                need(name not in getattr(self, '_registry_identities', {}), 'Anonymous OCI authentication file disappeared')
+                created = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                try:
+                    need(os.write(created, expected) == len(expected),
+                         'Anonymous OCI authentication creation was incomplete')
+                    os.fsync(created)
+                    created_identity = self.s.stamp(os.fstat(created))
+                finally:
+                    os.close(created)
+                os.fsync(parent)
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                info = os.fstat(fd)
+                need(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1
+                     and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == len(expected),
+                     'Anonymous OCI authentication file is unsafe')
+                identity = self.s.stamp(info)
+                need(created_identity in (None, identity), 'Anonymous OCI authentication replaced after creation')
+                need(os.pread(fd, len(expected)+1, 0) == expected,
+                     'Anonymous OCI authentication content changed')
+                identities = getattr(self, '_registry_identities', {})
+                need(identities.get(name, identity) == identity, 'Anonymous OCI authentication file replaced')
+                self._registry_identities = {**identities, name: identity}
+                # Use the live runner's FD, like managed bind mounts. Podman's
+                # rootless re-exec may close its own inherited descriptors.
+                yield fd
+                need(self.s.stamp(os.fstat(fd)) == identity
+                     and self.s.stamp(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == identity,
+                     'Anonymous OCI authentication changed during operation')
+            finally:
+                os.close(fd)
 
     def command(self, *args):
         return ['/usr/bin/podman', '--root', str(self.folder/'graph'), '--runroot', str(self.folder/'run'),
@@ -137,7 +232,8 @@ class PersonalOCI:
                 '--runtime=/usr/bin/crun', '--hooks-dir='+str(HOOKS), '--events-backend=file', *args]
 
     def run(self, *args, timeout=30):
-        result = subprocess.run(self.command(*args), env=self.env, capture_output=True, text=True, timeout=timeout)
+        with self.registry_auth() as (env, authfd):
+            result = subprocess.run(self.command(*args), env=env, capture_output=True, text=True, timeout=timeout)
         need(result.returncode == 0 and len(result.stdout) < 2*1024**2, 'Managed OCI operation failed; no privileged fallback was attempted')
         return result.stdout.strip()
 
@@ -237,7 +333,7 @@ class PersonalOCI:
             self.s.atomic_json(self.state_path(slug), value)
             self.run('rm', old)
         elif not IMAGE.fullmatch(value['image']):
-            self.run('pull', '--quiet', value['image'], timeout=1800)
+            self.run('pull', '--quiet', '--policy=missing', '--retry=0', '--tls-verify=true', value['image'], timeout=1800)
             image = self.run('image', 'inspect', '--format={{.Id}}', value['image'])
             need(IMAGE.fullmatch(image), 'Approved base did not resolve to an immutable local image')
             value['image'] = image
@@ -299,6 +395,11 @@ class PersonalOCI:
         return args
 
     def execute(self, spec, project, terminal, uuids, mounts, *, control=(), pass_fds=()):
+        with self.registry_auth() as (env, authfd):
+            return self._execute(spec, project, terminal, uuids, mounts,
+                                 control=control, pass_fds=pass_fds, registry_env=env)
+
+    def _execute(self, spec, project, terminal, uuids, mounts, *, control=(), pass_fds=(), registry_env):
         self.verify_host()
         need(os.getuid() != 0, 'Rootless OCI cannot execute as host root')
         flags = self.arguments(spec, project, terminal, uuids, mounts, control)
@@ -330,14 +431,14 @@ class PersonalOCI:
                 self.s.atomic_json(self.state_path(spec['project']), head)
                 result = subprocess.run(self.command('create', '--name', name, *flags,
                     '--entrypoint', spec['argv'][0], head['image'], *spec['argv'][1:]),
-                    env=self.env, text=True, capture_output=True, pass_fds=pass_fds, timeout=60)
+                    env=registry_env, text=True, capture_output=True, pass_fds=pass_fds, timeout=60)
                 need(result.returncode == 0, 'OCI development creation unconfirmed; inspect the retained identity')
-            return subprocess.call(self.command('start', '--attach', '--interactive', name), env=self.env, pass_fds=pass_fds)
+            return subprocess.call(self.command('start', '--attach', '--interactive', name), env=registry_env, pass_fds=pass_fds)
         image = self.verify_image(spec['project'], project['meta']['oci'])
         name = 'gpuq-job-'+uuid.uuid4().hex
         return subprocess.call(self.command('run', '--rm', '--name', name, *flags,
                                '--entrypoint', spec['argv'][0], image, *spec['argv'][1:]),
-                               env=self.env, pass_fds=pass_fds)
+                               env=registry_env, pass_fds=pass_fds)
 
 
 def run_project(config, spec, project, terminal, uuids, workfd, project_fds,

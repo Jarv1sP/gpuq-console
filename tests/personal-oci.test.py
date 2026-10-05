@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -67,6 +68,184 @@ class OCITests(unittest.TestCase):
         self.assertIn('--cgroup-manager=cgroupfs', command)
         self.assertTrue(command[command.index('--root')+1].endswith(self.manager().owner+'/graph'))
         self.assertFalse(any('socket' in v or '--remote' in v for v in command))
+
+    def anonymous_manager(self, root):
+        manager = self.manager()
+        manager.folder = Path(root).resolve()/'private-oci'
+        manager.folder.mkdir(mode=0o700)
+        for name in ('home', 'home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d'):
+            (manager.folder/name).mkdir(mode=0o700)
+        manager.env = {'PATH': '/usr/bin:/bin', 'HOME': str(manager.folder/'home'),
+                       'REGISTRY_AUTH_FILE': str(manager.folder/'anonymous-registry-auth.json'),
+                       'CONTAINERS_REGISTRIES_CONF': str(manager.folder/'anonymous-registries.conf')}
+        # Preserve real private-HOME checks; do not depend on the test host's
+        # administrator /etc ownership or its legitimate registry drop-ins.
+        original = manager.registry_dropin_state
+        manager.registry_dropin_state = lambda path, uid: ('safe-system',) if path == o.REGISTRY_DROPINS else original(path, uid)
+        return manager
+
+    def test_anonymous_registry_auth_is_valid_private_json_and_fd_bound(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            with manager.registry_auth() as (env, fd):
+                self.assertEqual(env['REGISTRY_AUTH_FILE'], '/proc/'+str(os.getpid())+'/fd/'+str(fd))
+                self.assertEqual(json.loads(os.pread(fd, 1024, 0)), {'auths': {}})
+                registry_fd = int(env['CONTAINERS_REGISTRIES_CONF'].rsplit('/', 1)[1])
+                policy = tomllib.loads(os.pread(registry_fd, 1024, 0).decode())
+                self.assertEqual(policy['credential-helpers'], ['containers-auth.json'])
+                self.assertEqual(policy['unqualified-search-registries'], [])
+                self.assertEqual(os.fstat(fd).st_mode & 0o777, 0o600)
+            with self.assertRaises(OSError): os.fstat(fd)
+            with manager.registry_auth() as (_, fd):
+                self.assertEqual(os.pread(fd, 1024, 0), o.ANONYMOUS_AUTH_RAW)
+
+    def test_anonymous_registry_auth_rejects_links_and_untrusted_content(self):
+        for kind in ('symlink', 'hardlink', 'empty', 'credentials', 'helpers', 'mode'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                manager = self.anonymous_manager(root); path = Path(manager.env['REGISTRY_AUTH_FILE'])
+                other = Path(root)/'other'; other.write_bytes(o.ANONYMOUS_AUTH_RAW); other.chmod(0o600)
+                if kind == 'symlink': path.symlink_to(other)
+                elif kind == 'hardlink': os.link(other, path)
+                else:
+                    path.write_bytes(b'' if kind == 'empty' else b'{"auths":{"private":{}}}' if kind == 'credentials'
+                                     else b'{"auths":{},"credHelpers":{}}' if kind == 'helpers' else o.ANONYMOUS_AUTH_RAW)
+                    path.chmod(0o644 if kind == 'mode' else 0o600)
+                with self.assertRaises((ValueError, OSError)):
+                    with manager.registry_auth(): self.fail('Unsafe anonymous auth accepted')
+
+    def test_anonymous_registry_auth_rejects_replacement_and_disappearance(self):
+        for kind in ('replace', 'delete', 'content'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                manager = self.anonymous_manager(root)
+                with manager.registry_auth(): pass
+                path = Path(manager.env['REGISTRY_AUTH_FILE'])
+                if kind == 'replace':
+                    replacement = manager.folder/'replacement'; replacement.write_bytes(o.ANONYMOUS_AUTH_RAW)
+                    replacement.chmod(0o600); os.replace(replacement, path)
+                elif kind == 'delete': path.unlink()
+                else: path.write_bytes(b'{"auths":{}} ')
+                with self.assertRaises((ValueError, OSError)):
+                    with manager.registry_auth(): self.fail('Changed anonymous auth accepted')
+
+    def test_anonymous_registry_auth_detects_replace_during_operation(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            with self.assertRaisesRegex(ValueError, 'during operation'):
+                with manager.registry_auth():
+                    path = Path(manager.env['REGISTRY_AUTH_FILE']); replacement = manager.folder/'replacement'
+                    replacement.write_bytes(o.ANONYMOUS_AUTH_RAW); replacement.chmod(0o600); os.replace(replacement, path)
+
+    def test_managed_command_inherits_only_descriptor_and_no_host_credentials(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            def fake(*args, **kwargs):
+                fd = int(kwargs['env']['REGISTRY_AUTH_FILE'].rsplit('/', 1)[1])
+                self.assertEqual(kwargs['env']['REGISTRY_AUTH_FILE'], '/proc/'+str(os.getpid())+'/fd/'+str(fd))
+                self.assertNotIn('pass_fds', kwargs)
+                self.assertEqual(json.loads(os.pread(fd, 1024, 0)), {'auths': {}})
+                self.assertNotIn('HTTP_PROXY', kwargs['env'])
+                self.assertNotIn('DOCKER_CONFIG', kwargs['env'])
+                return SimpleNamespace(returncode=0, stdout='5.8.8\n', stderr='')
+            with patch.dict(os.environ, {'HTTP_PROXY': 'http://secret.invalid', 'DOCKER_CONFIG': '/private/host'}), \
+                 patch.object(o.subprocess, 'run', side_effect=fake):
+                self.assertEqual(manager.run('version'), '5.8.8')
+
+    def test_anonymous_registry_create_race_fails_closed_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); path = Path(manager.env['REGISTRY_AUTH_FILE'])
+            real_open = os.open
+            def race(name, flags, *args, **kwargs):
+                if name == path.name:
+                    if flags & os.O_CREAT: raise FileExistsError('another initializer won')
+                    raise FileNotFoundError('not present at first open')
+                return real_open(name, flags, *args, **kwargs)
+            with patch.object(o.os, 'open', side_effect=race), self.assertRaises(FileExistsError):
+                with manager.registry_auth(): self.fail('Race accepted')
+            self.assertFalse(path.exists())
+
+    def test_anonymous_registry_short_write_is_retained_and_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); path = Path(manager.env['REGISTRY_AUTH_FILE'])
+            real_write = os.write
+            with patch.object(o.os, 'write', side_effect=lambda fd, raw: real_write(fd, raw[:3])):
+                with self.assertRaisesRegex(ValueError, 'incomplete'):
+                    with manager.registry_auth(): self.fail('Short write accepted')
+            self.assertEqual(path.read_bytes(), o.ANONYMOUS_AUTH_RAW[:3])
+            with self.assertRaisesRegex(ValueError, 'unsafe'):
+                with manager.registry_auth(): self.fail('Partial JSON silently repaired')
+
+    def test_anonymous_registry_policy_rejects_external_credential_helper(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            path = Path(manager.env['CONTAINERS_REGISTRIES_CONF'])
+            path.write_bytes(b'credential-helpers = ["private-helper"]\n'); path.chmod(0o600)
+            with self.assertRaises(ValueError):
+                with manager.registry_auth(): self.fail('External credential helper accepted')
+
+    def test_registry_dropins_reject_nonempty_links_modes_and_foreign_owner(self):
+        for kind in ('nonempty', 'symlink', 'mode', 'foreign-owner'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                manager = self.manager(); base = Path(root).resolve()/'private'; base.mkdir(mode=0o700)
+                path = base/'registries.conf.d'
+                if kind == 'symlink': path.symlink_to(base, target_is_directory=True)
+                else:
+                    path.mkdir(mode=0o700)
+                    if kind == 'nonempty': (path/'override.conf').write_text('credential-helpers=["private-helper"]')
+                    if kind == 'mode': path.chmod(0o777)
+                uid = os.geteuid()+1 if kind == 'foreign-owner' else os.geteuid()
+                with self.assertRaises((ValueError, OSError)):
+                    manager.registry_dropin_state(path, uid)
+
+    def test_registry_dropins_safe_absence_empty_and_created_path_are_distinct(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.manager(); base = Path(root).resolve()/'private'; base.mkdir(mode=0o700)
+            path = base/'containers/registries.conf.d'
+            absent = manager.registry_dropin_state(path, os.geteuid())
+            self.assertEqual(absent[0], 'absent')
+            (base/'containers').mkdir(mode=0o700); path.mkdir(mode=0o700)
+            present = manager.registry_dropin_state(path, os.geteuid())
+            self.assertEqual(present[0], 'empty'); self.assertNotEqual(absent, present)
+
+    def test_external_system_dropin_is_checked_before_engine_invocation(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); manager.registry_dropin_state = Mock(side_effect=ValueError('administrator review'))
+            with patch.object(o.subprocess, 'run') as engine, self.assertRaisesRegex(ValueError, 'administrator review'):
+                manager.run('version')
+            engine.assert_not_called()
+            self.assertEqual(manager.registry_dropin_state.call_args.args, (o.REGISTRY_DROPINS, 0))
+
+    def test_private_home_dropin_and_mid_operation_changes_are_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            path = manager.folder/'home/.config/containers/registries.conf.d'
+            (path/'override.conf').write_text('credential-helpers=["private-helper"]')
+            with self.assertRaisesRegex(ValueError, 'administrator review'):
+                with manager.registry_auth(): self.fail('Private helper override accepted')
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            with self.assertRaisesRegex(ValueError, 'changed during operation'):
+                with manager.registry_auth():
+                    path = manager.folder/'home/.config/containers/registries.conf.d'
+                    path.rmdir(); path.mkdir(mode=0o700)
+
+    def test_anonymous_registry_home_cannot_be_redirected(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); manager.env['HOME'] = '/private/host'
+            with self.assertRaisesRegex(ValueError, 'path changed'):
+                with manager.registry_auth(): self.fail('Foreign registry HOME accepted')
+
+    def test_base_pull_is_one_attempt_with_verified_tls(self):
+        manager = self.manager()
+        manager.load = Mock(return_value={'schema': 1, 'owner': manager.owner, 'project': 'vision',
+                                         'image': manager.policy['baseImage'], 'container': None})
+        manager.run = Mock(side_effect=['', 'sha256:'+SHA])
+        with patch.object(manager.s, 'atomic_json'):
+            result = manager.checkpoint('vision')
+        self.assertEqual(result['image'], 'sha256:'+SHA)
+        self.assertEqual(manager.run.call_args_list[0].args,
+                         ('pull', '--quiet', '--policy=missing', '--retry=0', '--tls-verify=true', manager.policy['baseImage']))
+        self.assertEqual(manager.run.call_args_list[1].args,
+                         ('image', 'inspect', '--format={{.Id}}', manager.policy['baseImage']))
 
     def verify_capability(self, host):
         manager = self.manager()

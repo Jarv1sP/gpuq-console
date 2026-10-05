@@ -275,6 +275,8 @@ npm test
 
 节点实际启用、测试证据和剩余限制应单独记录，不将本手册当作上线回执。
 
+镜像认证使用个人配额内的私有匿名 JSON，不继承宿主登录信息、外部凭据助手或代理环境。Podman 5.x 会在主配置之外读取 `/etc/containers/registries.conf.d` 与私有 HOME 的 `.config/containers/registries.conf.d`；入口逐次核对它们为空或安全不存在。目录非空、链接、归属或身份变化会拒绝，须管理员独立评审，不会自动删除原配置。基础镜像拉取仅一次并验证 TLS；这不代替真实出口、rootless 重执行和容器业务验收。
+
 #### 小范围启用，不自动迁移旧工作区
 
 节点可配置 `storageQuota: {"enabled": true, "owners": ["demo-user-N"]}`，仅按不可变账号 ID 激活列出的用户；省略 `owners` 的旧全节点模式仍保留。列表必须非空、无重复且由管理员配置，不接受 RPC 或用户名覆盖。`personalOci.enabled` 即使为真，未纳入该列表的用户仍不能创建 OCI 工作区；容器入口在任何目录写入前验证本人已启用硬配额。节点上未激活的旧 shared/isolated 工作区继续原模式，查询明确显示未启用、用量未知，不代表零用量或无限容量。
