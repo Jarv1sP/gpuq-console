@@ -42,6 +42,7 @@ gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
 gpuctl project copy NAME --from SOURCE --to TARGET --release HASH
 gpuctl project copy-status COPY_ID / copy-cancel COPY_ID
+gpuctl data label DATASET_ID --display-name "中文数据名"  Set your personal display label
 gpuctl ssh                       Develop in the selected project's private terminal
 gpuctl ssh --root                Administrator: unrestricted host root terminal
 gpuctl ssh --reconnect SESSION   Explicitly reconnect a detached/expired session
@@ -185,7 +186,7 @@ const CLI_OPTIONS=new Map([
   ['via','value'],
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown','sync'].map(key=>[key,'flag']),
-  ['sync-dir','value'],['candidates','value'],
+  ['sync-dir','value'],['candidates','value'],['owner-id','value'],
   ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
@@ -308,6 +309,7 @@ async function main(){
   if(options.sync&&positionals[0]!=='run'||options['sync-dir']!==undefined&&!options.sync)fail('--sync is only for run; --sync-dir requires run --sync');
   if(options.sync&&['release','legacy','root','as','job'].some(key=>Object.hasOwn(options,key)))fail('run --sync requires a personal project; cannot combine with --release/--legacy/--root/--as/--job');
   const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',projectCopy=positionals[0]==='project'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
+  const datasetLabel=positionals[0]==='data'&&positionals[1]==='label';
   if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy&&!projectCopy)fail('--from/--to are for sync, project copy or transfer copy; ref/target-project/dry-run are only for sync');
   if(options.candidates!==undefined&&positionals[0]!=='run')fail('--candidates is only for run --machine auto');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
@@ -323,7 +325,7 @@ async function main(){
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(options.cwd!==undefined&&!['exec','maintenance'].includes(positionals[0])||options.timeout!==undefined&&!['exec','maintenance'].includes(positionals[0])&&!transferCopy||options.detach&&positionals[0]!=='exec'&&!transferCopy)fail('--cwd is for exec/maintenance; timeout also supports transfer copy; detach is for exec or transfer copy');
   if(['reason','script-file','preview-token','parent','ack-unknown'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='maintenance')fail('Maintenance options are only valid for maintenance');
-  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0])&&!transferList)fail('--revision is for community/maintenance; cursor/limit also support transfer list');
+  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])&&!datasetLabel||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0])&&!transferList)fail('--revision is for community/maintenance/data label; cursor/limit also support transfer list');
   const customScheduling=['rank','yield','restart-policy','checkpointable','mode'].some(k=>Object.hasOwn(options,k));
   if(customScheduling&&(positionals[0]!=='run'||options.priority))fail('Custom scheduling is only valid for run and cannot mix with --priority presets');
   const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
@@ -344,7 +346,8 @@ async function main(){
   if(options.job&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.job))fail('Use --job JOB_UUID from gpuctl jobs');
   const explicitSession=options['session-file']||process.env.GPUQ_SESSION_FILE||process.env.AMAX_SESSION_FILE;
   if(options.description!==undefined&&positionals[0]!=='run')fail('--description is only valid for run');
-  if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0]))fail('--display-name is only valid for profile or register');
+  if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0])&&!datasetLabel)fail('--display-name is only valid for profile, register or data label');
+  if(options['owner-id']!==undefined&&!datasetLabel)fail('--owner-id is only valid for administrator data label');
   let sessionFile=explicitSession||join(homedir(),'.config','gpuq-console','session.json');
   // Keep one cache: a previous installation continues using its existing file.
   if(!explicitSession){try{await lstat(sessionFile);}catch(e){if(e.code!=='ENOENT')throw e;const legacy=join(homedir(),'.config','amax-demo','session.json');try{await lstat(legacy);sessionFile=legacy;}catch(old){if(old.code!=='ENOENT')throw old;}}}
@@ -578,6 +581,22 @@ async function main(){
       else if(action==='enable'||action==='disable')result=(await call('users.enabled',{userId:find(username),enabled:action==='enable'})).result;
       else if(action==='delete')result=(await call('users.delete',{userId:find(username)})).result;
       else fail('Unknown user command');
+    }else if(command==='data'&&positionals[1]==='label'){
+      const allowed=['machines','datasets','url','session-file','json','display-name','revision','owner-id'];
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: data label DATASET_ID [--display-name TEXT] [--machine SERVER] [--revision N]');
+      const machine=defaultMachine(),dataset=positionals[2],label=options['display-name'];
+      if(machine==='auto'||!state.machines.some(m=>m.id===machine)||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(dataset))fail('Select an authorized server and an exact dataset ID, not a version or display label');
+      if(options['owner-id']!==undefined&&(session.principal.role!=='admin'||!/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$/.test(options['owner-id'])))fail('Only administrators may specify a valid --owner-id');
+      if(label!==undefined&&(typeof label!=='string'||!label.trim()||[...label.trim()].length>80||/[\p{Cc}\p{Cf}]/u.test(label)))fail('Dataset display names must be 1–80 visible characters');
+      if(options.revision!==undefined&&(label===undefined||!/^\d+$/.test(options.revision)||!Number.isSafeInteger(Number(options.revision))))fail('--revision requires --display-name and a nonnegative integer');
+      const context={machine,dataset,...(options['owner-id']?{ownerId:options['owner-id']}:{})};
+      const current=(await call('datasets.label.get',context)).result;
+      if(label===undefined)result=current;
+      else{
+        if(!Number.isSafeInteger(current.revision)||current.revision<0||current.scope!=='personal'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(current.dataset||''))fail('Dataset label revision is unconfirmed; no change was sent');
+        if(options.revision!==undefined&&Number(options.revision)!==current.revision)fail('Dataset label changed; read it again before replacing. No automatic overwrite was sent');
+        result=(await call('datasets.label.set',{...context,dataset:current.dataset,displayName:label.trim(),revision:current.revision})).result;
+      }
     }else if(command==='data'&&positionals[1]==='cloud'){
       if(training.length)fail('Cloud files do not accept extra commands');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
