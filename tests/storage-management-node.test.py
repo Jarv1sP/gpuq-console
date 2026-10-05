@@ -272,7 +272,7 @@ class StorageBridgeAndRuntime(unittest.TestCase):
         internal = ast.literal_eval(constants[0].value)
         self.assertEqual(set(internal), {
             'storage.archive.events', 'storage.archive.ack', 'storage.archive.original',
-            'storage.archive.enrollment-check',
+            'storage.archive.enrollment-check', 'storage.archive.retire',
             'storage.archive.provision', 'storage.archive.certify', 'storage.lease.prepare',
             'storage.lease.cancel', 'storage.download.open', 'storage.download.info',
             'storage.download.manifest', 'storage.download.get', 'storage.download.finish'})
