@@ -238,10 +238,13 @@ def dataset_error(error):
 def dataset_background_active(key):
     return subprocess.run(['/usr/bin/systemctl','--user','is-active','--quiet','gpuq-data-'+key[:32]],env=ENV,timeout=4).returncode==0
 
-def dataset_background_status(folder,key,spec,cache,actor):
+def dataset_background_status(folder,key,spec,cache,actor,*,catalog_snapshot=None):
     # READY is a current cache fact, never a historical worker receipt: a
     # completed transfer may since have been evicted or its mount removed.
-    current=cache.status(actor,spec['dataset'],spec['version']) if spec['op']=='prepare' else {}
+    current={}
+    if spec['op']=='prepare':
+        current=(cache.status(actor,spec['dataset'],spec['version']) if catalog_snapshot is None
+                 else cache._status_catalog_snapshot(actor,spec['dataset'],spec['version'],catalog_snapshot))
     if current.get('state')=='READY':return {**current,'operationId':key}
     if spec['op']=='prepare' and dataset_recovery_configured(cache,actor,spec['dataset'],spec['version']):current['recoveryConfigured']=True
     result=folder/(key+'.result.json')
@@ -287,7 +290,7 @@ def dataset_op(operation,args):
     if operation=='datasets.capacity':return cache.capacity(actor)
     folder=ROOT/'dataset-ops';folder.mkdir(mode=0o700,exist_ok=True)
     if operation=='datasets.list':
-        listing=cache.list_datasets(actor)
+        listing,snapshots=cache._list_datasets_snapshot(actor)
         # Cache metadata does not know the detached worker's outcome. Dataset
         # permission was checked by list_datasets; shared owners may observe a
         # transfer without learning its initiating identity or host source.
@@ -298,7 +301,8 @@ def dataset_op(operation,args):
                     version.update(canPrepare=True,recoveryConfigured=True)
                 pending=dataset_current_prepare(folder,item['dataset'],version['version'])
                 if pending:
-                    current=dataset_background_status(folder,*pending,cache,actor)
+                    current=dataset_background_status(folder,*pending,cache,actor,
+                        catalog_snapshot=snapshots[(item['dataset'],version['version'])])
                     version.update({k:v for k,v in current.items() if k in ('state','operationId','error')})
         return listing
     if operation=='datasets.status' and 'operationId' in args:

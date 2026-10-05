@@ -220,6 +220,28 @@ def _digest_fd(fd, length=None):
     return digest.hexdigest(), before.st_size
 
 
+def _canonical_json_matches(path, digest):
+    """Check published canonical bytes, bounded and stable, without JSON parse.
+
+    READY manifests are written by _write_json after full tree verification.
+    Their canonical bytes hash is the immutable version already validated from
+    the registry. A semantically equivalent but noncanonical replacement fails
+    closed; this helper never accepts a cached readiness flag or user digest.
+    """
+    with _directory(path.parent) as parent:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            before = _regular(fd)
+            if before.st_size > MAX_JSON_BYTES:
+                raise CacheError("metadata too large")
+            actual, size = _digest_fd(fd, before.st_size)
+            if size != before.st_size or _stamp(before) != _stamp(_regular(fd)):
+                raise CacheError("file changed while being read")
+            return actual == digest
+        finally:
+            os.close(fd)
+
+
 def _manifest_bytes(value):
     if not isinstance(value, dict) or set(value) != {"schema", "directories", "files"} or value["schema"] != SCHEMA:
         raise CacheError("unsupported manifest schema")
@@ -580,8 +602,12 @@ class DatasetCache:
             return None
 
     def _ready_snapshot(self, paths, manifest, version):
+        # Every caller has just obtained this manifest from _record_snapshot or
+        # a version-locked validated registration. Keep that full validation;
+        # compare READY canonical bytes to its version rather than parse a
+        # second large object. Identity checks still bracket the complete read.
         identity = self._ready_identity(paths)
-        ready = self._ready(paths, manifest, version)
+        ready = self._ready(paths, manifest, version, _canonical=True)
         if self._ready_identity(paths) != identity:
             raise CacheError("published version metadata changed; retry the operation")
         return ready, identity
@@ -716,6 +742,15 @@ class DatasetCache:
 
     def list_datasets(self, actor):
         """Authorized catalog and bounded ACL owner IDs, never source IDs/paths."""
+        return self._list_datasets_snapshot(actor)[0]
+
+    def _list_datasets_snapshot(self, actor):
+        """Private per-request identities for a detached-worker status overlay.
+
+        No manifest, summary or readiness result is cached across calls. The
+        executor may reuse these fully validated identities in this one request,
+        only after another live ACL/registration/READY check.
+        """
         self._actor(actor)
         snapshots = []
         with self._locked():
@@ -749,7 +784,7 @@ class DatasetCache:
                 versions.append((row, identity, ready_identity))
                 del record
             snapshots.append((dataset, versions))
-        result = []
+        result, current = [], {}
         with self._locked():
             for dataset, versions in snapshots:
                 # Recheck every ACL before any catalog leaves the service. ACL
@@ -761,6 +796,8 @@ class DatasetCache:
                     self._check_snapshot(actor, dataset, version, identity)
                     paths = self._paths(dataset, version)
                     self._check_ready_snapshot(paths, ready_identity)
+                    current[(dataset, version)] = (identity, ready_identity,
+                                                  row['state'] == 'READY', row['bytes'])
                     with _directory(paths[".staging"].parent) as fd:
                         if row['state'] != "READY" and version in os.listdir(fd):
                             row['state'] = "STAGING"
@@ -770,7 +807,7 @@ class DatasetCache:
                 # list that could be mistaken for the complete authorization.
                 result.append(dict(dataset=dataset, versions=rows,
                                    ownerIds=owners if len(owners) <= 64 else None))
-        return {"datasets": result}
+        return {"datasets": result}, current
 
     def status(self, actor, dataset, version):
         """Lightweight metadata only: no data hashing or staging modifications."""
@@ -781,8 +818,16 @@ class DatasetCache:
         record, identity = self._record_snapshot(actor, dataset, version)
         paths = self._paths(dataset, version)
         ready, ready_identity = self._ready_snapshot(paths, record["manifest"], version)
-        state = "READY" if ready else "REGISTERED"
         remaining = 0 if ready else sum(f["size"] for f in record["manifest"]["files"])
+        return self._status_catalog_snapshot(actor, dataset, version,
+                                             (identity, ready_identity, ready, remaining)), identity
+
+    def _status_catalog_snapshot(self, actor, dataset, version, snapshot):
+        """Trusted same-call catalog snapshot; never a public request field."""
+        identity, ready_identity, ready, remaining = snapshot
+        paths = self._paths(dataset, version)
+        state = "READY" if ready else "REGISTERED"
+        remaining = 0 if ready else remaining
         with self._locked():
             self._check_snapshot(actor, dataset, version, identity)
             self._check_ready_snapshot(paths, ready_identity)
@@ -790,7 +835,7 @@ class DatasetCache:
                 if state != "READY" and version in os.listdir(fd):
                     state = "STAGING"
                     remaining = self._transfer(paths[".staging"])["remainingBytes"]
-            return dict(dataset=dataset, version=version, state=state, remainingBytes=remaining), identity
+            return dict(dataset=dataset, version=version, state=state, remainingBytes=remaining)
 
     def _transfer(self, stage):
         value = _read_json(stage / "TRANSFER.json")
@@ -837,7 +882,7 @@ class DatasetCache:
                     total += self._transfer(stage)["remainingBytes"]
         return total
 
-    def _ready(self, paths, manifest, version):
+    def _ready(self, paths, manifest, version, *, _canonical=False):
         try:
             marker = _read_json(paths["ready"] / "READY.json")
         except FileNotFoundError:
@@ -845,7 +890,11 @@ class DatasetCache:
                 if paths["ready"].name in os.listdir(fd):
                     raise CacheError("published directory has no valid READY marker")
             return False
-        if marker != {"schema": SCHEMA, "version": version} or _read_json(paths["ready"] / "manifest.json") != manifest:
+        if marker != {"schema": SCHEMA, "version": version}:
+            raise CacheError("published version metadata is corrupt")
+        matches = (_canonical_json_matches(paths["ready"] / "manifest.json", version)
+                   if _canonical else _read_json(paths["ready"] / "manifest.json") == manifest)
+        if not matches:
             raise CacheError("published version metadata is corrupt")
         with _directory(paths["ready"]) as fd:
             if os.fstat(fd).st_mode & 0o222:
