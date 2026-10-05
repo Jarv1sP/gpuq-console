@@ -6,6 +6,25 @@ HERE=Path(__file__).resolve().parent
 TRAINING_CONTROL_PROTOCOL=1
 GPU_ALLOCATION_PROTOCOL=2
 
+def sandbox_information(descriptor,timeout=12,maximum=4096):
+    """--info-fd is a stream: bubblewrap writes JSON fields separately."""
+    deadline=time.monotonic()+timeout;raw=bytearray()
+    try:
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0 or not select.select([descriptor],[],[],remaining)[0]:
+                raise RuntimeError('Sandbox startup timed out')
+            chunk=os.read(descriptor,maximum+1-len(raw))
+            if not chunk:break
+            raw.extend(chunk)
+            if len(raw)>maximum:raise ValueError('Sandbox startup information exceeds limit')
+        try:information=json.loads(raw)
+        except (ValueError,UnicodeError) as error:raise ValueError('Invalid sandbox startup information') from error
+        if not isinstance(information,dict) or type(information.get('child-pid')) is not int or not 0<information['child-pid']<=2147483647:
+            raise ValueError('Invalid sandbox child PID')
+        return information
+    finally:os.close(descriptor)
+
 def local_module(name,filename):
     module=importlib.util.spec_from_file_location(name,HERE/filename)
     loaded=importlib.util.module_from_spec(module);sys.modules[name]=loaded;module.loader.exec_module(loaded)
@@ -245,8 +264,7 @@ def main():
     os.close(info_w);os.close(block_r);os.close(workfd);os.close(resolv);os.close(passwd);os.close(hosts)
     network=None
     try:
-        if not select.select([info_r],[],[],12)[0]:raise RuntimeError('Sandbox startup timed out')
-        information=json.loads(os.read(info_r,4096));os.close(info_r)
+        information=sandbox_information(info_r)
         ready_r,ready_w=os.pipe()
         network=subprocess.Popen([cfg.get('slirp','/usr/bin/slirp4netns'),'--configure','--disable-host-loopback','--enable-seccomp','--ready-fd',str(ready_w),str(information['child-pid']),'tap0'],pass_fds=(ready_w,),env={**env,'LD_LIBRARY_PATH':str(HERE/'netlib')},stdout=subprocess.DEVNULL)
         os.close(ready_w)
@@ -256,8 +274,8 @@ def main():
         finish_job_capture(capture_module,root,spec,capture_id,code)
         return code
     finally:
-        gatefile.close()
         if process.poll() is None:process.kill();process.wait()
+        gatefile.close()
         if network and network.poll() is None:network.terminate();network.wait(timeout=5)
         if datalock is not None:os.close(datalock)
 

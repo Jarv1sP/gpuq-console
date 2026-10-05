@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -212,7 +214,7 @@ class Resources(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertIsNone(S.finish_job_capture(broken, self.root, JOB, identifier, 42))
 
-    def runner_command(self, terminal=False, managed_runtime=False, data_workspace=False, training_control=False, allocated_cards=8):
+    def runner_command(self, terminal=False, managed_runtime=False, data_workspace=False, training_control=False, allocated_cards=8, fragmented_info=False):
         """Execute trusted runner orchestration with fake children, never bwrap/GPU."""
         job = {**JOB, 'userId': 'demo-user-1', 'username': 'demo', 'argv': ['python', 'train.py']}
         if data_workspace:job['dataWorkspace']=True
@@ -232,7 +234,7 @@ class Resources(unittest.TestCase):
         config={'root':str(self.root),'conda':'/opt/conda'}
         if training_control:config.update(controlRoot=str(self.root/'not-for-terminals'),gpuqArchive=str(self.root/'must-not-mount-sdk.pyz'),trainingControlProtocol=1)
         (self.root / 'node-config.json').write_text(json.dumps(config))
-        captured, properties, kept = [], [], []
+        captured, properties, kept, writers = [], [], [], []
         path_exists, path_read = Path.exists, Path.read_text
         def exists(path):
             return str(path).startswith('/dev/nvidia') or str(path) == '/run/systemd/resolve/resolv.conf' or path_exists(path)
@@ -250,7 +252,15 @@ class Resources(unittest.TestCase):
                 info = int(command[command.index('--info-fd') + 1])
                 block = int(command[command.index('--block-fd') + 1])
                 kept.append(os.dup(block))
-                os.write(info, json.dumps({'child-pid': 12345}).encode())
+                if fragmented_info:
+                    writer=os.dup(info)
+                    os.write(writer,b'{\n  "child-pid": 12345,\n  "mnt-namespace": 4026')
+                    def finish_info():
+                        try:time.sleep(.03);os.write(writer,b'5355\n}\n')
+                        except BrokenPipeError:pass
+                        finally:os.close(writer)
+                    thread=threading.Thread(target=finish_info);writers.append(thread);thread.start()
+                else:os.write(info, json.dumps({'child-pid': 12345}).encode())
             else:
                 ready = int(command[command.index('--ready-fd') + 1])
                 os.write(ready, b'1')
@@ -290,10 +300,14 @@ class Resources(unittest.TestCase):
                     mapping.device_paths.assert_called_once_with(UUIDS[:allocated_cards])
                     self.assertEqual(gpu_check.call_args.args[0][2], ','.join(UUIDS[:allocated_cards]))
         finally:
+            for thread in writers:thread.join(timeout=1)
             for descriptor in kept:
                 os.close(descriptor)
         self.assertEqual(json.loads(spec_file.read_text()), job)
         return captured[0], properties
+
+    def test_fragmented_bwrap_information_waits_for_complete_json(self):
+        self.runner_command(fragmented_info=True)
 
     def test_runner_builds_readonly_leaf_cgroup_and_metadata_without_changing_user_command(self):
         (args, options), properties = self.runner_command()

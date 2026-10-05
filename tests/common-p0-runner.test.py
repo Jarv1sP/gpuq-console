@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -29,7 +31,7 @@ class CommonRunner(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
 
-    def orchestrate(self, terminal=False, available=True, missing=False, broken=False, indices='0,1', devices=None):
+    def orchestrate(self, terminal=False, available=True, missing=False, broken=False, indices='0,1', devices=None, fragmented_info=False, invalid_info=False):
         job = {'id': JID, 'userId': 'demo-user-1', 'username': 'demo', 'cards': 2, 'argv': ['python', 'train.py']}
         if terminal: del job['id']; job['cards'] = 0
         spec_dir = self.root / ('terminals' if terminal else 'jobs'); spec_dir.mkdir()
@@ -46,7 +48,7 @@ class CommonRunner(unittest.TestCase):
         guard = SimpleNamespace(check=Mock())
         mapping = SimpleNamespace(device_paths=Mock(return_value=devices or ['/dev/nvidia3', '/dev/nvidia2']))
         if broken: diagnostic.start_capture.side_effect = RuntimeError('observer unavailable')
-        captured, properties, kept, memfds = [], [], [], []
+        captured, properties, kept, memfds, writers, stopped = [], [], [], [], [], []
         path_exists, path_read = Path.exists, Path.read_text
         group = '/user.slice/' + ('amax-term-test.service' if terminal else 'gpuq-test.service')
         def exists(path):
@@ -64,13 +66,25 @@ class CommonRunner(unittest.TestCase):
             if command[0] == '/usr/bin/bwrap':
                 info = int(command[command.index('--info-fd') + 1])
                 block = int(command[command.index('--block-fd') + 1]); kept.append(os.dup(block))
-                os.write(info, json.dumps({'child-pid': 12345}).encode())
+                if fragmented_info:
+                    writer=os.dup(info)
+                    os.write(writer,b'{\n  "child-pid": 12345,\n  "mnt-namespace": 4026')
+                    def finish_info():
+                        try:time.sleep(.03);os.write(writer,b'5355\n}\n')
+                        except BrokenPipeError:pass
+                        finally:os.close(writer)
+                    thread=threading.Thread(target=finish_info);writers.append(thread);thread.start()
+                else:os.write(info, json.dumps({'child-pid': 0 if invalid_info else 12345}).encode())
                 if '/run/gpuq/runtime' in command:
                     descriptor = int(command[command.index('/run/gpuq/runtime') - 1])
                     self.assertEqual(os.fstat(descriptor).st_ino, runtime.stat().st_ino)
                     self.assertIn(descriptor, kwargs['pass_fds'])
             else: os.write(int(command[command.index('--ready-fd') + 1]), b'1')
-            return SimpleNamespace(wait=lambda *args, **kwargs: 42, poll=lambda: 42)
+            def stop():
+                gate=Path(command[command.index('/run/.ready')-1])
+                self.assertEqual(gate.read_bytes(),b'0','failed admission never opens or deletes readiness gate before stop')
+                stopped.append(True)
+            return SimpleNamespace(wait=lambda *args, **kwargs: 42, poll=lambda: None if invalid_info else 42,kill=stop)
         try:
             with patch.object(S, 'HERE', self.root), patch.object(S, 'local_module', side_effect=lambda name, filename: guard if filename=='platform-root-guard.py' else P if filename=='scheduling-policy.py' else mapping if filename=='gpu-devices.py' else diagnostic) as imported, \
                     patch.object(S, 'start_job_capture', wraps=S.start_job_capture) as capture, \
@@ -82,6 +96,12 @@ class CommonRunner(unittest.TestCase):
                     patch.object(S.subprocess, 'check_output', return_value='24576\n24576\n') as gpu, \
                     patch.object(S.subprocess, 'run', side_effect=lambda cmd, **kwargs: properties.append(cmd)), \
                     patch.object(S.subprocess, 'Popen', side_effect=spawn), contextlib.redirect_stderr(io.StringIO()):
+                if invalid_info:
+                    with self.assertRaisesRegex(ValueError,'child PID'):S.main()
+                    self.assertEqual(stopped,[True]);self.assertEqual(len(captured),1,'invalid info never starts networking')
+                    self.assertFalse(list(self.root.glob('.gate-*')))
+                    diagnostic.finish_capture.assert_not_called()
+                    return
                 self.assertEqual(S.main(), 42)
                 guard.check.assert_called_once_with(self.root)
                 if terminal:
@@ -95,6 +115,7 @@ class CommonRunner(unittest.TestCase):
                     mapping.device_paths.assert_called_once_with(['GPU-a','GPU-b'])
                     self.assertEqual(gpu.call_args.args[0][2], 'GPU-a,GPU-b')
         finally:
+            for thread in writers:thread.join(timeout=1)
             for fd in kept: os.close(fd)
         self.assertEqual(json.loads(spec_file.read_text()), job)
         self.assertEqual(memfds, ['resolv', 'passwd', 'hosts'])
@@ -114,6 +135,12 @@ class CommonRunner(unittest.TestCase):
         self.assertNotIn('/run/gpuq/runtime', args)
         self.assertNotIn('/run/gpuq/control',args);self.assertNotIn('/opt/gpuq/sdk.pyz',args)
         self.assertNotIn('GPUQ_CONTROL_DIR',env);self.assertNotIn('PYTHONPATH',env)
+
+    def test_fragmented_bwrap_information_waits_for_complete_json(self):
+        self.orchestrate(fragmented_info=True)
+
+    def test_invalid_information_kills_child_with_gate_closed_before_unlinking(self):
+        self.orchestrate(invalid_info=True)
 
     def test_training_records_exit_and_binds_only_managed_runtime_without_budget_files(self):
         args, env, props = self.orchestrate()
