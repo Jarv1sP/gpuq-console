@@ -93,14 +93,14 @@ function renderUsers(){
   const focusedUser=list.contains(focused)?focused.closest('[data-user]')?.dataset.user:null;
   $('#filter-pending').textContent=`待处理 ${pendingUsers().length}`;$('#filter-all').textContent=`全部账号 ${store.users.length}`;
   $('#filter-pending').setAttribute('aria-pressed',String(filter==='pending'));$('#filter-all').setAttribute('aria-pressed',String(filter==='all'));
-  list.innerHTML=filteredUsers().map(u=>`<button class="user-row ${u.id===selected?'selected':''}" data-user="${esc(u.id)}" aria-pressed="${u.id===selected}"><span class="avatar">${esc(u.name.slice(0,1))}</span><span class="user-details"><span class="user-name">${esc(u.name)}</span><span class="user-meta">${label(u)}${u.total?' · '+u.total+' 张':''}</span></span><span class="user-chevron">›</span></button>`).join('')||'<div class="empty">把注册码发给同学，即可邀请注册。</div>';
+  list.innerHTML=filteredUsers().map(u=>`<button class="user-row ${u.id===selected?'selected':''}" data-user="${esc(u.id)}" aria-pressed="${u.id===selected}"><span class="avatar">${esc(u.name.slice(0,1))}</span><span class="user-details"><span class="user-name">${esc(u.name)}</span><span class="user-meta">${label(u)}${u.total?' · '+u.total+' 张':''}</span></span><span class="user-chevron">›</span></button>`).join('')||'<div class="empty">暂无待处理账号。</div>';
   list.scrollTop=scrollTop;
   if(focusedUser)for(const row of list.querySelectorAll('[data-user]'))if(row.dataset.user===focusedUser){row.focus({preventScroll:true});break;}
 }
 function renderEditor(){
   if(!draft){$('#editor').innerHTML='<div class="editor-empty"><h2>审批都处理好了</h2><p class="muted">切到“全部账号”可调整已有授权。</p><button class="button" data-action="invites">查看注册码</button></div>';return;}
   const u=store.get(selected),self=u.id===store.principal.userId,admin=u.role==='admin';
-  const permissionsHelp=copyHelp('服务器额度','勾选服务器后才能使用，卡数不绑定具体显卡。新账号额度为 0，批准后才能提交训练。','/guide/start');
+  const permissionsHelp=copyHelp('服务器额度','勾选服务器后才能使用，卡数不绑定具体显卡。新账号会自动出现在待处理，额度为 0，批准后才能提交训练。','/guide/start');
   const totalHelp=copyHelp('合计额度','排队也占用额度，所有服务器同时受这个上限限制。有额度仍可能需要等空卡。','/guide/queue');
   const accountHelp=()=>copyHelp('账号权限','用卡额度与管理员权限分开，管理员只能授予受信任的维护者。管理员可管理账号，并访问已启用的服务器管理终端。','/guide/start');
   const deleteHelp=copyHelp('删除条件','先暂停账号、确认没有未完成任务后才能删除，数据和历史保留。不能删除当前账号或移除最后一名管理员。','/guide/start');
@@ -128,7 +128,7 @@ function updateDirty(){
   }
 }
 async function refresh(){if(refreshing||!store.principal)return;refreshing=true;shell.syncStatus('syncing');try{await store.refresh();render(true);shell.syncStatus('ready',Date.now());if($('#invites-dialog').open)await loadInvites();}catch(e){shell.syncStatus('failed');report(e);}finally{refreshing=false;}}
-async function loadInvites(){const result=await store.call('invites.list');inviteCode=result.code;const i=result.invitations[0];$('#invites-content').innerHTML=`<section class="invite-card"><div class="invite-heading"><h3>当前注册码</h3><span class="badge ${i.available?'active':'pending'}">${i.available?'可用':'未启用'}</span></div>${copyHelp('注册码','新注册的账号额度为 0，需要管理员授权，不会获得管理员权限。换新或停用注册码只影响后续注册，已有账号不受影响。','/guide/start')}${inviteCode?`<label class="field">注册码<input id="current-invite" readonly spellcheck="false" value="${esc(inviteCode)}"></label><button class="button" data-action="copy-invite">复制注册码</button>`:`<p class="approval-note">${i.available?'旧码无法显示，请换新一次。':'生成一个注册码后即可邀请同学。'}</p>`}<p class="muted">已注册 ${i.uses} 个账号</p><div class="invite-actions"><button class="button primary" data-action="rotate-invite">${i.createdAt?'换新注册码':'生成注册码'}</button><button class="button danger" data-action="disable-invite" ${i.enabled?'':'disabled'}>停用注册</button></div></section>`;}
+async function loadInvites(){const result=await store.call('invites.list');inviteCode=result.code;const i=result.invitations[0];$('#invites-content').innerHTML=`<section class="invite-card"><div class="invite-heading"><h3>当前注册码</h3><span class="badge ${i.available?'active':'pending'}">${i.available?'可用':'未启用'}</span></div>${copyHelp('注册码','注册码不是登录密码，新账号额度为 0，需要管理员授权，不会获得管理员权限。复制给同学即可注册，换新或停用只影响后续注册。','/guide/start')}${inviteCode?`<label class="field">注册码<input id="current-invite" readonly spellcheck="false" value="${esc(inviteCode)}"></label><button class="button" data-action="copy-invite">复制注册码</button>`:`<p class="approval-note">${i.available?'旧码无法显示，请换新一次。':'生成一个注册码后即可邀请同学。'}</p>`}<p class="muted">已注册 ${i.uses} 个账号</p><div class="invite-actions"><button class="button primary" data-action="rotate-invite">${i.createdAt?'换新注册码':'生成注册码'}</button><button class="button danger" data-action="disable-invite" ${i.enabled?'':'disabled'}>停用注册</button></div></section>`;}
 async function guardedChange(action){if(dirty()){toast('请先保存或撤销额度草稿。');return;}await action();}
 document.addEventListener('click',async event=>{
   const b=event.target.closest('button,a[data-nav]');if(!b||b.disabled)return;
