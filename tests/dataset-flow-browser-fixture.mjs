@@ -68,12 +68,19 @@ try{
   async function pageFor(role,zoom=1){const context=await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:zoom,permissions:['clipboard-read','clipboard-write']});await context.route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());assert.equal(url.origin,origin);if(url.pathname==='/api/call'&&mode==='error'&&route.request().postDataJSON()?.operation==='datasets.catalog')return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false,error:'本地模拟目录查询失败'})});return route.continue();}));const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));await page.goto(origin+'/#datasets');await login(page,role==='admin'?'admin':role==='zero'?zero.username:member.username);return page;}
   async function load(page){await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);}
   async function check(page,label,width){await page.setViewportSize({width,height:width<760?900:1000});await page.evaluate(async()=>{for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(resolve=>requestAnimationFrame(resolve));});const result=await inspectGeometry(page,geometry);geometries.push({label,...result});await writeFile(join(out,'key-geometry.json'),JSON.stringify(geometries,null,2));assert.ok(result.pass,JSON.stringify({label,failures:result.failures}));}
-  async function capture(page,name){await page.mouse.move(0,100);await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(out,name+'.png'),fullPage:true,animations:'disabled'});}
+  async function capture(page,name){await page.mouse.move(0,100);await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(out,name+'-viewport.png'),animations:'disabled'});await page.screenshot({path:join(out,name+'.png'),fullPage:true,animations:'disabled'});}
   async function captureComponent(page,selector,name){
     const viewport=page.viewportSize(),element=page.locator(selector),height=Math.ceil(await element.evaluate(node=>node.getBoundingClientRect().height));
-    // A taller native viewport keeps the complete component clear of sticky
-    // navigation and the persistent bottom controls; no UI is hidden or edited.
-    try{await page.setViewportSize({width:viewport.width,height:Math.max(viewport.height,height+448)});await element.screenshot({path:join(out,name+'.png'),animations:'disabled'});}
+    // Capture the native viewport rather than an element crop: Chromium can
+    // place sticky controls over the crop when it moves the capture viewport.
+    // A taller viewport and real scrolling leave space above and below the card.
+    try{
+      await page.setViewportSize({width:viewport.width,height:Math.max(viewport.height,height+448)});
+      await element.evaluate(node=>scrollTo(0,Math.max(0,node.getBoundingClientRect().top+scrollY-224)));
+      await page.mouse.move(0,0);await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(resolve)));
+      const bounds=await element.boundingBox();assert.ok(bounds&&bounds.y>=0&&bounds.y+bounds.height<=page.viewportSize().height,'complete component remains in the native screenshot viewport');
+      await page.screenshot({path:join(out,name+'.png'),animations:'disabled'});
+    }
     finally{await page.setViewportSize(viewport);}
   }
   const memberPage=await pageFor('member');await load(memberPage);
