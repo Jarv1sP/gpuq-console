@@ -15,7 +15,7 @@ let server,service,browser;const calls=[],receipts=new Map(),uploads=new Map(),e
 const data=Buffer.alloc(2*1024**2+13,17),manifest=Buffer.from(JSON.stringify({directories:[],files:[{path:'train.bin',sha256:hash(data),size:data.length}],schema:1})),version=hash(manifest),info={state:'READY',manifestBytes:manifest.length,manifestSha256:version,totalBytes:data.length,entries:1};
 try{
   const bootstrap=join(dir,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
-  const uploadView=u=>({uploadId:u.id,state:u.state,manifestOffset:u.manifest.length,totalBytes:u.spec.totalBytes,remainingBytes:u.spec.totalBytes-[...u.files.values()].reduce((n,b)=>n+b.length,0),...(u.state==='READY'?{dataset:'u-fixture-'+u.spec.name,version:hash(u.manifest)}:{})});
+  const uploadView=u=>({uploadId:u.id,state:u.state,manifestOffset:u.manifest.length,totalBytes:u.spec.totalBytes,entries:u.spec.entries,remainingBytes:u.spec.totalBytes-[...u.files.values()].reduce((n,b)=>n+b.length,0),...(u.state==='READY'?{dataset:'u-fixture-'+u.spec.name,version:hash(u.manifest)}:{})});
   ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,bridge:async(machine,op,args)=>{
     calls.push({machine,op,args});
     if(op==='transfers.source.prepare')return {id:args.id,token:'x'.repeat(43),...info};

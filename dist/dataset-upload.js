@@ -43,40 +43,188 @@ export async function scanBrowserDirectory(selection,{signal,onProgress=()=>{}}=
 }
 function base64(data){let value='';for(let i=0;i<data.length;i+=8192)value+=String.fromCharCode(...data.subarray(i,i+8192));return btoa(value);}
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-export async function uploadBrowserDataset({call,userId,machine,name,scan,signal,onProgress=()=>{},pollMs=1500,keyStore,allowRelay=false}){
+const PROTOCOL='dataset-upload-v1';
+export function uploadError(message,code='UNCONFIRMED',extra={}){return Object.assign(Error(message),{code,...extra});}
+
+// Browser TLS/CORS remain mandatory; the portal certificate pin is identity
+// metadata, not an instruction to bypass the browser's certificate checks.
+export function validateBrowserUploadGrant(value,now=Date.now()/1000){
+  let endpoint;try{endpoint=new URL(value?.endpoint);}catch{throw uploadError('直传入口未确认。','DIRECT');}
+  if(value.available!==true||value.protocol!==PROTOCOL||endpoint.protocol!=='https:'||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||endpoint.pathname!=='/'||endpoint.origin!==value.endpoint||
+    !/^[a-f0-9]{64}$/.test(value.certificateSha256||'')||typeof value.ticket!=='string'||!/^[A-Za-z0-9_.-]{20,4096}$/.test(value.ticket)||
+    !Number.isSafeInteger(value.expiresAt)||value.expiresAt<=now||value.expiresAt>now+601||!Number.isSafeInteger(value.chunkBytes)||value.chunkBytes<1||value.chunkBytes>CHUNK_BYTES)
+    throw uploadError('直传授权未确认。','DIRECT');
+  return value;
+}
+export async function browserDatasetTransport({control,uploadId,signal,fetch:send=globalThis.fetch,now=()=>Date.now()/1000,grant:initial}){
+  let grant=validateBrowserUploadGrant(initial,now());
+  const endpoint=grant.endpoint,certificate=grant.certificateSha256;
+  async function renew(){
+    alive(signal);
+    const status=await control('status');alive(signal);
+    if(!status||status.uploadId!==uploadId||['DISCARDING','DISCARDED','READY'].includes(status.state))throw uploadError('上传状态已改变，请重新查询。','DIRECT');
+    const next=validateBrowserUploadGrant(await control('direct-ticket'),now());alive(signal);
+    if(next.endpoint!==endpoint||next.certificateSha256!==certificate)throw uploadError('直传入口已改变，请重新确认。','DIRECT');
+    grant=next;
+  }
+  async function request(action,args={}){
+    alive(signal);
+    if(!['status','manifest','chunk'].includes(action))throw uploadError('直传操作无效。','DIRECT');
+    const url=new URL(`/v1/uploads/${encodeURIComponent(uploadId)}/${action}`,endpoint),writing=action!=='status';
+    if(args.path!==undefined)url.searchParams.set('path',datasetPath(args.path));
+    if(writing){
+      if(!Number.isSafeInteger(args.offset)||args.offset<0||!(args.bytes instanceof Uint8Array)||args.bytes.length>grant.chunkBytes)throw uploadError('直传分块无效。','DIRECT');
+      url.searchParams.set('offset',String(args.offset));
+    }
+    const timeout=new AbortController(),stop=()=>timeout.abort();signal?.addEventListener('abort',stop,{once:true});
+    const timer=setTimeout(stop,30000);
+    try{
+      const response=await send(url.href,{method:writing?'POST':'GET',credentials:'omit',mode:'cors',redirect:'error',cache:'no-store',signal:timeout.signal,
+        headers:{Authorization:'Bearer '+grant.ticket,Accept:'application/json',...(writing?{'Content-Type':'application/octet-stream'}:{})},...(writing?{body:args.bytes}:{})});
+      alive(signal);
+      if(response.status===401||response.status===403)throw uploadError('直传授权已失效。','DIRECT_AUTH');
+      if(response.status!==200)throw uploadError(`直传被拒绝（${response.status}）。`,'DIRECT');
+      if(!/^application\/json(?:;|$)/i.test(response.headers.get('content-type')||''))throw uploadError('直传回执未确认。','DIRECT');
+      const value=await response.json();alive(signal);
+      if(value?.ok!==true||!value.result||typeof value.result!=='object'||Array.isArray(value.result))throw uploadError('直传回执未确认。','DIRECT');
+      return value.result;
+    }catch(error){alive(signal);if(error.code?.startsWith('DIRECT'))throw error;throw uploadError('直传连接或回执未确认，请检查网络与证书。','DIRECT');}
+    finally{clearTimeout(timer);signal?.removeEventListener('abort',stop);}
+  }
+  return {
+    get chunkBytes(){return grant.chunkBytes;},
+    async request(action,args={}){
+      if(grant.expiresAt<=now()+10)await renew();
+      try{return await request(action,args);}
+      catch(error){
+        if(error.code!=='DIRECT_AUTH')throw error;
+        // Never replay a write until the reauthorized node confirms its offset.
+        await renew();
+        if(action==='status')return request(action,args);
+        const status=await request('status',args.path===undefined?{}:{path:args.path});
+        const offset=action==='manifest'?status.manifestOffset:status.file?.offset;
+        if(offset===args.offset+args.bytes.length&&(args.bytes.length||status.file?.complete===true))return {offset,complete:status.file?.complete};
+        if(offset!==args.offset)throw uploadError('直传写入未确认，请重新查询。','DIRECT');
+        return request(action,args);
+      }
+    }
+  };
+}
+
+// READY comes from the backend's full SHA256 verification and atomic publish.
+// A final portal status is still required; begin/commit alone cannot confirm it.
+export function confirmedDatasetUpload(value,{uploadId,totalBytes,entries}){
+  if(value?.uploadId!==uploadId||value.state!=='READY'||typeof value.dataset!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value.dataset)||!/^[a-f0-9]{64}$/.test(value.version||''))throw uploadError('上传结果未确认。');
+  if(value.totalBytes!==totalBytes||value.entries!==entries)throw uploadError('上传结果与本地清单不符。','MISMATCH');
+  return value;
+}
+export async function uploadBrowserDataset({call,userId,machine,name,scan,signal,onProgress=()=>{},onRoute=()=>{},pollMs=1500,keyStore,allowRelay=false,via='auto',resume,fetch,now}){
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw Error('名称需为 1–40 位字母、数字、下划线或连字符。');
-  if(scan.totalBytes>LARGE_RELAY_BYTES&&allowRelay!==true)throw Error('超过 256 MiB 的网页上传需要明确确认 VPS 中转，或改用可直传的命令行通道。');
-  let uploadId,state;
-  const request=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'?{uploadId}:{}),...args});alive(signal);return result;};
-  const report=(current,extra={})=>{state=current;onProgress({...current,...extra});};
-  const ready=()=>{if(state.state!=='READY'||!state.dataset||!/^[a-f0-9]{64}$/.test(state.version||''))throw Error('服务器尚未确认数据集完整就绪。');return state;};
-  const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){alive(signal);await pause(pollMs);report(await request('status'));}if(state.state==='FAILED')throw Error(state.error||'服务端校验失败；修复后重新上传同一目录。');if(state.state==='DISCARDED')throw Error('这次上传已取消。');};
-  const baseKey=uploadKey(userId,machine,name,scan.manifestSha256),begin={name,key:keyStore?.get(baseKey)||baseKey,manifestBytes:scan.manifest.size,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(allowRelay===true?{allowRelay:true}:{})};
-  report(await request('begin',begin));
-  if(state.state==='DISCARDED'){
-    if(!keyStore)throw Error('这次上传已取消；请使用能保存续传信息的客户端重新开始。');
-    begin.key=crypto.randomUUID();keyStore.set(baseKey,begin.key);report(await request('begin',begin));
+  if(!['auto','direct','relay'].includes(via))throw Error('请选择有效的上传通道。');
+  if(via==='relay'&&scan.totalBytes>LARGE_RELAY_BYTES&&allowRelay!==true)throw uploadError('超过 256 MiB，请先确认经门户中转。','RELAY_CONSENT',{canRelay:true});
+  let uploadId,state,direct,route,transport;
+  const control=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'?{uploadId}:{}),...args});alive(signal);return result;};
+  const report=(current,extra={})=>{if(!current||typeof current.state!=='string')throw uploadError('上传状态未确认。');state=current;onProgress({...current,...(current.state==='READY'?{state:'PUBLISHING',confirmationPending:true}:{}),...extra});};
+  const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){alive(signal);await pause(pollMs);report(await control('status'));}if(state.state==='FAILED')throw uploadError(state.error||'服务端校验失败。','FAILED');if(state.state==='DISCARDED')throw uploadError('这次上传已取消。','DISCARDED');};
+  const ready=async()=>{
+    const last=await control('status');alive(signal);
+    const result=confirmedDatasetUpload(last,{uploadId,totalBytes:scan.totalBytes,entries:scan.entries});
+    state=result;onProgress({...result,...(route?{route}: {})});return {...result,...(route?{route}: {})};
+  };
+  const baseKey=uploadKey(userId,machine,name,scan.manifestSha256),begin={name,key:keyStore?.get?.(baseKey)||baseKey,manifestBytes:scan.manifest.size,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(allowRelay===true||via==='relay'?{allowRelay:true}:{})};
+  const stored=resume||keyStore?.getHandle?.(baseKey);
+  try{
+    if(stored?.uploadId&&stored.machine===machine&&stored.name===name&&stored.manifestSha256===scan.manifestSha256){
+      uploadId=stored.uploadId;report(await control('status'));
+      if(state.state==='READY')return await ready();
+      // The read above precedes any repeated control intent, including consent.
+    }
+    try{report(await control('begin',begin));}
+    catch(error){
+      alive(signal);if(error.status||error.code==='MAINTENANCE_ACTIVE')throw error;
+      // The existing node protocol uses the begin UUID as the upload ID,
+      // including transfer-backed uploads. Query it before any repeated intent.
+      uploadId=begin.key;
+      const observed=await control('status');report(observed);
+      if(observed.uploadId!==uploadId)throw uploadError('上传编号未确认。');
+      keyStore?.setHandle?.(baseKey,{uploadId,machine,name,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries});
+      if(state.state==='READY')return await ready();
+      throw uploadError('上传初始化未确认，请重新查询。');
+    }
+    if(state.state==='DISCARDED'){
+      if(!keyStore)throw Error('这次上传已取消；请使用能保存续传信息的客户端重新开始。');
+      begin.key=crypto.randomUUID();keyStore.set(baseKey,begin.key);report(await control('begin',begin));
+    }
+    uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)throw uploadError('上传编号未确认。');
+    const handle={uploadId,machine,name,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries};
+    keyStore?.setHandle?.(baseKey,handle);
+    transport=state.uploadTransport;
+    if(!['READY','PUBLISHING'].includes(state.state)){
+      if(via!=='relay'&&transport?.directAvailable===true){
+        if(transport.protocol!==PROTOCOL)throw uploadError('直传协议未确认。','DIRECT');
+        const grant=await control('direct-ticket');
+        if(grant?.available===true){direct=await browserDatasetTransport({control,uploadId,signal,grant,fetch,now});route={kind:'campus-direct',machine};}
+        else if(grant?.available!==false)throw uploadError('直传授权未确认。','DIRECT');
+      }else if(via!=='relay'&&transport&&transport.directAvailable!==false)throw uploadError('上传通道未确认。','DIRECT');
+      if(!direct){
+        if(via==='direct')throw uploadError('这台服务器未提供直传入口。','DIRECT_UNAVAILABLE');
+        const limit=Number.isSafeInteger(transport?.relayLimitBytes)&&transport.relayLimitBytes>0?Math.min(LARGE_RELAY_BYTES,transport.relayLimitBytes):LARGE_RELAY_BYTES;
+        if(scan.totalBytes>limit&&allowRelay!==true&&via!=='relay')throw uploadError('没有直传入口；超过 256 MiB，请明确同意经门户中转。','RELAY_CONSENT',{canRelay:true});
+        if(transport&&scan.totalBytes>limit&&transport.relayAllowed!==true)throw uploadError('门户尚未确认大文件中转授权。','RELAY_CONSENT',{canRelay:true});
+        route={kind:'vps-relay',machine};
+      }
+      alive(signal);onRoute(route);
+      if(direct&&(state.state==='RECEIVING_MANIFEST'||state.state==='FAILED'&&state.resumeState==='RECEIVING_MANIFEST'))report({...state,...await direct.request('status')});
+    }
+    async function request(action,args={}){
+      if(direct&&(action==='manifest'||action==='chunk'||action==='status'&&args.path!==undefined))return direct.request(action,args);
+      if(args.bytes!==undefined){const {bytes,...rest}=args;return control(action,{...rest,data:base64(bytes)});}
+      return control(action,args);
+    }
+    async function intent(action){
+      try{return await control(action);}
+      catch(error){alive(signal);if([400,401,403,409,422,429].includes(error.status)||error.code==='MAINTENANCE_ACTIVE')throw error;report(await control('status'));if(['SEALING','PUBLISHING','READY'].includes(state.state))return state;throw uploadError('上传操作未确认，请重新查询。');}
+    }
+    if(state.state==='FAILED'&&state.resumeState==='SEALING')report(await intent('seal'));
+    if(state.state==='FAILED'&&state.resumeState==='PUBLISHING')report(await intent('commit'));
+    if(state.state==='FAILED'&&['RECEIVING_MANIFEST','UPLOADING'].includes(state.resumeState))state={...state,state:state.resumeState};
+    const offered=direct?.chunkBytes??state.chunkBytes??CHUNK_BYTES;
+    if(!Number.isSafeInteger(offered)||offered<1)throw uploadError('分块大小未确认。');
+    const chunkBytes=Math.min(CHUNK_BYTES,offered);
+    if(!Number.isSafeInteger(chunkBytes)||chunkBytes<1)throw uploadError('分块大小未确认。');
+    if(state.state==='RECEIVING_MANIFEST'){
+      let offset=state.manifestOffset;if(!Number.isSafeInteger(offset)||offset<0||offset>scan.manifest.size)throw uploadError('服务器清单偏移无效。');
+      while(offset<scan.manifest.size){
+        alive(signal);const bytes=new Uint8Array(await scan.manifest.slice(offset,offset+chunkBytes).arrayBuffer());alive(signal);
+        if(bytes.length!==Math.min(chunkBytes,scan.manifest.size-offset))throw Error('清单读取不完整。');
+        const result=await request('manifest',{offset,bytes});alive(signal);
+        if(result.offset!==offset+bytes.length)throw uploadError('清单写入未确认。',direct?'DIRECT':'UNCONFIRMED');
+        offset=result.offset;report({...state,manifestOffset:offset},{route});
+      }
+      report(await intent('seal'));
+    }
+    await waitFor();if(state.state==='READY')return await ready();
+    if(state.state!=='UPLOADING')throw uploadError('上传状态未确认，请重新查询。');
+    let transferred=0;
+    for(const entry of scan.files){
+      const status=await request('status',{path:entry.path}),remote=status.file;alive(signal);
+      if(!remote||remote.path!==entry.path||remote.size!==entry.size||remote.sha256!==entry.sha256||!Number.isSafeInteger(remote.offset)||remote.offset<0||remote.offset>entry.size)throw uploadError('服务器文件续传信息不匹配。',direct?'DIRECT':'UNCONFIRMED');
+      const file=scan.paths.get(entry.path),hash=new SHA256();let sent=remote.offset;
+      for(let at=0;at<file.size;at+=chunkBytes){
+        alive(signal);const bytes=new Uint8Array(await file.slice(at,at+chunkBytes).arrayBuffer());alive(signal);
+        if(bytes.length!==Math.min(chunkBytes,file.size-at))throw Error('本地文件读取不完整；未发布。');hash.update(bytes);
+        const begin=Math.max(0,sent-at);
+        if(begin<bytes.length){const part=bytes.subarray(begin),result=await request('chunk',{path:entry.path,offset:sent,bytes:part});alive(signal);if(result.offset!==sent+part.length)throw uploadError('文件写入未确认。',direct?'DIRECT':'UNCONFIRMED');sent=result.offset;}
+        report({...state,state:'UPLOADING'},{route,path:entry.path,bytes:transferred+sent,totalBytes:scan.totalBytes});
+      }
+      if(!file.size&&!remote.complete){const result=await request('chunk',{path:entry.path,offset:0,bytes:new Uint8Array()});alive(signal);if(result.offset!==0||result.complete!==true)throw uploadError('空文件写入未确认。',direct?'DIRECT':'UNCONFIRMED');}
+      if(hash.hex()!==entry.sha256)throw Error('本地文件在上传时发生变化；未发布，请重新选择目录。');
+      transferred+=entry.size;report({...state,state:'UPLOADING'},{route,bytes:transferred,totalBytes:scan.totalBytes});
+    }
+    report(await intent('commit'));await waitFor();return await ready();
+  }catch(error){
+    alive(signal);
+    error.uploadId=uploadId;error.route=route;error.canRelay=error.canRelay===true||via==='auto'&&['DIRECT','DIRECT_AUTH'].includes(error.code);
+    throw error;
   }
-  uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)throw Error('服务器未返回上传编号。');
-  if(state.state==='FAILED'&&state.resumeState==='SEALING')report(await request('seal'));
-  if(state.state==='FAILED'&&state.resumeState==='PUBLISHING')report(await request('commit'));
-  if(state.state==='FAILED'&&['RECEIVING_MANIFEST','UPLOADING'].includes(state.resumeState))state={...state,state:state.resumeState};
-  if(state.state==='RECEIVING_MANIFEST'){
-    let offset=state.manifestOffset;if(!Number.isSafeInteger(offset)||offset<0||offset>scan.manifest.size)throw Error('服务器清单偏移无效。');
-    while(offset<scan.manifest.size){const bytes=new Uint8Array(await scan.manifest.slice(offset,offset+CHUNK_BYTES).arrayBuffer());if(bytes.length!==Math.min(CHUNK_BYTES,scan.manifest.size-offset))throw Error('清单读取不完整。');const result=await request('manifest',{offset,data:base64(bytes)});if(result.offset!==offset+bytes.length)throw Error('服务器未确认清单分块。');offset=result.offset;report({...state,manifestOffset:offset});}
-    report(await request('seal'));
-  }
-  await waitFor();if(state.state==='READY')return ready();
-  if(state.state!=='UPLOADING')throw Error('服务器上传状态未确认，请重新选择同一目录续传。');
-  let transferred=0;
-  for(const entry of scan.files){
-    const status=await request('status',{path:entry.path}),remote=status.file;
-    if(!remote||remote.path!==entry.path||remote.size!==entry.size||remote.sha256!==entry.sha256||!Number.isSafeInteger(remote.offset)||remote.offset<0||remote.offset>entry.size)throw Error('服务器文件续传信息不匹配。');
-    const file=scan.paths.get(entry.path),hash=new SHA256();let sent=remote.offset;
-    for(let at=0;at<file.size;at+=CHUNK_BYTES){alive(signal);const bytes=new Uint8Array(await file.slice(at,at+CHUNK_BYTES).arrayBuffer());if(bytes.length!==Math.min(CHUNK_BYTES,file.size-at))throw Error('本地文件读取不完整；未发布。');hash.update(bytes);const begin=Math.max(0,sent-at);if(begin<bytes.length){const part=bytes.subarray(begin),result=await request('chunk',{path:entry.path,offset:sent,data:base64(part)});if(result.offset!==sent+part.length)throw Error('服务器未确认文件分块。');sent=result.offset;}report({...state,state:'UPLOADING'},{path:entry.path,bytes:transferred+sent,totalBytes:scan.totalBytes});}
-    if(!file.size&&!remote.complete){const result=await request('chunk',{path:entry.path,offset:0,data:''});if(result.offset!==0||result.complete!==true)throw Error('服务器未确认空文件。');}
-    if(hash.hex()!==entry.sha256)throw Error('本地文件在上传时发生变化；未发布，请重新选择目录。');
-    transferred+=entry.size;report({...state,state:'UPLOADING'},{bytes:transferred,totalBytes:scan.totalBytes});
-  }
-  report(await request('commit'));await waitFor();return ready();
 }

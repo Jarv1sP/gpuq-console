@@ -372,3 +372,19 @@
   #page-datasets .datasets-toolbar{gap:12px;align-items:center}
   #page-datasets .datasets-controls{flex:1;gap:8px}
 }
+
+/* Upload route facts use the shared status and server-ID grammar. */
+#page-datasets .dataset-route-heading>.st{display:flex;min-width:0;max-width:100%;gap:8px}
+#page-datasets .dataset-route-heading .server-id{max-width:min(100%,220px);min-width:0}
+#page-datasets .dataset-route-choice{grid-template-columns:auto auto 1fr;align-items:center;gap:8px}
+#page-datasets .dataset-route-choice>select{grid-column:1/-1;min-height:44px}
+#page-datasets #dataset-upload-status[data-state=UNKNOWN]{color:var(--queue)}
+#page-datasets #dataset-upload-status[data-state=READY]{color:var(--run)}
+#page-datasets .dataset-field-label{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px}
+#page-datasets .dataset-field-label>.ui-info{margin:0}
+#page-datasets .dataset-directory-control{position:relative;display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
+#page-datasets .dataset-directory-control input[type=file]{position:absolute;width:1px;height:1px;min-height:0;padding:0;border:0;clip-path:inset(50%);overflow:hidden}
+#page-datasets #dataset-directory-picker{min-height:44px;background:var(--d-surface);color:var(--d-ink);cursor:pointer;white-space:nowrap}
+#page-datasets .dataset-directory-control input:focus-visible+label{outline:2px solid var(--ink);outline-offset:2px}
+#page-datasets .dataset-directory-control input:disabled+label{opacity:.5;cursor:default;pointer-events:none}
+#page-datasets #dataset-directory-selection{font-size:12px;line-height:1.7;color:var(--d-meta);overflow-wrap:anywhere}

@@ -133,7 +133,7 @@ try {
       const rect = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
       const form = rect('#dataset-upload-form'), fields = rect('.dataset-upload-fields');
       return {width: innerWidth, scroll: document.documentElement.scrollWidth, form, fields,
-        name: rect('[name=dataset-name]'), directory: rect('[name=dataset-directory]'),
+        name: rect('[name=dataset-name]'), directory: rect('#dataset-directory-picker'),
         start: rect('#dataset-upload-start'), feedback: rect('.dataset-upload-feedback'),
         notes: rect('.dataset-upload-notes'),
         statusOverflows: document.querySelector('#dataset-upload-status').scrollWidth > document.querySelector('#dataset-upload-status').clientWidth + 1,
@@ -151,21 +151,35 @@ try {
   }
   await page.locator('[name=dataset-name]').fill('browser-data');
   await page.locator('[name=dataset-directory]').setInputFiles(dataDirectory);
-  const fileButtonContrast = await page.locator('[name=dataset-directory]').evaluate(input => {
-    const style = getComputedStyle(input, '::file-selector-button');
+  const fileButtonContrast = await page.locator('#dataset-directory-picker').evaluate(button => {
+    const style = getComputedStyle(button);
     const luminance = value => value.match(/[\d.]+/g).slice(0, 3).map(Number)
       .map(channel => channel / 255).map(channel => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4)
       .reduce((sum, channel, index) => sum + channel * [.2126, .7152, .0722][index], 0);
     const foreground = luminance(style.color), background = luminance(style.backgroundColor);
     return (Math.max(foreground, background) + .05) / (Math.min(foreground, background) + .05);
   });
-  assert.ok(fileButtonContrast >= 4.5, 'Native file selector label must retain AA contrast');
+  assert.ok(fileButtonContrast >= 4.5, 'Visible Chinese file selector label must retain AA contrast');
+  assert.equal(await page.locator('#dataset-add-dialog .data-eyebrow').count(),0);
+  assert.equal(await page.locator('#dataset-directory-picker').textContent(),'选择文件夹');
+  assert.match(await page.locator('#dataset-directory-selection').textContent(),/^已选 2 个文件 · 共 /);
+  for(const id of ['dataset-name-help','dataset-directory-help']){
+    assert.equal(await page.locator('#'+id).evaluate(note=>note.closest('.ui-info').parentElement.className),'dataset-field-label','Help belongs beside its field label');
+  }
+  const input=page.locator('[name=dataset-directory]');
+  assert.equal(await input.evaluate(node=>getComputedStyle(node).clipPath),'inset(50%)','Native English picker stays visually hidden');
+  const picker=page.waitForEvent('filechooser');await page.locator('#dataset-directory-picker').click();
+  assert.equal((await picker).isMultiple(),true,'Chinese label opens the folder picker');
+  await input.focus();const keyboardPicker=page.waitForEvent('filechooser');await input.press('Enter');
+  assert.equal((await keyboardPicker).isMultiple(),true,'Folder picker remains keyboard accessible');
   await assertUploadLayout();
   await page.screenshot({path: join(screenshots, 'upload-selection-desktop.png'), fullPage: true});
-  assert.match(await page.locator('#dataset-panel-directory .dataset-route').textContent(),/VPS 中转/);
+  assert.match(await page.locator('#dataset-panel-directory .dataset-route').textContent(),/通道未确认/);
   assert.equal(await page.locator('[data-upload-phase][aria-current]').count(),0,'No progress before a real upload event');
   // Synthetic size-only fixture: exercise the pre-hash consent gate without
   // creating or sending a large test file. Restore the real File afterwards.
+  await page.locator('[name=dataset-via]').selectOption('relay');
+  assert.match(await page.locator('#dataset-upload-route').textContent(),/经门户中转/);
   const beforeLarge = await page.evaluate(() => calls.length);
   await page.locator('[name=dataset-directory]').evaluate(input=>{
     Object.defineProperty(input.files[0],'size',{value:256*1024**2+1,configurable:true});
@@ -175,7 +189,7 @@ try {
   await page.locator('#dataset-upload-start').click();
   assert.equal(await page.evaluate(()=>calls.length),beforeLarge,'No upload calls before explicit large relay consent');
   assert.equal(await page.locator('#dataset-upload-progress').isHidden(),true);
-  assert.match(await page.evaluate(()=>toasts.at(-1)),/确认大文件传输/);
+  assert.match(await page.evaluate(()=>toasts.at(-1)),/确认大文件经门户中转/);
   await page.screenshot({path:join(screenshots,'upload-large-relay-consent.png'),fullPage:true});
   await page.locator('[name=dataset-relay-consent]').check();
   await page.evaluate(()=>{toasts.length=0;});
@@ -265,3 +279,6 @@ try {
   await browser.close();
   await rm(dataDirectory, {recursive: true, force: true});
 }
+
+// Keep the HTTPS contract coverage in the existing CI browser entry point.
+await import('./browser-direct-upload-browser.mjs');

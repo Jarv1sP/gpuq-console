@@ -13,6 +13,9 @@ export function transferUploadCall(call,onHandle=()=>{}){
       if(!row.uploadId||!row.result)throw Error('上传初始化未确认；重复原命令核对同一传输。编号：'+row.id);
       return row.result;
     }
+    // Portal status remains readable after transfers.io marks the task finished.
+    // It also lets a remembered upload be checked before repeating begin.
+    if(action==='status')return call(operation,args);
     if(!id)throw Error('传输尚未初始化。');
     const {machine,uploadId,...request}=args;
     return call('transfers.io',{id,action,...request});
