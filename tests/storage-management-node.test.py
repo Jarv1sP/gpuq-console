@@ -1,12 +1,18 @@
 """Actual node route plus bridge/runtime boundaries; no SSH or device writes."""
 import ast
+import hashlib
 import importlib.util
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
 import shutil
 import socketserver
+import stat
+import re
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -241,6 +247,7 @@ class StorageBridgeAndRuntime(unittest.TestCase):
         # start a Unix service. All SSH process creation is a strict mock.
         tree = ast.parse((ROOT / 'deploy' / 'execution-worker.py').read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Handler')
+        connections = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'SSHConnections')
         constants = [n for n in tree.body if isinstance(n, ast.Assign)
                      and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
                      and n.targets[0].id == 'INTERNAL_STORAGE']
@@ -253,14 +260,19 @@ class StorageBridgeAndRuntime(unittest.TestCase):
             'storage.download.manifest', 'storage.download.get', 'storage.download.finish'})
         run = Mock(return_value=SimpleNamespace(returncode=0, stdout='{"ok":true,"result":{"enabled":false}}'))
         namespace = dict(socketserver=socketserver, json=json, subprocess=SimpleNamespace(run=run),
+                         hashlib=hashlib, ipaddress=ipaddress, os=os, re=re, stat=stat, threading=threading, time=time,
+                         RUNTIME=Path('/fixture-only'),
                          BASE=Path('/fixture-only'), HOSTS={'gpu-1': {'user': 'fixture', 'address': '127.0.0.1'}})
-        exec(compile(ast.Module(body=constants + [cls], type_ignores=[]), '<worker boundary>', 'exec'), namespace)
+        exec(compile(ast.Module(body=constants + [connections, cls], type_ignores=[]), '<worker boundary>', 'exec'), namespace)
+        namespace['SSH_CONNECTIONS'] = namespace['SSHConnections']()
         handler = object.__new__(namespace['Handler'])
         handler.request = Mock()
         handler.rfile = io.BytesIO((json.dumps(dict(machine=machine, operation=operation,
                                                     args=dict(userId='builtin-admin', hostAdmin=True))) + '\n').encode())
         handler.wfile = io.BytesIO()
-        handler.handle()
+        with patch.object(namespace['SSH_CONNECTIONS'], 'control_path', return_value=Path('/fixture-private/control')), \
+                patch.object(namespace['SSH_CONNECTIONS'], 'ensure_master'):
+            handler.handle()
         return json.loads(handler.wfile.getvalue()), run
 
     def test_execution_worker_allows_only_four_storage_management_operations(self):

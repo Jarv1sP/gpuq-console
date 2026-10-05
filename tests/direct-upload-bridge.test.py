@@ -23,7 +23,11 @@ class BridgeDirectOperations(unittest.TestCase):
         args = {'userId': 'demo-user-1', 'hostAdmin': False, 'uploadId': '12345678-1234-4234-8234-123456789012'}
         handler.rfile = io.BytesIO(json.dumps({'machine': machine, 'operation': operation, 'args': args}).encode()+b'\n')
         handler.wfile = io.BytesIO()
-        with patch.object(self.worker['subprocess'], 'run', return_value=SimpleNamespace(returncode=0, stdout='{"ok":true,"result":{"available":false}}')) as run:
+        with (
+            patch.object(self.worker['SSH_CONNECTIONS'], 'control_path', return_value=Path('/fixture-private/control')),
+            patch.object(self.worker['SSH_CONNECTIONS'], 'ensure_master'),
+            patch.object(self.worker['subprocess'], 'run', return_value=SimpleNamespace(returncode=0, stdout='{"ok":true,"result":{"available":false}}')) as run,
+        ):
             handler.handle()
         return json.loads(handler.wfile.getvalue()), run, args
 
