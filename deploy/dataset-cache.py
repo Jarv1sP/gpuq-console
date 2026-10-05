@@ -583,6 +583,18 @@ class DatasetCache:
             self._check_snapshot(actor, dataset, version, identity)
         return record, identity
 
+    def _version_entry_exists(self, path):
+        """Inspect a required dataset parent without recreating or following it.
+
+        A missing version is normal; a missing parent is incomplete storage
+        metadata, not proof that a registered replica is safe to prepare.
+        """
+        try:
+            with _directory(path.parent) as fd:
+                return path.name in os.listdir(fd)
+        except FileNotFoundError:
+            raise CacheError("dataset storage metadata is incomplete; administrator verification required") from None
+
     def _ready_identity(self, paths):
         """Small no-follow identities only; never parse a READY manifest here."""
         try:
@@ -598,9 +610,8 @@ class DatasetCache:
             with _directory(paths["ready"] / "data") as fd:
                 return wrapper, tuple(files), _stamp(os.fstat(fd))
         except FileNotFoundError:
-            with _directory(paths["ready"].parent) as fd:
-                if paths["ready"].name in os.listdir(fd):
-                    raise CacheError("published directory has no valid READY metadata")
+            if self._version_entry_exists(paths["ready"]):
+                raise CacheError("published directory has no valid READY metadata")
             return None
 
     def _ready_snapshot(self, paths, manifest, version):
@@ -773,9 +784,9 @@ class DatasetCache:
             with _directory(paths['ready'] / 'data') as fd:
                 ready.append(stamp(os.fstat(fd)))
         except FileNotFoundError:
-            with _directory(paths['ready'].parent) as fd:
-                if version in os.listdir(fd):
-                    raise CacheError('published directory has no valid READY metadata')
+            if self._version_entry_exists(paths['ready']):
+                raise CacheError('published directory has no valid READY metadata')
+            ready = None
         return dict(root=list(self._root_identity), dataset=dataset, version=version,
                     folder=folder, record=record, ready=ready)
 
@@ -913,9 +924,8 @@ class DatasetCache:
                         raise CacheError('catalog metadata changed; retry the operation')
                     current[(dataset, version)] = (identity, ready_identity,
                                                   row['state'] == 'READY', row['bytes'])
-                    with _directory(paths[".staging"].parent) as fd:
-                        if row['state'] != "READY" and version in os.listdir(fd):
-                            row['state'] = "STAGING"
+                    if row['state'] != "READY" and self._version_entry_exists(paths[".staging"]):
+                        row['state'] = "STAGING"
                     rows.append(row)
                 owners = self._owners(metadata["owners"])
                 # A display bound, not an ACL limit. Never return a truncated
@@ -930,7 +940,12 @@ class DatasetCache:
 
     def _status_snapshot(self, actor, dataset, version):
         """Trusted adapter also receives the validated registration identity."""
-        record, identity = self._record_snapshot(actor, dataset, version)
+        try:
+            record, identity = self._record_snapshot(actor, dataset, version)
+        except FileNotFoundError:
+            # Keep the missing-registration type for internal lifecycle callers,
+            # but never expose an OS path as the user's status explanation.
+            raise FileNotFoundError("dataset registration or version does not exist or was removed; refresh the dataset list") from None
         paths = self._paths(dataset, version)
         ready, ready_identity = self._ready_snapshot(paths, record["manifest"], version)
         remaining = 0 if ready else sum(f["size"] for f in record["manifest"]["files"])
@@ -946,10 +961,9 @@ class DatasetCache:
         with self._locked():
             self._check_snapshot(actor, dataset, version, identity)
             self._check_ready_snapshot(paths, ready_identity)
-            with _directory(paths[".staging"].parent) as fd:
-                if state != "READY" and version in os.listdir(fd):
-                    state = "STAGING"
-                    remaining = self._transfer(paths[".staging"])["remainingBytes"]
+            if state != "READY" and self._version_entry_exists(paths[".staging"]):
+                state = "STAGING"
+                remaining = self._transfer(paths[".staging"])["remainingBytes"]
             return dict(dataset=dataset, version=version, state=state, remainingBytes=remaining)
 
     def _transfer(self, stage):
@@ -1001,9 +1015,8 @@ class DatasetCache:
         try:
             marker = _read_json(paths["ready"] / "READY.json")
         except FileNotFoundError:
-            with _directory(paths["ready"].parent) as fd:
-                if paths["ready"].name in os.listdir(fd):
-                    raise CacheError("published directory has no valid READY marker")
+            if self._version_entry_exists(paths["ready"]):
+                raise CacheError("published directory has no valid READY marker")
             return False
         if marker != {"schema": SCHEMA, "version": version}:
             raise CacheError("published version metadata is corrupt")
