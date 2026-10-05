@@ -61,6 +61,74 @@ class Transfers(unittest.TestCase):
         for p in self.patches:p.stop()
         self.fixture.tearDown()
     def control(self):return {'id':self.key,'userId':USER}
+    def test_cache_busy_retries_only_reads_without_replaying_target_writes(self):
+        original_read,original_upload=self.src.read,self.dst.upload
+        busy=[0];reads=[];writes=[]
+        def read(request,token):
+            reads.append((request['action'],request.get('path'),request.get('offset')))
+            if request['action']=='get' and request.get('offset')==T.CHUNK and busy[0]<2:
+                busy[0]+=1
+                raise self.source.DATASET_MODULE.CacheBusy('private-path secret-ticket payload')
+            return original_read(request,token)
+        def upload(spec,action,**fields):
+            if action in ('manifest','chunk'):
+                writes.append((action,fields.get('path'),fields['offset']))
+            return original_upload(spec,action,**fields)
+        self.dst.start(self.args)
+        with patch.object(self.src,'read',side_effect=read),patch.object(self.dst,'upload',side_effect=upload), \
+                patch.object(T.time,'sleep'),self.assertLogs('gpuq.transfer-peer',level='WARNING') as logs:
+            self.assertEqual(self.dst.worker(self.key,1),0)
+        result=self.dst.load(self.key,'.result.json')
+        self.assertEqual(result['state'],'SUCCEEDED');self.assertEqual(result['retries'],2)
+        self.assertEqual(len(writes),len(set(writes)))
+        self.assertEqual(sum(action=='get' and offset==T.CHUNK for action,path,offset in reads),3)
+        self.assertNotIn('private-path',str(logs.output));self.assertNotIn('secret-ticket',str(logs.output))
+        self.assertIn('class=CacheBusy',str(logs.output))
+    def test_cache_busy_budget_is_bounded_and_preserves_source_lease(self):
+        self.dst.start(self.args)
+        error=self.source.DATASET_MODULE.CacheBusy('never expose this message')
+        with patch.object(self.src,'read',side_effect=error) as read,patch.object(T.time,'sleep') as sleep, \
+                patch.object(self.dst,'upload') as upload,self.assertLogs('gpuq.transfer-peer',level='WARNING'):
+            self.assertEqual(self.dst.worker(self.key,1),1)
+        self.assertEqual(read.call_count,6);self.assertEqual(sleep.call_count,124);upload.assert_not_called()
+        result=self.dst.load(self.key,'.result.json')
+        self.assertEqual(result['state'],'PAUSED');self.assertEqual(result['retries'],6)
+        self.assertIn('resume the same stopped transfer',result['error'])
+        self.assertEqual(self.src.load(self.key,'.source-lease.json')['state'],'HELD')
+    def test_authentication_or_nonbusy_503_never_retries(self):
+        for status in (403,503):
+            with self.subTest(status=status):
+                key=str(uuid.uuid4());ticket=self.src.prepare({**self.control(),'id':key,
+                    'reference':self.args['reference'],'targetMachine':'gpu-2'})
+                self.dst.start({**self.args,'id':key,'source':ticket})
+                response={'ok':False,'error':'Snapshot grant or immutable source is unavailable'}
+                with patch.object(self.src,'read',side_effect=ValueError('secret-ticket private-path')) as read, \
+                        patch.object(P,'_read_error',return_value=(response,status)),patch.object(T.time,'sleep') as sleep:
+                    self.assertEqual(self.dst.worker(key,1),1)
+                self.assertEqual(read.call_count,1);sleep.assert_not_called()
+                result=self.dst.load(key,'.result.json')
+                self.assertEqual(result['state'],'FAILED');self.assertEqual(result['retries'],0)
+    def test_busy_code_requires_real_cache_class_and_exact_http_status(self):
+        class CacheBusy(ValueError):pass
+        with self.assertLogs('gpuq.transfer-peer',level='WARNING') as logs:
+            payload,status=P._read_error(self.source,CacheBusy('secret-ticket private-path payload'))
+        self.assertEqual(status,403);self.assertNotIn('code',payload)
+        self.assertNotIn('secret-ticket',str(logs.output));self.assertNotIn('private-path',str(logs.output))
+        client=T.PeerClient(self.target.CONFIG['transferPeers']['gpu-1'],self.args['source'])
+        for status,code in ((403,'SOURCE_CACHE_BUSY'),(503,'OTHER_BUSY'),(503,None),(200,'SOURCE_CACHE_BUSY')):
+            with self.subTest(status=status):
+                response=SimpleNamespace(status=status,read=lambda limit:json.dumps({'ok':False,'code':code}).encode())
+                connection=SimpleNamespace(request=lambda *a,**k:None,getresponse=lambda:response,close=lambda:None)
+                client.connection=connection
+                with patch.object(client,'connect'),self.assertRaises(ValueError):client.call('info')
+    def test_read_diagnostics_have_only_safe_class_and_source_frames(self):
+        self.dst.start(self.args)
+        with patch.object(self.source,'platform_root_check',side_effect=ValueError('token /private/customer/file payload')), \
+                self.assertLogs('gpuq.transfer-peer',level='WARNING') as logs:
+            self.assertEqual(self.dst.worker(self.key,1),1)
+        text=' '.join(logs.output)
+        self.assertIn('class=ValueError',text);self.assertIn('transfer-peer.py:do_POST:',text)
+        for private in ('token','/private/customer/file','payload',self.args['source']['token']):self.assertNotIn(private,text)
     def archive_target(self):
         d,cache=self.target.dataset_cache()
         self.target.CONFIG.update(storageArchive={'enabled':True,'machine':'gpu-2','authority':'hdd'},storageAuthority={'enabled':True})
