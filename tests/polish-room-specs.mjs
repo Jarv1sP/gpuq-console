@@ -2,7 +2,7 @@
 export const polishRoomSpecs={
  community:{roots:['#page-community:not([hidden])','.community-dialog[open]'],largeTargets:'.community-post-open',
   leftEdges:[['#community-forum .hero-label','#community-posts'],['#community-chat-form>label','#community-chat-body']],
-  centers:[{parent:'.chat-topline',children:':scope>div,:scope>button',wrap:true},{parent:'.chat-compose-footer',children:':scope>p,:scope>button',wrap:true},{parent:'.field-caption',children:':scope>span,:scope>.copy-help',wrap:true}],
+  centers:[{parent:'.chat-topline',children:':scope>div,:scope>button',wrap:true},{parent:'.chat-compose-footer',children:':scope>p,:scope>button',wrap:true},{parent:'.field-caption',children:':scope>span,:scope>.copy-help',wrap:true},{parent:'.community-dialog .modal-head',children:':scope>div,:scope>h2,:scope>button',wrap:true},{parent:'.community-dialog .modal-head .copy-caption',children:':scope>h2,:scope>.copy-help',wrap:true}],
   helpRows:['.copy-caption'],helpContexts:['#page-community [data-copy-help]','.community-dialog[open] [data-copy-help]'],buttonRows:[{parent:'.community-toolbar-actions'},{parent:'.community-dialog .modal-actions'}],
   repeatedPadding:['.community-post:not(.is-focal) .community-post-open'],repeatedGaps:['.community-meta'],bottomReserve:[{content:'#main-content',controls:'#control-strip:not([hidden]),.mobile-nav'}]},
  members:{roots:['#page-users:not([hidden])','#invites-dialog[open]','#password-dialog[open]'],largeTargets:'.user-row',
