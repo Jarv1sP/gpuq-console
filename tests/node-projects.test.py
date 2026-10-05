@@ -47,6 +47,13 @@ class NodeProjects(unittest.TestCase):
         self.assertEqual(result['projects'][0]['project'],'test-project')
         self.assertEqual(self.n.process('projects.list',{'userId':'demo-user-4'}),{'projects':[]})
         with self.assertRaises(ValueError):self.call('projects.status',userId='demo-user-4')
+    def test_quota_rpc_does_not_create_workspace_or_project_operations(self):
+        value={'enabled':False,'enforcement':None,'owner':'demo-user-42','volumes':None}
+        with patch.object(self.n,'storage_quota_status',return_value=value) as quota,patch.object(self.n,'workspace',side_effect=AssertionError),patch.object(self.n,'projects',side_effect=AssertionError):
+            self.assertEqual(self.n.process('projects.quota',{'userId':'demo-user-42'}),value)
+            quota.assert_called_once_with('demo-user-42')
+            for extra in ({'path':'/etc'},{'project':'test-project'},{'hostAdmin':True},{'projectId':10004}):
+                with self.assertRaisesRegex(ValueError,'quota status fields'):self.n.process('projects.quota',{'userId':'demo-user-42',**extra})
     def test_upload_atomic_commit_and_bad_hash_keep_old(self):
         self.upload()
         with self.assertRaisesRegex(ValueError,'SHA256'):self.upload(b'bad',sha256='a'*64)

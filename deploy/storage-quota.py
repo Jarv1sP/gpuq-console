@@ -37,11 +37,46 @@ def need(ok, message):
         raise ValueError(message)
 
 
-def enabled(config):
+def scope(config):
     value = config.get('storageQuota', {'enabled': False})
-    need(isinstance(value, dict) and set(value) == {'enabled'} and type(value['enabled']) is bool,
+    need(isinstance(value, dict) and {'enabled'} <= set(value) <= {'enabled', 'owners'}
+         and type(value['enabled']) is bool,
          'Invalid storageQuota configuration')
+    if 'owners' in value:
+        owners = value['owners']
+        need(value['enabled'] is True and isinstance(owners, list) and 1 <= len(owners) <= 10000
+             and all(isinstance(owner, str) and OWNER.fullmatch(owner) for owner in owners)
+             and len(set(owners)) == len(owners), 'Invalid hard-quota owner cohort')
+    return value
+
+
+def enabled(config, user=None):
+    value = scope(config)
+    if 'owners' in value:
+        need(isinstance(user, str) and OWNER.fullmatch(user), 'Authenticated quota owner required for scoped policy')
+        return user in value['owners']
     return value['enabled']
+
+
+def dataset_owner(config, user, owners):
+    """Choose a single registered billing owner, never guess shared ownership.
+
+    Legacy datasets remain unchanged only when neither their actor nor any
+    registered owner belongs to the explicitly activated quota cohort.
+    """
+    value = scope(config)
+    if not value['enabled']:
+        return None
+    need(isinstance(user, str) and OWNER.fullmatch(user), 'Invalid authenticated dataset quota actor')
+    need(isinstance(owners, list) and 1 <= len(owners) <= 10000
+         and all(isinstance(owner, str) and OWNER.fullmatch(owner) for owner in owners)
+         and len(set(owners)) == len(owners), 'Invalid dataset quota owners')
+    cohort = value.get('owners')
+    if cohort is not None and user not in cohort and not set(owners).intersection(cohort):
+        return None
+    need(len(owners) == 1, 'Shared dataset needs explicit storage billing policy')
+    need(cohort is None or owners[0] in cohort, 'Dataset billing owner is not in the hard-quota cohort')
+    return owners[0]
 
 
 @contextlib.contextmanager
@@ -82,7 +117,7 @@ def validate_policy(value):
     need(isinstance(value, dict) and required <= set(value)
          and not (set(value) - required - {'controlRoot', 'database', 'logRoot'})
          and (not {'controlRoot', 'logRoot'}.intersection(value) or 'database' in value)
-         and value['schema'] == 1 and type(value['serviceUid']) is int and value['serviceUid'] > 0,
+         and type(value['schema']) is int and value['schema'] == 1 and type(value['serviceUid']) is int and value['serviceUid'] > 0,
          'Invalid quota policy schema')
     for key in ('platformRoot', 'datasetsRoot', *[k for k in ('controlRoot', 'database', 'logRoot') if k in value]):
         path = Path(value[key])
@@ -332,6 +367,9 @@ def charge_attempt(fd, project_id, uid):
 def broker(request, policy=None):
     need(os.geteuid() == 0, 'Quota broker requires host administrator installation')
     policy = validate_policy(root_json(POLICY) if policy is None else policy)
+    if isinstance(request, dict) and request.get('operation') == 'status':
+        need(set(request) == {'operation', 'userId'}, 'Invalid quota status request')
+        return kernel_status(policy, request['userId'])
     need(isinstance(request, dict) and set(request) <= {'userId', 'path', 'project'}
          and {'userId', 'path'} <= set(request), 'Invalid quota request')
     user, path = request['userId'], Path(request['path'])
@@ -345,10 +383,7 @@ def broker(request, policy=None):
     else:
         need('project' not in request, 'Unexpected quota project field')
     # The platform guard remains independent of quota/mount admission.
-    spec = importlib.util.spec_from_file_location('gpuq_quota_platform_guard', Path(__file__).with_name('platform-root-guard.py'))
-    guard = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(guard)
-    observed = guard.check(policy['platformRoot'], purpose='check-only')
+    observed = check_guard(policy)
     need(isinstance(observed, dict) and observed.get('guarded') is True,
          'Hard quota requires an enabled platform root identity guard')
     volume, device = volume_for(policy, path, file=kind == 'scheduler-log')
@@ -390,7 +425,7 @@ def admit_target(fd, kind, policy, row, volume, actual):
 
 
 def ensure(config, user, path, *, project=None):
-    if not enabled(config):
+    if not enabled(config, user):
         return {'enabled': False, 'enforcement': None}
     request = {'userId': user, 'path': str(path)}
     if project is not None:
@@ -415,8 +450,75 @@ def ensure(config, user, path, *, project=None):
     return value
 
 
+def kernel_status(policy, user):
+    """Read the owner's actual kernel counters; no tree admission or mutation."""
+    row = quota_owner(policy, user)
+    observed = check_guard(policy)
+    need(isinstance(observed, dict) and observed.get('guarded') is True,
+         'Hard quota requires an enabled platform root identity guard')
+    volumes = []
+    for key, expected in sorted(row['limits'].items()):
+        volume, device = volume_for(policy, policy['volumes'][key]['mountPoint'])
+        need(volume == key, 'Quota status mount identity changed')
+        actual = quotactl(device, row['projectId'])
+        need(set(actual) == {'bytes', 'inodes', 'usedBytes', 'usedInodes'}
+             and all(type(v) is int and v >= 0 for v in actual.values())
+             and all(actual[k] == expected[k] for k in ('bytes', 'inodes')),
+             'Kernel hard quota does not match administrator policy')
+        volumes.append({'volume': key, **actual,
+                        'remainingBytes': max(0, actual['bytes']-actual['usedBytes']),
+                        'remainingInodes': max(0, actual['inodes']-actual['usedInodes'])})
+    return {'enabled': True, 'enforcement': 'kernel-project-quota', 'owner': user,
+            'projectId': row['projectId'], 'volumes': volumes}
+
+
+def check_guard(policy):
+    spec = importlib.util.spec_from_file_location('gpuq_quota_platform_guard', Path(__file__).with_name('platform-root-guard.py'))
+    guard = importlib.util.module_from_spec(spec)
+    before = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(guard)
+    finally: sys.dont_write_bytecode = before
+    return guard.check(policy['platformRoot'], purpose='check-only')
+
+
+def status(config, user):
+    """Authenticated read-only status; disabled/unknown is never zero usage."""
+    need(isinstance(user, str) and OWNER.fullmatch(user), 'Invalid authenticated quota owner')
+    if not enabled(config, user):
+        value = {'enabled': False, 'enforcement': None, 'owner': user, 'volumes': None}
+        if 'owners' in scope(config):
+            value['reason'] = 'OWNER_NOT_ACTIVATED'
+        return value
+    result = subprocess.run(['/usr/bin/sudo', '-n', BROKER],
+                            input=json.dumps({'operation': 'status', 'userId': user}),
+                            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'},
+                            text=True, capture_output=True, timeout=10)
+    need(result.returncode == 0 and len(result.stdout) < 65536,
+         'Hard quota status unavailable; usage is unknown')
+    value = json.loads(result.stdout)
+    need(isinstance(value, dict) and set(value) == {'enabled', 'enforcement', 'owner', 'projectId', 'volumes'}
+         and value['enabled'] is True and value['enforcement'] == 'kernel-project-quota'
+         and value['owner'] == user and type(value['projectId']) is int
+         and 10000 <= value['projectId'] < 2**31
+         and isinstance(value['volumes'], list) and 1 <= len(value['volumes']) <= 8,
+         'Invalid hard quota status response')
+    seen = set()
+    for row in value['volumes']:
+        need(isinstance(row, dict) and set(row) == {'volume','bytes','inodes','usedBytes','usedInodes','remainingBytes','remainingInodes'}
+             and isinstance(row['volume'], str) and SLUG.fullmatch(row['volume']) and row['volume'] not in seen
+             and all(type(row[k]) is int and 0 <= row[k] < 2**64 for k in row if k != 'volume')
+             and row['bytes'] > 0 and row['inodes'] > 0
+             and row['remainingBytes'] == max(0,row['bytes']-row['usedBytes'])
+             and row['remainingInodes'] == max(0,row['inodes']-row['usedInodes']),
+             'Invalid hard quota kernel counters')
+        seen.add(row['volume'])
+    return value
+
+
 def ensure_attempt(config, spec, environment):
-    if not enabled(config): return
+    if not enabled(config, spec.get('userId')): return
     attempt, job = environment.get('GPUQ_ATTEMPT_ID', ''), environment.get('GPUQ_JOB_ID', '')
     need(re.fullmatch(r'A[a-f0-9]{32}', attempt) and re.fullmatch(r'J[a-f0-9]+', job),
          'Missing scheduler log quota identity')

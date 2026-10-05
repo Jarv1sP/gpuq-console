@@ -34,10 +34,10 @@ async function fixture(t){
   await new Promise(r=>server.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${server.address().port}`;
   const save=extra=>writeFile(session,JSON.stringify({url,token:'test-only',principal,machine:'gpu-1',...extra}),{mode:0o600});
   await save({});
-  const cli=(args,input='',preload=null)=>new Promise((resolve,reject)=>{
-    const child=spawn(process.execPath,[...(preload?['--import',preload]:[]),new URL('../cli.mjs',import.meta.url).pathname,'--url',url,'--session-file',session,'--json',...args]);
+  const cli=(args,input='',preload=null,human=false)=>new Promise((resolve,reject)=>{
+    const child=spawn(process.execPath,[...(preload?['--import',preload]:[]),new URL('../cli.mjs',import.meta.url).pathname,'--url',url,'--session-file',session,...(human?[]:['--json']),...args]);
     let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);child.on('error',reject);
-    child.on('close',code=>resolve({code,data:stdout?JSON.parse(stdout).data:null,stderr}));child.stdin.end(input);
+    child.on('close',code=>resolve({code,data:human?null:stdout?JSON.parse(stdout).data:null,stderr,stdout}));child.stdin.end(input);
   });
   t.after(async()=>{await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});});
   return {dir,session,calls,cli,save,custom,setReleases:(value,head)=>{releases=value;latest=head;}};
@@ -69,6 +69,21 @@ test('project list/status/publish use selected context; publication does not cla
   assert.equal((await f.cli(['project','publish','--key',JOB])).code,1);
   assert.equal((await f.cli(['project','status','beta','--machine','2'])).code,0);
   assert.deepEqual(f.calls.at(-1),{operation:'projects.status',args:{machine:'gpu-2',project:'beta'}});
+});
+test('project quota queries only the selected machine and preserves unknown disabled usage',async t=>{
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ f.custom.set('projects.quota',()=>({enabled:false,enforcement:null,owner:principal.userId,volumes:null}));
+ const value=await f.cli(['project','quota']);assert.equal(value.code,0,value.stderr);assert.equal(value.data.volumes,null);
+ assert.deepEqual(f.calls.at(-1),{operation:'projects.quota',args:{machine:'gpu-1'}});
+ for(const args of [['project','quota','alpha'],['project','quota','--project','alpha'],['project','quota','--env-mode','oci']]){
+  const before=f.calls.filter(c=>c.operation==='projects.quota').length;assert.equal((await f.cli(args)).code,1);assert.equal(f.calls.filter(c=>c.operation==='projects.quota').length,before);
+ }
+});
+test('quota cohort exclusion explains personal not-enabled state without claiming zero usage',async t=>{
+ const f=await fixture(t);
+ f.custom.set('projects.quota',()=>({enabled:false,enforcement:null,owner:principal.userId,volumes:null,reason:'OWNER_NOT_ACTIVATED'}));
+ const value=await f.cli(['project','quota'],'',null,true);assert.equal(value.code,0,value.stderr);
+ assert.match(value.stdout,/你的工作区尚未纳入/);assert.match(value.stdout,/不是零用量/);assert.doesNotMatch(value.stdout,/这台服务器尚未启用/);
 });
 test('project create forwards only explicit environment mode and rejects mutation on other commands',async t=>{
   const f=await fixture(t);

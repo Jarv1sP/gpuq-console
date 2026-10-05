@@ -13,7 +13,7 @@ const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});}
 // remove a maintenance decision. No deadline or automatic unlock exists.
 const READ_OR_STOP=new Set([
   'jobs.logs','jobs.watch','jobs.diagnostics','jobs.cancel','logs','watch','diagnostics','cancel',
-  'files.list','files.get','projects.list','projects.status','projects.verify','host.status',
+  'files.list','files.get','projects.list','projects.quota','projects.status','projects.verify','host.status',
   'datasets.list','datasets.catalog','datasets.capacity','datasets.status',
   'datasets.workspace.list','datasets.workspace.get','datasets.workspace.status','datasets.upload.status','datasets.upload.list',
   'datasets.upload.pause','datasets.upload.direct-revoke','datasets.import.list','datasets.import.status','datasets.import.cancel',
