@@ -77,7 +77,7 @@ exit
 
 个人容器的最短流程如下；已有项目不会自动改成容器：
 
-```sh
+```sh local
 gpuctl project create my-container --env-mode oci
 gpuctl shell
 ```
