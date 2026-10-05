@@ -6,7 +6,7 @@ import {applyJobFeedback} from './dist/job-progress.js';
 import {maintainTaskNotes} from './community.mjs';
 import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
 import {yieldCapable} from './dist/scheduling-policy.js';
-import {normalizeJobSubmission,createSubmittedJob,datasetReferences} from './job-submission.mjs';
+import {normalizeJobSubmission,createSubmittedJob,datasetReferences,personalCardQuotaExempt} from './job-submission.mjs';
 import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 import {datasetCatalogCall,datasetListView} from './dataset-catalog.mjs';
@@ -341,7 +341,7 @@ export async function executionCall(service,principal,operation,args){
         needsPreparation=true;
       }
     }
-    if(!needsPreparation){
+    if(!needsPreparation&&!personalCardQuotaExempt(user,request)){
       if(usage(service.store.jobs,user.id)+request.cards>user.total)fail('超出跨机器用卡总额度（排队、运行和待核对任务均计入）。',409);
       if(usage(service.store.jobs,user.id,request.machine)+request.cards>user.limits[request.machine])fail('超出所选机器的用卡额度（排队、运行和待核对任务均计入）；不会自动切换服务器。',409);
     }

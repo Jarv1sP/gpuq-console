@@ -1,5 +1,6 @@
 // Durable data staging precedes scheduler submission. No GPU lease is held
 // during this phase, and a portal restart resumes observation, not a new job.
+import {personalCardQuotaExempt} from './job-submission.mjs';
 export const DATA_PREPARING='PREPARING_DATA';
 const terminal=new Set(['CANCELED','FAILED','SUCCEEDED']);
 const inFlight=new WeakMap();
@@ -99,7 +100,7 @@ async function observe(service,id,usage){
       currentJob.dataPreparation={datasets:states,checkedAt:new Date().toISOString()};currentJob.error=null;
       if(failure){currentJob.state='FAILED';currentJob.error=failure;currentJob.finishedAt=new Date().toISOString();return;}
       if(!ready){currentJob.queueReason='正在准备本机数据；尚未申请 GPU。';return;}
-      if(usage(service.store.jobs,user.id)+currentJob.cards>user.total||usage(service.store.jobs,user.id,currentJob.machine)+currentJob.cards>user.limits[currentJob.machine]){
+      if(!personalCardQuotaExempt(user,currentJob.spec)&&(usage(service.store.jobs,user.id)+currentJob.cards>user.total||usage(service.store.jobs,user.id,currentJob.machine)+currentJob.cards>user.limits[currentJob.machine])){
         currentJob.queueReason='数据已就绪，等待个人可用卡数额度；尚未申请 GPU。';return;
       }
       const host=service.gpuq?.hosts.find(h=>h.id===currentJob.machine);

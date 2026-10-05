@@ -12,6 +12,10 @@ const FIELDS=new Set([
 ]);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 
+// Only current administrator sharing is exempt from personal whole-card
+// counts. Node placement, VRAM scheduling and dataset leases remain unchanged.
+export const personalCardQuotaExempt=(user,request)=>user.enabled===true&&user.role==='admin'&&request.cards===1&&request.placement?.shared===true;
+
 export function datasetReferences(value){
   if(value===undefined)return [];
   if(!Array.isArray(value)||value.length>8)fail('每个任务最多关联 8 个数据集版本。');
