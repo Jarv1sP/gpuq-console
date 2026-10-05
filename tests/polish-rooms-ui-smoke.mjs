@@ -16,7 +16,7 @@ const sweep=process.env.UI_GEOMETRY_SWEEP==='1';
 const widths=sweep?[...new Set([...layoutWidths,390])].sort((a,b)=>a-b):[320,390,1440];
 const {STARBASE_ASSETS}=await import(pathToFileURL(join(source,'frontend-assets.mjs')));
 const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):(await import('../dist/machines.js')).MACHINES;
-const origin='https://offline-polish.test',checkedAt=new Date().toISOString(),version='b'.repeat(64),results=[],errors=[];
+const origin='https://offline-polish.test',checkedAt=new Date().toISOString(),version='b'.repeat(64),results=[],errors=[],scrollRegressions=[];
 const modes=(process.env.UI_POLISH_MODES||'normal,empty,loading,error,unconfirmed,maintenance').split(',');
 const rooms=(process.env.UI_POLISH_ROOMS||'community,members,cloud').split(',');
 const browser=await chromium.launch({headless:true});
@@ -82,7 +82,17 @@ try{
      if(['loading','error','unconfirmed'].includes(mode)){await page.locator('[data-machine]').first().check();await page.locator('[data-action=save-policy]').click();if(mode==='loading')await page.waitForFunction(()=>document.querySelector('[data-action=save-policy]').disabled);else await page.locator('#policy-error').filter({hasText:/./}).waitFor();}
     }
    }else{
-    await page.locator('[data-nav=datasets]').click();await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+    await page.locator('[data-nav=datasets]').click();
+    // A control can be inside the viewport but behind a persistent layer.
+    // Scroll it into the usable band and keep Playwright's real hit check.
+    await page.locator('#datasets-refresh').evaluate(node=>{
+     const visible=selector=>[...document.querySelectorAll(selector)].filter(n=>n.getClientRects().length&&n.getBoundingClientRect().height>0&&getComputedStyle(n).display!=='none');
+     const top=Math.max(0,...visible('#app-topbar,#shell-context,#operational-maintenance').map(n=>n.getBoundingClientRect().bottom));
+     const bottom=Math.min(innerHeight,...visible('#control-strip,.mobile-nav,#mobile-control').filter(n=>getComputedStyle(n).position==='fixed').map(n=>n.getBoundingClientRect().top));
+     const r=node.getBoundingClientRect();if(bottom-top<r.height)throw Error('no reachable band for dataset refresh');
+     scrollBy({top:r.top+r.height/2-(top+bottom)/2,behavior:'instant'});
+    });
+    await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
     await page.locator('#datasets-add>summary').click();await page.locator('[data-dataset-source=workspace]').click();await page.locator('#cloud-files>summary').click();
     if(mode==='loading')await page.waitForFunction(()=>document.querySelector('#cloud-files-refresh').disabled);
     else{await page.waitForFunction(()=>!document.querySelector('#cloud-files-refresh').disabled);if(mode==='unconfirmed'){await page.locator('[name=cloud-files-path]').fill('incoming/unconfirmed-layout.tar');await page.locator('#cloud-files-form [type=submit]').click();await page.locator('#cloud-files-status').filter({hasText:'未确认'}).waitFor();}}
@@ -101,14 +111,39 @@ try{
    // and scroller, including everything below a phone's first viewport.
    if(mode==='normal'&&!(role==='member'&&room==='members')){
     const captureSurface=async(name,surfaceSpec,scrollPanel)=>{
+     const layoutSpec=async()=>{
+      if(name!=='post-detail')return surfaceSpec;
+      // Short viewports scroll the complete detail sheet; taller ones scroll
+      // its body. Check the actual scroller without changing any thresholds.
+      const selector=await page.locator('.community-detail[open] .community-sheet-body').evaluate(node=>
+       getComputedStyle(node).overflowY==='visible'?'.community-detail[open]':'.community-detail[open] .community-sheet-body');
+      return {...surfaceSpec,scrollPanels:[selector]};
+     };
      if(zoom===1)for(const width of [1440,390,320]){
       await page.setViewportSize({width,height:900});await page.evaluate(async()=>{await document.fonts.ready;document.activeElement?.blur();for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(requestAnimationFrame);});
       const folder=join(output,room,phase);await mkdir(folder,{recursive:true});
       await page.screenshot({path:join(folder,name+'-'+role+'-'+width+'.png')});
-      const layout=await inspectGeometry(page,surfaceSpec);results.push({room,role,mode:name,...layout});
-      if(width<760){await page.evaluate(selector=>{const node=selector?document.querySelector(selector):document.scrollingElement;node.scrollTop=node.scrollHeight;},scrollPanel);await page.screenshot({path:join(folder,name+'-bottom-'+role+'-'+width+'.png')});}
+      const activeSpec=await layoutSpec(),layout=await inspectGeometry(page,activeSpec);results.push({room,role,mode:name,...layout});
+      if(width<760){await page.evaluate(selector=>{const node=selector?document.querySelector(selector):document.scrollingElement;node.scrollTop=node.scrollHeight;},name==='post-detail'?activeSpec.scrollPanels[0]:scrollPanel);await page.screenshot({path:join(folder,name+'-bottom-'+role+'-'+width+'.png')});}
      }
-     const scanned=await scanGeometry(page,surfaceSpec,{widths,heights:layoutHeights,zoom});results.push(...scanned.map(result=>({room,role,mode:name,...result})));
+     for(const height of layoutHeights){
+      await page.setViewportSize({width:Math.floor(widths[0]/zoom),height:Math.floor(height/zoom)});
+      const scanned=await scanGeometry(page,await layoutSpec(),{widths,heights:[height],zoom});results.push(...scanned.map(result=>({room,role,mode:name,...result})));
+     }
+     if(name==='post-detail'&&zoom===1.5){
+      await page.setViewportSize({width:Math.floor(320/zoom),height:Math.floor(700/zoom)});
+      const activeSpec=await layoutSpec(),scroller=page.locator(activeSpec.scrollPanels[0]);
+      const originalStyle=await scroller.getAttribute('style');
+      let blocked;
+      try{
+       await scroller.evaluate(node=>node.style.setProperty('overflow-y','hidden','important'));
+       blocked=await inspectGeometry(page,activeSpec);
+       assert(blocked.failures.some(failure=>failure.rule==='unreachable-panel-content'),'the actual short-sheet scroller must expose clipped content');
+      }finally{await scroller.evaluate((node,style)=>style===null?node.removeAttribute('style'):node.setAttribute('style',style),originalStyle);}
+      const restored=await inspectGeometry(page,activeSpec);assert(restored.pass,JSON.stringify(restored.failures));
+      scrollRegressions.push({role,selector:activeSpec.scrollPanels[0],blocked,restored});
+      await writeFile(join(output,'scroll-regressions.json'),JSON.stringify(scrollRegressions,null,2));
+     }
     };
     if(room==='community'){
      await page.setViewportSize({width:390,height:900});await page.locator('[data-community-tab=chat]').click();await page.locator('#community-task-notes>summary').click();await page.locator('#task-notes-list p').waitFor();
@@ -129,6 +164,16 @@ try{
    }
    await writeFile(join(output,'geometry-results.json'),JSON.stringify({results,errors},null,2));
    console.log(room,role,mode,'zoom '+zoom,results.filter(result=>result.room===room&&result.role===role&&result.mode===mode&&!result.pass).length+' geometry failures');
+  }catch(error){
+   const folder=join(output,'failure'),name=room+'-'+role+'-'+mode+'-zoom-'+zoom;
+   await mkdir(folder,{recursive:true});await page.screenshot({path:join(folder,name+'.png')});
+   const geometry=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scrollY,elements:
+    ['#app-topbar','#shell-context','#operational-maintenance','.maintenance-settings','#main-content','#datasets-refresh','#control-strip'].map(selector=>{
+     const node=document.querySelector(selector);if(!node)return {selector,missing:true};
+     const r=node.getBoundingClientRect(),s=getComputedStyle(node),top=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+     return {selector,rect:{left:r.left,top:r.top,width:r.width,height:r.height,bottom:r.bottom},position:s.position,overflowY:s.overflowY,hidden:node.hidden,open:node.open,hit:top?{tag:top.tagName,id:top.id,className:top.className}:null};
+    })}));
+   await writeFile(join(folder,name+'.json'),JSON.stringify(geometry,null,2));throw error;
   }finally{for(const resolve of release)resolve();await context.unrouteAll({behavior:'ignoreErrors'});await context.close();}
  }
 }finally{await browser.close();await mkdir(output,{recursive:true});await writeFile(join(output,'geometry-results.json'),JSON.stringify({results,errors},null,2)+'\n');}
