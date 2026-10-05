@@ -756,6 +756,77 @@ class DatasetCache:
                         memberAllowed=personal,
                         reason=None if actor.is_admin or personal else "ADMIN_ONLY")
 
+    def _delete_actor_locked(self, actor, dataset, version):
+        """Node-side permission check after every mutable-identity boundary."""
+        self._actor(actor, admin=version is None)
+        owners = self._dataset(actor, dataset)["owners"]
+        if not actor.is_admin:
+            proof = self._provenance(dataset, version)
+            if (owners != [actor.user_id] or proof is None or proof["owners"] != owners
+                    or proof["origin"] not in {"upload", "workspace", "replica"}):
+                raise PermissionError("这份数据只能由管理员删除")
+
+    @contextlib.contextmanager
+    def _retention_guard(self, actor, dataset, version):
+        """Only a live protected READY authority makes complete data disposable.
+
+        sourceId, ownership, an old recovery JSON, and successful transfer alone
+        are not evidence. The trusted node installs the same sealed authority
+        adapter used by tier collection; its guard spans target quarantine.
+        """
+        try:
+            record, registered = self._record_snapshot(actor, dataset, version)
+        except FileNotFoundError:
+            # Whole-dataset removal also finds unpublished orphan staging.
+            # Missing registration is never evidence that an orphan READY tree
+            # is disposable. Preserve it for explicit administrator recovery.
+            with self._locked():
+                self._dataset(actor, dataset)
+                if os.path.lexists(self._paths(dataset, version)["ready"]):
+                    raise CacheError("这是最后一份数据，请用彻底删除（7 天内可恢复）")
+            yield
+            return
+        with self._locked():
+            self._check_snapshot(actor, dataset, version, registered)
+            if self._leases(dataset, version):
+                raise CacheError("active leases prevent removal; leases never expire automatically")
+            if self._tier(dataset, version)["pins"]:
+                if self._authority_pins(dataset, version):
+                    raise CacheError("authority pin protects this original; 这是数据库原件，请用彻底删除")
+                raise CacheError("persistent pins prevent removal")
+            complete = self._ready(self._paths(dataset, version), record["manifest"], version)
+            # A retry after quarantine must still protect its complete data.
+            # Otherwise disappearance of the original between two attempts
+            # could make the retry erase the only remaining copy in .trash.
+            with _directory(self.root / ".trash") as fd:
+                transactions = sorted(os.listdir(fd))
+            for name in transactions:
+                if not re.fullmatch(r"unregister-[a-f0-9]{32}", name):
+                    continue
+                folder = self.root / ".trash" / name
+                receipt = _read_json(folder / "REMOVAL.json")
+                if receipt.get("dataset") != dataset or receipt.get("unregistered") is True:
+                    continue
+                if version in receipt.get("versions", []):
+                    retained = folder / "replicas" / "ready" / version
+                    if os.path.lexists(retained):
+                        with _directory(retained):
+                            pass
+                        # An interrupted cleanup may have made directories
+                        # writable, or deleted some files. Never dispose of its
+                        # remaining bytes without the original's live guard.
+                        complete = True
+        if not complete:
+            yield
+            return
+        guard = getattr(self, "rebuild_guard", None)
+        if not callable(guard):
+            raise CacheError("这是最后一份数据，请用彻底删除（7 天内可恢复）")
+        with guard(actor, dataset, version):
+            with self._locked():
+                self._check_snapshot(actor, dataset, version, registered)
+            yield
+
     def _register(self, actor, dataset, manifest, owners, source_id, *, _origin="admin", _receipt=None):
         self._actor(actor, admin=True)
         owners = self._provenance_actor(actor, owners, _origin, _receipt)
@@ -1736,7 +1807,7 @@ class DatasetCache:
     def evict(self, actor, dataset, version):
         """Administrator cleanup only. Registration remains for later recreation."""
         self._actor(actor, admin=True)
-        with self._version_locked(actor, dataset, version):
+        with self._retention_guard(actor, dataset, version), self._version_locked(actor, dataset, version):
             with self._locked():
                 self._record(actor, dataset, version)
                 quarantined = self._quarantine_locked(dataset, version)
@@ -1919,14 +1990,14 @@ class DatasetCache:
                     os.fsync(fd)
 
     def unregister(self, actor, dataset, version=None, *, _guard=None, _expected_registration=None, _expected_owners=None):
-        """Admin-only reversible registration removal after unleased eviction.
+        """Source-proven personal or administrator registration removal.
 
         Internal transfers and leases share these locks. As with evict/publish,
         administrators MUST stop/join any external trusted rsync writer first.
         Cleanup failures leave registration in place; retries resume the private
         cleanup journal. Original configured source directories are never touched.
         """
-        self._actor(actor, admin=True)
+        self._actor(actor, admin=version is None)
         self._paths(dataset, version)
         if _expected_registration is not None and (version is None or not isinstance(_expected_registration, list)
                 or len(_expected_registration) != 5 or any(type(item) is not int or item < 0 for item in _expected_registration)):
@@ -1943,6 +2014,8 @@ class DatasetCache:
                 raise CacheBusy("dataset registration differs from the original retirement identity")
             if _expected_owners is not None and initial['metadata']['owners'] != _expected_owners:
                 raise CacheBusy("dataset ownership differs from the original retirement identity")
+            if initial is not None:
+                self._delete_actor_locked(actor, dataset, version)
         if initial is None:
             return dict(dataset=dataset, version=version, versions=[], unregistered=False,
                         registrationRetained=False, recoveryId=None)
@@ -1951,6 +2024,8 @@ class DatasetCache:
             if _guard is not None:
                 _guard()
             current = self._unregister_snapshot(actor, dataset, version)
+            if current is not None:
+                self._delete_actor_locked(actor, dataset, version)
             if (current is None or current["registry"] != initial["registry"]
                     or set(current["versions"]) - set(initial["versions"])):
                 raise CacheBusy("dataset registration changed during removal; retry after checking the catalog")
@@ -1961,6 +2036,12 @@ class DatasetCache:
                     raise CacheError("persistent pins prevent unregister")
 
         with contextlib.ExitStack() as locks:
+            with self._locked():
+                recheck()  # Reject active uses before contacting any original.
+            # Source guards first, matching tier GC's lock order. A sourceId or
+            # cached receipt must never make the last complete copy disposable.
+            for item in initial["versions"]:
+                locks.enter_context(self._retention_guard(actor, dataset, item))
             # Never wait on a version lock while holding the global lock: active
             # materialize/publish need global metadata access before releasing it.
             for item in initial["versions"]:

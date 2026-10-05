@@ -17,6 +17,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 from storage_test_helpers import local_data_mounts
+from dataset_retention_helpers import protected_original
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "deploy" / "dataset-cache.py"
@@ -42,6 +43,7 @@ class DatasetCacheTests(unittest.TestCase):
         (self.source / "empty").write_bytes(b"")
         self.root = self.base / "cache"
         self.cache = D.DatasetCache(self.root, sources={"sample-source": self.source}, reserve_bytes=1024)
+        self.original = protected_original(self.cache, D, self.base/'protected-original')
 
     def tearDown(self):
         # Published data is deliberately read-only; make only this test's sandbox
@@ -308,6 +310,7 @@ class DatasetCacheTests(unittest.TestCase):
         self.assertEqual(lease["path"], str(self.ready(version) / "data"))
         self.assertEqual(lease, self.cache.acquire_lease(OWNER, "sample", version, "job-1"))
         reopened = D.DatasetCache(self.root, reserve_bytes=1024)
+        protected_original(reopened, D, self.base/'reopened-original')
         with patch.object(D.time, "time", return_value=10**15), self.assertRaises(D.CacheError):
             reopened.evict(ADMIN, "sample", version)
         with self.assertRaises(PermissionError):

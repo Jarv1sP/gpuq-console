@@ -168,6 +168,9 @@ def dataset_cache():
         module=importlib.util.spec_from_file_location('gpuq_dataset_cache',HERE/'dataset-cache.py')
         DATASET_MODULE=importlib.util.module_from_spec(module);sys.modules[module.name]=DATASET_MODULE;module.loader.exec_module(DATASET_MODULE)
     cache=DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=config.get('reserveBytes',10*1024**3),mount_point=config.get('mountPoint','/data2'))
+    # Lazy to avoid the storage-node constructor calling dataset_cache again.
+    # Only configured, sealed authorities can prove a cache is replaceable.
+    cache.rebuild_guard=lambda actor,dataset,version:storage_node().tier.rebuild_guard(actor,dataset,version)
     if 'storageQuota' in CONFIG:
         def quota_guard(actor,dataset,path):
             spec=importlib.util.spec_from_file_location('gpuq_dataset_quota',HERE/'storage-quota.py')
