@@ -2,9 +2,9 @@
 """Durable preparation handoff and whole-download holds; no TTL release.
 
 Authenticated executor code owns this interface, never raw client identities.
-prepare/handoff serialize using an independent journal flock; the runner does
-not have to reacquire the executor's submission job flock. The submission path
-still owns its existing job flock. cancel_prepare MUST hold that job flock and
+prepare/handoff serialize using an independent journal flock. Runner handoff
+also holds the executor job flock, shared with cleanup; submission already owns
+that flock and must not acquire it recursively. cancel_prepare MUST hold it and
 have trusted proof that the job was never dispatched. finalize_training MUST
 hold the same job flock and have fresh trusted proof of either never-dispatched
 or native terminal AND all execution units stopped. No client-provided flag is
@@ -16,6 +16,7 @@ Downloads use their own namespace, never the peer transfer's lease identity.
 from contextlib import contextmanager
 import fcntl
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -225,7 +226,7 @@ class StorageLeases:
                     return None
             return self._handoff_locked(job, binding, path, self._load(path, binding))
 
-    def _handoff_locked(self, job, binding, path, record):
+    def _handoff_locked(self, job, binding, path, record, *, lease_job_id=None):
         if record['state'] not in ('HELD', 'HANDED_OFF') or len(record['leases']) != len(binding['references']):
             if record['state'] in ('CANCELING', 'CANCELED', 'RELEASING', 'RELEASED'):
                 raise ValueError('Preparation hold is not ready for handoff: previous preparation was finalized; '
@@ -234,7 +235,7 @@ class StorageLeases:
             raise ValueError('Preparation hold is not ready for handoff')
         _, cache = self.n.dataset_cache()
         for ref, lease in zip(binding['references'], record['leases']):
-            self._require(cache, binding, ref, lease, binding['id'], ready=True)
+            self._require(cache, binding, ref, lease, lease_job_id or binding['id'], ready=True)
         destination = self.n.ROOT / 'jobs' / (binding['id'] + '.datasets.json')
         self.d._mkdir(destination.parent)
         if destination.exists():
@@ -245,6 +246,139 @@ class StorageLeases:
         record['state'] = 'HANDED_OFF'
         self._save(path, record)
         return record['leases']
+
+    def _retry_binding(self, job, native, retry):
+        if (not isinstance(native, str) or not re.fullmatch(r'J[a-f0-9]{12}', native)
+                or not isinstance(retry, dict) or set(retry) != {'id', 'createdAt'}
+                or type(retry['id']) is not int or retry['id'] <= 0
+                or type(retry['createdAt']) not in (int, float) or not 0 < retry['createdAt'] < 1e12):
+            raise ValueError('Invalid verified native retry binding')
+        return {**self._training(job), 'nativeJobId': native, 'retry': retry,
+                'specSha256': hashlib.sha256(json.dumps(job, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+
+    def _retry_records(self, job, folder):
+        paths = sorted(folder.glob('retry-*.json'))
+        if len(paths) > 1024:
+            raise ValueError('Training retry history is full; retain existing fences')
+        values = []
+        for path in paths:
+            if not re.fullmatch(r'retry-[1-9][0-9]*\.json', path.name):
+                raise ValueError('Invalid training retry journal name')
+            raw = self.d._read_json(path)
+            binding = raw.get('binding', {})
+            expected = self._retry_binding(job, binding.get('nativeJobId'), binding.get('retry'))
+            if path.name != 'retry-' + str(expected['retry']['id']) + '.json':
+                raise ValueError('Training retry journal identity differs')
+            record = self._load(path, expected)
+            consumers = record.get('consumers')
+            if (not isinstance(consumers, list) or not 1 <= len(consumers) <= 1024
+                    or len(consumers) != len(set(consumers))
+                    or any(not isinstance(value, str) or not re.fullmatch(r'A[a-f0-9]{32}', value) for value in consumers)):
+                raise ValueError('Training retry consumer history is invalid')
+            values.append((path, record))
+        return values
+
+    @staticmethod
+    def _retry_lease_id(binding):
+        return 'retry:' + binding['id'] + ':' + str(binding['retry']['id'])
+
+    def _finalize_retry(self, path, record):
+        if record['state'] == 'RELEASED':
+            return
+        if record['state'] not in ('ACQUIRING', 'HELD', 'HANDED_OFF', 'RELEASING'):
+            raise ValueError('Invalid retry generation finalization state')
+        record['state'] = 'RELEASING'
+        self._save(path, record)
+        binding = record['binding']
+        self._release_matching(binding, binding['references'], self._retry_lease_id(binding))
+        record['state'] = 'RELEASED'
+        self._save(path, record)
+
+    def runner_handoff(self, job, proof):
+        """Private trusted runner + job flock only. Never exposed by prepare.
+
+        The old journal is immutable once RELEASED. Native admin JOB_RETRIED
+        creates a distinct lease namespace; a preemption in that same epoch
+        reuses its held generation and adds its current consumer identity.
+        """
+        binding = self._training(job)
+        with self.d.wait_for_locks(timeout=5, total=8), self._lock('training', binding['id'], create=False) as path:
+            if path is None:
+                return None
+            try:
+                base = self._load(path, binding)
+            except FileNotFoundError:
+                if any(path.parent.glob('retry-*.json')):
+                    raise ValueError('Retry generations exist without their permanent base fence')
+                return None
+            if base['state'] != 'RELEASED':
+                return self._handoff_locked(job, binding, path, base)
+            if not isinstance(proof, dict) or proof.get('retry') is None:
+                raise ValueError('Finalized preparation requires a verified explicit native retry epoch')
+            retry_binding = self._retry_binding(job, proof.get('nativeJobId'), proof['retry'])
+            if proof.get('specSha256') != retry_binding['specSha256']:
+                raise ValueError('Native retry immutable specification differs')
+            current, prior = proof.get('attemptId'), proof.get('priorAttemptIds')
+            if (not isinstance(current, str) or not re.fullmatch(r'A[a-f0-9]{32}', current)
+                    or not isinstance(prior, list) or current in prior):
+                raise ValueError('Native retry current consumer identity differs')
+            records = self._retry_records(job, path.parent)
+            destination = self.n.ROOT / 'jobs' / (binding['id'] + '.datasets.json')
+            target = path.parent / ('retry-' + str(proof['retry']['id']) + '.json')
+            for old_path, old in records:
+                old_binding = old['binding']
+                if old_path == target:
+                    continue
+                if (old_binding['nativeJobId'] != proof['nativeJobId']
+                        or old_binding['retry']['id'] >= proof['retry']['id']
+                        or not set(old['consumers']) <= set(prior)):
+                    raise ValueError('Earlier retry generation consumers are not confirmed stopped')
+                # Retire only the exact old namespace, including an interrupted
+                # acquire whose last lease was not yet appended to its journal.
+                self._finalize_retry(old_path, old)
+                if destination.exists() and self.d._read_json(destination) == old['leases']:
+                    destination.unlink()
+            record = next((record for old_path, record in records if old_path == target), None)
+            if record is None:
+                if len(records) >= 1024:
+                    raise ValueError('Training retry history is full')
+                if destination.exists():
+                    # A stale base receipt cannot silently be replaced.
+                    if self.d._read_json(destination) != base['leases']:
+                        raise ValueError('Existing scheduler receipt is not a retired generation')
+                    _, cache = self.n.dataset_cache()
+                    for ref in binding['references']:
+                        with cache._locked():
+                            if any(value['owner'] == binding['userId'] and value['jobId'] == binding['id']
+                                   for value in cache._leases(ref['dataset'], ref['version'])):
+                                raise ValueError('Finalized base preparation still retains a lease')
+                    destination.unlink()
+                record = {'schema': 1, 'binding': retry_binding, 'state': 'ACQUIRING',
+                          'leases': [], 'consumers': [current], 'createdAt': time.time()}
+                self._save(target, record)  # Durable generation precedes leases.
+            if record['binding'] != retry_binding or record['state'] not in ('ACQUIRING', 'HELD', 'HANDED_OFF'):
+                raise ValueError('Native retry generation was finalized; a new explicit retry is required')
+            if not set(record['consumers']) <= set(prior + [current]):
+                raise ValueError('Native retry has an unknown earlier consumer')
+            if current not in record['consumers']:
+                record['consumers'].append(current)
+                self._save(target, record)
+            module, cache = self.n.dataset_cache()
+            actor = module.Principal(binding['userId'], False)
+            lease_job_id = self._retry_lease_id(retry_binding)
+            for index, ref in enumerate(binding['references']):
+                if index < len(record['leases']):
+                    self._require(cache, binding, ref, record['leases'][index], lease_job_id)
+                lease = cache.acquire_lease(actor, ref['dataset'], ref['version'], lease_job_id)
+                if index < len(record['leases']):
+                    if record['leases'][index] != lease:
+                        raise ValueError('Retry generation lease identity changed')
+                else:
+                    record['leases'].append(lease)
+                    self._save(target, record)
+            record['state'] = 'HELD'
+            self._save(target, record)
+            return self._handoff_locked(job, retry_binding, target, record, lease_job_id=lease_job_id)
 
     def _release_matching(self, binding, refs, job_id):
         module, cache = self.n.dataset_cache()
@@ -278,7 +412,7 @@ class StorageLeases:
             self._save(path, record)
             return {'jobId': binding['id'], 'state': 'CANCELED', 'released': True}
 
-    def finalize_training(self, job):
+    def finalize_training(self, job, *, stopped_native=None):
         """Trusted stopped/never-dispatched proof + main job flock REQUIRED.
 
         Finalize only an existing preparation journal. This remains retryable
@@ -297,11 +431,30 @@ class StorageLeases:
             if record['state'] not in ('ACQUIRING', 'HELD', 'HANDED_OFF', 'CANCELING',
                                        'CANCELED', 'RELEASING', 'RELEASED'):
                 raise ValueError('Invalid training finalization state')
-            record['state'] = 'RELEASING'
-            self._save(path, record)
-            self._release_matching(binding, binding['references'], binding['id'])
-            record['state'] = 'RELEASED'
-            self._save(path, record)
+            retries = self._retry_records(job, path.parent)
+            receipt = self.n.ROOT / 'jobs' / (binding['id'] + '.datasets.json')
+            if receipt.exists() and self.d._read_json(receipt) not in [record['leases']] + [value['leases'] for _, value in retries]:
+                raise ValueError('Scheduler receipt does not belong to a proven preparation generation')
+            if retries:
+                if not isinstance(stopped_native, dict) or not self.n.scheduler_terminal_confirmed(stopped_native):
+                    raise ValueError('Retry cleanup requires fresh native terminal proof')
+                native = stopped_native['job']
+                attempts = stopped_native['attempts']
+                stopped = {value.get('id') for value in attempts}
+                if (native.get('submit_key') != binding['id']
+                        or not all(self.n.dataset_unit_stopped(value) for value in attempts)):
+                    raise ValueError('Retry cleanup consumer termination is unconfirmed')
+                for retry_path, retry_record in retries:
+                    if retry_record['binding']['nativeJobId'] != native.get('id') or not set(retry_record['consumers']) <= stopped:
+                        raise ValueError('Retry cleanup does not cover every generation consumer')
+                for retry_path, retry_record in retries:
+                    self._finalize_retry(retry_path, retry_record)
+            if record['state'] != 'RELEASED':
+                record['state'] = 'RELEASING'
+                self._save(path, record)
+                self._release_matching(binding, binding['references'], binding['id'])
+                record['state'] = 'RELEASED'
+                self._save(path, record)
             return {'jobId': binding['id'], 'state': 'RELEASED', 'released': True}
 
     def _snapshots(self):

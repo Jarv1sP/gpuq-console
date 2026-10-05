@@ -61,7 +61,7 @@ def open_dataset_mounts(spec):
     if not spec.get('datasets'):return []
     module=importlib.util.spec_from_file_location('gpuq_node_datasets',HERE/'node-executor.py')
     executor=importlib.util.module_from_spec(module);module.loader.exec_module(executor)
-    return executor.dataset_open_mounts(spec)
+    return executor.dataset_open_mounts(spec,runner=True)
 
 def open_data_workspace(spec,jid,terminal):
     if not spec.get('dataWorkspace'):return None,None

@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Forced command. Fixed GPUQ wrapper; user commands only run inside the sandbox."""
-import base64, fcntl, hashlib, importlib.util, json, os, re, select, sqlite3, stat, subprocess, sys, socket, tempfile, time, uuid
+import base64, fcntl, hashlib, importlib.util, json, math, os, re, select, sqlite3, stat, subprocess, sys, socket, tempfile, time, uuid
 from pathlib import Path
 from contextlib import closing
 from types import SimpleNamespace
@@ -454,8 +454,110 @@ def reject_unsubmitted_datasets(job,receipt):
     return {'state':'FAILED','notSubmitted':True,'failureCode':'DATASET_NOT_READY','assignedIndices':[],
             'error':'数据副本在提交前已失效，未启动训练。请重新准备数据后新建任务。'}
 
-def dataset_open_mounts(job):
-    leases=acquire_datasets(job);opened=[]
+def dataset_runner_group():
+    groups=[line.split(':',2)[2] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::')]
+    if len(groups)!=1:raise ValueError('Dataset runner requires a verified unified cgroup')
+    return groups[0]
+
+def dataset_current_unit(unit,group):
+    # Basenames alone are insufficient: a delegated child could imitate one.
+    # The trusted bootstrap is GPUQ's execve'd main process, not a descendant.
+    try:
+        result=subprocess.run(['/usr/bin/systemctl','--user','show',unit,'--property=LoadState,ActiveState,MainPID,ControlGroup'],
+            env=ENV,text=True,capture_output=True,timeout=5)
+        props=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        return (result.returncode==0 and set(props)=={'LoadState','ActiveState','MainPID','ControlGroup'}
+            and props['LoadState']=='loaded' and props['ActiveState'] in ('active','activating')
+            and props['MainPID']==str(os.getpid()) and props['ControlGroup']==group)
+    except (OSError,ValueError,subprocess.SubprocessError):return False
+
+def dataset_runner_proof(job):
+    """Internal runner authority, never an RPC argument or a client retry flag.
+
+    Read one native snapshot, then require the current process to inhabit its
+    exact attempt unit. Every earlier consumer must already be stopped. A
+    JOB_RETRIED event authorizes a separate epoch; it does not reopen old state.
+    Caller holds the Console job flock and repeats this proof before execution.
+    """
+    validate_job(job,readonly=True)
+    spec=ROOT/'jobs'/(job['id']+'.json')
+    if spec.is_symlink() or json.loads(spec.read_text())!=job:raise ValueError('Dataset runner immutable specification differs')
+    native_id=os.environ.get('GPUQ_JOB_ID','');attempt_id=os.environ.get('GPUQ_ATTEMPT_ID','')
+    if not re.fullmatch(r'J[a-f0-9]{12}',native_id) or not re.fullmatch(r'A[a-f0-9]{32}',attempt_id):
+        raise ValueError('Dataset runner native identity is missing')
+    unit='gpuq-'+attempt_id.lower()+'.service'
+    group=dataset_runner_group()
+    if not group.startswith('/') or '..' in Path(group).parts or Path(group).name!=unit:
+        raise ValueError('Dataset runner is outside its native attempt cgroup')
+    if not dataset_current_unit(unit,group):raise ValueError('Dataset runner is not the verified native unit main process')
+    control=Path(CONFIG['controlRoot'])/attempt_id
+    if os.environ.get('GPUQ_CONTROL_DIR')!=str(control):raise ValueError('Dataset runner control identity differs')
+    with closing(sqlite3.connect(f'file:{CONFIG["database"]}?mode=ro',uri=True)) as db:
+        db.row_factory=sqlite3.Row;db.execute('BEGIN')
+        row=db.execute('SELECT id,submit_key,owner,argv_json,state FROM jobs WHERE submit_key=?',(job['id'],)).fetchone()
+        if not row or row['id']!=native_id or row['owner']!=gpuq_owner(job) or row['state'] not in ('STARTING','RUNNING'):
+            raise ValueError('Dataset runner native job is not the current authorized execution')
+        argv=json.loads(row['argv_json'])
+        if (not isinstance(argv,list) or len(argv)!=3 or argv[0]!='/usr/bin/python3' or argv[2]!=job['id']
+                or Path(argv[1]).resolve()!=HERE/'sandbox-runner.py'):
+            raise ValueError('Dataset runner native wrapper identity differs')
+        rows=[dict(value) for value in db.execute('SELECT id,job_id,ordinal,state,unit_name,control_dir,created_at,finished_at FROM attempts WHERE job_id=? ORDER BY ordinal LIMIT 1025',(native_id,))]
+        event=db.execute("SELECT id,created_at FROM events WHERE job_id=? AND event_type='JOB_RETRIED' ORDER BY id DESC LIMIT 1",(native_id,)).fetchone()
+    if not rows or len(rows)>1024:raise ValueError('Dataset runner attempt history is incomplete')
+    current=rows[-1];prior=rows[:-1]
+    if (current['id']!=attempt_id or current['state'] not in ('STARTING','RUNNING')
+            or current['unit_name'] not in (unit,unit[:-8]) or current['control_dir']!=str(control)
+            or [value['ordinal'] for value in rows]!=list(range(1,len(rows)+1))):
+        raise ValueError('Dataset runner is not the current native attempt')
+    def timestamp(value):return type(value) in (int,float) and math.isfinite(value) and value>0
+    for value in prior:
+        expected='gpuq-'+value['id'].lower()
+        if (not re.fullmatch(r'A[a-f0-9]{32}',value['id']) or value['unit_name'] not in (expected,expected+'.service')
+                or not timestamp(value['finished_at']) or not dataset_unit_stopped(value)):
+            raise ValueError('Earlier dataset consumer termination is unconfirmed')
+    retry=None
+    if event is not None:
+        if (type(event['id']) is not int or event['id']<=0 or not timestamp(event['created_at'])
+                or not timestamp(current['created_at']) or event['created_at']>current['created_at']):
+            raise ValueError('Native retry epoch is not valid for this attempt')
+        earlier=[value for value in prior if value['created_at']<=event['created_at']]
+        if not earlier or any(value['finished_at']>event['created_at'] for value in earlier):
+            raise ValueError('Native retry precedes termination of its previous consumers')
+        retry={'id':event['id'],'createdAt':event['created_at']}
+    rejected=ROOT/'jobs'/(job['id']+'.dataset-not-submitted.json')
+    canceled=ROOT/'jobs'/(job['id']+'.canceled')
+    if os.path.lexists(rejected):raise ValueError('Dataset submission was permanently rejected')
+    if os.path.lexists(canceled):
+        info=canceled.lstat()
+        if not stat.S_ISREG(info.st_mode) or retry is None or info.st_mtime>=retry['createdAt']:
+            raise ValueError('Dataset cancellation is newer than the verified native retry')
+    return {'nativeJobId':native_id,'attemptId':attempt_id,'ordinal':current['ordinal'],
+            'priorAttemptIds':[value['id'] for value in prior], 'retry':retry,
+            'specSha256':hashlib.sha256(json.dumps(job,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
+
+def dataset_open_mounts(job,*,runner=False):
+    if not dataset_refs(job):return []
+    if runner:
+        # submit only waits for GPUQ admission, not for this child to finish
+        # bootstrapping. Never acquire this lock recursively from submit/sync.
+        with open(ROOT/'jobs'/(job['id']+'.lock'),'a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            proof=dataset_runner_proof(job)
+            leases=None
+            if os.path.lexists(ROOT/'storage-leases'/'training'/job['id']):
+                leases=storage_leases().runner_handoff(job,proof)
+            opened=_dataset_open_mounts(job,leases)
+            try:
+                if dataset_runner_proof(job)!=proof:raise ValueError('Dataset runner authority changed during handoff')
+                return opened
+            except BaseException:
+                for descriptor,_ in opened:os.close(descriptor)
+                raise
+    return _dataset_open_mounts(job)
+
+def _dataset_open_mounts(job,leases=None):
+    if leases is None:leases=acquire_datasets(job)
+    opened=[]
     try:
         module,_=dataset_cache()
         for ref,lease in zip(dataset_refs(job),leases):
@@ -513,15 +615,30 @@ def release_datasets(job,data=None,never_dispatched=False):
     fences retries after the legacy receipt has already been removed.
     """
     if not dataset_refs(job):return True
+    retry_folder=ROOT/'storage-leases'/'training'/job['id']
+    has_retries=retry_folder.exists() and any(retry_folder.glob('retry-*.json'))
+    if has_retries:
+        # Do NOT use a terminal snapshot obtained before waiting for job flock.
+        # A newer native attempt might have consumed a retry generation since.
+        if never_dispatched:return False
+        with closing(sqlite3.connect(f'file:{CONFIG["database"]}?mode=ro',uri=True)) as db:
+            row=db.execute('SELECT id FROM jobs WHERE submit_key=?',(job['id'],)).fetchone()
+        if not row:return False
+        data=gpu('show',row[0])
+        if data.get('job',{}).get('id')!=row[0] or data['job'].get('submit_key')!=job['id']:return False
     filename=ROOT/'jobs'/(job['id']+'.datasets.json')
     if not never_dispatched:
         if not scheduler_terminal_confirmed(data):return False
         if not all(dataset_unit_stopped(attempt) for attempt in data['attempts']):return False
-    if os.path.lexists(filename):
+    finalized=None
+    if os.path.lexists(ROOT/'storage-leases'/'training'/job['id']):
+        finalized=storage_leases().finalize_training(job,stopped_native=data if has_retries else None)
+    # A journal validates the exact receipt before retiring all its namespaces.
+    # Do not release its same IDs twice: legitimate eviction/unregistration can
+    # occur as soon as the final lease is gone, before this receipt is unlinked.
+    if finalized is None and os.path.lexists(filename):
         module,cache=dataset_cache();leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
         for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
-    if os.path.lexists(ROOT/'storage-leases'/'training'/job['id']):
-        storage_leases().finalize_training(job)
     # Older attempts can lose the receipt after acquiring a lease (or before
     # the durable handoff journal existed). The immutable job and confirmed
     # stopped scheduler/cgroup proof above are the authority, not a TTL or the
