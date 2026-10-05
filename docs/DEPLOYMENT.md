@@ -273,6 +273,17 @@ npm test
 
 节点实际启用、测试证据和剩余限制应单独记录，不将本手册当作上线回执。
 
+#### 已有目录与配额变更
+
+首次安装之后，管理员使用 `deploy/manage-storage-quota.py`，不重跑首次安装器。默认只读输出 `{plan, planSHA256}`；执行只接受 root 所有、不可被普通用户写入的已保存计划和其中的 `planSHA256`。计划包含原政策的完整字节/目录身份、内核计数、维护栅栏、物理根守卫和脚本 SHA；执行前再次核对。先保留维护状态，停止调度器、终端、传输等 service UID 或 rootless subuid 进程。工具不停止服务、不重挂载、不改分区、不启用标志。
+
+- 新增用户或改限额：`policy --candidate /root/quota-next.json`。候选必须从当前 root 政策完整合并，只新增 owner、为原 owner 增加已配置卷或调整有限 byte/inode 限额；根、卷、服务 UID 与既有 project ID 不变，不支持删 owner、回收 ID 或减少到实际用量以下。新 ID 必须在所有已配置卷均为空闲。
+- 迁移已有个人目录：`migrate --owner demo-user-N --path <政策中的个人根>`。支持私有工作区、项目、OCI、个人数据及单 owner 的登记 staging 根；项目上传桶另需 `--project NAME`。计划扫描不读取文件内容。软链接、外部硬链接、特殊文件、跨挂载、未知属主或已有别人的 project ID 均拒绝，要求管理员单独整理，不猜归属。内部硬链接保留，执行仅设置 project ID/目录继承，不改文件、chmod、chown 或删除内容；现有 rootless 映射 UID 内容需另行审查，不能当作 service UID 目录批量迁移。
+- 执行：`policy|migrate --execute --plan /root/quota-plan.json --approved-plan-sha256 <planSHA256>`。每次计划在 root 控制目录使用独占 intent，先保存原政策；中途失败保留原件、政策备份、已改变的内核归属和失败回执，不自动回滚或重放。检查后需要新计划，若内核与政策已不一致，先由管理员明确修复，工具不会静默改成“可用”。
+- 用量：成员使用 `gpuctl project quota --machine SERVER`（或 `--json`）。返回经认证的本人、该物理卷的内核 byte/inode 已用、硬上限与剩余，不统计应用文件数来假冒内核配额。未启用返回“未启用”，查询失败/未知不是零用量。管理员本机只读可用 `manage-storage-quota.py status --owner demo-user-N`。GPU 用卡额度与磁盘配额是不同政策；注册用户不会因此自动得到不限量磁盘。
+
+不要将该工具的纯本地测试等同于真实 EDQUOT、容器隔离或四节点上线。政策与 kernel 限制变更不具备跨卷事务；维护栅栏和保留失败 intent 是部分失败时的边界。宿主 root 和已有原生 SSH 管理权限仍属于可信运维，不受这些平台入口约束。
+
 ## 10. 常见阻塞
 
 - 终端打不开：`bwrap --help` 是否支持 bind-fd、用户命名空间策略、slirp4netns、服务用户 linger、基础 Python 路径。

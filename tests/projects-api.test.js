@@ -6,13 +6,14 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
+import {quotaStatus} from '../projects.mjs';
 const release='a'.repeat(64),password='Project-Test-Long-Password-2026';
 async function fixture(){
  const dir=await mkdtemp(join(tmpdir(),'gpuq-project-api-')),bootstrap=join(dir,'bootstrap'),status=join(dir,'status');
  await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
  await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:32768})),gpuq:{connected:true,observeOnly:false,schedulableIndices:[0],jobs:[]}}))}));
  const calls=[];let ready=true;
- const bridge=async(machine,operation,args)=>{calls.push({machine,operation,args});if(operation==='projects.verify')return {project:args.project,release:args.release,state:ready?'READY':'DRAFT'};if(operation.startsWith('projects.'))return {project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null};if(operation==='sync')return {state:'RUNNING',nodeJobId:'node-'+args.job.id};return {entries:[]};};
+ const bridge=async(machine,operation,args)=>{calls.push({machine,operation,args});if(operation==='projects.quota')return {enabled:false,enforcement:null,owner:args.userId,volumes:null};if(operation==='projects.verify')return {project:args.project,release:args.release,state:ready?'READY':'DRAFT'};if(operation.startsWith('projects.'))return {project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null};if(operation==='sync')return {state:'RUNNING',nodeJobId:'node-'+args.job.id};return {entries:[]};};
  const service=await PortalService.open(join(dir,'db'),bootstrap,status,bridge);clearInterval(service.executionTimer);
  const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'alice',password})).result;
  await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:2,limits:{'gpu-1':2}});
@@ -34,6 +35,23 @@ test('project operations bind authenticated owner and explicit node without rese
   await assert.rejects(f.call('projects.list',{machine:'gpu-2'}),e=>e.status===403);
   await assert.rejects(f.call('projects.verify',{project:'my-project',release}));
  }finally{await f.close();}
+});
+test('kernel quota status is owner-bound, read-only and available during maintenance',async()=>{
+ const f=await fixture();try{
+  const revision=f.service.operationalMaintenance(f.admin.principal).revision;
+  await f.service.invoke(f.admin.token,'maintenance.set',{scope:'all',enabled:true,reason:'quota test',revision});
+  const value=(await f.call('projects.quota')).result;
+  assert.deepEqual(value,{enabled:false,enforcement:null,owner:f.member.id,volumes:null});
+  assert.deepEqual(f.calls.at(-1).args,{userId:f.member.id});assert.equal(f.service.store.jobs.length,0);
+  for(const extra of [{userId:'builtin-admin'},{path:'/etc'},{hostAdmin:true},{project:'alpha'},{projectId:10004}])await assert.rejects(f.call('projects.quota',extra));
+  await assert.rejects(f.call('projects.quota',{machine:'gpu-2'}),e=>e.status===403);
+ }finally{await f.close();}
+});
+test('quota API rejects stale owner, unknown fields and non-kernel or unsafe counters',()=>{
+ const owner='demo-user-3',row={volume:'data',bytes:1048576,inodes:100,usedBytes:4096,usedInodes:4,remainingBytes:1044480,remainingInodes:96};
+ const value={enabled:true,enforcement:'kernel-project-quota',owner,projectId:10003,volumes:[row]};
+ assert.deepEqual(quotaStatus(value,owner),value);
+ for(const bad of [{...value,owner:'demo-user-4'},{...value,path:'/data'},{...value,enforcement:'app-counts'},{...value,volumes:[row,row]},{...value,volumes:[{...row,usedBytes:Number.MAX_SAFE_INTEGER+1}]},{...value,volumes:[{...row,remainingBytes:0}]}])assert.throws(()=>quotaStatus(bad,owner),e=>e.status===503);
 });
 test('project jobs pin one release and verify it before quota reservation',async()=>{
  const f=await fixture();try{

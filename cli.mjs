@@ -105,6 +105,7 @@ gpuctl data unregister NAME[@VERSION]  Administrator: asynchronously unregister 
 gpuctl data status OPERATION_ID   Check a background operation; accepted is not completed
 gpuctl data status NAME@VERSION  Inspect preparation state
 gpuctl data storage status [NAME@VERSION]  Administrator: capacity and protection state
+gpuctl project quota --machine SERVER  Your real kernel byte/inode usage, when enabled
 gpuctl data storage plan         Administrator: preview cache policy; never deletes
 gpuctl data storage pin NAME@VERSION LABEL  Protect a manual job's dataset copy
 gpuctl data storage unpin NAME@VERSION LABEL  Release that manual pin after its job stops
@@ -506,13 +507,13 @@ async function main(){
       result={...result,machine};
       if(terminal.has(result.state))process.exitCode=result.state==='TIMED_OUT'?124:result.state==='CANCELED'?130:Number.isInteger(result.exitCode)?Math.min(255,Math.max(0,result.exitCode)):result.signal?Math.min(255,128+result.signal):result.state==='SUCCEEDED'?0:1;
       else if(result.state==='UNKNOWN')process.exitCode=3;
-    }else if(command==='project'&&['list','create','use','status','publish'].includes(positionals[1])){
+    }else if(command==='project'&&['list','quota','create','use','status','publish'].includes(positionals[1])){
       if(options.legacy)fail('Project commands do not accept --legacy');
       const action=positionals[1],machine=defaultMachine();
       if(!state.machines.some(m=>m.id===machine))fail('这台机器未授权或不存在');
-      if(action==='list'){
-        if(positionals.length!==2||options.project)fail('Usage: project list [--machine SERVER]');
-        result=(await call('projects.list',{machine})).result;
+      if(['list','quota'].includes(action)){
+        if(positionals.length!==2||options.project||options['env-mode'])fail('Usage: project list|quota [--machine SERVER]');
+        result=(await call('projects.'+action,{machine})).result;
       }else{
         if(positionals.length>3)fail('Usage: project create|use NAME | project status|publish [NAME]');
         const project=projectSlug(positionals[2]||options.project||(['status','publish'].includes(action)?selectedProject(machine):null));
@@ -724,6 +725,11 @@ async function main(){
     return;
   }
   if(command==='use'){console.log(`当前服务器：${result.selected}\n${result.project?'当前项目：'+result.project:'未选择项目；可用 gpuctl project create NAME 或 project use NAME'}`);return;}
+  if(command==='project'&&positionals[1]==='quota'){
+    if(!result.enabled)console.log('这台服务器尚未启用个人磁盘硬配额；不是零用量，也不代表无限容量。');
+    else for(const row of result.volumes)console.log(`${row.volume} · 内核项目配额\n  已用 ${row.usedBytes} / ${row.bytes} B；剩余 ${row.remainingBytes} B\n  文件／目录 ${row.usedInodes} / ${row.inodes}；剩余 ${row.remainingInodes}`);
+    return;
+  }
   if(command==='data'&&positionals[1]==='put'){console.log(`已上传 ${result.bytes} 字节 → ${result.machine}:${result.path}\n未自动解压或发布。进入个人数据终端：gpuctl data shell`);return;}
   if(command==='data'&&['publish','workspace-status'].includes(positionals[1])){console.log(`${result.state} · ${result.machine}${result.error?'\n'+result.error:''}${result.operationId?'\n查看：gpuctl data workspace-status '+result.operationId+' --machine '+result.machine:''}${result.state==='READY'?'\n数据集：'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
   if(command==='data'&&positionals[1]==='upload'){console.log(`数据集已就绪：${result.machine}\n${result.dataset}@${result.version}\n训练只读路径：/data2/${result.dataset}\n可在 run 中使用 --data ${result.dataset}@${result.version}`);return;}

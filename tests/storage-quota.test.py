@@ -183,5 +183,43 @@ class QuotaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Missing scheduler log quota identity'):
             q.ensure_attempt({'storageQuota':{'enabled':True}}, {'userId':USER,'id':'a'*36}, {})
 
+    def test_disabled_status_is_unknown_usage_and_never_spawns(self):
+        with patch.object(q.subprocess,'run',side_effect=AssertionError):
+            got=q.status({},USER)
+        self.assertEqual(got,{'enabled':False,'enforcement':None,'owner':USER,'volumes':None})
+
+    def test_kernel_status_is_read_only_and_uses_actual_counters(self):
+        actual={'bytes':1048576,'inodes':100,'usedBytes':12288,'usedInodes':7}
+        with patch.object(q,'check_guard',return_value={'guarded':True}),patch.object(q,'volume_for',return_value=('data','/dev/a')),patch.object(q,'quotactl',return_value=actual) as call,patch.object(q,'attribute',side_effect=AssertionError):
+            got=q.kernel_status(policy(),USER)
+        call.assert_called_once_with('/dev/a',10003)
+        self.assertEqual(got['volumes'][0]['usedBytes'],12288);self.assertEqual(got['volumes'][0]['remainingInodes'],93)
+        self.assertEqual(set(got),{'enabled','enforcement','owner','projectId','volumes'})
+
+    def test_status_request_cannot_supply_path_id_limits_or_other_identity_fields(self):
+        with patch.object(q.os,'geteuid',return_value=0):
+            for extra in ({'path':'/etc'},{'projectId':10004},{'bytes':0},{'hostAdmin':True}):
+                with self.assertRaisesRegex(ValueError,'status request'):q.broker({'operation':'status','userId':USER,**extra},policy())
+
+    def test_status_missing_owner_and_kernel_drift_are_unknown_not_empty(self):
+        with self.assertRaisesRegex(ValueError,'No administrator'):q.kernel_status(policy(),'demo-user-4')
+        with patch.object(q,'check_guard',return_value={'guarded':True}),patch.object(q,'volume_for',return_value=('data','/dev/a')),patch.object(q,'quotactl',return_value={'bytes':0,'inodes':100,'usedBytes':0,'usedInodes':0}):
+            with self.assertRaisesRegex(ValueError,'does not match'):q.kernel_status(policy(),USER)
+
+    def test_client_status_owner_and_counters_are_strict(self):
+        value={'enabled':True,'enforcement':'kernel-project-quota','owner':USER,'projectId':10003,
+               'volumes':[{'volume':'data','bytes':1048576,'inodes':100,'usedBytes':12288,'usedInodes':7,'remainingBytes':1036288,'remainingInodes':93}]}
+        with patch.object(q.subprocess,'run',return_value=Mock(returncode=0,stdout=json.dumps(value))) as proc:
+            self.assertEqual(q.status({'storageQuota':{'enabled':True}},USER),value)
+            self.assertEqual(json.loads(proc.call_args.kwargs['input']),{'operation':'status','userId':USER})
+        for alter in ('owner','remaining','duplicate','bool','path'):
+            bad=copy.deepcopy(value)
+            if alter=='owner':bad['owner']='demo-user-4'
+            if alter=='remaining':bad['volumes'][0]['remainingBytes']=0
+            if alter=='duplicate':bad['volumes'].append(copy.deepcopy(bad['volumes'][0]))
+            if alter=='bool':bad['volumes'][0]['usedInodes']=False
+            if alter=='path':bad['path']='/srv/data'
+            with self.subTest(alter=alter),patch.object(q.subprocess,'run',return_value=Mock(returncode=0,stdout=json.dumps(bad))),self.assertRaises(ValueError):q.status({'storageQuota':{'enabled':True}},USER)
+
 
 if __name__ == '__main__': unittest.main()

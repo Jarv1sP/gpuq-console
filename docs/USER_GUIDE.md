@@ -75,6 +75,8 @@ exit
 
 需要 apt 等系统包时，可在管理员已启用的节点新建 `gpuctl project create system-project --env-mode oci`。这是个人 rootless 容器：容器内 root 不是宿主机 root，开发阶段无 GPU；安装依赖后退出终端再发布，训练固定该镜像版本并只见调度分配的 GPU。未启用节点明确拒绝，不改变原有项目。未显示该能力时，按[常见问题](/guide/troubleshooting)联系管理员，不将本指南视为已经开通。
 
+管理员开通磁盘硬配额后，可用 `gpuctl project quota --machine MACHINE_ID` 查看本人实际 byte/inode 用量、上限和剩余。这里的 inode 是文件和目录的计数，不是用卡额度。显示“未启用”或查询失败不代表零用量或无限容量；数据目录与工作区在同一个物理卷时共用该卷的个人硬上限。
+
 项目终端的 `$HOME` 是可写的 `/home/gpuq`，其缓存与私人环境使用平台工作区磁盘。shared/isolated Python 模式的 `/tmp` 是计入内存限制的临时文件系统，不是额外磁盘容量；开通的 OCI 模式默认 `/tmp` 在个人配额内的容器可写层。大包构建可在项目终端把临时文件放到私人 HOME，安装完成后自行清理不再需要的临时文件：
 
 ```sh

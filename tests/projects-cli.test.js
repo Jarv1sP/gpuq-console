@@ -70,6 +70,15 @@ test('project list/status/publish use selected context; publication does not cla
   assert.equal((await f.cli(['project','status','beta','--machine','2'])).code,0);
   assert.deepEqual(f.calls.at(-1),{operation:'projects.status',args:{machine:'gpu-2',project:'beta'}});
 });
+test('project quota queries only the selected machine and preserves unknown disabled usage',async t=>{
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ f.custom.set('projects.quota',()=>({enabled:false,enforcement:null,owner:principal.userId,volumes:null}));
+ const value=await f.cli(['project','quota']);assert.equal(value.code,0,value.stderr);assert.equal(value.data.volumes,null);
+ assert.deepEqual(f.calls.at(-1),{operation:'projects.quota',args:{machine:'gpu-1'}});
+ for(const args of [['project','quota','alpha'],['project','quota','--project','alpha'],['project','quota','--env-mode','oci']]){
+  const before=f.calls.filter(c=>c.operation==='projects.quota').length;assert.equal((await f.cli(args)).code,1);assert.equal(f.calls.filter(c=>c.operation==='projects.quota').length,before);
+ }
+});
 test('project create forwards only explicit environment mode and rejects mutation on other commands',async t=>{
   const f=await fixture(t);
   for(const mode of ['shared','isolated','oci']){

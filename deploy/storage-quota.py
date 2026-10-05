@@ -82,7 +82,7 @@ def validate_policy(value):
     need(isinstance(value, dict) and required <= set(value)
          and not (set(value) - required - {'controlRoot', 'database', 'logRoot'})
          and (not {'controlRoot', 'logRoot'}.intersection(value) or 'database' in value)
-         and value['schema'] == 1 and type(value['serviceUid']) is int and value['serviceUid'] > 0,
+         and type(value['schema']) is int and value['schema'] == 1 and type(value['serviceUid']) is int and value['serviceUid'] > 0,
          'Invalid quota policy schema')
     for key in ('platformRoot', 'datasetsRoot', *[k for k in ('controlRoot', 'database', 'logRoot') if k in value]):
         path = Path(value[key])
@@ -332,6 +332,9 @@ def charge_attempt(fd, project_id, uid):
 def broker(request, policy=None):
     need(os.geteuid() == 0, 'Quota broker requires host administrator installation')
     policy = validate_policy(root_json(POLICY) if policy is None else policy)
+    if isinstance(request, dict) and request.get('operation') == 'status':
+        need(set(request) == {'operation', 'userId'}, 'Invalid quota status request')
+        return kernel_status(policy, request['userId'])
     need(isinstance(request, dict) and set(request) <= {'userId', 'path', 'project'}
          and {'userId', 'path'} <= set(request), 'Invalid quota request')
     user, path = request['userId'], Path(request['path'])
@@ -345,10 +348,7 @@ def broker(request, policy=None):
     else:
         need('project' not in request, 'Unexpected quota project field')
     # The platform guard remains independent of quota/mount admission.
-    spec = importlib.util.spec_from_file_location('gpuq_quota_platform_guard', Path(__file__).with_name('platform-root-guard.py'))
-    guard = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(guard)
-    observed = guard.check(policy['platformRoot'], purpose='check-only')
+    observed = check_guard(policy)
     need(isinstance(observed, dict) and observed.get('guarded') is True,
          'Hard quota requires an enabled platform root identity guard')
     volume, device = volume_for(policy, path, file=kind == 'scheduler-log')
@@ -412,6 +412,70 @@ def ensure(config, user, path, *, project=None):
             need(attribute(fd)[0] == value['projectId'] and (kind == 'scheduler-log' or attribute(fd)[1]),
                  'Quota target changed after root verification')
         finally: os.close(fd)
+    return value
+
+
+def kernel_status(policy, user):
+    """Read the owner's actual kernel counters; no tree admission or mutation."""
+    row = quota_owner(policy, user)
+    observed = check_guard(policy)
+    need(isinstance(observed, dict) and observed.get('guarded') is True,
+         'Hard quota requires an enabled platform root identity guard')
+    volumes = []
+    for key, expected in sorted(row['limits'].items()):
+        volume, device = volume_for(policy, policy['volumes'][key]['mountPoint'])
+        need(volume == key, 'Quota status mount identity changed')
+        actual = quotactl(device, row['projectId'])
+        need(set(actual) == {'bytes', 'inodes', 'usedBytes', 'usedInodes'}
+             and all(type(v) is int and v >= 0 for v in actual.values())
+             and all(actual[k] == expected[k] for k in ('bytes', 'inodes')),
+             'Kernel hard quota does not match administrator policy')
+        volumes.append({'volume': key, **actual,
+                        'remainingBytes': max(0, actual['bytes']-actual['usedBytes']),
+                        'remainingInodes': max(0, actual['inodes']-actual['usedInodes'])})
+    return {'enabled': True, 'enforcement': 'kernel-project-quota', 'owner': user,
+            'projectId': row['projectId'], 'volumes': volumes}
+
+
+def check_guard(policy):
+    spec = importlib.util.spec_from_file_location('gpuq_quota_platform_guard', Path(__file__).with_name('platform-root-guard.py'))
+    guard = importlib.util.module_from_spec(spec)
+    before = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(guard)
+    finally: sys.dont_write_bytecode = before
+    return guard.check(policy['platformRoot'], purpose='check-only')
+
+
+def status(config, user):
+    """Authenticated read-only status; disabled/unknown is never zero usage."""
+    need(isinstance(user, str) and OWNER.fullmatch(user), 'Invalid authenticated quota owner')
+    if not enabled(config):
+        return {'enabled': False, 'enforcement': None, 'owner': user, 'volumes': None}
+    result = subprocess.run(['/usr/bin/sudo', '-n', BROKER],
+                            input=json.dumps({'operation': 'status', 'userId': user}),
+                            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'},
+                            text=True, capture_output=True, timeout=10)
+    need(result.returncode == 0 and len(result.stdout) < 65536,
+         'Hard quota status unavailable; usage is unknown')
+    value = json.loads(result.stdout)
+    need(isinstance(value, dict) and set(value) == {'enabled', 'enforcement', 'owner', 'projectId', 'volumes'}
+         and value['enabled'] is True and value['enforcement'] == 'kernel-project-quota'
+         and value['owner'] == user and type(value['projectId']) is int
+         and 10000 <= value['projectId'] < 2**31
+         and isinstance(value['volumes'], list) and 1 <= len(value['volumes']) <= 8,
+         'Invalid hard quota status response')
+    seen = set()
+    for row in value['volumes']:
+        need(isinstance(row, dict) and set(row) == {'volume','bytes','inodes','usedBytes','usedInodes','remainingBytes','remainingInodes'}
+             and isinstance(row['volume'], str) and SLUG.fullmatch(row['volume']) and row['volume'] not in seen
+             and all(type(row[k]) is int and 0 <= row[k] < 2**64 for k in row if k != 'volume')
+             and row['bytes'] > 0 and row['inodes'] > 0
+             and row['remainingBytes'] == max(0,row['bytes']-row['usedBytes'])
+             and row['remainingInodes'] == max(0,row['inodes']-row['usedInodes']),
+             'Invalid hard quota kernel counters')
+        seen.add(row['volume'])
     return value
 
 

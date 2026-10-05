@@ -513,6 +513,11 @@ def storage_quota(user,path,**kwargs):
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     return module.ensure(CONFIG,user,path,**kwargs)
 
+def storage_quota_status(user):
+    spec=importlib.util.spec_from_file_location('gpuq_storage_quota',HERE/'storage-quota.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module.status(CONFIG,user)
+
 def workspace(user):
     if not isinstance(user,str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',user):raise ValueError('Invalid identity')
     path=ROOT/'users'/hashlib.sha256(user.encode()).hexdigest()[:32]
@@ -896,6 +901,9 @@ def storage_collect():
 
 def process(operation,args):
     platform_root_check()
+    if operation=='projects.quota':
+        if not isinstance(args,dict) or set(args)!={'userId'}:raise ValueError('Invalid quota status fields')
+        return storage_quota_status(args['userId'])
     if operation.startswith(('storage.lease.','storage.download.')):return storage_lease_operation(operation,args)
     if operation.startswith('storage.archive.'):return storage_archive_operation(operation,args)
     if operation.startswith('datasets.storage.'):return storage_management(operation,args)
