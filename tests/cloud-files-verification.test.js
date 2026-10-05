@@ -19,6 +19,16 @@ test('pending cloud metadata is confirmed with bounded backoff against exactly o
   assert.deepEqual(events,[0,1,2].map(()=>({kind:'progress',stage:'VERIFYING',bytes:0})));
 });
 
+test('fresh verify key enables only delayed explicit identity refresh; same original key is refused',async()=>{
+  const r=request(),clock=fakeClock();let calls=0;
+  await runCloudFileIO(r,{clock,adapter:{verify:async(args,options)=>{
+    calls++;assert.equal(options.refreshIdentity,true);assert.deepEqual(args,{ownerId:r.ownerId,receipt:r.receipt});
+    await options.identityWait(1000,options.signal);return {id:r.fileId,state:'VERIFIED'};
+  }}});
+  assert.equal(calls,1);assert.deepEqual(clock.waits,[1000]);
+  await assert.rejects(runCloudFileIO({...r,operationId:r.fileId},{clock,adapter:{verify:forbidden}}),/New verification operation required/);
+});
+
 test('permanent pending metadata reaches one fixed five-minute deadline, never returns a false verified result',async()=>{
   const r=request(),clock=fakeClock();let calls=0;
   const adapter={upload:forbidden,download:forbidden,verify:async args=>{calls++;assert.deepEqual(args,{ownerId:r.ownerId,receipt:r.receipt});return {id:r.fileId,state:'VERIFYING'};}};

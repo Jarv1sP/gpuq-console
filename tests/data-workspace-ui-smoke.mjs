@@ -79,6 +79,25 @@ try{
   await page.waitForFunction(()=>document.querySelector('#cloud-files-list').textContent.includes('已保存到数据空间'));
   assert.deepEqual(await page.evaluate(()=>calls.filter(call=>['cloud.files.upload','cloud.files.verify','cloud.files.download'].includes(call.operation)).map(call=>[call.operation,call.user,call.args.machine])),[['cloud.files.upload','alice','node-a'],['cloud.files.verify','alice','node-a'],['cloud.files.download','alice','node-a']]);
   assert.equal(await page.evaluate(()=>calls.find(call=>call.operation==='cloud.files.download').args.path),'restored/training.zip');
+  // A changed cloud identity is retained as a paused operation, never resumed
+  // by re-verification. Confirming the source and starting a NEW download are
+  // separate user actions with independent keys.
+  const oldDownload=await page.evaluate(()=>structuredClone(calls.find(call=>call.operation==='cloud.files.download').args));
+  await page.evaluate(key=>{const row=cloudRows.get('alice:node-a').find(row=>row.operationId===key);row.state='PAUSED';row.canResume=false;row.errorCode='CLOUD_FILE_IDENTITY_CHANGED';row.error='private backend implementation detail';},oldDownload.key);
+  await page.locator('#cloud-files-refresh').click();await page.waitForFunction(()=>document.querySelector('#cloud-files-list').textContent.includes('云端文件已变化'));
+  const changed=page.locator('#cloud-files-list li').filter({hasText:'云端文件已变化'});
+  assert.match(await changed.textContent(),/重新校验.*新的路径/);assert.match(await changed.textContent(),/已有文件会保留/);
+  assert.doesNotMatch(await changed.textContent(),/可续传|private backend implementation/);assert.equal(await changed.locator('button').count(),0);
+  assert.equal(await page.locator('[data-cloud-verify]').textContent(),'重新校验');await page.locator('[data-cloud-verify]').click();
+  await page.waitForFunction(()=>calls.filter(call=>call.operation==='cloud.files.verify').length===2&&document.querySelector('#cloud-files-status').textContent.includes('已提交'));
+  const reverified=await page.evaluate(()=>calls.filter(call=>call.operation==='cloud.files.verify').map(call=>call.args));
+  assert.notEqual(reverified[0].key,reverified[1].key);assert.notEqual(reverified[1].key,oldDownload.key);assert.notEqual(reverified[1].key,reverified[1].fileId);
+  assert.equal(await page.evaluate(()=>calls.filter(call=>call.operation==='cloud.files.download').length),1,'Reverify must not silently resume or download');
+  page.once('dialog',dialog=>dialog.accept('restored/reverified-training.zip'));await page.locator('[data-cloud-restore]').click();
+  await page.waitForFunction(()=>calls.filter(call=>call.operation==='cloud.files.download').length===2);
+  const nextDownload=await page.evaluate(()=>calls.findLast(call=>call.operation==='cloud.files.download').args);
+  assert.notEqual(nextDownload.key,oldDownload.key);assert.equal(nextDownload.fileId,oldDownload.fileId);assert.equal(nextDownload.path,'restored/reverified-training.zip');
+  assert.equal(await page.evaluate(key=>cloudRows.get('alice:node-a').find(row=>row.operationId===key).state,oldDownload.key),'PAUSED');
   await cloudEntry.click();
   await page.locator('.data-workspace-browser > summary').filter({hasText:'查看文件与发布进度'}).click();await page.locator('#data-workspace-refresh').click();
   await page.waitForFunction(()=>document.querySelector('#data-workspace-files-list').textContent.includes('<unsafe>.zip'));
@@ -129,5 +148,5 @@ try{
   await page.evaluate(()=>{store.principal={userId:'carol',role:'member'};store.authGeneration++;store.authChanged();render();releaseCatalog();});await page.waitForTimeout(100);
   assert.equal(await page.locator('.dataset-card').count(),0);assert.doesNotMatch(await page.locator('#datasets-capacity').textContent(),/512\.00/);
   assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
-  console.log('PERSONAL DATA UI PASS: raw bounded upload; no automatic extraction/publication; file-list escaping; publication then READY catalog; 390px layout; late account reply stops chunks; late machine reply stops polling; unknown capacity keeps catalog; revoked remote-machine permission invalidates aggregate; old login cannot repaint catalog. Screenshots: '+screenshots);
+  console.log('PERSONAL DATA UI PASS: raw bounded upload; no automatic extraction/publication; cloud identity pause retained, explicit fresh-key reverify and separate new download; file-list escaping; publication then READY catalog; 390px layout; late account reply stops chunks; late machine reply stops polling; unknown capacity keeps catalog; revoked remote-machine permission invalidates aggregate; old login cannot repaint catalog. Offline mock nodes only. Screenshots: '+screenshots);
 }finally{await browser.close();}

@@ -15,6 +15,15 @@ const hash=data=>createHash('sha256').update(data).digest('hex');
 const copy=(stat,changes)=>Object.assign(Object.create(Object.getPrototypeOf(stat)),stat,changes);
 const windowsLstat=async(...args)=>copy(await fs.lstat(...args),{dev:0n});
 
+// NTFS can coalesce metadata timestamps for back-to-back same-size writes.
+// These cases exercise the metadata-change guard, not the server hash guard,
+// so give the edit a distinct timestamp without adding a timing-dependent sleep.
+async function changeFile(filename,bytes){
+  const before=await fs.stat(filename,{bigint:true});await fs.writeFile(filename,bytes);
+  await fs.utimes(filename,before.atime,new Date(Number(before.mtimeMs)+2000));
+  assert.notEqual((await fs.stat(filename,{bigint:true})).mtimeNs,before.mtimeNs);
+}
+
 async function fixture(t){
   const directory=await fs.mkdtemp(join(tmpdir(),'gpuq-data-identity-'));
   t.after(()=>fs.rm(directory,{recursive:true,force:true}));
@@ -103,7 +112,7 @@ test('Windows compatibility retains the original descriptor device when reopenin
 test('Windows compatibility refuses content changes and file replacements after hashing',async t=>{
   for(const replace of [false,true])await t.test(replace?'replacement':'same-size edit',async t=>{
     const f=await fixture(t);
-    f.hooks.begin=async()=>{if(replace){const replacement=join(f.directory,'replacement');await fs.writeFile(replacement,'temporary image bytes');await fs.rename(replacement,f.filename);}else await fs.writeFile(f.filename,'changed image bytes!!');};
+    f.hooks.begin=async()=>{if(replace){const replacement=join(f.directory,'replacement');await fs.writeFile(replacement,'temporary image bytes');await fs.rename(replacement,f.filename);}else await changeFile(f.filename,'changed image bytes!!');};
     await assert.rejects(f.upload(client({platform:'win32',lstat:windowsLstat})),/changed after hashing/);
     assert.equal(f.calls.includes('commit'),false);
   });
@@ -112,7 +121,7 @@ test('Windows compatibility refuses content changes and file replacements after 
 test('Windows compatibility refuses edits and directory changes during upload before commit',async t=>{
   for(const directoryEdit of [false,true])await t.test(directoryEdit?'directory edit':'file edit',async t=>{
     const f=await fixture(t);let changed=false;
-    f.hooks.chunk=async args=>{if(changed||args.path!=='images/00001.jpg')return;changed=true;if(directoryEdit)await fs.writeFile(join(f.directory,'new-file'),'extra');else await fs.writeFile(f.filename,'changed during upload');};
+    f.hooks.chunk=async args=>{if(changed||args.path!=='images/00001.jpg')return;changed=true;if(directoryEdit)await fs.writeFile(join(f.directory,'new-file'),'extra');else await changeFile(f.filename,'changed during upload');};
     await assert.rejects(f.upload(client({platform:'win32',lstat:windowsLstat})),/changed/);
     assert.equal(f.calls.includes('commit'),false);
   });
@@ -120,7 +129,7 @@ test('Windows compatibility refuses edits and directory changes during upload be
 
 test('Windows compatibility rechecks previously uploaded files before commit',async t=>{
   const f=await fixture(t);await fs.writeFile(join(f.directory,'z-last'),'last');
-  f.hooks.chunk=async args=>{if(args.path==='z-last')await fs.writeFile(f.filename,'changed after upload!');};
+  f.hooks.chunk=async args=>{if(args.path==='z-last')await changeFile(f.filename,'changed after upload!');};
   await assert.rejects(f.upload(client({platform:'win32',lstat:windowsLstat})),/Local file changed; no publication/);
   assert.equal(f.calls.includes('commit'),false);
 });
