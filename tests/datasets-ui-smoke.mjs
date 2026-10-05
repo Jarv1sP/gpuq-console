@@ -316,3 +316,7 @@ try {
   if (server) await new Promise(resolve => server.close(resolve));
   await rm(dir, {recursive: true, force: true});
 }
+
+// Keep all existing protocol and authorization assertions above. The extended
+// local fixture exercises database/cache facts, admin retention and layout.
+await import('./dataset-flow-browser-fixture.mjs');

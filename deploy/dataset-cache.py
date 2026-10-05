@@ -1591,20 +1591,25 @@ class DatasetCache:
             self._touch_locked(dataset, version)
             return dict(touched=True)
 
-    def pin(self, actor, dataset, version, pin_id):
+    def pin(self, actor, dataset, version, pin_id, *, own_only=False):
         """Trusted operator/worker protection, with no age-based expiry."""
         self._actor(actor, admin=True)
         _identifier(pin_id)
+        if own_only and pin_id.startswith("authority-"):
+            raise CacheError("authority retention pins require explicit dependency reconciliation")
         with self._locked():
             record = self._record(actor, dataset, version)
             if not self._ready(self._paths(dataset, version), record["manifest"], version):
                 raise CacheError("cannot pin an unready version")
             tier = self._tier(dataset, version)
+            existing = tier["pins"].get(pin_id)
+            if own_only and existing is not None and existing.get("owner") != actor.user_id:
+                raise CacheError("manual pin is not owned by this principal")
             tier["pins"].setdefault(pin_id, dict(owner=actor.user_id, createdAt=time.time()))
             self._write_tier(dataset, version, tier)
             return dict(pinned=True, pinId=pin_id)
 
-    def unpin(self, actor, dataset, version, pin_id):
+    def unpin(self, actor, dataset, version, pin_id, *, own_only=False):
         """Only after the trusted caller has confirmed the protected use ended."""
         self._actor(actor, admin=True)
         _identifier(pin_id)
@@ -1613,6 +1618,9 @@ class DatasetCache:
         with self._locked():
             self._record(actor, dataset, version)
             tier = self._tier(dataset, version)
+            existing = tier["pins"].get(pin_id)
+            if own_only and existing is not None and existing.get("owner") != actor.user_id:
+                raise CacheError("manual pin is not owned by this principal")
             removed = tier["pins"].pop(pin_id, None) is not None
             self._write_tier(dataset, version, tier)
             return dict(unpinned=removed)

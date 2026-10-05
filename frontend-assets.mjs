@@ -6,6 +6,7 @@ export const STARBASE_ASSETS = Object.fromEntries([
   'favicon.svg', 'favicon.ico', 'mask-icon.svg',
   'dataset-remove-ui.js', 'dataset-remove.css',
   'upload-routes.js',
+  'dataset-flow.js', 'dataset-cache-admin.js', 'manual-pin-state.js', 'dataset-flow.css',
   'maintenance-state.js', 'maintenance-experience.js', 'maintenance-experience.css',
   'vendor/fonts/Archivo-Variable.woff2',
   'vendor/fonts/Geist-Variable.woff2',

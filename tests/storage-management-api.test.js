@@ -52,7 +52,7 @@ test('real HTTP storage requires current admin even for a fully granted member',
 
 test('real HTTP status and dry-run plan only forward trusted server identity and never deletion',async t=>{
   const f=await fixture(t),beforeJobs=f.service.store.jobs.length;
-  for(const args of [{machine:'gpu-1'},{machine:'gpu-2',dataset:'sample',version:VERSION}]){
+  for(const args of [{machine:'gpu-1'},{machine:'gpu-2',dataset:'sample',version:VERSION},{machine:'gpu-2',dataset:'sample',version:VERSION,pinId:'manual-own'}]){
     const out=await f.call('datasets.storage.status',args);assert.equal(out.status,200);
     assert.equal(out.data.result.enabled,false);
     const {machine,...request}=args;
@@ -66,7 +66,7 @@ test('real HTTP status and dry-run plan only forward trusted server identity and
 
 test('real HTTP pin and unpin are audited and cannot touch authority retention',async t=>{
   const f=await fixture(t),base={machine:'gpu-1',dataset:'sample',version:VERSION,pinId:'manual-job'};
-  for(const action of ['pin','unpin']){
+  for(const action of ['pin','unpin','status']){
     const out=await f.call('datasets.storage.'+action,base);assert.equal(out.status,200);
     assert.deepEqual(f.calls.at(-1),{machine:'gpu-1',operation:'datasets.storage.'+action,args:{dataset:'sample',version:VERSION,pinId:'manual-job',userId:'builtin-admin',hostAdmin:true}});
     const count=f.calls.length;

@@ -73,6 +73,40 @@ class StorageNodeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.node.dispatch(ADMIN, {"op": "status", name: True})
 
+    def test_exact_manual_status_is_principal_bound_and_never_enumerates(self):
+        request = self.request("status", pinId="manual-own")
+        value = self.node.dispatch(ADMIN, request)["version"]
+        self.assertEqual(value["manualPinProtocol"], 1)
+        self.assertEqual(value["manualPin"], dict(pinId="manual-own", owner="admin", present=False))
+        self.node.dispatch(ADMIN, {**request, "op": "pin"})
+        self.assertTrue(self.node.dispatch(ADMIN, request)["version"]["manualPin"]["present"])
+        other = D.Principal("other-admin", True)
+        for op in ("status", "pin", "unpin"):
+            with self.assertRaisesRegex(ValueError, "not owned"):
+                self.node.dispatch(other, {**request, "op": op})
+        self.assertEqual(self.cache._tier("sample", self.version)["pins"]["manual-own"]["owner"], "admin")
+        for op in ("status", "pin", "unpin"):
+            with self.assertRaises(ValueError):
+                self.node.dispatch(ADMIN, self.request(op, pinId="authority-protected"))
+        with self.assertRaises(ValueError):
+            self.node.dispatch(ADMIN, dict(op="status", pinId="manual-own"))
+        with self.assertRaises(ValueError):
+            self.node.dispatch(ADMIN, {**request, "owner": "other-admin"})
+        with self.assertRaises(ValueError):
+            self.node.dispatch(ADMIN, {**request, "pinId": None})
+
+    def test_unpin_checks_current_owner_atomically_not_old_status(self):
+        request = self.request("pin", pinId="manual-own")
+        self.node.dispatch(ADMIN, request)
+        self.assertTrue(self.node.dispatch(ADMIN, {**request, "op": "status"})["version"]["manualPin"]["present"])
+        with self.cache._locked():
+            tier = self.cache._tier("sample", self.version)
+            tier["pins"]["manual-own"]["owner"] = "other-admin"
+            self.cache._write_tier("sample", self.version, tier)
+        with self.assertRaisesRegex(ValueError, "not owned"):
+            self.node.dispatch(ADMIN, {**request, "op": "unpin"})
+        self.assertIn("manual-own", self.cache._tier("sample", self.version)["pins"])
+
     def test_gc_recovery_paths_proofs_and_enable_not_rpc(self):
         bad = [{"op": "collect"}, {"op": "recover"}, {"op": "enable"},
                {"op": "plan", "dryRun": False}, {"op": "status", "enabled": True},

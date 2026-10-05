@@ -118,14 +118,14 @@ export async function executionCall(service,principal,operation,args){
     if(principal.role!=='admin')fail('存储管理仅管理员可用。',403);
     authorizedMachine(args.machine);
     const action=operation.slice('datasets.storage.'.length);
-    const definitions={status:['dataset','version'],plan:['neededBytes'],pin:['dataset','version','pinId'],unpin:['dataset','version','pinId']};
+    const definitions={status:['dataset','version','pinId'],plan:['neededBytes'],pin:['dataset','version','pinId'],unpin:['dataset','version','pinId']};
     const fields=Object.hasOwn(definitions,action)?definitions[action]:null;
     if(!fields||Object.keys(args).some(k=>k!=='machine'&&!fields.includes(k)))fail('存储管理参数无效。');
-    if(action==='pin'||action==='unpin'||Object.hasOwn(args,'dataset')||Object.hasOwn(args,'version'))datasetReferences([{dataset:args.dataset,version:args.version}]);
+    if(action==='pin'||action==='unpin'||Object.hasOwn(args,'dataset')||Object.hasOwn(args,'version')||Object.hasOwn(args,'pinId'))datasetReferences([{dataset:args.dataset,version:args.version}]);
     if(action==='plan'&&args.neededBytes!==undefined&&(!Number.isSafeInteger(args.neededBytes)||args.neededBytes<0))fail('预计新增容量必须是非负整数字节。');
-    if(action==='pin'||action==='unpin'){
+    if(action==='pin'||action==='unpin'||Object.hasOwn(args,'pinId')){
       if(typeof args.pinId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.pinId)||args.pinId.startsWith('authority-'))fail('固定标记需为 1–64 位字母数字、短横线或下划线；不能修改归档保护。');
-      service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version+':'+args.pinId);
+      if(action!=='status')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version+':'+args.pinId);
     }
     const {machine,...request}=args;
     return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:true});

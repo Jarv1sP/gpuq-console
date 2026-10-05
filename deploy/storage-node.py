@@ -38,8 +38,12 @@ class StorageNode:
         _, cache = executor.dataset_cache()
         return cls(cache, policy=executor.CONFIG.get("storageTier"), authorities=authorities)
 
-    def status(self, actor, dataset=None, version=None):
+    def status(self, actor, dataset=None, version=None, pin_id=None):
         self.cache._actor(actor, admin=True)
+        if pin_id is not None:
+            T.D._identifier(pin_id)
+            if pin_id.startswith("authority-") or dataset is None or version is None:
+                raise ValueError("manual pin status requires an exact dataset and version")
         response = dict(enabled=self.tier.enabled, highWater=self.tier.high_water,
                         lowWater=self.tier.low_water, budgetBytes=self.tier.budget_bytes,
                         scope="datasets-only", automaticCollectionExposed=False,
@@ -52,6 +56,12 @@ class StorageNode:
         with self.cache._locked():
             self.cache._check_snapshot(actor, dataset, version, identity)
             value = self.cache._tier(dataset, version)
+            manual_pin = None
+            if pin_id is not None:
+                pin = value["pins"].get(pin_id)
+                if pin is not None and pin.get("owner") != actor.user_id:
+                    raise ValueError("manual pin is not owned by this principal")
+                manual_pin = dict(pinId=pin_id, owner=actor.user_id, present=pin is not None)
             leases = self.cache._leases(dataset, version)
             receipt = None
             try:
@@ -68,7 +78,9 @@ class StorageNode:
         response["version"] = dict(dataset=dataset, version=version, state=state["state"],
                                    role=value["role"], lastUsedAt=value["lastUsedAt"],
                                    pinCount=len(value["pins"]), leaseCount=len(leases),
-                                   recoveryVerified=verified)
+                                   recoveryVerified=verified, manualPinProtocol=1)
+        if manual_pin is not None:
+            response["version"]["manualPin"] = manual_pin
         return response
 
     def dispatch(self, actor, request):
@@ -78,8 +90,10 @@ class StorageNode:
             raise ValueError("invalid storage management request")
         op = request["op"]
         fields = set(request) - {"op"}
-        if op == "status" and fields in (set(), {"dataset", "version"}):
-            return self.status(actor, request.get("dataset"), request.get("version"))
+        if op == "status" and fields in (set(), {"dataset", "version"}, {"dataset", "version", "pinId"}):
+            if "pinId" in request:
+                T.D._identifier(request["pinId"])
+            return self.status(actor, request.get("dataset"), request.get("version"), request.get("pinId"))
         if op == "plan" and fields in (set(), {"neededBytes"}):
             return self.tier.plan(actor, needed_bytes=request.get("neededBytes", 0))
         if op in {"pin", "unpin"} and fields == {"dataset", "version", "pinId"}:
@@ -91,5 +105,5 @@ class StorageNode:
             if pin_id.startswith("authority-"):
                 raise ValueError("authority retention pins require private reconciliation")
             function = self.cache.pin if op == "pin" else self.cache.unpin
-            return function(actor, request["dataset"], request["version"], pin_id)
+            return function(actor, request["dataset"], request["version"], pin_id, own_only=True)
         raise ValueError("unsupported operation or unrecognized storage request fields")
