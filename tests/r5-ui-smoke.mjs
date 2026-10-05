@@ -20,8 +20,10 @@ let server,service,browser,releaseCatalog,releaseInventory;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
 async function closeRoutedContext(context){
-  await Promise.all(context.pages().map(page=>page.unrouteAll({behavior:'wait'})));
-  await context.unrouteAll({behavior:'wait'});
+  // Background requests can finish after teardown has already handled them.
+  // Ignore only late route callbacks after removal, before closing the pages.
+  await Promise.all(context.pages().map(page=>page.unrouteAll({behavior:'ignoreErrors'})));
+  await context.unrouteAll({behavior:'ignoreErrors'});
   await context.close();
 }
 const project={project:'vision-baseline',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
