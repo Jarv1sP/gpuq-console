@@ -501,6 +501,16 @@ def release_datasets(job,data=None,never_dispatched=False):
         for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
     if os.path.lexists(ROOT/'storage-leases'/'training'/job['id']):
         storage_leases().finalize_training(job)
+    # Older attempts can lose the receipt after acquiring a lease (or before
+    # the durable handoff journal existed). The immutable job and confirmed
+    # stopped scheduler/cgroup proof above are the authority, not a TTL or the
+    # receipt's absence. Recover only this owner's exact job/reference holds.
+    module,cache=dataset_cache();actor=module.Principal('scheduler',True)
+    for ref in dataset_refs(job):
+        with cache._locked():
+            retained=[lease for lease in cache._leases(ref['dataset'],ref['version'])
+                      if lease['jobId']==job['id'] and lease['owner']==job['userId']]
+        for lease in retained:cache.release_lease(actor,ref['dataset'],ref['version'],lease['id'])
     filename.unlink(missing_ok=True);return True
 
 def run(argv,timeout=18):

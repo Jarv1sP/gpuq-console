@@ -534,6 +534,40 @@ class NodeDatasets(unittest.TestCase):
             self.assertTrue(self.node.release_datasets(self.job, data))
         self.assertTrue(self.cache.evict(self.admin, 'example', self.version)['evicted'])
 
+    def test_missing_legacy_receipt_recovers_only_exact_stopped_job_holds(self):
+        self.ready()
+        self.node.acquire_datasets(self.job)
+        (self.node.ROOT/'jobs'/(self.job['id']+'.datasets.json')).unlink()
+        self.cache.set_owners(self.admin,'example',['demo-user-1','demo-user-2'])
+        other_job=self.cache.acquire_lease(self.user,'example',self.version,'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+        other_owner=self.cache.acquire_lease(self.module.Principal('demo-user-2'),'example',self.version,self.job['id'])
+        stopped=SimpleNamespace(returncode=0,stdout='LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n')
+        data={'job':{'state':'FAILED'},'attempts':[dict(state='EXITED_FAILURE',unit_name='gpuq-a123')],'leases':[],'scale_up_reservations':[]}
+        with patch.object(self.node.subprocess,'run',return_value=stopped):
+            self.assertTrue(self.node.release_datasets(self.job,data))
+            self.assertTrue(self.node.release_datasets(self.job,data))
+        self.assertEqual({x['id'] for x in self.cache._leases('example',self.version)},
+                         {other_job['leaseId'],other_owner['leaseId']})
+
+    def test_missing_receipt_never_implies_worker_stopped(self):
+        self.ready();self.node.acquire_datasets(self.job)
+        (self.node.ROOT/'jobs'/(self.job['id']+'.datasets.json')).unlink()
+        before=self.cache._leases('example',self.version)
+        data={'job':{'state':'FAILED'},'attempts':[dict(state='EXITED_FAILURE',unit_name='gpuq-a123')],'leases':[],'scale_up_reservations':[]}
+        with patch.object(self.node,'dataset_unit_stopped',return_value=False):
+            self.assertFalse(self.node.release_datasets(self.job,data))
+        self.assertEqual(self.cache._leases('example',self.version),before)
+
+    def test_missing_receipt_cleanup_failure_is_retryable_not_success(self):
+        self.ready();self.node.acquire_datasets(self.job)
+        (self.node.ROOT/'jobs'/(self.job['id']+'.datasets.json')).unlink()
+        data={'job':{'state':'FAILED'},'attempts':[],'leases':[],'scale_up_reservations':[]}
+        with patch.object(self.module.DatasetCache,'release_lease',side_effect=OSError('disk temporarily unavailable')):
+            with self.assertRaises(OSError):self.node.release_datasets(self.job,data)
+        self.assertEqual(len(self.cache._leases('example',self.version)),1)
+        self.assertTrue(self.node.release_datasets(self.job,data))
+        self.assertEqual(self.cache._leases('example',self.version),[])
+
     def test_unit_must_be_terminal_and_have_no_processes(self):
         for state in ('RUNNING', 'LOST', 'KILL_REQUESTED', 'DRAINING', 'STUCK'):
             self.assertFalse(self.node.dataset_unit_stopped(dict(state=state, unit_name='gpuq-a123')))
