@@ -43,7 +43,7 @@ class DatasetShortLockTests(unittest.TestCase):
 
     def while_blocked(self, operation, target):
         entered,resume=threading.Event(),threading.Event();errors=[]
-        original=D._manifest_bytes if target=='registry' else D._read_json
+        original=D._manifest_bytes if target=='registry' else D._canonical_json_matches
         def slow(value,*args,**kwargs):
             selected=(isinstance(value,dict) and len(value.get('files',[]))==2000) if target=='registry' else Path(value)==self.paths['ready']/'manifest.json'
             if selected:
@@ -53,7 +53,7 @@ class DatasetShortLockTests(unittest.TestCase):
         def run():
             try:operation()
             except BaseException as e:errors.append(e)
-        with patch.object(D,'_manifest_bytes' if target=='registry' else '_read_json',side_effect=slow):
+        with patch.object(D,'_manifest_bytes' if target=='registry' else '_canonical_json_matches',side_effect=slow):
             worker=threading.Thread(target=run);worker.start()
             try:
                 self.assertTrue(entered.wait(3))
@@ -102,7 +102,7 @@ class DatasetShortLockTests(unittest.TestCase):
         self.assertEqual(self.cache._leases('large',self.version),[])
 
     def test_all_heavy_catalog_validation_runs_outside_global_lock(self):
-        self.ready_metadata();depth=0;lock=self.cache._locked;read=D._read_json;validate=D._manifest_bytes
+        self.ready_metadata();depth=0;lock=self.cache._locked;read=D._read_json;validate=D._manifest_bytes;canonical=D._canonical_json_matches
         @contextlib.contextmanager
         def tracked():
             nonlocal depth
@@ -115,7 +115,9 @@ class DatasetShortLockTests(unittest.TestCase):
             return read(p)
         def checked_validate(v):
             self.assertEqual(depth,0);return validate(v)
-        with patch.object(self.cache,'_locked',side_effect=tracked),patch.object(D,'_read_json',side_effect=checked_read),patch.object(D,'_manifest_bytes',side_effect=checked_validate):
+        def checked_canonical(path,digest):
+            self.assertEqual(depth,0);return canonical(path,digest)
+        with patch.object(self.cache,'_locked',side_effect=tracked),patch.object(D,'_read_json',side_effect=checked_read),patch.object(D,'_manifest_bytes',side_effect=checked_validate),patch.object(D,'_canonical_json_matches',side_effect=checked_canonical):
             self.assertEqual(self.cache.list_datasets(OWNER)['datasets'][0]['versions'][0]['state'],'READY')
             self.assertEqual(self.cache.status(OWNER,'large',self.version)['state'],'READY')
             self.assertEqual(self.cache.export_manifest(OWNER,'large',self.version)['version'],self.version)

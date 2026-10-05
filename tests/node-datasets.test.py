@@ -398,6 +398,37 @@ class NodeDatasets(unittest.TestCase):
         self.ready()
         self.assertEqual(self.call('list')['datasets'][0]['versions'][0]['state'], 'READY')
 
+    def test_list_pending_overlay_reuses_one_full_manifest_validation(self):
+        self.start_prepare()
+        record = self.module.DatasetCache._record
+        with patch.object(self.module.DatasetCache, '_record', autospec=True, side_effect=record) as read, \
+                patch.object(self.node, 'dataset_background_active', return_value=True):
+            result = self.call('list')
+        self.assertEqual(result['datasets'][0]['versions'][0]['state'], 'PREPARING')
+        self.assertEqual(read.call_count, 1)
+
+    def test_list_pending_overlay_rechecks_revoked_acl_after_catalog(self):
+        self.start_prepare()
+        snapshot = self.module.DatasetCache._list_datasets_snapshot
+        def revoke(cache, actor):
+            result = snapshot(cache, actor)
+            self.cache.set_owners(self.admin, 'example', ['demo-user-2'])
+            return result
+        with patch.object(self.module.DatasetCache, '_list_datasets_snapshot', autospec=True, side_effect=revoke), \
+                patch.object(self.node, 'dataset_background_active', return_value=True):
+            with self.assertRaises(PermissionError): self.call('list')
+
+    def test_list_pending_overlay_rejects_new_ready_identity_not_stale_state(self):
+        self.start_prepare()
+        snapshot = self.module.DatasetCache._list_datasets_snapshot
+        def publish(cache, actor):
+            result = snapshot(cache, actor)
+            self.ready()
+            return result
+        with patch.object(self.module.DatasetCache, '_list_datasets_snapshot', autospec=True, side_effect=publish), \
+                patch.object(self.node, 'dataset_background_active', return_value=True):
+            with self.assertRaisesRegex(self.module.CacheError, 'metadata changed'): self.call('list')
+
     def test_shared_owner_reuses_one_active_prepare_without_initiator_identity(self):
         self.cache.register_source(self.admin, 'shared', 'approved', ['demo-user-1', 'demo-user-2'])
         with patch.object(self.node, 'dataset_background_active', return_value=False), patch.object(self.node, 'run'):
