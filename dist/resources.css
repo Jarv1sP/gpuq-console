@@ -140,7 +140,9 @@
  .sb .resource-head-telemetry{display:none}
  .sb .resource-fleet{padding:0;margin-top:8px;border:0;background:none}
  .sb .resource-fleet::before,.sb .resource-fleet::after{display:none}
- .sb .resource-hardware-caption{margin-bottom:12px;font-size:12px}
+ .sb .resource-hardware-caption{position:relative;margin-bottom:12px;font-size:12px}
+ .sb .resource-hardware-caption .resource-info,.sb .resource-fleet-actions .resource-info{position:static}
+ .sb .resource-hardware-caption .resource-info-content,.sb .resource-hardware-caption>span:last-child .resource-info-content{left:0;right:auto}
  .sb .resource-info>summary{min-width:44px;min-height:44px}
  .sb .resource-hardware-layout{display:block}
  .sb .resource-portrait .resource-identity{font-size:clamp(64px,22vw,88px);letter-spacing:-4px;margin-left:-3px}
@@ -149,7 +151,7 @@
  .sb .resource-chassis{min-width:max(480px,calc(var(--gpu-count)*50px + 64px));margin-top:14px}
  .sb .resource-selection{gap:12px;font-size:13px}
  .sb .resource-selection .button{font-size:13px;min-height:44px}
- .sb .resource-fleet-actions{position:static;font-size:13px;min-height:44px}
+ .sb .resource-fleet-actions{position:relative;left:auto;bottom:auto;font-size:13px;min-height:44px}
  .sb .resource-fleet-actions .button{display:inline-flex;font-size:14px;min-height:44px;padding:8px 12px;border:1px solid var(--line-2);background:var(--ink);border-color:var(--ink);color:var(--bg)}
  .sb .resource-mini-fleet{margin-top:24px;gap:16px}
  .sb .resource-mini h2{font-size:24px}

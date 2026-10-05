@@ -72,8 +72,8 @@ try{
     return route.fulfill({contentType:'application/json',body:JSON.stringify({result,token:'synthetic-local-session',state:state(),principal:principal()})});
   });
   const response=await page.goto(origin+'/#resources');
-  async function refreshResources(){
-    const [response]=await Promise.all([page.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='state'),refreshVisible(page)]);
+  async function refreshResources({background=false}={}){
+    const [response]=await Promise.all([page.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='state'),background?page.evaluate(()=>document.querySelector('#refresh-state').click()):refreshVisible(page)]);
     assert.equal(response.status(),200);await response.finished();
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(resolve)));
     await page.waitForFunction(()=>document.querySelector('#sync-label').textContent.startsWith('已同步'));
@@ -177,6 +177,18 @@ try{
 
   await page.setViewportSize({width:390,height:844});await selectResource(page,'gpu-1');await closeResource(page);await capture('resources-member-390');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  for(const width of [390,320]){
+    await page.setViewportSize({width,height:844});
+    for(const id of ['memory','sample','quota']){
+      const tip=page.locator(`[data-resource-info="${id}"]`);await tip.locator(':scope > summary').click();
+      const box=await tip.locator('.resource-info-content').boundingBox();
+      assert.ok(box.x>=0&&box.x+box.width<=width+1,`${id} tip must fit the ${width}px viewport: ${JSON.stringify(box)}`);
+      assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Opening an info tip must not widen the page');
+      if(id==='quota'){await refreshResources({background:true});assert.equal(await page.evaluate(()=>document.activeElement.closest('[data-resource-info]')?.dataset.resourceInfo),'quota','Background refresh preserves keyboard focus and the open explanation');assert.equal(await page.locator('[data-resource-info="quota"]').getAttribute('open'),'');}
+      await page.locator(`[data-resource-info="${id}"]>summary`).click();
+    }
+  }
+  await page.setViewportSize({width:390,height:844});
   previous=(await page.evaluate(()=>resourceAnimations)).length;
   await selectResource(page,'gpu-1');assert.equal(await page.locator('#resource-sheet').evaluate(element=>Math.round(element.getBoundingClientRect().height)),844);
   const bay=await page.locator('[data-resource-card="0"]').boundingBox();assert.ok(bay.width>=44&&bay.height>=44,'The phone hardware bays retain 44px tap targets');
