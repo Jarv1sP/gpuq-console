@@ -86,3 +86,18 @@ test('a many-task GPU keeps a compact tile while retaining every process task in
  assert.match(html,/另 19 个任务 · 详见进程/);
  for(let index=0;index<20;index++){assert.ok(html.includes('Experiment '+index));assert.ok(html.includes('Description '+index));}
 });
+
+test('maintenance stays independent of measured occupancy and preserves authorization',()=>{
+ const data=structuredClone(snapshot);data.hosts[0].gpus[0].memoryUsedMiB=1024;
+ const entry={reason:'维修 <script>unsafe</script>',since:'2026-10-05T00:00:00Z'};
+ const maintenance={version:1,revision:9,global:null,machines:{'gpu-1':entry}};
+ const options={machines:[machine],limits:{'gpu-1':1},snapshot:data,production:true,maintenance};
+ const view=resourceServerView(machine,options);
+ assert.equal(view.fresh,true);assert.equal(view.maintenance,entry);
+ const html=resourceCards(options);
+ assert.match(html,/maintenance-lock-band/);assert.match(html,/维修 &lt;script&gt;unsafe&lt;\/script&gt;/);
+ assert.doesNotMatch(html,/<script>/);assert.match(html,/data-resource-level=/);assert.match(html,/>42</);
+ assert.equal(resourceServerView(machine,{...options,maintenance:{...maintenance,global:entry,machines:{}}}).maintenance,entry);
+ const denied=resourceCards({...options,limits:{}});
+ assert.doesNotMatch(denied,/维修|maintenance-lock-band|data-resource-level=/);
+});

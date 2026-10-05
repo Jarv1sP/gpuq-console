@@ -20,7 +20,7 @@ const admin={id:'admin',name:'实验室管理员',username:'admin',role:'admin',
 const job={id:'11111111-1111-4111-8111-111111111111',machine:'gpu-1',project:'vision-baseline',release,userId:member.id,username:member.username,name:'baseline-lr3e-4',cards:2,state:'RUNNING',priority:'normal',schedulerPriority:2,assignedIndices:[0,1]};
 const ownTask={id:job.id,name:job.name,description:'主训练实验',submitter:{name:member.name,username:member.username},state:'RUNNING',priority:'normal',assignedGpuIndices:[0,1]};
 const otherTask={id:'22222222-2222-4222-8222-222222222222',name:'diffusion-ft',description:'对照实验',submitter:{name:'王可',username:'wang-research'},state:'RUNNING',priority:'normal',assignedGpuIndices:[2]};
-let actor=member,sampleNumber=0,server,browser;
+let actor=member,sampleNumber=0,server,browser,maintenance={version:1,revision:9,global:null,machines:{}};
 function snapshot(){
   const checkedAt=new Date(Date.now()+ ++sampleNumber*1000).toISOString();
   return {checkedAt,stale:false,hosts:MACHINES.map(machine=>({id:machine.id,reachable:machine.id!=='gpu-3',checkedAt,
@@ -30,7 +30,7 @@ function snapshot(){
 }
 let monitor=snapshot();
 const principal=()=>actor?{userId:actor.id,username:actor.username,role:actor.role}:null;
-const state=()=>actor?{machines:MACHINES.filter(machine=>actor.role==='admin'||actor.limits[machine.id]>0),users:actor.role==='admin'?[admin,member]:[member],jobs:[job],executionEnabled:true,execution:{priorityCapabilities:{'gpu-1':true,'gpu-2':true}},taskMetadata:{version:1},gpuq:monitor}:null;
+const state=()=>actor?{machines:MACHINES.filter(machine=>actor.role==='admin'||actor.limits[machine.id]>0),users:actor.role==='admin'?[admin,member]:[member],jobs:[job],executionEnabled:true,execution:{priorityCapabilities:{'gpu-1':true,'gpu-2':true}},taskMetadata:{version:1},gpuq:monitor,operationalMaintenance:maintenance}:null;
 try{
   await mkdir(screenshots,{recursive:true});
   const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));
@@ -207,6 +207,20 @@ try{
   await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
   const footer=await resourceCard(page,'gpu-4').locator('.resource-fleet-state').boundingBox(),pill=await page.locator('#live-pill').boundingBox();
   if(pill)assert.ok(footer.y+footer.height<=pill.y,'The live pill never covers the last card actions');
+  maintenance={version:1,revision:10,global:null,machines:{'gpu-1':{reason:'存储维修 <script>unsafe</script>',since:'2026-10-05T00:00:00Z'}}};
+  await page.setViewportSize({width:1440,height:1080});await refreshResources();
+  assert.equal(await resourceCard(page,'gpu-1').locator('.maintenance-lock-band').count(),1);
+  assert.equal(await resourceCard(page,'gpu-2').locator('.maintenance-lock-band').count(),0);
+  assert.match(await resourceCard(page,'gpu-1').innerText(),/存储维修 <script>unsafe<\/script>/);
+  assert.equal(await resourceCard(page,'gpu-1').locator('script').count(),0);
+  assert.ok(await resourceCard(page,'gpu-1').locator('[data-resource-level]').count(),'Maintenance preserves measured monitoring instead of reporting idle');
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollHeight<=2200),'The maintained desktop stays within the page height budget');
+  await capture('resources-maintenance-1440');await page.setViewportSize({width:390,height:844});await capture('resources-maintenance-390');
+  await selectResource(page,'gpu-1');await page.locator('#resource-sheet .maintenance-lock-band').waitFor({state:'visible'});
+  assert.equal(await page.locator('#resource-sheet-work').isDisabled(),false,'A maintained server remains accessible for read-only work');
+  await capture('resources-detail-maintenance-390');await closeResource(page);
+  maintenance={version:1,revision:11,global:null,machines:{}};await refreshResources();
+  assert.equal(await page.locator('#machine-grid .maintenance-lock-band').count(),0,'Refreshed recovery removes the old maintenance overlay');
   await page.setViewportSize({width:1440,height:1080});await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor();
   assert.equal(await page.locator('[data-resource-root]').count(),0);assert.equal(await page.locator('.resource-process-table').count(),0,'Old principal data is cleared on logout');
   await page.locator('#login-form [name=username]').fill('admin');await page.locator('#login-form [name=password]').fill('Synthetic-Local-Password');await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=resources]').click();
@@ -222,7 +236,7 @@ try{
   assert.ok((await page.locator('[data-resource-root]').boundingBox()).height>=44,'Phone administrator actions retain a 44px target');
   violations.push(...await page.evaluate(()=>resourceCSP));
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(violations,[]);
-  checks.push('exact physical slots','selected server only','member/admin process columns','confirmed own-task fills','stale/partial/invalid/unauthorized states','sample-gated motion and reduced fallback','Mission Control selection','terminal context cancel/accept','320px and 390px tap targets, info-tip bounds and refresh focus','phone push, Escape and reserved live pill','identity reset','ROOT entry makes no execution call','Portal CSP and self-hosted assets');
+  checks.push('exact physical slots','selected server only','member/admin process columns','confirmed own-task fills','stale/partial/invalid/unauthorized states','sample-gated motion and reduced fallback','Mission Control selection','terminal context cancel/accept','320px and 390px tap targets, info-tip bounds and refresh focus','phone push, Escape and reserved live pill','PR5 maintenance overlay, monitoring, mobile detail and recovery','identity reset','ROOT entry makes no execution call','Portal CSP and self-hosted assets');
   await writeFile(join(screenshots,'resources-checks.json'),JSON.stringify({checks,errors,external,violations},null,2));
   console.log(JSON.stringify({status:'passed',checks,screenshots}));
 }finally{
