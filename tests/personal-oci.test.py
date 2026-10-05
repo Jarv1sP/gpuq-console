@@ -73,9 +73,15 @@ class OCITests(unittest.TestCase):
         manager = self.manager()
         manager.folder = Path(root).resolve()/'private-oci'
         manager.folder.mkdir(mode=0o700)
+        for name in ('home', 'home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d'):
+            (manager.folder/name).mkdir(mode=0o700)
         manager.env = {'PATH': '/usr/bin:/bin', 'HOME': str(manager.folder/'home'),
                        'REGISTRY_AUTH_FILE': str(manager.folder/'anonymous-registry-auth.json'),
                        'CONTAINERS_REGISTRIES_CONF': str(manager.folder/'anonymous-registries.conf')}
+        # Preserve real private-HOME checks; do not depend on the test host's
+        # administrator /etc ownership or its legitimate registry drop-ins.
+        original = manager.registry_dropin_state
+        manager.registry_dropin_state = lambda path, uid: ('safe-system',) if path == o.REGISTRY_DROPINS else original(path, uid)
         return manager
 
     def test_anonymous_registry_auth_is_valid_private_json_and_fd_bound(self):
@@ -175,6 +181,58 @@ class OCITests(unittest.TestCase):
             path.write_bytes(b'credential-helpers = ["private-helper"]\n'); path.chmod(0o600)
             with self.assertRaises(ValueError):
                 with manager.registry_auth(): self.fail('External credential helper accepted')
+
+    def test_registry_dropins_reject_nonempty_links_modes_and_foreign_owner(self):
+        for kind in ('nonempty', 'symlink', 'mode', 'foreign-owner'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                manager = self.manager(); base = Path(root).resolve()/'private'; base.mkdir(mode=0o700)
+                path = base/'registries.conf.d'
+                if kind == 'symlink': path.symlink_to(base, target_is_directory=True)
+                else:
+                    path.mkdir(mode=0o700)
+                    if kind == 'nonempty': (path/'override.conf').write_text('credential-helpers=["private-helper"]')
+                    if kind == 'mode': path.chmod(0o777)
+                uid = os.geteuid()+1 if kind == 'foreign-owner' else os.geteuid()
+                with self.assertRaises((ValueError, OSError)):
+                    manager.registry_dropin_state(path, uid)
+
+    def test_registry_dropins_safe_absence_empty_and_created_path_are_distinct(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.manager(); base = Path(root).resolve()/'private'; base.mkdir(mode=0o700)
+            path = base/'containers/registries.conf.d'
+            absent = manager.registry_dropin_state(path, os.geteuid())
+            self.assertEqual(absent[0], 'absent')
+            (base/'containers').mkdir(mode=0o700); path.mkdir(mode=0o700)
+            present = manager.registry_dropin_state(path, os.geteuid())
+            self.assertEqual(present[0], 'empty'); self.assertNotEqual(absent, present)
+
+    def test_external_system_dropin_is_checked_before_engine_invocation(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); manager.registry_dropin_state = Mock(side_effect=ValueError('administrator review'))
+            with patch.object(o.subprocess, 'run') as engine, self.assertRaisesRegex(ValueError, 'administrator review'):
+                manager.run('version')
+            engine.assert_not_called()
+            self.assertEqual(manager.registry_dropin_state.call_args.args, (o.REGISTRY_DROPINS, 0))
+
+    def test_private_home_dropin_and_mid_operation_changes_are_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            path = manager.folder/'home/.config/containers/registries.conf.d'
+            (path/'override.conf').write_text('credential-helpers=["private-helper"]')
+            with self.assertRaisesRegex(ValueError, 'administrator review'):
+                with manager.registry_auth(): self.fail('Private helper override accepted')
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            with self.assertRaisesRegex(ValueError, 'changed during operation'):
+                with manager.registry_auth():
+                    path = manager.folder/'home/.config/containers/registries.conf.d'
+                    path.rmdir(); path.mkdir(mode=0o700)
+
+    def test_anonymous_registry_home_cannot_be_redirected(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root); manager.env['HOME'] = '/private/host'
+            with self.assertRaisesRegex(ValueError, 'path changed'):
+                with manager.registry_auth(): self.fail('Foreign registry HOME accepted')
 
     def test_base_pull_is_one_attempt_with_verified_tls(self):
         manager = self.manager()
