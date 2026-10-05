@@ -80,8 +80,17 @@ exit
 ```sh
 gpuctl project create my-container --env-mode oci
 gpuctl shell
-# 在个人容器内安装依赖、编辑代码，然后 exit
+```
+
+在个人容器内安装依赖、编辑代码，然后 `exit` 返回本机终端。发布环境与代码：
+
+```sh local
 gpuctl project publish
+```
+
+确认发布完成后提交训练：
+
+```sh local
 gpuctl run -g 1 -- python train.py
 ```
 
