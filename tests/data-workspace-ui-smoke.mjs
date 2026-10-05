@@ -88,7 +88,12 @@ try{
   await page.locator('#cloud-files-refresh').click();await page.waitForFunction(()=>document.querySelector('#cloud-files-list').textContent.includes('云端文件已变化'));
   const changed=page.locator('#cloud-files-list li').filter({hasText:'云端文件已变化'});
   assert.match(await changed.textContent(),/重新校验.*新的路径/);assert.match(await changed.textContent(),/已有文件会保留/);
-  assert.doesNotMatch(await changed.textContent(),/可续传|private backend implementation/);assert.equal(await changed.locator('button').count(),0);
+  assert.doesNotMatch(await changed.textContent(),/可续传|private backend implementation/);assert.equal(await changed.locator('button:not([data-copy-help])').count(),0);
+  const changedHelp=changed.locator('[data-copy-help]');assert.equal(await changedHelp.count(),1);
+  const writesBeforeHelp=await page.evaluate(()=>calls.filter(call=>['cloud.files.upload','cloud.files.verify','cloud.files.download','cloud.files.resume','cloud.files.cancel'].includes(call.operation)).length);
+  await changedHelp.click();assert.equal(await page.locator('#'+await changedHelp.getAttribute('aria-controls')).isVisible(),true);
+  assert.equal(await page.evaluate(()=>calls.filter(call=>['cloud.files.upload','cloud.files.verify','cloud.files.download','cloud.files.resume','cloud.files.cancel'].includes(call.operation)).length),writesBeforeHelp,'Cloud explanation cannot send an operation');
+  await page.keyboard.press('Escape');
   assert.equal(await page.locator('[data-cloud-verify]').textContent(),'重新校验');await page.locator('[data-cloud-verify]').click();
   await page.waitForFunction(()=>calls.filter(call=>call.operation==='cloud.files.verify').length===2&&document.querySelector('#cloud-files-status').textContent.includes('已提交'));
   const reverified=await page.evaluate(()=>calls.filter(call=>call.operation==='cloud.files.verify').map(call=>call.args));

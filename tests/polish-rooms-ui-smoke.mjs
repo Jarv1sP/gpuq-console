@@ -93,9 +93,11 @@ try{
      scrollBy({top:r.top+r.height/2-(top+bottom)/2,behavior:'instant'});
     });
     await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
-    await page.locator('#datasets-add>summary').click();await page.locator('[data-dataset-source=workspace]').click();await page.locator('#cloud-files>summary').click();
+    await page.locator('#datasets-add>summary').click();await page.locator('[data-dataset-source=workspace]').click();
+    const initialList=mode==='loading'?null:page.waitForResponse(response=>response.url().endsWith('/api/call')&&response.request().postDataJSON()?.operation==='cloud.files.list');
+    await page.locator('#cloud-files>summary').click();
     if(mode==='loading')await page.waitForFunction(()=>document.querySelector('#cloud-files-refresh').disabled);
-    else{await page.waitForFunction(()=>!document.querySelector('#cloud-files-refresh').disabled);if(mode==='unconfirmed'){await page.locator('[name=cloud-files-path]').fill('incoming/unconfirmed-layout.tar');await page.locator('#cloud-files-form [type=submit]').click();await page.locator('#cloud-files-status').filter({hasText:'未确认'}).waitFor();}}
+    else{await initialList;await page.waitForFunction(()=>!document.querySelector('#cloud-files-refresh').disabled&&document.querySelector('#cloud-files-status').textContent!=='先查询云端状态。');if(mode==='unconfirmed'){await page.locator('[name=cloud-files-path]').fill('incoming/unconfirmed-layout.tar');assert.equal(await page.locator('[name=cloud-files-path]').inputValue(),'incoming/unconfirmed-layout.tar');await page.locator('#cloud-files-form [type=submit]').click();await page.locator('#cloud-files-status').filter({hasText:'未确认'}).waitFor();}}
    }
    const spec={...specs[room],...(room==='community'&&mode==='unconfirmed'?{roots:['.community-dialog[open]']}:{} )};
    for(const width of (zoom===1?[1440,390,320]:[])){
