@@ -50,9 +50,40 @@ try{
   await page.locator('[data-nav=datasets]').click();await page.locator('#datasets-add > summary').click();await page.locator('[name=dataset-name]').fill('browser-upload');await page.locator('[name=dataset-directory]').setInputFiles(join(dir,'local'));await page.locator('#dataset-upload-start').click();await page.locator('#dataset-upload-status').filter({hasText:'本机已就绪'}).waitFor();await page.locator('[data-dataset-add-close]').click();await page.locator('[data-nav=transfers]').click();await page.locator('#transfer-refresh').click();await page.locator('#transfer-list article').filter({hasText:'browser-upload'}).waitFor();
   const capture=async name=>{if(process.env.UI_SCREENSHOTS){await mkdir(process.env.UI_SCREENSHOTS,{recursive:true});await page.waitForFunction(()=>!document.querySelector('#toast')?.classList.contains('visible'));await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(process.env.UI_SCREENSHOTS,name+'.png'),animations:'disabled'});}};
   await capture('transfers-desktop');
-  await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'transfer page overflows mobile width');assert.deepEqual(errors,[]);assert.ok(calls.every(c=>c.args.userId===member.id),'identity is derived from authenticated owner');assert.equal(service.store.jobs.length,0);
+  const markedRoute=await page.evaluate(()=>{
+    document.querySelector('[data-nav=datasets]').click();document.querySelector('[data-nav=transfers]').click();
+    return ['#page-transfers','.page-heading'].every(selector=>document.querySelector(selector).classList.contains('desktop-route-slide'));
+  });
+  assert.ok(markedRoute,'the shell identifies only its desktop route slides');
+  await page.evaluate(()=>{for(const animation of document.getAnimations())animation.cancel();});
+  await page.evaluate(()=>{}); // Drain completion handlers before holding a frame.
+  const desktopIndicator=await page.locator('.nav-indicator').evaluate(el=>({left:el.style.left,top:el.style.top,width:el.style.width,height:el.style.height}));
+  const mobileFit=async width=>{
+    await page.setViewportSize({width,height:844});
+    // A viewport can become mobile before resize listeners cancel a desktop
+    // transition. Hold that exact first frame instead of relying on CI timing.
+    await page.evaluate(geometry=>{
+      globalThis.heldDesktopTransitions=['#page-transfers','.page-heading'].map(selector=>{
+        const target=document.querySelector(selector);target.classList.add('desktop-route-slide');
+        const animation=target.animate([{opacity:0,transform:'translateX(24px)'},{opacity:1,transform:'none'}],{duration:280,fill:'both'});
+        animation.pause();animation.currentTime=0;return animation;
+      });
+      const indicator=document.querySelector('.nav-indicator');Object.assign(indicator.style,geometry);indicator.hidden=false;
+    },desktopIndicator);
+    const layout=await page.evaluate(()=>({width:innerWidth,document:document.documentElement.scrollWidth,
+      roomTransform:getComputedStyle(document.querySelector('#page-transfers')).transform,
+      headingTransform:getComputedStyle(document.querySelector('.page-heading')).transform,
+      indicatorDisplay:getComputedStyle(document.querySelector('.nav-indicator')).display,
+      heroRight:document.querySelector('.transfer-group.hero-frame').getBoundingClientRect().right}));
+    assert.ok(layout.document<=width+1,`transfer page overflows ${width}px before resize cleanup: ${JSON.stringify(layout)}`);
+    assert.equal(layout.roomTransform,'none','mobile room never retains a desktop slide');
+    assert.equal(layout.headingTransform,'none','mobile heading never retains a desktop slide');
+    assert.equal(layout.indicatorDisplay,'none','mobile navigation ignores stale desktop indicator geometry');
+    await page.evaluate(()=>{for(const animation of globalThis.heldDesktopTransitions){animation.effect.target.classList.remove('desktop-route-slide');animation.cancel();}delete globalThis.heldDesktopTransitions;document.querySelector('.nav-indicator').hidden=true;});
+  };
+  await mobileFit(390);assert.deepEqual(errors,[]);assert.ok(calls.every(c=>c.args.userId===member.id),'identity is derived from authenticated owner');assert.equal(service.store.jobs.length,0);
   await capture('transfers-mobile');
-  await page.setViewportSize({width:320,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'transfer page overflows 320px');
+  await mobileFit(320);
   assert.equal(await page.locator('#transfer-copy-form input,#transfer-copy-form select').evaluateAll(items=>items.every(el=>parseFloat(getComputedStyle(el).fontSize)>=16)),true,'mobile transfer fields avoid zoom');
   await capture('transfers-320');
   console.log('Transfers HTTP/CLI/Chromium passed: upload, download bytes, background copy, list/status/cancel, shared browser upload, mobile and owner isolation.');
