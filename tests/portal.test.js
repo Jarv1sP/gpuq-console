@@ -142,6 +142,50 @@ test('inventory requires a current enabled principal; public maintenance HTML ex
     assert.equal(runtime.headers['cache-control'],'private, no-store');
     assert.match((await get('/runtime.js',root.token)).body,/GPUQ_HAS_SESSION=true;/);
     const invalid=await get('/runtime.js','0'.repeat(64));assert.equal(invalid.status,200);assert.match(invalid.body,/GPUQ_HAS_SESSION=false;/);
-    assert.ok(invalid.headers['set-cookie'].every(value=>value.includes('Max-Age=0')));
+    assert.equal(invalid.headers['set-cookie'],undefined);
   }finally{if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(data.dir,{recursive:true,force:true});}
+});
+
+test('late runtime hints from another tab never erase a newer login cookie',async()=>{
+  const data=await setup(),origin='http://127.0.0.1:1',cookies=new Map();let server,release;
+  try{
+    ({server}=await createPortalServer({...data,origin,secure:false}));
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    const base=`http://127.0.0.1:${server.address().port}`;
+    // Two HTTP clients share the same browser cookie jar. Apply cookies when
+    // headers actually arrive, not in the order the requests were submitted.
+    const tab=(path,options={})=>new Promise((resolve,reject)=>{
+      const req=request(base+path,{...options,headers:{Host:'127.0.0.1:1',Cookie:[...cookies].map(([name,value])=>`${name}=${value}`).join('; '),...options.headers}},res=>{
+        for(const value of res.headers['set-cookie']||[]){
+          const [pair]=value.split(';'),index=pair.indexOf('='),name=pair.slice(0,index);
+          if(/(?:^|;)\s*Max-Age=0(?:;|$)/i.test(value))cookies.delete(name);else cookies.set(name,pair.slice(index+1));
+        }
+        let body='';res.setEncoding('utf8');res.on('data',part=>body+=part);
+        res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,body}));
+      });req.on('error',reject);req.end(options.body);
+    });
+    let held;
+    server.prependListener('request',(req,res)=>{
+      if(!req.url.startsWith('/runtime.js?late='))return;
+      const writeHead=res.writeHead.bind(res),end=res.end.bind(res);let head;
+      res.writeHead=(...args)=>{head=args;return res;};
+      res.end=(body)=>{held.ready();held.gate.then(()=>{writeHead(...head);end(body);});return res;};
+    });
+    for(const method of ['GET','HEAD']){
+      let ready;const captured=new Promise(resolve=>ready=resolve),gate=new Promise(resolve=>release=resolve);
+      held={ready,gate};cookies.set('gpuq_session','0'.repeat(64));
+      const old=tab(`/runtime.js?late=${method}`,{method});await captured;
+      const login=await tab('/api/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({username:'admin',password,client:'browser'})});
+      assert.equal(login.status,200);const fresh=cookies.get('gpuq_session');assert.match(fresh,/^[a-f0-9]{64}$/);
+      release();const late=await old;
+      assert.equal(late.status,200);assert.equal(late.headers['set-cookie'],undefined,'A read-only hint must not delete another tab\'s newer login');
+      assert.equal(cookies.get('gpuq_session'),fresh);
+      if(method==='GET')assert.match(late.body,/GPUQ_HAS_SESSION=false;/);else assert.equal(late.body,'');
+      const state=await tab('/api/call',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({operation:'state',args:{}})});
+      assert.equal(state.status,200);assert.equal(JSON.parse(state.body).principal.role,'admin');
+    }
+    const logout=await tab('/api/call',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({operation:'logout',args:{}})});
+    assert.equal(logout.status,200);assert.equal(cookies.has('gpuq_session'),false,'Explicit logout still clears the shared cookie');
+    assert.ok(logout.headers['set-cookie'].every(value=>value.includes('Max-Age=0')));
+  }finally{release?.();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(data.dir,{recursive:true,force:true});}
 });

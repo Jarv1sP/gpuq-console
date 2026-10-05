@@ -89,12 +89,14 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
       }
       if(req.method!=='GET'&&req.method!=='HEAD')return json(405,{error:'GET required'});
       if(path==='/runtime.js'){
-        const {bearer,fromCookie}=requestTokens(req);let authenticated=false,extra={};
+        const {bearer,fromCookie}=requestTokens(req);let authenticated=false;
         try{if(bearer||fromCookie){service.principal(bearer||fromCookie);authenticated=true;}}
-        catch(error){if(![401,403].includes(error.status))throw error;extra={'Set-Cookie':expiredCookies()};}
+        catch(error){if(![401,403].includes(error.status))throw error;}
         // Avoid an expected 401 fetch (and browser console error) on public
         // login. This hint grants nothing: state and inventory recheck auth.
-        res.writeHead(200,{...headers,'Cache-Control':'private, no-store','Content-Type':mime.js,...extra});
+        // A delayed read-only hint from another tab must not clear a newer
+        // login cookie. Explicit logout remains the cookie-clearing operation.
+        res.writeHead(200,{...headers,'Cache-Control':'private, no-store','Content-Type':mime.js});
         return res.end(req.method==='HEAD'?undefined:`globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;globalThis.GPUQ_HAS_SESSION=${authenticated};`);
       }
       if(path==='/gpuctl.mjs'||path==='/amaxctl.mjs'){const client=await standaloneClient(url.origin);res.writeHead(200,{...headers,'Content-Type':'text/javascript; charset=utf-8','Content-Disposition':'attachment; filename="gpuctl.mjs"'});return res.end(client);}
