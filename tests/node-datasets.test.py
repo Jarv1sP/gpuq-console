@@ -27,7 +27,7 @@ class NodeDatasets(unittest.TestCase):
         self.data_mount = local_data_mounts(self.base)
         self.data_mount.start()
         self.addCleanup(self.data_mount.stop)
-        for name in ('platform-root-guard.py','node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py'):
+        for name in ('platform-root-guard.py','node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py', 'storage-quota.py'):
             shutil.copy2(DEPLOY / name, self.base / name)
         self.source = self.base / 'source'
         self.source.mkdir()
@@ -56,6 +56,25 @@ class NodeDatasets(unittest.TestCase):
                         username='alice', cards=1, argv=['python', 'train.py'],
                         name='dataset-test', minVramGiB=0,
                         datasets=[dict(dataset='example', version=self.version)])
+
+    def test_dataset_quota_cohort_is_bound_to_registered_billing_owner(self):
+        self.node.CONFIG['storageQuota'] = {'enabled': True, 'owners': ['demo-user-1']}
+        _, cache = self.node.dataset_cache()
+        target = self.base/'stage'
+        with patch.object(self.node, 'storage_quota') as quota:
+            cache.quota_guard(self.admin, 'example', target)
+            quota.assert_called_once_with('demo-user-1', target)
+            cache.set_owners(self.admin, 'example', ['demo-user-1', 'demo-user-2'])
+            with self.assertRaisesRegex(ValueError, 'Shared dataset'):
+                cache.quota_guard(self.user, 'example', target)
+            self.assertEqual(quota.call_count, 1)
+
+    def test_all_legacy_dataset_owners_keep_existing_cohort_behavior(self):
+        self.node.CONFIG['storageQuota'] = {'enabled': True, 'owners': ['demo-user-3']}
+        _, cache = self.node.dataset_cache()
+        cache.set_owners(self.admin, 'example', ['demo-user-1', 'demo-user-2'])
+        with patch.object(self.node, 'storage_quota', side_effect=AssertionError):
+            cache.quota_guard(self.user, 'example', self.base/'stage')
 
     def tearDown(self):
         self.mount_patch.stop()

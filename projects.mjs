@@ -30,7 +30,8 @@ export function quotaStatus(value,owner){
   const unknown=()=>fail('磁盘硬配额用量未确认，请联系管理员；不会当作零用量。',503);
   if(!value||typeof value!=='object'||Array.isArray(value)||value.owner!==owner||typeof value.enabled!=='boolean')unknown();
   if(!value.enabled){
-    if(Object.keys(value).sort().join(',')!=='enabled,enforcement,owner,volumes'||value.enforcement!==null||value.volumes!==null)unknown();
+    const keys=Object.keys(value).sort().join(',');
+    if(!['enabled,enforcement,owner,volumes','enabled,enforcement,owner,reason,volumes'].includes(keys)||value.enforcement!==null||value.volumes!==null||(keys.includes('reason')&&value.reason!=='OWNER_NOT_ACTIVATED'))unknown();
     return value;
   }
   if(Object.keys(value).sort().join(',')!=='enabled,enforcement,owner,projectId,volumes'||value.enforcement!=='kernel-project-quota'||!Number.isSafeInteger(value.projectId)||value.projectId<10000||value.projectId>=2**31||!Array.isArray(value.volumes)||!value.volumes.length||value.volumes.length>8)unknown();

@@ -164,10 +164,12 @@ def dataset_cache():
     cache=DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=config.get('reserveBytes',10*1024**3),mount_point=config.get('mountPoint','/data2'))
     if 'storageQuota' in CONFIG:
         def quota_guard(actor,dataset,path):
-            if CONFIG['storageQuota']=={'enabled':False}:return
+            spec=importlib.util.spec_from_file_location('gpuq_dataset_quota',HERE/'storage-quota.py')
+            quota=importlib.util.module_from_spec(spec);spec.loader.exec_module(quota)
+            if not quota.scope(CONFIG)['enabled']:return
             owners=cache._dataset(actor,dataset)['owners']
-            if len(owners)!=1:raise ValueError('Shared dataset needs explicit storage billing policy')
-            return storage_quota(owners[0],path)
+            owner=quota.dataset_owner(CONFIG,actor.user_id,owners)
+            if owner is not None:return storage_quota(owner,path)
         cache.quota_guard=quota_guard
     return DATASET_MODULE,cache
 

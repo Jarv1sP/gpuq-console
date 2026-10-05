@@ -37,11 +37,46 @@ def need(ok, message):
         raise ValueError(message)
 
 
-def enabled(config):
+def scope(config):
     value = config.get('storageQuota', {'enabled': False})
-    need(isinstance(value, dict) and set(value) == {'enabled'} and type(value['enabled']) is bool,
+    need(isinstance(value, dict) and {'enabled'} <= set(value) <= {'enabled', 'owners'}
+         and type(value['enabled']) is bool,
          'Invalid storageQuota configuration')
+    if 'owners' in value:
+        owners = value['owners']
+        need(value['enabled'] is True and isinstance(owners, list) and 1 <= len(owners) <= 10000
+             and all(isinstance(owner, str) and OWNER.fullmatch(owner) for owner in owners)
+             and len(set(owners)) == len(owners), 'Invalid hard-quota owner cohort')
+    return value
+
+
+def enabled(config, user=None):
+    value = scope(config)
+    if 'owners' in value:
+        need(isinstance(user, str) and OWNER.fullmatch(user), 'Authenticated quota owner required for scoped policy')
+        return user in value['owners']
     return value['enabled']
+
+
+def dataset_owner(config, user, owners):
+    """Choose a single registered billing owner, never guess shared ownership.
+
+    Legacy datasets remain unchanged only when neither their actor nor any
+    registered owner belongs to the explicitly activated quota cohort.
+    """
+    value = scope(config)
+    if not value['enabled']:
+        return None
+    need(isinstance(user, str) and OWNER.fullmatch(user), 'Invalid authenticated dataset quota actor')
+    need(isinstance(owners, list) and 1 <= len(owners) <= 10000
+         and all(isinstance(owner, str) and OWNER.fullmatch(owner) for owner in owners)
+         and len(set(owners)) == len(owners), 'Invalid dataset quota owners')
+    cohort = value.get('owners')
+    if cohort is not None and user not in cohort and not set(owners).intersection(cohort):
+        return None
+    need(len(owners) == 1, 'Shared dataset needs explicit storage billing policy')
+    need(cohort is None or owners[0] in cohort, 'Dataset billing owner is not in the hard-quota cohort')
+    return owners[0]
 
 
 @contextlib.contextmanager
@@ -390,7 +425,7 @@ def admit_target(fd, kind, policy, row, volume, actual):
 
 
 def ensure(config, user, path, *, project=None):
-    if not enabled(config):
+    if not enabled(config, user):
         return {'enabled': False, 'enforcement': None}
     request = {'userId': user, 'path': str(path)}
     if project is not None:
@@ -451,8 +486,11 @@ def check_guard(policy):
 def status(config, user):
     """Authenticated read-only status; disabled/unknown is never zero usage."""
     need(isinstance(user, str) and OWNER.fullmatch(user), 'Invalid authenticated quota owner')
-    if not enabled(config):
-        return {'enabled': False, 'enforcement': None, 'owner': user, 'volumes': None}
+    if not enabled(config, user):
+        value = {'enabled': False, 'enforcement': None, 'owner': user, 'volumes': None}
+        if 'owners' in scope(config):
+            value['reason'] = 'OWNER_NOT_ACTIVATED'
+        return value
     result = subprocess.run(['/usr/bin/sudo', '-n', BROKER],
                             input=json.dumps({'operation': 'status', 'userId': user}),
                             env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'},
@@ -480,7 +518,7 @@ def status(config, user):
 
 
 def ensure_attempt(config, spec, environment):
-    if not enabled(config): return
+    if not enabled(config, spec.get('userId')): return
     attempt, job = environment.get('GPUQ_ATTEMPT_ID', ''), environment.get('GPUQ_JOB_ID', '')
     need(re.fullmatch(r'A[a-f0-9]{32}', attempt) and re.fullmatch(r'J[a-f0-9]+', job),
          'Missing scheduler log quota identity')

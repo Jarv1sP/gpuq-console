@@ -726,7 +726,7 @@ async function main(){
   }
   if(command==='use'){console.log(`当前服务器：${result.selected}\n${result.project?'当前项目：'+result.project:'未选择项目；可用 gpuctl project create NAME 或 project use NAME'}`);return;}
   if(command==='project'&&positionals[1]==='quota'){
-    if(!result.enabled)console.log('这台服务器尚未启用个人磁盘硬配额；不是零用量，也不代表无限容量。');
+    if(!result.enabled)console.log(result.reason==='OWNER_NOT_ACTIVATED'?'你的工作区尚未纳入磁盘硬配额；不是零用量，也不代表无限容量。':'这台服务器尚未启用个人磁盘硬配额；不是零用量，也不代表无限容量。');
     else for(const row of result.volumes)console.log(`${row.volume} · 内核项目配额\n  已用 ${row.usedBytes} / ${row.bytes} B；剩余 ${row.remainingBytes} B\n  文件／目录 ${row.usedInodes} / ${row.inodes}；剩余 ${row.remainingInodes}`);
     return;
   }

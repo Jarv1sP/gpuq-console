@@ -43,7 +43,7 @@ def need(condition, message):
         raise ValueError(message)
 
 
-def policy(config):
+def policy(config, user=None):
     value = config.get('personalOci', {'enabled': False})
     need(isinstance(value, dict) and type(value.get('enabled')) is bool, 'Invalid personal OCI policy')
     if value['enabled'] is False:
@@ -53,7 +53,8 @@ def policy(config):
          and isinstance(value['baseImage'], str) and BASE.fullmatch(value['baseImage'])
          and all(isinstance(value[k], str) and re.fullmatch('[a-f0-9]{64}', value[k])
                  for k in ('podmanSHA256', 'runtimeSHA256', 'cdiSHA256')), 'Invalid trusted OCI capability policy')
-    need(module('storage-quota').enabled(config), 'OCI requires verified kernel hard quotas')
+    need(module('storage-quota').enabled(config, user),
+         'OCI requires verified kernel hard quotas for this owner')
     return value
 
 
@@ -110,7 +111,9 @@ def translate_control(arguments):
 class PersonalOCI:
     def __init__(self, config, user):
         self.config, self.user = config, user
-        self.policy = policy(config)
+        # Admission precedes any owner directory creation. A global OCI flag
+        # must not let a legacy/non-cohort owner fall back to quota-free OCI.
+        self.policy = policy(config, user)
         self.s = module('project-store')
         self.q = module('storage-quota')
         self.root = self.s.absolute(config['root'])

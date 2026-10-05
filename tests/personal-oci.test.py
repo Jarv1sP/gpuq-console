@@ -39,6 +39,20 @@ class OCITests(unittest.TestCase):
         c = config(); c['storageQuota']['enabled'] = False
         with self.assertRaisesRegex(ValueError, 'hard quotas'): o.policy(c)
 
+    def test_oci_cohort_requires_authenticated_included_owner(self):
+        c = config(); c['storageQuota']['owners'] = [USER]
+        self.assertEqual(o.policy(c, USER), c['personalOci'])
+        with self.assertRaisesRegex(ValueError, 'Authenticated'): o.policy(c)
+        with self.assertRaisesRegex(ValueError, 'hard quotas'): o.policy(c, 'demo-user-4')
+
+    def test_excluded_oci_owner_is_rejected_before_any_workspace_write(self):
+        c = config(); c['storageQuota']['owners'] = ['demo-user-4']
+        with patch.object(o, 'protected_file', side_effect=AssertionError), \
+             patch.object(o.os, 'open', side_effect=AssertionError), \
+             patch.object(o.Path, 'mkdir', side_effect=AssertionError):
+            with self.assertRaisesRegex(ValueError, 'hard quotas'):
+                o.PersonalOCI(c, USER)
+
     def test_config_rejects_rootful_socket_paths_tags_and_unknown_flags(self):
         for replacement in ('ubuntu:latest', '/tmp/image', 'docker.io/lib/foo@sha256:bad', '--privileged'):
             c = config(); c['personalOci']['baseImage'] = replacement

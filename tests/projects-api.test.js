@@ -53,6 +53,11 @@ test('quota API rejects stale owner, unknown fields and non-kernel or unsafe cou
  assert.deepEqual(quotaStatus(value,owner),value);
  for(const bad of [{...value,owner:'demo-user-4'},{...value,path:'/data'},{...value,enforcement:'app-counts'},{...value,volumes:[row,row]},{...value,volumes:[{...row,usedBytes:Number.MAX_SAFE_INTEGER+1}]},{...value,volumes:[{...row,remainingBytes:0}]}])assert.throws(()=>quotaStatus(bad,owner),e=>e.status===503);
 });
+test('quota cohort exclusion remains explicit unknown usage, never zero counters',()=>{
+ const owner='demo-user-3',value={enabled:false,enforcement:null,owner,volumes:null,reason:'OWNER_NOT_ACTIVATED'};
+ assert.deepEqual(quotaStatus(value,owner),value);
+ for(const bad of [{...value,reason:'UNKNOWN_OWNER'},{...value,volumes:[]},{...value,owner:'demo-user-4'},{...value,usedBytes:0}])assert.throws(()=>quotaStatus(bad,owner),e=>e.status===503);
+});
 test('project jobs pin one release and verify it before quota reservation',async()=>{
  const f=await fixture();try{
   const args={project:'my-project',release,cards:1,argv:['python','train.py'],key:randomUUID()};

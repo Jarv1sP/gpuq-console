@@ -32,6 +32,45 @@ class QuotaTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 q.enabled({'storageQuota': value})
 
+    def test_cohort_is_explicit_finite_unique_and_authenticated(self):
+        config = {'storageQuota': {'enabled': True, 'owners': [USER]}}
+        self.assertTrue(q.enabled(config, USER))
+        self.assertFalse(q.enabled(config, 'demo-user-4'))
+        for user in (None, 'scheduler', '../demo-user-3', False):
+            with self.subTest(user=user), self.assertRaises(ValueError): q.enabled(config, user)
+        for owners in ([], [USER, USER], ['scheduler'], [False], USER, None):
+            with self.subTest(owners=owners), self.assertRaises(ValueError):
+                q.enabled({'storageQuota': {'enabled': True, 'owners': owners}}, USER)
+        with self.assertRaises(ValueError): q.enabled({'storageQuota': {'enabled': False, 'owners': [USER]}}, USER)
+
+    def test_excluded_owner_has_unknown_status_and_no_broker_or_path_touch(self):
+        config = {'storageQuota': {'enabled': True, 'owners': ['demo-user-4']}}
+        with patch.object(q.subprocess, 'run', side_effect=AssertionError), patch.object(q, 'directory', side_effect=AssertionError):
+            self.assertEqual(q.ensure(config, USER, '/missing'), {'enabled': False, 'enforcement': None})
+            self.assertEqual(q.status(config, USER), {'enabled': False, 'enforcement': None,
+                             'owner': USER, 'volumes': None, 'reason': 'OWNER_NOT_ACTIVATED'})
+            q.ensure_attempt(config, {'userId': USER}, {})
+
+    def test_selected_owner_keeps_strict_broker_and_attempt_admission(self):
+        config = {'storageQuota': {'enabled': True, 'owners': [USER]}}
+        with patch.object(q.subprocess, 'run', return_value=Mock(returncode=1, stdout='')) as broker:
+            with self.assertRaisesRegex(ValueError, 'write admission refused'): q.ensure(config, USER, '/missing')
+            with self.assertRaisesRegex(ValueError, 'usage is unknown'): q.status(config, USER)
+            self.assertEqual(broker.call_count, 2)
+        with self.assertRaisesRegex(ValueError, 'Missing scheduler'): q.ensure_attempt(config, {'userId': USER}, {})
+
+    def test_dataset_cohort_never_guesses_shared_or_legacy_billing(self):
+        config = {'storageQuota': {'enabled': True, 'owners': [USER]}}
+        self.assertEqual(q.dataset_owner(config, USER, [USER]), USER)
+        self.assertEqual(q.dataset_owner(config, 'builtin-admin', [USER]), USER)
+        self.assertIsNone(q.dataset_owner(config, 'demo-user-4', ['demo-user-4', 'demo-user-5']))
+        for actor, owners in ((USER, [USER, 'demo-user-4']), ('demo-user-4', [USER, 'demo-user-4']),
+                              (USER, ['demo-user-4']), (USER, [USER, USER]), ('scheduler', [USER])):
+            with self.subTest(actor=actor, owners=owners), self.assertRaises(ValueError): q.dataset_owner(config, actor, owners)
+        with self.assertRaisesRegex(ValueError, 'Shared dataset'):
+            q.dataset_owner({'storageQuota': {'enabled': True}}, 'demo-user-4', ['demo-user-4', 'demo-user-5'])
+        self.assertIsNone(q.dataset_owner({}, 'scheduler', ['scheduler']))
+
     def test_exact_owner_and_project_id_policy(self):
         self.assertEqual(q.validate_policy(policy())['owners'][USER]['projectId'], 10003)
         for alter in ('zero', 'duplicate', 'unlimited', 'bool', 'unaligned'):
