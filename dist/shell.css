@@ -74,3 +74,86 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 @media(max-width:759px){.sb .guide-link{display:inline-flex;align-items:center;min-height:44px;font-size:11px}.sb .topbar-right{gap:10px}.sb .guide-link{white-space:nowrap}.sb .maintenance-settings form{grid-template-columns:1fr}.sb .maintenance-settings>summary{min-height:44px}.sb .maintenance-banner{padding:12px 14px}.sb .maintenance-banner p{font-size:13px}.sb .maintenance-settings label{font-size:15px}.sb .maintenance-history{padding:20px}.sb .maintenance-history h2{font-size:18px}.sb .maintenance-history .maintenance-toolbar{align-items:flex-start}.sb .maintenance-history .maintenance-row{padding:12px}.sb .maintenance-history :is(.maintenance-row,.maintenance-detail){overflow-wrap:anywhere}}
 @media(prefers-reduced-transparency:reduce){.sb .maintenance-banner{background:var(--bg-1)}}
 .sb:has(#shell-context[hidden]) #operational-maintenance{top:60px}
+
+/* Shared shell geometry: one gutter, bounded content and equal hit targets.
+   Compact controls retain their full accessible labels and status titles. */
+.sb:not(.m){--gutter:clamp(16px,4vw,48px);--content:1280px;--topbar-height:60px}
+.sb #app-topbar{height:var(--topbar-height);gap:clamp(8px,1.5vw,24px)}
+.sb #app-topbar .brand{width:auto;min-width:0;max-width:100%}
+.sb #app-topbar .wordmark{font-size:clamp(12px,1.5vw,21px);max-width:100%}
+.sb #app-topbar .topbar-right{min-width:0;gap:clamp(8px,1vw,20px)}
+.sb #app-topbar :is(.guide-link,.sync,#account-menu-toggle){display:inline-flex;align-items:center;justify-content:center;height:40px;min-height:40px}
+.sb #app-topbar .sync{gap:8px;padding:0 8px}
+.sb #app-topbar .sync-mark{display:grid;place-items:center}
+.sb #app-topbar #sync-label{max-width:11em;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sb #app-topbar #account-menu-toggle{gap:8px;max-width:100%}
+.sb #app-topbar .acct-t{max-width:clamp(6em,10vw,12em)}
+.sb #app-topbar .guide-link{gap:6px;padding:0 8px;white-space:nowrap}
+.sb .guide-link svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5}
+.sb #app-topbar .topbar-right .guide-link::after{content:none}
+.sb #room-nav .nav-item{height:40px;min-height:40px;padding-inline:clamp(6px,1vw,14px)}
+@media(min-width:760px){
+ .sb #app-topbar .wordmark{margin:0}
+ .sb #room-nav{grid-column:auto;grid-row:auto;margin:0;padding:0;overflow:visible}
+}
+.sb #app-topbar .account-popover{right:0;min-width:min(220px,calc(100vw - 2*var(--gutter)));max-width:calc(100vw - 2*var(--gutter));overflow-wrap:anywhere}
+.sb #shell-context{top:var(--topbar-height);padding-inline:var(--edge);gap:clamp(8px,1vw,16px)}
+.sb #shell-context>label{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px}
+.sb #shell-context select{height:40px;min-height:40px;max-width:100%;width:100%}
+.sb #shell-context #context-note{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb #main-content{padding-inline:var(--gutter)}
+.sb #operational-maintenance{top:calc(var(--topbar-height) + 52px)}
+.sb:has(#shell-context[hidden]) #operational-maintenance{top:var(--topbar-height)}
+
+/* Authentication and the account sheet respond to their own available width. */
+.sb :is(#login-dialog,#register-dialog){container:authentication/inline-size;padding-inline:var(--gutter)}
+.sb #login-dialog.r5-login .auth-mast,.sb #login-dialog.r5-login .auth-r5-layout{max-width:var(--content)}
+.sb #login-dialog.r5-login .auth-r5-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(min(100%,20rem),.55fr);gap:clamp(24px,6cqw,96px)}
+.sb #login-dialog.r5-login .auth-login-fleet{gap:clamp(8px,2cqw,24px)}
+.sb #register-dialog>form{width:100%;max-width:420px}
+.sb #register-dialog .auth-mast{gap:clamp(8px,3cqw,32px);margin-bottom:clamp(32px,6cqw,64px)}
+.sb #register-dialog .auth-hero-mark{font-size:clamp(16px,8cqw,43px);max-width:100%}
+.sb :is(#login-dialog,#register-dialog,#profile-dialog) .modal-head{align-items:center;gap:12px}
+.sb #register-dialog .modal-head h2{margin:0;font-size:clamp(24px,4cqw,34px)}
+.sb #profile-dialog .modal-head h2{margin:0;font-size:clamp(20px,4vw,24px)}
+.sb :is(#login-dialog,#register-dialog,#profile-dialog) .field input{height:48px;min-height:48px;max-width:100%;width:100%}
+.sb #login-dialog.r5-login .modal-actions .button{height:48px;min-height:48px}
+.sb :is(#register-dialog,#profile-dialog) .icon-button{height:40px;min-height:40px;width:40px;min-width:40px}
+.sb #register-dialog .field-caption .copy-help-button{margin-right:0}
+.sb #profile-dialog{container:account-sheet/inline-size;max-width:min(520px,calc(100vw - 2*var(--gutter)));overflow:auto}
+.sb #profile-dialog .modal-actions{flex-wrap:wrap}
+.sb :is(#login-dialog,#register-dialog) .guide-link{display:inline-flex;align-items:center;gap:6px;min-height:44px}
+@container authentication (max-width:50rem){
+ .sb #login-dialog.r5-login .auth-r5-layout{grid-template-columns:minmax(0,1fr);padding-top:24px;gap:24px}
+ .sb #login-dialog.r5-login .auth-login-identity{padding-top:0}
+ .sb #login-dialog.r5-login .auth-chassis{max-height:clamp(100px,22cqw,200px)}
+ .sb #login-dialog.r5-login #login-form{margin-top:0;padding-top:16px}
+}
+@media(min-width:760px) and (max-width:1250px){
+ .sb #app-topbar .guide-link{display:inline-flex;min-width:40px}
+ .sb #app-topbar .guide-link{font-size:0}
+}
+@media(max-width:759px){
+ .sb #app-topbar{padding-inline:var(--gutter);gap:8px}
+ .sb #app-topbar :is(.guide-link,.sync,#account-menu-toggle){height:44px;min-height:44px;min-width:44px;padding-inline:0}
+ .sb #app-topbar .topbar-right{gap:4px}
+ .sb #app-topbar .guide-link{font-size:0}
+ .sb #room-nav{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));height:auto;min-height:66px;padding:6px max(4px,env(safe-area-inset-left)) max(10px,env(safe-area-inset-bottom));gap:0}
+ .sb #room-nav .nav-item{height:auto;min-width:0;min-height:48px;padding:3px 2px;white-space:normal;text-align:center;line-height:1.4}
+ .sb #shell-context{padding-inline:var(--gutter)}
+ .sb #shell-context>label{flex:1;min-width:0}
+ .sb #shell-context select{height:44px;min-height:44px;font-size:16px}
+ .sb #shell-context .ctx-divider{display:none}
+ .sb :is(#register-dialog,#profile-dialog) .icon-button{height:44px;min-height:44px;width:44px;min-width:44px}
+ .sb #profile-dialog{padding-inline:var(--gutter)}
+}
+/* Zoom can yield less than 320 CSS pixels. Keep every action reachable. */
+@media(max-width:319px){
+ .sb:not(.m){--topbar-height:104px}
+ .sb #app-topbar{flex-wrap:wrap;align-content:center;row-gap:0}
+ .sb #app-topbar .brand{flex:1 0 100%}
+ .sb #app-topbar .topbar-right{width:100%;justify-content:space-between}
+ .sb :is(#login-dialog,#register-dialog) .auth-mast{flex-wrap:wrap;gap:8px;padding-block:8px}
+ .sb :is(#login-dialog,#register-dialog) .modal-actions{flex-wrap:wrap}
+ .sb #profile-dialog .modal-actions .button{flex:1 1 100%}
+}

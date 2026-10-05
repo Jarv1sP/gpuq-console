@@ -92,7 +92,7 @@ export function shellUI(store,{navigate,getPage,toast}){
     syncContext();syncNavigation();control.update();updateMobileAction();renderMe();updateIndicator(changed);
     if(page==='work')q('#page-title').classList.add('work-project-title');else q('#page-title').classList.remove('work-project-title');
   }
-  function syncStatus(state,time){q('#sync-label').textContent=state==='syncing'?'正在同步':state==='failed'?'同步失败，保留已确认状态':'已同步 '+new Date(time||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});}
+  function syncStatus(state,time){q('#sync-label').textContent=state==='syncing'?'正在同步':state==='failed'?'同步失败，保留已确认状态':'已同步 '+new Date(time||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});q('#refresh-state').title=q('#sync-label').textContent;}
   const clearGhosts=()=>{roomAnimation?.cancel();headingAnimation?.cancel();ghost?.remove();for(const layer of document.querySelectorAll('.object-transition-layer'))layer.remove();};
   addEventListener('resize',()=>{clearGhosts();syncNavigation();control.update();updateMobileAction();updateIndicator();});
   store.onAuthChange(()=>{clearGhosts();control.close(true);account.open=false;scrolls.clear();context.hidden=true;});
