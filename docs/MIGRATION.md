@@ -1,11 +1,11 @@
 # 名称更新与兼容
 
-项目名称统一为 **GPUQ Console**，仓库为 [Jarv1sP/gpuq-console](https://github.com/Jarv1sP/gpuq-console)，新客户端命令为 `gpuctl`。平台面向满足部署条件的 NVIDIA GPU Linux 服务器，不依赖服务器厂商。
+项目名称为 **STARGATE**，原仓库名 `gpuq-console`（旧 GitHub 地址会自动重定向）。仓库为 [Jarv1sP/stargate](https://github.com/Jarv1sP/stargate)，新客户端命令为 `gpuctl`。平台面向满足部署条件的 NVIDIA GPU Linux 服务器，不依赖服务器厂商。
 
 ## 普通用户
 
 - 不用重新注册、重新申请额度或搬运项目。账号、授权、任务和个人工作区继续沿用。
-- 新安装使用网站的 `install.sh`，安装后执行 `gpuctl login`、`gpuctl use gpu-1` 等命令，参数和工作流程不变。
+- 新安装使用网站的 `install.sh`，安装后执行 `gpuctl login`、`gpuctl use MACHINE_ID` 等命令，参数和工作流程不变。
 - 已安装的旧 `amax` 命令仍可继续访问兼容接口；不必为了改名中断工作。建议下次客户端升级后使用 `gpuctl`。
 - 新 CLI 兼容旧登录缓存和旧环境变量。显式指定的会话文件、网站地址仍优先使用；不要公开缓存文件，其中含登录凭据。
 - 注册码不会因名称更新失效。管理员主动刷新才生成 `GPUQ-` 前缀的新码，同时作废上一个码；已注册账号不受影响。
@@ -31,7 +31,7 @@
 克隆新仓库地址；已有 Git 工作目录可只更新 remote URL：
 
 ```sh
-git remote set-url origin https://github.com/Jarv1sP/gpuq-console.git
+git remote set-url origin https://github.com/Jarv1sP/stargate.git
 ```
 
-这不会改本地目录、历史提交或生产服务。新增界面、示例、文档和命令统一使用新名称；为兼容旧客户端保留的标识不能机械删除，应有回归测试后再调整。
+这不会改本地目录、历史提交或生产服务。网页和文档使用 STARGATE；CLI、环境变量、域名、镜像、容器、节点服务和部署路径继续使用现有标识。内部 `starbase.css` 文件名、`STARBASE_ASSETS` 常量及 CSS 类名暂时保留。

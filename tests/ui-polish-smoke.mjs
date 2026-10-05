@@ -50,9 +50,9 @@ try{
   await page.locator('[name=command]').fill('python train.py --output /outputs/result.json');
   await closeSubmit(page);
   const capture=async name=>{await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});};
-  assert.match(await page.title(),/^STARBASE/);
-  if(baseline)assert.equal(await page.locator('.brand-wordmark').innerText(),'STARBASE');
-  else assert.equal(await page.getByRole('link',{name:'STARBASE 工作台',exact:true}).count(),1);
+  assert.match(await page.title(),/^STARGATE/);
+  if(baseline)assert.equal(await page.locator('.brand-wordmark').innerText(),'STARGATE');
+  else assert.equal(await page.getByRole('link',{name:'STARGATE 工作台',exact:true}).count(),1);
   const currentNav=async expected=>{
     assert.equal(await page.locator('[data-nav][aria-current=page]').count(),1);
     assert.equal(await page.locator('[data-nav].active').count(),1);
@@ -143,7 +143,7 @@ try{
   await page.setViewportSize({width:390,height:960});await page.waitForFunction(()=>document.querySelector('[data-nav=me]').getAttribute('aria-current')==='page');await currentNav('me');await textContrast();await capture('users-carbon-compatibility-390');
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({baseline,checks,errors,external},null,2));
-  console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','single current navigation','STARBASE accessible brand','helper text AA contrast','confirmed readiness without decorative motion','reduced motion']}));
+  console.log(JSON.stringify({status:'passed',baseline,screenshots,widths:checks.map(x=>x.width),features:['all per-card metrics/processes','raw GPUQ queue','quota','workspace draft','priority choices','320–1440 layout','tablet navigation','keyboard skip link','single current navigation','STARGATE accessible brand','helper text AA contrast','confirmed readiness without decorative motion','reduced motion']}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}
 
 // The existing CI entry point also runs the owner-bound Portal/CSP acceptance.

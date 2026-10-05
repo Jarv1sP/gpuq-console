@@ -33,7 +33,7 @@ ${communityHelp}
 gpuctl login                     Sign in; remembers your account and service
 gpuctl profile --display-name "张三"  Set your public submitter name
 gpuctl queue [--machine SERVER]   Read authorized machines' task names and descriptions
-gpuctl use gpu-1                  Select an approved server from your inventory
+gpuctl use MACHINE_ID             Select an approved server from your inventory
 gpuctl project create my-project Create/select a project (shared base Python packages)
 gpuctl project create clean --env-mode isolated  New venv without base site-packages
 gpuctl project create container --env-mode oci   Managed rootless OCI (enabled nodes only)
@@ -125,17 +125,17 @@ gpuctl user reset-password USERNAME
 gpuctl user enable|disable USERNAME
 gpuctl user delete USERNAME       Only disabled accounts without active jobs
 gpuctl user role USERNAME admin|member
-gpuctl grant USERNAME --machine gpu-1=2 --total 2
+gpuctl grant USERNAME --machine MACHINE_ID=2 --total 2
 gpuctl grant USERNAME --full       All GPU resources; NOT platform admin
-gpuctl run gpu-1 --cards 1 --name train -- python train.py
+gpuctl run MACHINE_ID --cards 1 --name train -- python train.py
 gpuctl run -g 1 --name baseline --description "验证新数据集" -- python train.py
 gpuctl jobs
 gpuctl logs JOB_ID
 gpuctl cancel JOB_ID
-gpuctl upload gpu-1 LOCAL_PATH [REMOTE_PATH]
-gpuctl files gpu-1 [REMOTE_DIRECTORY]
-gpuctl download gpu-1 REMOTE_FILE LOCAL_FILE
-gpuctl request gpu-1 --cards 1  Member uses their own identity
+gpuctl upload MACHINE_ID LOCAL_PATH [REMOTE_PATH]
+gpuctl files MACHINE_ID [REMOTE_DIRECTORY]
+gpuctl download MACHINE_ID REMOTE_FILE LOCAL_FILE
+gpuctl request MACHINE_ID --cards 1  Member uses their own identity
 gpuctl release DEMO-001
 
 --machine may repeat; grant REPLACES the entire machine policy.
@@ -374,7 +374,7 @@ async function main(){
     if(!session)fail('请先登录：gpuctl login');
     const state=(await call('state')).state;
     const machineName=value=>{const exact=state.machines.find(m=>m.id===value);if(exact)return exact.id;const short=state.machines.filter(m=>m.id.endsWith('-'+value));return short.length===1?short[0].id:value;};
-    const selectedMachine=()=>session.machine||(state.machines?.length===1?state.machines[0].id:null)||fail('先选择一次服务器：gpuctl use gpu-1');
+    const selectedMachine=()=>session.machine||(state.machines?.length===1?state.machines[0].id:null)||fail('先选择一次服务器：gpuctl use MACHINE_ID');
     const defaultMachine=()=>{if(options.machines.length){if(options.machines.length!==1||options.machines[0].includes('='))fail('Use one --machine SERVER outside grant');return machineName(options.machines[0]);}return selectedMachine();};
     const selectedProject=machine=>options.legacy?null:options.project||session.projectsByMachine?.[machine]||null;
     const projectArgs=machine=>{const project=selectedProject(machine);return project?{project:projectSlug(project)}:{};};
@@ -472,7 +472,7 @@ async function main(){
       if(action==='exec'&&positionals.length>2||action!=='exec'&&positionals.length!==3)fail('Usage: exec [SERVER] -- argv... | exec status|cancel HANDLE [--machine SERVER]');
       if(action==='exec'&&positionals[1]&&options.machines.length)fail('Select a server once, either positionally or with --machine');
       const explicit=action==='exec'?positionals[1]:null;
-      const machine=machineName(explicit||options.machines[0]||session.machine||fail('Select a server explicitly: gpuctl use gpu-1, or exec --machine gpu-1'));
+      const machine=machineName(explicit||options.machines[0]||session.machine||fail('Select a server explicitly: gpuctl use MACHINE_ID, or exec --machine MACHINE_ID'));
       if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('This server is not explicitly selected and authorized');
       const terminal=new Set(['SUCCEEDED','FAILED','CANCELED','TIMED_OUT']);
       let request;
@@ -635,7 +635,7 @@ async function main(){
       if(action==='unregister'||byOperation){result={...result,machine};if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;}
     }else if(command==='run'&&positionals.length===2){
       if(options.as)fail('--as cannot be used for real execution');
-      if(positionals[1]==='auto')fail('请手选服务器：gpuctl use gpu-1；GPU 数量由 -g 指定，在该机内自动分配');
+      if(positionals[1]==='auto')fail('请手选服务器：gpuctl use MACHINE_ID；GPU 数量由 -g 指定，在该机内自动分配');
       if(!training.length)fail('Put the training command after --');
       const context=projectArgs(positionals[1]);
       if(options.release&&!context.project)fail('--release requires a selected project');

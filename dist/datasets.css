@@ -1,6 +1,6 @@
 /* Data rooms: confirmed locations lead; tools stay in one optional sheet. */
 #page-datasets,#page-transfers{--d-bg:var(--bg,#f5f5f3);--d-surface:var(--surface,#fff);--d-line:var(--line,#dfdfdd);--d-ink:var(--ink,#19191b);--d-meta:var(--muted,#626266);--d-muted:#65656c;--run:#24714c;--prep:#256083;--err:#b73b3b;--queue:#80601a;--primary:var(--accent,#202023);--on-primary:#fff;color:var(--d-ink);min-width:0}
-/* Retain legacy light surfaces without masking STARBASE's theme state tokens. */
+/* Retain legacy light surfaces without masking STARGATE's theme state tokens. */
 .sb #page-datasets,.sb #page-transfers{--d-bg:var(--bg);--d-surface:var(--bg-1);--d-line:var(--line-2);--d-ink:var(--ink);--d-meta:var(--ink-2);--d-muted:var(--ink-2);--run:inherit;--prep:inherit;--err:inherit;--queue:inherit;--primary:inherit;--on-primary:inherit}
 #page-datasets [hidden],#page-transfers [hidden],.cloud-import [hidden]{display:none!important}
 #page-datasets :is(p,code,label,small),#page-transfers :is(p,code,label,small){overflow-wrap:anywhere}
@@ -31,6 +31,9 @@
 #page-datasets .dataset-matrix-row{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(100px,1fr);grid-template-columns:minmax(180px,1.65fr);gap:20px;align-items:center}
 #page-datasets .dataset-matrix-heading{padding:14px 0;color:var(--d-muted);font-size:12px;border-bottom:1px solid var(--d-line)}
 #page-datasets .dataset-matrix-heading small{display:block;margin-top:4px;font-size:11px;color:var(--d-meta)}
+#page-datasets .dataset-matrix-heading [role=columnheader]{min-width:0}
+#page-datasets .dataset-server-id,#page-datasets .dataset-machine-label{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#page-datasets .dataset-server-id{display:block}
 #page-datasets .dataset-card{border:0;border-bottom:1px solid var(--d-line);border-radius:0;background:none;box-shadow:none;padding:16px 0;margin:0;min-width:0}
 #page-datasets .dataset-card:last-child{border-bottom:0;padding-bottom:4px}
 #page-datasets .dataset-card-heading{min-width:0}
