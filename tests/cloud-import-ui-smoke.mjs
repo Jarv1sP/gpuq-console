@@ -116,3 +116,6 @@ try{
   assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
   console.log('CLOUD IMPORT UI MOCK PASS: share selection; exact-key retries and refresh reconciliation; short-link replacement; async cancel; stopped-worker cleanup guard; account/machine fences; 320/390/1280px. Mock provider/nodes only, not real cloud acceptance. Screenshots: '+screenshots);
 }finally{await browser.close();}
+
+// Keep cloud-file contracts in this existing CI entrypoint.
+await import('./cloud-files-ui-smoke.mjs');

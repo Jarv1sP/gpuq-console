@@ -86,6 +86,7 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
     for(const node of section.querySelectorAll('.data-workspace-card input,.data-workspace-card button'))node.disabled=!enabled||working||external;
     disableMaintenanceControls(card,'#data-workspace-upload,#data-workspace-publish,#terminal-data-open,#terminal-data-reconnect,#cloud-files-form [type=submit],[data-cloud-verify],[data-cloud-restore]',maintenanceFor(store.data?.operationalMaintenance,machine()));
     const stop=element('#data-workspace-cancel');if(stop){stop.hidden=!controller;stop.disabled=!controller;}
+    cloud.controls(working||external);
   }
   function reset(){epoch++;controller?.abort();controller=null;working=false;cloud.reset();relayChoice(true);onBusyChange();}
   async function run(action){
