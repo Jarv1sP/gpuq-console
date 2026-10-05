@@ -390,7 +390,8 @@ class PersonalOCI:
         """Optional fixed offline seed; configured failures never fall back to pull."""
         digest = self.policy['baseImage'].split('@sha256:', 1)[1]
         document = BASE_SEEDS/(digest+'.json')
-        if not document.exists() and not document.is_symlink(): return None
+        try: document.lstat()
+        except FileNotFoundError: return None
         # No mkdir, arbitrary archive URL/path, host graph, or credential reuse.
         for path in (BASE_SEEDS, *BASE_SEEDS.parents):
             if path == Path('/'): continue

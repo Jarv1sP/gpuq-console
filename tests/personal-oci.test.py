@@ -378,6 +378,15 @@ class OCITests(unittest.TestCase):
             self.assertIsNone(self.manager().offline_base())
             engine.assert_not_called()
 
+    def test_offline_base_unreadable_seed_is_not_treated_as_unconfigured(self):
+        manager=self.manager();manager.run=Mock()
+        manager.load=Mock(return_value={'schema':1,'owner':manager.owner,'project':'vision',
+                                       'image':manager.policy['baseImage'],'container':None})
+        with patch.object(Path,'lstat',side_effect=PermissionError('unreadable administrator seed')), \
+             patch.object(o.subprocess,'run') as engine,self.assertRaises(PermissionError):
+            manager.checkpoint('vision')
+        engine.assert_not_called();manager.run.assert_not_called()
+
     def test_offline_base_material_changed_during_inspection_is_rejected(self):
         for target in ('metadata','archive'):
             with self.subTest(target=target),self.offline_fixture() as (manager,document,archive,value,image):
