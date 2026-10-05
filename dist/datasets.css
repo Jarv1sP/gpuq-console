@@ -31,6 +31,9 @@
 #page-datasets .dataset-matrix-row{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(100px,1fr);grid-template-columns:minmax(180px,1.65fr);gap:20px;align-items:center}
 #page-datasets .dataset-matrix-heading{padding:14px 0;color:var(--d-muted);font-size:12px;border-bottom:1px solid var(--d-line)}
 #page-datasets .dataset-matrix-heading small{display:block;margin-top:4px;font-size:11px;color:var(--d-meta)}
+#page-datasets .dataset-matrix-heading [role=columnheader]{min-width:0}
+#page-datasets .dataset-server-id,#page-datasets .dataset-machine-label{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#page-datasets .dataset-server-id{display:block}
 #page-datasets .dataset-card{border:0;border-bottom:1px solid var(--d-line);border-radius:0;background:none;box-shadow:none;padding:16px 0;margin:0;min-width:0}
 #page-datasets .dataset-card:last-child{border-bottom:0;padding-bottom:4px}
 #page-datasets .dataset-card-heading{min-width:0}

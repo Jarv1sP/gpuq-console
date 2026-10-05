@@ -39,6 +39,10 @@
 .maintenance-server-row strong{font-weight:500;font-size:14px}.maintenance-server-row span,.maintenance-server-row small,.maintenance-server-row p{font-size:12px;line-height:1.6;overflow-wrap:anywhere}
 .maintenance-server-row small{display:block;color:var(--ink-3);margin-top:5px}.maintenance-server-row p{margin:8px 0 0;color:var(--ink-2)}
 .maintenance-server-name>span{display:block;color:var(--ink-3);font-size:11px;margin:10px 0 0 24px}.maintenance-select{display:flex;align-items:center;gap:12px}.maintenance-select input,.maintenance-ack input{width:14px;height:14px;flex-shrink:0;accent-color:var(--ink)}
+.maintenance-server-name,.maintenance-select{min-width:0}
+.maintenance-server-id{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}
+.maintenance-context-id{display:inline-block;max-width:min(38vw,240px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+#maintenance-context>span{min-width:0}
 .maintenance-server-facts>span{display:block;margin-top:10px;color:var(--ink-2)}
 .maintenance-server-actions{display:flex;flex-wrap:wrap;gap:7px}.sb .maintenance-server-actions .button{font-size:12px;min-height:34px;padding:6px 10px;border-radius:2px}
 .maintenance-recovery-bar{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:20px 0;border-bottom:1px solid var(--line-2)}

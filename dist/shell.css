@@ -1,4 +1,12 @@
 /* App adapters. Shared design tokens and components are in starbase.css. */
+.sb .cs-server-list{flex:1 1 280px;min-width:0}
+.sb .cs-server{flex:1 1 0;min-width:0;max-width:120px}
+.sb .cs-server-id,.sb .mc-server-head strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .cs-dot,.sb .cs-server-label{flex-shrink:0}
+.sb .mc-server-head{gap:12px;min-width:0}
+.sb .mc-server-head strong{display:block}
+.sb #shell-context label{min-width:0}
+.sb #shell-context select{min-width:0;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
 .sb .av{border-radius:50%;display:grid;place-items:center;flex:none}
 .sb .topbar #current-account{color:var(--ink-2)}.sb .section-kicker,.sb .section-kicker span:first-child,.sb .help-links>span{color:var(--ink-3)}
 .sb :is(.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small){color:var(--ink-2)}.sb .gpu-table :is(th,td){background:var(--bg-1);border-color:var(--line)}

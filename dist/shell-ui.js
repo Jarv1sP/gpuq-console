@@ -12,7 +12,7 @@ export function shellUI(store,{navigate,getPage,toast}){
   function syncContext(){
     const machine=q('[name=workspace-machine]'),project=q('[name=workspace-project]'),active=getPage();
     context.hidden=!store.principal||!machine||!['work','datasets','transfers'].includes(active);
-    for(const [original,target] of [[machine,q('#context-machine')],[project,q('#context-project')]]){if(!original)continue;if(target.innerHTML!==original.innerHTML)target.innerHTML=original.innerHTML;target.value=original.value;target.disabled=original.disabled;}
+    for(const [original,target] of [[machine,q('#context-machine')],[project,q('#context-project')]]){if(!original)continue;if(target.innerHTML!==original.innerHTML)target.innerHTML=original.innerHTML;target.value=original.value;target.title=target.id==='context-machine'?original.value:'';target.disabled=original.disabled;}
     q('#context-note').textContent=project?.value?'项目':'个人工作区';
     if(active==='work'&&store.principal){q('#page-title').textContent=project?.value||'个人工作区';q('#page-description').textContent=machine?.value?machine.value+' · '+(project?.value?'项目':'个人工作区'):'选择获授权服务器，开始一次训练。';}
   }

@@ -4,11 +4,14 @@ import {MACHINES} from './machines.js';
 import {displayName} from './task-metadata.js';
 export {MACHINES};
 const clone = value => JSON.parse(JSON.stringify(value));
+const demoLimits = allocations => Object.fromEntries(allocations.flatMap(([index,cards])=>{
+  const machine=MACHINES[index];return machine?[[machine.id,Math.min(cards,machine.cards)]]:[];
+}));
 export class DemoStore {
   constructor(){
     this.users=[
-      {id:'demo-chen',name:'陈同学',username:'chen-research',enabled:true,total:4,limits:{'gpu-1':2,'gpu-2':4,'gpu-3':2}},
-      {id:'demo-lin',name:'林同学',username:'lin-vision',enabled:true,total:2,limits:{'gpu-2':2,'gpu-4':2}},
+      {id:'demo-chen',name:'陈同学',username:'chen-research',enabled:true,total:4,limits:demoLimits([[0,2],[1,4],[2,2]])},
+      {id:'demo-lin',name:'林同学',username:'lin-vision',enabled:true,total:2,limits:demoLimits([[1,2],[3,2]])},
       {id:'demo-wang',name:'王同学',username:'wang-lab',enabled:true,total:0,limits:{}},
     ];this.jobs=[];this.sequence=0;
   }
