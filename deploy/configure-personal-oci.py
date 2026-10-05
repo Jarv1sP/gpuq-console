@@ -40,11 +40,16 @@ def plan(base_image, cdi_raw):
     for path in ('/usr/bin/podman','/usr/bin/crun','/usr/bin/newuidmap','/usr/bin/newgidmap','/usr/bin/slirp4netns'):
         raw = Path(path).read_bytes(); digest = sha(raw)
         o.protected_file(path, digest, executable=True); binaries[path] = digest
-    # --version is metadata only: no graphroot, pull or container creation.
+    # Metadata only: no graphroot, pull or container creation. Version alone
+    # does not establish support for a strong CDI directory override.
     version = subprocess.run(['/usr/bin/podman','--version'], env={'PATH':'/usr/bin:/bin'},
                              text=True, capture_output=True, check=True, timeout=5).stdout.strip()
     match = re.fullmatch(r'podman version (\d+)\.(\d+)\.(\d+)(?:[+~-].*)?', version)
     o.need(match and tuple(map(int,match.groups())) >= (4,1,0), 'Podman >= 4.1 is required; older packages cannot use this GPU contract')
+    help_text = subprocess.run(['/usr/bin/podman','--help'], env={'PATH':'/usr/bin:/bin'},
+                               text=True, capture_output=True, check=True, timeout=5).stdout
+    o.need(len(help_text) <= 1024**2 and any(line.strip().startswith('--cdi-spec-dir ')
+           for line in help_text.splitlines()), 'Podman --cdi-spec-dir support is required')
     node = {'enabled': True, 'baseImage': base_image, 'podmanSHA256': binaries['/usr/bin/podman'],
             'runtimeSHA256': binaries['/usr/bin/crun'], 'cdiSHA256': sha(cdi_raw)}
     manifest = {'schema':1,'phase':'DRY_RUN','personalOciCandidate':node,'binariesSHA256':binaries,
@@ -64,9 +69,7 @@ def execute(base_image, cdi_raw, approved):
         o.need(not path.exists() and not path.is_symlink(), 'OCI control path already exists; partial installation must not replay')
     for path in (o.ENGINE.parent,o.CDI.parent):
         q.protected_directory(path)
-    o.need(not os.listdir(o.CDI.parent), 'Other CDI specifications must be independently reviewed, not overwritten')
-    if Path('/run/cdi').exists():
-        o.need(not os.listdir('/run/cdi'), 'Runtime CDI directory is not empty')
+    o.need(not os.listdir(o.CDI.parent), 'Other dedicated CDI specifications must be independently reviewed, not overwritten')
     q.protected_directory(CONTROL)
     q.put_new(CONTROL/'intent.json',json.dumps(value,sort_keys=True).encode(),0o600)
     q.protected_directory(o.HOOKS)

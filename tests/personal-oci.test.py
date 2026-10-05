@@ -92,6 +92,18 @@ class OCITests(unittest.TestCase):
         self.assertTrue(command[command.index('--root')+1].endswith(self.manager().owner+'/graph'))
         self.assertFalse(any('socket' in v or '--remote' in v for v in command))
 
+    def test_fixed_cdi_override_cannot_load_host_or_user_spec_directories(self):
+        expected = '/etc/gpuq-console/cdi'
+        self.assertEqual(str(o.CDI), expected+'/gpuq-nvidia.json')
+        self.assertEqual(tomllib.loads(o.ENGINE_RAW.decode())['engine']['cdi_spec_dirs'], [expected])
+        for operation in ('version', 'info', 'create', 'run', 'start'):
+            command = self.manager().command(operation)
+            self.assertEqual([arg for arg in command if arg.startswith('--cdi-spec-dir=')],
+                             ['--cdi-spec-dir='+expected])
+            self.assertNotIn('/etc/cdi', command); self.assertNotIn('/run/cdi', command)
+        c = config(); c['personalOci']['cdiSpecDir'] = '/run/cdi'
+        with self.assertRaisesRegex(ValueError, 'capability policy'): o.policy(c, USER)
+
     def anonymous_manager(self, root):
         manager = self.manager()
         manager.folder = Path(root).resolve()/'private-oci'
@@ -363,20 +375,40 @@ class OCITests(unittest.TestCase):
             self.assertEqual(manager.checkpoint('vision')['image'], 'sha256:'+SHA)
             self.assertEqual(durable.call_args.args[1]['image'], 'sha256:'+SHA)
 
-    def verify_capability(self, host):
+    def verify_capability(self, host, *, cdi_names=None, wrong_cdi=False):
         manager = self.manager()
         manager.s = SimpleNamespace(directory=MagicMock())
         manager.run = Mock(side_effect=['5.8.8', json.dumps({'host': host})])
-        with patch.object(o, 'protected_file') as protected, \
+        def verify_file(path, expected, **kwargs):
+            if path == o.CDI:
+                self.assertEqual(expected, SHA)
+                if wrong_cdi: raise ValueError('OCI host dependency differs from accepted version')
+        with patch.object(o, 'protected_file', side_effect=verify_file) as protected, \
              patch.object(o.os, 'geteuid', return_value=1000), \
              patch.object(o.os, 'fstat', return_value=SimpleNamespace(st_uid=0, st_mode=0o40755)), \
-             patch.object(o.os, 'listdir', side_effect=[[], ['gpuq-nvidia.json'], []]), \
+             patch.object(o.os, 'listdir', side_effect=[[], cdi_names if cdi_names is not None else ['gpuq-nvidia.json']]), \
              patch.object(o.Path, 'exists', lambda p: str(p) in ('/etc/cdi', '/run/cdi')), \
              patch.object(o.Path, 'is_symlink', return_value=False):
             result = manager.verify_host()
             protected.assert_any_call('/usr/bin/crun', SHA, executable=True)
+        self.assertEqual([call.args[0] for call in manager.s.directory.call_args_list], [o.HOOKS, o.CDI.parent])
         self.assertEqual(manager.run.call_args_list[-1].args, ('info', '--format=json'))
         return result
+
+    def test_dedicated_cdi_rejects_extra_spec_and_wrong_digest(self):
+        host = {'security': {'rootless': True}, 'cgroupVersion': 'v2',
+                'ociRuntime': {'name': 'crun', 'path': '/usr/bin/crun'}}
+        for names in ([], ['gpuq-nvidia.json', 'host.yaml']):
+            with self.subTest(names=names), self.assertRaisesRegex(ValueError, 'Unpinned CDI'):
+                self.verify_capability(host, cdi_names=names)
+        with self.assertRaisesRegex(ValueError, 'differs from accepted version'):
+            self.verify_capability(host, wrong_cdi=True)
+
+    def test_host_cdi_directories_are_not_inspected_or_loaded(self):
+        # Both host defaults exist, potentially with automatic NVIDIA specs.
+        # The only inspected CDI directory and command option are dedicated.
+        self.verify_capability({'security': {'rootless': True}, 'cgroupVersion': 'v2',
+                                'ociRuntime': {'name': 'crun', 'path': '/usr/bin/crun'}})
 
     def test_runtime_capability_accepts_pinned_absolute_name(self):
         for name in ('crun', '/usr/bin/crun'):

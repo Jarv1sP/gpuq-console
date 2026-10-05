@@ -25,12 +25,13 @@ BASE = re.compile(r'[a-z0-9][a-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{6
 GPU = re.compile(r'GPU-[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}\Z')
 OWNER = re.compile(r'builtin-admin|demo-user-[0-9]+\Z')
 HOOKS = Path('/etc/gpuq-console/empty-hooks')
-CDI = Path('/etc/cdi/gpuq-nvidia.json')
+CDI = Path('/etc/gpuq-console/cdi/gpuq-nvidia.json')
 ENGINE = Path('/etc/gpuq-console/personal-oci.conf')
 SIGNATURE_POLICY = Path('/etc/gpuq-console/personal-oci-policy.json')
 REGISTRY_DROPINS = Path('/etc/containers/registries.conf.d')
 RUNTIME = Path('/run/user')
-ENGINE_RAW = b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n[engine]\nremote = false\n'
+ENGINE_RAW = (b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n'
+              b'[engine]\nremote = false\ncdi_spec_dirs = ["/etc/gpuq-console/cdi"]\n')
 ANONYMOUS_AUTH_RAW = b'{"auths":{}}\n'
 ANONYMOUS_REGISTRIES_RAW = (b'credential-helpers = ["containers-auth.json"]\n'
                             b'unqualified-search-registries = []\nshort-name-mode = "enforcing"\n')
@@ -299,7 +300,8 @@ class PersonalOCI:
     def command(self, *args):
         return ['/usr/bin/podman', '--root', str(self.folder/'graph'), '--runroot', str(self.folder/'run'),
                 '--tmpdir', str(self.folder/'tmp'), '--storage-driver=overlay', '--cgroup-manager=cgroupfs',
-                '--runtime=/usr/bin/crun', '--hooks-dir='+str(HOOKS), '--events-backend=file', *args]
+                '--runtime=/usr/bin/crun', '--hooks-dir='+str(HOOKS),
+                '--cdi-spec-dir='+str(CDI.parent), '--events-backend=file', *args]
 
     def run(self, *args, timeout=30):
         with self.registry_auth() as (env, authfd):
@@ -317,15 +319,12 @@ class PersonalOCI:
         protected_file(CDI, self.policy['cdiSHA256'])
         protected_file(ENGINE, hashlib.sha256(ENGINE_RAW).hexdigest())
         protected_file(SIGNATURE_POLICY, hashlib.sha256(signature_policy_raw(self.policy['baseImage'])).hexdigest())
-        # Podman 4.1 searches both default CDI directories. Accept only this
-        # one pinned administrator spec; do not let another spec override it.
-        for directory, names in ((Path('/etc/cdi'), {'gpuq-nvidia.json'}), (Path('/run/cdi'), set())):
-            if not directory.exists():
-                need(not names, 'Pinned CDI directory missing'); continue
-            with self.s.directory(directory) as fd:
-                info = os.fstat(fd)
-                need(info.st_uid == 0 and not info.st_mode & 0o022 and set(os.listdir(fd)) == names,
-                     'Unpinned CDI specification directory')
+        # Every command strongly overrides the default CDI search paths. The
+        # host's automatic NVIDIA specs remain untouched and are never loaded.
+        with self.s.directory(CDI.parent) as fd:
+            info = os.fstat(fd)
+            need(info.st_uid == 0 and not info.st_mode & 0o022
+                 and set(os.listdir(fd)) == {CDI.name}, 'Unpinned CDI specification directory')
         # mounts.conf is independent of containers.conf and must not inject a
         # host secret/socket into every otherwise restricted rootless container.
         for path in (Path('/usr/share/containers/mounts.conf'), Path('/etc/containers/mounts.conf'),
