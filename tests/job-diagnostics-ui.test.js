@@ -39,7 +39,7 @@ test('diagnostic logs, source names and attempt fields never inject HTML',()=>{
 });
 
 function domFixture(t){
-  const nodes=new Map(),downloads=[],errors=[],calls=[],oldDocument=globalThis.document;
+  const nodes=new Map(),downloads=[],errors=[],calls=[],viewed=[],oldDocument=globalThis.document;
   class Element{
     constructor(tag='div'){this.tag=tag;this.listeners=new Map();this.hidden=false;this.disabled=false;this.open=false;this._text='';this._html='';}
     set id(id){this._id=id;nodes.set('#'+id,this);}get id(){return this._id;}
@@ -55,11 +55,11 @@ function domFixture(t){
     click(){if(this.tag==='a')downloads.push({href:this.href,name:this.download});else return this.fire('click');}
   }
   const pre=new Element('pre'),dialog=new Element('dialog');
-  globalThis.document={querySelector:selector=>nodes.get(selector),head:new Element('head'),createElement:tag=>new Element(tag)};
+  globalThis.document={querySelector:selector=>nodes.get(selector),head:new Element('head'),createElement:tag=>new Element(tag),dispatchEvent:event=>{if(event.type==='gpuq-attention-viewed')viewed.push(event.detail);return true;}};
   t.after(()=>{globalThis.document=oldDocument;});
   const store={principal:{userId:'owner',role:'member'},call:async(op,args)=>{calls.push({op,args});return op==='jobs.logs'?{text:'main log'}:fixture();}};
   const control=createJobDiagnostics(store,()=>dialog,error=>errors.push(error));control.install();
-  return {store,control,dialog,pre,nodes,calls,errors,downloads};
+  return {store,control,dialog,pre,nodes,calls,errors,downloads,viewed};
 }
 
 test('log window exposes diagnostics and JSON download without altering job status',async t=>{
@@ -67,6 +67,7 @@ test('log window exposes diagnostics and JSON download without altering job stat
   await f.nodes.get('#job-diagnostic-open').fire('click');assert.match(f.nodes.get('#job-diagnostic-view').innerHTML,/GPU-test/);assert.equal(f.nodes.get('#job-diagnostic-download').disabled,false);
   await f.nodes.get('#job-diagnostic-download').fire('click');assert.equal(f.downloads[0].name,'gpuq-diagnostics-'+JOB+'.json');
   assert.deepEqual(f.calls.map(c=>c.op),['jobs.logs','jobs.diagnostics']);
+  assert.ok(f.viewed.length>=2);assert.ok(f.viewed.every(row=>row.kind==='job'&&row.userId==='owner'&&row.id===JOB),'view notifications carry the current account and displayed task');
 });
 
 test('late responses cannot leak across logout, role change or another job',async t=>{

@@ -34,7 +34,7 @@ test('individual control slots cannot look free when the full GPU inventory is u
   host.gpus[0].memoryUsedMiB=-1;assert.match(serverSlotsHTML(controlSnapshot(store).servers[0]),/GPU 0 · 占用未确认/);
 });
 test('only an administrator sees pending approvals, and only a complete data listing has an aggregate',()=>{
-  assert.equal(controlSnapshot(fixture()).attention.length,0);const snapshot=controlSnapshot(fixture('admin'),{activitiesComplete:true,activities:[{id:'one',userId:'owner',state:'RUNNING'},{id:'one',userId:'owner',state:'RUNNING'},{id:'two',userId:'owner',state:'FAILED'}]});assert.equal(snapshot.dataCount,1);assert.equal(snapshot.attention.length,2);
+  assert.equal(controlSnapshot(fixture()).attention.length,0);const snapshot=controlSnapshot(fixture('admin'),{activitiesComplete:true,activities:[{id:'one',userId:'owner',state:'RUNNING'},{id:'one',userId:'owner',state:'RUNNING'},{id:'two',userId:'owner',state:'FAILED'}]});assert.equal(snapshot.dataCount,1);assert.equal(snapshot.attention.length,1);assert.equal(snapshot.attention[0].id,'user:pending','timestamp-less failures no longer create an alert');
   const store=fixture();store.principal=null;assert.deepEqual(controlSnapshot(store).jobs,[]);assert.equal(controlSnapshot(store).quota,null);
 });
 test('stale or missing self-report never becomes a progress percentage or ETA',()=>{

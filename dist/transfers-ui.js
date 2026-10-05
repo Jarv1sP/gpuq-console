@@ -26,10 +26,10 @@ export function transferCard(row){
     <details class="transfer-details"><summary>任务详情</summary><p>任务编号 <code>${esc(row.id)}</code></p><p>后台状态 <code>${esc(row.state)}</code></p><p>${esc(route.note)}${['PAUSED','FAILED','CANCELED'].includes(row.state)?' 未完成文件保留；本机上传需在原客户端继续。':''}</p></details>`;
 }
 export function transfersUI(store,toast){
-  const section=document.querySelector('#page-transfers');let identity='',busy=false,generation=0,cursor=0,records=new Map();
+  const section=document.querySelector('#page-transfers');let identity='',busy=false,generation=0,cursor=0,records=new Map(),pendingReveal=null;
   function activities(complete){
     if(!store.principal)return;
-    document.dispatchEvent(new CustomEvent('gpuq-data-activities',{detail:{userId:store.principal.userId,items:[...records.values()].map(row=>({id:row.id,kind:row.kind,state:row.state,machine:row.machine,name:row.name||row.reference?.dataset||'数据传输'})),complete}}));
+    document.dispatchEvent(new CustomEvent('gpuq-data-activities',{detail:{userId:store.principal.userId,items:[...records.values()].map(row=>({id:row.id,kind:row.kind,state:row.state,machine:row.machine,name:row.name||row.reference?.dataset||'数据传输',finishedAt:row.finishedAt,updatedAt:row.updatedAt,error:row.error||row.result?.error})),complete}}));
   }
   function maintenanceControls(){
     restoreMaintenanceControls(section);
@@ -47,17 +47,26 @@ export function transfersUI(store,toast){
       let parent=block;
       for(const [index,row] of group.rows.entries()){
         if(group.id==='attention'&&index===3){parent=document.createElement('details');parent.className='transfer-overflow';parent.innerHTML=`<summary>还有 ${group.rows.length-3} 项需要处理</summary>`;block.append(parent);}
-        const node=document.createElement('article');node.className='panel transfer-card';node.dataset.state=Object.hasOwn(stateNames,row.state)?row.state:'UNKNOWN';node.innerHTML=transferCard(row);parent.append(node);
+        const node=document.createElement('article');node.className='panel transfer-card';node.dataset.transferId=row.id;node.dataset.state=Object.hasOwn(stateNames,row.state)?row.state:'UNKNOWN';node.innerHTML=transferCard(row);parent.append(node);
       }
       list.append(block);
     }
     maintenanceControls();
   }
-  store.onAuthChange?.(()=>{generation++;identity='';busy=false;records.clear();section.replaceChildren();});
+  function viewed(id){if(records.has(id))document.dispatchEvent(new CustomEvent('gpuq-attention-viewed',{detail:{userId:store.principal?.userId,kind:'data',id}}));}
+  function revealPending(fresh=false){
+    if(busy&&!fresh||!pendingReveal||pendingReveal.userId!==store.principal?.userId)return;
+    const card=[...section.querySelectorAll('[data-transfer-id]')].find(row=>row.dataset.transferId===pendingReveal.id);if(!card)return;
+    pendingReveal=null;for(let parent=card.parentElement;parent&&parent!==section;parent=parent.parentElement)if(parent.tagName==='DETAILS')parent.open=true;
+    card.querySelector('.transfer-details').open=true;viewed(card.dataset.transferId);requestAnimationFrame(()=>card.scrollIntoView({block:'center'}));
+  }
+  section.addEventListener('toggle',event=>{if(event.target.matches('.transfer-details')&&event.target.open)viewed(event.target.closest('[data-transfer-id]')?.dataset.transferId);},true);
+  document.addEventListener('gpuq-reveal-data-activity',event=>{if(!store.principal||event.detail?.userId!==store.principal.userId)return;pendingReveal={id:event.detail.id,userId:event.detail.userId};revealPending();});
+  store.onAuthChange?.(()=>{generation++;identity='';busy=false;pendingReveal=null;records.clear();section.replaceChildren();});
   async function load(next=false){
-    if(busy||!store.principal||!store.production||store.data?.transfers?.version!==1)return;busy=true;const token=generation;
-    try{const result=await store.call('transfers.list',{cursor:next?cursor:0});if(token!==generation)return;cursor=result.nextCursor;if(!next)records.clear();for(const row of result.transfers)records.set(row.id,row);renderRecords();activities(!cursor&&result.partial!==true);section.querySelector('#transfer-more').hidden=!cursor;section.querySelector('#transfer-status').textContent=records.size?(cursor?'已显示部分记录；加载下一页可继续核对。':'状态已更新。服务器间复制会在后台继续。'):'还没有传输任务。可从“数据集”上传数据，或创建服务器间复制。';}
-    catch(e){if(token===generation){section.querySelector('#transfer-status').textContent=e.message;activities(false);}}finally{if(token===generation)busy=false;}
+    if(busy||!store.principal||!store.production||store.data?.transfers?.version!==1)return;busy=true;const token=generation,requestedCursor=next?cursor:0;let follow=false;
+    try{const result=await store.call('transfers.list',{cursor:requestedCursor});if(token!==generation)return;cursor=result.nextCursor;if(!next)records.clear();for(const row of result.transfers)records.set(row.id,row);renderRecords();activities(!cursor&&result.partial!==true);revealPending(true);follow=!!pendingReveal&&!!cursor&&cursor!==requestedCursor;section.querySelector('#transfer-more').hidden=!cursor;section.querySelector('#transfer-status').textContent=records.size?(cursor?'已显示部分记录；加载下一页可继续核对。':'状态已更新。服务器间复制会在后台继续。'):'还没有传输任务。可从“数据集”上传数据，或创建服务器间复制。';}
+    catch(e){if(token===generation){section.querySelector('#transfer-status').textContent=e.message;activities(false);}}finally{if(token===generation)busy=false;}if(follow&&token===generation)load(true);
   }
   section.addEventListener('submit',async e=>{
     if(e.target.id!=='transfer-copy-form')return;e.preventDefault();if(busy)return;

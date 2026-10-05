@@ -92,3 +92,4 @@ try{
 // Exercise grouped presentation and mission-control records in the same CI entry.
 await import('./transfers-panel-fixture.mjs');
 await import('./navigation-browser-fixture.mjs');
+await import('./attention-ui-smoke.mjs');
