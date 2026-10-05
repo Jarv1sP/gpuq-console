@@ -2,7 +2,18 @@
 // proof of failure and must never cause an implicit second submission.
 const READS=new Set(['state','datasets.list','datasets.status','datasets.catalog','projects.list','projects.status','projects.verify','jobs.logs','jobs.watch','jobs.diagnostics','transfers.list','transfers.status','community.posts.list','community.posts.get','community.comments.list']);
 const TRANSIENT=new Set([502,503,504]);
-const safe=value=>String(value).replace(/[\p{Cc}\p{Cf}]/gu,c=>'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}').slice(0,600);
+// Shared by HTTP errors and CLI metadata; only explicit multiline output keeps LF.
+export const visibleControls=(value,multiline=false)=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>multiline&&c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
+const safe=value=>{
+  const visible=visibleControls(String(value));
+  let end=Math.min(visible.length,600);
+  // Keep each visible escape whole when the error detail reaches its display cap.
+  for(const match of visible.matchAll(/\\u\{[0-9a-f]{4,6}\}/g)){
+    if(match.index>=end)break;
+    if(match.index+match[0].length>end){end=match.index;break;}
+  }
+  return visible.slice(0,end);
+};
 const error=(message,status)=>Object.assign(Error(message),{status});
 
 export async function apiPost(base,path,body,{token,signal,fetchImpl=fetch,sleep=(ms,s)=>new Promise((resolve,reject)=>{
