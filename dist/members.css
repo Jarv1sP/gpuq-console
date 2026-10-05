@@ -141,8 +141,8 @@
 .sb #login-dialog .auth-platform{font:12px var(--sans);color:var(--ink-2)}
 .sb #login-dialog .auth-r5-layout{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:100px;max-width:1312px;margin:0 auto;padding-top:clamp(48px,10dvh,100px);align-items:start}
 .sb #login-dialog .auth-login-identity{padding-top:10px;min-width:0}
-.sb #login-dialog .auth-r5-wordmark{display:block;width:100%;max-width:none;height:auto;fill:var(--ink);stroke:none;stroke-width:0;overflow:visible}
-.sb #login-dialog .auth-r5-wordmark path{fill:var(--ink);stroke:none}
+.sb #login-dialog .auth-r5-wordmark{display:block;width:100%;max-width:none;height:auto;aspect-ratio:9753/711;fill:var(--ink);stroke:none;stroke-width:0;overflow:visible;background:none;-webkit-mask:none;mask:none;text-indent:0;line-height:normal}
+.sb #login-dialog .auth-r5-wordmark path{display:inline;fill:var(--ink);stroke:none}
 .sb #login-dialog .auth-login-fleet{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:23px;align-items:end;margin-top:clamp(32px,7dvh,70px);padding:0 4px}
 .sb #login-dialog .auth-login-fleet figure{margin:0;min-width:0}
 .sb #login-dialog .auth-login-fleet figcaption{font:11px var(--mono);color:var(--ink-2);text-align:center;margin-top:14px}

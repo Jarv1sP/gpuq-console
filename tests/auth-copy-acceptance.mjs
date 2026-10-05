@@ -14,7 +14,10 @@ export async function verifyAuthentication(page,origin,capture){
   });
   await page.goto(origin);await page.locator('#login-dialog[open]').waitFor();
   await page.waitForFunction(()=>window.authIgnitions.length===1);
-  assert.deepEqual(await page.evaluate(()=>window.authIgnitions),[[.6,.6]],'the two Lambda strokes ignite for the approved 600ms');
+  assert.deepEqual(await page.evaluate(()=>window.authIgnitions),[[.6]],'both Lambda glyphs share the approved 600ms ignition path');
+  assert.equal(await page.locator('.auth-r5-wordmark.wordmark').getAttribute('viewBox'),'0 0 9753 711');
+  assert.equal(await page.locator('.auth-r5-wordmark>path').count(),2);
+  assert.equal(await page.locator('.auth-lambda').evaluate(node=>(node.getAttribute('d').match(/M/g)||[]).length),2,'the supplied animated path contains both Lambda glyphs');
   await page.waitForFunction(()=>!document.querySelector('#login-dialog').classList.contains('wordmark-ignition'));
   const portraits=page.locator('[data-auth-machine]');
   assert.deepEqual(await portraits.evaluateAll(nodes=>nodes.map(node=>({id:node.dataset.authMachine,bays:node.querySelectorAll('.auth-bay').length}))),MACHINES.map(machine=>({id:machine.id,bays:machine.cards})));
@@ -53,7 +56,7 @@ export async function verifyAuthentication(page,origin,capture){
     const staticPage=await reduced.newPage();staticPage.on('pageerror',error=>reducedErrors.push(error.message));
     await staticPage.goto(origin);await staticPage.locator('#login-dialog[open]').waitFor();
     assert.equal(await staticPage.locator('.wordmark-ignition').count(),0);
-    assert.deepEqual(await staticPage.locator('.auth-lambda').evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationName)),['none','none']);
+    assert.deepEqual(await staticPage.locator('.auth-lambda').evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationName)),['none']);
     await capture(staticPage,'r5-login-reduced-390.png');
     assert.deepEqual(reducedErrors,[]);assert.deepEqual(external,[]);
   }finally{await reduced.close();}
