@@ -1,4 +1,5 @@
 import copy
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -316,6 +317,143 @@ class OCITests(unittest.TestCase):
                           '--retry=0', '--tls-verify=true', manager.policy['baseImage']))
         self.assertEqual(manager.run.call_args_list[1].args,
                          ('image', 'inspect', '--format={{.Id}}', manager.policy['baseImage']))
+
+    @contextlib.contextmanager
+    def offline_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); manager = self.anonymous_manager(root)
+            seeds = root/'seeds'; seeds.mkdir(mode=0o755)
+            digest = manager.policy['baseImage'].split('@sha256:')[1]
+            document, archive = seeds/(digest+'.json'), seeds/(digest+'.oci.tar')
+            raw = b'deterministic public offline image fixture'
+            archive.write_bytes(raw); archive.chmod(0o444)
+            value = {'schema':1, 'baseImage':manager.policy['baseImage'], 'archiveBytes':len(raw),
+                     'archiveSHA256':hashlib.sha256(raw).hexdigest(), 'imageId':'sha256:'+SHA,
+                     'diffIds':['sha256:'+'b'*64]}
+            document.write_text(json.dumps(value)); document.chmod(0o444)
+            image = {'Id':SHA, 'RepoDigests':[value['baseImage']], 'Digest':'sha256:'+digest,
+                     'RootFS':{'Layers':value['diffIds']}}
+            # The Mac test account cannot chown fixtures to host root. Model
+            # only administrator-owned seed assets/ancestors, not private HOME.
+            real_fstat, real_stat = os.fstat, os.stat
+            identities = {(p.stat().st_dev,p.stat().st_ino) for p in (seeds,*seeds.parents,document,archive)}
+            def root_info(info):
+                if (info.st_dev,info.st_ino) not in identities:return info
+                fields = {key:getattr(info,key) for key in ('st_dev','st_ino','st_mode','st_uid','st_gid',
+                          'st_nlink','st_size','st_mtime_ns','st_ctime_ns')}
+                fields['st_uid']=0
+                if __import__('stat').S_ISDIR(info.st_mode):fields['st_mode'] &= ~0o022
+                return SimpleNamespace(**fields)
+            with patch.object(o,'BASE_SEEDS',seeds), \
+                 patch.object(o.os,'fstat',side_effect=lambda fd:root_info(real_fstat(fd))), \
+                 patch.object(o.os,'stat',side_effect=lambda *a,**k:root_info(real_stat(*a,**k))):
+                yield manager, document, archive, value, image
+
+    def test_offline_base_cold_loads_only_fixed_archive_into_private_graph(self):
+        with self.offline_fixture() as (manager,document,archive,value,image):
+            manager.run=Mock(side_effect=['',json.dumps([image])])
+            with patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout=b'',stderr=b'')) as exists:
+                self.assertEqual(manager.offline_base(),value['imageId'])
+            self.assertEqual(exists.call_args.args[0][-3:],['image','exists',value['baseImage']])
+            self.assertIn(str(manager.folder/'graph'),exists.call_args.args[0])
+            self.assertEqual(manager.run.call_args_list[0].args,
+                ('load','--signature-policy',str(manager.folder/'offline-base-policy.json'),
+                 '--quiet','--input',str(archive)))
+            policy=json.loads((manager.folder/'offline-base-policy.json').read_text())
+            self.assertEqual(policy,{'default':[{'type':'reject'}],'transports':{
+                'oci-archive':{str(archive):[{'type':'insecureAcceptAnything'}]}}})
+            self.assertNotIn('HTTP_PROXY',exists.call_args.kwargs['env'])
+            self.assertFalse(any(call.args[0]=='pull' for call in manager.run.call_args_list))
+
+    def test_offline_base_warm_still_checks_full_identity_without_reload(self):
+        with self.offline_fixture() as (manager,document,archive,value,image):
+            manager.run=Mock(return_value=json.dumps([image]))
+            with patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=b'',stderr=b'')):
+                self.assertEqual(manager.offline_base(),value['imageId'])
+            manager.run.assert_called_once_with('image','inspect',value['baseImage'])
+
+    def test_offline_base_unconfigured_remains_optional_without_engine_access(self):
+        with tempfile.TemporaryDirectory() as root,patch.object(o,'BASE_SEEDS',Path(root)/'absent'), \
+             patch.object(o.subprocess,'run') as engine:
+            self.assertIsNone(self.manager().offline_base())
+            engine.assert_not_called()
+
+    def test_offline_base_unreadable_seed_is_not_treated_as_unconfigured(self):
+        manager=self.manager();manager.run=Mock()
+        manager.load=Mock(return_value={'schema':1,'owner':manager.owner,'project':'vision',
+                                       'image':manager.policy['baseImage'],'container':None})
+        with patch.object(Path,'lstat',side_effect=PermissionError('unreadable administrator seed')), \
+             patch.object(o.subprocess,'run') as engine,self.assertRaises(PermissionError):
+            manager.checkpoint('vision')
+        engine.assert_not_called();manager.run.assert_not_called()
+
+    def test_offline_base_material_changed_during_inspection_is_rejected(self):
+        for target in ('metadata','archive'):
+            with self.subTest(target=target),self.offline_fixture() as (manager,document,archive,value,image):
+                def inspect(*args,**kwargs):
+                    path=document if target=='metadata' else archive
+                    path.chmod(0o644);path.write_bytes(path.read_bytes()+b' ');path.chmod(0o444)
+                    return json.dumps([image])
+                manager.run=Mock(side_effect=inspect)
+                with patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=b'',stderr=b'')), \
+                     self.assertRaisesRegex(ValueError,'seed changed during operation'):
+                    manager.offline_base()
+
+    def test_offline_base_corrupt_archive_or_metadata_never_calls_engine(self):
+        for kind in ('checksum','size','foreign-base','unknown-key','mode','hardlink','symlink','missing'):
+            with self.subTest(kind=kind),self.offline_fixture() as (manager,document,archive,value,image):
+                if kind=='checksum':value['archiveSHA256']='c'*64
+                elif kind=='size':value['archiveBytes']+=1
+                elif kind=='foreign-base':value['baseImage']='docker.io/library/other@sha256:'+SHA
+                elif kind=='unknown-key':value['archivePath']='/private/host/graph'
+                elif kind=='mode':archive.chmod(0o644)
+                elif kind=='hardlink':os.link(archive,archive.with_suffix('.linked'))
+                elif kind=='symlink':archive.unlink();archive.symlink_to(document)
+                elif kind=='missing':archive.unlink()
+                document.chmod(0o644);document.write_text(json.dumps(value));document.chmod(0o444)
+                with patch.object(o.subprocess,'run') as engine,self.assertRaises((ValueError,OSError)):
+                    manager.offline_base()
+                engine.assert_not_called()
+
+    def test_offline_base_identity_requires_repo_manifest_config_and_every_layer(self):
+        for kind in ('repo','digest','id','layer','extra-layer'):
+            with self.subTest(kind=kind),self.offline_fixture() as (manager,document,archive,value,image):
+                if kind=='repo':image['RepoDigests']=[]
+                elif kind=='digest':image['Digest']='sha256:'+'c'*64
+                elif kind=='id':image['Id']='c'*64
+                elif kind=='layer':image['RootFS']['Layers']=['sha256:'+'c'*64]
+                else:image['RootFS']['Layers']+=['sha256:'+'c'*64]
+                manager.run=Mock(return_value=json.dumps([image]))
+                with patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=b'',stderr=b'')),self.assertRaisesRegex(ValueError,'identity mismatch'):
+                    manager.offline_base()
+                manager.run.assert_called_once_with('image','inspect',value['baseImage'])
+
+    def test_offline_base_load_failure_never_pulls_or_acknowledges_project(self):
+        with self.offline_fixture() as (manager,document,archive,value,image):
+            manager.load=Mock(return_value={'schema':1,'owner':manager.owner,'project':'vision',
+                                           'image':value['baseImage'],'container':None})
+            manager.run=Mock(side_effect=ValueError('Managed OCI operation failed'))
+            with patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout=b'',stderr=b'')), \
+                 patch.object(manager.s,'atomic_json') as write,self.assertRaises(ValueError):
+                manager.checkpoint('vision')
+            write.assert_not_called();self.assertEqual(manager.run.call_count,1)
+            self.assertEqual(manager.run.call_args.args[0],'load')
+
+    def test_offline_base_lookup_timeout_and_invalid_exit_never_load_or_retry(self):
+        for result in (SimpleNamespace(returncode=125,stdout=b'',stderr=b'error'),
+                       o.subprocess.TimeoutExpired('fixed-local-lookup',30)):
+            with self.subTest(result=result),self.offline_fixture() as (manager,*_):
+                manager.run=Mock()
+                with patch.object(o.subprocess,'run',side_effect=result if isinstance(result,Exception) else None,
+                                  return_value=result) as exists,self.assertRaises((ValueError,o.subprocess.TimeoutExpired)):
+                    manager.offline_base()
+                self.assertEqual(exists.call_count,1);manager.run.assert_not_called()
+
+    def test_offline_base_published_image_does_not_load_or_pull(self):
+        manager=self.manager();manager.load=Mock(return_value={'schema':1,'owner':manager.owner,
+            'project':'vision','image':'sha256:'+SHA,'container':None})
+        manager.offline_base=Mock(side_effect=AssertionError);manager.run=Mock(side_effect=AssertionError)
+        self.assertEqual(manager.checkpoint('vision')['image'],'sha256:'+SHA)
 
     def test_signature_policy_allows_only_exact_approved_base_digest(self):
         value = json.loads(o.signature_policy_raw(config()['personalOci']['baseImage']))

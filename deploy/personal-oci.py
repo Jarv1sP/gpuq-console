@@ -30,6 +30,7 @@ ENGINE = Path('/etc/gpuq-console/personal-oci.conf')
 SIGNATURE_POLICY = Path('/etc/gpuq-console/personal-oci-policy.json')
 REGISTRY_DROPINS = Path('/etc/containers/registries.conf.d')
 RUNTIME = Path('/run/user')
+BASE_SEEDS = Path('/etc/gpuq-console/base-seeds')
 ENGINE_RAW = (b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n'
               b'[engine]\nremote = false\ncdi_spec_dirs = ["/etc/gpuq-console/cdi"]\n')
 ANONYMOUS_AUTH_RAW = b'{"auths":{}}\n'
@@ -362,6 +363,79 @@ class PersonalOCI:
         return self.folder/'projects'/(slug+'.json')
 
     @contextlib.contextmanager
+    def seed_file(self, parent, name, maximum, digest=None):
+        """Public administrator material, never an owner-selected host path."""
+        fd = os.open(name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+        try:
+            info = os.fstat(fd); identity = self.s.stamp(info)
+            need(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+                 and stat.S_IMODE(info.st_mode) == 0o444 and 0 < info.st_size <= maximum,
+                 'Unsafe offline base seed')
+            if digest is not None:
+                value = hashlib.sha256(); remaining = info.st_size+1
+                while remaining:
+                    chunk = os.read(fd, min(remaining, 1024**2))
+                    if not chunk: break
+                    value.update(chunk); remaining -= len(chunk)
+                need(remaining == 1, 'Offline base archive changed while reading')
+                need(value.hexdigest() == digest, 'Offline base archive checksum mismatch')
+            yield fd
+            need(self.s.stamp(os.fstat(fd)) == identity
+                 and self.s.stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity,
+                 'Offline base seed changed during operation')
+        finally:
+            os.close(fd)
+
+    def offline_base(self):
+        """Optional fixed offline seed; configured failures never fall back to pull."""
+        digest = self.policy['baseImage'].split('@sha256:', 1)[1]
+        document = BASE_SEEDS/(digest+'.json')
+        try: document.lstat()
+        except FileNotFoundError: return None
+        # No mkdir, arbitrary archive URL/path, host graph, or credential reuse.
+        for path in (BASE_SEEDS, *BASE_SEEDS.parents):
+            if path == Path('/'): continue
+            with self.s.directory(path) as fd:
+                info = os.fstat(fd)
+                need(info.st_uid == 0 and not info.st_mode & 0o022, 'Unsafe offline base directory')
+        with self.s.directory(BASE_SEEDS) as parent, self.seed_file(parent, document.name, 65536) as fd:
+            value = json.loads(os.read(fd, 65537))
+            need(isinstance(value, dict) and set(value) == {'schema', 'baseImage', 'archiveBytes',
+                 'archiveSHA256', 'imageId', 'diffIds'} and type(value['schema']) is int and value['schema'] == 1
+                 and value['baseImage'] == self.policy['baseImage']
+                 and type(value['archiveBytes']) is int and 0 < value['archiveBytes'] <= 4*1024**3
+                 and isinstance(value['archiveSHA256'], str) and re.fullmatch('[a-f0-9]{64}', value['archiveSHA256'])
+                 and isinstance(value['imageId'], str) and IMAGE.fullmatch(value['imageId'])
+                 and isinstance(value['diffIds'], list) and 1 <= len(value['diffIds']) <= 128
+                 and all(isinstance(v, str) and IMAGE.fullmatch(v) for v in value['diffIds']),
+                 'Invalid offline base identity')
+            archive = BASE_SEEDS/(digest+'.oci.tar')
+            with self.seed_file(parent, archive.name, value['archiveBytes'], value['archiveSHA256']) as archivefd:
+                need(os.fstat(archivefd).st_size == value['archiveBytes'], 'Offline base archive size mismatch')
+                with self.registry_auth() as (env, _):
+                    exists = subprocess.run(self.command('image', 'exists', value['baseImage']),
+                                            env=env, capture_output=True, timeout=30)
+                need(exists.returncode in (0, 1) and len(exists.stdout) <= 65536 and len(exists.stderr) <= 65536,
+                     'Offline base local lookup failed')
+                if exists.returncode == 1:
+                    policy = {'default':[{'type':'reject'}], 'transports':{
+                        'oci-archive':{str(archive):[{'type':'insecureAcceptAnything'}]}}}
+                    raw = (json.dumps(policy, sort_keys=True, separators=(',', ':'))+'\n').encode()
+                    with self.registry_file('offline-base-policy.json', raw):
+                        self.run('load', '--signature-policy', str(self.folder/'offline-base-policy.json'),
+                                 '--quiet', '--input', str(archive), timeout=1800)
+                images = json.loads(self.run('image', 'inspect', value['baseImage']))
+                need(isinstance(images, list) and len(images) == 1 and isinstance(images[0], dict),
+                     'Offline base local identity is missing')
+                image = images[0]
+                need(immutable_image_id(image.get('Id')) == value['imageId']
+                     and value['baseImage'] in image.get('RepoDigests', [])
+                     and image.get('Digest') == 'sha256:'+digest
+                     and image.get('RootFS', {}).get('Layers') == value['diffIds'],
+                     'Offline base local identity mismatch')
+                return value['imageId']
+
+    @contextlib.contextmanager
     def locked(self, slug):
         path = self.state_path(slug)
         fd = os.open(path.with_suffix('.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -433,9 +507,11 @@ class PersonalOCI:
             self.s.atomic_json(self.state_path(slug), value)
             self.run('rm', old)
         elif not IMAGE.fullmatch(value['image']):
-            self.run('pull', '--signature-policy', str(SIGNATURE_POLICY), '--quiet', '--policy=missing',
-                     '--retry=0', '--tls-verify=true', value['image'], timeout=1800)
-            image = immutable_image_id(self.run('image', 'inspect', '--format={{.Id}}', value['image']))
+            image = self.offline_base()
+            if image is None:
+                self.run('pull', '--signature-policy', str(SIGNATURE_POLICY), '--quiet', '--policy=missing',
+                         '--retry=0', '--tls-verify=true', value['image'], timeout=1800)
+                image = immutable_image_id(self.run('image', 'inspect', '--format={{.Id}}', value['image']))
             value['image'] = image
             self.s.atomic_json(self.state_path(slug), value)
         return value
