@@ -2,8 +2,39 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+import logging
+from pathlib import Path
+import re
 import ssl
 import threading
+import traceback
+
+
+def _read_error(node, error):
+    # Match the actual executor-loaded class, never a peer field or merely an
+    # exception name. No new cache construction is needed on an error path.
+    cache_module = getattr(node, 'DATASET_MODULE', None)
+    busy_class = getattr(cache_module, 'CacheBusy', None)
+    busy = isinstance(busy_class, type) and isinstance(error, busy_class)
+    code = 503 if busy else 403
+    safe_class = 'CacheBusy' if busy else type(error).__name__
+    if safe_class not in {'CacheBusy', 'ValueError', 'CacheError', 'PermissionError', 'FileNotFoundError',
+                          'TimeoutError', 'OSError', 'RuntimeError', 'JSONDecodeError'}:
+        safe_class = 'Exception'
+    frames = []
+    allowed = {'transfer-peer.py', 'transfer-jobs.py', 'snapshot-sync.py', 'dataset-cache.py',
+               'platform-root-guard.py', 'storage-quota.py', 'node-executor.py'}
+    for frame, line in traceback.walk_tb(error.__traceback__):
+        name, function = Path(frame.f_code.co_filename).name, frame.f_code.co_name
+        if name in allowed and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', function):
+            frames.append(f'{name}:{function}:{line}')
+    # Do not log exception messages, requests, ticket IDs, paths or contents.
+    logging.getLogger('gpuq.transfer-peer').warning('snapshot-read-error status=%s class=%s frames=%s',
+        code, safe_class, ','.join(frames[-4:]) or 'none')
+    if busy:
+        return {'ok': False, 'code': 'SOURCE_CACHE_BUSY',
+                'error': 'Source dataset metadata is temporarily busy'}, code
+    return {'ok': False, 'error': 'Snapshot grant or immutable source is unavailable'}, code
 
 
 def create_server(node, jobs, *, authority=None):
@@ -66,8 +97,8 @@ def create_server(node, jobs, *, authority=None):
                     result=authority.read(json.loads(raw),auth[7:])
                 else:result = jobs.read(json.loads(raw), auth[7:])
                 payload, code = {'ok': True, 'result': result}, 200
-            except Exception:
-                payload, code = {'ok': False, 'error': 'Snapshot grant or immutable source is unavailable'}, 403
+            except Exception as error:
+                payload, code = _read_error(node, error)
             data = json.dumps(payload).encode()
             self.send_response(code)
             self.send_header('Content-Type', 'application/json')

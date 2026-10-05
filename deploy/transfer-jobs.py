@@ -109,6 +109,11 @@ class PeerClient:
             if len(raw) > 1500000:
                 raise ValueError('Peer response is too large')
             value = json.loads(raw)
+            if response.status == 503 and value.get('ok') is False and value.get('code') == 'SOURCE_CACHE_BUSY':
+                # Only this typed metadata-lock response joins the existing
+                # bounded read retry budget. Other 503s and every 403 remain
+                # terminal; acknowledged target writes are never replayed.
+                raise ConnectionError('Source dataset metadata is temporarily busy')
             if response.status != 200 or value.get('ok') is not True:
                 raise ValueError('Source snapshot unavailable: '+str(value.get('error', response.status))[:200])
             return value['result']
