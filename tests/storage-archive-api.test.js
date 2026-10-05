@@ -58,6 +58,8 @@ function enrollmentFixture(t){
   f.service.bridge=async(machine,op,args)=>{
     if(op!=='storage.archive.enrollment-check')return bridge(machine,op,args);
     f.calls.push({machine,op,args});await f.onCheck?.(machine,args);
+    if(f.missingOriginal&&machine===cold&&args.dataset===ref.dataset)
+      return {protocol:1,machine,userId:args.userId,dataset:args.dataset,version:args.version,state:'ABSENT',...f.absentOverride};
     return {protocol:1,machine,userId:args.userId,dataset:args.dataset,version:args.version,state:'READY',role:'protected',manifestSha256:args.version,manifestBytes:100,registration:(machine===hot?'c':'d').repeat(64),...f.probeOverride};
   };
   return f;
@@ -222,6 +224,61 @@ test('owner revocation after explicit enrollment prevents authority sealing',asy
   const f=enrollmentFixture(t);await f.service.enrollStorageArchive(f.actor,f.request);f.user.enabled=false;
   await f.service.reconcileStorageArchive();
   assert.equal(f.archive.rows()[0].phase,'BLOCKED');assert.equal(f.calls.some(c=>c.op==='storage.archive.provision'),false);
+});
+
+test('explicit missing-original enrollment queues one trusted copy then seals and certifies',async t=>{
+  const f=enrollmentFixture(t);f.missingOriginal=true;f.request.copyIfMissing=true;
+  const [one,two]=await Promise.all([f.service.enrollStorageArchive(f.actor,f.request),f.service.enrollStorageArchive(f.actor,f.request)]);
+  assert.deepEqual(one,two);assert.equal(one.phase,'QUEUED');assert.equal(f.transfers.size,0);
+  const initial=f.archive.rows()[0];assert.equal(initial.kind,'enrollment');assert.equal(initial.sourceDataset,null);
+  assert.equal(f.calls.find(c=>c.machine===cold&&c.op==='storage.archive.enrollment-check').args.allowMissing,true);
+  await f.service.reconcileStorageArchive();assert.equal(f.transfers.size,1);
+  assert.equal(f.calls.some(c=>c.op==='storage.archive.provision'),false);
+  f.finish();f.install();await f.service.reconcileStorageArchive();
+  const final=f.archive.rows()[0];assert.equal(final.phase,'ARCHIVED');assert.equal(final.copyKey,initial.copyKey);
+  assert.equal(final.sourceDataset,'cold-copy');assert.equal(final.enrollment.sourceRegistration,'d'.repeat(64));
+  assert.equal(f.calls.find(c=>c.op==='storage.archive.provision').args.expectedRegistration,'d'.repeat(64));
+  assert.equal(f.calls.find(c=>c.op==='storage.archive.certify').args.expectedRegistration,'c'.repeat(64));
+  assert.equal(f.calls.some(c=>c.op==='storage.archive.ack'),false);
+  assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,{dataset:'cold-copy',version:ref.version}),true);
+  assert.throws(()=>f.service.enrollStorageArchive(f.actor,{...f.request,copyIfMissing:false}),/cannot change/);
+});
+
+test('missing-original copy is opt-in, exact, and never substitutes errors for ABSENT',async t=>{
+  for(const override of [{machine:other},{userId:'demo-user-2'},{version:'b'.repeat(64)},{state:'UNKNOWN'},{extra:true}]){
+    const f=enrollmentFixture(t);f.missingOriginal=true;f.absentOverride=override;
+    await assert.rejects(f.service.enrollStorageArchive(f.actor,{...f.request,copyIfMissing:true}),/not confirmed/);
+    assert.equal(f.archive.rows().length,0);assert.equal(f.transfers.size,0);
+  }
+  const f=enrollmentFixture(t);f.missingOriginal=true;
+  await assert.rejects(f.service.enrollStorageArchive(f.actor,f.request),/not confirmed/);
+  f.onCheck=machine=>{if(machine===cold)throw Error('permission/timeout/unknown');};
+  await assert.rejects(f.service.enrollStorageArchive(f.actor,{...f.request,copyIfMissing:true}),/permission\/timeout/);
+  assert.equal(f.archive.rows().length,0);
+});
+
+test('enrollment rechecks fixed hot registration before copy and rejects changed copied manifest',async t=>{
+  const f=enrollmentFixture(t);f.missingOriginal=true;
+  await f.service.enrollStorageArchive(f.actor,{...f.request,copyIfMissing:true});
+  f.probeOverride={registration:'e'.repeat(64)};
+  await f.service.reconcileStorageArchive();assert.equal(f.transfers.size,0);
+  f.probeOverride=null;f.now+=100000;await f.service.reconcileStorageArchive();assert.equal(f.transfers.size,1);
+  f.finish();f.probeOverride={manifestBytes:101};
+  await f.service.reconcileStorageArchive();assert.equal(f.calls.some(c=>c.op==='storage.archive.provision'),false);
+  assert.equal(f.archive.rows()[0].phase,'COPYING');
+});
+
+test('enrollment unknown copy and restart retain fixed key; revocation prevents new dispatch',async t=>{
+  const f=enrollmentFixture(t);f.missingOriginal=true;
+  await f.service.enrollStorageArchive(f.actor,{...f.request,copyIfMissing:true});
+  const copyKey=f.archive.rows()[0].copyKey;
+  f.onCall=(_,op)=>{if(op==='transfers.start')throw Error('reply lost');};
+  await f.service.reconcileStorageArchive();const saved=f.archive.rows()[0];
+  assert.equal(saved.copyKey,copyKey);assert.equal(f.service.db.prepare('SELECT count(*) n FROM transfers').get().n,1);
+  f.install();f.now+=100000;f.user.enabled=false;
+  await f.service.reconcileStorageArchive();assert.equal(f.archive.rows()[0].phase,'BLOCKED');
+  assert.equal(f.service.db.prepare('SELECT count(*) n FROM transfers').get().n,1);
+  assert.equal(f.calls.some(c=>c.op==='storage.archive.provision'),false);
 });
 
 test('archive policy is explicit fixed configuration, disabled by default',()=>{

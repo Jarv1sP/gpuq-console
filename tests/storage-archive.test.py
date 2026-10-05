@@ -485,6 +485,37 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'staging'): target.enrollment_check(args)
         self.assertEqual(target._ids(target.root/'events'), [])
 
+    def test_missing_enrollment_probe_is_source_only_explicit_and_metadata_only(self):
+        args = dict(userId=USER, dataset='absent', version=self.version)
+        with self.assertRaises(FileNotFoundError): self.source.enrollment_check(args)
+        self.assertEqual(self.source.enrollment_check({**args, 'allowMissing': True}),
+                         dict(protocol=1, machine='cold-node', state='ABSENT', **args))
+        self.assertEqual(self.source._ids(self.source.root/'events'), [])
+        for flag in [False, 'true', 1]:
+            with self.assertRaises(ValueError): self.source.enrollment_check({**args, 'allowMissing':flag})
+        with self.assertRaisesRegex(ValueError, 'configured machine'):
+            self.tls_target().enrollment_check({**args, 'allowMissing': True})
+        self.assertEqual(self.source.enrollment_check(dict(userId=USER, dataset='original',
+            version=self.version, allowMissing=True))['state'], 'READY')
+
+    def test_missing_probe_rejects_orphan_state_wrong_owner_and_unknown_io(self):
+        args = dict(userId=USER, dataset='absent', version=self.version, allowMissing=True)
+        paths = self.cold._paths('absent', self.version)
+        for name in ('ready', '.staging', '.leases'):
+            path = paths[name]; path.mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, 'protected or unknown'):
+                self.source.enrollment_check(args)
+            path.rmdir()
+        self.cold._write_tier('absent', self.version, self.cold._default_tier())
+        with self.assertRaisesRegex(ValueError, 'protected or unknown'): self.source.enrollment_check(args)
+        with self.assertRaises(PermissionError):
+            self.source.enrollment_check(dict(userId='demo-user-2', dataset='original',
+                version='f'*64, allowMissing=True))
+        with patch.object(self.cold, '_record_identity', side_effect=OSError('disk unavailable')):
+            with self.assertRaisesRegex(OSError, 'disk unavailable'):
+                self.source.enrollment_check(dict(userId=USER, dataset='original',
+                    version=self.version, allowMissing=True))
+
     def test_enrollment_fixed_registration_rejects_change_before_provision_or_certify(self):
         target = self.tls_target()
         source = self.source.enrollment_check(dict(userId=USER, dataset='original', version=self.version))

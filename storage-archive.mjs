@@ -54,6 +54,15 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   };
   const releaseLane=row=>service.db.prepare('DELETE FROM storage_archive_lane WHERE singleton=1 AND archive_id=?').run(row.id);
   const currentPolicy=row=>row.policyKey===policyKey&&row.sourceMachine===policy.machine;
+  const isCopyIntent=row=>['ingest','enrollment'].includes(row?.kind);
+  const enrollmentProof=(value,machine,owner,ref)=>{
+    if(!value||Object.keys(value).sort().join(',')!=='dataset,machine,manifestBytes,manifestSha256,protocol,registration,role,state,userId,version'||
+      value.protocol!==1||value.machine!==machine||value.userId!==owner||value.dataset!==ref.dataset||value.version!==ref.version||
+      value.state!=='READY'||value.role!=='protected'||value.manifestSha256!==ref.version||
+      !HASH.test(value.registration||'')||!Number.isSafeInteger(value.manifestBytes)||value.manifestBytes<1||value.manifestBytes>64*1024**2)
+      fail('Existing original or replica is not confirmed; no enrollment was created.');
+    return value;
+  };
   const grantIdentity=row=>{
     if(!ID.test(row.sourceDataset||''))fail('Archive source identity is not confirmed');
     const value=key(row.owner,row.sourceMachine,row.sourceDataset,row.version,row.machine);
@@ -94,7 +103,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   service.archiveIntentAllowed=(owner,args)=>{
     if(!policy.enabled||args.kind!=='copy'||args.machine!==policy.machine||args.from===args.machine||!UUID.test(args.key||'')||!isRef(args))return false;
     const row=rows().find(row=>row.owner===owner&&row.machine===args.from&&row.dataset===args.dataset&&row.version===args.version&&row.copyKey===args.key);
-    return row?.kind==='ingest'&&!row.retirementIntent&&row.failureStage!=='retired'&&!retiring.has(row.id)&&currentPolicy(row)&&row.owner===owner&&row.copyKey===args.key&&args.name==='archive-'+key(owner,args.from,args.dataset).slice(0,24);
+    return isCopyIntent(row)&&!row.retirementIntent&&row.failureStage!=='retired'&&!retiring.has(row.id)&&currentPolicy(row)&&row.owner===owner&&row.copyKey===args.key&&args.name==='archive-'+key(owner,args.from,args.dataset).slice(0,24);
   };
 
   function enqueueEvent(machine,event){
@@ -205,7 +214,8 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     retiring.set(id,{binding,task});return task;
   };
   service.enrollStorageArchive=(principal,args)=>{
-    if(!args||Object.keys(args).sort().join(',')!=='dataset,key,machine,ownerId,version'||
+    if(!args||!['dataset,key,machine,ownerId,version','copyIfMissing,dataset,key,machine,ownerId,version'].includes(Object.keys(args).sort().join(','))||
+      Object.hasOwn(args,'copyIfMissing')&&typeof args.copyIfMissing!=='boolean'||
       !USER.test(args.ownerId||'')||!UUID.test(args.key||'')||!isRef(args)||
       !MACHINES.some(m=>m.id===args.machine)||args.machine===policy.machine)
       fail('Enrollment requires an exact owner, hot machine, version and UUID key.',400);
@@ -220,7 +230,8 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
          JSON.stringify(enabledUser(owner,machine))!==ownerPolicy)fail('Archive enrollment authorization changed.',403);
     };
     check();
-    const id=key('explicit-enrollment',principal.userId,requestKey),binding=key(owner,machine,dataset,version,policyKey);
+    const copyIfMissing=args.copyIfMissing===true;
+    const id=key('explicit-enrollment',principal.userId,requestKey),binding=copyIfMissing?key(owner,machine,dataset,version,policyKey,'copy-if-missing-v1'):key(owner,machine,dataset,version,policyKey);
     const prior=load(id);
     if(prior){
       if(prior.enrollment?.binding!==binding)fail('Enrollment key cannot change its owner or fixed reference.');
@@ -229,30 +240,31 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     const pending=enrolling.get(id);
     if(pending){if(pending.binding!==binding)fail('Enrollment key is already bound to another reference.');return pending.task;}
     const task=(async()=>{
-      // No discovery scan, owners mutation, forged upload event, public grant,
-      // or automatic copy fallback. Both registered versions must already exist.
+      // No scan, forged outbox or inferred absence. A new HDD copy requires
+      // explicit admin intent and an exact trusted ABSENT probe.
       if(rows().some(row=>currentPolicy(row)&&row.owner===owner&&row.machine===machine&&row.dataset===dataset&&row.version===version))
         fail('An archive intent already exists; inspect or retry that intent.');
       const reference={userId:owner,dataset,version},proofs=[];
       for(const target of [machine,policy.machine]){
-        const value=await service.bridge(target,'storage.archive.enrollment-check',reference);check();
-        if(!value||Object.keys(value).sort().join(',')!=='dataset,machine,manifestBytes,manifestSha256,protocol,registration,role,state,userId,version'||
-          value.protocol!==1||value.machine!==target||value.userId!==owner||value.dataset!==dataset||value.version!==version||
-          value.state!=='READY'||value.role!=='protected'||value.manifestSha256!==version||
-          !HASH.test(value.registration||'')||!Number.isSafeInteger(value.manifestBytes)||value.manifestBytes<1||value.manifestBytes>64*1024**2)
-          fail('Existing original or replica is not confirmed; no enrollment was created.');
-        proofs.push(value);
+        const value=await service.bridge(target,'storage.archive.enrollment-check',{
+          ...reference,...(copyIfMissing&&target===policy.machine?{allowMissing:true}:{})});check();
+        const absent=copyIfMissing&&target===policy.machine&&value?.state==='ABSENT'&&
+          Object.keys(value).sort().join(',')==='dataset,machine,protocol,state,userId,version'&&value.protocol===1&&
+          value.machine===target&&value.userId===owner&&value.dataset===dataset&&value.version===version;
+        proofs.push(absent?value:enrollmentProof(value,target,owner,reference));
       }
-      if(proofs[0].manifestBytes!==proofs[1].manifestBytes)fail('Complete immutable manifests do not match.');
+      const needsCopy=proofs[1].state==='ABSENT';
+      if(!needsCopy&&proofs[0].manifestBytes!==proofs[1].manifestBytes)fail('Complete immutable manifests do not match.');
       check();
       if(rows().some(row=>currentPolicy(row)&&row.owner===owner&&row.machine===machine&&row.dataset===dataset&&row.version===version))
         fail('An archive intent was created concurrently; inspect that intent.');
       if(rows().length>=10000)fail('Archive history limit reached');
-      const now=clock(),row={id,kind:'replica',owner,machine,dataset,version,logicalDataset:dataset,
-        sourceMachine:policy.machine,sourceDataset:dataset,phase:'PROVISIONING',copyKey:randomUUID(),transferId:null,
+      const now=clock(),row={id,kind:needsCopy?'enrollment':'replica',owner,machine,dataset,version,logicalDataset:dataset,
+        sourceMachine:policy.machine,sourceDataset:needsCopy?null:dataset,phase:needsCopy?'QUEUED':'PROVISIONING',copyKey:randomUUID(),transferId:null,
         grantId:null,certifyId:randomUUID(),createdAt:now,updatedAt:now,nextCheckAt:now,failures:0,eventAcknowledged:true,policyKey,
-        enrollment:{binding,actor:principal.userId,key:requestKey,targetRegistration:proofs[0].registration,sourceRegistration:proofs[1].registration}};
-      row.grantId=grantIdentity(row);save(row);
+        enrollment:{binding,actor:principal.userId,key:requestKey,targetRegistration:proofs[0].registration,
+          sourceRegistration:needsCopy?null:proofs[1].registration,manifestBytes:proofs[0].manifestBytes}};
+      if(!needsCopy)row.grantId=grantIdentity(row);save(row);
       service.audit(principal.username,'datasets.archive.enroll',machine,owner+':'+dataset+'@'+version);
       return publicRow(row);
     })().finally(()=>{if(enrolling.get(id)?.task===task)enrolling.delete(id);});
@@ -271,7 +283,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(row.transferState==='CANCELED')fail('归档传输已永久取消；原件仍受保护，请联系管理员处理。');
     if(!['FAILED','BLOCKED'].includes(row.phase))return publicRow(row);
     row.retryRequested=true;row.nextCheckAt=clock();row.failures=0;
-    row.phase=row.kind==='ingest'&&!row.sourceDataset?'COPYING':'PROVISIONING';
+    row.phase=isCopyIntent(row)&&!row.sourceDataset?'COPYING':'PROVISIONING';
     delete row.error;save(row);return publicRow(row);
   };
 
@@ -291,6 +303,12 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(row.phase==='ARCHIVED'){await acknowledge(row,snapshot);releaseLane(row);return;}
     if(row.phase==='QUEUED'||row.phase==='COPYING'){
       if(typeof service.archiveTransferCall!=='function')fail('Archive copy adapter is unavailable');
+      if(row.kind==='enrollment'){
+        const proof=enrollmentProof(await call(row,snapshot,row.machine,'storage.archive.enrollment-check',{
+          userId:row.owner,dataset:row.dataset,version:row.version}),row.machine,row.owner,row);
+        if(proof.registration!==row.enrollment.targetRegistration||proof.manifestBytes!==row.enrollment.manifestBytes)
+          fail('Explicit archive enrollment registration changed before copy');
+      }
       // The copy key is durable before the first request; ambiguous replies
       // always resolve the same transfer, never a second destination/name.
       row.phase='COPYING';save(row);
@@ -310,6 +328,13 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       if(result.state!=='SUCCEEDED'){save(row);return;}
       if(!isRef(result.result)||result.result.version!==row.version)fail('Archive copy returned a different version');
       row.sourceDataset=result.result.dataset;row.grantId=grantIdentity(row);row.phase='PROVISIONING';save(row);
+    }
+    if(row.kind==='enrollment'&&!row.enrollment.sourceRegistration){
+      const source={dataset:row.sourceDataset,version:row.version};
+      const proof=enrollmentProof(await call(row,snapshot,policy.machine,'storage.archive.enrollment-check',{
+        userId:row.owner,...source}),policy.machine,row.owner,source);
+      if(proof.manifestBytes!==row.enrollment.manifestBytes)fail('Copied archive manifest does not match enrollment');
+      row.enrollment.sourceRegistration=proof.registration;save(row);
     }
     if(row.machine===policy.machine){
       const result=await call(row,snapshot,policy.machine,'storage.archive.original',{userId:row.owner,dataset:row.dataset,version:row.version});

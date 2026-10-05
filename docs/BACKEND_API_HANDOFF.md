@@ -92,6 +92,8 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 
 旧版本首次归档的管理入口是 `datasets.archive.enroll {machine,dataset,version,ownerId,key}`：`machine` 为已授权的本地训练节点，`version` 为完整哈希，`ownerId` 为不可变账号 ID，`key` 为本次 UUID。仅当前启用的管理员可调用；重复请求沿用同一 key，不在列表刷新时自动调用。只有指定 HDD 已有同名同版单 owner 的受保护 READY 原件才接受，返回归档阶段而非立即完成。阶段查询继续使用现有归档状态；`archive-retry` 不能代替首次纳管。此管理入口不放在普通用户操作栏。
 
+若 HDD 尚无这版原件，管理员可在同一首次纳管请求中显式增加 `copyIfMissing:true`。服务只接受配置 HDD 的精确 `ABSENT` 证明；超时、撤权、孤立文件或未知状态都不触发复制。成功受理返回 `QUEUED`，固定登记身份和复制 key 后，复用受信节点传输队列异步建立原件，再完整校验、签发恢复授权并认证本机缓存，最终才是 `ARCHIVED`。受理不是备份完成；在此之前本机副本保持保护。刷新、门户重启、丢响应仍使用原意图及 key，不另建副本；失败需显式重试，取消不自动复活。旧请求不带该字段时保留“原件必须已存在”的行为；同一 key 不能切换复制意图。数据走既有节点传输，不经过 VPS。此字段不开放用户指定来源、URL、凭据或恢复证明。
+
 `datasets.archive.retire {machine,dataset,version,ownerId,eventId,recoveryId}` 也是当前管理员专用入口，接受固定 HDD 同机 ingest（无 transfer、未确认归档）或完全未派发的 `QUEUED` ingest。后者必须 transferId/sourceDataset/grantId 均为 null、retryRequested 非 true、没有同 copyKey 的任何传输记录且不是 laneOwner；RPC 前保存持久 retirementIntent 并阻止该行的 dispatch/reconcile，前后复核登记上下文与准入条件。回包丢失或重启只保留待确认 fence，同请求可继续，不推断成功或启动传输。`recoveryId` 是正常注销的 `unregister-` 加 32 位小写十六进制回执，不接收客户端的 mode、grant、证明、路径或角色。后台私有 `storage.archive.retire` 复核原登记身份、完整清单、单 owner、已提交注销与无现存保护，再持久化该事件的 `RETIRED` 墓碑；旧 HDD 协议还检查 worker 从未创建且确认停止，QUEUED 内部模式只证明本来源注销。门户返回 `phase=FAILED` 并保留不可重试的 retired 原因；重复同一回执幂等，换回执、已派发跨机、已 seal 或 UNKNOWN 均拒绝，不清除其他 lane。私有 RPC 不向浏览器公开。
 
 个人显示名使用 `datasets.label.get {machine,dataset}` 读取，`datasets.label.set {machine,dataset,displayName,revision}` 修改。名称为 1–80 个可见字符，允许中文，拒绝控制字符；`revision` 必须沿用最近查询值，409 冲突后请用户刷新决定，不自动覆盖。响应有规范逻辑 `dataset`、原 `name`、可空的 `displayName`、`revision`、`ownerId` 和 `scope:"personal"`。管理员代管时可显式增加 `ownerId`，普通成员不能指定他人。该名称仅作用于这位用户的显示视图，不重命名节点登记、版本或训练挂载路径，也不改变共享数据权限。

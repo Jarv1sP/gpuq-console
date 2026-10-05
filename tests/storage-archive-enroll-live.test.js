@@ -22,7 +22,7 @@ async function fixture(t){
   await writeFile(storage,JSON.stringify({enabled:true,machine:cold,authority:'hdd'}));
   const reservation=createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));
   const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve));const origin='http://127.0.0.1:'+port;
-  const calls=[],grants=new Map(),certifications=new Map(),retirements=new Map(),requests=[];let owner,server,service,certified=false,dropRetirement=false,keepNextPeerAlive=false;
+  const calls=[],grants=new Map(),certifications=new Map(),retirements=new Map(),requests=[];let owner,server,service,certified=false,dropRetirement=false,keepNextPeerAlive=false,missingOriginal=false;
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='storage.archive.events')return {events:[]};
@@ -37,6 +37,10 @@ async function fixture(t){
         state:'RETIRED',...(args.mode?{sourceRetired:true}:{neverDispatched:true}),proofSha256:'f'.repeat(64)};
     }
     if(operation==='storage.archive.enrollment-check'){
+      if(missingOriginal&&machine===cold){
+        assert.deepEqual(args,{userId:owner.id,dataset,version,allowMissing:true});
+        return {protocol:1,machine,userId:owner.id,dataset,version,state:'ABSENT'};
+      }
       assert.deepEqual(args,{userId:owner.id,dataset,version});
       assert.equal(certified,false,'a repeated enrollment must resolve its durable row instead of reprobe');
       return {protocol:1,machine,userId:owner.id,dataset,version,state:'READY',role:'protected',manifestSha256:version,manifestBytes:100,registration:registration(machine)};
@@ -92,6 +96,7 @@ async function fixture(t){
   });
   return {calls,owner,bob,admin,member,call,cli,grants,certifications,requests,get service(){return service;},loseNextRetirementReply:()=>{dropRetirement=true;},
     keepNextPeerAlive:()=>{keepNextPeerAlive=true;},
+    noOriginal:()=>{missingOriginal=true;},
     request:{machine:hot,dataset,version,ownerId:owner.id,key:randomUUID()},
     restart:async()=>{await stop();await start();}};
 }
@@ -152,6 +157,21 @@ test('real HTTP rejects member, forged context and private bridge operations bef
   await f.service.reconcileStorageArchive();
   assert.equal(JSON.parse(f.service.db.prepare('SELECT data FROM storage_archives').get().data).phase,'BLOCKED');
   assert.equal(f.calls.some(c=>c.operation==='storage.archive.provision'),false);
+});
+
+test('real HTTP explicit missing-original admission is durable without dispatching bytes in the request',async t=>{
+  const f=await fixture(t);f.noOriginal();const args={...f.request,copyIfMissing:true};
+  assert.equal((await f.call(f.member.token,'datasets.archive.enroll',args)).http,403);
+  const accepted=await f.call(f.admin.token,'datasets.archive.enroll',args);
+  assert.equal(accepted.http,200);assert.equal(accepted.body.result.phase,'QUEUED');
+  const original=JSON.parse(f.service.db.prepare('SELECT data FROM storage_archives').get().data);
+  assert.equal(original.kind,'enrollment');assert.equal(original.transferId,null);
+  assert.equal(f.calls.some(c=>c.operation==='transfers.start'||c.operation==='storage.archive.provision'),false);
+  await f.restart();const again=await f.call(f.admin.token,'datasets.archive.enroll',args);
+  assert.deepEqual(again.body.result,accepted.body.result);
+  assert.equal(JSON.parse(f.service.db.prepare('SELECT data FROM storage_archives').get().data).copyKey,original.copyKey);
+  assert.notEqual((await f.call(f.admin.token,'datasets.archive.enroll',{...args,copyIfMissing:false})).http,200);
+  assert.equal(f.service.db.prepare('SELECT count(*) n FROM storage_archives').get().n,1);
 });
 
 test('real HTTP admin retirement persists terminal proof through restart and rejects private/member calls',async t=>{

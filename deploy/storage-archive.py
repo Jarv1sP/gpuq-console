@@ -196,11 +196,37 @@ class StorageArchive:
         READY tree is immutable; an overlapping staging writer is not adopted.
         """
         self._require()
-        _object(args, ('userId', 'dataset', 'version'))
+        if set(args) == {'userId', 'dataset', 'version', 'allowMissing'}:
+            self._require(source=True)
+            if args['allowMissing'] is not True:
+                raise ValueError('Missing-original probe requires explicit true')
+        else:
+            _object(args, ('userId', 'dataset', 'version'))
         user = _user(args['userId']); ref = _ref({k: args[k] for k in ('dataset', 'version')})
         with self.cache._locked():
-            identity = self._single_locked(user, ref, ready=True, protected=True)
             paths = self.cache._paths(**ref)
+            identity = self._single_locked(user, ref, ready=True, protected=True,
+                                           missing=args.get('allowMissing') is True)
+            if identity is None:
+                # Only a clean, exact absence on the configured HDD is an
+                # admission proof. Missing metadata must not mask an orphaned
+                # payload, authority pin, lease, staging writer or symlink.
+                entries = [paths[name] for name in ('ready', '.staging', '.leases')]
+                entries += [self.cache._paths(ref['dataset'])['.registry']/(ref['version']+'.json'),
+                            self.cache.root/'.tiers'/ref['dataset']/(ref['version']+'.json')]
+                def exists(path):
+                    # For a never-registered ID, missing parents are normal.
+                    # _directory walks every existing ancestor no-follow;
+                    # only ENOENT is absence, not EACCES/EIO or a symlink.
+                    try:
+                        with D._directory(path.parent) as parent:
+                            os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                        return True
+                    except FileNotFoundError:
+                        return False
+                if any(exists(path) for path in entries):
+                    raise ValueError('Missing archive registration has protected or unknown state')
+                return dict(protocol=1, machine=self.machine, userId=user, **ref, state='ABSENT')
             if self.cache._version_entry_exists(paths['.staging']):
                 raise ValueError('Archive enrollment refuses an active or unknown staging writer')
             if not self.source and self.cache._tier(**ref)['pins']:
