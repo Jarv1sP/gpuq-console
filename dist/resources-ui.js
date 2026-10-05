@@ -1,6 +1,7 @@
 import {priorityLabel,sampleTime,taskIdentityHTML,taskStateLabel} from './execution-ui.js';
 import {revealSheet,dismissSheet,reducedMotion,captureObject,sharedObject} from './motion-ui.js';
 import {maintenanceFor,maintenanceTime,maintenanceInfoHTML} from './maintenance-state.js';
+import {serverIdHTML} from './workbench-ui.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const known=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
 const metric=(value,suffix='',digits=0)=>known(value)?`${value.toFixed(digits)}${suffix}`:'—';
@@ -93,7 +94,7 @@ function selectedDetail(view,{admin,mine,production,index}){
   const warning=!view.authorized?'未授权，请联系管理员。':!production?'演示模式，无真实采集。':!view.fresh?'状态未知，请稍后刷新。':!view.validInventory?'卡号异常，请刷新。':!view.complete?`已采集 ${view.gpus.length} / ${view.count} 张`:'',showQueue=view.authorized&&production&&(Array.isArray(h?.tasks)||admin&&view.fresh&&h?.gpuq?.connected);
   const content=view.authorized&&production&&view.fresh?`<article class="resource-gpu ${state}" data-resource-gpu="${index}"><div class="resource-gpu-owner">${owner}</div><dl class="resource-card-metrics"><div><dd class="resource-gpu-util" ${known(gpu?.utilization)&&state!=='unknown'?`data-resource-reading="${gpu.utilization}" data-resource-reading-key="${esc(m.id)}:${index}" data-resource-sample="${esc(view.checkedAt)}"`:''}>${metric(gpu?.utilization,'%')}</dd><dt>利用率</dt></div><div><dd>${metric(gpu?.temperatureC,' °C')}</dd><dt>温度</dt></div><div><dd>${metric(gpu?.powerDrawW,' W')} <small>/ ${metric(gpu?.powerLimitW,' W')}</small></dd><dt>功率</dt></div><div><dd>${esc(pid??'—')}${knownProcess.length>1?` <small>+${knownProcess.length-1}</small>`:''}</dd><dt>PID</dt></div></dl></article>`:'';
   const reference=view.authorized&&production&&view.fresh?`${allProcesses(view,admin)}<details class="resource-full-metrics" data-resource-detail="${esc(m.id)}:metrics"><summary>完整指标与逐卡进程</summary>${gpuTable({...h,gpus:view.gpus},admin,m)}</details>`:'';
-  return `<section class="resource-detail" data-resource-selected="${esc(m.id)}" aria-labelledby="resource-selected-title"><header class="resource-detail-head"><h2 id="resource-selected-title"><span class="server-id" title="${esc(m.id)}">${esc(m.id)}</span><span class="resource-gpu-number">· GPU ${index}</span></h2>${admin?`<button type="button" class="button quiet" data-resource-root="${esc(m.id)}">ROOT 运维</button>`:''}</header>${warning?`<p class="monitor-warning">${warning}</p>`:''}${view.maintenance?`<div class="maintenance-resource"><div class="maintenance-resource-body"><div class="maintenance-resource-metrics">${content}</div>${maintenanceBand(view)}</div>${maintenanceReason(view)}</div>`:content}${reference}${showQueue?queue(h,m,view.checkedAt,admin):''}</section>`;
+  return `<section class="resource-detail" data-resource-selected="${esc(m.id)}" aria-labelledby="resource-selected-title"><header class="resource-detail-head"><h2 id="resource-selected-title">${serverIdHTML(m.id)}<span class="resource-gpu-number">· GPU ${index}</span></h2>${admin?`<button type="button" class="button quiet" data-resource-root="${esc(m.id)}">ROOT 运维</button>`:''}</header>${warning?`<p class="monitor-warning">${warning}</p>`:''}${view.maintenance?`<div class="maintenance-resource"><div class="maintenance-resource-body"><div class="maintenance-resource-metrics">${content}</div>${maintenanceBand(view)}</div>${maintenanceReason(view)}</div>`:content}${reference}${showQueue?queue(h,m,view.checkedAt,admin):''}</section>`;
 }
 export function resourceCards({machines=[],limits={},snapshot,admin=false,production=false,maintenance,selectedMachine,selectedGPU=0,userId,jobs=[],usage}={}){
   const views=machines.map(machine=>resourceServerView(machine,{limits,snapshot,admin,production,maintenance})),selected=views.find(view=>view.machine.id===selectedMachine)||views.find(view=>view.authorized)||views[0];
@@ -143,7 +144,7 @@ export function resourcesUI(store,{machines,getPage,navigate}){
   }
   function updatePrimary(button,view){
     delete button.dataset.useMachine;delete button.dataset.resourceContact;
-    if(view?.authorized){button.dataset.useMachine=view.machine.id;button.innerHTML=`在 <span class="server-id" title="${esc(view.machine.id)}">${esc(view.machine.id)}</span> 工作`;button.title='在 '+view.machine.id+' 工作';}
+    if(view?.authorized){button.dataset.useMachine=view.machine.id;button.innerHTML=`在 ${serverIdHTML(view.machine.id)} 工作`;button.title='在 '+view.machine.id+' 工作';}
     else{button.dataset.resourceContact='true';button.textContent='去协作区联系管理员';button.removeAttribute('title');}
   }
   function applyMeasurements(){

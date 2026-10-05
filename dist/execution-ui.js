@@ -5,7 +5,7 @@ import {schedulingFields,schedulingFromForm,schedulingSummary} from './schedulin
 import {elasticCapable,placementCapable} from './gpu-allocation.js';
 import {elasticFields,elasticFromForm,allocationSummary,placementFields,placementFromForm,placementSummary} from './gpu-allocation-ui.js';
 import {taskDescription} from './task-metadata.js';
-import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,boundarySweep,taskMissionUI,infoHTML,discloseInfo} from './workbench-ui.js';
+import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,boundarySweep,taskMissionUI,infoHTML,discloseInfo,jobCancelConfirmation} from './workbench-ui.js';
 import {revealSheet,dismissSheet,sharedObject} from './motion-ui.js';
 import {taskNotesMarkup,createTaskNotesUI} from './task-notes-ui.js';
 import {maintenanceFor,heldDuringMaintenance,maintenanceTime,maintenanceInfoHTML,maintenanceClock} from './maintenance-state.js';
@@ -139,7 +139,9 @@ export function executionUI(store,refresh,toast){
     for(const text of section.querySelectorAll('.wb-rail p.muted,.wb-rail .project-actions>span'))discloseInfo(text,'工作区说明');
     for(const text of train.querySelectorAll('p.muted,label>small'))if(!text.closest('.submit-cli,.sheet-footer'))discloseInfo(text,'训练配置说明');
     discloseInfo(explanation,'任务额度说明');
-    for(const id of ['workspace-mode-note','project-status-detail'])query('#'+id)?.closest('.ui-info')&&query('.workspace-context-heading>div').append(query('#'+id).closest('.ui-info'));
+    const contextInfo=query('#workspace-mode-note').closest('.ui-info'),statusInfo=query('#project-status-detail').closest('.ui-info'),contextCopy=document.createElement('div');contextCopy.className='ui-info-content';
+    for(const id of ['workspace-mode-note','project-status-detail']){const note=query('#'+id);note.classList.remove('ui-info-content');contextCopy.append(note);}contextInfo.append(contextCopy);statusInfo.remove();contextInfo.querySelector('summary').setAttribute('aria-label','项目与训练版本说明');query('.workspace-context-heading>div').append(contextInfo);
+    const publishInfo=query('#project-detail>.ui-info'),publishControl=document.createElement('div');publishControl.className='wb-publish-control';query('#project-publish').before(publishControl);publishControl.append(query('#project-publish'),publishInfo);
     const terminalHelp=query('#terminal-mode-note')?.closest('.ui-info');if(terminalHelp)query('.terminal-heading').append(terminalHelp);
 
   }
@@ -251,7 +253,7 @@ export function executionUI(store,refresh,toast){
     for(const id of ['workspace-list','workspace-download'])query('#'+id).disabled=!available||locked;
     query('#workspace-upload').disabled=!available||locked||output||publishing;query('[name=files]').disabled=!available||locked||output||publishing;
     query('[name=file-area]').disabled=!project||locked;query('.output-run-fields').hidden=!output;query('#project-release-field').hidden=!project;query('#project-detail').hidden=!project;
-    query('#workspace-mode-note').textContent=project?'代码草稿在 /workspace；项目环境在 /opt/project-env。发布后，训练读取固定只读版本，每项任务写入自己的 /outputs。':'个人工作区路径为 /workspace。终端、文件和训练共用此目录；新实验可单独创建项目。';
+    query('#workspace-mode-note').textContent=project?'代码在 /workspace，环境在 /opt/project-env；训练读取只读版本，输出写入 /outputs。':'终端、文件和训练共用个人 /workspace，新实验可单独创建项目。';
     query('#terminal-mode-note').textContent=project?'编辑代码、安装项目 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。':'管理个人文件和 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。';
     if(maintenanceFor(store.data?.operationalMaintenance,machine)){
       for(const selector of ['#project-create-form [type=submit]','#project-publish','#terminal-open','#terminal-reconnect','#train-form [type=submit]','#workspace-upload','[name=files]'])query(selector).disabled=true;
@@ -268,7 +270,7 @@ export function executionUI(store,refresh,toast){
     query('#release-full').textContent=release.value||'发布成功后才可提交项目训练。';query('#release-full').title=release.value;
     if(catalogError)status(catalogError,true);
     else if(project){const phase=info?.progress;const fact=({DRAFT:'代码草稿',READY:'训练版本就绪',PUBLISHING:'正在生成训练版本',FAILED:'生成训练版本失败'})[info?.state]||'项目待更新';const detail=projectStatusText(info,hasTerminal());status(info?.state==='FAILED'?detail:info?.error?fact+' · '+info.error:fact+(phase&&Number.isSafeInteger(phase.completedEntries)?' · '+phase.completedEntries+(Number.isSafeInteger(phase.totalEntries)?' / '+phase.totalEntries:'')+' 项':''),info?.state==='FAILED');query('#project-status-detail').textContent=detail;}
-    else {status(machine?'个人工作区':'请选择服务器');query('#project-status-detail').textContent='项目、终端、文件和训练使用当前目标。新实验可创建独立项目。';}
+    else {status(machine?'个人工作区':'请选择服务器');query('#project-status-detail').textContent='项目、终端、文件和训练使用当前服务器。';}
     renderRuns();updateControls();updatePreflight();armPolling();document.dispatchEvent(new Event('gpuq-workspace-rendered'));
   }
   function renderRuns(){
@@ -326,7 +328,7 @@ export function executionUI(store,refresh,toast){
       const enabled=job.notifications?.enabled!==true;
       await call('notifications.job',{jobId:job.id,enabled});refresh();toast(enabled?'Telegram 任务通知已开启。':'Telegram 任务通知已关闭。');
     });
-    if(button.dataset.jobCancel&&window.confirm('取消这个训练任务？已保存的文件保留，确认停止后才释放额度。'))guarded(button,async()=>{await call('jobs.cancel',{jobId:button.dataset.jobCancel});refresh();toast('已请求取消；等待服务器确认停止。');});
+    if(button.dataset.jobCancel&&window.confirm(jobCancelConfirmation(store.jobs.find(job=>job.id===button.dataset.jobCancel))))guarded(button,async()=>{await call('jobs.cancel',{jobId:button.dataset.jobCancel});refresh();toast('已请求取消；等待服务器确认停止。');});
     if(button.dataset.jobPrioritySave)guarded(button,async()=>{
       if(store.principal?.role!=='admin')throw Error('只有管理员可以调整排队任务优先级。');
       const jobId=button.dataset.jobPrioritySave,job=store.jobs.find(item=>item.id===jobId),control=button.closest('[data-priority-editor]')?.querySelector('select');

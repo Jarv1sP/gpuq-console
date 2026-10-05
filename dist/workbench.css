@@ -103,8 +103,9 @@
 .ui-info-content{pointer-events:none}
 .ui-info-content :is(a,button,input,select,textarea){pointer-events:auto}
 /* Inventory IDs remain complete in accessible text and native name hints. */
-.sb .server-id{display:inline-block;min-width:0;max-width:18ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
-.sb .cs-server-list{max-width:360px;min-width:0;gap:10px}.sb .cs-server-label{flex-shrink:0}.sb .cs-server{min-width:0;flex:1 1 0}.sb .cs-server-id{min-width:0;max-width:9ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sb .cs-dot{flex-shrink:0}
+.sb .server-id:has(>.server-id-head){display:inline-flex;font-family:var(--mono)}
+.sb .server-id-head{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sb .server-id-tail{flex:none}
+.sb .cs-server-list{flex:0 1 auto;max-width:520px;min-width:0;gap:12px}.sb .cs-server-label{flex-shrink:0}.sb .cs-server{min-width:0;flex:0 1 auto}.sb .cs-server-id{min-width:0;max-width:none;white-space:nowrap}.sb .cs-dot{flex-shrink:0}
 .sb .mc-server-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px}.sb .mc-server-head strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sb #shell-context label{min-width:0}.sb #shell-context select{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sb .r5-mission-identity>p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sb .r5-mission,.sb .r5-mission::backdrop{background:#000}.sb .r5-mission-label{margin-left:auto;margin-right:32px}
@@ -115,3 +116,33 @@
  .sb .r5-mission-gpus{grid-column:2;grid-row:1/span 2;border-left:1px solid var(--line);padding-left:28px}.sb .r5-mission-metrics{max-width:calc(100% - 384px);margin-top:0}
 }
 @media(max-width:759px){.sb #shell-context label{flex:1;max-width:calc((100vw - 50px)/2)}.sb #shell-context select{flex:1;width:0}.sb .r5-mission-head .wordmark{display:none}.sb .r5-mission-label{margin:0 auto 0 0}}
+.sb #projects-refresh{white-space:nowrap;flex:none}
+.sb .wb-publish-control{display:flex;align-items:center;gap:6px;width:100%;min-width:0}
+.sb .wb-rail .wb-publish-control .button{flex:1;width:auto}.sb .wb-publish-control>.ui-info{flex:none;margin:0}
+.sb .server-select{display:inline-grid;position:relative;min-width:0;max-width:100%;vertical-align:middle}
+.sb .server-select>select{grid-area:1/1;width:100%;min-width:0;appearance:none;padding-right:28px}
+.sb :is(#shell-context,#page-datasets) .server-select>select{color:transparent}
+.sb .server-select>select option{color:var(--ink);background:var(--bg-1)}
+.sb .server-select-label{position:absolute;left:12px;right:28px;top:0;bottom:0;display:flex;align-items:center;pointer-events:none;min-width:0;color:var(--ink)}
+.sb .server-select::after{content:'';position:absolute;right:12px;top:calc(50% - 5px);width:6px;height:6px;border-right:1.5px solid var(--ink-2);border-bottom:1.5px solid var(--ink-2);transform:rotate(45deg);pointer-events:none}
+.sb #shell-context .server-select{flex:1;min-width:0}.sb #shell-context .server-select select{width:100%}.sb #shell-context .server-select-label{left:0;font:12px var(--mono)}
+.sb .r5-mission-head>.r5-mission-actions{flex-wrap:wrap;align-items:center;gap:8px}.sb .r5-mission-actions .button{white-space:nowrap}
+.sb .r5-mission-identity>p{display:flex;gap:8px;min-width:0}.sb .r5-mission-project{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.sb .r5-mission-trajectory .wb-trajectory{position:relative}
+.sb .r5-mission-trajectory .wb-trajectory::before{content:'';position:absolute;top:4px;left:4px;right:4px;height:1px;background:var(--line-3)}
+.sb .r5-mission-trajectory .wb-trajectory li::before{display:none}
+.sb .r5-mission-trajectory .wb-trajectory li:last-child{flex:0 0 auto;padding-right:0;text-align:right}
+.sb .r5-mission-trajectory .wb-trajectory li:last-child .d{left:auto;right:0}
+@media(max-width:759px){
+ .sb .wb-progress-hero{display:grid;grid-template-columns:1fr;gap:16px}
+ .sb .wb-progress-meta{display:flex;flex-wrap:wrap;align-items:flex-start;max-width:none;gap:8px 16px}
+ .sb .wb-progress-meta>span{flex:none;max-width:100%}
+ .sb .r5-mission-head{display:grid;grid-template-columns:1fr;gap:10px;padding:12px 0}
+ .sb .r5-mission-head>.r5-mission-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;gap:4px}
+ .sb .r5-mission-actions .button{min-height:44px;font-size:12px;padding:0 6px}
+ .sb .r5-mission-actions [data-mission-close]{grid-column:span 2}
+ .sb .r5-mission-actions [data-mission-close] kbd{display:none}
+ .sb .heading-actions:not(:has(>button:not([hidden]))){display:none}
+ .sb .page-heading{display:grid;grid-template-columns:minmax(0,1fr) auto}
+ .sb .page-heading>div:first-child{min-width:0}
+}

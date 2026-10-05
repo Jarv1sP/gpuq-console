@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parseTrainingCommand,trainingReadout,elapsedTraining,missionGPUs,missionHTML,quotaLedgerHTML,workbenchCards} from '../dist/workbench-ui.js';
-import {datasetCopyRoute,datasetRows} from '../dist/datasets-ui.js';
+import {parseTrainingCommand,trainingReadout,elapsedTraining,missionGPUs,missionHTML,quotaLedgerHTML,workbenchCards,serverIdHTML,jobCancelConfirmation} from '../dist/workbench-ui.js';
+import {datasetCopyRoute,datasetRows,catalogUpdatedText,datasetCapacityHTML} from '../dist/datasets-ui.js';
 const machines=[{id:'gpu-1',cards:8},{id:'private-long-id',cards:6}];
 test('Chinese training commands resolve only explicit authorized machines, counts and full data references',()=>{
   const version='a'.repeat(64);
@@ -42,5 +42,22 @@ test('copy route needs an approved real source and confirmed target catalog, wit
   const html=datasetRows(catalog);assert.match(html,/data-route-source="gpu-2" data-route-target="gpu-1"/);assert.doesNotMatch(html,/实验室内网|61\.0|0\.0 MiB/);
   for(const change of [{canPrepare:false},{sourceMachine:'unauthorized'},{state:'UNKNOWN'},{sourceMachine:'gpu-1'},{locations:[]}])assert.equal(datasetCopyRoute({...version,...change},catalog),null);
   assert.equal(datasetCopyRoute(version,{...catalog,machines:[{machine:'gpu-1',state:'unavailable'},{machine:'gpu-2',state:'ok'}]}),null);
-  assert.match(html,/role="columnheader">gpu-1<small>所选服务器/);assert.match(html,/dataset-actions-cell dataset-target/);
+  assert.match(html,/role="columnheader"><span class="server-id[^>]*title="gpu-1"/);assert.match(html,/dataset-actions-cell dataset-target/);
+});
+test('compact names preserve the distinguishing suffix and complete escaped ID',()=>{
+  const html=serverIdHTML('synthetic-long-4090-8');assert.match(html,/title="synthetic-long-4090-8"/);assert.match(html,/server-id-tail">90-8</);
+  assert.equal(html.replace(/<[^>]*>/g,''),'synthetic-long-4090-8');assert.doesNotMatch(serverIdHTML('<unsafe>'),/<unsafe>/);
+  assert.equal(serverIdHTML('short').replace(/<[^>]*>/g,''),'short');
+});
+test('cancellation explains the real reservation, including zero during data preparation and unknown counts',()=>{
+  assert.match(jobCancelConfirmation({state:'RUNNING',cards:4,actualCards:2}),/释放 4 张卡的额度/);
+  assert.match(jobCancelConfirmation({state:'PREPARING_DATA',cards:4}),/释放 0 张卡的额度/);
+  assert.match(jobCancelConfirmation({state:'UNKNOWN'}),/占用额度尚未确认/);assert.doesNotMatch(jobCancelConfirmation({state:'UNKNOWN'}),/释放 0/);
+});
+test('catalog freshness never substitutes a browser clock and capacity separates uploadable from total space',()=>{
+  assert.match(catalogUpdatedText({checkedAt:1700000000}),/^更新于 \d{2}:\d{2}$/);
+  for(const checkedAt of [undefined,null,'','invalid'])assert.equal(catalogUpdatedText({checkedAt}),'更新时间未知');
+  assert.equal(catalogUpdatedText({partial:true}),'更新时间未知 · 部分目录待更新');
+  const html=datasetCapacityHTML({available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3},'synthetic-long-8');
+  assert.match(html,/<strong class="mono">502 GiB<\/strong><small>共 1024 GiB<\/small>/);assert.match(html,/安全预留 10 GiB/);
 });

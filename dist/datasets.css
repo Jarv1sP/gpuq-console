@@ -327,6 +327,7 @@
 #page-datasets .dataset-copy-route svg{display:block;overflow:visible;width:100%;height:15px}
 #page-datasets .dataset-copy-route path{fill:none;stroke:currentColor;stroke-width:1}
 #page-datasets .dataset-copy-route>span{position:absolute;left:50%;top:12px;transform:translateX(-50%);background:var(--bg-2);padding:3px 6px;font:10px/1.5 var(--mono);white-space:nowrap}
+#page-datasets .dataset-route-row .dataset-location{align-items:flex-start;padding-top:18px;padding-bottom:60px}
 #page-datasets .dataset-source-tabs button{min-height:56px;padding:12px 10px}
 #page-datasets .dataset-upload-heading{display:flex;align-items:center;gap:10px}
 #page-datasets .dataset-upload-notes{display:flex;align-items:center;margin-top:16px}

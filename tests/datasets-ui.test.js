@@ -67,12 +67,12 @@ test('capacity distinguishes unknown readings and shared space from a personal q
  assert.match(capacityText(null),/容量待更新/);assert.match(capacityText({available:false,availableBytes:99,filesystemBytes:100}),/容量待更新/);
  assert.match(capacityText({available:true,availableBytes:-1,filesystemBytes:100}),/容量待更新/);
  const text=capacityText({available:true,filesystemBytes:1024**4,availableBytes:100*1024**3,usableBytes:90*1024**3,reserveBytes:10*1024**3});
- assert.match(text,/100\.00 GiB/);assert.match(text,/90\.00 GiB/);assert.match(text,/安全预留 10\.00 GiB/);assert.match(datasetCapacityHTML({available:true,filesystemBytes:1024**4,availableBytes:100*1024**3,usableBytes:90*1024**3},'gpu-1'),/共享磁盘容量，不是个人配额/);
+ assert.match(text,/100\.00 GiB/);assert.match(text,/90\.00 GiB/);assert.match(text,/安全预留 10\.00 GiB/);assert.match(datasetCapacityHTML({available:true,filesystemBytes:1024**4,availableBytes:100*1024**3,usableBytes:90*1024**3},'gpu-1'),/共享数据盘，容量不是个人配额/);
 });
 test('approved local preparation can be selected for training without claiming it is READY',()=>{
  for(const state of ['REGISTERED','STAGING','PREPARING']){
   const html=rows({datasets:[{dataset:'source',versions:[{version:'a'.repeat(64),state,canPrepare:state!=='PREPARING'}]}]});
-  assert.doesNotMatch(html,/data-use-dataset="source"[^>]+disabled/);assert.match(html,/准备后训练/);assert.match(html,/准备数据暂不占额度/);assert.doesNotMatch(html,/本机已就绪/);
+  assert.doesNotMatch(html,/data-use-dataset="source"[^>]+disabled/);assert.match(html,/准备后训练/);assert.match(html,/准备期间不占额度/);assert.doesNotMatch(html,/本机已就绪/);
  }
  for(const state of ['NOT_LOCAL','UNKNOWN'])assert.match(rows({datasets:[{dataset:'absent',versions:[{version:'a'.repeat(64),state,canPrepare:true}]}]}),/data-use-dataset="absent"[^>]+disabled/);
  const failed=rows({datasets:[{dataset:'source',versions:[{version:'a'.repeat(64),state:'FAILED',canPrepare:true}]}]});
