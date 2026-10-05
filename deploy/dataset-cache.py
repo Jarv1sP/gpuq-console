@@ -55,6 +55,8 @@ SCHEMA = 1
 CHUNK_BYTES = 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 500000
+CATALOG_SUMMARY_BYTES = 4096
+CATALOG_SUMMARY_ROWS = 256
 TRANSFER_BATCH_BYTES = 64 * 1024 * 1024
 TRANSFER_BATCH_FILES = 256
 TRANSFER_BATCH_SECONDS = 1.0
@@ -744,12 +746,127 @@ class DatasetCache:
         """Authorized catalog and bounded ACL owner IDs, never source IDs/paths."""
         return self._list_datasets_snapshot(actor)[0]
 
+    def _catalog_binding(self, dataset, version):
+        """Metadata-only key for a display summary, never an admission proof."""
+        def stamp(info):
+            return [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                    info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        paths = self._paths(dataset, version)
+        filename = paths['.registry'].parent / (version + '.json')
+        with _directory(filename.parent) as parent:
+            folder = stamp(os.fstat(parent))
+            fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                record = stamp(_regular(fd))
+            finally:
+                os.close(fd)
+        ready = None
+        try:
+            with _directory(paths['ready']) as fd:
+                ready = [stamp(os.fstat(fd))]
+                for name in ('READY.json', 'manifest.json'):
+                    child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        ready.append(stamp(_regular(child)))
+                    finally:
+                        os.close(child)
+            with _directory(paths['ready'] / 'data') as fd:
+                ready.append(stamp(os.fstat(fd)))
+        except FileNotFoundError:
+            with _directory(paths['ready'].parent) as fd:
+                if version in os.listdir(fd):
+                    raise CacheError('published directory has no valid READY metadata')
+        return dict(root=list(self._root_identity), dataset=dataset, version=version,
+                    folder=folder, record=record, ready=ready)
+
+    def _catalog_directory(self):
+        path = self.root / '.catalog'
+        _mkdir(path)
+        with _directory(path) as fd:
+            info = os.fstat(fd)
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise CacheError('unsafe derived catalog directory')
+        return path
+
+    def _catalog_summary(self, binding, value=None):
+        """Bounded service-private, disposable display cache; failure is a miss.
+
+        No manifest or source path is retained. Source capability is recomputed
+        from the current configuration. Leases, status and all data operations
+        never consume these summaries.
+        """
+        try:
+            directory = self._catalog_directory()
+            name = hashlib.sha256((binding['dataset'] + '\0' + binding['version']).encode()).hexdigest() + '.json'
+            path = directory / name
+            if value is not None:
+                with _directory(directory) as parent:
+                    names = os.listdir(parent)
+                    if any(not re.fullmatch(r'[a-f0-9]{64}\.json', item) for item in names):
+                        return None
+                    if name not in names and len(names) >= CATALOG_SUMMARY_ROWS:
+                        return None
+                _write_json(path, dict(schema=SCHEMA, binding=binding, summary=value))
+                return None
+            with _directory(directory) as parent:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                try:
+                    before = _regular(fd)
+                    if (before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) != 0o600
+                            or before.st_size > CATALOG_SUMMARY_BYTES):
+                        return None
+                    raw = os.read(fd, CATALOG_SUMMARY_BYTES + 1)
+                    if (len(raw) != before.st_size or _stamp(before) != _stamp(_regular(fd))
+                            or _stamp(before) != _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False))):
+                        return None
+                    value = json.loads(raw)
+                finally:
+                    os.close(fd)
+            if (not isinstance(value, dict) or set(value) != {'schema', 'binding', 'summary'}
+                    or type(value['schema']) is not int or value['schema'] != SCHEMA
+                    or _json_bytes(value['binding']) != _json_bytes(binding)):
+                return None
+            row = value['summary']
+            if (not isinstance(row, dict) or set(row) != {'bytes', 'files', 'ready', 'sourceId'}
+                    or type(row['bytes']) is not int or not 0 <= row['bytes'] <= MAX_ENTRIES * (2**63 - 1)
+                    or type(row['files']) is not int or not 0 <= row['files'] <= MAX_ENTRIES
+                    or type(row['ready']) is not bool or row['ready'] != (binding['ready'] is not None)):
+                return None
+            if row['sourceId'] is not None:
+                _identifier(row['sourceId'])
+            return row
+        except (OSError, CacheError, ValueError, TypeError, KeyError):
+            return None
+
+    def _catalog_version(self, actor, dataset, version):
+        with self._locked():
+            self._dataset(actor, dataset)
+            binding = self._catalog_binding(dataset, version)
+            summary = self._catalog_summary(binding)
+            if summary is not None:
+                identity = self._record_identity(dataset, version)
+                ready_identity = self._ready_identity(self._paths(dataset, version))
+                if self._catalog_binding(dataset, version) != binding:
+                    raise CacheError('catalog metadata changed; retry the operation')
+                return summary, identity, ready_identity, binding
+        record, identity = self._record_snapshot(actor, dataset, version)
+        ready, ready_identity = self._ready_snapshot(self._paths(dataset, version), record['manifest'], version)
+        summary = dict(bytes=sum(f['size'] for f in record['manifest']['files']),
+                       files=len(record['manifest']['files']), ready=ready, sourceId=record['sourceId'])
+        with self._locked():
+            self._check_snapshot(actor, dataset, version, identity)
+            self._check_ready_snapshot(self._paths(dataset, version), ready_identity)
+            if self._catalog_binding(dataset, version) != binding:
+                raise CacheError('catalog metadata changed; retry the operation')
+            self._catalog_summary(binding, summary)
+        return summary, identity, ready_identity, binding
+
     def _list_datasets_snapshot(self, actor):
         """Private per-request identities for a detached-worker status overlay.
 
-        No manifest, summary or readiness result is cached across calls. The
-        executor may reuse these fully validated identities in this one request,
-        only after another live ACL/registration/READY check.
+        A bounded service-owned display summary may avoid reparsing unchanged
+        manifests. Each call checks live ACL and all registration/READY stamps;
+        a miss uses the original full validation. Data admission never uses it.
         """
         self._actor(actor)
         snapshots = []
@@ -772,17 +889,13 @@ class DatasetCache:
                 if not name.endswith(".json"):
                     raise CacheError("corrupt registry directory")
                 version = name[:-5]
-                record, identity = self._record_snapshot(actor, dataset, version)
-                paths = self._paths(dataset, version)
-                ready, ready_identity = self._ready_snapshot(paths, record["manifest"], version)
+                summary, identity, ready_identity, binding = self._catalog_version(actor, dataset, version)
                 # Summation and parsing scale with the manifest; they must not
                 # delay unrelated publication/lease admission under global lock.
-                row = dict(version=version, state="READY" if ready else "REGISTERED",
-                           canPrepare=record['sourceId'] in self.sources,
-                           bytes=sum(f["size"] for f in record["manifest"]["files"]),
-                           files=len(record["manifest"]["files"]))
-                versions.append((row, identity, ready_identity))
-                del record
+                row = dict(version=version, state="READY" if summary['ready'] else "REGISTERED",
+                           canPrepare=summary['sourceId'] in self.sources,
+                           bytes=summary['bytes'], files=summary['files'])
+                versions.append((row, identity, ready_identity, binding))
             snapshots.append((dataset, versions))
         result, current = [], {}
         with self._locked():
@@ -791,11 +904,13 @@ class DatasetCache:
                 # revocation or metadata replacement during parsing is rejected.
                 metadata = self._dataset(actor, dataset)
                 rows = []
-                for row, identity, ready_identity in versions:
+                for row, identity, ready_identity, binding in versions:
                     version = row['version']
                     self._check_snapshot(actor, dataset, version, identity)
                     paths = self._paths(dataset, version)
                     self._check_ready_snapshot(paths, ready_identity)
+                    if self._catalog_binding(dataset, version) != binding:
+                        raise CacheError('catalog metadata changed; retry the operation')
                     current[(dataset, version)] = (identity, ready_identity,
                                                   row['state'] == 'READY', row['bytes'])
                     with _directory(paths[".staging"].parent) as fd:
