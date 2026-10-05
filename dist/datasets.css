@@ -397,3 +397,5 @@
 #page-datasets .dataset-directory-control input:focus-visible+label{outline:2px solid var(--ink);outline-offset:2px}
 #page-datasets .dataset-directory-control input:disabled+label{opacity:.5;cursor:default;pointer-events:none}
 #page-datasets #dataset-directory-selection{font-size:12px;line-height:1.7;color:var(--d-meta);overflow-wrap:anywhere}
+#page-datasets #cloud-share-availability{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:16px 0;color:var(--d-meta)}
+#page-datasets #cloud-share-availability .button{white-space:nowrap}

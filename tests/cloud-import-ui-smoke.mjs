@@ -13,7 +13,7 @@ try{
   await page.route('**/*',async route=>{
     const url=new URL(route.request().url());if(url.origin!==origin){unexpected.push(url.href);return route.abort();}
     if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><main><h1>数据空间</h1><section id="page-datasets"></section></main>'});
-    if(['/maintenance-state.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
+    if(['/maintenance-state.js','/copy-help-ui.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
     if(url.pathname==='/favicon.ico')return route.fulfill({status:204});unexpected.push(url.href);return route.abort();
   });
   await page.goto(origin);
@@ -24,6 +24,7 @@ try{
     window.store={production:true,principal:{userId:'alice',role:'member'},authGeneration:0,async call(operation,args){
       const user=this.principal.userId;calls.push({operation,args:structuredClone(args),user});
       const key=user+':'+args.machine,items=rows.get(key)||[];
+      if(operation==='cloud.info')return {backend:'aliyun',aliyunConnected:true,capabilityVerified:true};
       if(operation==='cloud.inspect')return {inspectionId:'inspection-alice',files:[{id:'file-1',name:'压缩数据.zip',size:1024**3},{id:'file-2',name:'<img onerror=alert(1)>.zip',size:2}]};
       if(operation==='cloud.import.start'){
         const row=items.find(r=>r.operationId===args.key)||{operationId:args.key,path:args.path,sourceKind:args.url?'https':'aliyun',state:'QUEUED',bytes:0,totalBytes:1024**3,canResume:false};
@@ -36,7 +37,7 @@ try{
       const row=items.find(r=>r.operationId===args.operationId);
       if(operation==='cloud.import.resume'){if(!row)throw Error('missing mock task');row.state='RUNNING';row.canResume=false;return structuredClone(row);}
       if(operation==='cloud.import.cancel'){row.state='CANCELING';row.canResume=false;return structuredClone(row);}
-      if(operation==='cloud.import.status')return {...structuredClone(row),canDiscard:allowDiscard};
+      if(operation==='cloud.import.status'){if(hideRows||!row)throw Object.assign(Error('original import absent'),{status:404});return {...structuredClone(row),canDiscard:allowDiscard};}
       if(operation==='cloud.import.discard'){if(!allowDiscard)throw Error('worker not stopped');rows.set(key,items.filter(r=>r!==row));return {discarded:true,operationId:args.operationId};}
       if(operation==='cloud.auth.begin')return {id:'mock-qr',image:'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="20" height="20"%3E%3C/svg%3E'};
       if(operation==='cloud.auth.poll')return {state:'CONFIRMED'};
@@ -50,7 +51,7 @@ try{
   const refresh=async()=>{await page.locator('#cloud-import-refresh').click();await waitIdle();};
   const source=page.locator('[name=cloud-source]'),link=page.locator('[name=cloud-url]'),path=page.locator('[name=cloud-path]');
   assert.equal(await page.locator('#cloud-admin').count(),0);
-  assert.equal(await page.locator('[name=cloud-sha256]').isDisabled(),true);
+  await source.selectOption('aliyun');await waitIdle();assert.equal(await page.locator('[name=cloud-sha256]').isDisabled(),true);
   await link.fill('https://www.alipan.com/s/mock-share');await page.locator('#cloud-inspect').click();await waitIdle();
   assert.equal(await page.locator('[name=cloud-file] option').count(),2);assert.equal(await page.locator('[name=cloud-file] img').count(),0);
   await page.locator('#cloud-import-form [type=submit]').click();await waitIdle();
@@ -111,7 +112,7 @@ try{
   await page.evaluate(()=>{store.principal={userId:'bob',role:'member'};store.authGeneration++;ui.reset();render();});
   assert.equal(await link.inputValue(),'');assert.equal(await page.locator('#cloud-import-list li').count(),0);await refresh();assert.equal(await page.locator('#cloud-import-list').textContent(),'暂无导入任务。');
   await page.evaluate(()=>{store.principal={userId:'admin',role:'admin'};store.authGeneration++;ui.reset();render();});
-  await page.locator('#cloud-admin summary').click();await page.locator('#cloud-auth-begin').click();await waitIdle();await page.locator('#cloud-auth-check').click();await waitIdle();assert.match(await page.locator('#cloud-auth-status').textContent(),/已连接/);
+  await page.locator('#cloud-admin summary').click();await page.waitForFunction(()=>document.querySelector('#cloud-auth-status').textContent.includes('已登录'));await waitIdle();await page.locator('#cloud-auth-begin').click();await waitIdle();await page.locator('#cloud-auth-check').click();await waitIdle();assert.match(await page.locator('#cloud-auth-status').textContent(),/已登录，分享导入已核验/);
   await page.locator('#cloud-auth-disconnect').click();await waitIdle();assert.match(await page.locator('#cloud-auth-status').textContent(),/已断开/);
   assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
   console.log('CLOUD IMPORT UI MOCK PASS: share selection; exact-key retries and refresh reconciliation; short-link replacement; async cancel; stopped-worker cleanup guard; account/machine fences; 320/390/1280px. Mock provider/nodes only, not real cloud acceptance. Screenshots: '+screenshots);
@@ -119,3 +120,6 @@ try{
 
 // Keep cloud-file contracts in this existing CI entrypoint.
 await import('./cloud-files-ui-smoke.mjs');
+
+// Share capability contracts reuse this existing CI entrypoint.
+await import('./cloud-import-capability-ui-smoke.mjs');
