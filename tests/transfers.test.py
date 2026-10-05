@@ -61,6 +61,72 @@ class Transfers(unittest.TestCase):
         for p in self.patches:p.stop()
         self.fixture.tearDown()
     def control(self):return {'id':self.key,'userId':USER}
+    def test_snapshot_adapter_reused_only_inside_one_read(self):
+        original=self.src.snapshots;instances=[];checks=[]
+        def snapshots():
+            value=original();instances.append(value)
+            lease,export=value.require_transfer_lease,value.export
+            value.require_transfer_lease=lambda *a,**k:(checks.append(('lease',id(value))),lease(*a,**k))[1]
+            value.export=lambda op,*a,**k:(checks.append((op,id(value))),export(op,*a,**k))[1]
+            return value
+        token=self.args['source']['token'];request={**self.control(),'action':'get','path':'sample.txt','offset':2*T.CHUNK+17};request.pop('userId')
+        with patch.object(self.src,'snapshots',side_effect=snapshots):
+            self.assertTrue(self.src.read(request,token)['eof']);self.assertTrue(self.src.read(request,token)['eof'])
+        self.assertEqual(len(instances),2);self.assertIsNot(instances[0],instances[1])
+        self.assertEqual([name for name,_ in checks],['lease','datasets.snapshot.info','datasets.snapshot.get']*2)
+        self.assertEqual(len({identity for _,identity in checks[:3]}),1)
+        self.assertEqual(len({identity for _,identity in checks[3:]}),1)
+    def test_snapshot_adapter_is_not_cached_between_concurrent_requests(self):
+        other=str(uuid.uuid4());ticket=self.src.prepare({**self.control(),'id':other,'reference':self.args['reference'],'targetMachine':'gpu-2'})
+        original=self.src.snapshots;instances=[];guard=threading.Lock()
+        def snapshots():
+            value=original()
+            with guard:instances.append(value)
+            return value
+        def read(pair):return self.src.read({'id':pair[0],'action':'get','path':'sample.txt','offset':2*T.CHUNK+17},pair[1])
+        with patch.object(self.src,'snapshots',side_effect=snapshots),ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(read,[(self.key,self.args['source']['token']),(other,ticket['token'])]))
+        self.assertTrue(all(r['eof'] for r in results));self.assertEqual(len(instances),2);self.assertIsNot(instances[0],instances[1])
+    def test_snapshot_adapter_still_rechecks_acl_before_payload(self):
+        original=self.src.snapshots;d,c=self.source.dataset_cache();record_path=c._paths('shared')['.registry']/'dataset.json'
+        def snapshots():
+            value=original();export=value.export
+            def changed(operation,*args,**kw):
+                result=export(operation,*args,**kw)
+                if operation=='datasets.snapshot.info':
+                    record=json.loads(record_path.read_text());record['owners']=['builtin-admin'];d._write_json(record_path,record)
+                return result
+            value.export=changed;return value
+        with patch.object(self.src,'snapshots',side_effect=snapshots),self.assertRaises(PermissionError):
+            self.src.read({'id':self.key,'action':'get','path':'sample.txt','offset':0},self.args['source']['token'])
+    def test_snapshot_adapter_still_rechecks_lease_before_payload(self):
+        original=self.src.snapshots;d,c=self.source.dataset_cache();journal=self.src.load(self.key,'.source-lease.json')
+        def snapshots():
+            value=original();export=value.export
+            def changed(operation,*args,**kw):
+                result=export(operation,*args,**kw)
+                if operation=='datasets.snapshot.info':c.release_lease(d.Principal('builtin-admin',True), 'shared',self.version,journal['leaseId'])
+                return result
+            value.export=changed;return value
+        with patch.object(self.src,'snapshots',side_effect=snapshots),self.assertRaisesRegex(ValueError,'Persistent source transfer lease'):
+            self.src.read({'id':self.key,'action':'get','path':'sample.txt','offset':0},self.args['source']['token'])
+    def test_snapshot_adapter_does_not_bypass_ticket_lease_or_fixed_info(self):
+        token=self.args['source']['token'];request={'id':self.key,'action':'get','path':'sample.txt','offset':0}
+        with patch.object(self.src,'snapshots') as snapshots:
+            with self.assertRaises(ValueError):self.src.read(request,'x'*43)
+            with self.assertRaises(ValueError):self.src.read({**request,'_snapshots':{}},token)
+            snapshots.assert_not_called()
+        original=self.src.snapshots
+        def snapshots():
+            value=original();export=value.export
+            def changed(operation,*args,**kw):
+                result=export(operation,*args,**kw)
+                if operation=='datasets.snapshot.info':result={**result,'entries':result['entries']+1}
+                else:raise AssertionError('payload must not be read after info drift')
+                return result
+            value.export=changed;return value
+        with patch.object(self.src,'snapshots',side_effect=snapshots),self.assertRaisesRegex(ValueError,'Fixed source snapshot changed'):
+            self.src.read(request,token)
     def test_cache_busy_retries_only_reads_without_replaying_target_writes(self):
         original_read,original_upload=self.src.read,self.dst.upload
         busy=[0];reads=[];writes=[]

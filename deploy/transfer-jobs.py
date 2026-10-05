@@ -210,8 +210,9 @@ class TransferJobs:
         return {**journal['actor'], 'dataset': journal['reference']['dataset'],
                 'version': journal['reference']['version']}
 
-    def source(self, ref, actor, action, *, _transfer_lease=None, **fields):
-        return self.snapshots().export('datasets.snapshot.'+action,
+    def source(self, ref, actor, action, *, _transfer_lease=None, _snapshots=None, **fields):
+        snapshots = self.snapshots() if _snapshots is None else _snapshots
+        return snapshots.export('datasets.snapshot.'+action,
             {'dataset': ref['dataset'], 'version': ref['version'], 'userId': actor['userId'],
              'hostAdmin': actor.get('hostAdmin', False), **fields}, _transfer_lease=_transfer_lease)
 
@@ -297,12 +298,16 @@ class TransferJobs:
         journal = self.load(key, '.source-lease.json')
         if journal['state'] != 'HELD' or journal['digest'] != ticket['digest']:
             raise ValueError('Source transfer is not protected by a persistent lease')
-        self.snapshots().require_transfer_lease(self.lease_args(journal), key, journal['leaseId'])
+        # Reuse only this request's adapter, not any authorization, lease,
+        # registry or file result. Both export calls still recheck live state.
+        snapshots = self.snapshots()
+        snapshots.require_transfer_lease(self.lease_args(journal), key, journal['leaseId'])
         lease = (key, journal['leaseId'])
-        info = self.source(ticket['reference'], ticket['actor'], 'info', _transfer_lease=lease)
+        info = self.source(ticket['reference'], ticket['actor'], 'info', _transfer_lease=lease, _snapshots=snapshots)
         if info != ticket['info']:
             raise ValueError('Fixed source snapshot changed')
-        return info if action == 'info' else self.source(ticket['reference'], ticket['actor'], action, _transfer_lease=lease, **fields)
+        return info if action == 'info' else self.source(ticket['reference'], ticket['actor'], action,
+            _transfer_lease=lease, _snapshots=snapshots, **fields)
 
     def confirm_source_release(self, args):
         """Trusted target control: permanently fence restart BEFORE releasing."""
