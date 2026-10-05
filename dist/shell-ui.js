@@ -7,7 +7,7 @@ export function shellUI(store,{navigate,getPage,toast}){
   const q=selector=>document.querySelector(selector),account=q('#account-menu'),nav=q('#room-nav'),context=q('#shell-context');
   const reduced=()=>matchMedia('(prefers-reduced-motion:reduce)').matches,phone=()=>matchMedia('(max-width:759px)').matches;
   let page=null,roomAnimation=null,headingAnimation=null,ghost=null,contextActor=null,notice='',phoneAction=null,phoneActionPlace=null;
-  const scrolls=new Map(),indicator=document.createElement('span');indicator.className='nav-indicator';indicator.setAttribute('aria-hidden','true');nav.prepend(indicator);nav.classList.add('has-indicator');
+  const scrolls=new Map(),routeSlides=new Map(),indicator=document.createElement('span');indicator.className='nav-indicator';indicator.setAttribute('aria-hidden','true');nav.prepend(indicator);nav.classList.add('has-indicator');
   const control=controlUI(store,{navigate,getPage,toast,openSubmit:()=>document.dispatchEvent(new CustomEvent('gpuq-open-submit')),openJob:(id,view='overview',origin)=>document.dispatchEvent(new CustomEvent('gpuq-open-job',{detail:{id,view,origin}}))});
   function syncContext(){
     const machine=q('[name=workspace-machine]'),project=q('[name=workspace-project]'),active=getPage();
@@ -42,6 +42,12 @@ export function shellUI(store,{navigate,getPage,toast}){
     const active=getPage(),selected=phone()?({transfers:'datasets',users:'me',maintenance:'me'}[active]||active):active;
     for(const item of nav.querySelectorAll('[data-nav]')){const current=item.dataset.nav===selected;item.classList.toggle('active',current);if(current)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current');}
   }
+  function markDesktopSlide(target,animation){
+    if(phone()||reduced())return;
+    target.classList.add('desktop-route-slide');routeSlides.set(target,animation);
+    const clear=()=>{if(routeSlides.get(target)===animation){routeSlides.delete(target);target.classList.remove('desktop-route-slide');}};
+    animation.finished.then(clear,clear);
+  }
   function route(next,apply){
     const previous=getPage();if(previous===next){apply();return;}
     scrolls.set(previous,scrollY);roomAnimation?.cancel();headingAnimation?.cancel();ghost?.remove();
@@ -56,8 +62,9 @@ export function shellUI(store,{navigate,getPage,toast}){
     }
     apply();scrollTo({top:scrolls.get(next)||0,behavior:'instant'});
     const incoming=q(`[data-page="${CSS.escape(next)}"]`);
-    if(incoming)roomAnimation=incoming.animate(phone()||reduced()?[{opacity:0},{opacity:1}]:[{opacity:0,transform:`translateX(${direction*24}px)`},{opacity:1,transform:'none'}],{duration:reduced()?150:phone()?200:280,delay:phone()||reduced()?0:60,easing:'cubic-bezier(.2,.8,.2,1)'});
+    if(incoming){roomAnimation=incoming.animate(phone()||reduced()?[{opacity:0},{opacity:1}]:[{opacity:0,transform:`translateX(${direction*24}px)`},{opacity:1,transform:'none'}],{duration:reduced()?150:phone()?200:280,delay:phone()||reduced()?0:60,easing:'cubic-bezier(.2,.8,.2,1)'});markDesktopSlide(incoming,roomAnimation);}
     headingAnimation=q('.page-heading').animate(phone()||reduced()?[{opacity:0},{opacity:1}]:[{opacity:0,transform:`translateX(${direction*24}px)`},{opacity:1,transform:'none'}],{duration:reduced()?150:phone()?200:280,delay:phone()||reduced()?0:60,easing:'cubic-bezier(.2,.8,.2,1)'});
+    markDesktopSlide(q('.page-heading'),headingAnimation);
     updateIndicator(true);
   }
   function updateMobileAction(){
