@@ -93,7 +93,10 @@ test('ordinary-user datasets include resumable upload, fixed references and larg
   for (const command of ['gpuctl data upload ./my-data --name my-data', 'gpuctl data upload-status UPLOAD_ID', 'gpuctl data upload-discard UPLOAD_ID', 'gpuctl data prepare DATASET_ID@VERSION', 'gpuctl data status DATASET_ID@VERSION']) {
     assert.ok(guide.includes(command), `Missing data command: ${command}`);
   }
-  assert.match(guide, /网页上传和 `data put` 仍经过平台中转/);
+  assert.match(guide, /网页上传按服务器能力选择路线：可直传时直接传到服务器，否则经平台中转；页面会标出本次实际路线。/);
+  assert.match(guide, /直传失败不会自动改走中转；超过 256 MiB 的中转需要你确认。/);
+  assert.match(guide, /个人数据空间上传和 `data put` 仍经平台中转。/);
+  assert.doesNotMatch(guide, /网页(?:目录)?上传(?:和\s+`data put`)?\s*仍(?:走|经(?:过)?)平台中转/);
   assert.match(guide, /校内直传或外接硬盘导入/);
   assert.match(guide, /500,000/);
   assert.match(guide, /64 MiB/);
@@ -140,14 +143,26 @@ test('collaboration uses posts and chat while root requests stay retired', () =>
 test('optional OCI guide requires node enablement and distinguishes container from host root',()=>{
   assert.match(guide,/管理员已启用的节点/);
   assert.match(guide,/gpuctl project create system-project --env-mode oci/);
-  assert.match(guide,/容器内 root 不是宿主机 root，开发阶段无 GPU/);
-  assert.match(guide,/未启用节点明确拒绝，不改变原有项目/);
-  assert.match(guide,/不将本指南视为已经开通/);
+  assert.match(guide,/容器内 root 不是服务器 root，开发阶段无 GPU/);
+  assert.doesNotMatch(guide,/宿主机 root/);
+  assert.match(guide,/没开通的服务器会直接拒绝，不影响你已有的项目/);
+  assert.match(guide,/页面上没有「个人容器」选项，就说明你的账号或这台服务器还没开通/);
   assert.match(guide,/训练固定该镜像版本并只见调度分配的 GPU/);
   assert.match(guide,/shared\/isolated Python 模式的 `\/tmp`/);
   assert.match(guide,/容器可写层，占用工作区磁盘，是否有个人硬配额取决于节点配置/);
   assert.match(guide,/只有管理员另行启用并验收内核配额的节点，才具有个人磁盘硬上限/);
   assert.match(guide,/容器已开通不等于硬配额已开通/);
+});
+
+test('personal container guidance separates creation, no-GPU development, ending and a pinned training version',()=>{
+  const section=guide.split('### 个人容器\n')[1]?.split('\n### ')[0];
+  assert.ok(section,'personal containers have their own concise section');
+  assert.match(section,/新建项目.*个人容器/);assert.match(section,/容器内 root 不是服务器 root，开发阶段无 GPU/);
+  assert.match(section,/同一项目只保留一个开发终端/);assert.match(section,/断开.*不能用于发布/);
+  assert.match(section,/本次发布已确认/);assert.match(section,/结果未确认时先重新查询/);
+  assert.match(section,/先选好要训练的版本.*训练固定该镜像版本/);assert.match(section,/不会改动已经提交的训练/);
+  assert.match(guide,/输入未确认，未自动重发.*暂停输入，直到你明确重连/);
+  assert.match(guide,/接管会让另一处失去输入权，已发出的命令不能撤回/);
 });
 
 test('guide explains quotas, interruption and failure evidence without promising runtime health', () => {
