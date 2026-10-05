@@ -1,7 +1,19 @@
 import {progressPercent,progressText} from './job-progress.js';
 import {maintenanceActive} from './maintenance-state.js';
+import {captureObject,sharedObject,reducedMotion} from './motion-ui.js';
 
 export const escapeUI=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+export function infoHTML(text,label='说明'){
+  return `<details class="ui-info"><summary aria-label="${escapeUI(label)}">ⓘ</summary><div class="ui-info-content" role="note">${escapeUI(text)}</div></details>`;
+}
+// Keep the original node and its aria-describedby ID when moving copy offscreen.
+export function discloseInfo(element,label='说明'){
+  if(!element||element.closest('.ui-info'))return;
+  const help=document.createElement('details'),summary=document.createElement('summary');help.className='ui-info';summary.textContent='ⓘ';summary.setAttribute('aria-label',label);element.before(help);help.append(summary,element);element.classList.add('ui-info-content');element.hidden=false;
+}
+if(typeof document!=='undefined')document.addEventListener('click',event=>{
+  for(const help of document.querySelectorAll('.ui-info[open]'))if(!help.contains(event.target))help.open=false;
+},{capture:true});
 export const endedJob=job=>['SUCCEEDED','FAILED','CANCELED'].includes(job.state);
 export function stateClass(job){
   if(job.cancelRequested&&!endedJob(job))return 'st-cancel';
@@ -18,12 +30,12 @@ export function trainingReadout(job){
   let eta='';
   if(fresh&&Number.isFinite(s.etaSeconds)&&s.etaSeconds>=0){
     if(Number.isFinite(s.updatedAt)&&s.updatedAt>0){const date=new Date((s.updatedAt+s.etaSeconds)*1000);if(Number.isFinite(date.getTime()))eta='约 '+date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false})+' · 训练上报';}
-    else eta='训练上报剩余约 '+Math.ceil(s.etaSeconds/60)+' 分钟';
+    else eta='剩余约 '+Math.ceil(s.etaSeconds/60)+' 分钟 · 训练上报';
   }
   const rank=key=>({loss:0,val_acc:1,lr:2})[key]??3;
   const metrics=fresh?Object.entries(s.metrics||{}).filter(([key,value])=>Number.isFinite(value)&&!/^epochs?$/i.test(key)).sort(([a],[b])=>rank(a)-rank(b)).slice(0,3):[];
   const description=p?.stale?'进度停滞（训练上报超时）'+(s?.epochsTotal?` · 上次轮次 ${s.epochsCompleted}/${s.epochsTotal}`:'')+(s?.message?' · '+s.message:''):progressText(p);
-  return {fresh,percent:fresh?percent:null,eta,epoch:fresh&&s.epochsTotal?`第 ${s.epochsCompleted} / ${s.epochsTotal} 轮`:'',metrics,description};
+  return {fresh,percent:fresh?percent:null,eta,epoch:fresh&&s.epochsTotal?`第 ${s.epochsCompleted} / ${s.epochsTotal} 轮`:'',metrics,description,phase:fresh?s.phase||'':'',updatedAt:fresh?s.updatedAt:null,completionPending:fresh&&percent>=100&&!endedJob(job)};
 }
 function shortTime(value){
   if(value===undefined||value===null||value==='')return '';
@@ -40,26 +52,105 @@ export function jobFacts(job){
   const indices=job.assignedIndices?.length?'GPU '+job.assignedIndices.join(' · '):Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数未确认';
   const allocation=job.elastic?`弹性 ${job.elastic.minCards}–${job.cards} 张 · 当前 ${Number.isSafeInteger(job.actualCards)?job.actualCards:job.assignedIndices?.length||'未确认'} 张`:indices;
   const placement=job.placement,placementText=placement?`${placement.shared?'共享':'固定'} GPU ${placement.gpuIndices.join(',')}${placement.shared?' · 预算 '+placement.vramMiB+' MiB':''}${placement.hami?' · HAMi SM '+placement.smPercent+'%':''}`:'';
-  return [job.machine||'服务器未确认',allocation,placementText,job.state==='PREPARING_DATA'?'不占 GPU 额度':job.queueReason||job.latestAttempt?.failureReason||job.error||job.description||'暂无调度说明',job.latestAttempt?.exitCode!==null&&job.latestAttempt?.exitCode!==undefined?'退出码：'+job.latestAttempt.exitCode:'',job.schedulerState||job.state].filter(Boolean).map(escapeUI).join(' · ');
+  return [job.machine||'服务器未确认',allocation,placementText,job.state==='PREPARING_DATA'?'不占 GPU 额度':job.queueReason||job.latestAttempt?.failureReason||job.error||job.description||'暂无调度说明',job.latestAttempt?.exitCode!==null&&job.latestAttempt?.exitCode!==undefined?'退出码：'+job.latestAttempt.exitCode:'',job.schedulerState||job.state].filter(Boolean).join(' · ');
 }
-export function workbenchCards(jobs,{actions=()=>'',focusId,maintenance}={}){
+export function parseTrainingCommand(text,machines=[]){
+  const value=String(text??'').trim();
+  const match=value.match(/^(\S+)\s+([1-9]\d*|[一二两三四五六七八九十]+)\s*张(?:显卡|卡)?\s+(?:跑|运行)\s+(.+)\s+用\s+([A-Za-z0-9][A-Za-z0-9_-]{0,63}(?:@[a-f0-9]{64})?)\s*$/u);
+  if(!match||!/^(?:[1-9]\d*|[一二两三四五六七八九]|[一二两三四五六七八九]?十[一二三四五六七八九]?)$/.test(match[2]))return null;
+  const [,machine,count,command,reference]=match,digits={'一':1,'二':2,'两':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
+  const cards=/^\d+$/.test(count)?Number(count):count.includes('十')?(count.split('十')[0]?digits[count.split('十')[0]]:1)*10+(count.split('十')[1]?digits[count.split('十')[1]]:0):digits[count];
+  const target=machines.find(row=>row.id===machine),[dataset,version]=reference.split('@');
+  if(!target||!Number.isSafeInteger(cards)||cards<1||!Number.isSafeInteger(target.cards)||cards>target.cards||!command.trim()||/[\u0000-\u001f\u007f]/.test(command))return null;
+  return {machine,cards,command:command.trim(),dataset,...(version?{version}:{})};
+}
+export function quotaLedgerHTML(store,machine=''){
+  const user=store.users.find(row=>row.id===store.principal?.userId);if(!user)return '';
+  const jobs=store.jobs.filter(job=>job.userId===user.id&&!endedJob(job)&&job.state!=='PREPARING_DATA'&&(!machine||job.machine===machine));
+  const groups=[{label:'运行 / 启动 / 待确认',rows:jobs.filter(job=>!['PENDING','QUEUED'].includes(job.state)||job.cancelRequested)},{label:'排队占用',rows:jobs.filter(job=>['PENDING','QUEUED'].includes(job.state)&&!job.cancelRequested)}].filter(group=>group.rows.length);
+  const number=value=>Number.isSafeInteger(value)&&value>=0?value:'—';
+  const usage=store.usage(user.id,machine||undefined),limit=machine?user.limits?.[machine]:user.total,total=store.usage(user.id);
+  return `<section class="wb-ledger" id="quota-ledger" aria-labelledby="quota-ledger-title"><div class="wb-ledger-head"><h2 id="quota-ledger-title">我的额度</h2>${infoHTML('占用数来自任务记录，排队也计入。准备数据暂不占额度；服务器确认结束后才释放。','额度来源')}<span class="mono">${escapeUI(machine||'全部服务器')}</span><strong>${number(usage)} / ${number(limit)} <small>张</small></strong></div>${machine?`<div class="wb-ledger-total">合计 ${number(total)} / ${number(user.total)} 张</div>`:''}<div class="wb-ledger-groups">${groups.map(group=>`<details><summary><span>${group.label}</span><strong>${group.rows.every(job=>Number.isSafeInteger(job.cards)&&job.cards>=0)?group.rows.reduce((sum,job)=>sum+job.cards,0):'—'} <small>张</small></strong></summary><ul>${group.rows.map(job=>`<li><button class="button quiet" type="button" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button><span class="mono">${number(job.cards)} 张</span></li>`).join('')}</ul></details>`).join('')||'<span class="muted">没有占用额度</span>'}</div></section>`;
+}
+export function boundarySweep(element){
+  const line=element?.querySelector('.r5-boundary-line');if(!line)return;
+  for(const animation of line.getAnimations())animation.cancel();
+  line.animate(reducedMotion()?[{opacity:.65},{opacity:0}]:[{transform:'scaleX(0)',opacity:1},{transform:'scaleX(1)',opacity:1,offset:.8},{transform:'scaleX(1)',opacity:0}],{duration:reducedMotion()?150:320,easing:'cubic-bezier(.2,0,0,1)'});
+}
+export function workbenchCards(jobs,{actions=()=>'',focusId,maintenance,ledger=''}={}){
   const active=jobs.filter(job=>!endedJob(job));
-  const focal=active.find(job=>job.id===focusId&&job.state==='RUNNING'&&!job.cancelRequested)||active.find(job=>job.state==='RUNNING'&&!job.cancelRequested)||active.find(job=>job.id===focusId)||active.find(job=>job.state==='UNKNOWN')||[...jobs].reverse().find(job=>job.state==='FAILED')||active[0]||jobs.at(-1);
+  const focal=active.find(job=>job.id===focusId)||active.find(job=>job.state==='RUNNING'&&!job.cancelRequested)||active.find(job=>job.state==='UNKNOWN')||[...jobs].reverse().find(job=>job.state==='FAILED')||active[0]||jobs.at(-1);
   const attention=jobs.filter(job=>job.state==='FAILED'&&job.id!==focal?.id),completed=jobs.filter(job=>endedJob(job)&&job.state!=='FAILED'&&job.id!==focal?.id);
-  const heading=job=>`<div class="job-top"><div class="wb-job-heading">${stateHTML(job)}<button type="button" class="wb-job-name" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button></div><span class="mono wb-job-id">${escapeUI(job.id)}</span></div>`;
-  const compact=job=>`<article class="job compact-job" data-workbench-job="${escapeUI(job.id)}">${heading(job)}<p class="subline">${jobFacts(job)}</p>${trajectoryHTML(job)}<div class="job-acts">${actions(job)}</div></article>`;
+  const heading=(job,compact=false)=>`<div class="job-top"><div class="wb-job-heading">${stateHTML(job)}<button type="button" class="wb-job-name" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button>${compact?`<span class="wb-job-quick">${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数待更新'}</span>`:''}</div><span class="mono wb-job-id" title="${escapeUI(job.id)}">${escapeUI(String(job.id).slice(0,8))}</span></div>`;
+  const compact=job=>`<article class="job compact-job" data-workbench-job="${escapeUI(job.id)}">${heading(job,true)}${job.error?`<p class="form-error">${escapeUI(job.error)}</p>`:''}<div class="job-acts"><button class="button quiet" type="button" data-job-focus="${escapeUI(job.id)}">聚焦</button>${actions(job)}${infoHTML(jobFacts(job),'任务事实')}</div></article>`;
   let hero='';
   if(focal){
-    const running=focal.state==='RUNNING'&&!focal.cancelRequested,readout=trainingReadout(focal);
-    const label=['FAILED','UNKNOWN'].includes(focal.state)?'需要处理的训练':endedJob(focal)?'最近一次训练':'当前训练';
-    hero=`<article class="job hero-frame wb-focal ${running?'':'wb-focus-state'}" data-workbench-job="${escapeUI(focal.id)}"><span class="hero-label">${label}</span>${heading(focal)}<p class="subline">${jobFacts(focal)}</p>${running?`<div class="wb-progress-hero"><div><span class="label">训练上报</span><div class="wb-progress-number ${readout.fresh?'':'unknown'}">${readout.percent===null?'—':readout.percent+'%'}</div></div><div class="wb-progress-meta">${readout.epoch?`<span>${escapeUI(readout.epoch)}</span>`:''}${readout.eta?`<span class="mono">${escapeUI(readout.eta)}</span>`:''}<span>${escapeUI(readout.fresh?'完成状态以调度器确认为准。':readout.description)}</span></div></div>${readout.percent===null?'':`<progress class="wb-progress-line" max="100" value="${readout.percent}" aria-label="${escapeUI(focal.name)} 的训练上报进度"></progress>`}`:''}${trajectoryHTML(focal)}${running&&readout.metrics.length?`<div class="wb-metrics">${readout.metrics.map(([key,value])=>`<div><span class="label">${escapeUI(key)}</span><strong class="mono">${escapeUI(Number(value).toPrecision(5))}</strong></div>`).join('')}</div>`:''}<div class="job-acts">${actions(focal)}</div></article>`;
+    const running=focal.state==='RUNNING'&&!focal.cancelRequested,readout=trainingReadout(focal),prep=focal.dataPreparation?.datasets;
+    const prepFact=Array.isArray(prep)&&prep.length?`${prep.filter(row=>row.state==='READY').length} / ${prep.length} 项已就绪`:'';
+    const label=['FAILED','UNKNOWN'].includes(focal.state)?'需要处理':endedJob(focal)?'最近一次训练':'当前训练';
+    const phase=running?`<div class="wb-progress-hero"><div><div class="wb-report-label"><span class="label">训练上报</span>${infoHTML('进度来自训练上报。任务结束和额度释放以服务器确认的状态为准。','进度来源')}</div><div class="wb-progress-number ${readout.fresh?'':'unknown'}">${readout.percent===null?'—':readout.percent+'%'}</div></div><div class="wb-progress-meta">${readout.epoch?`<span>${escapeUI(readout.epoch)}</span>`:''}${readout.updatedAt?`<span class="mono">更新于 ${escapeUI(shortTime(readout.updatedAt))}</span>`:''}${readout.eta?`<span class="mono">${escapeUI(readout.eta)}</span>`:''}${readout.completionPending?'<span class="wb-completion-pending">完成待确认</span>':''}${!readout.fresh?`<span>进度未更新 ${infoHTML(readout.description,'进度状态')}</span>`:''}</div></div>`:`<div class="wb-stage-hero"><strong>${escapeUI(focal.cancelRequested&&!endedJob(focal)?'正在取消':({PENDING:'等待显卡',QUEUED:'等待显卡',PREPARING_DATA:'准备数据',STARTING:'启动中',SUBMITTING:'提交中',UNKNOWN:'状态待核对',FAILED:'训练失败',SUCCEEDED:'已完成',CANCELED:'已取消'})[focal.state]||stateWord(focal))}</strong>${prepFact&&focal.state==='PREPARING_DATA'?`<span class="mono">${escapeUI(prepFact)}</span>`:''}${focal.queueReason&&!focal.error?infoHTML(focal.queueReason,'等待原因'):''}</div>`;
+    hero=`<article class="job hero-frame wb-focal ${running?'':'wb-focus-state'}" data-workbench-job="${escapeUI(focal.id)}"><span class="r5-boundary-line" aria-hidden="true"></span><span class="hero-label">${label}</span>${heading(focal)}<div class="subline">${escapeUI(focal.machine||'服务器待更新')} · ${Number.isSafeInteger(focal.cards)?focal.cards+' 张':'卡数待更新'}${infoHTML(jobFacts(focal),'任务事实')}</div>${phase}${focal.error?`<p class="form-error">${escapeUI(focal.error)}</p>`:''}${running&&readout.percent!==null?`<progress class="wb-progress-line" max="100" value="${readout.percent}" aria-label="${escapeUI(focal.name)} 的训练上报进度"></progress>`:''}${trajectoryHTML(focal)}${running&&readout.metrics.length?`<div class="wb-metrics">${readout.metrics.map(([key,value])=>`<div><span class="label">${escapeUI(key)}</span><strong class="mono">${escapeUI(Number(value).toPrecision(5))}</strong></div>`).join('')}</div>`:''}<div class="job-acts"><button class="button quiet" type="button" data-job-mission="${escapeUI(focal.id)}">全屏查看</button>${actions(focal)}</div></article>`;
   }
   const others=active.filter(job=>job.id!==focal?.id).sort((a,b)=>Number(['FAILED','UNKNOWN'].includes(b.state))-Number(['FAILED','UNKNOWN'].includes(a.state)));
   const list=(rows,label)=>`<div class="wb-scroll-list" tabindex="0" role="region" aria-label="${label}">${rows.map(compact).join('')}</div>`;
-  return hero+(attention.length?`<details class="wb-attention" open><summary><span class="st st-err"><span class="g" aria-hidden="true"></span>需要处理 · ${attention.length} 项</span></summary>${list([...attention].reverse(),'需要处理的训练')}</details>`:'')+(others.length?`<div class="wb-list-title"><h2>其他进行中的训练</h2><span class="mono">${others.length} 项</span></div>`+list(others,'其他进行中的训练'):'')+(completed.length?`<details class="wb-ended"><summary>已结束的训练 · ${completed.length} 项</summary>${list([...completed].reverse(),'已结束的训练')}</details>`:'')+(!jobs.length&&maintenanceActive(maintenance)?'<section class="wb-empty hero-frame"><span class="hero-label">我的训练任务</span><h2>暂无训练任务</h2><p>维护不会自动停止运行任务；新任务等待管理员明确恢复。</p></section>':!jobs.length?'<section class="wb-empty hero-frame"><span class="hero-label">开始一次训练</span><h2>准备好下一次实验</h2><p>选择服务器与项目，准备代码和环境，再提交训练。</p><ol><li>选择获授权服务器</li><li>创建项目或使用个人工作区</li><li>上传代码，在开发终端安装环境</li><li>结束开发终端，生成训练版本</li><li>确认数据与卡数，提交训练</li></ol></section>':'');
+  return hero+ledger+(attention.length?`<details class="wb-attention" open><summary><span class="st st-err"><span class="g" aria-hidden="true"></span>需要处理 · ${attention.length} 项</span></summary>${list([...attention].reverse(),'需要处理的训练')}</details>`:'')+(others.length?`<div class="wb-list-title"><h2>其他进行中的训练</h2><span class="mono">${others.length} 项</span></div>`+list(others,'其他进行中的训练'):'')+(completed.length?`<details class="wb-ended"><summary>已结束的训练 · ${completed.length} 项</summary>${list([...completed].reverse(),'已结束的训练')}</details>`:'')+(!jobs.length&&maintenanceActive(maintenance)?'<section class="wb-empty hero-frame"><span class="hero-label">我的训练任务</span><h2>暂无训练任务</h2><p>维护中的服务器暂停新提交。</p>'+infoHTML('维护不会自动停止运行任务，恢复由管理员确认。其他未维护的服务器仍可使用。','维护说明')+'</section>':!jobs.length?'<section class="wb-empty hero-frame"><span class="hero-label">开始一次训练</span><h2>准备好下一次实验</h2><p>选择服务器与项目，开始训练。</p></section>':'');
 }
+
 export function jobOverviewHTML(job,{owned=true,schedulingHTML=''}={}){
   const readout=trainingReadout(job);
   const command=Array.isArray(job.command)?job.command:job.argv;
-  return `<section class="job-overview"><div class="job-overview-fact">${stateHTML(job)}<span>${escapeUI(job.machine||'服务器未确认')}</span><span>${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数未确认'}</span></div><p>${escapeUI(job.description||'未填写描述')}</p><dl class="job-overview-grid"><div><dt>完整任务 ID</dt><dd><code>${escapeUI(job.id)}</code><button class="button quiet" type="button" data-copy-job="${escapeUI(job.id)}">复制 ID</button></dd></div>${job.project?`<div><dt>项目 / 训练版本</dt><dd>${escapeUI(job.project)}<code>${escapeUI(job.release||'版本未提供')}</code></dd></div>`:''}<div><dt>调度说明</dt><dd>${escapeUI(job.queueReason||'暂无调度说明')}</dd></div><div><dt>最近核对</dt><dd>${escapeUI(shortTime(job.schedulerCheckedAt||job.checkedAt)||'未提供')}</dd></div></dl>${trajectoryHTML(job)}<p class="muted">${escapeUI(readout.description)}</p>${owned&&command?.length?`<details class="job-command"><summary>训练命令</summary><pre>${escapeUI(command.join(' '))}</pre></details>`:''}${schedulingHTML?`<details class="job-command"><summary>卡数与调度策略</summary><div class="job-scheduling-facts">${schedulingHTML}</div></details>`:''}${job.latestAttempt?`<details class="job-command"><summary>最近运行记录</summary><dl><dt>运行 ID</dt><dd>${escapeUI(job.latestAttempt.id||'未记录')}</dd><dt>退出码</dt><dd>${escapeUI(job.latestAttempt.exitCode??'未记录')}</dd><dt>原因</dt><dd>${escapeUI(job.latestAttempt.failureReason||'未记录')}</dd></dl></details>`:''}<h3>主日志</h3><pre id="job-log-preview">正在读取主日志…</pre></section>`;
+  return `<section class="job-overview"><div class="job-overview-fact">${stateHTML(job)}<span>${escapeUI(job.machine||'服务器未确认')}</span><span>${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数未确认'}</span></div><p>${escapeUI(job.description||'未填写描述')}</p><dl class="job-overview-grid"><div><dt>完整任务 ID</dt><dd><code>${escapeUI(job.id)}</code><button class="button quiet" type="button" data-copy-job="${escapeUI(job.id)}">复制 ID</button></dd></div>${job.project?`<div><dt>项目 / 训练版本</dt><dd>${escapeUI(job.project)}<code>${escapeUI(job.release||'版本未提供')}</code></dd></div>`:''}<div><dt>调度说明</dt><dd>${escapeUI(job.queueReason||'暂无调度说明')}</dd></div><div><dt>更新于</dt><dd>${escapeUI(shortTime(job.schedulerCheckedAt||job.checkedAt)||'未提供')}</dd></div></dl>${trajectoryHTML(job)}${infoHTML(readout.description.replaceAll('自报','训练上报'),'训练进度说明')}${owned&&command?.length?`<details class="job-command"><summary>训练命令</summary><pre>${escapeUI(command.join(' '))}</pre></details>`:''}${schedulingHTML?`<details class="job-command"><summary>卡数与调度策略</summary><div class="job-scheduling-facts">${schedulingHTML}</div></details>`:''}${job.latestAttempt?`<details class="job-command"><summary>最近运行记录</summary><dl><dt>运行 ID</dt><dd>${escapeUI(job.latestAttempt.id||'未记录')}</dd><dt>退出码</dt><dd>${escapeUI(job.latestAttempt.exitCode??'未记录')}</dd><dt>原因</dt><dd>${escapeUI(job.latestAttempt.failureReason||'未记录')}</dd></dl></details>`:''}<h3>主日志</h3><pre id="job-log-preview">正在读取主日志…</pre></section>`;
+}
+
+export function elapsedTraining(job,now=Date.now()/1000){
+  const start=job.latestAttempt?.startedAt,end=endedJob(job)?job.latestAttempt?.finishedAt:now;
+  if(!Number.isFinite(start)||start<=0||!Number.isFinite(end)||end<start||!endedJob(job)&&job.state!=='RUNNING')return null;
+  const seconds=Math.floor(end-start),hours=Math.floor(seconds/3600),minutes=Math.floor(seconds/60)%60;
+  return (hours?hours+':':'')+String(minutes).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');
+}
+export function missionGPUs(job,snapshot,machines=[]){
+  const host=snapshot?.hosts?.find(row=>row.id===job.machine),machine=machines.find(row=>row.id===job.machine);
+  if(!machine||!Array.isArray(job.assignedIndices)||!job.assignedIndices.length)return [];
+  const ids=[...new Set(job.assignedIndices)].filter(index=>Number.isSafeInteger(index)&&index>=0&&index<machine.cards);
+  const samples=new Map(),duplicates=new Set();for(const gpu of host?.gpus||[]){if(samples.has(gpu.index))duplicates.add(gpu.index);samples.set(gpu.index,gpu);}
+  return ids.map(index=>{
+    const gpu=samples.get(index),known=!duplicates.has(index)&&snapshot?.stale===false&&host?.reachable===true&&Number.isFinite(gpu?.memoryTotalMiB)&&gpu.memoryTotalMiB>0&&Number.isFinite(gpu.memoryUsedMiB)&&gpu.memoryUsedMiB>=0&&gpu.memoryUsedMiB<=gpu.memoryTotalMiB;
+    return {index,known,ratio:known?gpu.memoryUsedMiB/gpu.memoryTotalMiB:null,used:known?(gpu.memoryUsedMiB/1024).toFixed(1):'—',total:known?(gpu.memoryTotalMiB/1024).toFixed(1):'—',utilization:known&&Number.isFinite(gpu.utilization)&&gpu.utilization>=0&&gpu.utilization<=100?gpu.utilization:null};
+  });
+}
+export function missionHTML(job,{snapshot,machines=[],now=Date.now()/1000}={}){
+  const r=trainingReadout(job),gpus=missionGPUs(job,snapshot,machines),elapsed=elapsedTraining(job,now),width=gpus.length?384/gpus.length:0;
+  const hardware=gpus.length?`<svg class="r5-mission-hardware" viewBox="0 0 432 205" role="img" aria-label="${escapeUI(job.machine)} 本次分配的 ${gpus.length} 张显卡"><defs><pattern id="mission-unknown" width="6" height="6" patternUnits="userSpaceOnUse"><path d="M-1 1L1-1M0 6L6 0M5 7L7 5" class="mission-hatch"></path></pattern><pattern id="mission-perforation" width="7" height="7" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r=".7" class="mission-hole"></circle></pattern></defs><rect x="1" y="1" width="430" height="195" rx="3" class="mission-chassis"></rect><rect x="8" y="9" width="416" height="176" class="mission-panel"></rect><rect x="16" y="17" width="400" height="12" fill="url(#mission-perforation)"></rect>${gpus.map((gpu,n)=>{const x=24+n*width,h=gpu.known?120*gpu.ratio:120;return `<g><rect x="${x}" y="38" width="${width-9}" height="120" class="mission-bay"></rect><rect x="${x+1}" y="${158-h}" width="${width-11}" height="${h}" class="mission-fill ${gpu.known?'':'unknown'}" ${gpu.known?'':'fill="url(#mission-unknown)"'}></rect><text x="${x+5}" y="174">GPU ${gpu.index}</text></g>`;}).join('')}<path d="M16 184H416M16 190H52M64 190H89M102 190H133" class="mission-io"></path></svg><div class="r5-mission-gpu-facts">${gpus.map(gpu=>`<div><strong>GPU ${gpu.index}</strong><span class="mono">${gpu.known?gpu.used+' / '+gpu.total+' GiB':'显存待更新'}</span>${gpu.utilization===null?'':`<span>利用率 ${gpu.utilization}%</span>`}</div>`).join('')}</div>`:'<p class="r5-mission-empty">显卡尚未分配</p>';
+  return `<header class="r5-mission-head"><span>任务全屏</span><div><button class="button quiet" type="button" data-copy-job="${escapeUI(job.id)}" title="${escapeUI(job.id)}">复制 ID</button><button class="button quiet" type="button" data-mission-close>退出全屏 <kbd>Esc</kbd></button></div></header><div class="r5-mission-body"><div class="r5-mission-identity"><p class="mono">${escapeUI(job.machine)}${job.project?' / '+escapeUI(job.project):''}</p><h1 id="job-mission-title">${escapeUI(job.name||'训练')}</h1><div>${stateHTML(job)}${job.schedulerCheckedAt?`<span class="mono">更新于 ${escapeUI(shortTime(job.schedulerCheckedAt))}</span>`:''}</div></div><div class="r5-mission-focus"><section class="r5-mission-progress"><div class="wb-report-label"><span class="label">训练上报</span>${infoHTML('进度、指标和预计结束时间来自训练上报。任务结束和额度释放以服务器确认的状态为准。','训练上报说明')}</div><div class="r5-mission-percentage">${r.percent===null?'—':r.percent}<small>${r.percent===null?'':'%'}</small></div><div class="r5-mission-report">${r.epoch?`<span>${escapeUI(r.epoch)}</span>`:''}${r.updatedAt?`<span class="mono">更新于 ${escapeUI(shortTime(r.updatedAt))}</span>`:''}${r.completionPending?'<strong>完成待确认</strong>':''}${!r.fresh?'<span>进度未更新</span>':''}</div></section><section class="r5-mission-time"><div><span class="label">${endedJob(job)?'运行时长':'已运行'}</span><strong class="mono" data-mission-elapsed>${elapsed||'—'}</strong></div>${!endedJob(job)&&r.eta?`<div><span class="label">预计结束</span><span>${escapeUI(r.eta)}</span></div>`:''}</section><section class="r5-mission-gpus"><div class="r5-mission-section-title"><h2>本次显卡</h2><span class="mono">${escapeUI(job.machine)}</span>${infoHTML('液位表示显存占比。斜线表示采集未知，不代表空闲。','显卡图例')}</div>${hardware}</section></div>${job.error?`<p class="form-error">${escapeUI(job.error)}</p>`:''}${r.metrics.length?`<section class="r5-mission-metrics" aria-label="最新指标">${r.metrics.map(([name,value])=>`<div><span class="label">${escapeUI(name)}</span><strong class="mono">${escapeUI(Number(value).toPrecision(5))}</strong></div>`).join('')}</section>`:''}<section class="r5-mission-trajectory"><div class="r5-mission-section-title"><h2>任务轨迹</h2>${infoHTML('各阶段依据任务状态显示。只有已返回的时间会显示，缺失时间不会推算。','轨迹来源')}</div>${trajectoryHTML(job)}</section></div>`;
+}
+export function taskMissionUI(store,{onOpen=()=>{},toast=()=>{}}={}){
+  const dialog=document.createElement('dialog');dialog.id='job-mission';dialog.className='r5-mission';dialog.setAttribute('aria-labelledby','job-mission-title');document.body.append(dialog);
+  let id=null,opener=null,html='',timer=null;
+  const owned=()=>store.jobs.find(job=>job.id===id&&job.userId===store.principal?.userId);
+  function close(animate=true){
+    if(!dialog.open)return;
+    const title=captureObject(dialog.querySelector('#job-mission-title')),number=captureObject(dialog.querySelector('.r5-mission-percentage'));
+    dialog.close();clearInterval(timer);timer=null;
+    const row=[...document.querySelectorAll('[data-workbench-job]')].find(node=>node.dataset.workbenchJob===id);
+    if(animate){sharedObject(title,row?.querySelector('.wb-job-name'));sharedObject(number,row?.querySelector('.wb-progress-number'));}
+    (opener?.isConnected?opener:row?.querySelector('[data-job-mission]')||row?.querySelector('.wb-job-name'))?.focus({preventScroll:true});
+  }
+  function sync(){
+    const job=owned();if(!job){close(false);dialog.replaceChildren();id=null;html='';return;}
+    if(!dialog.open)return;
+    const next=missionHTML(job,{snapshot:store.data?.gpuq,machines:store.data?.machines});
+    if(next!==html){const focus=dialog.contains(document.activeElement)?document.activeElement?.hasAttribute('data-mission-close')?'[data-mission-close]':document.activeElement?.hasAttribute('data-copy-job')?'[data-copy-job]':null:null;html=next;dialog.innerHTML=next;if(focus)dialog.querySelector(focus)?.focus({preventScroll:true});}
+  }
+  function open(jobId,source){
+    if(!store.jobs.some(job=>job.id===jobId&&job.userId===store.principal?.userId))return;
+    opener=source;const row=source?.closest('[data-workbench-job]'),title=captureObject(row?.querySelector('.wb-job-name')),number=captureObject(row?.querySelector('.wb-progress-number'));
+    id=jobId;onOpen(id);html=missionHTML(owned(),{snapshot:store.data?.gpuq,machines:store.data?.machines});dialog.innerHTML=html;dialog.showModal();
+    sharedObject(title,dialog.querySelector('#job-mission-title'));sharedObject(number,dialog.querySelector('.r5-mission-percentage'));dialog.querySelector('[data-mission-close]').focus({preventScroll:true});
+    clearInterval(timer);timer=setInterval(()=>{if(document.hidden)return;const job=owned(),elapsed=job?elapsedTraining(job):null;const label=dialog.querySelector('[data-mission-elapsed]');if(label)label.textContent=elapsed||'—';},1000);
+  }
+  document.addEventListener('click',event=>{const button=event.target.closest('button');if(!button||button.disabled)return;if(button.dataset.jobMission)open(button.dataset.jobMission,button);if(button.hasAttribute('data-mission-close'))close();});
+  dialog.addEventListener('click',event=>{const button=event.target.closest('[data-copy-job]');if(button&&owned()?.id===button.dataset.copyJob)navigator.clipboard.writeText(button.dataset.copyJob).then(()=>toast('已复制任务 ID'),()=>toast('复制失败，请手动复制。'));});
+  dialog.addEventListener('cancel',event=>{event.preventDefault();close();});
+  store.onAuthChange?.(()=>{close(false);dialog.replaceChildren();id=null;html='';});
+  return {sync,close};
 }

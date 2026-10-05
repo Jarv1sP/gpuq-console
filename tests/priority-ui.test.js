@@ -33,10 +33,10 @@ test('priority controls require administrator plus explicit queued capability, n
   assert.doesNotMatch(taskTable([{...job,state:'RUNNING'}],{admin:true}),/data-job-priority=/);
 });
 test('task table displays scheduler evidence without inventing sampling time or cancellation cause',()=>{
-  const html=taskTable([job]);assert.match(html,/普通/);assert.match(html,/等待空闲 GPU/);assert.match(html,/调度状态：PENDING/);assert.match(html,/核对时间/);
+  const html=taskTable([job]);assert.match(html,/普通/);assert.match(html,/等待空闲 GPU/);assert.match(html,/状态：PENDING/);assert.match(html,/更新于/);
   assert.equal(taskStateLabel({...job,state:'CANCELED'}),'已取消');assert.equal(taskStateLabel({...job,state:'CANCELED',preempted:true}),'让位结束');
   const preempted=taskTable([{...job,state:'CANCELED',preempted:true}]);assert.match(preempted,/输出保留，不自动恢复/);assert.match(preempted,/data-job-cancel="job-1" disabled/);
-  const unknown=taskTable([{...job,schedulerCheckedAt:null,queueReason:null,schedulerState:null}]);assert.match(unknown,/核对时间：未提供/);assert.match(unknown,/暂无调度说明/);assert.doesNotMatch(unknown,/预计.*开始/);
+  const unknown=taskTable([{...job,schedulerCheckedAt:null,queueReason:null,schedulerState:null}]);assert.match(unknown,/更新于 未提供/);assert.match(unknown,/暂无调度说明/);assert.doesNotMatch(unknown,/预计.*开始/);
 });
 test('data preparation state and escaped task metadata coexist after the frontend merge',()=>{
   const preparing={...job,state:'PREPARING_DATA',schedulerState:null,submitterName:'张三 <script>',description:'等待固定数据版本 <img src=x>',canSetPriority:false};

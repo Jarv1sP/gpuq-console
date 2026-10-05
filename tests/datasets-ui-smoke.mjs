@@ -119,7 +119,7 @@ try {
   assert.doesNotMatch(await admin.locator('#dataset-catalog').textContent(), /admin-private/);
   assert.equal(await card(admin).locator('.dataset-owner').textContent(), '所属用户：admin');
   assert.equal(calls.at(-1).args.userId, 'builtin-admin'); assert.equal(calls.at(-1).args.hostAdmin, false);
-  assert.match(await admin.locator('#datasets-capacity').textContent(),/512\.00 GiB.*不是个人配额/);
+  assert.match(await admin.locator('#datasets-capacity').textContent(),/可用 512\.00 GiB/);assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/共享磁盘容量，不是个人配额/);
   assert.equal(await admin.locator('.dataset-card h3',{hasText:/^another$/}).count(),1,'Same dataset and version is merged across machines');
   assert.equal(await admin.locator('#datasets-add').evaluate(node=>node.open),false,'Import controls start collapsed');
   await capture(admin, 'datasets-admin-desktop.png');

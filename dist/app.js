@@ -1,3 +1,4 @@
+import {discloseInfo} from './workbench-ui.js';
 import {DemoClient} from './client.js';
 import {executionUI,renderTaskTable} from './execution-ui.js';
 import {terminalUI} from './terminal-ui.js';
@@ -70,9 +71,12 @@ function render(preserve=false){
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
   const titles={me:['我的','账号、额度与个人工作区。'],transfers:['传输任务','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
   const concisePage=['community','users','maintenance'].includes(page);
-  $('#page-title').textContent=titles[page][0];$('#page-description').textContent=concisePage?'':titles[page][1];$('#page-description').hidden=concisePage;$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
-  const note=!logged?'登录或使用注册码注册，开始使用实验室资源。':!store.production?page==='resources'?'演示模式，无真实采集。':'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?page==='resources'?'暂无额度，等待管理员授权。':'当前用卡额度为 0，请等待管理员授权。你仍可以查看资源和参与协作。':'';
-  const monitorNotice=logged&&store.production&&store.data?.gpuq?.stale&&page!=='resources'?'监控已过期：显卡占用为未知；任务结束与额度释放以调度器核对为准。':'';
+  $('#page-title').textContent=titles[page][0];$('#page-description').textContent=concisePage?'':titles[page][1];$('#page-description').hidden=concisePage||!titles[page][1];$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
+  if(!concisePage&&titles[page][1])discloseInfo($('#page-description'),'页面说明');
+  const descriptionInfo=$('#page-description').closest('.ui-info');if(descriptionInfo)descriptionInfo.hidden=concisePage||!titles[page][1];
+  discloseInfo($('.help-links>span'),'首次使用说明');
+  const note=!logged?'请登录。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?'暂无用卡额度，等待授权。':'';
+  const monitorNotice=logged&&store.production&&store.data?.gpuq?.stale&&page!=='resources'?'显卡监控待更新':'';
   if(concisePage){
     const mode=!logged?'请登录':!store.production?'演示':note?'额度 0':'';
     $('#mode-note').innerHTML=[mode?`<span>${mode}</span>${copyHelp('当前状态',!logged?'登录或用注册码注册后即可使用。':!store.production?'演示不会连接真实服务器或启动训练。':'获得管理员授权后才能提交训练，仍可查看资源和参与协作。','/guide/start')}`:'',monitorNotice?`<span>监控未更新</span>${copyHelp('监控未更新','显卡占用暂时未知。任务停止、额度释放以平台确认的结果为准。','/guide/troubleshooting')}`:''].filter(Boolean).join(' · ');
@@ -89,7 +93,7 @@ function render(preserve=false){
   const distribution=[...grouped].map(([key,count])=>{const [css,text]=stateNames[key]||['st-unk','状态未知'];return `<span class="st ${css}"><span class="g" aria-hidden="true"></span>${count} ${text}</span>`;}).join('');
   const used=u?store.usage(u.id):null,quota=u?.total;
   const quotaSlots=Number.isSafeInteger(quota)&&quota>0&&quota<=64?`<span class="wb-quota-segments" aria-hidden="true">${Array.from({length:quota},(_,i)=>`<i class="${i<used?'on':''}"></i>`).join('')}</span>`:'';
-  $('#self-summary').innerHTML=logged?`<div><small>已占额度 / 上限</small><strong>${used??'—'} / ${quota??'—'}<span> 张</span></strong>${quotaSlots}</div><div><small>进行中的训练</small><strong>${activeJobs.length}<span> 项</span></strong><span class="wb-state-distribution">${distribution||'暂无进行中的训练'}</span></div><div><small>已授权服务器</small><strong>${Object.values(u?.limits||{}).filter(limit=>limit>0).length}<span> 台</span></strong><span class="wb-telemetry-note">${label(u)}</span></div>`:'';
+  $('#self-summary').innerHTML=logged?`<div><small>占用额度 / 上限</small><strong>${used??'—'} / ${quota??'—'}<span> 张</span></strong>${quotaSlots}</div><div><small>进行中的训练</small><strong>${activeJobs.length}<span> 项</span></strong><span class="wb-state-distribution">${distribution||'暂无进行中的训练'}</span></div><div><small>已授权服务器</small><strong>${Object.values(u?.limits||{}).filter(limit=>limit>0).length}<span> 台</span></strong><span class="wb-telemetry-note">${label(u)}</span></div>`:'';
   $('#work-title-telemetry').hidden=page!=='work'||!logged;
   $('#open-submit').hidden=page!=='work'||!logged;$('#open-submit').disabled=!store.production||store.data?.executionEnabled!==true;
   shell.update();
