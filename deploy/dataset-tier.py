@@ -331,6 +331,20 @@ class DatasetTier:
             raise D.CacheError("no valid fixed-version recovery receipt")
         return receipt
 
+    def retirement_references(self, actor, dataset, version):
+        """Private grant relationship projection, never inferred from sourceId."""
+        self.cache._actor(actor)
+        internal=type(actor)(actor.user_id,True)
+        with self.cache._locked():
+            self.cache._dataset(actor,dataset)
+            tier=self.cache._tier(dataset,version)
+            if tier['role']!='cache':return []
+            receipt=self._receipt(internal,tier,dataset,version)
+        adapter=self.authorities[receipt['authorityId']]
+        project=getattr(adapter,'retirement_reference',None)
+        if not callable(project):raise D.CacheError('authority dependency has no fixed machine/reference proof')
+        return [project(internal,receipt['proof'])]
+
     def recover(self, actor, dataset, version):
         """Trusted worker recovery; no paths, endpoints or receipts from callers."""
         self.cache._actor(actor, admin=True)

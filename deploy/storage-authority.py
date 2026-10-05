@@ -10,6 +10,8 @@ do not infer media, root paths, machines, grants or endpoints from request JSON.
 Permanent authority-* pins freeze source ACL/registration and prohibit ordinary
 unpin. Explicit private retirement must reconcile every dependent cache and
 write permanent source/target fences before releasing any authority pin.
+Version-data retirement separately requires each fixed dependent isolation.
+There is no peer/public revoke endpoint and no archive-intent retirement here.
 """
 import base64
 import contextlib
@@ -18,6 +20,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -155,6 +158,167 @@ class AuthorityStore:
             return
         raise ValueError('Authority reference was permanently retired; it cannot be reissued')
 
+    def _revocation(self, grant):
+        try:
+            row = _load(self.root/grant['id']/'revoked.json')
+        except FileNotFoundError:
+            return None
+        fields = {'schema','protocol','operationId','sourceMachine','dataset','version','grantId',
+                  'grantSha256','receiptSha256','targetsSha256','state','createdAt'}
+        if (not isinstance(row,dict) or set(row)!=fields or type(row['schema']) is not int or row['schema']!=1
+                or row['protocol']!='dataset-authority-revocation-v1' or row['state']!='REVOKED'
+                or row['sourceMachine']!=self.machine or row['dataset']!=grant['dataset'] or row['version']!=grant['version']
+                or row['grantId']!=grant['id'] or row['grantSha256']!=_sha(grant)
+                or row['receiptSha256']!=_sha(grant['receipt'])
+                or type(row['createdAt']) not in (int,float) or not math.isfinite(row['createdAt']) or row['createdAt']<0):
+            raise ValueError('Corrupt permanent authority revocation; old grant remains unusable')
+        J.identifier(row['operationId']); D._identifier(row['targetsSha256'],D.HASH_RE)
+        return row
+
+    def _assert_live(self, grant):
+        if self._revocation(grant) is not None:
+            raise PermissionError('Authority grant was permanently revoked by version-data retirement')
+
+    def deletion_dependencies(self, actor, dataset, version):
+        """Private token-free dependency projection under caller's version lock.
+
+        Enumerate every grant, not the caller's visible catalog. Unknown pins,
+        incomplete issuers and damaged records require reconciliation. No file
+        absence, archive RETIRED event or cached public receipt proves removal.
+        """
+        self.cache._actor(actor)
+        record, registration = self.cache._record_snapshot(actor,dataset,version)
+        with self.cache._locked():
+            self.cache._check_snapshot(actor,dataset,version,registration)
+            owners = self.cache._dataset(actor,dataset)['owners']
+            tier = self.cache._tier(dataset,version)
+            if tier['role']!='protected' or not self.cache._ready(self.cache._paths(dataset,version),record['manifest'],version):
+                raise ValueError('Authority retirement requires the fixed protected READY original')
+            pins = sorted(pin for pin in tier['pins'] if pin.startswith('authority-'))
+        with D._directory(self.root) as fd:
+            names = sorted(os.listdir(fd))
+        if len(names)>10000:raise ValueError('Authority dependency inventory requires reconciliation')
+        grants=[]
+        for key in names:
+            J.identifier(key)
+            grant=_load(self.root/key/'grant.json')
+            grant=_validate_grant(grant,self.machine,grant.get('targetMachine'))
+            if grant['id']!=key:raise ValueError('Authority grant folder identity differs')
+            if grant['dataset']!=dataset or grant['version']!=version:continue
+            revoked=self._revocation(grant)
+            proof=_load(self.root/key/'sealed.json')
+            # Old grants stay permanently revoked after administrator restore.
+            # During a partially completed retirement their pins still exist;
+            # keep them in this exact generation's dependency inventory.
+            if revoked is not None and proof.get('registration')!=list(registration):continue
+            if (_sha(proof)!=grant['receipt']['sealedSha256'] or proof.get('owners')!=owners
+                    or grant['receipt']['owners']!=owners or grant['receipt']['pinId']!='authority-'+key):
+                raise ValueError('Authority dependency seal or owner binding changed')
+            with self.cache._locked():
+                self.cache._check_snapshot(actor,dataset,version,registration)
+                self.local._validate_locked(self.principal,proof)
+            grants.append(dict(id=key,targetMachine=grant['targetMachine'],receiptSha256=_sha(grant['receipt']),
+                               registration=list(registration),pinId=grant['receipt']['pinId']))
+        if pins!=sorted(g['pinId'] for g in grants):
+            raise ValueError('Unconfirmed or unknown authority pins block original retirement')
+        return dict(protocol='dataset-authority-dependencies-v1',sourceMachine=self.machine,
+                    dataset=dataset,version=version,registration=list(registration),pins=pins,grants=grants)
+
+    def revoke_for_retirement(self, actor, row, targets):
+        """Private exact-operation revocation after all fixed targets isolate.
+
+        targets are authenticated control-plane receipts, never public request
+        fields. The caller has fenced the original and all nodes and owns the
+        source version lock. This performs only local durable metadata writes.
+        """
+        self.cache._actor(actor)
+        expected=row['snapshot'].get('authority')
+        if expected is None or expected['sourceMachine']!=self.machine:
+            raise ValueError('Retirement has no fixed authority dependency plan')
+        fence=self.cache._check_retirement(row['dataset'],row['version'])
+        if (fence is None or fence['operationId']!=row['operationId'] or fence['actor']!=row['actor']
+                or fence['admin']!=row['admin'] or fence['snapshotSha256']!=_sha(row['snapshot'])
+                or fence['state']!='FENCED'):
+            raise ValueError('Authority revocation requires this active version fence')
+        if not isinstance(targets,list) or len(targets)>10000:raise ValueError('Invalid confirmed target inventory')
+        fields={'protocol','operationId','machine','dataset','version','state','isolated','complete',
+                'snapshotSha256','generation','fenceState','retainUntil','proofSha256','authorityReferences'}
+        confirmed={}
+        for target in targets:
+            if (not isinstance(target,dict) or set(target)!=fields or target['protocol']!='dataset-version-retirement-v1'
+                    or target['state']!='ISOLATED' or target['isolated'] is not True or target['fenceState']!='ISOLATED'
+                    or target['version']!=row['version'] or type(target['complete']) is not bool
+                    or type(target['retainUntil']) not in (int,float) or not math.isfinite(target['retainUntil'])
+                    or target['retainUntil']<fence['createdAt']+7*86400 or not isinstance(target['authorityReferences'],list)):
+                raise ValueError('Dependent data isolation is unconfirmed; original stays protected')
+            J.identifier(target['operationId']);_machine(target['machine']);D._identifier(target['dataset'])
+            for field in ('snapshotSha256','generation','proofSha256'):D._identifier(target[field],D.HASH_RE)
+            for ref in target['authorityReferences']:
+                ref_fields={'sourceMachine','targetMachine','sourceDataset','version','grantId','receiptSha256'}
+                if not isinstance(ref,dict) or set(ref)!=ref_fields:raise ValueError('Invalid fixed dependent reference')
+                if (ref['sourceMachine']!=self.machine or ref['sourceDataset']!=row['dataset']
+                        or ref['version']!=row['version']):continue
+                if ref['targetMachine']!=target['machine']:raise ValueError('Dependent target identity differs')
+                J.identifier(ref['grantId']);D._identifier(ref['receiptSha256'],D.HASH_RE)
+                if ref['grantId'] in confirmed:raise ValueError('Ambiguous dependent grant mapping')
+                confirmed[ref['grantId']]=(target,ref)
+        if set(confirmed)!=set(grant['id'] for grant in expected['grants']):
+            raise ValueError('Every authority dependent needs a matching isolated generation')
+        for planned in expected['grants']:
+            target,ref=confirmed[planned['id']]
+            if target['machine']!=planned['targetMachine'] or ref['receiptSha256']!=planned['receiptSha256']:
+                raise ValueError('Authority dependent receipt does not match its issued grant')
+        # On recovery, already-revoked grants remain in the fixed plan. Compare
+        # every private row and seal, then write only missing tombstones.
+        known=[]
+        for planned in expected['grants']:
+            key=planned['id'];folder=self.root/key
+            grant=_validate_grant(_load(folder/'grant.json'),self.machine,planned['targetMachine'])
+            proof=_load(folder/'sealed.json')
+            if (grant['dataset']!=row['dataset'] or grant['version']!=row['version']
+                    or _sha(grant['receipt'])!=planned['receiptSha256'] or _sha(proof)!=grant['receipt']['sealedSha256']
+                    or proof.get('registration')!=row['snapshot']['registration']):
+                raise ValueError('Private authority dependency changed before revocation')
+            revoked=self._revocation(grant)
+            if revoked is not None and (revoked['operationId']!=row['operationId'] or revoked['targetsSha256']!=_sha(targets)):
+                raise ValueError('Authority grant was revoked by another immutable operation')
+            known.append((grant,revoked))
+        live=self.deletion_dependencies(actor,row['dataset'],row['version'])
+        if live!=expected:
+            raise ValueError('New authority dependencies appeared; no retirement permitted')
+        receipts=[]
+        for grant,revoked in known:
+            if revoked is None:
+                revoked=dict(schema=1,protocol='dataset-authority-revocation-v1',operationId=row['operationId'],
+                    sourceMachine=self.machine,dataset=row['dataset'],version=row['version'],grantId=grant['id'],
+                    grantSha256=_sha(grant),receiptSha256=_sha(grant['receipt']),targetsSha256=_sha(targets),state='REVOKED',createdAt=time.time())
+                D._write_json(self.root/grant['id']/'revoked.json',revoked)
+            receipts.append(dict(id=grant['id'],proofSha256=_sha(revoked)))
+        return receipts
+
+    def verify_retirement_revocations(self, row):
+        """Check permanent proofs after the original registry has been moved."""
+        expected=row['snapshot'].get('authority')
+        receipts=row['revocations']
+        if (expected is None or expected['sourceMachine']!=self.machine
+                or not isinstance(receipts,list) or any(not isinstance(r,dict) or set(r)!={'id','proofSha256'} for r in receipts)
+                or len({r['id'] for r in receipts})!=len(receipts)
+                or {r['id'] for r in receipts}!={g['id'] for g in expected['grants']}):
+            raise ValueError('Permanent authority revocation proofs are incomplete')
+        by_id={r['id']:r for r in receipts}
+        for planned in expected['grants']:
+            grant=_validate_grant(_load(self.root/planned['id']/'grant.json'),self.machine,planned['targetMachine'])
+            proof=_load(self.root/planned['id']/'sealed.json')
+            if (grant['dataset']!=row['dataset'] or grant['version']!=row['version']
+                    or _sha(grant['receipt'])!=planned['receiptSha256'] or _sha(proof)!=grant['receipt']['sealedSha256']
+                    or proof.get('registration')!=row['snapshot']['registration']
+                    or proof.get('rootIdentity')!=row['snapshot']['rootIdentity'] or proof.get('owners')!=row['snapshot']['owners']):
+                raise ValueError('Permanent authority revocation generation changed')
+            revoked=self._revocation(grant)
+            if revoked is None or revoked['operationId']!=row['operationId'] or _sha(revoked)!=by_id[planned['id']]['proofSha256']:
+                raise ValueError('Old authority grant is not confirmed permanently revoked')
+        return True
+
     def seal(self, actor, dataset, version, grant_id, target_machine):
         """Offline/long-running ADMIN operation; never reachable via read()."""
         self.cache._actor(actor, admin=True)
@@ -172,6 +336,7 @@ class AuthorityStore:
                 grant = None
             if grant is not None:
                 grant = _validate_grant(grant, self.machine, target_machine)
+                self._assert_live(grant)
                 if grant['dataset'] != dataset or grant['version'] != version:
                     raise ValueError('Authority grant ID cannot change fixed content')
                 self.read({'id':grant_id,'action':'guard','dataset':dataset,'version':version,
@@ -215,6 +380,7 @@ class AuthorityStore:
         if extra is None or set(request) != base|extra: raise ValueError('Authority endpoint is read-only')
         key = J.identifier(request['id']); folder = self.root/key
         grant = _validate_grant(_load(folder/'grant.json'), self.machine, request['targetMachine'])
+        self._assert_live(grant)
         if (not isinstance(token, str) or not hmac.compare_digest(token, grant['token'])
                 or request['dataset'] != grant['dataset'] or request['version'] != grant['version']):
             raise PermissionError('Authority grant does not authorize this fixed reference')
@@ -317,6 +483,18 @@ class RemoteAuthority:
         return dict(schema=1,kind='remote-protected-v1',machine=self.machine,targetMachine=self.target_machine,
             dataset=grant['dataset'],version=grant['version'],owners=receipt['owners'],pinId=receipt['pinId'],
             grantId=grant['id'],receiptSha256=_sha(receipt),certificateSha256=self.peer['certificateSha256'])
+
+    def retirement_reference(self, actor, proof):
+        """Private fixed binding from installed grant; no token or peer I/O.
+
+        The original's frozen dependency plan verifies this ID and receipt
+        again before revocation. No network is performed under a cache lock.
+        """
+        _admin(actor)
+        grant=self._grant(proof.get('dataset'),proof.get('version'))
+        if proof!=self._proof(grant):raise ValueError('Installed authority binding changed during deletion')
+        return dict(sourceMachine=self.machine,targetMachine=self.target_machine,sourceDataset=grant['dataset'],
+                    version=grant['version'],grantId=grant['id'],receiptSha256=_sha(grant['receipt']))
 
     def _authenticated(self, client, grant):
         if client.call('guard') != grant['receipt']: raise ValueError('Remote sealed authority identity changed')

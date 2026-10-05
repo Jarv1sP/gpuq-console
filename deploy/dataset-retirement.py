@@ -23,6 +23,7 @@ _spec = importlib.util.spec_from_file_location('retirement_cache_helpers', Path(
 D = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(D)
 PROTOCOL = 'dataset-version-retirement-v1'
+GRANT_UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z')
 
 
 def operation(value):
@@ -78,7 +79,7 @@ def identity(path, directory=False):
 
 class DatasetRetirement:
     def __init__(self, cache, machine, *, retention_days=7, clock=time.time,
-                 assert_quiescent=None, authority=None):
+                 assert_quiescent=None, authority=None, recovery_references=None):
         if not isinstance(machine, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', machine):
             raise D.CacheError('a configured machine identity is required')
         if type(retention_days) is not int or not 7 <= retention_days <= 365:
@@ -86,6 +87,7 @@ class DatasetRetirement:
         self.cache, self.machine, self.clock = cache, machine, clock
         self.retention_seconds = retention_days * 86400
         self.assert_quiescent, self.authority = assert_quiescent, authority
+        self.recovery_references=recovery_references
         self.root = cache.root / '.retirements'
         private_directory(self.root)
 
@@ -128,7 +130,7 @@ class DatasetRetirement:
         snap = row['snapshot']
         fields = {'protocol', 'machine', 'dataset', 'version', 'owners', 'registration', 'rootIdentity',
                   'manifestSha256', 'complete', 'readyIdentity', 'tierSha256', 'provenanceSha256',
-                  'tierIdentity', 'provenanceIdentity', 'memberAllowed'}
+                  'tierIdentity', 'provenanceIdentity', 'memberAllowed', 'authority', 'authorityReferences'}
         if (not isinstance(snap, dict) or set(snap) != fields or snap['protocol'] != PROTOCOL
                 or any(snap[name] != row[name] for name in ('machine', 'dataset', 'version', 'rootIdentity'))
                 or type(snap['complete']) is not bool or type(snap['memberAllowed']) is not bool
@@ -147,6 +149,29 @@ class DatasetRetirement:
             raise D.CacheError('corrupt restored registration identity')
         for name in ('manifestSha256', 'tierSha256', 'provenanceSha256'):
             D._identifier(snap[name], D.HASH_RE)
+        if not isinstance(snap['authorityReferences'],list) or len(snap['authorityReferences'])>16:
+            raise D.CacheError('corrupt fixed authority references')
+        for ref in snap['authorityReferences']:
+            if (not isinstance(ref,dict) or set(ref)!={'sourceMachine','targetMachine','sourceDataset','version','grantId','receiptSha256'}
+                    or ref['targetMachine']!=row['machine'] or ref['version']!=row['version']):
+                raise D.CacheError('corrupt fixed authority reference')
+            D._identifier(ref['sourceMachine']);D._identifier(ref['sourceDataset'])
+            D._identifier(ref['grantId'],GRANT_UUID);D._identifier(ref['receiptSha256'],D.HASH_RE)
+        authority=snap['authority']
+        if authority is not None:
+            if (not isinstance(authority,dict) or set(authority)!={'protocol','sourceMachine','dataset','version','registration','pins','grants'}
+                    or authority['protocol']!='dataset-authority-dependencies-v1' or authority['sourceMachine']!=row['machine']
+                    or authority['dataset']!=row['dataset'] or authority['version']!=row['version']
+                    or authority['registration']!=snap['registration'] or not isinstance(authority['pins'],list)
+                    or not isinstance(authority['grants'],list) or len(authority['grants'])>10000):
+                raise D.CacheError('corrupt authority dependency plan')
+            for grant in authority['grants']:
+                if (not isinstance(grant,dict) or set(grant)!={'id','targetMachine','receiptSha256','registration','pinId'}
+                        or grant['registration']!=snap['registration'] or grant['pinId']!='authority-'+grant['id']):
+                    raise D.CacheError('corrupt fixed authority grant')
+                D._identifier(grant['id'],GRANT_UUID);D._identifier(grant['targetMachine']);D._identifier(grant['receiptSha256'],D.HASH_RE)
+            if authority['pins']!=sorted(grant['pinId'] for grant in authority['grants']):
+                raise D.CacheError('incomplete authority dependency pins')
         for name, value in row['moves'].items():
             origin = (row['restoreRecordIdentity'] if name == 'restore-registration' else snap['registration']
                       if name == 'registration' else snap['readyIdentity'] if name in {'ready', 'restore-ready'} else snap[name+'Identity'])
@@ -180,6 +205,62 @@ class DatasetRetirement:
             raise PermissionError('这份数据只能由管理员删除')
         return owners, proof
 
+    def fence(self, actor, dataset, version, key, snapshot):
+        """Persist before draining workers; never clear an ambiguous fence."""
+        self.cache._actor(actor)
+        operation(key)
+        with self._lock(key):
+            with self.cache._locked():
+                previous = self.cache._retirement_fence(dataset, version)
+            if previous is not None and previous['state'] != 'RESTORED':
+                if (previous['operationId'] != key or previous['actor'] != actor.user_id
+                        or previous['admin'] != actor.is_admin or previous['snapshotSha256'] != sha(snapshot)):
+                    raise PermissionError('version is fenced by another immutable deletion request')
+            else:
+                if previous is not None and previous['operationId'] == key:
+                    raise D.CacheError('restored generation cannot replay its old deletion')
+                if self.inspect(actor, dataset, version) != snapshot:
+                    raise D.CacheError('version deletion preflight is stale')
+                with self.cache._locked():
+                    if self.cache._retirement_fence(dataset, version) != previous:
+                        raise D.CacheError('another deletion fenced the version during preflight')
+                    self.cache._check_snapshot(actor, dataset, version, tuple(snapshot['registration']))
+                    owners, _ = self._permissions_locked(actor, dataset, version)
+                    if (owners != snapshot['owners'] or sha(self.cache._tier(dataset, version)) != snapshot['tierSha256']
+                            or self.cache._leases(dataset, version)
+                            or exists(self.cache._paths(dataset, version)['.staging'])):
+                        raise D.CacheError('version use changed before the persistent deletion fence')
+                    folder = self.root/dataset
+                    private_directory(folder)
+                    previous = dict(schema=1, protocol='dataset-version-fence-v1', rootIdentity=list(self.cache._root_identity),
+                        dataset=dataset, version=version, operationId=key, actor=actor.user_id, admin=actor.is_admin,
+                        snapshotSha256=sha(snapshot), generation=sha([list(self.cache._root_identity), dataset, version, snapshot['registration']]),
+                        state='FENCED', createdAt=self._now(), restoredRegistration=None)
+                    D._write_json(folder/(version+'.json'), previous)
+            with self.cache._retirement_scope(actor, key, dataset, version, sha(snapshot)):
+                # Global metadata lock is released before waiting for a copier,
+                # recovery stream, source guard, publish or another GC worker.
+                with self.cache._lock_file('.locks/'+dataset+'.'+version+'.lock'):
+                    if self.assert_quiescent is not None:
+                        self.assert_quiescent(dataset, version)
+                    return dict(protocol='dataset-version-fence-v1', operationId=key, machine=self.machine,
+                        dataset=dataset, version=version, snapshotSha256=sha(snapshot), generation=previous['generation'],
+                        state=previous['state'], drained=True)
+
+    def _set_fence(self, row, state, restored=None):
+        """Caller owns operation/version/global locks and the private scope."""
+        previous = self.cache._retirement_fence(row['dataset'], row['version'])
+        if (previous is None or previous['operationId'] != row['operationId']
+                or previous['actor'] != row['actor'] or previous['admin'] != row['admin']
+                or previous['snapshotSha256'] != sha(row['snapshot'])):
+            raise D.CacheError('persistent deletion generation changed; no mutation permitted')
+        allowed = {'FENCED':{'ISOLATED'}, 'ISOLATED':{'RESTORING','PURGED'},
+                   'RESTORING':{'RESTORED'}, 'RESTORED':set(), 'PURGED':set()}
+        if state != previous['state'] and state not in allowed[previous['state']]:
+            raise D.CacheError('invalid persistent deletion fence transition')
+        current = dict(previous, state=state, restoredRegistration=restored)
+        D._write_json(self.root/row['dataset']/(row['version']+'.json'), current)
+
     def inspect(self, actor, dataset, version):
         self.cache._actor(actor)
         paths = self.cache._paths(dataset, version)
@@ -207,14 +288,24 @@ class DatasetRetirement:
                         and provenance['origin'] in {'upload', 'workspace', 'replica'}))
             if self.assert_quiescent is not None:
                 self.assert_quiescent(dataset, version)
+            snapshot['authority']=(self.authority.deletion_dependencies(actor,dataset,version)
+                                   if self.authority is not None and tier['role']=='protected' and ready else None)
+            if tier['role']=='cache' and self.recovery_references is None:
+                raise D.CacheError('cache deletion requires fixed configured authority references')
+            snapshot['authorityReferences']=(self.recovery_references(actor,dataset,version)
+                                             if self.recovery_references is not None else [])
             return snapshot
 
-    @staticmethod
-    def _receipt(row):
+    def _receipt(self, row):
+        fence = self.cache._retirement_fence(row['dataset'], row['version'])
+        if fence is None or fence['operationId'] != row['operationId'] or fence['snapshotSha256'] != sha(row['snapshot']):
+            raise D.CacheError('retirement receipt has no matching persistent generation')
         return dict(protocol=PROTOCOL, operationId=row['operationId'], machine=row['machine'],
                     dataset=row['dataset'], version=row['version'], state=row['state'],
-                    isolated=row['state'] == 'ISOLATED', complete=row['snapshot']['complete'],
-                    retainUntil=row['retainUntil'], proofSha256=sha([row['binding'], row['moves'], row['dataIdentity'], row['revocations']]))
+                    isolated=row['state'] == 'ISOLATED' and fence['state'] == 'ISOLATED', complete=row['snapshot']['complete'],
+                    snapshotSha256=sha(row['snapshot']), generation=fence['generation'], fenceState=fence['state'],
+                    authorityReferences=row['snapshot']['authorityReferences'],
+                    retainUntil=row['retainUntil'], proofSha256=sha([row['binding'], row['moves'], row['dataIdentity'], row['revocations'], fence]))
 
     def status(self, actor, key):
         self.cache._actor(actor)
@@ -244,8 +335,9 @@ class DatasetRetirement:
         self.cache._actor(actor)
         self.cache._paths(dataset, version)
         operation(key)
+        self.fence(actor, dataset, version, key, snapshot)
         folder = self._folder(key)
-        with self._lock(key):
+        with self._lock(key), self.cache._retirement_scope(actor, key, dataset, version, sha(snapshot)):
             try:
                 row = self._journal(key)
             except FileNotFoundError:
@@ -264,11 +356,28 @@ class DatasetRetirement:
                 raise PermissionError('retirement UUID belongs to another immutable request')
             if row['state'] == 'ISOLATED':
                 self._verify_payload(row)
+                with self.cache._locked():
+                    self._set_fence(row, 'ISOLATED')
                 return self._receipt(row)
             if row['state'] != 'ISOLATING':
                 raise D.CacheError('retirement transaction cannot be replayed in this state')
             self._now(row)
             with self.cache._lock_file('.locks/' + dataset + '.' + version + '.lock'):
+                with self.cache._locked():
+                    authority_pins=self.cache._authority_pins(dataset,version)
+                if authority_pins:
+                    if _revoke is None:
+                        raise D.CacheError('authority isolation requires confirmed dependent removal and grant revocation')
+                    # Source version lock + persistent fence stay held, but
+                    # metadata/global lock never spans enumeration, hashing,
+                    # peer I/O, or an authenticated confirmation checker.
+                    row['revocations']=_revoke(row)
+                    if self.authority is None:
+                        raise D.CacheError('confirmed authority revocation adapter is unavailable')
+                    self.authority.verify_retirement_revocations(row)
+                    self._save(row)
+                if self.assert_quiescent is not None:
+                    self.assert_quiescent(dataset,version)
                 with self.cache._locked():
                     paths = self.cache._paths(dataset, version)
                     registry = self.cache._paths(dataset)['.registry']
@@ -282,12 +391,8 @@ class DatasetRetirement:
                     if any(not pin.startswith('authority-') for pin in tier['pins']):
                         raise D.CacheError('new use pin blocks version isolation')
                     if any(pin.startswith('authority-') for pin in tier['pins']):
-                        if _revoke is None:
-                            raise D.CacheError('authority isolation requires confirmed dependent removal and grant revocation')
-                        row['revocations'] = _revoke(row)
-                        self._save(row)
-                    if self.assert_quiescent is not None:
-                        self.assert_quiescent(dataset, version)
+                        if not row['revocations']:
+                            raise D.CacheError('authority revocation is not durably confirmed')
                     for name in ('payload', 'registration', 'metadata'):
                         private_directory(folder/name)
                     metadata = folder/'registration'/'dataset.json'
@@ -319,9 +424,16 @@ class DatasetRetirement:
                 row['retainUntil'] = self._now(row) + row['retentionSeconds']
                 row['state'] = 'ISOLATED'
                 self._save(row)
+                with self.cache._locked():
+                    self._set_fence(row, 'ISOLATED')
             return self._receipt(row)
 
     def _verify_payload(self, row, *, partial=False):
+        authority=row['snapshot']['authority']
+        if authority is not None and authority['grants']:
+            if self.authority is None:
+                raise D.CacheError('retained authority revocation adapter is unavailable')
+            self.authority.verify_retirement_revocations(row)
         folder = self._folder(row['operationId'])
         record = private_read(folder/'registration'/(row['version']+'.json'))
         manifest = D._manifest(record['manifest'])
@@ -367,6 +479,12 @@ class DatasetRetirement:
     def restore(self, actor, key):
         """Administrator-only local restore; old grants are never reinstated."""
         self.cache._actor(actor, admin=True)
+        row = self._journal(key)
+        original_actor = type(actor)(row['actor'], row['admin'])
+        with self.cache._retirement_scope(original_actor, key, row['dataset'], row['version'], sha(row['snapshot'])):
+            return self._restore(actor, key)
+
+    def _restore(self, actor, key):
         with self._lock(key):
             row = self._journal(key)
             now = self._now(row)
@@ -374,6 +492,7 @@ class DatasetRetirement:
                 with self.cache._locked():
                     if list(self.cache._record_identity(row['dataset'], row['version'])) != row['moves'].get('restore-registration'):
                         raise D.CacheError('restored registration changed; no replay permitted')
+                    self._set_fence(row, 'RESTORED', row['moves']['restore-registration'])
                 return self._receipt(row)
             if row['state'] not in {'ISOLATED', 'RESTORING'} or row['retainUntil'] is None or now >= row['retainUntil']:
                 raise D.CacheError('restore is only available during the retention period')
@@ -401,6 +520,7 @@ class DatasetRetirement:
                     if row['state'] == 'ISOLATED':
                         row['state'] = 'RESTORING'
                         self._save(row)
+                    self._set_fence(row, 'RESTORING')
                     restored_record = folder/'metadata'/'restore-registration.json'
                     if row['restoreRecordIdentity'] is None:
                         if exists(registry/(version+'.json')):
@@ -434,6 +554,7 @@ class DatasetRetirement:
                         self.cache._write_provenance(actor, dataset, version, metadata['owners'], 'admin', None)
                     row['state'] = 'RESTORED'
                     self._save(row)
+                    self._set_fence(row, 'RESTORED', row['moves']['restore-registration'])
             return self._receipt(row)
 
     @staticmethod
@@ -459,12 +580,20 @@ class DatasetRetirement:
     def purge(self, actor, key):
         """Local collection hook only. No RPC/peer route or timer is installed."""
         self.cache._actor(actor, admin=True)
+        row = self._journal(key)
+        original_actor = type(actor)(row['actor'], row['admin'])
+        with self.cache._retirement_scope(original_actor, key, row['dataset'], row['version'], sha(row['snapshot'])):
+            return self._purge(actor, key)
+
+    def _purge(self, actor, key):
         if not shutil.rmtree.avoids_symlink_attacks:
             raise D.CacheError('descriptor-safe cleanup is unavailable')
         with self._lock(key):
             row = self._journal(key)
             now = self._now(row)
             if row['state'] == 'PURGED':
+                with self.cache._locked():
+                    self._set_fence(row,'PURGED')
                 return self._receipt(row)
             if row['state'] not in {'ISOLATED', 'PURGING'} or row['retainUntil'] is None or now < row['retainUntil']:
                 raise D.CacheError('confirmed complete isolation and expired retention are required')
@@ -484,6 +613,8 @@ class DatasetRetirement:
                         os.fsync(fd)
                 row['state'] = 'PURGED'
                 self._save(row)
+                with self.cache._locked():
+                    self._set_fence(row, 'PURGED')
             return self._receipt(row)
 
     def collect_expired(self, actor, *, enabled=False, max_versions=16):

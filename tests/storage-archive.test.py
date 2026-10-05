@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 import uuid
+from dataset_retention_helpers import protected_original
 
 SPEC = importlib.util.spec_from_file_location('archive_tests', Path(__file__).resolve().parents[1]/'deploy/storage-archive.py')
 M = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(M)
@@ -121,6 +122,10 @@ class ArchiveTests(unittest.TestCase):
         intent = self.intent()
         self.source.outbox_begin(intent)
         self.source.outbox_ready(dict(opId=intent['opId'], userId=USER))
+        # Intent retirement consumes a genuine ordinary-removal receipt. This
+        # positive fixture needs another sealed complete original; it cannot
+        # use the intent's RETIRED state as last-copy protection.
+        protected_original(self.cold, D, self.root/'removed-intent-original')
         receipt = self.cold.unregister(ADMIN, 'original', self.version)
         h = A._sha([USER, 'cold-node', 'original', self.version, 'cold-node'])
         grant = h[:8]+'-'+h[8:12]+'-5'+h[13:16]+'-a'+h[17:20]+'-'+h[20:32]
@@ -150,6 +155,7 @@ class ArchiveTests(unittest.TestCase):
     def test_queued_retire_is_source_only_and_keeps_other_native_lane(self):
         target = self.tls_target(); intent = self.intent(dataset='replica')
         target.outbox_begin(intent); target.outbox_ready(dict(opId=intent['opId'], userId=USER))
+        protected_original(self.hot, D, self.root/'queued-intent-original')
         removed = self.hot.unregister(ADMIN, 'replica', self.version)
         request = dict(id=intent['opId'], userId=USER, dataset='replica', version=self.version,
                        recoveryId=removed['recoveryId'], mode='queued-ingest-v1')
@@ -164,6 +170,17 @@ class ArchiveTests(unittest.TestCase):
         self.hot.register_manifest(ADMIN,'replica',self.manifest,[USER])
         new = self.intent(dataset='replica');target.outbox_begin(new)
         with self.assertRaises(ValueError):target.retire({**request,'id':new['opId']})
+
+    def test_intent_retirement_does_not_authorize_erasing_the_last_complete_copy(self):
+        intent = self.intent()
+        self.source.outbox_begin(intent)
+        self.source.outbox_ready(dict(opId=intent['opId'], userId=USER))
+        with self.assertRaisesRegex(ValueError, '最后一份'):
+            self.cold.unregister(ADMIN, 'original', self.version)
+        self.assertEqual(self.source.outbox_list({'limit':8})['events'][0]['state'], 'READY')
+        self.assertEqual((self.cold._paths('original', self.version)['ready']/'data/file').read_bytes(),
+                         b'archive fixture\x00'*2048)
+        self.assertEqual(list((self.cold.root/'.trash').iterdir()), [])
 
     def test_retire_rejects_recreated_registration_missing_or_uncommitted_proof(self):
         request = self.removed_intent()

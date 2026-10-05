@@ -53,6 +53,7 @@ from typing import NamedTuple
 
 
 SCHEMA = 1
+_RETIREMENT_SCOPE = contextvars.ContextVar('dataset_retirement_scope', default=None)
 CHUNK_BYTES = 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 500000
@@ -478,8 +479,82 @@ class DatasetCache:
             if self.mount is not None and info.st_dev != self.mount[2]:
                 raise CacheError("cache no longer resides on the verified data mount")
             self._root_identity = info.st_dev, info.st_ino
-        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations", ".tiers", ".provenance"):
+        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations", ".tiers", ".provenance", ".retirements"):
             _mkdir(self.root / name)
+
+    def _retirement_fence(self, dataset, version):
+        """Private persistent generation fence; missing is the only open case."""
+        self._paths(dataset, version)
+        path = self.root / '.retirements' / dataset / (version + '.json')
+        try:
+            with _directory(path.parent) as parent:
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                try:
+                    info = _regular(fd)
+                    if info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > 65536:
+                        raise CacheError('unsafe version deletion fence')
+                    with os.fdopen(fd, 'rb', closefd=False) as stream:
+                        row = json.loads(stream.read(65537))
+                finally:
+                    os.close(fd)
+        except FileNotFoundError:
+            return None
+        except (ValueError, UnicodeError) as error:
+            raise CacheError('corrupt version deletion fence') from error
+        fields = {'schema', 'protocol', 'rootIdentity', 'dataset', 'version', 'operationId',
+                  'actor', 'admin', 'snapshotSha256', 'generation', 'state', 'createdAt', 'restoredRegistration'}
+        if (not isinstance(row, dict) or set(row) != fields or type(row['schema']) is not int or row['schema'] != 1
+                or row['protocol'] != 'dataset-version-fence-v1' or row['rootIdentity'] != list(self._root_identity)
+                or row['dataset'] != dataset or row['version'] != version or type(row['admin']) is not bool
+                or row['state'] not in {'FENCED', 'ISOLATED', 'RESTORING', 'RESTORED', 'PURGED'}
+                or type(row['createdAt']) not in (int, float) or not math.isfinite(row['createdAt']) or row['createdAt'] < 0
+                or not isinstance(row['operationId'], str)
+                or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}', row['operationId'])):
+            raise CacheError('corrupt version deletion fence')
+        _identifier(row['actor'], USER_RE)
+        _identifier(row['snapshotSha256'], HASH_RE)
+        _identifier(row['generation'], HASH_RE)
+        restored = row['restoredRegistration']
+        if ((row['state'] == 'RESTORED') != (restored is not None)
+                or restored is not None and (not isinstance(restored, list) or len(restored) != 5
+                    or any(type(item) is not int or item < 0 for item in restored))):
+            raise CacheError('corrupt restored deletion generation')
+        return row
+
+    def _check_retirement(self, dataset, version, *, _read_only=False):
+        row = self._retirement_fence(dataset, version)
+        if row is None or row['state'] == 'RESTORED' or _read_only:
+            return row
+        scope = (tuple(self._root_identity), row['operationId'], row['actor'], row['admin'], dataset, version, row['snapshotSha256'])
+        if _RETIREMENT_SCOPE.get() != scope:
+            raise CacheError('数据删除已锁定此版本，请查询删除任务；不可重新准备或重建')
+        return row
+
+    @contextlib.contextmanager
+    def _retirement_scope(self, actor, operation_id, dataset, version, snapshot_sha256):
+        """Private exact-operation override, deliberately absent from dispatch."""
+        self._actor(actor)
+        self._paths(dataset, version)
+        _identifier(snapshot_sha256, HASH_RE)
+        token = _RETIREMENT_SCOPE.set((tuple(self._root_identity), operation_id, actor.user_id,
+                                       actor.is_admin, dataset, version, snapshot_sha256))
+        try:
+            self._check_retirement(dataset, version)
+            yield
+        finally:
+            _RETIREMENT_SCOPE.reset(token)
+
+    def _check_dataset_retirement(self, dataset):
+        folder = self.root / '.retirements' / dataset
+        try:
+            with _directory(folder) as fd:
+                names = os.listdir(fd)
+        except FileNotFoundError:
+            return
+        for name in names:
+            if not re.fullmatch(r'[a-f0-9]{64}\.json', name):
+                raise CacheError('unknown version deletion fence')
+            self._check_retirement(dataset, name[:-5])
 
     def _current_mount(self):
         if self.mount_point is None or (self.mount_point == Path("/data2") and self.root == Path("/data2/datasets")):
@@ -574,8 +649,9 @@ class DatasetCache:
             raise CacheError("at least one dataset owner is required")
         return sorted(set(_identifier(owner, USER_RE) for owner in owners))
 
-    def _record(self, actor, dataset, version):
+    def _record(self, actor, dataset, version, *, _read_only=False):
         self._dataset(actor, dataset)
+        self._check_retirement(dataset, version, _read_only=_read_only)
         record = _read_json(self._paths(dataset)[".registry"] / (version + ".json")) if _identifier(version, HASH_RE) else None
         if (not isinstance(record, dict) or set(record) != {"schema", "manifest", "sourceId"}
                 or record["schema"] != SCHEMA):
@@ -587,7 +663,8 @@ class DatasetCache:
             _identifier(record["sourceId"])
         return record
 
-    def _record_identity(self, dataset, version):
+    def _record_identity(self, dataset, version, *, _read_only=False):
+        self._check_retirement(dataset, version, _read_only=_read_only)
         filename = self._paths(dataset)[".registry"] / (_identifier(version, HASH_RE) + ".json")
         with _directory(filename.parent) as parent:
             fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
@@ -596,15 +673,15 @@ class DatasetCache:
             finally:
                 os.close(fd)
 
-    def _check_snapshot(self, actor, dataset, version, identity):
+    def _check_snapshot(self, actor, dataset, version, identity, *, _read_only=False):
         # Authorization may be revoked while a long copy owns the version lock.
         # Revalidate the small owner record and immutable registration identity,
         # not a potentially 64 MiB manifest, under the global lock each batch.
         self._dataset(actor, dataset)
-        if self._record_identity(dataset, version) != identity:
+        if self._record_identity(dataset, version, _read_only=_read_only) != identity:
             raise CacheError("version registration changed; retry the operation")
 
-    def _record_snapshot(self, actor, dataset, version):
+    def _record_snapshot(self, actor, dataset, version, *, _read_only=False):
         """Validate a full immutable manifest without owning the global lock.
 
         The service-owned registration can only be accepted if the same no-follow
@@ -615,10 +692,10 @@ class DatasetCache:
         """
         with self._locked():
             self._dataset(actor, dataset)
-            identity = self._record_identity(dataset, version)
-        record = self._record(actor, dataset, version)
+            identity = self._record_identity(dataset, version, _read_only=_read_only)
+        record = self._record(actor, dataset, version, _read_only=_read_only)
         with self._locked():
-            self._check_snapshot(actor, dataset, version, identity)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=_read_only)
         return record, identity
 
     def _version_entry_exists(self, path):
@@ -675,7 +752,7 @@ class DatasetCache:
         if getattr(info, 'f_files', 0) > 0 and info.f_favail < 1024 + needed_inodes + self._upload_reserved()[1]:
             raise CacheError("insufficient free inodes including upload reservations")
 
-    def _provenance(self, dataset, version):
+    def _provenance(self, dataset, version, *, _read_only=False):
         """Private version provenance, bound to this exact registration.
 
         Missing historical records are UNKNOWN. Never infer personal origin
@@ -710,7 +787,7 @@ class DatasetCache:
             if len(value["owners"]) != 1:
                 raise CacheError("personal provenance requires one authenticated owner")
         if (value["rootIdentity"] != list(self._root_identity)
-                or value["registrationIdentity"] != list(self._record_identity(dataset, version))):
+                or value["registrationIdentity"] != list(self._record_identity(dataset, version, _read_only=_read_only))):
             return None  # Replaced registration/restore must acquire new proof.
         return value
 
@@ -744,11 +821,14 @@ class DatasetCache:
 
     def deletion_permissions(self, actor, dataset, version):
         """Safe permission projection; never expose private proof or paths."""
-        _, identity = self._record_snapshot(actor, dataset, version)
+        _, identity = self._record_snapshot(actor, dataset, version, _read_only=True)
         with self._locked():
-            self._check_snapshot(actor, dataset, version, identity)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
             owners = self._dataset(actor, dataset)["owners"]
-            proof = self._provenance(dataset, version)
+            proof = self._provenance(dataset, version, _read_only=True)
+            fence = self._retirement_fence(dataset, version)
+            if fence is not None and fence['state'] != 'RESTORED':
+                return dict(allowed=False, memberAllowed=False, reason='DELETION_ACTIVE')
             personal = (owners == [actor.user_id] and proof is not None
                         and proof["owners"] == owners
                         and proof["origin"] in {"upload", "workspace", "replica"})
@@ -832,6 +912,7 @@ class DatasetCache:
         owners = self._provenance_actor(actor, owners, _origin, _receipt)
         manifest = _manifest(manifest)
         version = _version(manifest)
+        self._check_retirement(dataset, version)
         paths = self._paths(dataset)
         self._free(self._reserved() + len(_json_bytes(manifest)) + 8192)
         for path in paths.values():
@@ -909,6 +990,7 @@ class DatasetCache:
             self._actor(actor, admin=True)
             existing = self._dataset(actor, dataset)
             owners = self._owners(owners)
+            self._check_dataset_retirement(dataset)
             if existing["owners"] == owners:
                 return {"updated": True}
             if self._authority_pins(dataset):
@@ -1046,17 +1128,17 @@ class DatasetCache:
             binding = self._catalog_binding(dataset, version)
             summary = self._catalog_summary(binding)
             if summary is not None:
-                identity = self._record_identity(dataset, version)
+                identity = self._record_identity(dataset, version, _read_only=True)
                 ready_identity = self._ready_identity(self._paths(dataset, version))
                 if self._catalog_binding(dataset, version) != binding:
                     raise CacheError('catalog metadata changed; retry the operation')
                 return summary, identity, ready_identity, binding
-        record, identity = self._record_snapshot(actor, dataset, version)
+        record, identity = self._record_snapshot(actor, dataset, version, _read_only=True)
         ready, ready_identity = self._ready_snapshot(self._paths(dataset, version), record['manifest'], version)
         summary = dict(bytes=sum(f['size'] for f in record['manifest']['files']),
                        files=len(record['manifest']['files']), ready=ready, sourceId=record['sourceId'])
         with self._locked():
-            self._check_snapshot(actor, dataset, version, identity)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
             self._check_ready_snapshot(self._paths(dataset, version), ready_identity)
             if self._catalog_binding(dataset, version) != binding:
                 raise CacheError('catalog metadata changed; retry the operation')
@@ -1108,7 +1190,7 @@ class DatasetCache:
                 rows = []
                 for row, identity, ready_identity, binding in versions:
                     version = row['version']
-                    self._check_snapshot(actor, dataset, version, identity)
+                    self._check_snapshot(actor, dataset, version, identity, _read_only=True)
                     paths = self._paths(dataset, version)
                     self._check_ready_snapshot(paths, ready_identity)
                     if self._catalog_binding(dataset, version) != binding:
@@ -1117,6 +1199,10 @@ class DatasetCache:
                                                   row['state'] == 'READY', row['bytes'])
                     if row['state'] != "READY" and self._version_entry_exists(paths[".staging"]):
                         row['state'] = "STAGING"
+                    fence = self._retirement_fence(dataset, version)
+                    if fence is not None and fence['state'] != 'RESTORED':
+                        row.update(state='UNKNOWN', canPrepare=False, deletionBlocked=True,
+                                   error='数据删除已锁定此版本，请查询删除任务。')
                     rows.append(row)
                 owners = self._owners(metadata["owners"])
                 # A display bound, not an ACL limit. Never return a truncated
@@ -1132,7 +1218,7 @@ class DatasetCache:
     def _status_snapshot(self, actor, dataset, version):
         """Trusted adapter also receives the validated registration identity."""
         try:
-            record, identity = self._record_snapshot(actor, dataset, version)
+            record, identity = self._record_snapshot(actor, dataset, version, _read_only=True)
         except FileNotFoundError:
             # Keep the missing-registration type for internal lifecycle callers,
             # but never expose an OS path as the user's status explanation.
@@ -1150,11 +1236,15 @@ class DatasetCache:
         state = "READY" if ready else "REGISTERED"
         remaining = 0 if ready else remaining
         with self._locked():
-            self._check_snapshot(actor, dataset, version, identity)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
             self._check_ready_snapshot(paths, ready_identity)
             if state != "READY" and self._version_entry_exists(paths[".staging"]):
                 state = "STAGING"
                 remaining = self._transfer(paths[".staging"])["remainingBytes"]
+            fence = self._retirement_fence(dataset, version)
+            if fence is not None and fence['state'] != 'RESTORED':
+                return dict(dataset=dataset, version=version, state='UNKNOWN', remainingBytes=remaining,
+                            deletionBlocked=True, error='数据删除已锁定此版本，请查询删除任务。')
             return dict(dataset=dataset, version=version, state=state, remainingBytes=remaining)
 
     def _transfer(self, stage):
@@ -1655,9 +1745,9 @@ class DatasetCache:
         self._actor(actor, admin=True)
         if not isinstance(lease_id, str) or str(uuid.UUID(lease_id)) != lease_id:
             raise CacheError("invalid lease ID")
-        _, identity = self._record_snapshot(actor, dataset, version)
+        _, identity = self._record_snapshot(actor, dataset, version, _read_only=True)
         with self._locked():
-            self._check_snapshot(actor, dataset, version, identity)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
             leases = self._leases(dataset, version)
             if not any(l["id"] == lease_id for l in leases):
                 return {"released": False}

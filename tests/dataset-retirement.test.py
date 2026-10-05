@@ -345,7 +345,7 @@ class RetirementTests(unittest.TestCase):
                 raise OSError('crash after restored registration rename')
         with patch.object(self.cache, '_unregister_move_record', side_effect=crash), self.assertRaises(OSError):
             self.retirement.restore(ADMIN, self.key)
-        registered = list(self.cache._record_identity('sample', self.version))
+        registered = list(self.cache._record_identity('sample', self.version, _read_only=True))
         self.assertEqual(self.retirement.restore(ADMIN, self.key)['state'], 'RESTORED')
         self.assertEqual(list(self.cache._record_identity('sample', self.version)), registered)
         filename = self.cache._paths('sample')['.registry']/(self.version+'.json')
