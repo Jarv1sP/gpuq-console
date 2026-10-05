@@ -156,10 +156,10 @@ export function boundarySweep(element){
   for(const animation of line.getAnimations())animation.cancel();
   line.animate(reducedMotion()?[{opacity:.65},{opacity:0}]:[{transform:'scaleX(0)',opacity:1},{transform:'scaleX(1)',opacity:1,offset:.8},{transform:'scaleX(1)',opacity:0}],{duration:reducedMotion()?150:320,easing:'cubic-bezier(.2,0,0,1)'});
 }
-export function workbenchCards(jobs,{actions=()=>'',focusId,maintenance,ledger=''}={}){
+export function workbenchCards(jobs,{actions=()=>'',focusId,maintenance,ledger='',historyState=''}={}){
   const active=jobs.filter(job=>!endedJob(job));
-  const focal=active.find(job=>job.id===focusId)||active.find(job=>job.state==='RUNNING'&&!job.cancelRequested)||active.find(job=>job.state==='UNKNOWN')||active[0]||jobs.at(-1);
-  const completed=jobs.filter(job=>endedJob(job)&&job.id!==focal?.id);
+  const focal=active.find(job=>job.id===focusId)||active.find(job=>job.state==='RUNNING'&&!job.cancelRequested)||active.find(job=>job.state==='UNKNOWN')||active[0]||(historyState?null:jobs.at(-1));
+  const completed=jobs.filter(job=>endedJob(job)&&job.id!==focal?.id&&(!historyState||job.state===historyState));
   const heading=(job,compact=false)=>`<div class="job-top"><div class="wb-job-heading">${stateHTML(job)}<button type="button" class="wb-job-name" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button>${compact?`<span class="wb-job-quick">${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数待更新'}</span>`:''}</div><span class="mono wb-job-id" title="${escapeUI(job.id)}">${escapeUI(String(job.id).slice(0,8))}</span></div>`;
   const compact=job=>`<article class="job compact-job" data-workbench-job="${escapeUI(job.id)}">${heading(job,true)}${job.error?`<p class="form-error">${escapeUI(job.error)}</p>`:''}<div class="job-acts"><button class="button quiet" type="button" data-job-focus="${escapeUI(job.id)}">聚焦</button>${actions(job)}${infoHTML(jobFacts(job),'任务事实')}</div></article>`;
   let hero='';
@@ -172,7 +172,8 @@ export function workbenchCards(jobs,{actions=()=>'',focusId,maintenance,ledger='
   }
   const others=active.filter(job=>job.id!==focal?.id).sort((a,b)=>Number(['FAILED','UNKNOWN'].includes(b.state))-Number(['FAILED','UNKNOWN'].includes(a.state)));
   const list=(rows,label)=>`<div class="wb-scroll-list" tabindex="0" role="region" aria-label="${label}">${rows.map(compact).join('')}</div>`;
-  return hero+ledger+(others.length?`<div class="wb-list-title"><h2>其他进行中的训练</h2><span class="mono">${others.length} 项</span></div>`+list(others,'其他进行中的训练'):'')+(completed.length?`<details class="wb-ended"><summary>已结束的训练 · ${completed.length} 项</summary>${list([...completed].reverse(),'已结束的训练')}</details>`:'')+(!jobs.length&&maintenanceActive(maintenance)?'<section class="wb-empty hero-frame"><span class="hero-label">我的训练任务</span><h2>暂无训练任务</h2><p>维护中的服务器暂停新提交。</p>'+infoHTML('维护不会自动停止运行任务，恢复由管理员确认。其他未维护的服务器仍可使用。','维护说明')+'</section>':!jobs.length?'<section class="wb-empty hero-frame"><span class="hero-label">开始一次训练</span><h2>准备好下一次实验</h2><p>选择服务器与项目，开始训练。</p></section>':'');
+  const history=completed.length||historyState?`<details class="wb-ended" ${historyState?'open':''}><summary>已结束的训练 · ${completed.length} 项</summary><label class="wb-history-filter">状态<select data-job-history-filter aria-label="已结束训练状态"><option value="">全部</option><option value="FAILED" ${historyState==='FAILED'?'selected':''}>失败</option></select></label>${completed.length?list([...completed].reverse(),'已结束的训练'):'<p class="muted">没有失败的训练。</p>'}</details>`:'';
+  return hero+ledger+(others.length?`<div class="wb-list-title"><h2>其他进行中的训练</h2><span class="mono">${others.length} 项</span></div>`+list(others,'其他进行中的训练'):'')+history+(!jobs.length&&maintenanceActive(maintenance)?'<section class="wb-empty hero-frame"><span class="hero-label">我的训练任务</span><h2>暂无训练任务</h2><p>维护中的服务器暂停新提交。</p>'+infoHTML('维护不会自动停止运行任务，恢复由管理员确认。其他未维护的服务器仍可使用。','维护说明')+'</section>':!jobs.length?'<section class="wb-empty hero-frame"><span class="hero-label">开始一次训练</span><h2>准备好下一次实验</h2><p>选择服务器与项目，开始训练。</p></section>':'');
 }
 
 export function jobOverviewHTML(job,{owned=true,schedulingHTML=''}={}){

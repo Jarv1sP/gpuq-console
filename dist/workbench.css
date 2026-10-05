@@ -161,3 +161,6 @@
 .sb .publication-trajectory{margin:8px 0 0;padding-bottom:0;gap:8px}.sb .publication-trajectory li{font-size:10px;white-space:nowrap}.sb .publication-count{display:block;margin-top:8px;font-size:11px;color:var(--ink-3)}
 .sb .workspace-status>.st{display:inline-flex;vertical-align:middle;margin-right:8px}.sb .wb-rail .workspace-status.publication-unknown{color:var(--queue)}.sb .wb-rail .workspace-status.publication-ready{color:var(--run)}
 @media(prefers-reduced-motion:reduce){.sb .project-environment-segments span{transition-duration:150ms}}
+.sb .wb-history-filter{display:flex;align-items:center;gap:12px;max-width:280px;margin:12px 0}
+.sb .wb-history-filter select{flex:1;min-width:0;min-height:40px}
+@media(max-width:759px){.sb .wb-history-filter select{min-height:44px}}
