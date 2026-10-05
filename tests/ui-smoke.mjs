@@ -35,10 +35,11 @@ try{
  const portal=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,statusPath,bridge:async(machine,operation)=>{if(operation==='projects.list')return {projects:[]};throw Error('Resource acceptance permits project metadata only, never an execution operation.');}});server=portal.server;await new Promise(r=>server.listen(port,'127.0.0.1',r));
  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
  const admin=await browser.newPage({viewport:{width:1440,height:1050}}),member=await browser.newPage({viewport:{width:1440,height:1050}}),errors=[];
- const blockedRequests=[];
+ const blockedRequests=[],inventoryRequests=[];
  for(const p of [admin,member]){
   p.context().on('page',page=>page.on('pageerror',e=>errors.push(e.message)));
   p.on('pageerror',e=>errors.push(e.message));
+  p.on('request',request=>{if(new URL(request.url()).pathname==='/machines.js')inventoryRequests.push(p===admin?'admin':'member');});
   await p.context().route('**/*',route=>{
    const url=route.request().url();
    if(new URL(url).origin===origin)return route.continue();
@@ -68,7 +69,26 @@ try{
   await p.evaluate(()=>scrollTo(0,0));
   await p.screenshot({path:join(process.env.UI_SCREENSHOTS,name),fullPage:await p.locator('dialog[open]').count()===0});
  }
- await login(admin,'admin');
+ // Public login and registration must initialise without a private module
+ // request or an expected-401 console error, including narrow phones.
+ const publicRequests=[],publicConsole=[];
+ const onPublicRequest=request=>publicRequests.push(new URL(request.url()).pathname);
+ const onPublicConsole=message=>{if(message.type()==='error')publicConsole.push(message.text());};
+ admin.on('request',onPublicRequest);admin.on('console',onPublicConsole);
+ await admin.goto(origin);await admin.locator('#login-dialog').waitFor({state:'visible'});
+ for(const width of [1440,390,320]){
+  await admin.setViewportSize({width,height:width===1440?1000:844});
+  await capture(admin,`login-public-${width}.png`);
+  assert.ok(await admin.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+ }
+ await admin.locator('#open-register').click();await admin.locator('#register-dialog').waitFor({state:'visible'});
+ await admin.locator('#back-to-login').click();await admin.locator('#login-dialog').waitFor({state:'visible'});
+ assert.equal(publicRequests.includes('/machines.js'),false);assert.equal(publicRequests.includes('/model.js'),false);
+ assert.equal(publicRequests.includes('/api/call'),false,'Public login should not probe authenticated state');
+ assert.deepEqual(publicConsole,[]);
+ admin.off('request',onPublicRequest);admin.off('console',onPublicConsole);
+ await admin.setViewportSize({width:1440,height:1050});
+ await login(admin,'admin');assert.deepEqual(inventoryRequests,[],'Admin uses the complete authenticated state catalogue');await capture(admin,'workbench-admin-desktop.png');
  const headerUser=portal.service.store.users.find(user=>user.username==='admin'),originalName=headerUser.name;
  const longName='超长账户名'.repeat(6)+'验证';headerUser.name=longName;portal.service.save();await refreshPage(admin);
  await admin.waitForFunction(name=>document.querySelector('#profile-name').textContent===name,longName);
@@ -153,6 +173,7 @@ try{
  assert.equal(await member.locator('#register-form [name=username]').evaluate(node=>parseFloat(getComputedStyle(node).fontSize)>=16),true);
  await member.setViewportSize({width:1440,height:1050});await capture(member,'register-1440.png');await member.locator('#register-form [type=submit]').click();await member.locator('#register-dialog').waitFor({state:'hidden'});
  assert.equal(await member.locator('#app-topbar .guide-link').count(),1,'the one public guide entry returns to the authenticated shell');
+ assert.deepEqual(inventoryRequests,['member'],'Partial member state loads the protected directory only after successful registration and login');
  assert.equal(await member.locator('[data-nav=users]').isVisible(),false);assert.equal(await member.locator('#page-resources').isVisible(),true);assert.match(await member.locator('#resource-summary').textContent(),/额度 0 张/);assert.equal(await member.locator('[data-use-machine]:enabled').count(),0);
  assert.equal(await member.locator('.resource-card').count(),MACHINES.length);
  assert.equal(await member.locator('[data-gpu-index]').count(),0);
