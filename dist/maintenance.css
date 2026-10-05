@@ -38,3 +38,7 @@
 .sb .maintenance-history .form-error{color:var(--err);font-size:13px}
 .sb .maintenance-history .empty{background:none;color:var(--ink-2);font-size:14px;padding:28px 0;text-align:left}
 @media(max-width:759px){.sb #page-maintenance .maintenance-history{font-size:16px}.sb .maintenance-history-focus{padding:22px 0}.sb .maintenance-history .maintenance-toolbar h2{font-size:26px}.sb .maintenance-history .maintenance-row{font-size:16px}.sb .maintenance-history .maintenance-detail{font-size:16px}.sb .maintenance-history .maintenance-detail pre{font-size:13px}.sb .maintenance-history .maintenance-row span{font-size:13px}}
+.sb .maintenance-history .maintenance-row>strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb .maintenance-history .maintenance-row-facts{display:flex;align-items:center;gap:8px;width:100%}
+.sb .maintenance-history .maintenance-row-facts>:last-child{flex:none;white-space:nowrap}
+.sb .maintenance-history .maintenance-history-machine{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}

@@ -59,7 +59,7 @@ export function maintenanceUI(store){
     try{
       const result=await store.call('maintenance.list',next?{cursor:next}:{});if(!same(stamp))return;
       cursor=result.nextCursor;q('#maintenance-more').hidden=!cursor;q('#maintenance-list-error').textContent='';
-      q('#maintenance-list').innerHTML=result.items.map(r=>`<button class="maintenance-row" data-id="${esc(r.id)}"><strong>${esc(r.title)}</strong><span>${esc(r.machine)} · ${esc(labels[r.state]||r.state)}</span></button>`).join('')||'<p class="empty">暂无历史记录。</p>';
+      q('#maintenance-list').innerHTML=result.items.map(r=>`<button class="maintenance-row" data-id="${esc(r.id)}"><strong title="${esc(r.title)}">${esc(r.title)}</strong><span class="maintenance-row-facts"><span class="maintenance-history-machine" title="${esc(r.machine)}">${esc(r.machine)}</span><span>${esc(labels[r.state]||r.state)}</span></span></button>`).join('')||'<p class="empty">暂无历史记录。</p>';
       for(const node of q('#maintenance-list').querySelectorAll('[data-id]'))node.addEventListener('click',()=>show(node.dataset.id));
     }catch(error){if(same(stamp))q('#maintenance-list-error').textContent=error.message;}
     finally{if(same(stamp))loading=false;}
