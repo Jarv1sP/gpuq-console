@@ -162,13 +162,21 @@ class StorageLeases:
                 or lease.get('dataset') != ref['dataset']
                 or lease.get('version') != ref['version'] or lease.get('readOnly') is not True):
             raise ValueError('Stored dataset lease identity changed')
+        paths = cache._paths(ref['dataset'], ref['version'])
+        if lease['path'] != str(paths['ready'] / 'data'):
+            raise ValueError('Stored dataset lease path changed')
+        if ready:
+            # Like acquire_lease, validate the large immutable manifests outside
+            # the cache-wide metadata lock. Recheck both identities and current
+            # authorization under that lock before trusting this exact hold.
+            actor = self.d.Principal(binding['userId'], False)
+            record, identity = cache._record_snapshot(actor, ref['dataset'], ref['version'])
+            is_ready, ready_identity = cache._ready_snapshot(paths, record['manifest'], ref['version'])
         with cache._locked():
-            paths = cache._paths(ref['dataset'], ref['version'])
-            if lease['path'] != str(paths['ready'] / 'data'):
-                raise ValueError('Stored dataset lease path changed')
             if ready:
-                record = cache._record(self.d.Principal(binding['userId'], False), ref['dataset'], ref['version'])
-                if not cache._ready(paths, record['manifest'], ref['version']):
+                cache._check_snapshot(actor, ref['dataset'], ref['version'], identity)
+                cache._check_ready_snapshot(paths, ready_identity)
+                if not is_ready:
                     raise ValueError('Prepared dataset is no longer READY')
             if not any(value['id'] == lease.get('leaseId') and value['owner'] == binding['userId']
                        and value['jobId'] == job_id for value in cache._leases(ref['dataset'], ref['version'])):
@@ -177,7 +185,7 @@ class StorageLeases:
     def prepare(self, job):
         """Hold every selected READY version using final job ID and own flock."""
         binding = self._training(job)
-        with self._lock('training', binding['id']) as path:
+        with self.d.wait_for_locks(timeout=5, total=8), self._lock('training', binding['id']) as path:
             record = self._initial(path, binding)
             if record['state'] not in ('ACQUIRING', 'HELD'):
                 raise ValueError('Preparation was finalized; no same-ID reacquisition')
@@ -200,14 +208,14 @@ class StorageLeases:
     def handoff(self, job):
         """Own flock: persist scheduler receipt without dropping any lease."""
         binding = self._training(job)
-        with self._lock('training', binding['id']) as path:
+        with self.d.wait_for_locks(timeout=5, total=8), self._lock('training', binding['id']) as path:
             record = self._load(path, binding)
             return self._handoff_locked(job, binding, path, record)
 
     def handoff_if_present(self, job):
         """None means exactly no journal, never an ACL/mount/lease read failure."""
         binding = self._training(job)
-        with self._lock('training', binding['id'], create=False) as path:
+        with self.d.wait_for_locks(timeout=5, total=8), self._lock('training', binding['id'], create=False) as path:
             if path is None:
                 return None
             with self.d._directory(path.parent) as directory:
@@ -219,6 +227,10 @@ class StorageLeases:
 
     def _handoff_locked(self, job, binding, path, record):
         if record['state'] not in ('HELD', 'HANDED_OFF') or len(record['leases']) != len(binding['references']):
+            if record['state'] in ('CANCELING', 'CANCELED', 'RELEASING', 'RELEASED'):
+                raise ValueError('Preparation hold is not ready for handoff: previous preparation was finalized; '
+                                 'native same-ID retry cannot reopen it; create an explicit new platform '
+                                 'submission after data is READY')
             raise ValueError('Preparation hold is not ready for handoff')
         _, cache = self.n.dataset_cache()
         for ref, lease in zip(binding['references'], record['leases']):

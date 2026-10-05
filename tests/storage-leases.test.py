@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import threading
+import time
 import unittest
 from unittest.mock import patch
 import uuid
@@ -68,6 +69,137 @@ class StorageLeaseTests(unittest.TestCase):
         self.assertEqual(self.leases()[0]['jobId'], self.job['id'])
         self.assertEqual(S.StorageLeases(self.node).prepare(self.job), values[0])
         self.blocked()
+
+    def contend_for_cache(self, operation, seconds=2.2):
+        locked = threading.Event()
+        def holder():
+            with self.cache._locked():
+                locked.set()
+                time.sleep(seconds)  # Longer than the cache's legacy two-second wait.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(holder)
+            self.assertTrue(locked.wait(5))
+            result = operation()
+            pending.result(timeout=5)
+        return result
+
+    def test_prepare_waits_for_short_metadata_contention_without_replaying(self):
+        original = self.d.DatasetCache.acquire_lease
+        with patch.object(self.d.DatasetCache, 'acquire_lease', autospec=True, side_effect=original) as acquire:
+            result = self.contend_for_cache(lambda: self.s.prepare(self.job))
+        self.assertEqual(result['state'], 'HELD')
+        self.assertEqual(acquire.call_count, 1)
+        self.assertEqual(len(self.leases()), 1)
+
+    def test_handoff_waits_for_short_contention_and_preserves_exact_hold(self):
+        leases = self.s.prepare(self.job)['leases']
+        before = self.leases()
+        self.assertEqual(self.contend_for_cache(lambda: self.s.handoff_if_present(self.job)), leases)
+        self.assertEqual(self.leases(), before)
+
+    def test_handoff_large_manifest_validation_does_not_own_global_cache_lock(self):
+        leases = self.s.prepare(self.job)['leases']
+        record, ready = self.d.DatasetCache._record, self.d.DatasetCache._ready
+        calls = []
+        def concurrent_metadata_read():
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(self.cache.capacity, self.actor).result(timeout=3)
+        def unlocked_record(cache, *args, **kwargs):
+            # This independent metadata request would deadlock/time out if
+            # handoff retained the global lock while parsing the manifest.
+            concurrent_metadata_read()
+            calls.append('record')
+            return record(cache, *args, **kwargs)
+        def unlocked_ready(cache, *args, **kwargs):
+            concurrent_metadata_read()
+            calls.append('ready')
+            return ready(cache, *args, **kwargs)
+        with patch.object(self.d.DatasetCache, '_record', new=unlocked_record), patch.object(self.d.DatasetCache, '_ready', new=unlocked_ready):
+            self.assertEqual(self.s.handoff_if_present(self.job), leases)
+        self.assertEqual(calls, ['record', 'ready'])
+
+    def test_handoff_rechecks_acl_after_unlocked_ready_validation(self):
+        self.s.prepare(self.job)
+        original = self.d.DatasetCache._ready_snapshot
+        def revoke(cache, *args, **kwargs):
+            result = original(cache, *args, **kwargs)
+            self.cache.set_owners(self.admin, 'shared', ['demo-user-9'])
+            return result
+        with patch.object(self.d.DatasetCache, '_ready_snapshot', new=revoke):
+            with self.assertRaises(PermissionError):
+                self.s.handoff_if_present(self.job)
+        self.assertEqual(len(self.leases()), 1)
+        self.assertEqual(json.loads(self.journal('training', self.job['id']).read_text())['state'], 'HELD')
+
+    def test_handoff_rechecks_registration_after_unlocked_validation(self):
+        self.s.prepare(self.job)
+        original = self.d.DatasetCache._ready_snapshot
+        def replace(cache, *args, **kwargs):
+            result = original(cache, *args, **kwargs)
+            registration = self.cache._paths('shared')['.registry'] / (self.version + '.json')
+            self.d._write_json(registration, self.d._read_json(registration))
+            return result
+        with patch.object(self.d.DatasetCache, '_ready_snapshot', new=replace):
+            with self.assertRaisesRegex(self.d.CacheError, 'registration changed'):
+                self.s.handoff_if_present(self.job)
+        self.assertEqual(len(self.leases()), 1)
+
+    def test_handoff_rechecks_ready_identity_after_unlocked_validation(self):
+        self.s.prepare(self.job)
+        original = self.d.DatasetCache._ready_snapshot
+        def replace(cache, *args, **kwargs):
+            result = original(cache, *args, **kwargs)
+            ready = self.cache._paths('shared', self.version)['ready'] / 'READY.json'
+            os.chmod(ready.parent, 0o700)  # Trusted fixture-only metadata replacement.
+            try:
+                self.d._write_json(ready, self.d._read_json(ready))
+            finally:
+                os.chmod(ready.parent, 0o555)
+            return result
+        with patch.object(self.d.DatasetCache, '_ready_snapshot', new=replace):
+            with self.assertRaisesRegex(self.d.CacheError, 'published version metadata changed'):
+                self.s.handoff_if_present(self.job)
+        self.assertEqual(len(self.leases()), 1)
+
+    def test_handoff_missing_lease_during_unlocked_validation_is_not_reacquired(self):
+        held = self.s.prepare(self.job)['leases'][0]
+        original = self.d.DatasetCache._ready_snapshot
+        def release(cache, *args, **kwargs):
+            result = original(cache, *args, **kwargs)
+            self.cache.release_lease(self.admin, 'shared', self.version, held['leaseId'])
+            return result
+        with patch.object(self.d.DatasetCache, '_ready_snapshot', new=release):
+            with self.assertRaisesRegex(ValueError, 'lease is missing'):
+                self.s.handoff_if_present(self.job)
+        self.assertEqual(self.leases(), [])
+
+    def test_long_contention_still_fails_without_replay_or_held_receipt(self):
+        original = self.d.DatasetCache.acquire_lease
+        with patch.object(self.d.DatasetCache, 'acquire_lease', autospec=True, side_effect=original) as acquire:
+            with self.assertRaises(self.d.CacheBusy):
+                self.contend_for_cache(lambda: self.s.prepare(self.job), seconds=5.4)
+        self.assertEqual(acquire.call_count, 1)
+        self.assertEqual(self.leases(), [])
+        self.assertEqual(json.loads(self.journal('training', self.job['id']).read_text())['state'], 'ACQUIRING')
+
+    def test_prepare_does_not_reset_outer_lock_budget_or_assume_ready(self):
+        with self.cache._locked(), self.d.wait_for_locks(timeout=0, total=0):
+            with self.assertRaises(self.d.CacheBusy):
+                self.s.prepare(self.job)
+        self.assertEqual(self.leases(), [])
+        self.assertEqual(json.loads(self.journal('training', self.job['id']).read_text())['state'], 'ACQUIRING')
+
+    def test_finalized_handoff_explains_retry_boundary_without_reopening(self):
+        self.s.prepare(self.job)
+        path = self.journal('training', self.job['id'])
+        record = json.loads(path.read_text())
+        for state in ('CANCELING', 'CANCELED', 'RELEASING', 'RELEASED'):
+            record['state'] = state
+            self.d._write_json(path, record)
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, 'Preparation hold is not ready for handoff: previous preparation was finalized; native same-ID retry cannot reopen it'):
+                self.s.handoff_if_present(self.job)
+            self.assertEqual(path.read_bytes(), before)
 
     def test_new_and_existing_locks_use_exclusive_create_then_nofollow_open(self):
         for name in ('.history.lock', '.lock'):

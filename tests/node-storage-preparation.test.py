@@ -4,11 +4,14 @@ Disposable cache and SQLite scheduler fixtures only; GPUQ and systemd inspection
 are replaced by explicit evidence. No network, actual GPU, or services are used.
 """
 from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 from pathlib import Path
 import shutil
 import sqlite3
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -115,6 +118,27 @@ class PreparedLeaseIntegration(unittest.TestCase):
         self.assertTrue(self.cancel_hold()['released'])
         with self.assertRaises(ValueError):self.prepare()
         self.assertEqual(self.leases(),[])
+
+    def test_legacy_runner_without_journal_waits_before_opening_ready_mount(self):
+        locked = threading.Event()
+        def holder():
+            with self.cache._locked():
+                locked.set()
+                time.sleep(2.2)
+        self.node.CONFIG['storageArchive']['enabled'] = False
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(holder)
+            self.assertTrue(locked.wait(5))
+            mounts = self.node.dataset_open_mounts(self.job)
+            pending.result(timeout=5)
+        try:
+            self.assertEqual(len(mounts), 1)
+            self.assertEqual(mounts[0][1], '/data2/example')
+            self.assertEqual(len(self.leases()), 1)
+            self.assertFalse((self.node.ROOT/'storage-leases'/'training'/self.job['id']).exists())
+        finally:
+            for descriptor, _ in mounts:
+                __import__('os').close(descriptor)
 
 
 if __name__=='__main__':unittest.main()

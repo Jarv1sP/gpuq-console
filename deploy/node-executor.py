@@ -389,6 +389,15 @@ class DatasetNotReady(ValueError):
     """An authorized cache status proved that a selected replica is absent."""
 
 def acquire_datasets(job):
+    # Both the submit preflight and sandbox runner enter here. A busy metadata
+    # lock is not an absent dataset: wait only for acquisition, with one bounded
+    # budget shared by nested hold/READY checks. Never replay a mutation or
+    # bypass a canceled/released preparation journal.
+    if not dataset_refs(job):return []
+    module,_=dataset_cache()
+    with module.wait_for_locks(timeout=5,total=8):return _acquire_datasets(job)
+
+def _acquire_datasets(job):
     refs=dataset_refs(job)
     if not refs:return []
     if CONFIG.get('storageArchive',{}).get('enabled') is True or os.path.lexists(ROOT/'storage-leases'):
