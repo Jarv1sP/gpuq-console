@@ -2,6 +2,9 @@
 // proof of failure and must never cause an implicit second submission.
 const READS=new Set(['state','datasets.list','datasets.status','datasets.catalog','projects.list','projects.status','projects.verify','jobs.logs','jobs.watch','jobs.diagnostics','transfers.list','transfers.status','community.posts.list','community.posts.get','community.comments.list']);
 const TRANSIENT=new Set([502,503,504]);
+// Cover a short single-instance rollout without a tight polling loop. Queries
+// remain bounded; a mutation is never replayed by this generic transport.
+const READ_RETRY_DELAYS=[500,1000,2000,4000,8000,16000,16000];
 const safe=value=>String(value).replace(/[\p{Cc}\p{Cf}]/gu,' ').slice(0,600);
 const error=(message,status)=>Object.assign(Error(message),{status});
 
@@ -13,7 +16,7 @@ export async function apiPost(base,path,body,{token,signal,fetchImpl=fetch,sleep
 })}={}){
   const target=new URL(`/api/${path}`,base),operation=path==='call'?body?.operation:path;
   const read=path==='call'&&READS.has(operation);
-  const deadline=AbortSignal.timeout(40000),combined=signal?AbortSignal.any([signal,deadline]):deadline;
+  const deadline=AbortSignal.timeout(read?65000:40000),combined=signal?AbortSignal.any([signal,deadline]):deadline;
   for(let attempt=0;;attempt++){
     let response,data,decoded=false;
     try{
@@ -24,10 +27,10 @@ export async function apiPost(base,path,body,{token,signal,fetchImpl=fetch,sleep
       try{data=await response.json();decoded=!!data&&typeof data==='object'&&!Array.isArray(data);}
       catch(cause){if(!(cause instanceof SyntaxError))throw cause;}
     }catch{
-      if(read&&attempt<2&&!combined.aborted){await sleep((attempt+1)*500,combined);continue;}
+      if(read&&attempt<READ_RETRY_DELAYS.length&&!combined.aborted){await sleep(READ_RETRY_DELAYS[attempt],combined);continue;}
       throw error(`${safe(operation)}：${combined.aborted?'请求已取消或超时':'网络连接中断'}。${read?'稍后重试查询。':'操作结果尚未确认，请先查询状态；不要更换提交键重复提交。'}`);
     }
-    if(read&&TRANSIENT.has(response.status)&&attempt<2&&!combined.aborted){await sleep((attempt+1)*500,combined);continue;}
+    if(read&&TRANSIENT.has(response.status)&&attempt<READ_RETRY_DELAYS.length&&!combined.aborted){await sleep(READ_RETRY_DELAYS[attempt],combined);continue;}
     if(!response.ok){
       const detail=decoded&&typeof data.error==='string'?safe(data.error):TRANSIENT.has(response.status)?'服务暂时不可用或正在更新':response.status===404?'API 路径不存在，请检查服务地址':'服务返回了非 JSON 错误响应';
       throw error(`${safe(operation)}：HTTP ${response.status} — ${detail}${!read&&TRANSIENT.has(response.status)?'；操作结果尚未确认，请先查询状态，不要更换提交键重复提交。':''}`,response.status);
