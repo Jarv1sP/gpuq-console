@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {confirmProjectCreation,projectEnvironmentLabel,projectPublicationStorage,projectPublicationOutcome,projectPublicationDelay,projectPublicationProgressHTML} from '../dist/workbench-ui.js';
+import {confirmProjectCreation,projectEnvironmentLabel,projectPublicationStorage,projectPublicationOutcome,projectPublicationDelay,projectPublicationProgressHTML,createProjectActivity} from '../dist/workbench-ui.js';
 import {validProject} from '../dist/execution-ui.js';
+import {endProjectTerminals} from '../dist/terminal-ui.js';
 
 const key='b69e7f69-18e8-4496-864e-e612195a2e93',other='086d123e-834b-43da-aa24-c33566d1b3f4',release='a'.repeat(64);
 const intent={machine:'fixture-server-long-id',project:'experiment-a',key,startedAt:1000};
@@ -47,4 +48,26 @@ test('query backoff is 2, 5, then 10 seconds and observed phases never invent pr
   const scanning=projectPublicationProgressHTML({phase:'scanning',completedEntries:0,totalEntries:null});assert.match(scanning,/aria-current="step".*扫描/);assert.match(scanning,/0 项/);assert.doesNotMatch(scanning,/%|null|剩余/);
   const copying=projectPublicationProgressHTML({phase:'copying',completedEntries:12,totalEntries:20});assert.match(copying,/12 \/ 20 项/);assert.match(copying,/aria-current="step".*复制/);
   for(const value of [undefined,{phase:'invented'}])assert.equal(projectPublicationProgressHTML(value),'');
+});
+test('closing a project context cancels all pending work and fences late callbacks from a new context',async()=>{
+  const activity=createProjectActivity(),signals=[];let finish;
+  const late=new Promise(resolve=>{finish=resolve;});
+  const lookup=activity.run(signal=>{signals.push(signal);return late;});
+  const ending=activity.run(signal=>{signals.push(signal);return new Promise(()=>{});});
+  const rejected=[lookup,ending].map(pending=>assert.rejects(pending,error=>error.name==='AbortError'));
+  activity.cancel();await Promise.all(rejected);assert.ok(signals.every(signal=>signal.aborted));assert.equal(activity.generation,1);
+  assert.equal(await activity.run(async signal=>{assert.equal(signal.aborted,false);return 'new project';}),'new project');
+  finish('old READY');await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(await activity.run(async()=> 'new project remains current'),'new project remains current');
+});
+test('the terminal-owned confirmation promise accepts cancellation without starting another close flow',async()=>{
+  const original=globalThis.document,document=new EventTarget(),controller=new AbortController();let detail,count=0;
+  globalThis.document=document;
+  document.addEventListener('gpuq-project-terminals-close',event=>{count++;detail=event.detail;detail.handled=true;});
+  try{
+    const pending=endProjectTerminals({machine:'example-node',project:'vision'},{signal:controller.signal});
+    const rejected=assert.rejects(pending,error=>error.name==='AbortError');controller.abort();await rejected;
+    assert.equal(detail.signal.aborted,true);detail.resolve(true);await new Promise(resolve=>setImmediate(resolve));assert.equal(count,1);
+    assert.throws(()=>endProjectTerminals({machine:'example-node',project:'vision'},{signal:controller.signal}),error=>error.name==='AbortError');assert.equal(count,1);
+  }finally{globalThis.document=original;}
 });

@@ -66,3 +66,33 @@ test('all production registration fetches also have a bound and do not leak a be
   globalThis.fetch=async(_url,options)=>{signal=options.signal;authorization=options.headers.Authorization;return new Promise(()=>{});};
   try{await assert.rejects(client.register('fixture','fixture','fixture'),error=>error.code==='REQUEST_TIMEOUT');assert.equal(signal.aborted,true);assert.equal(authorization,undefined);}finally{globalThis.fetch=original;}
 });
+test('external cancellation aborts hung fetch/body reads, drains inflight and rejects late state',async()=>{
+  const original=globalThis.fetch;
+  try{
+    for(const stage of ['fetch','body']){
+      const {client}=fixture();client.remote=true;const controller=new AbortController(),hung=deferred();let signal,accepted=false;
+      globalThis.fetch=async(_url,options)=>{signal=options.signal;return stage==='fetch'?hung.promise:{ok:true,json:()=>hung.promise};};
+      const request=client.call('projects.status',{machine:'example-node',project:'vision'},{signal:controller.signal,accept:()=>{accepted=true;}});
+      const rejected=assert.rejects(request,error=>error.name==='AbortError');await tick();assert.equal(client.inflight.size,1);
+      controller.abort();await rejected;assert.equal(signal.aborted,true);assert.equal(client.inflight.size,0);
+      const late={...state('obsolete'),result:{project:'vision',state:'READY'}};
+      hung.resolve(stage==='fetch'?{ok:true,json:async()=>late}:late);await tick();
+      assert.equal(accepted,false);assert.equal(client.principal.userId,'old');assert.equal(client.users[0].id,'old');
+    }
+  }finally{globalThis.fetch=original;}
+});
+test('cancelled project lookup cannot hold logout behind an unresolved body',async()=>{
+  const original=globalThis.fetch;const {client}=fixture();client.remote=true;const controller=new AbortController(),hung=deferred(),sent=[];
+  globalThis.fetch=async(url,options)=>{const request=JSON.parse(options.body);sent.push(request.operation);return {ok:true,json:()=>request.operation==='logout'?Promise.resolve({result:{loggedOut:true}}):hung.promise};};
+  client.onAuthChange(()=>controller.abort());
+  try{
+    const old=assert.rejects(client.call('projects.status',{machine:'example-node',project:'vision'},{signal:controller.signal}),stale);
+    await client.logout();await old;assert.deepEqual(sent,['projects.status','logout']);assert.equal(client.inflight.size,0);
+    hung.resolve(state('obsolete'));await tick();assert.equal(client.principal,null);assert.equal(client.data,null);
+  }finally{globalThis.fetch=original;}
+});
+test('a pre-cancelled request cannot send any network request',async()=>{
+  const original=globalThis.fetch;const {client}=fixture();client.remote=true;const controller=new AbortController();controller.abort();let calls=0;
+  globalThis.fetch=async()=>{calls++;throw Error('must not send');};
+  try{await assert.rejects(client.call('projects.status',{}, {signal:controller.signal}),error=>error.name==='AbortError');assert.equal(calls,0);assert.equal(client.inflight.size,0);}finally{globalThis.fetch=original;}
+});

@@ -68,6 +68,21 @@ export function projectPublicationOutcome(info,record){
   return {state:'UNKNOWN'};
 }
 export const projectPublicationDelay=attempt=>[2000,5000,10000][Math.min(2,Math.max(0,attempt))];
+// A context owns its requests as well as its next polling timer. Cancelling
+// bounds even a promise whose underlying operation cannot undo a sent write.
+export function createProjectActivity(){
+  let controller=new AbortController(),generation=0;
+  return {
+    get generation(){return generation;},
+    cancel(){generation++;controller.abort();controller=new AbortController();},
+    async run(action){
+      const signal=controller.signal,turn=generation;let onAbort;
+      const cancelled=new Promise((_,reject)=>{onAbort=()=>reject(signal.reason);signal.addEventListener('abort',onAbort,{once:true});});
+      try{const result=await Promise.race([action(signal),cancelled]);signal.throwIfAborted();if(turn!==generation)throw new DOMException('项目上下文已改变','AbortError');return result;}
+      finally{signal.removeEventListener('abort',onAbort);}
+    }
+  };
+}
 export function projectPublicationProgressHTML(progress){
   const phases=[['scanning','扫描'],['copying','复制'],['verifying','校验'],['publishing','写入版本']],active=phases.findIndex(([phase])=>phase===progress?.phase);
   if(active<0)return '';

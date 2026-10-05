@@ -4,14 +4,18 @@ import {serverIdHTML,escapeUI} from './workbench-ui.js';
 
 // The exported project action shares the same confirmed close flow as the UI.
 // No connection credentials leave terminalUI's memory.
-export function endProjectTerminals({machine,project}){
+export function endProjectTerminals({machine,project},{signal}={}){
+  signal?.throwIfAborted();
   terminalContext({machine,project});
   if(!project)return Promise.reject(Error('先选择要结束开发终端的项目。'));
-  return new Promise((resolve,reject)=>{
-    const detail={machine,project,resolve,reject,handled:false};
+  let onAbort;
+  const pending=new Promise((resolve,reject)=>{
+    if(signal){onAbort=()=>reject(signal.reason);signal.addEventListener('abort',onAbort,{once:true});}
+    const detail={machine,project,signal,resolve,reject,handled:false};
     document.dispatchEvent(new CustomEvent('gpuq-project-terminals-close',{detail}));
     if(!detail.handled)reject(Error('终端尚未准备好。'));
   });
+  return pending.finally(()=>{if(onAbort)signal.removeEventListener('abort',onAbort);});
 }
 
 export function terminalRequestContext(value){
@@ -131,25 +135,31 @@ export function terminalUI(store,toast){
       return store.call('terminal.open',{...request,key:crypto.randomUUID(),takeover:true},lifecycle);
     }
   }
-  async function closeSession(record){
+  async function closeSession(record,{signal,allowTakeover=true}={}){
+    signal?.throwIfAborted();
     if(record.userId!==store.principal?.userId)throw Error('不能结束另一账号的终端。');
     let target=session?.id===record.id?session:null;
     if(target&&!usable(target))target=null;
     if(!target){
       if(paused(record))throw Error('维护期间不能重连已断开的开发终端，请管理员核对。');
-      const userId=store.principal?.userId,auth=store.authGeneration,current=()=>userId===store.principal?.userId&&auth===store.authGeneration;
+      const userId=store.principal?.userId,auth=store.authGeneration,current=()=>!signal?.aborted&&userId===store.principal?.userId&&auth===store.authGeneration;
       const request=openRequest(record,'reconnect',record.id),startedAt=Date.now();
-      await requestAttachment(record,request,{
+      const lifecycle={signal,
         accept:result=>{target=connection(result,record,request,startedAt);},
         onStale:async(result,call)=>{if(result?.writerToken)await release(connection(result,record,request,startedAt),call);}
-      },current);
+      };
+      if(allowTakeover)await requestAttachment(record,request,lifecycle,current);
+      else try{await store.call('terminal.open',request,lifecycle);}catch(error){if(takeoverError(error))throw Error('这个终端正在别处使用，请在那里结束');throw error;}
+      if(signal?.aborted){delete target?.writerToken;signal.throwIfAborted();}
       if(!current()){delete target?.writerToken;throw Error('登录账号已改变，未结束旧终端。');}
     }
     const attached=target===session;if(attached){closing=true;clearTimeout(timer);inputScheduled=false;syncMaintenance();}
     let confirmed=false;
     const removeCleanup=!attached?store.onAuthChange?.(call=>release(target,call)):null;
     try{
-      const result=await store.call('terminal.close',args(target));
+      signal?.throwIfAborted();
+      const result=await store.call('terminal.close',args(target),{signal});
+      signal?.throwIfAborted();
       if(result?.closed!==true){if(attached)stopInput(target,'结束结果未确认，请重新查询。',{expired:false});throw Error('结束结果未确认，请重新查询。');}
       confirmed=true;
       delete target.writerToken;sessions.delete(record.id);
@@ -159,12 +169,13 @@ export function terminalUI(store,toast){
       throw error;
     }finally{
       removeCleanup?.();
-      if(!attached&&!confirmed&&attachmentCurrent(target))try{await release(target);}catch{toast('断开未确认，请稍后重连检查。');}
+      if(!attached&&!confirmed&&attachmentCurrent(target))try{await release(target,(operation,fields)=>store.call(operation,fields,{signal}));}catch{if(!signal?.aborted)toast('断开未确认，请稍后重连检查。');}
       if(target!==session)delete target?.writerToken;
       if(attached){closing=false;syncMaintenance();}
     }
   }
-  async function closeProject({machine,project}){
+  async function closeProject({machine,project,signal}){
+    signal?.throwIfAborted();
     const key=JSON.stringify([store.principal?.userId,machine,project]);
     if(projectClosing){if(projectClosing.key===key)return projectClosing.promise;throw Error('另一项目正在结束终端，请稍后。');}
     const promise=(async()=>{
@@ -173,7 +184,8 @@ export function terminalUI(store,toast){
       const targets=[...sessions.values()].filter(value=>value.userId===owner&&value.machine===machine&&value.project===project&&!value.hostAdmin&&!value.dataWorkspace);
       if(!targets.length)return true;
       if(!window.confirm(`结束 ${project} 的全部开发终端？正在执行的命令会停止，已保存的文件保留。`))return false;
-      for(const target of targets){if(owner!==store.principal?.userId||auth!==store.authGeneration)throw Error('登录账号已改变，已停止结束旧终端。');await closeSession(target);}
+      for(const target of targets){signal?.throwIfAborted();if(owner!==store.principal?.userId||auth!==store.authGeneration)throw Error('登录账号已改变，已停止结束旧终端。');await closeSession(target,{signal,allowTakeover:false});}
+      signal?.throwIfAborted();
       return true;
     })();
     projectClosing={key,promise};try{return await promise;}finally{projectClosing=null;}

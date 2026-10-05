@@ -5,8 +5,9 @@ import {schedulingFields,schedulingFromForm,schedulingSummary} from './schedulin
 import {elasticCapable,placementCapable} from './gpu-allocation.js';
 import {elasticFields,elasticFromForm,allocationSummary,placementFields,placementFromForm,placementSummary} from './gpu-allocation-ui.js';
 import {taskDescription} from './task-metadata.js';
-import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,boundarySweep,taskMissionUI,infoHTML,discloseInfo,jobCancelConfirmation,projectEnvironmentLabel,confirmProjectCreation,projectPublicationStorage,projectPublicationOutcome,projectPublicationDelay,projectPublicationProgressHTML,confirmPublicationMotion} from './workbench-ui.js';
-import * as terminalActions from './terminal-ui.js';
+import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,boundarySweep,taskMissionUI,infoHTML,discloseInfo,jobCancelConfirmation,projectEnvironmentLabel,confirmProjectCreation,projectPublicationStorage,projectPublicationOutcome,projectPublicationDelay,projectPublicationProgressHTML,confirmPublicationMotion,createProjectActivity} from './workbench-ui.js';
+import {endProjectTerminals} from './terminal-ui.js';
+export {endProjectTerminals} from './terminal-ui.js';
 import {revealSheet,dismissSheet,sharedObject} from './motion-ui.js';
 import {taskNotesMarkup,createTaskNotesUI} from './task-notes-ui.js';
 import {maintenanceFor,heldDuringMaintenance,maintenanceTime,maintenanceInfoHTML,maintenanceClock} from './maintenance-state.js';
@@ -33,12 +34,6 @@ export function taskStateLabel(job){
   return {PREPARING_DATA:'准备数据 · 不占 GPU',SUBMITTING:'提交中',PENDING:'排队中',QUEUED:'排队中',STARTING:'启动中',RUNNING:'运行中',UNKNOWN:'状态待核对',SUCCEEDED:'已完成',FAILED:'失败',CANCELED:'已取消',PREEMPTING:'正在让位',PREEMPTED:'让位结束'}[job.state]||job.state||'状态未知';
 }
 export const validProject=value=>typeof value==='string'&&/^[a-z][a-z0-9_-]{0,47}$/.test(value);
-// PR-B owns terminal lifecycle and confirmation. This thin adapter fails
-// closed until its export is available; it never sends terminal.close itself.
-export async function endProjectTerminals(context){
-  if(typeof terminalActions.endProjectTerminals!=='function')throw Error('结束入口尚未更新，请在开发终端中明确结束。');
-  return terminalActions.endProjectTerminals(context);
-}
 export function projectStatusText(info,hasTerminal=false){
   const labels={DRAFT:'代码草稿',SYNCING:'正在同步代码',READY:'已有就绪版本',PUBLISHING:'正在生成训练版本',FAILED:'生成训练版本失败',UNKNOWN:'发布结果未确认'};
   const parts=[labels[info?.state]||'项目状态未确认'];
@@ -96,6 +91,7 @@ export function executionUI(store,refresh,toast){
   let section,log,actor=null,submitKey=crypto.randomUUID(),machine='',project='',catalog=[],catalogError='',projectBusy=false,operationBusy=false;
   let epoch=0,pollTimer=null,pollCount=0,terminalSessions=[],machineIdentity='';
   let publicationIntent=null,publicationResult=null,publicationError='',publicationSelection=null,publicationFlash=null,recoveredActor=null;
+  const projectActivity=createProjectActivity();let projectPaused=false,pageActive=true,projectOperation=false;
   const publicationCache=projectPublicationStorage({getItem:key=>localStorage.getItem(key),setItem:(key,value)=>localStorage.setItem(key,value),removeItem:key=>localStorage.removeItem(key),key:index=>localStorage.key(index),get length(){return localStorage.length;}});
   let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
   let submitReceipt=null,parsedTarget=null,acceptedDraft=false;
@@ -104,15 +100,24 @@ export function executionUI(store,refresh,toast){
   const diagnostics=createJobDiagnostics(store,()=>log,toast,{drawer:true,header:job=>`<span class="sheet-object">${stateHTML(job,false)}<span>${escape(job.name||'训练详情')}</span></span>`,reveal:(dialog,job,origin)=>{sharedObject(origin||jobHeading(job.id),dialog.querySelector('.sheet-object'));revealSheet(dialog,{drilldown:true});},dismiss:dialog=>dismissSheet(dialog,{drilldown:true,target:jobHeading(focusedJob)}),overview:job=>jobOverviewHTML(job,{owned:job.userId===store.principal?.userId,schedulingHTML:allocationSummary(job)+placementSummary(job)+`<span>排队优先级：${escape(priorityRankLabel(job))}</span>`+schedulingSummary(job)+`<span>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</span><span>状态：${escape(job.schedulerState||'未提供')}</span><span>更新于 ${escape(sampleTime(job.schedulerCheckedAt))}</span>`}),output:showOutput,notes:showNotes,onView:next=>{if(next!=='notes')notes?.sync(false,true);}});
   const call=(operation,args)=>store.call(operation,args),query=selector=>section?.querySelector(selector)||submitDialog?.querySelector(selector)||settingsDialog?.querySelector(selector)||log?.querySelector(selector)||document.querySelector('#shell-context')?.querySelector(selector);
   const context=()=>({machine,...(project?{project}:{})}),currentProject=()=>catalog.find(item=>item.project===project);
-  const currentToken=()=>JSON.stringify([actor,machine,project,epoch,store.principal?.userId,store.principal?.role,store.authGeneration]),ownJobs=()=>store.jobs.filter(job=>job.userId===store.principal?.userId);
+  const currentToken=()=>JSON.stringify([actor,machine,project,epoch,projectActivity.generation,store.principal?.userId,store.principal?.role,store.authGeneration]),ownJobs=()=>store.jobs.filter(job=>job.userId===store.principal?.userId);
   const submitSelection=createSubmitSelectionGuard(),submitIdentity=()=>JSON.stringify([currentToken(),store.principal?.userId,store.principal?.role,store.authGeneration,document.body.dataset.room]);
   const priorityAvailable=()=>store.data?.execution?.priorityCapabilities?.[machine]===true;
   const customAvailable=()=>!store.data?.gpuq?.stale&&yieldCapable(store.data?.gpuq?.hosts?.find(h=>h.id===machine));
   const enabled=()=>store.production&&!!store.principal&&store.data?.executionEnabled===true&&(store.data?.machines||[]).some(item=>item.id===machine);
-  const isVisible=()=>!document.hidden&&!section?.closest('[data-page]')?.hidden;
+  const isVisible=()=>section?.isConnected===true&&!section.hidden&&!document.hidden&&(!section.closest('[data-page]')?.hidden||submitDialog?.open||settingsDialog?.open||log?.open);
+  const projectActive=()=>pageActive&&!projectPaused&&isVisible();
+  const projectCall=(operation,args)=>projectActivity.run(signal=>store.call(operation,args,{signal}));
   const hasTerminal=()=>terminalSessions.some(item=>item.machine===machine&&item.project===project&&item.userId===actor);
   const status=(text,error=false)=>{const element=query('#project-status');if(element){element.textContent=text;element.classList.toggle('form-error',error);}};
   const stopPolling=()=>{clearTimeout(pollTimer);pollTimer=null;};
+  function cancelProjectActivity(){
+    projectPaused=true;stopPolling();projectActivity.cancel();projectBusy=false;recoveredActor=null;
+    if(projectOperation){operationBusy=false;projectOperation=false;}
+    if(publicationIntent&&publicationResult?.state==='REQUESTING'){publicationResult={state:'UNKNOWN'};publicationError='';}
+    if(section&&actor)updateControls();
+  }
+  function activateProjectActivity(){if(!pageActive||!isVisible())return false;projectPaused=false;recoveredActor=actor;return true;}
   function restorePublication(){publicationIntent=project?publicationCache.read(actor,machine,project):null;publicationResult=null;publicationError='';publicationSelection=null;publicationFlash=null;pollCount=0;}
   function observePublication(info){
     if(!publicationIntent)return;
@@ -135,7 +140,7 @@ export function executionUI(store,refresh,toast){
   }
   function notifyContext(){document.dispatchEvent(new CustomEvent('gpuq-workspace-context',{detail:{userId:actor,...context()}}));}
   const reduced=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
-  function showSheet(dialog,options={}){if(dialog.open)return;dialog.showModal();revealSheet(dialog,options);}
+  function showSheet(dialog,options={}){if(dialog.open)return;dialog.showModal();if(dialog===submitDialog||dialog===settingsDialog){activateProjectActivity();armPolling();}revealSheet(dialog,options);}
   function closeSettings(){if(!settingsSource)return;const source=settingsSource;settingsSource=null;source.append(...settingsDialog.querySelector('.sheet-scroll').children);source.open=false;settingsDialog.close();}
   function settings(source){closeSettings();settingsSource=source;settingsDialog.querySelector('h2').textContent=source.querySelector('summary').textContent;for(const control of source.querySelectorAll('input,select,textarea'))control.setAttribute('form','train-form');settingsDialog.querySelector('.sheet-scroll').append(...[...source.children].filter(child=>child.tagName!=='SUMMARY'));showSheet(settingsDialog,{drilldown:true});}
   function adaptWorkspace(){
@@ -326,40 +331,41 @@ export function executionUI(store,refresh,toast){
   function clearFileContext(){query('[name=file-path]').value='.';query('[name=file-area]').value='code';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('[name=files]').value='';query('#workspace-result').textContent='仅操作当前服务器、当前工作区。代码上传失败后，可重新上传同一路径；未完成的上传会阻止发布。';}
   function syncMachineFields(){for(const name of ['workspace-machine','machine','terminal-machine','file-machine']){const field=query(`[name=${name}]`);field.value=machine;field.title=machine;}const selected=(store.data?.machines||[]).find(item=>item.id===machine);query('[name=cards]').max=String(selected?.cards||1);}
   async function selectMachine(value){
-    if(value===machine)return;machine=(store.data?.machines||[]).some(item=>item.id===value)?value:'';project='';catalog=[];catalogError='';epoch++;projectBusy=false;stopPolling();pollCount=0;
+    if(value===machine)return;cancelProjectActivity();activateProjectActivity();machine=(store.data?.machines||[]).some(item=>item.id===value)?value:'';project='';catalog=[];catalogError='';epoch++;projectBusy=false;pollCount=0;
     restorePublication();
     query('[name=release]').value='';syncMachineFields();clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(machine)await loadProjects();
   }
   async function selectProject(value){
     if(value&&!catalog.some(item=>item.project===value)){toast('请刷新项目列表后再选择。');return;}
-    if(value===project){if(project)await loadProjectStatus();return;}
-    project=value;epoch++;projectBusy=false;catalogError='';stopPolling();restorePublication();query('[name=release]').value='';clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(project)await loadProjectStatus();
+    if(value===project){activateProjectActivity();if(project)await loadProjectStatus();return;}
+    cancelProjectActivity();activateProjectActivity();project=value;epoch++;projectBusy=false;catalogError='';restorePublication();query('[name=release]').value='';clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(project)await loadProjectStatus();
   }
   async function loadProjects(){
-    if(!enabled()||projectBusy||operationBusy)return;const token=currentToken(),selected=machine,requestEpoch=epoch,requestActor=actor;projectBusy=true;updateControls();status('正在读取这台服务器的项目…');
-    try{const result=await call('projects.list',{machine:selected});if(token!==currentToken())return;
+    if(!projectActive()||!enabled()||projectBusy||operationBusy)return;const token=currentToken(),selected=machine;projectBusy=true;updateControls();status('正在读取这台服务器的项目…');
+    try{const result=await projectCall('projects.list',{machine:selected});if(token!==currentToken())return;
       catalog=Array.isArray(result.projects)?result.projects.filter(item=>validProject(item?.project)):[];catalogError='';
       if(project&&!catalog.some(item=>item.project===project)){project='';restorePublication();clearFileContext();notifyContext();}
     }catch(error){if(token===currentToken())catalogError=error.message;}
-    finally{if(epoch===requestEpoch&&actor===requestActor&&selected===machine){projectBusy=false;renderProject();if(publicationIntent&&publicationResult?.state!=='READY'&&project)await loadProjectStatus();}}
+    finally{if(token===currentToken()){projectBusy=false;renderProject();if(publicationIntent&&publicationResult?.state!=='READY'&&project&&projectActive())await loadProjectStatus();}}
   }
   async function readProjectStatus(target,token){
-    const result=await call('projects.status',target);if(token!==currentToken())return null;
+    if(!projectActive()||token!==currentToken())return null;
+    const result=await projectCall('projects.status',target);if(token!==currentToken())return null;
     if(result?.project!==target.project)throw Error('项目返回身份不匹配，请重新查询。');
     catalog=catalog.map(item=>item.project===target.project?result:item);catalogError='';observePublication(result);return result;
   }
   async function loadProjectStatus(poll=false){
-    if(!project||!enabled()||projectBusy||operationBusy)return;const token=currentToken(),target=context();projectBusy=true;updateControls();
+    if(!projectActive()||!project||!enabled()||projectBusy||operationBusy)return;const token=currentToken(),target=context();projectBusy=true;updateControls();
     try{await readProjectStatus(target,token);}
     catch(error){if(token===currentToken()){catalogError=error.message;if(publicationIntent){publicationResult={state:'UNKNOWN'};publicationError=error.message;}stopPolling();}}
     finally{if(token===currentToken()){projectBusy=false;if(!poll)pollCount=0;renderProject();}}
   }
   function armPolling(){
     const publishing=publicationIntent?publicationResult?.state==='PUBLISHING':currentProject()?.state==='PUBLISHING';
-    if(!isVisible()||!enabled()||projectBusy||operationBusy||catalogError||!publishing){stopPolling();return;}if(pollTimer)return;
-    pollTimer=setTimeout(()=>{pollTimer=null;if(isVisible()){pollCount++;loadProjectStatus(true);}},projectPublicationDelay(pollCount));
+    if(!projectActive()||!enabled()||projectBusy||operationBusy||catalogError||!publishing){stopPolling();return;}if(pollTimer)return;
+    const token=currentToken();pollTimer=setTimeout(()=>{pollTimer=null;if(projectActive()&&token===currentToken()){pollCount++;loadProjectStatus(true);}},projectPublicationDelay(pollCount));
   }
-  async function guarded(button,fn){if(operationBusy)return;const owner=receiptActor();operationBusy=true;button.disabled=true;updateControls();try{await fn();}catch(error){if(owner===receiptActor()){toast(error.message);status(error.message,error.code!=='MAINTENANCE_ACTIVE');}}finally{if(owner===receiptActor()){operationBusy=false;if(button.isConnected)button.disabled=false;updateControls();renderReceipt();armPolling();}}}
+  async function guarded(button,fn,scoped=false){if(operationBusy||scoped&&!activateProjectActivity())return;const owner=receiptActor(),turn=projectActivity.generation,current=()=>owner===receiptActor()&&(!scoped||turn===projectActivity.generation);operationBusy=true;if(scoped)projectOperation=true;button.disabled=true;updateControls();try{await fn();}catch(error){if(current()&&error.name!=='AbortError'){toast(error.message);status(error.message,error.code!=='MAINTENANCE_ACTIVE');}}finally{if(current()){operationBusy=false;if(scoped)projectOperation=false;if(button.isConnected)button.disabled=false;updateControls();renderReceipt();armPolling();}}}
   async function publishProject(retry=false){
     const target=assertContext(),token=currentToken();if(!project)throw Error('先选择项目。');
     if(hasTerminal())throw Error('先结束开发终端（断开不算）');
@@ -375,7 +381,7 @@ export function executionUI(store,refresh,toast){
     }
     const request=publicationIntent;publicationResult={state:'REQUESTING'};renderProject();
     try{
-      const result=await call('projects.publish',{...target,key:request.key});if(token!==currentToken())return;
+      const result=await projectCall('projects.publish',{...target,key:request.key});if(token!==currentToken())return;
       if(result?.project!==target.project)throw Error('项目返回身份不匹配，请重新查询。');
       catalog=catalog.map(item=>item.project===target.project?result:item);catalogError='';observePublication(result);
     }catch(error){
@@ -392,7 +398,7 @@ export function executionUI(store,refresh,toast){
     // Keep the legacy DOM hook, while routing it through PR-B's confirmed
     // close flow. Do not let the older terminal click handler close as well.
     event.stopImmediatePropagation();
-    guarded(button,async()=>{const target=assertContext(),token=currentToken();if(await endProjectTerminals(target)!==true||token!==currentToken())return;await readProjectStatus(target,token);if(token===currentToken())renderProject();});
+    guarded(button,async()=>{const target=assertContext(),token=currentToken();if(await projectActivity.run(signal=>endProjectTerminals(target,{signal}))!==true||token!==currentToken())return;await readProjectStatus(target,token);if(token===currentToken())renderProject();},true);
   },{capture:true});
   function fileContext(){const target=assertContext();if(!project)return target;const area=query('[name=file-area]').value;if(area==='code')return {...target,area};const runId=query('[name=file-run-id]').value.trim();if(!uuidPattern.test(runId))throw Error('请选择本项目任务，或输入完整任务 ID。');return {...target,area:'output',runId};}
   async function listFiles(){const target=fileContext(),path=query('[name=file-path]').value||'.';const result=await call('files.list',{...target,path});query('#workspace-result').textContent=result.entries.map(file=>`${file.type==='directory'?'[目录]':'[文件]'} ${file.name}  ${file.type==='file'?file.size+' B':''}`).join('\n')||'目录为空';}
@@ -426,10 +432,10 @@ export function executionUI(store,refresh,toast){
       await call('jobs.priority',{jobId,priority,expectedPriority:control.dataset.originalPriority});control.dataset.originalPriority=priority;refresh();toast('已请求调整优先级；等待服务器更新状态。');
     });
     if(button.id==='close-job-log')dismissSheet(log,{drilldown:true,target:jobHeading(focusedJob)});
-    if(button.id==='projects-refresh'){pollCount=0;loadProjects();}
-    if(button.id==='project-publish')guarded(button,()=>publishProject());
-    if(button.id==='publication-query'){pollCount=0;loadProjectStatus();}
-    if(button.id==='publication-retry')guarded(button,()=>publishProject(true));
+    if(button.id==='projects-refresh'){activateProjectActivity();pollCount=0;loadProjects();}
+    if(button.id==='project-publish')guarded(button,()=>publishProject(),true);
+    if(button.id==='publication-query'){activateProjectActivity();pollCount=0;loadProjectStatus();}
+    if(button.id==='publication-retry')guarded(button,()=>publishProject(true),true);
     if(button.id==='workspace-list')guarded(button,listFiles);
     if(button.id==='workspace-upload')guarded(button,async()=>{
       const target=fileContext(),dir=query('[name=file-path]').value||'.',files=[...query('[name=files]').files];if(target.area==='output')throw Error('任务输出只支持查看和下载。');if(!files.length)throw Error('先选择文件。');
@@ -450,9 +456,9 @@ export function executionUI(store,refresh,toast){
       const target=assertContext(),token=currentToken();if(!validProject(slug))throw Error('项目名需小写字母开头，使用字母、数字、下划线或短横线，最多 48 位。');
       const environmentMode=query('[name=environment-mode]').value;if(!['shared','isolated','oci'].includes(environmentMode))throw Error('请选择项目环境模式。');
       query('#project-create-error').hidden=true;
-      let result;try{result=await call('projects.create',{machine:target.machine,project:slug,environmentMode});if(token!==currentToken())return;confirmProjectCreation(result,{project:slug,environmentMode});}catch(error){if(token===currentToken()){query('#project-create-error').hidden=false;query('#project-create-error').textContent=error.message;}throw error;}
+      let result;try{result=await projectCall('projects.create',{machine:target.machine,project:slug,environmentMode});if(token!==currentToken())return;confirmProjectCreation(result,{project:slug,environmentMode});}catch(error){if(token===currentToken()){query('#project-create-error').hidden=false;query('#project-create-error').textContent=error.message;}throw error;}
       catalog=[...catalog.filter(item=>item.project!==slug),result];project=slug;epoch++;restorePublication();query('[name=release]').value='';clearFileContext();catalogError='';renderProject();notifyContext();query('[name=new-project]').value='';query('#project-create').open=false;submitKey=crypto.randomUUID();toast('项目已创建。');
-    });return;}
+    },true);return;}
     if(event.target.id!=='train-form')return;event.preventDefault();const form=new FormData(event.target);
     guarded(event.target.querySelector('[type=submit]'),async()=>{if(acceptedDraft)throw Error('此配置已提交，请先选择再次使用配置。');const target=assertContext();if(parsedTarget&&(target.machine!==parsedTarget.machine||project!==parsedTarget.project))throw Error('配置目标已改变，请先确认当前目标。');if(form.get('machine')!==machine)throw Error('服务器选择已改变，请核对工作台顶部后再提交。');const datasets=datasetReferences(form.get('datasets'));
       const customOn=query('[name=custom-policy]').checked;
@@ -506,16 +512,34 @@ export function executionUI(store,refresh,toast){
     }catch(error){if(valid())toast(error.message);}
   });
   document.addEventListener('gpuq-open-job',event=>{if(!log||!store.principal)return;const {id,view,origin}=event.detail||{};if(!store.jobs.some(job=>job.id===id)){toast('任务暂未出现在当前账号的状态中，请刷新核对。');return;}focusedJob=id;diagnostics.openLogs(id,view||'overview',origin).catch(error=>toast(error.message));});
-  store.onAuthChange?.(()=>{submitReceipt=null;parsedTarget=null;acceptedDraft=false;publicationIntent=null;publicationResult=null;publicationError='';publicationSelection=null;publicationFlash=null;recoveredActor=null;stopPolling();query('#submission-receipt')?.replaceChildren();});
+  store.onAuthChange?.(()=>{cancelProjectActivity();submitReceipt=null;parsedTarget=null;acceptedDraft=false;publicationIntent=null;publicationResult=null;publicationError='';publicationSelection=null;publicationFlash=null;recoveredActor=null;query('#submission-receipt')?.replaceChildren();});
   document.addEventListener('gpuq-terminal-state',event=>{terminalSessions=event.detail.sessions||[];if(section&&actor)renderProject();});
-  document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPolling();else armPolling();});
-  // Routing changes the existing room's hidden attribute. Pause immediately,
-  // rather than waiting for the next timer to notice that the user has left.
   const workRoom=document.querySelector('[data-page=work]');
-  if(workRoom)new MutationObserver(()=>{if(!isVisible())stopPolling();else armPolling();}).observe(workRoom,{attributes:true,attributeFilter:['hidden']});
+  let wasVisible=isVisible();
+  function visibilityChanged(){
+    const visible=pageActive&&isVisible();
+    if(!visible){wasVisible=false;if(!projectPaused)cancelProjectActivity();return;}
+    if(wasVisible)return;wasVisible=true;projectPaused=false;recoverIfNeeded();armPolling();
+  }
+  document.addEventListener('visibilitychange',visibilityChanged);
+  window.addEventListener('pagehide',()=>{pageActive=false;wasVisible=false;cancelProjectActivity();});
+  window.addEventListener('pageshow',()=>{pageActive=true;visibilityChanged();});
+  // A periodic render must not resume a context that was explicitly closed.
+  const projectDialogs='#work-submit,#work-submit-panel,#job-mission,.job-log-dialog,.terminal-dialog,#mission-control';
+  document.addEventListener('cancel',event=>{if(event.target.matches?.(projectDialogs))cancelProjectActivity();},true);
+  document.addEventListener('close',event=>{if(!event.target.open&&event.target.matches?.(projectDialogs))cancelProjectActivity();},true);
+  // The native close event is queued; invalidate requests as soon as the
+  // dialog closes, including closures performed by another UI module.
+  new MutationObserver(records=>{if(records.some(({target})=>target.isConnected&&target.matches?.(projectDialogs)&&!target.open))cancelProjectActivity();}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['open']});
+  if(workRoom)new MutationObserver(visibilityChanged).observe(workRoom,{attributes:true,attributeFilter:['hidden']});
   const enabledForRecovery=()=>store.production&&store.data?.executionEnabled===true;
+  function recoverIfNeeded(){
+    if(!projectActive()||!actor||recoveredActor===actor||projectBusy||operationBusy)return;
+    recoveredActor=actor;const saved=project?publicationCache.read(actor,machine,project):publicationCache.list(actor).find(item=>(store.data?.machines||[]).some(node=>node.id===item.machine));
+    if(saved&&enabledForRecovery())recoverPublication(saved).catch(()=>{});
+  }
   async function recoverPublication(saved){
-    const owner=receiptActor();await selectMachine(saved.machine);if(owner!==receiptActor()||machine!==saved.machine)return;
+    const owner=receiptActor(),pending=machine===saved.machine?loadProjects():selectMachine(saved.machine),token=currentToken();await pending;if(owner!==receiptActor()||token!==currentToken()||!projectActive()||machine!==saved.machine)return;
     if(!catalog.some(item=>item.project===saved.project)){toast('待确认项目未返回，请刷新项目列表。');return;}
     await selectProject(saved.project);
   }
@@ -547,10 +571,7 @@ export function executionUI(store,refresh,toast){
     }
     const machines=store.data?.machines||[],next=JSON.stringify(machines);
     if(machineIdentity!==next){machineIdentity=next;const options='<option value="">请选择服务器</option>'+machines.map(item=>`<option value="${escape(item.id)}">${escape(item.id)}</option>`).join('');for(const name of ['workspace-machine','machine','terminal-machine','file-machine'])query(`[name=${name}]`).innerHTML=options;if(!machines.some(item=>item.id===machine)){machine='';project='';catalog=[];epoch++;restorePublication();clearFileContext();notifyContext();}syncMachineFields();}
-    if(recoveredActor!==actor){
-      recoveredActor=actor;const saved=publicationCache.list(actor).find(item=>machines.some(node=>node.id===item.machine));
-      if(saved&&enabledForRecovery())recoverPublication(saved);
-    }
+    recoverIfNeeded();
     const jobs=ownJobs();renderJobs(jobs);query('#my-job-count').textContent=jobs.filter(job=>!terminal.has(job.state)).length+' 项进行中';renderProject();
     if(!deepLinkHandled){deepLinkHandled=true;const id=new URL(location.href).searchParams.get('job');if(id&&store.jobs.some(job=>job.id===id))diagnostics.openLogs(id,'overview');}
   };

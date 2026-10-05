@@ -9,7 +9,8 @@ import net from 'node:net';
 import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
-import {accountMenu,closeSubmit} from './starbase-workflows.mjs';
+import {accountMenu,closeSubmit,openSubmit} from './starbase-workflows.mjs';
+import {guardedRoute} from './browser-route-guard.mjs';
 
 const directory=await mkdtemp(join(tmpdir(),'personal-project-browser-')),shots=process.env.UI_SCREENSHOTS||'/tmp/personal-project-ui';
 const password='Personal-Project-Local-Only-2026!',machine=MACHINES[0].id,oldRelease='a'.repeat(64),release='b'.repeat(64);
@@ -61,7 +62,7 @@ try{
       document.addEventListener('securitypolicyviolation',event=>publicationCSP.push(event.violatedDirective));
       const animate=Element.prototype.animate;Element.prototype.animate=function(frames,options){if(this.id==='project-status')publicationAnimations.push(options.duration);return animate.call(this,frames,options);};
     });
-    await target.route('**/*',route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol))return route.continue();outside.push(url.href);return route.abort();});
+    await target.route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol)){await route.fallback();return;}outside.push(url.href);await route.abort();}));
   }
   await configure(page);
   const responseFor=(target,operation)=>target.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation===operation);
@@ -101,7 +102,7 @@ try{
   assert.equal(await page.locator('#project-publish').isDisabled(),true);assert.equal(await page.locator('#project-terminal-block').textContent(),'先结束开发终端（断开不算）');assert.equal(sessions.size,1);
   const beforeClose=calls.filter(row=>row.operation==='terminal.close').length;page.once('dialog',dialog=>dialog.dismiss());await page.locator('#project-terminal-stop').click();await idle();
   assert.equal(calls.filter(row=>row.operation==='terminal.close').length,beforeClose);assert.equal(sessions.size,1);
-  unconfirmedClose=true;page.once('dialog',dialog=>dialog.accept());await page.locator('#project-terminal-stop').click();await page.waitForFunction(()=>document.querySelector('#project-status').textContent.includes('结束未确认'));await idle();
+  unconfirmedClose=true;page.once('dialog',dialog=>dialog.accept());await page.locator('#project-terminal-stop').click();await page.waitForFunction(()=>document.querySelector('#project-status').textContent.includes('结束结果未确认'));await idle();
   assert.equal(await page.locator('#project-publish').isDisabled(),true);assert.equal(sessions.size,1);unconfirmedClose=false;
   page.once('dialog',dialog=>dialog.accept());await action('terminal.close',()=>page.locator('#project-terminal-stop').click());await idle();assert.equal(sessions.size,0);assert.equal(await page.locator('#project-publish').isEnabled(),true);
 
@@ -123,7 +124,7 @@ try{
   await makeReady(project);await query();assert.deepEqual(await pendingRecords(),[]);
 
   // The node accepted a write, but its HTTP response is lost to this browser.
-  let drop=true;const loseResponse=async route=>{if(route.request().postDataJSON()?.operation==='projects.publish'&&drop){drop=false;await route.fetch();return route.abort('connectionreset');}return route.fallback();};
+  let drop=true;const loseResponse=guardedRoute(async route=>{if(route.request().postDataJSON()?.operation==='projects.publish'&&drop){drop=false;await route.fetch();await route.abort('connectionreset');return;}await route.fallback();});
   await page.route(origin+'/api/call',loseResponse);const lostCount=publishes().length;await page.locator('#project-publish').click();await page.waitForFunction(()=>document.querySelector('#project-status').textContent.includes('正在生成训练版本'));await idle();
   assert.equal(publishes().length,lostCount+1);const lostKey=project.publication.id;assert.equal(calls.at(-1).operation,'projects.status');assert.equal((await pendingRecords())[0].value.key,lostKey);await page.unroute(origin+'/api/call',loseResponse);
   const beforeRefresh=publishes().length;await page.reload();await page.waitForFunction(name=>document.querySelector('[name=workspace-project]')?.value===name,project.project);await idle();
@@ -160,13 +161,13 @@ try{
     const user={id:'layout-'+role,username:'layout-'+role,name:'排版验收',role,enabled:true,approvedAt:new Date().toISOString(),policyVersion:0,total:8,limits:Object.fromEntries(layoutMachines.map(node=>[node.id,node.cards]))},principal={userId:user.id,username:user.username,role};
     const state={machines:layoutMachines,users:[user],jobs:[],executionEnabled:true,operationalMaintenance:{version:1,revision:0,global:null,machines:{}},gpuq:{stale:false,checkedAt:new Date().toISOString(),hosts:[]}};
     const layoutProject=ready('container-layout');let layoutRequest=null;
-    await layout.route('**/*',async route=>{
-      const request=route.request(),url=new URL(request.url());if(url.origin!==origin)return route.fallback();
-      if(url.pathname==='/machines.js')return route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(layoutMachines)+';'});
-      if(!url.pathname.startsWith('/api/'))return route.fallback();const {operation,args}=request.postDataJSON();let result=null;
+    await layout.route('**/*',guardedRoute(async route=>{
+      const request=route.request(),url=new URL(request.url());if(url.origin!==origin){await route.fallback();return;}
+      if(url.pathname==='/machines.js'){await route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(layoutMachines)+';'});return;}
+      if(!url.pathname.startsWith('/api/')){await route.fallback();return;}const {operation,args}=request.postDataJSON();let result=null;
       if(operation==='state'){}else if(operation==='projects.list')result={projects:[layoutProject]};else if(operation==='projects.status')result=layoutProject;else if(operation==='projects.publish'){layoutRequest=args;layoutProject.state='UNKNOWN';layoutProject.publication={id:args.key,state:'UNKNOWN'};result=layoutProject;}else throw Error('Unexpected layout operation '+operation);
-      return route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal})});
-    });
+      await route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal})});
+    }));
     await layout.goto(origin);await layout.locator('[name=workspace-machine]').waitFor();await layout.evaluate(()=>document.fonts.ready);
     for(const node of layoutMachines){
       await action('projects.list',()=>layout.locator('[name=workspace-machine]').selectOption(node.id),layout);await idle(layout);await action('projects.status',()=>layout.locator('[name=workspace-project]').selectOption(layoutProject.project),layout);await idle(layout);
@@ -182,6 +183,70 @@ try{
     assert.deepEqual(await layout.evaluate(()=>publicationAnimations),[width===320?150:480]);assert.deepEqual(await layout.evaluate(()=>publicationCSP),[]);await layout.close();
   }
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
-  await writeFile(join(shots,'personal-checks.json'),JSON.stringify({status:'passed',checks:['three environments and exact name validation','strict container confirmation and legacy shared response','server rejection unchanged','detached terminals block publish','confirmed close, cancellation and unconfirmed close','matching receipt plus READY release','old READY never confirms new request','same-key explicit retry queries first','lost response queries without duplicate publish','refresh restores scoped intent','FAILED details escaped in help','room departure pauses polling','account isolation and zero authorization','status args never include key','member/admin long IDs at 1440/390/320','480ms confirmation and 150ms reduced motion','no CSP errors or external requests'],calls:calls.length,shots,animations},null,2));
+
+  // Fake time and a deliberately hung fetch make lifecycle cancellation
+  // deterministic. Late completion must not confirm a release or restart
+  // polling, even though the node-side publication intent remains recoverable.
+  const lifecycle=[];
+  for(const departure of ['modal-close-and-logout','room','project','pagehide','logout','refresh-recovery']){
+    const target=await browser.newPage({viewport:{width:1440,height:1080}});await configure(target);
+    await target.addInitScript(()=>{
+      const send=globalThis.fetch.bind(globalThis);globalThis.projectProbe={hold:localStorage.getItem('lifecycle-hold-on-reload'),trace:[],pending:[]};
+      globalThis.fetch=(url,options={})=>{
+        let request;try{request=JSON.parse(options.body);}catch{}
+        if(request?.operation?.startsWith('projects.')){
+          const entry={operation:request.operation,project:request.args?.project,aborted:false};projectProbe.trace.push(entry);
+          if(projectProbe.hold===request.operation){
+            projectProbe.hold=false;
+            return new Promise((resolve,reject)=>{
+              const aborted=()=>{entry.aborted=true;reject(options.signal.reason);};
+              options.signal.addEventListener('abort',aborted,{once:true});
+              projectProbe.pending.push({resolve:value=>resolve(new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}})),entry});
+            });
+          }
+        }
+        return send(url,options);
+      };
+    });
+    const name='cleanup-'+departure,publishing=ready(name);
+    projects.set(identity(machine,'builtin-admin',name),publishing);
+    const logged=await target.context().request.post(origin+'/api/login',{headers:{Origin:origin},data:{username:'admin',password,client:'browser'}});assert.equal(logged.status(),200);
+    await target.goto(origin);await target.locator('[data-nav=work]').click();await chooseMachine(target);
+    await action('projects.status',()=>target.locator('[name=workspace-project]').selectOption(name),target);await idle(target);
+    await target.clock.install();await target.clock.pauseAt(new Date());
+    await action('projects.publish',()=>target.locator('#project-publish').click(),target);await idle(target);
+    if(departure==='modal-close-and-logout')await openSubmit(target);
+    if(departure==='refresh-recovery'){await target.evaluate(()=>localStorage.setItem('lifecycle-hold-on-reload','projects.list'));await target.reload();}
+    else{await target.evaluate(()=>projectProbe.hold='projects.status');await target.clock.runFor(2100);}
+    try{await target.waitForFunction(()=>projectProbe.pending.length===1,null,{timeout:5000});}catch(error){console.error('lifecycle polling evidence',departure,await target.evaluate(()=>({trace:projectProbe.trace,status:document.querySelector('#project-status')?.textContent,dialogs:[...document.querySelectorAll('dialog[open]')].map(dialog=>dialog.id),workHidden:document.querySelector('[data-page=work]')?.hidden})));throw error;}
+    if(departure==='modal-close-and-logout')await target.locator('#work-submit').evaluate(dialog=>dialog.close());
+    else if(departure==='room')await target.locator('[data-nav=resources]').click();
+    else if(departure==='project')await target.locator('[name=workspace-project]').evaluate(select=>{select.value='admin-project';select.dispatchEvent(new Event('change',{bubbles:true}));});
+    else if(departure==='pagehide'||departure==='refresh-recovery')await target.evaluate(()=>dispatchEvent(new PageTransitionEvent('pagehide')));
+    else{await accountMenu(target);await action('logout',()=>target.locator('#switch-account').evaluate(button=>button.click()),target);}
+    await target.clock.runFor(50);
+    const stopped=await target.evaluate(()=>({aborted:projectProbe.pending[0].entry.aborted,dialogs:[...document.querySelectorAll('dialog')].map(dialog=>({id:dialog.id,open:dialog.open})),trace:projectProbe.trace}));
+    assert.equal(stopped.aborted,true,departure+' aborts the pending fetch: '+JSON.stringify(stopped));
+    await idle(target);
+    const frozen=await target.evaluate(()=>projectProbe.trace.length);
+    const before=await target.evaluate(()=>document.querySelector('#project-status')?.textContent??null);
+    await target.evaluate(({project,release,key})=>{const stale={project,state:'READY',publication:{id:key,state:'READY',release},releases:[{state:'READY',release}]};projectProbe.pending[0].resolve({result:projectProbe.pending[0].entry.operation==='projects.list'?{projects:[stale]}:stale});},{project:name,release,key:publishing.publication.id});
+    await target.clock.runFor(31000);
+    assert.equal(await target.evaluate(()=>projectProbe.trace.length),frozen,departure+' sends no project requests after cancellation');
+    assert.equal(await target.evaluate(()=>document.querySelector('#project-status')?.textContent??null),before,departure+' ignores late READY');
+    assert.equal(await target.evaluate(key=>Object.keys(localStorage).some(name=>name.startsWith('stargate.project-publication.v1:')&&JSON.parse(localStorage[name]).key===key),publishing.publication.id),true,departure+' keeps the original intent for explicit confirmation');
+    if(departure==='project')assert.equal(await target.locator('[name=workspace-project]').inputValue(),'admin-project');
+    if(departure==='modal-close-and-logout'){
+      assert.equal(await target.locator('#project-publish').isDisabled(),true,'unconfirmed publication stays fenced');
+      await accountMenu(target);await action('logout',()=>target.locator('#switch-account').evaluate(button=>button.click()),target);
+      await target.clock.runFor(31000);assert.equal(await target.evaluate(()=>projectProbe.trace.length),frozen,'closed polling stays stopped after logout');
+      assert.equal(await target.locator('#login-dialog').isVisible(),true);
+    }
+    assert.deepEqual(await target.evaluate(()=>publicationCSP),[]);
+    lifecycle.push({departure,aborted:true,noMoreProjectRequests:true,lateResultIgnored:true});await target.close();
+  }
+  assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
+  await writeFile(join(shots,'publication-lifecycle.json'),JSON.stringify(lifecycle,null,2));
+  await writeFile(join(shots,'personal-checks.json'),JSON.stringify({status:'passed',checks:['three environments and exact name validation','strict container confirmation and legacy shared response','server rejection unchanged','detached terminals block publish','confirmed close, cancellation and unconfirmed close','matching receipt plus READY release','old READY never confirms new request','same-key explicit retry queries first','lost response queries without duplicate publish','refresh restores scoped intent','FAILED details escaped in help','room departure pauses polling','account isolation and zero authorization','status args never include key','member/admin long IDs at 1440/390/320','480ms confirmation and 150ms reduced motion','no CSP errors or external requests','hung polling cancelled on modal close then logout, room/project change, pagehide and logout','late READY cannot restart polling or mutate another context'],calls:calls.length,shots,animations,lifecycle},null,2));
   console.log(JSON.stringify({status:'passed',test:'personal-project-ui',shots,calls:calls.length}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(directory,{recursive:true,force:true});}

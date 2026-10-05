@@ -400,6 +400,25 @@ test('endProjectTerminals confirms, matches machine+project+actor and closes eac
     assert.deepEqual(f.events.at(-1).detail.sessions.map(value=>value.id),['other']);
   }finally{f.restore();}
 });
+test('cancelled project-terminal cleanup cannot close after a delayed reconnect completes',async()=>{
+  const f=fixture();try{
+    await attach(f,'retained');await f.click('terminal-disconnect');
+    const controller=new AbortController(),end=endProjectTerminals({machine:'node-a',project:'experiment'},{signal:controller.signal});
+    const rejected=assert.rejects(end,error=>error.name==='AbortError');await f.settle();assert.equal(f.opens.length,2);
+    controller.abort();await rejected;f.resolve(1,'retained');await f.settle();
+    assert.equal(f.calls.some(call=>call.operation==='terminal.close'),false);assert.equal(f.opens.length,2,'cancellation never reconnects or takes over again');
+    assert.equal(f.confirmations.length,1);
+  }finally{f.restore();}
+});
+test('project-terminal cleanup rejects another writer without offering takeover',async()=>{
+  const f=fixture();try{
+    await attach(f,'elsewhere');await f.click('terminal-disconnect');
+    const end=endProjectTerminals({machine:'node-a',project:'experiment'});
+    const rejected=assert.rejects(end,/这个终端正在别处使用，请在那里结束/);await f.settle();
+    f.opens[1].reject(Error('Terminal has another active writer'));await rejected;
+    assert.equal(f.confirmations.length,1,'only the project-ending confirmation is shown');assert.equal(f.opens.length,2);assert.equal(f.calls.some(call=>call.operation==='terminal.close'||call.args?.takeover),false);
+  }finally{f.restore();}
+});
 
 test('old actor sessions cannot be revealed or closed by the next account',async()=>{
   const f=fixture();try{
