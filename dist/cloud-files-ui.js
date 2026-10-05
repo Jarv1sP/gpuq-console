@@ -1,3 +1,4 @@
+import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const label={QUEUED:'等待传输',RUNNING:'传输中',CANCELING:'正在停止',CANCELED:'已停止',PAUSED:'可续传',FAILED:'需检查',VERIFYING:'待云端确认',VERIFIED:'已在云端确认',READY:'已保存到数据空间'};
 const identityChanged=row=>row.action==='download'&&row.state==='PAUSED'&&row.errorCode==='CLOUD_FILE_IDENTITY_CHANGED';
@@ -7,11 +8,12 @@ export function cloudFilesRows(rows){
 export function cloudFilesHTML(){return `<details class="data-workspace-browser"><summary>云端副本</summary><p class="muted">把已整理的文件保存到平台云盘，或取回到个人数据空间。只有你能查看这些副本；不会向你提供管理员的网盘账号。此通道由存储节点直接传输，不经 VPS。</p><form id="cloud-files-form"><label class="field">个人 /data2 中的文件<input name="cloud-files-path" placeholder="incoming/data.tar" required></label><div class="file-actions"><button class="button" type="submit">存到云端</button><button class="button" id="cloud-files-refresh" type="button">刷新</button></div></form><p id="cloud-files-status" role="status">请先结束数据终端。云端确认前，务必保留本地原件。</p><ul id="cloud-files-list"></ul></details>`;}
 export function cloudFilesUI(store,section,toast){
   let busy=false,epoch=0;const pending=new Map();const $=s=>section.querySelector(s),machine=()=>$('[name=dataset-machine]')?.value;
+  function maintenanceControls(){const card=$('#cloud-files-form')?.closest('details');if(!card)return;restoreMaintenanceControls(card);disableMaintenanceControls(card,'#cloud-files-form [type=submit],[data-cloud-verify],[data-cloud-restore]',maintenanceFor(store.data?.operationalMaintenance,machine()));}
   const scope=()=>JSON.stringify([store.principal?.userId,machine()]);
   const context=()=>JSON.stringify([store.principal?.userId,store.authGeneration,machine(),epoch]);
   async function run(fn){if(busy||!store.production||!store.principal||!machine())return;busy=true;const expected=context();const current=()=>{if(expected!==context())throw Error('账号或服务器已改变。');};
     const call=async(op,args)=>{current();const r=await store.call(op,{machine:machine(),...args});current();return r;};
-    try{await fn(call,current);}catch(e){if(expected===context()){$('#cloud-files-status').textContent=e.message;toast(e.message);}}finally{if(expected===context())busy=false;}}
+    try{await fn(call,current);}catch(e){if(expected===context()){$('#cloud-files-status').textContent=e.message;toast(e.message);}}finally{if(expected===context()){busy=false;maintenanceControls();}}}
   async function refresh(call){const info=await call('cloud.files.info',{});if(!info.enabled){$('#cloud-files-status').textContent='这台机器尚未开通云文件；请使用指定存储节点或校内直传。';$('#cloud-files-list').replaceChildren();return;}const held=pending.get(scope());if(held){try{const r=await call('cloud.files.status',{operationId:held.key});if(r.operationId!==held.key)throw Error('操作编号不匹配');pending.delete(scope());$('#cloud-files-status').textContent='已找到原操作 '+held.key+'，未重复提交。';}catch{throw Error('原操作 '+held.key+' 还未确认，请稍后刷新或联系管理员；暂不创建第二个上传。');}}const result=await call('cloud.files.list',{});$('#cloud-files-list').innerHTML=cloudFilesRows(result.files||[]);}
   async function start(call,action,args){
     if(args.path!==undefined&&(typeof args.path!=='string'||!args.path||args.path.length>1024||/[\\\x00-\x1f\x7f]/.test(args.path)||args.path.split('/').some(p=>!p||p==='.'||p==='..'||new TextEncoder().encode(p).length>255)))throw Error('请填写个人 /data2 内的相对文件路径。');

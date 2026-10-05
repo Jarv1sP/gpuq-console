@@ -8,6 +8,7 @@ import {taskDescription} from './task-metadata.js';
 import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout} from './workbench-ui.js';
 import {revealSheet,dismissSheet,sharedObject} from './motion-ui.js';
 import {taskNotesMarkup,createTaskNotesUI} from './task-notes-ui.js';
+import {maintenanceFor,heldDuringMaintenance,maintenanceTime,maintenanceInfoHTML,maintenanceClock} from './maintenance-state.js';
 const escape=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const terminal=new Set(['SUCCEEDED','FAILED','CANCELED']);
 const hashPattern=/^[a-f0-9]{64}$/;
@@ -134,9 +135,13 @@ export function executionUI(store,refresh,toast){
     if(!submitDialog||!actor)return;query('#submit-context').textContent=(machine||'未选择服务器')+' · '+(project||'个人工作区');
     const user=store.users.find(item=>item.id===actor),used=store.usage(actor),quota=user?.total,info=currentProject(),host=store.data?.gpuq?.hosts?.find(item=>item.id===machine),fresh=store.production&&!store.data?.gpuq?.stale&&host?.reachable===true;
     const release=query('[name=release]').value,authorized=enabled()&&user?.limits?.[machine]>0;
-    const rows=[['服务器授权',authorized?'已授权 '+machine:'选择获授权服务器',authorized],['额度',Number.isFinite(quota)?`已占 ${used} / ${quota} 张；准备数据期间不占额度，数据就绪后由后台再次核对。`:'额度尚未确认',Number.isFinite(quota)],['训练版本',project?(readyReleases(info).some(item=>item.release===release)?'已就绪的固定版本；提交时再次校验。':'先生成可用训练版本。'):'使用个人工作区；提交时再次核对。',!project||readyReleases(info).some(item=>item.release===release)],['服务器采集',fresh?'当前采集可用；启动由调度器确认。':'采集未知或过期；不会当作空闲。',fresh],['数据集',query('[name=datasets]').value.trim()?'提交后先校验固定版本与本机副本；需要时准备数据。':'本次不挂载数据集。',!query('[name=datasets]').value.trim()]];
+    const rows=[['服务器',authorized?machine:'选择服务器',authorized],['占用额度',Number.isFinite(quota)?`${used} / ${quota} 张`:'待确认',Number.isFinite(quota)],['版本',project?(readyReleases(info).some(item=>item.release===release)?'已就绪':'尚未发布'):'个人工作区',!project||readyReleases(info).some(item=>item.release===release)],['监控',fresh?'更新于 '+maintenanceClock(host.checkedAt||store.data.gpuq.checkedAt):'待确认',fresh],['数据集',query('[name=datasets]').value.trim()?'已选择 · 提交时检查':'未选择',!query('[name=datasets]').value.trim()]];
     query('#submit-check-list').innerHTML=rows.map(([label,text,ok])=>`<li><span class="what">${escape(label)}<small>${escape(text)}</small></span><span class="${ok?'v-ok':'v-wait'}">${ok?'已确认':'待核对'}</span></li>`).join('');
-    query('#submit-summary').textContent=query('[name=datasets]').value.trim()?'先准备数据，再核对额度并排队。提交后可关闭网页。':'提交后由服务器继续运行，可以关闭网页。';
+    const entry=maintenanceFor(store.data?.operationalMaintenance,machine);
+    let maintenance=query('#submit-maintenance');if(!maintenance){maintenance=document.createElement('div');maintenance.id='submit-maintenance';query('#train-form .sheet-scroll').prepend(maintenance);}
+    maintenance.hidden=!entry;
+    if(entry){const alternatives=(store.data?.machines||[]).filter(item=>user?.limits?.[item.id]>0&&!maintenanceFor(store.data?.operationalMaintenance,item.id));maintenance.innerHTML=`<p><span class="maintenance-pause" aria-hidden="true"></span> ${escape(store.data.operationalMaintenance.global?'全平台':machine)}维护中 · 自 ${escape(maintenanceTime(entry.since))}</p><p>${escape(entry.reason)}</p>${maintenanceInfoHTML("换机后请检查代码、环境和数据。不会自动提交。","换机说明")}${alternatives.length?`<label>改用其他服务器<select id="submit-maintenance-machine" aria-label="选择其他服务器">${alternatives.map(item=>`<option value="${escape(item.id)}">${escape(item.id)}</option>`).join('')}</select></label><button type="button" class="button" id="submit-maintenance-switch">改用其他服务器</button>`:'<p>没有其他可用服务器。</p>'}`;}
+    query('#submit-summary').textContent=entry?'维护中，暂停提交':'';
     const quote=value=>"'"+String(value).replaceAll("'","'\\''")+"'",get=name=>query(`[name=${name}]`).value;
     const args=['gpuctl run',quote(machine||'SERVER'),'-g',get('cards'),'--min-vram',get('memory'),'--name',quote(get('name'))];
     if(project)args.push('--project',quote(project),'--release',quote(release));if(store.data?.taskMetadata?.version===1&&get('task-description').trim())args.push('--description',quote(get('task-description')));
@@ -147,9 +152,9 @@ export function executionUI(store,refresh,toast){
   }
   function renderJobs(jobs){
     const table=query('#my-job-table'),detailKey=item=>item.className+'|'+(item.closest('[data-workbench-job]')?.dataset.workbenchJob||''),details=new Map([...table.querySelectorAll('details')].map(item=>[detailKey(item),item.open])),scrolls=new Map([...table.querySelectorAll('.wb-scroll-list')].map(item=>[item.getAttribute('aria-label'),item.scrollTop])),active=document.activeElement,focus=table.contains(active)?{id:active.closest('[data-workbench-job]')?.dataset.workbenchJob,hook:[...active.attributes].find(attr=>attr.name.startsWith('data-'))?.name}:null;
-    const actions=job=>`${jobNotificationHTML(job,actor)}<button class="button quiet" data-job-logs="${escape(job.id)}">日志</button><button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="diagnostics">诊断</button>${job.project?`<button class="button quiet" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="notes">留言</button><button class="button danger" data-job-cancel="${escape(job.id)}" ${endedJob(job)||job.cancelRequested?'disabled':''}>取消</button>${canEditPriority(job,store.principal?.role==='admin')?`<details class="wb-priority" data-priority-editor><summary>排队优先级</summary><select data-job-priority="${escape(job.id)}" data-original-priority="${escape(job.priority)}">${priorityRankOptions(job.priority)}</select><button class="button quiet" data-job-priority-save="${escape(job.id)}">保存优先级</button></details>`:''}`;
+    const actions=job=>`${heldDuringMaintenance(job,store.data?.operationalMaintenance)?'<span class="maintenance-held"><span class="maintenance-pause" aria-hidden="true"></span>维护期间暂不派发</span>':''}${jobNotificationHTML(job,actor)}<button class="button quiet" data-job-logs="${escape(job.id)}">日志</button><button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="diagnostics">诊断</button>${job.project?`<button class="button quiet" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="notes">留言</button><button class="button danger" data-job-cancel="${escape(job.id)}" ${endedJob(job)||job.cancelRequested?'disabled':''}>取消</button>${canEditPriority(job,store.principal?.role==='admin')&&!maintenanceFor(store.data?.operationalMaintenance,job.machine)?`<details class="wb-priority" data-priority-editor><summary>排队优先级</summary><select data-job-priority="${escape(job.id)}" data-original-priority="${escape(job.priority)}">${priorityRankOptions(job.priority)}</select><button class="button quiet" data-job-priority-save="${escape(job.id)}">保存优先级</button></details>`:''}`;
     const drafts=new Map([...table.querySelectorAll('[data-job-priority]')].map(input=>[input.dataset.jobPriority,{value:input.value,original:input.dataset.originalPriority}]));
-    const html=workbenchCards(jobs,{actions,focusId:focusedJob});if(html===jobHTML)return;jobHTML=html;table.innerHTML=html;
+    const html=workbenchCards(jobs,{actions,focusId:focusedJob,maintenance:store.data?.operationalMaintenance});if(html===jobHTML)return;jobHTML=html;table.innerHTML=html;
     for(const detail of table.querySelectorAll('details'))if(details.has(detailKey(detail)))detail.open=details.get(detailKey(detail));
     for(const list of table.querySelectorAll('.wb-scroll-list'))if(scrolls.has(list.getAttribute('aria-label')))list.scrollTop=scrolls.get(list.getAttribute('aria-label'));
     for(const input of table.querySelectorAll('[data-job-priority]')){const draft=drafts.get(input.dataset.jobPriority);if(draft&&draft.value!==draft.original){input.value=draft.value;input.dataset.originalPriority=draft.original;}}
@@ -211,6 +216,10 @@ export function executionUI(store,refresh,toast){
     query('[name=file-area]').disabled=!project||locked;query('.output-run-fields').hidden=!output;query('#project-release-field').hidden=!project;query('#project-detail').hidden=!project;
     query('#workspace-mode-note').textContent=project?'代码草稿在 /workspace；项目环境在 /opt/project-env。发布后，训练读取固定只读版本，每项任务写入自己的 /outputs。':'个人工作区路径为 /workspace。终端、文件和训练共用此目录；新实验可单独创建项目。';
     query('#terminal-mode-note').textContent=project?'编辑代码、安装项目 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。':'管理个人文件和 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。';
+    if(maintenanceFor(store.data?.operationalMaintenance,machine)){
+      for(const selector of ['#project-create-form [type=submit]','#project-publish','#terminal-open','#terminal-reconnect','#train-form [type=submit]','#workspace-upload','[name=files]'])query(selector).disabled=true;
+      query('#terminal-mode-note').textContent='维护中，暂停新建和重连。';
+    }
   }
   function renderProject(){
     const select=query('[name=workspace-project]'),options='<option value="">个人工作区</option>'+catalog.filter(item=>validProject(item.project)).map(item=>`<option value="${escape(item.project)}">${escape(item.project)}</option>`).join('');if(select.innerHTML!==options)select.innerHTML=options;select.value=project;
@@ -256,12 +265,13 @@ export function executionUI(store,refresh,toast){
     finally{if(token===currentToken()){projectBusy=false;if(!poll)pollCount=0;renderProject();}}
   }
   function armPolling(){stopPolling();if(!isVisible()||projectBusy||operationBusy||catalogError||currentProject()?.state!=='PUBLISHING'||pollCount>=60)return;pollTimer=setTimeout(()=>{pollTimer=null;if(isVisible()){pollCount++;loadProjectStatus(true);}},5000);}
-  async function guarded(button,fn){if(operationBusy)return;operationBusy=true;button.disabled=true;updateControls();try{await fn();}catch(error){toast(error.message);status(error.message,true);}finally{operationBusy=false;if(button.isConnected)button.disabled=false;updateControls();armPolling();}}
+  async function guarded(button,fn){if(operationBusy)return;operationBusy=true;button.disabled=true;updateControls();try{await fn();}catch(error){toast(error.message);status(error.message,error.code!=='MAINTENANCE_ACTIVE');}finally{operationBusy=false;if(button.isConnected)button.disabled=false;updateControls();armPolling();}}
   function fileContext(){const target=assertContext();if(!project)return target;const area=query('[name=file-area]').value;if(area==='code')return {...target,area};const runId=query('[name=file-run-id]').value.trim();if(!uuidPattern.test(runId))throw Error('请选择本项目任务，或输入完整任务 ID。');return {...target,area:'output',runId};}
   async function listFiles(){const target=fileContext(),path=query('[name=file-path]').value||'.';const result=await call('files.list',{...target,path});query('#workspace-result').textContent=result.entries.map(file=>`${file.type==='directory'?'[目录]':'[文件]'} ${file.name}  ${file.type==='file'?file.size+' B':''}`).join('\n')||'目录为空';}
   document.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
     if(button.id==='open-submit'){submitSelection.invalidate();if(submitDialog)query('#train-panel').open=true;return;}
+    if(button.id==='submit-maintenance-switch'){const target=query('#submit-maintenance-machine')?.value;if(target&&(store.data?.machines||[]).some(item=>item.id===target)&&!maintenanceFor(store.data?.operationalMaintenance,target))guarded(button,async()=>{await selectMachine(target);updatePreflight();toast('已按你的选择换机。请重新核对代码、环境、数据与版本；尚未提交。');});return;}
     if(button.id==='close-submit'){submitSelection.invalidate();dismissSheet(submitDialog);return;}
     if(button.id==='close-submit-panel'){dismissSheet(settingsDialog,{drilldown:true});closeSettings();updatePreflight();return;}
     if(button.id==='submit-check-refresh'){document.querySelector('#refresh-state').click();if(project)loadProjectStatus();updatePreflight();return;}

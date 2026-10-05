@@ -53,7 +53,7 @@ export function progressText(progress){
   if(s.stepsTotal)parts.push(`步数 ${s.stepsCompleted}/${s.stepsTotal}`);
   const percent=progressPercent(progress);if(percent!==null)parts.push(percent+'%');
   if(s.etaSeconds!==null)parts.push('预计剩余 '+Math.ceil(s.etaSeconds/60)+' 分钟');
-  if(progress.stale)parts.push('进度停滞（训练自报超时）');
+  if(progress.stale)parts.push('进度停滞（训练上报超时）');
   if(s.severity!=='info')parts.push(s.severity==='error'?'训练报告异常':'训练报告警告');
   if(s.message)parts.push(s.message);
   return parts.join(' · ');

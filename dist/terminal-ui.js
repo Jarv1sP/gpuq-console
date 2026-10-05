@@ -1,3 +1,4 @@
+import {maintenanceFor} from './maintenance-state.js';
 export function terminalContext({machine,project,hostAdmin=false,dataWorkspace=false}){
   if(typeof machine!=='string'||!machine||machine==='auto')throw Error('先选择一台服务器，再打开终端。');
   if(project!==undefined&&project!==''&&(typeof project!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(project)))throw Error('项目名称无效。');
@@ -33,15 +34,23 @@ export function terminalUI(store,toast){
   }
   let dialog,term,fit,session,timer,inputScheduled=false,idleDelay=80,busy=false,input=new Uint8Array(),offset=0,closing=false,lastSize='',generation=0,currentActor=null,currentWorkspace='',workspaceGeneration=0,openingGeneration=0;
   const sessions=new Map();
+  const paused=target=>!!target&&!target.hostAdmin&&!!maintenanceFor(store.data?.operationalMaintenance,target.machine);
+  function syncMaintenance(){
+    const locked=paused(session),interrupt=document.querySelector('#terminal-interrupt'),note=document.querySelector('#terminal-maintenance-note');
+    if(interrupt)interrupt.disabled=locked;if(note){note.hidden=!locked;note.textContent=locked?'维护中：终端输入（包括 Ctrl+C）暂停。仍可查看输出、断开或明确结束终端。':'';}
+    if(term?.options)term.options.disableStdin=locked;
+    if(locked)input=new Uint8Array();
+  }
   const identity=value=>JSON.stringify([value.userId,value.machine,value.project||'',value.hostAdmin===true,value.dataWorkspace===true]);
   const args=value=>{const {machine,project,hostAdmin,dataWorkspace,id,clientId,writerToken}=value;return {machine,...(project?{project}:{}),...(dataWorkspace?{dataWorkspace:true}:{}),hostAdmin,id,clientId,writerToken};};
   function announce(){document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[...sessions.values()].filter(value=>value.userId===store.principal?.userId).map(({writerToken,...value})=>({...value}))}}));}
   async function detach(release=true,invalidateOpening=true){if(invalidateOpening)openingGeneration++;const previous=session;clearTimeout(timer);inputScheduled=false;generation++;session=null;input=new Uint8Array();dialog?.close();if(previous&&release){previous.detached=true;previous.connectionState='detached';announce();try{await store.call('terminal.detach',args(previous));}catch{toast('写入权释放未确认；终端仍保留，等待 30 秒或明确接管后重连。');}}}
   store.onAuthChange?.(async call=>{
     const targets=[...sessions.values()].filter(value=>value.userId===currentActor);currentActor=null;detach(false);announce();
+    term?.dispose();term=null;document.querySelector('#terminal-screen')?.replaceChildren();for(const id of ['terminal-title','terminal-session-note','terminal-maintenance-note']){const node=document.querySelector('#'+id);if(node)node.textContent='';}
     for(const target of targets)try{await call('terminal.detach',args(target));target.detached=true;}catch{toast('旧终端写入权释放未确认；终端未自动关闭，原账号可显式重连。');}
   });
-  function enqueue(text){const data=new TextEncoder().encode(text);if(input.length+data.length>1048576){toast('终端待发送内容过多；请等待发送完成后再粘贴。');return;}const next=new Uint8Array(input.length+data.length);next.set(input);next.set(data,input.length);input=next;}
+  function enqueue(text){if(paused(session))return;const data=new TextEncoder().encode(text);if(input.length+data.length>1048576){toast('终端待发送内容过多；请等待发送完成后再粘贴。');return;}const next=new Uint8Array(input.length+data.length);next.set(input);next.set(data,input.length);input=next;}
   function schedule(delay){clearTimeout(timer);inputScheduled=false;timer=setTimeout(()=>{timer=null;inputScheduled=false;exchange();},delay);}
   function sendSoon(){
     // A short fixed batching window, not a trailing debounce: continuous typing
@@ -49,14 +58,15 @@ export function terminalUI(store,toast){
     if(!busy&&!inputScheduled){schedule(20);inputScheduled=true;}
   }
   async function closeSession(target){
-    if(target.detached){const result=await store.call('terminal.open',{...args(target),key:crypto.randomUUID(),mode:'reconnect'});target.writerToken=result.writerToken;target.detached=false;target.connectionState='connected';}
+    if(target.detached&&paused(target))throw Error('维护期间不能重连已断开的开发会话，无法重新取得结束权限。请管理员用 ROOT 核对；不会自动接管。');
+    if(target.detached&&!paused(target)){const result=await store.call('terminal.open',{...args(target),key:crypto.randomUUID(),mode:'reconnect'});target.writerToken=result.writerToken;target.detached=false;target.connectionState='connected';}
     await store.call('terminal.close',args(target));sessions.delete(target.id);
     if(session?.id===target.id)detach(false);announce();
   }
   async function exchange(){
     if(!session||busy||closing)return;clearTimeout(timer);inputScheduled=false;busy=true;const target=session,turn=generation;
     try{
-      const bytes=input.slice(0,8192);input=input.slice(bytes.length);
+      syncMaintenance();const bytes=input.slice(0,8192);input=input.slice(bytes.length);
       const size={cols:term.cols,rows:term.rows},sizeKey=JSON.stringify(size);
       const result=await store.call('terminal.exchange',{...args(target),offset,input:btoa(String.fromCharCode(...bytes)),...(sizeKey===lastSize?{}:size)});
       if(turn!==generation||session?.id!==target.id)return;
@@ -69,7 +79,7 @@ export function terminalUI(store,toast){
   }
   function ensureDialog(){
     if(dialog)return;dialog=document.createElement('dialog');dialog.className='terminal-dialog';dialog.setAttribute('aria-labelledby','terminal-title');
-    dialog.innerHTML='<div class="modal-head"><h2 id="terminal-title"></h2><div><button class="button quiet" id="terminal-collapse">收起</button><button class="button" id="terminal-interrupt">Ctrl+C</button> <button class="button" id="terminal-disconnect">断开</button> <button class="button danger" id="terminal-stop">结束终端</button></div></div><div id="terminal-screen"></div><p id="terminal-session-note" class="muted"></p>';
+    dialog.innerHTML='<div class="modal-head"><h2 id="terminal-title"></h2><div><button class="button quiet" id="terminal-collapse">收起</button><button class="button" id="terminal-interrupt">Ctrl+C</button> <button class="button" id="terminal-disconnect">断开</button> <button class="button danger" id="terminal-stop">结束终端</button></div></div><p id="terminal-maintenance-note" class="terminal-maintenance-note" role="status" hidden></p><div id="terminal-screen"></div><p id="terminal-session-note" class="muted"></p>';
     document.body.append(dialog);dialog.addEventListener('cancel',event=>{event.preventDefault();detach();});
   }
   document.addEventListener('gpuq-workspace-context',event=>{
@@ -88,6 +98,7 @@ export function terminalUI(store,toast){
       try{
         const entry=button.id.startsWith('terminal-data-')?'data':button.id.startsWith('terminal-root-')?'host':'development';
         const target=terminalLaunchContext({machine:knownTarget?.machine??document.querySelector(entry==='data'?'[name=dataset-machine]':'[name=terminal-machine]')?.value,project:knownTarget?.project??document.querySelector('[name=workspace-project]')?.value,role:store.principal?.role,entry});
+        if(paused(target))throw Error('维护中：不能新开或重连开发终端；已连接终端仍可断开或结束。');
         if(target.hostAdmin&&!window.confirm(`进入 ${target.machine} 的宿主机 ROOT 运维？可修改整机、影响他人任务，并能绕过 GPU 配额。日常开发请使用个人开发终端。`))return;
         const userId=store.principal?.userId,authGeneration=store.authGeneration,workspace=workspaceGeneration;if(!userId)throw Error('请先登录。');
         let retained;const reconnect=button.id.endsWith('-reconnect');
@@ -120,7 +131,7 @@ export function terminalUI(store,toast){
         dialog.showModal();revealMotion();term?.dispose();document.querySelector('#terminal-screen').replaceChildren();
         term=new globalThis.Terminal({documentOverride:terminalDocument,cursorBlink:false,fontFamily:'Geist Mono, monospace',fontSize:14,scrollback:3000,theme:{background:'#060607',foreground:'#D8D9D4'},allowProposedApi:false});
         fit=new globalThis.FitAddon.FitAddon();term.loadAddon(fit);withNonceStyles(()=>{term.open(document.querySelector('#terminal-screen'));fit.fit();});
-        term.onData(data=>{enqueue(data);sendSoon();});term.focus();exchange();
+        term.onData(data=>{enqueue(data);sendSoon();});syncMaintenance();term.focus();exchange();
       }catch(error){toast(error.message);}finally{button.disabled=false;}
   }
   document.addEventListener('gpuq-terminal-reveal',event=>{
@@ -128,13 +139,19 @@ export function terminalUI(store,toast){
     if(session?.id===id){ensureDialog();if(!dialog.open){dialog.showModal();revealMotion();}fit?.fit();term?.focus();return;}
     const idForEntry=known.dataWorkspace?'terminal-data-reconnect':known.hostAdmin?'terminal-root-reconnect':'terminal-reconnect';openTerminal({id:idForEntry,disabled:false},known);
   });
+  document.addEventListener('gpuq-maintenance-state',syncMaintenance);
+  document.addEventListener('gpuq-maintenance-root',event=>{
+    const {machine,id,userId}=event.detail||{};if(userId!==store.principal?.userId||store.principal?.role!=='admin'||!store.data?.machines?.some(item=>item.id===machine))return;
+    const known=id?sessions.get(id):null;if(id&&(!known||!known.hostAdmin||known.machine!==machine||known.userId!==userId))return;
+    openTerminal({id:id?'terminal-root-reconnect':'terminal-root-open',disabled:false},known||{machine,project:''});
+  });
   document.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
     if(['terminal-open','terminal-reconnect','terminal-root-open','terminal-root-reconnect','terminal-data-open','terminal-data-reconnect'].includes(button.id))await openTerminal(button);
     if(button.id==='terminal-collapse')dialog?.close();
     if(button.id==='terminal-interrupt'){enqueue('\x03');clearTimeout(timer);exchange();}
     if(button.id==='terminal-disconnect')detach();
-    if(button.id==='terminal-stop'&&session){closing=true;clearTimeout(timer);inputScheduled=false;button.disabled=true;try{await closeSession(session);}catch(error){toast(error.message);closing=false;}finally{button.disabled=false;}}
+    if(button.id==='terminal-stop'&&session){if(paused(session)&&!window.confirm('结束这个终端？已执行的命令不会撤销；断开只保留会话，结束会终止本终端。'))return;closing=true;clearTimeout(timer);inputScheduled=false;button.disabled=true;try{await closeSession(session);}catch(error){toast(error.message);closing=false;}finally{button.disabled=false;}}
     if(button.id==='project-terminal-stop'){
       const machine=document.querySelector('[name=workspace-machine]')?.value,project=document.querySelector('[name=workspace-project]')?.value;
       const targets=[...sessions.values()].filter(value=>value.userId===store.principal?.userId&&value.machine===machine&&value.project===project);

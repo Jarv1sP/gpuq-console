@@ -8,7 +8,7 @@ const defer=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});re
 const events=[];let stateGate,loginGate,terminalGate,browser;
 const server=createServer(async(req,res)=>{
   if(req.url==='/'){res.setHeader('Content-Type','text/html');return res.end('<script type="module">import {DemoClient} from "/client.js"; window.client=new DemoClient(); client.remote=true; client.production=true;</script>');}
-  if(req.url==='/client.js'){res.setHeader('Content-Type','text/javascript');return res.end(await readFile(new URL('../dist/client.js',import.meta.url)));}
+  if(['/client.js','/maintenance-state.js'].includes(req.url)){res.setHeader('Content-Type','text/javascript');return res.end(await readFile(new URL('../dist'+req.url,import.meta.url)));}
   const parts=[];for await(const part of req)parts.push(part);const body=JSON.parse(Buffer.concat(parts).toString()||'{}');
   const actor=(req.headers.cookie||'').match(/fixture_session=([^;]+)/)?.[1];
   events.push({path:req.url,operation:body.operation,username:body.username,actor});

@@ -1,3 +1,4 @@
+import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const size=n=>!Number.isFinite(n)||n<0?'未知':(n/1024**3).toFixed(2)+' GiB';
 const labels={QUEUED:'准备中',RUNNING:'下载中',CANCELING:'正在取消',PAUSED:'已暂停',READY:'已下载',FAILED:'失败',CANCELED:'已取消',UNKNOWN:'待核对'};
@@ -42,11 +43,12 @@ export function cloudImportUI(store,section,toast){
   const context=()=>JSON.stringify([store.principal?.userId,store.authGeneration,machine(),epoch]);
   const report=t=>{const el=$('#cloud-import-status');if(el)el.textContent=t;};
   function controls(){
-    const card=$('.cloud-import');if(!card)return;
+    const card=$('.cloud-import');if(!card)return;restoreMaintenanceControls(card);
     const disabled=busy||!store.production||!store.principal||!machine(),held=pending.get(scope()),aliyun=$('[name=cloud-source]')?.value==='aliyun';
     for(const el of card.querySelectorAll('input,button,select'))el.disabled=disabled||!!held&&el.closest('#cloud-import-form')&&el.id!=='cloud-import-refresh';
     $('#cloud-share-fields').hidden=!aliyun;$('#cloud-checksum-fields').hidden=aliyun;
     $('[name=cloud-sha256]').disabled=disabled||!!held||aliyun;
+    disableMaintenanceControls(card,'#cloud-import-form [type=submit],#cloud-inspect,#cloud-import-retry,#cloud-auth-begin,#cloud-auth-check,#cloud-auth-disconnect,[data-import-resume],[data-import-discard],[data-import-replace] [type=submit]',maintenanceFor(store.data?.operationalMaintenance,machine()));
     $('#cloud-import-pending').hidden=!held;$('#cloud-import-pending-key').textContent=held?.args.key||'';
   }
   function reset(forgetPending=true){epoch++;clearTimeout(timer);timer=null;inspection=null;auth=null;busy=false;if(forgetPending)pending.clear();}

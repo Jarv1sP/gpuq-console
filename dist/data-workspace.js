@@ -1,3 +1,4 @@
+import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 // Editable personal data is deliberately separate from verified training data.
 // Raw uploads never unpack or publish a dataset automatically.
 import {CHUNK_BYTES,LARGE_RELAY_BYTES} from './dataset-upload.js';
@@ -80,9 +81,10 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
     element('#data-workspace-relay-size').textContent=bytesLabel(total);if(reset)consent.checked=false;
   }
   function controls(){
-    relayChoice();
+    const card=section.querySelector('.data-workspace-card:not(.cloud-import)');if(!card)return;restoreMaintenanceControls(card);relayChoice();
     const enabled=store.production&&store.principal&&machine(),external=element('#dataset-upload-pause')?.hidden===false;
     for(const node of section.querySelectorAll('.data-workspace-card input,.data-workspace-card button'))node.disabled=!enabled||working||external;
+    disableMaintenanceControls(card,'#data-workspace-upload,#data-workspace-publish,#terminal-data-open,#terminal-data-reconnect,#cloud-files-form [type=submit],[data-cloud-verify],[data-cloud-restore]',maintenanceFor(store.data?.operationalMaintenance,machine()));
     const stop=element('#data-workspace-cancel');if(stop){stop.hidden=!controller;stop.disabled=!controller;}
   }
   function reset(){epoch++;controller?.abort();controller=null;working=false;cloud.reset();relayChoice(true);onBusyChange();}
