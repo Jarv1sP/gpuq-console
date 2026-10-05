@@ -158,8 +158,39 @@ try{
       assert.equal(await block.locator('.copy-code').textContent(),'已复制');
       copied++;if(text.includes('\n'))multilineCopied++;
     }
-    if(index===1)await capture(guide,'guide-development-desktop.png');
+    if(index===1){
+      const container=guide.getByRole('heading',{name:'个人容器',exact:true});
+      await container.waitFor({state:'visible'});
+      const explanation=container.locator('xpath=following-sibling::details[1]');
+      assert.equal(await explanation.getAttribute('class'),'guide-explanation');
+      assert.equal(await explanation.evaluate(node=>node.open),false,'container details stay out of the first-screen explanation budget');
+      await explanation.locator('summary').click();
+      assert.match(await explanation.innerText(),/容器内 root 不是宿主机 root，开发阶段无 GPU/);
+      assert.match(await explanation.innerText(),/发布前先结束所有开发终端/);
+      assert.match(await explanation.innerText(),/先选好要训练的版本.*训练固定该镜像版本/);
+      await container.evaluate(node=>window.scrollTo(0,window.scrollY+node.getBoundingClientRect().top-80));
+      await guide.screenshot({path:join(screenshots,'guide-container-1440.png')});
+      await guide.setViewportSize({width:390,height:844});
+      await container.evaluate(node=>window.scrollTo(0,window.scrollY+node.getBoundingClientRect().top-80));
+      assert.ok(await guide.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'personal container guidance fits 390px');
+      await guide.screenshot({path:join(screenshots,'guide-container-390.png')});
+      await guide.setViewportSize({width:1440,height:1050});
+      await explanation.locator('summary').click();
+      await capture(guide,'guide-development-desktop.png');
+    }
     if(index===2)await capture(guide,'guide-training-desktop.png');
+    if(index===3){
+      const direct=guide.locator('.guide-explanation').filter({hasText:'网页上传按服务器能力选择路线'});
+      await direct.locator('summary').click();
+      assert.match(await direct.innerText(),/可直传时直接传到服务器，否则经平台中转；页面会标出本次实际路线/);
+      assert.match(await direct.innerText(),/直传失败不会自动改走中转；超过 256 MiB 的中转需要你确认/);
+      const workspace=guide.locator('.guide-explanation').filter({hasText:'个人数据空间上传和 data put 仍经平台中转'});
+      await workspace.locator('summary').click();
+      assert.match(await workspace.innerText(),/个人数据空间上传和 data put 仍经平台中转/);
+      assert.doesNotMatch(await guide.locator('.guide-prose').textContent(),/网页(?:目录)?上传(?:和\s+data put)?\s*仍(?:走|经(?:过)?)平台中转/);
+      await direct.locator('summary').click();
+      await workspace.locator('summary').click();
+    }
     // Follow the actual next/previous links, not just their href values.
     if(index<chapters.length-1){
       await guide.getByRole('navigation',{name:'相邻章节'}).locator('a').last().click();
