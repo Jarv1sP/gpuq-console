@@ -18,7 +18,7 @@ routes['/scheduling-ui.js']='scheduling-ui.js';
 routes['/gpu-allocation.js']='gpu-allocation.js';
 routes['/gpu-allocation-ui.js']='gpu-allocation-ui.js';
 Object.assign(routes,STARBASE_ASSETS);
-const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',woff2:'font/woff2',png:'image/png'};
+const mime={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',woff2:'font/woff2',png:'image/png',svg:'image/svg+xml',ico:'image/x-icon'};
 routes['/guide.css']='guide.css';routes['/guide.js']='guide.js';
 routes['/community-ui.js']='community-ui.js';routes['/community.css']='community.css';
 routes['/cloud-import-ui.js']='cloud-import-ui.js';

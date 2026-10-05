@@ -42,7 +42,7 @@ async function imageLayout(){
 }
 function staticFile(value,base='index.html'){
   const url=new URL(value,'http://runtime.fixture/'+base);
-  return url.origin==='http://runtime.fixture'&&/\.(?:js|css|woff2|png)$/.test(url.pathname)?url.pathname.slice(1):null;
+  return url.origin==='http://runtime.fixture'&&/\.(?:js|css|woff2|png|svg|ico)$/.test(url.pathname)?url.pathname.slice(1):null;
 }
 
 test('every transitive local Portal module exists at its runtime COPY path',async t=>{
@@ -90,6 +90,28 @@ test('client imports, styles and fonts are copied and served by the Portal white
   await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   const runtime=await fetch(origin+'/runtime.js');assert.equal(runtime.status,200);
   assert.match(await runtime.text(),/globalThis\.GPUQ_LOCAL_API=true;globalThis\.GPUQ_PRODUCTION=true;/);
+  for(const page of ['/','/guide','/guide/data']){
+    const response=await fetch(origin+page);assert.equal(response.status,200);const html=await response.text();
+    assert.match(html,/href="\/favicon\.svg\?v=stargate-2"/);
+    assert.match(html,/href="\/favicon\.ico\?v=stargate-2"/);
+    assert.match(html,/rel="mask-icon"[^>]*href="\/mask-icon\.svg\?v=stargate-2"[^>]*color="#0A0B0D"/);
+    assert.match(html,/rel="apple-touch-icon"[^>]*href="\/apple-touch-icon\.png\?v=stargate-2"/);
+    assert.match(html,/<meta name="theme-color" content="#0A0B0D"/);
+  }
+  for(const [file,type] of [['favicon.svg','image/svg+xml'],['favicon.ico','image/x-icon'],['mask-icon.svg','image/svg+xml']])for(const suffix of ['','?v=stargate-2'])for(const method of ['GET','HEAD']){
+    const response=await fetch(origin+'/'+file+suffix,{method});assert.equal(response.status,200,'anonymous icon '+method+' '+file);
+    assert.equal(response.headers.get('content-type'),type);const content=Buffer.from(await response.arrayBuffer());
+    if(method==='HEAD'){assert.equal(content.length,0);continue;}
+    if(file==='favicon.ico'){
+      assert.equal(content.readUInt16LE(0),0);assert.equal(content.readUInt16LE(2),1);assert.equal(content.readUInt16LE(4),3);
+      for(const [index,size] of [16,32,48].entries()){
+        const pos=6+16*index;assert.equal(content[pos],size);assert.equal(content[pos+1],size);
+        const length=content.readUInt32LE(pos+8),offset=content.readUInt32LE(pos+12),png=content.subarray(offset,offset+length);
+        assert.equal(png.length,length);assert.equal(png.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
+        assert.equal(png.readUInt32BE(16),size);assert.equal(png.readUInt32BE(20),size);
+      }
+    }else{assert.match(content.toString(),/M10\.41 71\.20 L42\.06 8\.00/);if(file==='mask-icon.svg')assert.doesNotMatch(content.toString(),/<rect/);}
+  }
   const login=await fetch(origin+'/api/login',{method:'POST',headers:{'Content-Type':'application/json',Origin:origin},body:JSON.stringify({username:'admin',password:'Local-Image-Asset-Fixture-Only-2026!',client:'browser'})});
   assert.equal(login.status,200);const cookie=login.headers.get('set-cookie').split(';')[0];
   for(const file of assets){
@@ -98,7 +120,7 @@ test('client imports, styles and fonts are copied and served by the Portal white
     }
     const response=await fetch(origin+'/'+file,file==='machines.js'?{headers:{Cookie:cookie}}:{});
     assert.equal(response.status,200,'Static whitelist is missing /'+file);
-    const type=file.endsWith('.png')?'image/png':file.endsWith('.woff2')?'font/woff2':file.endsWith('.css')?'text/css':'text/javascript';
+    const type=file.endsWith('.svg')?'image/svg+xml':file.endsWith('.ico')?'image/x-icon':file.endsWith('.png')?'image/png':file.endsWith('.woff2')?'font/woff2':file.endsWith('.css')?'text/css':'text/javascript';
     assert.ok(response.headers.get('content-type')?.startsWith(type),'Incorrect asset MIME: '+file);
     const content=Buffer.from(await response.arrayBuffer());
     assert.ok(content.byteLength>0,'Empty asset: '+file);
