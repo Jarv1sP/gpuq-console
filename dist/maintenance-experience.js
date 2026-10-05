@@ -61,7 +61,7 @@ export function maintenanceExperienceUI(store,toast,{getPage,refresh}){
     if(active){const snapshot=store.data?.gpuq,monitor=document.querySelector('#monitor-status');if(monitor)monitor.innerHTML=`${store.production&&Number.isFinite(Date.parse(snapshot?.checkedAt))?'更新于 '+esc(maintenanceClock(snapshot.checkedAt))+(snapshot.stale?' · 已过期':''):'监控待确认'} ${info('页面每 15 秒同步，节点约每分钟采样。监控过期时不能推断 GPU 空闲。','监控时间')}`;}
     updateContext();foldCopy(active);document.dispatchEvent(new Event('gpuq-maintenance-state'));
   }
-  function show(title,content,machine){dialog.innerHTML=`<div class="modal-head"><h2 id="maintenance-dialog-title"${machine?' class="maintenance-object-title"':''}>${machine?`<span class="server-id" title="${esc(machine)}">${esc(machine)}</span><span> · ${esc(title)}</span>`:esc(title)}</h2><button type="button" class="button quiet" data-maintenance-dialog-close>关闭</button></div>${content}`;dialog.showModal();}
+  function show(title,content,machine){dialog.innerHTML=`<div class="modal-head"><div class="maintenance-object-title"><h2 id="maintenance-dialog-title" title="${esc(title)}">${esc(title)}</h2>${machine?`<span class="server-id" title="${esc(machine)}">${esc(machine)}</span>`:''}</div><button type="button" class="button quiet" data-maintenance-dialog-close>关闭</button></div>${content}`;dialog.showModal();}
   async function refreshState(){const result=await store.call('maintenance.status');if(store.data)store.data.operationalMaintenance=result;await store.refresh();refresh();}
   async function start(scope){
     const revision=value().revision;

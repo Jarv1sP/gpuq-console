@@ -94,7 +94,7 @@ const scenes = [
   ...['normal', 'unknown', 'start', 'checks', 'recovery', 'settings'].map(view => ({room: 'maintenance', name: 'admin-' + view,
     role: 'admin', maintained: true, view,
     spec: ['start', 'checks', 'recovery'].includes(view) ? {...authSpec('maintenance-console-dialog'), leftEdges: [],
-      helpRows: ['.maintenance-reason-field .field-caption'], repeatedGaps: []} : maintenanceSpec})),
+      helpRows: ['.maintenance-reason-field .field-caption'], repeatedGaps: [], unbrokenTitles: ['#maintenance-dialog-title']} : maintenanceSpec})),
   ...['overview', ...chapters].map(view => ({room: 'guide', name: view, view, spec: guideSpec})),
   {room: 'guide', name: 'reduced-motion', view: 'training', reduced: true, spec: guideSpec},
   {room: 'guide', name: 'copy-error', view: 'training', copyError: true, spec: guideSpec},
@@ -137,6 +137,9 @@ try {
     baselines: [{parent: '.line', children: 'span'}], scrollPanels: ['.panel']});
   assert.ok(['container-clipping', 'orphan-help', 'numeric-alignment', 'text-baseline', 'unreachable-panel-content']
     .every(rule => clipped.failures.some(failure => failure.rule === rule)), JSON.stringify(clipped.failures));
+  await probe.setContent('<h2 style="width:32px;font-size:16px;word-break:break-all">恢复前检查</h2>');
+  const broken = await inspectGeometry(probe, {unbrokenTitles: ['h2']});
+  assert.ok(broken.failures.some(failure => failure.rule === 'title-word-wrap'), 'detect a title split inside a word');
   await probe.close();
 
   for (const scene of scenes.filter(scene => !selected || selected.includes(scene.name) || selected.includes(scene.room))) {
@@ -254,9 +257,24 @@ try {
           }
         }
         await page.evaluate(() => document.fonts.ready);
+        if (!before && scene.room !== 'guide') {
+          assert.equal(await page.locator('a.guide-link[href="/guide"]').count(), 1, 'one guide entry is moved between auth and shell');
+          assert.equal(await page.locator('a.guide-link svg').count(), 1, 'one external-link icon');
+          assert.ok(['none', 'normal'].includes(await page.locator('a.guide-link').evaluate(node => getComputedStyle(node, '::after').content)), 'no duplicate generated arrow');
+          assert.equal(await page.locator('#refresh-state .sync-mark svg').count(), 1, 'refresh has its own circular-arrow icon');
+          assert.equal(await page.locator('#refresh-state').getAttribute('aria-label'), '刷新已确认的状态');
+          assert.equal(await page.locator('a.guide-link').getAttribute('aria-label'), '使用指南');
+        }
+        if (!before && scene.view === 'checks') {
+          assert.equal(await page.locator('#maintenance-dialog-title').textContent(), '恢复前检查');
+          assert.equal(await page.locator('.maintenance-object-title>.server-id').textContent(), inventory[0].id);
+        }
         const directory = join(output, scene.room, before ? 'before' : 'after'); await mkdir(directory, {recursive: true});
         if (zoom === 1) for (const width of [1440, 390, 320]) {
           await page.setViewportSize({width, height: width < 760 ? 900 : 1000});
+          if (!before && scene.room !== 'guide') assert.ok(['none', 'normal'].includes(
+            await page.locator('a.guide-link').evaluate(node => getComputedStyle(node, '::after').content)),
+            'no duplicate guide arrow at ' + width + 'px');
           await page.evaluate(() => {for (const animation of document.getAnimations()) if (Number.isFinite(animation.effect?.getComputedTiming().endTime)) animation.finish();});
           await page.screenshot({path: join(directory, scene.name + '-' + width + '.png'), fullPage: scene.room === 'guide'});
         }

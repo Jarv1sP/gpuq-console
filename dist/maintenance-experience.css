@@ -100,9 +100,9 @@
 #maintenance-context small{font-size:11px}
 .sb #maintenance-console-dialog{container:maintenance-sheet/inline-size;max-width:min(720px,calc(100vw - 2*var(--gutter)));width:100%;overflow:auto}
 .sb #maintenance-console-dialog .modal-head{align-items:center;gap:12px}
-.sb #maintenance-console-dialog .modal-head h2{margin:0;min-width:0}
-.sb #maintenance-console-dialog .maintenance-object-title{display:flex;flex-direction:column;gap:4px;flex:1}
-.sb #maintenance-console-dialog .maintenance-object-title>.server-id{display:block;width:100%;font-size:clamp(16px,4cqw,24px)}
+.sb #maintenance-console-dialog .modal-head h2{margin:0;min-width:0;font-size:clamp(16px,7cqw,24px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb #maintenance-console-dialog .maintenance-object-title{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
+.sb #maintenance-console-dialog .maintenance-object-title>.server-id{display:block;width:100%;font:clamp(11px,3cqw,14px) var(--mono)}
 .sb #maintenance-console-dialog summary{display:flex;align-items:center;min-height:40px;overflow-wrap:anywhere}
 .sb #maintenance-console-dialog .maintenance-checks li{align-items:center;gap:12px}
 .sb #maintenance-console-dialog .maintenance-checks li>div{display:flex;align-items:center;gap:8px;min-width:0}

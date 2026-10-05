@@ -85,12 +85,13 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 .sb #app-topbar :is(.guide-link,.sync,#account-menu-toggle){display:inline-flex;align-items:center;justify-content:center;height:40px;min-height:40px}
 .sb #app-topbar .sync{gap:8px;padding:0 8px}
 .sb #app-topbar .sync-mark{display:grid;place-items:center}
+.sb #app-topbar .sync-mark svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5}
 .sb #app-topbar #sync-label{max-width:11em;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .sb #app-topbar #account-menu-toggle{gap:8px;max-width:100%}
 .sb #app-topbar .acct-t{max-width:clamp(6em,10vw,12em)}
 .sb #app-topbar .guide-link{gap:6px;padding:0 8px;white-space:nowrap}
 .sb .guide-link svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5}
-.sb #app-topbar .topbar-right .guide-link::after{content:none}
+.sb :is(#app-topbar,#login-dialog,#register-dialog) a.guide-link::after{content:none}
 .sb #room-nav .nav-item{height:40px;min-height:40px;padding-inline:clamp(6px,1vw,14px)}
 @media(min-width:760px){
  .sb #app-topbar .wordmark{margin:0}

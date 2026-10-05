@@ -183,6 +183,15 @@ export async function inspectGeometry(page, specification = {}) {
           add('numeric-alignment', [node], {textAlign: style.textAlign});
       }
     }
+    for (const selector of spec.unbrokenTitles || []) {
+      for (const node of select(selector)) {
+        const range = document.createRange(); range.selectNodeContents(node);
+        const tops = [];
+        for (const fragment of range.getClientRects())
+          if (fragment.width && fragment.height && !tops.some(top => Math.abs(fragment.top - top) <= tolerance)) tops.push(fragment.top);
+        if (tops.length > 1) add('title-word-wrap', [node], {lineTops: tops, text: node.textContent});
+      }
+    }
     for (const root of roots) {
       for (const node of select('p,span,label,small,strong,button,input,select,summary', root)) {
         if (node.closest('[aria-hidden=true],.copy-help-popup,.maintenance-info-body') ||
