@@ -284,6 +284,33 @@ class OCITests(unittest.TestCase):
                 with patch.object(o.subprocess,'run') as engine,self.assertRaises((ValueError,OSError)):manager.run('commit','own-container')
                 engine.assert_not_called()
 
+    def test_save_home_policy_matches_xdg_policy_without_host_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager=self.anonymous_manager(root)
+            with manager.registry_auth():pass
+            xdg=manager.folder/'home/containers/policy.json'
+            home=manager.folder/'home/.config/containers/policy.json'
+            self.assertEqual(home.read_bytes(),xdg.read_bytes())
+            self.assertEqual(home.stat().st_mode&0o777,0o600)
+            value=json.loads(home.read_bytes())
+            self.assertEqual(value['default'],[{'type':'reject'}])
+            self.assertEqual(set(value['transports']['docker']),{manager.policy['baseImage']})
+            with patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='')) as engine:
+                manager.run('save','--format=oci-archive','sha256:'+SHA)
+            self.assertEqual(engine.call_args.kwargs['env']['HOME'],str(manager.folder/'home'))
+
+    def test_save_home_policy_rejects_tamper_and_mid_call_replacement(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager=self.anonymous_manager(root)
+            with manager.registry_auth():pass
+            path=manager.folder/'home/.config/containers/policy.json'
+            original=path.read_bytes();path.write_bytes(b'{"default":[{"type":"insecureAcceptAnything"}]}')
+            with patch.object(o.subprocess,'run') as engine,self.assertRaises(ValueError):manager.run('save','pinned-image')
+            engine.assert_not_called();path.write_bytes(original)
+            with self.assertRaises(ValueError):
+                with manager.registry_auth():
+                    replacement=path.with_name('replacement');replacement.write_bytes(original);replacement.chmod(0o600);os.replace(replacement,path)
+
     def test_private_home_dropin_and_mid_operation_changes_are_refused(self):
         with tempfile.TemporaryDirectory() as root:
             manager = self.anonymous_manager(root)

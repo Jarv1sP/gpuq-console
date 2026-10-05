@@ -219,7 +219,13 @@ class PersonalOCI:
         with self.registry_file(auth, ANONYMOUS_AUTH_RAW) as authfd, \
              self.registry_file(registries, ANONYMOUS_REGISTRIES_RAW) as registriesfd, \
              self.registry_file('policy.json', signature_policy_raw(self.policy['baseImage']),
-                                directory=self.folder/'home/containers') as policyfd:
+                                directory=self.folder/'home/containers') as policyfd, \
+             self.registry_file('policy.json', signature_policy_raw(self.policy['baseImage']),
+                                directory=self.folder/'home/.config/containers') as homepolicyfd:
+            # Podman save uses containers/image's HOME lookup even when other
+            # subcommands honor XDG_CONFIG_HOME. Both private lookup locations
+            # must carry the identical narrow policy; never fall back to host
+            # /etc/containers or broaden the default signature acceptance.
             # Podman 5.8 still loads both drop-in directories when an explicit
             # main config is supplied. Never let them override our helper policy.
             dropins = ((REGISTRY_DROPINS, 0),
@@ -260,10 +266,12 @@ class PersonalOCI:
         # `commit` has no signature-policy CLI flag in Podman 5.x. Its default
         # lookup is this fixed private XDG_CONFIG_HOME/containers path. Never
         # inherit a host default, Docker credential or broad registry policy.
-        need(directory is None or (name == 'policy.json' and directory == self.folder/'home/containers'),
+        need(directory is None or (name == 'policy.json' and directory in
+                                  (self.folder/'home/containers', self.folder/'home/.config/containers')),
              'Invalid private OCI policy directory')
         folder = self.folder if directory is None else self.s.private_dir(directory, create=True)
         path = folder/name
+        identity_key = str(path.relative_to(self.folder))
         with self.s.directory(folder) as parent:
             directory = os.fstat(parent)
             need(directory.st_uid == os.geteuid() and stat.S_IMODE(directory.st_mode) == 0o700,
@@ -272,7 +280,7 @@ class PersonalOCI:
             try:
                 fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
             except FileNotFoundError:
-                need(name not in getattr(self, '_registry_identities', {}), 'Anonymous OCI authentication file disappeared')
+                need(identity_key not in getattr(self, '_registry_identities', {}), 'Anonymous OCI authentication file disappeared')
                 created = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
                 try:
                     need(os.write(created, expected) == len(expected),
@@ -293,8 +301,8 @@ class PersonalOCI:
                 need(os.pread(fd, len(expected)+1, 0) == expected,
                      'Anonymous OCI authentication content changed')
                 identities = getattr(self, '_registry_identities', {})
-                need(identities.get(name, identity) == identity, 'Anonymous OCI authentication file replaced')
-                self._registry_identities = {**identities, name: identity}
+                need(identities.get(identity_key, identity) == identity, 'Anonymous OCI authentication file replaced')
+                self._registry_identities = {**identities, identity_key: identity}
                 # Retain the verified descriptor throughout the operation and
                 # reject replacement of the exact named file before returning.
                 yield fd
