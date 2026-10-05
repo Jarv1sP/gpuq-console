@@ -169,7 +169,8 @@ test('personal container guidance separates creation, no-GPU development, ending
 });
 
 test('guide explains quotas, interruption and failure evidence without promising runtime health', () => {
-  assert.match(guide, /排队、启动、运行和状态待确认的任务都会计入你的额度/);
+  assert.match(guide, /普通成员的排队、启动、运行和状态待确认任务都会计入额度/);
+  assert.match(guide, /管理员单卡共享仅豁免个人整卡累计计数，不豁免实际显存、节点授权和调度约束/);
   assert.match(guide, /不自动重跑/);
   assert.match(guide, /不保证每个 worker 都健康/);
   assert.match(guide, /gpuctl diagnostics JOB_ID --json/);
