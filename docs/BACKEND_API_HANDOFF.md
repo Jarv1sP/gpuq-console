@@ -132,6 +132,12 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 
 个人可写数据空间的 `datasets.workspace.put` 是另一套现有操作，当前仍是门户中转，不受数据集直传票据授权。不要仅改按钮文案就声称它已直传，也不要把 dataset 票据用于任意个人文件路径。大于 256 MiB 的 `data put` 同样要求显式中转同意。
 
+## 管理员手动缓存标记
+
+`datasets.storage.status` 可带 `{machine,dataset,version,pinId}` 查询精确标记，必须同时给完整版本；返回 `version.manualPinProtocol:1` 和 `version.manualPin:{pinId,owner,present}`。`owner` 由当前认证主体确定，不能从浏览器传入。查询不创建标记；其他账号的标记和 `authority-` 标记拒绝访问。`pin/unpin` 在节点锁内再次核验归属，不因调用者是管理员就删除他人的标记。
+
+前端按账号、机器、物理数据集名及完整版本持久保存操作身份；回包丢失后只读核对原 `pinId`，不重新生成 UUID。节点未提供精确能力或查询未知时禁用相应写操作，总 `pinCount` 不是本人标记的证明。预算查询只在数据集页展开或明确刷新时发起，不随全站状态刷新轮询。
+
 ## 云端文件：服务器文件，不是电脑上传
 
 `cloud.files.*` 处理选定节点上当前用户的个人数据文件；成员不会得到后台云账号、CD2 令牌或私人云盘浏览权限。
