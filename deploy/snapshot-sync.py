@@ -67,6 +67,25 @@ class SnapshotSync:
         return cache.release_lease(module.Principal('builtin-admin', True),
                                    args['dataset'], args['version'], lease_id)
 
+    def release_unprepared_transfer_lease(self, args, transfer_id):
+        """Recover an unrecorded acquisition, ONLY after the source cancel fence.
+
+        Never acquire a lease to discover its ID. PREPARING can mean either no
+        acquisition or a crash before leaseId was journaled. The exact immutable
+        reference, owner and namespaced transfer ID identify the original lease.
+        """
+        if not isinstance(transfer_id, str) or not UUID.fullmatch(transfer_id):
+            raise ValueError('Invalid transfer lease identity')
+        _, cache = self.n.dataset_cache()
+        with cache._locked():
+            matches = [lease for lease in cache._leases(args['dataset'], args['version'])
+                       if lease['owner'] == args['userId'] and lease['jobId'] == 'transfer:'+transfer_id]
+            if len(matches) > 1:
+                raise ValueError('Ambiguous source transfer leases; reconcile before releasing')
+        if not matches:
+            return {'released': False}
+        return self.release_transfer_lease(args, matches[0]['id'])
+
     def metadata_space(self, needed):
         # Legacy snapshot metadata reads/writes keep their historical behavior.
         # Only explicitly configured nodes gain these additional write gates.

@@ -396,6 +396,81 @@ class TransferJobs:
             self.n.atomic_json(self.path(key, '.source-lease.json'), journal)
             return {'id': key, 'released': True}
 
+    def confirm_unprepared_cancel(self, args):
+        """Internal target control: certify an explicitly canceled, unstarted ID."""
+        if set(args) != {'id', 'userId', 'sourceMachine', 'reference'}:
+            raise ValueError('Invalid unprepared cancellation fields')
+        self.actor(args)
+        key, ref = identifier(args['id']), reference(args['reference'])
+        source = args['sourceMachine']
+        if not isinstance(source, str) or not MACHINE.fullmatch(source) or source == self.machine():
+            raise ValueError('Invalid source machine identity')
+        proof = {'schema': 1, 'mode': 'unprepared-cancel-v1', 'id': key, 'userId': args['userId'],
+                 'sourceMachine': source, 'targetMachine': self.machine(), 'reference': ref,
+                 'attempt': 0, 'state': 'CANCELED', 'confirmedStopped': True}
+        with self.lock(key):
+            # Serialize with start/resume, and fail closed on any surviving spec.
+            try:
+                self.load(key)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError('Unprepared cancellation requires no target specification')
+            marker = self.load(key, '.cancel')
+            if marker.get('userId') != args['userId'] or self.activity(self.unit(key, 1)) is not False:
+                raise ValueError('Unprepared cancellation requires owned cancel and confirmed stopped target')
+            try:
+                prior = self.load(key, '.source-release.json')
+                if prior != proof:
+                    raise ValueError('Target release confirmation identity cannot change')
+            except FileNotFoundError:
+                self.n.atomic_json(self.path(key, '.source-release.json'), proof)
+            return proof
+
+    def release_unprepared_source(self, args):
+        """Internal source control; no ticket may ever have been issued for ID."""
+        if set(args) != {'id', 'userId', 'confirmation'}:
+            raise ValueError('Invalid unprepared source release fields')
+        self.actor(args)
+        key = identifier(args['id'])
+        with self.lock(key, '.ticket.lock'):
+            # A lost prepare reply is NOT an unprepared transfer. Never fabricate
+            # a manifest/ticket or weaken the existing issued-ticket protocol.
+            try:
+                self.load(key, '.ticket.json')
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError('Issued source ticket requires the regular release protocol')
+            journal = self.load(key, '.source-lease.json')
+            payload = {k: journal[k] for k in ('reference', 'actor', 'timeoutSec', 'sourceMachine', 'targetMachine')}
+            if (journal['id'] != key or journal['digest'] != digest(payload)
+                    or journal['actor']['userId'] != args['userId'] or journal['sourceMachine'] != self.machine()):
+                raise ValueError('Unprepared source journal identity mismatch')
+            expected = {'schema': 1, 'mode': 'unprepared-cancel-v1', 'id': key, 'userId': args['userId'],
+                        'sourceMachine': journal['sourceMachine'], 'targetMachine': journal['targetMachine'],
+                        'reference': reference(journal['reference']), 'attempt': 0,
+                        'state': 'CANCELED', 'confirmedStopped': True}
+            proof = args['confirmation']
+            if (not isinstance(proof, dict) or proof != expected or type(proof.get('schema')) is not int
+                    or type(proof.get('attempt')) is not int or proof.get('confirmedStopped') is not True):
+                raise ValueError('Unprepared source release requires exact stopped-target confirmation')
+            retry = journal['state'] in ('RELEASING', 'RELEASED') and journal.get('confirmation') == expected
+            if (not retry and journal['state'] != 'PREPARING') or journal.get('leaseId') is not None:
+                raise ValueError('Only an original PREPARING source journal may use unprepared cancellation')
+            if journal.get('confirmation') not in (None, expected):
+                raise ValueError('Source release confirmation cannot change')
+            if journal['state'] == 'RELEASED':
+                return {'id': key, 'released': True}
+            # Existing prepare rejects both states. Persist this fence BEFORE
+            # looking up/removing a lease whose ID may not have been journaled.
+            journal.update(state='RELEASING', confirmation=expected)
+            self.n.atomic_json(self.path(key, '.source-lease.json'), journal)
+            self.snapshots().release_unprepared_transfer_lease(self.lease_args(journal), key)
+            journal.update(state='RELEASED', releasedAt=time.time())
+            self.n.atomic_json(self.path(key, '.source-lease.json'), journal)
+            return {'id': key, 'released': True}
+
     @staticmethod
     def unit(key, attempt):
         return 'gpuq-transfer-'+identifier(key)+'-'+str(attempt)+'.service'
@@ -764,6 +839,8 @@ class TransferJobs:
         if action == 'source.prepare':return self.prepare(args)
         if action == 'confirm-source-release':return self.confirm_source_release(args)
         if action == 'release-source':return self.release_source(args)
+        if action == 'confirm-unprepared-cancel':return self.confirm_unprepared_cancel(args)
+        if action == 'release-unprepared-source':return self.release_unprepared_source(args)
         if action == 'source.read':
             if set(args)-{'userId','id','action','path','offset','token'}:raise ValueError('Invalid snapshot read fields')
             self.actor(args);ticket=self.load(args['id'],'.ticket.json')

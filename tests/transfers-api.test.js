@@ -23,6 +23,15 @@ async function fixture(t){
         reference:grant.reference,manifestSha256:hash,attempt:1,state:result.state,confirmedStopped:true};
     }
     if(op==='transfers.release-source')return {id:args.id,released:true};
+    if(op==='transfers.confirm-unprepared-cancel'){
+      if(nodes.get(args.id)?.state!=='CANCELED')throw Error('Target not confirmed stopped');
+      return {schema:1,mode:'unprepared-cancel-v1',id:args.id,userId:args.userId,sourceMachine:args.sourceMachine,
+        targetMachine:machine,reference:args.reference,attempt:0,state:'CANCELED',confirmedStopped:true};
+    }
+    if(op==='transfers.release-unprepared-source'){
+      if(grants.has(args.id))throw Error('Issued source ticket requires regular release');
+      return {id:args.id,released:true};
+    }
     if(op==='transfers.resume'){nodes.set(args.id,{id:args.id,state:'RUNNING',attempt:2});return nodes.get(args.id);}
     if(op==='datasets.upload.begin')return {uploadId:args.key,state:'RECEIVING_MANIFEST',manifestOffset:0,totalBytes:30};
     if(op==='datasets.upload.status')return {uploadId:args.uploadId,state:'UPLOADING',totalBytes:30,remainingBytes:10};
@@ -307,10 +316,60 @@ test('unconfirmed preparation retains a pending reconciliation marker without mi
 });
 test('release-source and confirmation are never public caller supplied operations or fields',async t=>{
   const f=await fixture(t),row=await f.call('transfers.create',copy()),count=f.calls.length;
-  for(const operation of ['transfers.confirm-source-release','transfers.release-source'])await assert.rejects(f.call(operation,{id:row.id}));
+  for(const operation of ['transfers.confirm-source-release','transfers.release-source','transfers.confirm-unprepared-cancel','transfers.release-unprepared-source'])await assert.rejects(f.call(operation,{id:row.id}));
   await assert.rejects(f.call('transfers.status',{id:row.id,confirmation:{confirmedStopped:true}}));
   await assert.rejects(f.call('transfers.create',{...copy(),sourceRelease:{protocol:1,state:'RELEASED'}}));
   assert.equal(f.calls.length,count);
   const bridge=await readFile(new URL('../deploy/execution-worker.py',import.meta.url),'utf8');
-  for(const name of ['transfers.confirm-source-release','transfers.release-source','datasets.upload.direct-ticket','datasets.upload.direct-revoke'])assert.ok(bridge.includes("'"+name+"'"));
+  for(const name of ['transfers.confirm-source-release','transfers.release-source','transfers.confirm-unprepared-cancel','transfers.release-unprepared-source','datasets.upload.direct-ticket','datasets.upload.direct-revoke'])assert.ok(bridge.includes("'"+name+"'"));
+});
+
+test('unprepared copy cancellation releases without a new ticket or target dispatch',async t=>{
+  const f=await fixture(t),bridge=f.service.bridge;
+  f.service.bridge=async(...request)=>{if(request[1]==='transfers.source.prepare')throw Error('preparing failed');return bridge(...request);};
+  const row=await f.call('transfers.create',copy());assert.equal(row.state,'UNKNOWN');
+  const canceled=await f.call('transfers.cancel',{id:row.id});
+  assert.equal(canceled.state,'CANCELED');assert.equal(canceled.sourceRelease.state,'RELEASED');
+  assert.deepEqual(f.calls.map(x=>x.op),['transfers.cancel','transfers.confirm-unprepared-cancel','transfers.release-unprepared-source']);
+  await f.restart();await f.service.reconcileTransfers();
+  assert.equal(f.service.transferSnapshot(f.member.id,row.id).sourceRelease.state,'RELEASED');
+});
+
+test('unprepared source reply loss retries the same durable target proof',async t=>{
+  const f=await fixture(t),bridge=f.service.bridge;
+  f.service.bridge=async(...request)=>{if(request[1]==='transfers.source.prepare')throw Error('preparing failed');
+    const result=await bridge(...request);if(request[1]==='transfers.release-unprepared-source')throw Error('reply lost');return result;};
+  const row=await f.call('transfers.create',copy()),canceled=await f.call('transfers.cancel',{id:row.id});
+  assert.equal(canceled.state,'CANCELED');assert.equal(canceled.sourceRelease.state,'PENDING');
+  assert.equal(canceled.sourceRelease.unpreparedConfirmation,undefined);
+  await f.restart();await f.service.reconcileTransfers();
+  assert.equal(f.service.transferSnapshot(f.member.id,row.id).sourceRelease.state,'RELEASED');
+  assert.equal(f.calls.filter(x=>x.op==='transfers.confirm-unprepared-cancel').length,1);
+  assert.equal(f.calls.filter(x=>x.op==='transfers.release-unprepared-source').length,2);
+});
+
+test('unprepared cancellation rejects mismatched proofs and old nodes fail closed',async t=>{
+  for(const change of [{userId:'demo-user-999'},{attempt:1},{reference:{kind:'datasets',dataset:'other',version:hash}},{confirmedStopped:false},{mode:'other'},{extra:1},null]){
+    const f=await fixture(t),bridge=f.service.bridge;
+    f.service.bridge=async(...request)=>{
+      if(request[1]==='transfers.source.prepare')throw Error('preparing failed');
+      if(request[1]==='transfers.confirm-unprepared-cancel'&&change===null)throw Error('Unknown transfer operation');
+      const value=await bridge(...request);return request[1]==='transfers.confirm-unprepared-cancel'?{...value,...change}:value;
+    };
+    const row=await f.call('transfers.create',copy()),canceled=await f.call('transfers.cancel',{id:row.id});
+    assert.equal(canceled.sourceRelease.state,'PENDING');
+    assert.equal(f.calls.some(x=>x.op==='transfers.release-unprepared-source'),false);
+  }
+});
+
+test('no-ticket reconciliation never creates a cancellation intent',async t=>{
+  const f=await fixture(t),bridge=f.service.bridge;
+  f.service.bridge=async(...request)=>{if(request[1]==='transfers.source.prepare')throw Error('preparing failed');return bridge(...request);};
+  const row=await f.call('transfers.create',copy());
+  await f.service.reconcileTransfers();
+  assert.equal(f.calls.some(x=>x.op.includes('cancel')||x.op.includes('release')),false);
+  // Even a historical terminal row without the durable intent is not enough.
+  f.service.db.prepare('UPDATE transfers SET state=? WHERE id=?').run('CANCELED',row.id);
+  await f.service.reconcileTransfers();
+  assert.equal(f.calls.some(x=>x.op.includes('cancel')||x.op.includes('release')),false);
 });

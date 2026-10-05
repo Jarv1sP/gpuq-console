@@ -178,6 +178,136 @@ class SourceLeases(unittest.TestCase):
         self.release(proof)
         with self.assertRaisesRegex(ValueError, 'finalized'): self.dst.resume(self.control)
 
+    def unprepared(self, acquired=False):
+        if acquired:
+            atomic = self.source.atomic_json
+            def fail(path, value):
+                if path.name.endswith('.source-lease.json') and 'leaseId' in value:
+                    raise OSError('prepare interrupted')
+                return atomic(path, value)
+            mock = patch.object(self.source, 'atomic_json', side_effect=fail)
+        else:
+            mock = patch.object(self.src, 'snapshots', side_effect=OSError('prepare interrupted'))
+        with mock:
+            with self.assertRaisesRegex(OSError, 'prepare interrupted'): self.prepared()
+        self.assertEqual(self.src.load(self.key, '.source-lease.json')['state'], 'PREPARING')
+        self.assertFalse(self.src.path(self.key, '.ticket.json').exists())
+        self.dst.cancel(self.control)
+        return self.dst.process('transfers.confirm-unprepared-cancel',
+            {**self.control, 'sourceMachine': 'gpu-source', 'reference': self.ref})
+
+    def release_unprepared(self, proof):
+        return self.src.process('transfers.release-unprepared-source', {**self.control, 'confirmation': proof})
+
+    def test_unprepared_cancel_without_acquisition_fences_both_ends(self):
+        proof = self.unprepared()
+        self.assertEqual(self.release_unprepared(proof), {'id': self.key, 'released': True})
+        self.assertEqual(self.release_unprepared(proof), {'id': self.key, 'released': True})
+        self.assertEqual(self.leases(), [])
+        self.assertFalse(self.src.path(self.key, '.ticket.json').exists())
+        self.assertEqual(self.src.load(self.key, '.source-lease.json')['state'], 'RELEASED')
+        with self.assertRaisesRegex(ValueError, 'finalized'): self.src.prepare(self.args)
+        # A delayed ticket/start from any older control process is fenced too.
+        other = {**self.args, 'id': str(uuid.uuid4())}
+        ticket = self.src.prepare(other); ticket['id'] = self.key
+        with self.assertRaisesRegex(ValueError, 'finalized'):
+            self.dst.start({**self.control, 'sourceMachine': 'gpu-source', 'source': ticket,
+                            'reference': self.ref, 'name': 'copy'})
+
+    def test_unprepared_cancel_recovers_only_exact_unjournaled_lease(self):
+        proof = self.unprepared(acquired=True)
+        self.assertEqual(len(self.leases()), 1)
+        other = {**self.args, 'id': str(uuid.uuid4())}; self.src.prepare(other)
+        self.release_unprepared(proof)
+        self.assertEqual([lease['jobId'] for lease in self.leases()], ['transfer:'+other['id']])
+        self.evict_blocked()
+
+    def test_unprepared_target_requires_explicit_owned_cancel_and_stopped(self):
+        binding = {**self.control, 'sourceMachine': 'gpu-source', 'reference': self.ref}
+        with self.assertRaises(FileNotFoundError): self.dst.confirm_unprepared_cancel(binding)
+        self.dst.cancel(self.control)
+        for activity in (True, None):
+            with patch.object(self.dst, 'activity', return_value=activity):
+                with self.assertRaisesRegex(ValueError, 'confirmed stopped'): self.dst.confirm_unprepared_cancel(binding)
+        with self.assertRaisesRegex(ValueError, 'owned cancel'):
+            self.dst.confirm_unprepared_cancel({**binding, 'userId': 'demo-user-9'})
+        proof = self.dst.confirm_unprepared_cancel(binding)
+        self.assertEqual(self.dst.confirm_unprepared_cancel(binding), proof)
+        with self.assertRaisesRegex(ValueError, 'identity cannot change'):
+            self.dst.confirm_unprepared_cancel({**binding, 'sourceMachine': 'other'})
+
+    def test_unprepared_target_rejects_existing_specification(self):
+        self.terminal('CANCELED')
+        with self.assertRaisesRegex(ValueError, 'no target specification'):
+            self.dst.confirm_unprepared_cancel({**self.control, 'sourceMachine': 'gpu-source', 'reference': self.ref})
+
+    def test_unprepared_source_rejects_wrong_bindings_without_releasing(self):
+        proof = self.unprepared(acquired=True); before = self.leases()
+        for change in ({'id': str(uuid.uuid4())}, {'userId': 'demo-user-9'}, {'targetMachine': 'other'},
+                       {'sourceMachine': 'other'}, {'reference': {**self.ref, 'version': 'a'*64}},
+                       {'mode': 'other'}, {'attempt': False}, {'confirmedStopped': 1}, {'schema': True}):
+            with self.assertRaises(ValueError): self.release_unprepared({**proof, **change})
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            self.src.release_unprepared_source({**self.control, 'userId': 'demo-user-9', 'confirmation': proof})
+        self.assertEqual(self.leases(), before)
+        self.assertEqual(self.src.load(self.key, '.source-lease.json')['state'], 'PREPARING')
+
+    def test_unprepared_source_rejects_ticket_or_held_journal(self):
+        self.prepared(); self.dst.cancel(self.control)
+        proof = self.dst.confirm_unprepared_cancel({**self.control, 'sourceMachine': 'gpu-source', 'reference': self.ref})
+        with self.assertRaisesRegex(ValueError, 'Issued source ticket'): self.release_unprepared(proof)
+        before = self.leases()
+        # Separate real failure stage: info can fail after HELD, with no ticket.
+        self.key = str(uuid.uuid4()); self.args['id'] = self.key; self.control['id'] = self.key
+        with patch.object(self.src, 'source', side_effect=OSError('info failed')):
+            with self.assertRaises(OSError): self.prepared()
+        self.dst.cancel(self.control)
+        proof = self.dst.confirm_unprepared_cancel({**self.control, 'sourceMachine': 'gpu-source', 'reference': self.ref})
+        with self.assertRaisesRegex(ValueError, 'original PREPARING'): self.release_unprepared(proof)
+        self.assertEqual(len(self.leases()), len(before)+1)
+
+    def test_unprepared_release_failure_preserves_fence_and_retries(self):
+        proof = self.unprepared(acquired=True); before = self.leases()
+        with patch.object(self.src, 'snapshots', side_effect=OSError('release interrupted')):
+            with self.assertRaises(OSError): self.release_unprepared(proof)
+        self.assertEqual(self.leases(), before)
+        self.assertEqual(self.src.load(self.key, '.source-lease.json')['state'], 'RELEASING')
+        with self.assertRaisesRegex(ValueError, 'finalized'): self.src.prepare(self.args)
+        self.release_unprepared(proof); self.assertEqual(self.leases(), [])
+
+    def test_unprepared_post_release_crash_retries_without_registry_or_reacquire(self):
+        proof = self.unprepared(acquired=True); atomic = self.source.atomic_json
+        def fail(path, value):
+            if path.name.endswith('.source-lease.json') and value['state'] == 'RELEASED':
+                raise OSError('final receipt failed')
+            return atomic(path, value)
+        with patch.object(self.source, 'atomic_json', side_effect=fail):
+            with self.assertRaises(OSError): self.release_unprepared(proof)
+        self.assertEqual(self.leases(), [])
+        self.cache.evict(self.admin, 'shared', self.version)
+        self.cache.unregister(self.admin, 'shared', self.version)
+        self.assertTrue(self.release_unprepared(proof)['released'])
+
+    def test_unprepared_cancel_serializes_with_late_prepare(self):
+        proof = self.unprepared(acquired=True)
+        entered, proceed = threading.Event(), threading.Event()
+        snapshot = self.src.snapshots()
+        original = snapshot.release_unprepared_transfer_lease
+        def slow(*args):
+            entered.set()
+            if not proceed.wait(5): raise AssertionError('test release did not unblock')
+            return original(*args)
+        with ThreadPoolExecutor(max_workers=2) as pool, patch.object(self.src, 'snapshots', return_value=snapshot), patch.object(snapshot, 'release_unprepared_transfer_lease', side_effect=slow):
+            releasing = pool.submit(self.release_unprepared, proof)
+            self.assertTrue(entered.wait(5))
+            preparing = pool.submit(self.src.prepare, self.args)
+            try:
+                with self.assertRaises(FutureTimeoutError): preparing.result(timeout=.05)
+            finally: proceed.set()
+            self.assertTrue(releasing.result()['released'])
+            with self.assertRaisesRegex(ValueError, 'finalized'): preparing.result()
+        self.assertEqual(self.leases(), [])
+
     def test_release_crash_keeps_fence_and_retry_finishes(self):
         proof = self.terminal(); before = self.leases()
         with patch.object(self.src, 'snapshots', side_effect=OSError('release interrupted')):

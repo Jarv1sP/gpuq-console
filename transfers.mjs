@@ -109,6 +109,17 @@ function releaseConfirmation(row,value){
     ['kind','dataset','version'].some(key=>value.reference[key]!==data.reference[key]))throw Error('Source release confirmation mismatch');
   return structuredClone(value);
 }
+function unpreparedConfirmation(row,value){
+  const expected={schema:1,mode:'unprepared-cancel-v1',id:row.id,userId:row.owner_id,
+    sourceMachine:row.data.from,targetMachine:row.data.machine,reference:row.data.reference,
+    attempt:0,state:'CANCELED',confirmedStopped:true};
+  if(!value||typeof value!=='object'||Array.isArray(value)||
+    Object.keys(value).sort().join(',')!==Object.keys(expected).sort().join(',')||
+    Object.entries(expected).some(([key,want])=>key!=='reference'&&value[key]!==want)||
+    !value.reference||Object.keys(value.reference).sort().join(',')!=='dataset,kind,version'||
+    ['kind','dataset','version'].some(key=>value.reference[key]!==expected.reference[key]))throw Error('Unprepared source confirmation mismatch');
+  return structuredClone(value);
+}
 async function releaseSource(service,row,actor='transfer-reconcile'){
   if(row.data.kind==='download'&&done.has(row.state)&&row.data.downloadProtection?.protocol===1&&row.data.downloadProtection.state!=='RELEASED'){
     row.data.downloadProtection={protocol:1,state:'PENDING'};
@@ -129,9 +140,23 @@ async function releaseSource(service,row,actor='transfer-reconcile'){
   row.data.sourceRelease={...row.data.sourceRelease,state:'PENDING'};
   row=save(service,row,row.state,actor,pending?'transfers.sync':'transfers.source-release-pending');
   try{
-    // An uncertain preparation may have left a protected source journal but no
-    // portal ticket. Keep it for reconciliation; never mint a grant to clean up.
-    if(!row.data.sourceTicket)throw Error('Source preparation was not confirmed');
+    // Only an existing explicit cancel intent can close a PREPARING/no-ticket
+    // source. Both nodes fence the exact ID; neither a new grant nor dispatch
+    // is attempted. Issued tickets with a lost reply still remain protected.
+    if(!row.data.sourceTicket){
+      if(row.state!=='CANCELED'||row.data.cancelRequested!==true)throw Error('Source preparation was not confirmed');
+      let proof=row.data.sourceRelease.unpreparedConfirmation;
+      if(!proof){
+        proof=unpreparedConfirmation(row,await service.bridge(row.data.machine,'transfers.confirm-unprepared-cancel',{
+          id:row.id,userId:row.owner_id,sourceMachine:row.data.from,reference:row.data.reference}));
+        row.data.sourceRelease.unpreparedConfirmation=proof;
+        row=save(service,row,row.state,actor,'transfers.unprepared-cancel-confirmed');
+      }else proof=unpreparedConfirmation(row,proof);
+      const result=await service.bridge(row.data.from,'transfers.release-unprepared-source',{id:row.id,userId:row.owner_id,confirmation:proof});
+      if(result?.id!==row.id||result.released!==true)throw Error('Unprepared source release not confirmed');
+      row.data.sourceRelease={protocol:1,state:'RELEASED'};
+      return save(service,row,row.state,actor,'transfers.source-released');
+    }
     let confirmation=row.data.sourceRelease.confirmation;
     if(!confirmation){
       const value=await service.bridge(row.data.machine,'transfers.confirm-source-release',{
