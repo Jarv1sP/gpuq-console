@@ -13,6 +13,9 @@ const lanes=new WeakMap();
 // Never derived from HTTP arguments. Only the archive orchestrator can open a
 // copy to the configured cold store without a compute grant on that machine.
 const archiveAdmission=Symbol('trusted archive admission');
+// Older orchestrated copies used an ordinary upload admission. They may resume
+// that SAME stopped transfer, but cannot acquire the newer archive lane.
+const legacyArchiveAdmission=Symbol('trusted legacy archive resume');
 function laneState(service){let state=lanes.get(service);if(!state){state={pending:0,users:new Map(),rows:new Map()};lanes.set(service,state);}return state;}
 async function inLane(service,owner,key,run){
   const state=laneState(service),lane=state.rows.get(key)||{tail:Promise.resolve(),pending:0},count=state.users.get(owner)||0;
@@ -59,6 +62,26 @@ function archiveLane(service,data){
     value.schema!==1||value.targetMachine!==policy.machine||value.authority!==policy.authority||data.machine!==policy.machine)
     fail('归档传输未绑定当前固定存储；不会重标旧传输。',409);
   return structuredClone(value);
+}
+function legacyArchiveBinding(service,principal,row,binding){
+  const data=row.data,request=binding.request,ticket=data.sourceTicket;
+  if(row.owner_id!==principal.userId||data.owner?.id!==principal.userId||row.client_key!==request.key||
+    data.kind!=='copy'||data.managedArchive!==1||Object.hasOwn(data,'archiveLane')||Object.hasOwn(data,'allowRelay')||
+    digest(service.storageArchivePolicy)!==digest(binding.policy)||
+    data.from!==request.from||data.machine!==request.machine||data.name!==request.name||
+    !data.reference||Object.keys(data.reference).sort().join(',')!=='dataset,kind,version'||
+    data.reference.kind!=='datasets'||data.reference.dataset!==request.dataset||data.reference.version!==request.version||
+    !Number.isInteger(data.timeoutSec)||data.timeoutSec<1||data.timeoutSec>604800||
+    data.sourceRelease?.protocol!==1||!['HELD','PENDING','RELEASED'].includes(data.sourceRelease.state)||
+    !ticket||Object.keys(ticket).sort().join(',')!=='entries,id,manifestBytes,manifestSha256,state,token,totalBytes'||
+    ticket.id!==row.id||typeof ticket.token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(ticket.token)||
+    digest(info(ticket))!==digest(binding.info)||!service.archiveIntentAllowed?.(principal.userId,request))
+    fail('旧归档的原始发布意图或源租约不匹配；不会重标传输。',409);
+  // Reconstruct the historical insertion order, not a new-schema digest. A
+  // new transfer with its archiveLane merely removed must still be rejected.
+  const payload={kind:data.kind,machine:data.machine,reference:data.reference,from:data.from,timeoutSec:data.timeoutSec,name:data.name,managedArchive:1};
+  if(row.digest!==digest(payload))fail('旧归档的固定内容校验不匹配；不会重标传输。',409);
+  authorizedCopy(service,service.store.get(principal.userId),data);
 }
 function pinnedSnapshot(service,principal,operation,args,row){
   const user=service.store.get(principal.userId);
@@ -196,8 +219,15 @@ export function installTransfers(service){
     const policy=service.storageArchivePolicy;
     if(!policy?.enabled||args.kind!=='copy'||args.machine!==policy.machine||args.from===args.machine||!service.archiveIntentAllowed?.(principal.userId,args))fail('归档传输缺少固定发布意图。',403);
     const current=service.transferSnapshotByKey(principal.userId,args.key);
-    if(resume&&current&&['FAILED','PAUSED'].includes(current.state))return transferCall(service,principal,'transfers.resume',{id:current.id},()=>{},archiveAdmission);
-    if(current&&!['DISPATCHING','UNKNOWN'].includes(current.state))return transferCall(service,principal,'transfers.status',{id:current.id});
+    if(resume&&current&&['FAILED','PAUSED'].includes(current.state)){
+      if(Object.hasOwn(current,'archiveLane'))return transferCall(service,principal,'transfers.resume',{id:current.id},()=>{},archiveAdmission);
+      const row=load(service,current.id),binding={request:structuredClone(args),policy:structuredClone(policy),info:info(row.data.sourceTicket)};
+      legacyArchiveBinding(service,principal,row,binding);
+      return transferCall(service,principal,'transfers.resume',{id:current.id},()=>{legacyArchiveBinding(service,principal,load(service,current.id),binding);},{[legacyArchiveAdmission]:binding});
+    }
+    // Legacy ambiguous/canceling receipts must be observed on their original
+    // node, not replayed through new-schema create (or granted a new lane).
+    if(current&&(current.managedArchive===1&&!Object.hasOwn(current,'archiveLane')||!['DISPATCHING','UNKNOWN'].includes(current.state)))return transferCall(service,principal,'transfers.status',{id:current.id});
     return transferCall(service,principal,'transfers.create',args,()=>{},archiveAdmission);
   };
   const snapshot=(owner,column,id)=>{
@@ -253,7 +283,8 @@ export async function transferCall(service,principal,operation,args,assertCurren
     // A narrow per-call view lets existing upload/snapshot validators use the
     // same bridge without bypassing the policy fence or mutating shared hooks.
     const context=Object.create(service);
-    context[archiveAdmission]=admission===archiveAdmission;
+    context[archiveAdmission]=admission===archiveAdmission||!!admission?.[legacyArchiveAdmission];
+    context[legacyArchiveAdmission]=admission?.[legacyArchiveAdmission];
     context.bridge=async(...request)=>{current();try{return await service.bridge(...request);}finally{current();}};
     check();try{return await transferOperation(context,principal,operation,args);}finally{check();}
   });
@@ -360,14 +391,23 @@ async function transferOperation(service,principal,operation,args){
   if(operation==='transfers.resume'){
     fields(args,['id']);if(done.has(row.state)||row.data.cancelRequested)fail('完成或取消的传输不能恢复。',409);
     if(row.data.managedArchive===1&&!service[archiveAdmission])fail('请在数据集页面重试长期归档，后台会按顺序恢复同一传输。',409);
-    if(row.data.managedArchive===1)archiveLane(service,row.data);
+    if(row.data.managedArchive===1){
+      if(service[legacyArchiveAdmission]){
+        legacyArchiveBinding(service,principal,row,service[legacyArchiveAdmission]);
+        if(row.data.sourceRelease.state!=='HELD')fail('旧归档源租约未处于保留状态。',409);
+      }else archiveLane(service,row.data);
+    }
     if(row.data.kind!=='copy')return view(save(service,row,'WAITING_CLIENT',principal.username,operation));
     const current=await sync(service,row,principal.username);
     if(!['PAUSED','FAILED'].includes(current.state))fail('先确认原任务已经停止；UNKNOWN 不会启动新尝试。',409);
     const ticket=await service.bridge(row.data.from,'transfers.source.prepare',{id:row.id,reference:row.data.reference,userId:user.id,hostAdmin:principal.role==='admin',timeoutSec:row.data.timeoutSec,targetMachine:row.data.machine,renew:true});
+    if(ticket?.id!==row.id||typeof ticket.token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(ticket.token))fail('源授权回执不匹配。',502);
     const source={id:row.id,token:ticket.token,...info(ticket)};
     if(Object.keys(current.data.sourceTicket).some(k=>k!=='token'&&current.data.sourceTicket[k]!==source[k]))fail('恢复只能读取原固定版本。',409);
-    if(row.data.managedArchive===1)archiveLane(service,row.data);
+    if(row.data.managedArchive===1){
+      if(service[legacyArchiveAdmission])legacyArchiveBinding(service,principal,current,service[legacyArchiveAdmission]);
+      else archiveLane(service,row.data);
+    }
     current.data.sourceTicket=source;const saved=save(service,current,'DISPATCHING',principal.username,'transfers.resume-intent');
     try{const result=await service.bridge(row.data.machine,'transfers.resume',{id:row.id,userId:user.id,source});if(result.id!==row.id||!states.has(result.state))fail('恢复回执不匹配。',502);saved.data.result=result;return view(await releaseSource(service,save(service,saved,result.state,principal.username,operation),principal.username));}
     catch(error){if(error.transferFence)throw error;saved.data.error='恢复回执未确认；核对同一任务，不会重复启动。';return view(save(service,saved,'UNKNOWN',principal.username,'transfers.resume-unknown'));}
