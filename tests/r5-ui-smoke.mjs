@@ -19,6 +19,11 @@ const errors=[],outside=[],assets=[],calls=[],sessions=new Map();
 let server,service,browser,releaseCatalog,releaseInventory;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
+async function closeRoutedContext(context){
+  await Promise.all(context.pages().map(page=>page.unrouteAll({behavior:'wait'})));
+  await context.unrouteAll({behavior:'wait'});
+  await context.close();
+}
 const project={project:'vision-baseline',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
 const status=()=>({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map((machine,position)=>({id:machine.id,checkedAt:new Date().toISOString(),reachable:position!==2,
   gpus:position===2?[]:Array.from({length:machine.cards},(_,index)=>({index,memoryTotalMiB:(Number.parseFloat(machine.memory)||32)*1024,memoryUsedMiB:index<2?16384:0,processesAvailable:true,processes:index<2?[{pid:1000+index,memoryUsedMiB:16384}]:[]})),
@@ -103,7 +108,7 @@ try{
   await inventoryProbe.setViewportSize({width:1440,height:1080});await inventoryProbe.locator('[data-nav=users]').click();await inventoryProbe.locator('#filter-all').click();await inventoryProbe.locator('[data-user="'+member.id+'"]').click();
   assert.equal(await inventoryProbe.locator('[data-quota=total]').getAttribute('max'),String(MACHINES.reduce((sum,machine)=>sum+machine.cards,0)),'account capacity is recomputed after the empty login phase');
   assert.equal(await inventoryProbe.locator('[data-permission-meter]').count(),MACHINES.length);
-  await inventoryProbe.context().close();
+  await closeRoutedContext(inventoryProbe.context());
 
   const desktop=await pageFor(1440);await login(desktop,member.username);
   const requests=[];desktop.on('request',request=>{if(request.url()===origin+'/api/call'){const body=request.postDataJSON();requests.push(body);}});
@@ -218,5 +223,5 @@ try{
   assert.deepEqual(outside,[]);assert.deepEqual(errors.filter(message=>!message.includes('ERR_FAILED')&&!message.includes('Failed to fetch')),[]);assert.ok(assets.filter(row=>row.path.endsWith('.woff2')).every(row=>row.status===200));
   console.log(JSON.stringify({status:'passed',checks:['empty pre-login inventory + delayed member directory + admin state + logout mirrors/capacity','mission real attempt/allocated GPU/timeline/Escape/privacy','stage adaptive hero + one real state-boundary sweep','explicit Chinese parse/version/confirmation/target binding','lost submit reply + identical explicit idempotent retry + in-place receipt','operation column and read-only true-source route','1440/390/320 member/admin + all inventory names + reduced motion + CSP/self-hosted fonts'],screenshots:shots}));
 }finally{
-  releaseInventory?.();releaseCatalog?.();await browser?.close();if(server?.listening)await new Promise(resolve=>server.close(resolve));if(service&&!service.closing){clearInterval(service.executionTimer);await service.close();}await rm(temp,{recursive:true,force:true});
+  releaseInventory?.();releaseCatalog?.();if(browser)await Promise.all(browser.contexts().map(closeRoutedContext));await browser?.close();if(server?.listening)await new Promise(resolve=>server.close(resolve));if(service&&!service.closing){clearInterval(service.executionTimer);await service.close();}await rm(temp,{recursive:true,force:true});
 }
