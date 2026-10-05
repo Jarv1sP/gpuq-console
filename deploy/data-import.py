@@ -169,7 +169,7 @@ class DataImports:
                        'maxUserSessions': 1024, 'maxUserEntries': 2000000}
         for key in self.limits:
             value = configured.get(key, self.limits[key])
-            if type(value) is not int or not 1 <= value <= 2**63-1:
+            if type(value) is not int or not (0 if key == 'maxUserBytes' else 1) <= value <= 2**63-1:
                 raise ValueError('Invalid personal data import limits')
             self.limits[key] = value
 
@@ -540,7 +540,8 @@ class DataImports:
                         raise ImportFailure('RESUME', 'Safe resume requires a stable ETag or an expected checksum')
                     connection, response = open_download(task['url'], offset, task.get('etag'), task['sourceKind'], **({'download_headers':task['downloadHeaders']} if task.get('downloadHeaders') else {}))
                     total, etag = self.response_info(task, response, offset)
-                    if self.usage(user, key)+total > self.limits['maxUserBytes']:
+                    used = self.usage(user, key)  # Also validates entry count and directory depth.
+                    if self.limits['maxUserBytes'] and used+total > self.limits['maxUserBytes']:
                         raise ImportFailure('QUOTA', 'Personal data storage limit would be exceeded')
                     self.reservation(task, total-offset+65536)
                     self.progress(task, offset, totalBytes=total, etag=etag)

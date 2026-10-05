@@ -298,6 +298,44 @@ class DataImportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Too many'):
             self.start(key=str(uuid.uuid4()))
 
+    def test_shared_volume_policy_has_no_personal_bytes_but_still_reserves_space(self):
+        self.n.CONFIG['datasets']['uploads'] = {'maxUserBytes': 0}
+        self.assertEqual(self.d.DataImports(self.n).limits['maxUserBytes'], 0)
+        self.i.limits['maxUserBytes'] = 0
+        self.start()
+        with patch.object(self.i, 'usage', wraps=self.i.usage) as usage:
+            self.assertEqual(self.worker(Response())[0], 0)
+            usage.assert_called_once_with(self.user,self.key)
+        self.assertEqual(self.status()['state'], 'READY')
+        self.key = str(uuid.uuid4()); self.start(path='downloads/second.tar')
+        with patch.object(type(self.cache), '_free', side_effect=ValueError('disk full')):
+            self.assertEqual(self.worker(Response())[0], 1)
+        self.assertEqual(self.status()['errorCode'], 'SPACE')
+
+    def test_no_personal_byte_cap_retains_entry_and_depth_validation(self):
+        self.i.limits.update(maxUserBytes=0,maxUserEntries=1)
+        (self.owner/'data'/'one').write_bytes(b'a')
+        (self.owner/'data'/'two').write_bytes(b'b')
+        self.start();self.assertEqual(self.worker(Response())[0],1)
+        self.assertEqual(self.status()['errorCode'],'QUOTA')
+        self.i.limits['maxUserEntries']=1000
+        directory=self.owner/'data'
+        for _ in range(65):
+            directory=directory/'d';directory.mkdir()
+        self.key=str(uuid.uuid4());self.start()
+        self.assertEqual(self.worker(Response())[0],1)
+        self.assertEqual(self.status()['errorCode'],'QUOTA')
+
+    def test_zero_budget_is_explicit_and_does_not_disable_other_limits(self):
+        for value in (False, -1, None, '0'):
+            self.n.CONFIG['datasets']['uploads'] = {'maxUserBytes': value}
+            with self.assertRaises(ValueError):
+                self.d.DataImports(self.n)
+        for key in ('maxUploadBytes', 'maxUserSessions', 'maxUserEntries'):
+            self.n.CONFIG['datasets']['uploads'] = {key: 0}
+            with self.assertRaises(ValueError):
+                self.d.DataImports(self.n)
+
     def test_ambiguous_launch_fence_and_generation_resume(self):
         self.launch_mock.side_effect = ValueError(self.url)
         self.start()

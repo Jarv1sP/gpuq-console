@@ -197,6 +197,8 @@ gpuctl invites disable member
 
 节点 `datasets.uploads` 可设置应用层限额：`maxUploadBytes` 默认单份内容 1 TiB、`maxUserBytes` 默认每人每节点 2 TiB 存储预算、`maxActiveUploads` 默认 4、`maxUserUploads` 默认 256、`maxUserEntries` 默认 2,000,000 个保留条目、`maxUserSessions` 默认 1,024 个历史会话（含已取消）。单份存储预算为文件字节数 + 清单大小 × 4 + 条目数 × 8 KiB + 64 KiB，避免空文件、空目录绕过容量预留；磁盘可用空间、inode 和安全余量也会检查。这不是文件系统硬配额；成员不能通过接口修改限额。
 
+不需要个人容量份额时，将 `datasets.uploads.maxUserBytes` 显式设为 `0`；云文件功能另设 `cloudFiles.maxUserBytes: 0`。仅关闭个人累计字节限制，不关闭节点剩余空间、安全余量、上传并发和条目检查，也不关闭云账号的总容量上限 `cloudFiles.maxTotalBytes`。已有运行程序的任意写入不受上传入口检查约束；不要把此策略当作文件系统硬配额。
+
 成员只能取消未完成上传，已发布版本由管理员在确认无租约后注销；明确注销后回收该个人上传的保留容量、条目与上传数量额度，但历史会话仍计入 `maxUserSessions`，到限额后需管理员审核归档历史记录。不要直接删除仍在使用的恢复记录或锁。个人数据没有自动外部备份，注销前须确认原始资料仍在。
 
 登记生成完整内容清单与 64 位版本哈希，会读取登记范围内的数据；不要把“登记”理解为可以无成本扫描整块旧盘。先小样本验收，再安排实际数据登记。用户通过 `gpuctl data list/prepare/status` 或网页准备本地副本，准备不申请 GPU；只有本机 `READY` 才能作为训练输入。

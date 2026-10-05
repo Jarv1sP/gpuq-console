@@ -25,6 +25,8 @@ gpuctl data cloud cancel OPERATION_ID --machine SERVER
 
 节点的 `cloudFiles` 配置必须包含：`enabled`、`nodeExecutable`、`worker`、`privateConfig`、`maxFileBytes`、`maxUserBytes`、`maxTotalBytes`。Node.js 运行时及 JS 依赖应固定版本并独立部署，不替换系统 Node。`worker` 是本仓库的 `cloud-files-worker.mjs`。
 
+`maxUserBytes: 0` 可关闭每个成员的云存储字节份额，但 `maxTotalBytes` 必须为正数，始终限制整个后台云账号的已预留容量；它不能设为无限。下载到节点还受该节点实际剩余空间和预留容量限制。两者均为应用计量，不是后台账号的云厂商套餐或节点文件系统硬配额。
+
 运行 `npm ci && npm run build:cloud-worker` 生成单文件 `build/cloud-files-worker.mjs` 及 SHA256 清单。把此产物与已核验的 Node 24 放到中心节点的管理员管理目录，`worker` 指向该产物。节点不需要另行安装 npm 依赖；其余机器只安装 Python 控制器并保持功能关闭。
 
 私有配置包含 `enabled`、`capabilityVerified`、`scopeId`、`cloud`（已核验的 CD2 云名与账号标识）、`endpoint`、`allowInsecureLoopback`、`tokenFile`、`receiptKeyFile`，可设置 `maxBytes` 和 `timeoutMs`。令牌文件采用 `{ "apiToken": "..." }`；回执密钥是独立32字节随机文件。配置、令牌、密钥均0600，父目录0700。不要将这些文件提交Git或发给成员。

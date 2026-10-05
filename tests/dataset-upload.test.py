@@ -229,6 +229,33 @@ class PersonalUploads(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'free space'):
                 self.call('manifest', uploadId=one['uploadId'], offset=0, data='eA==')
 
+    def test_shared_volume_policy_keeps_space_and_concurrency_guards(self):
+        self.node.CONFIG['datasets']['uploads'] = {'maxUserBytes': 0, 'maxActiveUploads': 2}
+        self.u = U.DatasetUploads(self.node)
+        one, _, _, _ = self.admit(files={'x': b'one'})
+        two, _, _, _ = self.admit(files={'x': b'two'}, name='second')
+        self.assertNotEqual(one['uploadId'], two['uploadId'])
+        self.assertGreater(self.cache._reserved(), 100000)
+        with self.assertRaisesRegex(ValueError, 'unfinished'):
+            self.admit(files={'x': b'three'}, name='third')
+        self.u.limits['maxActiveUploads'] = 4
+        with patch.object(self.cache, '_free', side_effect=ValueError('Insufficient free space')):
+            with self.assertRaisesRegex(ValueError, 'free space'):
+                self.admit(files={'x': b'four'}, name='fourth')
+
+    def test_only_user_byte_budget_accepts_explicit_zero(self):
+        for key in U.DEFAULTS:
+            self.node.CONFIG['datasets']['uploads'] = {key: 0}
+            if key == 'maxUserBytes':
+                self.assertEqual(U.DatasetUploads(self.node).limits[key], 0)
+            else:
+                with self.assertRaises(ValueError):
+                    U.DatasetUploads(self.node)
+        for value in (False, -1, None, '0'):
+            self.node.CONFIG['datasets']['uploads'] = {'maxUserBytes': value}
+            with self.assertRaises(ValueError):
+                U.DatasetUploads(self.node)
+
     def test_failed_publish_can_receive_remaining_chunks_and_retry(self):
         result, args, files = self.seal()
         upload = result['uploadId']
