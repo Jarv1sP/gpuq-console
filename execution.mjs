@@ -213,6 +213,10 @@ export async function executionCall(service,principal,operation,args){
     if(['begin','seal','commit','discard','direct-ticket','direct-revoke'].includes(action))service.audit(principal.username,operation,machine,id);
     return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
   }
+  if(operation==='datasets.archive.enroll'){
+    if(!service.enrollStorageArchive)fail('长期归档尚未配置。',409);
+    return service.enrollStorageArchive(principal,args);
+  }
   if(operation==='datasets.archive.retry'){
     authorizedMachine(args.machine);
     if(Object.keys(args).sort().join(',')!=='dataset,machine,version')fail('归档重试需要固定数据集版本。');

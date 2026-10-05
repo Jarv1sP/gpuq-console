@@ -58,6 +58,15 @@ class StorageManagementRoute(unittest.TestCase):
         self.assertEqual(before, (self.cache.root / 'ready' / 'example' / self.version / 'data' / 'train.txt').read_bytes())
         self.assertNotIn(str(self.base), json.dumps(status))
 
+    def test_enrollment_metadata_probe_is_only_an_internal_archive_route(self):
+        args = dict(userId='demo-user-1', dataset='example', version=self.version)
+        archive = SimpleNamespace(enrollment_check=Mock(return_value={'state':'READY'}))
+        with patch.object(self.node, 'storage_archive', return_value=archive), \
+                patch.object(self.node, 'gpu', side_effect=AssertionError('no scheduler')):
+            self.assertEqual(self.node.process('storage.archive.enrollment-check', args), {'state':'READY'})
+            archive.enrollment_check.assert_called_once_with(args)
+            with self.assertRaises(ValueError): self.node.process('datasets.archive.enrollment-check', args)
+
     def test_authenticated_control_flag_is_exact_boolean_and_identity_is_validated(self):
         for admin in (False, None, 0, 1, 'true'):
             with self.subTest(admin=admin), self.assertRaises(ValueError):
@@ -255,6 +264,7 @@ class StorageBridgeAndRuntime(unittest.TestCase):
         internal = ast.literal_eval(constants[0].value)
         self.assertEqual(set(internal), {
             'storage.archive.events', 'storage.archive.ack', 'storage.archive.original',
+            'storage.archive.enrollment-check',
             'storage.archive.provision', 'storage.archive.certify', 'storage.lease.prepare',
             'storage.lease.cancel', 'storage.download.open', 'storage.download.info',
             'storage.download.manifest', 'storage.download.get', 'storage.download.finish'})
@@ -294,6 +304,7 @@ class StorageBridgeAndRuntime(unittest.TestCase):
 
     def test_execution_worker_allows_exact_internal_lifecycle_operations(self):
         for operation in ('storage.archive.events', 'storage.archive.ack', 'storage.archive.original',
+                          'storage.archive.enrollment-check',
                           'storage.archive.provision', 'storage.archive.certify', 'storage.lease.prepare',
                           'storage.lease.cancel', 'storage.download.open', 'storage.download.info',
                           'storage.download.manifest', 'storage.download.get', 'storage.download.finish'):

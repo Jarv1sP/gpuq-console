@@ -300,6 +300,7 @@ def terminal_exchange(host,args,machine):
         return json.loads(p.stdout)
 
 INTERNAL_STORAGE=('storage.archive.events','storage.archive.ack','storage.archive.original',
+    'storage.archive.enrollment-check',
     'storage.archive.provision','storage.archive.certify','storage.lease.prepare','storage.lease.cancel',
     'storage.download.open','storage.download.info','storage.download.manifest','storage.download.get','storage.download.finish')
 CLOUD_FILES=tuple('datasets.cloud.'+action for action in ('info','list','status','upload','verify','download','cancel'))

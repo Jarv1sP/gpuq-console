@@ -918,6 +918,7 @@ def storage_archive_operation(operation,args):
     # Private trusted bridge only. No matching operation is present in the
     # public execution API, CLI, upload ticket or node peer allowlist.
     methods={'storage.archive.events':'outbox_list','storage.archive.ack':'outbox_ack',
+             'storage.archive.enrollment-check':'enrollment_check',
              'storage.archive.original':'original','storage.archive.provision':'provision',
              'storage.archive.certify':'certify'}
     if operation not in methods:raise ValueError('Unknown internal archive operation')
