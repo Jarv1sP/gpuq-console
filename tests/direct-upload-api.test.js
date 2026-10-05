@@ -38,3 +38,19 @@ test('relay override is only an explicit boolean on authenticated begin',async()
   for(const allowRelay of ['true',1,null])await assert.rejects(f.call('begin',{...args,allowRelay}));
   assert.equal(f.calls.length,3);
 });
+test('route discovery is authorized read-only metadata; tickets accept an ID, never an endpoint',async()=>{
+  const f=fixture();
+  await f.call('routes',{machine:'gpu-1'});
+  assert.deepEqual(f.calls[0],['gpu-1','datasets.upload.routes',{userId:'demo-user-1',hostAdmin:false}]);
+  assert.equal(f.audits.length,0);
+  await f.call('direct-ticket',{machine:'gpu-1',uploadId,routeId:'tail'});
+  assert.equal(f.calls.at(-1)[2].routeId,'tail');
+  for(const args of [{machine:'gpu-2'},{machine:'gpu-1',endpoint:'https://evil'},{machine:'gpu-1',userId:'demo-user-2'},{machine:'gpu-1',uploadId}])
+    await assert.rejects(f.call('routes',args));
+  for(const routeId of ['https://evil','../tail',1,null,'', 'a'.repeat(33)])
+    await assert.rejects(f.call('direct-ticket',{machine:'gpu-1',uploadId,routeId}));
+  const count=f.calls.length;f.user.limits['gpu-1']=0;
+  await assert.rejects(f.call('routes',{machine:'gpu-1'}));assert.equal(f.calls.length,count);
+  f.user.limits['gpu-1']=1;f.user.enabled=false;
+  await assert.rejects(f.call('routes',{machine:'gpu-1'}));assert.equal(f.calls.length,count);
+});

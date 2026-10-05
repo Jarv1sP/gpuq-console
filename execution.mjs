@@ -188,12 +188,13 @@ export async function executionCall(service,principal,operation,args){
   }
   if(operation.startsWith('datasets.upload.')){
     authorizedMachine(args.machine);
-    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries','allowRelay'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId'],'direct-ticket':['uploadId'],'direct-revoke':['uploadId']};
+    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries','allowRelay'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId'],routes:[],'direct-ticket':['uploadId','routeId'],'direct-revoke':['uploadId']};
     const action=operation.slice('datasets.upload.'.length),allowed=fields[action];
     if(!allowed||Object.keys(args).some(k=>k!=='machine'&&!allowed.includes(k)))fail('个人数据集上传参数无效。');
     const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
     const id=action==='begin'?args.key:args.uploadId;
-    if(typeof id!=='string'||!uuid.test(id))fail('上传编号必须为完整 UUID。');
+    if(action!=='routes'&&(typeof id!=='string'||!uuid.test(id)))fail('上传编号必须为完整 UUID。');
+    if(args.routeId!==undefined&&(typeof args.routeId!=='string'||!/^[a-z][a-z0-9-]{0,31}$/.test(args.routeId)))fail('上传通道编号无效。');
     if(action==='begin'){
       if(args.allowRelay!==undefined&&typeof args.allowRelay!=='boolean')fail('中转确认必须是明确的布尔值。');
       if(typeof args.name!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(args.name))fail('名称请用 1–40 位字母、数字、短横线或下划线。');

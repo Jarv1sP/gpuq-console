@@ -82,7 +82,7 @@ class DirectTests(unittest.TestCase):
         self.assertEqual(grant['maxChunkBytes'], DIRECT.MAX_FILE_CHUNK_BYTES)
         self.assertEqual(claims['maxChunkBytes'], grant['maxChunkBytes'])
         self.assertEqual(fixtures.D._read_json(self.u.folder(self.user, upload)/'direct-grant.json')['claims'], claims)
-        legacy_claims = {key: value for key, value in claims.items() if key != 'maxChunkBytes'}
+        legacy_claims = {key: value for key, value in claims.items() if key not in ('maxChunkBytes', 'routeId')}
         legacy = self.fixture_grant_claims(grant, upload, legacy_claims)
         with self.assertRaises(ValueError):
             self.raw(legacy, upload, 'chunk', path='x', offset=0, data=content)
@@ -104,6 +104,9 @@ class DirectTests(unittest.TestCase):
         grant = self.ticket(upload)
         self.assertTrue(grant['available'])
         self.assertEqual(grant['protocol'], DIRECT.PROTOCOL)
+        self.assertEqual(grant['routeId'], 'primary')
+        self.assertEqual(grant['endpoint'], self.config['endpoint'])
+        self.assertEqual(grant['kind'], 'campus-direct')
         self.assertLessEqual(grant['expiresAt']-time.time(), 300)
         self.assertNotIn(grant['ticket'], (self.u.folder(self.user, upload)/'direct-grant.json').read_text())
         with patch.object(self.u, 'decoded', side_effect=AssertionError('No base64 data path')):
@@ -309,6 +312,50 @@ class DirectTests(unittest.TestCase):
         (self.base/'node-config.json').write_text(json.dumps({**self.node.CONFIG, 'datasets': {'root': '/other'}}))
         with self.assertRaisesRegex(ValueError, 'storage configuration changed'):
             DIRECT.DirectUploads(self.node, self.u).configuration()
+
+    def test_fixed_routes_are_bounded_revision_bound_and_not_client_urls(self):
+        cert, key, _ = self.tls_fixture()
+        direct = DIRECT.DirectUploads(self.node, self.u)
+        config = {'enabled': True, 'bind': '192.168.77.104', 'port': 18444,
+                  'endpoint': 'https://upload.example.test:18444', 'certificate': str(cert), 'privateKey': str(key)}
+        self.node.CONFIG['directUpload'] = config
+        old = direct.configuration()
+        alternate = {'id': 'tail', 'endpoint': 'https://tail-upload.example.test:18444', 'kind': 'tail-upload'}
+        self.node.CONFIG['directUpload'] = {**config, 'alternates': [alternate]}
+        new = direct.configuration()
+        self.assertNotEqual(old['revision'], new['revision'])
+        self.assertEqual(direct.routes(new)[1], alternate)
+        for candidates in ([{**alternate, 'id': 'primary'}], [alternate]*2, [alternate]*4,
+                           [{**alternate, 'endpoint': config['endpoint']}],
+                           [{**alternate, 'endpoint': 'https://a/path'}],
+                           [{**alternate, 'endpoint': 'http://a'}],
+                           [{**alternate, 'endpoint': 'https://*.example.test'}],
+                           [{**alternate, 'kind': 'vps-relay'}], [{**alternate, 'url': 'https://evil'}]):
+            self.node.CONFIG['directUpload'] = {**config, 'alternates': candidates}
+            with self.subTest(candidates=candidates), self.assertRaises(ValueError):
+                direct.configuration()
+
+    def test_route_discovery_creates_nothing_and_ticket_binds_fixed_route(self):
+        self.config['alternates'] = [{'id': 'tail', 'endpoint': 'https://tail.example.test', 'kind': 'tail-upload'}]
+        with patch.object(self.u, 'direct', return_value=self.direct), \
+                patch.object(self.u, 'actor', side_effect=AssertionError('read-only discovery')):
+            self.node.CONFIG['directUpload'] = {'enabled': True}
+            result = self.call('routes')
+            self.assertEqual([row['id'] for row in result['routes']], ['primary', 'tail'])
+            self.assertEqual(result['machine'], 'gpu-4')
+            self.assertNotIn('ticket', result)
+        initial, _, manifest, _ = self.admit()
+        upload = initial['uploadId']
+        with self.assertRaisesRegex(ValueError, 'not approved'):
+            self.direct.issue(self.user, upload, 'https://evil.test')
+        ticket = self.direct.issue(self.user, upload, 'tail')
+        self.assertEqual(ticket['endpoint'], 'https://tail.example.test')
+        self.assertEqual(self.direct.claims(ticket['ticket'])['routeId'], 'tail')
+        written = self.raw(ticket, upload, 'manifest', offset=0, data=manifest)
+        self.assertEqual(written['lastConfirmedRoute'], 'tail-upload')
+        self.config.pop('alternates')
+        with self.assertRaises(DIRECT.GrantError):
+            self.raw(ticket, upload, 'status')
 
     def test_browser_origins_are_optional_exact_https_and_revision_bound(self):
         cert, key, _ = self.tls_fixture()

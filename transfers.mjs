@@ -440,7 +440,8 @@ async function transferOperation(service,principal,operation,args){
     catch(error){if(error.transferFence)throw error;saved.data.error='恢复回执未确认；核对同一任务，不会重复启动。';return view(save(service,saved,'UNKNOWN',principal.username,'transfers.resume-unknown'));}
   }
   if(operation==='transfers.io'){
-    fields(args,['id','action','path','offset','data']);if(done.has(row.state)||row.data.cancelRequested)fail('此传输已结束或正在取消。',409);
+    fields(args,['id','action','path','offset','data','routeId']);if(done.has(row.state)||row.data.cancelRequested)fail('此传输已结束或正在取消。',409);
+    if(args.routeId!==undefined&&(row.data.kind!=='upload'||args.action!=='direct-ticket'))fail('仅上传票据可指定批准的通道。');
     let result;
     if(row.data.kind==='upload'){
       if(!row.data.uploadId)fail('上传初始化未确认，请重复原 create。',409);

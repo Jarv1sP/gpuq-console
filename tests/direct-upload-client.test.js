@@ -80,6 +80,14 @@ test('a failed direct connection never falls back to relay, even for a small fil
   await assert.rejects(uploadDatasetSnapshot(call,{machine:'node',name:'data',userId:'u',scan:snapshot(),keyStore,progress:()=>{},directFactory:async()=>({request:async()=>{throw Error('Direct upload connection failed');},close(){closed=true;}})}),/connection failed/);
   assert.equal(calls.includes('datasets.upload.manifest'),false);assert.equal(closed,true);
 });
+test('failed route discovery/probes and a configured unavailable listener never issue tickets or relay bytes',async()=>{
+  for(const mode of ['probe','listener','protocol']){
+    const calls=[],description={available:true,protocol:'dataset-upload-v1',machine:'node',revision:'b'.repeat(64),certificateSha256:'a'.repeat(64),routes:[{id:'primary',kind:'campus-direct',endpoint:'https://upload.example'}]};
+    const call=async(op,args)=>{calls.push({op,args});return {result:op.endsWith('begin')?{uploadId:id,state:'RECEIVING_MANIFEST',manifestOffset:0,uploadTransport:{protocol:mode==='protocol'?'unknown':'dataset-upload-v1',directAvailable:mode!=='listener',routeSelection:true,reason:'listener-unavailable'}}:description};};
+    await assert.rejects(uploadDatasetSnapshot(call,{machine:'node',name:'data',userId:'u',scan:snapshot(),keyStore,progress:()=>{},probeRoute:async()=>{throw Error('unreachable');}}),/no (?:automatic )?VPS fallback|no ticket issued/);
+    assert.equal(calls.some(x=>x.op.endsWith('direct-ticket')||x.args.data),false);
+  }
+});
 
 test('explicit relay selection is announced and transmitted in authenticated begin',async()=>{
   const scan=snapshot(),routes=[],calls=[];

@@ -2,7 +2,8 @@ import {lstat as fsLstat,open as fsOpen,readdir as fsReaddir} from 'node:fs/prom
 import {constants as fsConstants} from 'node:fs';
 import {basename,join,resolve} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
-import {createDirectDatasetTransport,RELAY_LIMIT_BYTES} from './client-direct-upload.mjs';
+import {createDirectDatasetTransport,probeDirectUploadRoute,RELAY_LIMIT_BYTES} from './client-direct-upload.mjs';
+import {selectUploadRoute} from './dist/upload-routes.js';
 export const DATA_CHUNK=1024*1024;
 const DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
 const fail=message=>{throw Error(message);};
@@ -47,11 +48,11 @@ export async function scanLocalDataset(root,progress,{lstat=fsLstat,open=fsOpen,
 
 export async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore,filesystem,via='auto'}){if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,via});}
 export function snapshotKey(identity){const h=createHash('sha256').update(JSON.stringify(identity)).digest('hex');return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;}
-export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,via='auto',directFactory=createDirectDatasetTransport}){
+export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,via='auto',directFactory=createDirectDatasetTransport,probeRoute=probeDirectUploadRoute}){
   if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');
   const key=snapshotKey([userId,machine,name,scan.manifestSha256]);
   let uploadId,state,direct,route;
-  const control=async(action,args={})=>(await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'?{uploadId}:{}),...args})).result;
+  const control=async(action,args={})=>(await call('datasets.upload.'+action,{machine,...(uploadId&&!['begin','routes'].includes(action)?{uploadId}:{}),...args})).result;
   const request=async(action,args={})=>{
     if(direct&&(action==='manifest'||action==='chunk'||action==='status'&&args.path!==undefined))return direct.request(action,args);
     if(args.bytes!==undefined){const {bytes,...other}=args;return control(action,{...other,data:bytes.toString('base64')});}
@@ -66,10 +67,16 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
   try{
     if(!['READY','PUBLISHING'].includes(state.state)){
       const advertised=state.uploadTransport;
+      if(via!=='relay'&&advertised?.directAvailable===true&&advertised.protocol!=='dataset-upload-v1')
+        fail('Direct upload protocol is unconfirmed; no automatic VPS fallback was attempted');
+      if(via!=='relay'&&advertised?.routeSelection===true&&advertised.directAvailable!==true&&!['not-configured','disabled'].includes(advertised.reason))
+        fail('Configured upload listener is unavailable; no automatic VPS fallback was attempted');
       if(via!=='relay'&&advertised?.protocol==='dataset-upload-v1'&&advertised.directAvailable===true){
-        const first=await control('direct-ticket');
-        if(first?.available===true){let initial=true;direct=await directFactory(async()=>{if(initial){initial=false;return first;}return control('direct-ticket');},{uploadId});route='campus-direct';}
-        else if(first?.available!==false)fail('Direct upload authorization is unconfirmed; no relay fallback was attempted');
+        const selected=advertised.routeSelection===true?await selectUploadRoute(await control('routes'),machine,probeRoute):undefined;
+        const ticketArgs=selected?{routeId:selected.id}:{};
+        const first=await control('direct-ticket',ticketArgs);
+        if(first?.available===true){let initial=true;direct=await directFactory(async()=>{if(initial){initial=false;return first;}return control('direct-ticket',ticketArgs);},{uploadId,route:selected});route=selected?.kind||'campus-direct';}
+        else fail('Direct upload authorization is unconfirmed; no relay fallback was attempted');
       }
       if(!direct){
         if(via==='direct')fail('Direct upload is unavailable on this server; use a verified campus connection or cloud import');

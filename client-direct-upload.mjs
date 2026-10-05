@@ -1,6 +1,7 @@
 import {Agent,request as httpsRequest} from 'node:https';
 import {connect as tlsConnect} from 'node:tls';
 import {createHash,timingSafeEqual} from 'node:crypto';
+import {assertUploadRouteGrant} from './dist/upload-routes.js';
 
 export const RELAY_LIMIT_BYTES=256*1024*1024;
 const PROTOCOL='dataset-upload-v1',CHUNK=1024*1024,MAX_FILE_CHUNK=16*1024*1024,RESPONSE_LIMIT=2*1024*1024;
@@ -76,16 +77,35 @@ export function directUploadRequest(grant,agent,{uploadId,action,path,offset,byt
   });
 }
 
-export async function createDirectDatasetTransport(requestGrant,{uploadId,agentFactory=pinnedUploadAgent,send=directUploadRequest,now=()=>Date.now()/1000}={}){
-  let grant=validateDirectGrant(await requestGrant(),now()),agent=agentFactory(grant.certificateSha256),closed=false;
+export async function probeDirectUploadRoute(route,{request=httpsRequest,timeoutMs=2500,agentFactory=pinnedUploadAgent}={}){
+  const agent=agentFactory(route.certificateSha256,{timeoutMs});
+  try{return await new Promise((resolve,reject)=>{
+    let req,timer,done=false;
+    const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);if(error){req?.destroy();reject(error);}else resolve(value);};
+    try{
+      req=request(new URL('/capabilities',route.endpoint),{agent,method:'GET',headers:{Accept:'application/json'}},res=>{
+        let size=0;const parts=[];
+        res.on('data',part=>{size+=part.length;if(size>4096){res.destroy();finish(Error('Upload probe exceeds response limit'));}else parts.push(part);});
+        res.on('aborted',()=>finish(Error('Upload probe interrupted')));res.on('error',()=>finish(Error('Upload probe failed')));
+        res.on('end',()=>{if(res.statusCode!==200||!/^application\/json(?:;|$)/i.test(res.headers['content-type']||''))return finish(Error('Upload probe rejected'));
+          try{finish(null,JSON.parse(Buffer.concat(parts)));}catch{finish(Error('Invalid upload probe'));}});
+      });
+      req.on('error',()=>finish(Error('Upload probe connection failed')));
+      timer=setTimeout(()=>finish(Error('Upload probe timed out')),timeoutMs);timer.unref?.();req.end();
+    }catch{finish(Error('Upload probe could not start'));}
+  });}finally{agent.destroy();}
+}
+
+export async function createDirectDatasetTransport(requestGrant,{uploadId,route,agentFactory=pinnedUploadAgent,send=directUploadRequest,now=()=>Date.now()/1000}={}){
+  let grant=assertUploadRouteGrant(validateDirectGrant(await requestGrant(),now()),route),agent=agentFactory(grant.certificateSha256),closed=false;
   const endpoint=grant.endpoint,pin=grant.certificateSha256;
   return {
-    kind:'campus-direct',
+    kind:route?.kind||'campus-direct',
     get chunkBytes(){return grant.maxChunkBytes??CHUNK;},
     async request(action,args={}){
       if(closed)denied('Direct upload transport is closed');
       if(grant.expiresAt<=now()+10){
-        const next=validateDirectGrant(await requestGrant(),now());
+        const next=assertUploadRouteGrant(validateDirectGrant(await requestGrant(),now()),route);
         if(next.endpoint!==endpoint||next.certificateSha256!==pin)denied('Direct upload destination changed; repeat the command to re-authorize');
         grant=next;
       }

@@ -2,6 +2,7 @@
 // direct path. Callers must supply a route reported by the transport itself.
 const routes = {
   'campus-direct': {label:'校内直传', path:['本机','实验室入口','目标服务器'], note:'文件不经过 VPS。'},
+  'tail-upload': {label:'Tail 备用上传', path:['本机','专用 Tail 入口','目标服务器'], note:'只改变本次上传入口，不改变默认路由。Tail 中继可能影响速度。'},
   'vps-relay': {label:'VPS 中转', path:['本机','平台中转','目标服务器'], note:'传输速度受平台中转带宽限制。'},
   'cloud-pull': {label:'服务器直下', path:['下载源','目标服务器'], note:'文件由目标服务器直接下载。'},
   'node-lan': {label:'实验室内网', path:['源服务器','目标服务器'], note:'文件在服务器之间传输。'},

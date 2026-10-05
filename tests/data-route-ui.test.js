@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {routePresentation,transferBytes,uploadPhase,LARGE_RELAY_BYTES} from '../dist/data-route.js';
 import {transferCard,transferGroups} from '../dist/transfers-ui.js';
+import {uploadRouteHTML} from '../dist/datasets-ui.js';
 
 test('routes require an explicit known transport, never infer a campus path',()=>{
   for(const value of [undefined,null,{},'10.11.1.2',{url:'https://192.168.1.2'},'copy'])assert.equal(routePresentation(value).kind,'unknown');
@@ -10,6 +11,10 @@ test('routes require an explicit known transport, never infer a campus path',()=
   assert.equal(routePresentation('vps-relay').label,'VPS 中转');
   assert.equal(routePresentation({kind:'cloud-pull'}).label,'服务器直下');
   assert.equal(routePresentation('node-lan').label,'实验室内网');
+  assert.equal(routePresentation('tail-upload').label,'Tail 备用上传');
+  assert.match(routePresentation('tail-upload').note,/中继可能影响速度/);
+  const tail=uploadRouteHTML({kind:'tail-upload'},'node-a');
+  assert.match(tail,/Tail 备用上传/);assert.doesNotMatch(tail,/经门户中转|不经.*VPS|千兆/);
   const first=routePresentation('campus-direct');first.path.push('wrong');assert.equal(routePresentation('campus-direct').path.length,3);
 });
 test('transfer sizes distinguish unknown, zero and actual binary units',()=>{

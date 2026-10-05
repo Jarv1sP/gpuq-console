@@ -21,6 +21,8 @@ class BridgeDirectOperations(unittest.TestCase):
         handler = self.worker['Handler'].__new__(self.worker['Handler'])
         handler.request = SimpleNamespace(settimeout=lambda _value: None)
         args = {'userId': 'demo-user-1', 'hostAdmin': False, 'uploadId': '12345678-1234-4234-8234-123456789012'}
+        if operation == 'datasets.upload.routes':
+            args.pop('uploadId')
         handler.rfile = io.BytesIO(json.dumps({'machine': machine, 'operation': operation, 'args': args}).encode()+b'\n')
         handler.wfile = io.BytesIO()
         with (
@@ -32,7 +34,7 @@ class BridgeDirectOperations(unittest.TestCase):
         return json.loads(handler.wfile.getvalue()), run, args
 
     def test_exact_direct_control_operations_cross_real_bridge_without_shell_or_identity_changes(self):
-        for operation in ('datasets.upload.direct-ticket', 'datasets.upload.direct-revoke'):
+        for operation in ('datasets.upload.routes', 'datasets.upload.direct-ticket', 'datasets.upload.direct-revoke'):
             result, run, args = self.request(operation)
             self.assertTrue(result['ok'])
             command = run.call_args.args[0]

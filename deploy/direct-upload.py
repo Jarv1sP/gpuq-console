@@ -35,6 +35,7 @@ MAX_HEADER_FIELDS = 64
 HEADER_TIMEOUT = 5
 HANDSHAKE_TIMEOUT = 5
 STALE_ANONYMOUS_SECONDS = 2
+ROUTE_ID = re.compile(r'[a-z][a-z0-9-]{0,31}\Z')
 
 
 class HeaderBudget:
@@ -204,7 +205,7 @@ class DirectUploads:
         config = whole.get('directUpload')
         required = {'enabled', 'bind', 'port', 'endpoint', 'certificate', 'privateKey'}
         if (not isinstance(config, dict) or config.get('enabled') is not True
-                or not required <= set(config) or set(config)-required-{'allowedOrigins'}):
+                or not required <= set(config) or set(config)-required-{'allowedOrigins', 'alternates'}):
             raise ValueError('Direct upload is not explicitly enabled')
         origins = config.get('allowedOrigins', [])
         if not isinstance(origins, list) or len(origins) > 8:
@@ -242,6 +243,23 @@ class DirectUploads:
         host = '['+hostname+']' if ':' in hostname else hostname
         origin = 'https://'+host+((':'+str(endpoint.port)) if endpoint.port not in (None, 443) else '')
         public = dict(config, endpoint=origin, machine=machine, certificateSha256=pin)
+        alternates = config.get('alternates', [])
+        if not isinstance(alternates, list) or len(alternates) > 3:
+            raise ValueError('At most three fixed alternate upload routes are allowed')
+        ids, endpoints, normalized = {'primary'}, {origin}, []
+        for route in alternates:
+            if (not isinstance(route, dict) or set(route) != {'id', 'endpoint', 'kind'}
+                    or not isinstance(route['id'], str) or not ROUTE_ID.fullmatch(route['id'])
+                    or route['id'] in ids or route['kind'] not in ('campus-direct', 'tail-upload')):
+                raise ValueError('Invalid fixed upload route')
+            endpoint_origin = browser_origin(route['endpoint'])
+            if endpoint_origin in endpoints:
+                raise ValueError('Duplicate fixed upload endpoint')
+            ids.add(route['id']); endpoints.add(endpoint_origin)
+            normalized.append(dict(route, endpoint=endpoint_origin))
+        # Do not change the revision of existing single-endpoint configs.
+        if 'alternates' in config:
+            public['alternates'] = normalized
         if 'allowedOrigins' in config:
             public['allowedOrigins'] = allowed
         public['revision'] = hashlib.sha256(encoded(public).encode()).hexdigest()
@@ -263,7 +281,8 @@ class DirectUploads:
             response = connection.getresponse()
             body = response.read(4097)
             if (response.status != 200 or len(body) > 4096
-                    or json.loads(body) != {'protocol': PROTOCOL, 'listenerReady': True, 'revision': config['revision']}):
+                    or json.loads(body) != {'protocol': PROTOCOL, 'listenerReady': True,
+                                           'revision': config['revision'], 'machine': config['machine']}):
                 raise ValueError('Direct listener is unavailable')
         finally:
             connection.close()
@@ -277,10 +296,20 @@ class DirectUploads:
             self.probe(config)
         except Exception:
             return {'available': False, 'reason': 'listener-unavailable'}
-        return {'available': True, 'reason': 'ready'}
+        return {'available': True, 'reason': 'ready', 'protocol': PROTOCOL,
+                'machine': config['machine'], 'revision': config['revision'],
+                'certificateSha256': config['certificateSha256'], 'routes': self.routes(config)}
 
-    def issue(self, user, upload):
+    @staticmethod
+    def routes(config):
+        return [{'id': 'primary', 'kind': 'campus-direct', 'endpoint': config['endpoint']},
+                *config.get('alternates', [])]
+
+    def issue(self, user, upload, route_id='primary'):
         config = self.configuration()
+        route = next((row for row in self.routes(config) if row['id'] == route_id), None)
+        if route is None:
+            raise ValueError('Upload route is not approved by this node')
         self.probe(config)
         with self.u.direct_guard(user, upload):
             session = self.u.load(user, upload)
@@ -289,12 +318,15 @@ class DirectUploads:
             claims = {'schema': 1, 'machine': config['machine'], 'userId': user,
                       'uploadId': upload, 'expiresAt': int(time.time())+TTL_SECONDS,
                       'operations': OPERATIONS, 'revision': config['revision'],
+                      'routeId': route['id'],
                       'maxChunkBytes': MAX_FILE_CHUNK_BYTES,
                       **{k: session[k] for k in ('manifestSha256', 'manifestBytes', 'totalBytes', 'entries')}}
             token = encoded(claims)+'.'+secrets.token_urlsafe(32)
             self.u.d._write_json(self.u.folder(user, upload)/'direct-grant.json', {
                 'claims': claims, 'sha256': hashlib.sha256(token.encode()).hexdigest()})
-            return {'available': True, 'protocol': PROTOCOL, 'endpoint': config['endpoint'],
+            return {'available': True, 'protocol': PROTOCOL, 'endpoint': route['endpoint'],
+                    'routeId': route['id'], 'kind': route['kind'], 'machine': config['machine'],
+                    'revision': config['revision'],
                     'certificateSha256': config['certificateSha256'], 'ticket': token,
                     'expiresAt': claims['expiresAt'], 'chunkBytes': self.u.d.CHUNK_BYTES,
                     'maxChunkBytes': claims['maxChunkBytes']}
@@ -319,6 +351,8 @@ class DirectUploads:
     def authorize(self, token, claims, upload, action):
         config = self.configuration()
         if claims.get('uploadId') != upload or claims.get('machine') != config['machine'] or claims.get('revision') != config['revision']:
+            raise GrantError()
+        if not any(row['id'] == claims.get('routeId', 'primary') for row in self.routes(config)):
             raise GrantError()
         if type(claims.get('expiresAt')) is not int or claims['expiresAt'] <= int(time.time()):
             raise GrantError('grant-expired')
@@ -362,7 +396,8 @@ class DirectUploads:
             if action not in ('manifest', 'chunk') or set(args) != ({'offset'} if action == 'manifest' else {'offset', 'path'}):
                 raise ValueError('Invalid direct upload fields')
             extra = {'direct_chunk_limit': claims.get('maxChunkBytes', self.u.d.CHUNK_BYTES)} if action == 'chunk' else {}
-            return getattr(self.u, action+'_bytes')(user, {'uploadId': upload, **args}, args['offset'], data, transport='campus-direct', **extra)
+            route = next(row for row in self.routes(self.configuration()) if row['id'] == claims.get('routeId', 'primary'))
+            return getattr(self.u, action+'_bytes')(user, {'uploadId': upload, **args}, args['offset'], data, transport=route['kind'], **extra)
 
 
 def create_server(node, uploads):
@@ -532,7 +567,8 @@ def create_server(node, uploads):
                     node.dataset_mount_check(node.CONFIG['datasets'])
                     if current['revision'] != config['revision']:
                         raise ValueError('Restart listener after configuration change')
-                    self.send_json(200, {'protocol': PROTOCOL, 'listenerReady': True, 'revision': config['revision']})
+                    self.send_json(200, {'protocol': PROTOCOL, 'listenerReady': True,
+                                         'revision': config['revision'], 'machine': config['machine']})
                     return
                 parsed = urlsplit(self.path)
                 route = re.fullmatch(r'/v1/uploads/([a-f0-9-]{36})/(manifest|chunk|status)', parsed.path)

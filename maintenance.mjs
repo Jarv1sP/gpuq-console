@@ -16,7 +16,7 @@ const READ_OR_STOP=new Set([
   'files.list','files.get','projects.list','projects.quota','projects.status','projects.verify','host.status',
   'datasets.list','datasets.catalog','datasets.capacity','datasets.status',
   'datasets.workspace.list','datasets.workspace.get','datasets.workspace.status','datasets.upload.status','datasets.upload.list',
-  'datasets.upload.pause','datasets.upload.direct-revoke','datasets.import.list','datasets.import.status','datasets.import.cancel',
+  'datasets.upload.routes','datasets.upload.pause','datasets.upload.direct-revoke','datasets.import.list','datasets.import.status','datasets.import.cancel',
   'datasets.storage.status','datasets.storage.plan','terminal.close','terminal.detach',
   'transfers.list','transfers.status','transfers.capabilities','transfers.cancel','transfers.progress',
   'transfers.confirm-source-release','transfers.release-source','storage.lease.cancel','storage.download.finish',

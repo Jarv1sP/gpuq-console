@@ -5,6 +5,7 @@ export const STARBASE_ASSETS = Object.fromEntries([
   'shell-ui.js', 'control-ui.js', 'attention-state.js', 'workbench-ui.js', 'motion-ui.js', 'copy-help-ui.js', 'auth-ui.js', 'navigation.js',
   'favicon.svg', 'favicon.ico', 'mask-icon.svg',
   'dataset-remove-ui.js', 'dataset-remove.css',
+  'upload-routes.js',
   'maintenance-state.js', 'maintenance-experience.js', 'maintenance-experience.css',
   'vendor/fonts/Archivo-Variable.woff2',
   'vendor/fonts/Geist-Variable.woff2',

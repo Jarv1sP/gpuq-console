@@ -393,6 +393,7 @@ class DatasetUploads:
         return {**self.result(session), 'uploadTransport': {
             'protocol': 'dataset-upload-v1', 'directAvailable': transport['available'],
             'reason': transport['reason'], 'relayLimitBytes': RELAY_LIMIT_BYTES,
+            'routeSelection': True,
             'relayAllowed': session.get('relayAllowed') is True}}
 
     def direct(self):
@@ -501,7 +502,7 @@ class DatasetUploads:
     def confirm_route(self, session, transport):
         # Only a trusted ingress selects this value, after accepted data I/O.
         # Persist once per route change, not on every chunk or status request.
-        if transport not in ('campus-direct', 'lan-peer', 'vps-relay'):
+        if transport not in ('campus-direct', 'tail-upload', 'lan-peer', 'vps-relay'):
             raise ValueError('Invalid trusted upload transport')
         if session.get('lastConfirmedRoute') != transport:
             session['lastConfirmedRoute'] = transport
@@ -593,7 +594,7 @@ class DatasetUploads:
         # Keep the journal, data and accounting durability barriers unchanged.
         limit = self.d.CHUNK_BYTES
         if direct_chunk_limit is not None:
-            if transport != 'campus-direct' or type(direct_chunk_limit) is not int or direct_chunk_limit not in (self.d.CHUNK_BYTES, DIRECT_FILE_CHUNK_BYTES):
+            if transport not in ('campus-direct', 'tail-upload') or type(direct_chunk_limit) is not int or direct_chunk_limit not in (self.d.CHUNK_BYTES, DIRECT_FILE_CHUNK_BYTES):
                 raise ValueError('Invalid authenticated direct chunk limit')
             limit = direct_chunk_limit
         self.raw_chunk(offset, data, limit=limit)
@@ -930,15 +931,20 @@ class DatasetUploads:
                   'manifest': {'uploadId', 'offset', 'data'}, 'seal': {'uploadId'},
                   'status': {'uploadId', 'path'}, 'chunk': {'uploadId', 'path', 'offset', 'data'},
                   'commit': {'uploadId'}, 'discard': {'uploadId'}, 'pause': {'uploadId'},
-                  'direct-ticket': {'uploadId'}, 'direct-revoke': {'uploadId'}}
+                  'routes': set(), 'direct-ticket': {'uploadId', 'routeId'}, 'direct-revoke': {'uploadId'}}
         action = operation.removeprefix('datasets.upload.')
         if (action not in fields or not isinstance(args, dict) or set(args)-fields[action]-{'userId', 'hostAdmin'}
                 or ('hostAdmin' in args and args['hostAdmin'] is not False)):
             raise ValueError('Invalid personal upload fields')
-        required = fields[action]-({'path'} if action == 'status' else {'allowRelay'} if action == 'begin' else set())
+        required = fields[action]-({'path'} if action == 'status' else {'allowRelay'} if action == 'begin' else {'routeId'} if action == 'direct-ticket' else set())
         if not required <= set(args) or 'userId' not in args:
             raise ValueError('Missing personal upload fields')
         user = args['userId']
+        if action == 'routes':
+            # Metadata only: no workspace, upload, ticket or lockfile creation.
+            if not isinstance(user, str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]{1,18})', user):
+                raise ValueError('Invalid personal upload identity')
+            return self.direct_transport()
         self.actor(user)
         if 'allowRelay' in args and type(args['allowRelay']) is not bool:
             raise ValueError('allowRelay must be an explicit boolean')
@@ -948,7 +954,7 @@ class DatasetUploads:
             if not transport['available']:
                 return {'available': False, 'protocol': 'dataset-upload-v1',
                         'reason': transport['reason'], 'relayLimitBytes': RELAY_LIMIT_BYTES}
-            return self.direct().issue(user, args['uploadId'])
+            return self.direct().issue(user, args['uploadId'], args.get('routeId', 'primary'))
         if action == 'direct-revoke':
             self.load(user, args['uploadId'])
             self.revoke_direct(user, args['uploadId'], paused=True)

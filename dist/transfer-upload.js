@@ -15,7 +15,7 @@ export function transferUploadCall(call,onHandle=()=>{}){
     }
     // Portal status remains readable after transfers.io marks the task finished.
     // It also lets a remembered upload be checked before repeating begin.
-    if(action==='status')return call(operation,args);
+    if(action==='status'||action==='routes')return call(operation,args);
     if(!id)throw Error('传输尚未初始化。');
     const {machine,uploadId,...request}=args;
     return call('transfers.io',{id,action,...request});

@@ -173,10 +173,10 @@ test('upload relay consent is explicit, type checked, owner scoped and unavailab
 });
 test('direct upload tickets are fresh on resume, returned only to owner and never persisted in transfer progress',async t=>{
   const f=await fixture(t),bridge=f.service.bridge,transport={protocol:'dataset-upload-v1',directAvailable:true,reason:'ready',relayLimitBytes:268435456,relayAllowed:false};
-  let begins=0;
+  let begins=0;const ticketRoutes=[];
   f.service.bridge=async(machine,operation,args)=>{
     if(operation==='datasets.upload.begin'){begins++;return {...await bridge(machine,operation,args),uploadTransport:transport};}
-    if(operation==='datasets.upload.direct-ticket')return {available:true,protocol:'dataset-upload-v1',endpoint:'https://example.test:18444',certificateSha256:hash,ticket:'PRIVATE-TICKET',expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:1048576};
+    if(operation==='datasets.upload.direct-ticket'){ticketRoutes.push(args.routeId);return {available:true,protocol:'dataset-upload-v1',endpoint:'https://example.test:18444',certificateSha256:hash,ticket:'PRIVATE-TICKET',expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:1048576};}
     if(operation==='datasets.upload.direct-revoke')return {uploadId:args.uploadId,revoked:true};
     return bridge(machine,operation,args);
   };
@@ -187,6 +187,9 @@ test('direct upload tickets are fresh on resume, returned only to owner and neve
   const resumed=await f.call('transfers.create',args);
   assert.equal(resumed.id,row.id);assert.equal(begins,2);assert.deepEqual(resumed.result.uploadTransport,transport);
   const ticket=await f.call('transfers.io',{id:row.id,action:'direct-ticket'});assert.equal(ticket.ticket,'PRIVATE-TICKET');
+  await f.call('transfers.io',{id:row.id,action:'direct-ticket',routeId:'tail'});
+  assert.deepEqual(ticketRoutes,[undefined,'tail']);
+  await assert.rejects(f.call('transfers.io',{id:row.id,action:'status',routeId:'tail'}));
   assert.equal(JSON.stringify(f.service.db.prepare('SELECT * FROM transfers').all()).includes('PRIVATE-TICKET'),false);
   assert.equal(JSON.stringify((await f.call('transfers.list',{}))).includes('PRIVATE-TICKET'),false);
   await assert.rejects(f.service.invoke(f.admin.token,'transfers.io',{id:row.id,action:'direct-ticket'}),e=>e.status===404);

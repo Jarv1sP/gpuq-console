@@ -7,8 +7,8 @@ import {uploadDatasetSnapshot} from '../client-data-upload.mjs';
 import {createDirectDatasetTransport,directUploadRequest,pinnedUploadAgent} from '../client-direct-upload.mjs';
 
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
-async function fixture(t){
-  const child=spawn(process.env.PYTHON||'python3',[new URL('./direct-upload-fixture.py',import.meta.url).pathname],{stdio:['pipe','pipe','pipe']});
+async function fixture(t,alternate=false){
+  const child=spawn(process.env.PYTHON||'python3',[new URL('./direct-upload-fixture.py',import.meta.url).pathname],{stdio:['pipe','pipe','pipe'],env:{...process.env,...(alternate?{GPUQ_TEST_UPLOAD_ALTERNATE:'1'}:{})}});
   const pending=new Map();let sequence=0,stderr='',readyResolve,readyReject;
   const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});
   const lines=createInterface({input:child.stdout});
@@ -42,6 +42,14 @@ test('real Node pinned client uploads raw bytes to real Python HTTPS endpoint, p
   assert.match(result.version,/^[a-f0-9]{64}$/);assert.ok(progress.some(x=>x.state==='ROUTE'&&x.value.kind==='campus-direct'));
   assert.equal(calls.includes('manifest'),false);assert.equal(calls.includes('chunk'),false);
   assert.ok(calls.includes('direct-ticket'));assert.ok(calls.includes('seal'));assert.ok(calls.includes('commit'));
+});
+test('real anonymous probe selects fixed alternate before issuing a ticket; no payload crosses control bridge',{timeout:20000},async t=>{
+  const f=await fixture(t,true),calls=[],scan=snapshot({sample:Buffer.alloc(1048593,42)});
+  const result=await uploadDatasetSnapshot(async(op,args)=>{calls.push({op,args});return {result:await f.control(op.slice('datasets.upload.'.length),args)};},options(scan));
+  assert.equal(result.state,'READY');assert.equal(result.lastConfirmedRoute,'tail-upload');assert.equal(result.route.kind,'tail-upload');
+  const actions=calls.map(x=>x.op.split('.').at(-1));assert.ok(actions.indexOf('routes')<actions.indexOf('direct-ticket'));
+  assert.equal(calls.find(x=>x.op.endsWith('.direct-ticket')).args.routeId,'tail');
+  assert.equal(calls.some(x=>x.args.bytes!==undefined||x.args.data!==undefined),false);
 });
 
 test('lost real raw response never falls back through portal; same upload resumes confirmed offset',{timeout:20000},async t=>{

@@ -67,6 +67,9 @@ direct = direct_module.DirectUploads(node, uploads)
 uploads.direct = lambda: direct
 server = direct_module.create_server(node, uploads)
 config.update(port=server.server_address[1], endpoint=f'https://127.0.0.1:{server.server_address[1]}')
+if os.environ.get('GPUQ_TEST_UPLOAD_ALTERNATE') == '1':
+    config['alternates'] = [{'id': 'tail', 'kind': 'tail-upload', 'endpoint': config['endpoint']}]
+    config['endpoint'] = 'https://127.0.0.1:1'  # Unreachable primary; isolated loopback only.
 fault = {'dropNextChunkReceipt': False}
 original_send = server.RequestHandlerClass.send_json
 

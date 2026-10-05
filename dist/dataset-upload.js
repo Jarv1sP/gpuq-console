@@ -1,4 +1,5 @@
 // Incremental SHA256 and the bounded HTTPS dataset upload protocol. No remote dependencies.
+import {selectUploadRoute,assertUploadRouteGrant} from './upload-routes.js';
 export const CHUNK_BYTES=1024*1024,MAX_MANIFEST_BYTES=64*1024*1024,MAX_ENTRIES=500000,LARGE_RELAY_BYTES=256*1024**2;
 const K=new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
 const rr=(n,b)=>(n>>>b)|(n<<(32-b));
@@ -56,14 +57,28 @@ export function validateBrowserUploadGrant(value,now=Date.now()/1000){
     throw uploadError('直传授权未确认。','DIRECT');
   return value;
 }
-export async function browserDatasetTransport({control,uploadId,signal,fetch:send=globalThis.fetch,now=()=>Date.now()/1000,grant:initial}){
-  let grant=validateBrowserUploadGrant(initial,now());
+export async function probeBrowserUploadRoute(route,{fetch:send=globalThis.fetch,signal,timeoutMs=2500}={}){
+  alive(signal);
+  const timeout=new AbortController(),stop=()=>timeout.abort();signal?.addEventListener('abort',stop,{once:true});
+  const timer=setTimeout(stop,timeoutMs);
+  try{
+    const response=await send(new URL('/capabilities',route.endpoint).href,{method:'GET',credentials:'omit',mode:'cors',redirect:'error',cache:'no-store',signal:timeout.signal,headers:{Accept:'application/json'}});
+    if(response.status!==200||!/^application\/json(?:;|$)/i.test(response.headers.get('content-type')||''))throw Error('Upload probe rejected');
+    const reader=response.body.getReader(),parts=[];let size=0;
+    try{while(true){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>4096)throw Error('Upload probe exceeds response limit');parts.push(value);}}
+    finally{await reader.cancel();reader.releaseLock();}
+    alive(signal);const bytes=new Uint8Array(size);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.length;}
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }finally{clearTimeout(timer);signal?.removeEventListener('abort',stop);}
+}
+export async function browserDatasetTransport({control,uploadId,signal,route,fetch:send=globalThis.fetch,now=()=>Date.now()/1000,grant:initial}){
+  let grant=assertUploadRouteGrant(validateBrowserUploadGrant(initial,now()),route);
   const endpoint=grant.endpoint,certificate=grant.certificateSha256;
   async function renew(){
     alive(signal);
     const status=await control('status');alive(signal);
     if(!status||status.uploadId!==uploadId||['DISCARDING','DISCARDED','READY'].includes(status.state))throw uploadError('上传状态已改变，请重新查询。','DIRECT');
-    const next=validateBrowserUploadGrant(await control('direct-ticket'),now());alive(signal);
+    const next=assertUploadRouteGrant(validateBrowserUploadGrant(await control('direct-ticket',route?{routeId:route.id}:{}),now()),route);alive(signal);
     if(next.endpoint!==endpoint||next.certificateSha256!==certificate)throw uploadError('直传入口已改变，请重新确认。','DIRECT');
     grant=next;
   }
@@ -123,7 +138,7 @@ export async function uploadBrowserDataset({call,userId,machine,name,scan,signal
   if(!['auto','direct','relay'].includes(via))throw Error('请选择有效的上传通道。');
   if(via==='relay'&&scan.totalBytes>LARGE_RELAY_BYTES&&allowRelay!==true)throw uploadError('超过 256 MiB，请先确认经门户中转。','RELAY_CONSENT',{canRelay:true});
   let uploadId,state,direct,route,transport;
-  const control=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'?{uploadId}:{}),...args});alive(signal);return result;};
+  const control=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&!['begin','routes'].includes(action)?{uploadId}:{}),...args});alive(signal);return result;};
   const report=(current,extra={})=>{if(!current||typeof current.state!=='string')throw uploadError('上传状态未确认。');state=current;onProgress({...current,...(current.state==='READY'?{state:'PUBLISHING',confirmationPending:true}:{}),...extra});};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){alive(signal);await pause(pollMs);report(await control('status'));}if(state.state==='FAILED')throw uploadError(state.error||'服务端校验失败。','FAILED');if(state.state==='DISCARDED')throw uploadError('这次上传已取消。','DISCARDED');};
   const ready=async()=>{
@@ -160,11 +175,14 @@ export async function uploadBrowserDataset({call,userId,machine,name,scan,signal
     keyStore?.setHandle?.(baseKey,handle);
     transport=state.uploadTransport;
     if(!['READY','PUBLISHING'].includes(state.state)){
+      if(via!=='relay'&&transport?.routeSelection===true&&transport.directAvailable!==true&&!['not-configured','disabled'].includes(transport.reason))
+        throw uploadError('已配置的上传服务不可用，未自动改走 VPS。','DIRECT');
       if(via!=='relay'&&transport?.directAvailable===true){
         if(transport.protocol!==PROTOCOL)throw uploadError('直传协议未确认。','DIRECT');
-        const grant=await control('direct-ticket');
-        if(grant?.available===true){direct=await browserDatasetTransport({control,uploadId,signal,grant,fetch,now});route={kind:'campus-direct',machine};}
-        else if(grant?.available!==false)throw uploadError('直传授权未确认。','DIRECT');
+        const selected=transport.routeSelection===true?await selectUploadRoute(await control('routes'),machine,candidate=>probeBrowserUploadRoute(candidate,{fetch,signal}),{signal}):undefined;
+        const grant=await control('direct-ticket',selected?{routeId:selected.id}:{});
+        if(grant?.available===true){direct=await browserDatasetTransport({control,uploadId,signal,grant,route:selected,fetch,now});route={kind:selected?.kind||'campus-direct',machine};}
+        else throw uploadError('直传授权未确认，未自动改走 VPS。','DIRECT');
       }else if(via!=='relay'&&transport&&transport.directAvailable!==false)throw uploadError('上传通道未确认。','DIRECT');
       if(!direct){
         if(via==='direct')throw uploadError('这台服务器未提供直传入口。','DIRECT_UNAVAILABLE');
