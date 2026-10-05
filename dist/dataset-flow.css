@@ -5,9 +5,10 @@
 #page-datasets .copy-help-popup.ui-info-content :is(p,small){font:inherit;color:inherit;margin:0}
 #page-datasets .dataset-help-label{font-size:14px;font-weight:500}
 #page-datasets :is(input:not([type=file]):not([type=checkbox]),select){height:40px;min-height:40px;line-height:20px;padding-block:8px}
-#page-datasets .data-workspace-card .button,#page-datasets #cloud-files .file-actions .button{min-height:40px}
+#page-datasets .data-workspace-card .button,#page-datasets #cloud-files .file-actions .button{min-height:48px}
 #page-datasets .dataset-source-tabs button{min-height:48px;padding:0 10px;justify-content:center}
-#page-datasets .dataset-upload-actions .button,#page-datasets #dataset-directory-picker{min-height:40px}
+#page-datasets .dataset-upload-actions .button,#page-datasets #dataset-directory-picker{min-height:48px}
+#page-datasets .dataset-route-cell{min-height:40px}
 #page-datasets :is(.dataset-short-version,.dataset-volume small,.dataset-copy-route>span,.dataset-book>small){font-size:11px}
 #page-datasets .datasets-ledger-strip{grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:clamp(20px,3vw,40px)}
 #page-datasets .dataset-book{min-width:0}
@@ -142,6 +143,7 @@
   #page-datasets :is(input:not([type=file]):not([type=checkbox]),select){height:44px;min-height:44px;line-height:24px}
   #page-datasets .data-workspace-card .button,#page-datasets #cloud-files .file-actions .button{min-height:44px}
   #page-datasets .dataset-upload-actions .button,#page-datasets #dataset-directory-picker{min-height:44px}
+  #page-datasets .dataset-route-cell{min-height:44px}
   #page-datasets .dataset-cache-legend{gap:10px 16px}
   #page-datasets .dataset-library{padding:16px 0}
   #page-datasets .dataset-frame-corners{display:none}

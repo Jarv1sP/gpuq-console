@@ -353,7 +353,9 @@ export function datasetsUI(store,toast){
         if(footnote){section.querySelector('#data-workspace-upload-form>.file-actions').append(help);continue;}
         const heading=help.parentElement.querySelector(':scope>header h3,:scope>h4');if(heading){heading.classList.add('dataset-help-heading');heading.append(help);}
       }
-      const notes=section.querySelector('.dataset-upload-notes');if(notes?.firstElementChild){section.querySelector('.dataset-upload-actions').append(notes.firstElementChild);notes.remove();}
+      // Keep the existing status-footer spacing while placing its explanation
+      // beside the upload actions in the shared help popover.
+      const notes=section.querySelector('.dataset-upload-notes');if(notes?.firstElementChild)section.querySelector('.dataset-upload-actions').append(notes.firstElementChild);
       const nextHelp=section.querySelector('#dataset-panel-link>.ui-info');if(nextHelp){const button=section.querySelector('#dataset-organize-next'),row=document.createElement('div');row.className='dataset-next-step';button.before(row);row.append(button,nextHelp);}
     }
     if(ids!==machineIds){
