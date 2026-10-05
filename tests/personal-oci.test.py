@@ -789,7 +789,7 @@ class OCITests(unittest.TestCase):
 
     def test_portable_save_never_commits_live_container_and_checks_free_space(self):
         with tempfile.TemporaryDirectory() as directory:
-            m=self.manager();m.root=Path(directory).resolve()
+            m=self.manager();m.root=Path(directory).resolve();m.folder=m.root/'oci';m.folder.mkdir(mode=0o700)
             owner=m.root/'projects-v2'/m.owner;owner.mkdir(parents=True,mode=0o700);archive=owner/'image.tar'
             base={'schema':1,'image':'sha256:'+SHA,'os':'linux','architecture':'amd64','diffIds':['sha256:'+'b'*64],'unpackedBytes':456}
             m.portable_image=Mock(return_value=base)
@@ -799,7 +799,10 @@ class OCITests(unittest.TestCase):
                 result=m.export_image('vision',{},archive)
                 self.assertEqual(result['archiveSha256'],hashlib.sha256(b'fixed image').hexdigest())
                 self.assertGreater(reserve.call_args_list[0].args[2],456)
-                self.assertEqual(m.run.call_args.args,('save','--format=oci-archive','--output',str(archive),'sha256:'+SHA))
+                policy=m.folder/('portable-export-'+SHA+'.json')
+                self.assertEqual(m.run.call_args.args,('save','--signature-policy',str(policy),'--format=oci-archive','--output',str(archive),'sha256:'+SHA))
+                self.assertEqual(json.loads(policy.read_bytes()),{'default':[{'type':'reject'}],
+                    'transports':{'containers-storage':{'[overlay@'+str(m.folder/'graph')+']@'+SHA:[{'type':'insecureAcceptAnything'}]}}})
                 self.assertEqual(reserve.call_count,2)
 
     def test_running_or_foreign_dev_container_is_not_committed(self):

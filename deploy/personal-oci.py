@@ -586,7 +586,16 @@ class PersonalOCI:
         # the engine returns; this is not a per-user filesystem hard quota.
         self.s.require_workspace_space(self.root, self.s.workspace_reserve_bytes(self.config),
                                        image['unpackedBytes']*11//10+16*1024**2)
-        self.run('save', '--format=oci-archive', '--output', str(archive), image['image'], timeout=1800)
+        # `save` verifies containers-storage too. Grant only this already
+        # owner-verified immutable image in this exact private graph, not the
+        # whole store and not any registry. Podman supports this hidden flag.
+        scope = '[overlay@'+str(self.folder/'graph')+']@'+image['image'].removeprefix('sha256:')
+        export_policy = {'default':[{'type':'reject'}], 'transports':{
+            'containers-storage':{scope:[{'type':'insecureAcceptAnything'}]}}}
+        name = 'portable-export-'+image['image'].removeprefix('sha256:')+'.json'
+        with self.registry_file(name, self.s.canonical(export_policy)):
+            self.run('save', '--signature-policy', str(self.folder/name),
+                     '--format=oci-archive', '--output', str(archive), image['image'], timeout=1800)
         self.s.require_workspace_space(self.root, self.s.workspace_reserve_bytes(self.config))
         with self.portable_archive(archive, 100*1024**3) as fd:
             size = os.fstat(fd).st_size
