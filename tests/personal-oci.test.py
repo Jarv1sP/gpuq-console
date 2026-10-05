@@ -521,6 +521,27 @@ class OCITests(unittest.TestCase):
         for args in (['--bind-fd','12','/etc'], ['--dev-bind','/dev/nvidia0','/dev/nvidia0'], ['--setenv','bad;command','x']):
             with self.assertRaises(ValueError): o.translate_control(args)
 
+    def test_real_training_control_combination_accepts_exact_ray_spilling_key(self):
+        owner=Mock();owner.run.return_value=json.dumps(['PATH=/usr/local/bin:/usr/bin'])
+        owner.execute.side_effect=lambda *a,**kw:o.translate_control(kw['control'])
+        training=SimpleNamespace(prepare=lambda *a:(['--dir','/run/gpuq','--bind-fd','99','/run/gpuq/control',
+                      '--setenv','GPUQ_ATTEMPT_ID','A123'],[]))
+        project={'code':Path('/private/code'),'meta':{'oci':{'image':'sha256:'+SHA}}}
+        with patch.object(o,'PersonalOCI',return_value=owner),patch.object(o,'module',return_value=training), \
+             patch.object(o.Path,'exists',return_value=False):
+            result=o.run_project(config(),{'id':'job','userId':USER,'project':'vision'},project,
+                                 False,[GPU],1,{'home':2,'output':3},[],runtimefd=4)
+        self.assertIn('RAY_object_spilling_directory=/tmp/gpuq-ray-spill',result)
+        self.assertIn('GPUQ_ATTEMPT_ID=A123',result)
+        self.assertIn('RAY_TMPDIR=/run/gpuq/runtime',result)
+        self.assertEqual(owner.execute.call_args.args[3],[GPU])
+
+    def test_mixed_case_environment_exception_is_exact_and_bounded(self):
+        for key,value in [('ray_object_spilling_directory','x'),('RAY_other','x'),('normalKey','x'),
+                          ('RAY_object_spilling_directory','x\x00y'),('X',123),
+                          ('X','x'*65537),('X'*257,'x')]:
+            with self.subTest(key=key),self.assertRaises(ValueError):o.translate_control(['--setenv',key,value])
+
     def test_release_cannot_select_another_owner_or_tag(self):
         m = self.manager(); m.run = Mock(return_value='sha256:'+SHA)
         receipt = {'schema': 1, 'owner': m.owner, 'project': 'vision', 'image': 'sha256:'+SHA}

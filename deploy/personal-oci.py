@@ -133,7 +133,9 @@ def translate_control(arguments, sources=None):
             i += 3
         elif op == '--setenv':
             key, value = arguments[i+1:i+3]
-            need(re.fullmatch('[A-Z][A-Z0-9_]*', key) and '\x00' not in value, 'Invalid scheduler environment')
+            need(isinstance(key, str) and isinstance(value, str) and len(key) <= 256 and len(value) <= 65536
+                 and (re.fullmatch('[A-Z][A-Z0-9_]*', key) or key == 'RAY_object_spilling_directory')
+                 and '\x00' not in value, 'Invalid scheduler environment')
             result += ['--env', key+'='+value]
             i += 3
         else:
