@@ -53,7 +53,9 @@ class PortableProjectTests(unittest.TestCase):
         def verify(slug,value):
             self.assertEqual(value,receipt); return IMAGE
         store._oci = lambda user: SimpleNamespace(verify_host=lambda:None,publish=lambda slug:dict(receipt),
-            verify_image=verify,export_image=export,import_image=lambda *args:None)
+            verify_image=verify,export_image=export,import_image=lambda *args:None,
+            portable_image=lambda slug,value:{'schema':1,'image':verify(slug,value),'os':'linux',
+                'architecture':'amd64','diffIds':['sha256:'+'b'*64],'unpackedBytes':24})
         return store
 
     def stage(self):

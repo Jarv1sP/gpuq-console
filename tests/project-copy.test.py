@@ -143,6 +143,16 @@ class ProjectCopyTests(unittest.TestCase):
         self.fixture.target.create(USER,PROJECT,environment_mode='isolated')
         with self.assertRaisesRegex(ValueError,'not OCI'):self.dst.probe({'userId':USER,'project':PROJECT})
 
+    def test_source_release_probe_needs_no_operation_id(self):
+        before=len(self.calls)
+        result=self.src.probe({'userId':USER,'project':PROJECT,'release':self.release})
+        self.assertTrue(result['releaseReady'])
+        self.assertEqual(result['release'],self.release)
+        self.assertEqual(len(self.calls),before)
+        self.assertEqual(list(self.src.root.glob('*.json')),[])
+        with self.assertRaisesRegex(ValueError,'Invalid immutable project release'):
+            self.src.probe({'userId':USER,'project':PROJECT,'release':'latest'})
+
     def test_lost_final_receipt_recovers_exact_published_release_without_relaunch(self):
         args=self.start();self.assertEqual(self.dst.worker(self.key,1),0)
         self.dst.path(self.key,'.result.json').unlink();before=len(self.calls)

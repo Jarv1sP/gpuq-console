@@ -80,7 +80,10 @@ class ProjectCopies(t.TransferJobs):
                 'environmentMode':'oci','architecture':{'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine(),platform.machine()),
                 'sources':sources,'releaseReady':False}
         if 'release' in args:
-            self.identity(args)
+            # A read-only compatibility probe has no operation ID. Only the
+            # immutable release needs validation; prepare/start bind an ID.
+            p.need(isinstance(args['release'],str) and t.HASH.fullmatch(args['release']),
+                   'Invalid immutable project release')
             source=self.store.release(args['userId'],args['project'],args['release'])
             p.need(source['meta'].get('environmentMode')=='oci','Cross-node environments require a published OCI project')
             image=engine.portable_image(args['project'],source['meta']['oci'])
