@@ -38,13 +38,34 @@ try{
   await page.evaluate(()=>{window.second=client.login('second','fixture');});assert.equal(events.some(event=>event.username==='second'),false);firstLogin.resolve();
   assert.equal(await page.evaluate(()=>first),'STALE_SESSION');await page.evaluate(()=>second);assert.equal(await cookie(),'second');
   stateGate=defer();const timedOut=stateGate;
-  await page.evaluate(()=>{client.requestTimeoutMs=100;window.timeoutCall=client.call('state').catch(error=>error.code);window.afterTimeout=client.login('after-timeout','fixture');});
-  assert.equal(await page.evaluate(()=>timeoutCall),'STALE_SESSION');await page.evaluate(()=>afterTimeout);timedOut.resolve();await page.waitForTimeout(150);
+  loginGate=defer();const delayedLogin=loginGate;
+  try{
+    await page.evaluate(()=>{
+      const schedule=window.setTimeout;window.oldTimeout={delay:null,fired:false};
+      window.setTimeout=(callback,delay,...args)=>{
+        oldTimeout.delay=delay;
+        return schedule(()=>{oldTimeout.fired=true;callback(...args);},delay);
+      };
+      try{
+        client.requestTimeoutMs=100;
+        window.timeoutCall=client.call('state').catch(error=>error.code);
+        client.requestTimeoutMs=45000;
+      }finally{window.setTimeout=schedule;}
+      window.afterTimeoutSettled=false;
+      window.afterTimeout=client.login('after-timeout','fixture');
+      afterTimeout.then(()=>{afterTimeoutSettled=true;},()=>{afterTimeoutSettled=true;});
+    });
+    assert.equal(await page.evaluate(()=>timeoutCall),'STALE_SESSION');
+    assert.deepEqual(await page.evaluate(()=>oldTimeout),{delay:100,fired:true},'the old request must still expire on its own 100ms timer');
+    await waitEvent(event=>event.username==='after-timeout');await page.waitForTimeout(200);
+    assert.equal(await page.evaluate(()=>afterTimeoutSettled),false,'the queued login must survive a response held longer than 100ms');
+    delayedLogin.resolve();await page.evaluate(()=>afterTimeout);timedOut.resolve();await page.waitForTimeout(150);
+  }finally{delayedLogin.resolve();timedOut.resolve();}
   assert.equal(await cookie(),'after-timeout','aborted old 401 must not clear the new browser cookie');
   terminalGate=defer();
   await page.evaluate(()=>{client.requestTimeoutMs=45000;window.attached=false;window.opened=client.call('terminal.open',{}, {accept:()=>{attached=true;},onStale:(result,call)=>call('terminal.close',{id:result.id})}).catch(error=>error.code);window.lastLogin=client.login('last','fixture');});
   await waitEvent(event=>event.operation==='terminal.open');assert.equal(events.some(event=>event.username==='last'),false);terminalGate.resolve();
   assert.equal(await page.evaluate(()=>opened),'STALE_SESSION');await page.evaluate(()=>lastLogin);assert.equal(await page.evaluate(()=>attached),false);
   const close=events.findIndex(event=>event.operation==='terminal.close'),last=events.findIndex(event=>event.username==='last');assert.ok(close>=0&&close<last);assert.equal(events[close].actor,'after-timeout');assert.equal(await cookie(),'last');
-  console.log(JSON.stringify({status:'passed',checks:['native HttpOnly cookie order','old 401 drain','overlapping login order','timeout abort cookie isolation','original-identity late terminal cleanup']}));
+  console.log(JSON.stringify({status:'passed',checks:['native HttpOnly cookie order','old 401 drain','overlapping login order','timeout abort cookie isolation','queued login survives beyond old 100ms timeout','original-identity late terminal cleanup']}));
 }finally{stateGate?.resolve();loginGate?.resolve();terminalGate?.resolve();await browser?.close();await new Promise(resolve=>server.close(resolve));}
