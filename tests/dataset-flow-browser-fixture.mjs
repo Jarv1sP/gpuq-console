@@ -19,7 +19,7 @@ const states={scans:['PREPARING','READY',null,null],'sample-pictures':['REGISTER
 // A modal makes the background inert. Scan the dialog's active controls while
 // open; scan the complete room again after closing it for every catalog state.
 const geometry={roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],controls:'button,input:not([type=file]):not([type=checkbox]),select,summary,a[href]',
-  centers:[{parent:'.dataset-title-label',children:':scope>h3,:scope>.ui-info'},{parent:'.dataset-field-label',children:':scope>label,:scope>span:not(.ui-info),:scope>.ui-info'},{parent:'.dataset-location-fact',children:':scope>.dataset-machine-label,:scope>.dataset-location-status'},{parent:'.dataset-version-heading',children:':scope>.dataset-version-details>summary,:scope>.ui-info'}],
+  centers:[{parent:'.dataset-title-label',children:':scope>h3,:scope>.ui-info'},{parent:'.dataset-field-label',children:':scope>label,:scope>span:not(.ui-info),:scope>.ui-info'},{parent:'.dataset-location-fact',children:':scope>.dataset-machine-label,:scope>.dataset-location-status'},{parent:'.dataset-details-cell',children:':scope>.dataset-version-details>summary,:scope>.ui-info'}],
   leftEdges:[['.datasets-library-heading','.dataset-workflow-copy','#datasets-status','#dataset-catalog'],['#dataset-add-title','.dataset-source-tabs','.dataset-source-view:not([hidden])']],
   helpRows:['.dataset-title-label','.dataset-field-label'],repeatedPadding:['.dataset-cache-gauge'],repeatedGaps:['.dataset-cache-preview-row'],
   buttonRows:[{parent:'.file-actions',children:'.button'}],
