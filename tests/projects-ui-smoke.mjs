@@ -124,7 +124,7 @@ try{
   await page.locator('#terminal-reconnect').click();await page.locator('.terminal-dialog').waitFor({state:'visible'});await page.locator('#terminal-disconnect').click();
   assert.equal(calls.filter(call=>call.operation==='terminal.open').length,opened+1,'reconnect explicitly reacquires the same session');assert.equal(terminals.size,1);
   await action('terminal.open',()=>page.locator('#terminal-open').click());await page.locator('.terminal-dialog').waitFor({state:'visible'});await page.locator('#terminal-disconnect').click();assert.equal(terminals.size,2,'new always creates an independent session');
-  page.once('dialog',dialog=>dialog.accept());await action('terminal.close',()=>page.locator('#project-terminal-stop').click());await page.locator('#project-terminal-stop').waitFor({state:'hidden'});assert.equal(terminals.size,0);await idle();
+  await action('terminal.close',()=>page.locator('#project-terminal-stop').click());await page.locator('#project-terminal-stop').waitFor({state:'hidden'});assert.equal(terminals.size,0);await idle();
   for(const call of calls.filter(call=>call.operation.startsWith('terminal.'))){assert.equal(call.machine,machine);assert.equal(call.args.project,'vision-demo');assert.equal(call.args.hostAdmin,false);}
 
   await page.locator('#train-form').evaluate(form=>{form.closest('details').open=true;});
