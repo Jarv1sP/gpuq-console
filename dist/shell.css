@@ -65,6 +65,16 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 @media(prefers-reduced-motion:reduce){.sb *,.sb *::before,.sb *::after{scroll-behavior:auto!important;transition:none!important}}
 @media(prefers-reduced-transparency:reduce){.sb :is(.topbar,#shell-context,.nav,.account-popover){background:var(--bg-1);backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media(max-width:759px){.sb #room-nav{position:fixed}.sb #mobile-control .live-pill{transform:none;margin:0;flex:1;min-width:0;overflow:hidden;gap:7px;padding:0 12px}.sb #mobile-control{gap:10px}.sb #mobile-control>#open-submit{margin-left:auto;min-width:130px}.sb #mission-control[open]{height:100dvh;max-height:none}.sb #mission-control-content{border-radius:0}.sb #mission-control .mc-head{padding:20px 16px 12px}.sb #mission-control .mc-input{font-size:16px}.sb #mission-control .mc-body{padding-bottom:24px}.sb #mission-control .mc-row-actions .button{min-height:44px;font-size:13px}.sb #mission-control .mc-attention-item>.button{min-height:44px}.sb #mission-control .mc-overview{grid-template-columns:repeat(4,minmax(0,1fr))}.sb #mission-control .mc-meter-value{font-size:24px;flex-wrap:wrap}.sb #mission-control .mc-meter-label{font-size:11px;white-space:normal}.sb .me-hero{padding:24px 0}.sb .me-hero h2{font-size:32px}.sb .me-telemetry{gap:24px}.sb .me-actions{display:grid;grid-template-columns:1fr}.sb .me-actions .button{justify-content:flex-start}.sb #mobile-control .cs-name{max-width:110px}}
+.sb #mission-control .mc-footer-command{display:flex;align-items:center;flex:none;gap:8px}.sb #mission-control .mc-footer-command>.ui-info{margin:0}
+.sb #mission-control .mc-attention-heading{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px}
+.sb #mission-control .mc-attention-heading h2{margin:0}
+.sb #mission-control .mc-attention-heading>.button{margin-left:auto;min-height:40px}
+.sb #mission-control .mc-attention{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));overflow:visible;margin-bottom:12px}
+.sb #mission-control .mc-attention-item{min-width:0}
+.sb #mission-control .mc-attention-actions{grid-column:2;grid-row:1/span 2;display:flex;flex-direction:column;justify-content:center;gap:4px}
+.sb #mission-control .mc-attention-actions>.button{min-height:32px;padding:0 8px;font-size:12px}
+.sb #mission-control .mc-failure-history{display:inline-flex;align-items:center;min-height:40px;margin-bottom:20px;color:var(--ink-3);font-size:12px}
+@media(max-width:759px){.sb #mission-control .mc-attention-heading>.button,.sb #mission-control .mc-attention-actions>.button,.sb #mission-control .mc-failure-history{min-height:44px}}
 .sb [data-page]:not([hidden]){animation:none}.sb .modal-head h2{color:var(--ink)}.sb #mission-control[open]{max-width:none}.sb #mission-control .mc-footer{padding:12px 24px;margin:0;flex:none}.sb #mission-control .mc-suggestion{width:100%}.sb #mission-control .mc-server .slot span{font-size:11px}.sb #mission-control .wb-trajectory .n{font-size:11px}
 @media(max-width:759px){.sb #mission-control[open]{width:100vw}.sb #mission-control .mc-footer{padding:14px 16px;gap:12px}.sb #mission-control .mc-meter-value{font-size:28px}.sb #mission-control .mc-monitor{font-size:11px}.sb #mission-control .mc-suggestion{min-height:44px}.sb #mission-control .mc-row-name{min-height:44px;font-size:14px}.sb #mission-control .mc-recent{margin-bottom:24px;flex-wrap:wrap}.sb #mission-control .mc-suggestion code{max-width:45%}}
 @media(prefers-reduced-transparency:reduce){.sb .topbar::before{backdrop-filter:none;-webkit-backdrop-filter:none}}
@@ -158,13 +168,3 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
  .sb :is(#login-dialog,#register-dialog) .modal-actions{flex-wrap:wrap}
  .sb #profile-dialog .modal-actions .button{flex:1 1 100%}
 }
-.sb #mission-control .mc-attention-heading{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px}
-.sb #mission-control .mc-attention-heading h2{margin:0}
-.sb #mission-control .mc-attention-heading>.button{margin-left:auto;min-height:40px}
-.sb #mission-control .mc-attention{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));overflow:visible;margin-bottom:12px}
-.sb #mission-control .mc-attention-item{min-width:0}
-.sb #mission-control .mc-attention-actions{grid-column:2;grid-row:1/span 2;display:flex;flex-direction:column;justify-content:center;gap:4px}
-.sb #mission-control .mc-attention-actions>.button{min-height:32px;padding:0 8px;font-size:12px}
-.sb #mission-control .mc-failure-history{display:inline-flex;align-items:center;min-height:40px;margin-bottom:20px;color:var(--ink-3);font-size:12px}
-@media(max-width:759px){.sb #mission-control .mc-attention-heading>.button,.sb #mission-control .mc-attention-actions>.button,.sb #mission-control .mc-failure-history{min-height:44px}}
-.sb #mission-control .mc-footer-command{display:flex;align-items:center;flex:none;gap:8px}.sb #mission-control .mc-footer-command>.ui-info{margin:0}
