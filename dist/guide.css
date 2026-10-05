@@ -82,6 +82,7 @@
 .guide-footer a{display:flex;align-items:center;min-height:44px}
 .guide-sr-only,.guide-skip:not(:focus){position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .guide-skip:focus{position:fixed;top:8px;left:8px;padding:12px;background:#fff;z-index:20}
+@media(min-width:760px){.guide-prose :is(p,li)>code{white-space:nowrap}}
 @media(max-width:1439px){.guide-footer{margin-inline:80px}}
 @media(max-width:1099px){
  .guide-topbar{padding-inline:40px}#guide-main{padding-inline:40px}.guide-footer{margin-inline:40px}
