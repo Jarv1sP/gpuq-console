@@ -3,6 +3,7 @@ import {scanBrowserDirectory,uploadBrowserDataset,confirmedDatasetUpload} from '
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
 import {transferUploadCall} from './transfer-upload.js';
 import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
+import {datasetRemoveUI} from './dataset-remove-ui.js';
 import {infoHTML,discloseInfo,serverIdHTML,serverSelectLabel} from './workbench-ui.js';
 import {reducedMotion} from './motion-ui.js';
 import {LARGE_RELAY_BYTES,transferBytes,uploadPhase} from './data-route.js';
@@ -86,6 +87,7 @@ export function datasetsUI(store,toast){
   const human=transferBytes;
   const workspace=dataWorkspaceUI(store,section,toast,{onBusyChange:controls,refreshCatalog:load});
   const cloud=cloudImportUI(store,section,toast);
+  datasetRemoveUI(store,section,toast,{reload:load});
   new MutationObserver(()=>{
     if(document.body.dataset.room!=='datasets')section.querySelector('#dataset-add-dialog')?.close();
   }).observe(document.body,{attributes:true,attributeFilter:['data-room']});

@@ -30,5 +30,6 @@ USER node
 # Load the final image's module graph as its runtime user. Importing the Portal
 # does not start it, open SQLite or contact the execution bridge.
 RUN node --input-type=module -e "await import('./portal-server.mjs')"
+RUN test -s dist/dataset-remove-ui.js && test -s dist/dataset-remove.css
 EXPOSE 8080
 CMD ["node", "portal-server.mjs"]

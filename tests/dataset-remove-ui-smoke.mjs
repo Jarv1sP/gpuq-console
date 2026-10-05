@@ -1,0 +1,95 @@
+// Real frontend, browser-local replies. No production or node cleanup.
+import assert from 'node:assert/strict';
+import {readFile,mkdir,writeFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {chromium} from 'playwright';
+import {MACHINES} from '../dist/machines.js';
+import {STARBASE_ASSETS} from '../frontend-assets.mjs';
+const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):MACHINES;
+const origin='https://offline-remove.test',shots=join(process.env.UI_SCREENSHOTS||'/tmp/stargate-remove-ui','dataset-remove');
+const V1='a'.repeat(64),V2='b'.repeat(64),V3='c'.repeat(64),localDataset='local-scans',errors=[],external=[],checks=[];
+const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
+await mkdir(shots,{recursive:true});
+try{
+ for(const role of ['member','admin']){
+  const context=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:'reduce'}),page=await context.newPage();await page.clock.install();
+  let userId='local-'+role,principal={userId,username:userId,role},stateMode='UNREGISTERING',lostSubmit=false,lostStatus=false,serial=0;
+  const calls=[],ops=new Map(),deleted=new Set();let navigation=0;
+  const state=()=>({machines,executionEnabled:true,users:[{id:userId,username:userId,name:'本地删除验收',role:principal.role,enabled:true,total:8,limits:Object.fromEntries(machines.map(m=>[m.id,m.cards]))}],jobs:[],gpuq:{checkedAt:new Date().toISOString(),stale:false,hosts:[]}});
+  const key=(machine,dataset,version)=>[machine,dataset,version].join(':');
+  const catalog=machine=>({machine,checkedAt:new Date().toISOString(),machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[
+   {dataset:'scans',name:'scans',versions:[V1,V2].map(version=>{
+    const locations=machines.filter((_,i)=>version===V1?i<2:i===0).filter(m=>!deleted.has(key(m.id,localDataset,version))).map(m=>({machine:m.id,dataset:localDataset,state:'READY'}));
+    const local=locations.some(row=>row.machine===machine);return {version,state:local?'READY':'NOT_LOCAL',bytes:7*1024**3,files:12,canPrepare:!local,sourceMachine:locations[0]?.machine,locations};
+   }).filter(version=>version.locations.length)},
+   {dataset:'other-data',name:'other-data',versions:[{version:V3,state:'READY',bytes:1024,files:1,canPrepare:false,locations:machines.map(m=>({machine:m.id,dataset:'other-data',state:'READY'}))}]}
+  ].filter(dataset=>dataset.versions.length)});
+  page.on('pageerror',error=>errors.push(error.message));
+  const reply=(route,result)=>route.fulfill({contentType:'application/json',body:JSON.stringify({principal,state:state(),result})});
+  await context.route('**/*',async route=>{
+   const url=new URL(route.request().url());if(url.origin!==origin){external.push(url.href);return route.abort();}
+   if(url.pathname==='/api/call'){
+    const {operation,args={}}=route.request().postDataJSON();calls.push({operation,args:structuredClone(args),userId});
+    if(operation==='state')return reply(route,null);
+    if(operation==='projects.list')return reply(route,{projects:[]});
+    if(operation==='datasets.catalog')return reply(route,catalog(args.machine));
+    if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
+    if(operation==='datasets.unregister'){
+     assert.equal(principal.role,'admin');assert.equal(args.dataset,localDataset);assert.deepEqual(Object.keys(args).sort(),args.version?['dataset','machine','version']:['dataset','machine']);
+     const operationId=(++serial).toString(16).padStart(64,'0');ops.set(operationId,{...args,operationId,userId,state:'UNREGISTERING'});
+     if(lostSubmit){const failure=lostSubmit;lostSubmit=false;if(failure==='http400')return route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'节点响应超时；任务状态将自动核对。'})});return route.abort('failed');}return reply(route,{operationId,state:'UNREGISTERING',dataset:args.dataset,version:args.version??null});
+    }
+    if(operation==='datasets.status'){
+     assert.deepEqual(Object.keys(args).sort(),['machine','operationId']);const op=ops.get(args.operationId);assert(op);assert.equal(op.machine,args.machine);assert.equal(op.userId,userId);
+     if(lostStatus){lostStatus=false;return route.abort('failed');}
+     if(stateMode==='UNREGISTERED')for(const version of op.version?[op.version]:[V1,V2])deleted.add(key(op.machine,op.dataset,version));
+     return reply(route,{operationId:args.operationId,dataset:op.dataset,version:op.version??null,state:stateMode,...(stateMode==='UNREGISTERED'?{unregistered:true}:{}),...(stateMode==='FAILED'?{error:'有训练正在使用'}:{})});
+    }
+    throw Error('Unexpected operation '+operation);
+   }
+   if(url.pathname==='/machines.js')return route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(machines)+';'});
+   const file=url.pathname==='/'?'index.html':url.pathname.slice(1);assert(file==='index.html'||/^[a-z-]+\.(js|css)$/.test(file)||Object.hasOwn(STARBASE_ASSETS,url.pathname));
+   let body=await readFile(new URL('../dist/'+file,import.meta.url));if(file==='index.html')body=body.toString().replace('globalThis.GPUQ_LOCAL_API=false;','globalThis.GPUQ_LOCAL_API=true;globalThis.GPUQ_PRODUCTION=true;globalThis.GPUQ_HAS_SESSION=true;');
+   return route.fulfill({contentType:file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.woff2')?'font/woff2':file.endsWith('.svg')?'image/svg+xml':'text/html',body});
+  });
+  const load=async()=>{await page.goto(origin+'/?fixture-reload='+(++navigation)+'#datasets');await page.locator('#datasets-refresh').waitFor();await page.locator('#datasets-refresh').click();await page.locator('.dataset-card').first().waitFor();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);};
+  const card=version=>page.locator('.dataset-card').filter({has:page.locator('[data-use-dataset=scans][data-version="'+version+'"]')});
+  const capture=async name=>{for(const width of [1440,390,320]){await page.setViewportSize({width,height:1000});if(name==='unknown-receipt'||name==='lost-submit')await page.locator('#dataset-removal-records').scrollIntoViewIfNeeded();await page.evaluate(async()=>{await document.fonts.ready;document.activeElement?.blur();for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(requestAnimationFrame);});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));const controls=await page.evaluate(()=>[...document.querySelectorAll('#dataset-remove-dialog[open] .button,#dataset-removal-records .button,.dataset-remove-more .button')].map(element=>{const rect=element.getBoundingClientRect();return {text:element.textContent,height:rect.height,width:rect.width,minimum:innerWidth<=759?44:32};}).filter(rect=>rect.width&&rect.height));assert(controls.every(rect=>rect.height>=rect.minimum),JSON.stringify({name,width,controls}));await page.screenshot({path:join(shots,name+'-'+role+'-'+width+'.png')});}};
+  const open=async(version,whole=false)=>{await card(version).locator('[data-remove-more]').click();await card(version).locator(whole?'[data-remove-dataset]':'[data-remove-version]').click();await page.locator('#dataset-remove-dialog').waitFor();};
+  await load();
+  if(role==='member'){
+   assert.equal(await page.locator('[data-remove-more],[data-remove-version],[data-remove-dataset],#dataset-removal-records').count(),0);await capture('member-boundary');assert.equal(calls.some(x=>x.operation==='datasets.unregister'||x.operation==='datasets.status'),false);checks.push('member has no deletion DOM or calls');
+  }else{
+   await page.locator('link[data-dataset-remove-style]').waitFor({state:'attached'});assert.equal(await page.locator('[data-remove-more]').count(),3);
+   for(const width of [1440,390,320]){await page.setViewportSize({width,height:1000});await card(V1).locator('[data-remove-more]').click();const menu=card(V1).locator('.dataset-remove-options');await menu.waitFor();assert.equal(await menu.locator('[data-remove-version] .server-id').textContent(),machines[0].id);await page.evaluate(()=>document.activeElement?.blur());await page.screenshot({path:join(shots,'more-menu-admin-'+width+'.png')});await menu.evaluate(element=>element.hidePopover());}
+   await open(V1);assert.match(await page.locator('#dataset-remove-dialog').textContent(),/数据库原件、其他服务器/);assert.equal(await page.locator('#dataset-remove-dialog .server-id').textContent(),machines[0].id);await capture('version-confirm');
+   await page.locator('[data-remove-confirm]').click();await page.locator('.dataset-removal-state').filter({hasText:'删除中'}).waitFor();assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,1);assert.equal(calls.find(x=>x.operation==='datasets.unregister').args.version,V1);
+   await page.clock.runFor(2000);await page.waitForFunction(()=>document.querySelector('#dataset-removal-records')?.textContent.includes('操作编号'));
+   assert.equal(calls.filter(x=>x.operation==='datasets.status').length,1);await page.locator('[data-nav=resources]').click();const before=calls.filter(x=>x.operation==='datasets.status').length;await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.status').length,before);await page.locator('[data-nav=datasets]').click();
+   stateMode='UNKNOWN';await page.locator('[data-removal-query]').click();await page.locator('.dataset-removal-state').filter({hasText:'删除结果未确认'}).waitFor();await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,1);
+   await page.locator('#dataset-removal-records').scrollIntoViewIfNeeded();await capture('unknown-receipt');
+   stateMode='FAILED';await page.locator('[data-removal-query]').click();await page.locator('#dataset-removal-records').filter({hasText:'有训练正在使用'}).waitFor();assert.equal(await card(V1).count(),1);
+   stateMode='UNREGISTERED';await page.locator('[data-removal-query]').click();await page.locator('#dataset-removal-records').waitFor({state:'detached'});await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+   assert.equal(await card(V1).locator('.dataset-location[data-machine="'+machines[0].id+'"]').getAttribute('data-location-state'),'NOT_LOCAL');assert.equal(await card(V1).locator('.dataset-location[data-machine="'+machines[1].id+'"]').getAttribute('data-location-state'),'READY');assert.equal(await page.locator('[data-use-dataset=other-data]').count(),1);
+   await card(V1).locator('[data-remove-more]').click();await card(V1).locator('[data-remove-version]').click();await page.getByText('这台服务器没有此登记，请刷新目录。',{exact:true}).waitFor();assert.equal(await page.locator('#dataset-remove-dialog').isVisible(),false);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,1);
+   // Whole-dataset confirmation cannot use a partial or display name.
+   await open(V2,true);assert.equal(await page.locator('[data-remove-confirm]').isDisabled(),true);await page.locator('[name=remove-name]').fill('sca');assert.equal(await page.locator('[data-remove-confirm]').isDisabled(),true);await page.locator('[name=remove-name]').fill('scans');assert.equal(await page.locator('[data-remove-confirm]').isEnabled(),true);await capture('whole-confirm');
+   await page.locator('[data-remove-confirm]').click();await page.locator('.dataset-removal-state').filter({hasText:'删除中'}).first().waitFor();assert.equal(Object.hasOwn(calls.filter(x=>x.operation==='datasets.unregister').at(-1).args,'version'),false);
+   stateMode='UNKNOWN';await page.locator('[data-removal-query]').click();await page.locator('#dataset-removal-records').filter({hasText:'未确认'}).waitFor();lostStatus=true;await page.locator('[data-removal-query]').click();await page.waitForFunction(()=>!document.querySelector('[data-removal-query]').disabled);
+   const idBefore=calls.filter(x=>x.operation==='datasets.status').at(-1).args.operationId;await load();await page.clock.runFor(2000);await page.waitForFunction(()=>!document.querySelector('[data-removal-query]').disabled);assert.equal(calls.filter(x=>x.operation==='datasets.status').at(-1).args.operationId,idBefore);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,2);
+   stateMode='UNREGISTERED';await page.locator('[data-removal-query]').click();await page.locator('#dataset-removal-records').waitFor({state:'detached'});await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(await card(V2).count(),0);assert.equal(await page.locator('[data-use-dataset=other-data]').count(),1);assert.equal(await card(V1).locator('.dataset-location[data-machine="'+machines[1].id+'"]').getAttribute('data-location-state'),'READY');
+   // A completely lost submission has no operation ID. It stays locked until
+   // an administrator supplies the actual ID or confirms abandoning intent.
+   deleted.delete(key(machines[0].id,localDataset,V1));await load();lostSubmit='http400';stateMode='UNKNOWN';await open(V1);await page.locator('[data-remove-confirm]').click();await page.locator('.dataset-removal-state').filter({hasText:'删除请求结果未确认'}).waitFor();const count=calls.filter(x=>x.operation==='datasets.unregister').length;
+   await load();assert.equal(await card(V1).locator('[data-remove-version]').isDisabled(),true);await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,count);await page.locator('#dataset-removal-records').scrollIntoViewIfNeeded();await capture('lost-submit');
+   await page.locator('[data-removal-abandon]').click();assert.match(await page.locator('#dataset-remove-dialog').textContent(),/再次删除可能重复执行/);await page.locator('#dataset-remove-dialog [data-remove-close]').click();assert.equal(await card(V1).locator('[data-remove-version]').isDisabled(),true);
+   await page.locator('[name=operationId]').fill([...ops.keys()].at(-1));await page.locator('[data-removal-lookup] [type=submit]').click();await page.locator('[data-removal-query]').waitFor();assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,count);
+   await page.locator('[data-removal-abandon]').click();await page.getByRole('button',{name:'放弃记录',exact:true}).click();await page.locator('#dataset-removal-records').waitFor({state:'detached'});assert.equal(await card(V1).locator('[data-remove-version]').isEnabled(),true);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,count);
+   // A new admin login does not resume another admin's pending receipt.
+   lostSubmit=true;await open(V1);await page.locator('[data-remove-confirm]').click();await page.locator('.dataset-removal-state').filter({hasText:'请求结果未确认'}).waitFor();userId='another-admin';principal={userId,username:userId,role:'admin'};await load();assert.equal(await page.locator('#dataset-removal-records').count(),0);await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,count+1);assert.equal(calls.some(x=>x.userId==='another-admin'&&x.operation==='datasets.status'),false);
+   checks.push('version scope','catalog alias resolves to the node registration name','no local registration cannot be removed','whole-name confirmation','2s then pause on leave','UNKNOWN no replay','lease FAILED reason','known receipt refresh','HTTP 400 bridge uncertainty stays locked','missing ID manual lookup','double-confirm abandon','other machines and datasets retained','cross-account isolation');
+  }
+  await context.unrouteAll({behavior:'ignoreErrors'});await context.close();
+ }
+}finally{await browser.close();}
+assert.deepEqual(errors,[]);assert.deepEqual(external,[]);await writeFile(join(shots,'checks.json'),JSON.stringify({status:'passed',checks,errors,external},null,2));console.log(JSON.stringify({status:'passed',screenshots:shots,checks}));
