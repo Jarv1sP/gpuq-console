@@ -24,6 +24,17 @@ async function fixture(){
  const settle=async()=>{await new Promise(r=>setImmediate(r));while(service.reconciling)await new Promise(r=>setTimeout(r,2));};
  return {service,calls,user,admin,member,otherLogin,call,ready:v=>ready=v,settle,close:async()=>{await settle();service.close();await rm(dir,{recursive:true,force:true});}};
 }
+test('project upload status is read-only, owner-bound and usable during maintenance',async()=>{
+ const f=await fixture();try{
+  const args={project:'my-project',area:'code',path:'bundle.tar',totalSize:123,sha256:'b'.repeat(64),uploadId:randomUUID()};
+  const revision=f.service.operationalMaintenance(f.admin.principal).revision;
+  await f.service.invoke(f.admin.token,'maintenance.set',{scope:'all',enabled:true,reason:'upload status fixture',revision});
+  await f.call('files.upload.status',args);
+  assert.deepEqual(f.calls.at(-1),{machine:'gpu-1',operation:'files.upload.status',args:{machine:'gpu-1',...args,userId:f.member.id}});
+  for(const extra of [{userId:'builtin-admin'},{hostAdmin:true},{data:'unsafe'},{offset:0},{final:true},{project:undefined},{area:'output'},{machine:'gpu-2'}])await assert.rejects(f.call('files.upload.status',{...args,...extra}));
+  assert.equal(f.service.store.jobs.length,0);
+ }finally{await f.close();}
+});
 test('project operations bind authenticated owner and explicit node without reserving GPUs',async()=>{
  const f=await fixture();try{
   for(const op of ['projects.list','projects.create','projects.status','projects.publish']){

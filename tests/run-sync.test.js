@@ -20,6 +20,7 @@ async function fixture(t,{states=['PUBLISHING','READY'],before={}}={}){
     publication:{id:key,state,...(state==='READY'?{release:FRESH}:{})}});
   const call=async(operation,args)=>{
     calls.push({operation,args});
+    if(operation==='files.upload.status')return {result:{protocol:2,state:'ABSENT',complete:false,path:args.path,receivedBytes:0}};
     if(operation==='files.put'){if(args.final)uploaded.push({path:args.path,size:args.totalSize,sha256:args.sha256});return {result:{complete:args.final,size:args.totalSize,sha256:args.sha256}};}
     if(operation.startsWith('projects.snapshot.')){
       assert.equal(args.release,FRESH);const raw=Buffer.from(JSON.stringify({schema:1,directories:[],files:uploaded}));
@@ -40,7 +41,7 @@ test('sync flag stays before argv separator; Windows paths are literal option va
 });
 test('verified upload then own publication pins its release, never latest old READY',async t=>{
   const f=await fixture(t);assert.equal(await synchronizeProjectRun(f.call,f.options),FRESH);
-  assert.deepEqual(f.calls.map(c=>c.operation),['projects.status','files.put','projects.publish','projects.status','projects.snapshot.info','projects.snapshot.manifest','projects.snapshot.info']);
+  assert.deepEqual(f.calls.map(c=>c.operation),['projects.status','files.upload.status','files.put','projects.publish','projects.status','projects.snapshot.info','projects.snapshot.manifest','projects.snapshot.info']);
   assert.ok(f.calls.every(c=>c.args.machine==='gpu-1'&&c.args.project==='alpha'&&!('hostAdmin'in c.args)&&!('userId'in c.args)));
 });
 test('legacy capability or busy/unknown project rejects before local upload',async t=>{
@@ -118,7 +119,8 @@ test('real CLI loopback: Unicode/space cwd, literal argv, own READY and one subm
     res.setHeader('Content-Type','application/json');assert.equal(req.headers.authorization,'Bearer fixture-only');
     if(operation==='state')return res.end(JSON.stringify({state:{demo:false,gpuqConnected:true,machines:[{id:'gpu-1'}],users:[],jobs:[]}}));
     let result;
-    if(operation==='files.put'){uploaded.set(args.path,{path:args.path,size:args.totalSize,sha256:args.sha256});result={complete:args.final,size:args.totalSize,sha256:args.sha256};}
+    if(operation==='files.upload.status')result={protocol:2,state:'ABSENT',complete:false,path:args.path,receivedBytes:0};
+    else if(operation==='files.put'){uploaded.set(args.path,{path:args.path,size:args.totalSize,sha256:args.sha256});result={complete:args.final,size:args.totalSize,sha256:args.sha256};}
     else if(operation.startsWith('projects.snapshot.')){
       assert.equal(args.release,FRESH);const raw=Buffer.from(JSON.stringify({schema:1,directories:[],files:[...uploaded.values()]}));
       result=operation.endsWith('.info')?{state:'READY',manifestBytes:raw.length,manifestSha256:createHash('sha256').update(raw).digest('hex'),entries:uploaded.size}:{offset:raw.length,size:raw.length,data:raw.toString('base64')};

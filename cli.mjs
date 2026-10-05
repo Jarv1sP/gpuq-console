@@ -40,6 +40,7 @@ gpuctl project create clean --env-mode isolated  New venv without base site-pack
 gpuctl project create container --env-mode oci   Managed rootless OCI (enabled nodes only)
 gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
+gpuctl push-status LOCAL [REMOTE]  Check original project upload; never writes
 gpuctl project copy NAME --from SOURCE --to TARGET --release HASH
 gpuctl project copy-status COPY_ID / copy-cancel COPY_ID
 gpuctl project copy-retry COPY_ID [--key UUID]
@@ -210,8 +211,9 @@ export function parseCLIOptions(argv){
   }
   return {options,positionals,training:[]};
 }
-export async function uploadCodeFiles(call,{machine,context,local,remote,verifyTree=false,progress=message=>process.stderr.write(message)}){
-  let count=0,skipped=0;const observed=[],files=[];
+export async function uploadCodeFiles(call,{machine,context,local,remote,verifyTree=false,inspectOnly=false,progress=message=>process.stderr.write(message),recoverySleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}){
+  let count=0,skipped=0;const observed=[],files=[],statuses=[];
+  if(inspectOnly&&!context.project)fail('push-status requires a selected personal project');
   const excluded=name=>['.git','.ssh','.aws','.azure','.venv','venv','node_modules','__pycache__','id_rsa','id_ed25519','.env'].includes(name)||(name.startsWith('.env.')&&name!=='.env.example');
   const stable=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs;
   if(verifyTree&&!(await lstat(local)).isDirectory())fail('--sync-dir must be an ordinary local directory');
@@ -227,27 +229,67 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
     const file=await open(local,'r');let offset=0;
     try{
       const initial=await file.stat();if(!initial.isFile()||!stable(st,initial))fail('Local file changed before upload');
-      let identity={};
+      let identity={},confirmed=false,recoveries=0;
+      const inspectUpload=async()=>{
+        const value=(await call('files.upload.status',{machine,path,...context,...identity})).result;
+        if(value?.protocol!==2||!['ABSENT','UPLOADING','COMPLETE','CONFLICT'].includes(value.state)||value.path!==path)fail('Server did not confirm the project upload recovery protocol; no file was resent');
+        if(['UPLOADING','COMPLETE'].includes(value.state)){
+          if(value.sha256!==identity.sha256||value.totalSize!==identity.totalSize||!Number.isSafeInteger(value.receivedBytes)||value.receivedBytes<0||value.receivedBytes>identity.totalSize||!(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/).test(value.uploadId)||identity.uploadId&&value.uploadId!==identity.uploadId)fail('Project upload status identity differs; no file was resent');
+          if(value.state==='COMPLETE'&&(value.complete!==true||value.size!==identity.totalSize))fail('Server did not confirm the complete verified upload');
+          if(value.completionPending!==undefined&&typeof value.completionPending!=='boolean')fail('Server did not confirm the upload completion fence');
+        }
+        return value;
+      };
       if(context.project){
         const hash=createHash('sha256'),buffer=Buffer.alloc(1024*1024);let at=0;
         while(at<initial.size){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,initial.size-at),at);if(!bytesRead)fail('Local file changed during hashing');hash.update(buffer.subarray(0,bytesRead));at+=bytesRead;}
         if(!stable(initial,await file.stat()))fail('Local file changed during hashing');
-        identity={totalSize:initial.size,sha256:hash.digest('hex'),uploadId:randomUUID()};
+        identity={totalSize:initial.size,sha256:hash.digest('hex')};
+        const current=await inspectUpload();
+        if(inspectOnly){statuses.push(current);return;}
+        if(current.state==='CONFLICT')fail('Project upload target changed or another content upload is active; inspect the original target before replacing it');
+        if(current.state==='UPLOADING'&&current.resumable!==true)fail('Existing upload has no safe recovery fence; its original ID and partial bytes were preserved. Ask an administrator to inspect it before restarting');
+        if(current.state==='COMPLETE'){identity.uploadId=current.uploadId;offset=initial.size;confirmed=current.completionPending!==true;}
+        else if(current.state==='UPLOADING'&&current.resumable===true){identity.uploadId=current.uploadId;offset=current.receivedBytes;}
+        else identity.uploadId=randomUUID();
+        if(offset)progress(`项目文件 ${maintenanceVisible(path)}：已确认 ${offset}/${initial.size} 字节${confirmed?'（完整校验）':'，续传原上传'}\n`);
       }
-      do{
+      if(!confirmed)do{
         const buffer=Buffer.alloc(1024*1024);const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,Math.max(0,initial.size-offset)),offset);
         if(!bytesRead&&offset<initial.size)fail('Local file changed during upload');
         const final=offset+bytesRead===initial.size;
         if(context.project&&final&&!stable(initial,await file.stat()))fail('Local file changed during upload; no final publish was sent');
-        const response=(await call('files.put',{machine,path,offset,...context,...(context.project?{...identity,final}:{truncate:offset===0}),data:buffer.subarray(0,bytesRead).toString('base64')})).result;
-        if(context.project&&final&&(response?.complete!==true||response.sha256!==identity.sha256||response.size!==identity.totalSize))fail('Server did not confirm the complete verified upload; check and retry this file before publishing');
+        let response;
+        try{response=(await call('files.put',{machine,path,offset,...context,...(context.project?{...identity,final}:{truncate:offset===0}),data:buffer.subarray(0,bytesRead).toString('base64')})).result;}
+        catch(error){
+          // Only this fixed, checksum-bound project protocol can recover an
+          // uncertain write. Legacy uploads and other mutations never replay.
+          if(!context.project||error.status!==undefined&&![502,503,504].includes(error.status)||recoveries>=3)throw error;
+          await recoverySleep(1000*2**recoveries++);
+          if(!stable(initial,await file.stat()))fail('Local file changed after an interrupted upload; no retry was sent');
+          const current=await inspectUpload();
+          if(current.state==='COMPLETE'){
+            offset=initial.size;
+            if(current.completionPending!==true){confirmed=true;break;}
+            // The bytes were verified, but the completion journal still
+            // blocks publication. Send only the same-ID zero-byte final.
+            continue;
+          }
+          if(current.state==='CONFLICT'||current.state==='ABSENT'&&offset!==0||current.state==='UPLOADING'&&(current.resumable!==true||current.receivedBytes<offset||current.receivedBytes>offset+bytesRead))throw Error('Upload outcome is not safely resumable; keep the same source and target and inspect upload status');
+          offset=current.state==='UPLOADING'?current.receivedBytes:0;
+          progress(`项目文件 ${maintenanceVisible(path)}：连接恢复，服务器确认 ${offset}/${initial.size} 字节；保持原上传身份\n`);
+          continue;
+        }
+        if(context.project&&final&&(response?.complete!==true||response.completionPending===true||response.sha256!==identity.sha256||response.size!==identity.totalSize))fail('Server did not confirm the complete verified upload; check and retry this file before publishing');
         offset+=bytesRead;
-      }while(offset<initial.size);
+        confirmed=final;
+      }while(!confirmed);
       if(context.project&&!stable(initial,await file.stat()))fail('Local file changed during upload; verify and upload again before project publish');
       if(verifyTree){observed.push({local,st:initial});files.push({path,size:identity.totalSize,sha256:identity.sha256});}
     }finally{await file.close();}count++;
   }
   await upload(local,remote);
+  if(inspectOnly)return {machine,project:context.project,readOnly:true,files:statuses,skipped};
   if(verifyTree){
     if(!count)fail('No code files were uploaded; refusing to publish or submit an old draft');
     for(const item of observed){
@@ -398,7 +440,7 @@ async function main(){
       if(positionals.length!==2||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','reconnect','takeover'].includes(k)))fail('Usage: data shell [--machine SERVER] [--reconnect SESSION] [--takeover]');
       command='shell';positionals.splice(0,positionals.length,'shell',defaultMachine());
     }
-    if(command==='ssh')command='shell';if(command==='push')command='upload';if(command==='pull')command='download';
+    if(command==='ssh')command='shell';if(command==='push')command='upload';if(command==='push-status')command='upload-status';if(command==='pull')command='download';
     if((options.reconnect||options.takeover)&&command!=='shell')fail('--reconnect/--takeover are only valid for ssh');
     if(options['env-mode']!==undefined){
       if(command!=='project'||positionals[1]!=='create')fail('--env-mode is only valid for project create; existing environments are never rebuilt');
@@ -406,10 +448,10 @@ async function main(){
     }
     if(command==='run'&&positionals.length>1&&options.machines.length)fail('Select a server once, either positionally or with --machine/--on');
     if(['run','shell'].includes(command)&&positionals.length===1)positionals.push(defaultMachine());
-    if(['push','pull'].includes(shortcut))positionals.splice(1,0,defaultMachine());
-    if(shortcut==='push'&&positionals.length===3&&(await lstat(positionals[2])).isDirectory())positionals.push('.');
+    if(['push','push-status','pull'].includes(shortcut))positionals.splice(1,0,defaultMachine());
+    if(['push','push-status'].includes(shortcut)&&positionals.length===3&&(await lstat(positionals[2])).isDirectory())positionals.push('.');
     if(command==='files'&&(positionals.length===1||!state.machines.some(m=>m.id===machineName(positionals[1]))))positionals.splice(1,0,defaultMachine());
-    if(['run','shell','upload','download','files','use'].includes(command)&&positionals[1])positionals[1]=machineName(positionals[1]);
+    if(['run','shell','upload','upload-status','download','files','use'].includes(command)&&positionals[1])positionals[1]=machineName(positionals[1]);
     mode={demo:state.demo,gpuqConnected:state.gpuqConnected===true};
     const find=username=>{const user=state.users.find(u=>u.username===username);if(!user)fail('Unknown or unauthorized username');return user.id;};
     const own=()=>session.principal.role==='admin'&&options.as?find(options.as):session.principal.userId;
@@ -745,10 +787,10 @@ async function main(){
     }
     else if(['logs','cancel'].includes(command)&&positionals.length===2)result=(await call(command==='logs'?'jobs.logs':'jobs.cancel',{jobId:positionals[1]})).result;
     else if(command==='files'&&positionals.length<=3)result=(await call('files.list',{machine:positionals[1],path:positionals[2]||'.',...fileArgs(positionals[1])})).result;
-    else if(command==='upload'&&positionals.length>=3&&positionals.length<=4){
+    else if(['upload','upload-status'].includes(command)&&positionals.length>=3&&positionals.length<=4){
       if(options.job)fail('Job outputs cannot be uploaded; upload project code without --job');
       const machine=positionals[1],context=fileArgs(machine);
-      result=await uploadCodeFiles(call,{machine,context,local:positionals[2],remote:positionals[3]||basename(positionals[2])});
+      result=await uploadCodeFiles(call,{machine,context,local:positionals[2],remote:positionals[3]||basename(positionals[2]),inspectOnly:command==='upload-status'});
     }else if(command==='download'&&positionals.length===4){
       const context=fileArgs(positionals[1]);
       const file=await open(positionals[3],'wx',0o600);let offset=0;
@@ -819,6 +861,7 @@ async function main(){
   if(command==='logs'){process.stdout.write(result.text+(result.text.endsWith('\n')?'':'\n'));return;}
   if(command==='cancel'){console.log(`任务 ${result.id}：${result.state}${result.cancelRequested?'（已请求取消，等待节点确认）':''}`);return;}
   if(command==='upload'){console.log(`已上传 ${result.uploaded} 个文件到 ${result.machine} 的${result.project?'项目 '+result.project+' 草稿':'个人工作区'}。${result.skipped?'跳过 '+result.skipped+' 项。':''}`);return;}
+  if(command==='upload-status'){console.log(result.files.map(file=>`${file.path}: ${file.state} ${file.receivedBytes??0}/${file.totalSize??'?'} B${file.uploadId?' · '+file.uploadId:''}`).join('\n')||'没有可查询的文件。');return;}
   if(command==='download'){console.log(`已下载：${result.downloaded}（${result.bytes} 字节）`);return;}
   if(command==='jobs'){console.log(result.length?[...result].slice(-50).reverse().map(j=>`${j.id}  ${j.state}${j.preempted?'（让位中断，不会自动重跑）':''}\n  ${j.machine} · ${allocationLabel(j)} · ${j.name||'train'} · 优先级 ${['idle','normal','high'].includes(j.priority)?j.priority:'旧策略／未核验'}${j.schedulerState?' · 调度 '+j.schedulerState:''}${j.queueReason?'\n  排队原因：'+j.queueReason:''}\n  ${progressText(j.progress)}${jobTimingText(j)?'\n  '+jobTimingText(j):''}`).join('\n'):'暂无任务。');if(result.length>50)console.log('仅显示最近 50 条；完整记录：gpuctl jobs --json');return;}
   if(command==='files'){console.log(result.entries.map(f=>`${f.type==='directory'?'[目录]':'[文件]'} ${f.name}${f.type==='file'?'  '+f.size+' B':''}`).join('\n')||'目录为空。');return;}

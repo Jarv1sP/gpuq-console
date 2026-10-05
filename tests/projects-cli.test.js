@@ -26,6 +26,7 @@ async function fixture(t){
         operation.startsWith('projects.')?{project:args.project,state:'READY',releases,latestReadyRelease:latest,environmentMode:args.environmentMode||'shared'}:
         operation==='files.list'?{entries:[]}:
         operation==='files.get'?{data:Buffer.from('checkpoint').toString('base64'),eof:true}:
+        operation==='files.upload.status'?{protocol:2,state:'ABSENT',complete:false,path:args.path,receivedBytes:0}:
         operation==='files.put'&&args.project?{complete:args.final,size:args.offset+Buffer.from(args.data,'base64').length,...(args.final?{sha256:args.sha256}:{})}:
         operation==='jobs.submit'?{id:JOB,state:'QUEUED',machine:args.machine,cards:args.cards}:{};
       res.end(JSON.stringify({result}));
@@ -222,6 +223,16 @@ test('project code upload uses full-file digest + stable upload id + final chunk
   assert.equal(chunks[0].final,false);assert.equal(chunks[1].final,true);assert.equal(chunks[1].offset,1024*1024);
   for(const c of chunks){assert.equal(c.project,'alpha');assert.equal(c.area,'code');assert.equal(c.totalSize,bytes.length);assert.equal('truncate'in c,false);}
   assert.equal(all.some(a=>a.path==='.env'),false);assert.equal(all.some(a=>a.path==='sample.pem'),true);assert.equal(all.some(a=>a.path==='.env.example'),true);
+});
+test('push-status hashes original local input and only queries the owned upload',async t=>{
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ const source=join(f.dir,'bundle');await writeFile(source,'owned bytes');
+ const result=await f.cli(['push-status',source,'bundle.tar']);
+ assert.equal(result.code,0,result.stderr);assert.equal(result.data.readOnly,true);
+ assert.equal(result.data.files[0].state,'ABSENT');
+ const query=f.calls.find(c=>c.operation==='files.upload.status');assert.equal(query.args.path,'bundle.tar');
+ assert.equal(query.args.sha256,createHash('sha256').update('owned bytes').digest('hex'));
+ assert.equal(f.calls.some(c=>c.operation==='files.put'||c.operation==='projects.publish'||c.operation==='jobs.submit'),false);
 });
 
 test('empty project files finalize correctly; mutation during upload rejects without a final chunk',async t=>{

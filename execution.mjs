@@ -453,10 +453,11 @@ export async function executionCall(service,principal,operation,args){
       return {...result,portalTerminal:portalTerminalSnapshot(job),nativeObservation:terminalNativeObservation(job,result?.nativeObservation)};
     }catch{return {jobId:job.id,state:'UNAVAILABLE',portalTerminal:portalTerminalSnapshot(job),nativeObservation:unavailableObservation()};}
   }
-  if(operation==='files.list'||operation==='files.put'||operation==='files.get'){
+  if(operation==='files.list'||operation==='files.put'||operation==='files.get'||operation==='files.upload.status'){
     authorizedMachine(args.machine);
     if(Object.keys(args).some(k=>!['machine','path','data','offset','truncate','project','area','runId','uploadId','totalSize','sha256','final'].includes(k)))fail('文件参数无效。');
     const project=validateProjectFile(args);
+    if(operation==='files.upload.status'&&(!args.project||project.area==='output'||Object.keys(args).some(k=>!['machine','path','project','area','uploadId','totalSize','sha256'].includes(k))))fail('上传状态仅用于个人项目代码文件的固定路径、大小和校验和。');
     if(project.area==='output'){
       const job=jobById(args.runId);
       // Admin resource inspection does not implicitly read somebody else's

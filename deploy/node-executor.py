@@ -1148,6 +1148,11 @@ def process(operation,args):
                 ops.writable(args);ops.store.dev_paths(*ops.identity(args))
                 return terminal_op(operation,args)
         return terminal_op(operation,args)
+    if operation=='files.upload.status':
+        if not args.get('project') or set(args)-{'userId','machine','project','area','path','uploadId','totalSize','sha256'}:
+            raise ValueError('Project upload status requires an exact owned upload identity')
+        if args.get('area','code')!='code':raise ValueError('Project upload status is only available for code drafts')
+        return projects().files(operation,args)
     if operation.startswith('files.') and operation in ('files.list','files.put','files.get'):
         return projects().files(operation,args) if args.get('project') else file_op(operation,args)
     if operation not in ('sync','cancel','logs','priority'):raise ValueError('Unknown operation')

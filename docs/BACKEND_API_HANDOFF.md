@@ -78,6 +78,16 @@
 
 网络错误／切换页面不应触发 `close`，也不应自动新建替代终端。明确“断开”使用 `detach`；显式“结束终端”才使用 `close`。持久 SSH 通道是后端内部优化，不新增浏览器流协议，也不改变上述字段或旧节点兼容路径。
 
+## 项目文件上传的确认与恢复
+
+`files.upload.status {machine,project,area:"code",path,totalSize,sha256,uploadId?}` 仅查询当前账号的精确项目文件；首次可省略 `uploadId`，发现同路径、同大小、同完整 SHA 的现存上传。返回 `protocol:2` 及 `ABSENT / UPLOADING / COMPLETE / CONFLICT`；已知上传含原 `uploadId`、`receivedBytes`。`UPLOADING` 还必须有 `resumable:true` 才能续传。维护期间仍可查状态，不能借它写文件、发布或提交任务。
+
+项目 `files.put` 的固定身份由账号、项目、路径、总长度、SHA256、uploadId 共同绑定。中间块重复发送同 offset/bytes 不会追加；最终提交保留完成回执，查询和原最终块恢复会核验目标内容及身份。已提交的目标被他人编辑或替换会拒绝恢复，不回滚或覆盖新内容。rename 已完成但最终回执尚未写入时，保留的 COMMITTING 意图用于核验结果，此时状态为 `COMPLETE,completionPending:true`；客户端须保持原 ID，在 `offset=totalSize` 发送空的 final 块收尾后才可发布，查询本身不写入。不能仅凭项目旧 READY 版本推断这次上传成功。
+
+客户端先查状态，再继续原上传；遇未知 ACK 最多进行三轮有界恢复，且每轮先查询已确认偏移，不换 uploadId 或路径。旧格式未完成记录没有目标变化围栏，同内容返回 `legacy:true,resumable:false`，不同内容返回 `CONFLICT`，需人工核对，不自动清理或从零重开。传统非项目 `files.put` 不增加重放。完成后的恢复只校验目标并收尾回执，不再次 rename；尚未提交的首次上传／续传仍按显式 push 的替换语义执行，上传期间禁止同路径并发终端编辑，不能把平台锁或 stat 检查称为对外部写入的原子 CAS。单文件上限仍为 4 GiB，完成状态的完整 hash 核验可能占用一次文件读取时间；超时只是未确认，不表示文件不存在。
+
+CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --json` 只读；`gpuctl push` 能恢复同内容的已确认上传。此功能不改变项目字节当前经门户中转的路径，也不冒称项目包走了数据集直传。
+
 ## 数据集上传：控制面与文件字节分开
 
 旧版本首次归档的管理入口是 `datasets.archive.enroll {machine,dataset,version,ownerId,key}`：`machine` 为已授权的本地训练节点，`version` 为完整哈希，`ownerId` 为不可变账号 ID，`key` 为本次 UUID。仅当前启用的管理员可调用；重复请求沿用同一 key，不在列表刷新时自动调用。只有指定 HDD 已有同名同版单 owner 的受保护 READY 原件才接受，返回归档阶段而非立即完成。阶段查询继续使用现有归档状态；`archive-retry` 不能代替首次纳管。此管理入口不放在普通用户操作栏。

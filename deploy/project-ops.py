@@ -283,21 +283,114 @@ class ProjectOperations:
             return self.n.file_op(operation,args,root=root)
         if area != 'code' or args.get('runId') is not None: raise ValueError('Invalid project file area')
         root = self.store.dev_paths(user,project)['code']
+        if operation == 'files.upload.status':
+            with self.guard(args), self.store.locked(user, project):
+                return self.upload_status(args, root)
         if operation != 'files.put': return self.n.file_op(operation,args,root=root)
         with self.guard(args):
             self.writable(args)
             with self.store.locked(user, project):
                 return self.upload(args, root)
 
-    def upload(self, args, root):
+    def upload_identity(self, args, *, required=True):
         path, upload = args.get('path'), args.get('uploadId')
         if not isinstance(path,str) or len(path)>1024 or '\\' in path or '\0' in path:
             raise ValueError('Invalid project upload path')
         parts = path.split('/')
         if any(p in ('','.','..') or len(p)>255 for p in parts): raise ValueError('Invalid project upload path')
-        if not isinstance(upload,str) or not UUID.fullmatch(upload): raise ValueError('Invalid upload ID')
-        total, offset, digest = args.get('totalSize'), args.get('offset'), args.get('sha256')
-        if type(total)!=int or not 0<=total<=4*1024**3 or type(offset)!=int or not 0<=offset<=total:
+        if (required or upload is not None) and (not isinstance(upload,str) or not UUID.fullmatch(upload)):
+            raise ValueError('Invalid upload ID')
+        total, digest = args.get('totalSize'), args.get('sha256')
+        if type(total)!=int or not 0<=total<=4*1024**3:
+            raise ValueError('Code upload size invalid (maximum 4 GiB)')
+        if not isinstance(digest,str) or not HASH.fullmatch(digest): raise ValueError('Invalid upload checksum')
+        return {'path':path,'uploadId':upload,'totalSize':total,'sha256':digest}
+
+    @staticmethod
+    def upload_stamp(info):
+        return [info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
+
+    def upload_target(self, root, path, *, digest=False):
+        """No-follow traversal. A receipt never grants access to another path."""
+        parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        fd=None
+        try:
+            parts=path.split('/')
+            for component in parts[:-1]:
+                child=os.open(component,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+                os.close(parent);parent=child
+            # Keep the existing explicit-upload ability to replace a symlink,
+            # but never hash or follow it while recovering a completed upload.
+            info=os.stat(parts[-1],dir_fd=parent,follow_symlinks=False)
+            if not digest:return self.upload_stamp(info)
+            fd=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+            before=os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise ValueError('Unsafe completed upload target')
+            value=hashlib.sha256()
+            while True:
+                data=os.read(fd,1024**2)
+                if not data:break
+                value.update(data)
+            after=os.fstat(fd)
+            if self.upload_stamp(before)!=self.upload_stamp(after):raise ValueError('Completed upload target changed during verification')
+            if self.upload_stamp(os.stat(parts[-1],dir_fd=parent,follow_symlinks=False))!=self.upload_stamp(after):
+                raise ValueError('Completed upload target was replaced during verification')
+            return {'stamp':self.upload_stamp(after),'size':after.st_size,'sha256':value.hexdigest()}
+        except FileNotFoundError:return None
+        finally:
+            if fd is not None:os.close(fd)
+            os.close(parent)
+
+    def upload_status(self, args, root, *, _stamp=False):
+        wanted=self.upload_identity(args,required=False)
+        folder=self.folder/(self.key(args)+'.uploads')
+        key=hashlib.sha256(wanted['path'].encode()).hexdigest()
+        meta,part,done=(folder/(key+suffix) for suffix in ('.json','.part','.done'))
+        active=json.loads(meta.read_text()) if meta.exists() else None
+        complete=json.loads(done.read_text()) if done.exists() else None
+        def matches(record):
+            return (isinstance(record,dict) and all(record.get(k)==wanted[k] for k in ('path','totalSize','sha256'))
+                    and (wanted['uploadId'] is None or record.get('uploadId')==wanted['uploadId']))
+        if active is not None:
+            record=active.get('identity',active)
+            if not matches(record):
+                # An explicit new push can replace unfinished different input,
+                # as before. A recovery query with an existing ID may not.
+                return {'protocol':2,'state':'ABSENT' if wanted['uploadId'] is None and 'identity' in active else 'CONFLICT',
+                        'complete':False,'path':wanted['path'],'receivedBytes':0}
+            if active.get('state')=='COMMITTING' and not part.exists():
+                # The data rename can finish before the durable receipt (or
+                # active-intent removal). Status remains read-only; the client
+                # must finalize this exact identity before publication.
+                if complete is None or complete.get('identity')!=record:complete={'identity':record}
+            else:
+                if 'baseTarget' in active and self.upload_target(root,record['path'])!=active['baseTarget']:
+                    return {'protocol':2,'state':'CONFLICT','complete':False,'path':record['path'],'error':'Target changed during upload'}
+                size=0
+                if part.exists():
+                    info=part.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>record['totalSize']:
+                        raise ValueError('Unsafe upload staging')
+                    size=info.st_size
+                if active.get('state')=='COMMITTING' and size!=record['totalSize']:
+                    raise ValueError('Incomplete committing upload; preserve staging for inspection')
+                return {'protocol':2,'state':'UPLOADING','complete':False,**record,'receivedBytes':size,
+                        'resumable':active.get('state') in ('UPLOADING','COMMITTING'),'legacy': 'identity' not in active}
+        if complete is not None and matches(complete.get('identity')):
+            record=complete['identity'];target=self.upload_target(root,record['path'],digest=True)
+            if (not target or target['size']!=record['totalSize'] or target['sha256']!=record['sha256']
+                    or complete.get('targetStamp',target['stamp'])!=target['stamp']):
+                return {'protocol':2,'state':'CONFLICT','complete':False,'path':record['path'],'error':'Completed target changed; it was not overwritten'}
+            return {'protocol':2,'state':'COMPLETE','complete':True,**record,'size':target['size'],'receivedBytes':target['size'],
+                    'completionPending':active is not None,
+                    **({'_targetStamp':target['stamp']} if _stamp else {})}
+        return {'protocol':2,'state':'ABSENT','complete':False,'path':wanted['path'],'receivedBytes':0}
+
+    def upload(self, args, root):
+        record=self.upload_identity(args)
+        path, upload, total, digest=(record[k] for k in ('path','uploadId','totalSize','sha256'))
+        offset=args.get('offset');parts=path.split('/')
+        if type(offset)!=int or not 0<=offset<=total:
             raise ValueError('Code upload size/offset invalid (maximum 4 GiB per file; datasets use /data2)')
         if not isinstance(digest,str) or not HASH.fullmatch(digest) or type(args.get('final')) is not bool:
             raise ValueError('Upload requires checksum and final marker')
@@ -308,14 +401,28 @@ class ProjectOperations:
         # replaces only its unfinished staging, never the published code file.
         key = hashlib.sha256(path.encode()).hexdigest()
         meta, part = folder/(key+'.json'), folder/(key+'.part')
-        record = {'path':path,'uploadId':upload,'totalSize':total,'sha256':digest}
+        done=folder/(key+'.done')
         prior = json.loads(meta.read_text()) if meta.exists() else None
-        if prior != record:
+        prior_identity=prior.get('identity',prior) if prior is not None else None
+        completed=json.loads(done.read_text()) if done.exists() else None
+        if (completed is not None and completed.get('identity')==record) or (prior_identity==record and prior.get('state')=='COMMITTING' and not part.exists()):
+            current=self.upload_status(args,root,_stamp=True)
+            if current['state']!='COMPLETE':raise ValueError('Completed upload target changed; refusing to overwrite it during recovery')
+            target_stamp=current.pop('_targetStamp')
+            if meta.exists():
+                self.n.atomic_json(done,{'identity':record,'targetStamp':target_stamp})
+                meta.unlink()
+            current['completionPending']=False
+            return current
+        if prior_identity != record:
             if offset: raise ValueError('Upload identity changed; restart this file')
             if len(list(folder.glob('*.json')))>=64 and prior is None: raise ValueError('Too many unfinished uploads')
             self.store._space(len(data))
-            self.n.atomic_json(meta, record)
+            prior={'identity':record,'state':'UPLOADING','baseTarget':self.upload_target(root,path)}
             part.unlink(missing_ok=True)
+            # Never label old partial bytes as a new upload if the process dies
+            # between metadata commit and removing the replaced staging file.
+            self.n.atomic_json(meta, prior)
         fd = os.open(part,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
         try:
             info = os.fstat(fd)
@@ -339,6 +446,9 @@ class ProjectOperations:
                 if not chunk:break
                 hasher.update(chunk)
             if hasher.hexdigest()!=digest: raise ValueError('Upload SHA256 mismatch; retry the file')
+            if 'baseTarget' in prior and self.upload_target(root,path)!=prior['baseTarget']:
+                raise ValueError('Project target changed during upload; no replacement was made. Pause same-path terminal edits before uploading')
+            self.n.atomic_json(meta,{**prior,'identity':record,'state':'COMMITTING'})
             parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
             try:
                 for component in parts[:-1]:
@@ -348,6 +458,10 @@ class ProjectOperations:
                     os.close(parent);parent=child
                 os.replace(part,parts[-1],dst_dir_fd=parent);os.fsync(parent)
             finally:os.close(parent)
+            target_stamp=self.upload_target(root,path)
+            current_stamp=self.upload_stamp(os.fstat(fd))
+            if target_stamp!=current_stamp or current_stamp[2]!=total:raise ValueError('Committed upload requires verification before recovery')
+            self.n.atomic_json(done,{'identity':record,'targetStamp':target_stamp})
             meta.unlink()
             return {'path':path,'size':total,'complete':True,'sha256':digest}
         finally:os.close(fd)
