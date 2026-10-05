@@ -74,7 +74,7 @@
 
 ### 直传数据面
 
-票据返回 `available`、`protocol="dataset-upload-v1"`、`endpoint`、`ticket`、`expiresAt`、`certificateSha256`、`chunkBytes`。仅使用本次授权的 `endpoint`，不硬编码某台节点、IP 或门户地址。
+票据返回 `available`、`protocol="dataset-upload-v1"`、`endpoint`、`ticket`、`expiresAt`、`certificateSha256`、`chunkBytes`，新版另含可选的 `maxChunkBytes`。仅使用本次授权的 `endpoint`，不硬编码某台节点、IP 或门户地址。
 
 | 节点请求 | 数据 |
 | --- | --- |
@@ -82,7 +82,11 @@
 | `POST /v1/uploads/<uploadId>/chunk?offset=<offset>&path=<encodedRelativePath>` | 原始文件块 |
 | `GET /v1/uploads/<uploadId>/status[?path=<encodedRelativePath>]` | 已确认的状态／偏移 |
 
-设置 `Authorization: Bearer <ticket>`，POST 使用 `application/octet-stream`，块大小不超过 `chunkBytes`（当前 1 MiB）。节点成功响应为 `{ok:true,result:...}`，不同于门户响应；manifest／chunk 的 `result.offset` 必须确认整块已写入。文件 status 的 `result.file` 包含路径、大小、SHA256、偏移及完成标记。
+设置 `Authorization: Bearer <ticket>`，POST 使用 `application/octet-stream`。清单块仍不超过 `chunkBytes`（1 MiB）；文件块可采用票据的 `maxChunkBytes`（仅允许 1 或 16 MiB），缺省回到 1 MiB。旧客户端继续发送 1 MiB 块，不需改变接口。节点在读取请求体前验证票据及其限额，确认仍意味着本块已持久写入，不能通过去掉落盘保证换取速度。
+
+客户端应从 1 MiB 文件块起步：确认耗时低于 500 ms 后可升到已授权上限，耗时超过 8 秒则降回 1 MiB，避免慢网络被迫用大块。清单、VPS 中转及哈希扫描的块大小不变。续期授权可能降低限额；尚未发送的大块不能越过新限额，未知响应不自动重发或改走中转。网页可仍用原有 1 MiB 实现，不应仅凭后端升级就宣称网页已提速。
+
+节点成功响应为 `{ok:true,result:...}`，不同于门户响应；manifest／chunk 的 `result.offset` 必须确认整块已写入。文件 status 的 `result.file` 包含路径、大小、SHA256、偏移及完成标记。
 
 浏览器使用正常受信任 HTTPS、`credentials: "omit"`，不发送门户 Cookie。部署方须配置精确允许的门户 origin；遵循 Authorization／Content-Type 的 CORS 预检和需要时的私有网络预检，不用通配符或跳过证书检查。CLI 的门户签发证书固定实现不能直接代替浏览器证书信任。
 

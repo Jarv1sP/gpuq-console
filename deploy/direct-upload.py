@@ -26,6 +26,7 @@ PROTOCOL = 'dataset-upload-v1'
 TTL_SECONDS = 300
 OPERATIONS = ['manifest', 'chunk', 'status']
 MAX_TICKET_BYTES = 4096
+MAX_FILE_CHUNK_BYTES = 16*1024*1024
 RELAY_LIMIT_BYTES = 256*1024**2
 UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z')
 
@@ -166,13 +167,15 @@ class DirectUploads:
             claims = {'schema': 1, 'machine': config['machine'], 'userId': user,
                       'uploadId': upload, 'expiresAt': int(time.time())+TTL_SECONDS,
                       'operations': OPERATIONS, 'revision': config['revision'],
+                      'maxChunkBytes': MAX_FILE_CHUNK_BYTES,
                       **{k: session[k] for k in ('manifestSha256', 'manifestBytes', 'totalBytes', 'entries')}}
             token = encoded(claims)+'.'+secrets.token_urlsafe(32)
             self.u.d._write_json(self.u.folder(user, upload)/'direct-grant.json', {
                 'claims': claims, 'sha256': hashlib.sha256(token.encode()).hexdigest()})
             return {'available': True, 'protocol': PROTOCOL, 'endpoint': config['endpoint'],
                     'certificateSha256': config['certificateSha256'], 'ticket': token,
-                    'expiresAt': claims['expiresAt'], 'chunkBytes': self.u.d.CHUNK_BYTES}
+                    'expiresAt': claims['expiresAt'], 'chunkBytes': self.u.d.CHUNK_BYTES,
+                    'maxChunkBytes': claims['maxChunkBytes']}
 
     def claims(self, token):
         try:
@@ -198,6 +201,9 @@ class DirectUploads:
         if type(claims.get('expiresAt')) is not int or claims['expiresAt'] <= int(time.time()):
             raise GrantError('grant-expired')
         if claims['expiresAt'] > int(time.time())+TTL_SECONDS+1 or claims.get('operations') != OPERATIONS or action not in OPERATIONS:
+            raise GrantError()
+        limit = claims.get('maxChunkBytes', self.u.d.CHUNK_BYTES)
+        if type(limit) is not int or limit not in (self.u.d.CHUNK_BYTES, MAX_FILE_CHUNK_BYTES):
             raise GrantError()
         try:
             # Do not call actor()/folder()/guard() on untrusted claims: those
@@ -233,7 +239,8 @@ class DirectUploads:
                 return self.u.status(user, {'uploadId': upload, **args})
             if action not in ('manifest', 'chunk') or set(args) != ({'offset'} if action == 'manifest' else {'offset', 'path'}):
                 raise ValueError('Invalid direct upload fields')
-            return getattr(self.u, action+'_bytes')(user, {'uploadId': upload, **args}, args['offset'], data, transport='campus-direct')
+            extra = {'direct_chunk_limit': claims.get('maxChunkBytes', self.u.d.CHUNK_BYTES)} if action == 'chunk' else {}
+            return getattr(self.u, action+'_bytes')(user, {'uploadId': upload, **args}, args['offset'], data, transport='campus-direct', **extra)
 
 
 def create_server(node, uploads):
@@ -358,7 +365,7 @@ def create_server(node, uploads):
                         or lengths and not re.fullmatch(r'0|[1-9][0-9]{0,7}', lengths[0])):
                     raise ValueError('Invalid framing')
                 length = int(lengths[0]) if lengths else 0
-                if self.command == 'GET' and length or length > uploads.d.CHUNK_BYTES:
+                if self.command == 'GET' and length or length > MAX_FILE_CHUNK_BYTES:
                     raise ValueError('Invalid request length')
                 if self.path == '/capabilities' and self.command == 'GET':
                     current = direct.configuration()
@@ -372,6 +379,8 @@ def create_server(node, uploads):
                 if (not route or not UUID.fullmatch(route[1]) or parsed.fragment or parsed.scheme or parsed.netloc
                         or self.command != ('GET' if route[2] == 'status' else 'POST')):
                     raise ValueError('Invalid upload operation')
+                if length > (MAX_FILE_CHUNK_BYTES if route[2] == 'chunk' else uploads.d.CHUNK_BYTES):
+                    raise ValueError('Invalid request length')
                 # Python 3.10 treats an empty strict query as a malformed field.
                 # Status has no required query; nonempty input remains strict.
                 query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2) if parsed.query else {}
@@ -391,6 +400,8 @@ def create_server(node, uploads):
                 # Reject unauthenticated requests before receiving file bytes.
                 claims = direct.claims(token)
                 direct.authorize(token, claims, route[1], route[2])
+                if length > (claims.get('maxChunkBytes', uploads.d.CHUNK_BYTES) if route[2] == 'chunk' else uploads.d.CHUNK_BYTES):
+                    raise ValueError('Request exceeds authenticated chunk limit')
                 if self.command == 'POST' and (not lengths or self.headers.get('Content-Type') != 'application/octet-stream'):
                     raise ValueError('Raw upload requires an explicit bounded octet-stream body')
                 data = self.rfile.read(length)

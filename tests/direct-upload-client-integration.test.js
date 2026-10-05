@@ -55,6 +55,32 @@ test('lost real raw response never falls back through portal; same upload resume
   assert.equal(calls.filter(x=>x==='begin').length,2);assert.equal(calls.includes('chunk'),false);
 });
 
+test('real Node/Python HTTPS loses a durable 16 MiB ACK and resumes only its confirmed offset',{timeout:20000},async t=>{
+  const f=await fixture(t),big=16*1048576,content=Buffer.alloc(big+113,51),scan=snapshot({'large.bin':content}),uploadId=randomUUID();
+  await f.control('begin',{key:uploadId,name:'large-recovery',manifestBytes:scan.manifest.length,
+    manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries});
+  const grant=await f.control('direct-ticket',{uploadId});
+  assert.equal(grant.chunkBytes,1048576);assert.equal(grant.maxChunkBytes,big);
+  const transport=await createDirectDatasetTransport(async()=>grant,{uploadId});
+  try{
+    await transport.request('manifest',{offset:0,bytes:scan.manifest});
+    assert.equal((await f.control('seal',{uploadId})).state,'UPLOADING');
+    await f.control('fault');
+    await assert.rejects(transport.request('chunk',{path:'large.bin',offset:0,bytes:content.subarray(0,big)}),
+      /Direct upload.*(?:failed|interrupted)|Direct upload connection/i);
+    // No automatic retry after unknown ACK: explicitly reconcile via a new
+    // read, then send only the missing suffix of the same immutable upload.
+    const status=await transport.request('status',{path:'large.bin'});
+    assert.equal(status.file.offset,big);assert.equal(status.file.complete,false);
+    const tail=await transport.request('chunk',{path:'large.bin',offset:status.file.offset,bytes:content.subarray(big)});
+    assert.equal(tail.offset,content.length);assert.equal(tail.complete,true);
+    const ready=await f.control('commit',{uploadId});
+    assert.equal(ready.state,'READY');assert.equal(ready.lastConfirmedRoute,'campus-direct');
+    const final=await f.control('status',{uploadId,path:'large.bin'});
+    assert.equal(final.file.size,content.length);assert.equal(final.file.sha256,sha(content));assert.equal(final.file.complete,true);
+  }finally{transport.close();}
+});
+
 test('actual TLS wrong pin is rejected before writes and revoked scoped ticket cannot continue',{timeout:20000},async t=>{
   const f=await fixture(t),scan=snapshot({x:Buffer.from('hello')}),uploadId=randomUUID();
   await f.control('begin',{key:uploadId,name:'security',manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries});

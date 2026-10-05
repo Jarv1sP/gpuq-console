@@ -30,6 +30,9 @@ RELAY_LIMIT_BYTES = 256*1024**2
 MAX_ACTIVE_ARCHIVES = 4  # Independent admission, never an unbounded bypass.
 
 
+DIRECT_FILE_CHUNK_BYTES = 16 * 1024 * 1024
+
+
 class DatasetUploads:
     def __init__(self, executor):
         self.n = executor
@@ -559,7 +562,7 @@ class DatasetUploads:
         if (not isinstance(pending, dict) or set(pending) != {'path', 'beforeOffset', 'beforeRemaining', 'length', 'token'}
                 or pending['token'] != session['transferToken']
                 or any(type(pending[k]) is not int or pending[k] < 0 for k in ('beforeOffset', 'beforeRemaining', 'length'))
-                or pending['length'] > self.d.CHUNK_BYTES):
+                or pending['length'] > DIRECT_FILE_CHUNK_BYTES):
             raise ValueError('Invalid interrupted chunk journal')
         entry = self._entry(session, pending['path'])
         size = self._size(paths['.staging']/'data'/entry['path'])
@@ -579,13 +582,21 @@ class DatasetUploads:
         offset, data = self.decoded(args)
         return self.chunk_bytes(user, args, offset, data)
 
-    def raw_chunk(self, offset, data):
-        if type(offset) is not int or not 0 <= offset <= 2**63-1 or not isinstance(data, bytes) or len(data) > self.d.CHUNK_BYTES:
+    def raw_chunk(self, offset, data, *, limit=None):
+        limit = self.d.CHUNK_BYTES if limit is None else limit
+        if type(offset) is not int or not 0 <= offset <= 2**63-1 or not isinstance(data, bytes) or len(data) > limit:
             raise ValueError('Invalid raw upload chunk or offset')
 
-    def chunk_bytes(self, user, args, offset, data, *, transport='vps-relay'):
+    def chunk_bytes(self, user, args, offset, data, *, transport='vps-relay', direct_chunk_limit=None):
         upload = args['uploadId']
-        self.raw_chunk(offset, data)
+        # Only the authenticated direct data plane can use large file blocks.
+        # Keep the journal, data and accounting durability barriers unchanged.
+        limit = self.d.CHUNK_BYTES
+        if direct_chunk_limit is not None:
+            if transport != 'campus-direct' or type(direct_chunk_limit) is not int or direct_chunk_limit not in (self.d.CHUNK_BYTES, DIRECT_FILE_CHUNK_BYTES):
+                raise ValueError('Invalid authenticated direct chunk limit')
+            limit = direct_chunk_limit
+        self.raw_chunk(offset, data, limit=limit)
         with self.guard(user, upload):
             session = self.effective(self.load(user, upload))
             if session['state'] != 'UPLOADING' and not (session['state'] == 'FAILED' and session.get('resumeState') == 'UPLOADING'):

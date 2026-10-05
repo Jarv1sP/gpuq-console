@@ -3,7 +3,7 @@ import {connect as tlsConnect} from 'node:tls';
 import {createHash,timingSafeEqual} from 'node:crypto';
 
 export const RELAY_LIMIT_BYTES=256*1024*1024;
-const PROTOCOL='dataset-upload-v1',CHUNK=1024*1024,RESPONSE_LIMIT=2*1024*1024;
+const PROTOCOL='dataset-upload-v1',CHUNK=1024*1024,MAX_FILE_CHUNK=16*1024*1024,RESPONSE_LIMIT=2*1024*1024;
 const denied=message=>{throw Error(message);};
 
 export function validateDirectGrant(value,now=Date.now()/1000){
@@ -13,6 +13,7 @@ export function validateDirectGrant(value,now=Date.now()/1000){
     denied('Direct upload requires an HTTPS origin without credentials or redirects');
   if(!/^[a-f0-9]{64}$/.test(value.certificateSha256||'')||!Number.isSafeInteger(value.expiresAt)||value.expiresAt<=now||value.expiresAt>now+601||value.chunkBytes!==CHUNK||typeof value.ticket!=='string'||!/^[A-Za-z0-9_.-]{20,4096}$/.test(value.ticket))
     denied('Invalid or expired direct upload grant');
+  if(value.maxChunkBytes!==undefined&&![CHUNK,MAX_FILE_CHUNK].includes(value.maxChunkBytes))denied('Invalid direct file chunk limit');
   return {...value,endpoint:endpoint.origin};
 }
 
@@ -49,7 +50,8 @@ export function directUploadRequest(grant,agent,{uploadId,action,path,offset,byt
   const target=new URL(`/v1/uploads/${uploadId}/${action}`,grant.endpoint);
   if(path!==undefined){if(typeof path!=='string'||Buffer.byteLength(path)>4096||/[\x00-\x1f\x7f]/.test(path))denied('Invalid upload file path');target.searchParams.set('path',path);}
   const writing=action!=='status';
-  if(writing){if(!Number.isSafeInteger(offset)||offset<0||!Buffer.isBuffer(bytes)||bytes.length>CHUNK)denied('Invalid direct upload chunk');target.searchParams.set('offset',String(offset));}
+  const chunkLimit=action==='chunk'?(grant.maxChunkBytes??CHUNK):CHUNK;
+  if(writing){if(![CHUNK,MAX_FILE_CHUNK].includes(chunkLimit)||!Number.isSafeInteger(offset)||offset<0||!Buffer.isBuffer(bytes)||bytes.length>chunkLimit)denied('Invalid direct upload chunk');target.searchParams.set('offset',String(offset));}
   return new Promise((resolve,reject)=>{
     let req,timer,done=false;
     const finish=(error,result)=>{if(done)return;done=true;clearTimeout(timer);if(error){req?.destroy();reject(error);}else resolve(result);};
@@ -79,6 +81,7 @@ export async function createDirectDatasetTransport(requestGrant,{uploadId,agentF
   const endpoint=grant.endpoint,pin=grant.certificateSha256;
   return {
     kind:'campus-direct',
+    get chunkBytes(){return grant.maxChunkBytes??CHUNK;},
     async request(action,args={}){
       if(closed)denied('Direct upload transport is closed');
       if(grant.expiresAt<=now()+10){
