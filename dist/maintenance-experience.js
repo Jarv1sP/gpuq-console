@@ -12,9 +12,9 @@ export function maintenanceExperienceUI(store,toast,{getPage,refresh}){
   const value=()=>store.data?.operationalMaintenance;
   const machines=()=>store.data?.machines||[];
   function foldCopy(active){
-    for(const [node,wrapper] of folded)if(!active||!wrapper.isConnected){if(wrapper.isConnected)wrapper.replaceWith(node);folded.delete(node);}
+    for(const [node,wrapper] of folded)if(!active||!wrapper.isConnected||!node.textContent.trim()){if(wrapper.isConnected)wrapper.replaceWith(node);folded.delete(node);}
     if(!active)return;
-    const selectors='#workspace-mode-note,#terminal-mode-note,.wb-job-explanation,#environment-mode-note,#project-create>p,#project-detail>.muted,#priority-note,#custom-policy-note,#elastic-note,#placement-note,#work-submit .sheet-scroll>p,#work-submit label>small,#work-submit .submit-cli>p,#page-datasets p.muted,#page-datasets .dataset-upload-notes p,#page-datasets .data-workspace-footnote,#page-datasets .datasets-next,#transfer-copy .transfer-form-heading>p,#transfer-copy label>small,.maintenance-settings>p';
+    const selectors='#page-description,.resource-explainer,.node-queue>p.muted:first-of-type,#workspace-mode-note,#terminal-mode-note,.wb-job-explanation,#environment-mode-note,#project-create>p,#project-detail>.muted,#priority-note,#custom-policy-note,#elastic-note,#placement-note,#work-submit .sheet-scroll>p,#work-submit label>small,#work-submit .submit-cli>p,#page-datasets p.muted,#page-datasets .dataset-upload-notes p,#page-datasets .data-workspace-footnote,#page-datasets .datasets-next,#transfer-copy .transfer-form-heading>p,#transfer-copy label>small,.maintenance-settings>p';
     for(const node of document.querySelectorAll(selectors)){if(folded.has(node)||node.closest('.maintenance-info')||node.classList.contains('form-error')||!node.textContent.trim())continue;const wrapper=document.createElement('div');wrapper.className='maintenance-info maintenance-copy-info';wrapper.innerHTML='<button type="button" data-maintenance-info aria-expanded="false" aria-label="操作说明">ⓘ</button><div class="maintenance-info-body" role="note"></div>';node.before(wrapper);wrapper.querySelector('.maintenance-info-body').append(node);folded.set(node,wrapper);}
   }
   document.addEventListener('click',event=>{const button=event.target.closest('[data-maintenance-info]');if(button){const open=button.getAttribute('aria-expanded')!=='true';button.setAttribute('aria-expanded',String(open));button.closest('.maintenance-info').classList.toggle('is-open',open);}});
@@ -53,6 +53,7 @@ export function maintenanceExperienceUI(store,toast,{getPage,refresh}){
     document.body.classList.toggle('maintenance-global',!!actor&&!!value()?.global);
     if(!host.hidden){const nextMarkup=admin?adminHTML():memberHTML();if(markup!==nextMarkup){const focused=document.activeElement,hook=host.contains(focused)?[...focused.attributes].find(attribute=>attribute.name.startsWith('data-')):null;markup=nextMarkup;host.innerHTML=markup;if(hook)for(const element of host.querySelectorAll(`[${hook.name}]`))if(element.getAttribute(hook.name)===hook.value){element.focus({preventScroll:true});break;}}}
     if(!host.hidden&&getPage()==='work')document.querySelector('#work-title-telemetry').hidden=true;
+    if(active){const snapshot=store.data?.gpuq,monitor=document.querySelector('#monitor-status');if(monitor)monitor.innerHTML=`${store.production&&Number.isFinite(Date.parse(snapshot?.checkedAt))?'更新于 '+esc(maintenanceClock(snapshot.checkedAt))+(snapshot.stale?' · 已过期':''):'监控待确认'} ${info('页面每 15 秒同步，节点约每分钟采样。监控过期时不能推断 GPU 空闲。','监控时间')}`;}
     updateContext();foldCopy(active);document.dispatchEvent(new Event('gpuq-maintenance-state'));
   }
   function show(title,content){dialog.innerHTML=`<div class="modal-head"><h2 id="maintenance-dialog-title">${esc(title)}</h2><button type="button" class="button quiet" data-maintenance-dialog-close>关闭</button></div>${content}`;dialog.showModal();}
