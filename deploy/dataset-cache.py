@@ -478,7 +478,7 @@ class DatasetCache:
             if self.mount is not None and info.st_dev != self.mount[2]:
                 raise CacheError("cache no longer resides on the verified data mount")
             self._root_identity = info.st_dev, info.st_ino
-        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations", ".tiers"):
+        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations", ".tiers", ".provenance"):
             _mkdir(self.root / name)
 
     def _current_mount(self):
@@ -675,9 +675,90 @@ class DatasetCache:
         if getattr(info, 'f_files', 0) > 0 and info.f_favail < 1024 + needed_inodes + self._upload_reserved()[1]:
             raise CacheError("insufficient free inodes including upload reservations")
 
-    def _register(self, actor, dataset, manifest, owners, source_id):
+    def _provenance(self, dataset, version):
+        """Private version provenance, bound to this exact registration.
+
+        Missing historical records are UNKNOWN. Never infer personal origin
+        from an owner list, an upload binding or the dataset's spelling.
+        Caller holds the metadata lock; this does not grant authorization.
+        """
+        self._paths(dataset, version)
+        try:
+            value = _read_json(self.root / ".provenance" / dataset / (version + ".json"))
+        except FileNotFoundError:
+            return None
+        fields = {"schema", "dataset", "version", "owners", "origin", "receipt",
+                  "rootIdentity", "registrationIdentity", "createdAt"}
+        if (not isinstance(value, dict) or set(value) != fields or type(value["schema"]) is not int or value["schema"] != 1
+                or value["dataset"] != dataset or value["version"] != version
+                or value["origin"] not in {"admin", "upload", "workspace", "replica"}
+                or not isinstance(value["rootIdentity"], list) or len(value["rootIdentity"]) != 2
+                or any(type(item) is not int or item < 0 for item in value["rootIdentity"])
+                or not isinstance(value["registrationIdentity"], list)
+                or len(value["registrationIdentity"]) != 5
+                or any(type(item) is not int or item < 0 for item in value["registrationIdentity"])
+                or type(value["createdAt"]) not in (int, float)
+                or not math.isfinite(value["createdAt"]) or value["createdAt"] < 0):
+            raise CacheError("corrupt version provenance; member deletion forbidden")
+        if self._owners(value["owners"]) != value["owners"]:
+            raise CacheError("corrupt version provenance owner binding")
+        if value["origin"] == "admin":
+            if value["receipt"] is not None:
+                raise CacheError("corrupt administrator provenance")
+        else:
+            _identifier(value["receipt"])
+            if len(value["owners"]) != 1:
+                raise CacheError("personal provenance requires one authenticated owner")
+        if (value["rootIdentity"] != list(self._root_identity)
+                or value["registrationIdentity"] != list(self._record_identity(dataset, version))):
+            return None  # Replaced registration/restore must acquire new proof.
+        return value
+
+    def _provenance_actor(self, actor, owners, origin, receipt):
         self._actor(actor, admin=True)
         owners = self._owners(owners)
+        if origin not in {"admin", "upload", "workspace", "replica"}:
+            raise CacheError("invalid trusted provenance origin")
+        if origin == "admin":
+            if receipt is not None:
+                raise CacheError("administrator registration has no personal receipt")
+        else:
+            _identifier(receipt)
+            if owners != [actor.user_id]:
+                raise PermissionError("personal provenance must bind the authenticated owner")
+        return owners
+
+    def _write_provenance(self, actor, dataset, version, owners, origin, receipt):
+        """Trusted creation adapters only; deliberately absent from dispatch.
+
+        Write personal proof only at NEW registration creation. A retry or an
+        administrator changing sources cannot upgrade old/unknown provenance.
+        """
+        owners = self._provenance_actor(actor, owners, origin, receipt)
+        folder = self.root / ".provenance" / dataset
+        _mkdir(folder)
+        _write_json(folder / (version + ".json"), dict(
+            schema=1, dataset=dataset, version=version, owners=owners, origin=origin,
+            receipt=receipt, rootIdentity=list(self._root_identity),
+            registrationIdentity=list(self._record_identity(dataset, version)), createdAt=time.time()))
+
+    def deletion_permissions(self, actor, dataset, version):
+        """Safe permission projection; never expose private proof or paths."""
+        _, identity = self._record_snapshot(actor, dataset, version)
+        with self._locked():
+            self._check_snapshot(actor, dataset, version, identity)
+            owners = self._dataset(actor, dataset)["owners"]
+            proof = self._provenance(dataset, version)
+            personal = (owners == [actor.user_id] and proof is not None
+                        and proof["owners"] == owners
+                        and proof["origin"] in {"upload", "workspace", "replica"})
+            return dict(allowed=actor.is_admin or personal,
+                        memberAllowed=personal,
+                        reason=None if actor.is_admin or personal else "ADMIN_ONLY")
+
+    def _register(self, actor, dataset, manifest, owners, source_id, *, _origin="admin", _receipt=None):
+        self._actor(actor, admin=True)
+        owners = self._provenance_actor(actor, owners, _origin, _receipt)
         manifest = _manifest(manifest)
         version = _version(manifest)
         paths = self._paths(dataset)
@@ -701,6 +782,7 @@ class DatasetCache:
                 raise CacheError("orphan persistent pins require administrator reconciliation")
             self._write_tier(dataset, version, self._default_tier())
             _write_json(filename, record)
+            self._write_provenance(actor, dataset, version, owners, _origin, _receipt)
         else:
             if existing["manifest"] != manifest:
                 raise CacheError("registered version is immutable")

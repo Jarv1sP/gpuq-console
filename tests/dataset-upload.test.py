@@ -139,6 +139,21 @@ class PersonalUploads(unittest.TestCase):
         self.assertEqual(events, [{'opId': upload, 'userId': self.user, 'reference': {'dataset': result['dataset'], 'version': result['version']}, 'origin': 'upload'}])
         self.assertEqual(self.u.load(self.user, upload)['archiveEventId'], upload)
 
+    def test_personal_upload_creation_proof_does_not_authorize_another_owner(self):
+        result, _, files = self.seal()
+        self.fill(result['uploadId'], files)
+        self.call('commit', uploadId=result['uploadId'])
+        self.assertEqual(self.u.worker(self.user, result['uploadId'], 'commit'), 0)
+        actor = D.Principal(self.user)
+        self.assertTrue(self.cache.deletion_permissions(actor, result['dataset'], result['version'])['memberAllowed'])
+        with self.assertRaises(PermissionError):
+            self.cache.deletion_permissions(D.Principal('demo-user-2'), result['dataset'], result['version'])
+        proof = self.cache.root/'.provenance'/result['dataset']/(result['version']+'.json')
+        self.assertEqual(proof.stat().st_mode & 0o777, 0o600)
+        proof.unlink()
+        self.assertFalse(self.cache.deletion_permissions(actor, result['dataset'], result['version'])['allowed'])
+        self.assertEqual(self.call('status', uploadId=result['uploadId'])['state'], 'READY')
+
     def test_archive_intent_failure_prevents_new_publication(self):
         result, _, files = self.seal()
         self.fill(result['uploadId'], files)

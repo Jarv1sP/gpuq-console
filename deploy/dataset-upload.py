@@ -794,7 +794,9 @@ class DatasetUploads:
                 # All authorization, quota admission and reservation conversion
                 # are service-owned. No public operation receives an admin actor.
                 try:
-                    self.cache._register(self.d.Principal(user, True), dataset, manifest, [user], None)
+                    origin = 'replica' if session.get('workerUnit', '').startswith('gpuq-transfer-') else 'upload'
+                    self.cache._register(self.d.Principal(user, True), dataset, manifest, [user], None,
+                                         _origin=origin, _receipt=upload)
                     session['registrationIdentity'] = list(self.cache._record_identity(dataset, version))
                     self.save(session)
                     self.d._write_json(self.reservation(user, upload), self.reservation_value(session, sealed=True))

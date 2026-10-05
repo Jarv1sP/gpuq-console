@@ -258,13 +258,17 @@ class DataWorkspaces:
             dataset = 'w-'+hashlib.sha256(user.encode()).hexdigest()[:16]+'-'+task['name']
             actor = module.Principal(user, False)
             internal = module.Principal(user, True)
-            registered = cache.register_manifest(internal, dataset, manifest, [user])
             # Internal-only source: no arbitrary client path, no configuration
             # mutation and no globally reusable approved source. Evicted copies
             # are republished explicitly from the personal workspace.
             source_id = 'workspace-'+hashlib.sha256((user+'\0'+dataset).encode()).hexdigest()[:40]
             cache.sources[source_id] = source
-            cache.attach_source(internal, dataset, registered['version'], source_id)
+            # Bind source and creation provenance in the same metadata commit.
+            # An existing historical registration is never upgraded to personal
+            # merely because its name/owner matches this workspace.
+            with cache._locked():
+                registered = cache._register(internal, dataset, manifest, [user], source_id,
+                                             _origin='workspace', _receipt=key)
             archive = None
             if self.n.CONFIG.get('storageArchive', {}).get('enabled') is True:
                 archive = self.n.storage_archive()

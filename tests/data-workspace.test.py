@@ -128,6 +128,18 @@ class DataWorkspaceTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 self.call('publish', path=path, name='sample', key=str(uuid.uuid4()))
 
+    def test_workspace_creation_proof_survives_source_binding_but_not_owner_change(self):
+        self.fill()
+        result = self.publish()
+        self.assertEqual(self.w.worker(self.user, result['operationId']), 0)
+        ready = self.call('status', operationId=result['operationId'])
+        actor = self.module.Principal(self.user)
+        self.assertTrue(self.cache.deletion_permissions(actor, ready['dataset'], ready['version'])['memberAllowed'])
+        with self.assertRaises(PermissionError):
+            self.cache.deletion_permissions(self.module.Principal('demo-user-2'), ready['dataset'], ready['version'])
+        self.cache.set_owners(self.module.Principal(self.user, True), ready['dataset'], [self.user, 'demo-user-2'])
+        self.assertFalse(self.cache.deletion_permissions(actor, ready['dataset'], ready['version'])['allowed'])
+
     def test_archive_intent_is_durable_before_publish_and_lost_ack_is_not_publish_failure(self):
         self.fill()
         result = self.publish()
