@@ -212,7 +212,7 @@
  .sb[data-room=users]:has(#mobile-control:not([hidden]) #live-pill:not([hidden])) .page-heading .heading-actions{display:none}
 }
 @media(max-width:360px){
- .sb #app-topbar .wordmark.sm{font-size:calc(8px / .687)}
+ .sb #app-topbar .wordmark{font-size:calc(8px / .687)}
  .sb #app-topbar .guide-link{font-size:0;width:44px;min-width:44px;justify-content:center}
  .sb #app-topbar .guide-link::after{content:'↗';font-size:16px;line-height:1}
  .sb #app-topbar .topbar-right{gap:8px}
