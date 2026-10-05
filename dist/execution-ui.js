@@ -204,6 +204,14 @@ export function executionUI(store,refresh,toast){
     const fieldHelp=(note,control)=>{const help=note?.closest('.ui-info');if(help&&control)control.before(help);};
     fieldHelp(query('#priority-note'),train.querySelector('[name=priority]'));
     for(const name of ['command','datasets']){const label=train.querySelector('[name='+name+']')?.closest('label');fieldHelp(label?.nextElementSibling?.querySelector('.ui-info-content'),label?.querySelector('textarea'));}
+    for(const label of train.querySelectorAll('label')){
+      const help=label.querySelector(':scope>.ui-info'),control=label.querySelector(':scope>:is(input,select,textarea)');
+      if(!help||!control)continue;
+      const caption=document.createElement('span');caption.className='field-caption';
+      const text=document.createElement('span');
+      for(const node of [...label.childNodes])if(node.nodeType===Node.TEXT_NODE)text.append(node);
+      caption.append(text,help);control.before(caption);
+    }
     const environmentHelp=query('#environment-mode-note').closest('.ui-info');query('.project-environment-choice legend').append(environmentHelp);
     const taskHelp=explanation.closest('.ui-info');kicker.querySelector('span').append(taskHelp);
     const contextHeading=query('#workspace-context-title'),contextCaption=document.createElement('div');contextCaption.className='field-caption';contextHeading.before(contextCaption);contextCaption.append(contextHeading,contextInfo);

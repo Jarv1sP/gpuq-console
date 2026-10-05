@@ -169,28 +169,41 @@
 /* Operational controls and field captions share a measurable size and axis. */
 .sb .wb-job-name{min-height:32px;line-height:1.4;min-width:0;overflow-wrap:anywhere}
 .sb .job .job-acts .button{min-height:32px}
-.sb .ui-info>summary{width:32px;height:32px;flex:none}
+.sb .ui-info>summary{width:32px;height:32px;flex:none;margin:0}
 .sb #train-form label{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center}
-.sb #train-form label>:is(input,select,textarea,code,.project-name-error){grid-column:1/-1}
+.sb #train-form label>:is(input,select,textarea,code,.project-name-error,.field-caption){grid-column:1/-1}
 .sb #train-form label>.ui-info{margin:0}
+.sb #train-form .field-caption{display:flex;align-items:center;justify-content:flex-start;gap:8px;min-width:0}
+.sb #train-form .field-caption>.ui-info{margin:0;flex:none}
+.sb #train-form .field-caption>span{min-width:0}
 .sb #page-work .field-caption,.sb #project-create .project-environment-choice legend,.sb #page-work .section-kicker>span:has(.ui-info){display:flex;align-items:center;gap:8px}
 .sb #page-work .field-caption>.ui-info,.sb #project-create .project-environment-choice legend>.ui-info{margin:0}
 .sb .project-environment-segments{grid-template-columns:repeat(3,minmax(0,1fr))}
 .sb .project-environment-segments span{min-height:48px;padding:4px 2px;white-space:normal;line-height:18px;text-align:center}
 .sb .wb-ledger-groups>details>summary{min-height:40px}
 .sb .wb-rail #host-maintenance>summary{min-height:40px;display:flex;align-items:center}
-.sb .wb-progress-hero{container-type:inline-size}
+.sb .wb-progress-hero{container-type:inline-size;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:clamp(16px,3cqi,32px)}
 .sb .wb-progress-hero>div{min-width:0;max-width:100%}
+.sb .wb-progress-hero>div:first-child{container-type:inline-size}
+.sb .wb-progress-number{font-size:clamp(48px,32cqi,140px)}
+.sb .r5-mission-progress{container-type:inline-size;min-width:0}
+.sb .r5-mission-percentage{font-size:clamp(64px,45cqi,300px)}
+.sb .r5-mission-percentage small{font-size:clamp(16px,8cqi,40px)}
+.sb .wb-job-heading{max-width:100%}
+.sb .wb-job-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .wb-focus-state .wb-job-name{min-height:40px}
 .sb .wb-progress-meta{overflow-wrap:anywhere}
 .sb .wb-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(110px,100%),1fr));gap:12px}
 .sb .wb-metrics>div{padding-inline:0;border-left:0;min-width:0}
 .sb #self-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100px,100%),1fr));gap:16px}
+@media(min-width:1100px){.sb #work-title-telemetry{width:clamp(404px,32vw,520px)}}
 @media(max-width:759px){
  .sb .wb-job-name,.sb .wb-rail #project-create>summary,.sb .wb-rail #workspace-files>summary,.sb .wb-ledger-groups>details>summary{min-height:44px}
  .sb .ui-info>summary{width:44px;height:44px}
  .sb .wb-rail #host-maintenance>summary{min-height:44px}
  .sb .project-environment-segments span{min-height:44px}
  .sb .job .job-acts .button{min-height:44px}
- .sb .wb-progress-number{font-size:clamp(64px,42cqi,104px)}
+ .sb .wb-progress-number{font-size:clamp(48px,32cqi,104px)}
+ .sb .wb-focus-state .wb-job-name{min-height:44px}
  .sb #self-summary>div{padding-left:0;border-left:0}
 }

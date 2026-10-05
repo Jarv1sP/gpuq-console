@@ -12,6 +12,8 @@
 .sb #terminal-screen{height:auto;min-width:0;border:0;padding:0}
 /* FitAddon subtracts xterm's padding, rather than its parent's padding. */
 .sb #terminal-screen>.xterm{box-sizing:border-box;width:100%;height:100%;padding:16px 24px}
+/* The keyboard/IME bridge keeps xterm's cursor geometry, not form-field size. */
+.sb #terminal-screen .xterm .xterm-helper-textarea{min-height:0;padding:0;border:0;margin:0}
 .sb .terminal-dialog [hidden]{display:none!important}
 @media(max-width:759px){
   .sb .terminal-dialog .button{min-height:44px}

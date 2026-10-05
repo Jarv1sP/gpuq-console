@@ -5,18 +5,26 @@
 import {inspectGeometry} from './layout-geometry.mjs';
 
 export async function inspectOperationalGeometry(page, specification = {}) {
-  const {scrollGroups = [], viewportContainment = [],viewportPanels=[],textContainment=[], ...shared} = specification;
-  const controls = shared.controls || 'button,input,textarea,select,summary,a[href]';
+  const {scrollGroups = [], viewportContainment = [],viewportPanels=[],textContainment=[],nonvisualInputs=[],nativeHelpRows=[],wideRows=[], ...shared} = specification;
+  // xterm's transparent keyboard/IME bridge is not a visible touch target.
+  // An opt-in exclusion is valid only while the actual input stays transparent;
+  // showing it is a regression, not a way to bypass the normal geometry rules.
+  const invalidInputs=await page.evaluate(selectors=>selectors.flatMap(selector=>
+    [...document.querySelectorAll(selector)].filter(node=>!node.matches('textarea.xterm-helper-textarea')||getComputedStyle(node).opacity!=='0')
+      .map(node=>({rule:'visible-engine-input',elements:[selector],opacity:getComputedStyle(node).opacity}))),nonvisualInputs);
+  const selectedControls = shared.controls || 'button,input,textarea,select,summary,a[href]';
+  const controls = nonvisualInputs.length?':is('+selectedControls+'):not('+nonvisualInputs.join(',')+')':selectedControls;
   const excluded = scrollGroups.map(selector => selector + ' *').join(',');
   const result = await inspectGeometry(page, {...shared,
     controls: excluded ? ':is(' + controls + '):not(' + excluded + ')' : controls});
+  result.failures.push(...invalidInputs);
   for (const selector of scrollGroups) {
     const area = await inspectGeometry(page, {roots: [selector], controls,
       largeTargets: shared.largeTargets, containment: shared.containment});
     result.failures.push(...area.failures);
     for (const key of Object.keys(result.counts)) result.counts[key] += area.counts[key];
   }
-  const visible = await page.evaluate(({roots, controls, viewportContainment,viewportPanels,textContainment,checkVisibleOverlap}) => {
+  const visible = await page.evaluate(({roots, controls, viewportContainment,viewportPanels,textContainment,nativeHelpRows,wideRows,checkVisibleOverlap}) => {
     const failures = [], tolerance = 1;
     const rect = node => node.getBoundingClientRect();
     const name = node => node.id ? '#' + node.id : node.tagName.toLowerCase() + '.' + [...node.classList].join('.');
@@ -68,8 +76,31 @@ export async function inspectOperationalGeometry(page, specification = {}) {
       for(const line of range.getClientRects())if(line.left<box.left-tolerance||line.right>box.right+tolerance)
         failures.push({rule:'text-clipping',elements:[name(node)],left:line.left,right:line.right,boundaryLeft:box.left,boundaryRight:box.right});
     }
+    for(const selector of nativeHelpRows)for(const row of document.querySelectorAll(selector)){
+      const label=row.querySelector(':scope>.field-caption>span,:scope>span:not(.ui-info):not(.field-caption)')||row,help=row.querySelector('.ui-info>summary');
+      if(!help||!visibleRect(help))continue;
+      let labelBox=rect(label);
+      if(label===row){
+        const text=[...row.childNodes].find(node=>node.nodeType===Node.TEXT_NODE&&node.textContent.trim());
+        if(!text)continue;
+        const range=document.createRange();range.selectNodeContents(text);labelBox=range.getBoundingClientRect();
+      }
+      const helpBox=rect(help),gap=helpBox.left-labelBox.right;
+      const centers=[labelBox.top+labelBox.height/2,helpBox.top+helpBox.height/2];
+      if(Math.abs(centers[0]-centers[1])>tolerance)
+        failures.push({rule:'native-help-center',elements:[name(label),name(help)],values:centers});
+      if(gap < -tolerance||gap > 12+tolerance)
+        failures.push({rule:'help-label-gap',elements:[name(label),name(help)],gap,maximum:12});
+    }
+    for(const group of wideRows)if(innerWidth>=group.minimumWidth)for(const parent of document.querySelectorAll(group.parent)){
+      const nodes=[...parent.querySelectorAll(group.children)].filter(node=>visibleRect(node));
+      if(nodes.length<2)continue;
+      const values=nodes.map(node=>rect(node).top);
+      if(Math.max(...values)-Math.min(...values)>tolerance)
+        failures.push({rule:'wide-row-wrap',elements:nodes.map(name),values,minimumWidth:group.minimumWidth});
+    }
     return failures;
-  }, {roots: shared.roots || ['body'], controls, viewportContainment,viewportPanels,textContainment,checkVisibleOverlap:scrollGroups.length>0});
+  }, {roots: shared.roots || ['body'], controls, viewportContainment,viewportPanels,textContainment,nativeHelpRows,wideRows,checkVisibleOverlap:scrollGroups.length>0});
   result.failures.push(...visible); result.pass = result.failures.length === 0;
   return result;
 }

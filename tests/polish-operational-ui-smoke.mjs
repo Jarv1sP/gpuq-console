@@ -33,6 +33,7 @@ const roomSpec={
   bottomReserve:[{content:'#main-content',controls:'#control-strip,#mobile-control,#room-nav'}],
 };
 const workSpec={...roomSpec,roots:['#page-work','#control-strip'],
+  wideRows:[{minimumWidth:1100,parent:'#self-summary',children:':scope>div'}],
   leftEdges:[['.wb-focal .job-top','.wb-focal .subline','.wb-focal .wb-progress-hero','.wb-focal .wb-progress-line'],
     ['.workspace-context-heading','#project-create']],
   centers:[{parent:'.terminal-heading',children:'h3,.ui-info',wrap:true},
@@ -61,7 +62,10 @@ const controlSpec={...roomSpec,roots:['#mission-control'],
   scrollPanels:['#mission-control','.mc-body'],
 };
 const dialogSpec=(selector,scroll)=>({controls,roots:[selector],scrollPanels:selector==='#job-mission'?[selector]:[selector,scroll],scrollGroups:[scroll],
-  centers:[{parent:selector+' .sheet-header',children:':scope>*',wrap:true}],
+  nativeHelpRows:[selector+' #train-form label:has(.ui-info)'],
+  textContainment:selector==='#job-mission'?['.r5-mission-percentage','.r5-mission-time strong','.r5-mission-metrics strong']:[],
+  centers:[{parent:selector+' .sheet-header',children:':scope>*',wrap:true},
+    {parent:selector+' #train-form .field-caption',children:':scope>span,:scope>.ui-info>summary'}],
   buttonRows:[{parent:selector+' .sheet-footer',children:'button'}],
 });
 const scenes=[
@@ -69,12 +73,15 @@ const scenes=[
     ...['work','compute','control'].flatMap(room=>['normal','empty','loading','error','unknown','maintenance'].map(state=>({role,room,state,name:role+'-'+room+'-'+state,
       spec:room==='work'?workSpec:room==='compute'?computeSpec:controlSpec}))),
     ...['work','control'].map(room=>({role,room,state:'counts',name:role+'-'+room+'-all-counts',spec:room==='work'?workSpec:controlSpec})),
+    ...['work','fullscreen'].map(room=>({role,room,state:'complete-report',name:role+'-'+room+'-complete-report',
+      spec:room==='work'?workSpec:dialogSpec('#job-mission','.r5-mission-body')})),
     {role,room:'compute',state:'normal',expanded:true,name:role+'-compute-processes',spec:computeSpec},
     ...['normal','error','unknown'].map(state=>({role,room:'fullscreen',state,name:role+'-fullscreen-'+state,spec:dialogSpec('#job-mission','.r5-mission-body')})),
     {role,room:'submit',state:'normal',name:role+'-submit',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
     {role,room:'project',state:'normal',name:role+'-project',spec:workSpec},
     ...['normal','error','ended'].map(state=>({role,room:'terminal',state,name:role+'-terminal-'+state,
       spec:{controls,roots:['.terminal-dialog'],scrollPanels:['.terminal-dialog','#terminal-screen .xterm-viewport'],
+        nonvisualInputs:['#terminal-screen .xterm .xterm-helper-textarea'],
         viewportContainment:[{parent:'#terminal-screen',child:'#terminal-screen .xterm-screen,#terminal-screen .xterm-viewport'}],
         centers:[{parent:'.terminal-footer',children:':scope>*',wrap:true}],buttonRows:[{parent:'.terminal-dialog .modal-head>div'}]}})),
     ...[1.25,1.5].map(zoom=>({role,room:'work',state:'normal',zoom,toast:true,
@@ -111,6 +118,25 @@ async function checkGeometryRegressions(){
     await page.locator('.xterm-viewport').evaluate(node=>node.style.overflow='auto');
     await page.locator('.xterm-screen').evaluate(node=>node.style.height='140px');
     assert.ok((await inspectOperationalGeometry(page,terminalSpec)).failures.some(row=>row.rule==='viewport-content-clipping'),'visible terminal rows outside the viewport still fail');
+    await page.setContent('<style>#terminal-screen{height:100px}.xterm-helper-textarea{position:absolute;opacity:0;height:20px}</style><div id="terminal-screen"><div class="xterm"><textarea class="xterm-helper-textarea"></textarea></div></div>');
+    const engineSpec={roots:['#terminal-screen'],nonvisualInputs:['#terminal-screen .xterm .xterm-helper-textarea']};
+    assert.equal((await inspectOperationalGeometry(page,engineSpec)).pass,true,'a transparent keyboard bridge is not a visible touch target');
+    await page.locator('.xterm-helper-textarea').evaluate(node=>node.style.opacity='1');
+    assert.ok((await inspectOperationalGeometry(page,engineSpec)).failures.some(row=>row.rule==='visible-engine-input'),'an engine input exposed as a visible control still fails');
+    await page.setContent('<style>.caption{display:flex;align-items:center}.label{font:15px/24px sans-serif}.ui-info>summary{display:flex;width:44px;height:44px;margin-bottom:14px}</style><div class="caption"><span class="label">Training version</span><details class="ui-info"><summary>Info</summary></details></div>');
+    const captionSpec={roots:['.caption'],nativeHelpRows:['.caption'],centers:[{parent:'.caption',children:':scope>span,:scope>.ui-info>summary'}]};
+    assert.ok((await inspectOperationalGeometry(page,captionSpec)).failures.some(row=>row.rule==='inline-center'),'a disclosure margin that displaces the icon from its label is detected');
+    await page.locator('.ui-info>summary').evaluate(node=>node.style.margin='0');
+    assert.equal((await inspectOperationalGeometry(page,captionSpec)).pass,true,'the icon shares its label center without inherited disclosure margins');
+    await page.locator('.ui-info').evaluate(node=>node.style.marginLeft='30px');
+    assert.ok((await inspectOperationalGeometry(page,captionSpec)).failures.some(row=>row.rule==='help-label-gap'),'an explanation detached from its label still fails');
+    await page.setViewportSize({width:1440,height:900});
+    await page.setContent('<div class="readings" style="display:grid;grid-template-columns:1fr;width:300px"><div>Quota</div><div>Training</div><div>Servers</div></div>');
+    const readingsSpec={roots:['.readings'],wideRows:[{minimumWidth:1100,parent:'.readings',children:':scope>div'}]};
+    assert.ok((await inspectOperationalGeometry(page,readingsSpec)).failures.some(row=>row.rule==='wide-row-wrap'),'desktop summary readings cannot unexpectedly become a tall single column');
+    await page.locator('.readings').evaluate(node=>node.style.gridTemplateColumns='repeat(3,1fr)');
+    assert.equal((await inspectOperationalGeometry(page,readingsSpec)).pass,true,'desktop summary readings share one row');
+    await page.setViewportSize({width:320,height:700});
     await page.setContent('<div class="popup" style="position:fixed;left:280px;top:680px;width:100px;height:100px">Full explanation</div>');
     const popupSpec={roots:['body'],controls:'button',viewportPanels:['.popup']};
     assert.ok((await inspectOperationalGeometry(page,popupSpec)).failures.some(row=>row.rule==='popup-clipping'),'a popup outside the viewport still fails');
@@ -143,8 +169,8 @@ try{
           processesAvailable:true,processes:gpu===0?[{pid:1234,memoryUsedMiB:16384,task:{id:'fixture-running',name:'长任务名称用于检查行高与表格边缘',state:'RUNNING',submitter:{name:member.name}}}]:[]})),
         gpuq:{connected:true,health:'ok',observeOnly:false,schedulableIndices:[0],jobs:[],capabilities:['console-placement-v1','console-sharing-v1','console-hami-v1']}}))};
       const job=(id,status)=>({id,userId:principal.userId,username:principal.username,machine,project,release,name:'训练任务名称 · '+id,cards:2,state:status,priority:'normal',createdAt:Date.now()/1000-3600,
-        spec:{id,argv:['python','train.py']},latestAttempt:{id:'attempt-'+id,finishedAt:Date.now()/1000-60,exitCode:status==='FAILED'?1:null},
-        ...(status==='RUNNING'?{assignedIndices:[0,1],progress:{reported:true,stale:false,snapshot:{epochsCompleted:12,epochsTotal:40,updatedAt:Date.now()/1000,etaSeconds:900,metrics:{loss:.438,val_acc:.716,lr:.0003}}}}:{}),
+        spec:{id,argv:['python','train.py']},latestAttempt:{id:'attempt-'+id,...(status==='FAILED'?{finishedAt:Date.now()/1000-60,exitCode:1}:{})},
+        ...(status==='RUNNING'?{startedAt:Date.now()/1000-3600,assignedIndices:[0,1],progress:{reported:true,stale:false,snapshot:{epochsCompleted:scene.state==='complete-report'?40:12,epochsTotal:40,updatedAt:Date.now()/1000,etaSeconds:900,metrics:{loss:.438,val_acc:.716,lr:.0003}}}}:{}),
         ...(status==='FAILED'?{error:'保存训练结果时出现错误，请查看日志与诊断。'}:{})});
       state.jobs=scene.state==='empty'?[]:scene.state==='error'?[job('fixture-failed','FAILED')]:scene.state==='unknown'?[job('fixture-unknown','UNKNOWN')]:
         [job('fixture-running','RUNNING'),job('fixture-queued','PENDING'),job('fixture-failed','FAILED')];
@@ -199,7 +225,16 @@ try{
         },{userId:principal.userId,machine,project});
         if(scene.room==='control'){await page.keyboard.press('Control+k');await page.locator('#mission-control').waitFor({state:'visible'});}
         if(scene.room==='fullscreen'){await page.locator('.wb-focal [data-job-mission]').click();await page.locator('#job-mission').waitFor({state:'visible'});}
-        if(scene.room==='submit'){await page.locator('#open-submit').click();await page.locator('#work-submit').waitFor({state:'visible'});}
+        if(scene.room==='submit'){
+          await page.locator('#open-submit').click();await page.locator('#work-submit').waitFor({state:'visible'});
+          if(!before){
+            assert.equal(await page.locator('#train-form label>.ui-info').count(),0,'field explanations belong to their label row, including training-version help');
+            for(const name of ['task-description','priority','release','command','datasets']){
+              const label=page.locator('#train-form label').filter({has:page.locator('[name='+name+']')});
+              assert.equal(await label.locator(':scope>.field-caption .ui-info>summary').count(),1,'labelled '+name+' explanation is retained');
+            }
+          }
+        }
         if(scene.room==='project'){await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('container-layout');await page.locator('[name=environment-choice][value=oci]').check();}
         if(scene.room==='terminal'){await page.locator('#terminal-open').click();await page.locator('.terminal-dialog').waitFor({state:'visible'});if(scene.state==='error')await page.locator('#terminal-connection-note').filter({hasText:'未确认'}).waitFor();if(scene.state==='ended')await page.locator('#terminal-connection-note').filter({hasText:'终端已结束'}).waitFor();}
         if(scene.help)await page.locator(scene.help).click();

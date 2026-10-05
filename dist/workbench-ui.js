@@ -181,7 +181,7 @@ export function workbenchCards(jobs,{actions=()=>'',focusId,maintenance,ledger='
   const active=jobs.filter(job=>!endedJob(job));
   const focal=active.find(job=>job.id===focusId)||active.find(job=>job.state==='RUNNING'&&!job.cancelRequested)||active.find(job=>job.state==='UNKNOWN')||active[0]||(historyState?null:jobs.at(-1));
   const completed=jobs.filter(job=>endedJob(job)&&job.id!==focal?.id&&(!historyState||job.state===historyState));
-  const heading=(job,compact=false)=>`<div class="job-top"><div class="wb-job-heading">${stateHTML(job)}<button type="button" class="wb-job-name" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button>${compact?`<span class="wb-job-quick">${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数待更新'}</span>`:''}</div><span class="mono wb-job-id" title="${escapeUI(job.id)}">${escapeUI(String(job.id).slice(0,8))}</span></div>`;
+  const heading=(job,compact=false)=>`<div class="job-top"><div class="wb-job-heading">${stateHTML(job)}<button type="button" class="wb-job-name" title="${escapeUI(job.name||'训练')}" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button>${compact?`<span class="wb-job-quick">${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数待更新'}</span>`:''}</div><span class="mono wb-job-id" title="${escapeUI(job.id)}">${escapeUI(String(job.id).slice(0,8))}</span></div>`;
   const compact=job=>`<article class="job compact-job" data-workbench-job="${escapeUI(job.id)}">${heading(job,true)}${job.error?`<p class="form-error">${escapeUI(job.error)}</p>`:''}<div class="job-acts"><button class="button quiet" type="button" data-job-focus="${escapeUI(job.id)}">聚焦</button>${actions(job)}${infoHTML(jobFacts(job),'任务事实')}</div></article>`;
   let hero='';
   if(focal){
