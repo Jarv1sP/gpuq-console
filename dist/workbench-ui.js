@@ -1,4 +1,4 @@
-import {progressPercent,progressText} from './job-progress.js';
+import {progressPercent,progressText,jobTiming} from './job-progress.js';
 import {maintenanceActive} from './maintenance-state.js';
 import {captureObject,sharedObject,reducedMotion} from './motion-ui.js';
 
@@ -178,7 +178,13 @@ export function workbenchCards(jobs,{actions=()=>'',focusId,maintenance,ledger='
 export function jobOverviewHTML(job,{owned=true,schedulingHTML=''}={}){
   const readout=trainingReadout(job);
   const command=Array.isArray(job.command)?job.command:job.argv;
-  return `<section class="job-overview"><div class="job-overview-fact">${stateHTML(job)}${serverIdHTML(job.machine||'服务器未确认')}<span>${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数未确认'}</span></div><p>${escapeUI(job.description||'未填写描述')}</p><dl class="job-overview-grid"><div><dt>完整任务 ID</dt><dd><code>${escapeUI(job.id)}</code><button class="button quiet" type="button" data-copy-job="${escapeUI(job.id)}">复制 ID</button></dd></div>${job.project?`<div><dt>项目 / 训练版本</dt><dd>${escapeUI(job.project)}<code>${escapeUI(job.release||'版本未提供')}</code></dd></div>`:''}<div><dt>调度说明</dt><dd>${escapeUI(job.queueReason||'暂无调度说明')}</dd></div><div><dt>更新于</dt><dd>${escapeUI(shortTime(job.schedulerCheckedAt||job.checkedAt)||'未提供')}</dd></div></dl>${trajectoryHTML(job)}${infoHTML(readout.description.replaceAll('自报','训练上报'),'训练进度说明')}${owned&&command?.length?`<details class="job-command"><summary>训练命令</summary><pre>${escapeUI(command.join(' '))}</pre></details>`:''}${schedulingHTML?`<details class="job-command"><summary>卡数与调度策略</summary><div class="job-scheduling-facts">${schedulingHTML}</div></details>`:''}${job.latestAttempt?`<details class="job-command"><summary>最近运行记录</summary><dl><dt>运行 ID</dt><dd>${escapeUI(job.latestAttempt.id||'未记录')}</dd><dt>退出码</dt><dd>${escapeUI(job.latestAttempt.exitCode??'未记录')}</dd><dt>原因</dt><dd>${escapeUI(job.latestAttempt.failureReason||'未记录')}</dd></dl></details>`:''}<h3>主日志</h3><pre id="job-log-preview">正在读取主日志…</pre></section>`;
+  return `<section class="job-overview"><div class="job-overview-fact">${stateHTML(job)}${serverIdHTML(job.machine||'服务器未确认')}<span>${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数未确认'}</span></div><p>${escapeUI(job.description||'未填写描述')}</p><dl class="job-overview-grid"><div><dt>完整任务 ID</dt><dd><code>${escapeUI(job.id)}</code><button class="button quiet" type="button" data-copy-job="${escapeUI(job.id)}">复制 ID</button></dd></div>${job.project?`<div><dt>项目 / 训练版本</dt><dd>${escapeUI(job.project)}<code>${escapeUI(job.release||'版本未提供')}</code></dd></div>`:''}<div><dt>调度说明</dt><dd>${escapeUI(job.queueReason||'暂无调度说明')}</dd></div><div><dt>更新于</dt><dd>${escapeUI(shortTime(job.schedulerCheckedAt||job.checkedAt)||'未提供')}</dd></div></dl>${jobTimingHTML(job)}${trajectoryHTML(job)}${infoHTML(readout.description.replaceAll('自报','训练上报'),'训练进度说明')}${owned&&command?.length?`<details class="job-command"><summary>训练命令</summary><pre>${escapeUI(command.join(' '))}</pre></details>`:''}${schedulingHTML?`<details class="job-command"><summary>卡数与调度策略</summary><div class="job-scheduling-facts">${schedulingHTML}</div></details>`:''}${job.latestAttempt?`<details class="job-command"><summary>最近运行记录</summary><dl><dt>运行 ID</dt><dd>${escapeUI(job.latestAttempt.id||'未记录')}</dd><dt>退出码</dt><dd>${escapeUI(job.latestAttempt.exitCode??'未记录')}</dd><dt>原因</dt><dd>${escapeUI(job.latestAttempt.failureReason||'未记录')}</dd></dl></details>`:''}<h3>主日志</h3><pre id="job-log-preview">正在读取主日志…</pre></section>`;
+}
+
+export function jobTimingHTML(job){
+  if(!endedJob(job))return '';
+  const timing=jobTiming(job),display=value=>value?`<time datetime="${escapeUI(value)}">${escapeUI(new Date(value).toLocaleString('zh-CN',{hour12:false}))}</time>`:'未确认';
+  return `<dl class="job-overview-grid"><div><dt>节点运行结束</dt><dd>${display(timing.workerFinishedAt)}</dd></div><div><dt>门户确认终态</dt><dd>${display(timing.terminalObservedAt)}</dd></div></dl>`;
 }
 
 export function elapsedTraining(job,now=Date.now()/1000){

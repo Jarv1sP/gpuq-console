@@ -475,6 +475,8 @@ gpuctl diagnostics JOB_ID --json
 
 网页任务表可显示轮次、步数和训练上报 ETA。准确进度需要程序接入 `gpuq.progress.ProgressReporter`；未适配显示「进度未上报」，仍可看日志。训练上报 100% 或异常，不代表平台已确认任务结束。`RUNNING` 不保证每个 worker 都健康；先看最近 200 行主日志，再看 worker 诊断、退出原因和历史分配。
 
+任务详情和 CLI 区分「节点运行结束」与「门户确认终态」：前者来自最近一次调度运行记录，后者可能因离线或稍后对账而延迟。原始 JSON 的 `workerFinishedAt` 与 `terminalObservedAt` 分别对应两者；旧字段 `finishedAt` 保留门户确认时间的兼容含义，不应用来计算实际训练时长。节点结束证据缺失时显示未确认；不因诊断包不完整就编造退出原因，也不改写原任务历史。
+
 任务信息新版还可查询同机成员的公开姓名、任务名和描述：
 
 ```sh local

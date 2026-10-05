@@ -82,3 +82,21 @@ test('the same persistence rollback protects background observations from SQLite
   const persisted=JSON.parse(f.service.db.prepare('SELECT data FROM portal_state').get().data).jobs[0];
   assert.equal(f.job.state,'RUNNING');assert.equal(f.job.finishedAt,undefined);assert.equal(persisted.state,'RUNNING');assert.equal(usage(f.service.store.jobs,f.job.userId),1);
 });
+
+test('historical terminal HTTP and downloaded CLI project separate clocks without rewriting stored history',async t=>{
+  const f=await fixture(t),observed='2026-10-04T20:59:08.610Z';
+  Object.assign(f.job,{state:'CANCELED',finishedAt:observed,latestAttempt:{id:'Ahistory',ordinal:1,state:'CANCELED',exitCode:15,
+    failureReason:null,startedAt:1791061513.3825824,finishedAt:1791096621.3531966}});
+  f.service.save();const persisted=()=>JSON.parse(f.service.db.prepare('SELECT data FROM portal_state').get().data).jobs[0];
+  const before=persisted();
+  const state=(await f.service.invoke(f.login.token,'state')).state.jobs[0];
+  assert.equal(state.finishedAt,observed);assert.equal(state.terminalObservedAt,observed);
+  assert.equal(state.workerFinishedAt,'2026-10-04T06:50:21.353Z');
+  const human=await f.cli(['jobs']).ended;assert.equal(human.code,0,human.err);
+  assert.match(human.out,/节点运行结束：2026-10-04T06:50:21\.353Z.*门户确认终态：2026-10-04T20:59:08\.610Z/);
+  const raw=await f.cli(['jobs','--json']).ended;assert.equal(raw.code,0,raw.err);
+  assert.equal(JSON.parse(raw.out).data[0].workerFinishedAt,state.workerFinishedAt);
+  const watch=await f.cli(['watch',f.job.id]).ended;assert.equal(watch.code,130,watch.err);
+  assert.match(watch.out,/节点运行结束：2026-10-04T06:50:21\.353Z/);assert.match(watch.out,/退出码 15/);
+  assert.deepEqual(persisted(),before);assert.deepEqual(f.job,before);assert.deepEqual(f.calls,[]);
+});

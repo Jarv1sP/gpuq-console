@@ -38,6 +38,29 @@ export function applyJobFeedback(job,result){
   job.latestAttempt=normalizeAttempt(result.latestAttempt);
 }
 
+const EXITED_ATTEMPTS=new Set(['EXITED_SUCCESS','EXITED_FAILURE','CANCELED','PREEMPTED']);
+function isoTime(value,seconds=false){
+  if(seconds?!finite(value)||value<=0:typeof value!=='string'||!value)return null;
+  const date=new Date(seconds?value*1000:value);
+  return Number.isFinite(date.getTime())?date.toISOString():null;
+}
+export function jobTiming(job){
+  // finishedAt is the legacy portal-observation timestamp. Project distinct
+  // names without migrating history or inferring an exit from reconciliation.
+  const attempt=job.latestAttempt,started=isoTime(attempt?.startedAt,true);
+  const exited=EXITED_ATTEMPTS.has(attempt?.state)&&started&&finite(attempt?.finishedAt)
+    &&attempt.finishedAt>=attempt.startedAt?isoTime(attempt.finishedAt,true):null;
+  return {workerStartedAt:started,workerFinishedAt:exited,
+    workerTimeSource:started?'scheduler-attempt':null,
+    terminalObservedAt:JOB_TERMINAL.has(job.state)?isoTime(job.terminalObservedAt??job.finishedAt):null};
+}
+export function jobTimingText(job){
+  if(!JOB_TERMINAL.has(job.state))return '';
+  const timing=jobTiming(job);
+  return ['节点运行结束：'+(timing.workerFinishedAt||'未确认'),
+    '门户确认终态：'+(timing.terminalObservedAt||'未记录')].join(' · ');
+}
+
 export function progressPercent(progress){
   const s=progress?.snapshot;if(!progress?.reported||!s)return null;
   const completed=s.stepsTotal?s.stepsCompleted:s.epochsCompleted,total=s.stepsTotal||s.epochsTotal;
@@ -70,6 +93,7 @@ export function jobFeedbackText(job){
   const attempt=job.latestAttempt;
   if(attempt?.exitCode!==null&&attempt?.exitCode!==undefined)parts.push('退出码 '+attempt.exitCode);
   if(attempt?.failureReason)parts.push(attempt.failureReason);
+  const timing=jobTimingText(job);if(timing)parts.push(timing);
   return parts.join('\n');
 }
 
