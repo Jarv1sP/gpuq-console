@@ -93,6 +93,32 @@ class RuntimeDeployment(unittest.TestCase):
     def test_project_upgrade_explicit_ray_cohort_has_resource_dependencies(self):
         self.projects_apply('ray-p0');self.assert_complete('ray-p0')
 
+    def test_admin_quota_lifecycle_is_deployed_with_its_setup_dependency_in_every_profile(self):
+        # The offline administrator command is not imported by the node RPC
+        # entrypoint. Exercise its real deployed CLI, not just a file count.
+        for profile in ('common-p0','ray-p0'):
+            with self.subTest(profile=profile):
+                planned=dict(node_runtime.runtime_plan(profile))
+                for name in ('manage-storage-quota.py','configure-storage-quota.py'):
+                    self.assertIn(name,planned)
+                self.projects_apply(profile);self.assert_complete(profile)
+                before={p.name:p.read_bytes() for p in self.dest.iterdir() if p.is_file()}
+                result=subprocess.run([sys.executable,'-B',str(self.dest/'manage-storage-quota.py'),'--help'],
+                                      capture_output=True,text=True,timeout=10)
+                self.assertEqual(result.returncode,0,result.stderr)
+                for command in ('policy','migrate','status'):self.assertIn(command,result.stdout)
+                self.assertEqual(before,{p.name:p.read_bytes() for p in self.dest.iterdir() if p.is_file()})
+
+    def test_admin_quota_setup_omission_aborts_real_import_graph_before_copy(self):
+        manifest=json.loads((self.source/'node-runtime.json').read_text())
+        manifest['dependencies'].remove('configure-storage-quota.py')
+        (self.source/'node-runtime.json').write_text(json.dumps(manifest))
+        before={p.name:p.read_bytes() for p in self.dest.iterdir() if p.is_file()}
+        with self.assertRaisesRegex(SystemExit,'misses dependencies.*configure-storage-quota'):
+            self.projects_apply()
+        self.assertEqual(before,{p.name:p.read_bytes() for p in self.dest.iterdir() if p.is_file()})
+        self.assertFalse(list(self.dest.glob('before-projects-*')))
+
     def test_missing_ray_only_dependencies_abort_without_downgrading_existing_profile(self):
         shutil.copy2(DEPLOY/'sandbox-runner.py',self.dest/'sandbox-runner.py')
         before=(self.dest/'sandbox-runner.py').read_bytes()
