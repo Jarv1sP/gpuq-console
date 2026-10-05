@@ -18,12 +18,15 @@ test('user guide source contains no captured command diagnostics', () => {
   assert.doesNotMatch(guide, /^(?:git:\s+(?:warning|error):|fatal:|npm (?:WARN|ERR!)\b|Traceback \(most recent call last\):)/m);
 });
 
-test('guide explains authorization labels and keeps small personal weights in the project',()=>{
+test('guide explains authorization labels and keeps personal model inputs separate from datasets',()=>{
   assert.match(guide,/共享授权用户/);assert.match(guide,/不把授权用户当成创建者/);
   assert.match(guide,/各机授权不同/);assert.match(guide,/旧节点未完整提供归属/);
-  assert.match(guide,/个人的小体积模型权重.*`\/workspace\/weights`/);
+  assert.match(guide,/个人预训练权重、tokenizer 和模型配置.*`\/workspace\/weights`/);
+  assert.match(guide,/`\/workspace\/models`/);assert.match(guide,/`\/workspace\/tokenizers`/);
+  assert.match(guide,/只读的固定输入/);assert.match(guide,/数据集只登记训练、验证、测试样本/);
+  assert.match(guide,/不登记为数据集/);assert.match(guide,/不要覆盖输入权重/);
   assert.match(guide,/不用每次从电脑重新上传/);assert.match(guide,/服务器内部复制快照/);
-  assert.match(guide,/新训练产生的 checkpoint 仍写每个任务独立的 `\/outputs`/);
+  assert.match(guide,/新训练产生的 checkpoint 和其他输出仍写每个任务独立的 `\/outputs`/);
 });
 
 test('user guide has the seven stable chapters used by the website', () => {
