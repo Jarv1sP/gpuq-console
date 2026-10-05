@@ -3,17 +3,20 @@ import {scanBrowserDirectory,uploadBrowserDataset,confirmedDatasetUpload} from '
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
 import {transferUploadCall} from './transfer-upload.js';
 import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
-import {infoHTML,discloseInfo,serverIdHTML,serverSelectLabel} from './workbench-ui.js';
+import {serverIdHTML,serverSelectLabel} from './workbench-ui.js';
 import {reducedMotion} from './motion-ui.js';
 import {LARGE_RELAY_BYTES,transferBytes,uploadPhase} from './data-route.js';
+import {cacheFact,cacheProgress,cacheIconHTML,databaseGroundHTML,databaseSummary,datasetFlowDetailHTML,uploadJourneyHTML,datasetInfoHTML as infoHTML,discloseDatasetInfo as discloseInfo} from './dataset-flow.js';
+import {cacheAdminHTML,datasetCacheAdminUI} from './dataset-cache-admin.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={READY:'本机已就绪',REGISTERED:'待准备',STAGING:'未完成，可续传',PREPARING:'准备中',FAILED:'准备失败',NOT_LOCAL:'本机没有此版本',UNKNOWN:'本机状态待确认'};
 const bytesLabel=value=>Number.isFinite(value)&&value>=0?transferBytes(value):'未知';
-export function archiveStatus(storage){
+export function archiveStatus(storage,expectedVersion=null){
   if(!storage)return '';
-  const saved=storage.phase==='ARCHIVED'&&storage.originalRetained===true;
-  const text=saved?`长期保存 · ${storage.archiveMachine}`:({QUEUED:'等待长期保存',COPYING:'长期保存中',PROVISIONING:'校验长期保存',CERTIFYING:'检查恢复能力',FAILED:'长期保存失败',BLOCKED:'长期保存待确认'}[storage.phase]||'长期保存待确认');
-  return `<div class="dataset-storage" role="status">${esc(text)} ${infoHTML(saved?'空闲训练副本可以回收，需要时重新准备。长期保存的数据继续保留。':'长期保存尚未确认，本机数据继续保留。只有确认可以恢复后，才会回收空闲训练副本。','长期保存说明')}</div>${storage.error?`<p class="form-error">${esc(storage.error)}</p>`:''}${['FAILED','BLOCKED'].includes(storage.phase)?`<button class="button" data-retry-archive="${esc(storage.dataset)}" data-version="${esc(storage.version)}">重试长期保存</button>`:''}`;
+  const matching=!expectedVersion||storage.version===expectedVersion;
+  const saved=matching&&storage.phase==='ARCHIVED'&&storage.originalRetained===true&&typeof storage.archiveMachine==='string'&&storage.archiveMachine.length>0;
+  const text=saved?`原件已保存 · ${storage.archiveMachine}`:matching?({QUEUED:'等待存入',COPYING:'存入中',PROVISIONING:'校验中',CERTIFYING:'检查恢复能力',FAILED:'存入数据库失败',BLOCKED:'待确认'}[storage.phase]||'待确认'):'待确认';
+  return `<div class="dataset-storage" role="status">${esc(text)} ${infoHTML(saved?'原件不会被释放。空闲缓存释放后，用时从数据库取回。':'存入数据库尚未确认，本机数据继续保留。只有确认可取回且没有训练在用的缓存才会释放。','数据库说明')}</div>${storage.error?`<p class="form-error">${esc(storage.error)}</p>`:''}${matching&&['FAILED','BLOCKED'].includes(storage.phase)?`<button class="button" data-retry-archive="${esc(storage.dataset)}" data-version="${esc(storage.version)}">重试存入数据库</button>`:''}`;
 }
 export function capacityText(capacity){
   if(!capacity||capacity.available!==true||!Number.isFinite(capacity.availableBytes)||capacity.availableBytes<0||!Number.isFinite(capacity.filesystemBytes)||capacity.filesystemBytes<0)return '容量待更新';
@@ -53,39 +56,42 @@ export function datasetCopyRoute(version,catalog){
   if(!(version.locations||[]).some(row=>row.machine===source&&row.state==='READY'))return null;
   return {source,target,bytes:Number.isFinite(version.bytes)&&version.bytes>=0?version.bytes:null};
 }
-export function datasetRows(catalog){
+export function datasetRows(catalog,options={}){
   const machines=datasetMachines(catalog),selected=machines.findIndex(row=>row.machine===catalog.machine);
   const rows=(catalog?.datasets||[]).flatMap(item=>(item.versions||[]).map(v=>{
     const state=v.state||'UNKNOWN',locations=Array.isArray(v.locations)?v.locations:[],route=datasetCopyRoute(v,catalog),remoteSource=v.canPrepare===true&&typeof v.sourceMachine==='string'&&v.sourceMachine.length>0,selectable=state==='READY'||state==='PREPARING'||v.canPrepare===true&&(['REGISTERED','STAGING'].includes(state)||state==='NOT_LOCAL'&&remoteSource);
     const ownerLabel=typeof v.ownerLabel==='string'?v.ownerLabel:'所属用户：未知';
     const differentOwners=locations.some(location=>location.ownerLabel!==v.ownerLabel);
     const where=locations.length?`<p class="dataset-locations${differentOwners?'':' dataset-location-summary'}">副本位置：${locations.map(location=>`${esc(location.machine)} · ${esc(location.state==='READY'?'已就绪':labels[location.state]||'待确认')}${differentOwners?` · ${esc(location.ownerLabel||'所属用户：未知')}`:''}`).join('；')}</p>`:'';
-    const storage=archiveStatus(locations.find(location=>location.machine===catalog.machine)?.storage);
+    const storage=archiveStatus(locations.find(location=>location.machine===catalog.machine)?.storage,v.version);
     const help=v.canPrepare===false&&!['READY','PREPARING'].includes(state)?(state==='NOT_LOCAL'?'没有可用复制来源':state==='UNKNOWN'?'本机状态待更新':String(item.dataset).startsWith('w-')?'到个人数据空间重新发布':'重新选择同一目录继续上传') : '';
     const cells=machines.map(machine=>{
       const location=datasetLocation(v,machine,catalog),target=machine.machine===catalog.machine,routeCell=route&&(target||machine.machine===route.source);
-      const content=`${serverIdHTML(machine.machine,'dataset-machine-label')}<span class="dataset-location-status"><span class="dataset-location-icon" aria-hidden="true"></span><span class="dataset-location-text">${esc(location.label)}</span></span>`;
-      return `<div class="dataset-location${target?' dataset-target':''}" data-machine="${esc(machine.machine)}" data-location-state="${location.state}" role="cell" aria-label="${esc(machine.machine+' · '+location.label)}">${routeCell?`<button type="button" class="dataset-location-fact dataset-route-cell" data-route-cell data-route-source="${esc(route.source)}" data-route-target="${esc(route.target)}" data-route-bytes="${route.bytes===null?'':route.bytes}" aria-label="${esc(route.source+' → '+route.target+'，准备到本机')}" title="准备到本机">${content}</button>`:`<div class="dataset-location-fact">${content}</div>`}</div>`;
+      const cache=cacheFact(v,machine.machine,catalog,location.state);
+      const progress=cache.kind==='fetch'?cacheProgress(cache.progress):null,label=cache.label+(progress===null?'':' '+progress+'%');
+      const content=`${serverIdHTML(machine.machine,'dataset-machine-label')}<span class="dataset-location-status" title="${esc(label)}">${cacheIconHTML(cache)}<span class="dataset-location-text">${esc(label)}</span></span>`;
+      return `<div class="dataset-location${target?' dataset-target':''}" data-machine="${esc(machine.machine)}" data-location-state="${location.state}" data-cache-state="${cache.kind}" role="cell" aria-label="${esc(machine.machine+' · '+location.label)}">${routeCell?`<button type="button" class="dataset-location-fact dataset-route-cell" data-route-cell data-route-source="${esc(route.source)}" data-route-target="${esc(route.target)}" data-route-bytes="${route.bytes===null?'':route.bytes}" aria-label="${esc(route.source+' → '+route.target+'，准备到本机')}" title="准备到本机">${content}</button>`:`<div class="dataset-location-fact">${content}</div>`}${cache.kind==='fetch'?'<span class="dataset-cache-riser" aria-hidden="true"></span>':''}</div>`;
     }).join('');
     const versionHelp=route?'目录确认了复制来源，传输通道尚未返回。点击格子准备到所选服务器；数据就绪后才排显卡，准备期间不占额度。':selectable&&state!=='READY'?'数据准备完成后才排显卡。准备期间不占额度。':'';
     const files=Number.isSafeInteger(v.files)&&v.files>=0?v.files.toLocaleString('zh-CN')+' 个文件':'文件数未知';
-    return `<article class="dataset-card" role="rowgroup"><div class="dataset-matrix-row${route?' dataset-route-row':''}" role="row"><div class="dataset-card-heading" role="rowheader"><h3>${esc(item.name||item.dataset)}</h3><p class="dataset-owner">${esc(ownerLabel)}</p><code class="dataset-short-version">${esc(String(v.version||'').slice(0,12))}</code></div>${cells}<div class="dataset-volume" role="cell">${esc(bytesLabel(v.bytes))}<small>${esc(files)}</small></div></div>${route?`<div class="dataset-mobile-route" aria-label="${esc(route.source+' → '+route.target)}">${serverIdHTML(route.source)}<span aria-hidden="true">→</span>${serverIdHTML(route.target)}${route.bytes===null?'':`<small>· ${esc(bytesLabel(route.bytes))}</small>`}</div>`:''}<div class="dataset-row-details dataset-matrix-row" role="row"><div class="dataset-details-cell" role="cell"><details class="dataset-version-details"><summary>版本与路径</summary><span data-state="${esc(state)}" class="dataset-readiness">${esc(labels[state]||state)}</span><label class="field">版本<input readonly value="${esc(item.dataset+'@'+v.version)}" aria-label="${esc(item.dataset)} 的版本" spellcheck="false"></label><p class="muted">训练路径：<code>/data2/${esc(item.dataset)}</code>（只读）</p>${where}${storage}</details>${help?`<span class="dataset-guidance">${esc(help)}</span>`:''}${versionHelp?infoHTML(versionHelp,'版本与准备说明'):''}${v.error?`<p class="form-error" role="status">${esc(v.error)}</p>`:''}</div>${machines.map(machine=>`<div data-machine="${esc(machine.machine)}" class="dataset-actions-cell${machine.machine===catalog.machine?' dataset-target':''}" role="cell">${machine.machine===catalog.machine?`<div class="file-actions">${v.canPrepare===false?'':`<button class="button" data-prepare-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${state==='READY'?'hidden':''} ${['READY','PREPARING','UNKNOWN'].includes(state)?'disabled':''}>准备到本机</button>`}<button class="button primary" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${selectable?'':'disabled'}>${selectable&&state!=='READY'?'准备后训练':'用于训练'}</button></div>`:''}</div>`).join('')}<div role="cell"></div></div></article>`;
+    return `<article class="dataset-card" role="rowgroup"><div class="dataset-matrix-row${route?' dataset-route-row':''}" role="row"><div class="dataset-card-heading" role="rowheader"><h3>${esc(item.name||item.dataset)}</h3><p class="dataset-owner">${esc(ownerLabel)}</p><code class="dataset-short-version">${esc(String(v.version||'').slice(0,12))}</code></div>${cells}<div class="dataset-volume" role="cell">${esc(bytesLabel(v.bytes))}<small>${esc(files)}</small></div></div>${databaseGroundHTML(v)}${route?`<div class="dataset-mobile-route" aria-label="${esc(route.source+' → '+route.target)}">${serverIdHTML(route.source)}<span aria-hidden="true">→</span>${serverIdHTML(route.target)}${route.bytes===null?'':`<small>· ${esc(bytesLabel(route.bytes))}</small>`}</div>`:''}<div class="dataset-row-details dataset-matrix-row" role="row"><div class="dataset-details-cell" role="cell"><details class="dataset-version-details"><summary>版本与路径</summary>${datasetFlowDetailHTML(item.dataset,v,catalog,route,options)}<span data-state="${esc(state)}" class="dataset-readiness">${esc(labels[state]||state)}</span><label class="field">版本<input readonly value="${esc(item.dataset+'@'+v.version)}" aria-label="${esc(item.dataset)} 的版本" spellcheck="false"></label><p class="muted">训练路径：<code>/data2/${esc(item.dataset)}</code>（只读）</p>${where}${storage}</details>${help?`<span class="dataset-guidance">${esc(help)}</span>`:''}${versionHelp?infoHTML(versionHelp,'版本与准备说明'):''}${v.error?`<p class="form-error" role="status">${esc(v.error)}</p>`:''}<span class="dataset-more-slot" data-dataset-more-slot data-machine="${esc(catalog.machine)}" data-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" data-dataset-state="${esc(state)}"${locations.find(row=>row.machine===catalog.machine)?.dataset?` data-local-dataset="${esc(locations.find(row=>row.machine===catalog.machine).dataset)}"`:""}></span></div>${machines.map(machine=>`<div data-machine="${esc(machine.machine)}" class="dataset-actions-cell${machine.machine===catalog.machine?' dataset-target':''}" role="cell">${machine.machine===catalog.machine?`<div class="file-actions">${v.canPrepare===false?'':`<button class="button" data-prepare-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${state==='READY'?'hidden':''} ${['READY','PREPARING','UNKNOWN'].includes(state)?'disabled':''}>准备到本机</button>`}<button class="button primary" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${selectable?'':'disabled'}>${selectable&&state!=='READY'?'准备后训练':'用于训练'}</button></div>`:''}</div>`).join('')}<div role="cell"></div></div></article>`;
   })).join('');
   if(!rows)return `<div class="empty">${catalog?.partial?'目录未确认，请刷新。':'还没有数据集，从“添加数据”开始。'}</div>`;
-  return `<div class="dataset-matrix" data-machine-count="${machines.length}" data-selected-column="${selected}" role="table" tabindex="0" aria-label="数据版本的副本位置"><div class="dataset-matrix-row dataset-matrix-heading" role="row"><span role="columnheader">数据集 · 版本</span>${machines.map(machine=>`<span class="${machine.machine===catalog.machine?'dataset-target':''}" data-machine="${esc(machine.machine)}" title="${esc(machine.machine)}" role="columnheader">${serverIdHTML(machine.machine)}${machine.machine===catalog.machine?'<small>所选服务器</small>':''}</span>`).join('')}<span role="columnheader">数据量</span></div>${rows}<div class="dataset-copy-route" hidden aria-hidden="true"><svg><path></path></svg><span></span></div></div>`;
+  return `<div class="dataset-matrix" data-machine-count="${machines.length}" data-selected-column="${selected}" role="table" tabindex="0" aria-label="数据版本的副本位置"><div class="dataset-matrix-row dataset-matrix-heading" role="row"><span role="columnheader">数据集 · 版本</span>${machines.map(machine=>`<span class="${machine.machine===catalog.machine?'dataset-target':''}" data-machine="${esc(machine.machine)}" title="${esc(machine.machine)}" tabindex="0" role="columnheader">${serverIdHTML(machine.machine)}${machine.machine===catalog.machine?'<small>所选服务器</small>':''}</span>`).join('')}<span role="columnheader">数据量</span></div>${rows}<div class="dataset-copy-route" hidden aria-hidden="true"><svg><path></path></svg><span></span></div></div>`;
 }
-export function uploadRouteHTML(route,machine){
+export function uploadRouteHTML(route,machine,state){
   const direct=route?.kind==='campus-direct',relay=route?.kind==='vps-relay',known=direct||relay;
-  return `<div class="dataset-route-heading"><span class="st ${known?'st-prep':'st-unk'}"><span class="g" aria-hidden="true"></span>${direct?'直传到':relay?'经门户中转':'通道未确认'}${direct&&machine?' '+serverIdHTML(machine):''}</span><span class="dataset-route-path"><span>本机</span>${relay?'<i aria-hidden="true">→</i><span>门户</span>':''}${known?'<i aria-hidden="true">→</i>'+serverIdHTML(machine||'所选服务器'):''}</span>${infoHTML(known?direct?'文件直接发送到已授权的服务器，门户只处理确认。':'文件经过门户发送到所选服务器。':'扫描目录后确认上传通道；发送文件前会显示实际路线。','实际上传路线')}</div>`;
+  return `<div class="dataset-route-heading"><span class="st ${known?'st-prep':'st-unk'}"><span class="g" aria-hidden="true"></span>${direct?'直传到':relay?'经门户中转':'通道未确认'}${direct&&machine?' '+serverIdHTML(machine):''}</span><span class="dataset-route-path"><span>本机</span>${relay?'<i aria-hidden="true">→</i><span>门户</span>':''}${known?'<i aria-hidden="true">→</i>'+serverIdHTML(machine||'所选服务器'):''}</span>${infoHTML(known?direct?'文件直接发送到已授权的服务器，门户只处理确认。':'文件经过门户发送到所选服务器。':'扫描目录后确认上传通道；发送文件前会显示实际路线。','实际上传路线')}</div>${uploadJourneyHTML(route,machine,state)}`;
 }
 export function datasetsUI(store,toast){
-  const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,queryBusy=false,controller=null,active=null,machineIds='',uploadRoute=null,lastScan=null,canRelay=false;
+  const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,queryBusy=false,controller=null,active=null,machineIds='',uploadRoute=null,uploadState=null,lastScan=null,canRelay=false;
   const actionPlaces=new WeakMap();
   const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   const current=expected=>expected===account();
   const human=transferBytes;
   const workspace=dataWorkspaceUI(store,section,toast,{onBusyChange:controls,refreshCatalog:load});
   const cloud=cloudImportUI(store,section,toast);
+  const cacheAdmin=datasetCacheAdminUI(store,section,toast);
   new MutationObserver(()=>{
     if(document.body.dataset.room!=='datasets')section.querySelector('#dataset-add-dialog')?.close();
   }).observe(document.body,{attributes:true,attributeFilter:['data-room']});
@@ -94,9 +100,17 @@ export function datasetsUI(store,toast){
     const number=value=>Number.isSafeInteger(value)&&value>=0?value:'—',used=store.usage(user.id);
     el.innerHTML=`<div class="dataset-book"><div><span>我的总额度</span>${infoHTML('来源：当前账号任务记录；所有服务器共用总额度。排队也占额度，准备数据暂不占额度。','额度来源')}</div><strong class="mono">${number(used)} / ${number(user.total)} <small>张</small></strong></div>`;
   }
+  function databaseLedger(catalog){
+    const node=section.querySelector('#datasets-database');if(!node)return;
+    const machines=[...new Set((catalog?.datasets||[]).flatMap(item=>(item.versions||[]).map(version=>databaseSummary(version).machine)).filter(Boolean))];
+    node.hidden=!machines.length;
+    node.innerHTML=machines.length?`<div class="dataset-book"><div><span>数据库</span>${infoHTML('原件所在服务器来自当前版本记录；是否保存完成，以每行的数据库状态为准。','数据库位置')}</div><strong>${machines.length===1?serverIdHTML(machines[0]):machines.length+' 台服务器'}</strong></div>`:'';
+  }
   function layoutMatrix(){
     const matrix=section.querySelector('.dataset-matrix');if(!matrix)return;
-    matrix.style.setProperty('--dataset-columns',`minmax(180px,1.5fr) repeat(${Number(matrix.dataset.machineCount)},minmax(132px,1fr)) minmax(98px,.7fr)`);
+    const columns=Number(matrix.dataset.machineCount);
+    matrix.style.setProperty('--dataset-columns',`minmax(120px,1.35fr) repeat(${columns},minmax(${columns>4?'132px':'0'},1fr)) minmax(80px,.65fr)`);
+    matrix.style.setProperty('--dataset-min-width',columns>4?(180+columns*132+98)+'px':'0px');
     const phone=matchMedia('(max-width:759px)').matches,focused=matrix.contains(document.activeElement)?document.activeElement:null;
     matrix.setAttribute('role',phone?'list':'table');matrix.setAttribute('aria-label',phone?'数据集与服务器副本':'数据版本的副本位置');
     for(const card of matrix.querySelectorAll('.dataset-card')){
@@ -131,6 +145,14 @@ export function datasetsUI(store,toast){
   section.addEventListener('pointerout',event=>{const button=event.target.closest('[data-route-cell]');if(button&&!button.contains(event.relatedTarget))clearRoute();});
   section.addEventListener('focusin',event=>{if(event.target.matches('[data-route-cell]'))showRoute(event.target);});
   section.addEventListener('focusout',event=>{if(event.target.matches('[data-route-cell]'))clearRoute();});
+  function focusColumn(machine){
+    const matrix=section.querySelector('.dataset-matrix');if(!matrix)return;
+    for(const node of matrix.querySelectorAll('.dataset-matrix-heading [data-machine],.dataset-location,.dataset-actions-cell'))node.style.opacity=!machine||node.dataset.machine===machine?'1':'.4';
+  }
+  section.addEventListener('pointerover',event=>{const header=event.target.closest('.dataset-matrix-heading [data-machine]');if(header)focusColumn(header.dataset.machine);});
+  section.addEventListener('pointerout',event=>{const header=event.target.closest('.dataset-matrix-heading [data-machine]');if(header&&!header.contains(event.relatedTarget))focusColumn(null);});
+  section.addEventListener('focusin',event=>{const header=event.target.closest('.dataset-matrix-heading [data-machine]');if(header)focusColumn(header.dataset.machine);});
+  section.addEventListener('focusout',event=>{if(event.target.closest('.dataset-matrix-heading [data-machine]'))focusColumn(null);});
   section.addEventListener('click',event=>{const cell=event.target.closest('[data-route-cell]');if(!cell||busy)return;const button=cell.closest('.dataset-card')?.querySelector('[data-prepare-dataset]');if(button&&!button.disabled)button.click();});
   globalThis.addEventListener('resize',()=>{layoutMatrix();clearRoute();});
   function installAddSheet(){
@@ -141,20 +163,22 @@ export function datasetsUI(store,toast){
       if(entry.open&&!dialog.open){dialog.querySelector('.dataset-sheet-context').append(controls,capacity);dialog.showModal();dialog.querySelector('[data-dataset-panel]:not([hidden]) input:not([disabled])')?.focus();}
       else if(!entry.open&&dialog.open)dialog.close();
     });
-    dialog.addEventListener('close',()=>{if(!section.contains(entry))return;entry.open=false;toolbar.prepend(controls);section.querySelector('.datasets-ledger-strip').append(capacity);entry.querySelector('summary').focus({preventScroll:true});});
+    dialog.addEventListener('close',()=>{if(!section.contains(entry))return;entry.open=false;toolbar.prepend(controls);section.querySelector('#datasets-database').before(capacity);entry.querySelector('summary').focus({preventScroll:true});});
     dialog.addEventListener('click',event=>{if(event.target.closest('[data-dataset-add-close]'))dialog.close();});
   }
   function phase(state){
+    uploadState=state||null;
     const current=uploadPhase(state);
     for(const [index,item] of [...section.querySelectorAll('[data-upload-phase]')].entries()){
       item.dataset.status=index===current?'current':index<current?'complete':'pending';
       if(index===current)item.setAttribute('aria-current','step');else item.removeAttribute('aria-current');
     }
+    showUploadRoute();
   }
   function showUploadRoute(route=uploadRoute){
     uploadRoute=route;
     const node=section.querySelector('#dataset-upload-route'),machine=section.querySelector('[name=dataset-machine]')?.value;
-    if(node)node.innerHTML=uploadRouteHTML(route,machine);
+    if(node)node.innerHTML=uploadRouteHTML(route,machine,uploadState);
   }
   function relayChoice(reset=false){
     const files=Array.from(section.querySelector('[name=dataset-directory]')?.files||[]),total=files.reduce((n,f)=>n+f.size,0),warning=section.querySelector('#dataset-relay-warning'),check=section.querySelector('[name=dataset-relay-consent]');
@@ -182,15 +206,15 @@ export function datasetsUI(store,toast){
     disableMaintenanceControls(section,'#dataset-upload-start,#dataset-upload-discard,#dataset-upload-retry-direct,#dataset-upload-relay,[data-prepare-dataset],[data-retry-archive]',maintenanceFor(store.data?.operationalMaintenance,section.querySelector('[name=dataset-machine]')?.value));
   }
   document.addEventListener('gpuq-maintenance-state',()=>{if(section.children.length)controls();});
-  store.onAuthChange?.(()=>{cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;lastScan=null;uploadRoute=null;canRelay=false;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
+  store.onAuthChange?.(()=>{cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;lastScan=null;uploadRoute=null;uploadState=null;canRelay=false;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
   async function load(){
     if(busy||uploadBusy||discardBusy||!store.principal)return;
     const machine=section.querySelector('[name=dataset-machine]')?.value;if(!machine)return;
     busy=true;const token=++generation,expected=account(),button=section.querySelector('#datasets-refresh'),select=section.querySelector('[name=dataset-machine]');button.disabled=true;select.disabled=true;
     const valid=()=>token===generation&&current(expected)&&section.querySelector('[name=dataset-machine]')?.value===machine;
-    const status=section.querySelector('#datasets-status'),capacity=section.querySelector('#datasets-capacity');status.textContent='加载中…';capacity.innerHTML=datasetCapacityHTML(null,machine);section.querySelector('#dataset-catalog').replaceChildren();
+    const status=section.querySelector('#datasets-status'),capacity=section.querySelector('#datasets-capacity');status.textContent='加载中…';capacity.innerHTML=datasetCapacityHTML(null,machine);databaseLedger(null);section.querySelector('#dataset-catalog').replaceChildren();
     try{await Promise.all([
-      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;section.querySelector('#dataset-catalog').innerHTML=datasetRows({...result,machine});layoutMatrix();status.textContent=catalogUpdatedText(result);}).catch(error=>{if(valid()){section.querySelector('#dataset-catalog').replaceChildren();status.textContent='目录未能确认：'+error.message;}}),
+      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;section.querySelector('#dataset-catalog').innerHTML=datasetRows({...result,machine},{upload:active});layoutMatrix();databaseLedger(result);cacheAdmin.render();status.textContent=catalogUpdatedText(result);}).catch(error=>{if(valid()){section.querySelector('#dataset-catalog').replaceChildren();status.textContent='目录未能确认：'+error.message;}}),
       store.call('datasets.capacity',{machine}).then(result=>{if(valid())capacity.innerHTML=datasetCapacityHTML(result,machine);}).catch(()=>{if(valid())capacity.innerHTML=datasetCapacityHTML(null,machine);})
     ]);}
     finally{if(token===generation){busy=false;controls();}}
@@ -230,11 +254,14 @@ export function datasetsUI(store,toast){
       const call=store.data?.transfers?.version===1?transferUploadCall(directCall):directCall;
       const result=await uploadBrowserDataset({userId,machine,name,scan,signal,onProgress:report,keyStore,call,allowRelay,via,onRoute:route=>{check();showUploadRoute(route);}});check();
       active={...result,machine};phase('READY');status.dataset.state='READY';status.textContent=`本机已就绪 · 可用于训练 · ${result.dataset}@${result.version.slice(0,12)}`;progress.value=progress.max=1;toast('数据集上传并校验完成，可以用于训练。');
-    }catch(error){if(current(expected)){status.dataset.state=signal.aborted?'PAUSED':'UNKNOWN';status.textContent=error.message;if(error.uploadId)active={...active,uploadId:error.uploadId,machine,name,manifestSha256:lastScan?.manifestSha256,totalBytes:lastScan?.totalBytes,entries:lastScan?.entries,state:'UNKNOWN',directFailed:error.code?.startsWith('DIRECT')===true};canRelay=via==='auto'&&error.canRelay===true;}}
+    }catch(error){if(current(expected)){status.dataset.state=signal.aborted?'PAUSED':'UNKNOWN';phase(status.dataset.state);status.textContent=error.message;if(error.uploadId)active={...active,uploadId:error.uploadId,machine,name,manifestSha256:lastScan?.manifestSha256,totalBytes:lastScan?.totalBytes,entries:lastScan?.entries,state:'UNKNOWN',directFailed:error.code?.startsWith('DIRECT')===true};canRelay=via==='auto'&&error.canRelay===true;}}
     finally{if(current(expected)){uploadBusy=false;controller=null;controls();if(active?.state==='READY')await load();}}
   });
   section.addEventListener('click',async e=>{
     const b=e.target.closest('button');if(!b||b.disabled)return;
+    if(b.hasAttribute('data-copy-dataset-version')){
+      const expected=account();b.disabled=true;try{await navigator.clipboard.writeText(b.dataset.copyDatasetVersion);if(!current(expected)||!b.isConnected)return;b.textContent='已复制';setTimeout(()=>{if(current(expected)&&b.isConnected)b.textContent='复制';},1200);}catch(error){if(current(expected))toast('未能复制，请手动选择完整版本。');}finally{if(current(expected)&&b.isConnected)b.disabled=false;}return;
+    }
     if(b.dataset.datasetSource){source(b.dataset.datasetSource);return;}
     if(['terminal-data-open','terminal-data-reconnect'].includes(b.id))section.querySelector('#dataset-add-dialog')?.close();
     if(b.id==='dataset-organize-next'){source('workspace');section.querySelector('#dataset-source-workspace').focus();return;}
@@ -248,7 +275,7 @@ export function datasetsUI(store,toast){
         if(result.state==='READY'){
           confirmedDatasetUpload(result,target);active={...target,...result};phase('READY');status.dataset.state='READY';status.textContent=`可用于训练 · ${result.dataset}@${result.version.slice(0,12)}`;canRelay=false;toast('数据集上传并校验完成，可以用于训练。');
         }else{active={...target,state:result.state};phase(result.state);status.dataset.state=result.state;status.textContent=({PUBLISHING:'服务器完整校验中',SEALING:'校验目录清单中',UPLOADING:'上传未完成，可继续',RECEIVING_MANIFEST:'清单未传完，可继续',FAILED:'上传失败',DISCARDED:'上传已取消'}[result.state]||'未确认')+(result.error?' · '+result.error:'');}
-      }catch(error){if(current(expected)){section.querySelector('#dataset-upload-status').dataset.state='UNKNOWN';section.querySelector('#dataset-upload-status').textContent=error.message;}}
+      }catch(error){if(current(expected)){phase('UNKNOWN');section.querySelector('#dataset-upload-status').dataset.state='UNKNOWN';section.querySelector('#dataset-upload-status').textContent=error.message;}}
       finally{if(current(expected)){queryBusy=false;controls();if(active?.state==='READY')await load();}}return;
     }
     if(b.id==='dataset-upload-retry-direct'){section.querySelector('[name=dataset-via]').value='direct';section.querySelector('#dataset-upload-form').requestSubmit();return;}
@@ -264,7 +291,7 @@ export function datasetsUI(store,toast){
       catch(error){if(current(expected))toast(error.message);}finally{if(current(expected)){discardBusy=false;b.disabled=false;controls();}}return;
     }
     const machine=section.querySelector('[name=dataset-machine]').value;
-    if(b.dataset.retryArchive){const expected=account(),token=generation;b.disabled=true;try{await store.call('datasets.archive.retry',{machine,dataset:b.dataset.retryArchive,version:b.dataset.version});if(!current(expected)||token!==generation)return;toast('已安排重试长期保存。');await load();}catch(error){if(current(expected)&&token===generation){toast(error.message);b.disabled=false;}}return;}
+    if(b.dataset.retryArchive){const expected=account(),token=generation;b.disabled=true;try{await store.call('datasets.archive.retry',{machine,dataset:b.dataset.retryArchive,version:b.dataset.version});if(!current(expected)||token!==generation)return;toast('已安排重试存入数据库。');await load();}catch(error){if(current(expected)&&token===generation){toast(error.message);b.disabled=false;}}return;}
     if(b.dataset.prepareDataset){const expected=account(),token=generation;b.disabled=true;try{const result=await store.call('datasets.prepare',{machine,dataset:b.dataset.prepareDataset,version:b.dataset.version});if(!current(expected)||token!==generation)return;toast(result.state==='READY'?'数据已经就绪。':'已开始准备。');await load();}catch(error){if(current(expected)&&token===generation){toast(error.message);b.disabled=false;}}}
     if(b.dataset.useDataset){
       const datasetRef=b.dataset.useDataset+'@'+b.dataset.version;
@@ -284,8 +311,8 @@ export function datasetsUI(store,toast){
     if(next!==identity){workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;identity=next;generation++;busy=false;machineIds='';
       section.classList.add('datasets-unified');
       section.innerHTML=`<nav class="data-room-tabs" aria-label="数据集内容"><a href="#datasets" aria-current="page">数据集</a><a href="#datasets/transfers">传输与导入</a></nav><div class="terminal-controls datasets-controls"><label><span>本次使用的服务器</span><select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新</button></div>
-        <div class="datasets-ledger-strip"><div id="datasets-quota"></div><div id="datasets-capacity" class="datasets-capacity" role="status">${datasetCapacityHTML(null,machines[0]?.id)}</div></div>
-        <section class="dataset-library hero-frame" aria-labelledby="dataset-catalog-heading"><div class="datasets-library-heading"><h3 id="dataset-catalog-heading">数据在哪里</h3>${infoHTML('操作列对应所选服务器，准备和训练都会使用这台机器。斜线表示目录未知，不能据此判断没有数据。','矩阵说明')}</div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div></section>
+        <div class="datasets-ledger-strip"><div id="datasets-quota"></div><div id="datasets-capacity" class="datasets-capacity" role="status">${datasetCapacityHTML(null,machines[0]?.id)}</div><div id="datasets-database" hidden></div></div>
+        <section class="dataset-library hero-frame" aria-labelledby="dataset-catalog-heading"><div class="dataset-frame-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="datasets-library-heading"><div class="dataset-title-label"><h3 id="dataset-catalog-heading">数据在哪里</h3>${infoHTML('原件不会被释放；只有已经存入数据库、并且没有训练在用的缓存才会释放。操作对应所选服务器，斜线表示目录未知。','数据库与缓存说明')}</div><div class="dataset-cache-legend" aria-label="缓存状态图例"><span data-cache-symbol="ready">缓存就绪</span><span data-cache-symbol="fetch">取回中</span><span data-cache-symbol="recoverable">可从数据库取回</span><span data-cache-symbol="database">数据库</span></div></div><div class="dataset-workflow-copy"><span class="dataset-copy-full">训练读取本机缓存；数据库长期保存原件，空闲缓存可以释放，用时自动取回。</span><span class="dataset-copy-compact">训练读取缓存；数据库保留原件。</span></div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div></section>${cacheAdminHTML(store.principal?.role==='admin')}
         <details id="datasets-add" class="datasets-add"><summary class="button primary">添加数据 <span class="dataset-add-hint">从电脑上传，或让服务器直接下载</span></summary><dialog id="dataset-add-dialog" class="dataset-add-sheet" aria-labelledby="dataset-add-title"><header class="dataset-sheet-head"><div><h2 id="dataset-add-title">添加数据</h2></div><button class="button quiet" type="button" data-dataset-add-close aria-label="关闭添加数据">关闭</button></header><div class="dataset-sheet-context"></div>
         <div class="dataset-source-tabs" role="tablist" aria-label="添加数据的方式">
           <button type="button" role="tab" id="dataset-source-directory" data-dataset-source="directory" aria-controls="dataset-panel-directory" aria-selected="true"><span>本机目录</span></button>
@@ -296,7 +323,7 @@ export function datasetsUI(store,toast){
         <form id="dataset-upload-form" aria-labelledby="dataset-upload-heading">
           <div class="dataset-upload-heading"><h3 id="dataset-upload-heading">上传一个数据集</h3><p class="muted">选择已整理好的目录。传输与校验完成后，即可用于训练。</p></div>
           <aside id="dataset-upload-route" class="dataset-route" aria-label="当前网页上传通道">${uploadRouteHTML(null)}</aside>
-          <label class="field dataset-route-choice">上传通道 ${infoHTML('自动优先使用已授权直传；直传连接失败不会自动中转。大于 256 MiB 的中转需要额外确认。','上传通道说明')}<select name="dataset-via"><option value="automatic">自动 · 优先直传</option><option value="direct">只用直传</option><option value="relay">经门户中转</option></select></label>
+          <div class="field dataset-route-choice"><div class="dataset-field-label"><label for="dataset-via-input">上传通道</label>${infoHTML('自动优先使用已授权直传；直传连接失败不会自动中转。大于 256 MiB 的中转需要额外确认。','上传通道说明')}</div><select id="dataset-via-input" name="dataset-via"><option value="automatic">自动 · 优先直传</option><option value="direct">只用直传</option><option value="relay">经门户中转</option></select></div>
           <div class="dataset-upload-fields">
             <div class="field"><div class="dataset-field-label"><label for="dataset-name-input">数据集名称</label></div><input id="dataset-name-input" name="dataset-name" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" placeholder="my-data" aria-describedby="dataset-name-help" required><small id="dataset-name-help">1–40 位字母、数字、下划线或连字符。</small></div>
             <div class="field"><div class="dataset-field-label"><label for="dataset-directory-input">本机目录</label></div><div class="dataset-directory-control"><input id="dataset-directory-input" type="file" name="dataset-directory" webkitdirectory multiple aria-label="选择文件夹" aria-describedby="dataset-directory-help dataset-directory-selection"><label id="dataset-directory-picker" class="button" for="dataset-directory-input">选择文件夹</label><span id="dataset-directory-selection" aria-live="polite">尚未选择</span></div><small id="dataset-directory-help">选择整个目录；网页上传不包含空目录。</small></div>
@@ -310,7 +337,24 @@ export function datasetsUI(store,toast){
         <div id="dataset-panel-workspace" data-dataset-panel="workspace" role="tabpanel" aria-labelledby="dataset-source-workspace" hidden>${dataWorkspaceHTML()}</div></dialog></details>`;
       installAddSheet();
       for(const note of section.querySelectorAll('.dataset-upload-heading p,.dataset-upload-notes p,.dataset-route>p,.field>small,.data-workspace-card>p.muted,.data-workspace-terminal p.muted,#data-workspace-publish-form>p.muted,.data-workspace-footnote,.datasets-next,.cloud-import>p.muted'))discloseInfo(note,'数据操作说明');
-      for(const field of section.querySelectorAll('.dataset-upload-fields .field'))field.querySelector('.dataset-field-label').append(field.querySelector(':scope>.ui-info'));
+      for(const field of section.querySelectorAll('.field')){
+        const help=field.querySelector(':scope>.ui-info');if(!help)continue;
+        let row=field.querySelector(':scope>.dataset-field-label');
+        if(!row&&field.matches('label')){
+          row=document.createElement('span');row.className='dataset-field-label field-caption';const caption=document.createElement('span');
+          for(const node of [...field.childNodes]){if(node.nodeType===1&&node.matches('input,select,textarea'))break;if(node!==help)caption.append(node);}
+          field.prepend(row);row.append(caption);
+        }
+        row?.append(help);
+      }
+      for(const help of section.querySelectorAll('.dataset-route>.ui-info'))help.parentElement.querySelector('.dataset-route-heading')?.append(help);
+      for(const help of section.querySelectorAll('.data-workspace-card>.ui-info,.data-workspace-terminal>div>.ui-info,#data-workspace-publish-form>.ui-info')){
+        const footnote=help.querySelector('.data-workspace-footnote');
+        if(footnote){section.querySelector('#data-workspace-upload-form>.file-actions').append(help);continue;}
+        const heading=help.parentElement.querySelector(':scope>header h3,:scope>h4');if(heading){heading.classList.add('dataset-help-heading');heading.append(help);}
+      }
+      const notes=section.querySelector('.dataset-upload-notes');if(notes?.firstElementChild){section.querySelector('.dataset-upload-actions').append(notes.firstElementChild);notes.remove();}
+      const nextHelp=section.querySelector('#dataset-panel-link>.ui-info');if(nextHelp){const button=section.querySelector('#dataset-organize-next'),row=document.createElement('div');row.className='dataset-next-step';button.before(row);row.append(button,nextHelp);}
     }
     if(ids!==machineIds){
       const select=section.querySelector('[name=dataset-machine]'),selected=select.value,changed=machineIds!=='';
@@ -322,6 +366,6 @@ export function datasetsUI(store,toast){
       if(changed){generation++;busy=false;section.querySelector('#dataset-catalog').replaceChildren();section.querySelector('#datasets-capacity').innerHTML=datasetCapacityHTML(null,select.value);section.querySelector('#datasets-status').textContent=machines.length?'机器授权已更新，请重新加载目录。':'当前没有已授权机器。';}
       machineIds=ids;
     }
-    if(!uploadRoute)showUploadRoute();quota();controls();
+    if(!uploadRoute)showUploadRoute();quota();controls();cacheAdmin.render();
   };
 }
