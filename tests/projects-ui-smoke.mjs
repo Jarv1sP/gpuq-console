@@ -35,6 +35,7 @@ try{
     if(operation==='projects.status'){assert.ok(project);return copy(project);}
     if(operation==='projects.publish'){
       assert.ok(project);assert.ok(![...terminals.values()].some(value=>value.machine===node&&value.userId===args.userId&&value.project===args.project),'active dev terminal must block publish');
+      assert.match(args.key,/^[a-f0-9-]{36}$/);project.publication={id:args.key,state:'PUBLISHING'};
       project.state='PUBLISHING';project.progress={phase:'copying',completedEntries:12,completedBytes:512,totalEntries:20,totalBytes:1024};return copy(project);
     }
     if(operation==='projects.verify'){assert.ok(project?.releases.some(item=>item.release===args.release&&item.state==='READY'));return {project:args.project,release:args.release,state:'READY'};}
@@ -93,10 +94,10 @@ try{
   for(const name of ['machine','terminal-machine','file-machine'])assert.equal(await page.locator(`[name=${name}]`).inputValue(),machine);
   await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('vision-demo');
   assert.equal(await page.locator('[name=environment-mode]').inputValue(),'shared');
-  await page.locator('[name=environment-mode]').selectOption('isolated');
+  await page.locator('[name=environment-choice][value=isolated]').check();
   await action('projects.create',()=>page.locator('#project-create-form [type=submit]').click());await idle();
   assert.equal(calls.filter(call=>call.operation==='projects.create').at(-1).args.environmentMode,'isolated');
-  assert.match(await page.locator('#project-status-detail').textContent(),/完全隔离/);
+  assert.match(await page.locator('#project-status-detail').textContent(),/隔离（不继承基础包）/);
   assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   assert.match(await page.locator('#workspace-mode-note').textContent(),/\/opt\/project-env/);
@@ -131,16 +132,17 @@ try{
   await closeSubmit(page);await action('projects.publish',()=>page.locator('#project-publish').click());await idle();
   assert.match(await page.locator('#project-status').textContent(),/正在生成训练版本/);assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   assert.match(await page.locator('#project-status-detail').textContent(),/复制：12 \/ 20 项，512 \/ 1024 B/);
-  const publication=projects.get(key(machine,member.id,'vision-demo'));publication.state='READY';publication.releases=[{release,state:'READY'}];publication.latestReadyRelease=release;
+  const publication=projects.get(key(machine,member.id,'vision-demo'));publication.state='READY';publication.releases=[{release,state:'READY'}];publication.latestReadyRelease=release;publication.publication={id:publication.publication.id,state:'READY',release};
   await responseFor(page,'projects.status');await idle();
   assert.equal(await page.locator('[name=release]').inputValue(),release);assert.equal(await page.locator('#release-full').textContent(),release);
   assert.equal(await page.locator('#train-form [type=submit]').isEnabled(),true);
-  publication.state='FAILED';publication.error='mock failure';publication.errorDetails={path:'code/<img src=x onerror=alert(1)>',mode:'0o664',links:2,kind:'file',remediation:'make a private copy'};
+  await action('projects.publish',()=>page.locator('#project-publish').click());await idle();
+  publication.state='FAILED';publication.publication.state='FAILED';publication.error='mock failure';publication.errorDetails={path:'code/<img src=x onerror=alert(1)>',mode:'0o664',links:2,kind:'file',remediation:'make a private copy'};
   await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
-  assert.match(await page.locator('#project-status').textContent(),/code\/<img src=x onerror=alert\(1\)>/);
-  assert.match(await page.locator('#project-status').textContent(),/权限：0o664.*链接数：2.*make a private copy/);
-  assert.equal(await page.locator('#project-status img').count(),0);
-  publication.state='READY';delete publication.error;delete publication.errorDetails;
+  assert.match(await page.locator('#project-status-detail').textContent(),/code\/<img src=x onerror=alert\(1\)>/);
+  assert.match(await page.locator('#project-status-detail').textContent(),/权限：0o664.*链接数：2.*make a private copy/);
+  assert.equal(await page.locator('#project-status-detail img').count(),0);
+  publication.state='READY';publication.publication={id:publication.publication.id,state:'READY',release};delete publication.error;delete publication.errorDetails;
   await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
   await capture('projects-desktop-ready.png');
 
@@ -190,7 +192,7 @@ try{
   await capture('projects-mobile-ready.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px selected-project layout must not overflow');
   await page.locator('#project-create>summary').click();
-  await page.locator('[name=environment-mode]').selectOption('isolated');
+  await page.locator('[name=environment-choice][value=isolated]').check();
   await capture('projects-mobile-environment.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px environment creation form must not overflow');
 
@@ -286,3 +288,5 @@ try{
 
 // Keep the terminal contract browser suite in the existing CI project entry.
 await terminalContractSmoke();
+// Keep the new receipt contract in the existing CI browser entry point.
+await import('./personal-project-ui-smoke.mjs');

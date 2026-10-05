@@ -51,6 +51,7 @@ export function shellUI(store,{navigate,getPage,toast}){
   }
   function route(next,apply){
     const previous=getPage();if(previous===next){apply();return;}
+    document.dispatchEvent(new CustomEvent('gpuq-route-leaving',{detail:{previous,next}}));
     scrolls.set(previous,scrollY);roomAnimation?.cancel();headingAnimation?.cancel();ghost?.remove();
     const outgoing=q(`[data-page="${CSS.escape(previous)}"]`),rect=outgoing?.getBoundingClientRect(),direction=(order[next]??0)>=(order[previous]??0)?1:-1;
     if(outgoing&&rect.height&&!phone()&&!reduced()){

@@ -10,6 +10,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {accountMenu,closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
+import {guardedRoute} from './browser-route-guard.mjs';
 
 const temp=await mkdtemp(join(tmpdir(),'starbase-shell-browser-'));
 const shots=process.env.UI_SCREENSHOTS||'/tmp/starbase-ui-smoke';
@@ -92,13 +93,14 @@ try{
   const olderRef='sample@'+'b'.repeat(64),newerRef='sample@'+'d'.repeat(64);
   for(const action of ['latest','edit','close']){
     if(action!=='latest')await openSubmit(desktop);
-    let held,hold=true;const received=new Promise(resolve=>{held=resolve;});
-    const routeCatalog=async route=>{
+    let held,hold=true,delivery,heldRequest;const received=new Promise(resolve=>{held=resolve;});
+    const routeCatalog=guardedRoute(async route=>{
       const request=route.request().postDataJSON();
       if(hold&&request?.operation==='projects.list'&&request.args.machine==='gpu-2'){
-        hold=false;const response=await route.fetch();await new Promise(resolve=>{releaseCatalog=resolve;held();});await route.fulfill({response});
-      }else await route.continue();
-    };
+        hold=false;const response=await route.fetch();heldRequest=route.request();let complete;delivery=new Promise(resolve=>{complete=resolve;});
+        try{await new Promise(resolve=>{releaseCatalog=resolve;held();});await route.fulfill({response});}finally{complete();}
+      }else await route.fallback();
+    });
     await desktop.route('**/api/call',routeCatalog);
     await desktop.evaluate(detail=>document.dispatchEvent(new CustomEvent('gpuq-open-submit',{detail})),{machine:'gpu-2',datasetRef:olderRef});await received;
     if(action==='latest'){
@@ -106,8 +108,9 @@ try{
       assert.equal(await desktop.locator('#train-form [name=datasets]').inputValue(),newerRef,'the newest selection appears before the old lookup is delivered');
     }else if(action==='edit')await desktop.locator('#train-form [name=datasets]').fill(newerRef);
     else await closeSubmit(desktop);
-    const delivered=desktop.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-2');
+    const delivered=delivery;
     releaseCatalog();releaseCatalog=null;await delivered;await desktop.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+    if(action==='close'){assert.equal(await heldRequest.response(),null,'closing the sheet aborts its pending lookup');assert.ok(heldRequest.failure());}
     if(action==='close')assert.equal(await desktop.locator('#work-submit').isVisible(),false,'a cancelled intent cannot reopen the sheet');
     else assert.equal(await desktop.locator('#train-form [name=datasets]').inputValue(),newerRef,'a late catalog cannot overwrite the latest selection or edited draft');
     await desktop.unroute('**/api/call',routeCatalog);await closeSubmit(desktop);
