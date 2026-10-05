@@ -25,12 +25,13 @@ BASE = re.compile(r'[a-z0-9][a-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{6
 GPU = re.compile(r'GPU-[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}\Z')
 OWNER = re.compile(r'builtin-admin|demo-user-[0-9]+\Z')
 HOOKS = Path('/etc/gpuq-console/empty-hooks')
-CDI = Path('/etc/cdi/gpuq-nvidia.json')
+CDI = Path('/etc/gpuq-console/cdi/gpuq-nvidia.json')
 ENGINE = Path('/etc/gpuq-console/personal-oci.conf')
 SIGNATURE_POLICY = Path('/etc/gpuq-console/personal-oci-policy.json')
 REGISTRY_DROPINS = Path('/etc/containers/registries.conf.d')
 RUNTIME = Path('/run/user')
-ENGINE_RAW = b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n[engine]\nremote = false\n'
+ENGINE_RAW = (b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n'
+              b'[engine]\nremote = false\ncdi_spec_dirs = ["/etc/gpuq-console/cdi"]\n')
 ANONYMOUS_AUTH_RAW = b'{"auths":{}}\n'
 ANONYMOUS_REGISTRIES_RAW = (b'credential-helpers = ["containers-auth.json"]\n'
                             b'unqualified-search-registries = []\nshort-name-mode = "enforcing"\n')
@@ -72,14 +73,17 @@ def policy(config, user=None):
         need(set(value) == {'enabled'}, 'Disabled OCI policy must be explicit')
         raise ValueError('Personal OCI is not enabled on this node; use shared/isolated venv mode')
     required = {'enabled', 'baseImage', 'podmanSHA256', 'runtimeSHA256', 'cdiSHA256'}
-    need(required <= set(value) <= required | {'owners'}
+    need(required <= set(value) <= required | {'owners','autoOwners','autoOwnersRevision'}
          and isinstance(value['baseImage'], str) and BASE.fullmatch(value['baseImage'])
          and all(isinstance(value[k], str) and re.fullmatch('[a-f0-9]{64}', value[k])
                  for k in ('podmanSHA256', 'runtimeSHA256', 'cdiSHA256')), 'Invalid trusted OCI capability policy')
+    need('autoOwners' not in value or type(value['autoOwners']) is bool, 'Invalid automatic OCI cohort')
+    need(not value.get('autoOwners') or 'owners' in value, 'Automatic OCI requires an explicit scoped cohort')
+    need('autoOwnersRevision' not in value or ('owners' in value and 'autoOwners' in value and type(value['autoOwnersRevision']) is int and 0<=value['autoOwnersRevision']<=9007199254740991), 'Invalid automatic OCI cohort revision')
     quota_enabled = module('storage-quota').enabled(config, user)
     if 'owners' in value:
         owners = value['owners']
-        need(isinstance(owners, list) and 1 <= len(owners) <= 10000
+        need(isinstance(owners, list) and (0 if value.get('autoOwners') is True else 1) <= len(owners) <= 10000
              and all(isinstance(owner, str) and OWNER.fullmatch(owner) for owner in owners)
              and len(set(owners)) == len(owners), 'Invalid personal OCI owner cohort')
         need(isinstance(user, str) and OWNER.fullmatch(user) and user in owners,
@@ -299,7 +303,8 @@ class PersonalOCI:
     def command(self, *args):
         return ['/usr/bin/podman', '--root', str(self.folder/'graph'), '--runroot', str(self.folder/'run'),
                 '--tmpdir', str(self.folder/'tmp'), '--storage-driver=overlay', '--cgroup-manager=cgroupfs',
-                '--runtime=/usr/bin/crun', '--hooks-dir='+str(HOOKS), '--events-backend=file', *args]
+                '--runtime=/usr/bin/crun', '--hooks-dir='+str(HOOKS),
+                '--cdi-spec-dir='+str(CDI.parent), '--events-backend=file', *args]
 
     def run(self, *args, timeout=30):
         with self.registry_auth() as (env, authfd):
@@ -317,15 +322,12 @@ class PersonalOCI:
         protected_file(CDI, self.policy['cdiSHA256'])
         protected_file(ENGINE, hashlib.sha256(ENGINE_RAW).hexdigest())
         protected_file(SIGNATURE_POLICY, hashlib.sha256(signature_policy_raw(self.policy['baseImage'])).hexdigest())
-        # Podman 4.1 searches both default CDI directories. Accept only this
-        # one pinned administrator spec; do not let another spec override it.
-        for directory, names in ((Path('/etc/cdi'), {'gpuq-nvidia.json'}), (Path('/run/cdi'), set())):
-            if not directory.exists():
-                need(not names, 'Pinned CDI directory missing'); continue
-            with self.s.directory(directory) as fd:
-                info = os.fstat(fd)
-                need(info.st_uid == 0 and not info.st_mode & 0o022 and set(os.listdir(fd)) == names,
-                     'Unpinned CDI specification directory')
+        # Every command strongly overrides the default CDI search paths. The
+        # host's automatic NVIDIA specs remain untouched and are never loaded.
+        with self.s.directory(CDI.parent) as fd:
+            info = os.fstat(fd)
+            need(info.st_uid == 0 and not info.st_mode & 0o022
+                 and set(os.listdir(fd)) == {CDI.name}, 'Unpinned CDI specification directory')
         # mounts.conf is independent of containers.conf and must not inject a
         # host secret/socket into every otherwise restricted rootless container.
         for path in (Path('/usr/share/containers/mounts.conf'), Path('/etc/containers/mounts.conf'),
@@ -392,6 +394,32 @@ class PersonalOCI:
             entry = container[0]
             labels = entry.get('Config', {}).get('Labels', {})
             state = entry.get('State', {})
+            need(labels.get('io.gpuq.owner') == self.owner and labels.get('io.gpuq.project') == slug,
+                 'Development container ownership is unknown')
+            if state.get('Running') is True:
+                # A control-group stop can kill conmon before its exit event is
+                # persisted. Reconcile only this dead, exactly owned runtime;
+                # never stop/remove a live container or discard its overlay.
+                identifier = entry.get('Id')
+                need(isinstance(identifier, str) and re.fullmatch('[a-f0-9]{64}', identifier)
+                     and state.get('Paused', False) is False
+                     and all(type(state.get(key)) is int and state[key] >= 0
+                             and (state[key] == 0 or not Path('/proc', str(state[key])).exists())
+                             for key in ('Pid', 'ConmonPid')), 'Development container is still running')
+                # Podman may report conmon's missing exit record as an error
+                # even after native stop saved Exited. Accept no state from
+                # that return code: only the fresh identity/stopped checks do.
+                with self.registry_auth() as (env, authfd):
+                    stopped = subprocess.run(self.command('stop', '--time', '1', identifier),
+                                             env=env, capture_output=True, timeout=30)
+                need(len(stopped.stdout) < 2*1024**2 and len(stopped.stderr) < 65536,
+                     'Development container stop response exceeds bound')
+                refreshed = json.loads(self.run('container', 'inspect', value['container']))
+                need(len(refreshed) == 1 and refreshed[0].get('Id') == identifier,
+                     'Development container changed during runtime refresh')
+                entry = refreshed[0]
+                labels = entry.get('Config', {}).get('Labels', {})
+                state = entry.get('State', {})
             need(labels.get('io.gpuq.owner') == self.owner and labels.get('io.gpuq.project') == slug
                  and state.get('Running') is False and state.get('Paused', False) is False and state.get('Pid') == 0
                  and state.get('Status') in ('exited', 'stopped', 'created', 'configured'), 'Development container is running or ownership is unknown')

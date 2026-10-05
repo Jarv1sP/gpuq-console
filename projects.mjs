@@ -21,6 +21,8 @@ export async function projectCall(service,principal,user,operation,args,authoriz
   if(args.key!==undefined&&(typeof args.key!=='string'||!UUID.test(args.key)))fail('发布标识必须是完整 UUID。');
   if(args.environmentMode!==undefined&&!['shared','isolated','oci'].includes(args.environmentMode))fail('环境模式只能是 shared、isolated 或 oci。');
   const reference=ownerOnly?{}:projectReference(args,{optional:false});
+  if(operation==='projects.create'&&args.environmentMode==='oci')await service.ociProjectAdmission?.(args.machine,user.id,args.project,{creatingOCI:true});
+  if(operation==='projects.publish')await service.ociProjectAdmission?.(args.machine,user.id,args.project);
   const result=await service.bridge(args.machine,operation,{...reference,...(args.environmentMode!==undefined?{environmentMode:args.environmentMode}:{}),...(args.key!==undefined?{key:args.key}:{}),userId:user.id});
   if(operation==='projects.quota')return quotaStatus(result,user.id);
   if(['projects.create','projects.publish'].includes(operation))service.audit(principal.username,operation,args.machine,args.project);

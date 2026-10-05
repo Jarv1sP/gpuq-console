@@ -92,6 +92,18 @@ class OCITests(unittest.TestCase):
         self.assertTrue(command[command.index('--root')+1].endswith(self.manager().owner+'/graph'))
         self.assertFalse(any('socket' in v or '--remote' in v for v in command))
 
+    def test_fixed_cdi_override_cannot_load_host_or_user_spec_directories(self):
+        expected = '/etc/gpuq-console/cdi'
+        self.assertEqual(str(o.CDI), expected+'/gpuq-nvidia.json')
+        self.assertEqual(tomllib.loads(o.ENGINE_RAW.decode())['engine']['cdi_spec_dirs'], [expected])
+        for operation in ('version', 'info', 'create', 'run', 'start'):
+            command = self.manager().command(operation)
+            self.assertEqual([arg for arg in command if arg.startswith('--cdi-spec-dir=')],
+                             ['--cdi-spec-dir='+expected])
+            self.assertNotIn('/etc/cdi', command); self.assertNotIn('/run/cdi', command)
+        c = config(); c['personalOci']['cdiSpecDir'] = '/run/cdi'
+        with self.assertRaisesRegex(ValueError, 'capability policy'): o.policy(c, USER)
+
     def anonymous_manager(self, root):
         manager = self.manager()
         manager.folder = Path(root).resolve()/'private-oci'
@@ -363,20 +375,40 @@ class OCITests(unittest.TestCase):
             self.assertEqual(manager.checkpoint('vision')['image'], 'sha256:'+SHA)
             self.assertEqual(durable.call_args.args[1]['image'], 'sha256:'+SHA)
 
-    def verify_capability(self, host):
+    def verify_capability(self, host, *, cdi_names=None, wrong_cdi=False):
         manager = self.manager()
         manager.s = SimpleNamespace(directory=MagicMock())
         manager.run = Mock(side_effect=['5.8.8', json.dumps({'host': host})])
-        with patch.object(o, 'protected_file') as protected, \
+        def verify_file(path, expected, **kwargs):
+            if path == o.CDI:
+                self.assertEqual(expected, SHA)
+                if wrong_cdi: raise ValueError('OCI host dependency differs from accepted version')
+        with patch.object(o, 'protected_file', side_effect=verify_file) as protected, \
              patch.object(o.os, 'geteuid', return_value=1000), \
              patch.object(o.os, 'fstat', return_value=SimpleNamespace(st_uid=0, st_mode=0o40755)), \
-             patch.object(o.os, 'listdir', side_effect=[[], ['gpuq-nvidia.json'], []]), \
+             patch.object(o.os, 'listdir', side_effect=[[], cdi_names if cdi_names is not None else ['gpuq-nvidia.json']]), \
              patch.object(o.Path, 'exists', lambda p: str(p) in ('/etc/cdi', '/run/cdi')), \
              patch.object(o.Path, 'is_symlink', return_value=False):
             result = manager.verify_host()
             protected.assert_any_call('/usr/bin/crun', SHA, executable=True)
+        self.assertEqual([call.args[0] for call in manager.s.directory.call_args_list], [o.HOOKS, o.CDI.parent])
         self.assertEqual(manager.run.call_args_list[-1].args, ('info', '--format=json'))
         return result
+
+    def test_dedicated_cdi_rejects_extra_spec_and_wrong_digest(self):
+        host = {'security': {'rootless': True}, 'cgroupVersion': 'v2',
+                'ociRuntime': {'name': 'crun', 'path': '/usr/bin/crun'}}
+        for names in ([], ['gpuq-nvidia.json', 'host.yaml']):
+            with self.subTest(names=names), self.assertRaisesRegex(ValueError, 'Unpinned CDI'):
+                self.verify_capability(host, cdi_names=names)
+        with self.assertRaisesRegex(ValueError, 'differs from accepted version'):
+            self.verify_capability(host, wrong_cdi=True)
+
+    def test_host_cdi_directories_are_not_inspected_or_loaded(self):
+        # Both host defaults exist, potentially with automatic NVIDIA specs.
+        # The only inspected CDI directory and command option are dedicated.
+        self.verify_capability({'security': {'rootless': True}, 'cgroupVersion': 'v2',
+                                'ociRuntime': {'name': 'crun', 'path': '/usr/bin/crun'}})
 
     def test_runtime_capability_accepts_pinned_absolute_name(self):
         for name in ('crun', '/usr/bin/crun'):
@@ -559,6 +591,71 @@ class OCITests(unittest.TestCase):
                     else:
                         self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
                         self.assertEqual(m.run.call_args.args[0],'rm');write.assert_called_once()
+
+    def test_dead_conmon_native_stop_preserves_overlay_before_checkpoint(self):
+        m=self.manager();identifier='c'*64
+        m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                    'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+        stale={'Id':identifier,'Config':{'Labels':{'io.gpuq.owner':m.owner,'io.gpuq.project':'vision'}},
+               'State':{'Running':True,'Paused':False,'Pid':99999998,'ConmonPid':99999999}}
+        stopped={**stale,'State':{'Running':False,'Paused':False,'Pid':0,'Status':'stopped'}}
+        for code in (0,125):
+            m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                        'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+            m.run=Mock(side_effect=[json.dumps([stale]),json.dumps([stopped]),SHA,''])
+            auth=MagicMock();auth.__enter__.return_value=(m.env,-1)
+            with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write, \
+                 patch.object(m,'registry_auth',return_value=auth), \
+                 patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=code,stdout=b'',stderr=b'conmon exited')) as stop:
+                self.assertEqual(m.checkpoint('vision')['image'],'sha256:'+SHA)
+            self.assertEqual(stop.call_args.args[0][-4:],['stop','--time','1',identifier])
+            self.assertEqual(stop.call_args.kwargs['env'],m.env);self.assertEqual(stop.call_args.kwargs['timeout'],30)
+            self.assertEqual(m.run.call_args_list[2].args[0],'commit');write.assert_called_once()
+
+    def test_dead_runtime_refresh_keeps_running_changed_paused_and_foreign_state_refused(self):
+        identifier='c'*64
+        stale={'Id':identifier,'Config':{'Labels':{'io.gpuq.owner':self.manager().owner,'io.gpuq.project':'vision'}},
+               'State':{'Running':True,'Paused':False,'Pid':99999998,'ConmonPid':99999999}}
+        variants=[stale,{**stale,'Id':'d'*64},
+                  {**stale,'State':{'Running':False,'Paused':True,'Pid':0,'Status':'stopped'}},
+                  {**stale,'Config':{'Labels':{'io.gpuq.owner':'f'*64,'io.gpuq.project':'vision'}}}]
+        for refreshed in variants:
+            with self.subTest(refreshed=refreshed):
+                m=self.manager();m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                    'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+                m.run=Mock(side_effect=[json.dumps([stale]),json.dumps([refreshed])])
+                auth=MagicMock();auth.__enter__.return_value=(m.env,-1)
+                with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write, \
+                     patch.object(m,'registry_auth',return_value=auth), \
+                     patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=125,stdout=b'',stderr=b'conmon exited')):
+                    with self.assertRaises(ValueError):m.checkpoint('vision')
+                    write.assert_not_called();self.assertEqual(m.run.call_count,2)
+
+    def test_live_kernel_pid_never_syncs_or_commits_development_container(self):
+        m=self.manager();m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                    'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+        entry={'Id':'c'*64,'Config':{'Labels':{'io.gpuq.owner':m.owner,'io.gpuq.project':'vision'}},
+               'State':{'Running':True,'Paused':False,'Pid':123,'ConmonPid':124}}
+        m.run=Mock(return_value=json.dumps([entry]))
+        with patch.object(o.Path,'exists',return_value=True),patch.object(m.s,'atomic_json') as write:
+            with self.assertRaises(ValueError):m.checkpoint('vision')
+            write.assert_not_called();self.assertEqual(m.run.call_count,1)
+
+    def test_dead_native_stop_timeout_or_oversize_cannot_commit(self):
+        import subprocess
+        for failure in (subprocess.TimeoutExpired('podman',30),
+                        SimpleNamespace(returncode=0,stdout=b'x'*(2*1024**2),stderr=b'')):
+            m=self.manager();m.load=Mock(return_value={'schema':1,'owner':m.owner,'project':'vision',
+                       'container':'gpuq-dev-'+'a'*32,'image':'sha256:'+SHA})
+            entry={'Id':'c'*64,'Config':{'Labels':{'io.gpuq.owner':m.owner,'io.gpuq.project':'vision'}},
+                   'State':{'Running':True,'Paused':False,'Pid':99999998,'ConmonPid':99999999}}
+            m.run=Mock(return_value=json.dumps([entry]));auth=MagicMock();auth.__enter__.return_value=(m.env,-1)
+            with patch.object(o.Path,'exists',return_value=False),patch.object(m.s,'atomic_json') as write, \
+                 patch.object(m,'registry_auth',return_value=auth),patch.object(o.subprocess,'run') as stop:
+                if isinstance(failure,Exception):stop.side_effect=failure
+                else:stop.return_value=failure
+                with self.assertRaises((ValueError,subprocess.TimeoutExpired)):m.checkpoint('vision')
+                self.assertEqual(m.run.call_count,1);write.assert_not_called()
     def test_commit_head_is_durable_before_deleting_writable_layer(self):
         m = self.manager()
         value = {'schema': 1, 'owner': m.owner, 'project': 'vision', 'image': 'sha256:'+SHA, 'container': 'gpuq-dev-'+'c'*32}
