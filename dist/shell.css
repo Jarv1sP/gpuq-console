@@ -168,3 +168,30 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
  .sb :is(#login-dialog,#register-dialog) .modal-actions{flex-wrap:wrap}
  .sb #profile-dialog .modal-actions .button{flex:1 1 100%}
 }
+
+/* Command rows keep the same control height as the rest of the desktop UI. */
+.sb #mission-control .mc-suggestion{min-height:40px}
+.sb #mission-control button.mc-row-name{min-height:32px}
+@media(max-width:759px){.sb #mission-control .mc-suggestion,.sb #mission-control button.mc-row-name{min-height:44px}}
+
+/* Keep confirmed counts readable when the desktop strip has less room. */
+.sb .cstrip{container-type:inline-size;container-name:operational-strip}
+.sb .cs-focal{min-width:0}
+.sb .cs-focal .cs-progress{min-width:0}
+.sb .cs-meta{overflow:hidden;text-overflow:ellipsis}
+.sb .cs-counts{flex:0 1 246px;max-width:none;gap:0}
+.sb .cs-count-link{flex-wrap:wrap;max-width:100%;gap:0 8px;line-height:16px}
+.sb .cs-count-link .st{line-height:16px}
+.sb .cs-server-summary{display:none;font:11px var(--mono);white-space:nowrap}
+@container operational-strip (width < 1000px){
+ .sb .cs-seg{padding-inline:clamp(10px,1.8cqi,18px)}
+ .sb .cs-focal{flex:1.35 1 140px}
+ .sb .cs-counts{flex:0 1 160px;gap:0}
+ .sb .cs-count-link{flex-wrap:wrap;gap:0 8px;max-width:100%;min-height:22px;line-height:16px}
+ .sb .cs-count-link .st{line-height:16px}
+ .sb .cs-server-list{flex:0 0 auto;gap:8px}
+ .sb .cs-server-summary{display:block}
+ .sb .cs-server-list .cs-server{display:none}
+ .sb .cs-seg:has(>.cs-small){flex:1 1 120px;overflow:hidden}
+ .sb .cs-small,.sb .cs-small small{min-width:0;overflow:hidden;text-overflow:ellipsis}
+}

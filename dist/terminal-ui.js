@@ -234,6 +234,7 @@ export function terminalUI(store,toast){
     if(dialog)return;dialog=document.createElement('dialog');dialog.className='terminal-dialog';dialog.setAttribute('aria-labelledby','terminal-title');
     dialog.innerHTML='<div class="modal-head"><h2 id="terminal-title"></h2><div><button class="button quiet" id="terminal-collapse">收起</button><button class="button" id="terminal-interrupt">Ctrl+C</button> <button class="button" id="terminal-disconnect">断开</button> <button class="button danger" id="terminal-stop">结束终端</button></div></div><p id="terminal-maintenance-note" class="terminal-maintenance-note" role="status" hidden></p><div id="terminal-screen"></div><div class="terminal-recovery"><span id="terminal-connection-note" role="status" hidden></span><button class="button quiet" id="terminal-query" hidden>重新查询</button><button class="button" id="terminal-retry" hidden>重连</button><button class="button" id="terminal-new" hidden>新建终端</button></div><div class="terminal-footer"><p id="terminal-session-note" class="muted"></p>'+copyHelp('断开和结束','断开保留终端和已有命令；结束终端会停止其中的命令。输入未确认时不会自动重发，请重连后检查输出。','/guide/development')+'</div>';
     document.body.append(dialog);dialog.addEventListener('cancel',event=>{event.preventDefault();detach();});
+    if(typeof ResizeObserver==='function')new ResizeObserver(()=>{if(dialog.open&&term)fit?.fit();}).observe(document.querySelector('#terminal-screen'));
   }
   document.addEventListener('gpuq-workspace-context',event=>{
     const {userId,machine,project}=event.detail,next=JSON.stringify([userId,machine,project||'']);

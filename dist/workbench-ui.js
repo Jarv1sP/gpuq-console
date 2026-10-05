@@ -17,13 +17,14 @@ export function jobCancelConfirmation(job){
   const cards=job?.state==='PREPARING_DATA'?0:job?.cards;
   return Number.isSafeInteger(cards)&&cards>=0?`取消这个训练任务？确认停止后释放 ${cards} 张卡的额度，已保存的文件保留。`:'取消这个训练任务？占用额度尚未确认，停止后由服务器确认释放；已保存的文件保留。';
 }
+const infoMark='<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25"/><path d="M8 7v4M8 4.5v.1"/></svg>';
 export function infoHTML(text,label='说明'){
-  return `<details class="ui-info"><summary aria-label="${escapeUI(label)}">ⓘ</summary><div class="ui-info-content" role="note">${escapeUI(text)}</div></details>`;
+  return `<details class="ui-info"><summary aria-label="${escapeUI(label)}">${infoMark}</summary><div class="ui-info-content" role="note">${escapeUI(text)}</div></details>`;
 }
 // Keep the original node and its aria-describedby ID when moving copy offscreen.
 export function discloseInfo(element,label='说明'){
   if(!element||element.closest('.ui-info'))return;
-  const help=document.createElement('details'),summary=document.createElement('summary');help.className='ui-info';summary.textContent='ⓘ';summary.setAttribute('aria-label',label);element.before(help);help.append(summary,element);element.classList.add('ui-info-content');element.hidden=false;
+  const help=document.createElement('details'),summary=document.createElement('summary');help.className='ui-info';summary.innerHTML=infoMark;summary.setAttribute('aria-label',label);element.before(help);help.append(summary,element);element.classList.add('ui-info-content');element.hidden=false;
 }
 export const projectEnvironments={shared:'共享',isolated:'隔离',oci:'个人容器'};
 export function projectEnvironmentLabel(mode){return mode===undefined?'共享':typeof mode==='string'&&Object.hasOwn(projectEnvironments,mode)?projectEnvironments[mode]:'环境未确认';}

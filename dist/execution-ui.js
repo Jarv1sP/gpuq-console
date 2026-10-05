@@ -173,7 +173,7 @@ export function executionUI(store,refresh,toast){
     section.querySelector('.workspace-context-heading').querySelector('.eyebrow').textContent='代码与环境';
     section.querySelector('#workspace-context-title').textContent='项目与训练版本';
     for(const id of ['project-publish','terminal-open'])query('#'+id).classList.remove('primary');
-    const train=section.querySelector('#train-form'),panel=train.closest('details');panel.id='train-panel';panel.querySelector('summary').classList.add('sr-only');
+    const train=section.querySelector('#train-form'),panel=train.closest('details');panel.id='train-panel';panel.querySelector('summary').hidden=true;
     submitDialog=document.createElement('dialog');submitDialog.id='work-submit';submitDialog.className='work-sheet submit-sheet';submitDialog.setAttribute('aria-labelledby','submit-title');
     submitDialog.innerHTML='<header class="sheet-header glass"><div><p id="submit-context" class="mono"></p><h2 id="submit-title">提交训练</h2></div><button class="button quiet" type="button" id="close-submit" aria-label="关闭提交抽屉">关闭</button></header>';
     submitDialog.append(panel);document.body.append(submitDialog);
@@ -200,7 +200,14 @@ export function executionUI(store,refresh,toast){
     for(const id of ['workspace-mode-note','project-status-detail']){const note=query('#'+id);note.classList.remove('ui-info-content');contextCopy.append(note);}contextInfo.append(contextCopy);statusInfo.remove();contextInfo.querySelector('summary').setAttribute('aria-label','项目与训练版本说明');query('.workspace-context-heading>div').append(contextInfo);
     const publishInfo=query('#project-detail>.ui-info'),publishControl=document.createElement('div');publishControl.className='wb-publish-control';query('#project-publish').before(publishControl);publishControl.append(query('#project-publish'),publishInfo);
     const terminalHelp=query('#terminal-mode-note')?.closest('.ui-info');if(terminalHelp)query('.terminal-heading').append(terminalHelp);
-    discloseInfo(query('#environment-mode-note'),'运行环境说明');renderEnvironmentChoice();
+    discloseInfo(query('#environment-mode-note'),'运行环境说明');
+    const fieldHelp=(note,control)=>{const help=note?.closest('.ui-info');if(help&&control)control.before(help);};
+    fieldHelp(query('#priority-note'),train.querySelector('[name=priority]'));
+    for(const name of ['command','datasets']){const label=train.querySelector('[name='+name+']')?.closest('label');fieldHelp(label?.nextElementSibling?.querySelector('.ui-info-content'),label?.querySelector('textarea'));}
+    const environmentHelp=query('#environment-mode-note').closest('.ui-info');query('.project-environment-choice legend').append(environmentHelp);
+    const taskHelp=explanation.closest('.ui-info');kicker.querySelector('span').append(taskHelp);
+    const contextHeading=query('#workspace-context-title'),contextCaption=document.createElement('div');contextCaption.className='field-caption';contextHeading.before(contextCaption);contextCaption.append(contextHeading,contextInfo);
+    renderEnvironmentChoice();
 
   }
   const receiptActor=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);

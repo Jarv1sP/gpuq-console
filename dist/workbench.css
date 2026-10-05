@@ -89,9 +89,9 @@
 .wb-submit-rail .ui-info-content,.wb-scroll .ui-info-content{left:auto;right:0}
 .wb-focal .subline{display:flex;align-items:center;gap:8px;color:var(--ink-2);font:12px var(--sans);margin:8px 0 0}
 .wb-job-name{overflow-wrap:anywhere}
-/* The information mark uses native text plus an explicit circle: no missing-glyph box. */
-.ui-info>summary{font-size:0!important;display:inline-flex!important;align-items:center;justify-content:center;list-style:none}
-.ui-info>summary::before{content:'i';box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border:1px solid currentColor;border-radius:50%;font:10px/1 Georgia,serif;color:var(--ink-2)}
+/* The labelled disclosure has a decorative SVG, independent of font glyphs. */
+.ui-info>summary{display:inline-flex!important;align-items:center;justify-content:center;list-style:none}
+.ui-info>summary svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.25;stroke-linecap:round;color:var(--ink-2)}
 .ui-info>summary::after{display:none!important}
 .workspace-context-heading>div{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px}
 .workspace-context-heading>div>.eyebrow{flex-basis:100%}
@@ -164,3 +164,24 @@
 .sb .wb-history-filter{display:flex;align-items:center;gap:12px;max-width:280px;margin:12px 0}
 .sb .wb-history-filter select{flex:1;min-width:0;min-height:40px}
 @media(max-width:759px){.sb .wb-history-filter select{min-height:44px}}
+
+/* Operational controls and field captions share a measurable size and axis. */
+.sb .wb-job-name{min-height:32px;line-height:1.4;min-width:0;overflow-wrap:anywhere}
+.sb .job .job-acts .button{min-height:32px}
+.sb .ui-info>summary{width:32px;height:32px;flex:none}
+.sb #train-form label{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.sb #train-form label>:is(input,select,textarea,code,.project-name-error){grid-column:1/-1}
+.sb #train-form label>.ui-info{margin:0}
+.sb #page-work .field-caption,.sb #project-create .project-environment-choice legend,.sb #page-work .section-kicker>span:has(.ui-info){display:flex;align-items:center;gap:8px}
+.sb #page-work .field-caption>.ui-info,.sb #project-create .project-environment-choice legend>.ui-info{margin:0}
+.sb .project-environment-segments{grid-template-columns:repeat(3,minmax(0,1fr))}
+.sb .project-environment-segments span{min-height:48px;padding:4px 2px;white-space:normal;line-height:18px;text-align:center}
+.sb .wb-ledger-groups>details>summary{min-height:40px}
+.sb .wb-rail #host-maintenance>summary{min-height:40px;display:flex;align-items:center}
+@media(max-width:759px){
+ .sb .wb-job-name,.sb .wb-rail #project-create>summary,.sb .wb-rail #workspace-files>summary,.sb .wb-ledger-groups>details>summary{min-height:44px}
+ .sb .ui-info>summary{width:44px;height:44px}
+ .sb .wb-rail #host-maintenance>summary{min-height:44px}
+ .sb .project-environment-segments span{min-height:44px}
+ .sb .job .job-acts .button{min-height:44px}
+}
