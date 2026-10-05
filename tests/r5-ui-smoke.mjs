@@ -16,7 +16,7 @@ const shots=process.env.UI_SCREENSHOTS||'/tmp/r5-ui-smoke';
 const [targetMachine,sourceMachine]=MACHINES.map(machine=>machine.id);
 const password='Starbase-Local-Fixture-Only-2026!',release='a'.repeat(64);
 const errors=[],outside=[],assets=[],calls=[],sessions=new Map();
-let server,service,browser,releaseCatalog;
+let server,service,browser,releaseCatalog,releaseInventory;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
 const project={project:'vision-baseline',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
@@ -72,6 +72,38 @@ try{
     try{await page.waitForTimeout(400);await page.screenshot({path:join(shots,name+'.png'),fullPage:!overlay&&(fullPage||viewport.width>=760)});}finally{if(expand)await page.setViewportSize(viewport);}
   }
   async function noOverflow(page){assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'no horizontal overflow, including during a transition');}
+
+  // Production imports start with no inventory. Keep the member directory
+  // pending to verify that constructors and mirrors tolerate that empty phase.
+  const inventoryProbe=await pageFor(390),inventoryRequests=[];
+  inventoryProbe.on('request',request=>{const path=new URL(request.url()).pathname;if(['/machines.js','/model.js'].includes(path))inventoryRequests.push(path);});
+  const inventoryGate=new Promise(resolve=>{releaseInventory=resolve;});
+  await inventoryProbe.route(/\/machines\.js\?login=/,async route=>{await inventoryGate;await route.continue();});
+  await inventoryProbe.goto(origin);await inventoryProbe.locator('#login-dialog').waitFor({state:'visible'});
+  assert.deepEqual(inventoryRequests,[],'public R5 entry does not import the capacity directory or demo model');
+  assert.equal(await inventoryProbe.locator('.resource-card').count(),0);
+  const inventoryStarted=inventoryProbe.waitForRequest(request=>new URL(request.url()).pathname==='/machines.js');
+  await inventoryProbe.locator('#login-form [name=username]').fill(member.username);await inventoryProbe.locator('#login-form [name=password]').fill(password);await inventoryProbe.locator('#login-form [type=submit]').click();
+  await inventoryStarted;
+  assert.equal(await inventoryProbe.locator('#login-dialog').isVisible(),true,'login waits for its protected directory');
+  assert.equal(await inventoryProbe.locator('#context-machine option').count(),0,'empty inventory cannot retain a context ID');
+  assert.equal(await inventoryProbe.locator('.resource-card').count(),0);
+  releaseInventory();await inventoryProbe.locator('#login-dialog').waitFor({state:'hidden'});
+  assert.deepEqual(inventoryRequests,['/machines.js'],'member directory is fetched only after authentication');
+  assert.equal(await inventoryProbe.locator('.resource-card').count(),MACHINES.length,'the existing array reference receives the logged-in inventory');
+  await inventoryProbe.locator('[data-nav=datasets]').click();assert.equal(await inventoryProbe.locator('[name=dataset-machine] option').count(),MACHINES.length);
+  await inventoryProbe.evaluate(()=>document.querySelector('#switch-account').click());await inventoryProbe.locator('#login-dialog').waitFor({state:'visible'});
+  assert.equal(await inventoryProbe.locator('#context-machine option').count(),0);
+  assert.equal(await inventoryProbe.locator('.resource-card').count(),0);
+  assert.equal(await inventoryProbe.locator('#dataset-catalog').textContent(),'');
+  const loggedOutLabels=await inventoryProbe.locator('.server-select-label').allTextContents();
+  for(const machine of MACHINES)assert.ok(!loggedOutLabels.some(label=>label.includes(machine.id)),'logout clears mirrored server IDs: '+machine.id);
+  await login(inventoryProbe,'admin');
+  assert.deepEqual(inventoryRequests,['/machines.js'],'administrator uses state rather than importing the directory');
+  await inventoryProbe.setViewportSize({width:1440,height:1080});await inventoryProbe.locator('[data-nav=users]').click();await inventoryProbe.locator('#filter-all').click();await inventoryProbe.locator('[data-user="'+member.id+'"]').click();
+  assert.equal(await inventoryProbe.locator('[data-quota=total]').getAttribute('max'),String(MACHINES.reduce((sum,machine)=>sum+machine.cards,0)),'account capacity is recomputed after the empty login phase');
+  assert.equal(await inventoryProbe.locator('[data-permission-meter]').count(),MACHINES.length);
+  await inventoryProbe.context().close();
 
   const desktop=await pageFor(1440);await login(desktop,member.username);
   const requests=[];desktop.on('request',request=>{if(request.url()===origin+'/api/call'){const body=request.postDataJSON();requests.push(body);}});
@@ -156,14 +188,17 @@ try{
     await page.locator('[data-nav=datasets]').click();await page.locator('[name=dataset-machine]').selectOption(targetMachine);await page.locator('#datasets-refresh').click();await page.locator('.dataset-matrix').waitFor();await noOverflow(page);assert.equal(await page.locator('.heading-actions [data-shell-action=control]').isVisible(),width<760?!await page.locator('#mobile-control').isVisible():true,'same control entry on datasets');
     assert.equal(await page.locator('[name=dataset-machine]').evaluate(n=>getComputedStyle(n).color),'rgba(0, 0, 0, 0)','dataset selector renders one name');assert.equal(await page.locator('.dataset-matrix-heading [data-machine]').count(),MACHINES.length);assert.equal(await page.locator('#datasets-capacity>div>strong').innerText(),'502 GiB');assert.equal(await page.locator('#datasets-capacity>div>small').innerText(),'共 1024 GiB');assert.equal(await page.locator('.dataset-library .hero-label').count(),0);
     if(width<760){
-      assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'list');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),false);
+      assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'list');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),false);assert.equal(await page.locator('.help-links').isVisible(),false,'phone datasets have no detached footer information mark');
       for(const card of await page.locator('.dataset-card').all()){
         assert.equal(await card.getAttribute('role'),'listitem');assert.deepEqual(await card.locator('.dataset-machine-label').allTextContents(),MACHINES.map(row=>row.id));
         const facts=await card.locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>({height:n.getBoundingClientRect().height,line:parseFloat(getComputedStyle(n).lineHeight),whiteSpace:getComputedStyle(n).whiteSpace})));assert.ok(facts.every(n=>n.height<=n.line+1&&n.whiteSpace==='nowrap'),'phone states stay on one line');
         for(const location of await card.locator('.dataset-location').all()){const name=await location.locator('.dataset-machine-label').boundingBox(),state=await location.locator('.dataset-location-status').boundingBox();assert.ok(name.x+name.width<=state.x&&Math.abs(name.y+name.height/2-state.y-state.height/2)<=1,'phone ID and state share one line');}
         const selected=card.locator('.dataset-location.dataset-target'),fact=await selected.locator('.dataset-location-fact').boundingBox(),row=await selected.boundingBox();
         assert.equal(await selected.locator('[data-use-dataset]').count(),1);
-        for(const button of await selected.locator('.file-actions .button').all()){const bounds=await button.boundingBox();assert.ok(bounds.height>=44&&bounds.y>=fact.y+fact.height&&bounds.y+bounds.height<=row.y+row.height+1,'mobile actions occupy separate 44px rows');}
+        const prepare=selected.locator('[data-prepare-dataset]'),use=selected.locator('[data-use-dataset]');
+        if(await selected.getAttribute('data-location-state')==='READY'){assert.equal(await prepare.isVisible(),false,'local ready cards hide redundant preparation');assert.equal(await use.isVisible(),true);}
+        const actionBounds=[];for(const button of await selected.locator('.file-actions .button:visible').all()){const bounds=await button.boundingBox();actionBounds.push(bounds);assert.ok(bounds.height>=44&&bounds.y>=fact.y+fact.height&&bounds.y+bounds.height<=row.y+row.height+1,'mobile actions keep distinct 44px targets below the status');}
+        if(actionBounds.length===2){assert.ok(actionBounds[0].x+actionBounds[0].width<=actionBounds[1].x&&Math.abs(actionBounds[0].y-actionBounds[1].y)<=1,'preparation and training are separate side-by-side buttons');assert.match(await use.getAttribute('class'),/primary/);assert.doesNotMatch(await prepare.getAttribute('class'),/quiet/);}
         assert.ok(await card.evaluate(n=>n.scrollWidth<=n.clientWidth+1),'dataset card has no horizontal matrix scroll');
       }
       const mobileRoute=page.locator('.dataset-mobile-route');assert.equal(await mobileRoute.isVisible(),true);assert.match(await mobileRoute.textContent(),new RegExp(sourceMachine+'.*→.*'+targetMachine+'.*7.00 GiB'));
@@ -181,7 +216,7 @@ try{
   await desktop.locator('[data-nav=work]').click();await desktop.locator('.wb-focal [data-job-mission]').click();desktop.once('dialog',async dialog=>{assert.match(dialog.message(),/释放 2 张卡的额度/);await dialog.accept();});await desktop.locator('#job-mission [data-job-cancel]').click();await desktop.waitForFunction(()=>document.querySelector('#job-mission .st')?.textContent.includes('正在取消'));assert.equal(requests.filter(row=>row.operation==='jobs.cancel').length,1);assert.equal(await desktop.locator('#job-mission [data-job-cancel]').isDisabled(),true);
   await desktop.evaluate(()=>document.querySelector('#switch-account').click());await desktop.locator('#login-dialog').waitFor({state:'visible'});await desktop.locator('#job-mission').waitFor({state:'hidden'});assert.equal(await desktop.locator('#job-mission').innerText(),'');assert.equal(await desktop.locator('#submission-receipt').count(),0);
   assert.deepEqual(outside,[]);assert.deepEqual(errors.filter(message=>!message.includes('ERR_FAILED')&&!message.includes('Failed to fetch')),[]);assert.ok(assets.filter(row=>row.path.endsWith('.woff2')).every(row=>row.status===200));
-  console.log(JSON.stringify({status:'passed',checks:['mission real attempt/allocated GPU/timeline/Escape/privacy','stage adaptive hero + one real state-boundary sweep','explicit Chinese parse/version/confirmation/target binding','lost submit reply + identical explicit idempotent retry + in-place receipt','operation column and read-only true-source route','1440/390/320 member/admin + all inventory names + reduced motion + CSP/self-hosted fonts'],screenshots:shots}));
+  console.log(JSON.stringify({status:'passed',checks:['empty pre-login inventory + delayed member directory + admin state + logout mirrors/capacity','mission real attempt/allocated GPU/timeline/Escape/privacy','stage adaptive hero + one real state-boundary sweep','explicit Chinese parse/version/confirmation/target binding','lost submit reply + identical explicit idempotent retry + in-place receipt','operation column and read-only true-source route','1440/390/320 member/admin + all inventory names + reduced motion + CSP/self-hosted fonts'],screenshots:shots}));
 }finally{
-  releaseCatalog?.();await browser?.close();if(server?.listening)await new Promise(resolve=>server.close(resolve));if(service&&!service.closing){clearInterval(service.executionTimer);await service.close();}await rm(temp,{recursive:true,force:true});
+  releaseInventory?.();releaseCatalog?.();await browser?.close();if(server?.listening)await new Promise(resolve=>server.close(resolve));if(service&&!service.closing){clearInterval(service.executionTimer);await service.close();}await rm(temp,{recursive:true,force:true});
 }
