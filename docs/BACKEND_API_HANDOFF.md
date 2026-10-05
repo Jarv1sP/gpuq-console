@@ -17,6 +17,29 @@
 - owner、账号角色和节点执行凭据由后端确定。不要在 `args` 中添加 `userId`、`username`、角色或宿主机绝对路径。
 - 写请求的响应丢失，意味着结果未确认。不要自动重发终端输入、换一个 UUID 重启云任务，或把文件块改走另一条路径；先查原 ID 和服务端确认的状态／偏移。
 
+## 个人容器项目：创建与固定发布
+
+项目沿用同一个 `/api/call`，详细工作流见 [项目与环境](PROJECTS.md)。创建个人容器项目的请求是：
+
+```json
+{"operation":"projects.create","args":{"machine":"SERVER_ID","project":"experiment-a","environmentMode":"oci"}}
+```
+
+`project` 须匹配 `^[a-z][a-z0-9_-]{0,47}$`。`environmentMode` 只用于创建，取 `shared`、`isolated` 或 `oci`；省略时沿用共享模式。同名项目不能改换模式，失败时不自动降级或创建替代项目。创建成功须确认 `result.environmentMode === "oci"`，不能把 HTTP 200 当作容器模式已确认。
+
+| 操作 | `args` | 成功的 `result` |
+| --- | --- | --- |
+| `projects.list` | `machine` | `{projects: [...]}`，每项为项目状态 |
+| `projects.create` | `machine`、`project`，可选 `environmentMode` | 项目状态，创建时通常为 `DRAFT` |
+| `projects.status` | `machine`、`project` | 项目状态及适用时的发布回执／进度 |
+| `projects.publish` | `machine`、`project`、本次发布 UUID `key` | 后台发布状态，不占 GPU，不等于发布完成 |
+
+项目状态包含 `project`、`environmentMode`、`state`、`createdAt`、`releases`、`latestReadyRelease`、`offlineAssetsPath`。`releases` 项包含 `release`（64 位小写十六进制）、`state="READY"`、`createdAt`、`bytes`、`entries`。顶层状态可能是 `DRAFT`、`SYNCING`、`PUBLISHING`、`READY`、`FAILED` 或 `UNKNOWN`；失败详情和进度仅在返回时展示，不能因存在旧 READY 版本就宣称新发布完成。
+
+发布前必须显式结束该项目的全部开发终端，`detach` 不算结束。每次明确发布生成一个 `key`，受理后用 `projects.status` 读取进度；状态查询只传 `machine`、`project`，不传 `key`、不循环调用 publish。保留原 `key`，仅当 `publication.id` 与它一致、`publication.state="READY"` 且 `publication.release` 出现在 READY 版本清单中，才确认本次发布成功；训练固定该 release。响应丢失先查询状态，若需确认原请求仍使用同一个 key，不换新 key 重复发布。`UNKNOWN` 或缺少对应回执时不能猜测成功。
+
+账号须仍启用且具有所选机器的有效授权，节点还须显式启用个人 OCI 并允许该账号；管理员角色不自动绕过这些检查。当前真实正式验收范围是一个 RTX 3090 节点上的受控账号，不代表已向全部账号和节点开放。owner 由后端登录身份确定，HTTP 不接受客户端指定 `owner`、`userId`、角色、镜像或引擎参数。进入容器用下述 `terminal.open` 加 `project`，不加 `hostAdmin`；容器内 root 不等于宿主机 root，开发终端没有 GPU。
+
 ## 终端：新建与重连分开
 
 所有操作均包含 `machine`。可选上下文为 `project`、`dataWorkspace`、`hostAdmin`；重连及后续操作必须保持原上下文。项目、个人数据终端和宿主机 root 入口不能混用。宿主机 root 仍受管理员身份、机器授权和节点配置约束，不等于个人容器内的 root。
