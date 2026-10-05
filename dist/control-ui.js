@@ -1,5 +1,5 @@
 import {endedJob,escapeUI as esc,stateHTML,stateClass,stateWord,trainingReadout,trajectoryHTML,parseTrainingCommand,infoHTML,boundarySweep,serverIdHTML} from './workbench-ui.js';
-import {captureObject,dismissReveal} from './motion-ui.js';
+import {captureObject,dismissReveal,openDialogs} from './motion-ui.js';
 
 const finite=value=>Number.isSafeInteger(value)&&value>=0;
 const activeData=new Set(['NEW','HASHING','RECEIVING_MANIFEST','SEALING','UPLOADING','PUBLISHING','QUEUED','RUNNING','IMPORTING','DOWNLOADING','EXTRACTING','VERIFYING','PREPARING','COPYING','ARCHIVING']);
@@ -143,7 +143,7 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
   dialog.addEventListener('change',event=>{if(!naturalDraft)return;if(event.target.id==='control-data-version'){naturalDraft.version=event.target.value;naturalDraft.confirmed=false;}if(event.target.id==='control-confirm-fields')naturalDraft.confirmed=event.target.checked;renderNatural();dialog.querySelector('#'+event.target.id)?.focus();});
   document.addEventListener('keydown',event=>{
     const editing=event.target.closest('input,textarea,select,[contenteditable=true]');
-    if([...document.querySelectorAll('dialog[open]')].some(layer=>layer!==dialog))return;
+    if(openDialogs().some(layer=>layer!==dialog))return;
     if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'&&!(event.ctrlKey&&event.target.closest('.terminal-dialog'))){event.preventDefault();open('command');return;}
     if(event.target.id==='control-command'&&['ArrowDown','ArrowUp','Enter'].includes(event.key)){event.preventDefault();const rows=[...dialog.querySelectorAll('[data-command-id]')];if(!rows.length)return;if(event.key==='Enter')return runCommand(rows[cursor].dataset.commandId);cursor=(cursor+(event.key==='ArrowDown'?1:-1)+rows.length)%rows.length;updateCommands();return;}
     if(editing||event.metaKey||event.ctrlKey||event.altKey)return;
