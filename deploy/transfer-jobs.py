@@ -607,6 +607,28 @@ class TransferJobs:
         if action == 'begin' and 'archiveLane' in spec:
             self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
             return self.n.dataset_uploads().begin(spec['userId'], fields, _archive_transfer=spec['id'])
+        if action in ('manifest', 'chunk'):
+            # These bytes were read by this node from a certificate-pinned LAN
+            # peer, not relayed through the Portal. The public upload RPC keeps
+            # its large-relay opt-in; no request field can select this ingress.
+            # Revalidate the durable copy/session binding before every write,
+            # including old ordinary-admission transfers resumed in place.
+            current = self.load(spec['id'])
+            if current != spec or fields.get('uploadId') != spec['id']:
+                raise ValueError('LAN upload differs from its durable transfer')
+            if self.path(spec['id'], '.cancel').exists():
+                raise InterruptedError('Canceled by owner')
+            if 'archiveLane' in spec:
+                self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
+            uploads = self.n.dataset_uploads()
+            session = uploads.load(spec['userId'], fields['uploadId'])
+            if (session.get('name') != spec['name'] or any(
+                    session.get(k) != spec['source'][k]
+                    for k in ('manifestBytes', 'manifestSha256', 'totalBytes', 'entries'))):
+                raise ValueError('LAN upload differs from its admitted immutable source')
+            offset, data = uploads.decoded(fields)
+            return getattr(uploads, action+'_bytes')(
+                spec['userId'], fields, offset, data, transport='lan-peer')
         if action in ('seal', 'commit'):
             return self.n.dataset_uploads().start(spec['userId'], fields, action,
                 inline_unit=self.unit(spec['id'], spec['attempt']))
