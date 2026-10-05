@@ -659,6 +659,25 @@ def stop_terminal(jid):
         active=subprocess.run(['/usr/bin/systemctl','--user','is-active','--quiet',unit],env=ENV,timeout=5)
         if active.returncode==0:raise ValueError('Terminal could not be stopped')
 
+def personal_oci_project(args):
+    # Only a new personal project container needs a delegated child cgroup.
+    # The client cannot ask for delegation by supplying an environment mode.
+    if args.get('hostAdmin') is True or args.get('dataWorkspace') is True or not args.get('project'):
+        return False
+    if projects().store.environment_mode(args['userId'],args['project'])!='oci':
+        return False
+    spec=importlib.util.spec_from_file_location('gpuq_terminal_oci_policy',HERE/'personal-oci.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    module.policy(CONFIG,args['userId'])  # exact authenticated owner cohort
+    return True
+
+def terminal_oci_properties(args):
+    return ['--property=Delegate=yes'] if personal_oci_project(args) else []
+
+def oci_submission_arguments(job):
+    # This is platform-selected from owned metadata, never a user host env.
+    return ['--env','GPUQ_CONSOLE_OCI=1'] if personal_oci_project(job) else []
+
 def terminal_op(operation,args):
     if args.get('hostAdmin') is True and not CONFIG.get('hostRoot',False):raise ValueError('Host root terminal is disabled on this node')
     workspace(args['userId'])
@@ -684,6 +703,7 @@ def terminal_op(operation,args):
         if opening:
             if mode=='new' and not (folder/(jid+'.json')).exists():
                 if args.get('hostAdmin') is not True:workspace_storage_check(admission=True)
+                oci_properties=terminal_oci_properties(args)
                 unit='amax-term-'+jid
                 spec={'userId':args['userId'],'username':args['username'],'cards':0,'argv':['/bin/bash','--noprofile','--norc','-i'],'hostAdmin':args.get('hostAdmin') is True}
                 if args.get('project'):spec['project']=args['project']
@@ -697,6 +717,7 @@ def terminal_op(operation,args):
                 finally:os.close(directory)
                 command=['/usr/bin/systemd-run','--user','--collect','--unit',unit,'--property=RuntimeMaxSec=21600','--property=KillMode=control-group','--property=TimeoutStopSec=5']
                 if not spec['hostAdmin']:command+=['--property=MemoryMax=8G','--property=CPUQuota=200%','--property=TasksMax=2048']
+                command+=oci_properties
                 run(command+['/usr/bin/python3',str(HERE/'terminal-helper.py'),jid])
                 for _ in range(30):
                     if (folder/(jid+'.sock')).exists():break
@@ -1035,7 +1056,7 @@ def process(operation,args):
                 # lease while the scheduler may still accept the request.
                 atomic_json(attempted,{'jobId':jid})
             scheduling=SCHEDULING.submit_arguments(policy)
-            result=gpu('submit',*SCHEDULING.allocation_arguments(job),*scheduling,'-n','portal-'+jid[:8],'-u',gpuq_owner(job),'--cwd',str(workspace(job['userId'])),'--submit-key',jid,'--','/usr/bin/python3',str(HERE/'sandbox-runner.py'),jid)
+            result=gpu('submit',*SCHEDULING.allocation_arguments(job),*scheduling,*oci_submission_arguments(job),'-n','portal-'+jid[:8],'-u',gpuq_owner(job),'--cwd',str(workspace(job['userId'])),'--submit-key',jid,'--','/usr/bin/python3',str(HERE/'sandbox-runner.py'),jid)
             node_id=result['job_id']
         else:node_id=row[0]
         data=gpu('show',node_id);state=data.get('job',data)

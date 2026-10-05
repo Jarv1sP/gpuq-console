@@ -3481,6 +3481,7 @@ class Coordinator:
                     cwd=str(control_dir),
                     env={},
                     log_path=payload["log_path"],
+                    **({"delegate": True} if payload["env"].get("GPUQ_CONSOLE_OCI") == "1" else {}),
                 )
             except ValueError as exc:
                 reason = f"invalid launch specification: {exc}"

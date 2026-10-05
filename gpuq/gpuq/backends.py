@@ -459,6 +459,7 @@ class UserSystemdBackend:
         cwd: os.PathLike[str] | str,
         env: Mapping[str, str] | None,
         log_path: os.PathLike[str] | str,
+        delegate: bool = False,
     ) -> SystemdUnitStatus:
         """Start one new transient service and return its verified identity.
 
@@ -473,6 +474,8 @@ class UserSystemdBackend:
         working_directory = self._validate_absolute_path(cwd, "cwd")
         output_path = self._validate_absolute_path(log_path, "log_path")
         environment = self._validate_env(env or {})
+        if type(delegate) is not bool:
+            raise ValueError("delegate must be a boolean")
         description = self.description_for(token)
 
         command = [
@@ -489,6 +492,10 @@ class UserSystemdBackend:
             f"--property=Description={description}",
             f"--working-directory={working_directory}",
         ]
+        # Only an explicitly admitted OCI launch needs child cgroup ownership.
+        # Existing units and ordinary new tasks retain their prior recipe.
+        if delegate:
+            command.append("--property=Delegate=yes")
         command.append("--")
         command.extend([self._env_binary, "-i", "--"])
         command.extend(f"{key}={value}" for key, value in environment)

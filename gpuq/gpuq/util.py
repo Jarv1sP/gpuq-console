@@ -54,7 +54,10 @@ def validate_env(env: dict[str, str], reserved: set[str]) -> dict[str, str]:
     for key, value in env.items():
         if not isinstance(key, str) or not ENV_NAME_RE.fullmatch(key):
             raise ValueError(f"invalid environment variable name: {key!r}")
-        if key in reserved or key.startswith("GPUQ_"):
+        # The trusted console adapter explicitly submits this single launch
+        # hint. All allocation variables remain scheduler-managed.
+        console_oci = key == "GPUQ_CONSOLE_OCI" and value == "1"
+        if key in reserved or (key.startswith("GPUQ_") and not console_oci):
             raise ValueError(f"environment variable is managed by gpuq: {key}")
         if (
             not isinstance(value, str)
