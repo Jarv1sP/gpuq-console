@@ -16,6 +16,7 @@ import {watchJob} from './job-watch.mjs';
 import {progressText} from './dist/job-progress.js';
 import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
 import {displayName,taskDescription} from './dist/task-metadata.js';
+import {apiPost} from './client-http.mjs';
 
 // Member metadata is untrusted even after submission validators improve: old
 // stored records and older servers can still contain C1/ANSI or bidi controls.
@@ -348,9 +349,7 @@ async function main(){
   if(base.protocol!=='https:'&&!(base.protocol==='http:'&&base.hostname==='127.0.0.1'))fail('Remote APIs require HTTPS.');
   if(session&&session.url!==base.origin)session=undefined;
   async function post(path,body,requestSignal){
-    const response=await fetch(new URL(`/api/${path}`,base),{method:'POST',redirect:'error',signal:requestSignal?AbortSignal.any([requestSignal,AbortSignal.timeout(40000)]):AbortSignal.timeout(40000),headers:{'Content-Type':'application/json',...(session?{Authorization:`Bearer ${session.token}`}:{})},body:JSON.stringify(body)});
-    let data;try{data=await response.json();}catch{fail('Target is not an GPUQ JSON API. The hosted static preview does not provide one.');}
-    if(!response.ok)fail(data.error||`HTTP ${response.status}`);return data;
+    return apiPost(base,path,body,{token:session?.token,signal:requestSignal});
   }
   const call=(operation,args={},signal)=>post('call',{operation,args},signal);
   let command=positionals[0];let result,mode={demo:true,gpuqConnected:false};

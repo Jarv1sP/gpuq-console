@@ -10,6 +10,7 @@ import {guideTarget,guidePage} from './guide.mjs';
 import {LOGIN_POLICY} from './login-sessions.mjs';
 import {loadStorageArchivePolicy} from './storage-archive.mjs';
 import {STARBASE_ASSETS} from './frontend-assets.mjs';
+import {directUploadConnectSources} from './direct-upload-policy.mjs';
 
 const files={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/xterm.js':'vendor/xterm.js','/xterm.css':'vendor/xterm.css','/addon-fit.js':'vendor/addon-fit.js'};
 files['/job-progress.js']='job-progress.js';files['/job-progress-ui.js']='job-progress-ui.js';
@@ -38,14 +39,15 @@ files['/cloud-import-ui.js']='cloud-import-ui.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
 files['/maintenance-ui.js']='maintenance-ui.js';files['/maintenance.css']='maintenance.css';
 files['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';
-export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge,notificationConfigPath,storageArchiveConfigPath,ociCohortMachines=[]}){
+export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge,notificationConfigPath,storageArchiveConfigPath,ociCohortMachines=[],directUploadOrigins=process.env.GPUQ_DIRECT_UPLOAD_ORIGINS||'[]'}){
+  const uploadConnect=directUploadConnectSources(directUploadOrigins);
   await standaloneClient();
   const url=new URL(origin);const config=await loadTelegramNotifications(notificationConfigPath);
   const storage=await loadStorageArchivePolicy(storageArchiveConfigPath);
   const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined),config,storage,ociCohortMachines);const rate=new Map();
   const server=http.createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
-    const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Content-Security-Policy':`default-src 'self'; script-src 'self'; style-src 'self' 'nonce-${styleNonce}'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`};
+    const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Content-Security-Policy':`default-src 'self'; script-src 'self'; style-src 'self' 'nonce-${styleNonce}'; img-src 'self' data:; connect-src 'self'${uploadConnect?' '+uploadConnect:''}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`};
     const json=(code,data,extra={})=>{res.writeHead(code,{...headers,'Content-Type':'application/json; charset=utf-8',...extra});res.end(JSON.stringify(data));};
     const cookie=(token,name='gpuq_session')=>`${name}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${token?LOGIN_POLICY.cookieSeconds:0}${secure?'; Secure':''}`;
     const expiredCookies=()=>[cookie(''),cookie('','amax_session')];

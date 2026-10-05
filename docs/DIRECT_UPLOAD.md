@@ -53,6 +53,8 @@ gpuctl data upload ./samples --name samples
 
 可信 HTTPS 入口的 `directUpload` 可额外配置 `allowedOrigins`，例如 `["https://portal.example.edu"]`。只接受明确的 HTTPS origin，不接受通配符、`null`、用户名密码或路径。未配置时维持原 CLI 行为，不开放浏览器跨域访问；改变名单也改变票据配置版本。
 
+门户还须设置 `GPUQ_DIRECT_UPLOAD_ORIGINS`，值为专用上传入口的 JSON 数组，例如 `["https://upload.example.edu:18441","https://upload.example.edu:18442"]`。它只把这些准确 origin 加入页面的 CSP `connect-src`；不接受通配符、HTTP、路径、账号或查询参数，默认空名单。节点的 `allowedOrigins` 是“谁能来上传”，门户的该项是“浏览器可连哪里”，两者都必须配置，不能仅凭 OPTIONS 成功就判定网页可上传。修改后核对真实门户响应头，再做浏览器实测。
+
 网页仍通过门户完成 `datasets.upload.begin`、`datasets.upload.direct-ticket`、清单封存和最终发布。文件字节直接发送给票据返回的节点 `endpoint`：
 
 - `POST /v1/uploads/<uploadId>/manifest?offset=<offset>`：原始清单块。

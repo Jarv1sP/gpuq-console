@@ -39,6 +39,18 @@ gpuctl run --rank P2 --mode preempt1 -g 1 -- python urgent.py
 gpuctl run --rank P2 --mode preempt2 -g 1 -- python urgent.py
 ```
 
+## 共享长训练的边界
+
+普通共享和 HAMi 共享均只支持 `mode=queue`、`yieldPolicy=never`、`restartPolicy=never`，不支持弹性扩卡。`checkpointable=true` 本身可保留，表示程序具备保存能力，不会使共享任务自动获得平台让位或恢复能力。
+
+```sh
+# 共享长训练：程序自行周期保存；中断后手动重新提交并指定恢复文件
+gpuctl run --gpu 0 --share --vram-mib 8192 --rank P2 \
+  --yield never --restart-policy never --checkpointable -- python train.py
+```
+
+平台自动保存让位及从 checkpoint 恢复，仅在不带 `--share` 的任务上使用。共享任务可能与外部程序共卡，因此不会擅自停止整卡或把同卡其他进程纳入让位。共享模式下 `--yield save`、`--restart-policy on-preempt` 的拒绝是当前明确的功能边界，而不是已提交的训练失败。
+
 API `jobs.submit` 可传 `scheduling: {rank, yieldPolicy, restartPolicy, checkpointable, mode?}`，
 不与旧 `priority` 同时传入。该对象作为任务不可变提交内容保存；本 PR 不提供运行中修改它的接口。
 mode支持queue/preempt1/preempt2及canonical preempt-save/preempt-now；显式queue归一为旧默认格式。
