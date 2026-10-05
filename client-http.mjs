@@ -2,7 +2,7 @@
 // proof of failure and must never cause an implicit second submission.
 const READS=new Set(['state','datasets.list','datasets.status','datasets.catalog','projects.list','projects.status','projects.verify','jobs.logs','jobs.watch','jobs.diagnostics','transfers.list','transfers.status','community.posts.list','community.posts.get','community.comments.list']);
 const TRANSIENT=new Set([502,503,504]);
-const safe=value=>String(value).replace(/[\p{Cc}\p{Cf}]/gu,' ').slice(0,600);
+const safe=value=>String(value).replace(/[\p{Cc}\p{Cf}]/gu,c=>'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}').slice(0,600);
 const error=(message,status)=>Object.assign(Error(message),{status});
 
 export async function apiPost(base,path,body,{token,signal,fetchImpl=fetch,sleep=(ms,s)=>new Promise((resolve,reject)=>{

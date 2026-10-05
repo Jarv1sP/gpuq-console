@@ -30,6 +30,17 @@ test('401 JSON error does not retry or lose useful details',async()=>{
  const f=fixture([new Response(JSON.stringify({error:'会话失效'}),{status:401})]);
  await assert.rejects(apiPost(url,'call',{operation:'state'},f.options),/HTTP 401.*会话失效/);assert.equal(f.calls.length,1);
 });
+test('HTTP error messages visibly escape CSI, ESC and bidi controls without terminal control bytes',async()=>{
+ const detail='CSI:\u009b2J ESC:\x1b[31m BIDI:\u202e\u2066';
+ const f=fixture([new Response(JSON.stringify({error:detail}),{status:403})]);
+ await assert.rejects(apiPost(url,'call',{operation:'state'},f.options),error=>{
+  assert.equal(error.status,403);
+  assert.equal(error.message,'state：HTTP 403 — CSI:\\u{009b}2J ESC:\\u{001b}[31m BIDI:\\u{202e}\\u{2066}');
+  assert.doesNotMatch(error.message,/[\p{Cc}\p{Cf}]/u);
+  return true;
+ });
+ assert.equal(f.calls.length,1);
+});
 test('connection and response body failures retry reads but not mutations',async()=>{
  for(const fail of [new TypeError('fetch failed'),{status:200,ok:true,json:async()=>{throw new TypeError('terminated');}}]){
   const f=fixture([fail,new Response('{"state":{}}')]);
