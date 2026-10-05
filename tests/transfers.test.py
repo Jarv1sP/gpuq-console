@@ -129,6 +129,45 @@ class Transfers(unittest.TestCase):
             self.assertEqual(session['lastConfirmedRoute'],'lan-peer')
             self.assertNotIn('archiveAdmission',session);self.assertNotIn('relayAllowed',session)
             self.assertEqual(self.dst.status(self.control())['uploadId'],self.key)
+    def test_legacy_failed_relay_resumes_with_four_ordinary_sessions_and_same_source_lease(self):
+        uploads=self.target.dataset_uploads();original=self.dst.upload;blocked=[False]
+        def old_worker(spec,action,**fields):
+            if action=='manifest' and not blocked[0]:
+                blocked[0]=True
+                return uploads.process('datasets.upload.manifest',{'userId':USER,**fields})
+            return original(spec,action,**fields)
+        with patch.dict(uploads.relay_allowed.__globals__, {'RELAY_LIMIT_BYTES':1024}):
+            self.dst.start(self.args)
+            with patch.object(self.dst,'upload',side_effect=old_worker):self.assertEqual(self.dst.worker(self.key,1),1)
+            self.assertEqual(self.dst.status(self.control())['state'],'FAILED')
+            self.assertEqual(uploads.load(USER,self.key)['state'],'RECEIVING_MANIFEST')
+            retained=[]
+            for _ in range(3):
+                key=str(uuid.uuid4());uploads.begin(USER,{'name':'retained','key':key,'manifestBytes':100,
+                    'manifestSha256':'a'*64,'totalBytes':10,'entries':1});retained.append(key)
+            before=[uploads.load(USER,key) for key in retained]
+            lease=self.src.load(self.key,'.source-lease.json')
+            self.assertEqual(lease['state'],'HELD')
+            renewed=self.src.prepare({'id':self.key,'userId':USER,'reference':self.args['reference'],'targetMachine':'gpu-2','renew':True})
+            self.assertNotEqual(renewed['token'],self.args['source']['token'])
+            self.assertEqual({k:v for k,v in renewed.items() if k!='token'},
+                {k:v for k,v in self.args['source'].items() if k!='token'})
+            self.assertEqual(self.src.load(self.key,'.source-lease.json')['leaseId'],lease['leaseId'])
+            self.dst.resume({**self.control(),'source':renewed})
+            self.assertEqual(self.dst.worker(self.key,2),0)
+            result=self.dst.status(self.control());self.assertEqual(result['state'],'SUCCEEDED')
+            self.assertEqual(result['uploadId'],self.key);self.assertEqual(result['version'],self.version)
+            session=uploads.load(USER,self.key)
+            for field in ('archiveAdmission','relayAllowed'):self.assertNotIn(field,session)
+            self.assertNotIn('archiveLane',self.dst.load(self.key))
+            self.assertEqual(session['lastConfirmedRoute'],'lan-peer')
+            self.assertEqual([uploads.load(USER,key) for key in retained],before)
+            self.assertEqual(self.src.load(self.key,'.source-lease.json')['leaseId'],lease['leaseId'])
+            self.assertEqual(self.src.load(self.key,'.source-lease.json')['state'],'HELD')
+            proof=self.dst.process('transfers.confirm-source-release',self.control())
+            self.assertEqual(proof['attempt'],2)
+            self.assertTrue(self.src.process('transfers.release-source',{**self.control(),'confirmation':proof})['released'])
+            self.assertEqual(self.source.dataset_cache()[1]._leases('shared',self.version),[])
     def test_lan_ingress_rejects_spec_session_or_cancel_drift_before_writing(self):
         self.dst.start(self.args);spec=self.dst.load(self.key);uploads=self.target.dataset_uploads()
         begin={k:spec['source'][k] for k in ('manifestBytes','manifestSha256','totalBytes','entries')}

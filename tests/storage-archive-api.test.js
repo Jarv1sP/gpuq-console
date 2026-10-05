@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import {installStorageArchive,storageArchivePolicy} from '../storage-archive.mjs';
 import {installTransfers} from '../transfers.mjs';
 import {datasetCatalogCall} from '../dataset-catalog.mjs';
@@ -26,12 +26,13 @@ function fixture(t){
       return f.transfers.get(args.id);
     }
     if(op==='transfers.status')return f.transfers.get(args.id);
+    if(op==='transfers.cancel'){const row=f.transfers.get(args.id);row.state='CANCELED';return row;}
     if(op==='transfers.resume'){
       const row=f.transfers.get(args.id);
       if(['FAILED','PAUSED'].includes(row.state))row.state='RUNNING';
       return row;
     }
-    if(op==='transfers.confirm-source-release')return {schema:1,id:args.id,userId:user.id,sourceMachine:hot,targetMachine:cold,reference:{kind:'datasets',...ref},manifestSha256:manifest.manifestSha256,attempt:1,state:'SUCCEEDED',confirmedStopped:true};
+    if(op==='transfers.confirm-source-release')return {schema:1,id:args.id,userId:user.id,sourceMachine:hot,targetMachine:cold,reference:{kind:'datasets',...ref},manifestSha256:manifest.manifestSha256,attempt:1,state:f.transfers.get(args.id)?.state||'SUCCEEDED',confirmedStopped:true};
     if(op==='transfers.release-source')return {id:args.id,released:true};
     if(op==='storage.archive.provision')return {opId:args.opId,state:'READY',grant:{schema:1,id:args.opId,sourceMachine:cold,targetMachine:args.targetMachine,...args.source,token:'private-grant-token',receipt:{owners:[user.id]}}};
     if(op==='storage.archive.certify')return {opId:args.opId,state:'READY',...args.target,role:'cache',receiptSha256:'c'.repeat(64)};
@@ -187,6 +188,83 @@ test('legacy managed copies without a durable lane are not silently relabelled o
   assert.equal(f.calls.some(c=>c.op==='transfers.resume'),false);
   assert.equal(f.transfers.size,1);assert.equal(f.transfers.get(row.transferId).state,'PAUSED');
   assert.equal(Object.hasOwn(JSON.parse(f.db.prepare('SELECT data FROM transfers WHERE id=?').get(row.transferId).data),'archiveLane'),false);
+});
+async function legacyStopped(f,state='FAILED'){
+  await f.service.reconcileStorageArchive();const row=f.archive.rows()[0];
+  f.transfers.get(row.transferId).state=state;await f.service.reconcileStorageArchive();
+  const data=JSON.parse(f.db.prepare('SELECT data FROM transfers WHERE id=?').get(row.transferId).data);
+  delete data.archiveLane;
+  const payload={kind:data.kind,machine:data.machine,reference:data.reference,from:data.from,timeoutSec:data.timeoutSec,name:data.name,managedArchive:1};
+  const digest=createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  f.db.prepare('UPDATE transfers SET data=?,digest=? WHERE id=?').run(JSON.stringify(data),digest,row.transferId);
+  return {...row,legacyDigest:digest};
+}
+test('authentic legacy ordinary admission resumes the same ID and converges without relabelling',async t=>{
+  for(const stopped of ['FAILED','PAUSED']){
+    const f=fixture(t),before=await legacyStopped(f,stopped),id=before.transferId;
+    await assert.rejects(f.service.transferCall(f.principal,'transfers.resume',{id}),/数据集页面/);
+    const count=f.calls.length;f.service.retryStorageArchive(f.user.id,hot,ref);await f.service.reconcileStorageArchive();
+    const calls=f.calls.slice(count),renew=calls.find(c=>c.op==='transfers.source.prepare'),resume=calls.find(c=>c.op==='transfers.resume');
+    assert.equal(renew.args.id,id);assert.equal(renew.args.renew,true);assert.equal(renew.args.hostAdmin,false);
+    assert.deepEqual(resume.args,{id,userId:f.user.id,source:{id,token:'x'.repeat(43),...manifest}});
+    assert.equal(f.archive.rows()[0].phase,'COPYING');assert.equal(f.transfers.size,1);
+    let durable=f.db.prepare('SELECT * FROM transfers WHERE id=?').get(id);
+    assert.equal(durable.digest,before.legacyDigest);assert.equal(Object.hasOwn(JSON.parse(durable.data),'archiveLane'),false);
+    f.finish();await f.service.reconcileStorageArchive();
+    const after=f.archive.rows()[0];assert.equal(after.phase,'ARCHIVED');assert.equal(after.eventAcknowledged,true);
+    assert.equal(after.transferId,id);assert.equal(after.copyKey,before.copyKey);assert.equal(f.transfers.size,1);
+    durable=f.db.prepare('SELECT * FROM transfers WHERE id=?').get(id);
+    assert.equal(durable.digest,before.legacyDigest);assert.equal(JSON.parse(durable.data).sourceRelease.state,'RELEASED');
+    for(const key of ['archiveLane','archiveAdmission','allowRelay'])assert.equal(Object.hasOwn(JSON.parse(durable.data),key),false);
+    assert.equal(f.db.prepare('SELECT * FROM storage_archive_lane').get(),undefined);
+  }
+});
+test('legacy resume rejects changed immutable metadata, missing lease, or new-schema digest',async t=>{
+  for(const mutate of [d=>d.reference.version='d'.repeat(64),d=>d.from=other,d=>d.machine=other,d=>d.name='changed',
+    d=>d.sourceTicket.id=randomUUID(),d=>d.sourceTicket.token='bad',d=>d.sourceRelease.state='RELEASED',
+    d=>d.owner.id='demo-user-2',d=>d.allowRelay=true,d=>d.archiveLane=null]){
+    const f=fixture(t),row=await legacyStopped(f);
+    const data=JSON.parse(f.db.prepare('SELECT data FROM transfers WHERE id=?').get(row.transferId).data);mutate(data);
+    f.db.prepare('UPDATE transfers SET data=? WHERE id=?').run(JSON.stringify(data),row.transferId);
+    f.service.retryStorageArchive(f.user.id,hot,ref);await f.service.reconcileStorageArchive();
+    assert.equal(f.calls.some(c=>c.op==='transfers.resume'),false);assert.equal(f.transfers.size,1);
+  }
+});
+test('legacy resume rechecks fixed intent, account, source identity and cancellation after renewal',async t=>{
+  for(const mutate of [f=>f.user.limits[hot]=0,f=>f.service.storageArchivePolicy={enabled:true,machine:cold,authority:'changed'},
+    f=>{const row=f.db.prepare('SELECT * FROM transfers').get(),data=JSON.parse(row.data);data.cancelRequested=true;f.db.prepare('UPDATE transfers SET data=? WHERE id=?').run(JSON.stringify(data),row.id);},
+    f=>{f.service.archiveIntentAllowed=()=>false;},
+    f=>{const row=f.db.prepare('SELECT * FROM transfers').get(),data=JSON.parse(row.data);data.sourceTicket.entries++;f.db.prepare('UPDATE transfers SET data=? WHERE id=?').run(JSON.stringify(data),row.id);}]){
+    const f=fixture(t),row=await legacyStopped(f);f.service.retryStorageArchive(f.user.id,hot,ref);
+    f.onCall=(_,op)=>{if(op==='transfers.source.prepare')mutate(f);};
+    await f.service.reconcileStorageArchive();
+    assert.equal(f.calls.some(c=>c.op==='transfers.resume'),false);assert.equal(f.transfers.get(row.transferId).state,'FAILED');
+    assert.equal(f.calls.some(c=>c.op==='storage.archive.certify'),false);
+  }
+});
+test('legacy resume never restarts an unknown or canceled node or trusts a changed source reply',async t=>{
+  for(const state of ['UNKNOWN','CANCELED']){
+    const f=fixture(t),row=await legacyStopped(f);f.service.retryStorageArchive(f.user.id,hot,ref);
+    f.transfers.get(row.transferId).state=state;await f.service.reconcileStorageArchive();
+    assert.equal(f.calls.some(c=>c.op==='transfers.resume'),false);assert.equal(f.calls.filter(c=>c.op==='transfers.source.prepare').length,1);
+  }
+  for(const field of ['id','manifestSha256','entries','totalBytes']){
+    const f=fixture(t),row=await legacyStopped(f);f.service.retryStorageArchive(f.user.id,hot,ref);
+    const bridge=f.service.bridge;f.service.bridge=async(...request)=>{const result=await bridge(...request);if(request[1]==='transfers.source.prepare')result[field]=field==='id'?randomUUID():field==='manifestSha256'?'d'.repeat(64):result[field]+1;return result;};
+    await f.service.reconcileStorageArchive();assert.equal(f.calls.some(c=>c.op==='transfers.resume'),false);
+    assert.equal(f.transfers.get(row.transferId).state,'FAILED');
+  }
+});
+test('legacy ambiguous cancellation converges through original cancel/status without replay',async t=>{
+  const f=fixture(t),before=await legacyStopped(f),id=before.transferId;
+  const data=JSON.parse(f.db.prepare('SELECT data FROM transfers WHERE id=?').get(id).data);data.cancelRequested=true;
+  f.db.prepare('UPDATE transfers SET data=?,state=? WHERE id=?').run(JSON.stringify(data),'UNKNOWN',id);
+  f.service.retryStorageArchive(f.user.id,hot,ref);await f.service.reconcileStorageArchive();
+  const row=f.archive.rows()[0];assert.equal(row.phase,'FAILED');assert.equal(row.transferState,'CANCELED');
+  assert.equal(row.transferId,id);assert.equal(row.copyKey,before.copyKey);assert.equal(f.transfers.size,1);
+  assert.equal(f.calls.some(c=>c.op==='transfers.resume'),false);assert.equal(f.calls.filter(c=>c.op==='transfers.start').length,1);
+  assert.equal(f.service.transferSnapshot(f.user.id,id).sourceRelease.state,'RELEASED');
+  assert.throws(()=>f.service.retryStorageArchive(f.user.id,hot,ref),/永久取消/);
 });
 
 test('revoked owner keeps the active lane and must explicitly retry after authorization returns',async t=>{
