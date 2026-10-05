@@ -385,8 +385,8 @@ class PersonalOCI:
             labels = entry.get('Config', {}).get('Labels', {})
             state = entry.get('State', {})
             need(labels.get('io.gpuq.owner') == self.owner and labels.get('io.gpuq.project') == slug
-                 and state.get('Running') is False and state.get('Pid') == 0
-                 and state.get('Status') in ('exited', 'created', 'configured'), 'Development container is running or ownership is unknown')
+                 and state.get('Running') is False and state.get('Paused', False) is False and state.get('Pid') == 0
+                 and state.get('Status') in ('exited', 'stopped', 'created', 'configured'), 'Development container is running or ownership is unknown')
             image = immutable_image_id(self.run('commit', '--pause=false', value['container'], timeout=1800))
             old = value['container']
             value.update(image=image, container=None)
