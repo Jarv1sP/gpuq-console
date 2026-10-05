@@ -18,7 +18,7 @@ function fixture(){
   const probes=[],calls=[],saved=[],maintained=new Set(),local=new Set([ids[0]]),incompatible=new Set();
   const service={store:{jobs:[],users:[user],get:()=>structuredClone(user)},db:{exec(){}},audit(){},save(){saved.push(structuredClone(this.store.jobs));},
     enqueue:async f=>f(),reconcile:async()=>{},refreshGPUQ:async()=>{},maintenanceFor:id=>maintained.has(id),
-    gpuq:{stale:false,hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:24576})),gpuq:{connected:true,observeOnly:false,capabilities:[],jobs:[]}}))},
+    gpuq:{stale:false,hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:24576})),gpuq:{connected:true,health:'ok',observeOnly:false,schedulableIndices:[],capabilities:[],jobs:[]}}))},
     projectCopyProbe:async(owner,machine,ref)=>{
       assert.equal(owner,user.id);probes.push({machine,ref});
       if(ref.release&&!local.has(machine))throw Error('release absent');
@@ -78,6 +78,20 @@ test('permission revision during probing prevents selection without writes',asyn
   f.service.projectCopyProbe=async(...args)=>{const value=await probe(...args);f.user.policyVersion++;return value;};
   await assert.rejects(selectMachine(f.service,structuredClone(f.user),normalized(),priorityCapable),e=>e.status===403);
   assert.equal(f.saved.length,0);assert.equal(f.calls.length,0);
+});
+
+test('AUTO excludes connected degraded/unknown nodes without treating an empty free pool as unhealthy',async()=>{
+  for(const health of ['degraded','recovering','unknown',undefined]){
+    const f=fixture();f.service.gpuq.hosts[0].gpuq.health=health;
+    const chosen=await selectMachine(f.service,f.user,normalized(),priorityCapable);
+    assert.notEqual(chosen.machine,ids[0]);
+    await assert.rejects(selectMachine(f.service,f.user,normalized({machineSelection:{mode:'auto',candidates:[ids[0]]}}),priorityCapable),/健康/);
+    assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
+  }
+  const f=fixture();assert.deepEqual(f.service.gpuq.hosts[0].gpuq.schedulableIndices,[]);
+  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[0]);
+  f.service.gpuq.hosts[0].gpuq.observeOnly=undefined;
+  await assert.rejects(selectMachine(f.service,f.user,normalized({machineSelection:{mode:'auto',candidates:[ids[0]]}}),priorityCapable),/健康/);
 });
 
 test('dataset locality wins before advisory queue length; missing or unauthorized versions exclude the target',async()=>{

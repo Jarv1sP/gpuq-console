@@ -21,7 +21,10 @@ export async function selectMachine(service,user,request,priorityCapable){
   const allowed=request.machineSelection.candidates;
   const eligible=authorized.filter(m=>{
     const h=hosts.find(h=>h.id===m.id),gpus=h.gpus||[],q=h.gpuq;
-    if(allowed&&!allowed.includes(m.id)||user.limits[m.id]<request.cards||!q?.connected||q.observeOnly||gpus.filter(g=>g.memoryTotalMiB>=request.minVramGiB*1024-512).length<request.cards)return false;
+    // schedulableIndices is the currently free pool, not healthy total
+    // capacity: an empty pool can still accept queued/shared work. Health is
+    // the authoritative node fence (including GPU/Xid recovery failures).
+    if(allowed&&!allowed.includes(m.id)||user.limits[m.id]<request.cards||q?.connected!==true||q.health!=='ok'||q.observeOnly!==false||gpus.filter(g=>g.memoryTotalMiB>=request.minVramGiB*1024-512).length<request.cards)return false;
     if(request.elastic&&!elasticCapable(h)||request.placement&&!placementCapable(h,request.placement))return false;
     if(request.placement){const selected=request.placement.gpuIndices.map(index=>gpus.find(g=>g.index===index));
       if(selected.some(g=>!g||g.memoryTotalMiB<request.minVramGiB*1024-512)||request.placement.shared&&selected[0].memoryTotalMiB<request.placement.vramMiB)return false;}
