@@ -133,3 +133,66 @@
  .sb .auth-dialog .auth-footer .button{min-height:44px}
 }
 @media(prefers-reduced-motion:reduce){.sb #page-users *,.sb .member-dialog *,.sb .auth-dialog *{transition:none!important;scroll-behavior:auto!important}}
+
+/* R5Login: approved original hardware silhouettes, never live telemetry. */
+.sb #login-dialog{background:#000;padding:0 64px 56px}
+.sb #login-dialog .auth-mast{max-width:1312px;margin:0 auto;min-height:94px;border-bottom:1px solid var(--line);gap:24px}
+.sb #login-dialog .auth-platform{font:12px var(--sans);color:var(--ink-2)}
+.sb #login-dialog .auth-r5-layout{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:100px;max-width:1312px;margin:0 auto;padding-top:clamp(48px,10dvh,100px);align-items:start}
+.sb #login-dialog .auth-login-identity{padding-top:10px;min-width:0}
+.sb #login-dialog .auth-r5-wordmark{display:block;width:100%;max-width:none;height:auto;fill:var(--ink);stroke:none;stroke-width:0;overflow:visible}
+.sb #login-dialog .auth-r5-wordmark path{fill:var(--ink);stroke:none}
+.sb #login-dialog .auth-login-fleet{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:23px;align-items:end;margin-top:clamp(32px,7dvh,70px);padding:0 4px}
+.sb #login-dialog .auth-login-fleet figure{margin:0;min-width:0}
+.sb #login-dialog .auth-login-fleet figcaption{font:11px var(--mono);color:var(--ink-2);text-align:center;margin-top:14px}
+.sb #login-dialog .auth-chassis{display:block;width:100%;height:auto;max-height:40dvh;fill:none;stroke:#45474b;stroke-width:1;stroke-linecap:butt;stroke-linejoin:miter}
+.sb #login-dialog .auth-chassis :is(path,rect,circle){vector-effect:non-scaling-stroke}
+.sb #login-dialog .auth-chassis .outer-depth{fill:#070708;stroke:#27282b}
+.sb #login-dialog .auth-chassis .bezel{fill:#101012;stroke:#55565c}
+.sb #login-dialog .auth-chassis .face{fill:#050506;stroke:#35363a}
+.sb #login-dialog .auth-chassis .edge-light{stroke:#777980}
+.sb #login-dialog .auth-chassis .panel-seam{stroke:#25262a}
+.sb #login-dialog .auth-chassis .handle{fill:#070708;stroke:#55565a}
+.sb #login-dialog .auth-chassis .bay-face{fill:#101012;stroke:#414248}
+.sb #login-dialog .auth-chassis .bay-line{stroke:#696a70}
+.sb #login-dialog .auth-chassis .bay-pin{fill:#74767b;stroke:none}
+.sb #login-dialog .auth-chassis .port{fill:#050505;stroke:#61636a}
+.sb #login-dialog .auth-chassis .engraving{stroke:#96989e}
+.sb #login-dialog .auth-chassis .hardware-id{font:400 9px var(--mono);fill:#aaaeb5;stroke:none}
+.sb #login-dialog .auth-chassis .screw{fill:#070708;stroke:#777980}
+.sb #login-dialog .auth-chassis .foot{fill:#101012;stroke:#3c3e43}
+.sb #login-dialog .auth-chassis .perforation{fill:#6b6d74;stroke:none}
+.sb #login-dialog #login-form{margin:0;width:100%;padding:24px 0 0;border-top:1px solid var(--line-3);background:#000}
+.sb #login-dialog .modal-head{margin-bottom:22px;align-items:center;gap:12px}
+.sb #login-dialog .modal-head h2{font:500 22px/1.4 var(--sans);margin:0}
+.sb #login-dialog .modal-head .icon-button{width:32px;min-width:32px;height:32px;min-height:32px;font-size:24px}
+.sb #login-dialog .field{margin-top:18px;font-size:12px}
+.sb #login-dialog .field input{border-radius:2px;min-height:47px}
+.sb #login-dialog .modal-actions{border:0;padding-top:0;margin-top:24px}
+.sb #login-dialog .modal-actions .button{border-radius:2px;min-height:47px}
+.sb #login-dialog .modal-actions [data-close]{background:none;border-color:transparent;color:var(--ink-2);padding-inline:0;margin-right:8px}
+.sb #login-dialog .auth-footer{margin-top:24px;padding-top:14px;font-size:12px;justify-content:space-between}
+.sb #login-dialog .auth-footer .button{padding-inline:0;font-size:12px}
+.sb #login-dialog .auth-horizon::before{border-color:#313a48;opacity:.7;top:calc(100dvh - 130px)}
+.sb #login-dialog.wordmark-ignition .auth-lambda{animation:auth-lambda-ignite 600ms cubic-bezier(.2,.8,.2,1) both}
+@keyframes auth-lambda-ignite{from{opacity:.12;clip-path:inset(100% 0 0 0)}to{opacity:1;clip-path:inset(0)}}
+.sb #register-dialog .field-caption label{font:inherit;color:inherit}
+.sb #register-dialog .field-caption .copy-help-button{margin-right:-8px}
+@media(max-width:1099px){.sb #login-dialog{padding-inline:40px}.sb #login-dialog .auth-r5-layout{grid-template-columns:minmax(0,1fr) 300px;gap:48px}.sb #login-dialog .auth-login-fleet{gap:14px}}
+@media(max-width:759px){
+ .sb #login-dialog{padding:0 20px 32px}
+ .sb #login-dialog .auth-mast{min-height:64px}
+ .sb #login-dialog .auth-r5-layout{display:block;padding-top:24px}
+ .sb #login-dialog .auth-login-identity{padding-top:0}
+ .sb #login-dialog .auth-login-fleet{margin-top:20px;gap:12px;padding:0}
+ .sb #login-dialog .auth-chassis{max-height:154px}
+ .sb #login-dialog .auth-login-fleet figcaption{margin-top:8px}
+ .sb #login-dialog #login-form{margin-top:24px;padding-top:14px}
+ .sb #login-dialog .modal-head{margin-bottom:0}
+ .sb #login-dialog .modal-head .icon-button{width:44px;min-width:44px;height:44px;min-height:44px}
+ .sb #login-dialog .field{margin-top:14px}
+ .sb #login-dialog .field input{font-size:16px;min-height:44px}
+ .sb #login-dialog .modal-actions{margin-top:22px}
+ .sb #login-dialog .auth-footer{margin-top:18px;padding-top:10px}
+}
+@media(prefers-reduced-motion:reduce){.sb #login-dialog.wordmark-ignition .auth-lambda{animation:none!important;opacity:1;clip-path:none}}

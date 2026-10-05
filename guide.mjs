@@ -28,23 +28,27 @@ export function inline(text){
   }
   return result+escape(text.slice(last));
 }
-export function renderMarkdown(source,{headings=[]}={}){
-  const lines=source.replaceAll('\r','').split('\n');let output='',paragraph=[],list=null,section=0;
-  const flush=()=>{if(paragraph.length){output+=`<p>${inline(paragraph.join(' '))}</p>`;paragraph=[];}if(list){output+=`</${list}>`;list=null;}};
+export function renderMarkdown(source,{headings=[],condense=false}={}){
+  const lines=source.replaceAll('\r','').split('\n');let output='',paragraph=[],list=null,section=0,explanation='';
+  const append=html=>{if(condense)explanation+=html;else output+=html;};
+  const flush=()=>{if(paragraph.length){append(`<p>${inline(paragraph.join(' '))}</p>`);paragraph=[];}if(list){append(`</${list}>`);list=null;}};
+  const explain=()=>{if(explanation){output+=`<details class="guide-explanation"><summary>操作说明</summary><div>${explanation}</div></details>`;explanation='';}};
   for(let i=0;i<lines.length;i++){
     const line=lines[i];
     if(line.startsWith('```')){
       const where=/^```[a-z]+ (local|project|data)\s*$/.exec(line)?.[1],location={local:'本机终端',project:'项目开发终端',data:'数据终端'}[where]||'命令示例';
-      flush();const code=[];while(++i<lines.length&&!lines[i].startsWith('```'))code.push(lines[i]);
-      output+=`<div class="guide-code"><div class="guide-code-bar"><span>${location}</span><button type="button" class="copy-code" hidden aria-label="复制这段命令">复制</button></div><pre tabindex="0"><code>${escape(code.join('\n'))}</code></pre></div>`;continue;
+      flush();explain();const code=[];while(++i<lines.length&&!lines[i].startsWith('```'))code.push(lines[i]);
+      const language=line.startsWith('```powershell')?'<small>PowerShell</small>':'';
+      output+=`<div class="guide-code"><div class="guide-code-bar"><span>${location}</span>${language}<button type="button" class="copy-code" hidden aria-label="复制这段命令">复制</button></div><pre tabindex="0"><code>${escape(code.join('\n'))}</code></pre></div>`;continue;
     }
     if(!line.trim()){flush();continue;}
-    if(line.startsWith('### ')){flush();const title=line.slice(4),id='section-'+(++section);headings.push({id,title});output+=`<h2 id="${id}" tabindex="-1">${inline(title)}</h2>`;continue;}
+    if(line.startsWith('### ')){flush();explain();const title=line.slice(4),id='section-'+(++section);headings.push({id,title});output+=`<h2 id="${id}" tabindex="-1">${inline(title)}</h2>`;continue;}
+    if(line.startsWith('! ')){flush();explain();output+=`<p class="guide-critical">${inline(line.slice(2))}</p>`;continue;}
     const item=/^(?:([-*]) |(\d+)\. )(.*)$/.exec(line);
-    if(item){const type=item[1]?'ul':'ol';if(paragraph.length||list&&list!==type)flush();if(!list){output+=`<${type}>`;list=type;}output+=`<li>${inline(item[3])}</li>`;continue;}
+    if(item){const type=item[1]?'ul':'ol';if(paragraph.length||list&&list!==type)flush();if(!list){append(`<${type}>`);list=type;}append(`<li>${inline(item[3])}</li>`);continue;}
     if(list)flush();paragraph.push(line);
   }
-  flush();return output;
+  flush();explain();return output;
 }
 export function parseGuide(source){
   const sections=new Map();let id=null,body=[];
@@ -70,9 +74,9 @@ export async function guidePage(chapter,origin){
   const nav=chapters.map((item,index)=>`<a href="/guide/${item.id}"${chapter?.id===item.id?' aria-current="page"':''}><span class="guide-number">${String(index+1).padStart(2,'0')}</span><span>${item.title}</span><span class="guide-arrow" aria-hidden="true">↗</span></a>`).join('');
   const index=chapter?chapters.findIndex(item=>item.id===chapter.id):-1;
   const sibling=(item,label)=>item?`<a href="/guide/${item.id}"><small>${label}</small><span>${item.title} <span aria-hidden="true">→</span></span></a>`:'<span></span>';
-  const headings=[],prose=chapter?renderMarkdown(sections.get(chapter.id),{headings}):'';
+  const headings=[],prose=chapter?renderMarkdown(sections.get(chapter.id),{headings,condense:true}):'';
   const toc=chapter?`<details class="guide-toc"><summary>本章内容</summary><nav aria-label="本章内容">${headings.map(item=>`<a href="#${item.id}">${escape(item.title)}</a>`).join('')}</nav></details>`:'';
-  const content=chapter?`<div class="guide-layout"><aside class="guide-sidebar"><a class="guide-overview" href="/guide">全部内容</a><nav aria-label="指南章节">${nav}</nav></aside><article class="guide-article"><header><p class="guide-eyebrow">使用指南 / ${String(index+1).padStart(2,'0')}</p><h1>${chapter.title}</h1><p class="guide-lead">${chapter.description}</p></header>${toc}<div class="guide-prose">${prose}</div><nav class="guide-pagination" aria-label="相邻章节">${sibling(chapters[index-1],'上一章')}${sibling(chapters[index+1],'下一章')}</nav></article></div>`:
-    `<section class="guide-hero"><div><p class="guide-eyebrow">STARGATE / 使用指南</p><h1>从准备，<br>到一次训练。</h1><p class="guide-lead">从第一次登录，到一次完整训练。<br>按你正在做的事，找到需要的步骤。</p><a class="guide-start" href="/guide/start">第一次使用，从这里开始 <span aria-hidden="true">↗</span></a></div></section><section class="guide-topics" aria-labelledby="topics-title"><div class="guide-section-heading"><h2 id="topics-title">按功能查阅</h2><span>七个章节，一条清晰的路径。</span></div><div class="guide-cards">${chapters.map((item,i)=>`<a href="/guide/${item.id}" class="guide-card"><span class="guide-number">${String(i+1).padStart(2,'0')}</span><h3>${item.title}</h3><p>${item.description}</p><span class="guide-arrow" aria-hidden="true">↗</span></a>`).join('')}</div></section>`;
+  const content=chapter?`<div class="guide-layout"><aside class="guide-sidebar"><a class="guide-overview" href="/guide">全部内容</a><nav aria-label="指南章节">${nav}</nav></aside><article class="guide-article"><header><p class="guide-eyebrow">使用指南 / ${String(index+1).padStart(2,'0')}</p><h1>${chapter.title}</h1></header>${toc}<div class="guide-prose">${prose}</div><nav class="guide-pagination" aria-label="相邻章节">${sibling(chapters[index-1],'上一章')}${sibling(chapters[index+1],'下一章')}</nav></article></div>`:
+    `<section class="guide-hero"><div><p class="guide-eyebrow">STARGATE / 使用指南</p><h1>从准备，<br>到一次训练。</h1><a class="guide-start" href="/guide/start">首次使用 <span aria-hidden="true">↗</span></a></div></section><section class="guide-topics" aria-labelledby="topics-title"><div class="guide-section-heading"><h2 id="topics-title">按功能查阅</h2></div><div class="guide-cards">${chapters.map((item,i)=>`<a href="/guide/${item.id}" class="guide-card"><span class="guide-number">${String(i+1).padStart(2,'0')}</span><h3>${item.title}</h3><span class="guide-arrow" aria-hidden="true">↗</span></a>`).join('')}</div></section>`;
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><title>${chapter?chapter.title+' · ':''}使用指南 · STARGATE</title><meta name="description" content="STARGATE 使用指南：注册账号、准备项目、提交训练与管理数据。"><link rel="icon" type="image/svg+xml" href="${guideFavicon}"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="stylesheet" href="/fonts.css"><link rel="stylesheet" href="/guide.css"><script src="/guide.js" defer></script></head><body><a class="guide-skip" href="#guide-main">跳到正文</a><header class="guide-topbar"><a class="guide-brand" href="/guide" aria-label="STARGATE 使用指南"><span class="guide-wordmark" aria-hidden="true">STARGATE</span><small>使用指南</small></a><a class="guide-return" href="/">返回工作台 <span aria-hidden="true">↗</span></a></header><main id="guide-main" tabindex="-1">${content}</main><footer class="guide-footer"><span>STARGATE · 独立开源研究计算工作台</span><a href="/#community">仍有疑问？前往协作区</a></footer><div id="guide-copy-status" class="guide-sr-only" role="status" aria-live="polite"></div></body></html>`;
 }

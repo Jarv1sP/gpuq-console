@@ -115,10 +115,10 @@ try{
     await page.locator('#login-form [name=password]').fill(password);
     await page.locator('#login-form [type=submit]').click();
     await page.locator('#login-dialog').waitFor({state:'hidden'});
-    const count=await page.locator('a[href^="/guide"]').count();
+    const count=await page.locator('.guide-link').count();
     if(count!==1)entryErrors.push(`${username}: expected one workbench guide entry, found ${count}`);
     assert.equal(await page.locator('[data-user-guide]').count(),0,'no secondary execution guide button duplicates the shared entry');
-    const entries=page.locator('a[href="/guide"]');
+    const entries=page.locator('.guide-link');
     assert.equal(await entries.count(),1,'the shared guide entry must exist exactly once');
     assert.equal(await entries.getAttribute('href'),'/guide');
     assert.equal(await entries.isVisible(),true);

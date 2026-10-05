@@ -19,11 +19,11 @@ try{
   await mkdir(legacy);
   await run('git',['archive','--format=tar','--output='+archive,'20dc58f96202626199bc8599a94f37801686f248'],{cwd:fileURLToPath(new URL('..',import.meta.url))});
   await run('tar',['-xf',archive,'-C',legacy]);await rm(archive);
-  for(const name of ['community-ui.js','community.css','task-notes-ui.js','submission-keys.js','motion-ui.js'])await copyFile(new URL('../dist/'+name,import.meta.url),join(legacy,'dist',name));
+  for(const name of ['community-ui.js','community.css','task-notes-ui.js','submission-keys.js','motion-ui.js','copy-help-ui.js','copy-help.css'])await copyFile(new URL('../dist/'+name,import.meta.url),join(legacy,'dist',name));
   const serverPath=join(legacy,'portal-server.mjs'),source=await readFile(serverPath,'utf8');
   const routes="files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';";
   assert.equal(source.split(routes).length,2,'frozen server static route anchor must remain exact');
-  await writeFile(serverPath,source.replace(routes,routes+"\nfiles['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';files['/motion-ui.js']='motion-ui.js';"));
+  await writeFile(serverPath,source.replace(routes,routes+"\nfiles['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';files['/motion-ui.js']='motion-ui.js';files['/copy-help-ui.js']='copy-help-ui.js';files['/copy-help.css']='copy-help.css';"));
   const {createPortalServer}=await import(pathToFileURL(serverPath));
   const password='Old-Backend-Browser-Fixture-2026!',bootstrap=join(dir,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve));const origin='http://127.0.0.1:'+port;

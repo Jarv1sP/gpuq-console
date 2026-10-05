@@ -138,3 +138,12 @@
 }
 @media(prefers-reduced-motion:reduce){.sb #page-community *,.sb .community-dialog *{transition:none!important;scroll-behavior:auto!important}}
 @media(prefers-reduced-transparency:reduce){.sb .community-dialog:is(.community-detail,.community-composer) :is(.modal-head,.modal-actions,#community-comment-form){background:var(--bg-1);backdrop-filter:none;-webkit-backdrop-filter:none}}
+/* The original controller's help stays available in the scoped info control. */
+#community-task-notes #community-notes>.chat-topline p,
+#community-task-notes #task-note-form>.chat-compose-footer>p {display:none}
+.community-notes-help{display:flex;justify-content:flex-end}
+.sb #page-community .community-post:not(.is-focal) .community-post-open{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:16px}
+.sb #page-community .community-post:not(.is-focal) h3{grid-column:1;grid-row:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0}
+.sb #page-community .community-post:not(.is-focal) .community-post-top{grid-column:2;grid-row:1}
+.sb #page-community .community-post:not(.is-focal) .community-meta{grid-column:3;grid-row:1;white-space:nowrap}
+@media(max-width:759px){.sb #page-community .community-post:not(.is-focal) .community-post-open{gap:8px}.sb #page-community .community-post:not(.is-focal) .community-post-top{gap:4px}.sb #page-community .community-post:not(.is-focal) .community-post-top:has(.community-tag.open,.community-tag.investigating,.community-tag.resolved,.community-tag.closed) .community-tag.feedback{display:none}}
