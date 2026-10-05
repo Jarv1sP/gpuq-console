@@ -226,8 +226,9 @@ export async function executionCall(service,principal,operation,args){
     authorizedMachine(args.machine);
     if(operation==='datasets.unregister'&&principal.role!=='admin')fail('注销数据集仅管理员可用。',403);
     const byOperation=operation==='datasets.status'&&Object.hasOwn(args,'operationId');
-    const allowed=operation==='datasets.list'?['machine']:byOperation?['machine','operationId']:['machine','dataset','version'];
+    const allowed=operation==='datasets.list'?['machine','includeEmpty']:byOperation?['machine','operationId']:['machine','dataset','version'];
     if(Object.keys(args).some(k=>!allowed.includes(k)))fail('数据集参数无效。');
+    if(operation==='datasets.list'&&args.includeEmpty!==undefined&&typeof args.includeEmpty!=='boolean')fail('includeEmpty 需为布尔值。');
     if(byOperation){
       if(typeof args.operationId!=='string'||!/^[a-f0-9]{64}$/.test(args.operationId))fail('数据集后台操作编号无效。');
     }else if(operation==='datasets.unregister'){
@@ -238,7 +239,7 @@ export async function executionCall(service,principal,operation,args){
     }else if(operation!=='datasets.list')datasetReferences([{dataset:args.dataset,version:args.version}]);
     // Identity comes only from the authenticated portal; node paths and roles
     // cannot be supplied by the client. Large copies run in a node-local worker.
-    const {machine,...reference}=args;
+    const {machine,includeEmpty,...reference}=args;
     if(operation==='datasets.prepare'&&service.prepareDataset){
       const result=await service.prepareDataset(user.id,machine,reference);
       service.audit(principal.username,operation,machine,args.dataset+'@'+args.version);return result;
@@ -253,7 +254,15 @@ export async function executionCall(service,principal,operation,args){
     try{result=await service.bridge(machine,operation,{...reference,userId:user.id,hostAdmin:principal.role==='admin'});}
     catch(error){if(operation==='datasets.status'&&!byOperation&&service.resolveDataset)return (await service.resolveDataset(user.id,machine,reference)).status;throw error;}
     if(operation==='datasets.prepare')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
-    if(operation==='datasets.list')return datasetListView(result,service.store.users);
+    if(operation==='datasets.list'){
+      const aliases=service.datasetAliases?.(user.id,machine),archives=machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(user.id):null;
+      return datasetListView(result,service.store.users,{includeEmpty:includeEmpty===true,
+        ...(service.datasetLabelView?{labelView:dataset=>service.datasetLabelView(user.id,dataset)}:{}),
+        logicalName:item=>{
+          const names=new Set(item.versions.filter(v=>/^[a-f0-9]{64}$/.test(v?.version)).map(v=>aliases?.get(item.dataset+'@'+v.version)||archives?.get(item.dataset+'@'+v.version)||item.dataset));
+          return names.size===1?[...names][0]:item.dataset;
+        }});
+    }
     return result;
   }
   if(['terminal.open','terminal.exchange','terminal.close','terminal.detach'].includes(operation)){

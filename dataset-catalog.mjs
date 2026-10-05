@@ -19,10 +19,11 @@ function ownerView(item,users){
 }
 
 // Do not forward arbitrary node metadata, owner IDs, paths or user records.
-export function datasetListView(result,users){
+export function datasetListView(result,users,{includeEmpty=false,labelView,logicalName}={}){
   if(!Array.isArray(result?.datasets))fail('数据集目录暂时无法确认。',502);
   return {datasets:result.datasets.filter(item=>ID.test(item?.dataset)&&Array.isArray(item.versions)).map(item=>({
     dataset:item.dataset,ownerLabel:ownerView(item,users).label,
+    ...(labelView?labelView(logicalName?.(item)||item.dataset):{}),
     versions:item.versions.filter(value=>HASH.test(value?.version)).map(value=>{
       const clean={version:value.version,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true};
       for(const field of ['bytes','files'])if(Number.isSafeInteger(value[field])&&value[field]>=0)clean[field]=value[field];
@@ -31,7 +32,7 @@ export function datasetListView(result,users){
       if(typeof value.error==='string')clean.error=value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300);
       return clean;
     })
-  }))};
+  })).filter(item=>includeEmpty||item.versions.length>0)};
 }
 
 function combinedOwnerLabel(locations,owners){
@@ -106,7 +107,8 @@ export async function datasetCatalogCall(service,principal,operation,args){
   }
   const localAvailable=listings.find(m=>m.machine===args.machine)?.state==='ok';
   return {machine:args.machine,partial:listings.some(m=>m.state!=='ok'),machines:listings.map(({machine,state})=>({machine,state})),
-    datasets:[...datasets.values()].sort((a,b)=>a.dataset.localeCompare(b.dataset)).map(item=>({dataset:item.dataset,versions:[...item.versions.values()].sort((a,b)=>a.version.localeCompare(b.version)).map(version=>{
+    datasets:[...datasets.values()].sort((a,b)=>a.dataset.localeCompare(b.dataset)).map(item=>({dataset:item.dataset,
+      ...(service.datasetLabelView?.(user.id,item.dataset)||{}),versions:[...item.versions.values()].sort((a,b)=>a.version.localeCompare(b.version)).map(version=>{
       const local=version.locations.find(l=>l.machine===args.machine&&l.state==='READY')||version.locations.find(l=>l.machine===args.machine);
       const source=localAvailable&&local?.state!=='READY'&&!local?.canPrepare&&version.locations.find(l=>l.state==='READY'&&replicaSources.includes(l.machine));
       const transfer=service.datasetReplicaState?.(user.id,args.machine,{dataset:item.dataset,version:version.version});
