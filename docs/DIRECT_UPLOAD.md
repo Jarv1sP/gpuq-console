@@ -10,7 +10,7 @@ gpuctl data upload ./samples --name samples
 
 客户端显示「直连上传节点」或「VPS 中转」。同目录、同机器、同名称重跑可续传。没有直传入口且净文件大小超过 256 MiB 时，默认不发送文件内容；用户可选择校内网络、服务器拉取的 HTTPS／云盘链接，或明确使用 `--via relay`。`--via direct` 禁止任何中转。续传只相信节点确认的偏移，最终全量 SHA256 校验通过才发布 READY。
 
-网页目录上传仍使用 VPS。浏览器跨域、HTTPS 证书和本地网络访问权限需要独立适配，不能把 CLI 的证书固定直接搬进浏览器。网页对大目录明确要求中转确认，不通过不安全 HTTP 或关闭证书校验来绕过浏览器保护。
+网页目录上传是否直传取决于入口配置和前端接入，不能把 CLI 的证书固定直接搬进浏览器。网页直传使用浏览器信任的 HTTPS 证书、下述受限跨域协议与相同短期上传票据；不通过不安全 HTTP 或关闭证书校验绕过保护。尚未接入直传的网页仍明确要求大目录中转确认，不能静默降级。
 
 ## 管理员先确认网络，再开启服务
 
@@ -46,6 +46,20 @@ gpuctl data upload ./samples --name samples
 - 节点只接受该上传的原始清单块、文件块及状态，每块最多 1 MiB；不能新建账号、选其他 owner、发布任意路径或执行命令。发布仍走已认证控制面。
 - 取消／撤销与写入共用围栏；取消确认后，旧票据不能继续写入。节点禁用或配置发生变化时拒绝旧授权。断网、过期或权限错误不等于取消了服务器校验。
 - 已签发票据是短期能力凭据；仅在门户撤销账号权限不能承诺既有票据立即失效。紧急情况撤销对应上传票据或禁用专用入口，最迟在票据到期后不能继续写入。
+
+## 网页与 CLI 使用同一上传协议
+
+可信 HTTPS 入口的 `directUpload` 可额外配置 `allowedOrigins`，例如 `["https://portal.example.edu"]`。只接受明确的 HTTPS origin，不接受通配符、`null`、用户名密码或路径。未配置时维持原 CLI 行为，不开放浏览器跨域访问；改变名单也改变票据配置版本。
+
+网页仍通过门户完成 `datasets.upload.begin`、`datasets.upload.direct-ticket`、清单封存和最终发布。文件字节直接发送给票据返回的节点 `endpoint`：
+
+- `POST /v1/uploads/<uploadId>/manifest?offset=<offset>`：原始清单块。
+- `POST /v1/uploads/<uploadId>/chunk?offset=<offset>&path=<encodedRelativePath>`：原始文件块。
+- `GET /v1/uploads/<uploadId>/status[?path=<encodedRelativePath>]`：节点确认的偏移／状态。
+
+请求设置 `Authorization: Bearer <ticket>`；POST 的 `Content-Type` 为 `application/octet-stream`，每块不超过票据的 `chunkBytes`。`fetch` 使用 `credentials: "omit"`，不向节点发送门户 Cookie。浏览器执行的 `OPTIONS` 只允许匹配的 origin、方法、Authorization／Content-Type 头；需要私有网络预检时仅对允许的 origin 返回同意。预检不创建工作区，也不签发票据。
+
+过期／撤销响应对允许的 origin 保持可读，网页应回门户查询状态并续签，不猜测文件偏移。证书、校内可达性或跨域检查失败时明确提示选择校内网络或云盘，不自动把文件字节重发到 VPS。
 
 ## 发布验收，不以健康页代替业务验证
 

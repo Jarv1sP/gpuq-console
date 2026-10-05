@@ -40,6 +40,20 @@ def encoded(value):
     return base64.urlsafe_b64encode(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).decode().rstrip('=')
 
 
+def browser_origin(value):
+    if (not isinstance(value, str) or not 1 <= len(value) <= 512
+            or re.search(r'[\s\\\x00-\x1f*]', value)):
+        raise ValueError('Browser upload origins must be exact HTTPS origins')
+    parsed = urlsplit(value)
+    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or parsed.path not in ('', '/')
+            or parsed.port is not None and not 1 <= parsed.port <= 65535):
+        raise ValueError('Browser upload origins must be exact HTTPS origins')
+    hostname = parsed.hostname.encode('idna').decode('ascii').lower()
+    host = '['+hostname+']' if ':' in hostname else hostname
+    return 'https://'+host+((':'+str(parsed.port)) if parsed.port not in (None, 443) else '')
+
+
 class DirectUploads:
     def __init__(self, node, uploads):
         self.n, self.u = node, uploads
@@ -65,9 +79,16 @@ class DirectUploads:
         if whole.get('datasets') != self.n.CONFIG.get('datasets'):
             raise ValueError('Dataset storage configuration changed; restart listener after validation')
         config = whole.get('directUpload')
+        required = {'enabled', 'bind', 'port', 'endpoint', 'certificate', 'privateKey'}
         if (not isinstance(config, dict) or config.get('enabled') is not True
-                or set(config) != {'enabled', 'bind', 'port', 'endpoint', 'certificate', 'privateKey'}):
+                or not required <= set(config) or set(config)-required-{'allowedOrigins'}):
             raise ValueError('Direct upload is not explicitly enabled')
+        origins = config.get('allowedOrigins', [])
+        if not isinstance(origins, list) or len(origins) > 8:
+            raise ValueError('Invalid browser upload origin allowlist')
+        allowed = [browser_origin(value) for value in origins]
+        if len(set(allowed)) != len(allowed):
+            raise ValueError('Duplicate browser upload origin')
         address = ipaddress.IPv4Address(config['bind'])
         networks = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')
         if not any(address in ipaddress.IPv4Network(net) for net in networks):
@@ -98,6 +119,8 @@ class DirectUploads:
         host = '['+hostname+']' if ':' in hostname else hostname
         origin = 'https://'+host+((':'+str(endpoint.port)) if endpoint.port not in (None, 443) else '')
         public = dict(config, endpoint=origin, machine=machine, certificateSha256=pin)
+        if 'allowedOrigins' in config:
+            public['allowedOrigins'] = allowed
         public['revision'] = hashlib.sha256(encoded(public).encode()).hexdigest()
         return public
 
@@ -249,6 +272,7 @@ def create_server(node, uploads):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Content-Length', str(len(body)))
+            self.cors_headers()
             if self.close_connection:
                 self.send_header('Connection', 'close')
             self.end_headers()
@@ -260,9 +284,75 @@ def create_server(node, uploads):
         def do_POST(self):
             self.handle_upload()
 
+        def cors_headers(self):
+            self.send_header('Vary', 'Origin')
+            if getattr(self, 'cors_origin', None):
+                self.send_header('Access-Control-Allow-Origin', self.cors_origin)
+
+        def check_origin(self):
+            self.cors_origin = None
+            origins = self.headers.get_all('Origin', [])
+            if len(origins) > 1:
+                raise GrantError('origin-rejected')
+            if not origins:
+                return  # Existing pinned CLI clients do not send Origin.
+            current = direct.configuration()
+            if current['revision'] != config['revision']:
+                raise ValueError('Restart listener after configuration change')
+            if origins[0] not in current.get('allowedOrigins', []):
+                raise GrantError('origin-rejected')
+            self.cors_origin = origins[0]
+
+        def do_OPTIONS(self):
+            try:
+                node.platform_root_check()
+                self.check_origin()
+                if not self.cors_origin:
+                    raise GrantError('origin-rejected')
+                methods = self.headers.get_all('Access-Control-Request-Method', [])
+                headers = self.headers.get_all('Access-Control-Request-Headers', [])
+                networks = self.headers.get_all('Access-Control-Request-Private-Network', [])
+                lengths = self.headers.get_all('Content-Length', [])
+                if (len(methods) != 1 or len(headers) > 1 or len(networks) > 1
+                        or networks and networks != ['true']
+                        or self.headers.get('Transfer-Encoding')
+                        or len(lengths) > 1 or lengths and lengths != ['0']):
+                    raise ValueError('Invalid browser preflight')
+                parsed = urlsplit(self.path)
+                route = re.fullmatch(r'/v1/uploads/([a-f0-9-]{36})/(manifest|chunk|status)', parsed.path)
+                method = 'GET' if self.path == '/capabilities' or route and route[2] == 'status' else 'POST'
+                if (parsed.fragment or parsed.scheme or parsed.netloc
+                        or self.path != '/capabilities' and (not route or not UUID.fullmatch(route[1]))
+                        or methods[0] != method):
+                    raise ValueError('Invalid browser preflight route')
+                names = [value.strip().lower() for value in headers[0].split(',')] if headers else []
+                if (headers and len(headers[0]) > 1024
+                        or len(set(names)) != len(names)
+                        or set(names)-{'authorization', 'content-type'}):
+                    raise ValueError('Invalid browser preflight headers')
+                node.dataset_mount_check(node.CONFIG['datasets'])
+                self.send_response(204)
+                self.cors_headers()
+                self.send_header('Access-Control-Allow-Methods', method)
+                if names:
+                    self.send_header('Access-Control-Allow-Headers', ', '.join(sorted(names)))
+                if networks:
+                    self.send_header('Access-Control-Allow-Private-Network', 'true')
+                self.send_header('Access-Control-Max-Age', '300')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+            except GrantError:
+                self.close_connection = True
+                self.send_json(403, {'ok': False, 'code': 'origin-rejected', 'error': 'Browser origin is not allowed'})
+            except Exception:
+                self.close_connection = True
+                self.send_json(409, {'ok': False, 'code': 'preflight-rejected', 'error': 'Browser preflight rejected'})
+
         def handle_upload(self):
             try:
                 node.platform_root_check()
+                self.check_origin()
                 lengths = self.headers.get_all('Content-Length', [])
                 if (self.headers.get('Transfer-Encoding') or len(lengths) > 1
                         or lengths and not re.fullmatch(r'0|[1-9][0-9]{0,7}', lengths[0])):
