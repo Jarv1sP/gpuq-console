@@ -781,6 +781,14 @@ class OCITests(unittest.TestCase):
                 args=m.run.call_args.args;self.assertEqual(args[0],'load');self.assertEqual(args[args.index('--input')+1],str(archive))
                 policy=json.loads(Path(args[args.index('--signature-policy')+1]).read_text())
                 self.assertEqual(policy,{'default':[{'type':'reject'}],'transports':{'oci-archive':{str(archive):[{'type':'insecureAcceptAnything'}]}}})
+                # Real Podman 5.8 save/load produced the same image/layers
+                # with a 76-byte local Size accounting difference.
+                m.portable_image.return_value={**base,'unpackedBytes':base['unpackedBytes']+76}
+                self.assertEqual(m.import_image('vision',receipt,archive,identity),m.portable_image.return_value)
+                for key,bad in [('image','sha256:'+'c'*64),('diffIds',['sha256:'+'c'*64]),('architecture','arm64')]:
+                    m.portable_image.return_value={**base,key:bad}
+                    with self.assertRaisesRegex(ValueError,'identity differs'):m.import_image('vision',receipt,archive,identity)
+                m.portable_image.return_value=base
                 m.run.reset_mock()
                 with self.assertRaisesRegex(ValueError,'checksum'):m.import_image('vision',receipt,archive,{**identity,'archiveSha256':'f'*64})
                 m.run.assert_not_called()

@@ -642,7 +642,12 @@ class PersonalOCI:
                          '--input', str(archive), timeout=1800)
         self.s.require_workspace_space(self.root, self.s.workspace_reserve_bytes(self.config))
         observed = self.portable_image(slug, receipt)
-        need(observed == {k:v for k,v in identity.items() if k not in ('archiveBytes','archiveSha256')},
+        # Podman's Size includes local storage accounting (even identical
+        # image IDs/layers may differ by tens of bytes after save/load). It is
+        # an admission estimate, never content identity. Keep every actual
+        # identity field exact, plus the archive checksum verified above.
+        content_keys = ('schema','image','os','architecture','diffIds')
+        need(all(observed[key] == identity[key] for key in content_keys),
              'Imported OCI image identity differs; project release was not published')
         return observed
 
