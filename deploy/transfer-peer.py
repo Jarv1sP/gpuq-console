@@ -37,7 +37,7 @@ def _read_error(node, error):
     return {'ok': False, 'error': 'Snapshot grant or immutable source is unavailable'}, code
 
 
-def create_server(node, jobs, *, authority=None):
+def create_server(node, jobs, *, authority=None, copies=None):
     config = node.CONFIG.get('transferPeer')
     if not isinstance(config, dict) or set(config) != {'bind', 'port', 'certificate', 'privateKey'}:
         raise ValueError('Configure transferPeer explicitly before enabling this service')
@@ -80,7 +80,7 @@ def create_server(node, jobs, *, authority=None):
         def do_POST(self):
             self.close_connection = True
             try:
-                if self.path not in ('/snapshot','/authority') or self.headers.get('Transfer-Encoding'):
+                if self.path not in ('/snapshot','/authority','/project-snapshot') or self.headers.get('Transfer-Encoding'):
                     raise ValueError('Read-only snapshot endpoint')
                 length = int(self.headers.get('Content-Length', '-1'))
                 if not 1 <= length <= 8192 or not self.headers.get('Content-Type', '').startswith('application/json'):
@@ -95,6 +95,9 @@ def create_server(node, jobs, *, authority=None):
                 if self.path == '/authority':
                     if authority is None:raise ValueError('Protected authority is not enabled')
                     result=authority.read(json.loads(raw),auth[7:])
+                elif self.path == '/project-snapshot':
+                    if copies is None:raise ValueError('Project copying is not enabled')
+                    result=(copies() if callable(copies) else copies).read(json.loads(raw),auth[7:])
                 else:result = jobs.read(json.loads(raw), auth[7:])
                 payload, code = {'ok': True, 'result': result}, 200
             except Exception as error:
@@ -135,6 +138,6 @@ def create_server(node, jobs, *, authority=None):
     return Server((config['bind'], config['port']), Handler)
 
 
-def serve(node, jobs, *, authority=None):
-    with create_server(node, jobs, authority=authority) as server:
+def serve(node, jobs, *, authority=None, copies=None):
+    with create_server(node, jobs, authority=authority, copies=copies) as server:
         server.serve_forever()

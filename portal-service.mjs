@@ -14,6 +14,7 @@ import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
 import {LoginSessions} from './login-sessions.mjs';
 import {installStorageArchive} from './storage-archive.mjs';
 import {installOciCohort} from './oci-cohort.mjs';
+import {installProjectReplication,projectReplicationCall} from './project-replication.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -53,6 +54,7 @@ export class PortalService extends DemoService{
     service.loginSessions=new LoginSessions(service.db,id=>service.store.users.find(user=>user.id===id),{initialPrune:!service.globalMaintenanceActive()});
     service.statusPath=statusPath;await service.refreshGPUQ();installExecution(service,bridge);installMaintenance(service);installJobNotifications(service,notificationConfig);
     installOciCohort(service,ociCohortMachines);
+    installProjectReplication(service);
     maintainTaskNotes(service);
     installTransfers(service);
     installStorageArchive(service,storageArchiveConfig);
@@ -212,6 +214,13 @@ export class PortalService extends DemoService{
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   invoke(token,operation,args={}){
+    if(operation==='projects.replicate'||operation==='projects.replication.status'||operation==='projects.replication.cancel'){
+      const principal=this.principal(token);
+      return projectReplicationCall(this,principal,operation,args,()=>this.principal(token)).then(result=>{
+        this.principal(token);
+        return {result,principal:{username:principal.username,role:principal.role,userId:principal.userId}};
+      });
+    }
     if(operation==='terminal.exchange')return this.terminalExchange(token,args);
     if(['datasets.catalog','datasets.capacity','datasets.list','datasets.status','datasets.prepare'].includes(operation))return this.datasetRead(token,operation,args);
     if(typeof operation==='string'&&operation.startsWith('transfers.')){
@@ -281,5 +290,5 @@ export class PortalService extends DemoService{
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
-  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);this.db.close();}
+  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);clearInterval(this.projectCopyTimer);this.db.close();}
 }

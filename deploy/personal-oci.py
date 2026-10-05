@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import stat
@@ -528,6 +529,105 @@ class PersonalOCI:
              and isinstance(receipt['image'], str) and IMAGE.fullmatch(receipt['image']), 'OCI release ownership mismatch')
         need(immutable_image_id(self.run('image', 'inspect', '--format={{.Id}}', receipt['image'])) == receipt['image'], 'Published OCI image is missing; no tag fallback allowed')
         return receipt['image']
+
+    def portable_image(self, slug, receipt):
+        """Describe a pinned owner image; never checkpoint a live container."""
+        self.verify_host()
+        image_id = self.verify_image(slug, receipt)
+        images = json.loads(self.run('image', 'inspect', image_id))
+        need(isinstance(images, list) and len(images) == 1, 'Published image inspection failed')
+        image = images[0]
+        architecture = {'x86_64':'amd64', 'aarch64':'arm64'}.get(platform.machine(), platform.machine())
+        layers = image.get('RootFS', {}).get('Layers')
+        need(immutable_image_id(image.get('Id')) == image_id and image.get('Os') == 'linux'
+             and image.get('Architecture') == architecture and isinstance(layers, list)
+             and 1 <= len(layers) <= 256 and all(isinstance(v, str) and IMAGE.fullmatch(v) for v in layers)
+             and type(image.get('Size')) is int and 0 < image['Size'] <= 100*1024**3,
+             'Published OCI image is incompatible or exceeds the 100 GiB transfer limit')
+        return {'schema':1, 'image':image_id, 'os':'linux', 'architecture':architecture,
+                'diffIds':layers, 'unpackedBytes':image['Size']}
+
+    @contextlib.contextmanager
+    def portable_archive(self, archive, maximum, checksum=None):
+        with self.s.directory(archive.parent) as parent:
+            fd = os.open(archive.name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=parent)
+            try:
+                info = os.fstat(fd); identity = self.s.stamp(info)
+                need(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1
+                     and not info.st_mode & 0o022 and 0 < info.st_size <= maximum, 'Unsafe portable OCI archive')
+                if checksum is not None:
+                    value = hashlib.sha256()
+                    while block := os.read(fd, 1024**2): value.update(block)
+                    need(value.hexdigest() == checksum, 'Portable image archive checksum mismatch')
+                    os.lseek(fd, 0, os.SEEK_SET)
+                yield fd
+                need(self.s.stamp(os.fstat(fd)) == identity
+                     and self.s.stamp(os.stat(archive.name, dir_fd=parent, follow_symlinks=False)) == identity,
+                     'Portable image archive changed during operation')
+            finally: os.close(fd)
+
+    def export_image(self, slug, receipt, archive):
+        """Internal worker destination, not an RPC path or a registry push."""
+        image = self.portable_image(slug, receipt)
+        archive = self.s.absolute(archive)
+        need(archive.is_relative_to(self.root/'projects-v2'/self.owner), 'Image export must stay in the owner project store')
+        self.s.private_dir(archive.parent)
+        need(not archive.exists() and not archive.is_symlink(), 'Image export destination already exists')
+        # Archive headers and image metadata need additional room. Admission is
+        # conservative, and the shared volume's reserve is checked again after
+        # the engine returns; this is not a per-user filesystem hard quota.
+        self.s.require_workspace_space(self.root, self.s.workspace_reserve_bytes(self.config),
+                                       image['unpackedBytes']*11//10+16*1024**2)
+        self.run('save', '--format=oci-archive', '--output', str(archive), image['image'], timeout=1800)
+        self.s.require_workspace_space(self.root, self.s.workspace_reserve_bytes(self.config))
+        with self.portable_archive(archive, 100*1024**3) as fd:
+            size = os.fstat(fd).st_size
+            need(size > 0, 'Empty OCI archive')
+            checksum = hashlib.sha256()
+            while block := os.read(fd, 1024**2): checksum.update(block)
+        return {**image, 'archiveBytes':size, 'archiveSha256':checksum.hexdigest()}
+
+    def import_image(self, slug, receipt, archive, identity):
+        """Load one authenticated, hashed LAN archive into this owner's graph.
+
+        No tag resolution, network pull, project state update or container start.
+        The receipt was authenticated by the immutable project release hash.
+        """
+        self.verify_host()
+        need(isinstance(receipt, dict) and set(receipt) == {'schema','owner','project','image'}
+             and receipt.get('schema') == 1 and receipt.get('owner') == self.owner
+             and receipt.get('project') == slug and isinstance(receipt.get('image'), str)
+             and IMAGE.fullmatch(receipt['image']), 'OCI release ownership mismatch')
+        architecture = {'x86_64':'amd64', 'aarch64':'arm64'}.get(platform.machine(), platform.machine())
+        need(isinstance(identity, dict) and set(identity) == {'schema','image','os','architecture','diffIds',
+             'unpackedBytes','archiveBytes','archiveSha256'} and identity.get('schema') == 1
+             and identity.get('image') == receipt['image'] and identity.get('os') == 'linux'
+             and identity.get('architecture') == architecture and isinstance(identity.get('diffIds'), list)
+             and 1 <= len(identity['diffIds']) <= 256
+             and all(isinstance(v, str) and IMAGE.fullmatch(v) for v in identity['diffIds'])
+             and all(type(identity.get(k)) is int and 0 < identity[k] <= 100*1024**3
+                     for k in ('archiveBytes','unpackedBytes'))
+             and isinstance(identity.get('archiveSha256'), str)
+             and re.fullmatch('[a-f0-9]{64}', identity['archiveSha256']), 'Invalid portable image identity')
+        archive = self.s.absolute(archive)
+        need(archive.is_relative_to(self.root/'projects-v2'/self.owner), 'Image import must stay in the owner project store')
+        self.s.private_dir(archive.parent)
+        # The archive is already on disk; reserve space for unpacking as well.
+        self.s.require_workspace_space(self.root, self.s.workspace_reserve_bytes(self.config),
+                                       identity['unpackedBytes']*11//10+16*1024**2)
+        with self.portable_archive(archive, identity['archiveBytes'], identity['archiveSha256']) as fd:
+            need(os.fstat(fd).st_size == identity['archiveBytes'], 'Portable image archive size differs')
+            name = 'portable-'+hashlib.sha256(str(archive).encode()).hexdigest()+'.json'
+            policy = {'default':[{'type':'reject'}], 'transports':{
+                'oci-archive':{str(archive):[{'type':'insecureAcceptAnything'}]}}}
+            with self.registry_file(name, self.s.canonical(policy)):
+                self.run('load', '--signature-policy', str(self.folder/name), '--quiet',
+                         '--input', str(archive), timeout=1800)
+        self.s.require_workspace_space(self.root, self.s.workspace_reserve_bytes(self.config))
+        observed = self.portable_image(slug, receipt)
+        need(observed == {k:v for k,v in identity.items() if k not in ('archiveBytes','archiveSha256')},
+             'Imported OCI image identity differs; project release was not published')
+        return observed
 
     def arguments(self, spec, project, terminal, uuids, mounts, control=()):
         need(project.get('environmentMode') == 'oci', 'Not an OCI project')

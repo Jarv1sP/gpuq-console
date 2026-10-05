@@ -788,6 +788,14 @@ def transfers():
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     return module.TransferJobs(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
 
+def project_copies():
+    global PROJECT_COPIES
+    if globals().get('PROJECT_COPIES') is None:
+        spec=importlib.util.spec_from_file_location('gpuq_project_copies',HERE/'project-copy.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        PROJECT_COPIES=module.ProjectCopies(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    return PROJECT_COPIES
+
 
 def storage_node():
     global STORAGE_NODE
@@ -967,6 +975,7 @@ def process(operation,args):
         spec=importlib.util.spec_from_file_location('gpuq_snapshot_sync',HERE/'snapshot-sync.py')
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
         return module.SnapshotSync(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())).process(operation,args)
+    if operation.startswith('projects.copy.'):return project_copies().process(operation,args)
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)
@@ -1194,10 +1203,11 @@ if __name__=='__main__':
     if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':
         print(json.dumps(storage_collect()));sys.exit(0)
     if len(sys.argv)==4 and sys.argv[1]=='--transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3])))
+    if len(sys.argv)==4 and sys.argv[1]=='--project-copy-worker':sys.exit(project_copies().worker(sys.argv[2],int(sys.argv[3])))
     if len(sys.argv)==2 and sys.argv[1]=='--transfer-peer-daemon':
         spec=importlib.util.spec_from_file_location('gpuq_transfer_peer',HERE/'transfer-peer.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        module.serve(sys.modules[__name__],transfers(),authority=storage_authority());sys.exit(0)
+        module.serve(sys.modules[__name__],transfers(),authority=storage_authority(),copies=project_copies);sys.exit(0)
     if len(sys.argv)==2 and sys.argv[1]=='--direct-upload-daemon':
         spec=importlib.util.spec_from_file_location('gpuq_direct_upload',HERE/'direct-upload.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)

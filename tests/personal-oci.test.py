@@ -726,6 +726,55 @@ class OCITests(unittest.TestCase):
             m.verify_image('vision', {'schema': 1, 'owner': m.owner, 'project': 'vision', 'image': 'sha256:'+SHA})
         self.assertEqual(m.run.call_count, 1)
 
+    def test_portable_image_reports_fixed_digest_platform_and_layers_only(self):
+        m=self.manager();m.verify_host=Mock();m.verify_image=Mock(return_value='sha256:'+SHA)
+        image={'Id':'sha256:'+SHA,'Os':'linux','Architecture':'amd64','Size':123,
+               'RootFS':{'Layers':['sha256:'+'b'*64]}}
+        m.run=Mock(return_value=json.dumps([image]));receipt={'schema':1,'owner':m.owner,'project':'vision','image':'sha256:'+SHA}
+        with patch.object(o.platform,'machine',return_value='x86_64'):
+            value=m.portable_image('vision',receipt)
+            self.assertEqual(value['architecture'],'amd64');self.assertEqual(value['unpackedBytes'],123)
+            for key,bad in [('Architecture','arm64'),('Os','windows'),('Id','sha256:'+'c'*64),('Size',101*1024**3)]:
+                m.run.return_value=json.dumps([{**image,key:bad}])
+                with self.assertRaises(ValueError):m.portable_image('vision',receipt)
+        self.assertTrue(all(call.args[0]=='image' for call in m.run.call_args_list))
+
+    def test_portable_load_checks_checksum_reserve_and_exact_local_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            m=self.manager();m.root=Path(directory).resolve();m.folder=m.root/'oci';m.folder.mkdir(mode=0o700)
+            owner=m.root/'projects-v2'/m.owner;owner.mkdir(parents=True,mode=0o700)
+            archive=owner/'image.tar';archive.write_bytes(b'fixed image');archive.chmod(0o600)
+            receipt={'schema':1,'owner':m.owner,'project':'vision','image':'sha256:'+SHA}
+            base={'schema':1,'image':receipt['image'],'os':'linux','architecture':'amd64','diffIds':['sha256:'+'b'*64],'unpackedBytes':456}
+            identity={**base,'archiveBytes':11,'archiveSha256':hashlib.sha256(b'fixed image').hexdigest()}
+            m.verify_host=Mock();m.portable_image=Mock(return_value=base);m.run=Mock()
+            with patch.object(o.platform,'machine',return_value='x86_64'),patch.object(m.s,'require_workspace_space') as reserve:
+                self.assertEqual(m.import_image('vision',receipt,archive,identity),base)
+                self.assertGreater(reserve.call_args_list[0].args[2],base['unpackedBytes'])
+                args=m.run.call_args.args;self.assertEqual(args[0],'load');self.assertEqual(args[args.index('--input')+1],str(archive))
+                policy=json.loads(Path(args[args.index('--signature-policy')+1]).read_text())
+                self.assertEqual(policy,{'default':[{'type':'reject'}],'transports':{'oci-archive':{str(archive):[{'type':'insecureAcceptAnything'}]}}})
+                m.run.reset_mock()
+                with self.assertRaisesRegex(ValueError,'checksum'):m.import_image('vision',receipt,archive,{**identity,'archiveSha256':'f'*64})
+                m.run.assert_not_called()
+                with self.assertRaises(ValueError):m.import_image('vision',{**receipt,'owner':'f'*64},archive,identity)
+                m.run.assert_not_called()
+
+    def test_portable_save_never_commits_live_container_and_checks_free_space(self):
+        with tempfile.TemporaryDirectory() as directory:
+            m=self.manager();m.root=Path(directory).resolve()
+            owner=m.root/'projects-v2'/m.owner;owner.mkdir(parents=True,mode=0o700);archive=owner/'image.tar'
+            base={'schema':1,'image':'sha256:'+SHA,'os':'linux','architecture':'amd64','diffIds':['sha256:'+'b'*64],'unpackedBytes':456}
+            m.portable_image=Mock(return_value=base)
+            def save(*args,**kwargs):archive.write_bytes(b'fixed image');archive.chmod(0o600)
+            m.run=Mock(side_effect=save)
+            with patch.object(m.s,'require_workspace_space') as reserve:
+                result=m.export_image('vision',{},archive)
+                self.assertEqual(result['archiveSha256'],hashlib.sha256(b'fixed image').hexdigest())
+                self.assertGreater(reserve.call_args_list[0].args[2],456)
+                self.assertEqual(m.run.call_args.args,('save','--format=oci-archive','--output',str(archive),'sha256:'+SHA))
+                self.assertEqual(reserve.call_count,2)
+
     def test_running_or_foreign_dev_container_is_not_committed(self):
         for running, owner in ((True, None), (False, 'f'*64)):
             m = self.manager()
