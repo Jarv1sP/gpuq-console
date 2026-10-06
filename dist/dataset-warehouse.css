@@ -54,13 +54,13 @@ body[data-room=datasets] .v3-count{font:13px var(--mono);font-variant-numeric:ta
 #page-datasets .v3-strata.storing i{background:var(--v3-warn)}#page-datasets .v3-strata.storing i:nth-child(n+2){opacity:.35}
 #page-datasets .v3-strata.out i{background:none;border-top:2px dashed var(--ink-3);height:0}
 #page-datasets .v3-strata.out i:nth-child(n+2){display:none}#page-datasets .v3-strata.failed i{background:var(--v3-bad)}
-#page-datasets .v3-inspector{min-width:0;position:sticky;top:120px;display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:var(--bg-1);align-self:start}
+#page-datasets .v3-inspector{min-width:0;position:sticky;top:24px;display:flex;flex-direction:column;gap:0;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:var(--bg-1);align-self:start}
 #page-datasets .v3-inspector:empty{display:none}
-#page-datasets .v3-detail-scroll{flex:0 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}
+#page-datasets .v3-detail-scroll{flex:0 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0}
 #page-datasets .v3-inspector-overflow .v3-detail-scroll{flex:1;overflow:auto}
-#page-datasets .v3-detail-scroll>section{padding:12px 20px;border-bottom:1px solid var(--line)}
+#page-datasets .v3-detail-scroll>section{padding:12px 20px;margin:0;border-bottom:1px solid var(--line)}
 #page-datasets .v3-detail-scroll>section:last-child{border:0}
-#page-datasets .v3-train{flex:none;background:var(--bg-1);padding:16px 20px;border-top:1px solid var(--line);display:block}
+#page-datasets .v3-train{flex:none;background:var(--bg-1);padding:16px 20px;margin:0;border-top:1px solid var(--line);display:block}
 #page-datasets .v3-inspector-overflow .v3-train{position:sticky;bottom:0}
 #page-datasets .v3-inspector h2{margin:0;font:600 22px/1.25 var(--display);display:flex;align-items:center;gap:8px}
 #page-datasets .v3-inspector h2>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
