@@ -424,6 +424,7 @@ class CompletedRemovalAliasTests(RetirementNodeTests):
         self.assertEqual(self.empty.cache._retirement_fence(self.alias,self.version)['state'],'RELEASED')
         self.empty.cache.register_manifest(ADMIN,self.alias,self.cache._record(OWNER,'sample',self.version)['manifest'],['owner'])
         self.assertEqual(self.empty.cache._tier(self.alias,self.version),self.empty.cache._default_tier())
+        self.assertEqual(self.empty.status(OWNER,self.key_alias)['result']['state'],'CANCELED')
 
     def test_revoked_or_changed_adapter_grant_never_releases_old_fence(self):
         self.alias_plan();self.empty.isolate(OWNER,self.key_alias,[]);self.adapter.revoked=True
