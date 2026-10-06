@@ -24,6 +24,73 @@ async function fixture(){
  const settle=async()=>{await new Promise(r=>setImmediate(r));while(service.reconciling)await new Promise(r=>setTimeout(r,2));};
  return {service,calls,user,admin,member,otherLogin,call,ready:v=>ready=v,settle,close:async()=>{await settle();service.close();await rm(dir,{recursive:true,force:true});}};
 }
+test('project display names are owner CAS metadata and never replace immutable execution references',async()=>{
+ const f=await fixture();try{
+  const ref={project:'my-project'},before=f.service.store.jobs.length;
+  const first=(await f.call('projects.label.get',ref)).result;assert.equal(first.revision,0);assert.equal(first.displayName,'my-project');
+  const changed=(await f.call('projects.label.set',{...ref,displayName:'机器人 · 中文名称',revision:0})).result;
+  assert.equal(changed.revision,1);assert.equal(changed.project,'my-project');
+  const status=(await f.call('projects.status',ref)).result;assert.equal(status.displayName,'机器人 · 中文名称');assert.equal(status.project,'my-project');
+  await assert.rejects(f.call('projects.label.set',{...ref,displayName:'stale',revision:0}),e=>e.status===409);
+  assert.equal((await f.call('projects.label.get',ref,f.otherLogin.token)).result.revision,0);
+  for(const extra of [{userId:f.member.id},{hostAdmin:true},{project:'../other'},{machine:'gpu-2'},{displayName:'hidden\u200b',revision:1}])await assert.rejects(f.call('projects.label.set',{...ref,displayName:'valid',revision:1,...extra}));
+  assert.equal(f.service.store.jobs.length,before);
+ }finally{await f.close();}
+});
+test('logical projects group explicit authorized instances, preserve primary mapping and support detach without filesystem changes',async()=>{
+ const f=await fixture();try{
+  await f.service.invoke(f.admin.token,'policy.save',{userId:f.member.id,policyVersion:1,total:2,limits:{'gpu-1':1,'gpu-2':1}});
+  const id=randomUUID(),members=[{machine:'gpu-1',project:'alpha'},{machine:'gpu-2',project:'beta'}];
+  const set=async args=>(await f.service.invoke(f.user.token,'projects.group.set',args)).result;
+  let row=await set({id,displayName:'One research project',revision:0,members,primary:members[0]});assert.equal(row.revision,1);assert.deepEqual(row.members,members);
+  assert.deepEqual((await f.call('projects.status',{project:'alpha'})).result.primaryInstance,members[0]);
+  await assert.rejects(set({id,displayName:'stale',revision:0,members}),e=>e.status===409);
+  await assert.rejects(set({id:randomUUID(),displayName:'overlap',revision:0,members}),e=>e.status===409);
+  await assert.rejects(set({id,displayName:'bad primary',revision:1,members,primary:{machine:'gpu-1',project:'foreign'}}));
+  row=await set({id,displayName:'One research project',revision:1,members:[]});assert.equal(row.revision,2);assert.deepEqual(row.members,[]);
+  assert.equal((await f.call('projects.status',{project:'alpha'})).result.logicalProjectId,null);
+  const hidden=(await f.service.invoke(f.otherLogin.token,'projects.group.get',{id})).result;assert.equal(hidden.revision,0);assert.deepEqual(hidden.members,[]);
+  assert.equal(f.calls.some(c=>c.operation==='projects.create'||c.operation==='projects.publish'),false);
+ }finally{await f.close();}
+});
+test('catalog filters archived instances only in presentation and keeps unreachable nodes explicitly partial',async()=>{
+ const f=await fixture();try{
+  await f.service.invoke(f.admin.token,'policy.save',{userId:f.member.id,policyVersion:1,total:2,limits:{'gpu-1':1,'gpu-2':1}});
+  const original=f.service.bridge;
+  f.service.bridge=async(machine,op,args)=>op==='projects.list'?(machine==='gpu-2'?Promise.reject(Error('offline')):{projects:[{project:'alpha',state:'DRAFT',lifecycle:{state:'ACTIVE',revision:0}},{project:'old',state:'READY',lifecycle:{state:'ARCHIVED',revision:1}}]}):original(machine,op,args);
+  const first=(await f.service.invoke(f.user.token,'projects.catalog',{})).result;assert.equal(first.partial,true);assert.equal(first.groups.length,1);assert.deepEqual(first.errors,[{machine:'gpu-2',error:'此节点项目清单未确认'}]);
+  const full=(await f.service.invoke(f.user.token,'projects.catalog',{includeArchived:true})).result;assert.equal(full.groups.length,2);assert.equal(full.groups[1].instances[0].project,'old');
+  await assert.rejects(f.service.invoke(f.user.token,'projects.catalog',{userId:f.member.id}));
+ }finally{await f.close();}
+});
+test('lifecycle controls bind exact owner, revision and UUID; history cannot be retired and unknown dispatch cannot archive',async()=>{
+ const f=await fixture();try{
+  const ref={project:'alpha',revision:0},key=randomUUID(),digest='c'.repeat(64);
+  for(const operation of ['projects.archive','projects.unarchive']){
+   await f.call(operation,ref);assert.deepEqual(f.calls.at(-1).args,{project:'alpha',revision:0,userId:f.member.id});
+  }
+  await f.call('projects.retire.plan',{project:'alpha'});
+  await f.call('projects.retire',{...ref,key,manifestSha256:digest});assert.equal(f.calls.at(-1).args.key,key);
+  await f.call('projects.retire.status',{project:'alpha',key});
+  for(const extra of [{revision:-1},{revision:'0'},{key:'invalid'},{manifestSha256:'short'},{hostPath:'/data1'},{machine:'gpu-2'}])await assert.rejects(f.call('projects.retire',{...ref,key,manifestSha256:digest,...extra}));
+  f.service.store.jobs.push({id:randomUUID(),userId:f.member.id,machine:'gpu-1',project:'alpha',state:'SUCCEEDED'});
+  await assert.rejects(f.call('projects.retire',{...ref,key,manifestSha256:digest}),e=>e.status===409);
+  f.service.store.jobs.at(-1).state='UNKNOWN';await assert.rejects(f.call('projects.archive',ref),e=>e.status===409);
+  f.service.store.jobs.at(-1).nodeJobId='confirmed-native';await f.call('projects.archive',ref);
+  const revision=f.service.operationalMaintenance(f.admin.principal).revision;
+  await f.service.invoke(f.admin.token,'maintenance.set',{scope:'all',enabled:true,reason:'lifecycle fixture',revision});
+  await f.call('projects.retire.plan',{project:'alpha'});await f.call('projects.retire.status',{project:'alpha',key});
+  for(const operation of ['projects.archive','projects.unarchive'])await assert.rejects(f.call(operation,ref));
+  await assert.rejects(f.call('projects.label.set',{project:'alpha',displayName:'blocked',revision:0}));
+ }finally{await f.close();}
+});
+test('authorization change during metadata proof cannot commit a display name',async()=>{
+ const f=await fixture();try{
+  const original=f.service.bridge;f.service.bridge=async(...args)=>{const result=await original(...args);f.service.store.get(f.member.id).enabled=false;return result;};
+  await assert.rejects(f.call('projects.label.set',{project:'alpha',displayName:'not committed',revision:0}),e=>e.status===403);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_labels WHERE owner_id=?').get(f.member.id).n,0);
+ }finally{await f.close();}
+});
 test('project upload status is read-only, owner-bound and usable during maintenance',async()=>{
  const f=await fixture();try{
   const args={project:'my-project',area:'code',path:'bundle.tar',totalSize:123,sha256:'b'.repeat(64),uploadId:randomUUID()};

@@ -236,7 +236,8 @@ class SnapshotSync:
                 return self._export(kind, action, args)
         if _transfer_lease is not None or _download_lease is not None:
             raise ValueError('Transfer leases protect datasets only')
-        return self._export(kind, action, args)
+        with self.ops.store.lifetime(args['userId'],args['project']):
+            return self._export(kind, action, args)
 
     def _export(self, kind, action, args):
         folder, source = self.source(kind, args)
