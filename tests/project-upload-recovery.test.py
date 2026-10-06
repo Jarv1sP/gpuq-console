@@ -131,6 +131,43 @@ class UploadRecovery(base.ProjectSecurity):
         self.assertEqual(self.status(changed)['state'],'CONFLICT')
         self.assertEqual((folder/(key+'.part')).read_bytes(),b'ab')
 
+    def test_official_upload_list_and_exact_cancel_without_local_source(self):
+        self.upload(b'old published draft')
+        r=self.request();self.put(r,b'ab',0)
+        listed=self.node.process('files.upload.list',self.args)
+        self.assertEqual(listed['uploads'][0]['uploadId'],r['uploadId']);self.assertTrue(listed['uploads'][0]['cancelable'])
+        request={**self.args,'uploadId':r['uploadId']}
+        result=self.node.process('files.upload.cancel',request);self.assertEqual(result['state'],'CANCELED')
+        self.assertEqual(self.node.process('files.upload.cancel',request),result)
+        self.assertEqual(self.node.process('files.upload.list',self.args)['uploads'],[])
+        self.assertEqual(self.ops.store.dev_paths(*self.ops.identity(self.args))['code'].joinpath('train.py').read_bytes(),b'old published draft')
+        with self.assertRaisesRegex(ValueError,'canceled'):self.put(r,b'ab',0)
+
+    def test_upload_cancel_lost_cleanup_receipt_is_recoverable_and_commit_unknown_is_preserved(self):
+        r=self.request();self.put(r,b'ab',0)
+        folder=self.ops.transfer_dir(self.args);meta=folder/(hashlib.sha256(r['path'].encode()).hexdigest()+'.json')
+        original=Path.unlink
+        def fail_meta(path,*args,**kwargs):
+            if path==meta:raise OSError('synthetic metadata unlink failure')
+            return original(path,*args,**kwargs)
+        args={**self.args,'uploadId':r['uploadId']}
+        with patch.object(Path,'unlink',fail_meta),self.assertRaises(OSError):self.node.process('files.upload.cancel',args)
+        self.assertTrue(meta.exists());self.assertEqual(self.node.process('files.upload.cancel',args)['state'],'CANCELED');self.assertFalse(meta.exists())
+        newer=self.request();self.put(newer,b'ab',0)
+        value=json.loads(meta.read_text());self.node.atomic_json(meta,{**value,'state':'COMMITTING'})
+        before=meta.read_bytes()
+        with self.assertRaisesRegex(ValueError,'unconfirmed'):self.node.process('files.upload.cancel',{**self.args,'uploadId':newer['uploadId']})
+        self.assertEqual(meta.read_bytes(),before)
+
+    def test_pending_upload_cancel_never_follows_other_owner_and_rejects_extra_fields(self):
+        r=self.request();self.put(r,b'ab',0)
+        other={**self.args,'userId':'demo-user-4'};self.node.process('projects.create',other)
+        self.assertEqual(self.node.process('files.upload.list',other)['uploads'],[])
+        self.assertEqual(self.node.process('files.upload.cancel',{**other,'uploadId':r['uploadId']})['state'],'ABSENT')
+        for extra in ({'hostAdmin':True},{'path':'train.py'},{'area':'output'},{'root':'/data1'}):
+            with self.assertRaises(ValueError):self.node.process('files.upload.cancel',{**self.args,'uploadId':r['uploadId'],**extra})
+        self.assertEqual(self.status(r)['receivedBytes'],2)
+
 
 def rpc_fixture():
     """Private test bridge: real native file operations on a temporary project."""

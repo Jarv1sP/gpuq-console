@@ -120,6 +120,9 @@ class DataWorkspaces:
         return task
 
     def writable(self, args):
+        _,_,owner=self.storage(args['userId'])
+        if (owner/'project-import.json').exists():
+            self.n.projects().local_imports().data_writable(args['userId'])
         pending = self.pending(args['userId'])
         # A missing/failed unit never converts a pending record into permission
         # to edit. Its launch could have timed out before systemd accepted it.

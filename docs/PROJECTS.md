@@ -105,6 +105,9 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 | `gpuctl project list` | 查看当前机器的个人项目 |
 | `gpuctl project status [NAME]` | 查看草稿/发布状态、READY 版本 |
 | `gpuctl project publish [NAME]` | 后台冻结代码和环境，返回状态；不占 GPU |
+| `gpuctl project import SOURCE [DEST]` | 同机个人数据目录复制到项目草稿的新目录；字节不经门户 |
+| `gpuctl project import-status UUID` / `import-cancel UUID` | 查看本次导入／请求停止；未知结果仍保留围栏 |
+| `gpuctl project uploads` / `upload-cancel UUID` | 查看／取消精确未完成上传；不删除草稿或发布版本 |
 | `gpuctl files [目录]` | 浏览本项目代码 |
 | `gpuctl files --job UUID [目录]` | 浏览本项目该任务输出 |
 | `gpuctl pull --job UUID 远端文件 本地文件` | 下载指定任务产物 |
@@ -112,6 +115,26 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 项目名只用小写 ASCII 字母、数字、下划线、连字符，以字母开头，长度 1–48。机器和项目选择保存在本机登录缓存中，按服务器分别记忆；切到没有选过项目的新服务器时不会沿用另一台的项目。可用 `--project NAME` 临时覆盖，不修改记忆。登录另一账号会清除旧身份的选择。
 
 普通 `run` 选择 `latestReadyRelease`，并核验该版本在 READY 清单中。顶层 `PUBLISHING` 不会阻止使用以前的 READY 版本，因此想运行新改动时务必先核对最新发布结果。`--release 完整64位哈希` 可显式固定版本。没有可用版本时清楚报错，普通 `run` 不会自动替用户发布、切机或占卡等发布。
+
+## 同机导入已准备的代码和资源
+
+已在服务器**本人个人数据区**准备好的普通目录，无需再经过自己电脑和门户逐块上传：
+
+```sh
+gpuctl use gpu-1
+gpuctl project use experiment-a
+# SOURCE 是个人数据终端 /data2 内的相对目录；DEST 是项目 /workspace 内的新目录
+gpuctl project import staging/code incoming
+gpuctl project import-status 上一步打印的UUID
+```
+
+源目录与项目必须在同一台已授权服务器、属于同一平台账号。目标须不存在，父目录须已在草稿中创建；不合并、不覆盖原目录。只有 `IMPORTED` 且 `draftChanged:true` 才确认导入完成，随后在项目终端调整代码或依赖，主动 `project publish`；不会发布环境、复制开发 HOME 或提交训练。既有 READY 版本、结果和固定版本任务不变。
+
+先结束项目和个人数据区的全部终端，断开不等于结束。启动前持久围栏保护两端，后台扫描、复制、完整 SHA256 及源变化检查后原子提交。仅接受普通目录和单链接普通文件；软/硬链接、特殊文件、秘密与环境/缓存目录拒绝。代码执行位保留，其他权限标准化为私人目录/文件；项目条目/字节、磁盘预留和已启用内核配额仍有效。
+
+**不接受任意宿主路径**，旧 `/data1/某用户/...` 不能直接传入。管理员须先核实所有权，将所需文件整理到该账号个人数据区；只读数据集、他人工作区和宿主目录不在允许范围。旧未完成项目上传可用 `project uploads` 发现 UUID，再 `project upload-cancel UUID`，不需要原本本机文件；COMMITTING、目标变化或旧格式无围栏记录不自动删除，须按原身份恢复或核查。
+
+响应丢失或 `UNKNOWN` 时只查原 UUID，不换 key 重发。`import-cancel` 仅在确认整组停止且未进入提交时清理本次私有临时目录，不动源数据；提交后回执不明仍保留围栏，不猜取消成功或重做。完成后源目录仍保留供用户自行管理。
 
 ## 可选的自动选机与固定版本复制
 

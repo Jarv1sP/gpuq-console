@@ -11,21 +11,28 @@ export function projectReference(args,{optional=true,release=false}={}){
   return {project:args.project,...(release?{release:args.release}:{})};
 }
 export async function projectCall(service,principal,user,operation,args,authorizedMachine){
-  if(!['projects.list','projects.quota','projects.create','projects.status','projects.publish'].includes(operation))return undefined;
+  if(!['projects.list','projects.quota','projects.create','projects.status','projects.publish','projects.local-import.begin','projects.local-import.status','projects.local-import.cancel'].includes(operation))return undefined;
   authorizedMachine(args.machine);
   const ownerOnly=['projects.list','projects.quota'].includes(operation);
   const allowed=ownerOnly?['machine']:['machine','project'];
   if(operation==='projects.create')allowed.push('environmentMode');
   if(operation==='projects.publish')allowed.push('key');
+  if(operation.startsWith('projects.local-import.'))allowed.push('key');
+  if(operation==='projects.local-import.begin')allowed.push('sourcePath','destinationPath');
   if(Object.keys(args).some(k=>!allowed.includes(k)))fail('项目参数无效。');
   if(args.key!==undefined&&(typeof args.key!=='string'||!UUID.test(args.key)))fail('发布标识必须是完整 UUID。');
   if(args.environmentMode!==undefined&&!['shared','isolated','oci'].includes(args.environmentMode))fail('环境模式只能是 shared、isolated 或 oci。');
+  if(operation==='projects.local-import.begin')for(const key of ['sourcePath','destinationPath']){
+    const value=args[key];
+    if(typeof value!=='string'||value.length>1024||value.includes('\\')||/[\p{Cc}\p{Cf}]/u.test(value)||value.split('/').some(p=>!p||p==='.'||p==='..'||p.length>255))fail('同机导入只接受个人数据区和项目草稿内的相对目录。');
+  }
+  if(operation.startsWith('projects.local-import.')&&args.key===undefined)fail('同机导入必须使用固定 UUID 操作标识。');
   const reference=ownerOnly?{}:projectReference(args,{optional:false});
   if(operation==='projects.create'&&args.environmentMode==='oci')await service.ociProjectAdmission?.(args.machine,user.id,args.project,{creatingOCI:true});
   if(operation==='projects.publish')await service.ociProjectAdmission?.(args.machine,user.id,args.project);
-  const result=await service.bridge(args.machine,operation,{...reference,...(args.environmentMode!==undefined?{environmentMode:args.environmentMode}:{}),...(args.key!==undefined?{key:args.key}:{}),userId:user.id});
+  const result=await service.bridge(args.machine,operation,{...reference,...(args.environmentMode!==undefined?{environmentMode:args.environmentMode}:{}),...(args.key!==undefined?{key:args.key}:{}),...(operation==='projects.local-import.begin'?{sourcePath:args.sourcePath,destinationPath:args.destinationPath}:{}),userId:user.id});
   if(operation==='projects.quota')return quotaStatus(result,user.id);
-  if(['projects.create','projects.publish'].includes(operation))service.audit(principal.username,operation,args.machine,args.project);
+  if(['projects.create','projects.publish','projects.local-import.begin','projects.local-import.cancel'].includes(operation))service.audit(principal.username,operation,args.machine,args.project);
   return result;
 }
 export function quotaStatus(value,owner){

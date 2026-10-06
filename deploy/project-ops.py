@@ -84,6 +84,8 @@ class ProjectOperations:
         return events.get('populated')=='0'
 
     def writable(self, args):
+        if (self.folder/(self.key(args)+'.local-import.json')).exists():
+            self.local_imports().project_writable(args)
         sync=self.folder/(self.key(args)+'.sync.json')
         if sync.exists() and json.loads(sync.read_text()).get('state')!='CODE_READY':
             raise ValueError('Code synchronization is incomplete; repeat the original sync before editing, opening a terminal or publishing')
@@ -92,9 +94,19 @@ class ProjectOperations:
             raise ValueError('Project publication is running; wait before editing or uploading')
         self.store.fail_if_publishing(*self.identity(args))
 
+    def local_imports(self):
+        spec=importlib.util.spec_from_file_location('gpuq_project_local_import',self.n.HERE/'project-local-import.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.LocalImports(self)
+
     def status(self, args):
         result = self.store.status(*self.identity(args))
         result['publicationProtocol'] = 1
+        pointer=self.folder/(self.key(args)+'.local-import.json')
+        if pointer.exists():
+            helper=self.local_imports()
+            local=helper.status(helper.s.read_json(pointer));result['localImport']=local
+            if local['state'] not in ('IMPORTED','FAILED','CANCELED'):result.update(state=local['state'],error='Local draft import is pending; use its original operation ID')
         sync=self.folder/(self.key(args)+'.sync.json')
         if sync.exists():
             session=json.loads(sync.read_text())
@@ -173,6 +185,8 @@ class ProjectOperations:
         return [*modes, 'oci']
 
     def process(self, operation, args):
+        if operation.startswith('projects.local-import.'):
+            return self.local_imports().process(operation,args)
         allowed = {'userId'} if operation == 'projects.list' else {'userId','project'}
         if operation == 'projects.create': allowed.add('environmentMode')
         if operation == 'projects.publish': allowed.add('key')
@@ -283,8 +297,10 @@ class ProjectOperations:
             return self.n.file_op(operation,args,root=root)
         if area != 'code' or args.get('runId') is not None: raise ValueError('Invalid project file area')
         root = self.store.dev_paths(user,project)['code']
-        if operation == 'files.upload.status':
+        if operation in ('files.upload.status','files.upload.list','files.upload.cancel'):
             with self.guard(args), self.store.locked(user, project):
+                if operation=='files.upload.list':return self.upload_list(args,root)
+                if operation=='files.upload.cancel':return self.upload_cancel(args,root)
                 return self.upload_status(args, root)
         if operation != 'files.put': return self.n.file_op(operation,args,root=root)
         with self.guard(args):
@@ -305,6 +321,60 @@ class ProjectOperations:
             raise ValueError('Code upload size invalid (maximum 4 GiB)')
         if not isinstance(digest,str) or not HASH.fullmatch(digest): raise ValueError('Invalid upload checksum')
         return {'path':path,'uploadId':upload,'totalSize':total,'sha256':digest}
+
+    def upload_list(self,args,root):
+        """Discover exact pending identities without the original local source."""
+        folder=self.folder/(self.key(args)+'.uploads')
+        if not folder.exists():return {'protocol':1,'project':args['project'],'uploads':[]}
+        module=sys.modules[type(self.store).__module__]
+        rows=[]
+        for path in sorted(folder.glob('*.json')):
+            if len(rows)>=64:raise ValueError('Too many pending uploads; inspect node state')
+            if not HASH.fullmatch(path.stem):raise ValueError('Invalid pending upload metadata name')
+            value=module.read_json(path);record=self.upload_identity(value.get('identity',value))
+            if hashlib.sha256(record['path'].encode()).hexdigest()!=path.stem:raise ValueError('Pending upload path identity differs')
+            part=path.with_suffix('.part');size=0
+            try:
+                info=part.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o022 or info.st_size>record['totalSize']:
+                    raise ValueError('Unsafe upload staging')
+                size=info.st_size
+            except FileNotFoundError:pass
+            state=value.get('state','UNKNOWN')
+            modern='identity' in value and state in ('UPLOADING','CANCELING') and 'baseTarget' in value
+            rows.append({**record,'state':state,'receivedBytes':size,'cancelable':modern,'legacy':'identity' not in value})
+        return {'protocol':1,'project':args['project'],'uploads':rows}
+
+    def upload_cancel(self,args,root):
+        upload=args.get('uploadId')
+        if not isinstance(upload,str) or not UUID.fullmatch(upload):raise ValueError('Use an exact pending upload UUID')
+        folder=self.folder/(self.key(args)+'.uploads')
+        module=sys.modules[type(self.store).__module__]
+        canceled=folder/(upload+'.canceled')
+        try:receipt=module.read_json(canceled)
+        except FileNotFoundError:receipt=None
+        if receipt is not None:
+            if receipt!={'protocol':1,'state':'CANCELED','uploadId':upload}:raise ValueError('Invalid upload cancellation receipt')
+        rows=[row for row in self.upload_list(args,root)['uploads'] if row['uploadId']==upload]
+        if not rows:return receipt or {'protocol':1,'state':'ABSENT','uploadId':upload}
+        if receipt is not None and any(row['state']!='CANCELING' for row in rows):raise ValueError('Cancellation receipt conflicts with pending upload state')
+        if len(rows)!=1 or not rows[0]['cancelable']:raise ValueError('Upload commit or legacy outcome is unconfirmed; preserve its metadata and use exact status/recovery')
+        record={k:rows[0][k] for k in ('path','uploadId','totalSize','sha256')}
+        key=hashlib.sha256(record['path'].encode()).hexdigest();meta=folder/(key+'.json');part=folder/(key+'.part')
+        value=module.read_json(meta)
+        if value.get('identity')!=record or self.upload_target(root,record['path'])!=value.get('baseTarget'):
+            raise ValueError('Upload target changed; cancellation cannot discard unconfirmed evidence')
+        self.n.atomic_json(meta,{**value,'state':'CANCELING'})
+        # Only this unpublished, private staging file is removed. Draft code,
+        # READY releases and historical completion receipts remain untouched.
+        part.unlink(missing_ok=True)
+        receipt={'protocol':1,'state':'CANCELED','uploadId':upload}
+        self.n.atomic_json(canceled,receipt)
+        meta.unlink()
+        fd=os.open(folder,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        return receipt
 
     @staticmethod
     def upload_stamp(info):
@@ -358,6 +428,8 @@ class ProjectOperations:
                 # as before. A recovery query with an existing ID may not.
                 return {'protocol':2,'state':'ABSENT' if wanted['uploadId'] is None and 'identity' in active else 'CONFLICT',
                         'complete':False,'path':wanted['path'],'receivedBytes':0}
+            if active.get('state')=='CANCELING':
+                return {'protocol':2,'state':'CANCELING','complete':False,**record,'receivedBytes':0,'resumable':False}
             if active.get('state')=='COMMITTING' and not part.exists():
                 # The data rename can finish before the durable receipt (or
                 # active-intent removal). Status remains read-only; the client
@@ -397,6 +469,7 @@ class ProjectOperations:
         data = base64.b64decode(args.get('data',''),validate=True)
         if len(data)>1024**2 or offset+len(data)>total: raise ValueError('Invalid upload chunk')
         folder = self.transfer_dir(args)
+        if (folder/(upload+'.canceled')).exists():raise ValueError('This exact upload was canceled; choose a new explicit upload identity')
         # At most one in-flight version of a path; retrying with a new UUID
         # replaces only its unfinished staging, never the published code file.
         key = hashlib.sha256(path.encode()).hexdigest()
@@ -404,6 +477,7 @@ class ProjectOperations:
         done=folder/(key+'.done')
         prior = json.loads(meta.read_text()) if meta.exists() else None
         prior_identity=prior.get('identity',prior) if prior is not None else None
+        if prior is not None and prior.get('state')=='CANCELING':raise ValueError('Upload cancellation is pending; finish canceling its original UUID first')
         completed=json.loads(done.read_text()) if done.exists() else None
         if (completed is not None and completed.get('identity')==record) or (prior_identity==record and prior.get('state')=='COMMITTING' and not part.exists()):
             current=self.upload_status(args,root,_stamp=True)

@@ -40,6 +40,8 @@ docker build -f deploy/Dockerfile -t gpuq-console:test .
 
 优先级界面回归使用本机静态资源与合成 API 响应，不连接真实执行桥。覆盖普通用户只有 normal/idle、未知节点能力禁止增强档位但保留训练草稿、管理员仅修改已确认队列、轮询保留优先级草稿及焦点、原优先级并发冲突、真实抢占标记、未知字段不冒充已知，以及 390px 布局。该浏览器测试只验证界面契约；后端权限、GPUQ 排序与让位策略须由独立单元测试和隔离节点验收覆盖，不能将合成响应当作实机通过。
 
+同机项目导入回归包含固定 owner/project/UUID、当前授权和维护门禁、后台源/草稿双围栏、full SHA 与源 CAS、新目录不覆盖、秘密/软硬链接拒绝、终端/旧上传阻塞、未知启动/提交不解围栏、取消只清理私人 staging。`tests/project-local-import.test.py` 的 Mac 离线复制夹具仅测试流程；Linux 专用用例实际调用 renameat2，不能把 Mac fixture fallback 当生产原子能力证明。待上传 list/cancel 另测目标变化、COMMITTING/旧记录拒绝、取消回执后清理中断可恢复及跨账号隔离。Portal/CLI 不重放新建/取消，不读取本机源即可发现和取消旧操作。
+
 ## 上线前的实机验收
 
 1. 用普通邀请码注册；未获批前提交和终端应拒绝，不能自选 admin。

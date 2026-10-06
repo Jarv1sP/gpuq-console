@@ -4,7 +4,7 @@ import {taskIdentity} from './dist/task-metadata.js';
 import {nativeJobRequest} from './native-task-metadata.mjs';
 import {applyJobFeedback,jobTiming} from './dist/job-progress.js';
 import {maintainTaskNotes} from './community.mjs';
-import {projectCall,projectReference,validateProjectFile} from './projects.mjs';
+import {projectCall,projectReference,validateProjectFile,UUID} from './projects.mjs';
 import {yieldCapable} from './dist/scheduling-policy.js';
 import {normalizeJobSubmission,createSubmittedJob,datasetReferences,personalCardQuotaExempt} from './job-submission.mjs';
 import {snapshotSyncCall} from './snapshot-sync.mjs';
@@ -529,11 +529,16 @@ export async function executionCall(service,principal,operation,args){
       return {...result,portalTerminal:portalTerminalSnapshot(job),nativeObservation:terminalNativeObservation(job,result?.nativeObservation)};
     }catch{return {jobId:job.id,state:'UNAVAILABLE',portalTerminal:portalTerminalSnapshot(job),nativeObservation:unavailableObservation()};}
   }
-  if(operation==='files.list'||operation==='files.put'||operation==='files.get'||operation==='files.upload.status'){
+  if(['files.list','files.put','files.get','files.upload.status','files.upload.list','files.upload.cancel'].includes(operation)){
     authorizedMachine(args.machine);
     if(Object.keys(args).some(k=>!['machine','path','data','offset','truncate','project','area','runId','uploadId','totalSize','sha256','final'].includes(k)))fail('文件参数无效。');
     const project=validateProjectFile(args);
     if(operation==='files.upload.status'&&(!args.project||project.area==='output'||Object.keys(args).some(k=>!['machine','path','project','area','uploadId','totalSize','sha256'].includes(k))))fail('上传状态仅用于个人项目代码文件的固定路径、大小和校验和。');
+    if(['files.upload.list','files.upload.cancel'].includes(operation)){
+      const allowed=['machine','project','area',...(operation==='files.upload.cancel'?['uploadId']:[])];
+      if(!args.project||project.area!=='code'||Object.keys(args).some(k=>!allowed.includes(k)))fail('待上传管理只适用于本人的项目代码。');
+      if(operation==='files.upload.cancel'&&(typeof args.uploadId!=='string'||!UUID.test(args.uploadId)))fail('取消上传必须使用原上传 UUID。');
+    }
     if(project.area==='output'){
       const job=jobById(args.runId);
       // Admin resource inspection does not implicitly read somebody else's
