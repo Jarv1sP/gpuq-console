@@ -7,7 +7,7 @@ import {join,resolve} from 'node:path';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 import {polishRoomSpecs as specs} from './polish-room-specs.mjs';
-import {checkDatasetHelpRegressions,checkDatasetSpacingRegressions} from './dataset-help-geometry.mjs';
+import {checkDatasetHelpRegressions,checkDatasetSpacingRegressions,checkDatasetDisclosureRegressions} from './dataset-help-geometry.mjs';
 const geometryURL=process.env.UI_GEOMETRY_MODULE?pathToFileURL(resolve(process.env.UI_GEOMETRY_MODULE)):new URL('./layout-geometry.mjs',import.meta.url);
 const {inspectGeometry,scanGeometry,layoutWidths,layoutHeights,layoutZooms}=await import(geometryURL);
 const source=fileURLToPath(new URL('..',import.meta.url));
@@ -102,7 +102,7 @@ try{
    }
    if(room==='cloud'&&mode==='normal'&&zoom===1){
     await page.setViewportSize({width:320,height:900});
-    await checkDatasetHelpRegressions(page);await checkDatasetSpacingRegressions(page);
+    await checkDatasetHelpRegressions(page);await checkDatasetSpacingRegressions(page);await checkDatasetDisclosureRegressions(page);
    }
    const spec={...specs[room],...(room==='community'&&mode==='unconfirmed'?{roots:['.community-dialog[open]']}:{} )};
    for(const width of (zoom===1?[1440,390,320]:[])){

@@ -9,6 +9,8 @@ export const datasetHelpGeometry = {
     labels: ':scope>h2,:scope>h3,:scope>h4,:scope>label,:scope>a,:scope>.dataset-version-details>summary,:scope>span:not(.copy-help):not(.dataset-route-path)'}],
   siblingSpacing: [{parent: '#cloud-files-list>li', gap: 12}],
   closedDisclosures: ['.cloud-file-details:not([open])'],
+  disclosureRows: ['.cloud-file-details>summary,#cloud-files-pending>summary,.dataset-version-details>summary'],
+  disclosureAfterSpacing: [{details: '.cloud-file-details:not([open])', nextBlocks: '#cloud-files-list>li,#data-workspace-status', gap: 12}],
 };
 
 export async function checkDatasetBodyHelpRegressions(page) {
@@ -62,6 +64,36 @@ export async function checkDatasetHelpRegressions(page) {
   }
   const restored = await inspectGeometry(page, datasetHelpGeometry);
   assert(restored.pass, JSON.stringify(restored.failures));
+}
+
+export async function checkDatasetDisclosureRegressions(page) {
+  const details=page.locator('.cloud-file-details').first(),summary=details.locator(':scope>summary'),label=summary.locator('.dataset-disclosure-label');
+  assert.equal(await details.getAttribute('open'),null,'the disclosure starts closed');
+  const original=await label.getAttribute('style');
+  try{
+    await label.evaluate(node=>node.style.transform='translateY(10px)');
+    const displaced=await inspectGeometry(page,datasetHelpGeometry);
+    assert(displaced.failures.some(row=>row.rule==='disclosure-text-center'),'a top-aligned or displaced disclosure caption is rejected');
+  }finally{await label.evaluate((node,style)=>style===null?node.removeAttribute('style'):node.setAttribute('style',style),original);}
+  try{
+    await page.evaluate(()=>{const style=document.createElement('style');style.id='disclosure-marker-regression';style.textContent='.cloud-file-details>summary::before{content:none!important}';document.head.append(style);});
+    const missing=await inspectGeometry(page,datasetHelpGeometry);
+    assert(missing.failures.some(row=>row.rule==='disclosure-marker'),'a disclosure with no visible state marker is rejected');
+  }finally{await page.locator('#disclosure-marker-regression').evaluate(node=>node.remove());}
+  const row=details.locator('..'),rowStyle=await row.getAttribute('style');
+  try{
+    await row.evaluate(node=>node.style.paddingBottom='20px');
+    const space=await inspectGeometry(page,datasetHelpGeometry);
+    assert(space.failures.some(row=>row.rule==='disclosure-after-spacing'),'the old record padding after a collapsed disclosure is rejected');
+  }finally{await row.evaluate((node,style)=>style===null?node.removeAttribute('style'):node.setAttribute('style',style),rowStyle);}
+  const result=await inspectGeometry(page,datasetHelpGeometry);assert(result.pass,JSON.stringify(result.failures));
+  assert.equal(await summary.evaluate(node=>getComputedStyle(node,'::before').content),'"▸"');
+  await summary.click();
+  try{
+    assert.equal(await summary.evaluate(node=>getComputedStyle(node,'::before').content),'"▾"');
+    assert.equal(await summary.evaluate(node=>node.getAnimations().length),0,'reduced motion keeps the marker static');
+    const open=await inspectGeometry(page,datasetHelpGeometry);assert(open.pass,JSON.stringify(open.failures));
+  }finally{await summary.click();}
 }
 
 export async function checkDatasetSpacingRegressions(page) {

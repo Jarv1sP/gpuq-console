@@ -170,6 +170,35 @@ export async function inspectGeometry(page, specification = {}) {
           add('closed-disclosure-space', [node, summary], {height: rect(node).height, summaryHeight: rect(summary).height});
       }
     }
+    for (const selector of spec.disclosureRows || []) {
+      for (const summary of select(selector)) {
+        const walker = document.createTreeWalker(summary, NodeFilter.SHOW_TEXT);
+        const boxes = [];
+        for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+          if (!text.textContent.trim() || !rendered(text.parentElement)) continue;
+          const range = document.createRange(); range.selectNodeContents(text);
+          boxes.push(...[...range.getClientRects()].filter(box => box.width > 0 && box.height > 0));
+        }
+        if (!boxes.length) { add('disclosure-label', [summary], {}); continue; }
+        const row = rect(summary), top = Math.min(...boxes.map(box => box.top)), bottom = Math.max(...boxes.map(box => box.bottom));
+        counts.alignments++;
+        if (Math.abs((top + bottom) / 2 - row.top - row.height / 2) > tolerance)
+          add('disclosure-text-center', [summary], {textTop: top, textBottom: bottom, rowTop: row.top, rowHeight: row.height});
+        const marker = getComputedStyle(summary, '::before'), expected = summary.parentElement.open ? '▾' : '▸';
+        if (marker.content.replace(/^["']|["']$/g, '') !== expected || marker.display === 'none' || marker.visibility === 'hidden')
+          add('disclosure-marker', [summary], {content: marker.content, expected});
+      }
+    }
+    for (const group of spec.disclosureAfterSpacing || []) {
+      for (const details of select(group.details)) {
+        const next = select(group.nextBlocks).find(node => details.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+        if (!next) { add('missing-disclosure-successor', [details], {}); continue; }
+        const gap = rect(next).top - rect(details).bottom;
+        counts.rows++;
+        if (Math.abs(gap - group.gap) > tolerance)
+          add('disclosure-after-spacing', [details, next], {gap, expected: group.gap});
+      }
+    }
     for (const group of spec.buttonRows || []) {
       for (const parent of select(group.parent)) {
         const nodes = select(group.children || 'button', parent);

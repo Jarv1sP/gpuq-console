@@ -148,11 +148,11 @@
 .cloud-import img{display:block;max-width:100%;margin:16px 0}
 #page-datasets #cloud-import-pending{padding:16px;margin:20px 0;background:var(--d-bg);border:1px solid var(--d-line);border-radius:8px;font-size:13px}
 #page-datasets #cloud-import-pending p{margin-bottom:10px;line-height:1.7}
-#page-datasets #cloud-files-list{list-style:none;padding:0;margin:16px 0}
-#page-datasets #cloud-files-list>li{display:grid;gap:12px;min-width:0;padding:20px 0;border-top:1px solid var(--d-line);overflow-wrap:anywhere}
+#page-datasets #cloud-files-list{display:grid;gap:var(--dataset-block-gap);list-style:none;padding:0;margin:16px 0 0}
+#page-datasets #cloud-files-list>li{display:grid;gap:var(--dataset-block-gap);min-width:0;padding:var(--dataset-block-gap) 0 0;border-top:1px solid var(--d-line);overflow-wrap:anywhere}
 #page-datasets #cloud-files-list>li>.file-actions{margin:0}
 #page-datasets #cloud-files-list>li>.file-actions:empty{display:none}
-#page-datasets #cloud-files{container:cloud-files / inline-size;min-width:0}
+#page-datasets #cloud-files{container:cloud-files / inline-size;min-width:0;margin-bottom:0;padding-bottom:0}
 #page-datasets .cloud-file-heading{display:grid;grid-template-columns:minmax(0,1fr);align-items:center;gap:8px}
 #page-datasets .cloud-file-heading code{min-width:0;color:var(--d-ink)}
 #page-datasets .cloud-file-error{color:var(--err);line-height:1.7}
@@ -421,3 +421,13 @@
 #page-datasets .dataset-storage{display:flex;align-items:center;gap:8px}
 #page-datasets .dataset-storage>span:not(.copy-help){min-width:0;overflow-wrap:anywhere}
 .sb:has(#page-datasets:not([hidden])) .help-links{justify-content:flex-start;flex-wrap:nowrap;gap:12px}
+/* All dataset disclosures share one static marker and a centred label. */
+#page-datasets{--dataset-block-gap:12px}
+#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)>summary{display:flex;align-items:center;gap:8px;list-style:none;line-height:1.7;margin:0;padding:0}
+#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)>summary::-webkit-details-marker{display:none}
+#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)>summary::before{content:'▸';display:block;flex:none;width:12px;text-align:center;line-height:1;transition:none}
+#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)[open]>summary::before{content:'▾'}
+#page-datasets :is(.dataset-disclosure-label,.dataset-version-caption){min-width:0}
+#page-datasets :is(.cloud-file-details,#cloud-files-pending){margin:0;padding:0}
+#page-datasets :is(.cloud-file-details,#cloud-files-pending)[open]>summary{margin-bottom:var(--dataset-block-gap)}
+#page-datasets #cloud-files+#data-workspace-status{margin:var(--dataset-block-gap) 0 0}

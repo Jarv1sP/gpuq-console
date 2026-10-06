@@ -1,6 +1,6 @@
 # STARGATE 界面设计与代码参考
 
-本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `e027633`，并同步添加数据提示与间距的维护；已包含导航合并、数据库与缓存、管理员删除、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
+本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `e027633`，并同步数据集提示、折叠控件与间距的维护；已包含导航合并、数据库与缓存、管理员删除、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
 
 ## 1. 原则
 
@@ -22,7 +22,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 
 字标保留9753×711的原图比例，顶栏mask、小尺寸与登录SVG是不同适配。独立Λ门图标见 [favicon.svg](../dist/favicon.svg)、[favicon.ico](../dist/favicon.ico)、[mask-icon.svg](../dist/mask-icon.svg)、[apple-touch-icon.png](../dist/apple-touch-icon.png)。[index.html](../dist/index.html)的图标链接带stargate-2版本号；修改资产时同步版本与真实ico入口，避免浏览器继续用旧缓存。
 
-下表覆盖源码全部 **99 个已声明自定义属性、219 处声明**。同名多行是实际作用域/断点/后续覆盖，不能任选配色。间距和圆角没有另一套隐含令牌：没有变量的 gap、padding、border-radius 以相邻组件 CSS 为准。品牌遮罩完整载荷留在源码，不复制 SVG 路径到新组件。
+下表覆盖源码全部 **100 个已声明自定义属性、220 处声明**。同名多行是实际作用域/断点/后续覆盖，不能任选配色。间距和圆角没有另一套隐含令牌：没有变量的 gap、padding、border-radius 以相邻组件 CSS 为准。品牌遮罩完整载荷留在源码，不复制 SVG 路径到新组件。
 
 | 变量 | 实际值 | 源码作用域 | 用途 |
 | --- | --- | --- | --- |
@@ -54,6 +54,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `--queue` | `inherit` | [datasets.css](../dist/datasets.css) · `.sb #page-datasets,.sb #page-transfers` | 排队/等待状态 |
 | `--primary` | `inherit` | [datasets.css](../dist/datasets.css) · `.sb #page-datasets,.sb #page-transfers` | 主操作底色 |
 | `--on-primary` | `inherit` | [datasets.css](../dist/datasets.css) · `.sb #page-datasets,.sb #page-transfers` | 主操作文字 |
+| `--dataset-block-gap` | `12px` | [datasets.css](../dist/datasets.css) · `#page-datasets` | 云端同级区块与折叠后间距 |
 | `--sans` | `Geist,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif` | [guide.css](../dist/guide.css) · `@charset "UTF-8";  :root` | 界面字体栈 |
 | `--display` | `Archivo,var(--sans)` | [guide.css](../dist/guide.css) · `@charset "UTF-8";  :root` | 对象标题与主读数字体 |
 | `--mono` | `"Geist Mono",ui-monospace,SFMono-Regular,Consolas,monospace` | [guide.css](../dist/guide.css) · `@charset "UTF-8";  :root` | ID、命令与时刻字体 |
@@ -309,7 +310,8 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `#dataset-add-dialog` / `.dataset-field-label` / `.dataset-directory-control` | [datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 三来源添加数据，中文选择文件夹/合计 | 标签关联，来源说明在标题右侧ⓘ；弹窗内部真实滚动 |
 | `.help-links.copy-caption` / `.dataset-storage` | [index.html](../dist/index.html)、[app.js](../dist/app.js)、[datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 数据集主体及页尾提示均跟随真实标签 | 页尾「首次使用」右侧使用共享SVG提示，保留原说明和提示内指南链接；提示与标签同中线，不单独占行 |
 | `.dataset-upload-journey` / `.dataset-route-heading` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-upload.js](../dist/dataset-upload.js)、[upload-routes.js](../dist/upload-routes.js) | 三段上传、直传/Tail备用/显式中转，不造数据库阶段 | 未确认通道明示；失败不自动换中转 |
-| `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 个人数据空间/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回；记录内区块统一12px间距，折叠详情与未确认操作编号的标题保持48px触控高度 |
+| `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 个人数据空间/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回；记录内区块、折叠后的后续区块统一使用12px间距令牌，关闭详情不保留margin/padding；详情与未确认操作编号的标题保持48px触控高度，文字居中 |
+| `.dataset-version-caption` / `.dataset-disclosure-label` | [cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 数据集版本与云端详情共用折叠标记 | summary使用flex中线；统一▸/▾，切换不旋转，减少动态时保持静止 |
 | `.publication-trajectory` / `#publication-actions` | [execution-ui.js](../dist/execution-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 扫描/复制/校验/写入版本及原请求查询 | 无字段省略，回执不明不制造成功 |
 
 算力只在该卡所有进程均被节点确认为自己的平台任务时用白色填充，可信新样本才保留旧液位细线并提示差异；首次采样与恢复连接直接呈现当前值，过期或失联显示未知，不保留液位过渡。没有进程证据不等于可以立即启动，监控与训练准入分开。原始指标、进程与队列保留在默认折叠详情；程序、系统用户和节点调度任务ID仅管理员可见，刷新保留所选卡号与滚动位置。
