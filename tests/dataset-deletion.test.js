@@ -7,9 +7,10 @@ import {fixture,hosts,version,principal,admin,request,writes} from './dataset-de
 test('persist original key/child IDs, fence source first, isolate every target before original, retain complete bytes',async t=>{
   const f=fixture(t),r=await f.start();
   assert.equal(r.first.state,'PLANNED');assert.equal(r.result.state,'DELETED');assert.equal(r.result.steps.length,hosts.length);
-  assert.equal(writes(f)[0].host,hosts[0]);assert.equal(writes(f).at(-1).host,hosts[0]);
+  assert.equal(writes(f)[0].host,hosts[0]);assert.equal(writes(f).findLast(c=>c.op.endsWith('.isolate')).host,hosts[0]);
+  assert.equal(writes(f).filter(c=>c.op.endsWith('.commit')).length,hosts.length);
   assert.ok(writes(f).slice(0,hosts.length).every(c=>c.op.endsWith('.fence')));
-  const source=writes(f).at(-1);assert.equal(source.args.targets.length,hosts.length-1);
+  const source=writes(f).findLast(c=>c.op.endsWith('.isolate'));assert.equal(source.args.targets.length,hosts.length-1);
   assert.ok(source.args.targets.every(r=>r.state==='ISOLATED'&&r.isolated&&r.complete===false));
   assert.ok(Date.parse(r.result.retainUntil)>=Date.now()+7*86400*1000-1000);
   assert.doesNotMatch(JSON.stringify(r.result),/snapshotSha256|owners|demo-user|grant|token|registration|rootIdentity/);
@@ -189,12 +190,14 @@ test('concurrent restore capability reads cannot dispatch duplicate restore or o
   assert.equal(writes(f).slice(count).filter(c=>c.op.endsWith('.restore')).length,1);
   assert.equal(writes(f).slice(count).filter(c=>c.op.endsWith('.release-absence')).length,hosts.length-1);
 });
-test('corrupt or expired restore remains unknown and keeps the original deletion lock',async t=>{
+test('definite expired restore is FAILED with reason and keeps the original deletion lock',async t=>{
   const f=fixture(t),{first}=await f.start();f.after=(host,op,args,result)=>{if(op.endsWith('.status')&&result.phases.restore)result.phases.restore={ok:false,error:'retention expired'};};
   const args={operationId:first.operationId,machine:hosts[0]};
-  assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'UNKNOWN');
+  assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'FAILED');
   assert.equal(f.service.datasetDeletionBlocked(hosts[0],{dataset:'personal',version}),true);
-  const count=writes(f).length;assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'UNKNOWN');assert.equal(writes(f).length,count);
+  const count=writes(f).length;assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'FAILED');assert.equal(writes(f).length,count);
+  const status=await f.call('datasets.delete.status',{operationId:first.operationId},admin);
+  assert.equal(status.state,'FAILED');assert.match(status.error,/保留期已过/);assert.equal(writes(f).length,count);
 });
 
 test('JSON property order is irrelevant, but receipt fields and authority reference values remain exact',async t=>{

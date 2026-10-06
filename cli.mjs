@@ -122,6 +122,8 @@ gpuctl run -g 2 --data NAME@VERSION -- python train.py --data /data2/NAME
 gpuctl data delete NAME@VERSION --key UUID  Delete this version everywhere; retain 7 days
 gpuctl data delete-status UUID             Query the original deletion key; never replay
 gpuctl data retire-restore OPERATION_ID --machine SERVER  Administrator: restore retained bytes
+gpuctl data retire-continue OPERATION_ID                 Administrator: query then advance
+gpuctl data retire-cancel OPERATION_ID                   Administrator: cancel and restore
 
 gpuctl login USERNAME              Login (hidden password prompt)
 gpuctl register USERNAME           Register with invite + own password
@@ -691,7 +693,7 @@ async function main(){
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: data upload-status|upload-discard UPLOAD_ID [--machine SERVER]');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       result={...(await call('datasets.upload.'+(positionals[1]==='upload-status'?'status':'discard'),{machine,uploadId:positionals[2]})).result,machine};if(result.state==='FAILED')process.exitCode=1;
-    }else if(command==='data'&&['delete','delete-status','retire-status','retire-restore'].includes(positionals[1])){
+    }else if(command==='data'&&['delete','delete-status','retire-status','retire-restore','retire-continue','retire-cancel'].includes(positionals[1])){
       const action=positionals[1],restore=action==='retire-restore';
       const allowed=['machines','datasets','url','session-file','json',...(action==='delete'?['key']:[])];
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: data delete NAME@VERSION --key UUID | delete-status KEY | retire-status OPERATION_ID | retire-restore OPERATION_ID --machine SERVER');
@@ -705,7 +707,12 @@ async function main(){
       }else{
         const operationId=positionals[2];
         if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operationId))fail('需要完整 UUID 删除编号。');
-        if(restore){
+        if(['retire-continue','retire-cancel'].includes(action)){
+          if(session.principal.role!=='admin')fail('只有管理员可继续或取消删除。');
+          if(options.machines.length)fail('继续或取消覆盖原任务，不接受 --machine。');
+          try{result=(await call('datasets.delete.'+(action==='retire-continue'?'continue':'cancel'),{operationId})).result;}
+          catch(error){fail(`${error.message}\n只查询原编号：gpuctl data retire-status ${operationId}`);}
+        }else if(restore){
           if(session.principal.role!=='admin')fail('只有管理员可恢复保留的数据。');
           if(options.machines.length!==1||options.machines[0].includes('='))fail('恢复需明确指定一个 --machine SERVER。');
           const machine=machineName(options.machines[0]);

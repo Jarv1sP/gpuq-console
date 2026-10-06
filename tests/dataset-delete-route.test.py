@@ -106,6 +106,35 @@ class RetirementRoutes(unittest.TestCase):
         self.assertEqual(before,{p:p.read_bytes() for p in paths})
         self.assertEqual(len(self.starts),2)
 
+    def test_result_written_while_sampling_inactive_worker_is_seen_in_same_status(self):
+        self.call('fence',operationId=self.key)
+        def stopped(key,phase):
+            if phase=='fence':self.assertEqual(self.node.dataset_retirement_worker(key,phase),0)
+            return 'STOPPED'
+        with patch.object(self.node,'dataset_retirement_activity',side_effect=stopped):
+            result=self.call('status',operationId=self.key)
+        self.assertEqual(result['unconfirmedPhases'],[])
+        self.assertEqual(result['pendingPhases'],[])
+        self.assertTrue(result['phases']['fence']['ok'])
+
+    def test_running_worker_status_does_not_wait_for_version_or_retirement_lock(self):
+        self.call('fence',operationId=self.key)
+        node=self.node.dataset_retirement_node()
+        with node.cache._lock_file('.locks/example.'+self.version+'.lock'),\
+                patch.object(self.node,'dataset_retirement_activity',return_value='RUNNING'):
+            result=self.call('status',operationId=self.key)
+        self.assertEqual(result['pendingPhases'],['fence'])
+        self.assertEqual(result['unconfirmedPhases'],[])
+        self.assertEqual(result['phases'],{})
+
+    def test_cancel_refuses_running_or_unknown_old_workers_before_dispatch(self):
+        self.call('fence',operationId=self.key)
+        for state in ('RUNNING','UNKNOWN'):
+            with patch.object(self.node,'dataset_retirement_activity',return_value=state),self.assertRaisesRegex(ValueError,'termination'):
+                self.call('cancel',operationId=self.key)
+        self.assertEqual(len(self.starts),1)
+        self.assertFalse((self.node.ROOT/'dataset-retirements'/(self.key+'.cancel.launch.json')).exists())
+
     def test_isolation_before_confirmed_fence_and_mutated_launch_are_rejected(self):
         with self.assertRaisesRegex(ValueError,'fence'):self.call('isolate',operationId=self.key,targets=[])
         self.assertEqual(self.starts,[])

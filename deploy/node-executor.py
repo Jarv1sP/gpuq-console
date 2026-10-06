@@ -1049,13 +1049,14 @@ def dataset_retirement_operation(operation,args):
     # ticket routes or public executionCall. Identity is the portal's current
     # Principal; supplied owners/proofs are accepted only for private negatives.
     fields={'capabilities':set(),'locations':{'version','references'},
-            'plan':{'operationId','dataset','version','authorization','references'},
-            'fence':{'operationId'},'isolate':{'operationId','targets'},'status':{'operationId'},
-            'restore':{'operationId'},'release-absence':{'operationId','sourceResult'}}
+            'plan':{'operationId','dataset','version','authorization','references','adminContinue'},
+            'fence':{'operationId','adminContinue'},'isolate':{'operationId','targets','adminContinue'},'status':{'operationId'},
+            'restore':{'operationId'},'release-absence':{'operationId','sourceResult'},
+            'cancel':{'operationId'},'commit':{'operationId','sourceResult'}}
     action=operation.removeprefix('storage.dataset-delete.')
     if action not in fields or not isinstance(args,dict) or set(args)-fields[action]-{'userId','hostAdmin'}:
         raise ValueError('Invalid private version-data retirement fields')
-    required=fields[action]-({'authorization','references'} if action=='plan' else set())
+    required=fields[action]-({'authorization','references','adminContinue'} if action=='plan' else {'adminContinue'} if action in ('fence','isolate') else set())
     if not required<=set(args):raise ValueError('Missing private retirement fields')
     if not {'userId','hostAdmin'}<=set(args) or type(args['hostAdmin']) is not bool:
         raise ValueError('Authenticated retirement identity is required')
@@ -1063,31 +1064,44 @@ def dataset_retirement_operation(operation,args):
     if action=='capabilities':return {'protocol':'dataset-delete-node-v1','machine':CONFIG['machine'],'datasetDelete':dataset_delete_capability()}
     node=dataset_retirement_node()
     if action=='locations':return {'protocol':'dataset-delete-node-v1','machine':CONFIG['machine'],'locations':node.grant_locations(args['version'],args['references'])}
-    if action=='plan':return node.plan(actor,args['dataset'],args['version'],args['operationId'],authorization=args.get('authorization'),references=args.get('references'))
+    if action=='plan':
+        continuation=args.get('adminContinue',False)
+        if type(continuation) is not bool or continuation and not actor.is_admin:raise ValueError('Authenticated administrator continuation is required')
+        effective=node.resume_actor(actor,args['operationId']) if continuation and node._path(args['operationId']).exists() else actor
+        return node.plan(effective,args['dataset'],args['version'],args['operationId'],authorization=args.get('authorization'),references=args.get('references'))
     key=args['operationId']
     if action=='status':
-        result=node.worker_status(actor,key)
+        # Sample worker state first: an inactive worker may have published its
+        # result between the two reads. A stale pre-inactive file read is unsafe.
+        activities={phase:dataset_retirement_activity(key,phase)
+                    for phase in ('fence','isolate','restore','release-absence','cancel','commit')
+                    if node._phase_path(key,phase,'launch').exists()}
+        result=node.worker_status(actor,key,active=any(state=='RUNNING' for state in activities.values()))
         pending=[];unknown=[]
-        for phase in ('fence','isolate','restore','release-absence'):
-            if phase in result['phases'] or not node._phase_path(key,phase,'launch').exists():continue
-            state=dataset_retirement_activity(key,phase)
+        for phase,state in activities.items():
+            if phase in result['phases']:continue
             (pending if state=='RUNNING' else unknown).append(phase)
         return {**result,'pendingPhases':pending,'unconfirmedPhases':unknown}
-    if action in ('fence','isolate','restore','release-absence'):
-        if action in ('restore','release-absence') and not actor.is_admin:raise ValueError('Administrator restoration is required')
+    if action in ('fence','isolate','restore','release-absence','cancel','commit'):
+        if action in ('restore','release-absence','cancel') and not actor.is_admin:raise ValueError('Administrator restoration is required')
         # Keep long hash/moves out of the forced-command request. Persist the
         # launch intent once; an uncertain launch is queried, never replayed.
-        return dataset_retirement_launch(node,actor,key,action,args.get('targets'),args.get('sourceResult'))
+        return dataset_retirement_launch(node,actor,key,action,args.get('targets'),args.get('sourceResult'),args.get('adminContinue',False))
     raise ValueError('Unknown private retirement operation')
 
 
-def dataset_retirement_launch(node,actor,key,action,targets,source_result=None):
+def dataset_retirement_launch(node,actor,key,action,targets,source_result=None,admin_continue=False):
     # One immutable invocation per step/phase. Lost replies do not launch a
     # second worker, including across executor or portal restarts.
+    if type(admin_continue) is not bool or admin_continue and not actor.is_admin:raise ValueError('Authenticated administrator continuation is required')
+    if action=='cancel':
+        for old in ('fence','isolate','restore','release-absence','commit'):
+            if node._phase_path(key,old,'launch').exists() and dataset_retirement_activity(key,old)!='STOPPED':
+                raise ValueError('Prior deletion worker termination is unconfirmed')
     spec_path=node._phase_path(key,action,'launch')
     with node._lock(key):
-        row=node._load(key);node._owned(actor,row,restoring=action in ('restore','release-absence'))
-        request={'schema':1,'operationId':key,'action':action,'userId':actor.user_id,'hostAdmin':actor.is_admin,'targets':targets,'sourceResult':source_result}
+        row=node._load(key);node._owned(actor,row,restoring=action in ('restore','release-absence','cancel','commit') and actor.is_admin or admin_continue)
+        request={'schema':1,'operationId':key,'action':action,'userId':actor.user_id,'hostAdmin':actor.is_admin,'targets':targets,'sourceResult':source_result,'adminContinue':admin_continue}
         if spec_path.exists():
             prior=node._phase_read(key,action,'launch')
             if prior!=request:raise ValueError('Retirement dispatch request cannot change')
@@ -1103,7 +1117,7 @@ def dataset_retirement_launch(node,actor,key,action,targets,source_result=None):
 
 
 def dataset_retirement_activity(key,action):
-    if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}',key) or action not in ('fence','isolate','restore','release-absence'):
+    if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}',key) or action not in ('fence','isolate','restore','release-absence','cancel','commit'):
         raise ValueError('Invalid fixed retirement worker identity')
     unit='gpuq-data-delete-'+key+'-'+action+'.service'
     try:
@@ -1120,16 +1134,20 @@ def dataset_retirement_activity(key,action):
 
 
 def dataset_retirement_worker(key,action):
-    if action not in ('fence','isolate','restore','release-absence'):raise ValueError('Unknown private retirement worker action')
+    if action not in ('fence','isolate','restore','release-absence','cancel','commit'):raise ValueError('Unknown private retirement worker action')
     node=dataset_retirement_node()
     request=node._phase_read(key,action,'launch')
-    if not isinstance(request,dict) or set(request)!={'schema','operationId','action','userId','hostAdmin','targets','sourceResult'} or type(request['schema']) is not int or request['schema']!=1 or request['operationId']!=key or request['action']!=action:
+    if not isinstance(request,dict) or set(request)!={'schema','operationId','action','userId','hostAdmin','targets','sourceResult','adminContinue'} or type(request['schema']) is not int or request['schema']!=1 or request['operationId']!=key or request['action']!=action:
         raise ValueError('Retirement launch intent changed')
     module,_=dataset_cache();actor=dataset_actor(module,request)
     try:
-        if action=='fence':result=node.fence(actor,key)
-        elif action=='isolate':result=node.isolate(actor,key,request['targets'])
+        if type(request['adminContinue']) is not bool:raise ValueError('Invalid continuation flag')
+        effective=node.resume_actor(actor,key) if request['adminContinue'] else actor
+        if action=='fence':result=node.fence(effective,key)
+        elif action=='isolate':result=node.isolate(effective,key,request['targets'])
         elif action=='restore':result=node.restore(actor,key)
+        elif action=='cancel':result=node.cancel(actor,key)
+        elif action=='commit':result=node.commit(actor,key,request['sourceResult'])
         else:result=node.release_absence(actor,key,request['sourceResult'])
         atomic_json(node._phase_path(key,action,'result'),{'ok':True,'result':result})
         return 0

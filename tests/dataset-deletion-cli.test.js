@@ -56,3 +56,18 @@ test('restore requires admin and explicit machine, never sends force or an owner
   for(const value of [args.slice(0,3),[...args,'--root'],[...args,'--key',randomUUID()]])assert.equal((await f.cli(value)).code,1);
   f.role='member';assert.equal((await f.cli(args)).code,1);assert.equal(f.calls.filter(c=>c.operation==='datasets.delete.restore').length,1);
 });
+
+test('admin continue and cancel use original task ID once and never accept machine or member override',async t=>{
+  const f=await fixture(t);
+  for(const action of ['retire-continue','retire-cancel']){
+    const op='datasets.delete.'+(action.endsWith('continue')?'continue':'cancel');
+    const r=await f.cli(['data',action,f.id]);assert.equal(r.code,0,r.stderr);
+    assert.deepEqual(f.calls.at(-1),{operation:op,args:{operationId:f.id}});
+    assert.equal((await f.cli(['data',action,f.id,'--machine',MACHINES[0].id])).code,1);
+    assert.equal((await f.cli(['data',action,f.id,'--key',randomUUID()])).code,1);
+    f.role='member';assert.equal((await f.cli(['data',action,f.id])).code,1);f.role='admin';
+    assert.equal(f.calls.filter(c=>c.operation===op).length,1);
+  }
+  f.failure='unknown result';const r=await f.cli(['data','retire-cancel',f.id]);assert.equal(r.code,1);
+  assert.match(r.stderr,new RegExp('retire-status '+f.id));assert.equal(f.calls.filter(c=>c.operation==='datasets.delete.cancel').length,2);
+});

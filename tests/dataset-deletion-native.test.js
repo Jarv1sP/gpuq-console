@@ -15,7 +15,7 @@ async function nativeFixture(t){
     }};
     await writable(root);await rm(root,{recursive:true,force:true});
   });
-  const f=fixture(t),calls=[];
+  const f=fixture(t,{options:{capabilityTimeoutMs:5000}}),calls=[];
   const bridge=(host,op,args)=>new Promise((resolve,reject)=>{
     calls.push({host,op,args});
     const child=spawn(process.env.PYTHON||'python3',[new URL('./dataset_deletion_node_fixture.py',import.meta.url).pathname,root]);
@@ -95,4 +95,27 @@ test('actual local CLI restore is recognized through current journal even though
   const count=calls.length,current=await f.call('datasets.delete.status',{key:r.args.key});
   assert.equal(current.state,'BLOCKED');assert.equal(current.steps.find(s=>s.machine===hosts[0]).state,'RESTORED');
   assert.ok(calls.slice(count).every(c=>c.op==='storage.dataset-delete.status'));
+});
+
+test('real cancel after lost target isolation restores full bytes and releases every node namespace',async t=>{
+  const {f,root,bridge,calls}=await nativeFixture(t),actor={userId:principal.userId,hostAdmin:false};
+  const source=await bridge(hosts[0],'fixture.publish',actor);let lost=true;
+  f.service.bridge=async(host,op,args)=>{const result=await bridge(host,op,args);if(lost&&host===hosts[1]&&op.endsWith('.isolate')){lost=false;throw Error('lost isolated target reply');}return result;};
+  const r=await f.start({dataset:'personal',version:source.version,key:randomUUID()});assert.equal(r.result.state,'UNKNOWN');
+  await f.call('datasets.delete.cancel',{operationId:r.first.operationId},admin);await f.service.waitDatasetDeletions();
+  const result=await f.call('datasets.delete.status',{operationId:r.first.operationId},admin);assert.equal(result.state,'CANCELED',JSON.stringify(result));
+  assert.equal((await readFile(join(root,hosts[0],'cache','ready','personal',source.version,'data/train.txt'))).toString(),'actual complete recoverable bytes');
+  for(const host of hosts){const fence=JSON.parse(await readFile(join(root,host,'cache','.retirements','personal',source.version+'.json')));assert.equal(fence.state,'RELEASED');}
+  assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_deletion_fences').all(),[]);
+  assert.ok(calls.every(c=>c.op!=='datasets.unregister'));
+});
+test('complete independent transfer under another name is untouched by dataset deletion',async t=>{
+  const {f,root,bridge,calls}=await nativeFixture(t),actor={userId:principal.userId,hostAdmin:false};
+  const source=await bridge(hosts[0],'fixture.publish',actor);
+  await bridge(hosts[1],'fixture.independent',{userId:admin.userId,hostAdmin:true,owner:principal.userId,dataset:'separate-copy'});
+  const independent=join(root,hosts[1],'cache','ready','separate-copy',source.version,'data/train.txt'),before=await readFile(independent);
+  const r=await f.start({dataset:'personal',version:source.version,key:randomUUID()});assert.equal(r.result.state,'DELETED',JSON.stringify(r.result));
+  assert.deepEqual(await readFile(independent),before);
+  assert.ok(!calls.some(c=>c.op.startsWith('storage.dataset-delete.')&&c.args.dataset==='separate-copy'));
+  assert.equal(r.result.copyNotice,'其他名称下的副本不受影响');
 });

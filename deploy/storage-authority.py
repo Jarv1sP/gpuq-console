@@ -274,14 +274,14 @@ class AuthorityStore:
             raise ValueError('Authority revocation requires this active version fence')
         if not isinstance(targets,list) or len(targets)>10000:raise ValueError('Invalid confirmed target inventory')
         fields={'protocol','operationId','machine','dataset','version','state','isolated','complete',
-                'snapshotSha256','generation','fenceState','retainUntil','proofSha256','authorityReferences'}
+                'snapshotSha256','generation','fenceState','retainUntil','proofSha256','authorityReferences','authorityAliases'}
         confirmed={};scopes=set()
         for target in targets:
             if (not isinstance(target,dict) or set(target)!=fields or target['protocol']!='dataset-version-retirement-v1'
                     or target['state']!='ISOLATED' or target['isolated'] is not True or target['fenceState']!='ISOLATED'
                     or target['version']!=row['version'] or type(target['complete']) is not bool
                     or type(target['retainUntil']) not in (int,float) or not math.isfinite(target['retainUntil'])
-                    or target['retainUntil']<fence['createdAt']+7*86400 or not isinstance(target['authorityReferences'],list)):
+                    or target['retainUntil']<fence['createdAt']+7*86400-300 or not isinstance(target['authorityReferences'],list)):
                 raise ValueError('Dependent data isolation is unconfirmed; original stays protected')
             J.identifier(target['operationId']);_machine(target['machine']);D._identifier(target['dataset'])
             for field in ('snapshotSha256','generation','proofSha256'):D._identifier(target[field],D.HASH_RE)
@@ -296,6 +296,21 @@ class AuthorityStore:
                 if scope in scopes:raise ValueError('Ambiguous dependent grant mapping')
                 scopes.add(scope)
                 confirmed.setdefault(ref['grantId'],[]).append((target,ref))
+        # Each target node enumerates the grant's physical aliases itself,
+        # including retained aliases whose registry was moved. Portal locations
+        # alone cannot authorize revocation by omitting one of them.
+        for target in targets:
+            aliases=target['authorityAliases']
+            if not isinstance(aliases,list) or len(aliases)>10000:
+                raise ValueError('Node authority alias inventory is unconfirmed')
+            for alias in aliases:
+                if (not isinstance(alias,dict) or set(alias)!={'dataset','version','authorityReference'}
+                        or alias['version']!=row['version'] or alias['authorityReference'] not in target['authorityReferences']):
+                    raise ValueError('Invalid node authority alias inventory')
+                D._identifier(alias['dataset']);ref=alias['authorityReference']
+                if ref['sourceMachine']==self.machine and ref['sourceDataset']==row['dataset']:
+                    if (ref['grantId'],target['machine'],alias['dataset']) not in scopes:
+                        raise ValueError('Every physical authority alias must be ISOLATED before revocation')
         if set(confirmed)!=set(grant['id'] for grant in expected['grants']):
             raise ValueError('Every authority dependent needs a matching isolated generation')
         for planned in expected['grants']:

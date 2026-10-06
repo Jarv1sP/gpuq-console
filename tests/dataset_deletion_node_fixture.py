@@ -58,6 +58,13 @@ elif op=='fixture.replicate':
     cache.materialize(actor,name,registered['version'],_source=approved)
     remote.install_grant(grant)
     result=tier.verify_authority(actor,name,registered['version'],'configured-original','personal')
+elif op=='fixture.independent':
+    approved=root/'fixture-input';name=args['dataset']
+    with cache._locked():
+        registered=cache._register(D.Principal(args['owner'],True),name,D._scan(approved),[args['owner']],None,
+            _origin='replica',_receipt=str(uuid.uuid4()))
+    cache.materialize(actor,name,registered['version'],_source=approved)
+    result=registered
 elif op=='fixture.old-grant-denied':
     grant=args['grant']
     try:
@@ -78,13 +85,18 @@ else:
     phase=op.removeprefix('storage.dataset-delete.')
     if phase=='capabilities':result=dict(protocol=N.PROTOCOL,machine=machine,datasetDelete=1)
     elif phase=='locations':result=dict(protocol=N.PROTOCOL,machine=machine,locations=node.grant_locations(args['version'],args['references']))
-    elif phase=='plan':result=node.plan(actor,args['dataset'],args['version'],args['operationId'],authorization=args.get('authorization'),references=args.get('references'))
+    elif phase=='plan':
+        effective=node.resume_actor(actor,args['operationId']) if args.get('adminContinue') and node._path(args['operationId']).exists() else actor
+        result=node.plan(effective,args['dataset'],args['version'],args['operationId'],authorization=args.get('authorization'),references=args.get('references'))
     elif phase=='status':result={**node.worker_status(actor,args['operationId']),'pendingPhases':[],'unconfirmedPhases':[]}
-    elif phase in ('fence','isolate','restore','release-absence'):
+    elif phase in ('fence','isolate','restore','release-absence','cancel','commit'):
         key=args['operationId']
-        if phase=='fence':value=node.fence(actor,key)
-        elif phase=='isolate':value=node.isolate(actor,key,args['targets'])
+        effective=node.resume_actor(actor,key) if args.get('adminContinue') else actor
+        if phase=='fence':value=node.fence(effective,key)
+        elif phase=='isolate':value=node.isolate(effective,key,args['targets'])
         elif phase=='restore':value=node.restore(actor,key)
+        elif phase=='cancel':value=node.cancel(actor,key)
+        elif phase=='commit':value=node.commit(actor,key,args['sourceResult'])
         else:value=node.release_absence(actor,key,args['sourceResult'])
         D._write_json(node._phase_path(key,phase,'result'),dict(ok=True,result=value))
         result=dict(protocol=N.PROTOCOL,operationId=key,machine=machine,state='DISPATCHED',action=phase)

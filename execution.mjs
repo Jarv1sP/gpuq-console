@@ -126,7 +126,7 @@ export async function executionCall(service,principal,operation,args){
   const jobView=job=>publicJob(job,service.store.users);
   if(!user.enabled)fail('账号已暂停。',403);
   service.assertMaintenanceAllowed?.(operation,args,principal);
-  if(['datasets.delete','datasets.delete.status','datasets.delete.restore'].includes(operation))return service.datasetDeletionCall(principal,operation,args);
+  if(['datasets.delete','datasets.delete.status','datasets.delete.restore','datasets.delete.continue','datasets.delete.cancel'].includes(operation))return service.datasetDeletionCall(principal,operation,args);
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   if(operation.startsWith('datasets.storage.')){
@@ -269,14 +269,19 @@ export async function executionCall(service,principal,operation,args){
     // Identity comes only from the authenticated portal; node paths and roles
     // cannot be supplied by the client. Large copies run in a node-local worker.
     const {machine,includeEmpty,...reference}=args;
+    let removalGuard;
     if(operation==='datasets.unregister'){
-      // Keep the existing administrator request unchanged during the staged
-      // node rollout. Only v1 nodes can authorize personal version removal;
+      // Only v1 nodes can authorize personal version removal;
       // a failed capability read is not evidence that any data is absent.
       let capability;
       try{capability=await service.bridge(machine,'storage.dataset-delete.capabilities',{userId:user.id,hostAdmin:principal.role==='admin'});}
-      catch{ /* An administrator retains the legacy node path below. */ }
-      if(principal.role!=='admin'&&(capability?.protocol!=='dataset-delete-node-v1'||capability.machine!==machine||capability.datasetDelete!==1))fail('这台服务器还不支持安全删除，请等待节点更新。',409);
+      catch{ /* Capability failure never proves absence of data. */ }
+      if(capability?.protocol!=='dataset-delete-node-v1'||capability.machine!==machine||capability.datasetDelete!==1){
+        if(principal.role!=='admin')fail('这台服务器还不支持安全删除，请等待节点更新。',409);
+        // PR-M2 owns the shared guard and its durable exclusions. Read +
+        // dispatch must stay inside its cross-machine version lock.
+        removalGuard=createDatasetRemovalGuard(service,principal);
+      }
     }
     if(operation==='datasets.prepare'&&service.prepareDataset){
       const result=await service.prepareDataset(user.id,machine,reference);
@@ -289,9 +294,8 @@ export async function executionCall(service,principal,operation,args){
       if(principal.role!=='admin'||mapped&&mapped.dataset!==reference.dataset)return (await service.resolveDataset(user.id,machine,reference)).status;
     }
     let result;
-    const dispatch=()=>service.bridge(machine,operation,{...reference,userId:user.id,hostAdmin:principal.role==='admin'});
-    try{result=operation==='datasets.unregister'?
-      await createDatasetRemovalGuard(service,principal).withProtectedRemoval(machine,args.dataset,args.version,dispatch):await dispatch();}
+    try{const send=()=>service.bridge(machine,operation,{...reference,userId:user.id,hostAdmin:principal.role==='admin'});
+      result=removalGuard?await removalGuard.withProtectedRemoval(machine,reference.dataset,reference.version,send):await send();}
     catch(error){if(operation==='datasets.status'&&!byOperation&&service.resolveDataset)return (await service.resolveDataset(user.id,machine,reference)).status;throw error;}
     if(operation==='datasets.prepare')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
     if(operation==='datasets.list'){

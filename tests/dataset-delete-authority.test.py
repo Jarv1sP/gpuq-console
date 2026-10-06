@@ -380,7 +380,12 @@ class RetirementAuthorityTests(unittest.TestCase):
         cache.materialize(ADMIN,'other-alias',self.version,_source=self.input)
         tier.verify_authority(ADMIN,'other-alias',self.version,'configured-original','source-data')
         snapshot=target['retirement'].inspect(OWNER,'other-alias',self.version)
+        target['snapshot']=target['retirement'].inspect(OWNER,'replica-data',self.version)
         self.fence();receipts=self.target_receipts()
+        with self.assertRaisesRegex(ValueError,'physical authority alias'):
+            self.isolate(receipts)
+        self.assertFalse(self.revoked(target['grant']).exists())
+        self.assertTrue((cache._paths('other-alias',self.version)['ready']/'data/fixed.txt').exists())
         alias=target['retirement'].isolate(OWNER,'other-alias',self.version,str(uuid.uuid4()),snapshot)
         self.assertTrue(self.isolate([*receipts,alias])['isolated'])
         self.assertTrue(self.revoked(target['grant']).exists())

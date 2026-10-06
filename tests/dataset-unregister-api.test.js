@@ -41,9 +41,8 @@ test('whole-dataset unregister requires authenticated admin despite full member 
   assert.equal(f.calls.length,0);
 });
 
-test('missing/old/wrong-machine/failed capability preserves exact main admin request but rejects member and full deletion',async t=>{
-  const f=await apiFixture(t),bridge=f.s.bridge;
-  const machine=MACHINES[0].id,reads=[];
+test('missing/old/wrong-machine/failed capability cannot erase an unproven last copy, member or full deletion',async t=>{
+  const f=await apiFixture(t),bridge=f.s.bridge,machine=MACHINES[0].id,reads=[];
   for(const capability of [undefined,{protocol:'dataset-delete-node-v1',machine,datasetDelete:0},
     {protocol:'dataset-delete-node-v0',machine,datasetDelete:1},
     {protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1},Error('capability query failed')]){
@@ -53,13 +52,13 @@ test('missing/old/wrong-machine/failed capability preserves exact main admin req
       if(capability instanceof Error)throw capability;
       return structuredClone(capability);
     };
+    // The old request-shape positives remain below for v1. cap0 must run the
+    // shared M2 guard, whose read failure cannot become a complete copy.
     for(const extra of [{},{version:null},{version:VERSION}]){
       f.calls.length=0;reads.length=0;
-      const out=await f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',...extra});
-      assert.equal(out.result.state,'UNREGISTERING');assert.equal(out.result.unregistered,undefined);
-      // origin/main e027633 execution.mjs forwards only ...reference and
-      // authenticated userId/hostAdmin. No fallback/proof/force fields added.
-      assert.deepEqual(f.calls,[{machine,operation:'datasets.unregister',args:{dataset:'sample',...extra,userId:'builtin-admin',hostAdmin:true}}]);
+      await assert.rejects(f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',...extra}),
+        e=>e.status===409&&e.code==='LAST_COPY_UNPROVEN');
+      assert.equal(f.calls.filter(c=>c.operation==='datasets.unregister').length,0);
       assert.deepEqual(reads,[{machine,operation:'storage.dataset-delete.capabilities',args:{userId:'builtin-admin',hostAdmin:true}}]);
     }
     f.calls.length=0;reads.length=0;
@@ -68,7 +67,7 @@ test('missing/old/wrong-machine/failed capability preserves exact main admin req
     for(const token of [f.admin.token,f.member.token]){
       reads.length=0;
       await assert.rejects(f.s.invoke(token,'datasets.delete',{dataset:'sample',version:VERSION,key:randomUUID()}),e=>e.status===409&&e.code==='DATASET_DELETE_UNSUPPORTED');
-      assert.deepEqual(f.calls,[]);assert.equal(reads.length,1);
+      assert.deepEqual(f.calls,[]);assert.equal(reads.length,MACHINES.length);
     }
     assert.equal(f.s.db.prepare('SELECT count(*) n FROM dataset_deletions').get().n,0);
     assert.equal(f.s.db.prepare('SELECT count(*) n FROM dataset_deletion_fences').get().n,0);

@@ -319,7 +319,7 @@ class DatasetTier:
                     cache._write_tier(dataset, version, tier)
         return dict(dataset=dataset, version=version, role="cache", verified=True, authorityId=authority_id)
 
-    def _receipt(self, actor, tier, dataset, version):
+    def _receipt(self, actor, tier, dataset, version, *, _read_only=False):
         receipt = tier["recovery"]
         if (tier["role"] != "cache" or not isinstance(receipt, dict)
                 or set(receipt) != {"schema", "authorityId", "version", "registration", "proof", "owners"}
@@ -327,11 +327,11 @@ class DatasetTier:
                 or receipt["authorityId"] not in self.authorities
                 or not self._recoverable(self.authorities[receipt["authorityId"]])
                 or receipt["owners"] != self.cache._dataset(actor, dataset)["owners"]
-                or receipt["registration"] != list(self.cache._record_identity(dataset, version))):
+                or receipt["registration"] != list(self.cache._record_identity(dataset, version, _read_only=_read_only))):
             raise D.CacheError("no valid fixed-version recovery receipt")
         return receipt
 
-    def retirement_references(self, actor, dataset, version):
+    def retirement_references(self, actor, dataset, version, *, _read_only=False):
         """Private grant relationship projection, never inferred from sourceId."""
         self.cache._actor(actor)
         internal=type(actor)(actor.user_id,True)
@@ -339,7 +339,7 @@ class DatasetTier:
             self.cache._dataset(actor,dataset)
             tier=self.cache._tier(dataset,version)
             if tier['role']!='cache':return []
-            receipt=self._receipt(internal,tier,dataset,version)
+            receipt=self._receipt(internal,tier,dataset,version,_read_only=_read_only)
         adapter=self.authorities[receipt['authorityId']]
         project=getattr(adapter,'retirement_reference',None)
         if not callable(project):raise D.CacheError('authority dependency has no fixed machine/reference proof')

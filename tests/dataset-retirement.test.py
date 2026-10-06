@@ -36,7 +36,7 @@ class RetirementTests(unittest.TestCase):
         (source/'train.txt').write_bytes(b'fixed complete data')
         self.cache = D.DatasetCache(self.root/'cache', sources={'source':source}, reserve_bytes=0, lock_timeout=.01)
         self.now = 1000000.0
-        self.retirement = R.DatasetRetirement(self.cache, 'test-long-machine', clock=lambda:self.now)
+        self.retirement = R.DatasetRetirement(self.cache, 'test-long-machine', clock=lambda:self.now,clock_synchronized=lambda:True)
         self.key = str(uuid.uuid4())
         with self.cache._locked():
             registered = self.cache._register(D.Principal('owner', True), 'sample', D._scan(source), ['owner'], 'source',
@@ -76,6 +76,49 @@ class RetirementTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.retirement.purge(ADMIN, self.key)
             self.assertTrue(self.retained().exists())
+
+    def test_restore_ready_crash_can_finish_after_original_retention_deadline(self):
+        isolated=self.isolate()
+        original=R.D._rename_new
+        def crash(source,destination):
+            original(source,destination)
+            if destination==self.cache._paths('sample',self.version)['ready']:
+                raise OSError('crash after restore-ready')
+        with patch.object(R.D,'_rename_new',side_effect=crash),self.assertRaisesRegex(OSError,'restore-ready'):
+            self.retirement.restore(ADMIN,self.key)
+        self.assertEqual(self.retirement.status(ADMIN,self.key)['state'],'RESTORING')
+        self.now=isolated['retainUntil']+86400
+        result=self.retirement.restore(ADMIN,self.key)
+        self.assertEqual(result['state'],'RESTORED')
+        self.assertEqual((self.cache._paths('sample',self.version)['ready']/'data/train.txt').read_bytes(),b'fixed complete data')
+        self.assertFalse(self.retained().exists())
+
+    def test_forward_wall_clock_jump_without_ntp_proof_never_purges_full_bytes(self):
+        result=self.isolate();self.now=result['retainUntil']+30*86400
+        for probe in (lambda:False,lambda:None,lambda:(_ for _ in ()).throw(OSError('no clock evidence'))):
+            self.retirement.clock_synchronized=probe
+            with self.assertRaisesRegex(ValueError,'NTP'):
+                self.retirement.purge(ADMIN,self.key)
+            self.assertTrue(self.retained().exists())
+            self.assertEqual(self.retirement.status(ADMIN,self.key)['state'],'ISOLATED')
+        self.retirement.clock_synchronized=lambda:True
+        self.assertEqual(self.retirement.purge(ADMIN,self.key)['state'],'PURGED')
+
+    def test_clock_or_commit_lost_during_long_hash_never_reaches_payload_cleanup(self):
+        result=self.isolate();self.now=result['retainUntil']+1
+        verify=self.retirement._verify_payload
+        for kind in ('clock','commit'):
+            self.retirement.clock_synchronized=lambda:True
+            self.retirement.collection_allowed=lambda key:True
+            def lose_evidence(row,**kwargs):
+                verify(row,**kwargs)
+                if kind=='clock':self.retirement.clock_synchronized=lambda:False
+                else:self.retirement.collection_allowed=lambda key:None
+            with self.subTest(kind=kind),patch.object(self.retirement,'_verify_payload',side_effect=lose_evidence),\
+                    self.assertRaisesRegex(ValueError,'NTP|not committed'):
+                self.retirement.purge(ADMIN,self.key)
+            self.assertTrue(self.retained().exists())
+            self.assertEqual(self.retirement.status(ADMIN,self.key)['state'],'ISOLATED')
 
     def test_ordinary_admin_or_personal_delete_never_erases_last_complete_copy(self):
         before = (self.cache._paths('sample', self.version)['ready']/'data'/'train.txt').read_bytes()

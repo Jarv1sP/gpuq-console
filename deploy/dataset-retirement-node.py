@@ -27,6 +27,8 @@ class RetirementNode:
         self.root = D._absolute(state_root)
         R.private_directory(self.root)
         self.quiescent = quiescent
+        # Portal-managed steps must not expire while the parent task is partial.
+        retirement.collection_allowed=self._collection_allowed
 
     @classmethod
     def from_executor(cls, executor):
@@ -63,17 +65,25 @@ class RetirementNode:
 
     def _phase_path(self,key,action,kind):
         R.operation(key)
-        if action not in {'fence','isolate','restore','release-absence'} or kind not in {'launch','result'}:
+        if action not in {'fence','isolate','restore','release-absence','cancel','commit'} or kind not in {'launch','result'}:
             raise ValueError('Invalid fixed retirement worker phase')
         return self.root/(key+'.'+action+'.'+kind+'.json')
 
     def _phase_read(self,key,action,kind):
         return R.private_read(self._phase_path(key,action,kind))
 
-    def worker_status(self,actor,key):
-        result=self.status(actor,key)
+    def worker_status(self,actor,key,*,active=False):
+        if active:
+            # Atomic node journal read while a hashing worker owns the version
+            # lock. Do not wait on that worker just to report RUNNING.
+            row=self._load(key);self.cache._actor(actor)
+            if not actor.is_admin and (row['actor']!=actor.user_id or row['admin']!=actor.is_admin):
+                raise PermissionError('Node retirement belongs to another account')
+            result={**self._view(row),'result':row['result']}
+        else:
+            result=self.status(actor,key)
         phases={}
-        for action in ('fence','isolate','restore','release-absence'):
+        for action in ('fence','isolate','restore','release-absence','cancel','commit'):
             try:
                 phase=self._phase_read(key,action,'result')
             except FileNotFoundError:
@@ -110,7 +120,7 @@ class RetirementNode:
         if (not isinstance(row,dict) or set(row)!=fields or type(row['schema']) is not int or row['schema']!=1
                 or row['protocol']!=PROTOCOL or row['operationId']!=R.operation(key)
                 or row['machine']!=self.retirement.machine or type(row['admin']) is not bool
-                or row['state'] not in {'PLANNED','FENCED','ISOLATING','ISOLATED','RESTORING','RESTORED'}
+                or row['state'] not in {'PLANNED','FENCED','ISOLATING','ISOLATED','RESTORING','RESTORED','CANCELED','PURGED'}
                 or not isinstance(row['snapshot'],dict)
                 or row['snapshot'].get('protocol') not in {R.PROTOCOL,'dataset-version-absence-v1'}
                 or row['snapshotSha256']!=R.sha(row['snapshot'])
@@ -128,6 +138,119 @@ class RetirementNode:
         self.cache._actor(actor, admin=restoring)
         if not restoring and (row['actor']!=actor.user_id or row['admin']!=actor.is_admin):
             raise PermissionError('Node retirement belongs to another immutable account and role')
+
+    def resume_actor(self, actor, key):
+        # Only an authenticated current administrator can continue a saved
+        # creator's immutable phase; the creator never comes from RPC fields.
+        self.cache._actor(actor,admin=True)
+        row=self._load(key)
+        if row['state'] in {'RESTORING','RESTORED','CANCELED','PURGED'}:
+            raise ValueError('Restored/canceled deletion cannot resume')
+        return type(actor)(row['actor'],row['admin'])
+
+    def _collection_allowed(self,key):
+        try:
+            if not R.exists(self._phase_path(key,'commit','launch')) and not R.exists(self._phase_path(key,'commit','result')):
+                return False  # positively never committed, not an unknown reply
+            proof=self._phase_read(key,'commit','result');row=self._load(key)
+            if row['state']!='ISOLATED':return None
+            journal=self.retirement._journal(key)
+            # Collection may be resuming an interrupted PURGING transaction;
+            # the authorized isolated identity is still the same durable one.
+            expected=self.retirement._receipt({**journal,'state':'ISOLATED'})
+            if (set(proof)=={'ok','result'} and proof['ok'] is True
+                    and proof['result']==row['result']==expected):return True
+            return None  # invalid proof is unknown, never positively uncommitted
+        except (OSError,ValueError,KeyError,TypeError):
+            return None  # corrupt/unconfirmed commit cannot authorize expiry
+
+    def commit(self,actor,key,source_result):
+        self.cache._actor(actor)
+        row=self._load(key)
+        if not actor.is_admin:self._owned(actor,row)
+        source=row['snapshot'].get('authorization')
+        if (not isinstance(source_result,dict) or source_result.get('protocol')!=R.PROTOCOL
+                or source_result.get('state')!='ISOLATED' or source_result.get('isolated') is not True
+                or source_result.get('complete') is not True or source_result.get('version')!=row['version']
+                or source is not None and any(source_result.get(k)!=source[k] for k in ('operationId','machine','dataset','snapshotSha256'))):
+            raise ValueError('Complete original isolation is required before collection can be committed')
+        for field in ('proofSha256','generation','snapshotSha256'):
+            D._identifier(source_result.get(field),D.HASH_RE)
+        status=self.status(actor,key)
+        if status['result'] is None or status['result']['state']!='ISOLATED':
+            raise ValueError('Only a confirmed isolated step may be committed')
+        return status['result']
+
+    def _can_cancel_before_moves(self,row):
+        """Prove an interrupted isolate made no data or grant mutation."""
+        key=row['operationId']
+        try:journal=self.retirement._journal(key)
+        except FileNotFoundError:return False
+        if journal['state']!='ISOLATING' or journal['moves'] or journal['revocations']:return False
+        snapshot=row['snapshot'];original=type(self.principal)(row['actor'],row['admin'])
+        with self.cache._retirement_scope(original,key,row['dataset'],row['version'],row['snapshotSha256']),\
+                self.cache._lock_file('.locks/'+row['dataset']+'.'+row['version']+'.lock'),self.cache._locked():
+            self.cache._check_snapshot(original,row['dataset'],row['version'],tuple(snapshot['registration']))
+            if R.exists(self.retirement._folder(key)/'payload/ready'):return False
+            if snapshot['complete'] and not R.exists(self.cache._paths(row['dataset'],row['version'])['ready']):return False
+            if R.sha(self.cache._tier(row['dataset'],row['version']))!=snapshot['tierSha256']:return False
+            for field,folder in (('tierIdentity','.tiers'),('provenanceIdentity','.provenance')):
+                path=self.cache.root/folder/row['dataset']/(row['version']+'.json')
+                if snapshot[field] is not None and (not R.exists(path) or R.identity(path)!=snapshot[field]):return False
+            authority=snapshot.get('authority')
+            if authority:
+                if self.retirement.authority is None:return False
+                if any(R.exists(self.retirement.authority.root/grant['id']/'revoked.json') for grant in authority['grants']):return False
+        return True
+
+    def cancel(self,actor,key):
+        """Audited private admin recovery, after executor confirms old workers stopped."""
+        self.cache._actor(actor,admin=True)
+        row=self._load(key);self._owned(actor,row,restoring=True)
+        if row['state']=='CANCELED':return row['result']
+        original=type(actor)(row['actor'],row['admin'])
+        # An interrupted isolation has a fixed snapshot and fixed targets.
+        # Complete only that known local transaction, then restore its bytes.
+        if row['state']=='ISOLATING':
+            if self._can_cancel_before_moves(row):
+                with self._lock(key):
+                    row=self._load(key);row['state']='FENCED';self._write(row)
+            else:
+                self.isolate(original,key,row['targets'])
+                row=self._load(key)
+        if row['snapshot']['protocol']==R.PROTOCOL and row['state'] in {'ISOLATED','RESTORING','RESTORED'}:
+            self.restore(actor,key,_cancel_uncommitted=True)
+        with self._lock(key):
+            row=self._load(key);snapshot=row['snapshot']
+            with self.cache._retirement_scope(original,key,row['dataset'],row['version'],row['snapshotSha256']),\
+                    self.cache._lock_file('.locks/'+row['dataset']+'.'+row['version']+'.lock'):
+                fence=self.cache._retirement_fence(row['dataset'],row['version'])
+                if fence is not None:
+                    if (fence['operationId']!=key or fence['snapshotSha256']!=row['snapshotSha256']):
+                        raise ValueError('Cancellation refuses another deletion generation')
+                    if fence['state']=='FENCED' or snapshot['protocol']=='dataset-version-absence-v1' and fence['state']=='ISOLATED':
+                        if snapshot['protocol']==R.PROTOCOL:
+                            self.cache._check_snapshot(original,row['dataset'],row['version'],tuple(snapshot['registration']))
+                            if R.sha(self.cache._tier(row['dataset'],row['version']))!=snapshot['tierSha256']:
+                                raise ValueError('Unisolated registration changed; cancellation is unconfirmed')
+                            if snapshot['complete'] and not self.cache._ready(self.cache._paths(row['dataset'],row['version']),self.cache._record(original,row['dataset'],row['version'])['manifest'],row['version']):
+                                raise ValueError('Unisolated complete data is unconfirmed')
+                        else:
+                            self._assert_empty(original,row['dataset'],row['version'],snapshot['authorization'])
+                        fence={**fence,'state':'RELEASED'}
+                        with self.cache._locked():
+                            current=self.cache._retirement_fence(row['dataset'],row['version'])
+                            if current is None or current['operationId']!=key or current['state'] not in {'FENCED','ISOLATED'}:
+                                raise ValueError('Cancellation generation changed before release')
+                            D._write_json(self.cache.root/'.retirements'/row['dataset']/(row['version']+'.json'),fence)
+                    elif fence['state'] not in {'RESTORED','RELEASED'}:
+                        raise ValueError('Data has not been restored; cancellation is unconfirmed')
+                elif row['state']!='PLANNED':
+                    raise ValueError('Lost fence generation; cancellation is unconfirmed')
+                result=dict(protocol='dataset-version-cancel-v1',operationId=key,machine=row['machine'],
+                    dataset=row['dataset'],version=row['version'],snapshotSha256=row['snapshotSha256'],state='CANCELED',available=True)
+                row['state'],row['result']='CANCELED',result;self._write(row)
+                return result
 
     def _authorization(self, actor, value, version):
         """Authenticated source preflight, never a public request field."""
@@ -185,14 +308,14 @@ class RetirementNode:
         owners=self._assert_empty(actor,dataset,version,authorization)
         return dict(protocol='dataset-version-absence-v1',machine=self.retirement.machine,dataset=dataset,version=version,
                     owners=owners,rootIdentity=list(self.cache._root_identity),complete=False,memberAllowed=authorization['memberAllowed'],
-                    authorization=authorization,authorityReferences=references)
+                    authorization=authorization,authorityReferences=references,authorityAliases=[])
 
     def _view(self, row):
         snapshot=row['snapshot']
         return dict(protocol=PROTOCOL,operationId=row['operationId'],machine=row['machine'],dataset=row['dataset'],version=row['version'],
                     state=row['state'],snapshotSha256=row['snapshotSha256'],owners=snapshot['owners'],memberAllowed=snapshot['memberAllowed'],
                     complete=snapshot['complete'],absent=snapshot['protocol']=='dataset-version-absence-v1',
-                    authority=snapshot.get('authority'),authorityReferences=snapshot['authorityReferences'])
+                    authority=snapshot.get('authority'),authorityReferences=snapshot['authorityReferences'],authorityAliases=snapshot['authorityAliases'])
 
     def plan(self, actor, dataset, version, key, *, authorization=None, references=None):
         self.cache._actor(actor)
@@ -237,6 +360,7 @@ class RetirementNode:
         with self._lock(key):
             row=self._load(key);self._owned(actor,row)
             snapshot=row['snapshot']
+            if row['state']=='CANCELED':raise ValueError('Canceled node deletion cannot resume')
             if snapshot['protocol']==R.PROTOCOL:
                 result=self.retirement.fence(actor,row['dataset'],row['version'],key,snapshot)
             else:
@@ -302,7 +426,7 @@ class RetirementNode:
                     result=dict(protocol=R.PROTOCOL,operationId=key,machine=row['machine'],dataset=row['dataset'],version=row['version'],
                         state='ISOLATED',isolated=True,complete=False,snapshotSha256=row['snapshotSha256'],generation=fence['generation'],
                         fenceState='ISOLATED',retainUntil=fence['createdAt']+self.retirement.retention_seconds,
-                        authorityReferences=snapshot['authorityReferences'],proofSha256=R.sha([row['binding'],fence]))
+                        authorityReferences=snapshot['authorityReferences'],authorityAliases=snapshot['authorityAliases'],proofSha256=R.sha([row['binding'],fence]))
             row['state'],row['result']='ISOLATED',result;self._write(row)
             return result
 
@@ -312,9 +436,14 @@ class RetirementNode:
             self.cache._actor(actor)
             if not actor.is_admin and (row['actor']!=actor.user_id or row['admin']!=actor.is_admin):
                 raise PermissionError('Node retirement belongs to another account')
+            if row['state']=='CANCELED':
+                fence=self.cache._retirement_fence(row['dataset'],row['version'])
+                if fence is not None and (fence['operationId']!=key or fence['state'] not in {'RESTORED','RELEASED'}):
+                    raise ValueError('Canceled deletion lost its released generation')
+                return {**self._view(row),'result':row['result']}
             # A query never invokes isolate, replays a request, writes a clock,
             # or promotes a saved launch intent into a confirmed outcome.
-            if row['snapshot']['protocol']==R.PROTOCOL and row['state'] in {'ISOLATING','ISOLATED','RESTORING','RESTORED'}:
+            if row['snapshot']['protocol']==R.PROTOCOL and row['state'] in {'ISOLATING','ISOLATED','RESTORING','RESTORED','PURGED'}:
                 try:
                     result=self.retirement.status(actor,key)
                 except FileNotFoundError:
@@ -330,7 +459,7 @@ class RetirementNode:
                     raise ValueError('Negative inventory receipt lost its persistent proof')
             return {**self._view(row),'result':row['result']}
 
-    def restore(self, actor, key):
+    def restore(self, actor, key, *, _cancel_uncommitted=False):
         self.cache._actor(actor,admin=True)
         with self._lock(key):
             row=self._load(key);self._owned(actor,row,restoring=True)
@@ -339,7 +468,16 @@ class RetirementNode:
             if row['snapshot']['protocol']!=R.PROTOCOL:
                 raise ValueError('Empty namespace release requires the separately confirmed restored source')
             row['state']='RESTORING';self._write(row)
-            result=self.retirement.restore(actor,key)
+            try:
+                result=self.retirement.restore(actor,key,_cancel_uncommitted=_cancel_uncommitted)
+            except Exception:
+                # A definite refusal before a move is not RESTORING. Project
+                # the actual durable core state, never the launch intention.
+                try:
+                    current=self.retirement.status(actor,key)
+                    row['state'],row['result']=current['state'],current;self._write(row)
+                except (OSError,ValueError,KeyError):pass
+                raise
             row['state'],row['result']='RESTORED',result;self._write(row)
             return result
 
@@ -353,7 +491,7 @@ class RetirementNode:
                 raise ValueError('Only this isolated absence namespace can be released')
             authorization=snapshot['authorization']
             fields={'protocol','operationId','machine','dataset','version','state','isolated','complete',
-                    'snapshotSha256','generation','fenceState','retainUntil','proofSha256','authorityReferences'}
+                    'snapshotSha256','generation','fenceState','retainUntil','proofSha256','authorityReferences','authorityAliases'}
             if (not isinstance(source_result,dict) or set(source_result)!=fields or source_result['protocol']!=R.PROTOCOL
                     or source_result['state']!='RESTORED' or source_result['fenceState']!='RESTORED'
                     or source_result['isolated'] is not False or source_result['complete'] is not True

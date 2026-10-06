@@ -232,7 +232,7 @@ export class PortalService extends DemoService{
         .then(result=>({result,principal:this.principal(token)})).finally(()=>this.datasetReadPending--);
     }
     if(operation==='terminal.exchange')return this.terminalExchange(token,args);
-    if(['datasets.delete','datasets.delete.status','datasets.delete.restore'].includes(operation)){
+    if(['datasets.delete','datasets.delete.status','datasets.delete.restore','datasets.delete.continue','datasets.delete.cancel'].includes(operation)){
       if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
       const principal=this.principal(token);
       const check=()=>{const current=this.principal(token);if(current.userId!==principal.userId||current.username!==principal.username||current.role!==principal.role)throw Object.assign(Error('登录身份已改变。'),{status:403});};

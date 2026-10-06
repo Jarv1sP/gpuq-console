@@ -182,6 +182,90 @@ class RetirementNodeTests(unittest.TestCase):
         self.empty.cache.register_manifest(ADMIN,'sample',manifest,['owner'])
         with self.assertRaises(ValueError):self.empty.fence(OWNER,self.empty_key)
 
+    def test_cancel_releases_exact_unisolated_fence_without_erasing_last_complete_bytes(self):
+        self.node.fence(OWNER,self.key)
+        with self.assertRaises(PermissionError):self.node.cancel(OWNER,self.key)
+        result=self.node.cancel(ADMIN,self.key)
+        self.assertEqual(result['state'],'CANCELED');self.assertTrue(result['available'])
+        self.assertEqual(self.cache._retirement_fence('sample',self.version)['state'],'RELEASED')
+        self.assertEqual((self.cache._paths('sample',self.version)['ready']/'data/fixed.txt').read_bytes(),b'fixed full data')
+        self.assertEqual(self.node.status(OWNER,self.key)['result'],result)
+        with self.assertRaisesRegex(ValueError,'Canceled'):self.node.fence(OWNER,self.key)
+        lease=self.cache.acquire_lease(OWNER,'sample',self.version,'normal-prepare')
+        self.assertTrue(lease['readOnly']);self.assertEqual(lease['version'],self.version)
+
+    def test_cancel_restores_real_isolated_full_bytes_and_empty_namespace(self):
+        self.empty_plan();self.node.fence(OWNER,self.key);self.empty.isolate(OWNER,self.empty_key,[])
+        self.node.isolate(OWNER,self.key,[])
+        self.assertEqual(self.node.cancel(ADMIN,self.key)['state'],'CANCELED')
+        self.assertEqual(self.empty.cancel(ADMIN,self.empty_key)['state'],'CANCELED')
+        self.assertEqual((self.cache._paths('sample',self.version)['ready']/'data/fixed.txt').read_bytes(),b'fixed full data')
+        self.empty.cache.register_manifest(ADMIN,'sample',self.cache._record(OWNER,'sample',self.version)['manifest'],['owner'])
+        self.assertEqual(self.empty.cache._retirement_fence('sample',self.version)['state'],'RELEASED')
+
+    def test_registered_evicted_step_restores_registration_and_releases_fence(self):
+        with self.empty.cache._locked():
+            self.empty.cache._register(type(OWNER)('owner',True),'sample',self.cache._record(OWNER,'sample',self.version)['manifest'],['owner'],None,
+                _origin='replica',_receipt=str(uuid.uuid4()))
+        plan=self.empty.plan(OWNER,'sample',self.version,self.empty_key)
+        self.assertFalse(plan['complete']);self.assertFalse(plan['absent'])
+        isolated=self.empty.isolate(OWNER,self.empty_key,[]);self.assertFalse(isolated['complete'])
+        result=self.empty.restore(ADMIN,self.empty_key);self.assertEqual(result['state'],'RESTORED')
+        self.assertEqual(self.empty.cache._retirement_fence('sample',self.version)['state'],'RESTORED')
+        self.assertTrue(self.empty.cache._paths('sample')['.registry'].joinpath(self.version+'.json').exists())
+
+    def test_cancel_before_first_move_releases_fence_instead_of_replaying_failed_isolate(self):
+        self.node.fence(OWNER,self.key)
+        with patch.object(N.R.D,'_rename_new',side_effect=OSError('before any move')),self.assertRaises(OSError):
+            self.node.isolate(OWNER,self.key,[])
+        with patch.object(self.source,'isolate',side_effect=AssertionError('no replay needed')):
+            self.assertEqual(self.node.cancel(ADMIN,self.key)['state'],'CANCELED')
+        self.assertEqual(self.cache._retirement_fence('sample',self.version)['state'],'RELEASED')
+        self.assertEqual((self.cache._paths('sample',self.version)['ready']/'data/fixed.txt').read_bytes(),b'fixed full data')
+
+    def test_cancel_after_payload_move_completes_exact_local_transaction_then_restores(self):
+        rename=N.R.D._rename_new
+        def crash(source,destination):
+            rename(source,destination)
+            raise OSError('after first move')
+        with patch.object(N.R.D,'_rename_new',side_effect=crash),self.assertRaises(OSError):
+            self.node.isolate(OWNER,self.key,[])
+        result=self.node.cancel(ADMIN,self.key)
+        self.assertEqual(result['state'],'CANCELED')
+        self.assertEqual(self.cache._retirement_fence('sample',self.version)['state'],'RESTORED')
+        self.assertEqual((self.cache._paths('sample',self.version)['ready']/'data/fixed.txt').read_bytes(),b'fixed full data')
+
+    def test_cancel_uncommitted_parent_after_deadline_recovers_retained_complete_bytes(self):
+        result=self.node.isolate(OWNER,self.key,[])
+        self.source.clock=lambda:result['retainUntil']+86400
+        with self.assertRaisesRegex(ValueError,'retention'):
+            self.node.restore(ADMIN,self.key)
+        self.assertEqual(self.node.cancel(ADMIN,self.key)['state'],'CANCELED')
+        self.assertEqual((self.cache._paths('sample',self.version)['ready']/'data/fixed.txt').read_bytes(),b'fixed full data')
+
+    def test_corrupt_commit_proof_cannot_authorize_gc_or_expired_restore_override(self):
+        result=self.node.isolate(OWNER,self.key,[])
+        self.source.clock=lambda:result['retainUntil']+1;self.source.clock_synchronized=lambda:True
+        D._write_json(self.node._phase_path(self.key,'commit','result'),dict(ok=True,result=dict(state='ISOLATED',operationId=self.key)))
+        self.assertIsNone(self.node._collection_allowed(self.key))
+        with self.assertRaisesRegex(ValueError,'not committed'):
+            self.source.purge(ADMIN,self.key)
+        with self.assertRaisesRegex(ValueError,'retention'):
+            self.node.cancel(ADMIN,self.key)
+        self.assertEqual((self.source._folder(self.key)/'payload/ready/data/fixed.txt').read_bytes(),b'fixed full data')
+
+    def test_uncommitted_parent_cannot_expire_child_payload(self):
+        result=self.node.isolate(OWNER,self.key,[])
+        self.source.clock=lambda:result['retainUntil']+1;self.source.clock_synchronized=lambda:True
+        with self.assertRaisesRegex(ValueError,'not committed'):
+            self.source.purge(ADMIN,self.key)
+        self.assertEqual((self.source._folder(self.key)/'payload/ready/data/fixed.txt').read_bytes(),b'fixed full data')
+        with self.assertRaisesRegex(ValueError,'Complete original'):
+            self.node.commit(ADMIN,self.key,{**result,'state':'RETIRED'})
+        committed=self.node.commit(ADMIN,self.key,result)
+        D._write_json(self.node._phase_path(self.key,'commit','result'),dict(ok=True,result=committed))
+        self.assertEqual(self.source.purge(ADMIN,self.key)['state'],'PURGED')
+
     def test_corrupt_private_step_blocks_status_dispatch_and_restore(self):
         file=self.node._path(self.key);row=N.R.private_read(file)
         for change in (dict(actor='other'),dict(admin=1),dict(snapshotSha256='0'*64),dict(machine='other'),dict(state='READY')):

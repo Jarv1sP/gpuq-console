@@ -7,6 +7,7 @@ All complete data remains on its verified filesystem for at least seven days.
 There is no listener, automatic retry, enabled timer, or archive lane here.
 """
 import contextlib
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -77,9 +78,24 @@ def identity(path, directory=False):
             os.close(fd)
 
 
+def ntp_synchronized():
+    """Read-only kernel clock status. Unknown/unsynchronized never permits GC."""
+    # timex starts with uint modes, padded longs offset/freq/maxerror/esterror,
+    # and int status. Reserve more than sizeof(timex) without writing modes.
+    buffer = ctypes.create_string_buffer(512)
+    try:
+        result = ctypes.CDLL(None, use_errno=True).adjtimex(ctypes.byref(buffer))
+        offset = ((ctypes.sizeof(ctypes.c_uint) + ctypes.sizeof(ctypes.c_long)-1)
+                  // ctypes.sizeof(ctypes.c_long))*ctypes.sizeof(ctypes.c_long)
+        status = ctypes.c_int.from_buffer(buffer, offset+4*ctypes.sizeof(ctypes.c_long)).value
+        return result >= 0 and result != 5 and not status & 0x40  # TIME_ERROR / STA_UNSYNC
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
 class DatasetRetirement:
     def __init__(self, cache, machine, *, retention_days=7, clock=time.time,
-                 assert_quiescent=None, authority=None, recovery_references=None):
+                 assert_quiescent=None, authority=None, recovery_references=None, clock_synchronized=ntp_synchronized):
         if not isinstance(machine, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', machine):
             raise D.CacheError('a configured machine identity is required')
         if type(retention_days) is not int or not 7 <= retention_days <= 365:
@@ -88,6 +104,8 @@ class DatasetRetirement:
         self.retention_seconds = retention_days * 86400
         self.assert_quiescent, self.authority = assert_quiescent, authority
         self.recovery_references=recovery_references
+        self.clock_synchronized=clock_synchronized
+        self.collection_allowed=None
         self.root = cache.root / '.retirements'
         private_directory(self.root)
 
@@ -130,7 +148,7 @@ class DatasetRetirement:
         snap = row['snapshot']
         fields = {'protocol', 'machine', 'dataset', 'version', 'owners', 'registration', 'rootIdentity',
                   'manifestSha256', 'complete', 'readyIdentity', 'tierSha256', 'provenanceSha256',
-                  'tierIdentity', 'provenanceIdentity', 'memberAllowed', 'authority', 'authorityReferences'}
+                  'tierIdentity', 'provenanceIdentity', 'memberAllowed', 'authority', 'authorityReferences', 'authorityAliases'}
         if (not isinstance(snap, dict) or set(snap) != fields or snap['protocol'] != PROTOCOL
                 or any(snap[name] != row[name] for name in ('machine', 'dataset', 'version', 'rootIdentity'))
                 or type(snap['complete']) is not bool or type(snap['memberAllowed']) is not bool
@@ -157,6 +175,14 @@ class DatasetRetirement:
                 raise D.CacheError('corrupt fixed authority reference')
             D._identifier(ref['sourceMachine']);D._identifier(ref['sourceDataset'])
             D._identifier(ref['grantId'],GRANT_UUID);D._identifier(ref['receiptSha256'],D.HASH_RE)
+        aliases=snap['authorityAliases']
+        if not isinstance(aliases,list) or len(aliases)>10000:
+            raise D.CacheError('corrupt fixed authority alias inventory')
+        for alias in aliases:
+            if (not isinstance(alias,dict) or set(alias)!={'dataset','version','authorityReference'}
+                    or alias['version']!=row['version'] or alias['authorityReference'] not in snap['authorityReferences']):
+                raise D.CacheError('corrupt fixed authority alias')
+            D._identifier(alias['dataset'])
         authority=snap['authority']
         if authority is not None:
             if (not isinstance(authority,dict) or set(authority)!={'protocol','sourceMachine','dataset','version','registration','pins','grants'}
@@ -294,7 +320,42 @@ class DatasetRetirement:
                 raise D.CacheError('cache deletion requires fixed configured authority references')
             snapshot['authorityReferences']=(self.recovery_references(actor,dataset,version)
                                              if self.recovery_references is not None else [])
+            snapshot['authorityAliases']=self._authority_aliases(snapshot['authorityReferences'],version,actor)
             return snapshot
+
+    def _authority_aliases(self,references,version,actor):
+        """Node's own exhaustive grant aliases, including already isolated bytes."""
+        if not references:return []
+        expected={ref['grantId']:ref for ref in references};found={}
+        def add(dataset,bindings):
+            for ref in bindings:
+                if ref.get('grantId') not in expected:continue
+                if ref!=expected[ref['grantId']]:raise D.CacheError('Authority alias binding differs')
+                found[(dataset,ref['grantId'])]=dict(dataset=dataset,version=version,authorityReference=ref)
+        with D._directory(self.cache.root/'.registry') as fd:names=set(os.listdir(fd))
+        with D._directory(self.cache.root/'.tiers') as fd:names.update(os.listdir(fd))
+        if len(names)>10000:raise D.CacheError('Authority alias inventory requires reconciliation')
+        internal=type(actor)('builtin-admin',True)
+        for dataset in sorted(names):
+            D._identifier(dataset)
+            with self.cache._locked():tier=self.cache._tier(dataset,version)
+            if tier['role']!='cache':continue
+            path=self.cache._paths(dataset)['.registry']/(version+'.json')
+            if not exists(path):raise D.CacheError('Orphan authority alias cannot be omitted')
+            if self.recovery_references is None:raise D.CacheError('Authority alias adapter unavailable')
+            add(dataset,self.recovery_references(internal,dataset,version,_read_only=True))
+        with D._directory(self.cache.root/'.trash') as fd:names=sorted(os.listdir(fd))
+        if len(names)>10000:raise D.CacheError('Authority alias trash inventory requires reconciliation')
+        for name in names:
+            if re.fullmatch(r'retire-[a-f0-9]{32}',name):
+                prior=private_read(self.cache.root/'.trash'/name/'RETIREMENT.json')
+                if prior.get('version')==version and prior.get('state') not in {'RESTORED','PURGED'}:
+                    add(prior['dataset'],prior['snapshot']['authorityReferences'])
+            elif re.fullmatch(r'unregister-[a-f0-9]{32}',name):
+                removed=private_read(self.cache.root/'.trash'/name/'REMOVAL.json')
+                if version in removed.get('versions',[]) and any(exists(self.cache.root/'.trash'/name/'replicas'/bucket/version) for bucket in ('ready','staging')):
+                    raise D.CacheError('Unconfirmed ordinary authority alias payload')
+        return [found[key] for key in sorted(found)]
 
     def _receipt(self, row):
         fence = self.cache._retirement_fence(row['dataset'], row['version'])
@@ -304,7 +365,7 @@ class DatasetRetirement:
                     dataset=row['dataset'], version=row['version'], state=row['state'],
                     isolated=row['state'] == 'ISOLATED' and fence['state'] == 'ISOLATED', complete=row['snapshot']['complete'],
                     snapshotSha256=sha(row['snapshot']), generation=fence['generation'], fenceState=fence['state'],
-                    authorityReferences=row['snapshot']['authorityReferences'],
+                    authorityReferences=row['snapshot']['authorityReferences'],authorityAliases=row['snapshot']['authorityAliases'],
                     retainUntil=row['retainUntil'], proofSha256=sha([row['binding'], row['moves'], row['dataIdentity'], row['revocations'], fence]))
 
     def status(self, actor, key):
@@ -476,15 +537,19 @@ class DatasetRetirement:
             raise D.CacheError('retained full payload is missing')
         return record
 
-    def restore(self, actor, key):
+    def restore(self, actor, key, *, _cancel_uncommitted=False):
         """Administrator-only local restore; old grants are never reinstated."""
         self.cache._actor(actor, admin=True)
         row = self._journal(key)
+        if type(_cancel_uncommitted) is not bool:raise D.CacheError('invalid private cancellation mode')
+        # Only the authenticated node adapter can supply its own uncommitted
+        # parent proof. Public restore retains the ordinary deadline.
+        allow_expired=bool(_cancel_uncommitted and self.collection_allowed is not None and self.collection_allowed(key) is False)
         original_actor = type(actor)(row['actor'], row['admin'])
         with self.cache._retirement_scope(original_actor, key, row['dataset'], row['version'], sha(row['snapshot'])):
-            return self._restore(actor, key)
+            return self._restore(actor, key, allow_expired=allow_expired)
 
-    def _restore(self, actor, key):
+    def _restore(self, actor, key, *, allow_expired=False):
         with self._lock(key):
             row = self._journal(key)
             now = self._now(row)
@@ -494,7 +559,7 @@ class DatasetRetirement:
                         raise D.CacheError('restored registration changed; no replay permitted')
                     self._set_fence(row, 'RESTORED', row['moves']['restore-registration'])
                 return self._receipt(row)
-            if row['state'] not in {'ISOLATED', 'RESTORING'} or row['retainUntil'] is None or now >= row['retainUntil']:
+            if row['state'] not in {'ISOLATED', 'RESTORING'} or row['retainUntil'] is None or row['state']=='ISOLATED' and not allow_expired and now >= row['retainUntil']:
                 raise D.CacheError('restore is only available during the retention period')
             dataset, version = row['dataset'], row['version']
             folder = self._folder(key)
@@ -507,7 +572,7 @@ class DatasetRetirement:
                 if 'restore-ready' not in row['moves'] and exists(ready):
                     self._verify_payload(row)
                 with self.cache._locked():
-                    if self._now(row) >= row['retainUntil']:
+                    if row['state']=='ISOLATED' and not allow_expired and self._now(row) >= row['retainUntil']:
                         raise D.CacheError('restore retention period expired during verification')
                     if self.cache._leases(dataset, version) or exists(paths['.staging']):
                         raise D.CacheError('restore refuses active users or unfinished writers')
@@ -597,6 +662,7 @@ class DatasetRetirement:
                 return self._receipt(row)
             if row['state'] not in {'ISOLATED', 'PURGING'} or row['retainUntil'] is None or now < row['retainUntil']:
                 raise D.CacheError('confirmed complete isolation and expired retention are required')
+            self._assert_collection_allowed(key)
             folder = self._folder(key)
             with self.cache._lock_file('.locks/' + row['dataset'] + '.' + row['version'] + '.lock'):
                 payload = folder/'payload'
@@ -604,6 +670,11 @@ class DatasetRetirement:
                     if set(os.listdir(fd)) - {'ready'}:
                         raise D.CacheError('unknown retirement payload; cleanup forbidden')
                 self._verify_payload(row, partial=row['state'] == 'PURGING')
+                # Hashing a large payload can take a long time. Recheck at the
+                # irreversible boundary, not only before that read began.
+                if self._now(row)<row['retainUntil']:
+                    raise D.CacheError('retention deadline is not confirmed before collection')
+                self._assert_collection_allowed(key)
                 row['state'] = 'PURGING'
                 self._save(row)
                 if exists(payload/'ready'):
@@ -616,6 +687,16 @@ class DatasetRetirement:
                 with self.cache._locked():
                     self._set_fence(row, 'PURGED')
             return self._receipt(row)
+
+    def _assert_collection_allowed(self, key):
+        try:
+            synchronized = self.clock_synchronized() is True
+        except Exception:
+            synchronized = False
+        if not synchronized:
+            raise D.CacheError('NTP synchronization is unconfirmed; collection forbidden')
+        if self.collection_allowed is not None and self.collection_allowed(key) is not True:
+            raise D.CacheError('Version deletion is not committed; collection forbidden')
 
     def collect_expired(self, actor, *, enabled=False, max_versions=16):
         self.cache._actor(actor, admin=True)
