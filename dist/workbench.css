@@ -239,7 +239,9 @@
 .sb .mc-natural-confirm{min-height:44px}
 .sb #work-submit-panel :is(input:not([type=checkbox]):not([type=radio]),select){height:40px;min-height:40px;padding-block:8px}
 .sb .job-sheet .job-tabs .button{min-height:40px}
-.sb #workspace-files::details-content{display:grid;gap:var(--field-block-gap)}
+.sb .job-sheet .sheet-footer{flex-wrap:wrap}
+.sb .job-sheet .sheet-footer>p{flex:1 1 180px;max-width:min(330px,100%)}
+.sb #workspace-files::details-content{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--field-block-gap)}
 .sb #workspace-files :is(.file-location-grid,.output-run-fields){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--field-label-gap) 16px;margin:0}
 .sb #workspace-files :is(.file-location-grid,.output-run-fields)>label{display:grid;grid-row:span 2;grid-template-columns:minmax(0,1fr);grid-template-rows:subgrid;gap:inherit;margin:0}
 .sb #workspace-files label>.field-caption{grid-row:1;align-self:end;display:flex;align-items:center;line-height:1.6}

@@ -142,6 +142,42 @@ const scenes=[
     spec:room==='work'?workSpec:room==='compute'?computeSpec:controlSpec})),
 ];
 
+async function fieldHelpTargets(page,root){
+  const targets=page.locator(root+' :is(.field-caption>.ui-info>summary,legend>.ui-info>summary)');
+  const indices=await targets.evaluateAll(nodes=>nodes.flatMap((node,index)=>{
+    if(node.closest('[hidden],[inert]')||getComputedStyle(node).visibility==='hidden')return [];
+    for(let parent=node.parentElement;parent;parent=parent.parentElement)
+      if(parent.matches('details:not([open])')&&!parent.querySelector(':scope>summary')?.contains(node))return [];
+    const box=node.getBoundingClientRect();return box.width&&box.height?[index]:[];
+  }));
+  // Reach every rendered explanation by normal scrolling. A box inside the
+  // viewport can still be behind fixed navigation; that is not a visible hit
+  // target. Keep all three hit points and the full target-size assertion.
+  const positions=await page.evaluateHandle(selector=>{
+    const nodes=[document.scrollingElement];
+    for(const node of document.querySelectorAll(selector))for(let parent=node.parentElement;parent;parent=parent.parentElement)nodes.push(parent);
+    return [...new Set(nodes)].map(node=>({node,top:node.scrollTop,left:node.scrollLeft}));
+  },root+' :is(.field-caption>.ui-info>summary,legend>.ui-info>summary)');
+  const rows=[];
+  try{
+    for(const index of indices){
+      const target=targets.nth(index);
+      await target.evaluate(node=>node.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'}));
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      rows.push(await target.evaluate(node=>{
+        const box=node.getBoundingClientRect(),hits=[box.top+2,box.top+box.height/2,box.bottom-2].map(y=>document.elementFromPoint(box.left+box.width/2,y));
+        return {label:node.getAttribute('aria-label'),top:box.top,bottom:box.bottom,height:box.height,expected:innerWidth<760?44:32,
+          hit:hits.every(hit=>node.contains(hit)),targets:hits.map(hit=>hit?.id||hit?.tagName+'.'+hit?.className)};
+      }));
+    }
+  }finally{
+    await positions.evaluate(rows=>{for(const {node,top,left} of rows){node.scrollTop=top;node.scrollLeft=left;}});
+    await positions.dispose();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  }
+  return rows;
+}
+
 async function checkGeometryRegressions(){
   const context=await browser.newContext({viewport:{width:1440,height:900}}),page=await context.newPage();
   const markup=(footerTop,fontSize=13)=>`<style>body{margin:0;font-family:sans-serif}main{position:relative;width:300px}button{width:100px;height:40px;font-size:${fontSize}px}.scroll{height:100px;overflow:auto;position:relative}.scroll button{position:absolute;top:120px;left:0}footer{position:absolute;top:${footerTop}px}</style><main><div class="scroll"><button>Scrolled action</button></div><footer><button>Fixed action</button></footer></main>`;
@@ -365,14 +401,7 @@ try{
           if(!before){
             assert.deepEqual(await page.locator('#control-training-preview[hidden],#work-submit [hidden],#work-submit-panel [hidden],#project-create-form [hidden],#workspace-files [hidden],.job-notes [hidden]').evaluateAll(nodes=>nodes.filter(node=>getComputedStyle(node).display!=='none').map(node=>node.id||node.tagName)),[],'field layout must respect existing hidden conditions');
             const activeFieldRoot=scene.room==='submit'?(scene.setting?'#work-submit-panel':'#work-submit'):scene.room==='project'?'#project-create-form':null;
-            const hitAreas=activeFieldRoot?await page.locator(activeFieldRoot+' :is(.field-caption>.ui-info>summary,legend>.ui-info>summary)').evaluateAll(nodes=>nodes.filter(node=>{
-              for(let parent=node.parentElement;parent;parent=parent.parentElement)
-                if(parent.matches('details:not([open])')&&!parent.querySelector(':scope>summary')?.contains(node))return false;
-              const box=node.getBoundingClientRect(),area=node.closest('.sheet-scroll')?.getBoundingClientRect();
-              return box.width&&box.top>=Math.max(0,area?.top??0)&&box.bottom<=Math.min(innerHeight,area?.bottom??innerHeight)&&!node.closest('[hidden]');
-            }).map(node=>{const box=node.getBoundingClientRect(),hits=[box.top+2,box.top+box.height/2,box.bottom-2].map(y=>document.elementFromPoint(box.left+box.width/2,y));
-              return {label:node.getAttribute('aria-label'),top:box.top,bottom:box.bottom,height:box.height,expected:innerWidth<760?44:32,
-                hit:hits.every(hit=>node.contains(hit)),targets:hits.map(hit=>hit?.id||hit?.tagName+'.'+hit?.className)};})):[];
+            const hitAreas=activeFieldRoot?await fieldHelpTargets(page,activeFieldRoot):[];
             assert.ok(hitAreas.every(row=>Math.abs(row.height-row.expected)<=1&&row.hit),'the full disclosure target remains clickable beyond its compact caption line: '+JSON.stringify({scene:scene.name,width,zoom,hitAreas}));
           }
           if(process.env.POLISH_DOM_REPORT){

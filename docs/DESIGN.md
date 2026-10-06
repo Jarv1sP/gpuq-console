@@ -612,7 +612,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 [layout-geometry.mjs](../tests/layout-geometry.mjs)是共享测量器，不能放宽阈值、隐藏元素或关掉断言。[dataset-flow-browser-fixture.mjs](../tests/dataset-flow-browser-fixture.mjs)完整扫描为两角色×六状态加详情/三来源弹窗×三真缩放，共60场景，每场景59宽×3高=177组，总计10620。缩放使用真实DPR上下文与对应视口，不用CSS transform冒充。角色、目录、容量、票据与丢回执明确来自测试数据。
 
-共享测量器另有三项默认关闭的关系规则：`sameRowControls:[{parent,children,wrap?}]`要求同一视觉行控件上沿差不超过1px；`unbrokenValues:[selector]`检查数字与单位的真实文本行，允许同一基线上的不同字号；`tokenGap:[{parent,left,right,minimum?}]`检查相邻文本的水平间距，默认至少6px。现有规格不启用时，既有规则与结果保持不变。工作台、算力、总控的[polish-operational-ui-smoke.mjs](../tests/polish-operational-ui-smoke.mjs)按各组件关系启用，包含长标签、间距不足、数值折行的FAIL/PASS回归；[operational-geometry.mjs](../tests/operational-geometry.mjs)还检查真实滚动裁切、焦点目标和完整错误内容。
+共享测量器另有四项默认关闭的关系规则：`sameRowControls:[{parent,children,wrap?}]`要求同一视觉行控件上沿差不超过1px；`unbrokenValues:[selector]`检查数字与单位的真实文本行，允许同一基线上的不同字号；`tokenGap:[{parent,left,right,minimum?}]`检查相邻文本的水平间距，默认至少6px；`siblingGap:[{parent,children,textBounds?,together?,wrap?}]`要求连续同级字段块的间距一致，或按文本边界比较标签到控件的间距，差值不超过1px。现有规格不启用时，既有规则与结果保持不变。工作台、算力、总控的[polish-operational-ui-smoke.mjs](../tests/polish-operational-ui-smoke.mjs)按各组件关系启用，包含长标签、间距不足、数值折行的FAIL/PASS回归；[operational-geometry.mjs](../tests/operational-geometry.mjs)还检查真实滚动裁切、焦点目标和完整错误内容。
 
 截图用真实1440/390/320视口，包含成员/管理员与正常/空/加载/失败/未确认/维护；鼠标移开，清除无关焦点，焦点行为另测。展示完整控件与上下文，长卡用真实滚动和较高原生视口，不裁操作、不拼接、不改图。长ID通过独立本地清单验证，公共 [machines.js](../dist/machines.js)保持示例；真实资产、用户数据与生产图不提交。
 
