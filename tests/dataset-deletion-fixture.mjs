@@ -46,7 +46,7 @@ export function fixture(t,{db,onlySource=true}={}){
           const receipt={protocol:'dataset-version-retirement-v1',operationId:args.operationId,machine:host,dataset:node.plan.dataset,version,
             state:node.state,isolated:!restored,complete:node.plan.complete,snapshotSha256:snapshot,generation:'c'.repeat(64),
             fenceState:restored?(node.plan.absent?'RELEASED':'RESTORED'):'ISOLATED',retainUntil:node.at/1000+7*86400,
-            proofSha256:'d'.repeat(64),authorityReferences:[]};
+            proofSha256:'d'.repeat(64),authorityReferences:structuredClone(node.plan.authorityReferences)};
           node.result=receipt;node.phases[phase]={ok:true,result:receipt};
         }
         value={protocol:'dataset-delete-node-v1',operationId:args.operationId,machine:host,state:'DISPATCHED',action:phase};

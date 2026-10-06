@@ -1,7 +1,7 @@
-"""Metadata-only enrollment fixtures: no GPU, production data, or listener.
+"""Enrollment metadata identity/lock fixtures with no production or listener.
 
-Large fixture manifests intentionally have no payload files: these tests prove
-admission identity/lock behavior, not publication or seal/payload correctness.
+Small actual payloads and a separate sealed original keep removal race tests
+valid under last-copy protection; the admission assertions remain metadata-only.
 """
 import contextlib
 import hashlib
@@ -13,6 +13,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from dataset_retention_helpers import protected_original
 
 SPEC = importlib.util.spec_from_file_location('archive_enrollment_performance',
     Path(__file__).resolve().parents[1]/'deploy/storage-archive.py')
@@ -28,15 +29,18 @@ class EnrollmentFixture:
         self.root = Path(self.temp.name).resolve()
         self.cache = D.DatasetCache(self.root/'cache', reserve_bytes=0)
         self.manifest = dict(schema=1, directories=[], files=[
-            dict(path=f'{n:08d}.bin', size=1, sha256='a'*64) for n in range(count)])
+            dict(path=f'{n:08d}.bin', size=1, sha256=hashlib.sha256(b'x').hexdigest()) for n in range(count)])
         self.version = self.cache.register_manifest(ADMIN, 'original', self.manifest, [USER])['version']
         self.paths = self.cache._paths('original', self.version)
         self.registration = self.cache._paths('original')['.registry']/(self.version+'.json')
         self.owners = self.registration.parent/'dataset.json'
         ready = self.paths['ready']; ready.mkdir(); (ready/'data').mkdir()
+        for entry in self.manifest['files']:
+            payload=ready/'data'/entry['path'];payload.write_bytes(b'x');payload.chmod(0o444)
         D._write_json(ready/'manifest.json', self.manifest)
         D._write_json(ready/'READY.json', dict(schema=1, version=self.version))
         (ready/'data').chmod(0o555); ready.chmod(0o555)
+        self.retained=protected_original(self.cache,D,self.root/'protected-original')
         store = A.AuthorityStore(self.cache, 'cold-node', self.root/'authority', principal=ADMIN)
         self.node = SimpleNamespace(ROOT=self.root/'state', CONFIG={
             'machine':'cold-node', 'storageArchive':dict(enabled=True, machine='cold-node', authority='hdd'),
@@ -200,7 +204,7 @@ class EnrollmentPerformanceTests(unittest.TestCase):
         self.assertNotEqual(first['registration'], second['registration'])
         # Same-size corruption with original mtime is still fenced by ctime.
         p = f.paths['ready']/'manifest.json'; info = p.stat(); raw = p.read_bytes()
-        p.write_bytes(raw.replace(b'aaaaaaaa',b'bbbbbbbb',1)); os.utime(p,ns=(info.st_atime_ns,info.st_mtime_ns))
+        p.write_bytes(raw.replace(f.manifest['files'][0]['sha256'][:8].encode(),b'bbbbbbbb',1)); os.utime(p,ns=(info.st_atime_ns,info.st_mtime_ns))
         with self.assertRaisesRegex(D.CacheError, 'corrupt'): f.check()
         p.write_bytes(raw); f.check()
         f.paths['ready'].chmod(0o700)

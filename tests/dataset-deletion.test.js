@@ -149,3 +149,53 @@ test('corrupt or expired restore remains unknown and keeps the original deletion
   assert.equal(f.service.datasetDeletionBlocked(hosts[0],{dataset:'personal',version}),true);
   const count=writes(f).length;assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'UNKNOWN');assert.equal(writes(f).length,count);
 });
+
+test('JSON property order is irrelevant, but receipt fields and authority reference values remain exact',async t=>{
+  const f=fixture(t),ref={sourceMachine:hosts[0],sourceDataset:'personal',version,targetMachine:hosts[1],grantId:randomUUID(),receiptSha256:'e'.repeat(64)};
+  f.after=(host,op,args,result)=>{
+    if(host===hosts[1]&&op.endsWith('.plan'))result.authorityReferences=[ref];
+    if(host===hosts[1]&&op.endsWith('.status')&&result.phases.isolate)
+      result.phases.isolate.result.authorityReferences=[Object.fromEntries(Object.entries(ref).reverse())];
+  };
+  const r=await f.start();assert.equal(r.result.state,'DELETED');
+  f.after=(host,op,args,result)=>{if(host===hosts[1]&&op.endsWith('.status'))result.result.authorityReferences[0].receiptSha256='f'.repeat(64);};
+  assert.equal((await f.call('datasets.delete.status',{key:r.args.key})).state,'UNKNOWN');
+});
+
+test('cached isolation never confirms deletion when current receipt is missing, altered, or its node is unavailable',async t=>{
+  for(const change of ['missing','wrong-generation','wrong-current-state','offline']){
+    const f=fixture(t),r=await f.start();assert.equal(r.result.state,'DELETED');
+    f.after=(host,op,args,result)=>{
+      if(host!==hosts[0]||!op.endsWith('.status'))return;
+      if(change==='offline')throw Error('node offline');
+      if(change==='missing')result.result=null;
+      if(change==='wrong-generation')result.result={...result.result,generation:'f'.repeat(64)};
+      if(change==='wrong-current-state')result.result={...result.result,state:'FENCED'};
+    };
+    const count=writes(f).length,current=await f.call('datasets.delete.status',{key:r.args.key});
+    assert.equal(current.state,'UNKNOWN',change);assert.equal(current.steps.find(s=>s.machine===hosts[0]).state,'UNKNOWN');
+    await f.call('datasets.delete',r.args);assert.equal(writes(f).length,count);
+    assert.equal(f.service.datasetDeletionBlocked(hosts[0],{dataset:'personal',version}),true);
+  }
+});
+
+test('read-only late local restoration overrides a saved isolate receipt and releases only its proven namespace',async t=>{
+  const f=fixture(t),r=await f.start(),step=r.result.steps.find(s=>s.machine===hosts[0]),node=f.nodes.get(step.operationId);
+  node.result={...node.result,state:'RESTORED',isolated:false,fenceState:'RESTORED',proofSha256:'e'.repeat(64)};
+  // No Portal restore or worker-phase receipt exists: this is an actual local
+  // admin action observed through the current outcome, not an auto RPC retry.
+  const count=writes(f).length,current=await f.call('datasets.delete.status',{key:r.args.key});
+  assert.equal(current.state,'BLOCKED');assert.equal(current.steps.find(s=>s.machine===hosts[0]).state,'RESTORED');
+  assert.equal(writes(f).length,count);assert.equal(f.service.datasetDeletionBlocked(hosts[0],{dataset:'personal',version}),false);
+  for(const host of hosts.slice(1))assert.equal(f.service.datasetDeletionBlocked(host,{dataset:'personal',version}),true);
+});
+
+test('purged receipt needs its actual matching generation and expired retention; old isolate phase does not substitute',async t=>{
+  const f=fixture(t),r=await f.start(),step=r.result.steps.find(s=>s.machine===hosts[0]),node=f.nodes.get(step.operationId);
+  node.result={...node.result,state:'PURGED',isolated:false,fenceState:'PURGED',proofSha256:'e'.repeat(64)};
+  assert.equal((await f.call('datasets.delete.status',{key:r.args.key})).state,'UNKNOWN','premature purge is never trusted');
+  installDatasetDeletion(f.service,{clock:()=>Date.now()+8*86400*1000,pollMs:1,waitMs:30});
+  const count=writes(f).length,current=await f.call('datasets.delete.status',{key:r.args.key});
+  assert.equal(current.state,'DELETED');assert.equal(current.steps.find(s=>s.machine===hosts[0]).state,'PURGED');
+  assert.equal(writes(f).length,count);assert.equal(f.service.datasetDeletionBlocked(hosts[0],{dataset:'personal',version}),true);
+});

@@ -109,10 +109,13 @@ test('a refresh does not drop an older uncertain intent behind a hundred complet
   f.values.set(removalStorageKey('admin-one'),JSON.stringify([pending,...Array.from({length:100},(_,i)=>({...target,id:'completed-'+i,state:'UNREGISTERED',operationId:OP,unregistered:true}))]));
   const restored=createDatasetRemovals(f.options);restored.sync(true);assert.equal(restored.blocked(target),true);assert.equal(restored.rows.find(row=>row.id==='pending').state,'UNKNOWN');restored.stop();
 });
-test('a fully authorized real Portal member receives exactly 403 and never reaches the unregister bridge',async t=>{
+test('a fully authorized real Portal member cannot unregister a whole dataset: exactly 403 without any bridge call',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'stargate-remove-contract-')),bootstrap=join(dir,'bootstrap'),status=join(dir,'status'),password='Local-Remove-Test-2026!';let writes=0;
   await writeFile(bootstrap,JSON.stringify({username:'admin',password}));await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(machine=>({id:machine.id,reachable:true,gpus:[],gpuq:{connected:true,observeOnly:false,jobs:[]}}))}));
   const service=await PortalService.open(join(dir,'db'),bootstrap,status,async()=>{writes++;return {};});clearInterval(service.executionTimer);t.after(async()=>{service.close();await rm(dir,{recursive:true,force:true});});
   const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'member',password})).result;await service.invoke(admin.token,'policy.full',{userId:member.id,policyVersion:0});const session=await service.login('member',password);
-  await assert.rejects(service.invoke(session.token,'datasets.unregister',target),error=>error.status===403);assert.equal(writes,0);
+  // Personal version removal has a new provenance-checked contract. The
+  // administrator-only whole-dataset boundary remains exact, even with GPUs.
+  const {version:ignored,...wholeDataset}=target;
+  await assert.rejects(service.invoke(session.token,'datasets.unregister',wholeDataset),error=>error.status===403);assert.equal(writes,0);
 });
