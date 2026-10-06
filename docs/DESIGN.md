@@ -430,7 +430,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [dataset-remove-ui-smoke.mjs](../tests/dataset-remove-ui-smoke.mjs) | 管理员单版本/整库删除、未知原编号恢复；数据库原件/其他完整副本/最后副本/未决删除与409、缺编号25小时说明与有编号区别、三宽共享几何 |
 | [dataset-last-copy.test.js](../tests/dataset-last-copy.test.js) | 实时可信目录、跨机器互斥、SQLite派发排除与重启、原回执后复核、明确不存在、worker硬上限/宽限期/新读取与身份校验、旧表迁移、零成员授权及HTTP code通路 |
 | [node-dataset-unregister.test.py](../tests/node-dataset-unregister.test.py) | 真实节点异步租约/固定保留拒绝均以原编号FAILED且READY保留；旧trash清理时当前READY仍可能被worker稍后删除 |
-| [dataset-upload-ui-smoke.mjs](../tests/dataset-upload-ui-smoke.mjs) | 文件夹、直传/中转同意、续传和READY清单核对 |
+| [dataset-upload-ui-smoke.mjs](../tests/dataset-upload-ui-smoke.mjs) | 文件夹、直传/中转同意、续传和READY清单核对，标题提示位置及原文 |
 | [datasets-ui-smoke.mjs](../tests/datasets-ui-smoke.mjs) | 目录、数据库/缓存、预算、保留与共享几何；[dataset-help-geometry.mjs](../tests/dataset-help-geometry.mjs)验证标签右侧ⓘ及旧布局反例 |
 | [fixed-upload-routes-browser.mjs](../tests/fixed-upload-routes-browser.mjs) | 固定校园/Tail路线探测与严格票据匹配 |
 | [guide-ui-smoke.mjs](../tests/guide-ui-smoke.mjs) | 指南导航、移动目录与可达性 |
