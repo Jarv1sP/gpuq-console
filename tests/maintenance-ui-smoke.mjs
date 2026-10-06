@@ -103,7 +103,13 @@ try{
     }
     await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});await page.setViewportSize({width:1440,height:1000});
   }
-  assert.equal(service.db.prepare('SELECT state FROM maintenance_requests WHERE id=?').get(legacy.id).state,'PENDING');assert.deepEqual(calls,[]);
+  assert.equal(service.db.prepare('SELECT state FROM maintenance_requests WHERE id=?').get(legacy.id).state,'PENDING');
+  // My projects now reads the exact signed-in owner's authorised directory on
+  // initial work entry. Maintenance allows this read, but no retired workflow
+  // or node mutation may be dispatched while viewing the legacy history.
+  const directoryReads=[member.id,'builtin-admin'].flatMap(userId=>MACHINES.map(machine=>({machine:machine.id,operation:'projects.list',args:{userId}})));
+  const callOrder=(left,right)=>JSON.stringify(left).localeCompare(JSON.stringify(right));
+  assert.deepEqual([...calls].sort(callOrder),directoryReads.sort(callOrder),'only the exact own-directory reads are allowed; all maintenance and node writes remain absent');
   const shots=process.env.PR5_SCREENSHOTS||'/tmp/gpuq-maintenance-ui';await mkdir(shots,{recursive:true});
   const writes=[],requests=[];page.on('request',request=>{if(request.url()!==origin+'/api/call')return;const body=request.postDataJSON();if(!body)return;requests.push(body.operation);if(body.operation==='maintenance.set')writes.push(body.args);});
   const set=async(scope,enabled,reason='存储诊断 · 明确恢复前检查')=>service.invoke(admin.token,'maintenance.set',{scope,enabled,revision:service.operationalMaintenance(admin.principal).revision,...(enabled?{reason}:{})});
