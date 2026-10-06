@@ -145,6 +145,8 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 
 ### 中转边界
 
+固定候选选路沿用 [校内直传](DIRECT_UPLOAD.md) 的 `routeSelection`／`datasets.upload.routes` 协议。全部匿名探测失败时，共享客户端选择器按已批准 `routeId` 输出静态失败分类；CLI 区分连接、超时、TLS／证书固定和回复中的节点／版本不匹配，浏览器无法确认网络原因时保留泛化失败。分类不回显入口 URL、原始异常、响应正文或实际节点身份，也不新增后端 API 字段、请求或票据权限。节点本地监听可用不能代替客户端入口可达；不得以升级客户端诊断冒称已修复网络。发布这项诊断须重建 CLI，并配套发布共享静态模块 `upload-routes.js`；无需更新节点服务。
+
 沿用 `auto`／`direct`／`relay` 路由选择。`auto` 优先已授权直传；明确无直传入口时，最多 256 MiB 可走门户中转，大于该值必须用户明确同意。直传认证、TLS、网络或响应不确定时，不自动重发到 VPS；`direct` 从不允许中转。显式中转的 manifest／chunk 使用门户 `datasets.upload.manifest`／`datasets.upload.chunk` 的规范 Base64 `data`，不是 raw HTTP。
 
 个人可写数据空间的 `datasets.workspace.put` 是另一套现有操作，当前仍是门户中转，不受数据集直传票据授权。不要仅改按钮文案就声称它已直传，也不要把 dataset 票据用于任意个人文件路径。大于 256 MiB 的 `data put` 同样要求显式中转同意。
