@@ -68,7 +68,14 @@ export class PortalService extends DemoService{
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
   restore(data){if(data.schema!==1)throw Error('Unsupported database version.');this.store.users=data.users;this.store.jobs=data.jobs;this.store.sequence=data.sequence;this.credentials=new Map(data.credentials.map(([name,r])=>[name,{salt:new Uint8Array(Buffer.from(r.salt,'base64')),hash:new Uint8Array(Buffer.from(r.hash,'base64')),iterations:r.iterations}]));}
   save(){this.db.prepare('INSERT INTO portal_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(JSON.stringify(this.export()));}
-  issueSession(principal){return this.loginSessions?this.loginSessions.issue(principal):super.issueSession(principal);}
+  issueSession(principal){
+    const admission=this.loginAdmissions?.get(principal.username);
+    // Password hashing awaits; a reset or revoke may have completed meanwhile.
+    admission?.check();
+    const token=this.loginSessions?this.loginSessions.issue(principal):super.issueSession(principal);
+    if(admission)admission.issued=token;
+    return token;
+  }
   principal(token){return this.loginSessions?this.loginSessions.principal(token):super.principal(token);}
   revokeSession(token){if(this.loginSessions)this.loginSessions.revoke(token);else super.revokeSession(token);}
   invalidate(username){if(this.loginSessions)this.loginSessions.invalidate(username);else super.invalidate(username);}
@@ -204,11 +211,39 @@ export class PortalService extends DemoService{
     try{let result;try{result=await executionCall(this,admitted,operation,args);}finally{check();}return {result,principal:check()};}
     finally{this.datasetReadPending--;}
   }
-  login(username,password){return this.enqueue(async()=>{
-    let issued;
-    try{await this.refreshGPUQ();const result=await super.login(username,password);issued=result.token;this.audit(username,'login',null,'ok');return result;}
-    catch(e){if(issued)this.revokeSession(issued);this.audit(username,'login',null,'denied');throw e;}
-  });}
+  async login(username,password){
+    // Authentication must not wait behind remote writes or scheduler dispatch.
+    // Bound expensive password work independently; same-account attempts remain
+    // serial so the inherited failure counter cannot lose concurrent updates.
+    username=String(username??'').trim();
+    if(username.length>24||typeof password!=='string'||password.length>128)
+      throw Error('用户名或密码错误。');
+    if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+    this.loginPending??=0;this.loginAdmissions??=new Map();
+    if(this.loginPending>=2||this.loginAdmissions.has(username))
+      throw Object.assign(Error('登录验证繁忙，请稍后重试。'),{status:429});
+    this.loginPending++;
+    const record=this.credentials.get(username);
+    const admitted=this.store.users.find(user=>user.username===username);
+    const identity=admitted?{id:admitted.id,role:admitted.role||'member'}:null;
+    const check=()=>{
+      if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+      const current=this.store.users.find(user=>user.username===username);
+      if(this.credentials.get(username)!==record||
+         (identity&&(!current?.enabled||current.id!==identity.id||(current.role||'member')!==identity.role)))
+        throw Object.assign(Error('账号权限或密码已改变，请重新登录。'),{status:403});
+    };
+    const admission={check,issued:null};this.loginAdmissions.set(username,admission);
+    try{
+      await this.refreshGPUQ();check();
+      const result=await super.login(username,password);
+      check();this.audit(username,'login',null,'ok');return result;
+    }catch(e){
+      if(admission.issued&&!this.closing)this.revokeSession(admission.issued);
+      if(!this.closing)this.audit(username,'login',null,'denied');
+      throw e;
+    }finally{this.loginPending--;this.loginAdmissions.delete(username);}
+  }
   invitations(){return ['member'].map(role=>{
     const row=this.db.prepare('SELECT role,enabled,uses,max_uses,created_at FROM invites WHERE role=?').get(role);
     return row?{role,enabled:!!row.enabled,uses:row.uses,maxUses:row.max_uses,createdAt:row.created_at,available:!!row.enabled&&(row.max_uses===null||row.uses<row.max_uses)}:{role,enabled:false,uses:0,maxUses:role==='admin'?1:null,createdAt:null,available:false};
@@ -347,5 +382,5 @@ export class PortalService extends DemoService{
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
-  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);clearInterval(this.projectCopyTimer);this.db.close();}
+  close(){this.closing=true;for(const admission of this.loginAdmissions?.values()||[])if(admission.issued)this.revokeSession(admission.issued);this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);clearInterval(this.projectCopyTimer);this.db.close();}
 }
