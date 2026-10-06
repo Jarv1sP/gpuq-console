@@ -24,7 +24,7 @@ try{
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='projects.list')return {environmentModes:machine===source?['shared','isolated','oci']:['shared','isolated'],projects:[...projects].filter(([id])=>{const [m,u]=JSON.parse(id);return m===machine&&u===args.userId;}).map(([,info])=>structuredClone(info))};
-    if(operation==='datasets.capacity')return {machine,available:false};
+    if(operation==='datasets.capacity')return {filesystemBytes:1024**3,availableBytes:512*1024**2,reserveBytes:16*1024**2,usableBytes:496*1024**2,guarded:true};
     const id=key(machine,args.userId,args.project);
     if(operation==='projects.create'){assert.equal(machine,source);assert.equal(args.environmentMode,'oci');const info={project:args.project,environmentMode:'oci',state:'DRAFT',releases:[]};projects.set(id,info);return structuredClone(info);}
     if(operation==='projects.status'){assert.ok(projects.has(id));assert.equal(args.key,undefined);return structuredClone(projects.get(id));}
