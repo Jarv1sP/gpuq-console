@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 
 export async function assertResourceNames(page,root){
+  // A viewport change queues ResizeObserver's fitted-name update; measuring
+  // immediately can sample the old desktop font inside the new mobile box.
+  // Wait for the actual public geometry, never call the production fitter or
+  // suppress the assertions below. A permanent overflow still fails bounded.
+  await page.evaluate(()=>document.fonts.ready);
+  await page.waitForFunction(root=>{
+    const labels=[...document.querySelectorAll(root+' .resource-fleet .resource-id-label')];
+    return labels.length>0&&labels.every(label=>{
+      const range=document.createRange();range.selectNodeContents(label);
+      return label.clientWidth>0&&label.scrollWidth<=label.clientWidth+1&&range.getBoundingClientRect().width<=label.clientWidth+1;
+    });
+  },root,{timeout:5000});
   const names=await page.locator(root+' .resource-fleet .resource-id-label').evaluateAll(labels=>labels.map(label=>{
     const range=document.createRange();range.selectNodeContents(label);
     return {id:label.title,text:label.textContent,width:label.clientWidth,content:label.scrollWidth,
