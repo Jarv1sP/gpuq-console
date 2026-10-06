@@ -170,7 +170,11 @@ test('personal container guidance separates creation, no-GPU development, ending
 
 test('guide explains quotas, interruption and failure evidence without promising runtime health', () => {
   assert.match(guide, /普通成员的排队、启动、运行和状态待确认任务都会计入额度/);
-  assert.match(guide, /管理员单卡共享仅豁免个人整卡累计计数，不豁免实际显存、节点授权和调度约束/);
+  assert.match(guide, /共享和独占任务均免个人累计用卡额度，无需执行 `grant --full`/);
+  assert.match(guide, /单个任务仍不能超过所选机器的物理卡数，不豁免实际显存、节点授权和调度约束/);
+  assert.match(guide, /资源不足时正常排队，不会因为管理员身份抢停其他训练/);
+  assert.match(guide, /每人最多 10 个准备中任务、全平台 5000 条任务历史/);
+  assert.match(guide, /降为普通成员后，新提交及尚未派发的任务重新受个人额度约束/);
   assert.match(guide, /不自动重跑/);
   assert.match(guide, /不保证每个 worker 都健康/);
   assert.match(guide, /gpuctl diagnostics JOB_ID --json/);

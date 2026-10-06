@@ -59,6 +59,28 @@ function persistSchedulerResult(service,job,result){
     Object.assign(job,before);throw error;
   }
 }
+function firstDispatch(service,job){
+  // Only new records with this durable marker are known never to have reached
+  // a node. Legacy/attempted/unknown jobs must keep their existing sync path.
+  return service.enqueue(()=>{
+    const current=service.store.jobs.find(j=>j.id===job.id);
+    if(!current||service.closing||current.state!=='SUBMITTING'||current.cancelRequested||service.maintenanceFor?.(current.machine))return null;
+    const user=service.store.get(current.userId),capacity=MACHINES.find(m=>m.id===current.machine)?.cards||0;
+    if(!user.enabled||!user.limits[current.machine]||current.cards>user.limits[current.machine]||current.cards>user.total||current.cards>capacity)
+      throw Error('首次派发前账号或机器授权已改变；未启动训练，请恢复授权或取消任务。');
+    if(user.role!=='admin'&&(current.spec.priority==='high'||RANKS[current.spec.scheduling?.rank]>2))
+      throw Error('首次派发前管理员角色已改变；P3/P4 任务未启动，请取消后重新提交。');
+    if(!personalCardQuotaExempt(user)&&(usage(service.store.jobs,user.id)>user.total||usage(service.store.jobs,user.id,current.machine)>user.limits[current.machine]))
+      throw Error('首次派发等待个人可用卡数额度；未启动训练，请等待已有任务释放或取消多余任务。');
+    current.dispatchPending=false;
+    try{service.save();}catch(error){current.dispatchPending=true;throw error;}
+    // Begin the attempt in the same serialized turn as admission, but return a
+    // wrapped promise so slow remote I/O never holds the mutation queue. Persist
+    // before sending: a lost reply or restart cannot reinterpret an attempt as
+    // a safely retractable reservation or stop a possibly running experiment.
+    return {response:service.bridge(current.machine,'sync',nativeJobRequest(service,current))};
+  });
+}
 export function bridgeClient(socketPath){
   return (machine,operation,args)=>new Promise((resolve,reject)=>{
     const socket=net.createConnection(socketPath);let raw='',settled=false;
@@ -105,7 +127,9 @@ export function installExecution(service,bridge){
               continue;
             }
             const action=job.cancelRequested?'cancel':'sync';
-            const result=await service.bridge(job.machine,action,nativeJobRequest(service,job));
+            const attempt=action==='sync'&&job.state==='SUBMITTING'&&job.dispatchPending===true?await firstDispatch(service,job):{response:service.bridge(job.machine,action,nativeJobRequest(service,job))};
+            if(!attempt)continue;
+            const result=await attempt.response;
             await service.enqueue(()=>{
               const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||TERMINAL.has(current.state)||(current.policyRevision||0)!==policyRevision)return;
               // LOST/unknown remains nonterminal: retain quota until confirmed.
@@ -121,7 +145,7 @@ export function installExecution(service,bridge){
   if(bridge){service.executionTimer=setInterval(()=>service.reconcile().catch(()=>{}),15000);service.executionTimer.unref();}
 }
 export function usage(jobs,userId,machine){return jobs.filter(j=>j.userId===userId&&!TERMINAL.has(j.state)&&j.state!==DATA_PREPARING&&(!machine||j.machine===machine)).reduce((sum,j)=>sum+j.cards,0);}
-export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,nativeTaskDisplay:displayCache,...safe}=job;return {...safe,...jobTiming(job),...taskIdentity(job,users),command:spec.argv,
+export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,dispatchPending,nativeTaskDisplay:displayCache,...safe}=job;return {...safe,...jobTiming(job),...taskIdentity(job,users),command:spec.argv,
   yieldPolicy:['legacy','never','now','save'].includes(schedulerPolicy?.yield_policy)?schedulerPolicy.yield_policy:null,
   restartPolicy:['never','on-preempt'].includes(schedulerPolicy?.restart_policy)?schedulerPolicy.restart_policy:null,
   dispatchMode:['queue','preempt-now','preempt-save'].includes(schedulerPolicy?.dispatch_mode)?schedulerPolicy.dispatch_mode:null};}

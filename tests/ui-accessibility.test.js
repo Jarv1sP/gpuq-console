@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {personalQuotaReadout} from '../dist/workbench-ui.js';
 
 const read=name=>readFileSync(new URL('../dist/'+name,import.meta.url),'utf8');
 const app=read('app.js'),start=app.indexOf('function renderUsers(){'),end=app.indexOf('\nfunction renderEditor(){',start);
@@ -21,7 +22,7 @@ function fixture(){
   const nodes={'#user-list':list,'#filter-pending':{setAttribute(){}},'#filter-all':{setAttribute(){}}};
   const users=[{id:'user-1',name:'One',total:0},{id:'user-2',name:'Two',total:2}];
   const context={$:id=>nodes[id],document,store:{users},pendingUsers:()=>[],filter:'all',selected:'user-1',
-    filteredUsers:()=>context.store.users,esc:String,label:()=>''};
+    filteredUsers:()=>context.store.users,esc:String,label:()=>'',personalQuotaReadout};
   const render=vm.runInNewContext('('+renderSource+')',context);render();
   return {body,document,list,calls,context,render};
 }

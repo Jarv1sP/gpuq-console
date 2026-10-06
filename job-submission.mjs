@@ -12,9 +12,9 @@ const FIELDS=new Set([
 ]);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 
-// Only current administrator sharing is exempt from personal whole-card
-// counts. Node placement, VRAM scheduling and dataset leases remain unchanged.
-export const personalCardQuotaExempt=(user,request)=>user.enabled===true&&user.role==='admin'&&request.cards===1&&request.placement?.shared===true;
+// Current enabled administrators are exempt from personal cumulative card
+// counts, not per-job physical capacity, placement, VRAM or dataset leases.
+export const personalCardQuotaExempt=user=>user.enabled===true&&user.role==='admin';
 
 export function datasetReferences(value){
   if(value===undefined)return [];
@@ -94,5 +94,5 @@ export function createSubmittedJob(request,user,prioritySupported,{id=randomUUID
     ...(request.machineSelection?{machineSelection:structuredClone(request.machineSelection),projectPreparation:structuredClone(request.projectPreparation)}:{}),
     ...(request.elastic?{allowedGpuCounts:[...request.allowedGpuCounts]}:{}),
     ...(explicit?{scheduling:structuredClone(explicit)}:{}),priority:explicit?null:prioritySupported?priority:null,
-    state:'SUBMITTING',createdAt:now,cancelRequested:false};
+    state:'SUBMITTING',dispatchPending:true,createdAt:now,cancelRequested:false};
 }

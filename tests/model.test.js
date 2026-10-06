@@ -30,6 +30,22 @@ test('save per-machine permissions and enforce cross-machine total',()=>{
   assert.throws(()=>s.request('demo-chen','gpu-2',1),/跨机器总上限/);
   assert.equal(s.usage('demo-chen'),3);
 });
+test('administrator effective card limits follow inventory without rewriting historical member policy',()=>{
+  const store=new DemoStore(),id='demo-chen';
+  store.save(id,{limits:{[MACHINES[0].id]:1},total:1});
+  const historical=structuredClone(store.users.find(user=>user.id===id));
+  store.setRole(id,'admin');
+  const effective=store.get(id);
+  assert.deepEqual(effective.limits,Object.fromEntries(MACHINES.map(machine=>[machine.id,machine.cards])));
+  assert.equal(effective.total,MACHINES.reduce((sum,machine)=>sum+machine.cards,0));
+  assert.deepEqual(store.users.find(user=>user.id===id),{...historical,role:'admin'});
+  assert.throws(()=>store.save(id,{limits:effective.limits,total:effective.total}),
+    /管理员可访问全部机器且免个人累计用卡额度，无需配置个人额度；资源不足时正常排队/);
+  assert.deepEqual(store.users.find(user=>user.id===id),{...historical,role:'admin'});
+  store.setRole(id,'member');
+  assert.deepEqual(store.get(id).limits,historical.limits);
+  assert.equal(store.get(id).total,historical.total);
+});
 test('deny ungranted machines and per-machine overflow without adding jobs',()=>{
   const s=new DemoStore();assert.throws(()=>s.request('demo-chen','gpu-4',1),/未授权/);
   assert.throws(()=>s.request('demo-chen','gpu-1',3),/这台机器的上限/);assert.equal(s.jobs.length,0);

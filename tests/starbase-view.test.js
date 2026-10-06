@@ -37,6 +37,12 @@ test('only an administrator sees pending approvals, and only a complete data lis
   assert.equal(controlSnapshot(fixture()).attention.length,0);const snapshot=controlSnapshot(fixture('admin'),{activitiesComplete:true,activities:[{id:'one',userId:'owner',state:'RUNNING'},{id:'one',userId:'owner',state:'RUNNING'},{id:'two',userId:'owner',state:'FAILED'}]});assert.equal(snapshot.dataCount,1);assert.equal(snapshot.attention.length,1);assert.equal(snapshot.attention[0].id,'user:pending','timestamp-less failures no longer create an alert');
   const store=fixture();store.principal=null;assert.deepEqual(controlSnapshot(store).jobs,[]);assert.equal(controlSnapshot(store).quota,null);
 });
+test('control quota exemption follows the current enabled account rather than a stale principal',()=>{
+  const store=fixture('admin');store.users[0].enabled=true;store.usage=()=>31;
+  let snapshot=controlSnapshot(store);assert.equal(snapshot.quotaReadout.exempt,true);assert.equal(snapshot.quotaReadout.value,'31');assert.equal(snapshot.usage,31);assert.equal(snapshot.quota,4,'physical inventory metadata remains available, but is not the personal ceiling');
+  store.users[0].role='member';snapshot=controlSnapshot(store);assert.equal(snapshot.quotaReadout.exempt,false);assert.equal(snapshot.quotaReadout.value,'31 / 4');
+  store.users[0].role='admin';store.users[0].enabled=false;assert.equal(controlSnapshot(store).quotaReadout.exempt,false);
+});
 test('stale or missing self-report never becomes a progress percentage or ETA',()=>{
   const job={progress:{reported:true,stale:true,snapshot:{epochsCompleted:12,epochsTotal:40,etaSeconds:60,updatedAt:1790700000,metrics:{loss:.4}}}};assert.equal(trainingReadout(job).percent,null);assert.equal(trainingReadout(job).eta,'');assert.deepEqual(trainingReadout(job).metrics,[]);
   job.progress.stale=false;assert.equal(trainingReadout(job).percent,30);assert.equal(trainingReadout(job).epoch,'第 12 / 40 轮');assert.match(trainingReadout(job).eta,/训练上报/);
