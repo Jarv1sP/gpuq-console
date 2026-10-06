@@ -165,7 +165,7 @@ try{
   assert.equal(await page.locator('[data-resource-selected]').getAttribute('data-resource-selected'),'gpu-2');
 
   // A server opened from Mission Control must target that same server in this room.
-  await page.locator('[data-nav=work]').click();await page.locator('[name=workspace-machine]').selectOption('gpu-1');
+  await page.locator('[data-nav=work]').click();await page.locator('[name=workspace-machine]').selectOption('gpu-1');await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
   await page.keyboard.press('Control+k');await page.locator('#mission-control').waitFor();await page.locator('[data-control-machine=gpu-2]').click();
   assert.equal(await page.locator('[data-resource-selected]').getAttribute('data-resource-selected'),'gpu-2');
   const controlLanding=await page.evaluate(()=>({top:document.querySelector('.resource-fleet').getBoundingClientRect().top,heading:document.querySelector('.resource-identity').getBoundingClientRect().bottom,scroll:scrollY,maxScroll:document.documentElement.scrollHeight-innerHeight,height:innerHeight}));
@@ -175,6 +175,7 @@ try{
   page.once('dialog',dialog=>dialog.dismiss());await page.locator('#resource-primary').click();
   await page.waitForFunction(()=>document.querySelector('[data-nav=work]').getAttribute('aria-current')==='page');
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'gpu-1','Canceling terminal context confirmation must retain the server');
+  await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
   await page.evaluate(()=>document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[]}})));
   await page.locator('[data-nav=resources]').click();
   const projectsRequest=request=>new URL(request.url()).pathname==='/api/call'&&request.postDataJSON()?.operation==='projects.list'&&request.postDataJSON()?.args?.machine==='gpu-2';
@@ -185,6 +186,9 @@ try{
   const delayedProjects=async route=>{if(projectsRequest(route.request()))await projectsGate;await route.fallback();};
   await page.route('**/api/call',delayedProjects);
   const projectRequestSeen=page.waitForRequest(projectsRequest),projectsReady=page.waitForResponse(response=>projectsRequest(response.request()));
+  // Keep failures on the awaited request path rather than an unhandled sibling
+  // promise during cleanup; neither timeout nor outcome is changed.
+  void projectRequestSeen.catch(()=>{});void projectsReady.catch(()=>{});
   try{
     await page.locator('#resource-primary').click();
     await page.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-2');
