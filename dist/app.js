@@ -18,6 +18,7 @@ import {pageForRoute,hashForPage} from './navigation.js';
 import {createAdminUI,adminHashForRoute,adminSectionForRoute,hasAdminSections,onAdminSectionsChange,registerAdminSection} from './admin-ui.js';
 import {registerDatasetStorageAdmin} from './admin-data-storage.js';
 import {membersAdminUI,membersRoute} from './admin-members-ui.js';
+import {maintenanceAdminUI} from './admin-maintenance-ui.js';
 registerDatasetStorageAdmin(registerAdminSection);
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -212,6 +213,7 @@ function syncAuthGuide(){
 const authGuideObserver=new MutationObserver(syncAuthGuide);
 for(const dialog of [$('#login-dialog'),$('#register-dialog')])authGuideObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
 members=membersAdminUI(store,{getPage:()=>page,render:renderMembers,unmount:()=>{selected=null;draft=null;inviteCode=null;confirmAction=null;}});
+maintenanceAdminUI(store,renderMaintenanceExperience,{getPage:()=>page,toast,refresh:()=>render(true)});
 installAuthentication();
 if(store.principal)defaultPage();render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
 onAdminSectionsChange(()=>render(true));

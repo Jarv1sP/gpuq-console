@@ -1,4 +1,5 @@
 import {openMembers} from './admin-members-workflows.mjs';
+import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {accountMenu,refreshVisible} from './starbase-workflows.mjs';
 // Real local Portal/SQLite/cookie/browser; no host, GPU or network mutations.
 import assert from 'node:assert/strict';
@@ -62,7 +63,7 @@ try{
   async function publicReasonHint(form){
     const text='全平台维护原因会公开显示在登录页，请勿写服务器名或内部信息。';
     const hint=form.getByRole('button',{name:'全平台维护原因说明',exact:true});
-    assert.equal(await form.locator('[name=reason]').getAttribute('placeholder'),'例如：存储维护，预计今晚恢复');
+    assert.equal(await form.locator('[name=reason]').getAttribute('placeholder'),'例如：存储维护','maintenance never promises a recovery time');
     assert.equal(await hint.isVisible(),true);
     await hint.click();assert.equal(await form.getByText(text,{exact:true}).isVisible(),true,'global reason warning is available on demand');
     await form.locator('[name=scope]').selectOption(MACHINES[0].id);
@@ -77,7 +78,7 @@ try{
     assert.match(await page.locator('.maintenance-banner').textContent(),/存储维修/);
     assert.match(await page.locator('.maintenance-banner').textContent(),/不会自动结束已有任务/);
     assert.equal(await page.locator('#operational-maintenance img').count(),0);
-    assert.equal(await page.locator('.maintenance-settings').count(),username==='admin'?1:0);
+    assert.equal(await page.locator('.maintenance-settings').count(),0,'primary history has no administrator maintenance controls');
     assert.equal(await page.locator('#maintenance-create,[data-maintenance=approve],[data-maintenance=cancel]').count(),0);
     assert.equal(await page.locator('#maintenance-detail img').count(),0);
     const detail=await page.locator('#maintenance-detail').textContent();assert.ok(detail.includes('\\u{000d}'));assert.ok(detail.includes('\\u{202e}'));assert.ok(detail.includes('\\u{0085}'));assert.doesNotMatch(detail,/[\r\u202e\u0085]/u);
@@ -91,7 +92,7 @@ try{
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile archive must not overflow');
     await page.screenshot({path:join(screenshots,'history-'+username+'-390.png'),fullPage:true});
     if(username==='admin'){
-      await page.locator('.maintenance-settings summary').click();
+      await openMaintenance(page);assert.equal(await page.locator('#admin-content .maintenance-settings').count(),1);await page.locator('.maintenance-settings summary').click();
       await publicReasonHint(page.locator('.maintenance-settings form'));
       await page.locator('.maintenance-settings [name=reason]').fill('明确维修');await page.locator('.maintenance-settings [type=submit]').click();
       await page.waitForFunction(()=>document.querySelector('.maintenance-banner')?.textContent.includes('明确维修'));
@@ -145,11 +146,11 @@ try{
   await set('gpu-1',false);await refreshVisible(page);await page.locator('[name=workspace-machine]').selectOption('gpu-1');await page.waitForFunction(()=>document.querySelector('#terminal-open')&&!document.querySelector('#terminal-open').disabled);await page.locator('#terminal-open').click();await page.locator('.terminal-dialog').waitFor({state:'visible'});
   await set('gpu-1',true);await page.evaluate(()=>document.querySelector('#refresh-state').click());await page.locator('#terminal-maintenance-note').waitFor({state:'visible'});const pausedCalls=calls.length;await page.locator('#terminal-screen textarea').focus();await page.keyboard.type('echo forbidden\r');await page.waitForTimeout(900);assert.equal(await page.locator('#terminal-interrupt').isDisabled(),true);assert.ok(calls.slice(pausedCalls).filter(call=>call.operation==='terminal.exchange').every(call=>!call.args.input));
   await shot('member-terminal-desktop');await shot('member-terminal-mobile',390);await page.locator('#terminal-stop').click();await page.locator('.terminal-dialog').waitFor({state:'hidden'});assert.equal(calls.at(-1).operation,'terminal.close');await logout();
-  await fresh();await set('all',true);await page.setViewportSize({width:1440,height:1000});await workLogin('admin');await page.locator('.maintenance-console-heading').waitFor();assert.equal(await page.locator('[data-maintenance-server]').count(),MACHINES.length);
+  await fresh();await set('all',true);await page.setViewportSize({width:1440,height:1000});await workLogin('admin');await openMaintenance(page);await page.locator('.maintenance-console-heading').waitFor();assert.equal(await page.locator('[data-maintenance-server]').count(),MACHINES.length);
   await shot('admin-console-desktop');await shot('admin-console-mobile',390);
   await page.locator('[data-maintenance-start="all"]').click();await publicReasonHint(page.locator('#maintenance-start-form'));await page.locator('[data-maintenance-dialog-close]').click();
   await page.locator('[data-maintenance-root="gpu-3"]').click();await page.locator('.host-terminal-dialog').waitFor({state:'visible'});assert.match(await page.locator('#terminal-title').innerText(),/gpu-3.*ROOT/);const root=calls.filter(call=>call.operation==='terminal.open').at(-1);assert.equal(root.machine,'gpu-3');assert.equal(root.args.hostAdmin,true);assert.equal(root.args.project,undefined);assert.equal(await page.locator('#terminal-interrupt').isDisabled(),false);await shot('admin-root-desktop');await shot('admin-root-mobile',390);await page.locator('#terminal-stop').click();await page.locator('.terminal-dialog').waitFor({state:'hidden'});
-  await page.locator('[data-maintenance-host="gpu-3"]').click();await page.locator('#maintenance-host-form [name=commandId]').fill(commandId);await page.locator('#maintenance-host-form [type=submit]').click();await page.locator('[data-host-receipt]').filter({hasText:'SUCCEEDED'}).waitFor();assert.equal(calls.at(-1).operation,'host.status');assert.equal(calls.at(-1).args.hostAdmin,true);await shot('admin-host-desktop');await shot('admin-host-mobile',390);await page.locator('[data-maintenance-dialog-close]').click();
+  await page.locator('[data-maintenance-host="gpu-3"]').click();await page.locator('.host-lookup summary').click();await page.locator('#maintenance-host-form [name=commandId]').fill(commandId);await page.locator('#maintenance-host-form [type=submit]').click();await page.locator('[data-host-state]').filter({hasText:'已完成'}).waitFor();assert.equal(await page.locator('[data-host-receipt]').textContent(),'local fixture: repair check complete');assert.equal(calls.at(-1).operation,'host.status');assert.equal(calls.at(-1).args.hostAdmin,true);await shot('admin-host-desktop');await shot('admin-host-mobile',390);await page.locator('.host-lookup summary').click();
   await page.locator('[data-maintenance-check="gpu-1"]').click();assert.match(await page.locator('.maintenance-checks').innerText(),/任务状态核对|整机无其他 ROOT/);await shot('admin-check-desktop');await shot('admin-check-mobile',390);await page.locator('[data-select-checked="gpu-1"]').click();
   const first=writes.length;await page.locator('[data-maintenance-stage]').click();await page.locator('[data-recovery-ack]').check();await shot('admin-recovery-desktop');await shot('admin-recovery-mobile',390);await page.locator('[data-recovery-apply]').click();await page.waitForFunction(()=>!document.querySelector('#maintenance-console-dialog').open);
   assert.deepEqual(writes.slice(first).map(args=>[args.scope,args.enabled]),[['gpu-2',true],['gpu-3',true],['gpu-4',true],['gpu-1',false],['all',false]]);assert.ok(writes.slice(first).every((args,index,values)=>index===0||args.revision===values[index-1].revision+1));assert.equal(service.maintenanceFor('gpu-1'),null);for(const id of ['gpu-2','gpu-3','gpu-4'])assert.equal(service.maintenanceFor(id).reason,'存储诊断 · 明确恢复前检查');

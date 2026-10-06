@@ -11,6 +11,7 @@ import {MACHINES} from '../dist/machines.js';
 import {accountMenu,refreshVisible} from './starbase-workflows.mjs';
 import {resourceCard,resourceDetail,selectResource,closeResource} from './resources-workflows.mjs';
 import {assertResourceNames} from './resource-name-assertions.mjs';
+import {openMaintenance} from './admin-maintenance-workflows.mjs';
 
 const directory=await mkdtemp(join(tmpdir(),'starbase-resources-'));
 const screenshots=process.env.UI_SCREENSHOTS||join(directory,'screenshots');
@@ -258,20 +259,21 @@ try{
   assert.equal(await page.locator('[data-resource-selected]').getAttribute('data-resource-selected'),'gpu-1','Identity changes discard the prior server selection');
   assert.equal(await page.locator('[data-resource-root]').count(),0,'ordinary admin compute has no ROOT action');
   for(const privateValue of [privateProgram,privateOwner,'private-native-job'])assert.ok(!(await page.locator('.resource-process-table').textContent()).includes(privateValue),'ordinary admin compute hides '+privateValue);
-  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content [data-resource-root]').waitFor();
-  assert.equal(await page.locator('[data-resource-root]').count(),1);
+  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content .resource-process-table').waitFor({state:'attached'});
+  await page.locator('#admin-content [data-resource-detail$=processes] summary').click();await page.locator('#admin-content .resource-process-table').waitFor({state:'visible'});
+  assert.equal(await page.locator('[data-resource-root]').count(),0,'ROOT is owned by the maintenance section');
   for(const visible of [privateProgram,privateOwner,'private-native-job'])assert.ok((await page.locator('#admin-content .resource-process-table').textContent()).includes(visible),visible);
   assert.deepEqual(await page.locator('#admin-content .resource-process-table th').allTextContents(),['GPU','PID','任务 / 提交者 / 描述','程序','系统用户','显存 MiB','优先级']);
   await capture('resources-admin-1440');
-  await page.locator('[data-resource-root]').click();await page.locator('#host-maintenance').waitFor();
+  await openMaintenance(page);await page.locator('#host-maintenance summary').click();await page.locator('#host-maintenance').waitFor();
   assert.equal(await page.locator('#host-maintenance').getAttribute('open'),'');
   assert.equal(calls.filter(call=>call.operation.startsWith('terminal.')||call.operation.startsWith('jobs.')).length,0,'ROOT entry only reveals the existing administrator controls');
-  await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await page.locator('#admin-content .resource-identity .resource-select').click();
+  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content .resource-identity').waitFor();await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await page.locator('#admin-content .resource-identity .resource-select').click();
   // Measure the visible, settled sheet before screenshot capture can dispatch
   // resize events or fast-forward its animation.
-  await page.locator('[data-resource-root]').waitFor({state:'visible'});
+  assert.equal(await page.locator('[data-resource-root]').count(),0);
   await page.locator('#admin-content').evaluate(async region=>{await Promise.all(region.getAnimations({subtree:true}).filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
-  assert.ok((await page.locator('[data-resource-root]').boundingBox()).height>=44,'Phone administrator actions retain a 44px target');
+  await openMaintenance(page);await page.locator('#host-maintenance summary').click();assert.ok((await page.locator('#terminal-root-open').boundingBox()).height>=44,'Phone administrator actions retain a 44px target in maintenance');
   await capture('resources-detail-admin-390');
   violations.push(...await page.evaluate(()=>resourceCSP));
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(violations,[]);

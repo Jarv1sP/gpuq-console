@@ -356,7 +356,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | 后台成员与额度 | [admin-members-ui.js](../dist/admin-members-ui.js)、[app.js](../dist/app.js)、[members.css](../dist/members.css) | admin-members / ui / polish-shell |
 | 登录、注册、账号 | [auth-ui.js](../dist/auth-ui.js)、[client.js](../dist/client.js)、[members.css](../dist/members.css)、[shell.css](../dist/shell.css) | client-auth / persistent-login / polish-shell |
 | 指南 | [guide.mjs](../guide.mjs)、[USER_GUIDE.md](USER_GUIDE.md)、[guide.css](../dist/guide.css) | guide / user-guide-content |
-| 维护 | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-state.js](../dist/maintenance-state.js)、[maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-experience.css](../dist/maintenance-experience.css) | maintenance / maintenance-background-freeze |
+| 只读维护与后台维护 | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-state.js](../dist/maintenance-state.js)、[maintenance-experience.js](../dist/maintenance-experience.js)、[admin-maintenance-ui.js](../dist/admin-maintenance-ui.js)、[host-diagnostics-ui.js](../dist/host-diagnostics-ui.js)、[maintenance-experience.css](../dist/maintenance-experience.css) | maintenance / admin-maintenance / host-diagnostics / terminal-ui-races |
 
 ### 管理后台区块注册
 
@@ -446,6 +446,10 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 数据仓库允许启用的登录成员浏览全节点元数据，零机器额度仍可浏览。版本与位置的 `canUse` 表示本人使用授权；`READY` 只证明副本状态，不能单独解锁准备或训练。未授权版本简短标为“仅浏览”，不把生命周期画成“可用于训练”；容量、上传、训练和管理员操作仍分别鉴权，不因目录扩大而增加权限或暴露私有路径。
 
 全平台维护原因公开显示在登录页，输入旁保留提醒；单台原因只在登录后显示。账号、协作、指南、维护控制不被执行类维护拦截；管理员ROOT、host操作、只读、取消/断开/结束按现有规则放行。维护开关不会自动停止已有任务或节点。
+
+主界面只显示相同的只读维护事实。后台 `maintenance/order40` 挂载维护开关、原逐台控制台、分阶段恢复、ROOT 与只读诊断，卸载先停止查询和退休回调，再把 ROOT 控件停放到隐藏 inert 容器。个人终端仍留在工作台；离开维护只断开 ROOT 写连接，不结束节点会话。ROOT 直接查询原生调度 RPC 的 `FORBIDDEN: peer uid is not allowed` 显示身份提示，不把工作的 ROOT 终端标为失败。
+
+主机诊断只有固定的 `nvidia-smi` 和 `df -h /data2`，确认框显示服务器与完整原文；任意命令仍由 ROOT 终端执行。新鲜且可达的节点必须明确报告 `hostCommand.version:1/available:true` 才能操作。节点将请求 key 绑定为 id，前端派发前按管理员账号和服务器持久化该编号；回执未确认、刷新或重新进入时只查原编号，绝不自动重发。显示纯文本输出，支持复制、停止与本浏览器最近操作；原 UUID 查询保留在次级折叠项内。
 
 上传路线只三段：你的电脑→所选服务器缓存→可用于训练；通道另标直传/Tail备用/中转。它不证明数据库原件已经保存，不把存入数据库追加为已完成阶段。
 

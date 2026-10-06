@@ -56,6 +56,7 @@ try{
       const reply=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
       // Exercise the frame's zero/one registry in isolation; the real member module
       // has separate acceptance with its actual controls and administration API.
+      if(url.pathname==='/admin-maintenance-ui.js'){await route.fulfill({contentType:'text/javascript',body:'export function maintenanceAdminUI(){return ()=>{}}'});return;}
       if(url.pathname==='/admin-members-ui.js'){await route.fulfill({contentType:'text/javascript',body:`export const membersRoute=route=>String(route??'').replace(/^#/,'')==='users'?'#admin/members':route;export const membersAdminUI=()=>({active:()=>false,capture:()=>null,current:()=>false,owns:()=>false,dispose(){}});`});return;}
       if(url.pathname==='/admin-gpu-tasks.js'){await route.fulfill({contentType:'text/javascript',body:'export function registerGpuTasksAdmin(){}'});return;}
       if(url.pathname==='/machines.js'){await route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(MACHINES)+';'});return;}

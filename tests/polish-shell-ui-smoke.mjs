@@ -10,6 +10,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {seedLegacy, password} from './maintenance-fixture.mjs';
+import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {guardedRoute} from './browser-route-guard.mjs';
 import {inspectGeometry, scanGeometry, layoutZooms, layoutWidths, layoutHeights} from './layout-geometry.mjs';
 
@@ -55,7 +56,7 @@ const authSpec = id => ({
   scrollPanels: ['#' + id],
 });
 const maintenanceSpec = {
-  ...shellSpec, roots: [...shellSpec.roots, '#maintenance-experience', '#operational-maintenance'],
+  ...shellSpec, roots: [...shellSpec.roots, '#maintenance-experience', '#operational-maintenance', '#admin-content'],
   controls: 'button,input:not([type=checkbox]),select,summary,a[href],.maintenance-select',
   leftEdges: [...shellSpec.leftEdges, ['.maintenance-console-heading', '.maintenance-console-rows', '.maintenance-recovery-bar'],
     ['.maintenance-hero .maintenance-eyebrow', '.maintenance-hero h2', '.maintenance-hero .maintenance-reason', '.maintenance-since']],
@@ -239,6 +240,7 @@ try {
               await page.locator('#refresh-state').click(); await page.locator('#sync-label').filter({hasText: scene.state === 'loading' ? '同步' : '失败'}).waitFor();}
             if (scene.maintained) {
               await page.locator('#maintenance-experience').waitFor();
+              if (scene.role === 'admin') await openMaintenance(page);
               if (scene.view === 'start') await page.locator('[data-maintenance-start="all"]').click();
               if (scene.view === 'checks') await page.locator('[data-maintenance-check]').first().click();
               if (scene.view === 'recovery') {await page.locator('[data-recovery-select]').first().check(); await page.locator('[data-maintenance-stage]').click();}
