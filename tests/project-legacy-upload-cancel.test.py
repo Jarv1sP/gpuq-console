@@ -161,7 +161,8 @@ class LegacyUploadCancel(base.ProjectSecurity):
             if process.is_alive():process.terminate();process.join();self.fail('independent cancellation did not respect bounded lock')
             outcome=queue.get(timeout=1);self.assertEqual(outcome[0],'error');self.assertIn('being published or changed',outcome[1])
             self.assertTrue(meta.exists() and part.exists())
-        q=folder/'.canceled-staging'/r['uploadId'];q.mkdir(parents=True,mode=0o700);(q/'collision').write_bytes(b'existing')
+        q=folder/'.canceled-staging'/r['uploadId'];q.mkdir(parents=True,mode=0o700)
+        q.parent.chmod(0o700);q.chmod(0o700);(q/'collision').write_bytes(b'existing')
         with self.ops.store.locked(*self.ops.identity(self.args)):
             with self.ops.store.lifetime(*self.ops.identity(self.args)):
                 src=os.open(folder,os.O_RDONLY|os.O_DIRECTORY);dst=os.open(q,os.O_RDONLY|os.O_DIRECTORY)
