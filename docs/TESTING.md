@@ -34,6 +34,14 @@ docker build -f deploy/Dockerfile -t gpuq-console:test .
 
 `execution-fair-reconcile.test.js` 使用独立 SQLite 和手动挂起的执行桥回包，不使用真实节点。验证同机／跨机旧查询仍未返回时，后来提交的任务已按原身份首次派发；每机最多两个在途、每任务一个、旧观察与新任务均可推进。取消不与本任务 sync 并发，UNKNOWN 保留额度；轮中新增、授权改变、丢回执、准备完成、旧 policyRevision 回包和关闭均保持原保护。失败断言先解除夹具的全部等待，避免测试自己留下后台请求。真实短作业并行、HAMi 内存隔离与取消隔离仍须另做实机验收，不能用这组离线结果代替。
 
+`project-sync-cancel.test.py` 使用独立临时项目验证原 UUID/source/snapshot/manifest/revision
+CAS、永久旧编号写入围栏、原收据与全部已复制字节不变、丢回执只读恢复、同项目写锁竞争、
+未知 unit/PID/cgroup 和全部历史／上传／终端保护。Linux 额外运行真实 no-replace 软退役，
+Mac 对该一项保留明确 skip；不接触生产路径、服务、GPU 或用户数据。
+`project-sync-cancel-api.test.js` 和 `project-sync-cancel-cli.test.js` 覆盖当前授权、零权限、
+固定来源、旧能力拒绝、维护准入及 mutation 不重放；`project-sync-cancel-bridge.test.py`
+隔离加载实际固定桥，确认仅一个 literal 新 RPC 原样转发身份、邻近未知操作拒绝且超时不重试。
+
 数据集回归另覆盖固定版本、身份/机器授权、准备不预留显卡、只选择同机全部 READY 的副本、失败重试与断点继续、租约清理的保守边界、挂载缺失拒绝写系统盘、旧节点环境/管理员终端兼容升级。数据页浏览器测试使用假的执行桥，不触发真实训练；验证准备、失败、重试、READY 后填入训练，以及移动端和在线手册入口。
 
 项目回归覆盖手选服务器、拒绝新 `auto`、按机记忆项目、跨用户/项目拒绝、未 READY 不预留显卡、固定版本幂等、旧 job spec 不变、终端项目上下文、上传 SHA256/原子替换/中断重传/文件变更、秘密目录默认跳过，以及独立输出归属。发布安全还检查未知终端停止状态保留指针、拒绝发布或覆盖旧终端，不能因服务管理器失联而放开写入。代码+venv 发布与 Slurm 后端迁移须分别验收。

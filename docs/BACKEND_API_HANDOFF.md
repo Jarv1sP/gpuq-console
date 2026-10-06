@@ -48,6 +48,26 @@ no-follow CAS、一致原子 no-replace 与永久 slug tombstone。未知、历�
 维护模式允许只读 label/group/catalog/retire.plan/status，不允许整理写入。需同步部署实际桥
 白名单和 `project-lifecycle.py/project-store.py/project-ops.py`、相关 reader/执行器；无旧节点降级。
 
+### 未完成代码同步的显式取消
+
+`projects.sync.status {machine,project,key}`（不带 path）只观察原请求，增加
+`cancelProtocol:1,snapshotId,revision`；revision 是完整原始收据的规范 JSON SHA256。
+`projects.sync.cancel {machine,project,key,snapshotId,source,manifestSha256,revision}`
+绑定同账号同项目和原来源，不要求源节点仍在线，不接受客户端 owner、force、路径或角色。
+节点在项目写锁及发布锁内核对完整身份和 fresh idle；上传、终端、复制、发布状态未知，
+或已有任何任务／run claim／输出时拒绝，不停止任何进程。
+
+取消只写永久服务私有证明，不改原收据、清单、索引、代码或环境。确认响应为
+`state:CANCELED,preservesBytes:true`，同 UUID 的 begin/manifest/seal/chunk/finish 永久拒绝。
+ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单独写 CANCELED 状态不能解除
+保护。状态响应不确认或丢失时沿原编号查询，不自动重派取消。维护期允许该状态和取消，
+其他同步写操作仍拒绝；取消后是否可退役继续按完整生命周期保护判断。
+
+需要配套 `snapshot-sync.py/project-ops.py/project-lifecycle.py`、Portal/CLI 以及实际桥中
+唯一新增的 `projects.sync.cancel` 固定白名单；保留既有 legacy-upload 取消补丁和全部私有
+路由。已写取消证明后不能回滚到不识别证明的旧同步 helper，否则会丢失旧编号写入围栏。
+先停新入口／核查已取消身份并保留支持该证明的版本；不能通过删证明或回滚数据库恢复。
+
 ## 个人容器项目：创建与固定发布
 
 项目沿用同一个 `/api/call`，详细工作流见 [项目与环境](PROJECTS.md)。创建个人容器项目的请求是：

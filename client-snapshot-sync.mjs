@@ -106,6 +106,30 @@ export async function syncCodeSnapshot(call,{machine,project,key,scan,progress})
 export async function runManualSync(call,{options,positionals,training,machines,userId}){
   const state={machines},session={principal:{userId}},machineName=value=>{const exact=machines.find(m=>m.id===value);if(exact)return exact.id;const short=machines.filter(m=>m.id.endsWith('-'+value));return short.length===1?short[0].id:value;};
   const projectSlug=value=>{if(typeof value!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(value))fail('Project must use a new lowercase project slug');return value;};
+  if(['status','cancel'].includes(positionals[1])){
+    const mode=positionals[1],allowed=['machines','datasets','url','session-file','json','to','project'];
+    if(training.length||options.machines.length||options.datasets.length||positionals.length!==3||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: sync status|cancel ORIGINAL_UUID --to SERVER --project PROJECT');
+    const machine=machineName(options.to||fail('Select target explicitly with --to SERVER')),project=projectSlug(options.project),key=positionals[2];
+    if(machine==='auto'||!machines.some(m=>m.id===machine))fail('Target is not an authorized explicit server');
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(key||''))fail('Use the original complete sync UUID');
+    const reference={machine,project,key},before=(await call('projects.sync.status',reference)).result;
+    if(mode==='status')return {...before,machine};
+    if(before.cancelProtocol!==1||before.project!==project||before.key!==key||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(before.snapshotId||'')||!/^[a-f0-9]{64}$/.test(before.revision||'')||!/^[a-f0-9]{64}$/.test(before.manifestSha256||'')||!before.source)fail('Node has no confirmed cancellation protocol; retain this UUID');
+    if(before.state==='CANCELED'&&before.preservesBytes===true)return {...before,machine};
+    if(!['RECEIVING_MANIFEST','COPYING'].includes(before.state))fail('Only an unfinished code synchronization can be canceled');
+    const pinned={...reference,...Object.fromEntries(['snapshotId','source','manifestSha256','revision'].map(k=>[k,before[k]]))};
+    const confirmed=row=>row?.state==='CANCELED'&&row.preservesBytes===true&&row.cancelProtocol===1&&row.key===key&&row.project===project&&['snapshotId','manifestSha256','revision'].every(k=>row[k]===before[k])&&JSON.stringify(row.source)===JSON.stringify(before.source);
+    let result;
+    try{result=(await call('projects.sync.cancel',pinned)).result;}
+    catch(error){
+      // Ambiguous acknowledgement: observe only this UUID, never resend the
+      // mutation or mint a replacement key. Unknown remains an error.
+      let observed;try{observed=(await call('projects.sync.status',reference)).result;}catch{}
+      if(!confirmed(observed))throw error;result=observed;
+    }
+    if(!confirmed(result))fail('Cancellation is unconfirmed; inspect the original UUID with sync status');
+    return {...result,machine};
+  }
   let result;
       const mode=positionals[1],common=['machines','datasets','url','session-file','json','to','from','dry-run','key'];
       const allowed=mode==='git'?[...common,'project','ref']:mode==='code'?[...common,'project','target-project','release']:mode==='data'?[...common,'name']:[];
