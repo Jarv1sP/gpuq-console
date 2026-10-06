@@ -497,7 +497,7 @@ class RetirementNode:
         self.cache._actor(actor,admin=True)
         with self._lock(key):
             row=self._load(key);self._owned(actor,row,restoring=True)
-            if row['state'] not in {'ISOLATED','RESTORING','RESTORED'}:
+            if row['state'] not in {'ISOLATED','RESTORING','RESTORED','PURGED'}:
                 raise ValueError('Only confirmed isolated data may be restored')
             if row['snapshot']['protocol']!=R.PROTOCOL:
                 raise ValueError('Empty namespace release requires the separately confirmed restored source')
@@ -507,6 +507,8 @@ class RetirementNode:
                 result=self._newly_registered_restore(actor,row)
                 row['state'],row['result']='RESTORED',result;self._write(row)
                 return result
+            if row['state']=='PURGED':
+                raise ValueError('Purged source has no confirmed purge journal')
             row['state']='RESTORING';self._write(row)
             try:
                 result=self.retirement.restore(actor,key,_cancel_uncommitted=_cancel_uncommitted)

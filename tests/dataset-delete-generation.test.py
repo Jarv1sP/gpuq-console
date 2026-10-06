@@ -93,6 +93,51 @@ class ExplicitRegistration(unittest.TestCase):
             fresh=node.plan(F.ADMIN,'sample',self.version,str(uuid.uuid4()))
             self.assertTrue(fresh['complete'])
 
+    def test_NB2_purge_winning_restore_race_can_recover_from_a_new_complete_source(self):
+        cache=self.empty.cache;cache.sources['approved']=self.cache.sources['approved']
+        cache.register_source(F.ADMIN,'sample','approved',['owner']);cache.materialize(F.OWNER,'sample',self.version)
+        self.empty.plan(F.ADMIN,'sample',self.version,self.empty_key)
+        child=self.empty.isolate(F.ADMIN,self.empty_key,[])
+        source=self.node.isolate(F.OWNER,self.key,[child])
+        for node,key in ((self.node,self.key),(self.empty,self.empty_key)):
+            committed=node.commit(F.ADMIN,key,source)
+            F.D._write_json(node._phase_path(key,'commit','result'),dict(ok=True,result=committed))
+            node.retirement.clock=lambda:source['retainUntil']+10
+            node.retirement.clock_synchronized=lambda:True
+        self.empty.retirement.purge(F.ADMIN,self.empty_key)
+        original=self.node._write;collected=False
+        def finish_collection_before_restore_intent(row):
+            nonlocal collected
+            if row['state']=='RESTORING' and not collected:
+                collected=True
+                self.assertEqual(self.source.purge(F.ADMIN,self.key)['state'],'PURGED')
+            original(row)
+        # Collection wins after the restore precheck but before its durable
+        # intent. The failed restore legitimately records adapter state PURGED.
+        with patch.object(self.node,'_write',side_effect=finish_collection_before_restore_intent),\
+                self.assertRaisesRegex(ValueError,'retention period'):
+            self.node.restore(F.ADMIN,self.key)
+        self.assertTrue(collected)
+        self.assertEqual(self.node._load(self.key)['state'],'PURGED')
+        self.assertEqual(self.node.status(F.ADMIN,self.key)['result']['state'],'PURGED')
+        purged=self.source._journal(self.key)
+        with patch.object(self.source,'_journal',return_value={**purged,'state':'ISOLATED'}),\
+                self.assertRaisesRegex(ValueError,'purge journal'):
+            self.node.restore(F.ADMIN,self.key)
+        self.assertEqual(self.node._load(self.key)['state'],'PURGED')
+        self.cache.register_source(F.ADMIN,'sample','approved',['owner'])
+        with self.assertRaisesRegex(ValueError,'not yet complete'):
+            self.node.restore(F.ADMIN,self.key)
+        self.assertEqual(self.node._load(self.key)['state'],'PURGED')
+        self.cache.materialize(F.OWNER,'sample',self.version)
+        restored=self.node.restore(F.ADMIN,self.key)
+        self.assertEqual(restored['state'],'RESTORED')
+        self.assertEqual(self.node.status(F.ADMIN,self.key)['result'],restored)
+        self.assertEqual(self.empty.release_absence(F.ADMIN,self.empty_key,restored)['state'],'RELEASED')
+        cache.register_source(F.ADMIN,'sample','approved',['owner']);cache.materialize(F.OWNER,'sample',self.version)
+        for node in (self.node,self.empty):
+            self.assertTrue(node.plan(F.ADMIN,'sample',self.version,str(uuid.uuid4()))['complete'])
+
 class ExplicitUpload(unittest.TestCase):
     setUp=U.PersonalUploads.setUp
     tearDown=U.PersonalUploads.tearDown
