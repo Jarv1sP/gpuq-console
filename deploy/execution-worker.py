@@ -7,6 +7,21 @@ BASE=Path('/opt/gpuq-console/executor')
 HOSTS={n['id']:n for n in json.loads(Path('/opt/gpuq-console/inventory.json').read_text())['nodes']}
 RUNTIME=Path('/run/gpuq-console-executor')
 
+class NodeTransportError(ValueError):
+    """Fixed, non-secret diagnostics; never expose OpenSSH stderr or key paths."""
+    def __init__(self,code,status,phase):
+        super().__init__('Node connection failed')
+        self.code=code;self.status=status;self.phase=phase
+
+def ssh_transport_failure(completed,phase):
+    error=completed.stderr
+    if isinstance(error,str):error=error.encode()
+    if b'Host key verification failed' in error:
+        return NodeTransportError('NODE_SSH_HOSTKEY_FAILED',502,phase)
+    if b'Permission denied' in error or b'Authentication failed' in error:
+        return NodeTransportError('NODE_SSH_AUTH_FAILED',502,phase)
+    return NodeTransportError('NODE_CONNECT_FAILED',503,phase)
+
 class SSHConnections:
     """Fixed-host transport; only creation of an idle master is serialized.
 
@@ -73,16 +88,17 @@ class SSHConnections:
             if checked.returncode==0:return
             # Never remove a live, unrecognized or concurrently replaced socket.
             if not any(word in checked.stderr for word in (b'Connection refused',b'No such file or directory')):
-                raise ValueError('Node connection failed')
+                raise ssh_transport_failure(checked,'master')
             if self.socket_identity(path)==identity:path.unlink()
             elif self.socket_identity(path) is not None:raise ValueError('SSH control socket changed')
         remaining=deadline-time.monotonic()
-        if remaining<=0:raise ValueError('Node connection failed')
+        if remaining<=0:raise NodeTransportError('NODE_TRANSPORT_BUSY',503,'master')
         # No remote command, forwarding or stdin is requested by this startup.
         master=command[:-1]+['-N','-f','-o','ControlPersist=15s',target]
         master[master.index('ControlMaster=no')]='ControlMaster=yes'
         started=subprocess.run(master,stdin=subprocess.DEVNULL,capture_output=True,timeout=min(7,remaining))
-        if started.returncode or self.socket_identity(path) is None:raise ValueError('Node connection failed')
+        if started.returncode:raise ssh_transport_failure(started,'master')
+        if self.socket_identity(path) is None:raise NodeTransportError('NODE_CONNECT_FAILED',503,'master')
 
     def rpc_command(self, target, path):
         # If a warm socket disappears/refuses, fail instead of implicitly
@@ -91,17 +107,20 @@ class SSHConnections:
 
     def call(self, host, request):
         name,target,lock,slots=self.identity(host);deadline=time.monotonic()+27
-        if not slots.acquire(timeout=27):raise ValueError('Node connection failed')
+        if not slots.acquire(timeout=27):raise NodeTransportError('NODE_TRANSPORT_BUSY',503,'capacity')
+        phase='master'
         try:
             path=self.control_path(name)
-            if not lock.acquire(timeout=max(0,deadline-time.monotonic())):raise ValueError('Node connection failed')
+            if not lock.acquire(timeout=max(0,deadline-time.monotonic())):raise NodeTransportError('NODE_TRANSPORT_BUSY',503,'capacity')
             try:self.ensure_master(target,path,deadline)
             finally:lock.release()
             remaining=deadline-time.monotonic()
-            if remaining<=0:raise ValueError('Node connection failed')
+            if remaining<=0:raise NodeTransportError('NODE_TRANSPORT_BUSY',503,'capacity')
             # Never retry or resend input after a timeout or failed channel.
+            phase='rpc'
             return subprocess.run(self.rpc_command(target,path),input=json.dumps(request),text=True,capture_output=True,timeout=remaining)
-        except (OSError,subprocess.SubprocessError):raise ValueError('Node connection failed') from None
+        except subprocess.TimeoutExpired:raise NodeTransportError('NODE_RESPONSE_TIMEOUT' if phase=='rpc' else 'NODE_CONNECT_FAILED',504 if phase=='rpc' else 503,phase) from None
+        except (OSError,subprocess.SubprocessError):raise NodeTransportError('NODE_CONNECT_FAILED',503,phase) from None
         finally:slots.release()
 
 SSH_CONNECTIONS=SSHConnections()
@@ -296,7 +315,7 @@ def terminal_exchange(host,args,machine):
         # Only a new-context capacity refusal, before any input is dispatched.
         # A sent/unconfirmed input, handshake error or writer error never falls back.
         p=SSH_CONNECTIONS.call(host,{'operation':'terminal.exchange','args':args})
-        if p.returncode:raise ValueError('Node connection failed')
+        if p.returncode:raise ssh_transport_failure(p,'rpc')
         return json.loads(p.stdout)
 
 INTERNAL_STORAGE=('storage.archive.events','storage.archive.ack','storage.archive.original',
@@ -323,8 +342,10 @@ class Handler(socketserver.StreamRequestHandler):
                 result=terminal_exchange(host,data['args'],data['machine'])
             else:
                 p=SSH_CONNECTIONS.call(host,{'operation':data['operation'],'args':data['args']})
-                if p.returncode: raise ValueError('Node connection failed')
-                result=json.loads(p.stdout)
+                if p.returncode:raise ssh_transport_failure(p,'rpc')
+                try:result=json.loads(p.stdout)
+                except (json.JSONDecodeError,UnicodeError):raise NodeTransportError('NODE_RESPONSE_INVALID',502,'rpc') from None
+        except NodeTransportError as e:result={'ok':False,'error':str(e),'code':e.code,'status':e.status,'phase':e.phase,'outcomeUnconfirmed':True}
         except Exception as e: result={'ok':False,'error':str(e)[:200]}
         self.wfile.write((json.dumps(result)+'\n').encode())
 class Server(socketserver.ThreadingUnixStreamServer):

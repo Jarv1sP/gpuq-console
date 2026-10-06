@@ -1,6 +1,7 @@
 """Synthetic sockets and a fake OpenSSH process; never touch keys or real nodes."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import io
 from pathlib import Path
 import runpy
 import socket
@@ -96,6 +97,41 @@ class ConnectionReuse(unittest.TestCase):
         self.fake.timeout_rpc=True
         with self.assertRaisesRegex(ValueError,'^Node connection failed$'):self.call()
         self.assertEqual(len(self.fake.requests),1)
+    def test_rpc_timeout_has_fixed_safe_classification_without_stderr(self):
+        self.fake.timeout_rpc=True
+        with self.assertRaises(self.worker['NodeTransportError']) as caught:self.call()
+        self.assertEqual(caught.exception.code,'NODE_RESPONSE_TIMEOUT');self.assertEqual(caught.exception.status,504)
+        self.assertEqual(str(caught.exception),'Node connection failed');self.assertEqual(len(self.fake.requests),1)
+    def test_ssh_auth_host_key_and_connection_errors_are_classified_without_private_details(self):
+        classify=self.worker['ssh_transport_failure']
+        for message,code,status in [(b'Permission denied PRIVATE secret','NODE_SSH_AUTH_FAILED',502),
+                (b'Host key verification failed PRIVATE path','NODE_SSH_HOSTKEY_FAILED',502),
+                (b'Connection timed out PRIVATE address','NODE_CONNECT_FAILED',503)]:
+            error=classify(SimpleNamespace(stderr=message),'master')
+            self.assertEqual((error.code,error.status,error.phase),(code,status,'master'))
+            self.assertNotIn('PRIVATE',str(error))
+    def handler_response(self,completed=None,error=None):
+        handler=object.__new__(self.worker['Handler'])
+        handler.request=SimpleNamespace(settimeout=lambda value:None)
+        handler.rfile=io.BytesIO((json.dumps({'machine':'gpu-4','operation':'host.status','args':{}})+'\n').encode())
+        handler.wfile=io.BytesIO()
+        with patch.object(self.worker['SSH_CONNECTIONS'],'call',return_value=completed,side_effect=error):handler.handle()
+        return json.loads(handler.wfile.getvalue())
+    def test_handler_emits_fixed_transport_envelope_but_does_not_promote_native_denials(self):
+        reply=self.handler_response(SimpleNamespace(returncode=255,stderr='Permission denied PRIVATE token',stdout=''))
+        self.assertEqual((reply['status'],reply['code'],reply['phase']),(502,'NODE_SSH_AUTH_FAILED','rpc'))
+        self.assertTrue(reply['outcomeUnconfirmed']);self.assertNotIn('PRIVATE',json.dumps(reply))
+        reply=self.handler_response(SimpleNamespace(returncode=0,stderr='',stdout='PRIVATE malformed'))
+        self.assertEqual((reply['status'],reply['code']),(502,'NODE_RESPONSE_INVALID'));self.assertNotIn('PRIVATE',json.dumps(reply))
+        reply=self.handler_response(SimpleNamespace(returncode=0,stderr='',stdout='{"ok":false,"error":"Native owner refusal"}'))
+        self.assertEqual(reply,{'ok':False,'error':'Native owner refusal'})
+    def test_handler_timeout_keeps_unconfirmed_outcome_and_never_sends_a_second_rpc(self):
+        error=self.worker['NodeTransportError']('NODE_RESPONSE_TIMEOUT',504,'rpc')
+        handler=object.__new__(self.worker['Handler']);handler.request=SimpleNamespace(settimeout=lambda value:None)
+        handler.rfile=io.BytesIO((json.dumps({'machine':'gpu-4','operation':'host.exec','args':{'key':'fixed'}})+'\n').encode());handler.wfile=io.BytesIO()
+        with patch.object(self.worker['SSH_CONNECTIONS'],'call',side_effect=error) as call:handler.handle()
+        reply=json.loads(handler.wfile.getvalue());self.assertEqual(call.call_count,1)
+        self.assertEqual((reply['status'],reply['code']),(504,'NODE_RESPONSE_TIMEOUT'));self.assertTrue(reply['outcomeUnconfirmed'])
     def test_failed_or_timed_out_handshake_does_not_send_input(self):
         for mode in ('fail_master','timeout_master'):
             setattr(self.fake,mode,True)
