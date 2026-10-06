@@ -170,7 +170,8 @@ try{
   const routeBounds=await desktop.locator('.dataset-copy-route>span').boundingBox(),prepareBounds=await routeCell.locator('..').locator('..').locator('..').locator('[data-prepare-dataset]').boundingBox();assert.ok(routeBounds.y+routeBounds.height<=prepareBounds.y,'route label ends before preparation state');
   assert.equal(await routeCell.locator('..').locator('..').locator('..').locator('.dataset-details-cell>.ui-info').count(),1);
   assert.match(await desktop.locator('#datasets-status').innerText(),/^更新时间未知/);
-  assert.equal(await desktop.locator('.workspace-context-heading .ui-info').count(),1);assert.equal(await desktop.locator('.wb-publish-control>.ui-info').count(),1);
+  assert.equal(await desktop.locator('.workspace-context-heading .ui-info').count(),1);assert.equal(await desktop.locator('.wb-publish-control>.ui-info').count(),0);
+  assert.match(await desktop.locator('.workspace-context-heading .ui-info-content').textContent(),/先完成上传并结束开发终端，再保存代码与环境版本。/);
   const band=await desktop.locator('[data-machine="'+targetMachine+'"].dataset-target').evaluateAll(nodes=>nodes.map(n=>({x:n.getBoundingClientRect().left,w:n.getBoundingClientRect().width,bg:getComputedStyle(n).backgroundColor})));assert.ok(band.length>=3&&band.every(n=>n.x===band[0].x&&n.w===band[0].w&&n.bg===band[0].bg));await capture(desktop,'r5-datasets-route-1440',true);assert.equal(await desktop.locator('.dataset-copy-route').isVisible(),true);
   await routeCell.click();await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.deepEqual(prepared,[{machine:targetMachine,dataset:'scans',version:release}]);await desktop.unroute('**/api/call',observePrepare);
   const phone=await pageFor(390,true);await login(phone,member.username);await phone.locator('[data-nav=work]').click();await phone.locator('.wb-focal').waitFor();await capture(phone,'r5-work-member-390');await noOverflow(phone);

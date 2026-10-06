@@ -96,9 +96,14 @@ if(typeof document!=='undefined'){
   function placeInfo(help){
     const popup=help.querySelector(':scope>.ui-info-content');if(!popup||!help.open||!help.getClientRects().length)return;
     popup.style.translate='none';
-    const box=popup.getBoundingClientRect(),anchor=help.getBoundingClientRect(),margin=16;
+    const anchor=(help.querySelector(':scope>summary')||help).getBoundingClientRect(),margin=16,gap=8;
+    const previousBox=popup.getBoundingClientRect(),contentHeight=Math.max(previousBox.height,popup.scrollHeight+previousBox.height-popup.clientHeight);
+    const below=Math.max(0,innerHeight-margin-anchor.bottom-gap),above=Math.max(0,anchor.top-margin-gap);
+    const opensBelow=contentHeight<=below||below>=above;
+    popup.style.maxHeight=Math.max(0,Math.min(innerHeight-margin*2,opensBelow?below:above))+'px';
+    const box=popup.getBoundingClientRect();
     const left=Math.max(margin,Math.min(innerWidth-margin-box.width,box.left));
-    const preferredTop=box.bottom>innerHeight-margin?anchor.top-box.height-8:box.top;
+    const preferredTop=opensBelow?anchor.bottom+gap:anchor.top-box.height-gap;
     const top=Math.max(margin,Math.min(innerHeight-margin-box.height,preferredTop));
     popup.style.translate=(left-box.left)+'px '+(top-box.top)+'px';
   }

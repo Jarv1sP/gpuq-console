@@ -208,7 +208,9 @@ export function executionUI(store,refresh,toast){
     discloseInfo(explanation,'任务额度说明');
     const contextInfo=query('#workspace-mode-note').closest('.ui-info'),statusInfo=query('#project-status-detail').closest('.ui-info'),contextCopy=document.createElement('div');contextCopy.className='ui-info-content';
     for(const id of ['workspace-mode-note','project-status-detail']){const note=query('#'+id);note.classList.remove('ui-info-content');contextCopy.append(note);}contextInfo.append(contextCopy);statusInfo.remove();contextInfo.querySelector('summary').setAttribute('aria-label','项目与训练版本说明');query('.workspace-context-heading>div').append(contextInfo);
-    const publishInfo=query('#project-detail>.ui-info'),publishControl=document.createElement('div');publishControl.className='wb-publish-control';query('#project-publish').before(publishControl);publishControl.append(query('#project-publish'),publishInfo);
+    const publishInfo=query('#project-detail>.ui-info'),publishCopy=publishInfo.querySelector('.ui-info-content');
+    publishCopy.classList.remove('ui-info-content');contextCopy.append(publishCopy);publishInfo.remove();
+    const publishControl=document.createElement('div');publishControl.className='wb-publish-control';query('#project-publish').before(publishControl);publishControl.append(query('#project-publish'));
     const terminalHelp=query('#terminal-mode-note')?.closest('.ui-info');if(terminalHelp)query('.terminal-heading').append(terminalHelp);
     discloseInfo(query('#environment-mode-note'),'运行环境说明');
     const fieldHelp=(note,control)=>{const help=note?.closest('.ui-info');if(help&&control)control.before(help);};
