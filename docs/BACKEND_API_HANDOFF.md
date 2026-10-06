@@ -169,7 +169,7 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 
 CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --json` 只读；`gpuctl push` 能恢复同内容的已确认上传。此功能不改变项目字节当前经门户中转的路径，也不冒称项目包走了数据集直传。
 
-无需本机源的清理：`files.upload.list {machine,project,area:"code"}` 返回 `protocol:1,project,uploads`，每项 path/uploadId/totalSize/sha256/state/receivedBytes/cancelable/legacy，最多 64 个私人待上传对象。`files.upload.cancel {machine,project,area:"code",uploadId}` 只选精确 UUID，返回 `protocol:1,state:"CANCELED"|"ABSENT",uploadId`；ABSENT 不是删除完成证明。正规 UPLOADING/CANCELING 且原目标围栏匹配时，先持久 CANCELING，再清理未提交 staging 并保留幂等取消回执；COMMITTING、旧缺失围栏、身份冲突或目标变化拒绝。不能删除已提交草稿、READY 或结果。取消中 status 可返回 CANCELING，不标为可续传，原已取消 UUID 不能 files.put。list/status 可读重试，cancel 不自动重放；维护期间允许查询/停止，不允许继续上传。
+无需本机源的清理：`files.upload.list {machine,project,area:"code"}` 返回 `protocol:1,project,uploads`，每项 path/uploadId/totalSize/sha256/state/receivedBytes/cancelable/legacy，最多 64 个私人待上传对象。`files.upload.cancel {machine,project,area:"code",uploadId}` 只选精确 UUID，返回 `protocol:1,state:"CANCELED"|"ABSENT",uploadId`；ABSENT 不是删除完成证明。正规 UPLOADING/CANCELING 且原目标围栏匹配时，先持久 CANCELING，再清理未提交 staging 并保留幂等取消回执，目标变化仍拒绝。新版节点仅允许严格四字段旧记录且 service-owned 单链接片段明确小于 totalSize、无同 UUID 完成回执的软取消：在原 store lock 内先永久封住原 UUID，再用 renameat2 no-replace 将原登记与片段全部保留到私人回收区，不碰目标草稿或版本。部分移动后仍保留原 pending metadata 围栏，同 UUID 可显式继续取消；全尺寸、缺片段、COMMITTING、未知身份或碰撞仍拒绝。取消中 status 可返回 CANCELING，已确认软取消返回 CANCELED，两者都不标为可续传，原已取消 UUID 不能 files.put。list/status 可读重试，cancel 不自动重放；维护期间允许查询/停止，不允许继续上传。
 
 ## 数据集上传：控制面与文件字节分开
 
