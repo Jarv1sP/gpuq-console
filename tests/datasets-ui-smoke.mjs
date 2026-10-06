@@ -139,7 +139,9 @@ try {
   await selectDataset(admin,'admin-private');
   assert.equal(await detail(admin).locator('[data-use-dataset]').isDisabled(),true,'Admin metadata visibility grants no personal dataset ownership');
   await selectDataset(admin,'sample');
-  assert.equal(await row(admin,'sample').locator('.v3-owner').textContent(),'共享授权用户：admin、dataset-browser-user');
+  assert.equal(await row(admin,'sample').locator('.v3-owner').textContent(),'admin、dataset-browser-user');
+  assert.equal(await row(admin,'sample').locator('.v3-owner').getAttribute('title'),'所属 admin、dataset-browser-user');
+  assert.equal(await detail(admin).locator('.v3-meta>span').first().textContent(),'所属 admin、dataset-browser-user');
   assert.ok(calls.some(call=>call.operation==='datasets.list'&&call.args.userId==='builtin-admin'&&call.args.hostAdmin===true));
   assert.equal(await admin.locator('#datasets-capacity strong').textContent(),'502 GiB');assert.equal(await admin.locator('#datasets-capacity small').textContent(),'共 1024 GiB');assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/可用 512 GiB/);assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/共享数据盘，容量不是个人配额/);
   assert.equal(await row(admin,'another').count(),1,'Same dataset and version is merged across machines');
@@ -168,7 +170,9 @@ try {
   assert.equal(await member.locator('#work-submit').isVisible(),false,'Delegated action rechecks authorization even if disabled DOM is removed');
   assert.equal(calls.length,beforeTamper,'Metadata-only click never reaches node or submission APIs');
   await selectDataset(member,'sample');
-  assert.equal(await row(member,'sample').locator('.v3-owner').textContent(),'共享授权用户：admin、dataset-browser-user');
+  assert.equal(await row(member,'sample').locator('.v3-owner').textContent(),'admin、dataset-browser-user');
+  assert.equal(await row(member,'sample').locator('.v3-owner').getAttribute('title'),'所属 admin、dataset-browser-user');
+  assert.equal(await detail(member).locator('.v3-meta>span').first().textContent(),'所属 admin、dataset-browser-user');
   assert.equal(await cache(member).isEnabled(),true);
   assert.equal(await detail(member).locator('[data-use-dataset]').isEnabled(),true);
   assert.equal(await detail(member).locator('[data-use-dataset]').textContent(),'用于训练');

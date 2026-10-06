@@ -30,11 +30,10 @@ async function closeRoutedContext(context){
   await context.close();
 }
 async function datasetTarget(page,machine){
-  await page.locator('[data-v3-upload]').first().click();
-  await page.locator('[name=dataset-machine]').selectOption(machine);
-  await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
-  await page.locator('[data-dataset-add-close]').click();
-  await page.locator('#dataset-add-dialog').waitFor({state:'hidden'});
+  // The initial upload view reveals its destination after selecting files.
+  // Cache inspection instead follows the visible, shared server context.
+  await page.locator('#context-machine').selectOption(machine);
+  await page.waitForFunction(machine=>document.querySelector('[name=dataset-machine]').value===machine&&!document.querySelector('#datasets-refresh').disabled,machine);
 }
 async function datasetDetail(page,dataset){
   const row=page.locator('[data-v3-select="'+dataset+'"]');
@@ -181,7 +180,7 @@ try{
   assert.match(await desktop.locator('#submit-summary').innerText(),new RegExp(persisted[0].id.slice(0,8)));assert.equal(await desktop.locator('#train-form [type=submit]').isDisabled(),true);await capture(desktop,'r5-submit-receipt-1440',true);await closeSubmit(desktop);assert.match(await desktop.locator('#submission-receipt').innerText(),/receipt-local/);await desktop.unroute('**/api/call',loseReply);
   await desktop.locator('[data-nav=datasets]').click();await datasetTarget(desktop,targetMachine);await datasetDetail(desktop,'scans');
   const prepared=[];const observePrepare=guardedRoute(async route=>{const body=route.request().postDataJSON();if(body?.operation==='datasets.prepare'){prepared.push(body.args);await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result:{dataset:body.args.dataset,version:body.args.version,state:'PREPARING'}})});}else await route.fallback();});await desktop.route('**/api/call',observePrepare);
-  const inspector=desktop.locator('#warehouse-inspector'),sourceRow=inspector.locator('.v3-server').filter({has:inspector.locator('.v3-server-text>b[title="'+sourceMachine+'"]')}),targetRow=inspector.locator('.v3-server.cur');
+  const inspector=desktop.locator('#warehouse-inspector'),sourceRow=inspector.locator('.v3-server').filter({has:desktop.locator('.v3-server-text>b[title="'+sourceMachine+'"]')}),targetRow=inspector.locator('.v3-server.cur');
   await sourceRow.hover();assert.equal(prepared.length,0,'inspecting the true READY source is read-only');
   assert.equal(await sourceRow.locator('.v3-server-text>b').getAttribute('title'),sourceMachine);
   assert.equal(await sourceRow.locator('.v3-server-text>span').textContent(),'已缓存');
@@ -199,7 +198,7 @@ try{
   assert.equal(await desktop.locator('.workspace-context-heading .ui-info').count(),1);assert.equal(await desktop.locator('.wb-publish-control>.ui-info').count(),0);
   assert.match(await desktop.locator('.workspace-context-heading .ui-info-content').textContent(),/先完成上传并结束开发终端，再保存代码与环境版本。/);
   await capture(desktop,'r5-datasets-route-1440',true);
-  await targetRow.locator('[data-v3-cache]').click();await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.deepEqual(prepared,[{machine:targetMachine,dataset:'scans',version:release}]);await desktop.unroute('**/api/call',observePrepare);
+  await Promise.all([desktop.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.prepare'),targetRow.locator('[data-v3-cache]').click()]);await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.deepEqual(prepared,[{machine:targetMachine,dataset:'scans',version:release}]);await desktop.unroute('**/api/call',observePrepare);
   const phone=await pageFor(390,true);await login(phone,member.username);await phone.locator('[data-nav=work]').click();await phone.locator('.wb-focal').waitFor();await capture(phone,'r5-work-member-390');await noOverflow(phone);
   await phone.locator('.wb-focal [data-job-mission]').click();await phone.locator('#job-mission').waitFor({state:'visible'});await capture(phone,'r5-mission-member-390',true);assert.ok(await phone.locator('#job-mission').evaluate(n=>n.scrollWidth<=n.clientWidth+1));await phone.keyboard.press('Escape');
   await phone.keyboard.press('Control+k');await phone.locator('#control-command').fill(targetMachine+' 两张卡 跑 python train.py 用 tiny-local');await phone.keyboard.press('Enter');await phone.locator('#control-data-version:not([disabled])').waitFor();await phone.locator('#control-data-version').selectOption(release);await phone.locator('#control-confirm-fields').check();await capture(phone,'r5-command-prefill-390',true);assert.ok(await phone.locator('#mission-control').evaluate(n=>n.scrollWidth<=n.clientWidth+1));await phone.keyboard.press('Escape');
@@ -267,7 +266,7 @@ try{
     await capture(page,'r5-review-datasets-'+role+'-'+width,false,true);reviewChecks.push({role,width,inventory:MACHINES.map(row=>row.id)});
   }
   await writeFile(join(shots,'review-checks.json'),JSON.stringify(reviewChecks,null,2));
-  await phone.route('**/api/call',observePrepare);await datasetDetail(phone,'scans');await phone.locator('[data-v3-cache="'+targetMachine+'"][data-dataset="scans"]').click();await phone.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(prepared.length,2);assert.deepEqual(prepared[1],{machine:targetMachine,dataset:'scans',version:release});await phone.unroute('**/api/call',observePrepare);
+  await phone.route('**/api/call',observePrepare);await datasetDetail(phone,'scans');await Promise.all([phone.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.prepare'),phone.locator('[data-v3-cache="'+targetMachine+'"][data-dataset="scans"]').click()]);await phone.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(prepared.length,2);assert.deepEqual(prepared[1],{machine:targetMachine,dataset:'scans',version:release});await phone.unroute('**/api/call',observePrepare);
   await desktop.locator('[data-nav=work]').click();await desktop.locator('.wb-focal [data-job-mission]').click();desktop.once('dialog',async dialog=>{assert.match(dialog.message(),/释放 2 张卡的额度/);await dialog.accept();});await desktop.locator('#job-mission [data-job-cancel]').click();await desktop.waitForFunction(()=>document.querySelector('#job-mission .st')?.textContent.includes('正在取消'));assert.equal(requests.filter(row=>row.operation==='jobs.cancel').length,1);assert.equal(await desktop.locator('#job-mission [data-job-cancel]').isDisabled(),true);
   await desktop.evaluate(()=>document.querySelector('#switch-account').click());await desktop.locator('#login-dialog').waitFor({state:'visible'});await desktop.locator('#job-mission').waitFor({state:'hidden'});assert.equal(await desktop.locator('#job-mission').innerText(),'');assert.equal(await desktop.locator('#submission-receipt').count(),0);
   assert.deepEqual(outside,[]);assert.deepEqual(errors.filter(message=>!message.includes('ERR_FAILED')&&!message.includes('Failed to fetch')),[]);assert.ok(assets.filter(row=>row.path.endsWith('.woff2')).every(row=>row.status===200));
