@@ -2249,6 +2249,101 @@ class DatasetCache:
             if fence['state'] == 'PURGED':
                 raise CacheError('仍有已清除副本的删除围栏，请先恢复源并释放名称，或显式重新登记；暂不能注销整个数据集')
 
+    def _empty_unregister_snapshot(self, actor, dataset):
+        """Prove a personal registration shell, never an absent data version.
+
+        Caller holds the cache lock. Immutable stamps bind the admission to
+        every final rename checkpoint. Default orphan tiers are retained, not
+        deleted; any protection, unfinished upload or unknown metadata refuses.
+        """
+        self._actor(actor, admin=True)
+        row = self._unregister_snapshot(actor, dataset, None)
+        if row is None or row['versions'] or [name for name, _ in row['registry']] != ['dataset.json']:
+            raise CacheError('empty personal registration proof requires no versions')
+        owners = row['metadata']['owners']
+        if len(owners) != 1:
+            raise CacheError('empty personal registration requires one confirmed owner')
+        owner = owners[0]
+        prefix = 'u-'+hashlib.sha256(owner.encode()).hexdigest()[:16]+'-'
+        if not dataset.startswith(prefix) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,39}', dataset[len(prefix):]):
+            raise CacheError('empty personal registration owner namespace differs')
+        evidence = []
+
+        def names(path):
+            try:
+                with _directory(path) as fd:
+                    info = os.fstat(fd)
+                    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                        raise CacheError('unsafe empty-registration dependency directory')
+                    return sorted(os.listdir(fd))
+            except FileNotFoundError:
+                return []
+
+        def read(path):
+            with _directory(path.parent) as fd:
+                child = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    info = _regular(child)
+                    if info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > 65536:
+                        raise CacheError('unsafe empty-registration dependency metadata')
+                    with os.fdopen(child, 'rb', closefd=False) as stream:
+                        raw = stream.read(65537)
+                    value = json.loads(raw)
+                    evidence.append([str(path.relative_to(self.root)), list(_stamp(info)), hashlib.sha256(raw).hexdigest()])
+                    return value
+                finally:
+                    os.close(child)
+
+        for area in ('ready', '.staging', '.leases', '.provenance', '.retirements', '.reopens'):
+            if names(self.root / area / dataset):
+                raise CacheError('empty registration still has payload or protected dependencies')
+        # Reservations deliberately carry no dataset name. An orphan cannot be
+        # proven unrelated; wait for normal uploads to finish/discard rather
+        # than guessing its owner or deleting a future upload's registration.
+        if names(self.root / '.upload-reservations'):
+            raise CacheError('unconfirmed upload reservations prevent empty registration removal')
+        for name in names(self.root / '.tiers' / dataset):
+            if not name.endswith('.json'):
+                raise CacheError('empty registration has unknown tier metadata')
+            _identifier(name[:-5], HASH_RE)
+            value = read(self.root / '.tiers' / dataset / name)
+            if (value != self._default_tier() or type(value.get('schema')) is not int
+                    or type(value.get('lastUsedAt')) not in (int, float)):
+                raise CacheError('empty registration has retained pins or recovery metadata')
+        uploads = self.root / '.uploads'
+        parent = uploads / hashlib.sha256(owner.encode()).hexdigest()
+        for upload in names(parent):
+            if not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', upload):
+                raise CacheError('empty registration has unknown upload identity')
+            # Do not call effective()/retire_unregistered(): this proof is read
+            # only and must not refund reservations or mutate session history.
+            path = parent / upload / 'session.json'
+            before = len(evidence)
+            session = read(path)
+            if (not isinstance(session, dict) or session.get('schema') != 1
+                    or session.get('userId') != owner or session.get('uploadId') != upload
+                    or not isinstance(session.get('name'), str)
+                    or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,39}', session['name'])):
+                raise CacheError('empty registration upload ownership is unconfirmed')
+            target = prefix + session['name']
+            if session.get('dataset', target) != target:
+                raise CacheError('empty registration upload namespace changed')
+            if target != dataset:
+                del evidence[before:]
+                continue
+            if session.get('state') != 'DISCARDED':
+                raise CacheError('unfinished upload prevents empty registration removal')
+            reservation = hashlib.sha256(json.dumps([owner, upload], separators=(',', ':')).encode()).hexdigest()+'.json'
+            if reservation in names(self.root / '.upload-reservations'):
+                raise CacheError('upload reservation prevents empty registration removal')
+            if 'version' in session:
+                _identifier(session['version'], HASH_RE)
+                binding = hashlib.sha256((dataset+'@'+session['version']).encode()).hexdigest()+'.json'
+                if binding in names(uploads / 'bindings'):
+                    raise CacheError('upload binding prevents empty registration removal')
+        return dict(registry=[[name, list(stamp)] for name, stamp in row['registry']],
+                    owners=owners, dependencies=evidence)
+
     @staticmethod
     def _unregister_move_record(source, destination):
         """Atomic no-replace move for one registration file, never source data."""
@@ -2363,7 +2458,7 @@ class DatasetCache:
                 with _directory(parent) as fd:
                     os.fsync(fd)
 
-    def unregister(self, actor, dataset, version=None, *, _guard=None, _expected_registration=None, _expected_owners=None, _portal_proved_versions=None):
+    def unregister(self, actor, dataset, version=None, *, _guard=None, _expected_registration=None, _expected_owners=None, _portal_proved_versions=None, _expected_empty_registration=None):
         """Source-proven personal or administrator registration removal.
 
         Internal transfers and leases share these locks. As with evict/publish,
@@ -2374,10 +2469,15 @@ class DatasetCache:
         self._actor(actor, admin=version is None)
         if _portal_proved_versions is not None:
             self._actor(actor,admin=True)
-            if (not isinstance(_portal_proved_versions,list) or not _portal_proved_versions
+            if (not isinstance(_portal_proved_versions,list)
                     or len(_portal_proved_versions)>10000 or any(not isinstance(v,str) or not HASH_RE.fullmatch(v) for v in _portal_proved_versions)
                     or len(set(_portal_proved_versions))!=len(_portal_proved_versions)):
                 raise CacheError('invalid exact Portal-proved complete-copy versions')
+        empty_proof = _portal_proved_versions == []
+        if empty_proof and (version is not None or not isinstance(_expected_empty_registration, dict)):
+            raise CacheError('empty Portal proof requires a fixed whole personal registration snapshot')
+        if _expected_empty_registration is not None and not empty_proof:
+            raise CacheError('empty registration snapshot cannot authorize version removal')
         self._paths(dataset, version)
         if _expected_registration is not None and (version is None or not isinstance(_expected_registration, list)
                 or len(_expected_registration) != 5 or any(type(item) is not int or item < 0 for item in _expected_registration)):
@@ -2398,6 +2498,8 @@ class DatasetCache:
                 raise CacheBusy("dataset ownership differs from the original retirement identity")
             if initial is not None:
                 self._delete_actor_locked(actor, dataset, version)
+            if empty_proof and self._empty_unregister_snapshot(actor, dataset) != _expected_empty_registration:
+                raise CacheBusy('empty registration changed since admission')
         if initial is None:
             return dict(dataset=dataset, version=version, versions=[], unregistered=False,
                         registrationRetained=False, recoveryId=None)
@@ -2409,6 +2511,8 @@ class DatasetCache:
                 _guard()
             if version is None:
                 self._preserve_purged_owners_locked(dataset)
+            if empty_proof and self._empty_unregister_snapshot(actor, dataset) != _expected_empty_registration:
+                raise CacheBusy('empty registration changed during removal')
             current = self._unregister_snapshot(actor, dataset, version)
             if current is not None:
                 self._delete_actor_locked(actor, dataset, version)
@@ -2440,6 +2544,9 @@ class DatasetCache:
             with self._locked():
                 recheck()  # All leases checked before the first filesystem move.
                 transaction, receipt = self._unregister_transaction(dataset, version, initial)
+                if empty_proof:
+                    receipt['emptyRegistrationProof'] = _expected_empty_registration
+                    _write_json(transaction / 'REMOVAL.json', receipt)
             self._unregister_cleanup(transaction)
             with self._locked():
                 recheck()  # A lease may have arrived while cleaning an old journal.

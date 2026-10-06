@@ -356,7 +356,7 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         if 'portalProvedOtherCopy' in args:
             if (not actor.is_admin or protocol!='dataset-delete-node-v1' or not isinstance(proof,dict)
                     or set(proof)!={'protocol','versions'} or proof['protocol']!='dataset-portal-copy-proof-v1'
-                    or not isinstance(proof['versions'],list) or not proof['versions'] or len(proof['versions'])>10000
+                    or not isinstance(proof['versions'],list) or len(proof['versions'])>10000
                     or any(not isinstance(v,str) or not DATASET_VERSION.fullmatch(v) for v in proof['versions'])
                     or len(set(proof['versions']))!=len(proof['versions'])
                     or version is not None and version not in proof['versions']):
@@ -370,6 +370,9 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         task={'op':'unregister-v1' if protocol else 'unregister','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':actor.is_admin,'requestId':_request_id or str(uuid.uuid4())}
         if protocol:task['protocol']=protocol
         if proof is not None:task['portalProvedOtherCopy']=proof
+        if proof is not None and proof['versions']==[]:
+            if version is not None:raise ValueError('Empty proof only permits whole personal registration removal')
+            with cache._locked():task['emptyRegistrationSnapshot']=cache._empty_unregister_snapshot(actor,dataset)
         if _expected_registration is not None:task['expectedRegistration']=_expected_registration
         if _expected_owners is not None:task['expectedOwners']=_expected_owners
     elif operation=='datasets.register':
@@ -441,7 +444,7 @@ def dataset_worker(key):
                             raise ValueError('Authenticated administrator Portal proof is required')
                         proof=value.get('versions')
                 out=cache.unregister(actor,task['dataset'],task.get('version'),_expected_registration=task.get('expectedRegistration'),_expected_owners=task.get('expectedOwners'),
-                                     _portal_proved_versions=proof);out['state']='UNREGISTERED'
+                                     _portal_proved_versions=proof,_expected_empty_registration=task.get('emptyRegistrationSnapshot'));out['state']='UNREGISTERED'
             else:raise ValueError('Invalid background dataset action')
         # Never return transfer tokens, local paths, or source IDs to callers.
         out={k:v for k,v in out.items() if k in ('dataset','version','state','bytes','files','unregistered','registrationRetained','versions','recoveryId')}

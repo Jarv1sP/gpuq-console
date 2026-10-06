@@ -365,7 +365,7 @@ export async function executionCall(service,principal,operation,args){
         // PR-M2 owns the shared guard and its durable exclusions. Read +
         // dispatch must stay inside its cross-machine version lock.
       }
-      if(principal.role==='admin')removalGuard=createDatasetRemovalGuard(service,principal);
+      if(principal.role==='admin')removalGuard=createDatasetRemovalGuard(service,principal,{allowEmptyPersonalRegistration:removalV1});
     }
     if(operation==='datasets.prepare'&&service.prepareDataset){
       const result=await service.prepareDataset(user.id,machine,reference);
