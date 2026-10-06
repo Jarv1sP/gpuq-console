@@ -30,9 +30,9 @@ function refusal(message){
   if(/verification|校验|checksum/i.test(message))return '保留的数据校验未通过，恢复已停止。';
   if(/lease|租约|训练|正在使用/i.test(message))return '仍有训练或传输正在使用这份数据。';
   if(/pin|固定保留/i.test(message))return '这份数据仍有固定保留。';
-  if(/管理员|provenance|owner|权限|账号|logged out/i.test(message))return '账号或来源权限未确认，请联系管理员。';
   if(/maintenance|维护/i.test(message))return '服务器正在维护，请等待管理员恢复。';
   if(/依赖|归档|archive|alias|物理名称|传输/i.test(message))return '归档或副本依赖未确认，请联系管理员核对。';
+  if(/管理员|provenance|owner|权限|账号|logged out/i.test(message))return '账号或来源权限未确认，请联系管理员。';
   return '节点步骤未确认，请联系管理员核对原编号。';
 }
 const same=(a,b)=>encoded(a)===encoded(b);

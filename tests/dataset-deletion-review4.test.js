@@ -6,7 +6,9 @@ import {fixture,hosts,principal,admin,writes,version} from './dataset-deletion-f
 
 test('R4-2 definite refusal reasons are mapped exactly once in execute and observe',async t=>{
   const cases=[['maintenance active','服务器正在维护，请等待管理员恢复。'],
+    ['服务器维护中：磁盘检查。新任务、终端输入和数据写入已暂停，请等待管理员明确恢复；仍可查看历史、日志或取消任务。','服务器正在维护，请等待管理员恢复。'],
     ['archive dependency unconfirmed','归档或副本依赖未确认，请联系管理员核对。'],
+    ['归档或副本依赖未确认，请联系管理员核对。','归档或副本依赖未确认，请联系管理员核对。'],
     ['would overwrite existing registration','已有同名数据，恢复不会覆盖。'],
     ['active leases prevent deletion','仍有训练或传输正在使用这份数据。'],
     ['persistent pins prevent deletion','这份数据仍有固定保留。'],
