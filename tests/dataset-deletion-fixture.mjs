@@ -61,4 +61,3 @@ export function fixture(t,{db,onlySource=true}={}){
     start:async(args=request(),who=principal)=>{const first=await service.datasetDeletionCall(who,'datasets.delete',args);await service.waitDatasetDeletions();return {first,result:(await service.datasetDeletionCall(who,'datasets.delete.status',{key:args.key})),args};}});
 }
 export const writes=f=>f.calls.filter(c=>/\.(fence|isolate|restore|release-absence)$/.test(c.op));
-
