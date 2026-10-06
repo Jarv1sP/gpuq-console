@@ -414,6 +414,6 @@ export function datasetsUI(store,toast){
       section.querySelector('#datasets-capacity').hidden=!machines.length;
       machineIds=ids;
     }
-    if(!uploadRoute)showUploadRoute();quota();controls();warehouse.render();if(initialCatalog&&store.production&&store.principal){initialCatalog=false;queueMicrotask(load);}
+    if(!uploadRoute)showUploadRoute();quota();controls();warehouse.render();if(initialCatalog&&!section.hidden&&store.production&&store.principal){initialCatalog=false;queueMicrotask(load);}
   };
 }

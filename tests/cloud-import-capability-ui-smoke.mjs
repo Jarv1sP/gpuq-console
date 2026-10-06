@@ -29,7 +29,9 @@ try{
         if(operation==='state')return reply(route,null);
         if(operation==='projects.list')return reply(route,{projects:[]});
         if(operation==='datasets.catalog')return reply(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[]});
+        if(operation==='datasets.list')return reply(route,{datasets:[]});
         if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
+        if(operation==='datasets.upload.routes')return reply(route,{machine:args.machine,available:false,protocol:'dataset-upload-v1'});
         if(operation==='cloud.info')return denyInfo?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'后台状态暂时无法查询。'})}):reply(route,info);
         if(operation==='cloud.import.list')return reply(route,{imports:[]});
         if(operation==='cloud.inspect')return reply(route,{inspectionId:'local-inspection',files:[{id:'local-file',name:'training-data.zip',size:4*1024**2}]});
@@ -48,18 +50,18 @@ try{
     await page.goto(origin);await page.locator('#execution-workspace').waitFor();
     await page.locator('[data-nav=datasets]').click();await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
     await page.locator('#warehouse-page-actions [data-v3-upload]').click();await page.locator('[data-v3-source=link]').click();
-    const source=page.locator('[name=cloud-source]'),submit=page.locator('#cloud-import-form [type=submit]');
+    const source=page.locator('#dataset-add-dialog [name=cloud-source]'),submit=page.locator('#dataset-add-dialog #cloud-import-form [type=submit]');
     const idle=()=>page.waitForFunction(()=>!document.querySelector('#cloud-import-refresh').disabled);
     assert.equal(await source.inputValue(),'https');assert.equal(calls.some(c=>c.operation==='cloud.info'),false,'opening HTTPS does not probe share capability');
-    assert.equal(await page.locator('#cloud-auth-begin').count(),role==='admin'?1:0);
+    assert.equal(await page.locator('#page-datasets #cloud-auth-begin').count(),0,'main import flow is identical for members and administrators');
     await source.selectOption('aliyun');await page.waitForFunction(()=>document.querySelector('#cloud-share-availability').hidden===false);await idle();
     assert.equal(await submit.isDisabled(),true);assert.equal(await page.locator('#cloud-share-fields').isHidden(),true);
     assert.equal(calls.filter(c=>c.operation==='cloud.info').length,1);
     assert.equal(calls.some(c=>['cloud.inspect','cloud.import.start'].includes(c.operation)),false);
-    const shot=async(name,width)=>{
-      await page.setViewportSize({width,height:1000});await page.locator('#cloud-import-form').scrollIntoViewIfNeeded();await page.evaluate(()=>document.fonts.ready);
+    const shot=async(name,width,root='#dataset-add-dialog')=>{
+      await page.setViewportSize({width,height:1000});await page.locator(root+' .cloud-import').scrollIntoViewIfNeeded();await page.evaluate(()=>document.fonts.ready);
       await page.evaluate(()=>{document.activeElement?.blur();scrollTo({top:0,left:0,behavior:'instant'});});
-      const layout=await page.evaluate(()=>{const d=document.querySelector('#dataset-add-dialog');return {width:innerWidth,document:document.documentElement.scrollWidth,dialog:d.scrollWidth,client:d.clientWidth,buttons:[...d.querySelectorAll('.cloud-import .button')].filter(b=>b.getClientRects().length).map(b=>b.getBoundingClientRect().height),help:[...d.querySelectorAll('.cloud-import [data-copy-help]')].filter(b=>b.getClientRects().length).map(b=>b.getBoundingClientRect().height),skip:document.querySelector('.skip-link').getBoundingClientRect().bottom};});
+      const layout=await page.evaluate(root=>{const d=document.querySelector(root);return {width:innerWidth,document:document.documentElement.scrollWidth,dialog:d.scrollWidth,client:d.clientWidth,buttons:[...d.querySelectorAll('.cloud-import .button')].filter(b=>b.getClientRects().length).map(b=>b.getBoundingClientRect().height),help:[...d.querySelectorAll('.cloud-import [data-copy-help]')].filter(b=>b.getClientRects().length).map(b=>b.getBoundingClientRect().height),skip:document.querySelector('.skip-link').getBoundingClientRect().bottom};},root);
       assert(layout.document<=width+1);assert(layout.dialog<=layout.client+1);assert(layout.buttons.every(height=>height>=44));assert(layout.help.every(height=>height>=(width<760?44:32)));assert(layout.skip<=0);checks.push({role,name,...layout});
       await page.screenshot({path:join(screenshots,name+'-'+role+'-'+width+'.png')});
     };
@@ -78,12 +80,16 @@ try{
       // download itself is unverified; login is never treated as that proof.
       info={backend:'aliyun',aliyunConnected:true,capabilityVerified:false};
       await page.locator('#cloud-import-refresh').click();await idle();
-      await page.locator('#cloud-admin > summary').click();await page.locator('#cloud-auth-begin').click();await idle();assert.equal(await page.locator('#cloud-auth-qr').isVisible(),true);
-      await page.locator('#cloud-auth-check').click();await idle();assert.equal(await page.locator('#cloud-auth-status').textContent(),'已登录，但分享导入未核验。');assert.equal(await submit.isDisabled(),true);
-      await shot('native-admin-login-unverified',390);await page.setViewportSize({width:1440,height:1000});
+      assert.equal(await submit.isDisabled(),true);await page.locator('[data-dataset-add-close]').click();await page.evaluate(()=>{location.hash='admin/storage';});
+      const adminCloud=page.locator('.admin-data-storage .admin-storage-cloud');await adminCloud.waitFor({state:'visible'});await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);
+      assert.equal(await adminCloud.locator('#cloud-auth-begin').count(),1,'the original QR administration entry remains available in storage administration');
+      const adminIdle=()=>page.waitForFunction(()=>!document.querySelector('.admin-data-storage #cloud-auth-begin').disabled);
+      await adminCloud.locator('#cloud-admin > summary').click();await adminIdle();await adminCloud.locator('#cloud-auth-begin').click();await adminIdle();assert.equal(await adminCloud.locator('#cloud-auth-qr').isVisible(),true);
+      await adminCloud.locator('#cloud-auth-check').click();await adminIdle();assert.equal(await adminCloud.locator('#cloud-auth-status').textContent(),'已登录，但分享导入未核验。');assert.equal(await submit.isDisabled(),true);
+      await shot('native-admin-login-unverified',390,'.admin-data-storage');await page.setViewportSize({width:1440,height:1000});
       info={backend:'clouddrive',managedExternally:true,configurationEnabled:true,aliyunConnected:true,nodeDirect:true,capabilityVerified:false};
-      await page.locator('#cloud-import-refresh').click();await idle();assert.equal(await page.locator('#cloud-auth-begin').isHidden(),true);assert.equal(await page.locator('#cloud-auth-status').textContent(),'云盘连接由后台管理。');assert.equal(await page.locator('#cloud-auth-disconnect').isVisible(),true);
-      for(const width of [1440,390])await shot('external-admin',width);
+      await page.reload();await adminCloud.waitFor({state:'visible'});await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);await adminCloud.locator('#cloud-admin > summary').click();await adminIdle();assert.equal(await adminCloud.locator('#cloud-auth-begin').isHidden(),true);assert.equal(await adminCloud.locator('#cloud-auth-status').textContent(),'云盘连接由后台管理。');assert.equal(await adminCloud.locator('#cloud-auth-disconnect').isVisible(),true);
+      for(const width of [1440,390])await shot('external-admin',width,'.admin-data-storage');
     }
     assert.equal(calls.some(c=>c.operation==='cloud.import.start'),false);
     assert.equal(calls.some(c=>Object.hasOwn(c.args,'userId')||Object.hasOwn(c.args,'hostAdmin')),false);
