@@ -61,7 +61,7 @@ try{
   await memberPage.evaluate(()=>{location.hash='transfers';});await assertTransfer(memberPage);
   const adminPage=await browser.newPage({viewport:{width:1440,height:1000}});adminPage.on('pageerror',error=>errors.push(error.message));
   await login(adminPage,'admin','#datasets/transfers');await assertTransfer(adminPage);
-  assert.deepEqual(await adminPage.locator('#room-nav [data-nav]:visible').evaluateAll(nodes=>nodes.map(node=>node.dataset.nav)),['work','resources','datasets','community','users']);
+  assert.deepEqual(await adminPage.locator('#room-nav [data-nav]:visible').evaluateAll(nodes=>nodes.map(node=>node.dataset.nav)),['work','resources','datasets','community']);
   // Direction follows the dataset room, including the legacy transfer route.
   for(const [from,to,expected] of [['resources','transfers','translateX(24px)'],['community','transfers','translateX(-24px)']]){
     const direction=await adminPage.evaluate(({from,to})=>{
@@ -87,7 +87,7 @@ try{
   await memberPage.emulateMedia({reducedMotion:'reduce'});await memberPage.locator('[data-nav=work]').click();
   await memberPage.evaluate(()=>{location.hash='transfers';});await assertTransfer(memberPage);
   assert.ok(await memberPage.evaluate(()=>document.querySelector('#page-transfers').getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!frame.transform||frame.transform==='none'))));
-  await memberPage.evaluate(()=>{location.hash='users';});await memberPage.locator('#page-resources').waitFor({state:'visible'});
+  await memberPage.evaluate(()=>{location.hash='users';});await memberPage.locator('#admin-denied').waitFor({state:'visible'});
   assert.equal(await memberPage.locator('#page-users').isVisible(),false,'member deep links do not expose the admin room');
   assert.ok(MACHINES.length);assert.deepEqual(errors,[]);
   console.log('DATASET NAVIGATION PASS: legacy/canonical/auth/reload routes, member/admin counts and order, transfer command, same-room tabs and direction, reduced motion, 1440/390/320 topbar, five mobile tabs, admin guard.');

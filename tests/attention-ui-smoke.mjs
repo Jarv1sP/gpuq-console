@@ -103,16 +103,16 @@ try{
     assert.deepEqual(await page.evaluate(()=>attentionCSP),[]);
   }
   const pages=new Map();
-  for(const [role,user,expected] of [['member',member,5],['admin',adminUser,5]])for(const width of [1440,390,320]){
+  for(const [role,user,expected] of [['member',member,5],['admin',adminUser,4]])for(const width of [1440,390,320]){
     const page=await pageFor(width);pages.set(role+'-'+width,page);await login(page,user);await count(page,expected);
-    if(width<760)assert.match(await page.locator('#live-pill').innerText(),/需处理 5/);
+    if(width<760)assert.match(await page.locator('#live-pill').innerText(),new RegExp('需处理 '+expected));
     await geometry(page);await page.screenshot({path:join(shots,`attention-${role}-strip-${width}.png`),animations:'disabled'});
     await open(page);assert.equal(await page.locator('#control-attention .mc-attention-item').count(),expected);
     assert.equal(await page.locator('[data-control-ack]').count(),role==='member'?4:3);
     assert.equal(await page.locator('[data-control-ack-all]').count(),1);
     assert.equal(await page.locator('[data-control-history]').textContent(),'查看全部失败 215 项');
     assert.doesNotMatch(await page.locator('#control-attention').innerText(),/历史失败|未记录失败时间|另一账号的最近失败/);
-    if(role==='admin')assert.match(await page.locator('#control-attention').innerText(),new RegExp(pendingName));else assert.doesNotMatch(await page.locator('#control-attention').innerText(),new RegExp(pendingName));
+    assert.doesNotMatch(await page.locator('#control-attention').innerText(),new RegExp(pendingName),'member approvals belong only in the backend');
     assert.equal(await page.locator('#mission-control img').count(),0);await geometry(page);
     assert.equal(await page.locator('.mc-footer>.ui-info').count(),0,'no orphan footer help');
     assert.ok(await page.locator('.mc-footer-command').evaluate(group=>{
@@ -140,7 +140,7 @@ try{
   await phone.locator('#job-overview-view').waitFor({state:'visible'});await count(phone,4);
   await phone.locator('#close-job-log').click();await phone.locator('.job-log-dialog').waitFor({state:'hidden'});await open(phone);await phone.locator('[data-control-ack-all]').click();await count(phone,1);
   assert.equal(await phone.locator('#control-attention .mc-attention-item').count(),1);assert.equal(await phone.locator('[data-control-history]').textContent(),'查看全部失败 215 项');
-  const adminPage=pages.get('admin-320');await adminPage.locator('[data-control-ack-all]').click();await count(adminPage,2);assert.match(await adminPage.locator('#control-attention').innerText(),new RegExp(pendingName));assert.match(await adminPage.locator('#control-attention').innerText(),/训练状态待确认/);
+  const adminPage=pages.get('admin-320');await adminPage.locator('[data-control-ack-all]').click();await count(adminPage,1);assert.doesNotMatch(await adminPage.locator('#control-attention').innerText(),new RegExp(pendingName));assert.match(await adminPage.locator('#control-attention').innerText(),/训练状态待确认/);
   // Same browser/account switch retains only the original account's read markers.
   await close(desktop);await accountMenu(desktop);await desktop.locator('#switch-account').click();await desktop.locator('#login-dialog').waitFor({state:'visible'});
   await desktop.locator('#login-form [name=username]').fill(peer.username);await desktop.locator('#login-form [name=password]').fill(password);await desktop.locator('#login-form [type=submit]').click();await desktop.locator('#login-dialog').waitFor({state:'hidden'});await count(desktop,1);
@@ -173,7 +173,7 @@ try{
   await writeFile(join(shots,'attention-unconfirmed-data-checks.json'),JSON.stringify({status:'passed',states:['UNKNOWN','PARTIAL','UNCONFIRMED'],remainingAfterAcknowledgeAndDetailsAndReload:3,readMarkers:1,onlyFailedAcknowledged:true},null,2));
   assert.ok(requests.every(operation=>['state','projects.list','transfers.list','jobs.logs','jobs.diagnostics','logout'].includes(operation)),'acknowledgment and history navigation never write server state');
   assert.deepEqual(service.store.jobs,unchangedJobs);assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
-  await writeFile(join(shots,'attention-checks.json'),JSON.stringify({status:'passed',historicalFailures:211,failedHistoryPerAccount:215,memberAttention:5,adminAttention:5,widths:[1440,390,320],checks:['shared desktop/pill/panel rules','24h/missing time exclusion','acknowledge one/all','opening diagnostics/logs/details marks read','data timestamps and detail navigation','UNKNOWN and approvals stay','history link and actual FAILED filter','reload and account isolation','storage read/write fallback','zero capsule hidden','99+ display','unchanged server task records','no page/card overflow, script/CSP errors or external requests'],shots},null,2));
+  await writeFile(join(shots,'attention-checks.json'),JSON.stringify({status:'passed',historicalFailures:211,failedHistoryPerAccount:215,memberAttention:5,adminAttention:4,widths:[1440,390,320],checks:['shared desktop/pill/panel rules','24h/missing time exclusion','acknowledge one/all','opening diagnostics/logs/details marks read','data timestamps and detail navigation','UNKNOWN stays; approvals move to backend','history link and actual FAILED filter','reload and account isolation','storage read/write fallback','zero capsule hidden','99+ display','unchanged server task records','no page/card overflow, script/CSP errors or external requests'],shots},null,2));
   console.log('ATTENTION PASS: 211 historical failures excluded; account-scoped reads/one/all/views/history/storage fallback/99+/zero; member/admin 1440/390/320.');
 }finally{
   await browser?.close();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}else service?.close();

@@ -348,7 +348,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | 彻底删除对话框 | [dataset-full-delete-ui.js](../dist/dataset-full-delete-ui.js)、[dataset-full-delete-state.js](../dist/dataset-full-delete-state.js)、[dataset-remove.css](../dist/dataset-remove.css) | dataset-full-delete-ui 契约与浏览器 |
 | 数据集传输与导入页签 | [transfers-ui.js](../dist/transfers-ui.js)、[data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[cloud-import-ui.js](../dist/cloud-import-ui.js) | transfers-http / data-workspace / cloud-files / cloud-import |
 | 协作区 | [community-ui.js](../dist/community-ui.js)、[community.css](../dist/community.css) | community |
-| 成员授权 | [app.js](../dist/app.js)、[members.css](../dist/members.css) | ui / polish-shell |
+| 后台成员与额度 | [admin-members-ui.js](../dist/admin-members-ui.js)、[app.js](../dist/app.js)、[members.css](../dist/members.css) | admin-members / ui / polish-shell |
 | 登录、注册、账号 | [auth-ui.js](../dist/auth-ui.js)、[client.js](../dist/client.js)、[members.css](../dist/members.css)、[shell.css](../dist/shell.css) | client-auth / persistent-login / polish-shell |
 | 指南 | [guide.mjs](../guide.mjs)、[USER_GUIDE.md](USER_GUIDE.md)、[guide.css](../dist/guide.css) | guide / user-guide-content |
 | 维护 | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-state.js](../dist/maintenance-state.js)、[maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-experience.css](../dist/maintenance-experience.css) | maintenance / maintenance-background-freeze |
@@ -364,6 +364,8 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 额外提供当前身份快照 `ctx.principal`、有生命周期保护的 `ctx.navigate` 和 `ctx.subscribe(render)`；后者立即渲染并随主状态更新调用，返回取消订阅函数。区块自行处理成功、失败和未确认，框架只在 mount 抛错时显示「重新打开」操作，不猜后台状态。此框架不新增接口和动效。
 
 ## 6. 动效
+
+成员授权控件仅在 `#admin/members`（order 30）挂载，原桌面、手机和命令面板入口移除；旧 `#users` 重定向到该后台区块。邀请、审批、额度、角色、重置、暂停/恢复和删除仍沿用原接口。区块卸载先关闭弹窗、清除草稿/注册码/确认动作并把控件移回隐藏且 inert 的停车区；异步回包用挂载上下文核验。原成员根节点与控件 ID 保留，布局使用成员容器查询。
 
 动效解释已发生的差异，不决定业务时序。实际规则见 [motion-ui.js](../dist/motion-ui.js)、[shell-ui.js](../dist/shell-ui.js)、[starbase.css](../dist/starbase.css)、[resources-ui.js](../dist/resources-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[members.css](../dist/members.css)。
 
@@ -475,6 +477,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [dataset-upload-ui-smoke.mjs](../tests/dataset-upload-ui-smoke.mjs) | 文件夹、直传/中转同意、续传和READY清单核对，标题提示位置及原文 |
 | [datasets-ui-smoke.mjs](../tests/datasets-ui-smoke.mjs) | 目录、数据库/缓存、预算、保留与共享几何；[dataset-help-geometry.mjs](../tests/dataset-help-geometry.mjs)验证标签右侧ⓘ及旧布局反例 |
 | [fixed-upload-routes-browser.mjs](../tests/fixed-upload-routes-browser.mjs) | 固定校园/Tail路线探测与严格票据匹配 |
+| [admin-members-ui-smoke.mjs](../tests/admin-members-ui-smoke.mjs) | 后台 order30、主界面无成员入口、审批、草稿保护、卸载和晚回包、成员拒绝及四档几何 |
 | [admin-ui-smoke.mjs](../tests/admin-ui-smoke.mjs) | 后台入口、成员与匿名拒绝、注册顺序、AbortSignal与跨账号卸载、1440/390/320及流式几何 |
 | [guide-ui-smoke.mjs](../tests/guide-ui-smoke.mjs) | 指南导航、移动目录与可达性 |
 | [job-diagnostics-ui-smoke.mjs](../tests/job-diagnostics-ui-smoke.mjs) | 训练诊断/历史/日志状态 |

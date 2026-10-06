@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 import {closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 // UI contract acceptance with loopback static assets and synthetic API replies.
 // No real accounts, execution bridge, SSH, shell commands or GPU jobs are used.
@@ -67,7 +68,7 @@ try{
   await capture(member,'priority-member-desktop.png');await member.setViewportSize({width:390,height:844});await capture(member,'priority-member-mobile.png');assert.ok(await member.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
 
   const admin=await open('admin');await selectMachine(admin,machine);assert.equal(await admin.locator('[name=priority] option[value=high]').count(),1);
-  await admin.locator('[data-nav=users]').click();await admin.locator('.team-jobs summary').click();
+  await openMembers(admin);await admin.locator('.team-jobs summary').click();
   const select=admin.locator('#all-jobs [data-job-priority="queue-1"]');assert.equal(await select.count(),1);assert.equal(await admin.locator('#all-jobs [data-job-priority="running-1"]').count(),0);assert.equal(await admin.locator('#all-jobs [data-job-priority="legacy-1"]').count(),0);
   await select.selectOption('high');await select.focus();await refresh(admin,true);assert.equal(await select.inputValue(),'high');assert.equal(await select.evaluate(el=>el===document.activeElement),true);
   // A concurrent admin update must not replace the edit baseline during polling.
