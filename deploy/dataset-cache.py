@@ -821,20 +821,40 @@ class DatasetCache:
 
     def deletion_permissions(self, actor, dataset, version):
         """Safe permission projection; never expose private proof or paths."""
-        _, identity = self._record_snapshot(actor, dataset, version, _read_only=True)
         with self._locked():
-            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+            self._actor(actor)
             owners = self._dataset(actor, dataset)["owners"]
-            proof = self._provenance(dataset, version, _read_only=True)
+            identity = self._record_identity(dataset, version, _read_only=True)
             fence = self._retirement_fence(dataset, version)
             if fence is not None and fence['state'] != 'RESTORED':
-                return dict(allowed=False, memberAllowed=False, reason='DELETION_ACTIVE')
+                if fence['state'] == 'RELEASED':
+                    fence = None
+                else:
+                    return dict(allowed=False, memberAllowed=False, reason='DELETION_ACTIVE')
+            path = self.root / '.provenance' / dataset / (version + '.json')
+            try:
+                with _directory(path.parent) as parent:
+                    fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
+                    try: proof_identity = _stamp(_regular(fd))
+                    finally: os.close(fd)
+            except FileNotFoundError:
+                proof_identity = None
+            key = (dataset, version, actor.user_id, actor.is_admin, tuple(owners), identity, proof_identity)
+            cache = getattr(self, '_deletion_permission_cache', None)
+            if cache is None:
+                cache = self._deletion_permission_cache = {}
+            if key in cache:
+                return dict(cache[key])
+            proof = self._provenance(dataset, version, _read_only=True)
             personal = (owners == [actor.user_id] and proof is not None
                         and proof["owners"] == owners
                         and proof["origin"] in {"upload", "workspace", "replica"})
-            return dict(allowed=actor.is_admin or personal,
-                        memberAllowed=personal,
-                        reason=None if actor.is_admin or personal else "ADMIN_ONLY")
+            result = dict(allowed=actor.is_admin or personal, memberAllowed=personal,
+                          reason=None if actor.is_admin or personal else "ADMIN_ONLY")
+            if len(cache) >= 1024:
+                cache.pop(next(iter(cache)))
+            cache[key] = result
+            return dict(result)
 
     def _delete_actor_locked(self, actor, dataset, version):
         """Node-side permission check after every mutable-identity boundary."""

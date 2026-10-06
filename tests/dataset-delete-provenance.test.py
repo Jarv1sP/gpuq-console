@@ -116,6 +116,27 @@ class DeleteProvenanceTests(unittest.TestCase):
         version = self.register("upload")
         self.assertFalse(self.cache.deletion_permissions(OWNER, "sample", version)["allowed"])
 
+    def test_permission_projection_caches_small_proof_and_never_rereads_manifest(self):
+        version=self.register('upload')
+        with patch.object(self.cache,'_record',side_effect=AssertionError('no manifest read')),\
+                patch.object(self.cache,'_record_snapshot',side_effect=AssertionError('no manifest snapshot')),\
+                patch.object(self.cache,'_provenance',wraps=self.cache._provenance) as proof:
+            for _ in range(5):self.assertTrue(self.cache.deletion_permissions(OWNER,'sample',version)['allowed'])
+            self.assertEqual(proof.call_count,1)
+        record=self.cache._paths('sample')['.registry']/(version+'.json')
+        D._write_json(record,D._read_json(record))
+        self.assertFalse(self.cache.deletion_permissions(OWNER,'sample',version)['allowed'])
+
+    def test_cached_permission_revalidates_proof_inode_acl_and_fence_every_read(self):
+        version=self.register('workspace')
+        self.assertTrue(self.cache.deletion_permissions(OWNER,'sample',version)['allowed'])
+        file=self.proof_path(version);value=D._read_json(file)
+        D._write_json(file,{**value,'origin':'admin','receipt':None})
+        self.assertFalse(self.cache.deletion_permissions(OWNER,'sample',version)['allowed'])
+        self.cache.set_owners(ADMIN,'sample',[OTHER.user_id])
+        with self.assertRaisesRegex(PermissionError,'owner'):
+            self.cache.deletion_permissions(OWNER,'sample',version)
+
     def test_public_adapter_cannot_supply_private_origin_proof(self):
         with self.assertRaisesRegex(D.CacheError, "unrecognized"):
             self.cache.dispatch(ADMIN, {"op": "register_manifest", "dataset": "sample",
