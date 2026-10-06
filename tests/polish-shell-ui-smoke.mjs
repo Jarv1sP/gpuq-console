@@ -200,6 +200,8 @@ try {
           else if (operation === 'projects.list') result = {projects: []};
           else if (operation === 'projects.quota') result = {usedBytes: 0, quotaBytes: 1024 ** 3};
           else if (operation === 'datasets.list') result = {datasets: []};
+          else if (operation === 'datasets.catalog') result = {machine: args.machine, machines: inventory.map(row => ({machine: row.id, state: 'ok'})), datasets: []};
+          else if (operation === 'datasets.capacity') result = {machine: args.machine, available: false};
           else if (operation === 'transfers.capabilities') result = {enabled: false};
           else if (operation === 'notifications.list') result = {items: []};
           else if (operation === 'logout') result = {loggedOut: true};

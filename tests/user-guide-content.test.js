@@ -124,6 +124,11 @@ test('public guide excludes cloud and link-import workflows until they are ready
 
 test('unified dataset guide distinguishes catalog, capacity and preparation from training readiness', () => {
   assert.match(guide, /网页只有一个“数据集”入口/);
+  assert.match(guide, /仓库列表按数据集显示，服务器栏筛选缓存位置/);
+  assert.match(guide, /「所属」显示授权记录对应的用户名，省略重复前缀/);
+  assert.match(guide, /完整 `--data ID@版本`/);
+  assert.match(guide, /`\/data2\/ID` 只读路径读取/);
+  assert.match(guide, /数据集 → 上传数据 → 在服务器上整理/);
   assert.match(guide, /相同数据集 ID 和完整版本才合并显示/);
   assert.match(guide, /不是个人硬磁盘配额/);
   assert.match(guide, /`PREPARING_DATA` 表示正在准备所选机器的本地数据，暂不占 GPU 额度/);
@@ -148,7 +153,9 @@ test('optional OCI guide requires node enablement and distinguishes container fr
   assert.match(guide,/容器内 root 不是服务器 root，开发阶段无 GPU/);
   assert.doesNotMatch(guide,/宿主机 root/);
   assert.match(guide,/没开通的服务器会直接拒绝，不影响你已有的项目/);
-  assert.match(guide,/页面上没有「个人容器」选项，就说明你的账号或这台服务器还没开通/);
+  assert.match(guide,/页面上没有「个人容器」选项，说明尚未确认你有可用的个人容器位置；可刷新项目重试/);
+  assert.match(guide,/网页从「我的项目」进入个人容器.*不用先选顶栏服务器/);
+  assert.match(guide,/切换顶栏服务器不会搬迁当前容器、文件或开发终端/);
   assert.match(guide,/训练固定该镜像版本并只见调度分配的 GPU/);
   assert.match(guide,/shared\/isolated Python 模式的 `\/tmp`/);
   assert.match(guide,/容器可写层，占用工作区磁盘，是否有个人硬配额取决于节点配置/);

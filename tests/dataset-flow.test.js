@@ -26,7 +26,7 @@ test('database preservation needs exact version, retained original and consisten
   for(const value of [storage('ARCHIVED',{originalRetained:false}),storage('ARCHIVED',{version:other}),storage('ARCHIVED',{archiveMachine:null}),storage('FUTURE')]){
     assert.equal(databaseSummary(version(value)).saved,false);assert.doesNotMatch(databaseGroundHTML(version(value)),/原件已保存/);
   }
-  for(const [phase,label] of [['QUEUED','等待存入'],['COPYING','存入中'],['PROVISIONING','校验中'],['CERTIFYING','检查恢复能力'],['FAILED','存入数据库失败'],['BLOCKED','待确认']]){
+  for(const [phase,label] of [['QUEUED','等待存入'],['COPYING','存入中'],['PROVISIONING','校验中'],['CERTIFYING','检查恢复能力'],['FAILED','存入仓库失败'],['BLOCKED','待确认']]){
     const v=version(storage(phase));assert.equal(databaseSummary(v).label,label);assert.doesNotMatch(databaseGroundHTML(v),/\d+%|原件已保存/);
   }
   const v=version();v.locations.push({machine:'another-node',dataset:'samples',storage:storage('COPYING')});assert.equal(databaseSummary(v).phase,'COPYING');
@@ -41,7 +41,7 @@ test('an empty cache is recoverable only with same-version database proof and ex
   for(const state of ['UNKNOWN','STAGING','FAILED','PREPARING','READY'])assert.notEqual(cacheFact(v,catalog.machine,catalog,state).kind,'recoverable');
   assert.equal(cacheFact(v,'another-node',catalog,'NOT_LOCAL').kind,'none','selected-machine permission cannot grant another cell');
   assert.equal(hasDatabaseOriginal(version(null)),false);assert.equal(databaseSummary(version(null)).kind,'none');
-  assert.match(databaseGroundHTML(version(null)),/仅本机缓存 · 未存入数据库/);
+  assert.match(databaseGroundHTML(version(null)),/仅服务器缓存 · 未存入仓库/);
   assert.doesNotMatch(databaseGroundHTML(v)+uploadJourneyHTML(null,catalog.machine),/已释放|SSD|HDD|NVMe|归档|GC/);
 });
 test('progress has an explicit byte contract and current catalog renders no percentage or invented lifecycle time',()=>{

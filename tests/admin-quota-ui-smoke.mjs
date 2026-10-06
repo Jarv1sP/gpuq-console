@@ -36,16 +36,16 @@ try{
     await page.goto(origin);await page.locator('#login-form [name=username]').fill(role==='admin'?'admin':member.username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});
     await page.locator('[name=workspace-machine]').selectOption(machine.id);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
     const exempt=role==='admin',demand=capacity+1;
-    if(exempt){assert.match(await page.locator('#self-summary').innerText(),/免个人额度/);assert.doesNotMatch(await page.locator('#self-summary').innerText(),new RegExp(demand+' / '+capacity));assert.equal(await page.locator('#self-summary .wb-quota-segments').count(),0);assert.match(await page.locator('#quota-ledger').innerText(),/免个人额度 · 资源不足正常排队/);assert.doesNotMatch(await page.locator('#quota-ledger').innerText(),new RegExp(demand+' /'));}
-    else{assert.match(await page.locator('#self-summary').innerText(),/1 \/ 1/);assert.match(await page.locator('#quota-ledger').innerText(),/1 \/ 1/);assert.doesNotMatch(await page.locator('#quota-ledger').innerText(),/免个人额度/);}
+    if(exempt){assert.match(await page.locator('#self-summary').innerText(),/不限个人额度/);assert.doesNotMatch(await page.locator('#self-summary').innerText(),new RegExp(demand+' / '+capacity));assert.equal(await page.locator('#self-summary .wb-quota-segments').count(),0);assert.match(await page.locator('#quota-ledger').innerText(),/不限个人额度 · 资源不足正常排队/);assert.doesNotMatch(await page.locator('#quota-ledger').innerText(),new RegExp(demand+' /'));}
+    else{assert.match(await page.locator('#self-summary').innerText(),/1 \/ 1/);assert.match(await page.locator('#quota-ledger').innerText(),/1 \/ 1/);assert.doesNotMatch(await page.locator('#quota-ledger').innerText(),/不限个人额度/);}
     await openSubmit(page);assert.equal(await page.locator('[name=cards]').getAttribute('max'),String(machine.cards),'single request is bounded by hardware, never remaining personal quota');
     await page.locator('[name=cards]').fill(String(exempt?machine.cards:1));assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),false,'queued demand does not impose a client-only submission fence');
-    const preflight=await page.locator('#submit-check-list').innerText();assert.equal(preflight.includes('免个人额度'),exempt);
+    const preflight=await page.locator('#submit-check-list').innerText();assert.equal(preflight.includes('不限个人额度'),exempt);
     await closeSubmit(page);await page.keyboard.press('Control+k');await page.locator('#mission-control').waitFor({state:'visible'});
-    const meter=await page.locator('.mc-overview .mc-meter').first().innerText();assert.equal(meter.includes('免个人额度'),exempt);if(exempt)assert.doesNotMatch(meter,/\//);else assert.match(meter,/1 \/ 1/);
+    const meter=await page.locator('.mc-overview .mc-meter').first().innerText();assert.equal(meter.includes('不限个人额度'),exempt);if(exempt)assert.doesNotMatch(meter,/\//);else assert.match(meter,/1 \/ 1/);
     if(exempt)assert.match(await page.locator('#control-servers').innerText(),new RegExp('单次最多 '+machine.cards+' 张'));
     await page.keyboard.press('Escape');await page.locator('#mission-control').waitFor({state:'hidden'});await page.setViewportSize({width:390,height:844});await page.locator('[data-nav=me]').click();
-    const me=await page.locator('#me-content .me-telemetry').innerText();assert.equal(me.includes('免个人额度'),exempt);if(exempt)assert.doesNotMatch(me,/\//);else assert.match(me,/1 \/ 1/);
+    const me=await page.locator('#me-content .me-telemetry').innerText();assert.equal(me.includes('不限个人额度'),exempt);if(exempt)assert.doesNotMatch(me,/\//);else assert.match(me,/1 \/ 1/);
     for(const width of [1440,390]){await page.setViewportSize({width,height:width===390?844:1080});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:join(shots,role+'-'+width+'.png'),fullPage:true});}
     await context.close();
   }

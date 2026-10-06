@@ -34,7 +34,8 @@ try{
         if(operation==='state')return reply(route,null);
         if(operation==='projects.list')return reply(route,{projects:[]});
         if(operation==='datasets.catalog')return reply(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[{dataset:'local-sample',name:'样例数据',versions:[{version:release,state:'READY',bytes:7*1024**3,files:12,canPrepare:false,locations:machines.map(m=>({machine:m.id,state:'READY'}))}]}]});
-        if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
+        if(operation==='datasets.upload.routes')return reply(route,{available:false,protocol:'dataset-upload-v1',machine:args.machine});
+    if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
         if(operation==='cloud.info')return reply(route,{capabilityVerified:shareEnabled,configurationEnabled:true,aliyunConnected:true,nodeDirect:true,managedExternally:true});
         if(operation==='cloud.import.list')return reply(route,{imports:[]});
         if(operation==='cloud.inspect')return reject(route,'分享能力尚未开放。',409);
@@ -81,10 +82,10 @@ try{
       assert((await skipBounds()).bottom<=0);await page.screenshot({path:join(screenshots,name+'.png')});
     };
     await page.locator('[data-nav=datasets]').click();
-    await page.locator('#datasets-refresh').click();await page.locator('.dataset-matrix').waitFor();
+    await page.locator('#datasets-refresh').click();await page.locator('[data-v3-select]').first().waitFor();
     await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
-    assert.deepEqual(await page.locator('.dataset-matrix-heading .server-id').allTextContents(),machines.map(m=>m.id));
-    const openCloud=async()=>{await page.locator('#datasets-add > summary').click();await page.locator('[data-dataset-source=workspace]').click();if(!await page.locator('#cloud-files').evaluate(el=>el.open))await page.locator('#cloud-files > summary').click();};
+    assert.deepEqual(await page.locator('.v3-server-chip:not(.v3-all)').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Filter)),machines.map(m=>m.id));assert.equal(await page.locator('.dataset-matrix').count(),0);
+    const openCloud=async()=>{await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();if(!await page.locator('#cloud-files').evaluate(el=>el.open))await page.locator('#cloud-files > summary').click();};
     const idle=()=>page.waitForFunction(()=>!document.querySelector('#cloud-files-refresh').disabled);
     const refresh=async()=>{await page.locator('#cloud-files-refresh').click();await idle();};
     const initialRead=page.waitForRequest(request=>request.url()===origin+'/api/call'&&request.postDataJSON().operation==='cloud.files.list');

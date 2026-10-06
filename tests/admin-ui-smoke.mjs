@@ -54,7 +54,14 @@ try{
       const url=new URL(route.request().url());
       if(url.origin!==origin&&!['data:','blob:'].includes(url.protocol)){outside.push(url.href);await route.abort();return;}
       const reply=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
+      // Exercise the frame's zero/one registry in isolation; the real member module
+      // has separate acceptance with its actual controls and administration API.
+      if(url.pathname==='/admin-members-ui.js'){await route.fulfill({contentType:'text/javascript',body:`export const membersRoute=route=>String(route??'').replace(/^#/,'')==='users'?'#admin/members':route;export const membersAdminUI=()=>({active:()=>false,capture:()=>null,current:()=>false,owns:()=>false,dispose(){}});`});return;}
+      if(url.pathname==='/admin-gpu-tasks.js'){await route.fulfill({contentType:'text/javascript',body:'export function registerGpuTasksAdmin(){}'});return;}
       if(url.pathname==='/machines.js'){await route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(MACHINES)+';'});return;}
+      // Isolate the frame's zero/one registrations; real storage mounting is
+      // exercised by the dataset/admin storage acceptance entry.
+      if(url.pathname==='/admin-data-storage.js'){await route.fulfill({contentType:'text/javascript',body:'export function registerDatasetStorageAdmin(){}'});return;}
       if(url.pathname==='/api/login'){
         if(heldLogin)await heldLogin.promise;
         logged=true;await reply({principal:actor,state:state()});return;

@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 // Actual Portal/SQLite/cookies/CSP/assets in Chromium. Node observations and
 // terminal output are synthetic; no shell, GPU, SSH or production mutation.
 import assert from 'node:assert/strict';
@@ -30,6 +31,8 @@ try{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='projects.list')return {projects:[structuredClone(project)]};
     if(operation==='projects.status')return structuredClone(project);
+    if(operation==='datasets.list')return {datasets:[]};
+    if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
     if(operation==='logs')return {text:'epoch 12/40 loss=0.438 val_acc=0.716\ncheckpoint saved\nTraining continues on the synthetic node.'};
     if(operation==='diagnostics')return {jobId:args.job.id,state:'COMPLETE',schedulerState:'FAILED',attempts:[],captures:[],historyAvailable:true,allocationHistory:[]};
     if(operation==='files.list')return {entries:[{name:'metrics.json',type:'file',size:32}]};
@@ -177,7 +180,13 @@ try{
   const statePage=await pageFor(1440);await login(statePage,member.username);
   running.progress.stale=true;service.save();await refreshVisible(statePage);await statePage.locator('.wb-progress-number').filter({hasText:'—'}).waitFor();assert.equal(await statePage.locator('.wb-focal progress').count(),0,'stale self-report has no trusted progress line');await capture(statePage,'work-stale-member-1440');await statePage.setViewportSize({width:390,height:844});await capture(statePage,'work-stale-member-390');
   running.progress.stale=false;service.save();await statePage.close();
-  const adminPage=await pageFor(1440);await login(adminPage,'admin');await adminPage.keyboard.press('Control+k');await adminPage.locator('#control-attention').filter({hasText:'李明'}).waitFor();await capture(adminPage,'control-admin-1440',true);await adminPage.keyboard.press('Escape');await adminPage.locator('#mission-control').waitFor({state:'hidden'});
+  const adminPage=await pageFor(1440);await login(adminPage,'admin');await adminPage.keyboard.press('Control+k');await adminPage.locator('#mission-control').waitFor({state:'visible'});
+  assert.doesNotMatch(await adminPage.locator('#mission-control').innerText(),/李明|待审批/,'The personal control view does not expose administrator approvals');
+  await capture(adminPage,'control-admin-1440',true);await adminPage.keyboard.press('Escape');await adminPage.locator('#mission-control').waitFor({state:'hidden'});
+  await adminPage.evaluate(()=>location.hash='#admin/tasks');await adminPage.locator('.admin-task-approvals').waitFor({state:'visible'});
+  assert.match(await adminPage.locator('.admin-task-approvals').innerText(),/待审批/);await adminPage.locator('.admin-task-approvals a').click();
+  await adminPage.locator('#user-list').filter({hasText:'李明'}).waitFor();await capture(adminPage,'approvals-admin-1440');await adminPage.locator('[data-nav=work]').click();
+  await openMembers(adminPage);await adminPage.locator('#user-list [data-user]').filter({hasText:'李明'}).waitFor();assert.equal(await adminPage.locator('#user-list [data-user]').filter({hasText:'李明'}).count(),1);await capture(adminPage,'members-admin-1440');await adminPage.locator('[data-nav=work]').click();
   await service.invoke(admin.token,'maintenance.set',{scope:'all',enabled:true,revision:0,reason:'本地验收维护横幅：暂停新任务，运行中任务继续。'});await refreshVisible(adminPage);await adminPage.locator('.maintenance-banner').waitFor();assert.equal(await adminPage.locator('.maintenance-settings').count(),1);await capture(adminPage,'maintenance-admin-1440');await adminPage.locator('.maintenance-settings summary').click();await capture(adminPage,'maintenance-settings-admin-1440');
   await refreshVisible(phone);assert.equal(await phone.locator('.maintenance-settings').count(),0);await phone.locator('[data-nav=work]').click();await capture(phone,'maintenance-member-390');
   await adminPage.setViewportSize({width:390,height:844});await noOverflow(adminPage);await capture(adminPage,'maintenance-admin-390');await adminPage.keyboard.press('Control+k');await capture(adminPage,'control-admin-390',true);await adminPage.keyboard.press('Escape');await adminPage.locator('[data-nav=me]').click();await capture(adminPage,'me-admin-390');await adminPage.setViewportSize({width:1440,height:1080});await capture(adminPage,'me-admin-1440');

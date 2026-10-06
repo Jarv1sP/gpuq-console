@@ -40,6 +40,7 @@ try {
     calls.push({machine, operation, args: structuredClone(args)});
     assert.ok(MACHINES.some(item => item.id === machine));
     if (operation === 'projects.list') return {projects: []};
+    if(operation==='datasets.upload.routes'){assert.equal(args.hostAdmin,false);assert.equal(args.uploadId,undefined);return {available:false,protocol:'dataset-upload-v1',reason:'not-configured',relayLimitBytes:256*1024**2};}
     if (operation === 'datasets.capacity') return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,totalInodes:100000,availableInodes:50000,inodeUsageKnown:true,guarded:true};
     if (operation === 'datasets.list') {
       if (machine === 'gpu-2' && listGate) {waitingList?.(); await listGate;}
@@ -96,6 +97,7 @@ try {
     await page.locator('[data-nav=datasets]').click();
   }
   async function refresh(page) {
+    if(!await page.locator('#datasets-refresh').isVisible()&&await page.locator('[data-v3-back]').isVisible())await page.locator('[data-v3-back]').click();
     await Promise.all([page.waitForResponse(response => response.url() === origin + '/api/call' &&
       response.request().postDataJSON()?.operation === 'datasets.catalog'), page.locator('#datasets-refresh').click()]);
     await page.locator('#datasets-refresh').waitFor({state: 'visible'});
@@ -109,53 +111,74 @@ try {
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({path: join(screenshots, name), fullPage: await page.locator('dialog[open]').count()===0, animations: 'disabled'});
   }
-  async function prepare(page) {
-    await Promise.all([page.waitForResponse(response => response.url() === origin + '/api/call' &&
-      response.request().postDataJSON()?.operation === 'datasets.catalog'),
-      page.locator('[data-prepare-dataset="sample"]').click()]);
-    await page.waitForFunction(() => document.querySelector('#dataset-catalog')?.textContent.includes('准备中'));
+  const row=(page,id)=>page.locator('[data-v3-select="'+id+'"]');
+  const detail=page=>page.locator('#warehouse-inspector');
+  const cache=(page,id='sample',machine='gpu-1')=>page.locator('[data-v3-cache="'+machine+'"][data-dataset="'+id+'"]');
+  async function selectDataset(page,id,versionChoice=null){
+    if(!await row(page,id).isVisible()&&await page.locator('[data-v3-back]').isVisible())await page.locator('[data-v3-back]').click();
+    await row(page,id).click();
+    if(versionChoice&&await page.locator('[data-v3-version]').count())await page.locator('[data-v3-version]').selectOption(versionChoice);
+    await detail(page).locator('[data-use-dataset="'+id+'"]').waitFor({state:'visible'});
   }
-  const card = page => page.locator('.dataset-card').filter({has: page.locator('h3', {hasText: /^sample$/})});
+  async function switchMachine(page,machine){
+    await page.locator('#context-machine').selectOption(machine);
+    await page.waitForFunction(machine=>document.querySelector('[name=dataset-machine]').value===machine&&!document.querySelector('#datasets-refresh').disabled,machine);
+  }
+  async function setDatasetMachine(page,machine){
+    await page.locator('[data-v3-upload]').first().click();await page.locator('[name=dataset-machine]').selectOption(machine);await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);await page.locator('[data-dataset-add-close]').click();
+  }
+  async function prepare(page){
+    await selectDataset(page,'sample');
+    await Promise.all([page.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.prepare'),cache(page).click()]);
+    await page.waitForFunction(()=>document.querySelector('#warehouse-inspector')?.textContent.includes('取回中'));
+  }
 
-  await login(admin, 'admin'); await refresh(admin);
-  assert.equal(await admin.locator('.dataset-card').count(), 3);
-  assert.match(await admin.locator('#dataset-catalog').textContent(), /admin-private/);
-  assert.equal(await admin.locator('[data-use-dataset="admin-private"]').isDisabled(),true,'Admin metadata visibility grants no personal dataset ownership');
-  assert.equal(await card(admin).locator('.dataset-owner').textContent(), '共享授权用户：admin、dataset-browser-user');
+  await login(admin,'admin');await refresh(admin);
+  assert.equal(await admin.locator('[data-v3-select]').count(),3);
+  assert.match(await admin.locator('#dataset-catalog').textContent(),/admin-private/);
+  await selectDataset(admin,'admin-private');
+  assert.equal(await detail(admin).locator('[data-use-dataset]').isDisabled(),true,'Admin metadata visibility grants no personal dataset ownership');
+  await selectDataset(admin,'sample');
+  assert.equal(await row(admin,'sample').locator('.v3-owner').textContent(),'admin、dataset-browser-user');
+  assert.equal(await row(admin,'sample').locator('.v3-owner').getAttribute('title'),'所属 admin、dataset-browser-user');
+  assert.equal(await detail(admin).locator('.v3-meta>span').first().textContent(),'所属 admin、dataset-browser-user');
   assert.ok(calls.some(call=>call.operation==='datasets.list'&&call.args.userId==='builtin-admin'&&call.args.hostAdmin===true));
-  assert.equal(await admin.locator('#datasets-capacity strong').innerText(),'502 GiB');assert.equal(await admin.locator('#datasets-capacity small').innerText(),'共 1024 GiB');assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/可用 512 GiB/);assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/共享数据盘，容量不是个人配额/);
-  assert.equal(await admin.locator('.dataset-card h3',{hasText:/^another$/}).count(),1,'Same dataset and version is merged across machines');
+  assert.equal(await admin.locator('#datasets-capacity strong').textContent(),'502 GiB');assert.equal(await admin.locator('#datasets-capacity small').textContent(),'共 1024 GiB');assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/可用 512 GiB/);assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/共享数据盘，容量不是个人配额/);
+  assert.equal(await row(admin,'another').count(),1,'Same dataset and version is merged across machines');
   assert.equal(await admin.locator('#datasets-add').evaluate(node=>node.open),false,'Import controls start collapsed');
-  await capture(admin, 'datasets-admin-desktop.png');
-  phases.set('gpu-2', 'STAGING');
-  await admin.locator('[name=dataset-machine]').selectOption('gpu-2');
-  await admin.locator('[data-prepare-dataset="another"]').waitFor();
-  assert.equal(await admin.locator('[data-prepare-dataset="another"]').isEnabled(), true, 'Interrupted staging must remain resumable');
-  assert.equal(await admin.locator('[data-use-dataset="another"]').isEnabled(), true,'Approved interrupted staging can enter preparation-before-training');
-  phases.set('gpu-2', 'READY');
+  assert.equal(await admin.locator('.dataset-cache-admin,[data-remove-more],[data-cache-pin-slot],#cloud-admin').count(),0,'Main view has no privileged storage actions');
+  await capture(admin,'datasets-admin-desktop.png');
+  phases.set('gpu-2','STAGING');await switchMachine(admin,'gpu-2');await selectDataset(admin,'another');
+  assert.equal(await cache(admin,'another','gpu-2').isEnabled(),true,'Interrupted staging must remain resumable');
+  assert.equal(await detail(admin).locator('[data-use-dataset="another"]').isEnabled(),true,'Approved interrupted staging can enter preparation-before-training');
+  phases.set('gpu-2','READY');
 
-  await login(member, 'dataset-browser-user'); await refresh(member);
-  assert.deepEqual(await member.locator('[name=dataset-machine] option').evaluateAll(options => options.map(option => option.value)), ['gpu-1', 'gpu-2']);
-  assert.equal(await member.locator('.dataset-card').count(), 3);
-  assert.match(await member.locator('#dataset-catalog').textContent(), /admin-private/);
+  await login(member,'dataset-browser-user');await refresh(member);
+  assert.deepEqual(await member.locator('[name=dataset-machine] option').evaluateAll(options=>options.map(option=>option.value)),['gpu-1','gpu-2']);
+  assert.equal(await member.locator('[data-v3-select]').count(),3);
+  assert.match(await member.locator('#dataset-catalog').textContent(),/admin-private/);
   assert.ok(calls.some(call=>call.operation==='datasets.list'&&call.args.userId==='builtin-admin'&&call.args.hostAdmin===true));
-  assert.equal(await member.locator('.dataset-matrix').getAttribute('data-machine-count'),String(MACHINES.length),'Metadata includes every inventory node while the execution selector stays quota-bound');
-  const foreign=member.locator('.dataset-card').filter({has:member.locator('h3',{hasText:/^admin-private$/})});
-  assert.match(await foreign.innerText(),/仅浏览 · 未获使用授权/);
+  assert.equal(await member.locator('.v3-server-chip:not(.v3-all)').count(),MACHINES.length,'Metadata includes every inventory node while the execution selector stays quota-bound');
+  await selectDataset(member,'admin-private');
+  assert.match(await row(member,'admin-private').innerText(),/仅浏览/);
+  const foreign=detail(member);
   assert.equal(await foreign.locator('[data-use-dataset]').isDisabled(),true);
-  assert.equal(await foreign.locator('[data-prepare-dataset],[data-remove-more],[data-remove-confirm]').count(),0);
-  await foreign.locator('summary').click();assert.doesNotMatch(await foreign.locator('.dataset-lifecycle').innerText(),/可用于训练/);
+  assert.equal(await foreign.locator('[data-v3-cache]:enabled,[data-remove-more],[data-remove-confirm],.v3-edit:enabled').count(),0);
+  assert.doesNotMatch(await foreign.innerText(),/可用于训练/);
   const beforeTamper=calls.length;
   await foreign.locator('[data-use-dataset]').evaluate(button=>{button.disabled=false;button.click();button.disabled=true;});
   assert.equal(await member.locator('#work-submit').isVisible(),false,'Delegated action rechecks authorization even if disabled DOM is removed');
   assert.equal(calls.length,beforeTamper,'Metadata-only click never reaches node or submission APIs');
-  await foreign.locator('summary').click();
-  assert.match(await card(member).textContent(), /待准备/);
-  assert.equal(await card(member).locator('.dataset-owner').textContent(), '共享授权用户：admin、dataset-browser-user');
-  assert.equal(await card(member).locator('[data-prepare-dataset]').isEnabled(), true);
-  assert.equal(await card(member).locator('[data-use-dataset]').isEnabled(), true);
-  assert.equal(await card(member).locator('[data-use-dataset]').textContent(), '准备后训练');
-  assert.equal(await card(member).locator('input[readonly]').inputValue(), 'sample@' + version);
+  await selectDataset(member,'sample');
+  assert.equal(await row(member,'sample').locator('.v3-owner').textContent(),'admin、dataset-browser-user');
+  assert.equal(await row(member,'sample').locator('.v3-owner').getAttribute('title'),'所属 admin、dataset-browser-user');
+  assert.equal(await detail(member).locator('.v3-meta>span').first().textContent(),'所属 admin、dataset-browser-user');
+  assert.equal(await cache(member).isEnabled(),true);
+  assert.equal(await detail(member).locator('[data-use-dataset]').isEnabled(),true);
+  assert.equal(await detail(member).locator('[data-use-dataset]').textContent(),'用于训练');
+  assert.equal(await detail(member).locator('.v3-code code').first().textContent(),'--data sample@'+version);
+  assert.equal(await detail(member).locator('.v3-code code').last().textContent(),'/data2/sample');
+  assert.equal(await detail(member).locator('.v3-lock').textContent(),'只读');
   assert.equal(await member.locator('a[href="/guide"]').count(),1,'The workbench has exactly one reader guide entry');
   assert.equal(await member.locator('[data-user-guide]').count(),0,'The shared entry is not duplicated by a workspace guide button');
   const [guide] = await Promise.all([member.waitForEvent('popup'), member.locator('a[href="/guide"]:visible').click()]);
@@ -167,8 +190,9 @@ try {
   assert.ok((await guide.locator('.guide-prose pre code').allTextContents()).some(block => block.includes('gpuctl data upload ')), 'Dataset guide includes actionable upload instructions');
   await guide.close();
   await capture(member, 'datasets-member-registered.png');
-  await member.locator('#datasets-add > summary').click();
-  await member.locator('[name=dataset-name]').fill('preserved-draft');
+  await member.locator('[data-v3-upload]').first().click();
+  await member.locator('#v3-file-picker').setInputFiles({name:'draft.txt',mimeType:'text/plain',buffer:Buffer.from('draft')});
+  await member.locator('#v3-upload-display').fill('preserved-draft');
   await member.locator('[data-dataset-source=link]').click();
   await member.locator('[name=cloud-source]').selectOption('https');
   await member.locator('[name=cloud-url]').fill('https://example.invalid/dataset.zip');
@@ -178,60 +202,59 @@ try {
   assert.equal(await member.locator('#dataset-add-dialog #cloud-files-form').count(),1,'The import sheet preserves the private cloud file panel');
   assert.equal(await member.locator('#dataset-add-dialog [name=cloud-files-path]').count(),1);
   await member.locator('[data-dataset-source=directory]').click();
-  assert.equal(await member.locator('[name=dataset-name]').inputValue(),'preserved-draft');
+  assert.equal(await member.locator('#v3-upload-display').inputValue(),'preserved-draft');
   await member.locator('[data-dataset-source=link]').click();
   assert.equal(await member.locator('[name=cloud-url]').inputValue(),'https://example.invalid/dataset.zip');
   await member.locator('#dataset-source-link').press('ArrowRight');
   assert.equal(await member.locator('#dataset-source-workspace').getAttribute('aria-selected'),'true');
-  assert.equal(calls.some(call=>/cloud|workspace/.test(call.operation)),false,'Selecting an import path never imports, extracts, publishes or starts a terminal');
+  assert.equal(calls.some(call=>/cloud\.(import|files\.(put|pull|begin))|workspace\.(put|publish)|datasets\.upload\.(begin|direct-ticket)|terminal.*open/.test(call.operation)),false,'Passive capability reads and selecting a source never imports, extracts, publishes, issues tickets or starts a terminal');
   await member.locator('[data-dataset-add-close]').click();
   assert.equal(await member.locator('#dataset-add-dialog').isVisible(),false,'The import sheet closes without discarding method drafts');
-  await member.locator('#datasets-add > summary').click();
+  await member.locator('[data-v3-upload]').first().click();
   await member.locator('#dataset-add-dialog').waitFor({state:'visible'});
   await member.evaluate(()=>{location.hash='work';});
   await member.locator('#page-work').waitFor({state:'visible'});
   await member.locator('#dataset-add-dialog').waitFor({state:'hidden'});
   assert.equal(await member.locator('#dataset-add-dialog').getAttribute('open'),null,'A room deep link closes the native sheet and releases background input');
   await member.locator('[data-nav=datasets]').click();
-  await member.locator('#datasets-add > summary').click();
+  await member.locator('[data-v3-upload]').first().click();
   await member.locator('#dataset-add-dialog').waitFor({state:'visible'});
-  assert.equal(await member.locator('[name=dataset-name]').inputValue(),'preserved-draft','Changing rooms keeps the upload draft');
+  assert.equal(await member.locator('#v3-upload-display').inputValue(),'preserved-draft','Changing rooms keeps the upload draft');
   await member.locator('[data-dataset-add-close]').click();
 
   // Delay one machine's response: old machine entries must disappear immediately.
   let releaseList; listGate = new Promise(resolve => {releaseList = resolve;});
   const listStarted = new Promise(resolve => {waitingList = resolve;});
-  await member.locator('[name=dataset-machine]').selectOption('gpu-2'); await listStarted;
-  assert.equal(await member.locator('.dataset-card').count(), 0);
+  await member.locator('#context-machine').selectOption('gpu-2'); await listStarted;
+  assert.equal(await member.locator('[data-v3-select]').count(),0);assert.equal(await detail(member).locator('[data-use-dataset]:enabled').count(),0,'No stale inspector can submit during reload');
   assert.equal(await member.locator('[name=dataset-machine]').isDisabled(), true);
   releaseList(); listGate = null; waitingList = null;
-  await member.locator('.dataset-card h3', {hasText: 'another'}).waitFor();
-  assert.match(await card(member).textContent(), /本机没有此版本/);
-  assert.equal(await card(member).locator('[data-use-dataset]').isDisabled(),true,'Remote READY is not current-machine READY');
-  await member.locator('[name=dataset-machine]').selectOption('gpu-1');
-  await card(member).waitFor();
+  await row(member,'another').waitFor();await member.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);await selectDataset(member,'sample');
+  assert.equal(await cache(member,'sample','gpu-2').isDisabled(),true,'Remote metadata without preparation rights cannot be cached');
+  assert.equal(await detail(member).locator('[data-use-dataset]').isDisabled(),true,'Remote READY is not current-machine READY');
+  await switchMachine(member,'gpu-1');await selectDataset(member,'sample');
 
   await prepare(member);
-  assert.match(await card(member).textContent(), /准备中/);
+  assert.match(await detail(member).textContent(), /取回中/);
   assert.equal(service.store.jobs.length, 0, 'Preparing data must not reserve any GPU');
   phases.set('gpu-1', 'FAILED'); await refresh(member);
-  assert.match(await card(member).textContent(), /准备失败/);
-  assert.match(await card(member).textContent(), /Test preparation interrupted/);
-  assert.equal(await card(member).locator('[data-prepare-dataset]').isEnabled(), true);
-  assert.equal(await card(member).locator('[data-use-dataset]').isDisabled(), true,'Failed data requires an explicit preparation retry, not another doomed training');
+  assert.match(await detail(member).textContent(), /取回失败/);
+  assert.match(await detail(member).textContent(), /Test preparation interrupted/);
+  assert.equal(await cache(member).isEnabled(), true);
+  assert.equal(await detail(member).locator('[data-use-dataset]').isDisabled(), true,'Failed data requires an explicit preparation retry, not another doomed training');
   await capture(member, 'datasets-member-failed-retry.png');
   await prepare(member);
   assert.equal(calls.filter(call => call.operation === 'datasets.prepare').length, 2);
   phases.set('gpu-1', 'READY'); await refresh(member);
-  assert.equal(await card(member).locator('[data-prepare-dataset]').isDisabled(), true);
-  assert.equal(await card(member).locator('[data-use-dataset]').isEnabled(), true);
+  assert.equal(await cache(member).count(),0,'READY has no redundant cache button');
+  assert.equal(await detail(member).locator('[data-use-dataset]').isEnabled(), true);
 
   await member.setViewportSize({width: 390, height: 844});
   await capture(member, 'datasets-member-mobile-ready.png');
   await member.screenshot({path:join(screenshots,'datasets-unified-mobile-viewport.png'),fullPage:false});
   const layout = await member.evaluate(() => ({width: innerWidth, scroll: document.documentElement.scrollWidth}));
   assert.ok(layout.scroll <= layout.width + 1, `390px dataset page overflows: ${JSON.stringify(layout)}`);
-  await card(member).locator('[data-use-dataset]').click();
+  await selectDataset(member,'sample');await detail(member).locator('[data-use-dataset]').click();
   await member.locator('#work-submit').waitFor({state: 'visible'});
   assert.equal(await member.locator('#page-datasets').isVisible(),true,'Selecting a fixed dataset opens submission above the current room');
   assert.equal(await member.locator('#page-work').isVisible(),false,'Dataset selection preserves its page context');
@@ -265,6 +288,7 @@ try {
   await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});
   moreLocalVersions=true;await refresh(member);
   await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-2'),member.locator('#context-machine').selectOption('gpu-2')]);
+  await setDatasetMachine(member,'gpu-1');
   let notifyHeld,rejectHeld;const held=new Promise((resolve,reject)=>{notifyHeld=resolve;rejectHeld=reject;});
   await member.route('**/api/call',guardedRoute(async route=>{
     const request=route.request().postDataJSON();
@@ -276,14 +300,14 @@ try {
     }else await route.fallback();
   }));
   holdLookup=true;
-  const chosen=value=>member.locator('article.dataset-card').filter({has:member.locator('input[value="'+value+'"]')}).locator('[data-use-dataset]');
-  await chosen('sample@'+version).click();
+  const chosen=async value=>{const [dataset,selectedVersion]=value.split('@');await selectDataset(member,dataset,selectedVersion);await detail(member).locator('[data-use-dataset]').click();};
+  await chosen('sample@'+version);
   let heldTimeout;
   try{await Promise.race([held,new Promise((_,reject)=>{heldTimeout=setTimeout(()=>reject(new Error('The first dataset choice must request its server projects')),10000);})]);}
   finally{clearTimeout(heldTimeout);}
   if(await member.locator('#work-submit').isVisible()){await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});}
   const latest='sample@'+'d'.repeat(64);
-  await chosen(latest).click();await member.locator('#work-submit').waitFor({state:'visible'});
+  await chosen(latest);await member.locator('#work-submit').waitFor({state:'visible'});
   const before=await member.locator('#train-form [name=datasets]').inputValue();
   const delivered=heldDelivery;
   releaseLookup();await delivered;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
@@ -294,33 +318,38 @@ try {
   // The same intent fence must also hold when the second choice changes node.
   await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});
   await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='projects.list'&&response.request().postDataJSON()?.args.machine==='gpu-2'),member.locator('#context-machine').selectOption('gpu-2')]);
+  await setDatasetMachine(member,'gpu-1');
   const crossNodeHeld=new Promise(resolve=>{notifyHeld=resolve;});holdLookup=true;
-  await chosen('sample@'+version).click();
+  await chosen('sample@'+version);
   try{await Promise.race([crossNodeHeld,new Promise((_,reject)=>{heldTimeout=setTimeout(()=>reject(new Error('The cross-node first choice must request projects')),10000);})]);}
   finally{clearTimeout(heldTimeout);}
-  await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.catalog'),member.locator('[name=dataset-machine]').selectOption('gpu-2')]);
-  await member.locator('[data-use-dataset=another]').waitFor({state:'visible'});
-  await chosen('another@'+version).click();await member.locator('#work-submit').waitFor({state:'visible'});
+  await setDatasetMachine(member,'gpu-2');
+  await row(member,'another').waitFor({state:'visible'});await member.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+  await chosen('another@'+version);await member.locator('#work-submit').waitFor({state:'visible'});
   // Context changes now abort fetch. Await the controlled fixture delivery,
   // then require cancellation as well as the original stale-intent assertions.
   const oldReply=heldDelivery;
   releaseLookup();await oldReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
-  assert.equal(await heldRequest.response(),null,'switching server cancels the older lookup');assert.ok(heldRequest.failure());
+  assert.ok((await heldRequest.response())===null,'switching server cancels the older lookup');assert.ok(heldRequest.failure());
   assert.equal(await member.locator('#train-form [name=machine]').inputValue(),'gpu-2','An old node lookup cannot restore its server');
   assert.equal(await member.locator('#train-form [name=datasets]').inputValue(),'another@'+version,'The newest node and fixed version remain paired');
 
   // Native/programmatic close must cancel pending selection, not only its button.
-  await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.catalog'),member.locator('[name=dataset-machine]').selectOption('gpu-1')]);
+  await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});
+  await setDatasetMachine(member,'gpu-1');
   const closedHeld=new Promise(resolve=>{notifyHeld=resolve;});holdLookup=true;
   // The existing submit sheet is modal, so use the same delegated UI event as
   // the real dataset button without changing the sheet's native close behavior.
   await member.evaluate(ref=>document.dispatchEvent(new CustomEvent('gpuq-open-submit',{detail:{machine:'gpu-1',datasetRef:ref}})),'sample@'+version);
   try{await Promise.race([closedHeld,new Promise((_,reject)=>{heldTimeout=setTimeout(()=>reject(new Error('The close-race choice must request projects')),10000);})]);}
   finally{clearTimeout(heldTimeout);}
+  // close() on a closed dialog is a no-op; establish the actual native transition.
+  await member.evaluate(()=>document.querySelector('#work-submit').showModal());
+  assert.equal(await member.locator('#work-submit').evaluate(dialog=>dialog.open),true,'Native-close fixture starts open');
   await member.evaluate(()=>document.querySelector('#work-submit').close());await member.locator('#work-submit').waitFor({state:'hidden'});
   const closedReply=heldDelivery;
   releaseLookup();await closedReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
-  assert.equal(await heldRequest.response(),null,'native close cancels the pending lookup');assert.ok(heldRequest.failure());
+  assert.ok((await heldRequest.response())===null,'native close cancels the pending lookup');assert.ok(heldRequest.failure());
   assert.equal(await member.locator('#work-submit').isVisible(),false,'A late lookup must not reopen a generically closed submit sheet');
   console.log('DATASETS UI PASS: full metadata catalogs with explicit owner-use gates; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; zero HTTP or browser errors and no external requests.');
   console.log(`Screenshots: ${screenshots}`);
