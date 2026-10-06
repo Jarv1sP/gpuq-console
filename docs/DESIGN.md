@@ -292,6 +292,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.segmented` / `.project-environment-segments` / `.dataset-source-tabs` | [starbase.css](../dist/starbase.css)、[workbench.css](../dist/workbench.css)、[datasets.css](../dist/datasets.css) | 少量互斥项，不把长清单塞分段 | 保留radio/legend，明确选中态 |
 | `.wb-stage-hero` / `.wb-progress-hero` / `.wb-trajectory` / `.wb-ledger` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 阶段自适应当前训练、真实里程碑、额度账本 | 其他训练仍在列表，无进度不给补数 |
 | `.train-grid` / `.field-caption` / `.note-field` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 同一行的训练参数共享subgrid标签与输入轨道；提交/设置/项目/任务留言字段块用24px、标签到控件用12px | 标签折行仍保持控件上沿对齐；ⓘ保留32/44px点击区域，用负margin保持标签行高度；留言复用原提交契约 |
+| `.wb-publish-control` / `.workspace-context-heading .field-caption` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 创建项目与生成训练版本占满同一列；发布说明并入分组标题右侧现有ⓘ | 保留原说明、操作ID与发布确认；按钮两侧对齐，说明不占操作宽度 |
 | `#job-mission` / `.r5-mission` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 任务全屏，肖像只画实际分配的卡 | Esc/关闭/返回任务，保留取消日志输出 |
 | `.resource-chassis` / `.resource-towers` / `.resource-tower` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 真实物理卡位，液位仅表示显存比例 | 手机全部卡位可见，利用率另列，未知斜线 |
 | `.resource-portrait-utils` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 卡位使用率，按真实卡数生成；窄容器自动换列 | 两位等宽序号与百分比分开8px，序号用次级颜色；不把序号拼成读数 |

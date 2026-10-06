@@ -135,6 +135,9 @@ const scenes=[
     {role,room:'project',state:'normal',name:role+'-project',spec:workSpec},
     ...[['project-environment','#project-create .project-environment-choice'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
       spec:{...workSpec,focusedTargets:[selector]}})),
+    {role,room:'project',state:'normal',help:'.workspace-context-heading .field-caption>.ui-info>summary',name:role+'-project-summary-help',
+      spec:{...workSpec,focusedTargets:['.workspace-context-heading .field-caption>.ui-info>summary'],
+        viewportPanels:['.ui-info[open] .ui-info-content'],textContainment:['.ui-info[open] .ui-info-content']}},
     {role,room:'submit',state:'normal',name:role+'-submit-bottom',spec:{...dialogSpec('#work-submit','#work-submit .sheet-scroll'),focusedTargets:['#train-form [name=command]']}},
     ...['normal','error','ended'].map(state=>({role,room:'terminal',state,name:role+'-terminal-'+state,
       spec:{controls,roots:['.terminal-dialog'],scrollPanels:['.terminal-dialog','#terminal-screen .xterm-viewport'],
@@ -470,6 +473,20 @@ try{
             }).map(node=>{const box=node.getBoundingClientRect(),style=getComputedStyle(node);return {tag:node.tagName,id:node.id,class:String(node.className),left:box.left,right:box.right,top:box.top,width:box.width,clientWidth:node.clientWidth,scrollWidth:node.scrollWidth,overflow:style.overflow,clip:style.clip,clipPath:style.clipPath,visibility:style.visibility,closedAncestor:node.closest('details:not([open])')?.className};})),null,2));
           }
           if(zoom===1||scene.toast)await page.screenshot({path:join(output,scene.name+'-'+width+'.png'),animations:'disabled'});
+          if(!before&&scene.room==='project'){
+            const actions=await page.locator('#project-create-form [type=submit],#project-publish').evaluateAll(nodes=>nodes.map(node=>{
+              const box=node.getBoundingClientRect();return {id:node.id||'create-project',left:box.left,right:box.right,width:box.width};
+            }));
+            assert.equal(actions.length,2,'both project actions remain available');
+            assert.ok(Math.abs(actions[0].left-actions[1].left)<=1&&Math.abs(actions[0].right-actions[1].right)<=1,
+              'create and publish share both edges at every tested width: '+JSON.stringify({scene:scene.name,width,zoom,actions}));
+            assert.equal(await page.locator('.wb-publish-control>.ui-info').count(),0,'publication help does not consume action width');
+            assert.equal(await page.locator('.workspace-context-heading .field-caption>.ui-info>summary').count(),1,
+              'project and publication share the existing title-row explanation');
+            assert.match(await page.locator('.workspace-context-heading .ui-info-content').textContent(),
+              /先完成上传并结束开发终端，再保存代码与环境版本。/,'the original publication explanation remains accessible');
+          }
+
         }
         if(scene.toast)for(let cssWidth=213;cssWidth<=256;cssWidth++){
           await page.setViewportSize({width:cssWidth,height:Math.floor(700/zoom)});
