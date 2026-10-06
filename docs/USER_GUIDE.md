@@ -67,6 +67,10 @@ gpuctl ssh
 
 如果提示目标被修改、上传身份冲突或旧上传缺少安全恢复记录，停止重试并联系管理员；不要换名字绕过。上传期间不要在个人终端或容器内同时修改同一路径：目标变化检测不等于对终端写入加锁，正常 `push` 本身会替换目标文件。单个项目文件最多 4 GiB，完整恢复核验需要读取一次目标文件，大文件或慢盘可能需要等待；数据集仍用数据上传流程。
 
+文件已在该服务器个人数据区时，可用 `gpuctl project import 源目录 新目标目录` 直接复制到本项目草稿，不绕门户传字节。两个路径相对，目标须新建、父目录已存在；先结束项目和个人数据终端。`gpuctl project import-status UUID` 等到 `IMPORTED` 后再编辑依赖和发布。任意宿主路径和只读数据集不支持。停止用 `project import-cancel UUID`；UNKNOWN 保留原 UUID，不换新操作。
+
+旧上传卡住且本机原文件找不到时，`gpuctl project uploads` 查看 UUID，再 `gpuctl project upload-cancel UUID`。只清理确认尚未提交的临时上传，不删除项目代码；提交结果不明或目标变化时仍需按原操作核查。
+
 进入项目终端后执行：
 
 ```sh project

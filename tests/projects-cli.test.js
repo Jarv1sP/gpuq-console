@@ -72,6 +72,31 @@ test('project list/status/publish use selected context; publication does not cla
   assert.deepEqual(f.calls.at(-1),{operation:'projects.status',args:{machine:'gpu-2',project:'beta'}});
 });
 
+test('official same-host import is fixed-key, relative and draft-only; status/cancel use no local files',async t=>{
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ f.custom.set('projects.local-import.begin',args=>({protocol:'project-local-import-v1',...args,state:'IMPORTING',draftChanged:false}));
+ f.custom.set('projects.local-import.status',args=>({protocol:'project-local-import-v1',...args,state:'IMPORTED',draftChanged:true}));
+ f.custom.set('projects.local-import.cancel',args=>({protocol:'project-local-import-v1',...args,state:'CANCELED',draftChanged:false}));
+ const value=await f.cli(['project','import','source/code','incoming','--key',JOB]);
+ assert.equal(value.code,0,value.stderr);assert.match(value.stderr,new RegExp(JOB));
+ assert.deepEqual(f.calls.at(-1),{operation:'projects.local-import.begin',args:{machine:'gpu-1',project:'alpha',key:JOB,sourcePath:'source/code',destinationPath:'incoming'}});
+ assert.equal((await f.cli(['project','import-status',JOB])).data.state,'IMPORTED');
+ assert.equal((await f.cli(['project','import-cancel',JOB])).code,0);
+ assert.equal(f.calls.some(c=>['files.put','projects.publish','jobs.submit'].includes(c.operation)),false);
+ for(const args of [['import','/data1/legacy'],['import','source','../escape'],['import','source','--root'],['import-status','bad'],['import','source','--machine','foreign']])assert.equal((await f.cli(['project',...args])).code,1);
+ f.custom.set('projects.local-import.begin',args=>({protocol:'project-local-import-v1',...args,key:randomUUID(),state:'IMPORTED',draftChanged:true}));
+ assert.equal((await f.cli(['project','import','source','--key',JOB])).code,1);
+});
+test('pending upload cleanup discovers UUIDs without original source and never fabricates a target deletion',async t=>{
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ f.custom.set('files.upload.list',args=>({protocol:1,project:args.project,uploads:[{uploadId:JOB,path:'bundle.tar',state:'UPLOADING',receivedBytes:1,totalSize:2,cancelable:true}]}));
+ f.custom.set('files.upload.cancel',args=>({protocol:1,state:'CANCELED',uploadId:args.uploadId}));
+ const listing=await f.cli(['project','uploads']);assert.equal(listing.code,0,listing.stderr);assert.equal(listing.data.uploads[0].uploadId,JOB);
+ assert.equal((await f.cli(['project','upload-cancel',JOB])).code,0);
+ assert.deepEqual(f.calls.at(-1),{operation:'files.upload.cancel',args:{machine:'gpu-1',project:'alpha',area:'code',uploadId:JOB}});
+ for(const args of [['upload-cancel','bad'],['upload-cancel',JOB,'--root'],['uploads','extra']])assert.equal((await f.cli(['project',...args])).code,1);
+ assert.equal(f.calls.some(c=>c.operation==='files.put'),false);
+});
 test('auto run pins the development release but sends opt-in target selection without changing saved context',async t=>{
   const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
   for(const alias of ['--machine','--on']){
