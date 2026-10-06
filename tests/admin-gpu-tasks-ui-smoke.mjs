@@ -116,6 +116,13 @@ try{
         await capture(page,'member-admin-denied');
       }else{
         await page.locator('#admin-content #all-jobs').waitFor({state:'visible'});
+        assert.equal(await page.locator('#all-jobs').count(),1,'All-user training appears exactly once, in the task section');
+        assert.equal(await page.locator('.admin-task-list #all-jobs').count(),1);
+        await page.locator('[data-admin-section=members]').click();await page.locator('#admin-content #page-users').waitFor({state:'visible'});
+        assert.equal(await page.locator('.team-jobs').count(),0,'The member section does not duplicate training management');
+        assert.equal(await page.locator('#all-jobs').count(),0,'Task management unmounts outside its sole section');
+        await page.locator('[data-admin-section=tasks]').click();await page.locator('#admin-content #all-jobs').waitFor({state:'visible'});
+        assert.equal(await page.locator('#all-jobs').count(),1,'Returning to tasks mounts one table');
         assert.equal(await page.locator('#all-jobs tbody tr').count(),2);
         assert.ok((await page.locator('#admin-content .resource-process-table').textContent()).includes('PRIVATE-PROGRAM'));
         assert.equal(await page.locator('#admin-content [data-job-priority]').count(),1);
