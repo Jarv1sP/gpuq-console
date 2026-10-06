@@ -135,9 +135,9 @@ const scenes=[
     {role,room:'project',state:'normal',name:role+'-project',spec:workSpec},
     ...[['project-environment','#project-create .project-environment-choice'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
       spec:{...workSpec,focusedTargets:[selector]}})),
-    {role,room:'project',state:'normal',help:'.workspace-context-heading .field-caption>.ui-info>summary',name:role+'-project-summary-help',
+    {role,room:'project',state:'normal',headingHelp:true,help:'.workspace-context-heading .field-caption>.ui-info>summary',name:role+'-project-summary-help',
       spec:{...workSpec,focusedTargets:['.workspace-context-heading .field-caption>.ui-info>summary'],
-        viewportPanels:['.ui-info[open] .ui-info-content'],textContainment:['.ui-info[open] .ui-info-content']}},
+        viewportPanels:['.ui-info[open] .ui-info-content'],textContainment:['.ui-info[open] .ui-info-content'],scrollPanels:['.ui-info[open] .ui-info-content']}},
     {role,room:'submit',state:'normal',name:role+'-submit-bottom',spec:{...dialogSpec('#work-submit','#work-submit .sheet-scroll'),focusedTargets:['#train-form [name=command]']}},
     ...['normal','error','ended'].map(state=>({role,room:'terminal',state,name:role+'-terminal-'+state,
       spec:{controls,roots:['.terminal-dialog'],scrollPanels:['.terminal-dialog','#terminal-screen .xterm-viewport'],
@@ -436,7 +436,7 @@ try{
             // An explanation overlays later fields. Check its own full target
             // while open, then dismiss/reopen it through the normal trigger
             // around the unchanged probe for all other explanation targets.
-            const expandedHelp=scene.room==='submit'&&scene.help?page.locator(scene.help):null;
+            const expandedHelp=(scene.room==='submit'||scene.headingHelp)&&scene.help?page.locator(scene.help):null;
             if(expandedHelp){
               const activeTarget=await expandedHelp.evaluate(node=>{
                 const box=node.getBoundingClientRect();
@@ -453,6 +453,15 @@ try{
             if(expandedHelp){
               await expandedHelp.click();
               assert.equal(await expandedHelp.evaluate(node=>node.parentElement.open),true,'restore the expanded explanation for the screenshot and dense scan');
+            }
+            if(scene.headingHelp){
+              const scrolling=await page.locator('.workspace-context-heading .ui-info-content').evaluate(async node=>{
+                const previous=node.scrollTop;node.scrollTop=node.scrollHeight;
+                await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+                const result={top:node.scrollTop,maximum:node.scrollHeight-node.clientHeight};
+                node.scrollTop=previous;return result;
+              });
+              assert.ok(Math.abs(scrolling.top-scrolling.maximum)<=1,'all project explanation text remains reachable by scrolling: '+JSON.stringify(scrolling));
             }
           }
           if(process.env.POLISH_DOM_REPORT){

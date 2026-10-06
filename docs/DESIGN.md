@@ -287,7 +287,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.mc-overview` / `.mc-meter-value` | [control-ui.js](../dist/control-ui.js)、[shell.css](../dist/shell.css) | 总控统计按面板容器宽度排列，560px及以下为2×2 | 数值与单位不折行，标签不在词中断开；保留全部真实统计 |
 | `.room-transition-layer` / `.room-ghost` | [shell-ui.js](../dist/shell-ui.js)、[shell.css](../dist/shell.css) | 跨房间快照，同房间页签不使用 | inert、无应用ID/事件钩子，不截操作 |
 | `.sheet` / `.modal` / `.dialog` / `.object-transition-layer` | [motion-ui.js](../dist/motion-ui.js)、[starbase.css](../dist/starbase.css) | 详情/提交/确认浮层，不由动画决定状态 | 原生dialog，关闭/返回焦点；克隆去open |
-| `.copy-help` / `.copy-help-button` / `.copy-help-popup` / `.ui-info` | [copy-help-ui.js](../dist/copy-help-ui.js)、[copy-help.css](../dist/copy-help.css) | 标签行右侧ⓘ，不用孤立一行/长段说明 | aria-controls/expanded，popover视口限制，键盘关闭 |
+| `.copy-help` / `.copy-help-button` / `.copy-help-popup` / `.ui-info` | [copy-help-ui.js](../dist/copy-help-ui.js)、[copy-help.css](../dist/copy-help.css)、[workbench-ui.js](../dist/workbench-ui.js) | 标签行右侧ⓘ，不用孤立一行/长段说明 | aria-controls/expanded，popover视口限制，键盘关闭；工作台说明按触发器上下可用空间限高、内部滚动，不遮住完整点击区域 |
 | `.btn.primary` / `.btn.danger` / `.btn.danger-fill` / `.button.primary` / `.button.quiet` | [starbase.css](../dist/starbase.css)、[styles.css](../dist/styles.css)、[shell.css](../dist/shell.css) | 一个实心主操作，次要安静，破坏性确认代价 | 原生disabled/busy，焦点环，图标有名称 |
 | `.segmented` / `.project-environment-segments` / `.dataset-source-tabs` | [starbase.css](../dist/starbase.css)、[workbench.css](../dist/workbench.css)、[datasets.css](../dist/datasets.css) | 少量互斥项，不把长清单塞分段 | 保留radio/legend，明确选中态 |
 | `.wb-stage-hero` / `.wb-progress-hero` / `.wb-trajectory` / `.wb-ledger` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 阶段自适应当前训练、真实里程碑、额度账本 | 其他训练仍在列表，无进度不给补数 |
