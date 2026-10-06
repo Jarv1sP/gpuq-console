@@ -21,6 +21,8 @@ const fields=(value,allowed)=>{
 const reference=(dataset,version)=>{if(typeof dataset!=='string'||!ID.test(dataset)||typeof version!=='string'||!HASH.test(version))fail('需要数据集 ID 和完整版本。',400);};
 const uuid=value=>{if(typeof value!=='string'||!UUID.test(value))fail('需要完整 UUID 编号。',400);return value;};
 const machine=value=>{if(!MACHINES.some(m=>m.id===value))fail('删除清单包含未知服务器。');return value;};
+const MAPPED_REFUSAL=Symbol('mapped dataset refusal');
+const safeRefusal=error=>error[MAPPED_REFUSAL]?error.message:refusal(error.message);
 function refusal(message){
   if(/retention|保留期|expired/i.test(message))return '保留期已过，不能开始恢复。';
   if(/clock|时钟|时间|synchron/i.test(message))return '节点时间待确认，请联系管理员核对。';
@@ -88,7 +90,7 @@ function externalRetirementAction(archive){
 }
 function publicTask(row){
   return {operationId:row.id,key:row.key,dataset:row.dataset,version:row.version,state:row.state,
-    ...(row.state==='WAITING_CONTINUE'?{canContinue:true}:{}),
+    ...(row.state==='WAITING_CONTINUE'?{canContinue:!row.cancelRequested&&!row.waitingWorker}:{}),
     createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString(),
     ...(row.error?{error:row.error}:{}),copyNotice:'其他名称下的副本不受影响',...(row.retainUntil?{retainUntil:new Date(row.retainUntil*1000).toISOString()}:{}),
     steps:row.steps.map(step=>({machine:step.machine,dataset:step.dataset,operationId:step.operationId,
@@ -121,7 +123,8 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
   };
   service.datasetDeletionBlocked=(host,ref)=>{
     if(!ref||!ID.test(ref.dataset))return false;
-    if(ref.version===null||ref.version===undefined)return !!service.db.prepare('SELECT operation_id FROM dataset_deletion_fences WHERE machine=? AND dataset=? LIMIT 1').get(host,ref.dataset);
+    if(ref.version===null||ref.version===undefined)return service.db.prepare('SELECT operation_id FROM dataset_deletion_fences WHERE machine=? AND dataset=?').all(host,ref.dataset)
+      .some(fence=>{const row=load(fence.operation_id);return !row||!['DELETED','CANCELED'].includes(row.state);});
     if(!HASH.test(ref.version))return false;
     return !!service.db.prepare('SELECT operation_id FROM dataset_deletion_fences WHERE machine=? AND dataset=? AND version=?').get(host,ref.dataset,ref.version);
   };
@@ -317,7 +320,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
   }
   function phaseResult(status,step,phase){
     const result=status.phases[phase];
-    if(result?.ok===false)fail(refusal(result.error),409,'DATASET_DELETE_PHASE_FAILED');
+    if(result?.ok===false)throw Object.assign(Error(refusal(result.error)),{status:409,code:'DATASET_DELETE_PHASE_FAILED',[MAPPED_REFUSAL]:true});
     if(!result)return null;
     if(result.ok!==true)fail('原节点步骤回执未确认。',502);
     const value=result.result;
@@ -350,12 +353,36 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     if(!same(status.result,receipt))fail('节点当前状态与原步骤回执不一致。',502);
     return receipt;
   }
+  const workerActive=status=>status.pendingPhases.some(phase=>!status.unconfirmedPhases.includes(phase));
+  function waiting(row){
+    row.state=row.cancelRequested?'CANCELING':'WAITING_CONTINUE';row.waitingWorker=true;
+    row.error='节点仍在进行，请等待原工作进程结束。';save(row);return publicTask(row);
+  }
+  async function waitForWorkers(row,principal,check){
+    const idle=()=>{if(running.has(row.id)||restoring.has(row.id)||canceling.has(row.id)||queries.has(row.id))fail('原任务还在运行或查询，请稍后核对。');};
+    for(const step of row.steps.filter(s=>s.plan&&s.dispatched.length)){
+      let status;
+      try{status=verifyStatus(await rpc(principal,check,step.machine,'status',{operationId:step.operationId}),step);}
+      catch(error){
+        check();idle();Object.assign(row,access(principal,load(row.id)));
+        row.state='UNKNOWN';row.error=safeRefusal(error);delete row.waitingWorker;save(row);return true;
+      }
+      // Reads yield. Another recovery/query must not have its newer journal
+      // overwritten by this earlier snapshot, even when a worker is active.
+      idle();
+      if(workerActive(status)){Object.assign(row,access(principal,load(row.id)));waiting(row);return true;}
+    }
+    idle();
+    Object.assign(row,access(principal,load(row.id)));
+    delete row.waitingWorker;return false;
+  }
   async function dispatch(row,step,principal,check,phase,args={},allowRetry=false){
     check();if(['fence','isolate'].includes(phase)&&graph(row).digest!==row.graphDigest)fail('数据依赖已改变，删除已暂停。');
     let retryKey;
     if(step.dispatched.includes(phase)&&allowRetry){
       if(principal.role!=='admin')fail('只有管理员可重试原节点阶段。',403);
       const status=verifyStatus(await rpc(principal,check,step.machine,'status',{operationId:step.operationId}),step);
+      if(workerActive(status))fail('节点仍在进行，请等待原工作进程结束。',409,'DATASET_DELETE_WORKER_RUNNING');
       const old=status.phases[phase];
       if(!old||old.ok===false){
         if(phase==='restore'&&old?.ok===false&&/retention|expired|保留期/i.test(old.error)){
@@ -424,10 +451,11 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     }catch(error){
       if(service.closing||error.code==='DATASET_DELETE_CANCELED')return; // cancel owns the durable journal
       const latest=load(row.id);if(latest?.cancelRequested)return;
+      if(error.code==='DATASET_DELETE_WORKER_RUNNING'){waiting(row);return;}
       row.state=error.status===403||error.status===409||error.code==='MAINTENANCE_ACTIVE'?'BLOCKED':'UNKNOWN';
-      row.error=row.state==='BLOCKED'?refusal(error.message):'删除结果未确认；仅查询原编号，不会重新执行。';
+      row.error=row.state==='BLOCKED'?safeRefusal(error):'删除结果未确认；仅查询原编号，不会重新执行。';
       if(error.status===403&&!row.authorized)row.authorizationDenied=true;
-      const step=row.steps.findLast(s=>s.state==='DISPATCHING');if(step)step.error=refusal(error.message);
+      const step=row.steps.findLast(s=>s.state==='DISPATCHING');if(step)step.error=safeRefusal(error);
       if(!row.steps.some(s=>s.dispatched.length))releasePortalFences(row);
       save(row);event(row,'停止推进',null,row.state);
     }
@@ -450,6 +478,9 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       const phase=step.dispatched.at(-1);
       try{
         const status=verifyStatus(await rpc(principal,check,step.machine,'status',{operationId:step.operationId}),step);
+        if(workerActive(status)&&status.phases[phase]?.ok!==true){
+          confirmed=false;inProgress=true;step.state='RUNNING';step.error='节点正在处理。';save(row);continue;
+        }
         // A local administrator may have restored a confirmed copy through
         // the node CLI. Observe that proof without dispatching any new writes.
         if(['isolate','commit'].includes(phase)&&['RESTORED','PURGED'].includes(status.result?.state)){
@@ -473,7 +504,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       }catch(error){check();confirmed=false;
         const definite=error.code==='DATASET_DELETE_PHASE_FAILED';blocked||=definite&&['fence','isolate','commit'].includes(phase);uncertain||=!definite;
         step.state=definite?['fence','isolate','commit'].includes(phase)?'BLOCKED':'FAILED':'UNKNOWN';
-        if(['restore','release-absence'].includes(phase))step.restoreState=step.state;step.error=refusal(error.message);save(row);}
+        if(['restore','release-absence'].includes(phase))step.restoreState=step.state;step.error=safeRefusal(error);save(row);}
     }
     if(row.cancelRequested){
       if(row.steps.every(s=>!s.dispatched.length||s.state==='CANCELED')){row.state='CANCELED';releasePortalFences(row);delete row.error;}
@@ -490,8 +521,9 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     }else if(!confirmed&&row.steps.some(s=>s.result)){
       row.state='UNKNOWN';row.error='节点当前结果未确认；仅查询原编号，不会重新执行。';save(row);
     }
-    if(restarted.has(row.id)&&!['DELETED','CANCELED','BLOCKED','FAILED','UNKNOWN'].includes(row.state)){
-      row.state='WAITING_CONTINUE';row.error='等待继续（门户已重启），请由管理员继续或取消删除。';save(row);
+    row.waitingWorker=inProgress;
+    if(!row.cancelRequested&&(restarted.has(row.id)||row.state==='WAITING_CONTINUE')&&!['DELETED','CANCELED','BLOCKED','FAILED','UNKNOWN'].includes(row.state)){
+      row.state='WAITING_CONTINUE';row.error=inProgress?'节点仍在进行，请等待原工作进程结束。':'等待继续（门户已重启），请由管理员继续或取消删除。';save(row);
     }
     return publicTask(row);
   }
@@ -525,6 +557,43 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       if(queries.has(row.id))return queries.get(row.id).then(()=>{check();return publicTask(access(principal,load(row.id)));});
       const query=observe(row,principal,check).finally(()=>queries.delete(row.id));queries.set(row.id,query);return query;
     }
+    if(operation==='datasets.delete.registration.discard'){
+      fields(args,['operationId','machine','dataset','key']);uuid(args.operationId);machine(args.machine);uuid(args.key);
+      if(principal.role!=='admin')fail('只有管理员可丢弃从未安装的登记意图。',403);
+      let row=access(principal,load(args.operationId));
+      if(args.dataset!==undefined)reference(args.dataset,row.version);
+      const check=checkFactory(principal,assertCurrent,policy,inventory,row);check();
+      await capabilities(principal,check);check();row=access(principal,load(args.operationId));
+      if(running.has(row.id)||restoring.has(row.id)||canceling.has(row.id)||queries.has(row.id))fail('原任务还在运行或查询，请稍后核对。');
+      const targets=row.steps.filter(s=>s.machine===args.machine&&s.dataset===(args.dataset??row.dataset));
+      if(targets.length!==1||!targets[0].fence)fail('此服务器的固定删除代次未确认。');
+      const step=targets[0],binding={key:args.key,machine:step.machine,dataset:step.dataset,requestedBy:principal.userId};
+      row.registrationDiscards??=[];
+      let intent=row.registrationDiscards.find(value=>value.key===args.key);
+      if(intent&&Object.keys(binding).some(key=>intent[key]!==binding[key]))fail('这个丢弃请求编号属于另一个固定登记意图。');
+      if(intent?.state==='DISCARDED')return structuredClone(intent.result);
+      if(!intent){intent={...binding,state:'PREPARED'};row.registrationDiscards.push(intent);save(row);}
+      // Both the fixed key and its audit are durable before the metadata-only
+      // RPC. A lost reply is repeated only by an explicit same-key command.
+      event(row,'丢弃未安装登记意图',step.machine,'PREPARED');
+      const task=Promise.resolve().then(async()=>{
+        try{
+          const value=await rpc(principal,check,step.machine,'registration-discard',{operationId:step.operationId,requestKey:args.key});
+          const keys=['protocol','operationId','requestKey','machine','dataset','version','generation','state'];
+          if(!value||Object.keys(value).sort().join(',')!==keys.toSorted().join(',')
+            ||value.protocol!=='dataset-registration-discard-v1'||value.operationId!==step.operationId||value.requestKey!==args.key
+            ||value.machine!==step.machine||value.dataset!==step.dataset||value.version!==row.version
+            ||value.generation!==step.fence.generation||value.state!=='DISCARDED')fail('丢弃登记意图的回执未确认。',502);
+          intent.state='DISCARDED';intent.result={...structuredClone(value),operationId:row.id,key:args.key};
+          save(row);event(row,'丢弃未安装登记意图',step.machine,'DISCARDED');return structuredClone(intent.result);
+        }catch(error){
+          check();intent.state=error.status===403||error.status===409?'FAILED':'UNKNOWN';intent.error=safeRefusal(error);save(row);
+          event(row,'丢弃登记意图待核对',step.machine,intent.state);
+          return {operationId:row.id,key:args.key,machine:step.machine,dataset:step.dataset,version:row.version,state:intent.state,error:intent.error};
+        }
+      }).finally(()=>restoring.delete(row.id));
+      restoring.set(row.id,task);return task;
+    }
     if(['datasets.delete.continue','datasets.delete.cancel'].includes(operation)){
       fields(args,['operationId']);uuid(args.operationId);
       if(principal.role!=='admin')fail('只有管理员可继续或取消删除。',403);
@@ -544,10 +613,11 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       if(restoring.has(row.id)||queries.has(row.id)||canceling.has(row.id)||!isCancel&&running.has(row.id))fail('原任务还在运行或查询。');
       service.audit(principal.username,operation,row.id,isCancel?'CANCEL_REQUESTED':'CONTINUE_REQUESTED');
       if(!isCancel){
+        if(await waitForWorkers(row,principal,check))return publicTask(row);
         restarted.delete(row.id);
         const task=(async()=>{try{await observe(row,principal,check);check();
           if(row.state!=='DELETED')await execute(row,principal,check,{allowRetry:true,creator});
-          }catch(error){if(!service.closing&&!load(row.id)?.cancelRequested){row.state='UNKNOWN';row.error=refusal(error.message);save(row);}}})().finally(()=>running.delete(row.id));
+          }catch(error){if(!service.closing&&!load(row.id)?.cancelRequested){row.state='UNKNOWN';row.error=safeRefusal(error);save(row);}}})().finally(()=>running.delete(row.id));
         running.set(row.id,task);return publicTask(row);
       }
       row.cancelRequested={userId:principal.userId,time:clock()};row.state='CANCELING';save(row);
@@ -570,7 +640,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
             service.db.prepare('DELETE FROM dataset_deletion_fences WHERE machine=? AND dataset=? AND version=? AND operation_id=?').run(step.machine,step.dataset,row.version,row.id);
           }
           row.state='CANCELED';delete row.error;releasePortalFences(row);event(row,'取消删除并恢复',null,'CANCELED');
-        }catch(error){if(!service.closing){row.state=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';row.error=refusal(error.message);save(row);event(row,'取消待核对',null,row.state);}}
+        }catch(error){if(!service.closing){row.state=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';row.error=safeRefusal(error);save(row);event(row,'取消待核对',null,row.state);}}
       })().finally(()=>canceling.delete(row.id));canceling.set(row.id,task);return publicTask(row);
     }
     if(operation==='datasets.delete.restore'){
@@ -585,6 +655,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       // Capability reads yield: reload the journal and recheck in-flight work
       // so concurrent restore/status calls cannot reuse an earlier snapshot.
       row=access(principal,load(args.operationId));
+      if(await waitForWorkers(row,principal,check))return {...publicTask(row),machine:args.machine};
       const step=row.steps.find(s=>s.machine===args.machine&&s.result?.complete);
       if(!step||row.steps.filter(s=>s.machine===args.machine&&s.result?.complete).length!==1)fail('此服务器的完整保留副本未确认或名称不唯一，请先核对删除任务。');
       if(running.has(row.id)||restoring.has(row.id)||canceling.has(row.id)||queries.has(row.id))fail('原任务还在运行或查询，请稍后核对。');
@@ -611,11 +682,12 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
               peer.restoreState=peer.restored.state==='RELEASED'?'RELEASED':'RESTORED';
               peer.state=peer.restoreState;delete peer.error;
               service.db.prepare('DELETE FROM dataset_deletion_fences WHERE machine=? AND dataset=? AND version=? AND operation_id=?').run(peer.machine,peer.dataset,row.version,row.id);
-            }catch(error){peer.restoreState=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';peer.error=refusal(error.message);save(row);throw error;}
+            }catch(error){peer.restoreState=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';peer.error=safeRefusal(error);save(row);throw error;}
           }
           delete row.restoreState;row.state='BLOCKED';row.error='管理员已恢复数据和全部名称；旧删除编号不可重新执行。';save(row);
           service.audit(principal.username,operation,row.id,JSON.stringify({machine:step.machine,state:'RESTORED'}));
-        }catch(error){if(!service.closing){row.restoreState=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';row.error=refusal(error.message);
+        }catch(error){if(!service.closing){if(error.code==='DATASET_DELETE_WORKER_RUNNING'){delete step.restoreState;waiting(row);return;}
+          row.restoreState=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';row.error=safeRefusal(error);
           if(!step.restored){step.restoreState=row.restoreState;step.error=row.error;}save(row);}}
       })().finally(()=>restoring.delete(row.id));restoring.set(row.id,task);await task;check();
       return {operationId:row.id,machine:step.machine,state:row.restoreState|| (step.restored?'RESTORED':step.restoreState||'UNKNOWN'),...(row.restoreState?{error:row.error}:step.error?{error:step.error}:{}),dataset:step.dataset,version:row.version,...(principal.role==='admin'&&row.owner!==principal.userId?{adminContinue:true}:{})};

@@ -53,6 +53,25 @@ class RetirementRoutes(unittest.TestCase):
             with self.assertRaises(ValueError):self.node.process('storage.dataset-delete.fence',args)
         self.assertEqual(self.starts,[])
 
+    def test_NBB_actual_private_discard_derives_reference_from_fixed_plan_and_requires_admin(self):
+        adapter=self.node.dataset_retirement_node();request=str(uuid.uuid4())
+        with patch.object(self.node,'dataset_retirement_node',return_value=adapter),\
+                patch.object(adapter.cache,'discard_new_registration',return_value={'state':'DISCARDED'}) as discard:
+            with self.assertRaisesRegex(PermissionError,'administrator authorization required'):
+                self.call('registration-discard',user='demo-user-1',admin=False,operationId=self.key,requestKey=request)
+            discard.assert_not_called()
+            for change in ({'dataset':'other'},{'path':'/outside'},{'force':True}):
+                with self.assertRaisesRegex(ValueError,'fields'):
+                    self.call('registration-discard',**dict(operationId=self.key,requestKey=request,**change))
+            discard.assert_not_called()
+            for invalid in (None,'',False,'not-a-uuid'):
+                with self.assertRaisesRegex(ValueError,'UUID'):
+                    self.call('registration-discard',operationId=self.key,requestKey=invalid)
+            discard.assert_not_called()
+            self.assertEqual(self.call('registration-discard',operationId=self.key,requestKey=request),{'state':'DISCARDED','machine':'node-a'})
+            discard.assert_called_once_with(self.module.Principal('builtin-admin',True),'example',self.version,self.key,request)
+        self.assertEqual(self.starts,[])
+
     def test_legacy_single_owner_remains_admin_only_at_real_node_route(self):
         with self.assertRaisesRegex(PermissionError,'管理员'):
             self.call('plan',user='demo-user-1',admin=False,dataset='example',version=self.version,operationId=str(uuid.uuid4()))

@@ -409,6 +409,7 @@ gpuctl data retire-status OPERATION_ID
 gpuctl data retire-restore OPERATION_ID --machine SERVER
 gpuctl data retire-continue OPERATION_ID
 gpuctl data retire-cancel OPERATION_ID
+gpuctl data retire-discard-registration OPERATION_ID --machine SERVER --key UUID [--name PHYSICAL_NAME]
 ```
 
 彻底删除覆盖可信清单中全部服务器及数据库原件，门户先保存 key、任务和每个物理版本的子编号。查询可以用提交前打印的 key，首次回包丢失也不需要另建任务。相同 key、身份和版本返回原任务；换目标或账号拒绝。所有节点必须确认 `datasetDelete:1`，离线、旧节点、未知物理别名、在途归档/传输或任何依赖未确认都会停止。新门户先上线且节点未更新时，能力为 0，拒绝彻底删除；前端不得显示可用的彻底删除操作。
@@ -428,3 +429,7 @@ gpuctl data retire-cancel OPERATION_ID
 后台 prepare、旧复制和归档不会自动重建已删除代次。实际确认 PURGED 后，有权用户可以显式重新上传同名同字节，或从自己的工作区再次发布；管理员也可在本机用受信配置重新登记来源/清单。节点核对原清除日志、所有者和当前目录为空，先持久化新登记 inode 与来源意图，再 no-replace 安装；重试只完成这一新意图，不采用别人的登记。旧 grant、token、复制和归档授权仍永久失效。
 
 门户凭精确新登记证明释放这个位置的旧围栏。要重新使用同一任务的其他位置，先让新的原源达到 READY，再由管理员用原 `retire-restore OPERATION_ID --machine SOURCE` 核对这个新源；它会还原仍保留的副本、凭源证明释放已清除或空的命名空间。然后可以重新准备、复制或创建新的删除任务；旧删除编号不可继续执行。新源不完整、证据改变、占名或权限改变均拒绝，不会复活旧授权。
+
+登记意图按删除 operationId 分代保存，旧代次不能阻止下一次删除、清除和显式登记。若容量等错误使新登记的准备 inode 从未安装，管理员可用 `retire-discard-registration` 撤回这份意图；必须指定原删除任务、服务器和固定 UUID key，物理别名使用 `--name`。门户和节点均先保存固定请求与审计，只有当前 PURGED 代次、无登记、READY、STAGING、来源记录、租约及固定保留时，才把这一份未安装元数据移入审计区。它不删除数据载荷，不移除删除墓碑，也不采用其他人的登记。成功为 `DISCARDED`；回执丢失先核对原任务，必要时只重试相同命令和 key。已经安装、意图改变或权限不明均拒绝。
+
+取消以实际 journal 为准：ISOLATED 已落盘而节点投影中断时只补投影并恢复，不再次隔离；个人来源记录随第一次回滚一起还原。终态删除的门户墓碑不挡整数据集的普通注销，精确版本的后台重建仍受节点墓碑保护。原 worker 仍在进行时，继续和恢复保持等待且不派发；取消等待保持 CANCELING。完整副本确未提交收集许可时，源恢复也可还原过期但仍保留的字节，未知或损坏的提交不算未提交。

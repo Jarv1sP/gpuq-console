@@ -1080,6 +1080,7 @@ def dataset_retirement_operation(operation,args):
     # ticket routes or public executionCall. Identity is the portal's current
     # Principal; supplied owners/proofs are accepted only for private negatives.
     fields={'capabilities':set(),'locations':{'version','references'},'registration':{'dataset','version'},
+            'registration-discard':{'operationId','requestKey'},
             'plan':{'operationId','dataset','version','authorization','references','adminContinue'},
             'fence':{'operationId','adminContinue','retryKey'},'isolate':{'operationId','targets','adminContinue','retryKey'},'status':{'operationId'},
             'restore':{'operationId','retryKey'},'release-absence':{'operationId','sourceResult','retryKey'},
@@ -1096,6 +1097,11 @@ def dataset_retirement_operation(operation,args):
     node=dataset_retirement_node()
     if action=='registration':
         return {**node.cache.new_registration_proof(actor,args['dataset'],args['version']),'machine':CONFIG['machine']}
+    if action=='registration-discard':
+        if not isinstance(args['requestKey'],str) or not UUID.fullmatch(args['requestKey']):raise ValueError('A fixed discard request UUID is required')
+        row=node._load(args['operationId']);node._owned(actor,row,restoring=True)
+        return {**node.cache.discard_new_registration(actor,row['dataset'],row['version'],row['operationId'],args['requestKey']),
+                'machine':CONFIG['machine']}
     if action=='locations':return {'protocol':'dataset-delete-node-v1','machine':CONFIG['machine'],'locations':node.grant_locations(args['version'],args['references'])}
     if action=='plan':
         continuation=args.get('adminContinue',False)

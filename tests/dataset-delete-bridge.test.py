@@ -33,7 +33,13 @@ class DeletionBridge(unittest.TestCase):
         self.assertTrue(reply['ok'],reply)
         call.assert_called_once_with({'fixture':True},{'operation':'storage.dataset-delete.registration','args':args})
         deletion={op.removeprefix('storage.dataset-delete.') for op in operations if op.startswith('storage.dataset-delete.')}
-        self.assertEqual(deletion,{'capabilities','locations','registration','plan','fence','isolate','status','restore','release-absence','cancel','commit'})
+        self.assertEqual(deletion,{'capabilities','locations','registration','registration-discard','plan','fence','isolate','status','restore','release-absence','cancel','commit'})
+
+    def test_NBB_admin_discard_is_forwarded_by_actual_bridge_without_path_or_identity_changes(self):
+        args=dict(userId='fixture-admin',hostAdmin=True,operationId='fixed-operation',requestKey='fixed-attempt')
+        reply,call,_=self.handler('storage.dataset-delete.registration-discard',args=args)
+        self.assertTrue(reply['ok'],reply)
+        call.assert_called_once_with({'fixture':True},{'operation':'storage.dataset-delete.registration-discard','args':args})
 
     def test_private_bridge_unknown_machine_and_unlisted_override_have_zero_node_calls(self):
         for op,machine in (('storage.dataset-delete.registration','unknown'),('storage.dataset-delete.unfence','fixture-node'),

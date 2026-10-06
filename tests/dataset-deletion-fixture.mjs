@@ -26,6 +26,11 @@ export function fixture(t,{db,onlySource=true,options={}}={}){
       else if(phase==='capabilities')value={protocol:'dataset-delete-node-v1',machine:host,datasetDelete:f.cap};
       else if(phase==='locations')value={protocol:'dataset-delete-node-v1',machine:host,locations:[]};
       else if(phase==='registration'){if(!f.registration)throw Error('No explicit new registration');value=structuredClone(f.registration);}
+      else if(phase==='registration-discard'){
+        const node=nodes.get(args.operationId);assert.ok(node);
+        value={protocol:'dataset-registration-discard-v1',operationId:args.operationId,requestKey:args.requestKey,
+          machine:host,dataset:node.plan.dataset,version,generation:'c'.repeat(64),state:'DISCARDED'};
+      }
       else if(phase==='plan'){
         const complete=(host===hosts[0]||!f.onlySource)&&!f.missing;
         const plan={protocol:'dataset-delete-node-v1',operationId:args.operationId,machine:host,dataset:args.dataset,version:args.version,
@@ -65,4 +70,4 @@ export function fixture(t,{db,onlySource=true,options={}}={}){
     call:(op,args,who=principal,current=()=>{})=>service.datasetDeletionCall(who,op,args,current),
     start:async(args=request(),who=principal)=>{const first=await service.datasetDeletionCall(who,'datasets.delete',args);await service.waitDatasetDeletions();return {first,result:(await service.datasetDeletionCall(who,'datasets.delete.status',{key:args.key})),args};}});
 }
-export const writes=f=>f.calls.filter(c=>/\.(fence|isolate|restore|release-absence|cancel|commit)$/.test(c.op));
+export const writes=f=>f.calls.filter(c=>/\.(fence|isolate|restore|release-absence|cancel|commit|registration-discard)$/.test(c.op));

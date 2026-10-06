@@ -71,3 +71,21 @@ test('admin continue and cancel use original task ID once and never accept machi
   f.failure='unknown result';const r=await f.cli(['data','retire-cancel',f.id]);assert.equal(r.code,1);
   assert.match(r.stderr,new RegExp('retire-status '+f.id));assert.equal(f.calls.filter(c=>c.operation==='datasets.delete.cancel').length,2);
 });
+
+test('NB-B discard CLI requires admin, one machine and an explicit immutable key without identity overrides',async t=>{
+  const f=await fixture(t),key=randomUUID(),args=['data','retire-discard-registration',f.id,'--machine',MACHINES[0].id,'--key',key];
+  f.response={state:'DISCARDED',operationId:f.id,key};
+  assert.equal((await f.cli(args)).code,0);
+  assert.deepEqual(f.calls.at(-1),{operation:'datasets.delete.registration.discard',args:{operationId:f.id,machine:MACHINES[0].id,key}});
+  assert.equal((await f.cli([...args,'--name','physical-alias'])).code,0);
+  assert.deepEqual(f.calls.at(-1).args,{operationId:f.id,machine:MACHINES[0].id,key,dataset:'physical-alias'});
+  for(const flags of [['--root'],['--as','another'],['--key','bad'],['--machine',MACHINES[1].id]]){
+    assert.equal((await f.cli([...args,...flags])).code,1);
+  }
+  assert.equal((await f.cli(args.slice(0,5))).code,1);
+  f.role='member';assert.equal((await f.cli(args)).code,1);
+  assert.equal(f.calls.filter(value=>value.operation==='datasets.delete.registration.discard').length,2);
+  f.role='admin';f.failure='lost reply';const result=await f.cli(args);
+  assert.equal(result.code,1);assert.match(result.stderr,new RegExp('同一个 --key '+key));
+  assert.equal(f.calls.filter(value=>value.operation==='datasets.delete.registration.discard').length,3);
+});
