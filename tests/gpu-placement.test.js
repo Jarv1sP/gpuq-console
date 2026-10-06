@@ -74,12 +74,12 @@ test('portal accepts explicit one-sided sharing and rejects unavailable fixed ca
   assert.equal(s.store.jobs.length,1);
 });
 
-test('only a current enabled admin shared submission bypasses personal whole-card counts',async t=>{
+test('current enabled admin shared and exclusive submissions bypass personal counts without bypassing physical admission',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-admin-sharing-test-')),bootstrap=join(dir,'bootstrap'),status=join(dir,'status'),password=randomUUID()+randomUUID();
   await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,
     gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:32768,memoryUsedMiB:8192})),
-    gpuq:{connected:true,observeOnly:false,capabilities:['priority-policy-v1','preempt-idle-only-v1','console-placement-v1','console-sharing-v1'],jobs:[]}}))}));
+    gpuq:{connected:true,observeOnly:false,schedulableIndices:[],capabilities:['priority-policy-v1','preempt-idle-only-v1','console-placement-v1','console-sharing-v1'],jobs:[]}}))}));
   const calls=[],s=await PortalService.open(join(dir,'db'),bootstrap,status,async(machine,operation,args)=>{
     calls.push({machine,operation,args});return {state:'PENDING',assignedIndices:[],queueReason:'waiting for shared VRAM budget'};
   });clearInterval(s.executionTimer);
@@ -109,13 +109,26 @@ test('only a current enabled admin shared submission bypasses personal whole-car
   const state=(await s.invoke(admin.token,'state')).state;
   assert.equal(state.jobs.find(job=>job.id===globalAccepted.id).state,'PENDING');
   assert.match(state.jobs.find(job=>job.id===globalAccepted.id).queueReason,/VRAM budget/);
-  // Sharing never removes real jobs/leases or gives exclusive requests extra quota.
+  // Exemption does not remove any real jobs/leases. A busy GPU queues both modes.
   assert.ok(state.jobs.filter(job=>job.userId===adminUser.id).length>adminUser.total);
-  await assert.rejects(submit(admin.token,{placement:{gpuIndices:[2]}}),error=>error.status===409&&/额度/.test(error.message));
+  const count=s.store.jobs.length;
+  for(const more of [{placement:{gpuIndices:[2]}},{placement:undefined,cards:machine.cards}]){
+    const exclusive=(await submit(admin.token,more)).result;await settle();
+    assert.equal(s.store.jobs.find(job=>job.id===exclusive.id).state,'PENDING');
+    const call=calls.find(call=>call.args.job.id===exclusive.id);assert.equal(call.operation,'sync');
+    assert.equal(call.args.job.cards,more.cards||1);assert.equal(call.args.job.placement?.shared||false,false);
+  }
+  assert.equal(s.store.jobs.length,count+2);assert.ok(calls.every(call=>call.operation==='sync'));
+  const smallest=MACHINES.reduce((a,b)=>a.cards<b.cards?a:b);
+  await assert.rejects(submit(admin.token,{machine:smallest.id,placement:undefined,cards:smallest.cards+1}),error=>[400,409].includes(error.status)&&/卡数/.test(error.message));
+  const baseline=structuredClone(s.store.users.find(user=>user.id===adminUser.id));
+  await assert.rejects(s.invoke(admin.token,'policy.full',{userId:adminUser.id,policyVersion:baseline.policyVersion}),/免个人累计用卡额度.*无需配置个人额度/);
+  assert.deepEqual(s.store.users.find(user=>user.id===adminUser.id),baseline);
   for(const placement of [{gpuIndices:[100],shared:true,vramMiB:4096},{gpuIndices:[2],shared:true,vramMiB:50000},{...input.placement,hami:true}])
     await assert.rejects(submit(admin.token,{placement}),error=>[409,503].includes(error.status));
   reserve(s.store.get(member.id),machine.id,1);
   await assert.rejects(submit(memberSession.token),error=>error.status===409&&/额度/.test(error.message));
+  await assert.rejects(submit(memberSession.token,{placement:undefined}),error=>error.status===409&&/额度/.test(error.message));
   // Use normal role changes: no exemption survives a new member session.
   await s.invoke(admin.token,'users.role',{userId:member.id,role:'admin'});
   const promoted=await s.login('alice',password);await submit(promoted.token);await settle();

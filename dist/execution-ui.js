@@ -5,7 +5,7 @@ import {schedulingFields,schedulingFromForm,schedulingSummary} from './schedulin
 import {elasticCapable,placementCapable} from './gpu-allocation.js';
 import {elasticFields,elasticFromForm,allocationSummary,placementFields,placementFromForm,placementSummary} from './gpu-allocation-ui.js';
 import {taskDescription} from './task-metadata.js';
-import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,boundarySweep,taskMissionUI,infoHTML,discloseInfo,jobCancelConfirmation,projectEnvironmentLabel,confirmProjectCreation,projectPublicationStorage,projectPublicationOutcome,projectPublicationDelay,projectPublicationProgressHTML,confirmPublicationMotion,createProjectActivity} from './workbench-ui.js';
+import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,personalQuotaReadout,boundarySweep,taskMissionUI,infoHTML,discloseInfo,jobCancelConfirmation,projectEnvironmentLabel,confirmProjectCreation,projectPublicationStorage,projectPublicationOutcome,projectPublicationDelay,projectPublicationProgressHTML,confirmPublicationMotion,createProjectActivity} from './workbench-ui.js';
 import {endProjectTerminals} from './terminal-ui.js';
 export {endProjectTerminals} from './terminal-ui.js';
 import {revealSheet,dismissSheet,sharedObject} from './motion-ui.js';
@@ -252,9 +252,10 @@ export function executionUI(store,refresh,toast){
   function updatePreflight(){
     if(!submitDialog||!actor)return;query('#submit-context').textContent=(machine||'未选择服务器')+' · '+(project||'个人工作区');
     const user=store.users.find(item=>item.id===actor),used=store.usage(actor),quota=user?.total,info=currentProject(),host=store.data?.gpuq?.hosts?.find(item=>item.id===machine),fresh=store.production&&!store.data?.gpuq?.stale&&host?.reachable===true;
+    const quotaReadout=personalQuotaReadout(user,used,quota);
     const release=query('[name=release]').value,authorized=enabled()&&user?.limits?.[machine]>0,automatic=automaticTraining();
     const lockedTarget=parsedTarget&&(machine!==parsedTarget.machine||project!==parsedTarget.project);
-    const rows=[['服务器',authorized?machine:'选择已授权服务器',authorized],['额度',Number.isFinite(quota)?`${used} / ${quota} 张`:'待更新',Number.isFinite(quota)],['训练版本',project?(readyReleases(info).some(item=>item.release===release)?release.slice(0,12):'先生成训练版本'):'个人工作区',!project||readyReleases(info).some(item=>item.release===release)],['监控',fresh?'已更新':'待更新',fresh],['数据集',query('[name=datasets]').value.trim()?'提交时检查':'未选择',!query('[name=datasets]').value.trim()]];
+    const rows=[['服务器',authorized?machine:'选择已授权服务器',authorized],['额度',quotaReadout.exempt?`免个人额度 · 已请求 ${quotaReadout.value} 张`:Number.isFinite(quota)?`${used} / ${quota} 张`:'待更新',quotaReadout.exempt||Number.isFinite(quota)],['训练版本',project?(readyReleases(info).some(item=>item.release===release)?release.slice(0,12):'先生成训练版本'):'个人工作区',!project||readyReleases(info).some(item=>item.release===release)],['监控',fresh?'已更新':'待更新',fresh],['数据集',query('[name=datasets]').value.trim()?'提交时检查':'未选择',!query('[name=datasets]').value.trim()]];
     if(automatic)rows[0]=['训练服务器','自动选择 · 开发仍在 '+machine,authorized&&info?.environmentMode==='oci'];
     if(lockedTarget)rows.unshift(['目标已改变',parsedTarget.machine+' / '+(parsedTarget.project||'个人工作区'),false]);
     query('#submit-check-list').innerHTML=rows.map(([label,text,ok])=>`<li><span class="what">${escape(label)}<small>${escape(text)}</small></span><span class="${ok?'v-ok':'v-wait'}">${ok?'通过':'待确认'}</span></li>`).join('');
@@ -334,7 +335,7 @@ export function executionUI(store,refresh,toast){
     elastic.disabled=!available||locked;
     for(const name of ['min-cards','global-batch','micro-batch','auto-expand'])query(`[name=${name}]`).disabled=!available||locked||!elasticOn;
     const elasticReady=!store.data?.gpuq?.stale&&trainingHosts().some(elasticCapable);
-    query('#elastic-note').textContent=elasticReady?'只选择可整除 global batch 的卡数；最大卡数计入额度。自动扩卡须接入 checkpoint、弹性 batch，启用保存让位和自动恢复。':'服务器尚未确认弹性分配通道，弹性任务暂不能提交。';
+    query('#elastic-note').textContent=elasticReady?`只选择可整除 global batch 的卡数；${personalQuotaReadout(store.users.find(item=>item.id===actor)).exempt?'最大卡数记入请求统计，免个人额度。':'最大卡数计入额度。'}自动扩卡须接入 checkpoint、弹性 batch，启用保存让位和自动恢复。`:'服务器尚未确认弹性分配通道，弹性任务暂不能提交。';
     const placementMode=query('[name=gpu-placement]'),shared=placementMode.value==='shared',hami=query('[name=hami]');
     placementMode.disabled=!available||locked;
     query('[name=gpu-indices]').disabled=!available||locked||placementMode.value==='any';

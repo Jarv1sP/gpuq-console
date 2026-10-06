@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parseTrainingCommand,trainingReadout,elapsedTraining,missionGPUs,missionHTML,quotaLedgerHTML,workbenchCards,serverIdHTML,jobCancelConfirmation} from '../dist/workbench-ui.js';
+import {parseTrainingCommand,trainingReadout,elapsedTraining,missionGPUs,missionHTML,quotaLedgerHTML,personalQuotaReadout,workbenchCards,serverIdHTML,jobCancelConfirmation} from '../dist/workbench-ui.js';
 import {datasetCopyRoute,datasetRows,catalogUpdatedText,datasetCapacityHTML} from '../dist/datasets-ui.js';
 const machines=[{id:'gpu-1',cards:8},{id:'private-long-id',cards:6}];
 test('Chinese training commands resolve only explicit authorized machines, counts and full data references',()=>{
@@ -35,6 +35,14 @@ test('hardware portrait displays only allocated cards with actual per-card denom
 test('quota ledger excludes foreign, preparing and ended jobs while unknown and elastic maximum stay occupied',()=>{
   const store={principal:{userId:'owner'},users:[{id:'owner',total:8,limits:{'gpu-1':8}}],usage:()=>7,jobs:[{id:'a',userId:'owner',machine:'gpu-1',name:'unknown',state:'UNKNOWN',cards:4,actualCards:1,elastic:{minCards:1}},{id:'b',userId:'owner',machine:'gpu-1',name:'queued',state:'PENDING',cards:3},{id:'c',userId:'owner',name:'PREP-EXCLUDED',state:'PREPARING_DATA',cards:8},{id:'d',userId:'other',name:'FOREIGN-EXCLUDED',state:'UNKNOWN',cards:8},{id:'e',userId:'owner',name:'ENDED-EXCLUDED',state:'SUCCEEDED',cards:8}]};
   const html=quotaLedgerHTML(store,'gpu-1');assert.match(html,/7 \/ 8/);assert.match(html,/4 <small>张/);assert.match(html,/3 <small>张/);assert.doesNotMatch(html,/PREP-EXCLUDED|FOREIGN-EXCLUDED|ENDED-EXCLUDED/);
+});
+test('administrator quota readouts preserve queued demand above inventory without painting a personal ceiling',()=>{
+  const user={id:'owner',role:'admin',enabled:true,total:8,limits:{'gpu-1':8}};
+  assert.deepEqual(personalQuotaReadout(user,31),{exempt:true,label:'请求卡数',value:'31',note:'免个人额度'});
+  const store={principal:{userId:user.id,role:'admin'},users:[user],usage:()=>31,jobs:[{id:'queued',userId:user.id,machine:'gpu-1',state:'PENDING',cards:1}]};
+  const html=quotaLedgerHTML(store,'gpu-1');assert.match(html,/我的用卡请求/);assert.match(html,/免个人额度 · 资源不足正常排队/);assert.match(html,/31 <small>张/);assert.match(html,/排队请求/);assert.doesNotMatch(html,/31 \/ 8|累计上限|没有占用额度/);
+  user.role='member';assert.deepEqual(personalQuotaReadout(user,31),{exempt:false,label:'占用额度 / 上限',value:'31 / 8',note:''});assert.match(quotaLedgerHTML(store,'gpu-1'),/31 \/ 8/);
+  user.role='admin';user.enabled=false;assert.equal(personalQuotaReadout(user,31).exempt,false,'stale principal role cannot grant a disabled user an exemption');
 });
 test('copy route needs an approved real source and confirmed target catalog, without inventing a channel or size',()=>{
   const version={version:'a'.repeat(64),state:'NOT_LOCAL',canUse:true,canPrepare:true,sourceMachine:'gpu-2',locations:[{machine:'gpu-2',state:'READY',canUse:true}]},catalog={machine:'gpu-1',machines:[{machine:'gpu-1',state:'ok'},{machine:'gpu-2',state:'ok'}],datasets:[{dataset:'scans',versions:[version]}]};
