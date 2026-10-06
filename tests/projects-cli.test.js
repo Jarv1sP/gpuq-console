@@ -59,6 +59,20 @@ test('project lifecycle CLI exposes CAS labels, grouping and original-key soft r
  assert.equal(f.calls.some(c=>['projects.create','projects.publish','jobs.submit','files.put'].includes(c.operation)),false);
 });
 
+test('member guide project-label command uses the real CLI option and rejects the misleading name alias before mutation',async t=>{
+ const guide=await readFile(new URL('../docs/USER_GUIDE.md',import.meta.url),'utf8');
+ const command=guide.match(/`gpuctl project label --display-name "([^"\n]+)"`/);
+ assert.ok(command,'Member guide must document the actual --display-name option');
+ assert.doesNotMatch(guide,/gpuctl project label --name(?:\s|`)/);
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ f.custom.set('projects.label.get',args=>({...args,displayName:args.project,revision:3}));
+ f.custom.set('projects.label.set',args=>({...args,revision:args.revision+1}));
+ const value=await f.cli(['project','label','--display-name',command[1]]);
+ assert.equal(value.code,0,value.stderr);assert.deepEqual(f.calls.at(-1),{operation:'projects.label.set',args:{machine:'gpu-1',project:'alpha',displayName:command[1],revision:3}});
+ const before=f.calls.length,invalid=await f.cli(['project','label','--name',command[1]]);
+ assert.equal(invalid.code,1);assert.deepEqual(f.calls.slice(before).map(c=>c.operation),['state'],'Invalid label alias may read authentication state but must never read or write a label');
+});
+
 test('project create/use is verified and remembered per machine; changing server never reuses another project',async t=>{
   const f=await fixture(t);
   assert.equal((await f.cli(['project','create','alpha'])).code,0);
