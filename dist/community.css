@@ -86,7 +86,7 @@
 .sb .community-dialog .modal-head{display:flex;gap:clamp(12px,3cqi,20px);justify-content:space-between;align-items:center;margin:0 0 24px}
 .sb .community-dialog .modal-head .copy-caption{min-width:0;gap:8px;justify-content:flex-start}
 .sb .community-dialog .modal-head .copy-caption h2{min-width:0;margin:0}
-.sb .community-dialog h2{font-size:24px;font-weight:500;line-height:1.4;margin:8px 0 0}
+.sb .community-dialog h2{font-size:24px;font-weight:500;line-height:1.4;text-wrap:balance;margin:8px 0 0}
 .sb .community-dialog .icon-button{flex:none;min-width:48px;min-height:48px;background:none;color:var(--ink-2);border:0;font-size:24px}
 .sb .community-dialog label{display:block;font-size:13px;color:var(--ink-2);line-height:1.65}
 .sb .community-dialog .field{display:grid;gap:8px;margin-bottom:20px}
