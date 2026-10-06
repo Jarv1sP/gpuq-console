@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 // Visual and responsive acceptance with synthetic API data only.
 // No real accounts, shell, SSH, jobs, credentials, or external requests.
 import assert from 'node:assert/strict';
@@ -103,7 +104,7 @@ try{
     if(!baseline){
       assert(layout.document<=width+1,`page overflow at ${width}`);
       const visible=layout.nav.filter(nav=>nav.visible);
-      assert.deepEqual(visible.map(nav=>nav.id),width<760?['work','resources','datasets','community','me']:['work','resources','datasets','community','users'],`room navigation at ${width}`);
+      assert.deepEqual(visible.map(nav=>nav.id),width<760?['work','resources','datasets','community','me']:['work','resources','datasets','community'],`room navigation at ${width}`);
       assert(visible.every(nav=>nav.height>=(width<760?44:36)),`navigation targets too small at ${width}`);
     }
     await textContrast();
@@ -155,7 +156,7 @@ try{
   await page.emulateMedia({reducedMotion:'reduce'});
   if(!baseline)assert.equal(await page.locator('#refresh-state').evaluate(el=>getComputedStyle(el).transitionProperty),'none');
   assert.equal(await preparing.evaluate(el=>getComputedStyle(el,'::before').animationName),'none');
-  await page.setViewportSize({width:1440,height:1080});await page.locator('[data-nav=users]').click();await page.locator('#filter-all').click();await textContrast();await capture('users-carbon-compatibility');
+  await page.setViewportSize({width:1440,height:1080});await openMembers(page);await page.locator('#filter-all').click();await textContrast();await capture('users-carbon-compatibility');
   await page.setViewportSize({width:390,height:960});await page.waitForFunction(()=>document.querySelector('[data-nav=me]').getAttribute('aria-current')==='page');await currentNav('me');await textContrast();await capture('users-carbon-compatibility-390');
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({baseline,checks,errors,external},null,2));
@@ -171,4 +172,5 @@ if(!baseline){
   await import('./polish-shell-ui-smoke.mjs');
   await import('./polish-operational-ui-smoke.mjs');
   await import('./admin-ui-smoke.mjs');
+  await import('./admin-members-ui-smoke.mjs');
 }

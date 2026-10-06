@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 // Real frontend assets with browser-local replies only. No production login,
 // accounts, capability probes or business writes. Set UI_GEOMETRY_SWEEP=1 for
 // every 40px width, the common widths, three heights and all three zooms.
@@ -79,8 +80,8 @@ try{
     else await page.waitForFunction(()=>document.querySelector('#community-posts')?.getAttribute('aria-busy')==='false');
     if(mode==='unconfirmed'){await page.locator('#community-create').click();await page.locator('#community-compose-form [name=title]').fill('保留发送草稿');await page.locator('#community-compose-form [name=body]').fill('回执丢失时保持原内容。');await page.locator('#community-compose-form [type=submit]').click();await page.locator('#community-compose-error').filter({hasText:'未确认'}).waitFor();}
    }else if(room==='members'){
-    if(role==='member'){await page.evaluate(()=>location.hash='#users');await page.locator('#page-resources').waitFor();for(const entry of await page.locator('[data-nav=users]').all())assert.equal(await entry.isVisible(),false);assert.equal(await page.locator('#page-users').isVisible(),false);}
-    else{await page.locator('[data-nav=users]').click();await page.locator('#page-users').waitFor();
+    if(role==='member'){await page.evaluate(()=>location.hash='#users');await page.locator('#admin-denied').waitFor();assert.equal(await page.locator('[data-nav=users]').count(),0);assert.equal(await page.locator('#page-users').isVisible(),false);}
+    else{await openMembers(page);await page.locator('#page-users').waitFor();
      if(['loading','error','unconfirmed'].includes(mode)){await page.locator('[data-machine]').first().check();await page.locator('[data-action=save-policy]').click();if(mode==='loading')await page.waitForFunction(()=>document.querySelector('[data-action=save-policy]').disabled);else await page.locator('#policy-error').filter({hasText:/./}).waitFor();}
     }
    }else{

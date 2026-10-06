@@ -16,7 +16,6 @@ export function controlSnapshot(store,{sessions=[],activities=[],activitiesCompl
   const unread=(kind,row)=>recentFailure(row,now)&&!seen?.has(failureReadKey(kind,row)),failedJobs=jobs.filter(row=>row.state==='FAILED');
   const attention=jobs.filter(row=>row.state==='UNKNOWN'||row.state==='FAILED'&&unread('job',row)).map(row=>({id:'job:'+row.id,name:row.name||'训练',fact:row.error||row.latestAttempt?.failureReason||stateWord(row),action:row.state==='FAILED'?'查看诊断':'刷新核对',jobId:row.id,state:row.state,readKey:row.state==='FAILED'?failureReadKey('job',row):null}));
   for(const row of ownedActivities.filter(row=>failedData.has(row.state)&&(row.state!=='FAILED'||unread('data',row))))attention.push({id:'data:'+row.id,name:row.name||row.kind||'后台数据任务',fact:row.error||row.state,action:'查看数据任务',activityId:row.id,state:row.state,readKey:row.state==='FAILED'?failureReadKey('data',row):null});
-  if(principal.role==='admin')for(const row of store.users.filter(row=>row.enabled&&row.role!=='admin'&&!row.approvedAt&&row.total===0))attention.push({id:'user:'+row.id,name:row.name||row.username,fact:'待审批 · 额度 0 张',action:'去审批',userId:row.id});
   const hosts=new Map((store.data?.gpuq?.hosts||[]).map(host=>[host.id,host]));
   const servers=(store.data?.machines||[]).filter(machine=>principal.role==='admin'||user?.limits?.[machine.id]>0).map(machine=>{
     // Reachability alone is not a confirmed scheduler observation. Never paint
@@ -80,7 +79,6 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
     const terminal=document.querySelector('#terminal-open');if(terminal&&!terminal.disabled&&machine)rows.push(actionButton('terminal','打开开发终端','gpuctl ssh '+machine,()=>terminal.click()));
     const publish=document.querySelector('#project-publish');if(publish&&!publish.disabled&&project)rows.push(actionButton('publish','生成训练版本 · '+project,'gpuctl project publish --machine '+machine+' --project '+project,()=>publish.click()));
     for(const job of snapshot.active)rows.push(actionButton('job:'+job.id,'查看任务 · '+job.name,'gpuctl watch '+job.id,()=>openJob(job.id)));
-    if(store.principal?.role==='admin')rows.push(actionButton('users','成员授权','',()=>navigate('users')));
     if(store.principal?.role==='admin'&&hasAdminSections())rows.push(actionButton('admin','管理后台','',()=>navigate('admin')));
     return rows;
   }
@@ -153,7 +151,7 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
     if(button.dataset.controlSession){const session=snapshot.sessions.find(row=>row.id===button.dataset.controlSession);if(session){close(true);document.dispatchEvent(new CustomEvent('gpuq-terminal-reveal',{detail:{id:session.id,userId:store.principal.userId}}));}}
     if(button.dataset.controlMachine){close(true);navigate('resources');document.dispatchEvent(new CustomEvent('gpuq-open-resource',{detail:{machine:button.dataset.controlMachine,userId:store.principal?.userId}}));}
     if(button.dataset.controlActivity){close(true);navigate('transfers');document.dispatchEvent(new CustomEvent('gpuq-reveal-data-activity',{detail:{id:button.dataset.controlActivity,userId:store.principal?.userId}}));}
-    if(button.dataset.controlAttention){const row=snapshot.attention.find(item=>item.id===button.dataset.controlAttention);if(!row)return;close(true);if(row.userId){navigate('users');document.querySelector(`[data-user="${CSS.escape(row.userId)}"]`)?.click();}else if(row.jobId){if(row.state==='UNKNOWN')document.querySelector('#refresh-state').click();else openJob(row.jobId,'diagnostics');}else {navigate('transfers');document.dispatchEvent(new CustomEvent('gpuq-reveal-data-activity',{detail:{id:row.activityId,userId:store.principal?.userId}}));}}
+    if(button.dataset.controlAttention){const row=snapshot.attention.find(item=>item.id===button.dataset.controlAttention);if(!row)return;close(true);if(row.jobId){if(row.state==='UNKNOWN')document.querySelector('#refresh-state').click();else openJob(row.jobId,'diagnostics');}else {navigate('transfers');document.dispatchEvent(new CustomEvent('gpuq-reveal-data-activity',{detail:{id:row.activityId,userId:store.principal?.userId}}));}}
   });
   dialog.addEventListener('cancel',event=>{event.preventDefault();close();});
   dialog.addEventListener('click',event=>{if(event.target===dialog){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)close();}});
@@ -167,7 +165,7 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
     if(editing||event.metaKey||event.ctrlKey||event.altKey)return;
     if(event.key==='.'||event.key==='?'){event.preventDefault();open('command');return;}
     if(event.key.toLowerCase()==='g'){gPending=Date.now();return;}
-    if(Date.now()-gPending<1500){gPending=0;const route={w:'work',c:'resources',d:'datasets',x:'community',m:'users'}[event.key.toLowerCase()];if(route&&(route!=='users'||store.principal?.role==='admin')){event.preventDefault();close(true);navigate(route);}}
+    if(Date.now()-gPending<1500){gPending=0;const route={w:'work',c:'resources',d:'datasets',x:'community'}[event.key.toLowerCase()];if(route){event.preventDefault();close(true);navigate(route);}}
     if(event.key==='Escape')document.querySelector('#account-menu').open=false;
   });
   document.addEventListener('gpuq-terminal-state',event=>{sessions=event.detail.sessions||[];update();});

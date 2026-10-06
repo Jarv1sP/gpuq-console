@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 import {openSubmit} from './starbase-workflows.mjs';
 import {resourceCard as card,resourceDetail,selectResource} from './resources-workflows.mjs';
 import {verifyAuthentication,verifyPublicLoginInventoryPrivacy} from './auth-copy-acceptance.mjs';
@@ -158,7 +159,7 @@ try{
  assert.equal(await admin.locator('[data-gpu-index]').count(),0);
  assert.match(await resourceDetail(admin,'gpu-1').textContent(),/状态未知/);
  await saveSnapshot();await refreshPage(admin);await gpu0.waitFor();
- await admin.locator('[data-nav=users]').click();assert.equal(await admin.locator('#add-user').count(),0);
+ await openMembers(admin);assert.equal(await admin.locator('#add-user').count(),0);
  await admin.locator('.management-toolbar [data-action=invites]').click();await admin.locator('[data-action=rotate-invite]').click();await capture(admin,'members-invite-confirm-1440.png');await admin.locator('#confirm-action').click();const code=await admin.locator('#current-invite').inputValue();assert.ok(code.startsWith('GPUQ-U-'));
  await capture(admin,'members-invites-1440.png');await admin.setViewportSize({width:390,height:844});await capture(admin,'members-invites-390.png');await admin.setViewportSize({width:1440,height:1050});
  await admin.locator('[data-close=invites-dialog]').click();await admin.reload();await admin.locator('.management-toolbar [data-action=invites]').click();assert.equal(await admin.locator('#current-invite').inputValue(),code);await admin.locator('[data-close=invites-dialog]').click();
@@ -174,7 +175,7 @@ try{
  await member.setViewportSize({width:1440,height:1050});await capture(member,'register-1440.png');await member.locator('#register-form [type=submit]').click();await member.locator('#register-dialog').waitFor({state:'hidden'});
  assert.equal(await member.locator('#app-topbar .guide-link').count(),1,'the one public guide entry returns to the authenticated shell');
  assert.deepEqual(inventoryRequests,['member'],'Partial member state loads the protected directory only after successful registration and login');
- assert.equal(await member.locator('[data-nav=users]').isVisible(),false);assert.equal(await member.locator('#page-resources').isVisible(),true);assert.match(await member.locator('#resource-summary').textContent(),/额度 0 张/);assert.equal(await member.locator('[data-use-machine]:enabled').count(),0);
+ assert.equal(await member.locator('[data-nav=users]').count(),0);assert.equal(await member.locator('#page-resources').isVisible(),true);assert.match(await member.locator('#resource-summary').textContent(),/额度 0 张/);assert.equal(await member.locator('[data-use-machine]:enabled').count(),0);
  assert.equal(await member.locator('.resource-card').count(),MACHINES.length);
  assert.equal(await member.locator('[data-gpu-index]').count(),0);
  assert.equal(await member.locator('details[data-resource-detail]').count(),0);
@@ -263,7 +264,7 @@ try{
  await member.setViewportSize({width:1440,height:1050});
  await member.locator('#resource-primary').click();await member.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-1');await openSubmit(member);await member.locator('[name=command]').fill('python unchanged_draft.py');await member.waitForTimeout(16000);assert.equal(await member.locator('[name=command]').inputValue(),'python unchanged_draft.py');
  await admin.locator('#filter-all').click();await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('summary').filter({hasText:'账号权限与状态'}).click();await admin.locator('[data-action=role]').click();await admin.locator('#confirm-action').click();
- await member.reload();await member.locator('#login-dialog').waitFor();await member.locator('#login-form [name=username]').fill('验收同学');await member.locator('#login-form [name=password]').fill(password);await member.locator('#login-form [type=submit]').click();await member.locator('[data-nav=users]').click();await member.locator('#filter-all').click();await member.locator('[data-user]').filter({hasText:'管理员'}).filter({hasNotText:'验收同学'}).click();await member.locator('summary').filter({hasText:'账号权限与状态'}).click();await member.locator('[data-action=enabled]').click();await member.locator('#confirm-action').click();await member.locator('summary').filter({hasText:'账号权限与状态'}).click();await member.locator('[data-action=delete]').click();await member.locator('#confirm-action').click();
+ await member.reload();await member.locator('#login-dialog').waitFor();await member.locator('#login-form [name=username]').fill('验收同学');await member.locator('#login-form [name=password]').fill(password);await member.locator('#login-form [type=submit]').click();await openMembers(member);await member.locator('#filter-all').click();await member.locator('[data-user]').filter({hasText:'管理员'}).filter({hasNotText:'验收同学'}).click();await member.locator('summary').filter({hasText:'账号权限与状态'}).click();await member.locator('[data-action=enabled]').click();await member.locator('#confirm-action').click();await member.locator('summary').filter({hasText:'账号权限与状态'}).click();await member.locator('[data-action=delete]').click();await member.locator('#confirm-action').click();
  await member.locator('#confirm-dialog').waitFor({state:'hidden'});assert.equal(portal.service.store.users.some(u=>u.username==='admin'),false);
  if(process.env.UI_SCREENSHOTS){await capture(member,'users-desktop.png');await member.setViewportSize({width:390,height:844});await member.locator('[data-nav=resources]').click();await capture(member,'resources-mobile.png');}
  assert.deepEqual(errors,[]);assert.deepEqual(blockedRequests,[]);console.log('UI PASS: local-only monitor fixtures, per-card metrics, process disclosure by role, preserved process panels, unknown/stale states, accessible guides, register, zero-quota resource directory, auto pending, grant, auto permissions, preserved drafts, readable invite, named admin, bootstrap retirement, mobile layout.');
