@@ -182,7 +182,7 @@
  .sb .resource-detail .gpu-processes summary{min-height:44px}
  .sb .resource-sheet .sheet-header .button{min-height:44px;font-size:15px}
 }
-@container(max-width:360px){
+@container(max-width:560px){
  .sb .resource-portrait-utils{grid-template-columns:repeat(auto-fit,minmax(min(100%,64px),1fr));gap:8px 6px}
 }
 @media(prefers-reduced-motion:reduce){.sb .resource-select,.sb .resource-chassis-bays .resource-tower-bar{transition:none}}

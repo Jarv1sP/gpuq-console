@@ -69,13 +69,6 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 .sb #mission-control-content{container:control-panel/inline-size}
 .sb #mission-control .mc-meter-value{white-space:nowrap;flex-wrap:nowrap}
 .sb #mission-control .mc-meter-label{word-break:keep-all}
-@container control-panel (max-width:560px){
- .sb #mission-control .mc-overview{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 0;padding:16px}
- .sb #mission-control .mc-meter{padding:0 12px}
- .sb #mission-control .mc-meter:nth-child(odd){padding-left:0;border-left:0}
- .sb #mission-control .mc-meter:nth-child(even){padding-right:0}
- .sb #mission-control-content .mc-meter-value{font-size:clamp(20px,7cqi,28px)}
-}
 .sb #mission-control .mc-attention-heading{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px}
 .sb #mission-control .mc-attention-heading h2{margin:0}
 .sb #mission-control .mc-attention-heading>.button{margin-left:auto;min-height:40px}
@@ -205,4 +198,12 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
  .sb .cs-server-list .cs-server{display:none}
  .sb .cs-seg:has(>.cs-small){flex:1 1 120px;overflow:hidden}
  .sb .cs-small,.sb .cs-small small{min-width:0;overflow:hidden;text-overflow:ellipsis}
+}
+/* This follows the phone defaults so zoomed narrow panels keep their scale. */
+@container control-panel (max-width:560px){
+ .sb #mission-control .mc-overview{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 0;padding:16px}
+ .sb #mission-control .mc-meter{padding:0 clamp(8px,3cqi,12px)}
+ .sb #mission-control .mc-meter:nth-child(odd){padding-left:0;border-left:0}
+ .sb #mission-control .mc-meter:nth-child(even){padding-right:0}
+ .sb #mission-control .mc-meter-value{font-size:clamp(20px,7cqi,28px)}
 }
