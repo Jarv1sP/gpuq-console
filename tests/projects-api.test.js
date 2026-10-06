@@ -73,7 +73,7 @@ test('lifecycle controls bind exact owner, revision and UUID; history cannot be 
   await f.call('projects.retire',{...ref,key,manifestSha256:digest});assert.equal(f.calls.at(-1).args.key,key);
   await f.call('projects.retire.status',{project:'alpha',key});
   for(const extra of [{revision:-1},{revision:'0'},{key:'invalid'},{manifestSha256:'short'},{hostPath:'/data1'},{machine:'gpu-2'}])await assert.rejects(f.call('projects.retire',{...ref,key,manifestSha256:digest,...extra}));
-  f.service.store.jobs.push({id:randomUUID(),userId:f.member.id,machine:'gpu-1',project:'alpha',state:'SUCCEEDED'});
+  f.service.store.jobs.push({id:randomUUID(),userId:f.member.id,machine:'gpu-1',project:'alpha',state:'SUCCEEDED',cards:1,key:randomUUID(),name:'fixture',spec:{argv:['true']}});
   await assert.rejects(f.call('projects.retire',{...ref,key,manifestSha256:digest}),e=>e.status===409);
   f.service.store.jobs.at(-1).state='UNKNOWN';await assert.rejects(f.call('projects.archive',ref),e=>e.status===409);
   f.service.store.jobs.at(-1).nodeJobId='confirmed-native';await f.call('projects.archive',ref);
@@ -86,9 +86,24 @@ test('lifecycle controls bind exact owner, revision and UUID; history cannot be 
 });
 test('authorization change during metadata proof cannot commit a display name',async()=>{
  const f=await fixture();try{
-  const original=f.service.bridge;f.service.bridge=async(...args)=>{const result=await original(...args);f.service.store.get(f.member.id).enabled=false;return result;};
+  const original=f.service.bridge;f.service.bridge=async(...args)=>{const result=await original(...args);f.service.store.setEnabled(f.member.id,false);return result;};
   await assert.rejects(f.call('projects.label.set',{project:'alpha',displayName:'not committed',revision:0}),e=>e.status===403);
   assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM project_labels WHERE owner_id=?').get(f.member.id).n,0);
+ }finally{await f.close();}
+});
+test('post-commit audit failure preserves readable label/group receipts and stale CAS rejects replay',async()=>{
+ const f=await fixture();try{
+  const original=f.service.audit.bind(f.service),id=randomUUID(),members=[{machine:'gpu-1',project:'alpha'}];
+  f.service.audit=(actor,operation,...args)=>{if(['projects.label.set','projects.group.set'].includes(operation))throw Error('Synthetic audit receipt failure');return original(actor,operation,...args);};
+  await assert.rejects(f.call('projects.label.set',{project:'alpha',displayName:'Committed label',revision:0}),/Synthetic audit receipt failure/);
+  const group={id,displayName:'Committed group',revision:0,members,primary:members[0]};
+  await assert.rejects(f.service.invoke(f.user.token,'projects.group.set',group),/Synthetic audit receipt failure/);
+  f.service.audit=original;
+  const label=(await f.call('projects.label.get',{project:'alpha'})).result;assert.equal(label.revision,1);assert.equal(label.displayName,'Committed label');
+  const saved=(await f.service.invoke(f.user.token,'projects.group.get',{id})).result;assert.equal(saved.revision,1);assert.deepEqual(saved.members,members);assert.equal(saved.displayName,'Committed group');
+  await assert.rejects(f.call('projects.label.set',{project:'alpha',displayName:'Replay',revision:0}),e=>e.status===409);
+  await assert.rejects(f.service.invoke(f.user.token,'projects.group.set',group),e=>e.status===409);
+  assert.equal(f.service.store.jobs.length,0);
  }finally{await f.close();}
 });
 test('project upload status is read-only, owner-bound and usable during maintenance',async()=>{

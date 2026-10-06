@@ -46,8 +46,9 @@ export async function projectCatalogCall(service,principal,user,operation,args,a
     try{if(view().revision!==args.revision)fail('名称已被其他客户端修改，请刷新。',409);
       if(args.revision===0&&service.db.prepare('SELECT count(*) AS n FROM project_labels WHERE owner_id=?').get(user.id).n>=10000)fail('项目名称记录过多。',429);
       service.db.prepare('INSERT INTO project_labels(owner_id,machine,project,name,revision,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(owner_id,machine,project) DO UPDATE SET name=excluded.name,revision=excluded.revision,updated_at=excluded.updated_at').run(user.id,ref.machine,ref.project,text,args.revision+1,new Date().toISOString());
-      service.db.exec('COMMIT');service.audit(principal.username,operation,ref.machine,ref.project);return view();
+      service.db.exec('COMMIT');
     }catch(error){service.db.exec('ROLLBACK');throw error;}
+    service.audit(principal.username,operation,ref.machine,ref.project);return view();
   }
   const setting=operation.endsWith('.set');fields(args,['id',...(setting?['displayName','revision','members','primary']:[])]);
   if(typeof args.id!=='string'||!UUID.test(args.id))fail('逻辑项目须使用固定 UUID。');
@@ -67,6 +68,7 @@ export async function projectCatalogCall(service,principal,user,operation,args,a
     service.db.prepare('INSERT INTO project_groups(owner_id,id,name,revision,primary_machine,primary_project,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(owner_id,id) DO UPDATE SET name=excluded.name,revision=excluded.revision,primary_machine=excluded.primary_machine,primary_project=excluded.primary_project,updated_at=excluded.updated_at').run(user.id,args.id,text,args.revision+1,primary?.machine??null,primary?.project??null,new Date().toISOString());
     service.db.prepare('DELETE FROM project_group_members WHERE owner_id=? AND group_id=?').run(user.id,args.id);
     const insert=service.db.prepare('INSERT INTO project_group_members(owner_id,machine,project,group_id) VALUES(?,?,?,?)');for(const ref of members)insert.run(user.id,ref.machine,ref.project,args.id);
-    service.db.exec('COMMIT');service.audit(principal.username,operation,null,args.id);return view();
+    service.db.exec('COMMIT');
   }catch(error){service.db.exec('ROLLBACK');throw error;}
+  service.audit(principal.username,operation,null,args.id);return view();
 }
