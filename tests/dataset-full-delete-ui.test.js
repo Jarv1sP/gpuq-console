@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {canFullDelete,createDatasetFullDeletion,fullDeleteActions,fullDeleteStorageKey} from '../dist/dataset-full-delete-state.js';
+import {canFullDelete,createDatasetFullDeletion,fullDeleteActions,fullDeleteStorageKey,fullDeleteCopyRoles,fullDeleteStepLabel} from '../dist/dataset-full-delete-state.js';
 import {DemoClient} from '../dist/client.js';
 import {maintenanceBlocks} from '../dist/maintenance-state.js';
 
@@ -8,10 +8,10 @@ const version='a'.repeat(64),key='10000000-0000-4000-8000-000000000001',operatio
 const stepId='30000000-0000-4000-8000-000000000001',target={dataset:'scans',version},admin={userId:'alice',role:'admin'},member={userId:'alice',role:'member'};
 const catalog=(allowed=true,capability=1)=>({datasetDelete:capability,datasets:[{dataset:target.dataset,versions:[{version,locations:[{machine:'node-long-id-8',deletionPermissions:{memberAllowed:allowed}}]}]}]});
 const task=(args,overrides={})=>({...args,operationId,state:'PLANNED',steps:[{machine:'node-long-id-8',dataset:'physical-scans',operationId:stepId,phase:'plan',state:'PLANNED',complete:true}],events:[],...overrides});
-function fixture({who=admin,value=catalog(),storageValue,handler}={}){
+function fixture({who=admin,value=catalog(),storageValue,handler,management=true}={}){
   let principal=who,inventory=value,clock=0,session=0;const memory=storageValue||new Map(),calls=[],timers=new Map();let serial=0;
   const storage={getItem:id=>memory.get(id),setItem:(id,value)=>memory.set(id,value)};
-  const options={principal:()=>principal,catalog:()=>inventory,session:()=>session,call:async(operation,args)=>{calls.push({operation,args:structuredClone(args),account:principal?.userId});return handler?handler(operation,args):task(args);},storage,now:()=>clock,makeKey:()=>key,setTimer:(callback,delay)=>{timers.set(++serial,{callback,delay});return serial;},clearTimer:id=>timers.delete(id)};
+  const options={management,principal:()=>principal,catalog:()=>inventory,session:()=>session,call:async(operation,args)=>{calls.push({operation,args:structuredClone(args),account:principal?.userId});return handler?handler(operation,args):task(args);},storage,now:()=>clock,makeKey:()=>key,setTimer:(callback,delay)=>{timers.set(++serial,{callback,delay});return serial;},clearTimer:id=>timers.delete(id)};
   const model=createDatasetFullDeletion(options);model.sync();
   return {model,options,calls,memory,timers,setPrincipal:value=>{principal=value;session++;model.sync();},setCatalog:value=>{inventory=value;},setTime:value=>{clock=value;}};
 }
@@ -44,7 +44,7 @@ test('failure to persist blocks dispatch, rather than losing an idempotency key'
   await assert.rejects(model.submit(target.dataset,version),/无法保存删除请求编号/);assert.equal(f.calls.length,0);assert.equal(model.rows.length,0);
 });
 test('403 preserves backend refusal and 409 unsupported is blocked, not advertised as deleted',async()=>{
-  for(const [status,code,message] of [[403,undefined,'这份数据只能由管理员删除。'],[409,'DATASET_DELETE_UNSUPPORTED','服务器的删除能力未确认，请等待节点更新或恢复连接。']]){
+  for(const [status,code,message] of [[403,undefined,'这份数据只能由管理员删除。'],[409,'DATASET_DELETE_UNSUPPORTED','服务器的删除能力未确认，请等待节点更新或恢复连接。'],[409,undefined,'服务器的删除能力未确认，请等待节点更新或恢复连接。']]){
     const f=fixture({who:member,handler:async()=>{throw Object.assign(Error(message),{status,code});}});
     const row=await f.model.submit(target.dataset,version);assert.equal(row.state,'BLOCKED');assert.equal(row.error,message);assert.equal(row.confirmed,false);assert.equal(row.operationId,null);assert.equal(f.calls.length,1);
   }
@@ -131,4 +131,38 @@ test('maintenance permits deletion status and cancellation, while delete/continu
   const state={operationalMaintenance:{version:1,global:{reason:'检查',since:'2026-10-06T10:00:00Z'},machines:{}}};
   for(const operation of ['datasets.delete.status','datasets.delete.cancel'])assert.equal(maintenanceBlocks(operation,{key,operationId},state,admin),null);
   for(const operation of ['datasets.delete','datasets.delete.continue','datasets.delete.restore'])assert.equal(maintenanceBlocks(operation,{key,operationId},state,admin).reason,'检查');
+});
+
+test('primary interface treats administrators like members; management alone exposes privileged actions',async()=>{
+  assert.equal(canFullDelete(admin,catalog(false),target.dataset,version,false),false);
+  assert.equal(canFullDelete(admin,catalog(true),target.dataset,version,false),true);
+  const f=fixture({management:false,handler:async(operation,args)=>task(args,{state:'WAITING_CONTINUE',canContinue:true})});
+  await f.model.submit(target.dataset,version);assert.deepEqual(fullDeleteActions(f.model.rows[0],admin,false),[]);
+  for(const action of ['continue','cancel','restore'])await assert.rejects(f.model.act(key,action,'node-long-id-8'),/需要管理员处理/);
+  assert.equal(f.calls.length,1);
+});
+test('role labels require an actual original proof; complete cache is not an original, unknown remains factual',()=>{
+  const value=catalog();value.datasets[0].versions[0].locations=[
+    {machine:'cache',state:'READY',storage:{phase:'ARCHIVED',originalRetained:true,archiveMachine:'original'}},
+    {machine:'original',state:'READY'},
+    {machine:'unknown',state:'UNKNOWN'}
+  ];
+  const roles=fullDeleteCopyRoles(value,target.dataset,version);
+  assert.equal(fullDeleteStepLabel({machine:'original',complete:true},roles),'隔离原件（可恢复）');
+  assert.equal(fullDeleteStepLabel({machine:'cache',complete:true},roles),'移除缓存');
+  assert.equal(fullDeleteStepLabel({machine:'unknown',complete:true},roles),'隔离完整副本（可恢复）');
+  assert.equal(fullDeleteStepLabel({machine:'unknown',complete:false},roles),'检查并移除');
+  for(const invalid of [{phase:'ARCHIVED',originalRetained:false,archiveMachine:'original'},{phase:'ARCHIVING',originalRetained:true,archiveMachine:'original'},{phase:'ARCHIVED',originalRetained:'true',archiveMachine:'original'}]){
+    value.datasets[0].versions[0].locations[0].storage=invalid;
+    assert.deepEqual(fullDeleteCopyRoles(value,target.dataset,version).originals,[]);
+  }
+});
+test('primary/management journals preserve independent original keys across both controllers',async()=>{
+  const f=fixture(),otherKey='60000000-0000-4000-8000-000000000001';
+  const value=catalog();value.datasets.push({dataset:'other-data',versions:value.datasets[0].versions});
+  f.setCatalog(value);const second=createDatasetFullDeletion({...f.options,makeKey:()=>otherKey});second.sync();
+  await f.model.submit(target.dataset,version);await second.submit('other-data',version);
+  assert.deepEqual(JSON.parse(f.memory.get(fullDeleteStorageKey(admin.userId))).map(row=>row.key).sort(),[key,otherKey]);
+  f.model.sync();assert.equal(f.model.rows.length,2);await f.model.query(key);
+  assert.equal(JSON.parse(f.memory.get(fullDeleteStorageKey(admin.userId))).length,2);
 });

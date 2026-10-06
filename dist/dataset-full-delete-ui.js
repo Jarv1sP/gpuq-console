@@ -1,26 +1,27 @@
-import {createDatasetFullDeletion,fullDeleteActions,fullDeleteTarget} from './dataset-full-delete-state.js';
+import {createDatasetFullDeletion,fullDeleteActions,fullDeleteTarget,fullDeleteStepLabel} from './dataset-full-delete-state.js';
 import {serverIdHTML} from './workbench-ui.js';
 import {copyHelp} from './copy-help-ui.js';
 import {fadeDialog} from './motion-ui.js';
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={SUBMITTING:'正在提交',PLANNED:'正在核对副本',RUNNING:'正在删除',REMOVING_CACHES:'正在删除缓存',RETIRING_ORIGINAL:'正在删除原件',DELETED:'已删除',BLOCKED:'暂不能删除',FAILED:'删除未完成',UNKNOWN:'删除结果待确认',WAITING_CONTINUE:'等待管理员继续',CANCELING:'正在取消并恢复',CANCELED:'已取消删除'};
-const phases={plan:'核对完整副本',fence:'保护版本',isolate:'移入保留区',commit:'确认删除',restore:'恢复数据',cancel:'取消并恢复','release-absence':'解除旧名称保护','retire-intent':'核对数据库记录'};
+let dialogSerial=0;
 const stamp=value=>{const date=new Date(value);return Number.isNaN(date.getTime())?'时间未确认':date.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});};
 const shape=state=>state==='DELETED'?'st-done':state==='CANCELED'?'st-stop':['BLOCKED','FAILED'].includes(state)?'st-err':state==='UNKNOWN'?'st-unk':state==='WAITING_CONTINUE'?'st-stop':'st-busy';
 const status=(state,label)=>`<span class="st ${shape(state)}"><span class="g" aria-hidden="true"></span>${esc(label||labels[state]||'状态待确认')}</span>`;
 
 // The data-room owns the entry and catalog. This module owns only its dialog,
 // original-key journal and status/action lifecycle; it does not add page layout.
-export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storage}={}){
+export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storage,management=true}={}){
   if(storage===undefined)try{storage=globalThis.localStorage;}catch{}
   let dialog=null,target=null,view='confirm',action=null,opener=null,account=null,notice='';
-  const api=createDatasetFullDeletion({principal:()=>store.principal,session:()=>store.authGeneration,catalog,call:(...args)=>store.call(...args),storage,changed:render,completed:()=>{if(dialog?.open&&!document.hidden&&current())reload();}});
+  const api=createDatasetFullDeletion({principal:()=>store.principal,session:()=>store.authGeneration,catalog,management,call:(...args)=>store.call(...args),storage,changed:render,completed:()=>{if(dialog?.open&&!document.hidden&&current())reload();}});
   function ensureDialog(){
     if(dialog?.isConnected)return;
     if(!document.querySelector('link[data-dataset-remove-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/dataset-remove.css';link.dataset.datasetRemoveStyle='';document.head.append(link);}
-    dialog=document.createElement('dialog');dialog.className='modal dataset-full-delete-dialog';dialog.id='dataset-full-delete-dialog';dialog.setAttribute('aria-labelledby','dataset-full-delete-title');
-    dialog.innerHTML='<header class="modal-head"><h2 id="dataset-full-delete-title">彻底删除数据集</h2><button class="button quiet" type="button" data-full-delete-close aria-label="关闭彻底删除对话框">关闭</button></header><div data-full-delete-content></div>';
+    const suffix=dialogSerial++?'-'+dialogSerial:'';
+    dialog=document.createElement('dialog');dialog.className='modal dataset-full-delete-dialog';dialog.id='dataset-full-delete-dialog'+suffix;dialog.setAttribute('aria-labelledby','dataset-full-delete-title'+suffix);
+    dialog.innerHTML=`<header class="modal-head"><h2 id="dataset-full-delete-title${suffix}">彻底删除数据集</h2><button class="button quiet" type="button" data-full-delete-close aria-label="关闭彻底删除对话框">关闭</button></header><div data-full-delete-content></div>`;
     document.body.append(dialog);
     dialog.addEventListener('close',()=>{api.sync(false);target=null;action=null;notice='';if(opener?.isConnected&&!opener.disabled)opener.focus();});
     dialog.addEventListener('input',event=>{if(event.target.name==='full-delete-name'){const button=dialog.querySelector('[data-full-delete-submit]');if(button)button.disabled=event.target.value!==target?.dataset;}});
@@ -41,6 +42,10 @@ export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storag
       const button=event.target.closest('button');if(!button||button.disabled)return;
       if(button.hasAttribute('data-full-delete-close')){dialog.close();return;}
       if(!current())return;
+      if(button.dataset.fullDeleteCopy){
+        try{await navigator.clipboard.writeText(button.dataset.fullDeleteCopy);button.textContent='已复制';}
+        catch{notice='未能复制，请展开完整编号后手动复制。';render();}return;
+      }
       if(button.hasAttribute('data-full-delete-back')){view='task';action=null;notice='';render();return;}
       const row=target&&api.find(target.dataset,target.version);
       if(button.hasAttribute('data-full-delete-query')&&row){notice='';await api.query(row.key);render();}
@@ -61,7 +66,7 @@ export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storag
       return;
     }
     if(!row){view='confirm';render();return;}
-    const busy=api.isBusy(row.key),actions=catalog()?.datasetDelete===1?fullDeleteActions(row,store.principal):[];
+    const busy=api.isBusy(row.key),actions=catalog()?.datasetDelete===1?fullDeleteActions(row,store.principal,management):[];
     if(view==='action'){
       if(!actions.includes(action)){view='task';action=null;render();return;}
       const sources=row.task.steps.filter(step=>step.complete===true&&step.retainUntil),machines=[...new Set(sources.map(step=>step.machine))].filter(machine=>sources.filter(step=>step.machine===machine).length===1);
@@ -70,10 +75,11 @@ export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storag
       body.innerHTML=`<form>${facts()}<h3>${esc(button)}？</h3><p class="full-delete-warning">${text}</p>${action==='cancel'?'<p class="full-delete-notice">正在执行的步骤会先完成，不会强制中断。</p>':''}${action==='restore'?`<label class="full-delete-name">完整副本所在服务器<select name="full-delete-restore-machine" aria-label="完整副本所在服务器">${machines.map(machine=>`<option value="${esc(machine)}">${esc(machine)}</option>`).join('')}</select></label>`:''}${errorHTML()}<footer class="modal-actions"><button class="button" type="button" data-full-delete-back>返回状态</button><button class="button ${action==='continue'?'danger':'primary'}" type="submit">${esc(button)}</button></footer></form>`;
       return;
     }
-    const stepHTML=(row.task?.steps||[]).map(step=>`<li><div class="full-delete-step-name">${serverIdHTML(step.machine)}<span>${esc(phases[step.phase]||'核对步骤')}</span></div><span class="full-delete-step-state">${esc(step.restoreState==='RESTORED'?'已恢复':step.restoreState==='RELEASED'?'已解除保护':step.state==='ISOLATED'?'已移入保留区':step.state==='PURGED'?'保留数据已清理':step.state==='FAILED'?'未完成':step.state==='UNKNOWN'?'待确认':step.state==='ABSENT'?'原本没有此版本':step.state==='PLANNED'?'待执行':step.state==='COMMITTED'?'已确认':step.state==='RESTORED'?'已恢复':step.state==='CANCELED'?'已取消':'正在核对')}</span></li>`).join('');
-    const needsAdmin=store.principal?.role!=='admin'&&['WAITING_CONTINUE','BLOCKED','FAILED','DELETED'].includes(row.state);
-    const retained=row.confirmed&&row.state==='DELETED'?`<dl class="full-delete-facts"><div><dt>可恢复至</dt><dd>${row.task.retainUntil?`<time datetime="${esc(row.task.retainUntil)}">${esc(stamp(row.task.retainUntil))}</time>`:'恢复期限未确认'}</dd></div></dl><p class="full-delete-notice">其他名称下的副本不受影响</p>`:'';
-    body.innerHTML=`${facts()}<div class="full-delete-status copy-caption" role="status">${status(row.state,row.pendingAction==='restore'?'正在恢复':row.pendingAction==='continue'?'正在请求继续':row.pendingAction==='cancel'?'正在请求取消':null)}${row.state==='UNKNOWN'?copyHelp('删除结果待确认','请求结果未确认，只会按原请求编号查询。请勿创建新编号或重复删除。'):''}</div>${row.error?`<p class="form-error" role="alert">${esc(row.error)}</p>`:''}${errorHTML()}${needsAdmin?'<p class="full-delete-notice">需要管理员处理</p>':''}${row.state==='WAITING_CONTINUE'&&row.task?.canContinue!==true?'<p class="full-delete-notice">服务器仍在处理原步骤，请先重新查询。</p>':''}${retained}${stepHTML?`<ol class="full-delete-steps" aria-label="删除步骤">${stepHTML}</ol>`:''}<details class="full-delete-record"><summary>请求编号</summary><code>${esc(row.key)}</code>${row.operationId?`<span>操作编号</span><code>${esc(row.operationId)}</code>`:''}</details><footer class="modal-actions"><button class="button" type="button" data-full-delete-query ${busy?'disabled':''}>${busy?'正在查询…':'重新查询'}</button>${actions.map(item=>`<button class="button ${item==='continue'?'danger':'quiet'}" type="button" data-full-delete-action="${item}" ${busy?'disabled':''}>${{continue:'继续删除',cancel:'取消删除',restore:'恢复数据'}[item]}</button>`).join('')}</footer>`;
+    const stepHTML=(row.task?.steps||[]).map(step=>`<li><div class="full-delete-step-name">${serverIdHTML(step.machine)}<span>${esc(fullDeleteStepLabel(step,row.copyRoles))}</span></div><span class="full-delete-step-state">${esc(step.restoreState==='RESTORED'?'已恢复':step.restoreState==='RELEASED'?'已解除保护':step.state==='ISOLATED'?'已移入保留区':step.state==='PURGED'?'保留数据已清理':step.state==='FAILED'?'失败':step.state==='UNKNOWN'?'待确认':step.state==='ABSENT'?'原本没有此版本':step.state==='PLANNED'?'待执行':step.state==='COMMITTED'?'已确认':step.state==='RESTORED'?'已恢复':step.state==='CANCELED'?'已取消':'进行中')}</span></li>`).join('');
+    const ordinary=!management||store.principal?.role!=='admin',needsAdmin=ordinary&&['WAITING_CONTINUE','BLOCKED','UNKNOWN'].includes(row.state);
+    const retained=row.confirmed&&row.state==='DELETED'?`${ordinary?`<p class="full-delete-notice full-delete-retention">如需恢复，请联系管理员（${row.task.retainUntil?'保留至 '+esc(stamp(row.task.retainUntil)):'保留期限未确认'}）</p>`:`<dl class="full-delete-facts full-delete-retention"><div><dt>可恢复至</dt><dd>${row.task.retainUntil?`<time datetime="${esc(row.task.retainUntil)}">${esc(stamp(row.task.retainUntil))}</time>`:'恢复期限未确认'}</dd></div></dl>`}<p class="full-delete-notice">其他名称下的副本不受影响</p>`:'';
+    const reference=row.operationId?`<dl class="full-delete-facts full-delete-reference"><div><dt>请求编号</dt><dd><code title="${esc(row.operationId)}">${esc(row.operationId.slice(0,8)+'…'+row.operationId.slice(-4))}</code><button class="button quiet" type="button" data-full-delete-copy="${esc(row.operationId)}" aria-label="复制完整请求编号">复制</button></dd></div></dl><details class="full-delete-record"><summary>完整编号</summary><code>${esc(row.operationId)}</code></details>`:'';
+    body.innerHTML=`${facts()}<div class="full-delete-status copy-caption" role="status">${status(row.state,row.pendingAction==='restore'?'正在恢复':row.pendingAction==='continue'?'正在请求继续':row.pendingAction==='cancel'?'正在请求取消':null)}${row.state==='UNKNOWN'?copyHelp('删除结果待确认','请求结果未确认，只会按原请求编号查询。请勿创建新编号或重复删除。'):''}</div>${row.error?`<p class="form-error" role="alert">${esc(row.error)}</p>`:''}${errorHTML()}${needsAdmin?'<p class="full-delete-notice">需要管理员处理</p>':''}${row.state==='WAITING_CONTINUE'&&row.task?.canContinue!==true?'<p class="full-delete-notice">服务器仍在处理原步骤，请先重新查询。</p>':''}${retained}${stepHTML?`<ol class="full-delete-steps" aria-label="删除步骤">${stepHTML}</ol>`:''}${reference}<footer class="modal-actions"><button class="button" type="button" data-full-delete-query ${busy?'disabled':''}>${busy?'正在查询…':'重新查询'}</button>${actions.map(item=>`<button class="button ${item==='continue'?'danger':'quiet'}" type="button" data-full-delete-action="${item}" ${busy?'disabled':''}>${{continue:'继续删除',cancel:'取消删除',restore:'恢复数据'}[item]}</button>`).join('')}</footer>`;
   }
   function present(dataset,version,recordOnly=false){
     fullDeleteTarget(dataset,version);

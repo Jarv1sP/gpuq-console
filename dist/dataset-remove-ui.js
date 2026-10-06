@@ -100,17 +100,19 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
   return {sync,submit,query,abandon,dismiss,stop,get rows(){return owner?.rows||[];},get saved(){return owner?.saved??true;},isBusy:id=>busy.has(owner?.rows.find(row=>row.id===id)),blocked:value=>owner?.rows.some(row=>unresolved(row)&&overlaps(row,value))||false};
 }
 
-export function datasetRemoveUI(store,section,toast,{reload,catalog}={}){
+export function datasetRemoveUI(store,section,toast,{reload,catalog,readCatalog,management}={}){
   let storage;try{storage=globalThis.localStorage;}catch{}
   let dialog=null,confirmation=null,serial=0,updating=false;
   const originals=new WeakMap();
   const resolving=new WeakSet();
   const localReferences=new Map();
-  const api=createDatasetRemovals({principal:()=>store.principal,machines:()=>store.data?.machines||[],call:(...args)=>store.call(...args),storage,changed:update,completed:row=>{
-    toast(row.unregistered?'已从 '+row.machine+' 删除':'这台服务器原本没有此登记。');if(document.body.dataset.room==='datasets')reload?.();
+  const api=createDatasetRemovals({principal:()=>management===false?null:store.principal,machines:()=>store.data?.machines||[],call:(...args)=>store.call(...args),storage,changed:update,completed:row=>{
+    toast(row.unregistered?'已从 '+row.machine+' 删除':'这台服务器原本没有此登记。');if(inRoom())reload?.();
   }});
   if(!document.querySelector('link[data-dataset-remove-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/dataset-remove.css';link.dataset.datasetRemoveStyle='';document.head.append(link);}
-  const admin=()=>store.principal?.role==='admin',currentMachine=()=>section.querySelector('[name=dataset-machine]')?.value;
+  if(management===true)section.classList.add('dataset-management');
+  const inRoom=()=>document.body.dataset.room===(management===true?'admin':'datasets');
+  const admin=()=>management!==false&&store.principal?.role==='admin',currentMachine=()=>section.querySelector('[name=dataset-machine]')?.value;
   const targetFor=card=>{
     const slot=card.querySelector('[data-dataset-more-slot]'),action=card.querySelector('[data-use-dataset],[data-prepare-dataset]');if(!slot&&!action)return null;
     const logical=slot?.dataset.dataset||action.dataset.useDataset||action.dataset.prepareDataset,machine=slot?.dataset.machine||card.querySelector('.dataset-location.dataset-target')?.dataset.machine||currentMachine(),version=slot?.dataset.version||action.dataset.version;
@@ -119,11 +121,11 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog}={}){
   };
   async function resolveTarget(card,whole){
     const target=targetFor(card),identity=JSON.stringify([store.principal,store.authGeneration]);
-    if(target.machine!==currentMachine())throw Error('请等所选服务器的目录更新后再删除。');
+    if(management!==true&&target.machine!==currentMachine())throw Error('请等所选服务器的目录更新后再删除。');
     // A catalog's logical training name may refer to a differently named local
     // registration. Revalidate the actual selected-node name before confirming.
-    const catalog=await store.call('datasets.catalog',{machine:target.machine});
-    if(identity!==JSON.stringify([store.principal,store.authGeneration])||currentMachine()!==target.machine||!card.isConnected)return null;
+    const catalog=readCatalog?await readCatalog():await store.call('datasets.catalog',{machine:target.machine});
+    if(identity!==JSON.stringify([store.principal,store.authGeneration])||management!==true&&currentMachine()!==target.machine||!card.isConnected||section.hidden||!inRoom())return null;
     const item=catalog.datasets?.find(item=>item.dataset===target.catalogDataset),versions=whole?item?.versions:item?.versions?.filter(row=>row.version===target.version);
     const references=[...new Set((versions||[]).flatMap(row=>(row.locations||[]).filter(location=>location.machine===target.machine).map(location=>location.dataset)).filter(value=>typeof value==='string'&&datasetID.test(value)))];
     if(references.length!==1)throw Error(references.length?'请先核对这台服务器的多个登记名称。':'这台服务器没有此登记，请刷新目录。');
@@ -162,10 +164,10 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog}={}){
   function update(){
     if(updating)return;updating=true;
     try{
-      const visible=!document.hidden&&!section.hidden&&document.body.dataset.room==='datasets';api.sync(visible);
-      if(section.hidden||document.body.dataset.room!=='datasets')dialog?.close();
+      const visible=!document.hidden&&!section.hidden&&inRoom();api.sync(visible);
+      if(section.hidden||!inRoom())dialog?.close();
       if(!admin()){dialog?.close();section.querySelectorAll('[data-remove-owned]').forEach(node=>node.remove());return;}
-      const catalog=section.querySelector('#dataset-catalog');if(!catalog)return;
+      const catalog=section.querySelector('#dataset-catalog,[data-dataset-catalog]')||(management===true?section:null);if(!catalog)return;
       for(const card of catalog.querySelectorAll('.dataset-card')){
         let target;try{target=targetFor(card);}catch{continue;}if(!target)continue;
         let more=card.querySelector('.dataset-remove-more');
@@ -175,7 +177,7 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog}={}){
           (card.querySelector('[data-dataset-more-slot]')||card.querySelector('.dataset-card-heading')).append(more);
         }
         const blocked=api.blocked(target),maintenance=maintenanceFor(store.data?.operationalMaintenance,target.machine);
-        for(const button of more.querySelectorAll('[data-remove-version],[data-remove-dataset]'))button.disabled=blocked||!!maintenance||resolving.has(card)||target.machine!==currentMachine()||api.blocked({...target,version:null})&&button.hasAttribute('data-remove-dataset');
+        for(const button of more.querySelectorAll('[data-remove-version],[data-remove-dataset]'))button.disabled=blocked||!!maintenance||resolving.has(card)||management!==true&&target.machine!==currentMachine()||api.blocked({...target,version:null})&&button.hasAttribute('data-remove-dataset');
         const actions=card.querySelector('.dataset-actions-cell.dataset-target');
         for(const button of actions?.querySelectorAll('[data-use-dataset],[data-prepare-dataset]')||[]){if(blocked){if(!originals.has(button))originals.set(button,button.disabled);button.disabled=true;}else if(originals.has(button)){button.disabled=originals.get(button)||!!maintenance||!!section.querySelector('#datasets-refresh')?.disabled;originals.delete(button);}}
         const pending=api.rows.find(row=>unresolved(row)&&overlaps(row,target))||api.rows.findLast(row=>['FAILED','BLOCKED'].includes(row.state)&&overlaps(row,target));let status=card.querySelector('.dataset-removal-state');
@@ -199,10 +201,10 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog}={}){
   section.addEventListener('change',update);
   new MutationObserver(update).observe(section,{subtree:true,childList:true,attributes:true,attributeFilter:['hidden']});
   new MutationObserver(update).observe(document.body,{attributes:true,attributeFilter:['data-room']});
-  document.addEventListener('visibilitychange',()=>{api.sync(!document.hidden&&!section.hidden&&document.body.dataset.room==='datasets');});
+  document.addEventListener('visibilitychange',()=>{api.sync(!document.hidden&&!section.hidden&&inRoom());});
   document.addEventListener('gpuq-maintenance-state',update);
   store.onAuthChange?.(()=>{dialog?.close();localReferences.clear();api.sync(false);update();});
-  const fullDelete=datasetFullDeleteUI(store,{reload,catalog});
+  const fullDelete=datasetFullDeleteUI(store,{reload,catalog,management:management!==false});
   Object.assign(api,{canOpenFullDelete:fullDelete.canOpenFullDelete,openFullDelete:fullDelete.openFullDelete,fullDelete});
   update();return api;
 }

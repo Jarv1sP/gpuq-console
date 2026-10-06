@@ -443,8 +443,12 @@ gpuctl data retire-discard-registration OPERATION_ID --machine SERVER --key UUID
 
 ### 网页：彻底删除对话框与原编号恢复
 
-数据集详情的入口由房间控制器提供。`datasetRemoveUI(store, section, toast, {reload, catalog: () => currentCatalog})` 返回 `canOpenFullDelete(dataset, version)` 和 `openFullDelete(dataset, version)`，只挂载独立对话框，不改变数据集布局。catalog getter 必须返回当前账号的最新目录，切换账号或尚未读取时返回 null；所有服务器名称来自目录和任务步骤。只有 `datasetDelete === 1` 才显示入口：管理员可见；成员还要求这个版本至少一个 location 的 `deletionPermissions.memberAllowed === true`。旧节点缺字段或 false 时成员不显示入口，不从用户名或所属用户文字推断权限。
+数据集详情的入口由房间控制器提供。主界面调用 `datasetRemoveUI(store, section, toast, {reload, catalog: () => currentCatalog, management: false})`，返回 `canOpenFullDelete(dataset, version)` 和 `openFullDelete(dataset, version)`，只挂载独立对话框，不改变数据集布局，也不读取管理目录或显示管理员操作。catalog getter 必须返回当前账号的最新目录，切换账号或尚未读取时返回 null；所有服务器名称来自目录和任务步骤。只有 `datasetDelete === 1` 且这个版本至少一个 location 的 `deletionPermissions.memberAllowed === true` 才显示主界面入口，管理员在主界面也遵循此条件。旧节点缺字段或 false 时不显示入口，不从用户名或所属用户文字推断权限。
 
-输入准确的数据集名称后，网页先在当前账号的本地记录里保存固定 UUID key 和原 dataset/version，再发送 `datasets.delete`。无法保存时不派发。重复打开同一目标使用原记录；丢回执先 `datasets.delete.status {key}`，不换 key、不自动再次删除，包括 404。刷新后本地终态也先显示待确认，只有匹配原 key、任务编号和目标的服务器回执恢复当前事实。`fullDelete.records` 是本地恢复引用，`fullDelete.openFullDeleteRecord(key)` 可供任务记录入口调用；它只读取当前账号的记录，不授予跨账号访问权。
+后台数据与存储区调用同一工厂，传 `{reload, catalog: () => adminCatalog, readCatalog: () => freshAdminAllNodeListings, management: true}`。`readCatalog` 必须重新读取全部服务器，供按机器删除核对真实登记名和其他完整副本；缓存的 catalog getter 不能替代此读取。后台管理员在能力为 1 时不受 `memberAllowed` 限制，继续、取消和恢复也只出现在后台。省略 management 时暂保留旧数据集页的管理入口，迁移完成的调用方应显式传入该参数。
+
+输入准确的数据集名称后，网页先在当前账号的本地记录里保存固定 UUID key 和原 dataset/version，再发送 `datasets.delete`。无法保存时不派发。重复打开同一目标使用原记录；丢回执先 `datasets.delete.status {key}`，不换 key、不自动再次删除，包括 404。刷新后本地终态也先显示待确认，只有匹配原 key、任务编号和目标的服务器回执恢复当前事实。主界面和后台共用按账号的记录，保存一条任务时保留其他任务的 key。`fullDelete.records` 是本地恢复引用，`fullDelete.openFullDeleteRecord(key)` 可供任务记录入口调用；它只读取当前账号的记录，不授予跨账号访问权。
+
+有 operationId 时直接显示短请求编号，可复制完整编号；没有编号时不渲染此行。步骤角色只依据目录事实：`ARCHIVED + originalRetained + archiveMachine` 证明的服务器显示「隔离原件（可恢复）」，已知普通缓存显示「移除缓存」。角色未知但步骤 complete 为真时显示「隔离完整副本（可恢复）」，其余显示「检查并移除」，不把 complete 推断成原件。成员删除完成后显示联系管理员恢复和真实保留期限；只有 BLOCKED、UNKNOWN、WAITING_CONTINUE 才提示需要管理员处理。
 
 任务显示当前步骤、原服务器 ID 和服务器原因，不画百分比。UNKNOWN 只提供重新查询；DELETED 显示服务器的 retainUntil，并注明「其他名称下的副本不受影响」，不声称磁盘空间已释放。403 和能力未开通的 409 保留后台原文。成员看到需继续、取消或恢复的任务时显示「需要管理员处理」，不渲染管理按钮。管理员继续沿用原 operationId；取消先确认停止后续删除并还原数据、不强制中断已执行步骤；恢复由管理员选择任务中已确认完整的保留副本，回执可能使用真实物理别名且不带 key，网页核对绑定后再查询原任务。所有未知写结果都不自动重放。

@@ -14,13 +14,13 @@ const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{
 await mkdir(shots,{recursive:true});
 try{
  for(const role of ['member','admin']){
-  const context=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:'reduce'}),page=await context.newPage();await page.clock.install({time:new Date('2026-10-06T10:00:00Z')});
+  const context=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:'reduce',permissions:['clipboard-read','clipboard-write']}),page=await context.newPage();await page.clock.install({time:new Date('2026-10-06T10:00:00Z')});
   let principal={userId:'local-'+role,username:'local-'+role,role},mode='DELETED',lostSubmit=false,queryLost=false,serial=0;
   const calls=[],tasks=new Map();
   const state=()=>({machines,users:[],jobs:[],executionEnabled:true});
   const json=(route,result)=>route.fulfill({contentType:'application/json',body:JSON.stringify({principal,state:state(),result})});
   const failure=(route,status,error,code)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify({error,...(code?{code}:{})})});
-  const fixtureCatalog=(dataset,allowed=true,capability=1)=>({datasetDelete:capability,datasets:[{dataset,versions:[{version,locations:machines.map(machine=>({machine:machine.id,dataset,state:'READY',deletionPermissions:{memberAllowed:allowed}}))}]}]});
+  const fixtureCatalog=(dataset,allowed=true,capability=1)=>({datasetDelete:capability,datasets:[{dataset,versions:[{version,locations:machines.map((machine,index)=>({machine:machine.id,dataset:index===0?'physical-scans':dataset,state:'READY',storage:{phase:'ARCHIVED',originalRetained:true,archiveMachine:machines[0].id},deletionPermissions:{memberAllowed:allowed}}))}]}]});
   const task=(args,account)=>({operationId:`20000000-0000-4000-8000-${(++serial).toString().padStart(12,'0')}`,key:args.key,dataset:args.dataset,version:args.version,state:mode,
    ...(mode==='WAITING_CONTINUE'?{canContinue:true}:{}),...(mode==='BLOCKED'?{error:'这份数据仍有固定保留。'}:{}),
    retainUntil:'2026-10-13T10:00:00Z',copyNotice:'其他名称下的副本不受影响',createdAt:'2026-10-06T10:00:00Z',updatedAt:'2026-10-06T10:00:00Z',
@@ -33,7 +33,7 @@ try{
     if(operation==='datasets.delete'){
      assert.deepEqual(Object.keys(args).sort(),['dataset','key','version']);assert.equal(args.version,version);
      if(mode==='FORBIDDEN')return failure(route,403,'这份数据只能由管理员删除。');
-     if(mode==='UNSUPPORTED')return failure(route,409,'服务器的删除能力未确认，请等待节点更新或恢复连接。','DATASET_DELETE_UNSUPPORTED');
+     if(mode==='UNSUPPORTED')return failure(route,409,'服务器的删除能力未确认，请等待节点更新或恢复连接。');
      const result=task(args,principal.userId);tasks.set(args.key,result);if(lostSubmit){lostSubmit=false;return route.abort('failed');}return json(route,result);
     }
     if(operation==='datasets.delete.status'){
@@ -62,8 +62,8 @@ try{
   await page.evaluate(async({principal,state})=>{
    const {DemoClient}=await import('/client.js'),{datasetRemoveUI}=await import('/dataset-remove-ui.js');
    window.store=new DemoClient();store.remote=true;store.production=true;store.token='offline-browser-fixture';store.principal=principal;store.data=state;
-   window.currentCatalog=null;window.reloads=0;
-   window.removals=datasetRemoveUI(store,document.querySelector('#page-datasets'),()=>{},{catalog:()=>currentCatalog,reload:()=>{reloads++;}});
+   window.currentCatalog=null;window.reloads=0;if(principal.role==='admin')document.body.dataset.room='admin';
+   window.removals=datasetRemoveUI(store,document.querySelector('#page-datasets'),()=>{},{catalog:()=>currentCatalog,reload:()=>{reloads++;},management:principal.role==='admin'});
    window.setEntry=(catalog,dataset,version)=>{
     currentCatalog=catalog;const slot=document.querySelector('#test-entry');slot.replaceChildren();
     if(removals.canOpenFullDelete(dataset,version)){const button=document.createElement('button');button.className='button danger';button.dataset.fullDeleteOpen='';button.textContent='彻底删除';button.onclick=()=>removals.openFullDelete(dataset,version);slot.append(button);}
@@ -96,9 +96,19 @@ try{
   checks.push(role+': capability 0/string/boolean/null renders no entry or dialog and sends no requests; current memberAllowed true/false/missing, admin override');
   await open('scans');assert.equal(await page.locator('[data-full-delete-submit]').isDisabled(),true);await page.locator('[name=full-delete-name]').fill('scan');assert.equal(await page.locator('[data-full-delete-submit]').isDisabled(),true);
   await capture('confirmation');await page.locator('[data-copy-help]').click();assert.equal(calls.length,0);await page.keyboard.press('Escape');assert.equal(await page.locator('#dataset-full-delete-dialog[open]').count(),1);
-  await submit('scans');assert(await page.locator('.full-delete-status').innerText().then(text=>text.includes('已删除')));assert(await page.locator('.full-delete-facts').last().innerText().then(text=>text.includes('2026/10/13')));assert(await page.locator('#dataset-full-delete-dialog').innerText().then(text=>text.includes('其他名称下的副本不受影响')));
+  await submit('scans');assert(await page.locator('.full-delete-status').innerText().then(text=>text.includes('已删除')));assert(await page.locator('.full-delete-retention').innerText().then(text=>text.includes('2026/10/13')));assert(await page.locator('#dataset-full-delete-dialog').innerText().then(text=>text.includes('其他名称下的副本不受影响')));
+  const current=[...tasks.values()].find(task=>task.dataset==='scans');
+  assert.equal(await page.locator('.full-delete-reference code').textContent(),current.operationId.slice(0,8)+'…'+current.operationId.slice(-4));
+  const beforeCopy=calls.length;await page.locator('[data-full-delete-copy]').click();await page.waitForFunction(()=>document.querySelector('[data-full-delete-copy]').textContent==='已复制');
+  assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),current.operationId);assert.equal(calls.length,beforeCopy);
+  assert.equal(await page.locator('.full-delete-step-name>span:last-child').first().textContent(),'隔离原件（可恢复）');
+  for(const label of await page.locator('.full-delete-step-name>span:last-child').allTextContents().then(values=>values.slice(1)))assert.equal(label,'移除缓存');
   await capture('deleted');
-  if(role==='member'){assert.equal(await page.locator('[data-full-delete-action]').count(),0);assert(await page.locator('#dataset-full-delete-dialog').innerText().then(text=>text.includes('需要管理员处理')));}
+  if(role==='member'){
+   assert.equal(await page.locator('[data-full-delete-action]').count(),0);
+   assert(await page.locator('.full-delete-retention').innerText().then(text=>/^如需恢复，请联系管理员（保留至 \d{4}\/\d{2}\/\d{2} \d{2}:\d{2}）$/.test(text)));
+   assert(!await page.locator('#dataset-full-delete-dialog').innerText().then(text=>text.includes('需要管理员处理')));
+  }
   else{
    await page.locator('[data-full-delete-action=restore]').click();await capture('restore-confirmation');assert.equal(await page.locator('[name=full-delete-restore-machine]').inputValue(),machines[0].id);await page.locator('#dataset-full-delete-dialog form [type=submit]').click();await page.waitForFunction(()=>document.querySelector('#dataset-full-delete-dialog').textContent.includes('管理员已恢复数据和全部名称'));
    assert.equal(await page.locator('[data-full-delete-action=continue]').count(),0);assert.equal(calls.at(-2).operation,'datasets.delete.restore');assert.equal(calls.at(-1).operation,'datasets.delete.status');
@@ -115,8 +125,8 @@ try{
   for(const [state,label] of [['BLOCKED','这份数据仍有固定保留。'],['FORBIDDEN','这份数据只能由管理员删除。'],['UNSUPPORTED','服务器的删除能力未确认，请等待节点更新或恢复连接。']]){
    mode=state;const dataset=state.toLowerCase();await open(dataset);await submit(dataset);assert(await page.locator('#dataset-full-delete-dialog').innerText().then(text=>text.includes(label)));assert(await page.locator('.full-delete-status').innerText().then(text=>text.includes('暂不能删除')));await capture(state.toLowerCase());await page.locator('[data-full-delete-close]').click();
   }
-  checks.push(role+': BLOCKED node reason, original 403 and coded 409 UNSUPPORTED');
-  mode='DELETED';lostSubmit=true;queryLost=true;await open('lost-receipt');await submit('lost-receipt');assert(await page.locator('.full-delete-status').innerText().then(text=>text.includes('删除结果待确认')));assert.equal(await page.locator('[data-full-delete-action]').count(),0);assert.equal(await page.locator('.modal-actions button').count(),1);await capture('unknown');
+  checks.push(role+': BLOCKED node reason, original 403 and uncoded 409 UNSUPPORTED');
+  mode='DELETED';lostSubmit=true;queryLost=true;await open('lost-receipt');await submit('lost-receipt');assert(await page.locator('.full-delete-status').innerText().then(text=>text.includes('删除结果待确认')));assert.equal(await page.locator('[data-full-delete-action]').count(),0);assert.equal(await page.locator('.modal-actions button').count(),1);assert.equal(await page.locator('.full-delete-reference').count(),0);await capture('unknown');
   const original=[...tasks.values()].at(-1);assert.equal(calls.at(-1).operation,'datasets.delete.status');assert.deepEqual(calls.at(-1).args,{key:original.key});
   await page.reload();await page.evaluate(async({principal,state,catalog,dataset,version})=>{
    const {DemoClient}=await import('/client.js'),{datasetFullDeleteUI}=await import('/dataset-full-delete-ui.js');
@@ -133,6 +143,58 @@ try{
   const rejected=await page.evaluate(async key=>{try{await store.call('datasets.delete.status',{key});return null;}catch(error){return {status:error.status,message:error.message};}},original.key);
   if(role==='member')assert.deepEqual(rejected,{status:404,message:'删除记录不存在或无权查看。'});
   checks.push(role+': auth switch closes old dialog and exposes no foreign local records; owner/admin status authorization');
+  if(role==='admin'){
+   mode='WAITING_CONTINUE';const primary=await context.newPage();primary.on('pageerror',error=>errors.push(error.message));await primary.goto(origin);
+   await primary.evaluate(async({principal,state,catalog,version})=>{
+    const {DemoClient}=await import('/client.js'),{datasetRemoveUI}=await import('/dataset-remove-ui.js');
+    window.store=new DemoClient();store.remote=true;store.production=true;store.token='offline-browser-fixture';store.principal=principal;store.data=state;
+    window.currentCatalog=catalog;window.reads=0;
+    const root=document.querySelector('#page-datasets');root.querySelector('#dataset-catalog').innerHTML='<article class="dataset-card"><div class="dataset-card-heading"><span data-dataset-more-slot data-machine="'+state.machines[0].id+'" data-dataset="main-personal" data-version="'+version+'"></span></div></article>';
+    window.mainRemove=datasetRemoveUI(store,root,()=>{},{management:false,catalog:()=>currentCatalog,readCatalog:()=>{reads++;throw Error('primary must not read admin listings');}});
+   },{principal,state:state(),catalog:fixtureCatalog('main-personal'),version});
+   assert.equal(await primary.locator('[data-remove-more]').count(),0);
+   assert.equal(await primary.evaluate(({dataset,version})=>mainRemove.canOpenFullDelete(dataset,version),{dataset:'main-personal',version}),true);
+   await primary.evaluate(({dataset,version})=>{currentCatalog.datasets[0].versions[0].locations.forEach(location=>location.deletionPermissions.memberAllowed=false);}, {dataset:'main-personal',version});
+   assert.equal(await primary.evaluate(({dataset,version})=>mainRemove.canOpenFullDelete(dataset,version),{dataset:'main-personal',version}),false);
+   await primary.evaluate(({dataset,version})=>{currentCatalog.datasets[0].versions[0].locations.forEach(location=>location.deletionPermissions.memberAllowed=true);mainRemove.openFullDelete(dataset,version);}, {dataset:'main-personal',version});
+   await primary.locator('[name=full-delete-name]').fill('main-personal');await primary.locator('[data-full-delete-submit]').click();await primary.waitForFunction(()=>document.querySelector('.full-delete-status').textContent.includes('等待管理员继续'));
+   assert.equal(await primary.locator('[data-full-delete-action]').count(),0);assert.equal(await primary.evaluate(()=>reads),0);assert(await primary.locator('.dataset-full-delete-dialog').innerText().then(text=>text.includes('需要管理员处理')));
+   checks.push('management:false administrator has member-equivalent entry and no unregister/continue/cancel/restore UI or admin listing calls');
+   await primary.unrouteAll({behavior:'ignoreErrors'});await primary.close();
+   const backend=await context.newPage();backend.on('pageerror',error=>errors.push(error.message));await backend.goto(origin);
+   const fresh=fixtureCatalog('admin-cache',false);fresh.datasets[0].versions[0].locations.forEach(location=>{delete location.storage;});
+   const cached=structuredClone(fresh);cached.datasets[0].versions[0].locations=cached.datasets[0].versions[0].locations.slice(0,1);
+   await backend.evaluate(async({principal,state,cached,fresh,version})=>{
+    const {DemoClient}=await import('/client.js'),{datasetRemoveUI}=await import('/dataset-remove-ui.js');
+    window.store=new DemoClient();store.remote=true;store.production=true;store.token='offline-browser-fixture';store.principal=principal;store.data=state;
+    document.body.dataset.room='admin';window.reads=0;window.freshCatalog=fresh;window.messages=[];
+    const root=document.querySelector('#page-datasets');root.id='admin-storage-pane';root.querySelector('#dataset-catalog').removeAttribute('id');root.firstElementChild.dataset.datasetCatalog='';
+    root.firstElementChild.innerHTML='<article class="dataset-card"><div class="dataset-card-heading"><span data-dataset-more-slot data-machine="'+state.machines[0].id+'" data-dataset="admin-cache" data-version="'+version+'"></span></div></article>';
+    window.adminRemove=datasetRemoveUI(store,root,message=>messages.push(message),{management:true,catalog:()=>cached,readCatalog:async()=>{reads++;return structuredClone(freshCatalog);}});
+   },{principal,state:state(),cached,fresh,version});
+   assert.equal(await backend.locator('[name=dataset-machine]').count(),0);
+   assert.equal(await backend.evaluate(({dataset,version})=>adminRemove.canOpenFullDelete(dataset,version),{dataset:'admin-cache',version}),true);
+   const beforeRead=calls.length;
+   const openRemoval=async()=>{await backend.locator('[data-remove-more]').click();await backend.locator('[data-remove-version]').click();await backend.locator('#dataset-remove-dialog[open]').waitFor();};
+   await openRemoval();assert.equal(await backend.evaluate(()=>reads),1);assert.equal(calls.length,beforeRead);
+   assert.equal(await backend.locator('[data-remove-confirm]').isEnabled(),true);
+   assert.match(await backend.locator('.dataset-remove-facts>div:nth-child(2)').innerText(),/admin-cache · 登记名 physical-scans/);
+   for(const machine of machines.slice(1))assert(await backend.locator('.dataset-remove-facts>div:last-child').innerText().then(text=>text.includes(machine.id)));
+   for(const width of [1440,390,320]){
+    await backend.setViewportSize({width,height:1000});await backend.evaluate(async()=>{await document.fonts.ready;document.activeElement?.blur();for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();});
+    const result=await inspectGeometry(backend,{roots:['#dataset-remove-dialog[open]'],controls:'.button',containment:'.button,.dataset-remove-facts>div',buttonRows:[{parent:'.dataset-remove-dialog .modal-actions'}]});
+    assert.equal(result.pass,true,JSON.stringify(result));geometry.push({name:'management-reader',role,...result});
+    await backend.screenshot({path:join(shots,'management-reader-admin-'+width+'.png')});
+   }
+   await backend.locator('[data-remove-close]').first().click();
+   await backend.evaluate(()=>{freshCatalog.datasets[0].versions[0].locations=freshCatalog.datasets[0].versions[0].locations.slice(0,1);});
+   await openRemoval();assert.equal(await backend.evaluate(()=>reads),2);assert.equal(await backend.locator('[data-remove-confirm]').isDisabled(),true);
+   assert.match(await backend.locator('#dataset-remove-dialog').innerText(),/这可能是最后一份完整数据/);assert.equal(calls.length,beforeRead);
+   await backend.evaluate(()=>{document.body.dataset.room='datasets';});await backend.locator('#dataset-remove-dialog[open]').waitFor({state:'detached'});
+   assert.deepEqual(await backend.evaluate(()=>messages),[]);
+   checks.push('management:true uses the fresh all-node reader and physical name without the primary machine selector; changed last-copy proof blocks deletion; leaving admin closes the dialog; zero writes');
+   await backend.unrouteAll({behavior:'ignoreErrors'});await backend.close();
+  }
   await context.unrouteAll({behavior:'ignoreErrors'});await context.close();
  }
 }finally{await browser.close();}
