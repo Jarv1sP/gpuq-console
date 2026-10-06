@@ -89,6 +89,8 @@ no-follow CAS、一致原子 no-replace 与永久 slug tombstone。未知、历�
 
 个人累计用卡额度只约束普通成员；当前启用的管理员对共享、独占、手选和 AUTO 一致豁免。单任务物理卡数、显存、能力、owner-only 数据授权、优先级和显式让位规则不变，资源不足交给节点排队；不清除既有任务或租约，也不更改成员原始额度。全平台 5000 条历史和每人 10 个准备中任务的上限保留。新任务内部 `dispatchPending:true` 随记录持久化（不下发到节点或返回客户端）；首次 sync 在串行队列内重验当前角色/启用状态、机器和个人额度及管理员专属优先级，先持久化标记为 false 再开始远程调用，等待回包不占用串行队列。降级后未派发任务不沿用管理员豁免；已尝试派发、旧无标记或回执未知任务继续原同步路径，不凭角色变化停止训练或释放资源。该标记不是节点成功证明。
 
+后台任务核对每台机器保留一个首次派发／取消通道和一个既有任务观察通道，最多两个在途操作，同一任务始终只有一个。新任务能加入正在进行的核对，不等待其他机器或旧任务列表全部查完；既有任务仍按原顺序获得独立观察通道。每轮同一阶段只尝试一次，首次回包丢失不会在该轮立即重新 sync。取消先等待该任务自身在途操作结束，不并发取消与 sync；UNKNOWN 仍保留额度和原编号。此调度不绕过全局持久写队列、当前授权、维护门禁或节点排队，也不保证节点／网络故障时的启动时间。
+
 界面按当前账号的 `enabled:true` 与 `role:admin` 显示「请求卡数／免个人额度」，保留进行中和排队的真实请求统计，但不把清单派生的 `total` 或 `limits` 画成管理员累计额度上限，也不以 `total-used` 禁用管理员提交。单次 `cards.max` 仍来自目标机器物理卡数；成员继续显示占用／额度上限。工作台、提交预检、总控、算力摘要和个人账号页口径一致。
 
 手动项目副本使用正常认证接口 `projects.replicate {from,machine,project,release,key}`，查询／取消为 `projects.replication.status {id}` 和 `projects.replication.cancel {id}`。只允许账号自身、两端机器均仍授权的固定 OCI 版本。响应包含 `id,state,from,machine,project,release,bytes?,totalBytes?,error?,developmentChanged:false`；状态包括 PREPARING、DISPATCHING、RUNNING、UNKNOWN、SUCCEEDED、FAILED、CANCELING、CANCELED。UNKNOWN 不证明未启动，不能换 key 重发。内部传输票据不会返回前端。
