@@ -68,7 +68,7 @@ export async function directBrowserFixture(machines){
         if(config.deny)return reply(res,403,{error:'这台服务器未授权'});
         assert.equal(args.machine,machines[0].id);
         if(operation==='datasets.capacity')return reply(res,200,{result:{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3}});
-        if(operation==='datasets.catalog')return reply(res,200,{result:{checkedAt:Date.now()/1000,machine:args.machine,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[...uploads.values()].filter(upload=>upload.owner===owner&&upload.state==='READY').map(upload=>({dataset:upload.dataset,name:upload.name,versions:[{version:upload.version,state:'READY',bytes:upload.spec.totalBytes,files:upload.parsed.files.length,canPrepare:false,ownerLabel:'所属用户：本地验收',locations:[{machine:args.machine,state:'READY'}]}]}))}});
+        if(operation==='datasets.catalog')return reply(res,200,{result:{checkedAt:Date.now()/1000,machine:args.machine,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[...uploads.values()].filter(upload=>upload.owner===owner&&upload.state==='READY').map(upload=>({dataset:upload.dataset,name:upload.name,versions:[{version:upload.version,state:'READY',bytes:upload.spec.totalBytes,files:upload.parsed.files.length,canUse:true,canPrepare:false,ownerLabel:'所属用户：本地验收',locations:[{machine:upload.spec.machine,dataset:upload.dataset,state:'READY',canUse:true,canPrepare:false}]}]}))}});
         const action=operation.split('.').at(-1);let upload;
         if(action==='begin'){
           upload=uploads.get(args.key);if(upload&&upload.owner!==owner)return reply(res,403,{error:'不能读取其他账号的上传'});

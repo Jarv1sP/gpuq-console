@@ -26,7 +26,10 @@ async function fixture(t){
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='storage.archive.events')return {events:[]};
-    if(operation==='datasets.list')return {datasets:args.userId===owner?.id?[{dataset,ownerIds:[owner.id],versions:[{version,state:'READY'}]}]:[]};
+    if(operation==='datasets.list'){
+      if(args.hostAdmin===true)assert.deepEqual(args,{userId:'builtin-admin',hostAdmin:true});
+      return {datasets:(args.hostAdmin===true||args.userId===owner?.id)?[{dataset,ownerIds:[owner.id],versions:[{version,state:'READY'}]}]:[]};
+    }
     if(operation==='transfers.capabilities')return {enabled:false,sources:[]};
     assert.equal(args.userId,owner.id,'native single-owner ACL must match explicit enrollment owner');
     if(operation==='storage.archive.retire'){

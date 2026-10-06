@@ -269,7 +269,11 @@ test('catalog exposes timed-release eligibility only to admins for missing-ID re
   await f.service.invoke(admin.token,'policy.full',{userId:member.id,policyVersion:0});f.calls.length=0;
   catalog=await datasetCatalogCall(f.service,{userId:member.id,role:'member'},'datasets.catalog',{machine:A});
   assert.equal(local(catalog).removalPending,undefined);assert.equal(local(catalog).removalGraceEligible,undefined);
-  assert(f.calls.every(call=>call.operation==='datasets.list'&&call.args.hostAdmin===false));assert.equal(f.journal().length,1);
+  // Shared discovery may elevate only metadata reads. It must not reconcile
+  // private operation receipts or expose the administrator's removal guard.
+  assert(f.calls.length>=MACHINES.length);assert(f.calls.every(call=>call.operation==='datasets.list'));
+  assert(f.calls.some(call=>call.args.hostAdmin===true));assert.equal(f.journal().length,1);
+  assert(!JSON.stringify(catalog).includes('operation_id'));assert(!JSON.stringify(catalog).includes('registration_identity'));
   f.service.db.prepare('UPDATE dataset_removal_exclusions SET operation_id=?').run(OP);
   catalog=await datasetCatalogCall(f.service,actor,'datasets.catalog',{machine:A});
   assert.equal(local(catalog).removalPending,true);assert.equal(local(catalog).removalGraceEligible,undefined);

@@ -181,12 +181,16 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
   return {assertAnotherCompleteCopy:snapshot,withProtectedRemoval,refreshExclusions};
 }
 
-// Node ACLs determine visibility first. Only usernames for those returned ACLs
-// are projected from the trusted account store; IDs stay inside the portal.
-function ownerView(item,users){
+// Only usernames from valid node ACLs are projected from the trusted account
+// store. Directory discovery is public to members; owner IDs stay internal.
+function ownerIds(item){
   const ids=item?.ownerIds;
-  if(!Array.isArray(ids)||!ids.length||ids.length>64||ids.some(id=>typeof id!=='string'||!OWNER_ID.test(id)))return {key:null,label:'所属用户：未知（授权信息未完整返回）'};
-  const owners=[...new Set(ids)].sort(),names=owners.map(id=>users?.find(user=>user.id===id)?.username);
+  return Array.isArray(ids)&&ids.length>0&&ids.length<=64&&ids.every(id=>typeof id==='string'&&OWNER_ID.test(id))?[...new Set(ids)].sort():null;
+}
+function ownerView(item,users){
+  const owners=ownerIds(item);
+  if(!owners)return {key:null,label:'所属用户：未知（授权信息未完整返回）'};
+  const names=owners.map(id=>users?.find(user=>user.id===id)?.username);
   const known=names.filter(validUsername),unknown=names.length-known.length;
   const label=owners.length===1?`所属用户：${unknown?'未知（账号已删除或未登记）':known[0]}`:
     `共享授权用户：${[...known,...(unknown?[`未知用户 ${unknown} 位（账号已删除或未登记）`]:[])].join('、')}`;
@@ -218,21 +222,27 @@ function combinedOwnerLabel(locations,owners){
   return views[0]?.label||'所属用户：未知';
 }
 
-// This is a permission-filtered view, not a second mutable source of truth.
-// Each node authenticates the same owner before returning its immutable versions.
+// Discovery is metadata-only. The elevated principal is confined to list;
+// capabilities, source selection and all mutations keep the member's own ACL.
 export async function datasetCatalogCall(service,principal,operation,args){
   if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>k!=='machine'))fail('数据集目录参数无效。');
-  const user=service.store.get(principal.userId);
-  if(!user.enabled||!MACHINES.some(m=>m.id===args.machine)||!user.limits[args.machine])fail('这台机器未授权。',403);
+  let user;
+  try{user=service.store.get(principal?.userId);}catch{fail('账号不存在或已停用。',403);}
+  if(user?.enabled!==true||user.id!==principal?.userId)fail('账号不存在或已停用。',403);
+  const machine=args.machine??null;
+  if(machine!==null&&!MACHINES.some(m=>m.id===machine))fail('这台机器未授权。',403);
+  const hasMachine=id=>user.limits?.[id]>0;
   const policy=JSON.stringify(user),checkPolicy=()=>{
-    if(service.closing||JSON.stringify(service.store.get(principal.userId))!==policy)fail('账号授权已改变，请刷新后重试。',403);
+    let current;try{current=service.store.get(principal.userId);}catch{}
+    if(service.closing||current?.enabled!==true||JSON.stringify(current)!==policy)fail('账号授权已改变，请刷新后重试。',403);
   };
   if(!service.bridge)fail('节点执行桥尚未配置。',503);
   const owner={userId:user.id,hostAdmin:false};
   if(operation==='datasets.capacity'){
-    const value=await service.bridge(args.machine,'datasets.capacity',owner);
+    if(machine===null||!hasMachine(machine))fail('这台机器未授权。',403);
+    const value=await service.bridge(machine,'datasets.capacity',owner);
     checkPolicy();
-    const result={machine:args.machine,available:true};
+    const result={machine,available:true};
     for(const key of ['filesystemBytes','availableBytes','reserveBytes','usableBytes']){
       if(!Number.isSafeInteger(value?.[key])||value[key]<0)fail('数据盘容量暂时无法确认。',502);
       result[key]=value[key];
@@ -251,55 +261,89 @@ export async function datasetCatalogCall(service,principal,operation,args){
     try{await createDatasetRemovalGuard(service,principal).refreshExclusions();}
     catch(error){if(error.code!=='LAST_COPY_UNPROVEN')throw error;}
   }
-  // A known owner's archived version is data access, not a GPU/shell grant on
-  // the storage host. Unrelated versions on that host remain invisible.
-  const machines=MACHINES.filter(m=>user.limits[m.id]>0||service.archiveMachineVisible?.(user.id,m.id));
-  const listings=await Promise.all(machines.map(async m=>{
+  const listings=await Promise.all(MACHINES.map(async m=>{
     try{
-      const result=await service.bridge(m.id,'datasets.list',owner);
+      // This fixed service identity is confined to this literal list call.
+      // It does not provision a legacy workspace for every zero-quota viewer,
+      // and must never be forwarded to a content or mutation operation.
+      const result=await service.bridge(m.id,'datasets.list',{userId:'builtin-admin',hostAdmin:true});
       if(!Array.isArray(result?.datasets))throw Error('invalid catalog');
-      return {machine:m.id,state:'ok',datasets:result.datasets,datasetDelete:result.datasetDelete===1};
+      // Old nodes omit ownerIds (and large ACLs return null). An exact second
+      // read as the member can prove use; missing/failed/invalid proofs cannot.
+      // New deletion permissions are also actor-bound. Never copy the service
+      // identity's permission hint into this member's catalog projection.
+      const legacy=new Set(),memberDeletes=new Set();
+      const needsProof=result.datasets.some(item=>(item?.ownerIds==null||result.datasetDelete===1&&ownerIds(item)?.includes(user.id))&&typeof item?.dataset==='string'&&ID.test(item.dataset)&&Array.isArray(item.versions)&&item.versions.some(value=>
+        typeof value?.version==='string'&&HASH.test(value.version)&&(hasMachine(m.id)||service.archiveSourceAllowed?.(user.id,m.id,{dataset:item.dataset,version:value.version})===true)));
+      if(needsProof){
+        try{
+          const personal=await service.bridge(m.id,'datasets.list',owner);
+          for(const item of personal?.datasets||[]){
+            if(typeof item?.dataset!=='string'||!ID.test(item.dataset)||!Array.isArray(item.versions))continue;
+            const ids=ownerIds(item);
+            if(item.ownerIds!=null&&(!ids||!ids.includes(user.id)))continue;
+            for(const value of item.versions)if(typeof value?.version==='string'&&HASH.test(value.version)){
+              const ref=item.dataset+'@'+value.version;legacy.add(ref);
+              if(personal.datasetDelete===1&&value.deletionPermissions?.memberAllowed===true)memberDeletes.add(ref);
+            }
+          }
+        }catch{}
+      }
+      return {machine:m.id,state:'ok',datasets:result.datasets,legacy,memberDeletes,datasetDelete:result.datasetDelete===1};
     }catch{return {machine:m.id,state:'unavailable',datasets:[]};}
   }));
   let capabilities;
-  try{capabilities=await service.transferCall?.({...principal,role:'member'},'transfers.capabilities',{machine:args.machine});}catch{}
+  if(machine!==null&&hasMachine(machine))try{capabilities=await service.transferCall?.({...principal,role:'member'},'transfers.capabilities',{machine});}catch{}
   checkPolicy();
-  const replicaSources=capabilities?.enabled===true&&Array.isArray(capabilities.sources)?capabilities.sources.filter(id=>machines.some(m=>m.id===id)):[];
+  const replicaSources=capabilities?.enabled===true&&Array.isArray(capabilities.sources)?capabilities.sources.filter(id=>MACHINES.some(m=>m.id===id)):[];
   const datasets=new Map();
   const owners=new WeakMap();
-  const aliases=new Map(listings.map(listing=>[listing.machine,service.datasetAliases?.(user.id,listing.machine)]));
+  const aliases=new Map();
+  const aliasesFor=id=>{if(!aliases.has(id))aliases.set(id,service.datasetAliases?.(user.id,id));return aliases.get(id);};
   for(const listing of listings)for(const item of listing.datasets){
-    if(!ID.test(item?.dataset)||!Array.isArray(item.versions))continue;
+    if(typeof item?.dataset!=='string'||!ID.test(item.dataset)||!Array.isArray(item.versions))continue;
     for(const value of item.versions){
-      if(!HASH.test(value?.version))continue;
-      if(!user.limits[listing.machine]&&!service.archiveSourceAllowed?.(user.id,listing.machine,{dataset:item.dataset,version:value.version}))continue;
-      const alias=aliases.get(listing.machine)?.get(item.dataset+'@'+value.version)||(listing.machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(user.id)?.get(item.dataset+'@'+value.version):null);
+      if(typeof value?.version!=='string'||!HASH.test(value.version))continue;
+      const ids=ownerIds(item),ref={dataset:item.dataset,version:value.version};
+      const own=ids?ids.includes(user.id):item.ownerIds==null&&listing.legacy?.has(item.dataset+'@'+value.version)===true;
+      const canUse=own&&(hasMachine(listing.machine)||service.archiveSourceAllowed?.(user.id,listing.machine,ref)===true);
+      // Never apply this viewer's historical aliases to somebody else's new
+      // registration. Unknown ownership needs the same precise member proof.
+      const alias=own?(aliasesFor(listing.machine)?.get(item.dataset+'@'+value.version)||(listing.machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(user.id)?.get(item.dataset+'@'+value.version):null)):null;
       const name=typeof alias==='string'&&ID.test(alias)?alias:item.dataset;
       let dataset=datasets.get(name);
       if(!dataset){dataset={dataset:name,versions:new Map()};datasets.set(name,dataset);}
       let version=dataset.versions.get(value.version);
       if(!version){version={version:value.version,locations:[]};dataset.versions.set(value.version,version);}
-      const owner=ownerView(item,service.store.users);
+      const ownership=ownerView(item,service.store.users);
       const pending=principal.role==='admin'?removalPending(service,listing.machine,item.dataset,value.version):null;
-      const location={machine:listing.machine,dataset:item.dataset,ownerLabel:owner.label,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,
+      const storage=canUse?service.archiveState?.(user.id,listing.machine,ref):null;
+      const memberAllowed=canUse&&listing.memberDeletes?.has(item.dataset+'@'+value.version)===true;
+      const location={machine:listing.machine,dataset:item.dataset,ownerLabel:ownership.label,state:STATES.has(value.state)?value.state:'UNKNOWN',canUse,canPrepare:canUse&&hasMachine(listing.machine)&&value.canPrepare===true,
         ...(pending?{removalPending:true,...(!pending.operation_id&&pending.registration_identity?{removalGraceEligible:true}:{})}:{}),
-        deletionPermissions:{memberAllowed:value.deletionPermissions?.memberAllowed===true,reason:value.deletionPermissions?.memberAllowed===true?null:'这份数据只能由管理员删除'},
-        ...(service.archiveState?.(user.id,listing.machine,{dataset:item.dataset,version:value.version})?{storage:service.archiveState(user.id,listing.machine,{dataset:item.dataset,version:value.version})}:{}),
-        ...(listing.machine===args.machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})};
-      owners.set(location,owner);version.locations.push(location);
+        deletionPermissions:{memberAllowed,reason:memberAllowed?null:'这份数据只能由管理员删除'},
+        ...(storage?{storage}:{}),
+        ...(canUse&&listing.machine===machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})};
+      owners.set(location,ownership);version.locations.push(location);
       if(Number.isSafeInteger(value.bytes)&&value.bytes>=0)version.bytes=value.bytes;
       if(Number.isSafeInteger(value.files)&&value.files>=0)version.files=value.files;
     }
   }
-  const localAvailable=listings.find(m=>m.machine===args.machine)?.state==='ok';
-  const deletionCapabilities=listings.every(l=>l.datasetDelete)&&service.datasetDeleteCapabilities?await service.datasetDeleteCapabilities(principal):{datasetDelete:0};
+  // Deletion still requires a machine grant; directory browsing does not.
+  const deletionCapabilities=MACHINES.some(m=>hasMachine(m.id))&&listings.every(l=>l.datasetDelete)&&service.datasetDeleteCapabilities?await service.datasetDeleteCapabilities(principal):{datasetDelete:0};
   checkPolicy();
-  return {machine:args.machine,...deletionCapabilities,partial:listings.some(m=>m.state!=='ok'),machines:listings.map(({machine,state})=>({machine,state})),
+  const localAvailable=listings.find(m=>m.machine===machine)?.state==='ok',targetAllowed=machine!==null&&hasMachine(machine);
+  return {machine,...deletionCapabilities,partial:listings.some(m=>m.state!=='ok'),machines:listings.map(({machine,state})=>({machine,state})),
     datasets:[...datasets.values()].sort((a,b)=>a.dataset.localeCompare(b.dataset)).map(item=>({dataset:item.dataset,
       ...(service.datasetLabelView?.(user.id,item.dataset)||{}),versions:[...item.versions.values()].sort((a,b)=>a.version.localeCompare(b.version)).map(version=>{
-      const local=version.locations.find(l=>l.machine===args.machine&&l.state==='READY')||version.locations.find(l=>l.machine===args.machine);
-      const source=localAvailable&&local?.state!=='READY'&&!local?.canPrepare&&version.locations.find(l=>l.state==='READY'&&replicaSources.includes(l.machine));
-      const transfer=service.datasetReplicaState?.(user.id,args.machine,{dataset:item.dataset,version:version.version});
-      return {...version,ownerLabel:combinedOwnerLabel(version.locations,owners),state:local?.state==='READY'?'READY':transfer?.state||local?.state||(localAvailable?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true||!!source,...(source?{sourceMachine:source.machine,sourceDataset:source.dataset}:{}),...(local?.state!=='READY'&&(transfer?.error||local?.error)?{error:transfer?.error||local?.error}:{})};
+      const canUse=version.locations.some(l=>l.canUse),usableLocal=version.locations.filter(l=>l.machine===machine&&l.canUse);
+      const local=usableLocal.find(l=>l.state==='READY')||usableLocal[0];
+      const visibleLocal=version.locations.find(l=>l.machine===machine);
+      const source=targetAllowed&&localAvailable&&local?.state!=='READY'&&!local?.canPrepare&&version.locations.find(l=>l.canUse&&l.state==='READY'&&replicaSources.includes(l.machine));
+      const transfer=targetAllowed&&canUse?service.datasetReplicaState?.(user.id,machine,{dataset:item.dataset,version:version.version}):null;
+      // A private local READY is useful directory metadata, not proof that a
+      // remote authorized version is already prepared for this member here.
+      const state=local?.state==='READY'?'READY':transfer?.state||local?.state||(!canUse?visibleLocal?.state:null)||(localAvailable?'NOT_LOCAL':'UNKNOWN');
+      return {...version,ownerLabel:combinedOwnerLabel(version.locations,owners),state,canUse,canPrepare:targetAllowed&&(local?.canPrepare===true||!!source),...(source?{sourceMachine:source.machine,sourceDataset:source.dataset}:{}),...(canUse&&local?.state!=='READY'&&(transfer?.error||local?.error)?{error:transfer?.error||local?.error}:{})};
     })}))};
 }

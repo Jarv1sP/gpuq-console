@@ -389,16 +389,19 @@ export async function executionCall(service,principal,operation,args){
         }
         const transfer=service.datasetReplicaState?.(user.id,request.machine,ref);
         try{const result=await service.bridge(request.machine,'datasets.status',{...ref,userId:user.id,hostAdmin:false});return result.state==='READY'?result:transfer||result;}
-        catch(error){if(!request.prepareData||error?.message==='dataset owner authorization required')throw error;return {...ref,state:'UNKNOWN'};}
+        catch(error){if(!request.prepareData||error?.status===403||error?.message==='dataset owner authorization required')throw error;return {...ref,state:'UNKNOWN'};}
       }));}
       catch(error){
-        if(error?.message==='dataset owner authorization required')fail('当前账号没有数据集读取授权；管理员个人训练也必须列入数据集 owners。未占用 GPU。',403);
+        if(error?.status===403||error?.message==='dataset owner authorization required')fail('当前账号没有数据集读取授权；管理员个人训练也必须列入数据集 owners。未占用 GPU。',403);
         fail('无法确认所选机器的数据授权或准备状态，未占用 GPU。请稍后重试或查看数据集状态。',503);
       }
       if(!states.every(s=>s.state==='READY')){
         if(!request.prepareData)fail('所选机器没有完整的本地数据副本。先用 gpuctl data prepare 数据集@版本 准备数据；此时未占用 GPU，不会自动切换服务器。',409);
         const catalog=await datasetCatalogCall(service,{...principal,userId:user.id},'datasets.catalog',{machine:request.machine});
-        if(!datasets.every((ref,index)=>states[index].state==='READY'||catalog.datasets?.find(d=>d.dataset===ref.dataset)?.versions?.some(v=>v.version===ref.version&&(v.canPrepare===true||v.state==='PREPARING'))))fail('部分数据没有可用来源；请先在数据集页面完成导入。未占用 GPU。',409);
+        const catalogVersions=datasets.map(ref=>catalog.datasets?.find(d=>d.dataset===ref.dataset)?.versions?.find(v=>v.version===ref.version));
+        if(catalogVersions.some((value,index)=>states[index].state!=='READY'&&value&&value.canUse!==true))
+          fail('当前账号没有数据集读取授权；目录可见不代表可以训练读取。未占用 GPU。',403);
+        if(!datasets.every((ref,index)=>states[index].state==='READY'||catalogVersions[index]?.canUse===true&&(catalogVersions[index].canPrepare===true||catalogVersions[index].state==='PREPARING')))fail('部分数据没有可用来源；请先在数据集页面完成导入。未占用 GPU。',409);
         if(service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)fail('最多保留 10 个数据准备中的训练，请先等待或取消。',429);
         needsPreparation=true;
       }

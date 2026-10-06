@@ -56,7 +56,8 @@ export async function selectMachine(service,user,request,priorityCapable,usage){
       try{catalog=await datasetCatalogCall(service,{userId:user.id,role:user.role},'datasets.catalog',{machine:m.id});}catch{return null;}
       for(const ref of request.datasets){
         const value=catalog.datasets?.find(d=>d.dataset===ref.dataset)?.versions?.find(v=>v.version===ref.version);
-        if(value?.state==='READY')localData++;
+        if(value?.canUse!==true)return null;
+        if(value.state==='READY')localData++;
         else if(!value||!(value.canPrepare===true||value.state==='PREPARING'))return null;
       }
     }

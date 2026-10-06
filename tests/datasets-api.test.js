@@ -79,6 +79,43 @@ test('opt-in dataset preparation is durable, reserves no GPU and dispatches only
     await f.service.reconcile();assert.equal(f.calls.filter(c=>c.operation==='sync').length,1);
   }finally{await f.close();}
 });
+test('public foreign dataset metadata cannot prepare, label or enter a training preparation job',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample','REGISTERED');
+    for(const state of ['READY','PREPARING']){
+      f.list({datasets:[{dataset:'sample',ownerIds:[f.other.id],versions:[{version,state,canPrepare:true}]}]});
+      const catalog=await f.post('datasets.catalog',{machine:'gpu-1'});
+      assert.equal(catalog.status,200);assert.equal(catalog.data.result.datasets[0].versions[0].canUse,false);
+      assert.equal((await f.post('datasets.prepare',{machine:'gpu-1',...reference})).status,403);
+      const submitted=await f.submit({prepareData:true});assert.equal(submitted.status,403,JSON.stringify(submitted.data));
+      assert.equal((await f.post('datasets.label.set',{machine:'gpu-1',dataset:'sample',displayName:'Foreign',revision:0})).status,403);
+    }
+    await f.settle();assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+    assert.equal(f.calls.some(c=>['datasets.prepare','transfers.create','sync'].includes(c.operation)),false);
+    assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM dataset_labels').get().n,0);
+  }finally{await f.close();}
+});
+test('zero-quota directory browsing never grants prepare, training or label rights',async()=>{
+  const f=await fixture();try{
+    f.list({datasets:[{dataset:'sample',ownerIds:[f.member.id],versions:[{version,state:'READY',canPrepare:true}]}]});
+    for(const args of [{},{machine:'gpu-1'}]){
+      const catalog=await f.post('datasets.catalog',args);assert.equal(catalog.status,200);
+      assert.equal(catalog.data.result.datasets[0].versions[0].canUse,false);
+    }
+    assert.equal((await f.post('datasets.prepare',{machine:'gpu-1',...reference})).status,403);
+    assert.equal((await f.submit({prepareData:true})).status,409);
+    assert.equal((await f.post('datasets.label.set',{machine:'gpu-1',dataset:'sample',displayName:'No grant',revision:0})).status,403);
+    await f.settle();assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+    assert.ok(f.calls.every(c=>['datasets.list','transfers.capabilities'].includes(c.operation)));
+  }finally{await f.close();}
+});
+test('explicit node authorization rejection is not converted into preparation availability',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample',Object.assign(Error('read access revoked'),{status:403}));
+    const result=await f.submit({prepareData:true});assert.equal(result.status,403,JSON.stringify(result.data));
+    assert.equal(f.service.store.jobs.length,0);assert.equal(f.calls.some(c=>['datasets.prepare','sync'].includes(c.operation)),false);
+  }finally{await f.close();}
+});
 test('canceling data preparation never dispatches or cancels a shared cache worker',async()=>{
   const f=await fixture();try{
     await f.grant();f.states.set('gpu-1:sample','REGISTERED');

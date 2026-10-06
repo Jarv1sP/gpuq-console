@@ -176,3 +176,4 @@
 @media(prefers-reduced-motion:reduce){
   #page-datasets .dataset-matrix-heading [data-machine],#page-datasets .dataset-location,#page-datasets .dataset-actions-cell{transition:none}
 }
+#page-datasets #datasets-add>summary[aria-disabled=true]{opacity:.5;cursor:not-allowed}

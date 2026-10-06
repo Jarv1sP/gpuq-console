@@ -12,7 +12,7 @@ function fixture(t){
   const f={db,user,calls:[],records:new Map(),local:false,copied:false,enabled:true,lost:false};
   f.service={db,store:{get:()=>structuredClone(user)},bridge:async(machine,operation,args)=>{
     f.calls.push({machine,operation,args});if(f.onBridge)await f.onBridge(machine,operation,args);
-    if(operation==='datasets.list')return {datasets:machine===source?[{dataset:ref.dataset,versions:[{...ref,state:'READY'}]}]:f.local?[{dataset:ref.dataset,versions:[{...ref,state:'READY'}]}]:f.copied?[{dataset:actual,versions:[{version:ref.version,state:'READY'}]}]:[]};
+    if(operation==='datasets.list')return {datasets:machine===source?[{dataset:ref.dataset,versions:[{...ref,state:'READY'}]}]:machine!==target?[]:f.local?[{dataset:ref.dataset,versions:[{...ref,state:'READY'}]}]:f.copied?[{dataset:actual,versions:[{version:ref.version,state:'READY'}]}]:[]};
     if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:(args.dataset===ref.dataset&&f.local||args.dataset===actual&&f.copied)?'READY':'REGISTERED',...(f.recovery&&args.dataset===actual&&!f.copied?{recoveryConfigured:true}:{})};
     if(operation==='datasets.prepare'){
       if(f.recoverError)throw f.recoverError;
@@ -141,6 +141,37 @@ test('policy revocation before receipt recovery blocks the prepare side effect',
   f.onBridge=(_,operation,args)=>{if(operation==='datasets.status'&&args.dataset===actual)f.user.enabled=false;};
   await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e.status===403);
   assert.equal(f.calls.some(c=>c.operation==='datasets.prepare'),false);
+});
+
+test('another owner\'s visible READY copy is not preparation authority',async t=>{
+  const f=fixture(t),bridge=f.service.bridge;
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='datasets.list')return {datasets:[{dataset:ref.dataset,ownerIds:['demo-user-2'],versions:[{version:ref.version,state:'READY',canPrepare:true}]}]};
+    return bridge(machine,operation,args);
+  };
+  const value=(await datasetCatalogCall(f.service,{userId:f.user.id},'datasets.catalog',{machine:target})).datasets[0].versions[0];
+  assert.equal(value.state,'READY');assert.equal(value.canUse,false);
+  await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e.status===403);
+  assert.equal(f.calls.some(c=>['datasets.prepare','transfers.create'].includes(c.operation)),false);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM dataset_copies').get().n,0);
+});
+
+test('zero machine quota rejects prepare before directory reads or copy creation',async t=>{
+  const f=fixture(t);f.user.limits={};f.user.total=0;
+  await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e.status===403);
+  assert.equal(f.calls.length,0);assert.equal(f.records.size,0);
+});
+
+test('foreign local READY cannot skip the owned remote copy lifecycle',async t=>{
+  const f=fixture(t),bridge=f.service.bridge;
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='datasets.list')return {datasets:[{dataset:ref.dataset,ownerIds:[machine===source?f.user.id:'demo-user-2'],versions:[{version:ref.version,state:'READY'}]}]};
+    return bridge(machine,operation,args);
+  };
+  const value=(await datasetCatalogCall(f.service,{userId:f.user.id},'datasets.catalog',{machine:target})).datasets[0].versions[0];
+  assert.equal(value.canUse,true);assert.equal(value.state,'NOT_LOCAL');assert.equal(value.sourceMachine,source);
+  assert.equal((await f.service.prepareDataset(f.user.id,target,ref)).state,'PREPARING');
+  assert.equal(f.records.size,1);assert.equal(f.calls.filter(c=>c.operation==='transfers.create').length,1);
 });
 
 test('recovery rejects mismatched physical name or content version from the node',async t=>{

@@ -429,11 +429,13 @@ test('wrong grant owner/source/target/version cannot certify or release protecti
     await f.service.reconcileStorageArchive();assert.notEqual(f.archive.rows()[0].phase,'ARCHIVED');assert.equal(f.calls.some(c=>c.op==='storage.archive.certify'),false);
   }
 });
-test('catalog exposes only the owners enrolled archive even without a storage-node compute grant',async t=>{
+test('catalog discovers unenrolled metadata but only the owners enrolled archive is a usable source without compute grant',async t=>{
   const f=fixture(t);await f.service.reconcileStorageArchive();f.finish();await f.service.reconcileStorageArchive();
   const catalog=await datasetCatalogCall(f.service,f.principal,'datasets.catalog',{machine:other});
-  assert.equal(catalog.datasets.length,1);assert.equal(catalog.datasets[0].dataset,ref.dataset);
-  assert.equal(catalog.datasets[0].versions[0].sourceMachine,cold);assert.equal(catalog.datasets[0].versions[0].sourceDataset,'cold-copy');
+  assert.equal(catalog.datasets.length,2);
+  const allowed=catalog.datasets.find(item=>item.dataset===ref.dataset).versions[0],denied=catalog.datasets.find(item=>item.dataset==='not-enrolled').versions[0];
+  assert.equal(allowed.canUse,true);assert.equal(allowed.sourceMachine,cold);assert.equal(allowed.sourceDataset,'cold-copy');
+  assert.equal(denied.canUse,false);assert.equal(denied.canPrepare,false);assert.equal(denied.sourceMachine,undefined);assert.equal(denied.locations[0].canUse,false);
   const copied=await f.service.transferCall(f.principal,'transfers.create',{key:randomUUID(),kind:'copy',from:cold,machine:other,dataset:'cold-copy',version:ref.version,name:'replica'});
   assert.equal(copied.state,'RUNNING');
   await assert.rejects(f.service.transferCall(f.principal,'transfers.create',{key:randomUUID(),kind:'copy',from:cold,machine:other,dataset:'not-enrolled',version:ref.version,name:'bad'}),e=>e.status===403);

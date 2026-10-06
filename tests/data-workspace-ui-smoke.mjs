@@ -19,10 +19,20 @@ try{
   await page.evaluate(async()=>{
     const {datasetsUI}=await import('/datasets-ui.js');
     window.calls=[];window.toasts=[];window.gatePut=false;window.gatePublish=false;window.gateCatalog=false;window.capacityFail=false;window.remote=new Map();window.cloudRows=new Map();window.published=false;
-    window.store={production:true,principal:{userId:'alice',role:'member'},authGeneration:0,data:{machines:[{id:'node-a'},{id:'node-b'}]},onAuthChange(callback){this.authChanged=callback;},async call(operation,args){
+    window.store={production:true,principal:{userId:'alice',role:'member'},authGeneration:0,
+      users:['alice','bob','carol'].map(id=>({id,role:'member',enabled:true,limits:{'node-a':1,'node-b':1},total:2})),usage(){return 0;},
+      data:{machines:[{id:'node-a'},{id:'node-b'}]},onAuthChange(callback){this.authChanged=callback;},async call(operation,args){
       calls.push({operation,args:structuredClone(args),user:this.principal.userId});
       if(operation==='datasets.capacity'){if(capacityFail)throw Error('test capacity unavailable');return {machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3};}
-      if(operation==='datasets.catalog'){const result={datasets:published?[{dataset:'personal-test',versions:[{version:'a'.repeat(64),state:'READY',canPrepare:false,files:1,bytes:4}]}]:[]};if(gateCatalog)await new Promise(resolve=>{window.releaseCatalog=resolve;});return result;}
+      if(operation==='datasets.catalog'){
+        // Alice's published metadata remains discoverable after an account
+        // switch; discovery never transfers Alice's content permission.
+        const canUse=this.principal.userId==='alice'&&this.users.find(row=>row.id==='alice').limits['node-a']>0;
+        const result={machine:args.machine,machines:this.data.machines.map(row=>({machine:row.id,available:true})),
+          datasets:published?[{dataset:'personal-test',versions:[{version:'a'.repeat(64),state:args.machine==='node-a'&&canUse?'READY':'NOT_LOCAL',
+            canUse,canPrepare:false,files:1,bytes:4,locations:[{machine:'node-a',dataset:'personal-test',state:'READY',canUse,canPrepare:false}]}]}]:[]};
+        if(gateCatalog)await new Promise(resolve=>{window.releaseCatalog=resolve;});return result;
+      }
       if(operation==='datasets.workspace.put'){
         const id=this.principal.userId+':'+args.machine+':'+args.path,old=remote.get(id)||0,length=atob(args.data).length;
         if(args.offset!==(args.truncate?0:old))throw Error('File exists; explicitly enable overwrite');
@@ -142,11 +152,12 @@ try{
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
   assert.match(await page.locator('#datasets-capacity').textContent(),/容量待更新/);
   assert.equal(await page.locator('.dataset-card').count(),1);
+  assert.equal(await page.locator('[data-use-dataset]').isDisabled(),true,'Bob may discover Alice\'s metadata, not train with her data');
   // Revoking a different machine invalidates the entire aggregate, even when
   // the selected machine is unchanged and an old directory reply arrives late.
   await page.evaluate(()=>{gateCatalog=true;});await page.locator('#datasets-refresh').click();
   await page.waitForFunction(()=>typeof releaseCatalog==='function');
-  await page.evaluate(()=>{store.data.machines=[{id:'node-b'}];render();releaseCatalog();});await page.waitForTimeout(100);
+  await page.evaluate(()=>{store.users.find(row=>row.id==='bob').limits={'node-b':1};render();releaseCatalog();});await page.waitForTimeout(100);
   assert.equal(await page.locator('.dataset-card').count(),0);assert.match(await page.locator('#datasets-status').textContent(),/授权已更新/);
   // A response belonging to the previous login cannot refill the new view.
   await page.evaluate(()=>{window.releaseCatalog=undefined;});await page.locator('#datasets-refresh').click();

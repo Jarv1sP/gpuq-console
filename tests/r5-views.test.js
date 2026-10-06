@@ -37,7 +37,7 @@ test('quota ledger excludes foreign, preparing and ended jobs while unknown and 
   const html=quotaLedgerHTML(store,'gpu-1');assert.match(html,/7 \/ 8/);assert.match(html,/4 <small>张/);assert.match(html,/3 <small>张/);assert.doesNotMatch(html,/PREP-EXCLUDED|FOREIGN-EXCLUDED|ENDED-EXCLUDED/);
 });
 test('copy route needs an approved real source and confirmed target catalog, without inventing a channel or size',()=>{
-  const version={version:'a'.repeat(64),state:'NOT_LOCAL',canPrepare:true,sourceMachine:'gpu-2',locations:[{machine:'gpu-2',state:'READY'}]},catalog={machine:'gpu-1',machines:[{machine:'gpu-1',state:'ok'},{machine:'gpu-2',state:'ok'}],datasets:[{dataset:'scans',versions:[version]}]};
+  const version={version:'a'.repeat(64),state:'NOT_LOCAL',canUse:true,canPrepare:true,sourceMachine:'gpu-2',locations:[{machine:'gpu-2',state:'READY',canUse:true}]},catalog={machine:'gpu-1',machines:[{machine:'gpu-1',state:'ok'},{machine:'gpu-2',state:'ok'}],datasets:[{dataset:'scans',versions:[version]}]};
   assert.deepEqual(datasetCopyRoute(version,catalog),{source:'gpu-2',target:'gpu-1',bytes:null});
   const html=datasetRows(catalog);assert.match(html,/data-route-source="gpu-2" data-route-target="gpu-1"/);assert.doesNotMatch(html,/实验室内网|61\.0|0\.0 MiB/);
   for(const change of [{canPrepare:false},{sourceMachine:'unauthorized'},{state:'UNKNOWN'},{sourceMachine:'gpu-1'},{locations:[]}])assert.equal(datasetCopyRoute({...version,...change},catalog),null);

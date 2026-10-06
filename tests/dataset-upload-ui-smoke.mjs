@@ -58,6 +58,8 @@ try {
       totalBytes: upload.spec.totalBytes, entries: upload.spec.entries,
       ...(upload.version ? {dataset: upload.dataset, version: upload.version} : {})});
     window.store = {production: true, principal: {userId: 'old-user', role: 'member'}, authGeneration: 0,
+      users: ['old-user','new-user'].map(id => ({id,role:'member',enabled:true,limits:{'gpu-1':1,'gpu-2':1},total:2})),
+      usage() {return 0;},
       data: {machines: [{id: 'gpu-1'}, {id: 'gpu-2'}]},
       onAuthChange(listener) {this.listener = listener;},
       async call(operation, args) {
@@ -66,11 +68,13 @@ try {
         check(args.machine === 'gpu-1', 'Selected machine drifted during upload');
         check(!('hostAdmin' in args || 'owners' in args || 'sourceId' in args), 'Privileged browser upload fields');
         if (operation === 'datasets.capacity') return {machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3};
-        if (operation === 'datasets.catalog') return {datasets: [...uploads.values()]
+        if (operation === 'datasets.catalog') return {machine:args.machine,
+          machines:this.data.machines.map(row=>({machine:row.id,available:true})),datasets: [...uploads.values()]
           .filter(upload => upload.user === user && upload.state === 'READY')
           .map(upload => ({dataset: upload.dataset, name: upload.name,
             versions: [{version: upload.version, state: 'READY', files: upload.parsed.files.length,
-              bytes: upload.spec.totalBytes, canPrepare: false}]}))};
+              bytes: upload.spec.totalBytes, canUse:true, canPrepare: false,
+              locations:[{machine:upload.spec.machine,dataset:upload.dataset,state:'READY',canUse:true,canPrepare:false}]}]}))};
         const action = operation.split('.').at(-1);
         let upload;
         if (action === 'begin') {

@@ -22,7 +22,9 @@ async function open(fixture,role='member'){
   await page.evaluate(async({machines,role})=>{
     const {datasetsUI}=await import('/datasets-ui.js');window.toasts=[];window.fetchOptions=[];
     const originalFetch=window.fetch;window.fetch=(url,options)=>{if(String(url).includes('/v1/uploads/'))fetchOptions.push({url:String(url),credentials:options.credentials,method:options.method,redirect:options.redirect});return originalFetch(url,options);};
-    window.store={production:true,principal:{userId:role,role},authGeneration:0,data:{machines},onAuthChange(listener){this.listener=listener;},async call(operation,args){const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,args})});const value=await response.json();if(!response.ok)throw Object.assign(Error(value.error),{status:response.status});return value.result;}};
+    window.store={production:true,principal:{userId:role,role},authGeneration:0,
+      users:['member','admin','another-member'].map(id=>({id,role:id==='admin'?'admin':'member',enabled:true,limits:Object.fromEntries(machines.map(machine=>[machine.id,machine.cards])),total:machines.reduce((sum,machine)=>sum+machine.cards,0)})),usage(){return 0;},
+      data:{machines},onAuthChange(listener){this.listener=listener;},async call(operation,args){const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,args})});const value=await response.json();if(!response.ok)throw Object.assign(Error(value.error),{status:response.status});return value.result;}};
     window.renderDatasets=datasetsUI(store,text=>toasts.push(text));renderDatasets();
   },{machines,role});
   await page.locator('#datasets-add > summary').click();await page.locator('[name=dataset-name]').fill('browser-data');await page.locator('[name=dataset-directory]').setInputFiles(selection);

@@ -54,6 +54,7 @@ test('progress has an explicit byte contract and current catalog renders no perc
   assert.equal(cacheFact(v,'sample-training-node',{machine:'sample-training-node'},'PREPARING').progress,null);
   const stages=datasetLifecycle(v,{machine:'sample-training-node'});assert.ok(stages.some(row=>row.label.startsWith('取回到')&&row.state==='current'));assert.ok(stages.every(row=>!Object.hasOwn(row,'time')));assert.ok(!stages.some(row=>row.label==='上传'||row.label==='可用于训练'));
   const local=version(null);local.locations[0].state='READY';assert.deepEqual(datasetLifecycle(local,{machine:'sample-training-node'}).map(row=>row.label),['缓存就绪','可用于训练']);
+  assert.deepEqual(datasetLifecycle(local,{machine:'sample-training-node'},{trainingAllowed:false}).map(row=>row.label),['缓存就绪'],'metadata visibility preserves READY but is not training permission');
 });
 test('preparing detail route needs the returned source, its READY location and confirmed target, without guessing a database route',()=>{
   const catalog={machine:'sample-training-node',machines:[{machine:'sample-training-node',state:'ok'}]},v={...version(),state:'PREPARING',sourceMachine:'sample-source-node',bytes:7*1024**3};

@@ -149,7 +149,17 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 
 个人可写数据空间的 `datasets.workspace.put` 是另一套现有操作，当前仍是门户中转，不受数据集直传票据授权。不要仅改按钮文案就声称它已直传，也不要把 dataset 票据用于任意个人文件路径。大于 256 MiB 的 `data put` 同样要求显式中转同意。
 
-## 已被新版替代的旧归档原件
+## 数据仓库：目录发现不授予数据使用权
+
+`datasets.catalog` 对所有启用的登录成员返回全节点白名单元数据；零机器额度时可省略 `machine` 或传 `null`，仅浏览。提供机器时必须是清单内 ID，不能传任意地址。`datasets.capacity`、上传及其他执行接口继续要求机器授权。
+
+版本和每个 `locations` 条目均返回显式 `canUse`。界面不能单凭 `state: READY` 解锁训练；`canPrepare`、复制来源和本机就绪用于执行时都须来自本人有权使用的位置。私有本机 READY 与本人远端 READY 并列时，不可误称本人本机已就绪。后端的准备、标签修改、提交及自动选机也独立检查使用权限。
+
+内部发现只能执行固定 `datasets.list` 元数据读取。响应不转发 owner IDs、文件清单、宿主路径、恢复票据或他人的错误/操作编号，节点 `owners` 不改。未知旧节点授权只按本人受限列表中的精确数据集和完整版本确认，不默认允许。客户端不得提供内部身份或 `hostAdmin`，不因目录可见获得管理权限。
+
+目录发现兼容尚未提供 `datasetDelete:1` 的节点，不要求部署新删除协议。删除能力仍须全节点确认且账号已有机器授权；零额度成员的目录返回 `datasetDelete:0`。新节点的 `deletionPermissions.memberAllowed` 只采用本人受限列表对同机、同数据集、同完整版本返回的许可，不继承内部发现身份的权限；证明失败只关闭删除许可，不把已确认的目录元数据隐藏。
+
+## 已被新版替代的旧归档原件（管理员）
 
 `datasets.archive.retire-authority` 是当前管理员的显式维护操作，不是普通删除或解除固定按钮。参数：
 

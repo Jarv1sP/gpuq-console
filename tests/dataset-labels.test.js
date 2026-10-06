@@ -54,15 +54,36 @@ test('shared readers choose independent personal names; member cannot edit anoth
   await assert.rejects(f.call('datasets.label.set',{machine,dataset,displayName:'forged',revision:1,ownerId:f.users[1].id}),e=>e.status===403);
   await assert.rejects(f.call('datasets.label.get',{machine,dataset,ownerId:f.users[1].id}),e=>e.status===403);
 });
-test('administrator delegates only to actual target viewer ACL and never uses hostAdmin to rename',async t=>{
+test('administrator delegates only to usable target-viewer data, not elevated catalog visibility',async t=>{
   const f=await fixture(t),ownerId=f.users[0].id;
   const changed=await f.call('datasets.label.set',{machine,dataset,ownerId,displayName:'管理员代设',revision:0},'admin');
   assert.equal(changed.ownerId,ownerId);assert.equal((await f.call('datasets.label.get',{machine,dataset})).name,'管理员代设');
   assert.equal((await f.call('datasets.label.get',{machine,dataset},'bob')).name,dataset);
-  assert.ok(f.calls.filter(c=>c.operation==='datasets.list').every(c=>c.args.hostAdmin===false));
-  const bridge=f.service.bridge;f.service.bridge=async(host,operation,args)=>operation==='datasets.list'&&args.userId===ownerId?{datasets:[]}:bridge(host,operation,args);
-  await assert.rejects(f.call('datasets.label.set',{machine,dataset,ownerId,displayName:'无授权不许',revision:1},'admin'),e=>e.status===404);
+  // The shared directory may elevate metadata listing, never an operation
+  // that reads payloads or changes node data. Renaming still checks the viewer.
+  assert.ok(f.calls.every(c=>['datasets.list','transfers.capabilities'].includes(c.operation)));
+  const bridge=f.service.bridge;f.service.bridge=async(host,operation,args)=>operation==='datasets.list'?
+    {datasets:f.records(host).datasets.map(item=>({...item,ownerIds:[f.users[1].id]}))}:bridge(host,operation,args);
+  await assert.rejects(f.call('datasets.label.set',{machine,dataset,ownerId,displayName:'无授权不许',revision:1},'admin'),e=>e.status===403);
   assert.equal(f.service.db.prepare('SELECT name FROM dataset_labels WHERE owner_id=?').get(ownerId).name,'管理员代设');
+});
+test('foreign READY metadata is visible but cannot read or create a personal label',async t=>{
+  const f=await fixture(t),bridge=f.service.bridge;
+  f.service.bridge=async(host,operation,args)=>operation==='datasets.list'?
+    {datasets:f.records(host).datasets.map(item=>({...item,ownerIds:[f.users[1].id]}))}:bridge(host,operation,args);
+  const item=(await f.call('datasets.catalog',{machine})).datasets.find(item=>item.dataset===dataset);
+  assert.equal(item.versions[0].state,'READY');assert.equal(item.versions[0].canUse,false);
+  for(const operation of ['datasets.label.get','datasets.label.set'])
+    await assert.rejects(f.call(operation,{machine,dataset,...(operation.endsWith('set')?{displayName:'非法名称',revision:0}:{})}),e=>e.status===403);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM dataset_labels').get().n,0);
+});
+test('zero-quota members may browse their dataset metadata but cannot mutate labels',async t=>{
+  const f=await fixture(t),owner=f.service.store.get(f.users[0].id);
+  await f.call('policy.save',{userId:owner.id,policyVersion:owner.policyVersion,total:0,limits:{}},'admin');
+  const item=(await f.call('datasets.catalog',{})).datasets.find(item=>item.dataset===dataset);
+  assert.equal(item.versions[0].canUse,false);
+  await assert.rejects(f.call('datasets.label.set',{machine,dataset,displayName:'无额度名称',revision:0}),e=>e.status===403);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM dataset_labels').get().n,0);
 });
 test('replica and archive aliases inherit logical labels without guessing generated prefixes',async t=>{
   const f=await fixture(t);
