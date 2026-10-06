@@ -96,6 +96,22 @@ class Client:
             response = reject_duplicate_json(raw[:-1].decode("utf-8", errors="strict"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise ProtocolError(f"invalid daemon response: {exc}") from exc
+        # The daemon rejects a different SO_PEERCRED uid before reading any
+        # request, so this exact connection-level denial has no request id.
+        # Surface it as a refusal, never as a result or a retry instruction.
+        if (
+            isinstance(response, dict)
+            and set(response) == {"request_id", "ok", "error"}
+            and response["request_id"] is None
+            and response["ok"] is False
+            and response["error"] == {
+                "code": "FORBIDDEN", "message": "peer uid is not allowed"
+            }
+        ):
+            raise ProtocolError(
+                "FORBIDDEN: peer uid is not allowed; run native GPUQ as its "
+                "configured service user (host ROOT is a different identity)"
+            )
         if not isinstance(response, dict) or response.get("request_id") != request_id:
             raise ProtocolError("daemon response does not match request")
         if response.get("ok") is not True:

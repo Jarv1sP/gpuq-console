@@ -29,6 +29,23 @@ gpu submit --help
 
 **新平台普通用户使用 `gpuctl`，不直接获得共享服务账号下的 `gpu`。** 直接 GPUQ CLI 是可信旧用户/管理员的接口，不经过门户逐人权限验证；公开给普通用户会绕过门户额度。
 
+### ROOT 运维与原生 GPUQ 的身份
+
+原生 daemon 只接受配置中的 `allowed_uid`，通过 Unix socket 的
+`SO_PEERCRED` 核验系统身份；宿主 ROOT 不是这个服务账号。即使能打开 socket，
+ROOT 直接执行原生 CLI 也可能收到 `FORBIDDEN: peer uid is not allowed`。
+客户端会明确显示这项权限拒绝，不把它误报为请求编号不一致，不自动重试或切换身份。
+
+确需只读核对时，管理员先确认节点当前服务账号、配置和 CLI 的实际路径，再显式执行：
+
+```sh
+sudo -u GPUQ_SERVICE_USER -- env GPUQ_CONFIG=/srv/gpuq/config.json /srv/gpuq/gpu --json show JOB_ID
+```
+
+这些名称与路径都是占位示例。不要把 `allowed_uid` 改成 ROOT、放宽 socket 权限，
+或将服务账号入口提供给普通用户；门户的 `gpuctl show` 仍沿用个人授权。
+本修复只改客户端对拒绝回执的解释，不改变 daemon 的授权或运行中的任务。
+
 ## Console 优先级与可中断任务契约
 
 ### 独立修改排队优先级
