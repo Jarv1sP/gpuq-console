@@ -85,6 +85,7 @@ try{
   assert.equal(await page.locator('[name=priority] option').count(),2,'Main submit offers the same normal/idle choices for both roles');
   assert.deepEqual(await page.locator('[name=priority] option').evaluateAll(rows=>rows.map(row=>row.value)),['normal','idle']);
   await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('[data-admin-submit]').waitFor();await page.locator('[data-admin-submit]').click();
+  await page.locator('#work-submit[open]').waitFor({state:'visible'});
   assert.equal(await page.locator('[name=priority] option').count(),3,'The original administrator priority choices remain available in the backend');
   assert.deepEqual(await page.locator('[name=priority] option').evaluateAll(rows=>rows.map(row=>row.value)),['normal','idle','high']);
   await closeSubmit(page);await page.locator('[data-nav=work]').click();
