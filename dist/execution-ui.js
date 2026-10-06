@@ -163,6 +163,16 @@ export function executionUI(store,refresh,toast){
   }
   function notifyContext(){document.dispatchEvent(new CustomEvent('gpuq-workspace-context',{detail:{userId:actor,...context()}}));}
   const reduced=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
+  function fieldCaption(label){
+    if(label.querySelector(':scope>.field-caption'))return;
+    const control=label.querySelector(':scope>:is(input,select,textarea)');
+    if(!control)return;
+    const caption=document.createElement('span');caption.className='field-caption';
+    const text=document.createElement('span');
+    for(const node of [...label.childNodes])if(node.nodeType===Node.TEXT_NODE)text.append(node);
+    caption.append(text);const help=label.querySelector(':scope>.ui-info');if(help)caption.append(help);
+    if(control.matches('[type=checkbox]'))control.after(caption);else control.before(caption);
+  }
   function showSheet(dialog,options={}){if(dialog.open)return;dialog.showModal();if(dialog===submitDialog||dialog===settingsDialog){activateProjectActivity();armPolling();}revealSheet(dialog,options);}
   function closeSettings(){if(!settingsSource)return;const source=settingsSource;settingsSource=null;source.append(...settingsDialog.querySelector('.sheet-scroll').children);source.open=false;settingsDialog.close();}
   function settings(source){closeSettings();settingsSource=source;settingsDialog.querySelector('h2').textContent=source.querySelector('summary').textContent;for(const control of source.querySelectorAll('input,select,textarea'))control.setAttribute('form','train-form');settingsDialog.querySelector('.sheet-scroll').append(...[...source.children].filter(child=>child.tagName!=='SUMMARY'));showSheet(settingsDialog,{drilldown:true});}
@@ -203,16 +213,13 @@ export function executionUI(store,refresh,toast){
     discloseInfo(query('#environment-mode-note'),'运行环境说明');
     const fieldHelp=(note,control)=>{const help=note?.closest('.ui-info');if(help&&control)control.before(help);};
     fieldHelp(query('#priority-note'),train.querySelector('[name=priority]'));
+    for(const [id,name] of [['custom-policy-note','custom-policy'],['elastic-note','elastic'],['placement-note','gpu-placement']])fieldHelp(query('#'+id),train.querySelector('[name='+name+']'));
     for(const name of ['command','datasets']){const label=train.querySelector('[name='+name+']')?.closest('label');fieldHelp(label?.nextElementSibling?.querySelector('.ui-info-content'),label?.querySelector('textarea'));}
-    for(const label of train.querySelectorAll('label')){
-      const help=label.querySelector(':scope>.ui-info'),control=label.querySelector(':scope>:is(input,select,textarea)');
-      if(!control||(!help&&!label.parentElement.matches('.train-grid')))continue;
-      const caption=document.createElement('span');caption.className='field-caption';
-      const text=document.createElement('span');
-      for(const node of [...label.childNodes])if(node.nodeType===Node.TEXT_NODE)text.append(node);
-      caption.append(text);if(help)caption.append(help);control.before(caption);
-    }
+    for(const label of train.querySelectorAll('label'))fieldCaption(label);
+    for(const label of section.querySelectorAll('#project-create-form>label,#workspace-files label'))fieldCaption(label);
     const environmentHelp=query('#environment-mode-note').closest('.ui-info');query('.project-environment-choice legend').append(environmentHelp);
+    const legend=query('.project-environment-choice legend'),legendText=document.createElement('span');
+    for(const node of [...legend.childNodes])if(node.nodeType===Node.TEXT_NODE)legendText.append(node);legend.prepend(legendText);
     const taskHelp=explanation.closest('.ui-info');kicker.querySelector('span').append(taskHelp);
     const contextHeading=query('#workspace-context-title'),contextCaption=document.createElement('div');contextCaption.className='field-caption';contextHeading.before(contextCaption);contextCaption.append(contextHeading,contextInfo);
     renderEnvironmentChoice();
@@ -284,7 +291,13 @@ export function executionUI(store,refresh,toast){
   async function showNotes(id,container){
     if(notesJob===id&&notes){notes.sync(true,true);return;}notes?.reset();notes=null;notesJob=id;const generation=++notesGeneration,owner=actor;container.textContent='正在核对任务留言功能…';
     try{const info=await call('community.info',{});if(generation!==notesGeneration||owner!==actor)return;if(info.enabled!==true||!info.capabilities?.includes('task-notes-v1')){container.textContent='当前后台尚未提供任务留言功能。';return;}
-      container.className='job-notes';container.innerHTML=taskNotesMarkup.replace(/(id|for)="([a-z][a-z-]*)"/g,(_,attribute,value)=>`${attribute}="drawer-${value}"`);notes=createTaskNotesUI(container,store,toast,{prefix:'drawer-',jobId:id});container.querySelector('#drawer-task-note-lifetime').value='task';notes.sync(true,true);
+      container.className='job-notes';container.innerHTML=taskNotesMarkup.replace(/(id|for)="([a-z][a-z-]*)"/g,(_,attribute,value)=>`${attribute}="drawer-${value}"`);
+      for(const label of container.querySelectorAll('form label')){
+        const control=label.htmlFor&&container.querySelector('#'+CSS.escape(label.htmlFor));
+        if(control){const field=document.createElement('div');field.className='note-field';label.before(field);field.append(label,control);const text=document.createElement('span');text.append(...label.childNodes);label.append(text);label.classList.add('field-caption');}
+        else{label.classList.add('note-field');fieldCaption(label);}
+      }
+      notes=createTaskNotesUI(container,store,toast,{prefix:'drawer-',jobId:id});container.querySelector('#drawer-task-note-lifetime').value='task';notes.sync(true,true);
     }catch(error){if(generation===notesGeneration&&owner===actor)container.textContent='留言暂不可用：'+error.message;}
   }
   document.addEventListener('gpuq-job-drawer-close',()=>{notesGeneration++;notes?.reset();notes=null;notesJob=null;const files=query('#workspace-files');if(outputPlace&&files){outputPlace.after(files);outputPlace.remove();outputPlace=null;}});

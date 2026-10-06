@@ -32,6 +32,8 @@ const roomSpec={
   controls,largeTargets:'[data-control-section],.cstrip .cs-seg',
   bottomReserve:[{content:'#main-content',controls:'#control-strip,#mobile-control,#room-nav'}],
 };
+const fieldGaps=parent=>({parent,children:':scope>.field-caption>span,:scope>:is(input:not([type=checkbox]):not([type=radio]),select,textarea)',
+  textBounds:'.field-caption>span',together:true,wrap:false});
 const workSpec={...roomSpec,roots:['#page-work','#control-strip'],
   wideRows:[{minimumWidth:1100,parent:'#self-summary',children:':scope>div'}],
   leftEdges:[['.wb-focal .job-top','.wb-focal .subline','.wb-focal .wb-progress-hero','.wb-focal .wb-progress-line'],
@@ -40,8 +42,15 @@ const workSpec={...roomSpec,roots:['#page-work','#control-strip'],
     {parent:'.wb-publish-control',children:':scope>*'},
     {parent:'.wb-ledger-head',children:':scope>*',wrap:true}],
   buttonRows:[{parent:'.terminal-controls'},{parent:'.wb-job-quick'},{parent:'.job-acts',wrap:true}],
-  sameRowControls:[{parent:'.terminal-controls',children:':scope>button'}],
+  sameRowControls:[{parent:'.terminal-controls',children:':scope>button'},
+    {parent:'#workspace-files .file-location-grid,#workspace-files .output-run-fields',children:'input,select'}],
   unbrokenValues:['#self-summary strong','.wb-metrics strong'],
+  siblingGap:[{parent:'#project-create-form',children:':scope>label,:scope>fieldset,:scope>button'},
+    {parent:'#project-create-form>label,#project-create-form>fieldset',
+      children:':scope>.field-caption>span,:scope>:is(input,select),:scope>legend>span,:scope>.project-environment-segments',
+      textBounds:'.field-caption>span,legend>span',wrap:false,together:true},
+    {parent:'#workspace-files',children:':scope>.file-location-grid,:scope>.output-run-fields,:scope>.file-actions,:scope>pre'},
+    fieldGaps('#workspace-files label')],
   baselines:[{parent:'.wb-job-heading',children:'.st,.wb-job-name',wrap:true}],
   textContainment:['.project-environment-segments label>span','.cs-count-link>.st',
     '.wb-progress-number','.wb-progress-meta>span','.wb-metrics strong','#self-summary>div'],
@@ -67,6 +76,9 @@ const controlSpec={...roomSpec,roots:['#mission-control'],
   sameRowControls:[{parent:'.mc-row-actions',children:'button'}],
   unbrokenValues:['.mc-meter-value'],
   textContainment:['.mc-meter-value','.mc-meter-label'],
+  siblingGap:[{parent:'.mc-natural',children:':scope>*'},fieldGaps('.mc-natural-version'),
+    {parent:'.mc-natural-fields>div',children:':scope>dt,:scope>dd',textBounds:'dt',wrap:false,together:true},
+    {parent:'.mc-cols>.mc-col',children:':scope>.mc-row'}],
   scrollPanels:['#mission-control','.mc-body'],
 };
 const dialogSpec=(selector,scroll)=>({controls,roots:[selector],scrollPanels:selector==='#job-mission'?[selector]:[selector,scroll],scrollGroups:[scroll],
@@ -77,7 +89,23 @@ const dialogSpec=(selector,scroll)=>({controls,roots:[selector],scrollPanels:sel
   buttonRows:[{parent:selector+' .sheet-footer',children:'button'}],
   sameRowControls:[{parent:selector+' #train-form .train-grid',children:'input,select,button'},
     {parent:selector+' .sheet-footer',children:'button'}],
+  siblingGap:[{parent:selector+' .sheet-scroll',children:':scope>.train-grid>label,:scope>label,:scope>.priority-choice>label'},
+    fieldGaps(selector+' label:has(>.field-caption)')],
 });
+const settingsSpec={...dialogSpec('#work-submit-panel','#work-submit-panel .sheet-scroll'),
+  sameRowControls:[{parent:'#work-submit-panel .train-grid',children:'input,select'}],
+  siblingGap:[{parent:'#work-submit-panel .sheet-scroll',children:':scope>label,:scope>.train-grid>label'},
+    fieldGaps('#work-submit-panel label:has(>.field-caption)')],
+};
+const notesSpec={...dialogSpec('.job-log-dialog','.job-log-dialog .sheet-scroll'),
+  siblingGap:[{parent:'.job-notes #drawer-task-note-form',children:':scope>.note-field,:scope>.chat-compose-footer'},
+    fieldGaps('.job-notes .note-field')],
+};
+const outputSpec={...dialogSpec('.job-log-dialog','.job-log-dialog .sheet-scroll'),
+  sameRowControls:[{parent:'#workspace-files .file-location-grid,#workspace-files .output-run-fields',children:'input,select'}],
+  siblingGap:[{parent:'#workspace-files',children:':scope>.file-location-grid,:scope>.output-run-fields,:scope>.file-actions,:scope>pre'},
+    fieldGaps('#workspace-files label')],
+};
 const scenes=[
   ...['member','admin'].flatMap(role=>[
     ...['work','compute','control'].flatMap(room=>['normal','empty','loading','error','unknown','maintenance'].map(state=>({role,room,state,name:role+'-'+room+'-'+state,
@@ -89,6 +117,11 @@ const scenes=[
     ...['normal','error','unknown'].map(state=>({role,room:'fullscreen',state,name:role+'-fullscreen-'+state,spec:dialogSpec('#job-mission','.r5-mission-body')})),
     {role,room:'submit',state:'normal',name:role+'-submit',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
     {role,room:'submit',state:'normal',wrappedLabels:true,name:role+'-submit-wrapped-labels',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
+    ...['scheduling','elastic','placement'].map(setting=>({role,room:'submit',state:'normal',setting,name:role+'-submit-'+setting,spec:settingsSpec})),
+    {role,room:'control',state:'normal',natural:true,name:role+'-control-training-form',spec:controlSpec},
+    {role,room:'fullscreen',state:'normal',notes:true,name:role+'-fullscreen-notes',spec:notesSpec},
+    {role,room:'fullscreen',state:'normal',output:true,name:role+'-fullscreen-output',spec:outputSpec},
+    {role,room:'work',state:'normal',files:true,name:role+'-work-files',spec:workSpec},
     {role,room:'project',state:'normal',name:role+'-project',spec:workSpec},
     ...[['project-environment','#project-create .project-environment-choice'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
       spec:{...workSpec,focusedTargets:[selector]}})),
@@ -186,6 +219,17 @@ async function checkGeometryRegressions(){
     assert.ok((await inspectOperationalGeometry(page,gapSpec)).failures.some(row=>row.rule==='token-gap'&&row.gap===2),'a two-pixel serial/value gap fails the optional token rule');
     await page.locator('.tokens').evaluate(node=>node.style.gap='8px');
     assert.equal((await inspectOperationalGeometry(page,gapSpec)).pass,true,'an eight-pixel serial/value gap passes');
+    await page.setContent('<style>.fields{display:grid;gap:24px}.fields>div{height:40px}.fields>div:last-child{margin-top:10px}</style><div class="fields"><div>One</div><div>Two</div><div>Three</div></div>');
+    assert.equal((await inspectOperationalGeometry(page,defaultSpec)).pass,true,'sibling gap checks are disabled for existing specifications');
+    const siblingSpec={...defaultSpec,siblingGap:[{parent:'.fields'}]};
+    assert.ok((await inspectOperationalGeometry(page,siblingSpec)).failures.some(row=>row.rule==='sibling-gap'),'unequal consecutive field gaps fail');
+    await page.locator('.fields>div').last().evaluate(node=>node.style.marginTop='0');
+    assert.equal((await inspectOperationalGeometry(page,siblingSpec)).pass,true,'equal field gaps pass');
+    await page.setContent('<style>.field{display:grid;gap:12px}.caption{display:flex;align-items:center;gap:8px;font:16px/24px sans-serif}.info{height:44px;width:44px}input{width:100px;height:40px;box-sizing:border-box}</style><div class="field"><div class="caption"><span>Plain</span></div><input></div><div class="field"><div class="caption"><span>Help</span><div class="info"></div></div><input></div>');
+    const fieldGapSpec={...defaultSpec,siblingGap:[{parent:'.field',children:'.caption>span,input',textBounds:'.caption>span',together:true,wrap:false}]};
+    assert.ok((await inspectOperationalGeometry(page,fieldGapSpec)).failures.some(row=>row.rule==='sibling-gap'),'a tall help target changes the visual caption-to-control gap');
+    await page.locator('.info').evaluate(node=>node.style.marginBlock='-10px');
+    assert.equal((await inspectOperationalGeometry(page,fieldGapSpec)).pass,true,'a full-size target with negative margins keeps the caption gap');
   }finally{await context.close();}
 }
 
@@ -218,6 +262,7 @@ try{
         ...(status==='FAILED'?{error:'保存训练结果时出现错误，请查看日志与诊断。'}:{})});
       state.jobs=scene.state==='empty'?[]:scene.state==='error'?[job('fixture-failed','FAILED')]:scene.state==='unknown'?[job('fixture-unknown','UNKNOWN')]:
         [job('fixture-running','RUNNING'),job('fixture-queued','PENDING'),job('fixture-failed','FAILED')];
+      if(scene.output)for(const [index,row] of state.jobs.entries()){row.id='00000000-0000-4000-8000-'+String(index+1).padStart(12,'0');row.spec.id=row.id;}
       if(scene.state==='counts')state.jobs.push(job('fixture-start','STARTING'),job('fixture-data','PREPARING_DATA'),
         {...job('fixture-cancel','RUNNING'),cancelRequested:true},job('fixture-unknown','UNKNOWN'));
       state.operationalMaintenance={version:1,revision:1,global:scene.state==='maintenance'?{reason:'存储检查；已有训练继续运行',since:checkedAt}:null,machines:{}};
@@ -237,7 +282,7 @@ try{
           else if(operation==='projects.status')result={project,state:'READY',environmentMode:'oci',latestReadyRelease:release,releases:[{release,state:'READY'}]};
           else if(operation==='projects.quota')result={usedBytes:0,quotaBytes:1024**3};
           else if(operation==='maintenance.status')result=state.operationalMaintenance;
-          else if(['datasets.list','datasets.catalog'].includes(operation))result={datasets:[],machines:inventory.map(row=>({machine:row.id,state:'ok'}))};
+          else if(['datasets.list','datasets.catalog'].includes(operation))result={datasets:scene.natural?[{dataset:'fixture-data',versions:[{version:release,state:'READY'}]}]:[],machines:inventory.map(row=>({machine:row.id,state:'ok'}))};
           else if(operation==='datasets.capacity')result={available:false};
           else if(['notifications.list','transfers.list'].includes(operation))result={items:[]};
           else if(operation==='transfers.capabilities')result={enabled:false};
@@ -246,6 +291,10 @@ try{
             if(++terminalCalls>1&&scene.state==='error'){await reply(route,{error:'输入结果未确认，请重连。'},503);return;}
             result={offset:12,data:terminalCalls===1?Buffer.from('Local xterm.\r\n').toString('base64'):'',exited:scene.state==='ended',exitCode:scene.state==='ended'?17:null};
           }else if(operation==='terminal.detach')result={detached:true};
+          else if(operation==='jobs.logs')result={text:'Local training log.'};
+          else if(operation==='community.info')result={enabled:true,capabilities:['task-notes-v1']};
+          else if(operation==='community.notes.list')result={notes:[],nextCursor:null};
+          else if(operation==='files.list')result={entries:[]};
           else throw Error('Unexpected layout fixture API: '+operation);
           await reply(route,{result,state});return;
         }
@@ -273,8 +322,15 @@ try{
             const count=root.querySelector('.cs-count-link>.'+type);if(!count||!count.getAttribute('aria-label'))throw Error('A confirmed activity count disappeared: '+type);
           }
         },{userId:principal.userId,machine,project});
-        if(scene.room==='control'){await page.keyboard.press('Control+k');await page.locator('#mission-control').waitFor({state:'visible'});}
-        if(scene.room==='fullscreen'){await page.locator('.wb-focal [data-job-mission]').click();await page.locator('#job-mission').waitFor({state:'visible'});}
+        if(scene.room==='control'){
+          await page.keyboard.press('Control+k');await page.locator('#mission-control').waitFor({state:'visible'});
+          if(scene.natural){await page.locator('#control-command').fill(machine+' 两张卡 跑 python train.py 用 fixture-data');await page.locator('[data-command-id="parse-training"]').click();await page.locator('#control-data-version option').filter({hasText:'已就绪'}).waitFor({state:'attached'});}
+        }
+        if(scene.room==='fullscreen'){
+          await page.locator('.wb-focal [data-job-mission]').click();await page.locator('#job-mission').waitFor({state:'visible'});
+          if(scene.notes){await page.locator('#job-mission [data-job-logs]').click();await page.locator('.job-log-dialog [data-job-tab=notes]').click();await page.locator('#drawer-task-note-form').waitFor({state:'visible'});}
+          if(scene.output){await page.locator('#job-mission [data-job-output]').click();await page.locator('#job-output-view #workspace-result').filter({hasText:'目录为空'}).waitFor();}
+        }
         if(scene.room==='submit'){
           await page.locator('#open-submit').click();await page.locator('#work-submit').waitFor({state:'visible'});
           if(scene.wrappedLabels)await page.locator('#train-form .train-grid:has([name=cards])').evaluate(grid=>{
@@ -283,7 +339,8 @@ try{
               text.textContent=value;
             }
           });
-          if(!before){
+          if(scene.setting){await page.locator('.training-advanced>details>summary').nth({scheduling:0,elastic:1,placement:2}[scene.setting]).click();await page.locator('#work-submit-panel').waitFor({state:'visible'});}
+          if(!before&&!scene.setting){
             assert.equal(await page.locator('#train-form label>.ui-info').count(),0,'field explanations belong to their label row, including training-version help');
             for(const name of ['task-description','priority','release','command','datasets']){
               const label=page.locator('#train-form label').filter({has:page.locator('[name='+name+']')});
@@ -292,6 +349,7 @@ try{
           }
         }
         if(scene.room==='project'){await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('container-layout');await page.locator('[name=environment-choice][value=oci]').check();}
+        if(scene.files)await page.locator('#workspace-files>summary').click();
         if(scene.room==='terminal'){await page.locator('#terminal-open').click();await page.locator('.terminal-dialog').waitFor({state:'visible'});if(scene.state==='error')await page.locator('#terminal-connection-note').filter({hasText:'未确认'}).waitFor();if(scene.state==='ended')await page.locator('#terminal-connection-note').filter({hasText:'终端已结束'}).waitFor();}
         if(scene.help)await page.locator(scene.help).click();
         await page.evaluate(()=>document.fonts.ready);
@@ -304,6 +362,19 @@ try{
           await page.evaluate(async()=>{for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
           if(scene.spec.focusedTargets?.length)await revealOperationalTarget(page,scene.spec.focusedTargets[0]);
           const measurement=await inspectOperationalGeometry(page,scene.spec);caseRows.push({physicalWidth:width,physicalHeight:width<760?844:900,zoom,...measurement});
+          if(!before){
+            assert.deepEqual(await page.locator('#control-training-preview[hidden],#work-submit [hidden],#work-submit-panel [hidden],#project-create-form [hidden],#workspace-files [hidden],.job-notes [hidden]').evaluateAll(nodes=>nodes.filter(node=>getComputedStyle(node).display!=='none').map(node=>node.id||node.tagName)),[],'field layout must respect existing hidden conditions');
+            const activeFieldRoot=scene.room==='submit'?(scene.setting?'#work-submit-panel':'#work-submit'):scene.room==='project'?'#project-create-form':null;
+            const hitAreas=activeFieldRoot?await page.locator(activeFieldRoot+' :is(.field-caption>.ui-info>summary,legend>.ui-info>summary)').evaluateAll(nodes=>nodes.filter(node=>{
+              for(let parent=node.parentElement;parent;parent=parent.parentElement)
+                if(parent.matches('details:not([open])')&&!parent.querySelector(':scope>summary')?.contains(node))return false;
+              const box=node.getBoundingClientRect(),area=node.closest('.sheet-scroll')?.getBoundingClientRect();
+              return box.width&&box.top>=Math.max(0,area?.top??0)&&box.bottom<=Math.min(innerHeight,area?.bottom??innerHeight)&&!node.closest('[hidden]');
+            }).map(node=>{const box=node.getBoundingClientRect(),hits=[box.top+2,box.top+box.height/2,box.bottom-2].map(y=>document.elementFromPoint(box.left+box.width/2,y));
+              return {label:node.getAttribute('aria-label'),top:box.top,bottom:box.bottom,height:box.height,expected:innerWidth<760?44:32,
+                hit:hits.every(hit=>node.contains(hit)),targets:hits.map(hit=>hit?.id||hit?.tagName+'.'+hit?.className)};})):[];
+            assert.ok(hitAreas.every(row=>Math.abs(row.height-row.expected)<=1&&row.hit),'the full disclosure target remains clickable beyond its compact caption line: '+JSON.stringify({scene:scene.name,width,zoom,hitAreas}));
+          }
           if(process.env.POLISH_DOM_REPORT){
             const geometry=await page.evaluate(selector=>{
               const rect=node=>{const box=node.getBoundingClientRect();return Object.fromEntries(['left','top','right','bottom','width','height'].map(key=>[key,box[key]]));};

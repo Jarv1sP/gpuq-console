@@ -275,6 +275,39 @@ export async function inspectGeometry(page, specification = {}) {
         if (gap < minimum - .01) add('token-gap', [left, right], {parent: describe(parent), gap, minimum});
       }
     }
+    for (const group of spec.siblingGap || []) {
+      const combined = [];
+      for (const parent of select(group.parent)) {
+        const nodes = select(group.children || ':scope > *', parent);
+        const bounds = node => {
+          const fragments = group.textBounds && node.matches(group.textBounds) ? textFragments(node) : [];
+          return fragments.length ? {top: Math.min(...fragments.map(box => box.top)),
+            bottom: Math.max(...fragments.map(box => box.bottom))} : rect(node);
+        };
+        const rows = (group.wrap === false ? nodes.map(node => [node]) : lines(nodes, true)).map(row => ({nodes: row,
+          top: Math.min(...row.map(node => bounds(node).top)),
+          bottom: Math.max(...row.map(node => bounds(node).bottom))})).sort((a, b) => a.top - b.top);
+        const gaps = rows.slice(1).map((row, index) => ({nodes: [...rows[index].nodes, ...row.nodes],
+          gap: row.top - rows[index].bottom}));
+        const check = values => {
+          if (values.length < 2) return;
+          counts.alignments++;
+          const sizes = values.map(value => value.gap);
+          if (Math.max(...sizes) - Math.min(...sizes) > tolerance)
+            add('sibling-gap', [...new Set(values.flatMap(value => value.nodes))],
+              {parent: group.parent, values: sizes, maximum: tolerance});
+        };
+        if (group.together) combined.push(...gaps);
+        else check(gaps);
+      }
+      if (group.together && combined.length > 1) {
+        counts.alignments++;
+        const values = combined.map(value => value.gap);
+        if (Math.max(...values) - Math.min(...values) > tolerance)
+          add('sibling-gap', [...new Set(combined.flatMap(value => value.nodes))],
+            {parent: group.parent, values, maximum: tolerance});
+      }
+    }
     for (const selector of spec.repeatedPadding || []) {
       const nodes = select(selector);
       if (nodes.length < 2) continue;
