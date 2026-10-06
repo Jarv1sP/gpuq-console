@@ -26,7 +26,7 @@ export class DemoStore {
   }
   save(id,policy){
     const user=this.get(id);const {limits,total}=policy??{};
-    if(user.role==='admin')throw Error('管理员可访问全部机器，无需配置个人额度。');
+    if(user.role==='admin')throw Error('管理员可访问全部机器且免个人累计用卡额度，无需配置个人额度；资源不足时正常排队。');
     if(!limits||typeof limits!=='object'||Array.isArray(limits))throw Error('机器授权格式无效。');
     const capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
     if(!Number.isInteger(total)||total<0||total>capacity)throw Error(`总上限必须是 0–${capacity} 之间的整数。`);
@@ -48,8 +48,9 @@ export class DemoStore {
     if(!user.enabled)throw Error('账号已暂停，不能申请新的 GPU。');
     if(!host||!user.limits[machine])throw Error('这台机器未授权，请联系管理员。');
     if(!Number.isInteger(cards)||cards<1)throw Error('申请卡数须为大于 0 的整数。');
-    if(cards+this.usage(id,machine)>user.limits[machine])throw Error(`超出这台机器的上限：已用 ${this.usage(id,machine)} 张，最多 ${user.limits[machine]} 张。`);
-    if(cards+this.usage(id)>user.total)throw Error(`超出跨机器总上限：已用 ${this.usage(id)} 张，最多 ${user.total} 张。`);
+    if(cards>host.cards)throw Error('申请卡数超出单机容量。');
+    if(user.role!=='admin'&&cards+this.usage(id,machine)>user.limits[machine])throw Error(`超出这台机器的上限：已用 ${this.usage(id,machine)} 张，最多 ${user.limits[machine]} 张。`);
+    if(user.role!=='admin'&&cards+this.usage(id)>user.total)throw Error(`超出跨机器总上限：已用 ${this.usage(id)} 张，最多 ${user.total} 张。`);
     const occupied=this.jobs.filter(j=>j.machine===machine).reduce((n,j)=>n+j.cards,0);
     if(occupied+cards>host.cards)throw Error('模拟资源暂时不足；真实接入后交由 GPUQ 排队。');
     const job={id:`DEMO-${String(++this.sequence).padStart(3,'0')}`,userId:id,machine,cards};this.jobs.push(job);return clone(job);

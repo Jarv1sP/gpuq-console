@@ -114,6 +114,35 @@ test('a free but heavily queued local node does not defeat another free unqueued
   assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[1]);
 });
 
+test('AUTO admin exemption applies to exclusive and shared ranking and preparation on busy nodes',async()=>{
+  for(const shared of [false,true]){
+    const f=fixture();f.user.role='admin';
+    for(const host of f.service.gpuq.hosts)host.gpuq.capabilities=['console-placement-v1','console-sharing-v1'];
+    const placement={gpuIndices:[0],shared,...(shared?{vramMiB:4096}:{})};
+    f.user.limits[ids[1]]=1;f.service.store.jobs.push({id:'existing',userId:f.user.id,machine:ids[1],state:'RUNNING',cards:8});
+    f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0];
+    assert.equal((await selectMachine(f.service,f.user,normalized({placement}),priorityCapable)).machine,ids[1],'actual free capacity wins despite personal counts');
+    f.service.gpuq.hosts[1].gpuq.schedulableIndices=[];
+    const input={...base(),placement,machineSelection:{mode:'auto',candidates:[ids[1]]}};
+    const reply=await executionCall(f.service,principal(f),'jobs.submit',input),job=f.service.store.jobs.find(j=>j.id===reply.id);
+    assert.equal(reply.state,DATA_PREPARING);assert.equal(reply.machine,ids[1]);
+    assert.equal(Object.hasOwn(reply,'dispatchPending'),false);
+    await advanceDataPreparation(f.service,job,usage);
+    assert.equal(job.state,'SUBMITTING');assert.equal(job.machine,ids[1]);assert.equal(job.dispatchPending,true);
+    assert.equal(usage(f.service.store.jobs,f.user.id),9);assert.equal(f.service.store.jobs[0].state,'RUNNING');
+    assert.ok(f.calls.every(call=>['prepareProject','projects.verify'].includes(call.operation)));
+  }
+});
+
+test('admin exemption retains global history and per-user preparation bounds without dispatch',async()=>{
+  const f=fixture();f.user.role='admin';
+  f.service.store.jobs=Array.from({length:10},(_,i)=>({id:'preparing-'+i,userId:f.user.id,machine:ids[0],state:DATA_PREPARING,cards:1}));
+  await assert.rejects(executionCall(f.service,principal(f),'jobs.submit',base()),error=>error.status===429&&/最多保留 10/.test(error.message));
+  f.service.store.jobs=Array.from({length:5000},(_,i)=>({id:'historical-'+i,userId:f.user.id,machine:ids[0],state:'SUCCEEDED',cards:1}));
+  await assert.rejects(executionCall(f.service,principal(f),'jobs.submit',base()),error=>error.status===503&&/归档上限/.test(error.message));
+  assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
+});
+
 test('unobserved preparing targets reduce advisory free capacity; recorded targets never drift',async()=>{
   const f=fixture();for(const h of f.service.gpuq.hosts.slice(0,2))h.gpuq.schedulableIndices=[0];
   const first=await executionCall(f.service,principal(f),'jobs.submit',base());assert.equal(first.machine,ids[0]);

@@ -285,7 +285,7 @@ export class PortalService extends DemoService{
         const user=this.store.users.find(u=>u.id===args.userId);if(!user)throw Error('用户不存在。');
         if(args.policyVersion!==user.policyVersion)throw Object.assign(Error('权限已被其他窗口修改，请刷新后重试。'),{status:409});
         // Do not silently kill running experiments when lowering a policy.
-        if(args.total<usage(this.store.jobs,user.id)||Object.entries(user.limits).some(([m])=>(args.limits?.[m]||0)<usage(this.store.jobs,user.id,m)))throw Object.assign(Error('新额度低于当前预留用卡数。请先取消相应任务并等待释放。'),{status:409});
+        if(user.role!=='admin'&&(args.total<usage(this.store.jobs,user.id)||Object.entries(user.limits).some(([m])=>(args.limits?.[m]||0)<usage(this.store.jobs,user.id,m))))throw Object.assign(Error('新额度低于当前预留用卡数。请先取消相应任务并等待释放。'),{status:409});
       }
       const result=await super.invoke(token,operation,args);
       if(operation==='policy.save'){const u=this.store.users.find(u=>u.id===args.userId);u.policyVersion++;u.approvedBy=actor;u.approvedAt=new Date().toISOString();result.result=this.store.get(u.id);result.state=this.state(principal);}

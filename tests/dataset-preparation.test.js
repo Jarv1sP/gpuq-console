@@ -61,29 +61,31 @@ test('concurrent preparation completion checks quota and reserves atomically',as
   await advanceDataPreparation(f.service,waiting,usage);assert.equal(waiting.state,'SUBMITTING');
 });
 
-test('data-ready admin sharing bypasses personal counts but preserves leases and node admission',async()=>{
+test('data-ready admin shared and exclusive jobs bypass personal counts but preserve leases and node admission',async()=>{
+  for(const shared of [false,true]){
   const f=managed(fixture({jobs:2}));f.user.role='admin';
-  for(const job of f.jobs){job.placement={gpuIndices:[0],shared:true,vramMiB:4096};Object.assign(job.spec,{cards:1,placement:job.placement});}
+  for(const job of f.jobs){job.placement={gpuIndices:[0],shared,...(shared?{vramMiB:4096}:{})};Object.assign(job.spec,{cards:1,placement:job.placement});}
   await Promise.all(f.jobs.map(job=>advanceDataPreparation(f.service,job,usage)));
   assert.ok(f.jobs.every(job=>job.state==='SUBMITTING'));
   assert.equal(usage(f.jobs,f.user.id),2);assert.ok(f.jobs.every(job=>job.dataPreparationHold.state==='HELD'));
   assert.equal(f.calls.filter(call=>call.operation==='storage.lease.prepare').length,2);
   assert.equal(f.calls.filter(call=>call.operation==='storage.lease.cancel').length,0);
+  }
   const offline=fixture();offline.user.role='admin';offline.jobs[0].spec.placement={shared:true};offline.jobs[0].spec.cards=1;offline.service.gpuq.stale=true;
   await advanceDataPreparation(offline.service,offline.jobs[0],usage);
   assert.equal(offline.jobs[0].state,DATA_PREPARING);assert.match(offline.jobs[0].queueReason,/等待服务器恢复/);
 });
 
-test('data-ready personal quota still applies to members, admin exclusive jobs and demoted admins',async()=>{
-  for(const role of ['member','admin']){
-    const f=fixture({jobs:2});f.user.role=role;
-    for(const job of f.jobs)Object.assign(job.spec,{cards:1,placement:{gpuIndices:[0],shared:role==='member',vramMiB:4096}});
+test('data-ready personal quota still applies to members in both modes and rechecks demoted admins',async()=>{
+  for(const shared of [false,true]){
+    const f=fixture({jobs:2});f.user.role='member';
+    for(const job of f.jobs)Object.assign(job.spec,{cards:1,placement:{gpuIndices:[0],shared,...(shared?{vramMiB:4096}:{})}});
     await Promise.all(f.jobs.map(job=>advanceDataPreparation(f.service,job,usage)));
     assert.equal(f.jobs.filter(job=>job.state==='SUBMITTING').length,1);
     assert.match(f.jobs.find(job=>job.state===DATA_PREPARING).queueReason,/等待个人可用卡数额度/);
   }
-  for(const change of [user=>user.role='member',user=>user.enabled=false,user=>user.limits={}]){
-    const f=fixture();f.user.role='admin';Object.assign(f.jobs[0].spec,{cards:1,placement:{gpuIndices:[0],shared:true,vramMiB:4096}});
+  for(const shared of [false,true])for(const change of [user=>user.role='member',user=>user.enabled=false,user=>user.limits={}]){
+    const f=fixture();f.user.role='admin';Object.assign(f.jobs[0].spec,{cards:1,placement:{gpuIndices:[0],shared,...(shared?{vramMiB:4096}:{})}});
     const entered=deferred(),response=deferred();f.service.bridge=async()=>{entered.resolve();return response.promise;};
     const work=advanceDataPreparation(f.service,f.jobs[0],usage);await entered.promise;
     await f.service.enqueue(()=>change(f.user));response.resolve({...ref,state:'READY'});await work;
