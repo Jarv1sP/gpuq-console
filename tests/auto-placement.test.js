@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {normalizeJobSubmission} from '../job-submission.mjs';
-import {selectMachine} from '../machine-selection.mjs';
+import {selectMachine as selectMachineWithUsage} from '../machine-selection.mjs';
 import {executionCall,priorityCapable,usage} from '../execution.mjs';
 import {advanceDataPreparation,DATA_PREPARING} from '../dataset-preparation.mjs';
 import {MACHINES} from '../dist/model.js';
@@ -12,6 +12,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
 const ids=MACHINES.map(m=>m.id),release='a'.repeat(64),image='sha256:'+'b'.repeat(64);
+const selectMachine=(...args)=>selectMachineWithUsage(...args,usage);
 const base=()=>({machine:'auto',project:'vision',release,cards:1,argv:['python','train.py'],key:randomUUID()});
 function fixture(){
   const user={id:'u',username:'alice',role:'member',enabled:true,total:8,limits:Object.fromEntries(ids.map(id=>[id,8])),policyVersion:1};
@@ -49,49 +50,87 @@ test('auto candidate sets are canonical, immutable and reject malformed or impli
 
 test('local READY project wins; selection performs no prepare or GPU writes',async()=>{
   const f=fixture();f.local.clear();f.local.add(ids[2]);
-  const result=await selectMachine(f.service,f.user,normalized(),priorityCapable,usage);
+  const result=await selectMachine(f.service,f.user,normalized(),priorityCapable);
   assert.equal(result.machine,ids[2]);assert.equal(result.projectPreparation.from,ids[2]);assert.equal(result.projectPreparation.state,'READY');
   assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
+});
+
+test('AUTO prefers a genuinely free pool over a busy local project, without dispatching or copying',async()=>{
+  const f=fixture();f.service.gpuq.hosts[0].gpuq.jobs=[{id:'Jbusy',state:'RUNNING',assigned_gpu_indices:[0]}];
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0,1];
+  const result=await selectMachine(f.service,f.user,normalized(),priorityCapable);
+  assert.equal(result.machine,ids[1]);assert.equal(result.projectPreparation.from,ids[0]);assert.equal(result.projectPreparation.state,'WAITING');
+  assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
+  // Reported free indices cannot manufacture a nonexistent/low-VRAM GPU.
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[99,99];
+  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[0]);
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0];f.service.gpuq.hosts[1].gpus[0].memoryTotalMiB=8192;
+  assert.equal((await selectMachine(f.service,f.user,normalized({minVramGiB:24}),priorityCapable)).machine,ids[0]);
+});
+
+test('free ranking respects requested cardinality, pinned indices and available personal quota',async()=>{
+  const f=fixture();f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0];
+  assert.equal((await selectMachine(f.service,f.user,normalized({cards:2}),priorityCapable)).machine,ids[0]);
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0,1];
+  assert.equal((await selectMachine(f.service,f.user,normalized({cards:2}),priorityCapable)).machine,ids[1]);
+  f.user.limits[ids[1]]=2;f.service.store.jobs.push({userId:f.user.id,machine:ids[1],state:'RUNNING',cards:2});
+  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[0]);
+  f.service.store.jobs=[];for(const host of f.service.gpuq.hosts)host.gpuq.capabilities=['console-placement-v1'];
+  assert.equal((await selectMachine(f.service,f.user,normalized({placement:{gpuIndices:[2]}}),priorityCapable)).machine,ids[0]);
+});
+
+test('a free but heavily queued local node does not defeat another free unqueued node',async()=>{
+  const f=fixture();for(const host of f.service.gpuq.hosts.slice(0,2))host.gpuq.schedulableIndices=[0,1];
+  f.service.gpuq.hosts[0].gpuq.jobs=Array.from({length:31},(_,i)=>({id:'J'+i,state:'PENDING'}));
+  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[1]);
+});
+
+test('unobserved preparing targets reduce advisory free capacity; recorded targets never drift',async()=>{
+  const f=fixture();for(const h of f.service.gpuq.hosts.slice(0,2))h.gpuq.schedulableIndices=[0];
+  const first=await executionCall(f.service,principal(f),'jobs.submit',base());assert.equal(first.machine,ids[0]);
+  const second=await executionCall(f.service,principal(f),'jobs.submit',base());assert.equal(second.machine,ids[1]);
+  assert.equal(f.service.store.jobs.length,2);assert.equal(usage(f.service.store.jobs,f.user.id),0);
+  assert.equal(f.calls.length,0);assert.equal(first.machine,f.service.store.jobs[0].machine);
 });
 
 test('authorized source can feed restricted candidates; foreign, maintained, low-VRAM, offline and wrong-arch targets excluded',async()=>{
   const f=fixture();f.user.limits[ids[3]]=0;f.incompatible.add(ids[1]);
   const request=normalized({machineSelection:{mode:'auto',candidates:[ids[1],ids[2],ids[3]]}});
-  const result=await selectMachine(f.service,f.user,request,priorityCapable,usage);assert.equal(result.machine,ids[2]);assert.equal(result.projectPreparation.from,ids[0]);
+  const result=await selectMachine(f.service,f.user,request,priorityCapable);assert.equal(result.machine,ids[2]);assert.equal(result.projectPreparation.from,ids[0]);
   assert.ok(f.probes.every(p=>p.machine!==ids[3]));
-  f.maintained.add(ids[2]);await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable,usage),/兼容/);
-  f.maintained.clear();f.service.gpuq.hosts[2].gpus=[];await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable,usage));
-  f.service.gpuq.hosts[1].reachable=false;await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable,usage),/没有已授权/);
+  f.maintained.add(ids[2]);await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable),/兼容/);
+  f.maintained.clear();f.service.gpuq.hosts[2].gpus=[];await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable));
+  f.service.gpuq.hosts[1].reachable=false;await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable),/没有已授权/);
 });
 
 test('unsafe scheduling capability, stale status, non-OCI or mismatched immutable images fail closed',async()=>{
-  const f=fixture();await assert.rejects(selectMachine(f.service,f.user,normalized({priority:'normal'}),priorityCapable,usage),/调度能力/);
-  f.service.gpuq.stale=true;await assert.rejects(selectMachine(f.service,f.user,normalized(),priorityCapable,usage),/过期/);f.service.gpuq.stale=false;
+  const f=fixture();await assert.rejects(selectMachine(f.service,f.user,normalized({priority:'normal'}),priorityCapable),/调度能力/);
+  f.service.gpuq.stale=true;await assert.rejects(selectMachine(f.service,f.user,normalized(),priorityCapable),/过期/);f.service.gpuq.stale=false;
   const probe=f.service.projectCopyProbe;f.service.projectCopyProbe=async(...args)=>({...await probe(...args),environmentMode:'shared'});
-  await assert.rejects(selectMachine(f.service,f.user,normalized(),priorityCapable,usage),/未找到/);
+  await assert.rejects(selectMachine(f.service,f.user,normalized(),priorityCapable),/未找到/);
   f.local.add(ids[1]);f.service.projectCopyProbe=async(...args)=>({...await probe(...args),image:'sha256:'+(args[1]===ids[0]?'c':'b').repeat(64)});
-  await assert.rejects(selectMachine(f.service,f.user,normalized(),priorityCapable,usage),/不一致/);
+  await assert.rejects(selectMachine(f.service,f.user,normalized(),priorityCapable),/不一致/);
 });
 
 test('permission revision during probing prevents selection without writes',async()=>{
   const f=fixture(),probe=f.service.projectCopyProbe;
   f.service.projectCopyProbe=async(...args)=>{const value=await probe(...args);f.user.policyVersion++;return value;};
-  await assert.rejects(selectMachine(f.service,structuredClone(f.user),normalized(),priorityCapable,usage),e=>e.status===403);
+  await assert.rejects(selectMachine(f.service,structuredClone(f.user),normalized(),priorityCapable),e=>e.status===403);
   assert.equal(f.saved.length,0);assert.equal(f.calls.length,0);
 });
 
 test('AUTO excludes connected degraded/unknown nodes without treating an empty free pool as unhealthy',async()=>{
   for(const health of ['degraded','recovering','unknown',undefined]){
     const f=fixture();f.service.gpuq.hosts[0].gpuq.health=health;
-    const chosen=await selectMachine(f.service,f.user,normalized(),priorityCapable,usage);
+    const chosen=await selectMachine(f.service,f.user,normalized(),priorityCapable);
     assert.notEqual(chosen.machine,ids[0]);
-    await assert.rejects(selectMachine(f.service,f.user,normalized({machineSelection:{mode:'auto',candidates:[ids[0]]}}),priorityCapable,usage),/健康/);
+    await assert.rejects(selectMachine(f.service,f.user,normalized({machineSelection:{mode:'auto',candidates:[ids[0]]}}),priorityCapable),/健康/);
     assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
   }
   const f=fixture();assert.deepEqual(f.service.gpuq.hosts[0].gpuq.schedulableIndices,[]);
-  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable,usage)).machine,ids[0]);
+  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[0]);
   f.service.gpuq.hosts[0].gpuq.observeOnly=undefined;
-  await assert.rejects(selectMachine(f.service,f.user,normalized({machineSelection:{mode:'auto',candidates:[ids[0]]}}),priorityCapable,usage),/健康/);
+  await assert.rejects(selectMachine(f.service,f.user,normalized({machineSelection:{mode:'auto',candidates:[ids[0]]}}),priorityCapable),/健康/);
 });
 
 test('dataset locality wins before advisory queue length; missing or unauthorized versions exclude the target',async()=>{
@@ -102,8 +141,8 @@ test('dataset locality wins before advisory queue length; missing or unauthorize
   };
   f.service.transferCall=async()=>({enabled:true,sources:ids});
   const request=normalized({datasets:[ref],machineSelection:{mode:'auto',candidates:[ids[0],ids[1]]}});
-  const result=await selectMachine(f.service,f.user,request,priorityCapable,usage);assert.equal(result.machine,ids[1]);assert.equal(result.projectPreparation.from,ids[0]);
-  f.service.bridge=async()=>({datasets:[]});await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable,usage),/数据来源/);
+  const result=await selectMachine(f.service,f.user,request,priorityCapable);assert.equal(result.machine,ids[1]);assert.equal(result.projectPreparation.from,ids[0]);
+  f.service.bridge=async()=>({datasets:[]});await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable),/数据来源/);
 });
 
 test('save failure cannot trigger copy and terminal project failure never allocates GPU',async()=>{
@@ -137,6 +176,12 @@ test('project preparation progress remains no-GPU and promotes exact release onc
   f.service.prepareProject=async(owner,machine,ref)=>({...ref,machine,state:'READY',operationId:'copy-1'});
   await advanceDataPreparation(f.service,job,usage);assert.equal(job.state,'SUBMITTING');assert.equal(job.machine,ids[1]);assert.equal(job.spec.release,release);assert.equal(usage([job],f.user.id),1);
   assert.ok(!Object.hasOwn(job.spec,'machineSelection'));assert.ok(!Object.hasOwn(job.spec,'projectPreparation'));
+});
+
+test('AUTO never promotes onto a node which becomes unhealthy after copying',async()=>{
+  const f=fixture();await executionCall(f.service,principal(f),'jobs.submit',base());const job=f.service.store.jobs[0];
+  f.service.gpuq.hosts.find(h=>h.id===job.machine).gpuq.health='degraded';
+  await advanceDataPreparation(f.service,job,usage);assert.equal(job.state,DATA_PREPARING);assert.match(job.queueReason,/服务器恢复/);assert.equal(usage([job],f.user.id),0);
 });
 
 test('cancellation, source revocation, maintenance and immutable-source changes prevent promotion',async()=>{

@@ -87,7 +87,10 @@ try{
   await login(page,'project-user');
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'');
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
-  assert.equal(await page.locator('option[value=auto]').count(),0);
+  assert.equal(await page.locator('[name=workspace-machine] option[value=auto],[name=machine] option[value=auto],[name=terminal-machine] option[value=auto],[name=file-machine] option[value=auto]').count(),0,'development and terminal contexts remain explicitly selected');
+  assert.equal(await page.locator('[name=training-target]').inputValue(),'current');
+  assert.equal(await page.locator('[name=training-target] option[value=auto]').count(),1,'only the independent training target offers automatic placement');
+  assert.equal(await page.locator('[name=training-target] option[value=auto]').isDisabled(),true,'automatic placement is unavailable without a fixed OCI project');
   assert.equal(await page.locator('#host-maintenance').isVisible(),false);
   assert.equal(await page.locator('[name=terminal-host]').count(),0,'no sticky ROOT mode switch exists');
   await setMachine(machine);
