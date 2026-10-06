@@ -17,13 +17,14 @@ export function jobCancelConfirmation(job){
   const cards=job?.state==='PREPARING_DATA'?0:job?.cards;
   return Number.isSafeInteger(cards)&&cards>=0?`取消这个训练任务？确认停止后释放 ${cards} 张卡的额度，已保存的文件保留。`:'取消这个训练任务？占用额度尚未确认，停止后由服务器确认释放；已保存的文件保留。';
 }
+const infoMark='<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25"/><path d="M8 7v4M8 4.5v.1"/></svg>';
 export function infoHTML(text,label='说明'){
-  return `<details class="ui-info"><summary aria-label="${escapeUI(label)}">ⓘ</summary><div class="ui-info-content" role="note">${escapeUI(text)}</div></details>`;
+  return `<details class="ui-info"><summary aria-label="${escapeUI(label)}">${infoMark}</summary><div class="ui-info-content" role="note">${escapeUI(text)}</div></details>`;
 }
 // Keep the original node and its aria-describedby ID when moving copy offscreen.
 export function discloseInfo(element,label='说明'){
   if(!element||element.closest('.ui-info'))return;
-  const help=document.createElement('details'),summary=document.createElement('summary');help.className='ui-info';summary.textContent='ⓘ';summary.setAttribute('aria-label',label);element.before(help);help.append(summary,element);element.classList.add('ui-info-content');element.hidden=false;
+  const help=document.createElement('details'),summary=document.createElement('summary');help.className='ui-info';summary.innerHTML=infoMark;summary.setAttribute('aria-label',label);element.before(help);help.append(summary,element);element.classList.add('ui-info-content');element.hidden=false;
 }
 export const projectEnvironments={shared:'共享',isolated:'隔离',oci:'个人容器'};
 export function projectEnvironmentLabel(mode){return mode===undefined?'共享':typeof mode==='string'&&Object.hasOwn(projectEnvironments,mode)?projectEnvironments[mode]:'环境未确认';}
@@ -90,9 +91,29 @@ export function projectPublicationProgressHTML(progress){
   return `<ol class="wb-trajectory publication-trajectory" aria-label="训练版本生成阶段">${phases.map(([phase,label],index)=>`<li class="${index<active?'done':index===active?'active':''}" ${index===active?'aria-current="step"':''}><span class="d" aria-hidden="true"></span>${label}</li>`).join('')}</ol>${counts?`<span class="publication-count mono">${counts}</span>`:''}`;
 }
 export function confirmPublicationMotion(element){element?.animate([{opacity:.45},{opacity:1}],{duration:reducedMotion()?150:480,easing:'cubic-bezier(.2,0,0,1)'});}
-if(typeof document!=='undefined')document.addEventListener('click',event=>{
-  for(const help of document.querySelectorAll('.ui-info[open]'))if(!help.contains(event.target))help.open=false;
-},{capture:true});
+if(typeof document!=='undefined'){
+  let infoFrame;
+  function placeInfo(help){
+    const popup=help.querySelector(':scope>.ui-info-content');if(!popup||!help.open||!help.getClientRects().length)return;
+    popup.style.translate='none';
+    const box=popup.getBoundingClientRect(),anchor=help.getBoundingClientRect(),margin=16;
+    const left=Math.max(margin,Math.min(innerWidth-margin-box.width,box.left));
+    const preferredTop=box.bottom>innerHeight-margin?anchor.top-box.height-8:box.top;
+    const top=Math.max(margin,Math.min(innerHeight-margin-box.height,preferredTop));
+    popup.style.translate=(left-box.left)+'px '+(top-box.top)+'px';
+  }
+  function placeOpenInfo(){
+    cancelAnimationFrame(infoFrame);
+    infoFrame=requestAnimationFrame(()=>{for(const help of document.querySelectorAll('.ui-info[open]'))placeInfo(help);});
+  }
+  document.addEventListener('click',event=>{
+    for(const help of document.querySelectorAll('.ui-info[open]'))if(!help.contains(event.target))help.open=false;
+  },{capture:true});
+  document.addEventListener('toggle',event=>{if(event.target.matches?.('.ui-info'))placeOpenInfo();},{capture:true});
+  document.addEventListener('scroll',placeOpenInfo,{capture:true,passive:true});
+  globalThis.addEventListener?.('resize',placeOpenInfo);
+  document.fonts?.ready.then(placeOpenInfo);
+}
 export const endedJob=job=>['SUCCEEDED','FAILED','CANCELED'].includes(job.state);
 export function stateClass(job){
   if(job.cancelRequested&&!endedJob(job))return 'st-cancel';
@@ -160,7 +181,7 @@ export function workbenchCards(jobs,{actions=()=>'',focusId,maintenance,ledger='
   const active=jobs.filter(job=>!endedJob(job));
   const focal=active.find(job=>job.id===focusId)||active.find(job=>job.state==='RUNNING'&&!job.cancelRequested)||active.find(job=>job.state==='UNKNOWN')||active[0]||(historyState?null:jobs.at(-1));
   const completed=jobs.filter(job=>endedJob(job)&&job.id!==focal?.id&&(!historyState||job.state===historyState));
-  const heading=(job,compact=false)=>`<div class="job-top"><div class="wb-job-heading">${stateHTML(job)}<button type="button" class="wb-job-name" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button>${compact?`<span class="wb-job-quick">${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数待更新'}</span>`:''}</div><span class="mono wb-job-id" title="${escapeUI(job.id)}">${escapeUI(String(job.id).slice(0,8))}</span></div>`;
+  const heading=(job,compact=false)=>`<div class="job-top"><div class="wb-job-heading">${stateHTML(job)}<button type="button" class="wb-job-name" title="${escapeUI(job.name||'训练')}" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button>${compact?`<span class="wb-job-quick">${Number.isSafeInteger(job.cards)?job.cards+' 张':'卡数待更新'}</span>`:''}</div><span class="mono wb-job-id" title="${escapeUI(job.id)}">${escapeUI(String(job.id).slice(0,8))}</span></div>`;
   const compact=job=>`<article class="job compact-job" data-workbench-job="${escapeUI(job.id)}">${heading(job,true)}${job.error?`<p class="form-error">${escapeUI(job.error)}</p>`:''}<div class="job-acts"><button class="button quiet" type="button" data-job-focus="${escapeUI(job.id)}">聚焦</button>${actions(job)}${infoHTML(jobFacts(job),'任务事实')}</div></article>`;
   let hero='';
   if(focal){

@@ -81,7 +81,7 @@ function gpuFacts(view,index,mine){
   return {gpu,tasks,owner:tasks.length?gpuTaskSummary(tasks,mine,gpu,view):processEvidence(gpu,view)};
 }
 function chassis(view,mine,index){
-  return `<div class="resource-chassis-scroll"><div class="resource-chassis" data-resource-card-count="${view.count}">${HARDWARE}${towers(view,mine,{portrait:true,selectedGPU:index})}<div class="resource-portrait-utils" data-resource-card-count="${view.count}">${Array.from({length:view.count},(_,number)=>`<span><small>${number}</small><b>${metric(view.gpus.find(gpu=>gpu.index===number)?.utilization,'%')}</b></span>`).join('')}</div></div></div>`;
+  return `<div class="resource-chassis-scroll"><div class="resource-chassis" data-resource-card-count="${view.count}">${HARDWARE}${towers(view,mine,{portrait:true,selectedGPU:index})}</div><div class="resource-portrait-utils" data-resource-card-count="${view.count}" aria-label="各显卡使用率">${Array.from({length:view.count},(_,number)=>`<span aria-label="GPU ${number}"><small>${String(number).padStart(2,'0')}</small><b>${metric(view.gpus.find(gpu=>gpu.index===number)?.utilization,'%')}</b></span>`).join('')}</div></div>`;
 }
 function allProcesses(view,admin){
   const rows=view.gpus.flatMap(gpu=>(Array.isArray(gpu.processes)?gpu.processes:[]).map(process=>({gpu,process})));

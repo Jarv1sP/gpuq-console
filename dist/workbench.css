@@ -89,9 +89,9 @@
 .wb-submit-rail .ui-info-content,.wb-scroll .ui-info-content{left:auto;right:0}
 .wb-focal .subline{display:flex;align-items:center;gap:8px;color:var(--ink-2);font:12px var(--sans);margin:8px 0 0}
 .wb-job-name{overflow-wrap:anywhere}
-/* The information mark uses native text plus an explicit circle: no missing-glyph box. */
-.ui-info>summary{font-size:0!important;display:inline-flex!important;align-items:center;justify-content:center;list-style:none}
-.ui-info>summary::before{content:'i';box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border:1px solid currentColor;border-radius:50%;font:10px/1 Georgia,serif;color:var(--ink-2)}
+/* The labelled disclosure has a decorative SVG, independent of font glyphs. */
+.ui-info>summary{display:inline-flex!important;align-items:center;justify-content:center;list-style:none}
+.ui-info>summary svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.25;stroke-linecap:round;color:var(--ink-2)}
 .ui-info>summary::after{display:none!important}
 .workspace-context-heading>div{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px}
 .workspace-context-heading>div>.eyebrow{flex-basis:100%}
@@ -101,6 +101,7 @@
 .terminal-heading>.ui-info{flex:none}
 @media(max-width:759px){#submit-receipt-actions .button{min-height:44px}.sheet-footer>div{min-width:0;width:100%}}
 .ui-info-content{pointer-events:none}
+.sb .ui-info .ui-info-content{max-height:calc(100dvh - 32px);overflow:auto;overscroll-behavior:contain;pointer-events:auto}
 .ui-info-content :is(a,button,input,select,textarea){pointer-events:auto}
 /* Inventory IDs remain complete in accessible text and native name hints. */
 .sb .server-id:has(>.server-id-head){display:inline-flex;font-family:var(--mono)}
@@ -164,3 +165,100 @@
 .sb .wb-history-filter{display:flex;align-items:center;gap:12px;max-width:280px;margin:12px 0}
 .sb .wb-history-filter select{flex:1;min-width:0;min-height:40px}
 @media(max-width:759px){.sb .wb-history-filter select{min-height:44px}}
+
+/* Operational controls and field captions share a measurable size and axis. */
+.sb .wb-job-name{min-height:32px;line-height:1.4;min-width:0;overflow-wrap:anywhere}
+.sb .job .job-acts .button{min-height:32px}
+.sb .ui-info>summary{width:32px;height:32px;flex:none;margin:0}
+.sb #train-form label{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.sb #train-form label>:is(input,select,textarea,code,.project-name-error,.field-caption){grid-column:1/-1}
+.sb #train-form label>.ui-info{margin:0}
+.sb #train-form .field-caption{display:flex;align-items:center;justify-content:flex-start;gap:8px;min-width:0}
+.sb #train-form .field-caption>.ui-info{margin:0;flex:none}
+.sb #train-form .field-caption>span{min-width:0}
+.sb #train-form .train-grid{grid-template-columns:repeat(3,minmax(0,1fr));column-gap:16px;row-gap:10px}
+.sb #train-form .train-grid>label{grid-row:span 2;grid-template-columns:minmax(0,1fr);grid-template-rows:subgrid;align-items:stretch;row-gap:inherit;margin-bottom:0;min-width:0}
+.sb #train-form .train-grid>label>.field-caption{grid-row:1;align-self:end}
+.sb #train-form .train-grid>label>:is(input,select){grid-row:2;align-self:start;min-width:0}
+.sb #page-work .field-caption,.sb #project-create .project-environment-choice legend,.sb #page-work .section-kicker>span:has(.ui-info){display:flex;align-items:center;gap:8px}
+.sb #page-work .field-caption>.ui-info,.sb #project-create .project-environment-choice legend>.ui-info{margin:0}
+.sb .wb-rail:has(#project-create[open],#workspace-files[open],#host-maintenance[open]){position:static}
+.sb .project-environment-segments{grid-template-columns:repeat(3,minmax(0,1fr))}
+.sb .project-environment-segments span{min-height:48px;padding:4px 2px;white-space:normal;line-height:18px;text-align:center}
+.sb .wb-ledger-groups>details>summary{min-height:40px}
+.sb .wb-rail #host-maintenance>summary{min-height:40px;display:flex;align-items:center}
+.sb .wb-progress-hero{container-type:inline-size;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:clamp(16px,3cqi,32px)}
+.sb .wb-progress-hero>div{min-width:0;max-width:100%}
+.sb .wb-progress-hero>div:first-child{container-type:inline-size}
+.sb .wb-progress-number{font-size:clamp(48px,32cqi,140px)}
+.sb .r5-mission-progress{container-type:inline-size;min-width:0}
+.sb .r5-mission-percentage{font-size:clamp(64px,45cqi,300px)}
+.sb .r5-mission-percentage small{font-size:clamp(16px,8cqi,40px)}
+.sb .wb-job-heading{max-width:100%}
+.sb .wb-job-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .wb-focus-state .wb-job-name{min-height:40px}
+.sb .wb-progress-meta{overflow-wrap:anywhere}
+.sb .wb-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(110px,100%),1fr));gap:12px}
+.sb .wb-metrics>div{padding-inline:0;border-left:0;min-width:0}
+.sb #self-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100px,100%),1fr));gap:16px}
+.sb #self-summary>div{padding-left:16px}
+.sb #self-summary strong{white-space:nowrap}
+@media(min-width:1100px){.sb #work-title-telemetry{width:clamp(404px,32vw,520px)}}
+@media(max-width:759px){
+ .sb #train-form .train-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .sb .wb-job-name,.sb .wb-rail #project-create>summary,.sb .wb-rail #workspace-files>summary,.sb .wb-ledger-groups>details>summary{min-height:44px}
+ .sb .ui-info>summary{width:44px;height:44px}
+ .sb .wb-rail #host-maintenance>summary{min-height:44px}
+ .sb .project-environment-segments span{min-height:44px}
+ .sb .job .job-acts .button{min-height:44px}
+ .sb .wb-progress-number{font-size:clamp(48px,32cqi,104px)}
+ .sb .wb-focus-state .wb-job-name{min-height:44px}
+ .sb #self-summary>div{padding-left:0;border-left:0}
+}
+
+/* Field rows share spacing; a disclosure's full target does not set line height. */
+.sb :is(#train-form>.sheet-scroll,#work-submit-panel>.sheet-scroll,#project-create-form,.job-notes form,.mc-natural,#workspace-files){--field-block-gap:24px;--field-label-gap:12px;--field-help-size:32px;display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:var(--field-block-gap)}
+.sb :is(#train-form,#work-submit-panel,#project-create-form,.job-notes,#workspace-files) label{margin:0;font-size:13px;line-height:1.6;min-width:0}
+.sb :is(#train-form,#work-submit-panel,#project-create-form,.job-notes,#workspace-files) label:not(:has(>[type=checkbox])){display:grid;grid-template-columns:minmax(0,1fr);gap:var(--field-label-gap)}
+.sb :is(#train-form,#work-submit-panel) :is(.train-grid,.priority-choice){margin:0}
+.sb :is(#train-form,#work-submit-panel) .train-grid{grid-template-columns:repeat(3,minmax(0,1fr));column-gap:16px;row-gap:var(--field-label-gap)}
+.sb :is(#train-form,#work-submit-panel) .train-grid>label{grid-row:span 2;grid-template-rows:subgrid;row-gap:inherit;align-items:stretch}
+.sb :is(#train-form,#work-submit-panel) .train-grid>label>.field-caption{grid-row:1;align-self:end}
+.sb :is(#train-form,#work-submit-panel) .train-grid>label>:is(input,select){grid-row:2;align-self:start}
+.sb :is(#train-form,#work-submit-panel,#project-create-form,.job-notes,.mc-natural,#workspace-files) .field-caption{display:flex;align-items:center;gap:8px;min-width:0;line-height:1.6}
+.sb :is(#train-form,#work-submit-panel,#project-create-form,.job-notes,.mc-natural,#workspace-files) .field-caption>.ui-info{flex:none;margin:calc((1lh - var(--field-help-size))/2) 0}
+.sb #project-create-form>.project-environment-choice{margin:0}
+.sb #project-create-form>.project-environment-choice>legend{font-size:13px;line-height:1.6;margin:0 0 var(--field-label-gap)}
+.sb #project-create-form>.project-environment-choice>legend>.ui-info{margin:calc((1lh - var(--field-help-size))/2) 0}
+.sb .job-notes .note-field{display:grid;gap:var(--field-label-gap);min-width:0}
+.sb .job-notes :is(label,select,textarea,.chat-compose-footer,p){margin:0}
+.sb #train-form :is(.submit-checks,.submit-cli){margin-top:0}
+.sb .mc-natural :is(.mc-natural-fields,.mc-natural-confirm){margin:0}
+.sb .mc-natural-version{gap:var(--field-label-gap);font-size:13px;line-height:1.6}
+.sb .mc-natural-fields dt{font-size:13px;line-height:1.6;margin-bottom:var(--field-label-gap)}
+.sb .mc-natural-confirm{min-height:44px}
+.sb #work-submit-panel :is(input:not([type=checkbox]):not([type=radio]),select){height:40px;min-height:40px;padding-block:8px}
+.sb .job-sheet .job-tabs .button{min-height:40px}
+.sb .job-sheet .sheet-footer{flex-wrap:wrap}
+.sb .job-sheet .sheet-footer>p{flex:1 1 180px;max-width:min(330px,100%)}
+.sb #workspace-files::details-content{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--field-block-gap)}
+.sb #workspace-files :is(.file-location-grid,.output-run-fields){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--field-label-gap) 16px;margin:0}
+.sb #workspace-files :is(.file-location-grid,.output-run-fields)>label{display:grid;grid-row:span 2;grid-template-columns:minmax(0,1fr);grid-template-rows:subgrid;gap:inherit;margin:0}
+.sb #workspace-files label>.field-caption{grid-row:1;align-self:end;display:flex;align-items:center;line-height:1.6}
+.sb #workspace-files label>:is(input,select){grid-row:2;align-self:start}
+.sb #workspace-files :is(.file-actions,.file-result){margin:0}
+.sb #workspace-files>summary{min-height:40px;display:flex;align-items:center}
+.sb #workspace-files [type=file]{height:40px;min-height:40px;padding:0 8px;line-height:38px}
+.sb #workspace-files [type=file]::file-selector-button{height:32px;margin:0 8px 0 0;padding:0 8px;font:inherit;vertical-align:middle}
+.sb :is(#train-form,#work-submit-panel,#project-create-form,#workspace-files,.job-notes) [hidden],.sb #control-training-preview[hidden]{display:none!important}
+@media(max-width:759px){
+ .sb :is(#train-form>.sheet-scroll,#work-submit-panel>.sheet-scroll,#project-create-form,.job-notes form,.mc-natural){--field-help-size:44px}
+ .sb :is(#train-form,#work-submit-panel,#project-create-form,.job-notes,#workspace-files) label,.sb #project-create-form>.project-environment-choice>legend,.sb .mc-natural-version,.sb .mc-natural-fields dt{font-size:16px}
+ .sb :is(#train-form,#work-submit-panel) .train-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .sb :is(#train-form,#work-submit-panel) .train-grid>label:last-child{grid-column:1/-1;margin-top:calc(var(--field-block-gap) - var(--field-label-gap))}
+ .sb #work-submit-panel :is(input:not([type=checkbox]):not([type=radio]),select){height:44px;min-height:44px}
+ .sb .job-sheet .job-tabs .button{min-height:44px}
+ .sb #workspace-files>summary{min-height:44px}
+ .sb #workspace-files [type=file]{height:44px;min-height:44px;line-height:42px}
+ .sb #workspace-files [type=file]::file-selector-button{height:40px}
+}

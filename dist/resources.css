@@ -19,7 +19,7 @@
 .sb .resource-select:hover{color:var(--ink)}
 .sb .resource-portrait-meta{display:flex;align-items:baseline;justify-content:space-between;gap:16px;font-size:12px;color:var(--ink-3);margin-top:8px}
 .sb #page-resources .resource-spec{font-size:12px;line-height:1.7;margin:0;color:var(--ink-3);overflow-wrap:anywhere}
-.sb .resource-chassis-scroll{overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;padding-bottom:30px}
+.sb .resource-chassis-scroll{overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;padding-bottom:4px}
 .sb .resource-chassis{position:relative;width:100%;min-width:calc(var(--gpu-count)*50px + 64px);aspect-ratio:880 / 290;margin-top:18px}
 .sb .resource-chassis-linework{position:absolute;inset:0;width:100%;height:100%;fill:none;stroke:#535760;stroke-width:1;stroke-linejoin:miter}
 .sb .resource-chassis-linework :is(path,rect,circle){vector-effect:non-scaling-stroke}
@@ -51,9 +51,10 @@
 .sb .resource-chassis-bays .resource-tower:hover .resource-tower-bar{border-color:var(--ink-2)}
 .sb .resource-chassis-bays .resource-tower.selected::after{content:"";position:absolute;bottom:-25px;left:50%;width:1px;height:20px;background:var(--ink);pointer-events:none}
 .sb .resource-bay-label{position:absolute;right:5px;top:6px;padding:3px 4px;background:#101216;border:1px solid #30343b;color:var(--ink-2);font:11px/1 var(--mono)}
-.sb .resource-portrait-utils{position:absolute;left:7.04%;right:7.04%;top:calc(100% + 12px);display:grid;grid-template-columns:repeat(var(--gpu-count),minmax(0,1fr));gap:10px;color:var(--ink-2)}
-.sb .resource-portrait-utils>span{display:flex;justify-content:center;align-items:baseline;gap:6px;white-space:nowrap;font:11px/1.4 var(--mono)}
-.sb .resource-portrait-utils b{font-weight:400}.sb .resource-portrait-utils small{font-size:11px;color:var(--ink-3)}
+.sb .resource-portrait{container-type:inline-size}
+.sb .resource-portrait-utils{display:grid;grid-template-columns:repeat(var(--gpu-count),minmax(0,1fr));gap:10px;margin:12px 7.04% 0;color:var(--ink-2)}
+.sb .resource-portrait-utils>span{display:flex;justify-content:center;align-items:baseline;gap:8px;white-space:nowrap;font:11px/1.4 var(--mono);font-variant-numeric:tabular-nums}
+.sb .resource-portrait-utils b{font-weight:400}.sb .resource-portrait-utils small{font-size:11px;color:var(--ink-3);flex:none;width:2ch}
 .sb .resource-previous{position:absolute;left:0;right:0;height:1px;background:var(--ink);mix-blend-mode:difference;pointer-events:none}
 .sb .resource-delta,.sb .resource-sample-edge{position:absolute;left:0;right:0;opacity:0;background:var(--ink);pointer-events:none}
 .sb .resource-sample-edge{height:1px}
@@ -79,7 +80,7 @@
 .sb .resource-legend .unknown{background:repeating-linear-gradient(135deg,var(--hatch) 0 1px,transparent 1px 4px)}
 .sb .resource-legend .previous{height:1px;width:16px;border:0;background:var(--ink-2)}
 .sb .resource-info{display:inline-block;position:relative;vertical-align:middle;flex:none;border:0;margin:0;padding:0}
-.sb .resource-info>summary{display:flex;align-items:center;justify-content:center;min-width:24px;min-height:24px;color:var(--ink-2);cursor:pointer;list-style:none;font:16px/1 var(--sans)}
+.sb .resource-info>summary{display:flex;align-items:center;justify-content:center;min-width:32px;min-height:32px;color:var(--ink-2);cursor:pointer;list-style:none;font:16px/1 var(--sans)}
 .sb .resource-info>summary::-webkit-details-marker{display:none}
 .sb .resource-info>summary svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round}
 .sb .resource-info-content{position:absolute;z-index:5;left:0;top:calc(100% + 8px);width:min(330px,calc(100vw - 40px));padding:14px 16px;border:1px solid var(--line-3);border-radius:6px;background:var(--bg-2);color:var(--ink-2);font:13px/1.7 var(--sans);white-space:normal;box-shadow:none}
@@ -104,6 +105,7 @@
 .sb .resource-process-table{font-size:13px;min-width:710px}
 .sb .resource-process-table th{font-size:11px;color:var(--ink-3);font-weight:400;position:sticky;top:0;background:var(--bg);z-index:1}
 .sb .resource-process-table :is(th,td){padding:12px 10px;border-bottom:1px solid var(--line);text-align:left;line-height:1.6;vertical-align:top;color:var(--ink-2)}
+.sb .resource-process-table :is(th,td):is(:nth-child(1),:nth-child(2),:nth-last-child(2)){text-align:right;font-variant-numeric:tabular-nums}
 .sb .resource-process-table strong{color:var(--ink);font-size:13px;font-weight:500}
 .sb .resource-process-table small{display:block;font-size:11px;color:var(--ink-3);line-height:1.7;overflow-wrap:anywhere}
 .sb .resource-process-table .task-description{font-size:12px;line-height:1.7;max-height:3.4em;overflow:auto;margin-top:4px;max-width:380px}
@@ -152,10 +154,10 @@
  .sb .resource-chassis{min-width:0;margin-top:14px}
  .sb .resource-chassis-bays{gap:2px}
  .sb .resource-chassis-bays .resource-tower{min-width:0;padding:0}
- .sb .resource-bay-label{right:2px;top:3px;padding:2px;font-size:9px}
- .sb .resource-portrait-utils{gap:2px;top:calc(100% + 10px)}
- .sb .resource-portrait-utils>span{gap:2px;font-size:9px}
- .sb .resource-portrait-utils small{font-size:9px}
+ .sb .resource-bay-label{left:50%;right:auto;top:3px;padding:1px;border:0;transform:translateX(-50%);font-size:11px}
+ .sb .resource-portrait-utils{gap:2px;margin-top:10px}
+ .sb .resource-portrait-utils>span{gap:8px;font-size:11px}
+ .sb .resource-portrait-utils small{font-size:11px}
  .sb .resource-selection{gap:12px;font-size:13px}
  .sb .resource-selection .button{font-size:13px;min-height:44px}
  .sb .resource-fleet-actions{position:relative;left:auto;bottom:auto;font-size:13px;min-height:44px;flex-wrap:wrap}
@@ -179,5 +181,8 @@
  .sb .resource-process-scroll{max-height:340px}
  .sb .resource-detail .gpu-processes summary{min-height:44px}
  .sb .resource-sheet .sheet-header .button{min-height:44px;font-size:15px}
+}
+@container(max-width:560px){
+ .sb .resource-portrait-utils{grid-template-columns:repeat(auto-fit,minmax(min(100%,64px),1fr));gap:8px 6px}
 }
 @media(prefers-reduced-motion:reduce){.sb .resource-select,.sb .resource-chassis-bays .resource-tower-bar{transition:none}}

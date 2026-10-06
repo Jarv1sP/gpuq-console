@@ -66,6 +66,9 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 @media(prefers-reduced-transparency:reduce){.sb :is(.topbar,#shell-context,.nav,.account-popover){background:var(--bg-1);backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media(max-width:759px){.sb #room-nav{position:fixed}.sb #mobile-control .live-pill{transform:none;margin:0;flex:1;min-width:0;overflow:hidden;gap:7px;padding:0 12px}.sb #mobile-control{gap:10px}.sb #mobile-control>#open-submit{margin-left:auto;min-width:130px}.sb #mission-control[open]{height:100dvh;max-height:none}.sb #mission-control-content{border-radius:0}.sb #mission-control .mc-head{padding:20px 16px 12px}.sb #mission-control .mc-input{font-size:16px}.sb #mission-control .mc-body{padding-bottom:24px}.sb #mission-control .mc-row-actions .button{min-height:44px;font-size:13px}.sb #mission-control .mc-attention-item>.button{min-height:44px}.sb #mission-control .mc-overview{grid-template-columns:repeat(4,minmax(0,1fr))}.sb #mission-control .mc-meter-value{font-size:24px;flex-wrap:wrap}.sb #mission-control .mc-meter-label{font-size:11px;white-space:normal}.sb .me-hero{padding:24px 0}.sb .me-hero h2{font-size:32px}.sb .me-telemetry{gap:24px}.sb .me-actions{display:grid;grid-template-columns:1fr}.sb .me-actions .button{justify-content:flex-start}.sb #mobile-control .cs-name{max-width:110px}}
 .sb #mission-control .mc-footer-command{display:flex;align-items:center;flex:none;gap:8px}.sb #mission-control .mc-footer-command>.ui-info{margin:0}
+.sb #mission-control-content{container:control-panel/inline-size}
+.sb #mission-control .mc-meter-value{white-space:nowrap;flex-wrap:nowrap}
+.sb #mission-control .mc-meter-label{word-break:keep-all}
 .sb #mission-control .mc-attention-heading{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px}
 .sb #mission-control .mc-attention-heading h2{margin:0}
 .sb #mission-control .mc-attention-heading>.button{margin-left:auto;min-height:40px}
@@ -167,4 +170,40 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
  .sb :is(#login-dialog,#register-dialog) .auth-mast{flex-wrap:wrap;gap:8px;padding-block:8px}
  .sb :is(#login-dialog,#register-dialog) .modal-actions{flex-wrap:wrap}
  .sb #profile-dialog .modal-actions .button{flex:1 1 100%}
+}
+
+/* Command rows keep the same control height as the rest of the desktop UI. */
+.sb #mission-control .mc-suggestion{min-height:40px}
+.sb #mission-control button.mc-row-name{min-height:32px}
+@media(max-width:759px){.sb #mission-control .mc-suggestion,.sb #mission-control button.mc-row-name{min-height:44px}}
+
+/* Keep confirmed counts readable when the desktop strip has less room. */
+.sb .toast{min-width:min(240px,calc(100vw - 32px));max-width:min(420px,calc(100vw - 32px));white-space:normal;overflow-wrap:anywhere}
+.sb .cstrip{container-type:inline-size;container-name:operational-strip}
+.sb .cs-focal{min-width:0}
+.sb .cs-focal .cs-progress{min-width:0}
+.sb .cs-meta{overflow:hidden;text-overflow:ellipsis}
+.sb .cs-counts{flex:0 1 246px;max-width:none;gap:0}
+.sb .cs-count-link{flex-wrap:wrap;max-width:100%;gap:0 8px;line-height:16px}
+.sb .cs-count-link .st{line-height:16px}
+.sb .cs-server-summary{display:none;font:11px var(--mono);white-space:nowrap}
+@container operational-strip (width < 1000px){
+ .sb .cs-seg{padding-inline:clamp(10px,1.8cqi,18px)}
+ .sb .cs-focal{flex:1.35 1 140px}
+ .sb .cs-counts{flex:0 1 160px;gap:0}
+ .sb .cs-count-link{flex-wrap:wrap;gap:0 8px;max-width:100%;min-height:22px;line-height:16px}
+ .sb .cs-count-link .st{line-height:16px}
+ .sb .cs-server-list{flex:0 0 auto;gap:8px}
+ .sb .cs-server-summary{display:block}
+ .sb .cs-server-list .cs-server{display:none}
+ .sb .cs-seg:has(>.cs-small){flex:1 1 120px;overflow:hidden}
+ .sb .cs-small,.sb .cs-small small{min-width:0;overflow:hidden;text-overflow:ellipsis}
+}
+/* This follows the phone defaults so zoomed narrow panels keep their scale. */
+@container control-panel (max-width:560px){
+ .sb #mission-control .mc-overview{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 0;padding:16px}
+ .sb #mission-control .mc-meter{padding:0 clamp(8px,3cqi,12px)}
+ .sb #mission-control .mc-meter:nth-child(odd){padding-left:0;border-left:0}
+ .sb #mission-control .mc-meter:nth-child(even){padding-right:0}
+ .sb #mission-control .mc-meter-value{font-size:clamp(20px,7cqi,28px)}
 }

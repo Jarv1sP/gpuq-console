@@ -284,14 +284,17 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `#shell-context` / `#context-machine` / `#context-project` | [shell-ui.js](../dist/shell-ui.js) | 代理原服务器/项目控件，不造第二份业务状态 | 标签明确，title完整 ID，同步原控件 |
 | `#control-strip` / `.cstrip` / `.cs-progress` | [control-ui.js](../dist/control-ui.js)、[starbase.css](../dist/starbase.css) | 任务/会话/传输/需处理；无对象段收起 | 入口可读，不预测队列位次或终端倒计时 |
 | `.mc` / `.mc-natural` / `.mc-natural-fields` | [control-ui.js](../dist/control-ui.js)、[workbench-ui.js](../dist/workbench-ui.js) | 总控与⌘K解析预填；不自动提交 | Esc与焦点，解析字段待确认 |
+| `.mc-overview` / `.mc-meter-value` | [control-ui.js](../dist/control-ui.js)、[shell.css](../dist/shell.css) | 总控统计按面板容器宽度排列，560px及以下为2×2 | 数值与单位不折行，标签不在词中断开；保留全部真实统计 |
 | `.room-transition-layer` / `.room-ghost` | [shell-ui.js](../dist/shell-ui.js)、[shell.css](../dist/shell.css) | 跨房间快照，同房间页签不使用 | inert、无应用ID/事件钩子，不截操作 |
 | `.sheet` / `.modal` / `.dialog` / `.object-transition-layer` | [motion-ui.js](../dist/motion-ui.js)、[starbase.css](../dist/starbase.css) | 详情/提交/确认浮层，不由动画决定状态 | 原生dialog，关闭/返回焦点；克隆去open |
 | `.copy-help` / `.copy-help-button` / `.copy-help-popup` / `.ui-info` | [copy-help-ui.js](../dist/copy-help-ui.js)、[copy-help.css](../dist/copy-help.css) | 标签行右侧ⓘ，不用孤立一行/长段说明 | aria-controls/expanded，popover视口限制，键盘关闭 |
 | `.btn.primary` / `.btn.danger` / `.btn.danger-fill` / `.button.primary` / `.button.quiet` | [starbase.css](../dist/starbase.css)、[styles.css](../dist/styles.css)、[shell.css](../dist/shell.css) | 一个实心主操作，次要安静，破坏性确认代价 | 原生disabled/busy，焦点环，图标有名称 |
 | `.segmented` / `.project-environment-segments` / `.dataset-source-tabs` | [starbase.css](../dist/starbase.css)、[workbench.css](../dist/workbench.css)、[datasets.css](../dist/datasets.css) | 少量互斥项，不把长清单塞分段 | 保留radio/legend，明确选中态 |
 | `.wb-stage-hero` / `.wb-progress-hero` / `.wb-trajectory` / `.wb-ledger` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 阶段自适应当前训练、真实里程碑、额度账本 | 其他训练仍在列表，无进度不给补数 |
+| `.train-grid` / `.field-caption` / `.note-field` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 同一行的训练参数共享subgrid标签与输入轨道；提交/设置/项目/任务留言字段块用24px、标签到控件用12px | 标签折行仍保持控件上沿对齐；ⓘ保留32/44px点击区域，用负margin保持标签行高度；留言复用原提交契约 |
 | `#job-mission` / `.r5-mission` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 任务全屏，肖像只画实际分配的卡 | Esc/关闭/返回任务，保留取消日志输出 |
 | `.resource-chassis` / `.resource-towers` / `.resource-tower` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 真实物理卡位，液位仅表示显存比例 | 手机全部卡位可见，利用率另列，未知斜线 |
+| `.resource-portrait-utils` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 卡位使用率，按真实卡数生成；窄容器自动换列 | 两位等宽序号与百分比分开8px，序号用次级颜色；不把序号拼成读数 |
 | `.ro-v` / `.ro-m` / `.resource-id-label` | [starbase.css](../dist/starbase.css)、[resources-ui.js](../dist/resources-ui.js) | 遥测与巨型服务器 ID，不混淆额度/显存/利用率 | 数值单位分开，保留更新时间和失联事实 |
 | `.server-id` / `.server-id-head` / `.server-id-tail` | [workbench-ui.js](../dist/workbench-ui.js)、[shell.css](../dist/shell.css)、[workbench.css](../dist/workbench.css) | 来自清单的 ID，紧凑处省略，部分控件保留尾段 | title完整值，复制/详情不截断 |
 | `.hero-frame` | [starbase.css](../dist/starbase.css) | 主视觉四角细框，不给每行加框 | 装饰不抢读屏与点击 |
@@ -414,6 +417,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 759px为主要手机房间/抽屉边界。底栏是工作台、算力总览、数据集、协作区、我的，传输没有独立标签。成员/维护由我的或总控承接。总控胶囊与主操作同行，工作台不重复胶囊；内容为底栏、胶囊、安全区和真实控制层预留空间。
 
 触控目标至少44px，字形可以小，不能缩按钮规避目标。minmax(0,1fr)、min-width:0、有边界的换行/省略处理ID、用户名、数据集名、版本与命令。弹窗真实内部滚动，返回恢复焦点与原房间位置，不隐藏DOM冒充适配。
+
+工作台展开项目、文件或主机运维表单时，右栏随页面滚动，避免高于可用视口的吸顶表单把操作停在总控条后面。共享toast宽度受`100vw - 32px`约束，长错误换行并保留全文；缩放后213–256 CSS像素也须可读。训练进度、指标与额度用流式网格，百分比按容器宽度缩放，不以隐藏状态或降低字级避开检查。
 
 ## 10. 测试与截图地图
 
@@ -606,6 +611,10 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 新增能力至少覆盖成功、失败、未确认、丢回执、原编号恢复、跨账号与零授权；写入不能自动重复。真实浏览器检查数字右对齐、标签/ⓘ、长文本、内外滚动、焦点与可操作元素，不只查源码字符串。
 
 [layout-geometry.mjs](../tests/layout-geometry.mjs)是共享测量器，不能放宽阈值、隐藏元素或关掉断言。[dataset-flow-browser-fixture.mjs](../tests/dataset-flow-browser-fixture.mjs)完整扫描为两角色×六状态加详情/三来源弹窗×三真缩放，共60场景，每场景59宽×3高=177组，总计10620。缩放使用真实DPR上下文与对应视口，不用CSS transform冒充。角色、目录、容量、票据与丢回执明确来自测试数据。
+
+共享测量器另有四项默认关闭的关系规则：`sameRowControls:[{parent,children,wrap?}]`要求同一视觉行控件上沿差不超过1px；`unbrokenValues:[selector]`检查数字与单位的真实文本行，允许同一基线上的不同字号；`tokenGap:[{parent,left,right,minimum?}]`检查相邻文本的水平间距，默认至少6px；`siblingGap:[{parent,children,textBounds?,together?,wrap?}]`要求连续同级字段块的间距一致，或按文本边界比较标签到控件的间距，差值不超过1px。现有规格不启用时，既有规则与结果保持不变。工作台、算力、总控的[polish-operational-ui-smoke.mjs](../tests/polish-operational-ui-smoke.mjs)按各组件关系启用，包含长标签、间距不足、数值折行的FAIL/PASS回归；[operational-geometry.mjs](../tests/operational-geometry.mjs)还检查真实滚动裁切、焦点目标和完整错误内容。
+
+提交抽屉的「训练位置」和「候选服务器」沿用字段标签行、24px字段块间距和12px标签间距。两种角色覆盖当前服务器、自动选机、长标签及两处说明展开，启用`sameRowControls`、`siblingGap`和标签右侧ⓘ检查；选机说明仍更新原`training-target-note`节点，开发服务器、项目与固定训练版本保持原选机契约。
 
 截图用真实1440/390/320视口，包含成员/管理员与正常/空/加载/失败/未确认/维护；鼠标移开，清除无关焦点，焦点行为另测。展示完整控件与上下文，长卡用真实滚动和较高原生视口，不裁操作、不拼接、不改图。长ID通过独立本地清单验证，公共 [machines.js](../dist/machines.js)保持示例；真实资产、用户数据与生产图不提交。
 

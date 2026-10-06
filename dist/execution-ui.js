@@ -163,6 +163,16 @@ export function executionUI(store,refresh,toast){
   }
   function notifyContext(){document.dispatchEvent(new CustomEvent('gpuq-workspace-context',{detail:{userId:actor,...context()}}));}
   const reduced=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
+  function fieldCaption(label){
+    if(label.querySelector(':scope>.field-caption'))return;
+    const control=label.querySelector(':scope>:is(input,select,textarea)');
+    if(!control)return;
+    const caption=document.createElement('span');caption.className='field-caption';
+    const text=document.createElement('span');
+    for(const node of [...label.childNodes])if(node.nodeType===Node.TEXT_NODE)text.append(node);
+    caption.append(text);const help=label.querySelector(':scope>.ui-info');if(help)caption.append(help);
+    if(control.matches('[type=checkbox]'))control.after(caption);else control.before(caption);
+  }
   function showSheet(dialog,options={}){if(dialog.open)return;dialog.showModal();if(dialog===submitDialog||dialog===settingsDialog){activateProjectActivity();armPolling();}revealSheet(dialog,options);}
   function closeSettings(){if(!settingsSource)return;const source=settingsSource;settingsSource=null;source.append(...settingsDialog.querySelector('.sheet-scroll').children);source.open=false;settingsDialog.close();}
   function settings(source){closeSettings();settingsSource=source;settingsDialog.querySelector('h2').textContent=source.querySelector('summary').textContent;for(const control of source.querySelectorAll('input,select,textarea'))control.setAttribute('form','train-form');settingsDialog.querySelector('.sheet-scroll').append(...[...source.children].filter(child=>child.tagName!=='SUMMARY'));showSheet(settingsDialog,{drilldown:true});}
@@ -173,7 +183,7 @@ export function executionUI(store,refresh,toast){
     section.querySelector('.workspace-context-heading').querySelector('.eyebrow').textContent='代码与环境';
     section.querySelector('#workspace-context-title').textContent='项目与训练版本';
     for(const id of ['project-publish','terminal-open'])query('#'+id).classList.remove('primary');
-    const train=section.querySelector('#train-form'),panel=train.closest('details');panel.id='train-panel';panel.querySelector('summary').classList.add('sr-only');
+    const train=section.querySelector('#train-form'),panel=train.closest('details');panel.id='train-panel';panel.querySelector('summary').hidden=true;
     submitDialog=document.createElement('dialog');submitDialog.id='work-submit';submitDialog.className='work-sheet submit-sheet';submitDialog.setAttribute('aria-labelledby','submit-title');
     submitDialog.innerHTML='<header class="sheet-header glass"><div><p id="submit-context" class="mono"></p><h2 id="submit-title">提交训练</h2></div><button class="button quiet" type="button" id="close-submit" aria-label="关闭提交抽屉">关闭</button></header>';
     submitDialog.append(panel);document.body.append(submitDialog);
@@ -192,7 +202,7 @@ export function executionUI(store,refresh,toast){
     const receipt=document.createElement('section');receipt.id='submission-receipt';receipt.className='wb-receipt';receipt.setAttribute('aria-live','polite');receipt.hidden=true;jobs.prepend(receipt);
     const projectHelp=document.createElement('p');projectHelp.id='project-status-detail';query('#project-status').after(projectHelp);discloseInfo(projectHelp,'项目状态详情');
     const prefill=document.createElement('div');prefill.id='submit-prefill';prefill.className='submit-prefill';prefill.hidden=true;scroll.prepend(prefill);
-    for(const [id,label] of [['workspace-mode-note','代码与环境说明'],['terminal-mode-note','开发终端说明'],['priority-note','优先级说明'],['custom-policy-note','排队与让位说明'],['elastic-note','弹性显卡说明'],['placement-note','共享显卡说明']])discloseInfo(query('#'+id),label);
+    for(const [id,label] of [['workspace-mode-note','代码与环境说明'],['terminal-mode-note','开发终端说明'],['training-target-note','训练位置说明'],['priority-note','优先级说明'],['custom-policy-note','排队与让位说明'],['elastic-note','弹性显卡说明'],['placement-note','共享显卡说明']])discloseInfo(query('#'+id),label);
     for(const text of section.querySelectorAll('.wb-rail p.muted,.wb-rail .project-actions>span'))discloseInfo(text,'工作区说明');
     for(const text of train.querySelectorAll('p.muted,label>small'))if(!text.closest('.submit-cli,.sheet-footer'))discloseInfo(text,'训练配置说明');
     discloseInfo(explanation,'任务额度说明');
@@ -200,7 +210,20 @@ export function executionUI(store,refresh,toast){
     for(const id of ['workspace-mode-note','project-status-detail']){const note=query('#'+id);note.classList.remove('ui-info-content');contextCopy.append(note);}contextInfo.append(contextCopy);statusInfo.remove();contextInfo.querySelector('summary').setAttribute('aria-label','项目与训练版本说明');query('.workspace-context-heading>div').append(contextInfo);
     const publishInfo=query('#project-detail>.ui-info'),publishControl=document.createElement('div');publishControl.className='wb-publish-control';query('#project-publish').before(publishControl);publishControl.append(query('#project-publish'),publishInfo);
     const terminalHelp=query('#terminal-mode-note')?.closest('.ui-info');if(terminalHelp)query('.terminal-heading').append(terminalHelp);
-    discloseInfo(query('#environment-mode-note'),'运行环境说明');renderEnvironmentChoice();
+    discloseInfo(query('#environment-mode-note'),'运行环境说明');
+    const fieldHelp=(note,control)=>{const help=note?.closest('.ui-info');if(help&&control)control.before(help);};
+    fieldHelp(query('#training-target-note'),train.querySelector('[name=training-target]'));
+    fieldHelp(query('#priority-note'),train.querySelector('[name=priority]'));
+    for(const [id,name] of [['custom-policy-note','custom-policy'],['elastic-note','elastic'],['placement-note','gpu-placement']])fieldHelp(query('#'+id),train.querySelector('[name='+name+']'));
+    for(const name of ['command','datasets']){const label=train.querySelector('[name='+name+']')?.closest('label');fieldHelp(label?.nextElementSibling?.querySelector('.ui-info-content'),label?.querySelector('textarea'));}
+    for(const label of train.querySelectorAll('label'))fieldCaption(label);
+    for(const label of section.querySelectorAll('#project-create-form>label,#workspace-files label'))fieldCaption(label);
+    const environmentHelp=query('#environment-mode-note').closest('.ui-info');query('.project-environment-choice legend').append(environmentHelp);
+    const legend=query('.project-environment-choice legend'),legendText=document.createElement('span');
+    for(const node of [...legend.childNodes])if(node.nodeType===Node.TEXT_NODE)legendText.append(node);legend.prepend(legendText);
+    const taskHelp=explanation.closest('.ui-info');kicker.querySelector('span').append(taskHelp);
+    const contextHeading=query('#workspace-context-title'),contextCaption=document.createElement('div');contextCaption.className='field-caption';contextHeading.before(contextCaption);contextCaption.append(contextHeading,contextInfo);
+    renderEnvironmentChoice();
 
   }
   const receiptActor=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
@@ -269,7 +292,13 @@ export function executionUI(store,refresh,toast){
   async function showNotes(id,container){
     if(notesJob===id&&notes){notes.sync(true,true);return;}notes?.reset();notes=null;notesJob=id;const generation=++notesGeneration,owner=actor;container.textContent='正在核对任务留言功能…';
     try{const info=await call('community.info',{});if(generation!==notesGeneration||owner!==actor)return;if(info.enabled!==true||!info.capabilities?.includes('task-notes-v1')){container.textContent='当前后台尚未提供任务留言功能。';return;}
-      container.className='job-notes';container.innerHTML=taskNotesMarkup.replace(/(id|for)="([a-z][a-z-]*)"/g,(_,attribute,value)=>`${attribute}="drawer-${value}"`);notes=createTaskNotesUI(container,store,toast,{prefix:'drawer-',jobId:id});container.querySelector('#drawer-task-note-lifetime').value='task';notes.sync(true,true);
+      container.className='job-notes';container.innerHTML=taskNotesMarkup.replace(/(id|for)="([a-z][a-z-]*)"/g,(_,attribute,value)=>`${attribute}="drawer-${value}"`);
+      for(const label of container.querySelectorAll('form label')){
+        const control=label.htmlFor&&container.querySelector('#'+CSS.escape(label.htmlFor));
+        if(control){const field=document.createElement('div');field.className='note-field';label.before(field);field.append(label,control);const text=document.createElement('span');text.append(...label.childNodes);label.append(text);label.classList.add('field-caption');}
+        else{label.classList.add('note-field');fieldCaption(label);}
+      }
+      notes=createTaskNotesUI(container,store,toast,{prefix:'drawer-',jobId:id});container.querySelector('#drawer-task-note-lifetime').value='task';notes.sync(true,true);
     }catch(error){if(generation===notesGeneration&&owner===actor)container.textContent='留言暂不可用：'+error.message;}
   }
   document.addEventListener('gpuq-job-drawer-close',()=>{notesGeneration++;notes?.reset();notes=null;notesJob=null;const files=query('#workspace-files');if(outputPlace&&files){outputPlace.after(files);outputPlace.remove();outputPlace=null;}});
@@ -608,7 +637,7 @@ export function executionUI(store,refresh,toast){
         <select name="machine" hidden aria-label="训练服务器"></select>
         <label>训练位置<select name="training-target"><option value="current">当前服务器 · 自动分卡</option><option value="auto">自动选择空闲服务器</option></select></label>
         <p id="training-target-note" class="muted"></p><label id="training-candidates-field" hidden>候选服务器（可选）<input name="training-candidates" placeholder="留空使用全部授权机器；多个完整名称以逗号分隔" spellcheck="false"><small>自编 CUDA 扩展不一定兼容其他显卡型号；不确定时只填写已验证的服务器。</small></label>
-        <div class="train-grid"><label>卡数<input name="cards" type="number" min="1" max="1" value="1" required></label><label>每卡最低显存 / GiB<input name="memory" type="number" min="0" max="128" value="0" step="0.5"></label><label>任务名称<input name="name" maxlength="64" value="train" required></label></div>
+        <div class="train-grid"><label>卡数<input name="cards" type="number" min="1" max="1" value="1" required></label><label>每卡显存下限（GiB）<input name="memory" type="number" min="0" max="128" value="0" step="0.5"></label><label>任务名称<input name="name" maxlength="64" value="train" required></label></div>
         <label>任务描述 ${infoHTML('同一服务器获授权的成员可以看到描述。请勿填写口令或令牌。','描述可见范围')}<textarea name="task-description" rows="3" maxlength="2000" placeholder="例如：验证新数据集上的 baseline，预计运行约两小时。不要填写密码或令牌。"></textarea></label>
         <div class="priority-choice"><label>任务优先级<select name="priority" aria-describedby="priority-note">${priorityOptions(store.principal?.role==='admin')}</select></label><p id="priority-note" class="priority-note"></p></div>
         <label id="project-release-field">项目训练版本<select name="release"></select><code id="release-full" class="release-hash"></code><small>刷新保留已选版本；本次发布确认后选择新版本。</small></label>

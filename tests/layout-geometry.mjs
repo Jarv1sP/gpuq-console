@@ -218,6 +218,96 @@ export async function inspectGeometry(page, specification = {}) {
           add('row-control-height', nodes, {parent: describe(parent), heights});
       }
     }
+    // These checks are opt-in. Existing specifications keep their original
+    // measurements and results until they describe these relationships.
+    for (const group of spec.sameRowControls || []) {
+      for (const parent of select(group.parent)) {
+        const controls = select(group.children || 'input,select,button', parent);
+        // A long caption can move its control by more than a control's own
+        // height. Group the field wrappers, not the displaced control boxes.
+        const fields = new Map(controls.map(node => {
+          let field = node;
+          while (field.parentElement && field.parentElement !== parent) field = field.parentElement;
+          return [node, field];
+        }));
+        for (const row of lines([...new Set(fields.values())], group.wrap !== false)) {
+          const nodes = controls.filter(node => row.includes(fields.get(node)));
+          if (nodes.length < 2) continue;
+          counts.alignments++;
+          const values = nodes.map(node => rect(node).top);
+          if (Math.max(...values) - Math.min(...values) > tolerance)
+            add('same-row-controls', nodes, {parent: describe(parent), values, maximum: tolerance});
+        }
+      }
+    }
+    const textFragments = node => {
+      const boxes = [], walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+      let text;
+      while ((text = walker.nextNode())) {
+        if (!text.textContent.trim() || !rendered(text.parentElement)) continue;
+        const range = document.createRange(); range.selectNodeContents(text);
+        for (const box of range.getClientRects()) if (box.width && box.height)
+          boxes.push({left: box.left, right: box.right, top: box.top, bottom: box.bottom});
+      }
+      return boxes;
+    };
+    for (const selector of spec.unbrokenValues || []) {
+      for (const node of select(selector)) {
+        // Units may use a smaller font on the same baseline. Intersecting
+        // font boxes distinguish that from a number or unit on another line.
+        const rows = [];
+        for (const box of textFragments(node)) {
+          const row = rows.find(other => Math.min(box.bottom, other.bottom) - Math.max(box.top, other.top) > tolerance);
+          if (row) {row.top = Math.max(row.top, box.top); row.bottom = Math.min(row.bottom, box.bottom);}
+          else rows.push({top: box.top, bottom: box.bottom});
+        }
+        if (rows.length > 1) add('value-word-wrap', [node], {lines: rows, text: node.textContent});
+      }
+    }
+    for (const group of spec.tokenGap || []) {
+      for (const parent of select(group.parent)) {
+        const left = select(group.left, parent)[0], right = select(group.right, parent)[0];
+        if (!left || !right) continue;
+        const a = textFragments(left), b = textFragments(right);
+        if (!a.length || !b.length) continue;
+        const gap = Math.min(...b.map(box => box.left)) - Math.max(...a.map(box => box.right));
+        const minimum = group.minimum ?? 6;
+        if (gap < minimum - .01) add('token-gap', [left, right], {parent: describe(parent), gap, minimum});
+      }
+    }
+    for (const group of spec.siblingGap || []) {
+      const combined = [];
+      for (const parent of select(group.parent)) {
+        const nodes = select(group.children || ':scope > *', parent);
+        const bounds = node => {
+          const fragments = group.textBounds && node.matches(group.textBounds) ? textFragments(node) : [];
+          return fragments.length ? {top: Math.min(...fragments.map(box => box.top)),
+            bottom: Math.max(...fragments.map(box => box.bottom))} : rect(node);
+        };
+        const rows = (group.wrap === false ? nodes.map(node => [node]) : lines(nodes, true)).map(row => ({nodes: row,
+          top: Math.min(...row.map(node => bounds(node).top)),
+          bottom: Math.max(...row.map(node => bounds(node).bottom))})).sort((a, b) => a.top - b.top);
+        const gaps = rows.slice(1).map((row, index) => ({nodes: [...rows[index].nodes, ...row.nodes],
+          gap: row.top - rows[index].bottom}));
+        const check = values => {
+          if (values.length < 2) return;
+          counts.alignments++;
+          const sizes = values.map(value => value.gap);
+          if (Math.max(...sizes) - Math.min(...sizes) > tolerance)
+            add('sibling-gap', [...new Set(values.flatMap(value => value.nodes))],
+              {parent: group.parent, values: sizes, maximum: tolerance});
+        };
+        if (group.together) combined.push(...gaps);
+        else check(gaps);
+      }
+      if (group.together && combined.length > 1) {
+        counts.alignments++;
+        const values = combined.map(value => value.gap);
+        if (Math.max(...values) - Math.min(...values) > tolerance)
+          add('sibling-gap', [...new Set(combined.flatMap(value => value.nodes))],
+            {parent: group.parent, values, maximum: tolerance});
+      }
+    }
     for (const selector of spec.repeatedPadding || []) {
       const nodes = select(selector);
       if (nodes.length < 2) continue;
