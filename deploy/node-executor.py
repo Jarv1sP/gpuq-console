@@ -171,7 +171,7 @@ def dataset_cache():
     cache=DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=config.get('reserveBytes',10*1024**3),mount_point=config.get('mountPoint','/data2'))
     # Lazy to avoid the storage-node constructor calling dataset_cache again.
     # Only configured, sealed authorities can prove a cache is replaceable.
-    cache.rebuild_guard=lambda actor,dataset,version:storage_node().tier.rebuild_guard(actor,dataset,version)
+    cache.rebuild_guard=dataset_rebuild_guard
     if 'storageQuota' in CONFIG:
         def quota_guard(actor,dataset,path):
             spec=importlib.util.spec_from_file_location('gpuq_dataset_quota',HERE/'storage-quota.py')
@@ -182,6 +182,12 @@ def dataset_cache():
             if owner is not None:return storage_quota(owner,path)
         cache.quota_guard=quota_guard
     return DATASET_MODULE,cache
+
+
+def dataset_rebuild_guard(actor,dataset,version):
+    spec=importlib.util.spec_from_file_location('gpuq_dataset_rebuild_proof',HERE/'dataset-rebuild-proof.py')
+    helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+    return helper.configured_guard(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),actor,dataset,version)
 
 def dataset_uploads():
     global DATASET_UPLOADS
@@ -319,6 +325,8 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         # transfer without learning its initiating identity or host source.
         for item in listing['datasets']:
             for version in item['versions']:
+                if dataset_delete_capability()==1:
+                    version['deletionPermissions']=cache.deletion_permissions(actor,item['dataset'],version['version'])
                 if version['state']=='READY':continue
                 if dataset_recovery_configured(cache,actor,item['dataset'],version['version']):
                     version.update(canPrepare=True,recoveryConfigured=True)
@@ -996,6 +1004,7 @@ def storage_node():
                 raise ValueError('Storage authority needs a fixed, different, pinned LAN peer')
             authorities[key]=storage_authority_module().RemoteAuthority(value['machine'],CONFIG['transferPeers'][value['machine']],ROOT/'storage-grants'/key,target_machine=CONFIG['machine'])
         STORAGE_NODE=module.StorageNode.from_executor(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),authorities=authorities)
+        STORAGE_NODE.cache.rebuild_guard=dataset_rebuild_guard
     return STORAGE_NODE
 
 
@@ -1025,7 +1034,7 @@ def dataset_delete_capability():
     retention=config.get('retireRetentionDays',7) if isinstance(config,dict) else None
     if type(retention) is not int or not 7<=retention<=365 or not DATASET_ID.fullmatch(CONFIG.get('machine','')):return 0
     return 1 if all((HERE/name).is_file() and not (HERE/name).is_symlink() for name in
-        ('dataset-retirement.py','dataset-retirement-node.py','dataset-cache.py','dataset-tier.py','storage-authority.py')) else 0
+        ('dataset-retirement.py','dataset-retirement-node.py','dataset-rebuild-proof.py','dataset-cache.py','dataset-tier.py','storage-authority.py')) else 0
 
 
 def dataset_retirement_node():
@@ -1239,7 +1248,13 @@ def storage_collect():
         return {'enabled':False,'state':'DISABLED','evicted':[]}
     module,_=dataset_cache()
     try:
-        return storage.tier.collect(module.Principal('builtin-admin',True),dry_run=False,max_versions=16)
+        actor=module.Principal('builtin-admin',True)
+        result=storage.tier.collect(actor,dry_run=False,max_versions=16)
+        # Reuse the existing explicitly enabled local collection entry only.
+        # No timer is installed/enabled and this remains absent from RPC routes.
+        if dataset_delete_capability()==1:
+            result={**result,'retirements':dataset_retirement_node().retirement.collect_expired(actor,enabled=True,max_versions=16)}
+        return result
     except module.CacheBusy:
         # Foreground uploads/leases win. The existing timer retries after its
         # normal interval; do not spin or weaken the metadata lock. Contention

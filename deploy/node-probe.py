@@ -104,7 +104,7 @@ def probe_dataset_delete():
             and isinstance(node.value,ast.Constant) and node.value.value=='dataset-delete-v1'
             for node in dispatcher.body)
         if not marker:return 0
-        for name in ('dataset-retirement.py','dataset-retirement-node.py','dataset-cache.py','dataset-tier.py','storage-authority.py'):
+        for name in ('dataset-retirement.py','dataset-retirement-node.py','dataset-rebuild-proof.py','dataset-cache.py','dataset-tier.py','storage-authority.py'):
             ast.parse(helper_source(HERE/name,os.getuid()))
         return 1
     except (ValueError,OSError,UnicodeError,SyntaxError):return 0

@@ -170,7 +170,7 @@ class RetirementNode:
             if re.fullmatch(r'unregister-[a-f0-9]{32}',name):
                 removal=R.private_read(folder/'REMOVAL.json')
                 if removal.get('dataset')==dataset and version in removal.get('versions',[]):
-                    for bucket in ('ready','.staging'):
+                    for bucket in ('ready','staging'):
                         if R.exists(folder/'replicas'/bucket/version):
                             raise ValueError('Interrupted ordinary deletion still holds unconfirmed data')
             elif re.fullmatch(r'retire-[a-f0-9]{32}',name):
@@ -395,16 +395,46 @@ class RetirementNode:
             D._identifier(ref['receiptSha256'],D.HASH_RE)
         expected={ref['grantId']:ref for ref in references}
         if len(expected)!=len(references):raise ValueError('Ambiguous dependent grants')
+        # A grant can survive in interrupted ordinary-removal or isolated
+        # metadata even after its registry disappears. Such a dependent is not
+        # an empty node and cannot be silently omitted from source revocation.
+        with D._directory(self.cache.root/'.trash') as fd:
+            trash=sorted(os.listdir(fd))
+        if len(trash)>10000:raise ValueError('Dependent trash inventory requires reconciliation')
+        for name in trash:
+            folder=self.cache.root/'.trash'/name
+            if re.fullmatch(r'unregister-[a-f0-9]{32}',name):
+                removed=R.private_read(folder/'REMOVAL.json')
+                if version in removed.get('versions',[]):
+                    D._identifier(removed['dataset'])
+                    if any(R.exists(folder/'replicas'/bucket/version) for bucket in ('ready','staging')):
+                        raise ValueError('Unconfirmed dependent payload remains in ordinary removal')
+                    tier=self.cache.root/'.tiers'/removed['dataset']/(version+'.json')
+                    if R.exists(tier):
+                        saved=R.private_read(tier)
+                        if saved.get('recovery') is not None:
+                            raise ValueError('Dependent removal needs its fixed authority alias reconciled')
+            elif re.fullmatch(r'retire-[a-f0-9]{32}',name):
+                isolated=R.private_read(folder/'RETIREMENT.json')
+                if (isolated.get('version')==version and isolated.get('state') not in {'RESTORED','PURGED'}
+                        and isolated.get('snapshot',{}).get('authorityReferences')):
+                    raise ValueError('Another isolated dependency needs its original receipt reconciled')
         locations=[]
         with D._directory(self.cache.root/'.registry') as fd:
             names=sorted(os.listdir(fd))
+        with D._directory(self.cache.root/'.tiers') as fd:
+            names=sorted(set(names)|set(os.listdir(fd)))
         if len(names)>10000:
             raise ValueError('Dataset dependency inventory requires reconciliation')
         internal=self.principal
         for dataset in names:
             D._identifier(dataset)
             path=self.cache._paths(dataset)['.registry']/(version+'.json')
-            if not R.exists(path):continue
+            if not R.exists(path):
+                with self.cache._locked():tier=self.cache._tier(dataset,version)
+                if tier['role']=='cache' or tier['recovery'] is not None:
+                    raise ValueError('Dependent authority has an orphaned registration; reconcile its fixed removal receipt')
+                continue
             with self.cache._locked():
                 tier=self.cache._tier(dataset,version)
             if tier['role']!='cache':continue

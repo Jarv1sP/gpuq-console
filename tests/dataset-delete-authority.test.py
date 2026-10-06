@@ -159,6 +159,14 @@ class RetirementAuthorityTests(unittest.TestCase):
         self.assertEqual(set(self.cache._tier('source-data', self.version)['pins']), set(self.snapshot['authority']['pins']))
         self.assertTrue(all(not self.revoked(t['grant']).exists() for t in self.targets))
 
+    def test_external_consumption_lock_blocks_data_revocation_without_changing_its_fence(self):
+        self.fence();receipts=self.target_receipts()
+        with self.store.reference_lock('source-data',self.version):
+            with self.assertRaisesRegex(ValueError,'busy'):self.isolate(receipts)
+        self.assertTrue(self.original().exists())
+        self.assertFalse(any(self.revoked(t['grant']).exists() for t in self.targets))
+        self.assertTrue(self.isolate(receipts)['isolated'])
+
     def test_file_absence_or_archive_intent_retired_never_proves_data_isolation(self):
         self.fence()
         for receipt in ([], [dict(state='RETIRED', sourceRetired=True, neverDispatched=True)]):
@@ -352,6 +360,31 @@ class RetirementAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'binding changed'):
             target['retirement'].inspect(OWNER, 'replica-data', self.version)
 
+
+    def test_ordinary_removed_dependency_with_live_cached_grant_is_not_an_empty_node(self):
+        target=self.targets[0]
+        references=target['snapshot']['authorityReferences']
+        node_helpers=load('deleted_dependency_projection','dataset-retirement-node.py')
+        node=node_helpers.RetirementNode(target['retirement'],self.base/'dependent-plan',tier=target['tier'],principal=ADMIN)
+        target['cache'].unregister(ADMIN,'replica-data',self.version)
+        with self.assertRaisesRegex(ValueError,'fixed authority|orphaned'):
+            node.grant_locations(self.version,references)
+        self.assertTrue(self.original().exists())
+        self.assertTrue(self.cache._tier('source-data',self.version)['pins'])
+
+    def test_all_distinct_physical_aliases_of_one_grant_need_real_isolation(self):
+        target=self.targets[0];cache,tier=target['cache'],target['tier']
+        with cache._locked():
+            cache._register(D.Principal('owner',True),'other-alias',D._scan(self.input),['owner'],None,
+                _origin='replica',_receipt=target['grant']['id'])
+        cache.materialize(ADMIN,'other-alias',self.version,_source=self.input)
+        tier.verify_authority(ADMIN,'other-alias',self.version,'configured-original','source-data')
+        snapshot=target['retirement'].inspect(OWNER,'other-alias',self.version)
+        self.fence();receipts=self.target_receipts()
+        alias=target['retirement'].isolate(OWNER,'other-alias',self.version,str(uuid.uuid4()),snapshot)
+        self.assertTrue(self.isolate([*receipts,alias])['isolated'])
+        self.assertTrue(self.revoked(target['grant']).exists())
+        self.assertEqual((target['retirement']._folder(alias['operationId'])/'payload/ready/data/fixed.txt').read_bytes(),b'original complete bytes')
 
 if __name__ == '__main__':
     unittest.main()

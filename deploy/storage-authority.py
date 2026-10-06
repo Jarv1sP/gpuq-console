@@ -22,6 +22,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 from pathlib import Path
 import secrets
 import sqlite3
@@ -176,6 +177,7 @@ class AuthorityStore:
         return row
 
     def _assert_live(self, grant):
+        self.assert_live(grant['dataset'],grant['version'])
         if self._revocation(grant) is not None:
             raise PermissionError('Authority grant was permanently revoked by version-data retirement')
 
@@ -187,6 +189,7 @@ class AuthorityStore:
         absence, archive RETIRED event or cached public receipt proves removal.
         """
         self.cache._actor(actor)
+        self.assert_live(dataset,version)
         record, registration = self.cache._record_snapshot(actor,dataset,version)
         with self.cache._locked():
             self.cache._check_snapshot(actor,dataset,version,registration)
@@ -200,6 +203,28 @@ class AuthorityStore:
         if len(names)>10000:raise ValueError('Authority dependency inventory requires reconciliation')
         grants=[]
         for key in names:
+            # External replacement retirement owns these permanent reference
+            # fences and its consumption locks. They are not grant folders.
+            if re.fullmatch(r'\.reference-[a-f0-9]{64}\.lock',key):
+                with D._directory(self.root) as parent:
+                    child=os.open(key,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+                    try:
+                        info=D._regular(child)
+                        if info.st_uid!=os.getuid() or info.st_mode & 0o077 or info.st_nlink!=1 or info.st_size!=0:
+                            raise ValueError('Unsafe permanent authority reference lock')
+                    finally:os.close(child)
+                continue
+            if re.fullmatch(r'\.retired-[a-f0-9]{64}\.json',key):
+                fence=_load(self.root/key)
+                if (not isinstance(fence,dict) or set(fence)!={'binding','opId','grantId','replacementGrantId','targetProofSha256'}):
+                    raise ValueError('Unknown external authority retirement fence')
+                J.identifier(fence['opId']);J.identifier(fence['grantId']);J.identifier(fence['replacementGrantId'])
+                D._identifier(fence['binding'],D.HASH_RE);D._identifier(fence['targetProofSha256'],D.HASH_RE)
+                original=_load(self.root/fence['grantId']/'grant.json')
+                original=_validate_grant(original,self.machine,original.get('targetMachine'))
+                if self.reference_fence(original['dataset'],original['version']).name!=key:
+                    raise ValueError('External authority fence belongs to another reference')
+                continue
             J.identifier(key)
             grant=_load(self.root/key/'grant.json')
             grant=_validate_grant(grant,self.machine,grant.get('targetMachine'))
@@ -225,6 +250,13 @@ class AuthorityStore:
                     dataset=dataset,version=version,registration=list(registration),pins=pins,grants=grants)
 
     def revoke_for_retirement(self, actor, row, targets):
+        # Serialize our new data-deletion revocation with the unchanged
+        # external replacement-retirement consumer and its reference fence.
+        with self.reference_lock(row['dataset'],row['version']):
+            self.assert_live(row['dataset'],row['version'])
+            return self._revoke_for_retirement_locked(actor,row,targets)
+
+    def _revoke_for_retirement_locked(self, actor, row, targets):
         """Private exact-operation revocation after all fixed targets isolate.
 
         targets are authenticated control-plane receipts, never public request
@@ -243,7 +275,7 @@ class AuthorityStore:
         if not isinstance(targets,list) or len(targets)>10000:raise ValueError('Invalid confirmed target inventory')
         fields={'protocol','operationId','machine','dataset','version','state','isolated','complete',
                 'snapshotSha256','generation','fenceState','retainUntil','proofSha256','authorityReferences'}
-        confirmed={}
+        confirmed={};scopes=set()
         for target in targets:
             if (not isinstance(target,dict) or set(target)!=fields or target['protocol']!='dataset-version-retirement-v1'
                     or target['state']!='ISOLATED' or target['isolated'] is not True or target['fenceState']!='ISOLATED'
@@ -260,14 +292,16 @@ class AuthorityStore:
                         or ref['version']!=row['version']):continue
                 if ref['targetMachine']!=target['machine']:raise ValueError('Dependent target identity differs')
                 J.identifier(ref['grantId']);D._identifier(ref['receiptSha256'],D.HASH_RE)
-                if ref['grantId'] in confirmed:raise ValueError('Ambiguous dependent grant mapping')
-                confirmed[ref['grantId']]=(target,ref)
+                scope=(ref['grantId'],target['machine'],target['dataset'])
+                if scope in scopes:raise ValueError('Ambiguous dependent grant mapping')
+                scopes.add(scope)
+                confirmed.setdefault(ref['grantId'],[]).append((target,ref))
         if set(confirmed)!=set(grant['id'] for grant in expected['grants']):
             raise ValueError('Every authority dependent needs a matching isolated generation')
         for planned in expected['grants']:
-            target,ref=confirmed[planned['id']]
-            if target['machine']!=planned['targetMachine'] or ref['receiptSha256']!=planned['receiptSha256']:
-                raise ValueError('Authority dependent receipt does not match its issued grant')
+            for target,ref in confirmed[planned['id']]:
+                if target['machine']!=planned['targetMachine'] or ref['receiptSha256']!=planned['receiptSha256']:
+                    raise ValueError('Authority dependent receipt does not match its issued grant')
         # On recovery, already-revoked grants remain in the fixed plan. Compare
         # every private row and seal, then write only missing tombstones.
         known=[]

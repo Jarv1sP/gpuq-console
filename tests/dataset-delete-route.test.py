@@ -16,7 +16,7 @@ F=importlib.util.module_from_spec(spec);spec.loader.exec_module(F)
 class RetirementRoutes(unittest.TestCase):
     def setUp(self):
         F.NodeDatasets.setUp(self)
-        for name in ('dataset-retirement.py','dataset-retirement-node.py','dataset-tier.py','storage-node.py','storage-authority.py'):
+        for name in ('dataset-retirement.py','dataset-retirement-node.py','dataset-rebuild-proof.py','dataset-tier.py','storage-node.py','storage-authority.py'):
             shutil.copy2(ROOT/'deploy'/name,self.base/name)
         self.node.CONFIG['machine']='node-a'
         self.ready()

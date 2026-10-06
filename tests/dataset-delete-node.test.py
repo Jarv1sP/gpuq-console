@@ -192,5 +192,14 @@ class RetirementNodeTests(unittest.TestCase):
         self.assertTrue((self.cache._paths('sample',self.version)['ready']/'data/fixed.txt').exists())
 
 
+    def test_interrupted_ordinary_ready_or_staging_payload_cannot_disappear_from_grant_inventory(self):
+        for bucket in ('ready','staging'):
+            root=self.empty.cache.root/'.trash'/('unregister-'+uuid.uuid4().hex)
+            D._mkdir(root);D._write_json(root/'REMOVAL.json',{'dataset':'sample','versions':[self.version]})
+            D._mkdir(root/'replicas');D._mkdir(root/'replicas'/bucket);D._mkdir(root/'replicas'/bucket/self.version)
+            with self.assertRaisesRegex(ValueError,'payload'):self.empty.grant_locations(self.version,[])
+            with self.assertRaisesRegex(ValueError,'unconfirmed'):self.empty_plan()
+            (root/'replicas'/bucket/self.version).rmdir()
+
 if __name__=='__main__':
     unittest.main()

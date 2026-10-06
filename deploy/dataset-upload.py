@@ -202,8 +202,24 @@ class DatasetUploads:
         expected = 'u-'+hashlib.sha256(session['userId'].encode()).hexdigest()[:16]+'-'+session['name']
         if dataset != expected:
             raise ValueError('Personal upload namespace changed')
+        # Quarantined bytes still occupy disk and remain recoverable. A rename
+        # out of the registry is never permission to refund their reservation.
+        fence = self.cache._retirement_fence(dataset, version)
+        if fence is not None and fence['state'] not in {'RESTORED','RELEASED','PURGED'}:
+            return session
+        if fence is not None and fence['state'] == 'PURGED':
+            spec=importlib.util.spec_from_file_location('upload_retention_proof',Path(__file__).with_name('dataset-retirement.py'))
+            retention=importlib.util.module_from_spec(spec);spec.loader.exec_module(retention)
+            journal=retention.private_read(self.cache.root/'.trash'/('retire-'+fence['operationId'].replace('-',''))/'RETIREMENT.json')
+            if (journal.get('state')!='PURGED' or journal.get('dataset')!=dataset or journal.get('version')!=version
+                    or journal.get('snapshot',{}).get('registration')!=session['registrationIdentity']
+                    or journal.get('operationId')!=fence['operationId']
+                    or retention.sha(journal.get('snapshot'))!=fence['snapshotSha256']
+                    or journal.get('snapshot',{}).get('rootIdentity')!=list(self.cache._root_identity)
+                    or journal.get('actor')!=session['userId'] and journal.get('admin') is not True):
+                raise ValueError('Purged upload generation is unconfirmed; reservation retained')
         try:
-            self.cache._record_identity(dataset, version)
+            self.cache._record_identity(dataset, version, _read_only=fence is not None and fence['state']=='PURGED')
             return session
         except FileNotFoundError:
             pass

@@ -58,7 +58,7 @@ class Probe(unittest.TestCase):
         self.assertEqual(self.probe.probe_dataset_delete(),0)
         root=self.probe.HERE
         (root/'node-executor.py').write_text("DATASET_DELETE_CAPABILITY='dataset-delete-v1'\n")
-        helpers=('dataset-retirement.py','dataset-retirement-node.py','dataset-cache.py','dataset-tier.py','storage-authority.py')
+        helpers=('dataset-retirement.py','dataset-retirement-node.py','dataset-rebuild-proof.py','dataset-cache.py','dataset-tier.py','storage-authority.py')
         for name in helpers:(root/name).write_text('value=1\n')
         with patch.object(self.probe,'command',side_effect=AssertionError('No subprocess or deletion')):
             self.assertEqual(self.probe.probe_dataset_delete(),1)
