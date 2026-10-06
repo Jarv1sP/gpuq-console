@@ -138,6 +138,34 @@ class ExplicitRegistration(unittest.TestCase):
         for node in (self.node,self.empty):
             self.assertTrue(node.plan(F.ADMIN,'sample',self.version,str(uuid.uuid4()))['complete'])
 
+    def test_NB2_source_recovery_confirms_an_explicitly_reuploaded_peer_without_overwriting_it(self):
+        cache=self.empty.cache;cache.sources['approved']=self.cache.sources['approved']
+        cache.register_source(F.ADMIN,'sample','approved',['owner']);cache.materialize(F.OWNER,'sample',self.version)
+        self.empty.plan(F.ADMIN,'sample',self.version,self.empty_key)
+        child=self.empty.isolate(F.ADMIN,self.empty_key,[])
+        source=self.node.isolate(F.OWNER,self.key,[child])
+        for node,key in ((self.node,self.key),(self.empty,self.empty_key)):
+            committed=node.commit(F.ADMIN,key,source)
+            F.D._write_json(node._phase_path(key,'commit','result'),dict(ok=True,result=committed))
+        self.empty.retirement.clock=lambda:source['retainUntil']+10
+        self.empty.retirement.clock_synchronized=lambda:True
+        self.empty.retirement.purge(F.ADMIN,self.empty_key)
+        restored=self.node.restore(F.ADMIN,self.key)
+        cache.register_source(F.ADMIN,'sample','approved',['owner'])
+        with self.subTest('incomplete new registration is still refused'):
+            with self.assertRaisesRegex(ValueError,'not yet complete'):
+                self.empty.release_absence(F.ADMIN,self.empty_key,restored)
+        cache.materialize(F.OWNER,'sample',self.version)
+        registered=cache._record_identity('sample',self.version)
+        result=self.empty.release_absence(F.ADMIN,self.empty_key,restored)
+        self.assertEqual(result['state'],'RESTORED')
+        self.assertTrue(result['complete'])
+        self.assertEqual(cache._record_identity('sample',self.version),registered)
+        self.assertEqual((cache._paths('sample',self.version)['ready']/'data/fixed.txt').read_bytes(),b'fixed full data')
+        self.assertEqual(self.empty.status(F.ADMIN,self.empty_key)['result'],result)
+        self.assertEqual(self.empty.release_absence(F.ADMIN,self.empty_key,restored),result)
+        self.assertTrue(self.empty.plan(F.ADMIN,'sample',self.version,str(uuid.uuid4()))['complete'])
+
 class ExplicitUpload(unittest.TestCase):
     setUp=U.PersonalUploads.setUp
     tearDown=U.PersonalUploads.tearDown

@@ -606,11 +606,22 @@ class RetirementNode:
 
     def _release_purged(self, actor, row, source_result):
         key=row['operationId'];snapshot=row['snapshot']
-        if row['state'] not in {'ISOLATED','PURGED','RELEASED'} or self.retirement._journal(key)['state']!='PURGED':
+        if row['state'] not in {'ISOLATED','PURGED','RELEASED','RESTORED'} or self.retirement._journal(key)['state']!='PURGED':
             raise ValueError('Only an actually purged payload may release its namespace')
         digest=self._source_restore_proof(row,source_result)
         if row['restoreSourceSha256'] is not None and row['restoreSourceSha256']!=digest:
             raise ValueError('Restored source receipt cannot change')
+        fence=self.cache._retirement_fence(row['dataset'],row['version'])
+        if fence is not None and fence['state']=='RESTORED':
+            # This peer was explicitly registered again. Confirm its actual
+            # new READY generation; never call it an empty released name or
+            # overwrite it with old retained data. Its source proof stays fixed.
+            result=self._newly_registered_restore(actor,row)
+            row['restoreSourceSha256']=digest
+            row['state'],row['result']='RESTORED',result;self._write(row)
+            return result
+        if row['state']=='RESTORED':
+            raise ValueError('New peer recovery lost its explicit registration generation')
         original=type(actor)(row['actor'],row['admin'])
         with self.cache._retirement_scope(original,key,row['dataset'],row['version'],row['snapshotSha256']),\
                 self.cache._lock_file('.locks/'+row['dataset']+'.'+row['version']+'.lock'),self.cache._locked():

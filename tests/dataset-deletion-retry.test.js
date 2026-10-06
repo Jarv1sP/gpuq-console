@@ -58,6 +58,35 @@ test('NB2 source restore restores every complete peer and releases every namespa
   for(const host of hosts)assert.equal((await f.service.bridge(host,'datasets.prepare',{dataset:'personal',version,userId:principal.userId,hostAdmin:false})).state,'READY');
 });
 
+test('NB2 an expired restore can retry its original phase only with exact current explicit new-registration proof',async t=>{
+  const f=fixture(t,{onlySource:false}),r=await f.start();
+  const row=JSON.parse(f.service.db.prepare('SELECT data FROM dataset_deletions').get().data),step=row.steps.find(s=>s.operationId===row.source);
+  const original=structuredClone(f.nodes.get(step.operationId).result);let expired=true;
+  f.after=(host,op,args,result)=>{
+    if(host===step.machine&&op.endsWith('.restore')&&expired){
+      const node=f.nodes.get(args.operationId);node.phases.restore={ok:false,error:'retention expired'};
+      node.result=structuredClone(original);node.state='ISOLATED';
+    }
+    if(op.endsWith('.status'))result.stoppedPhases=Object.keys(result.phases);
+  };
+  const args={operationId:r.first.operationId,machine:step.machine};
+  assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'FAILED');
+  const count=writes(f).length;
+  assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'FAILED');
+  assert.equal(writes(f).length,count,'expiry alone never retries or opens a fence');
+  f.registration={protocol:'dataset-new-registration-proof-v1',state:'REGISTERED',machine:step.machine,
+    dataset:step.dataset,version,operationId:step.operationId,snapshotSha256:step.plan.snapshotSha256,
+    generation:'f'.repeat(64),registrationSha256:'e'.repeat(64)};
+  assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'FAILED');
+  assert.equal(writes(f).length,count,'a different generation never permits retry');
+  f.registration.generation=step.fence.generation;expired=false;
+  assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'RESTORED');
+  const attempts=writes(f).filter(c=>c.host===step.machine&&c.op.endsWith('.restore'));
+  assert.equal(attempts.length,2);assert.equal(attempts[1].args.operationId,attempts[0].args.operationId);
+  assert.match(attempts[1].args.retryKey,/^[a-f0-9-]{36}$/);
+  assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_deletion_fences').all(),[]);
+});
+
 test('SF7 only exact explicit new-registration proof releases the old portal namespace; failures never do',async t=>{
   const f=fixture(t),r=await f.start(),row=JSON.parse(f.service.db.prepare('SELECT data FROM dataset_deletions').get().data);
   const step=row.steps.find(s=>s.machine===hosts[0]);

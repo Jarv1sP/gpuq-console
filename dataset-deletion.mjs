@@ -63,6 +63,16 @@ function parseReceipt(value,step,state='ISOLATED'){
     ||!same(value.authorityReferences,step.plan.authorityReferences)||!same(value.authorityAliases,step.plan.authorityAliases))fail('完整隔离回执或节点时间待确认。',502);
   return structuredClone(value);
 }
+function parseNewRegistration(value,step){
+  const keys=['protocol','machine','dataset','version','operationId','generation','snapshotSha256','registrationSha256','state'];
+  if(!value||Object.keys(value).sort().join(',')!==keys.toSorted().join(',')
+    ||value.protocol!=='dataset-new-registration-proof-v1'||value.state!=='REGISTERED'
+    ||value.machine!==step.machine||value.dataset!==step.dataset||value.version!==step.version
+    ||value.operationId!==step.operationId||value.snapshotSha256!==step.plan.snapshotSha256
+    ||value.generation!==(step.fence?.generation||step.result?.generation)||!HASH.test(value.registrationSha256))
+    fail('显式新登记的来源证明待确认。',502);
+  return structuredClone(value);
+}
 function externalRetirementAction(archive){
   if(archive.failureStage==='authority-retired')return '外部替代退役';
   // The external lifecycle retains the fixed admission metadata. This is
@@ -130,13 +140,8 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       if(step?.plan&&actor?.enabled&&(actor.role==='admin')===identity.hostAdmin&&actor.limits?.[host]>0){
         let proof;
         try{proof=await previousBridge(host,'storage.dataset-delete.registration',{dataset:ref.dataset,version:ref.version,userId:identity.userId,hostAdmin:identity.hostAdmin});}catch{/* No proof never opens a fence. */}
-        const keys=['protocol','machine','dataset','version','operationId','generation','snapshotSha256','registrationSha256','state'];
-        if(proof&&Object.keys(proof).sort().join(',')===keys.toSorted().join(',')
-          &&service.store.get(identity.userId)&&sha(service.store.get(identity.userId))===policy
-          &&proof.protocol==='dataset-new-registration-proof-v1'&&proof.state==='REGISTERED'
-          &&proof.machine===host&&proof.dataset===step.dataset&&proof.version===step.version
-          &&proof.operationId===step.operationId&&proof.snapshotSha256===step.plan.snapshotSha256
-          &&proof.generation===(step.fence?.generation||step.result?.generation)&&HASH.test(proof.registrationSha256)){
+        try{proof=parseNewRegistration(proof,step);}catch{proof=null;}
+        if(proof&&service.store.get(identity.userId)&&sha(service.store.get(identity.userId))===policy){
           if(service.closing)fail('服务正在关闭；结果未确认。',503);
           service.db.exec('BEGIN IMMEDIATE');
           try{
@@ -353,7 +358,16 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       const status=verifyStatus(await rpc(principal,check,step.machine,'status',{operationId:step.operationId}),step);
       const old=status.phases[phase];
       if(!old||old.ok===false){
-        if(phase==='restore'&&old?.ok===false&&/retention|expired|保留期/i.test(old.error))phaseResult(status,step,phase);
+        if(phase==='restore'&&old?.ok===false&&/retention|expired|保留期/i.test(old.error)){
+          // An expired old payload stays refused. Only a current explicit new
+          // registration permits retrying its fixed source-check phase; the
+          // node still requires complete READY bytes before returning RESTORED.
+          let reopened;
+          try{reopened=parseNewRegistration(await rpc(principal,check,step.machine,'registration',
+            {dataset:step.dataset,version:step.version}),step);}catch{check();}
+          if(!reopened)phaseResult(status,step,phase);
+          step.reopened=reopened;save(row);
+        }
         if(old&&(Object.keys(old).sort().join(',')!=='error,ok'||typeof old.error!=='string'))fail('旧阶段结果损坏；不会重投。',502);
         if(!Array.isArray(status.stoppedPhases)||!status.stoppedPhases.includes(phase)
           ||status.pendingPhases.length)fail('原节点工作进程尚未确认停止；不会重试。',409);
