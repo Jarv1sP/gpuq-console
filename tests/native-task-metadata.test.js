@@ -1,13 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {nativeJobRequest} from '../native-task-metadata.mjs';
+import {nativeJobRequest,nativeTaskPresentation} from '../native-task-metadata.mjs';
 import {schedulerResult} from '../execution.mjs';
 const job={id:'UUID',machine:'gpu-1',userId:'demo-user-8',username:'刘鹏亮',submitterName:'刘鹏亮',
   name:'fashion-hm-teachers0-20261003',description:'任务说明',spec:{id:'UUID',userId:'demo-user-8',username:'刘鹏亮',name:'fashion-hm-teachers0-20261003'}};
 function service(caps=['console-task-display-v1']){
   return {store:{users:[{id:job.userId,username:job.username,name:'后改姓名'}]},gpuq:{stale:false,hosts:[{id:'gpu-1',reachable:true,gpuq:{connected:true,capabilities:caps}}]}};
 }
+test('native-only presentation returns bounded labels, never submitter or unknown metadata fields',()=>{
+  const display={name:'机械臂｜中文训练',description:'只读展示\n不改变调度',submitter:{name:'张三',username:'alice'}};
+  const before=structuredClone(display);
+  assert.deepEqual(nativeTaskPresentation(display),{name:display.name,description:display.description});assert.deepEqual(display,before);
+  for(const broken of [null,[],{}, {...display,secret:'PRIVATE'},{...display,name:'x'.repeat(65)},
+    {...display,description:'\u009b2J'},{...display,submitter:{...display.submitter,username:null}},
+    {...display,submitter:{...display.submitter,username:''}},{...display,submitter:{...display.submitter,username:'x'.repeat(25)}},
+    {...display,submitter:{...display.submitter,username:'\ud800'}},{...display,submitter:{...display.submitter,username:'a\u202eb'}},
+    {...display,submitter:{...display.submitter,name:'x'.repeat(33)}},{...display,submitter:{...display.submitter,userId:'forged'}}])assert.equal(nativeTaskPresentation(broken),null);
+});
 test('new node envelope carries real names beside, NEVER inside, old immutable execution spec',()=>{
   const request=nativeJobRequest(service(),job);assert.equal(request.job,job.spec);
   assert.deepEqual(request.metadata,{name:job.name,description:'任务说明',submitter:{name:'刘鹏亮',username:'刘鹏亮'}});

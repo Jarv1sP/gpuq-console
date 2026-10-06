@@ -12,7 +12,7 @@ export async function directBrowserFixture(machines){
   const directory=await mkdtemp(join(tmpdir(),'browser-upload-tls-')),key=join(directory,'key.pem'),certificate=join(directory,'certificate.pem');
   execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',certificate,'-days','1','-subj','/CN=localhost'],{stdio:'ignore'});
   const tls={key:await readFile(key),cert:await readFile(certificate)},certificateSha256=hash(execFileSync('openssl',['x509','-in',certificate,'-outform','DER']));
-  const calls=[],raw=[],preflights=[],failures=[],uploads=new Map(),tickets=new Map();
+  const calls=[],raw=[],probes=[],preflights=[],failures=[],uploads=new Map(),tickets=new Map(),names=new Map();
   const config={mode:'success',holdChunk:false,holdPublish:false,deny:false,mismatch:false};
   let nodeOrigin,origin,releaseChunk,heldChunk=false,expired=false,dropped=false,ticketCount=0;
   const describe=upload=>({uploadId:upload.id,name:upload.name,state:upload.state,manifestOffset:upload.manifest.length,manifestBytes:upload.spec.manifestBytes,totalBytes:upload.spec.totalBytes,entries:upload.spec.entries,chunkBytes:CHUNK,
@@ -42,7 +42,9 @@ export async function directBrowserFixture(machines){
         preflights.push({method:req.headers['access-control-request-method'],headers:req.headers['access-control-request-headers']});
         res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');res.setHeader('Access-Control-Allow-Headers','Authorization, Content-Type');res.setHeader('Access-Control-Allow-Private-Network','true');res.writeHead(204);return res.end();
       }
-      const url=new URL(req.url,nodeOrigin),parts=url.pathname.split('/'),id=parts[3],action=parts[4],ticket=tickets.get(req.headers.authorization),upload=uploads.get(id);
+      const url=new URL(req.url,nodeOrigin);
+      if(url.pathname==='/capabilities'){assert.equal(req.method,'GET');assert.equal(req.headers.authorization,undefined);probes.push({method:req.method,cookie:false});return reply(res,200,{protocol:'dataset-upload-v1',machine:machines[0].id,revision:'a'.repeat(64),listenerReady:config.mode!=='unavailable'});}
+      const parts=url.pathname.split('/'),id=parts[3],action=parts[4],ticket=tickets.get(req.headers.authorization),upload=uploads.get(id);
       raw.push({uploadId:id,action,path:url.searchParams.get('path'),offset:url.searchParams.has('offset')?Number(url.searchParams.get('offset')):null,method:req.method,cookie:false});
       if(!ticket||ticket.uploadId!==id||!upload||ticket.owner!==upload.owner)return reply(res,401,{ok:false});
       if(config.mode==='expire'&&action==='chunk'&&!expired){expired=true;tickets.delete(req.headers.authorization);return reply(res,401,{ok:false});}
@@ -66,9 +68,13 @@ export async function directBrowserFixture(machines){
         calls.push({operation,args:structuredClone(args),owner});
         assert.equal('userId' in args||'hostAdmin' in args||'owners' in args,false);
         if(config.deny)return reply(res,403,{error:'这台服务器未授权'});
-        assert.equal(args.machine,machines[0].id);
+        if(operation==='cloud.info')return reply(res,200,{result:{capabilityVerified:false,configurationEnabled:true}});
         if(operation==='datasets.capacity')return reply(res,200,{result:{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3}});
         if(operation==='datasets.catalog')return reply(res,200,{result:{checkedAt:Date.now()/1000,machine:args.machine,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[...uploads.values()].filter(upload=>upload.owner===owner&&upload.state==='READY').map(upload=>({dataset:upload.dataset,name:upload.name,versions:[{version:upload.version,state:'READY',bytes:upload.spec.totalBytes,files:upload.parsed.files.length,canUse:true,canPrepare:false,ownerLabel:'所属用户：本地验收',locations:[{machine:upload.spec.machine,dataset:upload.dataset,state:'READY',canUse:true,canPrepare:false}]}]}))}});
+        assert.equal(args.machine,machines[0].id);
+        if(operation==='datasets.upload.routes')return reply(res,200,{result:{available:true,protocol:'dataset-upload-v1',machine:args.machine,revision:'a'.repeat(64),certificateSha256,routes:[{id:'primary',kind:'campus-direct',endpoint:nodeOrigin}]}});
+        if(operation==='datasets.label.get'){const label=names.get(owner+':'+args.dataset)||{displayName:null,revision:0};return reply(res,200,{result:{dataset:args.dataset,...label,name:label.displayName??args.dataset,scope:'personal',ownerId:owner}});}
+        if(operation==='datasets.label.set'){const old=names.get(owner+':'+args.dataset)||{revision:0};assert.equal(args.revision,old.revision);const label={displayName:args.displayName,revision:old.revision+1};names.set(owner+':'+args.dataset,label);return reply(res,200,{result:{dataset:args.dataset,...label,name:label.displayName,scope:'personal',ownerId:owner}});}
         const action=operation.split('.').at(-1);let upload;
         if(action==='begin'){
           upload=uploads.get(args.key);if(upload&&upload.owner!==owner)return reply(res,403,{error:'不能读取其他账号的上传'});
@@ -99,7 +105,7 @@ export async function directBrowserFixture(machines){
       }
       if(url.pathname==='/favicon.ico'){res.writeHead(204);return res.end();}
       if(url.pathname==='/'){
-        res.writeHead(200,{'Content-Type':'text/html'});return res.end(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>STARGATE · 数据集</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/starbase.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/datasets.css"></head><body class="sb" data-room="datasets"><header class="app-header"><span class="wordmark" aria-label="STARGATE"></span><span>STARGATE</span></header><main><div class="page-heading"><h1>数据集</h1></div><section id="page-datasets"></section><button data-nav="work" hidden>工作台</button></main></body></html>`);
+        res.writeHead(200,{'Content-Type':'text/html'});return res.end(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>STARGATE · 数据集</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/fonts.css"><link rel="stylesheet" href="/copy-help.css"><link rel="stylesheet" href="/dataset-flow.css"><link rel="stylesheet" href="/dataset-warehouse.css"><link rel="stylesheet" href="/starbase.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/datasets.css"></head><body class="sb" data-room="datasets"><header class="app-header"><span class="wordmark" aria-label="STARGATE"></span><span>STARGATE</span></header><main><div class="page-heading"><h1 id="page-title">数据集</h1><div class="heading-actions"></div></div><section id="page-datasets"></section><button data-nav="work" hidden>工作台</button></main></body></html>`);
       }
       const path=resolve(root,'.'+url.pathname);assert.ok(path.startsWith(root+sep));
       const content=await readFile(path);res.writeHead(200,{'Content-Type':path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':path.endsWith('.woff2')?'font/woff2':path.endsWith('.svg')?'image/svg+xml':'application/octet-stream'});res.end(content);
@@ -108,6 +114,6 @@ export async function directBrowserFixture(machines){
   for(const server of [node,portal])server.on('tlsClientError',()=>{});
   await new Promise(resolve=>node.listen(0,'127.0.0.1',resolve));nodeOrigin='https://127.0.0.1:'+node.address().port;
   await new Promise(resolve=>portal.listen(0,'127.0.0.1',resolve));origin='https://127.0.0.1:'+portal.address().port;
-  return {origin,nodeOrigin,calls,raw,preflights,failures,uploads,config,get tickets(){return ticketCount;},get held(){return typeof releaseChunk==='function';},release(){releaseChunk?.();releaseChunk=null;},
+  return {origin,nodeOrigin,calls,raw,probes,preflights,failures,uploads,config,get tickets(){return ticketCount;},get held(){return typeof releaseChunk==='function';},release(){releaseChunk?.();releaseChunk=null;},
     async close(){releaseChunk?.();for(const server of [portal,node]){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(directory,{recursive:true,force:true});}};
 }

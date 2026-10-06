@@ -62,6 +62,33 @@ test('exact native labels are displayed while raw names, task identity and membe
   assert.equal(taskCatalog(h,{jobs:[a,{...a,id:'ambiguous'}],users:[owner]},false).tasks[0].submitter,null);
   assert.equal(nativeTaskDisplay({...display,secret:'private'},'alice'),null);
 });
+test('native-only fenced labels inform administrator presentation without changing ownership or member privacy',()=>{
+  const h=host(),before=structuredClone(h),display={name:'机械臂｜示教训练续训',description:'保留原任务与结果\n第二阶段',submitter:{name:'张三',username:'alice'}};
+  h.gpuq.jobs[0].display_metadata=display;const raw=structuredClone(h);
+  const admin=taskCatalog(h,{jobs:[],users:[owner]},true).tasks[0];
+  assert.equal(admin.name,display.name);assert.equal(admin.description,display.description);assert.equal(admin.source,'native');
+  assert.deepEqual(admin.submitter,{name:'internal-user',username:'internal-user'});
+  assert.equal(admin.id,'Jsame');assert.equal(admin.nodeJobId,'Jsame');assert.equal(admin.state,'RUNNING');assert.deepEqual(h,raw);
+  const member=taskCatalog(h,{jobs:[],users:[owner]},false).tasks[0];
+  assert.equal(member.name,'GPUQ 任务（未关联平台）');assert.equal(member.description,'');assert.equal(member.submitter,null);
+  const visible=visibleGPUQStatus({stale:false,hosts:[h]},{role:'member'},{'gpu-1':1},{jobs:[],users:[owner]});
+  for(const hidden of [display.name,display.description,'alice','internal-user','display_metadata'])assert.ok(!JSON.stringify(visible).includes(hidden),hidden);
+  assert.deepEqual(h.gpuq.jobs[0].assigned_gpu_indices,before.gpuq.jobs[0].assigned_gpu_indices);
+});
+test('ambiguous or unconfirmed native presentation never adopts labels or manufactures identity',()=>{
+  const display={name:'仅展示',description:'不改变执行',submitter:{name:'张三',username:'alice'}};
+  for(const setup of [h=>h.reachable=false,h=>h.gpuq.connected=false,h=>h.gpuq.jobs.push(structuredClone(h.gpuq.jobs[0]))]){
+    const h=host();h.gpuq.jobs[0].display_metadata=display;setup(h);
+    const result=taskCatalog(h,{jobs:[],users:[owner]},true).tasks[0];assert.equal(result.name,'portal-wrapper');assert.equal(result.description,'');
+  }
+  const h=host();h.gpuq.jobs[0].display_metadata=display;
+  const a=job(),result=taskCatalog(h,{jobs:[a,{...a,id:'ambiguous'}],users:[owner]},true).tasks[0];
+  assert.equal(result.source,'native');assert.equal(result.name,'portal-wrapper');assert.equal(result.description,'');
+  h.gpuq.jobs[0].state='UNKNOWN';const unknown=taskCatalog(h,{jobs:[],users:[owner]},true).tasks[0];
+  assert.equal(unknown.state,'UNKNOWN');assert.equal(unknown.source,'native');assert.equal(unknown.id,'Jsame');
+  delete h.gpuq.jobs[0].display_metadata;const legacy=taskCatalog(h,{jobs:[],users:[owner]},true).tasks[0];
+  assert.equal(legacy.name,'portal-wrapper');assert.equal(legacy.description,'');assert.equal(legacy.state,'UNKNOWN');
+});
 test('overview renders human metadata as escaped text and never grants task-control buttons',()=>{
   const submitted=job({name:'<img src=x onerror=alert(1)>',description:'第一行\n<script>private description</script>'});
   const snapshot=visibleGPUQStatus({checkedAt:new Date().toISOString(),stale:false,hosts:[host()]},{role:'member'},{'gpu-1':1},{jobs:[submitted],users:[owner]});

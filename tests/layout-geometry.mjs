@@ -68,7 +68,10 @@ export async function inspectGeometry(page, specification = {}) {
       if (isInlineLink(node)) continue;
       counts.controls++;
       const value = rect(node);
-      if (phone && value.height < 44 - tolerance)
+      const compactSearch=phone&&spec.compactSearch&&node.matches(spec.compactSearch);
+      if(compactSearch&&(Math.abs(value.height-40)>tolerance||getComputedStyle(node).fontSize!=='14px'))
+        add('compact-search', [node], {height:value.height,fontSize:getComputedStyle(node).fontSize,expectedHeight:40,expectedFontSize:14});
+      if (phone && !compactSearch && value.height < 44 - tolerance)
         add('touch-height', [node], {height: value.height, minimum: 44});
       if (!phone && node.matches('button,input,select') && !isRow(node) &&
           ![32, 40, 48].some(height => Math.abs(value.height - height) <= tolerance))
@@ -382,6 +385,20 @@ export async function inspectGeometry(page, specification = {}) {
         counts.containment++;
       }
     }
+    // Explicit scrolling surfaces clip their own descendants. Measure the
+    // painted intersection for overlap; their full controls and scrollability
+    // remain subject to the height, containment and scroll-panel checks above.
+    const clippedPanels=(spec.clippedScrollPanels||[]).flatMap(selector=>select(selector));
+    for(const panel of clippedPanels)if(!['auto','scroll'].includes(getComputedStyle(panel).overflowY))
+      add('invalid-scroll-clip',[panel],{overflowY:getComputedStyle(panel).overflowY});
+    const paintedRect=node=>{
+      const value=rect(node),result={left:value.left,right:value.right,top:value.top,bottom:value.bottom};
+      for(const panel of clippedPanels)if(panel.contains(node)){
+        const bounds=rect(panel);result.left=Math.max(result.left,bounds.left);result.right=Math.min(result.right,bounds.right);
+        result.top=Math.max(result.top,bounds.top);result.bottom=Math.min(result.bottom,bounds.bottom);
+      }
+      return result;
+    };
     const clickable = controls.filter(node => inView(node) && !node.closest('.copy-help-popup,.maintenance-info-body'));
     const reachableBehindReservedLayer = (layer, node) => (spec.bottomReserve || []).some(group => {
       if (!layer.matches(group.controls) && !layer.closest(group.controls)) return false;
@@ -398,11 +415,11 @@ export async function inspectGeometry(page, specification = {}) {
       return padding >= required - tolerance && rect(node).bottom + scrollY - maximumScroll <= rect(surface).top + tolerance;
     });
     for (let index = 0; index < clickable.length; index++) {
-      const left = clickable[index], a = rect(left);
+      const left = clickable[index], a = paintedRect(left);
       for (const right of clickable.slice(index + 1)) {
         if (left.contains(right) || right.contains(left) || left.closest('.account-popover') !== right.closest('.account-popover')) continue;
         if (reachableBehindReservedLayer(left, right) || reachableBehindReservedLayer(right, left)) continue;
-        const b = rect(right);
+        const b = paintedRect(right);
         const overlapWidth = Math.min(a.right, b.right) - Math.max(a.left, b.left);
         const overlapHeight = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
         if (overlapWidth > tolerance && overlapHeight > tolerance)
