@@ -201,3 +201,15 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 - **证书与网络是部署责任**：入口范围、证书更新和客户端真实可达性须持续核验；默认不承诺自动续签或任意校园 NAT 穿透。
 
 前端实现完后至少验收：零授权拒绝、独立终端与显式接管、断线不重放、跨账号拒绝、真实 raw 文件路径、续传偏移、最终校验及无直达入口的大文件拒绝。不得只用健康页或文案截图代替业务测试。
+
+
+## 版本删除（PR-N，节点与门户分阶段发布）
+
+- `datasets.unregister {machine,dataset,version?}`：新节点能力确认后新增个人版本来源校验；旧节点（包括管理员普通删除）返回409安全等待更新；成员必须完整 version 且为本人上传/工作区/副本，其他版本仅管理员。原件 authority pin、租约、其他 pin、版本锁与最后副本保护均不可跳过。没有实际可重建完整来源时拒绝普通删除；仍使用既有后台 64 位编号和 `datasets.status`，不伪造 unregister 回执。
+- `datasets.delete {dataset,version,key}`：key 为 UUID；客户端不传 machine、owner、角色、依赖或期限。服务从完整可信节点清单、可信副本/归档记录及实际 authority grant 枚举所有物理名称。所有节点 cap1 后持久化任务/子 UUID 与命名空间锁，才派发。相同 key 不重复执行。零授权、跨账号、旧能力、未知依赖均拒绝/停止。
+- `datasets.delete.status {key}` **或** `{operationId}`：只查询固定原节点编号，可补确认迟到回执，永不派发下一步。查询维护期间可用。返回 `operationId,key,dataset,version,state,steps,events,createdAt,updatedAt,retainUntil?`；不返回 owner ID、路径、inode、grant/token 或私有证明。状态 `PLANNED/REMOVING_CACHES/RETIRING_ORIGINAL/DELETED/BLOCKED/FAILED/UNKNOWN`。`DELETED` 严格要求每个物理命名空间的本代次 `ISOLATED` 回执和至少一份完整数据保留，不接受外部 `REVOKED/RETIRED` 代替。
+- `datasets.delete.restore {operationId,machine}`：管理员 CLI 专用；只恢复此任务在该机唯一已确认完整保留副本。返回 `RESTORED` 或 `UNKNOWN`，重复请求不会重发；没有完整隔离证据、到期、占名或结果未确认均失败关闭。网页不提供恢复入口。
+- `datasets.catalog/capacity`：`datasetDelete:1` 仅在完整可信清单每个节点的私有能力回执全部确认后投影；否则 0。新节点 list 提供安全的 `deletionPermissions`，`memberAllowed:false` 时界面隐藏成员删除，并在 ⓘ 中提示“这份数据只能由管理员删除”；旧节点缺字段按不可用处理，不从 owners 猜权限。
+- 私有桥 `storage.dataset-delete.{capabilities,locations,plan,fence,isolate,status,restore,release-absence}` 不接受公共/peer/upload ticket 请求。UID/hostAdmin 来自当前登录身份。计划仅存固定快照，派发先落固定 launch；长哈希、隔离和恢复由限额 node worker 运行。来源栅栏先持久化、全部目标实际隔离后才撤销旧 grant 和移动原件，保持 7–365 天。UNKNOWN/停止但无固定回执不重投。
+
+外部替代退役不被重写：其锁、权限、永久 reference/grant fence 和 API 契约原样保留。本功能仅处理没有替代的版本删除；外部严格完整替代证明只是普通注销“不是最后一份”的实际可重建依据，并在日志单独标为“外部替代退役”。来源不明单 owner 仅管理员。保留期间计费不因目录移动释放；到期清理仅接原本明确启用的 storage 收集服务，本 PR 不开 timer、不部署节点。前端由后续 m4 接口整合。

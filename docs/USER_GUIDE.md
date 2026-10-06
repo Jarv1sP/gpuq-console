@@ -633,3 +633,12 @@ gpuq-network exec --proxy http://PROXY_HOST:PORT -- python -m pip install -r req
 首次从旧版升级需重新登录一次，旧内存会话无法恢复。主动退出只撤销当前登录；管理员改密码、停用账号或改角色会撤销该账号所有登录。浏览器清理 Cookie、凭据缓存满一年，或更换平台地址，也需要重新登录。
 
 确实过期时用 `gpuctl login`，主动退出用 `gpuctl logout`；换账号后重新选服务器和项目。登录失效不会停止已经提交的训练。
+
+
+### 删除数据版本
+
+你只能删除有个人来源证明的本人上传、工作区发布或副本；旧数据、共享数据和管理员登记请联系管理员。新节点尚未开通删除能力时，彻底删除暂不可用。
+
+从一台服务器删除可重新准备的缓存：`gpuctl data unregister NAME@完整版本 --machine SERVER`。最后一份数据不会被直接清除；数据库原件、正在训练或有固定保留的数据也不能用这个入口。
+
+彻底删除全部服务器和数据库里的这一版本：`gpuctl data delete NAME@完整版本 --key UUID`。先保留输出的 key，用 `gpuctl data delete-status UUID` 查询；超时或“结果未确认”不要换编号重投。完整副本隔离保留至少 7 天，仍占空间；期限内只有管理员可恢复，到期且收集服务已开启才会清除。恢复命令是 `gpuctl data retire-restore OPERATION_ID --machine SERVER`，旧授权不会恢复。

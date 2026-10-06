@@ -119,6 +119,9 @@ gpuctl data storage plan         Administrator: preview cache policy; never dele
 gpuctl data storage pin NAME@VERSION LABEL  Protect a manual job's dataset copy
 gpuctl data storage unpin NAME@VERSION LABEL  Release that manual pin after its job stops
 gpuctl run -g 2 --data NAME@VERSION -- python train.py --data /data2/NAME
+gpuctl data delete NAME@VERSION --key UUID  Delete this version everywhere; retain 7 days
+gpuctl data delete-status UUID             Query the original deletion key; never replay
+gpuctl data retire-restore OPERATION_ID --machine SERVER  Administrator: restore retained bytes
 
 gpuctl login USERNAME              Login (hidden password prompt)
 gpuctl register USERNAME           Register with invite + own password
@@ -688,6 +691,34 @@ async function main(){
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: data upload-status|upload-discard UPLOAD_ID [--machine SERVER]');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       result={...(await call('datasets.upload.'+(positionals[1]==='upload-status'?'status':'discard'),{machine,uploadId:positionals[2]})).result,machine};if(result.state==='FAILED')process.exitCode=1;
+    }else if(command==='data'&&['delete','delete-status','retire-status','retire-restore'].includes(positionals[1])){
+      const action=positionals[1],restore=action==='retire-restore';
+      const allowed=['machines','datasets','url','session-file','json',...(action==='delete'?['key']:[])];
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: data delete NAME@VERSION --key UUID | delete-status KEY | retire-status OPERATION_ID | retire-restore OPERATION_ID --machine SERVER');
+      if(action==='delete'){
+        if(options.machines.length)fail('彻底删除覆盖所有服务器，不接受 --machine。');
+        const [dataset,version,...extra]=positionals[2].split('@'),key=options.key||randomUUID();
+        if(extra.length||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(dataset)||!/^[a-f0-9]{64}$/.test(version||'')||!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(key))fail('需要 NAME@完整版本 和 UUID --key。');
+        process.stderr.write(`Deletion key: ${key}\n`);
+        try{result=(await call('datasets.delete',{dataset,version,key})).result;}
+        catch(error){fail(`${error.message}\n删除结果未确认，不会重投。查询：gpuctl data delete-status ${key}`);}
+      }else{
+        const operationId=positionals[2];
+        if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operationId))fail('需要完整 UUID 删除编号。');
+        if(restore){
+          if(session.principal.role!=='admin')fail('只有管理员可恢复保留的数据。');
+          if(options.machines.length!==1||options.machines[0].includes('='))fail('恢复需明确指定一个 --machine SERVER。');
+          const machine=machineName(options.machines[0]);
+          if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(machine))fail('服务器 ID 无效。');
+          try{result=(await call('datasets.delete.restore',{operationId,machine})).result;}
+          catch(error){fail(`${error.message}\n恢复结果未确认。只查询：gpuctl data retire-status ${operationId}`);}
+        }else{
+          if(options.machines.length)fail('删除查询不接受 --machine。');
+          result=(await call('datasets.delete.status',action==='delete-status'?{key:operationId}:{operationId})).result;
+        }
+      }
+      if(result.state==='UNKNOWN')process.exitCode=3;
+      else if(['FAILED','BLOCKED'].includes(result.state))process.exitCode=1;
     }else if(command==='data'&&positionals[1]==='archive-enroll'){
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','owner-id','key'].includes(k)))fail('Usage: data archive-enroll NAME@VERSION --machine HOT_MACHINE --owner-id ID --key UUID');
       const [dataset,version,...extra]=positionals[2].split('@'),machine=defaultMachine();
@@ -728,7 +759,7 @@ async function main(){
           (ref.length===2&&!/^[a-f0-9]{64}$/.test(ref[1]))||(action!=='unregister'&&ref.length!==2))fail('Use NAME@FULL_VERSION_HASH; only unregister also accepts a bare NAME');
         reference={dataset:ref[0],...(ref.length===2?{version:ref[1]}:{})};
       }
-      if(action==='unregister'&&session.principal.role!=='admin')fail('Dataset unregister requires an administrator account');
+      if(action==='unregister'&&session.principal.role!=='admin'&&!reference.version)fail('成员删除必须指定本人个人数据的完整版本。');
       try{result=(await call(action==='archive-retry'?'datasets.archive.retry':'datasets.'+action,{machine,...reference})).result;}
       catch(error){if(action==='unregister')fail(`${error.message}\nUnregister outcome is unconfirmed; a background worker may still run. Inspect node operations before retrying.`);throw error;}
       if(action==='unregister'||byOperation){result={...result,machine};if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;}
