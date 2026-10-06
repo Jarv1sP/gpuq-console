@@ -54,6 +54,26 @@ class Policy(unittest.TestCase):
         with patch.object(store.os, 'fstatvfs', return_value=free(110)):
             store.require_workspace_space(self.root, 100, 10)
 
+    def test_reserve_error_explains_byte_counts_without_host_paths(self):
+        for available, reserve, needed in ((109, 100, 10), (99, 100, 0),
+                                           (2**63 - 2, 2**63 - 1, 2**63 - 1)):
+            with self.subTest(available=available), \
+                    patch.object(store.os, 'fstatvfs', return_value=free(available)):
+                with self.assertRaises(store.ProjectError) as caught:
+                    store.require_workspace_space(self.root, reserve, needed)
+                error = caught.exception
+                self.assertEqual(error.code, 'insufficient_space')
+                self.assertIn('Personal workspace', str(error))
+                for key, value in [('availableBytes', available), ('reserveBytes', reserve),
+                                   ('requestedBytes', needed)]:
+                    self.assertIn(f'{key}={value}', str(error))
+                self.assertNotIn(str(self.root), str(error))
+                self.assertLessEqual(len(str(error)), 200)
+        with patch.object(store.os, 'fstatvfs',
+                          return_value=SimpleNamespace(f_bavail=54, f_bfree=2**60, f_frsize=2)):
+            with self.assertRaisesRegex(store.ProjectError, 'availableBytes=108'):
+                store.require_workspace_space(self.root, 100, 10)
+
     def test_never_mkdir_or_follow_root_or_ancestor_symlink(self):
         missing = self.root / 'absent'
         with self.assertRaises(FileNotFoundError):store.require_workspace_space(missing, 0)

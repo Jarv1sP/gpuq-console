@@ -43,6 +43,35 @@ async function fixture(t){
   t.after(async()=>{await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});});
   return {dir,session,calls,cli,save,custom,setReleases:(value,head)=>{releases=value;latest=head;}};
 }
+test('project lifecycle CLI exposes CAS labels, grouping and original-key soft retirement without mutable path guesses',async t=>{
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ f.custom.set('projects.label.get',args=>({...args,displayName:args.project,revision:3}));
+ f.custom.set('projects.label.set',args=>({...args,revision:args.revision+1}));
+ f.custom.set('projects.status',args=>({...args,state:'READY',lifecycle:{state:'ACTIVE',revision:2}}));
+ const label=await f.cli(['project','label','--display-name','中文项目']);assert.equal(label.code,0,label.stderr);assert.equal(f.calls.at(-1).args.revision,3);
+ const archive=await f.cli(['project','archive']);assert.equal(archive.code,0,archive.stderr);assert.deepEqual(f.calls.at(-1),{operation:'projects.archive',args:{machine:'gpu-1',project:'alpha',revision:2}});
+ assert.equal((await f.cli(['project','catalog','--full'])).code,0);assert.deepEqual(f.calls.at(-1),{operation:'projects.catalog',args:{includeArchived:true}});
+ const group=await f.cli(['project','group',JOB,'--display-name','Project','--members','1/alpha,2/beta','--revision','0']);assert.equal(group.code,0,group.stderr);assert.deepEqual(f.calls.at(-1).args.members,[{machine:'gpu-1',project:'alpha'},{machine:'gpu-2',project:'beta'}]);
+ assert.equal((await f.cli(['project','group',JOB,'--display-name','Project','--members','none','--revision','1'])).code,0);assert.deepEqual(f.calls.at(-1).args.members,[]);
+ const retire=await f.cli(['project','retire','--key',JOB,'--revision','2','--manifest-sha256',RELEASE]);assert.equal(retire.code,0,retire.stderr);assert.match(retire.stderr,/original|retire-status/);assert.equal(f.calls.at(-1).args.key,JOB);
+ assert.equal((await f.cli(['project','retire-status',JOB,'--project','alpha'])).code,0);
+ for(const args of [['retire'],['retire','--key',JOB],['group','gggggggg-gggg-gggg-gggg-gggggggggggg'],['archive','--root'],['label','--display-name','name','--revision','-1'],['retire-status',JOB]])assert.equal((await f.cli(['project',...args])).code,1);
+ assert.equal(f.calls.some(c=>['projects.create','projects.publish','jobs.submit','files.put'].includes(c.operation)),false);
+});
+
+test('member guide project-label command uses the real CLI option and rejects the misleading name alias before mutation',async t=>{
+ const guide=await readFile(new URL('../docs/USER_GUIDE.md',import.meta.url),'utf8');
+ const command=guide.match(/`gpuctl project label --display-name "([^"\n]+)"`/);
+ assert.ok(command,'Member guide must document the actual --display-name option');
+ assert.doesNotMatch(guide,/gpuctl project label --name(?:\s|`)/);
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ f.custom.set('projects.label.get',args=>({...args,displayName:args.project,revision:3}));
+ f.custom.set('projects.label.set',args=>({...args,revision:args.revision+1}));
+ const value=await f.cli(['project','label','--display-name',command[1]]);
+ assert.equal(value.code,0,value.stderr);assert.deepEqual(f.calls.at(-1),{operation:'projects.label.set',args:{machine:'gpu-1',project:'alpha',displayName:command[1],revision:3}});
+ const before=f.calls.length,invalid=await f.cli(['project','label','--name',command[1]]);
+ assert.equal(invalid.code,1);assert.deepEqual(f.calls.slice(before).map(c=>c.operation),['state'],'Invalid label alias may read authentication state but must never read or write a label');
+});
 
 test('project create/use is verified and remembered per machine; changing server never reuses another project',async t=>{
   const f=await fixture(t);

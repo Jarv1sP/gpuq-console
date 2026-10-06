@@ -15,6 +15,7 @@ import {directUploadConnectSources} from './direct-upload-policy.mjs';
 const files={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/xterm.js':'vendor/xterm.js','/xterm.css':'vendor/xterm.css','/addon-fit.js':'vendor/addon-fit.js'};
 files['/job-progress.js']='job-progress.js';files['/job-progress-ui.js']='job-progress-ui.js';
 files['/task-metadata.js']='task-metadata.js';
+files['/project-management-ui.js']='project-management-ui.js';
 files['/job-diagnostics-ui.js']='job-diagnostics-ui.js';files['/job-diagnostics.css']='job-diagnostics.css';
 files['/scheduling-policy.js']='scheduling-policy.js';
 files['/scheduling-ui.js']='scheduling-ui.js';

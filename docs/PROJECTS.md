@@ -70,6 +70,39 @@ OCI 的 `/tmp` 默认属于容器可写层，和 venv 沙箱的 tmpfs 不同；�
 
 开发环境重连前会提交上次停止的容器层，因此大环境可能需要较长时间和临时磁盘空间。受管镜像提交、拉取和导出使用账号数据卷内的私人临时目录，不把完整镜像层放在内存盘；终端仍保留原 CPU、内存与 PID 预算。失败时保留原容器和镜像身份，不会自动新建替代环境或删除已安装的依赖。
 
+## 整理项目：名称、归组、归档与退役
+
+网页在工作台的「整理项目」入口操作。显示名称可以中文；CLI 和历史链接继续使用
+原内部项目 ID。一个逻辑项目可归组多台机器的实例并指定主实例，但不会搬移环境、
+合并结果或让不同机器共享可写容器。查看跨机项目时，离线节点明确显示未确认。
+
+```sh
+gpuctl project label --display-name "机器人插入实验"
+gpuctl project catalog --full
+gpuctl project group GROUP_UUID --display-name "机器人实验" --members SERVER_A/project-a,SERVER_B/project-b --primary SERVER_A/project-a --revision 0
+gpuctl project archive
+gpuctl project unarchive
+gpuctl project retire-plan
+```
+
+归档保留版本、任务和结果；原已确认提交的任务不被停止，新编辑、终端、发布和训练
+被拒绝，恢复项目后可继续。状态未知的写入／同步／导入／发布必须先用原编号核对。
+已有任务历史的项目请归档，不是删除候选。逻辑组成员可移除；空组用于解除最后成员，
+CLI 用 `--members none`，仍须提供该组当前 revision。
+
+软退役只允许从未有任务记录、run claim 或输出、没有活动／未知读写者的实例。
+未使用的已发布项目也可退役。读取 `retire-plan` 的完整摘要与 revision，明确确认后：
+
+```sh
+gpuctl project retire --key RETIREMENT_UUID --revision PLAN_REVISION --manifest-sha256 FULL_PLAN_SHA256
+gpuctl project retire-status RETIREMENT_UUID --project ORIGINAL_PROJECT_ID
+```
+
+节点对完整目录做 CAS，再原子移到本人私有同盘回收区；字节保留，不永久清空，不复用
+旧 ID。OCI 外部镜像存储也保留，不因项目整理删除。计划后内容变化、租约／读写者未确认
+或系统不支持原子 no-replace 时拒绝。回执丢失查原 UUID；`RETIRING` 保留围栏，由运维
+核查，不自动重发或新建替代项目。仅安装网页／CLI 不代表节点已部署配套生命周期 helper。
+
 ## 显式离线资源，不继承开发缓存
 
 `/workspace/offline` 是代码树内可发布的普通目录，环境变量 `GPUQ_OFFLINE_ASSETS` 指向它；平台不会自动下载、联网安装、收集 HOME、读取开发登录 token 或复制隐藏缓存。开发 HOME 与每次训练 HOME 不同；训练不能依赖开发时的默认 Hugging Face、Torch 或 pip 缓存。只有明确放入代码树的文件随发布快照进入训练，请先检查其中没有凭据。个人模型权重、配置和 tokenizer 放在项目的 `weights/`、`models/`、`tokenizers/` 或 `offline/` 中，随项目版本使用；不为这些文件另建数据集。离线资源一并计入项目容量/文件数上限；训练、验证和测试样本才使用数据集渠道。训练新产出的权重写入 `/outputs`，不会自动修改已发布的代码版本。
@@ -116,7 +149,7 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 
 项目名只用小写 ASCII 字母、数字、下划线、连字符，以字母开头，长度 1–48。机器和项目选择保存在本机登录缓存中，按服务器分别记忆；切到没有选过项目的新服务器时不会沿用另一台的项目。可用 `--project NAME` 临时覆盖，不修改记忆。登录另一账号会清除旧身份的选择。
 
-项目名也是已有环境、版本和训练结果的身份，不能通过移动项目目录改名；这会破坏绝对路径和原结果引用。当前项目接口尚无显示名编辑、逻辑归组、归档或删除。原生 GPUQ 身份围栏修改任务显示名后，配套升级的门户会在队列与任务列表采用相同标签，仍保留原任务 ID 和执行规格；它不等于项目已经归并或删除。需要整理旧项目时，先保留代码、版本、结果和活动任务，不能靠新建重复容器或裸删目录替代生命周期接口。
+项目名也是已有环境、版本和训练结果的身份，不能通过移动项目目录改名；这会破坏绝对路径和原结果引用。显示名、逻辑归组、归档与安全退役见上节，均保留内部身份。原生 GPUQ 身份围栏修改任务显示名后，配套升级的门户会在队列与任务列表采用相同标签，仍保留原任务 ID 和执行规格；它不等于项目已经物理归并。需要整理旧项目时，不能靠新建重复容器或裸删目录替代生命周期接口。
 
 普通 `run` 选择 `latestReadyRelease`，并核验该版本在 READY 清单中。顶层 `PUBLISHING` 不会阻止使用以前的 READY 版本，因此想运行新改动时务必先核对最新发布结果。`--release 完整64位哈希` 可显式固定版本。没有可用版本时清楚报错，普通 `run` 不会自动替用户发布、切机或占卡等发布。
 

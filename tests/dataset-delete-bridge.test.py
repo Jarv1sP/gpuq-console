@@ -17,10 +17,12 @@ class DeletionBridge(unittest.TestCase):
         extension=next(n for n in tree.body if isinstance(n,ast.AugAssign) and isinstance(n.target,ast.Name)
             and n.target.id=='INTERNAL_STORAGE' and 'storage.dataset-delete.' in ast.unparse(n.value))
         cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='Handler')
+        transport_error=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='NodeTransportError')
+        classify=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='ssh_transport_failure')
         call=Mock(return_value=SimpleNamespace(returncode=0,stdout=json.dumps({'ok':True,'result':{'state':'REGISTERED'}})))
         namespace=dict(socketserver=socketserver,json=json,HOSTS={'fixture-node':{'fixture':True}},
             SSH_CONNECTIONS=SimpleNamespace(call=call),TERMINAL_STREAM_HOSTS=set())
-        exec(compile(ast.Module(body=[base,extension,cls],type_ignores=[]),'<real deletion bridge boundary>','exec'),namespace)
+        exec(compile(ast.Module(body=[base,extension,transport_error,classify,cls],type_ignores=[]),'<real deletion bridge boundary>','exec'),namespace)
         handler=object.__new__(namespace['Handler']);handler.request=Mock()
         payload=dict(machine=machine,operation=operation,args=args or {})
         handler.rfile=io.BytesIO((json.dumps(payload)+'\n').encode());handler.wfile=io.BytesIO()

@@ -1460,12 +1460,15 @@ def process(operation,args):
             # actor is rejected before spec persistence or native submission.
             display.validate(job,args['metadata'])
     (ROOT/'jobs').mkdir(parents=True,exist_ok=True,mode=0o700)
-    with open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
+    from contextlib import nullcontext
+    project_store=projects().store if job.get('project') else None
+    with project_store.lifetime(job['userId'],job['project']) if project_store else nullcontext(), open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         spec=ROOT/'jobs'/f'{jid}.json'
         if spec.exists():
             if json.loads(spec.read_text())!=job:raise ValueError('Job identity mismatch')
         else:
+            if project_store is not None:project_store.admit(job['userId'],job['project'])
             with open(spec,'x') as f:json.dump(job,f);f.flush();os.fsync(f.fileno())
         # GPUQ is the source of truth for dispatch idempotency, including SSH failures.
         with closing(sqlite3.connect(f'file:{CONFIG["database"]}?mode=ro',uri=True)) as db:
