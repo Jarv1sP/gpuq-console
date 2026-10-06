@@ -120,6 +120,31 @@ class RetirementAuthorityTests(unittest.TestCase):
         return dict(id=grant['id'], action=action, dataset=grant['dataset'], version=grant['version'],
                     targetMachine=grant['targetMachine'])
 
+    def test_source_isolation_scans_once_and_keeps_original_grant_bytes(self):
+        self.fence()
+        receipts = self.target_receipts()
+        original_grants = [(self.store.root/t['grant']['id']/'grant.json').read_bytes() for t in self.targets]
+        with patch.object(R.D, '_scan', wraps=R.D._scan) as scan:
+            result = self.isolate(receipts)
+        self.assertEqual(scan.call_count, 1)
+        self.assertTrue(result['isolated'])
+        self.assertEqual(original_grants, [(self.store.root/t['grant']['id']/'grant.json').read_bytes() for t in self.targets])
+        self.assertTrue(self.store.verify_retirement_revocations(self.retirement._journal(self.key)))
+
+    def test_final_payload_check_still_requires_exact_permanent_grant_revocation(self):
+        self.fence()
+        receipts = self.target_receipts()
+        verify = self.retirement._verify_payload
+        def changed(row, **kwargs):
+            D._write_json(self.revoked(self.targets[0]['grant']), {'state':'REVOKED'})
+            return verify(row, **kwargs)
+        with patch.object(self.retirement, '_verify_payload', side_effect=changed), self.assertRaises(ValueError):
+            self.isolate(receipts)
+        self.assertEqual(self.retirement._journal(self.key)['state'], 'ISOLATING')
+        self.assertIsNone(self.retirement._journal(self.key)['retainUntil'])
+        self.assertEqual(self.cache._retirement_fence('source-data', self.version)['state'], 'FENCED')
+        self.assertTrue((self.retirement._folder(self.key)/'payload/ready/data/fixed.txt').exists())
+
     def test_projection_is_complete_fixed_and_token_free(self):
         dependencies = self.snapshot['authority']
         self.assertEqual(len(dependencies['grants']), 2)

@@ -644,6 +644,10 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       service.audit(principal.username,operation,row.id,isCancel?'CANCEL_REQUESTED':'CONTINUE_REQUESTED');
       if(!isCancel){
         if(await waitForWorkers(row,principal,check))return publicTask(row);
+        // A resumed inspection can outlive its HTTP response. Persist the new
+        // attempt before launching it: an earlier UNKNOWN is not its outcome,
+        // and callers must keep the current session while this work is active.
+        check();row.state='RUNNING';delete row.error;save(row);
         restarted.delete(row.id);
         const task=(async()=>{try{await observe(row,principal,check);check();
           if(row.state!=='DELETED')await execute(row,principal,check,{allowRetry:true,creator});
