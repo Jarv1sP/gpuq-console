@@ -75,7 +75,10 @@ function render(preserve=false){
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=concisePage?'':titles[page][1];$('#page-description').hidden=concisePage||!titles[page][1];$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
   if(!concisePage&&titles[page][1])discloseInfo($('#page-description'),'页面说明');
   const descriptionInfo=$('#page-description').closest('.ui-info');if(descriptionInfo)descriptionInfo.hidden=concisePage||!titles[page][1];
-  discloseInfo($('.help-links>span'),'首次使用说明');
+  const firstUseNote=$('.help-links>span');
+  if(firstUseNote&&!firstUseNote.classList.contains('copy-help')){
+    const template=document.createElement('template');template.innerHTML=copyHelp('首次使用说明',firstUseNote.textContent,'/guide/start');firstUseNote.replaceWith(template.content);
+  }
   const note=!logged?'请登录。':!store.production?'本地演示：不会连接真实服务器或启动训练。':!u?.total&&page!=='community'?'暂无用卡额度，等待授权。':'';
   const monitorNotice=logged&&store.production&&store.data?.gpuq?.stale&&page!=='resources'?'显卡监控待更新':'';
   if(concisePage){

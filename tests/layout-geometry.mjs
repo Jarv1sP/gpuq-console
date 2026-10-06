@@ -139,7 +139,7 @@ export async function inspectGeometry(page, specification = {}) {
     // paragraph, action group or list item. Check the rendered label boxes.
     for (const group of spec.labelledHelp || []) {
       for (const button of select(group.buttons)) {
-        const row = button.closest('.copy-help')?.parentElement;
+        const row = button.closest('.copy-help,details.ui-info')?.parentElement;
         const label = row?.matches(group.rows) ? select(group.labels, row)[0] : null;
         if (!label || label.contains(button)) { add('orphan-help', [button], {}); continue; }
         const caption = rect(label), help = rect(button);

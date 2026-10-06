@@ -388,7 +388,6 @@
   #page-datasets .dataset-row-details>div:not(.dataset-details-cell){display:none}
   #page-datasets .dataset-version-details summary{min-height:44px;line-height:44px}
   #page-datasets .dataset-copy-route{display:none}
-  .sb:has(#page-datasets:not([hidden])) .help-links{display:none}
   #page-datasets .datasets-controls label{min-width:0}
   #page-datasets .datasets-toolbar{gap:12px;align-items:center}
   #page-datasets .datasets-controls{flex:1;gap:8px}
@@ -419,3 +418,6 @@
 #page-datasets .dataset-route-heading>.copy-help{grid-column:2;grid-row:1}
 #page-datasets .dataset-route-heading>.dataset-route-path{grid-column:1/-1;grid-row:2}
 #page-datasets .dataset-relay-warning>.copy-caption>label{min-width:0}
+#page-datasets .dataset-storage{display:flex;align-items:center;gap:8px}
+#page-datasets .dataset-storage>span:not(.copy-help){min-width:0;overflow-wrap:anywhere}
+.sb:has(#page-datasets:not([hidden])) .help-links{justify-content:flex-start;flex-wrap:nowrap;gap:12px}

@@ -17,7 +17,7 @@ export function archiveStatus(storage,expectedVersion=null){
   const matching=!expectedVersion||storage.version===expectedVersion;
   const saved=matching&&storage.phase==='ARCHIVED'&&storage.originalRetained===true&&typeof storage.archiveMachine==='string'&&storage.archiveMachine.length>0;
   const text=saved?`原件已保存 · ${storage.archiveMachine}`:matching?({QUEUED:'等待存入',COPYING:'存入中',PROVISIONING:'校验中',CERTIFYING:'检查恢复能力',FAILED:'存入数据库失败',BLOCKED:'待确认'}[storage.phase]||'待确认'):'待确认';
-  return `<div class="dataset-storage" role="status">${esc(text)} ${infoHTML(saved?'原件不会被释放。空闲缓存释放后，用时从数据库取回。':'存入数据库尚未确认，本机数据继续保留。只有确认可取回且没有训练在用的缓存才会释放。','数据库说明')}</div>${storage.error?`<p class="form-error">${esc(storage.error)}</p>`:''}${matching&&['FAILED','BLOCKED'].includes(storage.phase)?`<button class="button" data-retry-archive="${esc(storage.dataset)}" data-version="${esc(storage.version)}">重试存入数据库</button>`:''}`;
+  return `<div class="dataset-storage" role="status"><span>${esc(text)}</span>${infoHTML(saved?'原件不会被释放。空闲缓存释放后，用时从数据库取回。':'存入数据库尚未确认，本机数据继续保留。只有确认可取回且没有训练在用的缓存才会释放。','数据库说明')}</div>${storage.error?`<p class="form-error">${esc(storage.error)}</p>`:''}${matching&&['FAILED','BLOCKED'].includes(storage.phase)?`<button class="button" data-retry-archive="${esc(storage.dataset)}" data-version="${esc(storage.version)}">重试存入数据库</button>`:''}`;
 }
 export function capacityText(capacity){
   if(!capacity||capacity.available!==true||!Number.isFinite(capacity.availableBytes)||capacity.availableBytes<0||!Number.isFinite(capacity.filesystemBytes)||capacity.filesystemBytes<0)return '容量待更新';
