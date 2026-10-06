@@ -12,8 +12,9 @@ export const datasetHelpGeometry = {
 };
 
 export async function checkDatasetBodyHelpRegressions(page) {
-  const footer=page.locator('.help-links'),label=footer.locator(':scope>a'),help=footer.locator(':scope>.copy-help');
-  assert.equal(await label.getAttribute('href'),'/guide/start');
+  const footer=page.locator('.help-links'),label=footer.locator(':scope>span:not(.copy-help)'),help=footer.locator(':scope>.copy-help');
+  assert.equal(await label.textContent(),'首次使用');
+  assert.equal(await help.locator('.copy-help-guide').getAttribute('href'),'/guide/start');
   assert.equal(await help.locator('.copy-help-popup>span').textContent(),'从第一次登录，到一次完整训练。');
   const specification={...datasetHelpGeometry,roots:['#page-datasets']};
   const initial=await inspectGeometry(page,specification);assert(initial.pass,JSON.stringify(initial.failures));

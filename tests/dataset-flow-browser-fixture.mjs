@@ -149,7 +149,7 @@ try{
     try{
       for(const width of [1440,390,320]){
         await page.setViewportSize({width,height:width<760?900:1000});await page.locator('.help-links').scrollIntoViewIfNeeded();
-        const result=await inspectGeometry(page,{...datasetHelpGeometry,roots:['.help-links'],controls:'a[href],summary'});
+        const result=await inspectGeometry(page,{...datasetHelpGeometry,roots:['.help-links'],controls:'a[href],button,summary'});
         geometries.push({label:role+'-footer-help',...result});assert.ok(result.pass,JSON.stringify(result.failures));
         await page.screenshot({path:join(out,role+'-footer-help-'+width+'-viewport.png'),animations:'disabled'});
       }
