@@ -82,7 +82,12 @@ try{
   const personalSummary=await page.locator('#self-summary').innerText();
   assert.match(personalSummary,/不限个人额度\n已占用 4 张/);
   assert.doesNotMatch(personalSummary,/4 \/ 8|占用额度 \/ 上限/);
-  assert.equal(await page.locator('[name=priority] option').count(),3);
+  assert.equal(await page.locator('[name=priority] option').count(),2,'Main submit offers the same normal/idle choices for both roles');
+  assert.deepEqual(await page.locator('[name=priority] option').evaluateAll(rows=>rows.map(row=>row.value)),['normal','idle']);
+  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('[data-admin-submit]').waitFor();await page.locator('[data-admin-submit]').click();
+  assert.equal(await page.locator('[name=priority] option').count(),3,'The original administrator priority choices remain available in the backend');
+  assert.deepEqual(await page.locator('[name=priority] option').evaluateAll(rows=>rows.map(row=>row.value)),['normal','idle','high']);
+  await closeSubmit(page);await page.locator('[data-nav=work]').click();
   const queueInfo=page.locator('[data-workbench-job="22222222-2222-4222-8222-222222222222"] .ui-info>summary');await queueInfo.click();assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);await queueInfo.click();
   await page.locator('[data-nav=resources]').click();
   await currentNav('resources');
@@ -93,8 +98,13 @@ try{
     await selectResource(page,machine,{metrics:true});
   }
   const first=page.locator('[data-resource-detail="'+machine+':0"]');await first.locator(':scope > summary').click();
-  await page.locator('.node-queue summary').first().click();
-  for(const text of ['76%','12.5','62 °C','24018','python train.py','researcher','等待空闲 GPU'])assert.ok((await page.locator('#machine-grid').innerText()).includes(text),text);
+  assert.equal(await page.locator('#machine-grid .node-queue').count(),0,'Unlinked raw native queue records stay in the management view');
+  for(const text of ['76%','12.5','62 °C','24018'])assert.ok((await page.locator('#machine-grid').innerText()).includes(text),text);
+  for(const text of ['python train.py','researcher','等待空闲 GPU'])assert.ok(!(await page.locator('#machine-grid').innerText()).includes(text),'Main process columns hide private fields and raw native queue: '+text);
+  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content .resource-full-metrics').waitFor();
+  await page.locator('#admin-content .resource-full-metrics>summary').click();await page.locator('#admin-content [data-resource-detail="'+machine+':0"]>summary').click();await page.locator('#admin-content .node-queue>summary').click();
+  for(const text of ['76%','12.5','62 °C','24018','python train.py','researcher','等待空闲 GPU'])assert.ok((await page.locator('#admin-content').innerText()).includes(text),'Backend preserves existing metrics/private process and queue evidence: '+text);
+  await capture('admin-resources-desktop');await page.locator('[data-nav=resources]').click();
   await capture('resources-desktop');
   await textContrast();
   for(const width of [1024,900,820,768,390,320]){
