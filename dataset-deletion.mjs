@@ -269,9 +269,11 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       return structuredClone(value);
     }
     if(phase==='cancel'){
-      if(value?.protocol!=='dataset-version-cancel-v1'||value.operationId!==step.operationId||value.machine!==step.machine
+      const keys=['protocol','operationId','machine','dataset','version','snapshotSha256','state','available'];
+      if(!value||Object.keys(value).sort().join(',')!==keys.toSorted().join(',')
+        ||value.protocol!=='dataset-version-cancel-v1'||value.operationId!==step.operationId||value.machine!==step.machine
         ||value.dataset!==step.dataset||value.version!==step.version||value.snapshotSha256!==step.plan.snapshotSha256
-        ||value.state!=='CANCELED'||value.available!==true)fail('取消删除的恢复回执未确认。',502);
+        ||value.state!=='CANCELED'||value.available!==true||status.state!=='CANCELED'||!same(status.result,value))fail('取消删除的恢复回执未确认。',502);
       return structuredClone(value);
     }
     const receipt=parseReceipt(value,step,['isolate','commit'].includes(phase)?'ISOLATED':'RESTORED');

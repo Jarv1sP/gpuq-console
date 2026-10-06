@@ -81,6 +81,7 @@ elif op=='fixture.publish':
     cache.materialize(D.Principal(actor.user_id,True),'personal',registered['version'],_source=approved)
     result=registered
 elif op=='datasets.list':result=cache.list_datasets(actor)
+elif op=='datasets.prepare':result=cache.prepare(actor,args['dataset'],args['version'])
 else:
     phase=op.removeprefix('storage.dataset-delete.')
     if phase=='capabilities':result=dict(protocol=N.PROTOCOL,machine=machine,datasetDelete=1)

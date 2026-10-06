@@ -140,3 +140,26 @@ test('unknown status continue cancel and restore never expose private node error
     assert.ok(status.error||status.steps.some(step=>step.error));
   }
 });
+
+test('historical cancel receipt cannot release portal fences without the matching current node outcome',async t=>{
+  for(const change of ['missing','changed','state','extra']){
+    const f=fixture(t);let lost=true;
+    f.after=(host,op)=>{if(lost&&op.endsWith('.fence')){lost=false;throw Error('lost original reply');}};
+    const r=await f.start();assert.equal(r.result.state,'UNKNOWN');
+    f.after=(host,op,args,result)=>{
+      if(!op.endsWith('.status')||!result.phases.cancel)return;
+      if(change==='missing')result.result=null;
+      if(change==='changed')result.result={...result.result,snapshotSha256:'f'.repeat(64)};
+      if(change==='state')result.state='FENCED';
+      if(change==='extra')result.phases.cancel.result={...result.phases.cancel.result,untrusted:true};
+    };
+    await f.call('datasets.delete.cancel',{operationId:r.first.operationId},admin);await f.service.waitDatasetDeletions();
+    assert.notEqual((await f.call('datasets.delete.status',{operationId:r.first.operationId},admin)).state,'CANCELED');
+    assert.ok(f.service.db.prepare('SELECT * FROM dataset_deletion_fences').all().length);
+    f.after=null;
+    await f.call('datasets.delete.cancel',{operationId:r.first.operationId},admin);await f.service.waitDatasetDeletions();
+    assert.equal((await f.call('datasets.delete.status',{operationId:r.first.operationId},admin)).state,'CANCELED');
+    assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_deletion_fences').all(),[]);
+    assert.equal(writes(f).filter(call=>call.op.endsWith('.cancel')&&call.host===hosts[0]).length,1);
+  }
+});

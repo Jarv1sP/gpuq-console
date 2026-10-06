@@ -119,3 +119,32 @@ test('complete independent transfer under another name is untouched by dataset d
   assert.ok(!calls.some(c=>c.op.startsWith('storage.dataset-delete.')&&c.args.dataset==='separate-copy'));
   assert.equal(r.result.copyNotice,'其他名称下的副本不受影响');
 });
+
+test('cancel after actual authority original isolation restores every alias for preparation while old grants stay dead',async t=>{
+  const {f,root,bridge,calls}=await nativeFixture(t),owner={userId:principal.userId,hostAdmin:false},administrator={userId:admin.userId,hostAdmin:true};
+  const source=await bridge(hosts[0],'fixture.publish',owner);
+  await bridge(hosts[0],'fixture.enable-authority',administrator);
+  const grant=await bridge(hosts[0],'fixture.seal',{...administrator,version:source.version,targetMachine:hosts[1]});
+  for(const dataset of ['replica-alias-one','replica-alias-two'])await bridge(hosts[1],'fixture.replicate',{...administrator,grant,dataset,owner:principal.userId});
+  let lost=true;
+  f.service.bridge=async(host,op,args)=>{
+    const result=await bridge(host,op,args);
+    if(lost&&host===hosts[0]&&op.endsWith('.isolate')){lost=false;throw Error('original isolation response lost');}
+    return result;
+  };
+  const r=await f.start({dataset:'personal',version:source.version,key:randomUUID()});
+  // Read-only status confirms late isolation, but no collection commit was
+  // dispatched after the lost reply. It must not claim DELETED.
+  assert.equal(r.result.state,'RUNNING');assert.ok(r.result.steps.every(step=>step.state==='ISOLATED'));
+  assert.equal(calls.filter(call=>call.op==='storage.dataset-delete.commit').length,0);
+  assert.equal((await bridge(hosts[0],'fixture.old-grant-denied',{...administrator,grant})).denied,true);
+  await f.call('datasets.delete.cancel',{operationId:r.first.operationId},admin);await f.service.waitDatasetDeletions();
+  const result=await f.call('datasets.delete.status',{operationId:r.first.operationId},admin);assert.equal(result.state,'CANCELED',JSON.stringify(result));
+  for(const [host,dataset] of [[hosts[0],'personal'],[hosts[1],'replica-alias-one'],[hosts[1],'replica-alias-two']]){
+    assert.equal((await readFile(join(root,host,'cache','ready',dataset,source.version,'data/train.txt'))).toString(),'actual complete recoverable bytes');
+    assert.equal((await f.service.bridge(host,'datasets.prepare',{...owner,dataset,version:source.version})).state,'READY');
+  }
+  assert.equal((await bridge(hosts[0],'fixture.old-grant-denied',{...administrator,grant})).denied,true);
+  assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_deletion_fences').all(),[]);
+  assert.ok(calls.every(call=>call.op!=='datasets.unregister'));
+});
