@@ -246,7 +246,9 @@ export function terminalUI(store,toast){
     button.disabled=true;let pendingOpen=null;
     try{
       const entry=button.id.startsWith('terminal-data-')?'data':button.id.startsWith('terminal-root-')?'host':knownTarget?entryOf(knownTarget):'development';
-      const target=terminalLaunchContext({machine:knownTarget?.machine??document.querySelector(entry==='data'?'[name=dataset-machine]':'[name=terminal-machine]')?.value,project:knownTarget?.project??document.querySelector('[name=workspace-project]')?.value,role:store.principal?.role,entry});
+      const projectControl=document.querySelector('[name=workspace-project]');
+      const selectedProject=projectControl?.selectedOptions[0]?.dataset.project||projectControl?.value;
+      const target=terminalLaunchContext({machine:knownTarget?.machine??document.querySelector(entry==='data'?'[name=dataset-machine]':entry==='host'?'[name=workspace-machine]':'[name=terminal-machine]')?.value,project:knownTarget?.project??selectedProject,role:store.principal?.role,entry});
       if(paused(target))throw Error('维护中：不能新开或重连开发终端；已连接终端仍可断开或结束。');
       if(target.hostAdmin&&!window.confirm(`进入 ${target.machine} 的宿主机 ROOT 运维？可修改整机、影响他人任务，并能绕过 GPU 配额。`))return;
       const userId=store.principal?.userId,auth=store.authGeneration,workspace=workspaceGeneration;if(!userId)throw Error('请先登录。');
