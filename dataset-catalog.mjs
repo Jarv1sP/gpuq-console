@@ -1,4 +1,5 @@
 import {MACHINES,validUsername} from './dist/model.js';
+import {createHash} from 'node:crypto';
 
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 const ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -25,7 +26,7 @@ function removalPending(service,machine,dataset,version){
 // The old node accepts cleanup before its worker removes READY. A durable
 // exclusion is therefore written BEFORE dispatch, and survives a Portal swap.
 // Neither a failed HTTP response nor a missing operation ID proves no deletion.
-export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000,now=Date.now}={}){
+export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000,now=Date.now,allowEmptyPersonalRegistration=false}={}){
   const user=service.store.get(principal.userId),policy=JSON.stringify(user);
   const checkPolicy=()=>{
     const current=service.store.get(principal.userId);
@@ -126,6 +127,16 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
     checkPolicy();
     const excluded=exclusionRows(),proof=[];
     if(excluded.some(row=>row.machine===machine&&row.dataset===dataset&&versions.includes(row.version)))throw pendingRemoval();
+    // Only paired v1 nodes can accept this metadata-only case. An empty list
+    // never proves absence of payload: the node must bind and recheck the
+    // personal registry, upload intents and every dependency before moving it.
+    if(!versions.length&&version==null&&allowEmptyPersonalRegistration===true&&target?.versions.length===0&&target.ownerIds?.length===1){
+      const prefix='u-'+createHash('sha256').update(target.ownerIds[0]).digest('hex').slice(0,16)+'-';
+      if(dataset.startsWith(prefix)&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(dataset.slice(prefix.length))){
+        if(excluded.some(row=>row.machine===machine&&row.dataset===dataset))throw pendingRemoval();
+        return [];
+      }
+    }
     if(!versions.length||!target||versions.some(id=>!target.versions.some(value=>value.version===id)))throw lastCopy();
     for(const id of versions){
       const targetNames=names(machine,target,id),copies=[];
