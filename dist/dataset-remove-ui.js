@@ -173,7 +173,7 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog,readCatalog,
         let more=card.querySelector('.dataset-remove-more');
         if(!more){
           const id='dataset-remove-menu-'+(++serial);more=document.createElement('div');more.className='dataset-remove-more';more.dataset.removeOwned='';
-          more.innerHTML=`<button class="button quiet" type="button" data-remove-more popovertarget="${id}" aria-haspopup="menu">更多</button><div class="dataset-remove-options" id="${id}" popover="auto" role="menu"><button class="button danger" type="button" data-remove-version role="menuitem">从 ${serverIdHTML(target.machine)} 删除此版本</button><button class="button danger" type="button" data-remove-dataset role="menuitem">从 ${serverIdHTML(target.machine)} 删除整个数据集</button></div>`;
+          more.innerHTML=`<button class="button quiet" type="button" data-remove-more popovertarget="${id}" aria-haspopup="menu">${card.classList.contains('v3-server')?'移除':'更多'}</button><div class="dataset-remove-options" id="${id}" popover="auto" role="menu"><button class="button danger" type="button" data-remove-version role="menuitem">从 ${serverIdHTML(target.machine)} 删除此版本</button><button class="button danger" type="button" data-remove-dataset role="menuitem">从 ${serverIdHTML(target.machine)} 删除整个数据集</button></div>`;
           (card.querySelector('[data-dataset-more-slot]')||card.querySelector('.dataset-card-heading')).append(more);
         }
         const blocked=api.blocked(target),maintenance=maintenanceFor(store.data?.operationalMaintenance,target.machine);

@@ -40,6 +40,10 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `--prep` | `#256083` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 数据准备状态 |
 | `--err` | `#b73b3b` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 失败状态 |
 | `--queue` | `#80601a` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 排队/等待状态 |
+| `--v3-fetch` | `#6CB4FF` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3` | 取回中的空心缓存标记 |
+| `--v3-warn` | `#E8B04B` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3` | 存入中、未存入或待确认 |
+| `--v3-run` | `#3DD68C` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3` | 当前所选服务器圆点 |
+| `--v3-bad` | `#FF6B6B` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3` | 已确认失败的菱形标记 |
 | `--primary` | `var(--accent,#202023)` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 主操作底色 |
 | `--on-primary` | `#fff` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 主操作文字 |
 | `--d-bg` | `var(--bg)` | [datasets.css](../dist/datasets.css) · `.sb #page-datasets,.sb #page-transfers` | 数据集页面底色映射 |
@@ -306,7 +310,10 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作 | 失联不重放，writerToken仅内存 |
-| `.dataset-matrix` / `.dataset-card` / `.dataset-volume` | [datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 位置矩阵/手机卡片，不省掉版本/所属用户 | 表格角色/列标题，数量右对齐等宽数字 |
+| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
+| `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；容量条只取已确认 capacity | filesystemBytes/availableBytes 计算实际数据盘已用比例；读不到不画 0%；长 ID 提示完整值；手机内部横向滚动 |
+| `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
+| `.v3-upload` / `.v3-drop` / `.v3-route` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 先拖放/选择文件，再显示文件摘要、名称、上传服务器及一条探测路线 | 匿名 capabilities 不带票据；门户提供路线无效时显示待确认；保留原链接、云盘、服务器整理流程；原生 dialog 在可见父节点下 |
 | `.dataset-ground` / `.dataset-location-icon` / `.dataset-lifecycle` / `.dataset-flow-route` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-flow.css](../dist/dataset-flow.css) | 数据库原件、缓存、实际来源路线 | 图形有文字/完整版本复制；无字段不画已释放或百分比 |
 | `.dataset-cache-admin` / `.dataset-cache-gauge` / `.dataset-cache-preview` | [dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[dataset-flow.css](../dist/dataset-flow.css) | 管理员预算/水位/释放预览，不是实际磁盘水位 | 展开或明确刷新才查询；预览不删除 |
 | `.dataset-pin-slot` / `[data-cache-retention]` | [dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[manual-pin-state.js](../dist/manual-pin-state.js) | 管理员固定保留与同账号原请求恢复 | 先按pinId查owner/present，计数不证明归属 |
@@ -335,7 +342,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | --- | --- | --- |
 | 工作台 | [execution-ui.js](../dist/execution-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css)、[workspace.css](../dist/workspace.css) | projects / personal-project / r5 浏览器 |
 | 算力总览 | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css)、[gpu-allocation-ui.js](../dist/gpu-allocation-ui.js) | resources / resource-ids / allocation |
-| 数据集与添加数据 | [datasets-ui.js](../dist/datasets-ui.js)、[dataset-flow.js](../dist/dataset-flow.js)、[dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[datasets.css](../dist/datasets.css)、[dataset-flow.css](../dist/dataset-flow.css) | datasets / dataset-upload / dataset-remove |
+| 数据集与上传数据 | [datasets-ui.js](../dist/datasets-ui.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css)、[datasets.css](../dist/datasets.css) | dataset-catalog-model / dataset-label-client / datasets / dataset-upload / dataset-remove |
 | 彻底删除对话框 | [dataset-full-delete-ui.js](../dist/dataset-full-delete-ui.js)、[dataset-full-delete-state.js](../dist/dataset-full-delete-state.js)、[dataset-remove.css](../dist/dataset-remove.css) | dataset-full-delete-ui 契约与浏览器 |
 | 数据集传输与导入页签 | [transfers-ui.js](../dist/transfers-ui.js)、[data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[cloud-import-ui.js](../dist/cloud-import-ui.js) | transfers-http / data-workspace / cloud-files / cloud-import |
 | 协作区 | [community-ui.js](../dist/community-ui.js)、[community.css](../dist/community.css) | community |

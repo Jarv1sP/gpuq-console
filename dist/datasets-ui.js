@@ -1,3 +1,4 @@
+import {warehouseWorkspaceHTML,datasetWarehouseView} from './dataset-warehouse-view.js';
 import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 import {scanBrowserDirectory,uploadBrowserDataset,confirmedDatasetUpload} from './dataset-upload.js';
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
@@ -102,6 +103,7 @@ export function uploadRouteHTML(route,machine,state){
 }
 export function datasetsUI(store,toast){
   const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,queryBusy=false,controller=null,active=null,machineIds='',uploadRoute=null,uploadState=null,lastScan=null,canRelay=false,catalog=null;
+  let initialCatalog=true;
   const actionPlaces=new WeakMap();
   const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   const current=expected=>expected===account();
@@ -111,20 +113,12 @@ export function datasetsUI(store,toast){
   const cloud=cloudImportUI(store,section,toast);
   datasetRemoveUI(store,section,toast,{reload:load});
   const cacheAdmin=datasetCacheAdminUI(store,section,toast);
+  const warehouse=datasetWarehouseView(store,section,toast,{refresh:load,cacheAdmin});
   new MutationObserver(()=>{
     if(document.body.dataset.room!=='datasets')section.querySelector('#dataset-add-dialog')?.close();
   }).observe(document.body,{attributes:true,attributeFilter:['data-room']});
-  function quota(){
-    const el=section.querySelector('#datasets-quota'),user=store.users?.find(row=>row.id===store.principal?.userId);if(!el||!user)return;
-    const number=value=>Number.isSafeInteger(value)&&value>=0?value:'—',used=store.usage(user.id);
-    el.innerHTML=`<div class="dataset-book"><div><span>我的总额度</span>${infoHTML('来源：当前账号任务记录；所有服务器共用总额度。排队也占额度，准备数据暂不占额度。','额度来源')}</div><strong class="mono">${number(used)} / ${number(user.total)} <small>张</small></strong></div>`;
-  }
-  function databaseLedger(catalog){
-    const node=section.querySelector('#datasets-database');if(!node)return;
-    const machines=[...new Set((catalog?.datasets||[]).flatMap(item=>(item.versions||[]).map(version=>databaseSummary(version).machine)).filter(Boolean))];
-    node.hidden=!machines.length;
-    node.innerHTML=machines.length?`<div class="dataset-book"><div><span>数据库</span>${infoHTML('原件所在服务器来自当前版本记录；是否保存完成，以每行的数据库状态为准。','数据库位置')}</div><strong>${machines.length===1?serverIdHTML(machines[0]):machines.length+' 台服务器'}</strong></div>`:'';
-  }
+  function quota(){}
+  function databaseLedger(){}
   function layoutMatrix(){
     const matrix=section.querySelector('.dataset-matrix');if(!matrix)return;
     const columns=Number(matrix.dataset.machineCount);
@@ -184,7 +178,7 @@ export function datasetsUI(store,toast){
       else if(!entry.open&&dialog.open)dialog.close();
     });
     entry.querySelector('summary').addEventListener('click',event=>{if(!machineAllowed(section.querySelector('[name=dataset-machine]')?.value))event.preventDefault();});
-    dialog.addEventListener('close',()=>{if(!section.contains(entry))return;entry.open=false;toolbar.prepend(controls);section.querySelector('#datasets-database').before(capacity);entry.querySelector('summary').focus({preventScroll:true});});
+    dialog.addEventListener('close',()=>{if(!section.contains(entry))return;entry.open=false;toolbar.prepend(controls);section.querySelector('#datasets-database').before(capacity);(document.querySelector('[data-v3-upload]')||entry.querySelector('summary')).focus({preventScroll:true});});
     dialog.addEventListener('click',event=>{if(event.target.closest('[data-dataset-add-close]'))dialog.close();});
   }
   function phase(state){
@@ -238,8 +232,8 @@ export function datasetsUI(store,toast){
     const valid=()=>token===generation&&current(expected)&&(section.querySelector('[name=dataset-machine]')?.value||null)===machine&&(machine===null||machineAllowed(machine));
     const status=section.querySelector('#datasets-status'),capacity=section.querySelector('#datasets-capacity');catalog=null;status.textContent='加载中…';capacity.hidden=!machine;capacity.innerHTML=datasetCapacityHTML(null,machine);databaseLedger(null);section.querySelector('#dataset-catalog').replaceChildren();
     try{await Promise.all([
-      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;catalog={...result,machine};section.querySelector('#dataset-catalog').innerHTML=datasetRows(catalog,{upload:active,machineAuthorized:!!machine});layoutMatrix();databaseLedger(result);cacheAdmin.render();status.textContent=catalogUpdatedText(result);}).catch(error=>{if(valid()){section.querySelector('#dataset-catalog').replaceChildren();status.textContent='目录未能确认：'+error.message;}}),
-      ...(machine?[store.call('datasets.capacity',{machine}).then(result=>{if(valid())capacity.innerHTML=datasetCapacityHTML(result,machine);}).catch(()=>{if(valid())capacity.innerHTML=datasetCapacityHTML(null,machine);})]:[])
+      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;catalog={...result,machine};warehouse.catalog(catalog);warehouse.capacitiesForOthers();status.textContent=result.partial?'部分目录待确认':'';cacheAdmin.render();}).catch(error=>{if(valid()){section.querySelector('#dataset-catalog').replaceChildren();status.textContent='目录未能确认：'+error.message;}}),
+      ...(machine?[store.call('datasets.capacity',{machine}).then(result=>{if(valid()){capacity.innerHTML=datasetCapacityHTML(result,machine);warehouse.capacity(result,machine);}}).catch(()=>{if(valid())capacity.innerHTML=datasetCapacityHTML(null,machine);})]:[])
     ]);}
     finally{if(token===generation){busy=false;controls();}}
   }
@@ -340,15 +334,13 @@ export function datasetsUI(store,toast){
     const machines=datasetAuthorizedMachines(store);
     const next=account(),ids=JSON.stringify(machines.map(m=>m.id));
     if(next!==identity){workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;catalog=null;identity=next;generation++;busy=false;machineIds='';
-      section.classList.add('datasets-unified');
-      section.innerHTML=`<nav class="data-room-tabs" aria-label="数据集内容"><a href="#datasets" aria-current="page">数据集</a><a href="#datasets/transfers">传输与导入</a></nav><div class="terminal-controls datasets-controls"><label><span>本次使用的服务器</span><select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新</button></div>
-        <div class="datasets-ledger-strip"><div id="datasets-quota"></div><div id="datasets-capacity" class="datasets-capacity" role="status">${datasetCapacityHTML(null,machines[0]?.id)}</div><div id="datasets-database" hidden></div></div>
-        <section class="dataset-library hero-frame" aria-labelledby="dataset-catalog-heading"><div class="dataset-frame-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="datasets-library-heading"><div class="dataset-title-label"><h3 id="dataset-catalog-heading">数据在哪里</h3>${infoHTML('原件不会被释放；只有已经存入数据库、并且没有训练在用的缓存才会释放。操作对应所选服务器，斜线表示目录未知。','数据库与缓存说明')}</div><div class="dataset-cache-legend" aria-label="缓存状态图例"><span data-cache-symbol="ready">缓存就绪</span><span data-cache-symbol="fetch">取回中</span><span data-cache-symbol="recoverable">可从数据库取回</span><span data-cache-symbol="database">数据库</span></div></div><div class="dataset-workflow-copy"><span class="dataset-copy-full">训练读取本机缓存；数据库长期保存原件，空闲缓存可以释放，用时自动取回。</span><span class="dataset-copy-compact">训练读取缓存；数据库保留原件。</span></div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div></section>${cacheAdminHTML(store.principal?.role==='admin')}
+      initialCatalog=true;section.classList.add('datasets-unified');
+      section.innerHTML=`${warehouseWorkspaceHTML()}
         <details id="datasets-add" class="datasets-add"><summary class="button primary">添加数据 <span class="dataset-add-hint">从电脑上传，或让服务器直接下载</span></summary><dialog id="dataset-add-dialog" class="dataset-add-sheet" aria-labelledby="dataset-add-title"><header class="dataset-sheet-head"><div class="copy-caption"><h2 id="dataset-add-title">添加数据</h2></div><button class="button quiet" type="button" data-dataset-add-close aria-label="关闭添加数据">关闭</button></header><div class="dataset-sheet-context"></div>
         <div class="dataset-source-tabs" role="tablist" aria-label="添加数据的方式">
-          <button type="button" role="tab" id="dataset-source-directory" data-dataset-source="directory" aria-controls="dataset-panel-directory" aria-selected="true"><span>本机目录</span></button>
+          <button type="button" role="tab" id="dataset-source-directory" data-dataset-source="directory" aria-controls="dataset-panel-directory" aria-selected="true"><span>电脑目录</span></button>
           <button type="button" role="tab" id="dataset-source-link" data-dataset-source="link" aria-controls="dataset-panel-link" aria-selected="false" tabindex="-1"><span>下载链接</span></button>
-          <button type="button" role="tab" id="dataset-source-workspace" data-dataset-source="workspace" aria-controls="dataset-panel-workspace" aria-selected="false" tabindex="-1"><span>个人数据空间</span></button>
+          <button type="button" role="tab" id="dataset-source-workspace" data-dataset-source="workspace" aria-controls="dataset-panel-workspace" aria-selected="false" tabindex="-1"><span>在服务器上整理</span></button>
         </div>
         <div id="dataset-panel-directory" data-dataset-panel="directory" role="tabpanel" aria-labelledby="dataset-source-directory">
         <form id="dataset-upload-form" aria-labelledby="dataset-upload-heading">
@@ -357,7 +349,7 @@ export function datasetsUI(store,toast){
           <div class="field dataset-route-choice"><div class="dataset-field-label"><label for="dataset-via-input">上传通道</label>${infoHTML('自动优先使用已授权直传；直传连接失败不会自动中转。大于 256 MiB 的中转需要额外确认。','上传通道说明')}</div><select id="dataset-via-input" name="dataset-via"><option value="automatic">自动 · 优先直传</option><option value="direct">只用直传</option><option value="relay">经门户中转</option></select></div>
           <div class="dataset-upload-fields">
             <div class="field"><div class="dataset-field-label"><label for="dataset-name-input">数据集名称</label></div><input id="dataset-name-input" name="dataset-name" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" placeholder="my-data" aria-describedby="dataset-name-help" required><small id="dataset-name-help">1–40 位字母、数字、下划线或连字符。</small></div>
-            <div class="field"><div class="dataset-field-label"><label for="dataset-directory-input">本机目录</label></div><div class="dataset-directory-control"><input id="dataset-directory-input" type="file" name="dataset-directory" webkitdirectory multiple aria-label="选择文件夹" aria-describedby="dataset-directory-help dataset-directory-selection"><label id="dataset-directory-picker" class="button" for="dataset-directory-input">选择文件夹</label><span id="dataset-directory-selection" aria-live="polite">尚未选择</span></div><small id="dataset-directory-help">选择整个目录；网页上传不包含空目录。</small></div>
+            <div class="field"><div class="dataset-field-label"><label for="dataset-directory-input">电脑目录</label></div><div class="dataset-directory-control"><input id="dataset-directory-input" type="file" name="dataset-directory" webkitdirectory multiple aria-label="选择文件夹" aria-describedby="dataset-directory-help dataset-directory-selection"><label id="dataset-directory-picker" class="button" for="dataset-directory-input">选择文件夹</label><span id="dataset-directory-selection" aria-live="polite">尚未选择</span></div><small id="dataset-directory-help">选择整个目录；网页上传不包含空目录。</small></div>
           </div>
           <div id="dataset-relay-warning" class="dataset-relay-warning" hidden><label><input type="checkbox" name="dataset-relay-consent"><span>我确认经门户中转上传这 <strong id="dataset-relay-size"></strong> 数据</span></label>${infoHTML('中转带宽由所有用户共享，速度可能较慢。此确认不会开启直传，也不会在直传失败后自动切换。','大文件中转说明')}</div>
           <div class="file-actions dataset-upload-actions"><button class="button primary" type="submit" id="dataset-upload-start">上传 / 继续</button><button class="button" type="button" id="dataset-upload-pause" hidden>暂停传输</button><button class="button quiet" type="button" id="dataset-upload-query" hidden>重新查询</button><button class="button quiet" type="button" id="dataset-upload-retry-direct" hidden>重试直传</button><button class="button quiet" type="button" id="dataset-upload-relay" hidden>同意经门户中转</button><button class="button" type="button" id="dataset-upload-discard" hidden>取消未完成上传</button></div>
@@ -367,6 +359,7 @@ export function datasetsUI(store,toast){
         <div id="dataset-panel-link" data-dataset-panel="link" role="tabpanel" aria-labelledby="dataset-source-link" hidden>${cloudImportHTML(store.principal?.role==='admin')}<p class="datasets-next">下载完成只代表文件已到个人空间，尚未发布训练版本。</p><button class="button" type="button" id="dataset-organize-next">下一步：手动整理与发布</button></div>
         <div id="dataset-panel-workspace" data-dataset-panel="workspace" role="tabpanel" aria-labelledby="dataset-source-workspace" hidden>${dataWorkspaceHTML()}</div></dialog></details>`;
       installAddSheet();
+      warehouse.install();
       for(const note of section.querySelectorAll('.dataset-upload-heading p,.dataset-upload-notes p,.dataset-route>p,.field>small,.data-workspace-card>p.muted,.data-workspace-terminal p.muted,#data-workspace-publish-form>p.muted,.data-workspace-footnote,.datasets-next,.cloud-import>p.muted'))discloseInfo(note,'数据操作说明');
       for(const field of section.querySelectorAll('.field')){
         const help=field.querySelector(':scope>.ui-info');if(!help)continue;
@@ -402,13 +395,14 @@ export function datasetsUI(store,toast){
       const select=section.querySelector('[name=dataset-machine]'),selected=select.value,changed=machineIds!=='';
       select.innerHTML=machines.length?machines.map(m=>`<option value="${esc(m.id)}">${esc(m.id)}</option>`).join(''):'<option value="">仅浏览</option>';
       if(machines.some(m=>m.id===selected))select.value=selected;
-      else if(selected){workspace.reset();cloud.reset(false);document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));controller?.abort();active=null;section.querySelector('#data-workspace-files-list').replaceChildren();section.querySelector('#cloud-import-list').replaceChildren();section.querySelector('#data-workspace-status').textContent='服务器授权已改变；请重新确认当前机器。';section.querySelector('#cloud-import-status').textContent='服务器授权已改变；请刷新当前机器的导入进度。';}
+      else if(!selected&&machines.some(m=>m.id===document.querySelector('[name=workspace-machine]')?.value))select.value=document.querySelector('[name=workspace-machine]').value;
+      else if(selected){warehouse.reset();workspace.reset();cloud.reset(false);document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));controller?.abort();active=null;section.querySelector('#data-workspace-files-list').replaceChildren();section.querySelector('#cloud-import-list').replaceChildren();section.querySelector('#data-workspace-status').textContent='服务器授权已改变；请重新确认当前机器。';section.querySelector('#cloud-import-status').textContent='服务器授权已改变；请刷新当前机器的导入进度。';}
       // The catalog spans all authorized machines: even removal of a different
       // machine must invalidate old rows and any in-flight aggregate response.
-      if(changed){generation++;busy=false;catalog=null;section.querySelector('#dataset-catalog').replaceChildren();section.querySelector('#datasets-capacity').innerHTML=datasetCapacityHTML(null,select.value);section.querySelector('#datasets-status').textContent=machines.length?'机器授权已更新，请重新加载目录。':'暂无服务器使用授权，可加载目录浏览。';}
+      if(changed){warehouse.reset();initialCatalog=true;generation++;busy=false;catalog=null;section.querySelector('#dataset-catalog').replaceChildren();section.querySelector('#datasets-capacity').innerHTML=datasetCapacityHTML(null,select.value);section.querySelector('#datasets-status').textContent=machines.length?'机器授权已更新，请重新加载目录。':'暂无服务器使用授权，可加载目录浏览。';}
       section.querySelector('#datasets-capacity').hidden=!machines.length;
       machineIds=ids;
     }
-    if(!uploadRoute)showUploadRoute();quota();controls();cacheAdmin.render();
+    if(!uploadRoute)showUploadRoute();quota();controls();cacheAdmin.render();warehouse.render();if(initialCatalog&&store.production&&store.principal){initialCatalog=false;queueMicrotask(load);}
   };
 }

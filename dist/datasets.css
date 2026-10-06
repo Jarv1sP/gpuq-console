@@ -424,10 +424,10 @@
 @media(max-width:759px){.sb:has(#page-datasets:not([hidden])) .help-links{display:none}}
 /* All dataset disclosures share one static marker and a centred label. */
 #page-datasets{--dataset-block-gap:12px}
-#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)>summary{display:flex;align-items:center;gap:8px;list-style:none;line-height:1.7;margin:0;padding:0}
-#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)>summary::-webkit-details-marker{display:none}
-#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)>summary::before{content:'▸';display:block;flex:none;width:12px;text-align:center;line-height:1;transition:none}
-#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)[open]>summary::before{content:'▾'}
+#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending,.v3-retention,.v3-policy)>summary{display:flex;align-items:center;gap:8px;list-style:none;line-height:1.7;margin:0;padding:0}
+#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending,.v3-retention,.v3-policy)>summary::-webkit-details-marker{display:none}
+#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending,.v3-retention,.v3-policy)>summary::before{content:'▸';display:block;flex:none;width:12px;text-align:center;line-height:1;transition:none}
+#page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending,.v3-retention,.v3-policy)[open]>summary::before{content:'▾'}
 #page-datasets :is(.dataset-disclosure-label,.dataset-version-caption){min-width:0}
 #page-datasets :is(.cloud-file-details,#cloud-files-pending){margin:0;padding:0}
 #page-datasets :is(.cloud-file-details,#cloud-files-pending)[open]>summary{margin-bottom:var(--dataset-block-gap)}
