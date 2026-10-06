@@ -2300,11 +2300,84 @@ class DatasetCache:
         for area in ('ready', '.staging', '.leases', '.provenance', '.retirements', '.reopens'):
             if names(self.root / area / dataset):
                 raise CacheError('empty registration still has payload or protected dependencies')
-        # Reservations deliberately carry no dataset name. An orphan cannot be
-        # proven unrelated; wait for normal uploads to finish/discard rather
-        # than guessing its owner or deleting a future upload's registration.
-        if names(self.root / '.upload-reservations'):
-            raise CacheError('unconfirmed upload reservations prevent empty registration removal')
+        # Reservation bodies have no owner/name. Only a bounded reverse proof
+        # through service-private session identities may exclude another
+        # dataset's reservation. Never refund or repair any upload here.
+        reservations = names(self.root / '.upload-reservations')
+        if reservations:
+            wanted = set(reservations)
+            uploads = self.root / '.uploads'
+            parents = names(uploads)
+            members, matched, scanned = {}, {}, 0
+            before = len(evidence)
+            for parent in parents:
+                if parent == 'bindings':
+                    continue
+                _identifier(parent, HASH_RE)
+                members[parent] = names(uploads / parent)
+                for upload in members[parent]:
+                    scanned += 1
+                    if scanned > 10000:
+                        raise CacheError('upload reservation proof exceeds its session budget')
+                    if not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', upload):
+                        raise CacheError('unconfirmed upload reservation session identity')
+                    try:
+                        session = read(uploads / parent / upload / 'session.json')
+                    except FileNotFoundError:
+                        raise CacheError('unconfirmed upload reservation session is missing') from None
+                    user = session.get('userId') if isinstance(session, dict) else None
+                    if (not isinstance(user, str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)', user)
+                            or parent != hashlib.sha256(user.encode()).hexdigest()
+                            or session.get('uploadId') != upload):
+                        raise CacheError('unconfirmed upload reservation session ownership')
+                    key = hashlib.sha256(json.dumps([user, upload], separators=(',', ':')).encode()).hexdigest()+'.json'
+                    if key not in wanted:
+                        del evidence[before:]
+                        continue
+                    # Same immutable identity and resource formula as upload
+                    # load(), without its workspace/quota/effective side effects.
+                    if (type(session.get('schema')) is not int or session['schema'] != 1
+                            or not isinstance(session.get('name'), str)
+                            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,39}', session['name'])
+                            or session.get('state') not in {'RECEIVING_MANIFEST', 'SEALING', 'UPLOADING', 'PUBLISHING', 'READY', 'DISCARDING', 'DISCARDED', 'FAILED'}
+                            or any(type(session.get(k)) is not int or session[k] < 0 for k in ('manifestBytes', 'totalBytes', 'entries', 'reserveBytes'))
+                            or not 1 <= session['manifestBytes'] <= MAX_JSON_BYTES
+                            or session['entries'] > MAX_ENTRIES or session['totalBytes'] > 2**63-1
+                            or session['reserveBytes'] != session['totalBytes']+session['manifestBytes']*4+session['entries']*8192+65536
+                            or not isinstance(session.get('manifestSha256'), str) or not HASH_RE.fullmatch(session['manifestSha256'])):
+                        raise CacheError('unconfirmed upload reservation resource identity')
+                    lane = session.get('archiveAdmission')
+                    if lane is not None and (not isinstance(lane, dict)
+                            or set(lane) != {'schema', 'transferId', 'targetMachine', 'authority', 'sourceMachine', 'reference'}
+                            or type(lane.get('schema')) is not int or lane['schema'] != 1 or lane['transferId'] != upload
+                            or any(not isinstance(lane.get(k), str) or not ID_RE.fullmatch(lane[k]) for k in ('targetMachine', 'authority', 'sourceMachine'))
+                            or lane['sourceMachine'] == lane['targetMachine']
+                            or not isinstance(lane['reference'], dict) or set(lane['reference']) != {'kind', 'dataset', 'version'}
+                            or lane['reference']['kind'] != 'datasets'
+                            or not isinstance(lane['reference']['dataset'], str) or not ID_RE.fullmatch(lane['reference']['dataset'])
+                            or not isinstance(lane['reference']['version'], str) or not HASH_RE.fullmatch(lane['reference']['version'])):
+                        raise CacheError('unconfirmed upload reservation archive identity')
+                    target = 'u-'+hashlib.sha256(user.encode()).hexdigest()[:16]+'-'+session['name']
+                    if session.get('dataset', target) != target or ('version' in session and
+                            (not isinstance(session['version'], str) or not HASH_RE.fullmatch(session['version']))):
+                        raise CacheError('unconfirmed upload reservation namespace')
+                    if key in matched:
+                        raise CacheError('duplicate upload reservation session identity')
+                    value = read(self.root / '.upload-reservations' / key)
+                    full = {'bytes': session['reserveBytes'], 'inodes': session['entries']+16}
+                    sealed = {'bytes': session['reserveBytes']-session['totalBytes'], 'inodes': session['entries']+16}
+                    if (not isinstance(value, dict) or set(value) != {'bytes', 'inodes'}
+                            or any(type(v) is not int or not 0 <= v <= 2**63-1 for v in value.values())
+                            or value not in (full, sealed)):
+                        raise CacheError('unconfirmed upload reservation budget')
+                    if target == dataset:
+                        raise CacheError('upload reservation prevents empty registration removal')
+                    matched[key] = target
+                    del evidence[before:]  # Unrelated progress is not a static CAS dependency.
+            if (set(matched) != set(reservations) or names(uploads) != parents
+                    or any(names(uploads / parent) != items for parent, items in members.items())
+                    or names(self.root / '.upload-reservations') != reservations):
+                raise CacheError('unconfirmed upload reservations prevent empty registration removal')
         for name in names(self.root / '.tiers' / dataset):
             if not name.endswith('.json'):
                 raise CacheError('empty registration has unknown tier metadata')
