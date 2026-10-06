@@ -63,7 +63,10 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
   }
   const exclusionRows=()=>service.db.prepare('SELECT * FROM dataset_removal_exclusions').all();
   const hasCopy=(rows,pending)=>rows.find(row=>row.machine===pending.machine)?.datasets.some(item=>item.dataset===pending.dataset&&item.versions?.some(value=>value.version===pending.version&&complete(value)));
-  const absent=(rows,pending)=>!rows.find(row=>row.machine===pending.machine)?.datasets.some(item=>item.dataset===pending.dataset&&item.versions.some(value=>value.version===pending.version));
+  const absent=(rows,pending)=>{
+    const listing=rows.find(row=>row.machine===pending.machine);
+    return !!listing&&!listing.datasets.some(item=>item.dataset===pending.dataset&&item.versions.some(value=>value.version===pending.version));
+  };
   async function reconcile(rows,pending){
     const remove=service.db.prepare('DELETE FROM dataset_removal_exclusions WHERE id=?');
     // A confirmed absence releases only this missing-ID record, even when an

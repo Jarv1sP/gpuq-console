@@ -9,7 +9,7 @@ import {inspectGeometry} from './layout-geometry.mjs';
 const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):MACHINES;
 const origin='https://offline-remove.test',shots=join(process.env.UI_SCREENSHOTS||'/tmp/stargate-remove-ui','dataset-remove');
 const V1='a'.repeat(64),V2='b'.repeat(64),V3='c'.repeat(64),localDataset='local-scans',errors=[],external=[],checks=[];
-const geometry=[];
+const geometry=[],wordGeometry=[];
 const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
 await mkdir(shots,{recursive:true});
 try{
@@ -57,7 +57,25 @@ try{
   });
   const load=async()=>{await page.goto(origin+'/?fixture-reload='+(++navigation)+'#datasets');await page.locator('#datasets-refresh').waitFor();await page.locator('#datasets-refresh').click();await page.locator('.dataset-card').first().waitFor();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);};
   const card=version=>page.locator('.dataset-card').filter({has:page.locator('[data-use-dataset=scans][data-version="'+version+'"]')});
-  const capture=async name=>{for(const width of [1440,390,320]){await page.setViewportSize({width,height:1000});if(name==='unknown-receipt'||name==='lost-submit'||name.startsWith('server-')&&!await page.locator('#dataset-remove-dialog[open]').count())await page.locator('#dataset-removal-records').scrollIntoViewIfNeeded();await page.evaluate(async()=>{await document.fonts.ready;document.activeElement?.blur();for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(requestAnimationFrame);});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));const controls=await page.evaluate(()=>[...document.querySelectorAll('#dataset-remove-dialog[open] .button,#dataset-removal-records .button,.dataset-remove-more .button')].map(element=>{const rect=element.getBoundingClientRect();return {text:element.textContent,height:rect.height,width:rect.width,minimum:innerWidth<=759?44:32};}).filter(rect=>rect.width&&rect.height));assert(controls.every(rect=>rect.height>=rect.minimum),JSON.stringify({name,width,controls}));const modal=await page.locator('#dataset-remove-dialog[open]').count();const result=await inspectGeometry(page,{roots:modal?['#dataset-remove-dialog[open]']:role==='admin'?['#dataset-catalog']:['#page-datasets'],controls:'.button,input,select',containment:'input,.button,.dataset-remove-facts>div,.dataset-remove-blocked',leftEdges:modal?[['.dataset-remove-facts>div:first-child dt','.dataset-remove-facts>div:last-child dt']]:[],helpContexts:modal?['#dataset-remove-dialog[open] [data-copy-help]']:['#dataset-removal-records [data-copy-help]'],buttonRows:modal?[{parent:'.dataset-remove-dialog .modal-actions'}]:[],scrollPanels:modal?['#dataset-remove-dialog[open]']:[]});geometry.push({name,role,...result});assert.equal(result.pass,true,JSON.stringify({name,role,...result}));await page.screenshot({path:join(shots,name+'-'+role+'-'+width+'.png')});}};
+  async function assertRemovalWords(name,width){
+   const words=await page.evaluate(()=>[...document.querySelectorAll('.dataset-remove-blocked')].filter(node=>node.getClientRects().length&&!node.closest('dialog:not([open])')).flatMap(node=>{
+    const word='按机器删除',walker=document.createTreeWalker(node,NodeFilter.SHOW_TEXT);let text;
+    while((text=walker.nextNode())){
+     const offset=text.textContent.indexOf(word);if(offset<0)continue;
+     const characters=[...word].map((_,index)=>{const range=document.createRange();range.setStart(text,offset+index);range.setEnd(text,offset+index+1);const rect=range.getBoundingClientRect();return {top:rect.top,left:rect.left,right:rect.right,width:rect.width,height:rect.height};});
+     const rect=node.getBoundingClientRect();return [{word,characters,parent:{left:rect.left,right:rect.right}}];
+    }
+    return [];
+   }));
+   if(['last-copy-blocked','whole-last-copy-blocked','server-last_copy_unproven'].includes(name))assert.equal(words.length,1,JSON.stringify({name,width,words}));
+   for(const value of words){
+    assert.equal(value.characters.length,5);assert(value.characters.every(rect=>rect.width>0&&rect.height>0));
+    const tops=value.characters.map(rect=>rect.top);assert(Math.max(...tops)-Math.min(...tops)<=1,JSON.stringify({rule:'removal-word-wrap',name,width,...value}));
+    assert(value.characters.every(rect=>rect.left>=value.parent.left-1&&rect.right<=value.parent.right+1),JSON.stringify({rule:'removal-word-clipping',name,width,...value}));
+   }
+   wordGeometry.push({name,role,width,words});
+  }
+  const capture=async name=>{for(const width of [1440,390,320]){await page.setViewportSize({width,height:1000});if(name==='unknown-receipt'||name==='lost-submit'||name.startsWith('server-')&&!await page.locator('#dataset-remove-dialog[open]').count())await page.locator('#dataset-removal-records').scrollIntoViewIfNeeded();await page.evaluate(async()=>{await document.fonts.ready;document.activeElement?.blur();for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(requestAnimationFrame);});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));const controls=await page.evaluate(()=>[...document.querySelectorAll('#dataset-remove-dialog[open] .button,#dataset-removal-records .button,.dataset-remove-more .button')].map(element=>{const rect=element.getBoundingClientRect();return {text:element.textContent,height:rect.height,width:rect.width,minimum:innerWidth<=759?44:32};}).filter(rect=>rect.width&&rect.height));assert(controls.every(rect=>rect.height>=rect.minimum),JSON.stringify({name,width,controls}));const modal=await page.locator('#dataset-remove-dialog[open]').count();const result=await inspectGeometry(page,{roots:modal?['#dataset-remove-dialog[open]']:role==='admin'?['#dataset-catalog']:['#page-datasets'],controls:'.button,input,select',containment:'input,.button,.dataset-remove-facts>div,.dataset-remove-blocked',leftEdges:modal?[['.dataset-remove-facts>div:first-child dt','.dataset-remove-facts>div:last-child dt']]:[],helpContexts:modal?['#dataset-remove-dialog[open] [data-copy-help]']:['#dataset-removal-records [data-copy-help]'],buttonRows:modal?[{parent:'.dataset-remove-dialog .modal-actions'}]:[],scrollPanels:modal?['#dataset-remove-dialog[open]']:[]});geometry.push({name,role,...result});assert.equal(result.pass,true,JSON.stringify({name,role,...result}));await assertRemovalWords(name,width);await page.screenshot({path:join(shots,name+'-'+role+'-'+width+'.png')});}};
   const open=async(version,whole=false)=>{await card(version).locator('[data-remove-more]').click();await card(version).locator(whole?'[data-remove-dataset]':'[data-remove-version]').click();await page.locator('#dataset-remove-dialog').waitFor();};
   await load();
   if(role==='member'){
@@ -101,10 +119,10 @@ try{
     const before=calls.filter(x=>x.operation==='datasets.unregister').length,operations=ops.size;rejectSubmit=code;await open(V1);await page.locator('[data-remove-confirm]').click();await page.locator('#dataset-removal-records').filter({hasText:code==='LAST_COPY_UNPROVEN'?'为避免永久丢失':'这台服务器上的删除结果待确认'}).waitFor();
     assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,before+1);assert.equal(ops.size,operations);assert.equal(await page.locator('[data-removal-query],[data-removal-abandon],[data-removal-lookup]').count(),0);assert.doesNotMatch(await page.locator('#dataset-removal-records').textContent(),/删除失败|删除请求结果未确认|重试/);await page.clock.runFor(30000);assert.equal(calls.filter(x=>x.operation==='datasets.unregister').length,before+1);await capture('server-'+code.toLowerCase());await page.locator('[data-removal-dismiss]').click();await page.locator('#dataset-removal-records').waitFor({state:'detached'});
    }
-   checks.push('database original fact','other complete copy fact','last copy disabled','whole mixed version disabled','node pending blocks repeat','authoritative server 409 no unknown/no retry');
+   checks.push('database original fact','other complete copy fact','last copy disabled','whole mixed version disabled','node pending blocks repeat','authoritative server 409 no unknown/no retry','atomic five-character action phrase stays on one line without clipping');
    checks.push('version scope','catalog alias resolves to the node registration name','no local registration cannot be removed','whole-name confirmation','2s then pause on leave','UNKNOWN no replay','lease FAILED reason','known receipt refresh','HTTP 400 bridge uncertainty stays locked','missing ID manual lookup','double-confirm abandon','other machines and datasets retained','cross-account isolation');
   }
   await context.unrouteAll({behavior:'ignoreErrors'});await context.close();
  }
 }finally{await browser.close();}
-assert.deepEqual(errors,[]);assert.deepEqual(external,[]);await writeFile(join(shots,'checks.json'),JSON.stringify({status:'passed',checks,geometry,errors,external},null,2));console.log(JSON.stringify({status:'passed',screenshots:shots,checks}));
+assert.deepEqual(errors,[]);assert.deepEqual(external,[]);await writeFile(join(shots,'checks.json'),JSON.stringify({status:'passed',checks,geometry,wordGeometry,errors,external},null,2));console.log(JSON.stringify({status:'passed',screenshots:shots,checks}));

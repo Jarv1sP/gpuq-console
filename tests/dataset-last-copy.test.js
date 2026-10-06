@@ -100,6 +100,13 @@ test('authoritative absent releases null-ID exclusion; unknown and failed reads 
   f.fail(machine=>machine===A);await assert.rejects(f.remove(B),blocked);assert.equal(f.journal().length,1);
   f.fail(null);f.data.set(A,[]);f.put(C);await f.remove(B);assert(!f.journal().some(row=>row.machine===A));assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);
 });
+test('a machine omitted from the current inventory is not a trusted absence',async t=>{
+  const f=await fixture(t);f.writeFail(Error('lost'));await assert.rejects(f.remove(A));f.writeFail(null);
+  const retired=A+'-removed-from-inventory';f.service.db.prepare('UPDATE dataset_removal_exclusions SET machine=?').run(retired);
+  await datasetCatalogCall(f.service,actor,'datasets.catalog',{machine:B});
+  assert.equal(f.journal().length,1);assert.equal(f.journal()[0].machine,retired);assert.equal(f.journal()[0].operation_id,null);
+  assert(!f.calls.some(call=>call.machine===retired));
+});
 test('proven absence releases a null-ID record without trusting another unreadable receipt',async t=>{
   const f=await fixture(t);f.put(C);f.writeFail(Error('lost'));await assert.rejects(f.remove(A));f.writeFail(null);
   await f.remove(B);assert.equal(f.journal().length,2);f.data.set(A,[]);
