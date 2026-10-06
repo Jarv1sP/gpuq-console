@@ -9,7 +9,16 @@ export const layoutWidths = [...new Set([
 export const layoutHeights = [700, 900, 1200];
 export const layoutZooms = [1, 1.25, 1.5];
 
+export async function waitForFontLayout(page) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    // Let font layout and ResizeObserver delivery settle before measuring.
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+}
+
 export async function inspectGeometry(page, specification = {}) {
+  await waitForFontLayout(page);
   return page.evaluate(spec => {
     const tolerance = 1;
     const failures = [];
