@@ -40,11 +40,11 @@ class ProjectLifecycle:
         return {'protocol': PROTOCOL, 'project': project, 'state': value['state'], 'revision': value['revision'],
                 **{k: value[k] for k in ('updatedAt', 'retiredAt', 'retirementId', 'manifestSha256') if k in value}}
 
-    def writer_blockers(self, args):
+    def writer_blockers(self, args, *, synchronization=True):
         blockers = []
         # Caller holds the exact project publication lock. Do not reacquire
         # it on another descriptor and misclassify our own lock as a writer.
-        try: self.ops.writable(args, lifecycle=False, publication_lock=False)
+        try: self.ops.writable(args, lifecycle=False, publication_lock=False,synchronization=synchronization)
         except (OSError, ValueError): blockers.append({'kind': 'writer', 'reason': 'Draft writer or outcome is unconfirmed'})
         pending = self.ops.pending(args)
         if pending.get('state') in ('PUBLISHING', 'UNKNOWN') or self.ops.active(args):

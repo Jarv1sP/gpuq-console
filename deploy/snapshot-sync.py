@@ -21,6 +21,67 @@ import uuid
 CHUNK = 1024**2
 HASH = re.compile(r'[a-f0-9]{64}\Z')
 UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z')
+CANCEL_PROTOCOL = 'project-sync-cancel-v1'
+
+
+def validate_source(source):
+    if (not isinstance(source,dict) or len(json.dumps(source))>4096
+            or (source.get('kind')=='git' and (set(source)!={'kind','commit'} or not isinstance(source.get('commit'),str) or not re.fullmatch(r'[a-f0-9]{40}(?:[a-f0-9]{24})?',source['commit'])))
+            or (source.get('kind')=='release' and (set(source)!={'kind','machine','project','release'} or not isinstance(source.get('machine'),str) or not 1<=len(source['machine'])<=128 or not isinstance(source.get('project'),str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',source['project']) or not isinstance(source.get('release'),str) or not HASH.fullmatch(source['release'])))
+            or source.get('kind') not in ('git','release')):
+        raise ValueError('Invalid or incomplete code sync receipt provenance')
+
+
+def cancellation(ops, args, session):
+    """Read-only proof. A raw CANCELED state never unlocks a draft.
+
+    The original receipt and snapshot are retained. The service-private marker
+    permanently fences this UUID, including after an acknowledgement is lost.
+    """
+    s = sys.modules[type(ops.store).__module__]
+    key = session.get('key')
+    if not isinstance(key, str) or not UUID.fullmatch(key):
+        return None
+    path = ops.folder / (ops.key(args) + '.sync-canceled-' + key + '.json')
+    if not path.exists() and not path.is_symlink():
+        return None
+    user, project = ops.identity(args)
+    snapshot = session.get('session')
+    if (session.get('userId') != user or session.get('project') != project
+            or not isinstance(snapshot, str) or not UUID.fullmatch(snapshot)
+            or not isinstance(session.get('source'),dict)
+            or not isinstance(session.get('manifestSha256'),str) or not HASH.fullmatch(session['manifestSha256'])
+            or session.get('state') not in ('RECEIVING_MANIFEST', 'COPYING')):
+        raise ValueError('Code sync cancellation identity is unconfirmed')
+    root = s.private_dir(ops.n.ROOT / 'snapshot-sync')
+    folder = s.private_dir(root / snapshot)
+    info = folder.lstat()
+    expected = {'protocol': CANCEL_PROTOCOL, 'state': 'CANCELED', 'userId': user,
+                'project': project, 'key': key, 'snapshotId': snapshot,
+                'source': session['source'], 'manifestSha256': session['manifestSha256'],
+                'revision': s.digest(session),
+                'snapshotIdentity': [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid],
+                'preservesBytes': True}
+    if s.read_json(path, limit=16384) != expected:
+        raise ValueError('Code sync cancellation proof changed; retain the original UUID')
+    return expected
+
+
+def observation(ops, args):
+    s = sys.modules[type(ops.store).__module__]
+    s.private_dir(ops.folder)
+    session = s.read_json(ops.folder / (ops.key(args) + '.sync.json'), limit=16384)
+    user,project=ops.identity(args)
+    required={'userId','project','key','session','state','manifestBytes','manifestSha256','manifestOffset','totalBytes','entries','source'}
+    if (not isinstance(session,dict) or set(session)!=required or session.get('userId')!=user or session.get('project')!=project
+            or any(not isinstance(session.get(k),str) or not UUID.fullmatch(session[k]) for k in ('key','session'))
+            or session.get('state') not in ('RECEIVING_MANIFEST','COPYING','CODE_READY')
+            or not isinstance(session.get('manifestSha256'),str) or not HASH.fullmatch(session['manifestSha256'])
+            or any(type(session.get(k)) is not int or not 0<=session[k]<=2**53-1 for k in ('manifestBytes','manifestOffset','totalBytes','entries'))
+            or not 1<=session['manifestBytes']<=48*CHUNK or session['manifestOffset']>session['manifestBytes']):
+        raise ValueError('Invalid or incomplete code sync receipt identity')
+    validate_source(session['source'])
+    return session, cancellation(ops, args, session)
 
 
 class SnapshotSync:
@@ -265,30 +326,98 @@ class SnapshotSync:
 
     def session(self, args):
         self.ops.identity(args)
-        value=json.loads(self.receipt(args).read_text())
+        value,_=observation(self.ops,args)
         if value.get('key')!=args.get('key') or value.get('userId')!=args['userId'] or value.get('project')!=args['project']:
             raise ValueError('Code sync identity mismatch; repeat the original command')
-        folder=self.root/value['session']
+        if (not isinstance(value.get('session'),str) or not UUID.fullmatch(value['session'])
+                or value.get('state') not in ('RECEIVING_MANIFEST','COPYING','CODE_READY')
+                or not isinstance(value.get('manifestSha256'),str) or not HASH.fullmatch(value['manifestSha256'])
+                or not isinstance(value.get('source'),dict)):
+            raise ValueError('Invalid code sync receipt identity')
+        s=sys.modules[type(self.ops.store).__module__]
+        s.private_dir(self.root)
+        folder=s.private_dir(self.root/value['session'])
         return value,folder
 
-    def summary(self, session):
-        return {k:session[k] for k in ('state','project','key','manifestOffset','source','manifestSha256') if k in session}
+    def summary(self, session, canceled=None):
+        s=sys.modules[type(self.ops.store).__module__]
+        return {**{k:session[k] for k in ('state','project','key','manifestOffset','source','manifestSha256') if k in session},
+                'cancelProtocol':1,'snapshotId':session['session'],'revision':s.digest(session),
+                **({'state':'CANCELED','preservesBytes':True} if canceled is not None else {})}
+
+    def publication_quiet(self,args):
+        """No process is stopped. Unknown systemd/cgroup observations reject."""
+        import subprocess
+        unit='gpuq-project-'+self.ops.key(args)[:32]+'.service'
+        result=subprocess.run(['/usr/bin/systemctl','--user','show',unit,
+            '--property=LoadState,ActiveState,SubState,MainPID,ControlGroup'],
+            env=self.n.ENV,text=True,capture_output=True,timeout=5)
+        props=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        if set(props)!={'LoadState','ActiveState','SubState','MainPID','ControlGroup'}:return False
+        if result.returncode and not (result.returncode==1 and props['LoadState']=='not-found'):return False
+        quiet=props['ActiveState'] in ('inactive','failed') or (props['ActiveState']=='active' and props['SubState']=='exited')
+        if props['MainPID']!='0' or not quiet:return False
+        group=props['ControlGroup']
+        if not group:return props['LoadState'] in ('loaded','not-found')
+        if not group.startswith('/') or '..' in Path(group).parts or Path(group).name!=unit:return False
+        path=Path('/sys/fs/cgroup')/group.lstrip('/')
+        try:events=dict(line.split() for line in (path/'cgroup.events').read_text().splitlines())
+        except FileNotFoundError:return not path.exists()
+        return events.get('populated')=='0'
+
+    def cancel(self,args,session,folder):
+        s=sys.modules[type(self.ops.store).__module__]
+        initial=folder.lstat()
+        identity=lambda info:[info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid]
+        initial_identity=identity(initial)
+        if any(args.get(k)!=value for k,value in (
+            ('snapshotId',session['session']),('source',session['source']),
+            ('manifestSha256',session['manifestSha256']),('revision',s.digest(session)))):
+            raise ValueError('Code sync changed; inspect the original UUID before cancellation')
+        proof=cancellation(self.ops,args,session)
+        if proof is not None:return self.summary(session,proof)
+        if session['state'] not in ('RECEIVING_MANIFEST','COPYING'):
+            raise ValueError('Only an unfinished code synchronization can be canceled')
+        user,project=self.ops.identity(args)
+        with self.ops.store.locked(user,project):
+            path,_=self.ops.store._project(user,project)
+            life=self.ops.lifecycle()
+            blockers=life.writer_blockers(args,synchronization=False)+life.history_blockers(args,path)
+            if blockers or not self.publication_quiet(args):
+                raise ValueError('Project has an active or unconfirmed writer/history; nothing was stopped')
+            # Re-read under both locks before the sole durable write. Payload,
+            # original receipt, manifest and index are never moved or removed.
+            current,current_folder=self.session(args)
+            if current!=session or identity(current_folder.lstat())!=initial_identity:
+                raise ValueError('Code sync changed during cancellation')
+            info=folder.lstat()
+            proof={'protocol':CANCEL_PROTOCOL,'state':'CANCELED','userId':user,'project':project,
+                   'key':session['key'],'snapshotId':session['session'],'source':session['source'],
+                   'manifestSha256':session['manifestSha256'],'revision':s.digest(session),
+                   'snapshotIdentity':identity(info),
+                   'preservesBytes':True}
+            s.atomic_json(self.ops.folder/(self.ops.key(args)+'.sync-canceled-'+session['key']+'.json'),proof)
+            return self.summary(session,cancellation(self.ops,args,session))
 
     def import_code(self, operation, args):
         action=operation.split('.')[-1]
         allowed={'userId','project','key'}|{'begin':{'manifestBytes','manifestSha256','totalBytes','entries','source'},
-            'manifest':{'offset','data'},'seal':set(),'status':{'path'},'chunk':{'path','offset','data'},'finish':set()}.get(action,set())
-        if action not in ('begin','manifest','seal','status','chunk','finish') or set(args)-allowed: raise ValueError('Invalid code sync fields')
+            'manifest':{'offset','data'},'seal':set(),'status':{'path'},'chunk':{'path','offset','data'},'finish':set(),
+            'cancel':{'snapshotId','source','manifestSha256','revision'}}.get(action,set())
+        if action not in ('begin','manifest','seal','status','chunk','finish','cancel') or set(args)-allowed: raise ValueError('Invalid code sync fields')
         if not isinstance(args.get('key'),str) or not UUID.fullmatch(args['key']): raise ValueError('Code sync requires a UUID retry key')
         with self.ops.guard(args):
             if action=='begin': return self.begin(args)
             session,folder=self.session(args)
+            canceled=cancellation(self.ops,args,session)
             if action=='status':
-                out=self.summary(session)
+                out=self.summary(session,canceled)
                 if args.get('path') is not None:
-                    if session['state']!='COPYING': raise ValueError('Seal the manifest before inspecting files')
+                    if canceled is not None or session['state']!='COPYING': raise ValueError('Seal the manifest before inspecting files; canceled syncs are read-only')
                     out['file']=self.copy_status(args,folder,args['path'])
                 return out
+            if action=='cancel':return self.cancel(args,session,folder)
+            if canceled is not None:raise ValueError('Code synchronization was permanently canceled; no old-key writes')
             if session['state']=='CODE_READY':
                 if action=='finish': return self.summary(session)
                 raise ValueError('Code snapshot is already complete; no further sync writes')
@@ -371,11 +500,12 @@ class SnapshotSync:
         if not 1<=args['manifestBytes']<=48*CHUNK or args['entries']>self.ops.store.max_entries or args['totalBytes']>self.ops.store.max_bytes:
             raise ValueError('Code sync exceeds project limits')
         if not isinstance(args.get('manifestSha256'),str) or not HASH.fullmatch(args['manifestSha256']): raise ValueError('Invalid code manifest checksum')
-        source=args.get('source')
-        if not isinstance(source,dict) or source.get('kind') not in ('git','release') or len(json.dumps(source))>4096 or set(source)-{'kind','commit','machine','project','release'}: raise ValueError('Invalid code provenance')
+        validate_source(args.get('source'))
         receipt=self.receipt(args)
         if receipt.exists():
             session,_=self.session(args)
+            if cancellation(self.ops,args,session) is not None:
+                raise ValueError('Code synchronization was permanently canceled; no old-key writes')
             if any(session.get(k)!=args[k] for k in ('manifestBytes','manifestSha256','totalBytes','entries','source')): raise ValueError('Same sync key cannot change the snapshot')
             if session['state']=='RECEIVING_MANIFEST':
                 # Recover a crash after the durable fence but before the atomic
