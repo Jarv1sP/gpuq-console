@@ -53,12 +53,14 @@ test('guide covers merged workflow changes while keeping completion, permissions
   for(const token of ['sync git','sync code','sync data','CODE_READY','check-attr --source','缺少系统依赖','旧维护申请流程已停用'])assert.ok(chapters.get('troubleshooting').includes(token),token);
   assert.match(chapters.get('queue'),/退出码 75/);assert.match(chapters.get('troubleshooting'),/不能提交脚本申请 root/);
   assert.doesNotMatch(source,/gpuctl maintenance (?:request|approve|withdraw)/);
-  assert.match(chapters.get('data'),/已开始的导入在服务器后台运行/);assert.match(chapters.get('data'),/没有整份已发布数据集的一键下载入口/);
-  assert.match(chapters.get('data'),/阿里云盘是可选功能/);assert.match(chapters.get('data'),/需管理员启用可用的下载通道/);
-  for(const command of ['data import ','data imports','data import-status','data import-resume','data import-cancel','data import-discard'])assert.ok(chapters.get('data').includes(command),command);
+  assert.match(chapters.get('data'),/已经开始的服务器校验会继续/);assert.match(chapters.get('data'),/没有整份已发布数据集的一键下载入口/);
+  assert.doesNotMatch(chapters.get('data'),/云盘|云端副本|分享链接|链接导入|data (?:cloud|import)/);
+  assert.match(chapters.get('data'),/gpuctl data upload \.\/my-data --name my-data --via direct/);
+  assert.match(chapters.get('data'),/gpuctl transfer upload \.\/my-data --name my-data --via direct/);
+  assert.match(chapters.get('data'),/入口不可达时停止，不改走中转/);
   assert.match(chapters.get('data'),/连续无输入 1 小时或累计 6 小时/);
   for(const token of ['传输任务新版','transfer upload','transfer download','transfer copy','transfer cancel','WAITING_CLIENT'])assert.ok(chapters.get('data').includes(token),token);
-  assert.match(chapters.get('data'),/不代表功能已上线/);assert.match(chapters.get('data'),/终止后不可恢复/);
+  assert.match(chapters.get('data'),/不要把指南更新当作功能已经上线/);assert.match(chapters.get('data'),/终止后不可恢复/);
   assert.match(chapters.get('data'),/不会因更新客户端自动开放/);assert.match(chapters.get('data'),/LAN copy 还需管理员配置并核验节点间接口/);
   assert.doesNotMatch(source,/没有后台 URL 下载按钮|不提供后台 URL 下载队列/);
 });

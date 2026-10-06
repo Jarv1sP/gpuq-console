@@ -199,14 +199,19 @@ try{
     }
     if(index===2)await capture(guide,'guide-training-desktop.png');
     if(index===3){
-      const direct=guide.locator('.guide-explanation').filter({hasText:'网页上传按服务器能力选择路线'});
+      const direct=guide.locator('.guide-explanation').filter({hasText:'网页选择目录后'});
       await direct.locator('summary').click();
-      assert.match(await direct.innerText(),/可直传时直接传到服务器，否则经平台中转；页面会标出本次实际路线/);
-      assert.match(await direct.innerText(),/直传失败不会自动改走中转；超过 256 MiB 的中转需要你确认/);
-      const workspace=guide.locator('.guide-explanation').filter({hasText:'个人数据空间上传和 data put 仍经平台中转'});
+      assert.match(await direct.innerText(),/路线显示「直传到」所选服务器，路径中没有门户中转或备用入口/);
+      assert.match(await direct.innerText(),/如果页面只提供中转或无法确认路线，先停止/);
+      assert.match(await direct.innerText(),/--via direct/);
+      const workspace=guide.locator('.guide-explanation').filter({hasText:'电脑上的数据优先整理成目录后'});
       await workspace.locator('summary').click();
-      assert.match(await workspace.innerText(),/个人数据空间上传和 data put 仍经平台中转/);
-      assert.doesNotMatch(await guide.locator('.guide-prose').textContent(),/网页(?:目录)?上传(?:和\s+data put)?\s*仍(?:走|经(?:过)?)平台中转/);
+      assert.match(await workspace.innerText(),/已经放在本人数据空间的文件/);
+      assert.match(await workspace.innerText(),/不是另一条电脑上传通道/);
+      const dataText=await guide.locator('.guide-prose').textContent();
+      assert.match(dataText,/gpuctl data upload \.\/my-data --name my-data --via direct/);
+      assert.match(dataText,/gpuctl transfer upload \.\/my-data --name my-data --via direct/);
+      assert.doesNotMatch(dataText,/云盘|云端副本|分享链接|链接导入|gpuctl data (?:cloud|import|put)|--via relay/);
       await direct.locator('summary').click();
       await workspace.locator('summary').click();
     }
