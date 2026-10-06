@@ -6,6 +6,147 @@ const HASH=/^[a-f0-9]{64}$/;
 const STATES=new Set(['READY','REGISTERED','STAGING','PREPARING','FAILED','UNKNOWN']);
 const OWNER_ID=/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$/;
 
+export const LAST_COPY_MESSAGE='这可能是这个版本的最后一份完整数据。为避免永久丢失，暂不能按机器删除；节点更新后可用「彻底删除」（7 天内可恢复）。';
+const removalLanes=new WeakMap();
+const lastCopy=()=>Object.assign(Error(LAST_COPY_MESSAGE),{status:409,code:'LAST_COPY_UNPROVEN'});
+const complete=value=>value?.state==='READY'||value?.state===undefined&&value?.complete===true;
+const pendingRemoval=()=>Object.assign(Error('这台服务器上的删除结果待确认'),{status:409,code:'DATASET_REMOVAL_PENDING'});
+
+function removalPending(service,machine,dataset,version){
+  if(!service.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_removal_exclusions'").get())return false;
+  return !!service.db.prepare('SELECT 1 FROM dataset_removal_exclusions WHERE machine=? AND dataset=? AND version=? LIMIT 1').get(machine,dataset,version);
+}
+
+// The old node accepts cleanup before its worker removes READY. A durable
+// exclusion is therefore written BEFORE dispatch, and survives a Portal swap.
+// Neither a failed HTTP response nor a missing operation ID proves no deletion.
+export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000}={}){
+  const user=service.store.get(principal.userId),policy=JSON.stringify(user);
+  const checkPolicy=()=>{
+    const current=service.store.get(principal.userId);
+    if(service.closing||principal.role!=='admin'||!current?.enabled||current.role!=='admin'||JSON.stringify(current)!==policy)
+      fail('账号授权已改变，请刷新后重试。',403);
+  };
+  checkPolicy();
+  if(!service.db||!service.bridge)throw lastCopy();
+  service.db.exec(`CREATE TABLE IF NOT EXISTS dataset_removal_exclusions (
+    id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
+    machine TEXT NOT NULL, dataset TEXT NOT NULL, version TEXT NOT NULL,
+    scope_version TEXT, operation_id TEXT, user_id TEXT NOT NULL, started_at TEXT NOT NULL
+  )`);
+  async function read(machine,operation,args){
+    let timer;
+    try{
+      return await Promise.race([service.bridge(machine,operation,args),new Promise((_,reject)=>{
+        timer=setTimeout(()=>reject(lastCopy()),readTimeoutMs);timer.unref?.();
+      })]);
+    }catch{throw lastCopy();}finally{clearTimeout(timer);checkPolicy();}
+  }
+  async function listings(){
+    const rows=await Promise.all(MACHINES.map(async machine=>{
+      const result=await read(machine.id,'datasets.list',{userId:user.id,hostAdmin:true});
+      if(!Array.isArray(result?.datasets)||result.datasets.some(item=>!ID.test(item?.dataset)||!Array.isArray(item.versions)||
+        item.versions.some(value=>!HASH.test(value?.version))||item.ownerIds!==undefined&&(!Array.isArray(item.ownerIds)||item.ownerIds.some(owner=>typeof owner!=='string'||!OWNER_ID.test(owner)))))throw lastCopy();
+      return {machine:machine.id,datasets:result.datasets};
+    }));
+    checkPolicy();return rows;
+  }
+  function names(machine,item,version){
+    const values=new Set([item.dataset]);
+    for(const owner of item.ownerIds||[]){
+      if(typeof owner!=='string'||!OWNER_ID.test(owner))continue;
+      const alias=service.datasetAliases?.(owner,machine)?.get(item.dataset+'@'+version);
+      const archived=machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(owner)?.get(item.dataset+'@'+version):null;
+      for(const name of [alias,archived])if(typeof name==='string'&&ID.test(name))values.add(name);
+    }
+    return values;
+  }
+  const exclusionRows=()=>service.db.prepare('SELECT * FROM dataset_removal_exclusions').all();
+  const hasCopy=(rows,pending)=>rows.find(row=>row.machine===pending.machine)?.datasets.some(item=>item.dataset===pending.dataset&&item.versions?.some(value=>value.version===pending.version&&complete(value)));
+  const absent=(rows,pending)=>!rows.find(row=>row.machine===pending.machine)?.datasets.some(item=>item.dataset===pending.dataset&&item.versions.some(value=>value.version===pending.version));
+  async function reconcile(rows,pending){
+    const remove=service.db.prepare('DELETE FROM dataset_removal_exclusions WHERE id=?');
+    // A confirmed absence releases only this missing-ID record, even when an
+    // unrelated original receipt cannot be read. That failure still blocks dispatch.
+    for(const row of pending)if(!row.operation_id&&absent(rows,row))remove.run(row.id);
+    const receipts=new Map();
+    for(const row of pending){
+      if(!HASH.test(row.operation_id||''))continue;
+      const key=JSON.stringify([row.machine,row.operation_id]);
+      if(!receipts.has(key))receipts.set(key,await read(row.machine,'datasets.status',{operationId:row.operation_id,userId:row.user_id,hostAdmin:true}));
+      const receipt=receipts.get(key);
+      if(receipt?.operationId!==row.operation_id||receipt.dataset!==row.dataset||(receipt.version??null)!==row.scope_version)throw lastCopy();
+    }
+    // Read AFTER the original receipt. A pre-receipt READY can be the copy
+    // that the just-finished worker removed, and must never release an exclusion.
+    if(receipts.size)rows=await listings();
+    for(const row of pending){
+      const receipt=receipts.get(JSON.stringify([row.machine,row.operation_id]));
+      if((receipt?.state==='UNREGISTERED'&&typeof receipt.unregistered==='boolean')||(receipt?.state==='FAILED'&&hasCopy(rows,row)))remove.run(row.id);
+    }
+    checkPolicy();return rows;
+  }
+  async function refreshExclusions(){
+    const pending=exclusionRows();if(!pending.length)return;
+    await reconcile(await listings(),pending);
+  }
+  async function snapshot(machine,dataset,version){
+    checkPolicy();
+    if(!MACHINES.some(row=>row.id===machine)||!ID.test(dataset)||version!=null&&!HASH.test(version))throw lastCopy();
+    let rows=await listings();
+    let target=rows.find(row=>row.machine===machine)?.datasets.find(item=>item.dataset===dataset);
+    const versions=version==null?[...new Set([...(target?.versions||[]).map(value=>value.version),...exclusionRows().filter(row=>row.machine===machine&&row.dataset===dataset).map(row=>row.version)])]:[version];
+    const pending=exclusionRows().filter(row=>versions.includes(row.version));
+    rows=await reconcile(rows,pending);
+    target=rows.find(row=>row.machine===machine)?.datasets.find(item=>item.dataset===dataset);
+    if(version==null)versions.splice(0,versions.length,...new Set((target?.versions||[]).map(value=>value.version)));
+    checkPolicy();
+    const excluded=exclusionRows(),proof=[];
+    if(excluded.some(row=>row.machine===machine&&row.dataset===dataset&&versions.includes(row.version)))throw pendingRemoval();
+    if(!versions.length||!target||versions.some(id=>!target.versions.some(value=>value.version===id)))throw lastCopy();
+    for(const id of versions){
+      const targetNames=names(machine,target,id),copies=[];
+      for(const row of rows){
+        if(row.machine===machine)continue;
+        for(const item of row.datasets){
+          if(!ID.test(item?.dataset)||!Array.isArray(item.versions)||![...names(row.machine,item,id)].some(name=>targetNames.has(name)))continue;
+          const value=item.versions.find(value=>value.version===id);
+          if(!complete(value)||excluded.some(pending=>pending.machine===row.machine&&pending.dataset===item.dataset&&pending.version===id))continue;
+          copies.push({machine:row.machine,dataset:item.dataset,version:id});
+        }
+      }
+      // An ARCHIVED journal alone is historical. Its distinct authority must
+      // also report this fixed version complete in the current node read.
+      if(!copies.length)throw lastCopy();
+      proof.push({version:id,copies});
+    }
+    return proof;
+  }
+  async function withProtectedRemoval(machine,dataset,version,dispatch){
+    // A single removal lane also covers whole-dataset requests and differently
+    // named archive aliases, without acquiring version locks in opposite orders.
+    const prior=removalLanes.get(service)||Promise.resolve();
+    const run=prior.then(async()=>{
+      const proof=await snapshot(machine,dataset,version),requestId=crypto.randomUUID(),startedAt=new Date().toISOString();
+      checkPolicy();
+      const insert=service.db.prepare('INSERT INTO dataset_removal_exclusions(id,request_id,machine,dataset,version,scope_version,operation_id,user_id,started_at) VALUES(?,?,?,?,?,?,NULL,?,?)');
+      service.db.exec('BEGIN IMMEDIATE');
+      try{
+        for(const row of proof)insert.run(crypto.randomUUID(),requestId,machine,dataset,row.version,version??null,user.id,startedAt);
+        service.db.exec('COMMIT');
+      }catch(error){service.db.exec('ROLLBACK');throw error;}
+      checkPolicy();
+      const result=await dispatch();
+      if(HASH.test(result?.operationId||'')&&(result.dataset===undefined||result.dataset===dataset)&&(result.version===undefined||(result.version??null)===(version??null)))
+        service.db.prepare('UPDATE dataset_removal_exclusions SET operation_id=? WHERE request_id=?').run(result.operationId,requestId);
+      checkPolicy();return result;
+    });
+    const tail=run.catch(()=>{});removalLanes.set(service,tail);
+    try{return await run;}finally{if(removalLanes.get(service)===tail)removalLanes.delete(service);}
+  }
+  return {assertAnotherCompleteCopy:snapshot,withProtectedRemoval,refreshExclusions};
+}
+
 // Node ACLs determine visibility first. Only usernames for those returned ACLs
 // are projected from the trusted account store; IDs stay inside the portal.
 function ownerView(item,users){
@@ -68,6 +209,12 @@ export async function datasetCatalogCall(service,principal,operation,args){
     return {...result,inodeUsageKnown:value.inodeUsageKnown===true,guarded:value.guarded===true};
   }
   if(operation!=='datasets.catalog')fail('未知目录操作。');
+  // An explicit administrator refresh may retire a proven terminal or absent
+  // exclusion. It never dispatches cleanup or invents an operation identity.
+  if(principal.role==='admin'&&service.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_removal_exclusions'").get()){
+    try{await createDatasetRemovalGuard(service,principal).refreshExclusions();}
+    catch(error){if(error.code!=='LAST_COPY_UNPROVEN')throw error;}
+  }
   // A known owner's archived version is data access, not a GPU/shell grant on
   // the storage host. Unrelated versions on that host remain invisible.
   const machines=MACHINES.filter(m=>user.limits[m.id]>0||service.archiveMachineVisible?.(user.id,m.id));
@@ -98,6 +245,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
       if(!version){version={version:value.version,locations:[]};dataset.versions.set(value.version,version);}
       const owner=ownerView(item,service.store.users);
       const location={machine:listing.machine,dataset:item.dataset,ownerLabel:owner.label,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,
+        ...(principal.role==='admin'&&removalPending(service,listing.machine,item.dataset,value.version)?{removalPending:true}:{}),
         ...(service.archiveState?.(user.id,listing.machine,{dataset:item.dataset,version:value.version})?{storage:service.archiveState(user.id,listing.machine,{dataset:item.dataset,version:value.version})}:{}),
         ...(listing.machine===args.machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})};
       owners.set(location,owner);version.locations.push(location);

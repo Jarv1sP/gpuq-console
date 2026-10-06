@@ -13,6 +13,21 @@ export function removalTarget(value){
   return {machine:value.machine,dataset:value.dataset,version:value.version??null,...(typeof value.catalogDataset==='string'&&datasetID.test(value.catalogDataset)?{catalogDataset:value.catalogDataset}:{})};
 }
 
+// Catalog facts are a preview only. The Portal repeats the proof from fresh
+// trusted node reads under its durable deletion guard before any dispatch.
+export function removalPreservation(target,versions,machines,{partial=false}={}){
+  const known=new Set(machines.map(machine=>machine.id));
+  const items=(versions||[]).map(version=>{
+    const locations=version.locations||[],local=locations.find(row=>row.machine===target.machine),storage=local?.storage||version.storage;
+    const pending=local?.removalPending===true;
+    const archive=storage?.phase==='ARCHIVED'&&storage.originalRetained===true&&known.has(storage.archiveMachine)&&storage.archiveMachine!==target.machine&&
+      !locations.some(row=>row.machine===storage.archiveMachine&&row.removalPending===true);
+    const copies=[...new Set(locations.filter(row=>row.machine!==target.machine&&known.has(row.machine)&&row.state==='READY'&&row.removalPending!==true).map(row=>row.machine))];
+    return {version:version.version,pending,kind:archive?'archive':copies.length?'replicas':'unproven',machines:archive?[storage.archiveMachine]:copies};
+  });
+  return {items,pending:items.some(item=>item.pending),allowed:!partial&&items.length>0&&items.every(item=>!item.pending&&item.kind!=='unproven')};
+}
+
 // Intent is persisted before dispatch. The node owns operationId; a missing
 // receipt cannot be reconstructed from the target or treated as safe to retry.
 export function createDatasetRemovals({principal,machines,call,storage,changed=()=>{},completed=()=>{},now=Date.now,setTimer=setTimeout,clearTimer=clearTimeout}){
@@ -26,7 +41,7 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
       stop();generation++;busy.clear();owner=null;
       if(id){let rows=[];try{rows=JSON.parse(storage?.getItem(removalStorageKey(id))||'[]');}catch{}
         owner={id,saved:!!storage,rows:Array.isArray(rows)?rows.filter(row=>{
-          try{removalTarget(row);return typeof row.id==='string'&&(!row.operationId||hash.test(row.operationId))&&['SUBMITTING','UNREGISTERING','UNKNOWN','FAILED','UNREGISTERED'].includes(row.state);}catch{return false;}
+          try{removalTarget(row);return typeof row.id==='string'&&(!row.operationId||hash.test(row.operationId))&&['SUBMITTING','UNREGISTERING','UNKNOWN','FAILED','BLOCKED','UNREGISTERED'].includes(row.state);}catch{return false;}
         }).map(row=>({...row,state:row.state==='SUBMITTING'?'UNKNOWN':row.state,nextAt:now()+2000,attempt:0,resumeCheck:!!row.operationId&&row.state==='UNKNOWN'})):[]};
       }
     }
@@ -61,7 +76,7 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
     try{accept(context,row,await call('datasets.unregister',{machine:target.machine,dataset:target.dataset,...(target.version?{version:target.version}:{})}));}
     // The portal can wrap a bridge timeout as HTTP 400. An HTTP error does not
     // prove the node rejected cleanup; only the local pre-dispatch gate does.
-    catch(error){if(!row.discarded){row.state=error.code==='MAINTENANCE_ACTIVE'?'FAILED':'UNKNOWN';row.error=error.message;}}
+    catch(error){if(!row.discarded){row.state=['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING'].includes(error.code)&&error.status===409?'BLOCKED':error.code==='MAINTENANCE_ACTIVE'?'FAILED':'UNKNOWN';row.error=error.message;row.blockReason=row.state==='BLOCKED'?error.code:null;}}
     finally{busy.delete(row);save(context);if(active(context,stamp)&&!row.discarded){changed();if(row.state==='UNREGISTERED')completed({...row});arm();}}
     return {...row};
   }
@@ -79,7 +94,8 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
     return {...row};
   }
   function abandon(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='UNKNOWN'||busy.has(row))throw Error('这条记录现在不能放弃。');row.discarded=true;owner.rows.splice(owner.rows.indexOf(row),1);notify(owner);}
-  return {sync,submit,query,abandon,stop,get rows(){return owner?.rows||[];},get saved(){return owner?.saved??true;},isBusy:id=>busy.has(owner?.rows.find(row=>row.id===id)),blocked:value=>owner?.rows.some(row=>unresolved(row)&&overlaps(row,value))||false};
+  function dismiss(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='BLOCKED'||busy.has(row))throw Error('只有已确认未派发的记录可以移除。');owner.rows.splice(owner.rows.indexOf(row),1);notify(owner);}
+  return {sync,submit,query,abandon,dismiss,stop,get rows(){return owner?.rows||[];},get saved(){return owner?.saved??true;},isBusy:id=>busy.has(owner?.rows.find(row=>row.id===id)),blocked:value=>owner?.rows.some(row=>unresolved(row)&&overlaps(row,value))||false};
 }
 
 export function datasetRemoveUI(store,section,toast,{reload}={}){
@@ -110,25 +126,30 @@ export function datasetRemoveUI(store,section,toast,{reload}={}){
     const references=[...new Set((versions||[]).flatMap(row=>(row.locations||[]).filter(location=>location.machine===target.machine).map(location=>location.dataset)).filter(value=>typeof value==='string'&&datasetID.test(value)))];
     if(references.length!==1)throw Error(references.length?'请先核对这台服务器的多个登记名称。':'这台服务器没有此登记，请刷新目录。');
     for(const version of versions||[])localReferences.set(JSON.stringify([target.machine,target.catalogDataset,version.version]),references[0]);
-    return {...target,dataset:references[0],version:whole?null:target.version};
+    const resolved={...target,dataset:references[0],version:whole?null:target.version};
+    return {target:resolved,preservation:removalPreservation(resolved,(versions||[]).filter(version=>version.locations?.some(location=>location.machine===target.machine&&location.dataset===references[0])),store.data?.machines||[],{partial:catalog.partial===true})};
   }
-  const label=row=>row.state==='SUBMITTING'||row.state==='UNREGISTERING'?'删除中':row.state==='FAILED'?'删除失败':row.operationId?'删除结果未确认':'删除请求结果未确认';
+  const label=row=>row.state==='SUBMITTING'||row.state==='UNREGISTERING'?'删除中':row.state==='FAILED'?'删除失败':row.state==='BLOCKED'?'暂不能删除':row.operationId?'删除结果未确认':'删除请求结果未确认';
   const stateHTML=row=>`<span class="st ${row.state==='SUBMITTING'||row.state==='UNREGISTERING'?'st-cancel':row.state==='FAILED'?'st-err':'st-unk'}"><span class="g" aria-hidden="true"></span>${label(row)}</span>`;
   function ensureDialog(){
     if(dialog?.isConnected)return;dialog=document.createElement('dialog');dialog.id='dataset-remove-dialog';dialog.className='modal dataset-remove-dialog';dialog.setAttribute('aria-labelledby','dataset-remove-title');section.append(dialog);
     dialog.addEventListener('close',()=>{confirmation=null;});
-    dialog.addEventListener('input',()=>{const button=dialog.querySelector('[data-remove-confirm]');if(button)button.disabled=confirmation?.whole&&dialog.querySelector('[name=remove-name]')?.value!==(confirmation.target.catalogDataset||confirmation.target.dataset);});
+    dialog.addEventListener('input',()=>{const button=dialog.querySelector('[data-remove-confirm]');if(button)button.disabled=!confirmation?.preservation?.allowed||confirmation?.whole&&dialog.querySelector('[name=remove-name]')?.value!==(confirmation.target.catalogDataset||confirmation.target.dataset);});
     dialog.addEventListener('click',event=>{if(event.target.closest('[data-remove-close]'))dialog.close();});
     dialog.addEventListener('submit',async event=>{
       event.preventDefault();const intent=confirmation;if(!intent||!admin()||intent.userId!==store.principal.userId)return;
       if(intent.abandon){try{api.abandon(intent.id);dialog.close();}catch(error){toast(error.message);}return;}
+      if(!intent.preservation?.allowed||api.blocked(intent.target))return;
       if(intent.whole&&dialog.querySelector('[name=remove-name]').value!==(intent.target.catalogDataset||intent.target.dataset))return;
       dialog.close();try{await api.submit(intent.target);}catch(error){toast(error.message);}update();
     });
   }
-  function confirmRemove(target,whole){
-    ensureDialog();confirmation={target:whole?{...target,version:null}:target,whole,userId:store.principal.userId};
-    dialog.innerHTML=`<form><header class="modal-head"><div class="copy-caption"><h2 id="dataset-remove-title">${whole?'删除整个数据集？':'删除此版本？'}</h2>${copyHelp('删除范围','正在训练或固定保留的版本会被拒绝。只删除所选服务器的缓存和登记，数据库原件与批准来源保留。')}</div><button class="button quiet" type="button" data-remove-close aria-label="关闭删除确认">关闭</button></header><dl class="dataset-remove-facts"><div><dt>服务器</dt><dd>${serverIdHTML(target.machine)}</dd></div><div><dt>数据集</dt><dd><code>${esc(target.dataset)}</code>${whole?'<small>全部版本</small>':`<small title="${esc(target.version)}">${esc(target.version.slice(0,12))}</small>`}</dd></div><div><dt>删除</dt><dd>缓存和登记</dd></div><div><dt>保留</dt><dd>数据库原件、其他服务器</dd></div></dl>${whole?`<label class="field">输入数据集名称 <code>${esc(target.dataset)}</code><input name="remove-name" required autocomplete="off" spellcheck="false" aria-label="输入数据集名称"></label>`:''}<footer class="modal-actions"><button class="button" type="button" data-remove-close>取消</button><button class="button danger" type="submit" data-remove-confirm ${whole?'disabled':''}>删除</button></footer></form>`;
+  function confirmRemove(target,whole,preservation){
+    ensureDialog();confirmation={target:whole?{...target,version:null}:target,whole,preservation,userId:store.principal.userId};
+    const retained=item=>item.kind==='archive'?`数据库原件（${serverIdHTML(item.machines[0])}）`:item.kind==='replicas'?`其他服务器上的完整副本：${item.machines.map(machine=>serverIdHTML(machine)).join('、')}`:'完整副本尚未确认';
+    const facts=preservation.items.map(item=>`${whole?`<small title="${esc(item.version)}">${esc(item.version.slice(0,12))}</small>`:''}<span>${retained(item)}</span>`).join('');
+    const blocked=!preservation.allowed?`<p class="dataset-remove-blocked">${preservation.pending?'这台服务器上的删除结果待确认':'这可能是最后一份完整数据，暂不能按机器删除'} ${copyHelp('暂不能删除',preservation.pending?'先查询原操作，不能重复发起删除。':'节点更新后可用「彻底删除」（7 天内可恢复）。')}</p>`:'';
+    dialog.innerHTML=`<form><header class="modal-head"><div class="copy-caption"><h2 id="dataset-remove-title">${whole?'删除整个数据集？':'删除此版本？'}</h2>${copyHelp('删除范围','只删除所选服务器的缓存和登记。删除前会重新确认还有完整副本，正在训练或固定保留的版本会被拒绝。')}</div><button class="button quiet" type="button" data-remove-close aria-label="关闭删除确认">关闭</button></header><dl class="dataset-remove-facts"><div><dt>服务器</dt><dd>${serverIdHTML(target.machine)}</dd></div><div><dt>数据集</dt><dd><code>${esc(target.dataset)}</code>${whole?'<small>全部版本</small>':`<small title="${esc(target.version)}">${esc(target.version.slice(0,12))}</small>`}</dd></div><div><dt>删除</dt><dd>缓存和登记</dd></div><div><dt>保留</dt><dd>${facts}</dd></div></dl>${blocked}${whole?`<label class="field">输入数据集名称 <code>${esc(target.dataset)}</code><input name="remove-name" required autocomplete="off" spellcheck="false" aria-label="输入数据集名称"></label>`:''}<footer class="modal-actions"><button class="button" type="button" data-remove-close>取消</button><button class="button danger" type="submit" data-remove-confirm ${whole||!preservation.allowed?'disabled':''}>删除</button></footer></form>`;
     if(target.catalogDataset&&target.catalogDataset!==target.dataset){dialog.querySelector('.dataset-remove-facts>div:nth-child(2) dd').prepend(document.createTextNode(target.catalogDataset+' · 登记名 '));if(whole){const field=dialog.querySelector('.field');field.querySelector('code').textContent=target.catalogDataset;}}
     dialog.showModal();fadeDialog(dialog);
   }
@@ -154,21 +175,22 @@ export function datasetRemoveUI(store,section,toast,{reload}={}){
         for(const button of more.querySelectorAll('[data-remove-version],[data-remove-dataset]'))button.disabled=blocked||!!maintenance||resolving.has(card)||target.machine!==currentMachine()||api.blocked({...target,version:null})&&button.hasAttribute('data-remove-dataset');
         const actions=card.querySelector('.dataset-actions-cell.dataset-target');
         for(const button of actions?.querySelectorAll('[data-use-dataset],[data-prepare-dataset]')||[]){if(blocked){if(!originals.has(button))originals.set(button,button.disabled);button.disabled=true;}else if(originals.has(button)){button.disabled=originals.get(button)||!!maintenance||!!section.querySelector('#datasets-refresh')?.disabled;originals.delete(button);}}
-        const pending=api.rows.find(row=>unresolved(row)&&overlaps(row,target))||api.rows.findLast(row=>row.state==='FAILED'&&overlaps(row,target));let status=card.querySelector('.dataset-removal-state');
+        const pending=api.rows.find(row=>unresolved(row)&&overlaps(row,target))||api.rows.findLast(row=>['FAILED','BLOCKED'].includes(row.state)&&overlaps(row,target));let status=card.querySelector('.dataset-removal-state');
         if(pending){if(!status){status=document.createElement('div');status.className='dataset-removal-state';status.dataset.removeOwned='';(actions||card).append(status);}const html=stateHTML(pending);if(status.innerHTML!==html)status.innerHTML=html;}else status?.remove();
       }
       let panel=catalog.querySelector('#dataset-removal-records');const rows=api.rows.filter(row=>row.state!=='UNREGISTERED');
       if(!rows.length){panel?.remove();return;}if(!panel){panel=document.createElement('section');panel.id='dataset-removal-records';panel.dataset.removeOwned='';panel.setAttribute('aria-label','删除记录');catalog.append(panel);}
       const signature=JSON.stringify([rows,rows.map(row=>api.isBusy(row.id)),api.saved]);if(panel.dataset.signature===signature)return;panel.dataset.signature=signature;
-      panel.innerHTML=`<h3>删除记录</h3>${rows.map(row=>`<article data-removal-record="${esc(row.id)}"><div class="dataset-removal-heading"><strong><code>${esc(row.dataset)}</code> · ${serverIdHTML(row.machine)}</strong>${stateHTML(row)}</div>${row.state==='FAILED'&&row.error?`<p class="form-error">${esc(row.error)}</p>`:''}${row.operationId?`<details><summary>操作编号</summary><code>${esc(row.operationId)}</code></details>`:`<form data-removal-lookup="${esc(row.id)}"><label class="field"><span class="field-caption"><span>原操作编号</span>${copyHelp('查询原操作','先在服务器的操作记录里找到原编号再查询，不要重复删除。')}</span><input name="operationId" required pattern="[a-f0-9]{64}" minlength="64" maxlength="64" placeholder="64 位原编号" autocomplete="off" spellcheck="false"></label><button class="button" type="submit" ${api.isBusy(row.id)||row.state==='SUBMITTING'?'disabled':''}>重新查询</button></form>`}<div class="file-actions">${row.operationId?`<button class="button" type="button" data-removal-query="${esc(row.id)}" ${api.isBusy(row.id)?'disabled':''}>重新查询</button>`:''}${row.state==='UNKNOWN'?`<button class="button quiet" type="button" data-removal-abandon="${esc(row.id)}" ${api.isBusy(row.id)?'disabled':''}>放弃这条未确认记录</button>`:''}</div>${!api.saved?'<p class="muted">这条记录未能保存，关闭前请保留原编号。</p>':''}</article>`).join('')}`;
+      panel.innerHTML=`<h3>删除记录</h3>${rows.map(row=>`<article data-removal-record="${esc(row.id)}"><div class="dataset-removal-heading"><strong><code>${esc(row.dataset)}</code> · ${serverIdHTML(row.machine)}</strong>${stateHTML(row)}</div>${['FAILED','BLOCKED'].includes(row.state)&&row.error?`<p class="${row.state==='BLOCKED'?'dataset-remove-blocked':'form-error'}">${esc(row.error)}</p>`:''}${row.operationId?`<details><summary>操作编号</summary><code>${esc(row.operationId)}</code></details>`:row.state==='BLOCKED'?'':`<form data-removal-lookup="${esc(row.id)}"><label class="field"><span class="field-caption"><span>原操作编号</span>${copyHelp('查询原操作','先在服务器的操作记录里找到原编号再查询，不要重复删除。')}</span><input name="operationId" required pattern="[a-f0-9]{64}" minlength="64" maxlength="64" placeholder="64 位原编号" autocomplete="off" spellcheck="false"></label><button class="button" type="submit" ${api.isBusy(row.id)||row.state==='SUBMITTING'?'disabled':''}>重新查询</button></form>`}<div class="file-actions">${row.state==='BLOCKED'?`<button class="button" type="button" data-removal-dismiss="${esc(row.id)}">知道了</button>`:''}${row.operationId?`<button class="button" type="button" data-removal-query="${esc(row.id)}" ${api.isBusy(row.id)?'disabled':''}>重新查询</button>`:''}${row.state==='UNKNOWN'?`<button class="button quiet" type="button" data-removal-abandon="${esc(row.id)}" ${api.isBusy(row.id)?'disabled':''}>放弃这条未确认记录</button>`:''}</div>${!api.saved?'<p class="muted">这条记录未能保存，关闭前请保留原编号。</p>':''}</article>`).join('')}`;
     }finally{updating=false;}
   }
   section.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled||!admin())return;
     if(button.hasAttribute('data-remove-more')){const menu=button.parentElement.querySelector('.dataset-remove-options'),rect=button.getBoundingClientRect();menu.style.left=Math.max(16,Math.min(innerWidth-Math.min(320,innerWidth-32)-16,rect.left))+'px';menu.style.top=Math.min(innerHeight-180,rect.bottom+8)+'px';}
-    if(button.matches('[data-remove-version],[data-remove-dataset]')){const card=button.closest('.dataset-card');if(resolving.has(card))return;button.closest('[popover]')?.hidePopover();resolving.add(card);update();try{const whole=button.hasAttribute('data-remove-dataset'),target=await resolveTarget(card,whole);if(target){if(api.blocked(target))throw Error('这次删除尚未确认，请先查询原操作。');confirmRemove(target,whole);}}catch(error){toast(error.message);}finally{resolving.delete(card);update();}}
+    if(button.matches('[data-remove-version],[data-remove-dataset]')){const card=button.closest('.dataset-card');if(resolving.has(card))return;button.closest('[popover]')?.hidePopover();resolving.add(card);update();try{const whole=button.hasAttribute('data-remove-dataset'),resolved=await resolveTarget(card,whole);if(resolved){if(api.blocked(resolved.target))throw Error('这台服务器上的删除结果待确认');confirmRemove(resolved.target,whole,resolved.preservation);}}catch(error){toast(error.message);}finally{resolving.delete(card);update();}}
     if(button.dataset.removalQuery)api.query(button.dataset.removalQuery).catch(error=>toast(error.message));
     if(button.dataset.removalAbandon)confirmAbandon(button.dataset.removalAbandon);
+    if(button.dataset.removalDismiss)api.dismiss(button.dataset.removalDismiss);
   });
   section.addEventListener('submit',event=>{if(!event.target.matches('[data-removal-lookup]'))return;event.preventDefault();if(admin())api.query(event.target.dataset.removalLookup,new FormData(event.target).get('operationId')).catch(error=>toast(error.message));});
   section.addEventListener('change',update);

@@ -301,7 +301,8 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.dataset-ground` / `.dataset-location-icon` / `.dataset-lifecycle` / `.dataset-flow-route` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-flow.css](../dist/dataset-flow.css) | 数据库原件、缓存、实际来源路线 | 图形有文字/完整版本复制；无字段不画已释放或百分比 |
 | `.dataset-cache-admin` / `.dataset-cache-gauge` / `.dataset-cache-preview` | [dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[dataset-flow.css](../dist/dataset-flow.css) | 管理员预算/水位/释放预览，不是实际磁盘水位 | 展开或明确刷新才查询；预览不删除 |
 | `.dataset-pin-slot` / `[data-cache-retention]` | [dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[manual-pin-state.js](../dist/manual-pin-state.js) | 管理员固定保留与同账号原请求恢复 | 先按pinId查owner/present，计数不证明归属 |
-| `.dataset-more-slot` / `[data-remove-more]` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[datasets-ui.js](../dist/datasets-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 管理员删除挂载点，成员无删除DOM | 绑定实体身份，整库名称确认，未知查原操作 |
+| `.dataset-more-slot` / `[data-remove-more]` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[datasets-ui.js](../dist/datasets-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 管理员删除挂载点，成员无删除DOM | 绑定实体身份，整库名称确认；按实际版本列完整保留副本；最后副本或本机未决时禁用；未知查原操作 |
+| `.dataset-remove-blocked` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 已证实未派发的拒绝与禁用原因 | 墨色原文，不显示失败重试；ⓘ说明节点更新后的彻底删除，只有已知拒绝可“知道了”移除 |
 | `#dataset-add-dialog` / `.dataset-field-label` / `.dataset-directory-control` | [datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 三来源添加数据，中文选择文件夹/合计 | 标签关联，ⓘ同一行，弹窗内部真实滚动 |
 | `.dataset-upload-journey` / `.dataset-route-heading` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-upload.js](../dist/dataset-upload.js)、[upload-routes.js](../dist/upload-routes.js) | 三段上传、直传/Tail备用/显式中转，不造数据库阶段 | 未确认通道明示；失败不自动换中转 |
 | `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 个人数据空间/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回 |
@@ -388,7 +389,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | 终端 | 会话与写权限分别确认，断开/结束/接管分开 | 不重放输入；writerToken仅内存；429退避；退出不结束已确认会话；晚到未采用资源由旧身份屏障清理 |
 | 维护恢复 | maintenance.set以当前revision CAS，逐步完成范围明确列出 | 先保护剩余范围，再解除全平台，再恢复选中范围；冲突停止刷新，不自动写重试；服务器最终准入 |
 | 需处理 | 原对象UNKNOWN/PARTIAL/UNCONFIRMED事实保留 | 时间或已读不能清除；只有已确认失败可按规则确认 |
-| 删除数据集 | 管理员目标/版本或整库范围/后端结果实际确认 | SUBMITTING刷新为未确认，查原operationId，不自动再删；放弃查询不是已删除 |
+| 删除数据集 | 管理员目标/版本或整库范围，服务端实时证明还有完整副本 | 唯一副本或本机未决禁用；409显示原文；SUBMITTING刷新为未确认，查原operationId，不自动再删；放弃查询不清门户持久排除 |
 
 目录别名用于训练，缓存保留/删除使用location真实本地名称。账号/机器/项目/版本切换停止旧轮询并抛弃旧回复；缓存策略只在展开/明确刷新查询，隐藏房间停止storage RPC。
 
@@ -421,7 +422,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [cloud-import-ui-smoke.mjs](../tests/cloud-import-ui-smoke.mjs) | 保存分享、取回/解压流程与未知恢复 |
 | [community-ui-smoke.mjs](../tests/community-ui-smoke.mjs) | 公告、帖子、评论、成员/管理员边界 |
 | [data-workspace-ui-smoke.mjs](../tests/data-workspace-ui-smoke.mjs) | 个人数据空间、云端副本与换账号 |
-| [dataset-remove-ui-smoke.mjs](../tests/dataset-remove-ui-smoke.mjs) | 管理员单版本/整库删除、未知原编号恢复 |
+| [dataset-remove-ui-smoke.mjs](../tests/dataset-remove-ui-smoke.mjs) | 管理员单版本/整库删除、未知原编号恢复；数据库原件/其他完整副本/最后副本/未决删除与409、三宽共享几何 |
+| [dataset-last-copy.test.js](../tests/dataset-last-copy.test.js) | 实时可信目录、跨机器互斥、SQLite派发排除与重启、原回执后复核、缺编号明确不存在、零成员授权及HTTP code通路 |
 | [dataset-upload-ui-smoke.mjs](../tests/dataset-upload-ui-smoke.mjs) | 文件夹、直传/中转同意、续传和READY清单核对 |
 | [datasets-ui-smoke.mjs](../tests/datasets-ui-smoke.mjs) | 目录、数据库/缓存、预算、保留与共享几何 |
 | [fixed-upload-routes-browser.mjs](../tests/fixed-upload-routes-browser.mjs) | 固定校园/Tail路线探测与严格票据匹配 |

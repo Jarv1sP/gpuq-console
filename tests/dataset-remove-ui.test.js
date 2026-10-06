@@ -1,12 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createDatasetRemovals,removalTarget,removalStorageKey} from '../dist/dataset-remove-ui.js';
+import {createDatasetRemovals,removalTarget,removalStorageKey,removalPreservation} from '../dist/dataset-remove-ui.js';
 import {PortalService} from '../portal-service.mjs';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {MACHINES} from '../dist/machines.js';
 const VERSION='a'.repeat(64),OP='b'.repeat(64),target={machine:MACHINES[0].id,dataset:'sample',version:VERSION};
+
+test('preservation distinguishes database original, other complete copies and no proof',()=>{
+  const other=MACHINES[1].id,local={machine:target.machine,state:'READY'},remote={machine:other,state:'READY'};
+  const view=(locations,options)=>removalPreservation(target,[{version:VERSION,locations}],MACHINES,options);
+  assert.deepEqual(view([local,remote]).items[0],{version:VERSION,pending:false,kind:'replicas',machines:[other]});
+  assert.equal(view([local,remote]).allowed,true);
+  const archived={...local,storage:{phase:'ARCHIVED',originalRetained:true,archiveMachine:other}};
+  assert.equal(view([archived,remote]).items[0].kind,'archive');
+  for(const storage of [{phase:'ARCHIVING',originalRetained:true,archiveMachine:other},{phase:'ARCHIVED',originalRetained:false,archiveMachine:other},{phase:'ARCHIVED',originalRetained:true,archiveMachine:target.machine},{phase:'ARCHIVED',originalRetained:true,archiveMachine:'not-in-inventory'}])assert.equal(view([{...local,storage}]).allowed,false);
+  for(const state of ['REGISTERED','STAGING','PREPARING','UNKNOWN','FAILED'])assert.equal(view([local,{...remote,state}]).allowed,false);
+  assert.equal(view([local,remote],{partial:true}).allowed,false);
+  assert.equal(view([local,{...remote,removalPending:true}]).allowed,false);
+  assert.equal(view([{...local,removalPending:true},remote]).pending,true);assert.equal(view([{...local,removalPending:true},remote]).allowed,false);
+  assert.equal(removalPreservation(target,[{version:VERSION,locations:[local,remote]},{version:OP,locations:[local]}],MACHINES).allowed,false);
+});
+
+test('authoritative pre-dispatch 409 stays BLOCKED with original message, no polling or retry',async()=>{
+  for(const code of ['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING']){
+    const f=fixture(),message='服务端原文：暂不能删除。';f.fail(Object.assign(Error(message),{status:409,code}));
+    const row=await f.api.submit(target);assert.equal(row.state,'BLOCKED');assert.equal(row.error,message);assert.equal(row.blockReason,code);
+    assert.equal(f.calls.length,1);assert.equal(f.timers.size,0);assert.equal(f.api.blocked(target),false);assert.equal(f.done.length,0);
+    const restored=createDatasetRemovals(f.options);restored.sync(true);assert.equal(restored.rows[0].state,'BLOCKED');assert.equal(f.calls.length,1);assert.equal(f.timers.size,0);
+    restored.dismiss(row.id);assert.equal(restored.rows.length,0);restored.stop();
+  }
+  const f=fixture();f.fail(Object.assign(Error('unknown HTTP 409'),{status:409}));const row=await f.api.submit(target);assert.equal(row.state,'UNKNOWN');assert.throws(()=>f.api.dismiss(row.id));f.api.stop();
+});
 function fixture(){
   let who={userId:'admin-one',role:'admin'},response={operationId:OP,state:'UNREGISTERING'},failure=null,clock=0;
   const values=new Map(),timers=new Map(),calls=[],done=[];let next=0;

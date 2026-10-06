@@ -9,7 +9,7 @@ import {yieldCapable} from './dist/scheduling-policy.js';
 import {normalizeJobSubmission,createSubmittedJob,datasetReferences,personalCardQuotaExempt} from './job-submission.mjs';
 import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
-import {datasetCatalogCall,datasetListView} from './dataset-catalog.mjs';
+import {datasetCatalogCall,datasetListView,createDatasetRemovalGuard} from './dataset-catalog.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 import {selectMachine} from './machine-selection.mjs';
@@ -279,7 +279,9 @@ export async function executionCall(service,principal,operation,args){
       if(principal.role!=='admin'||mapped&&mapped.dataset!==reference.dataset)return (await service.resolveDataset(user.id,machine,reference)).status;
     }
     let result;
-    try{result=await service.bridge(machine,operation,{...reference,userId:user.id,hostAdmin:principal.role==='admin'});}
+    const dispatch=()=>service.bridge(machine,operation,{...reference,userId:user.id,hostAdmin:principal.role==='admin'});
+    try{result=operation==='datasets.unregister'?
+      await createDatasetRemovalGuard(service,principal).withProtectedRemoval(machine,args.dataset,args.version,dispatch):await dispatch();}
     catch(error){if(operation==='datasets.status'&&!byOperation&&service.resolveDataset)return (await service.resolveDataset(user.id,machine,reference)).status;throw error;}
     if(operation==='datasets.prepare')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
     if(operation==='datasets.list'){
