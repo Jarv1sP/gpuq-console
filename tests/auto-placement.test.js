@@ -69,6 +69,21 @@ test('AUTO excludes visible foreign READY data and ranks only authorized dataset
   assert.equal(f.calls.some(c=>['prepareProject','datasets.prepare','sync'].includes(c.operation)),false);
 });
 
+test('AUTO retains complete authenticated identity when the shared catalog checks new-node deletion capabilities',async()=>{
+  const f=fixture(),ref={dataset:'personal-data',version:'c'.repeat(64)},checked=[];
+  f.service.bridge=async(machine,operation,args)=>{
+    assert.equal(operation,'datasets.list');
+    assert.equal(args.userId,args.hostAdmin?'builtin-admin':f.user.id);
+    return {datasetDelete:1,datasets:[{dataset:ref.dataset,ownerIds:[f.user.id],versions:[{version:ref.version,state:'READY',deletionPermissions:{memberAllowed:!args.hostAdmin}}]}]};
+  };
+  f.service.datasetDeleteCapabilities=async who=>{
+    assert.deepEqual(who,principal(f),'capability account check needs the complete server-derived principal');
+    checked.push(who);return {datasetDelete:1};
+  };
+  assert.equal((await selectMachine(f.service,f.user,normalized({datasets:[ref]}),priorityCapable)).machine,ids[0]);
+  assert.ok(checked.length>0);assert.equal(f.saved.length,0);assert.equal(f.service.store.jobs.length,0);
+});
+
 test('AUTO prefers a genuinely free pool over a busy local project, without dispatching or copying',async()=>{
   const f=fixture();f.service.gpuq.hosts[0].gpuq.jobs=[{id:'Jbusy',state:'RUNNING',assigned_gpu_indices:[0]}];
   f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0,1];
