@@ -14,6 +14,7 @@ import {fadeDialog,reducedMotion} from './motion-ui.js';
 import {copyHelp} from './copy-help-ui.js';
 import {installAuthentication} from './auth-ui.js';
 import {pageForRoute,hashForPage} from './navigation.js';
+import {createAdminUI,adminHashForRoute,adminSectionForRoute,hasAdminSections,onAdminSectionsChange} from './admin-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const MACHINES=[];let capacity=0;
@@ -31,8 +32,9 @@ async function loadInventory(){
   capacity=MACHINES.reduce((n,m)=>n+m.cards,0);
 }
 await loadInventory();
-let page='work',pendingRoute=pageForRoute(location.hash),selected=null,draft=null,filter='pending',toastTimer,confirmAction,inviteCode=null,refreshing=false;
+let page=pageForRoute(location.hash)==='admin'?'admin':'work',pendingRoute=pageForRoute(location.hash)==='admin'?location.hash:pageForRoute(location.hash),selected=null,draft=null,filter='pending',toastTimer,confirmAction,inviteCode=null,refreshing=false;
 const shell=shellUI(store,{navigate:choosePage,getPage:()=>page,toast});
+const adminConsole=createAdminUI(store,{navigate:choosePage,getPage:()=>page,toast});
 const renderExecution=executionUI(store,()=>render(true),toast);
 const renderDatasets=datasetsUI(store,toast);
 const renderCommunity=createCommunityUI(store,toast);
@@ -53,14 +55,14 @@ function toast(message){clearTimeout(toastTimer);const target=$('#toast'),shown=
 function report(error){toast(error.message);if(error.status===401){store.principal=null;store.data=null;MACHINES.length=0;capacity=0;draft=null;render();openLogin();}}
 function confirm(title,message,action){$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;confirmAction=action;$('#confirm-dialog').showModal();fadeDialog($('#confirm-dialog'));}
 function openLogin(){$('#login-form').reset();$('#login-error').textContent='';if(!$('#login-dialog').open)$('#login-dialog').showModal();}
-function choosePage(route){let next=pageForRoute(route);if(!next)return;if(next==='users'&&!isAdmin())next='resources';if(next===page){if(!store.principal)pendingRoute=next;history.replaceState(null,'',hashForPage(page));return;}if(dirty()){history.replaceState(null,'',hashForPage(page));toast('请先保存或撤销授权草稿。');return;}if(!store.principal)pendingRoute=next;shell.route(next,()=>{page=next;history.replaceState(null,'',hashForPage(next));render();});}
-function defaultPage(){page=pendingRoute||(maintenanceActive(store.data?.operationalMaintenance)||own()?.total?'work':'resources');pendingRoute=null;if(page==='users'&&!isAdmin())page='resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'',hashForPage(page));}
+function choosePage(route){let next=pageForRoute(route);if(!next)return;if(next==='users'&&!isAdmin())next='resources';const hash=next==='admin'?adminHashForRoute(route):hashForPage(next),sameSection=next!=='admin'||adminConsole.currentSection()===adminSectionForRoute(route);if(next===page&&sameSection){if(!store.principal)pendingRoute=hash;history.replaceState(null,'',hash);if(next==='admin')adminConsole.update();return;}if(dirty()){history.replaceState(null,'',hashForPage(page));toast('请先保存或撤销授权草稿。');return;}if(!store.principal)pendingRoute=hash;shell.route(next,()=>{page=next;history.replaceState(null,'',hash);render();});}
+function defaultPage(){const route=pendingRoute||(maintenanceActive(store.data?.operationalMaintenance)||own()?.total?'work':'resources');page=pageForRoute(route)||'work';pendingRoute=null;if(page==='users'&&!isAdmin())page='resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'',page==='admin'?adminHashForRoute(route):hashForPage(page));}
 function render(preserve=false){
   const logged=!!store.principal,admin=isAdmin(),u=own(),keepDraft=preserve&&dirty();
   if(logged)for(const node of document.querySelectorAll('[data-public-maintenance]')){node.textContent=store.data?.operationalMaintenance?.global?.reason||'';node.hidden=!node.textContent;}
   if(page==='users'&&!admin)page='resources';
   document.body.classList.toggle('not-admin',!admin);
-  for(const el of document.querySelectorAll('[data-admin-only]'))el.hidden=!admin;
+  for(const el of document.querySelectorAll('[data-admin-only]'))el.hidden=!admin||el.hasAttribute('data-admin-entry')&&!hasAdminSections();
   for(const el of document.querySelectorAll('[data-page]'))el.hidden=el.dataset.page!==page;
   for(const el of document.querySelectorAll('[data-nav]')){el.classList.toggle('active',el.dataset.nav===page);el.setAttribute('aria-current',el.dataset.nav===page?'page':'false');}
   $('#pending-count').textContent=pendingUsers().length;$('#pending-count').hidden=!pendingUsers().length;
@@ -70,8 +72,8 @@ function render(preserve=false){
   $('#edit-profile').hidden=!logged||store.production&&store.data?.taskMetadata?.version!==1;
   if(!logged)$('#profile-dialog').close();
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
-  const titles={me:['我的','账号、额度与个人工作区。'],transfers:['数据集','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。']};
-  const concisePage=['community','users','maintenance'].includes(page);
+  const titles={me:['我的','账号、额度与个人工作区。'],transfers:['数据集','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集','选定数据版本，准备到训练机器。'],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。'],admin:['管理后台','']};
+  const concisePage=['community','users','maintenance','admin'].includes(page);
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=concisePage?'':titles[page][1];$('#page-description').hidden=concisePage||!titles[page][1];$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
   if(!concisePage&&titles[page][1])discloseInfo($('#page-description'),'页面说明');
   const descriptionInfo=$('#page-description').closest('.ui-info');if(descriptionInfo)descriptionInfo.hidden=concisePage||!titles[page][1];
@@ -102,6 +104,7 @@ function render(preserve=false){
   $('#work-title-telemetry').hidden=page!=='work'||!logged;
   $('#open-submit').hidden=page!=='work'||!logged;$('#open-submit').disabled=!store.production||store.data?.executionEnabled!==true;
   shell.update();
+  adminConsole.update();
   renderMaintenanceExperience();
 }
 function renderResources(){
@@ -204,6 +207,7 @@ const authGuideObserver=new MutationObserver(syncAuthGuide);
 for(const dialog of [$('#login-dialog'),$('#register-dialog')])authGuideObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
 installAuthentication();
 if(store.principal)defaultPage();render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
+onAdminSectionsChange(()=>render(true));
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 addEventListener('hashchange',()=>choosePage(location.hash));

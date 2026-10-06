@@ -171,4 +171,5 @@ if(!baseline){
   await import('./r5-ui-smoke.mjs');
   await import('./polish-shell-ui-smoke.mjs');
   await import('./polish-operational-ui-smoke.mjs');
+  await import('./admin-ui-smoke.mjs');
 }
