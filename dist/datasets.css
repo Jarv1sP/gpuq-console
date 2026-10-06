@@ -415,7 +415,7 @@
 /* Explanations stay beside their label, including long phone headings. */
 #page-datasets .dataset-sheet-head>.copy-caption,#page-datasets .data-workspace-card header>div{min-width:0;flex:1}
 #page-datasets .dataset-sheet-head>.copy-caption{justify-content:flex-start}
-#page-datasets .dataset-route-heading>:first-child{grid-column:1;grid-row:1}
+#page-datasets .dataset-route-heading>:first-child{grid-column:1;grid-row:1;justify-self:start;max-width:100%}
 #page-datasets .dataset-route-heading>.copy-help{grid-column:2;grid-row:1}
 #page-datasets .dataset-route-heading>.dataset-route-path{grid-column:1/-1;grid-row:2}
 #page-datasets .dataset-relay-warning>.copy-caption>label{min-width:0}
