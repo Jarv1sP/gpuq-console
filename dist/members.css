@@ -1,49 +1,53 @@
 /* Member policy is one current draft. Authentication shares the Carbon shell. */
-.sb #page-users{font:14px/1.7 var(--sans);color:var(--ink);min-width:0}
+.sb #page-users{container:members / inline-size;font:14px/1.7 var(--sans);color:var(--ink);min-width:0}
 .sb #page-users :is(button,input,summary):focus-visible,.sb :is(.member-dialog,.auth-dialog) :is(button,input,a,summary):focus-visible{outline:2px solid var(--ink);outline-offset:3px}
 .sb #page-users button,.sb :is(.member-dialog,.auth-dialog) button{transform:none;transition:color 140ms linear,background-color 140ms linear,border-color 140ms linear}
 .sb #page-users .management-toolbar{display:flex;justify-content:space-between;align-items:center;gap:20px;margin:0 0 28px;flex-wrap:wrap}
 .sb #page-users .filter-tabs{display:flex;gap:20px;flex-wrap:wrap}
-.sb #page-users .filter-tabs button{background:none;color:var(--ink-2);border:0;border-bottom:2px solid transparent;border-radius:0;min-height:44px;font:13px var(--sans);padding:10px 0}
+.sb #page-users .filter-tabs button{background:none;color:var(--ink-2);border:0;border-bottom:2px solid transparent;border-radius:0;min-height:40px;font:13px/1.5 var(--sans);padding:8px 0}
 .sb #page-users .filter-tabs [aria-pressed=true]{color:var(--ink);border-bottom-color:var(--ink)}
-.sb #page-users .authorization-layout{grid-template-columns:250px minmax(0,1fr);gap:40px;align-items:start}
-.sb #page-users .user-panel{grid-column:1;grid-row:1;background:none;border:0;border-right:1px solid var(--line);border-radius:0;padding:0 28px 0 0;min-width:0}
-.sb #page-users .user-list{display:block;padding:0;max-height:760px;overflow:auto;scrollbar-width:thin}
-.sb #page-users .user-row{display:flex;align-items:center;gap:12px;border:1px solid transparent;padding:14px 12px;margin:0 0 4px;min-height:72px;border-radius:6px;background:none;color:var(--ink)}
+.sb #page-users .authorization-layout{grid-template-columns:minmax(0,1fr);gap:clamp(16px,4cqi,48px);align-items:start}
+.sb #page-users .user-panel{grid-column:auto;grid-row:auto;background:none;border:0;border-top:1px solid var(--line);border-radius:0;padding:24px 0 0;min-width:0}
+.sb #page-users .user-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr));gap:4px;padding:0;max-height:360px;overflow:auto;scrollbar-width:thin}
+.sb #page-users .user-row{display:flex;align-items:center;gap:12px;min-width:0;width:100%;border:1px solid transparent;padding:14px 12px;margin:0 0 4px;min-height:72px;border-radius:6px;background:none;color:var(--ink)}
 .sb #page-users .user-row:hover{background:var(--bg-1)}
 .sb #page-users .user-row.selected{background:var(--bg-2);border-color:var(--line)}
-.sb #page-users .avatar{display:grid;width:28px;height:28px;border-radius:50%;background:var(--bg-3);color:var(--ink-2);font-size:12px;font-weight:500}
-.sb #page-users .user-name{font-size:14px;font-weight:500;margin:0 0 4px;overflow-wrap:anywhere}
+.sb #page-users .avatar{display:grid;place-items:center;flex:none;width:28px;height:28px;border-radius:50%;background:var(--bg-3);color:var(--ink-2);font-size:12px;font-weight:500}
+.sb #page-users .user-details{display:grid;flex:1;min-width:0}
+.sb #page-users .user-name{font-size:14px;font-weight:500;margin:0 0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sb #page-users .user-meta{font-size:12px;color:var(--ink-2)}
 .sb #page-users .user-chevron{font-size:18px;color:var(--ink-2)}
 .sb #page-users .member-list-note,.sb #page-users .member-draft-note{font-size:12px;color:var(--ink-2);line-height:1.7;margin:20px 0 0;overflow-wrap:anywhere}
-.sb #page-users .member-editor{grid-column:2;grid-row:1;background-color:var(--bg);border:0;border-radius:0;padding:28px;min-width:0;overflow:visible}
-.sb #page-users .editor-head{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:0 0 20px;margin:0 0 12px;border-bottom:1px solid var(--line)}
-.sb #page-users .editor-head h2{font:300 36px/1.3 var(--display);letter-spacing:-.02em;overflow-wrap:anywhere;margin:0 0 10px}
+.sb #page-users .member-editor{container:member-editor / inline-size;grid-column:auto;grid-row:auto;background-color:var(--bg);border:0;border-radius:0;padding:28px 0;min-width:0;overflow:visible}
+.sb #page-users .editor-head{display:grid;grid-template-columns:minmax(0,1fr);align-items:center;gap:16px;padding:0 0 20px;margin:0 0 12px;border-bottom:1px solid var(--line)}
+.sb #page-users .editor-head>div{min-width:0}
+.sb #page-users .editor-head h2{font:300 clamp(28px,6cqi,36px)/1.3 var(--display);letter-spacing:-.02em;overflow-wrap:anywhere;margin:0 0 10px}
 .sb #page-users .editor-head .muted{font-size:12px;color:var(--ink-2)}
 .sb #page-users .member-username{font:11px var(--mono);overflow-wrap:anywhere}
-.sb #page-users .editor-head .button{flex:none;font-size:12px;min-height:36px;padding:8px 12px}
+.sb #page-users .editor-head .button{justify-self:start;flex:none;font-size:12px;min-height:40px;padding:8px 12px}
 .sb #page-users .editor-body{padding:0}
-.sb #page-users .editor-save{display:flex;justify-content:space-between;align-items:center;gap:20px;border:1px solid var(--line-2);border-radius:8px;padding:16px 18px;margin:0 0 28px}
-.sb #page-users .editor-save>div:last-child{display:flex;gap:10px;flex:none}
+.sb #page-users .editor-save{display:grid;grid-template-columns:minmax(0,1fr);align-items:center;gap:16px;border:1px solid var(--line-2);border-radius:8px;padding:16px 18px;margin:0 0 28px}
+.sb #page-users .editor-save>div:last-child{display:flex;gap:12px;flex-wrap:wrap;min-width:0}
+.sb #page-users .editor-save>div:last-child>.button{flex:1;white-space:nowrap}
 .sb #page-users #policy-summary{font-size:13px;color:var(--ink-2);margin:0 0 6px;overflow-wrap:anywhere}
 .sb #page-users .save-state{font-size:12px;color:var(--ink-2);max-width:none}
 .sb #page-users .permission-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin:0 0 8px}
 .sb #page-users .permission-heading h3{font-size:15px;font-weight:500}
-.sb #page-users .permission-heading .button{font-size:12px;min-height:36px;padding:8px 12px}
+.sb #page-users .permission-heading .button{font-size:12px;min-height:40px;padding:8px 12px}
 .sb #page-users .subtext{font-size:12px;line-height:1.7;color:var(--ink-2)}
 .sb #page-users .permissions{display:block;margin:16px 0 0}
-.sb #page-users .permission,.sb #page-users .permission.granted{border:0;border-top:1px solid var(--line);border-radius:0;padding:14px 0;background:none}
-.sb #page-users .permission-top{min-height:36px;display:flex;gap:10px;align-items:center;font-size:15px;font-weight:500;color:var(--ink)}
+.sb #page-users .permission,.sb #page-users .permission.granted{container:permission / inline-size;min-width:0;border:0;border-top:1px solid var(--line);border-radius:0;padding:14px 0;background:none}
+.sb #page-users .permission-top{min-height:48px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:6px 10px;align-items:center;font-size:15px;font-weight:500;color:var(--ink)}
 .sb #page-users .permission-top input{width:16px;height:16px;min-height:16px;accent-color:var(--ink);margin:0;flex:none}
-.sb #page-users .permission-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb #page-users .permission-name{min-width:0}
+.sb #page-users .permission-name .server-id{max-width:100%;vertical-align:middle}
 .sb #page-users .permission-spec{font:11px var(--sans);color:var(--ink-2);margin:0 0 0 auto;text-align:right;flex:none;white-space:nowrap}
-.sb #page-users .permission-bottom{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap;border:0;margin:8px 0 0;padding:0;color:var(--ink-2);font-size:12px}
-.sb #page-users .permission-bottom label{display:flex;align-items:center;gap:8px;font-size:12px}
-.sb #page-users .permission-meter{display:flex;gap:4px;flex:1;max-width:220px;min-width:120px}
+.sb #page-users .permission-bottom{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;border:0;margin:8px 0 0;padding:0;color:var(--ink-2);font-size:12px}
+.sb #page-users .permission-bottom label{display:flex;justify-self:end;align-items:center;gap:8px;font-size:12px;white-space:nowrap}
+.sb #page-users .permission-meter{display:flex;gap:4px;min-width:0;width:100%;max-width:220px}
 .sb #page-users .permission-meter i{flex:1;height:5px;background:var(--bg-3);border-radius:1px}
 .sb #page-users .permission-meter .is-on{background:var(--ink)}
-.sb #page-users .quota-input{font:500 14px var(--mono);width:64px;min-height:40px;padding:8px;text-align:center;color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:6px}
+.sb #page-users .quota-input{font:500 14px var(--mono);width:clamp(56px,8cqi,64px);min-height:40px;padding:8px;text-align:center;color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:6px}
 .sb #page-users .total-limit{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:20px 0;margin:8px 0 0;border-top:1px solid var(--line)}
 .sb #page-users .total-limit strong{font-size:14px;font-weight:500}
 .sb #page-users .total-limit small{display:block;margin-top:6px}
@@ -98,26 +102,27 @@
 .sb .auth-dialog .demo-credentials{font-size:12px;color:var(--ink-2);line-height:1.75;margin-top:20px}
 .sb .auth-dialog .demo-credentials summary{min-height:44px;display:flex;align-items:center;cursor:pointer}
 .sb .auth-dialog .demo-credentials code{font:12px var(--mono);overflow-wrap:anywhere}
-@media(max-width:1099px){
- .sb #page-users .authorization-layout{grid-template-columns:1fr;gap:32px}
- .sb #page-users :is(.member-editor,.user-panel){grid-column:1;grid-row:auto}
- .sb #page-users .user-panel{border-right:0;border-top:1px solid var(--line);padding:24px 0 0}
- .sb #page-users .user-list{max-height:360px}
+@container members (min-width:56rem){
+ .sb #page-users .authorization-layout{grid-template-columns:minmax(14rem,.8fr) minmax(0,2.8fr)}
+ .sb #page-users .user-panel{grid-column:1;grid-row:1;border-top:0;border-right:1px solid var(--line);padding:0 clamp(16px,3cqi,28px) 0 0}
+ .sb #page-users .user-list{grid-template-columns:minmax(0,1fr);max-height:760px}
+ .sb #page-users .member-editor{grid-column:2;grid-row:1;padding:28px}
 }
 @media(max-width:759px){
  .sb #page-users{font-size:16px}
  .sb #page-users .management-toolbar{margin-bottom:24px;gap:14px}
- .sb #page-users .management-toolbar>.button{font-size:13px;min-height:44px}
+ .sb #page-users .management-toolbar>.button{font-size:13px;min-height:48px}
+ .sb #page-users .filter-tabs button{min-height:48px}
  .sb #page-users .member-editor{padding:22px 0 0}
- .sb #page-users .editor-head{align-items:start;gap:12px;flex-direction:row}
- .sb #page-users .editor-head h2{font-size:32px}
- .sb #page-users .editor-head .button{font-size:12px;min-height:44px}
+ .sb #page-users .editor-head{gap:12px}
+ .sb #page-users .editor-head h2{font-size:clamp(28px,6cqi,32px)}
+ .sb #page-users .editor-head .button{font-size:12px;min-height:48px}
  .sb #page-users .editor-save{flex-wrap:wrap;gap:16px;padding:16px}
  .sb #page-users .editor-save>div:last-child{margin-left:auto}
- .sb #page-users .permission-heading .button{min-height:44px}
+ .sb #page-users .permission-heading .button{min-height:48px}
  .sb #page-users .permission-bottom{gap:12px}
  .sb #page-users .permission-bottom label{gap:8px;font-size:12px}
- .sb #page-users .permission-meter{max-width:180px;min-width:100px}
+ .sb #page-users .permission-meter{max-width:180px;min-width:0}
  .sb #page-users .quota-input{font-size:16px;min-height:44px}
  .sb #page-users .total-limit{align-items:start;gap:16px;flex-wrap:wrap}
  .sb #page-users .total-limit>span:last-child{margin-left:auto}
@@ -134,6 +139,33 @@
  .sb .auth-dialog .auth-footer .button{min-height:44px}
 }
 @media(prefers-reduced-motion:reduce){.sb #page-users *,.sb .member-dialog *,.sb .auth-dialog *{transition:none!important;scroll-behavior:auto!important}}
+
+/* Policy controls follow their actual editor and permission-row width. */
+.sb #page-users .member-action-help{justify-content:flex-start;gap:8px;min-width:0}
+.sb #page-users .permission-heading .copy-caption{justify-content:flex-start;gap:12px;min-width:0}
+@container member-editor (min-width:36rem){
+ .sb #page-users :is(.editor-head,.editor-save){grid-template-columns:minmax(0,1fr) auto}
+ .sb #page-users .editor-head .button{justify-self:end}
+}
+@container permission (max-width:22rem){
+ .sb #page-users .permission-top{grid-template-columns:auto minmax(0,1fr)}
+ .sb #page-users .permission-spec{grid-column:2;margin:0;text-align:left}
+ .sb #page-users .permission-bottom{grid-template-columns:minmax(0,1fr)}
+}
+.sb :is(#invites-dialog,#password-dialog){container:member-dialog / inline-size;width:min(36rem,calc(100% - 32px));max-width:none;max-height:calc(100dvh - 32px);padding:clamp(16px,3vw,28px);overflow:auto}
+.sb :is(#invites-dialog,#password-dialog) .modal-head{gap:12px;align-items:center}
+.sb :is(#invites-dialog,#password-dialog) .modal-head>div{min-width:0}
+.sb :is(#invites-dialog,#password-dialog) .icon-button{width:48px;height:48px;min-height:48px}
+.sb :is(#invites-dialog,#password-dialog) .field input{min-height:48px}
+.sb #invites-dialog .invite-heading{flex-wrap:wrap}
+@media(max-width:379px){
+ .sb :is(#invites-dialog,#password-dialog){width:100%;border-inline:0;border-radius:0}
+}
+@container member-dialog (max-width:14rem){
+ .sb :is(#invites-dialog,#password-dialog) .modal-head{gap:4px}
+ .sb :is(#invites-dialog,#password-dialog) .modal-head .copy-caption{gap:4px}
+ .sb :is(#invites-dialog,#password-dialog) .modal-head h2{font-size:20px;white-space:nowrap}
+}
 
 /* R5Login: approved original hardware silhouettes, never live telemetry. */
 .sb #login-dialog{background:#000;padding:0 64px 56px}

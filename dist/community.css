@@ -1,10 +1,11 @@
 /* Confirmed notices and posts lead; chat is a live companion on desktop. */
+.sb #page-community{container:community / inline-size;--community-gap:clamp(16px,4cqi,48px)}
 .sb #page-community,.sb .community-dialog{color:var(--ink);font:14px/1.7 var(--sans);min-width:0}
 .sb #page-community [hidden],.sb .community-dialog [hidden]{display:none!important}
 .sb #page-community :is(button,input,select,textarea),.sb .community-dialog :is(button,input,select,textarea){font:inherit}
 .sb #page-community button,.sb .community-dialog button{transform:none;transition:color 140ms linear,background-color 140ms linear,border-color 140ms linear}
 .sb #page-community :is(button,input,select,textarea,a,summary,[tabindex]):focus-visible,.sb .community-dialog :is(button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--ink);outline-offset:3px}
-.sb #page-community :is(input,select,textarea),.sb .community-dialog :is(input,select,textarea){color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:8px;min-width:0;min-height:44px;box-sizing:border-box}
+.sb #page-community :is(input,select,textarea),.sb .community-dialog :is(input,select,textarea){color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:8px;min-width:0;min-height:48px;box-sizing:border-box}
 .sb #page-community textarea,.sb .community-dialog textarea{display:block;width:100%;padding:12px;resize:vertical;line-height:1.65}
 .sb #page-community :is(select,input),.sb .community-dialog :is(select,input){padding:9px 12px;max-width:100%}
 .sb #page-community :is(textarea,input):read-only,.sb .community-dialog :is(textarea,input):read-only{color:var(--ink-2);background:var(--bg-2)}
@@ -13,13 +14,16 @@
 .sb #page-community #community-status{min-height:0;font-size:13px;color:var(--ink-2);margin:0 0 16px}
 .sb #page-community #community-status:empty{display:none}
 .sb #page-community #community-status.form-error{color:var(--err)}
-.sb #page-community .community-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:36px;align-items:start}
-.sb #page-community #community-forum{min-width:0}
-.sb #page-community .community-toolbar{display:flex;align-items:end;flex-wrap:wrap;gap:16px;margin:0 0 28px}
-.sb #page-community .community-toolbar label{display:grid;gap:6px;font-size:12px;color:var(--ink-2);min-width:0}
-.sb #page-community .community-toolbar>div{display:flex;gap:10px;margin-left:auto}
-.sb #page-community .community-toolbar select{min-width:140px}
-.sb #page-community .community-feed-focus{padding:26px 28px 8px;background-color:var(--bg)}
+.sb #page-community .community-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--community-gap);align-items:start}
+.sb #page-community #community-forum{min-width:0;container:community-forum / inline-size}
+.sb #page-community .community-toolbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,10rem),1fr));align-items:end;gap:clamp(12px,2cqi,24px);margin:0 0 28px}
+.sb #page-community .community-toolbar label{display:grid;gap:8px;font-size:12px;color:var(--ink-2);min-width:0;max-inline-size:18rem}
+.sb #page-community .community-toolbar-actions{display:flex;justify-content:flex-end;gap:12px;justify-self:end;min-width:0}
+.sb #page-community .community-toolbar-actions>.button{min-height:48px;white-space:nowrap}
+.sb #page-community .community-toolbar .field-caption{min-height:32px}
+.sb #page-community .community-toolbar select{width:100%;min-width:0}
+.sb #page-community .community-feed-focus{--community-inset:clamp(20px,2.5cqi,28px);padding:26px var(--community-inset) 8px;background-color:var(--bg)}
+.sb #page-community .community-feed-focus>.hero-label{left:var(--community-inset);padding-inline:0}
 .sb #page-community .community-posts{min-width:0}
 .sb #page-community .community-post{border:0;border-bottom:1px solid var(--line);border-radius:0;background:none;box-shadow:none;margin:0}
 .sb #page-community .community-post:last-child{border-bottom:0}
@@ -38,13 +42,13 @@
 .sb #page-community .community-meta,.sb .community-dialog .community-meta,.sb .task-note .community-meta{display:flex;gap:12px;flex-wrap:wrap;color:var(--ink-2);font-size:11px;line-height:1.7;margin:0}
 .sb #page-community .community-meta span:last-child{margin-left:auto}
 .sb #page-community .community-empty,.sb .community-dialog .community-empty{color:var(--ink-2);font-size:14px;line-height:1.7;padding:28px 0;margin:0}
-.sb #page-community .community-more{display:block;min-height:36px;margin:14px auto}
+.sb #page-community .community-more{display:block;min-height:40px;margin:14px auto}
 .sb #page-community .community-tabs{display:flex;gap:24px;border-bottom:1px solid var(--line);margin:0 0 24px}
-.sb #page-community .community-tabs button{display:block;min-height:44px;padding:12px 0;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;color:var(--ink-2)}
+.sb #page-community .community-tabs button{display:flex;align-items:center;justify-content:center;height:48px;min-height:48px;padding:0;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;color:var(--ink-2)}
 .sb #page-community .community-tabs button span{display:none}
 .sb #page-community .community-tabs [aria-selected=true]{color:var(--ink);border-bottom-color:var(--ink)}
 .sb #page-community #community-chat{display:flex;flex-direction:column;min-width:0;border-left:1px solid var(--line);padding-left:28px}
-.sb #page-community .chat-topline{display:flex;justify-content:space-between;gap:16px;align-items:start;margin-bottom:20px;flex:none}
+.sb #page-community .chat-topline{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:20px;flex:none}
 .sb #page-community .chat-topline h3{font-size:20px;font-weight:500;margin:0 0 6px}
 .sb #page-community .chat-topline p{font-size:12px;color:var(--ink-2);margin:0;line-height:1.65}
 .sb #page-community #chat-status{color:var(--ink-2);font-size:12px;line-height:1.6;margin:0 0 12px;flex:none}
@@ -79,9 +83,11 @@
 .sb .task-note{padding:14px 0;border-bottom:1px solid var(--line);min-width:0;overflow-wrap:anywhere}
 .sb .community-dialog{box-sizing:border-box;width:min(580px,calc(100% - 40px));max-width:none;max-height:calc(100dvh - 48px);padding:24px;border:1px solid var(--line-2);border-radius:14px;background:var(--bg-1);box-shadow:var(--shadow);overflow:auto}
 .sb .community-dialog::backdrop{background:var(--scrim)}
-.sb .community-dialog .modal-head{display:flex;gap:20px;justify-content:space-between;align-items:start;margin:0 0 24px}
-.sb .community-dialog h2{font-size:24px;font-weight:500;line-height:1.4;margin:8px 0 0}
-.sb .community-dialog .icon-button{flex:none;min-width:44px;min-height:44px;background:none;color:var(--ink-2);border:0;font-size:24px}
+.sb .community-dialog .modal-head{display:flex;gap:clamp(12px,3cqi,20px);justify-content:space-between;align-items:center;margin:0 0 24px}
+.sb .community-dialog .modal-head .copy-caption{min-width:0;gap:8px;justify-content:flex-start}
+.sb .community-dialog .modal-head .copy-caption h2{min-width:0;margin:0}
+.sb .community-dialog h2{font-size:24px;font-weight:500;line-height:1.4;text-wrap:balance;margin:8px 0 0}
+.sb .community-dialog .icon-button{flex:none;min-width:48px;min-height:48px;background:none;color:var(--ink-2);border:0;font-size:24px}
 .sb .community-dialog label{display:block;font-size:13px;color:var(--ink-2);line-height:1.65}
 .sb .community-dialog .field{display:grid;gap:8px;margin-bottom:20px}
 .sb .community-dialog .field :is(input,select,textarea){width:100%;margin:0}
@@ -104,24 +110,25 @@
 .sb .community-detail #community-comment-form{padding:14px 28px 20px;border-top:1px solid var(--line);background:color-mix(in srgb,var(--bg-1) 88%,transparent);backdrop-filter:blur(22px);flex:none}
 .sb .community-detail #community-comment-form textarea{margin-top:8px;min-height:68px;max-height:100px}
 .sb .community-detail #community-comment-form .modal-actions{margin-top:10px}
-@media(min-width:1100px){
- .sb #page-community .community-layout{grid-template-columns:minmax(0,1fr) 360px;gap:48px}
+@container community (min-width:56rem){
+ .sb #page-community .community-layout{grid-template-columns:minmax(0,1fr) minmax(16rem,.4fr)}
  .sb #page-community #community-posts{max-height:760px;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
  .sb #page-community #community-chat{position:sticky;top:88px;height:calc(100dvh - 184px);max-height:900px;overflow:auto}
  .sb #page-community .community-messages{min-height:160px;height:auto}
 }
-@media(max-width:1099px){.sb #page-community #community-chat{border:0;padding:0}.sb #page-community .community-messages{flex:none}}
+@container community (max-width:55.999rem){.sb #page-community #community-chat{border:0;padding:0}.sb #page-community .community-messages{flex:none}}
 @media(max-width:759px){
  .sb #page-community,.sb .community-dialog{font-size:16px}
  .sb #page-community .community-toolbar{gap:12px;margin-bottom:24px}
- .sb #page-community .community-toolbar select{font-size:16px;min-width:120px}
+ .sb #page-community .community-toolbar select{font-size:16px;min-width:0}
  .sb #page-community .community-toolbar>div{gap:8px}
- .sb #page-community .community-toolbar .button{font-size:13px;padding-inline:12px;min-height:44px}
- .sb #page-community .community-feed-focus{padding:22px 0 0;background-color:transparent}
+ .sb #page-community .community-toolbar .button{font-size:13px;padding-inline:12px;min-height:48px}
+ .sb #page-community .community-toolbar .field-caption{min-height:44px}
+ .sb #page-community .community-feed-focus{--community-inset:0px;padding:22px 0 0;background-color:transparent}
  .sb #page-community .community-post-open{padding:20px 0}
  .sb #page-community .community-post.is-focal h3{font-size:24px}
  .sb #page-community .community-excerpt,.sb #page-community .community-body,.sb .community-dialog .community-body{font-size:16px}
- .sb #page-community .community-meta{gap:8px;font-size:12px}
+ .sb #page-community .community-meta,.sb .community-dialog .community-meta{gap:8px;font-size:12px}
  .sb #page-community .community-meta span:last-child{margin-left:0}
  .sb #page-community .chat-topline p{font-size:13px}
  .sb #page-community .community-messages{height:420px}
@@ -138,12 +145,30 @@
 }
 @media(prefers-reduced-motion:reduce){.sb #page-community *,.sb .community-dialog *{transition:none!important;scroll-behavior:auto!important}}
 @media(prefers-reduced-transparency:reduce){.sb .community-dialog:is(.community-detail,.community-composer) :is(.modal-head,.modal-actions,#community-comment-form){background:var(--bg-1);backdrop-filter:none;-webkit-backdrop-filter:none}}
+@media(max-height:600px){
+ .sb .community-detail[open]{display:block;overflow:auto}
+ .sb .community-detail .community-sheet-body{overflow:visible}
+}
 /* The original controller's help stays available in the scoped info control. */
 #community-task-notes #community-notes>.chat-topline p,
 #community-task-notes #task-note-form>.chat-compose-footer>p {display:none}
-.community-notes-help{display:flex;justify-content:flex-end}
+.sb #page-community .community-task-notes>summary>.copy-caption{flex:1;min-width:0;justify-content:space-between}
+.sb #page-community .community-task-notes>summary{gap:12px}
+.sb #page-community .community-task-notes>summary::after{flex:none}
 .sb #page-community .community-post:not(.is-focal) .community-post-open{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:16px}
 .sb #page-community .community-post:not(.is-focal) h3{grid-column:1;grid-row:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0}
 .sb #page-community .community-post:not(.is-focal) .community-post-top{grid-column:2;grid-row:1}
 .sb #page-community .community-post:not(.is-focal) .community-meta{grid-column:3;grid-row:1;white-space:nowrap}
 @media(max-width:759px){.sb #page-community .community-post:not(.is-focal) .community-post-open{gap:8px}.sb #page-community .community-post:not(.is-focal) .community-post-top{gap:4px}.sb #page-community .community-post:not(.is-focal) .community-post-top:has(.community-tag.open,.community-tag.investigating,.community-tag.resolved,.community-tag.closed) .community-tag.feedback{display:none}}
+@container community-forum (max-width:40rem){
+ .sb #page-community .community-post:not(.is-focal) .community-post-open{grid-template-columns:minmax(0,1fr) auto;gap:8px}
+ .sb #page-community .community-post:not(.is-focal) h3{grid-column:1/-1;grid-row:1}
+ .sb #page-community .community-post:not(.is-focal) .community-post-top{grid-column:1;grid-row:2}
+ .sb #page-community .community-post:not(.is-focal) .community-meta{grid-column:2;grid-row:2}
+}
+@container community-forum (max-width:30rem){
+ .sb #page-community .community-toolbar{grid-template-columns:minmax(0,1fr)}
+ .sb #page-community .community-toolbar label{max-inline-size:none}
+ .sb #page-community .community-toolbar-actions{justify-self:stretch}
+ .sb #page-community .community-toolbar-actions>.button{flex:1;min-width:0}
+}

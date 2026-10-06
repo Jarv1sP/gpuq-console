@@ -188,3 +188,4 @@ try{
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({status:'passed',errors,external,captures,features:['real SQLite restart persistence','member/admin permissions','plain-text XSS','posts/comments cursor pages','105-message forward polling','unknown-send idempotent retry','deleted retry does not resurrect','409 preserves edit','429 preserves draft','auth reset','320–1440 responsive layout']},null,2));
   console.log(JSON.stringify({status:'passed',screenshots,requests:sent.length}));
 }finally{await browser?.close();if(server)await stop();await rm(folder,{recursive:true,force:true});}
+await import('./polish-rooms-ui-smoke.mjs');
