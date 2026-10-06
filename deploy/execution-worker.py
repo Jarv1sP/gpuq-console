@@ -309,6 +309,7 @@ INTERNAL_STORAGE+=CLOUD_FILES+('projects.oci-cohort.sync',)
 INTERNAL_STORAGE+=('transfers.confirm-unprepared-cancel','transfers.release-unprepared-source')
 INTERNAL_STORAGE+=tuple('storage.dataset-delete.'+action for action in ('capabilities','locations','registration','registration-discard','plan','fence','isolate','status','restore','release-absence','cancel','commit'))
 INTERNAL_STORAGE+=tuple('projects.copy.'+action for action in ('prepare','start','status','cancel','revoke','release','probe'))
+INTERNAL_STORAGE+=('projects.archive','projects.unarchive','projects.retire.plan','projects.retire','projects.retire.status')
 # Exact owner-bound draft RPCs; Portal and node checks still establish identity.
 INTERNAL_STORAGE+=('files.upload.list','files.upload.cancel','projects.local-import.begin','projects.local-import.status','projects.local-import.cancel')
 class Handler(socketserver.StreamRequestHandler):

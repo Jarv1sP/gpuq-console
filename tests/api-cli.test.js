@@ -38,6 +38,7 @@ test('real CLI and browser API share accounts and permissions; reset revokes pri
     assert.equal((await post('login',{username:'cli-user',password:'Password123'})).status,400);
     assert.equal((await post('login',{username:'cli-user',password:'Changed123'})).status,200);
     const page=await(await fetch(url)).text();assert.match(page,/GPUQ_LOCAL_API=true/);
+    const organization=await fetch(url+'/project-management-ui.js');assert.equal(organization.status,200);assert.match(organization.headers.get('content-type'),/javascript/);assert.match(await organization.text(),/export function createProjectManagement/);
   }finally{await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});}
 });
 

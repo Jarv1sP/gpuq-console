@@ -48,10 +48,12 @@ class ProjectOperations:
         return hashlib.sha256(json.dumps(self.identity(args)).encode()).hexdigest()
 
     @contextmanager
-    def guard(self, args):
-        with open(self.folder/(self.key(args)+'.lock'), 'a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            yield
+    def guard(self, args, *, lifecycle=True):
+        from contextlib import nullcontext
+        with self.store.lifetime(*self.identity(args)) if lifecycle else nullcontext():
+            with open(self.folder/(self.key(args)+'.lock'), 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                yield
 
     def receipt_path(self, args):
         return self.folder/(self.key(args)+'.json')
@@ -83,7 +85,8 @@ class ProjectOperations:
         except FileNotFoundError:return not path.exists()
         return events.get('populated')=='0'
 
-    def writable(self, args):
+    def writable(self, args, *, lifecycle=True, publication_lock=True):
+        if lifecycle: self.store.admit(*self.identity(args))
         if (self.folder/(self.key(args)+'.local-import.json')).exists():
             self.local_imports().project_writable(args)
         sync=self.folder/(self.key(args)+'.sync.json')
@@ -92,7 +95,7 @@ class ProjectOperations:
         pending = self.pending(args)
         if pending.get('state') == 'PUBLISHING' and self.active(args):
             raise ValueError('Project publication is running; wait before editing or uploading')
-        self.store.fail_if_publishing(*self.identity(args))
+        if publication_lock: self.store.fail_if_publishing(*self.identity(args))
 
     def local_imports(self):
         spec=importlib.util.spec_from_file_location('gpuq_project_local_import',self.n.HERE/'project-local-import.py')
@@ -101,6 +104,7 @@ class ProjectOperations:
 
     def status(self, args):
         result = self.store.status(*self.identity(args))
+        result['lifecycle'] = self.lifecycle().view(*self.identity(args))
         result['publicationProtocol'] = 1
         local = None
         pointer=self.folder/(self.key(args)+'.local-import.json')
@@ -143,6 +147,11 @@ class ProjectOperations:
         if local is not None and local['state'] not in ('IMPORTED','FAILED','CANCELED'):
             result.update(state=local['state'],error='Local draft import is pending; use its original operation ID')
         return result
+
+    def lifecycle(self):
+        spec=importlib.util.spec_from_file_location('gpuq_project_lifecycle',self.n.HERE/'project-lifecycle.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.ProjectLifecycle(self)
 
     def publication_status(self, result, pending):
         """Only this publication's durable commit proof, never an older READY."""
@@ -191,6 +200,8 @@ class ProjectOperations:
         return [*modes, 'oci']
 
     def process(self, operation, args):
+        if operation in ('projects.archive','projects.unarchive','projects.retire.plan','projects.retire','projects.retire.status'):
+            return self.lifecycle().process(operation,args)
         if operation.startswith('projects.local-import.'):
             return self.local_imports().process(operation,args)
         allowed = {'userId'} if operation == 'projects.list' else {'userId','project'}
@@ -214,6 +225,7 @@ class ProjectOperations:
         identity = self.identity(args)
         if operation == 'projects.status': return self.status(args)
         if operation == 'projects.verify':
+            self.store.admit(*identity)
             release = self.store.release(*identity, args['release'])
             return {'project':args['project'],'release':args['release'],'state':'READY'}
         with self.guard(args):
@@ -308,7 +320,9 @@ class ProjectOperations:
                 if operation=='files.upload.list':return self.upload_list(args,root)
                 if operation=='files.upload.cancel':return self.upload_cancel(args,root)
                 return self.upload_status(args, root)
-        if operation != 'files.put': return self.n.file_op(operation,args,root=root)
+        if operation != 'files.put':
+            with self.store.lifetime(user,project):
+                return self.n.file_op(operation,args,root=root)
         with self.guard(args):
             self.writable(args)
             with self.store.locked(user, project):

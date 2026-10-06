@@ -40,6 +40,13 @@ gpuctl project create clean --env-mode isolated  New venv without base site-pack
 gpuctl project create container --env-mode oci   Managed rootless OCI (enabled nodes only)
 gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
+gpuctl project label [NAME] --display-name "Readable name"
+gpuctl project catalog [--full]   Logical projects across your authorized servers
+gpuctl project group UUID --display-name "Project" --members SERVER/ID,SERVER/ID --revision N
+gpuctl project archive|unarchive [NAME]  Keep history, stop/resume new work
+gpuctl project retire-plan [NAME]  Inspect exact unused-project plan and blockers
+gpuctl project retire [NAME] --key UUID --revision N --manifest-sha256 HASH
+gpuctl project retire-status UUID --project NAME  Inspect the original retirement
 gpuctl project import SOURCE [DEST]  Same-node personal data directory -> new project code directory
 gpuctl project import-status|import-cancel UUID
 gpuctl project uploads / upload-cancel UUID  Inspect or discard an exact unfinished code upload
@@ -202,7 +209,7 @@ const CLI_OPTIONS=new Map([
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown','sync'].map(key=>[key,'flag']),
   ['sync-dir','value'],['candidates','value'],['owner-id','value'],
-  ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit'].map(key=>[key,'value']),
+  ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit','members','primary','manifest-sha256'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
 
@@ -366,6 +373,7 @@ async function main(){
   if(options.sync&&['release','legacy','root','as','job'].some(key=>Object.hasOwn(options,key)))fail('run --sync requires a personal project; cannot combine with --release/--legacy/--root/--as/--job');
   const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',projectCopy=positionals[0]==='project'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
   const datasetLabel=positionals[0]==='data'&&positionals[1]==='label';
+  const projectLifecycle=positionals[0]==='project'&&['label','group','archive','unarchive','retire'].includes(positionals[1]);
   if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy&&!projectCopy)fail('--from/--to are for sync, project copy or transfer copy; ref/target-project/dry-run are only for sync');
   if(options.candidates!==undefined&&positionals[0]!=='run')fail('--candidates is only for run --machine auto');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
@@ -381,7 +389,7 @@ async function main(){
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(options.cwd!==undefined&&!['exec','maintenance'].includes(positionals[0])||options.timeout!==undefined&&!['exec','maintenance'].includes(positionals[0])&&!transferCopy||options.detach&&positionals[0]!=='exec'&&!transferCopy)fail('--cwd is for exec/maintenance; timeout also supports transfer copy; detach is for exec or transfer copy');
   if(['reason','script-file','preview-token','parent','ack-unknown'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='maintenance')fail('Maintenance options are only valid for maintenance');
-  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])&&!datasetLabel||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0])&&!transferList)fail('--revision is for community/maintenance/data label; cursor/limit also support transfer list');
+  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])&&!datasetLabel&&!projectLifecycle||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0])&&!transferList)fail('--revision is for community/maintenance/data label/project lifecycle; cursor/limit also support transfer list');
   const customScheduling=['rank','yield','restart-policy','checkpointable','mode'].some(k=>Object.hasOwn(options,k));
   if(customScheduling&&(positionals[0]!=='run'||options.priority))fail('Custom scheduling is only valid for run and cannot mix with --priority presets');
   const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
@@ -402,7 +410,7 @@ async function main(){
   if(options.job&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.job))fail('Use --job JOB_UUID from gpuctl jobs');
   const explicitSession=options['session-file']||process.env.GPUQ_SESSION_FILE||process.env.AMAX_SESSION_FILE;
   if(options.description!==undefined&&positionals[0]!=='run')fail('--description is only valid for run');
-  if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0])&&!datasetLabel)fail('--display-name is only valid for profile, register or data label');
+  if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0])&&!datasetLabel&&!(positionals[0]==='project'&&['label','group'].includes(positionals[1])))fail('--display-name is only valid for profile, register, data label or project label/group');
   if(options['owner-id']!==undefined&&!datasetLabel&&!(positionals[0]==='data'&&positionals[1]==='archive-enroll'))fail('--owner-id is only valid for administrator data label/archive-enroll');
   let sessionFile=explicitSession||join(homedir(),'.config','gpuq-console','session.json');
   // Keep one cache: a previous installation continues using its existing file.
@@ -574,6 +582,41 @@ async function main(){
       result={...result,machine};
       if(terminal.has(result.state))process.exitCode=result.state==='TIMED_OUT'?124:result.state==='CANCELED'?130:Number.isInteger(result.exitCode)?Math.min(255,Math.max(0,result.exitCode)):result.signal?Math.min(255,128+result.signal):result.state==='SUCCEEDED'?0:1;
       else if(result.state==='UNKNOWN')process.exitCode=3;
+    }else if(command==='project'&&['label','group','catalog','archive','unarchive','retire-plan','retire','retire-status'].includes(positionals[1])){
+      const action=positionals[1],common=['machines','datasets','url','session-file','json'],extra={label:['project','display-name','revision'],group:['display-name','revision','members','primary'],catalog:['full'],archive:['project','revision'],unarchive:['project','revision'],'retire-plan':['project'],retire:['project','key','revision','manifest-sha256'],'retire-status':['project']}[action];
+      if(training.length||options.datasets.length||options.machines.length>1||Object.keys(options).some(k=>![...common,...extra].includes(k)))fail('Project lifecycle accepts only its own documented options');
+      const numeric=()=>{if(!/^\d+$/.test(options.revision||''))fail('Use the current nonnegative --revision');const value=Number(options.revision);if(!Number.isSafeInteger(value))fail('Revision is out of range');return value;};
+      if(action==='catalog'){
+        if(positionals.length!==2||options.machines.length)fail('Usage: project catalog [--full]');
+        result=(await call('projects.catalog',{includeArchived:options.full===true})).result;
+      }else if(action==='group'){
+        if(positionals.length!==3||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(positionals[2]))fail('Usage: project group UUID [--display-name NAME --members SERVER/PROJECT,... --revision N]');
+        const id=positionals[2];
+        if(options['display-name']===undefined){if(['members','revision','primary'].some(k=>options[k]!==undefined))fail('Group read accepts only its UUID');result=(await call('projects.group.get',{id})).result;}
+        else{
+          const ref=value=>{const parts=String(value).split('/');if(parts.length!==2)fail('Each member must be SERVER/PROJECT');return {machine:machineName(parts[0]),project:projectSlug(parts[1])};};
+          if(options.members===undefined)fail('Specify exact --members SERVER/PROJECT,... (none to detach all)');
+          result=(await call('projects.group.set',{id,displayName:options['display-name'],revision:numeric(),members:options.members==='none'?[]:options.members.split(',').map(ref),...(options.primary?{primary:ref(options.primary)}:{})})).result;
+        }
+      }else{
+        if(positionals.length>3)fail('Specify one exact project or original retirement UUID');
+        const machine=defaultMachine(),project=projectSlug(action==='retire-status'?options.project:positionals[2]||options.project||selectedProject(machine)),ref={machine,project};
+        if(action==='label'){
+          result=(await call('projects.label.get',ref)).result;
+          if(options['display-name']!==undefined)result=(await call('projects.label.set',{...ref,displayName:options['display-name'],revision:options.revision===undefined?result.revision:numeric()})).result;
+        }else if(['archive','unarchive'].includes(action)){
+          const status=(await call('projects.status',ref)).result;if(!Number.isSafeInteger(status.lifecycle?.revision))fail('Node lifecycle capability is unconfirmed; no legacy fallback');
+          result=(await call('projects.'+action,{...ref,revision:options.revision===undefined?status.lifecycle.revision:numeric()})).result;
+        }else if(action==='retire-plan')result=(await call('projects.retire.plan',ref)).result;
+        else if(action==='retire-status'){
+          if(positionals.length!==3||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(positionals[2]))fail('Use the original full retirement UUID');
+          result=(await call('projects.retire.status',{...ref,key:positionals[2]})).result;
+        }else{
+          if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.key||'')||!/^[a-f0-9]{64}$/.test(options['manifest-sha256']||''))fail('Retire requires explicit --key UUID, --revision and --manifest-sha256 from its plan');
+          process.stderr.write(`Retirement key: ${options.key}\nIf unconfirmed, inspect project retire-status ${options.key} --project ${project}\n`);
+          result=(await call('projects.retire',{...ref,key:options.key,revision:numeric(),manifestSha256:options['manifest-sha256']})).result;
+        }
+      }
     }else if(command==='project'&&['copy','copy-status','copy-cancel','copy-retry'].includes(positionals[1])){
       const action=positionals[1],allowed=['machines','datasets','url','session-file','json',...(action==='copy'?['from','to','release','key']:action==='copy-retry'?['key']:[])];
       if(training.length||options.datasets.length||options.machines.length||positionals.length!==3||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: project copy NAME --from SOURCE --to TARGET --release HASH | project copy-status|copy-cancel COPY_ID | project copy-retry COPY_ID [--key UUID]');

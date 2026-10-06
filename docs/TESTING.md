@@ -44,6 +44,15 @@ docker build -f deploy/Dockerfile -t gpuq-console:test .
 
 `tests/project-import-bridge.test.py` 隔离加载完整的实际执行桥，通过真实 Handler 和固定 SSH 命令构造验证上述五个新操作、旧上传/发布兼容、未知机器/邻近操作零派发、原 owner 与操作编号不变、节点拒绝原样返回及超时不重放。仅替换 inventory 和最终 SSH transport，不连接生产或读取凭据。
 
+## 项目生命周期额外回归
+
+项目生命周期离线夹具覆盖 owner/revision/UUID、名字与分组纯 metadata、跨机部分未知、
+权限在 proof 期间撤销、归档保留旧结果、禁止新工作、未使用 READY 项目退役、任何 run/claim/output
+阻塞、活动/未知终端与导入/上传/发布围栏、目录全量 CAS、私有软退役与永久 ID tombstone、
+丢回执保持 RETIRING 原请求、真实执行桥五操作。Mac 原子流程 fixture 明确只测试流程；
+Linux 专用 test 实际 renameat2 no-replace。生产绝不用测试 fallback，不因 UI 显示 ELIGIBLE
+就认为目录已退役。网页另核对名称、归组、归档过滤、退役计划/原 UUID 查询及 1440/390/320。
+
 ## 上线前的实机验收
 
 1. 用普通邀请码注册；未获批前提交和终端应拒绝，不能自选 admin。

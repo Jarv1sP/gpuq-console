@@ -247,6 +247,20 @@
 .sb #workspace-files label>.field-caption{grid-row:1;align-self:end;display:flex;align-items:center;line-height:1.6}
 .sb #workspace-files label>:is(input,select){grid-row:2;align-self:start}
 .sb #workspace-files :is(.file-actions,.file-result){margin:0}
+.sb #project-management{margin-top:16px;min-width:0}
+.sb #project-management :is(form,.project-management-current){display:grid;gap:16px;min-width:0}
+.sb #project-management form{margin:16px 0}
+.sb #project-management label{display:grid;gap:8px;margin:0;min-width:0}
+.sb #project-management .project-archive-filter{display:flex;align-items:center;gap:8px;margin:16px 0;min-height:44px}
+.sb #project-management .project-archive-filter input{width:32px;height:32px;min-height:32px}
+.sb #project-management :is(input:not([type=checkbox]),select){width:100%;min-width:0;min-height:44px}
+.sb #project-management :is(button,summary){min-height:44px}
+.sb #project-management .file-actions{display:flex;flex-wrap:wrap;gap:8px}
+.sb #project-management :is(pre,.mono){white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6;max-width:100%}
+.sb #project-management [data-catalog-output]{display:grid;gap:8px;margin-top:16px}
+.sb #project-management [data-catalog-output] button{text-align:left;white-space:normal;overflow-wrap:anywhere}
+.sb #project-management [hidden]{display:none!important}
+@media(max-width:759px){.sb #project-management .project-archive-filter input{width:48px;height:48px;min-height:48px}}
 .sb #workspace-files>summary{min-height:40px;display:flex;align-items:center}
 .sb #workspace-files [type=file]{height:40px;min-height:40px;padding:0 8px;line-height:38px}
 .sb #workspace-files [type=file]::file-selector-button{height:32px;margin:0 8px 0 0;padding:0 8px;font:inherit;vertical-align:middle}
