@@ -592,6 +592,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [native-maintenance-integration.test.js](../tests/native-maintenance-integration.test.js) | reconcile sends native labels beside the unchanged spec through the installed bridge |
 | [native-task-metadata-http.test.js](../tests/native-task-metadata-http.test.js) | authenticated Portal submit/reconcile reaches REAL native queue metadata, with no resubmit or spec edits |
 | [native-task-metadata.test.js](../tests/native-task-metadata.test.js) | new node envelope carries real names beside, NEVER inside, old immutable execution spec |
+| [native-task-presentation-http-cli.test.js](../tests/native-task-presentation-http-cli.test.js) | downloaded CLI reads bounded native-only labels for administrators, preserves native ownership and member redaction, and never dispatches |
 | [navigation.test.js](../tests/navigation.test.js) | transfer routes identify the dataset room and use one canonical tab URL |
 | [oci-cohort-api.test.js](../tests/oci-cohort-api.test.js) | actual account grant/revoke events and first project access sync only server-derived cohort |
 | [oci-cohort.test.js](../tests/oci-cohort.test.js) | default OFF makes no node call and does not create bookkeeping |
