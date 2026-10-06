@@ -301,6 +301,10 @@ def probe_gpuq():
                     functions={node.name for node in helper_tree.body if isinstance(node,ast.FunctionDef)}
                     if constants(entry).get('TASK_DISPLAY_CAPABILITY')=='console-task-display-v1' and constants(helper_tree).get('CAPABILITY')=='console-task-display-v1' and {'validate','sync'}<=functions:
                         output['capabilities'].append('console-task-display-v1')
+                    if (constants(entry).get('TASK_DISPLAY_EDIT_CAPABILITY')=='console-task-display-edit-v1'
+                            and constants(helper_tree).get('EDIT_CAPABILITY')=='console-task-display-edit-v1'
+                            and 'edit' in functions and 'job-display-cas-v1' in daemon['capabilities']):
+                        output['capabilities'].append('console-task-display-edit-v1')
                 except (OSError,ValueError,SyntaxError):pass
             helper=Path(__file__).resolve().parent/'scheduling-policy.py'
             if helper.is_file():

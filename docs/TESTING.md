@@ -40,6 +40,8 @@ docker build -f deploy/Dockerfile -t gpuq-console:test .
 
 `native-task-presentation-http-cli.test.js` 用独立 SQLite、合成新鲜节点快照、真实 HTTP 和下载版 CLI 验证原生任务展示：管理员只采用合法、有界的名称和说明，原生 owner 不变；成员仍脱敏，UNKNOWN 不变，过期快照不保留任务或猜测空闲。重复 ID、模糊平台关联、断连及非法标签的回退另由 `task-metadata.test.js` 覆盖。全程不派发节点命令，不修改任务身份、规格或资源。
 
+已有任务标签编辑：`task-display-api.test.js` 覆盖原规格不变、跨账号与零授权拒绝、旧能力零派发、撤权、并发版本及丢回执；`task-display-http-cli.test.js` 验证真实 HTTP 下载客户端的显式 revision 和不重试写入。`node-task-display-edit.test.py` 使用真实临时 GPUQ SQLite 和原生 CLI 测原提交三围栏、原子 CAS、写后丢回包仅原编号读取及 sync 保留人工标签；`task-display-bridge.test.py` 隔离加载真实固定桥，未知操作不连 SSH、拒绝原样保留、失败写不重试。`node tests/task-display-ui-smoke.mjs` 仅本机假 API，父级 120 秒截止、独立 Node 512 MiB heap，实际键盘与 1440/390/320 控件几何、旧节点、丢回执及角色变化；`CHROME_PATH` 可指定浏览器，截图用私有 `UI_SCREENSHOTS`。该父级限制不是全平台内存限额或跨平台 cgroup 承诺，正式配套启用另须节点服务版本核验。
+
 优先级界面回归使用本机静态资源与合成 API 响应，不连接真实执行桥。覆盖普通用户只有 normal/idle、未知节点能力禁止增强档位但保留训练草稿、管理员仅修改已确认队列、轮询保留优先级草稿及焦点、原优先级并发冲突、真实抢占标记、未知字段不冒充已知，以及 390px 布局。该浏览器测试只验证界面契约；后端权限、GPUQ 排序与让位策略须由独立单元测试和隔离节点验收覆盖，不能将合成响应当作实机通过。
 
 同机项目导入回归包含固定 owner/project/UUID、当前授权和维护门禁、后台源/草稿双围栏、full SHA 与源 CAS、新目录不覆盖、秘密/软硬链接拒绝、终端/旧上传阻塞、未知启动/提交不解围栏、取消只清理私人 staging。`tests/project-local-import.test.py` 的 Mac 离线复制夹具仅测试流程；Linux 专用用例实际调用 renameat2，不能把 Mac fixture fallback 当生产原子能力证明。待上传 list/cancel 另测目标变化、COMMITTING/旧记录拒绝、取消回执后清理中断可恢复及跨账号隔离。Portal/CLI 不重放新建/取消，不读取本机源即可发现和取消旧操作。

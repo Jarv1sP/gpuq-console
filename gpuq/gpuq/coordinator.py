@@ -4664,19 +4664,28 @@ class Coordinator:
 
     def _api_set_job_display(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_exact_fields(arguments,
-            allowed={"job_id", "metadata", "expected_submit_key", "expected_owner", "expected_name"},
+            allowed={"job_id", "metadata", "expected_submit_key", "expected_owner", "expected_name", "expected_display_revision"},
             required={"job_id", "metadata", "expected_submit_key", "expected_owner", "expected_name"})
+        if "expected_display_revision" in arguments and (not isinstance(arguments["expected_display_revision"], str)
+                or len(arguments["expected_display_revision"]) != 64
+                or any(c not in "0123456789abcdef" for c in arguments["expected_display_revision"])):
+            raise ApiError("BAD_REQUEST", "invalid expected display revision")
         try:
             job = self.store.set_job_display(arguments["job_id"], arguments["metadata"],
                 expected_submit_key=arguments["expected_submit_key"],
-                expected_owner=arguments["expected_owner"], expected_name=arguments["expected_name"])
+                expected_owner=arguments["expected_owner"], expected_name=arguments["expected_name"],
+                expected_display_revision=arguments.get("expected_display_revision"))
         except StoreNotFoundError as exc:
             raise ApiError("NOT_FOUND", str(exc)) from exc
         except StoreConflictError as exc:
             raise ApiError("CONFLICT", str(exc)) from exc
         except (ValueError, TypeError) as exc:
             raise ApiError("BAD_REQUEST", str(exc)) from exc
-        return {"job_id": job["id"], "display_metadata": job["display_metadata"]}
+        result = {"job_id": job["id"], "display_metadata": job["display_metadata"]}
+        if "expected_display_revision" in arguments:
+            from .job_display import display_revision
+            result["revision"] = display_revision(job["display_metadata"])
+        return result
 
     def _api_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_exact_fields(arguments, allowed={"all", "limit"})
@@ -4806,7 +4815,7 @@ class Coordinator:
         return {
             "daemon": {
                 **self._health_payload(),
-                "capabilities": ["job-display-v1", "priority-policy-v1", "preempt-idle-only-v1", "priority-rank-v1", "preempt-opt-in-only-v1", "elastic-batch-v1", "gpu-placement-v1", "gpu-sharing-v1"],
+                "capabilities": ["job-display-v1", "job-display-cas-v1", "priority-policy-v1", "preempt-idle-only-v1", "priority-rank-v1", "preempt-opt-in-only-v1", "elastic-batch-v1", "gpu-placement-v1", "gpu-sharing-v1"],
                 "observe_only": self._observe_only,
                 "managed_indices": managed_indices,
                 "managed_gpus": managed_gpus,

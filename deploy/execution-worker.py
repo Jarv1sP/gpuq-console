@@ -311,6 +311,7 @@ INTERNAL_STORAGE+=tuple('storage.dataset-delete.'+action for action in ('capabil
 INTERNAL_STORAGE+=tuple('projects.copy.'+action for action in ('prepare','start','status','cancel','revoke','release','probe'))
 # Exact owner-bound draft RPCs; Portal and node checks still establish identity.
 INTERNAL_STORAGE+=('files.upload.list','files.upload.cancel','projects.local-import.begin','projects.local-import.status','projects.local-import.cancel')
+INTERNAL_STORAGE+=('tasks.display.get','tasks.display.set')
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.request.settimeout(35)

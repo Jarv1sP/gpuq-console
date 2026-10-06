@@ -90,5 +90,25 @@ class Display(unittest.TestCase):
             with patch('sys.stdout',new=io.StringIO()):args.func(args)
             op,payload=get.return_value.call.call_args.args
             self.assertEqual(op,'set_job_display');self.assertEqual(payload['metadata']['name'],'中文 任务');self.assertEqual(payload['expected_submit_key'],'key')
+    def test_display_cas_is_atomic_and_stale_edits_do_not_mutate_execution(self):
+        from gpuq.job_display import display_revision
+        job,attempt=self.running((0,1));before=self.store.get_job(job['id']);leases=self.store.list_leases()
+        old=display_revision({})
+        changed=self.coordinator.handle_api('set_job_display',self.args(job,expected_display_revision=old))
+        self.assertEqual(changed['revision'],display_revision(self.metadata()))
+        for value in (old,None,'x'*64,42):
+            with self.assertRaises(ApiError):self.coordinator.handle_api('set_job_display',self.args(job,metadata=self.metadata(name='冲突改名'),expected_display_revision=value))
+        after=self.store.get_job(job['id'])
+        self.assertEqual({k:v for k,v in before.items() if k!='display_metadata'},{k:v for k,v in after.items() if k!='display_metadata'})
+        self.assertEqual(self.store.list_leases(),leases);self.assertEqual(self.store.list_attempts(job_id=job['id'])[0]['id'],attempt['id'])
+        self.assertIn('job-display-cas-v1',self.coordinator.handle_api('status',{})['daemon']['capabilities'])
+    def test_revision_hash_is_order_independent_and_cli_carries_exact_expectation(self):
+        from gpuq.job_display import display_revision
+        value=self.metadata();reordered={'submitter':{'username':value['submitter']['username'],'name':value['submitter']['name']},'description':value['description'],'name':value['name']}
+        self.assertEqual(display_revision(value),display_revision(reordered))
+        args=cli.build_parser().parse_args(['set-display','Jjob','--expected-submit-key','key','--expected-owner','alice',
+          '--expected-name','raw','--name','标签','--submitter-name','alice','--username','alice','--expected-display-revision','a'*64])
+        with patch.object(cli,'get_client') as client,patch.object(cli,'print_result'):
+            args.func(args);self.assertEqual(client.return_value.call.call_args.args[1]['expected_display_revision'],'a'*64)
 
 if __name__=='__main__':unittest.main()

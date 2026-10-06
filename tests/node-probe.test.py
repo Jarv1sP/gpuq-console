@@ -136,6 +136,18 @@ class Probe(unittest.TestCase):
             self.outputs['gpuq']=json.dumps({'daemon':{'health':'ok'},'jobs':[{**job,'display_metadata':broken}]})
             self.assertNotIn('display_metadata',self.run_probe()['gpuq']['jobs'][0])
 
+    def test_display_edit_requires_actual_atomic_cas_and_both_safe_helper_contracts(self):
+        entry=b"TASK_DISPLAY_CAPABILITY='console-task-display-v1'\nTASK_DISPLAY_EDIT_CAPABILITY='console-task-display-edit-v1'"
+        helper=b"CAPABILITY='console-task-display-v1'\nEDIT_CAPABILITY='console-task-display-edit-v1'\ndef validate(job,metadata):pass\ndef sync(node,job,metadata,native):pass\ndef edit(node,operation,args):pass"
+        def source(path,owner,**kwargs):return entry if path.name=='node-executor.py' else helper
+        for native in (['job-display-v1'],['job-display-v1','job-display-cas-v1']):
+            self.outputs['gpuq']=json.dumps({'daemon':{'capabilities':native},'jobs':[]})
+            with patch.object(self.probe,'helper_source',side_effect=source):
+                capabilities=self.run_probe()['gpuq']['capabilities']
+                self.assertEqual('console-task-display-edit-v1' in capabilities,'job-display-cas-v1' in native)
+        helper=helper.replace(b'def edit(node,operation,args):pass',b'')
+        with patch.object(self.probe,'helper_source',side_effect=source):self.assertNotIn('console-task-display-edit-v1',self.run_probe()['gpuq']['capabilities'])
+
     def test_host_command_requires_matching_safe_helpers_and_sudo_policy(self):
         self.probe.CONFIG['hostRoot'] = True
         def source(path, owner, **kwargs):
