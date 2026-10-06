@@ -266,7 +266,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     catch(error){service.db.exec('ROLLBACK');throw error;}
   }
   async function inspect(row,principal,check){
-    const view=graph(row);row.graphDigest=view.digest;save(row);
+    const view=graph(row);row.inspectionComplete=false;row.graphDigest=view.digest;save(row);
     for(const record of view.records.filter(r=>r.kind==='external'))event(row,externalRetirementAction(record.value),record.value.machine,'RETIRED');
     const listings=new Map();
     for(const host of MACHINES){
@@ -311,6 +311,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       if(!step.plan){step.plan=parsePlan(await rpc(principal,check,host,'plan',{operationId:step.operationId,dataset:name,version:row.version,authorization,references:[],...(principal.role==='admin'&&row.owner!==principal.userId?{adminContinue:true}:{})}),step,principal);save(row);}
     }
     if(graph(row).digest!==row.graphDigest)fail('数据依赖在准备期间改变，删除已暂停。');
+    row.inspectionComplete=true;save(row);
   }
   function verifyStatus(value,step){
     if(value?.protocol!==PROTOCOL||value.operationId!==step.operationId||value.machine!==step.machine||value.dataset!==step.dataset
@@ -429,7 +430,11 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
   }
   async function execute(row,principal,check,{allowRetry=false,creator=principal}={}){
     try{
-      check();if(!row.source)await inspect(row,creator,check);
+      // Source selection precedes authority-location and negative plans. A
+      // saved source is not proof that inspection finished. Explicit continue
+      // resumes the same fixed child IDs; already-authorized legacy tasks or
+      // dispatched phases keep their original proofs, never a fresh deletion.
+      check();if(!row.source||row.inspectionComplete!==true&&!row.authorized&&!row.steps.some(s=>s.dispatched.length))await inspect(row,creator,check);
       claimAuthorized(row,creator);
       const source=row.steps.find(s=>s.operationId===row.source);
       if(!source.fence&&!source.result)await dispatch(row,source,principal,check,'fence',{},allowRetry);
