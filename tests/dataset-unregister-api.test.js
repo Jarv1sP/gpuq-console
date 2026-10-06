@@ -47,18 +47,25 @@ test('missing/old/wrong-machine/failed capability cannot erase an unproven last 
     {protocol:'dataset-delete-node-v0',machine,datasetDelete:1},
     {protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1},Error('capability query failed')]){
     f.s.bridge=async(host,operation,args)=>{
+      if(operation==='datasets.list'){
+        f.calls.push({machine:host,operation,args:structuredClone(args)});
+        return {datasets:host===machine?[{dataset:'sample',versions:[{version:VERSION,state:'READY'}]}]:[]};
+      }
       if(operation!=='storage.dataset-delete.capabilities')return bridge(host,operation,args);
       reads.push({machine:host,operation,args:structuredClone(args)});
       if(capability instanceof Error)throw capability;
       return structuredClone(capability);
     };
-    // The old request-shape positives remain below for v1. cap0 must run the
-    // shared M2 guard, whose read failure cannot become a complete copy.
+    // Only the target has a full copy. The shared M2 guard must read the whole
+    // trusted inventory, then refuse without dispatching or persisting intent.
     for(const extra of [{},{version:null},{version:VERSION}]){
       f.calls.length=0;reads.length=0;
       await assert.rejects(f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',...extra}),
         e=>e.status===409&&e.code==='LAST_COPY_UNPROVEN');
       assert.equal(f.calls.filter(c=>c.operation==='datasets.unregister').length,0);
+      assert.deepEqual(f.calls.map(c=>c.machine),MACHINES.map(m=>m.id));
+      assert.ok(f.calls.every(c=>c.operation==='datasets.list'&&c.args.userId==='builtin-admin'&&c.args.hostAdmin===true));
+      assert.equal(f.s.db.prepare('SELECT count(*) n FROM dataset_removal_exclusions').get().n,0);
       assert.deepEqual(reads,[{machine,operation:'storage.dataset-delete.capabilities',args:{userId:'builtin-admin',hostAdmin:true}}]);
     }
     f.calls.length=0;reads.length=0;
@@ -79,6 +86,53 @@ test('member version forwards only authenticated identity; node still proves per
   const f=await apiFixture(t),machine=MACHINES[0].id;
   await f.s.invoke(f.member.token,'datasets.unregister',{machine,dataset:'sample',version:VERSION});
   assert.deepEqual(f.calls.at(-1),{machine,operation:'datasets.unregister',args:{dataset:'sample',version:VERSION,userId:f.member.principal.userId,hostAdmin:false}});
+  assert.equal(f.calls.length,1,'a v1 member removal must use the node protection, not the admin-only legacy guard');
+  assert.equal(f.s.db.prepare("SELECT count(*) n FROM sqlite_master WHERE name='dataset_removal_exclusions'").get().n,0);
+});
+
+test('cap0 admin uses the real shared protected-removal lane and unchanged main request for every capability fallback',async t=>{
+  const machine=MACHINES[0].id;
+  for(const capability of [undefined,{protocol:'dataset-delete-node-v1',machine,datasetDelete:0},
+    {protocol:'dataset-delete-node-v0',machine,datasetDelete:1},
+    {protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1},Error('capability query failed')]){
+    const f=await apiFixture(t),bridge=f.s.bridge,reads=[];let receipt;
+    f.s.bridge=async(host,operation,args)=>{
+      if(operation==='storage.dataset-delete.capabilities'){
+        reads.push({machine:host,operation,args:structuredClone(args)});
+        if(capability instanceof Error)throw capability;
+        return structuredClone(capability);
+      }
+      if(operation==='datasets.status'){
+        f.calls.push({machine:host,operation,args:structuredClone(args)});
+        assert.equal(args.operationId,receipt.operationId);
+        return {...receipt,state:'FAILED'};
+      }
+      if(operation==='datasets.unregister'){
+        // The real M2 wrapper must commit its exclusion before the bridge write.
+        // Calling assertAnotherCompleteCopy outside its lane cannot pass this.
+        const rows=f.s.db.prepare('SELECT * FROM dataset_removal_exclusions').all();
+        assert.equal(rows.length,1);assert.equal(rows[0].machine,host);
+        assert.equal(rows[0].dataset,'sample');assert.equal(rows[0].version,VERSION);
+        assert.equal(rows[0].operation_id,null);assert.equal(rows[0].scope_version,args.version??null);
+        receipt={operationId:OPERATION,dataset:args.dataset,version:args.version??null,state:'UNREGISTERING'};
+        f.respond(receipt);
+      }
+      return bridge(host,operation,args);
+    };
+    for(const extra of [{},{version:null},{version:VERSION}]){
+      const before=f.calls.length;
+      const result=(await f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',...extra})).result;
+      assert.deepEqual(result,receipt);
+      const current=f.calls.slice(before),writes=current.filter(call=>call.operation==='datasets.unregister');
+      // This is main's exact bridge request shape, including omitted vs null.
+      assert.deepEqual(writes,[{machine,operation:'datasets.unregister',args:{dataset:'sample',...extra,userId:'builtin-admin',hostAdmin:true}}]);
+      assert.deepEqual(current.filter(call=>call.operation==='datasets.list').slice(0,MACHINES.length).map(call=>call.machine),MACHINES.map(host=>host.id));
+      assert(current.findIndex(call=>call.operation==='datasets.unregister')>=MACHINES.length);
+      assert.equal(f.s.db.prepare('SELECT operation_id FROM dataset_removal_exclusions').get().operation_id,OPERATION);
+    }
+    assert.deepEqual(reads,Array.from({length:3},()=>({machine,operation:'storage.dataset-delete.capabilities',args:{userId:'builtin-admin',hostAdmin:true}})));
+    assert.equal(f.s.store.jobs.length,0);
+  }
 });
 
 test('unregister forwards optional versions and server-owned identity without reserving or stopping jobs',async t=>{
