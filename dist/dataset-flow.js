@@ -55,7 +55,7 @@ export function databaseGroundHTML(version){
   const state=databaseSummary(version);
   return `<div class="dataset-ground dataset-ground-${state.kind}" data-database-state="${state.kind}" role="status"><svg viewBox="0 0 1000 8" preserveAspectRatio="none" aria-hidden="true">${state.kind==='none'?'<line x1="0" y1="7" x2="1000" y2="7" stroke-dasharray="3 6"/>':'<path d="M0 7 Q500 0 1000 7 Q500 4.2 0 7Z"/>'}</svg><div class="dataset-ground-label">${state.kind==='none'?esc(state.label):`<span>数据库</span>${state.machine?serverIdHTML(state.machine):''}<span>${esc(state.label)}</span>`}</div></div>`;
 }
-export function datasetLifecycle(version,catalog,{upload}={}){
+export function datasetLifecycle(version,catalog,{upload,trainingAllowed}={}){
   const ground=databaseSummary(version),local=(version.locations||[]).find(row=>row.machine===catalog.machine);
   const localState=local?.state||version.state;
   const stages=[];
@@ -68,7 +68,7 @@ export function datasetLifecycle(version,catalog,{upload}={}){
   if(localState==='PREPARING')stages.push({label:'取回到 '+catalog.machine,state:'current'});
   if(localState==='FAILED')stages.push({label:'取回失败',state:'failed'});
   if(localState==='UNKNOWN')stages.push({label:'缓存待确认',state:'unknown'});
-  if(localState==='READY')stages.push({label:'可用于训练',state:'complete'});
+  if(localState==='READY'&&trainingAllowed!==false)stages.push({label:'可用于训练',state:'complete'});
   return stages;
 }
 // Read-only route evidence also survives an in-progress preparation. The

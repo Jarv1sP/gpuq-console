@@ -19,7 +19,7 @@ const shots=process.env.UI_SCREENSHOTS||'/tmp/r5-ui-smoke';
 const [targetMachine,sourceMachine]=MACHINES.map(machine=>machine.id);
 const password='Starbase-Local-Fixture-Only-2026!',release='a'.repeat(64);
 const errors=[],outside=[],assets=[],calls=[],sessions=new Map();
-let server,service,browser,releaseCatalog,releaseInventory;
+let server,service,browser,releaseCatalog,releaseInventory,datasetOwners=[];
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
 async function closeRoutedContext(context){
@@ -41,7 +41,11 @@ try{
     if(operation==='projects.list')return {projects:[structuredClone(project)]};
     if(operation==='projects.verify')return {project:args.project,release:args.release,state:'READY'};
     if(operation==='projects.status')return structuredClone(project);
-    if(operation==='datasets.list')return {datasets:machine===targetMachine?[{dataset:'tiny-local',ownerIds:[args.userId],versions:[{version:release,state:'READY',canPrepare:true,bytes:2048,files:1}]}]:machine===sourceMachine?[{dataset:'scans',ownerIds:[args.userId],versions:[{version:release,state:'READY',canPrepare:true,bytes:7*1024**3,files:120}]}]:[]};
+    if(operation==='datasets.list'){
+      assert.deepEqual(args,{userId:'builtin-admin',hostAdmin:true},'catalog discovery has a fixed metadata-only principal');
+      assert.equal(datasetOwners.length,2,'fixture data grants belong to actual member and admin accounts');
+      return {datasets:machine===targetMachine?[{dataset:'tiny-local',ownerIds:datasetOwners,versions:[{version:release,state:'READY',canPrepare:true,bytes:2048,files:1}]}]:machine===sourceMachine?[{dataset:'scans',ownerIds:datasetOwners,versions:[{version:release,state:'READY',canPrepare:true,bytes:7*1024**3,files:120}]}]:[]};
+    }
     if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
     if(operation==='transfers.capabilities')return {protocol:'lan-transfer-v1',enabled:true,sourceReady:true,sources:[sourceMachine]};
     if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:'READY'};
@@ -58,6 +62,7 @@ try{
   ({server,service}=await createPortalServer({database:join(temp,'portal.db'),bootstrap,statusPath,origin,secure:false,bridge}));
   clearInterval(service.executionTimer);await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'chen-research',name:'陈思远',password})).result;
+  datasetOwners=[member.id,service.store.users.find(user=>user.username==='admin').id];
   const peer=(await service.invoke(admin.token,'users.create',{username:'another-member',password})).result;
   await service.invoke(admin.token,'users.create',{username:'li-research',name:'李明',password});
   await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:8,limits:Object.fromEntries(MACHINES.map(machine=>[machine.id,Math.min(8,machine.cards)]))});

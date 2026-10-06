@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {datasetRows,datasetMachines,datasetLocation,capacityText,datasetCapacityHTML,archiveStatus} from '../dist/datasets-ui.js';
-const rows=catalog=>datasetRows({machine:'gpu-1',...catalog});
+import {datasetRows,datasetMachines,datasetLocation,datasetAccess,datasetAuthorizedMachines,capacityText,datasetCapacityHTML,archiveStatus} from '../dist/datasets-ui.js';
+// Existing rendering cases represent authorized catalogs. Model the new
+// explicit API proof; missing and denied proof cases below bypass this helper.
+const rows=value=>{
+ const catalog={machine:'gpu-1',...value};
+ catalog.datasets=catalog.datasets?.map(item=>({...item,versions:item.versions.map(v=>({canUse:true,canPrepare:true,...v,locations:(v.locations||[...(v.state&&v.state!=='NOT_LOCAL'?[{machine:catalog.machine,state:v.state,ownerLabel:v.ownerLabel}]:[]),...(v.sourceMachine?[{machine:v.sourceMachine,state:'READY'}]:[])]).map(location=>({canUse:true,...location}))}))}));
+ return datasetRows(catalog);
+};
 test('dataset cards show one concise username label, never guess from the dataset prefix',()=>{
  const catalog={datasets:[{dataset:'u-guessed-owner-data',versions:[{version:'a'.repeat(64),state:'READY',ownerLabel:'所属用户：alice',locations:[{machine:'gpu-1',state:'READY',ownerLabel:'所属用户：alice'}]}]}]};
  const html=rows(catalog);assert.match(html,/<p class="dataset-owner">所属用户：alice<\/p>/);
@@ -94,4 +100,37 @@ test('an explicit unknown local location wins over a confirmed machine catalog',
  const machine={machine:'gpu-1',state:'ok'},catalog={machine:'gpu-1'};
  assert.equal(datasetLocation({state:'READY',locations:[{machine:'gpu-1',state:'UNKNOWN'}]},machine,catalog).state,'UNKNOWN');
  assert.equal(datasetLocation({state:'FUTURE_STATE'},machine,catalog).state,'UNKNOWN');
+});
+test('metadata-only and missing authorization retain facts without training, preparation or archive retry',()=>{
+ for(const canUse of [false,undefined])for(const state of ['READY','PREPARING','FAILED']){
+  const v={version:'a'.repeat(64),state,canUse,canPrepare:true,ownerLabel:'所属用户：someone',bytes:123,files:2,locations:[{machine:'gpu-1',dataset:'private',state,canUse,storage:{phase:'FAILED',dataset:'private',version:'a'.repeat(64)}}]};
+  const catalog={machine:'gpu-1',machines:[{machine:'gpu-1',state:'ok'}],datasets:[{dataset:'private',versions:[v]}]};
+  const html=datasetRows(catalog),access=datasetAccess(v,catalog);
+  assert.equal(access.selectable,false);assert.equal(access.prepare,false);assert.equal(access.canRetry,false);
+  assert.match(html,/所属用户：someone/);assert.match(html,/仅浏览 · 未获使用授权/);assert.match(html,/data-use-dataset="private"[^>]+disabled/);
+  assert.doesNotMatch(html,/data-prepare-dataset|data-retry-archive|可用于训练/);
+  assert.match(html,/123 B/);assert.match(html,/2 个文件/);assert.match(html,/a{64}/);
+ }
+});
+test('local private READY never borrows a remote owner proof or aggregate READY to unlock training',()=>{
+ const v={version:'a'.repeat(64),state:'READY',canUse:true,canPrepare:false,locations:[{machine:'gpu-1',state:'READY',canUse:false},{machine:'gpu-2',state:'READY',canUse:true}]};
+ const catalog={machine:'gpu-1',datasets:[{dataset:'same',versions:[v]}]};
+ assert.equal(datasetAccess(v,catalog).ready,false);assert.equal(datasetAccess(v,catalog).selectable,false);
+ const html=datasetRows(catalog);assert.match(html,/缓存就绪/);assert.doesNotMatch(html,/可用于训练/);assert.match(html,/data-use-dataset="same"[^>]+disabled/);
+ v.locations[0].canUse=true;assert.equal(datasetAccess(v,catalog).ready,true);
+ assert.equal(datasetAccess(v,catalog,{machineAuthorized:false}).selectable,false);
+ const remote={...v,state:'NOT_LOCAL',canPrepare:true,sourceMachine:'gpu-2',locations:[{machine:'gpu-2',state:'READY',canUse:false}]};
+ assert.equal(datasetAccess(remote,catalog).prepare,false,'Aggregate flags cannot borrow a denied source');
+ remote.locations[0].canUse=true;assert.equal(datasetAccess(remote,catalog).prepare,true);
+ assert.equal(datasetAccess({...remote,state:'FUTURE_STATE'},catalog).prepare,false);
+});
+test('zero machine authorization is independent from visible directory machines',()=>{
+ const store={principal:{userId:'member'},users:[{id:'member',enabled:true,limits:{}}],data:{machines:[{id:'gpu-1'},{id:'gpu-2'}]}};
+ assert.deepEqual(datasetAuthorizedMachines(store),[]);
+ store.users[0].limits={'gpu-2':1};assert.deepEqual(datasetAuthorizedMachines(store),[{id:'gpu-2'}]);
+ store.users[0].enabled=false;assert.deepEqual(datasetAuthorizedMachines(store),[]);
+ const v={version:'a'.repeat(64),state:'READY',canUse:true,canPrepare:true,locations:[{machine:'gpu-1',state:'READY',canUse:true}]};
+ const catalog={machine:null,machines:[{machine:'gpu-1',state:'ok'}],datasets:[{dataset:'visible',versions:[v]}]};
+ const html=datasetRows(catalog);assert.match(html,/visible/);assert.match(html,/仅浏览/);assert.doesNotMatch(html,/data-use-dataset|data-prepare-dataset|可用于训练/);
+ assert.equal(datasetAccess(v,catalog).selectable,false);
 });

@@ -4,7 +4,7 @@ import {datasetCatalogCall,datasetListView} from '../dataset-catalog.mjs';
 import {MACHINES} from '../dist/model.js';
 const machines=MACHINES.slice(0,2).map(m=>m.id),version='a'.repeat(64),principal={userId:'demo-user-1',role:'member'};
 const users=[{id:principal.userId,username:'alice',name:'Not the username',password:'never-return'}, {id:'reader-2',username:'bob'}, {id:'unrelated',username:'hidden-user'}];
-function fixture(bridge){return {bridge,store:{users,get:()=>({id:principal.userId,enabled:true,limits:Object.fromEntries(machines.map(m=>[m,1]))})}};}
+function fixture(bridge){return {bridge:(machine,...args)=>machines.includes(machine)?bridge(machine,...args):Promise.resolve({datasets:[]}),store:{users,get:()=>({id:principal.userId,enabled:true,limits:Object.fromEntries(machines.map(m=>[m,1]))})}};}
 const item=(ownerIds,extra={})=>({dataset:'u-misleading-name',ownerIds,versions:[{version,state:'READY',bytes:5,files:1}],...extra});
 test('list projects only trusted authorized usernames, not IDs, guessed prefixes or user records',()=>{
   const result=datasetListView({datasets:[item([principal.userId],{ownerLabel:'forged',sourceId:'/private',users})]},users);
@@ -29,6 +29,7 @@ test('catalog retains per-location ownership and never unions differing ACLs',as
   const v=result.datasets[0].versions[0];
   assert.equal(v.ownerLabel,'各机授权不同（见副本位置）');
   assert.deepEqual(v.locations.map(location=>location.ownerLabel),['所属用户：alice','所属用户：bob']);
+  assert.deepEqual(v.locations.map(location=>location.canUse),[true,false]);
   assert.doesNotMatch(JSON.stringify(result),/共享授权用户|ownerIds|demo-user-1|reader-2/);
 });
 test('equal ACL sets share one label, while a legacy node cannot silently inherit another owner',async()=>{
@@ -38,13 +39,16 @@ test('equal ACL sets share one label, while a legacy node cannot silently inheri
   const v=(await datasetCatalogCall(s,principal,'datasets.catalog',{machine:machines[0]})).datasets[0].versions[0];
   assert.match(v.ownerLabel,/未知/);assert.equal(v.locations[0].ownerLabel,'所属用户：alice');assert.match(v.locations[1].ownerLabel,/未知/);
 });
-test('archive alias merging preserves physical-location ACL differences and version isolation',async()=>{
+test('an archive alias for this member cannot rename another owner registration',async()=>{
   const s=fixture(async machine=>({datasets:[item(machine===machines[0]?[principal.userId]:['reader-2'],{dataset:machine===machines[0]?'local':'archive-copy'})]}));
   s.storageArchivePolicy={machine:machines[1]};s.archiveAliases=()=>new Map([['archive-copy@'+version,'local']]);
   const result=await datasetCatalogCall(s,principal,'datasets.catalog',{machine:machines[0]});
-  assert.equal(result.datasets.length,1);assert.equal(result.datasets[0].dataset,'local');
-  assert.match(result.datasets[0].versions[0].ownerLabel,/各机授权不同/);
-  assert.deepEqual(result.datasets[0].versions[0].locations.map(value=>value.dataset),['local','archive-copy']);
+  assert.equal(result.datasets.length,2);
+  const remote=result.datasets.find(value=>value.dataset==='archive-copy').versions[0];
+  assert.equal(remote.ownerLabel,'所属用户：bob');assert.equal(remote.canUse,false);
+  assert.deepEqual(remote.locations.map(value=>value.dataset),['archive-copy']);
+  const local=result.datasets.find(value=>value.dataset==='local').versions[0];
+  assert.equal(local.canUse,true);assert.equal(local.locations.length,1);
 });
 test('catalog merges authorized locations, never makes a remote READY version local',async()=>{
   const calls=[],s=fixture(async(machine,operation,owner)=>{calls.push({machine,operation,owner});return {datasets:machine===machines[0]?[]:[{dataset:'mine',owners:['secret'],versions:[{version,state:'READY',bytes:5,files:1,sourceId:'private-path'}]}]};});
@@ -52,7 +56,9 @@ test('catalog merges authorized locations, never makes a remote READY version lo
   assert.equal(r.datasets[0].versions[0].state,'NOT_LOCAL');assert.equal(r.datasets[0].versions[0].canPrepare,false);
   assert.equal(r.datasets[0].versions[0].locations[0].machine,machines[1]);assert.equal(r.partial,false);
   assert.equal(JSON.stringify(r).includes('private-path'),false);assert.equal(JSON.stringify(r).includes('secret'),false);
-  assert.deepEqual(calls.map(c=>c.owner),machines.map(()=>({userId:principal.userId,hostAdmin:false})));
+  assert.deepEqual(calls.map(c=>c.owner),[{userId:'builtin-admin',hostAdmin:true},{userId:'builtin-admin',hostAdmin:true},{userId:principal.userId,hostAdmin:false}]);
+  assert.ok(calls.every(c=>c.operation==='datasets.list'));
+  assert.equal(r.machines.length,MACHINES.length);assert.equal(r.datasets[0].versions[0].canUse,true);
 });
 test('failed node is unknown and partial, not an empty confirmed catalog',async()=>{
   const s=fixture(async machine=>{if(machine===machines[0])throw Error('secret');return {datasets:[{dataset:'mine',versions:[{version,state:'READY'}]}]};});

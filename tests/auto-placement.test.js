@@ -55,6 +55,35 @@ test('local READY project wins; selection performs no prepare or GPU writes',asy
   assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
 });
 
+test('AUTO excludes visible foreign READY data and ranks only authorized dataset locations',async()=>{
+  const f=fixture(),ref={dataset:'private-data',version:'c'.repeat(64)},bridge=f.service.bridge;let owned=true;
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='datasets.list')return {datasets:[{dataset:ref.dataset,ownerIds:[owned&&machine===ids[2]?f.user.id:'another-user'],versions:[{version:ref.version,state:'READY',canPrepare:true}]}]};
+    return bridge(machine,operation,args);
+  };
+  f.service.gpuq.hosts[0].gpuq.schedulableIndices=[0,1];
+  assert.equal((await selectMachine(f.service,f.user,normalized({datasets:[ref]}),priorityCapable)).machine,ids[2]);
+  owned=false;
+  await assert.rejects(selectMachine(f.service,f.user,normalized({datasets:[ref]}),priorityCapable),e=>e.status===409&&/可读取/.test(e.message));
+  assert.equal(f.service.store.jobs.length,0);assert.equal(f.saved.length,0);
+  assert.equal(f.calls.some(c=>['prepareProject','datasets.prepare','sync'].includes(c.operation)),false);
+});
+
+test('AUTO retains complete authenticated identity when the shared catalog checks new-node deletion capabilities',async()=>{
+  const f=fixture(),ref={dataset:'personal-data',version:'c'.repeat(64)},checked=[];
+  f.service.bridge=async(machine,operation,args)=>{
+    assert.equal(operation,'datasets.list');
+    assert.equal(args.userId,args.hostAdmin?'builtin-admin':f.user.id);
+    return {datasetDelete:1,datasets:[{dataset:ref.dataset,ownerIds:[f.user.id],versions:[{version:ref.version,state:'READY',deletionPermissions:{memberAllowed:!args.hostAdmin}}]}]};
+  };
+  f.service.datasetDeleteCapabilities=async who=>{
+    assert.deepEqual(who,principal(f),'capability account check needs the complete server-derived principal');
+    checked.push(who);return {datasetDelete:1};
+  };
+  assert.equal((await selectMachine(f.service,f.user,normalized({datasets:[ref]}),priorityCapable)).machine,ids[0]);
+  assert.ok(checked.length>0);assert.equal(f.saved.length,0);assert.equal(f.service.store.jobs.length,0);
+});
+
 test('AUTO prefers a genuinely free pool over a busy local project, without dispatching or copying',async()=>{
   const f=fixture();f.service.gpuq.hosts[0].gpuq.jobs=[{id:'Jbusy',state:'RUNNING',assigned_gpu_indices:[0]}];
   f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0,1];
@@ -136,7 +165,9 @@ test('AUTO excludes connected degraded/unknown nodes without treating an empty f
 test('dataset locality wins before advisory queue length; missing or unauthorized versions exclude the target',async()=>{
   const f=fixture(),ref={dataset:'data',version:'c'.repeat(64)};
   f.service.bridge=async(machine,operation,args)=>{
-    assert.equal(operation,'datasets.list');assert.equal(args.userId,f.user.id);assert.equal(args.hostAdmin,false);
+    // Discovery uses one fixed metadata-only service identity; the catalog
+    // derives usability from the requesting member's exact owner ACL below.
+    assert.equal(operation,'datasets.list');assert.equal(args.userId,'builtin-admin');assert.equal(args.hostAdmin,true);
     return {datasets:[{dataset:ref.dataset,ownerIds:[f.user.id],versions:[{version:ref.version,state:machine===ids[1]?'READY':'REGISTERED',canPrepare:false}]}]};
   };
   f.service.transferCall=async()=>({enabled:true,sources:ids});

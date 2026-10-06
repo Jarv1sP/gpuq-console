@@ -41,14 +41,18 @@ export async function datasetLabelCall(service,principal,operation,args,revalida
       fail('账号授权已改变，请重新查询数据集。',403);
   };
   check();
-  // Admin delegation uses the target account's node ACL, never hostAdmin.
+  // Admin delegation uses the target account's usable versions. Elevated
+  // catalog metadata reads must not grant access to personal label mutations.
   // Logical aliases come from catalog receipts, not name-prefix guessing.
   const catalog=await datasetCatalogCall(service,{userId:owner,username:viewer.username,role:viewer.role||'member'},'datasets.catalog',{machine:args.machine});
   check();
   let matches=catalog.datasets.filter(item=>item.dataset===args.dataset);
-  if(!matches.length)matches=catalog.datasets.filter(item=>item.versions.some(version=>version.locations.some(location=>location.machine===args.machine&&location.dataset===args.dataset)));
+  const physicalAlias=!matches.length;
+  if(physicalAlias)matches=catalog.datasets.filter(item=>item.versions.some(version=>version.locations.some(location=>location.machine===args.machine&&location.dataset===args.dataset)));
   if(!matches.length&&catalog.partial)fail('部分节点目录尚未确认，请稍后重试；未修改显示名称。',503);
   if(matches.length!==1)fail(matches.length?'该本地名称映射到多个逻辑数据集，请使用目录中的逻辑 ID。':'数据集不存在或该账号无访问权限。',matches.length?409:404);
+  if(!matches[0].versions.some(version=>version.canUse===true&&(!physicalAlias||version.locations.some(location=>location.canUse===true&&location.machine===args.machine&&location.dataset===args.dataset))))
+    fail('当前账号没有数据集读取授权，不能修改或读取其个人显示名称。',403);
   const logical=matches[0].dataset;
   const result=()=>{
     const row=service.db.prepare('SELECT name,revision,updated_at FROM dataset_labels WHERE owner_id=? AND logical_id=?').get(owner,logical);

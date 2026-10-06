@@ -15,6 +15,7 @@ const dir=await mkdtemp(join(tmpdir(),'dataset-flow-')),out=process.env.UI_SCREE
 const password='Local-Database-Cache-Fixture-Only-2026!',hash='a'.repeat(64),second='b'.repeat(64);
 const [target,source,third,database]=MACHINES.map(row=>row.id);
 const calls=[],errors=[],geometries=[],pins=new Set(['pre-existing']);let mode='normal',gate,releaseGate,pinReply='normal',databasePhase=null,server,service,browser;
+const fixtureOwners=['builtin-admin'];
 const ref={machine:target,dataset:'local-samples',version:hash};
 const states={scans:['PREPARING','READY',null,null],'sample-pictures':['REGISTERED','FAILED','READY',null],'tiny-local':['READY',null,null,null],validation:[null,null,'READY',null]};
 // A modal makes the background inert. Scan the dialog's active controls while
@@ -41,7 +42,7 @@ try{
       if(mode==='unknown'&&machine!==target)throw Error('Local fixture catalog unavailable');
       return {datasets:Object.entries(states).flatMap(([dataset,values])=>{
         const state=mode==='unknown'?(machine===target?'UNKNOWN':null):values[index];if(!state)return [];
-        return [{dataset:dataset==='tiny-local'?'local-samples':dataset,ownerIds:[args.userId],versions:[{version:dataset==='validation'?second:hash,state,canPrepare:state!=='UNKNOWN'&&state!=='PREPARING',bytes:dataset==='tiny-local'?2048:7*1024**3,files:dataset==='tiny-local'?1:120,...(state==='FAILED'?{error:'本地模拟缓存取回失败，可重试。'}:{})}]}];
+        return [{dataset:dataset==='tiny-local'?'local-samples':dataset,ownerIds:fixtureOwners,versions:[{version:dataset==='validation'?second:hash,state,canPrepare:state!=='UNKNOWN'&&state!=='PREPARING',bytes:dataset==='tiny-local'?2048:7*1024**3,files:dataset==='tiny-local'?1:120,...(state==='FAILED'?{error:'本地模拟缓存取回失败，可重试。'}:{})}]}];
       })};
     }
     if(operation==='datasets.storage.status'){
@@ -64,6 +65,7 @@ try{
   const originalTransferCall=service.transferCall.bind(service);service.transferCall=(principal,operation,args)=>operation==='transfers.capabilities'?Promise.resolve({enabled:true,sources:[source],targets:[target]}):originalTransferCall(principal,operation,args);
   service.archiveState=(_owner,machine,value)=>value.dataset==='local-samples'?null:{...value,phase:mode==='unknown'?'BLOCKED':value.dataset==='validation'?(databasePhase||'COPYING'):'ARCHIVED',archiveMachine:database,localMachine:machine,originalRetained:mode!=='unknown'&&value.dataset!=='validation'};
   await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'data-flow-member',password})).result;await service.invoke(admin.token,'policy.full',{userId:member.id,policyVersion:0});
+  fixtureOwners.push(member.id);
   const zero=(await service.invoke(admin.token,'users.create',{username:'zero-cache-grants',password})).result;
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   async function login(page,username){await page.locator('#login-form [name=username]').fill(username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('#room-nav [data-nav=datasets]').click();await page.locator('#page-datasets').waitFor({state:'visible'});await page.evaluate(()=>document.fonts.ready);}
@@ -215,7 +217,19 @@ try{
   await adminPage.evaluate(()=>document.querySelector('#switch-account').click());await adminPage.locator('#login-dialog').waitFor({state:'visible'});assert.equal(await adminPage.locator('[data-cache-pin-slot],.dataset-cache-admin').count(),0);
   await login(adminPage,member.username);await load(adminPage);assert.equal(await adminPage.locator('.dataset-cache-admin,[data-cache-retention]').count(),0,'the next account inherits no retention controls');
   await adminPage.evaluate(()=>document.querySelector('#switch-account').click());await adminPage.locator('#login-dialog').waitFor({state:'visible'});await login(adminPage,'admin');await load(adminPage);await adminLocal.locator('.dataset-version-details>summary').click();await adminLocal.locator('[data-cache-retention=unpin]').waitFor();assert.equal(pins.size,2);assert.ok(pins.has('pre-existing'));assert.ok(calls.some(row=>row.operation==='datasets.storage.status'&&row.args.pinId===calls.filter(row=>row.operation==='datasets.storage.pin').at(-1).args.pinId),'same account restores only after exact server proof');
-  const zeroPage=await pageFor('zero');assert.equal(await zeroPage.locator('.dataset-cache-admin,[data-cache-retention],[data-dataset-more-slot]').count(),0);assert.equal(await zeroPage.locator('#datasets-refresh').isDisabled(),true);assert.match(await zeroPage.locator('#datasets-status').innerText(),/没有已授权/);
+  const zeroPage=await pageFor('zero');assert.equal(await zeroPage.locator('.dataset-cache-admin,[data-cache-retention],[data-dataset-more-slot]').count(),0);assert.equal(await zeroPage.locator('#datasets-refresh').isEnabled(),true);
+  const zeroCalls=calls.length;await load(zeroPage);
+  assert.equal(await zeroPage.locator('.dataset-card').count(),4,'Zero quota can browse the complete metadata library');
+  assert.equal(await zeroPage.locator('.dataset-matrix').getAttribute('data-machine-count'),String(MACHINES.length));
+  assert.equal(await zeroPage.locator('[name=dataset-machine]').inputValue(),'');
+  assert.equal(await zeroPage.locator('[name=dataset-machine]').isDisabled(),true);
+  assert.equal(await zeroPage.locator('#datasets-capacity').isVisible(),false);
+  assert.equal(await zeroPage.locator('#datasets-add>summary').getAttribute('aria-disabled'),'true');
+  assert.equal(await zeroPage.locator('#datasets-add>summary').evaluate(node=>getComputedStyle(node).opacity),'0.5');
+  await zeroPage.locator('#datasets-add>summary').click();assert.equal(await zeroPage.locator('#dataset-add-dialog').isVisible(),false);
+  assert.equal(await zeroPage.locator('[data-use-dataset],[data-prepare-dataset],[data-retry-archive],[data-remove-more],[data-remove-confirm]').count(),0);
+  assert.ok(calls.slice(zeroCalls).every(row=>row.operation==='datasets.list'),'Browsing zero-quota metadata makes no capacity, storage, preparation or execution RPC');
+  for(const width of [1440,390,320]){await check(zeroPage,'zero-quota-library',width);await capture(zeroPage,'zero-quota-library-'+width);}
   const zeroAuth=await service.login(zero.username,password),beforeDenied=calls.length;
   for(const operation of ['status','plan','pin','unpin'])await assert.rejects(service.invoke(zeroAuth.token,'datasets.storage.'+operation,operation==='plan'?{machine:target}:{...ref,...(['pin','unpin'].includes(operation)?{pinId:'manual-local-denied-fixture'}:{})}),error=>error.status===403);
   assert.equal(calls.length,beforeDenied,'zero-authority member is rejected before any node operation');

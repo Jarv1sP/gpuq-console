@@ -81,7 +81,16 @@ try{
     assert.equal(layout.indicatorDisplay,'none','mobile navigation ignores stale desktop indicator geometry');
     await page.evaluate(()=>{for(const animation of globalThis.heldDesktopTransitions){animation.effect.target.classList.remove('desktop-route-slide');animation.cancel();}delete globalThis.heldDesktopTransitions;document.querySelector('.nav-indicator').hidden=true;});
   };
-  await mobileFit(390);assert.deepEqual(errors,[]);assert.ok(calls.every(c=>c.args.userId===member.id),'identity is derived from authenticated owner');assert.equal(service.store.jobs.length,0);
+  await mobileFit(390);assert.deepEqual(errors,[]);
+  assert.ok(calls.some(call=>call.op==='datasets.list'),'catalog exercises the fixed metadata discovery operation');
+  for(const call of calls){
+    if(call.op==='datasets.list')assert.deepEqual(call.args,{userId:'builtin-admin',hostAdmin:true},'only fixed metadata list may use the service identity');
+    else{
+      assert.equal(call.args.userId,member.id,`${call.op} derives identity from authenticated owner`);
+      assert.equal(call.args.hostAdmin??false,false,`${call.op} never inherits metadata administrative authority`);
+    }
+  }
+  assert.equal(service.store.jobs.length,0);
   await capture('transfers-mobile');
   await mobileFit(320);
   assert.equal(await page.locator('#transfer-copy-form input,#transfer-copy-form select').evaluateAll(items=>items.every(el=>parseFloat(getComputedStyle(el).fontSize)>=16)),true,'mobile transfer fields avoid zoom');

@@ -17,6 +17,7 @@ const screenshots = process.env.UI_SCREENSHOTS || '/tmp/gpuq-datasets-ui';
 const password = 'Local-Dataset-UI-Only-Password-2026!';
 const version = 'a'.repeat(64), ref = {dataset: 'sample', version};
 const calls = [], errors = [], blocked = [], httpErrors = [], authenticated = new WeakSet(), phases = new Map([['gpu-1', 'REGISTERED']]);
+const fixtureOwners=['builtin-admin'];
 let moreLocalVersions=false, holdLookup=false, releaseLookup=null,heldDelivery=null,heldRequest=null;
 let server, browser, service, waitingList = null, listGate = null;
 const reserve = net.createServer();
@@ -43,10 +44,10 @@ try {
     if (operation === 'datasets.list') {
       if (machine === 'gpu-2' && listGate) {waitingList?.(); await listGate;}
       const state = phases.get(machine) || 'READY';
-      const entries = [{dataset: machine === 'gpu-1' ? 'sample' : 'another', ownerIds:[args.userId], versions: [{version, state,canPrepare:true,
+      const entries = [{dataset: machine === 'gpu-1' ? 'sample' : 'another', ownerIds:fixtureOwners, versions: [{version, state,canPrepare:true,
         files: 12, bytes: 128 * 1024 ** 2, ...(state === 'FAILED' ? {error: 'Test preparation interrupted; safe to retry.'} : {})}]}];
       if(moreLocalVersions&&machine==='gpu-1')entries[0].versions.push({version:'d'.repeat(64),state:'READY',canPrepare:true,files:4,bytes:2*1024**2});
-      if (args.hostAdmin) entries.push({dataset: 'admin-private', versions: [{version: 'b'.repeat(64), state: 'READY', files: 1, bytes: 12}]});
+      if (args.hostAdmin) entries.push({dataset: 'admin-private', ownerIds:['another-owner'], versions: [{version: 'b'.repeat(64), state: 'READY', files: 1, bytes: 12}]});
       return {datasets: entries};
     }
     if (operation === 'datasets.prepare') {
@@ -64,6 +65,7 @@ try {
   await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
   const adminLogin = await service.login('admin', password);
   const user = (await service.invoke(adminLogin.token, 'users.create', {username: 'dataset-browser-user', password})).result;
+  fixtureOwners.push(user.id);
   await service.invoke(adminLogin.token, 'policy.save', {userId: user.id,
     policyVersion: service.store.get(user.id).policyVersion, total: 2, limits: {'gpu-1': 1, 'gpu-2': 1}});
 
@@ -116,10 +118,11 @@ try {
   const card = page => page.locator('.dataset-card').filter({has: page.locator('h3', {hasText: /^sample$/})});
 
   await login(admin, 'admin'); await refresh(admin);
-  assert.equal(await admin.locator('.dataset-card').count(), 2);
-  assert.doesNotMatch(await admin.locator('#dataset-catalog').textContent(), /admin-private/);
-  assert.equal(await card(admin).locator('.dataset-owner').textContent(), '所属用户：admin');
-  assert.equal(calls.at(-1).args.userId, 'builtin-admin'); assert.equal(calls.at(-1).args.hostAdmin, false);
+  assert.equal(await admin.locator('.dataset-card').count(), 3);
+  assert.match(await admin.locator('#dataset-catalog').textContent(), /admin-private/);
+  assert.equal(await admin.locator('[data-use-dataset="admin-private"]').isDisabled(),true,'Admin metadata visibility grants no personal dataset ownership');
+  assert.equal(await card(admin).locator('.dataset-owner').textContent(), '共享授权用户：admin、dataset-browser-user');
+  assert.ok(calls.some(call=>call.operation==='datasets.list'&&call.args.userId==='builtin-admin'&&call.args.hostAdmin===true));
   assert.equal(await admin.locator('#datasets-capacity strong').innerText(),'502 GiB');assert.equal(await admin.locator('#datasets-capacity small').innerText(),'共 1024 GiB');assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/可用 512 GiB/);assert.match(await admin.locator('#datasets-capacity .ui-info-content').textContent(),/共享数据盘，容量不是个人配额/);
   assert.equal(await admin.locator('.dataset-card h3',{hasText:/^another$/}).count(),1,'Same dataset and version is merged across machines');
   assert.equal(await admin.locator('#datasets-add').evaluate(node=>node.open),false,'Import controls start collapsed');
@@ -133,11 +136,22 @@ try {
 
   await login(member, 'dataset-browser-user'); await refresh(member);
   assert.deepEqual(await member.locator('[name=dataset-machine] option').evaluateAll(options => options.map(option => option.value)), ['gpu-1', 'gpu-2']);
-  assert.equal(await member.locator('.dataset-card').count(), 2);
-  assert.doesNotMatch(await member.locator('#dataset-catalog').textContent(), /admin-private/);
-  assert.equal(calls.at(-1).args.userId, user.id); assert.equal(calls.at(-1).args.hostAdmin, false);
+  assert.equal(await member.locator('.dataset-card').count(), 3);
+  assert.match(await member.locator('#dataset-catalog').textContent(), /admin-private/);
+  assert.ok(calls.some(call=>call.operation==='datasets.list'&&call.args.userId==='builtin-admin'&&call.args.hostAdmin===true));
+  assert.equal(await member.locator('.dataset-matrix').getAttribute('data-machine-count'),String(MACHINES.length),'Metadata includes every inventory node while the execution selector stays quota-bound');
+  const foreign=member.locator('.dataset-card').filter({has:member.locator('h3',{hasText:/^admin-private$/})});
+  assert.match(await foreign.innerText(),/仅浏览 · 未获使用授权/);
+  assert.equal(await foreign.locator('[data-use-dataset]').isDisabled(),true);
+  assert.equal(await foreign.locator('[data-prepare-dataset],[data-remove-more],[data-remove-confirm]').count(),0);
+  await foreign.locator('summary').click();assert.doesNotMatch(await foreign.locator('.dataset-lifecycle').innerText(),/可用于训练/);
+  const beforeTamper=calls.length;
+  await foreign.locator('[data-use-dataset]').evaluate(button=>{button.disabled=false;button.click();button.disabled=true;});
+  assert.equal(await member.locator('#work-submit').isVisible(),false,'Delegated action rechecks authorization even if disabled DOM is removed');
+  assert.equal(calls.length,beforeTamper,'Metadata-only click never reaches node or submission APIs');
+  await foreign.locator('summary').click();
   assert.match(await card(member).textContent(), /待准备/);
-  assert.equal(await card(member).locator('.dataset-owner').textContent(), '所属用户：dataset-browser-user');
+  assert.equal(await card(member).locator('.dataset-owner').textContent(), '共享授权用户：admin、dataset-browser-user');
   assert.equal(await card(member).locator('[data-prepare-dataset]').isEnabled(), true);
   assert.equal(await card(member).locator('[data-use-dataset]').isEnabled(), true);
   assert.equal(await card(member).locator('[data-use-dataset]').textContent(), '准备后训练');
@@ -308,7 +322,7 @@ try {
   releaseLookup();await closedReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
   assert.equal(await heldRequest.response(),null,'native close cancels the pending lookup');assert.ok(heldRequest.failure());
   assert.equal(await member.locator('#work-submit').isVisible(),false,'A late lookup must not reopen a generically closed submit sheet');
-  console.log('DATASETS UI PASS: owner-filtered merged catalogs; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; zero HTTP or browser errors and no external requests.');
+  console.log('DATASETS UI PASS: full metadata catalogs with explicit owner-use gates; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; zero HTTP or browser errors and no external requests.');
   console.log(`Screenshots: ${screenshots}`);
 } finally {
   holdLookup=false;releaseLookup?.();

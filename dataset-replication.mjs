@@ -104,7 +104,9 @@ export function installDatasetReplication(service){
     const catalog=await datasetCatalogCall(service,who,'datasets.catalog',{machine:target});
     check(owner,target,policy);
     const selected=catalog.datasets.find(item=>item.dataset===ref.dataset)?.versions.find(item=>item.version===ref.version);
-    if(!selected)fail('没有当前账号可用的数据版本；请先导入。',403);
+    // Catalog visibility is metadata only, including another owner's READY
+    // copies. Only an explicitly usable version may enter the prepare path.
+    if(!selected||selected.canUse!==true)fail('没有当前账号可用的数据版本；请先导入或取得读取授权。',403);
     if(selected.state==='READY')return {...ref,state:'READY'};
     if(!selected.sourceMachine){
       if(!selected.canPrepare&&selected.state!=='PREPARING')fail('目标机器没有可用的数据来源。');
