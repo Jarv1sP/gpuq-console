@@ -62,7 +62,7 @@ try{
       await page.setViewportSize({width,height:1000});await page.locator(root+' .cloud-import').scrollIntoViewIfNeeded();await page.evaluate(()=>document.fonts.ready);
       await page.evaluate(()=>{document.activeElement?.blur();scrollTo({top:0,left:0,behavior:'instant'});});
       const layout=await page.evaluate(root=>{const d=document.querySelector(root);return {width:innerWidth,document:document.documentElement.scrollWidth,dialog:d.scrollWidth,client:d.clientWidth,buttons:[...d.querySelectorAll('.cloud-import .button')].filter(b=>b.getClientRects().length).map(b=>b.getBoundingClientRect().height),help:[...d.querySelectorAll('.cloud-import [data-copy-help]')].filter(b=>b.getClientRects().length).map(b=>b.getBoundingClientRect().height),skip:document.querySelector('.skip-link').getBoundingClientRect().bottom};},root);
-      assert(layout.document<=width+1);assert(layout.dialog<=layout.client+1);assert(layout.buttons.every(height=>height>=44));assert(layout.help.every(height=>height>=(width<760?44:32)));assert(layout.skip<=0);checks.push({role,name,...layout});
+      assert(layout.document<=width+1);assert(layout.dialog<=layout.client+1);assert(layout.buttons.every(height=>height>=44),JSON.stringify(layout));assert(layout.help.every(height=>height>=(width<760?44:32)));assert(layout.skip<=0);checks.push({role,name,...layout});
       await page.screenshot({path:join(screenshots,name+'-'+role+'-'+width+'.png')});
     };
     for(const width of [1440,390,320])await shot('share-unavailable',width);

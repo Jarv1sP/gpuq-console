@@ -30,6 +30,7 @@
 .admin-storage-cloud #cloud-admin{border:1px solid var(--line);border-radius:8px;padding:0 16px}
 .admin-storage-cloud #cloud-admin>summary{display:flex;align-items:center;gap:8px;min-height:48px}
 .admin-storage-cloud #cloud-admin>summary .copy-help{margin-left:auto}
+.admin-storage-cloud .button{min-height:44px}
 @media(max-width:759px){
  .admin-storage-controls .field{flex-basis:100%;max-width:none}.admin-storage-controls .button{min-height:48px}
  .admin-data-storage .dataset-cache-toolbar .button{height:48px;min-height:48px}

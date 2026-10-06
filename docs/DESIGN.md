@@ -310,7 +310,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作 | 失联不重放，writerToken仅内存 |
-| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；服务器区内部滚动，训练按钮和两条命令在固定底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
+| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
 | `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；容量条只取已确认 capacity | filesystemBytes/availableBytes 计算实际数据盘已用比例；读不到不画 0%；长 ID 提示完整值；手机内部横向滚动 |
 | `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
 | `.v3-upload` / `.v3-drop` / `.v3-route` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 先拖放/选择文件，再显示文件摘要、名称、上传服务器及一条探测路线 | 匿名 capabilities 不带票据；门户提供路线无效时显示待确认；保留原链接、云盘、服务器整理流程；原生 dialog 在可见父节点下 |
@@ -432,6 +432,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 详情按内容自然撑高，以 CSS sticky 顶部偏移和运行时总控占用计算最大空间；仅超出时让中段滚动、训练底栏固定，四台服务器在 1440×900 和 1024×768 均完整显示。「所属」只显示名字，原 ownerLabel 保留不变。上传连接失败只提供原路线重试与重新探测，不推荐其他来源；其他来源仍在初始选择里。
 
 主界面的管理员和普通成员使用相同仓库组件；只显示个人授权操作，不出现缓存策略、固定保留或云盘连接。独立 [admin-data-storage.js](../dist/admin-data-storage.js) 注册 storage/order20，只有管理后台确认角色并挂载时才读取全所属目录；离开或撤权先 abort 再清理。按机器删除读取新鲜全节点物理登记，固定保留仍绑定原 pinId，容量策略只在展开或显式刷新时读；全局目录可见性不授予任何管理权限。
+
+仓库目录只在打开数据集房间时首次加载，隐藏房间不提前读取节点。上传初始页的其他来源保留云盘导入；打开电脑上传不查询云盘连接能力。云盘扫码和断开授权仍在后台，按钮高度至少44px。
 
 数据仓库允许启用的登录成员浏览全节点元数据，零机器额度仍可浏览。版本与位置的 `canUse` 表示本人使用授权；`READY` 只证明副本状态，不能单独解锁准备或训练。未授权版本简短标为“仅浏览”，不把生命周期画成“可用于训练”；容量、上传、训练和管理员操作仍分别鉴权，不因目录扩大而增加权限或暴露私有路径。
 
