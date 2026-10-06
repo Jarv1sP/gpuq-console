@@ -2275,7 +2275,10 @@ class DatasetCache:
                     info = os.fstat(fd)
                     if info.st_uid != os.geteuid() or info.st_mode & 0o077:
                         raise CacheError('unsafe empty-registration dependency directory')
-                    return sorted(os.listdir(fd))
+                    result = sorted(os.listdir(fd))
+                    if len(result) > 10000:
+                        raise CacheError('empty-registration dependency proof exceeds its entry budget')
+                    return result
             except FileNotFoundError:
                 return []
 
@@ -2312,6 +2315,7 @@ class DatasetCache:
                 raise CacheError('empty registration has retained pins or recovery metadata')
         uploads = self.root / '.uploads'
         parent = uploads / hashlib.sha256(owner.encode()).hexdigest()
+        sessions = {}
         for upload in names(parent):
             if not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', upload):
                 raise CacheError('empty registration has unknown upload identity')
@@ -2328,6 +2332,7 @@ class DatasetCache:
             target = prefix + session['name']
             if session.get('dataset', target) != target:
                 raise CacheError('empty registration upload namespace changed')
+            sessions[upload] = (target, session)
             if target != dataset:
                 del evidence[before:]
                 continue
@@ -2341,6 +2346,47 @@ class DatasetCache:
                 binding = hashlib.sha256((dataset+'@'+session['version']).encode()).hexdigest()+'.json'
                 if binding in names(uploads / 'bindings'):
                     raise CacheError('upload binding prevents empty registration removal')
+        # Bindings can outlive a missing session or lose its version. Prove
+        # same-owner bindings through the already verified session map rather
+        # than assuming an absent session is unrelated to this registration.
+        for name in names(uploads / 'bindings'):
+            if not name.endswith('.json'):
+                raise CacheError('empty registration has unknown upload binding metadata')
+            _identifier(name[:-5], HASH_RE)
+            before = len(evidence)
+            binding = read(uploads / 'bindings' / name)
+            if (not isinstance(binding, dict) or set(binding) != {'userId', 'uploadId'}
+                    or not isinstance(binding['userId'], str)
+                    or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)', binding['userId'])
+                    or not isinstance(binding['uploadId'], str)
+                    or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', binding['uploadId'])):
+                raise CacheError('empty registration upload binding identity is unconfirmed')
+            if binding['userId'] == owner:
+                matched = sessions.get(binding['uploadId'])
+                if matched is None:
+                    raise CacheError('upload binding session or version is unconfirmed')
+                target, session = matched
+            else:
+                foreign = uploads/hashlib.sha256(binding['userId'].encode()).hexdigest()/binding['uploadId']
+                try: session = read(foreign/'session.json')
+                except FileNotFoundError:
+                    raise CacheError('upload binding session or version is unconfirmed') from None
+                if (not isinstance(session, dict) or session.get('schema') != 1
+                        or session.get('userId') != binding['userId'] or session.get('uploadId') != binding['uploadId']
+                        or not isinstance(session.get('name'), str)
+                        or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,39}', session['name'])):
+                    raise CacheError('upload binding session ownership is unconfirmed')
+                target = 'u-'+hashlib.sha256(binding['userId'].encode()).hexdigest()[:16]+'-'+session['name']
+                if session.get('dataset', target) != target:
+                    raise CacheError('upload binding namespace is unconfirmed')
+            if not isinstance(session.get('version'), str):
+                raise CacheError('upload binding session or version is unconfirmed')
+            _identifier(session['version'], HASH_RE)
+            if name != hashlib.sha256((target+'@'+session['version']).encode()).hexdigest()+'.json':
+                raise CacheError('upload binding namespace is unconfirmed')
+            if target == dataset:
+                raise CacheError('upload binding prevents empty registration removal')
+            del evidence[before:]  # Only confirmed unrelated binding identities remain.
         return dict(registry=[[name, list(stamp)] for name, stamp in row['registry']],
                     owners=owners, dependencies=evidence)
 

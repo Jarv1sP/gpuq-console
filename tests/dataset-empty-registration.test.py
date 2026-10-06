@@ -149,6 +149,68 @@ class EmptyRegistrationTests(unittest.TestCase):
             self.cache.unregister(self.admin, self.dataset, _portal_proved_versions=[], _expected_empty_registration=expected)
         self.assertTrue(self.cache._paths(self.dataset)['.registry'].exists())
 
+    def test_orphan_or_missing_version_binding_refuses_without_mutating_it(self):
+        uploads = self.cache.root/'.uploads'; bindings = uploads/'bindings'
+        self.module._mkdir(uploads); self.module._mkdir(bindings)
+        upload = str(uuid.uuid4()); owner = self.user.user_id
+        path = bindings/(hashlib.sha256((self.dataset+'@'+self.orphan).encode()).hexdigest()+'.json')
+        self.module._write_json(path, dict(userId=owner, uploadId=upload))
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'session or version'): self.request()
+        self.assert_kept(); self.assertEqual(path.read_bytes(), original)
+        parent = uploads/hashlib.sha256(owner.encode()).hexdigest()/upload
+        self.module._mkdir(parent.parent); self.module._mkdir(parent)
+        self.module._write_json(parent/'session.json', dict(schema=1, userId=owner, uploadId=upload,
+            name='discarded', dataset=self.dataset, state='DISCARDED'))
+        with self.assertRaisesRegex(ValueError, 'session or version'): self.request()
+        self.assert_kept(); self.assertEqual(path.read_bytes(), original)
+
+    def test_malformed_or_binding_namespace_mismatch_is_not_an_absence_proof(self):
+        uploads = self.cache.root/'.uploads'; bindings = uploads/'bindings'
+        self.module._mkdir(uploads); self.module._mkdir(bindings)
+        path = bindings/('e'*64+'.json')
+        for value in ({}, {'userId': self.user.user_id, 'uploadId': 'unknown'},
+                      {'userId': 'other', 'uploadId': str(uuid.uuid4())}):
+            self.module._write_json(path, value)
+            with self.assertRaises(ValueError): self.request()
+            self.assert_kept(); self.assertEqual(self.module._read_json(path), value)
+        upload = str(uuid.uuid4()); owner = self.user.user_id
+        parent = uploads/hashlib.sha256(owner.encode()).hexdigest()/upload
+        self.module._mkdir(parent.parent); self.module._mkdir(parent)
+        self.module._write_json(parent/'session.json', dict(schema=1, userId=owner, uploadId=upload,
+            name='unrelated', state='DISCARDED', version=self.orphan))
+        self.module._write_json(path, dict(userId=owner, uploadId=upload))
+        with self.assertRaisesRegex(ValueError, 'namespace'): self.request()
+        self.assert_kept()
+
+    def test_confirmed_foreign_owner_binding_is_retained_not_deleted(self):
+        uploads = self.cache.root/'.uploads'; bindings = uploads/'bindings'
+        self.module._mkdir(uploads); self.module._mkdir(bindings)
+        owner = 'demo-user-99'; upload = str(uuid.uuid4())
+        target = 'u-'+hashlib.sha256(owner.encode()).hexdigest()[:16]+'-unrelated'
+        path = bindings/(hashlib.sha256((target+'@'+self.orphan).encode()).hexdigest()+'.json')
+        self.module._write_json(path, dict(userId=owner, uploadId=upload))
+        with self.assertRaisesRegex(ValueError, 'session or version'): self.request()
+        self.assert_kept()
+        parent = uploads/hashlib.sha256(owner.encode()).hexdigest()/upload
+        self.module._mkdir(parent.parent); self.module._mkdir(parent)
+        self.module._write_json(parent/'session.json', dict(schema=1, userId=owner, uploadId=upload,
+            name='unrelated', dataset=target, version=self.orphan, state='READY'))
+        before = path.read_bytes(), path.stat()
+        result = self.request(); self.assertEqual(self.node.dataset_worker(result['operationId']), 0)
+        self.assertEqual(path.read_bytes(), before[0]); self.assertEqual(path.stat(), before[1])
+
+    def test_binding_appearing_after_admission_refuses_final_move(self):
+        uploads = self.cache.root/'.uploads'; bindings = uploads/'bindings'
+        self.module._mkdir(uploads); self.module._mkdir(bindings)
+        with self.cache._locked(): expected = self.cache._empty_unregister_snapshot(self.admin, self.dataset)
+        path = bindings/(hashlib.sha256((self.dataset+'@'+self.orphan).encode()).hexdigest()+'.json')
+        def late_binding(transaction):
+            self.module._write_json(path, dict(userId=self.user.user_id, uploadId=str(uuid.uuid4())))
+        with patch.object(self.cache, '_unregister_cleanup', side_effect=late_binding), self.assertRaises(ValueError):
+            self.cache.unregister(self.admin, self.dataset, _portal_proved_versions=[], _expected_empty_registration=expected)
+        self.assertTrue(self.cache._paths(self.dataset)['.registry'].exists()); self.assertTrue(path.exists())
+
     def test_empty_proof_never_removes_a_registered_version_or_accepts_a_raw_client_assertion(self):
         for expected in (None, {}, dict(registry=[], owners=[self.user.user_id], dependencies=[])):
             with self.subTest(expected=expected), self.assertRaises(ValueError):
