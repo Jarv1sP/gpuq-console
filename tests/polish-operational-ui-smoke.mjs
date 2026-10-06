@@ -87,7 +87,7 @@ const scenes=[
     ...[1.25,1.5].map(zoom=>({role,room:'work',state:'normal',zoom,toast:true,
       name:role+'-toast-'+zoom,spec:{...workSpec,textContainment:[...workSpec.textContainment,'#toast']}})),
     ...[['work','.wb-report-label .ui-info>summary'],['control','.mc-footer-command .ui-info>summary'],
-      ['project','.project-environment-choice legend .ui-info>summary']].map(([room,help])=>({role,room,help,state:'normal',
+      ['project','.ui-info:has(#environment-mode-note)>summary']].map(([room,help])=>({role,room,help,state:'normal',
         name:role+'-'+room+'-help',spec:{...(room==='control'?controlSpec:workSpec),
           viewportPanels:['.ui-info[open] .ui-info-content'],textContainment:['.ui-info[open] .ui-info-content']}})),
   ]),
