@@ -128,13 +128,13 @@ try{
   await page.locator('[data-nav=datasets]').click();await currentNav('datasets');
   await page.locator('#datasets-refresh').click();
   await page.locator('[data-v3-select=vision-validation]').click();
-  const preparing=page.locator('.v3-server.cur .v3-g.fetch');
+  const preparing=page.locator('#page-datasets .v3-server.cur .v3-g.fetch');
   await preparing.waitFor({state:'attached'});
-  assert.equal(await page.locator('.v3-server.cur .v3-server-text>span').innerText(),'取回中');
+  assert.equal(await page.locator('#page-datasets .v3-server.cur .v3-server-text>span').innerText(),'取回中');
   await preparing.waitFor();
   await textContrast();await capture('datasets-desktop');
   assert.equal(await preparing.evaluate(el=>el.getAnimations().length),0,'The first confirmed catalog is settled; motion requires a real state diff');
-  assert.equal(await page.locator('.v3-server.cur .v3-server-text>span').textContent(),'取回中','Readiness remains clear without motion');
+  assert.equal(await page.locator('#page-datasets .v3-server.cur .v3-server-text>span').textContent(),'取回中','Readiness remains clear without motion');
   await page.locator('[data-nav=work]').click();
   assert.equal(await preparing.evaluate(el=>el.getAnimations().length),0,'Hidden pages never add a decorative readiness pulse');
   await page.locator('[data-nav=datasets]').click();
@@ -154,7 +154,7 @@ try{
   }
   await page.emulateMedia({reducedMotion:'reduce'});
   if(!baseline)assert.equal(await page.locator('#refresh-state').evaluate(el=>getComputedStyle(el).transitionProperty),'none');
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none');
+  assert.equal(await preparing.evaluate(el=>getComputedStyle(el,'::before').animationName),'none');
   await page.setViewportSize({width:1440,height:1080});await page.locator('[data-nav=users]').click();await page.locator('#filter-all').click();await textContrast();await capture('users-carbon-compatibility');
   await page.setViewportSize({width:390,height:960});await page.waitForFunction(()=>document.querySelector('[data-nav=me]').getAttribute('aria-current')==='page');await currentNav('me');await textContrast();await capture('users-carbon-compatibility-390');
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
