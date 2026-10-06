@@ -11,6 +11,8 @@ import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {accountMenu,closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {freezeR5Clock,readMissionGeometry,assertMissionGeometry} from './r5-fixture-tools.mjs';
+import {runR5FixtureRegression} from './r5-fixture-regression.mjs';
 
 const temp=await mkdtemp(join(tmpdir(),'r5-work-browser-'));
 const shots=process.env.UI_SCREENSHOTS||'/tmp/r5-ui-smoke';
@@ -60,13 +62,14 @@ try{
   await service.invoke(admin.token,'users.create',{username:'li-research',name:'李明',password});
   await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:8,limits:Object.fromEntries(MACHINES.map(machine=>[machine.id,Math.min(8,machine.cards)]))});
   const job=(name,state,cards=2,extra={})=>{const id=randomUUID();return {id,userId:member.id,username:member.username,name,description:'本地验收数据；不启动真实训练。',machine:targetMachine,cards,state,createdAt:Date.now()/1000-3600,project:project.project,release,priority:'normal',schedulerState:state,schedulerCheckedAt:Date.now()/1000,queueReason:state==='PENDING'?'等待合法空卡':'',spec:{id,argv:['python','train.py','--epochs','40']},...extra};};
-  const running=job('baseline-lr3e-4','RUNNING',2,{assignedIndices:[0,1],latestAttempt:{id:'attempt-current',startedAt:Date.now()/1000-3255,finishedAt:null},progress:{reported:true,stale:false,snapshot:{epochsCompleted:12,epochsTotal:40,updatedAt:Date.now()/1000,etaSeconds:900,metrics:{loss:.438,val_acc:.716,lr:.0003}}}});
+  const fixtureTime=Date.now();
+  const running=job('baseline-lr3e-4','RUNNING',2,{assignedIndices:[0,1],latestAttempt:{id:'attempt-current',startedAt:fixtureTime/1000-3255,finishedAt:null},progress:{reported:true,stale:false,snapshot:{epochsCompleted:12,epochsTotal:40,updatedAt:fixtureTime/1000,etaSeconds:900,metrics:{loss:.438,val_acc:.716,lr:.0003}}}});
   const rows=[running,job('augmentation','STARTING'),job('ablation-dropout','PENDING'),job('data-preparation','PREPARING_DATA',1),job('previous-experiment','RUNNING',2,{cancelRequested:true}),job('failed-checkpoint','FAILED',1,{error:'训练进程退出；请查看持久诊断。',latestAttempt:{id:'fixture-attempt',exitCode:1,failureReason:'checkpoint path unavailable'}})];
   const adminRunning={...running,id:randomUUID(),userId:service.store.users.find(user=>user.username==='admin').id,username:'admin',name:'admin-baseline',spec:{id:randomUUID(),argv:['python','train.py']}};adminRunning.spec.id=adminRunning.id;
   service.store.jobs.push(...rows,adminRunning,{...job('FORBIDDEN-PEER-TRAINING','RUNNING'),userId:peer.id,username:peer.username});service.save();
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   async function pageFor(width,reduced=false){
-    const context=await browser.newContext({viewport:{width,height:width<760?844:1080},reducedMotion:reduced?'reduce':'no-preference'});const page=await context.newPage();
+    const context=await browser.newContext({viewport:{width,height:width<760?844:1080},reducedMotion:reduced?'reduce':'no-preference'});const page=await context.newPage();await freezeR5Clock(page,fixtureTime);
     page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error'&&!message.text().includes('401'))errors.push(message.text());});
     page.on('response',response=>{if(response.url().startsWith(origin)&&!new URL(response.url()).pathname.startsWith('/api/'))assets.push({path:new URL(response.url()).pathname,status:response.status()});});
     await context.route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol)){await route.continue();return;}outside.push(url.href);await route.abort();}));
@@ -121,7 +124,7 @@ try{
   assert.equal(await desktop.locator('#context-machine').getAttribute('title'),targetMachine);assert.ok((await desktop.locator('.cs-server').first().getAttribute('title')).startsWith(targetMachine));
   await capture(desktop,'r5-work-member-1440');
   await desktop.locator('.wb-focal [data-job-mission]').click();await desktop.locator('#job-mission').waitFor({state:'visible'});
-  assert.equal(await desktop.locator('.r5-mission-percentage').innerText(),'30%');assert.equal(await desktop.locator('.mission-bay').count(),2);assert.match(await desktop.locator('[data-mission-elapsed]').innerText(),/^54:/);
+  assert.equal(await desktop.locator('.r5-mission-percentage').innerText(),'30%');assert.equal(await desktop.locator('.mission-bay').count(),2);assert.equal(await desktop.locator('[data-mission-elapsed]').innerText(),'54:15');
   assert.equal(await desktop.locator('.r5-mission-metrics>div').count(),3);assert.equal(await desktop.locator('#job-mission .wb-trajectory time').count(),2);
   assert.doesNotMatch(await desktop.locator('#job-mission').innerText(),/FORBIDDEN-PEER|自报/);
   assert.equal(await desktop.locator('#job-mission').innerText().then(text=>(text.match(/更新于/g)||[]).length),1);
@@ -196,7 +199,7 @@ try{
       await capture(page,'r5-review-context-'+role+'-'+width+'-'+inventory.id);
       const row=page.locator('[data-workbench-job="'+fixtureJob.id+'"]');await row.locator('[data-job-mission]').click();await page.locator('#job-mission').waitFor();await noOverflow(page);assert.ok(await page.locator('#job-mission').evaluate(n=>n.scrollWidth<=n.clientWidth+1));
       const names=await page.evaluate(()=>[...document.querySelectorAll('#job-mission .server-id')].map(node=>node.textContent));assert.ok(names.includes(inventory.id));for(const hook of ['data-job-logs','data-job-output','data-job-cancel'])assert.ok(await page.locator('#job-mission ['+hook+']').isVisible());
-      const timeline=await page.locator('#job-mission .wb-trajectory').boundingBox(),body=await page.locator('.r5-mission-body').boundingBox(),lastDot=await page.locator('#job-mission .wb-trajectory li:last-child .d').boundingBox();assert.ok(Math.abs(timeline.x+timeline.width-(body.x+body.width))<=1);assert.ok(Math.abs(lastDot.x+lastDot.width-(body.x+body.width))<=1,'timeline reaches content edge');
+      const geometry=await readMissionGeometry(page);assertMissionGeometry(geometry);const {timeline,body,lastDot}=geometry;assert.ok(Math.abs(timeline.x+timeline.width-(body.x+body.width))<=1);assert.ok(Math.abs(lastDot.x+lastDot.width-(body.x+body.width))<=1,'timeline reaches content edge');
       await capture(page,'r5-review-mission-'+role+'-'+width+'-'+inventory.id,true);await page.keyboard.press('Escape');
     }
     fixtureJob.machine=targetMachine;service.save();await refreshVisible(page);await page.locator('[name=workspace-machine]').selectOption(targetMachine);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
@@ -240,3 +243,4 @@ try{
 }finally{
   releaseInventory?.();releaseCatalog?.();if(browser)await Promise.all(browser.contexts().map(closeRoutedContext));await browser?.close();if(server?.listening)await new Promise(resolve=>server.close(resolve));if(service&&!service.closing){clearInterval(service.executionTimer);await service.close();}await rm(temp,{recursive:true,force:true});
 }
+await runR5FixtureRegression(shots);
