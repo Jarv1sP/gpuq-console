@@ -138,7 +138,7 @@ test('cancel after actual authority original isolation restores every alias for 
   const r=await f.start({dataset:'personal',version:source.version,key:randomUUID()});
   // Read-only status confirms late isolation, but no collection commit was
   // dispatched after the lost reply. It must not claim DELETED.
-  assert.equal(r.result.state,'RUNNING');assert.ok(r.result.steps.every(step=>step.state==='ISOLATED'));
+  assert.equal(r.result.state,'WAITING_CONTINUE');assert.equal(r.result.canContinue,true);assert.ok(r.result.steps.every(step=>step.state==='ISOLATED'));
   assert.equal(calls.filter(call=>call.op==='storage.dataset-delete.commit').length,0);
   assert.equal((await bridge(hosts[0],'fixture.old-grant-denied',{...administrator,grant})).denied,true);
   await f.call('datasets.delete.cancel',{operationId:r.first.operationId},admin);await f.service.waitDatasetDeletions();
