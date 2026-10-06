@@ -72,7 +72,7 @@ class StorageArchive:
         self.root = A._private_root(executor.ROOT/'storage-archive')
         for name in ('operations', 'events', 'references', 'control'):
             A._private_root(self.root/name)
-        for name in ('lane', 'outbox'):
+        for name in ('lane', 'outbox', 'enrollment-checks'):
             A._private_root(self.root/'control'/name)
         self.binding = dict(policy=self.policy, machine=self.machine,
                             rootIdentity=list(self.cache._root_identity))
@@ -189,11 +189,59 @@ class StorageArchive:
                 raise ValueError('Archive enrollment refuses an active or unknown staging writer')
         return expected
 
+    def _enrollment_snapshot_locked(self, user, ref, *, missing=False):
+        """Live admission guards and small no-follow stamps, never a manifest.
+
+        Caller owns the global cache lock. The owner-file stamp also fences an
+        ACL change-and-restore while the full validation runs outside that lock.
+        Pins/tier/staging are read live, not accepted from the memoized proof.
+        """
+        paths = self.cache._paths(**ref)
+        identity = self._single_locked(user, ref, protected=True, missing=missing)
+        if identity is None:
+            # Only a clean, exact absence on the configured HDD is an
+            # admission proof. Missing metadata must not mask an orphaned
+            # payload, authority pin, lease, staging writer or symlink.
+            entries = [paths[name] for name in ('ready', '.staging', '.leases')]
+            entries += [self.cache._paths(ref['dataset'])['.registry']/(ref['version']+'.json'),
+                        self.cache.root/'.tiers'/ref['dataset']/(ref['version']+'.json')]
+            def exists(path):
+                # For a never-registered ID, missing parents are normal.
+                # _directory walks every existing ancestor no-follow;
+                # only ENOENT is absence, not EACCES/EIO or a symlink.
+                try:
+                    with D._directory(path.parent) as parent:
+                        os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                    return True
+                except FileNotFoundError:
+                    return False
+            if any(exists(path) for path in entries):
+                raise ValueError('Missing archive registration has protected or unknown state')
+            return None
+        if self.cache._version_entry_exists(paths['.staging']):
+            raise ValueError('Archive enrollment refuses an active or unknown staging writer')
+        if not self.source and self.cache._tier(**ref)['pins']:
+            raise ValueError('Pinned originals cannot be enrolled as disposable caches')
+        metadata = self.cache._paths(ref['dataset'])['.registry']/'dataset.json'
+        with D._directory(metadata.parent) as parent:
+            fd = os.open(metadata.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                owners = D._stamp(D._regular(fd))
+            finally:
+                os.close(fd)
+        ready = self.cache._ready_identity(paths)
+        if ready is None:
+            raise ValueError('Archive reference is not READY')
+        return dict(registration=identity, stamp=A._sha(dict(binding=self.binding,
+            userId=user, reference=ref, registration=identity, owners=owners, ready=ready)))
+
     def enrollment_check(self, args):
         """Exact metadata-only probe; never enumerate data or create an outbox event.
 
-        Full payload hashing remains in the bounded authority seal worker. A
-        READY tree is immutable; an overlapping staging writer is not adopted.
+        A cold check validates the full manifest outside the global lock. Only
+        an unchanged, service-owned immutable registration/READY tree may reuse
+        its small validated summary across RPCs. Live authorization/protection
+        checks bracket both paths. Full payload hashing still belongs to seal.
         """
         self._require()
         if set(args) == {'userId', 'dataset', 'version', 'allowMissing'}:
@@ -204,40 +252,39 @@ class StorageArchive:
             _object(args, ('userId', 'dataset', 'version'))
         user = _user(args['userId']); ref = _ref({k: args[k] for k in ('dataset', 'version')})
         with self.cache._locked():
-            paths = self.cache._paths(**ref)
-            identity = self._single_locked(user, ref, ready=True, protected=True,
-                                           missing=args.get('allowMissing') is True)
-            if identity is None:
-                # Only a clean, exact absence on the configured HDD is an
-                # admission proof. Missing metadata must not mask an orphaned
-                # payload, authority pin, lease, staging writer or symlink.
-                entries = [paths[name] for name in ('ready', '.staging', '.leases')]
-                entries += [self.cache._paths(ref['dataset'])['.registry']/(ref['version']+'.json'),
-                            self.cache.root/'.tiers'/ref['dataset']/(ref['version']+'.json')]
-                def exists(path):
-                    # For a never-registered ID, missing parents are normal.
-                    # _directory walks every existing ancestor no-follow;
-                    # only ENOENT is absence, not EACCES/EIO or a symlink.
-                    try:
-                        with D._directory(path.parent) as parent:
-                            os.stat(path.name, dir_fd=parent, follow_symlinks=False)
-                        return True
-                    except FileNotFoundError:
-                        return False
-                if any(exists(path) for path in entries):
-                    raise ValueError('Missing archive registration has protected or unknown state')
+            snapshot = self._enrollment_snapshot_locked(user, ref, missing=args.get('allowMissing') is True)
+            if snapshot is None:
                 return dict(protocol=1, machine=self.machine, userId=user, **ref, state='ABSENT')
-            if self.cache._version_entry_exists(paths['.staging']):
-                raise ValueError('Archive enrollment refuses an active or unknown staging writer')
-            if not self.source and self.cache._tier(**ref)['pins']:
-                raise ValueError('Pinned originals cannot be enrolled as disposable caches')
+        # Fixed 256 overwrite slots bound metadata growth without scanning a
+        # journal under the global lock. Collisions cause a full revalidation,
+        # never a different reference's proof. No fsync or large read owns it.
+        slot = A._sha(dict(binding=self.binding, userId=user, reference=ref))[:2]
+        path = self.root/'control'/'enrollment-checks'/(slot+'.json')
+        summary = self._load(path)
+        hit = (isinstance(summary, dict) and set(summary) == {'schema', 'stamp', 'manifestBytes'}
+               and type(summary['schema']) is int and summary['schema'] == 1
+               and summary['stamp'] == snapshot['stamp']
+               and type(summary['manifestBytes']) is int and 0 < summary['manifestBytes'] <= A.MAX_MANIFEST)
+        if not hit:
+            paths = self.cache._paths(**ref)
             record = self.cache._record(self.admin, **ref)
             raw = D._json_bytes(record['manifest'])
             if len(raw) > A.MAX_MANIFEST or hashlib.sha256(raw).hexdigest() != ref['version']:
                 raise ValueError('Archive enrollment manifest is not the complete fixed version')
-            return dict(protocol=1, machine=self.machine, userId=user, **ref,
-                        state='READY', role='protected', manifestSha256=ref['version'],
-                        manifestBytes=len(raw), registration=self._registration_binding(user, ref, identity))
+            if not self.cache._ready_snapshot(paths, record['manifest'], ref['version'])[0]:
+                raise ValueError('Archive reference is not READY')
+            summary = dict(schema=1, stamp=snapshot['stamp'], manifestBytes=len(raw))
+        with self.cache._locked():
+            if self._enrollment_snapshot_locked(user, ref) != snapshot:
+                raise ValueError('Archive enrollment metadata changed; retry the check')
+        if not hit:
+            # A concurrent deletion/replacement after the last locked check is
+            # harmless: subsequent calls cannot match the saved old stamps.
+            self._save(path, summary)
+        return dict(protocol=1, machine=self.machine, userId=user, **ref,
+                    state='READY', role='protected', manifestSha256=ref['version'],
+                    manifestBytes=summary['manifestBytes'],
+                    registration=self._registration_binding(user, ref, snapshot['registration']))
 
     def _op_path(self, op):
         return self.root/'operations'/J.identifier(op)/'journal.json'

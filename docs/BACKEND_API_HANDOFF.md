@@ -105,6 +105,10 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 
 若 HDD 尚无这版原件，管理员可在同一首次纳管请求中显式增加 `copyIfMissing:true`。服务只接受配置 HDD 的精确 `ABSENT` 证明；超时、撤权、孤立文件或未知状态都不触发复制。成功受理返回 `QUEUED`，固定登记身份和复制 key 后，复用受信节点传输队列异步建立原件，再完整校验、签发恢复授权并认证本机缓存，最终才是 `ARCHIVED`。受理不是备份完成；在此之前本机副本保持保护。刷新、门户重启、丢响应仍使用原意图及 key，不另建副本；失败需显式重试，取消不自动复活。旧请求不带该字段时保留“原件必须已存在”的行为；同一 key 不能切换复制意图。数据走既有节点传输，不经过 VPS。此字段不开放用户指定来源、URL、凭据或恢复证明。
 
+归档复制期间的内部 `storage.archive.enrollment-check` 不再在全局缓存锁内解析大清单。首次完整校验在锁外执行，前后以单 owner、登记文件、READY 元信息和只读数据根的精确身份复核；重复请求可复用服务私有目录内最多 256 槽的校验摘要，但仍实时检查权限、保护角色、pin 和 staging。替换、注销、权限变更或未知 I/O 不会由旧摘要覆盖；摘要不是租约、恢复授权或 ARCHIVED 证明，完整内容校验仍由封存流程完成。
+
+这项优化仅涉及 `deploy/storage-archive.py` 的内部检查及私有摘要目录。经过生产变体核对后可对该文件做精确原子热更新，新 RPC 使用新实现，不要求中断既有复制或重启 peer、训练、门户。它不改变单块 TLS 连接、目标落盘持久化或当前传输状态，不应把元信息基准的提速直接当作端到端吞吐提升。基准入口为 `tests/archive-enrollment-performance.bench.py`（支持 164,690 / 450,000 条目；临时元信息 fixture，不包含真实文件复制）。
+
 `datasets.archive.retire {machine,dataset,version,ownerId,eventId,recoveryId}` 也是当前管理员专用入口，接受固定 HDD 同机 ingest（无 transfer、未确认归档）或完全未派发的 `QUEUED` ingest。后者必须 transferId/sourceDataset/grantId 均为 null、retryRequested 非 true、没有同 copyKey 的任何传输记录且不是 laneOwner；RPC 前保存持久 retirementIntent 并阻止该行的 dispatch/reconcile，前后复核登记上下文与准入条件。回包丢失或重启只保留待确认 fence，同请求可继续，不推断成功或启动传输。`recoveryId` 是正常注销的 `unregister-` 加 32 位小写十六进制回执，不接收客户端的 mode、grant、证明、路径或角色。后台私有 `storage.archive.retire` 复核原登记身份、完整清单、单 owner、已提交注销与无现存保护，再持久化该事件的 `RETIRED` 墓碑；旧 HDD 协议还检查 worker 从未创建且确认停止，QUEUED 内部模式只证明本来源注销。门户返回 `phase=FAILED` 并保留不可重试的 retired 原因；重复同一回执幂等，换回执、已派发跨机、已 seal 或 UNKNOWN 均拒绝，不清除其他 lane。私有 RPC 不向浏览器公开。
 
 个人显示名使用 `datasets.label.get {machine,dataset}` 读取，`datasets.label.set {machine,dataset,displayName,revision}` 修改。名称为 1–80 个可见字符，允许中文，拒绝控制字符；`revision` 必须沿用最近查询值，409 冲突后请用户刷新决定，不自动覆盖。响应有规范逻辑 `dataset`、原 `name`、可空的 `displayName`、`revision`、`ownerId` 和 `scope:"personal"`。管理员代管时可显式增加 `ownerId`，普通成员不能指定他人。该名称仅作用于这位用户的显示视图，不重命名节点登记、版本或训练挂载路径，也不改变共享数据权限。
