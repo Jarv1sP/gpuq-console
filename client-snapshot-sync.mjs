@@ -118,7 +118,8 @@ export async function runManualSync(call,{options,positionals,training,machines,
     if(before.state==='CANCELED'&&before.preservesBytes===true)return {...before,machine};
     if(!['RECEIVING_MANIFEST','COPYING'].includes(before.state))fail('Only an unfinished code synchronization can be canceled');
     const pinned={...reference,...Object.fromEntries(['snapshotId','source','manifestSha256','revision'].map(k=>[k,before[k]]))};
-    const confirmed=row=>row?.state==='CANCELED'&&row.preservesBytes===true&&row.cancelProtocol===1&&row.key===key&&row.project===project&&['snapshotId','manifestSha256','revision'].every(k=>row[k]===before[k])&&JSON.stringify(row.source)===JSON.stringify(before.source);
+    const sameSource=value=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===Object.keys(before.source).length&&Object.keys(before.source).every(k=>Object.hasOwn(value,k)&&value[k]===before.source[k]);
+    const confirmed=row=>row?.state==='CANCELED'&&row.preservesBytes===true&&row.cancelProtocol===1&&row.key===key&&row.project===project&&['snapshotId','manifestSha256','revision'].every(k=>row[k]===before[k])&&sameSource(row.source);
     let result;
     try{result=(await call('projects.sync.cancel',pinned)).result;}
     catch(error){
