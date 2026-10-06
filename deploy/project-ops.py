@@ -8,6 +8,7 @@ in progress or a live development terminal.
 """
 import base64
 from contextlib import contextmanager
+import ctypes
 import fcntl
 import hashlib
 import importlib.util
@@ -362,8 +363,108 @@ class ProjectOperations:
             except FileNotFoundError:pass
             state=value.get('state','UNKNOWN')
             modern='identity' in value and state in ('UPLOADING','CANCELING') and 'baseTarget' in value
-            rows.append({**record,'state':state,'receivedBytes':size,'cancelable':modern,'legacy':'identity' not in value})
+            legacy=self.legacy_upload_partial(folder,path,value,record) is not None
+            canceling=(folder/(record['uploadId']+'.legacy-cancel')).exists()
+            rows.append({**record,'state':'CANCELING' if canceling else state,'receivedBytes':size,
+                         'cancelable':modern or legacy or canceling,'legacy':'identity' not in value})
         return {'protocol':1,'project':args['project'],'uploads':rows}
+
+    def legacy_upload_partial(self,folder,meta,value,record):
+        """Only provably partial old staging; never infer a commit from absence."""
+        if set(value)!=set(record) or value!=record:return None
+        module=sys.modules[type(self.store).__module__]
+        try:
+            with module.directory(folder):pass
+            part=meta.with_suffix('.part');info=part.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid()
+                    or info.st_mode&0o077 or not 0<=info.st_size<record['totalSize']):return None
+            done=module.read_json(meta.with_suffix('.done')) if meta.with_suffix('.done').exists() else None
+            if done is not None and (not isinstance(done,dict) or not isinstance(done.get('identity'),dict)
+                                     or done['identity'].get('uploadId')==record['uploadId']):return None
+            # Atomic no-replace is required before recording a cancellation.
+            if getattr(ctypes.CDLL(None,use_errno=True),'renameat2',None) is None:return None
+            return {'identity':record,'metaSha256':hashlib.sha256(module.canonical(value)).hexdigest(),
+                    'partIdentity':[info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns]}
+        except FileNotFoundError:return None
+
+    @staticmethod
+    def upload_quarantine_move(source_fd,source,target_fd,target):
+        function=getattr(ctypes.CDLL(None,use_errno=True),'renameat2',None)
+        if function is None:raise ValueError('Atomic no-replace upload quarantine is unavailable')
+        function.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint]
+        function.restype=ctypes.c_int
+        if function(source_fd,os.fsencode(source),target_fd,os.fsencode(target),1):
+            code=ctypes.get_errno();raise OSError(code,os.strerror(code),target)
+
+    def legacy_upload_cancel(self,folder,upload,receipt=None):
+        """Durable tombstone first; retain original metadata and partial bytes.
+
+        Called only under the same project guard + store lock as files.put.
+        A lost response continues this original quarantine, never a new upload.
+        """
+        module=sys.modules[type(self.store).__module__]
+        module.private_dir(folder)
+        intent_path=folder/(upload+'.legacy-cancel')
+        try:intent=module.read_json(intent_path)
+        except FileNotFoundError:intent=None
+        if intent is None:
+            if receipt is not None:return None
+            candidates=[]
+            for meta in folder.glob('*.json'):
+                value=module.read_json(meta);record=self.upload_identity(value.get('identity',value))
+                if record['uploadId']==upload:
+                    if not HASH.fullmatch(meta.stem) or hashlib.sha256(record['path'].encode()).hexdigest()!=meta.stem:
+                        raise ValueError('Pending upload path identity differs')
+                    proof=self.legacy_upload_partial(folder,meta,value,record)
+                    if proof is None:return None
+                    candidates.append(proof)
+            if len(candidates)!=1:return None
+            intent={'protocol':1,'uploadId':upload,**candidates[0]}
+            self.n.atomic_json(intent_path,intent)
+        if (not isinstance(intent,dict) or set(intent)!={'protocol','uploadId','identity','metaSha256','partIdentity'}
+                or intent.get('protocol')!=1 or intent.get('uploadId')!=upload
+                or not isinstance(intent.get('metaSha256'),str) or not HASH.fullmatch(intent['metaSha256'])
+                or not isinstance(intent.get('partIdentity'),list) or len(intent['partIdentity'])!=4
+                or any(type(v)!=int or v<0 for v in intent['partIdentity'])):
+            raise ValueError('Invalid legacy upload cancellation intention')
+        record=self.upload_identity(intent['identity'])
+        if (record['uploadId']!=upload or set(intent['identity'])!=set(record)
+                or intent['partIdentity'][2]>=record['totalSize']
+                or hashlib.sha256(module.canonical(record)).hexdigest()!=intent['metaSha256']):
+            raise ValueError('Legacy upload cancellation identity changed')
+        key=hashlib.sha256(record['path'].encode()).hexdigest()
+        quarantine=module.private_dir(folder/'.canceled-staging',create=True)
+        quarantine=module.private_dir(quarantine/upload,create=True)
+        # Validate both original files or their already-moved counterparts before
+        # making the permanent cancellation receipt. No existing destination wins.
+        def verify(source,target,metadata=False):
+            sources=[path for path in (folder/source,quarantine/target) if path.exists() or path.is_symlink()]
+            if len(sources)!=1:raise ValueError('Legacy upload quarantine outcome is unconfirmed')
+            path=sources[0]
+            if metadata:
+                if module.read_json(path)!=record:raise ValueError('Legacy upload metadata changed')
+            else:
+                info=path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1 or info.st_mode&0o077
+                        or [info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns]!=intent['partIdentity']):
+                    raise ValueError('Legacy upload partial bytes changed')
+            return path==folder/source
+        move_meta=verify(key+'.json','metadata.json',True);move_part=verify(key+'.part','partial.part')
+        # Persist the quarantine's own parent link before either source rename.
+        # Fsync of the new directory alone would not preserve that link at crash.
+        with module.directory(quarantine.parent) as parent_fd:os.fsync(parent_fd)
+        canceled={'protocol':1,'state':'CANCELED','uploadId':upload}
+        self.n.atomic_json(folder/(upload+'.canceled'),canceled)
+        with module.directory(folder) as source_fd,module.directory(quarantine) as target_fd:
+            # Metadata moves last: an interrupted quarantine must still block
+            # publication and project retirement until all partial bytes moved.
+            for source,target,moving,metadata in ((key+'.part','partial.part',move_part,False),(key+'.json','metadata.json',move_meta,True)):
+                if moving:
+                    verify(source,target,metadata)
+                    self.upload_quarantine_move(source_fd,source,target_fd,target)
+                    os.fsync(target_fd);os.fsync(source_fd)
+            verify(key+'.json','metadata.json',True);verify(key+'.part','partial.part')
+        return canceled
 
     def upload_cancel(self,args,root):
         upload=args.get('uploadId')
@@ -375,6 +476,8 @@ class ProjectOperations:
         except FileNotFoundError:receipt=None
         if receipt is not None:
             if receipt!={'protocol':1,'state':'CANCELED','uploadId':upload}:raise ValueError('Invalid upload cancellation receipt')
+        legacy=self.legacy_upload_cancel(folder,upload,receipt) if folder.exists() else None
+        if legacy is not None:return legacy
         rows=[row for row in self.upload_list(args,root)['uploads'] if row['uploadId']==upload]
         if not rows:return receipt or {'protocol':1,'state':'ABSENT','uploadId':upload}
         if receipt is not None and any(row['state']!='CANCELING' for row in rows):raise ValueError('Cancellation receipt conflicts with pending upload state')
@@ -434,6 +537,24 @@ class ProjectOperations:
     def upload_status(self, args, root, *, _stamp=False):
         wanted=self.upload_identity(args,required=False)
         folder=self.folder/(self.key(args)+'.uploads')
+        if wanted['uploadId'] is not None and (folder/(wanted['uploadId']+'.legacy-cancel')).exists():
+            module=sys.modules[type(self.store).__module__]
+            intent=module.read_json(folder/(wanted['uploadId']+'.legacy-cancel'))
+            if intent.get('identity')!=wanted:
+                return {'protocol':2,'state':'CONFLICT','complete':False,'path':wanted['path'],'receivedBytes':0}
+            pending=folder/(hashlib.sha256(wanted['path'].encode()).hexdigest()+'.json')
+            state='CANCELING'
+            if not pending.exists():
+                receipt=module.read_json(folder/(wanted['uploadId']+'.canceled'))
+                quarantine=module.private_dir(folder/'.canceled-staging'/wanted['uploadId'])
+                metadata=module.read_json(quarantine/'metadata.json');info=(quarantine/'partial.part').lstat()
+                if (receipt!={'protocol':1,'state':'CANCELED','uploadId':wanted['uploadId']} or metadata!=wanted
+                        or not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1 or info.st_mode&0o077
+                        or [info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns]!=intent.get('partIdentity')):
+                    raise ValueError('Legacy upload cancellation outcome is unconfirmed')
+                state='CANCELED'
+            return {'protocol':2,'state':state,'complete':False,
+                    **wanted,'receivedBytes':0,'resumable':False,'legacy':True}
         key=hashlib.sha256(wanted['path'].encode()).hexdigest()
         meta,part,done=(folder/(key+suffix) for suffix in ('.json','.part','.done'))
         active=json.loads(meta.read_text()) if meta.exists() else None
@@ -490,6 +611,7 @@ class ProjectOperations:
         if len(data)>1024**2 or offset+len(data)>total: raise ValueError('Invalid upload chunk')
         folder = self.transfer_dir(args)
         if (folder/(upload+'.canceled')).exists():raise ValueError('This exact upload was canceled; choose a new explicit upload identity')
+        if (folder/(upload+'.legacy-cancel')).exists():raise ValueError('Upload cancellation is pending; finish canceling its original UUID first')
         # At most one in-flight version of a path; retrying with a new UUID
         # replaces only its unfinished staging, never the published code file.
         key = hashlib.sha256(path.encode()).hexdigest()
