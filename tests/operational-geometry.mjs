@@ -5,7 +5,7 @@
 import {inspectGeometry} from './layout-geometry.mjs';
 
 export async function inspectOperationalGeometry(page, specification = {}) {
-  const {scrollGroups = [], viewportContainment = [],viewportPanels=[],textContainment=[],nonvisualInputs=[],nativeHelpRows=[],wideRows=[], ...shared} = specification;
+  const {scrollGroups = [], viewportContainment = [],viewportPanels=[],textContainment=[],nonvisualInputs=[],nativeHelpRows=[],wideRows=[],focusedTargets=[], ...shared} = specification;
   // xterm's transparent keyboard/IME bridge is not a visible touch target.
   // An opt-in exclusion is valid only while the actual input stays transparent;
   // showing it is a regression, not a way to bypass the normal geometry rules.
@@ -24,7 +24,7 @@ export async function inspectOperationalGeometry(page, specification = {}) {
     result.failures.push(...area.failures);
     for (const key of Object.keys(result.counts)) result.counts[key] += area.counts[key];
   }
-  const visible = await page.evaluate(({roots, controls, viewportContainment,viewportPanels,textContainment,nativeHelpRows,wideRows,checkVisibleOverlap}) => {
+  const visible = await page.evaluate(({roots, controls, viewportContainment,viewportPanels,textContainment,nativeHelpRows,wideRows,focusedTargets,checkVisibleOverlap}) => {
     const failures = [], tolerance = 1;
     const rect = node => node.getBoundingClientRect();
     const name = node => node.id ? '#' + node.id : node.tagName.toLowerCase() + '.' + [...node.classList].join('.');
@@ -47,6 +47,11 @@ export async function inspectOperationalGeometry(page, specification = {}) {
     };
     const nodes = [...new Set(roots.flatMap(selector => [...document.querySelectorAll(selector)]
       .flatMap(root => [...root.querySelectorAll(controls)])))].map(node => ({node, box: visibleRect(node)})).filter(row => row.box);
+    for(const selector of focusedTargets)for(const node of document.querySelectorAll(selector)){
+      const box=rect(node),hit=document.elementFromPoint(box.left+box.width/2,box.top+box.height/2);
+      if(!visibleRect(node)||!hit||!node.contains(hit))
+        failures.push({rule:'focused-target-covered',elements:[name(node),hit?name(hit):'outside viewport']});
+    }
     // For normal document flow the shared helper already checks overlap and
     // proves the fixed bottom controls have enough reachable scroll reserve.
     for (let index = 0; checkVisibleOverlap&&index < nodes.length; index++) for (const other of nodes.slice(index + 1)) {
@@ -100,9 +105,14 @@ export async function inspectOperationalGeometry(page, specification = {}) {
         failures.push({rule:'wide-row-wrap',elements:nodes.map(name),values,minimumWidth:group.minimumWidth});
     }
     return failures;
-  }, {roots: shared.roots || ['body'], controls, viewportContainment,viewportPanels,textContainment,nativeHelpRows,wideRows,checkVisibleOverlap:scrollGroups.length>0});
+  }, {roots: shared.roots || ['body'], controls, viewportContainment,viewportPanels,textContainment,nativeHelpRows,wideRows,focusedTargets,checkVisibleOverlap:scrollGroups.length>0});
   result.failures.push(...visible); result.pass = result.failures.length === 0;
   return result;
+}
+
+export async function revealOperationalTarget(page,selector){
+  await page.locator(selector).evaluate(node=>node.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'}));
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
 }
 
 export async function scanOperationalGeometry(page, specification, {widths, heights, zoom = 1}) {
@@ -113,6 +123,7 @@ export async function scanOperationalGeometry(page, specification, {widths, heig
       for (const animation of document.getAnimations()) if (Number.isFinite(animation.effect?.getComputedTiming().endTime)) animation.finish();
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     });
+    if(specification.focusedTargets?.length)await revealOperationalTarget(page,specification.focusedTargets[0]);
     results.push({physicalWidth: width, physicalHeight: height, zoom, ...await inspectOperationalGeometry(page, specification)});
   }
   return results;

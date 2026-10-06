@@ -11,7 +11,7 @@ import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {guardedRoute} from './browser-route-guard.mjs';
 import {layoutZooms,layoutWidths,layoutHeights} from './layout-geometry.mjs';
-import {inspectOperationalGeometry,scanOperationalGeometry} from './operational-geometry.mjs';
+import {inspectOperationalGeometry,scanOperationalGeometry,revealOperationalTarget} from './operational-geometry.mjs';
 
 const full=process.argv.includes('--full-scan'),before=process.argv.includes('--before');
 const selected=process.env.POLISH_CASES?.split(',');
@@ -79,6 +79,9 @@ const scenes=[
     ...['normal','error','unknown'].map(state=>({role,room:'fullscreen',state,name:role+'-fullscreen-'+state,spec:dialogSpec('#job-mission','.r5-mission-body')})),
     {role,room:'submit',state:'normal',name:role+'-submit',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
     {role,room:'project',state:'normal',name:role+'-project',spec:workSpec},
+    ...[['project-environment','#project-create .project-environment-choice'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
+      spec:{...workSpec,focusedTargets:[selector]}})),
+    {role,room:'submit',state:'normal',name:role+'-submit-bottom',spec:{...dialogSpec('#work-submit','#work-submit .sheet-scroll'),focusedTargets:['#train-form [name=command]']}},
     ...['normal','error','ended'].map(state=>({role,room:'terminal',state,name:role+'-terminal-'+state,
       spec:{controls,roots:['.terminal-dialog'],scrollPanels:['.terminal-dialog','#terminal-screen .xterm-viewport'],
         nonvisualInputs:['#terminal-screen .xterm .xterm-helper-textarea'],
@@ -142,6 +145,11 @@ async function checkGeometryRegressions(){
     assert.ok((await inspectOperationalGeometry(page,popupSpec)).failures.some(row=>row.rule==='popup-clipping'),'a popup outside the viewport still fails');
     await page.locator('.popup').evaluate(node=>{node.style.left='16px';node.style.top='16px';});
     assert.equal((await inspectOperationalGeometry(page,popupSpec)).pass,true,'a fully reachable popup passes');
+    await page.setContent('<button id="action" style="position:absolute;left:20px;top:20px;width:100px;height:44px">Create project</button><div id="cover" style="position:fixed;left:20px;top:20px;width:100px;height:44px"></div>');
+    const targetSpec={roots:['body'],controls:'button',focusedTargets:['#action']};
+    assert.ok((await inspectOperationalGeometry(page,targetSpec)).failures.some(row=>row.rule==='focused-target-covered'),'a focused action covered by another element still fails');
+    await page.locator('#cover').evaluate(node=>node.remove());
+    assert.equal((await inspectOperationalGeometry(page,targetSpec)).pass,true,'a reachable focused action passes');
   }finally{await context.close();}
 }
 
@@ -246,6 +254,7 @@ try{
         for(const width of [1440,390,320]){
           await page.setViewportSize({width:Math.floor(width/zoom),height:Math.floor((width<760?844:900)/zoom)});
           await page.evaluate(async()=>{for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+          if(scene.spec.focusedTargets?.length)await revealOperationalTarget(page,scene.spec.focusedTargets[0]);
           const measurement=await inspectOperationalGeometry(page,scene.spec);caseRows.push({physicalWidth:width,physicalHeight:width<760?844:900,zoom,...measurement});
           if(process.env.POLISH_DOM_REPORT){
             const geometry=await page.evaluate(selector=>{
