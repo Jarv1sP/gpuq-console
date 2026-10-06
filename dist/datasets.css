@@ -421,6 +421,7 @@
 #page-datasets .dataset-storage{display:flex;align-items:center;gap:8px}
 #page-datasets .dataset-storage>span:not(.copy-help){min-width:0;overflow-wrap:anywhere}
 .sb:has(#page-datasets:not([hidden])) .help-links{justify-content:flex-start;flex-wrap:nowrap;gap:12px}
+@media(max-width:759px){.sb:has(#page-datasets:not([hidden])) .help-links{display:none}}
 /* All dataset disclosures share one static marker and a centred label. */
 #page-datasets{--dataset-block-gap:12px}
 #page-datasets :is(.dataset-version-details,.cloud-file-details,#cloud-files-pending)>summary{display:flex;align-items:center;gap:8px;list-style:none;line-height:1.7;margin:0;padding:0}

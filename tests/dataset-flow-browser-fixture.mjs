@@ -147,9 +147,18 @@ try{
   for(const {role,views} of actors){
     const page=views[0].page,viewport=page.viewportSize(),scroll=await page.evaluate(()=>({x:scrollX,y:scrollY}));
     try{
-      for(const width of [1440,390,320]){
-        await page.setViewportSize({width,height:width<760?900:1000});await page.locator('.help-links').scrollIntoViewIfNeeded();
-        const result=await inspectGeometry(page,{...datasetHelpGeometry,roots:['.help-links'],controls:'a[href],button,summary'});
+      for(const width of [1440,768,390,320]){
+        await page.setViewportSize({width,height:width<760?900:1000});
+        const footer=page.locator('.help-links');
+        assert.equal(await footer.isVisible(),width>=760,'the first-use footer remains hidden on phones');
+        if(width>=760){
+          assert.equal(await footer.locator(':scope>span:not(.copy-help)').textContent(),'首次使用');
+          assert.equal(await footer.locator('[data-copy-help]').count(),1);
+          assert.equal(await footer.locator('.copy-help-popup>span').textContent(),'从第一次登录，到一次完整训练。');
+          assert.equal(await footer.locator('.copy-help-guide').getAttribute('href'),'/guide/start');
+          await footer.scrollIntoViewIfNeeded();
+        }else await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
+        const result=await inspectGeometry(page,{...datasetHelpGeometry,roots:width>=760?['.help-links']:['#page-datasets'],controls:'a[href],button,summary'});
         geometries.push({label:role+'-footer-help',...result});assert.ok(result.pass,JSON.stringify(result.failures));
         await page.screenshot({path:join(out,role+'-footer-help-'+width+'-viewport.png'),animations:'disabled'});
       }
