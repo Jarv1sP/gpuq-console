@@ -21,7 +21,7 @@ export function warehouseWorkspaceHTML(){
 
 export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machineAllowed,authorizedMachines,access}){
  let model=null,selected=null,selectedVersion=null,filter=null,search='',capacities=new Map(),epoch=0,routeEpoch=0,route=null,routeAbort=null,selectedFiles=[],uploadName='',phoneDetail=false,installedObserver=null;
- let upload=null,uploadBusy=false,uploadLocked=false,cloudAvailable=false,uploadDisplay='',lastControls={};
+ let upload=null,uploadBusy=false,uploadLocked=false,uploadDisplay='',lastControls={};
  const meter=createUploadMeter(),templates=new WeakMap();
  const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
  const machine=()=>section.querySelector('[name=dataset-machine]')?.value;
@@ -37,7 +37,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(v)return versionAccess(v).selectable;
   return upload?.state==='READY'&&upload.machine===machine()&&upload.dataset===dataset&&upload.version===version;
  }
- function reset(){epoch++;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;cloudAvailable=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();}
+ function reset(){epoch++;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();}
  function html(root,value){
   // A refresh clears the list while reading. An identical reply must restore
   // that DOM; the cached template alone does not prove it is still mounted.
@@ -132,7 +132,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const start=section.querySelector('#dataset-upload-start');
   if(start){start.hidden=!!upload&&['READY','HASHING','RECEIVING_MANIFEST','SEALING','UPLOADING','PUBLISHING','UNKNOWN'].includes(upload.state);start.disabled=blocked||!!maintenance||!selectedFiles.length||section.querySelector('[name=dataset-via]')?.value!=='relay'&&!['campus-direct','tail-upload'].includes(route?.kind);}
   for(const node of section.querySelectorAll('#v3-upload-display,[data-v3-reselect],[data-v3-folder],[data-v3-files],[data-v3-source]'))node.disabled=blocked||!!live;
-  for(const node of section.querySelectorAll('[data-v3-probe],[data-v3-explicit-relay],[data-v3-cloud],[data-v3-resume]'))node.disabled=blocked||!!maintenance||node.hasAttribute('data-v3-cloud')&&!cloudAvailable||node.hasAttribute('data-v3-resume')&&!['campus-direct','tail-upload'].includes(route?.kind);
+  for(const node of section.querySelectorAll('[data-v3-probe],[data-v3-explicit-relay],[data-v3-resume]'))node.disabled=blocked||!!maintenance||node.hasAttribute('data-v3-resume')&&!['campus-direct','tail-upload'].includes(route?.kind);
   const again=section.querySelector('[data-v3-again]');if(again)again.disabled=blocked;
  }
  function uploadUI(){
@@ -192,7 +192,6 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   }catch(error){if(current(expected,token))upload.labelError=error.message;}
   if(current(expected,token))uploadUI();
  }
- async function cloudCapability(){const expected=account(),token=epoch;cloudAvailable=false;try{const value=await store.call('cloud.info',{});if(current(expected,token))cloudAvailable=value?.capabilityVerified===true&&value.disabled!==true&&value.configurationEnabled!==false;}catch{}if(current(expected,token))uploadControls();}
  function selection(){
   selectedFiles=Array.from(section.querySelector('[name=dataset-directory]')?.files||[]);if(!selectedFiles.length)return;
   const path=selectedFiles[0].webkitRelativePath||selectedFiles[0].name,folder=path.includes('/')?path.split('/')[0]:selectedFiles.length===1?selectedFiles[0].name:'所选文件';
@@ -234,7 +233,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   dialog.querySelector('#dataset-upload-pause').textContent='暂停';
   const caption=section.querySelector('[name=dataset-machine]').closest('label');caption.querySelector('span').textContent='上传到';const available=document.createElement('span');available.id='v3-upload-capacity';caption.prepend(available);
   dialog.addEventListener('close',()=>{if(!uploadBusy){routeEpoch++;routeAbort?.abort();}});
-  installedObserver=new MutationObserver(()=>{if(dialog.open){dialog.querySelector('[data-dataset-source=directory]').click();dialog.classList.toggle('v3-picked',selectedFiles.length>0||!!upload);uploadUI();if(!uploadLocked){probe();cloudCapability();}}});installedObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
+  installedObserver=new MutationObserver(()=>{if(dialog.open){dialog.querySelector('[data-dataset-source=directory]').click();dialog.classList.toggle('v3-picked',selectedFiles.length>0||!!upload);uploadUI();if(!uploadLocked)probe();}});installedObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
   const drop=dialog.querySelector('#v3-drop');drop.addEventListener('dragover',event=>{event.preventDefault();drop.classList.add('dragging');});drop.addEventListener('dragleave',()=>drop.classList.remove('dragging'));
   drop.addEventListener('drop',async event=>{event.preventDefault();drop.classList.remove('dragging');const files=[];const expected=account(),token=epoch;
    async function walk(entry,path=''){if(entry.isFile){const file=await new Promise((resolve,reject)=>entry.file(resolve,reject));const selected=new File([file],file.name,{type:file.type,lastModified:file.lastModified});Object.defineProperty(selected,'webkitRelativePath',{value:path+file.name});files.push(selected);}else if(entry.isDirectory){const reader=entry.createReader();while(true){const entries=await new Promise((resolve,reject)=>reader.readEntries(resolve,reject));if(!entries.length)break;for(const next of entries)await walk(next,path+entry.name+'/');}}}
@@ -261,7 +260,6 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(button.hasAttribute('data-v3-explicit-relay')){const via=section.querySelector('[name=dataset-via]');via.value='relay';via.dispatchEvent(new Event('change',{bubbles:true}));section.querySelector('#dataset-upload-form').requestSubmit();return;}
   if(button.hasAttribute('data-v3-collapse')){section.querySelector('#dataset-add-dialog').close();return;}
   if(button.hasAttribute('data-v3-again')){upload=null;uploadName='';uploadDisplay='';uploadLocked=false;selectedFiles=[];meter.reset();section.querySelector('[name=dataset-directory]').value='';section.querySelector('#v3-file-picker').value='';section.querySelector('#v3-upload-display').value='';section.querySelector('#v3-upload-file').replaceChildren();section.querySelector('[name=dataset-via]').value='automatic';section.querySelector('[name=dataset-directory]').dispatchEvent(new Event('change',{bubbles:true}));section.querySelector('#dataset-add-dialog').classList.remove('v3-picked');uploadUI();rows();probe();return;}
-  if(button.hasAttribute('data-v3-cloud')){section.querySelector('[data-v3-source=aliyun]').click();return;}
   if(button.hasAttribute('data-v3-select')){selected=button.dataset.v3Select;selectedVersion=null;phoneDetail=matchMedia('(max-width:759px)').matches;rows();inspector();if(phoneDetail)section.scrollIntoView({block:'start'});return;}
   if(button.hasAttribute('data-v3-filter')){filter=button.dataset.v3Filter||null;rail();rows();return;}
   if(button.hasAttribute('data-v3-delete')){if(personalDelete(selected,selectedVersion))removeUI.openFullDelete(selected,selectedVersion);return;}

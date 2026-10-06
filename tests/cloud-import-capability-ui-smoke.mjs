@@ -47,7 +47,7 @@ try{
     });
     await page.goto(origin);await page.locator('#execution-workspace').waitFor();
     await page.locator('[data-nav=datasets]').click();await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
-    await page.locator('#datasets-add > summary').click();await page.locator('[data-dataset-source=link]').click();
+    await page.locator('#warehouse-page-actions [data-v3-upload]').click();await page.locator('[data-v3-source=link]').click();
     const source=page.locator('[name=cloud-source]'),submit=page.locator('#cloud-import-form [type=submit]');
     const idle=()=>page.waitForFunction(()=>!document.querySelector('#cloud-import-refresh').disabled);
     assert.equal(await source.inputValue(),'https');assert.equal(calls.some(c=>c.operation==='cloud.info'),false,'opening HTTPS does not probe share capability');
