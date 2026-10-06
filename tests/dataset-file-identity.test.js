@@ -4,12 +4,12 @@ import * as fs from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {createLocalDatasetTools} from '../client-data-upload.mjs';
+import {createLocalDatasetTools,scanLocalDataset} from '../client-data-upload.mjs';
 
 // Exercise the shared local reader used by upload and Git sync. Only filesystem
 // views/platform are injected; transport and identity checks execute unchanged.
-function client({platform=process.platform,lstat=fs.lstat,open=fs.open}={}){
-  return createLocalDatasetTools({platform,lstat,open,readdir:fs.readdir});
+function client({platform=process.platform,lstat=fs.lstat,open=fs.open,readdir=fs.readdir}={}){
+  return createLocalDatasetTools({platform,lstat,open,readdir});
 }
 const hash=data=>createHash('sha256').update(data).digest('hex');
 const copy=(stat,changes)=>Object.assign(Object.create(Object.getPrototypeOf(stat)),stat,changes);
@@ -141,5 +141,72 @@ test('Windows compatibility still refuses hard links and symbolic-link metadata'
     };
     await assert.rejects(f.upload(client({platform:'win32',lstat})),symlink?/Symlink/:/single-link/);
     assert.equal(f.calls.length,0);
+  });
+});
+
+async function coalescedDirectories(root){
+  const frozen=new Map();
+  async function visit(folder){
+    frozen.set(folder,copy(await fs.lstat(folder,{bigint:true}),{dev:0n}));
+    for(const name of await fs.readdir(folder)){
+      const path=join(folder,name);if((await fs.lstat(path)).isDirectory())await visit(path);
+    }
+  }
+  await visit(root);
+  // Only directory metadata is frozen. Real file identities and real readdir
+  // calls still run, so namespace edits cannot rely on a distinct timestamp.
+  return async(...args)=>frozen.get(args[0])||windowsLstat(...args);
+}
+
+test('coalesced Windows directory metadata retains unchanged uploads',async t=>{
+  const f=await fixture(t),lstat=await coalescedDirectories(f.directory);
+  assert.equal((await f.upload(client({platform:'win32',lstat}))).state,'READY');
+  assert.ok(f.calls.includes('commit'));
+});
+
+test('coalesced directory metadata rejects real namespace changes before commit',async t=>{
+  for(const change of ['root-add','nested-add','empty-remove','empty-rename'])await t.test(change,async t=>{
+    const f=await fixture(t),lstat=await coalescedDirectories(f.directory);let changed=false;
+    const empty=join(f.directory,'empty-directory');
+    f.hooks.chunk=async args=>{
+      if(changed||args.path!=='images/00001.jpg')return;changed=true;
+      if(change==='root-add')await fs.writeFile(join(f.directory,'new-file'),'extra');
+      if(change==='nested-add')await fs.writeFile(join(f.directory,'images','new-file'),'extra');
+      if(change==='empty-remove')await fs.rmdir(empty);
+      if(change==='empty-rename')await fs.rename(empty,join(f.directory,'renamed-empty'));
+    };
+    await assert.rejects(f.upload(client({platform:'win32',lstat})),/Local directory changed; no publication was requested/);
+    assert.equal(changed,true);assert.equal(f.calls.includes('commit'),false);
+  });
+});
+
+test('coalesced directory metadata rejects a new entry during hashing before any server call',async t=>{
+  const f=await fixture(t),lstat=await coalescedDirectories(f.directory);let changed=false;
+  const open=async(...args)=>{
+    const handle=await fs.open(...args);
+    return {close:()=>handle.close(),stat:(...a)=>handle.stat(...a),read:async(...a)=>{
+      const result=await handle.read(...a);
+      if(!changed&&args[0]===f.filename){changed=true;await fs.writeFile(join(f.directory,'images','new-file'),'extra');}
+      return result;
+    }};
+  };
+  await assert.rejects(f.upload(client({platform:'win32',lstat,open})),/Local directory changed during scan/);
+  assert.equal(changed,true);assert.equal(f.calls.length,0);
+});
+
+test('directory verification keeps stat checks on both sides of namespace reads',async t=>{
+  for(const phase of ['before','after'])await t.test(phase,async t=>{
+    const f=await fixture(t);let verifying=false,edited=false,namespaceReads=0;
+    const filesystem={open:fs.open,lstat:async(...args)=>{
+      const st=await fs.lstat(...args);return edited&&args[0]===f.directory?copy(st,{ino:st.ino+1n}):st;
+    },readdir:async folder=>{
+      const names=await fs.readdir(folder);
+      if(verifying&&folder===f.directory){namespaceReads++;if(phase==='after')edited=true;}
+      return names;
+    }};
+    const snapshot=await scanLocalDataset(f.directory,()=>{},filesystem);
+    verifying=true;if(phase==='before')edited=true;
+    await assert.rejects(snapshot.verify(),/Local directory changed; no publication/);
+    assert.equal(namespaceReads,phase==='before'?0:1);
   });
 });
