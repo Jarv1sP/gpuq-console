@@ -28,6 +28,7 @@
   <link rel="stylesheet" href="./dataset-flow.css" />
   <link rel="stylesheet" href="./admin.css" />
   <link rel="stylesheet" href="./dataset-warehouse.css" />
+  <link rel="stylesheet" href="./admin-gpu-tasks.css" />
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin />
 </head>
 <body class="sb root">
@@ -71,7 +72,6 @@
 <section data-page="community" id="page-community" hidden></section>
 <section data-page="maintenance" id="page-maintenance" hidden></section>
 <section data-page="resources" id="page-resources" hidden><div class="section-kicker"><span>实验室服务器</span><span id="resource-summary">我的额度：0 张</span></div><p id="monitor-status" class="monitor-status" role="status"></p><div class="resource-grid" id="machine-grid"></div></section>
-
 <div class="help-links copy-caption" aria-label="使用帮助"><span>首次使用</span><span>从第一次登录，到一次完整训练。</span></div>
 <footer><span class="wordmark footer-wordmark" role="img" aria-label="STARGATE">STARGATE</span><span>独立开源研究计算工作台</span></footer>
 </main>
@@ -80,7 +80,7 @@
 <section id="page-users" aria-label="成员与额度" hidden>
 <div class="management-toolbar"><div class="filter-tabs"><button id="filter-pending" aria-pressed="true">待处理 0</button><button id="filter-all" aria-pressed="false">全部账号</button></div><button class="button" data-action="invites">注册邀请</button></div>
 <div class="authorization-layout"><div class="member-editor hero-frame" id="editor"></div><aside class="user-panel" aria-label="成员账号"><div id="user-list" class="user-list"></div></aside></div>
-<details class="team-jobs"><summary>全体用户的训练任务</summary><div id="all-jobs"></div></details>
+
 </section>
   <dialog id="password-dialog" class="modal member-dialog" aria-labelledby="password-title"><form id="password-form"><div class="modal-head"><div class="copy-caption"><h2 id="password-title">重置密码</h2><span data-copy-password></span></div><button type="button" class="icon-button" data-close="password-dialog" aria-label="关闭">×</button></div><p class="muted" id="password-account"></p><p class="muted">重置后，原密码和已登录会话失效。</p><label class="field">新密码<input name="password" type="password" minlength="8" maxlength="128" required autocomplete="new-password" placeholder="至少 8 个字符" /></label><p class="form-error" id="password-error" role="alert"></p><div class="modal-actions"><button type="button" class="button" data-close="password-dialog">取消</button><button class="button primary" type="submit">确认重置</button></div></form></dialog>
   <dialog id="invites-dialog" class="modal member-dialog preview-modal" aria-labelledby="invites-title"><div class="modal-head"><div><div class="eyebrow">INVITATION KEYS</div><h2 id="invites-title">注册码</h2></div><button type="button" class="icon-button" data-close="invites-dialog" aria-label="关闭邀请码管理">×</button></div><div id="invites-content"></div><p class="form-error" id="invites-error" role="alert"></p></dialog>

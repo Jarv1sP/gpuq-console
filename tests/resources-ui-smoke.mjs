@@ -251,18 +251,21 @@ try{
   assert.equal(await page.locator('[data-resource-root]').count(),0);assert.equal(await page.locator('.resource-process-table').count(),0,'Old principal data is cleared on logout');
   await page.locator('#login-form [name=username]').fill('admin');await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=resources]').click();
   assert.equal(await page.locator('[data-resource-selected]').getAttribute('data-resource-selected'),'gpu-1','Identity changes discard the prior server selection');
+  assert.equal(await page.locator('[data-resource-root]').count(),0,'ordinary admin compute has no ROOT action');
+  for(const privateValue of [privateProgram,privateOwner,'private-native-job'])assert.ok(!(await page.locator('.resource-process-table').textContent()).includes(privateValue),'ordinary admin compute hides '+privateValue);
+  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content [data-resource-root]').waitFor();
   assert.equal(await page.locator('[data-resource-root]').count(),1);
-  for(const visible of [privateProgram,privateOwner,'private-native-job'])assert.ok((await page.locator('.resource-process-table').textContent()).includes(visible),visible);
-  assert.deepEqual(await page.locator('.resource-process-table th').allTextContents(),['GPU','PID','任务 / 提交者 / 描述','程序','系统用户','显存 MiB','优先级']);
+  for(const visible of [privateProgram,privateOwner,'private-native-job'])assert.ok((await page.locator('#admin-content .resource-process-table').textContent()).includes(visible),visible);
+  assert.deepEqual(await page.locator('#admin-content .resource-process-table th').allTextContents(),['GPU','PID','任务 / 提交者 / 描述','程序','系统用户','显存 MiB','优先级']);
   await capture('resources-admin-1440');
   await page.locator('[data-resource-root]').click();await page.locator('#host-maintenance').waitFor();
   assert.equal(await page.locator('#host-maintenance').getAttribute('open'),'');
   assert.equal(calls.filter(call=>call.operation.startsWith('terminal.')||call.operation.startsWith('jobs.')).length,0,'ROOT entry only reveals the existing administrator controls');
-  await page.locator('[data-nav=resources]').click();await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await selectResource(page,'gpu-1');
+  await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await page.locator('#admin-content .resource-identity .resource-select').click();
   // Measure the visible, settled sheet before screenshot capture can dispatch
   // resize events or fast-forward its animation.
   await page.locator('[data-resource-root]').waitFor({state:'visible'});
-  await page.locator('#resource-sheet').evaluate(async sheet=>{await Promise.all(sheet.getAnimations().map(animation=>animation.finished));});
+  await page.locator('#admin-content').evaluate(async region=>{await Promise.all(region.getAnimations({subtree:true}).filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
   assert.ok((await page.locator('[data-resource-root]').boundingBox()).height>=44,'Phone administrator actions retain a 44px target');
   await capture('resources-detail-admin-390');
   violations.push(...await page.evaluate(()=>resourceCSP));

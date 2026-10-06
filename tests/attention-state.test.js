@@ -44,6 +44,7 @@ test('recent failures can be acknowledged; UNKNOWN remains actionable and approv
   assert.equal(source.users.filter(row=>row.id==='pending'&&row.enabled&&row.total===0).length,1);
   assert.equal(snapshot.attention.some(row=>row.id.startsWith('user:')),false,'no account administration in the primary control');
   assert.ok(snapshot.attention.every(row=>!row.readKey));assert.equal(snapshot.failedJobs.length,1);
+  assert.deepEqual(snapshot.approvals.map(row=>row.id),['pending'],'approval cannot be acknowledged or removed by failure reads');
 });
 
 test('read markers persist across reloads, are account-scoped and do not silence a later failure',()=>{

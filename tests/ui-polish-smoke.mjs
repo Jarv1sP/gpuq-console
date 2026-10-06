@@ -80,7 +80,7 @@ try{
   await textContrast();
   await capture('workspace-desktop');
   const personalSummary=await page.locator('#self-summary').innerText();
-  assert.match(personalSummary,/请求卡数\n4 张\n免个人额度/);
+  assert.match(personalSummary,/不限个人额度\n已占用 4 张/);
   assert.doesNotMatch(personalSummary,/4 \/ 8|占用额度 \/ 上限/);
   assert.equal(await page.locator('[name=priority] option').count(),3);
   const queueInfo=page.locator('[data-workbench-job="22222222-2222-4222-8222-222222222222"] .ui-info>summary');await queueInfo.click();assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);await queueInfo.click();
@@ -174,3 +174,5 @@ if(!baseline){
   await import('./admin-ui-smoke.mjs');
   await import('./admin-members-ui-smoke.mjs');
 }
+
+await import('./admin-gpu-tasks-ui-smoke.mjs');

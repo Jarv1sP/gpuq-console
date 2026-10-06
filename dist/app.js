@@ -1,6 +1,7 @@
 import {discloseInfo,serverIdHTML,personalQuotaReadout} from './workbench-ui.js';
 import {DemoClient} from './client.js';
-import {executionUI,renderTaskTable} from './execution-ui.js';
+import {executionUI} from './execution-ui.js';
+import {registerGpuTasksAdmin} from './admin-gpu-tasks.js';
 import {terminalUI} from './terminal-ui.js';
 import {resourcesUI,monitorSummary} from './resources-ui.js';
 import {datasetsUI} from './datasets-ui.js';
@@ -37,6 +38,7 @@ async function loadInventory(){
 await loadInventory();
 let page=pageForRoute(location.hash)==='admin'?'admin':'work',pendingRoute=pageForRoute(location.hash)==='admin'?membersRoute(location.hash):pageForRoute(location.hash),selected=null,draft=null,filter='pending',toastTimer,confirmAction,inviteCode=null,refreshing=false,members;
 const shell=shellUI(store,{navigate:choosePage,getPage:()=>page,toast});
+registerGpuTasksAdmin(registerAdminSection);
 const adminConsole=createAdminUI(store,{navigate:choosePage,getPage:()=>page,toast});
 const renderExecution=executionUI(store,()=>render(true),toast);
 const renderDatasets=datasetsUI(store,toast);
@@ -91,8 +93,6 @@ function render(preserve=false){
   $('.demo-note').hidden=!note&&!monitorNotice;
   renderOperationalMaintenance();
   renderTransfers(page==='transfers');renderResources();renderExecution();renderDatasets();renderCommunity(page==='community');renderMaintenance(page==='maintenance');
-  if(admin)renderTaskTable($('#all-jobs'),store.jobs,{admin,userId:store.principal.userId});
-  else $('#all-jobs').innerHTML='';
   const activeJobs=store.jobs.filter(job=>job.userId===store.principal?.userId&&!['SUCCEEDED','FAILED','CANCELED'].includes(job.state));
   const grouped=new Map();for(const job of activeJobs){const key=job.cancelRequested?'cancel':job.state;grouped.set(key,(grouped.get(key)||0)+1);}
   const stateNames={RUNNING:['st-run','运行'],STARTING:['st-start','启动'],SUBMITTING:['st-start','提交'],PENDING:['st-queue','排队'],QUEUED:['st-queue','排队'],PREPARING_DATA:['st-prep','准备数据'],cancel:['st-cancel','正在取消'],UNKNOWN:['st-unk','待核对'],PREEMPTING:['st-cancel','正在让位'],PREEMPTED:['st-stop','让位结束']};
@@ -100,7 +100,7 @@ function render(preserve=false){
   const used=u?store.usage(u.id):null,quota=u?.total;
   const quotaReadout=personalQuotaReadout(u,used,quota);
   const quotaSlots=!quotaReadout.exempt&&Number.isSafeInteger(quota)&&quota>0&&quota<=64?`<span class="wb-quota-segments" aria-hidden="true">${Array.from({length:quota},(_,i)=>`<i class="${i<used?'on':''}"></i>`).join('')}</span>`:'';
-  $('#self-summary').innerHTML=logged?`<div><small>${quotaReadout.label}</small><strong>${quotaReadout.value}<span> 张</span></strong>${quotaReadout.note?`<span class="wb-telemetry-note">${quotaReadout.note}</span>`:quotaSlots}</div><div><small>进行中的训练</small><strong>${activeJobs.length}<span> 项</span></strong><span class="wb-state-distribution">${distribution||'暂无进行中的训练'}</span></div><div><small>已授权服务器</small><strong>${Object.values(u?.limits||{}).filter(limit=>limit>0).length}<span> 台</span></strong><span class="wb-telemetry-note">${label(u)}</span></div>`:'';
+  $('#self-summary').innerHTML=logged?`<div><small>${quotaReadout.label}</small><strong>${quotaReadout.exempt?'<span>已占用 </span>':''}${quotaReadout.value}<span> 张</span></strong>${quotaReadout.note?`<span class="wb-telemetry-note">${quotaReadout.note}</span>`:quotaSlots}</div><div><small>进行中的训练</small><strong>${activeJobs.length}<span> 项</span></strong><span class="wb-state-distribution">${distribution||'暂无进行中的训练'}</span></div><div><small>已授权服务器</small><strong>${Object.values(u?.limits||{}).filter(limit=>limit>0).length}<span> 台</span></strong><span class="wb-telemetry-note">${label(u)}</span></div>`:'';
   $('#work-title-telemetry').hidden=page!=='work'||!logged;
   $('#open-submit').hidden=page!=='work'||!logged;$('#open-submit').disabled=!store.production||store.data?.executionEnabled!==true;
   shell.update();
@@ -109,7 +109,7 @@ function render(preserve=false){
 }
 function renderResources(){
   const u=own(),limits=u?.limits||{};
-  $('#resource-summary').textContent=u?`${personalQuotaReadout(u).exempt?'免个人额度':'额度 '+u.total+' 张'} · ${Object.values(limits).filter(value=>value>0).length} 台已授权`:'登录后查看额度';
+  $('#resource-summary').textContent=u?`${personalQuotaReadout(u).exempt?'不限个人额度':'额度 '+u.total+' 张'} · ${Object.values(limits).filter(value=>value>0).length} 台已授权`:'登录后查看额度';
   $('#monitor-status').textContent=monitorSummary(store.data?.gpuq,store.production);
   $('#monitor-status').title=store.data?.gpuq?.checkedAt||'';
   renderResourceView();
