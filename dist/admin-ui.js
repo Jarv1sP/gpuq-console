@@ -19,14 +19,15 @@ export function createAdminRegistry(){
       const definition=Object.freeze({...section,title});sections.set(section.id,definition);notify();
       return ()=>{if(sections.get(section.id)!==definition)return;sections.delete(section.id);notify();};
     },
-    list(){return [...new Map([...ADMIN_SECTIONS,...sections.values()].map(row=>[row.id,row])).values()]
-      .sort((a,b)=>a.order-b.order||a.id.localeCompare(b.id));},
+    list(){return [...sections.values()].sort((a,b)=>a.order-b.order||a.id.localeCompare(b.id));},
     get:id=>sections.get(id),
     subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},
   };
 }
 const registry=createAdminRegistry();
 export const registerAdminSection=section=>registry.register(section);
+export const hasAdminSections=()=>registry.list().length>0;
+export const onAdminSectionsChange=listener=>registry.subscribe(listener);
 export function adminSectionForRoute(route){
   const value=String(route??'').replace(/^#/,'');
   return /^admin\/[a-z][a-z0-9-]{0,63}$/.test(value)?value.slice(6):ADMIN_SECTIONS[0].id;
@@ -35,7 +36,7 @@ export const adminHashForRoute=route=>String(route??'').replace(/^#/,'')==='admi
 
 export function createAdminUI(store,{getPage,navigate,toast},sections=registry){
   const q=selector=>document.querySelector(selector),root=q('#page-admin'),frame=q('#admin-frame'),denied=q('#admin-denied'),
-    navigation=q('#admin-sections'),content=q('#admin-content'),empty=q('#admin-empty'),emptyTitle=q('#admin-empty-title'),emptyNote=q('#admin-empty-note');
+    navigation=q('#admin-sections'),content=q('#admin-content');
   let mounted=null,navSignature='',selectedSection=null;
   const identity=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   const permitted=()=>!!store.principal&&store.principal.role==='admin'&&!store.authPending;
@@ -57,18 +58,16 @@ export function createAdminUI(store,{getPage,navigate,toast},sections=registry){
       }
     }
     for(const link of navigation.children){const current=link.dataset.adminSection===id;link.classList.toggle('active',current);if(current)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
-    return rows.find(row=>row.id===id);
   }
   function update(){
     const active=getPage()==='admin',allowed=permitted();
     if(!active||!allowed){stop();content.replaceChildren();}
-    frame.hidden=!allowed;denied.hidden=allowed;
+    const rows=sections.list();frame.hidden=!allowed||!rows.length;denied.hidden=allowed;
     if(!active||!allowed)return;
-    const id=adminSectionForRoute(location.hash),row=renderNavigation(id),definition=sections.get(id),key=identity();selectedSection=id;
-    root.dataset.adminCurrentSection=id;emptyTitle.textContent=row?.title||'找不到这个区块';
-    emptyNote.textContent=row?'这个区块正在准备。':'请选择一个管理区块。';
-    empty.hidden=!!definition;
-    if(!definition){stop();content.replaceChildren();return;}
+    if(!rows.length){stop();navigation.replaceChildren();navSignature='';navigate('work');return;}
+    const requested=adminSectionForRoute(location.hash),id=sections.get(requested)?requested:rows[0].id,definition=sections.get(id),key=identity();selectedSection=id;
+    if(location.hash!=='#admin/'+id)history.replaceState(null,'','#admin/'+id);
+    renderNavigation(id);root.dataset.adminCurrentSection=id;
     if(mounted?.key===key&&mounted.definition===definition){for(const listener of mounted.listeners){try{listener();}catch{console.warn('后台区块更新未完成');}}return;}
     stop();content.replaceChildren();
     const controller=new AbortController(),el=document.createElement('div'),listeners=new Set();el.className='admin-section-host';content.append(el);

@@ -19,7 +19,7 @@ const reservation=net.createServer();await new Promise(resolve=>reservation.list
 const origin='http://127.0.0.1:'+reservation.address().port;await new Promise(resolve=>reservation.close(resolve));
 const spec={roots:['#page-admin'],controls:'a[href],button,input,select,summary',
   centers:[{parent:'.admin-navigation>a',children:':scope>span',wrap:false}],
-  textContainment:['.admin-navigation>a>span','#admin-empty-title','#admin-denied h2'],
+  textContainment:['.admin-navigation>a>span','#admin-content h2','#admin-denied h2'],
   repeatedPadding:['.admin-navigation>a'],repeatedGaps:['.admin-navigation'],
   bottomReserve:[{content:'#main-content',controls:'#mobile-control,#room-nav,#control-strip'}]};
 const settle=page=>page.evaluate(async()=>{await document.fonts.ready;for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
@@ -101,17 +101,40 @@ try{
   }
   const {page,context,setActor,holdLogin}=await open('admin');
   try{
+    assert.equal(new URL(page.url()).hash,'#work','a zero-section admin deep link returns to the workbench');
+    assert.equal(await page.locator('#page-admin').isVisible(),false);
+    assert.equal(await page.locator('#admin-sections a').count(),0);
+    assert.equal(await page.locator('#account-menu [data-shell-action=admin]').isVisible(),false,'zero sections hide the account entry');
+    await page.locator('[data-shell-action=control]').first().click();await page.locator('#control-command').fill('管理后台');assert.equal(await page.locator('[data-command-id=admin]').count(),0,'zero sections hide the command');await page.locator('[data-control-close]').click();
+    await page.setViewportSize({width:390,height:844});await page.locator('[data-nav=me]').click();assert.equal(await page.locator('#me-content [data-shell-action=admin]').count(),0,'zero sections hide the phone entry');
+    await page.evaluate(async()=>{
+      const {registerAdminSection}=await import('/admin-ui.js');globalThis.basicRemovers={};
+      globalThis.basicAdminMount=title=>(el,ctx)=>{
+        const section=document.createElement('section'),heading=document.createElement('h2');section.className='me-hero hero-frame';heading.className='disp';heading.textContent=title;section.append(heading);el.append(section);
+        return ctx.store.call('datasets.storage.status',{machine:ctx.store.data.machines[0].id},{signal:ctx.signal}).then(result=>{if(ctx.signal.aborted)return;const fact=document.createElement('p');fact.textContent=result.available?'状态已确认':'状态暂时未知';section.append(fact);});
+      };
+      basicRemovers.storage=registerAdminSection({id:'storage',order:20,mount:basicAdminMount('数据与存储')});
+    });
+    await page.locator('#me-content [data-shell-action=admin]').click();
+    assert.deepEqual(await page.locator('#admin-sections a').allTextContents(),['01数据与存储'],'one registered section renders exactly one navigation entry');
+    assert.equal(await page.locator('#admin-content h2').innerText(),'数据与存储');assert.equal(new URL(page.url()).hash,'#admin/storage');
+    assert.equal(await page.locator('#admin-empty').count(),0,'default placeholders do not exist');
+    await capture(page,'admin-one-section');
+    await page.evaluate(async()=>{
+      const {registerAdminSection}=await import('/admin-ui.js');for(const [id,title,order] of [['tasks','显卡与任务',10],['members','成员与额度',30],['maintenance','维护',40]])basicRemovers[id]=registerAdminSection({id,order,mount:basicAdminMount(title)});
+    });
     assert.deepEqual(await page.locator('#admin-sections a').allTextContents(),['01显卡与任务','02数据与存储','03成员与额度','04维护']);
     for(const [id,title] of [['tasks','显卡与任务'],['storage','数据与存储'],['members','成员与额度'],['maintenance','维护']]){
-      await page.locator('[data-admin-section='+id+']').click();assert.equal(await page.locator('#admin-empty-title').innerText(),title);
+      await page.locator('[data-admin-section='+id+']').click();assert.equal(await page.locator('#admin-content h2').innerText(),title);
       assert.equal(await page.locator('#admin-sections [aria-current=page]').getAttribute('data-admin-section'),id);
     }
-    await page.locator('[data-admin-section=tasks]').focus();await page.keyboard.press('Enter');await page.locator('#page-title').click();await page.mouse.move(0,0);await capture(page,'admin-tasks-empty');
+    await page.locator('[data-admin-section=tasks]').focus();await page.keyboard.press('Enter');await page.locator('#page-title').click();await page.mouse.move(0,0);await capture(page,'admin-registered-sections');
+    if(full)for(const zoom of layoutZooms){const rows=await scanOperationalGeometry(page,spec,{widths,heights:layoutHeights,zoom});geometry.push(...rows.map(row=>({name:'admin-four-sections-dense',...row})));assert.deepEqual(rows.filter(row=>!row.pass),[],'four registered sections geometry at '+zoom);}
     await page.setViewportSize({width:1440,height:900});await page.locator('[data-nav=work]').click();await page.locator('#account-menu-toggle').click();await settle(page);await page.screenshot({path:join(output,'admin-account-entry-1440.png'),animations:'disabled'});await page.locator('#account-menu [data-shell-action=admin]').click();await page.locator('#page-admin').waitFor({state:'visible'});assert.equal(await page.locator('#account-menu').getAttribute('open'),null);
-    await page.locator('[data-shell-action=control]').first().click();await page.locator('#control-command').fill('管理后台');await page.locator('[data-command-id=admin]').click();assert.equal(await page.locator('#mission-control').isVisible(),false);assert.equal(new URL(page.url()).hash,'#admin');
+    await page.locator('[data-shell-action=control]').first().click();await page.locator('#control-command').fill('管理后台');await page.locator('[data-command-id=admin]').click();assert.equal(await page.locator('#mission-control').isVisible(),false);assert.equal(new URL(page.url()).hash,'#admin/tasks');
     await page.setViewportSize({width:390,height:844});await page.locator('[data-nav=me]').click();await settle(page);await page.screenshot({path:join(output,'admin-phone-entry-390.png'),animations:'disabled'});await page.locator('#me-content [data-shell-action=admin]').click();assert.equal(await page.locator('[data-nav=me]').getAttribute('aria-current'),'page');
     await page.evaluate(async()=>{
-      const {registerAdminSection}=await import('/admin-ui.js');globalThis.adminEvents=[];globalThis.adminContexts=[];globalThis.staleResolvers=[];
+      const {registerAdminSection}=await import('/admin-ui.js');for(const id of ['storage','members','maintenance'])basicRemovers[id]();globalThis.adminEvents=[];globalThis.adminContexts=[];globalThis.staleResolvers=[];
       globalThis.removeStorage=registerAdminSection({id:'storage',order:20,mount(el,ctx){
         adminContexts.push(ctx);adminEvents.push('mount:'+ctx.principal.userId);globalThis.lastAdminContext=ctx;
         const heading=document.createElement('h2');heading.textContent='已挂载的数据与存储';el.append(heading);
@@ -139,19 +162,22 @@ try{
     assert.equal(await page.evaluate(()=>adminContexts.at(-2).signal.aborted),true,'a different administrator gets a fresh host and signal');
     await page.evaluate(()=>{for(const resolve of staleResolvers.splice(0,-1))resolve();});await settle(page);
     assert.doesNotMatch(await page.locator('#admin-content').innerText(),/旧账号晚回包/);assert.doesNotMatch(await page.locator('#toast').innerText(),/旧账号提示/);
-    await page.evaluate(()=>removeStorage());assert.equal(await page.locator('#admin-empty-title').innerText(),'数据与存储');assert.equal(await page.evaluate(()=>lastAdminContext.signal.aborted),true);
+    await page.evaluate(()=>removeStorage());assert.equal(await page.locator('#admin-content h2').innerText(),'显卡与任务');assert.equal(await page.evaluate(()=>lastAdminContext.signal.aborted),true);assert.equal(new URL(page.url()).hash,'#admin/tasks');
+    await page.evaluate(()=>basicRemovers.tasks());assert.equal(new URL(page.url()).hash,'#work');assert.equal(await page.locator('#account-menu [data-shell-action=admin]').isVisible(),false,'removing the last mount also removes the entry');
     await page.evaluate(async()=>{const {registerAdminSection}=await import('/admin-ui.js');globalThis.failedMounts=0;globalThis.removeTasks=registerAdminSection({id:'tasks',title:'<img src=x onerror=alert(1)>',order:10,mount(){failedMounts++;throw Error('Private backend detail');}});});
-    await page.locator('[data-admin-section=tasks]').click();assert.equal(await page.locator('#admin-content').innerText(),'暂时无法显示这个区块。\n\n重新打开');assert.equal(await page.locator('#admin-sections img').count(),0);assert.match(await page.locator('#admin-sections').innerText(),/<img src=x/);
+    await page.locator('#account-menu-toggle').click();await page.locator('#account-menu [data-shell-action=admin]').click();assert.equal(await page.locator('#admin-content').innerText(),'暂时无法显示这个区块。\n\n重新打开');assert.equal(await page.locator('#admin-sections img').count(),0);assert.match(await page.locator('#admin-sections').innerText(),/<img src=x/);
     await page.locator('#admin-content button').click();assert.equal(await page.evaluate(()=>failedMounts),2,'failed mount retries only through the explicit recovery action');
-    await page.evaluate(()=>removeTasks());await page.locator('[data-admin-section=tasks]').click();
-    await capture(page,'admin-empty-after-unmount');
+    await page.evaluate(()=>removeTasks());assert.equal(new URL(page.url()).hash,'#work');
+    await page.evaluate(async()=>{const {registerAdminSection}=await import('/admin-ui.js');registerAdminSection({id:'storage',order:20,mount:basicAdminMount('数据与存储')});});
+    await page.locator('#account-menu-toggle').click();await page.locator('#account-menu [data-shell-action=admin]').click();assert.deepEqual(await page.locator('#admin-sections a').allTextContents(),['01数据与存储']);
+    await capture(page,'admin-real-mount-after-unmount');
     if(full)for(const zoom of layoutZooms){const rows=await scanOperationalGeometry(page,spec,{widths,heights:layoutHeights,zoom});geometry.push(...rows.map(row=>({name:'admin-navigation-dense',...row})));assert.deepEqual(rows.filter(row=>!row.pass),[],'admin adaptive geometry at '+zoom);}
     assert.deepEqual(await page.evaluate(()=>adminCSP),[]);
   }catch(error){await writeFile(join(output,'failure-dom.html'),await page.content());await page.screenshot({path:join(output,'failure.png'),animations:'disabled'});await writeFile(join(output,'failure-context.json'),JSON.stringify({message:error.message,requests,events:await page.evaluate(()=>globalThis.adminEvents||[])},null,2));throw error;
   }finally{await context.close();}
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);assert.ok(requests.some(row=>row.operation==='datasets.storage.status'));assert.ok(requests.filter(row=>row.operation==='datasets.storage.status').every(row=>row.role==='admin'));
   await writeFile(join(output,'checks.json'),JSON.stringify({full,geometry,errors,outside,requests},null,2)+'\n');
-  console.log(JSON.stringify({status:'PASS',features:['privileged mount','store/toast/signal','abort before unmount','late reply detached','logout and downgrade','unconfirmed login','account/command/phone entries','ordered deep links','XSS text','CSP'],measurements:geometry.length,output}));
+  console.log(JSON.stringify({status:'PASS',features:['registered-only 0/1 entries','no default placeholders','privileged mount','store/toast/signal','abort before unmount','late reply detached','logout and downgrade','unconfirmed login','account/command/phone entries','ordered deep links','XSS text','CSP'],measurements:geometry.length,output}));
 }finally{
   await browser?.close();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}if(service&&!service.closing)service.close();await rm(temporary,{recursive:true,force:true});
 }

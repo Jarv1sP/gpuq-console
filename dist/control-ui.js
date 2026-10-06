@@ -1,3 +1,4 @@
+import {hasAdminSections} from './admin-ui.js';
 import {endedJob,escapeUI as esc,stateHTML,stateClass,stateWord,trainingReadout,trajectoryHTML,parseTrainingCommand,infoHTML,boundarySweep,serverIdHTML,personalQuotaReadout} from './workbench-ui.js';
 import {captureObject,dismissReveal,openDialogs} from './motion-ui.js';
 import {recentFailure,failureReadKey,attentionCount,createAttentionReads} from './attention-state.js';
@@ -80,7 +81,7 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
     const publish=document.querySelector('#project-publish');if(publish&&!publish.disabled&&project)rows.push(actionButton('publish','生成训练版本 · '+project,'gpuctl project publish --machine '+machine+' --project '+project,()=>publish.click()));
     for(const job of snapshot.active)rows.push(actionButton('job:'+job.id,'查看任务 · '+job.name,'gpuctl watch '+job.id,()=>openJob(job.id)));
     if(store.principal?.role==='admin')rows.push(actionButton('users','成员授权','',()=>navigate('users')));
-    if(store.principal?.role==='admin')rows.push(actionButton('admin','管理后台','',()=>navigate('admin')));
+    if(store.principal?.role==='admin'&&hasAdminSections())rows.push(actionButton('admin','管理后台','',()=>navigate('admin')));
     return rows;
   }
   const commandMachines=()=>{const user=store.users.find(row=>row.id===store.principal?.userId);return (store.data?.machines||[]).filter(row=>user?.limits?.[row.id]>0);};

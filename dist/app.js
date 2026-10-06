@@ -14,7 +14,7 @@ import {fadeDialog,reducedMotion} from './motion-ui.js';
 import {copyHelp} from './copy-help-ui.js';
 import {installAuthentication} from './auth-ui.js';
 import {pageForRoute,hashForPage} from './navigation.js';
-import {createAdminUI,adminHashForRoute,adminSectionForRoute} from './admin-ui.js';
+import {createAdminUI,adminHashForRoute,adminSectionForRoute,hasAdminSections,onAdminSectionsChange} from './admin-ui.js';
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const MACHINES=[];let capacity=0;
@@ -55,14 +55,14 @@ function toast(message){clearTimeout(toastTimer);const target=$('#toast'),shown=
 function report(error){toast(error.message);if(error.status===401){store.principal=null;store.data=null;MACHINES.length=0;capacity=0;draft=null;render();openLogin();}}
 function confirm(title,message,action){$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;confirmAction=action;$('#confirm-dialog').showModal();fadeDialog($('#confirm-dialog'));}
 function openLogin(){$('#login-form').reset();$('#login-error').textContent='';if(!$('#login-dialog').open)$('#login-dialog').showModal();}
-function choosePage(route){let next=pageForRoute(route);if(!next)return;if(next==='users'&&!isAdmin())next='resources';const hash=next==='admin'?adminHashForRoute(route):hashForPage(next),sameSection=next!=='admin'||adminConsole.currentSection()===adminSectionForRoute(route);if(next===page&&sameSection){if(!store.principal)pendingRoute=hash;history.replaceState(null,'',hash);return;}if(dirty()){history.replaceState(null,'',hashForPage(page));toast('请先保存或撤销授权草稿。');return;}if(!store.principal)pendingRoute=hash;shell.route(next,()=>{page=next;history.replaceState(null,'',hash);render();});}
+function choosePage(route){let next=pageForRoute(route);if(!next)return;if(next==='users'&&!isAdmin())next='resources';const hash=next==='admin'?adminHashForRoute(route):hashForPage(next),sameSection=next!=='admin'||adminConsole.currentSection()===adminSectionForRoute(route);if(next===page&&sameSection){if(!store.principal)pendingRoute=hash;history.replaceState(null,'',hash);if(next==='admin')adminConsole.update();return;}if(dirty()){history.replaceState(null,'',hashForPage(page));toast('请先保存或撤销授权草稿。');return;}if(!store.principal)pendingRoute=hash;shell.route(next,()=>{page=next;history.replaceState(null,'',hash);render();});}
 function defaultPage(){const route=pendingRoute||(maintenanceActive(store.data?.operationalMaintenance)||own()?.total?'work':'resources');page=pageForRoute(route)||'work';pendingRoute=null;if(page==='users'&&!isAdmin())page='resources';selected=null;draft=null;filter=pendingUsers().length?'pending':'all';history.replaceState(null,'',page==='admin'?adminHashForRoute(route):hashForPage(page));}
 function render(preserve=false){
   const logged=!!store.principal,admin=isAdmin(),u=own(),keepDraft=preserve&&dirty();
   if(logged)for(const node of document.querySelectorAll('[data-public-maintenance]')){node.textContent=store.data?.operationalMaintenance?.global?.reason||'';node.hidden=!node.textContent;}
   if(page==='users'&&!admin)page='resources';
   document.body.classList.toggle('not-admin',!admin);
-  for(const el of document.querySelectorAll('[data-admin-only]'))el.hidden=!admin;
+  for(const el of document.querySelectorAll('[data-admin-only]'))el.hidden=!admin||el.hasAttribute('data-admin-entry')&&!hasAdminSections();
   for(const el of document.querySelectorAll('[data-page]'))el.hidden=el.dataset.page!==page;
   for(const el of document.querySelectorAll('[data-nav]')){el.classList.toggle('active',el.dataset.nav===page);el.setAttribute('aria-current',el.dataset.nav===page?'page':'false');}
   $('#pending-count').textContent=pendingUsers().length;$('#pending-count').hidden=!pendingUsers().length;
@@ -207,6 +207,7 @@ const authGuideObserver=new MutationObserver(syncAuthGuide);
 for(const dialog of [$('#login-dialog'),$('#register-dialog')])authGuideObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
 installAuthentication();
 if(store.principal)defaultPage();render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
+onAdminSectionsChange(()=>render(true));
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 addEventListener('hashchange',()=>choosePage(location.hash));

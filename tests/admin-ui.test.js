@@ -13,20 +13,21 @@ test('admin deep links stay in the independent room without admitting malformed 
 });
 test('section owners choose order; storage can mount with the agreed minimal registration',()=>{
   const registry=createAdminRegistry(),mount=()=>{};
+  assert.deepEqual(registry.list(),[],'unregistered metadata slots are never navigation entries');
   registry.register({id:'storage',order:20,mount});
-  assert.deepEqual(registry.list().map(({id,order})=>({id,order})),ADMIN_SECTIONS.map(({id,order})=>({id,order})));
+  assert.deepEqual(registry.list().map(({id,order})=>({id,order})),[{id:'storage',order:20}]);
   assert.equal(registry.get('storage').title,'数据与存储');
   assert.equal(registry.get('storage').mount,mount);
   registry.register({id:'audit',title:'操作记录',order:15,mount});
-  assert.deepEqual(registry.list().map(row=>row.id),['tasks','audit','storage','members','maintenance']);
+  assert.deepEqual(registry.list().map(row=>row.id),['audit','storage']);
 });
-test('registration changes notify once, unregister restores the placeholder and is idempotent',()=>{
+test('registration changes notify once, unregister removes navigation and is idempotent',()=>{
   const registry=createAdminRegistry();let changes=0;
   const unsubscribe=registry.subscribe(()=>changes++);
   const remove=registry.register({id:'members',order:30,mount:()=>{}});
   assert.equal(changes,1);assert.ok(registry.get('members'));
   remove();remove();assert.equal(changes,2);assert.equal(registry.get('members'),undefined);
-  assert.equal(registry.list().find(row=>row.id==='members').title,'成员与额度');
+  assert.deepEqual(registry.list(),[],'unregistering the last owner cannot restore a placeholder');
   unsubscribe();registry.register({id:'storage',order:20,mount:()=>{}});assert.equal(changes,2);
 });
 test('invalid and duplicate registrations are rejected without replacing a live owner',()=>{

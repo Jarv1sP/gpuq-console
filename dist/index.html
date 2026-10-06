@@ -46,7 +46,7 @@
       <div class="topbar-right">
         <a href="/guide" class="guide-link" aria-label="使用指南" title="使用指南" target="_blank" rel="noopener">使用指南<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 18 18 6M6 6h12v12"/></svg></a>
         <button class="sync" id="refresh-state" type="button" aria-label="刷新已确认的状态"><span class="sync-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17"/></svg></span><span id="sync-label">正在连接</span></button>
-        <details class="account-menu" id="account-menu"><summary class="acct" id="account-menu-toggle" aria-label="账号菜单"><span class="av" id="account-avatar" aria-hidden="true">S</span><span class="acct-t"><strong id="profile-name">未登录</strong><small id="profile-role">个人工作空间</small></span><span aria-hidden="true">⌄</span></summary><div class="account-popover glass"><span id="current-account" class="muted">未登录</span><button class="button quiet" id="edit-profile" hidden type="button">设置姓名</button><button class="button quiet" type="button" data-shell-action="admin" data-admin-only hidden>管理后台</button><button class="button quiet" id="switch-account" type="button">登录</button></div></details>
+        <details class="account-menu" id="account-menu"><summary class="acct" id="account-menu-toggle" aria-label="账号菜单"><span class="av" id="account-avatar" aria-hidden="true">S</span><span class="acct-t"><strong id="profile-name">未登录</strong><small id="profile-role">个人工作空间</small></span><span aria-hidden="true">⌄</span></summary><div class="account-popover glass"><span id="current-account" class="muted">未登录</span><button class="button quiet" id="edit-profile" hidden type="button">设置姓名</button><button class="button quiet" type="button" data-shell-action="admin" data-admin-only data-admin-entry hidden>管理后台</button><button class="button quiet" id="switch-account" type="button">登录</button></div></details>
       </div>
       <span id="breadcrumb" class="sr-only">工作台</span>
     </header>
@@ -63,7 +63,7 @@
   <div id="admin-denied" class="admin-denied hero-frame"><h2>需要管理员权限</h2><a href="#work" class="button quiet admin-return">返回工作台</a></div>
   <div id="admin-frame" class="admin-frame" hidden>
     <nav id="admin-sections" class="admin-navigation" aria-label="后台管理区块"></nav>
-    <div class="admin-content-column"><div id="admin-empty" class="admin-empty hero-frame"><h2 id="admin-empty-title"></h2><p id="admin-empty-note"></p><a href="#work" class="button quiet admin-return">返回工作台</a></div><div id="admin-content"></div></div>
+    <div class="admin-content-column"><div id="admin-content"></div></div>
   </div>
 </section>
 <section data-page="datasets" id="page-datasets" hidden></section>
