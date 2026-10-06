@@ -285,6 +285,8 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     const source=originals[0]||row.steps.find(s=>s.plan?.complete);
     if(!source)fail('没有已确认的完整数据，不能安全删除。');
     row.source=source.operationId;save(row);
+    const authorization={operationId:source.operationId,machine:source.machine,dataset:source.dataset,version:row.version,
+      owners:source.plan.owners,memberAllowed:source.plan.memberAllowed,complete:true,snapshotSha256:source.plan.snapshotSha256};
     const authority=source.plan.authority;
     if(authority){
       if(authority.protocol!=='dataset-authority-dependencies-v1'||authority.sourceMachine!==source.machine||authority.dataset!==source.dataset||authority.version!==row.version||!Array.isArray(authority.grants))fail('数据库依赖计划未确认。',502);
@@ -295,17 +297,37 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
         const relevant=references.filter(r=>r.targetMachine===host.id);
         const locations=await rpc(principal,check,host.id,'locations',{version:row.version,references:relevant});
         if(locations?.protocol!==PROTOCOL||locations.machine!==host.id||!Array.isArray(locations.locations))fail('完整依赖位置未确认。',502);
+        // One grant can name several physical aliases; conversely a location
+        // reply can attest several refs for one name. Collect the entire fixed
+        // set before issuing a plan, never a host-wide or partial ref list.
+        const aliases=new Map();
         for(const location of locations.locations){
-          if(location.version!==row.version||!relevant.some(r=>same(r,location.authorityReference)))fail('数据库依赖物理名称不匹配。',502);
-          reference(location.dataset,row.version);view.refs.get(host.id).add(location.dataset);
-          const step=claim(row,host.id,location.dataset);
-          if(!step.plan){step.plan=parsePlan(await rpc(principal,check,host.id,'plan',{operationId:step.operationId,dataset:step.dataset,version:row.version,...(principal.role==='admin'&&row.owner!==principal.userId?{adminContinue:true}:{})}),step,principal);save(row);}
+          if(!location||Object.keys(location).sort().join(',')!=='authorityReference,dataset,version'
+            ||location.version!==row.version||!relevant.some(r=>same(r,location.authorityReference)))fail('数据库依赖物理名称不匹配。',502);
+          reference(location.dataset,row.version);
+          const refs=aliases.get(location.dataset)||[];
+          if(!refs.some(ref=>same(ref,location.authorityReference)))refs.push(structuredClone(location.authorityReference));
+          aliases.set(location.dataset,refs);
+        }
+        for(const [name,mapped] of aliases){
+          // Preserve the fixed source grant order even if a location reply is
+          // reordered, so an explicit original-child retry has identical args.
+          const refs=relevant.filter(ref=>mapped.some(found=>same(found,ref)));
+          view.refs.get(host.id).add(name);const step=claim(row,host.id,name);
+          if(step.plan?.absent&&!same(step.plan.authorityReferences,refs))fail('原节点计划的固定依赖已改变。',502);
+          if(!step.plan){
+            // A present registration authenticates its own immutable local
+            // snapshot. Only a certified absence/REMOVAL alias receives the
+            // already selected complete source and this physical name's refs.
+            const absence=present(host.id,name)?{}:{authorization,references:refs};
+            step.plan=parsePlan(await rpc(principal,check,host.id,'plan',{operationId:step.operationId,dataset:name,version:row.version,...absence,
+              ...(principal.role==='admin'&&row.owner!==principal.userId?{adminContinue:true}:{})}),step,principal);save(row);
+          }
+          if(!refs.every(ref=>step.plan.authorityReferences.some(r=>same(r,ref))))fail('数据库依赖未映射到固定物理版本，需管理员核对。');
         }
         for(const ref of relevant)if(!row.steps.some(s=>s.machine===host.id&&s.plan?.authorityReferences.some(r=>same(r,ref))))fail('数据库依赖未映射到固定物理版本，需管理员核对。');
       }
     }
-    const authorization={operationId:source.operationId,machine:source.machine,dataset:source.dataset,version:row.version,
-      owners:source.plan.owners,memberAllowed:source.plan.memberAllowed,complete:true,snapshotSha256:source.plan.snapshotSha256};
     for(const [host,names] of view.refs)for(const name of names){
       const step=claim(row,host,name);
       if(!step.plan){step.plan=parsePlan(await rpc(principal,check,host,'plan',{operationId:step.operationId,dataset:name,version:row.version,authorization,references:[],...(principal.role==='admin'&&row.owner!==principal.userId?{adminContinue:true}:{})}),step,principal);save(row);}

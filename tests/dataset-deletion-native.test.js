@@ -4,7 +4,7 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,rm,readFile,readdir,chmod,stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {randomUUID} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {fixture,hosts,principal,admin} from './dataset-deletion-fixture.mjs';
 
 async function nativeFixture(t){
@@ -15,16 +15,18 @@ async function nativeFixture(t){
     }};
     await writable(root);await rm(root,{recursive:true,force:true});
   });
-  const f=fixture(t,{options:{capabilityTimeoutMs:5000}}),calls=[];
+  const f=fixture(t,{options:{capabilityTimeoutMs:5000}}),calls=[],errors=[];
   const bridge=(host,op,args)=>new Promise((resolve,reject)=>{
     calls.push({host,op,args});
     const child=spawn(process.env.PYTHON||'python3',[new URL('./dataset_deletion_node_fixture.py',import.meta.url).pathname,root]);
     let stdout='',stderr='';child.stdout.on('data',data=>stdout+=data);child.stderr.on('data',data=>stderr+=data);
-    child.on('error',reject);child.on('close',code=>code?reject(Error(stderr)):resolve(JSON.parse(stdout)));
+    child.on('error',reject);child.on('close',code=>{
+      if(code){errors.push({host,op,error:stderr});reject(Error(stderr));}else resolve(JSON.parse(stdout));
+    });
     child.stdin.end(JSON.stringify({host,op,args}));
   });
   f.service.bridge=bridge;
-  return {f,root,bridge,calls};
+  return {f,root,bridge,calls,errors};
 }
 
 test('Portal to real node adapter: last complete personal version remains recoverable; negative namespaces are durable; restore creates a new generation',async t=>{
@@ -84,6 +86,39 @@ test('real authority grant used by two physical aliases is fully isolated before
     assert.equal((await readFile(join(root,step.machine,'cache','ready',step.dataset,source.version,'data/train.txt'))).toString(),'actual complete recoverable bytes');
     assert.equal((await f.service.bridge(step.machine,'datasets.prepare',{...sourceActor,dataset:step.dataset,version:source.version})).state,'READY');
   }
+});
+
+test('Portal includes real completed ordinary-removal aliases with exact source proof; commit/history finish after grant revocation',async t=>{
+  const {f,root,bridge,calls,errors}=await nativeFixture(t),owner={userId:principal.userId,hostAdmin:false},administrator={userId:admin.userId,hostAdmin:true};
+  const source=await bridge(hosts[0],'fixture.publish',owner);
+  await bridge(hosts[0],'fixture.enable-authority',administrator);
+  const grant=await bridge(hosts[0],'fixture.seal',{...administrator,version:source.version,targetMachine:hosts[1]});
+  await bridge(hosts[1],'fixture.replicate',{...administrator,grant,dataset:'removed-physical-alias',owner:principal.userId});
+  const removal=await bridge(hosts[1],'fixture.ordinary-remove',{...administrator,dataset:'removed-physical-alias',version:source.version});
+  const audit=join(root,hosts[1],'cache','.trash',removal.recoveryId,'REMOVAL.json');
+  const tier=join(root,hosts[1],'cache','.tiers','removed-physical-alias',source.version+'.json');
+  const beforeAudit=await readFile(audit),beforeTier=await readFile(tier),beforeIdentity=(await stat(audit)).ino;
+  const r=await f.start({dataset:'personal',version:source.version,key:randomUUID()});
+  assert.equal(r.result.state,'DELETED',JSON.stringify({result:r.result,errors}));
+  const alias=r.result.steps.find(s=>s.machine===hosts[1]&&s.dataset==='removed-physical-alias');
+  assert.ok(alias);assert.equal(alias.complete,false);assert.equal(alias.state,'ISOLATED');
+  const sourcePlan=calls.find(c=>c.op==='storage.dataset-delete.plan'&&c.host===hosts[0]);
+  const aliasPlan=calls.find(c=>c.op==='storage.dataset-delete.plan'&&c.args.dataset===alias.dataset);
+  assert.equal(aliasPlan.args.authorization.operationId,sourcePlan.args.operationId);
+  assert.deepEqual(aliasPlan.args.authorization.owners,[principal.userId]);assert.equal(aliasPlan.args.authorization.complete,true);
+  const receiptSha256=createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.keys(grant.receipt).sort().map(key=>[key,grant.receipt[key]])))).digest('hex');
+  assert.deepEqual(aliasPlan.args.references,[{sourceMachine:hosts[0],sourceDataset:'personal',version:source.version,
+    targetMachine:hosts[1],grantId:grant.id,receiptSha256}]);
+  assert.equal(Object.hasOwn(sourcePlan.args,'authorization'),false);assert.equal(Object.hasOwn(sourcePlan.args,'references'),false);
+  assert.equal((await bridge(hosts[0],'fixture.old-grant-denied',{...administrator,grant})).denied,true);
+  for(let count=0;count<2;count++)assert.equal((await f.call('datasets.delete.status',{key:r.args.key})).state,'DELETED');
+  assert.deepEqual(await readFile(audit),beforeAudit);assert.equal((await stat(audit)).ino,beforeIdentity);
+  assert.deepEqual(await readFile(tier),beforeTier,'metadata-only alias never deletes or rewrites the recovery audit');
+  const proof=JSON.parse(await readFile(join(root,hosts[1],'operations',alias.operationId+'.json')));
+  assert.equal(proof.snapshot.retainedRemoval.protocol,'completed-removal-alias-v1');
+  assert.equal(proof.snapshot.authorization.operationId,sourcePlan.args.operationId);
+  const sourceIsolate=calls.find(c=>c.op==='storage.dataset-delete.isolate'&&c.host===hosts[0]);
+  assert.deepEqual(sourceIsolate.args.targets.filter(s=>s.machine===hosts[1]&&s.authorityReferences.length).map(s=>s.dataset),['removed-physical-alias']);
 });
 
 test('actual local CLI restore is recognized through current journal even though old node isolate phase remains saved',async t=>{
