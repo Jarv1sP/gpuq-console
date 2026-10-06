@@ -8,13 +8,13 @@ import {cacheRetentionSession} from './manual-pin-state.js';
 export {cacheRetentionSession} from './manual-pin-state.js';
 
 export function cacheAdminHTML(admin){
-  return admin?`<section class="dataset-cache-admin"><header><h3>缓存容量 <small>仅管理员</small></h3>${cacheBudgetInfo()}</header><details id="dataset-cache-admin"><summary class="button">查看缓存策略</summary><div class="dataset-cache-toolbar"><button class="button" type="button" data-cache-refresh>刷新缓存策略</button><span data-cache-policy-status role="status">展开后查询服务器</span></div><div class="dataset-cache-gauges"></div><div class="dataset-cache-previews"></div></details></section>`:'';
+  return admin?`<section class="dataset-cache-admin"><header><h3>缓存容量</h3>${cacheBudgetInfo()}</header><details id="dataset-cache-admin"><summary class="button">查看缓存策略</summary><div class="dataset-cache-toolbar"><button class="button" type="button" data-cache-refresh>刷新缓存策略</button><span data-cache-policy-status role="status">展开后查询服务器</span></div><div class="dataset-cache-gauges"></div><div class="dataset-cache-previews"></div></details></section>`:'';
 }
-export function datasetCacheAdminUI(store,section,toast){
+export function datasetCacheAdminUI(store,section,toast,{room=section.dataset.adminStorage!==undefined?'admin':'datasets'}={}){
   let identity='',generation=0,policyBusy=false,policyLoaded=false;const queried=new Set();
   const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   const admin=()=>store.principal?.role==='admin';
-  const visible=()=>!document.hidden&&!section.hidden&&(!document.body.dataset.room||document.body.dataset.room==='datasets');
+  const visible=()=>section.isConnected&&!document.hidden&&!section.hidden&&(!document.body.dataset.room||document.body.dataset.room===room);
   const allowed=target=>admin()&&visible()&&(store.data?.machines||[]).some(row=>row.id===target.machine);
   const retention=cacheRetentionSession({call:(operation,args)=>store.call(operation,args),allowed,identity:()=>admin()?store.principal.userId:null});
   const target=slot=>({machine:slot.dataset.machine,dataset:slot.dataset.dataset,version:slot.dataset.version});
@@ -25,7 +25,8 @@ export function datasetCacheAdminUI(store,section,toast){
     const ready=known&&value.status.version.state==='READY'&&value.status.version.manualPinProtocol===1,readBlocked=value.busy||!allowed(item),blocked=readBlocked||!!value.error||!!maintenanceFor(store.data?.operationalMaintenance,item.machine);
     const uncertain=record?.phase==='uncertain',proof=value.status?.version.manualPin;
     const retryKnown=uncertain&&proof?.pinId===record.pinId&&proof.owner===store.principal.userId&&typeof proof.present==='boolean';
-    slot.innerHTML=`<div class="dataset-pin-status" role="status">${known?'已固定保留 '+n+' 处':'保留状态待确认'}${uncertain?' · '+(record.intent==='pin'?'固定保留':'解除保留')+'结果未确认':''}</div><div class="file-actions"><button class="button" type="button" data-cache-retention="query" ${readBlocked?'disabled':''}>重新查询</button>${!record||record.phase==='released'?`<button class="button" type="button" data-cache-retention="pin" ${!ready||blocked?'disabled':''}>固定保留</button>`:record.phase==='retained'?`<button class="button" type="button" data-cache-retention="unpin" ${!known||blocked?'disabled':''}>解除本人保留</button>`:`<button class="button" type="button" data-cache-retention="retry" ${!retryKnown||blocked?'disabled':''}>${record.intent==='pin'?'恢复原请求保留':'用原请求解除保留'}</button>`}</div>${message||value.error?`<p class="form-error" role="status">${esc(message||value.error)}</p>`:''}`;
+    const html=`<div class="dataset-pin-status" role="status">${known?'已固定保留 '+n+' 处':'保留状态待确认'}${uncertain?' · '+(record.intent==='pin'?'固定保留':'解除保留')+'结果未确认':''}</div><div class="file-actions"><button class="button" type="button" data-cache-retention="query" ${readBlocked?'disabled':''}>重新查询</button>${!record||record.phase==='released'?`<button class="button" type="button" data-cache-retention="pin" ${!ready||blocked?'disabled':''}>固定保留</button>`:record.phase==='retained'?`<button class="button" type="button" data-cache-retention="unpin" ${!known||blocked?'disabled':''}>解除本人保留</button>`:`<button class="button" type="button" data-cache-retention="retry" ${!retryKnown||blocked?'disabled':''}>${record.intent==='pin'?'恢复原请求保留':'用原请求解除保留'}</button>`}</div>${message||value.error?`<p class="form-error" role="status">${esc(message||value.error)}</p>`:''}`;
+    if(slot.dataset.rendered!==html){slot.dataset.rendered=html;slot.innerHTML=html;}
   }
   async function querySlot(slot,explicit=false){
     if(!admin()||!visible()||!slot.isConnected)return;

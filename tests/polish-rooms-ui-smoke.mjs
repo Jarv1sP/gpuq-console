@@ -44,6 +44,7 @@ try{
     if(operation==='state')return json(route,null);
     if(operation==='projects.list')return json(route,{projects:[]});
     if(operation==='datasets.catalog')return json(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[{dataset:'local-fixture',name:'本地布局数据',versions:[{version,state:'READY',bytes:7*1024**3,files:12,canPrepare:false,locations:machines.map(m=>({machine:m.id,state:'READY'}))}]}]});
+    if(operation==='datasets.upload.routes')return json(route,{available:false,protocol:'dataset-upload-v1',machine:args.machine});
     if(operation==='datasets.capacity')return json(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
     if(operation==='cloud.info')return json(route,{capabilityVerified:false,configurationEnabled:true,aliyunConnected:false,nodeDirect:false,managedExternally:true});
     if(operation==='cloud.import.list')return json(route,{imports:[]});
@@ -94,7 +95,7 @@ try{
      scrollBy({top:r.top+r.height/2-(top+bottom)/2,behavior:'instant'});
     });
     await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
-    await page.locator('#datasets-add>summary').click();await page.locator('[data-dataset-source=workspace]').click();
+    await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();
     const initialList=mode==='loading'?null:page.waitForResponse(response=>response.url().endsWith('/api/call')&&response.request().postDataJSON()?.operation==='cloud.files.list');
     await page.locator('#cloud-files>summary').click();
     if(mode==='loading')await page.waitForFunction(()=>document.querySelector('#cloud-files-refresh').disabled);

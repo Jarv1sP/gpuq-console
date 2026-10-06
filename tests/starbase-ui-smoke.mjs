@@ -30,6 +30,8 @@ try{
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='projects.list')return {projects:[structuredClone(project)]};
     if(operation==='projects.status')return structuredClone(project);
+    if(operation==='datasets.list')return {datasets:[]};
+    if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
     if(operation==='logs')return {text:'epoch 12/40 loss=0.438 val_acc=0.716\ncheckpoint saved\nTraining continues on the synthetic node.'};
     if(operation==='diagnostics')return {jobId:args.job.id,state:'COMPLETE',schedulerState:'FAILED',attempts:[],captures:[],historyAvailable:true,allocationHistory:[]};
     if(operation==='files.list')return {entries:[{name:'metrics.json',type:'file',size:32}]};

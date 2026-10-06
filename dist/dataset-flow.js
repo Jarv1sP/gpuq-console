@@ -13,7 +13,7 @@ export function discloseDatasetInfo(element,label){
   // Preserve the original note and its aria-describedby ID.
   help.querySelector('.copy-help-popup>span').replaceWith(element);element.hidden=false;
 }
-const phases={QUEUED:'等待存入',COPYING:'存入中',PROVISIONING:'校验中',CERTIFYING:'检查恢复能力',ARCHIVED:'原件已保存',FAILED:'存入数据库失败',BLOCKED:'待确认'};
+const phases={QUEUED:'等待存入',COPYING:'存入中',PROVISIONING:'校验中',CERTIFYING:'检查恢复能力',ARCHIVED:'原件已保存',FAILED:'存入仓库失败',BLOCKED:'待确认'};
 const order=['QUEUED','COPYING','PROVISIONING','CERTIFYING','ARCHIVED'];
 const amount=value=>Number.isFinite(value)&&value>=0?transferBytes(value):null;
 const storageRows=version=>(version?.locations||[]).filter(row=>row.storage&&typeof row.storage==='object');
@@ -25,7 +25,7 @@ export function hasDatabaseOriginal(version){
 }
 export function databaseSummary(version){
   const rows=storageRows(version);
-  if(!rows.length)return {kind:'none',phase:null,machine:null,saved:false,label:'仅本机缓存 · 未存入数据库'};
+  if(!rows.length)return {kind:'none',phase:null,machine:null,saved:false,label:'仅服务器缓存 · 未存入仓库'};
   const machines=new Set(rows.map(row=>row.storage.archiveMachine));
   const machine=machines.size===1&&typeof rows[0].storage.archiveMachine==='string'&&rows[0].storage.archiveMachine?rows[0].storage.archiveMachine:null;
   if(rows.some(row=>row.storage.phase==='FAILED'))return {kind:'failed',phase:'FAILED',machine,saved:false,label:phases.FAILED};
@@ -37,7 +37,7 @@ export function cacheFact(version,machine,catalog,state){
   const location=(version.locations||[]).find(row=>row.machine===machine);
   const canPrepare=machine===catalog.machine?version.canPrepare===true:location?.canPrepare===true;
   const kind=state==='READY'?'ready':state==='PREPARING'?'fetch':state==='FAILED'?'failed':state==='UNKNOWN'?'unknown':['NOT_LOCAL','REGISTERED'].includes(state)&&canPrepare&&hasDatabaseOriginal(version)?'recoverable':state==='STAGING'?'staging':'none';
-  const label={ready:'缓存就绪',fetch:'取回中',failed:'取回失败',unknown:'待确认',recoverable:'可从数据库取回',staging:'上传未完成',none:'未准备'}[kind];
+  const label={ready:'缓存就绪',fetch:'取回中',failed:'取回失败',unknown:'待确认',recoverable:'可从仓库取回',staging:'上传未完成',none:'未缓存'}[kind];
   // Current catalog has no progress field. A future verified caller may pass
   // explicit byte progress; never use a catalog refresh or elapsed time.
   return {kind,label,progress:null};
@@ -53,7 +53,7 @@ export function cacheIconHTML(fact){
 }
 export function databaseGroundHTML(version){
   const state=databaseSummary(version);
-  return `<div class="dataset-ground dataset-ground-${state.kind}" data-database-state="${state.kind}" role="status"><svg viewBox="0 0 1000 8" preserveAspectRatio="none" aria-hidden="true">${state.kind==='none'?'<line x1="0" y1="7" x2="1000" y2="7" stroke-dasharray="3 6"/>':'<path d="M0 7 Q500 0 1000 7 Q500 4.2 0 7Z"/>'}</svg><div class="dataset-ground-label">${state.kind==='none'?esc(state.label):`<span>数据库</span>${state.machine?serverIdHTML(state.machine):''}<span>${esc(state.label)}</span>`}</div></div>`;
+  return `<div class="dataset-ground dataset-ground-${state.kind}" data-database-state="${state.kind}" role="status"><svg viewBox="0 0 1000 8" preserveAspectRatio="none" aria-hidden="true">${state.kind==='none'?'<line x1="0" y1="7" x2="1000" y2="7" stroke-dasharray="3 6"/>':'<path d="M0 7 Q500 0 1000 7 Q500 4.2 0 7Z"/>'}</svg><div class="dataset-ground-label">${state.kind==='none'?esc(state.label):`<span>仓库</span>${state.machine?serverIdHTML(state.machine):''}<span>${esc(state.label)}</span>`}</div></div>`;
 }
 export function datasetLifecycle(version,catalog,{upload,trainingAllowed}={}){
   const ground=databaseSummary(version),local=(version.locations||[]).find(row=>row.machine===catalog.machine);
@@ -62,7 +62,7 @@ export function datasetLifecycle(version,catalog,{upload,trainingAllowed}={}){
   if(upload?.state==='READY'&&upload.machine===catalog.machine&&upload.version===version.version&&upload.dataset===version.dataset)stages.push({label:'上传',state:'complete'});
   if((version.locations||[]).some(row=>row.state==='READY'))stages.push({label:'缓存就绪',state:'complete'});
   if(ground.kind!=='none'){
-    stages.push({label:'存入数据库',state:ground.saved?'complete':ground.kind==='pending'?'current':'unknown'});
+    stages.push({label:'存入仓库',state:ground.saved?'complete':ground.kind==='pending'?'current':'unknown'});
     stages.push({label:'原件已保存',state:ground.saved?'complete':'pending'});
   }
   if(localState==='PREPARING')stages.push({label:'取回到 '+catalog.machine,state:'current'});
