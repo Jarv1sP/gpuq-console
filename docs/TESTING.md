@@ -64,6 +64,8 @@ Mac 对该一项保留明确 skip；不接触生产路径、服务、GPU 或用�
 
 ## 项目生命周期额外回归
 
+`python3 tests/gpuq-native-release-gate.test.py` 用真实临时 SQLite 与有界本地文件验证固定 root 门禁：关闭状态两次物理扫描、原 unit/租约核验、全部 mutation RPC（含 observe/sync/fleet）及动作入口零派发、已有 pending action 不领取、DB/心跳不变、非法／过期／软硬链接／inode 变化保持关闭，显式移除后重新两次观察。文件夹具仅将临时 stat 的所有者表示为 root，不写 `/run`、不操作服务或 GPU；不能当作正式发布器或真实滚动升级通过。合同见 [NATIVE_RELEASE_GATE.md](NATIVE_RELEASE_GATE.md)。
+
 项目生命周期离线夹具覆盖 owner/revision/UUID、名字与分组纯 metadata、跨机部分未知、
 权限在 proof 期间撤销、归档保留旧结果、禁止新工作、未使用 READY 项目退役、任何 run/claim/output
 阻塞、活动/未知终端与导入/上传/发布围栏、目录全量 CAS、私有软退役与永久 ID tombstone、
