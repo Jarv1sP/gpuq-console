@@ -205,10 +205,10 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 
 ## 版本删除（PR-N，节点与门户分阶段发布）
 
-- `datasets.unregister {machine,dataset,version?}`：新节点能力确认后新增个人版本来源校验；旧节点（包括管理员普通删除）返回409安全等待更新；成员必须完整 version 且为本人上传/工作区/副本，其他版本仅管理员。原件 authority pin、租约、其他 pin、版本锁与最后副本保护均不可跳过。没有实际可重建完整来源时拒绝普通删除；仍使用既有后台 64 位编号和 `datasets.status`，不伪造 unregister 回执。
+- `datasets.unregister {machine,dataset,version?}`：新节点能力确认后新增个人版本来源校验和最后副本保护；成员必须完整 version 且为本人上传/工作区/副本，其他版本仅管理员。能力缺失、过旧、错机器或查询失败时，仅管理员沿用原请求 `{...reference,userId,hostAdmin:true}`，不加任何绕过参数；成员返回409且不派发注销。旧路径保留登记恢复记录，不检查最后副本，也不保证完整 payload 可恢复；新版节点没有实际可重建完整来源时拒绝普通删除。既有 authority pin、租约、其他 pin 和版本锁仍不可跳过，仍使用后台 64 位编号和 `datasets.status`，不伪造 unregister 回执。能力查询失败不作为数据或依赖不存在的证据。
 - `datasets.delete {dataset,version,key}`：key 为 UUID；客户端不传 machine、owner、角色、依赖或期限。服务从完整可信节点清单、可信副本/归档记录及实际 authority grant 枚举所有物理名称。所有节点 cap1 后持久化任务/子 UUID 与命名空间锁，才派发。相同 key 不重复执行。零授权、跨账号、旧能力、未知依赖均拒绝/停止。
 - `datasets.delete.status {key}` **或** `{operationId}`：只查询固定原节点编号，可补确认迟到回执，永不派发下一步。查询维护期间可用。返回 `operationId,key,dataset,version,state,steps,events,createdAt,updatedAt,retainUntil?`；不返回 owner ID、路径、inode、grant/token 或私有证明。状态 `PLANNED/REMOVING_CACHES/RETIRING_ORIGINAL/DELETED/BLOCKED/FAILED/UNKNOWN`。`DELETED` 严格要求每个物理命名空间的当前本代次 `ISOLATED` 回执和至少一份完整数据保留；期限后允许实际固定 `PURGED` 回执，步骤据实显示。历史 phase 文件不能代替当前回执；实际恢复转 `BLOCKED` 并确认对应步骤 `RESTORED`，离线/缺失/错代次转 `UNKNOWN`，不接受外部 `REVOKED/RETIRED` 代替。
-- `datasets.delete.restore {operationId,machine}`：管理员 CLI 专用；只恢复此任务在该机唯一已确认完整保留副本。返回 `RESTORED` 或 `UNKNOWN`，重复请求不会重发；没有完整隔离证据、到期、占名或结果未确认均失败关闭。网页不提供恢复入口。
+- `datasets.delete.restore {operationId,machine}`：管理员 CLI 专用；完整可信清单须重新确认节点能力，未确认返回409，不派发恢复或栅栏释放。只恢复此任务在该机唯一已确认完整保留副本。返回 `RESTORED` 或 `UNKNOWN`，重复请求不会重发；没有完整隔离证据、到期、占名或结果未确认均失败关闭。网页不提供恢复入口。
 - `datasets.catalog/capacity`：`datasetDelete:1` 仅在完整可信清单每个节点的私有能力回执全部确认后投影；否则 0。新节点 list 提供安全的 `deletionPermissions`，`memberAllowed:false` 时界面隐藏成员删除，并在 ⓘ 中提示“这份数据只能由管理员删除”；旧节点缺字段按不可用处理，不从 owners 猜权限。
 - 私有桥 `storage.dataset-delete.{capabilities,locations,plan,fence,isolate,status,restore,release-absence}` 不接受公共/peer/upload ticket 请求。UID/hostAdmin 来自当前登录身份。计划仅存固定快照，派发先落固定 launch；长哈希、隔离和恢复由限额 node worker 运行。来源栅栏先持久化、全部目标实际隔离后才撤销旧 grant 和移动原件，保持 7–365 天。UNKNOWN/停止但无固定回执不重投。
 

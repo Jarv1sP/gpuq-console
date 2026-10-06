@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
 
@@ -40,13 +41,39 @@ test('whole-dataset unregister requires authenticated admin despite full member 
   assert.equal(f.calls.length,0);
 });
 
-test('old/missing node deletion capability blocks even administrator ordinary deletion',async t=>{
+test('missing/old/wrong-machine/failed capability preserves exact main admin request but rejects member and full deletion',async t=>{
   const f=await apiFixture(t),bridge=f.s.bridge;
-  for(const value of [undefined,{datasetDelete:0},{protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1}]){
-    f.s.bridge=(machine,operation,args)=>operation==='storage.dataset-delete.capabilities'?Promise.resolve(value):bridge(machine,operation,args);
-    await assert.rejects(f.s.invoke(f.admin.token,'datasets.unregister',{machine:MACHINES[0].id,dataset:'sample',version:VERSION}),e=>e.status===409);
+  const machine=MACHINES[0].id,reads=[];
+  for(const capability of [undefined,{protocol:'dataset-delete-node-v1',machine,datasetDelete:0},
+    {protocol:'dataset-delete-node-v0',machine,datasetDelete:1},
+    {protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1},Error('capability query failed')]){
+    f.s.bridge=async(host,operation,args)=>{
+      if(operation!=='storage.dataset-delete.capabilities')return bridge(host,operation,args);
+      reads.push({machine:host,operation,args:structuredClone(args)});
+      if(capability instanceof Error)throw capability;
+      return structuredClone(capability);
+    };
+    for(const extra of [{},{version:null},{version:VERSION}]){
+      f.calls.length=0;reads.length=0;
+      const out=await f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',...extra});
+      assert.equal(out.result.state,'UNREGISTERING');assert.equal(out.result.unregistered,undefined);
+      // origin/main e027633 execution.mjs forwards only ...reference and
+      // authenticated userId/hostAdmin. No fallback/proof/force fields added.
+      assert.deepEqual(f.calls,[{machine,operation:'datasets.unregister',args:{dataset:'sample',...extra,userId:'builtin-admin',hostAdmin:true}}]);
+      assert.deepEqual(reads,[{machine,operation:'storage.dataset-delete.capabilities',args:{userId:'builtin-admin',hostAdmin:true}}]);
+    }
+    f.calls.length=0;reads.length=0;
+    await assert.rejects(f.s.invoke(f.member.token,'datasets.unregister',{machine,dataset:'sample',version:VERSION}),e=>e.status===409);
+    assert.deepEqual(f.calls,[]);assert.equal(reads.length,1);
+    for(const token of [f.admin.token,f.member.token]){
+      reads.length=0;
+      await assert.rejects(f.s.invoke(token,'datasets.delete',{dataset:'sample',version:VERSION,key:randomUUID()}),e=>e.status===409&&e.code==='DATASET_DELETE_UNSUPPORTED');
+      assert.deepEqual(f.calls,[]);assert.equal(reads.length,1);
+    }
+    assert.equal(f.s.db.prepare('SELECT count(*) n FROM dataset_deletions').get().n,0);
+    assert.equal(f.s.db.prepare('SELECT count(*) n FROM dataset_deletion_fences').get().n,0);
   }
-  assert.equal(f.calls.length,0);
+  assert.equal(f.s.store.jobs.length,0);
 });
 
 test('member version forwards only authenticated identity; node still proves personal provenance',async t=>{

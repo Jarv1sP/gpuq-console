@@ -270,12 +270,13 @@ export async function executionCall(service,principal,operation,args){
     // cannot be supplied by the client. Large copies run in a node-local worker.
     const {machine,includeEmpty,...reference}=args;
     if(operation==='datasets.unregister'){
-      // Old nodes cannot prove last-copy/provenance protection. The existing
-      // administrator shortcut must not bypass the staged deployment gate.
+      // Keep the existing administrator request unchanged during the staged
+      // node rollout. Only v1 nodes can authorize personal version removal;
+      // a failed capability read is not evidence that any data is absent.
       let capability;
       try{capability=await service.bridge(machine,'storage.dataset-delete.capabilities',{userId:user.id,hostAdmin:principal.role==='admin'});}
-      catch{fail('这台服务器还不支持安全删除，请等待节点更新。',409);}
-      if(capability?.protocol!=='dataset-delete-node-v1'||capability.machine!==machine||capability.datasetDelete!==1)fail('这台服务器还不支持安全删除，请等待节点更新。',409);
+      catch{ /* An administrator retains the legacy node path below. */ }
+      if(principal.role!=='admin'&&(capability?.protocol!=='dataset-delete-node-v1'||capability.machine!==machine||capability.datasetDelete!==1))fail('这台服务器还不支持安全删除，请等待节点更新。',409);
     }
     if(operation==='datasets.prepare'&&service.prepareDataset){
       const result=await service.prepareDataset(user.id,machine,reference);

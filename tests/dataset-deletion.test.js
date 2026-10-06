@@ -33,9 +33,12 @@ test('capability must confirm the complete trusted inventory, not just granted v
 });
 test('offline or mismatched capability never means an absent dataset',async t=>{
   const f=fixture(t);f.before=(host,op)=>{if(host===hosts[1])throw Error('offline');};
-  await assert.rejects(f.call('datasets.delete',request()),/offline/);assert.equal(writes(f).length,0);
+  await assert.rejects(f.call('datasets.delete',request()),e=>e.status===409&&e.code==='DATASET_DELETE_UNSUPPORTED');assert.equal(writes(f).length,0);
   f.before=null;f.after=(host,op,args,result)=>{if(op.endsWith('capabilities'))result.machine='untrusted';};
-  await assert.rejects(f.call('datasets.delete',request()));assert.equal(writes(f).length,0);
+  await assert.rejects(f.call('datasets.delete',request()),e=>e.status===409&&e.code==='DATASET_DELETE_UNSUPPORTED');assert.equal(writes(f).length,0);
+  assert.ok(f.calls.every(c=>c.op.endsWith('.capabilities')));
+  assert.equal(f.service.db.prepare('SELECT count(*) n FROM dataset_deletions').get().n,0);
+  assert.equal(f.service.db.prepare('SELECT count(*) n FROM dataset_deletion_fences').get().n,0);
 });
 test('source provenance is mandatory for members; unknown/admin/shared originals remain admin-only',async t=>{
   const f=fixture(t);f.personal=false;
@@ -141,6 +144,44 @@ test('restoration is explicit administrator CLI scope; original grants are never
   const now=writes(f).length;assert.equal((await f.call('datasets.delete.restore',args,admin)).state,'RESTORED');assert.equal(writes(f).length,now);
   assert.equal(f.service.datasetDeletionBlocked(hosts[0],{dataset:'personal',version}),false);
   assert.equal((await f.call('datasets.delete.status',{operationId:first.operationId})).state,'BLOCKED');
+});
+test('missing/old/wrong-machine/failed restore capability rejects with no writes or journal mutation',async t=>{
+  const f=fixture(t),{first}=await f.start(),args={operationId:first.operationId,machine:hosts[0]},bridge=f.service.bridge;
+  const persisted=()=>f.service.db.prepare('SELECT data FROM dataset_deletions WHERE id=?').get(first.operationId).data;
+  const original=persisted(),fences=f.service.db.prepare('SELECT * FROM dataset_deletion_fences ORDER BY machine,dataset,version').all();
+  for(const capability of [undefined,{protocol:'dataset-delete-node-v1',machine:hosts.at(-1),datasetDelete:0},
+    {protocol:'dataset-delete-node-v0',machine:hosts.at(-1),datasetDelete:1},
+    {protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1},Error('offline')]){
+    f.service.bridge=async(host,operation,rpcArgs)=>{
+      if(host!==hosts.at(-1)||!operation.endsWith('.capabilities'))return bridge(host,operation,rpcArgs);
+      f.calls.push({host,op:operation,args:structuredClone(rpcArgs)});
+      if(capability instanceof Error)throw capability;
+      return structuredClone(capability);
+    };
+    const start=f.calls.length;
+    await assert.rejects(f.call('datasets.delete.restore',args,admin),e=>e.status===409&&e.code==='DATASET_DELETE_UNSUPPORTED');
+    assert.deepEqual(f.calls.slice(start).map(c=>c.op),hosts.map(()=>'storage.dataset-delete.capabilities'));
+    assert.equal(persisted(),original);
+    assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_deletion_fences ORDER BY machine,dataset,version').all(),fences);
+  }
+});
+test('capability reply after logout or policy change cannot authorize delete or restore',async t=>{
+  for(const operation of ['datasets.delete','datasets.delete.restore'])for(const logout of [false,true]){
+    const f=fixture(t),args=operation==='datasets.delete'?request():{operationId:(await f.start()).first.operationId,machine:hosts[0]};
+    let loggedIn=true;
+    const count=writes(f).length;
+    f.after=(host,op)=>{if(op.endsWith('.capabilities')){if(logout)loggedIn=false;else f.users[1].enabled=false;}};
+    await assert.rejects(f.call(operation,args,admin,()=>{if(!loggedIn)throw Object.assign(Error('logged out'),{status:403});}),e=>e.status===403);
+    assert.equal(writes(f).length,count);
+  }
+});
+test('concurrent restore capability reads cannot dispatch duplicate restore or overwrite its outcome',async t=>{
+  const f=fixture(t),{first}=await f.start(),args={operationId:first.operationId,machine:hosts[0]},count=writes(f).length;
+  const values=await Promise.allSettled([f.call('datasets.delete.restore',args,admin),f.call('datasets.delete.restore',args,admin)]);
+  assert.equal(values.filter(v=>v.status==='fulfilled'&&v.value.state==='RESTORED').length,1);
+  assert.equal(values.filter(v=>v.status==='rejected'&&v.reason.status===409).length,1);
+  assert.equal(writes(f).slice(count).filter(c=>c.op.endsWith('.restore')).length,1);
+  assert.equal(writes(f).slice(count).filter(c=>c.op.endsWith('.release-absence')).length,hosts.length-1);
 });
 test('corrupt or expired restore remains unknown and keeps the original deletion lock',async t=>{
   const f=fixture(t),{first}=await f.start();f.after=(host,op,args,result)=>{if(op.endsWith('.status')&&result.phases.restore)result.phases.restore={ok:false,error:'retention expired'};};

@@ -116,7 +116,9 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,waitMs
     // Trusted complete inventory, including nodes hidden by GPU grants. Missing
     // capability/offline is never a negative dataset/dependency observation.
     for(const host of MACHINES){
-      const value=await rpc(principal,check,host.id,'capabilities');
+      let value;
+      try{value=await rpc(principal,check,host.id,'capabilities');}
+      catch{check();fail('这台服务器的删除能力未确认，请等待节点更新或恢复连接。',409,'DATASET_DELETE_UNSUPPORTED');}
       if(value?.protocol!==PROTOCOL||value.machine!==host.id||value.datasetDelete!==1)fail('这台服务器还不支持彻底删除。',409,'DATASET_DELETE_UNSUPPORTED');
     }
   }
@@ -367,11 +369,19 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,waitMs
     if(operation==='datasets.delete.restore'){
       fields(args,['operationId','machine']);uuid(args.operationId);machine(args.machine);
       if(principal.role!=='admin')fail('只有管理员可在保留期内恢复。',403);
-      const row=access(principal,load(args.operationId)),step=row.steps.find(s=>s.machine===args.machine&&s.result?.complete);
+      let row=access(principal,load(args.operationId));
+      if(running.has(row.id)||restoring.has(row.id)||queries.has(row.id))fail('原任务还在运行或查询，请稍后核对。');
+      const check=checkFactory(principal,assertCurrent,policy,inventory,row);check();
+      // Restore may also release source-authorized negative namespaces. Every
+      // node must still confirm v1 before any restore/release write is accepted.
+      await capabilities(principal,check);check();
+      // Capability reads yield: reload the journal and recheck in-flight work
+      // so concurrent restore/status calls cannot reuse an earlier snapshot.
+      row=access(principal,load(args.operationId));
+      const step=row.steps.find(s=>s.machine===args.machine&&s.result?.complete);
       if(!step||row.steps.filter(s=>s.machine===args.machine&&s.result?.complete).length!==1)fail('此服务器的完整保留副本未确认或名称不唯一，请先核对删除任务。');
       if(running.has(row.id)||restoring.has(row.id)||queries.has(row.id))fail('原任务还在运行或查询，请稍后核对。');
       if(step.restored)return {operationId:row.id,machine:step.machine,state:'RESTORED',version:row.version};
-      const check=checkFactory(principal,assertCurrent,policy,inventory,row);check();
       if(step.dispatched.includes('restore')){
         await observe(row,principal,check);return {operationId:row.id,machine:step.machine,state:step.restored?'RESTORED':'UNKNOWN',version:row.version};
       }
