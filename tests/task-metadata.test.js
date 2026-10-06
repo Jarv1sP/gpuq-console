@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {displayName,taskDescription,taskIdentity} from '../dist/task-metadata.js';
+import {displayName,taskDescription,taskIdentity,nativeTaskDisplay} from '../dist/task-metadata.js';
 import {normalizeJobSubmission,createSubmittedJob} from '../job-submission.mjs';
 import {visibleGPUQStatus} from '../gpuq-status.mjs';
 import {resourceCards} from '../dist/resources-ui.js';
@@ -48,6 +48,19 @@ test('unknown process ownership, ambiguous IDs, native records and missing sampl
   const ambiguous=taskCatalog(h,{jobs:[a,{...a,id:'duplicate'}],users:[owner]},false);assert.equal(ambiguous.byNode.get('Jsame').source,'native');assert.equal(ambiguous.byNode.get('Jsame').submitter,null);
   const waiting=job({id:'not-dispatched',nodeJobId:undefined,state:'PENDING'});h.gpuq.jobs=[];
   const catalog=taskCatalog(h,{jobs:[waiting],users:[owner]},false);assert.equal(catalog.tasks[0].name,args.name);assert.equal(catalog.tasks[0].state,'PENDING');assert.equal(catalog.byNode.size,0);
+});
+test('exact native labels are displayed while raw names, task identity and member privacy remain unchanged',()=>{
+  const a=job(),h=host(),before=structuredClone(a),display={name:'DUM-E｜中文训练',description:'保留当前训练和结果',submitter:{name:'张三',username:'alice'}};
+  h.gpuq.jobs[0].display_metadata=display;
+  const view=taskCatalog(h,{jobs:[a],users:[owner]},false).tasks[0];
+  assert.equal(view.name,display.name);assert.equal(view.description,display.description);assert.equal(view.id,a.id);assert.equal(view.source,'portal');assert.deepEqual(a,before);
+  assert.equal(h.gpuq.jobs[0].name,'portal-wrapper');
+  for(const broken of [{...display,submitter:{...display.submitter,username:'bob'}},{...display,argv:['SECRET']},{...display,name:'\u009b2J'},{...display,description:null},{...display,name:'😀'.repeat(65)}]){
+    h.gpuq.jobs[0].display_metadata=broken;assert.equal(taskCatalog(h,{jobs:[a],users:[owner]},false).tasks[0].name,a.name);
+  }
+  h.gpuq.jobs[0].display_metadata=display;
+  assert.equal(taskCatalog(h,{jobs:[a,{...a,id:'ambiguous'}],users:[owner]},false).tasks[0].submitter,null);
+  assert.equal(nativeTaskDisplay({...display,secret:'private'},'alice'),null);
 });
 test('overview renders human metadata as escaped text and never grants task-control buttons',()=>{
   const submitted=job({name:'<img src=x onerror=alert(1)>',description:'第一行\n<script>private description</script>'});

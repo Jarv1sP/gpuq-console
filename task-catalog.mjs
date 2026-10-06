@@ -1,4 +1,4 @@
-import {taskIdentity} from './dist/task-metadata.js';
+import {taskIdentity,nativeTaskDisplay} from './dist/task-metadata.js';
 
 const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
 const string=(value,max=120)=>typeof value==='string'?value.replace(/[\p{Cc}\p{Cf}]/gu,'').slice(0,max):null;
@@ -8,7 +8,7 @@ function nativeTask(job,admin){return {id:string(job.id),nodeJobId:string(job.id
   name:admin?string(job.name)||'GPUQ 任务':'GPUQ 任务（未关联平台）',description:'',submitter:admin?{name:string(job.owner)||'未知用户',username:string(job.owner)}:null,
   state:string(job.state,32)||'UNKNOWN',priority:priority(job.priority),yieldPolicy:string(job.yield_policy,16),
   assignedGpuIndices:indices(job.assigned_gpu_indices),gpuCount:Number.isInteger(job.gpu_count)?job.gpu_count:null,updatedAt:job.updated_at??null};}
-function portalTask(job,users,native=null){return {id:job.id,nodeJobId:job.nodeJobId||null,source:'portal',...taskIdentity(job,users),
+function portalTask(job,users,native=null){const identity=taskIdentity(job,users),display=native&&native.id===job.nodeJobId?nativeTaskDisplay(native.display_metadata,identity.submitter.username):null;return {id:job.id,nodeJobId:job.nodeJobId||null,source:'portal',...(display||identity),
   state:string(job.state,32)||'UNKNOWN',schedulerState:string(native?.state,32),priority:priority(native?.priority??job.schedulerPriority),
   yieldPolicy:string(native?.yield_policy??job.yieldPolicy??job.schedulerPolicy?.yield_policy,16),
   assignedGpuIndices:indices(native?.assigned_gpu_indices??job.assignedIndices),gpuCount:job.cards,updatedAt:native?.updated_at??job.schedulerCheckedAt??job.checkedAt??job.createdAt??null};}

@@ -63,6 +63,26 @@ class NodeDisplay(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'another'):self.node.process('sync',{'job':self.job,'metadata':meta})
         self.assertEqual(self.commands,[]);self.assertEqual(self.store.list_jobs(),[])
         self.assertFalse((self.node.ROOT/'jobs'/(self.job['id']+'.json')).exists())
+    def test_identity_fenced_native_edit_is_preserved_by_reconciliation(self):
+        original=deepcopy(self.job)
+        submitted=self.node.process('sync',{'job':self.job,'metadata':self.meta})
+        native=self.store.get_job(submitted['nodeJobId'])
+        renamed={**self.meta,'name':'DUM-E｜中文训练','description':'更准确的训练说明'}
+        before=deepcopy(native)
+        before_digest=self.store._get_connection().execute('SELECT submit_digest FROM jobs WHERE id=?',(native['id'],)).fetchone()[0]
+        self.store.set_job_display(native['id'],renamed,expected_submit_key=self.job['id'],
+                                   expected_owner=self.node.gpuq_owner(self.job),expected_name=native['name'])
+        commands=len(self.commands)
+        observed=self.node.process('sync',{'job':self.job,'metadata':self.meta})
+        self.assertEqual(observed['displaySync'],{'state':'PRESERVED','metadata':renamed})
+        self.assertFalse(any(c[0]=='set-display' for c in self.commands[commands:]))
+        after=self.store.get_job(native['id'])
+        for field in ('name','owner','submit_key','argv','env','state','updated_at'):
+            self.assertEqual(after[field],before[field],field)
+        self.assertEqual(after['display_metadata'],renamed)
+        self.assertEqual(self.store._get_connection().execute('SELECT submit_digest FROM jobs WHERE id=?',(native['id'],)).fetchone()[0],before_digest)
+        self.assertEqual(self.job,original)
+        self.assertEqual(sum(c[0]=='submit' for c in self.commands),1)
     def test_display_rpc_failure_keeps_real_training_state_and_cancel_functional(self):
         real=self.node.gpu
         def fail(*args):

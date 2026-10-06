@@ -10,11 +10,11 @@ import {MACHINES} from '../dist/model.js';
 const password='Task-Metadata-Fixture-Only-2026!';
 async function fixture(t){
   const dir=await mkdtemp(join(tmpdir(),'gpuq-task-metadata-api-')),database=join(dir,'db'),bootstrap=join(dir,'bootstrap'),status=join(dir,'status');
-  await writeFile(bootstrap,JSON.stringify({username:'admin',password}));const calls=[];let nativeJobs=[];
+  await writeFile(bootstrap,JSON.stringify({username:'admin',password}));const calls=[];let nativeJobs=[],preservedDisplay=null;
   const snapshot=()=>writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,
     gpus:Array.from({length:m.cards},(_,index)=>({index,uuid:'GPU-'+index,memoryTotalMiB:32768,processesAvailable:true,processes:nativeJobs.length&&index===0?[{pid:42,owner:'private-os-owner',name:'python',memoryUsedMiB:100,scheduling:{jobId:nativeJobs[0].id,priority:2}}]:[]})),gpuq:{connected:true,jobs:m.id==='gpu-1'?nativeJobs:[]}}))}));
   await snapshot();
-  const bridge=async(machine,operation,args)=>{calls.push({machine,operation,args:structuredClone(args)});if(operation==='logs')return {text:'private logs'};return {nodeJobId:'J'+args.job.id,state:'RUNNING',assignedIndices:[0]};};
+  const bridge=async(machine,operation,args)=>{calls.push({machine,operation,args:structuredClone(args)});if(operation==='logs')return {text:'private logs'};return {nodeJobId:'J'+args.job.id,state:'RUNNING',assignedIndices:[0],...(preservedDisplay&&operation==='sync'?{displaySync:{state:'PRESERVED',metadata:preservedDisplay}}:{})};};
   let s=await PortalService.open(database,bootstrap,status,bridge);clearInterval(s.executionTimer);clearInterval(s.maintenanceTimer);
   let a=await s.login('admin',password);
   const owner=(await s.invoke(a.token,'users.create',{username:'alice',name:'张三',password})).result,observer=(await s.invoke(a.token,'users.create',{username:'bob',name:'李四',password})).result;
@@ -24,7 +24,7 @@ async function fixture(t){
   t.after(async()=>{await settle();s.close();await rm(dir,{recursive:true,force:true});});
   const submit=(extra={})=>s.invoke(member.token,'jobs.submit',{machine:'gpu-1',cards:1,name:'正常训练名',description:'数据集 A 的消融\n预计两小时',key:randomUUID(),argv:['python','train.py','--token','SECRET-FIXTURE-ARGV'],...extra}).then(r=>r.result);
   return {get s(){return s},get a(){return a},get member(){return member},get other(){return other},owner,observer,calls,submit,settle,snapshot,
-    publish:async job=>{nativeJobs=[{id:job.nodeJobId,name:'portal-wrapper',owner:'internal-native-owner',state:'RUNNING',priority:2,gpu_count:1,assigned_gpu_indices:[0]}];await snapshot();await s.refreshGPUQ();},
+    publish:async (job,display=null)=>{preservedDisplay=display;nativeJobs=[{id:job.nodeJobId,name:'portal-wrapper',owner:'internal-native-owner',state:'RUNNING',priority:2,gpu_count:1,assigned_gpu_indices:[0],...(display?{display_metadata:display}:{})}];await snapshot();await s.refreshGPUQ();},
     reopen:async()=>{await settle();s.close();s=await PortalService.open(database,undefined,status,bridge);clearInterval(s.executionTimer);clearInterval(s.maintenanceTimer);a=await s.login('admin',password);member=await s.login('alice',password);other=await s.login('bob',password);}
   };
 }
@@ -39,6 +39,26 @@ test('same-machine members see submitter name/description but no command, logs o
   assert.equal((await f.s.invoke(f.member.token,'jobs.logs',{jobId:job.id})).result.text,'private logs');
   await f.s.invoke(f.a.token,'policy.save',{userId:f.observer.id,policyVersion:1,total:0,limits:{}});
   assert.equal((await f.s.invoke(f.other.token,'state')).state.gpuq.hosts.length,0);
+});
+test('real Portal state and queue observe native labels and preserve them across reconciliation and restart',async t=>{
+  const f=await fixture(t),submitted=await f.submit();await f.settle();
+  const job=f.s.store.jobs.find(j=>j.id===submitted.id),identity=structuredClone({spec:job.spec,digest:job.digest,key:job.key,name:job.name});
+  const display={name:'DUM-E｜训练续训',description:'节点身份围栏已核对',submitter:{name:'张三',username:'alice'}};
+  await f.publish(job,display);
+  let state=(await f.s.invoke(f.member.token,'state')).state;
+  assert.equal(state.gpuq.hosts[0].tasks.find(j=>j.id===submitted.id).name,display.name);
+  await f.s.reconcile();await f.settle();
+  state=(await f.s.invoke(f.member.token,'state')).state;
+  assert.equal(state.jobs.find(j=>j.id===submitted.id).name,display.name);
+  assert.equal(state.jobs.find(j=>j.id===submitted.id).description,display.description);
+  assert.deepEqual({spec:job.spec,digest:job.digest,key:job.key,name:job.name},identity);
+  await f.reopen();state=(await f.s.invoke(f.member.token,'state')).state;
+  assert.equal(state.jobs.find(j=>j.id===submitted.id).name,display.name);
+  assert.equal(f.s.store.jobs.find(j=>j.id===submitted.id).name,identity.name);
+  assert.ok(!JSON.stringify(state.jobs).includes('nativeTaskDisplay'));
+  const outsider=(await f.s.invoke(f.other.token,'state')).state;
+  assert.equal(outsider.jobs.length,0);assert.equal(outsider.gpuq.hosts[0].tasks.find(j=>j.id===submitted.id).name,display.name);
+  assert.ok(!JSON.stringify(outsider).includes('SECRET-FIXTURE-ARGV'));
 });
 test('profile edits persist without changing login/role/grants, and new/old job identities remain distinguishable',async t=>{
   const f=await fixture(t),initial=f.s.store.get(f.owner.id);const original=await f.submit();await f.settle();

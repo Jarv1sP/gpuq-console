@@ -1,6 +1,6 @@
 import net from 'node:net';
 import {MACHINES} from './dist/model.js';
-import {taskIdentity} from './dist/task-metadata.js';
+import {taskIdentity,nativeTaskDisplay} from './dist/task-metadata.js';
 import {nativeJobRequest} from './native-task-metadata.mjs';
 import {applyJobFeedback,jobTiming} from './dist/job-progress.js';
 import {maintainTaskNotes} from './community.mjs';
@@ -25,8 +25,13 @@ const RANKS={idle:0,normal:2,high:4,P0:0,P1:1,P2:2,P3:3,P4:4};
 function rankValue(value){if(typeof value!=='string'||!Object.hasOwn(RANKS,value))fail('排队优先级必须为 P0–P4（或 idle/normal/high）。');return value;}
 function priorityValue(value){if(!PRIORITIES.has(value))fail('优先级必须为 idle、normal 或 high。');return value;}
 export function schedulerResult(job,result){
-  if(result.displaySync&&['SYNCED','UNAVAILABLE','LEGACY'].includes(result.displaySync.state))
+  if(result.displaySync&&['SYNCED','PRESERVED','UNAVAILABLE','LEGACY'].includes(result.displaySync.state))
     job.nativeDisplay={state:result.displaySync.state,...(typeof result.displaySync.error==='string'?{error:result.displaySync.error.slice(0,200)}:{})};
+  if(result.displaySync?.state==='PRESERVED'){
+    const display=nativeTaskDisplay(result.displaySync.metadata,job.spec?.username);
+    if(display)job.nativeTaskDisplay=display;
+  }
+  if(result.displaySync?.state==='SYNCED')delete job.nativeTaskDisplay;
   job.nodeJobId=result.nodeJobId||job.nodeJobId;
   job.state=['PENDING','STARTING','RUNNING','PREEMPTING',...TERMINAL].includes(result.state)?result.state:'UNKNOWN';
   job.assignedIndices=result.assignedIndices||[];job.error=result.error||null;job.checkedAt=new Date().toISOString();
@@ -116,7 +121,7 @@ export function installExecution(service,bridge){
   if(bridge){service.executionTimer=setInterval(()=>service.reconcile().catch(()=>{}),15000);service.executionTimer.unref();}
 }
 export function usage(jobs,userId,machine){return jobs.filter(j=>j.userId===userId&&!TERMINAL.has(j.state)&&j.state!==DATA_PREPARING&&(!machine||j.machine===machine)).reduce((sum,j)=>sum+j.cards,0);}
-export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,...safe}=job;return {...safe,...jobTiming(job),...taskIdentity(job,users),command:spec.argv,
+export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,nativeTaskDisplay:displayCache,...safe}=job;return {...safe,...jobTiming(job),...taskIdentity(job,users),command:spec.argv,
   yieldPolicy:['legacy','never','now','save'].includes(schedulerPolicy?.yield_policy)?schedulerPolicy.yield_policy:null,
   restartPolicy:['never','on-preempt'].includes(schedulerPolicy?.restart_policy)?schedulerPolicy.restart_policy:null,
   dispatchMode:['queue','preempt-now','preempt-save'].includes(schedulerPolicy?.dispatch_mode)?schedulerPolicy.dispatch_mode:null};}
