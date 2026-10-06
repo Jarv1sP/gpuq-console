@@ -108,39 +108,79 @@ export function bridgeClient(socketPath){
 export function installExecution(service,bridge){
   service.bridge=bridge;service.executionEnabled=!!bridge;service.reconciling=false;
   installDatasetReplication(service);
-  service.reconcile=async()=>{
-    if(!bridge||service.reconciling||service.closing)return;
-    service.reconciling=true;
+  let cycle=null;
+  const kind=job=>job.cancelRequested&&!TERMINAL.has(job.state)?'cancel':job.state==='SUBMITTING'&&job.dispatchPending===true?'first':'observe';
+  const eligible=(job,maintained)=>(!TERMINAL.has(job.state)||job.dataPreparationHold&&job.dataPreparationHold.state!=='RELEASED')&&
+    (TERMINAL.has(job.state)||!maintained||job.cancelRequested);
+  const step=async job=>{
+    if(TERMINAL.has(job.state)){try{await releaseDataPreparation(service,job);}catch{}return;}
+    const policyRevision=job.policyRevision||0;
     try{
-      const jobs=service.store.jobs.filter(j=>!TERMINAL.has(j.state)||j.dataPreparationHold&&j.dataPreparationHold.state!=='RELEASED');
-      await Promise.all(MACHINES.map(async m=>{
-        for(const job of jobs.filter(j=>j.machine===m.id)){
-          if(TERMINAL.has(job.state)){
-            try{await releaseDataPreparation(service,job);}catch{}
-            continue;
-          }
-          if(service.maintenanceFor?.(job.machine)&&!job.cancelRequested)continue;
-          const policyRevision=job.policyRevision||0;
-          try{
-            if(job.state===DATA_PREPARING){
-              await advanceDataPreparation(service,job,usage);
-              continue;
-            }
-            const action=job.cancelRequested?'cancel':'sync';
-            const attempt=action==='sync'&&job.state==='SUBMITTING'&&job.dispatchPending===true?await firstDispatch(service,job):{response:service.bridge(job.machine,action,nativeJobRequest(service,job))};
-            if(!attempt)continue;
-            const result=await attempt.response;
-            await service.enqueue(()=>{
-              const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||TERMINAL.has(current.state)||(current.policyRevision||0)!==policyRevision)return;
-              // LOST/unknown remains nonterminal: retain quota until confirmed.
-              persistSchedulerResult(service,current,result);
-              maintainTaskNotes(service);
-            });
-            if(TERMINAL.has(job.state))await releaseDataPreparation(service,job);
-          }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing&&!TERMINAL.has(current.state)&&(current.policyRevision||0)===policyRevision){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
+      if(job.state===DATA_PREPARING){await advanceDataPreparation(service,job,usage);return;}
+      const action=job.cancelRequested?'cancel':'sync';
+      const attempt=action==='sync'&&job.state==='SUBMITTING'&&job.dispatchPending===true?await firstDispatch(service,job):{response:service.bridge(job.machine,action,nativeJobRequest(service,job))};
+      if(!attempt)return;
+      const result=await attempt.response;
+      await service.enqueue(()=>{
+        const current=service.store.jobs.find(j=>j.id===job.id);if(!current||service.closing||TERMINAL.has(current.state)||(current.policyRevision||0)!==policyRevision)return;
+        // LOST/unknown remains nonterminal: retain quota until confirmed.
+        persistSchedulerResult(service,current,result);maintainTaskNotes(service);
+      });
+      if(TERMINAL.has(job.state))await releaseDataPreparation(service,job);
+    }catch(e){await service.enqueue(()=>{const current=service.store.jobs.find(j=>j.id===job.id);if(current&&!service.closing&&!TERMINAL.has(current.state)&&(current.policyRevision||0)===policyRevision){current.error=String(e.message).slice(0,200);current.checkedAt=new Date().toISOString();service.save();}});}
+  };
+  const pump=()=>{
+    const current=cycle;if(!current)return;
+    // Reserve one lane per machine for first dispatch/cancel and one for old
+    // observations. New jobs can enter an active pass; neither a slow other
+    // host nor a backlog of old polls consumes their reserved lane. There is
+    // never more than one operation per job or two per configured machine.
+    try{if(!service.closing&&!current.error)for(const machine of MACHINES){
+      if(current.slots.has(machine.id+':urgent')&&current.slots.has(machine.id+':observe'))continue;
+      // Maintenance may read persistent state. Check once per available host,
+      // not again for every already-seen job in each queue scan.
+      const maintained=service.maintenanceFor?.(machine.id);
+      for(const lane of ['urgent','observe']){
+      const slot=machine.id+':'+lane;if(current.slots.has(slot))continue;
+      const job=service.store.jobs.find(job=>job.machine===machine.id&&!current.active.has(job.id)&&
+        !current.seen.has(job.id+':'+kind(job))&&(lane==='urgent'?kind(job)!=='observe':kind(job)==='observe')&&eligible(job,maintained));
+      if(!job)continue;
+      const operationKind=kind(job);
+      current.seen.add(job.id+':'+operationKind);
+      // A first attempt already observes the job. Do not immediately sync it
+      // again in the background lane, including after a lost first reply.
+      current.seen.add(job.id+':observe');
+      // Preserve the separate preparation/promotion and dispatch turns. A
+      // later kick may admit that newly prepared job even while other hosts
+      // are still busy, but completion alone never collapses the two stages.
+      if(job.state===DATA_PREPARING){current.seen.add(job.id+':first');current.preparations.add(job.id);}
+      current.active.add(job.id);current.slots.add(slot);
+      step(job).catch(error=>{current.error||=error;}).finally(()=>{
+        current.active.delete(job.id);current.slots.delete(slot);pump();
+      });
+    }}}catch(error){current.error||=error;}
+    if(current.active.size)return;
+    cycle=null;service.reconciling=false;
+    try{maintainTaskNotes(service);}catch(error){current.error||=error;}
+    current.error?current.reject(current.error):current.resolve();
+  };
+  service.reconcile=()=>{
+    if(!bridge||service.closing)return Promise.resolve();
+    if(cycle){
+      const promise=cycle.promise;
+      for(const id of cycle.preparations){
+        const job=service.store.jobs.find(job=>job.id===id);
+        if(job?.state==='SUBMITTING'&&job.dispatchPending===true&&!cycle.active.has(id)){
+          cycle.seen.delete(id+':first');cycle.preparations.delete(id);
         }
-      }));
-    }finally{maintainTaskNotes(service);service.reconciling=false;}
+      }
+      pump();return promise;
+    }
+    // Preserve the explicit pause used by callers while no pass is active.
+    if(service.reconciling)return Promise.resolve();
+    const current={active:new Set(),slots:new Set(),seen:new Set(),preparations:new Set(),error:null};
+    current.promise=new Promise((resolve,reject)=>{current.resolve=resolve;current.reject=reject;});
+    cycle=current;service.reconciling=true;pump();return current.promise;
   };
   if(bridge){service.executionTimer=setInterval(()=>service.reconcile().catch(()=>{}),15000);service.executionTimer.unref();}
 }
