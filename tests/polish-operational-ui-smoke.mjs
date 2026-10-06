@@ -83,11 +83,14 @@ const controlSpec={...roomSpec,roots:['#mission-control'],
 };
 const dialogSpec=(selector,scroll)=>({controls,roots:[selector],scrollPanels:selector==='#job-mission'?[selector]:[selector,scroll],scrollGroups:[scroll],
   nativeHelpRows:[selector+' #train-form label:has(.ui-info)'],
+  labelledHelp:[{buttons:selector+' #train-form .ui-info:has(#training-target-note)>summary,'+selector+' #training-candidates-field .ui-info>summary',
+    rows:'.field-caption',labels:':scope>span'}],
   textContainment:selector==='#job-mission'?['.r5-mission-percentage','.r5-mission-time strong','.r5-mission-metrics strong']:[],
   centers:[{parent:selector+' .sheet-header',children:':scope>*',wrap:true},
     {parent:selector+' #train-form .field-caption',children:':scope>span,:scope>.ui-info>summary'}],
   buttonRows:[{parent:selector+' .sheet-footer',children:'button'}],
   sameRowControls:[{parent:selector+' #train-form .train-grid',children:'input,select,button'},
+    {parent:selector+' #train-form .sheet-scroll',children:':scope>label>:is(input,select,textarea)'},
     {parent:selector+' .sheet-footer',children:'button'}],
   siblingGap:[{parent:selector+' .sheet-scroll',children:':scope>.train-grid>label,:scope>label,:scope>.priority-choice>label'},
     fieldGaps(selector+' label:has(>.field-caption)')],
@@ -117,6 +120,13 @@ const scenes=[
     ...['normal','error','unknown'].map(state=>({role,room:'fullscreen',state,name:role+'-fullscreen-'+state,spec:dialogSpec('#job-mission','.r5-mission-body')})),
     {role,room:'submit',state:'normal',name:role+'-submit',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
     {role,room:'submit',state:'normal',wrappedLabels:true,name:role+'-submit-wrapped-labels',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
+    {role,room:'submit',state:'normal',automatic:true,name:role+'-submit-automatic',
+      spec:{...dialogSpec('#work-submit','#work-submit .sheet-scroll'),focusedTargets:['#train-form [name=training-candidates]']}},
+    {role,room:'submit',state:'normal',automatic:true,wrappedTargets:true,name:role+'-submit-automatic-wrapped',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
+    {role,room:'submit',state:'normal',automatic:true,help:'#work-submit .ui-info:has(#training-target-note)>summary',name:role+'-submit-target-help',
+      spec:{...dialogSpec('#work-submit','#work-submit .sheet-scroll'),viewportPanels:['.ui-info[open] .ui-info-content'],textContainment:['.ui-info[open] .ui-info-content']}},
+    {role,room:'submit',state:'normal',automatic:true,help:'#training-candidates-field .ui-info>summary',name:role+'-submit-candidates-help',
+      spec:{...dialogSpec('#work-submit','#work-submit .sheet-scroll'),viewportPanels:['.ui-info[open] .ui-info-content'],textContainment:['.ui-info[open] .ui-info-content']}},
     ...['scheduling','elastic','placement'].map(setting=>({role,room:'submit',state:'normal',setting,name:role+'-submit-'+setting,spec:settingsSpec})),
     {role,room:'control',state:'normal',natural:true,name:role+'-control-training-form',spec:controlSpec},
     {role,room:'fullscreen',state:'normal',notes:true,name:role+'-fullscreen-notes',spec:notesSpec},
@@ -369,6 +379,22 @@ try{
         }
         if(scene.room==='submit'){
           await page.locator('#open-submit').click();await page.locator('#work-submit').waitFor({state:'visible'});
+          if(scene.automatic){
+            await page.locator('[name=training-target]').selectOption('auto');
+            await page.locator('[name=training-candidates]').fill(inventory.map(row=>row.id).join(', '));
+            assert.equal(await page.locator('[name=workspace-machine]').inputValue(),machine,'automatic training preserves the development server');
+            assert.equal(await page.locator('[name=workspace-project]').inputValue(),project,'automatic training preserves the development project');
+            assert.equal(await page.locator('[name=release]').inputValue(),release,'automatic training preserves the fixed release');
+            assert.equal(await page.locator('#training-candidates-field').evaluate(node=>node.hidden),false,'automatic selection exposes the candidate field');
+            await page.locator('[name=training-candidates]').evaluate(node=>node.blur());
+            await page.mouse.move(1,1);
+          }
+          if(scene.wrappedTargets)for(const [name,value] of [['training-target','本次训练自动选择服务器的位置'],['training-candidates','本次训练可以使用的候选服务器完整名称（可选）']]){
+            await page.locator('[name='+name+']').evaluate((control,value)=>{
+              const label=control.closest('label'),text=label.querySelector('.field-caption>span')||[...label.childNodes].find(node=>node.nodeType===Node.TEXT_NODE);
+              text.textContent=value;
+            },value);
+          }
           if(scene.wrappedLabels)await page.locator('#train-form .train-grid:has([name=cards])').evaluate(grid=>{
             for(const [name,value] of [['memory','每张显卡的最低可用显存容量下限（GiB）'],['name','本次训练任务的完整名称']]){
               const label=grid.querySelector('[name='+name+']').closest('label'),text=label.querySelector('.field-caption>span')||[...label.childNodes].find(node=>node.nodeType===Node.TEXT_NODE);
@@ -381,6 +407,10 @@ try{
             for(const name of ['task-description','priority','release','command','datasets']){
               const label=page.locator('#train-form label').filter({has:page.locator('[name='+name+']')});
               assert.equal(await label.locator(':scope>.field-caption .ui-info>summary').count(),1,'labelled '+name+' explanation is retained');
+            }
+            for(const name of ['training-target','training-candidates']){
+              const label=page.locator('#train-form label').filter({has:page.locator('[name='+name+']')});
+              assert.equal(await label.locator(':scope>.field-caption .ui-info>summary').count(),1,'automatic-selection '+name+' explanation stays on the label row');
             }
           }
         }
@@ -400,9 +430,27 @@ try{
           const measurement=await inspectOperationalGeometry(page,scene.spec);caseRows.push({physicalWidth:width,physicalHeight:width<760?844:900,zoom,...measurement});
           if(!before){
             assert.deepEqual(await page.locator('#control-training-preview[hidden],#work-submit [hidden],#work-submit-panel [hidden],#project-create-form [hidden],#workspace-files [hidden],.job-notes [hidden]').evaluateAll(nodes=>nodes.filter(node=>getComputedStyle(node).display!=='none').map(node=>node.id||node.tagName)),[],'field layout must respect existing hidden conditions');
+            // An explanation overlays later fields. Check its own full target
+            // while open, then dismiss/reopen it through the normal trigger
+            // around the unchanged probe for all other explanation targets.
+            const expandedHelp=scene.room==='submit'&&scene.help?page.locator(scene.help):null;
+            if(expandedHelp){
+              const activeTarget=await expandedHelp.evaluate(node=>{
+                const box=node.getBoundingClientRect();
+                return {open:node.parentElement.open,height:box.height,expected:innerWidth<760?44:32,
+                  hit:[box.top+2,box.top+box.height/2,box.bottom-2].every(y=>node.contains(document.elementFromPoint(box.left+box.width/2,y)))};
+              });
+              assert.ok(activeTarget.open&&activeTarget.hit&&Math.abs(activeTarget.height-activeTarget.expected)<=1,'the expanded explanation retains its full clickable trigger: '+JSON.stringify(activeTarget));
+              await expandedHelp.click();
+              assert.equal(await expandedHelp.evaluate(node=>node.parentElement.open),false,'dismiss the explanation before interacting with fields beneath it');
+            }
             const activeFieldRoot=scene.room==='submit'?(scene.setting?'#work-submit-panel':'#work-submit'):scene.room==='project'?'#project-create-form':null;
             const hitAreas=activeFieldRoot?await fieldHelpTargets(page,activeFieldRoot):[];
             assert.ok(hitAreas.every(row=>Math.abs(row.height-row.expected)<=1&&row.hit),'the full disclosure target remains clickable beyond its compact caption line: '+JSON.stringify({scene:scene.name,width,zoom,hitAreas}));
+            if(expandedHelp){
+              await expandedHelp.click();
+              assert.equal(await expandedHelp.evaluate(node=>node.parentElement.open),true,'restore the expanded explanation for the screenshot and dense scan');
+            }
           }
           if(process.env.POLISH_DOM_REPORT){
             const geometry=await page.evaluate(selector=>{

@@ -614,6 +614,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 共享测量器另有四项默认关闭的关系规则：`sameRowControls:[{parent,children,wrap?}]`要求同一视觉行控件上沿差不超过1px；`unbrokenValues:[selector]`检查数字与单位的真实文本行，允许同一基线上的不同字号；`tokenGap:[{parent,left,right,minimum?}]`检查相邻文本的水平间距，默认至少6px；`siblingGap:[{parent,children,textBounds?,together?,wrap?}]`要求连续同级字段块的间距一致，或按文本边界比较标签到控件的间距，差值不超过1px。现有规格不启用时，既有规则与结果保持不变。工作台、算力、总控的[polish-operational-ui-smoke.mjs](../tests/polish-operational-ui-smoke.mjs)按各组件关系启用，包含长标签、间距不足、数值折行的FAIL/PASS回归；[operational-geometry.mjs](../tests/operational-geometry.mjs)还检查真实滚动裁切、焦点目标和完整错误内容。
 
+提交抽屉的「训练位置」和「候选服务器」沿用字段标签行、24px字段块间距和12px标签间距。两种角色覆盖当前服务器、自动选机、长标签及两处说明展开，启用`sameRowControls`、`siblingGap`和标签右侧ⓘ检查；选机说明仍更新原`training-target-note`节点，开发服务器、项目与固定训练版本保持原选机契约。
+
 截图用真实1440/390/320视口，包含成员/管理员与正常/空/加载/失败/未确认/维护；鼠标移开，清除无关焦点，焦点行为另测。展示完整控件与上下文，长卡用真实滚动和较高原生视口，不裁操作、不拼接、不改图。长ID通过独立本地清单验证，公共 [machines.js](../dist/machines.js)保持示例；真实资产、用户数据与生产图不提交。
 
 同步维护令牌作用域、组件引用与测试清单。文档改动至少完整npm test、文档测试（如有）、git diff --check，并核对每个变量、选择器与链接存在；PR写确切提交和实际通过范围。功能改动仍按 [CONTRIBUTING.md](../CONTRIBUTING.md)跑全量Python、浏览器与构建，并经维护者批准合并和部署。
