@@ -71,10 +71,6 @@
 .sb .full-delete-step-name .server-id{max-width:100%;font-size:13px}
 .sb .full-delete-step-name>span:last-child,.sb .full-delete-step-state{color:var(--ink-2)}
 .sb .full-delete-step-state{white-space:nowrap}
-.sb .full-delete-record{margin:20px 0;font:13px/1.6 var(--sans)}
-.sb .full-delete-record summary{display:flex;align-items:center;min-height:44px;cursor:pointer;color:var(--ink-2)}
-.sb .full-delete-record code{display:block;margin:8px 0;font:12px/1.7 var(--mono);overflow-wrap:anywhere}
-.sb .full-delete-record>span{display:block;color:var(--ink-2)}
 .sb .dataset-full-delete-dialog .modal-actions{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:12px;justify-content:flex-end;margin:24px 0 0;padding:0;border:0}
 @container full-delete (max-width:22rem){
  .sb .dataset-full-delete-dialog .modal-head{gap:8px}

@@ -81,6 +81,7 @@ try{
     assert(heights.every(control=>Math.abs(control.height-48)<=1),JSON.stringify({name,role,width,heights}));
     const names=await page.evaluate(()=>[...document.querySelectorAll('.full-delete-step-name .server-id')].map(element=>({name:element.textContent,title:element.title,rect:element.getBoundingClientRect().toJSON()})));
     for(const value of names){assert.equal(value.name,value.title);assert(value.rect.width>0&&value.rect.height>0);}
+    assert.equal(await page.locator('.full-delete-record').count(),0);assert.equal(await page.getByText('完整编号',{exact:true}).count(),0);
     assert.equal(await page.locator('[role=progressbar]').count(),0);assert(!await page.locator('#dataset-full-delete-dialog').innerText().then(text=>text.includes('%')));
     await page.screenshot({path:join(shots,name+'-'+role+'-'+width+'.png')});
    }
