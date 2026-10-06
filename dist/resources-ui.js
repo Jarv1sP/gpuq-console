@@ -128,10 +128,10 @@ export function compactResourceId(id,fits){
 
 export function fitResourceNames(root){
   function fit(label,compact=false){
-    const button=label.parentElement,full=label.title;
+    const button=label.parentElement,full=label.title,heading=button?.closest('.resource-identity');
     if(!button?.clientWidth)return true;
     label.textContent=full;label.classList.remove('resource-id-wrap');
-    button.style.removeProperty('font-size');
+    button.style.removeProperty('font-size');heading?.style.removeProperty('font-size');
     const arrow=button.querySelector('.resource-swap-arrow');
     const available=button.clientWidth-(arrow?arrow.getBoundingClientRect().width+parseFloat(getComputedStyle(arrow).marginLeft):0)-1;
     const range=label.ownerDocument.createRange();
@@ -141,6 +141,8 @@ export function fitResourceNames(root){
     size=Math.max(20,Math.min(size,Math.floor(size*available/Math.max(1,width()))));
     button.style.fontSize=size+'px';
     while(size>20&&width()>available)button.style.fontSize=--size+'px';
+    // Keep the heading's line box in sync with the visible fitted text.
+    if(heading)heading.style.fontSize=size+'px';
     if(width()<=available)return true;
     if(compact){
       label.textContent=compactResourceId(full,value=>{label.textContent=value;return width()<=available;});
