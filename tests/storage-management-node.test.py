@@ -265,6 +265,8 @@ class StorageBridgeAndRuntime(unittest.TestCase):
         tree = ast.parse((ROOT / 'deploy' / 'execution-worker.py').read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Handler')
         connections = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'SSHConnections')
+        transport_error = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'NodeTransportError')
+        classify = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'ssh_transport_failure')
         constants = [n for n in tree.body if isinstance(n, ast.Assign)
                      and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
                      and n.targets[0].id == 'INTERNAL_STORAGE']
@@ -281,7 +283,7 @@ class StorageBridgeAndRuntime(unittest.TestCase):
                          hashlib=hashlib, ipaddress=ipaddress, os=os, re=re, stat=stat, threading=threading, time=time,
                          RUNTIME=Path('/fixture-only'),
                          BASE=Path('/fixture-only'), HOSTS={'gpu-1': {'user': 'fixture', 'address': '127.0.0.1'}})
-        exec(compile(ast.Module(body=constants + [connections, cls], type_ignores=[]), '<worker boundary>', 'exec'), namespace)
+        exec(compile(ast.Module(body=constants + [transport_error, classify, connections, cls], type_ignores=[]), '<worker boundary>', 'exec'), namespace)
         namespace['SSH_CONNECTIONS'] = namespace['SSHConnections']()
         handler = object.__new__(namespace['Handler'])
         handler.request = Mock()

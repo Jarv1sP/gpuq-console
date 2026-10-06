@@ -27,6 +27,7 @@ export class PortalService extends DemoService{
     service.terminalLanes=new Map();service.terminalPending=0;
     service.cloudPending=0;service.cloudUsers=new Map();service.cloudKeys=new Set();
     service.datasetReadPending=0;
+    service.remoteReadPending=0;service.remoteReadMachines=new Map();
     service.db=new DatabaseSync(path);await chmod(path,0o600);
     service.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS portal_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, subject TEXT, outcome TEXT NOT NULL);');
     service.db.exec("CREATE TABLE IF NOT EXISTS invites (role TEXT PRIMARY KEY CHECK(role IN ('admin','member')), digest TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, max_uses INTEGER, created_at TEXT NOT NULL);");
@@ -66,7 +67,14 @@ export class PortalService extends DemoService{
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
   restore(data){if(data.schema!==1)throw Error('Unsupported database version.');this.store.users=data.users;this.store.jobs=data.jobs;this.store.sequence=data.sequence;this.credentials=new Map(data.credentials.map(([name,r])=>[name,{salt:new Uint8Array(Buffer.from(r.salt,'base64')),hash:new Uint8Array(Buffer.from(r.hash,'base64')),iterations:r.iterations}]));}
   save(){this.db.prepare('INSERT INTO portal_state(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(JSON.stringify(this.export()));}
-  issueSession(principal){return this.loginSessions?this.loginSessions.issue(principal):super.issueSession(principal);}
+  issueSession(principal){
+    const admission=this.loginAdmissions?.get(principal.username);
+    // Password hashing awaits; a reset or revoke may have completed meanwhile.
+    admission?.check();
+    const token=this.loginSessions?this.loginSessions.issue(principal):super.issueSession(principal);
+    if(admission)admission.issued=token;
+    return token;
+  }
   principal(token){return this.loginSessions?this.loginSessions.principal(token):super.principal(token);}
   revokeSession(token){if(this.loginSessions)this.loginSessions.revoke(token);else super.revokeSession(token);}
   invalidate(username){if(this.loginSessions)this.loginSessions.invalidate(username);else super.invalidate(username);}
@@ -74,6 +82,44 @@ export class PortalService extends DemoService{
   enqueue(fn){
     if(this.pending>=24){const e=Error('服务忙，请稍后重试。');e.status=429;return Promise.reject(e);}
     this.pending++;const run=this.tail.then(fn);this.tail=run.catch(()=>{}).finally(()=>this.pending--);return run;
+  }
+  async remoteRead(token,operation,args){
+    // These two operations are observations only. A slow upload/SSH write
+    // must not hold their response behind the account/scheduler mutation tail.
+    if(!['host.status','files.upload.status'].includes(operation))throw Error('Invalid remote read operation');
+    if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+    const request=structuredClone(args);
+    const principal={...this.terminalPrincipal(token,request)};
+    if(operation==='host.status'&&principal.role!=='admin')throw Object.assign(Error('宿主机命令仅管理员可用。'),{status:403});
+    const check=()=>{
+      const current=this.terminalPrincipal(token,request);
+      if(current.userId!==principal.userId||current.username!==principal.username||current.role!==principal.role)
+        throw Object.assign(Error('登录身份已改变。'),{status:403});
+      this.assertMaintenanceAllowed?.(operation,request,current);
+    };
+    this.remoteReadMachines??=new Map();this.remoteReadPending??=0;
+    const count=this.remoteReadMachines.get(request.machine)||0;
+    if(this.remoteReadPending>=4||count>=2)throw Object.assign(Error('节点状态查询繁忙，请稍后重试。'),{status:429});
+    this.remoteReadPending++;this.remoteReadMachines.set(request.machine,count+1);
+    const work=Promise.resolve().then(()=>{check();return executionCall(this,principal,operation,request);});
+    const release=()=>{
+      this.remoteReadPending--;
+      const remaining=this.remoteReadMachines.get(request.machine)-1;
+      if(remaining)this.remoteReadMachines.set(request.machine,remaining);else this.remoteReadMachines.delete(request.machine);
+    };
+    // Keep admission charged until the actual I/O settles, even if the caller
+    // times out. An unresponsive dependency cannot create unlimited background
+    // reads. bridgeClient separately closes its owned socket at a hard deadline.
+    work.then(release,release);
+    let timer;
+    try{
+      const result=await Promise.race([work,new Promise((_,reject)=>{
+        timer=setTimeout(()=>reject(Object.assign(Error('节点状态查询超时；原操作未被重派，请稍后查询。'),{status:504,code:'NODE_READ_TIMEOUT'})),35000);
+      })]);
+      check();
+      return {result,principal:{...principal}};
+    }catch(error){check();throw error;
+    }finally{clearTimeout(timer);}
   }
   terminalPrincipal(token,args){
     if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
@@ -164,11 +210,39 @@ export class PortalService extends DemoService{
     try{let result;try{result=await executionCall(this,admitted,operation,args);}finally{check();}return {result,principal:check()};}
     finally{this.datasetReadPending--;}
   }
-  login(username,password){return this.enqueue(async()=>{
-    let issued;
-    try{await this.refreshGPUQ();const result=await super.login(username,password);issued=result.token;this.audit(username,'login',null,'ok');return result;}
-    catch(e){if(issued)this.revokeSession(issued);this.audit(username,'login',null,'denied');throw e;}
-  });}
+  async login(username,password){
+    // Authentication must not wait behind remote writes or scheduler dispatch.
+    // Bound expensive password work independently; same-account attempts remain
+    // serial so the inherited failure counter cannot lose concurrent updates.
+    username=String(username??'').trim();
+    if(username.length>24||typeof password!=='string'||password.length>128)
+      throw Error('用户名或密码错误。');
+    if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+    this.loginPending??=0;this.loginAdmissions??=new Map();
+    if(this.loginPending>=2||this.loginAdmissions.has(username))
+      throw Object.assign(Error('登录验证繁忙，请稍后重试。'),{status:429});
+    this.loginPending++;
+    const record=this.credentials.get(username);
+    const admitted=this.store.users.find(user=>user.username===username);
+    const identity=admitted?{id:admitted.id,role:admitted.role||'member'}:null;
+    const check=()=>{
+      if(this.closing)throw Object.assign(Error('服务正在关闭。'),{status:503});
+      const current=this.store.users.find(user=>user.username===username);
+      if(this.credentials.get(username)!==record||
+         (identity&&(!current?.enabled||current.id!==identity.id||(current.role||'member')!==identity.role)))
+        throw Object.assign(Error('账号权限或密码已改变，请重新登录。'),{status:403});
+    };
+    const admission={check,issued:null};this.loginAdmissions.set(username,admission);
+    try{
+      await this.refreshGPUQ();check();
+      const result=await super.login(username,password);
+      check();this.audit(username,'login',null,'ok');return result;
+    }catch(e){
+      if(admission.issued&&!this.closing)this.revokeSession(admission.issued);
+      if(!this.closing)this.audit(username,'login',null,'denied');
+      throw e;
+    }finally{this.loginPending--;this.loginAdmissions.delete(username);}
+  }
   invitations(){return ['member'].map(role=>{
     const row=this.db.prepare('SELECT role,enabled,uses,max_uses,created_at FROM invites WHERE role=?').get(role);
     return row?{role,enabled:!!row.enabled,uses:row.uses,maxUses:row.max_uses,createdAt:row.created_at,available:!!row.enabled&&(row.max_uses===null||row.uses<row.max_uses)}:{role,enabled:false,uses:0,maxUses:role==='admin'?1:null,createdAt:null,available:false};
@@ -217,6 +291,7 @@ export class PortalService extends DemoService{
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   invoke(token,operation,args={}){
+    if(operation==='host.status'||operation==='files.upload.status')return this.remoteRead(token,operation,args);
     if(operation==='projects.replicate'||operation==='projects.replication.status'||operation==='projects.replication.cancel'||operation==='projects.replication.retry'){
       const principal=this.principal(token);
       return projectReplicationCall(this,principal,operation,args,()=>this.principal(token)).then(result=>{
@@ -306,5 +381,5 @@ export class PortalService extends DemoService{
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
-  close(){this.closing=true;this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);clearInterval(this.projectCopyTimer);this.db.close();}
+  close(){this.closing=true;for(const admission of this.loginAdmissions?.values()||[])if(admission.issued)this.revokeSession(admission.issued);this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);clearInterval(this.projectCopyTimer);this.db.close();}
 }
