@@ -19,6 +19,7 @@ export async function terminalContractSmoke(){
     {project:'container-lab',environmentMode:'oci',state:'DRAFT',releases:[]}
   ];
   const sessions=new Map(),calls=[],requests=[],errors=[],outside=[],tokens=[];
+  let heldExchange=null;
   let server,service,browser,dropInput=false,rateId=null,rateRemaining=0,closeUnconfirmed=false;
   const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));
   const port=reservation.address().port,origin='http://127.0.0.1:'+port;await new Promise(resolve=>reservation.close(resolve));
@@ -57,10 +58,18 @@ export async function terminalContractSmoke(){
         const value=writer(node,args);value.pending++;value.maxPending=Math.max(value.maxPending,value.pending);
         try{
           await new Promise(resolve=>setTimeout(resolve,15));
+          // Hold a validated poll so revocation occurs during its async wait.
+          const held=heldExchange?.id===value.id&&!heldExchange.release?heldExchange:null;
+          if(held){held.inputEmpty=!args.input;await new Promise(resolve=>{held.release=resolve;});}
           const input=Buffer.from(args.input||'','base64').toString();if(input){value.inputs.push(input);value.output+='accepted: '+input+'\r\n';}
-          if(value.leaseExpiresAt-Date.now()<15000)value.leaseExpiresAt=Date.now()+30000;
+          const now=Date.now();
+          // A delayed mock response must not revive an expired/revoked writer
+          // or extend a lease that now belongs to another attachment.
+          if(sessions.get(args.id)===value&&!value.revoked&&!value.detached&&
+              value.clientId===args.clientId&&value.writerToken===args.writerToken&&
+              value.leaseExpiresAt>now&&value.leaseExpiresAt-now<15000)value.leaseExpiresAt=now+30000;
           const data=Buffer.from(value.output);return {offset:data.length,data:data.subarray(args.offset||0).toString('base64'),exited:value.ended===true,exitCode:value.ended?value.exitCode:null};
-        }finally{value.pending--;}
+        }finally{value.pending--;if(heldExchange?.id===value.id&&heldExchange.release)heldExchange.completed=true;}
       }
       if(operation==='terminal.detach'){const value=writer(node,args);value.detached=true;value.leaseExpiresAt=0;return {detached:true,id:value.id};}
       if(operation==='terminal.close'){const value=writer(node,args);if(closeUnconfirmed){closeUnconfirmed=false;return {};}sessions.delete(value.id);return {closed:true};}
@@ -130,7 +139,19 @@ export async function terminalContractSmoke(){
     const retries=requests.slice(requestStart).filter(row=>row.page===memberPage&&row.body.operation==='terminal.exchange');
     assert.ok(retries.length>=2);assert.ok(retries.every(row=>!row.body.args.input));assert.ok(retries[0].at-rejectedAt>=900);assert.ok(retries[1].at-retries[0].at>=1900);
     assert.ok(!sessions.get(first).inputs.some(value=>value.includes('rate-rejected')||value.includes('blocked-backoff')));
-    sessions.get(first).revoked=true;sessions.get(first).leaseExpiresAt=Date.now()-1;await type(memberPage,'expired');await memberPage.locator('#terminal-connection-note').filter({hasText:'已被接管'}).waitFor();
+    heldExchange={id:first,release:null,completed:false};
+    await waitFor(()=>heldExchange.release,'validated exchange paused before revocation');
+    const expiredLease=Date.now()-1;
+    sessions.get(first).revoked=true;sessions.get(first).leaseExpiresAt=expiredLease;
+    heldExchange.release();await waitFor(()=>heldExchange.completed,'old exchange released after revocation');
+    const race={pausedReadOnly:heldExchange.inputEmpty,revoked:sessions.get(first).revoked,
+      leaseStillExpired:sessions.get(first).leaseExpiresAt===expiredLease};
+    await writeFile(join(shots,'expiry-race.json'),JSON.stringify(race,null,2));
+    if(!race.leaseStillExpired)await memberPage.screenshot({path:join(shots,'expiry-race-failure.png')});
+    assert.equal(race.pausedReadOnly,true,'controlled race pauses an already validated read-only exchange');
+    assert.equal(race.leaseStillExpired,true,'in-flight exchange cannot renew a revoked or expired writer');
+    heldExchange=null;
+    await type(memberPage,'expired');await memberPage.locator('#terminal-connection-note').filter({hasText:'已被接管'}).waitFor();
     const expiredCount=exchangeRequests(memberPage).length;await type(memberPage,'must-not-send');await memberPage.waitForTimeout(200);assert.equal(exchangeRequests(memberPage).length,expiredCount);await layouts(memberPage,'member-expired');
     await memberPage.locator('#terminal-retry').click();await memberPage.waitForFunction(()=>document.querySelector('#terminal-interrupt')?.disabled===false);
     sessions.get(first).ended=true;sessions.get(first).exitCode=17;await memberPage.locator('#terminal-connection-note').filter({hasText:'终端已结束（退出码 17）'}).waitFor();
@@ -159,6 +180,7 @@ export async function terminalContractSmoke(){
     assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
     console.log(JSON.stringify({status:'passed',suite:'terminal-contract',shots,checks:['independent PTYs','explicit takeover cost','unknown input stops until reconnect','429 read-only 1s/2s backoff','expired writer fenced','exit code with explicit new action','container project without hostAdmin','duplicate container rejected','closed:true confirmation','cross-account and zero-grant rejection','writerToken memory only','member/admin 1440/390']}));
   }finally{
+    heldExchange?.release?.();
     await browser?.close();if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}
     await rm(folder,{recursive:true,force:true});
   }
