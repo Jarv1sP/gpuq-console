@@ -10,6 +10,7 @@ The base fingerprint covers interpreter + package metadata, NOT all base bits;
 this is a same-machine venv release, not a portable/hermetic OCI image.
 """
 import contextlib
+import functools
 import fcntl
 import hashlib
 import importlib.util
@@ -21,6 +22,7 @@ import re
 import shutil
 import stat
 import time
+import threading
 import uuid
 
 
@@ -31,6 +33,15 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _ROOT_GUARD = None
 DEFAULT_WORKSPACE_RESERVE = 10 * 1024**3
+
+
+def project_lifetime(function):
+    """Drain readers/writers before a project directory can be retired."""
+    @functools.wraps(function)
+    def wrapped(self, user, slug, *args, **kwargs):
+        with self.lifetime(user, slug):
+            return function(self, user, slug, *args, **kwargs)
+    return wrapped
 
 
 def check_platform_root(root):
@@ -112,8 +123,11 @@ def require_workspace_space(root, reserve_bytes, needed=0, *, target_fd=None):
         if target_fd is not None and os.fstat(target_fd).st_dev != identity.st_dev:
             fail('unsafe_path', 'Workspace write target is on another filesystem')
         space = os.fstatvfs(fd if target_fd is None else target_fd)
-        if space.f_bavail * space.f_frsize < reserve_bytes + needed:
-            fail('insufficient_space', 'Workspace storage would violate its free-space reserve')
+        available = space.f_bavail * space.f_frsize
+        if available < reserve_bytes + needed:
+            fail('insufficient_space',
+                 f'Personal workspace free-space reserve reached: availableBytes={available}, '
+                 f'reserveBytes={reserve_bytes}, requestedBytes={needed}.')
 
 
 def stamp(info):
@@ -183,6 +197,7 @@ class ProjectStore:
         self.reserve_bytes = reserve_bytes
         self.max_entries, self.max_bytes = max_entries, max_bytes
         self.max_projects, self.max_releases = max_projects, max_releases
+        self._lifetime_state = threading.local()
         if any(type(number) is not int or number < 0 for number in (reserve_bytes, max_entries, max_bytes, max_projects, max_releases)):
             fail('invalid_input', 'Project limits must be nonnegative integers')
         with directory(self.root) as fd:
@@ -229,6 +244,9 @@ class ProjectStore:
     def _project(self, user, slug):
         self._check_root()
         owner = self._identity(user, slug)
+        lifecycle = self.lifecycle(user, slug)
+        if lifecycle['state'] in ('RETIRING', 'RETIRED'):
+            fail('project_retired', 'Project retirement is fenced; inspect the original operation, never reuse this project ID')
         path = self.path / owner / slug
         try:
             private_dir(self.path / owner)
@@ -241,6 +259,53 @@ class ProjectStore:
         if meta.get('environmentMode', 'shared') not in ('shared', 'isolated', 'oci'):
             fail('unsafe_path', 'Invalid project environment mode')
         return path, meta
+
+    def lifecycle_folder(self, user, slug):
+        self._check_root()
+        owner = self._identity(user, slug)
+        parent = private_dir(self.path / owner, create=True)
+        return private_dir(parent / '.lifecycle', create=True)
+
+    def lifecycle(self, user, slug):
+        owner = self._identity(user, slug)
+        try:
+            value = read_json(self.lifecycle_folder(user, slug) / (slug + '.json'))
+        except FileNotFoundError:
+            return {'schema': 1, 'owner': owner, 'project': slug, 'state': 'ACTIVE', 'revision': 0}
+        if (value.get('schema') != 1 or value.get('owner') != owner or value.get('project') != slug
+                or value.get('state') not in ('ACTIVE', 'ARCHIVED', 'RETIRING', 'RETIRED')
+                or type(value.get('revision')) is not int or value['revision'] < 1):
+            fail('unsafe_path', 'Invalid project lifecycle receipt; access remains fenced')
+        return value
+
+    def admit(self, user, slug):
+        if self.lifecycle(user, slug)['state'] != 'ACTIVE':
+            fail('project_archived', 'Project is archived or retired; unarchive it before new work')
+
+    @contextlib.contextmanager
+    def lifetime(self, user, slug, *, exclusive=False):
+        folder = self.lifecycle_folder(user, slug)
+        key = str(folder / (slug + '.lock'))
+        held = getattr(self._lifetime_state, 'held', {})
+        if key in held:
+            if exclusive and not held[key]:
+                fail('project_busy', 'Cannot upgrade an active project reader to retirement')
+            yield
+            return
+        fd = os.open(key, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                fail('unsafe_path', 'Unsafe project lifecycle lock')
+            try:
+                fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+            except BlockingIOError:
+                fail('project_busy', 'Project has an active reader or lifecycle operation; retry after it finishes')
+            self._lifetime_state.held = {**held, key: exclusive}
+            yield
+        finally:
+            self._lifetime_state.held = held
+            os.close(fd)
 
     def environment_mode(self, user, slug):
         return self._project(user, slug)[1].get('environmentMode', 'shared')
@@ -262,15 +327,18 @@ class ProjectStore:
 
     @contextlib.contextmanager
     def locked(self, user, slug, blocking=False):
-        path, _ = self._project(user, slug)
-        with self._file_lock(path / '.lock', blocking=blocking):
-            yield
+        with self.lifetime(user, slug):
+            path, _ = self._project(user, slug)
+            with self._file_lock(path / '.lock', blocking=blocking):
+                yield
 
     def fail_if_publishing(self, user, slug):
         with self.locked(user, slug):
             pass
 
+    @project_lifetime
     def create(self, user, slug, environment_mode=None):
+        self.admit(user, slug)
         if environment_mode is not None and environment_mode not in ('shared', 'isolated', 'oci'):
             fail('invalid_input', 'Environment mode must be shared, isolated or oci')
         self._check_root()
@@ -315,6 +383,7 @@ class ProjectStore:
         private_dir(path)
         return [self.status(user, name) for name in sorted(os.listdir(path)) if SLUG.fullmatch(name)]
 
+    @project_lifetime
     def status(self, user, slug):
         path, project = self._project(user, slug)
         releases = []
@@ -344,6 +413,7 @@ class ProjectStore:
                 'environmentMode': project.get('environmentMode', 'shared'),
                 'offlineAssetsPath': '/workspace/offline'}
 
+    @project_lifetime
     def dev_paths(self, user, slug):
         path, _ = self._project(user, slug)
         self._quota(user, path.parent)
@@ -700,7 +770,9 @@ class ProjectStore:
         if values != ['false']:
             fail('environment_conflict', 'Isolated project requires include-system-site-packages = false; do not reuse a shared venv')
 
+    @project_lifetime
     def publish(self, user, slug, progress=None):
+        self.admit(user, slug)
         path, project = self._project(user, slug)
         self._quota(user, path.parent)
         environment_mode = project.get('environmentMode', 'shared')
@@ -863,6 +935,7 @@ class ProjectStore:
             fail('unsafe_path', 'Release is incomplete or metadata is inconsistent')
         return meta
 
+    @project_lifetime
     def release(self, user, slug, version):
         path, project = self._project(user, slug)
         if not isinstance(version, str) or not VERSION.fullmatch(version):
@@ -885,6 +958,7 @@ class ProjectStore:
                     fail('unsafe_path', 'Published project trees must remain service-owned and read-only')
         return {'code': target / 'code', 'env': target / 'env', 'meta': meta}
 
+    @project_lifetime
     def run_paths(self, user, slug, version, jobid):
         if not isinstance(jobid, str) or not JOB_ID.fullmatch(jobid):
             fail('invalid_input', 'Invalid project job ID')
@@ -905,6 +979,7 @@ class ProjectStore:
             result = {name: private_dir(run / name, create=True) for name in ('home', 'output')}
         return result
 
+    @project_lifetime
     def existing_run_paths(self, user, slug, version, jobid):
         """Read an existing run even after the shared base has been upgraded.
 

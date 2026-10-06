@@ -710,8 +710,9 @@ class DirectTests(unittest.TestCase):
                 client.request('POST', f'/v1/uploads/{upload}/chunk?path=large.bin&offset=0', content,
                                {'Authorization': 'Bearer '+grant['ticket'], 'Content-Type': 'application/octet-stream'})
                 reply = client.getresponse()
-                self.assertEqual(reply.status, 200)
-                self.assertEqual(json.loads(reply.read())['result']['offset'], len(content))
+                payload = reply.read()
+                self.assertEqual(reply.status, 200, payload.decode())
+                self.assertEqual(json.loads(payload)['result']['offset'], len(content))
                 return user, upload
             try:
                 with patch.object(self.u, 'chunk_bytes', side_effect=concurrently_authenticated), \
@@ -728,6 +729,54 @@ class DirectTests(unittest.TestCase):
                     self.assertEqual(json.loads(reply.read())['result']['file']['offset'], len(content))
             finally:
                 for client in clients: client.close()
+
+    def test_authenticated_chunk_waits_past_short_control_budget_without_replay(self):
+        result, _, _ = self.seal(files={'x': b'complete'})
+        upload = result['uploadId']; grant = self.ticket(upload)
+        acquired, release = threading.Event(), threading.Event()
+        def hold_cache():
+            with self.cache._locked():
+                acquired.set()
+                release.wait(5)
+        holder = threading.Thread(target=hold_cache)
+        holder.start(); self.assertTrue(acquired.wait(2))
+        timer = threading.Timer(2.2, release.set); timer.start()
+        original = self.u.chunk_bytes
+        try:
+            with patch.object(self.u, 'chunk_bytes', wraps=original) as write:
+                output = self.raw(grant, upload, 'chunk', offset=0, path='x', data=b'complete')
+                self.assertEqual(output['offset'], 8)
+                self.assertEqual(write.call_count, 1)
+            self.assertEqual(self.call('status', uploadId=upload, path='x')['file']['offset'], 8)
+        finally:
+            release.set(); timer.cancel(); holder.join(3)
+            self.assertFalse(holder.is_alive())
+
+    def test_status_and_invalid_grants_cannot_request_long_writer_wait(self):
+        result, _, _ = self.seal(files={'x': b'x'})
+        upload = result['uploadId']; grant = self.ticket(upload)
+        with patch.object(self.u.d, 'wait_for_locks', side_effect=AssertionError('No writer budget')) as wait:
+            self.assertEqual(self.raw(grant, upload, 'status')['state'], 'UPLOADING')
+            with self.assertRaises(DIRECT.GrantError):
+                self.raw({**grant, 'ticket': 'invalid'}, upload, 'chunk', offset=0, path='x', data=b'x')
+            wait.assert_not_called()
+
+    def test_writer_lock_budget_is_finite_and_does_not_leak_to_next_request(self):
+        result, _, _ = self.seal(files={'x': b'x'})
+        upload = result['uploadId']; grant = self.ticket(upload)
+        original = self.u.d.wait_for_locks
+        # Exercise expiry with a short trusted test budget, without changing
+        # production bounds or bypassing the actual flock/write protocol.
+        def short_budget(**kwargs):
+            self.assertEqual(kwargs, {'timeout': 8.0, 'total': 8.0})
+            return original(timeout=0.04, total=0.04)
+        with self.cache._locked(), patch.object(self.u.d, 'wait_for_locks', side_effect=short_budget):
+            start = time.monotonic()
+            with self.assertRaises(fixtures.D.CacheBusy):
+                self.raw(grant, upload, 'chunk', offset=0, path='x', data=b'x')
+            self.assertLess(time.monotonic()-start, 1)
+        self.assertEqual(self.call('status', uploadId=upload, path='x')['file']['offset'], 0)
+        self.assertEqual(self.raw(grant, upload, 'chunk', offset=0, path='x', data=b'x')['offset'], 1)
 
 
 class AdmissionUnitTests(unittest.TestCase):

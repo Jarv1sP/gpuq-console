@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import threading
+import functools
 import uuid
 
 CHUNK = 1024**2
@@ -36,6 +37,16 @@ def safe_path(value):
     return value
 
 
+def project_reader(function):
+    @functools.wraps(function)
+    def wrapped(self,user,project,*args,**kwargs):
+        with self.store.lifetime(user,project):
+            need(self.store.lifecycle(user,project)['state'] not in ('RETIRING','RETIRED'),
+                 'Project is retired or its retirement is unconfirmed')
+            return function(self,user,project,*args,**kwargs)
+    return wrapped
+
+
 class PortableProjects:
     def __init__(self, store):
         self.store, self.s = store, load_store()
@@ -51,6 +62,7 @@ class PortableProjects:
         folder = self.s.private_dir(parent/('.portable-'+kind), create=True)
         return self.s.private_dir(folder/project, create=True) if project else folder
 
+    @project_reader
     def export(self, user, project, release, operation=None):
         source = self.store.release(user, project, release)
         meta = source['meta']
@@ -138,6 +150,7 @@ class PortableProjects:
                 path.chmod(0o444 | (path.stat().st_mode & 0o111))
             if Path(current) != root: Path(current).chmod(0o555)
 
+    @project_reader
     def manifest(self, user, project, release):
         folder, cached = self._manifest(user, project, release)
         return folder, cached[1]
@@ -162,6 +175,7 @@ class PortableProjects:
         self._manifests[cache_key] = (stat_now, manifest, self.s.canonical(manifest), {f['path']:f for f in manifest['files']})
         return folder, self._manifests[cache_key]
 
+    @project_reader
     def info(self, user, project, release):
         _, cached = self._manifest(user, project, release)
         manifest, raw = cached[1:3]
@@ -189,6 +203,7 @@ class PortableProjects:
                 finally: os.close(fd)
         return opened()
 
+    @project_reader
     def read(self, user, project, release, action, *, path=None, offset=0):
         folder, cached = self._manifest(user, project, release)
         need(type(offset) is int and offset >= 0, 'Invalid portable read offset')
@@ -206,7 +221,9 @@ class PortableProjects:
             part = os.pread(fd, min(CHUNK,entry['size']-offset), offset)
             return {'data':base64.b64encode(part).decode(),'offset':offset+len(part),'size':entry['size']}
 
+    @project_reader
     def import_bundle(self, user, project, release, folder, manifest):
+        self.store.admit(user,project)
         """Publish only a new immutable release. Existing dev/latest stay intact."""
         total = self.validate_manifest(manifest, user, project, release)
         parent = self.folder(user, 'imports')

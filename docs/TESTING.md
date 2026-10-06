@@ -32,6 +32,8 @@ docker build -f deploy/Dockerfile -t gpuq-console:test .
 
 `admin-quota-ui-smoke.mjs` 单独验证管理员请求超过物理清单总数时仍免个人累计额度，工作台、预检、总控与账号页口径一致，单请求卡数仍按物理容量且成员额度不变；只读合成忙碌节点，不派发 GPU 作业。首次派发的当前角色、停用／授权变更、持久化失败、丢回执和慢桥队列由 `admin-quota-dispatch.test.js` 的独立 SQLite 夹具覆盖；旧无标记或已尝试任务不得因此重派或释放。
 
+`execution-fair-reconcile.test.js` 使用独立 SQLite 和手动挂起的执行桥回包，不使用真实节点。验证同机／跨机旧查询仍未返回时，后来提交的任务已按原身份首次派发；每机最多两个在途、每任务一个、旧观察与新任务均可推进。取消不与本任务 sync 并发，UNKNOWN 保留额度；轮中新增、授权改变、丢回执、准备完成、旧 policyRevision 回包和关闭均保持原保护。失败断言先解除夹具的全部等待，避免测试自己留下后台请求。真实短作业并行、HAMi 内存隔离与取消隔离仍须另做实机验收，不能用这组离线结果代替。
+
 数据集回归另覆盖固定版本、身份/机器授权、准备不预留显卡、只选择同机全部 READY 的副本、失败重试与断点继续、租约清理的保守边界、挂载缺失拒绝写系统盘、旧节点环境/管理员终端兼容升级。数据页浏览器测试使用假的执行桥，不触发真实训练；验证准备、失败、重试、READY 后填入训练，以及移动端和在线手册入口。
 
 项目回归覆盖手选服务器、拒绝新 `auto`、按机记忆项目、跨用户/项目拒绝、未 READY 不预留显卡、固定版本幂等、旧 job spec 不变、终端项目上下文、上传 SHA256/原子替换/中断重传/文件变更、秘密目录默认跳过，以及独立输出归属。发布安全还检查未知终端停止状态保留指针、拒绝发布或覆盖旧终端，不能因服务管理器失联而放开写入。代码+venv 发布与 Slurm 后端迁移须分别验收。
@@ -45,6 +47,15 @@ docker build -f deploy/Dockerfile -t gpuq-console:test .
 同机项目导入回归包含固定 owner/project/UUID、当前授权和维护门禁、后台源/草稿双围栏、full SHA 与源 CAS、新目录不覆盖、秘密/软硬链接拒绝、终端/旧上传阻塞、未知启动/提交不解围栏、取消只清理私人 staging。`tests/project-local-import.test.py` 的 Mac 离线复制夹具仅测试流程；Linux 专用用例实际调用 renameat2，不能把 Mac fixture fallback 当生产原子能力证明。待上传 list/cancel 另测目标变化、COMMITTING/旧记录拒绝、取消回执后清理中断可恢复及跨账号隔离。Portal/CLI 不重放新建/取消，不读取本机源即可发现和取消旧操作。
 
 `tests/project-import-bridge.test.py` 隔离加载完整的实际执行桥，通过真实 Handler 和固定 SSH 命令构造验证上述五个新操作、旧上传/发布兼容、未知机器/邻近操作零派发、原 owner 与操作编号不变、节点拒绝原样返回及超时不重放。仅替换 inventory 和最终 SSH transport，不连接生产或读取凭据。
+
+## 项目生命周期额外回归
+
+项目生命周期离线夹具覆盖 owner/revision/UUID、名字与分组纯 metadata、跨机部分未知、
+权限在 proof 期间撤销、归档保留旧结果、禁止新工作、未使用 READY 项目退役、任何 run/claim/output
+阻塞、活动/未知终端与导入/上传/发布围栏、目录全量 CAS、私有软退役与永久 ID tombstone、
+丢回执保持 RETIRING 原请求、真实执行桥五操作。Mac 原子流程 fixture 明确只测试流程；
+Linux 专用 test 实际 renameat2 no-replace。生产绝不用测试 fallback，不因 UI 显示 ELIGIBLE
+就认为目录已退役。网页另核对名称、归组、归档过滤、退役计划/原 UUID 查询及 1440/390/320。
 
 ## 上线前的实机验收
 
