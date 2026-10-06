@@ -20,7 +20,7 @@ const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(proces
 const origin='https://offline-polish.test',checkedAt=new Date().toISOString(),version='b'.repeat(64),results=[],errors=[],scrollRegressions=[];
 const modes=(process.env.UI_POLISH_MODES||'normal,empty,loading,error,unconfirmed,maintenance').split(',');
 const rooms=(process.env.UI_POLISH_ROOMS||'community,members,cloud').split(',');
-const browser=await chromium.launch({headless:true});
+const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
 try{
  for(const room of rooms)for(const role of ['member','admin'])for(const mode of modes)for(const zoom of layoutZooms){
   const context=await browser.newContext({viewport:{width:Math.floor(1440/zoom),height:Math.floor(900/zoom)},deviceScaleFactor:zoom,reducedMotion:'reduce'}),page=await context.newPage(),release=[];

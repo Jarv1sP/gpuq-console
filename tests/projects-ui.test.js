@@ -1,10 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {validProject,readyReleases,trainingProject,datasetReferences,uploadProjectFile,taskTable} from '../dist/execution-ui.js';
+import {validProject,readyReleases,trainingProject,trainingTarget,trainingReceiptMatches,datasetReferences,uploadProjectFile,taskTable} from '../dist/execution-ui.js';
 import {terminalContext,terminalLaunchContext} from '../dist/terminal-ui.js';
 
 const release='a'.repeat(64),future='b'.repeat(64);
+test('automatic training selection is distinct from fixed development context and requires OCI',()=>{
+  const machines=[{id:'gpu-1'},{id:'gpu-2'}],project={project:'vision',environmentMode:'oci'};
+  assert.deepEqual(trainingTarget('current','gpu-1',null,'',machines),{machine:'gpu-1'});
+  assert.deepEqual(trainingTarget('auto','gpu-1',project,'gpu-2, gpu-1',machines),{machine:'auto',machineSelection:{mode:'auto',candidates:['gpu-1','gpu-2']}});
+  assert.deepEqual(trainingTarget('auto','gpu-1',project,'',machines),{machine:'auto',machineSelection:{mode:'auto'}});
+  for(const candidate of ['gpu-3','gpu-1,gpu-1'])assert.throws(()=>trainingTarget('auto','gpu-1',project,candidate,machines));
+  for(const value of [null,{environmentMode:'shared'},{environmentMode:'isolated'}])assert.throws(()=>trainingTarget('auto','gpu-1',value,'',machines));
+});
+test('AUTO receipt confirms the selected authorized machine, fixed release and exact candidates',()=>{
+  const machines=[{id:'gpu-1'},{id:'gpu-2'}],args={machine:'auto',key:'k',project:'vision',release,cards:1,machineSelection:{mode:'auto',candidates:['gpu-2','gpu-1']}},
+    job={...args,id:'11111111-2222-4333-8444-555555555555',userId:'u',machine:'gpu-2',machineSelection:{mode:'auto',candidates:['gpu-1','gpu-2']}};
+  assert.equal(trainingReceiptMatches(job,args,'u',machines),true);
+  for(const patch of [{machine:'auto'},{machine:'gpu-3'},{release:future},{cards:2},{project:'other'},{userId:'foreign'},{key:'other'},{machineSelection:{mode:'auto'}},{machineSelection:{mode:'auto',candidates:{}}}])assert.equal(trainingReceiptMatches({...job,...patch},args,'u',machines),false);
+  assert.equal(trainingReceiptMatches({...job,machine:'gpu-1'},{...args,machine:'gpu-1'},'u',machines),true);
+});
 test('project slug validation is exact and never coerces paths or array values',()=>{
   for(const value of ['vision','a','vision-baseline_2','a'.repeat(48)])assert.equal(validProject(value),true);
   for(const value of ['',null,undefined,['vision'],{},'../vision','1vision','Vision',' vision','vision/next','a'.repeat(49)])assert.equal(validProject(value),false);

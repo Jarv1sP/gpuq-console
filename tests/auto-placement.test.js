@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {normalizeJobSubmission} from '../job-submission.mjs';
-import {selectMachine} from '../machine-selection.mjs';
+import {selectMachine as selectMachineWithUsage} from '../machine-selection.mjs';
 import {executionCall,priorityCapable,usage} from '../execution.mjs';
 import {advanceDataPreparation,DATA_PREPARING} from '../dataset-preparation.mjs';
 import {MACHINES} from '../dist/model.js';
@@ -12,6 +12,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
 const ids=MACHINES.map(m=>m.id),release='a'.repeat(64),image='sha256:'+'b'.repeat(64);
+const selectMachine=(...args)=>selectMachineWithUsage(...args,usage);
 const base=()=>({machine:'auto',project:'vision',release,cards:1,argv:['python','train.py'],key:randomUUID()});
 function fixture(){
   const user={id:'u',username:'alice',role:'member',enabled:true,total:8,limits:Object.fromEntries(ids.map(id=>[id,8])),policyVersion:1};
@@ -52,6 +53,44 @@ test('local READY project wins; selection performs no prepare or GPU writes',asy
   const result=await selectMachine(f.service,f.user,normalized(),priorityCapable);
   assert.equal(result.machine,ids[2]);assert.equal(result.projectPreparation.from,ids[2]);assert.equal(result.projectPreparation.state,'READY');
   assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
+});
+
+test('AUTO prefers a genuinely free pool over a busy local project, without dispatching or copying',async()=>{
+  const f=fixture();f.service.gpuq.hosts[0].gpuq.jobs=[{id:'Jbusy',state:'RUNNING',assigned_gpu_indices:[0]}];
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0,1];
+  const result=await selectMachine(f.service,f.user,normalized(),priorityCapable);
+  assert.equal(result.machine,ids[1]);assert.equal(result.projectPreparation.from,ids[0]);assert.equal(result.projectPreparation.state,'WAITING');
+  assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
+  // Reported free indices cannot manufacture a nonexistent/low-VRAM GPU.
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[99,99];
+  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[0]);
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0];f.service.gpuq.hosts[1].gpus[0].memoryTotalMiB=8192;
+  assert.equal((await selectMachine(f.service,f.user,normalized({minVramGiB:24}),priorityCapable)).machine,ids[0]);
+});
+
+test('free ranking respects requested cardinality, pinned indices and available personal quota',async()=>{
+  const f=fixture();f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0];
+  assert.equal((await selectMachine(f.service,f.user,normalized({cards:2}),priorityCapable)).machine,ids[0]);
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0,1];
+  assert.equal((await selectMachine(f.service,f.user,normalized({cards:2}),priorityCapable)).machine,ids[1]);
+  f.user.limits[ids[1]]=2;f.service.store.jobs.push({userId:f.user.id,machine:ids[1],state:'RUNNING',cards:2});
+  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[0]);
+  f.service.store.jobs=[];for(const host of f.service.gpuq.hosts)host.gpuq.capabilities=['console-placement-v1'];
+  assert.equal((await selectMachine(f.service,f.user,normalized({placement:{gpuIndices:[2]}}),priorityCapable)).machine,ids[0]);
+});
+
+test('a free but heavily queued local node does not defeat another free unqueued node',async()=>{
+  const f=fixture();for(const host of f.service.gpuq.hosts.slice(0,2))host.gpuq.schedulableIndices=[0,1];
+  f.service.gpuq.hosts[0].gpuq.jobs=Array.from({length:31},(_,i)=>({id:'J'+i,state:'PENDING'}));
+  assert.equal((await selectMachine(f.service,f.user,normalized(),priorityCapable)).machine,ids[1]);
+});
+
+test('unobserved preparing targets reduce advisory free capacity; recorded targets never drift',async()=>{
+  const f=fixture();for(const h of f.service.gpuq.hosts.slice(0,2))h.gpuq.schedulableIndices=[0];
+  const first=await executionCall(f.service,principal(f),'jobs.submit',base());assert.equal(first.machine,ids[0]);
+  const second=await executionCall(f.service,principal(f),'jobs.submit',base());assert.equal(second.machine,ids[1]);
+  assert.equal(f.service.store.jobs.length,2);assert.equal(usage(f.service.store.jobs,f.user.id),0);
+  assert.equal(f.calls.length,0);assert.equal(first.machine,f.service.store.jobs[0].machine);
 });
 
 test('authorized source can feed restricted candidates; foreign, maintained, low-VRAM, offline and wrong-arch targets excluded',async()=>{
@@ -137,6 +176,12 @@ test('project preparation progress remains no-GPU and promotes exact release onc
   f.service.prepareProject=async(owner,machine,ref)=>({...ref,machine,state:'READY',operationId:'copy-1'});
   await advanceDataPreparation(f.service,job,usage);assert.equal(job.state,'SUBMITTING');assert.equal(job.machine,ids[1]);assert.equal(job.spec.release,release);assert.equal(usage([job],f.user.id),1);
   assert.ok(!Object.hasOwn(job.spec,'machineSelection'));assert.ok(!Object.hasOwn(job.spec,'projectPreparation'));
+});
+
+test('AUTO never promotes onto a node which becomes unhealthy after copying',async()=>{
+  const f=fixture();await executionCall(f.service,principal(f),'jobs.submit',base());const job=f.service.store.jobs[0];
+  f.service.gpuq.hosts.find(h=>h.id===job.machine).gpuq.health='degraded';
+  await advanceDataPreparation(f.service,job,usage);assert.equal(job.state,DATA_PREPARING);assert.match(job.queueReason,/服务器恢复/);assert.equal(usage([job],f.user.id),0);
 });
 
 test('cancellation, source revocation, maintenance and immutable-source changes prevent promotion',async()=>{
