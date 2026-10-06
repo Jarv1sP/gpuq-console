@@ -34,7 +34,7 @@ try {
     }
     if (url.pathname === '/') return route.fulfill({contentType: 'text/html', body: `<!doctype html>
       <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-      <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/fonts.css"><link rel="stylesheet" href="/starbase.css"><link rel="stylesheet" href="/dataset-flow.css"><link rel="stylesheet" href="/dataset-warehouse.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/copy-help.css"><link rel="stylesheet" href="/datasets.css"></head>
+      <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><link rel="stylesheet" href="/fonts.css"><link rel="stylesheet" href="/starbase.css"><link rel="stylesheet" href="/copy-help.css"><link rel="stylesheet" href="/dataset-flow.css"><link rel="stylesheet" href="/dataset-warehouse.css"></head>
       <body class="sb" data-room="datasets"><main id="main-content"><div class="page-heading"><div><h1 id="page-title">数据集</h1></div><div class="heading-actions"></div></div>
       <section id="page-datasets"></section><button data-nav="work" hidden>工作台</button>
       <details hidden><form id="train-form"><select name="machine"><option>gpu-1</option><option>gpu-2</option></select>
