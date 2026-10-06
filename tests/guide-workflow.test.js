@@ -18,16 +18,21 @@ test('guide separates optional CLI installation and code upload from dataset pub
 });
 
 test('guide CLI examples use registered options and optional transfer rollout is explicit',()=>{
-  let parsed=0,metadata=0,transfers=0;
+  let parsed=0,metadata=0,transfers=0;const taskLabels=[];
   for(const block of blocks)for(const line of block.trim().split('\n')){
     if(!line.startsWith('gpuctl '))continue;
     const argv=words(line).slice(1);
     if(['profile','queue'].includes(argv[0])||argv.includes('--description'))metadata++;
     if(argv[0]==='transfer')transfers++;
+    if(argv[0]==='task-label')taskLabels.push(argv);
     const result=parseCLIOptions(argv);assert.ok(result.positionals.length,line);parsed++;
     if(argv[0]==='run')assert.ok(result.training.length,'run needs executable argv after --: '+line);
   }
-  assert.ok(parsed>=25);assert.equal(metadata,4);assert.ok(transfers>=6);
+  assert.ok(parsed>=27);assert.equal(metadata,5);assert.ok(transfers>=6);
+  assert.deepEqual(taskLabels,[['task-label','get','MACHINE_ID','NODE_JOB_ID','--json'],
+    ['task-label','set','MACHINE_ID','NODE_JOB_ID','--revision','HASH','--name','中文实验名','--description','本次训练说明']]);
+  assert.match(source,/多人同时修改时，过期版本会被拒绝/);
+  assert.match(source,/写入超时先查询同一编号，不自动重发/);
   assert.match(source,/姓名与描述（需任务信息新版）/);assert.match(source,/不要把指南更新当作功能已经上线/);
   assert.match(source,/管理员启用后的可选能力/);assert.match(source,/不会因更新客户端自动开放/);
 });
