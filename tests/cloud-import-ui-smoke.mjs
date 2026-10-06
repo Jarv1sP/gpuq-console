@@ -124,3 +124,4 @@ await import('./cloud-files-ui-smoke.mjs');
 // Share capability contracts reuse this existing CI entrypoint.
 await import('./cloud-import-capability-ui-smoke.mjs');
 await import('./dataset-remove-ui-smoke.mjs');
+await import('./dataset-full-delete-ui-smoke.mjs');

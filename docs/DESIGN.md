@@ -325,7 +325,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 
 `.publication-unknown` 与 `.room-ghost` 是JS实际附加的DOM状态/快照钩子，没有独立CSS声明；视觉由状态字形、动画层与JS定位控制，不能假定每个状态class都有一块CSS。
 
-版本删除的后端契约见 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 和 [DATASETS.md](DATASETS.md)。节点能力未确认时不可启用成员删除、彻底删除或隔离恢复；管理员按机器删除保留旧请求和入口；旧节点由 PR-M2 的持久互斥守卫先证明另有完整副本，新节点启用节点保护。成员权限必须来自版本级个人来源证明。成员与彻底删除组件由后续前端 PR 接入，不能从本 PR 的 API 推断它们已经上线。状态展示区分当前隔离、实际恢复、到期清理与结果未确认；历史 `RETIRED` 不能画成数据已删除。 门户重启后未完成任务显示“等待继续（门户已重启）”，管理员可继续或取消；明确节点拒绝显示 BLOCKED 和原因。恢复源代表恢复同一任务全部位置，PURGED 位置只显示名称已释放。显式重新上传属于新登记代次，旧删除任务不能重放。
+版本删除的后端契约见 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 和 [DATASETS.md](DATASETS.md)。节点能力未确认时不可启用成员删除、彻底删除或隔离恢复；管理员按机器删除保留旧请求和入口；旧节点由 PR-M2 的持久互斥守卫先证明另有完整副本，新节点启用节点保护。成员权限必须来自版本级个人来源证明。彻底删除组件提供独立挂载接口，数据集房间与后台负责入口和当前账号目录，不能仅从后端 API 推断入口已上线。状态展示区分当前隔离、实际恢复、到期清理与结果未确认；历史 `RETIRED` 不能画成数据已删除。门户重启后未完成任务显示“等待继续（门户已重启）”，管理员可继续或取消；明确节点拒绝显示 BLOCKED 和原因。恢复源代表恢复同一任务全部位置，PURGED 位置只显示名称已释放。显式重新上传属于新登记代次，旧删除任务不能重放。
 
 ## 5. 房间与文件
 
@@ -336,6 +336,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | 工作台 | [execution-ui.js](../dist/execution-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css)、[workspace.css](../dist/workspace.css) | projects / personal-project / r5 浏览器 |
 | 算力总览 | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css)、[gpu-allocation-ui.js](../dist/gpu-allocation-ui.js) | resources / resource-ids / allocation |
 | 数据集与添加数据 | [datasets-ui.js](../dist/datasets-ui.js)、[dataset-flow.js](../dist/dataset-flow.js)、[dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[datasets.css](../dist/datasets.css)、[dataset-flow.css](../dist/dataset-flow.css) | datasets / dataset-upload / dataset-remove |
+| 彻底删除对话框 | [dataset-full-delete-ui.js](../dist/dataset-full-delete-ui.js)、[dataset-full-delete-state.js](../dist/dataset-full-delete-state.js)、[dataset-remove.css](../dist/dataset-remove.css) | dataset-full-delete-ui 契约与浏览器 |
 | 数据集传输与导入页签 | [transfers-ui.js](../dist/transfers-ui.js)、[data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[cloud-import-ui.js](../dist/cloud-import-ui.js) | transfers-http / data-workspace / cloud-files / cloud-import |
 | 协作区 | [community-ui.js](../dist/community-ui.js)、[community.css](../dist/community.css) | community |
 | 成员授权 | [app.js](../dist/app.js)、[members.css](../dist/members.css) | ui / polish-shell |
@@ -415,6 +416,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | 维护恢复 | maintenance.set以当前revision CAS，逐步完成范围明确列出 | 先保护剩余范围，再解除全平台，再恢复选中范围；冲突停止刷新，不自动写重试；服务器最终准入 |
 | 需处理 | 原对象UNKNOWN/PARTIAL/UNCONFIRMED事实保留 | 时间或已读不能清除；只有已确认失败可按规则确认 |
 | 删除数据集 | 管理员目标/版本或整库范围，服务端实时证明还有完整副本 | 唯一副本或本机未决禁用；409显示原文；SUBMITTING刷新为未确认，查原operationId，不自动再删；放弃查询不清门户持久排除；缺编号只在明确不存在或worker硬上限加1小时之后的新读取仍READY且登记身份不变时解除 |
+
+彻底删除对话框独立于数据集布局：名称确认、48px 危险按钮、实际步骤和恢复期限；不显示推算百分比。目录 `datasetDelete === 1` 才能显示入口；主界面所有人还需当前版本至少一个位置的 `deletionPermissions.memberAllowed === true`，后台管理员不受该字段限制。403 与 BLOCKED 原因保留服务器原文。按账号保存原 UUID key 后才派发，刷新和丢回执只查询原 key；UNKNOWN 仅显示重新查询。有任务编号时直接显示等宽短编号并可复制完整值，没有编号则不渲染。步骤按已证实的原件、缓存或未知角色显示，不以 complete 推断原件。继续、取消和恢复仅出现在后台；普通视图在删除完成后显示「如需恢复，请联系管理员（保留至…）」，只有 BLOCKED、UNKNOWN、WAITING_CONTINUE 提示「需要管理员处理」。恢复核对原操作、服务器、物理名称与版本，再查询原任务。
 
 目录别名用于训练，缓存保留/删除使用location真实本地名称。账号/机器/项目/版本切换停止旧轮询并抛弃旧回复；缓存策略只在展开/明确刷新查询，隐藏房间停止storage RPC。
 
