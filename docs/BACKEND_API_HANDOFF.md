@@ -22,7 +22,7 @@
 
 队列、显卡进程详情和任务列表的 `name/description/submitter` 是显示信息，不是执行身份。节点采集白名单保留有界纯文本 `display_metadata`；平台关联任务仅在同机器、精确原生任务 ID、关联无歧义且登录用户名一致时采用它。管理员查询未关联平台的原生任务时，只有新鲜、已连接的节点和唯一任务 ID 才采用合法标签的 `name/description`，署名仍保留原生任务 owner，不从标签推断平台账号。普通成员对这些任务仍只收到脱敏占用。重复 ID、模糊关联、旧节点或非法标签回退原显示；UNKNOWN 状态保持未知，不新增 argv、路径、日志或操作权限。
 
-已通过原生 GPUQ 身份围栏 `set-display` 修改的同账号标签不会被常规 reconcile 改回提交时名字。节点返回 `displaySync.state:"PRESERVED"` 和允许的标签，门户保存其显示缓存，让任务列表与队列一致；原 `job.name`、不可变 spec、提交 key/digest、优先级、资源和结果路径均不改变。此修复需配套采集和任务显示 helper；它不新增网页/CLI 标签编辑、项目归并或项目退役接口。
+已通过原生 GPUQ 身份围栏 `set-display` 修改的同账号标签不会被常规 reconcile 改回提交时名字。节点返回 `displaySync.state:"PRESERVED"` 和允许的标签，门户保存其显示缓存，让任务列表与队列一致；原 `job.name`、不可变 spec、提交 key/digest、优先级、资源和结果路径均不改变。原回填接口需配套采集和任务显示 helper；它本身不提供显式编辑或项目整理。新版显式编辑另按下方「已有任务显示名与描述编辑」的能力与 CAS 约定启用；项目归组和退役仍是独立接口。
 
 ## 项目展示与生命周期
 
@@ -114,6 +114,16 @@ no-follow CAS、一致原子 no-replace 与永久 slug tombstone。未知、历�
 `completed:true` 必须同时满足：固定节点/账号/submit key/不可变 spec 匹配；最新 attempt 为 `EXITED_SUCCESS`、exit 0、开始结束时间有效；native watch 已确认 GPU 消费者结束及数据租约收尾；较旧失败之后须有可信重试事件及更高 attempt。门户取消标记、缺少身份或事件基线、节点失联和清理中均返回未确认。仅当前获授权的本人/管理员可读，不接受客户端提交证据；不重放训练、占用额度、释放租约或覆盖失败历史。
 
 下游准入应查询此接口，并核对预期 `jobId/project/release/completedAttempt`，不要将旧 `state/jobs` 的 FAILED 直接当作重试结果，也不要仅凭日志里的成功字样放行。该结果是通过认证 HTTPS 查询得到的时点证据，`specSha256` 只是不可变规格摘要，不是离线数字签名；不证明科学结果质量，后续再次重试可能产生更新状态。
+
+## 已有任务的显示信息
+
+`tasks.display.get {machine,nodeJobId}` 读取固定原生任务的名称、描述和显示版本；`tasks.display.set {machine,nodeJobId,name,description,revision}` 仅修改这两项展示文本。`nodeJobId` 是原 `J` 加 12 位十六进制编号，不是门户 UUID。客户端不能传 owner、提交键、submitter、规格、命令或角色。成员仅可操作本人已关联任务；当前启用管理员可管理未关联的原生任务，但显示文本不建立账号归属或操作权限。
+
+成功回包为 `protocol:"task-display-edit-v1",nodeJobId,available,name,description,revision`；`revision` 是读取时的 64 位显示内容哈希，写入必须显式沿用它。节点以固定 native ID、原提交键、owner、内部 rawname 及当前显示哈希在同一 SQLite 事务内比较，过期版本拒绝，不覆盖他人修改。原 `job.name/spec/argv/env`、attempt、租约、优先级、状态及历史记录不改。名称最多 64 字／256 字节，描述最多 2000 字／6 KiB，控制字符拒绝；保留原提交者信息，不开放作者编辑。
+
+节点实际 GPUQ 必须确认 `job-display-cas-v1`，并与匹配的执行器及 helper 一起公布 `console-task-display-edit-v1`。旧节点、失联或过期采集的 get 返回 `available:false`，set 拒绝且零派发，不猜测可编辑。展示在已确认回包后可用最多三分钟、最多 256 项的只读投影补偿采集延迟，新的采集会取代它；这不是授权、运行或空闲证明。原队列对账保留有效的人工标签，不用原名称覆盖它。
+
+丢失写回包应查询同一 `machine/nodeJobId`，人工比较原显示版本和内容；不自动重试 set 或换任务编号。CLI：`gpuctl task-label get SERVER NODE_JOB_ID --json`，再 `gpuctl task-label set SERVER NODE_JOB_ID --revision HASH --name TEXT --description TEXT`；空描述可明确传 `--description ""`。门户、客户端、固定执行桥、节点 helper 和运行中的 GPUQ 必须配套，源码合并不等于节点已经启用，发布该能力需要另行核验原生服务加载版本，不能以 Portal-only 更新冒称完成。
 
 ## 终端：新建与重连分开
 

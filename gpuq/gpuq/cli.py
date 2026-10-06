@@ -1213,12 +1213,15 @@ def cmd_retry(args: argparse.Namespace) -> int:
 
 
 def cmd_set_display(args: argparse.Namespace) -> int:
-    result = get_client(args).call("set_job_display", {
+    payload = {
         "job_id": args.job_id, "expected_submit_key": args.expected_submit_key,
         "expected_owner": args.expected_owner, "expected_name": args.expected_name,
         "metadata": {"name": args.name, "description": args.description,
                      "submitter": {"name": args.submitter_name, "username": args.username}},
-    })
+    }
+    if getattr(args, "expected_display_revision", None) is not None:
+        payload["expected_display_revision"] = args.expected_display_revision
+    result = get_client(args).call("set_job_display", payload)
     print_result(result, args.json)
     return 0
 
@@ -1521,6 +1524,7 @@ def build_parser() -> argparse.ArgumentParser:
     for option in ("expected-submit-key", "expected-owner", "expected-name", "name", "submitter-name", "username"):
         display.add_argument("--"+option, required=True)
     display.add_argument("--description", default="")
+    display.add_argument("--expected-display-revision", help="compare current display SHA256 atomically; read before editing")
     display.set_defaults(func=cmd_set_display)
 
     priority = subparsers.add_parser("set-priority", help="change a pending job's complete priority/yield contract")

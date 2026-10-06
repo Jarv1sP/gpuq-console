@@ -89,7 +89,11 @@ try{
   assert.equal(await page.locator('[name=priority] option').count(),3,'The original administrator priority choices remain available in the backend');
   assert.deepEqual(await page.locator('[name=priority] option').evaluateAll(rows=>rows.map(row=>row.value)),['normal','idle','high']);
   await closeSubmit(page);await page.locator('[data-nav=work]').click();
-  const queueInfo=page.locator('[data-workbench-job="22222222-2222-4222-8222-222222222222"] .ui-info>summary');await queueInfo.click();assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);await queueInfo.click();
+  const queueCard=page.locator('[data-workbench-job="22222222-2222-4222-8222-222222222222"]');
+  const queueInfo=queueCard.locator('.ui-info>summary');await queueInfo.click();
+  await queueCard.locator('.ui-info[open] .ui-info-content').waitFor({state:'visible'});
+  assert.match(await queueCard.locator('.ui-info[open] .ui-info-content').innerText(),/等待空闲 GPU/);
+  assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);await queueInfo.click();
   await page.locator('[data-nav=resources]').click();
   await currentNav('resources');
   if(baseline)assert.equal(await page.locator('[data-gpu-index]').count(),MACHINES.reduce((n,m)=>n+m.cards,0));

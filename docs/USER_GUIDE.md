@@ -478,6 +478,17 @@ gpuctl queue --machine MACHINE_ID
 
 在服务器 SSH 终端用 `gpu q` 查看原生队列。需门户、节点桥和 GPUQ 显示协议都升级后，才显示门户提交的真实姓名与任务名；仍显示 `portal-*` 就请管理员核对配套版本。已有排队／运行任务会按原提交键自动补齐显示，不重提交或重启训练；本机直接提交的原生任务仍使用自己的 name/owner。
 
+### 修改已有任务的名称与描述（需节点安全编辑能力）
+
+本人任务详情中的「显示名称与描述」先读取当前内容，再保存；管理员也可在后台队列中编辑原生任务。只改展示文本，不改训练命令、分配、运行状态或原提交者。命令行先复制 `queue --json` 中的完整 `nodeJobId`：
+
+```sh local
+gpuctl task-label get MACHINE_ID NODE_JOB_ID --json
+gpuctl task-label set MACHINE_ID NODE_JOB_ID --revision HASH --name "中文实验名" --description "本次训练说明"
+```
+
+`HASH` 用第一条命令返回的显示版本；清空描述可传 `--description ""`。多人同时修改时，过期版本会被拒绝，重新读取后再决定。写入超时先查询同一编号，不自动重发；提示节点未确认编辑能力时不能修改，请管理员核对配套版本。
+
 ### Telegram 通知（可选）
 
 先请管理员为你的账号配置 Telegram 收件人，再订阅自己的未结束任务：

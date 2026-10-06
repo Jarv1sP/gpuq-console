@@ -154,6 +154,7 @@ main{max-width:1536px;padding:42px 42px 26px}
 .button.danger{background:#fff;color:#a33d40;border-color:#e5c6c7}
 .button:active:not(:disabled),.execution-workspace .button:active{transform:none}
 .button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #76767d;outline-offset:3px}
+.task-label-editor{margin-block:12px;max-width:100%;overflow-wrap:anywhere}.task-label-editor summary{cursor:pointer;min-height:44px}.task-label-editor form:not([hidden]){display:grid;gap:10px;margin-block:12px}.task-label-editor label{display:grid;gap:6px}.task-label-editor input,.task-label-editor textarea{box-sizing:border-box;min-width:0;width:100%;font:inherit;padding:9px;border:1px solid var(--border);background:var(--surface);color:inherit}.task-label-editor textarea{resize:vertical}.task-label-editor button,.task-label-editor input{height:48px}.task-label-editor p{font-size:13px;line-height:1.6}
 .skip-link{color:#19191b;border-color:#19191b}
 .panel{border-color:var(--line);border-radius:8px;box-shadow:none}
 .field input,.field select,.preview-controls input,.preview-controls select{border-color:#d4d4d2;border-radius:5px;box-shadow:none;color:var(--ink)}

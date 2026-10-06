@@ -34,6 +34,8 @@ ${communityHelp}
 gpuctl login                     Sign in; remembers your account and service
 gpuctl profile --display-name "张三"  Set your public submitter name
 gpuctl queue [--machine SERVER]   Read authorized machines' task names and descriptions
+gpuctl task-label get SERVER NODE_JOB_ID
+gpuctl task-label set SERVER NODE_JOB_ID --revision HASH --name TEXT --description TEXT
 gpuctl use MACHINE_ID             Select an approved server from your inventory
 gpuctl project create my-project Create/select a project (shared base Python packages)
 gpuctl project create clean --env-mode isolated  New venv without base site-packages
@@ -226,7 +228,7 @@ export function parseCLIOptions(argv){
     if(Object.hasOwn(options,key))fail(`Duplicate option: ${item}`);
     if(kind==='flag'){options[key]=true;continue;}
     const value=argv[++i];
-    if(!value||value.startsWith('--'))fail(`Missing value: ${item}`);
+    if(value===undefined||value===''&&key!=='description'||value.startsWith('--'))fail(`Missing value: ${item}`);
     if(kind==='value')options[key]=value;
     else options[kind].push(value);
   }
@@ -391,7 +393,7 @@ async function main(){
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(options.cwd!==undefined&&!['exec','maintenance'].includes(positionals[0])||options.timeout!==undefined&&!['exec','maintenance'].includes(positionals[0])&&!transferCopy||options.detach&&positionals[0]!=='exec'&&!transferCopy)fail('--cwd is for exec/maintenance; timeout also supports transfer copy; detach is for exec or transfer copy');
   if(['reason','script-file','preview-token','parent','ack-unknown'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='maintenance')fail('Maintenance options are only valid for maintenance');
-  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])&&!datasetLabel&&!projectLifecycle||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0])&&!transferList)fail('--revision is for community/maintenance/data label/project lifecycle; cursor/limit also support transfer list');
+  if(options.revision!==undefined&&!['maintenance','community'].includes(positionals[0])&&!datasetLabel&&!projectLifecycle&&!(positionals[0]==='task-label'&&positionals[1]==='set')||['cursor','limit'].some(key=>Object.hasOwn(options,key))&&!['maintenance','community'].includes(positionals[0])&&!transferList)fail('--revision is for community/maintenance/data label/project lifecycle/task-label set; cursor/limit also support transfer list');
   const customScheduling=['rank','yield','restart-policy','checkpointable','mode'].some(k=>Object.hasOwn(options,k));
   if(customScheduling&&(positionals[0]!=='run'||options.priority))fail('Custom scheduling is only valid for run and cannot mix with --priority presets');
   const scheduling=customScheduling?{rank:options.rank||'P2',yieldPolicy:options.yield||'never',restartPolicy:options['restart-policy']||'never',checkpointable:options.checkpointable===true}:null;
@@ -411,7 +413,7 @@ async function main(){
   if(options.release&&!/^[a-f0-9]{64}$/.test(options.release))fail('Use --release FULL_64_CHARACTER_HASH');
   if(options.job&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.job))fail('Use --job JOB_UUID from gpuctl jobs');
   const explicitSession=options['session-file']||process.env.GPUQ_SESSION_FILE||process.env.AMAX_SESSION_FILE;
-  if(options.description!==undefined&&positionals[0]!=='run')fail('--description is only valid for run');
+  if(options.description!==undefined&&positionals[0]!=='run'&&!(positionals[0]==='task-label'&&positionals[1]==='set'))fail('--description is only valid for run or task-label set');
   if(options['display-name']!==undefined&&!['profile','register'].includes(positionals[0])&&!datasetLabel&&!(positionals[0]==='project'&&['label','group'].includes(positionals[1])))fail('--display-name is only valid for profile, register, data label or project label/group');
   if(options['owner-id']!==undefined&&!datasetLabel&&!(positionals[0]==='data'&&positionals[1]==='archive-enroll'))fail('--owner-id is only valid for administrator data label/archive-enroll');
   let sessionFile=explicitSession||join(homedir(),'.config','gpuq-console','session.json');
@@ -513,6 +515,13 @@ async function main(){
       const selected=options.machines.length?machineName(options.machines[0]):null;
       if(selected&&!state.machines.some(m=>m.id===selected))fail('这台机器未授权或不存在');
       result={stale:state.gpuq?.stale!==false,hosts:(state.gpuq?.hosts||[]).filter(h=>!selected||h.id===selected).map(h=>({machine:h.id,reachable:h.reachable,checkedAt:state.gpuq.checkedAt,tasks:h.tasks||[]}))};
+    }else if(command==='task-label'){
+      const action=positionals[1],setting=action==='set',allowed=['machines','datasets','url','session-file','json',...(setting?['name','description','revision']:[])];
+      if(!['get','set'].includes(action)||positionals.length!==4||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: task-label get|set SERVER NODE_JOB_ID [--revision HASH --name TEXT --description TEXT]');
+      const machine=machineName(positionals[2]),nodeJobId=positionals[3];
+      if(!state.machines.some(m=>m.id===machine)||!/^J[a-f0-9]{12}$/.test(nodeJobId))fail('Use an authorized server and the complete original native job ID.');
+      if(setting&&(typeof options.name!=='string'||typeof options.description!=='string'||!/^[a-f0-9]{64}$/.test(options.revision||'')))fail('Read task-label get first, then supply its exact --revision, --name and --description.');
+      result=(await call('tasks.display.'+action,{machine,nodeJobId,...(setting?{name:options.name,description:taskDescription(options.description),revision:options.revision}:{})})).result;
     }else if(command==='profile'){
       if(positionals.length!==1||training.length||options.datasets.length||options.machines.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','display-name'].includes(k)))fail('Usage: profile [--display-name NAME]');
       if(options['display-name']){if(state.taskMetadata?.version!==1)fail('当前后台尚未支持姓名设置，请升级门户。');result=(await call('profile.update',{name:displayName(options['display-name'])})).result;}
@@ -969,6 +978,11 @@ async function main(){
   if(command==='community'){console.log(formatCommunityResult(result));return;}
   if(command==='login'){console.log(`已登录：${result.principal.username}`);return;}
   if(command==='profile'){console.log(`姓名／显示名：${result.name}\n登录用户名：${result.username}`);return;}
+  if(command==='task-label'){
+    if(result.available!==true)console.log('节点尚未确认安全编辑能力；未修改任务。');
+    else console.log(`${result.nodeJobId} · ${result.name}\n描述：${result.description||'未填写描述'}\n显示版本：${result.revision}\n仅展示信息；原命令、任务身份和运行状态不变。`);
+    return;
+  }
   if(command==='queue'){if(result.stale)console.log('监控已过期；以下是平台记录与上次核对状态，不代表空闲。');for(const h of result.hosts){console.log(`${h.machine} · ${h.reachable?'可采集':'监控不可用'} · ${h.checkedAt||'暂无采集时间'}`);for(const t of h.tasks)console.log(`  ${t.id} · ${t.state} · ${t.name}\n  提交者：${t.submitter?.name||'未知'}${t.submitter?.username&&t.submitter.username!==t.submitter.name?'（'+t.submitter.username+'）':''}\n  描述：${t.description||'未填写描述'}\n  分配 GPU：${t.assignedGpuIndices?.join(', ')||'—'}`);if(!h.tasks.length)console.log('  暂无任务记录。');}return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='sync'){

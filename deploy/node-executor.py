@@ -28,6 +28,7 @@ ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DATASET_DELETE_CAPABILITY='dataset-delete-v1'
 TASK_DISPLAY_CAPABILITY='console-task-display-v1'
+TASK_DISPLAY_EDIT_CAPABILITY='console-task-display-edit-v1'
 DIAGNOSTICS=None
 PLATFORM_ROOT_GUARD=None
 WORKSPACE_STORAGE=None
@@ -1470,6 +1471,10 @@ def storage_collect():
 
 def process(operation,args):
     platform_root_check()
+    if operation in ('tasks.display.get','tasks.display.set'):
+        definition=importlib.util.spec_from_file_location('gpuq_console_task_display_edit',HERE/'task-display.py')
+        module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
+        return module.edit(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),operation,args)
     if operation=='projects.oci-cohort.sync':
         spec=importlib.util.spec_from_file_location('gpuq_oci_cohort',HERE/'oci-cohort.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)

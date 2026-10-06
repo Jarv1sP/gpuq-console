@@ -18,6 +18,7 @@ import {installProjectReplication,projectReplicationCall} from './project-replic
 import {installDatasetLabels,datasetLabelCall} from './dataset-labels.mjs';
 import {installProjectCatalog} from './project-catalog.mjs';
 import {installDatasetDeletion} from './dataset-deletion.mjs';
+import {installTaskDisplay,taskDisplayCall} from './task-display.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -32,7 +33,7 @@ export class PortalService extends DemoService{
     service.db=new DatabaseSync(path);await chmod(path,0o600);
     service.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS portal_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, subject TEXT, outcome TEXT NOT NULL);');
     service.db.exec("CREATE TABLE IF NOT EXISTS invites (role TEXT PRIMARY KEY CHECK(role IN ('admin','member')), digest TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, max_uses INTEGER, created_at TEXT NOT NULL);");
-    installMaintenanceState(service);installCommunity(service);installDatasetLabels(service);installProjectCatalog(service);
+    installMaintenanceState(service);installCommunity(service);installDatasetLabels(service);installProjectCatalog(service);installTaskDisplay(service);
     if(!service.db.prepare('PRAGMA table_info(invites)').all().some(c=>c.name==='code_cipher'))service.db.exec('ALTER TABLE invites ADD COLUMN code_cipher TEXT');
     const keyPath=path+'.invite-key';
     try{service.inviteKey=await readFile(keyPath);}catch(e){
@@ -292,6 +293,7 @@ export class PortalService extends DemoService{
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   invoke(token,operation,args={}){
+    if(operation==='tasks.display.get'||operation==='tasks.display.set')return taskDisplayCall(this,token,operation,args).then(result=>({result,principal:this.principal(token)}));
     if(operation==='host.status'||operation==='files.upload.status')return this.remoteRead(token,operation,args);
     if(operation==='projects.replicate'||operation==='projects.replication.status'||operation==='projects.replication.cancel'||operation==='projects.replication.retry'){
       const principal=this.principal(token);
@@ -376,7 +378,9 @@ export class PortalService extends DemoService{
   async refreshGPUQ(){this.gpuq=await readGPUQStatus(this.statusPath);}
   state(principal){
     const state=super.state(principal);
-    const gpuq=visibleGPUQStatus(this.gpuq||{checkedAt:null,stale:true,hosts:[]},principal,this.store.get(principal.userId).limits,{jobs:this.store.jobs,users:this.store.users});
+    const snapshot=this.taskDisplaySnapshot(this.gpuq||{checkedAt:null,stale:true,hosts:[]});
+    state.jobs=state.jobs.map(j=>this.taskDisplayJob(j));
+    const gpuq=visibleGPUQStatus(snapshot,principal,this.store.get(principal.userId).limits,{jobs:this.store.jobs.map(j=>this.taskDisplayJob(j)),users:this.store.users});
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
     return {...state,taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},operationalMaintenance:this.operationalMaintenance?.(principal),jobs:state.jobs.map(j=>({...publicJob(j,this.store.users),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
