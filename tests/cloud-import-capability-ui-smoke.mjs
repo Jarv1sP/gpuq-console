@@ -88,7 +88,7 @@ try{
       await adminCloud.locator('#cloud-auth-check').click();await adminIdle();assert.equal(await adminCloud.locator('#cloud-auth-status').textContent(),'已登录，但分享导入未核验。');assert.equal(await submit.isDisabled(),true);
       await shot('native-admin-login-unverified',390,'.admin-data-storage');await page.setViewportSize({width:1440,height:1000});
       info={backend:'clouddrive',managedExternally:true,configurationEnabled:true,aliyunConnected:true,nodeDirect:true,capabilityVerified:false};
-      await page.reload();await adminCloud.waitFor({state:'visible'});await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);await adminCloud.locator('#cloud-admin > summary').click();await adminIdle();assert.equal(await adminCloud.locator('#cloud-auth-begin').isHidden(),true);assert.equal(await adminCloud.locator('#cloud-auth-status').textContent(),'云盘连接由后台管理。');assert.equal(await adminCloud.locator('#cloud-auth-disconnect').isVisible(),true);
+      await page.reload();await adminCloud.waitFor({state:'visible'});await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);await adminCloud.locator('#cloud-admin > summary').click();await page.waitForFunction(()=>document.querySelector('.admin-data-storage #cloud-auth-status').textContent==='云盘连接由后台管理。');await adminIdle();assert.equal(await adminCloud.locator('#cloud-auth-begin').isHidden(),true);assert.equal(await adminCloud.locator('#cloud-auth-status').textContent(),'云盘连接由后台管理。');assert.equal(await adminCloud.locator('#cloud-auth-disconnect').isVisible(),true);
       for(const width of [1440,390])await shot('external-admin',width,'.admin-data-storage');
     }
     assert.equal(calls.some(c=>c.operation==='cloud.import.start'),false);
