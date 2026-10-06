@@ -9,6 +9,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {datasetHelpGeometry,checkDatasetHelpRegressions} from './dataset-help-geometry.mjs';
 const {inspectGeometry,scanGeometry,layoutZooms}=await import(process.env.DATA_FLOW_GEOMETRY_MODULE||'./layout-geometry.mjs');
 const dir=await mkdtemp(join(tmpdir(),'dataset-flow-')),out=process.env.UI_SCREENSHOTS||join(dir,'shots');
 const password='Local-Database-Cache-Fixture-Only-2026!',hash='a'.repeat(64),second='b'.repeat(64);
@@ -18,7 +19,7 @@ const ref={machine:target,dataset:'local-samples',version:hash};
 const states={scans:['PREPARING','READY',null,null],'sample-pictures':['REGISTERED','FAILED','READY',null],'tiny-local':['READY',null,null,null],validation:[null,null,'READY',null]};
 // A modal makes the background inert. Scan the dialog's active controls while
 // open; scan the complete room again after closing it for every catalog state.
-const geometry={roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],controls:'button,input:not([type=file]):not([type=checkbox]),select,summary,a[href]',
+const geometry={...datasetHelpGeometry,roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],controls:'button,input:not([type=file]):not([type=checkbox]),select,summary,a[href]',
   centers:[{parent:'.dataset-title-label',children:':scope>h3,:scope>.ui-info'},{parent:'.dataset-field-label',children:':scope>label,:scope>span:not(.ui-info),:scope>.ui-info'},{parent:'.dataset-location-fact',children:':scope>.dataset-machine-label,:scope>.dataset-location-status'},{parent:'.dataset-details-cell',children:':scope>.dataset-version-details>summary,:scope>.ui-info'}],
   leftEdges:[['.datasets-library-heading','.dataset-workflow-copy','#datasets-status','#dataset-catalog'],['#dataset-add-title','.dataset-source-tabs','.dataset-source-view:not([hidden])']],
   helpRows:['.dataset-title-label','.dataset-field-label'],repeatedPadding:['.dataset-cache-gauge'],repeatedGaps:['.dataset-cache-preview-row'],
@@ -107,6 +108,13 @@ try{
     await memberPage.locator('#dataset-source-'+source).click();
     for(const width of [1440,390,320]){await check(memberPage,'sheet-'+source,width);await capture(memberPage,'sheet-'+source+'-'+width);}
   }
+  assert.equal(await memberPage.locator('.dataset-sheet-head .data-workspace-footnote').textContent(),'上传前请确认磁盘容量；停止上传会保留已收到的文件片段。');
+  assert.equal(await memberPage.locator('.data-workspace-card>.ui-info,.data-workspace-card>.data-workspace-footnote,.dataset-upload-notes').count(),0);
+  await checkDatasetHelpRegressions(memberPage);
+  const helpButton=memberPage.locator('[data-dataset-help-source=workspace] [data-copy-help]'),helpCalls=calls.length;
+  await helpButton.click();assert.equal(await memberPage.locator('#'+await helpButton.getAttribute('aria-controls')).isVisible(),true);
+  assert.equal(calls.length,helpCalls,'opening the preserved explanation sends no node request');
+  await memberPage.keyboard.press('Escape');assert.equal(await memberPage.locator('#dataset-add-dialog').getAttribute('open'),'');
   await memberPage.locator('#dataset-source-directory').click();await memberPage.locator('[aria-label="上传通道说明"]').click();
   for(const width of [1440,390,320])await check(memberPage,'bounded-tooltip',width);
   await memberPage.keyboard.press('Escape');assert.equal(await memberPage.locator('.copy-help-popup:popover-open').count(),0);assert.equal(await memberPage.locator('#dataset-add-dialog').getAttribute('open'),'');await memberPage.keyboard.press('Escape');

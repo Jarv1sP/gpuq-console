@@ -1,3 +1,4 @@
+import {datasetHelpGeometry} from './dataset-help-geometry.mjs';
 // Relationships for the owned rooms; all measurements use the shared atomic geometry helper.
 export const polishRoomSpecs={
  community:{roots:['#page-community:not([hidden])','.community-dialog[open]'],largeTargets:'.community-post-open',
@@ -12,7 +13,7 @@ export const polishRoomSpecs={
   helpRows:['.permission-heading .copy-caption','.total-limit .copy-caption','.invite-heading .copy-caption'],helpContexts:['#page-users [data-copy-help]','#invites-dialog[open] [data-copy-help]','#password-dialog[open] [data-copy-help]'],
   buttonRows:[{parent:'.editor-save>div:last-child'},{parent:'.account-actions',children:'.button'},{parent:'.invite-actions'}],
   repeatedPadding:['.permission'],repeatedRowHeights:['.permission-top'],bottomReserve:[{content:'#main-content',controls:'#control-strip:not([hidden]),.mobile-nav'}]},
- cloud:{roots:['#cloud-files'],controls:'button,input,summary',largeTargets:'summary',
+ cloud:{...datasetHelpGeometry,roots:['#cloud-files'],controls:'button,input,summary',largeTargets:'summary',
   leftEdges:[['#cloud-files-form .field-caption','#cloud-files-form input','#cloud-files-form .file-actions']],
   centers:[{parent:'.cloud-file-heading',children:':scope>code,:scope>.st',wrap:true},{parent:'#cloud-files .field-caption',children:':scope>span,:scope>.copy-help',wrap:true}],helpContexts:['#cloud-files [data-copy-help]'],
   buttonRows:[{parent:'#cloud-files .file-actions'}],repeatedPadding:['#cloud-files-list>li'],

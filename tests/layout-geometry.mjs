@@ -135,6 +135,41 @@ export async function inspectGeometry(page, specification = {}) {
       for (const node of select(selector))
         if (!node.closest('.field-caption,.copy-caption,h2,h3,p,li,summary')) add('orphan-help', [node], {});
     }
+    // Drawer explanations need a real label sibling, not just a containing
+    // paragraph, action group or list item. Check the rendered label boxes.
+    for (const group of spec.labelledHelp || []) {
+      for (const button of select(group.buttons)) {
+        const row = button.closest('.copy-help')?.parentElement;
+        const label = row?.matches(group.rows) ? select(group.labels, row)[0] : null;
+        if (!label || label.contains(button)) { add('orphan-help', [button], {}); continue; }
+        const caption = rect(label), help = rect(button);
+        counts.alignments++;
+        if (help.left < caption.right - tolerance ||
+            Math.abs(help.top + help.height / 2 - caption.top - caption.height / 2) > tolerance)
+          add('labelled-help-position', [label, button], {
+            label: {left: caption.left, right: caption.right, top: caption.top, height: caption.height},
+            help: {left: help.left, right: help.right, top: help.top, height: help.height}});
+      }
+    }
+    for (const group of spec.siblingSpacing || []) {
+      for (const parent of select(group.parent)) {
+        const nodes = select(group.children || ':scope > *', parent);
+        for (let index = 1; index < nodes.length; index++) {
+          const gap = rect(nodes[index]).top - rect(nodes[index - 1]).bottom;
+          counts.rows++;
+          if (Math.abs(gap - group.gap) > tolerance)
+            add('sibling-spacing', [nodes[index - 1], nodes[index]], {parent: describe(parent), gap, expected: group.gap});
+        }
+      }
+    }
+    for (const selector of spec.closedDisclosures || []) {
+      for (const node of select(selector)) {
+        const summary = node.querySelector(':scope > summary');
+        if (node.open || !rendered(summary)) continue;
+        if (Math.abs(rect(node).height - rect(summary).height) > tolerance)
+          add('closed-disclosure-space', [node, summary], {height: rect(node).height, summaryHeight: rect(summary).height});
+      }
+    }
     for (const group of spec.buttonRows || []) {
       for (const parent of select(group.parent)) {
         const nodes = select(group.children || 'button', parent);

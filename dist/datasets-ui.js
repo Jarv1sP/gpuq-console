@@ -193,6 +193,7 @@ export function datasetsUI(store,toast){
     if(!['directory','link','workspace'].includes(next))return;
     for(const button of section.querySelectorAll('[data-dataset-source]')){const selected=button.dataset.datasetSource===next;button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;}
     for(const panel of section.querySelectorAll('[data-dataset-panel]'))panel.hidden=panel.dataset.datasetPanel!==next;
+    for(const help of section.querySelectorAll('[data-dataset-help-source]'))help.hidden=help.dataset.datasetHelpSource!==next;
   }
   function controls(){
     serverSelectLabel(section.querySelector('[name=dataset-machine]'));
@@ -315,7 +316,7 @@ export function datasetsUI(store,toast){
       section.innerHTML=`<nav class="data-room-tabs" aria-label="数据集内容"><a href="#datasets" aria-current="page">数据集</a><a href="#datasets/transfers">传输与导入</a></nav><div class="terminal-controls datasets-controls"><label><span>本次使用的服务器</span><select name="dataset-machine"></select></label><button class="button" id="datasets-refresh">加载 / 刷新</button></div>
         <div class="datasets-ledger-strip"><div id="datasets-quota"></div><div id="datasets-capacity" class="datasets-capacity" role="status">${datasetCapacityHTML(null,machines[0]?.id)}</div><div id="datasets-database" hidden></div></div>
         <section class="dataset-library hero-frame" aria-labelledby="dataset-catalog-heading"><div class="dataset-frame-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="datasets-library-heading"><div class="dataset-title-label"><h3 id="dataset-catalog-heading">数据在哪里</h3>${infoHTML('原件不会被释放；只有已经存入数据库、并且没有训练在用的缓存才会释放。操作对应所选服务器，斜线表示目录未知。','数据库与缓存说明')}</div><div class="dataset-cache-legend" aria-label="缓存状态图例"><span data-cache-symbol="ready">缓存就绪</span><span data-cache-symbol="fetch">取回中</span><span data-cache-symbol="recoverable">可从数据库取回</span><span data-cache-symbol="database">数据库</span></div></div><div class="dataset-workflow-copy"><span class="dataset-copy-full">训练读取本机缓存；数据库长期保存原件，空闲缓存可以释放，用时自动取回。</span><span class="dataset-copy-compact">训练读取缓存；数据库保留原件。</span></div><p id="datasets-status" role="status">${!store.principal?'请先登录。':!machines.length?'当前没有已授权机器。':'选择服务器，再加载数据集。'}</p><div id="dataset-catalog" class="dataset-catalog"></div></section>${cacheAdminHTML(store.principal?.role==='admin')}
-        <details id="datasets-add" class="datasets-add"><summary class="button primary">添加数据 <span class="dataset-add-hint">从电脑上传，或让服务器直接下载</span></summary><dialog id="dataset-add-dialog" class="dataset-add-sheet" aria-labelledby="dataset-add-title"><header class="dataset-sheet-head"><div><h2 id="dataset-add-title">添加数据</h2></div><button class="button quiet" type="button" data-dataset-add-close aria-label="关闭添加数据">关闭</button></header><div class="dataset-sheet-context"></div>
+        <details id="datasets-add" class="datasets-add"><summary class="button primary">添加数据 <span class="dataset-add-hint">从电脑上传，或让服务器直接下载</span></summary><dialog id="dataset-add-dialog" class="dataset-add-sheet" aria-labelledby="dataset-add-title"><header class="dataset-sheet-head"><div class="copy-caption"><h2 id="dataset-add-title">添加数据</h2></div><button class="button quiet" type="button" data-dataset-add-close aria-label="关闭添加数据">关闭</button></header><div class="dataset-sheet-context"></div>
         <div class="dataset-source-tabs" role="tablist" aria-label="添加数据的方式">
           <button type="button" role="tab" id="dataset-source-directory" data-dataset-source="directory" aria-controls="dataset-panel-directory" aria-selected="true"><span>本机目录</span></button>
           <button type="button" role="tab" id="dataset-source-link" data-dataset-source="link" aria-controls="dataset-panel-link" aria-selected="false" tabindex="-1"><span>下载链接</span></button>
@@ -350,15 +351,24 @@ export function datasetsUI(store,toast){
         row?.append(help);
       }
       for(const help of section.querySelectorAll('.dataset-route>.ui-info'))help.parentElement.querySelector('.dataset-route-heading')?.append(help);
+      const title=section.querySelector('.dataset-sheet-head>.copy-caption');
+      const titleHelp=(help,tab)=>{if(!help)return;help.dataset.datasetHelpSource=tab;help.hidden=tab!=='directory';title.append(help);};
       for(const help of section.querySelectorAll('.data-workspace-card>.ui-info,.data-workspace-terminal>div>.ui-info,#data-workspace-publish-form>.ui-info')){
         const footnote=help.querySelector('.data-workspace-footnote');
-        if(footnote){section.querySelector('#data-workspace-upload-form>.file-actions').append(help);continue;}
-        const heading=help.parentElement.querySelector(':scope>header h3,:scope>h4');if(heading){heading.classList.add('dataset-help-heading');heading.append(help);}
+        if(footnote){titleHelp(help,'workspace');continue;}
+        const heading=help.parentElement.querySelector(':scope>header h3,:scope>h4');if(heading){const caption=document.createElement('span');caption.append(...heading.childNodes);heading.classList.add('dataset-help-heading');heading.append(caption,help);}
       }
-      // Keep the existing status-footer spacing while placing its explanation
-      // beside the upload actions in the shared help popover.
-      const notes=section.querySelector('.dataset-upload-notes');if(notes?.firstElementChild)section.querySelector('.dataset-upload-actions').append(notes.firstElementChild);
-      const nextHelp=section.querySelector('#dataset-panel-link>.ui-info');if(nextHelp){const button=section.querySelector('#dataset-organize-next'),row=document.createElement('div');row.className='dataset-next-step';button.before(row);row.append(button,nextHelp);}
+      // Source-specific explanations share the title row; no empty footer or
+      // help-only action row remains when a different source is selected.
+      const notes=section.querySelector('.dataset-upload-notes');titleHelp(notes?.firstElementChild,'directory');notes?.remove();
+      titleHelp(section.querySelector('#dataset-panel-link>.ui-info'),'link');
+      for(const row of section.querySelectorAll('.field>span:has(>.copy-help),#cloud-admin>summary:has(>.copy-help)')){
+        const help=row.querySelector(':scope>.copy-help'),caption=document.createElement('span');
+        for(const node of [...row.childNodes])if(node!==help)caption.append(node);
+        row.classList.add('dataset-help-heading');row.prepend(caption);
+      }
+      const relay=section.querySelector('#dataset-relay-warning'),relayHelp=relay.querySelector(':scope>.ui-info'),relayLabel=relay.querySelector(':scope>label');
+      const relayRow=document.createElement('div');relayRow.className='copy-caption';relayLabel.before(relayRow);relayRow.append(relayLabel,relayHelp);
     }
     if(ids!==machineIds){
       const select=section.querySelector('[name=dataset-machine]'),selected=select.value,changed=machineIds!=='';

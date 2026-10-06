@@ -99,7 +99,8 @@
 #page-datasets .dataset-journey-channel{position:absolute;left:calc(-50% - 6px);top:-22px;transform:translateX(-50%);font:11px var(--mono);white-space:nowrap}
 #page-datasets .dataset-upload-phases{position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;white-space:nowrap}
 #page-datasets .dataset-field-label{display:flex;align-items:center;justify-content:space-between;gap:12px}
-#page-datasets .dataset-help-heading,#page-datasets .dataset-next-step{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+#page-datasets .dataset-help-heading,#page-datasets .dataset-next-step{display:flex;align-items:center;gap:8px;min-width:0}
+#page-datasets .dataset-help-heading>span:not(.copy-help){min-width:0;overflow-wrap:anywhere}
 #page-datasets .file-actions{align-items:center}
 #page-datasets .dataset-cache-admin{margin-top:32px;min-width:0}
 #page-datasets .dataset-cache-admin>header{display:flex;align-items:center;gap:8px;margin-bottom:16px}
