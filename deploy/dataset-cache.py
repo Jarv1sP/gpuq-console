@@ -847,7 +847,7 @@ class DatasetCache:
                 raise PermissionError("这份数据只能由管理员删除")
 
     @contextlib.contextmanager
-    def _retention_guard(self, actor, dataset, version):
+    def _retention_guard(self, actor, dataset, version, *, _confirm_only=False):
         """Only a live protected READY authority makes complete data disposable.
 
         sourceId, ownership, an old recovery JSON, and successful transfer alone
@@ -864,7 +864,7 @@ class DatasetCache:
                 self._dataset(actor, dataset)
                 if os.path.lexists(self._paths(dataset, version)["ready"]):
                     raise CacheError("这是最后一份数据，请用彻底删除（7 天内可恢复）")
-            yield
+            yield False
             return
         with self._locked():
             self._check_snapshot(actor, dataset, version, registered)
@@ -897,15 +897,20 @@ class DatasetCache:
                         # remaining bytes without the original's live guard.
                         complete = True
         if not complete:
-            yield
+            yield False
             return
+        if _confirm_only:
+            # A publisher won the target version lock after incomplete
+            # preflight. Fail closed rather than acquire a source lock in
+            # reverse order or dispose of newly complete data without it.
+            raise CacheError("这是最后一份数据，请重新核对后用彻底删除（7 天内可恢复）")
         guard = getattr(self, "rebuild_guard", None)
         if not callable(guard):
             raise CacheError("这是最后一份数据，请用彻底删除（7 天内可恢复）")
         with guard(actor, dataset, version):
             with self._locked():
                 self._check_snapshot(actor, dataset, version, registered)
-            yield
+            yield True
 
     def _register(self, actor, dataset, manifest, owners, source_id, *, _origin="admin", _receipt=None):
         self._actor(actor, admin=True)
@@ -1897,7 +1902,10 @@ class DatasetCache:
     def evict(self, actor, dataset, version):
         """Administrator cleanup only. Registration remains for later recreation."""
         self._actor(actor, admin=True)
-        with self._retention_guard(actor, dataset, version), self._version_locked(actor, dataset, version):
+        with self._retention_guard(actor, dataset, version) as protected, self._version_locked(actor, dataset, version):
+            if not protected:
+                with self._retention_guard(actor, dataset, version, _confirm_only=True):
+                    pass
             with self._locked():
                 self._record(actor, dataset, version)
                 quarantined = self._quarantine_locked(dataset, version)
@@ -2130,12 +2138,17 @@ class DatasetCache:
                 recheck()  # Reject active uses before contacting any original.
             # Source guards first, matching tier GC's lock order. A sourceId or
             # cached receipt must never make the last complete copy disposable.
+            protected = {}
             for item in initial["versions"]:
-                locks.enter_context(self._retention_guard(actor, dataset, item))
+                protected[item] = locks.enter_context(self._retention_guard(actor, dataset, item))
             # Never wait on a version lock while holding the global lock: active
             # materialize/publish need global metadata access before releasing it.
             for item in initial["versions"]:
                 locks.enter_context(self._lock_file(".locks/" + dataset + "." + item + ".lock"))
+            for item in initial["versions"]:
+                if not protected[item]:
+                    with self._retention_guard(actor, dataset, item, _confirm_only=True):
+                        pass
             with self._locked():
                 recheck()  # All leases checked before the first filesystem move.
                 transaction, receipt = self._unregister_transaction(dataset, version, initial)

@@ -170,10 +170,26 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,waitMs
     try{
       const old=service.db.prepare('SELECT operation_id FROM dataset_deletion_fences WHERE machine=? AND dataset=? AND version=?').get(host,dataset,row.version);
       if(old&&old.operation_id!==row.id)fail('这个版本已有删除任务，请查询原编号。');
-      service.db.prepare('INSERT OR IGNORE INTO dataset_deletion_fences VALUES(?,?,?,?)').run(host,dataset,row.version,row.id);
       const step={machine:host,dataset,version:row.version,operationId:randomUUID(),state:'PLANNED',phase:'plan',plan:null,result:null,dispatched:[],fenceAt:null};
       row.steps.push(step);save(row);if(!insideTransaction)service.db.exec('COMMIT');return step;
     }catch(error){if(!insideTransaction)service.db.exec('ROLLBACK');throw error;}
+  }
+  function claimAuthorized(row,principal){
+    if(!row.steps.length||row.steps.some(s=>!s.plan||principal.role!=='admin'&&(!s.plan.memberAllowed||!same(s.plan.owners,[principal.userId]))))fail('数据来源权限尚未确认。',403);
+    service.db.exec('BEGIN IMMEDIATE');
+    try{
+      for(const step of row.steps){
+        const old=service.db.prepare('SELECT operation_id FROM dataset_deletion_fences WHERE machine=? AND dataset=? AND version=?').get(step.machine,step.dataset,row.version);
+        if(old&&old.operation_id!==row.id)fail('这个版本已有删除任务，请查询原编号。');
+        service.db.prepare('INSERT OR IGNORE INTO dataset_deletion_fences VALUES(?,?,?,?)').run(step.machine,step.dataset,row.version,row.id);
+      }
+      save(row);service.db.exec('COMMIT');
+    }catch(error){service.db.exec('ROLLBACK');throw error;}
+  }
+  function releasePortalFences(row){
+    service.db.exec('BEGIN IMMEDIATE');
+    try{service.db.prepare('DELETE FROM dataset_deletion_fences WHERE operation_id=?').run(row.id);save(row);service.db.exec('COMMIT');}
+    catch(error){service.db.exec('ROLLBACK');throw error;}
   }
   async function inspect(row,principal,check){
     const view=graph(row);row.graphDigest=view.digest;save(row);
@@ -267,6 +283,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,waitMs
   async function execute(row,principal,check){
     try{
       check();await inspect(row,principal,check);
+      claimAuthorized(row,principal);
       const source=row.steps.find(s=>s.operationId===row.source);
       await dispatch(row,source,principal,check,'fence');
       for(const step of row.steps)if(step!==source)await dispatch(row,step,principal,check,'fence');
@@ -287,6 +304,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,waitMs
       row.state=error.status===403||error.status===409||error.code==='MAINTENANCE_ACTIVE'?'BLOCKED':'UNKNOWN';
       row.error=row.state==='BLOCKED'?'删除已暂停；数据仍保留，请联系管理员核对权限、使用记录和原步骤。':'删除结果未确认；仅查询原编号，不会重新执行。';
       const step=row.steps.findLast(s=>s.state==='DISPATCHING');if(step)step.error=refusal(error.message);
+      if(!row.steps.some(s=>s.dispatched.length))releasePortalFences(row);
       save(row);event(row,'停止推进',null,row.state);
     }
   }

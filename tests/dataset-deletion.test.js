@@ -43,12 +43,16 @@ test('offline or mismatched capability never means an absent dataset',async t=>{
 test('source provenance is mandatory for members; unknown/admin/shared originals remain admin-only',async t=>{
   const f=fixture(t);f.personal=false;
   const {result}=await f.start();assert.equal(result.state,'BLOCKED');assert.equal(writes(f).length,0);
+  assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_deletion_fences').all(),[]);
+  f.service.assertDatasetNotDeleting(hosts[0],{dataset:'personal',version});
   const g=fixture(t);g.personal=false;assert.equal((await g.start(request(),admin)).result.state,'DELETED');
 });
 test('every present physical version rechecks its own provenance, never supplied source owners',async t=>{
   const f=fixture(t,{onlySource:false});
   f.after=(host,op,args,result)=>{if(host===hosts[1]&&op.endsWith('.plan'))result.memberAllowed=false;};
   const {result}=await f.start();assert.equal(result.state,'BLOCKED');assert.equal(writes(f).length,0);
+  assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_deletion_fences').all(),[]);
+  for(const host of hosts)f.service.assertDatasetNotDeleting(host,{dataset:'personal',version});
 });
 test('different/multiple owners and absence without complete source fail before fencing',async t=>{
   const f=fixture(t);f.after=(host,op,args,result)=>{if(op.endsWith('.plan'))result.owners=[principal.userId,'someone'];};
@@ -75,8 +79,10 @@ test('same key with changed target and cross-account reuse or status are rejecte
 test('different keys cannot concurrently delete the same version namespace',async t=>{
   const f=fixture(t),a=request(),b=request();
   const results=await Promise.allSettled([f.call('datasets.delete',a),f.call('datasets.delete',b)]);
-  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);await f.service.waitDatasetDeletions();
-  assert.equal(f.service.db.prepare('SELECT count(*) n FROM dataset_deletions').get().n,1);
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,2);await f.service.waitDatasetDeletions();
+  const tasks=f.service.db.prepare('SELECT data FROM dataset_deletions').all().map(r=>JSON.parse(r.data));
+  assert.equal(tasks.filter(r=>r.state==='DELETED').length,1);assert.equal(tasks.filter(r=>r.state==='BLOCKED').length,1);
+  assert.equal(new Set(f.service.db.prepare('SELECT operation_id FROM dataset_deletion_fences').all().map(r=>r.operation_id)).size,1);
 });
 test('revoked account or logout after a late fence reply cannot dispatch isolation',async t=>{
   for(const logout of [false,true]){

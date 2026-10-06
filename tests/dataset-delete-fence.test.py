@@ -82,7 +82,7 @@ class FenceTests(unittest.TestCase):
             lambda:self.cache.publish(OWNER, 'sample', self.version, str(uuid.uuid4())),
         ]
         for action in actions:
-            with self.subTest(action=action), self.assertRaises(ValueError):
+            with self.subTest(action=action), self.assertRaisesRegex(ValueError, '锁定'):
                 action()
         self.assertEqual((self.cache._paths('sample', self.version)['ready']/'data'/'file.txt').read_bytes(), b'complete bytes')
 
