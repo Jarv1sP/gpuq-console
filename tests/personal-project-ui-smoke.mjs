@@ -165,7 +165,10 @@ try{
       const request=route.request(),url=new URL(request.url());if(url.origin!==origin){await route.fallback();return;}
       if(url.pathname==='/machines.js'){await route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(layoutMachines)+';'});return;}
       if(!url.pathname.startsWith('/api/')){await route.fallback();return;}const {operation,args}=request.postDataJSON();let result=null;
-      if(operation==='state'){}else if(operation==='projects.list')result={environmentModes:['shared','isolated','oci'],projects:[layoutProject]};else if(operation==='projects.status')result=layoutProject;else if(operation==='projects.publish'){layoutRequest=args;layoutProject.state='UNKNOWN';layoutProject.publication={id:args.key,state:'UNKNOWN'};result=layoutProject;}else throw Error('Unexpected layout operation '+operation);
+      if(operation==='state'){}else if(['datasets.catalog','datasets.capacity'].includes(operation)){
+        assert.ok(layoutMachines.some(node=>node.id===args.machine),'layout catalog only reads an authorized synthetic machine');
+        result=operation==='datasets.catalog'?{machine:args.machine,machines:[{machine:args.machine,state:'ok'}],datasets:[]}:{machine:args.machine,available:false};
+      }else if(operation==='projects.list')result={environmentModes:['shared','isolated','oci'],projects:[layoutProject]};else if(operation==='projects.status')result=layoutProject;else if(operation==='projects.publish'){layoutRequest=args;layoutProject.state='UNKNOWN';layoutProject.publication={id:args.key,state:'UNKNOWN'};result=layoutProject;}else throw Error('Unexpected layout operation '+operation);
       await route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal})});
     }));
     await layout.goto(origin);await layout.locator('[name=workspace-machine]').waitFor();await layout.evaluate(()=>document.fonts.ready);
