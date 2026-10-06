@@ -211,4 +211,3 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 
 /* Reserve the measured floating controls in every application room. */
 .sb #main-content{padding-bottom:max(80px,var(--bottom-reserve));scroll-padding-bottom:var(--bottom-reserve)}
-.sb:has(#control-strip:not([hidden])) .help-links{margin-top:calc(48px + var(--bottom-reserve))}

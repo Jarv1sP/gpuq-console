@@ -76,7 +76,7 @@ body[data-room=datasets] .v3-count{font:13px var(--mono);font-variant-numeric:ta
 .sb #page-datasets .v3-server .dataset-remove-more{margin-top:0}
 #page-datasets .v3-server-text{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}
 #page-datasets .v3-server-text b{font:500 13px var(--mono);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#page-datasets .v3-server-text>span{font:11px var(--sans);color:var(--ink-3)}
+#page-datasets .v3-server-text>span{font:11px/1.5 var(--sans);color:var(--ink-3);white-space:nowrap}
 #page-datasets .v3-server.cur .v3-server-text b::after{content:'';display:inline-block;width:6px;height:6px;background:var(--v3-run);border-radius:50%;margin-left:8px}
 #page-datasets .v3-small,.sb #page-datasets #warehouse-inspector .v3-server [data-remove-more]{height:32px;min-height:32px;font-size:13px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center}
 #page-datasets .v3-outline{background:none;border:1px solid var(--line-2);border-radius:7px;color:var(--ink)}
@@ -167,7 +167,8 @@ body[data-room=datasets] .v3-count{font:13px var(--mono);font-variant-numeric:ta
  #page-datasets .v3-phone-detail .v3-inspector{display:flex}
  #page-datasets .v3-detail-scroll>section{padding:16px 0}
  #page-datasets .v3-train{padding:16px 0;background:var(--bg)}
- #page-datasets :is(.v3-edit,.v3-copy){min-height:44px;min-width:44px}
+ #page-datasets :is(.v3-edit,.v3-copy){min-height:48px;min-width:48px}
+ #page-datasets .v3-version{height:48px!important;min-height:48px!important;font-size:16px}
  #page-datasets .v3-back{display:inline-flex;margin-left:-10px}
  #page-datasets .v3-upload{width:100%;height:100dvh;max-height:100dvh;padding-inline:16px}
  #page-datasets .v3-upload .dataset-sheet-head{margin-inline:-16px;padding-inline:16px}

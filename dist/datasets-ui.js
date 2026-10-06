@@ -176,7 +176,7 @@ export function datasetsUI(store,toast){
       else if(!entry.open&&dialog.open)dialog.close();
     });
     entry.querySelector('summary').addEventListener('click',event=>{if(!machineAllowed(section.querySelector('[name=dataset-machine]')?.value))event.preventDefault();});
-    dialog.addEventListener('close',()=>{if(!section.contains(entry))return;entry.open=false;toolbar.prepend(controls);section.querySelector('#datasets-database').before(capacity);(document.querySelector('[data-v3-upload]')||entry.querySelector('summary')).focus({preventScroll:true});});
+    dialog.addEventListener('close',()=>{if(!section.contains(entry))return;entry.open=false;toolbar.prepend(controls);section.querySelector('#datasets-database').before(capacity);const focused=document.activeElement;if(focused===document.body||dialog.contains(focused)||!focused?.getClientRects().length)(document.querySelector('[data-v3-upload]')||entry.querySelector('summary')).focus({preventScroll:true});});
     dialog.addEventListener('click',event=>{if(event.target.closest('[data-dataset-add-close]'))dialog.close();});
   }
   function phase(state){

@@ -67,7 +67,7 @@ try{
       const over=(front,back)=>front.slice(0,3).map((c,i)=>c*front[3]+back[i]*(1-front[3]));
       const luminance=rgb=>rgb.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
       const background=el=>{const ancestors=[];for(let n=el;n;n=n.parentElement)ancestors.unshift(n);return ancestors.reduce((bg,n)=>over(rgba(getComputedStyle(n).backgroundColor),bg),[255,255,255]);};
-      const selectors='[data-nav],.muted,.self-summary small,.self-summary strong span,.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small,.terminal-scope,.page-heading p,.page-heading .eyebrow,.topbar #current-account,.section-kicker,.help-links>span,.datasets-capacity,.dataset-readiness,.dataset-locations,.datasets-add>summary span,.datasets-flow,.dataset-source-tabs button,.user-row,.user-meta,.username,.permission-spec,.permission-bottom,.team-jobs';
+      const selectors='[data-nav],.muted,.self-summary small,.self-summary strong span,.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small,.terminal-scope,.page-heading p,.page-heading .eyebrow,.topbar #current-account,.section-kicker,.help-links>span,.datasets-capacity,.dataset-readiness,.dataset-locations,.datasets-add>summary span,.datasets-flow,.dataset-source-tabs button,.user-row,.user-meta,.username,.permission-spec,.permission-bottom,.team-jobs,.v3-id,.v3-owner,.v3-pip-id,.v3-store>span,.v3-server-text>span,.v3-meta,.v3-idline,.v3-lab,.v3-train .v3-lock';
       return [...document.querySelectorAll(selectors)].filter(el=>el.getClientRects().length&&el.textContent.trim()&&!el.closest('[disabled],[aria-hidden="true"],[inert]')).flatMap(el=>{
         const bg=background(el),fg=over(rgba(getComputedStyle(el).color),bg),a=luminance(fg),b=luminance(bg),ratio=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
         return ratio>=4.5?[]:[{element:el.className||el.tagName,text:el.textContent.trim().slice(0,45),ratio:Number(ratio.toFixed(2))}];
@@ -127,20 +127,19 @@ try{
   await page.setViewportSize({width:1440,height:1080});
   await page.locator('[data-nav=datasets]').click();await currentNav('datasets');
   await page.locator('#datasets-refresh').click();
-  const preparing=page.locator('.dataset-readiness[data-state=PREPARING]');
+  await page.locator('[data-v3-select=vision-validation]').click();
+  const preparing=page.locator('.v3-server.cur .v3-g.fetch');
   await preparing.waitFor({state:'attached'});
-  await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').waitFor();
-  assert.equal(await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').innerText(),'取回中');
-  await page.locator('.dataset-version-details').filter({has:preparing}).locator('summary').click();
+  assert.equal(await page.locator('.v3-server.cur .v3-server-text>span').innerText(),'取回中');
   await preparing.waitFor();
   await textContrast();await capture('datasets-desktop');
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','The first confirmed catalog is settled; motion requires a real state diff');
-  assert.match(await page.locator('.dataset-readiness[data-state=PREPARING]').textContent(),/准备中/,'Readiness remains clear without motion');
+  assert.equal(await preparing.evaluate(el=>el.getAnimations().length),0,'The first confirmed catalog is settled; motion requires a real state diff');
+  assert.equal(await page.locator('.v3-server.cur .v3-server-text>span').textContent(),'取回中','Readiness remains clear without motion');
   await page.locator('[data-nav=work]').click();
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','Hidden pages never add a decorative readiness pulse');
+  assert.equal(await preparing.evaluate(el=>el.getAnimations().length),0,'Hidden pages never add a decorative readiness pulse');
   await page.locator('[data-nav=datasets]').click();
   await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','Inactive tabs stay settled');
+  assert.equal(await preparing.evaluate(el=>el.getAnimations().length),0,'Inactive tabs stay settled');
   await page.evaluate(()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'));});
   await page.setViewportSize({width:390,height:960});await capture('datasets-mobile');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));

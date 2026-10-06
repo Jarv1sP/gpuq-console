@@ -1,13 +1,13 @@
 # STARGATE 界面设计与代码参考
 
-本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `34d07a1`，并同步数据集提示、折叠控件与间距的维护；已包含导航合并、数据库与缓存、管理员删除与最后副本保护、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
+本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `34d07a1`，并同步仓库列表、直传、数据集提示、折叠控件与间距的维护；已包含导航合并、数据库与缓存、管理员删除与最后副本保护、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
 
 ## 1. 原则
 
 - SpaceX 控制室感来自真实对象、精确线条、巨型读数和全屏聚焦，不把操作改成航天术语。
 - Apple 的克制来自明度、字级、留白和稳定位置，不添加装饰渐变、发光、霓虹或虚构扫描线。
 - 功能先行：详情可以折叠，操作、原始指标、权限和恢复入口必须保留。
-- 每屏一个焦点：工作台当前训练、算力服务器肖像、数据集位置矩阵、协作区公告和帖子。
+- 每屏一个焦点：工作台当前训练、算力服务器肖像、数据仓库列表与详情、协作区公告和帖子。
 - 未知、失联、过期、未授权、确认为零是不同事实；未知不能画成空闲或释放额度。
 - 真实状态先于画面完整性；缺字段就省略读数或显示待确认。
 - 文案减法：显示短事实与操作，解释进入 ⓘ 或指南。
@@ -22,7 +22,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 
 字标保留9753×711的原图比例，顶栏mask、小尺寸与登录SVG是不同适配。独立Λ门图标见 [favicon.svg](../dist/favicon.svg)、[favicon.ico](../dist/favicon.ico)、[mask-icon.svg](../dist/mask-icon.svg)、[apple-touch-icon.png](../dist/apple-touch-icon.png)。[index.html](../dist/index.html)的图标链接带stargate-2版本号；修改资产时同步版本与真实ico入口，避免浏览器继续用旧缓存。
 
-下表覆盖源码全部 **100 个已声明自定义属性、220 处声明**。同名多行是实际作用域/断点/后续覆盖，不能任选配色。间距和圆角没有另一套隐含令牌：没有变量的 gap、padding、border-radius 以相邻组件 CSS 为准。品牌遮罩完整载荷留在源码，不复制 SVG 路径到新组件。
+下表记录共享主题与各组件的已声明自定义属性。同名多行是实际作用域/断点/后续覆盖，不能任选配色。间距和圆角没有另一套隐含令牌：没有变量的 gap、padding、border-radius 以相邻组件 CSS 为准。品牌遮罩完整载荷留在源码，不复制 SVG 路径到新组件。
 
 | 变量 | 实际值 | 源码作用域 | 用途 |
 | --- | --- | --- | --- |
@@ -40,10 +40,10 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `--prep` | `#256083` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 数据准备状态 |
 | `--err` | `#b73b3b` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 失败状态 |
 | `--queue` | `#80601a` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 排队/等待状态 |
-| `--v3-fetch` | `#6CB4FF` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3` | 取回中的空心缓存标记 |
-| `--v3-warn` | `#E8B04B` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3` | 存入中、未存入或待确认 |
-| `--v3-run` | `#3DD68C` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3` | 当前所选服务器圆点 |
-| `--v3-bad` | `#FF6B6B` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3` | 已确认失败的菱形标记 |
+| `--v3-fetch` | `#6CB4FF` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3,.v3-upload` | 取回中的空心缓存标记 |
+| `--v3-warn` | `#E8B04B` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3,.v3-upload` | 存入中、未存入或待确认 |
+| `--v3-run` | `#3DD68C` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3,.v3-upload` | 当前所选服务器圆点 |
+| `--v3-bad` | `#FF6B6B` | [dataset-warehouse.css](../dist/dataset-warehouse.css) · `.warehouse-v3,.v3-upload` | 已确认失败的菱形标记 |
 | `--primary` | `var(--accent,#202023)` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 主操作底色 |
 | `--on-primary` | `#fff` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 主操作文字 |
 | `--d-bg` | `var(--bg)` | [datasets.css](../dist/datasets.css) · `.sb #page-datasets,.sb #page-transfers` | 数据集页面底色映射 |
@@ -251,7 +251,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `--sidebar-width` | `232px` | [styles.css](../dist/styles.css) · `:root` | 旧布局侧栏宽度，外壳可重映射 |
 | `--sidebar-width` | `212px` | [styles.css](../dist/styles.css) · `:root` | 旧布局侧栏宽度，外壳可重映射 |
 
-运行期布局变量不当主题或业务读数：`--gpu-count` 由 [resources-ui.js](../dist/resources-ui.js) 设置为真实物理卡数；`--dataset-columns` 和 `--dataset-min-width` 由 [datasets-ui.js](../dist/datasets-ui.js) 按目录机器数生成列模板与内部最小宽度。多于四列时最小宽度为 `180 + columns * 132 + 98` 像素。`--panel` 是 maintenance.css 的可选回退消费项，当前应用未声明；`--vscode-scrollbar-shadow` 是 [xterm.css](../dist/vendor/xterm.css) 的供应商消费项，也没有应用声明。
+运行期布局变量不当主题或业务读数：`--gpu-count` 由 [resources-ui.js](../dist/resources-ui.js) 设置为真实物理卡数；`--bottom-reserve` 由 [shell-ui.js](../dist/shell-ui.js) 按当前可见固定控制层的真实边界与20px间距计算，并换算为布局坐标；[shell.css](../dist/shell.css) 让各房间和页尾都能滚动到控制层上方。旧数据集矩阵的 `--dataset-columns` 与 `--dataset-min-width` 保留给兼容渲染函数，仓库主界面不再使用矩阵。`--panel` 是 maintenance.css 的可选回退消费项，当前应用未声明；`--vscode-scrollbar-shadow` 是 [xterm.css](../dist/vendor/xterm.css) 的供应商消费项，也没有应用声明。
 
 共享导航玻璃使用主题色混合与 `blur(22px) saturate(1.35)`；阴影只分离浮层。减少透明度时用实色。`.hero-frame` 的四角只围住主视觉，不给每个字段套框。
 
@@ -310,19 +310,19 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作 | 失联不重放，writerToken仅内存 |
-| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
+| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；服务器区内部滚动，训练按钮和两条命令在固定底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
 | `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；容量条只取已确认 capacity | filesystemBytes/availableBytes 计算实际数据盘已用比例；读不到不画 0%；长 ID 提示完整值；手机内部横向滚动 |
 | `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
 | `.v3-upload` / `.v3-drop` / `.v3-route` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 先拖放/选择文件，再显示文件摘要、名称、上传服务器及一条探测路线 | 匿名 capabilities 不带票据；门户提供路线无效时显示待确认；保留原链接、云盘、服务器整理流程；原生 dialog 在可见父节点下 |
 | `.dataset-ground` / `.dataset-location-icon` / `.dataset-lifecycle` / `.dataset-flow-route` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-flow.css](../dist/dataset-flow.css) | 数据库原件、缓存、实际来源路线 | 图形有文字/完整版本复制；无字段不画已释放或百分比 |
 | `.dataset-cache-admin` / `.dataset-cache-gauge` / `.dataset-cache-preview` | [dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[dataset-flow.css](../dist/dataset-flow.css) | 管理员预算/水位/释放预览，不是实际磁盘水位 | 展开或明确刷新才查询；预览不删除 |
 | `.dataset-pin-slot` / `[data-cache-retention]` | [dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[manual-pin-state.js](../dist/manual-pin-state.js) | 管理员固定保留与同账号原请求恢复 | 先按pinId查owner/present，计数不证明归属 |
-| `.dataset-more-slot` / `[data-remove-more]` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[datasets-ui.js](../dist/datasets-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 管理员删除挂载点，成员无删除DOM | 绑定实体身份，整库名称确认；按实际版本列完整保留副本；最后副本或本机未决时禁用；未知查原操作；缺编号的25小时保护说明放入ⓘ，有编号不承诺按时解除 |
-| `.dataset-remove-blocked` / `.dataset-remove-action-word` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 已证实未派发的拒绝与禁用原因 | 墨色原文，“按机器删除”不从词中间折行；ⓘ说明节点更新后的彻底删除，只有已知拒绝可“知道了”移除 |
+| `.dataset-more-slot` / `[data-remove-more]` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[datasets-ui.js](../dist/datasets-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 管理后台的按机器删除挂载点，主界面不挂管理员管理操作 | 绑定实体身份，整库名称确认；按实际版本列完整保留副本；最后副本或本机未决时禁用；未知查原操作；缺编号的25小时保护说明放入ⓘ，有编号不承诺按时解除 |
+| `.dataset-remove-blocked` / `.dataset-remove-action-word` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 已证实未派发的拒绝与禁用原因 | 墨色原文，“按机器删除”不从词中间折行；只有能力确认为1时才提彻底删除；只有已知拒绝可“知道了”移除 |
 | `#dataset-add-dialog` / `.dataset-field-label` / `.dataset-directory-control` | [datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 三来源添加数据，中文选择文件夹/合计 | 标签关联，来源说明在标题右侧ⓘ；弹窗内部真实滚动 |
 | `.help-links.copy-caption` / `.dataset-storage` | [index.html](../dist/index.html)、[app.js](../dist/app.js)、[datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 数据集主体及可见页尾提示均跟随真实标签 | 页尾「首次使用」在桌面和平板显示，手机断点保持整块隐藏；右侧共享SVG提示保留原说明和指南链接，与标签同中线，不单独占行 |
 | `.dataset-upload-journey` / `.dataset-route-heading` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-upload.js](../dist/dataset-upload.js)、[upload-routes.js](../dist/upload-routes.js) | 三段上传、直传/Tail备用/显式中转，不造数据库阶段 | 未确认通道明示；失败不自动换中转 |
-| `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 个人数据空间/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回；记录内区块、折叠后的后续区块统一使用12px间距令牌，关闭详情不保留margin/padding；详情与未确认操作编号的标题保持48px触控高度，文字居中 |
+| `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 在服务器上整理/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回；记录内区块、折叠后的后续区块统一使用12px间距令牌，关闭详情不保留margin/padding；详情与未确认操作编号的标题保持48px触控高度，文字居中 |
 | `.dataset-version-caption` / `.dataset-disclosure-label` | [cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 数据集版本与云端详情共用折叠标记 | summary使用flex中线；统一▸/▾，切换不旋转，减少动态时保持静止 |
 | `.publication-trajectory` / `#publication-actions` | [execution-ui.js](../dist/execution-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 扫描/复制/校验/写入版本及原请求查询 | 无字段省略，回执不明不制造成功 |
 
@@ -342,7 +342,8 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | --- | --- | --- |
 | 工作台 | [execution-ui.js](../dist/execution-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css)、[workspace.css](../dist/workspace.css) | projects / personal-project / r5 浏览器 |
 | 算力总览 | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css)、[gpu-allocation-ui.js](../dist/gpu-allocation-ui.js) | resources / resource-ids / allocation |
-| 数据集与上传数据 | [datasets-ui.js](../dist/datasets-ui.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css)、[datasets.css](../dist/datasets.css) | dataset-catalog-model / dataset-label-client / datasets / dataset-upload / dataset-remove |
+| 数据仓库与上传数据 | [datasets-ui.js](../dist/datasets-ui.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-upload-metrics.js](../dist/dataset-upload-metrics.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css)、[datasets.css](../dist/datasets.css) | dataset-catalog-model / dataset-label-client / datasets / dataset-upload / dataset-remove |
+| 管理后台的数据与存储区块 | [admin-data-storage.js](../dist/admin-data-storage.js)、[admin-data-storage.css](../dist/admin-data-storage.css)、[dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[dataset-remove-ui.js](../dist/dataset-remove-ui.js) | admin-data-storage / dataset-remove / manual-pin-state |
 | 彻底删除对话框 | [dataset-full-delete-ui.js](../dist/dataset-full-delete-ui.js)、[dataset-full-delete-state.js](../dist/dataset-full-delete-state.js)、[dataset-remove.css](../dist/dataset-remove.css) | dataset-full-delete-ui 契约与浏览器 |
 | 数据集传输与导入页签 | [transfers-ui.js](../dist/transfers-ui.js)、[data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[cloud-import-ui.js](../dist/cloud-import-ui.js) | transfers-http / data-workspace / cloud-files / cloud-import |
 | 协作区 | [community-ui.js](../dist/community-ui.js)、[community.css](../dist/community.css) | community |
@@ -399,7 +400,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | 同步时间 / 陈旧样本 | 更新于 / 上次更新 / 状态待确认 |
 | 配额占用的内部状态枚举 | 占用额度，显示已确认事实 |
 | OCI 环境 | 个人容器 / 现有环境 |
-| archive / SSD / HDD / 归档盘 | 数据库长期保存原件；训练读取本机缓存 |
+| archive / SSD / HDD / 归档盘 | 数据仓库长期保存原件；训练读取服务器缓存 |
 | evict / GC | 释放空闲缓存，用时取回 |
 | 电脑直传云盘 | 先到服务器，再保存云端副本 |
 
@@ -413,9 +414,9 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | --- | --- | --- |
 | 生成训练版本 | publication.id等于本次key；publication为READY且release是完整有效哈希；releases里同一release也READY | 保留原账号/服务器/项目/key，先查原项目，明确重试同请求；已确认成功后新的独立发布才能换key |
 | 网页直传 | 最后datasets.upload.status对同uploadId为READY，dataset/version有效，totalBytes/entries等于begin本地清单；READY依赖后端完整SHA256校验 | 按节点offset续传；不符显示上传结果与本地清单不符，不标可用 |
-| 直传路线 | 核实路线与票据节点/端点/证书/路线一致；raw HTTPS Bearer票据、credentials omit、redirect error、no-store | 续签核对端点证书不变；失败不自动中转；超过256MiB中转明确同意 |
-| 数据库原件 | 匹配版本storage.phase=ARCHIVED，originalRetained=true，archiveMachine有值 | 不从服务器角色或目录缺失推断已保存/已释放；冲突/未知显示待确认 |
-| 缓存 | 真实location状态，加可准备性与原件证明 | 取回/存入无可信进度就不画百分比，线静止；无storage为仅本机缓存、未存入数据库 |
+| 直传路线 | 核实路线与票据节点/端点/证书/路线一致；raw HTTPS Bearer票据、credentials omit、redirect error、no-store | 续签核对端点证书不变；失败不自动中转；超过256MiB中转明确同意；文件块只在票据明确授权16MiB时按实际ACK耗时从1MiB自适应，清单和中转仍为1MiB |
+| 数据仓库原件 | 匹配版本storage.phase=ARCHIVED，originalRetained=true，archiveMachine有值 | 不从服务器角色或目录缺失推断已保存/已释放；冲突/未知显示待确认 |
+| 缓存 | 真实location状态，严格canUse与可准备性，加原件证明 | 取回/存入无可信进度就不画百分比，线静止；无storage为服务器缓存、未存入仓库 |
 | 缓存容量 | status/plan的enabled一致，plan.usageBytes/budgetBytes和真实高低水位 | disabled=自动释放未开启；不是实际磁盘占用，候选只是释放预览 |
 | 固定保留 | 管理员；真实location.dataset+完整版本；原pinId的manualPin.owner/present由服务器证明 | 本地记录刷新变待确认，先读原ID；pinCount只显示处数，不证明归属；仅解除确认的本人保留，不自动补写 |
 | 云端副本 | 对应上传/校验已VERIFIED，之后才能取回 | enabled=false说明不可用；未知先查原对象，不重新创建 |
@@ -428,6 +429,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 目录别名用于训练，缓存保留/删除使用location真实本地名称。账号/机器/项目/版本切换停止旧轮询并抛弃旧回复；缓存策略只在展开/明确刷新查询，隐藏房间停止storage RPC。
 
+主界面的管理员和普通成员使用相同仓库组件；只显示个人授权操作，不出现缓存策略、固定保留或云盘连接。独立 [admin-data-storage.js](../dist/admin-data-storage.js) 注册 storage/order20，只有管理后台确认角色并挂载时才读取全所属目录；离开或撤权先 abort 再清理。按机器删除读取新鲜全节点物理登记，固定保留仍绑定原 pinId，容量策略只在展开或显式刷新时读；全局目录可见性不授予任何管理权限。
+
 数据仓库允许启用的登录成员浏览全节点元数据，零机器额度仍可浏览。版本与位置的 `canUse` 表示本人使用授权；`READY` 只证明副本状态，不能单独解锁准备或训练。未授权版本简短标为“仅浏览”，不把生命周期画成“可用于训练”；容量、上传、训练和管理员操作仍分别鉴权，不因目录扩大而增加权限或暴露私有路径。
 
 全平台维护原因公开显示在登录页，输入旁保留提醒；单台原因只在登录后显示。账号、协作、指南、维护控制不被执行类维护拦截；管理员ROOT、host操作、只读、取消/断开/结束按现有规则放行。维护开关不会自动停止已有任务或节点。
@@ -436,13 +439,13 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 ## 9. 响应式与长名称
 
-1440/390/320是原生截图三档，流式布局还覆盖中间宽度与真实浏览器缩放。页面根不横向滚动；多服务器矩阵、原始进程表允许在有名称的内部面板滚动，固定名称列与外围操作不溢出。
+1440/390/320是原生截图三档，流式布局还覆盖中间宽度与真实浏览器缩放。页面根不横向滚动；仓库服务器筛选栏和原始进程表允许在有名称的内部面板滚动，列表与操作不溢出。
 
 服务器ID来自清单/目录，保留原值，不写死名字。巨型标题按容器缩放，上限160px，桌面下限56px、手机40px；不足则省略并提示完整名称。总控/上下文/矩阵标题省略；工作台server-id-head/tail可保留尾段，复制与完整详情不截断。
 
 759px为主要手机房间/抽屉边界。底栏是工作台、算力总览、数据集、协作区、我的，传输没有独立标签。成员/维护由我的或总控承接。总控胶囊与主操作同行，工作台不重复胶囊；内容为底栏、胶囊、安全区和真实控制层预留空间。
 
-触控目标至少44px，字形可以小，不能缩按钮规避目标。minmax(0,1fr)、min-width:0、有边界的换行/省略处理ID、用户名、数据集名、版本与命令。弹窗真实内部滚动，返回恢复焦点与原房间位置，不隐藏DOM冒充适配。
+触控目标至少44px，字形可以小，不能缩按钮规避目标。仓库搜索是用户明确指定的40px/14px例外；手机服务器操作仍至少44px，桌面缓存/重试统一32px/13px。minmax(0,1fr)、min-width:0、有边界的换行/省略处理ID、用户名、数据集名、版本与命令。弹窗真实内部滚动，返回恢复焦点与原房间位置，不隐藏DOM冒充适配。
 
 工作台展开项目、文件或主机运维表单时，右栏随页面滚动，避免高于可用视口的吸顶表单把操作停在总控条后面。共享toast宽度受`100vw - 32px`约束，长错误换行并保留全文；缩放后213–256 CSS像素也须可读。训练进度、指标与额度用流式网格，百分比按容器宽度缩放，不以隐藏状态或降低字级避开检查。
 

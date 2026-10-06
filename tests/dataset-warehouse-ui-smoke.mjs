@@ -21,7 +21,7 @@ const fullScan=process.env.DATA_FLOW_FULL_SCAN==='1',scans=[];
 const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH});
 try{
  await mkdir(output,{recursive:true});
- for(const role of ['member','admin'])for(const width of [1440,390,320])for(const zoom of fullScan&&width===1440?layoutZooms:[1]){
+ for(const role of ['member','admin'])for(const width of [1440,1024,390,320])for(const zoom of fullScan&&width===1440?layoutZooms:[1]){
   const context=await browser.newContext({viewport:{width,height:1000},deviceScaleFactor:zoom,reducedMotion:'reduce'}),page=await context.newPage();
   const principal={userId:'demo-user-1',username:'fixture-'+role,role},me={id:principal.userId,username:principal.username,name:role==='admin'?'管理员':'本地验收成员',role,enabled:true,total:8,limits:Object.fromEntries(machines.map(m=>[m.id,m.cards])),policyVersion:1};
   let scene='normal',pendingReads=[];
@@ -78,6 +78,7 @@ try{
    const after=await training.boundingBox();assert(Math.abs(before.y-after.y)<=1,'training footer does not move with the server/policy scroller');
    assert(await training.locator('[data-use-dataset]').isVisible());assert.equal(await training.locator('.v3-code').count(),2);
    const strip=await page.locator('#control-strip').boundingBox();assert(after.y+after.height<=strip.y-12,'training and both commands remain above the control strip');
+   const firstUse=await page.locator('.help-links').boundingBox();assert(firstUse.y+firstUse.height<=strip.y-12,'first-use caption is already above the fixed strip in the initial desktop viewport');
    await page.locator('.v3-detail-scroll').evaluate(node=>node.scrollTop=0);
    for(const node of await page.locator('.v3-server [data-v3-cache],.v3-server [data-remove-more]').all())assert.deepEqual(await node.evaluate(node=>({height:node.getBoundingClientRect().height,font:getComputedStyle(node).fontSize})),{height:32,font:'13px'});
    await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
@@ -100,6 +101,15 @@ try{
   assert(await page.locator('[data-v3-upload]').evaluate(node=>document.activeElement===node),'closing returns focus to upload');
   await page.locator('#warehouse-search').fill('campus-seg');assert.equal(await page.locator('[data-v3-select]').count(),1);
   await page.locator('#warehouse-search').fill('');
+  const keyboardCalls=calls.length,firstRow=page.locator('[data-v3-select]').first(),secondRow=page.locator('[data-v3-select]').nth(1),secondId=await secondRow.getAttribute('data-v3-select');
+  await firstRow.focus();await firstRow.press('ArrowDown');
+  assert.equal(await page.locator('[data-v3-select][aria-selected=true]').getAttribute('data-v3-select'),secondId);
+  const focus=await page.evaluate(()=>({tag:document.activeElement.tagName,id:document.activeElement.id,dataset:document.activeElement.dataset.v3Select||null}));
+  assert.equal(focus.dataset,secondId,'keyboard selection retains focus on the real row '+JSON.stringify({role,width,zoom,focus}));
+  await page.locator('#dataset-add-dialog').evaluate(dialog=>dialog.dispatchEvent(new Event('close')));
+  assert.equal(await secondRow.evaluate(row=>document.activeElement===row),true,'a delayed drawer close event must not steal focus from a newer dataset selection');
+  await secondRow.press('Home');assert.equal(await firstRow.getAttribute('aria-selected'),'true');
+  assert.equal(calls.length,keyboardCalls,'arrow selection does not cache data or submit training');
   await page.locator('[data-v3-filter]').nth(1).click();assert.equal(await page.locator('[data-v3-select]').count(),2);
   await page.locator('[data-v3-filter=""]').click();assert.equal(await page.locator('[data-v3-select]').count(),5);
   if(width<760){await page.locator('[data-v3-select="campus-seg"]').click();assert(await page.locator('[data-v3-back]').isVisible());assert.equal(await page.locator('.v3-inspector h2>span').textContent(),'校园场景分割');await page.locator('[data-v3-back]').click();assert(await page.locator('.v3-list').isVisible());}
