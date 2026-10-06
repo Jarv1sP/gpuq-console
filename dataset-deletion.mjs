@@ -519,13 +519,14 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       row.state='BLOCKED';row.error='管理员已请求恢复；旧删除编号不可重新执行。';save(row);
     }else if(confirmed&&row.steps.length&&row.steps.every(s=>s.result&&s.committed&&['ISOLATED','PURGED'].includes(s.state))){
       delete row.error;row.state='DELETED';row.retainUntil=Math.min(...row.steps.filter(s=>s.plan.complete).map(s=>s.result.retainUntil));delete row.error;save(row);
-    }else if(inProgress&&!uncertain||confirmed&&row.steps.length&&row.steps.every(s=>s.result&&s.state==='ISOLATED')){row.state='RUNNING';delete row.error;save(row);
+    }else if(inProgress&&!uncertain||confirmed&&row.steps.length&&row.steps.every(s=>s.result&&s.state==='ISOLATED')){
+      row.state=running.has(row.id)?'RUNNING':'WAITING_CONTINUE';delete row.error;save(row);
     }else if(!confirmed&&row.steps.some(s=>s.result)){
       row.state='UNKNOWN';row.error='节点当前结果未确认；仅查询原编号，不会重新执行。';save(row);
     }
     row.waitingWorker=inProgress;
     if(!row.cancelRequested&&(restarted.has(row.id)||row.state==='WAITING_CONTINUE')&&!['DELETED','CANCELED','BLOCKED','FAILED','UNKNOWN'].includes(row.state)){
-      row.state='WAITING_CONTINUE';row.error=inProgress?'节点仍在进行，请等待原工作进程结束。':'等待继续（门户已重启），请由管理员继续或取消删除。';save(row);
+      row.state='WAITING_CONTINUE';row.error=inProgress?'节点仍在进行，请等待原工作进程结束。':restarted.has(row.id)?'等待继续（门户已重启），请由管理员继续或取消删除。':'等待继续，请由管理员继续或取消删除。';save(row);
     }
     return publicTask(row);
   }
