@@ -131,6 +131,23 @@ test('retired external archive intent is an event only, never evidence of comple
   assert.ok(result.events.some(e=>e.action==='外部替代退役'&&e.state==='RETIRED'));
   assert.ok(writes(f).length>=hosts.length*2,'actual isolation still required');
 });
+test('external intent log names its fixed mode without exposing proof or using retirement as data deletion',async t=>{
+  for(const [mode,metadata] of [
+    ['same-HDD',{sourceMachine:hosts[0],sourceDataset:'personal',transferId:null,grantId:randomUUID(),certifyId:randomUUID()}],
+    ['queued-ingest-v1',{sourceMachine:hosts[1],sourceDataset:null,transferId:null,grantId:null,copyKey:randomUUID()}],
+    ['待确认',{sourceMachine:hosts[1]}],
+  ]){
+    const f=fixture(t);f.service.db.exec('CREATE TABLE storage_archives(data TEXT)');
+    f.service.db.prepare('INSERT INTO storage_archives VALUES(?)').run(JSON.stringify({id:'retired-intent',kind:'ingest',
+      machine:hosts[0],dataset:'personal',version,failureStage:'retired',phase:'FAILED',
+      retirement:{proofSha256:'e'.repeat(64)},...metadata}));
+    const {result}=await f.start();assert.equal(result.state,'DELETED');
+    assert.ok(result.events.some(e=>e.action===`归档意图退役（外部原语，模式 ${mode}）`&&e.state==='RETIRED'));
+    assert.equal(writes(f).filter(c=>c.op.endsWith('.isolate')).length,hosts.length);
+    assert.equal(writes(f).filter(c=>c.op.endsWith('.commit')).length,hosts.length);
+    assert.doesNotMatch(JSON.stringify(result),/proofSha256|grantId|certifyId|copyKey|retirement/);
+  }
+});
 test('unknown/in-flight copy mapping blocks deletion instead of guessing physical names',async t=>{
   const f=fixture(t);f.service.db.exec('CREATE TABLE dataset_copies(data TEXT)');
   f.service.db.prepare('INSERT INTO dataset_copies VALUES(?)').run(JSON.stringify({id:'copy',owner:principal.userId,target:hosts[1],source:hosts[0],dataset:'personal',sourceDataset:'personal',version,transferId:randomUUID()}));

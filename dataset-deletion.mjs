@@ -62,6 +62,19 @@ function parseReceipt(value,step,state='ISOLATED'){
     ||!same(value.authorityReferences,step.plan.authorityReferences)||!same(value.authorityAliases,step.plan.authorityAliases))fail('完整隔离回执或节点时间待确认。',502);
   return structuredClone(value);
 }
+function externalRetirementAction(archive){
+  if(archive.failureStage==='authority-retired')return '外部替代退役';
+  // The external lifecycle retains the fixed admission metadata. This is
+  // only a log label, never authorization, an absence proof or data isolation.
+  let mode='待确认';
+  if(archive.kind==='ingest'&&HASH.test(archive.retirement?.proofSha256||'')){
+    if(archive.sourceMachine===archive.machine&&archive.sourceDataset===archive.dataset
+      &&archive.transferId===null&&UUID.test(archive.grantId||'')&&UUID.test(archive.certifyId||''))mode='same-HDD';
+    else if(archive.sourceDataset===null&&archive.transferId===null&&archive.grantId===null
+      &&UUID.test(archive.copyKey||''))mode='queued-ingest-v1';
+  }
+  return `归档意图退役（外部原语，模式 ${mode}）`;
+}
 function publicTask(row){
   return {operationId:row.id,key:row.key,dataset:row.dataset,version:row.version,state:row.state,
     createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString(),
@@ -206,7 +219,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
   }
   async function inspect(row,principal,check){
     const view=graph(row);row.graphDigest=view.digest;save(row);
-    for(const record of view.records.filter(r=>r.kind==='external'))event(row,record.value.failureStage==='authority-retired'?'外部替代退役':'归档意图退役（外部原语）',record.value.machine,'RETIRED');
+    for(const record of view.records.filter(r=>r.kind==='external'))event(row,externalRetirementAction(record.value),record.value.machine,'RETIRED');
     const listings=new Map();
     for(const host of MACHINES){
       check();const listing=await service.bridge(host.id,'datasets.list',{userId:principal.userId,hostAdmin:principal.role==='admin'});check();
