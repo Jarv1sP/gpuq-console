@@ -69,17 +69,17 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   for(const child of connection.children)if(child.id!=='cloud-admin')child.hidden=true;
   const summary=connection.querySelector('#cloud-admin>summary'),caption=document.createElement('span');caption.textContent='云盘连接';summary.firstChild.replaceWith(caption);
   cloud=cloudImportUI(store,el,toast);cache=datasetCacheAdminUI(store,el,toast,{room:'admin'});
-  removals=datasetRemoveUI(store,el,toast,{reload:load,catalog:()=>catalog,readCatalog:read});
+  removals=datasetRemoveUI(store,el,toast,{reload:load,catalog:()=>catalog,readCatalog:read,management:true});
   async function read(machine){
     if(!allowed()||!store.production)throw Error('需要管理员权限');
     const expected=actor(),token=epoch,machines=(store.data?.machines||[]).map(row=>({...row})),listings=[];
     // The portal allows at most four concurrent directory reads. Three here
     // leave a slot for a read already in progress elsewhere in the shell.
     for(let i=0;i<machines.length;i+=3){
-      const rows=await Promise.all(machines.slice(i,i+3).map(async row=>{try{const value=await store.call('datasets.list',{machine:row.id,includeEmpty:true});return {machine:row.id,state:'ok',datasets:value?.datasets};}catch{return {machine:row.id,state:'unavailable'};}}));
+      const rows=await Promise.all(machines.slice(i,i+3).map(async row=>{try{const value=await store.call('datasets.list',{machine:row.id,includeEmpty:true},{signal:lifecycle.signal});return {machine:row.id,state:'ok',datasets:value?.datasets};}catch{return {machine:row.id,state:'unavailable'};}}));
       if(!allowed()||expected!==actor()||token!==epoch)throw Error('账号或页面已改变');listings.push(...rows);
     }
-    let personal=null;try{personal=await store.call('datasets.catalog',{machine});}catch{}
+    let personal=null;try{personal=await store.call('datasets.catalog',{machine},{signal:lifecycle.signal});}catch{}
     if(!allowed()||expected!==actor()||token!==epoch)throw Error('账号或页面已改变');
     return adminDatasetCatalog(machine,machines,listings,personal);
   }

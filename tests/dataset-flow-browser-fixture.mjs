@@ -70,7 +70,7 @@ try{
   async function pageFor(role,zoom=1){const context=await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:zoom,permissions:['clipboard-read','clipboard-write']});await context.route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());assert.equal(url.origin,origin);if(url.pathname==='/api/call'&&mode==='error'&&route.request().postDataJSON()?.operation==='datasets.catalog')return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false,error:'本地模拟目录查询失败'})});return route.continue();}));const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));await page.goto(origin+'/#datasets');await login(page,role==='admin'?'admin':role==='zero'?zero.username:member.username);return page;}
   async function load(page){if(!await page.locator('#datasets-refresh').isVisible()&&await page.locator('[data-v3-back]').isVisible())await page.locator('[data-v3-back]').click();await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);}
   async function detail(page,dataset){const row=page.locator('[data-v3-select="'+dataset+'"]');if(!await row.isVisible()&&await page.locator('[data-v3-back]').isVisible())await page.locator('[data-v3-back]').click();await row.click();await page.locator('#warehouse-inspector .v3-train').waitFor();}
-  async function sourceSheet(page,source){if(!await page.locator('#dataset-add-dialog').isVisible())await page.locator('[data-v3-upload]').first().click();if(source==='directory'){const tab=page.locator('[data-dataset-source=directory]');if(await tab.isVisible())await tab.click();}else await page.locator('[data-v3-source="'+source+'"]').click();}
+  async function sourceSheet(page,source){if(!await page.locator('#dataset-add-dialog').isVisible())await page.locator('[data-v3-upload]').first().click();if(source==='directory'){const tab=page.locator('[data-dataset-source=directory]');if(await tab.isVisible())await tab.click();}else {const tab=page.locator('[data-dataset-source="'+source+'"]');if(await tab.isVisible())await tab.click();else await page.locator('[data-v3-source="'+source+'"]').click();}}
   async function storage(page){await page.evaluate(()=>{location.hash='admin/storage';});await page.locator('#page-admin .admin-data-storage').waitFor();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);}
 
   async function check(page,label,width){await page.setViewportSize({width,height:width<760?900:1000});await page.evaluate(async()=>{for(const animation of document.getAnimations())if(Number.isFinite(animation.effect?.getComputedTiming().endTime))animation.finish();await new Promise(resolve=>requestAnimationFrame(resolve));});const result=await inspectGeometry(page,geometry);geometries.push({label,...result});await writeFile(join(out,'key-geometry.json'),JSON.stringify(geometries,null,2));assert.ok(result.pass,JSON.stringify({label,failures:result.failures}));}
@@ -99,7 +99,7 @@ try{
   assert.equal(await memberPage.locator('.v3-store>code').getAttribute('title'),database);
   assert.equal(await memberPage.locator('.v3-server-text>b[title="'+source+'"]+span').textContent(),'取回失败');
   await detail(memberPage,'validation');assert.equal(await memberPage.locator('.v3-store>span:last-of-type').textContent(),'正在存入仓库');
-  assert.equal(await memberPage.locator('.v3-strata.storing').evaluate(node=>node.getAnimations().length),0,'unverified copying has no fabricated animation or progress');
+  assert.equal(await memberPage.locator('.v3-strata.storing').evaluateAll(nodes=>nodes.reduce((count,node)=>count+node.getAnimations().length,0)),0,'unverified copying has no fabricated animation or progress in either the list or detail');
   await detail(memberPage,'tiny-local');assert.equal(await memberPage.locator('.v3-store>span:last-of-type').textContent(),'未存入仓库');
   assert.doesNotMatch(await memberPage.locator('#warehouse-inspector').innerText(),/已释放|\d+%|SSD|HDD|NVMe|归档|GC/);
   const readyIcon=memberPage.locator('.v3-server.cur .v3-g.ready');assert.equal(await readyIcon.evaluate(node=>node.getBoundingClientRect().width),10,'v3 uses the compact ready glyph from the approved warehouse design');assert.notEqual(await readyIcon.evaluate(node=>getComputedStyle(node).backgroundColor),'rgba(0, 0, 0, 0)');
@@ -110,20 +110,20 @@ try{
   await memberPage.emulateMedia({reducedMotion:'reduce'});await sourceHeader.focus();assert.equal(await memberPage.locator('.v3-g').first().evaluate(node=>node.getAnimations().length),0);await memberPage.locator('#datasets-refresh').focus();await memberPage.emulateMedia({reducedMotion:'no-preference'});
   for(const [phase,label] of [['QUEUED','等待存入仓库'],['PROVISIONING','校验中'],['CERTIFYING','检查恢复能力'],['FAILED','存入失败'],['BLOCKED','待确认']]){
     databasePhase=phase;await load(memberPage);await detail(memberPage,'validation');assert.equal(await memberPage.locator('.v3-store>span:last-of-type').textContent(),label);assert.doesNotMatch(await memberPage.locator('#warehouse-inspector').innerText(),/\d+%|已存入仓库/);
-    for(const width of [1440,390,320]){await check(memberPage,'database-'+phase,width);if(width<760)await detail(memberPage,'validation');await captureComponent(memberPage,'.warehouse-v3','database-'+phase+'-'+width);}
+    for(const width of [1440,1024,390,320]){await check(memberPage,'database-'+phase,width);if(width<760)await detail(memberPage,'validation');await captureComponent(memberPage,'.warehouse-v3','database-'+phase+'-'+width);}
   }
   databasePhase=null;await load(memberPage);await detail(memberPage,'scans');
   assert.equal(await memberPage.locator('.v3-server.cur .v3-server-text>span').textContent(),'取回中');assert.equal(await memberPage.locator('.v3-server.cur [data-v3-cache]').count(),0,'active retrieval is not resubmitted');
   assert.equal(await memberPage.locator('.v3-server-text>b[title="'+source+'"]+span').textContent(),'已缓存');
   assert.equal(await memberPage.locator('.v3-server.cur .v3-g.fetch').evaluate(node=>node.getAnimations().length),0,'retrieval remains static without real progress');
   assert.doesNotMatch(await memberPage.locator('#warehouse-inspector').innerText(),/\d+%/);
-  for(const width of [1440,390,320]){await memberPage.setViewportSize({width,height:1000});await detail(memberPage,'scans');await check(memberPage,'preparing-details',width);await captureComponent(memberPage,'.warehouse-v3','member-preparing-details-'+width);}
+  for(const width of [1440,1024,390,320]){await memberPage.setViewportSize({width,height:1000});await detail(memberPage,'scans');await check(memberPage,'preparing-details',width);await captureComponent(memberPage,'.warehouse-v3','member-preparing-details-'+width);}
   await detail(memberPage,'tiny-local');await memberPage.locator('[data-v3-copy="'+hash+'"]').click();assert.equal(await memberPage.evaluate(()=>navigator.clipboard.readText()),hash,'copy always includes the full immutable version');
   assert.deepEqual(await memberPage.locator('.v3-train .v3-code code').allTextContents(),['--data tiny-local@'+hash,'/data2/tiny-local']);assert.equal(await memberPage.locator('.v3-train .v3-lock').textContent(),'只读');
   await memberPage.setViewportSize({width:1440,height:1000});
   for(const source of ['directory','link','workspace']){
     await sourceSheet(memberPage,source);
-    for(const width of [1440,390,320]){await check(memberPage,'sheet-'+source,width);await capture(memberPage,'sheet-'+source+'-'+width);}
+    for(const width of [1440,1024,390,320]){await check(memberPage,'sheet-'+source,width);await capture(memberPage,'sheet-'+source+'-'+width);}
   }
   assert.equal(await memberPage.locator('.dataset-sheet-head .data-workspace-footnote').textContent(),'上传前请确认磁盘容量；停止上传会保留已收到的文件片段。');
   assert.equal(await memberPage.locator('.data-workspace-card>.ui-info,.data-workspace-card>.data-workspace-footnote,.dataset-upload-notes').count(),0);
@@ -133,13 +133,13 @@ try{
   assert.equal(calls.length,helpCalls,'opening the preserved explanation sends no node request');
   await memberPage.keyboard.press('Escape');assert.equal(await memberPage.locator('#dataset-add-dialog').getAttribute('open'),'');
   await helpButton.click();
-  for(const width of [1440,390,320])await check(memberPage,'bounded-tooltip',width);
+  for(const width of [1440,1024,390,320])await check(memberPage,'bounded-tooltip',width);
   await memberPage.keyboard.press('Escape');assert.equal(await memberPage.locator('.copy-help-popup:popover-open').count(),0);assert.equal(await memberPage.locator('#dataset-add-dialog').getAttribute('open'),'');await memberPage.keyboard.press('Escape');
   await memberPage.locator('#dataset-add-dialog').waitFor({state:'hidden'});
   assert.equal(await memberPage.locator('.datasets-ledger-strip').count(),0,'no GPU or database statistics ledger returns after closing upload');
   const adminPage=await pageFor('admin');await load(adminPage);await checkDatasetBodyHelpRegressions(adminPage);assert.equal(await adminPage.locator('.dataset-cache-admin,[data-cache-retention],[data-remove-more]').count(),0,'administrators see the same personal main view');await storage(adminPage);await adminPage.locator('#dataset-cache-admin>summary').click();await adminPage.waitForFunction(()=>document.querySelector('.dataset-cache-gauges')?.children.length===4);assert.equal(await adminPage.locator('[data-budget-state=high]').count(),1);assert.equal(await adminPage.locator('[data-budget-state=disabled]').count(),1);assert.match(await adminPage.locator('.dataset-cache-previews').innerText(),/超过高水位时将释放（预览，不会立即删除）/);assert.equal(await adminPage.locator('.dataset-cache-previews button').count(),0);
   const adminLocal=adminPage.locator('.admin-storage-row').filter({has:adminPage.locator('[data-cache-pin-slot][data-dataset="local-samples"]')});await adminLocal.locator('.dataset-version-details>summary').click();await adminLocal.locator('[data-cache-retention=pin]').waitFor({state:'visible'});await adminPage.waitForFunction(()=>!document.querySelector('[data-cache-pin-slot][data-dataset="local-samples"] [data-cache-retention=pin]').disabled);assert.equal(await adminLocal.locator('[data-cache-retention=unpin]').count(),0,'foreign pin count provides no generic unpin');
-  for(const width of [1440,390,320]){await check(adminPage,'retention-details',width);await captureComponent(adminPage,'.admin-storage-row:has([data-cache-pin-slot][data-dataset="local-samples"])','admin-retention-'+width);}
+  for(const width of [1440,1024,390,320]){await check(adminPage,'retention-details',width);await captureComponent(adminPage,'.admin-storage-row:has([data-cache-pin-slot][data-dataset="local-samples"])','admin-retention-'+width);}
   pinReply='lost';await adminLocal.locator('[data-cache-retention=pin]').click();await adminLocal.locator('[data-cache-retention=retry]').waitFor();await adminLocal.locator('.form-error').waitFor();assert.match(await adminLocal.locator('.dataset-pin-status').innerText(),/结果未确认/);assert.equal(await adminLocal.locator('[data-cache-retention=retry]').isDisabled(),true);
   await adminPage.reload();await storage(adminPage);await adminLocal.locator('.dataset-version-details>summary').click();await adminLocal.locator('.form-error').waitFor();assert.equal(await adminLocal.locator('[data-cache-retention=pin]').count(),0);assert.equal(await adminLocal.locator('[data-cache-retention=retry]').isDisabled(),true);
   pinReply='normal';await adminLocal.getByRole('button',{name:'重新查询',exact:true}).click();await adminLocal.locator('[data-cache-retention=unpin]').waitFor();const writes=calls.filter(row=>row.operation==='datasets.storage.pin');assert.equal(writes.length,1,'reload and query never recreate a pin');assert.match(writes[0].args.pinId,/^manual-/);assert.equal(writes[0].args.dataset,'local-samples');assert.equal(writes[0].args.version,hash);assert.equal(writes[0].machine,target);
@@ -156,7 +156,7 @@ try{
   await adminPage.locator('#room-nav [data-nav=datasets]').click();await load(adminPage);
   for(const source of ['directory','link','workspace']){
     await sourceSheet(adminPage,source);
-    for(const width of [1440,390,320]){await check(adminPage,'admin-sheet-'+source,width);await capture(adminPage,'admin-sheet-'+source+'-'+width);}
+    for(const width of [1440,1024,390,320]){await check(adminPage,'admin-sheet-'+source,width);await capture(adminPage,'admin-sheet-'+source+'-'+width);}
   }
   await adminPage.locator('[data-dataset-add-close]').click();await adminPage.locator('#dataset-add-dialog').waitFor({state:'hidden'});
   const actors=[{role:'member',views:[{zoom:1,page:memberPage}]},{role:'admin',views:[{zoom:1,page:adminPage}]}];
@@ -190,7 +190,7 @@ try{
     for(const {page} of views){
       if(state==='loading'){await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>document.querySelector('#datasets-status').textContent.includes('加载中'));}else await load(page);
       await page.locator('#refresh-state').click();await page.waitForFunction(()=>!document.querySelector('#refresh-state').disabled);
-      for(const width of [1440,390,320]){await check(page,role+'-'+state,width);await capture(page,role+'-'+state+'-'+width);}
+      for(const width of [1440,1024,390,320]){await check(page,role+'-'+state,width);await capture(page,role+'-'+state+'-'+width);}
       if(state==='unknown'){assert.equal(await page.locator('[data-v3-cache]:enabled,[data-use-dataset]:enabled').count(),0,'unknown observations grant no action');assert.match(await page.locator('#dataset-catalog').innerText(),/待确认/);}
       if(state==='error')assert.equal(await page.locator('[data-v3-select]').count(),0,'failed refresh clears stale catalog actions');
     }
@@ -210,15 +210,15 @@ try{
   assert.equal(await zeroPage.locator('#datasets-capacity').isVisible(),false);
   assert.equal(await zeroPage.locator('#datasets-add>summary').getAttribute('aria-disabled'),'true');
   assert.equal(await zeroPage.locator('#datasets-add>summary').evaluate(node=>getComputedStyle(node).opacity),'0.5');
-  await zeroPage.locator('#datasets-add>summary').click();assert.equal(await zeroPage.locator('#dataset-add-dialog').isVisible(),false);
+  assert.equal(await zeroPage.locator('[data-v3-upload]').first().isDisabled(),true);await zeroPage.locator('[data-v3-upload]').first().evaluate(button=>{button.disabled=false;button.click();button.disabled=true;});assert.equal(await zeroPage.locator('#dataset-add-dialog').isVisible(),false);
   assert.equal(await zeroPage.locator('[data-use-dataset]:enabled,[data-v3-cache]:enabled,.v3-edit:enabled,[data-retry-archive],[data-remove-more],[data-remove-confirm]').count(),0);await detail(zeroPage,'tiny-local');assert.equal(await zeroPage.locator('[data-use-dataset]').isDisabled(),true);const deniedClicks=calls.length;await zeroPage.locator('[data-use-dataset]').evaluate(button=>{button.disabled=false;button.click();button.disabled=true;});assert.equal(calls.length,deniedClicks,'DOM tampering cannot bypass zero execution authority');assert.equal(await zeroPage.locator('#work-submit').isVisible(),false);
   assert.ok(calls.slice(zeroCalls).every(row=>row.operation==='datasets.list'),'Browsing zero-quota metadata makes no capacity, storage, preparation or execution RPC');
-  for(const width of [1440,390,320]){await check(zeroPage,'zero-quota-library',width);await capture(zeroPage,'zero-quota-library-'+width);}
+  for(const width of [1440,1024,390,320]){await check(zeroPage,'zero-quota-library',width);await capture(zeroPage,'zero-quota-library-'+width);}
   const zeroAuth=await service.login(zero.username,password),beforeDenied=calls.length;
   for(const operation of ['status','plan','pin','unpin'])await assert.rejects(service.invoke(zeroAuth.token,'datasets.storage.'+operation,operation==='plan'?{machine:target}:{...ref,...(['pin','unpin'].includes(operation)?{pinId:'manual-local-denied-fixture'}:{})}),error=>error.status===403);
   assert.equal(calls.length,beforeDenied,'zero-authority member is rejected before any node operation');
   assert.ok(calls.filter(row=>row.operation.startsWith('datasets.storage.')).every(row=>row.args.userId===admin.principal.userId),'members never issue storage admin operations');
-  assert.deepEqual(errors,[]);await writeFile(join(out,'contract.json'),JSON.stringify({status:'PASS',inventory:MACHINES.map(row=>row.id),memberStorageCalls:0,pinCalls:calls.filter(row=>row.operation==='datasets.storage.pin').length,physicalCache:'local-samples',reloadReadOnlyRecovery:true,retainedForeignPins:1,identityBoundPinRecovery:true,noBackgroundStorageRPC:true,zeroAuthorityDenied:4,errors,stateScreenshots:36,sheetScreenshots:18,geometry:geometries.length,fullScan:process.env.DATA_FLOW_FULL_SCAN==='1'},null,2));
+  assert.deepEqual(errors,[]);await writeFile(join(out,'contract.json'),JSON.stringify({status:'PASS',inventory:MACHINES.map(row=>row.id),memberStorageCalls:0,pinCalls:calls.filter(row=>row.operation==='datasets.storage.pin').length,physicalCache:'local-samples',reloadReadOnlyRecovery:true,retainedForeignPins:1,identityBoundPinRecovery:true,noBackgroundStorageRPC:true,zeroAuthorityDenied:4,errors,stateScreenshots:48,sheetScreenshots:24,geometry:geometries.length,fullScan:process.env.DATA_FLOW_FULL_SCAN==='1'},null,2));
   console.log('WAREHOUSE/STORAGE UI PASS: true original and cache observations, static unverified retrieval, exact full versions, moved admin policy and pin recovery, zero authority and all six Portal states × two roles × three widths.');
 }catch(error){console.error('FIXTURE DEBUG',JSON.stringify({errors,calls:calls.filter(row=>row.operation.startsWith('datasets.storage.')).slice(-12),pages:browser?await Promise.all(browser.contexts().flatMap(c=>c.pages()).map(p=>p.locator('[data-cache-pin-slot]').allTextContents())):[]}));throw error;}finally{releaseGate?.();if(browser)await Promise.all(browser.contexts().map(closeRoutedContext));await browser?.close();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(dir,{recursive:true,force:true});}
 

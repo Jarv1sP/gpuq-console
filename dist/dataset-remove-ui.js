@@ -103,7 +103,6 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
 export function datasetRemoveUI(store,section,toast,{reload,catalog,readCatalog,management}={}){
   let storage;try{storage=globalThis.localStorage;}catch{}
   let dialog=null,confirmation=null,serial=0,updating=false;
-  const room=section.dataset.adminStorage!==undefined?'admin':'datasets';
   const originals=new WeakMap();
   const resolving=new WeakSet();
   const localReferences=new Map();

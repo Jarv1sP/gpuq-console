@@ -55,6 +55,9 @@ try{
       if(url.origin!==origin&&!['data:','blob:'].includes(url.protocol)){outside.push(url.href);await route.abort();return;}
       const reply=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
       if(url.pathname==='/machines.js'){await route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(MACHINES)+';'});return;}
+      // Isolate the frame's zero/one registrations; real storage mounting is
+      // exercised by the dataset/admin storage acceptance entry.
+      if(url.pathname==='/admin-data-storage.js'){await route.fulfill({contentType:'text/javascript',body:'export function registerDatasetStorageAdmin(){}'});return;}
       if(url.pathname==='/api/login'){
         if(heldLogin)await heldLogin.promise;
         logged=true;await reply({principal:actor,state:state()});return;

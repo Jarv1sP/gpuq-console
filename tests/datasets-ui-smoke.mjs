@@ -326,23 +326,26 @@ try {
   // then require cancellation as well as the original stale-intent assertions.
   const oldReply=heldDelivery;
   releaseLookup();await oldReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
-  assert.equal(await heldRequest.response(),null,'switching server cancels the older lookup');assert.ok(heldRequest.failure());
+  assert.ok((await heldRequest.response())===null,'switching server cancels the older lookup');assert.ok(heldRequest.failure());
   assert.equal(await member.locator('#train-form [name=machine]').inputValue(),'gpu-2','An old node lookup cannot restore its server');
   assert.equal(await member.locator('#train-form [name=datasets]').inputValue(),'another@'+version,'The newest node and fixed version remain paired');
 
   // Native/programmatic close must cancel pending selection, not only its button.
   await member.locator('#close-submit').click();await member.locator('#work-submit').waitFor({state:'hidden'});
-  await Promise.all([member.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.catalog'),member.locator('#context-machine').selectOption('gpu-1')]);
+  await setDatasetMachine(member,'gpu-1');
   const closedHeld=new Promise(resolve=>{notifyHeld=resolve;});holdLookup=true;
   // The existing submit sheet is modal, so use the same delegated UI event as
   // the real dataset button without changing the sheet's native close behavior.
   await member.evaluate(ref=>document.dispatchEvent(new CustomEvent('gpuq-open-submit',{detail:{machine:'gpu-1',datasetRef:ref}})),'sample@'+version);
   try{await Promise.race([closedHeld,new Promise((_,reject)=>{heldTimeout=setTimeout(()=>reject(new Error('The close-race choice must request projects')),10000);})]);}
   finally{clearTimeout(heldTimeout);}
+  // close() on a closed dialog is a no-op; establish the actual native transition.
+  await member.evaluate(()=>document.querySelector('#work-submit').showModal());
+  assert.equal(await member.locator('#work-submit').evaluate(dialog=>dialog.open),true,'Native-close fixture starts open');
   await member.evaluate(()=>document.querySelector('#work-submit').close());await member.locator('#work-submit').waitFor({state:'hidden'});
   const closedReply=heldDelivery;
   releaseLookup();await closedReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
-  assert.equal(await heldRequest.response(),null,'native close cancels the pending lookup');assert.ok(heldRequest.failure());
+  assert.ok((await heldRequest.response())===null,'native close cancels the pending lookup');assert.ok(heldRequest.failure());
   assert.equal(await member.locator('#work-submit').isVisible(),false,'A late lookup must not reopen a generically closed submit sheet');
   console.log('DATASETS UI PASS: full metadata catalogs with explicit owner-use gates; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; zero HTTP or browser errors and no external requests.');
   console.log(`Screenshots: ${screenshots}`);

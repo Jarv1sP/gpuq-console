@@ -17,7 +17,7 @@ const geometry={roots:['.admin-data-storage'],numericCells:['.dataset-volume'],c
 const records=[];
 try{
   await mkdir(out,{recursive:true});
-  for(const role of ['member','admin'])for(const width of [1440,390,320]){
+  for(const role of ['member','admin'])for(const width of [1440,1024,390,320]){
     const context=await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'}),page=await context.newPage(),calls=[],errors=[],pins=new Set(['foreign-pin']);let losePin=false,denyPinStatus=false;
     page.on('pageerror',error=>errors.push(error.message));
     await context.route('**/*',async route=>{
