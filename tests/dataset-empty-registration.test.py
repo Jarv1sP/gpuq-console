@@ -48,6 +48,164 @@ class EmptyRegistrationTests(unittest.TestCase):
         self.assertTrue((self.cache._paths(self.dataset)['.registry']/'dataset.json').is_file())
         self.assertEqual(self.starts, [])
 
+    def reserved_session(self, owner='demo-user-99', name='unrelated', *, sealed=False, state='UPLOADING'):
+        upload = str(uuid.uuid4())
+        parent = self.cache.root/'.uploads'/hashlib.sha256(owner.encode()).hexdigest()/upload
+        self.module._mkdir(parent.parent.parent); self.module._mkdir(parent.parent); self.module._mkdir(parent)
+        session = dict(schema=1, userId=owner, uploadId=upload, name=name, state=state,
+                       manifestBytes=100, manifestSha256='a'*64, totalBytes=700, entries=2,
+                       reserveBytes=700+100*4+2*8192+65536)
+        path = parent/'session.json'; self.module._write_json(path, session)
+        key = hashlib.sha256(json.dumps([owner, upload], separators=(',', ':')).encode()).hexdigest()+'.json'
+        reservation = self.cache.root/'.upload-reservations'/key
+        value = dict(bytes=session['reserveBytes']-(session['totalBytes'] if sealed else 0), inodes=18)
+        self.module._write_json(reservation, value)
+        return path, session, reservation, value
+
+    def proof(self):
+        with self.cache._locked(): return self.cache._empty_unregister_snapshot(self.admin, self.dataset)
+
+    def test_trusted_same_and_foreign_owner_reservations_are_preserved(self):
+        rows = [self.reserved_session(self.user.user_id, sealed=False),
+                self.reserved_session('demo-user-99', sealed=True)]
+        before = [(path.read_bytes(), path.stat(), reserve.read_bytes(), reserve.stat())
+                  for path, session, reserve, value in rows]
+        result = self.request(); self.assertEqual(self.node.dataset_worker(result['operationId']), 0)
+        for row, expected in zip(rows, before):
+            path, session, reserve, value = row
+            self.assertEqual((path.read_bytes(), path.stat(), reserve.read_bytes(), reserve.stat()), expected)
+        self.assertEqual(self.module._read_json(self.tier), self.cache._default_tier())
+
+    def test_target_reservation_is_not_safe_even_with_discarded_receipt(self):
+        path, session, reserve, value = self.reserved_session(self.user.user_id, 'discarded', state='DISCARDED')
+        with self.assertRaisesRegex(ValueError, 'reservation prevents'): self.request()
+        self.assert_kept(); self.assertEqual(self.module._read_json(reserve), value)
+
+    def test_reservation_reverse_identity_and_budget_refuse_unknown(self):
+        changes = [dict(schema=True), dict(userId='unknown'), dict(uploadId=str(uuid.uuid4())),
+                   dict(name='../other'), dict(state='UNKNOWN'), dict(manifestBytes=0),
+                   dict(manifestBytes=self.module.MAX_JSON_BYTES+1), dict(manifestSha256='bad'),
+                   dict(totalBytes=-1), dict(entries=self.module.MAX_ENTRIES+1), dict(entries=True),
+                   dict(reserveBytes=1), dict(dataset='unrelated'), dict(version='bad'),
+                   dict(archiveAdmission={})]
+        path, session, reserve, value = self.reserved_session()
+        for change in changes:
+            with self.subTest(change=change):
+                self.module._write_json(path, {**session, **change})
+                with self.assertRaises(ValueError): self.request()
+                self.assert_kept(); self.assertEqual(self.module._read_json(reserve), value)
+        self.module._write_json(path, session)
+        for changed in ({'bytes': value['bytes']}, {**value, 'inodes': 17}, {**value, 'bytes': True},
+                        {**value, 'bytes': 2**63}, {**value, 'unexpected': 1}):
+            with self.subTest(reservation=changed):
+                self.module._write_json(reserve, changed)
+                with self.assertRaisesRegex(ValueError, 'budget'): self.request()
+                self.assert_kept()
+
+    def test_orphan_moved_missing_and_unsafe_reservation_metadata_refuse(self):
+        path, session, reserve, value = self.reserved_session()
+        original = reserve.read_bytes()
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, 'missing'): self.request()
+        self.assert_kept()
+        self.module._write_json(path, session)
+        wrong = reserve.with_name('e'*64+'.json'); reserve.rename(wrong)
+        with self.assertRaisesRegex(ValueError, 'unconfirmed upload reservations'): self.request()
+        wrong.rename(reserve)
+        linked = reserve.with_name('link'); os.link(reserve, linked)
+        with self.assertRaises((ValueError, OSError)): self.request()
+        linked.unlink()
+        os.chmod(reserve, 0o644)
+        with self.assertRaisesRegex(ValueError, 'unsafe'): self.request()
+        os.chmod(reserve, 0o600)
+        reserve.unlink(); reserve.symlink_to(path)
+        with self.assertRaises(OSError): self.request()
+        reserve.unlink(); reserve.write_bytes(original); os.chmod(reserve, 0o600)
+        temp = reserve.with_name('.write-'+'f'*32); temp.write_text('{}'); os.chmod(temp, 0o600)
+        with self.assertRaisesRegex(ValueError, 'unconfirmed upload reservations'): self.request()
+        self.assert_kept()
+
+    def test_reverse_scan_rejects_duplicate_and_changed_directory_membership(self):
+        path, session, reserve, value = self.reserved_session()
+        parent_inode = path.parent.parent.stat().st_ino
+        original = os.listdir
+        def duplicate(fd):
+            rows = original(fd)
+            return rows+rows if isinstance(fd, int) and os.fstat(fd).st_ino == parent_inode else rows
+        with patch.object(self.module.os, 'listdir', side_effect=duplicate), self.assertRaisesRegex(ValueError, 'duplicate'):
+            self.request()
+        changed = False
+        def late_member(fd):
+            nonlocal changed
+            rows = original(fd)
+            if isinstance(fd, int) and os.fstat(fd).st_ino == parent_inode and not changed:
+                changed = True
+                self.module._mkdir(path.parent.parent/str(uuid.uuid4()))
+            return rows
+        with patch.object(self.module.os, 'listdir', side_effect=late_member), self.assertRaisesRegex(ValueError, 'unconfirmed upload reservations'):
+            self.request()
+        self.assert_kept()
+
+    def test_late_target_or_orphan_reservation_rejects_final_move(self):
+        expected = self.proof()
+        def late_dependency(transaction): self.reserved_session(self.user.user_id, 'discarded')
+        with patch.object(self.cache, '_unregister_cleanup', side_effect=late_dependency), self.assertRaisesRegex(ValueError, 'reservation prevents'):
+            self.cache.unregister(self.admin, self.dataset, _portal_proved_versions=[], _expected_empty_registration=expected)
+        self.assertTrue(self.cache._paths(self.dataset)['.registry'].exists())
+
+    def test_late_orphan_reservation_before_worker_refuses_without_replaying(self):
+        result = self.request()
+        path = self.cache.root/'.upload-reservations'/('e'*64+'.json')
+        self.module._write_json(path, dict(bytes=1, inodes=16))
+        self.assertEqual(self.node.dataset_worker(result['operationId']), 1)
+        self.assertTrue(self.cache._paths(self.dataset)['.registry'].exists())
+        self.assertEqual(self.module._read_json(path), dict(bytes=1, inodes=16))
+        self.assertEqual(len(self.starts), 1)
+
+    def test_private_session_parent_hash_links_and_scan_budget_refuse(self):
+        path, session, reserve, value = self.reserved_session()
+        parent = path.parent.parent; wrong = parent.with_name('e'*64)
+        parent.rename(wrong)
+        with self.assertRaisesRegex(ValueError, 'ownership'): self.request()
+        wrong.rename(parent)
+        outside = self.base/'outside-upload-session.json'; outside.write_bytes(path.read_bytes())
+        path.unlink(); path.symlink_to(outside)
+        with self.assertRaises(OSError): self.request()
+        path.unlink(); self.module._write_json(path, session)
+        linked = path.with_name('extra'); os.link(path, linked)
+        with self.assertRaises((ValueError, OSError)): self.request()
+        linked.unlink()
+        inode = parent.stat().st_ino; original = os.listdir
+        def over_budget(fd):
+            return ['f'*64]*10001 if isinstance(fd, int) and os.fstat(fd).st_ino == inode else original(fd)
+        with patch.object(self.module.os, 'listdir', side_effect=over_budget), self.assertRaisesRegex(ValueError, 'entry budget'):
+            self.request()
+        self.assert_kept(); self.assertEqual(self.module._read_json(reserve), value)
+
+    def test_archive_reservation_uses_upload_load_identity_without_side_effects(self):
+        path, session, reserve, value = self.reserved_session()
+        lane = dict(schema=1, transferId=session['uploadId'], targetMachine='node-a', authority='node-b',
+                    sourceMachine='node-b', reference=dict(kind='datasets', dataset='original-data', version='f'*64))
+        session['archiveAdmission'] = lane; self.module._write_json(path, session)
+        loaded = self.node.dataset_uploads().load(session['userId'], session['uploadId'])
+        self.assertEqual(loaded, session)
+        before = path.read_bytes(), reserve.read_bytes()
+        self.proof(); self.assertEqual((path.read_bytes(), reserve.read_bytes()), before)
+        for change in (dict(schema=True), dict(transferId=str(uuid.uuid4())), dict(sourceMachine='node-a'),
+                       dict(reference=dict(kind='projects', dataset='original-data', version='f'*64))):
+            session['archiveAdmission'] = {**lane, **change}; self.module._write_json(path, session)
+            with self.assertRaisesRegex(ValueError, 'archive identity'): self.request()
+            self.assert_kept()
+
+    def test_unrelated_progress_is_reproved_not_frozen_as_static_metadata(self):
+        path, session, reserve, value = self.reserved_session()
+        expected = self.proof()
+        self.assertFalse(any(item[0].startswith('.uploads/') or item[0].startswith('.upload-reservations/') for item in expected['dependencies']))
+        def progress(transaction): self.module._write_json(path, {**session, 'state': 'PUBLISHING', 'updatedAt': 500})
+        with patch.object(self.cache, '_unregister_cleanup', side_effect=progress):
+            result = self.cache.unregister(self.admin, self.dataset, _portal_proved_versions=[], _expected_empty_registration=expected)
+        self.assertTrue(result['unregistered']); self.assertEqual(self.module._read_json(reserve), value)
+
     def test_normal_worker_moves_only_registry_retains_default_tier_and_queries_original_receipt(self):
         before = self.tier.read_bytes(), self.tier.stat()
         result = self.request(version=None)
