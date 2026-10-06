@@ -17,6 +17,7 @@
 .sb .resource-id-label{display:inline-block;line-height:1;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
 .sb .resource-id-label.resource-id-wrap{white-space:normal;overflow-wrap:anywhere}
 .sb .resource-select{display:block;width:100%;background:none;border:0;padding:0;color:inherit;font:inherit;letter-spacing:inherit;line-height:inherit;text-align:left;min-height:44px;transition:color 140ms linear}
+.sb :is(.resource-portrait,.resource-mini) h2 .resource-select{letter-spacing:-.045em}
 .sb .resource-select:hover{color:var(--ink)}
 .sb .resource-portrait-meta{display:flex;align-items:baseline;justify-content:space-between;gap:16px;font-size:12px;color:var(--ink-3);margin-top:8px}
 .sb #page-resources .resource-spec{font-size:12px;line-height:1.7;margin:0;color:var(--ink-3);overflow-wrap:anywhere}

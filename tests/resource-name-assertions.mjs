@@ -4,7 +4,7 @@ export async function assertResourceNames(page,root){
   const names=await page.locator(root+' .resource-fleet .resource-id-label').evaluateAll(labels=>labels.map(label=>{
     const range=document.createRange();range.selectNodeContents(label);
     return {id:label.title,text:label.textContent,width:label.clientWidth,content:label.scrollWidth,
-      textWidth:range.getBoundingClientRect().width,font:parseFloat(getComputedStyle(label).fontSize)};
+      textWidth:range.getBoundingClientRect().width,font:parseFloat(getComputedStyle(label).fontSize),spacing:parseFloat(getComputedStyle(label).letterSpacing)};
   }));
   assert.ok(names.length,'The fleet must contain real inventory IDs');
   for(const name of names){
@@ -14,6 +14,8 @@ export async function assertResourceNames(page,root){
     assert.ok(name.content<=name.width+1&&name.textWidth<=name.width+1,
       'Machine name must actually fit, including its suffix: '+JSON.stringify(name));
     assert.ok(name.font>=20,'Machine names must stay at least 20px: '+JSON.stringify(name));
+    assert.ok(Math.abs(name.spacing+name.font*.045)<=.1,
+      'Shrinking the name must also shrink its tracking, without inherited hero-size overlaps: '+JSON.stringify(name));
   }
   assert.equal(new Set(names.map(name=>name.text)).size,new Set(names.map(name=>name.id)).size,
     'Different machines must never collapse to the same visible name');
