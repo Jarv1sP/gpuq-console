@@ -90,6 +90,19 @@ gpuctl project retire-plan
 已有任务历史的项目请归档，不是删除候选。逻辑组成员可移除；空组用于解除最后成员，
 CLI 用 `--members none`，仍须提供该组当前 revision。
 
+未完成的代码同步可先查原同步编号，再显式取消：
+
+```sh
+gpuctl sync status ORIGINAL_UUID --to SERVER --project PROJECT
+gpuctl sync cancel ORIGINAL_UUID --to SERVER --project PROJECT
+```
+
+取消固定原账号、目标项目、快照、来源与状态摘要；只允许没有任务历史和活动／未知
+读写者的草稿。未结束的文件上传等仍需先按其原编号收尾，不会替你停止终端或训练。
+确认 `CANCELED` 后，部分代码、原始清单和回执原样保留，但该同步编号永久不能续传。
+仍可保留草稿整理代码，或读取新的退役计划后软退役；取消不是删除。丢失响应只查询
+原同步编号，不换 key 重传。旧节点没有取消协议时明确拒绝，不能手动改成 `CODE_READY`。
+
 软退役只允许从未有任务记录、run claim 或输出、没有活动／未知读写者的实例。
 未使用的已发布项目也可退役。读取 `retire-plan` 的完整摘要与 revision，明确确认后：
 

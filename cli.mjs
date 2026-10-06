@@ -74,6 +74,8 @@ gpuctl project publish           Freeze code + private environment; wait for REA
 gpuctl sync git LOCAL_REPO --to SERVER --project NEW --ref HEAD --dry-run
 gpuctl sync code --from SOURCE --to TARGET --project SOURCE --target-project NEW --release HASH
 gpuctl sync data NAME@VERSION --from SOURCE --to TARGET --name NAME --dry-run
+gpuctl sync status ORIGINAL_UUID --to SERVER --project PROJECT
+gpuctl sync cancel ORIGINAL_UUID --to SERVER --project PROJECT  Preserve partial code; permanently reject old-key writes
 gpuctl run -g 2 -- python train.py
 gpuctl run --sync -g 1 -- python train.py  Upload current code, publish, wait, pin this release
 gpuctl run --sync --sync-dir "LOCAL_DIR" -- python train.py
@@ -972,7 +974,8 @@ async function main(){
   if(command==='queue'){if(result.stale)console.log('监控已过期；以下是平台记录与上次核对状态，不代表空闲。');for(const h of result.hosts){console.log(`${h.machine} · ${h.reachable?'可采集':'监控不可用'} · ${h.checkedAt||'暂无采集时间'}`);for(const t of h.tasks)console.log(`  ${t.id} · ${t.state} · ${t.name}\n  提交者：${t.submitter?.name||'未知'}${t.submitter?.username&&t.submitter.username!==t.submitter.name?'（'+t.submitter.username+'）':''}\n  描述：${t.description||'未填写描述'}\n  分配 GPU：${t.assignedGpuIndices?.join(', ')||'—'}`);if(!h.tasks.length)console.log('  暂无任务记录。');}return;}
   if(command==='logout'){console.log('已退出登录。');return;}
   if(command==='sync'){
-    if(result.state==='PREVIEW')console.log(`同步预览：${result.source?.commit||result.source?.machine||'Git'} → ${result.target}\n${result.project||result.name} · ${result.bytes} B · ${result.entries} 项\n未写入目标。去掉 --dry-run 执行，重复原命令可续传。`);
+    if(['status','cancel'].includes(positionals[1]))console.log(`代码同步：${result.state}\n${result.machine} / ${result.project}\n原编号：${result.key}${result.state==='CANCELED'?'\n已保留部分代码和原回执；该编号不能再续传。':''}`);
+    else if(result.state==='PREVIEW')console.log(`同步预览：${result.source?.commit||result.source?.machine||'Git'} → ${result.target}\n${result.project||result.name} · ${result.bytes} B · ${result.entries} 项\n未写入目标。去掉 --dry-run 执行，重复原命令可续传。`);
     else if(result.state==='CODE_READY')console.log(`代码已校验：${result.machine} / ${result.project}\n在目标准备项目环境，再 project publish，等 READY 后训练。环境未复制。`);
     else console.log(`数据已就绪：${result.machine}\n${result.dataset}@${result.version}\n训练使用 --data ${result.dataset}@${result.version}`);
     return;
