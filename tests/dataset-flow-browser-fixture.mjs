@@ -23,7 +23,7 @@ const states={scans:['PREPARING','READY',null,null],'sample-pictures':['REGISTER
 const geometry={...datasetHelpGeometry,roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]','#page-admin:not([hidden])'],
   controls:'button,input:not([type=file]):not([type=checkbox]),select,summary,a[href]',
   numericCells:['.v3-size,.v3-versions','.admin-data-storage .dataset-volume'],largeTargets:'.v3-row,.v3-upload-choices>.button',
-  scrollPanels:['.v3-detail-scroll','#dataset-add-dialog[open]'],containment:'input,select,button,h3,.server-id',
+  scrollPanels:['.v3-inspector-overflow .v3-detail-scroll','#dataset-add-dialog[open]'],containment:'input,select,button,h3,.server-id',
   bottomReserve:[{content:'#main-content',controls:'#room-nav,#mobile-control,#control-strip'}]};
 async function closeRoutedContext(context){await context.unrouteAll({behavior:'wait'});await context.close();}
 try{

@@ -6,7 +6,7 @@ export const datasetHelpGeometry = {
   roots: ['#cloud-files'],
   compactSearch: '#warehouse-search',
   largeTargets: '.v3-row,.v3-upload-choices>.button',
-  clippedScrollPanels: ['.v3-detail-scroll'],
+  clippedScrollPanels: ['.v3-inspector-overflow .v3-detail-scroll'],
   labelledHelp: [{buttons: '#page-datasets:not([hidden]) [data-copy-help],#page-datasets:not([hidden]) details.ui-info>summary,body[data-room=datasets] .help-links [data-copy-help],body[data-room=datasets] .help-links>details.ui-info>summary',
     rows: '.copy-caption,.dataset-field-label,.dataset-help-heading,.dataset-upload-heading,.dataset-route-heading,.dataset-book>div,.dataset-title-label,.dataset-cache-admin>header,.dataset-details-cell,.dataset-storage',
     labels: ':scope>h2,:scope>h3,:scope>h4,:scope>label,:scope>a,:scope>.dataset-version-details>summary,:scope>span:not(.copy-help):not(.dataset-route-path)'}],
