@@ -16,6 +16,9 @@ async function apiFixture(t){
   await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:[],gpuq:{connected:true,observeOnly:false,jobs:[]}}))}));
   const calls=[];let failure=null,response={operationId:OPERATION,dataset:'sample',version:null,state:'UNREGISTERING'};
   const s=await PortalService.open(join(dir,'database'),bootstrap,status,async(machine,operation,args)=>{
+    // Legacy assertions below count actual unregister/status side effects.
+    // The safety capability is a separate read and never claims deletion.
+    if(operation==='storage.dataset-delete.capabilities')return {protocol:'dataset-delete-node-v1',machine,datasetDelete:1};
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='datasets.list')return {datasets:[{dataset:'sample',versions:[{version:VERSION,state:'READY'}]}]};
     if(operation==='datasets.status'&&calls.some(call=>call.operation==='datasets.unregister'))return {operationId:OPERATION,dataset:'sample',version:null,state:'FAILED'};
@@ -31,10 +34,25 @@ async function apiFixture(t){
   return {s,admin,member,calls,fail:value=>failure=value,respond:value=>response=value};
 }
 
-test('unregister requires authenticated admin despite full member GPU grants',async t=>{
+test('whole-dataset unregister requires authenticated admin despite full member GPU grants',async t=>{
   const f=await apiFixture(t);
   for(const token of [f.member.token,'invalid'])await assert.rejects(f.s.invoke(token,'datasets.unregister',{machine:'gpu-1',dataset:'sample'}),e=>[401,403].includes(e.status));
   assert.equal(f.calls.length,0);
+});
+
+test('old/missing node deletion capability blocks even administrator ordinary deletion',async t=>{
+  const f=await apiFixture(t),bridge=f.s.bridge;
+  for(const value of [undefined,{datasetDelete:0},{protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1}]){
+    f.s.bridge=(machine,operation,args)=>operation==='storage.dataset-delete.capabilities'?Promise.resolve(value):bridge(machine,operation,args);
+    await assert.rejects(f.s.invoke(f.admin.token,'datasets.unregister',{machine:MACHINES[0].id,dataset:'sample',version:VERSION}),e=>e.status===409);
+  }
+  assert.equal(f.calls.length,0);
+});
+
+test('member version forwards only authenticated identity; node still proves personal provenance',async t=>{
+  const f=await apiFixture(t),machine=MACHINES[0].id;
+  await f.s.invoke(f.member.token,'datasets.unregister',{machine,dataset:'sample',version:VERSION});
+  assert.deepEqual(f.calls.at(-1),{machine,operation:'datasets.unregister',args:{dataset:'sample',version:VERSION,userId:f.member.principal.userId,hostAdmin:false}});
 });
 
 test('unregister forwards optional versions and server-owned identity without reserving or stopping jobs',async t=>{

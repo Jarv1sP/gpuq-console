@@ -56,7 +56,8 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   const currentPolicy=row=>row.policyKey===policyKey&&row.sourceMachine===policy.machine;
   const isCopyIntent=row=>['ingest','enrollment'].includes(row?.kind);
   const isRetired=row=>['retired','authority-retired'].includes(row?.failureStage);
-  const availableArchive=row=>currentPolicy(row)&&row.phase==='ARCHIVED'&&!row.retirementIntent&&!isRetired(row);
+  const availableArchive=row=>currentPolicy(row)&&row.phase==='ARCHIVED'&&!row.retirementIntent&&!isRetired(row)
+    &&!service.datasetDeletionBlocked?.(row.sourceMachine,{dataset:row.sourceDataset,version:row.version});
   const enrollmentProof=(value,machine,owner,ref)=>{
     if(!value||Object.keys(value).sort().join(',')!=='dataset,machine,manifestBytes,manifestSha256,protocol,registration,role,state,userId,version'||
       value.protocol!==1||value.machine!==machine||value.userId!==owner||value.dataset!==ref.dataset||value.version!==ref.version||
@@ -77,6 +78,8 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     return user;
   };
   const fence=(row,snapshot)=>{
+    service.assertDatasetNotDeleting?.(row.machine,{dataset:row.dataset,version:row.version});
+    service.assertDatasetNotDeleting?.(row.sourceMachine,{dataset:row.sourceDataset,version:row.version});
     const current=load(row.id);
     if(retiring.has(row.id)||current?.retirementIntent||isRetired(current))fail('Archive retirement fences this old intent');
     if(service.closing||!policy.enabled)fail('Archive service is unavailable');
