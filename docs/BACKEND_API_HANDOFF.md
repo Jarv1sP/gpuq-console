@@ -126,6 +126,8 @@ no-follow CAS、一致原子 no-replace 与永久 slug tombstone。未知、历�
 | `terminal.exchange` | `id`、`clientId`、`writerToken` | 读取输出，可带输入和窗口尺寸 |
 | `terminal.detach` | `id`、`clientId`、`writerToken` | 释放写入权，保留终端及命令 |
 | `terminal.close` | `id`、`clientId`、`writerToken` | 显式结束这一会话，不影响其他会话 |
+| `terminal.status` | 原 `id` 与原上下文 | 只读核验原会话，不附着、不输入、不续租 |
+| `terminal.close`，已停止记录收口 | 原 `id` 与原上下文；不带 `clientId`／`writerToken` | 仅本人、失效租约和一致停止证据可收口；不停止任何 unit |
 
 `open.result` 返回 `id`、`hostAdmin`、`clientId`、`writerToken`、`leaseExpiresAt`、`mode`。将写入凭据保存在当前连接内存中，不放进多客户端共用的账号缓存、URL 或日志。保存会话 ID 供用户明确重连。
 
@@ -134,6 +136,8 @@ no-follow CAS、一致原子 no-replace 与永久 slug tombstone。未知、历�
 单写租约为 30 秒，正常 exchange 续约。租约过期不会杀掉 PTY，但旧凭据不能继续输入或关闭它。另一客户端持有写入权时，普通重连拒绝；只有用户明确确认后才传 `takeover: true`。接管会换写入凭据，不能撤回已经被接受的命令。
 
 网络错误／切换页面不应触发 `close`，也不应自动新建替代终端。明确“断开”使用 `detach`；显式“结束终端”才使用 `close`。持久 SSH 通道是后端内部优化，不新增浏览器流协议，也不改变上述字段或旧节点兼容路径。
+
+`status.result` 使用 `protocol:"terminal-session-status-v1"`，包含原 `id`、`state:ALIVE|STOPPED|UNKNOWN`、`evidence`、`attachmentState`、`writerLeaseExpired`、`canCloseStopped`；不包含写入凭据、真实 cgroup 路径或宿主机文件路径。单位完整身份（含 InvocationID）、PID、cgroup、socket、spec/租约元数据前后不一致，或检查超时，均保持 `UNKNOWN`。无凭据 `close` 在原 ID 锁内重新核验两轮停止证据及元数据 identity，仅更新该 session receipt，返回同一协议、原 `id`、`closed:true,state:"STOPPED",metadataOnly:true`。其归属 tombstone 与项目围栏保留；正常新建不能复用 ID。活跃/未知/租约未过期/旧协议均拒绝，活跃终端的原单写关闭要求不变。执行桥新增的唯一固定操作为 `terminal.status`，不得使用终端通配授权。
 
 ## 项目文件上传的确认与恢复
 

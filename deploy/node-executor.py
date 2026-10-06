@@ -876,6 +876,105 @@ def terminal_alive(folder,jid):
             return not result.get('error') and result.get('exited') is False
     except (OSError,ValueError):return False
 
+def terminal_context_readonly(args):
+    """Validate context without creating a workspace/project or renewing a lease."""
+    if not isinstance(args,dict) or set(args)-{'machine','userId','username','id','project','hostAdmin','dataWorkspace','clientId','writerToken'}:
+        raise ValueError('Invalid terminal status fields')
+    if not isinstance(args.get('userId'),str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',args['userId']):raise ValueError('Invalid identity')
+    if not isinstance(args.get('username'),str) or not re.fullmatch(r'[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}',args['username']):raise ValueError('Invalid username')
+    if not isinstance(args.get('id'),str) or not UUID.fullmatch(args['id']):raise ValueError('Invalid terminal ID')
+    if any(type(args.get(k,False)) is not bool for k in ('hostAdmin','dataWorkspace')):raise ValueError('Invalid terminal scope')
+    if args.get('project') is not None and (not isinstance(args['project'],str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',args['project'])):raise ValueError('Invalid project name')
+    if args.get('hostAdmin') and (not CONFIG.get('hostRoot',False) or args.get('project') or args.get('dataWorkspace')):raise ValueError('Invalid host terminal scope')
+    if args.get('dataWorkspace') and args.get('project'):raise ValueError('Invalid data terminal scope')
+
+def terminal_file_identity(path):
+    try:info=path.lstat()
+    except FileNotFoundError:return None
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+def terminal_unit_observation(jid):
+    unit='amax-term-'+jid+'.service'
+    fields={'LoadState','ActiveState','SubState','MainPID','ControlGroup','InvocationID'}
+    result=subprocess.run(['/usr/bin/systemctl','--user','show',unit,'--property='+','.join(sorted(fields))],
+        env=ENV,text=True,capture_output=True,timeout=5)
+    lines=result.stdout.splitlines()
+    if len(lines)!=len(fields) or any('=' not in line for line in lines):raise ValueError('Terminal unit observation incomplete')
+    props=dict(line.split('=',1) for line in lines)
+    if set(props)!=fields or result.returncode and not (result.returncode==1 and props['LoadState']=='not-found'):
+        raise ValueError('Terminal unit observation unconfirmed')
+    if not re.fullmatch(r'[0-9]+',props['MainPID']):raise ValueError('Terminal PID observation invalid')
+    group=props['ControlGroup']
+    if group and (not group.startswith('/') or '..' in Path(group).parts or Path(group).name!=unit):
+        raise ValueError('Terminal cgroup identity unconfirmed')
+    populated=None
+    if group:
+        path=Path('/sys/fs/cgroup')/group.lstrip('/')
+        try:
+            events=dict(line.split() for line in (path/'cgroup.events').read_text().splitlines())
+            populated=events.get('populated')
+            if populated not in ('0','1'):raise ValueError('Terminal cgroup observation incomplete')
+        except FileNotFoundError:
+            if path.exists():raise ValueError('Terminal cgroup observation unconfirmed')
+            populated='0'
+    quiet=props['ActiveState'] in ('inactive','failed') or (props['ActiveState']=='active' and props['SubState']=='exited')
+    stopped=quiet and props['MainPID']=='0' and props['LoadState'] in ('loaded','not-found') and (not group or populated=='0')
+    return props,populated,stopped
+
+def terminal_status(args):
+    terminal_context_readonly(args);jid=args['id'];folder=ROOT/'terminals'
+    terminal_owned(args,jid)
+    spec=folder/(jid+'.json');receipt_path=folder/(jid+'.session.json');sock=folder/(jid+'.sock')
+    before=(terminal_file_identity(spec),terminal_file_identity(receipt_path),terminal_file_identity(sock))
+    receipt=terminal_metadata(receipt_path) if before[1] is not None else None
+    state='UNKNOWN';evidence={'confirmed':False,'socket':'UNKNOWN'}
+    try:
+        first=terminal_unit_observation(jid)
+        # A successful no-input socket reply is live evidence, never permission
+        # to terminate. Absence alone is insufficient: the unit/cgroup must agree.
+        live=terminal_alive(folder,jid) if before[2] is not None else False
+        second=terminal_unit_observation(jid)
+        after=(terminal_file_identity(spec),terminal_file_identity(receipt_path),terminal_file_identity(sock))
+        if first==second and before==after:
+            props,populated,stopped=second
+            state='STOPPED' if stopped and after[2] is None else 'ALIVE' if live and not stopped else 'UNKNOWN'
+            evidence={'confirmed':state!='UNKNOWN','loadState':props['LoadState'],'activeState':props['ActiveState'],
+                'subState':props['SubState'],'mainPid':int(props['MainPID']),'cgroupEmpty':populated=='0' if props['ControlGroup'] else stopped,
+                'socket':'ABSENT' if after[2] is None else 'RESPONDING' if live else 'UNCONFIRMED'}
+    except (OSError,ValueError,subprocess.TimeoutExpired):pass
+    lease=receipt.get('leaseExpiresAt') if isinstance(receipt,dict) else None
+    expired=isinstance(lease,(int,float)) and not isinstance(lease,bool) and math.isfinite(lease) and lease<=time.time()
+    recoverable=bool(isinstance(receipt,dict) and receipt.get('schema')==2 and receipt.get('state') in ('OPEN','DETACHED','CLOSED') and expired and state=='STOPPED')
+    return {'protocol':'terminal-session-status-v1','id':jid,'state':state,'evidence':evidence,
+        'attachmentState':receipt.get('state','UNKNOWN') if isinstance(receipt,dict) else 'UNKNOWN',
+        'writerLeaseExpired':expired,'canCloseStopped':recoverable}
+
+def terminal_close_stopped(args):
+    """Owner metadata cleanup only. Never stop a unit, send input or create a PTY."""
+    terminal_context_readonly(args);jid=args['id'];folder=ROOT/'terminals'
+    terminal_owned(args,jid)
+    lock_path=folder/(jid+'.lock');fd=os.open(lock_path,os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.getuid():raise ValueError('Terminal lock identity unconfirmed')
+        lock_identity=terminal_file_identity(lock_path)
+        if lock_identity is None or lock_identity[:2]!=(info.st_dev,info.st_ino):raise ValueError('Terminal lock identity changed')
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        paths=[folder/(jid+'.json'),folder/(jid+'.session.json'),folder/(jid+'.sock')]
+        identities=[terminal_file_identity(path) for path in paths]
+        first=terminal_status(args)
+        if not first['canCloseStopped']:raise ValueError('Terminal writer lease required; stopped state or lease expiry is unconfirmed')
+        terminal_owned(args,jid);receipt=terminal_metadata(paths[1])
+        second=terminal_status(args)
+        if first!=second or not second['canCloseStopped'] or identities!=[terminal_file_identity(path) for path in paths] or terminal_file_identity(lock_path)!=lock_identity:
+            raise ValueError('Terminal changed during stopped-session cleanup; query the original ID again')
+        # Retain the exact-ID specification AND project fences. A local
+        # administrator could start a unit after observation; metadata cleanup
+        # must not hide that unit from the publication's own stop proof.
+        receipt.update(leaseExpiresAt=0,state='CLOSED');atomic_json(paths[1],receipt)
+        return {'protocol':'terminal-session-status-v1','id':jid,'closed':True,'state':'STOPPED','metadataOnly':True}
+    finally:os.close(fd)
+
 def stop_terminal(jid):
     # Stable unit protocol shared with existing terminal pointers; not branding.
     unit='amax-term-'+jid+'.service'
@@ -904,6 +1003,8 @@ def oci_submission_arguments(job):
     return ['--env','GPUQ_CONSOLE_OCI=1'] if personal_oci_project(job) else []
 
 def terminal_op(operation,args):
+    if operation=='terminal.status':return terminal_status(args)
+    if operation=='terminal.close' and args.get('writerToken') is None and args.get('clientId') is None:return terminal_close_stopped(args)
     if args.get('hostAdmin') is True and not CONFIG.get('hostRoot',False):raise ValueError('Host root terminal is disabled on this node')
     workspace(args['userId'])
     if not re.fullmatch(r'[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}',args['username']):raise ValueError('Invalid username')
@@ -1419,7 +1520,7 @@ def process(operation,args):
     if operation.startswith('datasets.import.'):return data_imports().process(operation,args)
     if operation.startswith('datasets.cloud.'):return cloud_files().process(operation,args)
     if operation in ('datasets.capacity','datasets.list','datasets.status','datasets.prepare','datasets.register','datasets.unregister'):return dataset_op(operation,args)
-    if operation in ('terminal.open','terminal.exchange','terminal.close','terminal.detach'):
+    if operation in ('terminal.open','terminal.exchange','terminal.close','terminal.detach','terminal.status'):
         if args.get('dataWorkspace') is True and operation=='terminal.open':
             ops=data_workspaces()
             with ops.guard(args):
