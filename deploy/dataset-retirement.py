@@ -350,9 +350,13 @@ class DatasetRetirement:
             with self.cache._locked():tier=self.cache._tier(dataset,version)
             if tier['role']!='cache':continue
             path=self.cache._paths(dataset)['.registry']/(version+'.json')
-            if not exists(path):raise D.CacheError('Orphan authority alias cannot be omitted')
-            if self.recovery_references is None:raise D.CacheError('Authority alias adapter unavailable')
-            add(dataset,self.recovery_references(internal,dataset,version,_read_only=True))
+            if not exists(path):
+                removed=getattr(self,'removed_alias_references',None)
+                if not callable(removed):raise D.CacheError('Orphan authority alias cannot be omitted')
+                add(dataset,removed(dataset,version))
+            else:
+                if self.recovery_references is None:raise D.CacheError('Authority alias adapter unavailable')
+                add(dataset,self.recovery_references(internal,dataset,version,_read_only=True))
         with D._directory(self.cache.root/'.trash') as fd:names=sorted(os.listdir(fd))
         if len(names)>10000:raise D.CacheError('Authority alias trash inventory requires reconciliation')
         for name in names:

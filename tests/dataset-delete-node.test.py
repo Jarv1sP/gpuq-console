@@ -1,5 +1,6 @@
 """Private node steps: actual full data and fenced negative inventories."""
 import copy
+import contextlib
 import importlib.util
 import os
 from pathlib import Path
@@ -284,6 +285,223 @@ class RetirementNodeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'payload'):self.empty.grant_locations(self.version,[])
             with self.assertRaisesRegex(ValueError,'unconfirmed'):self.empty_plan()
             (root/'replicas'/bucket/self.version).rmdir()
+
+
+class FixedRemovedAuthority:
+    """Configured, local-only fixture. No network or minted replacement grant."""
+    recovery_protocol='dataset-tier-recovery-v1'
+
+    def __init__(self,reference,owners):
+        self.reference=reference
+        self.proof=dict(schema=1,kind='fixture-fixed-authority',owners=owners,version=reference['version'],grantId=reference['grantId'])
+        self.revoked=False
+
+    def seal(self,*args):raise AssertionError('No grant is issued during removal reconciliation')
+    def recover(self,*args,**kwargs):raise AssertionError('Removed data is never recovered during retirement')
+    @contextlib.contextmanager
+    def guard(self,*args,**kwargs):yield
+    def retirement_reference(self,actor,proof):
+        if self.revoked:raise ValueError('Old fixed grant was permanently revoked')
+        if proof!=self.proof:raise ValueError('Fixed installed grant proof differs')
+        return copy.deepcopy(self.reference)
+
+
+class CompletedRemovalAliasTests(RetirementNodeTests):
+    def setUp(self):
+        super().setUp()
+        self.alias='removed-alias';cache=self.empty.cache
+        self.ref=dict(sourceMachine='source-node',targetMachine='empty-node',sourceDataset='sample',
+                      version=self.version,grantId=str(uuid.uuid4()),receiptSha256='a'*64)
+        self.adapter=FixedRemovedAuthority(self.ref,['owner'])
+        self.empty.tier.authorities['approved']=self.adapter
+        with cache._locked():
+            cache._register(D.Principal('owner',True),self.alias,self.cache._record(OWNER,'sample',self.version)['manifest'],
+                            ['owner'],None,_origin='replica',_receipt=str(uuid.uuid4()))
+            tier=cache._default_tier();tier.update(role='cache',recovery=dict(schema=1,authorityId='approved',version=self.version,
+                registration=list(cache._record_identity(self.alias,self.version)),owners=['owner'],proof=self.adapter.proof))
+            cache._write_tier(self.alias,self.version,tier)
+        # Use the real ordinary removal, including its final archived inode.
+        removed=cache.unregister(ADMIN,self.alias,self.version)
+        self.assertTrue(removed['unregistered'])
+        self.folder=cache.root/'.trash'/removed['recoveryId']
+        # Reconciliation never accepts live provenance. This fixture models
+        # the actual completed removal which retains only its recovery tier.
+        provenance=cache.root/'.provenance'/self.alias/(self.version+'.json')
+        if provenance.exists():provenance.unlink()
+        self.key_alias=str(uuid.uuid4())
+
+    def alias_plan(self,authorization=None,references=None):
+        return self.empty.plan(OWNER,self.alias,self.version,self.key_alias,
+            authorization=authorization or self.authorization,references=[self.ref] if references is None else references)
+
+    def test_completed_removal_projects_exact_grant_and_pins_archived_inode(self):
+        before=self._metadata()
+        self.assertEqual(self.empty.grant_locations(self.version,[self.ref]),
+                         [dict(dataset=self.alias,version=self.version,authorityReference=self.ref)])
+        self.assertEqual(self._metadata(),before)
+        value=self.alias_plan();self.assertTrue(value['absent']);self.assertFalse(value['complete'])
+        self.assertEqual(value['authorityReferences'],[self.ref])
+        snapshot=self.empty._load(self.key_alias)['snapshot'];proof=snapshot['retainedRemoval']
+        self.assertEqual(proof['protocol'],'completed-removal-alias-v1')
+        self.assertEqual(proof['registrationIdentity'][:4],self.empty.cache._tier(self.alias,self.version)['recovery']['registration'][:4])
+        self.assertNotIn('manifest',proof)
+        self.assertEqual(self.alias_plan(),value)
+
+    def _metadata(self):
+        return {str(p.relative_to(self.empty.cache.root)):p.read_bytes() for p in self.empty.cache.root.rglob('*.json')}
+
+    def test_incomplete_corrupt_ambiguous_or_cross_owner_removal_is_never_absence(self):
+        file=self.folder/'REMOVAL.json';row=N.R.private_read(file)
+        for change in (dict(unregistered=False),dict(schema=True),dict(owners=['other']),dict(version='0'*64),
+                       dict(versions=[self.version,self.version]),dict(createdAt=float('nan'))):
+            with self.subTest(change=change):
+                D._write_json(file,{**row,**change})
+                with self.assertRaises((ValueError,PermissionError)):self.alias_plan()
+                self.assertIsNone(self.empty.cache._retirement_fence(self.alias,self.version))
+        D._write_json(file,row)
+        with self.assertRaises(PermissionError):self.alias_plan({**self.authorization,'owners':['other']})
+        with self.assertRaises(ValueError):self.alias_plan(references=[{**self.ref,'grantId':str(uuid.uuid4())}])
+        self.assertEqual(list(self.empty.root.iterdir()),[])
+
+    def test_fixed_archive_manifest_inode_and_grant_cannot_be_replaced(self):
+        file=self.folder/'registration'/(self.version+'.json')
+        row=N.R.private_read(file);D._write_json(file,row)
+        with self.assertRaisesRegex(ValueError,'inode'):self.alias_plan()
+        self.assertEqual(list(self.empty.root.iterdir()),[])
+
+    def test_fence_and_isolate_recheck_proof_and_never_clear_pins_or_recover(self):
+        self.alias_plan();self.empty.fence(OWNER,self.key_alias)
+        before=self._metadata();result=self.empty.isolate(OWNER,self.key_alias,[])
+        self.assertFalse(result['complete']);self.assertTrue(result['isolated'])
+        self.assertEqual(result['authorityAliases'],[dict(dataset=self.alias,version=self.version,authorityReference=self.ref)])
+        for p,raw in before.items():
+            if '/.retirements/' not in '/'+p:self.assertEqual((self.empty.cache.root/p).read_bytes(),raw)
+        for action in (lambda:self.empty.cache.register_manifest(ADMIN,self.alias,self.cache._record(OWNER,'sample',self.version)['manifest'],['owner']),
+                       lambda:self.empty.cache._check_retirement(self.alias,self.version)):
+            with self.assertRaisesRegex(ValueError,'锁定'):action()
+        self.assertEqual(self.empty.status(OWNER,self.key_alias)['result'],result)
+        reopened=N.RetirementNode(self.empty.retirement,self.empty.root,tier=self.empty.tier,principal=ADMIN)
+        self.assertEqual(reopened.status(OWNER,self.key_alias)['result'],result)
+
+    def test_frozen_phases_use_identity_without_reparsing_archived_manifest(self):
+        self.alias_plan();read=N.R.private_read;record=self.folder/'registration'/(self.version+'.json')
+        def guarded(path):
+            if path==record:raise AssertionError('Immutable full manifest must not be reparsed')
+            return read(path)
+        # First fence reconstructs the frozen negative snapshot; reuse the
+        # certified registration identity instead of loading its large JSON.
+        with patch.object(N.R,'private_read',side_effect=guarded):
+            self.empty.fence(OWNER,self.key_alias)
+            self.empty.isolate(OWNER,self.key_alias,[])
+            self.empty.status(OWNER,self.key_alias)
+
+    def test_metadata_changed_after_plan_prevents_fence_and_isolation(self):
+        self.alias_plan()
+        tier=self.empty.cache.root/'.tiers'/self.alias/(self.version+'.json');value=N.R.private_read(tier)
+        D._write_json(tier,value)
+        with self.assertRaisesRegex(ValueError,'changed'):self.empty.fence(OWNER,self.key_alias)
+        self.assertIsNone(self.empty.cache._retirement_fence(self.alias,self.version))
+
+    def test_unknown_or_live_removal_residue_blocks_all_retirement(self):
+        cache=self.empty.cache
+        for bucket in ('ready','.staging'):
+            folder=cache._paths(self.alias,self.version)[bucket];D._mkdir(folder.parent);D._mkdir(folder)
+            with self.subTest(bucket=bucket),self.assertRaisesRegex(ValueError,'unconfirmed'):self.alias_plan()
+            folder.rmdir()
+        file=cache.root/'.provenance'/self.alias/(self.version+'.json');D._mkdir(file.parent);D._write_json(file,{'unknown':True})
+        with self.assertRaisesRegex(ValueError,'unconfirmed'):self.alias_plan()
+        file.unlink()
+        with cache._locked():
+            value=cache._tier(self.alias,self.version);value['pins']['in-use']={'owner':'owner','createdAt':1};cache._write_tier(self.alias,self.version,value)
+        with self.assertRaisesRegex(ValueError,'unpinned'):self.alias_plan()
+        self.assertIsNone(cache._retirement_fence(self.alias,self.version))
+
+    def test_cancel_retains_audit_and_does_not_issue_or_resurrect_grants(self):
+        self.alias_plan();self.empty.isolate(OWNER,self.key_alias,[])
+        old=self.folder.joinpath('REMOVAL.json').read_bytes();proof=copy.deepcopy(self.adapter.proof)
+        self.assertEqual(self.empty.cancel(ADMIN,self.key_alias)['state'],'CANCELED')
+        self.assertEqual(self.folder.joinpath('REMOVAL.json').read_bytes(),old);self.assertEqual(self.adapter.proof,proof)
+        self.assertEqual(self.empty.cache._retirement_fence(self.alias,self.version)['state'],'RELEASED')
+        self.empty.cache.register_manifest(ADMIN,self.alias,self.cache._record(OWNER,'sample',self.version)['manifest'],['owner'])
+        self.assertEqual(self.empty.cache._tier(self.alias,self.version),self.empty.cache._default_tier())
+        self.assertEqual(self.empty.status(OWNER,self.key_alias)['result']['state'],'CANCELED')
+
+    def test_revoked_or_changed_adapter_grant_never_releases_old_fence(self):
+        self.alias_plan();self.empty.isolate(OWNER,self.key_alias,[]);self.adapter.revoked=True
+        with self.assertRaisesRegex(ValueError,'revoked'):self.empty.cancel(ADMIN,self.key_alias)
+        self.assertEqual(self.empty.cache._retirement_fence(self.alias,self.version)['state'],'ISOLATED')
+        with self.assertRaisesRegex(ValueError,'revoked'):self.empty.status(OWNER,self.key_alias)
+
+    def test_source_restore_releases_only_exact_absence_and_new_registration_resets_old_recovery(self):
+        self.alias_plan();self.empty.isolate(OWNER,self.key_alias,[])
+        self.node.isolate(OWNER,self.key,[]);restored=self.node.restore(ADMIN,self.key)
+        value=self.empty.release_absence(ADMIN,self.key_alias,restored);self.assertEqual(value['state'],'RESTORED')
+        self.empty.cache.register_manifest(ADMIN,self.alias,self.cache._record(OWNER,'sample',self.version)['manifest'],['owner'])
+        self.assertIsNone(self.empty.cache._tier(self.alias,self.version)['recovery'])
+        self.assertEqual(self.empty.status(OWNER,self.key_alias)['result'],value)
+
+    def test_every_physical_alias_is_projected_from_registered_and_completed_removal(self):
+        cache=self.empty.cache;live='live-alias'
+        with cache._locked():
+            cache._register(D.Principal('owner',True),live,self.cache._record(OWNER,'sample',self.version)['manifest'],['owner'],None,_origin='replica',_receipt=str(uuid.uuid4()))
+            tier=cache._default_tier();tier.update(role='cache',recovery=dict(schema=1,authorityId='approved',version=self.version,
+                registration=list(cache._record_identity(live,self.version)),owners=['owner'],proof=self.adapter.proof));cache._write_tier(live,self.version,tier)
+        plan=self.empty.plan(OWNER,live,self.version,str(uuid.uuid4()))
+        self.assertEqual({row['dataset'] for row in plan['authorityAliases']},{live,self.alias})
+
+    def test_all_existing_data_consumers_remain_fenced_no_rebuild_escape(self):
+        self.alias_plan();self.empty.isolate(OWNER,self.key_alias,[]);cache=self.empty.cache
+        before=self._metadata()
+        actions=(lambda:cache.materialize(ADMIN,self.alias,self.version),
+                 lambda:cache.prepare_transfer(ADMIN,self.alias,self.version),
+                 lambda:cache.publish(ADMIN,self.alias,self.version,'0'*64),
+                 lambda:cache.acquire_lease(ADMIN,self.alias,self.version,'consumer'),
+                 lambda:self.empty.tier.recover(ADMIN,self.alias,self.version),
+                 lambda:cache.register_manifest(ADMIN,self.alias,self.cache._record(OWNER,'sample',self.version)['manifest'],['owner']))
+        for action in actions:
+            with self.subTest(action=action),self.assertRaises((ValueError,FileNotFoundError)):action()
+        self.assertEqual(self._metadata(),before)
+        self.assertEqual(cache._retirement_fence(self.alias,self.version)['state'],'ISOLATED')
+
+    def test_payload_lease_and_changed_removal_between_fence_and_isolate_stay_protected(self):
+        self.alias_plan();self.empty.fence(OWNER,self.key_alias);cache=self.empty.cache
+        lease=cache._paths(self.alias,self.version)['.leases'];D._mkdir(lease.parent);D._mkdir(lease)
+        D._write_json(lease/'consumer.json',dict(unknown=True))
+        with self.assertRaises(ValueError):self.empty.isolate(OWNER,self.key_alias,[])
+        self.assertEqual(cache._retirement_fence(self.alias,self.version)['state'],'FENCED')
+        (lease/'consumer.json').unlink()
+        file=self.folder/'REMOVAL.json';row=N.R.private_read(file);D._write_json(file,{**row,'unregistered':False})
+        with self.assertRaises(ValueError):self.empty.isolate(OWNER,self.key_alias,[])
+        self.assertIsNone(self.empty._load(self.key_alias)['result'])
+
+    def test_same_inode_write_permissions_and_hardlink_are_not_frozen_proof(self):
+        self.alias_plan();record=self.folder/'registration'/(self.version+'.json')
+        raw=record.read_bytes()
+        with record.open('r+b') as f:f.write(raw);f.flush();os.fsync(f.fileno())
+        with self.assertRaisesRegex(ValueError,'archived registration'):self.empty.fence(OWNER,self.key_alias)
+        self.assertIsNone(self.empty.cache._retirement_fence(self.alias,self.version))
+        record.chmod(0o644)
+        with self.assertRaisesRegex(ValueError,'Unsafe'):self.empty.grant_locations(self.version,[self.ref])
+        record.chmod(0o600)
+        alias=record.with_name('extra-link.json');os.link(record,alias)
+        with self.assertRaisesRegex(ValueError,'single link'):self.empty.grant_locations(self.version,[self.ref])
+
+    def test_source_references_cannot_assert_extra_or_unknown_consumer(self):
+        with self.assertRaisesRegex(ValueError,'only its actual'):
+            self.alias_plan(references=[self.ref,{**self.ref,'grantId':str(uuid.uuid4())}])
+        original=copy.deepcopy(self.adapter.reference);self.adapter.reference={**self.adapter.reference,'targetMachine':'different-node'}
+        with self.assertRaisesRegex(ValueError,'identity'):self.alias_plan()
+        self.adapter.reference=original
+        self.adapter.proof['owners']=['other']
+        with self.assertRaisesRegex(ValueError,'identity|proof differs'):self.alias_plan()
+
+    def test_interrupted_metadata_only_isolate_cancel_is_not_payload_replay(self):
+        self.alias_plan();self.empty.fence(OWNER,self.key_alias)
+        row=self.empty._load(self.key_alias);row['state']='ISOLATING';self.empty._write(row)
+        with patch.object(self.empty.retirement,'isolate',side_effect=AssertionError('No replay')):
+            self.assertEqual(self.empty.cancel(ADMIN,self.key_alias)['state'],'CANCELED')
+        self.assertEqual(self.empty.cache._retirement_fence(self.alias,self.version)['state'],'RELEASED')
+        self.assertTrue((self.folder/'registration'/(self.version+'.json')).is_file())
 
 if __name__=='__main__':
     unittest.main()

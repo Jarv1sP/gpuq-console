@@ -303,4 +303,8 @@ DELETED 只覆盖当前逻辑版本及固定授权依赖；其他名称下的副
 
 第四轮恢复边界：已完成的隔离 journal 只补投影后恢复，取消不再次隔离；首次回滚保留个人来源证明。正在运行的原 worker 保持“仍在进行”的等待，`canContinue:false`；CANCELING 不允许继续。终态门户墓碑只拦精确版本的后台重建，不永久阻断整数据集的普通注销。未提交收集许可的完整 peer 可从保留字节恢复，缺失或损坏的提交回执不能被推断为未提交。
 
+已完成普通注销的 cache 别名仍参与固定授权依赖枚举。节点私有 `completed-removal-alias-v1` 证明绑定完整 `REMOVAL`、归档登记 inode/清单、所有者、tier 与配置适配器的精确 grant；要求没有载荷、租约、来源或 pins。它沿用 `dataset-version-absence-v1` 的 plan/fence/isolate，不新增公开证明字段、操作或忽略依赖的参数，审计与 tier 保持原地。初次验证清单后，以完整文件身份和小证明 CAS 核对后续阶段，不反复解析大清单。缺失、漂移或未知状态失败关闭；取消和源恢复仅释放已证明的名称围栏，不重新签发旧 grant，新登记重置旧 recovery。
+
+版本删除的源撤销只写 `AuthorityStore` 的永久 grant 撤销记录，目标版本围栏不等于外部 `StorageRetirement.target` 的 installed-authority 墓碑。因此目标可以继续只读核对固定本地 receipt、完成 commit 和历史 status，但源的 guard/manifest/get 永久拒绝旧 token。已有 installed-authority 墓碑依然拒绝本地投影，本接口不绕过或删改它；源恢复也不清除旧 grant 撤销记录。
+
 外部替代退役不被重写：其锁、权限、永久 reference/grant fence 和 API 契约原样保留。本功能仅处理没有替代的版本删除；外部严格完整替代证明只是普通注销“不是最后一份”的实际可重建依据，并在日志单独标为“外部替代退役”。来源不明单 owner 仅管理员。保留期间计费不因目录移动释放；到期清理仅接原本明确启用的 storage 收集服务，本 PR 不开 timer、不部署节点。前端由后续 m4 接口整合。

@@ -7,6 +7,7 @@ Principal; the portal supplies the authenticated source authorization only on
 this private bridge route. A negative inventory is fenced before it is used.
 """
 import importlib.util
+import math
 import os
 from pathlib import Path
 import re
@@ -27,6 +28,9 @@ class RetirementNode:
         self.root = D._absolute(state_root)
         R.private_directory(self.root)
         self.quiescent = quiescent
+        # The core still enumerates every grant alias. A missing registration
+        # is accepted only by this adapter's certified normal-removal proof.
+        retirement.removed_alias_references=self._removed_alias_references
         # Portal-managed steps must not expire while the parent task is partial.
         retirement.collection_allowed=self._collection_allowed
 
@@ -201,6 +205,12 @@ class RetirementNode:
     def _can_cancel_before_moves(self,row):
         """Prove an interrupted isolate made no data or grant mutation."""
         key=row['operationId']
+        if row['snapshot']['protocol']=='dataset-version-absence-v1':
+            original=type(self.principal)(row['actor'],row['admin'])
+            with self.cache._retirement_scope(original,key,row['dataset'],row['version'],row['snapshotSha256']),\
+                    self.cache._lock_file('.locks/'+row['dataset']+'.'+row['version']+'.lock'):
+                self._assert_empty(original,row['dataset'],row['version'],row['snapshot']['authorization'],row['snapshot'].get('retainedRemoval'))
+            return True  # Metadata-only isolation has no payload/grant writes.
         try:journal=self.retirement._journal(key)
         except FileNotFoundError:journal=None
         if journal is not None and (journal['state']!='ISOLATING' or journal['moves'] or journal['revocations']):return False
@@ -269,7 +279,7 @@ class RetirementNode:
                             if snapshot['complete'] and not self.cache._ready(self.cache._paths(row['dataset'],row['version']),self.cache._record(original,row['dataset'],row['version'])['manifest'],row['version']):
                                 raise ValueError('Unisolated complete data is unconfirmed')
                         else:
-                            self._assert_empty(original,row['dataset'],row['version'],snapshot['authorization'])
+                            self._assert_empty(original,row['dataset'],row['version'],snapshot['authorization'],snapshot.get('retainedRemoval'))
                         fence={**fence,'state':'RELEASED'}
                         with self.cache._locked():
                             current=self.cache._retirement_fence(row['dataset'],row['version'])
@@ -300,7 +310,113 @@ class RetirementNode:
             raise PermissionError('这份数据只能由管理员删除')
         return owners
 
-    def _assert_empty(self, actor, dataset, version, authorization):
+    @staticmethod
+    def _private_identity(path):
+        with D._directory(path.parent) as parent:
+            fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+            try:
+                info=D._regular(fd)
+                if info.st_uid!=os.geteuid() or info.st_mode & 0o077 or info.st_size>D.MAX_JSON_BYTES:
+                    raise ValueError('Unsafe removed-alias proof file')
+                return list(D._stamp(info))
+            finally:os.close(fd)
+
+    def _proof_json(self,path):
+        before=self._private_identity(path);value=R.private_read(path)
+        if self._private_identity(path)!=before:
+            raise ValueError('Removed-alias proof changed while reading')
+        return value,before,R.sha(value)
+
+    def _removed_alias(self,dataset,version,*,expected=None):
+        """Certify retained metadata, never infer deletion from READY absence.
+
+        The ordinary removal's archived inode and manifest are validated once.
+        A frozen plan subsequently pins its full private file identity (including
+        ctime), avoiding repeatedly parsing a large immutable manifest. All
+        small owner/removal/tier/grant proofs are still read afresh each phase.
+        """
+        paths=self.cache._paths(dataset,version);registry=self.cache._paths(dataset)['.registry']
+        with self.cache._locked():
+            if (any(R.exists(p) for p in (registry/(version+'.json'),paths['ready'],paths['.staging'],
+                    self.cache.root/'.provenance'/dataset/(version+'.json'))) or self.cache._leases(dataset,version)):
+                raise ValueError('Removed alias has live or unconfirmed data/dependencies; fixed authority reconciliation required')
+            tier=self.cache._tier(dataset,version)
+            if type(tier['schema']) is not int or tier['role']!='cache' or tier['pins']:
+                raise ValueError('Missing registration has unconfirmed recovery metadata; removed alias needs an unpinned certified recovery tier')
+            recovery=tier['recovery']
+        fields={'schema','authorityId','version','registration','proof','owners'}
+        if (not isinstance(recovery,dict) or set(recovery)!=fields or type(recovery['schema']) is not int or recovery['schema']!=1
+                or recovery['version']!=version or recovery['authorityId'] not in self.tier.authorities
+                or not self.tier._recoverable(self.tier.authorities[recovery['authorityId']])
+                or not isinstance(recovery['proof'],dict)
+                or not isinstance(recovery['registration'],list) or len(recovery['registration'])!=5
+                or any(type(item) is not int or item<0 for item in recovery['registration'])):
+            raise ValueError('Removed alias has no valid fixed recovery identity')
+        owners=self.cache._owners(recovery['owners'])
+        if owners!=recovery['owners']:raise ValueError('Removed alias ownership is unconfirmed')
+        with D._directory(self.cache.root/'.trash') as fd:names=sorted(os.listdir(fd))
+        if len(names)>10000:raise ValueError('Removed-alias trash inventory requires reconciliation')
+        matches=[]
+        for name in names:
+            if not re.fullmatch(r'unregister-[a-f0-9]{32}',name):continue
+            folder=self.cache.root/'.trash'/name
+            removal,removed_identity,removed_sha=self._proof_json(folder/'REMOVAL.json')
+            if not isinstance(removal,dict):raise ValueError('Unconfirmed normal removal metadata')
+            if removal.get('dataset')!=dataset or version not in removal.get('versions',[]):continue
+            fields={'schema','dataset','version','versions','createdAt','unregistered','owners'}
+            if (set(removal)!=fields or type(removal['schema']) is not int or removal['schema']!=D.SCHEMA
+                    or removal['unregistered'] is not True or removal['version'] not in (None,version)
+                    or not isinstance(removal['versions'],list) or len(removal['versions'])>10000
+                    or sorted(set(removal['versions']))!=removal['versions'] or removal['owners']!=owners
+                    or type(removal['createdAt']) not in (int,float) or not math.isfinite(removal['createdAt']) or removal['createdAt']<0):
+                raise ValueError('Removed alias needs its exact completed normal removal')
+            for item in removal['versions']:D._identifier(item,D.HASH_RE)
+            if any(R.exists(folder/'replicas'/bucket/version) for bucket in ('ready','staging')):
+                raise ValueError('Normal removal still retains unconfirmed alias payload')
+            metadata,owner_identity,owner_sha=self._proof_json(folder/'registration/dataset.json')
+            if (not isinstance(metadata,dict) or type(metadata.get('schema')) is not int
+                    or metadata!={'schema':D.SCHEMA,'owners':owners}):
+                raise ValueError('Archived removal owners differ from fixed recovery owners')
+            record_path=folder/'registration'/(version+'.json');record_identity=self._private_identity(record_path)
+            if record_identity[:4]!=recovery['registration'][:4]:
+                raise ValueError('Removed alias is not the certified archived registration inode')
+            if expected is not None:
+                if record_identity!=expected.get('registrationIdentity') or name!=expected.get('removalId'):
+                    raise ValueError('Removed alias archived registration changed from its plan')
+                record_sha=expected['registrationSha256']
+            else:
+                record,record_identity,record_sha=self._proof_json(record_path)
+                if (not isinstance(record,dict) or set(record)!={'schema','manifest','sourceId'} or type(record['schema']) is not int or record['schema']!=D.SCHEMA
+                        or D._version(D._manifest(record['manifest']))!=version):
+                    raise ValueError('Removed alias archived immutable manifest differs')
+                if record['sourceId'] is not None:D._identifier(record['sourceId'])
+            if self._private_identity(record_path)!=record_identity:
+                raise ValueError('Removed alias archived registration changed during inspection')
+            matches.append(dict(removalId=name,removalIdentity=removed_identity,removalSha256=removed_sha,
+                ownerIdentity=owner_identity,ownerSha256=owner_sha,registrationIdentity=record_identity,registrationSha256=record_sha))
+        if len(matches)!=1:raise ValueError('Removed alias requires one unambiguous completed removal')
+        tier_value,tier_identity,tier_sha=self._proof_json(self.cache.root/'.tiers'/dataset/(version+'.json'))
+        if tier_value!=tier:raise ValueError('Removed alias recovery tier changed while inspecting')
+        adapter=self.tier.authorities[recovery['authorityId']];project=getattr(adapter,'retirement_reference',None)
+        if not callable(project):raise ValueError('Removed alias authority lacks its configured fixed projection')
+        ref=project(self.principal,recovery['proof'])
+        fields={'sourceMachine','targetMachine','sourceDataset','version','grantId','receiptSha256'}
+        if (not isinstance(ref,dict) or set(ref)!=fields or ref['targetMachine']!=self.retirement.machine
+                or ref['version']!=version or recovery['proof'].get('owners')!=owners):
+            raise ValueError('Removed alias fixed authority identity differs')
+        D._identifier(ref['sourceMachine']);D._identifier(ref['sourceDataset']);D._identifier(ref['grantId'],R.GRANT_UUID)
+        D._identifier(ref['receiptSha256'],D.HASH_RE)
+        proof=dict(protocol='completed-removal-alias-v1',dataset=dataset,version=version,owners=owners,
+            rootIdentity=list(self.cache._root_identity),**matches[0],tierIdentity=tier_identity,tierSha256=tier_sha,authorityReference=ref)
+        if expected is not None and proof!=expected:
+            raise ValueError('Removed alias proof changed from its immutable plan')
+        if self.quiescent is not None:self.quiescent(dataset,version)
+        return proof
+
+    def _removed_alias_references(self,dataset,version):
+        return [self._removed_alias(dataset,version)['authorityReference']]
+
+    def _assert_empty(self, actor, dataset, version, authorization, retained_removal=None):
         """Exact negative observation; unknown residual data never means gone."""
         owners=self._authorization(actor,authorization,version)
         paths=self.cache._paths(dataset,version)
@@ -310,11 +426,14 @@ class RetirementNode:
                 current=self.cache._dataset(actor,dataset)['owners']
                 if current!=owners:
                     raise PermissionError('Absent version namespace belongs to different owners')
-            checks=[registry/(version+'.json'),paths['ready'],paths['.staging'],
-                    self.cache.root/'.tiers'/dataset/(version+'.json'),
-                    self.cache.root/'.provenance'/dataset/(version+'.json')]
+            checks=[registry/(version+'.json'),paths['ready'],paths['.staging'],self.cache.root/'.provenance'/dataset/(version+'.json')]
+            if retained_removal is None:checks.append(self.cache.root/'.tiers'/dataset/(version+'.json'))
             if any(R.exists(path) for path in checks) or self.cache._leases(dataset,version):
                 raise ValueError('Missing registration has unconfirmed data or active dependencies')
+        if retained_removal is not None:
+            proof=self._removed_alias(dataset,version,expected=retained_removal)
+            if proof['owners']!=owners:
+                raise PermissionError('Removed alias does not have the fixed source owners')
         # Interrupted ordinary removal can still hold the last complete bytes.
         # A negative READY lookup alone cannot certify its deletion.
         with D._directory(self.cache.root/'.trash') as fd:
@@ -337,11 +456,19 @@ class RetirementNode:
             self.quiescent(dataset,version)
         return owners
 
-    def _absence(self, actor, dataset, version, authorization, references):
-        owners=self._assert_empty(actor,dataset,version,authorization)
-        return dict(protocol='dataset-version-absence-v1',machine=self.retirement.machine,dataset=dataset,version=version,
+    def _absence(self, actor, dataset, version, authorization, references, *, frozen_removal=None):
+        self._authorization(actor,authorization,version)
+        retained=self._removed_alias(dataset,version,expected=frozen_removal) if R.exists(self.cache.root/'.tiers'/dataset/(version+'.json')) else None
+        owners=self._assert_empty(actor,dataset,version,authorization,retained)
+        if retained is not None and references!=[retained['authorityReference']]:
+            raise ValueError('Removed alias must use only its actual fixed source grant')
+        value=dict(protocol='dataset-version-absence-v1',machine=self.retirement.machine,dataset=dataset,version=version,
                     owners=owners,rootIdentity=list(self.cache._root_identity),complete=False,memberAllowed=authorization['memberAllowed'],
                     authorization=authorization,authorityReferences=references,authorityAliases=[])
+        if retained is not None:
+            value['retainedRemoval']=retained
+            value['authorityAliases']=self.grant_locations(version,references,_known_removals={dataset:retained})
+        return value
 
     def _view(self, row):
         snapshot=row['snapshot']
@@ -403,7 +530,7 @@ class RetirementNode:
                 if previous is None or previous['state'] in {'RESTORED','RELEASED'}:
                     if previous is not None and previous['operationId']==key:
                         raise ValueError('Released absence cannot replay its old deletion')
-                    if self._absence(actor,dataset,version,snapshot['authorization'],snapshot['authorityReferences'])!=snapshot:
+                    if self._absence(actor,dataset,version,snapshot['authorization'],snapshot['authorityReferences'],frozen_removal=snapshot.get('retainedRemoval'))!=snapshot:
                         raise ValueError('Negative dataset inventory changed')
                     with self.cache._lock_file('.locks/'+dataset+'.'+version+'.lock'),self.cache._locked():
                         if self.cache._retirement_fence(dataset,version)!=previous:
@@ -422,7 +549,7 @@ class RetirementNode:
                         or previous['snapshotSha256']!=row['snapshotSha256']):
                     raise ValueError('Negative inventory belongs to another persistent fence')
                 with self.cache._retirement_scope(actor,key,dataset,version,row['snapshotSha256']),self.cache._lock_file('.locks/'+dataset+'.'+version+'.lock'):
-                    self._assert_empty(actor,dataset,version,snapshot['authorization'])
+                    self._assert_empty(actor,dataset,version,snapshot['authorization'],snapshot.get('retainedRemoval'))
                 result=dict(protocol='dataset-version-fence-v1',operationId=key,machine=row['machine'],dataset=dataset,version=version,
                             snapshotSha256=row['snapshotSha256'],generation=previous['generation'],state=previous['state'],drained=True)
             if row['state']=='PLANNED':
@@ -448,7 +575,7 @@ class RetirementNode:
                 result=self.retirement.isolate(actor,row['dataset'],row['version'],key,snapshot,_revoke=revoke)
             else:
                 with self.cache._retirement_scope(actor,key,row['dataset'],row['version'],row['snapshotSha256']),self.cache._lock_file('.locks/'+row['dataset']+'.'+row['version']+'.lock'):
-                    self._assert_empty(actor,row['dataset'],row['version'],snapshot['authorization'])
+                    self._assert_empty(actor,row['dataset'],row['version'],snapshot['authorization'],snapshot.get('retainedRemoval'))
                     with self.cache._locked():
                         fence=self.cache._check_retirement(row['dataset'],row['version'])
                         if fence['state'] not in {'FENCED','ISOLATED'}:
@@ -496,6 +623,11 @@ class RetirementNode:
                             'error':'Node dispatch intent has no confirmed retirement outcome; no automatic retry'}
                 return {**self._view(row),'result':result}
             if row['result'] is not None:
+                if row['snapshot'].get('retainedRemoval') is not None and row['state']!='RESTORED':
+                    original=type(actor)(row['actor'],row['admin'])
+                    with self.cache._retirement_scope(original,key,row['dataset'],row['version'],row['snapshotSha256']),\
+                            self.cache._lock_file('.locks/'+row['dataset']+'.'+row['version']+'.lock'):
+                        self._assert_empty(original,row['dataset'],row['version'],row['snapshot']['authorization'],row['snapshot']['retainedRemoval'])
                 fence=self.cache._retirement_fence(row['dataset'],row['version'])
                 restored=row['state']=='RESTORED'
                 proof=[row['binding'],fence,row['restoreSourceSha256']] if restored else [row['binding'],fence]
@@ -607,7 +739,7 @@ class RetirementNode:
             original_actor=type(actor)(row['actor'],row['admin'])
             with self.cache._retirement_scope(original_actor,key,row['dataset'],row['version'],row['snapshotSha256']),\
                     self.cache._lock_file('.locks/'+row['dataset']+'.'+row['version']+'.lock'):
-                self._assert_empty(original_actor,row['dataset'],row['version'],authorization)
+                self._assert_empty(original_actor,row['dataset'],row['version'],authorization,snapshot.get('retainedRemoval'))
                 with self.cache._locked():
                     fence=self.cache._check_retirement(row['dataset'],row['version'])
                     if fence is None or fence['operationId']!=key or fence['state'] not in {'ISOLATED','RELEASED'}:
@@ -675,7 +807,7 @@ class RetirementNode:
             row['state'],row['result']='RELEASED',result;self._write(row)
             return result
 
-    def grant_locations(self, version, references):
+    def grant_locations(self, version, references, *, _known_removals=None):
         """Exhaustive local fixed-receipt projection, without owner filtering."""
         D._identifier(version,D.HASH_RE)
         if not isinstance(references,list) or len(references)>10000:
@@ -694,6 +826,7 @@ class RetirementNode:
         with D._directory(self.cache.root/'.trash') as fd:
             trash=sorted(os.listdir(fd))
         if len(trash)>10000:raise ValueError('Dependent trash inventory requires reconciliation')
+        removed_aliases={}
         for name in trash:
             folder=self.cache.root/'.trash'/name
             if re.fullmatch(r'unregister-[a-f0-9]{32}',name):
@@ -705,8 +838,9 @@ class RetirementNode:
                     tier=self.cache.root/'.tiers'/removed['dataset']/(version+'.json')
                     if R.exists(tier):
                         saved=R.private_read(tier)
-                        if saved.get('recovery') is not None:
-                            raise ValueError('Dependent removal needs its fixed authority alias reconciled')
+                        if saved.get('recovery') is not None and not R.exists(self.cache._paths(removed['dataset'])['.registry']/(version+'.json')):
+                            removed_aliases[removed['dataset']]=self._removed_alias(removed['dataset'],version,
+                                expected=(_known_removals or {}).get(removed['dataset']))
             elif re.fullmatch(r'retire-[a-f0-9]{32}',name):
                 isolated=R.private_read(folder/'RETIREMENT.json')
                 if (isolated.get('version')==version and isolated.get('state') not in {'RESTORED','PURGED','ROLLED_BACK'}
@@ -726,12 +860,13 @@ class RetirementNode:
             if not R.exists(path):
                 with self.cache._locked():tier=self.cache._tier(dataset,version)
                 if tier['role']=='cache' or tier['recovery'] is not None:
-                    raise ValueError('Dependent authority has an orphaned registration; reconcile its fixed removal receipt')
-                continue
-            with self.cache._locked():
-                tier=self.cache._tier(dataset,version)
-            if tier['role']!='cache':continue
-            bindings=self.tier.retirement_references(internal,dataset,version)
+                    proof=removed_aliases.get(dataset) or self._removed_alias(dataset,version)
+                    bindings=[proof['authorityReference']]
+                else:continue
+            else:
+                with self.cache._locked():tier=self.cache._tier(dataset,version)
+                if tier['role']!='cache':continue
+                bindings=self.tier.retirement_references(internal,dataset,version)
             for binding in bindings:
                 planned=expected.get(binding['grantId'])
                 if planned is not None:
