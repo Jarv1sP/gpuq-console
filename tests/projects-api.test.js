@@ -242,6 +242,21 @@ test('terminal API requires explicit isolated attachment and fences legacy/forge
   assert.equal(f.calls.at(-1).args.userId,f.admin.principal.userId);
  }finally{await f.close();}
 });
+test('terminal status and ended-session cleanup use exact original identity without acquiring a writer',async()=>{
+ const f=await fixture();try{
+  const id=randomUUID(),project='my-project';
+  for(const operation of ['terminal.status','terminal.close']){
+   await f.call(operation,{id,project});
+   assert.deepEqual(f.calls.at(-1),{machine:'gpu-1',operation,args:{machine:'gpu-1',id,project,userId:f.member.id,username:'alice',hostAdmin:false}});
+   for(const more of [{userId:'builtin-admin'},{machine:'gpu-2'},{hostAdmin:true},{dataWorkspace:true},{input:'QQ=='},{id:'invalid'},{takeover:true},{writerToken:null}])await assert.rejects(f.call(operation,{id,project,...more}));
+  }
+  await assert.rejects(f.call('terminal.status',{id,clientId:randomUUID()}));
+  await assert.rejects(f.call('terminal.status',{id,writerToken:randomUUID()}));
+  await assert.rejects(f.call('terminal.close',{id,clientId:randomUUID()}),/凭据/);
+  for(const op of ['terminal.exchange','terminal.detach'])await assert.rejects(f.call(op,{id}),/升级|凭据/);
+  assert.equal(f.calls.some(c=>c.operation==='terminal.open'),false);assert.equal(f.service.store.jobs.length,0);
+ }finally{await f.close();}
+});
 test('project outputs require same authenticated owner, machine, project and job',async()=>{
  const f=await fixture();try{
   const job=(await f.call('jobs.submit',{project:'my-project',release,cards:1,argv:['true'],key:randomUUID()})).result;await f.settle();

@@ -235,6 +235,23 @@ test('Ctrl+] releases the writer lease instead of closing the retained PTY',asyn
   assert.equal(f.calls.filter(call=>call.operation==='terminal.detach').length,1);
   assert.match(result.stderr,/--reconnect/);
 });
+test('terminal status/close are noninteractive exact-ID recovery commands, never open or stop a live terminal',async t=>{
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ f.custom.set('terminal.status',args=>({protocol:'terminal-session-status-v1',id:args.id,state:'UNKNOWN',evidence:{confirmed:false}}));
+ f.custom.set('terminal.close',args=>({protocol:'terminal-session-status-v1',id:args.id,state:'STOPPED',closed:true,metadataOnly:true}));
+ assert.equal((await f.cli(['terminal','status',JOB])).data.state,'UNKNOWN');
+ assert.deepEqual(f.calls.at(-1),{operation:'terminal.status',args:{machine:'gpu-1',project:'alpha',hostAdmin:false,id:JOB}});
+ assert.equal((await f.cli(['terminal','close',JOB])).code,0);
+ assert.equal((await f.cli(['terminal','status',JOB,'--root','--machine','2'])).code,0);
+ assert.deepEqual(f.calls.at(-1).args,{machine:'gpu-2',id:JOB,hostAdmin:true});
+ assert.equal((await f.cli(['terminal','status',JOB,'--data-workspace'])).code,0);
+ assert.deepEqual(f.calls.at(-1).args,{machine:'gpu-1',id:JOB,hostAdmin:false,dataWorkspace:true});
+ for(const args of [['status','bad'],['close',JOB,'--takeover'],['status',JOB,'--root','--project','alpha'],['status',JOB,'--data-workspace','--project','alpha'],['status',JOB,'--machine','foreign'],['status',JOB,'extra']])assert.equal((await f.cli(['terminal',...args])).code,1);
+ f.custom.set('terminal.close',args=>({protocol:'terminal-session-status-v1',id:args.id,closed:true,state:'ALIVE',metadataOnly:false}));
+ assert.equal((await f.cli(['terminal','close',JOB])).code,1);
+ assert.ok(f.calls.filter(c=>c.operation.startsWith('terminal.')).every(c=>!('writerToken'in c.args)&&!('clientId'in c.args)&&!('input'in c.args)));
+ assert.equal(f.calls.some(c=>['terminal.open','terminal.exchange'].includes(c.operation)),false);
+});
 
 test('run selects latest READY release without publishing; exact argv and dataset refs preserved',async t=>{
   const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});

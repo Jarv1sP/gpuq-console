@@ -59,6 +59,8 @@ gpuctl ssh                       Develop in the selected project's private termi
 gpuctl ssh --root                Administrator: unrestricted host root terminal
 gpuctl ssh --reconnect SESSION   Explicitly reconnect a detached/expired session
 gpuctl ssh --reconnect SESSION --takeover  Replace its active writer explicitly
+gpuctl terminal status SESSION [--machine SERVER]  Check the original session without attaching
+gpuctl terminal close SESSION [--machine SERVER]   Clear an ended session; never stops a live terminal
 gpuctl exec -- id                Administrator: non-interactive host root command
 gpuctl exec --detach -- bash -lc 'long-command'
 gpuctl exec status HANDLE        Read bounded stdout, stderr, state and exit code
@@ -207,7 +209,7 @@ const CLI_OPTIONS=new Map([
   ['pin','flag'],...['kind','status','title','body','body-file','announcement-type'].map(key=>[key,'value']),
   ['via','value'],
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
-  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown','sync'].map(key=>[key,'flag']),
+  ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown','sync','data-workspace'].map(key=>[key,'flag']),
   ['sync-dir','value'],['candidates','value'],['owner-id','value'],
   ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit','members','primary','manifest-sha256'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
@@ -687,6 +689,17 @@ async function main(){
           result={...result,machine,selectedProject:project};
         }
       }
+    }else if(command==='terminal'&&['status','close'].includes(positionals[1])){
+      const allowed=['machines','datasets','url','session-file','json','root','project','legacy','data-workspace'];
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!allowed.includes(k)))fail('Usage: terminal status|close SESSION [--machine SERVER] [--project NAME | --root | --data-workspace]');
+      const id=positionals[2],machine=defaultMachine(),hostAdmin=options.root===true;
+      if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id))fail('Terminal requires the complete original session UUID');
+      if(!state.machines.some(m=>m.id===machine))fail('这台机器未授权或不存在');
+      if(options['data-workspace']&&(hostAdmin||options.project)||hostAdmin&&options.project)fail('Terminal scopes cannot be combined');
+      const context=options['data-workspace']?{dataWorkspace:true}:hostAdmin?{}:projectArgs(machine);
+      result=(await call('terminal.'+positionals[1],{machine,id,hostAdmin,...context})).result;
+      if(result?.protocol!=='terminal-session-status-v1'||result.id!==id)fail('Original terminal status was not confirmed; upgrade the matching node. No replacement was started.');
+      if(positionals[1]==='close'&&(result.closed!==true||result.state!=='STOPPED'||result.metadataOnly!==true))fail('Ended-session cleanup was not confirmed; query the same session ID.');
     }else if(command==='shell'&&positionals.length===2){
       if(!process.stdin.isTTY)fail('交互终端需要 TTY；非交互任务使用 gpuctl run');
       const machine=positionals[1],hostAdmin=options.root===true;

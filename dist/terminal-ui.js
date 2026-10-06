@@ -27,6 +27,10 @@ export function terminalRequestContext(value){
 export function terminalExitMessage(result){
   return Number.isInteger(result.exitCode)?`终端已结束（退出码 ${result.exitCode}）`:'终端已结束（退出码未提供）';
 }
+export function terminalStoppedMessage(result,id){
+  return result?.protocol==='terminal-session-status-v1'&&result.id===id&&result.state==='STOPPED'&&result.evidence?.confirmed===true
+    ?'此终端已结束。原会话不能恢复；需要继续工作时，请明确新建独立终端。':null;
+}
 export function terminalContext({machine,project,hostAdmin=false,dataWorkspace=false}){
   if(typeof machine!=='string'||!machine||machine==='auto')throw Error('先选择一台服务器，再打开终端。');
   if(project!==undefined&&project!==''&&(typeof project!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(project)))throw Error('项目名称无效。');
@@ -130,14 +134,29 @@ export function terminalUI(store,toast){
   async function requestAttachment(target,request,lifecycle,current){
     try{return await store.call('terminal.open',request,lifecycle);}catch(error){
       if(!current())throw Error('终端请求已过期，没有切换当前终端。');
+      if(request.mode==='reconnect'&&/not reachable|has ended/.test(error.message)){
+        const observed=await store.call('terminal.status',{...terminalRequestContext(target),id:request.id});
+        if(!current())throw Error('终端请求已过期，没有切换当前终端。');
+        const text=terminalStoppedMessage(observed,request.id);
+        if(text)throw Object.assign(Error(text),{code:'TERMINAL_STOPPED',id:request.id});
+      }
       if(request.mode!=='reconnect'||!takeoverError(error)||!window.confirm('接管会让另一处失去输入权，已发出的命令不能撤回。确认接管？'))throw error;
       if(!current())throw Error('登录或项目已改变，请重新选择终端。');
       return store.call('terminal.open',{...request,key:crypto.randomUUID(),takeover:true},lifecycle);
     }
   }
+  async function closeEnded(record,signal){
+      const userId=store.principal?.userId,auth=store.authGeneration;
+      const result=await store.call('terminal.close',{...terminalRequestContext(record),id:record.id},{signal});
+      signal?.throwIfAborted();
+      if(userId!==store.principal?.userId||auth!==store.authGeneration)throw Error('登录账号已改变，未确认旧终端结果。');
+      if(result?.closed!==true||result.id!==record.id||result.state!=='STOPPED'||result.metadataOnly!==true)throw Error('结束结果未确认，请查询原会话。');
+      sessions.delete(record.id);if(session?.id===record.id)await detach(false);announce();
+  }
   async function closeSession(record,{signal,allowTakeover=true}={}){
     signal?.throwIfAborted();
     if(record.userId!==store.principal?.userId)throw Error('不能结束另一账号的终端。');
+    if(record.connectionState==='ended'&&!(session?.id===record.id&&session.writerToken&&Date.now()<session.writeUntil))return closeEnded(record,signal);
     let target=session?.id===record.id?session:null;
     if(target&&!usable(target))target=null;
     if(!target){
@@ -148,8 +167,19 @@ export function terminalUI(store,toast){
         accept:result=>{target=connection(result,record,request,startedAt);},
         onStale:async(result,call)=>{if(result?.writerToken)await release(connection(result,record,request,startedAt),call);}
       };
-      if(allowTakeover)await requestAttachment(record,request,lifecycle,current);
-      else try{await store.call('terminal.open',request,lifecycle);}catch(error){if(takeoverError(error))throw Error('这个终端正在别处使用，请在那里结束');throw error;}
+      try{
+        if(allowTakeover)await requestAttachment(record,request,lifecycle,current);
+        else try{await store.call('terminal.open',request,lifecycle);}catch(error){if(takeoverError(error))throw Error('这个终端正在别处使用，请在那里结束');throw error;}
+      }catch(error){
+        if(!current())throw error;
+        if(error.code==='TERMINAL_STOPPED')return closeEnded(record,signal);
+        if(!allowTakeover&&/not reachable|has ended/.test(error.message)){
+          const result=await store.call('terminal.status',{...terminalRequestContext(record),id:record.id},{signal});
+          if(!current())throw Error('登录或项目已改变，未结束旧终端。');
+          if(terminalStoppedMessage(result,record.id))return closeEnded(record,signal);
+        }
+        throw error;
+      }
       if(signal?.aborted){delete target?.writerToken;signal.throwIfAborted();}
       if(!current()){delete target?.writerToken;throw Error('登录账号已改变，未结束旧终端。');}
     }
@@ -295,6 +325,8 @@ export function terminalUI(store,toast){
     }catch(error){
       if(pendingOpen&&pendingOpen.userId===store.principal?.userId&&pendingOpen.authGeneration===store.authGeneration&&(error.code==='REQUEST_TIMEOUT'||error instanceof TypeError||/reply lost|connection reset|请求超时/i.test(error.message))){
         remember(pendingOpen);announce();toast('终端连接未确认；会话 ID '+pendingOpen.id+'，请用原 ID 重连检查。');
+      }else if(error.code==='TERMINAL_STOPPED'&&pendingOpen?.id===error.id&&pendingOpen.userId===store.principal?.userId&&pendingOpen.authGeneration===store.authGeneration){
+        pendingOpen.connectionState='ended';remember(pendingOpen);announce();pendingOpen=null;toast(error.message);
       }else toast(error.message);
     }finally{button.disabled=false;}
   }
