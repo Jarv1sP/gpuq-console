@@ -114,6 +114,29 @@ class LocalImportTests(base.ProjectSecurity):
         with self.assertRaises(ValueError):self.imports.data.writable(self.args)
         self.assertEqual(self.imports.load(self.reference())['state'],'IMPORTING')
 
+    def test_old_publication_receipt_cannot_hide_pending_or_unknown_local_import(self):
+        self.begin()
+        ready='a'*64
+        publication_id=str(uuid.uuid4())
+        catalog={'state':'READY','latestReadyRelease':ready,'releases':[{'release':ready}]}
+        for stored,active,expected in [('IMPORTING',True,'IMPORTING'),('COMMITTING',True,'COMMITTING'),('IMPORTING',False,'UNKNOWN')]:
+            value=self.imports.load(self.reference());self.imports.write(self.reference(),{**value,'state':stored})
+            self.imports.worker_active=lambda args:active
+            for publication_state,committed in [('PUBLISHING',False),('FAILED',False),('UNKNOWN',False),('UNKNOWN',True),('FAILED',True)]:
+                with self.subTest(import_state=expected,publication_state=publication_state,committed=committed):
+                    pending={'state':publication_state,'publicationId':publication_id,'error':'old publication error'}
+                    if committed:pending['committedRelease']=ready
+                    self.node.atomic_json(self.ops.receipt_path(self.args),pending)
+                    with patch.object(self.ops.store,'status',return_value=dict(catalog)),patch.object(self.ops,'active',return_value=True):
+                        result=self.ops.status(self.args)
+                    self.assertEqual(result['state'],expected)
+                    self.assertEqual(result['localImport']['state'],expected)
+                    self.assertEqual(result['localImport']['key'],self.request['key'])
+                    self.assertIn('original operation ID',result['error'])
+                    self.assertEqual(result['publication']['state'],'READY' if committed else publication_state)
+                    with self.assertRaises(ValueError):self.ops.writable(self.args)
+                    with self.assertRaises(ValueError):self.imports.data.writable(self.args)
+
     def test_cancel_discards_private_stage_only_and_unconfirmed_commit_remains_fenced(self):
         self.begin();self.assertEqual(self.imports.cancel(self.reference())['state'],'CANCELED')
         self.assertTrue(self.source.exists());self.assertFalse((self.code/'imported').exists())

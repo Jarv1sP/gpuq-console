@@ -102,11 +102,11 @@ class ProjectOperations:
     def status(self, args):
         result = self.store.status(*self.identity(args))
         result['publicationProtocol'] = 1
+        local = None
         pointer=self.folder/(self.key(args)+'.local-import.json')
         if pointer.exists():
             helper=self.local_imports()
             local=helper.status(helper.s.read_json(pointer));result['localImport']=local
-            if local['state'] not in ('IMPORTED','FAILED','CANCELED'):result.update(state=local['state'],error='Local draft import is pending; use its original operation ID')
         sync=self.folder/(self.key(args)+'.sync.json')
         if sync.exists():
             session=json.loads(sync.read_text())
@@ -133,10 +133,16 @@ class ProjectOperations:
                         self.n.atomic_json(self.receipt_path(args), recovered)
             except Exception: pass  # The on-disk commit proof remains authoritative.
             result.update(state='READY',progress=pending.get('progress',{}))
-            return self.publication_status(result, recovered)
+            pending = recovered
         if pending.get('state') in ('PUBLISHING', 'FAILED', 'UNKNOWN'):
             result.update({k: pending[k] for k in ('state','error','errorDetails','progress') if k in pending})
-        return self.publication_status(result, pending)
+        self.publication_status(result, pending)
+        # Historical publication recovery describes an immutable release,
+        # not the current mutable draft. Never let it hide a newer import's
+        # pending/unknown outcome or the exact-ID recovery entry point.
+        if local is not None and local['state'] not in ('IMPORTED','FAILED','CANCELED'):
+            result.update(state=local['state'],error='Local draft import is pending; use its original operation ID')
+        return result
 
     def publication_status(self, result, pending):
         """Only this publication's durable commit proof, never an older READY."""
