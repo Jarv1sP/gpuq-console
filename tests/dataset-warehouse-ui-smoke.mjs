@@ -69,6 +69,8 @@ try{
   assert.equal(await page.locator('[data-v3-select=imagenet-sub]').count(),1,'two immutable versions remain one logical dataset row');
   assert.deepEqual(await page.locator('[data-v3-version] option').evaluateAll(nodes=>nodes.map(node=>node.value)),['1'.repeat(64),'a'.repeat(64)]);
   assert.equal(await page.locator('.v3-server-chip:not(.v3-all)').count(),machines.length);
+  assert.equal(await page.locator('[data-v3-select=imagenet-sub] .v3-owner').textContent(),'fixture-user');
+  assert.equal(await page.locator('.v3-meta>span').first().textContent(),'所属 fixture-user');
   assert.equal(await page.locator('#page-datasets .dataset-cache-admin,#page-datasets [data-cache-pin-slot],#page-datasets [data-remove-more],#page-datasets #cloud-admin,#page-datasets [data-v3-delete]').count(),0,'main view contains no privileged operations, and missing delete capability grants no entry');
   const structure=await page.locator('#page-datasets').evaluate(root=>[...root.querySelectorAll('*')].map(node=>[node.tagName,node.id.replace(/^copy-help-\d+$/,'copy-help-generated'),node.getAttribute('role'),node.getAttribute('name')]));
   if(role==='member')mainStructures.set(width,structure);else assert.deepEqual(structure,mainStructures.get(width),'admin and member dataset main views have the same component structure');
@@ -78,13 +80,27 @@ try{
    const after=await training.boundingBox();assert(Math.abs(before.y-after.y)<=1,'training footer does not move with the server/policy scroller');
    assert(await training.locator('[data-use-dataset]').isVisible());assert.equal(await training.locator('.v3-code').count(),2);
    const strip=await page.locator('#control-strip').boundingBox();assert(after.y+after.height<=strip.y-12,'training and both commands remain above the control strip');
-   const firstUse=await page.locator('.help-links').boundingBox();assert(firstUse.y+firstUse.height<=strip.y-12,'first-use caption is already above the fixed strip in the initial desktop viewport');
+   const firstUse=await page.locator('.help-links').boundingBox();assert(firstUse.y>=after.y+after.height,'the first-use caption follows the naturally sized detail panel without overlapping it');
    await page.locator('.v3-detail-scroll').evaluate(node=>node.scrollTop=0);
    for(const node of await page.locator('.v3-server [data-v3-cache],.v3-server [data-remove-more]').all())assert.deepEqual(await node.evaluate(node=>({height:node.getBoundingClientRect().height,font:getComputedStyle(node).fontSize})),{height:32,font:'13px'});
    await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
    const footer=await page.locator('.help-links').boundingBox();assert(footer.y+footer.height<=strip.y-12,'first-use label and hint can scroll above the shared bottom layer');
    await page.evaluate(()=>scrollTo(0,0));
+   for(const size of [{width:1440,height:900},{width:1024,height:768}]){
+    await page.setViewportSize(size);await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    await page.locator('#warehouse-inspector').scrollIntoViewIfNeeded();
+    const visibility=await page.locator('#warehouse-inspector').evaluate(root=>{const middle=root.querySelector('.v3-detail-scroll'),box=middle.getBoundingClientRect(),train=root.querySelector('.v3-train').getBoundingClientRect();return {overflow:root.classList.contains('v3-inspector-overflow'),scroll:middle.scrollHeight-middle.clientHeight,rows:[...root.querySelectorAll('.v3-server')].map(row=>{const r=row.getBoundingClientRect();return {top:r.top,bottom:r.bottom,complete:r.top>=box.top-1&&r.bottom<=box.bottom+1&&r.bottom<=train.top+1};})};});
+    assert.equal(visibility.rows.length,4);
+    assert(visibility.rows.every(row=>row.complete),'all four server rows are complete at '+JSON.stringify({role,size,visibility}));
+    assert.equal(visibility.scroll,0,'four server rows do not need an internal scrollbar at '+JSON.stringify({role,size,visibility}));
+   }
+   await page.setViewportSize({width,height:1000});await page.evaluate(()=>scrollTo(0,0));
   }else{
+   // A real active task moves the shared control button into the mobile
+   // strip. Dataset actions must remain visible even without a direct child button.
+   state.jobs=[{id:'b'.repeat(64),userId:me.id,machine:machines[0].id,state:'RUNNING',cards:1,command:'python train.py',createdAt:checkedAt}];
+   await page.locator('#refresh-state').click();await page.waitForFunction(()=>!document.querySelector('#refresh-state').disabled);
+   assert.equal(await page.locator('#warehouse-page-actions [data-v3-upload]').isVisible(),true,'an active task cannot hide the dataset upload action on phones');
    assert.deepEqual(await page.locator('#warehouse-search').evaluate(node=>({height:node.getBoundingClientRect().height,font:getComputedStyle(node).fontSize})),{height:40,font:'14px'});
    const actions=await page.locator('#warehouse-page-actions>.button').evaluateAll(nodes=>nodes.map(node=>{const r=node.getBoundingClientRect();return r.y+r.height/2;}));assert(Math.max(...actions)-Math.min(...actions)<=1);
    if(width===390){const rail=await page.locator('.v3-rail').boundingBox(),chip=await page.locator('.v3-server-chip').nth(3).boundingBox();assert(chip.x<rail.x+rail.width&&chip.x+chip.width>rail.x+rail.width,'third server exposes the horizontal-scroll continuation');}

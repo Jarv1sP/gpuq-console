@@ -1,6 +1,11 @@
 // Data only: consume the portal's permission-filtered catalog. Do not guess
 // ownership, a latest version, cache release, capacity or training admission.
 import {databaseSummary} from './dataset-flow.js';
+export function datasetOwnerName(label){
+  if(typeof label!=='string')return '未知';
+  const name=label.trim().replace(/^(?:所属用户|共享授权用户)\s*[:：]\s*/, '').trim();
+  return !name||name==='所属未知'?'未知':name;
+}
 
 const identifier=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const hash=/^[a-f0-9]{64}$/;

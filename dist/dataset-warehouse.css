@@ -54,12 +54,14 @@ body[data-room=datasets] .v3-count{font:13px var(--mono);font-variant-numeric:ta
 #page-datasets .v3-strata.storing i{background:var(--v3-warn)}#page-datasets .v3-strata.storing i:nth-child(n+2){opacity:.35}
 #page-datasets .v3-strata.out i{background:none;border-top:2px dashed var(--ink-3);height:0}
 #page-datasets .v3-strata.out i:nth-child(n+2){display:none}#page-datasets .v3-strata.failed i{background:var(--v3-bad)}
-#page-datasets .v3-inspector{min-width:0;position:sticky;top:120px;max-height:calc(100dvh - 132px);display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:var(--bg-1)}
+#page-datasets .v3-inspector{min-width:0;position:sticky;top:120px;display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:var(--bg-1);align-self:start}
 #page-datasets .v3-inspector:empty{display:none}
-#page-datasets .v3-detail-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
-#page-datasets .v3-detail-scroll>section{padding:18px 20px;border-bottom:1px solid var(--line)}
+#page-datasets .v3-detail-scroll{flex:0 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}
+#page-datasets .v3-inspector-overflow .v3-detail-scroll{flex:1;overflow:auto}
+#page-datasets .v3-detail-scroll>section{padding:12px 20px;border-bottom:1px solid var(--line)}
 #page-datasets .v3-detail-scroll>section:last-child{border:0}
-#page-datasets .v3-train{position:sticky;bottom:0;flex:none;background:var(--bg-1);padding:16px 20px;border-top:1px solid var(--line);display:block}
+#page-datasets .v3-train{flex:none;background:var(--bg-1);padding:16px 20px;border-top:1px solid var(--line);display:block}
+#page-datasets .v3-inspector-overflow .v3-train{position:sticky;bottom:0}
 #page-datasets .v3-inspector h2{margin:0;font:600 22px/1.25 var(--display);display:flex;align-items:center;gap:8px}
 #page-datasets .v3-inspector h2>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #page-datasets .v3-edit{min-height:32px;min-width:32px;border:0;background:none;color:var(--ink-3);cursor:pointer;font-size:18px}
@@ -174,7 +176,7 @@ body[data-room=datasets] .v3-count{font:13px var(--mono);font-variant-numeric:ta
  #page-datasets .v3-upload .dataset-sheet-head{margin-inline:-16px;padding-inline:16px}
  #page-datasets .v3-other-sources{gap:8px}
 }
-@media(max-width:759px){body[data-room=datasets] #page-title{font-size:24px}body[data-room=datasets] .page-heading{gap:8px;padding-bottom:16px}.v3-head-actions{gap:2px}.v3-head-actions .button{font-size:12px;min-height:44px;padding:0 8px;display:inline-flex;align-items:center;justify-content:center;line-height:1}.v3-count{font-size:11px!important}}
+@media(max-width:759px){body[data-room=datasets] #page-title{font-size:24px}body[data-room=datasets] .page-heading{gap:8px;padding-bottom:16px}body[data-room=datasets] .page-heading .heading-actions{display:flex}.v3-head-actions{gap:2px}.v3-head-actions .button{font-size:12px;min-height:44px;padding:0 8px;display:inline-flex;align-items:center;justify-content:center;line-height:1}.v3-count{font-size:11px!important}}
 @media(prefers-reduced-motion:reduce){#page-datasets .warehouse-v3 *,#page-datasets .v3-upload *{transition:none}}
 
 #page-datasets .v3-delete-row{padding:12px 20px;border-top:1px solid var(--line)}

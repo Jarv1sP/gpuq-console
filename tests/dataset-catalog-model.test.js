@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {aggregateDatasetCatalog} from '../dist/dataset-catalog-model.js';
+import {aggregateDatasetCatalog,datasetOwnerName} from '../dist/dataset-catalog-model.js';
 
 const version='a'.repeat(64),other='b'.repeat(64);
 const storage=(extra={})=>({dataset:'logical-data',version,phase:'ARCHIVED',archiveMachine:'archive-node',originalRetained:true,...extra});
@@ -136,4 +136,14 @@ test('public metadata cannot override missing or explicit global or location use
   input.datasets[0].versions[0].canUse=true;delete input.datasets[0].versions[0].locations[0].canUse;v=one(input);assert.equal(v.selected.canUse,false);
   input.datasets[0].versions[0].locations[0].canUse=false;
   v=one(input);assert.equal(v.canUse,true);assert.equal(v.selected.canUse,false);assert.equal(v.servers[0].state,'READY','visible metadata remains an observation, not permission');
+});
+
+
+test('owner display removes only presentation prefixes and retains the backend facts',()=>{
+  const original={ownerLabel:'所属用户：fixture-user'};
+  assert.equal(datasetOwnerName(original.ownerLabel),'fixture-user');
+  assert.equal(original.ownerLabel,'所属用户：fixture-user');
+  assert.equal(datasetOwnerName('共享授权用户：alice、bob'),'alice、bob');
+  assert.equal(datasetOwnerName('普通名字'),'普通名字');
+  for(const label of [null,undefined,'','所属未知','所属用户：未知','所属用户：'])assert.equal(datasetOwnerName(label),'未知');
 });

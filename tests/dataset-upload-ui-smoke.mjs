@@ -183,7 +183,8 @@ try {
   await page.screenshot({path: join(screenshots, 'upload-selection-desktop.png'), fullPage: true});
   await page.waitForFunction(()=>document.querySelector('#dataset-add-dialog').dataset.v3UploadState==='error');
   assert.match(await page.locator('#v3-upload-route').textContent(),/平台中转/);
-  assert.equal(await page.locator('[data-v3-cloud]').isDisabled(),true,'Unverified cloud capability grants no import route');
+  assert.equal(await page.locator('[data-v3-cloud]').count(),0,'Connection failure never recommends a cloud import route');
+  assert.equal(await page.locator('[data-v3-source=aliyun]').count(),1,'Cloud import remains available under the original other-source entry');
   assert.equal(await page.locator('[data-upload-phase][aria-current]').count(),0,'No progress before a real upload event');
   // Synthetic size-only fixture: exercise the pre-hash consent gate without
   // creating or sending a large test file. Restore the real File afterwards.
