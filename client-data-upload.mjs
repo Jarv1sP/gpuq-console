@@ -23,9 +23,17 @@ export async function scanLocalDataset(root,progress,{lstat=fsLstat,open=fsOpen,
   const directories=[],files=[],local=new Map(),directoryStamps=new Map();let totalBytes=0,manifestEstimate=42,hashed=0;
   const account=entry=>{manifestEstimate+=Buffer.byteLength(JSON.stringify(entry))+1;if(manifestEstimate>DATA_MANIFEST_LIMIT)fail('Dataset manifest exceeds 64 MiB; split it by data scope');if(directories.length+files.length>DATA_ENTRY_LIMIT)fail('Dataset manifest exceeds 500,000 entries');};
   const top=await lstat(root,{bigint:true});if(!top.isDirectory()||top.isSymbolicLink())fail('data upload requires a real local directory, not a file or symlink');
+  const verifyDirectory=async(folder,{info,names},message)=>{
+    if(!sameFile(info,await lstat(folder,{bigint:true})))fail(message);
+    // NTFS can coalesce directory timestamps. Compare the actual namespace,
+    // not just metadata; keep both stat checks around the directory read.
+    const current=(await readdir(folder)).sort();
+    if(current.length!==names.length||current.some((name,index)=>name!==names[index])||!sameFile(info,await lstat(folder,{bigint:true})))fail(message);
+  };
   async function visit(folder,prefix=''){
-    const before=await lstat(folder,{bigint:true});if(!before.isDirectory()||before.isSymbolicLink())fail('Local directory changed or is a symlink');directoryStamps.set(folder,before);
-    for(const name of (await readdir(folder)).sort()){
+    const before=await lstat(folder,{bigint:true});if(!before.isDirectory()||before.isSymbolicLink())fail('Local directory changed or is a symlink');
+    const names=(await readdir(folder)).sort();directoryStamps.set(folder,{info:before,names});
+    for(const name of names){
       const path=dataPath(prefix?prefix+'/'+name:name),filename=join(folder,name),info=await lstat(filename,{bigint:true});
       if(info.isSymbolicLink())fail('Symlink dataset upload is not supported: '+path);
       if(info.isDirectory()){directories.push(path);account(path);await visit(filename,path);continue;}
@@ -35,14 +43,14 @@ export async function scanLocalDataset(root,progress,{lstat=fsLstat,open=fsOpen,
       try{handleInfo=await file.stat({bigint:true});if(!handleInfo.isFile()||!sameFile(info,handleInfo,{pathToHandle:true}))fail('Local file changed before hashing: '+path);const hash=createHash('sha256'),buffer=Buffer.alloc(DATA_CHUNK);let offset=0;while(offset<size){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,size-offset),offset);if(!bytesRead)fail('Local file changed during hashing: '+path);hash.update(buffer.subarray(0,bytesRead));offset+=bytesRead;progress('HASHING',{path,bytes:hashed+offset});}if(!sameFile(handleInfo,await file.stat({bigint:true})))fail('Local file changed during hashing: '+path);sha256=hash.digest('hex');}finally{await file.close();}
       const entry={path,size,sha256};files.push(entry);account(entry);local.set(path,{filename,info,handleDev:handleInfo.dev});hashed+=size;
     }
-    if(!sameFile(before,await lstat(folder,{bigint:true})))fail('Local directory changed during scan: '+folder);
+    await verifyDirectory(folder,directoryStamps.get(folder),'Local directory changed during scan: '+folder);
   }
   await visit(root);directories.sort();files.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
   const manifest=Buffer.from(JSON.stringify({schema:1,directories,files}));if(manifest.length>DATA_MANIFEST_LIMIT)fail('Dataset manifest exceeds 64 MiB');
   const openEntry=async entry=>{const {filename,info,handleDev}=local.get(entry.path),handleInfo={...info,dev:handleDev},file=await open(filename,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW||0)|(fsConstants.O_NONBLOCK||0));if(!sameFile(handleInfo,await file.stat({bigint:true}))){await file.close();fail('Local file changed after hashing: '+entry.path);}return {
     read:async(offset,chunkBytes=DATA_CHUNK)=>{if(![DATA_CHUNK,16*DATA_CHUNK].includes(chunkBytes))fail('Invalid dataset file chunk size');const buffer=Buffer.alloc(Math.min(chunkBytes,entry.size-offset)),{bytesRead}=await file.read(buffer,0,buffer.length,offset);if(!bytesRead&&offset<entry.size)fail('Local file changed during upload: '+entry.path);return buffer.subarray(0,bytesRead);},
     verify:async()=>{if(!sameFile(handleInfo,await file.stat({bigint:true}))||!sameFile(info,await lstat(filename,{bigint:true})))fail('Local file changed during upload: '+entry.path);},close:()=>file.close()};};
-  const verify=async()=>{for(const [folder,info] of directoryStamps)if(!sameFile(info,await lstat(folder,{bigint:true})))fail('Local directory changed; no publication was requested');for(const {filename,info} of local.values())if(!sameFile(info,await lstat(filename,{bigint:true})))fail('Local file changed; no publication was requested');};
+  const verify=async()=>{for(const [folder,stamp] of directoryStamps)await verifyDirectory(folder,stamp,'Local directory changed; no publication was requested');for(const {filename,info} of local.values())if(!sameFile(info,await lstat(filename,{bigint:true})))fail('Local file changed; no publication was requested');};
   return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files,totalBytes,entries:files.length+directories.length,openEntry,verify};
 }
 
