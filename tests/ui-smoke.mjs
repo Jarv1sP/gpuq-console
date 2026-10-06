@@ -134,8 +134,16 @@ try{
  await detail.locator(':scope > summary').click();
  const processText=await detail.locator('.process-table').textContent();
  assert.match(processText,new RegExp(String(processPid)));assert.match(processText,/8192/);
- assert.ok(processText.includes(processName));assert.ok(processText.includes(processOwner));
+ assert.ok(!processText.includes(processName));assert.ok(!processText.includes(processOwner),'Main compute uses the same process columns for every role');
  await capture(admin,'resources-admin-desktop.png');
+ await admin.evaluate(()=>location.hash='#admin/tasks');await admin.locator('#admin-content .resource-full-metrics').waitFor();
+ await admin.locator('#admin-content .resource-full-metrics>summary').click();
+ const managedDetail=admin.locator('#admin-content details[data-resource-detail="gpu-1:0"]');
+ await managedDetail.locator(':scope > summary').click();
+ const managedProcessText=await managedDetail.locator('.process-table').textContent();
+ assert.match(managedProcessText,new RegExp(String(processPid)));assert.match(managedProcessText,/8192/);
+ assert.ok(managedProcessText.includes(processName));assert.ok(managedProcessText.includes(processOwner));
+ await capture(admin,'admin-processes-desktop.png');await admin.locator('[data-nav=resources]').click();
  await checkGuide(admin,'/guide');assert.equal(await admin.locator('a[href="/guide/admin"]').count(),0);
  // A real state refresh changes metrics without closing the per-card process panel.
  const updated=snapshot();updated.hosts[0].gpus[0].utilization=44;await saveSnapshot(updated);await refreshPage(admin);

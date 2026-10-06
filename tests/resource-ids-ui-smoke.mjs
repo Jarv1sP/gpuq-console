@@ -9,6 +9,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES as examples} from '../dist/machines.js';
 import {checkDelayedResourceFonts,installResourceResizeProbe,waitForResourceFont} from './resource-font-readiness.mjs';
+import {assertResourceNames} from './resource-name-assertions.mjs';
 
 const machines=process.env.PR2_ID_MANIFEST?JSON.parse(await readFile(process.env.PR2_ID_MANIFEST,'utf8')):[
   ...examples.map(machine=>({...machine,id:machine.id+'-node'})),
@@ -77,10 +78,11 @@ try{
         return {text:label.textContent,title:label.title,fontSize:parseFloat(style.fontSize),whiteSpace:style.whiteSpace,height:box.height,left:box.left,right:box.right,textWidth:label.scrollWidth,available:label.clientWidth,ellipsis:getComputedStyle(label).textOverflow};
       });
       assert.equal(identity.text,machine.id);assert.equal(identity.title,machine.id);assert.equal(identity.whiteSpace,'nowrap');
-      assert.ok(identity.fontSize>= (width<760?40:56)&&identity.fontSize<=160);
+      assert.ok(identity.fontSize>=20&&identity.fontSize<=160,'The approved shared fitter may shrink to 20px while retaining the complete ID');
       assert.ok(identity.height<=identity.fontSize+1,'An ID must remain one line');
       assert.ok(identity.left>=0&&identity.right<=width,'The name must fit its container');
-      if(identity.textWidth>identity.available+1){assert.equal(identity.fontSize,width<760?40:56);assert.equal(identity.ellipsis,'ellipsis');}
+      assert.ok(identity.textWidth<=identity.available+1,'Shrinking must fit the ID instead of clipping its distinguishing suffix');
+      await assertResourceNames(page,'#machine-grid');
       const card=page.locator(`.resource-portrait[data-resource-machine="${machine.id}"]`);
       const chassis=await card.locator('.resource-chassis-scroll').evaluate(element=>({width:element.clientWidth,content:element.scrollWidth}));
       assert.ok(chassis.content<=chassis.width+1,'The complete chassis must fit without panning');
@@ -119,7 +121,7 @@ try{
   await page.screenshot({path:join(screenshots,'control-ids-1440.png'),animations:'disabled'});
   animations.push(...await page.evaluate(()=>idAnimations));
   assert.ok(animations.length,'Switching identities retains the approved shared-element motion');
-  for(const animation of animations){assert.equal(animation.options.duration,320);assert.ok(!animation.text.includes('→'),'Only the ID travels, without the side-card arrow');if(animation.tag==='SPAN'){const scale=animation.frames.at(-1).transform.match(/scale\(([^,]+),([^)]+)\)/);assert.ok(scale);assert.equal(Number(scale[1]),Number(scale[2]),'Text shares uniform scaling even when the final ID is ellipsized');assert.ok(parseFloat(animation.fontSize)>=24,'The ghost retains the source typography');}}
+  for(const animation of animations){assert.equal(animation.options.duration,320);assert.ok(!animation.text.includes('→'),'Only the ID travels, without the side-card arrow');if(animation.tag==='SPAN'){const scale=animation.frames.at(-1).transform.match(/scale\(([^,]+),([^)]+)\)/);assert.ok(scale);assert.equal(Number(scale[1]),Number(scale[2]),'Text shares uniform scaling even when the final ID is ellipsized');assert.ok(parseFloat(animation.fontSize)>=20&&parseFloat(animation.fontSize)<=160,'The ghost retains the approved fitted source typography (20–160px)');}}
   const fontReadiness=await checkDelayedResourceFonts(page,origin);
   csp.push(...await page.evaluate(()=>idCSP));assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(csp,[]);
   assert.ok(calls.every(call=>['state','projects.list','datasets.list','datasets.catalog','datasets.capacity','community.info','community.posts.list'].includes(call.operation)));

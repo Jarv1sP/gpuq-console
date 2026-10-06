@@ -303,11 +303,12 @@ export function terminalUI(store,toast){
     if(session?.id===id){ensureDialog();if(!dialog.open){dialog.showModal();revealMotion();}fit?.fit();term?.focus();return;}
     openTerminal({id:'terminal-'+(known.dataWorkspace?'data-':known.hostAdmin?'root-':'')+'reconnect',disabled:false},known);
   });
+  document.addEventListener('gpuq-terminal-state-request',announce);
   document.addEventListener('gpuq-maintenance-state',syncMaintenance);
   document.addEventListener('gpuq-maintenance-root',event=>{
-    const {machine,id,userId}=event.detail||{};if(userId!==store.principal?.userId||store.principal?.role!=='admin'||!store.data?.machines?.some(item=>item.id===machine))return;
+    const {machine,id,userId,mode}=event.detail||{};if(userId!==store.principal?.userId||store.principal?.role!=='admin'||!store.data?.machines?.some(item=>item.id===machine))return;
     const known=id?sessions.get(id):null;if(id&&(!known||!known.hostAdmin||known.machine!==machine||known.userId!==userId))return;
-    openTerminal({id:id?'terminal-root-reconnect':'terminal-root-open',disabled:false},known||{machine,project:''});
+    openTerminal({id:id||mode==='reconnect'?'terminal-root-reconnect':'terminal-root-open',disabled:false},known||{machine,project:''});
   });
   document.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
