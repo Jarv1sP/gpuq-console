@@ -90,6 +90,26 @@ def probe_host_command():
     return result
 
 
+def probe_dataset_delete():
+    """Read installed protocol/helper evidence; never import or run deletion."""
+    config=CONFIG.get('datasets')
+    if not isinstance(config,dict) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',CONFIG.get('machine','')):
+        return 0
+    days=config.get('retireRetentionDays',7)
+    if type(days) is not int or not 7<=days<=365:return 0
+    try:
+        dispatcher=ast.parse(helper_source(HERE/'node-executor.py',os.getuid()))
+        marker=any(isinstance(node,ast.Assign) and any(isinstance(target,ast.Name)
+            and target.id=='DATASET_DELETE_CAPABILITY' for target in node.targets)
+            and isinstance(node.value,ast.Constant) and node.value.value=='dataset-delete-v1'
+            for node in dispatcher.body)
+        if not marker:return 0
+        for name in ('dataset-retirement.py','dataset-retirement-node.py','dataset-rebuild-proof.py','dataset-cache.py','dataset-tier.py','storage-authority.py'):
+            ast.parse(helper_source(HERE/name,os.getuid()))
+        return 1
+    except (ValueError,OSError,UnicodeError,SyntaxError):return 0
+
+
 def number(value):
     """N/A and unsupported sensors are unknown, never a synthetic zero."""
     try:
@@ -327,6 +347,7 @@ def attach_scheduling(output):
 
 def probe():
     output = {"version": 1, "checkedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    output['datasetDelete']=probe_dataset_delete()
     # The bounded sudo policy check runs concurrently, never adding a serial
     # two seconds to GPU telemetry or the scheduler probe's deadline.
     with ThreadPoolExecutor(max_workers=3) as pool:

@@ -76,6 +76,7 @@ export function installDatasetReplication(service){
   };
   async function prepare(owner,target,ref,{retry=true}={}){
     if(!ID.test(ref.dataset)||!HASH.test(ref.version))fail('数据集版本无效。',400);
+    service.assertDatasetNotDeleting?.(target,ref);
     const user=authority(owner,target),policy=JSON.stringify(user),who=principal(user);
     let resolved;
     try{resolved=await service.resolveDataset(owner,target,ref);}catch(error){if(error.status===403)throw error;}

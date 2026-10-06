@@ -245,6 +245,30 @@ class DatasetTier:
                 if (cache.root == other.root or cache.root in other.root.parents or other.root in cache.root.parents
                         or cache._root_identity == other._root_identity):
                     raise D.CacheError("authority must be a distinct non-overlapping cache root")
+        cache.rebuild_guard = self.rebuild_guard
+
+    @contextlib.contextmanager
+    def rebuild_guard(self, actor, dataset, version):
+        """Trusted last-copy check, including when automatic GC is disabled.
+
+        Authenticate through the target cache before using its private adapter.
+        A member never receives an administrator RPC or an authority token.
+        The source's permanent pin and version lock protect the fixed original.
+        """
+        self.cache._actor(actor)
+        internal = type(actor)(actor.user_id, True)
+        with self.cache._locked():
+            self.cache._dataset(actor, dataset)
+            receipt = self._receipt(internal, self.cache._tier(dataset, version), dataset, version)
+        adapter = self.authorities[receipt["authorityId"]]
+        guard = (adapter.guard(internal, receipt["proof"], _hold_global=False)
+                 if isinstance(adapter, LocalAuthority) else adapter.guard(internal, receipt["proof"]))
+        with guard:
+            with self.cache._locked():
+                self.cache._dataset(actor, dataset)
+                if self._receipt(internal, self.cache._tier(dataset, version), dataset, version) != receipt:
+                    raise D.CacheError("protected original changed during removal")
+            yield
 
     @staticmethod
     def _recoverable(adapter):
@@ -295,7 +319,7 @@ class DatasetTier:
                     cache._write_tier(dataset, version, tier)
         return dict(dataset=dataset, version=version, role="cache", verified=True, authorityId=authority_id)
 
-    def _receipt(self, actor, tier, dataset, version):
+    def _receipt(self, actor, tier, dataset, version, *, _read_only=False):
         receipt = tier["recovery"]
         if (tier["role"] != "cache" or not isinstance(receipt, dict)
                 or set(receipt) != {"schema", "authorityId", "version", "registration", "proof", "owners"}
@@ -303,9 +327,23 @@ class DatasetTier:
                 or receipt["authorityId"] not in self.authorities
                 or not self._recoverable(self.authorities[receipt["authorityId"]])
                 or receipt["owners"] != self.cache._dataset(actor, dataset)["owners"]
-                or receipt["registration"] != list(self.cache._record_identity(dataset, version))):
+                or receipt["registration"] != list(self.cache._record_identity(dataset, version, _read_only=_read_only))):
             raise D.CacheError("no valid fixed-version recovery receipt")
         return receipt
+
+    def retirement_references(self, actor, dataset, version, *, _read_only=False):
+        """Private grant relationship projection, never inferred from sourceId."""
+        self.cache._actor(actor)
+        internal=type(actor)(actor.user_id,True)
+        with self.cache._locked():
+            self.cache._dataset(actor,dataset)
+            tier=self.cache._tier(dataset,version)
+            if tier['role']!='cache':return []
+            receipt=self._receipt(internal,tier,dataset,version,_read_only=_read_only)
+        adapter=self.authorities[receipt['authorityId']]
+        project=getattr(adapter,'retirement_reference',None)
+        if not callable(project):raise D.CacheError('authority dependency has no fixed machine/reference proof')
+        return [project(internal,receipt['proof'])]
 
     def recover(self, actor, dataset, version):
         """Trusted worker recovery; no paths, endpoints or receipts from callers."""

@@ -201,3 +201,22 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 - **证书与网络是部署责任**：入口范围、证书更新和客户端真实可达性须持续核验；默认不承诺自动续签或任意校园 NAT 穿透。
 
 前端实现完后至少验收：零授权拒绝、独立终端与显式接管、断线不重放、跨账号拒绝、真实 raw 文件路径、续传偏移、最终校验及无直达入口的大文件拒绝。不得只用健康页或文案截图代替业务测试。
+
+
+## 版本删除（PR-N，节点与门户分阶段发布）
+
+- `datasets.unregister {machine,dataset,version?}`：新节点校验个人来源和最后副本；成员必须指定完整 version，旧/共享/来源不明仅管理员。管理员在新旧节点上都复用 PR-M2 的 `createDatasetRemovalGuard(service,principal).withProtectedRemoval(...)`：跨机器 dataset/version 锁覆盖实时核验和 bridge 派发，必须证明另有完整副本，否则409 `LAST_COPY_UNPROVEN`。旧能力仅管理员可用，请求形状仍为 `{...reference,userId,hostAdmin:true}`；cap1 加私有 `protocol:'dataset-delete-node-v1'`，管理员另带守卫实际证明的完整版本集合 `portalProvedOtherCopy`。节点只对 hostAdmin 接受这份精确证明，版本不在集合中、租约、pin、数据库原件均拒绝；旧 executor/worker 拒绝 v1 请求和任务类型，能力读取之后回滚也不能执行旧清除。客户端不能传协议或证明。已派发或未知目标排除及解除规则完全沿用 M2，见 [DATASETS.md「管理员：清缓存与注销登记」](DATASETS.md#管理员清缓存与注销登记)。门户围栏在车道之前检查；车道内再次出现明确零派发拒绝时，只清本次 request_id 的空编号排除。能力或清单查询失败不能证明不存在。
+- `datasets.delete {dataset,version,key}`：key 为 UUID；客户端不传 machine、owner、角色、依赖或期限。服务从完整可信节点清单、可信副本/归档记录及实际 authority grant 枚举所有物理名称。所有节点 cap1 后先持久化任务/子 UUID；所有计划均确认调用者权限后，原子建立门户围栏，再派发节点围栏。节点写入之前 BLOCKED 原子释放本任务的门户围栏。相同 key 不重复执行。零授权、跨账号、旧能力、未知依赖均拒绝/停止。
+- `datasets.delete.status {key}` **或** `{operationId}`：只查询固定原节点编号，可补确认迟到回执，永不派发下一步。查询维护期间可用。返回 `operationId,key,dataset,version,state,steps,events,createdAt,updatedAt,retainUntil?`；不返回 owner ID、路径、inode、grant/token 或私有证明。状态 `PLANNED/RUNNING/REMOVING_CACHES/RETIRING_ORIGINAL/DELETED/BLOCKED/FAILED/UNKNOWN/WAITING_CONTINUE/CANCELING/CANCELED`。`DELETED` 严格要求每个物理命名空间的当前本代次 `ISOLATED` 回执和至少一份完整数据保留；期限后允许实际固定 `PURGED` 回执，步骤据实显示。历史 phase 文件不能代替当前回执；实际恢复转 `BLOCKED` 并确认对应步骤 `RESTORED`，离线/缺失/错代次转 `UNKNOWN`，不接受外部 `REVOKED/RETIRED` 代替。
+- `datasets.delete.restore {operationId,machine}`：管理员 CLI 专用，完整可信清单先重查 cap1。恢复原源时，同一任务全部步骤一起恢复；完整/被驱逐副本还原登记和实际保留数据，PURGED 副本凭精确源恢复回执释放围栏，不声称已清除的字节又存在。尚未清除但已到期的副本也仅在固定原源已恢复后才能还原。返回 `RESTORED`、明确拒绝的 `FAILED` 或 `UNKNOWN`；失败的固定恢复阶段可按下面的管理员重试规则重试，已确认成功只查询。普通到期恢复、占名或证据不明失败关闭。网页不提供恢复入口。
+- `datasets.delete.continue {operationId}`：仅管理员。沿用原发起人的身份、角色和当前授权；原403拒绝任务不可升级成管理员删除，管理员必须自己新建任务。先查原编号，只有原阶段 FAILED 或无结果且 systemd 明确 STOPPED，才可显式重派同一固定阶段；请求使用新的私有 attempt key 去重，节点保存每次尝试和原失败回执，journal 续做原事务。RUNNING/UNKNOWN 不重派，成功阶段不重派。恢复、取消或重新登记过的任务不能继续删除。门户重启后未完成推进显示 `WAITING_CONTINUE`、“等待继续（门户已重启）”及 `canContinue:true`；查询本身不启动任何步骤。
+- `datasets.delete.cancel {operationId}`：仅管理员，维护期也可用。停止门户推进并确认旧 worker STOPPED；没有 journal 或确无移动的步骤直接解除围栏，部分移动只按固定 inode 回滚，完整隔离恢复。取消永远不调用 isolate、不继续撤销 grant；已撤销授权保持撤销，数据使用新登记。取消 FAILED 后可显式重试原 cancel 阶段，条件同上。`CANCELED` 转换、查询及重复取消都幂等修补门户围栏，避免最后回执与门户重启间留下残留。结果 `CANCELING/CANCELED/FAILED/UNKNOWN`，未知终止状态仍拒绝。
+- `datasets.delete.registration.discard {operationId,machine,key,dataset?}`：管理员 CLI 专用，完整清单 cap1 门控。dataset 缺省使用任务名称；若指定则只能匹配任务在该机器的固定物理步骤，不接受路径、owner、角色或代次覆盖。固定 key 与审计在私有 RPC 前持久化，成功返回 `DISCARDED`，回执未知为 `UNKNOWN`，只允许显式沿用同一 key 续做元数据撤回。节点从子 operationId 推导数据和版本，只在当前 PURGED 代次、准备 inode 从未安装且无活数据/保护时移动意图到私有审计区。不会删除载荷或解除墓碑；成员、旧能力、错误绑定或审计失败均零派发。
+- `datasets.catalog/capacity`：`datasetDelete:1` 仅在完整可信清单每个节点的私有能力回执全部确认后投影；否则 0。新节点 list 提供安全的 `deletionPermissions`，`memberAllowed:false` 时界面隐藏成员删除，并在 ⓘ 中提示“这份数据只能由管理员删除”；旧节点缺字段按不可用处理，不从 owners 猜权限。
+- 私有桥 `storage.dataset-delete.{capabilities,locations,registration,registration-discard,plan,fence,isolate,status,restore,release-absence,cancel,commit}` 不接受公共/peer/upload ticket 请求。UID/hostAdmin 来自当前登录身份。限额退役 worker 没有24小时 RuntimeMaxSec；普通 dataset worker 原限时保持。phase launch 固定且先持久化，管理员重试用私有 retryKey 保存 attempt 审计，绝不改变目标、原身份或恢复源。节点先读 systemd 活动再读结果；`stoppedPhases` 明确列出已停止阶段，`runningPhases` 即使回执已落盘也保留实际仍运行的 worker；门户继续/恢复/取消仍先等待它退出。RUNNING 查询不等待载荷锁。`registration` 只读新登记证明；清除后由有权用户显式重新上传/工作区发布或管理员本机重新登记才创建新的 inode 和来源，旧后台导入、prepare、复制、归档不能越过 PURGED 墓碑。门户仅匹配原节点任务/快照/代次和当前账号权限后解除这个位置的旧围栏。其他位置需要管理员对原任务的完整新源执行 restore 来恢复或释放；新源未 READY、证明改变或权限改变均拒绝。旧 grant/token 永久不复活。
+
+DELETED 只覆盖当前逻辑版本及固定授权依赖；其他名称下的副本不受影响（transfers 产生的独立副本）。已登记但被驱逐的步骤和空命名空间，恢复原完整来源后都释放本任务墓碑。RESTORING 可在截止后完成；全任务隔离确认才为节点到期清理提交许可，部分任务不因7天到期丢恢复材料。物理清除还要求内核 NTP 已同步（STA_UNSYNC 未置位），墙钟过期单独不足；本实现不采用单调时长替代。跨节点最低保留截止允许5分钟时差，否则显示待确认并保留继续/取消出口。
+
+第四轮恢复边界：已完成的隔离 journal 只补投影后恢复，取消不再次隔离；首次回滚保留个人来源证明。正在运行的原 worker 保持“仍在进行”的等待，`canContinue:false`；CANCELING 不允许继续。终态门户墓碑只拦精确版本的后台重建，不永久阻断整数据集的普通注销。未提交收集许可的完整 peer 可从保留字节恢复，缺失或损坏的提交回执不能被推断为未提交。
+
+外部替代退役不被重写：其锁、权限、永久 reference/grant fence 和 API 契约原样保留。本功能仅处理没有替代的版本删除；外部严格完整替代证明只是普通注销“不是最后一份”的实际可重建依据，并在日志单独标为“外部替代退役”。来源不明单 owner 仅管理员。保留期间计费不因目录移动释放；到期清理仅接原本明确启用的 storage 收集服务，本 PR 不开 timer、不部署节点。前端由后续 m4 接口整合。

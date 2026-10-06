@@ -13,6 +13,7 @@ import unittest
 import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
+from dataset_retention_helpers import protected_original
 
 DEPLOY = Path(__file__).resolve().parents[1]/'deploy'
 
@@ -33,6 +34,7 @@ class PersonalUploads(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
         self.cache = D.DatasetCache(self.base/'cache', reserve_bytes=0)
+        self.retention=protected_original(self.cache, D, self.base/'retention-original')
         def workspace(user):
             if not isinstance(user, str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)', user):
                 raise ValueError('Invalid identity')
@@ -138,6 +140,21 @@ class PersonalUploads(unittest.TestCase):
         self.assertEqual(self.call('status', uploadId=upload)['state'], 'READY')
         self.assertEqual(events, [{'opId': upload, 'userId': self.user, 'reference': {'dataset': result['dataset'], 'version': result['version']}, 'origin': 'upload'}])
         self.assertEqual(self.u.load(self.user, upload)['archiveEventId'], upload)
+
+    def test_personal_upload_creation_proof_does_not_authorize_another_owner(self):
+        result, _, files = self.seal()
+        self.fill(result['uploadId'], files)
+        self.call('commit', uploadId=result['uploadId'])
+        self.assertEqual(self.u.worker(self.user, result['uploadId'], 'commit'), 0)
+        actor = D.Principal(self.user)
+        self.assertTrue(self.cache.deletion_permissions(actor, result['dataset'], result['version'])['memberAllowed'])
+        with self.assertRaises(PermissionError):
+            self.cache.deletion_permissions(D.Principal('demo-user-2'), result['dataset'], result['version'])
+        proof = self.cache.root/'.provenance'/result['dataset']/(result['version']+'.json')
+        self.assertEqual(proof.stat().st_mode & 0o777, 0o600)
+        proof.unlink()
+        self.assertFalse(self.cache.deletion_permissions(actor, result['dataset'], result['version'])['allowed'])
+        self.assertEqual(self.call('status', uploadId=result['uploadId'])['state'], 'READY')
 
     def test_archive_intent_failure_prevents_new_publication(self):
         result, _, files = self.seal()
@@ -289,6 +306,7 @@ class PersonalUploads(unittest.TestCase):
             status = self.call('begin', **args)
             self.assertEqual((status['state'], status['resumeState']), ('FAILED', 'UPLOADING'))
         self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
+        self.retention.seal_cache(D.Principal(self.user, True),result['dataset'],result['version'])
         self.cache.evict(D.Principal(self.user, True), result['dataset'], result['version'])
         missing = self.call('status', uploadId=upload)
         self.assertEqual((missing['state'], missing['resumeState']), ('FAILED', 'RECEIVING_MANIFEST'))
@@ -456,6 +474,7 @@ class PersonalUploads(unittest.TestCase):
         self.call('commit', uploadId=upload)
         self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
         self.u.limits['maxUserUploads'] = 1
+        self.retention.seal_cache(D.Principal(self.user, True),result['dataset'],result['version'])
         self.u.limits['maxUserBytes'] = self.u.load(self.user, upload)['reserveBytes']
         with self.assertRaisesRegex(ValueError, 'count limit'):
             self.admit(name='second')

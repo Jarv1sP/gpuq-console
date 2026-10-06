@@ -202,8 +202,24 @@ class DatasetUploads:
         expected = 'u-'+hashlib.sha256(session['userId'].encode()).hexdigest()[:16]+'-'+session['name']
         if dataset != expected:
             raise ValueError('Personal upload namespace changed')
+        # Quarantined bytes still occupy disk and remain recoverable. A rename
+        # out of the registry is never permission to refund their reservation.
+        fence = self.cache._retirement_fence(dataset, version)
+        if fence is not None and fence['state'] not in {'RESTORED','RELEASED','PURGED'}:
+            return session
+        if fence is not None and fence['state'] == 'PURGED':
+            spec=importlib.util.spec_from_file_location('upload_retention_proof',Path(__file__).with_name('dataset-retirement.py'))
+            retention=importlib.util.module_from_spec(spec);spec.loader.exec_module(retention)
+            journal=retention.private_read(self.cache.root/'.trash'/('retire-'+fence['operationId'].replace('-',''))/'RETIREMENT.json')
+            if (journal.get('state')!='PURGED' or journal.get('dataset')!=dataset or journal.get('version')!=version
+                    or journal.get('snapshot',{}).get('registration')!=session['registrationIdentity']
+                    or journal.get('operationId')!=fence['operationId']
+                    or retention.sha(journal.get('snapshot'))!=fence['snapshotSha256']
+                    or journal.get('snapshot',{}).get('rootIdentity')!=list(self.cache._root_identity)
+                    or journal.get('actor')!=session['userId'] and journal.get('admin') is not True):
+                raise ValueError('Purged upload generation is unconfirmed; reservation retained')
         try:
-            self.cache._record_identity(dataset, version)
+            self.cache._record_identity(dataset, version, _read_only=fence is not None and fence['state']=='PURGED')
             return session
         except FileNotFoundError:
             pass
@@ -763,12 +779,23 @@ class DatasetUploads:
             # A kill after any cache mutation must still leave enough durable
             # identity for discard/retry to find precisely this upload's work.
             self.save(session)
-            with self.cache._locked():
+            origin = 'replica' if session.get('workerUnit', '').startswith('gpuq-transfer-') else 'upload'
+            internal=self.d.Principal(user,True)
+            with self.cache._new_registration(internal,dataset,manifest,[user],None,origin=origin,receipt=upload,
+                                              explicit=origin=='upload') as reopening,self.cache._locked():
                 binding = self.binding(dataset, version)
                 try:
                     existing = self.d._read_json(binding)
                 except FileNotFoundError:
                     existing = None
+                if existing is not None and existing != {'userId': user, 'uploadId': upload}:
+                    if reopening:
+                        scope=self.d._REGISTRATION_SCOPE.get()[1]
+                        R=self.cache._retirement_module()
+                        old=R.private_read(self.cache.root/'.trash'/('retire-'+scope['operationId'].replace('-',''))/'metadata/provenance.json')
+                        if existing!={'userId':user,'uploadId':old.get('receipt')} or old.get('origin')!='upload' or old.get('owners')!=[user]:
+                            raise ValueError('Explicit upload cannot replace an unconfirmed old upload binding')
+                        existing=None
                 if existing is not None and existing != {'userId': user, 'uploadId': upload}:
                     if not self._ready(session):
                         raise ValueError('This personal dataset version already has another unfinished upload')
@@ -794,7 +821,8 @@ class DatasetUploads:
                 # All authorization, quota admission and reservation conversion
                 # are service-owned. No public operation receives an admin actor.
                 try:
-                    self.cache._register(self.d.Principal(user, True), dataset, manifest, [user], None)
+                    self.cache._register(internal, dataset, manifest, [user], None,
+                                         _origin=origin, _receipt=upload)
                     session['registrationIdentity'] = list(self.cache._record_identity(dataset, version))
                     self.save(session)
                     self.d._write_json(self.reservation(user, upload), self.reservation_value(session, sealed=True))

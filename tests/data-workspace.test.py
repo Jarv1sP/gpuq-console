@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 from storage_test_helpers import local_data_mounts
+from dataset_retention_helpers import protected_executor_original
 
 DEPLOY = Path(__file__).resolve().parents[1]/'deploy'
 
@@ -47,6 +48,8 @@ class DataWorkspaceTests(unittest.TestCase):
         self.stopped = patch.object(self.w, 'unit_stopped', return_value=False)
         self.stopped.start()
         self.module, self.cache, self.owner = self.w.storage(self.user)
+        self.retention = protected_executor_original(self.n, self.base/'retention-original')
+        self.retention.bind_cache(self.cache)
 
     def tearDown(self):
         self.stopped.stop();self.launch.stop();self.mount.stop()
@@ -127,6 +130,18 @@ class DataWorkspaceTests(unittest.TestCase):
         for path in ('.', '..', '/data2', '../.registry', ''):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 self.call('publish', path=path, name='sample', key=str(uuid.uuid4()))
+
+    def test_workspace_creation_proof_survives_source_binding_but_not_owner_change(self):
+        self.fill()
+        result = self.publish()
+        self.assertEqual(self.w.worker(self.user, result['operationId']), 0)
+        ready = self.call('status', operationId=result['operationId'])
+        actor = self.module.Principal(self.user)
+        self.assertTrue(self.cache.deletion_permissions(actor, ready['dataset'], ready['version'])['memberAllowed'])
+        with self.assertRaises(PermissionError):
+            self.cache.deletion_permissions(self.module.Principal('demo-user-2'), ready['dataset'], ready['version'])
+        self.cache.set_owners(self.module.Principal(self.user, True), ready['dataset'], [self.user, 'demo-user-2'])
+        self.assertFalse(self.cache.deletion_permissions(actor, ready['dataset'], ready['version'])['allowed'])
 
     def test_archive_intent_is_durable_before_publish_and_lost_ack_is_not_publish_failure(self):
         self.fill()

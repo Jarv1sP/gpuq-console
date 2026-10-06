@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from dataset_retention_helpers import protected_original
 
 SPEC = importlib.util.spec_from_file_location('dataset_catalog_performance',
     Path(__file__).resolve().parents[1] / 'deploy' / 'dataset-cache.py')
@@ -21,7 +22,7 @@ class DatasetCatalogPerformance(unittest.TestCase):
         self.base = Path(self.temp.name).resolve()
         self.cache = D.DatasetCache(self.base / 'cache', reserve_bytes=0)
         self.manifest = dict(schema=1, directories=['资料', '资料/深'], files=[
-            dict(path=f'资料/深/样本-{n:05d}.bin', size=9, sha256='a' * 64)
+            dict(path=f'资料/深/样本-{n:05d}.bin', size=9, sha256=hashlib.sha256(b'123456789').hexdigest())
             for n in range(2000)])
         self.version = self.cache.register_manifest(ADMIN, 'large', self.manifest, [OWNER.user_id])['version']
         self.paths = self.cache._paths('large', self.version)
@@ -63,7 +64,8 @@ class DatasetCatalogPerformance(unittest.TestCase):
 
     def test_ready_invalid_json_and_same_size_content_change_are_rejected(self):
         original = D._json_bytes(self.manifest)
-        for content in (b'{}', original.replace(b'aaaaaaaa', b'bbbbbbbb', 1), b'not JSON'):
+        prefix=self.manifest['files'][0]['sha256'][:8].encode()
+        for content in (b'{}', original.replace(prefix, b'bbbbbbbb', 1), b'not JSON'):
             with self.subTest(content=content[:20]):
                 self.replace_ready(content)
                 with self.assertRaisesRegex(D.CacheError, 'corrupt'):
@@ -95,6 +97,9 @@ class DatasetCatalogPerformance(unittest.TestCase):
             D._canonical_json_matches(path, self.version)
 
     def test_marker_readonly_modes_and_live_leases_are_not_bypassed_by_hash(self):
+        source=self.base/'protected-large';(source/'资料/深').mkdir(parents=True)
+        for n in range(2000):(source/f'资料/深/样本-{n:05d}.bin').write_bytes(b'123456789')
+        protected_original(self.cache,D,self.base/'retention-original',source_trees={('large',self.version):source})
         p = self.paths['ready']; p.chmod(0o700)
         D._write_json(p / 'READY.json', dict(schema=1, version='b' * 64)); p.chmod(0o555)
         with self.assertRaisesRegex(D.CacheError, 'corrupt'):

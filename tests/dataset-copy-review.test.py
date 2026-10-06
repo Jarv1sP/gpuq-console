@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from dataset_retention_helpers import protected_original
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -125,6 +126,11 @@ class DatasetCopyReview(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
         self.assertTrue(other.verify(OWNER, "sample", self.version)["verified"])
+        # This test times the target's publication, not a second full copy.
+        # Install the real protected original after that assertion, before the
+        # final removal. The busy-lock assertions above still run unchanged.
+        retention = protected_original(self.cache, D, self.base/'retention-original')
+        retention.bind_cache(other)
         self.assertTrue(other.unregister(ADMIN, "sample")["unregistered"])
 
     def test_failed_batch_fence_write_overreserves_fsynced_bytes_and_resumes(self):

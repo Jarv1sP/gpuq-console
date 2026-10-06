@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
 
@@ -16,6 +17,9 @@ async function apiFixture(t){
   await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:[],gpuq:{connected:true,observeOnly:false,jobs:[]}}))}));
   const calls=[];let failure=null,response={operationId:OPERATION,dataset:'sample',version:null,state:'UNREGISTERING'};
   const s=await PortalService.open(join(dir,'database'),bootstrap,status,async(machine,operation,args)=>{
+    // Legacy assertions below count actual unregister/status side effects.
+    // The safety capability is a separate read and never claims deletion.
+    if(operation==='storage.dataset-delete.capabilities')return {protocol:'dataset-delete-node-v1',machine,datasetDelete:1};
     calls.push({machine,operation,args:structuredClone(args)});
     if(operation==='datasets.list')return {datasets:[{dataset:'sample',versions:[{version:VERSION,state:'READY'}]}]};
     if(operation==='datasets.status'&&calls.some(call=>call.operation==='datasets.unregister'))return {operationId:OPERATION,dataset:'sample',version:null,state:'FAILED'};
@@ -31,10 +35,144 @@ async function apiFixture(t){
   return {s,admin,member,calls,fail:value=>failure=value,respond:value=>response=value};
 }
 
-test('unregister requires authenticated admin despite full member GPU grants',async t=>{
+test('whole-dataset unregister requires authenticated admin despite full member GPU grants',async t=>{
   const f=await apiFixture(t);
   for(const token of [f.member.token,'invalid'])await assert.rejects(f.s.invoke(token,'datasets.unregister',{machine:'gpu-1',dataset:'sample'}),e=>[401,403].includes(e.status));
   assert.equal(f.calls.length,0);
+});
+
+test('missing/old/wrong-machine/failed capability cannot erase an unproven last copy, member or full deletion',async t=>{
+  const f=await apiFixture(t),bridge=f.s.bridge,machine=MACHINES[0].id,reads=[];
+  for(const capability of [undefined,{protocol:'dataset-delete-node-v1',machine,datasetDelete:0},
+    {protocol:'dataset-delete-node-v0',machine,datasetDelete:1},
+    {protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1},Error('capability query failed')]){
+    f.s.bridge=async(host,operation,args)=>{
+      if(operation==='datasets.list'){
+        f.calls.push({machine:host,operation,args:structuredClone(args)});
+        return {datasets:host===machine?[{dataset:'sample',versions:[{version:VERSION,state:'READY'}]}]:[]};
+      }
+      if(operation!=='storage.dataset-delete.capabilities')return bridge(host,operation,args);
+      reads.push({machine:host,operation,args:structuredClone(args)});
+      if(capability instanceof Error)throw capability;
+      return structuredClone(capability);
+    };
+    // Only the target has a full copy. The shared M2 guard must read the whole
+    // trusted inventory, then refuse without dispatching or persisting intent.
+    for(const extra of [{},{version:null},{version:VERSION}]){
+      f.calls.length=0;reads.length=0;
+      await assert.rejects(f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',...extra}),
+        e=>e.status===409&&e.code==='LAST_COPY_UNPROVEN');
+      assert.equal(f.calls.filter(c=>c.operation==='datasets.unregister').length,0);
+      assert.deepEqual(f.calls.map(c=>c.machine),MACHINES.map(m=>m.id));
+      assert.ok(f.calls.every(c=>c.operation==='datasets.list'&&c.args.userId==='builtin-admin'&&c.args.hostAdmin===true));
+      assert.equal(f.s.db.prepare('SELECT count(*) n FROM dataset_removal_exclusions').get().n,0);
+      assert.deepEqual(reads,[{machine,operation:'storage.dataset-delete.capabilities',args:{userId:'builtin-admin',hostAdmin:true}}]);
+    }
+    f.calls.length=0;reads.length=0;
+    await assert.rejects(f.s.invoke(f.member.token,'datasets.unregister',{machine,dataset:'sample',version:VERSION}),e=>e.status===409);
+    assert.deepEqual(f.calls,[]);assert.equal(reads.length,1);
+    for(const token of [f.admin.token,f.member.token]){
+      reads.length=0;
+      await assert.rejects(f.s.invoke(token,'datasets.delete',{dataset:'sample',version:VERSION,key:randomUUID()}),e=>e.status===409&&e.code==='DATASET_DELETE_UNSUPPORTED');
+      assert.deepEqual(f.calls,[]);assert.equal(reads.length,MACHINES.length);
+    }
+    assert.equal(f.s.db.prepare('SELECT count(*) n FROM dataset_deletions').get().n,0);
+    assert.equal(f.s.db.prepare('SELECT count(*) n FROM dataset_deletion_fences').get().n,0);
+  }
+  assert.equal(f.s.store.jobs.length,0);
+});
+
+test('SF3 cap1 removal uses a protocol tag so rolled back legacy executors reject it',async t=>{
+  const f=await apiFixture(t),machine=MACHINES[0].id;
+  await f.s.invoke(f.member.token,'datasets.unregister',{machine,dataset:'sample',version:VERSION});
+  assert.deepEqual(f.calls.at(-1),{machine,operation:'datasets.unregister',args:{dataset:'sample',version:VERSION,userId:f.member.principal.userId,hostAdmin:false,protocol:'dataset-delete-node-v1'}});
+});
+
+test('SF8 cap1 admin removal uses real M2 proof and persists exclusions before sending only proved versions',async t=>{
+  const f=await apiFixture(t),machine=MACHINES[0].id,bridge=f.s.bridge;
+  f.s.bridge=async(host,op,args)=>{
+    if(op==='datasets.unregister'){
+      const rows=f.s.db.prepare('SELECT * FROM dataset_removal_exclusions').all();
+      assert.equal(rows.length,1);assert.equal(rows[0].version,VERSION);assert.equal(rows[0].operation_id,null);
+      assert.deepEqual(args.portalProvedOtherCopy,{protocol:'dataset-portal-copy-proof-v1',versions:[VERSION]});
+      assert.equal(args.protocol,'dataset-delete-node-v1');
+    }
+    return bridge(host,op,args);
+  };
+  await f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',version:VERSION});
+  assert.deepEqual(f.calls.filter(c=>c.operation==='datasets.list').map(c=>c.machine),MACHINES.map(m=>m.id));
+  assert.equal(f.calls.filter(c=>c.operation==='datasets.unregister').length,1);
+});
+
+test('SF4 portal deletion fence refusal before removal dispatch leaves no M2 exclusion, including a late claim',async t=>{
+  for(const late of [false,true]){
+    const f=await apiFixture(t),machine=MACHINES[0].id,bridge=f.s.bridge;
+    let claimed=false;
+    const claim=()=>{if(claimed)return;claimed=true;f.s.db.prepare('INSERT INTO dataset_deletion_fences VALUES(?,?,?,?)').run(machine,'sample',VERSION,randomUUID());};
+    f.s.bridge=async(host,op,args)=>{
+      if(op==='storage.dataset-delete.capabilities')return {protocol:'dataset-delete-node-v1',machine:host,datasetDelete:0};
+      if(late&&op==='datasets.list'&&host===MACHINES.at(-1).id)claim();
+      return bridge(host,op,args);
+    };
+    if(!late)claim();
+    await assert.rejects(f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',version:VERSION}),e=>e.status===409&&e.code==='DATASET_DELETION_FENCED');
+    assert.equal(f.calls.filter(c=>c.operation==='datasets.unregister').length,0);
+    if(f.s.db.prepare("SELECT 1 FROM sqlite_master WHERE name='dataset_removal_exclusions'").get())
+      assert.deepEqual(f.s.db.prepare('SELECT * FROM dataset_removal_exclusions').all(),[]);
+  }
+});
+
+test('member version forwards only authenticated identity; node still proves personal provenance',async t=>{
+  const f=await apiFixture(t),machine=MACHINES[0].id;
+  await f.s.invoke(f.member.token,'datasets.unregister',{machine,dataset:'sample',version:VERSION});
+  assert.deepEqual(f.calls.at(-1),{machine,operation:'datasets.unregister',args:{dataset:'sample',version:VERSION,userId:f.member.principal.userId,hostAdmin:false,protocol:'dataset-delete-node-v1'}});
+  assert.equal(f.calls.length,1,'a v1 member removal must use the node protection, not the admin-only legacy guard');
+  assert.equal(f.s.db.prepare("SELECT count(*) n FROM sqlite_master WHERE name='dataset_removal_exclusions'").get().n,0);
+});
+
+test('cap0 admin uses the real shared protected-removal lane and unchanged main request for every capability fallback',async t=>{
+  const machine=MACHINES[0].id;
+  for(const capability of [undefined,{protocol:'dataset-delete-node-v1',machine,datasetDelete:0},
+    {protocol:'dataset-delete-node-v0',machine,datasetDelete:1},
+    {protocol:'dataset-delete-node-v1',machine:'wrong',datasetDelete:1},Error('capability query failed')]){
+    const f=await apiFixture(t),bridge=f.s.bridge,reads=[];let receipt;
+    f.s.bridge=async(host,operation,args)=>{
+      if(operation==='storage.dataset-delete.capabilities'){
+        reads.push({machine:host,operation,args:structuredClone(args)});
+        if(capability instanceof Error)throw capability;
+        return structuredClone(capability);
+      }
+      if(operation==='datasets.status'){
+        f.calls.push({machine:host,operation,args:structuredClone(args)});
+        assert.equal(args.operationId,receipt.operationId);
+        return {...receipt,state:'FAILED'};
+      }
+      if(operation==='datasets.unregister'){
+        // The real M2 wrapper must commit its exclusion before the bridge write.
+        // Calling assertAnotherCompleteCopy outside its lane cannot pass this.
+        const rows=f.s.db.prepare('SELECT * FROM dataset_removal_exclusions').all();
+        assert.equal(rows.length,1);assert.equal(rows[0].machine,host);
+        assert.equal(rows[0].dataset,'sample');assert.equal(rows[0].version,VERSION);
+        assert.equal(rows[0].operation_id,null);assert.equal(rows[0].scope_version,args.version??null);
+        receipt={operationId:OPERATION,dataset:args.dataset,version:args.version??null,state:'UNREGISTERING'};
+        f.respond(receipt);
+      }
+      return bridge(host,operation,args);
+    };
+    for(const extra of [{},{version:null},{version:VERSION}]){
+      const before=f.calls.length;
+      const result=(await f.s.invoke(f.admin.token,'datasets.unregister',{machine,dataset:'sample',...extra})).result;
+      assert.deepEqual(result,receipt);
+      const current=f.calls.slice(before),writes=current.filter(call=>call.operation==='datasets.unregister');
+      // This is main's exact bridge request shape, including omitted vs null.
+      assert.deepEqual(writes,[{machine,operation:'datasets.unregister',args:{dataset:'sample',...extra,userId:'builtin-admin',hostAdmin:true}}]);
+      assert.deepEqual(current.filter(call=>call.operation==='datasets.list').slice(0,MACHINES.length).map(call=>call.machine),MACHINES.map(host=>host.id));
+      assert(current.findIndex(call=>call.operation==='datasets.unregister')>=MACHINES.length);
+      assert.equal(f.s.db.prepare('SELECT operation_id FROM dataset_removal_exclusions').get().operation_id,OPERATION);
+    }
+    assert.deepEqual(reads,Array.from({length:3},()=>({machine,operation:'storage.dataset-delete.capabilities',args:{userId:'builtin-admin',hostAdmin:true}})));
+    assert.equal(f.s.store.jobs.length,0);
+  }
 });
 
 test('unregister forwards optional versions and server-owned identity without reserving or stopping jobs',async t=>{
@@ -42,7 +180,8 @@ test('unregister forwards optional versions and server-owned identity without re
   for(const extra of [{},{version:null},{version:VERSION}]){
     const out=await f.s.invoke(f.admin.token,'datasets.unregister',{machine:'gpu-2',dataset:'sample',...extra});
     assert.equal(out.result.state,'UNREGISTERING');assert.equal(out.result.unregistered,undefined);
-    assert.deepEqual(f.calls.at(-1),{machine:'gpu-2',operation:'datasets.unregister',args:{dataset:'sample',...extra,userId:'builtin-admin',hostAdmin:true}});
+    assert.deepEqual(f.calls.at(-1),{machine:'gpu-2',operation:'datasets.unregister',args:{dataset:'sample',...extra,userId:'builtin-admin',hostAdmin:true,
+      protocol:'dataset-delete-node-v1',portalProvedOtherCopy:{protocol:'dataset-portal-copy-proof-v1',versions:[VERSION]}}});
   }
   assert.equal(f.s.store.jobs.length,0);
   assert.equal(f.calls.filter(c=>c.operation==='datasets.unregister').length,3);

@@ -10,6 +10,8 @@ export const LAST_COPY_MESSAGE='这可能是这个版本的最后一份完整数
 // The legacy detached worker has RuntimeMaxSec=86400. Keep another hour for
 // launch/stop cleanup; a contract test parses its actual systemd-run definition.
 export const DATASET_REMOVAL_GRACE_MS=25*60*60*1000;
+// An in-process refusal cannot be forged by a serialized node/bridge error.
+export const DATASET_FENCE_REFUSAL=Symbol('portal.dataset-deletion-fence-refusal');
 const removalLanes=new WeakMap();
 const lastCopy=()=>Object.assign(Error(LAST_COPY_MESSAGE),{status:409,code:'LAST_COPY_UNPROVEN'});
 const complete=value=>value?.state==='READY'||value?.state===undefined&&value?.complete===true;
@@ -157,7 +159,18 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
         service.db.exec('COMMIT');
       }catch(error){service.db.exec('ROLLBACK');throw error;}
       checkPolicy();
-      const result=await dispatch();
+      let result;
+      try{
+        // Read-only version scope of this exact proof. Existing callbacks may
+        // ignore it; v1 nodes use it to reject newly added, unproved versions.
+        result=await dispatch(proof.map(row=>({version:row.version})));
+      }catch(error){
+        // Only our explicit Portal fence refusal proves zero node dispatch.
+        // Transport/worker/account failures keep the original M2 exclusions.
+        if(error.code==='DATASET_DELETION_FENCED'&&error[DATASET_FENCE_REFUSAL]===true)
+          service.db.prepare('DELETE FROM dataset_removal_exclusions WHERE request_id=? AND operation_id IS NULL').run(requestId);
+        throw error;
+      }
       if(HASH.test(result?.operationId||'')&&(result.dataset===undefined||result.dataset===dataset)&&(result.version===undefined||(result.version??null)===(version??null)))
         service.db.prepare('UPDATE dataset_removal_exclusions SET operation_id=? WHERE request_id=?').run(result.operationId,requestId);
       checkPolicy();return result;
@@ -191,6 +204,7 @@ export function datasetListView(result,users,{includeEmpty=false,labelView,logic
       for(const field of ['bytes','files'])if(Number.isSafeInteger(value[field])&&value[field]>=0)clean[field]=value[field];
       if(HASH.test(value.operationId))clean.operationId=value.operationId;
       if(value.recoveryConfigured===true)clean.recoveryConfigured=true;
+      if(value.deletionPermissions)clean.deletionPermissions={memberAllowed:value.deletionPermissions.memberAllowed===true,reason:value.deletionPermissions.memberAllowed===true?null:'这份数据只能由管理员删除'};
       if(typeof value.error==='string')clean.error=value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300);
       return clean;
     })
@@ -227,7 +241,8 @@ export async function datasetCatalogCall(service,principal,operation,args){
       if(value.inodeUsageKnown===true&&(!Number.isSafeInteger(value[key])||value[key]<0))fail('数据盘 inode 容量暂时无法确认。',502);
       result[key]=value.inodeUsageKnown===true?value[key]:null;
     }
-    return {...result,inodeUsageKnown:value.inodeUsageKnown===true,guarded:value.guarded===true};
+    return {...result,inodeUsageKnown:value.inodeUsageKnown===true,guarded:value.guarded===true,
+      ...(value.datasetDelete===1&&service.datasetDeleteCapabilities?await service.datasetDeleteCapabilities(principal):{datasetDelete:0})};
   }
   if(operation!=='datasets.catalog')fail('未知目录操作。');
   // An explicit administrator refresh may retire a proven terminal or absent
@@ -243,7 +258,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
     try{
       const result=await service.bridge(m.id,'datasets.list',owner);
       if(!Array.isArray(result?.datasets))throw Error('invalid catalog');
-      return {machine:m.id,state:'ok',datasets:result.datasets};
+      return {machine:m.id,state:'ok',datasets:result.datasets,datasetDelete:result.datasetDelete===1};
     }catch{return {machine:m.id,state:'unavailable',datasets:[]};}
   }));
   let capabilities;
@@ -268,6 +283,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
       const pending=principal.role==='admin'?removalPending(service,listing.machine,item.dataset,value.version):null;
       const location={machine:listing.machine,dataset:item.dataset,ownerLabel:owner.label,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,
         ...(pending?{removalPending:true,...(!pending.operation_id&&pending.registration_identity?{removalGraceEligible:true}:{})}:{}),
+        deletionPermissions:{memberAllowed:value.deletionPermissions?.memberAllowed===true,reason:value.deletionPermissions?.memberAllowed===true?null:'这份数据只能由管理员删除'},
         ...(service.archiveState?.(user.id,listing.machine,{dataset:item.dataset,version:value.version})?{storage:service.archiveState(user.id,listing.machine,{dataset:item.dataset,version:value.version})}:{}),
         ...(listing.machine===args.machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})};
       owners.set(location,owner);version.locations.push(location);
@@ -276,7 +292,9 @@ export async function datasetCatalogCall(service,principal,operation,args){
     }
   }
   const localAvailable=listings.find(m=>m.machine===args.machine)?.state==='ok';
-  return {machine:args.machine,partial:listings.some(m=>m.state!=='ok'),machines:listings.map(({machine,state})=>({machine,state})),
+  const deletionCapabilities=listings.every(l=>l.datasetDelete)&&service.datasetDeleteCapabilities?await service.datasetDeleteCapabilities(principal):{datasetDelete:0};
+  checkPolicy();
+  return {machine:args.machine,...deletionCapabilities,partial:listings.some(m=>m.state!=='ok'),machines:listings.map(({machine,state})=>({machine,state})),
     datasets:[...datasets.values()].sort((a,b)=>a.dataset.localeCompare(b.dataset)).map(item=>({dataset:item.dataset,
       ...(service.datasetLabelView?.(user.id,item.dataset)||{}),versions:[...item.versions.values()].sort((a,b)=>a.version.localeCompare(b.version)).map(version=>{
       const local=version.locations.find(l=>l.machine===args.machine&&l.state==='READY')||version.locations.find(l=>l.machine===args.machine);

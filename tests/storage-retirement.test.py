@@ -9,6 +9,7 @@ import uuid
 spec = importlib.util.spec_from_file_location('archive_retirement_fixture',Path(__file__).with_name('storage-archive.test.py'))
 F = importlib.util.module_from_spec(spec);spec.loader.exec_module(F)
 M,A,D,USER,ADMIN = F.M,F.A,F.D,F.USER,F.ADMIN
+from dataset_retention_helpers import protected_original
 
 
 class AuthorityRetirementTests(unittest.TestCase):
@@ -27,6 +28,12 @@ class AuthorityRetirementTests(unittest.TestCase):
         new = self.cold.register_source(ADMIN,'replacement','input',[USER])['version']
         self.cold.materialize(ADMIN,'replacement',new)
         replacement = self.store.seal(ADMIN,'replacement',new,str(uuid.uuid4()),'hot-node')
+        # This fixture executes unregister synchronously inside the external
+        # controller's reference locks. A real second protected original keeps
+        # its unchanged assertions valid without recursively taking those locks.
+        # The separate replacement suite consumes the actual union proof after
+        # the asynchronous controller has released its original locks.
+        protected_original(self.cold,D,self.root/'retention-original')
         op = str(uuid.uuid4())
         removed = self.hot.unregister(ADMIN,'replica',self.version) if remove else {'recoveryId':'unregister-'+'0'*32}
         args = dict(mode='authority-target-v1',opId=op,userId=USER,target=dict(dataset='replica',version=self.version),

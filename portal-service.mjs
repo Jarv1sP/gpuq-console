@@ -16,6 +16,7 @@ import {installStorageArchive} from './storage-archive.mjs';
 import {installOciCohort} from './oci-cohort.mjs';
 import {installProjectReplication,projectReplicationCall} from './project-replication.mjs';
 import {installDatasetLabels,datasetLabelCall} from './dataset-labels.mjs';
+import {installDatasetDeletion} from './dataset-deletion.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -59,6 +60,7 @@ export class PortalService extends DemoService{
     maintainTaskNotes(service);
     installTransfers(service);
     installStorageArchive(service,storageArchiveConfig);
+    installDatasetDeletion(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -230,6 +232,12 @@ export class PortalService extends DemoService{
         .then(result=>({result,principal:this.principal(token)})).finally(()=>this.datasetReadPending--);
     }
     if(operation==='terminal.exchange')return this.terminalExchange(token,args);
+    if(['datasets.delete','datasets.delete.status','datasets.delete.restore','datasets.delete.continue','datasets.delete.cancel'].includes(operation)){
+      if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+      const principal=this.principal(token);
+      const check=()=>{const current=this.principal(token);if(current.userId!==principal.userId||current.username!==principal.username||current.role!==principal.role)throw Object.assign(Error('登录身份已改变。'),{status:403});};
+      return this.datasetDeletionCall(principal,operation,structuredClone(args),check).then(result=>{check();return {result,principal:{...principal}};});
+    }
     if(['datasets.catalog','datasets.capacity','datasets.list','datasets.status','datasets.prepare'].includes(operation))return this.datasetRead(token,operation,args);
     if(typeof operation==='string'&&operation.startsWith('transfers.')){
       const principal=this.principal(token);

@@ -12,6 +12,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 from storage_test_helpers import local_data_mounts
+from dataset_retention_helpers import protected_original
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "deploy" / "dataset-cache.py"
@@ -48,6 +49,7 @@ class DatasetUnregisterTests(unittest.TestCase):
         self.original_sources = {name: snapshot(path) for name, path in self.sources.items()}
         self.root = self.base / "cache"
         self.cache = D.DatasetCache(self.root, sources=self.sources, reserve_bytes=1024, lock_timeout=0.05)
+        self.original = protected_original(self.cache, D, self.base/'protected-original')
 
     def tearDown(self):
         try:
@@ -576,7 +578,15 @@ class DatasetUnregisterTests(unittest.TestCase):
         config = {"root": str(self.root), "mountPoint": str(self.base), "sources": {name: str(path) for name, path in self.sources.items()}, "reserveBytes": 1024}
         request = {"op": "unregister", "dataset": "sample", "version": None}
         output = io.StringIO()
+        constructor = D.DatasetCache
+
+        def configured_cache(*args, **kwargs):
+            cache = constructor(*args, **kwargs)
+            cache.rebuild_guard = self.cache.rebuild_guard
+            return cache
+
         with local_data_mounts(self.base), patch.object(D, "_operator_config", return_value=config), \
+                patch.object(D, "DatasetCache", side_effect=configured_cache), \
                 patch.object(D.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
                 patch.object(D.sys, "stdout", output):
             self.assertEqual(D.main(["--config", str(self.base / "mock-config")]), 0)
