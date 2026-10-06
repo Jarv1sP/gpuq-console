@@ -1,6 +1,6 @@
 # STARGATE 界面设计与代码参考
 
-本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `213d2eb`，已包含导航合并、数据库与缓存、管理员删除、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
+本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `34d07a1`，并同步数据集提示、折叠控件与间距的维护；已包含导航合并、数据库与缓存、管理员删除与最后副本保护、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
 
 ## 1. 原则
 
@@ -22,10 +22,13 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 
 字标保留9753×711的原图比例，顶栏mask、小尺寸与登录SVG是不同适配。独立Λ门图标见 [favicon.svg](../dist/favicon.svg)、[favicon.ico](../dist/favicon.ico)、[mask-icon.svg](../dist/mask-icon.svg)、[apple-touch-icon.png](../dist/apple-touch-icon.png)。[index.html](../dist/index.html)的图标链接带stargate-2版本号；修改资产时同步版本与真实ico入口，避免浏览器继续用旧缓存。
 
-下表覆盖源码全部 **97 个已声明自定义属性、216 处声明**。同名多行是实际作用域/断点/后续覆盖，不能任选配色。间距和圆角没有另一套隐含令牌：没有变量的 gap、padding、border-radius 以相邻组件 CSS 为准。品牌遮罩完整载荷留在源码，不复制 SVG 路径到新组件。
+下表覆盖源码全部 **100 个已声明自定义属性、220 处声明**。同名多行是实际作用域/断点/后续覆盖，不能任选配色。间距和圆角没有另一套隐含令牌：没有变量的 gap、padding、border-radius 以相邻组件 CSS 为准。品牌遮罩完整载荷留在源码，不复制 SVG 路径到新组件。
 
 | 变量 | 实际值 | 源码作用域 | 用途 |
 | --- | --- | --- | --- |
+| `--community-gap` | `clamp(16px,4cqi,48px)` | [community.css](../dist/community.css) · `.sb #page-community` | 协作区随容器宽度调整的区块间距 |
+| `--community-inset` | `clamp(20px,2.5cqi,28px)` | [community.css](../dist/community.css) · `.sb #page-community .community-feed-focus` | 协作聚焦区的内容边距 |
+| `--community-inset` | `0px` | [community.css](../dist/community.css) · `.sb #page-community .community-feed-focus` | 协作聚焦区在窄屏的内容边距 |
 | `--dataset-version-help-width` | `44px` | [dataset-flow.css](../dist/dataset-flow.css) · `#page-datasets .dataset-details-cell` | 版本说明控件保留宽度 |
 | `--d-bg` | `var(--bg,#f5f5f3)` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 数据集页面底色映射 |
 | `--d-surface` | `var(--surface,#fff)` | [datasets.css](../dist/datasets.css) · `#page-datasets,#page-transfers` | 数据集表面映射 |
@@ -51,6 +54,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `--queue` | `inherit` | [datasets.css](../dist/datasets.css) · `.sb #page-datasets,.sb #page-transfers` | 排队/等待状态 |
 | `--primary` | `inherit` | [datasets.css](../dist/datasets.css) · `.sb #page-datasets,.sb #page-transfers` | 主操作底色 |
 | `--on-primary` | `inherit` | [datasets.css](../dist/datasets.css) · `.sb #page-datasets,.sb #page-transfers` | 主操作文字 |
+| `--dataset-block-gap` | `12px` | [datasets.css](../dist/datasets.css) · `#page-datasets` | 云端同级区块与折叠后间距 |
 | `--sans` | `Geist,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif` | [guide.css](../dist/guide.css) · `@charset "UTF-8";  :root` | 界面字体栈 |
 | `--display` | `Archivo,var(--sans)` | [guide.css](../dist/guide.css) · `@charset "UTF-8";  :root` | 对象标题与主读数字体 |
 | `--mono` | `"Geist Mono",ui-monospace,SFMono-Regular,Consolas,monospace` | [guide.css](../dist/guide.css) · `@charset "UTF-8";  :root` | ID、命令与时刻字体 |
@@ -303,9 +307,11 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.dataset-pin-slot` / `[data-cache-retention]` | [dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[manual-pin-state.js](../dist/manual-pin-state.js) | 管理员固定保留与同账号原请求恢复 | 先按pinId查owner/present，计数不证明归属 |
 | `.dataset-more-slot` / `[data-remove-more]` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[datasets-ui.js](../dist/datasets-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 管理员删除挂载点，成员无删除DOM | 绑定实体身份，整库名称确认；按实际版本列完整保留副本；最后副本或本机未决时禁用；未知查原操作；缺编号的25小时保护说明放入ⓘ，有编号不承诺按时解除 |
 | `.dataset-remove-blocked` / `.dataset-remove-action-word` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 已证实未派发的拒绝与禁用原因 | 墨色原文，“按机器删除”不从词中间折行；ⓘ说明节点更新后的彻底删除，只有已知拒绝可“知道了”移除 |
-| `#dataset-add-dialog` / `.dataset-field-label` / `.dataset-directory-control` | [datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 三来源添加数据，中文选择文件夹/合计 | 标签关联，ⓘ同一行，弹窗内部真实滚动 |
+| `#dataset-add-dialog` / `.dataset-field-label` / `.dataset-directory-control` | [datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 三来源添加数据，中文选择文件夹/合计 | 标签关联，来源说明在标题右侧ⓘ；弹窗内部真实滚动 |
+| `.help-links.copy-caption` / `.dataset-storage` | [index.html](../dist/index.html)、[app.js](../dist/app.js)、[datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 数据集主体及可见页尾提示均跟随真实标签 | 页尾「首次使用」在桌面和平板显示，手机断点保持整块隐藏；右侧共享SVG提示保留原说明和指南链接，与标签同中线，不单独占行 |
 | `.dataset-upload-journey` / `.dataset-route-heading` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-upload.js](../dist/dataset-upload.js)、[upload-routes.js](../dist/upload-routes.js) | 三段上传、直传/Tail备用/显式中转，不造数据库阶段 | 未确认通道明示；失败不自动换中转 |
-| `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 个人数据空间/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回 |
+| `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 个人数据空间/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回；记录内区块、折叠后的后续区块统一使用12px间距令牌，关闭详情不保留margin/padding；详情与未确认操作编号的标题保持48px触控高度，文字居中 |
+| `.dataset-version-caption` / `.dataset-disclosure-label` | [cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 数据集版本与云端详情共用折叠标记 | summary使用flex中线；统一▸/▾，切换不旋转，减少动态时保持静止 |
 | `.publication-trajectory` / `#publication-actions` | [execution-ui.js](../dist/execution-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 扫描/复制/校验/写入版本及原请求查询 | 无字段省略，回执不明不制造成功 |
 
 算力只在该卡所有进程均被节点确认为自己的平台任务时用白色填充，可信新样本才保留旧液位细线并提示差异；首次采样与恢复连接直接呈现当前值，过期或失联显示未知，不保留液位过渡。没有进程证据不等于可以立即启动，监控与训练准入分开。原始指标、进程与队列保留在默认折叠详情；程序、系统用户和节点调度任务ID仅管理员可见，刷新保留所选卡号与滚动位置。
@@ -360,6 +366,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 标题下不放说明段落，每屏解释不超过两行，手机优先一行。ⓘ在标签行右侧，最多两句；长解释进入 [USER_GUIDE.md](USER_GUIDE.md)。维护原因原文、错误、时间、范围和恢复代价保留。不要英文眉标。
 
+添加数据抽屉的来源说明随页签切换，使用标题行的 `.copy-caption`，保留原说明与弹出提示。`.dataset-help-heading` 的文字可换行，ⓘ与文字盒保持同一水平中线；不要把提示放入按钮组、空页脚，或允许它单独换行。折叠头的ⓘ在右端，避免点击折叠头中心时误开提示。上传路线的标签和ⓘ同行，路径独占下一行。
+
 | 避免的页面措辞 | 普通话 |
 | --- | --- |
 | 自报 | 训练上报 |
@@ -409,7 +417,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 ## 10. 测试与截图地图
 
-以下是提取基线全部36个独立浏览器入口与137个Node单元入口。浏览器内部还执行共享夹具，不重复把每个夹具当独立入口。Python节点/队列契约见 [TESTING.md](TESTING.md)，使用完整Python3.12安装运行全量。
+以下是提取基线全部37个独立浏览器入口与137个Node单元入口。浏览器内部还执行共享夹具，不重复把每个夹具当独立入口。Python节点/队列契约见 [TESTING.md](TESTING.md)，使用完整Python3.12安装运行全量。
 
 | 浏览器入口 | 主要房间 / 契约 |
 | --- | --- |
@@ -425,8 +433,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [dataset-remove-ui-smoke.mjs](../tests/dataset-remove-ui-smoke.mjs) | 管理员单版本/整库删除、未知原编号恢复；数据库原件/其他完整副本/最后副本/未决删除与409、缺编号25小时说明与有编号区别、三宽共享几何 |
 | [dataset-last-copy.test.js](../tests/dataset-last-copy.test.js) | 实时可信目录、跨机器互斥、SQLite派发排除与重启、原回执后复核、明确不存在、worker硬上限/宽限期/新读取与身份校验、旧表迁移、零成员授权及HTTP code通路 |
 | [node-dataset-unregister.test.py](../tests/node-dataset-unregister.test.py) | 真实节点异步租约/固定保留拒绝均以原编号FAILED且READY保留；旧trash清理时当前READY仍可能被worker稍后删除 |
-| [dataset-upload-ui-smoke.mjs](../tests/dataset-upload-ui-smoke.mjs) | 文件夹、直传/中转同意、续传和READY清单核对 |
-| [datasets-ui-smoke.mjs](../tests/datasets-ui-smoke.mjs) | 目录、数据库/缓存、预算、保留与共享几何 |
+| [dataset-upload-ui-smoke.mjs](../tests/dataset-upload-ui-smoke.mjs) | 文件夹、直传/中转同意、续传和READY清单核对，标题提示位置及原文 |
+| [datasets-ui-smoke.mjs](../tests/datasets-ui-smoke.mjs) | 目录、数据库/缓存、预算、保留与共享几何；[dataset-help-geometry.mjs](../tests/dataset-help-geometry.mjs)验证标签右侧ⓘ及旧布局反例 |
 | [fixed-upload-routes-browser.mjs](../tests/fixed-upload-routes-browser.mjs) | 固定校园/Tail路线探测与严格票据匹配 |
 | [guide-ui-smoke.mjs](../tests/guide-ui-smoke.mjs) | 指南导航、移动目录与可达性 |
 | [job-diagnostics-ui-smoke.mjs](../tests/job-diagnostics-ui-smoke.mjs) | 训练诊断/历史/日志状态 |
@@ -436,6 +444,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [persistent-login-ui-smoke.mjs](../tests/persistent-login-ui-smoke.mjs) | 持久会话、退出与匿名清单隔离 |
 | [personal-project-ui-smoke.mjs](../tests/personal-project-ui-smoke.mjs) | 个人容器创建、选项、终端与发布 |
 | [placement-ui-smoke.mjs](../tests/placement-ui-smoke.mjs) | 自动服务器放置与提交确认 |
+| [polish-rooms-ui-smoke.mjs](../tests/polish-rooms-ui-smoke.mjs) | 协作、成员、云端副本及抽屉提示/折叠间距的完整测量 |
 | [polish-shell-ui-smoke.mjs](../tests/polish-shell-ui-smoke.mjs) | 外壳、账号、成员、指南和维护强化布局 |
 | [priority-ui-smoke.mjs](../tests/priority-ui-smoke.mjs) | 普通/最低/管理员优先级 |
 | [projects-ui-smoke.mjs](../tests/projects-ui-smoke.mjs) | 项目发布回执、原key恢复与内嵌终端 |

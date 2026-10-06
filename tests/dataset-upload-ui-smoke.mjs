@@ -31,12 +31,12 @@ try {
     }
     if (url.pathname === '/') return route.fulfill({contentType: 'text/html', body: `<!doctype html>
       <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-      <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"></head>
+      <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/copy-help.css"><link rel="stylesheet" href="/datasets.css"></head>
       <body><main><div class="page-heading"><div><h1>数据集</h1><p>本地浏览器验收</p></div></div>
       <section id="page-datasets"></section><button data-nav="work" hidden>工作台</button>
       <details hidden><form id="train-form"><select name="machine"><option>gpu-1</option><option>gpu-2</option></select>
       <input name="datasets"><input name="command"></form></details></main></body></html>`});
-    const names = new Set(['/dataset-flow.js','/dataset-cache-admin.js','/manual-pin-state.js','/maintenance-state.js','/copy-help-ui.js','/datasets-ui.js','/dataset-remove-ui.js','/dataset-remove.css','/workbench-ui.js','/job-progress.js','/motion-ui.js', '/data-route.js', '/dataset-upload.js', '/upload-routes.js', '/data-workspace.js', '/cloud-files-ui.js', '/transfer-upload.js','/cloud-import-ui.js', '/styles.css', '/workspace.css', '/datasets.css']);
+    const names = new Set(['/dataset-flow.js','/dataset-cache-admin.js','/manual-pin-state.js','/maintenance-state.js','/copy-help-ui.js','/copy-help.css','/datasets-ui.js','/dataset-remove-ui.js','/dataset-remove.css','/workbench-ui.js','/job-progress.js','/motion-ui.js', '/data-route.js', '/dataset-upload.js', '/upload-routes.js', '/data-workspace.js', '/cloud-files-ui.js', '/transfer-upload.js','/cloud-import-ui.js', '/styles.css', '/workspace.css', '/datasets.css']);
     if (names.has(url.pathname)) return route.fulfill({
       contentType: url.pathname.endsWith('.js') ? 'text/javascript' : 'text/css',
       body: await readFile(new URL('../dist' + url.pathname, import.meta.url), 'utf8')});
@@ -135,7 +135,10 @@ try {
       return {width: innerWidth, scroll: document.documentElement.scrollWidth, form, fields,
         name: rect('[name=dataset-name]'), directory: rect('#dataset-directory-picker'),
         start: rect('#dataset-upload-start'), feedback: rect('.dataset-upload-feedback'),
-        notes: rect('.dataset-upload-notes'),
+        notes: document.querySelectorAll('.dataset-upload-notes').length,
+        title: rect('#dataset-add-title'),
+        help: rect('[data-dataset-help-source=directory] [data-copy-help]'),
+        helpText: document.querySelector('[data-dataset-help-source=directory] .copy-help-popup>p').textContent,
         statusOverflows: document.querySelector('#dataset-upload-status').scrollWidth > document.querySelector('#dataset-upload-status').clientWidth + 1,
         columns: getComputedStyle(document.querySelector('.dataset-upload-fields')).gridTemplateColumns.split(' ').length};
     });
@@ -145,7 +148,10 @@ try {
     assert.ok(layout.start.y - (layout.fields.y + layout.fields.height) >= 36, 'Upload actions need their own separated row');
     assert.ok(layout.start.y - (layout.directory.y + layout.directory.height) >= 36, 'Upload button must not touch directory input');
     assert.ok(layout.feedback.y - (layout.start.y + layout.start.height) >= 15, 'Status needs breathing room below actions');
-    assert.ok(layout.notes.y - (layout.feedback.y + layout.feedback.height) >= 15, 'Help text must be separated from status');
+    assert.equal(layout.notes, 0, 'The title hint replaces the orphan footer row');
+    assert.ok(layout.help.left >= layout.title.right - 1, 'Upload explanation belongs to the right of its title');
+    assert.ok(Math.abs(layout.help.y + layout.help.height / 2 - layout.title.y - layout.title.height / 2) <= 1, 'Upload explanation shares its title centre');
+    assert.equal(layout.helpText, '关闭页面会暂停传输；重新选择同一目录可继续。已开始的服务器校验不受影响。', 'Moving the hint preserves its original copy');
     assert.ok(layout.start.height >= 44 && layout.directory.height >= 44, 'Controls need touch-friendly heights');
     assert.equal(layout.statusOverflows, false, 'Long upload status must wrap inside the form');
   }

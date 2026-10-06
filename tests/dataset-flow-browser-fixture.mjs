@@ -9,6 +9,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {datasetHelpGeometry,checkDatasetHelpRegressions,checkDatasetBodyHelpRegressions} from './dataset-help-geometry.mjs';
 const {inspectGeometry,scanGeometry,layoutZooms}=await import(process.env.DATA_FLOW_GEOMETRY_MODULE||'./layout-geometry.mjs');
 const dir=await mkdtemp(join(tmpdir(),'dataset-flow-')),out=process.env.UI_SCREENSHOTS||join(dir,'shots');
 const password='Local-Database-Cache-Fixture-Only-2026!',hash='a'.repeat(64),second='b'.repeat(64);
@@ -18,7 +19,7 @@ const ref={machine:target,dataset:'local-samples',version:hash};
 const states={scans:['PREPARING','READY',null,null],'sample-pictures':['REGISTERED','FAILED','READY',null],'tiny-local':['READY',null,null,null],validation:[null,null,'READY',null]};
 // A modal makes the background inert. Scan the dialog's active controls while
 // open; scan the complete room again after closing it for every catalog state.
-const geometry={roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],controls:'button,input:not([type=file]):not([type=checkbox]),select,summary,a[href]',
+const geometry={...datasetHelpGeometry,roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],controls:'button,input:not([type=file]):not([type=checkbox]),select,summary,a[href]',
   centers:[{parent:'.dataset-title-label',children:':scope>h3,:scope>.ui-info'},{parent:'.dataset-field-label',children:':scope>label,:scope>span:not(.ui-info),:scope>.ui-info'},{parent:'.dataset-location-fact',children:':scope>.dataset-machine-label,:scope>.dataset-location-status'},{parent:'.dataset-details-cell',children:':scope>.dataset-version-details>summary,:scope>.ui-info'}],
   leftEdges:[['.datasets-library-heading','.dataset-workflow-copy','#datasets-status','#dataset-catalog'],['#dataset-add-title','.dataset-source-tabs','.dataset-source-view:not([hidden])']],
   helpRows:['.dataset-title-label','.dataset-field-label'],repeatedPadding:['.dataset-cache-gauge'],repeatedGaps:['.dataset-cache-preview-row'],
@@ -85,6 +86,7 @@ try{
     finally{await page.setViewportSize(viewport);}
   }
   const memberPage=await pageFor('member');await load(memberPage);
+  await checkDatasetBodyHelpRegressions(memberPage);
   const memberCalls=calls.slice();assert.ok(memberCalls.every(row=>!row.operation.startsWith('datasets.storage.')));assert.equal(await memberPage.locator('.dataset-cache-admin').count(),0);
   assert.equal(await memberPage.locator('[data-database-state=saved]').count(),2);assert.equal(await memberPage.locator('[data-database-state=pending]').count(),1);assert.equal(await memberPage.locator('[data-database-state=none]').count(),1);assert.ok(await memberPage.locator('[data-cache-state=recoverable]').count());
   assert.equal(await memberPage.locator('.dataset-cache-riser').count(),1);assert.equal(await memberPage.locator('.dataset-cache-riser').evaluate(node=>node.getAnimations().length),0);assert.doesNotMatch(await memberPage.locator('#dataset-catalog').innerText(),/已释放|\d+%|SSD|HDD|NVMe|归档|GC/);
@@ -107,12 +109,19 @@ try{
     await memberPage.locator('#dataset-source-'+source).click();
     for(const width of [1440,390,320]){await check(memberPage,'sheet-'+source,width);await capture(memberPage,'sheet-'+source+'-'+width);}
   }
+  assert.equal(await memberPage.locator('.dataset-sheet-head .data-workspace-footnote').textContent(),'上传前请确认磁盘容量；停止上传会保留已收到的文件片段。');
+  assert.equal(await memberPage.locator('.data-workspace-card>.ui-info,.data-workspace-card>.data-workspace-footnote,.dataset-upload-notes').count(),0);
+  await checkDatasetHelpRegressions(memberPage);
+  const helpButton=memberPage.locator('[data-dataset-help-source=workspace] [data-copy-help]'),helpCalls=calls.length;
+  await helpButton.click();assert.equal(await memberPage.locator('#'+await helpButton.getAttribute('aria-controls')).isVisible(),true);
+  assert.equal(calls.length,helpCalls,'opening the preserved explanation sends no node request');
+  await memberPage.keyboard.press('Escape');assert.equal(await memberPage.locator('#dataset-add-dialog').getAttribute('open'),'');
   await memberPage.locator('#dataset-source-directory').click();await memberPage.locator('[aria-label="上传通道说明"]').click();
   for(const width of [1440,390,320])await check(memberPage,'bounded-tooltip',width);
   await memberPage.keyboard.press('Escape');assert.equal(await memberPage.locator('.copy-help-popup:popover-open').count(),0);assert.equal(await memberPage.locator('#dataset-add-dialog').getAttribute('open'),'');await memberPage.keyboard.press('Escape');
   await memberPage.locator('#dataset-add-dialog').waitFor({state:'hidden'});await memberPage.waitForFunction(()=>document.querySelector('#datasets-capacity').parentElement.classList.contains('datasets-ledger-strip'));
   assert.deepEqual(await memberPage.locator('.datasets-ledger-strip>*').evaluateAll(nodes=>nodes.map(node=>node.id)),['datasets-quota','datasets-capacity','datasets-database']);
-  const adminPage=await pageFor('admin');await load(adminPage);await adminPage.locator('#dataset-cache-admin>summary').click();await adminPage.waitForFunction(()=>document.querySelector('.dataset-cache-gauges')?.children.length===4);assert.equal(await adminPage.locator('[data-budget-state=high]').count(),1);assert.equal(await adminPage.locator('[data-budget-state=disabled]').count(),1);assert.match(await adminPage.locator('.dataset-cache-previews').innerText(),/超过高水位时将释放（预览，不会立即删除）/);assert.equal(await adminPage.locator('.dataset-cache-previews button').count(),0);
+  const adminPage=await pageFor('admin');await load(adminPage);await checkDatasetBodyHelpRegressions(adminPage);await adminPage.locator('#dataset-cache-admin>summary').click();await adminPage.waitForFunction(()=>document.querySelector('.dataset-cache-gauges')?.children.length===4);assert.equal(await adminPage.locator('[data-budget-state=high]').count(),1);assert.equal(await adminPage.locator('[data-budget-state=disabled]').count(),1);assert.match(await adminPage.locator('.dataset-cache-previews').innerText(),/超过高水位时将释放（预览，不会立即删除）/);assert.equal(await adminPage.locator('.dataset-cache-previews button').count(),0);
   const adminLocal=adminPage.locator('.dataset-card').filter({has:adminPage.locator('[data-use-dataset="tiny-local"]')});await adminLocal.locator('.dataset-version-details>summary').click();await adminLocal.locator('[data-cache-retention=pin]').waitFor({state:'visible'});await adminPage.waitForFunction(()=>!document.querySelector('[data-cache-pin-slot][data-dataset="local-samples"] [data-cache-retention=pin]').disabled);assert.equal(await adminLocal.locator('[data-cache-retention=unpin]').count(),0,'foreign pin count provides no generic unpin');
   for(const width of [1440,390,320]){await check(adminPage,'retention-details',width);await captureComponent(adminPage,'.dataset-card:has([data-use-dataset="tiny-local"])','admin-retention-'+width);}
   pinReply='lost';await adminLocal.locator('[data-cache-retention=pin]').click();await adminLocal.locator('[data-cache-retention=retry]').waitFor();await adminLocal.locator('.form-error').waitFor();assert.match(await adminLocal.locator('.dataset-pin-status').innerText(),/结果未确认/);assert.equal(await adminLocal.locator('[data-cache-retention=retry]').isDisabled(),true);
@@ -135,6 +144,26 @@ try{
   }
   await adminPage.locator('[data-dataset-add-close]').click();await adminPage.locator('#dataset-add-dialog').waitFor({state:'hidden'});await adminPage.waitForFunction(()=>document.querySelector('#datasets-capacity').parentElement.classList.contains('datasets-ledger-strip'));
   const actors=[{role:'member',views:[{zoom:1,page:memberPage}]},{role:'admin',views:[{zoom:1,page:adminPage}]}];
+  for(const {role,views} of actors){
+    const page=views[0].page,viewport=page.viewportSize(),scroll=await page.evaluate(()=>({x:scrollX,y:scrollY}));
+    try{
+      for(const width of [1440,768,390,320]){
+        await page.setViewportSize({width,height:width<760?900:1000});
+        const footer=page.locator('.help-links');
+        assert.equal(await footer.isVisible(),width>=760,'the first-use footer remains hidden on phones');
+        if(width>=760){
+          assert.equal(await footer.locator(':scope>span:not(.copy-help)').textContent(),'首次使用');
+          assert.equal(await footer.locator('[data-copy-help]').count(),1);
+          assert.equal(await footer.locator('.copy-help-popup>span').textContent(),'从第一次登录，到一次完整训练。');
+          assert.equal(await footer.locator('.copy-help-guide').getAttribute('href'),'/guide/start');
+          await footer.scrollIntoViewIfNeeded();
+        }else await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
+        const result=await inspectGeometry(page,{...datasetHelpGeometry,roots:width>=760?['.help-links']:['#page-datasets'],controls:'a[href],button,summary'});
+        geometries.push({label:role+'-footer-help',...result});assert.ok(result.pass,JSON.stringify(result.failures));
+        await page.screenshot({path:join(out,role+'-footer-help-'+width+'-viewport.png'),animations:'disabled'});
+      }
+    }finally{await page.setViewportSize(viewport);await page.evaluate(({x,y})=>scrollTo(x,y),scroll);}
+  }
   if(process.env.DATA_FLOW_FULL_SCAN==='1')for(const actor of actors)for(const zoom of layoutZooms.filter(value=>value!==1)){
     const page=await pageFor(actor.role,zoom);await load(page);
     if(actor.role==='admin'){await page.locator('#dataset-cache-admin>summary').click();await page.waitForFunction(()=>document.querySelector('.dataset-cache-gauges')?.children.length===4);}
@@ -165,7 +194,12 @@ try{
   if(process.env.DATA_FLOW_FULL_SCAN==='1')for(const {role,views} of actors)for(const {zoom,page} of views){
     await load(page);const details=page.locator('.dataset-card').filter({has:page.locator('.dataset-card-heading h3').filter({hasText:'scans'})}).locator('.dataset-version-details');await details.locator('summary').click();const detailResults=await scanGeometry(page,geometry,{zoom});await writeFile(join(out,'geometry-'+role+'-details-'+zoom+'.json'),JSON.stringify({role,zoom,results:detailResults},null,2));assert.ok(detailResults.every(row=>row.pass),JSON.stringify(detailResults.filter(row=>!row.pass).slice(0,2)));console.log('GEOMETRY',role,'details',zoom,detailResults.length,'PASS');await details.locator('summary').click();await page.locator('#datasets-add>summary').click();
     for(const source of ['directory','link','workspace']){
-      await page.locator('#dataset-source-'+source).click();const results=await scanGeometry(page,geometry,{zoom});await writeFile(join(out,'geometry-'+role+'-sheet-'+source+'-'+zoom+'.json'),JSON.stringify({role,source,zoom,results},null,2));assert.ok(results.every(row=>row.pass),JSON.stringify(results.filter(row=>!row.pass).slice(0,2)));console.log('GEOMETRY',role,'sheet-'+source,zoom,results.length,'PASS');
+      await page.locator('#dataset-source-'+source).click();
+      // Each source starts at its title/context rather than inheriting a
+      // previous sheet's scroll position under the sticky header. The cloud
+      // room suite separately scans the controls further down the drawer.
+      await page.locator('#dataset-add-dialog').evaluate(node=>node.scrollTop=0);
+      const results=await scanGeometry(page,geometry,{zoom});await writeFile(join(out,'geometry-'+role+'-sheet-'+source+'-'+zoom+'.json'),JSON.stringify({role,source,zoom,results},null,2));assert.ok(results.every(row=>row.pass),JSON.stringify(results.filter(row=>!row.pass).slice(0,2)));console.log('GEOMETRY',role,'sheet-'+source,zoom,results.length,'PASS');
     }
     await page.locator('[data-dataset-add-close]').click();await page.locator('#dataset-add-dialog').waitFor({state:'hidden'});
   }
