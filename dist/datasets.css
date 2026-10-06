@@ -157,7 +157,7 @@
 #page-datasets .cloud-file-heading code{min-width:0;color:var(--d-ink)}
 #page-datasets .cloud-file-error{color:var(--err);line-height:1.7}
 #page-datasets .cloud-file-details>code,#page-datasets #cloud-files-pending-key{display:block;overflow-wrap:anywhere;font:12px/1.8 var(--mono)}
-#page-datasets .cloud-file-details>summary{display:flex;align-items:center;min-height:48px;padding:0;color:var(--d-muted);font-size:12px;cursor:pointer}
+#page-datasets :is(.cloud-file-details,#cloud-files-pending)>summary{display:flex;align-items:center;min-height:48px;padding:0;color:var(--d-muted);font-size:12px;cursor:pointer}
 #page-datasets #cloud-files-status{font-size:13px;line-height:1.8;margin-top:12px}
 #page-datasets #cloud-files .file-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,9rem),1fr));gap:clamp(8px,2cqi,12px);min-width:0}
 #page-datasets #cloud-files .file-actions .button{min-height:48px;white-space:nowrap;margin:0}
