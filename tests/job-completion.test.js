@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:http';
 import {createPortalServer} from '../portal-server.mjs';
+import {execFileSync} from 'node:child_process';
 
 const ID='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',NODE='J0123456789ab';
 const fixture=()=>{
@@ -57,6 +58,66 @@ test('later success requires trusted retry after old failure and before the new 
 test('unchanged successful attempt is accepted without inventing a retry',()=>{
   const f=fixture();f.job.state='SUCCEEDED';f.job.latestAttempt={id:'Anew',ordinal:2,state:'EXITED_SUCCESS',exitCode:0,startedAt:250,finishedAt:300};f.raw.latestRetry=null;
   assert.equal(jobCompletion(f.job,f.result).completed,true);
+});
+
+test('explicit resource reconciliation fixes real watch UNKNOWN contract without changing old failed lifecycle',async()=>{
+  const f=fixture(),id='A'+'a'.repeat(32),before=structuredClone(f.job);f.raw.latestAttempt.id=id;
+  const expected={nodeJobId:NODE,attemptId:id,attemptOrdinal:2,nativeVersion:9};
+  f.service.audit=()=>{};let released=false;
+  f.service.bridge=async(machine,operation,args)=>{
+    f.calls.push([machine,operation,args]);
+    if(operation==='storage.lease.cancel'){assert.deepEqual(args,{job:f.job.spec,expectedNative:expected});released=true;return {jobId:ID,state:'CANCELED',released:true,reconciledNative:Object.fromEntries(Object.entries(expected).reverse())};}
+    assert.equal(operation,'watch');return {...f.result,state:released?'SUCCEEDED':'UNKNOWN',...(released?{}:{error:'Dataset lease cleanup awaits scheduler reconciliation'})};
+  };
+  const value=await executionCall(f.service,f.principal,'jobs.reconcile-resources',{jobId:ID});
+  assert.equal(value.resourcesReleased,true);assert.equal(value.completion.completed,true);assert.deepEqual(f.job,before);
+  assert.deepEqual(f.calls.map(c=>c[1]),['watch','storage.lease.cancel','watch']);
+});
+
+test('a later native retry after exact resource cleanup never becomes a completion claim',async()=>{
+  const f=fixture();f.raw.latestAttempt.id='A'+'a'.repeat(32);f.service.audit=()=>{};let released=false;
+  f.service.bridge=async(machine,op,args)=>{
+    if(op==='storage.lease.cancel'){released=true;return {jobId:ID,state:'CANCELED',released:true,reconciledNative:args.expectedNative};}
+    return released?{...f.result,state:'PENDING',nativeObservation:{...f.raw,state:'PENDING',nativeVersion:10}}:f.result;
+  };
+  const value=await executionCall(f.service,f.principal,'jobs.reconcile-resources',{jobId:ID});
+  assert.equal(value.resourcesReleased,true);assert.equal(value.completion.completed,false);assert.equal(f.job.state,'FAILED');
+});
+
+test('actual native watch and durable cache cleanup responses satisfy the Portal completion protocol',async()=>{
+  const value=JSON.parse(execFileSync('python3',[new URL('./job-resource-contract-fixture.py',import.meta.url).pathname],{encoding:'utf8'}));
+  const f=fixture();f.job.spec=value.spec;const before=structuredClone(f.job);f.service.audit=()=>{};
+  let cleaned=false;f.service.bridge=async(machine,operation,args)=>{
+    assert.equal(machine,'gpu-1');assert.deepEqual(args.job,value.spec);
+    if(operation==='storage.lease.cancel'){
+      assert.deepEqual(args.expectedNative,value.released.reconciledNative);cleaned=true;return value.released;
+    }
+    assert.equal(operation,'watch');return cleaned?value.after:value.before;
+  };
+  assert.equal(jobCompletion(f.job,value.before).completed,false);
+  const result=await executionCall(f.service,f.principal,'jobs.reconcile-resources',{jobId:ID});
+  assert.equal(result.resourcesReleased,true);assert.equal(result.completion.completed,true);
+  assert.equal(result.completion.completedAttempt.id,value.after.nativeObservation.latestAttempt.id);
+  assert.deepEqual(f.job,before);assert.equal(value.unchangedSpec,true);assert.equal(value.datasetLeasesAfter,0);
+});
+
+test('resource reconciliation rejects missing identity, live attempt, changed policy and unconfirmed release without new commands',async()=>{
+  for(const patch of [{state:'RUNNING'}, {nodeJobId:null}]){
+    const f=fixture();Object.assign(f.job,patch);await assert.rejects(executionCall(f.service,f.principal,'jobs.reconcile-resources',{jobId:ID}),e=>e.status===409);assert.equal(f.calls.length,0);
+  }
+  for(const mutation of [f=>{f.raw.state='RUNNING';},f=>{f.raw.latestAttempt.state='RUNNING';},f=>{f.raw.specVerified=false;},f=>{f.raw.latestAttempt=null;}]){
+    const f=fixture();f.raw.latestAttempt.id='A'+'a'.repeat(32);mutation(f);
+    await assert.rejects(executionCall(f.service,f.principal,'jobs.reconcile-resources',{jobId:ID}),e=>e.status===409);assert.deepEqual(f.calls.map(c=>c[1]),['watch']);
+  }
+  const f=fixture();f.raw.latestAttempt.id='A'+'a'.repeat(32);f.service.audit=()=>{};
+  f.service.bridge=async(m,op)=>op==='watch'?f.result:{jobId:ID,state:'CANCELED',released:true};
+  await assert.rejects(executionCall(f.service,f.principal,'jobs.reconcile-resources',{jobId:ID}),e=>e.status===409);
+  const g=fixture();g.service.bridge=async()=>{g.owner.enabled=false;return g.result;};
+  await assert.rejects(executionCall(g.service,g.principal,'jobs.reconcile-resources',{jobId:ID}),e=>e.status===409);
+  const h=fixture();
+  await assert.rejects(executionCall(h.service,{userId:'demo-user-2',role:'member'},'jobs.reconcile-resources',{jobId:ID}),e=>e.status===403);
+  await assert.rejects(executionCall(h.service,h.principal,'jobs.reconcile-resources',{jobId:ID,expectedNative:{}}));
+  assert.equal(h.calls.length,0);
 });
 
 test('identity mismatches, old nodes and transport errors produce unconfirmed, not fabricated success',async()=>{

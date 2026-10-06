@@ -86,6 +86,13 @@ test('CLI completion uses one read-only request and distinguishes confirmed succ
   for(const args of [['completion'],['completion',JOB,'--root'],['completion',JOB,'--machine','gpu-1'],['completion',JOB,'--','id']])assert.equal((await f.cli(args)).code,1);
 });
 
+test('CLI explicit resource reconciliation sends only one mutation and refuses execution options',async t=>{
+  const f=await cliFixture(t);f.result.resourcesReleased=true;
+  const out=await f.cli(['reconcile-resources',JOB]);assert.equal(out.code,0,out.stderr);
+  assert.deepEqual(f.calls.filter(c=>c.operation!=='state'),[{operation:'jobs.reconcile-resources',args:{jobId:JOB}}]);
+  for(const args of [['reconcile-resources'],['reconcile-resources',JOB,'--root'],['reconcile-resources',JOB,'--machine','gpu-1'],['reconcile-resources',JOB,'--','id']])assert.equal((await f.cli(args)).code,1);
+});
+
 test('portal serves diagnostic module and stylesheet through the explicit static allowlist',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-diagnostic-assets-')),bootstrap=join(dir,'bootstrap');
   await writeFile(bootstrap,JSON.stringify({username:'admin',password:'Diagnostic-Fixture-Password-2026!'}));

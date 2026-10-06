@@ -12,7 +12,7 @@ const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});}
 // This row is not part of account snapshots, so an unrelated rollback cannot
 // remove a maintenance decision. No deadline or automatic unlock exists.
 const READ_OR_STOP=new Set([
-  'jobs.logs','jobs.watch','jobs.diagnostics','jobs.cancel','logs','watch','diagnostics','cancel',
+  'jobs.logs','jobs.watch','jobs.diagnostics','jobs.completion','jobs.reconcile-resources','jobs.cancel','logs','watch','diagnostics','cancel',
   'files.list','files.get','files.upload.status','projects.list','projects.quota','projects.status','projects.verify','host.status',
   'datasets.list','datasets.catalog','datasets.capacity','datasets.status',
   'datasets.workspace.list','datasets.workspace.get','datasets.workspace.status','datasets.upload.status','datasets.upload.list',

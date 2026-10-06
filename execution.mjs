@@ -436,6 +436,28 @@ export async function executionCall(service,principal,operation,args){
     return jobView(job);
   }
   if(operation==='jobs.logs'){const job=jobById(args.jobId);if(job.state===DATA_PREPARING)return {text:job.queueReason||'正在准备本机数据；尚未申请 GPU。'};return service.bridge(job.machine,'logs',{job:job.spec});}
+  if(operation==='jobs.reconcile-resources'){
+    if(Object.keys(args).some(k=>k!=='jobId'))fail('资源对账仅接受任务 ID。');
+    const job=jobById(args.jobId);authorizedMachine(job.machine);
+    if(!TERMINAL.has(job.state)||!job.nodeJobId)fail('仅能对账已有原生任务的历史终态；不会取消或重跑任务。',409);
+    const snapshot=JSON.stringify(job),actorSnapshot=JSON.stringify(service.store.get(principal.userId));
+    const check=()=>{if(service.closing||JSON.stringify(service.store.get(principal.userId))!==actorSnapshot||JSON.stringify(job)!==snapshot)fail('授权或任务状态已改变，请重新查询后对账。',409);};
+    const before=await service.bridge(job.machine,'watch',{job:job.spec,expectedNodeJobId:job.nodeJobId});check();
+    const observation=terminalNativeObservation(job,before?.nativeObservation),attempt=observation.latestAttempt;
+    if(observation.status!=='CONFIRMED'||!TERMINAL.has(observation.state)||!attempt||
+       !/^A[a-f0-9]{32}$/.test(attempt.id)||!['EXITED_SUCCESS','EXITED_FAILURE','CANCELED','PREEMPTED'].includes(attempt.state))
+      fail('最新原生尝试尚未确认终止；未释放任何资源。',409);
+    const expectedNative={nodeJobId:job.nodeJobId,attemptId:attempt.id,attemptOrdinal:attempt.ordinal,nativeVersion:observation.nativeVersion};
+    service.audit(principal.username,operation,job.id,JSON.stringify(expectedNative));check();
+    const released=await service.bridge(job.machine,'storage.lease.cancel',{job:job.spec,expectedNative});check();
+    if(released?.released!==true||released.jobId!==job.id||released.state!=='CANCELED'||
+       !released.reconciledNative||Object.keys(released.reconciledNative).length!==4||
+       Object.entries(expectedNative).some(([key,value])=>released.reconciledNative[key]!==value))
+      fail('资源收尾尚未确认；请查询原任务，不要重新提交。',409);
+    const after=await service.bridge(job.machine,'watch',{job:job.spec,expectedNodeJobId:job.nodeJobId});check();
+    return {protocol:'job-resource-reconciliation-v1',jobId:job.id,reconciledNative:expectedNative,resourcesReleased:true,
+      portalHistory:portalTerminalSnapshot(job),completion:jobCompletion(job,after)};
+  }
   if(operation==='jobs.completion'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('完成核验仅接受任务 ID。');
     const job=jobById(args.jobId);authorizedMachine(job.machine);

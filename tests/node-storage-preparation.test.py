@@ -107,6 +107,113 @@ class PreparedLeaseIntegration(unittest.TestCase):
         self.assertEqual(self.leases(),[])
         with self.assertRaises(ValueError):self.node.acquire_datasets(self.job)
 
+    def exact_cleanup_fixture(self):
+        self.prepare();self.node.acquire_datasets(self.job)
+        native='J0123456789ab';attempt='A'+'a'*32
+        (self.node.ROOT/'jobs'/(self.job['id']+'.json')).write_text(json.dumps(self.job))
+        with closing(sqlite3.connect(self.node.CONFIG['database'])) as db:
+            db.execute('INSERT INTO jobs(id,submit_key) VALUES (?,?)',(native,self.job['id']));db.commit()
+        data=self.terminal();data['job'].update(id=native,submit_key=self.job['id'],version=7)
+        data['attempts'][0].update(id=attempt,ordinal=2)
+        expected=dict(nodeJobId=native,attemptId=attempt,attemptOrdinal=2,nativeVersion=7)
+        return data,expected
+
+    def exact_cleanup(self,expected):
+        return self.node.storage_lease_operation('storage.lease.cancel',{'job':self.job,'expectedNative':expected})
+
+    def test_explicit_native_snapshot_cleanup_preserves_history_and_never_calls_cancel_submit(self):
+        data,expected=self.exact_cleanup_fixture()
+        before=(self.node.ROOT/'jobs'/(self.job['id']+'.json')).read_bytes()
+        with patch.object(self.node,'gpu',return_value=data) as gpu,patch.object(self.node,'dataset_unit_stopped',return_value=True):
+            for _ in range(2):self.assertEqual(self.exact_cleanup(expected)['reconciledNative'],expected)
+            self.assertTrue(all(c.args==('show',expected['nodeJobId']) for c in gpu.call_args_list))
+        self.assertEqual(self.leases(),[]);self.assertFalse(self.receipt().exists())
+        self.assertEqual((self.node.ROOT/'jobs'/(self.job['id']+'.json')).read_bytes(),before)
+        self.assertFalse((self.node.ROOT/'jobs'/(self.job['id']+'.canceled')).exists())
+
+    def test_explicit_cleanup_missing_native_or_spec_does_not_cancel_prepare(self):
+        data,expected=self.exact_cleanup_fixture()
+        spec=self.node.ROOT/'jobs'/(self.job['id']+'.json');spec.unlink()
+        with patch.object(self.node,'gpu') as gpu:
+            with self.assertRaisesRegex(ValueError,'identity'):self.exact_cleanup(expected)
+            spec.write_text(json.dumps(self.job))
+            with closing(sqlite3.connect(self.node.CONFIG['database'])) as db:db.execute('DELETE FROM jobs');db.commit()
+            with self.assertRaisesRegex(ValueError,'identity'):self.exact_cleanup(expected)
+            gpu.assert_not_called()
+        self.assertEqual(len(self.leases()),1);self.assertTrue(self.receipt().exists())
+        self.assertFalse((self.node.ROOT/'jobs'/(self.job['id']+'.canceled')).exists())
+
+    def test_changed_native_generation_or_active_unit_keeps_all_leases(self):
+        import copy
+        data,expected=self.exact_cleanup_fixture()
+        changed=[]
+        for fields in ({'id':'Jffffffffffff'},{'submit_key':'other'},{'version':8},{'state':'RUNNING','active_attempt_id':'Anew'}):
+            value=copy.deepcopy(data);value['job'].update(fields);changed.append(value)
+        for fields in ({'id':'A'+'b'*32},{'ordinal':3},{'state':'RUNNING'}):
+            value=copy.deepcopy(data);value['attempts'][0].update(fields);changed.append(value)
+        value=copy.deepcopy(data);value['leases']=[{'id':'held'}];changed.append(value)
+        for value in changed:
+            with patch.object(self.node,'gpu',return_value=value),patch.object(self.node,'dataset_unit_stopped',return_value=True):
+                with self.assertRaisesRegex(ValueError,'unconfirmed'):self.exact_cleanup(expected)
+            self.assertEqual(len(self.leases()),1)
+        with patch.object(self.node,'gpu',return_value=data),patch.object(self.node,'dataset_unit_stopped',return_value=False):
+            with self.assertRaisesRegex(ValueError,'unconfirmed'):self.exact_cleanup(expected)
+        self.assertEqual(len(self.leases()),1);self.assertTrue(self.receipt().exists())
+
+    def test_retry_refresh_must_match_snapshot_before_any_generation_is_released(self):
+        data,expected=self.exact_cleanup_fixture()
+        folder=self.node.ROOT/'storage-leases'/'training'/self.job['id']
+        (folder/'retry-fixture.json').write_text('{}')
+        newer=json.loads(json.dumps(data));newer['job']['version']=8
+        with patch.object(self.node,'gpu',side_effect=[data,newer]),patch.object(self.node,'dataset_unit_stopped',return_value=True):
+            with self.assertRaisesRegex(ValueError,'unconfirmed'):self.exact_cleanup(expected)
+        self.assertEqual(len(self.leases()),1);self.assertTrue(self.receipt().exists())
+
+    def test_reconciliation_waits_for_job_lock_and_rechecks_after_it_changes(self):
+        import fcntl
+        data,expected=self.exact_cleanup_fixture();entered=threading.Event()
+        def cleanup():
+            entered.set();return self.exact_cleanup(expected)
+        path=self.node.ROOT/'jobs'/(self.job['id']+'.lock')
+        with open(path,'a') as lock,ThreadPoolExecutor(max_workers=1) as pool,patch.object(self.node,'gpu',return_value=data) as gpu:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            pending=pool.submit(cleanup);self.assertTrue(entered.wait(3));time.sleep(.02)
+            gpu.assert_not_called();data['job']['version']=8
+            fcntl.flock(lock,fcntl.LOCK_UN)
+            with self.assertRaisesRegex(ValueError,'unconfirmed'):pending.result(timeout=3)
+        self.assertEqual(len(self.leases()),1);self.assertTrue(self.receipt().exists())
+
+    def test_legacy_runner_holds_same_lock_until_its_dataset_mount_is_open(self):
+        import os
+        data,expected=self.exact_cleanup_fixture()
+        # Production legacy READY submissions have no preparation journal.
+        shutil.rmtree(self.node.ROOT/'storage-leases'/'training'/self.job['id'])
+        retained=self.leases();entered=threading.Event();advance=threading.Event();cleanup_entered=threading.Event()
+        def proof(job):
+            entered.set()
+            if not advance.wait(3):raise AssertionError('Fixture runner did not advance')
+            return {'fixture':'current authorized runner'}
+        def cleanup():cleanup_entered.set();return self.exact_cleanup(expected)
+        with ThreadPoolExecutor(max_workers=2) as pool,patch.object(self.node,'dataset_runner_proof',side_effect=proof),patch.object(self.node,'gpu',return_value=data) as gpu:
+            runner=pool.submit(self.node.dataset_open_mounts,self.job,runner=True);self.assertTrue(entered.wait(3))
+            pending=pool.submit(cleanup);self.assertTrue(cleanup_entered.wait(3));time.sleep(.02);gpu.assert_not_called()
+            data['job'].update(state='RUNNING',version=8,active_attempt_id='A'+'b'*32)
+            advance.set()
+            opened=runner.result(timeout=3)
+            try:
+                with self.assertRaisesRegex(ValueError,'unconfirmed'):pending.result(timeout=3)
+                self.assertEqual(self.leases(),retained);self.assertTrue(self.receipt().exists())
+            finally:
+                for descriptor,_ in opened:os.close(descriptor)
+
+    def test_expected_snapshot_fields_cannot_authorize_prepare_or_bypass_validation(self):
+        data,expected=self.exact_cleanup_fixture()
+        for value in (None,{},dict(expected,attemptOrdinal=True),dict(expected,nativeVersion=-1),dict(expected,attemptId='../../attempt')):
+            with self.assertRaisesRegex(ValueError,'identity'):self.exact_cleanup(value)
+        with self.assertRaisesRegex(ValueError,'request'):
+            self.node.storage_lease_operation('storage.lease.prepare',{'job':self.job,'expectedNative':expected})
+        self.assertEqual(len(self.leases()),1)
+
     def test_missing_receipt_still_requires_native_stopped_proof(self):
         self.prepare();self.native();self.assertFalse(self.receipt().exists())
         with patch.object(self.node,'gpu',return_value=self.terminal()),patch.object(self.node,'dataset_unit_stopped',return_value=False):

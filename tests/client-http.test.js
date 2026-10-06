@@ -67,6 +67,8 @@ test('connection and response body failures retry reads but not mutations',async
  for(const fail of [new TypeError('fetch failed'),{status:200,ok:true,json:async()=>{throw new TypeError('terminated');}}]){
   const f=fixture([fail,new Response('{"state":{}}')]);
   await apiPost(url,'call',{operation:'state'},f.options);assert.equal(f.calls.length,2);
-  const mutation=fixture([fail]);await assert.rejects(apiPost(url,'call',{operation:'datasets.unregister'},mutation.options),/操作结果尚未确认/);assert.equal(mutation.calls.length,1);
+  for(const operation of ['datasets.unregister','jobs.reconcile-resources']){
+   const mutation=fixture([fail]);await assert.rejects(apiPost(url,'call',{operation},mutation.options),/操作结果尚未确认/);assert.equal(mutation.calls.length,1);
+  }
  }
 });

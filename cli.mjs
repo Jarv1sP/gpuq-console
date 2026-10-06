@@ -74,6 +74,7 @@ gpuctl watch JOB                 Watch progress / completion / failure over SSH
 gpuctl notify JOB on|off|status  Opt into your configured Telegram destination
 gpuctl diagnostics JOB --json    Persistent bounded worker logs, exits and resource counters
 gpuctl completion JOB --json     Verify latest native success without rewriting failed history
+gpuctl reconcile-resources JOB   Release stopped-attempt data leases; never retry or cancel a job
 gpuctl run --priority idle -g 1 -- python train.py
 gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
 gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
@@ -765,6 +766,10 @@ async function main(){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');
       if(options.key||training.length)fail('priority does not accept a submission key or command argv');
       result=(await call('jobs.priority',{jobId:positionals[1],priority:positionals[2]})).result;
+    }
+    else if(command==='reconcile-resources'){
+      if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k)))fail('Usage: reconcile-resources JOB [--json]; no paths, machine or execution options');
+      result=(await call('jobs.reconcile-resources',{jobId:positionals[1]})).result;
     }
     else if(command==='completion'){
       if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k)))fail('Usage: completion JOB [--json]; no paths, machine or execution options');

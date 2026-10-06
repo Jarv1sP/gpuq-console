@@ -621,7 +621,16 @@ def scheduler_terminal_confirmed(data):
     if not isinstance(attempts,list) or not isinstance(leases,list) or leases or not isinstance(reservations,list) or reservations:return False
     return all(isinstance(a,dict) and a.get('state') in ('EXITED_SUCCESS','EXITED_FAILURE','CANCELED','PREEMPTED') for a in attempts)
 
-def release_datasets(job,data=None,never_dispatched=False):
+def cleanup_snapshot_matches(job,data,expected):
+    if not isinstance(data,dict):return False
+    native=data.get('job',{});attempts=data.get('attempts',[])
+    return (isinstance(native,dict) and isinstance(attempts,list) and bool(attempts) and isinstance(attempts[0],dict)
+            and native.get('id')==expected['nodeJobId'] and native.get('submit_key')==job['id']
+            and type(native.get('version')) is int and native['version']==expected['nativeVersion']
+            and type(attempts[0].get('ordinal')) is int
+            and attempts[0].get('id')==expected['attemptId'] and attempts[0].get('ordinal')==expected['attemptOrdinal'])
+
+def release_datasets(job,data=None,never_dispatched=False,expected_native=None):
     """Caller owns job flock and fresh no-dispatch or native terminal proof.
 
     A prepared HELD lease precedes the scheduler .datasets receipt. Absence of
@@ -640,6 +649,7 @@ def release_datasets(job,data=None,never_dispatched=False):
         if not row:return False
         data=gpu('show',row[0])
         if data.get('job',{}).get('id')!=row[0] or data['job'].get('submit_key')!=job['id']:return False
+    if expected_native is not None and not cleanup_snapshot_matches(job,data,expected_native):return False
     filename=ROOT/'jobs'/(job['id']+'.datasets.json')
     if not never_dispatched:
         if not scheduler_terminal_confirmed(data):return False
@@ -1023,8 +1033,18 @@ def storage_lease_operation(operation,args):
         if action=='finish':return storage_leases().download_finish(args)
         if action in ('info','manifest','get'):return storage_leases().download_export('datasets.snapshot.'+action,args)
         raise ValueError('Unknown protected download operation')
-    if operation not in ('storage.lease.prepare','storage.lease.cancel') or not isinstance(args,dict) or set(args)!={'job'}:
+    if (operation not in ('storage.lease.prepare','storage.lease.cancel') or not isinstance(args,dict)
+            or 'job' not in args or set(args)-{'job','expectedNative'}
+            or operation=='storage.lease.prepare' and 'expectedNative' in args):
         raise ValueError('Invalid data preparation lease request')
+    expected=args.get('expectedNative')
+    if 'expectedNative' in args:
+        if (not isinstance(expected,dict) or set(expected)!={'nodeJobId','attemptId','attemptOrdinal','nativeVersion'}
+                or not isinstance(expected['nodeJobId'],str) or not re.fullmatch(r'J[a-f0-9]{12}',expected['nodeJobId'])
+                or not isinstance(expected['attemptId'],str) or not re.fullmatch(r'A[a-f0-9]{32}',expected['attemptId'])
+                or type(expected['attemptOrdinal']) is not int or not 0<expected['attemptOrdinal']<=2**53-1
+                or type(expected['nativeVersion']) is not int or not 0<=expected['nativeVersion']<=2**53-1):
+            raise ValueError('Invalid resource reconciliation identity')
     job=args['job'];validate_job(job,readonly=True);jid=job['id']
     (ROOT/'jobs').mkdir(parents=True,exist_ok=True,mode=0o700)
     with open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
@@ -1035,10 +1055,17 @@ def storage_lease_operation(operation,args):
         if spec.exists() and json.loads(spec.read_text())!=job:raise ValueError('Job identity mismatch')
         canceled=ROOT/'jobs'/f'{jid}.canceled'
         if operation=='storage.lease.cancel':
+            if expected is not None and (not row or row[0]!=expected['nodeJobId'] or not spec.exists()):
+                raise ValueError('Resource reconciliation native identity is unavailable or changed')
             if row:
                 # Cleanup request is NOT permission to cancel an actual job.
                 # Only its native terminal evidence and stopped units suffice.
-                if not release_datasets(job,gpu('show',row[0])):
+                data=gpu('show',row[0])
+                if expected is not None and (not cleanup_snapshot_matches(job,data,expected)
+                        or not scheduler_terminal_confirmed(data)
+                        or not all(dataset_unit_stopped(attempt) for attempt in data['attempts'])):
+                    raise ValueError('Resource reconciliation attempt changed or termination is unconfirmed; leases retained')
+                if not release_datasets(job,data,expected_native=expected):
                     raise ValueError('Training termination is unconfirmed; prepared leases retained')
             else:
                 if os.path.lexists(ROOT/'jobs'/f'{jid}.dataset-dispatch-attempted'):
@@ -1048,7 +1075,7 @@ def storage_lease_operation(operation,args):
                     release_datasets(job,never_dispatched=True)
                 else:
                     storage_leases().cancel_prepare(job)
-            return {'jobId':jid,'state':'CANCELED','released':True}
+            return {'jobId':jid,'state':'CANCELED','released':True,**({'reconciledNative':expected} if expected is not None else {})}
         if row or os.path.lexists(ROOT/'jobs'/f'{jid}.dataset-dispatch-attempted'):
             raise ValueError('Training may already be submitted; preparation cannot change its leases')
         if canceled.exists() or os.path.lexists(ROOT/'jobs'/f'{jid}.dataset-not-submitted.json'):
