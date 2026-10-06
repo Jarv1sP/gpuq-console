@@ -328,7 +328,7 @@ export async function executionCall(service,principal,operation,args){
     if(previous){if(previous.digest!==digest)fail('同一提交键不能用于不同任务。',409);return jobView(previous);}
     if(service.store.jobs.length>=5000)fail('任务历史达到归档上限，请联系管理员归档后提交。',503);
     if(request.cards>user.total)fail('任务卡数超出跨机器用卡总额度。',409);
-    if(request.machineSelection)Object.assign(request,await selectMachine(service,user,request,priorityCapable));
+    if(request.machineSelection)Object.assign(request,await selectMachine(service,user,request,priorityCapable,usage));
     authorizedMachine(request.machine);
     if(project.project&&!request.machineSelection){
       await service.ociProjectAdmission?.(request.machine,user.id,project.project);
