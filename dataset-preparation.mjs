@@ -117,7 +117,7 @@ async function observe(service,id,usage){
         currentJob.queueReason='数据已就绪，等待个人可用卡数额度；尚未申请 GPU。';return;
       }
       const host=service.gpuq?.hosts.find(h=>h.id===currentJob.machine);
-      if(service.gpuq?.stale||!host?.reachable||!host.gpuq?.connected||host.gpuq.observeOnly){currentJob.queueReason='数据已就绪，等待服务器恢复；尚未申请 GPU。';return;}
+      if(service.gpuq?.stale||!host?.reachable||!host.gpuq?.connected||host.gpuq.observeOnly||currentJob.machineSelection&&(host.gpuq.health!=='ok'||host.gpuq.observeOnly!==false)){currentJob.queueReason='数据已就绪，等待服务器恢复；尚未申请 GPU。';return;}
       currentJob.spec.datasets=references;
       // Promotion reserves portal quota, not proof that the scheduler accepted
       // the job. Keep the durable hold pending until node termination cleanup;
