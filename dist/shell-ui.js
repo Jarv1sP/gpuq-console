@@ -1,4 +1,4 @@
-import {escapeUI as esc,serverSelectLabel} from './workbench-ui.js';
+import {escapeUI as esc,serverSelectLabel,containerContextPrompt} from './workbench-ui.js';
 import {controlUI,sessionStatus} from './control-ui.js';
 import {sharedObject,captureObject} from './motion-ui.js';
 import {roomForPage,roomOrder} from './navigation.js';
@@ -15,13 +15,20 @@ export function shellUI(store,{navigate,getPage,toast}){
     const machine=q('[name=workspace-machine]'),project=q('[name=workspace-project]'),active=getPage();
     context.hidden=!store.principal||!machine||!['work','datasets','transfers'].includes(active);
     for(const [original,target] of [[machine,q('#context-machine')],[project,q('#context-project')]]){if(!original)continue;if(target.innerHTML!==original.innerHTML)target.innerHTML=original.innerHTML;target.value=original.value;target.disabled=original.disabled;target.title=original.selectedOptions[0]?.textContent||original.value;}
-    serverSelectLabel(q('#context-machine'));
+    const choice=project?.selectedOptions?.[0],selector=q('#context-machine'),prompt=containerContextPrompt({environmentMode:active==='work'?choice?.dataset.environmentMode:undefined,trainingTarget:q('[name=training-target]')?.value,source:choice?.dataset.machine,focus:machine?.value});
+    if(selector){
+      const empty=selector.querySelector('option[value=""]');if(empty)empty.textContent=prompt.empty;
+      const caption=[...selector.closest('label').childNodes].find(node=>node.nodeType===Node.TEXT_NODE);if(caption)caption.textContent=prompt.label;
+      selector.setAttribute('aria-label',prompt.ariaLabel);
+    }
+    serverSelectLabel(selector);if(selector)selector.title=prompt.title;
     q('#context-note').textContent=project?.value?'项目':'个人工作区';
     if(active==='work'&&store.principal){const choice=project?.selectedOptions[0],source=choice?.dataset.machine||machine?.value;q('#page-title').textContent=choice?.dataset.project||'个人工作区';q('#page-description').textContent=source?source+' · '+(project?.value?'项目':'个人工作区'):'选择我的项目，或新建个人容器。';}
   }
   for(const [proxy,name] of [['#context-machine','workspace-machine'],['#context-project','workspace-project']])q(proxy).addEventListener('change',event=>{const original=q(`[name=${name}]`);if(original){original.value=event.target.value;original.dispatchEvent(new Event('change',{bubbles:true}));}});
   document.addEventListener('gpuq-workspace-context',event=>{if(event.detail.userId!==store.principal?.userId)return;queueMicrotask(syncContext);});
   document.addEventListener('gpuq-workspace-rendered',syncContext);
+  document.addEventListener('change',event=>{if(event.target.matches('[name=training-target]'))queueMicrotask(syncContext);});
   document.addEventListener('click',event=>{
     if(!account.contains(event.target))account.open=false;
     const action=event.target.closest('[data-shell-action]')?.dataset.shellAction;

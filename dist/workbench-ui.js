@@ -13,6 +13,13 @@ export function serverSelectLabel(select){
   if(!wrapper){wrapper=document.createElement('span');wrapper.className='server-select';select.before(wrapper);wrapper.append(select);const label=document.createElement('span');label.className='server-select-label';label.setAttribute('aria-hidden','true');wrapper.append(label);}
   select.title=select.value;wrapper.querySelector('.server-select-label').innerHTML=serverIdHTML(select.value||select.selectedOptions[0]?.textContent||'');
 }
+export function containerContextPrompt({environmentMode,trainingTarget,source='',focus=''}={}){
+  if(environmentMode!=='oci')return {label:'服务器',empty:'请选择服务器',title:focus,ariaLabel:'切换所选服务器'};
+  const ariaLabel='切换服务器焦点，个人容器开发位置保持不变';
+  if(!focus&&trainingTarget==='auto')return {label:'训练',empty:'自动选择',title:'自动选择兼容服务器',ariaLabel};
+  if(!focus&&trainingTarget==='current'&&source)return {label:'训练',empty:'开发位置',title:source,ariaLabel};
+  return {label:'服务器',empty:'可选服务器',title:focus,ariaLabel};
+}
 export function jobCancelConfirmation(job){
   const cards=job?.state==='PREPARING_DATA'?0:job?.cards;
   return Number.isSafeInteger(cards)&&cards>=0?`取消这个训练任务？确认停止后释放 ${cards} 张卡的额度，已保存的文件保留。`:'取消这个训练任务？占用额度尚未确认，停止后由服务器确认释放；已保存的文件保留。';
