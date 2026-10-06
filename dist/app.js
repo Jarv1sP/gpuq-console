@@ -1,4 +1,4 @@
-import {discloseInfo,serverIdHTML} from './workbench-ui.js';
+import {discloseInfo,serverIdHTML,personalQuotaReadout} from './workbench-ui.js';
 import {DemoClient} from './client.js';
 import {executionUI,renderTaskTable} from './execution-ui.js';
 import {terminalUI} from './terminal-ui.js';
@@ -96,8 +96,9 @@ function render(preserve=false){
   const stateNames={RUNNING:['st-run','运行'],STARTING:['st-start','启动'],SUBMITTING:['st-start','提交'],PENDING:['st-queue','排队'],QUEUED:['st-queue','排队'],PREPARING_DATA:['st-prep','准备数据'],cancel:['st-cancel','正在取消'],UNKNOWN:['st-unk','待核对'],PREEMPTING:['st-cancel','正在让位'],PREEMPTED:['st-stop','让位结束']};
   const distribution=[...grouped].map(([key,count])=>{const [css,text]=stateNames[key]||['st-unk','状态未知'];return `<span class="st ${css}"><span class="g" aria-hidden="true"></span>${count} ${text}</span>`;}).join('');
   const used=u?store.usage(u.id):null,quota=u?.total;
-  const quotaSlots=Number.isSafeInteger(quota)&&quota>0&&quota<=64?`<span class="wb-quota-segments" aria-hidden="true">${Array.from({length:quota},(_,i)=>`<i class="${i<used?'on':''}"></i>`).join('')}</span>`:'';
-  $('#self-summary').innerHTML=logged?`<div><small>占用额度 / 上限</small><strong>${used??'—'} / ${quota??'—'}<span> 张</span></strong>${quotaSlots}</div><div><small>进行中的训练</small><strong>${activeJobs.length}<span> 项</span></strong><span class="wb-state-distribution">${distribution||'暂无进行中的训练'}</span></div><div><small>已授权服务器</small><strong>${Object.values(u?.limits||{}).filter(limit=>limit>0).length}<span> 台</span></strong><span class="wb-telemetry-note">${label(u)}</span></div>`:'';
+  const quotaReadout=personalQuotaReadout(u,used,quota);
+  const quotaSlots=!quotaReadout.exempt&&Number.isSafeInteger(quota)&&quota>0&&quota<=64?`<span class="wb-quota-segments" aria-hidden="true">${Array.from({length:quota},(_,i)=>`<i class="${i<used?'on':''}"></i>`).join('')}</span>`:'';
+  $('#self-summary').innerHTML=logged?`<div><small>${quotaReadout.label}</small><strong>${quotaReadout.value}<span> 张</span></strong>${quotaReadout.note?`<span class="wb-telemetry-note">${quotaReadout.note}</span>`:quotaSlots}</div><div><small>进行中的训练</small><strong>${activeJobs.length}<span> 项</span></strong><span class="wb-state-distribution">${distribution||'暂无进行中的训练'}</span></div><div><small>已授权服务器</small><strong>${Object.values(u?.limits||{}).filter(limit=>limit>0).length}<span> 台</span></strong><span class="wb-telemetry-note">${label(u)}</span></div>`:'';
   $('#work-title-telemetry').hidden=page!=='work'||!logged;
   $('#open-submit').hidden=page!=='work'||!logged;$('#open-submit').disabled=!store.production||store.data?.executionEnabled!==true;
   shell.update();
@@ -105,7 +106,7 @@ function render(preserve=false){
 }
 function renderResources(){
   const u=own(),limits=u?.limits||{};
-  $('#resource-summary').textContent=u?`额度 ${u.total} 张 · ${Object.values(limits).filter(value=>value>0).length} 台已授权`:'登录后查看额度';
+  $('#resource-summary').textContent=u?`${personalQuotaReadout(u).exempt?'免个人额度':'额度 '+u.total+' 张'} · ${Object.values(limits).filter(value=>value>0).length} 台已授权`:'登录后查看额度';
   $('#monitor-status').textContent=monitorSummary(store.data?.gpuq,store.production);
   $('#monitor-status').title=store.data?.gpuq?.checkedAt||'';
   renderResourceView();
@@ -116,7 +117,7 @@ function renderUsers(){
   const focusedUser=list.contains(focused)?focused.closest('[data-user]')?.dataset.user:null;
   $('#filter-pending').textContent=`待处理 ${pendingUsers().length}`;$('#filter-all').textContent=`全部账号 ${store.users.length}`;
   $('#filter-pending').setAttribute('aria-pressed',String(filter==='pending'));$('#filter-all').setAttribute('aria-pressed',String(filter==='all'));
-  list.innerHTML=filteredUsers().map(u=>`<button class="user-row ${u.id===selected?'selected':''}" data-user="${esc(u.id)}" aria-pressed="${u.id===selected}"><span class="avatar">${esc(u.name.slice(0,1))}</span><span class="user-details"><span class="user-name" title="${esc(u.name)}">${esc(u.name)}</span><span class="user-meta">${label(u)}${u.total?' · '+u.total+' 张':''}</span></span><span class="user-chevron">›</span></button>`).join('')||'<div class="empty">暂无待处理账号。</div>';
+  list.innerHTML=filteredUsers().map(u=>`<button class="user-row ${u.id===selected?'selected':''}" data-user="${esc(u.id)}" aria-pressed="${u.id===selected}"><span class="avatar">${esc(u.name.slice(0,1))}</span><span class="user-details"><span class="user-name" title="${esc(u.name)}">${esc(u.name)}</span><span class="user-meta">${label(u)}${personalQuotaReadout(u).exempt?' · 免个人额度':u.total?' · '+u.total+' 张':''}</span></span><span class="user-chevron">›</span></button>`).join('')||'<div class="empty">暂无待处理账号。</div>';
   list.scrollTop=scrollTop;
   if(focusedUser)for(const row of list.querySelectorAll('[data-user]'))if(row.dataset.user===focusedUser){row.focus({preventScroll:true});break;}
 }
@@ -125,11 +126,11 @@ function renderEditor(){
   const u=store.get(selected),self=u.id===store.principal.userId,admin=u.role==='admin';
   const permissionsHelp=copyHelp('服务器额度','勾选服务器后才能使用，卡数不绑定具体显卡。新账号会自动出现在待处理，额度为 0，批准后才能提交训练。','/guide/start');
   const totalHelp=copyHelp('合计额度','排队也占用额度，所有服务器同时受这个上限限制。有额度仍可能需要等空卡。','/guide/queue');
-  const accountHelp=()=>copyHelp('账号权限','用卡额度与管理员权限分开，管理员只能授予受信任的维护者。管理员可管理账号，并访问已启用的服务器管理终端。','/guide/start');
+  const accountHelp=()=>copyHelp('账号权限','管理员免个人累计卡数额度，单次申请仍受目标物理卡数限制，资源不足正常排队；可管理账号，并访问已启用的服务器管理终端。只授予受信任的维护者。','/guide/start');
   const deleteHelp=copyHelp('删除条件','先暂停账号、确认没有未完成任务后才能删除，数据和历史保留。不能删除当前账号或移除最后一名管理员。','/guide/start');
   $('#editor').innerHTML=`<span class="hero-label">${pending(u)?'待审批':'成员授权'}</span>
     <div class="editor-head"><div><h2>${esc(u.name)}</h2><p class="muted"><span class="member-username">${esc(u.username)}</span> · ${label(u)}${self?' · 当前账号':''}</p></div><button class="button" data-action="reset-password">重置密码</button></div>
-    <div class="editor-body">${admin?`<div class="approval-note copy-caption"><span>全部服务器 · ${capacity} 张</span>${accountHelp()}</div>`:`
+    <div class="editor-body">${admin?`<div class="approval-note copy-caption"><span>全部服务器 · 免个人额度</span>${accountHelp()}</div>`:`
       <div class="editor-save"><div><p id="policy-summary"></p><p class="save-state" id="save-state" role="status"></p></div><div><button class="button ghost" data-action="reset-draft">撤销</button><button class="button primary" data-action="save-policy">${pending(u)?'批准授权':'保存额度'}</button></div></div>
       <p class="form-error" id="policy-error" role="alert"></p>
       <div class="permission-heading"><div class="copy-caption"><h3>服务器额度</h3>${permissionsHelp}</div><button class="button" data-action="grant-full">全部最大额度</button></div>
