@@ -150,9 +150,12 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     }
     service.assertDatasetNotDeleting(host,ref);
   };
-  if(previousBridge)service.bridge=async(host,operation,args)=>{
-    if(['datasets.prepare','datasets.unregister','datasets.register','datasets.sync.begin','datasets.snapshot.begin'].includes(operation))
-      await service.confirmDatasetNotDeleting(host,args,args);
+  if(previousBridge)service.bridge=(host,operation,args)=>{
+    if(['datasets.prepare','datasets.unregister','datasets.register','datasets.sync.begin','datasets.snapshot.begin'].includes(operation)
+      &&service.datasetDeletionBlocked(host,args))
+      return service.confirmDatasetNotDeleting(host,args,args).then(()=>previousBridge(host,operation,args));
+    // Keep the original synchronous maintenance refusal for every untouched
+    // operation. A proof read is asynchronous only for a fenced namespace.
     return previousBridge(host,operation,args);
   };
   const checkFactory=(principal,assertCurrent,policy,inventory,row,read=false,allowCancellation=false)=>()=>{

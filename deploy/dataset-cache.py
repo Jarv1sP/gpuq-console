@@ -579,6 +579,20 @@ class DatasetCache:
         """
         owners=self._provenance_actor(actor,owners,origin,receipt)
         version=_version(_manifest(manifest));self._paths(dataset,version)
+        # Ordinary registration keeps its original metadata-only behavior;
+        # it creates no version lock, particularly before an ACL refusal.
+        # _register rechecks the fence under the caller's metadata lock.
+        with self._locked():
+            initial=self._retirement_fence(dataset,version)
+            normal=initial is None or initial['state'] in {'RESTORED','RELEASED'}
+            if not normal:
+                if initial['state']!='PURGED' or not explicit or origin=='replica':
+                    self._check_retirement(dataset,version)
+                if self._dataset(actor,dataset)['owners']!=owners:
+                    raise PermissionError('Explicit registration must preserve authenticated dataset owners')
+        if normal:
+            yield False
+            return
         with self._lock_file('.locks/'+dataset+'.'+version+'.lock'):
             with self._locked():
                 fence=self._retirement_fence(dataset,version)
