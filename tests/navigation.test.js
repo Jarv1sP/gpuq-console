@@ -10,11 +10,16 @@ test('transfer routes identify the dataset room and use one canonical tab URL',(
   assert.equal(pageForRoute('#datasets'),'datasets');assert.equal(hashForPage('datasets'),'#datasets');
 });
 test('room ordering excludes the transfer tab while keeping account and admin routes',()=>{
-  assert.deepEqual(roomOrder,['work','resources','datasets','community','users']);
+  assert.deepEqual(roomOrder,['work','resources','datasets','community']);
   for(const page of [...roomOrder,'me','maintenance']){
     assert.equal(pageForRoute(hashForPage(page)),page);assert.equal(roomForPage(page),page);
   }
 });
 test('native document anchors and unrecognised routes are not treated as rooms',()=>{
   for(const route of ['',null,undefined,'#main-content','#guide-main','#datasets/missing','#missing','/#transfers'])assert.equal(pageForRoute(route),null);
+});
+
+test('legacy member management links stay in the admin frame, outside the primary rooms',()=>{
+  assert.equal(pageForRoute('#users'),'admin');assert.equal(hashForPage('users'),'#admin/members');
+  assert.equal(pageForRoute('#admin/members'),'admin');assert.equal(roomOrder.includes('users'),false);
 });
