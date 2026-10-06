@@ -323,6 +323,8 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 
 `.publication-unknown` 与 `.room-ghost` 是JS实际附加的DOM状态/快照钩子，没有独立CSS声明；视觉由状态字形、动画层与JS定位控制，不能假定每个状态class都有一块CSS。
 
+版本删除的后端契约见 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 和 [DATASETS.md](DATASETS.md)。节点能力未确认时不可启用普通或彻底删除；成员权限必须来自版本级个人来源证明。现有网页仍保留管理员删除入口，成员与彻底删除组件由后续前端 PR 接入，不能从本 PR 的 API 推断它们已经上线。状态展示区分当前隔离、实际恢复、到期清理与结果未确认；历史 `RETIRED` 不能画成数据已删除。
+
 ## 5. 房间与文件
 
 [navigation.js](../dist/navigation.js) 将 transfers 归入数据集，保留原控制器/DOM钩子。旧 `#transfers`、⌘K、总控进入 `#datasets/transfers` 页签，同一房间内不做跨房间转场。
@@ -514,7 +516,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [dataset-preparation.test.js](../tests/dataset-preparation.test.js) | slow node observation does not block mutations; cancellation prevents dispatch or cache-worker cancellation |
 | [dataset-remove-ui.test.js](../tests/dataset-remove-ui.test.js) | unregister submits exactly one scoped target and polls only the server operation ID at 2/5/10 seconds |
 | [dataset-replication.test.js](../tests/dataset-replication.test.js) | approved direct transfer is preparable but not falsely local READY |
-| [dataset-unregister-api.test.js](../tests/dataset-unregister-api.test.js) | unregister requires authenticated admin despite full member GPU grants |
+| [dataset-unregister-api.test.js](../tests/dataset-unregister-api.test.js) | whole-dataset unregister requires authenticated admin despite full member GPU grants |
 | [dataset-upload-cli.test.js](../tests/dataset-upload-cli.test.js) | standalone CLI uploads a directory with empty files/directories and resumes a lost chunk response |
 | [dataset-upload-client.test.js](../tests/dataset-upload-client.test.js) | incremental browser SHA256 matches native hash at padding boundaries and random chunk boundaries |
 | [datasets-api.test.js](../tests/datasets-api.test.js) | opt-in dataset preparation is durable, reserves no GPU and dispatches only after local READY |
