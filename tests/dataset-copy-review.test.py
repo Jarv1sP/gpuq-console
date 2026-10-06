@@ -93,7 +93,6 @@ class DatasetCopyReview(unittest.TestCase):
         self.assertTrue(self.cache.verify(OTHER, "sample", self.version)["verified"])
 
     def test_long_materialize_excludes_unregister_without_holding_the_global_lock(self):
-        retention = protected_original(self.cache, D, self.base/'retention-original')
         entered, resume = threading.Event(), threading.Event()
         errors = []
         put = self.cache._put_chunk_data
@@ -111,7 +110,6 @@ class DatasetCopyReview(unittest.TestCase):
                 errors.append(exc)
 
         other = D.DatasetCache(self.cache.root, sources={"source": self.source}, reserve_bytes=1024, lock_timeout=0.05)
-        retention.bind_cache(other)
         with patch.object(self.cache, "_put_chunk_data", side_effect=blocked):
             thread = threading.Thread(target=worker)
             thread.start()
@@ -128,6 +126,11 @@ class DatasetCopyReview(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
         self.assertTrue(other.verify(OWNER, "sample", self.version)["verified"])
+        # This test times the target's publication, not a second full copy.
+        # Install the real protected original after that assertion, before the
+        # final removal. The busy-lock assertions above still run unchanged.
+        retention = protected_original(self.cache, D, self.base/'retention-original')
+        retention.bind_cache(other)
         self.assertTrue(other.unregister(ADMIN, "sample")["unregistered"])
 
     def test_failed_batch_fence_write_overreserves_fsynced_bytes_and_resumes(self):
