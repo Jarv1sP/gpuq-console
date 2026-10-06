@@ -24,6 +24,30 @@
 
 已通过原生 GPUQ 身份围栏 `set-display` 修改的同账号标签不会被常规 reconcile 改回提交时名字。节点返回 `displaySync.state:"PRESERVED"` 和允许的标签，门户保存其显示缓存，让任务列表与队列一致；原 `job.name`、不可变 spec、提交 key/digest、优先级、资源和结果路径均不改变。此修复需配套采集和任务显示 helper；它不新增网页/CLI 标签编辑、项目归并或项目退役接口。
 
+## 项目展示与生命周期
+
+所有操作绑定登录账号，不接受 owner/userId/宿主路径。内部 `project`、release、run 与
+结果目录不改名；`displayName` 为纯文本，默认原 ID，写入有 revision CAS。
+
+| 操作 | args | result / 边界 |
+| --- | --- | --- |
+| `projects.label.get` / `.set` | `machine,project`；set 加 `displayName,revision` | 当前显示名与 revision；同账号同实例 |
+| `projects.group.get` / `.set` | 固定 UUID `id`；set 加 `displayName,revision,members:[{machine,project}],primary` | 同账号逻辑分组，primary 可空且须为成员；最多 32 实例，空 members 解除归组 |
+| `projects.catalog` | 可选布尔 `includeArchived` | `groups,partial,errors,historyMapping`；离线节点不猜空列表 |
+| `projects.archive` / `.unarchive` | `machine,project,revision` | 节点 lifecycle 状态；停止新工作但保留旧任务和结果 |
+| `projects.retire.plan` | `machine,project` | `ELIGIBLE/BLOCKED`、阻塞原因、目录摘要、生命周期 revision、计数；不移动内容 |
+| `projects.retire` | `machine,project,key,revision,manifestSha256` | 固定 UUID、完整 plan CAS；`RETIRING/RETIRED`，内容保留 |
+| `projects.retire.status` | `machine,project,key` | 仅原请求；未知维持围栏，不换 UUID |
+
+`projects.list/status/create` 增加 `displayName,displayNameRevision,logicalProjectId,logicalProjectName`；
+有组时增加其 revision 与主实例。节点项目状态增加 `lifecycle:{protocol,state,revision}`，state 为
+ACTIVE/ARCHIVED；软退役回执为 RETIRING/RETIRED。metadata 不能冒充权限或训练身份。
+archive 前要求写入者全部确证停止；retire 还要求 Portal 和节点都无任何任务历史，完整目录
+no-follow CAS、一致原子 no-replace 与永久 slug tombstone。未知、历史输出、活动源 reader、
+128 同机导入双围栏均拒绝。归档中的旧已确认提交不改 spec、优先级或 GPUQ 身份。
+维护模式允许只读 label/group/catalog/retire.plan/status，不允许整理写入。需同步部署实际桥
+白名单和 `project-lifecycle.py/project-store.py/project-ops.py`、相关 reader/执行器；无旧节点降级。
+
 ## 个人容器项目：创建与固定发布
 
 项目沿用同一个 `/api/call`，详细工作流见 [项目与环境](PROJECTS.md)。创建个人容器项目的请求是：

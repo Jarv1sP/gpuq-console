@@ -81,6 +81,14 @@ exit
 
 代码在 `/workspace`，私人环境在 `/opt/project-env`。默认继承基础 Python 包；需要空环境时新建 `gpuctl project create clean-project --env-mode isolated`。项目名以小写字母开头，可含数字、下划线和连字符，最长 48 字符。
 
+### 整理已有项目
+
+工作台选择项目后，展开「整理项目」可改显示名称、加入跨机项目组，或归档。显示名称和分组不移动代码、环境或结果；同组的各机器实例仍独立运行。名称有版本核对，冲突时先「读取最新名称」，再确认修改。
+
+归档隐藏旧项目并暂停新上传、终端、发布和训练，历史任务与结果保留；勾选「显示归档项目」可恢复。命令行对应 `gpuctl project label --display-name "实验名称"`、`gpuctl project catalog --full`、`gpuctl project archive` 和 `gpuctl project unarchive`。
+
+「检查安全退役」只允许从未有训练、运行领取或输出，且没有活动或未确认读写的实例。软退役保留内容到节点私有回收区，不释放磁盘、不复用内部项目名。退役回执丢失时查询原请求 UUID，不换新请求重试；有历史的项目用归档，不直接删除。
+
 ### 个人容器
 
 在网页「新建项目」选择「个人容器」，或在管理员已启用的节点使用 `gpuctl project create system-project --env-mode oci`。没开通的服务器会直接拒绝，不影响你已有的项目。页面上没有「个人容器」选项，就说明你的账号或这台服务器还没开通。

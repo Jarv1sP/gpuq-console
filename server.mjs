@@ -6,6 +6,7 @@ import {guideTarget,guidePage} from './guide.mjs';
 import {STARBASE_ASSETS} from './frontend-assets.mjs';
 const routes={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/datasets.css':'datasets.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/service.js':'service.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/datasets-ui.js':'datasets-ui.js'};
 routes['/dataset-upload.js']='dataset-upload.js';
+routes['/project-management-ui.js']='project-management-ui.js';
 routes['/data-workspace.js']='data-workspace.js';
 routes['/cloud-files-ui.js']='cloud-files-ui.js';
 routes['/transfers-ui.js']='transfers-ui.js';routes['/transfer-upload.js']='transfer-upload.js';

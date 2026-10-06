@@ -5,6 +5,7 @@ import {schedulingFields,schedulingFromForm,schedulingSummary} from './schedulin
 import {elasticCapable,placementCapable} from './gpu-allocation.js';
 import {elasticFields,elasticFromForm,allocationSummary,placementFields,placementFromForm,placementSummary} from './gpu-allocation-ui.js';
 import {taskDescription} from './task-metadata.js';
+import {createProjectManagement,projectSelectHTML} from './project-management-ui.js';
 import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,personalQuotaReadout,boundarySweep,taskMissionUI,infoHTML,discloseInfo,jobCancelConfirmation,projectEnvironmentLabel,confirmProjectCreation,projectPublicationStorage,projectPublicationOutcome,projectPublicationDelay,projectPublicationProgressHTML,confirmPublicationMotion,createProjectActivity} from './workbench-ui.js';
 import {endProjectTerminals} from './terminal-ui.js';
 export {endProjectTerminals} from './terminal-ui.js';
@@ -111,6 +112,7 @@ export function executionUI(store,refresh,toast){
   const publicationCache=projectPublicationStorage({getItem:key=>localStorage.getItem(key),setItem:(key,value)=>localStorage.setItem(key,value),removeItem:key=>localStorage.removeItem(key),key:index=>localStorage.key(index),get length(){return localStorage.length;}});
   let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,historyState='',jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
   let submitReceipt=null,parsedTarget=null,acceptedDraft=false;
+  let projectManagement=null;
   const mission=taskMissionUI(store,{toast,onOpen:id=>{focusedJob=id;renderJobs(ownJobs());document.dispatchEvent(new CustomEvent('gpuq-focused-job',{detail:{id}}));document.dispatchEvent(new CustomEvent('gpuq-attention-viewed',{detail:{userId:store.principal?.userId,kind:'job',id}}));}});
   const jobHeading=id=>[...document.querySelectorAll('[data-workbench-job]')].find(row=>row.dataset.workbenchJob===id)?.querySelector('.wb-job-heading');
   const diagnostics=createJobDiagnostics(store,()=>log,toast,{drawer:true,header:job=>`<span class="sheet-object">${stateHTML(job,false)}<span>${escape(job.name||'训练详情')}</span></span>`,reveal:(dialog,job,origin)=>{sharedObject(origin||jobHeading(job.id),dialog.querySelector('.sheet-object'));revealSheet(dialog,{drilldown:true});},dismiss:dialog=>dismissSheet(dialog,{drilldown:true,target:jobHeading(focusedJob)}),overview:job=>jobOverviewHTML(job,{owned:job.userId===store.principal?.userId,schedulingHTML:allocationSummary(job)+placementSummary(job)+`<span>排队优先级：${escape(priorityRankLabel(job))}</span>`+schedulingSummary(job)+`<span>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</span><span>状态：${escape(job.schedulerState||'未提供')}</span><span>更新于 ${escape(sampleTime(job.schedulerCheckedAt))}</span>`}),output:showOutput,notes:showNotes,onView:next=>{if(next!=='notes')notes?.sync(false,true);}});
@@ -308,7 +310,7 @@ export function executionUI(store,refresh,toast){
   function assertContext(){if(!enabled())throw Error('先在工作台顶部选择一台已授权服务器。');if(project&&!currentProject())throw Error('项目状态尚未读取，请刷新后再试。');return context();}
   function updateControls(){
     if(!section||!actor)return;
-    const available=enabled(),locked=operationBusy||projectBusy,info=currentProject(),publishing=info?.state==='PUBLISHING'||['REQUESTING','PUBLISHING'].includes(publicationResult?.state),unconfirmed=publicationIntent&&(!publicationResult||publicationResult.state==='UNKNOWN');
+    const available=enabled(),locked=operationBusy||projectBusy,info=currentProject(),archived=info?.lifecycle?.state==='ARCHIVED',publishing=info?.state==='PUBLISHING'||['REQUESTING','PUBLISHING'].includes(publicationResult?.state),unconfirmed=publicationIntent&&(!publicationResult||publicationResult.state==='UNKNOWN');
     for(const name of ['workspace-machine','workspace-project'])query(`[name=${name}]`).disabled=locked||(name==='workspace-project'&&!available);
     query('#projects-refresh').disabled=!available||locked;query('#project-create-form [type=submit]').disabled=!available||locked||!validateProjectName();
     for(const field of query('#project-create-form').querySelectorAll('input,select'))field.disabled=!available||locked;
@@ -361,9 +363,11 @@ export function executionUI(store,refresh,toast){
       for(const selector of ['#project-create-form [type=submit]','#project-publish','#terminal-open','#terminal-reconnect','#train-form [type=submit]','#workspace-upload','[name=files]'])query(selector).disabled=true;
       query('#terminal-mode-note').textContent='维护中，暂停新建和重连。';
     }
+    if(archived)for(const selector of ['#project-publish','#terminal-open','#terminal-reconnect','#train-form [type=submit]','#workspace-upload','[name=files]'])query(selector).disabled=true;
+    projectManagement?.update();
   }
   function renderProject(){
-    const select=query('[name=workspace-project]'),options='<option value="">个人工作区</option>'+catalog.filter(item=>validProject(item.project)).map(item=>`<option value="${escape(item.project)}">${escape(item.project)} · ${projectEnvironmentLabel(item.environmentMode)}</option>`).join('');if(select.innerHTML!==options)select.innerHTML=options;select.value=project;
+    const select=query('[name=workspace-project]'),options=projectSelectHTML(catalog.filter(item=>validProject(item.project)),project,projectManagement?.includeArchived(),projectEnvironmentLabel);if(select.innerHTML!==options)select.innerHTML=options;select.value=project;
     const info=currentProject(),releases=readyReleases(info),release=query('[name=release]'),previous=release.value;
     const missingPrevious=hashPattern.test(previous)&&!releases.some(item=>item.release===previous);
     const choices=(missingPrevious?`<option value="${previous}" disabled>${previous.slice(0,12)}… · 原选版本暂不可用</option>`:'')+releases.map(item=>`<option value="${item.release}">${item.release.slice(0,12)}… · 已就绪</option>`).join('');
@@ -405,10 +409,10 @@ export function executionUI(store,refresh,toast){
     cancelProjectActivity();activateProjectActivity();project=value;epoch++;projectBusy=false;catalogError='';restorePublication();query('[name=release]').value='';clearFileContext();renderProject();notifyContext();submitKey=crypto.randomUUID();if(project)await explicitProjectRead(loadProjectStatus);
   }
   async function loadProjects(){
-    if(!projectReadable()||!enabled()||projectBusy||operationBusy)return;const token=currentToken(),selected=machine;projectBusy=true;updateControls();status('正在读取这台服务器的项目…');
+    if(!projectReadable()||!enabled()||projectBusy||operationBusy)return;let token=currentToken();const selected=machine;projectBusy=true;updateControls();status('正在读取这台服务器的项目…');
     try{const result=await projectCall('projects.list',{machine:selected});if(token!==currentToken())return;
       catalog=Array.isArray(result.projects)?result.projects.filter(item=>validProject(item?.project)):[];catalogError='';
-      if(project&&!catalog.some(item=>item.project===project)){project='';restorePublication();clearFileContext();notifyContext();}
+      if(project&&!catalog.some(item=>item.project===project)){project='';epoch++;restorePublication();clearFileContext();notifyContext();token=currentToken();}
     }catch(error){if(token===currentToken())catalogError=error.message;}
     finally{if(token===currentToken()){projectBusy=false;renderProject();if(publicationIntent&&publicationResult?.state!=='READY'&&project&&projectActive())await loadProjectStatus();}}
   }
@@ -650,7 +654,9 @@ export function executionUI(store,refresh,toast){
         <p class="muted">只挂载你获授权且本机就绪的数据，路径 /data2/数据集名称。准备数据不占 GPU。</p><div class="training-advanced">${schedulingFields(store.principal?.role==='admin')}${elasticFields()}${placementFields()}</div><button type="submit" class="button primary">提交训练</button>
       </form></details>
       <div class="section-kicker"><span>我的训练任务</span><span id="my-job-count"></span></div><p class="muted">排队、运行及待核对任务均占用个人额度；取消确认后释放。</p><div id="my-job-table"></div>`;
-      adaptWorkspace();notifyContext();
+      adaptWorkspace();
+      projectManagement=createProjectManagement({getContext:()=>({owner:actor,machine,project,info:currentProject(),token:currentToken(),enabled:enabled(),locked:operationBusy||projectBusy,maintenance:!!maintenanceFor(store.data?.operationalMaintenance,machine)}),call:projectCall,run:(button,fn)=>guarded(button,fn,true),refresh:async options=>{if(options?.retired&&options.retired.machine===machine&&options.retired.project===project){catalog=catalog.filter(x=>x.project!==project);project='';epoch++;restorePublication();clearFileContext();renderProject();notifyContext();return;}if(options?.presentationOnly){renderProject();return;}const token=currentToken();await readProjectStatus(context(),token);if(token===currentToken())renderProject();},select:async(server,id)=>{await selectMachine(server);await selectProject(id);}});
+      query('.workspace-context').append(projectManagement.element);notifyContext();
     }
     const machines=store.data?.machines||[],next=JSON.stringify(machines);
     if(machineIdentity!==next){machineIdentity=next;const options='<option value="">请选择服务器</option>'+machines.map(item=>`<option value="${escape(item.id)}">${escape(item.id)}</option>`).join('');for(const name of ['workspace-machine','machine','terminal-machine','file-machine'])query(`[name=${name}]`).innerHTML=options;if(!machines.some(item=>item.id===machine)){machine='';project='';catalog=[];epoch++;restorePublication();clearFileContext();notifyContext();}syncMachineFields();}
