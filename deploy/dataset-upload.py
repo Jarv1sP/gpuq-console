@@ -779,12 +779,23 @@ class DatasetUploads:
             # A kill after any cache mutation must still leave enough durable
             # identity for discard/retry to find precisely this upload's work.
             self.save(session)
-            with self.cache._locked():
+            origin = 'replica' if session.get('workerUnit', '').startswith('gpuq-transfer-') else 'upload'
+            internal=self.d.Principal(user,True)
+            with self.cache._new_registration(internal,dataset,manifest,[user],None,origin=origin,receipt=upload,
+                                              explicit=origin=='upload') as reopening,self.cache._locked():
                 binding = self.binding(dataset, version)
                 try:
                     existing = self.d._read_json(binding)
                 except FileNotFoundError:
                     existing = None
+                if existing is not None and existing != {'userId': user, 'uploadId': upload}:
+                    if reopening:
+                        scope=self.d._REGISTRATION_SCOPE.get()[1]
+                        R=self.cache._retirement_module()
+                        old=R.private_read(self.cache.root/'.trash'/('retire-'+scope['operationId'].replace('-',''))/'metadata/provenance.json')
+                        if existing!={'userId':user,'uploadId':old.get('receipt')} or old.get('origin')!='upload' or old.get('owners')!=[user]:
+                            raise ValueError('Explicit upload cannot replace an unconfirmed old upload binding')
+                        existing=None
                 if existing is not None and existing != {'userId': user, 'uploadId': upload}:
                     if not self._ready(session):
                         raise ValueError('This personal dataset version already has another unfinished upload')
@@ -810,8 +821,7 @@ class DatasetUploads:
                 # All authorization, quota admission and reservation conversion
                 # are service-owned. No public operation receives an admin actor.
                 try:
-                    origin = 'replica' if session.get('workerUnit', '').startswith('gpuq-transfer-') else 'upload'
-                    self.cache._register(self.d.Principal(user, True), dataset, manifest, [user], None,
+                    self.cache._register(internal, dataset, manifest, [user], None,
                                          _origin=origin, _receipt=upload)
                     session['registrationIdentity'] = list(self.cache._record_identity(dataset, version))
                     self.save(session)

@@ -266,7 +266,7 @@ class DataWorkspaces:
             # Bind source and creation provenance in the same metadata commit.
             # An existing historical registration is never upgraded to personal
             # merely because its name/owner matches this workspace.
-            with cache._locked():
+            with cache._new_registration(internal,dataset,manifest,[user],source_id,origin='workspace',receipt=key,explicit=True),cache._locked():
                 registered = cache._register(internal, dataset, manifest, [user], source_id,
                                              _origin='workspace', _receipt=key)
             archive = None

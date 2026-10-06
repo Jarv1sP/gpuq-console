@@ -79,8 +79,11 @@ test('real authority grant used by two physical aliases is fully isolated before
   assert.ok(calls.slice(count).every(c=>c.op==='storage.dataset-delete.status'),'query never rewrites or replays any phase');
   assert.equal((await f.call('datasets.delete.restore',{operationId:r.first.operationId,machine:hosts[0]},admin)).state,'RESTORED');
   assert.equal((await bridge(hosts[0],'fixture.old-grant-denied',{...adminActor,grant})).denied,true);
-  for(const step of r.result.steps.filter(s=>s.machine===hosts[1]&&s.complete))
-    assert.equal(JSON.parse(await readFile(join(root,step.machine,'cache','.retirements',step.dataset,source.version+'.json'))).state,'ISOLATED');
+  for(const step of r.result.steps.filter(s=>s.machine===hosts[1]&&s.complete)){
+    assert.equal(JSON.parse(await readFile(join(root,step.machine,'cache','.retirements',step.dataset,source.version+'.json'))).state,'RESTORED');
+    assert.equal((await readFile(join(root,step.machine,'cache','ready',step.dataset,source.version,'data/train.txt'))).toString(),'actual complete recoverable bytes');
+    assert.equal((await f.service.bridge(step.machine,'datasets.prepare',{...sourceActor,dataset:step.dataset,version:source.version})).state,'READY');
+  }
 });
 
 test('actual local CLI restore is recognized through current journal even though old node isolate phase remains saved',async t=>{

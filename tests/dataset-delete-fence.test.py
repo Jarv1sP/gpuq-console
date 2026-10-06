@@ -100,12 +100,12 @@ class FenceTests(unittest.TestCase):
         self.fence()
         for actor, key, snapshot in ((ADMIN,self.key,self.snapshot),
                 (OWNER,str(uuid.uuid4()),self.snapshot), (OWNER,self.key,{**self.snapshot,'complete':False})):
-            with self.subTest(actor=actor,key=key), self.assertRaises(ValueError):
+            with self.subTest(actor=actor,key=key), self.assertRaisesRegex(ValueError,'锁定'):
                 with self.cache._retirement_scope(actor, key, 'sample', self.version, R.sha(snapshot)):
                     self.cache._record(OWNER, 'sample', self.version)
         with self.cache._retirement_scope(OWNER, self.key, 'sample', self.version, R.sha(self.snapshot)):
             self.assertEqual(self.cache._record(OWNER, 'sample', self.version)['manifest'], D._scan(self.base/'source'))
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError,'锁定'):
             self.cache._record(OWNER, 'sample', self.version)
 
     def test_new_lease_during_preflight_prevents_fence_and_every_move(self):
@@ -126,7 +126,7 @@ class FenceTests(unittest.TestCase):
                 snapshot = inspect(*args)
                 held.enter_context(self.cache._lock_file('.locks/sample.'+self.version+'.lock'))
                 return snapshot
-            with patch.object(self.retirement, 'inspect', side_effect=race), self.assertRaises(ValueError):
+            with patch.object(self.retirement, 'inspect', side_effect=race), self.assertRaisesRegex(ValueError,'cache is busy'):
                 self.fence()
             self.assertEqual(self.cache._retirement_fence('sample', self.version)['state'], 'FENCED')
             with self.assertRaisesRegex(ValueError, '锁定'):
@@ -141,7 +141,7 @@ class FenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '锁定'):
             with local.guard(ADMIN, proof):
                 self.fail('old original must not be readable through its grant')
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError,'锁定'):
             local.seal(ADMIN, 'sample', self.version, 'authority-new-use')
 
     def test_isolation_tombstone_survives_registry_removal_and_admin_restore_starts_new_generation(self):
@@ -151,7 +151,7 @@ class FenceTests(unittest.TestCase):
         result = self.retirement.restore(ADMIN, self.key)
         self.assertEqual(result['fenceState'], 'RESTORED')
         self.assertTrue(self.cache.acquire_lease(OWNER, 'sample', self.version, 'restored-job')['leaseId'])
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError,'restored generation'):
             self.retirement.isolate(OWNER, 'sample', self.version, self.key, self.snapshot)
 
     def test_corrupt_fence_or_wrong_root_is_never_interpreted_as_open(self):
@@ -160,16 +160,16 @@ class FenceTests(unittest.TestCase):
         row = D._read_json(path)
         for change in ({'rootIdentity':[0,0]}, {'state':'RESTORED'}, {'snapshotSha256':'bad'}):
             D._write_json(path, {**row, **change})
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError,'invalid identifier' if 'snapshotSha256' in change else 'corrupt'):
                 self.cache.plan(OWNER, 'sample', self.version)
         path.write_text('{broken')
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError,'corrupt'):
             self.cache.plan(OWNER, 'sample', self.version)
 
     def test_private_override_flags_cannot_arrive_via_dispatch(self):
         self.fence()
         for field in ('_read_only', '_retirement_scope', 'is_admin', 'operationId', 'retentionDays'):
-            with self.subTest(field=field), self.assertRaises(ValueError):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError,'unrecognized dataset request fields'):
                 self.cache.dispatch(OWNER, {'op':'plan', 'dataset':'sample', 'version':self.version, field:True})
 
 if __name__ == '__main__':

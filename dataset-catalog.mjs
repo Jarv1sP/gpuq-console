@@ -10,6 +10,8 @@ export const LAST_COPY_MESSAGE='这可能是这个版本的最后一份完整数
 // The legacy detached worker has RuntimeMaxSec=86400. Keep another hour for
 // launch/stop cleanup; a contract test parses its actual systemd-run definition.
 export const DATASET_REMOVAL_GRACE_MS=25*60*60*1000;
+// An in-process refusal cannot be forged by a serialized node/bridge error.
+export const DATASET_FENCE_REFUSAL=Symbol('portal.dataset-deletion-fence-refusal');
 const removalLanes=new WeakMap();
 const lastCopy=()=>Object.assign(Error(LAST_COPY_MESSAGE),{status:409,code:'LAST_COPY_UNPROVEN'});
 const complete=value=>value?.state==='READY'||value?.state===undefined&&value?.complete===true;
@@ -157,7 +159,18 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
         service.db.exec('COMMIT');
       }catch(error){service.db.exec('ROLLBACK');throw error;}
       checkPolicy();
-      const result=await dispatch();
+      let result;
+      try{
+        // Read-only version scope of this exact proof. Existing callbacks may
+        // ignore it; v1 nodes use it to reject newly added, unproved versions.
+        result=await dispatch(proof.map(row=>({version:row.version})));
+      }catch(error){
+        // Only our explicit Portal fence refusal proves zero node dispatch.
+        // Transport/worker/account failures keep the original M2 exclusions.
+        if(error.code==='DATASET_DELETION_FENCED'&&error[DATASET_FENCE_REFUSAL]===true)
+          service.db.prepare('DELETE FROM dataset_removal_exclusions WHERE request_id=? AND operation_id IS NULL').run(requestId);
+        throw error;
+      }
       if(HASH.test(result?.operationId||'')&&(result.dataset===undefined||result.dataset===dataset)&&(result.version===undefined||(result.version??null)===(version??null)))
         service.db.prepare('UPDATE dataset_removal_exclusions SET operation_id=? WHERE request_id=?').run(result.operationId,requestId);
       checkPolicy();return result;

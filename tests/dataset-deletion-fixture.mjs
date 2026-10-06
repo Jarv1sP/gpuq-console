@@ -25,6 +25,7 @@ export function fixture(t,{db,onlySource=true,options={}}={}){
       else if(op==='datasets.list')value={datasets:host===hosts[0]||!f.onlySource?[{dataset:'personal',versions:[{version,state:'READY'}]}]:[]};
       else if(phase==='capabilities')value={protocol:'dataset-delete-node-v1',machine:host,datasetDelete:f.cap};
       else if(phase==='locations')value={protocol:'dataset-delete-node-v1',machine:host,locations:[]};
+      else if(phase==='registration'){if(!f.registration)throw Error('No explicit new registration');value=structuredClone(f.registration);}
       else if(phase==='plan'){
         const complete=(host===hosts[0]||!f.onlySource)&&!f.missing;
         const plan={protocol:'dataset-delete-node-v1',operationId:args.operationId,machine:host,dataset:args.dataset,version:args.version,

@@ -130,7 +130,7 @@ class DatasetRetirement:
                   'createdAt', 'lastObservedAt', 'state', 'moves', 'dataIdentity', 'revocations', 'restoreRecordIdentity'}
         if (not isinstance(row, dict) or set(row) != fields or type(row['schema']) is not int or row['schema'] != 1
                 or row['protocol'] != PROTOCOL or row['operationId'] != operation(key) or row['machine'] != self.machine
-                or type(row['admin']) is not bool or row['state'] not in {'ISOLATING', 'ISOLATED', 'RESTORING', 'RESTORED', 'PURGING', 'PURGED'}
+                or type(row['admin']) is not bool or row['state'] not in {'ISOLATING', 'ISOLATED', 'RESTORING', 'RESTORED', 'PURGING', 'PURGED', 'ROLLING_BACK', 'ROLLED_BACK'}
                 or row['rootIdentity'] != list(self.cache._root_identity)
                 or row['mountIdentity'] != (list(self.cache.mount) if self.cache.mount is not None else None)
                 or type(row['retentionSeconds']) is not int or row['retentionSeconds'] < 7*86400
@@ -206,7 +206,7 @@ class DatasetRetirement:
         if row['dataIdentity'] is not None and (not stamp(row['dataIdentity'])
                 or row['dataIdentity'][:4] != (snap['readyIdentity'] or [])[:4]):
             raise D.CacheError('corrupt isolated payload identity')
-        if row['state'] != 'ISOLATING':
+        if row['state'] not in {'ISOLATING','ROLLING_BACK','ROLLED_BACK'}:
             required = {'registration'} | ({'ready'} if snap['complete'] else set())
             required |= {name for name in ('tier', 'provenance') if snap[name+'Identity'] is not None}
             if (not required <= set(row['moves']) or row['retainUntil'] is None
@@ -219,7 +219,12 @@ class DatasetRetirement:
         return row
 
     def _save(self, row):
-        row['lastObservedAt'] = self._now(row)
+        # Recovery never erases data or shortens retention. A clock correction
+        # must not strand rollback, while purge keeps strict clock checks.
+        if row['state'] in {'RESTORING','RESTORED','ROLLING_BACK','ROLLED_BACK'}:
+            row['lastObservedAt']=max(self._now(),row['lastObservedAt'])
+        else:
+            row['lastObservedAt'] = self._now(row)
         D._write_json(self._folder(row['operationId']) / 'RETIREMENT.json', row)
 
     def _permissions_locked(self, actor, dataset, version):
@@ -282,6 +287,7 @@ class DatasetRetirement:
             raise D.CacheError('persistent deletion generation changed; no mutation permitted')
         allowed = {'FENCED':{'ISOLATED'}, 'ISOLATED':{'RESTORING','PURGED'},
                    'RESTORING':{'RESTORED'}, 'RESTORED':set(), 'PURGED':set()}
+        if row['state']=='ROLLING_BACK':allowed['FENCED'].add('RESTORING')
         if state != previous['state'] and state not in allowed[previous['state']]:
             raise D.CacheError('invalid persistent deletion fence transition')
         current = dict(previous, state=state, restoredRegistration=restored)
@@ -349,7 +355,7 @@ class DatasetRetirement:
         for name in names:
             if re.fullmatch(r'retire-[a-f0-9]{32}',name):
                 prior=private_read(self.cache.root/'.trash'/name/'RETIREMENT.json')
-                if prior.get('version')==version and prior.get('state') not in {'RESTORED','PURGED'}:
+                if prior.get('version')==version and prior.get('state') not in {'RESTORED','PURGED','ROLLED_BACK'}:
                     add(prior['dataset'],prior['snapshot']['authorityReferences'])
             elif re.fullmatch(r'unregister-[a-f0-9]{32}',name):
                 removed=private_read(self.cache.root/'.trash'/name/'REMOVAL.json')
@@ -537,14 +543,15 @@ class DatasetRetirement:
             raise D.CacheError('retained full payload is missing')
         return record
 
-    def restore(self, actor, key, *, _cancel_uncommitted=False):
+    def restore(self, actor, key, *, _cancel_uncommitted=False, _source_recovery=False):
         """Administrator-only local restore; old grants are never reinstated."""
         self.cache._actor(actor, admin=True)
         row = self._journal(key)
         if type(_cancel_uncommitted) is not bool:raise D.CacheError('invalid private cancellation mode')
+        if type(_source_recovery) is not bool:raise D.CacheError('invalid private source recovery mode')
         # Only the authenticated node adapter can supply its own uncommitted
         # parent proof. Public restore retains the ordinary deadline.
-        allow_expired=bool(_cancel_uncommitted and self.collection_allowed is not None and self.collection_allowed(key) is False)
+        allow_expired=bool(_source_recovery or _cancel_uncommitted and self.collection_allowed is not None and self.collection_allowed(key) is False)
         original_actor = type(actor)(row['actor'], row['admin'])
         with self.cache._retirement_scope(original_actor, key, row['dataset'], row['version'], sha(row['snapshot'])):
             return self._restore(actor, key, allow_expired=allow_expired)
@@ -552,7 +559,7 @@ class DatasetRetirement:
     def _restore(self, actor, key, *, allow_expired=False):
         with self._lock(key):
             row = self._journal(key)
-            now = self._now(row)
+            now = self._now()
             if row['state'] == 'RESTORED':
                 with self.cache._locked():
                     if list(self.cache._record_identity(row['dataset'], row['version'])) != row['moves'].get('restore-registration'):
@@ -572,7 +579,7 @@ class DatasetRetirement:
                 if 'restore-ready' not in row['moves'] and exists(ready):
                     self._verify_payload(row)
                 with self.cache._locked():
-                    if row['state']=='ISOLATED' and not allow_expired and self._now(row) >= row['retainUntil']:
+                    if row['state']=='ISOLATED' and not allow_expired and self._now() >= row['retainUntil']:
                         raise D.CacheError('restore retention period expired during verification')
                     if self.cache._leases(dataset, version) or exists(paths['.staging']):
                         raise D.CacheError('restore refuses active users or unfinished writers')
@@ -622,6 +629,104 @@ class DatasetRetirement:
                     self._set_fence(row, 'RESTORED', row['moves']['restore-registration'])
             return self._receipt(row)
 
+    def rollback(self, actor, key):
+        """Undo only an interrupted local transaction; never invoke isolate.
+
+        Every original inode must be at exactly one of its fixed locations.
+        Full bytes are verified there before moving them back. Grants are not
+        read from peers or revoked here; a new registration leaves old grants
+        unusable, including ones revoked before the isolation was interrupted.
+        """
+        self.cache._actor(actor,admin=True)
+        with self._lock(key):
+            row=self._journal(key)
+            original=type(actor)(row['actor'],row['admin'])
+            dataset,version=row['dataset'],row['version']
+            with self.cache._retirement_scope(original,key,dataset,version,sha(row['snapshot'])),\
+                    self.cache._lock_file('.locks/'+dataset+'.'+version+'.lock'):
+                if row['state']=='ROLLED_BACK':
+                    with self.cache._locked():
+                        if identity(self.cache._paths(dataset)['.registry']/(version+'.json'))!=row['moves'].get('restore-registration'):
+                            raise D.CacheError('rollback registration changed; no replay permitted')
+                        self._set_fence(row,'RESTORED',row['moves']['restore-registration'])
+                    return self._receipt(row)
+                if row['state'] not in {'ISOLATING','ROLLING_BACK'}:
+                    raise D.CacheError('Only a fixed interrupted isolation can be rolled back')
+                folder=self._folder(key);snapshot=row['snapshot']
+                paths=self.cache._paths(dataset,version);registry=self.cache._paths(dataset)['.registry']
+                def located(live,retained,expected,directory=False):
+                    if expected is None:
+                        if exists(live) or exists(retained):raise D.CacheError('rollback found unplanned metadata')
+                        return None
+                    found=[p for p in (live,retained) if exists(p)]
+                    if len(found)!=1 or identity(found[0],directory)[:4]!=expected[:4]:
+                        raise D.CacheError('rollback refuses missing, replaced or ambiguous fixed data')
+                    return found[0]
+                record_path=registry/(version+'.json');retained_record=folder/'registration'/(version+'.json')
+                # A restored new registration plus the retained original is
+                # the only legal duplicate, after its identity was journaled.
+                new_live=bool(row['restoreRecordIdentity'] is not None and exists(record_path)
+                    and identity(record_path)[:4]==row['restoreRecordIdentity'][:4])
+                record_source=retained_record if new_live else located(record_path,retained_record,snapshot['registration'])
+                record=private_read(record_source)
+                if sha(D._manifest(record['manifest']))!=version:
+                    raise D.CacheError('rollback immutable manifest changed')
+                with self.cache._locked():
+                    metadata=self.cache._dataset(original,dataset)
+                    if metadata['owners']!=snapshot['owners'] or self.cache._leases(dataset,version) or exists(paths['.staging']):
+                        raise D.CacheError('rollback refuses changed owners or active data users')
+                ready=located(paths['ready'],folder/'payload'/'ready',snapshot['readyIdentity'],True)
+                if ready is not None and (not self.cache._ready({'ready':ready},record['manifest'],version)
+                        or D._scan(ready/'data')!=record['manifest']):
+                    raise D.CacheError('rollback full payload verification failed')
+                originals={}
+                for name,subdir in (('tier','.tiers'),('provenance','.provenance')):
+                    live=self.cache.root/subdir/dataset/(version+'.json')
+                    retained=folder/'metadata'/(name+'.json')
+                    # Once the new registration exists the final tier/proof
+                    # may already have been written by an interrupted rollback.
+                    if new_live and row['state']=='ROLLING_BACK':
+                        originals[name]=retained if exists(retained) else live
+                    else:
+                        originals[name]=located(live,retained,snapshot[name+'Identity'])
+                    value=private_read(originals[name]) if originals[name] is not None else self.cache._default_tier() if name=='tier' else None
+                    if not new_live and sha(value)!=snapshot[name+'Sha256']:
+                        raise D.CacheError('rollback fixed permission metadata changed')
+                row['state']='ROLLING_BACK';self._save(row)
+                with self.cache._locked():self._set_fence(row,'RESTORING')
+                for path in (folder/'registration',folder/'metadata'):private_directory(path)
+                prepared=folder/'metadata'/'rollback-registration.json'
+                if row['restoreRecordIdentity'] is None:
+                    if not exists(prepared):D._write_json(prepared,record)
+                    if private_read(prepared)!=record:raise D.CacheError('rollback pending registration changed')
+                    row['restoreRecordIdentity']=identity(prepared);self._save(row)
+                if not new_live and exists(record_path):
+                    # Preserve the exact original record before installing a
+                    # new generation. A pre-existing new record is never moved.
+                    self._move(row,'registration',record_path,retained_record,identity(record_path))
+                if snapshot['complete']:
+                    self._move(row,'restore-ready',folder/'payload'/'ready',paths['ready'],identity(ready,True),True)
+                for name,subdir in (('tier','.tiers'),('provenance','.provenance')):
+                    retained=folder/'metadata'/(name+'.json');live=self.cache.root/subdir/dataset/(version+'.json')
+                    if exists(retained) and not exists(live):
+                        D._mkdir(live.parent);self._move(row,name,retained,live,identity(retained))
+                self._move(row,'restore-registration',prepared,record_path,row['restoreRecordIdentity'])
+                tier=self.cache._tier(dataset,version)
+                tier['pins']={p:v for p,v in tier['pins'].items() if not p.startswith('authority-')}
+                tier['role'],tier['recovery']='protected',None
+                with self.cache._locked():
+                    self.cache._write_tier(dataset,version,tier)
+                    if snapshot['memberAllowed']:
+                        owner=type(actor)(metadata['owners'][0],True)
+                        proof=private_read(originals['provenance']) if originals['provenance'] is not None and exists(originals['provenance']) else None
+                        if proof is None or proof['origin'] not in {'upload','workspace','replica'}:
+                            raise D.CacheError('rollback personal provenance is unconfirmed')
+                        self.cache._write_provenance(owner,dataset,version,metadata['owners'],proof['origin'],key)
+                    else:self.cache._write_provenance(actor,dataset,version,metadata['owners'],'admin',None)
+                    row['state']='ROLLED_BACK';self._save(row)
+                    self._set_fence(row,'RESTORED',row['moves']['restore-registration'])
+                return self._receipt(row)
+
     @staticmethod
     def _writable_tree(path):
         def visit(fd):
@@ -658,7 +763,15 @@ class DatasetRetirement:
             now = self._now(row)
             if row['state'] == 'PURGED':
                 with self.cache._locked():
-                    self._set_fence(row,'PURGED')
+                    current=self.cache._retirement_fence(row['dataset'],row['version'])
+                    if current is None:
+                        raise D.CacheError('Purged generation lost its persistent fence')
+                    if current['operationId']==key and current['state']=='PURGED':
+                        self._set_fence(row,'PURGED')
+                    elif current['operationId']==key and current['state'] in {'RESTORED','RELEASED'}:
+                        pass  # Administrative recovery already released this history.
+                    elif current['createdAt']<=row['createdAt']:
+                        raise D.CacheError('Unconfirmed replacement of a purged generation')
                 return self._receipt(row)
             if row['state'] not in {'ISOLATED', 'PURGING'} or row['retainUntil'] is None or now < row['retainUntil']:
                 raise D.CacheError('confirmed complete isolation and expired retention are required')

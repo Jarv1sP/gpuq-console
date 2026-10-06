@@ -118,6 +118,8 @@ class RetirementRoutes(unittest.TestCase):
         self.assertTrue(result['phases']['fence']['ok'])
 
     def test_running_worker_status_does_not_wait_for_version_or_retirement_lock(self):
+        # Behavior-preservation coverage: this already passed on 1f95188.
+        # It is not claimed as an old-FAIL regression for phase retry.
         self.call('fence',operationId=self.key)
         node=self.node.dataset_retirement_node()
         with node.cache._lock_file('.locks/example.'+self.version+'.lock'),\

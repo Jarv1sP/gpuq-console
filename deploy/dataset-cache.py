@@ -39,6 +39,7 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -54,6 +55,7 @@ from typing import NamedTuple
 
 SCHEMA = 1
 _RETIREMENT_SCOPE = contextvars.ContextVar('dataset_retirement_scope', default=None)
+_REGISTRATION_SCOPE = contextvars.ContextVar('dataset_new_registration_scope', default=None)
 CHUNK_BYTES = 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 500000
@@ -479,7 +481,7 @@ class DatasetCache:
             if self.mount is not None and info.st_dev != self.mount[2]:
                 raise CacheError("cache no longer resides on the verified data mount")
             self._root_identity = info.st_dev, info.st_ino
-        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations", ".tiers", ".provenance", ".retirements"):
+        for name in (".registry", ".staging", "ready", ".leases", ".trash", ".locks", ".upload-reservations", ".tiers", ".provenance", ".retirements", ".reopens"):
             _mkdir(self.root / name)
 
     def _retirement_fence(self, dataset, version):
@@ -555,6 +557,112 @@ class DatasetCache:
             if not re.fullmatch(r'[a-f0-9]{64}\.json', name):
                 raise CacheError('unknown version deletion fence')
             self._check_retirement(dataset, name[:-5])
+
+    @staticmethod
+    def _retirement_module():
+        spec=importlib.util.spec_from_file_location('explicit_dataset_registration',Path(__file__).with_name('dataset-retirement.py'))
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module
+
+    def _reopen_path(self,dataset,version):
+        self._paths(dataset,version)
+        return self.root/'.reopens'/dataset/(version+'.json')
+
+    @contextlib.contextmanager
+    def _new_registration(self,actor,dataset,manifest,owners,source_id,*,origin='admin',receipt=None,explicit=False):
+        """Trusted explicit admission only; background imports keep the tombstone.
+
+        The new registry inode is prepared and persisted before any mutation.
+        Retrying the same admission can finish that inode, never adopt another
+        actor's registration. No public request accepts this private override.
+        Version lock precedes metadata lock, as in publish and retirement.
+        """
+        owners=self._provenance_actor(actor,owners,origin,receipt)
+        version=_version(_manifest(manifest));self._paths(dataset,version)
+        with self._lock_file('.locks/'+dataset+'.'+version+'.lock'):
+            with self._locked():
+                fence=self._retirement_fence(dataset,version)
+                if fence is None or fence['state'] in {'RESTORED','RELEASED'}:
+                    reopening=None
+                elif fence['state']!='PURGED' or not explicit or origin=='replica':
+                    self._check_retirement(dataset,version)
+                    reopening=None
+                else:
+                    R=self._retirement_module()
+                    raw=R.private_read(self.root/'.trash'/('retire-'+fence['operationId'].replace('-',''))/'RETIREMENT.json')
+                    old=R.DatasetRetirement(self,raw.get('machine'))._journal(fence['operationId'])
+                    if (old['state']!='PURGED' or old['dataset']!=dataset or old['version']!=version
+                            or R.sha(old['snapshot'])!=fence['snapshotSha256']
+                            or old['actor']!=fence['actor'] or old['admin']!=fence['admin']
+                            or R.exists(R.DatasetRetirement(self,old['machine'])._folder(fence['operationId'])/'payload/ready')):
+                        raise CacheError('The old generation has not been proven purged')
+                    current=self._dataset(actor,dataset)['owners']
+                    if current!=owners:
+                        raise PermissionError('Explicit registration must preserve authenticated dataset owners')
+                    if origin!='admin' and owners!=[actor.user_id]:
+                        raise PermissionError('Explicit personal registration belongs to another owner')
+                    folder=self.root/'.reopens'/dataset;_mkdir(folder)
+                    path=self._reopen_path(dataset,version)
+                    binding=dict(schema=1,protocol='dataset-new-registration-v1',rootIdentity=list(self._root_identity),
+                        dataset=dataset,version=version,operationId=fence['operationId'],generation=fence['generation'],
+                        snapshotSha256=fence['snapshotSha256'],actor=actor.user_id,owners=owners,
+                        origin=origin,receipt=receipt,sourceId=source_id)
+                    try:reopening=R.private_read(path)
+                    except FileNotFoundError:reopening=None
+                    prepared=folder/(version+'.registration.json')
+                    record=dict(schema=SCHEMA,manifest=_manifest(manifest),sourceId=source_id)
+                    if reopening is None:
+                        paths=self._paths(dataset,version)
+                        if (any(R.exists(p) for p in (paths['ready'],paths['.staging'],
+                                self._paths(dataset)['.registry']/(version+'.json'),
+                                self.root/'.tiers'/dataset/(version+'.json'),self.root/'.provenance'/dataset/(version+'.json')))
+                                or self._leases(dataset,version)):
+                            raise CacheError('Old generation still has live or unconfirmed metadata')
+                        if R.exists(prepared):
+                            raise CacheError('Unconfirmed new registration intent requires administrator reconciliation')
+                        _write_json(prepared,record)
+                        reopening={**binding,'registrationIdentity':list(_stamp(prepared.stat(follow_symlinks=False)))}
+                        _write_json(path,reopening)
+                    elif (not isinstance(reopening,dict) or set(reopening)!=set(binding)|{'registrationIdentity'}
+                            or any(reopening[k]!=v for k,v in binding.items())
+                            or not isinstance(reopening['registrationIdentity'],list) or len(reopening['registrationIdentity'])!=5
+                            or any(type(v) is not int or v<0 for v in reopening['registrationIdentity'])):
+                        raise CacheError('New registration admission differs from its durable immutable intent')
+                    registration=self._paths(dataset)['.registry']/(version+'.json')
+                    candidates=[p for p in (prepared,registration) if R.exists(p)]
+                    if (len(candidates)!=1 or R.identity(candidates[0])[:4]!=reopening['registrationIdentity'][:4]
+                            or R.private_read(candidates[0])!=record):
+                        raise CacheError('New registration inode changed; no overwrite or adoption permitted')
+                    if any(R.exists(p) for p in (self._paths(dataset,version)['ready'],self._paths(dataset,version)['.staging'])) or self._leases(dataset,version):
+                        raise CacheError('New registration admission has unexpected live data')
+            if reopening is None:
+                yield False
+            else:
+                original=Principal(fence['actor'],fence['admin'])
+                token=_REGISTRATION_SCOPE.set((tuple(self._root_identity),reopening))
+                try:
+                    with self._retirement_scope(original,fence['operationId'],dataset,version,fence['snapshotSha256']):
+                        yield True
+                finally:_REGISTRATION_SCOPE.reset(token)
+
+    def new_registration_proof(self,actor,dataset,version):
+        """Read-only private projection of the explicit replacement generation."""
+        with self._locked():
+            self._actor(actor);self._dataset(actor,dataset)
+            R=self._retirement_module();row=R.private_read(self._reopen_path(dataset,version))
+            fence=self._retirement_fence(dataset,version)
+            registered=list(self._record_identity(dataset,version))
+            provenance=self._provenance(dataset,version)
+            if (fence is None or fence['state']!='RESTORED' or row.get('protocol')!='dataset-new-registration-v1'
+                    or row.get('rootIdentity')!=list(self._root_identity)
+                    or any(row.get(k)!=fence[k] for k in ('operationId','generation','snapshotSha256','dataset','version'))
+                    or row.get('registrationIdentity')!=registered or fence['restoredRegistration']!=registered
+                    or provenance is None or any(provenance[k]!=row.get(k) for k in ('owners','origin','receipt'))
+                    or provenance['owners']!=self._dataset(actor,dataset)['owners']):
+                raise CacheError('Explicit new registration proof is unconfirmed')
+            return dict(protocol='dataset-new-registration-proof-v1',dataset=dataset,version=version,
+                operationId=row['operationId'],generation=row['generation'],snapshotSha256=row['snapshotSha256'],
+                registrationSha256=R.sha(registered),state='REGISTERED')
 
     def _current_mount(self):
         if self.mount_point is None or (self.mount_point == Path("/data2") and self.root == Path("/data2/datasets")):
@@ -867,7 +975,7 @@ class DatasetCache:
                 raise PermissionError("这份数据只能由管理员删除")
 
     @contextlib.contextmanager
-    def _retention_guard(self, actor, dataset, version, *, _confirm_only=False):
+    def _retention_guard(self, actor, dataset, version, *, _confirm_only=False, _portal_proved=False):
         """Only a live protected READY authority makes complete data disposable.
 
         sourceId, ownership, an old recovery JSON, and successful transfer alone
@@ -916,6 +1024,10 @@ class DatasetCache:
                         # writable, or deleted some files. Never dispose of its
                         # remaining bytes without the original's live guard.
                         complete = True
+        if _portal_proved:
+            self._actor(actor,admin=True)
+            yield True
+            return
         if not complete:
             yield False
             return
@@ -950,6 +1062,12 @@ class DatasetCache:
             _write_json(paths[".registry"] / "dataset.json", dict(schema=SCHEMA, owners=owners))
         filename = paths[".registry"] / (version + ".json")
         record = dict(schema=SCHEMA, manifest=manifest, sourceId=source_id)
+        scope=_REGISTRATION_SCOPE.get()
+        admission=scope[1] if scope is not None and scope[0]==tuple(self._root_identity) else None
+        if admission is not None and (admission['dataset']!=dataset or admission['version']!=version
+                or admission['actor']!=actor.user_id or admission['owners']!=owners
+                or admission['origin']!=_origin or admission['receipt']!=_receipt or admission['sourceId']!=source_id):
+            raise CacheError('Explicit registration differs from its admitted generation')
         try:
             existing = self._record(actor, dataset, version)
         except FileNotFoundError:
@@ -958,7 +1076,11 @@ class DatasetCache:
             if self._tier(dataset, version)["pins"]:
                 raise CacheError("orphan persistent pins require administrator reconciliation")
             self._write_tier(dataset, version, self._default_tier())
-            _write_json(filename, record)
+            if admission is None:_write_json(filename, record)
+            else:
+                self._unregister_move_record(self.root/'.reopens'/dataset/(version+'.registration.json'),filename)
+                admission['registrationIdentity']=list(self._record_identity(dataset,version))
+                _write_json(self._reopen_path(dataset,version),admission)
             self._write_provenance(actor, dataset, version, owners, _origin, _receipt)
         else:
             if existing["manifest"] != manifest:
@@ -969,6 +1091,19 @@ class DatasetCache:
                 _write_json(filename, record)
             elif source_id is not None and existing["sourceId"] != source_id:
                 raise CacheError("registered source is immutable")
+            if admission is not None:
+                registered=list(self._record_identity(dataset,version))
+                if registered[:4]!=admission['registrationIdentity'][:4]:
+                    raise CacheError('Explicit registration cannot adopt another inode')
+                admission['registrationIdentity']=registered
+                _write_json(self._reopen_path(dataset,version),admission)
+                self._write_provenance(actor,dataset,version,owners,_origin,_receipt)
+        if admission is not None:
+            fence=self._retirement_fence(dataset,version)
+            if (fence['state']!='PURGED' or any(fence[k]!=admission[k] for k in ('operationId','generation','snapshotSha256'))):
+                raise CacheError('Explicit registration deletion generation changed')
+            _write_json(self.root/'.retirements'/dataset/(version+'.json'),
+                {**fence,'state':'RESTORED','restoredRegistration':admission['registrationIdentity']})
         return dict(dataset=dataset, version=version, bytes=sum(f["size"] for f in manifest["files"]), files=len(manifest["files"]))
 
     def register_source(self, actor, dataset, source_id, owners):
@@ -979,12 +1114,14 @@ class DatasetCache:
         if source_id not in self.sources:
             raise PermissionError("source ID has not been approved in administrator configuration")
         manifest = _scan(self.sources[source_id])
-        with self._locked():
+        with self._new_registration(actor,dataset,manifest,owners,source_id,explicit=True),self._locked():
             return self._register(actor, dataset, manifest, owners, source_id)
 
-    def register_manifest(self, actor, dataset, manifest, owners):
+    def register_manifest(self, actor, dataset, manifest, owners, *, _explicit=False):
         """Administrator imports a manifest delivered by a trusted source node."""
-        with self._locked():
+        if not _explicit:
+            with self._locked():return self._register(actor,dataset,manifest,owners,None)
+        with self._new_registration(actor,dataset,manifest,owners,None,explicit=_explicit),self._locked():
             return self._register(actor, dataset, manifest, owners, None)
 
     def attach_source(self, actor, dataset, version, source_id):
@@ -2107,7 +2244,7 @@ class DatasetCache:
                 with _directory(parent) as fd:
                     os.fsync(fd)
 
-    def unregister(self, actor, dataset, version=None, *, _guard=None, _expected_registration=None, _expected_owners=None):
+    def unregister(self, actor, dataset, version=None, *, _guard=None, _expected_registration=None, _expected_owners=None, _portal_proved_versions=None):
         """Source-proven personal or administrator registration removal.
 
         Internal transfers and leases share these locks. As with evict/publish,
@@ -2116,6 +2253,12 @@ class DatasetCache:
         cleanup journal. Original configured source directories are never touched.
         """
         self._actor(actor, admin=version is None)
+        if _portal_proved_versions is not None:
+            self._actor(actor,admin=True)
+            if (not isinstance(_portal_proved_versions,list) or not _portal_proved_versions
+                    or len(_portal_proved_versions)>10000 or any(not isinstance(v,str) or not HASH_RE.fullmatch(v) for v in _portal_proved_versions)
+                    or len(set(_portal_proved_versions))!=len(_portal_proved_versions)):
+                raise CacheError('invalid exact Portal-proved complete-copy versions')
         self._paths(dataset, version)
         if _expected_registration is not None and (version is None or not isinstance(_expected_registration, list)
                 or len(_expected_registration) != 5 or any(type(item) is not int or item < 0 for item in _expected_registration)):
@@ -2137,6 +2280,8 @@ class DatasetCache:
         if initial is None:
             return dict(dataset=dataset, version=version, versions=[], unregistered=False,
                         registrationRetained=False, recoveryId=None)
+        if _portal_proved_versions is not None and not set(initial['versions'])<=set(_portal_proved_versions):
+            raise CacheError('Portal proof does not cover every current version; no removal permitted')
 
         def recheck():
             if _guard is not None:
@@ -2160,7 +2305,7 @@ class DatasetCache:
             # cached receipt must never make the last complete copy disposable.
             protected = {}
             for item in initial["versions"]:
-                protected[item] = locks.enter_context(self._retention_guard(actor, dataset, item))
+                protected[item] = locks.enter_context(self._retention_guard(actor, dataset, item,_portal_proved=_portal_proved_versions is not None))
             # Never wait on a version lock while holding the global lock: active
             # materialize/publish need global metadata access before releasing it.
             for item in initial["versions"]:
@@ -2232,6 +2377,7 @@ class DatasetCache:
         if set(request) != fields | {"op"}:
             raise CacheError("missing or unrecognized dataset request fields")
         args = {key: request[key] for key in fields}
+        if request['op']=='register_manifest':args['_explicit']=True  # privileged local CLI, never a peer import
         for key, replacement in (("sourceId", "source_id"), ("jobId", "job_id"), ("leaseId", "lease_id")):
             if key in args:
                 args[replacement] = args.pop(key)
