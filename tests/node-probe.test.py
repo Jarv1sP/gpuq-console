@@ -123,6 +123,18 @@ class Probe(unittest.TestCase):
             with patch.object(self.probe,'helper_source',return_value=bad):self.assertNotIn('console-task-display-v1',self.run_probe()['gpuq']['capabilities'])
         self.outputs['gpuq']=json.dumps({'daemon':{'capabilities':None},'jobs':[]})
         self.assertTrue(self.run_probe()['gpuq']['connected']);self.assertNotIn('console-task-display-v1',self.run_probe()['gpuq']['capabilities'])
+    def test_task_display_is_a_bounded_plain_text_allowlist(self):
+        metadata={'name':'DUM-E｜插接训练','description':'第一行\n第二行',
+                  'submitter':{'name':'张三','username':'alice'}}
+        job={'id':'J1','name':'portal-raw','owner':'internal-owner','display_metadata':metadata,'argv':['PRIVATE']}
+        self.outputs['gpuq']=json.dumps({'daemon':{'health':'ok'},'jobs':[job]})
+        out=self.run_probe()['gpuq']['jobs'][0]
+        self.assertEqual(out['display_metadata'],metadata);self.assertEqual(out['name'],'portal-raw');self.assertNotIn('argv',out)
+        for broken in ({**metadata,'argv':['PRIVATE']},{**metadata,'name':'\u202eunsafe'},
+                       {**metadata,'description':None},{**metadata,'name':'😀'*65},
+                       {**metadata,'submitter':{**metadata['submitter'],'role':'admin'}}):
+            self.outputs['gpuq']=json.dumps({'daemon':{'health':'ok'},'jobs':[{**job,'display_metadata':broken}]})
+            self.assertNotIn('display_metadata',self.run_probe()['gpuq']['jobs'][0])
 
     def test_host_command_requires_matching_safe_helpers_and_sudo_policy(self):
         self.probe.CONFIG['hostRoot'] = True

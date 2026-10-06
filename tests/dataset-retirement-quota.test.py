@@ -26,7 +26,9 @@ class RetirementQuota(unittest.TestCase):
 
     def test_fenced_isolated_and_restoring_bytes_are_never_refunded_as_missing_registration(self):
         session=self.publish();actor=F.D.Principal(self.user);clock=[1000.]
-        retention=R.DatasetRetirement(self.cache,'test-node',clock=lambda:clock[0]);key=str(uuid.uuid4())
+        # The quota fixture owns its fake clock; it must not consult the real
+        # host's NTP state. NTP refusal is covered by dataset-retirement tests.
+        retention=R.DatasetRetirement(self.cache,'test-node',clock=lambda:clock[0],clock_synchronized=lambda:True);key=str(uuid.uuid4())
         snap=retention.inspect(actor,session['dataset'],session['version'])
         retention.fence(actor,session['dataset'],session['version'],key,snap)
         with self.cache._locked():self.assertEqual(self.u.retire_unregistered(session),session)
@@ -46,7 +48,7 @@ class RetirementQuota(unittest.TestCase):
 
     def test_only_exact_purged_registration_allows_reservation_reclamation(self):
         session=self.publish();actor=F.D.Principal(self.user);clock=[1000.]
-        retention=R.DatasetRetirement(self.cache,'test-node',clock=lambda:clock[0]);key=str(uuid.uuid4())
+        retention=R.DatasetRetirement(self.cache,'test-node',clock=lambda:clock[0],clock_synchronized=lambda:True);key=str(uuid.uuid4())
         snap=retention.inspect(actor,session['dataset'],session['version']);retention.isolate(actor,session['dataset'],session['version'],key,snap)
         clock[0]+=7*86400+1;retention.purge(F.D.Principal('builtin-admin',True),key)
         with self.cache._locked(),self.assertRaisesRegex(ValueError,'generation'):
