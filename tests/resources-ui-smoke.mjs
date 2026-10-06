@@ -10,6 +10,7 @@ import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {accountMenu,refreshVisible} from './starbase-workflows.mjs';
 import {resourceCard,resourceDetail,selectResource,closeResource} from './resources-workflows.mjs';
+import {assertResourceNames} from './resource-name-assertions.mjs';
 
 const directory=await mkdtemp(join(tmpdir(),'starbase-resources-'));
 const screenshots=process.env.UI_SCREENSHOTS||join(directory,'screenshots');
@@ -108,7 +109,7 @@ try{
   assert.deepEqual(await page.locator('.resource-process-table th').allTextContents(),['GPU','PID','任务 / 提交者 / 描述','显存 MiB','优先级']);
   for(const hidden of [privateProgram,privateOwner,'private-native-job'])assert.ok(!(await page.locator('#machine-grid').textContent()).includes(hidden),hidden);
   assert.equal((await page.evaluate(()=>resourceAnimations)).length,0,'The first sample must be settled');
-  const capture=async name=>{await page.waitForFunction(()=>!document.querySelector('#toast').classList.contains('visible')&&!document.querySelector('.object-transition-layer'));await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});await page.screenshot({path:join(screenshots,name+'-full.png'),fullPage:true,animations:'disabled'});};
+  const capture=async name=>{await page.waitForFunction(()=>!document.querySelector('#toast').classList.contains('visible')&&!document.querySelector('.object-transition-layer'));if(await page.locator('#page-resources').isVisible())await assertResourceNames(page,'#page-resources');if(await page.locator('#admin-frame').isVisible())await assertResourceNames(page,'#admin-content');await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});await page.screenshot({path:join(screenshots,name+'-full.png'),fullPage:true,animations:'disabled'});};
   const desktop=await page.evaluate(()=>({height:document.documentElement.scrollHeight,heroBottom:document.querySelector('.resource-fleet').getBoundingClientRect().bottom,primaryBottom:document.querySelector('#resource-primary').getBoundingClientRect().bottom,layout:[...document.querySelectorAll('.resource-portrait,.resource-mini-fleet,.resource-mini,.resource-legend,.resource-fleet-actions')].map(element=>({class:element.className,top:element.getBoundingClientRect().top,bottom:element.getBoundingClientRect().bottom,position:getComputedStyle(element).position}))}));
   await capture('resources-member-1440');
   assert.ok(desktop.height<=2200,JSON.stringify(desktop));assert.ok(desktop.heroBottom<=900&&desktop.primaryBottom<=900,JSON.stringify(desktop));

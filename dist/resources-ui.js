@@ -112,6 +112,52 @@ export function monitorSummary(snapshot,production){
   return snapshot.stale?'采集已过期':'更新于 '+clock(snapshot.checkedAt);
 }
 
+// Keep the final two ID segments: adjacent servers often differ only there.
+// The inventory value and accessible button name remain the complete ID.
+export function compactResourceId(id,fits){
+  id=String(id);
+  if(fits(id))return id;
+  const parts=id.split('-'),suffix=parts.slice(parts.length>2?-2:-1).join('-');
+  const prefix=id.slice(0,id.length-suffix.length);
+  for(let length=prefix.length-1;length>=0;length--){
+    const candidate=prefix.slice(0,length)+'…'+suffix;
+    if(fits(candidate))return candidate;
+  }
+  return '…'+suffix;
+}
+
+export function fitResourceNames(root){
+  function fit(label,compact=false){
+    const button=label.parentElement,full=label.title;
+    if(!button?.clientWidth)return true;
+    label.textContent=full;label.classList.remove('resource-id-wrap');
+    button.style.removeProperty('font-size');
+    const arrow=button.querySelector('.resource-swap-arrow');
+    const available=button.clientWidth-(arrow?arrow.getBoundingClientRect().width+parseFloat(getComputedStyle(arrow).marginLeft):0)-1;
+    const range=label.ownerDocument.createRange();
+    const width=()=>{range.selectNodeContents(label);return range.getBoundingClientRect().width;};
+    let size=label.closest('.resource-portrait')?160:parseFloat(getComputedStyle(button).fontSize);
+    button.style.fontSize=size+'px';
+    size=Math.max(20,Math.min(size,Math.floor(size*available/Math.max(1,width()))));
+    button.style.fontSize=size+'px';
+    while(size>20&&width()>available)button.style.fontSize=--size+'px';
+    if(width()<=available)return true;
+    if(compact){
+      label.textContent=compactResourceId(full,value=>{label.textContent=value;return width()<=available;});
+      // Exceptionally long suffixes wrap rather than clipping their identity.
+      label.classList.toggle('resource-id-wrap',width()>available);
+    }
+    return false;
+  }
+  for(const fleet of root.querySelectorAll('.resource-fleet')){
+    fleet.classList.remove('resource-names-below');
+    const labels=[...fleet.querySelectorAll('.resource-id-label')];
+    const overflow=labels.map(label=>!fit(label));
+    if(labels.some((label,index)=>overflow[index]&&label.closest('.resource-mini')))fleet.classList.add('resource-names-below');
+    for(const label of labels)fit(label,true);
+  }
+}
+
 export function resourcesUI(store,{machines,getPage,navigate}){
   const grid=document.querySelector('#machine-grid'),phone=()=>matchMedia('(max-width:759px)').matches;
   const primary=document.createElement('button');primary.id='resource-primary';primary.type='button';primary.className='button primary';primary.hidden=true;document.querySelector('.heading-actions').prepend(primary);
@@ -120,19 +166,7 @@ export function resourcesUI(store,{machines,getPage,navigate}){
   sheet.innerHTML='<header class="sheet-header glass"><h2 id="resource-sheet-title">服务器详情</h2><select data-resource-gpu-picker aria-label="选择显卡"></select><button type="button" class="button quiet" data-resource-back>返回算力</button></header><div class="sheet-scroll"></div><footer class="sheet-footer glass"><button type="button" class="button primary" id="resource-sheet-work"></button></footer>';
   document.body.append(sheet);
   let actor=null,selected=null,levels=new Map(),readings=new Map();const expanded=new Map(),selectedGPUs=new Map();
-  let fittedIdentity=null,fittedKey='';
-  function fitIdentity(force=false){
-    const heading=grid.querySelector('.resource-identity'),label=heading?.querySelector('.resource-id-label'),button=label?.parentElement;
-    if(!label||!button.clientWidth)return;
-    const width=button.clientWidth,key=width+'|'+label.textContent+'|'+phone();
-    if(!force&&fittedIdentity===heading&&fittedKey===key)return;
-    heading.style.fontSize='160px';
-    const minimum=phone()?40:56;
-    let size=Math.max(minimum,Math.min(160,Math.floor(160*(width-1)/Math.max(1,label.scrollWidth))));
-    heading.style.fontSize=size+'px';
-    while(size>minimum&&label.scrollWidth>width)heading.style.fontSize=--size+'px';
-    fittedIdentity=heading;fittedKey=key;
-  }
+  const fitIdentity=()=>fitResourceNames(grid);
   const identityResize=new ResizeObserver(()=>fitIdentity());identityResize.observe(grid);
   document.fonts?.addEventListener('loadingdone',()=>fitIdentity(true));
   const identity=()=>store.principal?store.principal.userId+'|'+store.principal.role:null;

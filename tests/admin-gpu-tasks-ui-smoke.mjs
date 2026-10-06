@@ -11,6 +11,7 @@ const MACHINES=process.env.UI_INVENTORY?JSON.parse(await readFile(process.env.UI
 import {guardedRoute} from './browser-route-guard.mjs';
 import {layoutWidths,layoutHeights,layoutZooms} from './layout-geometry.mjs';
 import {inspectOperationalGeometry,scanOperationalGeometry} from './operational-geometry.mjs';
+import {assertResourceNames} from './resource-name-assertions.mjs';
 
 const full=process.argv.includes('--full-scan'),output=join(process.env.UI_SCREENSHOTS||'/tmp/stargate-admin','admin-tasks');
 const temporary=await mkdtemp(join(tmpdir(),'admin-console-')),password='Local-Admin-Console-2026!';
@@ -32,6 +33,7 @@ const settle=page=>page.evaluate(async()=>{await document.fonts.ready;for(const 
 async function capture(page,name,roomSpec=spec){
   for(const width of [1440,1024,390,320]){
     await page.setViewportSize({width,height:width<760?844:900});await page.mouse.move(0,0);await settle(page);
+    if(name==='admin-gpu-tasks')await assertResourceNames(page,'#admin-content');
     const result=await inspectOperationalGeometry(page,roomSpec);geometry.push({name,width,...result});
     assert.deepEqual(result.failures,[],name+' '+width+' geometry');
     await page.screenshot({path:join(output,name+'-'+width+'.png'),animations:'disabled'});
@@ -99,6 +101,13 @@ try{
       await page.locator('[data-nav=resources]').click();
       assert.equal(await page.locator('#page-resources [data-resource-root]').count(),0);
       assert.ok(!(await page.locator('#page-resources').innerText()).includes('PRIVATE-PROGRAM'));
+      for(const width of [1440,1024,390,320]){
+        await page.setViewportSize({width,height:width<760?844:900});await settle(page);
+        await assertResourceNames(page,'#page-resources');
+        assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+        await page.screenshot({path:join(output,role+'-compute-'+width+'.png'),animations:'disabled'});
+      }
+      await page.setViewportSize({width:1440,height:900});await settle(page);
       await page.evaluate(()=>location.hash='#admin/tasks');
       if(role==='member'){
         await page.locator('#admin-denied').waitFor({state:'visible'});
@@ -118,6 +127,22 @@ try{
         assert.equal(await page.locator('#all-jobs [data-job-priority]').count(),0);
         await page.locator('[data-admin-owner]').selectOption('');await page.locator('[data-admin-state]').selectOption('active');
         await capture(page,'admin-gpu-tasks');
+        await page.setViewportSize({width:1440,height:900});await settle(page);
+        // Exercise the measured fallback with synthetic IDs, never real assets.
+        const fallback=await page.evaluate(async()=>{
+          const {fitResourceNames}=await import('/resources-ui.js');
+          const labels=[...document.querySelectorAll('#admin-content .resource-mini .resource-id-label')];
+          const titles=labels.map(label=>label.title);
+          labels.forEach((label,index)=>label.title='fixture-'+('long-id-'.repeat(12))+'model-'+index.toString().padStart(2,'0'));
+          fitResourceNames(document.querySelector('.admin-gpu-fleet'));
+          const result={below:document.querySelector('#admin-content .resource-fleet').classList.contains('resource-names-below'),names:labels.map(label=>({text:label.textContent,title:label.title}))};
+          labels.forEach((label,index)=>label.title=titles[index]);fitResourceNames(document.querySelector('.admin-gpu-fleet'));
+          return result;
+        });
+        assert.equal(fallback.below,true,'Names that cannot fit at 20px move the fleet below the chassis before shortening');
+        for(const name of fallback.names){assert.ok(name.text.includes('…'));assert.ok(name.text.endsWith(name.title.split('-').slice(-2).join('-')));}
+        assert.equal(new Set(fallback.names.map(name=>name.text)).size,fallback.names.length);
+        await assertResourceNames(page,'#admin-content');
         const before=requests.filter(row=>row.operation.startsWith('terminal.')).length;
         await page.locator('[data-resource-root]').click();page.once('dialog',dialog=>dialog.dismiss());await page.locator('#terminal-root-open').click();
         assert.equal(requests.filter(row=>row.operation.startsWith('terminal.')).length,before,'root refusal sends no request');

@@ -1,4 +1,4 @@
-import {resourceCards} from './resources-ui.js';
+import {resourceCards,fitResourceNames} from './resources-ui.js';
 import {renderTaskTable} from './execution-ui.js';
 import {endedJob,serverIdHTML,personalQuotaReadout} from './workbench-ui.js';
 import {maintenanceFor} from './maintenance-state.js';
@@ -42,8 +42,7 @@ export function registerGpuTasksAdmin(register){
         for(const row of fleet.querySelectorAll('[data-resource-card-count]'))row.style.setProperty('--gpu-count',row.dataset.resourceCardCount);
         for(const row of fleet.querySelectorAll('[data-resource-level]'))row.style.height=row.dataset.resourceLevel+'%';
       }
-      const label=fleet.querySelector('.resource-identity'),text=label?.querySelector('.resource-id-label'),button=text?.parentElement;
-      if(label&&button?.clientWidth){label.style.fontSize='160px';label.style.fontSize=Math.max(20,Math.min(160,Math.floor(160*(button.clientWidth-1)/Math.max(1,text.scrollWidth))))+'px';}
+      fitResourceNames(fleet);
       if(host){host.hidden=false;host.querySelector('#host-terminal-target').textContent=selected||'暂无服务器';for(const button of host.querySelectorAll('button'))button.disabled=!selected||!store.production||store.data?.executionEnabled!==true;}
       q('[data-admin-submit]').disabled=!selected||store.data?.executionEnabled!==true||!!maintenanceFor(store.data?.operationalMaintenance,selected);
       const approvals=controlSnapshot(store).approvals;q('.admin-task-approvals').hidden=!approvals.length;q('.admin-task-approvals').innerHTML=`<span>待审批 ${approvals.length} 人</span><a class="button quiet" href="${document.querySelector('[data-admin-section=members]')?'#admin/members':'#users'}">去审批</a>`;
@@ -66,6 +65,7 @@ export function registerGpuTasksAdmin(register){
     },{signal});
     document.addEventListener('gpuq-terminal-state',event=>{if(permitted()){sessions=event.detail?.sessions||[];render();}},{signal});
     const observer=new ResizeObserver(render);observer.observe(fleet);signal.addEventListener('abort',()=>observer.disconnect(),{once:true});
+    document.fonts?.addEventListener('loadingdone',render,{signal});
     ctx.subscribe(render);document.dispatchEvent(new CustomEvent('gpuq-terminal-state-request'));
   }});
 }
