@@ -38,9 +38,9 @@ test('quota ledger excludes foreign, preparing and ended jobs while unknown and 
 });
 test('administrator quota readouts preserve queued demand above inventory without painting a personal ceiling',()=>{
   const user={id:'owner',role:'admin',enabled:true,total:8,limits:{'gpu-1':8}};
-  assert.deepEqual(personalQuotaReadout(user,31),{exempt:true,label:'请求卡数',value:'31',note:'免个人额度'});
+  assert.deepEqual(personalQuotaReadout(user,31),{exempt:true,label:'不限个人额度',value:'31',note:''});
   const store={principal:{userId:user.id,role:'admin'},users:[user],usage:()=>31,jobs:[{id:'queued',userId:user.id,machine:'gpu-1',state:'PENDING',cards:1}]};
-  const html=quotaLedgerHTML(store,'gpu-1');assert.match(html,/我的用卡请求/);assert.match(html,/免个人额度 · 资源不足正常排队/);assert.match(html,/31 <small>张/);assert.match(html,/排队请求/);assert.doesNotMatch(html,/31 \/ 8|累计上限|没有占用额度/);
+  const html=quotaLedgerHTML(store,'gpu-1');assert.match(html,/不限个人额度/);assert.match(html,/不限个人额度 · 资源不足正常排队/);assert.match(html,/31 <small>张/);assert.match(html,/排队请求/);assert.doesNotMatch(html,/31 \/ 8|累计上限|没有占用额度/);
   user.role='member';assert.deepEqual(personalQuotaReadout(user,31),{exempt:false,label:'占用额度 / 上限',value:'31 / 8',note:''});assert.match(quotaLedgerHTML(store,'gpu-1'),/31 \/ 8/);
   user.role='admin';user.enabled=false;assert.equal(personalQuotaReadout(user,31).exempt,false,'stale principal role cannot grant a disabled user an exemption');
 });

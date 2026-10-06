@@ -171,8 +171,10 @@ export function parseTrainingCommand(text,machines=[]){
 }
 export function personalQuotaReadout(user,usage,limit=user?.total){
   const number=value=>Number.isSafeInteger(value)&&value>=0?String(value):'—';
-  const exempt=user?.enabled===true&&user.role==='admin';
-  return {exempt,label:exempt?'请求卡数':'占用额度 / 上限',value:exempt?number(usage):`${number(usage)} / ${number(limit)}`,note:exempt?'免个人额度':''};
+  // STARGATE 功能与接口手册（2026-10-07）：启用管理员的 shared/独占/AUTO 免个人累计额度。
+  // An explicit backend flag overrides the documented role fallback; it never enables a disabled account.
+  const exempt=user?.enabled===true&&(typeof user.personalCardQuotaExempt==='boolean'?user.personalCardQuotaExempt:user.role==='admin');
+  return {exempt,label:exempt?'不限个人额度':'占用额度 / 上限',value:exempt?number(usage):`${number(usage)} / ${number(limit)}`,note:''};
 }
 export function quotaLedgerHTML(store,machine=''){
   const user=store.users.find(row=>row.id===store.principal?.userId);if(!user)return '';
@@ -182,7 +184,7 @@ export function quotaLedgerHTML(store,machine=''){
   const usage=store.usage(user.id,machine||undefined),limit=machine?user.limits?.[machine]:user.total,total=store.usage(user.id);
   const readout=personalQuotaReadout(user,usage,limit),totalReadout=personalQuotaReadout(user,total);
   if(readout.exempt)groups.forEach(group=>{if(group.label==='排队占用')group.label='排队请求';});
-  return `<section class="wb-ledger" id="quota-ledger" aria-labelledby="quota-ledger-title"><div class="wb-ledger-head"><h2 id="quota-ledger-title">${readout.exempt?'我的用卡请求':'我的额度'}</h2>${infoHTML(readout.exempt?'管理员免个人累计卡数额度。这里统计运行、启动、待确认和排队请求，不代表实际占卡；资源不足正常排队，不自动抢停他人任务。':'占用数来自任务记录，排队也计入。准备数据暂不占额度；服务器确认结束后才释放。',readout.exempt?'用卡请求来源':'额度来源')}${machine?serverIdHTML(machine,'mono'):'<span class="mono">全部服务器</span>'}<strong>${readout.value} <small>张</small></strong></div>${readout.exempt?'<div class="wb-ledger-total">免个人额度 · 资源不足正常排队</div>':''}${machine?`<div class="wb-ledger-total">合计 ${totalReadout.value} 张</div>`:''}<div class="wb-ledger-groups">${groups.map(group=>`<details><summary><span>${group.label}</span><strong>${group.rows.every(job=>Number.isSafeInteger(job.cards)&&job.cards>=0)?group.rows.reduce((sum,job)=>sum+job.cards,0):'—'} <small>张</small></strong></summary><ul>${group.rows.map(job=>`<li><button class="button quiet" type="button" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button><span class="mono">${number(job.cards)} 张</span></li>`).join('')}</ul></details>`).join('')||'<span class="muted">'+(readout.exempt?'没有进行中的用卡请求':'没有占用额度')+'</span>'}</div></section>`;
+  return `<section class="wb-ledger" id="quota-ledger" aria-labelledby="quota-ledger-title"><div class="wb-ledger-head"><h2 id="quota-ledger-title">${readout.exempt?'不限个人额度':'我的额度'}</h2>${infoHTML(readout.exempt?'管理员免个人累计卡数额度。这里统计运行、启动、待确认和排队请求，不代表实际占卡；资源不足正常排队，不自动抢停他人任务。':'占用数来自任务记录，排队也计入。准备数据暂不占额度；服务器确认结束后才释放。',readout.exempt?'用卡请求来源':'额度来源')}${machine?serverIdHTML(machine,'mono'):'<span class="mono">全部服务器</span>'}<strong>${readout.exempt?'<small>已占用 </small>':''}${readout.value} <small>张</small></strong></div>${readout.exempt?'<div class="wb-ledger-total">不限个人额度 · 资源不足正常排队</div>':''}${machine?`<div class="wb-ledger-total">合计 ${totalReadout.value} 张</div>`:''}<div class="wb-ledger-groups">${groups.map(group=>`<details><summary><span>${group.label}</span><strong>${group.rows.every(job=>Number.isSafeInteger(job.cards)&&job.cards>=0)?group.rows.reduce((sum,job)=>sum+job.cards,0):'—'} <small>张</small></strong></summary><ul>${group.rows.map(job=>`<li><button class="button quiet" type="button" data-job-detail="${escapeUI(job.id)}">${escapeUI(job.name||'训练')}</button><span class="mono">${number(job.cards)} 张</span></li>`).join('')}</ul></details>`).join('')||'<span class="muted">'+(readout.exempt?'没有进行中的用卡请求':'没有占用额度')+'</span>'}</div></section>`;
 }
 export function boundarySweep(element){
   const line=element?.querySelector('.r5-boundary-line');if(!line)return;
