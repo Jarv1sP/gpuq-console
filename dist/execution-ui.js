@@ -206,11 +206,11 @@ export function executionUI(store,refresh,toast){
     for(const name of ['command','datasets']){const label=train.querySelector('[name='+name+']')?.closest('label');fieldHelp(label?.nextElementSibling?.querySelector('.ui-info-content'),label?.querySelector('textarea'));}
     for(const label of train.querySelectorAll('label')){
       const help=label.querySelector(':scope>.ui-info'),control=label.querySelector(':scope>:is(input,select,textarea)');
-      if(!help||!control)continue;
+      if(!control||(!help&&!label.parentElement.matches('.train-grid')))continue;
       const caption=document.createElement('span');caption.className='field-caption';
       const text=document.createElement('span');
       for(const node of [...label.childNodes])if(node.nodeType===Node.TEXT_NODE)text.append(node);
-      caption.append(text,help);control.before(caption);
+      caption.append(text);if(help)caption.append(help);control.before(caption);
     }
     const environmentHelp=query('#environment-mode-note').closest('.ui-info');query('.project-environment-choice legend').append(environmentHelp);
     const taskHelp=explanation.closest('.ui-info');kicker.querySelector('span').append(taskHelp);
@@ -623,7 +623,7 @@ export function executionUI(store,refresh,toast){
         <select name="machine" hidden aria-label="训练服务器"></select>
         <label>训练位置<select name="training-target"><option value="current">当前服务器 · 自动分卡</option><option value="auto">自动选择空闲服务器</option></select></label>
         <p id="training-target-note" class="muted"></p><label id="training-candidates-field" hidden>候选服务器（可选）<input name="training-candidates" placeholder="留空使用全部授权机器；多个完整名称以逗号分隔" spellcheck="false"><small>自编 CUDA 扩展不一定兼容其他显卡型号；不确定时只填写已验证的服务器。</small></label>
-        <div class="train-grid"><label>卡数<input name="cards" type="number" min="1" max="1" value="1" required></label><label>每卡最低显存 / GiB<input name="memory" type="number" min="0" max="128" value="0" step="0.5"></label><label>任务名称<input name="name" maxlength="64" value="train" required></label></div>
+        <div class="train-grid"><label>卡数<input name="cards" type="number" min="1" max="1" value="1" required></label><label>每卡显存下限（GiB）<input name="memory" type="number" min="0" max="128" value="0" step="0.5"></label><label>任务名称<input name="name" maxlength="64" value="train" required></label></div>
         <label>任务描述 ${infoHTML('同一服务器获授权的成员可以看到描述。请勿填写口令或令牌。','描述可见范围')}<textarea name="task-description" rows="3" maxlength="2000" placeholder="例如：验证新数据集上的 baseline，预计运行约两小时。不要填写密码或令牌。"></textarea></label>
         <div class="priority-choice"><label>任务优先级<select name="priority" aria-describedby="priority-note">${priorityOptions(store.principal?.role==='admin')}</select></label><p id="priority-note" class="priority-note"></p></div>
         <label id="project-release-field">项目训练版本<select name="release"></select><code id="release-full" class="release-hash"></code><small>刷新保留已选版本；本次发布确认后选择新版本。</small></label>

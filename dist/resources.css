@@ -53,8 +53,8 @@
 .sb .resource-bay-label{position:absolute;right:5px;top:6px;padding:3px 4px;background:#101216;border:1px solid #30343b;color:var(--ink-2);font:11px/1 var(--mono)}
 .sb .resource-portrait{container-type:inline-size}
 .sb .resource-portrait-utils{display:grid;grid-template-columns:repeat(var(--gpu-count),minmax(0,1fr));gap:10px;margin:12px 7.04% 0;color:var(--ink-2)}
-.sb .resource-portrait-utils>span{display:flex;justify-content:center;align-items:baseline;gap:6px;white-space:nowrap;font:11px/1.4 var(--mono)}
-.sb .resource-portrait-utils b{font-weight:400}.sb .resource-portrait-utils small{font-size:11px;color:var(--ink-3)}
+.sb .resource-portrait-utils>span{display:flex;justify-content:center;align-items:baseline;gap:8px;white-space:nowrap;font:11px/1.4 var(--mono);font-variant-numeric:tabular-nums}
+.sb .resource-portrait-utils b{font-weight:400}.sb .resource-portrait-utils small{font-size:11px;color:var(--ink-3);flex:none;width:2ch}
 .sb .resource-previous{position:absolute;left:0;right:0;height:1px;background:var(--ink);mix-blend-mode:difference;pointer-events:none}
 .sb .resource-delta,.sb .resource-sample-edge{position:absolute;left:0;right:0;opacity:0;background:var(--ink);pointer-events:none}
 .sb .resource-sample-edge{height:1px}
@@ -156,7 +156,7 @@
  .sb .resource-chassis-bays .resource-tower{min-width:0;padding:0}
  .sb .resource-bay-label{left:50%;right:auto;top:3px;padding:1px;border:0;transform:translateX(-50%);font-size:11px}
  .sb .resource-portrait-utils{gap:2px;margin-top:10px}
- .sb .resource-portrait-utils>span{gap:2px;font-size:11px}
+ .sb .resource-portrait-utils>span{gap:8px;font-size:11px}
  .sb .resource-portrait-utils small{font-size:11px}
  .sb .resource-selection{gap:12px;font-size:13px}
  .sb .resource-selection .button{font-size:13px;min-height:44px}
@@ -183,6 +183,6 @@
  .sb .resource-sheet .sheet-header .button{min-height:44px;font-size:15px}
 }
 @container(max-width:360px){
- .sb .resource-portrait-utils{grid-template-columns:repeat(auto-fit,minmax(min(100%,52px),1fr));gap:8px 6px}
+ .sb .resource-portrait-utils{grid-template-columns:repeat(auto-fit,minmax(min(100%,64px),1fr));gap:8px 6px}
 }
 @media(prefers-reduced-motion:reduce){.sb .resource-select,.sb .resource-chassis-bays .resource-tower-bar{transition:none}}

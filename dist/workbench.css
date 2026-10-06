@@ -176,8 +176,13 @@
 .sb #train-form .field-caption{display:flex;align-items:center;justify-content:flex-start;gap:8px;min-width:0}
 .sb #train-form .field-caption>.ui-info{margin:0;flex:none}
 .sb #train-form .field-caption>span{min-width:0}
+.sb #train-form .train-grid{grid-template-columns:repeat(3,minmax(0,1fr));column-gap:16px;row-gap:10px}
+.sb #train-form .train-grid>label{grid-row:span 2;grid-template-columns:minmax(0,1fr);grid-template-rows:subgrid;align-items:stretch;row-gap:inherit;margin-bottom:0;min-width:0}
+.sb #train-form .train-grid>label>.field-caption{grid-row:1;align-self:end}
+.sb #train-form .train-grid>label>:is(input,select){grid-row:2;align-self:start;min-width:0}
 .sb #page-work .field-caption,.sb #project-create .project-environment-choice legend,.sb #page-work .section-kicker>span:has(.ui-info){display:flex;align-items:center;gap:8px}
 .sb #page-work .field-caption>.ui-info,.sb #project-create .project-environment-choice legend>.ui-info{margin:0}
+.sb .wb-rail:has(#project-create[open],#workspace-files[open],#host-maintenance[open]){position:static}
 .sb .project-environment-segments{grid-template-columns:repeat(3,minmax(0,1fr))}
 .sb .project-environment-segments span{min-height:48px;padding:4px 2px;white-space:normal;line-height:18px;text-align:center}
 .sb .wb-ledger-groups>details>summary{min-height:40px}
@@ -198,6 +203,7 @@
 .sb #self-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100px,100%),1fr));gap:16px}
 @media(min-width:1100px){.sb #work-title-telemetry{width:clamp(404px,32vw,520px)}}
 @media(max-width:759px){
+ .sb #train-form .train-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
  .sb .wb-job-name,.sb .wb-rail #project-create>summary,.sb .wb-rail #workspace-files>summary,.sb .wb-ledger-groups>details>summary{min-height:44px}
  .sb .ui-info>summary{width:44px;height:44px}
  .sb .wb-rail #host-maintenance>summary{min-height:44px}

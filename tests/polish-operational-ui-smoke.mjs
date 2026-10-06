@@ -40,6 +40,8 @@ const workSpec={...roomSpec,roots:['#page-work','#control-strip'],
     {parent:'.wb-publish-control',children:':scope>*'},
     {parent:'.wb-ledger-head',children:':scope>*',wrap:true}],
   buttonRows:[{parent:'.terminal-controls'},{parent:'.wb-job-quick'},{parent:'.job-acts',wrap:true}],
+  sameRowControls:[{parent:'.terminal-controls',children:':scope>button'}],
+  unbrokenValues:['#self-summary strong','.wb-metrics strong'],
   baselines:[{parent:'.wb-job-heading',children:'.st,.wb-job-name',wrap:true}],
   textContainment:['.project-environment-segments label>span','.cs-count-link>.st',
     '.wb-progress-number','.wb-progress-meta>span','.wb-metrics strong','#self-summary>div'],
@@ -53,12 +55,18 @@ const computeSpec={...roomSpec,roots:['#page-resources','#control-strip'],
   numericCells:['.resource-process-table :is(th,td):is(:nth-child(1),:nth-child(2),:nth-last-child(2))'],
   textContainment:['.resource-bay-label','.resource-portrait-utils b'],
   buttonRows:[{parent:'.resource-detail-head'}],
+  sameRowControls:[{parent:'.resource-detail-head',children:'button'}],
+  unbrokenValues:['.resource-portrait-utils b'],
+  tokenGap:[{parent:'.resource-portrait-utils>span',left:'small',right:'b',minimum:6}],
 };
 const controlSpec={...roomSpec,roots:['#mission-control'],
   scrollGroups:['#mission-control .mc-body'],
   centers:[{parent:'.mc-footer-command',children:':scope>span,:scope>.ui-info'},
     {parent:'.mc-attention-heading',children:':scope>*',wrap:true}],
   buttonRows:[{parent:'.mc-row-actions'}],repeatedPadding:['.mc-attention-item'],
+  sameRowControls:[{parent:'.mc-row-actions',children:'button'}],
+  unbrokenValues:['.mc-meter-value'],
+  textContainment:['.mc-meter-value','.mc-meter-label'],
   scrollPanels:['#mission-control','.mc-body'],
 };
 const dialogSpec=(selector,scroll)=>({controls,roots:[selector],scrollPanels:selector==='#job-mission'?[selector]:[selector,scroll],scrollGroups:[scroll],
@@ -67,6 +75,8 @@ const dialogSpec=(selector,scroll)=>({controls,roots:[selector],scrollPanels:sel
   centers:[{parent:selector+' .sheet-header',children:':scope>*',wrap:true},
     {parent:selector+' #train-form .field-caption',children:':scope>span,:scope>.ui-info>summary'}],
   buttonRows:[{parent:selector+' .sheet-footer',children:'button'}],
+  sameRowControls:[{parent:selector+' #train-form .train-grid',children:'input,select,button'},
+    {parent:selector+' .sheet-footer',children:'button'}],
 });
 const scenes=[
   ...['member','admin'].flatMap(role=>[
@@ -78,6 +88,7 @@ const scenes=[
     {role,room:'compute',state:'normal',expanded:true,name:role+'-compute-processes',spec:computeSpec},
     ...['normal','error','unknown'].map(state=>({role,room:'fullscreen',state,name:role+'-fullscreen-'+state,spec:dialogSpec('#job-mission','.r5-mission-body')})),
     {role,room:'submit',state:'normal',name:role+'-submit',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
+    {role,room:'submit',state:'normal',wrappedLabels:true,name:role+'-submit-wrapped-labels',spec:dialogSpec('#work-submit','#work-submit .sheet-scroll')},
     {role,room:'project',state:'normal',name:role+'-project',spec:workSpec},
     ...[['project-environment','#project-create .project-environment-choice'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
       spec:{...workSpec,focusedTargets:[selector]}})),
@@ -150,6 +161,31 @@ async function checkGeometryRegressions(){
     assert.ok((await inspectOperationalGeometry(page,targetSpec)).failures.some(row=>row.rule==='focused-target-covered'),'a focused action covered by another element still fails');
     await page.locator('#cover').evaluate(node=>node.remove());
     assert.equal((await inspectOperationalGeometry(page,targetSpec)).pass,true,'a reachable focused action passes');
+    await page.setViewportSize({width:1440,height:900});
+    const defaultSpec={roots:['body'],controls:'input,select,button'};
+    await page.setContent('<style>.control-row{display:flex;gap:16px}input{box-sizing:border-box;width:100px;height:40px}#second{transform:translateY(6px)}</style><div class="control-row"><input id="first"><input id="second"></div>');
+    assert.equal((await inspectOperationalGeometry(page,defaultSpec)).pass,true,'same-row checks are disabled for existing specifications');
+    const alignedSpec={...defaultSpec,sameRowControls:[{parent:'.control-row'}]};
+    const displaced=await inspectOperationalGeometry(page,alignedSpec);
+    assert.ok(displaced.failures.some(row=>row.rule==='same-row-controls'&&Math.max(...row.values)-Math.min(...row.values)===6),'a six-pixel input offset fails the optional shared row rule');
+    await page.locator('#second').evaluate(node=>node.style.transform='none');
+    assert.equal((await inspectOperationalGeometry(page,alignedSpec)).pass,true,'aligned input tops pass the same-row rule');
+    await page.setContent('<style>.control-row{display:flex;gap:16px}label{display:flex;flex-direction:column;width:100px}label span{height:16px}#long-caption{height:64px}input{box-sizing:border-box;height:40px;width:100px}</style><div class="control-row"><label><span>Cards</span><input></label><label><span id="long-caption">Wrapped caption</span><input></label></div>');
+    assert.ok((await inspectOperationalGeometry(page,alignedSpec)).failures.some(row=>row.rule==='same-row-controls'&&Math.max(...row.values)-Math.min(...row.values)===48),'field wrappers preserve the visual row even when controls no longer overlap vertically');
+    await page.locator('label span').first().evaluate(node=>node.style.height='64px');
+    assert.equal((await inspectOperationalGeometry(page,alignedSpec)).pass,true,'shared caption tracks align controls after arbitrary wrapping');
+    await page.setContent('<style>.reading{display:flex;align-items:baseline;flex-wrap:wrap;width:60px;gap:7px;font:28px/1.1 sans-serif}.reading small{font-size:11px}</style><div class="reading"><span>10 /</span><span>30</span><small>张</small></div>');
+    assert.equal((await inspectOperationalGeometry(page,defaultSpec)).pass,true,'numeric wrapping checks are disabled for existing specifications');
+    const valuesSpec={...defaultSpec,unbrokenValues:['.reading']};
+    assert.ok((await inspectOperationalGeometry(page,valuesSpec)).failures.some(row=>row.rule==='value-word-wrap'),'a number and unit on separate lines fail the optional value rule');
+    await page.locator('.reading').evaluate(node=>node.style.width='180px');
+    assert.equal((await inspectOperationalGeometry(page,valuesSpec)).pass,true,'different-size numeric and unit fonts on one baseline pass');
+    await page.setContent('<style>.tokens{display:flex;gap:2px;font:11px/1.4 monospace}.tokens small{font-size:11px}</style><div class="tokens"><small>01</small><b>93%</b></div>');
+    assert.equal((await inspectOperationalGeometry(page,defaultSpec)).pass,true,'token separation checks are disabled for existing specifications');
+    const gapSpec={...defaultSpec,tokenGap:[{parent:'.tokens',left:'small',right:'b',minimum:6}]};
+    assert.ok((await inspectOperationalGeometry(page,gapSpec)).failures.some(row=>row.rule==='token-gap'&&row.gap===2),'a two-pixel serial/value gap fails the optional token rule');
+    await page.locator('.tokens').evaluate(node=>node.style.gap='8px');
+    assert.equal((await inspectOperationalGeometry(page,gapSpec)).pass,true,'an eight-pixel serial/value gap passes');
   }finally{await context.close();}
 }
 
@@ -221,7 +257,13 @@ try{
         await page.locator('[name=workspace-machine]').selectOption(machine);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
         if(scene.state!=='empty'){await page.locator('[name=workspace-project]').selectOption(project);await page.waitForFunction(()=>!document.querySelector('[name=workspace-project]').disabled);}
         if(scene.state==='loading')await page.locator('#refresh-state').click();
-        if(scene.room==='compute'){await page.locator('[data-nav=resources]').click();await page.locator('.resource-fleet').waitFor();}
+        if(scene.room==='compute'){
+          await page.locator('[data-nav=resources]').click();await page.locator('.resource-fleet').waitFor();
+          if(!before)for(const row of await page.locator('.resource-chassis-scroll').evaluateAll(nodes=>nodes.map(node=>({
+            bays:[...node.querySelectorAll('.resource-bay-label')].map(label=>label.textContent),
+            indices:[...node.querySelectorAll('.resource-portrait-utils small')].map(label=>label.textContent),
+          }))))assert.deepEqual(row.indices,row.bays,'utilization serials match the actual chassis slot labels');
+        }
         if(scene.expanded)await page.locator('#machine-grid .resource-process-list>summary').click();
         if(scene.state==='counts')await page.evaluate(({userId,machine,project})=>{
           document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[{id:'layout-known-session',userId,machine,project,connectionState:'connected',environmentMode:'oci'}]}}));
@@ -235,6 +277,12 @@ try{
         if(scene.room==='fullscreen'){await page.locator('.wb-focal [data-job-mission]').click();await page.locator('#job-mission').waitFor({state:'visible'});}
         if(scene.room==='submit'){
           await page.locator('#open-submit').click();await page.locator('#work-submit').waitFor({state:'visible'});
+          if(scene.wrappedLabels)await page.locator('#train-form .train-grid:has([name=cards])').evaluate(grid=>{
+            for(const [name,value] of [['memory','每张显卡的最低可用显存容量下限（GiB）'],['name','本次训练任务的完整名称']]){
+              const label=grid.querySelector('[name='+name+']').closest('label'),text=label.querySelector('.field-caption>span')||[...label.childNodes].find(node=>node.nodeType===Node.TEXT_NODE);
+              text.textContent=value;
+            }
+          });
           if(!before){
             assert.equal(await page.locator('#train-form label>.ui-info').count(),0,'field explanations belong to their label row, including training-version help');
             for(const name of ['task-description','priority','release','command','datasets']){
