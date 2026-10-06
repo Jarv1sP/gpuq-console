@@ -55,7 +55,7 @@
 
 返回 `protocol:"project-local-import-v1",key,project,state,phase,sourcePath,destinationPath,files,bytes,draftChanged`，完成另有 `manifestSha256`，失败/未知可有 `error`。状态 IMPORTING/COMMITTING/IMPORTED/FAILED/CANCELED/UNKNOWN；阶段 SCANNING/COPYING/VERIFYING/COMMITTING/IMPORTED/STOPPED/CANCELED。仅 IMPORTED 且 draftChanged=true 证明新草稿目录完成，不是环境 READY 或 GPU 分配。项目 status/list 在 `localImport` 附回执，未确认时顶层显示 IMPORTING/COMMITTING/UNKNOWN。
 
-两端持久围栏早于 systemd launch。完整 SHA、源 CAS 后使用 Linux `renameat2(RENAME_NOREPLACE)` 原子提交；能力缺失拒绝受理，不降级为检查后 rename。cancel 确认整组停止后只清理尚未提交的私人 staging；COMMITTING/提交回执不明仍保留围栏。通用传输仅重试 status，不重放 begin/cancel。配套门户、项目/个人数据 helper 和 runtime manifest 应一起部署。
+两端持久围栏早于 systemd launch。完整 SHA、源 CAS 后使用 Linux `renameat2(RENAME_NOREPLACE)` 原子提交；能力缺失拒绝受理，不降级为检查后 rename。cancel 确认整组停止后只清理尚未提交的私人 staging；COMMITTING/提交回执不明仍保留围栏。通用传输仅重试 status，不重放 begin/cancel。配套门户、VPS 执行桥、项目/个人数据 helper 和 runtime 依赖清单应一起发布。执行桥仅新增固定的 `files.upload.list/cancel` 与 `projects.local-import.begin/status/cancel`；它不代替门户当前账号授权或节点 owner 检查，不开放任意操作、宿主路径或 shell。
 
 ## 自动选机与不可变项目复制
 
