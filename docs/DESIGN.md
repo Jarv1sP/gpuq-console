@@ -280,6 +280,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | --- | --- | --- | --- |
 | `.wordmark` / `.wordmark.sm` | [starbase.css](../dist/starbase.css) | mask 字标与小尺寸；不以字体临摹轮廓 | 保留 STARGATE 名称，重复装饰对读屏隐藏 |
 | `.auth-r5-wordmark` / `.auth-lambda` | [auth-ui.js](../dist/auth-ui.js)、[members.css](../dist/members.css) | 登录 SVG 字标与一次点亮；登录前只画静态外形 | 保持 viewBox；减少动态直接终态 |
+| `#page-admin` / `.admin-navigation` | [admin-ui.js](../dist/admin-ui.js)、[admin.css](../dist/admin.css) | 独立管理后台；桌面侧栏、窄容器两列导航，未挂载区块用对象标题空态 | 当前区块 aria-current；权限确认后才 mount，离开、换账号或撤权时先 abort 再 unmount |
 | `#app-topbar` / `#room-nav` / `.nav-item` | [shell-ui.js](../dist/shell-ui.js)、[shell.css](../dist/shell.css) | 稳定房间导航；不新增独立传输入口 | aria-current，指南始终可达 |
 | `#shell-context` / `#context-machine` / `#context-project` | [shell-ui.js](../dist/shell-ui.js) | 代理原服务器/项目控件，不造第二份业务状态 | 标签明确，title完整 ID，同步原控件 |
 | `#control-strip` / `.cstrip` / `.cs-progress` | [control-ui.js](../dist/control-ui.js)、[starbase.css](../dist/starbase.css) | 任务/会话/传输/需处理；无对象段收起 | 入口可读，不预测队列位次或终端倒计时 |
@@ -341,6 +342,16 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | 登录、注册、账号 | [auth-ui.js](../dist/auth-ui.js)、[client.js](../dist/client.js)、[members.css](../dist/members.css)、[shell.css](../dist/shell.css) | client-auth / persistent-login / polish-shell |
 | 指南 | [guide.mjs](../guide.mjs)、[USER_GUIDE.md](USER_GUIDE.md)、[guide.css](../dist/guide.css) | guide / user-guide-content |
 | 维护 | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-state.js](../dist/maintenance-state.js)、[maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-experience.css](../dist/maintenance-experience.css) | maintenance / maintenance-background-freeze |
+
+### 管理后台区块注册
+
+`#admin` 默认打开显卡与任务；`#admin/<id>` 保留区块深链接。账户菜单、总控命令、手机「我的」只向管理员提供入口；匿名和成员访问显示「需要管理员权限」。K1 先提供骨架，各负责人随后在同一个区块 PR 中移走主界面的管理操作并挂到后台，旧能力在迁移前保留。
+
+从 [admin-ui.js](../dist/admin-ui.js) 导入 `registerAdminSection({id,title,order,mount(el,ctx),unmount()})`；注册本身不能发管理请求。`tasks/storage/members/maintenance` 的默认标题依次为「显卡与任务 / 数据与存储 / 成员与额度 / 维护」，区块自己传 `order:10/20/30/40`。同一个 ID 只注册一次，返回函数可注销。
+
+`mount` 只在当前后台区块和已确认的管理员会话下调用，`ctx.store` 沿用现有已认证客户端，`ctx.toast` 显示消息，`ctx.signal` 在离开区块、注销、换账号、撤权或注销注册时中止。请求仍须把 signal 传给 `store.call`，不能仅因注册过就开始请求。卸载先 abort，再调用可选 `unmount()`，最后移除原宿主；晚回包只持有已移除的宿主，旧 toast 不会进入新页面。
+
+额外提供当前身份快照 `ctx.principal`、有生命周期保护的 `ctx.navigate` 和 `ctx.subscribe(render)`；后者立即渲染并随主状态更新调用，返回取消订阅函数。区块自行处理成功、失败和未确认，框架只在 mount 抛错时显示「重新打开」操作，不猜后台状态。此框架不新增接口和动效。
 
 ## 6. 动效
 
@@ -446,6 +457,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [dataset-upload-ui-smoke.mjs](../tests/dataset-upload-ui-smoke.mjs) | 文件夹、直传/中转同意、续传和READY清单核对，标题提示位置及原文 |
 | [datasets-ui-smoke.mjs](../tests/datasets-ui-smoke.mjs) | 目录、数据库/缓存、预算、保留与共享几何；[dataset-help-geometry.mjs](../tests/dataset-help-geometry.mjs)验证标签右侧ⓘ及旧布局反例 |
 | [fixed-upload-routes-browser.mjs](../tests/fixed-upload-routes-browser.mjs) | 固定校园/Tail路线探测与严格票据匹配 |
+| [admin-ui-smoke.mjs](../tests/admin-ui-smoke.mjs) | 后台入口、成员与匿名拒绝、注册顺序、AbortSignal与跨账号卸载、1440/390/320及流式几何 |
 | [guide-ui-smoke.mjs](../tests/guide-ui-smoke.mjs) | 指南导航、移动目录与可达性 |
 | [job-diagnostics-ui-smoke.mjs](../tests/job-diagnostics-ui-smoke.mjs) | 训练诊断/历史/日志状态 |
 | [job-notifications-ui-smoke.mjs](../tests/job-notifications-ui-smoke.mjs) | 任务通知操作与恢复 |
