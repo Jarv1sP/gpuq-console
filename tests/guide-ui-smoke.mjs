@@ -97,6 +97,7 @@ try{
     assert.deepEqual(contrast,[],`${label}: guide helper text retains AA contrast`);
   }
   async function chapter(page,index,{scripts=true}={}){
+    await page.waitForLoadState('domcontentloaded');
     const [id,title]=chapters[index];
     assert.equal(new URL(page.url()).pathname,'/guide/'+id);
     assert.equal(await page.locator('h1').count(),1);
