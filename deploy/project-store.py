@@ -112,8 +112,11 @@ def require_workspace_space(root, reserve_bytes, needed=0, *, target_fd=None):
         if target_fd is not None and os.fstat(target_fd).st_dev != identity.st_dev:
             fail('unsafe_path', 'Workspace write target is on another filesystem')
         space = os.fstatvfs(fd if target_fd is None else target_fd)
-        if space.f_bavail * space.f_frsize < reserve_bytes + needed:
-            fail('insufficient_space', 'Workspace storage would violate its free-space reserve')
+        available = space.f_bavail * space.f_frsize
+        if available < reserve_bytes + needed:
+            fail('insufficient_space',
+                 f'Personal workspace free-space reserve reached: availableBytes={available}, '
+                 f'reserveBytes={reserve_bytes}, requestedBytes={needed}.')
 
 
 def stamp(info):
