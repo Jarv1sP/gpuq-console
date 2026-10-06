@@ -41,9 +41,17 @@ test('project upload status retry keeps the exact identity and does not send fil
  assert.deepEqual(JSON.parse(f.calls[0][1].body),body);assert.deepEqual(JSON.parse(f.calls[1][1].body),body);
 });
 test('unregister and job submission are never replayed on ambiguous gateway failure',async()=>{
- for(const operation of ['datasets.unregister','jobs.submit','datasets.upload.commit','files.put','host.exec','host.cancel','terminal.exchange','login']){
+ for(const operation of ['datasets.unregister','jobs.submit','datasets.upload.commit','files.put','files.upload.cancel','projects.local-import.begin','projects.local-import.cancel','host.exec','host.cancel','terminal.exchange','login']){
   const f=fixture([new Response('',{status:502})]);
   await assert.rejects(apiPost(url,'call',{operation},f.options),/操作结果尚未确认/);assert.equal(f.calls.length,1);
+ }
+});
+test('local import status and pending upload discovery retry reads, never alter operation identity',async()=>{
+ for(const operation of ['projects.local-import.status','files.upload.list']){
+  const body={operation,args:{machine:'node-a',project:'code',key:'11111111-1111-4111-8111-111111111111'}};
+  const f=fixture([new Response('',{status:502}),new Response('{"result":{}}')]);
+  await apiPost(url,'call',body,f.options);assert.equal(f.calls.length,2);
+  assert.ok(f.calls.every(call=>JSON.stringify(JSON.parse(call[1].body))===JSON.stringify(body)));
  }
 });
 test('host status retries bridge maintenance with the same handle, never executes or cancels',async()=>{

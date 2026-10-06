@@ -1428,8 +1428,9 @@ def process(operation,args):
                 ops.writable(args);ops.store.dev_paths(*ops.identity(args))
                 return terminal_op(operation,args)
         return terminal_op(operation,args)
-    if operation=='files.upload.status':
-        if not args.get('project') or set(args)-{'userId','machine','project','area','path','uploadId','totalSize','sha256'}:
+    if operation in ('files.upload.status','files.upload.list','files.upload.cancel'):
+        allowed={'userId','machine','project','area'}|({'path','uploadId','totalSize','sha256'} if operation=='files.upload.status' else {'uploadId'} if operation=='files.upload.cancel' else set())
+        if not args.get('project') or set(args)-allowed:
             raise ValueError('Project upload status requires an exact owned upload identity')
         if args.get('area','code')!='code':raise ValueError('Project upload status is only available for code drafts')
         return projects().files(operation,args)
@@ -1660,6 +1661,7 @@ if __name__=='__main__':
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-recover':
         print(json.dumps(data_workspaces().recover(*sys.argv[2:])));sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
+    if len(sys.argv)==5 and sys.argv[1]=='--project-local-import-worker':sys.exit(projects().local_imports().worker(*sys.argv[2:]))
     try:
         reader=BoundedRPCInput(sys.stdin.fileno())
         first=reader.line(1600000,time.monotonic()+27)

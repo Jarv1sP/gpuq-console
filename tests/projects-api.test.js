@@ -35,6 +35,37 @@ test('project upload status is read-only, owner-bound and usable during maintena
   assert.equal(f.service.store.jobs.length,0);
  }finally{await f.close();}
 });
+test('local import binds current owner and machine; maintenance blocks begin but permits exact status and cancel',async()=>{
+ const f=await fixture();try{
+  const args={project:'my-project',key:randomUUID(),sourcePath:'source/code',destinationPath:'imported'};
+  await f.call('projects.local-import.begin',args);
+  assert.deepEqual(f.calls.at(-1),{machine:'gpu-1',operation:'projects.local-import.begin',args:{...args,userId:f.member.id}});
+  for(const extra of [{userId:'builtin-admin'},{hostAdmin:true},{sourcePath:'/data1/source'},{destinationPath:'../escape'},{root:'/data2'},{machine:'gpu-2'},{key:'invalid'}])await assert.rejects(f.call('projects.local-import.begin',{...args,...extra}));
+  const revision=f.service.operationalMaintenance(f.admin.principal).revision;
+  await f.service.invoke(f.admin.token,'maintenance.set',{scope:'all',enabled:true,reason:'import test',revision});
+  await assert.rejects(f.call('projects.local-import.begin',args));
+  for(const op of ['status','cancel']){
+   await f.call('projects.local-import.'+op,{project:args.project,key:args.key});
+   assert.equal(f.calls.at(-1).args.userId,f.member.id);
+   await assert.rejects(f.call('projects.local-import.'+op,args));
+  }
+  assert.equal(f.service.store.jobs.length,0);
+ }finally{await f.close();}
+});
+test('pending upload list/cancel are exact own-project controls, including maintenance',async()=>{
+ const f=await fixture();try{
+  const revision=f.service.operationalMaintenance(f.admin.principal).revision;
+  await f.service.invoke(f.admin.token,'maintenance.set',{scope:'all',enabled:true,reason:'upload cleanup test',revision});
+  const args={project:'my-project',area:'code'};
+  await f.call('files.upload.list',args);
+  assert.equal(f.calls.at(-1).args.userId,f.member.id);
+  const uploadId=randomUUID();await f.call('files.upload.cancel',{...args,uploadId});
+  assert.equal(f.calls.at(-1).args.uploadId,uploadId);
+  for(const extra of [{userId:'builtin-admin'},{hostAdmin:true},{path:'train.py'},{area:'output'},{machine:'gpu-2'},{uploadId:'invalid'}])await assert.rejects(f.call('files.upload.cancel',{...args,uploadId,...extra}));
+  await assert.rejects(f.call('files.upload.list',{...args,uploadId}));
+  assert.equal(f.service.store.jobs.length,0);
+ }finally{await f.close();}
+});
 test('project operations bind authenticated owner and explicit node without reserving GPUs',async()=>{
  const f=await fixture();try{
   for(const op of ['projects.list','projects.create','projects.status','projects.publish']){

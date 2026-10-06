@@ -40,6 +40,9 @@ gpuctl project create clean --env-mode isolated  New venv without base site-pack
 gpuctl project create container --env-mode oci   Managed rootless OCI (enabled nodes only)
 gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
+gpuctl project import SOURCE [DEST]  Same-node personal data directory -> new project code directory
+gpuctl project import-status|import-cancel UUID
+gpuctl project uploads / upload-cancel UUID  Inspect or discard an exact unfinished code upload
 gpuctl push-status LOCAL [REMOTE]  Check original project upload; never writes
 gpuctl project copy NAME --from SOURCE --to TARGET --release HASH
 gpuctl project copy-status COPY_ID / copy-cancel COPY_ID
@@ -590,6 +593,38 @@ async function main(){
       }
       if(['FAILED','CANCELED'].includes(result.state))process.stderr.write('修复原因后可用 gpuctl project copy-retry '+result.id+'；旧操作停止和清理未确认时不会重试。\n');
       if(['FAILED','CANCELED'].includes(result.state))process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
+    }else if(command==='project'&&['import','import-status','import-cancel','uploads','upload-cancel'].includes(positionals[1])){
+      const action=positionals[1],allowed=['machines','datasets','url','session-file','json','project',...(action==='import'?['key']:[])];
+      if(training.length||options.datasets.length||options.machines.length>1||Object.keys(options).some(k=>!allowed.includes(k)))fail('Project import accepts one authorized server and your selected project; no host/root or training options');
+      const machine=defaultMachine(),project=projectSlug(options.project||selectedProject(machine));
+      if(!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
+      const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+      let importRequest=null;
+      if(action==='import'){
+        if(positionals.length<3||positionals.length>4)fail('Usage: project import SOURCE [DEST] [--key UUID]; both paths are relative, destination must be new');
+        const sourcePath=positionals[2],destinationPath=positionals[3]||sourcePath.split('/').at(-1);
+        for(const value of [sourcePath,destinationPath])if(typeof value!=='string'||value.length>1024||value.includes('\\')||/[\p{Cc}\p{Cf}]/u.test(value)||value.split('/').some(p=>!p||p==='.'||p==='..'||p.length>255))fail('Use relative directories in your personal data workspace and project draft, never host paths');
+        const key=options.key||randomUUID();if(!uuid.test(key))fail('Import key must be a full UUID');
+        process.stderr.write(`Import key: ${key}\nIf the response is lost: gpuctl project import-status ${key}\n`);
+        importRequest={machine,project,key,sourcePath,destinationPath};
+        result=(await call('projects.local-import.begin',importRequest)).result;
+      }else if(action==='uploads'){
+        if(positionals.length!==2)fail('Usage: project uploads');
+        result=(await call('files.upload.list',{machine,project,area:'code'})).result;
+      }else{
+        if(positionals.length!==3||!uuid.test(positionals[2]))fail('Use the original full operation UUID');
+        const operation=action==='upload-cancel'?'files.upload.cancel':'projects.local-import.'+(action==='import-status'?'status':'cancel');
+        result=(await call(operation,{machine,project,...(action==='upload-cancel'?{area:'code',uploadId:positionals[2]}:{key:positionals[2]})})).result;
+      }
+      if(action.startsWith('import')){
+        const expected=action==='import'?importRequest.key:positionals[2];
+        if(result?.protocol!=='project-local-import-v1'||result.project!==project||result.key!==expected||!uuid.test(result.key)||!['IMPORTING','COMMITTING','IMPORTED','FAILED','CANCELED','UNKNOWN'].includes(result.state)||result.draftChanged!==(result.state==='IMPORTED'))fail('Node did not confirm the fixed local import protocol; keep the printed operation ID and inspect status');
+        if(importRequest&&(result.sourcePath!==importRequest.sourcePath||result.destinationPath!==importRequest.destinationPath))fail('Node import paths differ from the fixed request; keep the original key for inspection');
+      }else if(action==='uploads'){
+        if(result?.protocol!==1||result.project!==project||!Array.isArray(result.uploads)||result.uploads.length>64)fail('Node did not confirm pending upload discovery');
+      }else if(result?.protocol!==1||result.uploadId!==positionals[2]||!['CANCELED','ABSENT'].includes(result.state))fail('Node did not confirm exact upload cancellation');
+      result={...result,machine};
+      if(result.state==='FAILED'||result.state==='CANCELED'&&action!=='import-cancel'&&action!=='upload-cancel')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
     }else if(command==='project'&&['list','quota','create','use','status','publish'].includes(positionals[1])){
       if(options.legacy)fail('Project commands do not accept --legacy');
       const action=positionals[1],machine=defaultMachine();
@@ -892,6 +927,14 @@ async function main(){
     else for(const row of result.volumes)console.log(`${row.volume} · 内核项目配额\n  已用 ${row.usedBytes} / ${row.bytes} B；剩余 ${row.remainingBytes} B\n  文件／目录 ${row.usedInodes} / ${row.inodes}；剩余 ${row.remainingInodes}`);
     return;
   }
+  if(command==='project'&&['import','import-status','import-cancel'].includes(positionals[1])){
+    console.log(`${result.state} · ${result.key} · ${result.machine} / ${result.project}\n${result.phase||'待确认'} · ${result.files||0} 文件 · ${result.bytes||0} B${result.error?'\n'+result.error:''}\n查看：gpuctl project import-status ${result.key}${result.state==='IMPORTED'?'\n项目草稿已导入；代码和环境尚未发布，确认内容后再 project publish。':''}`);return;
+  }
+  if(command==='project'&&positionals[1]==='uploads'){
+    for(const row of result.uploads||[])console.log(`${row.uploadId} · ${row.state} · ${row.receivedBytes} / ${row.totalSize} B · ${row.path}${row.cancelable?'\n  取消：gpuctl project upload-cancel '+row.uploadId:'\n  提交结果未确认，保留原操作进行检查。'}`);
+    if(!result.uploads?.length)console.log('没有未完成的项目上传。');return;
+  }
+  if(command==='project'&&positionals[1]==='upload-cancel'){console.log(`${result.state} · ${result.uploadId}\n仅处理未提交的临时上传；不会删除项目代码或已发布版本。`);return;}
   if(command==='data'&&positionals[1]==='put'){console.log(`已上传 ${result.bytes} 字节 → ${result.machine}:${result.path}\n未自动解压或发布。进入个人数据终端：gpuctl data shell`);return;}
   if(command==='data'&&['publish','workspace-status'].includes(positionals[1])){console.log(`${result.state} · ${result.machine}${result.error?'\n'+result.error:''}${result.operationId?'\n查看：gpuctl data workspace-status '+result.operationId+' --machine '+result.machine:''}${result.state==='READY'?'\n数据集：'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
   if(command==='data'&&positionals[1]==='upload'){console.log(`数据集已就绪：${result.machine}\n${result.dataset}@${result.version}\n训练只读路径：/data2/${result.dataset}\n可在 run 中使用 --data ${result.dataset}@${result.version}`);return;}

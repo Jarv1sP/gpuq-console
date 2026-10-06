@@ -40,12 +40,22 @@
 | `projects.create` | `machine`、`project`，可选 `environmentMode` | 项目状态，创建时通常为 `DRAFT` |
 | `projects.status` | `machine`、`project` | 项目状态及适用时的发布回执／进度 |
 | `projects.publish` | `machine`、`project`、本次发布 UUID `key` | 后台发布状态，不占 GPU，不等于发布完成 |
+| `projects.local-import.begin` | `machine,project,key,sourcePath,destinationPath` | 本人同机数据区→草稿新目录；字节不经门户 |
+| `projects.local-import.status` / `.cancel` | `machine,project,key` | 原固定操作状态／取消请求 |
 
 项目状态包含 `project`、`environmentMode`、`state`、`createdAt`、`releases`、`latestReadyRelease`、`offlineAssetsPath`。`releases` 项包含 `release`（64 位小写十六进制）、`state="READY"`、`createdAt`、`bytes`、`entries`。顶层状态可能是 `DRAFT`、`SYNCING`、`PUBLISHING`、`READY`、`FAILED` 或 `UNKNOWN`；失败详情和进度仅在返回时展示，不能因存在旧 READY 版本就宣称新发布完成。
 
 发布前必须显式结束该项目的全部开发终端，`detach` 不算结束。每次明确发布生成一个 `key`，受理后用 `projects.status` 读取进度；状态查询只传 `machine`、`project`，不传 `key`、不循环调用 publish。保留原 `key`，仅当 `publication.id` 与它一致、`publication.state="READY"` 且 `publication.release` 出现在 READY 版本清单中，才确认本次发布成功；训练固定该 release。响应丢失先查询状态，若需确认原请求仍使用同一个 key，不换新 key 重复发布。`UNKNOWN` 或缺少对应回执时不能猜测成功。
 
 账号须仍启用且具有所选机器的有效授权，节点还须显式启用个人 OCI 并允许该账号；管理员角色不自动绕过这些检查。当前真实正式验收范围是一个 RTX 3090 节点上的受控账号，不代表已向全部账号和节点开放。owner 由后端登录身份确定，HTTP 不接受客户端指定 `owner`、`userId`、角色、镜像或引擎参数。进入容器用下述 `terminal.open` 加 `project`，不加 `hostAdmin`；容器内 root 不等于宿主机 root，开发终端没有 GPU。
+
+### 同机项目导入协议
+
+`key` 是固定 UUID；SOURCE 仅当前账号个人数据工作区的相对目录，DEST 仅本人项目草稿的新目录、父目录预先存在。先结束两端全部终端，并完成或正规取消 pending uploads。维护状态阻止 begin、允许 status/cancel；每次重验当前账号和机器授权，不接受 owner/userId/hostAdmin 或任意宿主路径。旧 `/data1/...` 需先明确整理到本人个人数据区，不支持直接导入。
+
+返回 `protocol:"project-local-import-v1",key,project,state,phase,sourcePath,destinationPath,files,bytes,draftChanged`，完成另有 `manifestSha256`，失败/未知可有 `error`。状态 IMPORTING/COMMITTING/IMPORTED/FAILED/CANCELED/UNKNOWN；阶段 SCANNING/COPYING/VERIFYING/COMMITTING/IMPORTED/STOPPED/CANCELED。仅 IMPORTED 且 draftChanged=true 证明新草稿目录完成，不是环境 READY 或 GPU 分配。项目 status/list 在 `localImport` 附回执，未确认时顶层显示 IMPORTING/COMMITTING/UNKNOWN。
+
+两端持久围栏早于 systemd launch。完整 SHA、源 CAS 后使用 Linux `renameat2(RENAME_NOREPLACE)` 原子提交；能力缺失拒绝受理，不降级为检查后 rename。cancel 确认整组停止后只清理尚未提交的私人 staging；COMMITTING/提交回执不明仍保留围栏。通用传输仅重试 status，不重放 begin/cancel。配套门户、VPS 执行桥、项目/个人数据 helper 和 runtime 依赖清单应一起发布。执行桥仅新增固定的 `files.upload.list/cancel` 与 `projects.local-import.begin/status/cancel`；它不代替门户当前账号授权或节点 owner 检查，不开放任意操作、宿主路径或 shell。
 
 ## 自动选机与不可变项目复制
 
@@ -108,6 +118,8 @@
 客户端先查状态，再继续原上传；遇未知 ACK 最多进行三轮有界恢复，且每轮先查询已确认偏移，不换 uploadId 或路径。旧格式未完成记录没有目标变化围栏，同内容返回 `legacy:true,resumable:false`，不同内容返回 `CONFLICT`，需人工核对，不自动清理或从零重开。传统非项目 `files.put` 不增加重放。完成后的恢复只校验目标并收尾回执，不再次 rename；尚未提交的首次上传／续传仍按显式 push 的替换语义执行，上传期间禁止同路径并发终端编辑，不能把平台锁或 stat 检查称为对外部写入的原子 CAS。单文件上限仍为 4 GiB，完成状态的完整 hash 核验可能占用一次文件读取时间；超时只是未确认，不表示文件不存在。
 
 CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --json` 只读；`gpuctl push` 能恢复同内容的已确认上传。此功能不改变项目字节当前经门户中转的路径，也不冒称项目包走了数据集直传。
+
+无需本机源的清理：`files.upload.list {machine,project,area:"code"}` 返回 `protocol:1,project,uploads`，每项 path/uploadId/totalSize/sha256/state/receivedBytes/cancelable/legacy，最多 64 个私人待上传对象。`files.upload.cancel {machine,project,area:"code",uploadId}` 只选精确 UUID，返回 `protocol:1,state:"CANCELED"|"ABSENT",uploadId`；ABSENT 不是删除完成证明。正规 UPLOADING/CANCELING 且原目标围栏匹配时，先持久 CANCELING，再清理未提交 staging 并保留幂等取消回执；COMMITTING、旧缺失围栏、身份冲突或目标变化拒绝。不能删除已提交草稿、READY 或结果。取消中 status 可返回 CANCELING，不标为可续传，原已取消 UUID 不能 files.put。list/status 可读重试，cancel 不自动重放；维护期间允许查询/停止，不允许继续上传。
 
 ## 数据集上传：控制面与文件字节分开
 
