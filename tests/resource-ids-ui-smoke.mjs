@@ -8,6 +8,7 @@ import net from 'node:net';
 import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES as examples} from '../dist/machines.js';
+import {checkDelayedResourceFonts,installResourceResizeProbe,waitForResourceFont} from './resource-font-readiness.mjs';
 
 const machines=process.env.PR2_ID_MANIFEST?JSON.parse(await readFile(process.env.PR2_ID_MANIFEST,'utf8')):[
   ...examples.map(machine=>({...machine,id:machine.id+'-node'})),
@@ -32,6 +33,7 @@ try{
   await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1080}});
+  await installResourceResizeProbe(page);
   // Layout data remain synthetic; public runtime now requires a real fixture
   // session before restoring the mocked authenticated state.
   const login=await page.context().request.post(origin+'/api/login',{headers:{Origin:origin},data:{username:'admin',password:'Isolated-ID-Layout-2026!',client:'browser'}});
@@ -69,6 +71,7 @@ try{
       await page.waitForFunction(id=>document.querySelector('.resource-identity .resource-id-label')?.textContent===id,machine.id);
       await page.waitForFunction(()=>!document.querySelector('.object-transition-layer'));
       await page.evaluate(()=>scrollTo(0,0));
+      await waitForResourceFont(page);
       const identity=await page.locator('.resource-identity').evaluate(element=>{
         const label=element.querySelector('.resource-id-label'),box=label.getBoundingClientRect(),style=getComputedStyle(element);
         return {text:label.textContent,title:label.title,fontSize:parseFloat(style.fontSize),whiteSpace:style.whiteSpace,height:box.height,left:box.left,right:box.right,textWidth:label.scrollWidth,available:label.clientWidth,ellipsis:getComputedStyle(label).textOverflow};
@@ -101,6 +104,7 @@ try{
     await page.locator('[data-nav=resources]').click();
   }
   await page.setViewportSize({width:1440,height:1080});
+  await waitForResourceFont(page);
   const resize=await page.locator('.resource-identity').evaluate(element=>parseFloat(getComputedStyle(element).fontSize));
   await page.setViewportSize({width:390,height:844});
   await page.waitForFunction(size=>parseFloat(getComputedStyle(document.querySelector('.resource-identity')).fontSize)<size,resize);
@@ -116,8 +120,9 @@ try{
   animations.push(...await page.evaluate(()=>idAnimations));
   assert.ok(animations.length,'Switching identities retains the approved shared-element motion');
   for(const animation of animations){assert.equal(animation.options.duration,320);assert.ok(!animation.text.includes('→'),'Only the ID travels, without the side-card arrow');if(animation.tag==='SPAN'){const scale=animation.frames.at(-1).transform.match(/scale\(([^,]+),([^)]+)\)/);assert.ok(scale);assert.equal(Number(scale[1]),Number(scale[2]),'Text shares uniform scaling even when the final ID is ellipsized');assert.ok(parseFloat(animation.fontSize)>=24,'The ghost retains the source typography');}}
+  const fontReadiness=await checkDelayedResourceFonts(page,origin);
   csp.push(...await page.evaluate(()=>idCSP));assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(csp,[]);
   assert.ok(calls.every(call=>['state','projects.list','datasets.list','datasets.catalog','datasets.capacity','community.info','community.posts.list'].includes(call.operation)));
-  await writeFile(join(screenshots,'checks.json'),JSON.stringify({checks,animations,errors,external,csp,privateManifest:!!process.env.PR2_ID_MANIFEST},null,2));
-  console.log(JSON.stringify({status:'passed',names:machines.length,views:checks.length,screenshots,errors,external,csp}));
+  await writeFile(join(screenshots,'checks.json'),JSON.stringify({checks,animations,errors,external,csp,fontReadiness,privateManifest:!!process.env.PR2_ID_MANIFEST},null,2));
+  console.log(JSON.stringify({status:'passed',names:machines.length,views:checks.length,screenshots,errors,external,csp,fontReadiness}));
 }finally{await browser?.close();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(directory,{recursive:true,force:true});}

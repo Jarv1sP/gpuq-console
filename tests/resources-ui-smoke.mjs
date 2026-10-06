@@ -175,9 +175,23 @@ try{
   await page.waitForFunction(()=>document.querySelector('[data-nav=work]').getAttribute('aria-current')==='page');
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'gpu-1','Canceling terminal context confirmation must retain the server');
   await page.evaluate(()=>document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[]}})));
-  await page.locator('[data-nav=resources]').click();await page.locator('#resource-primary').click();
+  await page.locator('[data-nav=resources]').click();
+  const projectsRequest=request=>new URL(request.url()).pathname==='/api/call'&&request.postDataJSON()?.operation==='projects.list'&&request.postDataJSON()?.args?.machine==='gpu-2';
+  let releaseProjects,projectsBeforeReply;const projectsGate=new Promise(resolve=>releaseProjects=resolve);
+  const delayedProjects=async route=>{if(projectsRequest(route.request()))await projectsGate;await route.fallback();};
+  await page.route('**/api/call',delayedProjects);
+  const projectRequestSeen=page.waitForRequest(projectsRequest),projectsReady=page.waitForResponse(response=>projectsRequest(response.request()));
+  try{
+    await page.locator('#resource-primary').click();
+    await page.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-2');
+    await projectRequestSeen;
+    projectsBeforeReply=calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2');
+    assert.throws(()=>assert.ok(calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2')),{name:'AssertionError'},'a selected machine does not prove that its asynchronous query has arrived');
+    releaseProjects();const projectResponse=await projectsReady;assert.equal(projectResponse.status(),200);await projectResponse.finished();
+  }finally{releaseProjects();await page.unroute('**/api/call',delayedProjects);}
   await page.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-2');
   assert.ok(calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2'));
+  checks.push({projectsReadiness:{before:projectsBeforeReply,after:calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2')}});
   await page.locator('[data-nav=resources]').click();
 
   await page.setViewportSize({width:390,height:844});await selectResource(page,'gpu-1');await closeResource(page);await capture('resources-member-390');
