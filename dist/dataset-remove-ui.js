@@ -124,7 +124,7 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog,readCatalog,
     if(management!==true&&target.machine!==currentMachine())throw Error('请等所选服务器的目录更新后再删除。');
     // A catalog's logical training name may refer to a differently named local
     // registration. Revalidate the actual selected-node name before confirming.
-    const catalog=readCatalog?await readCatalog():await store.call('datasets.catalog',{machine:target.machine});
+    const catalog=readCatalog?await readCatalog(target.machine):await store.call('datasets.catalog',{machine:target.machine});
     if(identity!==JSON.stringify([store.principal,store.authGeneration])||management!==true&&currentMachine()!==target.machine||!card.isConnected||section.hidden||!inRoom())return null;
     const item=catalog.datasets?.find(item=>item.dataset===target.catalogDataset),versions=whole?item?.versions:item?.versions?.filter(row=>row.version===target.version);
     const references=[...new Set((versions||[]).flatMap(row=>(row.locations||[]).filter(location=>location.machine===target.machine).map(location=>location.dataset)).filter(value=>typeof value==='string'&&datasetID.test(value)))];
@@ -150,7 +150,7 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog,readCatalog,
   }
   function confirmRemove(target,whole,preservation,fullDeleteSupported=false){
     ensureDialog();confirmation={target:whole?{...target,version:null}:target,whole,preservation,userId:store.principal.userId};
-    const retained=item=>item.kind==='archive'?`数据库原件（${serverIdHTML(item.machines[0])}）`:item.kind==='replicas'?`其他服务器上的完整副本：${item.machines.map(machine=>serverIdHTML(machine)).join('、')}`:'完整副本尚未确认';
+    const retained=item=>item.kind==='archive'?`仓库原件（${serverIdHTML(item.machines[0])}）`:item.kind==='replicas'?`其他服务器上的完整副本：${item.machines.map(machine=>serverIdHTML(machine)).join('、')}`:'完整副本尚未确认';
     const facts=preservation.items.map(item=>`${whole?`<small title="${esc(item.version)}">${esc(item.version.slice(0,12))}</small>`:''}<span>${retained(item)}</span>`).join('');
     const pendingHelp=preservation.items.some(item=>item.pending&&item.graceEligible)?'请求发出后没有收到回执。为避免误删最后一份数据，这份副本暂时不算作可用副本；节点确认删除完成或 25 小时后会自动解除。':'正在按原编号查询删除结果。为避免误删最后一份数据，确认完成前不能再次删除。';
     const blocked=!preservation.allowed?`<p class="dataset-remove-blocked">${preservation.pending?'这台服务器上的删除结果待确认':removalText('这可能是最后一份完整数据，暂不能按机器删除')} ${copyHelp('暂不能删除',preservation.pending?pendingHelp:fullDeleteSupported?'可用「彻底删除」（7 天内可恢复）。':'请先确认其他服务器上有完整副本，再刷新目录。')}</p>`:'';
@@ -173,15 +173,21 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog,readCatalog,
         let more=card.querySelector('.dataset-remove-more');
         if(!more){
           const id='dataset-remove-menu-'+(++serial);more=document.createElement('div');more.className='dataset-remove-more';more.dataset.removeOwned='';
-          more.innerHTML=`<button class="button quiet" type="button" data-remove-more popovertarget="${id}" aria-haspopup="menu">更多</button><div class="dataset-remove-options" id="${id}" popover="auto" role="menu"><button class="button danger" type="button" data-remove-version role="menuitem">从 ${serverIdHTML(target.machine)} 删除此版本</button><button class="button danger" type="button" data-remove-dataset role="menuitem">从 ${serverIdHTML(target.machine)} 删除整个数据集</button></div>`;
+          more.innerHTML=`<button class="button quiet" type="button" data-remove-more popovertarget="${id}" aria-haspopup="menu">${card.classList.contains('v3-server')?'移除':'更多'}</button><div class="dataset-remove-options" id="${id}" popover="auto" role="menu"><button class="button danger" type="button" data-remove-version role="menuitem">从 ${serverIdHTML(target.machine)} 删除此版本</button><button class="button danger" type="button" data-remove-dataset role="menuitem">从 ${serverIdHTML(target.machine)} 删除整个数据集</button></div>`;
           (card.querySelector('[data-dataset-more-slot]')||card.querySelector('.dataset-card-heading')).append(more);
         }
         const blocked=api.blocked(target),maintenance=maintenanceFor(store.data?.operationalMaintenance,target.machine);
         for(const button of more.querySelectorAll('[data-remove-version],[data-remove-dataset]'))button.disabled=blocked||!!maintenance||resolving.has(card)||management!==true&&target.machine!==currentMachine()||api.blocked({...target,version:null})&&button.hasAttribute('data-remove-dataset');
         const actions=card.querySelector('.dataset-actions-cell.dataset-target');
-        for(const button of actions?.querySelectorAll('[data-use-dataset],[data-prepare-dataset]')||[]){if(blocked){if(!originals.has(button))originals.set(button,button.disabled);button.disabled=true;}else if(originals.has(button)){button.disabled=originals.get(button)||!!maintenance||!!section.querySelector('#datasets-refresh')?.disabled;originals.delete(button);}}
+        for(const button of actions?.querySelectorAll('[data-use-dataset],[data-prepare-dataset]')||[]){if(blocked){if(!originals.has(button))originals.set(button,button.disabled);button.disabled=true;}else if(originals.has(button)){button.disabled=originals.get(button)||!!maintenance||!!section.querySelector('[data-storage-refresh],#datasets-refresh')?.disabled;originals.delete(button);}}
         const pending=api.rows.find(row=>unresolved(row)&&overlaps(row,target))||api.rows.findLast(row=>['FAILED','BLOCKED'].includes(row.state)&&overlaps(row,target));let status=card.querySelector('.dataset-removal-state');
         if(pending){if(!status){status=document.createElement('div');status.className='dataset-removal-state';status.dataset.removeOwned='';(actions||card).append(status);}const html=stateHTML(pending);if(status.innerHTML!==html)status.innerHTML=html;}else status?.remove();
+      }
+      for(const button of section.querySelectorAll('#warehouse-inspector [data-use-dataset],[data-v3-cache]')){
+        const logical=button.dataset.useDataset||button.dataset.dataset,machine=button.dataset.v3Cache||currentMachine(),version=button.dataset.version;
+        const physical=localReferences.get(JSON.stringify([machine,logical,version]))||logical;
+        if(api.blocked({machine,dataset:physical,version})||api.rows.some(row=>unresolved(row)&&row.machine===machine&&row.catalogDataset===logical&&(!row.version||row.version===version))){if(!originals.has(button))originals.set(button,button.disabled);button.disabled=true;}
+        else if(originals.has(button)){button.disabled=originals.get(button)||!!maintenanceFor(store.data?.operationalMaintenance,machine)||!!section.querySelector('[data-storage-refresh],#datasets-refresh')?.disabled;originals.delete(button);}
       }
       let panel=catalog.querySelector('#dataset-removal-records');const rows=api.rows.filter(row=>row.state!=='UNREGISTERED');
       if(!rows.length){panel?.remove();return;}if(!panel){panel=document.createElement('section');panel.id='dataset-removal-records';panel.dataset.removeOwned='';panel.setAttribute('aria-label','删除记录');catalog.append(panel);}

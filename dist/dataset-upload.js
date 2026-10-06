@@ -1,6 +1,12 @@
 // Incremental SHA256 and the bounded HTTPS dataset upload protocol. No remote dependencies.
 import {selectUploadRoute,assertUploadRouteGrant} from './upload-routes.js';
 export const CHUNK_BYTES=1024*1024,MAX_MANIFEST_BYTES=64*1024*1024,MAX_ENTRIES=500000,LARGE_RELAY_BYTES=256*1024**2;
+export const MAX_DIRECT_CHUNK_BYTES=16*CHUNK_BYTES;
+export function adaptiveUploadChunk(current,elapsedMs,maximum){
+  if(![CHUNK_BYTES,MAX_DIRECT_CHUNK_BYTES].includes(current)||![CHUNK_BYTES,MAX_DIRECT_CHUNK_BYTES].includes(maximum)||!Number.isFinite(elapsedMs)||elapsedMs<0)
+    throw uploadError('分块确认耗时或授权上限未确认。','DIRECT');
+  return elapsedMs<500?maximum:elapsedMs>8000?CHUNK_BYTES:Math.min(current,maximum);
+}
 const K=new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
 const rr=(n,b)=>(n>>>b)|(n<<(32-b));
 export class SHA256{
@@ -53,7 +59,8 @@ export function validateBrowserUploadGrant(value,now=Date.now()/1000){
   let endpoint;try{endpoint=new URL(value?.endpoint);}catch{throw uploadError('直传入口未确认。','DIRECT');}
   if(value.available!==true||value.protocol!==PROTOCOL||endpoint.protocol!=='https:'||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||endpoint.pathname!=='/'||endpoint.origin!==value.endpoint||
     !/^[a-f0-9]{64}$/.test(value.certificateSha256||'')||typeof value.ticket!=='string'||!/^[A-Za-z0-9_.-]{20,4096}$/.test(value.ticket)||
-    !Number.isSafeInteger(value.expiresAt)||value.expiresAt<=now||value.expiresAt>now+601||!Number.isSafeInteger(value.chunkBytes)||value.chunkBytes<1||value.chunkBytes>CHUNK_BYTES)
+    !Number.isSafeInteger(value.expiresAt)||value.expiresAt<=now||value.expiresAt>now+601||!Number.isSafeInteger(value.chunkBytes)||value.chunkBytes<1||value.chunkBytes>CHUNK_BYTES||
+    value.maxChunkBytes!==undefined&&![CHUNK_BYTES,MAX_DIRECT_CHUNK_BYTES].includes(value.maxChunkBytes))
     throw uploadError('直传授权未确认。','DIRECT');
   return value;
 }
@@ -88,7 +95,8 @@ export async function browserDatasetTransport({control,uploadId,signal,route,fet
     const url=new URL(`/v1/uploads/${encodeURIComponent(uploadId)}/${action}`,endpoint),writing=action!=='status';
     if(args.path!==undefined)url.searchParams.set('path',datasetPath(args.path));
     if(writing){
-      if(!Number.isSafeInteger(args.offset)||args.offset<0||!(args.bytes instanceof Uint8Array)||args.bytes.length>grant.chunkBytes)throw uploadError('直传分块无效。','DIRECT');
+      const maximum=action==='chunk'?grant.maxChunkBytes??grant.chunkBytes:grant.chunkBytes;
+      if(!Number.isSafeInteger(args.offset)||args.offset<0||!(args.bytes instanceof Uint8Array)||args.bytes.length>maximum)throw uploadError('直传分块无效。','DIRECT');
       url.searchParams.set('offset',String(args.offset));
     }
     const timeout=new AbortController(),stop=()=>timeout.abort();signal?.addEventListener('abort',stop,{once:true});
@@ -106,11 +114,28 @@ export async function browserDatasetTransport({control,uploadId,signal,route,fet
     }catch(error){alive(signal);if(error.code?.startsWith('DIRECT'))throw error;throw uploadError('直传连接或回执未确认，请检查网络与证书。','DIRECT');}
     finally{clearTimeout(timer);signal?.removeEventListener('abort',stop);}
   }
+  async function boundedWrite(action,args){
+    const maximum=action==='chunk'?grant.maxChunkBytes??grant.chunkBytes:grant.chunkBytes;
+    if(action==='status'||args.bytes.length<=maximum)return request(action,args);
+    // A renewed grant can narrow an already-read block. Each new piece must
+    // receive its exact node ACK before advancing; never replay an unknown ACK.
+    let result,offset=args.offset;
+    for(let at=0;at<args.bytes.length;at+=maximum){
+      const bytes=args.bytes.subarray(at,at+maximum);
+      result=await request(action,{...args,offset,bytes});
+      if(result.offset!==offset+bytes.length)throw uploadError('文件写入未确认。','DIRECT');
+      offset=result.offset;
+    }
+    return {...result,offset};
+  }
   return {
     get chunkBytes(){return grant.chunkBytes;},
+    get maxChunkBytes(){return grant.maxChunkBytes??grant.chunkBytes;},
+    async prepare(){if(grant.expiresAt<=now()+10)await renew();return grant.maxChunkBytes??grant.chunkBytes;},
     async request(action,args={}){
+      if(action!=='status'&&(!(args.bytes instanceof Uint8Array)||args.bytes.length>(action==='chunk'?grant.maxChunkBytes??grant.chunkBytes:grant.chunkBytes)))throw uploadError('直传分块无效。','DIRECT');
       if(grant.expiresAt<=now()+10)await renew();
-      try{return await request(action,args);}
+      try{return await boundedWrite(action,args);}
       catch(error){
         if(error.code!=='DIRECT_AUTH')throw error;
         // Never replay a write until the reauthorized node confirms its offset.
@@ -120,7 +145,7 @@ export async function browserDatasetTransport({control,uploadId,signal,route,fet
         const offset=action==='manifest'?status.manifestOffset:status.file?.offset;
         if(offset===args.offset+args.bytes.length&&(args.bytes.length||status.file?.complete===true))return {offset,complete:status.file?.complete};
         if(offset!==args.offset)throw uploadError('直传写入未确认，请重新查询。','DIRECT');
-        return request(action,args);
+        return boundedWrite(action,args);
       }
     }
   };
@@ -133,7 +158,7 @@ export function confirmedDatasetUpload(value,{uploadId,totalBytes,entries}){
   if(value.totalBytes!==totalBytes||value.entries!==entries)throw uploadError('上传结果与本地清单不符。','MISMATCH');
   return value;
 }
-export async function uploadBrowserDataset({call,userId,machine,name,scan,signal,onProgress=()=>{},onRoute=()=>{},pollMs=1500,keyStore,allowRelay=false,via='auto',resume,fetch,now}){
+export async function uploadBrowserDataset({call,userId,machine,name,scan,signal,onProgress=()=>{},onRoute=()=>{},pollMs=1500,keyStore,allowRelay=false,via='auto',resume,fetch,now,chunkClock=()=>performance.now()}){
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw Error('名称需为 1–40 位字母、数字、下划线或连字符。');
   if(!['auto','direct','relay'].includes(via))throw Error('请选择有效的上传通道。');
   if(via==='relay'&&scan.totalBytes>LARGE_RELAY_BYTES&&allowRelay!==true)throw uploadError('超过 256 MiB，请先确认经门户中转。','RELAY_CONSENT',{canRelay:true});
@@ -227,13 +252,17 @@ export async function uploadBrowserDataset({call,userId,machine,name,scan,signal
     for(const entry of scan.files){
       const status=await request('status',{path:entry.path}),remote=status.file;alive(signal);
       if(!remote||remote.path!==entry.path||remote.size!==entry.size||remote.sha256!==entry.sha256||!Number.isSafeInteger(remote.offset)||remote.offset<0||remote.offset>entry.size)throw uploadError('服务器文件续传信息不匹配。',direct?'DIRECT':'UNCONFIRMED');
-      const file=scan.paths.get(entry.path),hash=new SHA256();let sent=remote.offset;
-      for(let at=0;at<file.size;at+=chunkBytes){
-        alive(signal);const bytes=new Uint8Array(await file.slice(at,at+chunkBytes).arrayBuffer());alive(signal);
-        if(bytes.length!==Math.min(chunkBytes,file.size-at))throw Error('本地文件读取不完整；未发布。');hash.update(bytes);
+      const file=scan.paths.get(entry.path),hash=new SHA256();let sent=remote.offset,step=CHUNK_BYTES;
+      if(!file||file.size!==entry.size)throw Error('本地文件大小已改变；未发布。');
+      for(let at=0;at<file.size;){
+        alive(signal);const maximum=direct?await direct.prepare():chunkBytes;
+        const length=Math.min(at<sent?Math.min(chunkBytes,sent-at):Math.min(step,maximum),file.size-at);
+        const bytes=new Uint8Array(await file.slice(at,at+length).arrayBuffer());alive(signal);
+        if(bytes.length!==length)throw Error('本地文件读取不完整；未发布。');hash.update(bytes);
         const begin=Math.max(0,sent-at);
-        if(begin<bytes.length){const part=bytes.subarray(begin),result=await request('chunk',{path:entry.path,offset:sent,bytes:part});alive(signal);if(result.offset!==sent+part.length)throw uploadError('文件写入未确认。',direct?'DIRECT':'UNCONFIRMED');sent=result.offset;}
+        if(begin<bytes.length){const part=bytes.subarray(begin),started=chunkClock(),result=await request('chunk',{path:entry.path,offset:sent,bytes:part});alive(signal);if(result.offset!==sent+part.length)throw uploadError('文件写入未确认。',direct?'DIRECT':'UNCONFIRMED');sent=result.offset;if(direct)step=adaptiveUploadChunk(step,chunkClock()-started,direct.maxChunkBytes===MAX_DIRECT_CHUNK_BYTES?MAX_DIRECT_CHUNK_BYTES:CHUNK_BYTES);}
         report({...state,state:'UPLOADING'},{route,path:entry.path,bytes:transferred+sent,totalBytes:scan.totalBytes});
+        at+=bytes.length;
       }
       if(!file.size&&!remote.complete){const result=await request('chunk',{path:entry.path,offset:0,bytes:new Uint8Array()});alive(signal);if(result.offset!==0||result.complete!==true)throw uploadError('空文件写入未确认。',direct?'DIRECT':'UNCONFIRMED');}
       if(hash.hex()!==entry.sha256)throw Error('本地文件在上传时发生变化；未发布，请重新选择目录。');

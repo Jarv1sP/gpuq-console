@@ -124,6 +124,11 @@ test('public guide excludes cloud and link-import workflows until they are ready
 
 test('unified dataset guide distinguishes catalog, capacity and preparation from training readiness', () => {
   assert.match(guide, /网页只有一个“数据集”入口/);
+  assert.match(guide, /仓库列表按数据集显示，服务器栏筛选缓存位置/);
+  assert.match(guide, /「所属」显示授权记录对应的用户名，省略重复前缀/);
+  assert.match(guide, /完整 `--data ID@版本`/);
+  assert.match(guide, /`\/data2\/ID` 只读路径读取/);
+  assert.match(guide, /数据集 → 上传数据 → 在服务器上整理/);
   assert.match(guide, /相同数据集 ID 和完整版本才合并显示/);
   assert.match(guide, /不是个人硬磁盘配额/);
   assert.match(guide, /`PREPARING_DATA` 表示正在准备所选机器的本地数据，暂不占 GPU 额度/);

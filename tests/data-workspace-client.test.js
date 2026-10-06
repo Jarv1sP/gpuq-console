@@ -60,7 +60,7 @@ test('publication receipts report current readiness and require admin inspection
   for(const state of ['NOT_READY','UNREGISTERED','UNAVAILABLE']){
     const text=publicationText({state,publicationState:'READY'});assert.doesNotMatch(text,/服务器正在|已发布：|可在下方选择/);
   }
-  assert.match(publicationText({state:'NOT_READY'}),/副本.*不再就绪/);
+  assert.match(publicationText({state:'NOT_READY'}),/服务器缓存.*不再就绪/);
   assert.match(publicationText({state:'UNREGISTERED'}),/登记已删除/);
   assert.match(publicationText({state:'UNAVAILABLE'}),/无权.*管理员/);
   assert.match(publicationText({state:'UNKNOWN'}),/暂不可编辑.*管理员.*不要重复发布/);
