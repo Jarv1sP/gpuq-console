@@ -246,7 +246,9 @@ export function terminalUI(store,toast){
     button.disabled=true;let pendingOpen=null;
     try{
       const entry=button.id.startsWith('terminal-data-')?'data':button.id.startsWith('terminal-root-')?'host':knownTarget?entryOf(knownTarget):'development';
-      const target=terminalLaunchContext({machine:knownTarget?.machine??document.querySelector(entry==='data'?'[name=dataset-machine]':'[name=terminal-machine]')?.value,project:knownTarget?.project??document.querySelector('[name=workspace-project]')?.value,role:store.principal?.role,entry});
+      const projectControl=document.querySelector('[name=workspace-project]');
+      const selectedProject=projectControl?.selectedOptions?.[0]?.dataset?.project||projectControl?.value;
+      const target=terminalLaunchContext({machine:knownTarget?.machine??document.querySelector(entry==='data'?'[name=dataset-machine]':entry==='host'?'[name=workspace-machine]':'[name=terminal-machine]')?.value,project:knownTarget?.project??selectedProject,role:store.principal?.role,entry});
       if(paused(target))throw Error('维护中：不能新开或重连开发终端；已连接终端仍可断开或结束。');
       if(target.hostAdmin&&!window.confirm(`进入 ${target.machine} 的宿主机 ROOT 运维？可修改整机、影响他人任务，并能绕过 GPU 配额。`))return;
       const userId=store.principal?.userId,auth=store.authGeneration,workspace=workspaceGeneration;if(!userId)throw Error('请先登录。');
@@ -301,11 +303,12 @@ export function terminalUI(store,toast){
     if(session?.id===id){ensureDialog();if(!dialog.open){dialog.showModal();revealMotion();}fit?.fit();term?.focus();return;}
     openTerminal({id:'terminal-'+(known.dataWorkspace?'data-':known.hostAdmin?'root-':'')+'reconnect',disabled:false},known);
   });
+  document.addEventListener('gpuq-terminal-state-request',announce);
   document.addEventListener('gpuq-maintenance-state',syncMaintenance);
   document.addEventListener('gpuq-maintenance-root',event=>{
-    const {machine,id,userId}=event.detail||{};if(userId!==store.principal?.userId||store.principal?.role!=='admin'||!store.data?.machines?.some(item=>item.id===machine))return;
+    const {machine,id,userId,mode}=event.detail||{};if(userId!==store.principal?.userId||store.principal?.role!=='admin'||!store.data?.machines?.some(item=>item.id===machine))return;
     const known=id?sessions.get(id):null;if(id&&(!known||!known.hostAdmin||known.machine!==machine||known.userId!==userId))return;
-    openTerminal({id:id?'terminal-root-reconnect':'terminal-root-open',disabled:false},known||{machine,project:''});
+    openTerminal({id:id||mode==='reconnect'?'terminal-root-reconnect':'terminal-root-open',disabled:false},known||{machine,project:''});
   });
   document.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;

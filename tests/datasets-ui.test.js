@@ -23,7 +23,7 @@ test('archive UI distinguishes confirmed preservation from local readiness and e
  assert.equal(archiveStatus(null),'');
  for(const phase of ['QUEUED','COPYING','PROVISIONING','FAILED','BLOCKED']){
    const html=archiveStatus({phase,dataset:'mine',version:'a'.repeat(64),error:'<script>'});
-   assert.match(html,/本机数据继续保留/);assert.doesNotMatch(html,/长期原件已保存|<script>/);
+   assert.match(html,/服务器缓存继续保留/);assert.doesNotMatch(html,/长期原件已保存|<script>/);
    assert.equal(html.includes('data-retry-archive'),['FAILED','BLOCKED'].includes(phase));
  }
  assert.doesNotMatch(archiveStatus({phase:'ARCHIVED',originalRetained:false}),/长期原件已保存/);
@@ -37,7 +37,7 @@ test('archive action belongs only to the selected machine, not another replica',
 test('dataset cards keep full immutable versions and escape all text',()=>{
  const html=rows({datasets:[{dataset:'<unsafe>',versions:[{version:'" onfocus="evil',state:'FAILED',bytes:1024,files:1}]}]});
  assert.ok(html.includes('&lt;unsafe&gt;'));assert.ok(html.includes('&quot; onfocus=&quot;evil'));assert.ok(!html.includes('<unsafe>'));
- assert.match(html,/准备失败/);
+ assert.match(html,/取回失败/);
 });
 test('only ready datasets can be used and failed preparations can be retried',()=>{
  const ready=rows({datasets:[{dataset:'tiny',versions:[{version:'a'.repeat(64),state:'READY',bytes:1,files:1}]}]});
@@ -54,20 +54,20 @@ test('personal uploads without a configured source show resume guidance instead 
 });
 test('evicted workspace publications guide users to republish, not resume a directory upload',()=>{
  const html=rows({datasets:[{dataset:'w-user-private',versions:[{version:'a'.repeat(64),state:'REGISTERED',canPrepare:false}]}]});
- assert.match(html,/个人数据空间.*重新发布/);assert.doesNotMatch(html,/继续上传|data-prepare-dataset/);assert.match(html,/data-use-dataset="w-user-private"[^>]+disabled/);
+ assert.match(html,/在服务器上整理.*重新发布/);assert.doesNotMatch(html,/继续上传|data-prepare-dataset/);assert.match(html,/data-use-dataset="w-user-private"[^>]+disabled/);
 });
 test('remote readiness never enables training or preparation on the selected machine',()=>{
  const html=rows({machine:'gpu-2',datasets:[{dataset:'same',versions:[{version:'a'.repeat(64),state:'NOT_LOCAL',canPrepare:false,locations:[{machine:'gpu-1<script>',state:'READY'}]}]}]});
- assert.match(html,/本机没有此版本/);assert.match(html,/gpu-1&lt;script&gt;/);assert.doesNotMatch(html,/<script>|data-prepare-dataset/);
+ assert.match(html,/所选服务器未缓存/);assert.match(html,/gpu-1&lt;script&gt;/);assert.doesNotMatch(html,/<script>|data-prepare-dataset/);
  assert.match(html,/data-use-dataset="same"[^>]+disabled/);assert.match(html,/没有可用复制来源/);
 });
 test('approved remote source enables preparation, never claims a local ready copy',()=>{
  const html=rows({datasets:[{dataset:'remote',versions:[{version:'a'.repeat(64),state:'NOT_LOCAL',canPrepare:true,sourceMachine:'gpu-4'}]}]});
- assert.doesNotMatch(html,/data-(?:use|prepare)-dataset="remote"[^>]+disabled/);assert.match(html,/准备后训练/);assert.doesNotMatch(html,/实验室内网/);assert.doesNotMatch(html,/本机已就绪/);
+ assert.doesNotMatch(html,/data-(?:use|prepare)-dataset="remote"[^>]+disabled/);assert.match(html,/用于训练/);assert.doesNotMatch(html,/实验室内网/);assert.doesNotMatch(html,/已缓存/);
 });
 test('unknown selected-machine status remains unavailable even when another location is ready',()=>{
  const html=rows({datasets:[{dataset:'same',versions:[{version:'a'.repeat(64),canPrepare:false,locations:[{machine:'gpu-1',state:'READY'}]}]}]});
- assert.match(html,/本机状态待确认/);assert.match(html,/data-use-dataset="same"[^>]+disabled/);assert.doesNotMatch(html,/data-prepare-dataset/);
+ assert.match(html,/缓存状态待确认/);assert.match(html,/data-use-dataset="same"[^>]+disabled/);assert.doesNotMatch(html,/data-prepare-dataset/);
 });
 test('capacity distinguishes unknown readings and shared space from a personal quota',()=>{
  assert.match(capacityText(null),/容量待更新/);assert.match(capacityText({available:false,availableBytes:99,filesystemBytes:100}),/容量待更新/);
@@ -78,7 +78,7 @@ test('capacity distinguishes unknown readings and shared space from a personal q
 test('approved local preparation can be selected for training without claiming it is READY',()=>{
  for(const state of ['REGISTERED','STAGING','PREPARING']){
   const html=rows({datasets:[{dataset:'source',versions:[{version:'a'.repeat(64),state,canPrepare:state!=='PREPARING'}]}]});
-  assert.doesNotMatch(html,/data-use-dataset="source"[^>]+disabled/);assert.match(html,/准备后训练/);assert.match(html,/准备期间不占额度/);assert.doesNotMatch(html,/本机已就绪/);
+  assert.doesNotMatch(html,/data-use-dataset="source"[^>]+disabled/);assert.match(html,/用于训练/);assert.match(html,/准备期间不占额度/);assert.doesNotMatch(html,/已缓存/);
  }
  for(const state of ['NOT_LOCAL','UNKNOWN'])assert.match(rows({datasets:[{dataset:'absent',versions:[{version:'a'.repeat(64),state,canPrepare:true}]}]}),/data-use-dataset="absent"[^>]+disabled/);
  const failed=rows({datasets:[{dataset:'source',versions:[{version:'a'.repeat(64),state:'FAILED',canPrepare:true}]}]});

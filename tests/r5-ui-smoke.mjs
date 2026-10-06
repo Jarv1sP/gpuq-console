@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 // Actual Portal/SQLite/cookies/CSP/assets in Chromium. Node observations and
 // terminal output are synthetic; no shell, GPU, SSH or production mutation.
 import assert from 'node:assert/strict';
@@ -29,6 +30,17 @@ async function closeRoutedContext(context){
   await context.unrouteAll({behavior:'wait'});
   await context.close();
 }
+async function datasetTarget(page,machine){
+  // The initial upload view reveals its destination after selecting files.
+  // Cache inspection instead follows the visible, shared server context.
+  await page.locator('#context-machine').selectOption(machine);
+  await page.waitForFunction(machine=>document.querySelector('[name=dataset-machine]').value===machine&&!document.querySelector('#datasets-refresh').disabled,machine);
+}
+async function datasetDetail(page,dataset){
+  const row=page.locator('[data-v3-select="'+dataset+'"]');
+  if(!await row.isVisible()&&await page.locator('[data-v3-back]').isVisible())await page.locator('[data-v3-back]').click();
+  await row.click();await page.locator('#warehouse-inspector .v3-train').waitFor();
+}
 const project={project:'vision-baseline',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
 const status=()=>({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map((machine,position)=>({id:machine.id,checkedAt:new Date().toISOString(),reachable:position!==2,
   gpus:position===2?[]:Array.from({length:machine.cards},(_,index)=>({index,memoryTotalMiB:(Number.parseFloat(machine.memory)||32)*1024,memoryUsedMiB:index<2?16384:0,processesAvailable:true,processes:index<2?[{pid:1000+index,memoryUsedMiB:16384}]:[]})),
@@ -47,6 +59,7 @@ try{
       return {datasets:machine===targetMachine?[{dataset:'tiny-local',ownerIds:datasetOwners,versions:[{version:release,state:'READY',canPrepare:true,bytes:2048,files:1}]}]:machine===sourceMachine?[{dataset:'scans',ownerIds:datasetOwners,versions:[{version:release,state:'READY',canPrepare:true,bytes:7*1024**3,files:120}]}]:[]};
     }
     if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
+    if(operation==='datasets.upload.routes')return {available:false,protocol:'dataset-upload-v1',reason:'not-configured',relayLimitBytes:256*1024**2};
     if(operation==='transfers.capabilities')return {protocol:'lan-transfer-v1',enabled:true,sourceReady:true,sources:[sourceMachine]};
     if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:'READY'};
     if(operation==='logs')return {text:'epoch 12/40 loss=0.438 val_acc=0.716\ncheckpoint saved\nTraining continues on the synthetic node.'};
@@ -116,7 +129,7 @@ try{
   for(const machine of MACHINES)assert.ok(!loggedOutLabels.some(label=>label.includes(machine.id)),'logout clears mirrored server IDs: '+machine.id);
   await login(inventoryProbe,'admin');
   assert.deepEqual(inventoryRequests,['/machines.js'],'administrator uses state rather than importing the directory');
-  await inventoryProbe.setViewportSize({width:1440,height:1080});await inventoryProbe.locator('[data-nav=users]').click();await inventoryProbe.locator('#filter-all').click();await inventoryProbe.locator('[data-user="'+member.id+'"]').click();
+  await inventoryProbe.setViewportSize({width:1440,height:1080});await openMembers(inventoryProbe);await inventoryProbe.locator('#filter-all').click();await inventoryProbe.locator('[data-user="'+member.id+'"]').click();
   assert.equal(await inventoryProbe.locator('[data-quota=total]').getAttribute('max'),String(MACHINES.reduce((sum,machine)=>sum+machine.cards,0)),'account capacity is recomputed after the empty login phase');
   assert.equal(await inventoryProbe.locator('[data-permission-meter]').count(),MACHINES.length);
   await closeRoutedContext(inventoryProbe.context());
@@ -166,24 +179,32 @@ try{
   await desktop.locator('[data-receipt-retry]').click();await desktop.locator('[data-receipt-new-draft]').waitFor({state:'visible'});
   assert.equal(submitRequests.length,2);assert.deepEqual(submitRequests[1],submitRequests[0]);assert.equal(service.store.jobs.filter(row=>row.name==='receipt-local').length,1,'explicit retry cannot duplicate the accepted task');
   assert.match(await desktop.locator('#submit-summary').innerText(),new RegExp(persisted[0].id.slice(0,8)));assert.equal(await desktop.locator('#train-form [type=submit]').isDisabled(),true);await capture(desktop,'r5-submit-receipt-1440',true);await closeSubmit(desktop);assert.match(await desktop.locator('#submission-receipt').innerText(),/receipt-local/);await desktop.unroute('**/api/call',loseReply);
-  await desktop.locator('[data-nav=datasets]').click();await desktop.locator('[name=dataset-machine]').selectOption(targetMachine);await desktop.locator('#datasets-refresh').click();await desktop.locator('[data-route-cell]').first().waitFor();
-  const routeCell=desktop.locator('.dataset-card').filter({has:desktop.locator('h3',{hasText:/^scans$/})}).locator('[data-route-cell]').first();
+  await desktop.locator('[data-nav=datasets]').click();await datasetTarget(desktop,targetMachine);await datasetDetail(desktop,'scans');
   const prepared=[];const observePrepare=guardedRoute(async route=>{const body=route.request().postDataJSON();if(body?.operation==='datasets.prepare'){prepared.push(body.args);await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result:{dataset:body.args.dataset,version:body.args.version,state:'PREPARING'}})});}else await route.fallback();});await desktop.route('**/api/call',observePrepare);
-  await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);await desktop.evaluate(()=>scrollTo(0,0));await routeCell.hover();await desktop.locator('.dataset-copy-route').waitFor({state:'visible'});assert.equal(await desktop.locator('.dataset-copy-route').innerText(),sourceMachine+' → '+targetMachine+' · 7.00 GiB');assert.doesNotMatch(await desktop.locator('.dataset-copy-route').innerText(),/实验室内网/);assert.equal(prepared.length,0,'hover is read-only');
-  assert.equal(await desktop.locator('.dataset-matrix-heading [data-machine="'+targetMachine+'"]').getAttribute('title'),targetMachine);
-  const stateTops=await routeCell.locator('..').locator('..').locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().top));assert.ok(Math.max(...stateTops)-Math.min(...stateTops)<=1,'desktop copy states align at the top of their row');
-  const routeBounds=await desktop.locator('.dataset-copy-route>span').boundingBox(),prepareBounds=await routeCell.locator('..').locator('..').locator('..').locator('[data-prepare-dataset]').boundingBox();assert.ok(routeBounds.y+routeBounds.height<=prepareBounds.y,'route label ends before preparation state');
-  assert.equal(await routeCell.locator('..').locator('..').locator('..').locator('.dataset-details-cell>.ui-info').count(),1);
-  assert.match(await desktop.locator('#datasets-status').innerText(),/^更新时间未知/);
+  const inspector=desktop.locator('#warehouse-inspector'),sourceRow=inspector.locator('.v3-server').filter({has:desktop.locator('.v3-server-text>b[title="'+sourceMachine+'"]')}),targetRow=inspector.locator('.v3-server.cur');
+  await sourceRow.hover();assert.equal(prepared.length,0,'inspecting the true READY source is read-only');
+  assert.equal(await sourceRow.locator('.v3-server-text>b').getAttribute('title'),sourceMachine);
+  assert.equal(await sourceRow.locator('.v3-server-text>span').textContent(),'已缓存');
+  assert.equal(await sourceRow.locator('[data-v3-cache]').count(),0,'a READY source has no redundant cache operation');
+  assert.equal(await targetRow.locator('.v3-server-text>b').getAttribute('title'),targetMachine);
+  assert.equal(await targetRow.locator('[data-v3-cache]').isEnabled(),true,'a real permitted source unlocks preparation at the selected destination');
+  assert.deepEqual(await inspector.locator('.v3-code code').allTextContents(),['--data scans@'+release,'/data2/scans']);
+  assert.equal(await inspector.locator('.v3-lock').textContent(),'只读');
+  assert.equal(await desktop.locator('.v3-server-chip:not(.v3-all)').count(),MACHINES.length);
+  const serverCenters=await inspector.locator('.v3-server').evaluateAll(nodes=>nodes.map(node=>{const name=node.querySelector('.v3-server-text'),glyph=node.querySelector('.v3-g'),r=name.getBoundingClientRect(),g=glyph.getBoundingClientRect();return Math.abs(r.y+r.height/2-g.y-g.height/2);}));assert.ok(serverCenters.every(value=>value<=1),'server glyphs and names share one row centre');
+  assert.equal(await inspector.locator('.v3-train [data-use-dataset]').isVisible(),true);
+  assert.equal(await inspector.locator('.v3-train .v3-code').count(),2);
+  assert.equal(await inspector.locator('.v3-server.cur').count(),1,'the selected destination is identified exactly once');
+  assert.equal(await inspector.locator('.v3-server.cur [data-v3-cache]').getAttribute('data-v3-cache'),targetMachine);
   assert.equal(await desktop.locator('.workspace-context-heading .ui-info').count(),1);assert.equal(await desktop.locator('.wb-publish-control>.ui-info').count(),0);
   assert.match(await desktop.locator('.workspace-context-heading .ui-info-content').textContent(),/先完成上传并结束开发终端，再保存代码与环境版本。/);
-  const band=await desktop.locator('[data-machine="'+targetMachine+'"].dataset-target').evaluateAll(nodes=>nodes.map(n=>({x:n.getBoundingClientRect().left,w:n.getBoundingClientRect().width,bg:getComputedStyle(n).backgroundColor})));assert.ok(band.length>=3&&band.every(n=>n.x===band[0].x&&n.w===band[0].w&&n.bg===band[0].bg));await capture(desktop,'r5-datasets-route-1440',true);assert.equal(await desktop.locator('.dataset-copy-route').isVisible(),true);
-  await routeCell.click();await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.deepEqual(prepared,[{machine:targetMachine,dataset:'scans',version:release}]);await desktop.unroute('**/api/call',observePrepare);
+  await capture(desktop,'r5-datasets-route-1440',true);
+  await Promise.all([desktop.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.prepare'),targetRow.locator('[data-v3-cache]').click()]);await desktop.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.deepEqual(prepared,[{machine:targetMachine,dataset:'scans',version:release}]);await desktop.unroute('**/api/call',observePrepare);
   const phone=await pageFor(390,true);await login(phone,member.username);await phone.locator('[data-nav=work]').click();await phone.locator('.wb-focal').waitFor();await capture(phone,'r5-work-member-390');await noOverflow(phone);
   await phone.locator('.wb-focal [data-job-mission]').click();await phone.locator('#job-mission').waitFor({state:'visible'});await capture(phone,'r5-mission-member-390',true);assert.ok(await phone.locator('#job-mission').evaluate(n=>n.scrollWidth<=n.clientWidth+1));await phone.keyboard.press('Escape');
   await phone.keyboard.press('Control+k');await phone.locator('#control-command').fill(targetMachine+' 两张卡 跑 python train.py 用 tiny-local');await phone.keyboard.press('Enter');await phone.locator('#control-data-version:not([disabled])').waitFor();await phone.locator('#control-data-version').selectOption(release);await phone.locator('#control-confirm-fields').check();await capture(phone,'r5-command-prefill-390',true);assert.ok(await phone.locator('#mission-control').evaluate(n=>n.scrollWidth<=n.clientWidth+1));await phone.keyboard.press('Escape');
-  await phone.locator('[data-nav=datasets]').click();await phone.locator('#datasets-refresh').click();await phone.locator('[data-route-cell]').first().waitFor();await capture(phone,'r5-datasets-member-390');await noOverflow(phone);
-  const authAdmin=await pageFor(1440);await login(authAdmin,'admin');await authAdmin.locator('[data-nav=work]').click();await capture(authAdmin,'r5-work-admin-1440');await authAdmin.locator('[data-nav=datasets]').click();await authAdmin.locator('#datasets-refresh').click();await authAdmin.locator('.dataset-matrix').waitFor();await capture(authAdmin,'r5-datasets-admin-1440');await authAdmin.setViewportSize({width:390,height:844});await capture(authAdmin,'r5-datasets-admin-390');await authAdmin.locator('[data-nav=work]').click();await capture(authAdmin,'r5-work-admin-390');await noOverflow(authAdmin);
+  await phone.locator('[data-nav=datasets]').click();await phone.locator('#datasets-refresh').click();await phone.locator('[data-v3-select]').first().waitFor();await capture(phone,'r5-datasets-member-390');await noOverflow(phone);
+  const authAdmin=await pageFor(1440);await login(authAdmin,'admin');await authAdmin.locator('[data-nav=work]').click();await capture(authAdmin,'r5-work-admin-1440');await authAdmin.locator('[data-nav=datasets]').click();await authAdmin.locator('#datasets-refresh').click();await authAdmin.locator('[data-v3-select]').first().waitFor();await capture(authAdmin,'r5-datasets-admin-1440');await authAdmin.setViewportSize({width:390,height:844});await capture(authAdmin,'r5-datasets-admin-390');await authAdmin.locator('[data-nav=work]').click();await capture(authAdmin,'r5-work-admin-390');await noOverflow(authAdmin);
   const reviewChecks=[];
   for(const [page,role,fixtureJob] of [[phone,'member',running],[authAdmin,'admin',adminRunning]])for(const width of [1440,390,320]){
     await page.setViewportSize({width,height:width<760?844:1080});await page.locator('[data-nav=work]').click();await refreshVisible(page);await noOverflow(page);
@@ -209,39 +230,44 @@ try{
       await capture(page,'r5-review-mission-'+role+'-'+width+'-'+inventory.id,true);await page.keyboard.press('Escape');
     }
     fixtureJob.machine=targetMachine;service.save();await refreshVisible(page);await page.locator('[name=workspace-machine]').selectOption(targetMachine);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
-    await page.locator('[data-nav=datasets]').click();await page.locator('[name=dataset-machine]').selectOption(targetMachine);await page.locator('#datasets-refresh').click();await page.locator('.dataset-matrix').waitFor();await noOverflow(page);assert.equal(await page.locator('.heading-actions [data-shell-action=control]').isVisible(),width<760?!await page.locator('#mobile-control').isVisible():true,'same control entry on datasets');
-    assert.equal(await page.locator('[name=dataset-machine]').evaluate(n=>getComputedStyle(n).color),'rgba(0, 0, 0, 0)','dataset selector renders one name');assert.equal(await page.locator('.dataset-matrix-heading [data-machine]').count(),MACHINES.length);assert.equal(await page.locator('#datasets-capacity>div>strong').innerText(),'502 GiB');assert.equal(await page.locator('#datasets-capacity>div>small').innerText(),'共 1024 GiB');assert.equal(await page.locator('.dataset-library .hero-label').count(),0);
+    await page.locator('[data-nav=datasets]').click();await datasetTarget(page,targetMachine);await page.locator('[data-v3-select]').first().waitFor();await noOverflow(page);assert.equal(await page.locator('.heading-actions [data-shell-action=control]').isVisible(),false,'dataset upload and transfer actions occupy the heading; control remains in the shared bottom layer');
+    assert.equal(await page.locator('.dataset-matrix,.datasets-ledger-strip').count(),0,'one warehouse replaces the matrix and quota ledger');
+    assert.equal(await page.locator('.v3-server-chip:not(.v3-all)').count(),MACHINES.length);
+    assert.deepEqual(await page.locator('.v3-server-chip:not(.v3-all)').evaluateAll(nodes=>nodes.map(node=>({id:node.dataset.v3Filter,label:node.querySelector('.v3-server-name>span').textContent,title:node.title.split(' · ')[0]}))),MACHINES.map(row=>({id:row.id,label:row.id,title:row.id})));
+    assert.equal(await page.locator('#datasets-capacity>div>strong').innerText(),'502 GiB');assert.equal(await page.locator('#datasets-capacity>div>small').innerText(),'共 1024 GiB');assert.equal(await page.locator('.dataset-library .hero-label').count(),0);
+    assert.equal(await page.locator('[data-v3-select]').count(),2,'remote and local versions remain separate logical datasets');
+    assert.equal(await page.locator('#page-datasets .dataset-cache-admin,#page-datasets [data-cache-pin-slot],#page-datasets [data-remove-more]').count(),0,'main components are identical for members and administrators');
     if(width<760){
-      assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'list');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),false);assert.equal(await page.locator('.help-links').isVisible(),false,'phone datasets have no detached footer information mark');
-      for(const [cardIndex,card] of (await page.locator('.dataset-card').all()).entries()){
-        const serverRows=await page.evaluate(index=>{
-          const card=document.querySelectorAll('.dataset-card')[index];
-          const rect=node=>{if(!node.getClientRects().length)return null;const {x,y,width,height}=node.getBoundingClientRect();return {x,y,width,height};};
-          return {names:[...card.querySelectorAll('.dataset-machine-label')].map(node=>node.textContent),locations:[...card.querySelectorAll('.dataset-location')].map(location=>({name:rect(location.querySelector('.dataset-machine-label')),state:rect(location.querySelector('.dataset-location-status'))}))};
-        },cardIndex);
-        assert.equal(await card.getAttribute('role'),'listitem');assert.deepEqual(serverRows.names,MACHINES.map(row=>row.id));
-        const facts=await card.locator('.dataset-location-text').evaluateAll(nodes=>nodes.map(n=>({height:n.getBoundingClientRect().height,line:parseFloat(getComputedStyle(n).lineHeight),whiteSpace:getComputedStyle(n).whiteSpace})));assert.ok(facts.every(n=>n.height<=n.line+1&&n.whiteSpace==='nowrap'),'phone states stay on one line');
-        for(const {name,state} of serverRows.locations){assert.ok(name.x+name.width<=state.x&&Math.abs(name.y+name.height/2-state.y-state.height/2)<=1,'phone ID and state share one line');}
-        const selected=card.locator('.dataset-location.dataset-target'),fact=await selected.locator('.dataset-location-fact').boundingBox(),row=await selected.boundingBox();
-        assert.equal(await selected.locator('[data-use-dataset]').count(),1);
-        const prepare=selected.locator('[data-prepare-dataset]'),use=selected.locator('[data-use-dataset]');
-        if(await selected.getAttribute('data-location-state')==='READY'){assert.equal(await prepare.isVisible(),false,'local ready cards hide redundant preparation');assert.equal(await use.isVisible(),true);}
-        const actionBounds=[];for(const button of await selected.locator('.file-actions .button:visible').all()){const bounds=await button.boundingBox();actionBounds.push(bounds);assert.ok(bounds.height>=44&&bounds.y>=fact.y+fact.height&&bounds.y+bounds.height<=row.y+row.height+1,'mobile actions keep distinct 44px targets below the status');}
-        if(actionBounds.length===2){assert.ok(actionBounds[0].x+actionBounds[0].width<=actionBounds[1].x&&Math.abs(actionBounds[0].y-actionBounds[1].y)<=1,'preparation and training are separate side-by-side buttons');assert.match(await use.getAttribute('class'),/primary/);assert.doesNotMatch(await prepare.getAttribute('class'),/quiet/);}
-        assert.ok(await card.evaluate(n=>n.scrollWidth<=n.clientWidth+1),'dataset card has no horizontal matrix scroll');
-      }
-      const mobileRoute=page.locator('.dataset-mobile-route');assert.equal(await mobileRoute.isVisible(),true);assert.match(await mobileRoute.textContent(),new RegExp(sourceMachine+'.*→.*'+targetMachine+'.*7.00 GiB'));
-      if(width===390){
-        await page.locator('[data-use-dataset]').first().evaluate(n=>globalThis.savedDatasetAction=n);await page.setViewportSize({width:1440,height:1080});await page.waitForFunction(()=>document.querySelector('.dataset-matrix')?.getAttribute('role')==='table');
-        assert.equal(await page.locator('.dataset-matrix').getAttribute('role'),'table');assert.equal(await page.locator('.dataset-matrix-heading').isVisible(),true);
-        assert.equal(await page.locator('[data-use-dataset]').first().evaluate(n=>n===globalThis.savedDatasetAction&&n.closest('.dataset-actions-cell').parentElement.classList.contains('dataset-row-details')),true,'resize restores the same action to the desktop column');
-        await page.setViewportSize({width,height:844});await page.waitForFunction(()=>document.querySelector('.dataset-matrix')?.getAttribute('role')==='list');assert.equal(await page.locator('[data-use-dataset]').first().evaluate(n=>n===globalThis.savedDatasetAction&&!!n.closest('.dataset-location.dataset-target')),true);
-      }
+      assert.equal(await page.locator('.help-links').isVisible(),false,'phone datasets have no detached footer information mark');
+      assert.deepEqual(await page.locator('#warehouse-search').evaluate(node=>({height:node.getBoundingClientRect().height,font:getComputedStyle(node).fontSize})),{height:40,font:'14px'});
+    }
+    for(const dataset of ['scans','tiny-local']){
+      await datasetDetail(page,dataset);const panel=page.locator('#warehouse-inspector');
+      assert.deepEqual(await panel.locator('.v3-server-text>b').evaluateAll(nodes=>nodes.map(node=>node.title)),MACHINES.map(row=>row.id));
+      assert.equal(await panel.locator('.v3-train [data-use-dataset]').count(),1);
+      assert.equal(await panel.locator('.v3-train [data-use-dataset]').isEnabled(),true,'owned local READY or a real permitted source grants training with preparation');
+      assert.deepEqual(await panel.locator('.v3-code code').allTextContents(),['--data '+dataset+'@'+release,'/data2/'+dataset]);
+      assert.equal(await panel.locator('.v3-lock').textContent(),'只读');
+      assert.equal(await panel.locator('.v3-server.cur').count(),1);
+      if(dataset==='tiny-local')assert.equal(await panel.locator('.v3-server.cur [data-v3-cache]').count(),0,'local READY hides redundant preparation');
+      else assert.equal(await panel.locator('[data-v3-cache="'+targetMachine+'"]').isEnabled(),true);
+      const facts=await panel.locator('.v3-server').evaluateAll(nodes=>nodes.map(node=>{const name=node.querySelector('.v3-server-text'),glyph=node.querySelector('.v3-g'),r=name.getBoundingClientRect(),g=glyph.getBoundingClientRect(),text=node.querySelector('.v3-server-text>span');return {centred:Math.abs(r.y+r.height/2-g.y-g.height/2)<=1,stateHeight:text.getBoundingClientRect().height,line:parseFloat(getComputedStyle(text).lineHeight),nowrap:getComputedStyle(text).whiteSpace==='nowrap'};}));assert.ok(facts.every(row=>row.centred&&row.nowrap&&row.stateHeight<=row.line+1),'server facts remain aligned and readable');
+      assert.ok(await panel.evaluate(node=>node.scrollWidth<=node.clientWidth+1),'detail has no horizontal overflow');
+      if(width<760){for(const action of await panel.locator('button:visible').all())assert.ok(await action.evaluate(node=>node.getBoundingClientRect().height>=44),'mobile detail actions retain distinct 44px targets');}
+    }
+    await datasetDetail(page,'scans');
+    if(width===390){
+      await page.locator('.v3-train [data-use-dataset]').evaluate(node=>globalThis.savedDatasetAction=node);
+      await page.setViewportSize({width:1440,height:1080});await page.locator('.v3-list').waitFor({state:'visible'});
+      assert.equal(await page.locator('.v3-train [data-use-dataset]').evaluate(node=>node===globalThis.savedDatasetAction),true,'resizing retains the same fixed-version training action');
+      assert.equal(await page.locator('.v3-code code').first().textContent(),'--data scans@'+release);
+      await page.setViewportSize({width,height:844});assert.equal(await page.locator('.v3-train [data-use-dataset]').evaluate(node=>node===globalThis.savedDatasetAction),true);
+      assert.equal(await page.locator('.v3-inspector').isVisible(),true);assert.equal(await page.locator('.v3-list').isVisible(),false);
     }
     await capture(page,'r5-review-datasets-'+role+'-'+width,false,true);reviewChecks.push({role,width,inventory:MACHINES.map(row=>row.id)});
   }
   await writeFile(join(shots,'review-checks.json'),JSON.stringify(reviewChecks,null,2));
-  await phone.route('**/api/call',observePrepare);await phone.locator('.dataset-location.dataset-target [data-prepare-dataset="scans"]').click();await phone.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(prepared.length,2);assert.deepEqual(prepared[1],{machine:targetMachine,dataset:'scans',version:release});await phone.unroute('**/api/call',observePrepare);
+  await phone.route('**/api/call',observePrepare);await datasetDetail(phone,'scans');await Promise.all([phone.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.prepare'),phone.locator('[data-v3-cache="'+targetMachine+'"][data-dataset="scans"]').click()]);await phone.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(prepared.length,2);assert.deepEqual(prepared[1],{machine:targetMachine,dataset:'scans',version:release});await phone.unroute('**/api/call',observePrepare);
   await desktop.locator('[data-nav=work]').click();await desktop.locator('.wb-focal [data-job-mission]').click();desktop.once('dialog',async dialog=>{assert.match(dialog.message(),/释放 2 张卡的额度/);await dialog.accept();});await desktop.locator('#job-mission [data-job-cancel]').click();await desktop.waitForFunction(()=>document.querySelector('#job-mission .st')?.textContent.includes('正在取消'));assert.equal(requests.filter(row=>row.operation==='jobs.cancel').length,1);assert.equal(await desktop.locator('#job-mission [data-job-cancel]').isDisabled(),true);
   await desktop.evaluate(()=>document.querySelector('#switch-account').click());await desktop.locator('#login-dialog').waitFor({state:'visible'});await desktop.locator('#job-mission').waitFor({state:'hidden'});assert.equal(await desktop.locator('#job-mission').innerText(),'');assert.equal(await desktop.locator('#submission-receipt').count(),0);
   assert.deepEqual(outside,[]);assert.deepEqual(errors.filter(message=>!message.includes('ERR_FAILED')&&!message.includes('Failed to fetch')),[]);assert.ok(assets.filter(row=>row.path.endsWith('.woff2')).every(row=>row.status===200));

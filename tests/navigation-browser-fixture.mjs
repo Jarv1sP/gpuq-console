@@ -19,6 +19,7 @@ try{
   ({server,service}=await createPortalServer({database:join(directory,'portal.db'),bootstrap,origin,secure:false,bridge:async(machine,operation)=>{
     if(operation==='projects.list')return {projects:[]};
     if(operation==='datasets.list')return {datasets:[]};
+    if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:20*1024**3,usableBytes:492*1024**3,totalInodes:100000,availableInodes:50000,inodeUsageKnown:true,guarded:true};
     throw Error('Unexpected fixture node operation '+operation);
   }}));
   clearInterval(service.executionTimer);await new Promise(resolve=>server.listen(new URL(origin).port,'127.0.0.1',resolve));
@@ -54,13 +55,13 @@ try{
   await memberPage.locator('#page-datasets').waitFor({state:'visible'});
   assert.equal(await memberPage.locator('.room-transition-layer').count(),0,'dataset tabs do not animate a second room');
   assert.equal(await memberPage.locator('.desktop-route-slide').count(),0);
-  await memberPage.locator('#page-datasets .data-room-tabs a[href="#datasets/transfers"]').click();await assertTransfer(memberPage);
+  const records=memberPage.locator('#warehouse-page-actions a[href="#datasets/transfers"]');assert.equal(await records.textContent(),'传输记录');assert.equal(await memberPage.locator('#page-datasets .data-room-tabs').count(),0,'one warehouse has no duplicate dataset tabs');await records.click();await assertTransfer(memberPage);
   // Existing control-strip/notification callers keep their `transfers` target.
   await memberPage.locator('[data-nav=work]').click();
   await memberPage.evaluate(()=>{location.hash='transfers';});await assertTransfer(memberPage);
   const adminPage=await browser.newPage({viewport:{width:1440,height:1000}});adminPage.on('pageerror',error=>errors.push(error.message));
   await login(adminPage,'admin','#datasets/transfers');await assertTransfer(adminPage);
-  assert.deepEqual(await adminPage.locator('#room-nav [data-nav]:visible').evaluateAll(nodes=>nodes.map(node=>node.dataset.nav)),['work','resources','datasets','community','users']);
+  assert.deepEqual(await adminPage.locator('#room-nav [data-nav]:visible').evaluateAll(nodes=>nodes.map(node=>node.dataset.nav)),['work','resources','datasets','community']);
   // Direction follows the dataset room, including the legacy transfer route.
   for(const [from,to,expected] of [['resources','transfers','translateX(24px)'],['community','transfers','translateX(-24px)']]){
     const direction=await adminPage.evaluate(({from,to})=>{
@@ -86,7 +87,7 @@ try{
   await memberPage.emulateMedia({reducedMotion:'reduce'});await memberPage.locator('[data-nav=work]').click();
   await memberPage.evaluate(()=>{location.hash='transfers';});await assertTransfer(memberPage);
   assert.ok(await memberPage.evaluate(()=>document.querySelector('#page-transfers').getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!frame.transform||frame.transform==='none'))));
-  await memberPage.evaluate(()=>{location.hash='users';});await memberPage.locator('#page-resources').waitFor({state:'visible'});
+  await memberPage.evaluate(()=>{location.hash='users';});await memberPage.locator('#admin-denied').waitFor({state:'visible'});
   assert.equal(await memberPage.locator('#page-users').isVisible(),false,'member deep links do not expose the admin room');
   assert.ok(MACHINES.length);assert.deepEqual(errors,[]);
   console.log('DATASET NAVIGATION PASS: legacy/canonical/auth/reload routes, member/admin counts and order, transfer command, same-room tabs and direction, reduced motion, 1440/390/320 topbar, five mobile tabs, admin guard.');

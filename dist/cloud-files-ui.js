@@ -108,7 +108,7 @@ export function cloudFilesUI(store,section,toast){
     if(b.dataset.cloudVerify)return run(call=>start(call,'verify',{fileId:b.dataset.cloudVerify}));
     if(b.dataset.cloudRestore)return run(async(call,current)=>{
       await sourceConfirmed(call,b.dataset.cloudRestore);
-      const path=window.prompt('取回到个人数据空间的新路径，不会覆盖已有文件：','restored/'+b.dataset.cloudName);current();
+      const path=window.prompt('取回到个人整理目录的新路径，不会覆盖已有文件：','restored/'+b.dataset.cloudName);current();
       if(path)await start(call,'download',{fileId:b.dataset.cloudRestore,path:path.trim()});
     });
     if(b.dataset.cloudResume)return run(async call=>{

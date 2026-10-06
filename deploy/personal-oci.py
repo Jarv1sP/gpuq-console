@@ -320,6 +320,12 @@ class PersonalOCI:
 
     def run(self, *args, timeout=30):
         with self.registry_auth() as (env, authfd):
+            # containers/image and Buildah stage complete image layers under
+            # TMPDIR, not Podman's --tmpdir. Keep those potentially large
+            # bytes in the owner's quota-managed data volume. Runtime create/
+            # start still use the short private runtime directory for conmon's
+            # UNIX socket; changing that boundary would revive long-path bugs.
+            env['TMPDIR'] = str(self.s.private_dir(self.folder/'tmp'))
             result = subprocess.run(self.command(*args), env=env, capture_output=True, text=True, timeout=timeout)
         need(result.returncode == 0 and len(result.stdout) < 2*1024**2, 'Managed OCI operation failed; no privileged fallback was attempted')
         return result.stdout.strip()

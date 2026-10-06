@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 // Real frontend assets with browser-local replies only. No production login,
 // accounts, capability probes or business writes. Set UI_GEOMETRY_SWEEP=1 for
 // every 40px width, the common widths, three heights and all three zooms.
@@ -44,6 +45,7 @@ try{
     if(operation==='state')return json(route,null);
     if(operation==='projects.list')return json(route,{projects:[]});
     if(operation==='datasets.catalog')return json(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[{dataset:'local-fixture',name:'本地布局数据',versions:[{version,state:'READY',bytes:7*1024**3,files:12,canPrepare:false,locations:machines.map(m=>({machine:m.id,state:'READY'}))}]}]});
+    if(operation==='datasets.upload.routes')return json(route,{available:false,protocol:'dataset-upload-v1',machine:args.machine});
     if(operation==='datasets.capacity')return json(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
     if(operation==='cloud.info')return json(route,{capabilityVerified:false,configurationEnabled:true,aliyunConnected:false,nodeDirect:false,managedExternally:true});
     if(operation==='cloud.import.list')return json(route,{imports:[]});
@@ -78,8 +80,8 @@ try{
     else await page.waitForFunction(()=>document.querySelector('#community-posts')?.getAttribute('aria-busy')==='false');
     if(mode==='unconfirmed'){await page.locator('#community-create').click();await page.locator('#community-compose-form [name=title]').fill('保留发送草稿');await page.locator('#community-compose-form [name=body]').fill('回执丢失时保持原内容。');await page.locator('#community-compose-form [type=submit]').click();await page.locator('#community-compose-error').filter({hasText:'未确认'}).waitFor();}
    }else if(room==='members'){
-    if(role==='member'){await page.evaluate(()=>location.hash='#users');await page.locator('#page-resources').waitFor();for(const entry of await page.locator('[data-nav=users]').all())assert.equal(await entry.isVisible(),false);assert.equal(await page.locator('#page-users').isVisible(),false);}
-    else{await page.locator('[data-nav=users]').click();await page.locator('#page-users').waitFor();
+    if(role==='member'){await page.evaluate(()=>location.hash='#users');await page.locator('#admin-denied').waitFor();assert.equal(await page.locator('[data-nav=users]').count(),0);assert.equal(await page.locator('#page-users').isVisible(),false);}
+    else{await openMembers(page);await page.locator('#page-users').waitFor();
      if(['loading','error','unconfirmed'].includes(mode)){await page.locator('[data-machine]').first().check();await page.locator('[data-action=save-policy]').click();if(mode==='loading')await page.waitForFunction(()=>document.querySelector('[data-action=save-policy]').disabled);else await page.locator('#policy-error').filter({hasText:/./}).waitFor();}
     }
    }else{
@@ -94,7 +96,7 @@ try{
      scrollBy({top:r.top+r.height/2-(top+bottom)/2,behavior:'instant'});
     });
     await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
-    await page.locator('#datasets-add>summary').click();await page.locator('[data-dataset-source=workspace]').click();
+    await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();
     const initialList=mode==='loading'?null:page.waitForResponse(response=>response.url().endsWith('/api/call')&&response.request().postDataJSON()?.operation==='cloud.files.list');
     await page.locator('#cloud-files>summary').click();
     if(mode==='loading')await page.waitForFunction(()=>document.querySelector('#cloud-files-refresh').disabled);

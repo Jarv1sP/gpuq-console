@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {controlSnapshot,serverSlotsHTML} from '../dist/control-ui.js';
-import {trainingReadout,workbenchCards,jobOverviewHTML,stateClass} from '../dist/workbench-ui.js';
+import {trainingReadout,workbenchCards,jobOverviewHTML,stateClass,personalQuotaReadout} from '../dist/workbench-ui.js';
 
 function fixture(role='member'){
   const jobs=[{id:'own-run',userId:'owner',name:'own',state:'RUNNING',machine:'gpu-1',cards:2},{id:'own-prep',userId:'owner',state:'PREPARING_DATA',cards:1},{id:'other-failed',userId:'other',state:'FAILED',cards:8}];
@@ -33,8 +33,9 @@ test('individual control slots cannot look free when the full GPU inventory is u
   }
   host.gpus[0].memoryUsedMiB=-1;assert.match(serverSlotsHTML(controlSnapshot(store).servers[0]),/GPU 0 · 占用未确认/);
 });
-test('only an administrator sees pending approvals, and only a complete data listing has an aggregate',()=>{
-  assert.equal(controlSnapshot(fixture()).attention.length,0);const snapshot=controlSnapshot(fixture('admin'),{activitiesComplete:true,activities:[{id:'one',userId:'owner',state:'RUNNING'},{id:'one',userId:'owner',state:'RUNNING'},{id:'two',userId:'owner',state:'FAILED'}]});assert.equal(snapshot.dataCount,1);assert.equal(snapshot.attention.length,1);assert.equal(snapshot.attention[0].id,'user:pending','timestamp-less failures no longer create an alert');
+test('primary control omits member approvals for both roles, and only a complete data listing has an aggregate',()=>{
+  assert.equal(controlSnapshot(fixture()).attention.length,0);const snapshot=controlSnapshot(fixture('admin'),{activitiesComplete:true,activities:[{id:'one',userId:'owner',state:'RUNNING'},{id:'one',userId:'owner',state:'RUNNING'},{id:'two',userId:'owner',state:'FAILED'}]});assert.equal(snapshot.dataCount,1);assert.equal(snapshot.attention.length,0,'member approvals live in the backend and timestamp-less failures do not create an alert');assert.equal(snapshot.attention.some(row=>row.id.startsWith('user:')),false);
+  assert.deepEqual(snapshot.approvals.map(row=>row.id),['pending'],'approvals remain actionable in the admin console; missing failure times do not alert');
   const store=fixture();store.principal=null;assert.deepEqual(controlSnapshot(store).jobs,[]);assert.equal(controlSnapshot(store).quota,null);
 });
 test('control quota exemption follows the current enabled account rather than a stale principal',()=>{
@@ -42,6 +43,15 @@ test('control quota exemption follows the current enabled account rather than a 
   let snapshot=controlSnapshot(store);assert.equal(snapshot.quotaReadout.exempt,true);assert.equal(snapshot.quotaReadout.value,'31');assert.equal(snapshot.usage,31);assert.equal(snapshot.quota,4,'physical inventory metadata remains available, but is not the personal ceiling');
   store.users[0].role='member';snapshot=controlSnapshot(store);assert.equal(snapshot.quotaReadout.exempt,false);assert.equal(snapshot.quotaReadout.value,'31 / 4');
   store.users[0].role='admin';store.users[0].enabled=false;assert.equal(controlSnapshot(store).quotaReadout.exempt,false);
+});
+test('documented 2026-10-07 exemption prefers a backend field, with enabled-role fallback',()=>{
+  // 来源：STARGATE 功能与接口手册（2026-10-07），shared / 独占 / AUTO 一致。
+  const admin={role:'admin',enabled:true,total:30};
+  assert.deepEqual(personalQuotaReadout(admin,31),{exempt:true,label:'不限个人额度',value:'31',note:''});
+  assert.equal(personalQuotaReadout({...admin,personalCardQuotaExempt:false},31).value,'31 / 30');
+  assert.equal(personalQuotaReadout({...admin,personalCardQuotaExempt:true},31).exempt,true);
+  assert.equal(personalQuotaReadout({...admin,enabled:false,personalCardQuotaExempt:true},31).exempt,false);
+  assert.equal(personalQuotaReadout({...admin,role:'member'},31).value,'31 / 30');
 });
 test('stale or missing self-report never becomes a progress percentage or ETA',()=>{
   const job={progress:{reported:true,stale:true,snapshot:{epochsCompleted:12,epochsTotal:40,etaSeconds:60,updatedAt:1790700000,metrics:{loss:.4}}}};assert.equal(trainingReadout(job).percent,null);assert.equal(trainingReadout(job).eta,'');assert.deepEqual(trainingReadout(job).metrics,[]);

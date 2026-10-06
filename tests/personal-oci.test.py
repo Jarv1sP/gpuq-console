@@ -109,7 +109,7 @@ class OCITests(unittest.TestCase):
         manager = self.manager()
         manager.folder = Path(root).resolve()/'private-oci'
         manager.folder.mkdir(mode=0o700)
-        for name in ('home', 'home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d', 'home/containers'):
+        for name in ('tmp', 'home', 'home/.config', 'home/.config/containers', 'home/.config/containers/registries.conf.d', 'home/containers'):
             (manager.folder/name).mkdir(mode=0o700)
         manager.env = {'PATH': '/usr/bin:/bin', 'HOME': str(manager.folder/'home'),
                        'REGISTRY_AUTH_FILE': str(manager.folder/'anonymous-registry-auth.json'),
@@ -185,6 +185,49 @@ class OCITests(unittest.TestCase):
             with patch.dict(os.environ, {'HTTP_PROXY': 'http://secret.invalid', 'DOCKER_CONFIG': '/private/host'}), \
                  patch.object(o.subprocess, 'run', side_effect=fake):
                 self.assertEqual(manager.run('version'), '5.8.8')
+
+    def test_image_layer_temporary_bytes_use_private_disk_not_runtime_tmpfs(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            runtime = Path(root)/'short-runtime'; runtime.mkdir(mode=0o700)
+            manager.runtime_tmp = runtime
+            manager.runtime_temporary = Mock(return_value=runtime)
+            manager.env['TMPDIR'] = str(runtime)
+            def engine(*args, **kwargs):
+                temporary = Path(kwargs['env']['TMPDIR'])
+                self.assertEqual(temporary, manager.folder/'tmp')
+                self.assertEqual(temporary.stat().st_mode & 0o777, 0o700)
+                self.assertNotEqual(temporary, runtime)
+                (temporary/'synthetic-layer').write_bytes(b'x' * 1024)
+                self.assertEqual(manager.env['TMPDIR'], str(runtime))
+                return SimpleNamespace(returncode=0, stdout='sha256:'+SHA, stderr='')
+            with patch.object(o.subprocess, 'run', side_effect=engine) as call:
+                manager.run('commit', '--pause=false', 'owned-container')
+            call.assert_called_once()
+            self.assertFalse((runtime/'synthetic-layer').exists())
+            self.assertEqual((manager.folder/'tmp/synthetic-layer').stat().st_size, 1024)
+
+    def test_image_temporary_directory_rejects_link_unsafe_mode_and_missing_directory(self):
+        for kind in ('symlink', 'unsafe-mode', 'missing'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                manager = self.anonymous_manager(root)
+                path = manager.folder/'tmp'
+                path.rmdir()
+                if kind == 'symlink': path.symlink_to(Path(root))
+                elif kind == 'unsafe-mode': path.mkdir(mode=0o755)
+                with patch.object(o.subprocess,'run') as engine, self.assertRaises((ValueError,OSError)):
+                    manager.run('commit', '--pause=false', 'owned-container')
+                engine.assert_not_called()
+
+    def test_image_temporary_override_does_not_mutate_runtime_registry_environment(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            manager.env['TMPDIR'] = '/fixture-short-runtime'
+            with patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout='',stderr='private failure')), self.assertRaisesRegex(ValueError,'Managed OCI operation failed'):
+                manager.run('image','inspect','sha256:'+SHA)
+            self.assertEqual(manager.env['TMPDIR'], '/fixture-short-runtime')
+            with manager.registry_auth() as (runtime_env, _):
+                self.assertEqual(runtime_env['TMPDIR'], '/fixture-short-runtime')
 
     def test_private_registry_paths_cannot_be_redirected(self):
         for key, value in (('REGISTRY_AUTH_FILE', '/dev/null'), ('REGISTRY_AUTH_FILE', '/private/host/auth.json'),
@@ -669,7 +712,7 @@ class OCITests(unittest.TestCase):
 
     def test_only_small_valid_resource_memfd_is_privately_snapshotted_and_cleaned(self):
         with tempfile.TemporaryDirectory() as root:
-            manager = self.anonymous_manager(root); (manager.folder/'tmp').mkdir(mode=0o700)
+            manager = self.anonymous_manager(root)
             path = manager.folder/'synthetic-resources'; raw = json.dumps({'schemaVersion':1,'cpuLimit':2,
                 'memoryLimitBytes':8*1024**3,'pidsLimit':2048,'gpuCount':0}).encode(); path.write_bytes(raw)
             descriptor = os.open(path, os.O_RDONLY)

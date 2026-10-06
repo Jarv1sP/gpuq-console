@@ -10,6 +10,7 @@ import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {accountMenu,refreshVisible} from './starbase-workflows.mjs';
 import {resourceCard,resourceDetail,selectResource,closeResource} from './resources-workflows.mjs';
+import {assertResourceNames} from './resource-name-assertions.mjs';
 
 const directory=await mkdtemp(join(tmpdir(),'starbase-resources-'));
 const screenshots=process.env.UI_SCREENSHOTS||join(directory,'screenshots');
@@ -108,7 +109,7 @@ try{
   assert.deepEqual(await page.locator('.resource-process-table th').allTextContents(),['GPU','PID','任务 / 提交者 / 描述','显存 MiB','优先级']);
   for(const hidden of [privateProgram,privateOwner,'private-native-job'])assert.ok(!(await page.locator('#machine-grid').textContent()).includes(hidden),hidden);
   assert.equal((await page.evaluate(()=>resourceAnimations)).length,0,'The first sample must be settled');
-  const capture=async name=>{await page.waitForFunction(()=>!document.querySelector('#toast').classList.contains('visible')&&!document.querySelector('.object-transition-layer'));await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});await page.screenshot({path:join(screenshots,name+'-full.png'),fullPage:true,animations:'disabled'});};
+  const capture=async name=>{await page.waitForFunction(()=>!document.querySelector('#toast').classList.contains('visible')&&!document.querySelector('.object-transition-layer'));if(await page.locator('#page-resources').isVisible())await assertResourceNames(page,'#page-resources');if(await page.locator('#admin-frame').isVisible())await assertResourceNames(page,'#admin-content');await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:join(screenshots,name+'.png'),animations:'disabled'});await page.screenshot({path:join(screenshots,name+'-full.png'),fullPage:true,animations:'disabled'});};
   const desktop=await page.evaluate(()=>({height:document.documentElement.scrollHeight,heroBottom:document.querySelector('.resource-fleet').getBoundingClientRect().bottom,primaryBottom:document.querySelector('#resource-primary').getBoundingClientRect().bottom,layout:[...document.querySelectorAll('.resource-portrait,.resource-mini-fleet,.resource-mini,.resource-legend,.resource-fleet-actions')].map(element=>({class:element.className,top:element.getBoundingClientRect().top,bottom:element.getBoundingClientRect().bottom,position:getComputedStyle(element).position}))}));
   await capture('resources-member-1440');
   assert.ok(desktop.height<=2200,JSON.stringify(desktop));assert.ok(desktop.heroBottom<=900&&desktop.primaryBottom<=900,JSON.stringify(desktop));
@@ -164,7 +165,7 @@ try{
   assert.equal(await page.locator('[data-resource-selected]').getAttribute('data-resource-selected'),'gpu-2');
 
   // A server opened from Mission Control must target that same server in this room.
-  await page.locator('[data-nav=work]').click();await page.locator('[name=workspace-machine]').selectOption('gpu-1');
+  await page.locator('[data-nav=work]').click();await page.locator('[name=workspace-machine]').selectOption('gpu-1');await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
   await page.keyboard.press('Control+k');await page.locator('#mission-control').waitFor();await page.locator('[data-control-machine=gpu-2]').click();
   assert.equal(await page.locator('[data-resource-selected]').getAttribute('data-resource-selected'),'gpu-2');
   const controlLanding=await page.evaluate(()=>({top:document.querySelector('.resource-fleet').getBoundingClientRect().top,heading:document.querySelector('.resource-identity').getBoundingClientRect().bottom,scroll:scrollY,maxScroll:document.documentElement.scrollHeight-innerHeight,height:innerHeight}));
@@ -174,24 +175,31 @@ try{
   page.once('dialog',dialog=>dialog.dismiss());await page.locator('#resource-primary').click();
   await page.waitForFunction(()=>document.querySelector('[data-nav=work]').getAttribute('aria-current')==='page');
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'gpu-1','Canceling terminal context confirmation must retain the server');
+  await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
   await page.evaluate(()=>document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[]}})));
   await page.locator('[data-nav=resources]').click();
   const projectsRequest=request=>new URL(request.url()).pathname==='/api/call'&&request.postDataJSON()?.operation==='projects.list'&&request.postDataJSON()?.args?.machine==='gpu-2';
+  assert.ok(calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2'),'the account-wide project directory has already read this authorized source');
+  const projectsCallStart=calls.length;
+  const selectedProjectRead=()=>calls.slice(projectsCallStart).some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2');
   let releaseProjects,projectsBeforeReply;const projectsGate=new Promise(resolve=>releaseProjects=resolve);
   const delayedProjects=async route=>{if(projectsRequest(route.request()))await projectsGate;await route.fallback();};
   await page.route('**/api/call',delayedProjects);
   const projectRequestSeen=page.waitForRequest(projectsRequest),projectsReady=page.waitForResponse(response=>projectsRequest(response.request()));
+  // Keep failures on the awaited request path rather than an unhandled sibling
+  // promise during cleanup; neither timeout nor outcome is changed.
+  void projectRequestSeen.catch(()=>{});void projectsReady.catch(()=>{});
   try{
     await page.locator('#resource-primary').click();
     await page.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-2');
     await projectRequestSeen;
-    projectsBeforeReply=calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2');
-    assert.throws(()=>assert.ok(calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2')),{name:'AssertionError'},'a selected machine does not prove that its asynchronous query has arrived');
+    projectsBeforeReply=selectedProjectRead();
+    assert.throws(()=>assert.ok(selectedProjectRead()),{name:'AssertionError'},'a selected machine does not prove that its asynchronous query has arrived');
     releaseProjects();const projectResponse=await projectsReady;assert.equal(projectResponse.status(),200);await projectResponse.finished();
   }finally{releaseProjects();await page.unroute('**/api/call',delayedProjects);}
   await page.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-2');
-  assert.ok(calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2'));
-  checks.push({projectsReadiness:{before:projectsBeforeReply,after:calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2')}});
+  assert.ok(selectedProjectRead());
+  checks.push({projectsReadiness:{before:projectsBeforeReply,after:selectedProjectRead()}});
   await page.locator('[data-nav=resources]').click();
 
   await page.setViewportSize({width:390,height:844});await selectResource(page,'gpu-1');await closeResource(page);await capture('resources-member-390');
@@ -248,18 +256,21 @@ try{
   assert.equal(await page.locator('[data-resource-root]').count(),0);assert.equal(await page.locator('.resource-process-table').count(),0,'Old principal data is cleared on logout');
   await page.locator('#login-form [name=username]').fill('admin');await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=resources]').click();
   assert.equal(await page.locator('[data-resource-selected]').getAttribute('data-resource-selected'),'gpu-1','Identity changes discard the prior server selection');
+  assert.equal(await page.locator('[data-resource-root]').count(),0,'ordinary admin compute has no ROOT action');
+  for(const privateValue of [privateProgram,privateOwner,'private-native-job'])assert.ok(!(await page.locator('.resource-process-table').textContent()).includes(privateValue),'ordinary admin compute hides '+privateValue);
+  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content [data-resource-root]').waitFor();
   assert.equal(await page.locator('[data-resource-root]').count(),1);
-  for(const visible of [privateProgram,privateOwner,'private-native-job'])assert.ok((await page.locator('.resource-process-table').textContent()).includes(visible),visible);
-  assert.deepEqual(await page.locator('.resource-process-table th').allTextContents(),['GPU','PID','任务 / 提交者 / 描述','程序','系统用户','显存 MiB','优先级']);
+  for(const visible of [privateProgram,privateOwner,'private-native-job'])assert.ok((await page.locator('#admin-content .resource-process-table').textContent()).includes(visible),visible);
+  assert.deepEqual(await page.locator('#admin-content .resource-process-table th').allTextContents(),['GPU','PID','任务 / 提交者 / 描述','程序','系统用户','显存 MiB','优先级']);
   await capture('resources-admin-1440');
   await page.locator('[data-resource-root]').click();await page.locator('#host-maintenance').waitFor();
   assert.equal(await page.locator('#host-maintenance').getAttribute('open'),'');
   assert.equal(calls.filter(call=>call.operation.startsWith('terminal.')||call.operation.startsWith('jobs.')).length,0,'ROOT entry only reveals the existing administrator controls');
-  await page.locator('[data-nav=resources]').click();await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await selectResource(page,'gpu-1');
+  await page.setViewportSize({width:390,height:844});await capture('resources-admin-390');await page.locator('#admin-content .resource-identity .resource-select').click();
   // Measure the visible, settled sheet before screenshot capture can dispatch
   // resize events or fast-forward its animation.
   await page.locator('[data-resource-root]').waitFor({state:'visible'});
-  await page.locator('#resource-sheet').evaluate(async sheet=>{await Promise.all(sheet.getAnimations().map(animation=>animation.finished));});
+  await page.locator('#admin-content').evaluate(async region=>{await Promise.all(region.getAnimations({subtree:true}).filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
   assert.ok((await page.locator('[data-resource-root]').boundingBox()).height>=44,'Phone administrator actions retain a 44px target');
   await capture('resources-detail-admin-390');
   violations.push(...await page.evaluate(()=>resourceCSP));

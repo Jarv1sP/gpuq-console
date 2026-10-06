@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {mkdir,readFile} from 'node:fs/promises';
 import {chromium} from 'playwright';
+import {STARBASE_ASSETS} from '../frontend-assets.mjs';
 const origin='https://offline-data-workspace.test',screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-data-workspace-ui';
 const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
 try{
@@ -11,8 +12,8 @@ try{
   page.on('pageerror',error=>errors.push(error.message));
   await page.route('**/*',async route=>{
     const url=new URL(route.request().url());if(url.origin!==origin){unexpected.push(url.href);return route.abort();}
-    if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><main><h1>数据集</h1><section id="page-datasets"></section></main>'});
-    if(['/dataset-flow.js','/dataset-cache-admin.js','/manual-pin-state.js','/maintenance-state.js','/copy-help-ui.js','/datasets-ui.js','/dataset-remove-ui.js','/dataset-full-delete-ui.js','/dataset-full-delete-state.js','/dataset-remove.css','/workbench-ui.js','/job-progress.js','/motion-ui.js','/data-route.js','/data-workspace.js','/cloud-files-ui.js','/dataset-upload.js','/upload-routes.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url),'utf8')});
+    if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/datasets.css"><link rel="stylesheet" href="/fonts.css"><link rel="stylesheet" href="/starbase.css"><link rel="stylesheet" href="/dataset-flow.css"><link rel="stylesheet" href="/dataset-warehouse.css"><body class="sb" data-room="datasets"><main><div class="page-heading"><h1 id="page-title">数据集</h1><div class="heading-actions"></div></div><section id="page-datasets"></section></main>'});
+    if(['/dataset-catalog-model.js','/dataset-label-client.js','/dataset-warehouse-view.js','/dataset-upload-metrics.js','/dataset-warehouse.css','/dataset-flow.js','/dataset-cache-admin.js','/manual-pin-state.js','/maintenance-state.js','/copy-help-ui.js','/datasets-ui.js','/dataset-remove-ui.js','/dataset-full-delete-ui.js','/dataset-full-delete-state.js','/dataset-remove.css','/workbench-ui.js','/job-progress.js','/motion-ui.js','/data-route.js','/data-workspace.js','/cloud-files-ui.js','/dataset-upload.js','/upload-routes.js','/transfer-upload.js','/cloud-import-ui.js','/styles.css','/workspace.css','/datasets.css'].includes(url.pathname)||Object.hasOwn(STARBASE_ASSETS,url.pathname))return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':url.pathname.endsWith('.woff2')?'font/woff2':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url))});
     if(url.pathname==='/favicon.ico')return route.fulfill({status:204});unexpected.push(url.href);return route.abort();
   });
   await page.goto(origin);
@@ -21,14 +22,16 @@ try{
     window.calls=[];window.toasts=[];window.gatePut=false;window.gatePublish=false;window.gateCatalog=false;window.capacityFail=false;window.remote=new Map();window.cloudRows=new Map();window.published=false;
     window.store={production:true,principal:{userId:'alice',role:'member'},authGeneration:0,
       users:['alice','bob','carol'].map(id=>({id,role:'member',enabled:true,limits:{'node-a':1,'node-b':1},total:2})),usage(){return 0;},
-      data:{machines:[{id:'node-a'},{id:'node-b'}]},onAuthChange(callback){this.authChanged=callback;},async call(operation,args){
+      data:{machines:[{id:'node-a'},{id:'node-b'}]},listeners:[],onAuthChange(callback){this.listeners.push(callback);},async call(operation,args){
       calls.push({operation,args:structuredClone(args),user:this.principal.userId});
+      if(operation==='datasets.upload.routes')return {available:false,protocol:'dataset-upload-v1',machine:args.machine};
+      if(operation==='cloud.info')return {capabilityVerified:false,configurationEnabled:true};
       if(operation==='datasets.capacity'){if(capacityFail)throw Error('test capacity unavailable');return {machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3};}
       if(operation==='datasets.catalog'){
         // Alice's published metadata remains discoverable after an account
         // switch; discovery never transfers Alice's content permission.
         const canUse=this.principal.userId==='alice'&&this.users.find(row=>row.id==='alice').limits['node-a']>0;
-        const result={machine:args.machine,machines:this.data.machines.map(row=>({machine:row.id,available:true})),
+        const result={machine:args.machine,machines:this.data.machines.map(row=>({machine:row.id,state:'ok'})),
           datasets:published?[{dataset:'personal-test',versions:[{version:'a'.repeat(64),state:args.machine==='node-a'&&canUse?'READY':'NOT_LOCAL',
             canUse,canPrepare:false,files:1,bytes:4,locations:[{machine:'node-a',dataset:'personal-test',state:'READY',canUse,canPrepare:false}]}]}]:[]};
         if(gateCatalog)await new Promise(resolve=>{window.releaseCatalog=resolve;});return result;
@@ -64,8 +67,9 @@ try{
     }};
     window.render=datasetsUI(store,value=>toasts.push(value));render();
   });
-  await page.locator('#datasets-add > summary').click();
-  await page.locator('[data-dataset-source=workspace]').click();
+  await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+  await page.locator('[data-v3-upload]').first().click();
+  await page.locator('[data-v3-source=workspace]').click();
   const files=page.locator('[name=data-workspace-files]');
   await files.setInputFiles([{name:'training.zip',mimeType:'application/zip',buffer:Buffer.alloc(2*1024**2+3,7)}]);
   const callsBeforeLarge=await page.evaluate(()=>calls.length);
@@ -120,7 +124,8 @@ try{
   assert.equal(await page.locator('#data-workspace-files-list unsafe').count(),0);
   await page.locator('[data-workspace-path="prepared"]').click();await page.waitForFunction(()=>calls.some(call=>call.operation==='datasets.workspace.list'&&call.args.path==='prepared'));
   await page.locator('[name=data-workspace-publish-path]').fill('prepared');await page.locator('[name=data-workspace-name]').fill('training');await page.locator('#data-workspace-publish').click();
-  await page.waitForFunction(()=>document.querySelector('#dataset-catalog').textContent.includes('本机已就绪'));
+  await page.locator('[data-v3-select=personal-test]').waitFor();
+  assert.match(await page.locator('#warehouse-inspector').textContent(),/已缓存/);
   assert.match(await page.locator('#data-workspace-status').textContent(),/已发布/);
   assert.ok(await page.locator('[data-use-dataset]').isEnabled());
   await page.screenshot({path:screenshots+'/data-workspace-desktop.png',fullPage:true});
@@ -134,12 +139,13 @@ try{
   // under the next account nor repopulate the next account's controls.
   await files.setInputFiles([{name:'late.zip',mimeType:'application/zip',buffer:Buffer.alloc(2*1024**2,5)}]);
   await page.evaluate(()=>{gatePut=true;});await page.locator('#data-workspace-upload').click();await page.waitForFunction(()=>typeof releasePut==='function');
-  const before=await page.evaluate(()=>calls.length);
-  await page.evaluate(()=>{store.principal={userId:'bob',role:'member'};store.authGeneration++;store.authChanged();render();releasePut();});await page.waitForTimeout(100);
-  assert.equal(await page.evaluate(()=>calls.length),before);assert.doesNotMatch(await page.locator('#data-workspace-status').textContent(),/late.zip/);
+  const before=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.workspace.put').length);
+  await page.evaluate(()=>{store.principal={userId:'bob',role:'member'};store.authGeneration++;store.listeners.forEach(listener=>listener());render();releasePut();});await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.workspace.put').length),before,'Late old-account reply causes no further file blocks');assert.doesNotMatch(await page.locator('#data-workspace-status').textContent(),/late.zip/);
   assert.equal(await page.locator('[name=data-workspace-files]').evaluate(node=>node.files.length),0);
-  await page.locator('#datasets-add > summary').click();
-  await page.locator('[data-dataset-source=workspace]').click();
+  await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+  await page.locator('[data-v3-upload]').first().click();
+  await page.locator('[data-v3-source=workspace]').click();
   // A server reply arriving after a machine change cannot start polling for
   // the old machine through the new selection. The remote publish is retained.
   await page.evaluate(()=>{gatePublish=true;});await page.locator('[name=data-workspace-publish-path]').fill('prepared');await page.locator('[name=data-workspace-name]').fill('second');await page.locator('#data-workspace-publish').click();await page.waitForFunction(()=>typeof releasePublish==='function');
@@ -148,22 +154,27 @@ try{
   assert.equal(await page.evaluate(count=>calls.slice(count).some(call=>call.operation==='datasets.workspace.status'),beforeMachine),false);
   assert.match(await page.locator('#data-workspace-status').textContent(),/已切换服务器/);assert.equal(await page.locator('[name=dataset-machine]').inputValue(),'node-b');
   // A failed space reading is explicit but cannot erase a confirmed catalog.
+  await page.locator('[data-dataset-add-close]').click();
   await page.evaluate(()=>{capacityFail=true;});await page.locator('#datasets-refresh').click();
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
   assert.match(await page.locator('#datasets-capacity').textContent(),/容量待更新/);
-  assert.equal(await page.locator('.dataset-card').count(),1);
+  assert.equal(await page.locator('[data-v3-select]').count(),1);
   assert.equal(await page.locator('[data-use-dataset]').isDisabled(),true,'Bob may discover Alice\'s metadata, not train with her data');
   // Revoking a different machine invalidates the entire aggregate, even when
   // the selected machine is unchanged and an old directory reply arrives late.
   await page.evaluate(()=>{gateCatalog=true;});await page.locator('#datasets-refresh').click();
   await page.waitForFunction(()=>typeof releaseCatalog==='function');
   await page.evaluate(()=>{store.users.find(row=>row.id==='bob').limits={'node-b':1};render();releaseCatalog();});await page.waitForTimeout(100);
-  assert.equal(await page.locator('.dataset-card').count(),0);assert.match(await page.locator('#datasets-status').textContent(),/授权已更新/);
+  assert.equal(await page.locator('[data-v3-select]').count(),0);assert.match(await page.locator('#datasets-status').textContent(),/授权已更新/);
+  // The new contract refreshes after permission changes. Release that fresh
+  // authorized read, then independently hold the next old-login observation.
+  await page.evaluate(()=>{gateCatalog=false;releaseCatalog();});
+  await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
   // A response belonging to the previous login cannot refill the new view.
-  await page.evaluate(()=>{window.releaseCatalog=undefined;});await page.locator('#datasets-refresh').click();
+  await page.evaluate(()=>{gateCatalog=true;window.releaseCatalog=undefined;});await page.locator('#datasets-refresh').click();
   await page.waitForFunction(()=>typeof releaseCatalog==='function');
-  await page.evaluate(()=>{store.principal={userId:'carol',role:'member'};store.authGeneration++;store.authChanged();render();releaseCatalog();});await page.waitForTimeout(100);
-  assert.equal(await page.locator('.dataset-card').count(),0);assert.doesNotMatch(await page.locator('#datasets-capacity').textContent(),/512\.00/);
+  await page.evaluate(()=>{store.principal={userId:'carol',role:'member'};store.authGeneration++;store.listeners.forEach(listener=>listener());render();releaseCatalog();});await page.waitForTimeout(100);
+  assert.equal(await page.locator('[data-v3-select]').count(),0);assert.doesNotMatch(await page.locator('#datasets-capacity').textContent(),/512\.00/);
   assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
   console.log('PERSONAL DATA UI PASS: raw bounded upload; no automatic extraction/publication; cloud identity pause retained, explicit fresh-key reverify and separate new download; file-list escaping; publication then READY catalog; 390px layout; late account reply stops chunks; late machine reply stops polling; unknown capacity keeps catalog; revoked remote-machine permission invalidates aggregate; old login cannot repaint catalog. Offline mock nodes only. Screenshots: '+screenshots);
 }finally{await browser.close();}
