@@ -1,6 +1,6 @@
 # STARGATE 界面设计与代码参考
 
-本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `e027633`，并同步数据集提示、折叠控件与间距的维护；已包含导航合并、数据库与缓存、管理员删除、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
+本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `34d07a1`，并同步数据集提示、折叠控件与间距的维护；已包含导航合并、数据库与缓存、管理员删除与最后副本保护、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
 
 ## 1. 原则
 
