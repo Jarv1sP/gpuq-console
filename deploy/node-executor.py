@@ -1121,6 +1121,7 @@ def dataset_retirement_operation(operation,args):
             if phase in result['phases']:continue
             (pending if state=='RUNNING' else unknown).append(phase)
         return {**result,'pendingPhases':pending,'unconfirmedPhases':unknown,
+                'runningPhases':[phase for phase,state in activities.items() if state=='RUNNING'],
                 'stoppedPhases':[phase for phase,state in activities.items() if state=='STOPPED']}
     if action in ('fence','isolate','restore','release-absence','cancel','commit'):
         if action in ('restore','release-absence','cancel') and not actor.is_admin:raise ValueError('Administrator restoration is required')

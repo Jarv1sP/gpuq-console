@@ -161,4 +161,21 @@ class Review4(unittest.TestCase):
     def test_R4_5_uncommitted_complete_peer_restores_at_deadline(self):self.uncommitted_peer(0)
     def test_R4_5_uncommitted_complete_peer_restores_after_deadline(self):self.uncommitted_peer(86400)
 
+Routes=load('review4_actual_worker_status','dataset-delete-route.test.py')
+class WorkerProjection(unittest.TestCase):
+    setUp=Routes.RetirementRoutes.setUp
+    tearDown=Routes.RetirementRoutes.tearDown
+    ready=Routes.RetirementRoutes.ready
+    call=Routes.RetirementRoutes.call
+
+    def test_R4_4_completed_receipt_still_projects_actual_running_worker_without_writes(self):
+        self.call('fence',operationId=self.key)
+        self.assertEqual(self.node.dataset_retirement_worker(self.key,'fence'),0)
+        folder=self.node.ROOT/'dataset-retirements';before={p:p.read_bytes()for p in folder.glob('*.json')}
+        with patch.object(self.node,'dataset_retirement_activity',return_value='RUNNING'):
+            result=self.call('status',operationId=self.key)
+        self.assertTrue(result['phases']['fence']['ok']);self.assertEqual(result['pendingPhases'],[])
+        self.assertEqual(result.get('runningPhases'),['fence'])
+        self.assertEqual(before,{p:p.read_bytes()for p in folder.glob('*.json')})
+
 if __name__=='__main__':unittest.main()

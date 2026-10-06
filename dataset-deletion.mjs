@@ -315,7 +315,8 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
   function verifyStatus(value,step){
     if(value?.protocol!==PROTOCOL||value.operationId!==step.operationId||value.machine!==step.machine||value.dataset!==step.dataset
       ||value.version!==step.version||value.snapshotSha256!==step.plan.snapshotSha256||!value.phases||Array.isArray(value.phases)
-      ||!Array.isArray(value.pendingPhases)||!Array.isArray(value.unconfirmedPhases))fail('原节点操作状态未确认。',502);
+      ||!Array.isArray(value.pendingPhases)||!Array.isArray(value.unconfirmedPhases)
+      ||value.runningPhases!==undefined&&!Array.isArray(value.runningPhases))fail('原节点操作状态未确认。',502);
     return value;
   }
   function phaseResult(status,step,phase){
@@ -353,7 +354,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
     if(!same(status.result,receipt))fail('节点当前状态与原步骤回执不一致。',502);
     return receipt;
   }
-  const workerActive=status=>status.pendingPhases.some(phase=>!status.unconfirmedPhases.includes(phase));
+  const workerActive=status=>status.runningPhases?.length>0||status.pendingPhases.some(phase=>!status.unconfirmedPhases.includes(phase));
   function waiting(row){
     row.state=row.cancelRequested?'CANCELING':'WAITING_CONTINUE';row.waitingWorker=true;
     row.error='节点仍在进行，请等待原工作进程结束。';save(row);return publicTask(row);
@@ -478,6 +479,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       const phase=step.dispatched.at(-1);
       try{
         const status=verifyStatus(await rpc(principal,check,step.machine,'status',{operationId:step.operationId}),step);
+        inProgress||=workerActive(status);
         if(workerActive(status)&&status.phases[phase]?.ok!==true){
           confirmed=false;inProgress=true;step.state='RUNNING';step.error='节点正在处理。';save(row);continue;
         }
@@ -628,7 +630,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
           // absence or replay of an uncertain launch is accepted.
           for(const step of row.steps.filter(s=>s.plan&&s.dispatched.length))while(true){
             const status=verifyStatus(await rpc(principal,check,step.machine,'status',{operationId:step.operationId}),step);
-            if(status.pendingPhases.length){await new Promise(resolve=>setTimeout(resolve,pollMs));continue;}
+            if(status.pendingPhases.length||workerActive(status)){await new Promise(resolve=>setTimeout(resolve,pollMs));continue;}
             // Executor independently requires STOPPED for every original
             // worker before cancellation; missing files alone are no proof.
             break;

@@ -64,6 +64,23 @@ test('R4-4 restarted cancellation remains CANCELING and never advertises continu
   assert.equal(status.state,'CANCELING');assert.notEqual(status.canContinue,true);assert.equal(writes(f).length,before);
 });
 
+test('R4-4 a completed phase receipt cannot hide its still-running worker from continue or restore',async t=>{
+  for(const operation of ['datasets.delete.continue','datasets.delete.restore']){
+    const f=fixture(t);let lost=true;
+    f.after=(host,op)=>{if(lost&&host===hosts[0]&&op.endsWith('.isolate')){lost=false;throw Error('receipt lost');}};
+    const r=await f.start(),before=writes(f).length;
+    f.after=(host,op,args,result)=>{if(op.endsWith('.status')){
+      result.runningPhases=host===hosts[0]?['isolate']:[];result.pendingPhases=[];result.unconfirmedPhases=[];
+      result.stoppedPhases=Object.keys(result.phases).filter(phase=>!result.runningPhases.includes(phase));
+    }};
+    installDatasetDeletion(f.service,{pollMs:1,capabilityTimeoutMs:30});
+    const value=await f.call(operation,{operationId:r.first.operationId,...(operation.endsWith('.restore')?{machine:hosts[0]}:{})},admin);
+    assert.equal(value.state,'WAITING_CONTINUE');assert.equal(value.canContinue,false);assert.match(value.error,/仍在进行/);
+    const status=await f.call('datasets.delete.status',{operationId:r.first.operationId},admin);
+    assert.equal(status.state,'WAITING_CONTINUE');assert.equal(status.canContinue,false);assert.equal(writes(f).length,before);
+  }
+});
+
 test('NB-B admin discard persists its key and audit before RPC and resumes only that same binding',async t=>{
   const f=fixture(t),r=await f.start(),key=randomUUID(),args={operationId:r.first.operationId,machine:hosts[0],key};
   let lost=true;
