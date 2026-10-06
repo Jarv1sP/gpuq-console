@@ -11,6 +11,7 @@ import os
 import re
 import stat
 import subprocess
+import unicodedata
 from pathlib import Path
 
 CONFIG=json.loads((Path(__file__).resolve().parent/'node-config.json').read_text())
@@ -252,6 +253,22 @@ def probe_gpus():
     return output
 
 
+def public_task_display(value):
+    if not isinstance(value,dict) or set(value)!={'name','description','submitter'}:return None
+    actor=value['submitter']
+    if not isinstance(actor,dict) or set(actor)!={'name','username'}:return None
+    fields=((value['name'],64,256,False),(value['description'],2000,6000,True),
+            (actor['name'],32,128,False),(actor['username'],24,96,False))
+    for text,chars,size,multiline in fields:
+        if not isinstance(text,str) or len(text)>chars or (not multiline and not text.strip()):return None
+        try:
+            if len(text.encode('utf8'))>size:return None
+        except UnicodeError:return None
+        if any(unicodedata.category(c) in ('Cc','Cf','Cs','Zl','Zp') and not(multiline and c in '\n\t') for c in text):return None
+    return {'name':value['name'],'description':value['description'],
+            'submitter':{'name':actor['name'],'username':actor['username']}}
+
+
 def probe_gpuq():
     output = {'connected': False, 'jobs': []}
     if os.path.isfile(CONFIG['gpu']):
@@ -271,7 +288,9 @@ def probe_gpuq():
                 "observeOnly": daemon.get("observe_only"),
                 "capabilities": [c for c in (daemon.get('capabilities') if isinstance(daemon.get('capabilities'), list) else []) if c in ('priority-policy-v1','preempt-idle-only-v1','priority-rank-v1','preempt-opt-in-only-v1','elastic-batch-v1','gpu-placement-v1','gpu-sharing-v1')],
                 "schedulableIndices": daemon.get("schedulable_gpu_indices", []),
-                "jobs": [{key: job.get(key) for key in allowed} for job in jobs[:100] if isinstance(job, dict)],
+                "jobs": [{**{key: job.get(key) for key in allowed},
+                          **({'display_metadata':display} if (display:=public_task_display(job.get('display_metadata'))) is not None else {})}
+                         for job in jobs[:100] if isinstance(job, dict)],
                 "limit": 100,
             }
             if isinstance(daemon.get('capabilities'),list) and 'job-display-v1' in daemon['capabilities']:

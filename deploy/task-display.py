@@ -6,14 +6,12 @@ CAPABILITY = 'console-task-display-v1'
 NATIVE = 'job-display-v1'
 
 
-def validate(job, metadata):
+def normalize(metadata):
     if not isinstance(metadata, dict) or set(metadata) != {'name','description','submitter'}:
         raise ValueError('Invalid job display metadata')
     actor=metadata['submitter']
     if not isinstance(actor,dict) or set(actor) != {'name','username'}:
         raise ValueError('Invalid job display submitter')
-    if metadata['name'] != job['name'] or actor['username'] != job['username']:
-        raise ValueError('Display metadata belongs to another submitted task')
     fields=((metadata['name'],64,256,False),(metadata['description'],2000,6000,True),
             (actor['name'],32,128,False),(actor['username'],24,96,False))
     for value,chars,size,multiline in fields:
@@ -25,10 +23,26 @@ def validate(job, metadata):
     return metadata
 
 
+def validate(job, metadata):
+    normalize(metadata)
+    if metadata['name'] != job['name'] or metadata['submitter']['username'] != job['username']:
+        raise ValueError('Display metadata belongs to another submitted task')
+    return metadata
+
+
 def sync(node, job, metadata, native):
     if metadata is None:return {'state':'LEGACY'}
     validate(job,metadata)
     if native.get('display_metadata') == metadata:return {'state':'SYNCED'}
+    existing=native.get('display_metadata')
+    if existing:
+        try:normalize(existing)
+        except (ValueError,UnicodeError):pass
+        else:
+            if existing['submitter']['username']==job['username']:
+                # A human used the native, identity-fenced set-display entry.
+                # Reconciliation observes it, never rewrites it to rawname.
+                return {'state':'PRESERVED','metadata':existing}
     # The native endpoint checks all three persistent identity fields atomically.
     # No guess by shortened portal name, GPU index or process username.
     result=node.gpu('set-display',native['id'],
