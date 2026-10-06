@@ -1,7 +1,7 @@
 import {priorityLabel,sampleTime,taskIdentityHTML,taskStateLabel} from './execution-ui.js';
 import {revealSheet,dismissSheet,reducedMotion,captureObject,sharedObject} from './motion-ui.js';
 import {maintenanceFor,maintenanceTime,maintenanceInfoHTML} from './maintenance-state.js';
-import {serverIdHTML} from './workbench-ui.js';
+import {serverIdHTML,personalQuotaReadout} from './workbench-ui.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const known=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
 const metric=(value,suffix='',digits=0)=>known(value)?`${value.toFixed(digits)}${suffix}`:'—';
@@ -88,28 +88,76 @@ function allProcesses(view,admin){
   const label=view.processesComplete?`${rows.length}`:rows.length?`${rows.length} · 部分采集`:'未确认';
   return `<details class="resource-process-list" data-resource-detail="${esc(view.machine.id)}:processes"><summary>进程 · ${label}</summary>${info(view.machine.id+':process-info','了解进程归属',help.process)}<div class="resource-process-scroll" tabindex="0" role="region" aria-label="${esc(view.machine.id)} 已采集进程">${rows.length?`<table class="process-table resource-process-table"><caption class="sr-only">${esc(view.machine.id)} 进程；程序与系统用户只向管理员展示</caption><thead><tr><th>GPU</th><th>PID</th><th>任务 / 提交者 / 描述</th>${admin?'<th>程序</th><th>系统用户</th>':''}<th>显存 MiB</th><th>优先级</th></tr></thead><tbody>${rows.map(({gpu,process:p})=>`<tr><td>${gpu.index}</td><td>${esc(p.pid)}</td><td>${p.task?taskIdentityHTML(p.task):'<span class="muted">外部进程／归属未知</span>'}</td>${admin?`<td>${esc(p.name||'—')}</td><td>${esc(p.owner||'—')}</td>`:''}<td>${metric(p.memoryUsedMiB)}</td><td>${processPriority(p,admin)}</td></tr>`).join('')}</tbody></table>`:`<p class="muted">${view.processesComplete?'未检测到进程。':'采集未确认，请稍后刷新。'}</p>`}</div></details>`;
 }
-function selectedDetail(view,{admin,mine,production,index}){
+function selectedDetail(view,{admin,mine,production,index,idPrefix=''}){
   const m=view.machine,h=view.host,{gpu,tasks,owner}=gpuFacts(view,index,mine),state=cardState(gpu,view,mine);
   const knownProcess=Array.isArray(gpu?.processes)?gpu.processes:[],pid=knownProcess[0]?.pid;
   const warning=!view.authorized?'未授权，请联系管理员。':!production?'演示模式，无真实采集。':!view.fresh?'状态未知，请稍后刷新。':!view.validInventory?'卡号异常，请刷新。':!view.complete?`已采集 ${view.gpus.length} / ${view.count} 张`:'',showQueue=view.authorized&&production&&(Array.isArray(h?.tasks)||admin&&view.fresh&&h?.gpuq?.connected);
   const content=view.authorized&&production&&view.fresh?`<article class="resource-gpu ${state}" data-resource-gpu="${index}"><div class="resource-gpu-owner">${owner}</div><dl class="resource-card-metrics"><div><dd class="resource-gpu-util" ${known(gpu?.utilization)&&state!=='unknown'?`data-resource-reading="${gpu.utilization}" data-resource-reading-key="${esc(m.id)}:${index}" data-resource-sample="${esc(view.checkedAt)}"`:''}>${metric(gpu?.utilization,'%')}</dd><dt>利用率</dt></div><div><dd>${metric(gpu?.temperatureC,' °C')}</dd><dt>温度</dt></div><div><dd>${metric(gpu?.powerDrawW,' W')} <small>/ ${metric(gpu?.powerLimitW,' W')}</small></dd><dt>功率</dt></div><div><dd>${esc(pid??'—')}${knownProcess.length>1?` <small>+${knownProcess.length-1}</small>`:''}</dd><dt>PID</dt></div></dl></article>`:'';
   const reference=view.authorized&&production&&view.fresh?`${allProcesses(view,admin)}<details class="resource-full-metrics" data-resource-detail="${esc(m.id)}:metrics"><summary>完整指标与逐卡进程</summary>${gpuTable({...h,gpus:view.gpus},admin,m)}</details>`:'';
-  return `<section class="resource-detail" data-resource-selected="${esc(m.id)}" aria-labelledby="resource-selected-title"><header class="resource-detail-head"><h2 id="resource-selected-title">${serverIdHTML(m.id)}<span class="resource-gpu-number">· GPU ${index}</span></h2>${admin?`<button type="button" class="button quiet" data-resource-root="${esc(m.id)}">ROOT 运维</button>`:''}</header>${warning?`<p class="monitor-warning">${warning}</p>`:''}${view.maintenance?`<div class="maintenance-resource"><div class="maintenance-resource-body"><div class="maintenance-resource-metrics">${content}</div>${maintenanceBand(view)}</div>${maintenanceReason(view)}</div>`:content}${reference}${showQueue?queue(h,m,view.checkedAt,admin):''}</section>`;
+  return `<section class="resource-detail" data-resource-selected="${esc(m.id)}" aria-labelledby="${esc(idPrefix)}resource-selected-title"><header class="resource-detail-head"><h2 id="${esc(idPrefix)}resource-selected-title">${serverIdHTML(m.id)}<span class="resource-gpu-number">· GPU ${index}</span></h2>${admin?`<button type="button" class="button quiet" data-resource-root="${esc(m.id)}">ROOT 运维</button>`:''}</header>${warning?`<p class="monitor-warning">${warning}</p>`:''}${view.maintenance?`<div class="maintenance-resource"><div class="maintenance-resource-body"><div class="maintenance-resource-metrics">${content}</div>${maintenanceBand(view)}</div>${maintenanceReason(view)}</div>`:content}${reference}${showQueue?queue(h,m,view.checkedAt,admin):''}</section>`;
 }
-export function resourceCards({machines=[],limits={},snapshot,admin=false,production=false,maintenance,selectedMachine,selectedGPU=0,userId,jobs=[],usage}={}){
+export function resourceCards({machines=[],limits={},snapshot,admin=false,management=admin,quotaExempt=admin,production=false,maintenance,selectedMachine,selectedGPU=0,idPrefix='',userId,jobs=[],usage}={}){
   const views=machines.map(machine=>resourceServerView(machine,{limits,snapshot,admin,production,maintenance})),selected=views.find(view=>view.machine.id===selectedMachine)||views.find(view=>view.authorized)||views[0];
   if(!selected)return '<div class="monitor-empty">暂无服务器，请联系管理员。</div>';
   const mine=new Set(jobs.filter(job=>userId&&job.userId===userId).map(job=>job.id)),m=selected.machine,index=Number.isSafeInteger(selectedGPU)&&selectedGPU>=0&&selectedGPU<selected.count?selectedGPU:0,used=typeof usage==='function'?usage(m.id):null,{gpu}=gpuFacts(selected,index,mine);
   const scheduler=!selected.authorized||!production?'':!selected.fresh?'':selected.host.gpuq?.observeOnly?'仅观察':selected.host.gpuq?.connected!==true?'训练连接不可用':'训练连接正常';
   const status=[...new Set([selected.status,scheduler].filter(Boolean))].join(' · ');
   const capacity=selected.gpus.length&&selected.gpus.every(gpu=>gpu.memoryTotalMiB===selected.gpus[0].memoryTotalMiB)&&known(selected.gpus[0].memoryTotalMiB)&&selected.gpus[0].memoryTotalMiB>0?gib(selected.gpus[0].memoryTotalMiB)+' GiB':m.memory;
-  return `<section class="resource-fleet hero-frame" aria-label="服务器显卡"><div class="resource-hardware-caption"><span>显存 ${info('memory','了解显存柱高',help.memory)}</span><span>更新于 ${clock(selected.checkedAt)} ${info('sample','了解采样细线',help.sample)}</span></div><div class="resource-hardware-layout"><article class="resource-card resource-portrait fleet-server selected${selected.maintenance?' maintenance-resource':''}" data-resource-machine="${esc(m.id)}"><h2 class="resource-identity" id="resource-identity"><button type="button" class="resource-select" data-resource-select="${esc(m.id)}" aria-label="查看 ${esc(m.id)} 显卡详情"><span class="resource-id-label" title="${esc(m.id)}">${esc(m.id)}</span></button></h2><div class="resource-portrait-meta"><span class="resource-spec">${m.cards} × ${esc(m.model)} · ${esc(capacity)} / 卡</span><span>${status}</span></div><div class="maintenance-resource-body"><div class="maintenance-resource-metrics">${chassis(selected,mine,index)}</div>${maintenanceBand(selected)}</div>${maintenanceReason(selected)}<div class="resource-selection" role="status"><span class="mono">GPU ${index}</span><span>${selected.authorized&&selected.fresh?`${gib(gpu?.memoryUsedMiB)} / ${gib(gpu?.memoryTotalMiB)} GiB`:'—'}</span><button type="button" class="button quiet" data-resource-select="${esc(m.id)}">显卡详情 ↓</button></div><div class="resource-fleet-actions">${selected.authorized?`<span>${admin?'管理员可访问':`占用 ${known(used)?used:'—'} / ${selected.quota} 张 ${info('quota','了解额度',help.quota)}`}</span><button type="button" class="button quiet" data-use-machine="${esc(m.id)}">在 ${esc(m.id)} 工作</button>`:'<span>未授权</span>'}</div></article><aside class="resource-mini-fleet" aria-label="其他服务器">${views.filter(view=>view!==selected).map(view=>`<article class="resource-card resource-mini fleet-server${view.maintenance?' maintenance-resource':''}" data-resource-machine="${esc(view.machine.id)}"><h2><button type="button" class="resource-select" data-resource-select="${esc(view.machine.id)}" data-resource-swap="true" aria-label="选择 ${esc(view.machine.id)}"><span class="resource-id-label" title="${esc(view.machine.id)}">${esc(view.machine.id)}</span><span class="resource-swap-arrow" aria-hidden="true">→</span></button></h2><p class="resource-spec">${view.machine.cards} × ${esc(view.machine.model)} · ${esc(view.machine.memory)}</p><div class="maintenance-resource-body"><div class="maintenance-resource-metrics">${towers(view,mine)}</div>${maintenanceBand(view)}</div>${maintenanceReason(view)}<p class="resource-fleet-state">${view.status}</p></article>`).join('')}</aside></div><div class="resource-legend" aria-label="显卡图例"><span><i class="mine" aria-hidden="true"></i>我的任务</span><span><i class="used" aria-hidden="true"></i>其他进程</span><span><i class="free" aria-hidden="true"></i>未检测到进程</span><span><i class="unknown" aria-hidden="true"></i>未知</span><span><i class="locked" aria-hidden="true"></i>未授权</span><span><i class="previous" aria-hidden="true"></i>上次采样</span></div></section>${selectedDetail(selected,{admin,mine,production,index})}`;
+  return `<section class="resource-fleet hero-frame" aria-label="服务器显卡"><div class="resource-hardware-caption"><span>显存 ${info('memory','了解显存柱高',help.memory)}</span><span>更新于 ${clock(selected.checkedAt)} ${info('sample','了解采样细线',help.sample)}</span></div><div class="resource-hardware-layout"><article class="resource-card resource-portrait fleet-server selected${selected.maintenance?' maintenance-resource':''}" data-resource-machine="${esc(m.id)}"><h2 class="resource-identity" id="${esc(idPrefix)}resource-identity"><button type="button" class="resource-select" data-resource-select="${esc(m.id)}" aria-label="查看 ${esc(m.id)} 显卡详情"><span class="resource-id-label" title="${esc(m.id)}">${esc(m.id)}</span></button></h2><div class="resource-portrait-meta"><span class="resource-spec">${m.cards} × ${esc(m.model)} · ${esc(capacity)} / 卡</span><span>${status}</span></div><div class="maintenance-resource-body"><div class="maintenance-resource-metrics">${chassis(selected,mine,index)}</div>${maintenanceBand(selected)}</div>${maintenanceReason(selected)}<div class="resource-selection" role="status"><span class="mono">GPU ${index}</span><span>${selected.authorized&&selected.fresh?`${gib(gpu?.memoryUsedMiB)} / ${gib(gpu?.memoryTotalMiB)} GiB`:'—'}</span><button type="button" class="button quiet" data-resource-select="${esc(m.id)}">显卡详情 ↓</button></div><div class="resource-fleet-actions">${selected.authorized?`<span>${quotaExempt?`不限个人额度 · 已占用 ${known(used)?used:'—'} 张`:`占用 ${known(used)?used:'—'} / ${selected.quota} 张 ${info('quota','了解额度',help.quota)}`}</span><button type="button" class="button quiet" data-use-machine="${esc(m.id)}">在 ${esc(m.id)} 工作</button>`:'<span>未授权</span>'}</div></article><aside class="resource-mini-fleet" aria-label="其他服务器">${views.filter(view=>view!==selected).map(view=>`<article class="resource-card resource-mini fleet-server${view.maintenance?' maintenance-resource':''}" data-resource-machine="${esc(view.machine.id)}"><h2><button type="button" class="resource-select" data-resource-select="${esc(view.machine.id)}" data-resource-swap="true" aria-label="选择 ${esc(view.machine.id)}"><span class="resource-id-label" title="${esc(view.machine.id)}">${esc(view.machine.id)}</span><span class="resource-swap-arrow" aria-hidden="true">→</span></button></h2><p class="resource-spec">${view.machine.cards} × ${esc(view.machine.model)} · ${esc(view.machine.memory)}</p><div class="maintenance-resource-body"><div class="maintenance-resource-metrics">${towers(view,mine)}</div>${maintenanceBand(view)}</div>${maintenanceReason(view)}<p class="resource-fleet-state">${view.status}</p></article>`).join('')}</aside></div><div class="resource-legend" aria-label="显卡图例"><span><i class="mine" aria-hidden="true"></i>我的任务</span><span><i class="used" aria-hidden="true"></i>其他进程</span><span><i class="free" aria-hidden="true"></i>未检测到进程</span><span><i class="unknown" aria-hidden="true"></i>未知</span><span><i class="locked" aria-hidden="true"></i>未授权</span><span><i class="previous" aria-hidden="true"></i>上次采样</span></div></section>${selectedDetail(selected,{admin:management,mine,production,index,idPrefix})}`;
 }
 
 export function monitorSummary(snapshot,production){
   if(!production)return '演示模式';
   if(!snapshot?.checkedAt)return '暂无采集';
   return snapshot.stale?'采集已过期':'更新于 '+clock(snapshot.checkedAt);
+}
+
+// Keep the final two ID segments: adjacent servers often differ only there.
+// The inventory value and accessible button name remain the complete ID.
+export function compactResourceId(id,fits){
+  id=String(id);
+  if(fits(id))return id;
+  const parts=id.split('-'),suffix=parts.slice(parts.length>2?-2:-1).join('-');
+  const prefix=id.slice(0,id.length-suffix.length);
+  for(let length=prefix.length-1;length>=0;length--){
+    const candidate=prefix.slice(0,length)+'…'+suffix;
+    if(fits(candidate))return candidate;
+  }
+  return '…'+suffix;
+}
+
+export function fitResourceNames(root){
+  function fit(label,compact=false){
+    const button=label.parentElement,full=label.title,heading=button?.closest('.resource-identity');
+    if(!button?.clientWidth)return true;
+    label.textContent=full;label.classList.remove('resource-id-wrap');
+    button.style.removeProperty('font-size');heading?.style.removeProperty('font-size');
+    const arrow=button.querySelector('.resource-swap-arrow');
+    const available=button.clientWidth-(arrow?arrow.getBoundingClientRect().width+parseFloat(getComputedStyle(arrow).marginLeft):0)-1;
+    const range=label.ownerDocument.createRange();
+    const width=()=>{range.selectNodeContents(label);return range.getBoundingClientRect().width;};
+    let size=label.closest('.resource-portrait')?160:parseFloat(getComputedStyle(button).fontSize);
+    button.style.fontSize=size+'px';
+    size=Math.max(20,Math.min(size,Math.floor(size*available/Math.max(1,width()))));
+    button.style.fontSize=size+'px';
+    while(size>20&&width()>available)button.style.fontSize=--size+'px';
+    // Keep the heading's line box in sync with the visible fitted text.
+    if(heading)heading.style.fontSize=size+'px';
+    if(width()<=available)return true;
+    if(compact){
+      label.textContent=compactResourceId(full,value=>{label.textContent=value;return width()<=available;});
+      // Exceptionally long suffixes wrap rather than clipping their identity.
+      label.classList.toggle('resource-id-wrap',width()>available);
+    }
+    return false;
+  }
+  for(const fleet of root.querySelectorAll('.resource-fleet')){
+    fleet.classList.remove('resource-names-below');
+    const labels=[...fleet.querySelectorAll('.resource-id-label')];
+    const overflow=labels.map(label=>!fit(label));
+    if(labels.some((label,index)=>overflow[index]&&label.closest('.resource-mini')))fleet.classList.add('resource-names-below');
+    for(const label of labels)fit(label,true);
+  }
 }
 
 export function resourcesUI(store,{machines,getPage,navigate}){
@@ -120,19 +168,7 @@ export function resourcesUI(store,{machines,getPage,navigate}){
   sheet.innerHTML='<header class="sheet-header glass"><h2 id="resource-sheet-title">服务器详情</h2><select data-resource-gpu-picker aria-label="选择显卡"></select><button type="button" class="button quiet" data-resource-back>返回算力</button></header><div class="sheet-scroll"></div><footer class="sheet-footer glass"><button type="button" class="button primary" id="resource-sheet-work"></button></footer>';
   document.body.append(sheet);
   let actor=null,selected=null,levels=new Map(),readings=new Map();const expanded=new Map(),selectedGPUs=new Map();
-  let fittedIdentity=null,fittedKey='';
-  function fitIdentity(force=false){
-    const heading=grid.querySelector('.resource-identity'),label=heading?.querySelector('.resource-id-label'),button=label?.parentElement;
-    if(!label||!button.clientWidth)return;
-    const width=button.clientWidth,key=width+'|'+label.textContent+'|'+phone();
-    if(!force&&fittedIdentity===heading&&fittedKey===key)return;
-    heading.style.fontSize='160px';
-    const minimum=phone()?40:56;
-    let size=Math.max(minimum,Math.min(160,Math.floor(160*(width-1)/Math.max(1,label.scrollWidth))));
-    heading.style.fontSize=size+'px';
-    while(size>minimum&&label.scrollWidth>width)heading.style.fontSize=--size+'px';
-    fittedIdentity=heading;fittedKey=key;
-  }
+  const fitIdentity=()=>fitResourceNames(grid);
   const identityResize=new ResizeObserver(()=>fitIdentity());identityResize.observe(grid);
   document.fonts?.addEventListener('loadingdone',()=>fitIdentity(true));
   const identity=()=>store.principal?store.principal.userId+'|'+store.principal.role:null;
@@ -179,12 +215,12 @@ export function resourcesUI(store,{machines,getPage,navigate}){
       if(key)scrollPositions.set(key,{top:region.scrollTop,left:region.scrollLeft});
     }
     for(const root of [grid,sheet])for(const detail of root.querySelectorAll('details[data-resource-detail],details[data-resource-info]'))expanded.set(detail.dataset.resourceDetail||'info:'+detail.dataset.resourceInfo,detail.open);
-    const user=store.users.find(row=>row.id===store.principal?.userId),admin=store.principal?.role==='admin',options={limits:user?.limits||{},snapshot:store.data?.gpuq,admin,production:store.production,maintenance:store.data?.operationalMaintenance};
+    const user=store.users.find(row=>row.id===store.principal?.userId),admin=store.principal?.role==='admin',options={limits:user?.limits||{},snapshot:store.data?.gpuq,admin,production:store.production,maintenance:store.data?.operationalMaintenance,quotaExempt:personalQuotaReadout(user).exempt};
     const views=machines.map(machine=>resourceServerView(machine,options));
     if(!views.some(view=>view.machine.id===selected))selected=(views.find(view=>view.authorized)||views[0])?.machine.id||null;
     const view=views.find(view=>view.machine.id===selected);
     const remembered=selectedGPUs.get(selected),index=Number.isSafeInteger(remembered)&&remembered>=0&&remembered<view?.count?remembered:0;
-    grid.innerHTML=resourceCards({machines,...options,selectedMachine:selected,selectedGPU:index,userId:store.principal?.userId,jobs:store.jobs,usage:id=>user?store.usage(user.id,id):null});
+    grid.innerHTML=resourceCards({machines,...options,management:false,selectedMachine:selected,selectedGPU:index,userId:store.principal?.userId,jobs:store.jobs,usage:id=>user?store.usage(user.id,id):null});
     if(sheet.open){sheet.querySelector('.sheet-scroll').replaceChildren(grid.querySelector('.resource-detail'));sheet.querySelector('#resource-sheet-title').textContent=selected;sheet.querySelector('#resource-sheet-title').title=selected;}
     primary.hidden=telemetry.hidden=!store.principal||getPage()!=='resources';updatePrimary(primary,view);updatePrimary(sheet.querySelector('#resource-sheet-work'),view);
     const picker=sheet.querySelector('[data-resource-gpu-picker]');picker.innerHTML=Array.from({length:view?.count||0},(_,number)=>`<option value="${number}">GPU ${number}</option>`).join('');picker.value=String(index);
@@ -215,7 +251,7 @@ export function resourcesUI(store,{machines,getPage,navigate}){
     }
   }
   document.addEventListener('click',event=>{
-    const button=event.target.closest('button');if(!button||button.disabled)return;
+    const button=event.target.closest('button');if(!button||button.disabled||button!==primary&&!grid.contains(button)&&!sheet.contains(button))return;
     if(button.dataset.resourceSelect)select(button.dataset.resourceSelect,!button.hasAttribute('data-resource-swap'));
     if(button.hasAttribute('data-resource-card')&&button.dataset.resourceServer===selected){selectedGPUs.set(selected,Number(button.dataset.resourceCard));render();}
     if(button.dataset.resourceContact)navigate('community');

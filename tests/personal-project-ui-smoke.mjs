@@ -26,7 +26,7 @@ try{
   await writeFile(statusPath,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(node=>({id:node.id,reachable:true,checkedAt:new Date().toISOString(),gpus:Array.from({length:node.cards},(_,index)=>({index,model:node.model,memoryTotalMiB:32768,memoryUsedMiB:0,processesAvailable:true,processes:[]})),gpuq:{connected:true,health:'ok',observeOnly:false,schedulableIndices:[0],jobs:[]}}))}));
   const bridge=async(node,operation,args)=>{
     calls.push({node,operation,args:copy(args)});const key=identity(node,args.userId,args.project),project=projects.get(key);
-    if(operation==='projects.list')return {projects:[...projects].filter(([entry])=>{const [m,u]=JSON.parse(entry);return m===node&&u===args.userId;}).map(([,value])=>copy(value))};
+    if(operation==='projects.list')return {environmentModes:['shared','isolated','oci'],projects:[...projects].filter(([entry])=>{const [m,u]=JSON.parse(entry);return m===node&&u===args.userId;}).map(([,value])=>copy(value))};
     if(operation==='projects.create'){
       if(createError)throw Error(createError);
       const result={project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null,...(createMode==='missing'?{}:{environmentMode:createMode||args.environmentMode})};projects.set(key,result);return copy(result);
@@ -165,12 +165,14 @@ try{
       const request=route.request(),url=new URL(request.url());if(url.origin!==origin){await route.fallback();return;}
       if(url.pathname==='/machines.js'){await route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(layoutMachines)+';'});return;}
       if(!url.pathname.startsWith('/api/')){await route.fallback();return;}const {operation,args}=request.postDataJSON();let result=null;
-      if(operation==='state'){}else if(operation==='projects.list')result={projects:[layoutProject]};else if(operation==='projects.status')result=layoutProject;else if(operation==='projects.publish'){layoutRequest=args;layoutProject.state='UNKNOWN';layoutProject.publication={id:args.key,state:'UNKNOWN'};result=layoutProject;}else throw Error('Unexpected layout operation '+operation);
+      if(operation==='state'){}else if(operation==='projects.list')result={environmentModes:['shared','isolated','oci'],projects:[layoutProject]};else if(operation==='projects.status')result=layoutProject;else if(operation==='projects.publish'){layoutRequest=args;layoutProject.state='UNKNOWN';layoutProject.publication={id:args.key,state:'UNKNOWN'};result=layoutProject;}else throw Error('Unexpected layout operation '+operation);
       await route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal})});
     }));
     await layout.goto(origin);await layout.locator('[name=workspace-machine]').waitFor();await layout.evaluate(()=>document.fonts.ready);
     for(const node of layoutMachines){
-      await action('projects.list',()=>layout.locator('[name=workspace-machine]').selectOption(node.id),layout);await idle(layout);await action('projects.status',()=>layout.locator('[name=workspace-project]').selectOption(layoutProject.project),layout);await idle(layout);
+      await action('projects.list',()=>layout.locator('#projects-refresh').click(),layout);await idle(layout);await layout.locator('[name=workspace-machine]').selectOption(node.id);await idle(layout);
+      const selected=await layout.locator('[name=workspace-project] option').evaluateAll((options,id)=>options.find(option=>option.dataset.project==='container-layout'&&option.dataset.machine===id)?.value,node.id);assert.ok(selected,'the exact source project is present');
+      await action('projects.status',()=>layout.locator('[name=workspace-project]').selectOption(selected),layout);await idle(layout);
       await layout.locator('#project-create').evaluate(element=>element.open=true);await layout.locator('[name=new-project]').fill('new-container');await layout.locator('[name=environment-choice][value=oci]').check();
       await layout.locator('#project-create').scrollIntoViewIfNeeded();await layout.screenshot({path:join(shots,`personal-${role}-${width}-${node.id}-create.png`),fullPage:true});
       assert.ok(await layout.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),role+' '+width+' '+node.id+' does not overflow');

@@ -17,7 +17,7 @@ export function shellUI(store,{navigate,getPage,toast}){
     for(const [original,target] of [[machine,q('#context-machine')],[project,q('#context-project')]]){if(!original)continue;if(target.innerHTML!==original.innerHTML)target.innerHTML=original.innerHTML;target.value=original.value;target.disabled=original.disabled;target.title=original.selectedOptions[0]?.textContent||original.value;}
     serverSelectLabel(q('#context-machine'));
     q('#context-note').textContent=project?.value?'项目':'个人工作区';
-    if(active==='work'&&store.principal){q('#page-title').textContent=project?.value||'个人工作区';q('#page-description').textContent=machine?.value?machine.value+' · '+(project?.value?'项目':'个人工作区'):'选择获授权服务器，开始一次训练。';}
+    if(active==='work'&&store.principal){const choice=project?.selectedOptions[0],source=choice?.dataset.machine||machine?.value;q('#page-title').textContent=choice?.dataset.project||'个人工作区';q('#page-description').textContent=source?source+' · '+(project?.value?'项目':'个人工作区'):'选择我的项目，或新建个人容器。';}
   }
   for(const [proxy,name] of [['#context-machine','workspace-machine'],['#context-project','workspace-project']])q(proxy).addEventListener('change',event=>{const original=q(`[name=${name}]`);if(original){original.value=event.target.value;original.dispatchEvent(new Event('change',{bubbles:true}));}});
   document.addEventListener('gpuq-workspace-context',event=>{if(event.detail.userId!==store.principal?.userId)return;queueMicrotask(syncContext);});
@@ -29,7 +29,6 @@ export function shellUI(store,{navigate,getPage,toast}){
     if(action==='logout'){q('#switch-account').click();account.open=false;}
     if(action==='new-project'){navigate('work');const target=q('#project-create');if(target){target.open=true;target.scrollIntoView({block:'center',behavior:'instant'});target.querySelector('input')?.focus();}}
     if(action==='terminal')q('#terminal-open')?.click();
-    if(action==='members')navigate('users');
     if(action==='admin'){navigate('admin');account.open=false;}
     if(action==='guide')q('.guide-link').click();
     if(action==='files'){navigate('work');const target=q('#workspace-files');if(target){target.open=true;target.scrollIntoView({block:'center',behavior:'instant'});}}
@@ -43,7 +42,7 @@ export function shellUI(store,{navigate,getPage,toast}){
     if(animate&&!reduced()&&previous.width)indicator.animate([{transform:`translateX(${previous.left-rect.left}px) scaleX(${previous.width/rect.width})`},{transform:'none'}],{duration:220,easing:'cubic-bezier(.2,0,0,1)'});
   }
   function syncNavigation(){
-    const active=roomForPage(getPage()),selected=phone()?({users:'me',maintenance:'me',admin:'me'}[active]||active):active;
+    const active=roomForPage(getPage()),selected=phone()?({maintenance:'me',admin:'me'}[active]||active):active;
     for(const item of nav.querySelectorAll('[data-nav]')){const current=item.dataset.nav===selected;item.classList.toggle('active',current);if(current)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current');}
   }
   function markDesktopSlide(target,animation){
@@ -81,17 +80,29 @@ export function shellUI(store,{navigate,getPage,toast}){
     const action=q('#open-submit'),headingControl=q('.heading-actions [data-shell-action=control]');if(headingControl)headingControl.hidden=phone()&&!q('#mobile-control').hidden;
     if(phone()&&getPage()==='work'&&action){if(!phoneAction){phoneActionPlace=document.createComment('workbench primary action');action.before(phoneActionPlace);phoneAction=action;q('#mobile-control').append(action);}action.hidden=!store.principal;}
   }
+  function updateBottomReserve(){
+    const scale=document.body.getBoundingClientRect().width/document.body.offsetWidth||1;
+    const targets=[q('#control-strip'),q('#mobile-control'),nav].filter(node=>node&&!node.hidden&&getComputedStyle(node).position==='fixed'&&node.getClientRects().length);
+    const occupied=targets.reduce((value,node)=>Math.max(value,innerHeight-node.getBoundingClientRect().top),0);
+    const reserve=occupied>0?Math.ceil((occupied+20)/scale):0;
+    document.body.style.setProperty('--bottom-reserve',reserve+'px');
+  }
+  const reserveObserver=new ResizeObserver(updateBottomReserve);
+  for(const node of [q('#control-strip'),q('#mobile-control'),nav])if(node)reserveObserver.observe(node);
+  new MutationObserver(updateBottomReserve).observe(q('#control-strip'),{attributes:true,attributeFilter:['hidden']});
+  new MutationObserver(updateBottomReserve).observe(q('#mobile-control'),{attributes:true,attributeFilter:['hidden']});
+  addEventListener('resize',updateBottomReserve);
   function renderMe(){
     const user=store.users.find(row=>row.id===store.principal?.userId),snapshot=control.snapshot(),host=q('#me-content');
     if(!user){host.textContent='登录后查看自己的账号和工作区。';return;}
-    host.innerHTML=`<section class="me-hero hero-frame"><span class="hero-label">我的账号</span><h2 class="disp">${esc(user.name||user.username)}</h2><p class="mono">${esc(user.username)} · ${user.role==='admin'?'管理员':'成员'}</p><div class="me-telemetry"><div><span class="label">${snapshot.quotaReadout.exempt?'请求卡数':'额度占用 / 上限'}</span><strong>${snapshot.quotaReadout.value} <small>张</small></strong>${snapshot.quotaReadout.exempt?'<span class="wb-telemetry-note">免个人额度</span>':''}</div><div><span class="label">已授权服务器</span><strong>${snapshot.servers.length} <small>台</small></strong></div></div></section><div class="me-actions"><button type="button" class="button quiet" data-shell-action="profile" ${q('#edit-profile').hidden?'hidden':''}>设置姓名</button><button type="button" class="button quiet" data-shell-action="files">个人工作区与文件</button><button type="button" class="button quiet" data-shell-action="control">会话与后台任务</button>${store.principal?.role==='admin'&&hasAdminSections()?'<button type="button" class="button quiet" data-shell-action="admin">管理后台</button>':''}${user.role==='admin'?'<button type="button" class="button quiet" data-shell-action="members">成员授权</button>':''}<button class="button quiet" type="button" data-shell-action="guide">使用指南</button><button type="button" class="button quiet" data-shell-action="logout">退出登录</button></div>${snapshot.sessions.length?'<h3 class="me-section-title">保留的终端会话</h3>'+snapshot.sessions.map(session=>`<article class="mc-row"><span class="mono">${esc(session.machine)} · ${esc(session.project||'个人工作区')}</span><p class="muted">${esc(sessionStatus(session))}</p><code class="control-full-id">${esc(session.id)}</code><button type="button" class="button quiet" data-control-session="${esc(session.id)}">${session.detached?'重连':'展开'}终端</button></article>`).join(''):''}`;
+    host.innerHTML=`<section class="me-hero hero-frame"><span class="hero-label">我的账号</span><h2 class="disp">${esc(user.name||user.username)}</h2><p class="mono">${esc(user.username)} · ${user.role==='admin'?'管理员':'成员'}</p><div class="me-telemetry"><div><span class="label">${snapshot.quotaReadout.exempt?'已占用':'额度占用 / 上限'}</span><strong>${snapshot.quotaReadout.value} <small>张</small></strong>${snapshot.quotaReadout.exempt?'<span class="wb-telemetry-note">不限个人额度</span>':''}</div><div><span class="label">已授权服务器</span><strong>${snapshot.servers.length} <small>台</small></strong></div></div></section><div class="me-actions"><button type="button" class="button quiet" data-shell-action="profile" ${q('#edit-profile').hidden?'hidden':''}>设置姓名</button><button type="button" class="button quiet" data-shell-action="files">个人工作区与文件</button><button type="button" class="button quiet" data-shell-action="control">会话与后台任务</button>${store.principal?.role==='admin'&&hasAdminSections()?'<button type="button" class="button quiet" data-shell-action="admin">管理后台</button>':''}<button class="button quiet" type="button" data-shell-action="guide">使用指南</button><button type="button" class="button quiet" data-shell-action="logout">退出登录</button></div>${snapshot.sessions.length?'<h3 class="me-section-title">保留的终端会话</h3>'+snapshot.sessions.map(session=>`<article class="mc-row"><span class="mono">${esc(session.machine)} · ${esc(session.project||'个人工作区')}</span><p class="muted">${esc(sessionStatus(session))}</p><code class="control-full-id">${esc(session.id)}</code><button type="button" class="button quiet" data-control-session="${esc(session.id)}">${session.detached?'重连':'展开'}终端</button></article>`).join(''):''}`;
   }
   function update(){
     if(contextActor!==store.principal?.userId){contextActor=store.principal?.userId;scrolls.clear();context.hidden=true;}
     const changed=page!==null&&roomForPage(page)!==roomForPage(getPage());page=getPage();document.body.dataset.room=roomForPage(page);
     q('#account-avatar').textContent=(store.users.find(user=>user.id===store.principal?.userId)?.name||store.principal?.username||'S').slice(0,1);
     if(notice!==q('#mode-note').textContent)notice=q('#mode-note').textContent;
-    syncContext();syncNavigation();control.update();updateMobileAction();renderMe();updateIndicator(changed);
+    syncContext();syncNavigation();control.update();updateMobileAction();updateBottomReserve();renderMe();updateIndicator(changed);
     if(page==='work')q('#page-title').classList.add('work-project-title');else q('#page-title').classList.remove('work-project-title');
   }
   function syncStatus(state,time){q('#sync-label').textContent=state==='syncing'?'正在同步':state==='failed'?'同步失败，保留已确认状态':'已同步 '+new Date(time||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});q('#refresh-state').title=q('#sync-label').textContent;}

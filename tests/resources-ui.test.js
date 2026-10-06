@@ -1,8 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {resourceCards,resourceServerView,monitorSummary} from '../dist/resources-ui.js';
+import {resourceCards,resourceServerView,monitorSummary,compactResourceId} from '../dist/resources-ui.js';
 const machine={id:'gpu-1',cards:1,model:'GPU',memory:'24 GiB'};
 const snapshot={checkedAt:new Date().toISOString(),stale:false,hosts:[{id:'gpu-1',reachable:true,gpus:[{index:0,utilization:0,memoryTotalMiB:24576,memoryUsedMiB:null,processesAvailable:true,processes:[{pid:42,name:'<script>alert(1)</script>',owner:'other-owner',memoryUsedMiB:1024}]}],gpuq:{connected:true,jobs:[]}}]};
+test('resource ID fallback preserves distinct suffixes and full inventory values',()=>{
+ const ids=['example-rack-model-08','example-rack-model-06'];
+ const compact=ids.map(id=>compactResourceId(id,value=>value.length<=12));
+ assert.notEqual(compact[0],compact[1]);
+ compact.forEach((value,index)=>{assert.ok(value.length<=12);assert.match(value,/…model-/);assert.ok(value.endsWith(ids[index].split('-').slice(-2).join('-')));});
+ assert.equal(compactResourceId(ids[0],()=>true),ids[0]);
+ assert.equal(compactResourceId('example-verylongsuffix',()=>false),'…verylongsuffix');
+ const html=resourceCards({machines:ids.map(id=>({...machine,id})),admin:true});
+ for(const id of ids){assert.ok(html.includes('title="'+id+'"'));assert.ok(html.includes('data-resource-select="'+id+'"'));}
+});
 test('process priorities are displayed only when matched; member view omits job identity',()=>{
  const data=structuredClone(snapshot);data.hosts[0].gpus[0].processes.push({pid:43,memoryUsedMiB:2,scheduling:{priority:0,jobId:'private-job'}});
  const html=resourceCards({machines:[machine],limits:{'gpu-1':1},snapshot:data,admin:true,production:true});

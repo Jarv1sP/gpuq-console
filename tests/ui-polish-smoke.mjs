@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 // Visual and responsive acceptance with synthetic API data only.
 // No real accounts, shell, SSH, jobs, credentials, or external requests.
 import assert from 'node:assert/strict';
@@ -67,7 +68,7 @@ try{
       const over=(front,back)=>front.slice(0,3).map((c,i)=>c*front[3]+back[i]*(1-front[3]));
       const luminance=rgb=>rgb.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
       const background=el=>{const ancestors=[];for(let n=el;n;n=n.parentElement)ancestors.unshift(n);return ancestors.reduce((bg,n)=>over(rgba(getComputedStyle(n).backgroundColor),bg),[255,255,255]);};
-      const selectors='[data-nav],.muted,.self-summary small,.self-summary strong span,.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small,.terminal-scope,.page-heading p,.page-heading .eyebrow,.topbar #current-account,.section-kicker,.help-links>span,.datasets-capacity,.dataset-readiness,.dataset-locations,.datasets-add>summary span,.datasets-flow,.dataset-source-tabs button,.user-row,.user-meta,.username,.permission-spec,.permission-bottom,.team-jobs';
+      const selectors='[data-nav],.muted,.self-summary small,.self-summary strong span,.resource-explainer,.resource-spec,.resource-policy,.gpu-table th,.gpu-table small,.terminal-scope,.page-heading p,.page-heading .eyebrow,.topbar #current-account,.section-kicker,.help-links>span,.datasets-capacity,.dataset-readiness,.dataset-locations,.datasets-add>summary span,.datasets-flow,.dataset-source-tabs button,.user-row,.user-meta,.username,.permission-spec,.permission-bottom,.team-jobs,.v3-id,.v3-owner,.v3-pip-id,.v3-store>span,.v3-server-text>span,.v3-meta,.v3-idline,.v3-lab,.v3-train .v3-lock';
       return [...document.querySelectorAll(selectors)].filter(el=>el.getClientRects().length&&el.textContent.trim()&&!el.closest('[disabled],[aria-hidden="true"],[inert]')).flatMap(el=>{
         const bg=background(el),fg=over(rgba(getComputedStyle(el).color),bg),a=luminance(fg),b=luminance(bg),ratio=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
         return ratio>=4.5?[]:[{element:el.className||el.tagName,text:el.textContent.trim().slice(0,45),ratio:Number(ratio.toFixed(2))}];
@@ -79,9 +80,14 @@ try{
   await textContrast();
   await capture('workspace-desktop');
   const personalSummary=await page.locator('#self-summary').innerText();
-  assert.match(personalSummary,/请求卡数\n4 张\n免个人额度/);
+  assert.match(personalSummary,/不限个人额度\n已占用 4 张/);
   assert.doesNotMatch(personalSummary,/4 \/ 8|占用额度 \/ 上限/);
-  assert.equal(await page.locator('[name=priority] option').count(),3);
+  assert.equal(await page.locator('[name=priority] option').count(),2,'Main submit offers the same normal/idle choices for both roles');
+  assert.deepEqual(await page.locator('[name=priority] option').evaluateAll(rows=>rows.map(row=>row.value)),['normal','idle']);
+  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('[data-admin-submit]').waitFor();await page.locator('[data-admin-submit]').click();
+  assert.equal(await page.locator('[name=priority] option').count(),3,'The original administrator priority choices remain available in the backend');
+  assert.deepEqual(await page.locator('[name=priority] option').evaluateAll(rows=>rows.map(row=>row.value)),['normal','idle','high']);
+  await closeSubmit(page);await page.locator('[data-nav=work]').click();
   const queueInfo=page.locator('[data-workbench-job="22222222-2222-4222-8222-222222222222"] .ui-info>summary');await queueInfo.click();assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);await queueInfo.click();
   await page.locator('[data-nav=resources]').click();
   await currentNav('resources');
@@ -92,8 +98,13 @@ try{
     await selectResource(page,machine,{metrics:true});
   }
   const first=page.locator('[data-resource-detail="'+machine+':0"]');await first.locator(':scope > summary').click();
-  await page.locator('.node-queue summary').first().click();
-  for(const text of ['76%','12.5','62 °C','24018','python train.py','researcher','等待空闲 GPU'])assert.ok((await page.locator('#machine-grid').innerText()).includes(text),text);
+  assert.equal(await page.locator('#machine-grid .node-queue').count(),0,'Unlinked raw native queue records stay in the management view');
+  for(const text of ['76%','12.5','62 °C','24018'])assert.ok((await page.locator('#machine-grid').innerText()).includes(text),text);
+  for(const text of ['python train.py','researcher','等待空闲 GPU'])assert.ok(!(await page.locator('#machine-grid').innerText()).includes(text),'Main process columns hide private fields and raw native queue: '+text);
+  await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content .resource-full-metrics').waitFor();
+  await page.locator('#admin-content .resource-full-metrics>summary').click();await page.locator('#admin-content [data-resource-detail="'+machine+':0"]>summary').click();await page.locator('#admin-content .node-queue>summary').click();
+  for(const text of ['76%','12.5','62 °C','24018','python train.py','researcher','等待空闲 GPU'])assert.ok((await page.locator('#admin-content').innerText()).includes(text),'Backend preserves existing metrics/private process and queue evidence: '+text);
+  await capture('admin-resources-desktop');await page.locator('[data-nav=resources]').click();
   await capture('resources-desktop');
   await textContrast();
   for(const width of [1024,900,820,768,390,320]){
@@ -103,7 +114,7 @@ try{
     if(!baseline){
       assert(layout.document<=width+1,`page overflow at ${width}`);
       const visible=layout.nav.filter(nav=>nav.visible);
-      assert.deepEqual(visible.map(nav=>nav.id),width<760?['work','resources','datasets','community','me']:['work','resources','datasets','community','users'],`room navigation at ${width}`);
+      assert.deepEqual(visible.map(nav=>nav.id),width<760?['work','resources','datasets','community','me']:['work','resources','datasets','community'],`room navigation at ${width}`);
       assert(visible.every(nav=>nav.height>=(width<760?44:36)),`navigation targets too small at ${width}`);
     }
     await textContrast();
@@ -127,20 +138,19 @@ try{
   await page.setViewportSize({width:1440,height:1080});
   await page.locator('[data-nav=datasets]').click();await currentNav('datasets');
   await page.locator('#datasets-refresh').click();
-  const preparing=page.locator('.dataset-readiness[data-state=PREPARING]');
+  await page.locator('[data-v3-select=vision-validation]').click();
+  const preparing=page.locator('#page-datasets .v3-server.cur .v3-g.fetch');
   await preparing.waitFor({state:'attached'});
-  await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').waitFor();
-  assert.equal(await page.locator('.dataset-location.dataset-target[data-location-state=PREPARING]').innerText(),'取回中');
-  await page.locator('.dataset-version-details').filter({has:preparing}).locator('summary').click();
+  assert.equal(await page.locator('#page-datasets .v3-server.cur .v3-server-text>span').innerText(),'取回中');
   await preparing.waitFor();
   await textContrast();await capture('datasets-desktop');
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','The first confirmed catalog is settled; motion requires a real state diff');
-  assert.match(await page.locator('.dataset-readiness[data-state=PREPARING]').textContent(),/准备中/,'Readiness remains clear without motion');
+  assert.equal(await preparing.evaluate(el=>el.getAnimations().length),0,'The first confirmed catalog is settled; motion requires a real state diff');
+  assert.equal(await page.locator('#page-datasets .v3-server.cur .v3-server-text>span').textContent(),'取回中','Readiness remains clear without motion');
   await page.locator('[data-nav=work]').click();
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','Hidden pages never add a decorative readiness pulse');
+  assert.equal(await preparing.evaluate(el=>el.getAnimations().length),0,'Hidden pages never add a decorative readiness pulse');
   await page.locator('[data-nav=datasets]').click();
   await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none','Inactive tabs stay settled');
+  assert.equal(await preparing.evaluate(el=>el.getAnimations().length),0,'Inactive tabs stay settled');
   await page.evaluate(()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'));});
   await page.setViewportSize({width:390,height:960});await capture('datasets-mobile');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
@@ -155,8 +165,8 @@ try{
   }
   await page.emulateMedia({reducedMotion:'reduce'});
   if(!baseline)assert.equal(await page.locator('#refresh-state').evaluate(el=>getComputedStyle(el).transitionProperty),'none');
-  assert.equal(await page.locator('.dataset-readiness[data-state=PREPARING]').evaluate(el=>getComputedStyle(el,'::before').animationName),'none');
-  await page.setViewportSize({width:1440,height:1080});await page.locator('[data-nav=users]').click();await page.locator('#filter-all').click();await textContrast();await capture('users-carbon-compatibility');
+  assert.equal(await preparing.evaluate(el=>getComputedStyle(el,'::before').animationName),'none');
+  await page.setViewportSize({width:1440,height:1080});await openMembers(page);await page.locator('#filter-all').click();await textContrast();await capture('users-carbon-compatibility');
   await page.setViewportSize({width:390,height:960});await page.waitForFunction(()=>document.querySelector('[data-nav=me]').getAttribute('aria-current')==='page');await currentNav('me');await textContrast();await capture('users-carbon-compatibility-390');
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({baseline,checks,errors,external},null,2));
@@ -172,4 +182,7 @@ if(!baseline){
   await import('./polish-shell-ui-smoke.mjs');
   await import('./polish-operational-ui-smoke.mjs');
   await import('./admin-ui-smoke.mjs');
+  await import('./admin-members-ui-smoke.mjs');
 }
+
+await import('./admin-gpu-tasks-ui-smoke.mjs');

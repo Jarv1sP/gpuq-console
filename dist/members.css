@@ -236,12 +236,12 @@
 .sb #app-topbar .acct-t{min-width:0;max-width:12em}
 .sb #app-topbar #profile-name{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 @media(max-width:759px){
- .sb[data-room=users] .page-heading{display:flex;flex-direction:row;align-items:center;justify-content:space-between}
- .sb[data-room=users] .page-heading>div:first-child{min-width:0;flex:1}
- .sb[data-room=users] .page-heading h1{white-space:nowrap}
- .sb[data-room=users] .page-heading .heading-actions{width:auto;margin:0;flex:none}
- .sb[data-room=users] .page-heading .heading-actions .button{width:auto;flex:none;min-height:44px}
- .sb[data-room=users]:has(#mobile-control:not([hidden]) #live-pill:not([hidden])) .page-heading .heading-actions{display:none}
+ .sb[data-room=admin]:has(#admin-content #page-users) .page-heading{display:flex;flex-direction:row;align-items:center;justify-content:space-between}
+ .sb[data-room=admin]:has(#admin-content #page-users) .page-heading>div:first-child{min-width:0;flex:1}
+ .sb[data-room=admin]:has(#admin-content #page-users) .page-heading h1{white-space:nowrap}
+ .sb[data-room=admin]:has(#admin-content #page-users) .page-heading .heading-actions{width:auto;margin:0;flex:none}
+ .sb[data-room=admin]:has(#admin-content #page-users) .page-heading .heading-actions .button{width:auto;flex:none;min-height:44px}
+ .sb[data-room=admin]:has(#admin-content #page-users):has(#mobile-control:not([hidden]) #live-pill:not([hidden])) .page-heading .heading-actions{display:none}
 }
 @media(max-width:360px){
  .sb #app-topbar .wordmark{font-size:calc(8px / .687)}
