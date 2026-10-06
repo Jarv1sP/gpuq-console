@@ -53,6 +53,25 @@ class Probe(unittest.TestCase):
         with patch.object(self.probe, 'command', side_effect=self.command):
             return self.probe.probe()
 
+    def test_dataset_delete_requires_actual_protocol_full_safe_helpers_and_retention(self):
+        self.probe.CONFIG.update(machine='node-a',datasets={})
+        self.assertEqual(self.probe.probe_dataset_delete(),0)
+        root=self.probe.HERE
+        (root/'node-executor.py').write_text("DATASET_DELETE_CAPABILITY='dataset-delete-v1'\n")
+        helpers=('dataset-retirement.py','dataset-retirement-node.py','dataset-cache.py','dataset-tier.py','storage-authority.py')
+        for name in helpers:(root/name).write_text('value=1\n')
+        with patch.object(self.probe,'command',side_effect=AssertionError('No subprocess or deletion')):
+            self.assertEqual(self.probe.probe_dataset_delete(),1)
+            (root/helpers[0]).chmod(0o666)
+            self.assertEqual(self.probe.probe_dataset_delete(),0)
+            (root/helpers[0]).chmod(0o600)
+            (root/helpers[1]).unlink();(root/helpers[1]).symlink_to(root/helpers[0])
+            self.assertEqual(self.probe.probe_dataset_delete(),0)
+            (root/helpers[1]).unlink();(root/helpers[1]).write_text('value=1\n')
+            for value in (False,6,366,'7'):
+                self.probe.CONFIG['datasets']['retireRetentionDays']=value
+                self.assertEqual(self.probe.probe_dataset_delete(),0)
+
     def test_metrics_and_processes_are_matched_by_uuid(self):
         out = self.run_probe()
         self.assertEqual(len(out['gpus']), 2)

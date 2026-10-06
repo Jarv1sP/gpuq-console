@@ -506,7 +506,7 @@ class DatasetCache:
         if (not isinstance(row, dict) or set(row) != fields or type(row['schema']) is not int or row['schema'] != 1
                 or row['protocol'] != 'dataset-version-fence-v1' or row['rootIdentity'] != list(self._root_identity)
                 or row['dataset'] != dataset or row['version'] != version or type(row['admin']) is not bool
-                or row['state'] not in {'FENCED', 'ISOLATED', 'RESTORING', 'RESTORED', 'PURGED'}
+                or row['state'] not in {'FENCED', 'ISOLATED', 'RESTORING', 'RESTORED', 'PURGED', 'RELEASED'}
                 or type(row['createdAt']) not in (int, float) or not math.isfinite(row['createdAt']) or row['createdAt'] < 0
                 or not isinstance(row['operationId'], str)
                 or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}', row['operationId'])):
@@ -523,7 +523,7 @@ class DatasetCache:
 
     def _check_retirement(self, dataset, version, *, _read_only=False):
         row = self._retirement_fence(dataset, version)
-        if row is None or row['state'] == 'RESTORED' or _read_only:
+        if row is None or row['state'] in {'RESTORED', 'RELEASED'} or _read_only:
             return row
         scope = (tuple(self._root_identity), row['operationId'], row['actor'], row['admin'], dataset, version, row['snapshotSha256'])
         if _RETIREMENT_SCOPE.get() != scope:

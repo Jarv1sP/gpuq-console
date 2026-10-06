@@ -26,6 +26,7 @@ STORAGE_ARCHIVE=None
 STORAGE_LEASES=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
+DATASET_DELETE_CAPABILITY='dataset-delete-v1'
 TASK_DISPLAY_CAPABILITY='console-task-display-v1'
 DIAGNOSTICS=None
 PLATFORM_ROOT_GUARD=None
@@ -162,7 +163,7 @@ def dataset_mount_check(config):
 def dataset_cache():
     global DATASET_MODULE
     config=CONFIG.get('datasets')
-    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads'}:raise ValueError('Dataset storage is not configured')
+    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays'}:raise ValueError('Dataset storage is not configured')
     dataset_mount_check(config)
     if DATASET_MODULE is None:
         module=importlib.util.spec_from_file_location('gpuq_dataset_cache',HERE/'dataset-cache.py')
@@ -305,9 +306,11 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
     if _expected_owners is not None and (_expected_registration is None or _expected_owners!=[args.get('userId')]):raise ValueError('Invalid private unregister ownership identity')
     definitions={'datasets.capacity':set(),'datasets.list':set(),'datasets.status':{'dataset','version','operationId'},'datasets.prepare':{'dataset','version'},'datasets.register':{'dataset','sourceId','owners'},'datasets.unregister':{'dataset','version'}}
     if operation not in definitions or not isinstance(args,dict) or set(args)-definitions[operation]-{'userId','hostAdmin'}:raise ValueError('Invalid dataset operation fields')
-    if operation=='datasets.unregister' and args.get('hostAdmin') is not True:raise ValueError('Administrator authorization required')
     module,cache=dataset_cache();actor=dataset_actor(module,args)
-    if operation=='datasets.capacity':return cache.capacity(actor)
+    if operation=='datasets.capacity':
+        result=cache.capacity(actor)
+        if dataset_delete_capability()==1:result['datasetDelete']=1
+        return result
     folder=ROOT/'dataset-ops';folder.mkdir(mode=0o700,exist_ok=True)
     if operation=='datasets.list':
         listing,snapshots=cache._list_datasets_snapshot(actor)
@@ -324,13 +327,14 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                     current=dataset_background_status(folder,*pending,cache,actor,
                         catalog_snapshot=snapshots[(item['dataset'],version['version'])])
                     version.update({k:v for k,v in current.items() if k in ('state','operationId','error')})
+        if dataset_delete_capability()==1:listing['datasetDelete']=1
         return listing
     if operation=='datasets.status' and 'operationId' in args:
         key=args['operationId']
         if set(args)-{'userId','hostAdmin','operationId'} or not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):raise ValueError('Invalid dataset operation ID')
         spec=json.loads((folder/(key+'.json')).read_text())
         if hashlib.sha256(json.dumps(spec,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Dataset worker identity mismatch')
-        if spec.get('op')=='unregister' and not actor.is_admin:raise ValueError('Administrator authorization required')
+        if spec.get('op')=='unregister' and spec.get('hostAdmin') is not actor.is_admin:raise ValueError('Administrator authorization changed')
         if not actor.is_admin and spec['userId']!=actor.user_id:raise ValueError('Dataset operation is not owned by this user')
         return dataset_background_status(folder,key,spec,cache,actor)
     dataset=args.get('dataset')
@@ -338,9 +342,12 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
     if operation=='datasets.unregister':
         version=args.get('version')
         if version is not None and (not isinstance(version,str) or not DATASET_VERSION.fullmatch(version)):raise ValueError('Invalid immutable dataset version')
+        if not actor.is_admin:
+            if version is None or not cache.deletion_permissions(actor,dataset,version)['memberAllowed']:
+                raise ValueError('Administrator authorization required; 这份数据只能由管理员删除')
         # Each explicit removal gets its own receipt. Large replica cleanup runs
         # only in the detached worker, never inside the short SSH request.
-        task={'op':'unregister','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':True,'requestId':_request_id or str(uuid.uuid4())}
+        task={'op':'unregister','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':actor.is_admin,'requestId':_request_id or str(uuid.uuid4())}
         if _expected_registration is not None:task['expectedRegistration']=_expected_registration
         if _expected_owners is not None:task['expectedOwners']=_expected_owners
     elif operation=='datasets.register':
@@ -1011,6 +1018,119 @@ def storage_authority():
     return STORAGE_AUTHORITY
 
 
+def dataset_delete_capability():
+    # The helper set is delivered atomically by the runtime manifest. Cached
+    # probe data alone never authorizes a deletion; each private RPC rechecks.
+    config=CONFIG.get('datasets',{})
+    retention=config.get('retireRetentionDays',7) if isinstance(config,dict) else None
+    if type(retention) is not int or not 7<=retention<=365 or not DATASET_ID.fullmatch(CONFIG.get('machine','')):return 0
+    return 1 if all((HERE/name).is_file() and not (HERE/name).is_symlink() for name in
+        ('dataset-retirement.py','dataset-retirement-node.py','dataset-cache.py','dataset-tier.py','storage-authority.py')) else 0
+
+
+def dataset_retirement_node():
+    if dataset_delete_capability()!=1:raise ValueError('这台服务器还不支持彻底删除')
+    spec=importlib.util.spec_from_file_location('gpuq_dataset_retirement_node',HERE/'dataset-retirement-node.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module.RetirementNode.from_executor(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+
+
+def dataset_retirement_operation(operation,args):
+    # Internal bridge only. No operation here is accepted by peer/read/upload
+    # ticket routes or public executionCall. Identity is the portal's current
+    # Principal; supplied owners/proofs are accepted only for private negatives.
+    fields={'capabilities':set(),'locations':{'version','references'},
+            'plan':{'operationId','dataset','version','authorization','references'},
+            'fence':{'operationId'},'isolate':{'operationId','targets'},'status':{'operationId'},
+            'restore':{'operationId'},'release-absence':{'operationId','sourceResult'}}
+    action=operation.removeprefix('storage.dataset-delete.')
+    if action not in fields or not isinstance(args,dict) or set(args)-fields[action]-{'userId','hostAdmin'}:
+        raise ValueError('Invalid private version-data retirement fields')
+    required=fields[action]-({'authorization','references'} if action=='plan' else set())
+    if not required<=set(args):raise ValueError('Missing private retirement fields')
+    if not {'userId','hostAdmin'}<=set(args) or type(args['hostAdmin']) is not bool:
+        raise ValueError('Authenticated retirement identity is required')
+    module,_=dataset_cache();actor=dataset_actor(module,args)
+    if action=='capabilities':return {'protocol':'dataset-delete-node-v1','machine':CONFIG['machine'],'datasetDelete':dataset_delete_capability()}
+    node=dataset_retirement_node()
+    if action=='locations':return {'protocol':'dataset-delete-node-v1','machine':CONFIG['machine'],'locations':node.grant_locations(args['version'],args['references'])}
+    if action=='plan':return node.plan(actor,args['dataset'],args['version'],args['operationId'],authorization=args.get('authorization'),references=args.get('references'))
+    key=args['operationId']
+    if action=='status':
+        result=node.worker_status(actor,key)
+        pending=[];unknown=[]
+        for phase in ('fence','isolate','restore','release-absence'):
+            if phase in result['phases'] or not node._phase_path(key,phase,'launch').exists():continue
+            state=dataset_retirement_activity(key,phase)
+            (pending if state=='RUNNING' else unknown).append(phase)
+        return {**result,'pendingPhases':pending,'unconfirmedPhases':unknown}
+    if action in ('fence','isolate','restore','release-absence'):
+        if action in ('restore','release-absence') and not actor.is_admin:raise ValueError('Administrator restoration is required')
+        # Keep long hash/moves out of the forced-command request. Persist the
+        # launch intent once; an uncertain launch is queried, never replayed.
+        return dataset_retirement_launch(node,actor,key,action,args.get('targets'),args.get('sourceResult'))
+    raise ValueError('Unknown private retirement operation')
+
+
+def dataset_retirement_launch(node,actor,key,action,targets,source_result=None):
+    # One immutable invocation per step/phase. Lost replies do not launch a
+    # second worker, including across executor or portal restarts.
+    spec_path=node._phase_path(key,action,'launch')
+    with node._lock(key):
+        row=node._load(key);node._owned(actor,row,restoring=action in ('restore','release-absence'))
+        request={'schema':1,'operationId':key,'action':action,'userId':actor.user_id,'hostAdmin':actor.is_admin,'targets':targets,'sourceResult':source_result}
+        if spec_path.exists():
+            prior=node._phase_read(key,action,'launch')
+            if prior!=request:raise ValueError('Retirement dispatch request cannot change')
+            return {'protocol':'dataset-delete-node-v1','operationId':key,'machine':CONFIG['machine'],'state':'DISPATCHED','action':action}
+        if action=='isolate' and row['state'] not in ('FENCED','ISOLATING','ISOLATED'):
+            raise ValueError('Version must have a confirmed persistent fence before isolation')
+        atomic_json(spec_path,request)
+        run(['/usr/bin/systemd-run','--user','--collect','--unit=gpuq-data-delete-'+key+'-'+action,
+             '--property=KillMode=control-group','--property=UMask=0077','--property=CPUQuota=100%','--property=MemoryMax=2G',
+             '--property=IOWeight=10','--property=RuntimeMaxSec=86400','--property=TimeoutStopSec=20',
+             '/usr/bin/python3',str(HERE/'node-executor.py'),'--dataset-delete-worker',key,action],timeout=8)
+        return {'protocol':'dataset-delete-node-v1','operationId':key,'machine':CONFIG['machine'],'state':'DISPATCHED','action':action}
+
+
+def dataset_retirement_activity(key,action):
+    if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}',key) or action not in ('fence','isolate','restore','release-absence'):
+        raise ValueError('Invalid fixed retirement worker identity')
+    unit='gpuq-data-delete-'+key+'-'+action+'.service'
+    try:
+        result=subprocess.run(['/usr/bin/systemctl','--user','show',unit,'--property=LoadState,ActiveState,SubState,MainPID,ControlPID'],
+                              env=ENV,text=True,capture_output=True,timeout=4)
+        values=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        stopped=values.get('MainPID')=='0' and values.get('ControlPID')=='0'
+        if values.get('LoadState')=='not-found' and values.get('ActiveState')=='inactive' and stopped:return 'STOPPED'
+        if result.returncode!=0:return 'UNKNOWN'
+        if values.get('ActiveState') in ('inactive','failed') and stopped:return 'STOPPED'
+        if values.get('ActiveState') in ('active','activating','deactivating','reloading'):return 'RUNNING'
+    except (OSError,ValueError,subprocess.TimeoutExpired):pass
+    return 'UNKNOWN'
+
+
+def dataset_retirement_worker(key,action):
+    if action not in ('fence','isolate','restore','release-absence'):raise ValueError('Unknown private retirement worker action')
+    node=dataset_retirement_node()
+    request=node._phase_read(key,action,'launch')
+    if not isinstance(request,dict) or set(request)!={'schema','operationId','action','userId','hostAdmin','targets','sourceResult'} or type(request['schema']) is not int or request['schema']!=1 or request['operationId']!=key or request['action']!=action:
+        raise ValueError('Retirement launch intent changed')
+    module,_=dataset_cache();actor=dataset_actor(module,request)
+    try:
+        if action=='fence':result=node.fence(actor,key)
+        elif action=='isolate':result=node.isolate(actor,key,request['targets'])
+        elif action=='restore':result=node.restore(actor,key)
+        else:result=node.release_absence(actor,key,request['sourceResult'])
+        atomic_json(node._phase_path(key,action,'result'),{'ok':True,'result':result})
+        return 0
+    except Exception as error:
+        # FAILED is not proof of no side effects. Persistent fence and any
+        # isolated full bytes remain; status reports the actual durable state.
+        atomic_json(node._phase_path(key,action,'result'),{'ok':False,'error':dataset_error(error)})
+        return 1
+
+
 def storage_archive():
     global STORAGE_ARCHIVE
     if STORAGE_ARCHIVE is None:
@@ -1140,6 +1260,7 @@ def process(operation,args):
         return storage_quota_status(args['userId'])
     if operation.startswith(('storage.lease.','storage.download.')):return storage_lease_operation(operation,args)
     if operation.startswith('storage.archive.'):return storage_archive_operation(operation,args)
+    if operation.startswith('storage.dataset-delete.'):return dataset_retirement_operation(operation,args)
     if operation.startswith('datasets.storage.'):return storage_management(operation,args)
     if operation.startswith('transfers.'):return transfers().process(operation,args)
     if operation in ('diagnostics','watch'):
@@ -1403,6 +1524,7 @@ if __name__=='__main__':
     os.umask(0o077)
     platform_root_check()
     if len(sys.argv)==3 and sys.argv[1]=='--storage-archive-worker':sys.exit(storage_archive().worker(sys.argv[2]))
+    if len(sys.argv)==4 and sys.argv[1]=='--dataset-delete-worker':sys.exit(dataset_retirement_worker(sys.argv[2],sys.argv[3]))
     if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':
         print(json.dumps(storage_collect()));sys.exit(0)
     if len(sys.argv)==4 and sys.argv[1]=='--transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3])))

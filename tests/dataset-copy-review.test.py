@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from dataset_retention_helpers import protected_original
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -92,6 +93,7 @@ class DatasetCopyReview(unittest.TestCase):
         self.assertTrue(self.cache.verify(OTHER, "sample", self.version)["verified"])
 
     def test_long_materialize_excludes_unregister_without_holding_the_global_lock(self):
+        retention = protected_original(self.cache, D, self.base/'retention-original')
         entered, resume = threading.Event(), threading.Event()
         errors = []
         put = self.cache._put_chunk_data
@@ -109,6 +111,7 @@ class DatasetCopyReview(unittest.TestCase):
                 errors.append(exc)
 
         other = D.DatasetCache(self.cache.root, sources={"source": self.source}, reserve_bytes=1024, lock_timeout=0.05)
+        retention.bind_cache(other)
         with patch.object(self.cache, "_put_chunk_data", side_effect=blocked):
             thread = threading.Thread(target=worker)
             thread.start()

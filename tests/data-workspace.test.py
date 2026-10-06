@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 from storage_test_helpers import local_data_mounts
+from dataset_retention_helpers import protected_executor_original
 
 DEPLOY = Path(__file__).resolve().parents[1]/'deploy'
 
@@ -47,6 +48,8 @@ class DataWorkspaceTests(unittest.TestCase):
         self.stopped = patch.object(self.w, 'unit_stopped', return_value=False)
         self.stopped.start()
         self.module, self.cache, self.owner = self.w.storage(self.user)
+        self.retention = protected_executor_original(self.n, self.base/'retention-original')
+        self.retention.bind_cache(self.cache)
 
     def tearDown(self):
         self.stopped.stop();self.launch.stop();self.mount.stop()

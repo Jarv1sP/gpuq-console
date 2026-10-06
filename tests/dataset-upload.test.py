@@ -13,6 +13,7 @@ import unittest
 import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
+from dataset_retention_helpers import protected_original
 
 DEPLOY = Path(__file__).resolve().parents[1]/'deploy'
 
@@ -33,6 +34,7 @@ class PersonalUploads(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name).resolve()
         self.cache = D.DatasetCache(self.base/'cache', reserve_bytes=0)
+        self.retention=protected_original(self.cache, D, self.base/'retention-original')
         def workspace(user):
             if not isinstance(user, str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)', user):
                 raise ValueError('Invalid identity')
@@ -304,6 +306,7 @@ class PersonalUploads(unittest.TestCase):
             status = self.call('begin', **args)
             self.assertEqual((status['state'], status['resumeState']), ('FAILED', 'UPLOADING'))
         self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
+        self.retention.seal_cache(D.Principal(self.user, True),result['dataset'],result['version'])
         self.cache.evict(D.Principal(self.user, True), result['dataset'], result['version'])
         missing = self.call('status', uploadId=upload)
         self.assertEqual((missing['state'], missing['resumeState']), ('FAILED', 'RECEIVING_MANIFEST'))
@@ -471,6 +474,7 @@ class PersonalUploads(unittest.TestCase):
         self.call('commit', uploadId=upload)
         self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
         self.u.limits['maxUserUploads'] = 1
+        self.retention.seal_cache(D.Principal(self.user, True),result['dataset'],result['version'])
         self.u.limits['maxUserBytes'] = self.u.load(self.user, upload)['reserveBytes']
         with self.assertRaisesRegex(ValueError, 'count limit'):
             self.admit(name='second')

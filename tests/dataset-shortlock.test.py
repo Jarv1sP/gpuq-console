@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from dataset_retention_helpers import protected_original
 
 SPEC = importlib.util.spec_from_file_location('dataset_shortlock', Path(__file__).resolve().parents[1]/'deploy'/'dataset-cache.py')
 D = importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(D)
@@ -95,6 +96,10 @@ class DatasetShortLockTests(unittest.TestCase):
 
     def test_eviction_after_ready_validation_prevents_new_lease(self):
         self.ready_metadata();snapshot=self.cache._ready_snapshot
+        source=self.base/'protected-large';source.mkdir()
+        for n in range(2000):(source/f'large-{n:05d}.bin').write_bytes(b'')
+        retention=protected_original(self.cache,D,self.base/'retention-original',source_trees={('large',self.version):source})
+        retention.bind_cache(self.other)
         def evict(*args):
             value=snapshot(*args);self.other.evict(ADMIN,'large',self.version);return value
         with patch.object(self.cache,'_ready_snapshot',side_effect=evict),self.assertRaisesRegex(D.CacheError,'metadata changed'):
@@ -124,8 +129,8 @@ class DatasetShortLockTests(unittest.TestCase):
 
     def test_registration_replacement_after_parse_is_rejected_even_if_byte_identical(self):
         record=self.cache._record
-        def replace(*args):
-            result=record(*args);D._write_json(self.paths['.registry'].parent/(self.version+'.json'),result);return result
+        def replace(*args,**kwargs):
+            result=record(*args,**kwargs);D._write_json(self.paths['.registry'].parent/(self.version+'.json'),result);return result
         with patch.object(self.cache,'_record',side_effect=replace),self.assertRaisesRegex(D.CacheError,'registration changed'):
             self.cache.status(OWNER,'large',self.version)
 
@@ -133,8 +138,8 @@ class DatasetShortLockTests(unittest.TestCase):
         for action in ('status','export_manifest','list_datasets'):
             with self.subTest(action=action):
                 self.cache.set_owners(ADMIN,'large',[OWNER.user_id]);record=self.cache._record
-                def revoke(*args):
-                    value=record(*args);self.other.set_owners(ADMIN,'large',[OTHER.user_id]);return value
+                def revoke(*args,**kwargs):
+                    value=record(*args,**kwargs);self.other.set_owners(ADMIN,'large',[OTHER.user_id]);return value
                 with patch.object(self.cache,'_record',side_effect=revoke),self.assertRaises(PermissionError):
                     getattr(self.cache,action)(OWNER,*(() if action=='list_datasets' else ('large',self.version)))
 

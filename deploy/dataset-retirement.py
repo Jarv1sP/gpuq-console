@@ -212,7 +212,7 @@ class DatasetRetirement:
         with self._lock(key):
             with self.cache._locked():
                 previous = self.cache._retirement_fence(dataset, version)
-            if previous is not None and previous['state'] != 'RESTORED':
+            if previous is not None and previous['state'] not in {'RESTORED','RELEASED'}:
                 if (previous['operationId'] != key or previous['actor'] != actor.user_id
                         or previous['admin'] != actor.is_admin or previous['snapshotSha256'] != sha(snapshot)):
                     raise PermissionError('version is fenced by another immutable deletion request')
@@ -311,7 +311,7 @@ class DatasetRetirement:
         self.cache._actor(actor)
         with self._lock(key):
             row = self._journal(key)
-            if not actor.is_admin and row['actor'] != actor.user_id:
+            if not actor.is_admin and (row['actor'] != actor.user_id or row['admin'] != actor.is_admin):
                 raise PermissionError('retirement operation belongs to another account')
             return self._receipt(row)  # Pure query: no clock write or replay.
 

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from storage_test_helpers import local_data_mounts
+from dataset_retention_helpers import protected_executor_original
 
 
 DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
@@ -53,6 +54,8 @@ class NodeDatasets(unittest.TestCase):
         self.user = self.module.Principal('demo-user-1')
         record = self.cache.register_source(self.admin, 'example', 'approved', ['demo-user-1'])
         self.version = record['version']
+        self.retention = protected_executor_original(self.node, self.base/'retention-original')
+        self.retention.bind_cache(self.cache)
         self.job = dict(id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', userId='demo-user-1',
                         username='alice', cards=1, argv=['python', 'train.py'],
                         name='dataset-test', minVramGiB=0,

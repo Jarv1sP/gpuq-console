@@ -17,6 +17,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 from storage_test_helpers import local_data_mounts
+from dataset_retention_helpers import protected_executor_original
 
 DEPLOY=Path(__file__).resolve().parents[1]/'deploy'
 USER='demo-user-42'
@@ -35,6 +36,8 @@ class SnapshotSyncTests(unittest.TestCase):
             spec=importlib.util.spec_from_file_location('snapshot_node_'+str(i),base/'node-executor.py');node=importlib.util.module_from_spec(spec);sys.modules[spec.name]=node;spec.loader.exec_module(node)
             guard=patch.object(node,'dataset_mount_check');guard.start();self.patches.append(guard);node.workspace(USER);node.projects().store.reserve_bytes=0;self.nodes.append(node)
         mount=local_data_mounts(*(self.root/str(i) for i in range(2)));mount.start();self.addCleanup(mount.stop)
+        for i,node in enumerate(self.nodes):
+            protected_executor_original(node, self.root/str(i)/'retention-original')
         self.key=str(uuid.uuid4());data=b'snapshot content';self.manifest={'schema':1,'directories':['sub'],'files':[{'path':'sub/train.py','size':len(data),'sha256':hashlib.sha256(data).hexdigest(),'executable':True}]};self.data=data;self.raw=json.dumps(self.manifest).encode()
         self.begin={'userId':USER,'project':'imported','key':self.key,'manifestBytes':len(self.raw),'manifestSha256':hashlib.sha256(self.raw).hexdigest(),'totalBytes':len(data),'entries':2,'source':{'kind':'git','commit':'a'*40}}
     def tearDown(self):
