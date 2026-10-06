@@ -33,12 +33,16 @@ test('211 historical failures stay in task history without inflating control att
   assert.deepEqual(jobs,before);
 });
 
-test('recent failures can be acknowledged but UNKNOWN and pending approvals remain actionable',()=>{
+test('recent failures can be acknowledged; UNKNOWN remains actionable and approvals stay in the backend catalog',()=>{
   const failed=job('recent','FAILED',{finishedAt:now-1000}),unknown=job('unknown','UNKNOWN',{finishedAt:now-1000});
   const reads=createAttentionReads({storage:()=>memoryStore,now:()=>now}),memoryStore=memory();
   assert.equal(reads.acknowledge('owner',[failureReadKey('job',failed),failureReadKey('job',unknown)]),true);
-  const snapshot=controlSnapshot(store([failed,unknown],'admin'),{now,seen:reads.read('owner')});
-  assert.deepEqual(snapshot.attention.map(row=>row.id),['job:unknown','user:pending']);
+  const source=store([failed,unknown],'admin'),users=structuredClone(source.users);
+  const snapshot=controlSnapshot(source,{now,seen:reads.read('owner')});
+  assert.deepEqual(snapshot.attention.map(row=>row.id),['job:unknown']);
+  assert.deepEqual(source.users,users,'moving approvals does not remove or acknowledge account records');
+  assert.equal(source.users.filter(row=>row.id==='pending'&&row.enabled&&row.total===0).length,1);
+  assert.equal(snapshot.attention.some(row=>row.id.startsWith('user:')),false,'no account administration in the primary control');
   assert.ok(snapshot.attention.every(row=>!row.readKey));assert.equal(snapshot.failedJobs.length,1);
 });
 

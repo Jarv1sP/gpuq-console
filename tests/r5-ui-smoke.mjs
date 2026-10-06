@@ -1,3 +1,4 @@
+import {openMembers} from './admin-members-workflows.mjs';
 // Actual Portal/SQLite/cookies/CSP/assets in Chromium. Node observations and
 // terminal output are synthetic; no shell, GPU, SSH or production mutation.
 import assert from 'node:assert/strict';
@@ -128,7 +129,7 @@ try{
   for(const machine of MACHINES)assert.ok(!loggedOutLabels.some(label=>label.includes(machine.id)),'logout clears mirrored server IDs: '+machine.id);
   await login(inventoryProbe,'admin');
   assert.deepEqual(inventoryRequests,['/machines.js'],'administrator uses state rather than importing the directory');
-  await inventoryProbe.setViewportSize({width:1440,height:1080});await inventoryProbe.locator('[data-nav=users]').click();await inventoryProbe.locator('#filter-all').click();await inventoryProbe.locator('[data-user="'+member.id+'"]').click();
+  await inventoryProbe.setViewportSize({width:1440,height:1080});await openMembers(inventoryProbe);await inventoryProbe.locator('#filter-all').click();await inventoryProbe.locator('[data-user="'+member.id+'"]').click();
   assert.equal(await inventoryProbe.locator('[data-quota=total]').getAttribute('max'),String(MACHINES.reduce((sum,machine)=>sum+machine.cards,0)),'account capacity is recomputed after the empty login phase');
   assert.equal(await inventoryProbe.locator('[data-permission-meter]').count(),MACHINES.length);
   await closeRoutedContext(inventoryProbe.context());
