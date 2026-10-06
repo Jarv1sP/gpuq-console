@@ -177,6 +177,9 @@ try{
   await page.evaluate(()=>document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[]}})));
   await page.locator('[data-nav=resources]').click();
   const projectsRequest=request=>new URL(request.url()).pathname==='/api/call'&&request.postDataJSON()?.operation==='projects.list'&&request.postDataJSON()?.args?.machine==='gpu-2';
+  assert.ok(calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2'),'the account-wide project directory has already read this authorized source');
+  const projectsCallStart=calls.length;
+  const selectedProjectRead=()=>calls.slice(projectsCallStart).some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2');
   let releaseProjects,projectsBeforeReply;const projectsGate=new Promise(resolve=>releaseProjects=resolve);
   const delayedProjects=async route=>{if(projectsRequest(route.request()))await projectsGate;await route.fallback();};
   await page.route('**/api/call',delayedProjects);
@@ -185,13 +188,13 @@ try{
     await page.locator('#resource-primary').click();
     await page.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-2');
     await projectRequestSeen;
-    projectsBeforeReply=calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2');
-    assert.throws(()=>assert.ok(calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2')),{name:'AssertionError'},'a selected machine does not prove that its asynchronous query has arrived');
+    projectsBeforeReply=selectedProjectRead();
+    assert.throws(()=>assert.ok(selectedProjectRead()),{name:'AssertionError'},'a selected machine does not prove that its asynchronous query has arrived');
     releaseProjects();const projectResponse=await projectsReady;assert.equal(projectResponse.status(),200);await projectResponse.finished();
   }finally{releaseProjects();await page.unroute('**/api/call',delayedProjects);}
   await page.waitForFunction(()=>document.querySelector('[name=workspace-machine]').value==='gpu-2');
-  assert.ok(calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2'));
-  checks.push({projectsReadiness:{before:projectsBeforeReply,after:calls.some(call=>call.operation==='projects.list'&&call.args.machine==='gpu-2')}});
+  assert.ok(selectedProjectRead());
+  checks.push({projectsReadiness:{before:projectsBeforeReply,after:selectedProjectRead()}});
   await page.locator('[data-nav=resources]').click();
 
   await page.setViewportSize({width:390,height:844});await selectResource(page,'gpu-1');await closeResource(page);await capture('resources-member-390');
