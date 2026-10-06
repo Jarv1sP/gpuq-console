@@ -30,7 +30,7 @@ function refusal(message){
   if(/管理员|provenance|owner|权限|账号|logged out/i.test(message))return '账号或来源权限未确认，请联系管理员。';
   if(/maintenance|维护/i.test(message))return '服务器正在维护，请等待管理员恢复。';
   if(/依赖|归档|archive|alias|物理名称|传输/i.test(message))return '归档或副本依赖未确认，请联系管理员核对。';
-  return '节点步骤已停止；可能已有副作用，请联系管理员核对原编号。';
+  return '节点步骤未确认，请联系管理员核对原编号。';
 }
 const same=(a,b)=>encoded(a)===encoded(b);
 const planFields=['protocol','operationId','machine','dataset','version','state','snapshotSha256','owners','memberAllowed','complete','absent','authority','authorityReferences','authorityAliases'];
@@ -373,7 +373,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
           const pending=status.pendingPhases.includes(phase)&&!status.unconfirmedPhases.includes(phase);inProgress||=pending;uncertain||=!pending;
           step.state=pending?'RUNNING':'UNKNOWN';step.error=pending?'节点正在处理。':'原节点结果未确认；不会重投。';save(row);}
       }catch(error){check();confirmed=false;uncertain=true;step.state=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';
-        if(['restore','release-absence'].includes(phase))step.restoreState=step.state;step.error=error.message;save(row);}
+        if(['restore','release-absence'].includes(phase))step.restoreState=step.state;step.error=refusal(error.message);save(row);}
     }
     if(row.cancelRequested){
       row.state=row.steps.every(s=>!s.dispatched.length||s.state==='CANCELED')?'CANCELED':row.state;save(row);
@@ -434,7 +434,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
       if(!isCancel){
         const task=(async()=>{try{await observe(row,principal,check);check();
           if(row.state!=='DELETED')await execute(row,principal,check);
-          }catch(error){if(!service.closing&&!load(row.id)?.cancelRequested){row.state='UNKNOWN';row.error=error.message;save(row);}}})().finally(()=>running.delete(row.id));
+          }catch(error){if(!service.closing&&!load(row.id)?.cancelRequested){row.state='UNKNOWN';row.error=refusal(error.message);save(row);}}})().finally(()=>running.delete(row.id));
         running.set(row.id,task);return publicTask(row);
       }
       row.cancelRequested={userId:principal.userId,time:clock()};row.state='CANCELING';save(row);
@@ -457,7 +457,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
             service.db.prepare('DELETE FROM dataset_deletion_fences WHERE machine=? AND dataset=? AND version=? AND operation_id=?').run(step.machine,step.dataset,row.version,row.id);
           }
           row.state='CANCELED';delete row.error;releasePortalFences(row);event(row,'取消删除并恢复',null,'CANCELED');
-        }catch(error){if(!service.closing){row.state=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';row.error=error.message;save(row);event(row,'取消待核对',null,row.state);}}
+        }catch(error){if(!service.closing){row.state=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';row.error=refusal(error.message);save(row);event(row,'取消待核对',null,row.state);}}
       })().finally(()=>canceling.delete(row.id));canceling.set(row.id,task);return publicTask(row);
     }
     if(operation==='datasets.delete.restore'){
@@ -489,7 +489,7 @@ export function installDatasetDeletion(service,{clock=Date.now,pollMs=250,capabi
           }
           row.state='BLOCKED';row.error='管理员已恢复一份完整数据；旧删除编号不可重新执行。';save(row);
           service.audit(principal.username,operation,row.id,JSON.stringify({machine:step.machine,state:'RESTORED'}));
-        }catch(error){if(!service.closing){step.restoreState=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';step.error=error.message;save(row);}}
+        }catch(error){if(!service.closing){step.restoreState=error.code==='DATASET_DELETE_PHASE_FAILED'?'FAILED':'UNKNOWN';step.error=refusal(error.message);save(row);}}
       })().finally(()=>restoring.delete(row.id));restoring.set(row.id,task);await task;check();
       return {operationId:row.id,machine:step.machine,state:step.restored?'RESTORED':step.restoreState||'UNKNOWN',...(step.error?{error:step.error}:{}),dataset:step.dataset,version:row.version,...(principal.role==='admin'&&row.owner!==principal.userId?{adminContinue:true}:{})};
     }

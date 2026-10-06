@@ -124,3 +124,19 @@ test('dependency projection changes do not prevent safe cancellation of original
   assert.equal((await f.call('datasets.delete.status',{operationId:r.first.operationId},admin)).state,'CANCELED');
   assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_deletion_fences').all(),[]);
 });
+
+test('unknown status continue cancel and restore never expose private node error details',async t=>{
+  for(const operation of ['status','continue','cancel','restore']){
+    const f=fixture(t);let lost=operation!=='restore';
+    f.after=(host,op)=>{if(lost&&op.endsWith('.fence')){lost=false;throw Error('lost original reply');}};
+    const r=await f.start();assert.equal(r.result.state,operation==='restore'?'DELETED':'UNKNOWN');
+    f.before=(host,op)=>{if(op.endsWith('.status'))throw Error('opaque-secret node path /private/storage/private-owner/grant.json');};
+    const args={operationId:r.first.operationId,...(operation==='restore'?{machine:hosts[0]}:{})};
+    const value=await f.call('datasets.delete.'+operation,args,admin);
+    await f.service.waitDatasetDeletions();
+    const status=await f.call('datasets.delete.status',{operationId:r.first.operationId},admin);
+    assert.doesNotMatch(JSON.stringify([value,status]),/opaque-secret|\/private\/storage|private-owner|grant\.json/);
+    assert.notEqual(status.state,'DELETED');
+    assert.ok(status.error||status.steps.some(step=>step.error));
+  }
+});
