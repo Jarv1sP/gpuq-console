@@ -6,6 +6,7 @@ status; it cannot create uploads, select owners, publish, or run commands.
 """
 import base64
 from collections import Counter, OrderedDict
+from contextlib import nullcontext
 import hashlib
 import hmac
 import http.client
@@ -384,7 +385,15 @@ class DirectUploads:
         if claims['uploadId'] != upload:
             raise GrantError()
         self.authorize(token, claims, upload, action)
-        with self.u.direct_guard(claims['userId'], upload):
+        # Eight authenticated 16 MiB writers can briefly serialize at the
+        # durable cache/accounting fence. The ordinary two-second control-plane
+        # lock budget must not reject a healthy writer merely because fsync is
+        # busy. Wait only for acquisition, never replay a chunk, and stay below
+        # the HTTP request deadline. Status and unauthenticated callers retain
+        # the short default; nested locks share this finite per-thread budget.
+        waiting = (self.u.d.wait_for_locks(timeout=8.0, total=8.0)
+                   if action in ('manifest', 'chunk') else nullcontext())
+        with waiting, self.u.direct_guard(claims['userId'], upload):
             user = self.authorize(token, claims, upload, action)
             # This checks mount identity on every request even in a long-lived
             # listener. A missing /data2 mount must never fall back to root disk.
