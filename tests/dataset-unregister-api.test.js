@@ -17,6 +17,8 @@ async function apiFixture(t){
   const calls=[];let failure=null,response={operationId:OPERATION,dataset:'sample',version:null,state:'UNREGISTERING'};
   const s=await PortalService.open(join(dir,'database'),bootstrap,status,async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
+    if(operation==='datasets.list')return {datasets:[{dataset:'sample',versions:[{version:VERSION,state:'READY'}]}]};
+    if(operation==='datasets.status'&&calls.some(call=>call.operation==='datasets.unregister'))return {operationId:OPERATION,dataset:'sample',version:null,state:'FAILED'};
     if(failure)throw failure;
     return structuredClone(response);
   });
@@ -43,7 +45,9 @@ test('unregister forwards optional versions and server-owned identity without re
     assert.deepEqual(f.calls.at(-1),{machine:'gpu-2',operation:'datasets.unregister',args:{dataset:'sample',...extra,userId:'builtin-admin',hostAdmin:true}});
   }
   assert.equal(f.s.store.jobs.length,0);
-  assert.ok(f.calls.every(c=>c.operation==='datasets.unregister'));
+  assert.equal(f.calls.filter(c=>c.operation==='datasets.unregister').length,3);
+  assert.ok(f.calls.every(c=>['datasets.unregister','datasets.list','datasets.status'].includes(c.operation)));
+  assert.ok(f.calls.filter(c=>c.operation==='datasets.list').every(c=>c.args.hostAdmin===true&&c.args.userId==='builtin-admin'));
   const audit=f.s.db.prepare("SELECT * FROM audit WHERE operation='datasets.unregister'").all();
   assert.equal(audit.length,3);assert.deepEqual(audit.map(a=>a.outcome),['sample','sample','sample@'+VERSION]);
 });
@@ -67,7 +71,7 @@ test('intent audit must persist before unregister starts; bridge failure never c
   assert.equal(f.calls.length,0);f.s.audit=audit;
   f.fail(Error('bridge timeout'));
   await assert.rejects(f.s.invoke(f.admin.token,'datasets.unregister',{machine:'gpu-1',dataset:'sample'}),/bridge timeout/);
-  assert.equal(f.calls.length,1);
+  assert.equal(f.calls.filter(c=>c.operation==='datasets.unregister').length,1);
   assert.equal(f.s.db.prepare("SELECT count(*) AS n FROM audit WHERE operation='datasets.unregister'").get().n,1);
 });
 

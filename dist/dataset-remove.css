@@ -13,6 +13,9 @@
 .sb #page-datasets .dataset-remove-facts dt{color:var(--ink-2)}
 .sb #page-datasets .dataset-remove-facts dd{margin:0;min-width:0;overflow-wrap:anywhere}
 .sb #page-datasets .dataset-remove-facts .server-id{max-width:100%}
+.sb #page-datasets .dataset-remove-facts dd>span{display:block}
+.sb #page-datasets .dataset-remove-blocked{color:var(--ink-2);font-size:14px;line-height:1.6;margin:0 0 20px;overflow-wrap:anywhere}
+.sb #page-datasets .dataset-remove-action-word{white-space:nowrap}
 .sb #page-datasets .dataset-remove-facts small{display:block;color:var(--ink-2);font:12px/1.8 var(--mono)}
 .sb #page-datasets .dataset-remove-dialog .field{display:grid;gap:12px;margin-bottom:24px;color:var(--ink-2);font-size:14px;min-width:0}
 .sb #page-datasets .dataset-remove-dialog input{width:100%;min-width:0;box-sizing:border-box;min-height:48px;padding:10px 12px;color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:8px;font:14px var(--mono)}
