@@ -77,6 +77,15 @@ test('CLI diagnostics help and invalid/path/execution options are strict',async 
   assert.equal(f.calls.filter(c=>c.operation==='jobs.diagnostics').length,0);
 });
 
+test('CLI completion uses one read-only request and distinguishes confirmed success from unconfirmed',async t=>{
+  const f=await cliFixture(t);f.result.completed=true;f.result.state='SUCCEEDED';
+  const ok=await f.cli(['completion',JOB]);assert.equal(ok.code,0,ok.stderr);assert.equal(JSON.parse(ok.stdout).data.completed,true);
+  f.result.completed=false;f.result.state='UNCONFIRMED';
+  const pending=await f.cli(['completion',JOB]);assert.equal(pending.code,2,pending.stderr);assert.equal(JSON.parse(pending.stdout).data.completed,false);
+  assert.deepEqual(f.calls.filter(c=>c.operation!=='state'),Array.from({length:2},()=>({operation:'jobs.completion',args:{jobId:JOB}})));
+  for(const args of [['completion'],['completion',JOB,'--root'],['completion',JOB,'--machine','gpu-1'],['completion',JOB,'--','id']])assert.equal((await f.cli(args)).code,1);
+});
+
 test('portal serves diagnostic module and stylesheet through the explicit static allowlist',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-diagnostic-assets-')),bootstrap=join(dir,'bootstrap');
   await writeFile(bootstrap,JSON.stringify({username:'admin',password:'Diagnostic-Fixture-Password-2026!'}));

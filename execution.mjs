@@ -13,7 +13,7 @@ import {datasetCatalogCall,datasetListView} from './dataset-catalog.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 import {selectMachine} from './machine-selection.mjs';
-import {terminalNativeObservation,unavailableObservation,portalTerminalSnapshot} from './job-observation.mjs';
+import {terminalNativeObservation,unavailableObservation,portalTerminalSnapshot,jobCompletion} from './job-observation.mjs';
 export {datasetReferences} from './job-submission.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
@@ -432,6 +432,16 @@ export async function executionCall(service,principal,operation,args){
     return jobView(job);
   }
   if(operation==='jobs.logs'){const job=jobById(args.jobId);if(job.state===DATA_PREPARING)return {text:job.queueReason||'正在准备本机数据；尚未申请 GPU。'};return service.bridge(job.machine,'logs',{job:job.spec});}
+  if(operation==='jobs.completion'){
+    if(Object.keys(args).some(k=>k!=='jobId'))fail('完成核验仅接受任务 ID。');
+    const job=jobById(args.jobId);authorizedMachine(job.machine);
+    const snapshot=JSON.stringify(job),actorSnapshot=JSON.stringify(service.store.get(principal.userId));
+    let result;
+    if(job.nodeJobId)try{result=await service.bridge(job.machine,'watch',{job:job.spec,expectedNodeJobId:job.nodeJobId});}catch{}
+    if(service.closing||JSON.stringify(service.store.get(principal.userId))!==actorSnapshot||JSON.stringify(job)!==snapshot)
+      fail('授权或任务状态已改变，请重新查询完成状态。',409);
+    return jobCompletion(job,result);
+  }
   if(operation==='jobs.watch'){
     if(Object.keys(args).some(k=>k!=='jobId'))fail('进度查询参数无效。');
     const job=jobById(args.jobId);

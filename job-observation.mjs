@@ -1,6 +1,7 @@
 // A terminal Portal lifecycle is immutable here. A host-side retry is an
 // observation, not authority to reserve quota, reacquire holds or cancel it.
 import {normalizeAttempt,normalizeProgress,jobTiming} from './dist/job-progress.js';
+import {createHash} from 'node:crypto';
 
 const states=new Set(['PENDING','STARTING','RUNNING','PREEMPTING','SUCCEEDED','FAILED','CANCELED','LOST']);
 const positive=value=>Number.isSafeInteger(value)&&value>0;
@@ -36,6 +37,37 @@ export function terminalNativeObservation(job,raw){
     message:reason?'仅观察节点当前状态；门户原终态、取消标记与已释放保护保持，未批准或执行新的重试。':'节点观察与门户原终态一致；未改变任务生命周期。'};
 }
 export const portalTerminalSnapshot=job=>({state:job.state,cancelRequested:job.cancelRequested===true,...jobTiming(job)});
+
+// A fresh, authenticated success observation for downstream consumers. This
+// does not reopen the Portal lifecycle or acquire/release any resources.
+export function jobCompletion(job,result){
+  const observation=terminalNativeObservation(job,result?.nativeObservation);
+  const base={protocol:'job-completion-v1',readOnly:true,jobId:job.id,machine:job.machine,
+    userId:job.userId,nodeJobId:job.nodeJobId||null,project:job.spec.project||null,
+    release:job.spec.release||null,specSha256:createHash('sha256').update(JSON.stringify(job.spec)).digest('hex'),
+    portalHistory:{state:job.state,cancelRequested:job.cancelRequested===true,latestAttempt:job.latestAttempt||null},
+    completed:false,state:'UNCONFIRMED',nativeObservation:observation};
+  const reject=reason=>({...base,reason});
+  if(job.spec.id!==job.id||job.spec.userId!==job.userId)return reject('IMMUTABLE_IDENTITY_MISMATCH');
+  if(job.cancelRequested||job.state==='CANCELED')return reject('PORTAL_CANCELLATION_REQUIRES_REVIEW');
+  if(observation.status!=='CONFIRMED')return reject('NATIVE_OBSERVATION_UNAVAILABLE');
+  // The native watch also confirms no live scheduler consumer and completed
+  // dataset-lease cleanup. A SUCCEEDED field in an arbitrary log is not proof.
+  if(result?.nodeJobId!==job.nodeJobId||result?.state!=='SUCCEEDED'||
+     !Array.isArray(result.assignedIndices)||result.assignedIndices.length||observation.state!=='SUCCEEDED')
+    return reject('NATIVE_COMPLETION_NOT_CONFIRMED');
+  const attempt=observation.latestAttempt,previous=job.latestAttempt;
+  if(!attempt||attempt.state!=='EXITED_SUCCESS'||attempt.exitCode!==0||attempt.failureReason!==null||
+     !seconds(attempt.startedAt)||!seconds(attempt.finishedAt)||attempt.finishedAt<attempt.startedAt||attempt.finishedAt>observation.observedAt)
+    return reject('SUCCESSFUL_ATTEMPT_NOT_CONFIRMED');
+  const changed=job.state!=='SUCCEEDED'||previous?.id!==attempt.id||previous?.ordinal!==attempt.ordinal;
+  if(changed&&(!positive(previous?.ordinal)||attempt.ordinal<=previous.ordinal||
+     !observation.retryDetected||observation.latestRetry.createdAt>attempt.startedAt))
+    return reject('TRUSTED_RETRY_NOT_CONFIRMED');
+  return {...base,completed:true,state:'SUCCEEDED',reason:null,completedAttempt:attempt,
+    observedAt:observation.observedAt,nativeVersion:observation.nativeVersion,
+    message:'已核验同一不可变任务的末次成功尝试；原失败历史与配额生命周期未改写。'};
+}
 export function nativeObservationText(observation){
   if(!observation)return '';
   if(observation.status!=='CONFIRMED')return '节点只读观察：UNKNOWN；保留门户原终态，未自动重试。';

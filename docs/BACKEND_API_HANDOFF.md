@@ -59,6 +59,14 @@
 
 这些字段仅证明观察时刻，不是持续一致或重新执行授权。缺少旧节点能力、身份／事件／时间基线不全或查询失败不得推断任务复活；UNKNOWN 不覆盖原历史。不要用 `nativeObservation.state` 改写主 `state`、发起取消／提交、清除 `cancelRequested`、重新占用额度或重开已释放 hold。`manualRecovery.reason=HOST_RETRY_REQUIRES_EXPLICIT_RECOVERY` 表示已观察到宿主重试，`TERMINAL_DIVERGENCE_UNCONFIRMED` 表示状态差异但重试证据不足。普通请求不接受 node ID、spec、retry event、角色或宿主路径；内部只读证明不能由客户端提供。CLI `watch` 仍按门户原终态退出，并明确显示它与节点观察的区别。
 
+### 下游任务的完成核验
+
+`jobs.completion {jobId}`（CLI：`gpuctl completion JOB_ID --json`）提供同一不可变任务的最新成功证明，不修改 `state/jobs` 的原终态。返回 `protocol:"job-completion-v1"`、`completed`、`state:SUCCEEDED|UNCONFIRMED`，以及 `jobId,userId,machine,nodeJobId,project,release,specSha256,portalHistory,nativeObservation`；成功另含 `completedAttempt,observedAt,nativeVersion`。CLI 已核实成功退出 0，未确认退出 2，请求错误退出 1。
+
+`completed:true` 必须同时满足：固定节点/账号/submit key/不可变 spec 匹配；最新 attempt 为 `EXITED_SUCCESS`、exit 0、开始结束时间有效；native watch 已确认 GPU 消费者结束及数据租约收尾；较旧失败之后须有可信重试事件及更高 attempt。门户取消标记、缺少身份或事件基线、节点失联和清理中均返回未确认。仅当前获授权的本人/管理员可读，不接受客户端提交证据；不重放训练、占用额度、释放租约或覆盖失败历史。
+
+下游准入应查询此接口，并核对预期 `jobId/project/release/completedAttempt`，不要将旧 `state/jobs` 的 FAILED 直接当作重试结果，也不要仅凭日志里的成功字样放行。该结果是通过认证 HTTPS 查询得到的时点证据，`specSha256` 只是不可变规格摘要，不是离线数字签名；不证明科学结果质量，后续再次重试可能产生更新状态。
+
 ## 终端：新建与重连分开
 
 所有操作均包含 `machine`。可选上下文为 `project`、`dataWorkspace`、`hostAdmin`；重连及后续操作必须保持原上下文。项目、个人数据终端和宿主机 root 入口不能混用。宿主机 root 仍受管理员身份、机器授权和节点配置约束，不等于个人容器内的 root。
