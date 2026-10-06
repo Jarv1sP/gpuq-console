@@ -24,6 +24,14 @@ UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}
 CANCEL_PROTOCOL = 'project-sync-cancel-v1'
 
 
+def validate_source(source):
+    if (not isinstance(source,dict) or len(json.dumps(source))>4096
+            or (source.get('kind')=='git' and (set(source)!={'kind','commit'} or not isinstance(source.get('commit'),str) or not re.fullmatch(r'[a-f0-9]{40}(?:[a-f0-9]{24})?',source['commit'])))
+            or (source.get('kind')=='release' and (set(source)!={'kind','machine','project','release'} or not isinstance(source.get('machine'),str) or not 1<=len(source['machine'])<=128 or not isinstance(source.get('project'),str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',source['project']) or not isinstance(source.get('release'),str) or not HASH.fullmatch(source['release'])))
+            or source.get('kind') not in ('git','release')):
+        raise ValueError('Invalid or incomplete code sync receipt provenance')
+
+
 def cancellation(ops, args, session):
     """Read-only proof. A raw CANCELED state never unlocks a draft.
 
@@ -72,12 +80,7 @@ def observation(ops, args):
             or any(type(session.get(k)) is not int or not 0<=session[k]<=2**53-1 for k in ('manifestBytes','manifestOffset','totalBytes','entries'))
             or not 1<=session['manifestBytes']<=48*CHUNK or session['manifestOffset']>session['manifestBytes']):
         raise ValueError('Invalid or incomplete code sync receipt identity')
-    source=session['source']
-    if (not isinstance(source,dict) or len(json.dumps(source))>4096
-            or (source.get('kind')=='git' and (set(source)!={'kind','commit'} or not isinstance(source.get('commit'),str) or not re.fullmatch(r'[a-f0-9]{40}(?:[a-f0-9]{24})?',source['commit'])))
-            or (source.get('kind')=='release' and (set(source)!={'kind','machine','project','release'} or not isinstance(source.get('machine'),str) or not 1<=len(source['machine'])<=128 or not isinstance(source.get('project'),str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}',source['project']) or not isinstance(source.get('release'),str) or not HASH.fullmatch(source['release'])))
-            or source.get('kind') not in ('git','release')):
-        raise ValueError('Invalid or incomplete code sync receipt provenance')
+    validate_source(session['source'])
     return session, cancellation(ops, args, session)
 
 
@@ -497,8 +500,7 @@ class SnapshotSync:
         if not 1<=args['manifestBytes']<=48*CHUNK or args['entries']>self.ops.store.max_entries or args['totalBytes']>self.ops.store.max_bytes:
             raise ValueError('Code sync exceeds project limits')
         if not isinstance(args.get('manifestSha256'),str) or not HASH.fullmatch(args['manifestSha256']): raise ValueError('Invalid code manifest checksum')
-        source=args.get('source')
-        if not isinstance(source,dict) or source.get('kind') not in ('git','release') or len(json.dumps(source))>4096 or set(source)-{'kind','commit','machine','project','release'}: raise ValueError('Invalid code provenance')
+        validate_source(args.get('source'))
         receipt=self.receipt(args)
         if receipt.exists():
             session,_=self.session(args)

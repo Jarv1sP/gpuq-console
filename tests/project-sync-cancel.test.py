@@ -76,6 +76,18 @@ class SyncCancelTests(unittest.TestCase):
         folder=self.nodes[1].ROOT/'snapshot-sync'/self.pin()['snapshotId']
         self.assertEqual((folder/'manifest.part').read_bytes(),self.raw[:7])
 
+    def test_begin_rejects_incomplete_provenance_before_any_receipt_or_snapshot(self):
+        ops=self.nodes[1].projects();receipt=ops.folder/(ops.key(self.begin)+'.sync.json')
+        root=self.nodes[1].ROOT/'snapshot-sync'
+        for source in ({'kind':'git'},{'kind':'git','commit':'HEAD'},
+                       {'kind':'git','commit':'a'*40,'machine':'unexpected'},
+                       {'kind':'release','machine':'source','project':'code','release':'latest'},
+                       {'kind':'release','machine':'source','release':'a'*64}):
+            with self.subTest(source=source),self.assertRaisesRegex(ValueError,'provenance'):
+                self.nodes[1].process('projects.sync.begin',{**self.begin,'source':source})
+            self.assertFalse(receipt.exists());self.assertEqual(list(root.iterdir()),[])
+            self.assertEqual(ops.store.list(USER),[])
+
     def test_cancel_compare_and_swap_binds_every_original_identity(self):
         self.seal();pin=self.pin()
         for field,value in [('snapshotId',str(uuid.uuid4())),('manifestSha256','b'*64),('revision','c'*64),('source',{'kind':'git','commit':'b'*40})]:
