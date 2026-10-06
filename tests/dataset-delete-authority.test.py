@@ -372,6 +372,53 @@ class RetirementAuthorityTests(unittest.TestCase):
         self.assertTrue(self.original().exists())
         self.assertTrue(self.cache._tier('source-data',self.version)['pins'])
 
+    def test_certified_removed_alias_closes_with_real_remote_authority_after_source_revocation(self):
+        helpers=load('completed_removed_alias_real_authority','dataset-retirement-node.py')
+        source=helpers.RetirementNode(self.retirement,self.base/'source-node-plan',
+            tier=T.DatasetTier(self.cache),principal=ADMIN)
+        source_plan=source.plan(OWNER,'source-data',self.version,self.key)
+        authorization={k:source_plan[k] for k in ('operationId','machine','dataset','version','owners','memberAllowed','complete','snapshotSha256')}
+        nodes=[]
+        for target in self.targets:
+            nodes.append(helpers.RetirementNode(target['retirement'],self.base/(target['retirement'].machine+'-plan'),
+                tier=target['tier'],principal=ADMIN))
+        removed=self.targets[0];cache=removed['cache'];remote=removed['remote']
+        proof=copy.deepcopy(cache._tier('replica-data',self.version)['recovery']['proof'])
+        normal=cache.unregister(ADMIN,'replica-data',self.version)
+        self.assertTrue(normal['unregistered'])
+        # Model the already confirmed legacy ordinary removal, which has no
+        # provenance record. All removal/inode/tier/grant evidence is real.
+        (cache.root/'.provenance'/'replica-data'/(self.version+'.json')).unlink()
+        references=removed['snapshot']['authorityReferences']
+        self.assertEqual(nodes[0].grant_locations(self.version,references),
+            [dict(dataset='replica-data',version=self.version,authorityReference=references[0])])
+        alias_key=str(uuid.uuid4());live_key=str(uuid.uuid4())
+        nodes[0].plan(OWNER,'replica-data',self.version,alias_key,authorization=authorization,references=references)
+        nodes[1].plan(OWNER,'replica-data',self.version,live_key)
+        source.fence(OWNER,self.key)
+        receipts=[nodes[0].isolate(OWNER,alias_key,[]),nodes[1].isolate(OWNER,live_key,[])]
+        self.assertFalse(receipts[0]['complete']);self.assertTrue(receipts[1]['complete'])
+        isolated=source.isolate(OWNER,self.key,receipts)
+        self.assertTrue(isolated['complete']);self.assertTrue(isolated['isolated'])
+        for target in self.targets:
+            self.assertTrue(self.revoked(target['grant']).exists())
+            self.assertFalse(target['remote'].fence_path('source-data',self.version).exists())
+            with self.assertRaises(PermissionError):self.store.read(self.request(target['grant']),target['grant']['token'])
+        self.assertEqual(nodes[0].commit(OWNER,alias_key,isolated),receipts[0])
+        for _ in range(2):
+            self.assertEqual(nodes[0].status(OWNER,alias_key)['result'],receipts[0])
+            self.assertEqual(nodes[0].worker_status(OWNER,alias_key)['result'],receipts[0])
+        self.assertEqual(remote.retirement_reference(ADMIN,proof),references[0])
+        with self.assertRaises(PermissionError):
+            with remote.guard(ADMIN,proof):self.fail('Revoked source must not serve this old grant')
+        restored=source.restore(ADMIN,self.key)
+        self.assertEqual(nodes[0].release_absence(ADMIN,alias_key,restored)['state'],'RESTORED')
+        cache.register_manifest(ADMIN,'replica-data',self.cache._record(OWNER,'source-data',self.version)['manifest'],['owner'])
+        self.assertIsNone(cache._tier('replica-data',self.version)['recovery'])
+        self.assertEqual(nodes[0].status(OWNER,alias_key)['result']['state'],'RESTORED')
+        with self.assertRaises(PermissionError):self.store.read(self.request(removed['grant']),removed['grant']['token'])
+        self.assertTrue((cache.root/'.trash'/normal['recoveryId']/'REMOVAL.json').exists())
+
     def test_all_distinct_physical_aliases_of_one_grant_need_real_isolation(self):
         target=self.targets[0];cache,tier=target['cache'],target['tier']
         with cache._locked():
