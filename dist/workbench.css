@@ -95,6 +95,8 @@
 .ui-info>summary::after{display:none!important}
 .workspace-context-heading>div{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px}
 .workspace-context-heading>div>.eyebrow{flex-basis:100%}
+.sb .wb-rail .workspace-context-heading>div{flex:1;min-width:0}
+.sb #project-location{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #submit-receipt-actions{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
 #submit-receipt-actions .button{padding:4px 8px;min-height:28px;font-size:11px}
 #submit-receipt-actions .form-error{margin:4px 0;flex-basis:100%;max-width:100%;font-size:12px;overflow-wrap:anywhere}
