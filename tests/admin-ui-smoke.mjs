@@ -38,10 +38,8 @@ try{
   clearInterval(service.executionTimer);clearInterval(service.transferTimer);
   await new Promise(resolve=>server.listen(new URL(origin).port,'127.0.0.1',resolve));
   const account=await service.login('admin',password),member=(await service.invoke(account.token,'users.create',{username:'admin-layout-member',name:'后台权限检查成员',password})).result;
-  await service.invoke(account.token,'policy.full',{userId:account.principal.userId,policyVersion:0});
   await service.invoke(account.token,'policy.full',{userId:member.id,policyVersion:0});
   const second=(await service.invoke(account.token,'users.create',{username:'admin-layout-second',name:'第二位后台管理员',password,role:'admin'})).result;
-  await service.invoke(account.token,'policy.full',{userId:second.id,policyVersion:0});
   const principals={admin:account.principal,second:{userId:second.id,username:second.username,role:'admin'},member:{userId:member.id,username:member.username,role:'member'}};
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   async function open(role='admin',hash='#admin'){
