@@ -2225,6 +2225,30 @@ class DatasetCache:
         versions = sorted(copies | (set(registered) if version is None else {version}))
         return dict(registry=stamps, metadata=metadata, versions=versions)
 
+    def _preserve_purged_owners_locked(self, dataset):
+        """A purged version still needs dataset owners to release its name.
+
+        It has no version registration, so the ordinary removal snapshot cannot
+        see it. Check the fence directory under the same metadata lock as the
+        final dataset.json move; source recovery uses that lock as well.
+        """
+        try:
+            with _directory(self.root / '.retirements' / dataset) as fd:
+                names = sorted(os.listdir(fd))
+        except FileNotFoundError:
+            return
+        for name in names:
+            if re.fullmatch(r'\.write-[a-f0-9]{32}', name):
+                continue
+            if not name.endswith('.json'):
+                raise CacheError('corrupt version deletion fence directory')
+            version = _identifier(name[:-5], HASH_RE)
+            fence = self._retirement_fence(dataset, version)
+            if fence is None:
+                raise CacheBusy('version deletion fence changed during whole-dataset removal')
+            if fence['state'] == 'PURGED':
+                raise CacheError('仍有已清除副本的删除围栏，请先恢复源并释放名称，或显式重新登记；暂不能注销整个数据集')
+
     @staticmethod
     def _unregister_move_record(source, destination):
         """Atomic no-replace move for one registration file, never source data."""
@@ -2364,6 +2388,8 @@ class DatasetCache:
         with self._locked():
             if _guard is not None:
                 _guard()
+            if version is None:
+                self._preserve_purged_owners_locked(dataset)
             initial = self._unregister_snapshot(actor, dataset, version)
             if _expected_registration is not None and (initial is None or
                     dict(initial['registry']).get(version + '.json') != tuple(_expected_registration)):
@@ -2381,6 +2407,8 @@ class DatasetCache:
         def recheck():
             if _guard is not None:
                 _guard()
+            if version is None:
+                self._preserve_purged_owners_locked(dataset)
             current = self._unregister_snapshot(actor, dataset, version)
             if current is not None:
                 self._delete_actor_locked(actor, dataset, version)
