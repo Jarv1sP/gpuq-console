@@ -9,16 +9,36 @@ import {randomUUID} from 'node:crypto';
 import {createServer} from 'node:http';
 import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
+import {MACHINES} from '../dist/machines.js';
 
-const dir=await mkdtemp(join(tmpdir(),'gpuq-real-progress-ui-')),password='Real-Progress-Browser-2026!',errors=[],calls=[],failedAssets=[];
-let server,service,browser,state='RUNNING';
+const dir=await mkdtemp(join(tmpdir(),'gpuq-real-progress-ui-')),password='Real-Progress-Browser-2026!',errors=[],calls=[],readCalls=[],failedAssets=[];
+let server,service,browser,state='RUNNING',memberId;
 const progress={reported:true,stale:true,snapshot:{sequence:1,phase:'train',epochs_completed:3,epochs_total:10,steps_completed:null,steps_total:null,metrics:{loss:0.5},eta_seconds:60,severity:'error',message:'<img src=x onerror=window.XSS=1>',updated_at:1}};
 try{
   const bootstrap=join(dir,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   const reservation=createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve));const origin='http://127.0.0.1:'+port;
-  ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,bridge:async(machine,operation,args)=>{calls.push(operation);assert.ok(['sync','watch'].includes(operation));return {nodeJobId:'Jbrowser',state,assignedIndices:[0],progress,latestAttempt:{id:'Abrowser',ordinal:1,state,exit_code:state==='FAILED'?1:null,failure_reason:state==='FAILED'?'native confirmed failure':null}};}}));
+  ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,bridge:async(machine,operation,args)=>{
+    if(operation==='datasets.list'){
+      assert.ok(MACHINES.some(item=>item.id===machine));assert.deepEqual(args,{userId:'builtin-admin',hostAdmin:true});
+      readCalls.push(operation);return {datasets:[]};
+    }
+    if(operation==='datasets.capacity'){
+      assert.equal(machine,'gpu-1');assert.deepEqual(args,{userId:memberId,hostAdmin:false});
+      readCalls.push(operation);return {available:true,filesystemBytes:4096,availableBytes:2048,reserveBytes:512,usableBytes:1536};
+    }
+    if(operation==='transfers.capabilities'){
+      assert.equal(machine,'gpu-1');assert.deepEqual(args,{userId:memberId});
+      readCalls.push(operation);return {protocol:'lan-transfer-v1',enabled:false,sourceReady:false,sources:[]};
+    }
+    if(operation==='projects.list'){
+      assert.equal(machine,'gpu-1');assert.deepEqual(args,{userId:memberId});
+      readCalls.push(operation);return {projects:[]};
+    }
+    calls.push(operation);assert.ok(['sync','watch'].includes(operation));return {nodeJobId:'Jbrowser',state,assignedIndices:[0],progress,latestAttempt:{id:'Abrowser',ordinal:1,state,exit_code:state==='FAILED'?1:null,failure_reason:state==='FAILED'?'native confirmed failure':null}};
+  }}));
   clearInterval(service.executionTimer);await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   const admin=await service.login('admin',password),user=(await service.invoke(admin.token,'users.create',{username:'alice',password})).result;
+  memberId=user.id;
   const policyVersion=service.state(admin.principal).users.find(item=>item.id===user.id).policyVersion;
   await service.invoke(admin.token,'policy.save',{userId:user.id,policyVersion,limits:{'gpu-1':1},total:1});
   const id=randomUUID();service.store.jobs.push({id,userId:user.id,username:'alice',name:'real-progress-job',machine:'gpu-1',cards:1,state:'RUNNING',spec:{id,argv:['python','train.py']}});service.save();await service.reconcile();
@@ -28,6 +48,7 @@ try{
   const row=page.locator('#my-job-table article[data-workbench-job]').filter({hasText:'real-progress-job'});await row.waitFor();await row.locator('summary[aria-label="进度状态"]').click();await row.locator('summary[aria-label="任务事实"]').click();assert.match(await row.textContent(),/上次轮次 3\/10/);assert.equal(await row.locator('.wb-progress-number').innerText(),'—');assert.match(await row.textContent(),/进度停滞/);assert.match(await row.textContent(),/RUNNING/);assert.equal(await row.locator('progress').count(),0);assert.equal(await row.locator('img,script').count(),0);assert.equal(await page.evaluate(()=>window.XSS),undefined);
   progress.stale=false;progress.snapshot.updated_at=Date.now()/1000;progress.snapshot.epochs_completed=10;await service.reconcile();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#my-job-table progress')?.value===100);assert.match(await row.textContent(),/RUNNING/);
   state='FAILED';await service.reconcile();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#my-job-table').textContent.includes('native confirmed failure'));await row.locator('summary[aria-label="任务事实"]').click();assert.match(await row.textContent(),/退出码：1/);
-  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);assert.deepEqual(failedAssets,[]);assert.ok(calls.every(op=>op==='sync'));
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);assert.deepEqual(failedAssets,[]);assert.ok(calls.every(op=>op==='sync'),JSON.stringify([...new Set(calls)]));
+  assert.ok(readCalls.every(op=>['datasets.list','datasets.capacity','transfers.capabilities','projects.list'].includes(op)));
   console.log(JSON.stringify({status:'passed',checks:['real SQLite/cookie HTTP/assets','advisory progress does not finish or fail training','native confirmed failure+exit','escaped report message','390px no overflow','no starts/cancel/retry']}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});}
