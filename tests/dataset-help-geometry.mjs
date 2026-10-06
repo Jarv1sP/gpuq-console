@@ -31,6 +31,13 @@ export async function checkDatasetHelpRegressions(page) {
   } finally {
     await button.evaluate((node, style) => style === null ? node.removeAttribute('style') : node.setAttribute('style', style), originalStyle);
   }
+  try {
+    await button.evaluate(node => node.style.transform = 'translateX(-120px)');
+    const left = await inspectGeometry(page, datasetHelpGeometry);
+    assert(left.failures.some(row => row.rule === 'labelled-help-position'), 'a help left of its caption is rejected');
+  } finally {
+    await button.evaluate((node, style) => style === null ? node.removeAttribute('style') : node.setAttribute('style', style), originalStyle);
+  }
   const restored = await inspectGeometry(page, datasetHelpGeometry);
   assert(restored.pass, JSON.stringify(restored.failures));
 }
