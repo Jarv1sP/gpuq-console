@@ -1,6 +1,9 @@
 """Detached administrator unregister integration; no real systemd, SSH or GPUs."""
 import importlib.util
 import json
+import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
 import unittest
@@ -109,13 +112,65 @@ class NodeDatasetUnregister(unittest.TestCase):
         self.ready()
         lease = self.cache.acquire_lease(self.user, 'example', self.version, 'running-job')
         result, _ = self.submit()
+        self.assertEqual(result['state'], 'UNREGISTERING')
+        self.assertRegex(result['operationId'], '^[a-f0-9]{64}$')
         with patch.object(self.node, 'gpu', side_effect=AssertionError('must not touch scheduler')):
             self.assertEqual(self.node.dataset_worker(result['operationId']), 1)
         status = self.call('status', operationId=result['operationId'])
+        self.assertEqual(status['operationId'], result['operationId'])
         self.assertEqual(status['state'], 'FAILED')
         self.assertIn('lease', status['error'])
         self.assertNotIn('unregistered', status)
         self.assertEqual(self.cache.acquire_lease(self.user, 'example', self.version, 'running-job'), lease)
+        self.assertEqual(self.cache.status(self.user, 'example', self.version)['state'], 'READY')
+
+    def test_pin_rejection_is_async_failed_on_original_id_with_complete_copy_retained(self):
+        self.ready()
+        with self.cache._locked():
+            tier = self.cache._tier('example', self.version)
+            tier['pins']['manual-test'] = {'owner':'builtin-admin', 'createdAt':1}
+            self.cache._write_tier('example', self.version, tier)
+        result, _ = self.submit(version=self.version)
+        self.assertEqual(result['state'], 'UNREGISTERING')
+        self.assertRegex(result['operationId'], '^[a-f0-9]{64}$')
+        self.assertEqual(self.node.dataset_worker(result['operationId']), 1)
+        status = self.call('status', operationId=result['operationId'])
+        self.assertEqual(status['operationId'], result['operationId'])
+        self.assertEqual(status['state'], 'FAILED')
+        self.assertIn('pin', status['error'])
+        self.assertNotIn('unregistered', status)
+        self.assertEqual(self.cache.status(self.user, 'example', self.version)['state'], 'READY')
+
+    def test_old_quarantine_cleanup_can_keep_current_ready_before_accepted_worker_removes_it(self):
+        self.ready()
+        with self.cache._locked():
+            snapshot = self.cache._unregister_snapshot(self.admin, 'example', self.version)
+            transaction, _ = self.cache._unregister_transaction('example', self.version, snapshot)
+        old_quarantine = transaction / 'replicas/ready' / self.version
+        shutil.copytree(self.cache._paths('example', self.version)['ready'], old_quarantine)
+        accepted, _ = self.submit(version=self.version)
+        entered, release = threading.Event(), threading.Event()
+        original_remove = self.module.shutil.rmtree
+        def stalled_cleanup(path, *args, **kwargs):
+            if Path(path) == old_quarantine and not entered.is_set():
+                entered.set()
+                if not release.wait(10): raise AssertionError('fixture did not release its own cleanup')
+            return original_remove(path, *args, **kwargs)
+        with patch.object(self.node, 'dataset_cache', return_value=(self.module, self.cache)), \
+                patch.object(self.module.shutil, 'rmtree', side_effect=stalled_cleanup), ThreadPoolExecutor() as pool:
+            worker = pool.submit(self.node.dataset_worker, accepted['operationId'])
+            try:
+                self.assertTrue(entered.wait(5))
+                listing = self.call('list')
+                version = next(row for item in listing['datasets'] for row in item['versions'] if row['version'] == self.version)
+                self.assertEqual(version['state'], 'READY')
+                self.assertFalse(worker.done())
+            finally:
+                release.set()
+            self.assertEqual(worker.result(10), 0)
+        receipt = self.call('status', operationId=accepted['operationId'])
+        self.assertEqual(receipt['operationId'], accepted['operationId'])
+        self.assertEqual(receipt['state'], 'UNREGISTERED')
 
     def test_launch_timeout_keeps_operation_record_and_never_claims_canceled(self):
         with patch.object(self.node, 'dataset_background_active', return_value=False), \

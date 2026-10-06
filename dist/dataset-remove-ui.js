@@ -24,7 +24,7 @@ export function removalPreservation(target,versions,machines,{partial=false}={})
     const archive=storage?.phase==='ARCHIVED'&&storage.originalRetained===true&&known.has(storage.archiveMachine)&&storage.archiveMachine!==target.machine&&
       !locations.some(row=>row.machine===storage.archiveMachine&&row.removalPending===true);
     const copies=[...new Set(locations.filter(row=>row.machine!==target.machine&&known.has(row.machine)&&row.state==='READY'&&row.removalPending!==true).map(row=>row.machine))];
-    return {version:version.version,pending,kind:archive?'archive':copies.length?'replicas':'unproven',machines:archive?[storage.archiveMachine]:copies};
+    return {version:version.version,pending,graceEligible:local?.removalGraceEligible===true,kind:archive?'archive':copies.length?'replicas':'unproven',machines:archive?[storage.archiveMachine]:copies};
   });
   return {items,pending:items.some(item=>item.pending),allowed:!partial&&items.length>0&&items.every(item=>!item.pending&&item.kind!=='unproven')};
 }
@@ -149,7 +149,8 @@ export function datasetRemoveUI(store,section,toast,{reload}={}){
     ensureDialog();confirmation={target:whole?{...target,version:null}:target,whole,preservation,userId:store.principal.userId};
     const retained=item=>item.kind==='archive'?`数据库原件（${serverIdHTML(item.machines[0])}）`:item.kind==='replicas'?`其他服务器上的完整副本：${item.machines.map(machine=>serverIdHTML(machine)).join('、')}`:'完整副本尚未确认';
     const facts=preservation.items.map(item=>`${whole?`<small title="${esc(item.version)}">${esc(item.version.slice(0,12))}</small>`:''}<span>${retained(item)}</span>`).join('');
-    const blocked=!preservation.allowed?`<p class="dataset-remove-blocked">${preservation.pending?'这台服务器上的删除结果待确认':removalText('这可能是最后一份完整数据，暂不能按机器删除')} ${copyHelp('暂不能删除',preservation.pending?'先查询原操作，不能重复发起删除。':'节点更新后可用「彻底删除」（7 天内可恢复）。')}</p>`:'';
+    const pendingHelp=preservation.items.some(item=>item.pending&&item.graceEligible)?'请求发出后没有收到回执。为避免误删最后一份数据，这份副本暂时不算作可用副本；节点确认删除完成或 25 小时后会自动解除。':'正在按原编号查询删除结果。为避免误删最后一份数据，确认完成前不能再次删除。';
+    const blocked=!preservation.allowed?`<p class="dataset-remove-blocked">${preservation.pending?'这台服务器上的删除结果待确认':removalText('这可能是最后一份完整数据，暂不能按机器删除')} ${copyHelp('暂不能删除',preservation.pending?pendingHelp:'节点更新后可用「彻底删除」（7 天内可恢复）。')}</p>`:'';
     dialog.innerHTML=`<form><header class="modal-head"><div class="copy-caption"><h2 id="dataset-remove-title">${whole?'删除整个数据集？':'删除此版本？'}</h2>${copyHelp('删除范围','只删除所选服务器的缓存和登记。删除前会重新确认还有完整副本，正在训练或固定保留的版本会被拒绝。')}</div><button class="button quiet" type="button" data-remove-close aria-label="关闭删除确认">关闭</button></header><dl class="dataset-remove-facts"><div><dt>服务器</dt><dd>${serverIdHTML(target.machine)}</dd></div><div><dt>数据集</dt><dd><code>${esc(target.dataset)}</code>${whole?'<small>全部版本</small>':`<small title="${esc(target.version)}">${esc(target.version.slice(0,12))}</small>`}</dd></div><div><dt>删除</dt><dd>缓存和登记</dd></div><div><dt>保留</dt><dd>${facts}</dd></div></dl>${blocked}${whole?`<label class="field">输入数据集名称 <code>${esc(target.dataset)}</code><input name="remove-name" required autocomplete="off" spellcheck="false" aria-label="输入数据集名称"></label>`:''}<footer class="modal-actions"><button class="button" type="button" data-remove-close>取消</button><button class="button danger" type="submit" data-remove-confirm ${whole||!preservation.allowed?'disabled':''}>删除</button></footer></form>`;
     if(target.catalogDataset&&target.catalogDataset!==target.dataset){dialog.querySelector('.dataset-remove-facts>div:nth-child(2) dd').prepend(document.createTextNode(target.catalogDataset+' · 登记名 '));if(whole){const field=dialog.querySelector('.field');field.querySelector('code').textContent=target.catalogDataset;}}
     dialog.showModal();fadeDialog(dialog);

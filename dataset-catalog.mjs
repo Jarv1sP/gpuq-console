@@ -7,20 +7,23 @@ const STATES=new Set(['READY','REGISTERED','STAGING','PREPARING','FAILED','UNKNO
 const OWNER_ID=/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$/;
 
 export const LAST_COPY_MESSAGE='这可能是这个版本的最后一份完整数据。为避免永久丢失，暂不能按机器删除；节点更新后可用「彻底删除」（7 天内可恢复）。';
+// The legacy detached worker has RuntimeMaxSec=86400. Keep another hour for
+// launch/stop cleanup; a contract test parses its actual systemd-run definition.
+export const DATASET_REMOVAL_GRACE_MS=25*60*60*1000;
 const removalLanes=new WeakMap();
 const lastCopy=()=>Object.assign(Error(LAST_COPY_MESSAGE),{status:409,code:'LAST_COPY_UNPROVEN'});
 const complete=value=>value?.state==='READY'||value?.state===undefined&&value?.complete===true;
 const pendingRemoval=()=>Object.assign(Error('这台服务器上的删除结果待确认'),{status:409,code:'DATASET_REMOVAL_PENDING'});
 
 function removalPending(service,machine,dataset,version){
-  if(!service.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_removal_exclusions'").get())return false;
-  return !!service.db.prepare('SELECT 1 FROM dataset_removal_exclusions WHERE machine=? AND dataset=? AND version=? LIMIT 1').get(machine,dataset,version);
+  if(!service.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_removal_exclusions'").get())return null;
+  return service.db.prepare('SELECT operation_id,registration_identity FROM dataset_removal_exclusions WHERE machine=? AND dataset=? AND version=? LIMIT 1').get(machine,dataset,version);
 }
 
 // The old node accepts cleanup before its worker removes READY. A durable
 // exclusion is therefore written BEFORE dispatch, and survives a Portal swap.
 // Neither a failed HTTP response nor a missing operation ID proves no deletion.
-export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000}={}){
+export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000,now=Date.now}={}){
   const user=service.store.get(principal.userId),policy=JSON.stringify(user);
   const checkPolicy=()=>{
     const current=service.store.get(principal.userId);
@@ -32,8 +35,11 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
   service.db.exec(`CREATE TABLE IF NOT EXISTS dataset_removal_exclusions (
     id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
     machine TEXT NOT NULL, dataset TEXT NOT NULL, version TEXT NOT NULL,
-    scope_version TEXT, operation_id TEXT, user_id TEXT NOT NULL, started_at TEXT NOT NULL
+    scope_version TEXT, operation_id TEXT, user_id TEXT NOT NULL, started_at TEXT NOT NULL,
+    registration_identity TEXT
   )`);
+  if(!service.db.prepare('PRAGMA table_info(dataset_removal_exclusions)').all().some(column=>column.name==='registration_identity'))
+    service.db.exec('ALTER TABLE dataset_removal_exclusions ADD COLUMN registration_identity TEXT');
   async function read(machine,operation,args){
     let timer;
     try{
@@ -44,10 +50,11 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
   }
   async function listings(){
     const rows=await Promise.all(MACHINES.map(async machine=>{
+      const readStartedAt=now();
       const result=await read(machine.id,'datasets.list',{userId:user.id,hostAdmin:true});
       if(!Array.isArray(result?.datasets)||result.datasets.some(item=>!ID.test(item?.dataset)||!Array.isArray(item.versions)||
         item.versions.some(value=>!HASH.test(value?.version))||item.ownerIds!==undefined&&(!Array.isArray(item.ownerIds)||item.ownerIds.some(owner=>typeof owner!=='string'||!OWNER_ID.test(owner)))))throw lastCopy();
-      return {machine:machine.id,datasets:result.datasets};
+      return {machine:machine.id,datasets:result.datasets,readStartedAt};
     }));
     checkPolicy();return rows;
   }
@@ -62,18 +69,29 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
     return values;
   }
   const exclusionRows=()=>service.db.prepare('SELECT * FROM dataset_removal_exclusions').all();
+  const registrationIdentity=(item,value)=>JSON.stringify({dataset:item.dataset,version:value.version,
+    ...(item.ownerIds!==undefined?{ownerIds:[...item.ownerIds].sort()}:{}),
+    ...(value.bytes!==undefined?{bytes:value.bytes}:{}),...(value.files!==undefined?{files:value.files}:{})});
   const hasCopy=(rows,pending)=>rows.find(row=>row.machine===pending.machine)?.datasets.some(item=>item.dataset===pending.dataset&&item.versions?.some(value=>value.version===pending.version&&complete(value)));
   const absent=(rows,pending)=>{
     const listing=rows.find(row=>row.machine===pending.machine);
     return !!listing&&!listing.datasets.some(item=>item.dataset===pending.dataset&&item.versions.some(value=>value.version===pending.version));
   };
+  function graceConfirmed(rows,pending){
+    const listing=rows.find(row=>row.machine===pending.machine),item=listing?.datasets.find(item=>item.dataset===pending.dataset);
+    const value=item?.versions.find(value=>value.version===pending.version),startedAt=Date.parse(pending.started_at);
+    return !pending.operation_id&&typeof pending.registration_identity==='string'&&Number.isFinite(startedAt)&&
+      now()>=startedAt+DATASET_REMOVAL_GRACE_MS&&listing?.readStartedAt>=startedAt+DATASET_REMOVAL_GRACE_MS&&
+      value?.state==='READY'&&registrationIdentity(item,value)===pending.registration_identity;
+  }
   async function reconcile(rows,pending){
     const remove=service.db.prepare('DELETE FROM dataset_removal_exclusions WHERE id=?');
-    // A confirmed absence releases only this missing-ID record, even when an
-    // unrelated original receipt cannot be read. That failure still blocks dispatch.
-    for(const row of pending)if(!row.operation_id&&absent(rows,row))remove.run(row.id);
+    // Confirmed absence is independent of an unreadable old receipt. Missing-ID
+    // READY is safe only after the worker's hard limit AND an unchanged listing.
+    const remaining=[];
+    for(const row of pending){if(absent(rows,row)||graceConfirmed(rows,row))remove.run(row.id);else remaining.push(row);}
     const receipts=new Map();
-    for(const row of pending){
+    for(const row of remaining){
       if(!HASH.test(row.operation_id||''))continue;
       const key=JSON.stringify([row.machine,row.operation_id]);
       if(!receipts.has(key))receipts.set(key,await read(row.machine,'datasets.status',{operationId:row.operation_id,userId:row.user_id,hostAdmin:true}));
@@ -83,9 +101,9 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
     // Read AFTER the original receipt. A pre-receipt READY can be the copy
     // that the just-finished worker removed, and must never release an exclusion.
     if(receipts.size)rows=await listings();
-    for(const row of pending){
+    for(const row of remaining){
       const receipt=receipts.get(JSON.stringify([row.machine,row.operation_id]));
-      if((receipt?.state==='UNREGISTERED'&&typeof receipt.unregistered==='boolean')||(receipt?.state==='FAILED'&&hasCopy(rows,row)))remove.run(row.id);
+      if(absent(rows,row)||(receipt?.state==='UNREGISTERED'&&typeof receipt.unregistered==='boolean')||(receipt?.state==='FAILED'&&hasCopy(rows,row)))remove.run(row.id);
     }
     checkPolicy();return rows;
   }
@@ -121,7 +139,7 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
       // An ARCHIVED journal alone is historical. Its distinct authority must
       // also report this fixed version complete in the current node read.
       if(!copies.length)throw lastCopy();
-      proof.push({version:id,copies});
+      proof.push({version:id,copies,registrationIdentity:registrationIdentity(target,target.versions.find(value=>value.version===id))});
     }
     return proof;
   }
@@ -130,12 +148,12 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
     // named archive aliases, without acquiring version locks in opposite orders.
     const prior=removalLanes.get(service)||Promise.resolve();
     const run=prior.then(async()=>{
-      const proof=await snapshot(machine,dataset,version),requestId=crypto.randomUUID(),startedAt=new Date().toISOString();
+      const proof=await snapshot(machine,dataset,version),requestId=crypto.randomUUID(),startedAt=new Date(now()).toISOString();
       checkPolicy();
-      const insert=service.db.prepare('INSERT INTO dataset_removal_exclusions(id,request_id,machine,dataset,version,scope_version,operation_id,user_id,started_at) VALUES(?,?,?,?,?,?,NULL,?,?)');
+      const insert=service.db.prepare('INSERT INTO dataset_removal_exclusions(id,request_id,machine,dataset,version,scope_version,operation_id,user_id,started_at,registration_identity) VALUES(?,?,?,?,?,?,NULL,?,?,?)');
       service.db.exec('BEGIN IMMEDIATE');
       try{
-        for(const row of proof)insert.run(crypto.randomUUID(),requestId,machine,dataset,row.version,version??null,user.id,startedAt);
+        for(const row of proof)insert.run(crypto.randomUUID(),requestId,machine,dataset,row.version,version??null,user.id,startedAt,row.registrationIdentity);
         service.db.exec('COMMIT');
       }catch(error){service.db.exec('ROLLBACK');throw error;}
       checkPolicy();
@@ -247,8 +265,9 @@ export async function datasetCatalogCall(service,principal,operation,args){
       let version=dataset.versions.get(value.version);
       if(!version){version={version:value.version,locations:[]};dataset.versions.set(value.version,version);}
       const owner=ownerView(item,service.store.users);
+      const pending=principal.role==='admin'?removalPending(service,listing.machine,item.dataset,value.version):null;
       const location={machine:listing.machine,dataset:item.dataset,ownerLabel:owner.label,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,
-        ...(principal.role==='admin'&&removalPending(service,listing.machine,item.dataset,value.version)?{removalPending:true}:{}),
+        ...(pending?{removalPending:true,...(!pending.operation_id&&pending.registration_identity?{removalGraceEligible:true}:{})}:{}),
         ...(service.archiveState?.(user.id,listing.machine,{dataset:item.dataset,version:value.version})?{storage:service.archiveState(user.id,listing.machine,{dataset:item.dataset,version:value.version})}:{}),
         ...(listing.machine===args.machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})};
       owners.set(location,owner);version.locations.push(location);

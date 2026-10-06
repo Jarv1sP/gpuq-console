@@ -11,7 +11,7 @@ const VERSION='a'.repeat(64),OP='b'.repeat(64),target={machine:MACHINES[0].id,da
 test('preservation distinguishes database original, other complete copies and no proof',()=>{
   const other=MACHINES[1].id,local={machine:target.machine,state:'READY'},remote={machine:other,state:'READY'};
   const view=(locations,options)=>removalPreservation(target,[{version:VERSION,locations}],MACHINES,options);
-  assert.deepEqual(view([local,remote]).items[0],{version:VERSION,pending:false,kind:'replicas',machines:[other]});
+  assert.deepEqual(view([local,remote]).items[0],{version:VERSION,pending:false,graceEligible:false,kind:'replicas',machines:[other]});
   assert.equal(view([local,remote]).allowed,true);
   const archived={...local,storage:{phase:'ARCHIVED',originalRetained:true,archiveMachine:other}};
   assert.equal(view([archived,remote]).items[0].kind,'archive');
@@ -20,6 +20,7 @@ test('preservation distinguishes database original, other complete copies and no
   assert.equal(view([local,remote],{partial:true}).allowed,false);
   assert.equal(view([local,{...remote,removalPending:true}]).allowed,false);
   assert.equal(view([{...local,removalPending:true},remote]).pending,true);assert.equal(view([{...local,removalPending:true},remote]).allowed,false);
+  assert.equal(view([{...local,removalPending:true,removalGraceEligible:true},remote]).items[0].graceEligible,true);
   assert.equal(removalPreservation(target,[{version:VERSION,locations:[local,remote]},{version:OP,locations:[local]}],MACHINES).allowed,false);
 });
 

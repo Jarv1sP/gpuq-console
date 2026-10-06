@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import net from 'node:net';
@@ -8,12 +8,13 @@ import {PortalService} from '../portal-service.mjs';
 import {createPortalServer} from '../portal-server.mjs';
 import {DemoClient} from '../dist/client.js';
 import {executionCall} from '../execution.mjs';
-import {createDatasetRemovalGuard,datasetCatalogCall,LAST_COPY_MESSAGE} from '../dataset-catalog.mjs';
+import {createDatasetRemovalGuard,datasetCatalogCall,LAST_COPY_MESSAGE,DATASET_REMOVAL_GRACE_MS} from '../dataset-catalog.mjs';
 import {MACHINES} from '../dist/model.js';
 
 const [A,B,C]=MACHINES.map(machine=>machine.id),V='a'.repeat(64),V2='b'.repeat(64),OP='c'.repeat(64);
 const actor={userId:'builtin-admin',username:'admin',role:'admin'};
 const blocked=error=>error.status===409&&error.code==='LAST_COPY_UNPROVEN'&&error.message===LAST_COPY_MESSAGE;
+const pending=error=>error.status===409&&error.code==='DATASET_REMOVAL_PENDING'&&error.message==='这台服务器上的删除结果待确认';
 async function fixture(t){
   const dir=await mkdtemp(join(tmpdir(),'dataset-last-copy-')),database=join(dir,'portal.sqlite'),bootstrap=join(dir,'bootstrap');
   await writeFile(bootstrap,JSON.stringify({username:'admin',password:'Last-Copy-Isolated-Password-2026!'}),{mode:0o600});
@@ -38,6 +39,17 @@ async function fixture(t){
     journal:()=>service.db.prepare('SELECT * FROM dataset_removal_exclusions').all(),
     async restart(){service.close();service=await PortalService.open(database,undefined,undefined,bridge);clearInterval(service.executionTimer);}};
 }
+test('missing-ID grace exceeds the actual legacy worker hard limit plus an hour',async()=>{
+  const source=await readFile(new URL('../deploy/node-executor.py',import.meta.url),'utf8');
+  const begin=source.indexOf('def _dataset_op('),end=source.indexOf('def dataset_worker(');assert(begin>=0&&end>begin);
+  const definition=source.slice(begin,end);assert(definition.includes("'--dataset-worker',key"));
+  const limits=[...definition.matchAll(/--property=RuntimeMaxSec=([^'"\s,]+)/g)].map(match=>{
+    assert.match(match[1],/^\d+$/,'worker hard limit must be parsed in full, never as a numeric prefix');return Number(match[1]);
+  });assert(limits.length>0);
+  assert(DATASET_REMOVAL_GRACE_MS>=Math.max(...limits)*1000+3600*1000);
+  const ui=await readFile(new URL('../dist/dataset-remove-ui.js',import.meta.url),'utf8');
+  assert(ui.includes((DATASET_REMOVAL_GRACE_MS/(60*60*1000))+' 小时后会自动解除'));
+});
 test('fresh other READY permits exactly the unchanged main unregister request',async t=>{
   const f=await fixture(t),out=await f.remove();assert.equal(out.state,'UNREGISTERING');
   assert.deepEqual(f.calls.filter(call=>call.operation==='datasets.unregister'),[{machine:A,operation:'datasets.unregister',args:{dataset:'sample',version:V,userId:actor.userId,hostAdmin:true}}]);
@@ -94,6 +106,72 @@ test('a lost dispatch receipt keeps null-ID exclusion through restart; READY is 
   f.writeFail(null);await f.restart();await assert.rejects(f.remove(B),blocked);assert.equal(f.journal().length,1);assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,1);
   await assert.rejects(f.remove(A),error=>error.code==='DATASET_REMOVAL_PENDING'&&error.message==='这台服务器上的删除结果待确认');
 });
+test('a still-READY worker before grace stays pending; only a new read after grace releases unchanged identity',async t=>{
+  const f=await fixture(t);f.put(A,[V],{versions:[{version:V,state:'READY',bytes:64,files:1,checkedAt:'9999-01-01T00:00:00Z'}]});
+  f.writeFail(Object.assign(Error('launch response timed out'),{status:504}));await assert.rejects(f.remove(A),/timed out/);f.writeFail(null);
+  const original=f.journal()[0],started=Date.parse(original.started_at);let clock=started+15*60*1000;
+  const guard=createDatasetRemovalGuard(f.service,actor,{now:()=>clock});
+  const dispatch=()=>f.bridge(A,'datasets.unregister',{dataset:'sample',version:V,userId:actor.userId,hostAdmin:true});
+  await assert.rejects(guard.withProtectedRemoval(A,'sample',V,dispatch),pending);assert.equal(f.journal()[0].id,original.id);
+  clock=started+DATASET_REMOVAL_GRACE_MS-1;await assert.rejects(guard.withProtectedRemoval(A,'sample',V,dispatch),pending);
+  assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,1);
+  clock=started+DATASET_REMOVAL_GRACE_MS;f.data.get(A)[0].versions[0].checkedAt='1970-01-01T00:00:00Z';
+  await guard.withProtectedRemoval(A,'sample',V,dispatch);
+  assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);assert.equal(f.journal().length,1);
+  assert.notEqual(f.journal()[0].id,original.id);assert.equal(f.journal()[0].started_at,new Date(clock).toISOString());
+});
+test('a read begun before grace cannot release the record merely because its response arrives later',async t=>{
+  const f=await fixture(t);f.writeFail(Error('lost'));await assert.rejects(f.remove(A));f.writeFail(null);
+  const started=Date.parse(f.journal()[0].started_at);let clock=started+DATASET_REMOVAL_GRACE_MS-1;
+  const originalBridge=f.service.bridge;f.service.bridge=(machine,operation,args)=>{
+    if(machine===A&&operation==='datasets.list')clock=started+DATASET_REMOVAL_GRACE_MS;
+    return originalBridge(machine,operation,args);
+  };
+  const guard=createDatasetRemovalGuard(f.service,actor,{now:()=>clock});
+  await assert.rejects(guard.withProtectedRemoval(A,'sample',V,()=>{throw Error('must not dispatch');}),pending);
+  assert.equal(f.journal().length,1);assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,1);
+});
+test('grace requires unchanged provided owners, byte/file counts and a valid Portal start time',async t=>{
+  for(const changed of ['owners','bytes','files','missing-field','invalid-time','future-time']){
+    const f=await fixture(t);f.put(A,[V],{versions:[{version:V,state:'READY',bytes:64,files:1}]});
+    f.writeFail(Error('lost'));await assert.rejects(f.remove(A));f.writeFail(null);
+    const original=f.journal()[0],clock=Date.parse(original.started_at)+DATASET_REMOVAL_GRACE_MS+1,guard=createDatasetRemovalGuard(f.service,actor,{now:()=>clock});
+    if(changed==='owners')f.data.get(A)[0].ownerIds=['another-admin'];
+    if(changed==='bytes')f.data.get(A)[0].versions[0].bytes=65;
+    if(changed==='files')f.data.get(A)[0].versions[0].files=2;
+    if(changed==='missing-field')delete f.data.get(A)[0].versions[0].files;
+    if(changed==='invalid-time'||changed==='future-time')f.service.db.prepare('UPDATE dataset_removal_exclusions SET started_at=?').run(changed==='invalid-time'?'unknown':new Date(clock+1).toISOString());
+    await assert.rejects(guard.withProtectedRemoval(A,'sample',V,()=>{throw Error('must not dispatch');}),pending);
+    assert.equal(f.journal()[0].id,original.id);assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,1);
+  }
+});
+test('elapsed grace never clears known nonterminal receipts or incomplete/missing identity',async t=>{
+  for(const kind of ['known','incomplete','legacy-identity']){
+    const f=await fixture(t);
+    if(kind!=='known')f.writeFail(Error('lost'));await f.remove(A).catch(error=>assert.match(error.message,/lost/));f.writeFail(null);
+    const original=f.journal()[0],clock=Date.parse(original.started_at)+DATASET_REMOVAL_GRACE_MS+1;
+    if(kind==='incomplete')f.data.get(A)[0].versions[0].state='REGISTERED';
+    if(kind==='legacy-identity')f.service.db.prepare('UPDATE dataset_removal_exclusions SET registration_identity=NULL').run();
+    const guard=createDatasetRemovalGuard(f.service,actor,{now:()=>clock});
+    await assert.rejects(guard.withProtectedRemoval(A,'sample',V,()=>{throw Error('must not dispatch');}),pending);
+    assert.equal(f.journal()[0].id,original.id);assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,1);
+  }
+});
+test('a failed full read after the deadline cannot release a missing-ID exclusion',async t=>{
+  const f=await fixture(t);f.writeFail(Error('lost'));await assert.rejects(f.remove(A));f.writeFail(null);
+  const original=f.journal()[0],clock=Date.parse(original.started_at)+DATASET_REMOVAL_GRACE_MS+1;
+  f.fail((machine,operation)=>machine===C&&operation==='datasets.list');
+  const guard=createDatasetRemovalGuard(f.service,actor,{now:()=>clock});await assert.rejects(guard.refreshExclusions(),blocked);
+  assert.equal(f.journal()[0].id,original.id);assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,1);
+});
+test('an older exclusion table migrates without inventing identity or releasing its preserved row',async t=>{
+  const f=await fixture(t),started=new Date(Date.now()-DATASET_REMOVAL_GRACE_MS-1).toISOString();
+  f.service.db.exec('CREATE TABLE dataset_removal_exclusions (id TEXT PRIMARY KEY, request_id TEXT NOT NULL, machine TEXT NOT NULL, dataset TEXT NOT NULL, version TEXT NOT NULL, scope_version TEXT, operation_id TEXT, user_id TEXT NOT NULL, started_at TEXT NOT NULL)');
+  f.service.db.prepare('INSERT INTO dataset_removal_exclusions VALUES(?,?,?,?,?,?,NULL,?,?)').run('legacy-row','legacy-request',A,'sample',V,V,actor.userId,started);
+  const guard=createDatasetRemovalGuard(f.service,actor);await guard.refreshExclusions();
+  assert.equal(f.journal().length,1);assert.equal(f.journal()[0].registration_identity,null);
+  await assert.rejects(f.remove(A),pending);f.data.set(A,[]);await guard.refreshExclusions();assert.equal(f.journal().length,0);
+});
 test('authoritative absent releases null-ID exclusion; unknown and failed reads do not',async t=>{
   const f=await fixture(t);f.writeFail(Error('lost'));await assert.rejects(f.remove(A));f.writeFail(null);
   f.data.set(A,[{dataset:'sample',versions:[{version:V,state:'UNKNOWN'}]}]);await assert.rejects(f.remove(B),blocked);assert.equal(f.journal().length,1);
@@ -106,6 +184,11 @@ test('a machine omitted from the current inventory is not a trusted absence',asy
   await datasetCatalogCall(f.service,actor,'datasets.catalog',{machine:B});
   assert.equal(f.journal().length,1);assert.equal(f.journal()[0].machine,retired);assert.equal(f.journal()[0].operation_id,null);
   assert(!f.calls.some(call=>call.machine===retired));
+});
+test('trusted absence releases known receipts even when that original status would be unavailable',async t=>{
+  const f=await fixture(t);await f.remove(A);f.data.set(A,[]);f.put(C);f.fail((_machine,operation)=>operation==='datasets.status');
+  await f.remove(B);assert(!f.journal().some(row=>row.machine===A));assert.equal(f.calls.filter(call=>call.operation==='datasets.status').length,0);
+  assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);
 });
 test('proven absence releases a null-ID record without trusting another unreadable receipt',async t=>{
   const f=await fixture(t);f.put(C);f.writeFail(Error('lost'));await assert.rejects(f.remove(A));f.writeFail(null);
@@ -123,6 +206,11 @@ test('original terminal receipt plus a new read is required to release a known e
     const query=f.calls.findIndex(call=>call.operation==='datasets.status');assert(f.calls.slice(query+1).some(call=>call.operation==='datasets.list'));
     assert(f.calls.filter(call=>call.operation==='datasets.status').every(call=>call.args.operationId===OP));
   }
+});
+test('the original async pin failure plus READY unlocks immediately without leaving a permanent pending refusal',async t=>{
+  const f=await fixture(t);await f.remove(A);f.status({operationId:OP,dataset:'sample',version:V,state:'FAILED',error:'persistent pins prevent unregister'});
+  await datasetCatalogCall(f.service,actor,'datasets.catalog',{machine:A});assert.equal(f.journal().length,0);
+  assert.equal((await f.remove(A)).state,'UNREGISTERING');assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);
 });
 test('FAILED without READY and missing or mismatched original receipt keep exclusion',async t=>{
   for(const mode of ['failed-incomplete','missing','mismatch']){
@@ -169,4 +257,20 @@ test('explicit admin catalog refresh reconciles only proven receipts or authorit
   assert.equal(catalog.datasets[0].versions[0].locations.find(location=>location.machine===A).removalPending,undefined);assert.equal(f.journal().length,0);
   f.writeFail(Error('receipt lost'));await assert.rejects(f.remove(A));f.writeFail(null);f.data.set(A,[]);
   await datasetCatalogCall(f.service,actor,'datasets.catalog',{machine:B});assert.equal(f.journal().length,0);assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);
+});
+test('catalog exposes timed-release eligibility only to admins for missing-ID records with saved identity',async t=>{
+  const f=await fixture(t);f.writeFail(Error('lost'));await assert.rejects(f.remove(A));f.writeFail(null);
+  let catalog=await datasetCatalogCall(f.service,actor,'datasets.catalog',{machine:A});
+  const local=value=>value.datasets[0].versions[0].locations.find(location=>location.machine===A);
+  assert.equal(local(catalog).removalPending,true);assert.equal(local(catalog).removalGraceEligible,true);
+  assert(!JSON.stringify(catalog).includes('operation_id'));assert(!JSON.stringify(catalog).includes('registration_identity'));
+  const admin=await f.service.login('admin','Last-Copy-Isolated-Password-2026!');
+  const member=(await f.service.invoke(admin.token,'users.create',{username:'member',password:'Last-Copy-Member-Password-2026!'})).result;
+  await f.service.invoke(admin.token,'policy.full',{userId:member.id,policyVersion:0});f.calls.length=0;
+  catalog=await datasetCatalogCall(f.service,{userId:member.id,role:'member'},'datasets.catalog',{machine:A});
+  assert.equal(local(catalog).removalPending,undefined);assert.equal(local(catalog).removalGraceEligible,undefined);
+  assert(f.calls.every(call=>call.operation==='datasets.list'&&call.args.hostAdmin===false));assert.equal(f.journal().length,1);
+  f.service.db.prepare('UPDATE dataset_removal_exclusions SET operation_id=?').run(OP);
+  catalog=await datasetCatalogCall(f.service,actor,'datasets.catalog',{machine:A});
+  assert.equal(local(catalog).removalPending,true);assert.equal(local(catalog).removalGraceEligible,undefined);
 });
