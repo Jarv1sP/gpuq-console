@@ -65,6 +65,15 @@ elif op=='fixture.independent':
             _origin='replica',_receipt=str(uuid.uuid4()))
     cache.materialize(actor,name,registered['version'],_source=approved)
     result=registered
+elif op=='fixture.ordinary-remove':
+    # Actual old ordinary-removal layout: the immutable registration and
+    # REMOVAL audit are retained, recovery still names its fixed grant, and
+    # there is no live provenance. Only this isolated fixture models the
+    # already-completed legacy cleanup; no product proof is fabricated.
+    result=cache.unregister(actor,args['dataset'],args['version'])
+    assert result['unregistered'] is True
+    provenance=cache.root/'.provenance'/args['dataset']/(args['version']+'.json')
+    if provenance.exists():provenance.unlink()
 elif op=='fixture.old-grant-denied':
     grant=args['grant']
     try:
