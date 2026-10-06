@@ -86,13 +86,15 @@ class ProjectOperations:
         except FileNotFoundError:return not path.exists()
         return events.get('populated')=='0'
 
-    def writable(self, args, *, lifecycle=True, publication_lock=True):
+    def writable(self, args, *, lifecycle=True, publication_lock=True, synchronization=True):
         if lifecycle: self.store.admit(*self.identity(args))
         if (self.folder/(self.key(args)+'.local-import.json')).exists():
             self.local_imports().project_writable(args)
         sync=self.folder/(self.key(args)+'.sync.json')
-        if sync.exists() and json.loads(sync.read_text()).get('state')!='CODE_READY':
-            raise ValueError('Code synchronization is incomplete; repeat the original sync before editing, opening a terminal or publishing')
+        if synchronization and (sync.exists() or sync.is_symlink()):
+            session,canceled=self.synchronization(args)
+            if session.get('state')!='CODE_READY' and canceled is None:
+                raise ValueError('Code synchronization is incomplete; repeat the original sync or cancel its exact UUID before editing, opening a terminal or publishing')
         pending = self.pending(args)
         if pending.get('state') == 'PUBLISHING' and self.active(args):
             raise ValueError('Project publication is running; wait before editing or uploading')
@@ -102,6 +104,11 @@ class ProjectOperations:
         spec=importlib.util.spec_from_file_location('gpuq_project_local_import',self.n.HERE/'project-local-import.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         return module.LocalImports(self)
+
+    def synchronization(self,args):
+        spec=importlib.util.spec_from_file_location('gpuq_snapshot_observation',self.n.HERE/'snapshot-sync.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.observation(self,args)
 
     def status(self, args):
         result = self.store.status(*self.identity(args))
@@ -113,10 +120,11 @@ class ProjectOperations:
             helper=self.local_imports()
             local=helper.status(helper.s.read_json(pointer));result['localImport']=local
         sync=self.folder/(self.key(args)+'.sync.json')
-        if sync.exists():
-            session=json.loads(sync.read_text())
+        if sync.exists() or sync.is_symlink():
+            session,canceled=self.synchronization(args)
             result['codeSync']={k:session[k] for k in ('state','source','manifestSha256')}
-            if session['state']!='CODE_READY':result.update(state='SYNCING',error='Code sync incomplete; repeat the same sync command')
+            if canceled is not None:result['codeSync'].update(state='CANCELED',key=session['key'],snapshotId=session['session'],preservesBytes=True)
+            elif session['state']!='CODE_READY':result.update(state='SYNCING',error='Code sync incomplete; resume or cancel its original UUID')
         pending = self.pending(args)
         observed = pending
         if pending.get('state') == 'PUBLISHING':
