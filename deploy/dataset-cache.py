@@ -564,9 +564,89 @@ class DatasetCache:
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         return module
 
-    def _reopen_path(self,dataset,version):
+    def _reopen_path(self,dataset,version,operation_id=None):
         self._paths(dataset,version)
-        return self.root/'.reopens'/dataset/(version+'.json')
+        R=self._retirement_module()
+        if operation_id is None:
+            fence=self._retirement_fence(dataset,version)
+            if fence is None:raise FileNotFoundError('No explicit deleted generation')
+            operation_id=fence['operationId']
+        _identifier(operation_id,R.GRANT_UUID)
+        path=self.root/'.reopens'/dataset/version/(operation_id+'.json')
+        # Existing draft-format records stay immutable. Only the current
+        # operation can resume one; an older operation is superseded.
+        legacy=self.root/'.reopens'/dataset/(version+'.json')
+        if not os.path.lexists(path) and os.path.lexists(legacy):
+            old=R.private_read(legacy)
+            if old.get('operationId')==operation_id:return legacy
+        return path
+
+    def discard_new_registration(self,actor,dataset,version,operation_id,request_key=None):
+        """Audited admin withdrawal of a prepared inode that was never installed.
+
+        A fixed request key resumes only its own metadata moves. No dataset
+        payload, deletion journal, grant or generation fence is changed.
+        """
+        self._actor(actor,admin=True);self._paths(dataset,version)
+        R=self._retirement_module();_identifier(operation_id,R.GRANT_UUID)
+        request_key=str(uuid.uuid4()) if request_key is None else request_key;R.operation(request_key)
+        binding=dict(schema=1,protocol='dataset-registration-discard-v1',rootIdentity=list(self._root_identity),
+            dataset=dataset,version=version,operationId=operation_id,requestKey=request_key,requestedBy=actor.user_id)
+        folder=self.root/'.reopens'/'.discarded'/request_key;receipt=folder/'DISCARD.json'
+        with self._lock_file('.locks/'+dataset+'.'+version+'.lock'),self._locked():
+            try:audit=R.private_read(receipt)
+            except FileNotFoundError:audit=None
+            if audit is not None:
+                if (set(audit)!=set(binding)|{'state','generation','intentSha256','registrationIdentity'}
+                        or any(audit[k]!=v for k,v in binding.items())
+                        or audit['state'] not in {'PREPARED','DISCARDED'}):
+                    raise CacheError('Discard request differs from its durable operation identity')
+                _identifier(audit['generation'],HASH_RE);_identifier(audit['intentSha256'],HASH_RE)
+                if (not isinstance(audit['registrationIdentity'],list) or len(audit['registrationIdentity'])!=5
+                        or any(type(v) is not int or v<0 for v in audit['registrationIdentity'])):
+                    raise CacheError('Discard registration identity is corrupt')
+                if audit['state']=='DISCARDED':return {k:audit[k] for k in ('protocol','operationId','requestKey','dataset','version','generation','state')}
+            fence=self._retirement_fence(dataset,version)
+            if fence is None or fence['operationId']!=operation_id:
+                raise CacheError('Discard operation does not match the current deletion generation')
+            paths=self._paths(dataset,version);registered=self._paths(dataset)['.registry']/(version+'.json')
+            if (fence['state']!='PURGED' or any(R.exists(p) for p in (registered,paths['ready'],paths['.staging'],self.root/'.provenance'/dataset/(version+'.json')))
+                    or self._leases(dataset,version)):
+                raise CacheError('Discard refuses an installed or live registration')
+            path=self._reopen_path(dataset,version,operation_id);prepared=path.with_suffix('.registration.json')
+            intent_locations=[p for p in (path,folder/'INTENT.json') if R.exists(p)]
+            prepared_locations=[p for p in (prepared,folder/'registration.json') if R.exists(p)]
+            if len(intent_locations)!=1 or len(prepared_locations)!=1:
+                raise CacheError('Discard refuses missing or ambiguous uninstalled intent')
+            intent=R.private_read(intent_locations[0]);record=R.private_read(prepared_locations[0])
+            fields={'schema','protocol','rootIdentity','dataset','version','operationId','generation','snapshotSha256',
+                    'actor','owners','origin','receipt','sourceId','registrationIdentity'}
+            if (set(intent)!=fields or intent['schema']!=1 or intent['protocol']!='dataset-new-registration-v1'
+                    or intent['rootIdentity']!=list(self._root_identity)
+                    or any(intent[k]!=fence[k] for k in ('dataset','version','operationId','generation','snapshotSha256'))
+                    or intent['owners']!=self._dataset(actor,dataset)['owners']
+                    or not isinstance(intent['registrationIdentity'],list) or len(intent['registrationIdentity'])!=5
+                    or any(type(v) is not int or v<0 for v in intent['registrationIdentity'])
+                    or set(record)!={'schema','manifest','sourceId'} or record['schema']!=SCHEMA
+                    or _version(_manifest(record['manifest']))!=version or record['sourceId']!=intent['sourceId']
+                    or R.identity(prepared_locations[0])[:4]!=intent['registrationIdentity'][:4]):
+                raise CacheError('Discard uninstalled inode or fixed generation is unconfirmed')
+            if self._tier(dataset,version)!=self._default_tier():
+                raise CacheError('Discard refuses live or unconfirmed tier protection')
+            if audit is None:
+                R.private_directory(folder.parent);R.private_directory(folder)
+                audit={**binding,'state':'PREPARED','generation':fence['generation'],
+                    'intentSha256':R.sha(intent),'registrationIdentity':intent['registrationIdentity']}
+                _write_json(receipt,audit)  # audit before the first metadata move
+            elif (audit['generation']!=fence['generation'] or audit['intentSha256']!=R.sha(intent)
+                    or audit['registrationIdentity']!=intent['registrationIdentity']):
+                raise CacheError('Discard attempt cannot adopt a different prepared inode')
+            for source,target in ((prepared,folder/'registration.json'),(path,folder/'INTENT.json')):
+                if R.exists(source):self._unregister_move_record(source,target)
+            tier=self.root/'.tiers'/dataset/(version+'.json')
+            if R.exists(tier):self._unregister_move_record(tier,folder/'tier.json')
+            audit['state']='DISCARDED';_write_json(receipt,audit)
+            return {k:audit[k] for k in ('protocol','operationId','requestKey','dataset','version','generation','state')}
 
     @contextlib.contextmanager
     def _new_registration(self,actor,dataset,manifest,owners,source_id,*,origin='admin',receipt=None,explicit=False):
@@ -615,15 +695,16 @@ class DatasetCache:
                         raise PermissionError('Explicit registration must preserve authenticated dataset owners')
                     if origin!='admin' and owners!=[actor.user_id]:
                         raise PermissionError('Explicit personal registration belongs to another owner')
-                    folder=self.root/'.reopens'/dataset;_mkdir(folder)
                     path=self._reopen_path(dataset,version)
+                    _mkdir(self.root/'.reopens'/dataset)
+                    folder=path.parent;_mkdir(folder)
                     binding=dict(schema=1,protocol='dataset-new-registration-v1',rootIdentity=list(self._root_identity),
                         dataset=dataset,version=version,operationId=fence['operationId'],generation=fence['generation'],
                         snapshotSha256=fence['snapshotSha256'],actor=actor.user_id,owners=owners,
                         origin=origin,receipt=receipt,sourceId=source_id)
                     try:reopening=R.private_read(path)
                     except FileNotFoundError:reopening=None
-                    prepared=folder/(version+'.registration.json')
+                    prepared=path.with_suffix('.registration.json')
                     record=dict(schema=SCHEMA,manifest=_manifest(manifest),sourceId=source_id)
                     if reopening is None:
                         paths=self._paths(dataset,version)
@@ -1092,7 +1173,7 @@ class DatasetCache:
             self._write_tier(dataset, version, self._default_tier())
             if admission is None:_write_json(filename, record)
             else:
-                self._unregister_move_record(self.root/'.reopens'/dataset/(version+'.registration.json'),filename)
+                self._unregister_move_record(self._reopen_path(dataset,version,admission['operationId']).with_suffix('.registration.json'),filename)
                 admission['registrationIdentity']=list(self._record_identity(dataset,version))
                 _write_json(self._reopen_path(dataset,version),admission)
             self._write_provenance(actor, dataset, version, owners, _origin, _receipt)

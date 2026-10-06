@@ -287,7 +287,10 @@ class DatasetRetirement:
             raise D.CacheError('persistent deletion generation changed; no mutation permitted')
         allowed = {'FENCED':{'ISOLATED'}, 'ISOLATED':{'RESTORING','PURGED'},
                    'RESTORING':{'RESTORED'}, 'RESTORED':set(), 'PURGED':set()}
-        if row['state']=='ROLLING_BACK':allowed['FENCED'].add('RESTORING')
+        # A completed isolation journal may precede its fence write. Restore
+        # has already verified that journal and its retained bytes under the
+        # version lock; repair the lagging fence without replaying isolate.
+        if row['state'] in {'ROLLING_BACK','RESTORING'}:allowed['FENCED'].add('RESTORING')
         if state != previous['state'] and state not in allowed[previous['state']]:
             raise D.CacheError('invalid persistent deletion fence transition')
         current = dict(previous, state=state, restoredRegistration=restored)
@@ -679,7 +682,7 @@ class DatasetRetirement:
                 if ready is not None and (not self.cache._ready({'ready':ready},record['manifest'],version)
                         or D._scan(ready/'data')!=record['manifest']):
                     raise D.CacheError('rollback full payload verification failed')
-                originals={}
+                originals={};original_values={}
                 for name,subdir in (('tier','.tiers'),('provenance','.provenance')):
                     live=self.cache.root/subdir/dataset/(version+'.json')
                     retained=folder/'metadata'/(name+'.json')
@@ -690,6 +693,7 @@ class DatasetRetirement:
                     else:
                         originals[name]=located(live,retained,snapshot[name+'Identity'])
                     value=private_read(originals[name]) if originals[name] is not None else self.cache._default_tier() if name=='tier' else None
+                    original_values[name]=value
                     if not new_live and sha(value)!=snapshot[name+'Sha256']:
                         raise D.CacheError('rollback fixed permission metadata changed')
                 row['state']='ROLLING_BACK';self._save(row)
@@ -718,7 +722,7 @@ class DatasetRetirement:
                     self.cache._write_tier(dataset,version,tier)
                     if snapshot['memberAllowed']:
                         owner=type(actor)(metadata['owners'][0],True)
-                        proof=private_read(originals['provenance']) if originals['provenance'] is not None and exists(originals['provenance']) else None
+                        proof=original_values['provenance']
                         if proof is None or proof['origin'] not in {'upload','workspace','replica'}:
                             raise D.CacheError('rollback personal provenance is unconfirmed')
                         self.cache._write_provenance(owner,dataset,version,metadata['owners'],proof['origin'],key)

@@ -229,7 +229,18 @@ class RetirementNode:
         # Cancellation only rolls back. It never hashes a remote recovery
         # reference, runs isolate, revokes another grant or advances deletion.
         if row['state']=='ISOLATING':
-            if self._can_cancel_before_moves(row):
+            try:journal=self.retirement._journal(key) if row['snapshot']['protocol']==R.PROTOCOL else None
+            except FileNotFoundError:journal=None
+            if journal is not None and journal['state'] in {'ISOLATED','RESTORING','RESTORED'}:
+                if (journal['dataset']!=row['dataset'] or journal['version']!=row['version']
+                        or journal['actor']!=row['actor'] or journal['admin']!=row['admin']
+                        or R.sha(journal['snapshot'])!=row['snapshotSha256']):
+                    raise ValueError('Cancellation journal differs from its fixed node binding')
+                with self._lock(key):
+                    row=self._load(key);row['state']=journal['state'];row['result']=self.retirement._receipt(journal);self._write(row)
+                self.restore(actor,key,_cancel_uncommitted=True)
+                row=self._load(key)
+            elif self._can_cancel_before_moves(row):
                 with self._lock(key):
                     row=self._load(key);row['state']='FENCED';self._write(row)
             else:
@@ -548,7 +559,29 @@ class RetirementNode:
             snapshot=row['snapshot']
             if snapshot['protocol']==R.PROTOCOL:
                 if self.retirement._journal(key)['state'] in {'ISOLATED','RESTORING','RESTORED'}:
-                    digest=self._source_restore_proof(row,source_result)
+                    try:digest=self._source_restore_proof(row,source_result)
+                    except FileNotFoundError:
+                        # A never-committed complete peer cannot have expired
+                        # away. Recover its own verified retained bytes with
+                        # the same private uncommitted-cancel authorization;
+                        # missing/corrupt proof never permits payload disposal.
+                        if self.retirement.collection_allowed(key) is not False:
+                            raise ValueError('Uncommitted source recovery is unconfirmed')
+                        fields={'protocol','operationId','machine','dataset','version','state','isolated','complete',
+                            'snapshotSha256','generation','fenceState','retainUntil','proofSha256','authorityReferences','authorityAliases'}
+                        if (not isinstance(source_result,dict) or set(source_result)!=fields
+                                or source_result['protocol']!=R.PROTOCOL or source_result['version']!=row['version']
+                                or source_result['state']!='RESTORED' or source_result['fenceState']!='RESTORED'
+                                or source_result['complete'] is not True or source_result['isolated'] is not False):
+                            raise ValueError('Complete source restore is unconfirmed')
+                        for field in ('snapshotSha256','generation','proofSha256'):D._identifier(source_result[field],D.HASH_RE)
+                        digest=R.sha(source_result)
+                        if row['restoreSourceSha256'] is not None and row['restoreSourceSha256']!=digest:
+                            raise ValueError('Restored source receipt cannot change')
+                        row['restoreSourceSha256']=digest;row['state']='RESTORING';self._write(row)
+                        result=self.retirement.restore(actor,key,_cancel_uncommitted=True)
+                        row['state'],row['result']='RESTORED',result;self._write(row)
+                        return result
                     if row['restoreSourceSha256'] is not None and row['restoreSourceSha256']!=digest:
                         raise ValueError('Restored source receipt cannot change')
                     row['restoreSourceSha256']=digest;row['state']='RESTORING';self._write(row)
