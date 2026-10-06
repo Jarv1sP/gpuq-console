@@ -491,7 +491,7 @@ class DatasetRetirement:
                     raise D.CacheError('isolated immutable manifest changed')
                 if snapshot['complete']:
                     ready = folder/'payload'/'ready'
-                    if D._read_json(ready/'READY.json') != {'schema':1, 'version':version} or D._scan(ready/'data') != record['manifest']:
+                    if D._read_json(ready/'READY.json') != {'schema':1, 'version':version}:
                         raise D.CacheError('isolated full data is not confirmed')
                     row['dataIdentity'] = identity(ready, True)
                 self._verify_payload(row)

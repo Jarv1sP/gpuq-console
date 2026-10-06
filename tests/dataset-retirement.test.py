@@ -59,6 +59,98 @@ class RetirementTests(unittest.TestCase):
     def retained(self):
         return self.retirement._folder(self.key)/'payload'/'ready'/'data'/'train.txt'
 
+    def test_one_complete_scan_per_fresh_isolation_preserves_readonly_and_retention(self):
+        with patch.object(R.D, '_scan', wraps=R.D._scan) as scan:
+            result = self.isolate()
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(scan.call_args.args, (self.retained().parent,))
+        self.assertTrue(result['isolated'])
+        self.assertEqual(result['fenceState'], 'ISOLATED')
+        self.assertEqual(result['retainUntil'], self.now + 7*86400)
+        for path in (self.retained(), self.retained().parent, self.retained().parent.parent):
+            self.assertEqual(path.stat().st_mode & 0o222, 0)
+        self.assertEqual(self.retirement._journal(self.key)['dataIdentity'][:4], self.snapshot['readyIdentity'][:4])
+
+    def test_explicit_isolated_retry_scans_again_and_never_trusts_previous_success(self):
+        result = self.isolate()
+        with patch.object(R.D, '_scan', wraps=R.D._scan) as scan:
+            self.assertEqual(self.isolate(), result)
+            self.assertEqual(scan.call_count, 1)
+        self.retained().chmod(0o600)
+        self.retained().write_bytes(b'changed after confirmed isolation')
+        with patch.object(R.D, '_scan', wraps=R.D._scan) as scan, self.assertRaisesRegex(ValueError, 'verification'):
+            self.isolate()
+        self.assertEqual(scan.call_count, 1)
+        self.assertTrue(self.retained().exists())
+
+    def _reject_change_before_final_verification(self, change, message):
+        verify = self.retirement._verify_payload
+        def changed(row, **kwargs):
+            change(self.retirement._folder(self.key))
+            return verify(row, **kwargs)
+        with patch.object(self.retirement, '_verify_payload', side_effect=changed), self.assertRaisesRegex(ValueError, message):
+            self.isolate()
+        self.assertEqual(self.retirement._journal(self.key)['state'], 'ISOLATING')
+        self.assertIsNone(self.retirement._journal(self.key)['retainUntil'])
+        self.assertEqual(self.cache._retirement_fence('sample', self.version)['state'], 'FENCED')
+        self.assertTrue(self.retained().exists())
+
+    def test_only_scan_still_rejects_payload_corruption_before_confirmation(self):
+        def change(folder):
+            self.retained().chmod(0o600)
+            self.retained().write_bytes(b'wrong full payload')
+        self._reject_change_before_final_verification(change, 'verification')
+
+    @staticmethod
+    def _change_retained_json(path, value):
+        # Deliberately corrupt only this fixture's immutable file. Keep the
+        # read-only parent and fixed directory inode intact for the final check.
+        path.chmod(0o600)
+        path.write_bytes(D._json_bytes(value))
+
+    def test_final_verification_still_rejects_changed_ready_receipt(self):
+        self._reject_change_before_final_verification(
+            lambda folder: self._change_retained_json(folder/'payload/ready/READY.json', {'schema':1, 'version':'0'*64}),
+            'READY receipt')
+
+    def test_final_verification_still_rejects_changed_full_manifest(self):
+        self._reject_change_before_final_verification(
+            lambda folder: self._change_retained_json(folder/'payload/ready/manifest.json', {'schema':1, 'directories':[], 'files':[]}),
+            'full manifest')
+
+    def test_final_verification_still_rejects_changed_retained_tier(self):
+        self._reject_change_before_final_verification(
+            lambda folder: D._write_json(folder/'metadata/tier.json', {'changed':'permissions'}),
+            'permission or recovery')
+
+    def test_final_verification_still_rejects_changed_retained_provenance(self):
+        self._reject_change_before_final_verification(
+            lambda folder: D._write_json(folder/'metadata/provenance.json', {'changed':'owner'}),
+            'permission or recovery')
+
+    def test_final_verification_failure_can_resume_only_after_another_complete_scan(self):
+        with patch.object(self.retirement, '_verify_payload', side_effect=OSError('interrupted before final scan')), self.assertRaises(OSError):
+            self.isolate()
+        self.assertEqual(self.retirement.status(OWNER, self.key)['state'], 'ISOLATING')
+        self.assertEqual(self.cache._retirement_fence('sample', self.version)['state'], 'FENCED')
+        with patch.object(R.D, '_scan', wraps=R.D._scan) as scan:
+            self.assertEqual(self.isolate()['state'], 'ISOLATED')
+        self.assertEqual(scan.call_count, 1)
+
+    def test_node_status_and_commit_do_not_rehash_confirmed_payload(self):
+        from types import SimpleNamespace
+        N = module('single_scan_node_test', 'dataset-retirement-node.py')
+        node = N.RetirementNode(self.retirement, self.root/'node-plans',
+                                tier=SimpleNamespace(cache=self.cache), principal=ADMIN)
+        node.plan(OWNER, 'sample', self.version, self.key)
+        result = node.isolate(OWNER, self.key, [])
+        journal = (self.retirement._folder(self.key)/'RETIREMENT.json').read_bytes()
+        with patch.object(R.D, '_scan', side_effect=AssertionError('status/commit must not scan')):
+            self.assertEqual(node.status(OWNER, self.key)['result'], result)
+            self.assertEqual(node.commit(OWNER, self.key, result), result)
+            self.assertEqual(node.status(OWNER, self.key)['result'], result)
+        self.assertEqual((self.retirement._folder(self.key)/'RETIREMENT.json').read_bytes(), journal)
+
     def test_last_complete_data_is_retained_for_seven_days_and_query_is_pure(self):
         result = self.isolate()
         self.assertEqual(result['state'], 'ISOLATED')
