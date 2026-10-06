@@ -293,3 +293,5 @@ try{
 await terminalContractSmoke();
 // Keep the new receipt contract in the existing CI browser entry point.
 await import('./personal-project-ui-smoke.mjs');
+// Exercise the independent personal-project entry in this existing CI job.
+await import('./project-directory-ui-smoke.mjs');

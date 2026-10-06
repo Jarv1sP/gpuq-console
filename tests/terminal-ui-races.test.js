@@ -42,7 +42,10 @@ function fixture(){
     if(operation==='terminal.close'&&store.failClose)throw Error('fixture close unavailable');
     if(operation==='terminal.close')return store.closeReceipt||{closed:true};
     if(operation==='terminal.detach')return {detached:true};
-    if(operation==='projects.list')return {projects:[{project:elements.get('[name=workspace-project]').value,environmentMode:store.environmentMode||'shared'}]};
+    if(operation==='projects.list'){
+      const control=elements.get('[name=workspace-project]');
+      return {projects:[{project:control.selectedOptions?.[0]?.dataset?.project||control.value,environmentMode:store.environmentMode||'shared'}]};
+    }
     if(operation==='terminal.exchange'&&store.exchange)return store.exchange(args);
     return {offset:0,data:'',exited:false};
   }};
@@ -446,5 +449,16 @@ test('maintenance ROOT launch keeps the explicit host entry even when only a mac
     document.dispatchEvent(new CustomEvent('gpuq-maintenance-root',{detail:{machine:'node-a',userId:'admin'}}));await f.settle();
     assert.equal(f.opens.length,1);assert.equal(f.opens[0].args.hostAdmin,true);assert.ok(!('project'in f.opens[0].args));assert.match(f.confirmations[0],/宿主机 ROOT/);
     f.resolve(0,'maintenance-root');await f.settle();assert.match(f.title(),/ROOT 运维/);
+  }finally{f.restore();}
+});
+
+test('directory option identity keeps development source separate from the ROOT focus',async()=>{
+  const f=fixture();try{
+    Object.assign(f.elements.get('[name=workspace-project]'),{value:'["node-a","experiment"]',selectedOptions:[{dataset:{project:'experiment',machine:'node-a'}}]});
+    f.elements.get('[name=workspace-machine]').value='node-b';
+    await attach(f,'development-source');
+    assert.equal(f.opens[0].args.machine,'node-a');assert.equal(f.opens[0].args.project,'experiment');assert.ok(!('hostAdmin'in f.opens[0].args));
+    await attach(f,'host-focus','terminal-root-open');
+    assert.equal(f.opens[1].args.machine,'node-b');assert.equal(f.opens[1].args.hostAdmin,true);assert.ok(!('project'in f.opens[1].args));
   }finally{f.restore();}
 });

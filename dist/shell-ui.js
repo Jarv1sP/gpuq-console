@@ -17,7 +17,7 @@ export function shellUI(store,{navigate,getPage,toast}){
     for(const [original,target] of [[machine,q('#context-machine')],[project,q('#context-project')]]){if(!original)continue;if(target.innerHTML!==original.innerHTML)target.innerHTML=original.innerHTML;target.value=original.value;target.disabled=original.disabled;target.title=original.selectedOptions[0]?.textContent||original.value;}
     serverSelectLabel(q('#context-machine'));
     q('#context-note').textContent=project?.value?'项目':'个人工作区';
-    if(active==='work'&&store.principal){q('#page-title').textContent=project?.value||'个人工作区';q('#page-description').textContent=machine?.value?machine.value+' · '+(project?.value?'项目':'个人工作区'):'选择获授权服务器，开始一次训练。';}
+    if(active==='work'&&store.principal){const choice=project?.selectedOptions[0],source=choice?.dataset.machine||machine?.value;q('#page-title').textContent=choice?.dataset.project||'个人工作区';q('#page-description').textContent=source?source+' · '+(project?.value?'项目':'个人工作区'):'选择我的项目，或新建个人容器。';}
   }
   for(const [proxy,name] of [['#context-machine','workspace-machine'],['#context-project','workspace-project']])q(proxy).addEventListener('change',event=>{const original=q(`[name=${name}]`);if(original){original.value=event.target.value;original.dispatchEvent(new Event('change',{bubbles:true}));}});
   document.addEventListener('gpuq-workspace-context',event=>{if(event.detail.userId!==store.principal?.userId)return;queueMicrotask(syncContext);});
