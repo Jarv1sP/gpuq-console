@@ -1,6 +1,19 @@
 // Candidates originate only in authenticated node configuration. This module
 // never accepts a user URL, changes an OS route, or issues an upload ticket.
 const protocol='dataset-upload-v1',hex=/^[a-f0-9]{64}$/,id=/^[a-z][a-z0-9-]{0,31}$/;
+// Only these bounded classifications may cross the probe/error boundary. Never
+// echo native socket details, response bodies, endpoints or observed identities.
+const probeFailures=Object.freeze({
+  CONNECTION_REFUSED:'connection refused',DNS_FAILED:'DNS lookup failed',NETWORK_UNREACHABLE:'network unreachable',
+  CONNECTION_FAILED:'connection failed',TIMEOUT:'timed out',TLS_FAILED:'TLS connection failed',CERTIFICATE_MISMATCH:'certificate pin mismatch',
+  HTTP_REJECTED:'HTTP probe rejected',INVALID_RESPONSE:'invalid probe response',RESPONSE_TOO_LARGE:'probe response too large',
+  PROTOCOL_MISMATCH:'protocol mismatch',LISTENER_NOT_READY:'listener not ready',NODE_MISMATCH:'node identity mismatch',
+  REVISION_MISMATCH:'configuration revision mismatch',PROBE_FAILED:'probe failed'
+});
+export function uploadProbeFailureCode(error){
+  const code=error?.uploadProbeCode;
+  return typeof code==='string'&&Object.hasOwn(probeFailures,code)?code:'PROBE_FAILED';
+}
 const fail=()=>{throw Error('Approved upload routes are invalid or unavailable; no VPS fallback was attempted');};
 export function validateUploadRoutes(value,machine){
   if(!value||value.available!==true||value.protocol!==protocol||value.machine!==machine||
@@ -18,17 +31,24 @@ export function validateUploadRoutes(value,machine){
   return routes;
 }
 export async function selectUploadRoute(value,machine,probe,{signal}={}){
-  const routes=validateUploadRoutes(value,machine);
+  const routes=validateUploadRoutes(value,machine),routeFailures=[];
   for(const route of routes){
     if(signal?.aborted)throw signal.reason||Error('Upload canceled');
     try{
       const observed=await probe(route);
       if(observed?.protocol===protocol&&observed.listenerReady===true&&observed.machine===machine&&observed.revision===route.revision)
         return route;
-    }catch{ /* Anonymous bounded probe only; no writes are retried here. */ }
+      const code=observed?.protocol!==protocol?'PROTOCOL_MISMATCH':observed.listenerReady!==true?'LISTENER_NOT_READY':
+        observed.machine!==machine?'NODE_MISMATCH':'REVISION_MISMATCH';
+      routeFailures.push({routeId:route.id,code});
+    }catch(error){
+      // Anonymous bounded probe only; no writes are retried here.
+      routeFailures.push({routeId:route.id,code:uploadProbeFailureCode(error)});
+    }
   }
   if(signal?.aborted)throw signal.reason||Error('Upload canceled');
-  throw Error('No approved upload endpoint passed the node/revision probe; no ticket issued and no VPS fallback was attempted');
+  const summary=routeFailures.map(({routeId,code})=>`${routeId}: ${probeFailures[code]}`).join('; ');
+  throw Object.assign(Error(`No approved upload endpoint passed the node/revision probe; no ticket issued and no VPS fallback was attempted (${summary})`),{routeFailures});
 }
 export function assertUploadRouteGrant(grant,route){
   if(route&&(['endpoint','machine','revision','certificateSha256','kind'].some(key=>grant[key]!==route[key])||grant.routeId!==route.id))

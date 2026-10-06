@@ -55,7 +55,8 @@ test('administrators have full platform access; promotion and demotion invalidat
   const service=await DemoService.create();const owner=await service.login(DEMO_ADMIN.username,DEMO_ADMIN.password);
   assert.equal(owner.state.users[0].role,'admin');assert.equal(owner.state.users[0].total,30);
   const full=await service.invoke(owner.token,'request',{machine:'gpu-4',cards:8,userId:'builtin-admin'});assert.equal(full.result.cards,8);
-  await assert.rejects(service.invoke(owner.token,'request',{machine:'gpu-4',cards:1,userId:'builtin-admin'}),/上限/);
+  await assert.rejects(service.invoke(owner.token,'request',{machine:'gpu-4',cards:1,userId:'builtin-admin'}),/模拟资源暂时不足；真实接入后交由 GPUQ 排队/);
+  await assert.rejects(service.invoke(owner.token,'request',{machine:'gpu-4',cards:9,userId:'builtin-admin'}),/超出单机容量/);
   await assert.rejects(service.invoke(owner.token,'users.enabled',{userId:'builtin-admin',enabled:false}),/不能暂停/);
   await assert.rejects(service.invoke(owner.token,'users.role',{userId:'builtin-admin',role:'member'}),/不能降级/);
   const member=await service.login('chen-research',DEMO_MEMBER_PASSWORD);

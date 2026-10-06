@@ -1,11 +1,22 @@
 import {Agent,request as httpsRequest} from 'node:https';
 import {connect as tlsConnect} from 'node:tls';
 import {createHash,timingSafeEqual} from 'node:crypto';
-import {assertUploadRouteGrant} from './dist/upload-routes.js';
+import {assertUploadRouteGrant,uploadProbeFailureCode} from './dist/upload-routes.js';
 
 export const RELAY_LIMIT_BYTES=256*1024*1024;
 const PROTOCOL='dataset-upload-v1',CHUNK=1024*1024,MAX_FILE_CHUNK=16*1024*1024,RESPONSE_LIMIT=2*1024*1024;
 const denied=message=>{throw Error(message);};
+const probeError=(message,uploadProbeCode)=>Object.assign(Error(message),{uploadProbeCode});
+const connectionCode=error=>{
+  switch(error?.code){
+    case 'ECONNREFUSED':return 'CONNECTION_REFUSED';
+    case 'ENOTFOUND':case 'EAI_AGAIN':return 'DNS_FAILED';
+    case 'ENETUNREACH':case 'EHOSTUNREACH':return 'NETWORK_UNREACHABLE';
+    case 'ETIMEDOUT':return 'TIMEOUT';
+    case 'ECONNRESET':case 'EPIPE':return 'CONNECTION_FAILED';
+    default:return 'TLS_FAILED';
+  }
+};
 
 export function validateDirectGrant(value,now=Date.now()/1000){
   if(!value||value.available!==true||value.protocol!==PROTOCOL)denied('Direct upload is not available');
@@ -27,19 +38,19 @@ export function pinnedUploadAgent(certificateSha256,{connect=tlsConnect,timeoutM
   agent.createConnection=(options,callback)=>{
     let socket,finished=false;
     const finish=(error)=>{if(finished)return;finished=true;clearTimeout(timer);if(error){socket?.destroy();callback(error);}else callback(null,socket);};
-    const timer=setTimeout(()=>finish(Error('Direct upload TLS connection timed out')),timeoutMs);timer.unref?.();
+    const timer=setTimeout(()=>finish(probeError('Direct upload TLS connection timed out','TIMEOUT')),timeoutMs);timer.unref?.();
     try{
       socket=connect({...options,rejectUnauthorized:false,minVersion:'TLSv1.2',ALPNProtocols:['http/1.1']});
-      socket.once('error',()=>finish(Error('Direct upload TLS connection failed')));
+      socket.once('error',error=>finish(probeError('Direct upload TLS connection failed',connectionCode(error))));
       socket.once('secureConnect',()=>{
         try{
           const raw=socket.getPeerCertificate(true)?.raw;
           if(!raw||!timingSafeEqual(createHash('sha256').update(raw).digest(),Buffer.from(certificateSha256,'hex')))
-            return finish(Error('Direct upload certificate does not match the authorized node'));
+            return finish(probeError('Direct upload certificate does not match the authorized node','CERTIFICATE_MISMATCH'));
           finish();
-        }catch{finish(Error('Direct upload certificate validation failed'));}
+        }catch{finish(probeError('Direct upload certificate validation failed','TLS_FAILED'));}
       });
-    }catch{finish(Error('Direct upload TLS connection failed'));}
+    }catch(error){finish(probeError('Direct upload TLS connection failed',connectionCode(error)));}
     // Deliberately do not return the unverified socket to Agent.
     return undefined;
   };
@@ -85,14 +96,16 @@ export async function probeDirectUploadRoute(route,{request=httpsRequest,timeout
     try{
       req=request(new URL('/capabilities',route.endpoint),{agent,method:'GET',headers:{Accept:'application/json'}},res=>{
         let size=0;const parts=[];
-        res.on('data',part=>{size+=part.length;if(size>4096){res.destroy();finish(Error('Upload probe exceeds response limit'));}else parts.push(part);});
-        res.on('aborted',()=>finish(Error('Upload probe interrupted')));res.on('error',()=>finish(Error('Upload probe failed')));
-        res.on('end',()=>{if(res.statusCode!==200||!/^application\/json(?:;|$)/i.test(res.headers['content-type']||''))return finish(Error('Upload probe rejected'));
-          try{finish(null,JSON.parse(Buffer.concat(parts)));}catch{finish(Error('Invalid upload probe'));}});
+        res.on('data',part=>{size+=part.length;if(size>4096){finish(probeError('Upload probe exceeds response limit','RESPONSE_TOO_LARGE'));res.destroy();}else parts.push(part);});
+        res.on('aborted',()=>finish(probeError('Upload probe interrupted','CONNECTION_FAILED')));res.on('error',()=>finish(probeError('Upload probe failed','CONNECTION_FAILED')));
+        res.on('end',()=>{
+          if(res.statusCode!==200)return finish(probeError('Upload probe rejected','HTTP_REJECTED'));
+          if(!/^application\/json(?:;|$)/i.test(res.headers['content-type']||''))return finish(probeError('Upload probe rejected','INVALID_RESPONSE'));
+          try{finish(null,JSON.parse(Buffer.concat(parts)));}catch{finish(probeError('Invalid upload probe','INVALID_RESPONSE'));}});
       });
-      req.on('error',()=>finish(Error('Upload probe connection failed')));
-      timer=setTimeout(()=>finish(Error('Upload probe timed out')),timeoutMs);timer.unref?.();req.end();
-    }catch{finish(Error('Upload probe could not start'));}
+      req.on('error',error=>finish(probeError('Upload probe connection failed',uploadProbeFailureCode(error))));
+      timer=setTimeout(()=>finish(probeError('Upload probe timed out','TIMEOUT')),timeoutMs);timer.unref?.();req.end();
+    }catch{finish(probeError('Upload probe could not start','PROBE_FAILED'));}
   });}finally{agent.destroy();}
 }
 

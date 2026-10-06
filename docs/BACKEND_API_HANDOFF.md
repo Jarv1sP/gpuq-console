@@ -57,6 +57,10 @@
 
 后端只读筛选机器后，将唯一实际 `machine`、原提交 `digest`、`machineSelection` 和 `projectPreparation:{from,project,release,state,operationId?}` 随任务落库。项目／数据准备阶段为 `PREPARING_DATA`，不占 GPU 额度；后续逐阶段重新检查权限、维护、固定版本和额度。超时、刷新或重启只能观察这个目标和原操作，不能换机器或新建提交键。UI 展示实际 `machine`，用 `projectPreparation.state` 与 `dataPreparation` 显示进度；不把准备中的任务误画成已拿到显卡。
 
+个人累计用卡额度只约束普通成员；当前启用的管理员对共享、独占、手选和 AUTO 一致豁免。单任务物理卡数、显存、能力、owner-only 数据授权、优先级和显式让位规则不变，资源不足交给节点排队；不清除既有任务或租约，也不更改成员原始额度。全平台 5000 条历史和每人 10 个准备中任务的上限保留。新任务内部 `dispatchPending:true` 随记录持久化（不下发到节点或返回客户端）；首次 sync 在串行队列内重验当前角色/启用状态、机器和个人额度及管理员专属优先级，先持久化标记为 false 再开始远程调用，等待回包不占用串行队列。降级后未派发任务不沿用管理员豁免；已尝试派发、旧无标记或回执未知任务继续原同步路径，不凭角色变化停止训练或释放资源。该标记不是节点成功证明。
+
+界面按当前账号的 `enabled:true` 与 `role:admin` 显示「请求卡数／免个人额度」，保留进行中和排队的真实请求统计，但不把清单派生的 `total` 或 `limits` 画成管理员累计额度上限，也不以 `total-used` 禁用管理员提交。单次 `cards.max` 仍来自目标机器物理卡数；成员继续显示占用／额度上限。工作台、提交预检、总控、算力摘要和个人账号页口径一致。
+
 手动项目副本使用正常认证接口 `projects.replicate {from,machine,project,release,key}`，查询／取消为 `projects.replication.status {id}` 和 `projects.replication.cancel {id}`。只允许账号自身、两端机器均仍授权的固定 OCI 版本。响应包含 `id,state,from,machine,project,release,bytes?,totalBytes?,error?,developmentChanged:false`；状态包括 PREPARING、DISPATCHING、RUNNING、UNKNOWN、SUCCEEDED、FAILED、CANCELING、CANCELED。UNKNOWN 不证明未启动，不能换 key 重发。内部传输票据不会返回前端。
 
 明确失败或取消后，用户可选择 `projects.replication.retry {id,key}`，`key` 是新的重试 UUID；响应不确定时沿用这个 key。只有旧操作两端已停止、临时运输数据已清理、源票据已撤销且权限仍有效才接受；返回新复制及 `retryOf`，原失败记录不改写。不要让页面刷新自动调用 retry，也不要自动重提旧训练。后台发现撤权或取消时，先阻断源票据读取，再等目标停止和清理；目标暂时失联时继续保留收尾状态与临时文件。
@@ -156,6 +160,8 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 票据有效期 5 分钟。过期／撤销后回门户查询并重新授权；续传仍用同一个 `uploadId` 和节点确认的偏移。不要从“请求发出”推断写入完成。节点禁用、配置变更和撤销会拒绝旧票据；账号权限变更不应被描述为所有已签票据立即失效。
 
 ### 中转边界
+
+固定候选选路沿用 [校内直传](DIRECT_UPLOAD.md) 的 `routeSelection`／`datasets.upload.routes` 协议。全部匿名探测失败时，共享客户端选择器按已批准 `routeId` 输出静态失败分类；CLI 区分连接、超时、TLS／证书固定和回复中的节点／版本不匹配，浏览器无法确认网络原因时保留泛化失败。分类不回显入口 URL、原始异常、响应正文或实际节点身份，也不新增后端 API 字段、请求或票据权限。节点本地监听可用不能代替客户端入口可达；不得以升级客户端诊断冒称已修复网络。发布这项诊断须重建 CLI，并配套发布共享静态模块 `upload-routes.js`；无需更新节点服务。
 
 沿用 `auto`／`direct`／`relay` 路由选择。`auto` 优先已授权直传；明确无直传入口时，最多 256 MiB 可走门户中转，大于该值必须用户明确同意。直传认证、TLS、网络或响应不确定时，不自动重发到 VPS；`direct` 从不允许中转。显式中转的 manifest／chunk 使用门户 `datasets.upload.manifest`／`datasets.upload.chunk` 的规范 Base64 `data`，不是 raw HTTP。
 

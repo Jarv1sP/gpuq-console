@@ -78,7 +78,9 @@ try{
   await currentNav('work');
   await textContrast();
   await capture('workspace-desktop');
-  assert.match(await page.locator('#self-summary').innerText(),/8/);
+  const personalSummary=await page.locator('#self-summary').innerText();
+  assert.match(personalSummary,/请求卡数\n4 张\n免个人额度/);
+  assert.doesNotMatch(personalSummary,/4 \/ 8|占用额度 \/ 上限/);
   assert.equal(await page.locator('[name=priority] option').count(),3);
   const queueInfo=page.locator('[data-workbench-job="22222222-2222-4222-8222-222222222222"] .ui-info>summary');await queueInfo.click();assert.match(await page.locator('#my-job-table').innerText(),/等待空闲 GPU/);await queueInfo.click();
   await page.locator('[data-nav=resources]').click();

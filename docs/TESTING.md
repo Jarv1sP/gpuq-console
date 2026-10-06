@@ -16,11 +16,9 @@ npm ci --ignore-scripts
 npm test
 npm run test:python
 npx playwright install --with-deps chromium
-node tests/ui-smoke.mjs
-node tests/datasets-ui-smoke.mjs
-node tests/projects-ui-smoke.mjs
-node tests/priority-ui-smoke.mjs
-node tests/client-auth-smoke.mjs
+for test in tests/*-smoke.mjs tests/*-browser.mjs; do
+  node "$test" || exit $?
+done
 python3 scripts/build-gpuq.py
 python3 build/gpuq.pyz --help
 python3 -m compileall -q deploy gpuq scripts
@@ -31,6 +29,8 @@ docker build -f deploy/Dockerfile -t gpuq-console:test .
 覆盖账号/中文名、密码和会话、邀请码、角色、乐观授权写入、并发配额、幂等提交、超时保留、所有权、root 拒绝、API/CLI、上传越界/软链接、部署清单验证。不访问生产节点、不使用真实账号密码，不因 PR 启动真实训练。
 
 浏览器测试启动临时本地后台和独立数据库，验证注册自动登录、初始零额度、管理员自动发现待处理用户、授权后用户自动更新、编辑草稿不被刷新覆盖、注册码再次可读、引导 admin 退役与移动端布局。不会连接真实执行桥或 GPU；可选 `CHROME_PATH` 使用本地 Chrome，`UI_SCREENSHOTS` 指定私有截图目录。
+
+`admin-quota-ui-smoke.mjs` 单独验证管理员请求超过物理清单总数时仍免个人累计额度，工作台、预检、总控与账号页口径一致，单请求卡数仍按物理容量且成员额度不变；只读合成忙碌节点，不派发 GPU 作业。首次派发的当前角色、停用／授权变更、持久化失败、丢回执和慢桥队列由 `admin-quota-dispatch.test.js` 的独立 SQLite 夹具覆盖；旧无标记或已尝试任务不得因此重派或释放。
 
 数据集回归另覆盖固定版本、身份/机器授权、准备不预留显卡、只选择同机全部 READY 的副本、失败重试与断点继续、租约清理的保守边界、挂载缺失拒绝写系统盘、旧节点环境/管理员终端兼容升级。数据页浏览器测试使用假的执行桥，不触发真实训练；验证准备、失败、重试、READY 后填入训练，以及移动端和在线手册入口。
 
