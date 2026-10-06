@@ -37,6 +37,26 @@ test('lost or malformed response never silently replays a mutation',async t=>{
  await assert.rejects(bridgeClient(f.path)('node','host.cancel',{id:'fixed'}),e=>e.status===502&&!e.message.includes('PRIVATE'));
  assert.equal(calls.length,2);
 });
+test('only exact trusted transport code/status pairs are promoted; native denials remain domain errors',async t=>{
+ const calls=[],f=await fixture(t,(socket,request)=>{
+  calls.push(request);
+  socket.end(JSON.stringify(request.args));
+ });await f.start();const call=bridgeClient(f.path);
+ for(const [code,status] of [['NODE_TRANSPORT_BUSY',503],['NODE_CONNECT_FAILED',503],['NODE_RESPONSE_TIMEOUT',504],['NODE_SSH_AUTH_FAILED',502],['NODE_SSH_HOSTKEY_FAILED',502],['NODE_RESPONSE_INVALID',502]]){
+  await assert.rejects(call('node','host.status',{ok:false,error:'PRIVATE ssh stderr and key',code,status}),e=>e.code===code&&e.status===status&&!e.message.includes('PRIVATE'));
+ }
+ for(const body of [{ok:false,error:'Native refusal',code:'NODE_CONNECT_FAILED',status:200},{ok:false,error:'Native refusal',code:'ARBITRARY',status:503}])
+  await assert.rejects(call('node','host.exec',body),e=>e.status===undefined&&e.message==='Native refusal');
+ assert.equal(calls.length,8);
+});
+test('partial response activity cannot extend the hard 32-second elapsed deadline',async t=>{
+ let accepted;const started=new Promise(resolve=>accepted=resolve);
+ const f=await fixture(t,(socket)=>{socket.write('{"ok":');accepted(socket);});await f.start();
+ t.mock.timers.enable({apis:['setTimeout']});
+ const result=bridgeClient(f.path)('node','host.status',{}),socket=await started;
+ t.mock.timers.tick(16000);socket.write('true,');await new Promise(setImmediate);
+ t.mock.timers.tick(16001);await assert.rejects(result,e=>e.status===504&&e.code==='EXECUTOR_TIMEOUT');
+});
 test('real HTTP reports 503 during bridge absence and same host status recovers once listener starts',async t=>{
  const calls=[],f=await fixture(t,(socket,request)=>{calls.push(request);socket.end(JSON.stringify({ok:true,result:{id:request.args.id,state:'RUNNING'}}));});
  const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
