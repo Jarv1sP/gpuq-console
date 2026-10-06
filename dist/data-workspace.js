@@ -42,18 +42,18 @@ export function publicationText(status){
   if(status.state==='READY')return `已发布：${status.dataset}@${status.version}。可在数据集目录选择用于训练。`;
   if(status.state==='FAILED')return '发布失败：'+(status.error||'请检查目录后重试。');
   if(status.state==='UNKNOWN')return '发布结果尚未确认，数据空间暂不可编辑。请联系管理员检查后台发布进程；不要重复发布。';
-  if(status.state==='NOT_READY')return '这次发布的本机副本已不再就绪。原始数据仍保留，可从个人数据空间重新发布子目录。';
-  if(status.state==='UNREGISTERED')return '这次发布的数据集登记已删除。原始数据仍保留，可从个人数据空间重新发布子目录。';
+  if(status.state==='NOT_READY')return '这次发布的服务器缓存已不再就绪。原始数据仍保留，可从个人整理目录重新发布子目录。';
+  if(status.state==='UNREGISTERED')return '这次发布的数据集登记已删除。原始数据仍保留，可从个人整理目录重新发布子目录。';
   if(status.state==='UNAVAILABLE')return '当前账号已无权使用这次发布的数据集。请联系管理员确认授权；原始个人目录不受影响。';
   return '服务器正在扫描、复制并校验文件；可离开页面，后台会继续。';
 }
 export function dataWorkspaceHTML(){
   return `<section class="data-workspace-card" aria-labelledby="data-workspace-heading">
-    <header><div><p class="data-workspace-eyebrow">个人数据空间</p><h3 id="data-workspace-heading">在 /data2 整理，再发布</h3></div><span class="data-workspace-badge">不占用 GPU</span></header>
+    <header><div><p class="data-workspace-eyebrow">在服务器上整理</p><h3 id="data-workspace-heading">在 /data2 整理，再发布</h3></div><span class="data-workspace-badge">不占用 GPU</span></header>
     <p class="muted">这里只有你在所选服务器上的文件。上传压缩包后，可在终端手动解压；不会自动解压或跨机同步。</p>
     <ol class="data-workspace-steps"><li>上传文件</li><li>终端整理</li><li>发布数据集</li></ol>
     <form id="data-workspace-upload-form">
-      <aside class="dataset-route" aria-label="个人数据上传通道"><div class="dataset-route-heading"><span class="dataset-route-label">经门户中转</span><span class="dataset-route-path"><span>本机</span><i aria-hidden="true">→</i><span>平台中转</span><i aria-hidden="true">→</i><span>个人数据空间</span></span></div><p>这里上传的文件经过平台中转。大文件可改用“下载链接”，由服务器直接下载。</p></aside>
+      <aside class="dataset-route" aria-label="个人数据上传通道"><div class="dataset-route-heading"><span class="dataset-route-label">经门户中转</span><span class="dataset-route-path"><span>你的电脑</span><i aria-hidden="true">→</i><span>平台中转</span><i aria-hidden="true">→</i><span>在服务器上整理</span></span></div><p>这里上传的文件经过平台中转。大文件可改用“下载链接”，由服务器直接下载。</p></aside>
       <div class="data-workspace-fields"><label class="field">压缩包或文件<input name="data-workspace-files" type="file" multiple required><small>单个文件最多 100 GiB；不会自动解压。</small></label><label class="field">保存目录<input name="data-workspace-upload-path" value="incoming" placeholder="incoming" required><small>相对 /data2 的路径；缺少的目录会自动创建。</small></label></div>
       <label class="data-workspace-overwrite"><input type="checkbox" name="data-workspace-overwrite">覆盖所选文件在此目录里的同名文件</label>
       <div id="data-workspace-relay-warning" class="dataset-relay-warning" hidden><label><input type="checkbox" name="data-workspace-relay-consent"><span>我确认通过 VPS 中转上传这 <strong id="data-workspace-relay-size"></strong> 文件</span></label><p>所选文件合计超过 256 MiB；中转带宽由所有用户共享，速度可能较慢。</p></div>
@@ -117,7 +117,7 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
       if(overwrite&&!window.confirm('覆盖所选文件在目标目录里的同名文件？它们的旧内容将被替换，不能撤销。'))return;
       controller=new AbortController();controls();const progress=element('#data-workspace-progress');progress.hidden=false;progress.value=0;
       const result=await uploadWorkspaceFiles({files,directory,machine,overwrite,allowRelay,signal:controller.signal,call,onProgress:value=>{check();report('正在上传 '+value.path+' · '+bytesLabel(value.bytes)+' / '+bytesLabel(value.totalBytes));progress.max=Math.max(1,value.totalBytes);progress.value=value.totalBytes?value.bytes:1;}});
-      check();report(`已上传 ${result.files} 个文件。打开数据终端手动解压、整理后，再发布子目录。`);progress.value=progress.max=1;toast('文件已保存到个人数据空间。');
+      check();report(`已上传 ${result.files} 个文件。打开数据终端手动解压、整理后，再发布子目录。`);progress.value=progress.max=1;toast('文件已保存到在服务器上整理。');
     });
     return run(async({call,report,machine,check})=>{
       const path=workspacePath(form.elements['data-workspace-publish-path'].value.trim()),name=form.elements['data-workspace-name'].value.trim();

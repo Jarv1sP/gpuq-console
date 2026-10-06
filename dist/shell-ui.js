@@ -81,6 +81,18 @@ export function shellUI(store,{navigate,getPage,toast}){
     const action=q('#open-submit'),headingControl=q('.heading-actions [data-shell-action=control]');if(headingControl)headingControl.hidden=phone()&&!q('#mobile-control').hidden;
     if(phone()&&getPage()==='work'&&action){if(!phoneAction){phoneActionPlace=document.createComment('workbench primary action');action.before(phoneActionPlace);phoneAction=action;q('#mobile-control').append(action);}action.hidden=!store.principal;}
   }
+  function updateBottomReserve(){
+    const scale=document.body.getBoundingClientRect().width/document.body.offsetWidth||1;
+    const targets=[q('#control-strip'),q('#mobile-control'),nav].filter(node=>node&&!node.hidden&&getComputedStyle(node).position==='fixed'&&node.getClientRects().length);
+    const occupied=targets.reduce((value,node)=>Math.max(value,innerHeight-node.getBoundingClientRect().top),0);
+    const reserve=occupied>0?Math.ceil((occupied+20)/scale):0;
+    document.body.style.setProperty('--bottom-reserve',reserve+'px');
+  }
+  const reserveObserver=new ResizeObserver(updateBottomReserve);
+  for(const node of [q('#control-strip'),q('#mobile-control'),nav])if(node)reserveObserver.observe(node);
+  new MutationObserver(updateBottomReserve).observe(q('#control-strip'),{attributes:true,attributeFilter:['hidden']});
+  new MutationObserver(updateBottomReserve).observe(q('#mobile-control'),{attributes:true,attributeFilter:['hidden']});
+  addEventListener('resize',updateBottomReserve);
   function renderMe(){
     const user=store.users.find(row=>row.id===store.principal?.userId),snapshot=control.snapshot(),host=q('#me-content');
     if(!user){host.textContent='登录后查看自己的账号和工作区。';return;}
@@ -91,7 +103,7 @@ export function shellUI(store,{navigate,getPage,toast}){
     const changed=page!==null&&roomForPage(page)!==roomForPage(getPage());page=getPage();document.body.dataset.room=roomForPage(page);
     q('#account-avatar').textContent=(store.users.find(user=>user.id===store.principal?.userId)?.name||store.principal?.username||'S').slice(0,1);
     if(notice!==q('#mode-note').textContent)notice=q('#mode-note').textContent;
-    syncContext();syncNavigation();control.update();updateMobileAction();renderMe();updateIndicator(changed);
+    syncContext();syncNavigation();control.update();updateMobileAction();updateBottomReserve();renderMe();updateIndicator(changed);
     if(page==='work')q('#page-title').classList.add('work-project-title');else q('#page-title').classList.remove('work-project-title');
   }
   function syncStatus(state,time){q('#sync-label').textContent=state==='syncing'?'正在同步':state==='failed'?'同步失败，保留已确认状态':'已同步 '+new Date(time||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});q('#refresh-state').title=q('#sync-label').textContent;}

@@ -4,8 +4,8 @@ import {aggregateDatasetCatalog} from '../dist/dataset-catalog-model.js';
 
 const version='a'.repeat(64),other='b'.repeat(64);
 const storage=(extra={})=>({dataset:'logical-data',version,phase:'ARCHIVED',archiveMachine:'archive-node',originalRetained:true,...extra});
-const location=(extra={})=>({machine:'training-node',dataset:'physical-copy',state:'READY',ownerLabel:'共享授权用户：示例成员',canPrepare:false,storage:storage(),...extra});
-const item=(extra={})=>({dataset:'logical-data',name:'中文训练集',displayNameRevision:3,labelScope:'personal',versions:[{version,bytes:0,files:0,state:'READY',canPrepare:false,ownerLabel:'共享授权用户：示例成员',locations:[location()]}],...extra});
+const location=(extra={})=>({machine:'training-node',dataset:'physical-copy',state:'READY',canUse:true,ownerLabel:'共享授权用户：示例成员',canPrepare:false,storage:storage(),...extra});
+const item=(extra={})=>({dataset:'logical-data',name:'中文训练集',displayNameRevision:3,labelScope:'personal',versions:[{version,bytes:0,files:0,state:'READY',canUse:true,canPrepare:false,ownerLabel:'共享授权用户：示例成员',locations:[location()]}],...extra});
 const catalog=(datasets=[item()],extra={})=>({machine:'training-node',partial:false,checkedAt:'2026-10-06T00:00:00Z',machines:[{machine:'training-node',state:'ok'},{machine:'other-training-node',state:'ok'},{machine:'unreachable-node',state:'unavailable'}],datasets,...extra});
 const one=value=>aggregateDatasetCatalog(value).datasets[0].versions[0];
 function freeze(value){if(value&&typeof value==='object'){Object.freeze(value);Object.values(value).forEach(freeze);}return value;}
@@ -16,7 +16,7 @@ test('catalog model is pure, preserves exact IDs, physical cache aliases, person
   assert.equal(dataset.dataset,'logical-data');assert.equal(dataset.displayName,'中文训练集');assert.equal(dataset.displayNameRevision,3);
   assert.equal(v.version,version);assert.equal(v.bytes,0);assert.equal(v.files,0);assert.equal(v.ownerLabel,'共享授权用户：示例成员');
   assert.equal(v.servers[0].dataset,'physical-copy');assert.equal(v.warehouse.records[0].storage.dataset,'logical-data');
-  assert.deepEqual(v.selected,{machine:'training-node',state:'READY',canPrepare:false,sourceMachine:null,sourceDataset:null,error:null});
+  assert.deepEqual(v.selected,{machine:'training-node',state:'READY',canPrepare:false,canUse:true,sourceMachine:null,sourceDataset:null,error:null});
   assert.equal(result.checkedAt,input.checkedAt);assert.equal(result.partial,true);
   v.warehouse.records[0].storage.phase='FAILED';assert.equal(input.datasets[0].versions[0].locations[0].storage.phase,'ARCHIVED');
   assert.equal(Object.hasOwn(dataset,'latestVersion'),false);assert.equal(Object.hasOwn(result,'capacity'),false);
@@ -117,4 +117,23 @@ test('valid empty catalog is distinct from an invalid response; invalid IDs or s
   assert.deepEqual(aggregateDatasetCatalog(catalog([])).datasets,[]);
   for(const value of [null,{},catalog(undefined,{datasets:null}),catalog([],{machines:null}),catalog([],{machine:'../node'}),catalog([item({dataset:'../data'})]),catalog([item({versions:[{version:'a',locations:[]}]})])])
     assert.throws(()=>aggregateDatasetCatalog(value),TypeError);
+});
+
+test('browse-only catalog keeps server facts without a selected training target or invented admission',()=>{
+  const input=catalog();input.machine=null;input.datasets[0].versions[0].state='READY';
+  const result=aggregateDatasetCatalog(input),v=result.datasets[0].versions[0];
+  assert.equal(result.machine,null);assert.equal(v.selected.machine,null);
+  assert.equal(v.selected.state,'UNKNOWN');assert.equal(v.selected.canPrepare,false);
+  assert.equal(v.servers[0].state,'READY');assert.equal(v.warehouse.originalConfirmed,true);
+  assert.equal(result.machines.length,input.machines.length);
+  const invalid={...input};delete invalid.machine;assert.throws(()=>aggregateDatasetCatalog(invalid),TypeError);
+});
+
+test('public metadata cannot override missing or explicit global or location use denial',()=>{
+  const input=catalog();input.datasets[0].versions[0].canUse=false;
+  let v=one(input);assert.equal(v.canUse,false);assert.equal(v.selected.canUse,false);assert(v.servers.every(row=>row.canUse===false));
+  delete input.datasets[0].versions[0].canUse;v=one(input);assert.equal(v.canUse,false);assert.equal(v.selected.canUse,false);
+  input.datasets[0].versions[0].canUse=true;delete input.datasets[0].versions[0].locations[0].canUse;v=one(input);assert.equal(v.selected.canUse,false);
+  input.datasets[0].versions[0].locations[0].canUse=false;
+  v=one(input);assert.equal(v.canUse,true);assert.equal(v.selected.canUse,false);assert.equal(v.servers[0].state,'READY','visible metadata remains an observation, not permission');
 });

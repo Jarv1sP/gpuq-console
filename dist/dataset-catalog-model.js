@@ -41,6 +41,8 @@ function server(machine,directory,locations,observations,selectedMachine){
   }
   return {machine,directoryState:directory,observed:rows.length>0,conflict,
     state:conflict?'UNKNOWN':observedState,dataset:location?text(location.dataset):null,
+    canUse:!conflict&&observations.every(row=>row.canUse===true)&&location?.canUse===true,
+    deletionPermissions:!conflict&&location?.deletionPermissions?copy(location.deletionPermissions):null,
     ownerLabel:location?text(location.ownerLabel):null,
     canPrepare:!conflict&&(machine===selectedMachine?
       observations.every(row=>row.canPrepare===true):location?.canPrepare===true),
@@ -50,7 +52,7 @@ function server(machine,directory,locations,observations,selectedMachine){
 }
 
 export function aggregateDatasetCatalog(catalog){
-  if(!catalog||!identifier.test(catalog.machine||'')||!Array.isArray(catalog.datasets)||!Array.isArray(catalog.machines))
+  if(!catalog||catalog.machine!==null&&(typeof catalog.machine!=='string'||!identifier.test(catalog.machine))||!Array.isArray(catalog.datasets)||!Array.isArray(catalog.machines))
     throw TypeError('A confirmed portal catalog and selected machine are required');
   const machines=new Map(),datasets=new Map();
   for(const row of catalog.machines){
@@ -58,7 +60,7 @@ export function aggregateDatasetCatalog(catalog){
     const value=row.state==='ok'?'ok':'unavailable';
     machines.set(row.machine,machines.has(row.machine)&&machines.get(row.machine)!==value?'unavailable':value);
   }
-  if(!machines.has(catalog.machine))machines.set(catalog.machine,'unavailable');
+  if(catalog.machine!=null&&!machines.has(catalog.machine))machines.set(catalog.machine,'unavailable');
   for(const item of catalog.datasets){
     if(!identifier.test(item?.dataset||'')||!Array.isArray(item.versions))throw TypeError('Invalid catalog dataset');
     if(!datasets.has(item.dataset))datasets.set(item.dataset,{items:[],versions:new Map()});
@@ -73,7 +75,7 @@ export function aggregateDatasetCatalog(catalog){
       }
     }
   }
-  return {machine:catalog.machine,partial:catalog.partial===true||[...machines.values()].some(value=>value!=='ok'),
+  return {machine:catalog.machine??null,partial:catalog.partial===true||[...machines.values()].some(value=>value!=='ok'),
     // Preserve a supplied timestamp; never manufacture freshness on refresh.
     checkedAt:copy(catalog.checkedAt),machines:[...machines].map(([machine,state])=>({machine,state})),
     datasets:[...datasets].map(([dataset,group])=>{
@@ -85,11 +87,12 @@ export function aggregateDatasetCatalog(catalog){
         versions:[...group.versions].map(([version,observations])=>{
           const locations=observations.flatMap(row=>row.locations),servers=[...machines].map(([machine,directory])=>
             server(machine,directory,locations,observations,catalog.machine));
-          const selected=servers.find(row=>row.machine===catalog.machine);
+          const selected=servers.find(row=>row.machine===catalog.machine)||{machine:null,state:'UNKNOWN',canPrepare:false};
           const sourceMachine=same(observations.map(row=>text(row.sourceMachine)));
           return {version,bytes:knownNumber(observations,'bytes'),files:knownNumber(observations,'files'),
+            canUse:observations.every(row=>row.canUse===true),
             ownerLabel:same(observations.map(row=>text(row.ownerLabel))),servers,
-            selected:{machine:catalog.machine,state:selected.state,canPrepare:selected.canPrepare,
+            selected:{machine:catalog.machine??null,state:selected.state,canPrepare:selected.canPrepare,canUse:selected.canUse===true,
               sourceMachine,sourceDataset:sourceMachine?same(observations.map(row=>text(row.sourceDataset))):null,
               error:same(observations.map(row=>text(row.error)))},warehouse:warehouse(version,locations)};
         })};
