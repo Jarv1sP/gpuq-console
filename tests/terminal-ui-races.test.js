@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {terminalUI,endProjectTerminals,terminalRequestContext,terminalExitMessage} from '../dist/terminal-ui.js';
+import {terminalUI,endProjectTerminals,terminalRequestContext,terminalExitMessage,terminalStoppedMessage} from '../dist/terminal-ui.js';
 
 // Exercise the real event handlers with independently delayed API responses.
 // No network, real terminal, credentials, or node is used.
@@ -40,6 +40,7 @@ function fixture(){
     }
     if(operation==='terminal.detach'&&store.failDetach)throw Error('fixture detach unavailable');
     if(operation==='terminal.close'&&store.failClose)throw Error('fixture close unavailable');
+    if(operation==='terminal.status')return store.statusReceipt||{protocol:'terminal-session-status-v1',id:args.id,state:'UNKNOWN',evidence:{confirmed:false}};
     if(operation==='terminal.close')return store.closeReceipt||{closed:true};
     if(operation==='terminal.detach')return {detached:true};
     if(operation==='projects.list'){
@@ -461,4 +462,27 @@ test('directory option identity keeps development source separate from the ROOT 
     await attach(f,'host-focus','terminal-root-open');
     assert.equal(f.opens[1].args.machine,'node-b');assert.equal(f.opens[1].args.hostAdmin,true);assert.ok(!('project'in f.opens[1].args));
   }finally{f.restore();}
+});
+test('failed original reconnect checks only status and clearly marks ended without automatic replacement',async()=>{
+ const f=fixture();try{
+  await attach(f,'original-ended');await f.click('terminal-disconnect');f.setPrompt('original-ended');
+  f.store.statusReceipt={protocol:'terminal-session-status-v1',id:'original-ended',state:'STOPPED',evidence:{confirmed:true}};
+  const pending=f.click('terminal-reconnect');await f.settle();f.opens[1].reject(Error('Terminal is not reachable; no replacement was started'));await pending;
+  assert.equal(f.opens.length,2);assert.equal(f.visible(),false);assert.ok(f.toasts.some(text=>/终端已结束.*明确新建/.test(text)));
+  const status=f.calls.filter(c=>c.operation==='terminal.status');assert.equal(status.length,1);assert.equal(status[0].args.id,'original-ended');assert.ok(!('writerToken'in status[0].args)&&!('clientId'in status[0].args));
+  const retained=f.events.filter(e=>e.type==='gpuq-terminal-state').at(-1).detail.sessions[0];assert.equal(retained.connectionState,'ended');
+  f.store.closeReceipt={protocol:'terminal-session-status-v1',id:'original-ended',state:'STOPPED',metadataOnly:true,closed:true};
+  const before=f.opens.length;assert.equal(await endProjectTerminals({machine:'node-a',project:'experiment'}),true);assert.equal(f.opens.length,before);
+  const close=f.calls.filter(c=>c.operation==='terminal.close');assert.equal(close.length,1);assert.equal(close[0].args.id,'original-ended');assert.ok(!('writerToken'in close[0].args)&&!('clientId'in close[0].args));
+ }finally{f.restore();}
+});
+test('unknown or wrong original status never claims stopped and cannot invent a replacement',async()=>{
+ for(const status of [{protocol:'terminal-session-status-v1',id:'retained',state:'UNKNOWN',evidence:{confirmed:false}},{protocol:'terminal-session-status-v1',id:'different',state:'STOPPED',evidence:{confirmed:true}},{protocol:'terminal-session-status-v1',id:'retained',state:'STOPPED',evidence:{confirmed:false}}]){
+  const f=fixture();try{
+   await attach(f,'retained');await f.click('terminal-disconnect');f.setPrompt('retained');f.store.statusReceipt=status;
+   const pending=f.click('terminal-reconnect');await f.settle();f.opens[1].reject(Error('Terminal is not reachable'));await pending;
+   assert.equal(f.opens.length,2);assert.equal(f.calls.some(c=>c.operation==='terminal.close'),false);assert.ok(!f.toasts.some(t=>t.includes('终端已结束')));
+   assert.equal(terminalStoppedMessage(status,'retained'),null);
+  }finally{f.restore();}
+ }
 });

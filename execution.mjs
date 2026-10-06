@@ -345,14 +345,16 @@ export async function executionCall(service,principal,operation,args){
     }
     return result;
   }
-  if(['terminal.open','terminal.exchange','terminal.close','terminal.detach'].includes(operation)){
+  if(['terminal.open','terminal.exchange','terminal.close','terminal.detach','terminal.status'].includes(operation)){
     authorizedMachine(args.machine);
-    const opening=operation==='terminal.open',mode=args.mode||'new';
-    const allowed=['machine','id','hostAdmin','project','dataWorkspace','clientId','writerToken',...(opening?['key','mode','takeover']:operation==='terminal.exchange'?['input','offset','rows','cols']:[])];
+    const opening=operation==='terminal.open',status=operation==='terminal.status',stoppedClose=operation==='terminal.close'&&args.writerToken===undefined,mode=args.mode||'new';
+    const allowed=['machine','id','hostAdmin','project','dataWorkspace',...(!status?['clientId','writerToken']:[]),...(opening?['key','mode','takeover']:operation==='terminal.exchange'?['input','offset','rows','cols']:[])];
     if(Object.keys(args).some(k=>!allowed.includes(k)))fail('终端参数无效。');
     if(args.hostAdmin&&principal.role!=='admin')fail('宿主机 root 终端仅管理员可用。',403);
     const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-    if(typeof args.clientId!=='string'||!uuid.test(args.clientId))fail('请升级客户端或刷新网页：终端需要独立会话和单写租约。');
+    if(!status&&!stoppedClose&&(typeof args.clientId!=='string'||!uuid.test(args.clientId)))fail('请升级客户端或刷新网页：终端需要独立会话和单写租约。');
+    if(args.clientId!==undefined&&(typeof args.clientId!=='string'||!uuid.test(args.clientId)))fail('终端客户端 ID 无效。');
+    if(stoppedClose&&args.clientId!==undefined)fail('缺少终端写入凭据；停止会话收口不得携带旧附件 ID。');
     if(opening){
       if(!['new','reconnect'].includes(mode)||typeof args.key!=='string'||!uuid.test(args.key))fail('需明确新建或重连，并提供 UUID 连接键。');
       if(args.takeover!==undefined&&typeof args.takeover!=='boolean'||args.takeover&&mode!=='reconnect')fail('仅显式重连可确认接管。');
@@ -360,7 +362,7 @@ export async function executionCall(service,principal,operation,args){
     }
     if((!opening||mode==='reconnect')&&(typeof args.id!=='string'||!uuid.test(args.id)))fail('需指定完整终端会话 ID。');
     if(args.writerToken!==undefined&&(typeof args.writerToken!=='string'||!uuid.test(args.writerToken)))fail('终端写入凭据无效。');
-    if(!opening&&args.writerToken===undefined)fail('缺少终端写入凭据；请显式重连。');
+    if(!opening&&!status&&!stoppedClose&&args.writerToken===undefined)fail('缺少终端写入凭据；请显式重连。');
     if(args.hostAdmin!==undefined&&typeof args.hostAdmin!=='boolean')fail('终端模式无效。');
     if(args.dataWorkspace!==undefined&&typeof args.dataWorkspace!=='boolean')fail('数据终端模式无效。');
     const project=projectReference(args);
