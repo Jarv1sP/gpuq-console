@@ -331,7 +331,7 @@ try{
           else if(operation==='projects.status')result={project,state:'READY',environmentMode:'oci',latestReadyRelease:release,releases:[{release,state:'READY'}]};
           else if(operation==='projects.quota')result={usedBytes:0,quotaBytes:1024**3};
           else if(operation==='maintenance.status')result=state.operationalMaintenance;
-          else if(['datasets.list','datasets.catalog'].includes(operation))result={datasets:scene.natural?[{dataset:'fixture-data',versions:[{version:release,state:'READY'}]}]:[],machines:inventory.map(row=>({machine:row.id,state:'ok'}))};
+          else if(['datasets.list','datasets.catalog'].includes(operation))result={machine:args.machine,datasets:scene.natural?[{dataset:'fixture-data',versions:[{version:release,state:'READY'}]}]:[],machines:inventory.map(row=>({machine:row.id,state:'ok'}))};
           else if(operation==='datasets.capacity')result={available:false};
           else if(['notifications.list','transfers.list'].includes(operation))result={items:[]};
           else if(operation==='transfers.capabilities')result={enabled:false};
