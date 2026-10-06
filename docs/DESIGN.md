@@ -335,6 +335,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | 工作台 | [execution-ui.js](../dist/execution-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css)、[workspace.css](../dist/workspace.css) | projects / personal-project / r5 浏览器 |
 | 算力总览 | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css)、[gpu-allocation-ui.js](../dist/gpu-allocation-ui.js) | resources / resource-ids / allocation |
 | 数据集与添加数据 | [datasets-ui.js](../dist/datasets-ui.js)、[dataset-flow.js](../dist/dataset-flow.js)、[dataset-cache-admin.js](../dist/dataset-cache-admin.js)、[datasets.css](../dist/datasets.css)、[dataset-flow.css](../dist/dataset-flow.css) | datasets / dataset-upload / dataset-remove |
+| 彻底删除对话框 | [dataset-full-delete-ui.js](../dist/dataset-full-delete-ui.js)、[dataset-full-delete-state.js](../dist/dataset-full-delete-state.js)、[dataset-remove.css](../dist/dataset-remove.css) | dataset-full-delete-ui 契约与浏览器 |
 | 数据集传输与导入页签 | [transfers-ui.js](../dist/transfers-ui.js)、[data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[cloud-import-ui.js](../dist/cloud-import-ui.js) | transfers-http / data-workspace / cloud-files / cloud-import |
 | 协作区 | [community-ui.js](../dist/community-ui.js)、[community.css](../dist/community.css) | community |
 | 成员授权 | [app.js](../dist/app.js)、[members.css](../dist/members.css) | ui / polish-shell |
@@ -404,6 +405,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | 维护恢复 | maintenance.set以当前revision CAS，逐步完成范围明确列出 | 先保护剩余范围，再解除全平台，再恢复选中范围；冲突停止刷新，不自动写重试；服务器最终准入 |
 | 需处理 | 原对象UNKNOWN/PARTIAL/UNCONFIRMED事实保留 | 时间或已读不能清除；只有已确认失败可按规则确认 |
 | 删除数据集 | 管理员目标/版本或整库范围，服务端实时证明还有完整副本 | 唯一副本或本机未决禁用；409显示原文；SUBMITTING刷新为未确认，查原operationId，不自动再删；放弃查询不清门户持久排除；缺编号只在明确不存在或worker硬上限加1小时之后的新读取仍READY且登记身份不变时解除 |
+
+彻底删除对话框独立于数据集布局：名称确认、48px 危险按钮、实际步骤和恢复期限；不显示推算百分比。目录 `datasetDelete === 1` 才能显示入口，成员还需当前版本至少一个位置的 `deletionPermissions.memberAllowed === true`；false 或缺失不显示。403 与 BLOCKED 原因保留服务器原文。按账号保存原 UUID key 后才派发，刷新和丢回执只查询原 key；UNKNOWN 仅显示重新查询。继续、取消和恢复仅管理员可见，成员显示「需要管理员处理」。恢复核对原操作、服务器、物理名称与版本，再查询原任务。
 
 目录别名用于训练，缓存保留/删除使用location真实本地名称。账号/机器/项目/版本切换停止旧轮询并抛弃旧回复；缓存策略只在展开/明确刷新查询，隐藏房间停止storage RPC。
 

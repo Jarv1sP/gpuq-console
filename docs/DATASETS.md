@@ -439,3 +439,12 @@ gpuctl data retire-discard-registration OPERATION_ID --machine SERVER --key UUID
 登记意图按删除 operationId 分代保存，旧代次不能阻止下一次删除、清除和显式登记。若容量等错误使新登记的准备 inode 从未安装，管理员可用 `retire-discard-registration` 撤回这份意图；必须指定原删除任务、服务器和固定 UUID key，物理别名使用 `--name`。门户和节点均先保存固定请求与审计，只有当前 PURGED 代次、无登记、READY、STAGING、来源记录、租约及固定保留时，才把这一份未安装元数据移入审计区。它不删除数据载荷，不移除删除墓碑，也不采用其他人的登记。成功为 `DISCARDED`；回执丢失先核对原任务，必要时只重试相同命令和 key。已经安装、意图改变或权限不明均拒绝。
 
 取消以实际 journal 为准：ISOLATED 已落盘而节点投影中断时只补投影并恢复，不再次隔离；个人来源记录随第一次回滚一起还原。终态删除的门户墓碑不挡整数据集的普通注销，精确版本的后台重建仍受节点墓碑保护。原 worker 仍在进行时，继续和恢复保持等待且不派发；取消等待保持 CANCELING。完整副本确未提交收集许可时，源恢复也可还原过期但仍保留的字节，未知或损坏的提交不算未提交。
+
+
+### 网页：彻底删除对话框与原编号恢复
+
+数据集详情的入口由房间控制器提供。`datasetRemoveUI(store, section, toast, {reload, catalog: () => currentCatalog})` 返回 `canOpenFullDelete(dataset, version)` 和 `openFullDelete(dataset, version)`，只挂载独立对话框，不改变数据集布局。catalog getter 必须返回当前账号的最新目录，切换账号或尚未读取时返回 null；所有服务器名称来自目录和任务步骤。只有 `datasetDelete === 1` 才显示入口：管理员可见；成员还要求这个版本至少一个 location 的 `deletionPermissions.memberAllowed === true`。旧节点缺字段或 false 时成员不显示入口，不从用户名或所属用户文字推断权限。
+
+输入准确的数据集名称后，网页先在当前账号的本地记录里保存固定 UUID key 和原 dataset/version，再发送 `datasets.delete`。无法保存时不派发。重复打开同一目标使用原记录；丢回执先 `datasets.delete.status {key}`，不换 key、不自动再次删除，包括 404。刷新后本地终态也先显示待确认，只有匹配原 key、任务编号和目标的服务器回执恢复当前事实。`fullDelete.records` 是本地恢复引用，`fullDelete.openFullDeleteRecord(key)` 可供任务记录入口调用；它只读取当前账号的记录，不授予跨账号访问权。
+
+任务显示当前步骤、原服务器 ID 和服务器原因，不画百分比。UNKNOWN 只提供重新查询；DELETED 显示服务器的 retainUntil，并注明「其他名称下的副本不受影响」，不声称磁盘空间已释放。403 和能力未开通的 409 保留后台原文。成员看到需继续、取消或恢复的任务时显示「需要管理员处理」，不渲染管理按钮。管理员继续沿用原 operationId；取消先确认停止后续删除并还原数据、不强制中断已执行步骤；恢复由管理员选择任务中已确认完整的保留副本，回执可能使用真实物理别名且不带 key，网页核对绑定后再查询原任务。所有未知写结果都不自动重放。

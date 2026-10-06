@@ -2,6 +2,7 @@ import {serverIdHTML} from './workbench-ui.js';
 import {copyHelp} from './copy-help-ui.js';
 import {fadeDialog} from './motion-ui.js';
 import {maintenanceFor} from './maintenance-state.js';
+import {datasetFullDeleteUI} from './dataset-full-delete-ui.js';
 
 const hash=/^[a-f0-9]{64}$/,datasetID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -99,7 +100,7 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
   return {sync,submit,query,abandon,dismiss,stop,get rows(){return owner?.rows||[];},get saved(){return owner?.saved??true;},isBusy:id=>busy.has(owner?.rows.find(row=>row.id===id)),blocked:value=>owner?.rows.some(row=>unresolved(row)&&overlaps(row,value))||false};
 }
 
-export function datasetRemoveUI(store,section,toast,{reload}={}){
+export function datasetRemoveUI(store,section,toast,{reload,catalog}={}){
   let storage;try{storage=globalThis.localStorage;}catch{}
   let dialog=null,confirmation=null,serial=0,updating=false;
   const originals=new WeakMap();
@@ -128,7 +129,7 @@ export function datasetRemoveUI(store,section,toast,{reload}={}){
     if(references.length!==1)throw Error(references.length?'请先核对这台服务器的多个登记名称。':'这台服务器没有此登记，请刷新目录。');
     for(const version of versions||[])localReferences.set(JSON.stringify([target.machine,target.catalogDataset,version.version]),references[0]);
     const resolved={...target,dataset:references[0],version:whole?null:target.version};
-    return {target:resolved,preservation:removalPreservation(resolved,(versions||[]).filter(version=>version.locations?.some(location=>location.machine===target.machine&&location.dataset===references[0])),store.data?.machines||[],{partial:catalog.partial===true})};
+    return {target:resolved,fullDeleteSupported:catalog.datasetDelete===1,preservation:removalPreservation(resolved,(versions||[]).filter(version=>version.locations?.some(location=>location.machine===target.machine&&location.dataset===references[0])),store.data?.machines||[],{partial:catalog.partial===true})};
   }
   const label=row=>row.state==='SUBMITTING'||row.state==='UNREGISTERING'?'删除中':row.state==='FAILED'?'删除失败':row.state==='BLOCKED'?'暂不能删除':row.operationId?'删除结果未确认':'删除请求结果未确认';
   const stateHTML=row=>`<span class="st ${row.state==='SUBMITTING'||row.state==='UNREGISTERING'?'st-cancel':row.state==='FAILED'?'st-err':'st-unk'}"><span class="g" aria-hidden="true"></span>${label(row)}</span>`;
@@ -145,12 +146,12 @@ export function datasetRemoveUI(store,section,toast,{reload}={}){
       dialog.close();try{await api.submit(intent.target);}catch(error){toast(error.message);}update();
     });
   }
-  function confirmRemove(target,whole,preservation){
+  function confirmRemove(target,whole,preservation,fullDeleteSupported=false){
     ensureDialog();confirmation={target:whole?{...target,version:null}:target,whole,preservation,userId:store.principal.userId};
     const retained=item=>item.kind==='archive'?`数据库原件（${serverIdHTML(item.machines[0])}）`:item.kind==='replicas'?`其他服务器上的完整副本：${item.machines.map(machine=>serverIdHTML(machine)).join('、')}`:'完整副本尚未确认';
     const facts=preservation.items.map(item=>`${whole?`<small title="${esc(item.version)}">${esc(item.version.slice(0,12))}</small>`:''}<span>${retained(item)}</span>`).join('');
     const pendingHelp=preservation.items.some(item=>item.pending&&item.graceEligible)?'请求发出后没有收到回执。为避免误删最后一份数据，这份副本暂时不算作可用副本；节点确认删除完成或 25 小时后会自动解除。':'正在按原编号查询删除结果。为避免误删最后一份数据，确认完成前不能再次删除。';
-    const blocked=!preservation.allowed?`<p class="dataset-remove-blocked">${preservation.pending?'这台服务器上的删除结果待确认':removalText('这可能是最后一份完整数据，暂不能按机器删除')} ${copyHelp('暂不能删除',preservation.pending?pendingHelp:'节点更新后可用「彻底删除」（7 天内可恢复）。')}</p>`:'';
+    const blocked=!preservation.allowed?`<p class="dataset-remove-blocked">${preservation.pending?'这台服务器上的删除结果待确认':removalText('这可能是最后一份完整数据，暂不能按机器删除')} ${copyHelp('暂不能删除',preservation.pending?pendingHelp:fullDeleteSupported?'可用「彻底删除」（7 天内可恢复）。':'请先确认其他服务器上有完整副本，再刷新目录。')}</p>`:'';
     dialog.innerHTML=`<form><header class="modal-head"><div class="copy-caption"><h2 id="dataset-remove-title">${whole?'删除整个数据集？':'删除此版本？'}</h2>${copyHelp('删除范围','只删除所选服务器的缓存和登记。删除前会重新确认还有完整副本，正在训练或固定保留的版本会被拒绝。')}</div><button class="button quiet" type="button" data-remove-close aria-label="关闭删除确认">关闭</button></header><dl class="dataset-remove-facts"><div><dt>服务器</dt><dd>${serverIdHTML(target.machine)}</dd></div><div><dt>数据集</dt><dd><code>${esc(target.dataset)}</code>${whole?'<small>全部版本</small>':`<small title="${esc(target.version)}">${esc(target.version.slice(0,12))}</small>`}</dd></div><div><dt>删除</dt><dd>缓存和登记</dd></div><div><dt>保留</dt><dd>${facts}</dd></div></dl>${blocked}${whole?`<label class="field">输入数据集名称 <code>${esc(target.dataset)}</code><input name="remove-name" required autocomplete="off" spellcheck="false" aria-label="输入数据集名称"></label>`:''}<footer class="modal-actions"><button class="button" type="button" data-remove-close>取消</button><button class="button danger" type="submit" data-remove-confirm ${whole||!preservation.allowed?'disabled':''}>删除</button></footer></form>`;
     if(target.catalogDataset&&target.catalogDataset!==target.dataset){dialog.querySelector('.dataset-remove-facts>div:nth-child(2) dd').prepend(document.createTextNode(target.catalogDataset+' · 登记名 '));if(whole){const field=dialog.querySelector('.field');field.querySelector('code').textContent=target.catalogDataset;}}
     dialog.showModal();fadeDialog(dialog);
@@ -189,7 +190,7 @@ export function datasetRemoveUI(store,section,toast,{reload}={}){
   section.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled||!admin())return;
     if(button.hasAttribute('data-remove-more')){const menu=button.parentElement.querySelector('.dataset-remove-options'),rect=button.getBoundingClientRect();menu.style.left=Math.max(16,Math.min(innerWidth-Math.min(320,innerWidth-32)-16,rect.left))+'px';menu.style.top=Math.min(innerHeight-180,rect.bottom+8)+'px';}
-    if(button.matches('[data-remove-version],[data-remove-dataset]')){const card=button.closest('.dataset-card');if(resolving.has(card))return;button.closest('[popover]')?.hidePopover();resolving.add(card);update();try{const whole=button.hasAttribute('data-remove-dataset'),resolved=await resolveTarget(card,whole);if(resolved){if(api.blocked(resolved.target))throw Error('这台服务器上的删除结果待确认');confirmRemove(resolved.target,whole,resolved.preservation);}}catch(error){toast(error.message);}finally{resolving.delete(card);update();}}
+    if(button.matches('[data-remove-version],[data-remove-dataset]')){const card=button.closest('.dataset-card');if(resolving.has(card))return;button.closest('[popover]')?.hidePopover();resolving.add(card);update();try{const whole=button.hasAttribute('data-remove-dataset'),resolved=await resolveTarget(card,whole);if(resolved){if(api.blocked(resolved.target))throw Error('这台服务器上的删除结果待确认');confirmRemove(resolved.target,whole,resolved.preservation,resolved.fullDeleteSupported);}}catch(error){toast(error.message);}finally{resolving.delete(card);update();}}
     if(button.dataset.removalQuery)api.query(button.dataset.removalQuery).catch(error=>toast(error.message));
     if(button.dataset.removalAbandon)confirmAbandon(button.dataset.removalAbandon);
     if(button.dataset.removalDismiss)api.dismiss(button.dataset.removalDismiss);
@@ -201,5 +202,7 @@ export function datasetRemoveUI(store,section,toast,{reload}={}){
   document.addEventListener('visibilitychange',()=>{api.sync(!document.hidden&&!section.hidden&&document.body.dataset.room==='datasets');});
   document.addEventListener('gpuq-maintenance-state',update);
   store.onAuthChange?.(()=>{dialog?.close();localReferences.clear();api.sync(false);update();});
+  const fullDelete=datasetFullDeleteUI(store,{reload,catalog});
+  Object.assign(api,{canOpenFullDelete:fullDelete.canOpenFullDelete,openFullDelete:fullDelete.openFullDelete,fullDelete});
   update();return api;
 }

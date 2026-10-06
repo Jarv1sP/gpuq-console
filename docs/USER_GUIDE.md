@@ -651,6 +651,8 @@ gpuq-network exec --proxy http://PROXY_HOST:PORT -- python -m pip install -r req
 
 从一台服务器删除可重新准备的缓存：`gpuctl data unregister NAME@完整版本 --machine SERVER`。新版节点拒绝直接清除最后一份数据；数据库原件、正在训练或有固定保留的数据也不能用这个入口。节点未更新时仅管理员保留原按机器删除入口，门户先确认另有完整副本；无法确认时拒绝删除。
 
+网页在数据集详情中提供「彻底删除」，需要输入数据集名称确认。节点开启能力且证明这是你可删除的版本时才显示入口；删除结果未确认时，只用原编号重新查询。页面按步骤显示结果，删除完成后列出可恢复至的时间。继续、取消和恢复需要管理员处理。
+
 彻底删除全部服务器和数据库里的这一版本：`gpuctl data delete NAME@完整版本 --key UUID`。先保留输出的 key，用 `gpuctl data delete-status UUID` 查询；超时或“结果未确认”不要换编号重投。其他名称下的独立副本不受影响。完整副本隔离保留至少 7 天，仍占空间；期限内只有管理员可恢复，到期且收集服务已开启并确认隔离和时钟后才会清除。恢复命令是 `gpuctl data retire-restore OPERATION_ID --machine SERVER`，旧授权不会恢复。管理员也可用原任务编号显式 `retire-continue` 或 `retire-cancel`；继续只在原进程确定停止后重试原失败阶段；取消只还原数据，不继续删除、不杀训练。恢复原源时会同时处理这一任务的全部副本。实际清除后可以重新上传同名数据；管理员确认新的原源 READY 后，可用原恢复命令释放其余位置，旧授权不会复活。
 
 新登记在安装前失败且不再重试时，管理员可用 `gpuctl data retire-discard-registration OPERATION_ID --machine SERVER --key UUID` 撤回这份准备意图；物理别名另加 `--name NAME`。它不删除数据，不解除删除墓碑，已经安装的登记不能撤回。保留 key，回执不明只沿用相同命令和 key 核对；登记意图分代保存，后续可以再次删除、清除并重新上传。
