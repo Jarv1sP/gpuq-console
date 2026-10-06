@@ -23,6 +23,7 @@ try{
   await writeFile(statusPath,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(machine=>({id:machine.id,reachable:true,checkedAt:new Date().toISOString(),gpus:[],gpuq:{connected:true,observeOnly:false,jobs:[]}}))}));
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
+    if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:20*1024**3,usableBytes:492*1024**3,totalInodes:100000,availableInodes:50000,inodeUsageKnown:true,guarded:true};
     if(operation==='projects.list')return {environmentModes:machine===source?['shared','isolated','oci']:['shared','isolated'],projects:[...projects].filter(([id])=>{const [m,u]=JSON.parse(id);return m===machine&&u===args.userId;}).map(([,info])=>structuredClone(info))};
     if(operation==='datasets.capacity')return {filesystemBytes:1024**3,availableBytes:512*1024**2,reserveBytes:16*1024**2,usableBytes:496*1024**2,guarded:true};
     const id=key(machine,args.userId,args.project);
@@ -43,7 +44,7 @@ try{
   projects.set(key(source,'builtin-admin','admin-container'),{project:'admin-container',environmentMode:'oci',state:'READY',releases:[{state:'READY',release}],latestReadyRelease:release});
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const context=await browser.newContext({viewport:{width:1440,height:1080}}),page=await context.newPage();
-  page.on('pageerror',error=>errors.push(error.message));page.on('response',response=>{if(response.status()>=400)http.push([response.status(),response.url()]);});
+  page.on('pageerror',error=>errors.push(error.message));page.on('response',async response=>{if(response.status()>=400)http.push([response.status(),response.request().postDataJSON()?.operation,await response.text()]);});
   await page.addInitScript(()=>document.addEventListener('securitypolicyviolation',event=>{globalThis.directoryCSP??=[];directoryCSP.push(event.violatedDirective);}));
   await page.route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol)){await route.fallback();return;}outside.push(url.href);await route.abort();}));
   const response=operation=>page.waitForResponse(value=>value.url()===origin+'/api/call'&&value.request().postDataJSON()?.operation===operation);

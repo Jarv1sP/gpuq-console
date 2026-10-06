@@ -16,6 +16,7 @@ import {installStorageArchive} from './storage-archive.mjs';
 import {installOciCohort} from './oci-cohort.mjs';
 import {installProjectReplication,projectReplicationCall} from './project-replication.mjs';
 import {installDatasetLabels,datasetLabelCall} from './dataset-labels.mjs';
+import {installProjectCatalog} from './project-catalog.mjs';
 import {installDatasetDeletion} from './dataset-deletion.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
@@ -31,7 +32,7 @@ export class PortalService extends DemoService{
     service.db=new DatabaseSync(path);await chmod(path,0o600);
     service.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS portal_state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, subject TEXT, outcome TEXT NOT NULL);');
     service.db.exec("CREATE TABLE IF NOT EXISTS invites (role TEXT PRIMARY KEY CHECK(role IN ('admin','member')), digest TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0, max_uses INTEGER, created_at TEXT NOT NULL);");
-    installMaintenanceState(service);installCommunity(service);installDatasetLabels(service);
+    installMaintenanceState(service);installCommunity(service);installDatasetLabels(service);installProjectCatalog(service);
     if(!service.db.prepare('PRAGMA table_info(invites)').all().some(c=>c.name==='code_cipher'))service.db.exec('ALTER TABLE invites ADD COLUMN code_cipher TEXT');
     const keyPath=path+'.invite-key';
     try{service.inviteKey=await readFile(keyPath);}catch(e){

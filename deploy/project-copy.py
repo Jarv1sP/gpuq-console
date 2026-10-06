@@ -65,6 +65,7 @@ class ProjectCopies(t.TransferJobs):
         p.need(isinstance(args,dict) and set(args)<={'userId','project','release','from'},'Invalid project portability fields')
         self.actor(args)
         self.store._identity(args['userId'],args.get('project'))
+        self.store.admit(args['userId'],args['project'])
         engine=self.store._oci(args['userId']);engine.verify_host()
         sources=[]
         for machine,peer in self.n.CONFIG.get('transferPeers',{}).items():
@@ -103,7 +104,10 @@ class ProjectCopies(t.TransferJobs):
 
     def start_spec(self,args,payload):
         self.identity(args);key=args['id']
-        with self.lock(key):
+        with self.store.lifetime(args['userId'],args['project']),self.lock(key):
+            p.need(self.store.lifecycle(args['userId'],args['project'])['state'] not in ('RETIRING','RETIRED'),
+                   'Project is retired or its retirement is unconfirmed')
+            if payload['role']=='import':self.store.admit(args['userId'],args['project'])
             p.need(not any(self.path(key,suffix).exists() for suffix in ('.cancel','.revoked')),
                    'Project copy was canceled or revoked; use an explicit controlled retry')
             try:
