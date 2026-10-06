@@ -81,9 +81,11 @@ test('reverify labels and actions preserve filename escaping',()=>{
   assert.doesNotMatch(html,/<script>|" onclick="/);assert.match(html,/&lt;script&gt;/);assert.match(html,/重新校验/);
 });
 
-test('reader guide separates changed-file recovery from normal same-operation resume',async()=>{
+test('cloud engineering documentation preserves recovery rules without advertising cloud in the reader guide',async()=>{
   const guide=await readFile(new URL('../docs/USER_GUIDE.md',import.meta.url),'utf8');
-  const chapter=guide.slice(guide.indexOf('### 保存与取回云端副本'),guide.indexOf('### 从云盘或下载链接导入'));
+  assert.doesNotMatch(guide,/云盘|云端副本|分享链接|链接导入|gpuctl data (?:cloud|import)/);
+  const chapter=await readFile(new URL('../docs/CLOUD_FILES.md',import.meta.url),'utf8');
+  assert.match(chapter,/不代表部署已开通/);
   assert.match(chapter,/点击“重新校验”/);assert.match(chapter,/重新校验对应的云端副本，再取回到新的路径/);
   assert.match(chapter,/旧下载不会自动续传/);assert.match(chapter,/已有文件和临时内容都会保留/);
   assert.match(chapter,/普通连接中断仍按原下载的编号续传/);

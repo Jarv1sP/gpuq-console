@@ -91,36 +91,35 @@ test('terminal instructions correctly separate new sessions, detach and explicit
   assert.match(guide, /不能直接填入 VS Code Remote-SSH/);
 });
 
-test('ordinary-user datasets include resumable upload, fixed references and large-transfer guidance', () => {
+test('ordinary-user datasets document campus direct upload without relay recommendations', () => {
   assert.match(guide, /普通成员可以上传个人数据/);
-  for (const command of ['gpuctl data upload ./my-data --name my-data', 'gpuctl data upload-status UPLOAD_ID', 'gpuctl data upload-discard UPLOAD_ID', 'gpuctl data prepare DATASET_ID@VERSION', 'gpuctl data status DATASET_ID@VERSION']) {
+  for (const command of ['gpuctl data upload ./my-data --name my-data --via direct', 'gpuctl data upload-status UPLOAD_ID', 'gpuctl data upload-discard UPLOAD_ID', 'gpuctl data prepare DATASET_ID@VERSION', 'gpuctl data status DATASET_ID@VERSION']) {
     assert.ok(guide.includes(command), `Missing data command: ${command}`);
   }
-  assert.match(guide, /网页上传按服务器能力选择路线：可直传时直接传到服务器，否则经平台中转；页面会标出本次实际路线。/);
-  assert.match(guide, /直传失败不会自动改走中转；超过 256 MiB 的中转需要你确认。/);
-  assert.match(guide, /个人数据空间上传和 `data put` 仍经平台中转。/);
-  assert.doesNotMatch(guide, /网页(?:目录)?上传(?:和\s+`data put`)?\s*仍(?:走|经(?:过)?)平台中转/);
-  assert.match(guide, /校内直传或外接硬盘导入/);
+  assert.match(guide, /先连接能访问上传节点的校园网络/);
+  assert.match(guide, /`--via direct` 只允许直传/);
+  assert.match(guide, /不经过 VPS 文件中转/);
+  assert.match(guide, /客户端会显示实际传输路径/);
+  assert.match(guide, /路线显示「直传到」所选服务器，路径中没有门户中转或备用入口/);
+  assert.match(guide, /如果页面只提供中转或无法确认路线，先停止/);
+  assert.match(guide, /节点入口不可达时上传会停止/);
+  assert.match(guide, /重复原上传命令可续传/);
+  assert.match(guide, /直传断开不会偷偷改走中转/);
+  assert.match(guide, /数百 GB／TB 本机数据使用校内直传，或联系管理员协助外接硬盘导入/);
   assert.match(guide, /500,000/);
   assert.match(guide, /64 MiB/);
   assert.match(guide, /不必重复准备/);
-  assert.match(guide, /`data upload` 的实际路径以客户端显示为准/);
-  assert.match(guide, /超过 256 MiB 默认停止并提示选择/);
-  assert.match(guide, /--via relay/);
-  assert.match(guide, /直传断开不会偷偷改走中转/);
-  assert.match(guide, /链接导入由服务器直接下载/);
+  assert.match(guide, /不要把数据集直传当作所有文件操作的传输路线/);
+  assert.doesNotMatch(guide, /--via relay|gpuctl data put\b/);
 });
 
-test('link-import guidance explains authorization, manual extraction and partial-data retention', () => {
-  assert.match(guide, /阿里云盘分享链接或 HTTPS 文件直链/);
-  assert.match(guide, /需管理员启用可用的下载通道，并完成后台授权和真实下载验收/);
-  assert.match(guide, /未启用或连接不可用时，先使用 HTTPS 直链/);
-  assert.match(guide, /不能浏览管理员的云盘或取得账号令牌/);
-  assert.match(guide, /当前支持分享根目录的文件，不递归导入文件夹/);
-  assert.match(guide, /VPS 只传递授权、链接和进度信息，不搬运文件内容/);
-  for (const command of ['gpuctl data import ', 'gpuctl data imports', 'gpuctl data import-status IMPORT_ID', 'gpuctl data import-resume IMPORT_ID', 'gpuctl data import-cancel IMPORT_ID']) assert.ok(guide.includes(command));
-  assert.match(guide, /停止下载，但保留临时数据/);
-  assert.match(guide, /平台不会自动解压、执行文件、发布或复制到其他机器/);
+test('public guide excludes cloud and link-import workflows until they are ready for members', () => {
+  assert.doesNotMatch(guide, /云盘|云端副本|阿里云|CD2|分享链接|下载链接|链接导入|HTTPS.*直链/);
+  assert.doesNotMatch(guide, /gpuctl data (?:cloud|imports?)(?:\s|-|$)/m);
+  assert.match(guide, /服务器上已有的文件在个人数据空间整理/);
+  assert.match(guide, /不是另一条电脑上传通道/);
+  assert.match(guide, /不会自动解压/);
+  assert.match(guide, /发布保留可写目录并生成独立只读副本/);
 });
 
 test('unified dataset guide distinguishes catalog, capacity and preparation from training readiness', () => {
@@ -183,7 +182,8 @@ test('guide explains quotas, interruption and failure evidence without promising
 });
 
 test('personal data terminal manual extraction separates mutable drafts from immutable training data',()=>{
-  for(const command of ['gpuctl data put samples.zip','gpuctl data shell','unzip samples.zip -d samples','gpuctl data publish samples --name samples','gpuctl data workspace-status OPERATION_ID'])assert.ok(guide.includes(command));
+  for(const command of ['gpuctl data shell','unzip samples.zip -d samples','gpuctl data publish samples --name samples','gpuctl data workspace-status OPERATION_ID'])assert.ok(guide.includes(command));
+  assert.match(guide,/确认 `samples.zip` 已在个人数据目录中/);
   assert.match(guide,/只对应\*\*你在当前服务器上的可写目录/);
   assert.match(guide,/不会自动解压/);
   assert.match(guide,/独立只读副本/);

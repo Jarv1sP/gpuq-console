@@ -23,6 +23,8 @@ async function check(origin){
   }
   const start=await(await fetch(origin+'/guide/start')).text();assert.ok(start.includes(origin+'/install.sh'));assert.ok(!start.includes('https://gpu.example.com'));
   const data=await(await fetch(origin+'/guide/data')).text();assert.match(data,/gpuctl data upload/);assert.match(data,/READY/);
+  assert.match(data,/--via direct/);assert.match(data,/校内直传/);
+  assert.doesNotMatch(data,/云盘|云端副本|分享链接|链接导入|gpuctl data (?:cloud|import)|--via relay/);
   for(const [old,next] of [['user','start'],['datasets','data'],['projects','development'],['community','queue'],['diagnostics','results'],['ray-resources','troubleshooting'],['terminal-sessions','development'],['project-network','troubleshooting']]){
     const redirect=await fetch(origin+'/guide/'+old,{redirect:'manual'});assert.equal(redirect.status,302);assert.equal(redirect.headers.get('location'),'/guide/'+next);
   }
