@@ -49,8 +49,15 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   };
   const laneOwner=()=>service.db.prepare('SELECT archive_id FROM storage_archive_lane WHERE singleton=1').get()?.archive_id;
   const holdLane=row=>{
-    service.db.prepare('INSERT OR IGNORE INTO storage_archive_lane(singleton,archive_id) VALUES(1,?)').run(row.id);
-    return laneOwner()===row.id;
+    // Serialize admission against control-only cancellation across SQLite
+    // connections too. A stale worker paused after its earlier fence cannot
+    // acquire a lane or resurrect the journal after a cancellation commit.
+    service.db.exec('BEGIN IMMEDIATE');
+    try{
+      fence(row);
+      service.db.prepare('INSERT OR IGNORE INTO storage_archive_lane(singleton,archive_id) VALUES(1,?)').run(row.id);
+      const held=laneOwner()===row.id;service.db.exec('COMMIT');return held;
+    }catch(error){service.db.exec('ROLLBACK');throw error;}
   };
   const releaseLane=row=>service.db.prepare('DELETE FROM storage_archive_lane WHERE singleton=1 AND archive_id=?').run(row.id);
   const currentPolicy=row=>row.policyKey===policyKey&&row.sourceMachine===policy.machine;
@@ -150,6 +157,94 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   };
 
   const enrolling=new Map();
+  service.cancelStorageArchiveIntent=(principal,args)=>{
+    if(!args||Object.keys(args).sort().join(',')!=='archiveId,revision'||
+      !HASH.test(args.archiveId||'')||!HASH.test(args.revision||''))
+      fail('Intent cancellation requires the original archive ID and full journal revision.',400);
+    const actor=service.store.get(principal.userId);
+    if(!actor?.enabled||actor.role!=='admin'||principal.role!=='admin'||actor.username!==principal.username)
+      fail('Intent cancellation requires a current administrator.',403);
+    const actorSnapshot=JSON.stringify(actor);
+    if(service.closing)fail('Archive service is closing.',503);
+    service.assertMaintenanceAllowed?.('datasets.archive.cancel-intent',{},principal);
+    // No await/RPC occurs here. BEGIN IMMEDIATE serializes the full-row CAS,
+    // durable lane/transfer admission checks and audited tombstone. advance()
+    // owns that same lane before its first await; transfer admission is saved
+    // before remote I/O. An old in-memory worker must still pass fence() and
+    // archiveIntentAllowed(), both of which read the permanent tombstone.
+    service.db.exec('BEGIN IMMEDIATE');
+    try{
+      const stored=service.db.prepare('SELECT id,owner,machine,data FROM storage_archives WHERE id=?').get(args.archiveId);
+      if(!stored)fail('Archive intent is unavailable.',404);
+      const row=JSON.parse(stored.data),mode='undispatched-intent-cancel-v1';
+      const response=()=>({archiveId:row.id,state:'CANCELED',controlOnly:true,dataDeleted:false});
+      if(!row||row.id!==stored.id||row.owner!==stored.owner||row.machine!==stored.machine||
+        row.id!==key(row.owner,row.machine,row.dataset,row.version,row.eventId))
+        fail('Archive journal identity is not confirmed.',409);
+      if(row.phase==='FAILED'&&row.failureStage==='retired'&&row.retirement?.mode===mode&&row.retirement.revision===args.revision&&
+        row.retirement.controlOnly===true&&row.retirement.dataDeleted===false&&HASH.test(row.retirement.proofSha256||'')){
+        service.db.exec('COMMIT');return response();
+      }
+      if(createHash('sha256').update(stored.data).digest('hex')!==args.revision)
+        fail('Archive journal changed; inspect its original ID again.',409);
+      if(!row||row.id!==stored.id||row.owner!==stored.owner||row.machine!==stored.machine||
+        row.id!==key(row.owner,row.machine,row.dataset,row.version,row.eventId)||row.kind!=='ingest'||
+        !USER.test(row.owner||'')||!isRef(row)||!UUID.test(row.eventId||'')||
+        !MACHINES.some(m=>m.id===row.machine)||!MACHINES.some(m=>m.id===row.sourceMachine)||row.machine===row.sourceMachine||
+        row.logicalDataset!==row.dataset||row.phase!=='BLOCKED'||row.eventAcknowledged!==false||
+        row.sourceDataset!==null||row.transferId!==null||row.grantId!==null||
+        !UUID.test(row.copyKey||'')||!UUID.test(row.certifyId||'')||row.copyKey===row.certifyId||!HASH.test(row.policyKey||'')||
+        !Number.isSafeInteger(row.createdAt)||!Number.isSafeInteger(row.updatedAt)||!Number.isSafeInteger(row.failures)||row.failures<0||
+        row.retryRequested!==undefined&&row.retryRequested!==false||
+        ['failureStage','transferState','receiptSha256','enrollment','retirement','retirementIntent'].some(field=>Object.hasOwn(row,field))||
+        retiring.has(row.id)||laneOwner()===row.id)
+        fail('Only a confirmed, undispatched BLOCKED ingest intent can be canceled.',409);
+      const hasTable=name=>!!service.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
+      if(!hasTable('transfers'))fail('Durable transfer admission is not confirmed.',409);
+      const transfers=service.db.prepare('SELECT owner_id,client_key,state,data FROM transfers').all();
+      const copies=hasTable('dataset_copies')?service.db.prepare('SELECT data FROM dataset_copies').all():[];
+      if(transfers.length+copies.length>10000)fail('Transfer dependency history requires review.',409);
+      const related=(machine,ref)=>ref?.version===row.version&&ref.dataset===row.dataset&&[row.machine,row.sourceMachine].includes(machine);
+      for(const item of transfers){
+        const data=JSON.parse(item.data);
+        if(!data||typeof data!=='object'||Array.isArray(data)||!['copy','upload','download'].includes(data.kind)||
+          !MACHINES.some(m=>m.id===data.machine)||data.kind==='copy'&&!MACHINES.some(m=>m.id===data.from)||
+          data.kind!=='upload'&&(!isRef(data.reference)||data.reference.kind!=='datasets'))
+          fail('Unknown transfer dependency prevents intent cancellation.',409);
+        if(item.owner_id===row.owner&&item.client_key===row.copyKey)
+          fail('This intent already has durable transfer admission; cancellation is not safe.',409);
+        if(related(data.from||data.machine,data.reference)||related(data.machine,data.result)){
+          if(!['SUCCEEDED','CANCELED','FAILED'].includes(item.state)||
+            data.kind==='copy'&&data.sourceRelease?.state!=='RELEASED'||
+            data.kind==='download'&&data.downloadProtection?.state!=='RELEASED'||
+            data.sourceRelease&&data.sourceRelease.state!=='RELEASED'||data.downloadProtection&&data.downloadProtection.state!=='RELEASED')
+            fail('Active or unknown transfer protection prevents intent cancellation.',409);
+        }
+      }
+      for(const item of copies){
+        const copy=JSON.parse(item.data);
+        if(!copy||!isRef(copy)||!ID.test(copy.sourceDataset||'')||
+          !MACHINES.some(m=>m.id===copy.source)||!MACHINES.some(m=>m.id===copy.target))
+          fail('Unknown replica dependency prevents intent cancellation.',409);
+        if(related(copy.source,{dataset:copy.sourceDataset,version:copy.version})||related(copy.target,copy))
+          fail('A replica depends on this reference; reconcile it before canceling the intent.',409);
+      }
+      for(const other of rows())if(other.id!==row.id&&other.version===row.version&&!isRetired(other)&&
+        [other.dataset,other.logicalDataset,other.sourceDataset].includes(row.dataset))
+        fail('Another archive depends on this reference; reconcile it before canceling the intent.',409);
+      const proof={mode,archiveId:row.id,revision:args.revision,actor:principal.userId,
+        owner:row.owner,machine:row.machine,dataset:row.dataset,version:row.version,eventId:row.eventId,
+        controlOnly:true,dataDeleted:false,copyNeverAdmitted:true};
+      row.phase='FAILED';row.failureStage='retired';row.retryRequested=false;
+      row.retirement={mode,revision:args.revision,actor:principal.userId,proofSha256:key(proof),controlOnly:true,dataDeleted:false};
+      row.error='未开始的归档请求已取消；数据未删除，仍须通过正常数据集删除流程处理。';
+      save(row);
+      service.audit(principal.username,'datasets.archive.cancel-intent',row.id,JSON.stringify(proof));
+      if(JSON.stringify(service.store.get(principal.userId))!==actorSnapshot)
+        fail('Intent cancellation authorization changed.',403);
+      service.db.exec('COMMIT');return response();
+    }catch(error){service.db.exec('ROLLBACK');throw error;}
+  };
   service.retireStorageAuthority=(principal,args)=>{
     if(!args||Object.keys(args).filter(key=>key!=='retryKey').sort().join(',')!=='dataset,key,machine,ownerId,recoveryId,replacement,version'||
       !USER.test(args.ownerId||'')||!UUID.test(args.key||'')||!isRef(args)||

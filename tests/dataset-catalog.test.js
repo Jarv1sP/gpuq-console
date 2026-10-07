@@ -82,3 +82,60 @@ test('catalog and capacity discard results if machine policy changes during read
     await assert.rejects(datasetCatalogCall(s,principal,operation,{machine:machines[0]}),e=>e.status===403);
   }
 });
+
+const warehouseItems=(state='REGISTERED',extra={})=>[
+  {dataset:'training-data',ownerIds:[principal.userId],versions:[{version,state,canPrepare:true,warehouseReady:true,warehouseCanPrepare:true,...(state==='READY'?{storageReference:{dataset:'private-cache',version}}:{}),...extra}]},
+  {dataset:'private-cache',ownerIds:[principal.userId],versions:[{version,state,logicalDataset:'training-data'}]}
+];
+test('warehouse original is visible once, is not SSD READY, and lists no private binding or root',async()=>{
+  const s=fixture(async machine=>({datasets:machine===machines[0]?warehouseItems():[]}));
+  s.archiveState=()=>({phase:'FAILED',archiveMachine:machines[1],dataset:'old-authority',version});
+  const before=JSON.stringify(warehouseItems());
+  const view=datasetListView({datasets:warehouseItems()},users,{includeEmpty:true});
+  assert.equal(view.datasets.length,1);assert.equal(view.datasets[0].dataset,'training-data');
+  assert.equal(view.datasets[0].versions[0].state,'REGISTERED');assert.equal(view.datasets[0].versions[0].warehouseReady,true);
+  const result=await datasetCatalogCall(s,principal,'datasets.catalog',{machine:machines[0]});
+  assert.equal(result.datasets.length,1);const value=result.datasets[0].versions[0];
+  assert.equal(value.state,'REGISTERED');assert.equal(value.canPrepare,true);assert.equal(value.locations.length,1);
+  assert.equal(value.locations[0].warehouseReady,true);assert.equal(value.locations[0].dataset,'training-data');
+  assert.equal(value.locations[0].storage,undefined,'current fixed warehouse facts do not inherit old authority journals');
+  assert.doesNotMatch(JSON.stringify(result)+JSON.stringify(view),/storageReference|logicalDataset|private-cache|ownerIds/);
+  assert.equal(JSON.stringify(warehouseItems()),before);
+});
+test('prepared warehouse keeps one logical row, with exact cache identity for cache controls',async()=>{
+  const s=fixture(async machine=>({datasets:machine===machines[0]?warehouseItems('READY'):[]}));
+  const result=await datasetCatalogCall(s,principal,'datasets.catalog',{machine:machines[0]});
+  assert.equal(result.datasets.length,1);const value=result.datasets[0].versions[0];
+  assert.equal(value.state,'READY');assert.equal(value.locations[0].dataset,'private-cache');assert.equal(value.locations[0].warehouseReady,true);
+  assert.doesNotMatch(JSON.stringify(result),/storageReference|logicalDataset|ownerIds/);
+});
+test('warehouse duplicate suppression requires explicit binding, exact version and complete equal ACLs',()=>{
+  for(const change of [items=>delete items[1].versions[0].logicalDataset,items=>items[1].ownerIds=['reader-2'],items=>items[1].ownerIds=null,
+    items=>items[1].versions[0].version='b'.repeat(64),items=>items[1].versions[0].logicalDataset='other',items=>items[0].versions[0].storageReference.dataset='other']){
+    const items=warehouseItems('READY');change(items);assert.equal(datasetListView({datasets:items},users).datasets.length,2);
+  }
+  const unrelated={dataset:'wc-legitimate-dataset',ownerIds:[principal.userId],versions:[{version,state:'READY'}]};
+  assert.equal(datasetListView({datasets:[...warehouseItems('READY'),unrelated]},users).datasets.length,2);
+});
+test('warehouse invalid cache binding cannot advertise READY or prepare authority',async()=>{
+  for(const extra of [{storageReference:undefined},{storageReference:{dataset:'../cache',version}},{storageReference:{dataset:'private-cache',version:'b'.repeat(64)}},
+    {storageReference:{dataset:'private-cache',version,path:'/private'}},{warehouseReady:false}]){
+    const items=warehouseItems('READY',extra).slice(0,1),s=fixture(async machine=>({datasets:machine===machines[0]?items:[]}));
+    const listed=datasetListView({datasets:items},users).datasets[0].versions[0];
+    assert.equal(listed.state,'UNKNOWN');assert.equal(listed.canPrepare,false);
+    const value=(await datasetCatalogCall(s,principal,'datasets.catalog',{machine:machines[0]})).datasets[0].versions[0];
+    assert.equal(value.state,'UNKNOWN');assert.equal(value.canPrepare,false);assert.equal(value.locations[0].warehouseReady,false);
+  }
+});
+test('remote warehouse original can prepare another authorized machine without SSD cache and sources stay logical',async()=>{
+  for(const state of ['REGISTERED','READY']){
+    const s=fixture(async machine=>({datasets:machine===machines[1]?warehouseItems(state):[]}));
+    s.transferCall=async()=>({enabled:true,sources:[machines[1]]});
+    const value=(await datasetCatalogCall(s,principal,'datasets.catalog',{machine:machines[0]})).datasets[0].versions[0];
+    assert.equal(value.state,'NOT_LOCAL');assert.equal(value.canPrepare,true);assert.equal(value.sourceMachine,machines[1]);assert.equal(value.sourceDataset,'training-data');
+  }
+  const s=fixture(async machine=>({datasets:machine===machines[1]?warehouseItems():[]}));s.store.get=()=>({id:principal.userId,enabled:true,limits:{[machines[0]]:1}});
+  s.transferCall=async()=>({enabled:true,sources:[machines[1]]});
+  const value=(await datasetCatalogCall(s,principal,'datasets.catalog',{machine:machines[0]})).datasets[0].versions[0];
+  assert.equal(value.canUse,false);assert.equal(value.canPrepare,false);assert.equal(value.sourceMachine,undefined);
+});

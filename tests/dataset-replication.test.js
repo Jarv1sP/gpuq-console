@@ -214,3 +214,53 @@ test('recovery rejects mismatched physical name or content version from the node
   }
   assert.equal(f.calls.filter(c=>c.operation==='transfers.create').length,1);
 });
+
+function warehouse(f,{state='REGISTERED',extra={}}={}){
+  const original=f.service.bridge;
+  f.service.bridge=async(machine,operation,args)=>{
+    if(machine===target&&['datasets.status','datasets.prepare'].includes(operation)){
+      f.calls.push({machine,operation,args});if(f.onBridge)await f.onBridge(machine,operation,args);
+      if(operation==='datasets.prepare'&&f.warehouseError)throw f.warehouseError;
+      return f.warehouseReply||{...ref,state:operation==='datasets.prepare'?'PREPARING':state,warehouseReady:true,warehouseCanPrepare:true,
+        ...(state==='READY'&&operation==='datasets.status'?{storageReference:{dataset:'private-cache',version:ref.version}}:{}),...extra};
+    }
+    return original(machine,operation,args);
+  };
+  return f;
+}
+test('warehouse same-node READY resolves only the fixed physical cache and preserves the logical mount name',async t=>{
+  const f=warehouse(fixture(t),{state:'READY'}),result=await f.service.resolveDataset(f.user.id,target,ref);
+  assert.deepEqual(result.reference,{dataset:'private-cache',version:ref.version,mountAs:ref.dataset});
+  assert.equal(result.status.dataset,ref.dataset);assert.equal(f.records.size,0);
+  assert.deepEqual(f.service.datasetPhysicalReference(f.user.id,target,ref),ref,'copy/download sources remain the HDD original');
+});
+test('warehouse local preparation is coalesced, fixed, and does not create a transfer or reselect a source',async t=>{
+  const f=warehouse(fixture(t));const result=await Promise.all([f.service.prepareDataset(f.user.id,target,ref),f.service.prepareDataset(f.user.id,target,ref)]);
+  assert.ok(result.every(value=>value.state==='PREPARING'));assert.equal(f.records.size,0);
+  assert.deepEqual(f.calls.filter(c=>c.operation==='datasets.prepare'),[{machine:target,operation:'datasets.prepare',args:{userId:f.user.id,hostAdmin:false,...ref}}]);
+  assert.equal(f.calls.some(c=>c.operation==='datasets.list'||c.operation.startsWith('transfers.')),false);
+});
+test('invalid warehouse cache receipts fail closed without HDD training or another source fallback',async t=>{
+  for(const extra of [{storageReference:undefined},{storageReference:{dataset:'../escape',version:ref.version}},{storageReference:{dataset:123,version:ref.version}},{storageReference:{dataset:'cache',version:'b'.repeat(64)}},
+    {storageReference:{dataset:'cache',version:ref.version,mountAs:'other'}},{warehouseReady:false},{warehouseReady:false,storageReference:undefined}]){
+    const f=warehouse(fixture(t),{state:'READY',extra});
+    await assert.rejects(f.service.resolveDataset(f.user.id,target,ref),e=>e.code==='WAREHOUSE_REFERENCE_INVALID');
+    await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e.code==='WAREHOUSE_REFERENCE_INVALID');
+    assert.equal(f.calls.some(c=>c.operation==='datasets.prepare'||c.operation.startsWith('transfers.')),false);
+  }
+});
+test('warehouse rejection, wrong prepare identity and revoked policy never fall back to another source',async t=>{
+  const f=warehouse(fixture(t));f.warehouseError=Error('warehouse authority changed');
+  await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e===f.warehouseError);
+  assert.equal(f.calls.some(c=>c.operation.startsWith('transfers.')),false);
+  f.warehouseError=null;
+  for(const reply of [{...ref,dataset:'other',state:'READY'},{...ref,version:'b'.repeat(64),state:'READY'},{...ref,state:'READY'},
+    {...ref,state:'READY',warehouseReady:true,storageReference:{dataset:'cache',version:'b'.repeat(64)}}]){
+    // Only prepare changes its reply; the initial status remains unprepared.
+    const bridge=f.service.bridge;f.service.bridge=async(m,op,args)=>op==='datasets.prepare'?reply:bridge(m,op,args);
+    await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),e=>e.status===502);f.service.bridge=bridge;
+  }
+  const revoked=warehouse(fixture(t));revoked.onBridge=(_m,op)=>{if(op==='datasets.status')revoked.user.limits[target]=0;};
+  await assert.rejects(revoked.service.prepareDataset(revoked.user.id,target,ref),e=>e.status===403);
+  assert.equal(revoked.calls.some(c=>c.operation==='datasets.prepare'),false);
+});

@@ -10,13 +10,15 @@ def locate(executor, args):
             or not isinstance(args['uploadId'], str)
             or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', args['uploadId'])):
         raise ValueError('Invalid private upload location fields')
-    module, cache = executor.dataset_cache()  # Existing mount/root guard.
+    factory=getattr(executor,'dataset_source_cache',executor.dataset_cache)
+    module, cache = factory()  # Existing fixed warehouse mount/root guard.
     machine = executor.CONFIG['machine']
     archive = executor.CONFIG.get('storageArchive', {})
     authority = executor.CONFIG.get('storageAuthority', {})
     is_hdd = (authority.get('enabled') is True and archive.get('enabled') is True
               and archive.get('machine') == machine
-              and executor.CONFIG.get('storageTier', {}).get('enabled') is not True)
+              and (executor.CONFIG.get('storageTier', {}).get('enabled') is not True
+                   or executor.CONFIG.get('storageWarehouse', {}).get('enabled') is True))
     result = {'protocol': 'dataset-upload-location-v1', 'machine': machine,
               'userId': args['userId'], 'uploadId': args['uploadId'], 'present': False,
               'authority': {'enabled': is_hdd, 'machine': machine, 'authority': archive.get('authority')}}

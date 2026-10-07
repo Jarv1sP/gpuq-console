@@ -86,7 +86,7 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 {"operation":"projects.create","args":{"machine":"SERVER_ID","project":"experiment-a","environmentMode":"oci"}}
 ```
 
-`project` 须匹配 `^[a-z][a-z0-9_-]{0,47}$`。`environmentMode` 只用于创建，取 `shared`、`isolated` 或 `oci`；省略时沿用共享模式。同名项目不能改换模式，失败时不自动降级或创建替代项目。创建成功须确认 `result.environmentMode === "oci"`，不能把 HTTP 200 当作容器模式已确认。
+`project` 须匹配 `^[a-z][a-z0-9_-]{0,47}$`。新项目固定为个人 OCI；`environmentMode` 可省略或兼容显式 `"oci"`，shared/isolated 在门户派发前拒绝，不能通过旧客户端绕过。既有项目与历史版本仍可查询，不自动转换或重建环境；管理员 ROOT 入口独立不变。同名项目不能改换模式，失败时不自动降级或创建替代项目。创建成功须确认准确 `result.project` 与 `result.environmentMode === "oci"`，不能把 HTTP 200 当作容器模式已确认。
 
 | 操作 | `args` | 成功的 `result` |
 | --- | --- | --- |
@@ -208,6 +208,17 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 这项优化仅涉及 `deploy/storage-archive.py` 的内部检查及私有摘要目录。经过生产变体核对后可对该文件做精确原子热更新，新 RPC 使用新实现，不要求中断既有复制或重启 peer、训练、门户。它不改变单块 TLS 连接、目标落盘持久化或当前传输状态，不应把元信息基准的提速直接当作端到端吞吐提升。基准入口为 `tests/archive-enrollment-performance.bench.py`（支持 164,690 / 450,000 条目；临时元信息 fixture，不包含真实文件复制）。
 
 `datasets.archive.retire {machine,dataset,version,ownerId,eventId,recoveryId}` 也是当前管理员专用入口，接受固定 HDD 同机 ingest（无 transfer、未确认归档）或完全未派发的 `QUEUED` ingest。后者必须 transferId/sourceDataset/grantId 均为 null、retryRequested 非 true、没有同 copyKey 的任何传输记录且不是 laneOwner；RPC 前保存持久 retirementIntent 并阻止该行的 dispatch/reconcile，前后复核登记上下文与准入条件。回包丢失或重启只保留待确认 fence，同请求可继续，不推断成功或启动传输。`recoveryId` 是正常注销的 `unregister-` 加 32 位小写十六进制回执，不接收客户端的 mode、grant、证明、路径或角色。后台私有 `storage.archive.retire` 复核原登记身份、完整清单、单 owner、已提交注销与无现存保护，再持久化该事件的 `RETIRED` 墓碑；旧 HDD 协议还检查 worker 从未创建且确认停止，QUEUED 内部模式只证明本来源注销。门户返回 `phase=FAILED` 并保留不可重试的 retired 原因；重复同一回执幂等，换回执、已派发跨机、已 seal 或 UNKNOWN 均拒绝，不清除其他 lane。私有 RPC 不向浏览器公开。
+
+`datasets.archive.cancel-intent {archiveId,revision}` 仅当前启用的管理员可用，是未开始的
+`BLOCKED` ingest 请求的控制面取消，不删除数据或伪造节点 ACK。`archiveId` 是原 64 位
+ID，`revision` 是持久 `storage_archives.data` 完整 UTF-8 JSON 字节的 SHA-256；必须先核对
+原记录，不接受 owner、路径、授权、mode 或客户端证明。仅 sourceDataset/transferId/grantId
+明确为 null、未 retry/ACK、没有同 copyKey 的任何传输记录、未持有 lane 且无未释放依赖时
+受理。全行 CAS、持久 lane/传输复核、永久 retired 墓碑和审计在同一 SQLite 事务完成；
+lane 准入也在写事务内重读墓碑，旧 worker 或延迟 copy 准入不能复活原请求。
+回包为 `state:CANCELED, controlOnly:true, dataDeleted:false`，丢回执或重启只沿相同
+ID/revision 核对。维护状态仍保持；物理原件、副本、租约与 pin 不因此解除，后续数据删除
+仍须全部节点的正常计划、围栏、隔离和回执。此接口不增加普通用户按钮或节点 RPC。
 
 个人显示名使用 `datasets.label.get {machine,dataset}` 读取，`datasets.label.set {machine,dataset,displayName,revision}` 修改。名称为 1–80 个可见字符，允许中文，拒绝控制字符；`revision` 必须沿用最近查询值，409 冲突后请用户刷新决定，不自动覆盖。响应有规范逻辑 `dataset`、原 `name`、可空的 `displayName`、`revision`、`ownerId` 和 `scope:"personal"`。管理员代管时可显式增加 `ownerId`，普通成员不能指定他人。该名称仅作用于这位用户的显示视图，不重命名节点登记、版本或训练挂载路径，也不改变共享数据权限。
 

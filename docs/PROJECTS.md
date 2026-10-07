@@ -15,7 +15,7 @@ gpuctl push .
 gpuctl ssh
 ```
 
-开发终端会进入代码目录，并准备项目 venv。安装 Linux 端依赖：
+新项目统一创建个人容器，不需要环境模式参数。开发终端进入容器代码目录，安装 Linux 端依赖：
 
 ```sh
 python -m pip install -r requirements.txt
@@ -40,25 +40,24 @@ gpuctl pull --job 任务ID model.pt ./model.pt
 | 作业内路径 | 开发终端 | 训练任务 |
 |---|---|---|
 | `/workspace` | 本项目草稿代码，可写 | 指定发布版本代码，只读 |
-| `/opt/project-env` | 本项目 venv，可写 | 指定发布版本 venv，只读 |
-| `/opt/conda` | 管理员基础 Python/Conda，只读 | 同节点基础环境，只读 |
+| 镜像内 Python/Conda | 本项目容器环境，可安装依赖 | 指定发布镜像中的环境 |
 | `/home/gpuq` | 本项目个人目录 | 本次任务独立 HOME |
 | `/outputs` | 开发 scratch，不是训练结果 | 本次任务独立可写结果目录 |
 | `/data2/数据集名称` | 默认不挂载 | 显式授权、READY、租约保护的只读本地副本 |
 
-项目 Python 优先使用 `/opt/project-env/bin`；禁用用户 site-packages，并要求 pip 在项目 venv 内安装。基础 Conda 不被用户修改。依赖安装应在开发终端完成，不在占用 GPU 的训练启动命令里临时安装。
+新项目使用容器自己的 Python/Conda，不挂载或继承宿主基础 Conda。依赖安装应在开发终端完成，不在占用 GPU 的训练启动命令里临时安装。以下 venv 说明仅用于识别历史 shared/isolated 项目，不是新项目选项。
 
 项目环境、HOME 缓存和输出使用平台工作区磁盘；沙箱 `/tmp` 与默认受管 Ray spill 使用 tmpfs，计入内存限制。项目训练的 `/workspace` 只读，需要较大磁盘临时空间时，可在训练程序启动时创建本次任务的 `$HOME/.cache/tmp`，并在程序内将 `TMPDIR` 指向它；只在提交命令的本机终端设置变量不会自动传入任务。开发终端也可用私人 HOME 作为 pip 构建临时目录。此设置不改变 Ray spill 的独立配置；磁盘入口预留不是硬配额，仍须关注剩余容量并清理不再需要的临时文件。
 
-新建时可明确选择 `gpuctl project create clean-experiment --env-mode isolated`，网页对应“完全隔离（不继承基础包）”。它不使用 `--system-site-packages`，发布时校验 `pyvenv.cfg` 的 `include-system-site-packages = false`，PATH 不回退基础 Conda 的命令。Python、pip 及 `gpuq-ray` 仍优先使用项目解释器；需要的包须自行安装，包括 torch、Ray 等。默认 `--env-mode shared` 沿用原共享基础包行为；省略参数时兼容旧创建接口。
+历史 isolated 项目不使用 `--system-site-packages`；shared 项目继承只读基础 Python 包。这是 Python 依赖继承差异，不表示不同账号共享可写代码或 HOME。公开新建入口不再接受 shared/isolated，旧客户端也不能绕过；底层兼容仅供已有资料与管理员迁移使用。
 
 模式仅创建时设定。旧项目/旧版本缺少模式字段时继续按共享模式处理，历史版本哈希不改变；同名项目显式指定另一模式会报错，既不重装也不迁移。已有环境不自动重建，首次初始化失败留下的非空目录需先检查，或另建项目。旧节点不支持新选项时应升级配套节点，不能静默将 isolated 降级成 shared。`project status` 返回 `environmentMode` 和离线资源约定路径。这里的“完全隔离”只指不继承 Python site-packages，不是阻止用户代码显式访问只读基础路径的安全边界。
 
 项目 venv 与代码被冻结到版本，不覆盖其他账号/项目的环境。venv 依赖同机基础 Python 和系统库；记录基础环境指纹不等于封装基础镜像全部字节，也不能保证宿主机升级后仍 bit-for-bit 可复现。该发布机制不是容器镜像，也不支持把 Mac venv 直接拿到 Linux 运行。
 
-### 可选的个人 OCI 环境
+### 个人 OCI 环境
 
-管理员完成 rootless OCI 验收并显式启用后，获准账号可新建 `gpuctl project create system-env --env-mode oci`。未启用节点或未获准账号会被拒绝，不会静默改用 venv。现有 shared/isolated 项目不转换，管理员宿主机 root 入口保持独立。
+管理员完成 rootless OCI 验收并显式启用后，获准账号直接新建 `gpuctl project create system-env`。省略模式固定为 OCI；兼容显式 `--env-mode oci`，但无须使用。未启用节点或未获准账号会被拒绝，不会静默改用 venv。现有 shared/isolated 项目不转换、不重建旧环境；已有资料与历史结果保留，管理员宿主机 root 入口保持独立。
 
 OCI 开发终端内是容器 root，可安装容器系统包（例如基础镜像支持时使用 apt），不是宿主机 root：没有宿主机 Docker/Podman socket、宿主目录、宿主网络或 GPU。代码仍在 `/workspace`，私人 HOME 在 `/home/gpuq`，开发 scratch 在 `/outputs`；使用镜像自己的 Python/Conda，不再挂载宿主 `/opt/conda` 或项目 venv。每个账号的镜像、构建临时数据与可写层独立存放在数据卷。
 
@@ -148,9 +147,7 @@ model = AutoModel.from_pretrained(model_dir, local_files_only=True)
 
 | 命令 | 行为 |
 |---|---|
-| `gpuctl project create NAME` | 在当前机器创建并选中项目 |
-| `gpuctl project create NAME --env-mode isolated` | 新建不继承基础 Python 包的项目，须自行准备依赖 |
-| `gpuctl project create NAME --env-mode oci` | 在已启用节点新建可安装系统包的个人 rootless 容器环境 |
+| `gpuctl project create NAME` | 在已开通机器创建并选中个人容器项目，可在容器内安装系统包 |
 | `gpuctl project use NAME` | 核验项目存在后选中 |
 | `gpuctl project list` | 查看当前机器的个人项目 |
 | `gpuctl project status [NAME]` | 查看草稿/发布状态、READY 版本 |

@@ -7,6 +7,7 @@ Only cache.publish can make a version READY; upload receipts are not readiness.
 """
 import base64
 from contextlib import closing, contextmanager
+from contextvars import ContextVar
 import hashlib
 import importlib.util
 import json
@@ -31,6 +32,7 @@ MAX_ACTIVE_ARCHIVES = 4  # Independent admission, never an unbounded bypass.
 
 
 DIRECT_FILE_CHUNK_BYTES = 16 * 1024 * 1024
+_CACHE_PREPARATION = ContextVar('dataset_upload_cache_preparation', default=None)
 
 
 class DatasetUploads:
@@ -46,6 +48,57 @@ class DatasetUploads:
         self.root = self.cache.root/'.uploads'
         self.d._mkdir(self.root)
         self.d._mkdir(self.root/'bindings')
+
+    def cache_only(self):
+        # Existing trusted node policy, never a public request option. Members
+        # and administrators share the same dataset ingress boundary.
+        return self.n.CONFIG.get('storageTier', {}).get('enabled') is True
+
+    def require_public_ingress(self):
+        if self.cache_only():
+            raise PermissionError('Dataset originals must be uploaded to the HDD warehouse; this node only prepares training caches')
+
+    def require_ingress(self, user, upload, session=None):
+        if not self.cache_only():
+            return
+        scope = _CACHE_PREPARATION.get()
+        if scope is None or scope[0] is not self or scope[1]['userId'] != user or scope[1]['id'] != upload:
+            self.require_public_ingress()
+        spec, validate = scope[1], scope[2]
+        validate()
+        if session is not None and (session['name'] != spec['name'] or any(
+                session[k] != spec['source'][k] for k in ('manifestBytes', 'manifestSha256', 'totalBytes', 'entries'))
+                or session.get('version', spec['reference']['version']) != spec['reference']['version']):
+            raise ValueError('Training cache upload differs from its fixed warehouse version')
+
+    @contextmanager
+    def _peer_cache_preparation(self, spec):
+        """Private worker scope; no JSON/HTTP field can construct this grant."""
+        if not self.cache_only():
+            yield
+            return
+        policy = self.n.CONFIG.get('storageArchive', {})
+        jobs = self.n.transfers()
+        def validate():
+            ref, source = spec.get('reference'), spec.get('source')
+            if (policy.get('enabled') is not True or spec.get('sourceMachine') != policy.get('machine')
+                    or policy.get('machine') == self.n.CONFIG.get('machine') or 'archiveLane' in spec
+                    or not isinstance(ref, dict) or set(ref) != {'kind', 'dataset', 'version'}
+                    or ref.get('kind') != 'datasets' or not HASH.fullmatch(str(ref.get('version', '')))
+                    or not isinstance(source, dict) or source.get('state') != 'READY'
+                    or source.get('id') != spec.get('id') or not UUID.fullmatch(str(spec.get('id', '')))
+                    or jobs.load(spec['id']) != spec or jobs.path(spec['id'], '.cancel').exists()
+                    or spec['sourceMachine'] not in self.n.CONFIG.get('transferPeers', {})):
+                raise PermissionError('Training cache requires its durable fixed-version HDD warehouse transfer')
+            payload = {k: spec[k] for k in ('userId', 'sourceMachine', 'source', 'name', 'reference', 'timeoutSec')}
+            if spec.get('digest') != hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest():
+                raise ValueError('Training cache transfer identity changed')
+        validate()
+        token = _CACHE_PREPARATION.set((self, spec, validate))
+        try:
+            yield
+        finally:
+            _CACHE_PREPARATION.reset(token)
 
     def actor(self, user):
         self.n.workspace(user)
@@ -332,6 +385,7 @@ class DatasetUploads:
                 'authority': lane['authority'], 'sourceMachine': spec['sourceMachine'], 'reference': spec['reference']}
 
     def _admit(self, user, args, *, _archive_transfer=None):
+        self.require_ingress(user, args.get('key'))
         name, upload = args.get('name'), args.get('key')
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise ValueError('Personal dataset name must be 1-40 ASCII letters, digits, underscores or hyphens')
@@ -413,6 +467,7 @@ class DatasetUploads:
             return session
 
     def begin(self, user, args, *, _archive_transfer=None):
+        self.require_ingress(user, args.get('key'))
         # effective() has its own short cache lock; do not nest it in admission.
         session = self.effective(self._admit(user, args, _archive_transfer=_archive_transfer))
         if session.get('directPaused') is True or args.get('allowRelay') is True and session.get('relayAllowed') is not True:
@@ -493,9 +548,11 @@ class DatasetUploads:
 
     def manifest_bytes(self, user, args, offset, data, *, transport='vps-relay'):
         upload = args['uploadId']
+        self.require_ingress(user, upload)
         self.raw_chunk(offset, data)
         with self.guard(user, upload):
             session = self.effective(self.load(user, upload))
+            self.require_ingress(user, upload, session)
             if session['state'] not in ('RECEIVING_MANIFEST', 'FAILED') or session.get('resumeState', 'RECEIVING_MANIFEST') != 'RECEIVING_MANIFEST':
                 raise ValueError('Manifest is already sealed or being processed')
             if offset+len(data) > session['manifestBytes']:
@@ -623,6 +680,7 @@ class DatasetUploads:
 
     def chunk_bytes(self, user, args, offset, data, *, transport='vps-relay', direct_chunk_limit=None):
         upload = args['uploadId']
+        self.require_ingress(user, upload)
         # Only the authenticated direct data plane can use large file blocks.
         # Keep the journal, data and accounting durability barriers unchanged.
         limit = self.d.CHUNK_BYTES
@@ -633,6 +691,7 @@ class DatasetUploads:
         self.raw_chunk(offset, data, limit=limit)
         with self.guard(user, upload):
             session = self.effective(self.load(user, upload))
+            self.require_ingress(user, upload, session)
             if session['state'] != 'UPLOADING' and not (session['state'] == 'FAILED' and session.get('resumeState') == 'UPLOADING'):
                 raise ValueError('Upload is not accepting data; finish sealing or wait for publication')
             entry = self._entry(session, args.get('path'))
@@ -677,6 +736,8 @@ class DatasetUploads:
         return result
 
     def start(self, user, args, action, *, inline_unit=None):
+        if action != 'discard':
+            self.require_ingress(user, args.get('uploadId'))
         # Internal transfer worker only, never accepted in public RPC fields.
         # Seal/publish in the SAME cgroup, so cancel cannot leave a publisher.
         if inline_unit is not None and not re.fullmatch(r'gpuq-transfer-[a-f0-9-]{36}-[1-9][0-9]*\.service', inline_unit):
@@ -750,6 +811,7 @@ class DatasetUploads:
         return self.root/'bindings'/(hashlib.sha256((dataset+'@'+version).encode()).hexdigest()+'.json')
 
     def seal(self, session):
+        self.require_ingress(session['userId'], session['uploadId'], session)
         user, upload = session['userId'], session['uploadId']
         folder = self.folder(user, upload)
         with self.d._directory(folder) as parent:
@@ -928,6 +990,8 @@ class DatasetUploads:
             if session['state'] != expected or session.get('action') != action:
                 raise ValueError('Upload worker request changed')
             try:
+                if action != 'discard':
+                    self.require_ingress(user, upload, session)
                 if action == 'seal':
                     self.seal(session)
                 elif action == 'commit':
@@ -952,7 +1016,8 @@ class DatasetUploads:
                         # personal ownership at every publish checkpoint, even
                         # if an administrator changes authorization mid-hash.
                         self.cache._publish_locked(actor, session['dataset'], session['version'],
-                            session['transferToken'], (record, identity), _guard=lambda: self._check(session))
+                            session['transferToken'], (record, identity),
+                            _guard=lambda: (self.require_ingress(user, upload, session), self._check(session)))
                     session.update(state='READY')
                     with self.cache._locked():
                         self._unlink(self.reservation(user, upload))
@@ -992,6 +1057,8 @@ class DatasetUploads:
         if not required <= set(args) or 'userId' not in args:
             raise ValueError('Missing personal upload fields')
         user = args['userId']
+        if action in ('begin', 'manifest', 'seal', 'chunk', 'commit', 'direct-ticket'):
+            self.require_public_ingress()
         if action == 'routes':
             # Metadata only: no workspace, upload, ticket or lockfile creation.
             if not isinstance(user, str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]{1,18})', user):

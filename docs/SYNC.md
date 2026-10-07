@@ -13,7 +13,9 @@ gpuctl sync git ./my-repo --ref HEAD --to gpu-2 --project vision --dry-run
 gpuctl sync git ./my-repo --ref HEAD --to gpu-2 --project vision
 ```
 
-只创建新的项目草稿；已有普通项目不会覆盖。相同来源、目标和清单生成同一重试键，重复原命令可续传。首次打印的 key 也可用 `--key UUID` 固定。Git ref 变化或脏工作树会拒绝完成。
+只创建新的个人 OCI 容器项目草稿；目标须已开通本人容器权限，不回退 venv，已有普通项目不会覆盖。相同来源、目标和清单生成同一重试键，重复原命令可续传。首次打印的 key 也可用 `--key UUID` 固定。Git ref 变化或脏工作树会拒绝完成。旧同步的已有草稿可完成或取消，但不会重新创建已删除的旧环境。
+
+部署时先更新配套节点同步执行器，再更新门户。新同步回执在节点内部记录 `environmentMode: oci`；只接受旧回执格式的执行器不能恢复它，存在未完成的新回执时不能单独回滚为旧执行器。
 
 ## 从节点复制已发布代码
 
@@ -28,7 +30,7 @@ gpuctl sync code --from gpu-1 --to gpu-2 --project vision --release 完整64位�
 ```sh
 gpuctl use gpu-2
 gpuctl project use vision
-gpuctl ssh                # 准备项目自己的隔离环境；完成后 exit
+gpuctl ssh                # 在个人容器准备依赖；完成后 exit
 gpuctl project publish
 gpuctl project status     # 等 READY，记录目标节点的完整 release
 ```

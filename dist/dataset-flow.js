@@ -16,12 +16,12 @@ export function discloseDatasetInfo(element,label){
 const phases={QUEUED:'等待存入',COPYING:'存入中',PROVISIONING:'校验中',CERTIFYING:'检查恢复能力',ARCHIVED:'原件已保存',FAILED:'存入仓库失败',BLOCKED:'待确认'};
 const order=['QUEUED','COPYING','PROVISIONING','CERTIFYING','ARCHIVED'];
 const amount=value=>Number.isFinite(value)&&value>=0?transferBytes(value):null;
-const storageRows=version=>(version?.locations||[]).filter(row=>row.storage&&typeof row.storage==='object');
+const storageRows=version=>(version?.locations||[]).flatMap(row=>row.storage&&typeof row.storage==='object'?[row]:row.warehouseReady===true&&typeof row.machine==='string'&&row.machine?[{...row,storage:{dataset:row.dataset,version:version.version,phase:'WAREHOUSE_READY',archiveMachine:row.machine,originalRetained:true}}]:[]);
 // publicRow may use the logical dataset alias while a location retains the
 // node's physical identifier. The attached record and immutable hash bind it.
 const matching=(row,version)=>row.storage.version===version.version&&typeof row.storage.dataset==='string'&&row.storage.dataset.length>0;
 export function hasDatabaseOriginal(version){
-  return storageRows(version).some(row=>matching(row,version)&&row.storage.phase==='ARCHIVED'&&row.storage.originalRetained===true&&typeof row.storage.archiveMachine==='string'&&row.storage.archiveMachine.length>0);
+  return storageRows(version).some(row=>matching(row,version)&&['ARCHIVED','WAREHOUSE_READY'].includes(row.storage.phase)&&row.storage.originalRetained===true&&typeof row.storage.archiveMachine==='string'&&row.storage.archiveMachine.length>0);
 }
 export function databaseSummary(version){
   const rows=storageRows(version);
@@ -29,8 +29,8 @@ export function databaseSummary(version){
   const machines=new Set(rows.map(row=>row.storage.archiveMachine));
   const machine=machines.size===1&&typeof rows[0].storage.archiveMachine==='string'&&rows[0].storage.archiveMachine?rows[0].storage.archiveMachine:null;
   if(rows.some(row=>row.storage.phase==='FAILED'))return {kind:'failed',phase:'FAILED',machine,saved:false,label:phases.FAILED};
-  if(!machine||rows.some(row=>!matching(row,version)||!Object.hasOwn(phases,row.storage.phase)||row.storage.phase==='BLOCKED'||row.storage.phase==='ARCHIVED'&&row.storage.originalRetained!==true))return {kind:'unknown',phase:'BLOCKED',machine,saved:false,label:'待确认'};
-  const phase=order.find(value=>rows.some(row=>row.storage.phase===value));
+  if(!machine||rows.some(row=>!matching(row,version)||!Object.hasOwn(phases,row.storage.phase)&&row.storage.phase!=='WAREHOUSE_READY'||row.storage.phase==='BLOCKED'||['ARCHIVED','WAREHOUSE_READY'].includes(row.storage.phase)&&row.storage.originalRetained!==true))return {kind:'unknown',phase:'BLOCKED',machine,saved:false,label:'待确认'};
+  const phase=order.find(value=>rows.some(row=>row.storage.phase===value||value==='ARCHIVED'&&row.storage.phase==='WAREHOUSE_READY'));
   return {kind:phase==='ARCHIVED'?'saved':'pending',phase,machine,saved:phase==='ARCHIVED',label:phases[phase]};
 }
 export function cacheFact(version,machine,catalog,state){
@@ -77,7 +77,7 @@ export function datasetFlowRoute(version,catalog){
   if(!['NOT_LOCAL','PREPARING'].includes(version.state)||version.canPrepare!==true)return null;
   const source=version.sourceMachine,target=catalog.machine;
   if(typeof source!=='string'||!source||source===target||!(catalog.machines||[]).some(row=>row.machine===target&&row.state==='ok'))return null;
-  if(!(version.locations||[]).some(row=>row.machine===source&&row.state==='READY'))return null;
+  if(!(version.locations||[]).some(row=>row.machine===source&&(row.state==='READY'||row.warehouseReady===true)))return null;
   return {source,target,bytes:Number.isSafeInteger(version.bytes)&&version.bytes>=0?version.bytes:null};
 }
 export function datasetFlowDetailHTML(dataset,version,catalog,route,options={}){

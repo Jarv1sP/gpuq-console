@@ -37,7 +37,10 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
       const { operation, args = {} } = body;
       let result;
       if (operation === 'state') { res.end(JSON.stringify({ state })); return; }
-      if (operation === 'projects.create') result = { project: args.project, environmentMode: 'shared' };
+      if (operation === 'projects.create') {
+        assert.equal(args.environmentMode, 'oci');
+        result = { project: args.project, environmentMode: 'oci' };
+      }
       else if (operation === 'files.upload.status') {
         assert.equal(args.project, 'native-test');
         const record = codeUploads.get(JSON.stringify([args.project,args.path]));
@@ -112,7 +115,7 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
     assert.equal((await ok(['login', principal.username, '--password-stdin'], 'offline-test-not-a-secret\r\n')).json.data.loggedIn, true);
     assert.equal((await ok(['state'])).json.data.machines[0].id, 'offline-node');
     await ok(['use', 'offline-node']);
-    await ok(['project', 'create', 'native-test']);
+    assert.equal((await ok(['project', 'create', 'native-test'])).json.data.environmentMode, 'oci');
     const codeDir = join(dir, '代码 space ! &');
     await mkdir(codeDir);
     const content = 'print("hello native client")\n';

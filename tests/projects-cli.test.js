@@ -76,7 +76,7 @@ test('member guide project-label command uses the real CLI option and rejects th
 test('project create/use is verified and remembered per machine; changing server never reuses another project',async t=>{
   const f=await fixture(t);
   assert.equal((await f.cli(['project','create','alpha'])).code,0);
-  assert.deepEqual(f.calls.at(-1),{operation:'projects.create',args:{machine:'gpu-1',project:'alpha'}});
+  assert.deepEqual(f.calls.at(-1),{operation:'projects.create',args:{machine:'gpu-1',project:'alpha',environmentMode:'oci'}});
   assert.deepEqual(JSON.parse(await readFile(f.session,'utf8')).projectsByMachine,{'gpu-1':'alpha'});
   assert.equal((await f.cli(['use','2'])).data.project,null);
   assert.equal((await f.cli(['project','use','beta'])).code,0);
@@ -178,19 +178,19 @@ test('quota cohort exclusion explains personal not-enabled state without claimin
  const value=await f.cli(['project','quota'],'',null,true);assert.equal(value.code,0,value.stderr);
  assert.match(value.stdout,/你的工作区尚未纳入/);assert.match(value.stdout,/不是零用量/);assert.doesNotMatch(value.stdout,/这台服务器尚未启用/);
 });
-test('project create forwards only explicit environment mode and rejects mutation on other commands',async t=>{
+test('project create defaults to personal OCI and rejects old mode flags without mutation',async t=>{
   const f=await fixture(t);
-  for(const mode of ['shared','isolated','oci']){
-    assert.equal((await f.cli(['project','create','clean','--env-mode',mode])).code,0);
-    assert.deepEqual(f.calls.at(-1),{operation:'projects.create',args:{machine:'gpu-1',project:'clean',environmentMode:mode}});
+  for(const flags of [[],['--env-mode','oci']]){
+    assert.equal((await f.cli(['project','create','clean',...flags])).code,0);
+    assert.deepEqual(f.calls.at(-1),{operation:'projects.create',args:{machine:'gpu-1',project:'clean',environmentMode:'oci'}});
   }
-  for(const args of [['project','create','bad','--env-mode','auto'],['project','status','clean','--env-mode','isolated'],['project','publish','clean','--env-mode','isolated'],['ssh','--env-mode','isolated']]){
+  for(const args of [['project','create','bad','--env-mode','auto'],['project','create','bad','--env-mode','shared'],['project','create','bad','--env-mode','isolated'],['project','status','clean','--env-mode','isolated'],['project','publish','clean','--env-mode','isolated'],['ssh','--env-mode','isolated']]){
     const before=f.calls.filter(call=>call.operation!=='state').length;
     assert.equal((await f.cli(args)).code,1);assert.equal(f.calls.filter(call=>call.operation!=='state').length,before);
   }
   f.custom.set('projects.create',args=>({project:args.project,state:'DRAFT'}));
-  const unsupported=await f.cli(['project','create','unsupported','--env-mode','isolated']);
-  assert.equal(unsupported.code,1);assert.match(unsupported.stderr,/did not confirm isolated/);
+  const unsupported=await f.cli(['project','create','unsupported']);
+  assert.equal(unsupported.code,1);assert.match(unsupported.stderr,/did not confirm.*personal container/);
   assert.notEqual(JSON.parse(await readFile(f.session,'utf8')).projectsByMachine['gpu-1'],'unsupported');
 });
 

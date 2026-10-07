@@ -73,7 +73,9 @@ def observation(ops, args):
     session = s.read_json(ops.folder / (ops.key(args) + '.sync.json'), limit=16384)
     user,project=ops.identity(args)
     required={'userId','project','key','session','state','manifestBytes','manifestSha256','manifestOffset','totalBytes','entries','source'}
-    if (not isinstance(session,dict) or set(session)!=required or session.get('userId')!=user or session.get('project')!=project
+    if (not isinstance(session,dict) or set(session) not in (required, required|{'environmentMode'})
+            or 'environmentMode' in session and session['environmentMode']!='oci'
+            or session.get('userId')!=user or session.get('project')!=project
             or any(not isinstance(session.get(k),str) or not UUID.fullmatch(session[k]) for k in ('key','session'))
             or session.get('state') not in ('RECEIVING_MANIFEST','COPYING','CODE_READY')
             or not isinstance(session.get('manifestSha256'),str) or not HASH.fullmatch(session['manifestSha256'])
@@ -97,17 +99,21 @@ class SnapshotSync:
         self.n.workspace(args['userId'])
         return self.d.Principal(args['userId'], args.get('hostAdmin') is True)
 
+    def dataset_cache(self,args):
+        factory=getattr(self.n,'dataset_source_cache',None)
+        return factory(args.get('dataset'),args.get('version')) if factory else self.n.dataset_cache()
+
     def acquire_transfer_lease(self, args, transfer_id):
         """Internal control path; callers journal identity BEFORE acquiring."""
         if not isinstance(transfer_id, str) or not UUID.fullmatch(transfer_id):
             raise ValueError('Invalid transfer lease identity')
-        module, cache = self.n.dataset_cache()
+        module, cache = self.dataset_cache(args)
         actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
         # UUID and its namespaced job ID both satisfy DatasetCache.USER_RE.
         return cache.acquire_lease(actor, args['dataset'], args['version'], 'transfer:'+transfer_id)
 
     def require_transfer_lease(self, args, transfer_id, lease_id):
-        module, cache = self.n.dataset_cache()
+        module, cache = self.dataset_cache(args)
         actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
         with cache._locked():
             cache._dataset(actor, args['dataset'])
@@ -118,7 +124,7 @@ class SnapshotSync:
 
     def release_transfer_lease(self, args, lease_id):
         """Internal ONLY: TransferJobs has checked the trusted target fence."""
-        module, cache = self.n.dataset_cache()
+        module, cache = self.dataset_cache(args)
         # A crash after unlinking the lease may be followed by legitimate
         # eviction/unregistration before the release receipt is saved. Absence
         # is already the desired state; do not require a surviving registry.
@@ -137,7 +143,7 @@ class SnapshotSync:
         """
         if not isinstance(transfer_id, str) or not UUID.fullmatch(transfer_id):
             raise ValueError('Invalid transfer lease identity')
-        _, cache = self.n.dataset_cache()
+        _, cache = self.dataset_cache(args)
         with cache._locked():
             matches = [lease for lease in cache._leases(args['dataset'], args['version'])
                        if lease['owner'] == args['userId'] and lease['jobId'] == 'transfer:'+transfer_id]
@@ -209,7 +215,7 @@ class SnapshotSync:
             manifest = {'schema':1, 'directories':[r['path'] for r in records if r['type']=='directory'],
                 'files':[{'path':r['path'],'size':r['bytes'],'sha256':r['sha256'],'executable':r['executable']} for r in records if r['type']=='file']}
         else:
-            module,self.cache=self.n.dataset_cache()
+            module,self.cache=self.dataset_cache(args)
             actor=module.Principal(args['userId'],args.get('hostAdmin') is True)
             dataset, version = args.get('dataset'), args.get('version')
             paths=self.cache._paths(dataset,version);self.cache._dataset(actor,dataset)
@@ -263,7 +269,7 @@ class SnapshotSync:
         allowed = {'userId','hostAdmin'}|reference|({'offset'} if action=='manifest' else {'path','offset'} if action=='get' else set())
         if set(args)-allowed or action not in ('info','manifest','get'): raise ValueError('Invalid snapshot operation')
         if kind == 'datasets':
-            module, cache = self.n.dataset_cache()
+            module, cache = self.dataset_cache(args)
             actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
             dataset = module._identifier(args.get('dataset'))
             version = module._identifier(args.get('version'), module.HASH_RE)
@@ -509,17 +515,21 @@ class SnapshotSync:
             if any(session.get(k)!=args[k] for k in ('manifestBytes','manifestSha256','totalBytes','entries','source')): raise ValueError('Same sync key cannot change the snapshot')
             if session['state']=='RECEIVING_MANIFEST':
                 # Recover a crash after the durable fence but before the atomic
-                # new-project rename. Existing projects are never overwritten.
-                self.ops.store.create(user,project,environment_mode='isolated')
+                # OCI rename. Old receipts may finish an existing draft, but
+                # must never recreate a removed legacy venv environment.
+                if session.get('environmentMode')=='oci':
+                    self.ops.store.create(user,project,environment_mode='oci')
+                elif not any(item['project']==project for item in self.ops.store.list(user)):
+                    raise ValueError('Legacy sync target is missing; inspect or cancel the original sync, never recreate its environment')
             return self.summary(session)
         if any(item['project']==project for item in self.ops.store.list(user)): raise ValueError('Sync needs a new project name; existing projects are never overwritten')
         self.ops.store._space(args['totalBytes'])
         folder=self.root/str(uuid.uuid4());folder.mkdir(mode=0o700)
-        session={**args,'session':folder.name,'state':'RECEIVING_MANIFEST','manifestOffset':0}
+        session={**args,'session':folder.name,'state':'RECEIVING_MANIFEST','manifestOffset':0,'environmentMode':'oci'}
         # Persist the fence before making the draft visible. A failed receipt
         # cannot leave an ordinary editable orphan; retry repairs an absent draft.
         self.n.atomic_json(receipt,session)
-        self.ops.store.create(user,project,environment_mode='isolated')
+        self.ops.store.create(user,project,environment_mode='oci')
         return self.summary(session)
 
     def copy_status(self,args,folder,path):

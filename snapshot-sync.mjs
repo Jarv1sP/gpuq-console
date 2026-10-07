@@ -28,11 +28,16 @@ export async function snapshotSyncCall(service,principal,user,operation,args,aut
     // Cancellation only fences this account's target draft. It neither reads
     // nor changes the original source, which may now be offline/revoked.
   }
+  const policy=mode==='sync'&&action==='begin'?JSON.stringify(user):null;
   if(action==='begin'){
     if(!hash.test(args.manifestSha256||'')||!Number.isSafeInteger(args.manifestBytes)||args.manifestBytes<1||args.manifestBytes>48*1024**2||!Number.isSafeInteger(args.totalBytes)||args.totalBytes<0||!Number.isSafeInteger(args.entries)||args.entries<0)fail('代码快照大小或校验信息无效。');
     const source=args.source;
     if(!source||typeof source!=='object'||Array.isArray(source)||Object.keys(source).some(k=>!['kind','commit','machine','project','release'].includes(k))||!['git','release'].includes(source.kind))fail('同步来源无效。');
     if(source.kind==='git'&&(Object.keys(source).length!==2||typeof source.commit!=='string'||!/^[a-f0-9]{40}([a-f0-9]{24})?$/.test(source.commit)))fail('Git 来源必须固定完整 commit。');
+    // Code-only imports create a personal OCI draft on the target. Use the
+    // same server-derived membership admission as ordinary project creation;
+    // the client cannot request a legacy venv or supply an owner/cohort.
+    await service.ociProjectAdmission?.(args.machine,user.id,args.project,{creatingOCI:true});
     if(source.kind==='release'){
       if(Object.keys(source).length!==4||!project.test(source.project||'')||!hash.test(source.release||''))fail('来源必须固定项目版本。');
       authorizedMachine(source.machine);
@@ -41,12 +46,14 @@ export async function snapshotSyncCall(service,principal,user,operation,args,aut
     }
   }
   const {machine,...request}=args;
+  if(policy!==null&&service.store&&JSON.stringify(service.store.get(user.id))!==policy)fail('账号权限已改变，请查询原同步状态。',403);
   if(!physical&&mode==='snapshot'&&kind==='datasets'&&service.datasetPhysicalReference){
     const mapped=service.datasetPhysicalReference(user.id,machine,{dataset:request.dataset,version:request.version});
     if(!mapped||typeof mapped.dataset!=='string'||!dataset.test(mapped.dataset)||mapped.version!==request.version)fail('数据集逻辑引用尚未确认。',409);
     request.dataset=mapped.dataset;
   }
   const result=await service.bridge(machine,operation,{...request,userId:user.id,...(mode==='snapshot'&&kind==='datasets'?{hostAdmin:principal.role==='admin'}:{})});
+  if(policy!==null&&service.store&&JSON.stringify(service.store.get(user.id))!==policy)fail('账号权限已改变，请查询原同步状态。',403);
   if(mode==='sync'&&['begin','finish','cancel'].includes(action))service.audit(principal.username,operation,machine,args.project);
   return result;
 }

@@ -38,9 +38,7 @@ gpuctl queue [--machine SERVER]   Read authorized machines' task names and descr
 gpuctl task-label get SERVER NODE_JOB_ID
 gpuctl task-label set SERVER NODE_JOB_ID --revision HASH --name TEXT --description TEXT
 gpuctl use MACHINE_ID             Select an approved server from your inventory
-gpuctl project create my-project Create/select a project (shared base Python packages)
-gpuctl project create clean --env-mode isolated  New venv without base site-packages
-gpuctl project create container --env-mode oci   Managed rootless OCI (enabled nodes only)
+gpuctl project create my-project Create/select a personal container project
 gpuctl project use my-project    Select an existing project on this server
 gpuctl project list / status / publish
 gpuctl project label [NAME] --display-name "Readable name"
@@ -471,7 +469,7 @@ async function main(){
     if((options.reconnect||options.takeover)&&command!=='shell')fail('--reconnect/--takeover are only valid for ssh');
     if(options['env-mode']!==undefined){
       if(command!=='project'||positionals[1]!=='create')fail('--env-mode is only valid for project create; existing environments are never rebuilt');
-      if(!['shared','isolated','oci'].includes(options['env-mode']))fail('--env-mode must be shared, isolated or oci');
+      if(options['env-mode']!=='oci')fail('New projects use personal containers; shared/isolated venv creation is no longer available. Omit --env-mode.');
     }
     if(command==='run'&&positionals.length>1&&options.machines.length)fail('Select a server once, either positionally or with --machine/--on');
     if(['run','shell'].includes(command)&&positionals.length===1)positionals.push(defaultMachine());
@@ -694,8 +692,8 @@ async function main(){
         const project=projectSlug(positionals[2]||options.project||(['status','publish'].includes(action)?selectedProject(machine):null));
         if(positionals[2]&&options.project&&positionals[2]!==options.project)fail('Conflicting project names');
         if(options.key)fail('--key is for training submissions; publication is tracked per project with project status');
-        result=(await call(`projects.${action==='use'?'status':action}`,{machine,project,...(options['env-mode']!==undefined?{environmentMode:options['env-mode']}:{})})).result;
-        if(['isolated','oci'].includes(options['env-mode'])&&result.environmentMode!==options['env-mode'])fail('Node did not confirm '+options['env-mode']+' environment mode. Upgrade the node and inspect the project before installing dependencies; no shared-mode fallback was accepted.');
+        result=(await call(`projects.${action==='use'?'status':action}`,{machine,project,...(action==='create'?{environmentMode:'oci'}:{})})).result;
+        if(action==='create'&&(result?.project!==project||result.environmentMode!=='oci'))fail('Node did not confirm the personal container project. Inspect the original project; no fallback or replacement was accepted.');
         if(action==='create'||action==='use'){
           session.projectsByMachine={...session.projectsByMachine,[machine]:project};await saveSession();
           result={...result,machine,selectedProject:project};

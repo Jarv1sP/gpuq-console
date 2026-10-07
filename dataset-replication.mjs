@@ -1,5 +1,5 @@
 import {createHash,randomUUID} from 'node:crypto';
-import {datasetCatalogCall} from './dataset-catalog.mjs';
+import {datasetCatalogCall,warehouseCacheReference} from './dataset-catalog.mjs';
 
 // Logical names over the durable transfer service: no second copy worker,
 // retry controller or byte path through the portal.
@@ -52,7 +52,10 @@ export function installDatasetReplication(service){
     const policy=JSON.stringify(authority(owner,target));let status,error;
     try{status=await service.bridge(target,'datasets.status',{userId:owner,hostAdmin:false,...ref});}catch(value){error=value;}
     check(owner,target,policy);
-    if(status?.dataset===ref.dataset&&status?.version===ref.version&&status.state==='READY')return {status,reference:{...ref}};
+    if(status?.dataset===ref.dataset&&status?.version===ref.version&&status.state==='READY')return {status,reference:warehouseCacheReference(status,ref)||{...ref}};
+    // Validate an unexpected private binding before consulting historical
+    // transfers; a malformed warehouse receipt must not select another source.
+    if(status?.storageReference!==undefined)warehouseCacheReference(status,ref);
     const row=load(owner,target,ref),mapped=actual(row);
     if(mapped){
       const {mountAs,...request}=mapped;
@@ -79,9 +82,19 @@ export function installDatasetReplication(service){
     service.assertDatasetNotDeleting?.(target,ref);
     const user=authority(owner,target),policy=JSON.stringify(user),who=principal(user);
     let resolved;
-    try{resolved=await service.resolveDataset(owner,target,ref);}catch(error){if(error.status===403)throw error;}
+    try{resolved=await service.resolveDataset(owner,target,ref);}catch(error){if(error.status===403||error.code==='WAREHOUSE_REFERENCE_INVALID')throw error;}
     check(owner,target,policy);
     if(resolved?.status.state==='READY')return resolved.status;
+    if(resolved?.status.warehouseReady===true){
+      if(resolved.status.warehouseCanPrepare!==true&&resolved.status.state!=='PREPARING')fail('仓库原件尚不能准备为本机训练缓存。');
+      const result=await service.bridge(target,'datasets.prepare',{userId:owner,hostAdmin:false,...ref});
+      check(owner,target,policy);
+      if(result?.dataset!==ref.dataset||result.version!==ref.version)fail('仓库缓存准备回执不符。',502);
+      if(result.state==='READY'){
+        if(!warehouseCacheReference(result,ref))fail('仓库缓存的物理绑定缺失。',502);
+      }else if(result.storageReference!==undefined)warehouseCacheReference(result,ref);
+      return result;
+    }
     if(resolved?.status.recoveryConfigured===true){
       // A disposable copy can only be restored from its private, fixed
       // authority receipt. Do not reselect another source or create a second

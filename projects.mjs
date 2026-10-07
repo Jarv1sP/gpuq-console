@@ -31,24 +31,25 @@ export async function projectCall(service,principal,user,operation,args,authoriz
   if(['projects.archive','projects.unarchive','projects.retire'].includes(operation)&&(!Number.isSafeInteger(args.revision)||args.revision<0||args.revision>=Number.MAX_SAFE_INTEGER))fail('请使用当前项目生命周期 revision。');
   if(['projects.retire','projects.retire.status'].includes(operation)&&!UUID.test(args.key||''))fail('退役须使用固定完整 UUID。');
   if(operation==='projects.retire'&&!RELEASE.test(args.manifestSha256||''))fail('退役须使用准确的清单摘要。');
-  if(args.environmentMode!==undefined&&!['shared','isolated','oci'].includes(args.environmentMode))fail('环境模式只能是 shared、isolated 或 oci。');
+  if(operation==='projects.create'&&args.environmentMode!==undefined&&args.environmentMode!=='oci')fail('新项目统一使用个人容器；不能新建共享或隔离 venv 环境。');
   if(operation==='projects.local-import.begin')for(const key of ['sourcePath','destinationPath']){
     const value=args[key];
     if(typeof value!=='string'||value.length>1024||value.includes('\\')||/[\p{Cc}\p{Cf}]/u.test(value)||value.split('/').some(p=>!p||p==='.'||p==='..'||p.length>255))fail('同机导入只接受个人数据区和项目草稿内的相对目录。');
   }
   if(operation.startsWith('projects.local-import.')&&args.key===undefined)fail('同机导入必须使用固定 UUID 操作标识。');
   const reference=ownerOnly?{}:projectReference(args,{optional:false});
-  if(operation==='projects.create'&&args.environmentMode==='oci')await service.ociProjectAdmission?.(args.machine,user.id,args.project,{creatingOCI:true});
+  if(operation==='projects.create')await service.ociProjectAdmission?.(args.machine,user.id,args.project,{creatingOCI:true});
   if(operation==='projects.publish')await service.ociProjectAdmission?.(args.machine,user.id,args.project);
   const priorJobs=service.store.jobs.filter(job=>job.userId===user.id&&job.machine===args.machine&&job.project===args.project);
   if(operation==='projects.retire'&&priorJobs.length)fail('项目有任务历史，不能退役；请归档以保留结果。',409);
   if(operation==='projects.archive'&&priorJobs.some(job=>!['SUCCEEDED','FAILED','CANCELED'].includes(job.state)&&!job.nodeJobId))fail('已有任务尚未确认派发到节点；先核对其原状态，再归档项目。',409);
   const policy=JSON.stringify(user);
-  const result=await service.bridge(args.machine,operation,{...reference,...(args.environmentMode!==undefined?{environmentMode:args.environmentMode}:{}),...(args.key!==undefined?{key:args.key}:{}),...(args.revision!==undefined?{revision:args.revision}:{}),...(args.manifestSha256!==undefined?{manifestSha256:args.manifestSha256}:{}),...(operation==='projects.local-import.begin'?{sourcePath:args.sourcePath,destinationPath:args.destinationPath}:{}),userId:user.id});
+  const result=await service.bridge(args.machine,operation,{...reference,...(operation==='projects.create'?{environmentMode:'oci'}:{}),...(args.key!==undefined?{key:args.key}:{}),...(args.revision!==undefined?{revision:args.revision}:{}),...(args.manifestSha256!==undefined?{manifestSha256:args.manifestSha256}:{}),...(operation==='projects.local-import.begin'?{sourcePath:args.sourcePath,destinationPath:args.destinationPath}:{}),userId:user.id});
   if(JSON.stringify(service.store.get(user.id))!==policy)fail('账号权限已改变，请重新查询原操作状态。',403);
+  if(operation==='projects.create'&&(result?.project!==args.project||result.environmentMode!=='oci'))fail('服务器未确认个人容器项目；请查询原项目，不会回退或新建替代环境。',503);
   if(operation==='projects.quota')return quotaStatus(result,user.id);
   if(['projects.create','projects.publish','projects.local-import.begin','projects.local-import.cancel','projects.archive','projects.unarchive','projects.retire'].includes(operation))service.audit(principal.username,operation,args.machine,args.project);
-  if(operation==='projects.list')return {...result,projects:(result.projects||[]).map(row=>service.projectPresentation(user.id,args.machine,row))};
+  if(operation==='projects.list')return {...result,environmentModes:Array.isArray(result.environmentModes)&&result.environmentModes.includes('oci')?['oci']:[],projects:(result.projects||[]).map(row=>service.projectPresentation(user.id,args.machine,row))};
   return ['projects.status','projects.create'].includes(operation)?service.projectPresentation(user.id,args.machine,result):result;
 }
 export function quotaStatus(value,owner){
