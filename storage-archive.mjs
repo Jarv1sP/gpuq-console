@@ -364,7 +364,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   // The background lane alone consumes this flag after rechecking permission.
   service.retryStorageArchive=(owner,machine,ref)=>{
     if(!policy.enabled||!isRef(ref))fail('Invalid archive retry reference');
-    enabledUser(owner,machine);
+    enabledUser(owner,machine,ref);
     const row=rows().findLast(value=>value.owner===owner&&value.machine===machine&&(value.dataset===ref.dataset||value.logicalDataset===ref.dataset)&&value.version===ref.version);
     if(!row)fail('Archive intent is unavailable');
     if(isRetired(row))fail('已注销的旧归档意图不能重试；重新登记必须使用新的发布事件。');
@@ -480,7 +480,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
           row.failures=(row.failures||0)+1;
           row.nextCheckAt=clock()+Math.min(300000,15000*2**Math.min(row.failures,5));
           row.error='归档状态暂未确认；保留本机数据，稍后自动核对。';
-          try{enabledUser(row.owner,row.machine);}catch{row.phase='BLOCKED';row.error='账号或机器授权已改变；原件保持受保护，等待管理员核对。';}
+          try{enabledUser(row.owner,row.machine,{dataset:row.dataset,version:row.version});}catch{row.phase='BLOCKED';row.error='账号或机器授权已改变；原件保持受保护，等待管理员核对。';}
           save(row);
         }
       }

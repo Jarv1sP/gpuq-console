@@ -132,6 +132,23 @@ test('warehouse admission requires its independently configured authority and do
   await assert.rejects(unavailable.begin(randomUUID()),/机械仓库/);assert.equal(unavailable.sessions.size,0);
 });
 
+test('transient original-protection failure does not revoke an exact warehouse upload source',async t=>{
+  const f=fixture(t),id=randomUUID();await f.begin(id);const ready=await f.call('commit',{uploadId:id});
+  const archive=installStorageArchive(f.service,{enabled:true,machine:cold,authority:'hdd'},{startTimer:false});
+  const row=archive.enqueueEvent(cold,{id:randomUUID(),userId:f.user.id,state:'READY',dataset:ready.dataset,version:ready.version});
+  const bridge=f.service.bridge;
+  f.service.bridge=(machine,operation,args)=>{
+    if(operation==='storage.archive.events')return Promise.resolve({events:[]});
+    if(operation==='storage.archive.original')throw Error('Temporary warehouse timeout');
+    return bridge(machine,operation,args);
+  };
+  await f.service.reconcileStorageArchive();
+  const retry=archive.load(row.id);assert.equal(retry.phase,'PROVISIONING');assert.equal(retry.failures,1);
+  assert.equal(f.service.datasetIngressSourceAllowed(f.user.id,cold,ready),true);
+  assert.doesNotThrow(()=>f.service.retryStorageArchive(f.user.id,cold,ready));
+  assert.equal(f.user.limits[cold],undefined);
+});
+
 test('placement-aware clients bind actual direct writer while retaining training selection',()=>{
   const reply={placementProtocol:1,requestedMachine:hot,storageMachine:cold,storageTier:'hdd',legacyPlacement:false};
   assert.equal(uploadStorageMachine(reply,hot),cold);
