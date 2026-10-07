@@ -1,6 +1,7 @@
 // Personal display metadata only. Nodes remain the source of truth for data,
 // versions, ACLs and paths. A shared reader cannot rename another user's view.
 import {datasetCatalogCall} from './dataset-catalog.mjs';
+import {defaultDatasetDisplayName} from './dist/dataset-display-name.js';
 const ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const OWNER=/^(?:builtin-admin|demo-user-[0-9]+)$/;
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
@@ -19,7 +20,7 @@ export function installDatasetLabels(service){
     PRIMARY KEY(owner_id,logical_id));`);
   service.datasetLabelView=(owner,dataset)=>{
     const row=service.db.prepare('SELECT name,revision FROM dataset_labels WHERE owner_id=? AND logical_id=?').get(owner,dataset);
-    return {name:row?.name||dataset,displayNameRevision:row?.revision||0,labelScope:'personal'};
+    return {name:row?.name||defaultDatasetDisplayName(dataset),displayNameRevision:row?.revision||0,labelScope:'personal'};
   };
 }
 
@@ -56,7 +57,7 @@ export async function datasetLabelCall(service,principal,operation,args,revalida
   const logical=matches[0].dataset;
   const result=()=>{
     const row=service.db.prepare('SELECT name,revision,updated_at FROM dataset_labels WHERE owner_id=? AND logical_id=?').get(owner,logical);
-    return {dataset:logical,ownerId:owner,scope:'personal',name:row?.name||logical,
+    return {dataset:logical,ownerId:owner,scope:'personal',name:row?.name||defaultDatasetDisplayName(logical),
       displayName:row?.name??null,revision:row?.revision||0,updatedAt:row?.updated_at??null};
   };
   if(!setting)return result();

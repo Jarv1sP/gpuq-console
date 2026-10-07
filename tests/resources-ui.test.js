@@ -71,6 +71,34 @@ test('unknown memory is not a zero fill and monitoring does not prove scheduler 
  assert.doesNotMatch(html,/可立即启动/);
 });
 
+test('partial GPU inventory keeps measured cards without inventing missing capacity',()=>{
+ const rack={...machine,cards:3},data=structuredClone(snapshot);
+ Object.assign(data.hosts[0].gpus[0],{memoryUsedMiB:1024});
+ data.hosts[0].gpus.push({...data.hosts[0].gpus[0],index:2,memoryUsedMiB:0,processes:[]});
+ data.hosts[0].gpuq={connected:true,health:'degraded',healthIssue:{kind:'managed-gpu-missing',indices:[1]},schedulableIndices:[],jobs:[]};
+ const options={machines:[rack],snapshot:data,production:true,admin:true};
+ const view=resourceServerView(rack,options),html=resourceCards(options);
+ assert.equal(view.complete,false);assert.equal(view.busy,null);
+ assert.equal((html.match(/resource-tower-bar unknown/g)||[]).length,1);
+ assert.match(html,/resource-tower-bar used/);assert.match(html,/resource-tower-bar free/);
+ assert.match(html,/已采集 2 \/ 3 张/);assert.match(html,/GPU 1 不可用/);assert.match(html,/调度异常/);
+ assert.doesNotMatch(html,/调度异常 · 调度异常/);
+ assert.doesNotMatch(html,/训练连接正常|可立即启动/);
+ const stale=resourceCards({...options,snapshot:{...data,stale:true}});
+ assert.equal((stale.match(/resource-tower-bar unknown/g)||[]).length,3);
+ assert.doesNotMatch(stale,/GPU 1 不可用|resource-tower-bar free|resource-tower-bar used/);
+ const noGPU=structuredClone(data);noGPU.hosts[0].gpus=[];
+ assert.equal((resourceCards({...options,snapshot:noGPU}).match(/resource-tower-bar unknown/g)||[]).length,3);
+ const selected=resourceCards({...options,selectedGPU:1});
+ assert.match(selected,/data-resource-gpu="1"/);assert.doesNotMatch(selected,/data-resource-reading=/);
+ const member=resourceCards({...options,admin:false,limits:{'gpu-1':3}});
+ assert.match(member,/GPU 1 不可用/);assert.doesNotMatch(member,/other-owner|alert\(1\)/);
+ const injected=structuredClone(data);injected.hosts[0].gpuq.healthIssue.indices=['<script>'];
+ assert.doesNotMatch(resourceCards({...options,snapshot:injected}),/<script>/);
+ const contradictory=structuredClone(data);contradictory.hosts[0].gpus.push({...contradictory.hosts[0].gpus[1],index:1});
+ assert.equal((resourceCards({...options,snapshot:contradictory}).match(/resource-tower-bar unknown/g)||[]).length,1,'Explicit missing-GPU diagnosis must not be painted idle by a conflicting row');
+});
+
 test('white fills require confirmed process-to-own-task joins, never placement guesses',()=>{
  const data=structuredClone(snapshot);Object.assign(data.hosts[0].gpus[0],{memoryUsedMiB:1024,processes:[{pid:42,task:{id:'own',name:'my training'}}]});
  const options={machines:[machine],limits:{'gpu-1':1},snapshot:data,production:true,userId:'me',jobs:[{id:'own',userId:'me',assignedIndices:[0]}]};

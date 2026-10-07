@@ -106,6 +106,21 @@ test('personal label metadata is not a training ID or a guessed revision; confli
   const result=aggregateDatasetCatalog(catalog([item(),item({name:'另一个名称',displayNameRevision:4})])).datasets[0];
   assert.equal(result.displayName,'logical-data');assert.equal(result.displayNameRevision,null);
 });
+test('generated personal names stay readable across old/no labels without merging equal display names or guessing owners',()=>{
+  const upload='u-0123456789abcdef-ZJU-MoCap',workspace='w-fedcba9876543210-ZJU-MoCap';
+  const input=catalog([item({dataset:upload,name:upload,displayNameRevision:0}),
+    item({dataset:workspace,name:undefined,labelScope:undefined,displayNameRevision:undefined})]);
+  const result=aggregateDatasetCatalog(input);
+  assert.deepEqual(result.datasets.map(row=>row.displayName),['ZJU-MoCap','ZJU-MoCap']);
+  assert.deepEqual(result.datasets.map(row=>row.dataset),[upload,workspace]);
+  assert.equal(result.datasets.length,2,'A shared visible name does not combine immutable datasets');
+  assert.equal(result.datasets[0].displayNameRevision,0);assert.equal(result.datasets[1].displayNameRevision,null);
+  assert.equal(result.datasets[0].versions[0].ownerLabel,input.datasets[0].versions[0].ownerLabel);
+  input.datasets[0].name='用户自定名称';input.datasets[0].displayNameRevision=1;
+  assert.equal(aggregateDatasetCatalog(input).datasets[0].displayName,'用户自定名称');
+  input.datasets[0].name=upload;
+  assert.equal(aggregateDatasetCatalog(input).datasets[0].displayName,upload,'An explicitly set personal label remains exact');
+});
 
 test('future states and pending removal facts remain unknown or protected, never READY or released',()=>{
   const input=catalog();const v=input.datasets[0].versions[0];v.state='FUTURE';v.locations[0]={...location(),state:'FUTURE',removalPending:true,removalGraceEligible:true};

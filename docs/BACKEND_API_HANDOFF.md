@@ -1,5 +1,11 @@
 # 后端接口交接
 
+## 显卡故障与部分采集
+
+`gpuq.health:"degraded"` 可附固定诊断 `healthIssue:{kind:"managed-gpu-missing",indices:[1]}` 或 `{kind:"scheduler-degraded"}`。只有明确的调度器受管 GPU 缺失错误映射为前者；卡号有界且去重，不转发原始错误、UUID、路径或命令。已授权成员与管理员均可看到固定诊断，未授权、过期和失联状态不沿用旧故障结论。配套节点 `deploy/node-probe.py` 位于采集 SSH 强制命令，不属于数据存储 helper 更新；未部署时仅显示通用调度异常。
+
+部分采集保留每张实际观测卡的指标与进程，缺失卡保持未知。整机占用合计仍待确认，未检测到进程不代表可调度；本变更不修改受管 UUID、故障隔离、任务准入、运行任务或重启策略。
+
 面向前端开发者，汇总现有终端、数据上传和云文件接口。这里定义的是兼容契约，不表示每台节点已启用所有能力；部署代码、入口可达和业务验收是三件不同的事。详细说明见 [独立终端](TERMINAL_SESSIONS.md)、[校内直传](DIRECT_UPLOAD.md) 和 [私人云文件](CLOUD_FILES.md)。
 
 ## 通用调用
@@ -196,6 +202,8 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 `datasets.archive.retire {machine,dataset,version,ownerId,eventId,recoveryId}` 也是当前管理员专用入口，接受固定 HDD 同机 ingest（无 transfer、未确认归档）或完全未派发的 `QUEUED` ingest。后者必须 transferId/sourceDataset/grantId 均为 null、retryRequested 非 true、没有同 copyKey 的任何传输记录且不是 laneOwner；RPC 前保存持久 retirementIntent 并阻止该行的 dispatch/reconcile，前后复核登记上下文与准入条件。回包丢失或重启只保留待确认 fence，同请求可继续，不推断成功或启动传输。`recoveryId` 是正常注销的 `unregister-` 加 32 位小写十六进制回执，不接收客户端的 mode、grant、证明、路径或角色。后台私有 `storage.archive.retire` 复核原登记身份、完整清单、单 owner、已提交注销与无现存保护，再持久化该事件的 `RETIRED` 墓碑；旧 HDD 协议还检查 worker 从未创建且确认停止，QUEUED 内部模式只证明本来源注销。门户返回 `phase=FAILED` 并保留不可重试的 retired 原因；重复同一回执幂等，换回执、已派发跨机、已 seal 或 UNKNOWN 均拒绝，不清除其他 lane。私有 RPC 不向浏览器公开。
 
 个人显示名使用 `datasets.label.get {machine,dataset}` 读取，`datasets.label.set {machine,dataset,displayName,revision}` 修改。名称为 1–80 个可见字符，允许中文，拒绝控制字符；`revision` 必须沿用最近查询值，409 冲突后请用户刷新决定，不自动覆盖。响应有规范逻辑 `dataset`、原 `name`、可空的 `displayName`、`revision`、`ownerId` 和 `scope:"personal"`。管理员代管时可显式增加 `ownerId`，普通成员不能指定他人。该名称仅作用于这位用户的显示视图，不重命名节点登记、版本或训练挂载路径，也不改变共享数据权限。
+
+未设置个人显示名时，`name` 对严格节点生成格式 `^[uw]-[a-f0-9]{16}-([A-Za-z0-9][A-Za-z0-9_-]{0,39})$` 返回末尾的原上传／发布名称；其他 ID 原样返回。`dataset`、owner、revision 及 `displayName:null` 不变，不新建 label 行。网页兼容旧门户的原 ID 默认回包，但不会用前缀建立授权、逻辑别名或合并同名数据。
 
 门户控制面顺序：
 

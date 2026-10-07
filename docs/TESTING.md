@@ -30,6 +30,8 @@ docker build -f deploy/Dockerfile -t gpuq-console:test .
 
 浏览器测试启动临时本地后台和独立数据库，验证注册自动登录、初始零额度、管理员自动发现待处理用户、授权后用户自动更新、编辑草稿不被刷新覆盖、注册码再次可读、引导 admin 退役与移动端布局。不会连接真实执行桥或 GPU；可选 `CHROME_PATH` 使用本地 Chrome，`UI_SCREENSHOTS` 指定私有截图目录。
 
+`ui-smoke.mjs` 分别核验额度编辑器唯一的保存／批准主操作、账号创建入口及未保存草稿保护、邀请面板唯一的生成／换新操作和注册码持久性；不以整个成员页的 `.primary` 数量替代业务条件，以免合法的新入口使组合基线误报。
+
 `starbase-ui-smoke.mjs` 保留成员／管理员四种宽度的全部 48 项反馈几何检查。
 有限动画按真实 `playState/pending` 有界等待，不永久等待已结束 CSS transition 的旧
 `finished` Promise；不会取消、强制结束动画或禁用动态。可见的暂停动画必须超时拒绝，
