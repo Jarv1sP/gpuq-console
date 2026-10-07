@@ -194,3 +194,13 @@ Linux 专用 test 实际 renameat2 no-replace。生产绝不用测试 fallback�
 上述证明当前 GPUQ 后端上的同机项目工作流，不包括 Slurm/Pyxis/Enroot、硬磁盘配额、自动跨机项目/环境分发、结果自动归档或独立内容备份。私人验收日志、账号与主机清单不进入公开仓库。
 
 上传和结果下载故障：`project-operation-lock.test.py` 使用真实 flock 竞争验证短等待、超时原片段保留、非竞争 IO 错误与不安全锁拒绝，并固定 machine-only quota 路由。`dataset-replication.test.js` 验证管理员当前角色与个人 owner-only 目录。`remote-read-lanes.test.js` 验证文件读取越过写入积压及在途撤权；`client-http.test.js` 固定读取重试的 offset/fingerprint。`node-files.test.py` 验证逐块源指纹、读取期间变化与非法偏移；`client-file-download.test.js` 验证断线恢复、来源/账号/项目错配、本地编辑、软链接、旧节点和失败保留。不访问生产节点，不声明已完成真实大文件性能或迁移验收。
+
+`dataset-catalog-incomplete.test.py` 验证缺失 READY/staging 父目录时按固定版本展示 UNKNOWN，
+仍核对登记和实时 ACL；健康版本继续返回，无父目录重建，无 prepare/delete/recovery 准入。
+覆盖热摘要、跨账号与撤权并发、完整源不提升未知权限、损坏登记和 unsafe link 不降级，
+并复核 status、prepare、lease、unregister 的严格保护保持。
+`dataset-catalog-incomplete-node.test.py` 验证节点跳过未知行的删除、恢复和后台状态 overlay，
+不给它套入 worker 的可信快照。全部使用临时合成数据，不连接生产或读取真实账号。
+全量 Python 首轮两个旧断言要求列表对缺父目录整体报错；按明确的新展示契约改为
+逐字段核对固定版本、UNKNOWN、禁止准备／删除、固定错误码与无路径泄露，
+仍要求 status 抛出专门的缺失元数据错误并且零目录重建，其余损坏与不安全链接断言保留。

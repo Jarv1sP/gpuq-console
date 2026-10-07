@@ -38,6 +38,16 @@ class OptionalDatasetDirectories(unittest.TestCase):
     def listing(self):
         return self.cache.list_datasets(OWNER)['datasets'][0]['versions'][0]
 
+    def assert_incomplete_listing(self):
+        row = self.listing()
+        self.assertEqual(row['version'], self.version)
+        self.assertEqual(row['state'], 'UNKNOWN')
+        self.assertIs(row['canPrepare'], False)
+        self.assertIs(row['deletionBlocked'], True)
+        self.assertEqual(row['errorCode'], 'CACHE_METADATA_INCOMPLETE')
+        self.assertEqual(row['error'], '数据缓存元数据不完整；请管理员核验。')
+        self.assertNotIn(str(self.base), str(row))
+
     def publish(self):
         self.assertEqual(self.cache.materialize(OWNER, 'sample', self.version)['state'], 'READY')
 
@@ -56,18 +66,19 @@ class OptionalDatasetDirectories(unittest.TestCase):
         parents = [self.paths[k].parent for k in ('ready', '.staging')]
         for parent in parents:
             parent.rmdir()
-        for operation in (self.status, self.listing):
-            with self.subTest(operation=operation.__name__), self.assertRaisesRegex(D.CacheError, 'storage metadata is incomplete'):
-                operation()
-            self.assertTrue(all(not p.exists() for p in parents))
+        with self.assertRaisesRegex(D.CacheMetadataIncomplete, 'storage metadata is incomplete'):
+            self.status()
+        self.assert_incomplete_listing()
+        self.assertTrue(all(not p.exists() for p in parents))
         with self.assertRaisesRegex(D.CacheError, 'storage metadata is incomplete'):
             self.cache._ready(self.paths, {}, self.version)
 
     def test_nonready_missing_staging_parent_is_not_hidden(self):
         self.paths['.staging'].parent.rmdir()
-        for operation in (self.status, self.listing):
-            with self.subTest(operation=operation.__name__), self.assertRaisesRegex(D.CacheError, 'storage metadata is incomplete'):
-                operation()
+        with self.assertRaisesRegex(D.CacheMetadataIncomplete, 'storage metadata is incomplete'):
+            self.status()
+        self.assert_incomplete_listing()
+        self.assertFalse(self.paths['.staging'].parent.exists())
 
     def test_actual_incomplete_publication_is_still_rejected(self):
         self.paths['ready'].mkdir()

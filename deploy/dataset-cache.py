@@ -78,6 +78,10 @@ class CacheError(ValueError):
     """A request cannot safely proceed; no version should be consumed."""
 
 
+class CacheMetadataIncomplete(CacheError):
+    """Missing required parent is unknown, never an absence proof."""
+
+
 class CacheBusy(CacheError):
     """Another operation holds a lock; callers may retry without assuming readiness."""
 
@@ -953,7 +957,7 @@ class DatasetCache:
             with _directory(path.parent) as fd:
                 return path.name in os.listdir(fd)
         except FileNotFoundError:
-            raise CacheError("dataset storage metadata is incomplete; administrator verification required") from None
+            raise CacheMetadataIncomplete("dataset storage metadata is incomplete; administrator verification required") from None
 
     def _ready_identity(self, paths):
         """Small no-follow identities only; never parse a READY manifest here."""
@@ -1510,6 +1514,13 @@ class DatasetCache:
             self._catalog_summary(binding, summary)
         return summary, identity, ready_identity, binding
 
+    @staticmethod
+    def _catalog_incomplete(row):
+        return dict(**{k:v for k,v in row.items() if k not in ('state','canPrepare')},
+                    state='UNKNOWN', canPrepare=False, deletionBlocked=True,
+                    errorCode='CACHE_METADATA_INCOMPLETE',
+                    error='数据缓存元数据不完整；请管理员核验。')
+
     def _list_datasets_snapshot(self, actor):
         """Private per-request identities for a detached-worker status overlay.
 
@@ -1538,7 +1549,18 @@ class DatasetCache:
                 if not name.endswith(".json"):
                     raise CacheError("corrupt registry directory")
                 version = name[:-5]
-                summary, identity, ready_identity, binding = self._catalog_version(actor, dataset, version)
+                try:
+                    summary, identity, ready_identity, binding = self._catalog_version(actor, dataset, version)
+                except CacheMetadataIncomplete:
+                    # Only this typed parent absence becomes a display row.
+                    # Validate the exact registration and live ACL again; do
+                    # not catch corrupt metadata, I/O errors or unsafe links.
+                    record, identity = self._record_snapshot(actor, dataset, version, _read_only=True)
+                    row = self._catalog_incomplete(dict(version=version,
+                        bytes=sum(f['size'] for f in record['manifest']['files']),
+                        files=len(record['manifest']['files'])))
+                    versions.append((row, identity, None, None))
+                    continue
                 # Summation and parsing scale with the manifest; they must not
                 # delay unrelated publication/lease admission under global lock.
                 row = dict(version=version, state="READY" if summary['ready'] else "REGISTERED",
@@ -1557,12 +1579,22 @@ class DatasetCache:
                     version = row['version']
                     self._check_snapshot(actor, dataset, version, identity, _read_only=True)
                     paths = self._paths(dataset, version)
-                    self._check_ready_snapshot(paths, ready_identity)
-                    if self._catalog_binding(dataset, version) != binding:
-                        raise CacheError('catalog metadata changed; retry the operation')
+                    if binding is None:
+                        # UNKNOWN rows intentionally have no trusted snapshot
+                        # for worker/admission overlays. No parents are made.
+                        rows.append(row)
+                        continue
+                    try:
+                        self._check_ready_snapshot(paths, ready_identity)
+                        if self._catalog_binding(dataset, version) != binding:
+                            raise CacheError('catalog metadata changed; retry the operation')
+                        staging = row['state'] != "READY" and self._version_entry_exists(paths[".staging"])
+                    except CacheMetadataIncomplete:
+                        rows.append(self._catalog_incomplete(row))
+                        continue
                     current[(dataset, version)] = (identity, ready_identity,
                                                   row['state'] == 'READY', row['bytes'])
-                    if row['state'] != "READY" and self._version_entry_exists(paths[".staging"]):
+                    if staging:
                         row['state'] = "STAGING"
                     fence = self._retirement_fence(dataset, version)
                     if fence is not None and fence['state'] != 'RESTORED':

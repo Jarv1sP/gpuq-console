@@ -371,3 +371,13 @@ DELETED 只覆盖当前逻辑版本及固定授权依赖；其他名称下的副
 版本删除的源撤销只写 `AuthorityStore` 的永久 grant 撤销记录，目标版本围栏不等于外部 `StorageRetirement.target` 的 installed-authority 墓碑。因此目标可以继续只读核对固定本地 receipt、完成 commit 和历史 status，但源的 guard/manifest/get 永久拒绝旧 token。已有 installed-authority 墓碑依然拒绝本地投影，本接口不绕过或删改它；源恢复也不清除旧 grant 撤销记录。
 
 外部替代退役不被重写：其锁、权限、永久 reference/grant fence 和 API 契约原样保留。本功能仅处理没有替代的版本删除；外部严格完整替代证明只是普通注销“不是最后一份”的实际可重建依据，并在日志单独标为“外部替代退役”。来源不明单 owner 仅管理员。保留期间计费不因目录移动释放；到期清理仅接原本明确启用的 storage 收集服务，本 PR 不开 timer、不部署节点。前端由后续 m4 接口整合。
+
+### 缺失缓存父目录的目录展示
+
+`datasets.list` 对已通过登记与当前 ACL 校验、但缺少必需 READY/staging 父目录的固定版本返回
+`state:"UNKNOWN",canPrepare:false,deletionBlocked:true,errorCode:"CACHE_METADATA_INCOMPLETE"`
+和固定错误提示。其他健康版本继续返回；未知行没有供后台状态使用的可信快照，
+不会加入恢复／删除权限或变成 READY。不会由列表重建父目录。此展示处理只捕获
+专门的父目录缺失错误；损坏登记、权限撤销、unsafe link 和 I/O 错误保持原拒绝。
+`status/prepare/lease/unregister` 与一般目录存在检查不使用这个展示降级，
+缺父目录仍拒绝，不能把 UNKNOWN 当作安全不存在或准备／删除授权。

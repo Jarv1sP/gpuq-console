@@ -416,6 +416,11 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         # transfer without learning its initiating identity or host source.
         for item in listing['datasets']:
             for version in item['versions']:
+                if version.get('errorCode')=='CACHE_METADATA_INCOMPLETE':
+                    # Display UNKNOWN cannot authorize recovery/deletion or
+                    # consume the trusted catalog snapshot used by workers.
+                    version['deletionPermissions']={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'}
+                    continue
                 if dataset_delete_capability()==1:
                     version['deletionPermissions']=cache.deletion_permissions(actor,item['dataset'],version['version'])
                 if version['state']=='READY':continue
