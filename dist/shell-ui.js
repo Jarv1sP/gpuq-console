@@ -20,6 +20,7 @@ export function shellUI(store,{navigate,getPage,toast}){
       const empty=selector.querySelector('option[value=""]');if(empty)empty.textContent=prompt.empty;
       const caption=[...selector.closest('label').childNodes].find(node=>node.nodeType===Node.TEXT_NODE);if(caption)caption.textContent=prompt.label;
       selector.setAttribute('aria-label',prompt.ariaLabel);
+      selector.toggleAttribute('data-training-context',prompt.label==='训练');
     }
     serverSelectLabel(selector);if(selector)selector.title=prompt.title;
     q('#context-note').textContent=project?.value?'项目':'个人工作区';

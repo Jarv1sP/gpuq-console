@@ -55,6 +55,7 @@ try{
     await page.waitForFunction(value=>document.querySelector('#context-machine option[value=""]')?.textContent===value,empty);
     assert.equal(await page.locator('#context-machine').evaluate(select=>[...select.closest('label').childNodes].find(node=>node.nodeType===Node.TEXT_NODE)?.textContent.trim()),label);
     assert.equal(await page.locator('#context-machine').getAttribute('title'),title);
+    if(label==='训练')assert.equal(await page.locator('#context-machine').evaluate(select=>{const text=select.closest('.server-select').querySelector('.server-id-head');return text.scrollWidth<=text.clientWidth+1;}),true,'the complete training prompt is readable without an ellipsis');
   }
   async function capture(role){
     for(const width of [1440,1024,390,320]){await page.setViewportSize({width,height:1080});await page.evaluate(()=>document.fonts.ready);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'all original content remains within the viewport');await page.screenshot({path:join(shots,role+'-'+width+'.png'),fullPage:true});}
@@ -72,6 +73,7 @@ try{
   assert.equal(calls.filter(call=>call.operation==='projects.status').at(-1).machine,source);
   await assertPrompt('训练','自动选择','自动选择兼容服务器');
   assert.match(await page.locator('#context-machine').getAttribute('aria-label'),/开发位置保持不变/);
+  for(const width of [1440,1024,390,320]){await page.setViewportSize({width,height:1080});await assertPrompt('训练','自动选择','自动选择兼容服务器');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:join(shots,`member-auto-training-${width}.png`),fullPage:true});}await page.setViewportSize({width:1440,height:1080});
   await openSubmit(page);await page.locator('[name=training-target]').selectOption('current');await assertPrompt('训练','开发位置',source);
   assert.equal(await page.locator('[name=terminal-machine]').inputValue(),source);
   await page.locator('[name=training-target]').selectOption('auto');await assertPrompt('训练','自动选择','自动选择兼容服务器');await closeSubmit(page);

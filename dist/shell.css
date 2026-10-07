@@ -115,6 +115,7 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 .sb #shell-context{top:var(--topbar-height);padding-inline:var(--edge);gap:clamp(8px,1vw,16px)}
 .sb #shell-context>label{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px}
 .sb #shell-context select{height:40px;min-height:40px;max-width:100%;width:100%}
+.sb #shell-context .server-select:has(#context-machine[data-training-context]){min-width:80px}
 .sb #shell-context #context-note{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sb #main-content{padding-inline:var(--gutter)}
 .sb #operational-maintenance{top:calc(var(--topbar-height) + 52px)}
