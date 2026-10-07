@@ -17,7 +17,7 @@ test('guide separates optional CLI installation and code upload from dataset pub
   assert.doesNotMatch(chapters.get('development'),/不会上传数据集/);
 });
 
-test('guide CLI examples use registered options and optional transfer rollout is explicit',()=>{
+test('guide CLI examples use registered options and a single data preparation workflow',()=>{
   let parsed=0,metadata=0,transfers=0;const taskLabels=[];
   for(const block of blocks)for(const line of block.trim().split('\n')){
     if(!line.startsWith('gpuctl '))continue;
@@ -34,7 +34,8 @@ test('guide CLI examples use registered options and optional transfer rollout is
   assert.match(source,/多人同时修改时，过期版本会被拒绝/);
   assert.match(source,/写入超时先查询同一编号，不自动重发/);
   assert.match(source,/姓名与描述（需任务信息新版）/);assert.match(source,/不要把指南更新当作功能已经上线/);
-  assert.match(source,/管理员启用后的可选能力/);assert.match(source,/不会因更新客户端自动开放/);
+  assert.match(source,/训练缓存由 `data prepare` 管理，不需要自己在各台服务器复制长期数据/);
+  assert.match(source,/目录下载需节点已提供对应能力，无法确认时会停止/);
 });
 test('copy blocks never silently undo the preceding upload, subscription or note creation',()=>{
   for(const block of blocks){
@@ -55,7 +56,7 @@ test('guide covers merged workflow changes while keeping completion, permissions
   assert.match(chapters.get('training'),/1、2、4、8/);assert.match(chapters.get('training'),/空闲 3 张时启动 2 张/);
   assert.match(chapters.get('training'),/不支持弹性、自动让位、自动恢复或主动抢占/);
   assert.match(chapters.get('results'),/Ctrl\+C 只停止查看/);assert.match(chapters.get('results'),/管理员为你的账号配置 Telegram/);
-  for(const token of ['sync git','sync code','sync data','CODE_READY','check-attr --source','缺少系统依赖','旧维护申请流程已停用'])assert.ok(chapters.get('troubleshooting').includes(token),token);
+  for(const token of ['sync git','sync code','data prepare','CODE_READY','check-attr --source','缺少系统依赖','旧维护申请流程已停用'])assert.ok(chapters.get('troubleshooting').includes(token),token);
   assert.match(chapters.get('queue'),/退出码 75/);assert.match(chapters.get('troubleshooting'),/不能提交脚本申请 root/);
   assert.doesNotMatch(source,/gpuctl maintenance (?:request|approve|withdraw)/);
   assert.match(chapters.get('data'),/已经开始的服务器校验会继续/);assert.match(chapters.get('data'),/没有整份已发布数据集的一键下载入口/);
@@ -63,9 +64,10 @@ test('guide covers merged workflow changes while keeping completion, permissions
   assert.match(chapters.get('data'),/gpuctl data upload \.\/my-data --name my-data --via direct/);
   assert.match(chapters.get('data'),/gpuctl transfer upload \.\/my-data --name my-data --via direct/);
   assert.match(chapters.get('data'),/入口不可达时停止，不改走中转/);
-  assert.match(chapters.get('data'),/连续无输入 1 小时或累计 6 小时/);
-  for(const token of ['传输任务新版','transfer upload','transfer download','transfer copy','transfer cancel','WAITING_CLIENT'])assert.ok(chapters.get('data').includes(token),token);
-  assert.match(chapters.get('data'),/不要把指南更新当作功能已经上线/);assert.match(chapters.get('data'),/终止后不可恢复/);
-  assert.match(chapters.get('data'),/不会因更新客户端自动开放/);assert.match(chapters.get('data'),/LAN copy 还需管理员配置并核验节点间接口/);
+  for(const token of ['transfer upload','transfer download','transfer cancel','WAITING_CLIENT'])assert.ok(chapters.get('data').includes(token),token);
+  assert.match(chapters.get('data'),/目录下载需节点已提供对应能力，无法确认时会停止/);assert.match(chapters.get('data'),/终止后不可恢复/);
+  assert.match(chapters.get('data'),/管理员启用节点间私网传输后/);
+  assert.match(chapters.get('data'),/服务器间准备在 LAN 后台执行，不占 GPU，关电脑仍继续/);
+  assert.doesNotMatch(source,/gpuctl (?:transfer copy|sync data|data shell|data publish)\b/);
   assert.doesNotMatch(source,/没有后台 URL 下载按钮|不提供后台 URL 下载队列/);
 });
