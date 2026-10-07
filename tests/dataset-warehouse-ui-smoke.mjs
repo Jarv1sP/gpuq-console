@@ -63,6 +63,18 @@ try{
    return route.fulfill({contentType,body});
   });
   await page.goto(origin+'/#datasets');await page.waitForFunction(()=>document.querySelectorAll('[data-v3-select]').length===5&&!document.querySelector('#datasets-refresh').disabled);
+  // Exact existing public catalog/capacity shapes, with overview unsupported.
+  // The capacity design must be visible before any new node protocol exists.
+  assert.equal(await page.locator('.capacity-warehouse .capacity-strata').count(),1);
+  assert.equal(await page.locator('.v3-server-chip .capacity-cache-rail').count(),machines.length);
+  assert.equal(await page.locator('#warehouse-machine-capacity .capacity-disk>span').count(),20);
+  const legacyCatalog=catalog(machines[0].id,role),total=legacyCatalog.datasets.flatMap(row=>row.versions).reduce((n,v)=>n+v.bytes,0);
+  const {transferBytes}=await import('../dist/data-route.js');
+  assert.equal(await page.locator('.capacity-value-data b').textContent(),transferBytes(total));
+  assert.equal(await page.locator('.capacity-head .num').textContent(),'未知','a cache filesystem cannot establish warehouse capacity');
+  assert.equal(await page.locator('#warehouse-machine-capacity .capacity-metric').first().locator('.capacity-big small').textContent(),'/ 未知','a cache filesystem cannot establish a cache budget');
+  assert((await page.locator('#warehouse-machine-capacity .capacity-disk').getAttribute('aria-label')).includes(transferBytes(620*1024**3)));
+  assert.equal(await page.locator('[data-v3-cache-action]').count(),0,'display fallback cannot grant new cache actions');
   async function shot(stage){
    await page.evaluate(async()=>{await document.fonts.ready;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
    const geometry=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,dialogs:[...document.querySelectorAll('dialog[open]')].map(dialog=>({width:dialog.clientWidth,scroll:dialog.scrollWidth}))}));

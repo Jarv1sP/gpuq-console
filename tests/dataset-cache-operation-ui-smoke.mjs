@@ -20,15 +20,18 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  await page.goto(origin);
  await page.evaluate(async({role,machines,version})=>{
   const {mountCacheOperation,mountCacheTransfer}=await import('/dataset-cache-operation.js');
-  window.calls=[];window.operations=new Map();window.capabilities=new Map(machines.map((row,index)=>[row.id,{allowed:index!==3,action:index===0?'release':'prepare',protocol:'simulated-contract'}]));
-  window.sequence=0;window.lose=false;window.hold=false;window.prepareState='RUNNING';window.preparePhase='COPYING';window.callbacks=new Set();window.active=true;
+  window.calls=[];window.operations=new Map();window.capabilities=new Map(machines.map((row,index)=>[row.id,{protocol:1,prepare:index!==0&&index!==3,release:index===0,prepareCancel:false,releaseCancel:true}]));
+  window.sequence=0;window.lose=false;window.hold=false;window.prepareState='RUNNING';window.preparePhase='COPYING';window.counts=true;window.callbacks=new Set();window.active=true;
   window.store={production:true,principal:{userId:'alice',role,enabled:true},authGeneration:0,onAuthChange:callback=>{callbacks.add(callback);return ()=>callbacks.delete(callback);},call:async(operation,args)=>{
    const actor=store.principal.userId;calls.push({operation,args:structuredClone(args),actor});
-   if(operation==='datasets.cache.capabilities')return structuredClone(capabilities.get(args.machine));
+   if(operation==='datasets.cache.capabilities'){
+    if(window.delaySource&&args.machine===[...capabilities.keys()][0])return new Promise(resolve=>window.resolveSource=()=>resolve(structuredClone(capabilities.get(args.machine)))).finally(()=>window.sourceSettled=true);
+    return structuredClone(capabilities.get(args.machine));
+   }
    let row;
    if(operation==='datasets.cache.prepare'||operation==='datasets.cache.release'){
     const action=operation.split('.').at(-1),operationId='10000000-0000-4000-8000-'+String(++sequence).padStart(12,'0');
-    row={...args,operationId,action,state:action==='prepare'?prepareState:'RELEASING',phase:action==='prepare'?preparePhase:'RELEASING',canCancel:true,bytes:1024**2,totalBytes:4*1024**2,actor};operations.set(operationId,row);
+    row={...args,operationId,action,state:action==='prepare'?prepareState:'RUNNING',phase:action==='prepare'?preparePhase:'RELEASING',canCancel:action==='release',createdAt:Date.now(),updatedAt:Date.now(),...(counts?{bytes:1024**2,totalBytes:4*1024**2}:{}),actor};operations.set(operationId,row);
     if(hold)await new Promise(resolve=>window.completeDelayed=resolve);
     if(lose)throw Error('模拟回执丢失');
    }else{
@@ -36,11 +39,12 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
     if(operation==='datasets.cache.cancel'){row.state='CANCELING';row.phase='STOPPING';row.canCancel=false;}
     else if(operation!=='datasets.cache.status')throw Error('unexpected simulated operation '+operation);
    }
+   if(['RELEASED','BLOCKED','FAILED','CANCELED'].includes(row.state)){row.receiptOnly=true;row.locationState='NOT_OBSERVED';}
    return structuredClone(row);
   }};
   Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>window.copied=text},configurable:true});
   window.host=document.querySelector('#fixture');
-  window.mount=(raw={allowed:true},action='prepare')=>window.ui=mountCacheOperation(host,{store,action,machine:machines[action==='prepare'?1:0].id,dataset:'sample',version,capabilities:raw,active:()=>active});
+  window.mount=(raw={protocol:1,prepare:true,release:true,prepareCancel:false,releaseCancel:true},action='prepare')=>window.ui=mountCacheOperation(host,{store,action,machine:machines[action==='prepare'?1:0].id,dataset:'sample',version,capabilities:raw,active:()=>active});
   window.transfer=()=>window.ui=mountCacheTransfer(host,{store,source:machines[0].id,targets:machines.slice(1).map(row=>({machine:row.id,capabilities:capabilities.get(row.id)})),dataset:'sample',version});
   window.clean=()=>{ui?.destroy();host.replaceChildren();localStorage.clear();};
   host.innerHTML='<span>现有缓存操作</span>';window.baseline=host.innerHTML;window.ui={destroy(){}};
@@ -53,6 +57,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  await page.locator('[data-cache-transfer-open]').click();assert.equal(await page.locator('select option').count(),2);
  await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RUNNING]'));
  const prepare=await page.evaluate(()=>calls.find(row=>row.operation==='datasets.cache.prepare'));assert.deepEqual(Object.keys(prepare.args).sort(),['dataset','key','machine','version']);assert.equal(prepare.args.machine,machines[1].id);
+ assert.equal(await page.locator('[data-cache-transfer-target] [data-cache-cancel]').count(),0,'prepare never cancels the shared worker');
  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0,'no release before READY');
  await page.locator('[data-cache-copy]').click();const original=await page.evaluate(()=>operations.values().next().value.operationId);assert.equal(await page.evaluate(()=>copied),original);
  assert.equal(await page.locator('.cache-operation-id code').textContent(),original.slice(0,8)+'…'+original.slice(-4));assert.equal(await page.locator('.cache-operation-progress').textContent(),'1.0 MiB / 4.0 MiB');
@@ -62,25 +67,47 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  await page.evaluate(()=>document.activeElement?.blur());await page.screenshot({path:join(output,'transfer-'+role+'-'+width+'.png'),fullPage:true,animations:'disabled'});
  await page.evaluate(()=>{const row=operations.values().next().value;row.phase='READY';});await page.clock.runFor(1501);
  assert.equal(await page.locator('[data-state=RUNNING]').count(),1);assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0,'phase READY alone is not completion');
- await page.evaluate(()=>{const row=operations.values().next().value;row.state='READY';row.canCancel=false;});await page.clock.runFor(1501);
+ for(const flags of [{receiptOnly:true,locationState:null},{receiptOnly:false,locationState:'NOT_OBSERVED'}]){
+  await page.evaluate(flags=>Object.assign(operations.values().next().value,{state:'READY',canCancel:false},flags),flags);await page.locator('[data-cache-transfer-target] [data-cache-query]').click();
+  assert.equal(await page.locator('[data-state=READY]').count(),0,'unobserved location is not shown as a READY cache');assert.equal(await page.locator('[data-state=UNKNOWN]').textContent(),'未知');
+  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0);assert.equal(await page.evaluate(machine=>calls.filter(row=>row.operation==='datasets.cache.capabilities'&&row.args.machine===machine).length,machines[0].id),0);
+ }
+ await page.evaluate(()=>Object.assign(operations.values().next().value,{state:'READY',canCancel:false,receiptOnly:false,locationState:null}));await page.locator('[data-cache-transfer-target] [data-cache-query]').click();
  await page.waitForFunction(()=>document.querySelector('[data-cache-transfer-source] [data-cache-start]'));
  assert.equal(await page.locator('[data-cache-transfer-target] .cache-operation-progress').count(),0,'terminal receipt does not retain an old progress fraction');
  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').textContent(),'释放原服务器缓存');
+ assert.equal(await page.evaluate(machine=>calls.filter(row=>row.operation==='datasets.cache.capabilities'&&row.args.machine===machine).length,machines[0].id),1,'observed READY rechecks source release capability once');
+ await page.evaluate(()=>{operations.values().next().value.receiptOnly=true;});await page.locator('[data-cache-transfer-target] [data-cache-query]').click();assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0,'stale target proof removes an unstarted release');
+ await page.evaluate(()=>{operations.values().next().value.receiptOnly=false;window.delaySource=true;});await page.locator('[data-cache-transfer-target] [data-cache-query]').click();await page.waitForFunction(()=>typeof resolveSource==='function');
+ await page.evaluate(()=>{operations.values().next().value.receiptOnly=true;});await page.locator('[data-cache-transfer-target] [data-cache-query]').click();
+ await page.evaluate(()=>resolveSource());await page.waitForFunction(()=>sourceSettled);assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0,'late source capability cannot reopen release after target observation is lost');
+ await page.evaluate(()=>{operations.values().next().value.receiptOnly=false;delaySource=false;});await page.locator('[data-cache-transfer-target] [data-cache-query]').click();await page.locator('[data-cache-transfer-source] [data-cache-start]').waitFor();
  assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.cache.release').length),0,'READY never automatically releases source');
- await page.locator('[data-cache-transfer-source] [data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RELEASING]'));
+ await page.locator('[data-cache-transfer-source] [data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-transfer-source] [data-state=RUNNING]'));
  const release=await page.evaluate(()=>calls.find(row=>row.operation==='datasets.cache.release'));assert.equal(release.args.machine,machines[0].id);assert.equal(release.args.dataset,'sample');assert.equal(release.args.version,version);assert.notEqual(release.args.key,prepare.args.key);
  assert.equal(await page.evaluate(()=>calls.filter(row=>/unregister|evict/.test(row.operation)).length),0);
  await page.locator('[data-cache-transfer-source] [data-cache-cancel]').click();await page.waitForFunction(()=>document.querySelector('[data-state=CANCELING]'));assert.equal(await page.locator('[data-state=CANCELED]').count(),0);
  await page.evaluate(()=>{const row=[...operations.values()].find(row=>row.action==='release');row.state='CANCELED';row.phase='STOPPED';});await page.clock.runFor(1501);assert.equal(await page.locator('[data-state=CANCELED]').count(),1);
- await page.evaluate(()=>{clean();capabilities.set([...capabilities.keys()][0],{allowed:false,reason:'读取租约尚未结束 · 迁移保护'});mount({allowed:false,reason:'读取租约尚未结束 · 迁移保护'},'release');});
+ await page.evaluate(()=>{clean();capabilities.set([...capabilities.keys()][0],{protocol:1,prepare:false,release:false,reason:'读取租约尚未结束 · 迁移保护'});mount({protocol:1,prepare:false,release:false,reason:'读取租约尚未结束 · 迁移保护'},'release');});
  assert.equal(await page.locator('[data-cache-start]').count(),0);assert.equal(await page.locator('[role=alert]').textContent(),'读取租约尚未结束 · 迁移保护');assert.equal(await page.locator('[role=alert]').getAttribute('title'),'读取租约尚未结束 · 迁移保护');
  await page.screenshot({path:join(output,'blocked-'+role+'-'+width+'.png'),fullPage:true,animations:'disabled'});
- await page.evaluate(()=>capabilities.set([...capabilities.keys()][0],{allowed:true,action:'release'}));await page.locator('[data-cache-check]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-start]'));
- await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RELEASING]'));assert.equal(await page.locator('[data-state=RELEASED]').count(),0);
+ await page.evaluate(()=>capabilities.set([...capabilities.keys()][0],{protocol:1,prepare:false,release:true,prepareCancel:false,releaseCancel:true}));await page.locator('[data-cache-check]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-start]'));
+ await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RUNNING]'));assert.equal(await page.locator('[data-state=RELEASED]').count(),0);
  await page.evaluate(()=>{const row=[...operations.values()].findLast(row=>row.action==='release');row.state='RELEASED';row.phase='RELEASED';row.canCancel=false;});await page.locator('[data-cache-query]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RELEASED]'));
  assert.equal(await page.locator('[data-cache-start],[data-cache-cancel]').count(),0,'confirmed release is terminal');
+ assert.equal(await page.locator('[data-state=RELEASED]').textContent(),'释放已确认');
+ await page.screenshot({path:join(output,'released-'+role+'-'+width+'.png'),fullPage:true,animations:'disabled'});
+ await page.evaluate(()=>{clean();const machine=[...capabilities.keys()][0];capabilities.set(machine,{protocol:1,prepare:false,release:true,prepareCancel:false,releaseCancel:false});mount(capabilities.get(machine),'release');});
+ await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RUNNING]'));assert.equal(await page.locator('[data-cache-cancel]').count(),0,'release capability false denies cancellation even when the receipt allows it');
+ await page.evaluate(()=>{capabilities.get([...capabilities.keys()][0]).releaseCancel=true;return ui.check();});assert.equal(await page.locator('[data-cache-cancel]').count(),1);
+ await page.evaluate(()=>{[...operations.values()].at(-1).canCancel=false;return ui.query();});assert.equal(await page.locator('[data-cache-cancel]').count(),0,'release receipt false denies cancellation even when the capability allows it');
+ await page.evaluate(()=>{clean();prepareState='DISPATCHING';preparePhase='DISPATCHING';counts=false;mount();});await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=DISPATCHING]'));
+ assert.equal(await page.locator('.cache-operation-phase').textContent(),'派发');assert.equal(await page.locator('.cache-operation-progress,[data-cache-cancel]').count(),0,'no counters means phase only; shared prepare has no cancel');
+ await page.evaluate(()=>Object.assign([...operations.values()].at(-1),{state:'BLOCKED',phase:'BLOCKED',error:'读取租约尚未结束 · 迁移保护',canCancel:false}));await page.locator('[data-cache-query]').click();
+ assert.equal(await page.locator('[data-state=BLOCKED]').textContent(),'暂不能执行');assert.equal(await page.locator('[role=alert]').textContent(),'读取租约尚未结束 · 迁移保护');assert.equal(await page.locator('.cache-operation-progress').count(),0);
+ await page.screenshot({path:join(output,'blocked-receipt-'+role+'-'+width+'.png'),fullPage:true,animations:'disabled'});
  if(width===1440){
-  await page.evaluate(()=>{clean();lose=true;mount();});await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-id-form]'));
+  await page.evaluate(()=>{clean();prepareState='RUNNING';preparePhase='COPYING';lose=true;mount();});await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-id-form]'));
   const before=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.cache.prepare').length);
   assert.equal(await page.locator('[data-cache-start]').count(),0);await page.clock.runFor(5000);assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.cache.prepare').length),before);
   const lost=await page.evaluate(()=>[...operations.values()].at(-1).operationId);await page.locator('[name=operationId]').fill(lost);await page.evaluate(()=>lose=false);await page.locator('[data-cache-id-form] button').click();await page.waitForFunction(()=>document.querySelector('[data-state=RUNNING]'));

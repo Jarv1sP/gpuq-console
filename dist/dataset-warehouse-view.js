@@ -1,12 +1,13 @@
-import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName,adaptStorageOverview,overviewDatasetCatalog} from './dataset-catalog-model.js';
+import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName,adaptStorageOverview,overviewDatasetCatalog,displayStorageCapacity} from './dataset-catalog-model.js';
 import {datasetLabelClient,normalizeDatasetDisplayName} from './dataset-label-client.js';
 import {createUploadMeter} from './dataset-upload-metrics.js';
 import {maintenanceFor} from './maintenance-state.js';
 import {transferBytes} from './data-route.js';
 import {selectUploadRoute,validateUploadRoutes,uploadStorageMachine} from './upload-routes.js';
 import {probeBrowserUploadRoute} from './dataset-upload.js';
-import {datasetInfoHTML as info,warehouseCapacityHTML,cacheCapacityRatio,cacheCapacityRailHTML,storageCapacityDetailHTML,applyCapacityGeometry,capacityCheckedTitle} from './dataset-flow.js';
+import {datasetInfoHTML as info,warehouseCapacityHTML,cacheCapacityRatio,cacheCapacityAmount,cacheCapacityTitle,cacheCapacityRailHTML,storageCapacityDetailHTML,applyCapacityGeometry} from './dataset-flow.js';
 import {datasetCacheWatch} from './dataset-cache-watch.js';
+import {mountCacheOperation,mountCacheTransfer,canCacheAction} from './dataset-cache-operation.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const amount=value=>Number.isSafeInteger(value)&&value>=0?transferBytes(value):'—';
 const glyph=value=>`<span class="v3-g ${value==='READY'?'ready':value==='PREPARING'?'fetch':value==='FAILED'?'fail':value==='UNKNOWN'?'unknown':'none'}" aria-hidden="true"></span>`;
@@ -14,16 +15,16 @@ const strata=state=>`<span class="v3-strata ${state==='pending'?'storing':state=
 const short=value=>String(value);
 const words={READY:'已缓存',PREPARING:'取回中',FAILED:'取回失败',UNKNOWN:'待确认',STAGING:'上传未完成',REGISTERED:'未缓存',NOT_LOCAL:'未缓存'};
 const chosen=item=>item.versions.find(row=>row.selected.state==='READY')||item.versions[0];
-const usage=value=>value?.available===true&&Number.isSafeInteger(value.filesystemBytes)&&value.filesystemBytes>0&&Number.isSafeInteger(value.availableBytes)&&value.availableBytes>=0&&value.availableBytes<=value.filesystemBytes?Math.round((value.filesystemBytes-value.availableBytes)/value.filesystemBytes*100):null;
 
 export function warehouseWorkspaceHTML(){
- return `<div class="warehouse-v3"><div id="warehouse-server-rail" class="v3-rail" role="group" aria-label="按缓存所在服务器筛选"></div><div id="warehouse-machine-capacity"></div><div class="v3-split"><section class="v3-list" aria-label="仓库"><header class="v3-list-head"><h2>${strata('saved')}仓库</h2><input id="warehouse-search" class="v3-search" type="search" placeholder="搜索名称或 ID" aria-label="搜索数据集"><button id="datasets-refresh" class="button quiet v3-refresh" type="button" aria-label="刷新仓库">↻</button></header><div id="warehouse-capacity"></div><div class="v3-cols" aria-hidden="true"><span></span><span>名称</span><span>所属</span><span>版本</span><span>大小</span><span>已缓存在</span></div><p id="datasets-status" role="status"></p><div id="dataset-catalog" role="listbox" aria-label="数据集"></div></section><aside id="warehouse-inspector" class="v3-inspector" aria-label="数据集详情"></aside></div><div class="v3-legacy-context" hidden><div class="terminal-controls datasets-controls"><label><span>上传到</span><select name="dataset-machine"></select></label></div><div id="datasets-capacity" hidden></div><div id="datasets-quota" hidden></div><div id="datasets-database" hidden></div></div></div>`;
+ return `<div class="warehouse-v3"><div id="warehouse-server-rail" class="v3-rail" role="group" aria-label="按缓存所在服务器筛选"></div><div class="v3-split"><section class="v3-list" aria-label="仓库"><header class="v3-list-head"><h2>${strata('saved')}仓库</h2><input id="warehouse-search" class="v3-search" type="search" placeholder="搜索名称或 ID" aria-label="搜索数据集"><button id="datasets-refresh" class="button quiet v3-refresh" type="button" aria-label="刷新仓库">↻</button></header><div id="warehouse-capacity"></div><div id="warehouse-machine-capacity"></div><div class="v3-cols" aria-hidden="true"><span></span><span>名称</span><span>所属</span><span>版本</span><span>大小</span><span>已缓存在</span></div><p id="datasets-status" role="status"></p><div id="dataset-catalog" role="listbox" aria-label="数据集"></div></section><aside id="warehouse-inspector" class="v3-inspector" aria-label="数据集详情"></aside></div><div class="v3-legacy-context" hidden><div class="terminal-controls datasets-controls"><label><span>上传到</span><select name="dataset-machine"></select></label></div><div id="datasets-capacity" hidden></div><div id="datasets-quota" hidden></div><div id="datasets-database" hidden></div></div></div>`;
 }
 
 export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machineAllowed,authorizedMachines,access}){
  let model=null,selected=null,selectedVersion=null,filter=null,search='',capacities=new Map(),epoch=0,routeEpoch=0,route=null,routeAbort=null,selectedFiles=[],uploadName='',phoneDetail=false,installedObserver=null;
  let upload=null,uploadBusy=false,uploadLocked=false,uploadDisplay='',lastControls={};
- let overview=null,legacyCatalog=null,overviewRequest=0,overviewAbort=null;
+ let overview=null,legacyCatalog=null,capacityCatalog=null,overviewRequest=0,overviewAbort=null;
+ const cacheCapabilities=new Map();let capabilityScope=null,capabilityRequest=0,capabilityAbort=null,capabilityBusy=false,capabilityUnavailable=false,actionUI=null,actionLifetime=null,actionContext=null;
  const meter=createUploadMeter(),templates=new WeakMap();
  const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
  const machine=()=>section.querySelector('[name=dataset-machine]')?.value;
@@ -43,7 +44,37 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(v)return versionAccess(v).selectable;
   return upload?.state==='READY'&&upload.machine===machine()&&upload.dataset===dataset&&upload.version===version;
  }
- function reset(){epoch++;cacheWatch.reset();overviewRequest++;overviewAbort?.abort();overviewAbort=null;overview=null;legacyCatalog=null;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();capacityOverview();}
+ function reset(){epoch++;cacheWatch.reset();retireCacheActions();overviewRequest++;overviewAbort?.abort();overviewAbort=null;overview=null;legacyCatalog=null;capacityCatalog=null;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();capacityOverview();}
+ function closeCacheAction(){actionLifetime?.abort();actionUI?.destroy();actionUI=null;actionLifetime=null;actionContext=null;section.querySelector('#warehouse-cache-action')?.close();}
+ function retireCacheActions(close=true){capabilityRequest++;capabilityAbort?.abort();capabilityAbort=null;capabilityScope=null;capabilityBusy=false;capabilityUnavailable=false;cacheCapabilities.clear();if(close)closeCacheAction();}
+ async function readCacheCapabilities(){
+  if(!overview||!store.production||!store.principal||section.hidden||document.body.dataset.room!=='datasets'||capabilityBusy||capabilityUnavailable)return;
+  const v=model?.datasets.find(item=>item.dataset===selected)?.versions.find(row=>row.version===selectedVersion);
+  if(!v?.canUse)return;
+  const expected=account(),token=epoch,scope=JSON.stringify([expected,selected,selectedVersion]),dataset=selected,version=selectedVersion;
+  if(capabilityScope!==scope){retireCacheActions(false);capabilityScope=scope;}
+  if(v.servers.every(row=>!authorized(row.machine)||cacheCapabilities.has(row.machine)))return;
+  const request=capabilityRequest,controller=new AbortController();capabilityAbort=controller;capabilityBusy=true;
+  const valid=()=>current(expected,token)&&request===capabilityRequest&&capabilityScope===scope&&!section.hidden&&document.body.dataset.room==='datasets';
+  try{for(const row of v.servers){
+   if(!authorized(row.machine)||cacheCapabilities.has(row.machine))continue;
+   try{const raw=await store.call('datasets.cache.capabilities',{machine:row.machine,dataset,version},{signal:controller.signal});if(!valid())return;cacheCapabilities.set(row.machine,{raw});}
+   catch(error){if(!valid())return;if(error.status===404||/unknown operation|未知操作/i.test(error.message)){capabilityUnavailable=true;cacheCapabilities.clear();break;}cacheCapabilities.set(row.machine,{reason:error.message});}
+   if(valid())inspector();
+  }}finally{if(valid()){capabilityBusy=false;inspector();}}
+ }
+ function openCacheAction(action,target){
+  const item=model?.datasets.find(row=>row.dataset===selected),v=item?.versions.find(row=>row.version===selectedVersion),row=v?.servers.find(value=>value.machine===target),cap=cacheCapabilities.get(target)?.raw;
+  if(!v?.canUse||!row||!authorized(target)||maintenanceFor(store.data?.operationalMaintenance,target)||!overview||lastControls.busy||capabilityScope!==JSON.stringify([account(),selected,selectedVersion]))return;
+  const targets=v.servers.filter(value=>value.machine!==target&&authorized(value.machine)&&!maintenanceFor(store.data?.operationalMaintenance,value.machine)&&canCacheAction(cacheCapabilities.get(value.machine)?.raw,'prepare')).map(value=>({machine:value.machine,capabilities:cacheCapabilities.get(value.machine).raw}));
+  if(action==='transfer'?(row.state!=='READY'||!targets.length):!canCacheAction(cap,action))return;
+  closeCacheAction();let dialog=section.querySelector('#warehouse-cache-action');
+  if(!dialog){dialog=document.createElement('dialog');dialog.id='warehouse-cache-action';dialog.className='dataset-sheet v3-cache-sheet';dialog.innerHTML='<header class="dataset-sheet-head"><h2></h2><button class="button quiet" type="button" data-v3-cache-close aria-label="关闭">关闭</button></header><div data-v3-cache-host></div>';section.append(dialog);dialog.addEventListener('close',()=>{if(!dialog.open)closeCacheAction();});}
+  dialog.querySelector('h2').textContent=action==='transfer'?'转移缓存':action==='release'?'释放缓存':'缓存';dialog.querySelector('[data-v3-cache-host]').replaceChildren();actionLifetime=new AbortController();actionContext=JSON.stringify([account(),selected,selectedVersion]);dialog.showModal();
+  const expected=account(),token=epoch,observed=new Set(),options={store,dataset:item.dataset,version:v.version,signal:actionLifetime.signal,onChange:value=>{const key=JSON.stringify([value.operationId,value.state,value.receiptOnly,value.locationState]);if(current(expected,token)&&value.confirmed&&(['READY','RELEASED','CANCELED','FAILED','BLOCKED'].includes(value.state)||value.receiptOnly||value.locationState==='NOT_OBSERVED')&&!observed.has(key)){observed.add(key);refresh();}}};
+  actionUI=action==='transfer'?mountCacheTransfer(dialog.querySelector('[data-v3-cache-host]'),{...options,source:target,targets}):mountCacheOperation(dialog.querySelector('[data-v3-cache-host]'),{...options,action,machine:target,capabilities:cap});
+  if(action==='transfer')dialog.querySelector('[data-cache-transfer-open]')?.click();
+ }
  function html(root,value){
   // A refresh clears the list while reading. An identical reply must restore
   // that DOM; the cached template alone does not prove it is still mounted.
@@ -61,22 +92,24 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  }
  function header(){
   const root=document.querySelector('#page-title');if(document.body.dataset.room!=='datasets'||section.hidden){document.querySelector('#warehouse-page-actions')?.remove();return;}
-  if(root){root.querySelector('.v3-count')?.remove();if(model){const count=document.createElement('span');count.className='v3-count';count.textContent=model.datasets.length+' 个';root.append(count);}}
+  if(root){root.querySelector('.v3-count')?.remove();root.querySelector('.v3-partial')?.remove();if(model){const count=document.createElement('span');count.className='v3-count';count.textContent=model.datasets.length+' 个';root.append(count);}if(overview?.partial===true||model?.partial===true){const marker=document.createElement('span');marker.className='v3-partial v3-flag warn';marker.textContent='部分';root.append(marker);}}
   const host=document.querySelector('.page-heading .heading-actions');if(host&&!host.querySelector('#warehouse-page-actions')){const actions=document.createElement('span');actions.id='warehouse-page-actions';actions.className='v3-head-actions';actions.innerHTML='<a class="button quiet" href="#datasets/transfers">传输记录</a><button class="button primary" type="button" data-v3-upload>＋ 上传数据</button>';host.prepend(actions);}
   const upload=document.querySelector('#warehouse-page-actions [data-v3-upload]');if(upload){upload.disabled=!store.production||!store.principal||!authorizedMachines().length;upload.title=upload.disabled?'暂无服务器使用授权，仅可浏览目录':'';}
  }
  function rail(){
   const root=section.querySelector('#warehouse-server-rail');if(!root)return;
-  const rows=model?.machines||(store.data?.machines||[]).map(row=>({machine:row.id}));
+  const rows=model?.machines||(store.data?.machines||[]).map(row=>({machine:row.id})),facts=capacityDisplay();
   html(root,`<button type="button" class="v3-server-chip v3-all" data-v3-filter="" aria-pressed="${!filter}">全部</button>`+rows.map(row=>{
-   const cache=overview?.caches.find(value=>value.machine===row.machine),ratio=cacheCapacityRatio(cache),pct=overview?ratio===null?null:Math.round(ratio*100):usage(capacities.get(row.machine));
-   return `<button type="button" class="v3-server-chip" data-v3-filter="${esc(row.machine)}" aria-pressed="${filter===row.machine}" title="${esc(row.machine)}${overview?' · '+esc(capacityCheckedTitle(cache?.volume.checkedAt)):pct===null?'':' · 磁盘已用 '+pct+'%'}"><span class="v3-server-name"><span>${row.machine===machine()?'<i class="v3-here" aria-label="所选服务器"></i>':''}${esc(row.machine)}</span>${pct===null?overview?'<small>未知</small>':'':`<small class="num">${pct}%</small>`}</span>${overview?cacheCapacityRailHTML(cache):pct===null?'':`<span class="v3-cap ${pct>=80?'hot':''}" aria-hidden="true"><i data-v3-percent="${pct}"></i></span>`}</button>`;
+   const cache=facts.caches.find(value=>value.machine===row.machine),ratio=cacheCapacityRatio(cache),pct=ratio===null?null:Math.round(ratio*100);
+   return `<button type="button" class="v3-server-chip" data-v3-filter="${esc(row.machine)}" aria-pressed="${filter===row.machine}" title="${esc(row.machine+' · '+cacheCapacityTitle(cache))}"><span class="v3-server-name"><span>${row.machine===machine()?'<i class="v3-here" aria-label="所选服务器"></i>':''}${esc(row.machine)}</span><small class="num">${pct===null?cacheCapacityAmount(cache):pct+'%'+(cache.usageComplete===false?'+':'')}</small></span>${cacheCapacityRailHTML(cache)}</button>`;
   }).join(''));capacityOverview();
  }
+ function capacityDisplay(){return displayStorageCapacity(overview,capacityCatalog||model,capacities,store.data?.machines||[]);}
  function capacityOverview(){
   const warehouse=section.querySelector('#warehouse-capacity'),detail=section.querySelector('#warehouse-machine-capacity');
-  if(warehouse)html(warehouse,warehouseCapacityHTML(overview?.warehouse,overview?.checkedAt));
-  if(detail)html(detail,storageCapacityDetailHTML(overview?.caches.find(row=>row.machine===filter)));
+  const facts=capacityDisplay(),target=filter||machine()||facts.caches[0]?.machine;
+  if(warehouse)html(warehouse,warehouseCapacityHTML(facts.warehouse,facts.checkedAt));
+  if(detail)html(detail,storageCapacityDetailHTML(facts.caches.find(row=>row.machine===target)));
  }
  function visible(){return (model?.datasets||[]).filter(item=>(!filter||item.versions.some(v=>v.servers.some(row=>row.machine===filter&&row.observed&&!['NOT_LOCAL','REGISTERED'].includes(row.state))))&&(!search||(item.displayName+' '+item.dataset).toLowerCase().includes(search)));}
  function rows(){
@@ -91,7 +124,9 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  }
  function inspector(){
   const root=section.querySelector('#warehouse-inspector'),item=model?.datasets.find(row=>row.dataset===selected);if(!root)return;
-  if(!item){root.replaceChildren();return;}const v=item.versions.find(row=>row.version===selectedVersion)||chosen(item);if(!v){root.replaceChildren();return;}selectedVersion=v.version;
+  if(!item){root.replaceChildren();closeCacheAction();return;}const v=item.versions.find(row=>row.version===selectedVersion)||chosen(item);if(!v){root.replaceChildren();closeCacheAction();return;}selectedVersion=v.version;
+  if(actionContext&&actionContext!==JSON.stringify([account(),selected,selectedVersion]))closeCacheAction();
+  if(capabilityScope&&capabilityScope!==JSON.stringify([account(),selected,selectedVersion]))retireCacheActions();
   const w=v.warehouse,storeWords={saved:'已存入仓库',pending:({QUEUED:'等待存入仓库',COPYING:'正在存入仓库',PROVISIONING:'校验中',CERTIFYING:'检查恢复能力'}[w.phase]||'仓库状态待确认'),unrecorded:'未存入仓库',unknown:'待确认',failed:'存入失败'};
   const warehouseRows=w.originals?w.originals.map(row=>`<div class="capacity-proof-row" title="${esc(row.state||'未知')}"><span class="capacity-proof ${row.confirmed?'confirmed':''}" role="img" aria-label="${row.confirmed?'已确认':'待确认'}"></span>${row.machine?`<code title="${esc(row.machine)}">${esc(row.machine)}</code>`:''}</div>`).join('')||'<div class="capacity-proof-row"><span class="capacity-proof" role="img" aria-label="待确认"></span><span>未知</span></div>':`<div class="v3-store" title="${esc(storeWords[w.state])}"><span class="capacity-proof ${w.originalConfirmed?'confirmed':''}" role="img" aria-label="${w.originalConfirmed?'已确认':'待确认'}"></span>${w.machine?`<code title="${esc(w.machine)}">${esc(w.machine)}</code>`:'<span>未知</span>'}</div>`;
   const versions=item.versions.length>1?`<select class="v3-version" data-v3-version aria-label="版本">${item.versions.map(row=>`<option value="${esc(row.version)}" title="${esc(row.version)}" ${row===v?'selected':''}>${esc(row.version.slice(0,12))}</option>`).join('')}</select><button type="button" class="v3-copy" data-v3-copy="${esc(v.version)}" aria-label="复制完整版本">复制</button>`:`<button type="button" class="v3-copy" data-v3-copy="${esc(v.version)}" title="${esc(v.version)}" aria-label="复制完整版本">${esc(v.version.slice(0,12))} · 复制</button>`;
@@ -99,11 +134,15 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   html(root,`<div class="v3-detail-scroll"><button class="button quiet v3-back" type="button" data-v3-back>‹ 数据集</button><section><h2><span title="${esc(item.displayName)}">${esc(item.displayName)}</span><button type="button" class="v3-edit" data-v3-label="${esc(item.dataset)}" aria-label="修改显示名" ${v.canUse&&authorized(machine())?'':'disabled'}>✎</button></h2><div class="v3-idline"><code title="${esc(item.dataset)}">${esc(item.dataset)}</code><button type="button" class="v3-copy" data-v3-copy="${esc(item.dataset)}">复制</button></div><div class="v3-meta"><span>所属 ${esc(datasetOwnerName(v.ownerLabel))}</span><span class="num">${esc(amount(v.bytes))}</span>${v.files===null?'':`<span class="num">${v.files.toLocaleString('zh-CN')} 个文件</span>`}<span>${item.versions.length} 个版本</span></div></section><section><div class="v3-lab">仓库${versions}</div>${warehouseRows}${w.records.filter(row=>versionAccess(v).canRetry&&row.machine===machine()&&row.storage.version===v.version&&['FAILED','BLOCKED'].includes(row.storage.phase)).map(row=>`<button class="button" type="button" data-retry-archive="${esc(row.storage.dataset)}" data-version="${esc(v.version)}">重试</button>`).join('')}</section><section><div class="v3-lab copy-caption"><span>缓存</span>${v.selected.error?info(v.selected.error,'缓存结果'):""}</div>${v.servers.map(row=>{
    row=cacheRow(item.dataset,v,row);const source=v.warehouse.originalConfirmed||v.servers.some(server=>server.machine!==row.machine&&server.state==='READY'&&server.canUse);
    const mayCache=v.canUse&&!lastControls.busy&&authorized(row.machine)&&!maintenanceFor(store.data?.operationalMaintenance,row.machine)&&!['READY','PREPARING','UNKNOWN'].includes(row.state)&&row.directoryState==='ok'&&(row.canUse&&row.canPrepare||source);
-   const cacheAction=['READY','PREPARING'].includes(row.state)?'':`<button class="button ${row.state==='FAILED'?'quiet':'v3-outline'} v3-small" type="button" data-v3-cache="${esc(row.machine)}" data-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${mayCache?'':'disabled'}>${row.state==='FAILED'?'重试':'缓存'}</button>`;
+   const cap=cacheCapabilities.get(row.machine),newActions=overview&&!capabilityUnavailable,enabled=v.canUse&&!lastControls.busy&&authorized(row.machine)&&!maintenanceFor(store.data?.operationalMaintenance,row.machine);
+   const transferTargets=v.servers.some(target=>target.machine!==row.machine&&authorized(target.machine)&&canCacheAction(cacheCapabilities.get(target.machine)?.raw,'prepare'));
+   const legacyCacheAction=['READY','PREPARING'].includes(row.state)?'':`<button class="button ${row.state==='FAILED'?'quiet':'v3-outline'} v3-small" type="button" data-v3-cache="${esc(row.machine)}" data-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${mayCache?'':'disabled'}>${row.state==='FAILED'?'重试':'缓存'}</button>`;
+   const prepareAction=newActions&&canCacheAction(cap?.raw,'prepare')?enabled&&!['READY','PREPARING'].includes(row.state)?`<button class="button v3-outline v3-small" type="button" data-v3-cache-action="prepare" data-machine="${esc(row.machine)}">缓存</button>`:'':legacyCacheAction;
+   const cacheAction=newActions?`<span class="v3-server-actions">${prepareAction}${enabled&&row.state==='READY'&&transferTargets?`<button class="button quiet v3-small" type="button" data-v3-cache-action="transfer" data-machine="${esc(row.machine)}">转移到…</button>`:''}${enabled&&canCacheAction(cap?.raw,'release')?`<button class="button quiet v3-small" type="button" data-v3-cache-action="release" data-machine="${esc(row.machine)}">释放缓存</button>`:''}</span>`:prepareAction;
    const status=(row.storageRole==='personal-original'&&row.state==='READY'?'本机固定版本 · '+({hdd:'机械盘',ssd:'固态盘'}[row.storageTier]||'磁盘未知'):['NOT_LOCAL','REGISTERED','READY','UNKNOWN'].includes(row.state)?'':words[row.state])+(row.progress?' · '+amount(row.progress.bytes)+' / '+amount(row.progress.totalBytes):'');
-   return `<article data-cache-context="${esc(machine())}" class="v3-server dataset-card ${row.machine===machine()?'cur':''}">${glyph(row.state)}<span class="v3-server-text"><b title="${esc(row.machine)}">${esc(row.machine)}</b><span title="${esc(status)}" ${cacheWatch.get({machine:row.machine,dataset:item.dataset,version:v.version})?'role="status"':''}>${esc(status)}${row.error?info(row.error,'缓存结果'):''}</span></span>${cacheAction}</article>`;
+   return `<article data-cache-context="${esc(machine())}" class="v3-server dataset-card ${row.machine===machine()?'cur':''}">${glyph(row.state)}<span class="v3-server-text"><b title="${esc(row.machine)}">${esc(row.machine)}</b><span title="${esc(status)}" ${cacheWatch.get({machine:row.machine,dataset:item.dataset,version:v.version})?'role="status"':''}>${esc(status)}${row.error?info(row.error,'缓存结果'):''}</span></span>${cacheAction}${newActions&&(cap?.reason||cap?.raw?.reason)?`<p class="v3-cache-reason" title="${esc(cap.reason||cap.raw.reason)}">${esc(cap.reason||cap.raw.reason)}</p>`:''}</article>`;
   }).join('')}</section>${personalDelete(item.dataset,v.version)?'<div class="v3-delete-row"><button class="button quiet v3-delete" type="button" data-v3-delete>删除数据集…</button></div>':''}</div><footer class="v3-train"><button class="button primary" type="button" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${canTrain?'':'disabled'}>用于训练</button><div class="v3-code"><code title="${esc('--data '+item.dataset+'@'+v.version)}">--data ${esc(item.dataset)}@${esc(v.version)}</code><button type="button" class="v3-copy" data-v3-copy="${esc('--data '+item.dataset+'@'+v.version)}">复制</button></div><div class="v3-code"><span>容器内</span><code>/data2/${esc(item.dataset)}</code><span class="v3-lock">只读</span></div></footer>`);
-  section.querySelector('.warehouse-v3').classList.toggle('v3-phone-detail',phoneDetail);requestAnimationFrame(fitInspector);
+  section.querySelector('.warehouse-v3').classList.toggle('v3-phone-detail',phoneDetail);requestAnimationFrame(fitInspector);queueMicrotask(readCacheCapabilities);
  }
  function fitInspector(){
   const root=section.querySelector('#warehouse-inspector');if(!root?.isConnected||section.hidden)return;
@@ -121,18 +160,24 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function applyCatalog(){
   if(!legacyCatalog&&!overview)return;
   const principal={...store.principal,username:store.principal?.username||store.users?.find(row=>row.id===store.principal?.userId)?.username};
-  model=readableDatasetCatalog(overview?overviewDatasetCatalog(overview,machine(),legacyCatalog):aggregateDatasetCatalog(legacyCatalog),principal);
+  const rawLegacy=legacyCatalog?aggregateDatasetCatalog(legacyCatalog):null,legacy=rawLegacy?readableDatasetCatalog(rawLegacy,principal):null;
+  model=overview&&(overview.datasets.length||!legacy?.datasets.length)?readableDatasetCatalog(overviewDatasetCatalog(overview,machine(),legacyCatalog),principal):legacy;
+  capacityCatalog=legacy?{...legacy,datasets:legacy.datasets.flatMap(item=>{
+   const visible=model.datasets.find(row=>row.dataset===item.dataset),versions=item.versions.filter(v=>visible?.versions.some(row=>row.version===v.version));
+   return versions.length?[{...item,versions}]:[];
+  })}:model;
+  if(rawLegacy)capacityCatalog.capacityUsageComplete=capacityCatalog.datasets.reduce((n,item)=>n+item.versions.length,0)===rawLegacy.datasets.reduce((n,item)=>n+item.versions.length,0);
   cacheWatch.catalog(model.datasets.flatMap(item=>item.versions.flatMap(v=>v.servers.map(row=>({machine:row.machine,dataset:item.dataset,version:v.version,physicalDataset:row.dataset,state:row.state,canUse:v.canUse,totalBytes:v.bytes})))));
   if(!model.datasets.some(item=>item.dataset===selected)){selected=model.datasets[0]?.dataset||null;selectedVersion=null;}render();
  }
- function storageOverview(value){overview=adaptStorageOverview(value);capacityOverview();if(overview||legacyCatalog)applyCatalog();}
+ function storageOverview(value){overview=adaptStorageOverview(value);retireCacheActions(false);capacityOverview();if(overview||legacyCatalog)applyCatalog();}
  async function loadOverview(){
   if(!store.production||!store.principal||section.hidden||document.body.dataset.room!=='datasets')return;
   const expected=account(),token=epoch,request=++overviewRequest;overviewAbort?.abort();const controller=new AbortController();overviewAbort=controller;
   try{const value=await store.call('datasets.overview',{},{signal:controller.signal});if(current(expected,token)&&request===overviewRequest&&!section.hidden&&document.body.dataset.room==='datasets')storageOverview(value);}
   catch{if(current(expected,token)&&request===overviewRequest){overview=null;capacityOverview();if(legacyCatalog)applyCatalog();}}
  }
- function catalogUnavailable(){overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;model=null;selected=null;selectedVersion=null;capacityOverview();rows();inspector();}
+ function catalogUnavailable(){retireCacheActions();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;capacityOverview();rows();inspector();}
  function capacity(value,id){capacities.set(id,value);rail();uploadCapacity();}
  async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacities.set(row.id,null);rail();}});}}
  function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=route?.storageTier==='hdd'?'仓库':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
@@ -292,6 +337,8 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const button=event.target.closest('button');if(!button||button.disabled)return;
   if(button.hasAttribute('data-v3-upload')){if(store.production&&store.principal&&authorized(machine()))section.querySelector('#datasets-add').open=true;return;}
   if(!section.contains(button))return;
+  if(button.hasAttribute('data-v3-cache-close')){closeCacheAction();return;}
+  if(button.hasAttribute('data-v3-cache-action')){openCacheAction(button.dataset.v3CacheAction,button.dataset.machine);return;}
   if(button.hasAttribute('data-v3-probe')){await probe();return;}
   if(button.hasAttribute('data-v3-resume')){section.querySelector('[name=dataset-via]').value='direct';section.querySelector('#dataset-upload-form').requestSubmit();return;}
   if(button.hasAttribute('data-v3-explicit-relay')){const via=section.querySelector('[name=dataset-via]');via.value='relay';via.dispatchEvent(new Event('change',{bubbles:true}));section.querySelector('#dataset-upload-form').requestSubmit();return;}
@@ -307,6 +354,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(button.hasAttribute('data-v3-files')){section.querySelector('#v3-file-picker').click();return;}
   if(button.hasAttribute('data-v3-source')){const source=button.dataset.v3Source;section.querySelector('#dataset-add-dialog').classList.add('v3-other');section.querySelector('[data-dataset-source="'+(source==='aliyun'?'link':source)+'"]').click();if(source==='aliyun'){const select=section.querySelector('[name=cloud-source]');select.value='aliyun';select.dispatchEvent(new Event('change',{bubbles:true}));}return;}
   if(button.hasAttribute('data-v3-cache')){
+   if(overview&&!capabilityUnavailable&&canCacheAction(cacheCapabilities.get(button.dataset.v3Cache)?.raw,'prepare'))return;
    const visibleVersion=model?.datasets.find(row=>row.dataset===button.dataset.dataset)?.versions.find(row=>row.version===button.dataset.version);
    if(!visibleVersion||visibleVersion.canUse!==true)return;
    const expected=account(),token=epoch,target=button.dataset.v3Cache,ref={machine:target,dataset:button.dataset.dataset,version:button.dataset.version};let watch;
@@ -322,7 +370,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
    return;
   }
  });
- new MutationObserver(()=>{header();cacheWatch.sync();if(document.body.dataset.room!=='datasets'){overviewRequest++;overviewAbort?.abort();section.querySelector('#dataset-add-dialog')?.close();}}).observe(document.body,{attributes:true,attributeFilter:['data-room']});
+ new MutationObserver(()=>{header();cacheWatch.sync();if(document.body.dataset.room!=='datasets'){retireCacheActions();overviewRequest++;overviewAbort?.abort();section.querySelector('#dataset-add-dialog')?.close();}}).observe(document.body,{attributes:true,attributeFilter:['data-room']});
  document.addEventListener('visibilitychange',()=>cacheWatch.sync());
  new MutationObserver(()=>requestAnimationFrame(fitInspector)).observe(document.body,{attributes:true,attributeFilter:['style']});
  document.fonts?.ready.then(()=>requestAnimationFrame(fitInspector));

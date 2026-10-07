@@ -34,7 +34,7 @@ try{
         if(operation==='state')return reply(route,null);
         if(operation==='projects.list')return reply(route,{projects:[]});
         if(operation==='datasets.overview'){assert.deepEqual(args,{});return reply(route,{protocol:0});}
-        if(operation==='datasets.catalog')return reply(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[{dataset:'local-sample',name:'样例数据',versions:[{version:release,state:'READY',bytes:7*1024**3,files:12,canPrepare:false,canUse:true,ownerLabel:'所属用户：'+userId,locations:machines.map(m=>({machine:m.id,state:'READY',canUse:true,ownerLabel:'所属用户：'+userId}))}]}]});
+        if(operation==='datasets.catalog')return reply(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[{dataset:'local-sample',name:'样例数据',versions:[{version:release,state:'READY',ownerLabel:'所属用户：'+principal.username,canUse:false,bytes:7*1024**3,files:12,canPrepare:false,locations:machines.map(m=>({machine:m.id,state:'READY',ownerLabel:'所属用户：'+principal.username,canUse:false}))}]}]});
         if(operation==='datasets.upload.routes')return reply(route,{available:false,protocol:'dataset-upload-v1',machine:args.machine});
     if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
         if(operation==='cloud.info')return reply(route,{capabilityVerified:shareEnabled,configurationEnabled:true,aliyunConnected:true,nodeDirect:true,managedExternally:true});
@@ -85,6 +85,10 @@ try{
     await page.locator('[data-nav=datasets]').click();
     await page.locator('#datasets-refresh').click();await page.locator('[data-v3-select]').first().waitFor();
     await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+    assert.equal(await page.locator('[data-v3-select="local-sample"]').count(),1,'the account can browse its own fixture without granting training access');
+    assert.equal(await page.locator('[data-v3-select="local-sample"] .v3-owner').textContent(),principal.username);
+    assert.ok(calls.some(c=>c.operation==='datasets.overview'),'capacity overview is a supported read in the fixture');
+    assert.ok(calls.some(c=>c.operation==='datasets.capacity'),'legacy disk capacity is a supported read in the fixture');
     assert.deepEqual(await page.locator('.v3-server-chip:not(.v3-all)').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Filter)),machines.map(m=>m.id));assert.equal(await page.locator('.dataset-matrix').count(),0);
     const openCloud=async()=>{
       await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();

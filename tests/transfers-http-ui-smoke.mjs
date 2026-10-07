@@ -6,18 +6,31 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import net from 'node:net';
 import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 const hash=value=>createHash('sha256').update(value).digest('hex'),password='Transfer-HTTP-Browser-Fixture-2026!';
 const dir=await mkdtemp(join(tmpdir(),'gpuq-transfer-http-ui-')),reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));const origin='http://127.0.0.1:'+port;
 let server,service,browser;const calls=[],receipts=new Map(),uploads=new Map(),errors=[];
+const requestContext=new AsyncLocalStorage();
+const assertBridgeIdentity=(call,memberId)=>{
+  if(call.op==='datasets.list')assert.deepEqual(call.args,{userId:'builtin-admin',hostAdmin:true},'fixed metadata list uses only the exact service identity');
+  else if(call.op==='datasets.capacity'&&call.args.userId==='builtin-admin'){
+    assert.equal(call.request?.operation,'datasets.overview','service capacity requires an actual overview request in this call chain');
+    assert.equal(call.request?.userId,memberId,'overview belongs to the authenticated member in this session');
+    assert.deepEqual(call.args,{userId:'builtin-admin',hostAdmin:true},'overview capacity uses only the exact service identity and no extra arguments');
+  }else{
+    assert.equal(call.args.userId,memberId,`${call.op} derives identity from authenticated owner`);
+    assert.equal(call.args.hostAdmin??false,false,`${call.op} never inherits metadata administrative authority`);
+  }
+};
 const data=Buffer.alloc(2*1024**2+13,17),manifest=Buffer.from(JSON.stringify({directories:[],files:[{path:'train.bin',sha256:hash(data),size:data.length}],schema:1})),version=hash(manifest),info={state:'READY',manifestBytes:manifest.length,manifestSha256:version,totalBytes:data.length,entries:1};
 try{
   const bootstrap=join(dir,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   const uploadView=u=>({uploadId:u.id,state:u.state,manifestOffset:u.manifest.length,totalBytes:u.spec.totalBytes,entries:u.spec.entries,remainingBytes:u.spec.totalBytes-[...u.files.values()].reduce((n,b)=>n+b.length,0),...(u.state==='READY'?{dataset:'u-fixture-'+u.spec.name,version:hash(u.manifest)}:{})});
   ({server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,bridge:async(machine,op,args)=>{
-    calls.push({machine,op,args});
+    calls.push({machine,op,args,request:requestContext.getStore()});
     if(op==='transfers.source.prepare')return {id:args.id,token:'x'.repeat(43),...info};
     if(op==='transfers.start'){if(!receipts.has(args.id))receipts.set(args.id,{id:args.id,state:'RUNNING',bytes:123,totalBytes:data.length});return receipts.get(args.id);}
     if(op==='transfers.cancel'){receipts.get(args.id).state='CANCELED';return receipts.get(args.id);}
@@ -36,7 +49,12 @@ try{
       if(action==='commit'){for(const entry of u.entries)assert.equal(hash(u.files.get(entry.path)),entry.sha256);u.state='READY';return uploadView(u);}
       if(action==='pause')return uploadView(u);
     }throw Error('Unexpected bridge operation '+op);
-  }}));await new Promise(r=>server.listen(port,'127.0.0.1',r));
+  }}));
+  // Observe the authenticated Portal call, not a flag that a later request could
+  // retroactively apply to unrelated capacity reads. Never retain the token.
+  const invoke=service.invoke.bind(service);
+  service.invoke=(token,operation,...args)=>requestContext.run({operation,userId:service.principal(token).userId},()=>invoke(token,operation,...args));
+  await new Promise(r=>server.listen(port,'127.0.0.1',r));
   const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'transfer-member',password})).result;await service.invoke(admin.token,'policy.full',{userId:member.id,policyVersion:0});const login=await service.login(member.username,password),session=join(dir,'session.json');await writeFile(session,JSON.stringify({url:origin,token:login.token,principal:login.principal,machine:'gpu-1'}));
   const cliFile=join(dir,'gpuctl.mjs');await writeFile(cliFile,await (await fetch(origin+'/gpuctl.mjs')).text());
   const cli=args=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[cliFile,'--session-file',session,'--json',...args]);let out='',err='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>err+=b);child.once('error',reject);child.once('close',code=>{if(code)reject(Error(err));else resolve(JSON.parse(out).data);});child.stdin.end();});
@@ -84,12 +102,22 @@ try{
   };
   await mobileFit(390);assert.deepEqual(errors,[]);
   assert.ok(calls.some(call=>call.op==='datasets.list'),'catalog exercises the fixed metadata discovery operation');
-  for(const call of calls){
-    if(call.op==='datasets.list'||call.op==='datasets.capacity'&&call.args.userId==='builtin-admin')assert.deepEqual(call.args,{userId:'builtin-admin',hostAdmin:true},'only fixed metadata list/capacity overview reads may use the service identity, never caller fields or mutation');
-    else{
-      assert.equal(call.args.userId,member.id,`${call.op} derives identity from authenticated owner`);
-      assert.equal(call.args.hostAdmin??false,false,`${call.op} never inherits metadata administrative authority`);
-    }
+  assert.ok(calls.some(call=>call.op==='datasets.capacity'&&call.args.userId==='builtin-admin'&&call.request?.operation==='datasets.overview'),'browser really requests the overview service capacity read');
+  for(const call of calls)assertBridgeIdentity(call,member.id);
+  const overview={operation:'datasets.overview',userId:member.id},capacity={op:'datasets.capacity',args:{userId:'builtin-admin',hostAdmin:true},request:overview};
+  assertBridgeIdentity(capacity,member.id);
+  for(const denied of [
+    {...capacity,request:undefined},
+    {...capacity,request:{...overview,operation:'datasets.capacity'}},
+    {...capacity,request:{...overview,userId:'another-member'}},
+    {...capacity,args:{userId:'builtin-admin',hostAdmin:false}},
+    {...capacity,args:{...capacity.args,path:'/not-permitted'}},
+    {...capacity,args:{userId:member.id,hostAdmin:true}},
+    {...capacity,op:'datasets.snapshot.get'},
+    {...capacity,op:'datasets.upload.begin'},
+  ])assert.throws(()=>assertBridgeIdentity(denied,member.id),assert.AssertionError);
+  for(const request of [undefined,overview]){
+    assertBridgeIdentity({op:'datasets.capacity',args:{userId:member.id,hostAdmin:false},request},member.id);
   }
   assert.equal(service.store.jobs.length,0);
   await capture('transfers-mobile');
