@@ -57,6 +57,12 @@ try{
     const idle=()=>page.waitForFunction(()=>!document.querySelector('#cloud-import-refresh').disabled);
     assert.equal(await source.inputValue(),'https');assert.equal(calls.some(c=>c.operation==='cloud.info'),false,'opening HTTPS does not probe share capability');
     assert.equal(await page.locator('#page-datasets #cloud-auth-begin').count(),0,'main import flow is identical for members and administrators');
+    assert.equal(await page.locator('[data-v3-source="aliyun"]').isHidden(),true,'the public room does not advertise the experimental share entry');
+    const shareOption=source.locator('option[value="aliyun"]');
+    assert.equal(await shareOption.evaluate(option=>option.hidden&&option.disabled),true,'the public share option is hidden and disabled for both roles');
+    // Explicitly enable only the retained component in this local harness;
+    // keep the public entry hidden and all real capability/write gates intact.
+    await shareOption.evaluate(option=>{option.hidden=false;option.disabled=false;});
     await source.selectOption('aliyun');await page.waitForFunction(()=>document.querySelector('#cloud-share-availability').hidden===false);await idle();
     assert.equal(await submit.isDisabled(),true);assert.equal(await page.locator('#cloud-share-fields').isHidden(),true);
     assert.equal(calls.filter(c=>c.operation==='cloud.info').length,1);
