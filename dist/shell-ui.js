@@ -23,6 +23,8 @@ export function shellUI(store,{navigate,getPage,toast}){
       selector.toggleAttribute('data-training-context',prompt.label==='训练');
     }
     serverSelectLabel(selector);if(selector)selector.title=prompt.title;
+    const projectLabel=q('#context-project')?.closest('label'),projectCaption=projectLabel&&[...projectLabel.childNodes].find(node=>node.nodeType===Node.TEXT_NODE);
+    if(projectCaption){projectLabel.dataset.originalCaption??=projectCaption.textContent;projectCaption.textContent=prompt.label==='训练'?'项目':projectLabel.dataset.originalCaption;}
     q('#context-note').textContent=project?.value?'项目':'个人工作区';
     if(active==='work'&&store.principal){const choice=project?.selectedOptions[0],source=choice?.dataset.machine||machine?.value;q('#page-title').textContent=choice?.dataset.project||'个人工作区';q('#page-description').textContent=source?source+' · '+(project?.value?'项目':'个人工作区'):'选择我的项目，或新建个人容器。';}
   }

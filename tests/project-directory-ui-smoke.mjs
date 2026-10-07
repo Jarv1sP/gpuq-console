@@ -73,7 +73,14 @@ try{
   assert.equal(calls.filter(call=>call.operation==='projects.status').at(-1).machine,source);
   await assertPrompt('训练','自动选择','自动选择兼容服务器');
   assert.match(await page.locator('#context-machine').getAttribute('aria-label'),/开发位置保持不变/);
-  for(const width of [1440,1024,390,320]){await page.setViewportSize({width,height:1080});await assertPrompt('训练','自动选择','自动选择兼容服务器');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:join(shots,`member-auto-training-${width}.png`),fullPage:true});}await page.setViewportSize({width:1440,height:1080});
+  for(const width of [1440,1024,390,320]){
+    await page.setViewportSize({width,height:1080});await assertPrompt('训练','自动选择','自动选择兼容服务器');
+    assert.equal(await page.locator('#context-project').inputValue(),await page.locator('[name=workspace-project]').inputValue());
+    assert.equal(await page.locator('#context-project option:checked').getAttribute('data-machine'),source);
+    const projectGeometry=await page.locator('#context-project').evaluate(select=>{const style=getComputedStyle(select),canvas=document.createElement('canvas'),measure=canvas.getContext('2d');measure.font=[style.fontStyle,style.fontWeight,style.fontSize,style.fontFamily].join(' ');return {width:innerWidth,usable:select.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight),needed:measure.measureText(select.selectedOptions[0].dataset.project).width};});
+    assert.ok(projectGeometry.usable>=projectGeometry.needed,'the short selected project name remains readable beside the training prompt: '+JSON.stringify(projectGeometry));
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:join(shots,`member-auto-training-${width}.png`),fullPage:true});
+  }await page.setViewportSize({width:1440,height:1080});
   await openSubmit(page);await page.locator('[name=training-target]').selectOption('current');await assertPrompt('训练','开发位置',source);
   assert.equal(await page.locator('[name=terminal-machine]').inputValue(),source);
   await page.locator('[name=training-target]').selectOption('auto');await assertPrompt('训练','自动选择','自动选择兼容服务器');await closeSubmit(page);
