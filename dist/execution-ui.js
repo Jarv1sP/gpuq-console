@@ -126,15 +126,17 @@ export function projectDiskQuotaHTML(value,owner){
   });
   return '<ul class="disk-quota-volumes">'+rows.join('')+'</ul>';
 }
-export async function uploadProjectFile(file,context,send,progress=()=>{},{inspect,signal,current=()=>true}={}){
+export async function uploadProjectFile(file,context,send,progress=()=>{},{inspect,signal,current=()=>true,onRecoverySupport=()=>{}}={}){
   const check=()=>{signal?.throwIfAborted();if(!current())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');};
   check();
   if(!validProject(context.project)||context.area!=='code')throw Error('项目只能上传到代码草稿。');
   if(!Number.isSafeInteger(file.size)||file.size<0||file.size>100*1024*1024)throw Error('网页单文件上限 100 MiB；大文件请用 CLI。');
   const contents=await file.arrayBuffer();check();if(contents.byteLength!==file.size)throw Error('文件读取长度不一致，请重新选择。');
   const sha256=[...new Uint8Array(await crypto.subtle.digest('SHA-256',contents))].map(value=>value.toString(16).padStart(2,'0')).join('');
-  check();if(typeof inspect!=='function')throw Error('上传状态无法核实，请用 CLI 检查原上传。');
-  const identity={...context,totalSize:file.size,sha256};let uploadId,offset=0,recoveries=0,resumed=false;
+  check();
+  const unsupported=error=>![401,403].includes(error?.status)&&(error?.status===404||['UNSUPPORTED','UNKNOWN_OPERATION'].includes(error?.code)||/unknown operation|unsupported operation|未知操作/i.test(error?.message||''));
+  const noRecovery='这台服务器暂不支持续传，请重新上传';
+  const identity={...context,totalSize:file.size,sha256};let uploadId,offset=0,recoveries=0,resumed=false,recoverySupported=false;
   const unconfirmed=()=>Error('上传结果未确认'+(uploadId?' · '+uploadId:'')+'；重新选择同一文件后点上传，将核对原进度。');
   async function observe(){
     check();const result=await inspect({...identity,...(uploadId?{uploadId}:{})});check();
@@ -152,20 +154,27 @@ export async function uploadProjectFile(file,context,send,progress=()=>{},{inspe
     if(result.state==='COMPLETE'&&result.completionPending!==true){progress(offset,file.size,{resumed,uploadId});return true;}
     if(offset)progress(offset,file.size,{resumed,uploadId});return false;
   }
-  const initial=await observe();
-  if(initial.state==='ABSENT')uploadId=crypto.randomUUID();else if(advance(initial))return {uploadId,complete:true};
+  let initial;
+  if(typeof inspect==='function'){
+    try{initial=await observe();recoverySupported=true;}
+    catch(error){check();if(!unsupported(error))throw error;}
+  }
+  onRecoverySupport(recoverySupported);check();
+  if(!recoverySupported||initial.state==='ABSENT')uploadId=crypto.randomUUID();else if(advance(initial))return {uploadId,complete:true};
   do{const bytes=new Uint8Array(contents,offset,Math.min(1048576,file.size-offset)),final=offset+bytes.length===file.size;
     check();let receipt;
     try{receipt=await send({...identity,uploadId,offset,data:base64(bytes),final});check();}
     catch(error){
-      check();const ambiguous=error.code!=='MAINTENANCE_ACTIVE'&&(error.code==='REQUEST_TIMEOUT'||error instanceof TypeError||[502,503,504].includes(error.status)||/reply lost|connection reset|请求超时/i.test(error.message));
+      check();if(!recoverySupported)throw Error(error.message+'；'+noRecovery+'。');
+      const ambiguous=error.code!=='MAINTENANCE_ACTIVE'&&(error.code==='REQUEST_TIMEOUT'||error instanceof TypeError||[502,503,504].includes(error.status)||/reply lost|connection reset|请求超时/i.test(error.message));
       if(!ambiguous||recoveries++>=3)throw error;
-      const observed=await observe();
+      let observed;
+      try{observed=await observe();}catch(error){if(unsupported(error)){onRecoverySupport(false);throw Error(noRecovery+'。原上传结果未确认 · '+uploadId);}throw error;}
       if(observed.state==='ABSENT'||observed.state==='UPLOADING'&&(observed.receivedBytes<offset||observed.receivedBytes>offset+bytes.length))throw unconfirmed();
       if(advance(observed))return {uploadId,complete:true};continue;
     }
-    if(final&&(receipt?.complete!==true||receipt.completionPending===true||receipt.size!==file.size||receipt.sha256!==sha256))throw Error('服务器尚未确认完整文件及校验和 · '+uploadId+'；重新选择同一文件后继续核对。');
-    if(!final&&(receipt?.complete!==false||receipt.size!==offset+bytes.length)||receipt?.path!==undefined&&receipt.path!==context.path||receipt?.uploadId!==undefined&&receipt.uploadId!==uploadId)throw unconfirmed();
+    if(final&&(receipt?.complete!==true||receipt.completionPending===true||receipt.size!==file.size||receipt.sha256!==sha256))throw Error('服务器尚未确认完整文件及校验和 · '+uploadId+'；'+(recoverySupported?'重新选择同一文件后继续核对。':noRecovery+'。'));
+    if(!final&&(receipt?.complete!==false||receipt.size!==offset+bytes.length)||receipt?.path!==undefined&&receipt.path!==context.path||receipt?.uploadId!==undefined&&receipt.uploadId!==uploadId)throw recoverySupported?unconfirmed():Error('上传结果未确认 · '+uploadId+'；'+noRecovery+'。');
     offset+=bytes.length;progress(offset,file.size,{resumed,uploadId});
   }while(offset<file.size);
   return {uploadId,complete:true};
@@ -182,6 +191,8 @@ export function executionUI(store,refresh,toast){
   let submitReceipt=null,parsedTarget=null,acceptedDraft=false,managementSubmit=false;
   let projectManagement=null;
   let quotaKey='',quotaState='idle',quotaResult=null,quotaError='',quotaController;
+  let uploadRecovery=null;
+  const uploadScope=()=>JSON.stringify([store.authGeneration,store.principal?.userId,actor,machine,project]);
   const managementAllowed=()=>managementSubmit&&store.principal?.role==='admin';
   function submissionMode(management){
     const priority=query('[name=priority]'),rank=query('[name=queue-rank]');if(!priority||!rank)return false;
@@ -470,6 +481,7 @@ export function executionUI(store,refresh,toast){
     query('#train-form [type=submit]').disabled=!available||locked||acceptedDraft||automatic&&info?.environmentMode!=='oci'||!!parsedTarget&&(machine!==parsedTarget.machine||project!==parsedTarget.project)||!placementReady||(elasticOn&&!elasticReady)||(customOn?!customAvailable():priority.value!=='normal'&&!priorityAvailable())||(!!project&&(!!catalogError||!readyReleases(info).some(item=>item.release===release.value)));
     const output=project&&query('[name=file-area]').value==='output';
     for(const id of ['workspace-list','workspace-download'])query('#'+id).disabled=!available||locked;
+    query('#workspace-upload').textContent=project&&uploadRecovery?.scope===uploadScope()&&uploadRecovery.supported?'上传 / 续传':'上传';
     query('#workspace-upload').disabled=!available||locked||output||publishing;query('[name=files]').disabled=!available||locked||output||publishing;
     query('[name=file-area]').disabled=!project||locked;query('.output-run-fields').hidden=!output;query('#project-release-field').hidden=!project;query('#project-detail').hidden=!project;
     query('#workspace-mode-note').textContent=info?.environmentMode==='oci'?'代码与容器环境一起保存为训练版本；训练只使用选定版本。':project?'代码在 /workspace，环境在 /opt/project-env；训练读取只读版本，输出写入 /outputs。':'终端、文件和训练共用个人 /workspace，新实验可单独创建项目。';
@@ -649,8 +661,12 @@ export function executionUI(store,refresh,toast){
     if(button.id==='workspace-list')guarded(button,listFiles);
     if(button.id==='workspace-upload')guarded(button,async()=>{
       const target=fileContext(),token=currentToken(),dir=query('[name=file-path]').value||'.',files=[...query('[name=files]').files];if(target.area==='output')throw Error('任务输出只支持查看和下载。');if(!files.length)throw Error('先选择文件。');
+      query('#workspace-result').textContent='正在核对上传…';
       for(const file of files){const path=dir==='.'?file.name:dir+'/'+file.name,progress=(offset,total,info)=>{if(token===currentToken())query('#workspace-result').textContent=`${info?.resumed?'接着上传':'正在上传'} ${file.name}：${offset} / ${total??file.size} B`;};
-        if(target.project)await projectActivity.run(signal=>uploadProjectFile(file,{...target,path},args=>store.call('files.put',args,{signal}),progress,{inspect:args=>store.call('files.upload.status',args,{signal}),signal,current:()=>token===currentToken()}));
+        if(target.project){
+          try{await projectActivity.run(signal=>uploadProjectFile(file,{...target,path},args=>store.call('files.put',args,{signal}),progress,{inspect:args=>store.call('files.upload.status',args,{signal}),signal,current:()=>token===currentToken(),onRecoverySupport:supported=>{if(token===currentToken()){uploadRecovery={scope:uploadScope(),supported};updateControls();}}}));}
+          catch(error){if(token===currentToken())query('#workspace-result').textContent=error.message;throw error;}
+        }
         else{let offset=0;do{const bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());if(token!==currentToken())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');await call('files.put',{...target,path,offset,truncate:offset===0,data:base64(bytes)});offset+=bytes.length;progress(offset);}while(offset<file.size);}}
       if(token!==currentToken())return;
       query('#workspace-result').textContent=`已上传 ${files.length} 个文件${project?'到项目代码草稿；生成训练版本后才能用于训练。':'。'}`;renderProject();toast('文件上传完成。');
@@ -781,7 +797,7 @@ export function executionUI(store,refresh,toast){
       submitReceipt=null;parsedTarget=null;acceptedDraft=false;managementSubmit=false;actor=store.principal.userId;machine='';focusMachine='';project='';catalog=[];directory.clear();directoryOwner='';directoryError='';catalogError='';epoch++;stopPolling();machineIdentity='';submitKey=crypto.randomUUID();operationBusy=false;projectBusy=false;
       section.innerHTML=`<section class="workspace-context" aria-labelledby="workspace-context-title"><div class="workspace-context-heading"><div><div class="eyebrow">WORKSPACE</div><h2 id="workspace-context-title">选择服务器与项目</h2><span id="project-environment" class="project-environment" hidden></span></div><button class="button" id="projects-refresh">刷新项目</button></div><div class="workspace-context-grid"><label>服务器<select name="workspace-machine" aria-describedby="workspace-mode-note"></select></label><label>项目<select name="workspace-project"><option value="">个人工作区</option></select></label></div><p id="workspace-mode-note" class="muted"></p><p id="project-status" class="workspace-status" role="status" aria-live="polite"></p><details id="project-create"><summary>新建项目</summary><form id="project-create-form"><label>项目名称<input name="new-project" pattern="[a-z][a-z0-9_-]{0,47}" maxlength="48" required placeholder="例如 vision-baseline" aria-describedby="project-name-error" spellcheck="false" autocomplete="off"><span id="project-name-error" class="form-error project-name-error" hidden></span></label><fieldset class="project-environment-choice"><legend>运行环境</legend><span>个人容器</span><select name="environment-mode" hidden aria-hidden="true" tabindex="-1"><option value="oci">个人容器</option></select></fieldset><button type="submit" class="button">创建项目</button><p id="project-create-error" class="form-error" role="alert" hidden></p></form><p id="environment-mode-note" class="muted"></p></details><div id="project-detail" class="project-actions"><button class="button primary" id="project-publish">生成训练版本</button><p id="project-terminal-block" class="project-terminal-block" hidden>先结束开发终端（断开不算）</p><button class="button danger" id="project-terminal-stop" hidden>结束终端</button><span class="muted">先完成上传并结束开发终端，再保存代码与环境版本。</span><div id="publication-progress" class="publication-progress"></div><div id="publication-actions" class="publication-actions" hidden><button type="button" class="button quiet" id="publication-query">重新查询</button><button type="button" class="button quiet" id="publication-retry">用同一请求重试</button></div></div></section>
       <section class="personal-terminal" aria-labelledby="personal-terminal-title"><div class="terminal-heading"><h3 id="personal-terminal-title">个人开发终端</h3><span class="terminal-scope">日常开发 · 不占 GPU</span></div><p id="terminal-mode-note" class="muted"></p><div class="terminal-controls"><select name="terminal-machine" hidden aria-label="终端服务器"></select><button id="terminal-open" class="button primary">新建开发终端</button><button id="terminal-reconnect" class="button">重连开发会话</button></div></section>
-      <details class="execution-panel" id="workspace-files"><summary>代码与任务输出 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">代码草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传 / 续传</button></div><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
+      <details class="execution-panel" id="workspace-files"><summary>代码与任务输出 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">代码草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传</button></div><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
       <details class="execution-panel"><summary>提交训练</summary><form id="train-form">
         <select name="machine" hidden aria-label="训练服务器"></select>
         <label>训练位置<select name="training-target"><option value="current">当前服务器 · 自动分卡</option><option value="auto">自动选择空闲服务器</option></select></label>
