@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
 import unittest
@@ -156,6 +158,20 @@ class PersonalStorageTests(unittest.TestCase):
         self.assertEqual(storage.reserve('ssd'),100)
         with patch.object(os,'fstatvfs',return_value=type('Space',(),{'f_bavail':99,'f_frsize':1})()):
             with self.assertRaisesRegex(ValueError,'reserveBytes=100'):storage.require('ssd')
+
+    def test_concurrent_claim_waits_for_short_metadata_lock_instead_of_failing_job(self):
+        version=self.published();claims=s.private_dir(self.store.path/'.run-claims',create=True)
+        entered,released=threading.Event(),threading.Event()
+        def hold():
+            with self.store._file_lock(claims/'.lock',blocking=True):
+                entered.set();self.assertTrue(released.wait(5))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            holder=pool.submit(hold);self.assertTrue(entered.wait(5))
+            run=pool.submit(self.store.run_paths,self.user,'new-project',version,str(uuid.uuid4()))
+            try:self.assertFalse(run.done(),'claim contention must wait, not permanently fail a new preparation')
+            finally:released.set()
+            holder.result(timeout=5);result=run.result(timeout=5)
+            self.assertEqual(result['storageLayout'],'personal-storage-v1')
 
     def test_mount_root_identity_and_unsafe_links_fail_closed(self):
         storage=self.store.personal_storage()

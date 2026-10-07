@@ -85,7 +85,7 @@ try{
   await mobileFit(390);assert.deepEqual(errors,[]);
   assert.ok(calls.some(call=>call.op==='datasets.list'),'catalog exercises the fixed metadata discovery operation');
   for(const call of calls){
-    if(call.op==='datasets.list')assert.deepEqual(call.args,{userId:'builtin-admin',hostAdmin:true},'only fixed metadata list may use the service identity');
+    if(call.op==='datasets.list'||call.op==='datasets.capacity'&&call.args.userId==='builtin-admin')assert.deepEqual(call.args,{userId:'builtin-admin',hostAdmin:true},'only fixed metadata list/capacity overview reads may use the service identity, never caller fields or mutation');
     else{
       assert.equal(call.args.userId,member.id,`${call.op} derives identity from authenticated owner`);
       assert.equal(call.args.hostAdmin??false,false,`${call.op} never inherits metadata administrative authority`);

@@ -80,7 +80,7 @@ export async function datasetStorageOverviewCall(service,principal,args){
       }
       const key=item.dataset+'@'+version.version,size=byte(location.contentBytes),cached=usage.get(location.machine);
       if(typeof location.warehouseReady==='boolean'){
-        originalLocations.push({machine:location.machine,dataset:location.originalDataset,state:location.warehouseReady?'READY':'NOT_READY',canUse:location.canUse&&location.warehouseReady});
+        originalLocations.push({machine:location.machine,dataset:location.originalDataset,state:location.warehouseReady?'READY':'NOT_READY',confirmed:location.warehouseReady===true,canUse:location.canUse&&location.warehouseReady});
         const original=originals.get(location.machine);
         if(original&&location.state==='UNKNOWN')original.complete=false;
         if(original&&location.warehouseReady&&!original.versions.has(key)){

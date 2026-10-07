@@ -37,7 +37,7 @@ test('warehouse originals are distinguished from local cache readiness, with phy
   assert.equal(value.caches.find(row=>row.machine===cold).budgetBytes,400);
   const version=value.datasets[0].versions[0];
   assert.equal(version.contentBytes,42);assert.equal(version.fileCount,2);assert.equal(version.ownerLabel,'所属用户：alice');
-  assert.deepEqual(version.originals,[{machine:cold,dataset:'sample',state:'READY',canUse:true}]);
+  assert.deepEqual(version.originals,[{machine:cold,dataset:'sample',state:'READY',confirmed:true,canUse:true}]);
   assert.equal(version.caches.find(row=>row.machine===cold).state,'NOT_LOCAL');
   assert.equal(version.caches.find(row=>row.machine===cold).canUse,false);
   assert.match(value.checkedAt,/Z$/);assert.match(value.physicalVolumes[0].id,new RegExp('^'+hot+':'));

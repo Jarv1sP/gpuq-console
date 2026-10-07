@@ -1032,7 +1032,7 @@ class ProjectStore:
         claim = {'owner': project['owner'], 'project': slug, 'release': version, 'jobId': jobid,
                  **({'workspaceMode': mode} if personal else {})}
         claims = private_dir(self.path / '.run-claims')
-        with self._file_lock(claims / '.lock'):
+        with self._file_lock(claims / '.lock',blocking=True):
             claim_file = claims / (jobid + '.json')
             if claim_file.exists() or claim_file.is_symlink():
                 if read_json(claim_file) != claim:
