@@ -129,6 +129,7 @@ export function adaptOriginal(raw){
   const proof=raw?.proof;
   return {machine:identifier.test(raw?.machine||'')?raw.machine:null,
     dataset:identifier.test(raw?.dataset||'')?raw.dataset:null,
+    canUse:raw?.canUse===true,
     state:text(raw?.state),confirmed:raw?.confirmed===true||
       !!proof&&typeof proof==='object'&&!Array.isArray(proof)&&Object.keys(proof).length>0};
 }
@@ -177,8 +178,9 @@ export function overviewDatasetCatalog(overview,machine,legacy=null){
     datasets:overview.datasets.map(item=>{
       const old=legacy?.datasets?.find(row=>row.dataset===item.dataset);
       return {dataset:item.dataset,name:old?.name,labelScope:old?.labelScope,displayNameRevision:old?.displayNameRevision,
-        versions:item.versions.map(v=>{const locations=[...v.caches,...(v.personalOriginals||[])],local=locations.find(row=>row.machine===machine);return {version:v.version,ownerLabel:v.ownerLabel,canUse:v.canUse,bytes:v.contentBytes,files:v.fileCount,
-          state:local?.state||'UNKNOWN',canPrepare:local?.canPrepare===true,locations:locations.map(row=>({...row}))};})};
+        versions:item.versions.map(v=>{const locations=[...v.caches,...(v.personalOriginals||[])],local=locations.find(row=>row.machine===machine),node=overview.caches.find(row=>row.machine===machine),known=node?.state==='READY'&&node.usageComplete===true;return {version:v.version,ownerLabel:v.ownerLabel,
+          canUse:v.canUse===true||locations.some(row=>row.canUse===true)||v.originals.some(row=>row.canUse===true),bytes:v.contentBytes,files:v.fileCount,
+          state:local?.state||(known?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,locations:locations.map(row=>({...row}))};})};
     })};
   const result=aggregateDatasetCatalog(catalog);
   for(const item of result.datasets){

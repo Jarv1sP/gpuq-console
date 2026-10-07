@@ -31,3 +31,14 @@ test('an h-prefixed legacy registration alone never supplies a private-root role
  assert.equal(value.caches.find(row=>row.machine===machine).readyContentBytes,42);
  assert.equal(Object.hasOwn(value.datasets[0].versions[0],'personalOriginals'),false);
 });
+test('known empty target stays NOT_LOCAL and explicit original readability survives overview projection',()=>{
+ const raw={protocol:'dataset-storage-overview-v1',checkedAt:'2026-01-01T00:00:00Z',partial:false,
+  warehouse:{state:'NOT_CONFIGURED',volumes:[]},caches:[{machine,state:'READY',usageComplete:true,volume:{}}],
+  datasets:[{dataset:'sample',versions:[{version,canUse:false,originals:[{machine,dataset:'sample',state:'READY',confirmed:true,canUse:true}],caches:[]}]}]};
+ let model=overviewDatasetCatalog(adaptStorageOverview(raw),machine);assert.equal(model.datasets[0].versions[0].selected.state,'NOT_LOCAL');
+ assert.equal(model.datasets[0].versions[0].canUse,true,'only explicit per-location reading evidence supplies readability');
+ assert.equal(model.datasets[0].versions[0].warehouse.originalConfirmed,true);
+ raw.caches[0].usageComplete=false;raw.datasets[0].versions[0].originals[0].canUse=false;
+ model=overviewDatasetCatalog(adaptStorageOverview(raw),machine);assert.equal(model.datasets[0].versions[0].selected.state,'UNKNOWN');
+ assert.equal(model.datasets[0].versions[0].canUse,false,'confirmed backup alone never supplies file permission');
+});
