@@ -12,6 +12,11 @@ function gpuMetrics(gpu){
   const utilization=number(gpu.utilization);
   return {index:gpu.index,uuid:text(gpu.uuid),model:text(gpu.model),memoryTotalMiB:number(gpu.memoryTotalMiB),memoryUsedMiB:number(gpu.memoryUsedMiB),utilization:utilization!==null&&utilization<=100?utilization:null,temperatureC:number(gpu.temperatureC),powerDrawW:number(gpu.powerDrawW),powerLimitW:number(gpu.powerLimitW)};
 }
+function healthIssue(value,cards=64){
+  if(value?.kind==='scheduler-degraded')return {kind:'scheduler-degraded'};
+  if(value?.kind!=='managed-gpu-missing'||!Array.isArray(value.indices)||value.indices.length>64||value.indices.some(index=>!Number.isSafeInteger(index)||index<0||index>=cards)||new Set(value.indices).size!==value.indices.length)return undefined;
+  return {kind:'managed-gpu-missing',indices:[...value.indices].sort((a,b)=>a-b)};
+}
 function gpuStatus(gpu){
   const raw=Array.isArray(gpu.processes)?gpu.processes:[],valid=raw.filter(p=>p&&Number.isSafeInteger(p.pid)&&p.pid>0&&p.pid<=2147483647),incomplete=valid.length!==raw.length||valid.length>128;
   return {...gpuMetrics(gpu),processesAvailable:gpu.processesAvailable===true&&!incomplete,
@@ -35,6 +40,7 @@ export async function readGPUQStatus(path,now=Date.now()){
         hostCommand:{version:1,available:host.reachable===true&&host.hostCommand?.version===1&&host.hostCommand?.available===true},
         gpus:Array.isArray(host.gpus)?host.gpus.filter(g=>g&&Number.isInteger(g.index)&&g.index>=0).slice(0,machine.cards).map(gpuStatus):[],
         gpuq:{...host.gpuq,connected:host.gpuq?.connected===true,
+          healthIssue:host.gpuq?.health==='degraded'?healthIssue(host.gpuq?.healthIssue,machine.cards):undefined,
           jobs:Array.isArray(host.gpuq?.jobs)?host.gpuq.jobs.slice(0,100):[]}};
     })};
   }catch{return empty;}
@@ -48,6 +54,7 @@ export function visibleGPUQStatus(snapshot,principal,limits,context){
     const base=admin?structuredClone(host):{
       id:host.id,reachable:host.reachable,
       gpuq:{connected:host.gpuq.connected,health:host.gpuq.health,capabilities:host.gpuq.capabilities,
+        ...(host.gpuq.health==='degraded'&&healthIssue(host.gpuq.healthIssue)?{healthIssue:healthIssue(host.gpuq.healthIssue)}:{}),
         observeOnly:host.gpuq.observeOnly,schedulableIndices:host.gpuq.schedulableIndices},
       ...(host.error?{error:host.error}:{}),...(host.gpuError?{gpuError:'部分 GPU 指标暂不可用'}:{})
     };

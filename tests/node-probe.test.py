@@ -89,6 +89,33 @@ class Probe(unittest.TestCase):
         self.assertEqual(ps, ['/usr/bin/ps', '-p', '321', '-o', 'pid=,user=,comm='])
         self.assertTrue(all(timeout <= 12 for _, timeout in self.calls))
 
+    def test_missing_managed_gpu_is_classified_without_hiding_healthy_metrics(self):
+        missing = 'GPU-00000000-0000-0000-0000-000000000002'
+        self.outputs['base'] = self.outputs['base'].splitlines()[0] + '\n'
+        self.outputs['gpuq'] = json.dumps({'daemon': {'health': 'degraded',
+            'error': 'NvidiaSmiError: managed GPU UUIDs are missing: ' + missing,
+            'managed_gpus': [{'index': 1, 'uuid': missing}],
+            'schedulable_gpu_indices': []}, 'jobs': []})
+        out = self.run_probe()
+        self.assertEqual(len(out['gpus']), 1)
+        self.assertEqual(out['gpus'][0]['utilization'], 75)
+        self.assertEqual(out['gpus'][0]['processes'][0]['pid'], 321)
+        self.assertEqual(out['gpuq']['healthIssue'], {'kind': 'managed-gpu-missing', 'indices': [1]})
+        self.assertEqual(out['gpuq']['schedulableIndices'], [])
+        self.assertNotIn(missing, json.dumps(out))
+        self.assertNotIn('NvidiaSmiError', json.dumps(out))
+
+    def test_scheduler_error_text_and_invalid_gpu_identity_never_escape(self):
+        for error in ('/private/project secret-token <script>',
+                      'NvidiaSmiError: managed GPU UUIDs are missing: <script>',
+                      'NvidiaSmiError: managed GPU UUIDs are missing: ' + 'x' * 5000):
+            self.outputs['gpuq'] = json.dumps({'daemon': {'health': 'degraded', 'error': error}, 'jobs': []})
+            out = self.run_probe()
+            self.assertEqual(out['gpuq']['healthIssue'], {'kind': 'scheduler-degraded'})
+            self.assertNotIn(error, json.dumps(out))
+        self.outputs['gpuq'] = json.dumps({'daemon': {'health': 'ok', 'error': 'old failure'}, 'jobs': []})
+        self.assertNotIn('healthIssue', self.run_probe()['gpuq'])
+
     def test_process_priority_requires_exact_attempt_cgroup_and_gpu_assignment(self):
         attempt = 'A' + 'a' * 32
         job = dict(id='J1', active_attempt_id=attempt, state='RUNNING', assigned_gpu_indices=[0], priority=2, yield_policy='never')

@@ -269,6 +269,31 @@ def public_task_display(value):
             'submitter':{'name':actor['name'],'username':actor['username']}}
 
 
+def scheduler_health_issue(daemon):
+    """Fixed classifications only: never forward arbitrary scheduler errors."""
+    if daemon.get('health') != 'degraded':
+        return None
+    error = daemon.get('error')
+    prefix = 'NvidiaSmiError: managed GPU UUIDs are missing: '
+    if not isinstance(error, str) or not error.startswith(prefix) or len(error) > 4096:
+        return {'kind': 'scheduler-degraded'}
+    missing = error[len(prefix):].split(', ')
+    uuid = re.compile(r'^GPU-[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$')
+    if not 1 <= len(missing) <= 64 or len(set(missing)) != len(missing) or not all(uuid.fullmatch(value) for value in missing):
+        return {'kind': 'scheduler-degraded'}
+    managed = daemon.get('managed_gpus')
+    indices = {}
+    if isinstance(managed, list) and len(managed) <= 64:
+        for item in managed:
+            if (isinstance(item, dict) and type(item.get('index')) is int
+                    and 0 <= item['index'] < 64 and isinstance(item.get('uuid'), str)
+                    and uuid.fullmatch(item['uuid'])):
+                if item['uuid'] in indices or item['index'] in indices.values():
+                    return {'kind': 'scheduler-degraded'}
+                indices[item['uuid']] = item['index']
+    return {'kind': 'managed-gpu-missing', 'indices': sorted(indices[value] for value in missing if value in indices)}
+
+
 def probe_gpuq():
     output = {'connected': False, 'jobs': []}
     if os.path.isfile(CONFIG['gpu']):
@@ -293,6 +318,9 @@ def probe_gpuq():
                          for job in jobs[:100] if isinstance(job, dict)],
                 "limit": 100,
             }
+            issue = scheduler_health_issue(daemon)
+            if issue:
+                output['healthIssue'] = issue
             if isinstance(daemon.get('capabilities'),list) and 'job-display-v1' in daemon['capabilities']:
                 try:
                     entry=ast.parse(helper_source(HERE/'node-executor.py',os.getuid()))

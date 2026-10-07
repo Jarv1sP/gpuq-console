@@ -47,6 +47,22 @@ test('unknown metrics remain unknown and unavailable processes do not hide a car
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
+test('degraded health carries only fixed diagnosis and bounded card indices across roles',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'gpuq-health-')),path=join(dir,'status.json'),now=Date.now();
+ try{
+  for(const issue of [{kind:'managed-gpu-missing',indices:[1],error:'secret-path <script>'},{kind:'scheduler-degraded',error:'secret-path'},{kind:'managed-gpu-missing',indices:[1,1]},{kind:'managed-gpu-missing',indices:['<script>']},{kind:'untrusted',indices:[1]}]){
+   await writeFile(path,JSON.stringify({version:1,checkedAt:new Date(now).toISOString(),hosts:[{id:'gpu-1',reachable:true,gpus:[{index:0}],gpuq:{connected:true,health:'degraded',healthIssue:issue,schedulableIndices:[],jobs:[]}}]}));
+   const snapshot=await readGPUQStatus(path,now),member=visibleGPUQStatus(snapshot,{role:'member'},{'gpu-1':1});
+   const expected=issue.kind==='scheduler-degraded'?{kind:'scheduler-degraded'}:issue.kind==='managed-gpu-missing'&&issue.indices.length===1&&issue.indices[0]===1?{kind:'managed-gpu-missing',indices:[1]}:undefined;
+   assert.deepEqual(member.hosts[0].gpuq.healthIssue,expected);
+   assert.deepEqual(member.hosts[0].gpuq.schedulableIndices,[]);
+   assert.doesNotMatch(JSON.stringify(member),/secret-path|<script>/);
+   assert.equal(visibleGPUQStatus(snapshot,{role:'member'},{}).hosts.length,0);
+   assert.equal((await readGPUQStatus(path,now+181000)).hosts[0].gpuq.healthIssue,undefined);
+  }
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
 test('GPU process lists are bounded before returning snapshots',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'gpuq-bounds-')),path=join(dir,'status.json'),now=Date.now();
   try{

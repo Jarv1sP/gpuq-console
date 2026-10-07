@@ -135,9 +135,12 @@ try{
   monitor=snapshot();monitor.hosts[0].gpus[0].processesAvailable=false;monitor.hosts[0].gpus[0].utilization=65;monitor.hosts[0].gpus[0].memoryUsedMiB=18000;await refreshResources();
   assert.equal((await page.evaluate(()=>resourceAnimations)).length,previous,'Unconfirmed readings and hatches stay still');
   assert.equal(await resourceCard(page,'gpu-1').locator('.resource-tower-bar.unknown').count(),1);
-  monitor=snapshot();monitor.hosts[0].gpus.pop();await refreshResources();
-  assert.equal(await resourceCard(page,'gpu-1').locator('.resource-tower-bar.unknown').count(),8);
+  monitor=snapshot();monitor.hosts[0].gpus.pop();monitor.hosts[0].gpuq={...monitor.hosts[0].gpuq,health:'degraded',healthIssue:{kind:'managed-gpu-missing',indices:[7]},schedulableIndices:[]};await refreshResources();
+  assert.equal(await resourceCard(page,'gpu-1').locator('.resource-tower-bar.unknown').count(),1);
+  assert.equal(await resourceCard(page,'gpu-1').locator('.resource-tower-bar.mine').count(),2);
   assert.match(await resourceDetail(page,'gpu-1').textContent(),/已采集 7 \/ 8 张/);
+  assert.match(await resourceDetail(page,'gpu-1').textContent(),/GPU 7 不可用/);
+  assert.match(await resourceCard(page,'gpu-1').textContent(),/调度异常/);
   await capture('resources-partial-1440');
   const partialHeight=await page.evaluate(()=>document.documentElement.scrollHeight);
   assert.ok(partialHeight<=2200,'Partial inventory must stay within the desktop height budget: '+partialHeight);
