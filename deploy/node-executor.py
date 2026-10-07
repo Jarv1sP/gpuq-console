@@ -379,6 +379,19 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
     module,cache=dataset_cache();actor=dataset_actor(module,args)
     if operation=='datasets.capacity':
         result=cache.capacity(actor)
+        # Read-only role/volume facts. A warehouse volume is never inferred
+        # from the training-cache capacity, machine name or archive journal.
+        # Older Portal versions ignore this additive projection.
+        result['storageOverview']={'protocol':'dataset-storage-node-v1',
+            'cache':{'volume':dict(result),'budgetBytes':cache.budget_bytes},'warehouse':None}
+        if CONFIG.get('storageWarehouse') is not None:
+            try:
+                warehouse=storage_warehouse()
+                result['storageOverview']['warehouse']={'state':'READY','volume':warehouse.cold.capacity(actor)}
+            except (OSError,ValueError,RuntimeError):
+                # Do not leak mount paths/configuration through errors, and do
+                # not substitute SSD or the root disk for unavailable HDD.
+                result['storageOverview']['warehouse']={'state':'UNAVAILABLE','volume':None}
         if dataset_delete_capability()==1:result['datasetDelete']=1
         return result
     folder=ROOT/'dataset-ops';folder.mkdir(mode=0o700,exist_ok=True)
@@ -1598,6 +1611,25 @@ def storage_collect():
                 'recheck':'NEXT_SCHEDULED_RUN','evictionOutcome':'CHECK_STATUS'}
 
 
+DATASET_CACHE_ACTIONS = None
+
+def dataset_cache_actions():
+    global DATASET_CACHE_ACTIONS
+    if DATASET_CACHE_ACTIONS is None:
+        spec=importlib.util.spec_from_file_location('gpuq_dataset_cache_actions',HERE/'dataset-cache-actions.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        DATASET_CACHE_ACTIONS=module.from_executor(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    return DATASET_CACHE_ACTIONS
+
+def dataset_cache_action_operation(operation,args):
+    action=operation.removeprefix('storage.cache-action.')
+    if action not in ('capabilities','prepare','release','status','cancel') or not isinstance(args,dict) or args.get('hostAdmin') is not False:
+        raise ValueError('Invalid authenticated cache action')
+    module,_=dataset_cache();actor=dataset_actor(module,args)
+    request={key:value for key,value in args.items() if key not in ('userId','hostAdmin')}
+    return dataset_cache_actions().dispatch(actor,action,request)
+
+
 def process(operation,args):
     platform_root_check()
     if operation in ('tasks.display.get','tasks.display.set'):
@@ -1614,6 +1646,7 @@ def process(operation,args):
     if operation.startswith(('storage.lease.','storage.download.')):return storage_lease_operation(operation,args)
     if operation.startswith('storage.archive.'):return storage_archive_operation(operation,args)
     if operation.startswith('storage.dataset-delete.'):return dataset_retirement_operation(operation,args)
+    if operation.startswith('storage.cache-action.'):return dataset_cache_action_operation(operation,args)
     if operation.startswith('datasets.storage.'):return storage_management(operation,args)
     if operation.startswith('transfers.'):return transfers().process(operation,args)
     if operation in ('diagnostics','watch'):
@@ -1899,6 +1932,7 @@ if __name__=='__main__':
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         module.serve(dataset_ingress_view(),dataset_uploads());sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--dataset-cache-worker':sys.exit(dataset_cache_actions().release_worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))
     if len(sys.argv)==5 and sys.argv[1]=='--data-import-worker':sys.exit(data_imports().worker(*sys.argv[2:]))

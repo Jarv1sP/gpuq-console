@@ -1379,6 +1379,11 @@ class DatasetCache:
                         usedBytes=max(0, info.f_blocks - info.f_bfree) * block,
                         availableBytes=available, reserveBytes=self.reserve_bytes,
                         usableBytes=max(0, available - self.reserve_bytes),
+                        # Node-scoped opaque device identity lets observers
+                        # deduplicate bind aliases without exposing host paths.
+                        volumeDeviceId=hashlib.sha256(str(os.fstat(fd).st_dev).encode()).hexdigest(),
+                        checkedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                        readOnly=bool(info.f_flag & getattr(os, 'ST_RDONLY', 1)) if hasattr(info, 'f_flag') else None,
                         totalInodes=info.f_files if inodes_known else None,
                         availableInodes=info.f_favail if inodes_known else None,
                         inodeUsageKnown=inodes_known, guarded=self.mount is not None,

@@ -291,7 +291,8 @@ test('CLI rejects malformed references, member deletion, extra commands and unre
   await f.save({principal:{userId:'demo-user-1',role:'member'}});
   assert.equal((await f.cli(['data','unregister','sample'])).code,1);
   assert.equal(f.calls.some(c=>c.operation==='datasets.unregister'),false);
-  const help=await f.cli(['--help'],false);assert.match(help.stdout,/data unregister NAME\[@VERSION\]/);assert.match(help.stdout,/data status OPERATION_ID/);
+  const help=await f.cli(['help','admin'],false);assert.match(help.stdout,/data unregister NAME\[@VERSION\]/);
+  const daily=await f.cli(['--help'],false);assert.match(daily.stdout,/data status OPERATION_ID/);assert.doesNotMatch(daily.stdout,/data unregister/);
 });
 
 test('CLI submit timeout explicitly remains uncertain and does not implicitly repeat or cancel',async t=>{

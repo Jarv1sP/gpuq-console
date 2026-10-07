@@ -10,6 +10,8 @@
 
 目录上传还可启用独立的[机械仓库入库契约](DATASET_INGRESS.md)：`machine` 保留训练选择，placement-aware 回包明确给出 `requestedMachine/storageMachine/storageTier`。直传探测按真实 `storageMachine` 校验；会话 routes 请求须带原 `uploadId`，不要按当前策略重新选仓库。此能力默认关闭，工作区文件与旧导入不随它迁移。
 
+仓库优先展示的源码候选接口为 `datasets.overview {}`，见[仓库与缓存总览契约](DATASET_STORAGE_OVERVIEW.md)。明确区分仓库原件、训练缓存逻辑大小、缓存预算与整卷真实容量；未知为 `null`，不拿缓存卷推测机械仓库。元数据可浏览不代表私人文件可预览；当前 `filePreviewAvailable:false`。此契约不表示生产节点已安装，迁移围栏／执行器 SHA 需维护负责人协调后部署。
+
 ## 通用调用
 
 使用已有的已认证 `POST /api/call`：

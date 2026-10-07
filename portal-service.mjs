@@ -20,6 +20,7 @@ import {installProjectCatalog} from './project-catalog.mjs';
 import {installDatasetDeletion} from './dataset-deletion.mjs';
 import {installTaskDisplay,taskDisplayCall} from './task-display.mjs';
 import {installDatasetIngress} from './dataset-ingress.mjs';
+import {installDatasetCacheActions} from './dataset-cache-actions.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -66,6 +67,7 @@ export class PortalService extends DemoService{
     installStorageArchive(service,storageArchiveConfig);
     installDatasetIngress(service,datasetIngressConfig);
     installDatasetDeletion(service);
+    installDatasetCacheActions(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -211,7 +213,12 @@ export class PortalService extends DemoService{
     check();
     if(this.datasetReadPending>=4)throw Object.assign(Error('数据目录正在读取，请稍后刷新。'),{status:429});
     this.datasetReadPending++;
-    try{let result;try{result=await executionCall(this,admitted,operation,args);}finally{check();}return {result,principal:check()};}
+    try{let result;try{
+      this.assertMaintenanceAllowed?.(operation,args,admitted);
+      result=operation.startsWith('datasets.cache.')
+        ?await this.datasetCacheActionsCall(admitted,operation,args,check)
+        :await executionCall(this,admitted,operation,args);
+    }finally{check();}return {result,principal:check()};}
     finally{this.datasetReadPending--;}
   }
   async login(username,password){
@@ -318,7 +325,8 @@ export class PortalService extends DemoService{
       const check=()=>{const current=this.principal(token);if(current.userId!==principal.userId||current.username!==principal.username||current.role!==principal.role)throw Object.assign(Error('登录身份已改变。'),{status:403});};
       return this.datasetDeletionCall(principal,operation,structuredClone(args),check).then(result=>{check();return {result,principal:{...principal}};});
     }
-    if(['datasets.catalog','datasets.capacity','datasets.list','datasets.status','datasets.prepare'].includes(operation))return this.datasetRead(token,operation,args);
+    if(['datasets.catalog','datasets.capacity','datasets.overview','datasets.list','datasets.status','datasets.prepare',
+      'datasets.cache.capabilities','datasets.cache.prepare','datasets.cache.release','datasets.cache.status','datasets.cache.cancel'].includes(operation))return this.datasetRead(token,operation,args);
     if(typeof operation==='string'&&operation.startsWith('transfers.')){
       const principal=this.principal(token);
       return transferCall(this,principal,operation,args,()=>this.principal(token)).then(result=>({result,principal:{username:principal.username,role:principal.role,userId:principal.userId}}));

@@ -11,7 +11,8 @@ import {runManualSync,remoteSnapshot} from './client-snapshot-sync.mjs';
 import {uploadTransfer,downloadTransfer,transferText} from './client-transfers.mjs';
 import {runCloudImport} from './client-cloud-import.mjs';
 import {runCloudFiles} from './client-cloud-files.mjs';
-import {runCommunityCommand,formatCommunityResult,communityJSON,communityHelp} from './community-cli.mjs';
+import {runCommunityCommand,formatCommunityResult,communityJSON} from './community-cli.mjs';
+import {cliHelp} from './cli-help.mjs';
 import {watchJob} from './job-watch.mjs';
 import {progressText,jobTimingText} from './dist/job-progress.js';
 import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
@@ -27,184 +28,6 @@ const terminalMetadata=(value,key='')=>typeof value==='string'?maintenanceVisibl
   Array.isArray(value)?value.map(item=>terminalMetadata(item,key)):
   value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([name,item])=>[maintenanceVisible(name),terminalMetadata(item,name)])):value;
 
-const help=`GPUQ — 个人终端与 GPUQ 训练
-
-${communityHelp}
-
-日常命令（一次安装后直接使用 gpuctl）：
-gpuctl login                     Sign in; remembers your account and service
-gpuctl profile --display-name "张三"  Set your public submitter name
-gpuctl queue [--machine SERVER]   Read authorized machines' task names and descriptions
-gpuctl task-label get SERVER NODE_JOB_ID
-gpuctl task-label set SERVER NODE_JOB_ID --revision HASH --name TEXT --description TEXT
-gpuctl use MACHINE_ID             Select an approved server from your inventory
-gpuctl project create my-project Create/select a personal container project
-gpuctl project use my-project    Select an existing project on this server
-gpuctl project list / status / publish
-gpuctl project label [NAME] --display-name "Readable name"
-gpuctl project catalog [--full]   Logical projects across your authorized servers
-gpuctl project group UUID --display-name "Project" --members SERVER/ID,SERVER/ID --revision N
-gpuctl project archive|unarchive [NAME]  Keep history, stop/resume new work
-gpuctl project retire-plan [NAME]  Inspect exact unused-project plan and blockers
-gpuctl project retire [NAME] --key UUID --revision N --manifest-sha256 HASH
-gpuctl project retire-status UUID --project NAME  Inspect the original retirement
-gpuctl project import SOURCE [DEST]  Same-node personal data directory -> new project code directory
-gpuctl project import-status|import-cancel UUID
-gpuctl project uploads / upload-cancel UUID  Inspect or discard an exact unfinished code upload
-gpuctl push-status LOCAL [REMOTE]  Check original project upload; never writes
-gpuctl project copy NAME --from SOURCE --to TARGET --release HASH
-gpuctl project copy-status COPY_ID / copy-cancel COPY_ID
-gpuctl project copy-retry COPY_ID [--key UUID]
-gpuctl data label DATASET_ID --display-name "中文数据名"  Set your personal display label
-gpuctl ssh                       Develop in the selected project's private terminal
-gpuctl ssh --root                Administrator: unrestricted host root terminal
-gpuctl ssh --reconnect SESSION   Explicitly reconnect a detached/expired session
-gpuctl ssh --reconnect SESSION --takeover  Replace its active writer explicitly
-gpuctl terminal status SESSION [--machine SERVER]  Check the original session without attaching
-gpuctl terminal close SESSION [--machine SERVER]   Clear an ended session; never stops a live terminal
-gpuctl exec -- id                Administrator: non-interactive host root command
-gpuctl exec --detach -- bash -lc 'long-command'
-gpuctl exec status HANDLE        Read bounded stdout, stderr, state and exit code
-gpuctl exec cancel HANDLE        Cancel this host command and confirm cleanup
-gpuctl maintenance list / show ID  Read historical records (workflow retired)
-gpuctl maintenance status          Read persistent platform/machine maintenance
-gpuctl maintenance on all --reason "存储维修" --revision N   Administrator: block new operations
-gpuctl maintenance off SERVER --revision N                 Administrator: explicitly restore this scope
-gpuctl push .                    Upload code to the selected project's draft
-gpuctl project publish           Freeze code + private environment; wait for READY
-gpuctl sync git LOCAL_REPO --to SERVER --project NEW --ref HEAD --dry-run
-gpuctl sync code --from SOURCE --to TARGET --project SOURCE --target-project NEW --release HASH
-gpuctl sync data NAME@VERSION --from SOURCE --to TARGET --name NAME --dry-run
-gpuctl sync status ORIGINAL_UUID --to SERVER --project PROJECT
-gpuctl sync cancel ORIGINAL_UUID --to SERVER --project PROJECT  Preserve partial code; permanently reject old-key writes
-gpuctl run -g 2 -- python train.py
-gpuctl run --sync -g 1 -- python train.py  Upload current code, publish, wait, pin this release
-gpuctl run --sync --sync-dir "LOCAL_DIR" -- python train.py
-gpuctl jobs / logs JOB / cancel JOB
-gpuctl transfer upload LOCAL_DIR --name NAME [--machine SERVER]
-gpuctl transfer download NAME@VERSION NEW_LOCAL_DIR [--machine SERVER]
-gpuctl transfer copy NAME@VERSION --from SOURCE --to TARGET --name NAME --detach
-gpuctl transfer list / status ID / watch ID / cancel ID / resume ID
-gpuctl watch JOB                 Watch progress / completion / failure over SSH
-gpuctl notify JOB on|off|status  Opt into your configured Telegram destination
-gpuctl diagnostics JOB --json    Persistent bounded worker logs, exits and resource counters
-gpuctl completion JOB --json     Verify latest native success without rewriting failed history
-gpuctl reconcile-resources JOB   Release stopped-attempt data leases; never retry or cancel a job
-gpuctl run --priority idle -g 1 -- python train.py
-gpuctl run --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
-gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 -- python train.py
-gpuctl run -g 8 --min-cards 1 --global-batch 256 --micro-batch 8 --auto-expand --rank P1 --yield save --checkpointable --restart-policy on-preempt -- python train.py
-gpuctl run --gpu 0,2 -- python train.py
-gpuctl run --gpu 3 --share --vram-mib 4096 -- python small.py
-gpuctl run --gpu 3 --share --vram-mib 4096 --hami --sm-percent 50 -- python small.py
-gpuctl priority JOB high         Administrator: change queued job priority
-gpuctl notes                     Shared task / persistent general notes
-gpuctl note --job JOB "message"  Deleted when the task is confirmed finished
-gpuctl note --general "notice"  Kept until manually deleted
-gpuctl note-delete NOTE_ID       Delete own note (or any note as admin)
-gpuctl pull --job JOB model.pt ./model.pt
-gpuctl data list                 List authorized dataset versions on selected server
-gpuctl data import LINK [REMOTE_FILE]  Download from Aliyun share / HTTPS to private /data2
-gpuctl data imports              List your server-side downloads
-gpuctl data cloud list           List your private cloud file operations
-gpuctl data cloud upload PATH    Save a personal /data2 file to cloud
-gpuctl data cloud verify ID      Check that the cloud copy is complete
-gpuctl data cloud download ID PATH  Restore a verified file to /data2
-gpuctl data cloud status|cancel ID  Inspect or cancel the same operation
-gpuctl data import-status|import-resume|import-cancel|import-discard ID
-gpuctl data import-resume ID --source-url HTTPS_LINK  Refresh the same file's link
-gpuctl data put ARCHIVE [REMOTE_FILE]  Upload a file to your private /data2 (no extraction)
-gpuctl data shell                Open your private /data2 terminal (no GPU)
-gpuctl data files [DIRECTORY]    List your private data workspace
-gpuctl data publish DIRECTORY --name NAME  Publish a prepared subdirectory, after exit
-gpuctl data workspace-status [OPERATION_ID]  Inspect data workspace publication
-gpuctl data upload LOCAL_DIR --name NAME  Prefer direct upload; repeat to resume
-gpuctl data upload LOCAL_DIR --name NAME --via relay  Explicitly allow VPS relay
-gpuctl data upload-status UPLOAD_ID  Inspect this account's upload and verification
-gpuctl data upload-discard UPLOAD_ID  Cancel an unfinished upload (not a READY dataset)
-gpuctl data prepare NAME@VERSION Prepare a local, verified copy without reserving GPUs
-gpuctl data archive-retry NAME@VERSION  Retry long-term preservation; keeps the local original
-gpuctl data archive-enroll NAME@VERSION --owner-id ID --key UUID  Administrator: adopt an existing HDD original
-gpuctl data unregister NAME[@VERSION]  Administrator: asynchronously unregister local data
-gpuctl data status OPERATION_ID   Check a background operation; accepted is not completed
-gpuctl data status NAME@VERSION  Inspect preparation state
-gpuctl data storage status [NAME@VERSION]  Administrator: capacity and protection state
-gpuctl project quota --machine SERVER  Your real kernel byte/inode usage, when enabled
-gpuctl data storage plan         Administrator: preview cache policy; never deletes
-gpuctl data storage pin NAME@VERSION LABEL  Protect a manual job's dataset copy
-gpuctl data storage unpin NAME@VERSION LABEL  Release that manual pin after its job stops
-gpuctl run -g 2 --data NAME@VERSION -- python train.py --data /data2/NAME
-gpuctl data delete NAME@VERSION --key UUID  Delete this version everywhere; retain 7 days
-gpuctl data delete-status UUID             Query the original deletion key; never replay
-gpuctl data retire-restore OPERATION_ID --machine SERVER  Administrator: restore retained bytes
-gpuctl data retire-continue OPERATION_ID                 Administrator: query then advance
-gpuctl data retire-cancel OPERATION_ID                   Administrator: cancel and restore
-gpuctl data retire-discard-registration OPERATION_ID --machine SERVER --key UUID [--name NAME]
-                                                       Administrator: discard an uninstalled intent
-
-gpuctl login USERNAME              Login (hidden password prompt)
-gpuctl register USERNAME           Register with invite + own password
-gpuctl invites list                Administrator: invitation metadata only
-gpuctl invites rotate member       Generate member code (old code revoked)
-gpuctl invites disable member
-gpuctl logout                      Invalidate current session
-gpuctl users                       List visible accounts / quotas
-gpuctl state                       View machines, accounts and jobs
-gpuctl user add USERNAME           Create account; initially no access
-                                         Optional: --role admin (full access)
-gpuctl user reset-password USERNAME
-gpuctl user enable|disable USERNAME
-gpuctl user delete USERNAME       Only disabled accounts without active jobs
-gpuctl user role USERNAME admin|member
-gpuctl grant USERNAME --machine MACHINE_ID=2 --total 2
-gpuctl grant USERNAME --full       All GPU resources; NOT platform admin
-gpuctl run MACHINE_ID --cards 1 --name train -- python train.py
-gpuctl run -g 1 --name baseline --description "验证新数据集" -- python train.py
-gpuctl jobs
-gpuctl logs JOB_ID
-gpuctl cancel JOB_ID
-gpuctl upload MACHINE_ID LOCAL_PATH [REMOTE_PATH]
-gpuctl files MACHINE_ID [REMOTE_DIRECTORY]
-gpuctl download MACHINE_ID REMOTE_FILE LOCAL_FILE
-gpuctl request MACHINE_ID --cards 1  Member uses their own identity
-gpuctl release DEMO-001
-
---machine may repeat; grant REPLACES the entire machine policy.
-No --machine and --total 0 revokes all future GPU access.
-Global: --url http://127.0.0.1:58418 --json --session-file PATH
-Credentials: --password-stdin (one password via stdin, never an argument)
-Registration: --credentials-stdin accepts JSON {"invite":"...","password":"..."}
-Administrator: all machines as self; --as is only for the separate demo
-Default session cache: ~/.config/gpuq-console/session.json (mode 0600).
-GPUQ_URL / GPUQ_SESSION_FILE configure the service and cache.
-Existing legacy caches and AMAX_URL / AMAX_SESSION_FILE remain supported.
-Only loopback HTTP or HTTPS URLs accepted. The VPS portal has a shared API;
-the separate hosted static preview does not. request/release are demo-only.
-run executes on the selected server, in your private /workspace. Upload code first.
---key UUID allows safe submission retry. No --as impersonation for real jobs.
-run --priority idle|normal|high selects training priority (default normal).
-exec is separate from training/PTY: existing admins on hostRoot-enabled nodes only.
-exec --cwd /absolute/path --timeout SECONDS (1..86400, default 300).
-exec waits by default; --detach returns a handle. --json includes both output streams.
-Use -- bash -lc '...' only when shell syntax is intended. argv is otherwise literal.
-Host output retains the first 65536 bytes per stream; truncation is reported.
-Reuse --key after an uncertain response; never retry with a new key blindly.
-Projects are selected per server. Manual run keeps that server; auto is opt-in.
---project SLUG overrides the selection; --legacy explicitly uses the old workspace.
---release HASH pins a READY project release. Without it, run uses latest READY.
-run --sync uploads the current directory (or --sync-dir), then waits for its own
-publication and submits only that READY release. It requires a selected project.
-It keeps extra remote files, excludes the same secrets/environments as push,
-does not install packages, and never falls back to old code after a failed sync.
---job UUID selects a project's per-job outputs for files / pull (read-only to CLI).
-run --machine auto (or --on auto) chooses an authorized compatible server for a
-published OCI project. --candidates SERVER,SERVER optionally narrows the set.
-Your selected server remains the development source; --sync publishes there.
-The chosen server is fixed before copies start; retries keep the SAME --key.
-Project code/image and datasets prepare before GPU allocation. Results stay
-on the chosen server, not automatically in the development workspace.
-Existing users without a selected project keep their legacy workspace.
-The standard Python environment is /opt/conda; never modify global Conda.`;
 const args=process.argv.slice(2);let options,positionals,training;
 let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).includes('--json');
 function fail(message){throw Error(message);}
@@ -373,7 +196,11 @@ async function secret(label='Password'){
 }
 async function main(){
   ({options,positionals,training}=parseCLIOptions(args));
-  if(options.help||!positionals.length){console.log(help);return;}
+  if(positionals[0]==='help'){
+    if(positionals.length>2||training.length)fail('Usage: gpuctl help [daily|admin|community]');
+    console.log(cliHelp(positionals[1]));return;
+  }
+  if(options.help||!positionals.length){console.log(cliHelp());return;}
   if(options.sync&&positionals[0]!=='run'||options['sync-dir']!==undefined&&!options.sync)fail('--sync is only for run; --sync-dir requires run --sync');
   if(options.sync&&['release','legacy','root','as','job'].some(key=>Object.hasOwn(options,key)))fail('run --sync requires a personal project; cannot combine with --release/--legacy/--root/--as/--job');
   const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',projectCopy=positionals[0]==='project'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
