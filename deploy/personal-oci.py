@@ -15,6 +15,7 @@ import os
 import platform
 from pathlib import Path
 import re
+import select
 import stat
 import subprocess
 import time
@@ -32,6 +33,7 @@ SIGNATURE_POLICY = Path('/etc/gpuq-console/personal-oci-policy.json')
 REGISTRY_DROPINS = Path('/etc/containers/registries.conf.d')
 RUNTIME = Path('/run/user')
 BASE_SEEDS = Path('/etc/gpuq-console/base-seeds')
+STDERR_LIMIT = 64 * 1024
 ENGINE_RAW = (b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n'
               b'[engine]\nremote = false\ncdi_spec_dirs = ["/etc/gpuq-console/cdi"]\n')
 ANONYMOUS_AUTH_RAW = b'{"auths":{}}\n'
@@ -326,9 +328,68 @@ class PersonalOCI:
             # start still use the short private runtime directory for conmon's
             # UNIX socket; changing that boundary would revive long-path bugs.
             env['TMPDIR'] = str(self.s.private_dir(self.folder/'tmp'))
-            result = subprocess.run(self.command(*args), env=env, capture_output=True, text=True, timeout=timeout)
+            try:
+                result = subprocess.run(self.command(*args), env=env, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired as error:
+                self.record_stderr(error.stderr or b'', phase='OCI_PREPARATION')
+                raise
+            # Capture before context exit: integrity verification can raise
+            # even after the engine itself has returned successfully.
+            self.record_stderr(getattr(result, 'stderr', ''), phase='OCI_PREPARATION')
         need(result.returncode == 0 and len(result.stdout) < 2*1024**2, 'Managed OCI operation failed; no privileged fallback was attempted')
         return result.stdout.strip()
+
+    def record_stderr(self, raw, *, phase='OCI_ENGINE', truncated=False):
+        sink = getattr(self, 'stderr_sink', None)
+        if sink is None or not raw: return
+        if isinstance(raw, str): raw = raw.encode('utf-8', errors='replace')
+        try: sink(raw[-STDERR_LIMIT:], phase=phase, truncated=truncated or len(raw) > STDERR_LIMIT)
+        except Exception: pass  # Diagnostics must never replace an engine exit.
+
+    def call(self, command, *, env, pass_fds):
+        """Keep stdout/main stderr, plus one bounded private evidence tail.
+
+        No wrapper shell, command logging, container logs, recursive scan or
+        additional cancellation. Do not wait for unrelated inherited writers
+        after the exact engine process exits.
+        """
+        if getattr(self, 'stderr_sink', None) is None:
+            return subprocess.call(command, env=env, pass_fds=pass_fds)
+        process = subprocess.Popen(command, env=env, pass_fds=pass_fds, stderr=subprocess.PIPE)
+        tail = bytearray(); total = 0; last_saved = time.monotonic(); eof = False; drain_deadline = None
+        try:
+            while True:
+                if process.poll() is not None:
+                    if drain_deadline is None: drain_deadline = time.monotonic() + 1
+                    if time.monotonic() >= drain_deadline: break
+                ready = select.select([process.stderr], [], [], .5)[0]
+                if ready:
+                    raw = os.read(process.stderr.fileno(), 4096)
+                    if not raw: eof = True; break
+                    total += len(raw); tail.extend(raw)
+                    if len(tail) > STDERR_LIMIT: del tail[:-STDERR_LIMIT]
+                    try:
+                        offset = 0
+                        while offset < len(raw):
+                            written = os.write(2, raw[offset:])
+                            if written <= 0: break
+                            offset += written
+                    except OSError: pass
+                    if time.monotonic() - last_saved >= 5:
+                        self.record_stderr(bytes(tail), truncated=total > STDERR_LIMIT)
+                        last_saved = time.monotonic()
+                elif process.poll() is not None: break
+            return process.wait()
+        except BaseException:
+            # Preserve subprocess.call's original exceptional cleanup: only
+            # this exact engine child, not its unit or another owner's process.
+            try: process.kill()
+            except OSError: pass
+            process.wait()
+            raise
+        finally:
+            self.record_stderr(bytes(tail), truncated=total > STDERR_LIMIT or not eof)
+            process.stderr.close()
 
     def verify_host(self):
         need(os.geteuid() != 0, 'Personal OCI must never run as host root')
@@ -827,15 +888,16 @@ class PersonalOCI:
             return subprocess.call(self.command('start', '--attach', '--interactive', name), env=registry_env, pass_fds=pass_fds)
         image = self.verify_image(spec['project'], project['meta']['oci'])
         name = 'gpuq-job-'+uuid.uuid4().hex
-        return subprocess.call(self.command('run', '--rm', '--name', name, *flags,
+        return self.call(self.command('run', '--rm', '--name', name, *flags,
                                '--entrypoint', spec['argv'][0], image, *spec['argv'][1:]),
                                env=registry_env, pass_fds=pass_fds)
 
 
 def run_project(config, spec, project, terminal, uuids, workfd, project_fds,
-                dataset_fds, datafd=None, runtimefd=None, resourcefd=None, cgroupfd=None):
+                dataset_fds, datafd=None, runtimefd=None, resourcefd=None, cgroupfd=None, *, stderr_sink=None):
     """Both existing scheduler profiles enter here after allocation/limits."""
     owner = PersonalOCI(config, spec['userId'])
+    owner.stderr_sink = stderr_sink
     mounts = [(workfd, '/workspace', not terminal), (project_fds['home'], '/home/gpuq', False),
               (project_fds['output'], '/outputs', False)]
     mounts += [(fd, target, True) for fd, target in dataset_fds]
