@@ -12,6 +12,7 @@ import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 import {datasetCatalogCall,datasetListView,createDatasetRemovalGuard} from './dataset-catalog.mjs';
 import {datasetStorageOverviewCall} from './dataset-storage-overview.mjs';
+import {datasetFilesCall} from './dataset-files.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 import {selectMachine} from './machine-selection.mjs';
@@ -202,7 +203,7 @@ export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataP
   restartPolicy:['never','on-preempt'].includes(schedulerPolicy?.restart_policy)?schedulerPolicy.restart_policy:null,
   dispatchMode:['queue','preempt-now','preempt-save'].includes(schedulerPolicy?.dispatch_mode)?schedulerPolicy.dispatch_mode:null};}
 export async function executionCall(service,principal,operation,args){
-  if(!service.bridge)fail('节点执行桥尚未配置，未启动训练。',503,operation==='jobs.submit'?'SUBMISSION_REJECTED':undefined);
+  if(!service.bridge&&!['datasets.upload.admission.create','datasets.upload.admission.status'].includes(operation))fail('节点执行桥尚未配置，未启动训练。',503,operation==='jobs.submit'?'SUBMISSION_REJECTED':undefined);
   const user=service.store.get(principal.userId);
   const jobView=job=>publicJob(job,service.store.users);
   if(!user.enabled)fail('账号已暂停。',403);
@@ -210,6 +211,7 @@ export async function executionCall(service,principal,operation,args){
   if(['datasets.delete','datasets.delete.status','datasets.delete.restore','datasets.delete.continue','datasets.delete.cancel','datasets.delete.registration.discard'].includes(operation))return service.datasetDeletionCall(principal,operation,args);
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   if(operation==='datasets.overview')return datasetStorageOverviewCall(service,principal,args);
+  if(operation==='datasets.files.list')return datasetFilesCall(service,principal,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   if(operation.startsWith('projects.storage.'))return personalStorageCall(service,principal,user,operation,args,authorizedMachine);
   if(operation.startsWith('datasets.storage.')){
@@ -286,14 +288,14 @@ export async function executionCall(service,principal,operation,args){
   }
   if(operation.startsWith('datasets.upload.')){
     authorizedMachine(args.machine);
-    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries','allowRelay'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId'],routes:service.datasetUploadIngress?['uploadId']:[],'direct-ticket':['uploadId','routeId'],'direct-revoke':['uploadId']};
+    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries','allowRelay'],'admission.create':['name','key','manifestBytes','manifestSha256','totalBytes','entries'],'admission.status':['key'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId'],routes:service.datasetUploadIngress?['uploadId']:[],'direct-ticket':['uploadId','routeId'],'direct-revoke':['uploadId']};
     const action=operation.slice('datasets.upload.'.length),allowed=fields[action];
     if(!allowed||Object.keys(args).some(k=>k!=='machine'&&!allowed.includes(k)))fail('个人数据集上传参数无效。');
     const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-    const id=action==='begin'?args.key:args.uploadId;
+    const id=action==='begin'||action.startsWith('admission.')?args.key:args.uploadId;
     if((action!=='routes'||args.uploadId!==undefined)&&(typeof id!=='string'||!uuid.test(id)))fail('上传编号必须为完整 UUID。');
     if(args.routeId!==undefined&&(typeof args.routeId!=='string'||!/^[a-z][a-z0-9-]{0,31}$/.test(args.routeId)))fail('上传通道编号无效。');
-    if(action==='begin'){
+    if(action==='begin'||action==='admission.create'){
       if(args.allowRelay!==undefined&&typeof args.allowRelay!=='boolean')fail('中转确认必须是明确的布尔值。');
       if(typeof args.name!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(args.name))fail('名称请用 1–40 位字母、数字、短横线或下划线。');
       if(!Number.isSafeInteger(args.manifestBytes)||args.manifestBytes<1||args.manifestBytes>64*1024*1024||typeof args.manifestSha256!=='string'||!/^[a-f0-9]{64}$/.test(args.manifestSha256))fail('数据清单大小或校验值无效（上限 64 MiB）。');
@@ -308,9 +310,10 @@ export async function executionCall(service,principal,operation,args){
       if(data.length>1024*1024||data.toString('base64')!==args.data)fail('上传分块最多 1 MiB，且需使用规范 Base64。');
     }
     const {machine,...request}=args;
+    if(action.startsWith('admission.')&&!service.datasetUploadIngress)fail('机械仓库新上传准入尚未安装。',503);
     // Every upload is personal, including uploads made by administrators. No
     // client-provided role, source mapping or filesystem path crosses the bridge.
-    if(['begin','seal','commit','discard','direct-ticket','direct-revoke'].includes(action))service.audit(principal.username,operation,machine,id);
+    if(['begin','admission.create','seal','commit','discard','direct-ticket','direct-revoke'].includes(action))service.audit(principal.username,operation,machine,id);
     if(service.datasetUploadIngress)return service.datasetUploadIngress(principal,action,args);
     // The public routes uploadId is a Portal placement selector. Legacy node
     // route metadata has no session field and must keep its old wire contract.
@@ -397,10 +400,14 @@ export async function executionCall(service,principal,operation,args){
     catch(error){if(operation==='datasets.status'&&!byOperation&&service.resolveDataset)return (await service.resolveDataset(user.id,machine,reference)).status;throw error;}
     if(operation==='datasets.prepare')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
     if(operation==='datasets.list'){
-      const aliases=service.datasetAliases?.(user.id,machine),archives=machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(user.id):null;
+      const aliases=service.datasetAliases?.(user.id,machine),archives=service.archiveAliases?.(user.id,machine);
       return datasetListView(result,service.store.users,{includeEmpty:includeEmpty===true,
         ...(service.datasetLabelView?{labelView:dataset=>service.datasetLabelView(user.id,dataset)}:{}),
         logicalName:item=>{
+          // A privileged list may include other owners. Its personal aliases
+          // cannot rename their records; legacy member lists are owner-scoped.
+          const own=Array.isArray(item.ownerIds)?item.ownerIds.includes(user.id):item.ownerIds==null&&principal.role!=='admin';
+          if(!own)return item.dataset;
           const names=new Set(item.versions.filter(v=>/^[a-f0-9]{64}$/.test(v?.version)).map(v=>aliases?.get(item.dataset+'@'+v.version)||archives?.get(item.dataset+'@'+v.version)||item.dataset));
           return names.size===1?[...names][0]:item.dataset;
         }});

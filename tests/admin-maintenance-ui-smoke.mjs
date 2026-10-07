@@ -61,7 +61,7 @@ try{
   }
   const {context,page}=await open('admin');
   assert.equal(await page.locator('#main-content .maintenance-settings,#page-work #host-maintenance,#maintenance-experience [data-maintenance-root]').count(),0);
-  assert.equal(await page.locator('#maintenance-member-title').innerText(),'维护中');
+  assert.match(await page.locator('#operational-maintenance').innerText(),/全平台维护中/);assert.equal(await page.locator('#maintenance-experience').isHidden(),true);
   await openMaintenance(page);assert.equal(await page.locator('[data-maintenance-server]').count(),MACHINES.length);
   assert.equal(await page.locator('.maintenance-banner').count(),1,'the primary readonly banner is not duplicated inside admin settings');
   assert.equal(await page.locator('#admin-content .maintenance-banner').count(),0);assert.equal(await page.locator('#operational-maintenance .maintenance-banner').count(),1);
@@ -125,7 +125,7 @@ try{
   assert.equal(await page.locator('#admin-host-diagnostics,#admin-maintenance-console,.host-terminal-dialog[open]').count(),0);assert.equal(await page.locator('#maintenance-root-parking #host-maintenance').count(),1);
   assert.deepEqual(await page.evaluate(()=>maintenanceCSP),[]);await context.close();
   const regular=await open(member.username),before=calls.length;
-  assert.equal(await regular.page.locator('#maintenance-member-title').innerText(),'维护中');assert.equal(await regular.page.locator('.maintenance-settings,#host-maintenance').isVisible(),false);
+  assert.match(await regular.page.locator('#operational-maintenance').innerText(),/全平台维护中/);assert.equal(await regular.page.locator('#maintenance-experience').isHidden(),true);assert.equal(await regular.page.locator('.maintenance-settings,#host-maintenance').isVisible(),false);
   await regular.page.setViewportSize({width:390,height:844});await settle(regular.page);await regular.page.screenshot({path:join(output,'maintenance-member-primary-390.png'),fullPage:true});
   await regular.page.evaluate(()=>location.hash='#admin/maintenance');await regular.page.locator('#admin-denied').waitFor();
   assert.equal(await regular.page.locator('[data-host-preset],#admin-content #host-maintenance,.maintenance-settings').count(),0);

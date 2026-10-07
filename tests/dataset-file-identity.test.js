@@ -54,7 +54,7 @@ async function fixture(t){
     }
     throw Error('Unexpected mock operation '+operation);
   };
-  const upload=api=>api.uploadLocalDataset(call,{machine:'test-machine',name:'sample',userId:'test-only',directory,progress(){},keyStore:new Map()});
+  const upload=api=>api.uploadLocalDataset(call,{machine:'test-machine',name:'sample',userId:'test-only',directory,progress(){},keyStore:{get:()=>state.uploadId}});
   return {directory,filename,calls,hooks,upload};
 }
 

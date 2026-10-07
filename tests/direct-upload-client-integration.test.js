@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {createHash,randomUUID} from 'node:crypto';
-import {uploadDatasetSnapshot} from '../client-data-upload.mjs';
+import {uploadDatasetSnapshot,snapshotKey} from '../client-data-upload.mjs';
 import {createDirectDatasetTransport,directUploadRequest,pinnedUploadAgent} from '../client-direct-upload.mjs';
 
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -32,7 +32,8 @@ function snapshot(files){
   return {files:entries,entries:entries.length,totalBytes:entries.reduce((sum,x)=>sum+x.size,0),manifest,manifestSha256:sha(manifest),
     openEntry:async entry=>({read:async offset=>files[entry.path].subarray(offset,offset+1048576),verify:async()=>{},close:async()=>{}}),verify:async()=>{}};
 }
-function options(scan,progress=[]){return {machine:'gpu-4',name:'integration',userId:'demo-user-1',scan,progress:(state,value)=>progress.push({state,value}),keyStore:{get:()=>undefined,set:async()=>{}}};}
+// Keep the original persisted UUID in these real TLS/legacy-node fixtures.
+function options(scan,progress=[]){return {machine:'gpu-4',name:'integration',userId:'demo-user-1',scan,progress:(state,value)=>progress.push({state,value}),keyStore:{get:()=>snapshotKey(['demo-user-1','gpu-4','integration',scan.manifestSha256]),set:async()=>{}}};}
 
 test('HDD-first client keeps training selection but pins real raw bytes to warehouse TLS node',{timeout:20000},async t=>{
   const f=await fixture(t),scan=snapshot({'warehouse.bin':Buffer.alloc(1048576+41,29)}),calls=[];

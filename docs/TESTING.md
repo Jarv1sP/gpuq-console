@@ -15,6 +15,20 @@ global batch 的单进程参考在 FP64 容差 1e-12 内一致。另测三 rank 
 
 主分支公共页面已收敛为可读取／本人数据，实验云入口保持隐藏。旧云组件的操作、异常和几何测试使用显式 `experimentalCloudHarness` 变体，并先断言公共入口隐藏；不宣称普通页面已开放云功能。样例目录提供明确 `canUse`／ownerLabel；零授权场景断言无他人私人行。文件折叠器用直属 summary 定位，不将新增帮助 summary 当作重复主控件。
 
+`dataset-files.test.js`、`dataset-files-http.test.js`、`dataset-files.test.py` 和
+`dataset-files-bridge.test.py` 验证固定版本目录页：member 内容 ACL 与管理员元数据可见性
+分离、零额度／仓库源授权、旧节点明确 unavailable、200 项／64 KiB 上限、原源分页、
+撤权／丢回执／malformed response、no-follow 单链接和整页版本锁、不创建持久下载租约。
+独立 `--dataset-files-rpc` 只接受三个 literal metadata RPC，上传／终端／写操作拒绝。
+总览新增的项目实际字节、last-success 时间与动态目录能力有正反投影测试；旧节点不假 0。
+`storage-project-observation.test.py` 单独验证有界真实采样、inode 去重、挂载／根身份变化、
+缓存与未知。所有文件、配置、锁和服务夹具仅在一次性本地目录，不访问生产。
+
+开发首轮 Node 的真实 Python 桥夹具误用了 macOS `/var` symlink 临时根；按既有 no-follow
+边界设 `TMPDIR=/private/tmp` 并使用真实 Python 3.12 后重跑，无保护放宽。Portal image
+静态 COPY 验证还要求新增源码先加入 Git index，不能把未跟踪文件视为镜像来源。全
+浏览器旧主线首轮停在 cloud-files 夹具，整合已有主线夹具修正后另验；不据此改运行时权限。
+
 `storage-archive-intent-cancel.test.js` 用独立 SQLite 验证原 ID/完整 JSON 字节 CAS、
 当前管理员、BLOCKED 严格准入、未知/已派发/持久 lane/传输保护拒绝、审计失败和撤权
 回滚、丢回执重启、旧 worker 与延迟 copy 准入零派发。正常删除图仍要求四节点真实
@@ -38,6 +52,8 @@ python3 -m compileall -q deploy gpuq scripts
 python3 scripts/check-public-tree.py
 docker build -f deploy/Dockerfile -t gpuq-console:test .
 ```
+
+仓库默认机器切换用 `storage-archive-policy-cutover.test.js` 和 `archive-source-alias-consumers.test.js` 的真实 SQLite/Portal 数据读取夹具验收：旧 journal 不改写、原来源/别名隔离、跨账号与未知事实不授予权限、旧派发/重试零 RPC、同源显式退役及丢回执恢复、跨 authority 替代在 RPC 前拒绝。节点 grant、真实迁移及生产配置切换仍须单独验收，测试不会连接生产或移动用户数据。
 
 覆盖账号/中文名、密码和会话、邀请码、角色、乐观授权写入、并发配额、幂等提交、超时保留、所有权、root 拒绝、API/CLI、上传越界/软链接、部署清单验证。不访问生产节点、不使用真实账号密码，不因 PR 启动真实训练。
 
@@ -91,8 +107,8 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 门户、1440/390 原生浏览器验证一条逻辑记录、原件不冒充缓存就绪、自动准备入口、固定准备调用及原命令；
 不连接生产、不搬运数据、不运行 GPU，不替代实际 SSD/HDD 发布与校验。
 
-成员指南收敛为个人容器开发、机械仓库入库和 `data prepare` 准备训练缓存。
-内容测试明确核对上传位置与训练目标可不同、仓库不可达不改存 SSD、上传 READY
+成员指南收敛为个人容器开发、集中仓库入库和 `data prepare` 准备训练缓存。
+内容测试明确核对成员用词统一为仓库／缓存、上传位置与训练目标可不同、仓库不可达不改存训练缓存、上传 READY
 不冒充训练缓存 READY，以及模型和结果继续属于个人项目；不再推荐旧环境模式、
 个人数据终端发布或手工跨机长期复制。指南浏览器夹具保留全部七章导航、精确复制、
 键盘、无脚本、320/390/1440 布局和对比度检查，只改对应新流程的严格文字契约。

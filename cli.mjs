@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import {readFile,mkdir,writeFile,chmod,unlink,open,lstat,readdir} from 'node:fs/promises';
+import {readFile,mkdir,writeFile,chmod,unlink,open,lstat,readdir,rename} from 'node:fs/promises';
 import {dirname,join,basename} from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
 import {homedir} from 'node:os';
@@ -27,6 +27,21 @@ const maintenanceJSON=value=>JSON.stringify(value).replace(/[\p{Cc}\p{Cf}\p{Zl}\
 const terminalMetadata=(value,key='')=>typeof value==='string'?maintenanceVisible(value,['description','body'].includes(key)):
   Array.isArray(value)?value.map(item=>terminalMetadata(item,key)):
   value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([name,item])=>[maintenanceVisible(name),terminalMetadata(item,name)])):value;
+
+export async function saveDatasetUploadSession(path,value){
+  const before=await lstat(path,{bigint:true});
+  if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n)throw Error('Unsafe upload session cache');
+  const pending=path+'.upload-pending-'+randomUUID(),file=await open(pending,'wx',0o600);
+  try{
+    await file.writeFile(JSON.stringify(value));await file.sync();await file.close();
+    const current=await lstat(path,{bigint:true});
+    if(!current.isFile()||current.isSymbolicLink()||current.nlink!==1n||current.dev!==before.dev||current.ino!==before.ino||current.size!==before.size||current.mtimeNs!==before.mtimeNs||current.ctimeNs!==before.ctimeNs)throw Error('Upload session cache changed; no request was dispatched');
+    await rename(pending,path);
+    let directory;try{directory=await open(dirname(path),'r');await directory.sync();}
+    catch(error){if(process.platform!=='win32'||!['EPERM','EISDIR','EINVAL'].includes(error.code))throw error;}
+    finally{await directory?.close();}
+  }finally{await file.close().catch(()=>{});await unlink(pending).catch(error=>{if(error.code!=='ENOENT')throw error;});}
+}
 
 const args=process.argv.slice(2);let options,positionals,training;
 let wantsJSON=args.slice(0,args.includes('--')?args.indexOf('--'):args.length).includes('--json');
@@ -277,7 +292,7 @@ async function main(){
     mode={demo:login.state.demo,gpuqConnected:login.state.gpuqConnected===true};
     await mkdir(dirname(sessionFile),{recursive:true,mode:0o700});
     const previous=session?.principal?.userId===login.principal.userId?session:null;
-    await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(previous?.machine?{machine:previous.machine}:{}),...(previous?.projectsByMachine?{projectsByMachine:previous.projectsByMachine}:{}),...(previous?.datasetUploadKeys?{datasetUploadKeys:previous.datasetUploadKeys}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
+    await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(previous?.machine?{machine:previous.machine}:{}),...(previous?.projectsByMachine?{projectsByMachine:previous.projectsByMachine}:{}),...(previous?.datasetUploadKeys?{datasetUploadKeys:previous.datasetUploadKeys}:{}),...(previous?.datasetUploadIntents?{datasetUploadIntents:previous.datasetUploadIntents}:{}),...(previous?.datasetUploadHandles?{datasetUploadHandles:previous.datasetUploadHandles}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
     result={loggedIn:true,principal:login.principal};
   }else{
     if(!session)fail('请先登录：gpuctl login');
@@ -620,8 +635,9 @@ async function main(){
       if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Dataset name must be 1–40 ASCII letters, digits, _ or -, beginning with a letter or digit');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       let last=0,phase='';const progress=(next,value)=>{if(next==='HANDLE'){process.stderr.write(`Upload: ${value.uploadId} · ${value.machine}\n`);return;}if(next==='ROUTE'){process.stderr.write(value.kind==='campus-direct'?'传输路径：直连上传节点（文件不经平台中转）\n':value.kind==='tail-upload'?'传输路径：Tail 备用上传（不改变默认路由；中继可能影响速度）\n':`传输路径：VPS 中转${value.explicit?'（已明确选择）':'（小文件通道）'}\n`);return;}const now=Date.now();if(next!==phase||now-last>1000){phase=next;last=now;process.stderr.write(`${next}${value.bytes!==undefined?' · '+value.bytes+(value.totalBytes!==undefined?' / '+value.totalBytes:'')+' bytes':''}${value.path?' · '+value.path:''}\n`);}};
-      const keyStore={get:key=>session.datasetUploadKeys?.[key],set:async(key,value)=>{session.datasetUploadKeys={...session.datasetUploadKeys,[key]:value};await saveSession();}};
-      result=await uploadLocalDataset(call,{machine,name:options.name,userId:session.principal.userId,directory:positionals[2],progress,keyStore,via:options.via||'auto'});
+      const saveUploadValue=async(field,key,value)=>{const next={...session,[field]:{...session[field],[key]:value}};await saveDatasetUploadSession(sessionFile,next);session=next;};
+      const keyStore={get:key=>session.datasetUploadKeys?.[key],set:(key,value)=>saveUploadValue('datasetUploadKeys',key,value),getIntent:key=>session.datasetUploadIntents?.[key],setIntent:(key,value)=>saveUploadValue('datasetUploadIntents',key,value),getHandle:key=>session.datasetUploadHandles?.[key],setHandle:(key,value)=>saveUploadValue('datasetUploadHandles',key,value)};
+      result=await uploadLocalDataset(call,{machine,name:options.name,userId:session.principal.userId,directory:positionals[2],progress,keyStore,admission:state.datasetUploadAdmission,via:options.via||'auto'});
     }else if(command==='data'&&['upload-status','upload-discard'].includes(positionals[1])){
       if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Usage: data upload-status|upload-discard UPLOAD_ID [--machine SERVER]');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');

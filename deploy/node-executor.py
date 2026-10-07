@@ -31,6 +31,10 @@ DATASET_DELETE_CAPABILITY='dataset-delete-v1'
 TASK_DISPLAY_CAPABILITY='console-task-display-v1'
 PERSONAL_STORAGE_PROTOCOL=1
 TASK_DISPLAY_EDIT_CAPABILITY='console-task-display-edit-v1'
+UPLOAD_INGRESS_OPERATIONS=('storage.upload.admit','storage.upload.locate',
+    'datasets.upload.begin','datasets.upload.manifest','datasets.upload.seal','datasets.upload.status',
+    'datasets.upload.chunk','datasets.upload.commit','datasets.upload.discard','datasets.upload.pause',
+    'datasets.upload.routes','datasets.upload.direct-ticket','datasets.upload.direct-revoke')
 DIAGNOSTICS=None
 PLATFORM_ROOT_GUARD=None
 WORKSPACE_STORAGE=None
@@ -46,6 +50,12 @@ def platform_root_check():
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         PLATFORM_ROOT_GUARD=module
     return PLATFORM_ROOT_GUARD.check(ROOT)
+
+def require_upload_ingress_operation(operation):
+    # A distinct fixed key may force only this mode in an immutable runtime
+    # directory. Neither the client JSON nor shared old config enables it.
+    if operation not in UPLOAD_INGRESS_OPERATIONS:
+        raise ValueError('Invalid dedicated dataset upload ingress operation')
 
 def workspace_storage_check(needed=0, *, target_fd=None, admission=False):
     """Only configured nodes gain new-start admission; controls stay available."""
@@ -456,6 +466,10 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         # Older Portal versions ignore this additive projection.
         result['storageOverview']={'protocol':'dataset-storage-node-v1',
             'cache':{'volume':dict(result),'budgetBytes':cache.budget_bytes},'warehouse':None}
+        spec=importlib.util.spec_from_file_location('gpuq_storage_observation',HERE/'storage-observation.py')
+        observer=importlib.util.module_from_spec(spec);spec.loader.exec_module(observer)
+        result['storageOverview']['cache'].update(observer.project_usage(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())))
+        result['datasetFileList']=1
         if CONFIG.get('storageWarehouse') is not None:
             try:
                 warehouse=storage_warehouse()
@@ -1811,11 +1825,15 @@ def process(operation,args):
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
         return module.SnapshotSync(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())).process(operation,args)
     if operation.startswith('projects.copy.'):return project_copies().process(operation,args)
-    if operation=='storage.upload.locate':
+    if operation in ('storage.upload.locate','storage.upload.admit'):
         spec=importlib.util.spec_from_file_location('gpuq_dataset_ingress',HERE/'dataset-ingress-node.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        return module.locate(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
+        return getattr(module,operation.rsplit('.',1)[1])(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation.startswith('projects.'):return projects().process(operation,args)
+    if operation=='datasets.files.list':
+        spec=importlib.util.spec_from_file_location('gpuq_dataset_files',HERE/'dataset-files.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.listing(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)
     if operation.startswith('datasets.import.'):return data_imports().process(operation,args)
@@ -2050,8 +2068,23 @@ def write_rpc_line(value):
     if len(raw)>1048576:raise ValueError('Terminal response too large')
     sys.stdout.buffer.write(raw);sys.stdout.buffer.flush()
 
+DATASET_FILES_RPC_OPERATIONS=('datasets.list','datasets.capacity','datasets.files.list')
+
+def dataset_files_rpc(data):
+    """Separate immutable forced path: metadata and owner-bound directory only.
+
+    Not an upgrade to an upload key or the pinned general-purpose executor.
+    The bridge chooses this trusted path; callers cannot request another RPC.
+    """
+    if (not isinstance(data,dict) or set(data)!={'operation','args'}
+            or data['operation'] not in DATASET_FILES_RPC_OPERATIONS
+            or not isinstance(data['args'],dict)):
+        raise ValueError('Invalid dataset metadata RPC')
+    return process(data['operation'],data['args'])
+
 if __name__=='__main__':
     os.umask(0o077)
+    upload_ingress_only=len(sys.argv)==2 and sys.argv[1]=='--dataset-upload-ingress-rpc'
     platform_root_check()
     if len(sys.argv)==3 and sys.argv[1]=='--personal-workspace-worker':
         definition=importlib.util.spec_from_file_location('gpuq_workspace_worker',HERE/'personal-storage.py')
@@ -2090,15 +2123,20 @@ if __name__=='__main__':
     if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--project-local-import-worker':sys.exit(projects().local_imports().worker(*sys.argv[2:]))
     try:
+        files_rpc_mode=len(sys.argv)==2 and sys.argv[1]=='--dataset-files-rpc'
         reader=BoundedRPCInput(sys.stdin.fileno())
         first=reader.line(1600000,time.monotonic()+27)
         try:header=json.loads(first)
         except (ValueError,UnicodeDecodeError):header=None
         if isinstance(header,dict) and header.get('protocol')==TERMINAL_STREAM_PROTOCOL:
+            if upload_ingress_only:raise ValueError('Terminal streams are not allowed by the upload ingress key')
+            if files_rpc_mode:raise ValueError('Terminal streams are not allowed by the dataset metadata key')
             if len(first)>TERMINAL_FRAME_BYTES or not first.endswith(b'\n'):raise ValueError('Invalid terminal stream handshake')
             serve_terminal_stream(header,reader,write_rpc_line);sys.exit(0)
         raw=reader.rest(first,1600000)
         data=json.loads(raw)
-        result=process(data['operation'],data['args'])
+        if upload_ingress_only:require_upload_ingress_operation(data['operation'])
+        if files_rpc_mode:result=dataset_files_rpc(data)
+        else:result=process(data['operation'],data['args'])
         print(json.dumps({'ok':True,'result':result}))
     except Exception as e:print(json.dumps({'ok':False,'error':str(e)[:400]}))

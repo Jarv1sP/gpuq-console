@@ -17,14 +17,14 @@ const READ_OR_STOP=new Set([
   'projects.storage.copies',
   'jobs.logs','jobs.watch','jobs.diagnostics','jobs.completion','jobs.reconcile-resources','jobs.cancel','logs','watch','diagnostics','cancel','tasks.display.get',
   'files.list','files.get','files.upload.status','files.upload.list','files.upload.cancel','projects.list','projects.quota','projects.status','projects.verify','projects.local-import.status','projects.local-import.cancel','host.status',
-  'datasets.list','datasets.catalog','datasets.capacity','datasets.overview','datasets.status',
+  'datasets.list','datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.status',
   'datasets.cache.capabilities','datasets.cache.status','datasets.cache.cancel',
   'storage.cache-action.capabilities','storage.cache-action.status','storage.cache-action.cancel',
   'datasets.archive.cancel-intent',
   'projects.label.get','projects.group.get','projects.catalog','projects.retire.plan','projects.retire.status',
   'projects.sync.status','projects.sync.cancel',
   'datasets.delete.status','datasets.delete.cancel','storage.dataset-delete.cancel','storage.dataset-delete.status','storage.dataset-delete.capabilities','storage.dataset-delete.locations',
-  'datasets.workspace.list','datasets.workspace.get','datasets.workspace.status','datasets.upload.status','datasets.upload.list',
+  'datasets.workspace.list','datasets.workspace.get','datasets.workspace.status','datasets.upload.status','datasets.upload.list','datasets.upload.admission.status',
   'datasets.upload.routes','datasets.upload.pause','datasets.upload.direct-revoke','datasets.import.list','datasets.import.status','datasets.import.cancel',
   'datasets.storage.status','datasets.storage.plan','terminal.close','terminal.detach','terminal.status',
   'transfers.list','transfers.status','transfers.capabilities','transfers.cancel','transfers.progress',
@@ -132,6 +132,7 @@ export function installMaintenance(service){
     const admin=actor?.enabled&&actor.role==='admin'&&principal.role==='admin';
     if(admin&&(operation.startsWith('host.')||operation.startsWith('terminal.')&&args.hostAdmin===true))return;
     if(READ_OR_STOP.has(operation)||operation==='terminal.exchange'&&(args.input===undefined||args.input==='')||operation==='transfers.io'&&['status','direct-revoke'].includes(args.action))return;
+    if(service.warehouseMaintenanceUploadAllowed?.(operation,args,principal)===true)return;
     const machines=[args.machine,args.from,args.sourceMachine,args.targetMachine,args.source?.machine,args.job?.machine].filter(id=>typeof id==='string');
     if(args.jobId){const job=service.store.jobs.find(job=>job.id===args.jobId&&(admin||job.userId===principal?.userId));if(job)machines.push(job.machine);}
     const value=maintenanceState(service);

@@ -101,6 +101,10 @@
 .sb .maintenance-settings form :is(input,select){height:40px;min-height:40px}
 .sb .maintenance-settings form>div:not(.maintenance-reason-field){grid-column:1/-1;gap:8px;flex-wrap:wrap}
 #maintenance-context small{font-size:11px}
+.sb #operational-maintenance .maintenance-banner{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;padding:10px 14px;margin-bottom:18px;font-size:12px;line-height:1.5}
+.sb #operational-maintenance .maintenance-banner>strong{font-size:12px;white-space:nowrap}
+.sb #operational-maintenance .maintenance-notice-reason{flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb #operational-maintenance .maintenance-banner>.maintenance-info{margin:0}
 .sb #maintenance-console-dialog{container:maintenance-sheet/inline-size;max-width:min(720px,calc(100vw - 2*var(--gutter)));width:100%;overflow:auto}
 .sb #maintenance-console-dialog .modal-head{align-items:center;gap:12px}
 .sb #maintenance-console-dialog .modal-head h2{margin:0;min-width:0;font-size:clamp(16px,7cqw,24px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

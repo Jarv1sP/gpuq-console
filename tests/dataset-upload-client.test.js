@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash,randomBytes} from 'node:crypto';
-import {SHA256,hashBlob,uploadKey,datasetPath,manifestBlob,scanBrowserDirectory,uploadBrowserDataset,CHUNK_BYTES,LARGE_RELAY_BYTES} from '../dist/dataset-upload.js';
+import {SHA256,hashBlob,uploadKey,datasetPath,manifestBlob,scanBrowserDirectory,uploadBrowserDataset as uploadBrowserDatasetProtocol,CHUNK_BYTES,LARGE_RELAY_BYTES} from '../dist/dataset-upload.js';
+// These fixtures exercise the retained protocol with a remembered original
+// key. Fresh server-issued admission has its own full client contract suite.
+const uploadBrowserDataset=options=>uploadBrowserDatasetProtocol({...options,keyStore:{...options.keyStore,get:key=>options.keyStore?.get?.(key)||key}});
 const digest=data=>createHash('sha256').update(data).digest('hex');
 test('incremental browser SHA256 matches native hash at padding boundaries and random chunk boundaries',async()=>{
   for(const length of [0,1,3,55,56,63,64,65,127,128,129,1000000]){

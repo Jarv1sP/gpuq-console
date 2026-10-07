@@ -191,7 +191,7 @@ try{
       if(state==='loading'){await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>document.querySelector('#datasets-status').textContent.includes('加载中'));}else await load(page);
       await page.locator('#refresh-state').click();await page.waitForFunction(()=>!document.querySelector('#refresh-state').disabled);
       for(const width of [1440,1024,390,320]){await check(page,role+'-'+state,width);await capture(page,role+'-'+state+'-'+width);}
-      if(state==='unknown'){assert.equal(await page.locator('[data-v3-cache]:enabled,[data-use-dataset]:enabled').count(),0,'unknown observations grant no action');assert.match(await page.locator('#dataset-catalog').innerText(),/待确认/);}
+      if(state==='unknown'){assert.equal(await page.locator('[data-v3-cache]:enabled,[data-use-dataset]:enabled').count(),0,'unknown observations grant no action');assert.doesNotMatch(await page.locator('#dataset-catalog').innerText(),/待确认/);const unknown=page.locator('#dataset-catalog .v3-g.unknown[role=img][aria-label=待确认][title=待确认]');assert.ok(await unknown.count()>0,'unknown cache locations retain an accessible unconfirmed symbol');}
       if(state==='error')assert.equal(await page.locator('[data-v3-select]').count(),0,'failed refresh clears stale catalog actions');
     }
     if(state==='loading'){releaseGate();gate=null;for(const {page} of views)await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);}

@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 // No real portal, credentials, jobs or persistent installation is used here.
 test('native client works with a loopback mock API and Unicode Windows-style workflows', async () => {
@@ -14,11 +14,21 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
   const cliFile = fileURLToPath(new URL('../cli.mjs', import.meta.url));
   const requests = [];
   const principal = { userId: 'offline-user', username: '测试用户', role: 'member' };
-  const state = { demo: false, gpuqConnected: true, machines: [{ id: 'offline-node' }], users: [], jobs: [] };
+  const state = { demo: false, gpuqConnected: true, machines: [{ id: 'offline-node' }], users: [], jobs: [], datasetUploadAdmission: { protocol: 1, available: true } };
+  const specificationFields = ['name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries'];
+  const specification = args => Object.fromEntries(specificationFields.map(key => [key, args[key]]));
   const codeFiles = new Map();
   const codeUploads = new Map();
   const dataFiles = new Map();
-  let manifestBytes = Buffer.alloc(0), manifest;
+  let manifestBytes = Buffer.alloc(0), manifest, admission, uploadState, badReceipt;
+  const uploadReceipt = () => ({
+    uploadId: admission.uploadId, name: admission.specification.name, state: uploadState,
+    manifestOffset: manifestBytes.length, manifestBytes: admission.specification.manifestBytes,
+    totalBytes: admission.specification.totalBytes, entries: admission.specification.entries,
+    placementProtocol: 1, requestedMachine: 'offline-node', storageMachine: 'offline-warehouse',
+    storageTier: 'hdd', legacyPlacement: false,
+    ...(uploadState === 'READY' ? { dataset: 'u-offline-sample', version: 'b'.repeat(64) } : {}),
+  });
   const server = createServer(async (req, res) => {
     try {
       let raw = '';
@@ -35,6 +45,12 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
       assert.equal(req.url, '/api/call');
       assert.equal(req.headers.authorization, 'Bearer ' + 'a'.repeat(64));
       const { operation, args = {} } = body;
+      assert.ok(!operation.startsWith('jobs.'), 'Native file and dataset workflows never call jobs');
+      if (operation.startsWith('datasets.upload.')) {
+        assert.equal(args.machine, 'offline-node', 'Keep the selected machine, never dispatch as the warehouse');
+        if (!operation.includes('.admission.') && operation !== 'datasets.upload.begin')
+          assert.equal(args.uploadId, admission.uploadId, 'Every control and byte request uses the issued UUID');
+      }
       let result;
       if (operation === 'state') { res.end(JSON.stringify({ state })); return; }
       if (operation === 'projects.create') {
@@ -69,19 +85,55 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
         const data = codeFiles.get(args.path);
         assert.ok(data, 'Download only the fake uploaded code');
         result = { path:args.path,size:data.length,offset:args.offset,data: data.subarray(args.offset).toString('base64'), eof: true };
-      } else if (operation === 'datasets.upload.begin') result = { uploadId: 'offline-upload', state: 'RECEIVING_MANIFEST', manifestOffset: 0 };
+      } else if (operation === 'datasets.upload.admission.create') {
+        assert.deepEqual(Object.keys(args).sort(), ['machine', 'key', ...specificationFields].sort());
+        assert.match(args.key, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-8[a-f0-9]{3}-[a-f0-9]{12}$/);
+        assert.ok(Number.isSafeInteger(args.manifestBytes) && args.manifestBytes > 0);
+        assert.match(args.manifestSha256, /^[a-f0-9]{64}$/);
+        const saved = JSON.parse(await readFile(sessionFile, 'utf8'));
+        assert.deepEqual(saved.datasetUploadIntents[args.key], {
+          protocol: 1, userId: principal.userId, machine: args.machine, key: args.key,
+          specification: specification(args),
+        }, 'The complete owner-bound intent is durable before allocation');
+        assert.equal(saved.datasetUploadKeys?.[args.key], undefined, 'Fresh uploads are not legacy persisted keys');
+        admission = { protocol: 'dataset-upload-admission-v1', key: args.key, uploadId: randomUUID(),
+          requestedMachine: args.machine, storageMachine: 'offline-warehouse', storageTier: 'hdd',
+          specification: specification(args), state: 'ISSUED' };
+        assert.notEqual(admission.uploadId, admission.key, 'The server, not the client intent, chooses the upload UUID');
+        result = badReceipt === 'admission-spec'
+          ? { ...admission, specification: { ...admission.specification, totalBytes: args.totalBytes + 1 } }
+          : admission;
+      } else if (operation === 'datasets.upload.begin') {
+        assert.equal(args.key, admission.uploadId, 'Begin uses only the server-issued UUID');
+        assert.deepEqual(specification(args), admission.specification, 'Begin binds the complete admitted specification');
+        const saved = JSON.parse(await readFile(sessionFile, 'utf8'));
+        assert.deepEqual(saved.datasetUploadIntents[admission.key], {
+          protocol: 1, userId: principal.userId, machine: args.machine, key: admission.key,
+          specification: admission.specification, uploadId: admission.uploadId,
+          storageMachine: admission.storageMachine, storageTier: 'hdd', beginAttempted: true,
+        }, 'The issued UUID and begin attempt are durable before dispatch');
+        manifestBytes = Buffer.alloc(0); dataFiles.clear(); uploadState = 'RECEIVING_MANIFEST';
+        result = uploadReceipt();
+        if (badReceipt === 'begin-uuid') result.uploadId = randomUUID();
+        if (badReceipt === 'begin-spec') result.entries++;
+      }
       else if (operation === 'datasets.upload.manifest') {
         assert.equal(args.offset, manifestBytes.length);
         manifestBytes = Buffer.concat([manifestBytes, Buffer.from(args.data, 'base64')]);
         result = { offset: manifestBytes.length };
       } else if (operation === 'datasets.upload.seal') {
+        assert.equal(manifestBytes.length, admission.specification.manifestBytes);
+        assert.equal(createHash('sha256').update(manifestBytes).digest('hex'), admission.specification.manifestSha256);
         manifest = JSON.parse(manifestBytes);
-        result = { state: 'UPLOADING' };
+        assert.equal(manifest.files.reduce((total, file) => total + file.size, 0), admission.specification.totalBytes);
+        assert.equal(manifest.files.length + manifest.directories.length, admission.specification.entries);
+        uploadState = 'UPLOADING'; result = uploadReceipt();
       } else if (operation === 'datasets.upload.status' && args.path) {
         const entry = manifest.files.find(file => file.path === args.path);
         assert.ok(entry, 'Only upload files from the manifest');
         result = { state: 'UPLOADING', file: { ...entry, offset: dataFiles.get(args.path)?.length || 0, complete: false } };
-      } else if (operation === 'datasets.upload.chunk') {
+      } else if (operation === 'datasets.upload.status') result = uploadReceipt();
+      else if (operation === 'datasets.upload.chunk') {
         const entry = manifest.files.find(file => file.path === args.path);
         const previous = dataFiles.get(args.path) || Buffer.alloc(0);
         assert.equal(args.offset, previous.length);
@@ -90,7 +142,7 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
         result = { offset: data.length, complete: data.length === entry.size };
       } else if (operation === 'datasets.upload.commit') {
         for (const entry of manifest.files) assert.equal(createHash('sha256').update(dataFiles.get(entry.path)).digest('hex'), entry.sha256);
-        result = { state: 'READY', dataset: 'u-offline-sample', version: 'b'.repeat(64) };
+        uploadState = 'READY'; result = uploadReceipt();
       } else if (operation === 'logout') result = { loggedOut: true };
       else throw new Error(`Unexpected API operation: ${operation}`);
       res.end(JSON.stringify({ result }));
@@ -136,8 +188,34 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
     await writeFile(join(datasetDir, 'empty.txt'), '');
     const uploaded = await ok(['data', 'upload', datasetDir, '--name', 'sample']);
     assert.equal(uploaded.json.data.state, 'READY');
+    assert.equal(uploaded.json.data.uploadId, admission.uploadId);
+    assert.equal(uploaded.json.data.requestedMachine, 'offline-node');
+    assert.equal(uploaded.json.data.storageMachine, 'offline-warehouse');
+    assert.equal(uploaded.json.data.storageTier, 'hdd');
     assert.equal(dataFiles.get('样本.txt').toString(), 'offline sample\n');
+    const uploadCalls = requests.filter(request => request.operation?.startsWith('datasets.upload.'));
+    assert.deepEqual(uploadCalls.map(request => request.operation), [
+      'datasets.upload.admission.create', 'datasets.upload.begin', 'datasets.upload.manifest',
+      'datasets.upload.seal', 'datasets.upload.status', 'datasets.upload.chunk',
+      'datasets.upload.status', 'datasets.upload.chunk', 'datasets.upload.commit',
+    ]);
+    const completedId = admission.uploadId, beforeResume = requests.length;
+    assert.equal((await ok(['data', 'upload', datasetDir, '--name', 'sample'])).json.data.uploadId, completedId);
+    assert.deepEqual(requests.slice(beforeResume).filter(request => request.operation?.startsWith('datasets.upload.')),
+      [{ path: '/api/call', operation: 'datasets.upload.status', args: { machine: 'offline-node', uploadId: completedId } }],
+      'Restart inspects the same durable UUID without allocating or beginning again');
+    for (const failure of ['admission-spec', 'begin-uuid', 'begin-spec']) {
+      badReceipt = failure;
+      const before = requests.length, refused = await cli(['data', 'upload', datasetDir, '--name', failure]);
+      assert.equal(refused.code, 1, 'Malformed modern receipts must be refused');
+      assert.match(refused.stderr, failure === 'admission-spec' ? /完整清单未确认/ : /saved warehouse admission/);
+      assert.deepEqual(requests.slice(before).filter(request => request.operation?.startsWith('datasets.upload.')).map(request => request.operation),
+        failure === 'admission-spec' ? ['datasets.upload.admission.create'] : ['datasets.upload.admission.create', 'datasets.upload.begin'],
+        'Mismatch sends no upload bytes, status replay, second begin or legacy fallback');
+      assert.equal(requests.slice(before).filter(request => request.operation?.startsWith('jobs.')).length, 0);
+    }
     await ok(['logout']);
+    assert.equal(requests.filter(request => request.operation?.startsWith('jobs.')).length, 0, 'Exactly zero jobs calls');
     assert.ok(requests.every(request => !request.operation?.startsWith('jobs.')), 'No task submission or execution');
   } finally {
     server.closeAllConnections();

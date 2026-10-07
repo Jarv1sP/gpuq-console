@@ -97,7 +97,7 @@ test('classified route failure still sends no ticket or file bytes and preserves
     uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true,routeSelection:true}}};}
     assert.equal(operation,'datasets.upload.routes');return {result:descriptor};};
   for(let retry=0;retry<2;retry++)await assert.rejects(uploadDatasetSnapshot(call,{machine:'node-a',name:'fixture',userId:'fixture-owner',scan,
-    keyStore:{get:()=>undefined,set:()=>assert.fail('must retain key')},progress:()=>{},probeRoute:async()=>{
+    keyStore:{get:()=>uploadId,set:()=>assert.fail('must retain key')},progress:()=>{},probeRoute:async()=>{
       throw Object.assign(Error('private diagnostic'),{uploadProbeCode:'CONNECTION_REFUSED'});
     }}),error=>error.message.includes('connection refused')&&error.message.includes(uploadId)&&!error.message.includes('private diagnostic'));
   assert.deepEqual(calls,['datasets.upload.begin','datasets.upload.routes','datasets.upload.begin','datasets.upload.routes']);

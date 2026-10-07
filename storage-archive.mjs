@@ -61,10 +61,21 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   };
   const releaseLane=row=>service.db.prepare('DELETE FROM storage_archive_lane WHERE singleton=1 AND archive_id=?').run(row.id);
   const currentPolicy=row=>row.policyKey===policyKey&&row.sourceMachine===policy.machine;
+  // A machine cutover changes dispatch, not a certified record's authority.
+  // Only canonical journals under this same trusted authority are readable;
+  // changing authority or disabling the policy never imports old records.
+  const trustedHistory=row=>policy.enabled&&row&&HASH.test(row.id||'')&&USER.test(row.owner||'')&&isRef(row)&&
+    ['ingest','enrollment','replica'].includes(row.kind)&&MACHINES.some(m=>m.id===row.machine)&&
+    MACHINES.some(m=>m.id===row.sourceMachine)&&
+    row.policyKey===key({enabled:true,machine:row.sourceMachine,authority:policy.authority});
+  const archiveIdentity=row=>row&&key(row.id,row.kind,row.owner,row.machine,row.dataset,row.version,row.eventId,
+    row.sourceMachine,row.sourceDataset,row.logicalDataset,row.policyKey,row.copyKey,row.transferId,row.grantId,row.certifyId,row.receiptSha256,
+    row.phase,row.eventAcknowledged);
   const isCopyIntent=row=>['ingest','enrollment'].includes(row?.kind);
   const isRetired=row=>['retired','authority-retired'].includes(row?.failureStage);
-  const availableArchive=row=>currentPolicy(row)&&row.phase==='ARCHIVED'&&!row.retirementIntent&&!isRetired(row)
+  const availableArchive=row=>trustedHistory(row)&&ID.test(row.sourceDataset||'')&&row.phase==='ARCHIVED'&&!row.retirementIntent&&!isRetired(row)
     &&!service.datasetDeletionBlocked?.(row.sourceMachine,{dataset:row.sourceDataset,version:row.version});
+  const availableCurrentArchive=row=>currentPolicy(row)&&availableArchive(row);
   const enrollmentProof=(value,machine,owner,ref)=>{
     if(!value||Object.keys(value).sort().join(',')!=='dataset,machine,manifestBytes,manifestSha256,protocol,registration,role,state,userId,version'||
       value.protocol!==1||value.machine!==machine||value.userId!==owner||value.dataset!==ref.dataset||value.version!==ref.version||
@@ -103,16 +114,16 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   };
   const publicRow=row=>row?{
     dataset:row.logicalDataset||row.dataset,version:row.version,phase:row.phase,
-    archiveMachine:policy.machine,localMachine:row.machine,
+    archiveMachine:row.sourceMachine,localMachine:row.machine,
     originalRetained:availableArchive(row),
     ...(row.retirementIntent?{retirement:{state:row.retirementIntent.state||'FENCING'}}:{}),
     ...(row.error?{error:row.error}:{}),
   }:null;
 
   service.archiveState=(owner,machine,ref)=>publicRow(rows().findLast(row=>row.owner===owner&&row.machine===machine&&(row.dataset===ref.dataset||row.logicalDataset===ref.dataset)&&row.version===ref.version));
-  service.archiveSourceAllowed=(owner,machine,ref)=>policy.enabled&&machine===policy.machine&&isRef(ref)&&rows().some(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine&&row.sourceDataset===ref.dataset&&row.version===ref.version);
-  service.archiveMachineVisible=(owner,machine)=>policy.enabled&&machine===policy.machine&&rows().some(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine);
-  service.archiveAliases=owner=>new Map(rows().filter(row=>availableArchive(row)&&row.owner===owner&&row.sourceDataset).map(row=>[row.sourceDataset+'@'+row.version,row.logicalDataset||row.dataset]));
+  service.archiveSourceAllowed=(owner,machine,ref)=>isRef(ref)&&rows().some(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine&&row.sourceDataset===ref.dataset&&row.version===ref.version);
+  service.archiveMachineVisible=(owner,machine)=>rows().some(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine);
+  service.archiveAliases=(owner,machine=policy.machine)=>new Map(rows().filter(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine).map(row=>[row.sourceDataset+'@'+row.version,row.logicalDataset||row.dataset]));
   service.archiveIntentAllowed=(owner,args)=>{
     if(!policy.enabled||args.kind!=='copy'||args.machine!==policy.machine||args.from===args.machine||!UUID.test(args.key||'')||!isRef(args))return false;
     const row=rows().find(row=>row.owner===owner&&row.machine===args.from&&row.dataset===args.dataset&&row.version===args.version&&row.copyKey===args.key);
@@ -130,7 +141,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       return old;
     }
     if(rows().length>=10000)fail('Archive history limit reached');
-    const archived=rows().findLast(row=>availableArchive(row)&&row.owner===event.userId&&row.machine===machine&&row.dataset===event.dataset&&row.version===event.version);
+    const archived=rows().findLast(row=>availableCurrentArchive(row)&&row.owner===event.userId&&row.machine===machine&&row.dataset===event.dataset&&row.version===event.version);
     const sourceDataset=machine===policy.machine?event.dataset:archived?.sourceDataset||null;
     const now=clock(),row={id,kind:'ingest',owner:event.userId,machine,dataset:event.dataset,version:event.version,eventId:event.id,
       logicalDataset:event.dataset,sourceMachine:policy.machine,sourceDataset,
@@ -144,7 +155,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(!policy.enabled)return null;
     if(!isRef(logicalRef)||!isRef(physicalRef)||logicalRef.version!==physicalRef.version)fail('Invalid fixed archive replica');
     enabledUser(owner,machine);
-    const source=rows().findLast(row=>availableArchive(row)&&row.owner===owner&&(row.logicalDataset||row.dataset)===logicalRef.dataset&&row.version===logicalRef.version);
+    const source=rows().findLast(row=>availableCurrentArchive(row)&&row.owner===owner&&(row.logicalDataset||row.dataset)===logicalRef.dataset&&row.version===logicalRef.version);
     if(!source)return null;
     const id=key(owner,machine,physicalRef.dataset,physicalRef.version),old=load(id);
     if(old)return publicRow(old);
@@ -255,7 +266,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       fail('Authority retirement requires the exact removed reference, owner, receipt, replacement and UUID key.',400);
     const actor=service.store.get(principal.userId);
     if(!actor?.enabled||actor.role!=='admin')fail('Authority retirement requires a current administrator.',403);
-    const old=rows().findLast(row=>currentPolicy(row)&&row.owner===args.ownerId&&row.machine===args.machine&&
+    const old=rows().findLast(row=>trustedHistory(row)&&row.owner===args.ownerId&&row.machine===args.machine&&
       row.dataset===args.dataset&&row.version===args.version);
     const replacement=rows().findLast(row=>availableArchive(row)&&row.owner===args.ownerId&&row.machine===args.replacement.machine&&
       row.dataset===args.replacement.dataset&&row.version===args.replacement.version);
@@ -263,7 +274,12 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       !UUID.test(old.grantId||'')||!UUID.test(old.certifyId||'')||!HASH.test(old.receiptSha256||'')||
       !UUID.test(replacement.grantId||'')||!HASH.test(replacement.receiptSha256||'')||!old.eventAcknowledged||!replacement.eventAcknowledged)
       fail('Exact archived authority and independently certified replacement are required.',409);
+    // The node protocol proves both grants on one immutable authority store.
+    // A cross-machine replacement cannot safely retire the old source yet.
+    if(old.sourceMachine!==replacement.sourceMachine||old.policyKey!==replacement.policyKey)
+      fail('Cross-authority replacement retirement is unsupported; source protection is retained.',409);
     const binding=key('authority-retire-v1',args.ownerId,old.id,replacement.id,args.recoveryId,args.key),snapshot=JSON.stringify(actor);
+    const oldIdentity=archiveIdentity(old),replacementIdentity=archiveIdentity(replacement);
     if(old.retirement?.mode==='authority-retire-v1'){
       if(old.retirement.binding!==binding||old.failureStage!=='authority-retired')fail('Authority retirement identity cannot change.',409);
       return Promise.resolve(publicRow(old));
@@ -274,13 +290,14 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       if(service.closing||!policy.enabled||key(service.storageArchivePolicy)!==policyKey)fail('Authority retirement is unavailable.');
       if(JSON.stringify(service.store.get(principal.userId))!==snapshot)fail('Authority retirement authorization changed.',403);
       enabledUser(args.ownerId,args.machine);enabledUser(args.ownerId,args.replacement.machine);
-      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:args.machine,from:policy.machine});
-      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:args.replacement.machine,from:policy.machine});
+      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:old.machine,from:old.sourceMachine});
+      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:replacement.machine,from:replacement.sourceMachine});
       const current=load(old.id),fresh=load(replacement.id);
-      if(current?.retirementIntent&&current.retirementIntent.binding!==binding||
-        !availableArchive(fresh)||fresh.grantId!==replacement.grantId||fresh.receiptSha256!==replacement.receiptSha256)
+      if(!trustedHistory(current)||archiveIdentity(current)!==oldIdentity||
+        current.retirementIntent&&current.retirementIntent.binding!==binding||
+        !availableArchive(fresh)||archiveIdentity(fresh)!==replacementIdentity)
         fail('Retirement or replacement identity changed.');
-      if(rows().some(row=>row.id!==old.id&&currentPolicy(row)&&!isRetired(row)&&row.sourceDataset===old.sourceDataset&&row.version===old.version))
+      if(rows().some(row=>row.id!==old.id&&!isRetired(row)&&row.sourceMachine===old.sourceMachine&&row.sourceDataset===old.sourceDataset&&row.version===old.version))
         fail('Another archive depends on the old authority; explicit reconciliation is required.',409);
       if(laneOwner()===old.id)fail('An archive worker still holds the old lane.',409);
       for(const transfer of service.db.prepare('SELECT state,data FROM transfers').all()){
@@ -304,11 +321,11 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
         grantId:old.grantId,certifyId:old.certifyId,recoveryId:args.recoveryId,receiptSha256:old.receiptSha256});
       check();
       if(!proof||proof.protocol!==1||proof.state!=='REVOKED'||proof.opId!==args.key||proof.userId!==old.owner||proof.grantId!==old.grantId||
-        proof.sourceMachine!==policy.machine||proof.targetMachine!==old.machine||proof.source?.dataset!==old.sourceDataset||proof.source?.version!==old.version||
+        proof.sourceMachine!==old.sourceMachine||proof.targetMachine!==old.machine||proof.source?.dataset!==old.sourceDataset||proof.source?.version!==old.version||
         proof.target?.dataset!==old.dataset||proof.target?.version!==old.version||!HASH.test(proof.proofSha256||''))
         fail('Target retirement fence is not confirmed; source protection is retained.');
       old.retirementIntent.state='REVOKING';save(old);
-      const result=await service.bridge(policy.machine,'storage.archive.retire',{
+      const result=await service.bridge(old.sourceMachine,'storage.archive.retire',{
         mode:'authority-source-v1',opId:args.key,userId:old.owner,grantId:old.grantId,replacementGrantId:replacement.grantId,targetProof:proof,
         ...(args.retryKey?{retryKey:args.retryKey}:{})});
       check();
@@ -336,17 +353,19 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     const actor=service.store.get(principal.userId);
     if(!actor?.enabled||actor.role!=='admin')fail('Archive retirement requires a current administrator.',403);
     const snapshot=JSON.stringify(actor),ownerSnapshot=JSON.stringify(enabledUser(args.ownerId,args.machine));
-    const check=()=>{
-      if(service.closing||!policy.enabled||!service.bridge||key(service.storageArchivePolicy)!==policyKey)fail('Archive retirement is unavailable.');
-      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:args.machine,from:policy.machine});
-      if(JSON.stringify(service.store.get(principal.userId))!==snapshot||JSON.stringify(enabledUser(args.ownerId,args.machine))!==ownerSnapshot)
-        fail('Archive retirement authorization changed.',403);
-    };
-    check();
     const id=key(args.ownerId,args.machine,args.dataset,args.version,args.eventId),row=load(id);
-    if(!row||!currentPolicy(row)||row.kind!=='ingest'||row.owner!==args.ownerId||row.machine!==args.machine||
+    if(!row||!trustedHistory(row)||row.kind!=='ingest'||row.owner!==args.ownerId||row.machine!==args.machine||
       row.dataset!==args.dataset||row.version!==args.version||row.eventId!==args.eventId||row.eventAcknowledged)
       fail('Only a never-dispatched same-HDD ingest can be retired.');
+    const identity=archiveIdentity(row);
+    const check=()=>{
+      if(service.closing||!policy.enabled||!service.bridge||key(service.storageArchivePolicy)!==policyKey)fail('Archive retirement is unavailable.');
+      service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:row.machine,from:row.sourceMachine});
+      if(JSON.stringify(service.store.get(principal.userId))!==snapshot||JSON.stringify(enabledUser(args.ownerId,args.machine))!==ownerSnapshot)
+        fail('Archive retirement authorization changed.',403);
+      if(archiveIdentity(load(id))!==identity)fail('Archive retirement identity changed.');
+    };
+    check();
     const binding=key(args.ownerId,args.machine,args.dataset,args.version,args.eventId,args.recoveryId),prior=row.retirement;
     if(prior){if(prior.binding!==binding||row.phase!=='FAILED'||row.failureStage!=='retired')fail('Retirement receipt cannot be changed.');return Promise.resolve(publicRow(row));}
     const queuedSafe=value=>value?.kind==='ingest'&&value.phase==='QUEUED'&&value.sourceDataset===null&&value.transferId===null&&value.grantId===null&&
@@ -565,7 +584,9 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       const knownStoppedFailure=heldRow?.phase==='FAILED'&&(['copy','provision','certify'].includes(heldRow.failureStage)||
         heldRow.failureStage==='retired'&&HASH.test(heldRow.retirement?.proofSha256||''));
       if(heldRow&&(heldRow.phase==='ARCHIVED'&&heldRow.eventAcknowledged||knownStoppedFailure)){releaseLane(heldRow);held=null;}
-      const pending=held?(heldRow?[heldRow]:[]):rows().filter(row=>!row.retirementIntent&&row.nextCheckAt<=clock()&&(row.phase==='ARCHIVED'&&!row.eventAcknowledged||!['ARCHIVED','FAILED','BLOCKED'].includes(row.phase))).sort((a,b)=>a.updatedAt-b.updatedAt);
+      // An unknown old-policy lane stays held for explicit reconciliation. Do
+      // not dispatch or rewrite that journal merely because defaults changed.
+      const pending=held?(heldRow&&currentPolicy(heldRow)?[heldRow]:[]):rows().filter(row=>currentPolicy(row)&&!row.retirementIntent&&row.nextCheckAt<=clock()&&(row.phase==='ARCHIVED'&&!row.eventAcknowledged||!['ARCHIVED','FAILED','BLOCKED'].includes(row.phase))).sort((a,b)=>a.updatedAt-b.updatedAt);
       for(const row of pending.slice(0,1)){
         try{await advance(row);}
         catch(error){

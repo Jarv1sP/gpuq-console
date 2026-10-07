@@ -63,7 +63,7 @@ async function fixture({maximum=BIG,sizes=[20*SMALL,20*SMALL],delays=[]}={}){
     }
     return Response.json({ok:true,result:{offset:next.length,complete:action==='chunk'&&next.length===scan.files.find(entry=>entry.path===path).size}});
   };
-  return {raw,portal,stored,scan,setShrink:()=>{shrink=true;expire=true;},setRevoke:()=>{shrink=true;revoke=true;},setLose:()=>{lose=true;},options:{call,fetch:send,scan,userId:'fixture-user',machine:'training-node',name:'data',pollMs:0,now:()=>seconds,chunkClock:()=>ms,keyStore:{getHandle:key=>handles.get(key),setHandle:(key,value)=>handles.set(key,value)}}};
+  return {raw,portal,stored,scan,setShrink:()=>{shrink=true;expire=true;},setRevoke:()=>{shrink=true;revoke=true;},setLose:()=>{lose=true;},options:{call,fetch:send,scan,userId:'fixture-user',machine:'training-node',name:'data',pollMs:0,now:()=>seconds,chunkClock:()=>ms,keyStore:{get:()=>uploadId,getHandle:key=>handles.get(key),setHandle:(key,value)=>handles.set(key,value)}}};
 }
 
 test('each file starts at 1 MiB then grows to the ticket limit, preserving full SHA and manifest bounds',async()=>{

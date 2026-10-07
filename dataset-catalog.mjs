@@ -66,7 +66,7 @@ export function createDatasetRemovalGuard(service,principal,{readTimeoutMs=32000
     for(const owner of item.ownerIds||[]){
       if(typeof owner!=='string'||!OWNER_ID.test(owner))continue;
       const alias=service.datasetAliases?.(owner,machine)?.get(item.dataset+'@'+version);
-      const archived=machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(owner)?.get(item.dataset+'@'+version):null;
+      const archived=service.archiveAliases?.(owner,machine)?.get(item.dataset+'@'+version);
       for(const name of [alias,archived])if(typeof name==='string'&&ID.test(name))values.add(name);
     }
     return values;
@@ -313,6 +313,9 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
       if(value.inodeUsageKnown===true&&(!Number.isSafeInteger(value[key])||value[key]<0))fail('数据盘 inode 容量暂时无法确认。',502);
       result[key]=value.inodeUsageKnown===true?value[key]:null;
     }
+    const time=value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value)&&Number.isFinite(Date.parse(value))?value:null;
+    result.checkedAt=time(value.checkedAt);
+    result.collectedAt=time(value.collectedAt)??result.checkedAt;
     return {...result,inodeUsageKnown:value.inodeUsageKnown===true,guarded:value.guarded===true,
       ...(value.datasetDelete===1&&service.datasetDeleteCapabilities?await service.datasetDeleteCapabilities(principal):{datasetDelete:0})};
   }
@@ -372,7 +375,7 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
       const canUse=own&&(hasMachine(listing.machine)||service.archiveSourceAllowed?.(user.id,listing.machine,ref)===true||service.datasetIngressSourceAllowed?.(user.id,listing.machine,ref)===true);
       // Never apply this viewer's historical aliases to somebody else's new
       // registration. Unknown ownership needs the same precise member proof.
-      const alias=own?(aliasesFor(listing.machine)?.get(item.dataset+'@'+value.version)||(listing.machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(user.id)?.get(item.dataset+'@'+value.version):null)):null;
+      const alias=own?(aliasesFor(listing.machine)?.get(item.dataset+'@'+value.version)||service.archiveAliases?.(user.id,listing.machine)?.get(item.dataset+'@'+value.version)):null;
       const name=typeof alias==='string'&&ID.test(alias)?alias:item.dataset;
       let dataset=datasets.get(name);
       if(!dataset){dataset={dataset:name,versions:new Map()};datasets.set(name,dataset);}

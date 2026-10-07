@@ -1,20 +1,22 @@
-import {maintenanceInfoHTML} from './maintenance-state.js';
+import {maintenanceFor,maintenanceInfoHTML} from './maintenance-state.js';
 import {copyHelp} from './copy-help-ui.js';
 // Compatibility view for old bookmarks. It has no mutation controls.
 const visible=v=>String(v??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
 const esc=v=>visible(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={PENDING:'未执行（流程已停用）',RETURNED:'已退回',WITHDRAWN:'已撤回',DISPATCHING:'原执行待核对',RUNNING:'原操作执行中',CANCELING:'原停止结果待核对',SUCCEEDED:'已完成',FAILED:'执行失败',CANCELED:'已停止',TIMED_OUT:'已超时',UNKNOWN:'原结果待核对'};
-export function operationalMaintenanceHTML(value){
-  if(value?.version!==1)return '';
-  const rows=[...(value.global?[['全平台',value.global]]:[]),...Object.entries(value.machines||{})];
-  return rows.length?`<aside class="maintenance-banner glass" role="status"><strong>维护中 · 暂停新任务与数据写入</strong>${rows.map(([scope,entry])=>`<p>${esc(scope)}：${esc(entry.reason)}</p>`).join('')}${maintenanceInfoHTML("仍可查看历史、日志或取消任务；需管理员明确恢复。开启维护不会自动结束已有任务，也不代表服务器已经停止。","维护说明")}</aside>`:'';
+export function operationalMaintenanceHTML(value,machine,{unknown=false}={}){
+  if(unknown||value?.version!==1)return '<aside class="maintenance-banner glass" role="status"><strong>维护状态未确认</strong></aside>';
+  const entry=maintenanceFor(value,machine);if(!entry)return '';
+  const scope=value.global?'全平台':machine;
+  return `<aside class="maintenance-banner glass" role="status"><strong>${esc(scope)}维护中</strong><span class="maintenance-notice-reason" title="${esc(entry.reason)}">${esc(entry.reason)}</span><span>暂停训练提交、终端输入和数据写入</span>${maintenanceInfoHTML("仍可查看日志、下载和取消任务。维护不会自动结束已有任务；需管理员明确恢复。","维护限制")}</aside>`;
 }
 export function operationalMaintenanceUI(store,toast,onChange=()=>{},{host=document.querySelector('#operational-maintenance'),management=false,active=()=>true}={}){
-  let identity=null,revision=-1;
-  return ()=>{
+  let identity=null,revision=-1,workspaceMachine=null;
+  const render=()=>{
     if(!host)return;
     const value=store.data?.operationalMaintenance,actor=store.principal,admin=management&&actor?.role==='admin';
-    if(!actor||value?.version!==1||!active()||management&&!admin){host.replaceChildren();identity=null;revision=-1;return;}
+    if(!actor||!active()||management&&(!admin||store.maintenanceStatusUnknown||value?.version!==1)){host.replaceChildren();identity=null;revision=-1;return;}
+    if(!management){const machine=document.querySelector('#context-machine')?.value||document.querySelector('[name=workspace-machine]')?.value||workspaceMachine;host.innerHTML=operationalMaintenanceHTML(value,machine,{unknown:store.maintenanceStatusUnknown});return;}
     const nextIdentity=actor.userId+':'+actor.role;
     if(identity!==nextIdentity){
       identity=nextIdentity;revision=-1;
@@ -22,7 +24,7 @@ export function operationalMaintenanceUI(store,toast,onChange=()=>{},{host=docum
       if(admin){
         const form=host.querySelector('form'),error=host.querySelector('[data-maintenance-error]'),stamp=store.authGeneration;
         host.querySelector('[data-maintenance-settings-close]').addEventListener('click',()=>host.querySelector('dialog').close());
-        const current=()=>active()&&!store.authPending&&stamp===store.authGeneration&&identity===nextIdentity&&host.contains(form)&&store.principal?.role==='admin';
+        const current=()=>active()&&!store.authPending&&!store.maintenanceStatusUnknown&&stamp===store.authGeneration&&identity===nextIdentity&&host.contains(form)&&store.principal?.role==='admin';
         const select=()=>{const current=store.data.operationalMaintenance,scope=form.elements.scope.value;form.elements.reason.value=(scope==='all'?current.global:current.machines[scope])?.reason||'';form.dataset.revision=String(current.revision);form.querySelector('[data-maintenance-public-reason]').innerHTML=scope==='all'?copyHelp('全平台维护原因说明','全平台维护原因会公开显示在登录页，请勿写服务器名或内部信息。'):'';};
         form.elements.scope.addEventListener('change',select);
         const apply=async enabled=>{
@@ -44,6 +46,8 @@ export function operationalMaintenanceUI(store,toast,onChange=()=>{},{host=docum
     }
     if(revision!==value.revision){if(!management)host.querySelector('[data-maintenance-banner]').innerHTML=operationalMaintenanceHTML(value);revision=value.revision;}
   };
+  if(!management){document.addEventListener('gpuq-workspace-context',event=>{workspaceMachine=event.detail?.userId===store.principal?.userId?event.detail.machine:null;render();});document.addEventListener('gpuq-maintenance-observation',render);store.onAuthChange(()=>{workspaceMachine=null;host?.replaceChildren();});}
+  return render;
 }
 export function maintenanceUI(store){
   const host=document.querySelector('#page-maintenance');

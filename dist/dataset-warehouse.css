@@ -1,4 +1,4 @@
-/* datasets-v3: one warehouse list and a what/where/train inspector. */
+/* Warehouse first: per-node storage cards, one list and a three-step inspector. */
 body[data-room=datasets] #page-title{font-size:30px;display:flex;align-items:baseline;gap:14px}
 body[data-room=datasets] .page-heading{padding-bottom:22px}
 body[data-room=datasets] .page-heading [data-shell-action=control]{display:none}
@@ -27,9 +27,9 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-list-head h2{font:600 15px var(--display);display:flex;align-items:center;gap:10px;margin:0;flex:none}
 #page-datasets .v3-search{margin-left:auto;height:32px!important;min-height:32px!important;max-width:240px;width:45%;min-width:0;padding:0 10px!important;font-size:13px;border:1px solid var(--line);background:var(--bg);border-radius:8px}
 #page-datasets .v3-refresh{padding:0;width:32px;min-height:32px;flex:none}
-#page-datasets .v3-cols,#page-datasets .v3-row{display:grid;grid-template-columns:22px minmax(0,1.6fr) 76px 40px 84px minmax(114px,1fr);gap:12px;align-items:center;padding:0 16px}
+#page-datasets .v3-cols,#page-datasets .v3-row{display:grid;grid-template-columns:16px minmax(0,1.6fr) 76px 84px minmax(76px,.6fr) minmax(114px,1fr);gap:12px;align-items:center;padding:0 16px}
 #page-datasets .v3-cols{height:34px;color:var(--ink-3);font-size:12px;border-bottom:1px solid var(--line)}
-#page-datasets .v3-cols>span:is(:nth-child(4),:nth-child(5)),#page-datasets :is(.v3-versions,.v3-size){text-align:right;font-variant-numeric:tabular-nums}
+#page-datasets .v3-cols>span:nth-child(4),#page-datasets .v3-size{text-align:right;font-variant-numeric:tabular-nums}
 #page-datasets .v3-row{position:relative;min-height:74px;width:100%;background:none;border:0;border-bottom:1px solid var(--line);color:var(--ink);text-align:left;cursor:pointer}
 #page-datasets .v3-row:last-child{border-bottom:0}
 #page-datasets .v3-row[aria-selected=true]{background:var(--bg-2)}
@@ -60,11 +60,13 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-strata.out i:nth-child(n+2){display:none}#page-datasets .v3-strata.failed i{background:var(--v3-bad)}
 #page-datasets .v3-inspector{min-width:0;position:sticky;top:24px;display:flex;flex-direction:column;gap:0;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:var(--bg-1);align-self:start}
 #page-datasets .v3-inspector:empty{display:none}
+#page-datasets .v3-inspector{scroll-margin-top:24px;scroll-margin-bottom:calc(var(--bottom-reserve,92px) + 12px)}
 #page-datasets .v3-detail-scroll{flex:0 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0}
 #page-datasets .v3-inspector-overflow .v3-detail-scroll{flex:1;overflow:auto}
 #page-datasets .v3-detail-scroll>section{padding:12px 20px;margin:0;border-bottom:1px solid var(--line)}
 #page-datasets .v3-detail-scroll>section:last-child{border:0}
-#page-datasets .v3-train{flex:none;background:var(--bg-1);padding:16px 20px;margin:0;border-top:1px solid var(--line);display:block}
+#page-datasets .v3-train{flex:none;background:var(--bg-1);padding:12px 20px;margin:0;border-top:1px solid var(--line);display:block}
+#page-datasets .v3-train .v3-lab{margin-bottom:8px}
 #page-datasets .v3-inspector-overflow .v3-train{position:sticky;bottom:0}
 #page-datasets .v3-inspector h2{margin:0;font:600 22px/1.25 var(--display);display:flex;align-items:center;gap:8px}
 #page-datasets .v3-inspector h2>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -146,7 +148,7 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-upload .dataset-upload-actions{justify-content:flex-end;margin-top:32px;padding-top:16px;border-top:1px solid var(--line)}
 #page-datasets .v3-upload .dataset-upload-actions .button{font-size:13px;min-height:40px}
 #page-datasets .v3-label-dialog{width:min(440px,calc(100vw - 32px));max-width:calc(100vw - 32px);background:var(--bg-1);color:var(--ink);border:1px solid var(--line-2);padding:24px;border-radius:10px}
-@container(max-width:1100px){#page-datasets .v3-split{grid-template-columns:minmax(0,1fr) 360px;gap:16px}#page-datasets .v3-cols,#page-datasets .v3-row{grid-template-columns:18px minmax(0,1fr) 52px 32px 70px minmax(80px,.8fr);gap:8px;padding-inline:12px}}
+@container(max-width:1100px){#page-datasets .v3-split{grid-template-columns:minmax(0,1fr) 340px;gap:16px}#page-datasets .v3-cols,#page-datasets .v3-row{grid-template-columns:12px minmax(0,1fr) 52px 70px 64px minmax(80px,.8fr);gap:8px;padding-inline:12px}}
 @container(max-width:759px){
  #page-datasets .v3-upload .dataset-sheet-head>.button{min-height:48px}
  #page-datasets .v3-server-chip{min-width:120px}
@@ -190,6 +192,62 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-cache-sheet{width:min(440px,100%);padding:0 20px 20px;background:var(--bg-1);color:var(--ink)}
 #page-datasets .v3-cache-sheet>.dataset-sheet-head{margin:0 -20px;padding:16px 20px}
 #page-datasets .v3-cache-sheet>.dataset-sheet-head .button{min-height:44px}
+/* v4 phase one: warehouse cards and list filters. No hardware role is guessed. */
+#page-datasets .v4-section-title{font:500 12px/1 var(--sans);color:var(--ink-3);margin:0 0 12px;display:flex;align-items:center;gap:14px}
+#page-datasets .v4-warehouse-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr));gap:14px;margin-bottom:24px}
+#page-datasets .v4-warehouse-card.capacity-warehouse{display:grid;gap:12px;margin:0;border:1px solid var(--line);border-radius:14px;background:var(--bg-1);padding:18px 20px;text-align:left;color:var(--ink);min-width:0;cursor:pointer}
+#page-datasets .v4-warehouse-card[aria-pressed=true]{border-color:var(--ink);background:var(--bg-2)}
+#page-datasets .v4-card-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px 12px;min-width:0}
+#page-datasets .v4-warehouse-name{font:600 20px var(--display);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#page-datasets .v4-upload-target{flex:none;font:500 16px var(--sans);color:var(--ink-2)}
+#page-datasets .v4-dataset-count{font:12px var(--mono);color:var(--ink-3)}
+#page-datasets .v4-free{margin-left:auto;white-space:nowrap;font:12px var(--sans);color:var(--ink-2)}
+#page-datasets .v4-free b{font:600 20px var(--display);font-variant-numeric:tabular-nums;color:var(--ink)}
+#page-datasets .v4-warehouse-card.low .v4-free b{color:var(--v3-warn)}
+#page-datasets .v4-warehouse-card .capacity-strata{display:block;height:16px;margin:0}
+#page-datasets .v4-warehouse-card .capacity-values{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:12px;margin:0}
+#page-datasets .v4-warehouse-card .capacity-warning{margin:0}
+#page-datasets .v4-warehouse-empty{padding:24px;border:1px solid var(--line);border-radius:14px;color:var(--ink-3)}
+#page-datasets .v4-training{margin-bottom:24px}
+#page-datasets .v4-training{--v4-project:#7FA7FF}
+#page-datasets .v4-training-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:10px}
+#page-datasets .v3-server-chip.v4-training-card{min-width:0;width:auto;max-width:none;grid-template-columns:minmax(0,1fr);border-radius:12px;padding:12px 14px;gap:10px}
+#page-datasets .v4-training-card .v3-server-name{gap:8px;align-items:baseline}
+#page-datasets .v4-training-card .v3-server-name small{font:12px var(--sans)}
+#page-datasets .v4-training-card .v3-server-name small b{font-weight:500;color:var(--ink-2)}
+#page-datasets .v4-training-bar{position:relative;display:flex;height:8px;border-radius:3px;background:var(--line);min-width:0}
+#page-datasets .v4-training-bar>i{height:100%;flex:none;min-width:0}
+#page-datasets :is(.v4-training-bar,.v4-training-values,.v4-training-key) .v4-project{background:var(--v4-project)}
+#page-datasets :is(.v4-training-bar,.v4-training-values,.v4-training-key) .v4-data{background:var(--ink)}
+#page-datasets :is(.v4-training-bar,.v4-training-key) .v4-other,
+#page-datasets .v4-training-bar.unknown{background:repeating-linear-gradient(135deg,var(--ink-3) 0 2px,transparent 2px 4px)}
+#page-datasets .v4-training-bar .v4-budget{position:absolute;top:-4px;width:1.5px;height:16px;background:var(--ink-2)}
+#page-datasets .v4-training-values{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;font-size:12px;color:var(--ink-2);min-width:0}
+#page-datasets .v4-training-values>span{display:inline-flex;align-items:center;gap:5px;min-width:0}
+#page-datasets .v4-training-values i,#page-datasets .v4-training-key i{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}
+#page-datasets .v4-training-key{display:inline-flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:11px}
+#page-datasets .v4-training-key>span{display:inline-flex;align-items:center;gap:5px}
+#page-datasets .v4-training-key .v4-other{border:1px solid var(--line-2)}
+#page-datasets .v4-list-filters{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}
+#page-datasets .v4-filter-chip{display:inline-flex;align-items:center;gap:5px;min-height:32px;border:1px solid var(--line-2);border-radius:999px;background:none;color:var(--ink-2);font:12px var(--sans);padding:0 10px;cursor:pointer;max-width:100%}
+#page-datasets .v4-filter-chip[aria-pressed=true],#page-datasets .v4-filter-chip[data-v4-clear]:not([data-v4-clear=all]){border-color:var(--ink-2);color:var(--ink)}
+#page-datasets .v4-filter-chip>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px}
+#page-datasets .v3-list-head{flex-wrap:wrap}
+#page-datasets .v4-warehouse-where{display:grid;gap:4px;min-width:0;font:11px var(--mono);color:var(--ink-2)}
+#page-datasets .v4-warehouse-where>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#page-datasets .v3-pip{border:1px solid var(--line-2);border-radius:5px;padding:2px 5px;gap:5px}
+#page-datasets .v3-pip:has(.v3-g.ready){border-color:var(--ink-2);color:var(--ink)}
+#page-datasets .v4-step{display:inline-flex;align-items:center;justify-content:flex-start;gap:8px}
+#page-datasets .v4-step b{display:inline-grid;place-items:center;width:18px;height:18px;border:1px solid var(--line-2);border-radius:50%;font:11px var(--mono);color:var(--ink-2);flex:none}
+@container(max-width:759px){
+ #page-datasets .v4-warehouse-card.capacity-warehouse{padding:14px 16px;gap:10px}
+ #page-datasets .v4-warehouse-name{font-size:18px}
+ #page-datasets .v4-warehouses,#page-datasets .v4-training{min-width:0}
+ #page-datasets .v4-warehouse-where{grid-column:3;grid-row:2;text-align:right}
+ #page-datasets .v4-list-filters{flex:1 1 100%}
+ #page-datasets .v4-filter-chip{min-height:48px}
+ #page-datasets .v3-phone-detail :is(.v4-warehouses,.v4-training){display:none}
+}
 @container(max-width:759px){#page-datasets .v3-server-actions{grid-column:2/-1;justify-content:flex-start}#page-datasets .v3-cache-sheet{width:100%;padding-inline:16px}#page-datasets .v3-cache-sheet>.dataset-sheet-head{margin-inline:-16px;padding-inline:16px}}
 #page-datasets .v3-delete{font-size:13px;color:var(--v3-bad);min-height:40px}
 #page-datasets .v3-upload-row .v3-flag{color:var(--v3-fetch)}

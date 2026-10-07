@@ -42,10 +42,14 @@ try{
   verified=true;await snapshot();await refreshVisible(page);await page.waitForFunction(()=>!document.querySelector('[name=sm-percent]').closest('label').hidden);assert.equal(await page.locator('[name=sm-percent]').isVisible(),true,'Explicit complete node capability retains the verified control');
   verified=false;await snapshot();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('[name=sm-percent]').closest('label').hidden);await closeSubmit(page);
   await page.locator('[data-nav=datasets]').click();await page.locator('[data-v3-upload]').first().click();
+  // The upload button opens <details>; its queued toggle opens the dialog.
+  // Check retained/hidden sources only after that native UI transition ends.
+  await page.locator('#dataset-add-dialog').waitFor({state:'visible'});
   assert.equal(await page.locator('[data-v3-source=aliyun]').isVisible(),false);
   assert.deepEqual(await page.locator('[name=cloud-source] option[value=aliyun]').evaluate(node=>({hidden:node.hidden,disabled:node.disabled})),{hidden:true,disabled:true},'The native source option is hidden and unavailable');
   assert.equal(await page.locator('#cloud-files').isHidden(),true);
-  assert.equal(await page.locator('[data-v3-source=link]').isVisible(),true);assert.equal(await page.locator('[data-v3-source=workspace]').isVisible(),true,'Useful HTTPS and personal-workspace paths are retained');
+  assert.equal(await page.locator('[data-v3-source=link]').isVisible(),true);assert.equal(await page.locator('[data-v3-source=workspace]').isVisible(),true,'Useful HTTPS and personal-workspace paths are retained in the existing source drawers');
+  for(const source of ['link','workspace'])assert.equal(await page.locator('[data-v3-source='+source+']').count(),1,'each retained source has a single concrete entry');
   for(const width of [1440,390]){await page.setViewportSize({width,height:width===390?844:1080});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:join(shots,'sources-'+width+'.png'),animations:'disabled'});}
   assert.ok(calls.every(row=>!/^cloud\.(?:auth|files)|^cloud\.inspect$|^jobs\.submit$|^files\.put$/.test(row.operation)),'Browsing hidden entries issues no cloud operations or writes');assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
   console.log('MEMBER SURFACE PASS: simulated facts, one collapsed transmission hint, verified-only SM, hidden cloud experiments, retained HTTPS/workspace routes, 1440/390, no writes or outside requests.');

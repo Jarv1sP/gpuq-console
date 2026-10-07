@@ -389,6 +389,11 @@ async function transferOperation(service,principal,operation,args){
       if(done.has(row.state)||row.data.cancelRequested)return view(row);
     }
     else{
+      // A managed legacy upload has an immutable machine/digest and remains
+      // resumable above. New data must use the warehouse admission protocol;
+      // transfers.create may not bypass it and admit a selected SSD directly.
+      if(args.kind==='upload'&&service.datasetIngressPolicy?.enabled===true)
+        fail('新数据集请使用数据仓库上传入口（gpuctl data upload）；旧传输仍可按原编号继续。',409);
       if(service.db.prepare('SELECT COUNT(*) n FROM transfers').get().n>=10000)fail('传输历史已达上限，请联系管理员归档。',429);
       if(service.db.prepare("SELECT COUNT(*) n FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED')").get(user.id).n>=20)fail('请先处理现有传输任务。',429);
       const id=randomUUID(),now=Date.now();transaction(service,()=>{service.db.prepare('INSERT INTO transfers(id,owner_id,client_key,digest,state,created_at,updated_at,data) VALUES(?,?,?,?,?,?,?,?)').run(id,user.id,args.key,digest(payload),'DISPATCHING',now,now,JSON.stringify({...payload,owner:{id:user.id,username:user.username,name:user.name},...(payload.kind==='copy'?{sourceRelease:{protocol:1,state:'UNCONFIRMED'}}:{}),...(payload.kind==='download'&&service.storageArchivePolicy?.enabled?{downloadProtection:{protocol:1,state:'UNCONFIRMED'}}:{})}));service.audit(principal.username,operation,id,'DISPATCHING');});row=load(service,id);

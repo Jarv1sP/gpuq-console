@@ -29,6 +29,8 @@ DEFAULTS = {'maxUploadBytes': 1024**4, 'maxUserBytes': 2*1024**4,
             'maxUserEntries': 2000000}
 RELAY_LIMIT_BYTES = 256*1024**2
 MAX_ACTIVE_ARCHIVES = 4  # Independent admission, never an unbounded bypass.
+ADMISSION_PROTOCOL = 'dataset-upload-admission-v1'
+SPECIFICATION_FIELDS = ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')
 
 
 DIRECT_FILE_CHUNK_BYTES = 16 * 1024 * 1024
@@ -125,6 +127,98 @@ class DatasetUploads:
     def reservation(self, user, upload):
         return self.cache.root/'.upload-reservations'/(self.key(user, upload)+'.json')
 
+    def admission_path(self, user, upload):
+        return self.cache.root/'.upload-admissions'/(self.key(user, upload)+'.json')
+
+    def _admission_binding(self, args):
+        required = {'userId', 'hostAdmin', 'protocol', 'intentKey', 'uploadId',
+                    'requestedMachine', 'storageMachine', 'authority',
+                    'specification', 'specificationSha256'}
+        if (not isinstance(args, dict) or not required <= set(args) or set(args)-required-{'allowRelay'}
+                or args['hostAdmin'] is not False or args['protocol'] != ADMISSION_PROTOCOL
+                or not isinstance(args['userId'], str)
+                or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]{1,18})', args['userId'])
+                or any(not isinstance(args[k], str) or not UUID.fullmatch(args[k]) for k in ('intentKey', 'uploadId'))
+                or uuid.UUID(args['uploadId']).version != 4
+                or any(not isinstance(args[k], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', args[k])
+                       for k in ('requestedMachine', 'storageMachine', 'authority'))
+                or 'allowRelay' in args and type(args['allowRelay']) is not bool):
+            raise ValueError('Invalid private server upload admission fields')
+        policy = self.n.CONFIG.get('storageArchive', {})
+        if (policy.get('enabled') is not True or policy.get('machine') != self.n.CONFIG.get('machine')
+                or self.n.CONFIG.get('storageAuthority', {}).get('enabled') is not True
+                or self.cache_only() or args['storageMachine'] != self.n.CONFIG.get('machine')
+                or args['authority'] != policy.get('authority')):
+            raise PermissionError('Server upload admission requires this fixed HDD authority')
+        spec = args['specification']
+        if (not isinstance(spec, dict) or set(spec) != set(SPECIFICATION_FIELDS)
+                or not isinstance(spec.get('name'), str) or not NAME.fullmatch(spec['name'])
+                or not isinstance(spec.get('manifestSha256'), str) or not HASH.fullmatch(spec['manifestSha256'])
+                or any(type(spec.get(k)) is not int or not 0 <= spec[k] <= maximum
+                       or k == 'manifestBytes' and spec[k] == 0 for k, maximum in (
+                           ('manifestBytes', self.d.MAX_JSON_BYTES),
+                           ('totalBytes', self.limits['maxUploadBytes']), ('entries', self.d.MAX_ENTRIES)))):
+            raise ValueError('Invalid complete server upload specification')
+        spec = {k: spec[k] for k in SPECIFICATION_FIELDS}
+        digest = hashlib.sha256(json.dumps(spec, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        if args['specificationSha256'] != digest:
+            raise ValueError('Server upload specification digest changed')
+        reserve = spec['totalBytes']+spec['manifestBytes']*4+spec['entries']*8192+65536
+        if reserve > 2**63-1:
+            raise ValueError('Upload reservation exceeds supported size')
+        return dict(schema=1, protocol=ADMISSION_PROTOCOL, userId=args['userId'],
+                    intentKey=args['intentKey'], uploadId=args['uploadId'],
+                    requestedMachine=args['requestedMachine'], storageMachine=args['storageMachine'],
+                    authority=args['authority'], specification=spec, specificationSha256=digest,
+                    rootIdentity=list(self.cache._root_identity), reserveBytes=reserve)
+
+    def _check_admission(self, session):
+        bound = session.get('serverAdmission')
+        try:
+            marker = self.d._read_json(self.admission_path(session['userId'], session['uploadId']))
+        except FileNotFoundError:
+            if bound is not None:
+                raise ValueError('Server upload admission receipt is missing') from None
+            return
+        with self.d._directory(self.cache.root) as root:
+            info = os.fstat(root)
+            if (info.st_dev, info.st_ino) != self.cache._root_identity:
+                raise ValueError('Server upload admission root identity changed')
+        # Marker presence can never relabel an existing legacy/transfer session.
+        if (bound is None or marker != bound or not isinstance(bound, dict)
+                or set(bound) != {'schema', 'protocol', 'userId', 'intentKey', 'uploadId',
+                                  'requestedMachine', 'storageMachine', 'authority', 'specification',
+                                  'specificationSha256', 'rootIdentity', 'reserveBytes'}
+                or type(bound.get('schema')) is not int or bound['schema'] != 1
+                or bound.get('protocol') != ADMISSION_PROTOCOL
+                or bound.get('userId') != session['userId'] or bound.get('uploadId') != session['uploadId']
+                or not isinstance(bound.get('intentKey'), str) or not UUID.fullmatch(bound['intentKey'])
+                or uuid.UUID(bound['uploadId']).version != 4
+                or any(not isinstance(bound.get(k), str)
+                       or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', bound[k])
+                       for k in ('requestedMachine', 'storageMachine', 'authority'))
+                or bound.get('storageMachine') != self.n.CONFIG.get('machine')
+                or bound.get('rootIdentity') != list(self.cache._root_identity)
+                or any(type(value) is not int for value in bound.get('rootIdentity', ()))
+                or type(bound.get('reserveBytes')) is not int
+                or bound.get('reserveBytes') != session['reserveBytes']
+                or bound.get('specification') != {k: session[k] for k in SPECIFICATION_FIELDS}
+                or session.get('archiveAdmission') is not None):
+            raise ValueError('Server upload admission identity changed')
+        spec = {k: session[k] for k in SPECIFICATION_FIELDS}
+        if bound['specificationSha256'] != hashlib.sha256(json.dumps(spec, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest():
+            raise ValueError('Server upload admission specification changed')
+
+    def admit(self, args):
+        """Private fixed bridge only. The immutable marker precedes session I/O."""
+        binding = self._admission_binding(args)
+        begin = {**binding['specification'], 'key': binding['uploadId']}
+        if 'allowRelay' in args:
+            begin['allowRelay'] = args['allowRelay']
+        result = self.begin(binding['userId'], begin, _server_admission=binding)
+        return {**result, 'admissionProtocol': 1, 'admissionKey': binding['intentKey'],
+                'authority': binding['authority'], 'machine': binding['storageMachine']}
+
     def reservation_value(self, session, *, sealed=False, budget_sealed=None):
         budget_sealed = sealed if budget_sealed is None else budget_sealed
         footprint = session['totalBytes'] + 4096 * session['entries'] + 8192
@@ -190,9 +284,11 @@ class DatasetUploads:
                     or not isinstance(lane['reference']['dataset'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', lane['reference']['dataset'])
                     or not isinstance(lane['reference']['version'], str) or not HASH.fullmatch(lane['reference']['version'])):
                 raise ValueError('Corrupt managed archive upload binding')
+        self._check_admission(value)
         return value
 
     def save(self, session):
+        self._check_admission(session)
         session['updatedAt'] = time.time()
         self.d._write_json(self.folder(session['userId'], session['uploadId'])/'session.json', session)
 
@@ -384,7 +480,7 @@ class DatasetUploads:
         return {'schema': 1, 'transferId': transfer, 'targetMachine': lane['targetMachine'],
                 'authority': lane['authority'], 'sourceMachine': spec['sourceMachine'], 'reference': spec['reference']}
 
-    def _admit(self, user, args, *, _archive_transfer=None):
+    def _admit(self, user, args, *, _archive_transfer=None, _server_admission=None):
         self.require_ingress(user, args.get('key'))
         name, upload = args.get('name'), args.get('key')
         if not isinstance(name, str) or not NAME.fullmatch(name):
@@ -401,11 +497,26 @@ class DatasetUploads:
         specification = {k: args[k] for k in ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')}
         archive = self._archive_binding(user, args, _archive_transfer) if _archive_transfer is not None else None
         with self.cache._locked():
+            marker_present = True
+            try:
+                marker = self.d._read_json(self.admission_path(user, upload))
+            except FileNotFoundError:
+                marker = None
+                marker_present = False
+            if marker_present and (marker != _server_admission or _server_admission is None):
+                raise ValueError('Server-admitted upload cannot use bare begin or another intent')
+            if _server_admission is not None and (archive is not None
+                    or _server_admission['userId'] != user or _server_admission['uploadId'] != upload
+                    or _server_admission['specification'] != specification
+                    or _server_admission['rootIdentity'] != list(self.cache._root_identity)):
+                raise ValueError('Server upload admission tuple changed')
             try:
                 prior = self.load(user, upload)
             except FileNotFoundError:
                 prior = None
             if prior is not None:
+                if prior.get('serverAdmission') != _server_admission:
+                    raise ValueError('An existing legacy upload cannot acquire server admission')
                 if prior.get('archiveAdmission') != archive:
                     raise ValueError('An existing upload cannot change its admission lane')
                 if any(prior.get(k) != v for k, v in specification.items()):
@@ -457,19 +568,35 @@ class DatasetUploads:
                 raise ValueError('Personal dataset entry quota reached')
             self.cache._budget(reserve)
             self.cache._free(self.cache._reserved()+reserve, needed_inodes=args['entries']+16)
+            if _server_admission is not None:
+                # All three records share the original cache lock. A crash
+                # after the immutable marker permits only this same private
+                # tuple to finish admission; never a naked begin or new ID.
+                try:
+                    self.reservation(user, upload).lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ValueError('Orphan upload reservation requires inspection')
+                if not marker_present:
+                    self.d._mkdir(self.admission_path(user, upload).parent)
+                    self.d._write_json(self.admission_path(user, upload), _server_admission)
             self.folder(user, upload, create=True)
             session = dict(schema=1, userId=user, uploadId=upload, **specification,
                 state='RECEIVING_MANIFEST', createdAt=time.time(), reserveBytes=reserve)
             if archive is not None:
                 session['archiveAdmission'] = archive
+            if _server_admission is not None:
+                session['serverAdmission'] = _server_admission
             self.save(session)
             self.d._write_json(self.reservation(user, upload), self.reservation_value(session))
             return session
 
-    def begin(self, user, args, *, _archive_transfer=None):
+    def begin(self, user, args, *, _archive_transfer=None, _server_admission=None):
         self.require_ingress(user, args.get('key'))
         # effective() has its own short cache lock; do not nest it in admission.
-        session = self.effective(self._admit(user, args, _archive_transfer=_archive_transfer))
+        session = self.effective(self._admit(user, args, _archive_transfer=_archive_transfer,
+                                             _server_admission=_server_admission))
         if session.get('directPaused') is True or args.get('allowRelay') is True and session.get('relayAllowed') is not True:
             with self.guard(user, session['uploadId']):
                 session = self.load(user, session['uploadId'])
@@ -615,6 +742,7 @@ class DatasetUploads:
         return {'path': path, 'size': row[0], 'sha256': row[1]}
 
     def _check(self, session, *, transfer=True):
+        self._check_admission(session)
         actor = self.actor(session['userId'])
         dataset, version = session['dataset'], session['version']
         metadata = self.cache._dataset(actor, dataset)

@@ -41,7 +41,8 @@ test('expiring tickets renew without changing the approved node or revealing the
 });
 
 function snapshot(size=1){const content=Buffer.from('x'),manifest=Buffer.from(JSON.stringify({schema:1,directories:[],files:[{path:'a',size,sha256:hash(content)}]}));return {manifest,manifestSha256:hash(manifest),totalBytes:size,entries:1,files:[{path:'a',size,sha256:hash(content)}],openEntry:async()=>({read:async()=>content,verify:async()=>{},close:async()=>{}}),verify:async()=>{}};}
-const keyStore={get:()=>undefined,set:async()=>{}};
+// Transport fixtures resume an original persisted legacy upload key.
+const keyStore={get:()=>id,set:async()=>{}};
 
 test('large workspace files require relay consent before opening or sending bytes',async()=>{
   let opened=false,called=false;

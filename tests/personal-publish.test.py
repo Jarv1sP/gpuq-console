@@ -128,6 +128,26 @@ class Publish(unittest.TestCase):
         with self.assertRaises(ValueError):self.n.process('storage.cache-action.capabilities',{**args,'force':True})
         _,cache=self.n.dataset_cache_for(ref['dataset']);self.assertEqual(cache.status(self.n.DATASET_MODULE.Principal(self.user,False),**ref)['state'],'READY')
 
+    def test_personal_hdd_and_ssd_directory_pages_use_fixed_source_and_content_acl(self):
+        self.n.CONFIG['machine']='fixture-node'
+        results=[self.publish()]
+        raw=self.storage.data_path(self.user,'ssd',create=True)/'hot';raw.mkdir(mode=0o700)
+        (raw/'sample.bin').write_bytes(b'fixed SSD bytes')
+        publisher=self.p.publication(self.n,self.user,'ssd');key=str(uuid.uuid4())
+        publisher.publish({'userId':self.user,'key':key,'name':'hot','path':'hot'})
+        self.assertEqual(publisher.worker(self.user,key),0)
+        results.append(publisher.status(self.user,key))
+        for result,tier in zip(results,('hdd','ssd')):
+            args={'userId':self.user,'hostAdmin':False,'dataset':result['dataset'],'version':result['version']}
+            _,cache=self.n.dataset_source_cache(result['dataset'],result['version'])
+            self.assertEqual(cache.personalTier,tier)
+            page=self.n.process('datasets.files.list',args)
+            self.assertTrue(page['available']);self.assertEqual(page['version'],result['version'])
+            self.assertEqual(page['entries'][0]['name'],'train.csv' if tier=='hdd' else 'sample.bin')
+            self.assertNotIn(str(self.base),json.dumps(page))
+            with self.assertRaises(PermissionError):
+                self.n.process('datasets.files.list',{**args,'userId':'demo-user-9'})
+
     def test_live_raw_writer_prevents_publication_and_pending_publication_prevents_new_writer(self):
         lock=self.storage.data_lifetime(self.user,'hdd')
         try:

@@ -1,4 +1,4 @@
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {MACHINES} from './dist/model.js';
 
@@ -12,15 +12,26 @@ const SPEC=['name','manifestBytes','manifestSha256','totalBytes','entries'];
 const known=machine=>MACHINES.some(value=>value.id===machine);
 const fail=(message,status=409)=>{throw Object.assign(Error(message),{status});};
 const specification=args=>Object.fromEntries(SPEC.map(key=>[key,args[key]]));
+const validSpecification=value=>value&&typeof value==='object'&&!Array.isArray(value)&&
+  Object.keys(value).length===SPEC.length&&SPEC.every(key=>Object.hasOwn(value,key))&&
+  typeof value.name==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(value.name)&&
+  Number.isSafeInteger(value.manifestBytes)&&value.manifestBytes>=1&&value.manifestBytes<=64*1024*1024&&
+  typeof value.manifestSha256==='string'&&HASH.test(value.manifestSha256)&&
+  Number.isSafeInteger(value.totalBytes)&&value.totalBytes>=0&&
+  Number.isSafeInteger(value.entries)&&value.entries>=0&&value.entries<=500000;
+const ADMISSION='dataset-upload-admission-v1';
+const UPLOAD_STATES=new Set(['RECEIVING_MANIFEST','SEALING','UPLOADING','PUBLISHING','READY','FAILED','DISCARDING','DISCARDED']);
 
 export function datasetIngressPolicy(input){
   if(input==null)return {enabled:false};
   if(!input||typeof input!=='object'||Array.isArray(input)||typeof input.enabled!=='boolean'||
-    Object.keys(input).some(key=>!['enabled','machine','authority'].includes(key)))fail('Invalid trusted dataset ingress policy');
+    Object.keys(input).some(key=>!['enabled','machine','authority','allowDuringMaintenance'].includes(key))||
+    input.allowDuringMaintenance!==undefined&&typeof input.allowDuringMaintenance!=='boolean')fail('Invalid trusted dataset ingress policy');
   if(!input.enabled)return {enabled:false};
   if(!known(input.machine)||typeof input.authority!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(input.authority))
     fail('Unknown dataset warehouse or authority');
-  return {enabled:true,machine:input.machine,authority:input.authority};
+  return {enabled:true,machine:input.machine,authority:input.authority,
+    ...(input.allowDuringMaintenance!==undefined?{allowDuringMaintenance:input.allowDuringMaintenance}:{})};
 }
 
 export async function loadDatasetIngressPolicy(path){
@@ -37,14 +48,23 @@ export function installDatasetIngress(service,input){
   service.datasetIngressPolicy=Object.freeze(policy);
   service.db.exec('CREATE TABLE IF NOT EXISTS dataset_upload_placements (owner TEXT NOT NULL, upload_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(owner,upload_id))');
   service.db.exec("CREATE INDEX IF NOT EXISTS dataset_upload_ready_source ON dataset_upload_placements(owner,json_extract(data,'$.storageMachine'),json_extract(data,'$.ready.dataset'),json_extract(data,'$.ready.version'))");
+  service.db.exec('CREATE TABLE IF NOT EXISTS dataset_upload_admissions (owner TEXT NOT NULL, intent_key TEXT NOT NULL, upload_id TEXT NOT NULL UNIQUE, PRIMARY KEY(owner,intent_key))');
   const load=(owner,id)=>{
     const value=service.db.prepare('SELECT data FROM dataset_upload_placements WHERE owner=? AND upload_id=?').get(owner,id);
     if(!value)return null;
     const row=JSON.parse(value.data);
     if(row.protocol!==1||row.owner!==owner||row.uploadId!==id||!known(row.requestedMachine)||
-      !['LOCATING','BOUND'].includes(row.phase)||!known(row.candidateMachine)||
+      !['LOCATING','ISSUED','BOUND'].includes(row.phase)||!known(row.candidateMachine)||
       row.phase==='BOUND'&&!known(row.storageMachine)||
       row.specification&&hash(row.specification)!==row.specificationSha256)fail('Dataset upload placement journal is corrupt');
+    if(row.admissionProtocol!==undefined||row.phase==='ISSUED'){
+      const mapping=service.db.prepare('SELECT upload_id FROM dataset_upload_admissions WHERE owner=? AND intent_key=?').get(owner,row.admissionKey);
+      if(row.admissionProtocol!==1||!UUID.test(row.admissionKey||'')||mapping?.upload_id!==id||
+        row.phase==='LOCATING'||row.warehouse!==true||row.storageMachine!==row.candidateMachine||
+        typeof row.authority!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(row.authority)||
+        !validSpecification(row.specification)||hash(specification(row.specification))!==row.specificationSha256)
+        fail('Dataset fresh admission journal is corrupt');
+    }
     return row;
   };
   const save=row=>service.db.prepare('INSERT INTO dataset_upload_placements(owner,upload_id,data) VALUES(?,?,?) ON CONFLICT(owner,upload_id) DO UPDATE SET data=excluded.data')
@@ -54,8 +74,10 @@ export function installDatasetIngress(service,input){
     const user=service.store.get(principal.userId);
     if(service.closing||!user?.enabled||user.username!==principal.username||!user.limits?.[row.requestedMachine])
       fail('账号或所选训练服务器的授权已改变。',403);
-    service.assertMaintenanceAllowed?.(operation,{machine:row.requestedMachine},principal);
-    if(row.storageMachine)service.assertMaintenanceAllowed?.(operation,{machine:row.storageMachine},principal);
+    const maintenanceArgs={key:operation==='datasets.upload.admission.create'?row.admissionKey:row.uploadId,uploadId:row.uploadId};
+    service.assertMaintenanceAllowed?.(operation,{...maintenanceArgs,machine:row.requestedMachine},principal);
+    if(row.storageMachine&&operation!=='datasets.upload.admission.create')
+      service.assertMaintenanceAllowed?.(operation,{...maintenanceArgs,machine:row.storageMachine},principal);
     return hash(user);
   };
   const call=async(principal,row,machine,operation,args,publicOperation=operation)=>{
@@ -107,7 +129,88 @@ export function installDatasetIngress(service,input){
     const row=JSON.parse(value.data);return row.ready&&sourceAllowed(owner,machine,row.ready);
   });
 
+  const currentPolicy=row=>{
+    if(!policy.enabled||policy.machine!==row.candidateMachine||policy.authority!==row.authority||
+      service.storageArchivePolicy?.enabled!==true||service.storageArchivePolicy.machine!==row.candidateMachine||
+      service.storageArchivePolicy.authority!==row.authority)
+      fail('入库策略已改变；此待确认上传未派发，请联系管理员核对。');
+  };
+  // A protected operator policy may open only new HDD intake while compute
+  // and old-data cleanup remain in maintenance. This never unlocks projects,
+  // terminal input, SSD uploads, transfers, cache preparation or legacy keys.
+  service.warehouseMaintenanceUploadAllowed=(operation,args,principal)=>{
+    if(!policy.enabled||policy.allowDuringMaintenance!==true||!principal||!args||
+      service.storageArchivePolicy?.enabled!==true||service.storageArchivePolicy.machine!==policy.machine||
+      service.storageArchivePolicy.authority!==policy.authority)return false;
+    const actor=service.store.get(principal.userId);
+    if(!actor?.enabled||(actor.role||'member')!==principal.role)return false;
+    if(operation==='datasets.upload.admission.create')
+      return known(args.machine)&&Boolean(actor.limits?.[args.machine])&&UUID.test(args.key||'');
+    if(!['storage.upload.admit','datasets.upload.begin','datasets.upload.manifest','datasets.upload.seal',
+      'datasets.upload.chunk','datasets.upload.commit','datasets.upload.discard','datasets.upload.direct-ticket'].includes(operation))return false;
+    const id=operation==='datasets.upload.begin'?args.key:args.uploadId;
+    if(!UUID.test(id||''))return false;
+    const row=load(principal.userId,id);
+    if(row?.admissionProtocol!==1||row.warehouse!==true||row.storageMachine!==policy.machine||
+      row.authority!==policy.authority||!actor.limits?.[row.requestedMachine]||
+      ![row.requestedMachine,row.storageMachine].includes(args.machine))return false;
+    if(operation==='storage.upload.admit'&&(args.intentKey!==row.admissionKey||args.protocol!==ADMISSION||
+      args.requestedMachine!==row.requestedMachine||args.storageMachine!==row.storageMachine||
+      args.authority!==row.authority||hash(args.specification)!==row.specificationSha256||
+      args.specificationSha256!==row.specificationSha256))return false;
+    return true;
+  };
+  const admissionView=row=>({protocol:ADMISSION,key:row.admissionKey,uploadId:row.uploadId,
+    requestedMachine:row.requestedMachine,storageMachine:row.storageMachine,storageTier:'hdd',
+    specification:structuredClone(row.specification),state:row.phase});
+  const admission=async(principal,action,args)=>{
+    const owner=principal.userId,key=args.key,operation='datasets.upload.'+action;
+    if(!USER.test(owner)||!UUID.test(key||''))fail('无效的上传准入意图。',400);
+    const lane='admission/'+owner+'/'+key;
+    const write=action==='admission.create';
+    if(write&&(lanes.has(lane)||pending>=8))fail('上传控制繁忙，请稍后重试。',429);
+    if(write){lanes.set(lane,true);pending++;}
+    try{
+      const mapping=service.db.prepare('SELECT upload_id FROM dataset_upload_admissions WHERE owner=? AND intent_key=?').get(owner,key);
+      if(mapping){
+        const row=load(owner,mapping.upload_id);
+        if(!row||row.admissionKey!==key)fail('Dataset fresh admission mapping is corrupt');
+        if(row.requestedMachine!==args.machine)fail('此上传已绑定原先选择的服务器；请使用原服务器继续。');
+        if(action==='admission.create'&&hash(specification(args))!==row.specificationSha256)fail('此上传意图已绑定另一份清单。');
+        fence(principal,row,operation);
+        if(action==='admission.create'&&row.phase==='ISSUED')currentPolicy(row);
+        return admissionView(row);
+      }
+      fence(principal,{requestedMachine:args.machine,admissionKey:key},operation);
+      if(service.db.prepare("SELECT upload_id FROM dataset_upload_placements WHERE owner=? AND json_extract(data,'$.admissionKey')=?").get(owner,key))
+        fail('Dataset fresh admission mapping is corrupt');
+      if(action==='admission.status')fail('没有这条上传准入意图；未分配其他编号。',404);
+      if(!policy.enabled)fail('机械仓库新上传准入尚未启用。',503);
+      const spec=specification(args);
+      if(!validSpecification(spec))fail('上传准入清单无效。',400);
+      const row={protocol:1,owner,uploadId:randomUUID(),requestedMachine:args.machine,
+        candidateMachine:policy.machine,storageMachine:policy.machine,authority:policy.authority,
+        phase:'ISSUED',warehouse:true,createdAt:Date.now(),admissionProtocol:1,admissionKey:key,
+        specification:spec,specificationSha256:hash(spec)};
+      currentPolicy(row);fence(principal,row,operation);
+      // Both identities commit together, before even a warehouse RPC. The
+      // caller's intent key is never used as the node's fresh upload ID.
+      service.db.exec('BEGIN IMMEDIATE');
+      try{
+        if(service.db.prepare('SELECT count(*) AS count FROM dataset_upload_placements').get().count>=10000)
+          fail('上传位置历史已达上限，请联系管理员归档。');
+        if(row.uploadId===key||service.db.prepare('SELECT upload_id FROM dataset_upload_placements WHERE upload_id=?').get(row.uploadId))
+          fail('新上传身份发生冲突；未派发，请联系管理员核对。');
+        service.db.prepare('INSERT INTO dataset_upload_placements(owner,upload_id,data) VALUES(?,?,?)').run(owner,row.uploadId,JSON.stringify(row));
+        service.db.prepare('INSERT INTO dataset_upload_admissions(owner,intent_key,upload_id) VALUES(?,?,?)').run(owner,key,row.uploadId);
+        service.db.exec('COMMIT');
+      }catch(error){service.db.exec('ROLLBACK');throw error;}
+      return admissionView(row);
+    }finally{if(write){lanes.delete(lane);pending--;}}
+  };
+
   service.datasetUploadIngress=async(principal,action,args)=>{
+    if(action==='admission.create'||action==='admission.status')return admission(principal,action,args);
     const owner=principal.userId,id=action==='begin'?args.key:args.uploadId;
     // Preflight has no upload identity yet and therefore cannot resume or
     // rebind a session. Its advertised machine is explicit, not transparent.
@@ -139,6 +242,31 @@ export function installDatasetIngress(service,input){
         if(action==='begin')save(row); // Intent is durable before any admission.
       }
       fence(principal,row,'datasets.upload.'+action);
+      if(row.admissionProtocol===1){
+        if(row.phase==='ISSUED'){
+          if(action!=='begin')fail('此上传尚未向仓库准入；请按原意图核对并继续。');
+          currentPolicy(row);
+          // BOUND records the fixed dispatch attempt, not a successful node
+          // admission. Unknown replies retain this route across restart.
+          row.phase='BOUND';save(row);
+        }
+        if(action==='begin'){
+          const result=await call(principal,row,row.storageMachine,'storage.upload.admit',{
+            userId:owner,hostAdmin:false,protocol:ADMISSION,intentKey:row.admissionKey,
+            uploadId:row.uploadId,requestedMachine:row.requestedMachine,storageMachine:row.storageMachine,
+            authority:row.authority,specification:row.specification,specificationSha256:row.specificationSha256,
+            ...(args.allowRelay!==undefined?{allowRelay:args.allowRelay}:{})},'datasets.upload.begin');
+          if(!result||result.admissionProtocol!==1||result.admissionKey!==row.admissionKey||
+            result.machine!==row.storageMachine||result.authority!==row.authority||result.uploadId!==row.uploadId||
+            ['name','manifestBytes','totalBytes','entries'].some(key=>result[key]!==row.specification[key])||
+            !UPLOAD_STATES.has(result.state)||!Number.isSafeInteger(result.manifestOffset)||
+            result.manifestOffset<0||result.manifestOffset>row.specification.manifestBytes||
+            result.chunkBytes!==1024*1024||result.uploadTransport?.protocol!=='dataset-upload-v1'||
+            typeof result.uploadTransport.directAvailable!=='boolean')
+            fail('机械仓库准入回执与固定上传意图不匹配；未改换编号或位置。',502);
+          return remember(row,result);
+        }
+      }
       if(row.phase==='LOCATING'){
         // Exact owner/key observations only. Errors are never interpreted as
         // absence. Probe all configured nodes to prevent duplicate old keys.
@@ -155,12 +283,10 @@ export function installDatasetIngress(service,input){
           row.storageMachine=prior.machine;row.warehouse=false;
         }else{
           if(action!=='begin')fail('上传不存在；恢复已有仓库上传需要原平台的位置记录。',404);
-          if(!policy.enabled||policy.machine!==row.candidateMachine||policy.authority!==row.authority)
-            fail('入库策略已改变；此待确认上传未派发，请联系管理员核对。');
-          const warehouse=found.find(value=>value.machine===row.candidateMachine);
-          if(warehouse?.authority?.enabled!==true||warehouse.authority.machine!==row.candidateMachine||
-            warehouse.authority.authority!==row.authority)fail('机械仓库未确认可用，未改为固态或其他服务器上传。',503);
-          row.storageMachine=row.candidateMachine;row.warehouse=true;
+          // A caller-provided UUID is not evidence of an old session. Only
+          // the server-issued admission path may create a fresh HDD upload.
+          // Preserve this LOCATING journal: never silently rekey or relabel it.
+          fail('原上传编号在所有节点均不存在；请升级 gpuctl 并使用数据仓库的新上传入口。',409);
         }
         row.phase='BOUND';save(row);
       }

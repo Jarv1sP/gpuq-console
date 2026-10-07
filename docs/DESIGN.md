@@ -324,12 +324,12 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.empty` / `.form-error` / `.publication-unknown` | [styles.css](../dist/styles.css)、[workbench.css](../dist/workbench.css) | 空目录/已知错误/未确认分别表达 | 查询重试保留；未知不自动消失 |
 | `.toast` | [starbase.css](../dist/starbase.css)、[shell.css](../dist/shell.css)、[toast-ui.js](../dist/toast-ui.js) | 总控层上方的角落短反馈，不是唯一持久错误证据 | 布局变化时避开可见交互控件，需处理留在对象/总控 |
 | `.mc-attention-item` / `.mc-attention-actions` | [attention-state.js](../dist/attention-state.js)、[control-ui.js](../dist/control-ui.js)、[shell.css](../dist/shell.css) | 原对象失败/部分成功/未确认，不靠已读清除未知 | 回具体对象，只有已确认失败可按规则确认 |
-| `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
+| `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全局或当前服务器的一条只读通知；后台列出全部节点 | 范围、原因及受限动作；读取失败显示未确认；主界面无开关，原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
 | `#workspace-upload` / `#workspace-result` | [execution-ui.js](../dist/execution-ui.js) | 项目代码上传默认仅显示上传；节点确认恢复协议后，按原编号和确认偏移续传 | 旧节点沿用普通上传，失败说明不支持续传；未知能力不降级写入；回执丢失先查原编号；已完成不重传，待收口只发空final；冲突/旧记录/未知不另开；切换账号、项目或离开停止；旧个人工作区不重试；传输区别仅放在文件标题旁的单个ⓘ |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；开发ID按账号、服务器、项目恢复到原入口 | 刷新只读核验原ID，不自动连接或接管；未知仍保留，明确结束才移除；ROOT/数据终端不存入项目记录；writerToken仅内存 |
 | `#project-disk-quota` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 打开时查询当前账号在开发服务器的容量与文件数，独立于显卡额度 | 不传项目或他人身份；未启用和待确认不造零值，未知不保留旧读数；关闭、离开或换上下文取消请求，完整服务器名保留在title；手机展开按钮至少44px，保留原生键盘切换与焦点 |
-| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
+| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 仓库容量按真实仓库机器单独成卡置顶，点击卡片筛选并可再次取消；一个逻辑数据集一行，列为名称/所属/大小/仓库/已缓存到；右侧按①仓库、②缓存、③训练排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
 | `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；缓存条用就绪副本大小与真实预算 | 预算未知时保留细条与已知副本大小；磁盘单独使用 capacity 的 filesystemBytes/availableBytes；长 ID 提示完整值；手机内部横向滚动 |
 | `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
 | 服务器缓存状态 | [dataset-cache-watch.js](../dist/dataset-cache-watch.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 缓存后自动只读查询至 READY/FAILED；有真实字节计数才显示进度，否则显示“取回中” | 固定目标、完整版本及原编号；失去回执不重发 prepare；离开房间/隐藏页面暂停，账号或服务器切换丢弃旧响应；READY 刷新目录；目录确认 READY/FAILED 时移除旧查询覆盖，迟到回复不能覆盖较新的终态 |
@@ -471,7 +471,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 全平台维护原因公开显示在登录页，输入旁保留提醒；单台原因只在登录后显示。账号、协作、指南、维护控制不被执行类维护拦截；管理员ROOT、host操作、只读、取消/断开/结束按现有规则放行。维护开关不会自动停止已有任务或节点。
 
-主界面只显示相同的只读维护事实，后台不重复横幅。后台 `maintenance/order40` 挂载维护开关、原逐台控制台、分阶段恢复、ROOT 与只读诊断；维护设置从控制台标题行打开，卸载先关闭设置、停止查询和退休回调，再把 ROOT 控件停放到隐藏 inert 容器。个人终端仍留在工作台；离开维护只断开 ROOT 写连接，不结束节点会话。ROOT 直接查询原生调度 RPC 的 `FORBIDDEN: peer uid is not allowed` 显示身份提示，不把工作的 ROOT 终端标为失败。
+成员和管理员的主界面只显示全局或当前所选服务器的只读维护通知，其他机器的维护不产生通知；不再替换工作台标题或隐藏遥测，读取失败显示“维护状态未确认”，通知不含恢复按钮。门户维护独立于节点调度，提交区依据现有新鲜快照的 connected、observeOnly 和 health 显示“训练暂未开放”，有可调度候选即恢复原提交行为，不绑定服务器名称。后台不重复横幅。后台 `maintenance/order40` 挂载维护开关、原逐台控制台、分阶段恢复、ROOT 与只读诊断；维护设置从控制台标题行打开，卸载先关闭设置、停止查询和退休回调，再把 ROOT 控件停放到隐藏 inert 容器。个人终端仍留在工作台；离开维护只断开 ROOT 写连接，不结束节点会话。ROOT 直接查询原生调度 RPC 的 `FORBIDDEN: peer uid is not allowed` 显示身份提示，不把工作的 ROOT 终端标为失败。
 
 主机诊断只有固定的 `nvidia-smi` 和 `df -h /data2`，确认框显示服务器与完整原文；任意命令仍由 ROOT 终端执行。新鲜且可达的节点必须明确报告 `hostCommand.version:1/available:true` 才能操作。节点将请求 key 绑定为 id，前端派发前按管理员账号和服务器持久化该编号；回执未确认、刷新或重新进入时只查原编号，绝不自动重发。显示纯文本输出，支持复制、停止与本浏览器最近操作；原 UUID 查询保留在次级折叠项内。
 
@@ -737,3 +737,9 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 来源：知识库《STARGATE 前后端功能收口》。网页新建固定为个人容器，不再显示共享／隔离选择；开发位置仍只从当前账号获授权且 `projects.list.environmentModes` 明确含 `oci` 的服务器中选取。缺少能力、未知或查询失败时禁用创建并显示原因，不回退旧模式；受理回包仍须确认同一项目和 `environmentMode:oci`，不自动重发或创建替代项目。
 
 历史 shared／isolated 及缺少模式字段的共享项目在选择项和环境标签中显示「旧环境（兼容）」，终端、文件、固定版本发布和训练权限保持原样。开发草稿与固定发布版本分开说明，训练不写回草稿；文件区域标签右侧的「项目材料说明」保留权重、tokenizer 与开发 HOME 的边界，不新增动效或接口。
+
+数据集 v4 的仓库卡片按目录仓库位置去重汇总完整版本大小；整盘容量只取 `warehouse.volumes[].volume` 或 `datasets.capacity.storageOverview.warehouse.volume` 的明确仓库角色，不能用缓存卷冒充。上传准入仅在available严格为true且targetMachine为非空字符串时增加目标仓库卡片（datasetUploadAdmission.targetMachine:string|null；不代表健康、空间或写权限）；用↑标记上传目标，未登记数据按实际可见集合计数，容量未知不补零，不推断迁移完成。零与未知分开；每个仓库独立地层条、可用数字和预警，不新增上传配额。仓库与训练机筛选可组合，训练机筛选只收录 READY 副本，所有数量按可读集合。新版总览仓库实心标记只认 `originals[].warehouseReady===true`，其他来源不代替证明；`collectedAt` 只在悬停提示中显示采集时间，带历史采集时间的空读数不能被旧容量填充。
+仓库卡片数量优先采用明确卷的 `datasetCount`，缺失时按主列表同一可读集合、同一仓库位置去重统计数据集；旧缓存目录可补充大小，不能覆盖仓库位置或制造零计数。
+训练机用每台一张卡片替代横向服务器栏和单机「缓存 / 磁盘」两列。8px分段条按真实磁盘显示数据集、其他与可用；仅数字型 `projectBytes` 开放蓝色容器段和一次性的容器图例（`--v4-project: #7FA7FF`），缺失时并入其他。不完整数值加「+」，`projectCollectedAt` 与卷 `collectedAt` 分别进入悬停提示。数字不因横条限宽而改写；缓存预算只在已知磁盘总量时标竖线。同节点同卷才显示「与仓库同盘」。没有总览时按可读catalog中READY的完整版本去重合计，不用旧READY位置覆盖新总览；部分统计的零不能盖过当前目录已证明的READY大小。点击卡片筛选已缓存到该台的数据集，再点取消；「全部」统一留在列表筛选行。窄屏卡片纵向完整显示，不再横向裁切；未知保持未知，无新增解释段落。总览不覆盖独立完整目录的读取结果；选定目标的准备回执只在目标、完整版本、读取权限和当前READY来源都匹配时保留，容量本身不产生操作权限。
+总览只列出存在的缓存位置；缺一台的位置时，仅匹配完整版本且该台catalog确认完整、没有本地记录，才保留NOT_LOCAL。容量读数、缺字段或冲突不能证明缓存不存在，也不授予准备权限。已缓存等正常状态仅用符号，符号保留对应可访问名称与悬停提示。
+目录预览挂在①仓库中，仅在 `filePreviewAvailable===true` 时尝试本人固定版本的 `datasets.files.list`；每个数据集的 available:false/403 仍隐藏，不能把全局可用当作读取授权。复用 [dataset-files-preview.js](../dist/dataset-files-preview.js)，仅目录元数据；详情重绘保留现有组件，切换房间、账号、数据集或版本取消旧请求。
