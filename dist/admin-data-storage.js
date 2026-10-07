@@ -4,6 +4,7 @@ import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 import {datasetInfoHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML,hasDatabaseOriginal} from './dataset-flow.js';
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
+import {validUsername} from './model.js';
 
 const id=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,hash=/^[a-f0-9]{64}$/;
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -23,13 +24,13 @@ export function adminDatasetCatalog(machine,machines,listings,personal=null){
     for(const item of read.datasets){
       if(!id.test(item?.dataset)||!Array.isArray(item.versions))throw TypeError('Invalid dataset registration');
       if(!groups.has(item.dataset))groups.set(item.dataset,{dataset:item.dataset,versions:new Map(),registrations:[]});
-      const group=groups.get(item.dataset);group.registrations.push({machine:host.id,ownerLabel:typeof item.ownerLabel==='string'?item.ownerLabel:'所属用户：未知'});
+      const group=groups.get(item.dataset);group.registrations.push({machine:host.id,ownerLabel:typeof item.ownerLabel==='string'?item.ownerLabel:'所属用户：未知（授权信息未完整返回）'});
       for(const value of item.versions){
         if(!hash.test(value?.version))throw TypeError('Invalid immutable version');
         if(!group.versions.has(value.version))group.versions.set(value.version,{version:value.version,locations:[],quantities:[]});
         const v=group.versions.get(value.version),proof=personal?.datasets?.flatMap(row=>row.versions||[]).filter(row=>row.version===value.version).flatMap(row=>row.locations||[]).find(row=>row.machine===host.id&&row.dataset===item.dataset);
         v.quantities.push(value);
-        v.locations.push({machine:host.id,dataset:item.dataset,ownerLabel:typeof item.ownerLabel==='string'?item.ownerLabel:'所属用户：未知',state:Object.hasOwn(states,value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,bytes:Number.isSafeInteger(value.bytes)&&value.bytes>=0?value.bytes:null,
+        v.locations.push({machine:host.id,dataset:item.dataset,ownerLabel:typeof item.ownerLabel==='string'?item.ownerLabel:'所属用户：未知（授权信息未完整返回）',state:Object.hasOwn(states,value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,bytes:Number.isSafeInteger(value.bytes)&&value.bytes>=0?value.bytes:null,
           ...(value.deletionPermissions?{deletionPermissions:structuredClone(value.deletionPermissions)}:{}),
           ...(proof?.storage?{storage:structuredClone(proof.storage)}:{}),...(proof?.removalPending===true?{removalPending:true}:{}),...(proof?.removalGraceEligible===true?{removalGraceEligible:true}:{}),
           ...(typeof value.error==='string'?{error:value.error}:{})});
@@ -40,7 +41,7 @@ export function adminDatasetCatalog(machine,machines,listings,personal=null){
   return {machine,machines:nodes,partial:nodes.some(row=>row.state!=='ok'),datasetDelete:personal?.datasetDelete===1?1:0,datasetDeleteKnown:personal?.datasetDelete===1||personal?.datasetDelete===0,
     datasets:[...groups.values()].map(group=>({dataset:group.dataset,registrations:group.registrations,versions:[...group.versions.values()].map(v=>{
       const local=v.locations.find(row=>row.machine===machine),known=nodes.find(row=>row.machine===machine)?.state==='ok';
-      return {version:v.version,bytes:quantity(v.quantities,'bytes'),files:quantity(v.quantities,'files'),locations:v.locations,state:local?.state||(known?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,ownerLabel:local?.ownerLabel||v.locations[0]?.ownerLabel||'所属用户：未知'};
+      return {version:v.version,bytes:quantity(v.quantities,'bytes'),files:quantity(v.quantities,'files'),locations:v.locations,state:local?.state||(known?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,ownerLabel:local?.ownerLabel||v.locations[0]?.ownerLabel||'所属用户：未知（授权信息未完整返回）'};
     })}))};
 }
 
@@ -64,7 +65,7 @@ export function adminStorageUsers(catalog){
   const users=new Map();let excluded=0;
   for(const item of catalog?.datasets||[])for(const version of item.versions||[])for(const location of version.locations||[]){
     if(location.state!=='READY')continue;
-    const label=location.ownerLabel,names=typeof label==='string'&&/^(所属用户：|共享授权用户：)/.test(label)?label.replace(/^(所属用户：|共享授权用户：)/,'').split('、').filter(name=>/^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$/.test(name)):[];
+    const label=location.ownerLabel,names=typeof label==='string'&&/^(所属用户：|共享授权用户：)/.test(label)?label.replace(/^(所属用户：|共享授权用户：)/,'').split('、').filter(validUsername):[];
     if(!names.length||!Number.isSafeInteger(version.bytes)||version.bytes<0||location.bytes!==version.bytes){excluded++;continue;}
     for(const name of new Set(names)){
       if(!users.has(name))users.set(name,{name,datasets:new Set(),bytes:0});

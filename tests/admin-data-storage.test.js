@@ -15,11 +15,37 @@ test('storage summary uses explicit budget thresholds and candidate sizes, never
 });
 
 test('user statistics sum known physical ready caches, share only explicit names and exclude unknown facts',()=>{
-  const catalog={partial:true,datasets:[{dataset:'samples',versions:[{bytes:10,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：alice'},{state:'READY',bytes:10,ownerLabel:'共享授权用户：alice、bob'},{state:'PREPARING',ownerLabel:'所属用户：alice'},{state:'READY',bytes:10,ownerLabel:'所属用户：未知'}]},{bytes:null,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：bob'}]}]},{dataset:'second',versions:[{bytes:30,locations:[{state:'READY',bytes:30,ownerLabel:'所属用户：bob'}]}]}]};
+  const catalog={partial:true,datasets:[{dataset:'samples',versions:[{bytes:10,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：alice'},{state:'READY',bytes:10,ownerLabel:'共享授权用户：alice、bob'},{state:'PREPARING',ownerLabel:'所属用户：alice'},{state:'READY',bytes:10,ownerLabel:'所属用户：未知（授权信息未完整返回）'}]},{bytes:null,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：bob'}]}]},{dataset:'second',versions:[{bytes:30,locations:[{state:'READY',bytes:30,ownerLabel:'所属用户：bob'}]}]}]};
   const original=structuredClone(catalog);
   assert.deepEqual(adminStorageUsers(catalog),{rows:[{name:'bob',datasets:2,bytes:40},{name:'alice',datasets:1,bytes:20}],excluded:2,partial:true});
   assert.deepEqual(catalog,original);
   assert.equal(adminStorageUsers({datasets:[{dataset:'unsafe',versions:[{bytes:10,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：<img src=x>'}]}]}]}).rows.length,0);
+});
+test('user statistics retain valid Chinese and ASCII owners, including deduplicated shared names',()=>{
+  const catalog={datasets:[{dataset:'samples',versions:[{bytes:10,locations:[
+    {state:'READY',bytes:10,ownerLabel:'所属用户：陈宇轩'},
+    {state:'READY',bytes:10,ownerLabel:'所属用户：lab_user-1'},
+    {state:'READY',bytes:10,ownerLabel:'所属用户：未知'},
+    {state:'READY',bytes:10,ownerLabel:'共享授权用户：陈宇轩、lab_user-1、陈宇轩'},
+  ]}]}]};
+  const result=adminStorageUsers(catalog);
+  assert.deepEqual(new Map(result.rows.map(row=>[row.name,{datasets:row.datasets,bytes:row.bytes}])),
+    new Map([['陈宇轩',{datasets:1,bytes:20}],['lab_user-1',{datasets:1,bytes:20}],['未知',{datasets:1,bytes:10}]]));
+  assert.equal(result.excluded,0);assert.equal(result.partial,false);
+});
+test('user statistics exclude illegal account names and unknown owner sentinels',()=>{
+  const names=['Alice','0user','a','alice.admin','alice@example.com','a'.repeat(25),'alice smith','<img src=x>',
+    '未知（授权信息未完整返回）','未知（账号已删除或未登记）','未知用户 1 位（账号已删除或未登记）'];
+  const catalog={datasets:[{dataset:'samples',versions:[{bytes:10,locations:names.map(name=>({state:'READY',bytes:10,ownerLabel:'所属用户：'+name}))}]}]};
+  assert.deepEqual(adminStorageUsers(catalog),{rows:[],excluded:names.length,partial:false});
+});
+test('user statistics count known shared owners without inventing the unknown account',()=>{
+  const catalog={datasets:[{dataset:'samples',versions:[{bytes:10,locations:[
+    {state:'READY',bytes:10,ownerLabel:'共享授权用户：陈宇轩、alice、未知用户 1 位（账号已删除或未登记）'},
+  ]}]}]};
+  const result=adminStorageUsers(catalog);
+  assert.deepEqual(new Set(result.rows.map(row=>row.name)),new Set(['陈宇轩','alice']));
+  assert(result.rows.every(row=>row.datasets===1&&row.bytes===10));assert.equal(result.excluded,0);
 });
 test('warehouse marker requires retained ARCHIVED proof bound to the complete immutable version',()=>{
   const storage={dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:'node-b'},v={version,locations:[{machine:'node-a',dataset:'samples',storage}]};
@@ -60,7 +86,10 @@ test('unknown node states and missing owner labels remain unknown',()=>{
   const a=listing('node-a',undefined,undefined,'FUTURE');delete a.datasets[0].ownerLabel;
   const catalog=adminDatasetCatalog('node-a',machines,[a,listing('node-b')]);
   assert.equal(catalog.datasets[0].versions[0].locations[0].state,'UNKNOWN');
-  assert.equal(catalog.datasets[0].versions[0].locations[0].ownerLabel,'所属用户：未知');
+  assert.equal(catalog.datasets[0].versions[0].locations[0].ownerLabel,'所属用户：未知（授权信息未完整返回）');
+  const ready=listing('node-a');delete ready.datasets[0].ownerLabel;
+  const missing=adminDatasetCatalog('node-a',[machines[0]],[ready]);
+  assert.deepEqual(adminStorageUsers(missing),{rows:[],excluded:1,partial:false});
 });
 test('archive and pending-removal proof must match the exact physical name, machine and version',()=>{
   const storage={version,phase:'ARCHIVED',originalRetained:true,archiveMachine:'node-b'};

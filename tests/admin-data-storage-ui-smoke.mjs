@@ -27,7 +27,7 @@ try{
         const {operation,args={}}=route.request().postDataJSON();calls.push({operation,args});
         assert.equal(role,'admin','member sends zero privileged API requests');
         const reply=value=>route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
-        if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：alice',versions:[{version,state:'READY',bytes:7*1024**3,files:120}]},{dataset:'shared-data',ownerLabel:'共享授权用户：alice、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
+        if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：陈宇轩',versions:[{version,state:'READY',bytes:7*1024**3,files:120}]},{dataset:'shared-data',ownerLabel:'共享授权用户：陈宇轩、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
         if(operation==='datasets.catalog')return reply({machine:args.machine,datasetDelete:0,partial:false,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[{dataset:'samples',versions:[{version,locations:[{machine:machines[0].id,dataset:'samples',storage:{dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:machines.at(-1).id}}]}]}]});
         if(operation==='datasets.storage.status'){
           if(denyPinStatus&&args.pinId)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'原保留状态待确认'})});
@@ -40,7 +40,7 @@ try{
         if(operation==='cloud.auth.reconnect'){assert.deepEqual(args,{});cloudDisabled=false;if(lostReconnect){lostReconnect=false;return route.abort('failed');}return reply({reconnected:true,backend:'clouddrive',managedExternally:true});}
         throw Error('unexpected admin fixture operation '+operation);
       }
-      assert(Object.hasOwn(STARBASE_ASSETS,url.pathname)||['/styles.css','/workspace.css','/job-progress.js','/cloud-import-ui.js','/cloud-files-ui.js','/data-workspace.js','/data-route.js','/dataset-upload.js'].includes(url.pathname),'registered local asset '+url.pathname);
+      assert(Object.hasOwn(STARBASE_ASSETS,url.pathname)||['/styles.css','/workspace.css','/job-progress.js','/cloud-import-ui.js','/cloud-files-ui.js','/data-workspace.js','/data-route.js','/dataset-upload.js','/model.js','/machines.js','/task-metadata.js'].includes(url.pathname),'registered local asset '+url.pathname);
       return route.fulfill({contentType:url.pathname.endsWith('.js')?'text/javascript':url.pathname.endsWith('.woff2')?'font/woff2':'text/css',body:await readFile(new URL('../dist'+url.pathname,import.meta.url))});
     });
     await page.goto(origin);
@@ -62,7 +62,7 @@ try{
     assert.equal(await page.locator('[data-admin-full-delete]').count(),0,'capability zero has no delete entry');
     assert.deepEqual(await page.locator('[name=dataset-machine] option').evaluateAll(nodes=>nodes.map(node=>node.value)),machines.map(row=>row.id));
     assert.equal(await page.locator('.storage-server-card').last().locator('.storage-warehouse-badge').textContent(),'仓库');
-    assert.equal(await page.locator('.storage-user-table [role=row]').count(),3);assert.match(await page.locator('[data-storage-users]').textContent(),/alice.*2.*36.00 GiB.*bob.*1.*8.00 GiB/);assert.equal(await page.locator('[data-storage-delete-capability]').textContent(),'节点未启用彻底删除');
+    assert.equal(await page.locator('.storage-user-table [role=row]').count(),3);assert.match(await page.locator('[data-storage-users]').textContent(),/陈宇轩.*2.*36.00 GiB.*bob.*1.*8.00 GiB/);assert.equal(await page.locator('[data-storage-delete-capability]').textContent(),'节点未启用彻底删除');
     const help=await page.locator('[data-copy-help]').evaluateAll(nodes=>nodes.map(node=>({border:getComputedStyle(node).borderTopWidth,radius:getComputedStyle(node).borderRadius})));assert(help.every(row=>row.border==='0px'&&row.radius==='50%'),'all help buttons retain the shared borderless circle');
     const report=await inspectGeometry(page,geometry);assert(report.pass,JSON.stringify(report.failures));records.push({role,width,report});
     await page.screenshot({path:join(out,'directory-'+width+'.png'),fullPage:true});
