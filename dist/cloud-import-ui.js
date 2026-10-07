@@ -31,7 +31,7 @@ export function cloudImportHTML(admin=false){return `<section class="data-worksp
   <div class="file-actions"><button class="button primary" type="submit">开始导入</button><button class="button" id="cloud-import-refresh" type="button">刷新进度</button></div></form>
   <aside id="cloud-import-pending" hidden><p>导入结果未确认。</p><details><summary>操作编号</summary><code id="cloud-import-pending-key"></code></details><button class="button" id="cloud-import-retry" type="button">用同一请求重试</button></aside>
   <p id="cloud-import-status" role="status">填写 HTTPS 下载链接。</p><ul id="cloud-import-list" class="cloud-import-list"></ul>
-  ${admin?`<details id="cloud-admin"><summary>云盘连接 · 仅管理员${copyHelp('云盘连接','后台账号只用于处理已批准的来源，成员不能浏览账号或取得令牌。扫码授权可能允许访问整个云盘，请仅连接你有权使用的账号。')}</summary><div class="file-actions"><button class="button" id="cloud-auth-begin" type="button">连接 / 重新授权</button><button class="button" id="cloud-auth-disconnect" type="button">断开授权</button></div><img id="cloud-auth-qr" alt="用阿里云盘 App 扫码授权" width="240" height="240" hidden><button class="button" id="cloud-auth-check" type="button" hidden>我已确认，检查状态</button><p id="cloud-auth-status" role="status"></p></details>`:''}
+  ${admin?`<details id="cloud-admin"><summary>云盘连接 · 仅管理员${copyHelp('云盘连接','后台账号只用于处理已批准的来源，成员不能浏览账号或取得令牌。扫码授权可能允许访问整个云盘，请仅连接你有权使用的账号。')}</summary><div class="file-actions"><button class="button" id="cloud-auth-begin" type="button">连接 / 重新授权</button><button class="button" id="cloud-auth-reconnect" type="button" hidden>重新连接</button><button class="button" id="cloud-auth-info" type="button">重新查询</button><button class="button" id="cloud-auth-disconnect" type="button">断开授权</button></div><img id="cloud-auth-qr" alt="用阿里云盘 App 扫码授权" width="240" height="240" hidden><button class="button" id="cloud-auth-check" type="button" hidden>我已确认，检查状态</button><p id="cloud-auth-status" role="status"></p></details>`:''}
   </section>`;}
 export function cloudImportUI(store,section,toast){
   let epoch=0,inspection=null,auth=null,busy=false,timer=null;
@@ -39,29 +39,32 @@ export function cloudImportUI(store,section,toast){
   // the original request through uncertain replies and machine switches.
   const pending=new Map(),capabilities=new Map();
   const $=s=>section.querySelector(s),machine=()=>$('[name=dataset-machine]')?.value;
+  const management=()=>section.dataset?.adminStorage!==undefined&&store.principal?.role==='admin'&&section.isConnected&&!section.hidden&&document.body.dataset.room==='admin';
   const scope=()=>JSON.stringify([store.principal?.userId,store.authGeneration,machine()]);
   const context=()=>JSON.stringify([store.principal?.userId,store.authGeneration,machine(),epoch]);
   const report=t=>{const el=$('#cloud-import-status');if(el)el.textContent=t;};
   function controls(){
     const card=$('.cloud-import');if(!card)return;restoreMaintenanceControls(card);
     const owner=store.data?.users?.find(row=>row.id===store.principal?.userId);
-    const disabled=busy||!store.production||!store.principal||!machine()||owner&&(owner.enabled===false||!(owner.limits?.[machine()]>0)),held=pending.get(scope()),aliyun=$('[name=cloud-source]')?.value==='aliyun',info=capabilities.get(scope()),unavailable=!shareCapability(info);
+    const disabled=busy||!store.production||!store.principal||!machine()&&!management()||owner&&(owner.enabled===false||!management()&&!(owner.limits?.[machine()]>0)),held=pending.get(scope()),aliyun=$('[name=cloud-source]')?.value==='aliyun',info=capabilities.get(scope()),unavailable=!shareCapability(info);
     for(const el of card.querySelectorAll('input,button:not([data-copy-help]),select'))el.disabled=disabled||!!held&&el.closest('#cloud-import-form')&&el.id!=='cloud-import-refresh';
     $('#cloud-share-availability').hidden=!aliyun||!unavailable;
     if(aliyun&&unavailable)for(const el of card.querySelectorAll('#cloud-inspect,[name=cloud-file],#cloud-import-form [type=submit]'))el.disabled=true;
     const connect=$('#cloud-auth-begin');if(connect)connect.hidden=info?.managedExternally===true;
+    const reconnect=$('#cloud-auth-reconnect');if(reconnect){reconnect.hidden=info?.backend!=='clouddrive'||info?.managedExternally!==true;reconnect.disabled=disabled||info?.configurationEnabled!==true||info?.capabilityVerified!==true;}
+    const disconnect=$('#cloud-auth-disconnect');if(disconnect)disconnect.hidden=info?.aliyunConnected!==true||info?.disabled===true;
     $('#cloud-share-fields').hidden=!aliyun||unavailable;$('#cloud-checksum-fields').hidden=aliyun;
     $('[name=cloud-sha256]').disabled=disabled||!!held||aliyun;
-    disableMaintenanceControls(card,'#cloud-import-form [type=submit],#cloud-inspect,#cloud-import-retry,#cloud-auth-begin,#cloud-auth-check,#cloud-auth-disconnect,[data-import-resume],[data-import-discard],[data-import-replace] [type=submit]',maintenanceFor(store.data?.operationalMaintenance,machine()));
+    disableMaintenanceControls(card,'#cloud-import-form [type=submit],#cloud-inspect,#cloud-import-retry,[data-import-resume],[data-import-discard],[data-import-replace] [type=submit]'+(management()?'':',#cloud-auth-begin,#cloud-auth-check,#cloud-auth-disconnect'),maintenanceFor(store.data?.operationalMaintenance,machine()));
     $('#cloud-import-pending').hidden=!held;$('#cloud-import-pending-key').textContent=held?.args.key||'';
   }
   function reset(forgetPending=true){epoch++;clearTimeout(timer);timer=null;inspection=null;auth=null;busy=false;if(forgetPending){pending.clear();capabilities.clear();}}
-  async function run(fn){if(busy||!store.production||!store.principal||!machine())return;const owner=store.data?.users?.find(row=>row.id===store.principal.userId);if(owner&&(owner.enabled===false||!(owner.limits?.[machine()]>0))){report('这台服务器未授权。');return;}busy=true;controls();const expected=context();const check=()=>{if(expected!==context())throw Error('账号或服务器已改变。');};const call=async(op,args={})=>{check();const result=await store.call(op,args);check();return result;};try{await fn(call,check);}catch(e){if(expected===context()){report(e.message);toast(e.message);}}finally{if(expected===context()){busy=false;controls();}}}
+  async function run(fn){if(busy||!store.production||!store.principal||!machine()&&!management())return;const owner=store.data?.users?.find(row=>row.id===store.principal.userId);if(owner&&(owner.enabled===false||!management()&&!(owner.limits?.[machine()]>0))){report('这台服务器未授权。');return;}busy=true;controls();const expected=context();const check=()=>{if(expected!==context())throw Error('账号或服务器已改变。');};const call=async(op,args={})=>{check();const result=await store.call(op,args);check();return result;};try{await fn(call,check);}catch(e){if(expected===context()){report(e.message);toast(e.message);}}finally{if(expected===context()){busy=false;controls();}}}
   async function shareInfo(call){
     const key=scope();capabilities.delete(key);controls();
     const result=await call('cloud.info',{});capabilities.set(key,result);
     const status=$('#cloud-auth-status');
-    if(status)status.textContent=result?.managedExternally===true?'云盘连接由后台管理。':result?.aliyunConnected===true?(shareCapability(result)?'已登录，分享导入已核验。':'已登录，但分享导入未核验。'):'云盘登录未确认。';
+    if(status)status.textContent=result?.managedExternally===true?(result?.disabled===true?'云盘连接已停用。':result?.aliyunConnected===true?'云盘已连接。':'云盘连接由后台管理。'):result?.aliyunConnected===true?(shareCapability(result)?'已登录，分享导入已核验。':'已登录，但分享导入未核验。'):'云盘登录未确认。';
     if($('[name=cloud-source]').value==='aliyun')report('');controls();return result;
   }
   async function list(call){
@@ -104,6 +107,14 @@ export function cloudImportUI(store,section,toast){
     });
   });
   section.addEventListener('click',event=>{const b=event.target.closest('button');if(!b||b.disabled)return;
+    if(b.id==='cloud-auth-info')return management()?run(shareInfo):undefined;
+    if(b.id==='cloud-auth-reconnect')return management()?run(async call=>{
+      const info=capabilities.get(scope()),expected=context();
+      if(info?.backend!=='clouddrive'||info?.managedExternally!==true||info?.configurationEnabled!==true||info?.capabilityVerified!==true)throw Error('云盘配置尚未确认，不能重新连接。');
+      $('#cloud-auth-status').textContent='重新连接中…';
+      try{const result=await call('cloud.auth.reconnect',{});if(result?.reconnected!==true||result.backend!=='clouddrive'||result.managedExternally!==true)throw Error('重新连接结果待确认，请重新查询。');await shareInfo(call);}
+      catch(error){if(expected===context())$('#cloud-auth-status').textContent='重新连接结果待确认，请重新查询。';throw error;}
+    }):undefined;
     if(b.id==='cloud-inspect')return run(async call=>{if(!shareCapability(capabilities.get(scope())))throw Error('阿里云盘分享暂不可用。');inspection=await call('cloud.inspect',{machine:machine(),url:$('[name=cloud-url]').value.trim(),password:$('[name=cloud-password]').value.trim()});$('[name=cloud-file]').innerHTML=inspection.files.map(f=>`<option value="${esc(f.id)}">${esc(f.name)} · ${size(f.size)}</option>`).join('');if(inspection.files[0])$('[name=cloud-path]').value='incoming/'+inspection.files[0].name;report(inspection.files.length?'选择文件，然后开始导入。':'没有可导入的文件。请将数据压缩后，直接分享压缩包。');});
     if(b.id==='cloud-share-refresh')return run(shareInfo);
     if(b.id==='cloud-import-refresh')return run(async call=>{if($('[name=cloud-source]').value==='aliyun'){try{await shareInfo(call);}catch(error){report(error.message);toast(error.message);}}await list(call);});
@@ -113,7 +124,7 @@ export function cloudImportUI(store,section,toast){
     if(b.dataset.importDiscard)return run(async call=>{const args={machine:machine(),operationId:b.dataset.importDiscard},status=await call('cloud.import.status',args);if(status.canDiscard!==true)throw Error('下载进程尚未确认停止，暂不能清理；请稍后刷新。');if(!confirm('清理这条导入记录及未完成的临时文件？清理后不能续传；已经完成并保存到个人 /data2 的文件不会删除。'))return;await call('cloud.import.discard',args);report('已清理导入记录和临时文件；已完成的数据文件保留。');await list(call);});
     if(b.id==='cloud-auth-begin')return run(async call=>{const info=await shareInfo(call);if(info?.managedExternally===true)throw Error('云盘连接由后台管理。');auth=await call('cloud.auth.begin');$('#cloud-auth-qr').src=auth.image;$('#cloud-auth-qr').hidden=false;$('#cloud-auth-check').hidden=false;$('#cloud-auth-status').textContent='用阿里云盘 App 扫码并确认，然后点击检查状态。';});
     if(b.id==='cloud-auth-check')return run(async call=>{if(!auth)throw Error('请重新获取二维码。');const result=await call('cloud.auth.poll',{id:auth.id});$('#cloud-auth-status').textContent=({NEW:'请先扫码。',SCANED:'请在阿里云盘 App 内确认。',CONFIRMED:'已登录，但分享导入未核验。',EXPIRED:'二维码已过期，请重新连接。',CANCELED:'已取消授权。'})[result.state]||'待确认';if(['CONFIRMED','EXPIRED','CANCELED'].includes(result.state)){$('#cloud-auth-qr').hidden=true;$('#cloud-auth-check').hidden=true;auth=null;}if(result.state==='CONFIRMED')await shareInfo(call);});
-    if(b.id==='cloud-auth-disconnect')return run(async call=>{if(!confirm('断开后无法解析新的分享直链。已经发出的短期下载链接可能仍然有效；如需停止传输，请另外取消导入任务。'))return;const result=await call('cloud.auth.disconnect');capabilities.delete(scope());if(result?.disconnected!==true)throw Error('断开结果未确认，请重新查询。');$('#cloud-auth-status').textContent='已断开。';$('#cloud-auth-qr').hidden=true;$('#cloud-auth-check').hidden=true;auth=null;});
+    if(b.id==='cloud-auth-disconnect')return run(async call=>{const info=capabilities.get(scope());if(info?.aliyunConnected!==true||info?.disabled===true)throw Error('云盘未确认连接，请重新查询。');if(!confirm('断开后无法解析新的分享直链。已经发出的短期下载链接可能仍然有效；如需停止传输，请另外取消导入任务。'))return;const result=await call('cloud.auth.disconnect');capabilities.delete(scope());if(result?.disconnected!==true)throw Error('断开结果未确认，请重新查询。');$('#cloud-auth-status').textContent='已断开。';$('#cloud-auth-qr').hidden=true;$('#cloud-auth-check').hidden=true;auth=null;});
   });
   return {reset,controls};
 }

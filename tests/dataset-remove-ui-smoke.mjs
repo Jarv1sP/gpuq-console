@@ -43,6 +43,7 @@ try{
     }
     if(operation==='datasets.storage.status'){assert.equal(principal.role,'admin');assert.deepEqual(Object.keys(args),['machine']);return reply(route,{enabled:false});}
     if(operation==='datasets.storage.plan'){assert.equal(principal.role,'admin');assert.deepEqual(Object.keys(args),['machine']);return reply(route,{enabled:false,dryRun:true,candidates:[],usageBytes:0});}
+    if(operation==='cloud.info'){assert.equal(principal.role,'admin');assert.deepEqual(args,{});return reply(route,{backend:'clouddrive',managedExternally:true,configurationEnabled:false,capabilityVerified:false,disabled:true,aliyunConnected:false});}
     if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
     if(operation==='datasets.unregister'){
      assert.equal(principal.role,'admin');assert.equal(args.dataset,localDataset);assert.deepEqual(Object.keys(args).sort(),args.version?['dataset','machine','version']:['dataset','machine']);
