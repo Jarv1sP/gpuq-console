@@ -12,10 +12,10 @@ export async function directBrowserFixture(machines){
   const directory=await mkdtemp(join(tmpdir(),'browser-upload-tls-')),key=join(directory,'key.pem'),certificate=join(directory,'certificate.pem');
   execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',certificate,'-days','1','-subj','/CN=localhost'],{stdio:'ignore'});
   const tls={key:await readFile(key),cert:await readFile(certificate)},certificateSha256=hash(execFileSync('openssl',['x509','-in',certificate,'-outform','DER']));
-  const calls=[],raw=[],probes=[],preflights=[],failures=[],uploads=new Map(),tickets=new Map(),names=new Map();
+  const calls=[],raw=[],probes=[],preflights=[],failures=[],uploads=new Map(),tickets=new Map(),names=new Map(),admissions=new Map();
   const config={mode:'success',holdChunk:false,holdPublish:false,deny:false,mismatch:false};
   let nodeOrigin,origin,releaseChunk,heldChunk=false,expired=false,dropped=false,ticketCount=0;
-  const describe=upload=>({uploadId:upload.id,name:upload.name,state:upload.state,manifestOffset:upload.manifest.length,manifestBytes:upload.spec.manifestBytes,totalBytes:upload.spec.totalBytes,entries:upload.spec.entries,chunkBytes:CHUNK,
+  const describe=upload=>({uploadId:upload.id,name:upload.name,state:upload.state,placementProtocol:1,requestedMachine:upload.spec.machine,storageMachine:machines[0].id,storageTier:'hdd',legacyPlacement:false,manifestOffset:upload.manifest.length,manifestBytes:upload.spec.manifestBytes,totalBytes:upload.spec.totalBytes,entries:upload.spec.entries,chunkBytes:CHUNK,
     ...(upload.dataset?{dataset:upload.dataset,version:upload.version}:{})});
   const status=(upload,path)=>{
     if(upload.state==='PUBLISHING'&&!config.holdPublish)upload.state='READY';
@@ -76,8 +76,14 @@ export async function directBrowserFixture(machines){
         if(operation==='datasets.upload.routes')return reply(res,200,{result:{available:true,protocol:'dataset-upload-v1',machine:args.machine,revision:'a'.repeat(64),certificateSha256,routes:[{id:'primary',kind:'campus-direct',endpoint:nodeOrigin}]}});
         if(operation==='datasets.label.get'){const label=names.get(owner+':'+args.dataset)||{displayName:null,revision:0};return reply(res,200,{result:{dataset:args.dataset,...label,name:label.displayName??args.dataset,scope:'personal',ownerId:owner}});}
         if(operation==='datasets.label.set'){const old=names.get(owner+':'+args.dataset)||{revision:0};assert.equal(args.revision,old.revision);const label={displayName:args.displayName,revision:old.revision+1};names.set(owner+':'+args.dataset,label);return reply(res,200,{result:{dataset:args.dataset,...label,name:label.displayName,scope:'personal',ownerId:owner}});}
+        if(operation==='datasets.upload.admission.create'||operation==='datasets.upload.admission.status'){
+          const key=owner+':'+args.key;let receipt=admissions.get(key);
+          if(operation.endsWith('.create')){const specification=Object.fromEntries(['name','manifestBytes','manifestSha256','totalBytes','entries'].map(field=>[field,args[field]]));if(!receipt){receipt={protocol:'dataset-upload-admission-v1',key:args.key,uploadId:randomUUID(),requestedMachine:args.machine,storageMachine:machines[0].id,storageTier:'hdd',specification,state:'ISSUED'};admissions.set(key,receipt);}assert.deepEqual(receipt.specification,specification);}
+          assert.ok(receipt,'Original owner-scoped admission must exist');return reply(res,200,{result:receipt});
+        }
         const action=operation.split('.').at(-1);let upload;
         if(action==='begin'){
+          const receipt=[...admissions.entries()].find(([key,row])=>key.startsWith(owner+':')&&row.uploadId===args.key)?.[1];assert.ok(receipt,'Begin requires this owner’s server-issued UUID');assert.deepEqual(Object.fromEntries(['name','manifestBytes','manifestSha256','totalBytes','entries'].map(field=>[field,args[field]])),receipt.specification);
           upload=uploads.get(args.key);if(upload&&upload.owner!==owner)return reply(res,403,{error:'不能读取其他账号的上传'});
           if(!upload){upload={id:args.key,owner,name:args.name,spec:structuredClone(args),state:'RECEIVING_MANIFEST',manifest:Buffer.alloc(0),files:new Map()};uploads.set(upload.id,upload);}
           return reply(res,200,{result:{...describe(upload),uploadTransport:{protocol:'dataset-upload-v1',directAvailable:config.mode!=='unavailable',reason:config.mode==='unavailable'?'not-configured':'ready',relayLimitBytes:LIMIT,relayAllowed:args.allowRelay===true}}});

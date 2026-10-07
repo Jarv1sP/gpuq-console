@@ -1,5 +1,8 @@
 """Private control-plane lookup; never create a user workspace or upload."""
 import hashlib
+import importlib.util
+import json
+from pathlib import Path
 import re
 
 
@@ -20,13 +23,20 @@ def locate(executor, args):
               and (executor.CONFIG.get('storageTier', {}).get('enabled') is not True
                    or executor.CONFIG.get('storageWarehouse', {}).get('enabled') is True))
     result = {'protocol': 'dataset-upload-location-v1', 'machine': machine,
+              'uploadAdmissionProtocol': 1,
               'userId': args['userId'], 'uploadId': args['uploadId'], 'present': False,
               'authority': {'enabled': is_hdd, 'machine': machine, 'authority': archive.get('authority')}}
     path = cache.root/'.uploads'/hashlib.sha256(args['userId'].encode()).hexdigest()/args['uploadId']/'session.json'
     try:
         session = module._read_json(path)
     except FileNotFoundError:
-        return result
+        marker = cache.root/'.upload-admissions'/(hashlib.sha256(json.dumps(
+            [args['userId'], args['uploadId']], separators=(',', ':')).encode()).hexdigest()+'.json')
+        try:
+            module._read_json(marker)
+        except FileNotFoundError:
+            return result
+        raise ValueError('Private upload admission is incomplete; absence is unconfirmed')
     if (not isinstance(session, dict) or session.get('schema') != 1
             or session.get('userId') != args['userId'] or session.get('uploadId') != args['uploadId']
             or not isinstance(session.get('name'), str)
@@ -38,6 +48,19 @@ def locate(executor, args):
             or session['entries'] > module.MAX_ENTRIES
             or session.get('archiveAdmission') is not None):
         raise ValueError('Existing private upload identity is invalid or belongs to a transfer')
+    # Reuse the pure receipt check, not the upload constructor: location must
+    # never create a workspace, upload control directory or reservation.
+    spec = importlib.util.spec_from_file_location('gpuq_ingress_upload_receipt', Path(__file__).with_name('dataset-upload.py'))
+    uploads = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(uploads)
+    reader = uploads.DatasetUploads.__new__(uploads.DatasetUploads)
+    reader.n, reader.d, reader.cache = executor, module, cache
+    reader._check_admission(session)
     result.update(present=True, specification={key: session[key] for key in
         ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')})
     return result
+
+
+def admit(executor, args):
+    """Private server-minted admission; no public/peer operation alias."""
+    return executor.dataset_uploads().admit(args)

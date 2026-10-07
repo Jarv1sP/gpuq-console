@@ -302,6 +302,18 @@ export class PortalService extends DemoService{
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   invoke(token,operation,args={}){
+    if(operation==='datasets.upload.admission.status'){
+      if(!args||typeof args!=='object'||Array.isArray(args))throw Error('参数格式错误。');
+      const principal=this.principal(token);
+      // Pure journal recovery must not queue behind an unconfirmed node begin.
+      // It neither creates a mapping nor makes a bridge request.
+      return executionCall(this,principal,operation,structuredClone(args)).then(result=>{
+        const current=this.principal(token);
+        if(current.userId!==principal.userId||current.username!==principal.username||current.role!==principal.role)
+          throw Object.assign(Error('登录身份已改变。'),{status:403});
+        return {result,principal:{...current}};
+      });
+    }
     if(operation==='tasks.display.get'||operation==='tasks.display.set')return taskDisplayCall(this,token,operation,args).then(result=>({result,principal:this.principal(token)}));
     if(['host.status','files.upload.status','files.get','files.list'].includes(operation))return this.remoteRead(token,operation,args);
     if(operation==='projects.replicate'||operation==='projects.replication.status'||operation==='projects.replication.cancel'||operation==='projects.replication.retry'){
@@ -394,7 +406,11 @@ export class PortalService extends DemoService{
     const capabilities=Object.fromEntries(gpuq.hosts.map(h=>[h.id,!gpuq.stale&&priorityCapable(h)===true]));
     return {...state,taskMetadata:{version:1},maintenance:{version:1,retired:true,readOnly:true},operationalMaintenance:this.operationalMaintenance?.(principal),jobs:state.jobs.map(j=>({...publicJob(j,this.store.users),notifications:this.jobNotificationState(j,principal.userId),canSetPriority:principal.role==='admin'&&!gpuq.stale&&priorityRankCapable(gpuq.hosts.find(h=>h.id===j.machine))===true&&j.state==='PENDING'&&!j.cancelRequested&&j.priorityMutable===true&&(j.spec?.preemptIdleOnly===true||!!j.spec?.scheduling)})),
       demo:false,mode:'persistent',gpuqConnected:gpuq.hosts.some(h=>h.gpuq.connected),jobsSimulated:false,executionEnabled:this.executionEnabled===true,
-      execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},...(principal.role==='admin'?{invitations:this.invitations()}:{})};
+      execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},
+      // Protocol availability is a Portal policy fact, not a node/mount or
+      // free-space admission proof. The private HDD RPC still verifies those.
+      datasetUploadAdmission:{protocol:1,available:this.datasetIngressPolicy?.enabled===true},
+      ...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
   close(){this.closing=true;for(const admission of this.loginAdmissions?.values()||[])if(admission.issued)this.revokeSession(admission.issued);this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);clearInterval(this.projectCopyTimer);this.db.close();}
 }

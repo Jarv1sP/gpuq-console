@@ -59,7 +59,9 @@ async function fixture({size=CHUNK_BYTES+13,directAvailable=true,chunkBytes=CHUN
     }
     return Response.json({ok:true,result});
   };
-  const options={call,scan,userId:'member',machine:'node-a',name:'mine',pollMs:0,fetch:send,now:()=>clock,onRoute:route=>routes.push(route),onProgress:value=>progress.push(value),keyStore:{getHandle:key=>handles.get(key),setHandle:(key,value)=>handles.set(key,value)}};
+  // Original persisted legacy intent: this suite isolates ticket/transport
+  // recovery. Fresh allocation is covered by the admission client suite.
+  const options={call,scan,userId:'member',machine:'node-a',name:'mine',pollMs:0,fetch:send,now:()=>clock,onRoute:route=>routes.push(route),onProgress:value=>progress.push(value),keyStore:{get:()=>id,getHandle:key=>handles.get(key),setHandle:(key,value)=>handles.set(key,value)}};
   return {options,portal,raw,routes,probes,progress,content,stored,transport,handles,advance:()=>{clock+=295;},loseChunk:()=>{loseChunk=true;},revoke:()=>{revoke=true;},failDirect:()=>{failDirect=true;},loseCommit:()=>{loseCommit=true;},mismatch:()=>{mismatch=true;}};
 }
 test('HDD-first browser keeps training selector while validating the physical warehouse node',async()=>{
@@ -177,7 +179,7 @@ test('a lost begin receipt queries its original UUID before any explicit retry',
   const scan=await scanBrowserDirectory([file('a','content')]),calls=[],handles=new Map();let uploadId,attempt=0,state='RECEIVING_MANIFEST';
   const status=()=>({uploadId,state,totalBytes:scan.totalBytes,entries:scan.entries,manifestOffset:0,...(state==='READY'?{dataset:'u-test-mine',version:'a'.repeat(64)}:{})});
   const call=async(operation,args)=>{calls.push({operation,args});if(operation.endsWith('.begin')){uploadId=args.key;if(++attempt===1)throw Error('begin response lost');state='READY';return status();}assert.equal(operation,'datasets.upload.status');assert.equal(args.uploadId,uploadId);return status();};
-  const options={call,userId:'member',machine:'node-a',name:'mine',scan,keyStore:{getHandle:key=>handles.get(key),setHandle:(key,value)=>handles.set(key,value)}};
+  const options={call,userId:'member',machine:'node-a',name:'mine',scan,keyStore:{get:key=>key,getHandle:key=>handles.get(key),setHandle:(key,value)=>handles.set(key,value)}};
   await assert.rejects(uploadBrowserDataset(options),error=>error.code==='UNCONFIRMED'&&error.uploadId===uploadId);
   assert.deepEqual(calls.map(row=>row.operation),['datasets.upload.begin','datasets.upload.status']);
   const key=calls[0].args.key;assert.equal((await uploadBrowserDataset(options)).state,'READY');assert.equal(calls[2].operation,'datasets.upload.status');assert.equal(calls[3].args.key,key);

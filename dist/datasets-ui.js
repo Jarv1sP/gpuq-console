@@ -1,6 +1,6 @@
 import {warehouseWorkspaceHTML,datasetWarehouseView} from './dataset-warehouse-view.js';
 import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
-import {scanBrowserDirectory,uploadBrowserDataset,confirmedDatasetUpload} from './dataset-upload.js';
+import {scanBrowserDirectory,uploadBrowserDataset,confirmedDatasetUpload,uploadKey} from './dataset-upload.js';
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
 import {transferUploadCall} from './transfer-upload.js';
 import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
@@ -12,6 +12,16 @@ import {cacheFact,cacheProgress,cacheIconHTML,databaseGroundHTML,databaseSummary
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={READY:'已缓存',REGISTERED:'未缓存',STAGING:'未完成，可续传',PREPARING:'取回中',FAILED:'取回失败',NOT_LOCAL:'所选服务器未缓存',UNKNOWN:'缓存状态待确认'};
 const bytesLabel=value=>Number.isFinite(value)&&value>=0?transferBytes(value):'未知';
+export function datasetUploadKeyStore(storage){
+  const read=(prefix,key,json=false)=>{let value;try{value=storage.getItem(prefix+key);}catch{throw Error('浏览器无法读取续传信息；未开始上传。');}if(value===null)return null;if(!json)return value;try{return JSON.parse(value);}catch{throw Error('浏览器保存的续传信息损坏；未重新分配编号。');}};
+  const write=(prefix,key,value,json=false)=>{const raw=json?JSON.stringify(value):value;try{storage.setItem(prefix+key,raw);if(storage.getItem(prefix+key)!==raw)throw Error('Unconfirmed storage write');}catch{throw Error('浏览器无法保存续传信息，请允许本站本地存储；未开始上传。');}};
+  return {get:key=>read('gpuq.dataset-upload.',key),set:(key,value)=>write('gpuq.dataset-upload.',key,value),getHandle:key=>read('gpuq.dataset-upload.handle.',key,true),setHandle:(key,value)=>write('gpuq.dataset-upload.handle.',key,value,true),getIntent:key=>read('gpuq.dataset-upload.intent.',key,true),setIntent:(key,value)=>write('gpuq.dataset-upload.intent.',key,value,true)};
+}
+export function datasetUploadCalls(directCall,keyStore,baseKey,transfers){
+  const intent=keyStore.getIntent(baseKey),handle=keyStore.getHandle(baseKey);
+  const legacy=!intent&&(!!keyStore.get(baseKey)||handle?.uploadId&&handle.admissionProtocol!==1);
+  return {call:legacy&&transfers?.version===1?transferUploadCall(directCall):directCall,admissionCall:directCall};
+}
 export function archiveStatus(storage,expectedVersion=null,canRetry=true){
   if(!storage)return '';
   const matching=!expectedVersion||storage.version===expectedVersion;
@@ -284,10 +294,13 @@ export function datasetsUI(store,toast){
     try{
       status.textContent=machine+' · 正在读取目录…';
       const scan=await scanBrowserDirectory(files,{signal,onProgress:report});check();lastScan=scan;
-      const keyStore={getHandle:key=>{try{return JSON.parse(localStorage.getItem('gpuq.dataset-upload.handle.'+key));}catch{return null;}},setHandle:(key,value)=>{try{localStorage.setItem('gpuq.dataset-upload.handle.'+key,JSON.stringify(value));}catch{}},get:key=>{try{return localStorage.getItem('gpuq.dataset-upload.'+key);}catch{return null;}},set:(key,value)=>{try{localStorage.setItem('gpuq.dataset-upload.'+key,value);}catch{throw Error('浏览器无法保存续传编号，请允许本站本地存储。');}}};
+      const keyStore=datasetUploadKeyStore(localStorage),baseKey=uploadKey(userId,machine,name,scan.manifestSha256);
       const directCall=async(operation,args)=>{check();const result=await store.call(operation,args);check();return result;};
-      const call=store.data?.transfers?.version===1?transferUploadCall(directCall):directCall;
-      const result=await uploadBrowserDataset({userId,machine,name,scan,signal,onProgress:report,keyStore,call,allowRelay,via,onRoute:route=>{check();showUploadRoute(route);warehouse.actualRoute(route);}});check();
+      // Only remembered legacy uploads use their original managed-transfer
+      // protocol. Modern dataset admission and every subsequent control call
+      // go directly to the authenticated dataset API, never transfers.io.
+      const calls=datasetUploadCalls(directCall,keyStore,baseKey,store.data?.transfers);
+      const result=await uploadBrowserDataset({userId,machine,name,scan,signal,onProgress:report,keyStore,...calls,admission:store.data?.datasetUploadAdmission,allowRelay,via,onRoute:route=>{check();showUploadRoute(route);warehouse.actualRoute(route);}});check();
       active={...result,machine};phase('READY');status.dataset.state='READY';status.textContent=`已缓存 · 可用于训练 · ${result.dataset}@${result.version.slice(0,12)}`;progress.value=progress.max=1;await warehouse.completed(result);check();toast('数据集上传并校验完成，可以用于训练。');
     }catch(error){if(current(expected)){status.dataset.state=signal.aborted?'PAUSED':'UNKNOWN';phase(status.dataset.state);status.textContent=error.message;warehouse.uploadFailure(error,{paused:signal.aborted});if(error.uploadId)active={...active,uploadId:error.uploadId,machine,name,manifestSha256:lastScan?.manifestSha256,totalBytes:lastScan?.totalBytes,entries:lastScan?.entries,state:'UNKNOWN',directFailed:error.code?.startsWith('DIRECT')===true};canRelay=error.canRelay===true;}}
     finally{if(current(expected)){uploadBusy=false;controller=null;warehouse.uploading(false);controls();if(active?.state==='READY')await load();}}

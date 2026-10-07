@@ -4,6 +4,7 @@ import {basename,join,resolve} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {createDirectDatasetTransport,probeDirectUploadRoute,RELAY_LIMIT_BYTES} from './client-direct-upload.mjs';
 import {selectUploadRoute,uploadStorageMachine} from './dist/upload-routes.js';
+import {allocateDatasetUpload,saveDatasetUploadIntent} from './dist/dataset-upload.js';
 export const DATA_CHUNK=1024*1024;
 const DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
 const fail=message=>{throw Error(message);};
@@ -54,24 +55,41 @@ export async function scanLocalDataset(root,progress,{lstat=fsLstat,open=fsOpen,
   return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files,totalBytes,entries:files.length+directories.length,openEntry,verify};
 }
 
-export async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore,filesystem,via='auto'}){if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,via});}
+export async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore,filesystem,admission,via='auto'}){if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,admission,via});}
 export function snapshotKey(identity){const h=createHash('sha256').update(JSON.stringify(identity)).digest('hex');return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;}
-export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,via='auto',directFactory=createDirectDatasetTransport,probeRoute=probeDirectUploadRoute}){
+export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,admission,legacyTransfer=false,via='auto',directFactory=createDirectDatasetTransport,probeRoute=probeDirectUploadRoute}){
   if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');
   const key=snapshotKey([userId,machine,name,scan.manifestSha256]);
-  let uploadId,state,direct,route,storageMachine;
+  let uploadId,state,direct,route,storageMachine,uploadIntent;
   const control=async(action,args={})=>(await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'&&(action!=='routes'||state?.placementProtocol===1)?{uploadId}:{}),...args})).result;
   const request=async(action,args={})=>{
     if(direct&&(action==='manifest'||action==='chunk'||action==='status'&&args.path!==undefined))return direct.request(action,args);
     if(args.bytes!==undefined){const {bytes,...other}=args;return control(action,{...other,data:bytes.toString('base64')});}
     return control(action,args);
   };
-  const report=value=>{storageMachine=uploadStorageMachine(value,machine,storageMachine);state=value;progress(value.state,value);};
+  const report=value=>{if(uploadIntent&&(value?.uploadId!==uploadIntent.uploadId||value.placementProtocol!==1||value.requestedMachine!==machine||value.storageMachine!==uploadIntent.storageMachine||value.storageTier!=='hdd'||value.legacyPlacement!==false||['name','manifestBytes','totalBytes','entries'].some(field=>value[field]!==uploadIntent.specification[field])))throw Object.assign(Error('Upload session does not match the saved warehouse admission'),{code:'MISMATCH'});storageMachine=uploadStorageMachine(value,machine,storageMachine);state=value;progress(value.state,value);};
   const ready=()=>{if(state.state!=='READY'||!state.dataset||!/^[a-f0-9]{64}$/.test(state.version||''))fail('Server did not confirm a complete verified dataset');return {...state,machine,...(route?{route:{kind:route}}:{})};};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){await new Promise(resolve=>setTimeout(resolve,1500));report(await request('status'));}if(state.state==='FAILED')fail(state.error||'Dataset verification failed; repeat the same upload after fixing the cause');if(state.state==='DISCARDED')fail('Upload was discarded');};
-  const begin={name,key:keyStore.get(key)||key,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(via==='relay'?{allowRelay:true}:{})};
-  report(await request('begin',begin));if(state.state==='DISCARDED'){begin.key=randomUUID();await keyStore.set(key,begin.key);report(await request('begin',begin));}
+  const persistedKey=keyStore?.get?.(key),stored=keyStore?.getHandle?.(key),savedIntent=await keyStore?.getIntent?.(key);
+  if(persistedKey!==undefined&&persistedKey!==null&&(typeof persistedKey!=='string'||!persistedKey))fail('Saved legacy upload key is invalid');
+  if(stored&&(typeof stored.uploadId!=='string'||!stored.uploadId||stored.machine!==machine||stored.name!==name||stored.manifestSha256!==scan.manifestSha256||stored.userId!==undefined&&stored.userId!==userId))fail('Saved upload handle belongs to another account, target or manifest');
+  const begin={name,key:persistedKey||key,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(via==='relay'?{allowRelay:true}:{})};
+  const legacy=!savedIntent&&(legacyTransfer===true||typeof persistedKey==='string'&&!!persistedKey||stored?.uploadId&&stored.admissionProtocol!==1);
+  if(!legacy){
+    if(stored?.admissionProtocol===1&&!savedIntent)fail('Original admission intent is missing; no new upload was allocated');
+    uploadIntent=await allocateDatasetUpload({call:async(op,args)=>(await call(op,args)).result,keyStore,baseKey:key,userId,machine,specification:{name,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries},capability:admission});
+    begin.key=uploadIntent.uploadId;storageMachine=uploadIntent.storageMachine;
+    if(stored&&stored.uploadId!==begin.key)fail('Saved handle differs from the issued upload UUID');
+    if(uploadIntent.beginAttempted){uploadId=begin.key;report(await request('status'));}
+    else uploadIntent=await saveDatasetUploadIntent(keyStore,key,{...uploadIntent,beginAttempted:true});
+  }else if(stored?.uploadId){uploadId=stored.uploadId;report(await request('status'));}
+  if(!uploadIntent||!state||!['READY','PUBLISHING'].includes(state.state)){
+    try{report(await request('begin',begin));}
+    catch(error){if([400,401,403,404,409,422,429].includes(error.status)||['MAINTENANCE_ACTIVE','MISMATCH'].includes(error.code))throw error;uploadId=begin.key;report(await request('status'));if(state.uploadId!==uploadId)fail('Server did not confirm the original begin UUID');if(state.state!=='READY')fail('Upload initialization receipt was lost; repeat the original command to inspect the same UUID before resuming');}
+  }
+  if(state.state==='DISCARDED'){if(uploadIntent)fail('Upload was discarded; its issued UUID will not be silently replaced');begin.key=randomUUID();await keyStore.set(key,begin.key);report(await request('begin',begin));}
   uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)fail('Server did not return an upload identifier');progress('HANDLE',{uploadId,machine,...(state.placementProtocol===1?{requestedMachine:machine,storageMachine,storageTier:state.storageTier}:{})});
+  await keyStore?.setHandle?.(key,{uploadId,machine,name,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(uploadIntent?{admissionProtocol:1,userId}:{})});
   try{
     if(!['READY','PUBLISHING'].includes(state.state)){
       const advertised=state.uploadTransport;

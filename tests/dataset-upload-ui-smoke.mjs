@@ -55,16 +55,16 @@ try {
     const decode = data => Uint8Array.from(atob(data), char => char.charCodeAt(0));
     const concat = (first, second) => {const out = new Uint8Array(first.length + second.length); out.set(first); out.set(second, first.length); return out;};
     const check = (condition, message) => {if (!condition) throw Error(message);};
-    window.calls = []; window.toasts = []; window.uploads = new Map();window.names=new Map();
+    window.calls = []; window.toasts = []; window.uploads = new Map();window.names=new Map();window.admissions=new Map();
     window.gates = {chunk: true, begin: false, publish: true};
-    const describe = upload => ({uploadId: upload.id, name: upload.name, state: upload.state,
+    const describe = upload => ({uploadId: upload.id, name: upload.name, state: upload.state,placementProtocol:1,requestedMachine:upload.spec.machine,storageMachine:'gpu-1',storageTier:'hdd',legacyPlacement:false,
       manifestOffset: upload.manifest.length, manifestBytes: upload.spec.manifestBytes,
       totalBytes: upload.spec.totalBytes, entries: upload.spec.entries,
       ...(upload.version ? {dataset: upload.dataset, version: upload.version} : {})});
     window.store = {production: true, principal: {userId: 'old-user', role: 'member'}, authGeneration: 0,
       users: ['old-user','new-user'].map(id => ({id,role:'member',enabled:true,limits:{'gpu-1':1,'gpu-2':1},total:2})),
       usage() {return 0;},
-      data: {machines: [{id: 'gpu-1'}, {id: 'gpu-2'}]},
+      data: {machines: [{id: 'gpu-1'}, {id: 'gpu-2'}],datasetUploadAdmission:{protocol:1,available:true}},
       listeners:[],onAuthChange(listener) {this.listeners.push(listener);},
       async call(operation, args) {
         const user = this.principal.userId;
@@ -85,9 +85,16 @@ try {
         if(operation==='datasets.label.get'){const label=names.get(args.dataset)||{displayName:null,revision:0};return {dataset:args.dataset,name:label.displayName??args.dataset,...label,scope:'personal',ownerId:user};}
         if(operation==='datasets.label.set'){const old=names.get(args.dataset)||{revision:0};check(args.revision===old.revision,'Display label CAS');const label={displayName:args.displayName,revision:old.revision+1};names.set(args.dataset,label);return {dataset:args.dataset,name:label.displayName??args.dataset,...label,scope:'personal',ownerId:user};}
         check(args.machine==='gpu-1','Selected machine drifted during upload');
+        if(operation==='datasets.upload.admission.create'||operation==='datasets.upload.admission.status'){
+          const key=user+':'+args.key;let receipt=admissions.get(key);
+          if(operation.endsWith('.create')){const specification=Object.fromEntries(['name','manifestBytes','manifestSha256','totalBytes','entries'].map(field=>[field,args[field]]));if(!receipt){receipt={protocol:'dataset-upload-admission-v1',key:args.key,uploadId:crypto.randomUUID(),requestedMachine:args.machine,storageMachine:'gpu-1',storageTier:'hdd',specification,state:'ISSUED'};admissions.set(key,receipt);}check(JSON.stringify(receipt.specification)===JSON.stringify(specification),'Admission specification changed');const saved=JSON.parse(localStorage.getItem('gpuq.dataset-upload.intent.'+args.key));check(saved?.userId===user&&saved.key===args.key,'Admission intent must be durably remembered by this account');}
+          check(receipt,'Original admission must exist');return receipt;
+        }
         const action = operation.split('.').at(-1);
         let upload;
         if (action === 'begin') {
+          const receipt=[...admissions.entries()].find(([key,row])=>key.startsWith(user+':')&&row.uploadId===args.key)?.[1];check(receipt,'Begin requires this owner’s issued UUID');
+          const saved=JSON.parse(localStorage.getItem('gpuq.dataset-upload.intent.'+receipt.key));check(saved?.uploadId===args.key&&saved.beginAttempted===true,'Issued UUID must be durably remembered before begin');
           const key = user + ':' + args.key;
           upload = uploads.get(key);
           if (!upload) {
@@ -217,7 +224,7 @@ try {
   await page.evaluate(() => {
     window.originalForm = document.querySelector('#dataset-upload-form');
     window.originalStatus = document.querySelector('#dataset-upload-status').textContent;
-    store.data = {machines: [{id: 'gpu-1', freeCards: 0}, {id: 'gpu-2', freeCards: 4}]}; renderDatasets();
+    store.data = {machines: [{id: 'gpu-1', freeCards: 0}, {id: 'gpu-2', freeCards: 4}],datasetUploadAdmission:{protocol:1,available:true}}; renderDatasets();
   });
   assert.equal(await page.evaluate(() => document.querySelector('#dataset-upload-form') === originalForm), true);
   assert.equal(await page.evaluate(() => document.querySelector('[name=dataset-directory]').files.length), 2);

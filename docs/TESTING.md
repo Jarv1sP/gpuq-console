@@ -35,6 +35,8 @@ python3 scripts/check-public-tree.py
 docker build -f deploy/Dockerfile -t gpuq-console:test .
 ```
 
+仓库默认机器切换用 `storage-archive-policy-cutover.test.js` 和 `archive-source-alias-consumers.test.js` 的真实 SQLite/Portal 数据读取夹具验收：旧 journal 不改写、原来源/别名隔离、跨账号与未知事实不授予权限、旧派发/重试零 RPC、同源显式退役及丢回执恢复、跨 authority 替代在 RPC 前拒绝。节点 grant、真实迁移及生产配置切换仍须单独验收，测试不会连接生产或移动用户数据。
+
 覆盖账号/中文名、密码和会话、邀请码、角色、乐观授权写入、并发配额、幂等提交、超时保留、所有权、root 拒绝、API/CLI、上传越界/软链接、部署清单验证。不访问生产节点、不使用真实账号密码，不因 PR 启动真实训练。
 
 浏览器测试启动临时本地后台和独立数据库，验证注册自动登录、初始零额度、管理员自动发现待处理用户、授权后用户自动更新、编辑草稿不被刷新覆盖、注册码再次可读、引导 admin 退役与移动端布局。不会连接真实执行桥或 GPU；可选 `CHROME_PATH` 使用本地 Chrome，`UI_SCREENSHOTS` 指定私有截图目录。
