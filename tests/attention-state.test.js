@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {ATTENTION_WINDOW,failureTime,recentFailure,failureReadKey,attentionCount,attentionStorageKey,createAttentionReads} from '../dist/attention-state.js';
+import {ATTENTION_WINDOW,failureTime,recentFailure,failureReadKey,attentionCount,attentionStorageKey,createAttentionReads,mergeAttentionActivities} from '../dist/attention-state.js';
 import {controlSnapshot} from '../dist/control-ui.js';
 import {workbenchCards} from '../dist/workbench-ui.js';
 
@@ -106,4 +106,18 @@ test('the failure history filter includes every ended failure even with no activ
   assert.doesNotMatch(html,/data-workbench-job="success"/);
   for(const id of ['failed-old','failed-last'])assert.equal(html.split('data-workbench-job="'+id+'"').length-1,1);
   assert.match(html,/value="FAILED" selected/);
+});
+
+test('partial activity pages never erase known reminders, duplicates update once, only complete lists prove removal',()=>{
+  const first=mergeAttentionActivities([],[{id:'unknown',state:'UNKNOWN'},{id:'recent',state:'FAILED',updatedAt:now-1000}], 'owner',true);
+  const partial=mergeAttentionActivities(first,[{id:'active',state:'RUNNING'},{id:'recent',state:'FAILED',updatedAt:now-1000}], 'owner',false);
+  assert.equal(partial.length,3);assert.deepEqual(controlSnapshot(store([]),{now,activities:partial}).attention.map(row=>row.id),['data:unknown','data:recent']);
+  assert.deepEqual(mergeAttentionActivities(partial,[],'owner',false),partial);
+  assert.equal(controlSnapshot(store([]),{now,activities:partial,activitiesComplete:false}).dataCount,null);
+  const completed=mergeAttentionActivities(partial,[{id:'unknown',state:'SUCCEEDED'}],'owner',true);
+  assert.equal(completed.length,1);assert.equal(controlSnapshot(store([]),{now,activities:completed,activitiesComplete:true}).attention.length,0);
+});
+test('activity cache cannot adopt another owner or carry records across accounts',()=>{
+  const first=mergeAttentionActivities([],[{id:'one',state:'UNKNOWN'},{id:'foreign',userId:'other',state:'UNKNOWN'},{id:'foreign-owner',owner:{id:'other'},state:'UNKNOWN'}],'owner',true);
+  assert.deepEqual(first.map(row=>row.id),['one']);assert.deepEqual(mergeAttentionActivities(first,[],'other',false),[]);
 });

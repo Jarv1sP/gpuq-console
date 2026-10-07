@@ -1,7 +1,7 @@
 import {hasAdminSections} from './admin-ui.js';
 import {endedJob,escapeUI as esc,stateHTML,stateClass,stateWord,trainingReadout,trajectoryHTML,parseTrainingCommand,infoHTML,boundarySweep,serverIdHTML,personalQuotaReadout} from './workbench-ui.js';
 import {captureObject,dismissReveal,openDialogs} from './motion-ui.js';
-import {recentFailure,failureReadKey,attentionCount,createAttentionReads} from './attention-state.js';
+import {recentFailure,failureReadKey,attentionCount,createAttentionReads,mergeAttentionActivities} from './attention-state.js';
 
 const finite=value=>Number.isSafeInteger(value)&&value>=0;
 const activeData=new Set(['NEW','HASHING','RECEIVING_MANIFEST','SEALING','UPLOADING','PUBLISHING','QUEUED','RUNNING','IMPORTING','DOWNLOADING','EXTRACTING','VERIFYING','PREPARING','COPYING','ARCHIVING']);
@@ -67,6 +67,29 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
   let sessions=[],activities=[],activitiesComplete=false,focusJobId=null,actor=null,snapshot=controlSnapshot(store),expanded=false,source='command',commands=[],recent=[],cursor=0,closing=null,returnFocus=null,gPending=0,lastStrip='',previousJobs=new Map(),liveStates=new Set(),naturalDraft=null,naturalGeneration=0;
   const stripPlace=document.createComment('persistent control strip');strip.before(stripPlace);
   const reads=createAttentionReads();
+  let dataRevision=0,dataReadGeneration=0,dataReading=false,dataReadAt=0,dataController=null;
+  async function readActivities(){
+    if(dataReading||!store.principal||!store.production||store.data?.transfers?.version!==1||document.hidden||Date.now()-dataReadAt<15000)return;
+    const owner=store.principal.userId,auth=store.authGeneration,revision=dataRevision,request=++dataReadGeneration,controller=new AbortController();
+    dataReading=true;dataReadAt=Date.now();dataController=controller;
+    const current=()=>request===dataReadGeneration&&store.principal?.userId===owner&&store.authGeneration===auth;
+    let rows=[],cursor=0,complete=false;const cursors=new Set();
+    try{
+      // Metadata only: owner-filtered SQLite pages, no catalog, node or write.
+      for(let page=0;page<100;page++){
+        const result=await store.call('transfers.list',{cursor,limit:50},{signal:controller.signal});if(!current()||dataRevision!==revision)return;
+        if(!Array.isArray(result?.transfers))throw Error('传输目录待确认');
+        rows=mergeAttentionActivities(rows,result.transfers,owner,false);
+        if(result.nextCursor===null){complete=result.partial!==true;break;}
+        if(!Number.isSafeInteger(result.nextCursor)||result.nextCursor<=0||cursors.has(result.nextCursor))throw Error('传输分页待确认');
+        cursor=result.nextCursor;cursors.add(cursor);
+      }
+      if(current()&&dataRevision===revision){activities=mergeAttentionActivities(activities,rows,owner,complete);activitiesComplete=complete;}
+    }catch{if(current()&&dataRevision===revision)activitiesComplete=false;}
+    finally{if(current()){dataReading=false;dataController=null;dataReadAt=Date.now();update();}}
+  }
+  function resetActivities(){dataReadGeneration++;dataController?.abort();dataController=null;dataReading=false;dataReadAt=0;dataRevision++;activities=[];activitiesComplete=false;}
+
   function acknowledge(keys,manual=false){
     if(!reads.acknowledge(store.principal?.userId,keys)&&manual)toast('浏览器未保存已读，仍显示最近 24 小时的失败。');
     update();
@@ -170,16 +193,17 @@ export function controlUI(store,{navigate,getPage,toast,openSubmit,openJob}){
     if(event.key==='Escape')document.querySelector('#account-menu').open=false;
   });
   document.addEventListener('gpuq-terminal-state',event=>{sessions=event.detail.sessions||[];update();});
-  document.addEventListener('gpuq-data-activities',event=>{if(event.detail.userId!==store.principal?.userId)return;activities=Array.isArray(event.detail.items)?event.detail.items.map(row=>({...row,userId:event.detail.userId})):[];activitiesComplete=event.detail.complete===true;update();});
+  document.addEventListener('gpuq-data-activities',event=>{const detail=event.detail;if(detail?.userId!==store.principal?.userId||!Array.isArray(detail.items))return;dataRevision++;activities=mergeAttentionActivities(activities,detail.items,detail.userId,detail.complete===true);activitiesComplete=detail.complete===true;update();});
   document.addEventListener('gpuq-focused-job',event=>{if(store.jobs.some(job=>job.id===event.detail.id&&job.userId===store.principal?.userId)){focusJobId=event.detail.id;update();}});
   document.addEventListener('gpuq-attention-viewed',event=>{
     const {userId,kind,id}=event.detail||{};if(!userId||userId!==store.principal?.userId)return;
     const row=kind==='job'?store.jobs.find(job=>job.id===id&&job.userId===userId&&job.state==='FAILED'):kind==='data'?activities.find(item=>item.id===id&&item.userId===userId&&item.state==='FAILED'):null;
     if(row&&recentFailure(row))acknowledge([failureReadKey(kind,row)]);
   });
-  store.onAuthChange(()=>{close(true);naturalDraft=null;naturalGeneration++;sessions=[];activities=[];activitiesComplete=false;recent=[];focusJobId=null;actor=null;lastStrip='';previousJobs.clear();liveStates.clear();strip.replaceChildren();pill.replaceChildren();content.replaceChildren();strip.hidden=true;mobile.hidden=true;});
+  store.onAuthChange(()=>{close(true);naturalDraft=null;naturalGeneration++;sessions=[];resetActivities();recent=[];focusJobId=null;actor=null;lastStrip='';previousJobs.clear();liveStates.clear();strip.replaceChildren();pill.replaceChildren();content.replaceChildren();strip.hidden=true;mobile.hidden=true;});
   function update(){
     if(actor!==store.principal?.userId){actor=store.principal?.userId;focusJobId=null;recent=[];}
+    readActivities();
     snapshot=controlSnapshot(store,{sessions,activities,activitiesComplete,focusJobId,seen:reads.read(store.principal?.userId)});
     const boundaries=snapshot.jobs.filter(job=>previousJobs.get(job.id)?.state==='STARTING'&&job.state==='RUNNING').map(job=>job.id);
     for(const job of snapshot.jobs){const previous=previousJobs.get(job.id),percent=trainingReadout(job).percent;if(previous&&(previous.state!==job.state||previous.percent!==percent))liveStates.add(stateClass(job));}previousJobs=new Map(snapshot.jobs.map(job=>[job.id,{state:job.state,percent:trainingReadout(job).percent}]));
