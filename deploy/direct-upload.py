@@ -201,8 +201,11 @@ class DirectUploads:
             whole = self.n.CONFIG
         if not isinstance(whole, dict):
             raise ValueError('Invalid node configuration')
-        if whole.get('datasets') != self.n.CONFIG.get('datasets'):
+        expected=getattr(self.n,'direct_startup_config',lambda:self.n.CONFIG)()
+        if whole.get('datasets') != expected.get('datasets'):
             raise ValueError('Dataset storage configuration changed; restart listener after validation')
+        if whole.get('storageWarehouse') != expected.get('storageWarehouse'):
+            raise ValueError('Warehouse storage configuration changed; restart listener after validation')
         config = whole.get('directUpload')
         required = {'enabled', 'bind', 'port', 'endpoint', 'certificate', 'privateKey'}
         if (not isinstance(config, dict) or config.get('enabled') is not True
@@ -307,6 +310,7 @@ class DirectUploads:
                 *config.get('alternates', [])]
 
     def issue(self, user, upload, route_id='primary'):
+        self.u.require_public_ingress()
         config = self.configuration()
         route = next((row for row in self.routes(config) if row['id'] == route_id), None)
         if route is None:

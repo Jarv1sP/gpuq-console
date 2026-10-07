@@ -1,0 +1,220 @@
+"""Disposable dual-root contracts, no real nodes/configurations/datasets."""
+import contextlib
+import importlib.util
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import uuid
+
+DEPLOY=Path(__file__).resolve().parents[1]/'deploy'
+def module(name,file):
+    spec=importlib.util.spec_from_file_location(name,DEPLOY/file)
+    value=importlib.util.module_from_spec(spec);spec.loader.exec_module(value)
+    return value
+A=module('warehouse_test_authority','storage-authority.py');D=A.D
+W=module('warehouse_test_factory','storage-warehouse.py')
+S=module('warehouse_test_storage','storage-node.py')
+U=module('warehouse_test_upload','dataset-upload.py')
+L=module('warehouse_test_leases','storage-leases.py')
+I=module('warehouse_test_ingress','dataset-ingress-node.py')
+DW=module('warehouse_test_data_workspace','data-workspace.py')
+ADMIN=D.Principal('demo-user-3',True);OWNER=D.Principal('demo-user-3')
+
+
+class WarehouseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name).resolve()
+        (self.root/'hdd').mkdir(mode=0o700)
+        self.hot=D.DatasetCache(self.root/'ssd',reserve_bytes=0,budget_bytes=10**7)
+        self.config=dict(machine='test-node',datasets=dict(root=str(self.hot.root),sources={},uploads={},retireRetentionDays=7),
+            storageWarehouse=dict(enabled=True,root=str(self.root/'hdd'/'datasets'),mountPoint=str(self.root/'hdd'),reserveBytes=0),
+            storageAuthority={'enabled':True},storageArchive={'enabled':True,'machine':'test-node','authority':'hdd'},
+            storageTier={'enabled':True,'budgetBytes':10**7},storageAuthorities={'hdd':{'machine':'test-node'}})
+        self.node=SimpleNamespace(CONFIG=self.config,ROOT=self.root/'control',HERE=DEPLOY,
+            dataset_cache=lambda:(D,self.hot),dataset_mount_check=lambda config:None,
+            workspace=lambda user:self.root/user,dataset_cache_admission=lambda *args,**kwargs:None,
+            storage_authority=lambda:self.store,storage_archive=lambda:None)
+        self.node.ROOT.mkdir(mode=0o700)
+        # Production's factory requires separate, verified mounts. Disposable
+        # tests exercise byte/root isolation on one temporary filesystem only.
+        real=D.DatasetCache
+        with patch.object(D,'DatasetCache',side_effect=lambda root,**kwargs:real(root,**{k:v for k,v in kwargs.items() if k!='mount_point'})):
+            self.w=W.Warehouse(self.node)
+        self.store=A.AuthorityStore(self.w.cold,'test-node',self.node.ROOT/'authority',principal=ADMIN)
+        self.adapter=A.LocalStoredAuthority(self.store,self.hot,self.node.ROOT/'grants')
+        self.storage=S.StorageNode(self.hot,policy=self.config['storageTier'],authorities={'hdd':self.adapter})
+        self.node.storage_authority=lambda:self.store;self.w.view.storage_authority=self.node.storage_authority
+        self.node.storage_node=lambda:self.storage;self.w.cache_view.storage_node=self.node.storage_node
+        self.node.dataset_source_cache=lambda dataset=None,version=None:(D,self.w.cold) if dataset in (None,'tiny') else (D,self.hot)
+        self.node.projects=lambda:SimpleNamespace()
+        self.node.atomic_json=D._write_json
+        self.node.storage_archive=lambda:None
+        self.node.dataset_rebuild_guard_for=lambda *args:contextlib.nullcontext()
+        self.w.view.storage_archive=self.node.storage_archive
+        data=self.root/'input';data.mkdir();(data/'sample').write_bytes(b'warehouse original')
+        self.w.cold.sources['fixture']=data
+        manifest=D._scan(data)
+        self.version=self.w.cold._register(ADMIN,'tiny',manifest,[OWNER.user_id],'fixture',_origin='upload',_receipt=str(uuid.uuid4()))['version']
+        self.w.cold.materialize(OWNER,'tiny',self.version)
+
+    def tearDown(self):
+        for folder,_,files in os.walk(self.root):
+            os.chmod(folder,0o700)
+            for file in files:os.chmod(Path(folder)/file,0o600)
+        self.tmp.cleanup()
+
+    def test_hdd_ready_does_not_claim_ssd_ready(self):
+        result=self.w.status(OWNER,'tiny',self.version)
+        self.assertEqual(result['state'],'REGISTERED');self.assertTrue(result['warehouseReady'])
+        self.assertNotIn('storageReference',result)
+        self.assertEqual(self.hot.list_datasets(OWNER)['datasets'],[])
+
+    def test_upload_factory_writes_only_fixed_hdd(self):
+        uploads=U.DatasetUploads(self.w.view)
+        self.assertEqual(uploads.cache.root,self.w.cold.root)
+        self.assertFalse(uploads.cache_only())
+        self.assertTrue(self.node.CONFIG['storageTier']['enabled'])
+        self.assertFalse((self.hot.root/'.uploads').exists())
+
+    def test_private_location_proves_hdd_without_creating_upload(self):
+        key=str(uuid.uuid4())
+        result=I.locate(self.node,dict(userId=OWNER.user_id,uploadId=key))
+        self.assertTrue(result['authority']['enabled']);self.assertFalse(result['present'])
+        self.assertFalse((self.hot.root/'.uploads').exists())
+        self.assertFalse((self.w.cold.root/'.uploads').exists())
+
+    def test_download_lease_reads_and_releases_hdd_not_training_cache(self):
+        args=dict(id=str(uuid.uuid4()),userId=OWNER.user_id,
+            reference=dict(kind='datasets',dataset='tiny',version=self.version))
+        leases=L.StorageLeases(self.node)
+        self.assertEqual(leases.download_open(args)['state'],'OPEN')
+        self.assertTrue(self.w.cold._leases('tiny',self.version))
+        self.assertEqual(self.hot._leases('tiny',self.version),[])
+        result=leases.download_export('datasets.snapshot.get',{**args,'path':'sample','offset':0})
+        self.assertEqual(__import__('base64').b64decode(result['data']),b'warehouse original')
+        self.assertTrue(leases.download_finish({**args,'state':'COMPLETED'})['released'])
+        self.assertEqual(self.w.cold._leases('tiny',self.version),[])
+
+    def test_same_node_prepare_evict_restart_recover_and_fixed_reference(self):
+        result=self.w.prepare(OWNER,'tiny',self.version)
+        physical=W.Warehouse.cache_name('tiny')
+        self.assertEqual(result['state'],'READY')
+        self.assertEqual(result['storageReference'],{'dataset':physical,'version':self.version})
+        self.assertEqual((self.hot._paths(physical,self.version)['ready']/'data'/'sample').read_bytes(),b'warehouse original')
+        with self.hot._locked():self.assertEqual(self.hot._tier(physical,self.version)['role'],'cache')
+        self.hot.evict(ADMIN,physical,self.version)
+        self.assertEqual(self.w.status(OWNER,'tiny',self.version)['state'],'REGISTERED')
+        self.storage.tier.recover(ADMIN,physical,self.version)
+        self.assertEqual(self.w.status(OWNER,'tiny',self.version)['state'],'READY')
+        refs=self.storage.tier.retirement_references(ADMIN,physical,self.version)
+        self.assertEqual(refs[0]['sourceMachine'],refs[0]['targetMachine'])
+        self.assertEqual(refs[0]['sourceDataset'],'tiny')
+
+    def test_public_remote_self_grant_still_rejected(self):
+        with self.assertRaisesRegex(ValueError,'another target'):
+            self.store.seal(ADMIN,'tiny',self.version,str(uuid.uuid4()),'test-node')
+        with self.assertRaisesRegex(ValueError,'another machine'):
+            A.RemoteAuthority('test-node',{},self.root/'remote',target_machine='test-node')
+
+    def test_other_owner_cannot_prepare_or_claim_local_cache(self):
+        with self.assertRaises(PermissionError):self.w.prepare(D.Principal('demo-user-4'),'tiny',self.version)
+        self.assertEqual(self.hot.list_datasets(ADMIN)['datasets'],[])
+
+    def test_fixed_policy_no_public_role_or_path_overrides(self):
+        self.config['storageWarehouse']['role']='hdd'
+        with self.assertRaises(ValueError):W.policy(self.node)
+
+    def test_workspace_publication_cannot_create_an_ssd_original(self):
+        with self.assertRaises(PermissionError):DW.DataWorkspaces(self.node).publish({})
+        # The factory's HDD view retains the ordinary validation contract.
+        with self.assertRaises(ValueError):DW.DataWorkspaces(self.w.view).publish({'userId':OWNER.user_id})
+
+    def test_two_roots_retirement_preserves_source_until_target_isolated(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        physical=W.Warehouse.cache_name('tiny')
+        source=self.w.retirement(dataset='tiny',version=self.version)
+        target=self.w.retirement(dataset=physical,version=self.version)
+        source.retirement.clock_synchronized=target.retirement.clock_synchronized=lambda:True
+        sid,tid=str(uuid.uuid4()),str(uuid.uuid4())
+        self.assertEqual(self.w.retirement(dataset='tiny',version=self.version,operation_id=sid).cache.root,self.w.cold.root)
+        self.assertEqual(self.w.retirement(dataset=physical,version=self.version,operation_id=tid).cache.root,self.hot.root)
+        splan=source.plan(OWNER,'tiny',self.version,sid)
+        tplan=target.plan(OWNER,physical,self.version,tid)
+        self.assertIsNotNone(splan['authority']);self.assertEqual(len(tplan['authorityReferences']),1)
+        source.fence(OWNER,sid);target.fence(OWNER,tid)
+        self.assertTrue(self.w.cold._paths('tiny',self.version)['ready'].exists())
+        isolated=target.isolate(OWNER,tid,[])
+        done=source.isolate(OWNER,sid,[isolated])
+        self.assertTrue(done['isolated']);self.assertTrue(isolated['isolated'])
+        self.assertNotEqual(source.cache.root,target.cache.root)
+        self.assertEqual(self.w.retirement(operation_id=sid).cache.root,self.w.cold.root)
+        self.assertEqual(self.w.retirement(operation_id=tid).cache.root,self.hot.root)
+
+    def test_source_retirement_without_target_receipt_keeps_both_roots(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        source=self.w.retirement(dataset='tiny',version=self.version)
+        source.retirement.clock_synchronized=lambda:True
+        sid=str(uuid.uuid4())
+        source.plan(OWNER,'tiny',self.version,sid)
+        with self.assertRaises(ValueError):source.isolate(OWNER,sid,[])
+        self.assertTrue(self.w.cold._paths('tiny',self.version)['ready'].exists())
+        self.assertTrue(self.hot._paths(W.Warehouse.cache_name('tiny'),self.version)['ready'].exists())
+
+    def test_retirement_restore_can_prepare_again_without_reviving_old_grant(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        physical=W.Warehouse.cache_name('tiny')
+        old_proof=self.hot._tier(physical,self.version)['recovery']['proof']
+        source=self.w.retirement(dataset='tiny',version=self.version)
+        target=self.w.retirement(dataset=physical,version=self.version)
+        source.retirement.clock_synchronized=target.retirement.clock_synchronized=lambda:True
+        sid,tid=str(uuid.uuid4()),str(uuid.uuid4())
+        source.plan(OWNER,'tiny',self.version,sid);target.plan(OWNER,physical,self.version,tid)
+        source.fence(OWNER,sid);target.fence(OWNER,tid)
+        isolated=target.isolate(OWNER,tid,[]);source.isolate(OWNER,sid,[isolated])
+        restored=source.restore(ADMIN,sid,_cancel_uncommitted=True)
+        target.release_absence(ADMIN,tid,restored)
+        result=self.w.prepare(OWNER,'tiny',self.version)
+        self.assertEqual(result['state'],'READY')
+        new_proof=self.hot._tier(physical,self.version)['recovery']['proof']
+        self.assertNotEqual(old_proof['grantId'],new_proof['grantId'])
+        with self.assertRaises(PermissionError):
+            with self.adapter.guard(ADMIN,old_proof):pass
+        with self.adapter.guard(ADMIN,new_proof):pass
+
+
+F=module('warehouse_node_routing_fixture','../tests/node-datasets.test.py')
+
+
+class LegacyCacheRegistrationTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture=F.NodeDatasets();self.fixture.setUp()
+        self.node=self.fixture.node
+        self.node.CONFIG['storageTier']={'enabled':True,'budgetBytes':1024**3}
+
+    def tearDown(self):
+        try:self.fixture.tearDown()
+        finally:self.fixture.doCleanups()
+
+    def test_public_legacy_source_registration_is_blocked_for_cache_nodes(self):
+        with self.assertRaises(PermissionError):
+            self.node.dataset_op('datasets.register',dict(userId='builtin-admin',hostAdmin=True,
+                dataset='blocked',sourceId='approved',owners=['demo-user-1']))
+        self.assertFalse(self.fixture.cache._paths('blocked')['.registry'].exists())
+
+    def test_old_registration_worker_cannot_continue_writing_an_ssd_registry(self):
+        folder=self.node.ROOT/'dataset-ops';folder.mkdir()
+        task=dict(op='register',dataset='blocked',sourceId='approved',owners=['demo-user-1'],
+            userId='builtin-admin',hostAdmin=True)
+        key=hashlib.sha256(json.dumps(task,sort_keys=True).encode()).hexdigest()
+        self.node.atomic_json(folder/(key+'.json'),task)
+        self.assertEqual(self.node.dataset_worker(key),1)
+        self.assertEqual(json.loads((folder/(key+'.result.json')).read_text())['state'],'FAILED')
+        self.assertFalse(self.fixture.cache._paths('blocked')['.registry'].exists())
+
+
+if __name__=='__main__':unittest.main()

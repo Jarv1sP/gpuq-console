@@ -24,6 +24,7 @@ STORAGE_AUTHORITY=None
 STORAGE_AUTHORITY_MODULE=None
 STORAGE_ARCHIVE=None
 STORAGE_LEASES=None
+STORAGE_WAREHOUSE=None
 ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DATASET_DELETE_CAPABILITY='dataset-delete-v1'
@@ -220,14 +221,44 @@ def dataset_rebuild_guard(actor,dataset,version):
     helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
     return helper.configured_guard(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),actor,dataset,version)
 
+def storage_warehouse():
+    global STORAGE_WAREHOUSE
+    if CONFIG.get('storageWarehouse') is None:return None
+    if STORAGE_WAREHOUSE is None:
+        spec=importlib.util.spec_from_file_location('gpuq_fixed_warehouse',HERE/'storage-warehouse.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        STORAGE_WAREHOUSE=module.Warehouse(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+    return STORAGE_WAREHOUSE
+
+
+def dataset_source_cache(dataset=None,version=None):
+    warehouse=storage_warehouse()
+    if warehouse is not None:
+        if dataset is None or (warehouse.cold._paths(dataset)['.registry']/'dataset.json').exists():
+            dataset_mount_check(warehouse.config)
+            return warehouse.d,warehouse.cold
+    return dataset_cache()
+
+
+def dataset_rebuild_guard_for(executor,actor,dataset,version):
+    spec=importlib.util.spec_from_file_location('gpuq_fixed_rebuild_proof',HERE/'dataset-rebuild-proof.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module.configured_guard(executor,actor,dataset,version)
+
+
+def dataset_ingress_view():
+    warehouse=storage_warehouse()
+    return warehouse.view if warehouse is not None else (sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+
+
 def dataset_uploads():
     global DATASET_UPLOADS
     if DATASET_UPLOADS is None:
         spec=importlib.util.spec_from_file_location('gpuq_dataset_upload',HERE/'dataset-upload.py')
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-        DATASET_UPLOADS=module.DatasetUploads(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+        DATASET_UPLOADS=module.DatasetUploads(dataset_ingress_view())
     # Revalidate the current data mount even for compact upload status requests.
-    dataset_mount_check(CONFIG['datasets'])
+    dataset_mount_check(DATASET_UPLOADS.n.CONFIG['datasets'])
     return DATASET_UPLOADS
 
 def data_workspaces():
@@ -235,8 +266,8 @@ def data_workspaces():
     if DATA_WORKSPACES is None:
         spec=importlib.util.spec_from_file_location('gpuq_data_workspaces',HERE/'data-workspace.py')
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-        DATA_WORKSPACES=module.DataWorkspaces(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
-    dataset_mount_check(CONFIG['datasets'])
+        DATA_WORKSPACES=module.DataWorkspaces(dataset_ingress_view())
+    dataset_mount_check(DATA_WORKSPACES.n.CONFIG['datasets'])
     return DATA_WORKSPACES
 
 def data_imports():
@@ -244,8 +275,8 @@ def data_imports():
     if DATA_IMPORTS is None:
         spec=importlib.util.spec_from_file_location('gpuq_data_import',HERE/'data-import.py')
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-        DATA_IMPORTS=module.DataImports(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
-    dataset_mount_check(CONFIG['datasets'])
+        DATA_IMPORTS=module.DataImports(dataset_ingress_view())
+    dataset_mount_check(DATA_IMPORTS.n.CONFIG['datasets'])
     return DATA_IMPORTS
 
 def cloud_files():
@@ -253,8 +284,8 @@ def cloud_files():
     if CLOUD_FILES is None:
         spec=importlib.util.spec_from_file_location('gpuq_cloud_files',HERE/'cloud-files.py')
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-        CLOUD_FILES=module.CloudFiles(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
-    dataset_mount_check(CONFIG['datasets'])
+        CLOUD_FILES=module.CloudFiles(dataset_ingress_view())
+    dataset_mount_check(CLOUD_FILES.n.CONFIG['datasets'])
     return CLOUD_FILES
 
 def dataset_refs(job):
@@ -289,11 +320,13 @@ def dataset_background_status(folder,key,spec,cache,actor,*,catalog_snapshot=Non
     # READY is a current cache fact, never a historical worker receipt: a
     # completed transfer may since have been evicted or its mount removed.
     current={}
-    if spec['op']=='prepare':
+    if spec['op']=='prepare' and spec.get('warehouse') is True:
+        current=storage_warehouse().status(actor,spec['dataset'],spec['version'])
+    elif spec['op']=='prepare':
         current=(cache.status(actor,spec['dataset'],spec['version']) if catalog_snapshot is None
                  else cache._status_catalog_snapshot(actor,spec['dataset'],spec['version'],catalog_snapshot))
     if current.get('state')=='READY':return {**current,'operationId':key}
-    if spec['op']=='prepare' and dataset_recovery_configured(cache,actor,spec['dataset'],spec['version']):current['recoveryConfigured']=True
+    if spec['op']=='prepare' and spec.get('warehouse') is not True and dataset_recovery_configured(cache,actor,spec['dataset'],spec['version']):current['recoveryConfigured']=True
     result=folder/(key+'.result.json')
     if result.exists():
         receipt=json.loads(result.read_text())
@@ -367,6 +400,20 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                         catalog_snapshot=snapshots[(item['dataset'],version['version'])])
                     version.update({k:v for k,v in current.items() if k in ('state','operationId','error')})
         if dataset_delete_capability()==1:listing['datasetDelete']=1
+        warehouse=storage_warehouse()
+        if warehouse is not None:
+            for item in listing['datasets']:
+                for value in item['versions']:
+                    try:binding=warehouse.binding(item['dataset'],value['version'])
+                    except FileNotFoundError:continue
+                    value['logicalDataset']=binding['source']
+            originals=warehouse.list(actor)
+            for item in originals['datasets']:
+                for value in item['versions']:
+                    pending=dataset_current_prepare(folder,item['dataset'],value['version'])
+                    if pending:value.update(dataset_background_status(folder,*pending,cache,actor))
+                    value.pop('dataset',None)
+            listing['datasets'].extend(originals['datasets'])
         return listing
     if operation=='datasets.status' and 'operationId' in args:
         key=args['operationId']
@@ -379,6 +426,11 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
     dataset=args.get('dataset')
     if not isinstance(dataset,str) or not DATASET_ID.fullmatch(dataset):raise ValueError('Invalid dataset ID')
     if operation=='datasets.unregister':
+        warehouse=storage_warehouse()
+        warehouse_registration=warehouse is not None and (warehouse.cold._paths(dataset)['.registry']/'dataset.json').exists()
+        if warehouse_registration:
+            if (cache._paths(dataset)['.registry']/'dataset.json').exists():raise ValueError('Ambiguous dual-root dataset registration')
+            cache=warehouse.cold
         version=args.get('version')
         protocol=args.get('protocol')
         if 'protocol' in args and (protocol!='dataset-delete-node-v1' or dataset_delete_capability()!=1):
@@ -399,6 +451,7 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         # Each explicit removal gets its own receipt. Large replica cleanup runs
         # only in the detached worker, never inside the short SSH request.
         task={'op':'unregister-v1' if protocol else 'unregister','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':actor.is_admin,'requestId':_request_id or str(uuid.uuid4())}
+        if warehouse_registration:task['warehouse']=True
         if protocol:task['protocol']=protocol
         if proof is not None:task['portalProvedOtherCopy']=proof
         if proof is not None and proof['versions']==[]:
@@ -407,6 +460,8 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         if _expected_registration is not None:task['expectedRegistration']=_expected_registration
         if _expected_owners is not None:task['expectedOwners']=_expected_owners
     elif operation=='datasets.register':
+        if CONFIG.get('storageTier',{}).get('enabled') is True:
+            raise PermissionError('Dataset originals must use the HDD warehouse upload or workspace publication')
         protocol=args.get('protocol')
         if 'protocol' in args and (protocol!='dataset-delete-node-v1' or dataset_delete_capability()!=1):
             raise ValueError('Explicit new registration requires the v1 node protocol')
@@ -419,10 +474,13 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
     else:
         version=args.get('version')
         if not isinstance(version,str) or not DATASET_VERSION.fullmatch(version):raise ValueError('Invalid immutable dataset version')
-        status=cache.status(actor,dataset,version)
+        warehouse=storage_warehouse()
+        local_original=warehouse is not None and warehouse.contains(actor,dataset,version)
+        status=warehouse.status(actor,dataset,version) if local_original else cache.status(actor,dataset,version)
         if status['state']=='READY':return status
-        if dataset_recovery_configured(cache,actor,dataset,version):status['recoveryConfigured']=True
+        if not local_original and dataset_recovery_configured(cache,actor,dataset,version):status['recoveryConfigured']=True
         task={'op':'prepare','dataset':dataset,'version':version,'userId':actor.user_id,'hostAdmin':actor.is_admin}
+        if local_original:task['warehouse']=True
     key=hashlib.sha256(json.dumps(task,sort_keys=True).encode()).hexdigest();unit='gpuq-data-'+key[:32]
     spec=folder/(key+'.json');result=folder/(key+'.result.json')
     if operation=='datasets.status':
@@ -450,12 +508,22 @@ def dataset_worker(key):
     if hashlib.sha256(json.dumps(task,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Background dataset request was modified')
     try:
         module,cache=dataset_cache();actor=dataset_actor(module,task)
+        if task.get('warehouse') is True and task['op'] in ('unregister','unregister-v1'):
+            warehouse=storage_warehouse()
+            if warehouse is None:raise ValueError('Fixed warehouse registration is unavailable')
+            cache=warehouse.cold
         with module.wait_for_locks():
             if task['op'] in ('register','register-v1'):
+                if CONFIG.get('storageTier',{}).get('enabled') is True:
+                    raise PermissionError('Dataset originals must use the HDD warehouse upload or workspace publication')
                 if task['op']=='register-v1' and (task.get('protocol')!='dataset-delete-node-v1' or dataset_delete_capability()!=1):
                     raise ValueError('Explicit v1 registration worker protocol is unavailable')
                 out=cache.register_source(actor,task['dataset'],task['sourceId'],task['owners']);out['state']='REGISTERED'
             elif task['op']=='prepare':
+                if task.get('warehouse') is True:
+                    out=storage_warehouse().prepare(actor,task['dataset'],task['version'])
+                    atomic_json(folder/(key+'.result.json'),{**out,'operationId':key})
+                    return 0
                 record,identity=cache._record_snapshot(actor,task['dataset'],task['version'])
                 with cache._locked():
                     cache._check_snapshot(actor,task['dataset'],task['version'],identity)
@@ -1174,6 +1242,11 @@ def storage_node():
         if configured:
             paths,_=dataset_cache();paths._mkdir(ROOT/'storage-grants')
         for key,value in configured.items():
+            warehouse=storage_warehouse()
+            if (warehouse is not None and value=={'machine':CONFIG.get('machine')}
+                    and key==CONFIG['storageArchive']['authority']):
+                authorities[key]=storage_authority_module().LocalStoredAuthority(storage_authority(),warehouse.hot,ROOT/'storage-grants'/key)
+                continue
             if (not isinstance(key,str) or not DATASET_ID.fullmatch(key) or not isinstance(value,dict)
                     or set(value)!={'machine'} or value['machine']==CONFIG.get('machine')
                     or value['machine'] not in CONFIG.get('transferPeers',{})):
@@ -1198,7 +1271,7 @@ def storage_authority():
     if not isinstance(config,dict) or set(config)!={'enabled'} or type(config['enabled']) is not bool:raise ValueError('Invalid protected authority configuration')
     if not config['enabled']:return None
     if STORAGE_AUTHORITY is None:
-        module,cache=dataset_cache()
+        module,cache=dataset_source_cache()
         STORAGE_AUTHORITY=storage_authority_module().AuthorityStore(cache,CONFIG['machine'],ROOT/'storage-authority',principal=module.Principal('builtin-admin',True))
     return STORAGE_AUTHORITY
 
@@ -1213,8 +1286,10 @@ def dataset_delete_capability():
         ('dataset-retirement.py','dataset-retirement-node.py','dataset-rebuild-proof.py','dataset-cache.py','dataset-tier.py','storage-authority.py')) else 0
 
 
-def dataset_retirement_node():
+def dataset_retirement_node(*,dataset=None,version=None,operation_id=None):
     if dataset_delete_capability()!=1:raise ValueError('这台服务器还不支持彻底删除')
+    warehouse=storage_warehouse()
+    if warehouse is not None:return warehouse.retirement(dataset=dataset,version=version,operation_id=operation_id)
     spec=importlib.util.spec_from_file_location('gpuq_dataset_retirement_node',HERE/'dataset-retirement-node.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     return module.RetirementNode.from_executor(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
@@ -1239,7 +1314,7 @@ def dataset_retirement_operation(operation,args):
         raise ValueError('Authenticated retirement identity is required')
     module,_=dataset_cache();actor=dataset_actor(module,args)
     if action=='capabilities':return {'protocol':'dataset-delete-node-v1','machine':CONFIG['machine'],'datasetDelete':dataset_delete_capability()}
-    node=dataset_retirement_node()
+    node=dataset_retirement_node(dataset=args.get('dataset'),version=args.get('version'),operation_id=args.get('operationId'))
     if action=='registration':
         return {**node.cache.new_registration_proof(actor,args['dataset'],args['version']),'machine':CONFIG['machine']}
     if action=='registration-discard':
@@ -1362,7 +1437,7 @@ def dataset_retirement_activity(key,action):
 
 def dataset_retirement_worker(key,action):
     if action not in ('fence','isolate','restore','release-absence','cancel','commit'):raise ValueError('Unknown private retirement worker action')
-    node=dataset_retirement_node()
+    node=dataset_retirement_node(operation_id=key)
     request=node._phase_read(key,action,'launch')
     if not isinstance(request,dict) or set(request)!={'schema','operationId','action','userId','hostAdmin','targets','sourceResult','adminContinue'} or type(request['schema']) is not int or request['schema']!=1 or request['operationId']!=key or request['action']!=action:
         raise ValueError('Retirement launch intent changed')
@@ -1390,7 +1465,7 @@ def storage_archive():
     if STORAGE_ARCHIVE is None:
         spec=importlib.util.spec_from_file_location('gpuq_storage_archive',HERE/'storage-archive.py')
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-        STORAGE_ARCHIVE=module.StorageArchive.from_executor(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+        STORAGE_ARCHIVE=module.StorageArchive.from_executor(dataset_ingress_view())
     return STORAGE_ARCHIVE
 
 
@@ -1499,6 +1574,9 @@ def storage_collect():
         # No timer is installed/enabled and this remains absent from RPC routes.
         if dataset_delete_capability()==1:
             result={**result,'retirements':dataset_retirement_node().retirement.collect_expired(actor,enabled=True,max_versions=16)}
+            warehouse=storage_warehouse()
+            if warehouse is not None:
+                result['warehouseRetirements']=warehouse.retirement(originals=True).retirement.collect_expired(actor,enabled=True,max_versions=16)
         return result
     except module.CacheBusy:
         # Foreground uploads/leases win. The existing timer retries after its

@@ -192,6 +192,8 @@ class DataWorkspaces:
         return result
 
     def publish(self, args):
+        if self.n.CONFIG.get('storageTier',{}).get('enabled') is True:
+            raise PermissionError('Dataset originals must be published in the HDD warehouse, not a training cache')
         user, key, name, path = args['userId'], args.get('key'), args.get('name'), args.get('path')
         if not isinstance(key, str) or not UUID.fullmatch(key):
             raise ValueError('A valid publication key is required')
@@ -249,6 +251,8 @@ class DataWorkspaces:
             lock = self.lifetime(user, exclusive=True)
         module, cache, owner = self.storage(user)
         try:
+            if self.n.CONFIG.get('storageTier',{}).get('enabled') is True:
+                raise PermissionError('Dataset originals must be published in the HDD warehouse, not a training cache')
             source = owner/'data'/task['path']
             self.relative(task['path'])
             manifest = module._scan(source)  # FD traversal rejects links/special files

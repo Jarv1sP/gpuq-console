@@ -97,17 +97,21 @@ class SnapshotSync:
         self.n.workspace(args['userId'])
         return self.d.Principal(args['userId'], args.get('hostAdmin') is True)
 
+    def dataset_cache(self,args):
+        factory=getattr(self.n,'dataset_source_cache',None)
+        return factory(args.get('dataset'),args.get('version')) if factory else self.n.dataset_cache()
+
     def acquire_transfer_lease(self, args, transfer_id):
         """Internal control path; callers journal identity BEFORE acquiring."""
         if not isinstance(transfer_id, str) or not UUID.fullmatch(transfer_id):
             raise ValueError('Invalid transfer lease identity')
-        module, cache = self.n.dataset_cache()
+        module, cache = self.dataset_cache(args)
         actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
         # UUID and its namespaced job ID both satisfy DatasetCache.USER_RE.
         return cache.acquire_lease(actor, args['dataset'], args['version'], 'transfer:'+transfer_id)
 
     def require_transfer_lease(self, args, transfer_id, lease_id):
-        module, cache = self.n.dataset_cache()
+        module, cache = self.dataset_cache(args)
         actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
         with cache._locked():
             cache._dataset(actor, args['dataset'])
@@ -118,7 +122,7 @@ class SnapshotSync:
 
     def release_transfer_lease(self, args, lease_id):
         """Internal ONLY: TransferJobs has checked the trusted target fence."""
-        module, cache = self.n.dataset_cache()
+        module, cache = self.dataset_cache(args)
         # A crash after unlinking the lease may be followed by legitimate
         # eviction/unregistration before the release receipt is saved. Absence
         # is already the desired state; do not require a surviving registry.
@@ -137,7 +141,7 @@ class SnapshotSync:
         """
         if not isinstance(transfer_id, str) or not UUID.fullmatch(transfer_id):
             raise ValueError('Invalid transfer lease identity')
-        _, cache = self.n.dataset_cache()
+        _, cache = self.dataset_cache(args)
         with cache._locked():
             matches = [lease for lease in cache._leases(args['dataset'], args['version'])
                        if lease['owner'] == args['userId'] and lease['jobId'] == 'transfer:'+transfer_id]
@@ -209,7 +213,7 @@ class SnapshotSync:
             manifest = {'schema':1, 'directories':[r['path'] for r in records if r['type']=='directory'],
                 'files':[{'path':r['path'],'size':r['bytes'],'sha256':r['sha256'],'executable':r['executable']} for r in records if r['type']=='file']}
         else:
-            module,self.cache=self.n.dataset_cache()
+            module,self.cache=self.dataset_cache(args)
             actor=module.Principal(args['userId'],args.get('hostAdmin') is True)
             dataset, version = args.get('dataset'), args.get('version')
             paths=self.cache._paths(dataset,version);self.cache._dataset(actor,dataset)
@@ -263,7 +267,7 @@ class SnapshotSync:
         allowed = {'userId','hostAdmin'}|reference|({'offset'} if action=='manifest' else {'path','offset'} if action=='get' else set())
         if set(args)-allowed or action not in ('info','manifest','get'): raise ValueError('Invalid snapshot operation')
         if kind == 'datasets':
-            module, cache = self.n.dataset_cache()
+            module, cache = self.dataset_cache(args)
             actor = module.Principal(args['userId'], args.get('hostAdmin') is True)
             dataset = module._identifier(args.get('dataset'))
             version = module._identifier(args.get('version'), module.HASH_RE)

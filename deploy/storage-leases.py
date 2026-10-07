@@ -380,9 +380,13 @@ class StorageLeases:
             self._save(target, record)
             return self._handoff_locked(job, retry_binding, target, record, lease_job_id=lease_job_id)
 
-    def _release_matching(self, binding, refs, job_id):
-        module, cache = self.n.dataset_cache()
+    def _download_cache(self, ref):
+        resolve = getattr(self.n, 'dataset_source_cache', None)
+        return resolve(ref['dataset'], ref['version']) if resolve is not None else self.n.dataset_cache()
+
+    def _release_matching(self, binding, refs, job_id, *, _download_source=False):
         for ref in refs:
+            module, cache = self._download_cache(ref) if _download_source else self.n.dataset_cache()
             with cache._locked():
                 matches = [lease for lease in cache._leases(ref['dataset'], ref['version'])
                            if lease['owner'] == binding['userId'] and lease['jobId'] == job_id]
@@ -475,8 +479,8 @@ class StorageLeases:
             record = self._initial(path, binding)
             if record['state'] not in ('ACQUIRING', 'HELD'):
                 raise ValueError('Download was finalized; use a new UUID')
-            module, cache = self.n.dataset_cache()
             ref = binding['reference']
+            module, cache = self._download_cache(ref)
             if record['leases']:
                 self._require(cache, binding, ref, record['leases'][0], 'download:' + binding['id'])
             lease = cache.acquire_lease(module.Principal(binding['userId'], binding['hostAdmin']),
@@ -501,7 +505,7 @@ class StorageLeases:
             record = self._load(path, binding)
             if record['state'] != 'HELD' or len(record['leases']) != 1:
                 raise ValueError('Download is not held or was finalized')
-            _, cache = self.n.dataset_cache()
+            _, cache = self._download_cache(binding['reference'])
             self._require(cache, binding, binding['reference'], record['leases'][0], 'download:' + binding['id'])
             return self._export(binding, record['leases'][0], operation, {key: args[key] for key in fields if key in args})
 
@@ -518,7 +522,7 @@ class StorageLeases:
                 raise ValueError('Invalid download finalization state')
             record.update(state='CANCELING' if terminal == 'CANCELED' else 'COMPLETING', finishState=terminal)
             self._save(path, record)  # Same lock excludes every in-flight read.
-            self._release_matching(binding, [binding['reference']], 'download:' + binding['id'])
+            self._release_matching(binding, [binding['reference']], 'download:' + binding['id'], _download_source=True)
             record['state'] = terminal
             self._save(path, record)
             return {'id': binding['id'], 'state': terminal, 'released': True}

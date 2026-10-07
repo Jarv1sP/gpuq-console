@@ -28,6 +28,7 @@ import secrets
 import sqlite3
 import stat
 import time
+import uuid
 
 
 def _module(name, filename):
@@ -368,17 +369,34 @@ class AuthorityStore:
                 raise ValueError('Old authority grant is not confirmed permanently revoked')
         return True
 
-    def seal(self, actor, dataset, version, grant_id, target_machine):
+    def seal(self, actor, dataset, version, grant_id, target_machine, *, _local_target=None, _local_registration=None):
         """Offline/long-running ADMIN operation; never reachable via read()."""
         self.cache._actor(actor, admin=True)
         D._identifier(dataset); D._identifier(version, D.HASH_RE); J.identifier(grant_id)
         target_machine = _machine(target_machine)
-        if target_machine == self.machine: raise ValueError('Remote grant requires another target machine')
+        if target_machine == self.machine:
+            # A private factory may bind this physical machine's distinct SSD
+            # cache. No RPC/peer request passes this object or relaxes remote
+            # self-grants. The existing dependency journal remains authoritative.
+            if (_local_target is None or not isinstance(_local_registration,list) or len(_local_registration)!=5
+                    or any(type(v) is not int or v<0 for v in _local_registration) or _local_target.root == self.cache.root
+                    or _local_target.root in self.cache.root.parents
+                    or self.cache.root in _local_target.root.parents
+                    or _local_target._root_identity == self.cache._root_identity
+                    or self.cache.mount is not None and _local_target.mount is not None
+                    and self.cache.mount[2] == _local_target.mount[2]):
+                raise ValueError('Remote grant requires another target machine')
+        elif _local_target is not None or _local_registration is not None:
+            raise ValueError('Local authority must use this fixed physical machine')
         folder = self.root/grant_id
         # A source-cache lock file serializes retrying issuers without scanning
         # or rewriting any existing dataset or unrelated grant.
         with self.reference_lock(dataset,version), self.cache._lock_file('.locks/authority-issue-'+grant_id+'.lock'):
             self.assert_live(dataset,version)
+            if _local_registration is not None:
+                with self.cache._locked():
+                    if list(self.cache._record_identity(dataset,version))!=_local_registration:
+                        raise ValueError('Local warehouse registration changed before sealing')
             try:
                 grant = _load(folder/'grant.json')
             except FileNotFoundError:
@@ -654,3 +672,87 @@ class RemoteAuthority:
                 # again before READY. Corrupt partials never publish as valid.
                 return target_cache._publish_locked(actor,target_dataset,version,plan['token'],snapshot,_guard=validate_target)
         finally: client.close()
+
+
+class LocalStoredAuthority(RemoteAuthority):
+    """Fixed same-machine dual roots, using ordinary durable grant receipts."""
+    def __init__(self, store, target_cache, grant_root):
+        self.store, self.target_cache = store, target_cache
+        self.machine = self.target_machine = store.machine
+        cold, hot = store.cache, target_cache
+        if (cold.root == hot.root or cold.root in hot.root.parents or hot.root in cold.root.parents
+                or cold._root_identity == hot._root_identity
+                or cold.mount is not None and hot.mount is not None and cold.mount[2] == hot.mount[2]):
+            raise ValueError('Local warehouse and training cache must be distinct roots and media')
+        self.root = _private_root(grant_root)
+
+    def _proof(self, grant):
+        return dict(schema=1, kind='local-stored-protected-v1', machine=self.machine,
+                    targetMachine=self.target_machine, dataset=grant['dataset'], version=grant['version'],
+                    owners=grant['receipt']['owners'], pinId=grant['receipt']['pinId'], grantId=grant['id'],
+                    receiptSha256=_sha(grant['receipt']), sourceRootIdentity=list(self.store.cache._root_identity),
+                    targetRootIdentity=list(self.target_cache._root_identity))
+
+    def seal(self, actor, dataset, version, pin_id):
+        _admin(actor); D._identifier(pin_id)
+        if not pin_id.startswith('authority-'):raise ValueError('Authority retention pin required')
+        with self.store.cache._locked():
+            registration=list(self.store.cache._record_identity(dataset,version))
+        key=str(uuid.UUID(_sha([self.machine,list(self.target_cache._root_identity),dataset,version,registration])[:32]))
+        grant=self.store.seal(self.store.principal,dataset,version,key,self.machine,
+                              _local_target=self.target_cache,_local_registration=registration)
+        self.install_grant(grant)
+        return self._proof(grant)
+
+    def _stored(self, grant_id):
+        J.identifier(grant_id)
+        return _validate_grant(_load(self.root/(grant_id+'.json')),self.machine,self.target_machine)
+
+    def install_grant(self, grant):
+        # Restoring a retired version creates a new source registration. Keep
+        # every grant immutable; never replace one or revive its revocation.
+        grant=_validate_grant(grant,self.machine,self.target_machine)
+        with self.scope(grant['dataset'],grant['version']):
+            path=self.root/(grant['id']+'.json')
+            try:previous=_load(path)
+            except FileNotFoundError:previous=None
+            if previous is not None and previous!=grant:raise ValueError('Local grant generation cannot change')
+            if previous is None:D._write_json(path,grant)
+        return dict(installed=True,dataset=grant['dataset'],version=grant['version'])
+
+    def retirement_reference(self, actor, proof):
+        _admin(actor)
+        if not isinstance(proof,dict):raise ValueError('Invalid local warehouse receipt')
+        grant=self._stored(proof.get('grantId'))
+        if proof!=self._proof(grant):raise ValueError('Local warehouse binding changed during deletion')
+        return dict(sourceMachine=self.machine,targetMachine=self.target_machine,sourceDataset=grant['dataset'],
+                    version=grant['version'],grantId=grant['id'],receiptSha256=_sha(grant['receipt']))
+
+    def _live(self, proof):
+        grant=self._stored(proof.get('grantId'))
+        if proof!=self._proof(grant):raise ValueError('Local warehouse receipt or roots changed')
+        self.store._assert_live(grant)
+        sealed=_load(self.store.root/grant['id']/'sealed.json')
+        if _sha(sealed)!=grant['receipt']['sealedSha256']:raise ValueError('Local warehouse seal changed')
+        return grant,sealed
+
+    @contextlib.contextmanager
+    def guard(self, actor, proof):
+        _admin(actor)
+        if not isinstance(proof,dict):raise ValueError('Invalid local warehouse receipt')
+        with self.scope(proof.get('dataset'),proof.get('version')):
+            _,sealed=self._live(proof)
+            with self.store.local.guard(self.store.principal,sealed):
+                self._live(proof)
+                yield
+
+    def recover(self, actor, proof, target_cache, target_dataset, *, validate_target):
+        target_cache._actor(actor,admin=True)
+        if target_cache._root_identity!=self.target_cache._root_identity:
+            raise ValueError('Local recovery target differs from the fixed training cache')
+        with self.scope(proof.get('dataset'),proof.get('version')):
+            _,sealed=self._live(proof)
+            def check():
+                validate_target()
+                self._live(proof)
+            return self.store.local.recover(actor,sealed,target_cache,target_dataset,validate_target=check)

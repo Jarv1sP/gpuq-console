@@ -691,11 +691,19 @@ class TransferJobs:
         archive._require(source=True)
         if (archive.policy != policy or archive.machine != value['targetMachine']
                 or archive.store is None or archive.store.machine != archive.machine
-                or archive.store.cache.root != self.n.dataset_cache()[1].root):
+                or archive.store.cache.root != getattr(self.n,'dataset_source_cache',self.n.dataset_cache)()[1].root):
             raise ValueError('Managed archive authority binding changed')
         return dict(value)
 
     def upload(self, spec, action, **fields):
+        if action not in ('begin', 'manifest', 'chunk', 'seal', 'commit'):
+            # Query and cleanup remain usable after owner cancellation. They
+            # never need permission to admit warehouse bytes into a cache.
+            return self._upload_bound(spec, action, **fields)
+        with self.n.dataset_uploads()._peer_cache_preparation(spec):
+            return self._upload_bound(spec, action, **fields)
+
+    def _upload_bound(self, spec, action, **fields):
         if action == 'begin' and 'archiveLane' in spec:
             self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
             return self.n.dataset_uploads().begin(spec['userId'], fields, _archive_transfer=spec['id'])
@@ -724,6 +732,8 @@ class TransferJobs:
         if action in ('seal', 'commit'):
             return self.n.dataset_uploads().start(spec['userId'], fields, action,
                 inline_unit=self.unit(spec['id'], spec['attempt']))
+        if action == 'begin':
+            return self.n.dataset_uploads().begin(spec['userId'], fields)
         return self.n.dataset_uploads().process('datasets.upload.'+action, {'userId': spec['userId'], **fields})
 
     def worker(self, key, attempt):
