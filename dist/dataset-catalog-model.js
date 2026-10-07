@@ -178,9 +178,10 @@ export function overviewDatasetCatalog(overview,machine,legacy=null){
     datasets:overview.datasets.map(item=>{
       const old=legacy?.datasets?.find(row=>row.dataset===item.dataset);
       return {dataset:item.dataset,name:old?.name,labelScope:old?.labelScope,displayNameRevision:old?.displayNameRevision,
-        versions:item.versions.map(v=>{const locations=[...v.caches,...(v.personalOriginals||[])].map(row=>({...row,canUse:row.canUse===true||v.canUse===true&&v.originals.some(original=>original.machine===row.machine&&original.canUse===true)})),local=locations.find(row=>row.machine===machine),node=overview.caches.find(row=>row.machine===machine),known=node?.state!=='UNAVAILABLE'&&node?.usageComplete===true;return {version:v.version,ownerLabel:v.ownerLabel,
+        versions:item.versions.map(v=>{const locations=[...v.caches,...(v.personalOriginals||[])].map(row=>({...row,canUse:row.canUse===true||v.canUse===true&&v.originals.some(original=>original.machine===row.machine&&original.canUse===true)})),local=locations.find(row=>row.machine===machine),node=overview.caches.find(row=>row.machine===machine),known=node?.state!=='UNAVAILABLE'&&node?.usageComplete===true,prior=old?.versions?.find(row=>row.version===v.version),source=locations.find(row=>row.machine===prior?.sourceMachine&&row.state==='READY'&&row.canUse===true);return {version:v.version,ownerLabel:v.ownerLabel,
           canUse:v.canUse===true,bytes:v.contentBytes,files:v.fileCount,
-          state:local?.state||(known?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,locations:locations.map(row=>({...row}))};})};
+          state:local?.state||(known?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true||prior?.canPrepare===true,
+          ...(source?{sourceMachine:source.machine,sourceDataset:prior.sourceDataset}:{}),locations:locations.map(row=>({...row}))};})};
     })};
   const result=aggregateDatasetCatalog(catalog);
   for(const item of result.datasets){

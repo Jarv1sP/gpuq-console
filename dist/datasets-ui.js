@@ -57,7 +57,7 @@ export function datasetAccess(version,catalog,{machineAuthorized=true}={}){
   const remote=typeof version.sourceMachine==='string'&&version.sourceMachine!==catalog.machine&&version.locations?.some(row=>row.machine===version.sourceMachine&&row.state==='READY'&&row.canUse===true);
   const canPrepare=target&&version.canUse===true&&version.canPrepare===true&&(localAllowed||remote===true);
   const prepare=canPrepare&&['REGISTERED','STAGING','FAILED','NOT_LOCAL'].includes(state);
-  const selectable=ready||localAllowed&&state==='PREPARING'||canPrepare&&(['REGISTERED','STAGING','PREPARING'].includes(state)||state==='NOT_LOCAL'&&remote);
+  const selectable=ready||localAllowed&&state==='PREPARING'||canPrepare&&(['REGISTERED','STAGING','PREPARING'].includes(state)||state==='NOT_LOCAL'&&(remote||localAllowed));
   const browseOnly=version.canUse!==true||!target||!localAllowed&&!canPrepare&&version.locations?.some(row=>row.machine===catalog.machine&&row.canUse!==true);
   return {state,ready,prepare,selectable,browseOnly,canPrepare,canRetry:localAllowed};
 }
