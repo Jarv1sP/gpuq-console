@@ -202,7 +202,8 @@ try{
       for(const width of [1440,1024,390,320]){
         await target.setViewportSize({width,height:width<760?844:1080});
         await target.evaluate(async()=>{await document.fonts.ready;await Promise.allSettled(document.getAnimations().filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
-        await refreshVisible(target);toastChecks.push({role,route,width,...await assertToastClear(target)});
+        await refreshVisible(target);
+        try{toastChecks.push({role,route,width,...await assertToastClear(target)});}catch(error){await target.screenshot({path:join(shots,'toast-failed-'+role+'-'+route.replace('/','-')+'-'+width+'.png'),animations:'disabled'});error.message=role+' '+route+' '+width+': '+error.message;throw error;}
       }
     }
   }
