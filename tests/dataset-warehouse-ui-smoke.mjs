@@ -8,6 +8,7 @@ import {datasetHelpGeometry} from './dataset-help-geometry.mjs';
 const root=new URL('..',import.meta.url).pathname,output=join(process.env.UI_SCREENSHOTS||'/tmp/stargate-warehouse-ui','warehouse-v3');
 const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):(await import('../dist/machines.js')).MACHINES;
 const origin='https://offline-pr-j.test',node='https://upload-fixture.test',checkedAt=new Date().toISOString(),revision='c'.repeat(64),certificate='d'.repeat(64),results=[],errors=[],calls=[],mainStructures=new Map();
+const hddIngress=process.env.DATASET_HDD_INGRESS==='1',uploadMachine=hddIngress?machines[3].id:machines[0].id;
 function catalog(machine,role){
  const names=['ImageNet 子集','校园场景分割','语音指令 v2','tiny-local','CT 影像 2025'],ids=['imagenet-sub','campus-seg','voice-cmd','tiny-local','med-ct-2025'];
  return {machine,partial:false,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:ids.map((dataset,index)=>{
@@ -30,7 +31,7 @@ try{
   const json=(route,result)=>route.fulfill({contentType:'application/json',body:JSON.stringify({principal,state,result})});
   await context.route('**/*',async route=>{
    const url=new URL(route.request().url());assert([origin,node].includes(url.origin),'no external request '+url.origin);
-   if(url.origin===node){assert.equal(url.pathname,'/capabilities');assert.equal(route.request().method(),'GET');assert(!route.request().headers().authorization);return route.fulfill({contentType:'application/json',body:JSON.stringify({protocol:'dataset-upload-v1',listenerReady:true,machine:machines[0].id,revision})});}
+   if(url.origin===node){assert.equal(url.pathname,'/capabilities');assert.equal(route.request().method(),'GET');assert(!route.request().headers().authorization);return route.fulfill({contentType:'application/json',body:JSON.stringify({protocol:'dataset-upload-v1',listenerReady:true,machine:uploadMachine,revision})});}
    if(url.pathname==='/api/call'){
     const {operation,args={}}=route.request().postDataJSON();calls.push({role,width,operation,args});
     if(operation==='state')return json(route,null);
@@ -48,7 +49,7 @@ try{
       return json(route,value);
     }
     if(operation==='datasets.capacity'){const i=machines.findIndex(m=>m.id===args.machine),used=[.62,.9,.31,.62][i];return json(route,{machine:args.machine,available:true,filesystemBytes:1000*1024**3,availableBytes:Math.floor((1-used)*1000)*1024**3,usableBytes:(Math.floor((1-used)*1000)-20)*1024**3,reserveBytes:20*1024**3});}
-    if(operation==='datasets.upload.routes')return json(route,{available:true,protocol:'dataset-upload-v1',machine:args.machine,revision,certificateSha256:certificate,routes:[{id:'primary',kind:'campus-direct',endpoint:node}]});
+    if(operation==='datasets.upload.routes')return json(route,{available:true,protocol:'dataset-upload-v1',machine:hddIngress?uploadMachine:args.machine,revision,certificateSha256:certificate,routes:[{id:'primary',kind:'campus-direct',endpoint:node}],...(hddIngress?{placementProtocol:1,requestedMachine:args.machine,storageMachine:uploadMachine,storageTier:'hdd',legacyPlacement:false}:{})});
     if(operation==='cloud.info')return json(route,{capabilityVerified:false,configurationEnabled:true,aliyunConnected:false,nodeDirect:false,managedExternally:true});
     if(operation==='datasets.storage.status')return json(route,{enabled:true,version:{dataset:args.dataset,version:args.version,state:'READY',pinCount:0,manualPinProtocol:1,manualPin:null}});
     if(operation==='datasets.storage.plan')return json(route,{enabled:true,usageBytes:30*1024**3,budgetBytes:300*1024**3,lowWater:.6,highWater:.8,candidates:[]});
@@ -117,6 +118,11 @@ try{
   for(const source of await page.locator('.v3-other-sources>.button').all())assert(await source.evaluate(node=>getComputedStyle(node).borderTopStyle==='solid'&&node.getBoundingClientRect().height>=44));
   await page.locator('#v3-file-picker').setInputFiles([{name:'training-images.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(4*1024**2,1)},{name:'training-labels.json',mimeType:'application/json',buffer:Buffer.from('{"labels":[1,2,3]}')}]);
   await page.waitForFunction(()=>document.querySelector('#v3-upload-route')?.classList.contains('ok'));await shot('upload-2');
+  if(hddIngress){
+   const text=await page.locator('#dataset-add-dialog').textContent();
+   assert(text.includes(uploadMachine),'the physical HDD destination is visible, not the selected training node');
+   assert(text.includes('机械仓库入库'),'the selected SSD capacity is not advertised as HDD upload space');
+  }
   await page.keyboard.press('Escape');await page.locator('#dataset-add-dialog').waitFor({state:'hidden'});
   assert(await page.locator('[data-v3-upload]').evaluate(node=>document.activeElement===node),'closing returns focus to upload');
   await page.locator('#warehouse-search').fill('campus-seg');assert.equal(await page.locator('[data-v3-select]').count(),1);

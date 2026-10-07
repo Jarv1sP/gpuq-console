@@ -53,7 +53,7 @@ function authorizedCopy(service,user,data){
     authorized(service,user,data.from);
   }else{
     authorized(service,user,data.machine);
-    if(data.from&&!user.limits[data.from]&&!service.archiveSourceAllowed?.(user.id,data.from,data.reference))fail('源机器或数据版本未授权。',403);
+    if(data.from&&!user.limits[data.from]&&!service.archiveSourceAllowed?.(user.id,data.from,data.reference)&&!service.datasetIngressSourceAllowed?.(user.id,data.from,data.reference))fail('源机器或数据版本未授权。',403);
   }
 }
 function archiveLane(service,data){
@@ -225,7 +225,10 @@ async function dispatch(service,principal,row){
     row.data.result=result;return releaseSource(service,save(service,row,result.state,principal.username,'transfers.dispatched'),principal.username);
   }
   if(data.kind==='upload'){
-    const result=await executionCall(service,principal,'datasets.upload.begin',{machine:data.machine,key:row.client_key,name:data.name,...data.manifest,...(data.allowRelay===true?{allowRelay:true}:{})});
+    // Managed transfers own their pre-existing machine/digest. They are not a
+    // new standalone data-upload admission and may never be silently moved.
+    const local=Object.assign(Object.create(service),{datasetUploadIngress:undefined});
+    const result=await executionCall(local,principal,'datasets.upload.begin',{machine:data.machine,key:row.client_key,name:data.name,...data.manifest,...(data.allowRelay===true?{allowRelay:true}:{})});
     row.data.uploadId=validId(result.uploadId);row.data.result=result;
     return save(service,row,result.state==='READY'?'SUCCEEDED':'WAITING_CLIENT',principal.username,'transfers.upload-start');
   }
@@ -325,7 +328,7 @@ async function transferOperation(service,principal,operation,args){
     try{
       const value=await service.bridge(args.machine,'transfers.capabilities',{userId:user.id});
       if(value?.protocol!=='lan-transfer-v1'||typeof value.enabled!=='boolean'||typeof value.sourceReady!=='boolean'||!Array.isArray(value.sources))return unavailable;
-      const sources=[...new Set(value.sources)].filter(id=>id!==args.machine&&MACHINES.some(m=>m.id===id)&&(user.limits[id]>0||service.archiveMachineVisible?.(user.id,id)));
+      const sources=[...new Set(value.sources)].filter(id=>id!==args.machine&&MACHINES.some(m=>m.id===id)&&(user.limits[id]>0||service.archiveMachineVisible?.(user.id,id)||service.datasetIngressMachineVisible?.(user.id,id)));
       return {...unavailable,enabled:value.enabled,sourceReady:value.sourceReady,sources:value.enabled?sources:[]};
     }catch(error){if(error.transferFence)throw error;return unavailable;}
   }
@@ -446,7 +449,9 @@ async function transferOperation(service,principal,operation,args){
     if(row.data.kind==='upload'){
       if(!row.data.uploadId)fail('上传初始化未确认，请重复原 create。',409);
       if(!['status','manifest','seal','chunk','commit','direct-ticket','direct-revoke'].includes(args.action))fail('上传操作无效。');
-      const {id,action,...request}=args;result=await executionCall(service,principal,'datasets.upload.'+action,{machine:row.data.machine,uploadId:row.data.uploadId,...request});
+      const {id,action,...request}=args;
+      const local=Object.assign(Object.create(service),{datasetUploadIngress:undefined});
+      result=await executionCall(local,principal,'datasets.upload.'+action,{machine:row.data.machine,uploadId:row.data.uploadId,...request});
       // A short-lived credential is returned only to its authenticated caller,
       // never copied into persisted transfer history, progress, or audit data.
       if(['direct-ticket','direct-revoke'].includes(action))return result;

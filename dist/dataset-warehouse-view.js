@@ -3,7 +3,7 @@ import {datasetLabelClient,normalizeDatasetDisplayName} from './dataset-label-cl
 import {createUploadMeter} from './dataset-upload-metrics.js';
 import {maintenanceFor} from './maintenance-state.js';
 import {transferBytes} from './data-route.js';
-import {selectUploadRoute,validateUploadRoutes} from './upload-routes.js';
+import {selectUploadRoute,validateUploadRoutes,uploadStorageMachine} from './upload-routes.js';
 import {probeBrowserUploadRoute} from './dataset-upload.js';
 import {datasetInfoHTML as info} from './dataset-flow.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -104,22 +104,23 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function catalogUnavailable(){model=null;selected=null;selectedVersion=null;rows();inspector();}
  function capacity(value,id){capacities.set(id,value);rail();uploadCapacity();}
  async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacities.set(row.id,null);rail();}});}}
- function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
+ function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=route?.storageTier==='hdd'?'机械仓库入库 · 训练缓存按需准备':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
  function uploadRoute(){const node=section.querySelector('#v3-upload-route');if(!node)return;const kind=route?.kind;
   node.className='v3-route '+(kind==='campus-direct'?'ok':kind==='tail-upload'?'alt':kind==='unreachable'?'cut':'');
   const caption=kind==='campus-direct'?'校园网直连':kind==='tail-upload'?'备用线路':['relay-choice','vps-relay'].includes(kind)?'平台中转':kind==='unreachable'?'没连上校园网':kind==='unconfirmed'?'路线待确认':'探测中';
-  node.setAttribute('aria-label','你的电脑 · '+caption+' · '+(machine()||'未选择服务器'));
-  node.innerHTML=`<span class="v3-route-end"><i></i>你的电脑</span><span class="v3-route-seg"></span><span class="v3-route-via">${caption}</span><span class="v3-route-seg"></span><span class="v3-route-end"><i></i><span title="${esc(machine())}">${esc(machine()||'未选择服务器')}</span></span>`;
+  const destination=route?.machine||machine();
+  node.setAttribute('aria-label','你的电脑 · '+caption+' · '+(destination||'未选择服务器'));
+  node.innerHTML=`<span class="v3-route-end"><i></i>你的电脑</span><span class="v3-route-seg"></span><span class="v3-route-via">${caption}</span><span class="v3-route-seg"></span><span class="v3-route-end"><i></i><span title="${esc(destination)}">${esc(destination||'未选择服务器')}</span></span>`;
  }
  async function probe(){
   if(uploadBusy)return;
   const expected=account(),token=++routeEpoch,target=machine();if(!store.principal||!authorized(target))return;routeAbort?.abort();routeAbort=new AbortController();const signal=routeAbort.signal;route=null;uploadRoute();let probeable=false;
   try{const value=await store.call('datasets.upload.routes',{machine:target});if(token!==routeEpoch||expected!==account()||target!==machine()||signal.aborted)return;
-   validateUploadRoutes(value,target);probeable=true;
-   const selected=await selectUploadRoute(value,target,candidate=>probeBrowserUploadRoute(candidate,{signal}),{signal});
-   if(token!==routeEpoch||expected!==account()||target!==machine()||signal.aborted)return;route=selected;
+   const storageMachine=uploadStorageMachine(value,target);validateUploadRoutes(value,storageMachine);probeable=true;
+   const selected=await selectUploadRoute(value,storageMachine,candidate=>probeBrowserUploadRoute(candidate,{signal}),{signal});
+   if(token!==routeEpoch||expected!==account()||target!==machine()||signal.aborted)return;route={...selected,...(value.placementProtocol===1?{requestedMachine:target,storageTier:value.storageTier}:{})};
   }catch(error){if(token!==routeEpoch||expected!==account()||signal.aborted)return;route={kind:!probeable?'unconfirmed':selectedFiles.length&&selectedFiles.reduce((n,file)=>n+file.size,0)<=256*1024**2?'relay-choice':'unreachable',error,probesExhausted:probeable};}
-  uploadRoute();uploadUI();uploadControls(lastControls);
+  uploadRoute();uploadCapacity();uploadUI();uploadControls(lastControls);
  }
  function uploadControls(value=lastControls){
   const catalogBusyChanged=!!lastControls.busy!==!!value.busy;

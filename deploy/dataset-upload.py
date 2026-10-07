@@ -72,9 +72,12 @@ class DatasetUploads:
     def reservation(self, user, upload):
         return self.cache.root/'.upload-reservations'/(self.key(user, upload)+'.json')
 
-    def reservation_value(self, session, *, sealed=False):
+    def reservation_value(self, session, *, sealed=False, budget_sealed=None):
+        budget_sealed = sealed if budget_sealed is None else budget_sealed
+        footprint = session['totalBytes'] + 4096 * session['entries'] + 8192
         return {'bytes': session['reserveBytes']-(session['totalBytes'] if sealed else 0),
-                'inodes': session['entries']+16}
+                'inodes': session['entries']+16,
+                'budgetBytes': session['reserveBytes']-(footprint if budget_sealed else 0)}
 
     def ensure_reservation(self, session):
         """Caller holds the cache lock; repair interrupted admission safely."""
@@ -84,11 +87,24 @@ class DatasetUploads:
         try:
             value = self.d._read_json(path)
         except FileNotFoundError:
+            self.cache._budget(session['reserveBytes'])
             self.cache._free(self.cache._reserved()+session['reserveBytes'], needed_inodes=session['entries']+16)
             self.d._write_json(path, self.reservation_value(session))
         else:
-            if value not in (self.reservation_value(session), self.reservation_value(session, sealed=True)):
+            full = self.reservation_value(session)
+            variants = (full, self.reservation_value(session, sealed=True),
+                        self.reservation_value(session, sealed=True, budget_sealed=False))
+            legacy = tuple({k: v for k, v in item.items() if k != 'budgetBytes'} for item in variants)
+            if value not in (*variants, *legacy):
                 raise ValueError('Personal upload reservation changed')
+            if value != full:
+                # A killed conversion can leave its reduced physical record
+                # without a stage. Re-admit the missing commitment before any
+                # further manifest writes; never infer a refund from absence.
+                self.cache._budget(session['reserveBytes']-value.get('budgetBytes', value['bytes']))
+                self.cache._free(self.cache._reserved()+session['reserveBytes']-value['bytes'],
+                                 needed_inodes=session['entries']+16)
+                self.d._write_json(path, full)
 
     @contextmanager
     def guard(self, user, upload):
@@ -385,6 +401,7 @@ class DatasetUploads:
                 raise ValueError('Personal dataset storage quota reached (including metadata allowance)')
             if sum(s['entries'] for s in retained)+args['entries'] > self.limits['maxUserEntries']:
                 raise ValueError('Personal dataset entry quota reached')
+            self.cache._budget(reserve)
             self.cache._free(self.cache._reserved()+reserve, needed_inodes=args['entries']+16)
             self.folder(user, upload, create=True)
             session = dict(schema=1, userId=user, uploadId=upload, **specification,
@@ -825,8 +842,15 @@ class DatasetUploads:
                                          _origin=origin, _receipt=upload)
                     session['registrationIdentity'] = list(self.cache._record_identity(dataset, version))
                     self.save(session)
+                    # Keep the whole logical commitment until the stage is
+                    # durable. The physical record still reserves remaining
+                    # writes exactly as before. A crash may overcount, never
+                    # free the payload before its replacement stage exists.
+                    self.d._write_json(self.reservation(user, upload),
+                                       self.reservation_value(session, sealed=True, budget_sealed=False))
+                    plan = self.cache._plan(actor, dataset, version,
+                                            reservation_credit=self.cache._footprint(manifest))
                     self.d._write_json(self.reservation(user, upload), self.reservation_value(session, sealed=True))
-                    plan = self.cache._plan(actor, dataset, version)
                 except BaseException:
                     self.d._write_json(self.reservation(user, upload), self.reservation_value(session))
                     raise

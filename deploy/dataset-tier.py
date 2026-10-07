@@ -394,7 +394,7 @@ class DatasetTier:
                         manifest = record["manifest"]
                         # Conservative admission footprint, not promised freed
                         # physical bytes (sparse files and filesystem differ).
-                        size = sum(f["size"] for f in manifest["files"]) + 4096 * (len(manifest["files"]) + len(manifest["directories"])) + 8192
+                        size = self.cache._footprint(manifest)
                         usage += size
                         tier = self.cache._tier(dataset, version)
                         if tier["role"] != "cache" or tier["pins"] or self.cache._leases(dataset, version):
@@ -410,22 +410,32 @@ class DatasetTier:
                 unknown.append(dict(dataset=dataset, version="unknown"))
         return sorted(rows, key=lambda r: (r["lastUsedAt"], r["dataset"], r["version"])), unknown, usage
 
-    def plan(self, actor, *, needed_bytes=0):
+    def plan(self, actor, *, needed_bytes=0, _exclude=()):
         self.cache._actor(actor, admin=True)
         if type(needed_bytes) is not int or needed_bytes < 0:
             raise D.CacheError("invalid upcoming reservation")
+        # Internal preparation workers may retain their own exact fixed target
+        # during preflight. This is not accepted by any request/RPC parser.
+        excluded = set()
+        for dataset, version in _exclude:
+            excluded.add((D._identifier(dataset), D._identifier(version, D.HASH_RE)))
         with self.cache._locked():
             rows, unknown, usage = self._inventory_locked(actor)
             space = self._space()
             reserved = self.cache._reserved() + needed_bytes
+            # Logical budget includes all staged payload, not just bytes still
+            # to copy. Physical pressure separately uses remaining writes.
+            committed = self.cache._budget_usage() + needed_bytes if self.budget_bytes is not None else usage + reserved
         available, total = space["availableBytes"], space["totalBytes"]
         disk_used = total - available + reserved
         disk_need = max(0, math.ceil(disk_used - total * self.low_water)) if disk_used >= total * self.high_water else 0
         reserve_need = max(0, self.cache.reserve_bytes + reserved - available)
-        budget_need = max(0, math.ceil(usage + reserved - self.budget_bytes * self.low_water)) if self.budget_bytes is not None and usage + reserved >= self.budget_bytes * self.high_water else 0
+        budget_need = max(0, math.ceil(committed - self.budget_bytes * self.low_water)) if self.budget_bytes is not None and committed >= self.budget_bytes * self.high_water else 0
         needed = max(disk_need, reserve_need, budget_need)
         selected, invalid, projected = [], [], 0
         for row in rows:
+            if (row["dataset"], row["version"]) in excluded:
+                continue
             try:
                 with self.cache._locked():
                     receipt = self._receipt(actor, self.cache._tier(row["dataset"], row["version"]), row["dataset"], row["version"])
@@ -439,17 +449,18 @@ class DatasetTier:
                 projected += row["bytes"]
         return dict(enabled=self.enabled, dryRun=True, budgetBytes=self.budget_bytes,
                     highWater=self.high_water, lowWater=self.low_water, usageBytes=usage,
+                    budgetCommittedBytes=committed,
                     reservedBytes=reserved, availableBytes=available, requiredReclaimBytes=needed,
                     projectedReclaimBytes=projected, sufficient=projected >= needed,
                     candidates=selected, protectedUnknown=unknown, unavailableAuthorities=invalid)
 
-    def collect(self, actor, *, dry_run=True, needed_bytes=0, max_versions=16):
+    def collect(self, actor, *, dry_run=True, needed_bytes=0, max_versions=16, _exclude=()):
         self.cache._actor(actor, admin=True)
         if type(dry_run) is not bool or type(max_versions) is not int or not 1 <= max_versions <= 1000:
             raise D.CacheError("invalid GC request")
         if not dry_run and not self.enabled:
             raise D.CacheError("automatic cache collection is disabled")
-        plan = self.plan(actor, needed_bytes=needed_bytes)
+        plan = self.plan(actor, needed_bytes=needed_bytes, _exclude=_exclude)
         if dry_run:
             return plan
         evicted, skipped = [], []
@@ -480,4 +491,4 @@ class DatasetTier:
             except (ValueError, OSError, TypeError, KeyError):
                 skipped.append(dict(dataset=dataset, version=version, reason="changed-or-unverified"))
         return dict(dryRun=False, evicted=evicted, skipped=skipped,
-                    after=self.plan(actor, needed_bytes=needed_bytes))
+                    after=self.plan(actor, needed_bytes=needed_bytes, _exclude=_exclude))

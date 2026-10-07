@@ -332,6 +332,7 @@ INTERNAL_STORAGE+=('projects.archive','projects.unarchive','projects.retire.plan
 # Exact owner-bound draft RPCs; Portal and node checks still establish identity.
 INTERNAL_STORAGE+=('files.upload.list','files.upload.cancel','projects.local-import.begin','projects.local-import.status','projects.local-import.cancel')
 INTERNAL_STORAGE+=('tasks.display.get','tasks.display.set')
+INTERNAL_STORAGE+=('storage.upload.locate',)
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.request.settimeout(35)

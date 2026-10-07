@@ -779,6 +779,19 @@ class TransferJobs:
                 if (sum(f['size'] for f in manifest['files']) != info['totalBytes']
                         or len(manifest['files'])+len(manifest['directories']) != info['entries']):
                     raise ValueError('Source manifest totals differ')
+                # Only the detached trusted LAN worker may trigger bounded GC.
+                # Existing sessions retain their whole durable reservation; do
+                # not count the same admitted transfer twice on resume.
+                uploads=self.n.dataset_uploads()
+                try:prior=uploads.load(spec['userId'],key)
+                except FileNotFoundError:
+                    needed=info['totalBytes']+info['manifestBytes']*4+info['entries']*8192+65536
+                    prior=None
+                else:needed=0
+                target='u-'+hashlib.sha256(spec['userId'].encode()).hexdigest()[:16]+'-'+spec['name']
+                version=self.n.dataset_cache()[0]._version(manifest)
+                if prior is None or prior['state']!='READY':
+                    self.n.dataset_cache_admission(needed,_exclude=((target,version),))
                 state = self.upload(spec, 'begin', name=spec['name'], key=key, **{k: info[k] for k in ('manifestBytes', 'manifestSha256', 'totalBytes', 'entries')})
                 upload_id = state['uploadId'];result['uploadId'] = upload_id
                 if state['state'] == 'FAILED' and state.get('resumeState') in ('RECEIVING_MANIFEST', 'UPLOADING'):

@@ -15,6 +15,17 @@ export function uploadProbeFailureCode(error){
   return typeof code==='string'&&Object.hasOwn(probeFailures,code)?code:'PROBE_FAILED';
 }
 const fail=()=>{throw Error('Approved upload routes are invalid or unavailable; no VPS fallback was attempted');};
+export function uploadStorageMachine(value,requestedMachine,previous){
+  // Old node replies remain valid. Placement-aware replies bind one physical
+  // writer independently of the selected training machine for the whole run.
+  if(value?.placementProtocol===undefined)return previous||requestedMachine;
+  if(value.placementProtocol!==1||value.requestedMachine!==requestedMachine||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value.storageMachine||'')||
+    !['hdd','existing'].includes(value.storageTier)||typeof value.legacyPlacement!=='boolean'||
+    value.legacyPlacement!==(value.storageTier==='existing')||previous&&previous!==value.storageMachine)
+    throw Error('Dataset upload storage identity is unconfirmed or changed; no data was redirected');
+  return value.storageMachine;
+}
 export function validateUploadRoutes(value,machine){
   if(!value||value.available!==true||value.protocol!==protocol||value.machine!==machine||
     !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(machine||'')||!hex.test(value.revision||'')||!hex.test(value.certificateSha256||'')||
