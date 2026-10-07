@@ -40,6 +40,7 @@ function warehouse(version,locations){
   const result=databaseSummary({version,locations});
   return {state:result.kind==='none'?'unrecorded':result.kind,phase:result.phase,
     machine:result.machine,originalConfirmed:result.saved,
+    locations:locations.filter(row=>row.warehouseReady===true).map(row=>({machine:row.machine,confirmed:true,state:'READY'})),
     records:locations.filter(row=>row.storage&&typeof row.storage==='object')
       .map(row=>({machine:row.machine,dataset:text(row.dataset),storage:copy(row.storage)}))};
 }
@@ -119,28 +120,25 @@ export function aggregateDatasetCatalog(catalog){
     })};
 }
 
-// Contract pending finalization: a READY state alone is not warehouse proof.
-// Keep this boundary small so a finalized proof field can be adopted here.
+// Only the finalized explicit node fact proves this version is in a warehouse.
 export function adaptOriginal(raw){
-  const proof=raw?.proof;
   return {machine:identifier.test(raw?.machine||'')?raw.machine:null,
     dataset:identifier.test(raw?.dataset||'')?raw.dataset:null,
-    state:text(raw?.state),confirmed:raw?.confirmed===true||
-      !!proof&&typeof proof==='object'&&!Array.isArray(proof)&&Object.keys(proof).length>0};
+    state:text(raw?.state),confirmed:raw?.warehouseReady===true};
 }
 
 export function adaptStorageOverview(raw){
   if(raw?.protocol!=='dataset-storage-overview-v1'||!Array.isArray(raw.warehouse?.volumes)||
     !Array.isArray(raw.caches)||!Array.isArray(raw.datasets))return null;
-  const volume=value=>({id:text(value?.id),state:text(value?.state),checkedAt:copy(value?.checkedAt),
+  const volume=value=>({id:text(value?.id),state:text(value?.state),checkedAt:copy(value?.checkedAt),collectedAt:copy(value?.collectedAt),
     ...Object.fromEntries(['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'].map(key=>[key,number(value?.[key])])),
     readOnly:value?.readOnly===true,guarded:value?.guarded===true});
   const volumes=new Map();let unidentified=false;
   for(const row of raw.warehouse.volumes){
     if(!identifier.test(row?.machine||'')||!text(row?.volume?.id)){unidentified=true;continue;}
-    const value={machine:row.machine,volume:volume(row.volume),contentBytes:number(row.originalContentBytes),warnings:list(row.warnings)},key=JSON.stringify([value.machine,value.volume.id]);
+    const value={machine:row.machine,volume:volume(row.volume),contentBytes:number(row.originalContentBytes),datasetCount:number(row.datasetCount),warnings:list(row.warnings)},key=JSON.stringify([value.machine,value.volume.id]);
     if(volumes.has(key)&&JSON.stringify(volumes.get(key))!==JSON.stringify(value)){
-      const previous=volumes.get(key);previous.contentBytes=null;
+      const previous=volumes.get(key);previous.contentBytes=null;previous.datasetCount=null;
       for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])previous.volume[field]=null;
       previous.warnings.push(...value.warnings);
     }else volumes.set(key,value);
@@ -196,7 +194,7 @@ export function displayStorageCapacity(overview,model,capacities=new Map(),machi
     const result={...actual,volume:{...actual.volume}};
     if(actual.readyContentBytes===null){result.readyContentBytes=fallback.readyContentBytes;result.usageComplete=fallback.usageComplete;}
     if(actual.readyVersionCount===null)result.readyVersionCount=fallback.readyVersionCount;
-    for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])if(result.volume[field]===null)result.volume[field]=volume[field];
+    for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])if(result.volume[field]===null&&!actual.volume.collectedAt)result.volume[field]=volume[field];
     return result;
   });
   const warehouse=overview?{...overview.warehouse}:{volumes:[],totalBytes:null,usedBytes:null,availableBytes:null,
@@ -205,6 +203,58 @@ export function displayStorageCapacity(overview,model,capacities=new Map(),machi
   warehouse.known=warehouse.totalBytes>0&&warehouse.usedBytes!==null&&warehouse.usedBytes<=warehouse.totalBytes&&
     warehouse.availableBytes!==null&&warehouse.usedBytes+warehouse.availableBytes<=warehouse.totalBytes&&warehouse.contentBytes!==null;
   return {warehouse,caches,checkedAt:overview?.checkedAt??model?.checkedAt??null,partial:overview?.partial===true||model?.partial===true};
+}
+
+// Locations are metadata, not an action grant. Keep confirmation separate
+// from a named warehouse so an unconfirmed observation stays hollow in UI.
+export function datasetWarehouseMachines(version){
+  const w=version?.warehouse;
+  const nodes=list(w?.originals).filter(row=>row.confirmed===true||row.state==='READY').map(row=>row.machine)
+    .concat(list(w?.locations).map(row=>row.machine),list(w?.records).filter(row=>
+      row.storage?.version===version.version&&['ARCHIVED','WAREHOUSE_READY'].includes(row.storage.phase)&&
+      row.storage.originalRetained===true).map(row=>row.storage.archiveMachine),w?.originalConfirmed?[w.machine]:[]);
+  return [...new Set(nodes)].filter(machine=>identifier.test(machine||''));
+}
+
+export function warehouseStorageCards(overview,model,capacities=new Map(),contentCatalog=model){
+  const content=new Map(list(contentCatalog?.datasets).flatMap(item=>item.versions.map(version=>
+    [JSON.stringify([item.dataset,version.version]),number(version.bytes)])));
+  const groups=new Map(),group=machine=>{
+    if(!groups.has(machine))groups.set(machine,{machine,versions:new Map(),datasets:new Set(),volumes:[]});
+    return groups.get(machine);
+  };
+  for(const item of list(model?.datasets))for(const version of item.versions)for(const machine of datasetWarehouseMachines(version)){
+    const row=group(machine),key=JSON.stringify([item.dataset,version.version]);row.datasets.add(item.dataset);row.versions.set(key,number(version.bytes)??content.get(key)??null);
+  }
+  for(const row of list(overview?.warehouse.volumes))group(row.machine).volumes.push(row);
+  // Only the explicit warehouse-role projection can supply its physical
+  // volume. Top-level datasets.capacity measures the training cache disk.
+  for(const [machine,capacity] of capacities)if(capacity?.storageOverview?.protocol==='dataset-storage-node-v1'&&capacity.storageOverview.warehouse)
+    group(machine);
+  const fields=['totalBytes','usedBytes','availableBytes','reserveBytes'];
+  const sum=values=>values.length&&values.every(value=>number(value)!==null)&&number(values.reduce((n,value)=>n+value,0))!==null?
+    values.reduce((n,value)=>n+value,0):null;
+  return [...groups.values()].map(row=>{
+    const volumes=row.volumes;
+    let totals=Object.fromEntries(fields.map(field=>[field,sum(volumes.map(v=>v.volume[field]))]));
+    const raw=capacities.get(row.machine)?.storageOverview?.warehouse;
+    if(!volumes.length&&raw?.state==='READY'&&raw.volume){
+      const v=raw.volume;totals={totalBytes:number(v.filesystemBytes),usedBytes:number(v.usedBytes),
+        availableBytes:number(v.availableBytes),reserveBytes:number(v.reserveBytes)};
+    }
+    const valid=totals.totalBytes>0&&totals.usedBytes!==null&&totals.availableBytes!==null&&
+      totals.usedBytes<=totals.totalBytes&&totals.usedBytes+totals.availableBytes<=totals.totalBytes;
+    if(!valid)totals=Object.fromEntries(fields.map(field=>[field,null]));
+    const actual=sum(volumes.map(v=>v.contentBytes)),values=[...row.versions.values()];
+    const fallback=values.length?sum(values):null;
+    const contentBytes=actual??fallback;
+    const checkedAt=volumes[0]?.volume.checkedAt??raw?.volume?.checkedAt??overview?.checkedAt??model?.checkedAt??null;
+    const collectedAt=volumes[0]?.volume.collectedAt??raw?.volume?.collectedAt??null;
+    return {machine:row.machine,...totals,contentBytes,known:valid&&contentBytes!==null,collectedAt,
+      datasetCount:sum(volumes.map(v=>v.datasetCount))??(model?row.datasets.size:null),checkedAt,
+      warning:volumes.some(v=>list(v.warnings).some(w=>['WAREHOUSE_USAGE_HIGH','WAREHOUSE_FREE_SPACE_LOW'].includes(w?.code)))||
+        valid&&(totals.usedBytes/totals.totalBytes>=.9||totals.reserveBytes!==null&&totals.availableBytes<=totals.reserveBytes)};
+  });
 }
 
 // Overview and legacy catalog are observations, not action permissions. The

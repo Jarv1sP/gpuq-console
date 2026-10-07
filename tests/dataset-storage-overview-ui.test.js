@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adaptOriginal,adaptStorageOverview,overviewDatasetCatalog,readableDatasetCatalog,aggregateDatasetCatalog,displayStorageCapacity} from '../dist/dataset-catalog-model.js';
+import {adaptOriginal,adaptStorageOverview,overviewDatasetCatalog,readableDatasetCatalog,aggregateDatasetCatalog,displayStorageCapacity,warehouseStorageCards,datasetWarehouseMachines} from '../dist/dataset-catalog-model.js';
 import {warehouseCapacityHTML,storageCapacityDetailHTML,cacheCapacityRatio} from '../dist/dataset-flow.js';
 const version='a'.repeat(64),at='2026-10-08T01:23:00Z';
 const volume=(extra={})=>({id:'volume-a',state:'READY',checkedAt:at,totalBytes:1000,usedBytes:700,availableBytes:300,reserveBytes:50,usableBytes:250,...extra});
@@ -38,6 +38,42 @@ const legacyModel=()=>aggregateDatasetCatalog({machine:'server-a',checkedAt:at,p
   version,state:'READY',canUse:true,bytes:200,files:2,ownerLabel:'所属用户：alice',locations:[
    {machine:'server-a',dataset:'physical-a',state:'READY',canUse:true},{machine:'server-b',dataset:'physical-b',state:'READY',canUse:true}]}]}]});
 const oldCapacity={machine:'server-a',available:true,filesystemBytes:1000,availableBytes:300,reserveBytes:50,usableBytes:250};
+test('v4 makes one card per observed warehouse with unique logical versions, not one aggregate or one card per cache',()=>{
+ const model=legacyModel(),v=model.datasets[0].versions[0];
+ v.warehouse={originalConfirmed:true,machine:'server-b',records:[{machine:'server-a',storage:{version,archiveMachine:'server-b',phase:'ARCHIVED',originalRetained:true}}]};
+ model.datasets[0].versions.push({...structuredClone(v),version:'b'.repeat(64),bytes:300});
+ model.datasets.push({...structuredClone(model.datasets[0]),dataset:'more',versions:[{...structuredClone(v),bytes:50,warehouse:{originals:[{machine:'server-a',state:'READY',confirmed:false}]}}]});
+ const cards=warehouseStorageCards(null,model,new Map([['server-a',oldCapacity],['server-b',oldCapacity]]));
+ assert.equal(cards.length,2);assert.equal(cards.find(row=>row.machine==='server-b').contentBytes,500);assert.equal(cards.find(row=>row.machine==='server-b').datasetCount,1);
+ assert.equal(cards.find(row=>row.machine==='server-a').contentBytes,50);assert.equal(cards.find(row=>row.machine==='server-a').datasetCount,1);
+ for(const row of cards){assert.equal(row.totalBytes,null);assert.equal(row.availableBytes,null);assert.equal(row.known,false);}
+ assert.deepEqual(datasetWarehouseMachines(v),['server-b']);
+ assert.deepEqual(warehouseStorageCards(null,null,new Map()),[],'missing observations never create a fictional warehouse');
+});
+test('v4 uses only explicitly identified warehouse volumes, and unknown snapshots with collection time stay unknown',()=>{
+ const model=legacyModel(),v=model.datasets[0].versions[0];v.warehouse={originalConfirmed:true,machine:'server-a',records:[]};
+ const capacity={...oldCapacity,storageOverview:{protocol:'dataset-storage-node-v1',warehouse:{state:'READY',volume:{filesystemBytes:2000,usedBytes:1100,availableBytes:900,reserveBytes:100,collectedAt:at}}}};
+ const [card]=warehouseStorageCards(null,model,new Map([['server-a',capacity]]));
+ assert.equal(card.totalBytes,2000);assert.equal(card.usedBytes,1100);assert.equal(card.availableBytes,900);assert.equal(card.contentBytes,200);assert.equal(card.collectedAt,at);
+ const raw=snapshot();raw.partial=true;raw.warehouse.state='UNKNOWN';raw.warehouse.volumes[0].volume.collectedAt=at;
+ raw.warehouse.volumes[0].volume.totalBytes=null;raw.caches[0].volume=volume({totalBytes:null,usedBytes:null,availableBytes:null,collectedAt:at});
+ const overview=adaptStorageOverview(raw);
+ assert.equal(warehouseStorageCards(overview,model,new Map([['server-a',capacity]]))[0].totalBytes,null,'a past successful timestamp is not a current capacity');
+ assert.equal(displayStorageCapacity(overview,model,new Map([['server-a',oldCapacity]])).caches[0].volume.totalBytes,null,'old cached reads cannot fill a failed collected snapshot');
+});
+test('v4 warehouse counts use the same visible locations as filtering, with volume counts preferred when supplied',()=>{
+ const raw=snapshot();raw.warehouse.volumes[0].machine='server-b';raw.datasets[0].versions[0].originals[0].machine='server-b';
+ const overview=adaptStorageOverview(raw),model=overviewDatasetCatalog(overview,null),legacy=legacyModel();
+ // A cache-only legacy observation has no warehouse metadata. It may supply
+ // known bytes, but must not erase the overview's warehouse membership/count.
+ assert.deepEqual(datasetWarehouseMachines(model.datasets[0].versions[0]),['server-b']);
+ let [card]=warehouseStorageCards(overview,model,new Map(),legacy);
+ assert.equal(card.datasetCount,model.datasets.filter(item=>item.versions.some(v=>datasetWarehouseMachines(v).includes(card.machine))).length);
+ assert.equal(card.datasetCount,1);
+ raw.warehouse.volumes[0].datasetCount=7;
+ [card]=warehouseStorageCards(adaptStorageOverview(raw),model);assert.equal(card.datasetCount,7);
+ for(const value of [null,-1,'7']){raw.warehouse.volumes[0].datasetCount=value;assert.equal(warehouseStorageCards(adaptStorageOverview(raw),model)[0].datasetCount,1);}
+});
 test('the existing catalog and public capacity shape render all three components without overview or an invented budget',()=>{
  const model=legacyModel(),result=displayStorageCapacity(null,model,new Map([['server-a',oldCapacity]]));
  assert.equal(result.warehouse.contentBytes,200,'one version is not counted twice for two copies');assert.equal(result.warehouse.totalBytes,null);
@@ -93,11 +129,13 @@ test('space warnings never change reading or upload permissions, shared and unkn
  raw.warehouse.warnings=[];raw.warehouse.volumes[0].volume=volume({usedBytes:950,availableBytes:50,usableBytes:0});
  assert.equal(adaptStorageOverview(raw).warehouse.warning,true);
 });
-test('契约待定稿: explicit proof only, never infer confirmation from READY, machine name or path',()=>{
+test('only warehouseReady true proves a warehouse copy; no state, historical proof, machine name or path can substitute',()=>{
  for(const state of ['READY','ARCHIVED','CONFIRMED'])assert.equal(adaptOriginal({machine:'server-a',dataset:'samples',state,path:'/warehouse'}).confirmed,false);
  assert.equal(adaptOriginal({state:'READY',confirmed:false,proof:{}}).confirmed,false);
- assert.equal(adaptOriginal({machine:'server-a',state:'READY',confirmed:true}).confirmed,true);
- assert.equal(adaptOriginal({machine:'server-a',proof:{receipt:'explicit-node-proof'}}).confirmed,true);
+ assert.equal(adaptOriginal({machine:'server-a',state:'READY',confirmed:true}).confirmed,false);
+ assert.equal(adaptOriginal({machine:'server-a',proof:{receipt:'explicit-node-proof'}}).confirmed,false);
+ for(const value of [undefined,null,false,1,'true'])assert.equal(adaptOriginal({warehouseReady:value}).confirmed,false);
+ assert.equal(adaptOriginal({machine:'server-a',warehouseReady:true}).confirmed,true);
  assert.equal(adaptOriginal({state:'backend-raw-state'}).state,'backend-raw-state');
 });
 test('overview aggregation keeps full hashes, physical references, ownership and explicit readability',()=>{
@@ -108,7 +146,7 @@ test('overview aggregation keeps full hashes, physical references, ownership and
  assert.equal(result.datasets[0].versions[0].version,version);
  assert.deepEqual(readableDatasetCatalog(result,{userId:'alice-id',username:'alice',role:'member'}).datasets.map(row=>row.dataset),['samples']);
  assert.equal(readableDatasetCatalog(result,{userId:'admin',role:'admin'}).datasets.length,2);
- raw.datasets[0].versions[0].originals[0].confirmed=true;
+ raw.datasets[0].versions[0].originals[0].warehouseReady=true;
  assert.equal(overviewDatasetCatalog(adaptStorageOverview(raw),'server-a').datasets[0].versions[0].warehouse.originalConfirmed,true);
 });
 test('unreachable cache nodes remain unavailable and never supply a preparation source',()=>{

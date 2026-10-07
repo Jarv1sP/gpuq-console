@@ -13,7 +13,7 @@ function catalog(machine,role){
  const names=['ImageNet 子集','校园场景分割','语音指令 v2','tiny-local','CT 影像 2025'],ids=['imagenet-sub','campus-seg','voice-cmd','tiny-local','med-ct-2025'];
  return {machine,partial:false,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:ids.map((dataset,index)=>{
   const version=String(index+1).repeat(64),phase=['ARCHIVED','ARCHIVED','COPYING',null,'ARCHIVED'][index];
-  const locations=machines.map((m,i)=>({machine:m.id,dataset,canUse:true,ownerLabel:'所属用户：fixture-user',state:index===0?(i===0||i===1?'READY':'NOT_LOCAL'):index===1?(i===0?'PREPARING':i===3?'READY':'NOT_LOCAL'):index===2?(i===2?'READY':'NOT_LOCAL'):index===3?(i===1?'READY':'NOT_LOCAL'):(i===1?'FAILED':'NOT_LOCAL'),canPrepare:true,...(i===0&&phase?{storage:{dataset,version,phase,archiveMachine:machines[3].id,originalRetained:phase==='ARCHIVED'}}:{})}));
+  const locations=machines.map((m,i)=>({machine:m.id,dataset,canUse:true,ownerLabel:'所属用户：fixture-user',state:index===0?(i===0||i===1?'READY':'NOT_LOCAL'):index===1?(i===0?'PREPARING':i===3?'READY':'NOT_LOCAL'):index===2?(i===2?'READY':'NOT_LOCAL'):index===3?(i===1?'READY':'NOT_LOCAL'):(i===1?'FAILED':'NOT_LOCAL'),canPrepare:true,...(i===0&&phase?{storage:{dataset,version,phase,archiveMachine:machines[index===0?0:3].id,originalRetained:phase==='ARCHIVED'}}:{})}));
   const local=locations.find(row=>row.machine===machine),v={version,state:local.state,canUse:true,bytes:[142,61,18,0,412][index]*1024**3+(index===3?2048:0),files:[1281167,48320,210553,1,96011][index],ownerLabel:local.ownerLabel,canPrepare:local.state!=='UNKNOWN',sourceMachine:locations.find(row=>row.state==='READY')?.machine||null,locations};
   return {dataset,name:names[index],displayNameRevision:3,labelScope:'personal',versions:index===0?[v,{...v,version:'a'.repeat(64),bytes:120*1024**3,locations:locations.map(row=>({...row,storage:row.storage?{...row.storage,version:'a'.repeat(64)}:undefined}))}]:[v]};
  })};
@@ -65,13 +65,13 @@ try{
   await page.goto(origin+'/#datasets');await page.waitForFunction(()=>document.querySelectorAll('[data-v3-select]').length===5&&!document.querySelector('#datasets-refresh').disabled);
   // Exact existing public catalog/capacity shapes, with overview unsupported.
   // The capacity design must be visible before any new node protocol exists.
-  assert.equal(await page.locator('.capacity-warehouse .capacity-strata').count(),1);
+  assert.equal(await page.locator('[data-v4-warehouse] .capacity-strata').count(),2,'two observed warehouse nodes get distinct cards');
   assert.equal(await page.locator('.v3-server-chip .capacity-cache-rail').count(),machines.length);
   assert.equal(await page.locator('#warehouse-machine-capacity .capacity-disk>span').count(),20);
-  const legacyCatalog=catalog(machines[0].id,role),total=legacyCatalog.datasets.flatMap(row=>row.versions).reduce((n,v)=>n+v.bytes,0);
+  const legacyCatalog=catalog(machines[0].id,role),warehouses=legacyCatalog.datasets.flatMap(row=>row.versions).filter(v=>v.locations.some(row=>row.storage?.phase==='ARCHIVED'&&row.storage.originalRetained===true));
   const {transferBytes}=await import('../dist/data-route.js');
-  assert.equal(await page.locator('.capacity-value-data b').textContent(),transferBytes(total));
-  assert.equal(await page.locator('.capacity-head .num').textContent(),'未知','a cache filesystem cannot establish warehouse capacity');
+  for(const id of [machines[0].id,machines[3].id]){const total=warehouses.filter(v=>v.locations.some(row=>row.storage?.archiveMachine===id)).reduce((n,v)=>n+v.bytes,0);assert.equal(await page.locator('[data-v4-warehouse="'+id+'"] .capacity-value-data b').textContent(),transferBytes(total));}
+  assert.deepEqual(await page.locator('[data-v4-warehouse] .v4-free b').allTextContents(),['未知','未知'],'a cache filesystem cannot establish either warehouse volume');
   assert.equal(await page.locator('#warehouse-machine-capacity .capacity-metric').first().locator('.capacity-big small').textContent(),'/ 未知','a cache filesystem cannot establish a cache budget');
   assert((await page.locator('#warehouse-machine-capacity .capacity-disk').getAttribute('aria-label')).includes(transferBytes(620*1024**3)));
   assert.equal(await page.locator('[data-v3-cache-action]').count(),0,'display fallback cannot grant new cache actions');
@@ -79,7 +79,7 @@ try{
    await page.evaluate(async()=>{await document.fonts.ready;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
    const geometry=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,dialogs:[...document.querySelectorAll('dialog[open]')].map(dialog=>({width:dialog.clientWidth,scroll:dialog.scrollWidth}))}));
    assert(geometry.scroll<=width+1,'document overflow '+JSON.stringify(geometry));for(const dialog of geometry.dialogs)assert(dialog.scroll<=dialog.width+1,'dialog overflow '+JSON.stringify(geometry));
-   const hints=await inspectGeometry(page,{...datasetHelpGeometry,roots:[stage==='main'?'#page-datasets':'#dataset-add-dialog'],largeTargets:'.v3-row,.v3-upload-choices>.button'});assert(hints.pass,JSON.stringify(hints.failures));
+   const hints=await inspectGeometry(page,{...datasetHelpGeometry,roots:[stage==='main'?'#page-datasets':'#dataset-add-dialog'],largeTargets:'.v3-row,.v3-upload-choices>.button,.v4-warehouse-card'});assert(hints.pass,JSON.stringify(hints.failures));
    const file=role+'-'+stage+'-'+width+'.png';await page.screenshot({path:join(output,file),fullPage:stage==='main'});results.push({role,width,stage,file,geometry});
   }
   await shot('main');
@@ -93,7 +93,9 @@ try{
   const structure=await page.locator('#page-datasets').evaluate(root=>[...root.querySelectorAll('*')].map(node=>[node.tagName,node.id.replace(/^copy-help-\d+$/,'copy-help-generated'),node.getAttribute('role'),node.getAttribute('name')]));
   if(role==='member')mainStructures.set(width,structure);else assert.deepEqual(structure,mainStructures.get(width),'admin and member dataset main views have the same component structure');
   if(width>=760){
-   const training=page.locator('.v3-train'),before=await training.boundingBox();
+   // Warehouse cards now precede the list. Enter the list/inspector region by
+   // scrolling the page; retain the exact sticky/footer and full-row checks.
+   await page.locator('#warehouse-inspector').evaluate(node=>node.scrollIntoView({block:'start'}));await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));const training=page.locator('.v3-train'),before=await training.boundingBox();
    await page.locator('.v3-detail-scroll').evaluate(node=>node.scrollTop=node.scrollHeight);
    const after=await training.boundingBox();assert(Math.abs(before.y-after.y)<=1,'training footer does not move with the server/policy scroller');
    assert(await training.locator('[data-use-dataset]').isVisible());assert.equal(await training.locator('.v3-code').count(),2);
@@ -151,11 +153,26 @@ try{
   assert.equal(await secondRow.evaluate(row=>document.activeElement===row),true,'a delayed drawer close event must not steal focus from a newer dataset selection');
   await secondRow.press('Home');assert.equal(await firstRow.getAttribute('aria-selected'),'true');
   assert.equal(calls.length,keyboardCalls,'arrow selection does not cache data or submit training');
-  await page.locator('[data-v3-filter]').nth(1).click();assert.equal(await page.locator('[data-v3-select]').count(),2);
+  await page.locator('[data-v3-filter]').nth(1).click();assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),['imagenet-sub'],'the training-machine filter includes only confirmed READY caches, not PREPARING');
   await page.locator('[data-v3-filter=""]').click();assert.equal(await page.locator('[data-v3-select]').count(),5);
+  const writesBefore=calls.filter(call=>!['state','transfers.list','projects.list','datasets.overview','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan'].includes(call.operation)).length;
+  await page.locator('[data-v4-warehouse="'+machines[0].id+'"]').click();
+  assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),['imagenet-sub']);
+  assert.equal(await page.locator('[data-v4-warehouse="'+machines[0].id+'"] .v4-dataset-count').textContent(),(await page.locator('[data-v3-select]').count())+' 个数据集','warehouse card count equals the filtered logical dataset rows, not the number of versions');
+  assert.equal(await page.locator('[data-v4-warehouse="'+machines[0].id+'"]').getAttribute('aria-pressed'),'true');
+  assert.equal(await page.locator('[data-v4-clear=warehouse]').count(),1);
+  await page.locator('[data-v4-clear=warehouse]').click();assert.equal(await page.locator('[data-v3-select]').count(),5);
+  await page.locator('[data-v4-warehouse="'+machines[3].id+'"]').click();
+  assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),['campus-seg','med-ct-2025']);
+  assert.equal(await page.locator('[data-v4-warehouse="'+machines[3].id+'"] .v4-dataset-count').textContent(),(await page.locator('[data-v3-select]').count())+' 个数据集','second warehouse card count equals its filtered rows');
+  await page.locator('[data-v4-warehouse="'+machines[3].id+'"]').click();assert.equal(await page.locator('[data-v3-select]').count(),5);
+  assert.equal(calls.filter(call=>!['state','transfers.list','projects.list','datasets.overview','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan'].includes(call.operation)).length,writesBefore,'warehouse selection never caches, releases or trains');
+  assert.deepEqual(await page.locator('.v3-cols>span').allTextContents(),['','名称','所属','大小','仓库','已缓存到']);
+  assert.equal(await page.locator('.v4-step').count(),3,'inspector retains all three ordered steps');
+  assert.equal(await page.locator('[data-v3-select] .v3-flag').filter({hasText:'待确认'}).count(),0,'uncertainty stays in symbols and tooltips, not a row text tag');
   if(width<760){await page.locator('[data-v3-select="campus-seg"]').click();assert(await page.locator('[data-v3-back]').isVisible());assert.equal(await page.locator('.v3-inspector h2>span').textContent(),'校园场景分割');await page.locator('[data-v3-back]').click();assert(await page.locator('.v3-list').isVisible());}
   if(fullScan&&width===1440){
-   const spec={...datasetHelpGeometry,roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],largeTargets:'.v3-row,.v3-upload-choices>.button',numericCells:['.v3-size,.v3-versions'],scrollPanels:['.v3-inspector-overflow .v3-detail-scroll','#dataset-add-dialog[open]'],bottomReserve:[{content:'#main-content',controls:'#room-nav,#mobile-control,#control-strip'}]};
+   const spec={...datasetHelpGeometry,roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],largeTargets:'.v3-row,.v3-upload-choices>.button,.v4-warehouse-card',numericCells:['.v3-size'],scrollPanels:['.v3-inspector-overflow .v3-detail-scroll','#dataset-add-dialog[open]'],bottomReserve:[{content:'#main-content',controls:'#room-nav,#mobile-control,#control-strip'}]};
    const scan=async label=>{const measured=await scanGeometry(page,spec,{zoom});scans.push({role,label,zoom,count:measured.length});await writeFile(join(output,'geometry-'+role+'-'+label+'-'+zoom+'.json'),JSON.stringify({role,label,zoom,results:measured},null,2));assert.equal(await page.evaluate(()=>devicePixelRatio),zoom);assert(measured.every(row=>row.pass),JSON.stringify({role,label,zoom,failures:measured.filter(row=>!row.pass).slice(0,2)}));console.log('GEOMETRY',role,label,zoom,measured.length,'PASS');};
    const reload=async()=>{await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);};
    // The same twenty role/state profiles as the prior matrix suite, now
