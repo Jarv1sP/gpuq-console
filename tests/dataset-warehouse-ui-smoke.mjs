@@ -34,6 +34,10 @@ try{
    if(url.pathname==='/api/call'){
     const {operation,args={}}=route.request().postDataJSON();calls.push({role,width,operation,args});
     if(operation==='state')return json(route,null);
+    if(operation==='transfers.list'){
+      assert.deepEqual(args,args.limit===undefined?{cursor:0}:{cursor:0,limit:50},'the empty fixture permits only the initial owner-scoped reads from transfers and control, not identity overrides or pagination');
+      return json(route,{transfers:[],nextCursor:null});
+    }
     if(operation==='projects.list')return json(route,{projects:[]});
     if(operation==='datasets.catalog'){
       if(scene==='loading'){await new Promise(resolve=>pendingReads.push(resolve));}
@@ -150,7 +154,7 @@ try{
   }
   await context.close();
  }
- const onlyReads=new Set(['state','projects.list','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan']);assert(calls.every(row=>onlyReads.has(row.operation)),'no upload begin/ticket or other API writes');
+ const onlyReads=new Set(['state','transfers.list','projects.list','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan']);assert(calls.every(row=>onlyReads.has(row.operation)),'no upload begin/ticket or other API writes');
  assert(!calls.some(row=>row.operation.startsWith('datasets.storage.')||row.operation.startsWith('cloud.auth.')),"visiting an admin's main view sends no privileged data/storage RPC");
  assert.deepEqual(errors,[]);if(fullScan)assert.equal(scans.reduce((sum,row)=>sum+row.count,0),10620,'Every original role/state/zoom/width/height profile is measured');await writeFile(join(output,'shots.json'),JSON.stringify({checkedAt,results,errors,calls,scans},null,2));console.log('PASS '+results.length+' native v3 screenshots: member/admin × main/upload-1/upload-2 ×1440/390/320; shared help geometry; no overflow/script errors; anonymous route probe, no upload begin/ticket/write; search, filters, phone detail/back and Esc focus.');
 }finally{await browser.close();}
