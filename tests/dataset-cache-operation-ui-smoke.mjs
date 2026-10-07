@@ -20,7 +20,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  await page.goto(origin);
  await page.evaluate(async({role,machines,version})=>{
   const {mountCacheOperation,mountCacheTransfer}=await import('/dataset-cache-operation.js');
-  window.calls=[];window.operations=new Map();window.capabilities=new Map(machines.map((row,index)=>[row.id,{allowed:index!==3,action:index===0?'release':'prepare',protocol:'simulated-contract'}]));
+  window.calls=[];window.operations=new Map();window.capabilities=new Map(machines.map((row,index)=>[row.id,{protocol:1,prepare:index!==0&&index!==3,release:index===0}]));
   window.sequence=0;window.lose=false;window.hold=false;window.prepareState='RUNNING';window.preparePhase='COPYING';window.callbacks=new Set();window.active=true;
   window.store={production:true,principal:{userId:'alice',role,enabled:true},authGeneration:0,onAuthChange:callback=>{callbacks.add(callback);return ()=>callbacks.delete(callback);},call:async(operation,args)=>{
    const actor=store.principal.userId;calls.push({operation,args:structuredClone(args),actor});
@@ -40,7 +40,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
   }};
   Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>window.copied=text},configurable:true});
   window.host=document.querySelector('#fixture');
-  window.mount=(raw={allowed:true},action='prepare')=>window.ui=mountCacheOperation(host,{store,action,machine:machines[action==='prepare'?1:0].id,dataset:'sample',version,capabilities:raw,active:()=>active});
+  window.mount=(raw={protocol:1,prepare:true,release:true},action='prepare')=>window.ui=mountCacheOperation(host,{store,action,machine:machines[action==='prepare'?1:0].id,dataset:'sample',version,capabilities:raw,active:()=>active});
   window.transfer=()=>window.ui=mountCacheTransfer(host,{store,source:machines[0].id,targets:machines.slice(1).map(row=>({machine:row.id,capabilities:capabilities.get(row.id)})),dataset:'sample',version});
   window.clean=()=>{ui?.destroy();host.replaceChildren();localStorage.clear();};
   host.innerHTML='<span>现有缓存操作</span>';window.baseline=host.innerHTML;window.ui={destroy(){}};
@@ -72,10 +72,10 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  assert.equal(await page.evaluate(()=>calls.filter(row=>/unregister|evict/.test(row.operation)).length),0);
  await page.locator('[data-cache-transfer-source] [data-cache-cancel]').click();await page.waitForFunction(()=>document.querySelector('[data-state=CANCELING]'));assert.equal(await page.locator('[data-state=CANCELED]').count(),0);
  await page.evaluate(()=>{const row=[...operations.values()].find(row=>row.action==='release');row.state='CANCELED';row.phase='STOPPED';});await page.clock.runFor(1501);assert.equal(await page.locator('[data-state=CANCELED]').count(),1);
- await page.evaluate(()=>{clean();capabilities.set([...capabilities.keys()][0],{allowed:false,reason:'读取租约尚未结束 · 迁移保护'});mount({allowed:false,reason:'读取租约尚未结束 · 迁移保护'},'release');});
+ await page.evaluate(()=>{clean();capabilities.set([...capabilities.keys()][0],{protocol:1,prepare:false,release:false,reason:'读取租约尚未结束 · 迁移保护'});mount({protocol:1,prepare:false,release:false,reason:'读取租约尚未结束 · 迁移保护'},'release');});
  assert.equal(await page.locator('[data-cache-start]').count(),0);assert.equal(await page.locator('[role=alert]').textContent(),'读取租约尚未结束 · 迁移保护');assert.equal(await page.locator('[role=alert]').getAttribute('title'),'读取租约尚未结束 · 迁移保护');
  await page.screenshot({path:join(output,'blocked-'+role+'-'+width+'.png'),fullPage:true,animations:'disabled'});
- await page.evaluate(()=>capabilities.set([...capabilities.keys()][0],{allowed:true,action:'release'}));await page.locator('[data-cache-check]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-start]'));
+ await page.evaluate(()=>capabilities.set([...capabilities.keys()][0],{protocol:1,prepare:false,release:true}));await page.locator('[data-cache-check]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-start]'));
  await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RELEASING]'));assert.equal(await page.locator('[data-state=RELEASED]').count(),0);
  await page.evaluate(()=>{const row=[...operations.values()].findLast(row=>row.action==='release');row.state='RELEASED';row.phase='RELEASED';row.canCancel=false;});await page.locator('[data-cache-query]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RELEASED]'));
  assert.equal(await page.locator('[data-cache-start],[data-cache-cancel]').count(),0,'confirmed release is terminal');

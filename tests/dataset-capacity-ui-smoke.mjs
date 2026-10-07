@@ -22,7 +22,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
   const root=document.querySelector('#page-datasets');root.innerHTML=warehouseWorkspaceHTML();
   for(const machine of machines)root.querySelector('[name=dataset-machine]').add(new Option(machine.id,machine.id));
   window.calls=[];window.reply=null;window.waitReply=null;
-  window.store={production:true,principal:{userId:'reader',username:'示例成员',role},authGeneration:0,data:{machines},onAuthChange(){},async call(operation,args){calls.push({operation,args});assertOperation(operation);if(waitReply)return await waitReply;return reply;}};
+  window.store={production:true,principal:{userId:'reader',username:'示例成员',role},authGeneration:0,data:{machines},onAuthChange(){},async call(operation,args){calls.push({operation,args});if(operation==='datasets.cache.capabilities'){if(args.dataset!=='sample-data'||args.version!==version||!machines.some(row=>row.id===args.machine))throw Error('Unexpected capability target');return {protocol:0,prepare:false,release:false};}assertOperation(operation);if(waitReply)return await waitReply;return reply;}};
   function assertOperation(operation){if(operation!=='datasets.overview')throw Error('Unexpected simulated read/write '+operation);}
   const first=machines[0].id,at='2026-10-08T01:23:00Z';
   const volume=(id,used,available,total=1000*GiB)=>({id,state:'READY',checkedAt:at,totalBytes:total,usedBytes:used*GiB,availableBytes:available*GiB,reserveBytes:50*GiB,usableBytes:(available-50)*GiB});
@@ -77,5 +77,5 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  }
  await page.evaluate(async()=>{waitReply=new Promise(resolve=>window.releaseOverview=resolve);window.pending=view.loadOverview();store.principal={userId:'new-reader',username:'新成员',role:'member'};store.authGeneration++;view.reset();releaseOverview(snapshot);await pending;});
  assert.equal(await page.locator('.capacity-warehouse').count(),0,'A retired account reply cannot restore capacity or datasets');
- assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.overview'&&Object.keys(row.args).length===0));assert.deepEqual(errors,[]);await page.close();
+ assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.overview'&&Object.keys(row.args).length===0||row.operation==='datasets.cache.capabilities'&&row.args.dataset==='sample-data'&&row.args.version===version));assert.deepEqual(errors,[]);await page.close();
 }console.log('CAPACITY UI PASS: simulated member/admin 1440/1024/390/320; normal/unknown/warning/shared, no explanation copy, legacy fallback, account fence, readonly room gating.');}finally{await browser.close();}

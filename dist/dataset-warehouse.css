@@ -180,6 +180,13 @@ body[data-room=datasets] .v3-count{font:13px var(--mono);font-variant-numeric:ta
 @media(prefers-reduced-motion:reduce){#page-datasets .warehouse-v3 *,#page-datasets .v3-upload *{transition:none}}
 
 #page-datasets .v3-delete-row{padding:12px 20px;border-top:1px solid var(--line)}
+#page-datasets .v3-server-actions{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:6px}
+#page-datasets .v3-server-actions:empty{display:none}
+#page-datasets .v3-cache-reason{grid-column:2/-1;max-width:100%;margin:0;font-size:12px;color:var(--v3-warn);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#page-datasets .v3-cache-sheet{width:min(440px,100%);padding:0 20px 20px;background:var(--bg-1);color:var(--ink)}
+#page-datasets .v3-cache-sheet>.dataset-sheet-head{margin:0 -20px;padding:16px 20px}
+#page-datasets .v3-cache-sheet>.dataset-sheet-head .button{min-height:44px}
+@container(max-width:759px){#page-datasets .v3-server-actions{grid-column:2/-1;justify-content:flex-start}#page-datasets .v3-cache-sheet{width:100%;padding-inline:16px}#page-datasets .v3-cache-sheet>.dataset-sheet-head{margin-inline:-16px;padding-inline:16px}}
 #page-datasets .v3-delete{font-size:13px;color:var(--v3-bad);min-height:40px}
 #page-datasets .v3-upload-row .v3-flag{color:var(--v3-fetch)}
 #page-datasets .v3-row-progress{position:absolute;bottom:0;left:0;height:2px;background:var(--v3-fetch)}
