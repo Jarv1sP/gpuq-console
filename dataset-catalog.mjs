@@ -208,17 +208,65 @@ function ownerView(item,users){
   return {key:JSON.stringify(owners),label};
 }
 
+// Only the node's durable, fixed-version warehouse binding may select a
+// physical training cache. This is never a client-supplied path or an alias
+// inferred from a naming prefix. Missing/invalid bindings cannot run on HDD.
+export function warehouseCacheReference(status,ref){
+  if(status?.storageReference===undefined&&!(typeof status?.warehouseReady==='boolean'&&status?.state==='READY'))return null;
+  const value=status?.storageReference;
+  if(typeof ref?.dataset!=='string'||!ID.test(ref.dataset)||typeof ref?.version!=='string'||!HASH.test(ref.version)||status?.dataset!==ref.dataset||status?.version!==ref.version||status?.state!=='READY'||status?.warehouseReady!==true||
+    !value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length!==2||
+    !Object.hasOwn(value,'dataset')||!Object.hasOwn(value,'version')||typeof value.dataset!=='string'||!ID.test(value.dataset)||value.version!==ref.version||!HASH.test(value.version))
+    throw Object.assign(Error('仓库训练缓存的固定版本绑定尚未确认。'),{status:502,code:'WAREHOUSE_REFERENCE_INVALID'});
+  return {dataset:value.dataset,version:value.version,mountAs:ref.dataset};
+}
+
+function warehouseProjection(result){
+  if(!Array.isArray(result?.datasets))return result;
+  const originals=new Map();
+  for(const item of result.datasets){
+    if(typeof item?.dataset!=='string'||!ID.test(item.dataset)||!Array.isArray(item.versions))continue;
+    const ids=ownerIds(item);if(!ids)continue;
+    for(const value of item.versions)if(HASH.test(value?.version)&&typeof value.warehouseReady==='boolean'){
+      const key=item.dataset+'@'+value.version,entries=originals.get(key)||[];
+      entries.push({item,value,owners:JSON.stringify(ids)});originals.set(key,entries);
+    }
+  }
+  return {...result,datasets:result.datasets.map(item=>{
+    if(!Array.isArray(item?.versions))return item;
+    const ids=ownerIds(item);
+    const versions=item.versions.filter(value=>{
+      if(typeof value?.logicalDataset!=='string'||!ID.test(value.logicalDataset)||!HASH.test(value.version)||!ids)return true;
+      const entries=originals.get(value.logicalDataset+'@'+value.version);
+      if(entries?.length!==1||entries[0].owners!==JSON.stringify(ids)||item.dataset===value.logicalDataset)return true;
+      const original=entries[0].value;
+      if(original.state==='READY'){
+        try{return warehouseCacheReference({...original,dataset:value.logicalDataset},{dataset:value.logicalDataset,version:value.version})?.dataset!==item.dataset;}
+        catch{return true;}
+      }
+      // A registered original and its non-READY cache may share a durable
+      // binding, but a contradictory READY physical copy stays visible.
+      return value.state==='READY';
+    });
+    return item.versions.length&&!versions.length?null:{...item,versions};
+  }).filter(item=>item!==null)};
+}
+
 // Do not forward arbitrary node metadata, owner IDs, paths or user records.
 export function datasetListView(result,users,{includeEmpty=false,labelView,logicalName}={}){
   if(!Array.isArray(result?.datasets))fail('数据集目录暂时无法确认。',502);
-  return {datasets:result.datasets.filter(item=>ID.test(item?.dataset)&&Array.isArray(item.versions)).map(item=>({
+  return {datasets:warehouseProjection(result).datasets.filter(item=>ID.test(item?.dataset)&&Array.isArray(item.versions)).map(item=>({
     dataset:item.dataset,ownerLabel:ownerView(item,users).label,
     ...(labelView?labelView(logicalName?.(item)||item.dataset):{}),
     versions:item.versions.filter(value=>HASH.test(value?.version)).map(value=>{
       const clean={version:value.version,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true};
+      try{warehouseCacheReference({...value,dataset:item.dataset},{dataset:item.dataset,version:value.version});}
+      catch{clean.state='UNKNOWN';clean.canPrepare=false;}
       for(const field of ['bytes','files'])if(Number.isSafeInteger(value[field])&&value[field]>=0)clean[field]=value[field];
       if(HASH.test(value.operationId))clean.operationId=value.operationId;
       if(value.recoveryConfigured===true)clean.recoveryConfigured=true;
+      if(typeof value.warehouseReady==='boolean')clean.warehouseReady=clean.state!=='UNKNOWN'&&value.warehouseReady;
+      if(typeof value.warehouseCanPrepare==='boolean')clean.warehouseCanPrepare=value.warehouseCanPrepare===true&&clean.canPrepare;
       if(value.deletionPermissions)clean.deletionPermissions={memberAllowed:value.deletionPermissions.memberAllowed===true,reason:value.deletionPermissions.memberAllowed===true?null:'这份数据只能由管理员删除'};
       if(typeof value.error==='string')clean.error=value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300);
       return clean;
@@ -300,7 +348,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
           }
         }catch{}
       }
-      return {machine:m.id,state:'ok',datasets:result.datasets,legacy,memberDeletes,datasetDelete:result.datasetDelete===1};
+      return {machine:m.id,state:'ok',datasets:warehouseProjection(result).datasets,legacy,memberDeletes,datasetDelete:result.datasetDelete===1};
     }catch{return {machine:m.id,state:'unavailable',datasets:[]};}
   }));
   let capabilities;
@@ -309,6 +357,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
   const replicaSources=capabilities?.enabled===true&&Array.isArray(capabilities.sources)?capabilities.sources.filter(id=>MACHINES.some(m=>m.id===id)):[];
   const datasets=new Map();
   const owners=new WeakMap();
+  const sourceNames=new WeakMap();
   const aliases=new Map();
   const aliasesFor=id=>{if(!aliases.has(id))aliases.set(id,service.datasetAliases?.(user.id,id));return aliases.get(id);};
   for(const listing of listings)for(const item of listing.datasets){
@@ -328,14 +377,19 @@ export async function datasetCatalogCall(service,principal,operation,args){
       if(!version){version={version:value.version,locations:[]};dataset.versions.set(value.version,version);}
       const ownership=ownerView(item,service.store.users);
       const pending=principal.role==='admin'?removalPending(service,listing.machine,item.dataset,value.version):null;
-      const storage=canUse?service.archiveState?.(user.id,listing.machine,ref):null;
+      // A current warehouse fact is about this node's fixed HDD source, not
+      // a historical archive journal which may point at a retired authority.
+      const storage=canUse&&typeof value.warehouseReady!=='boolean'?service.archiveState?.(user.id,listing.machine,ref):null;
       const memberAllowed=canUse&&listing.memberDeletes?.has(item.dataset+'@'+value.version)===true;
-      const location={machine:listing.machine,dataset:item.dataset,ownerLabel:ownership.label,state:STATES.has(value.state)?value.state:'UNKNOWN',canUse,canPrepare:canUse&&hasMachine(listing.machine)&&value.canPrepare===true,
+      let cache,invalidBinding=false;
+      try{cache=warehouseCacheReference({...value,dataset:item.dataset},ref);}catch{invalidBinding=true;}
+      const location={machine:listing.machine,dataset:cache?.dataset||item.dataset,ownerLabel:ownership.label,state:invalidBinding?'UNKNOWN':STATES.has(value.state)?value.state:'UNKNOWN',canUse,canPrepare:!invalidBinding&&canUse&&hasMachine(listing.machine)&&value.canPrepare===true,
+        ...(typeof value.warehouseReady==='boolean'?{warehouseReady:!invalidBinding&&value.warehouseReady}:{}),
         ...(pending?{removalPending:true,...(!pending.operation_id&&pending.registration_identity?{removalGraceEligible:true}:{})}:{}),
         deletionPermissions:{memberAllowed,reason:memberAllowed?null:'这份数据只能由管理员删除'},
         ...(storage?{storage}:{}),
         ...(canUse&&listing.machine===machine&&typeof value.error==='string'?{error:value.error.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300)}:{})};
-      owners.set(location,ownership);version.locations.push(location);
+      owners.set(location,ownership);sourceNames.set(location,item.dataset);version.locations.push(location);
       if(Number.isSafeInteger(value.bytes)&&value.bytes>=0)version.bytes=value.bytes;
       if(Number.isSafeInteger(value.files)&&value.files>=0)version.files=value.files;
     }
@@ -350,11 +404,11 @@ export async function datasetCatalogCall(service,principal,operation,args){
       const canUse=version.locations.some(l=>l.canUse),usableLocal=version.locations.filter(l=>l.machine===machine&&l.canUse);
       const local=usableLocal.find(l=>l.state==='READY')||usableLocal[0];
       const visibleLocal=version.locations.find(l=>l.machine===machine);
-      const source=targetAllowed&&localAvailable&&local?.state!=='READY'&&!local?.canPrepare&&version.locations.find(l=>l.canUse&&l.state==='READY'&&replicaSources.includes(l.machine));
+      const source=targetAllowed&&localAvailable&&local?.state!=='READY'&&!local?.canPrepare&&version.locations.find(l=>l.canUse&&(l.state==='READY'||l.warehouseReady===true)&&replicaSources.includes(l.machine));
       const transfer=targetAllowed&&canUse?service.datasetReplicaState?.(user.id,machine,{dataset:item.dataset,version:version.version}):null;
       // A private local READY is useful directory metadata, not proof that a
       // remote authorized version is already prepared for this member here.
       const state=local?.state==='READY'?'READY':transfer?.state||local?.state||(!canUse?visibleLocal?.state:null)||(localAvailable?'NOT_LOCAL':'UNKNOWN');
-      return {...version,ownerLabel:combinedOwnerLabel(version.locations,owners),state,canUse,canPrepare:targetAllowed&&(local?.canPrepare===true||!!source),...(source?{sourceMachine:source.machine,sourceDataset:source.dataset}:{}),...(canUse&&local?.state!=='READY'&&(transfer?.error||local?.error)?{error:transfer?.error||local?.error}:{})};
+      return {...version,ownerLabel:combinedOwnerLabel(version.locations,owners),state,canUse,canPrepare:targetAllowed&&(local?.canPrepare===true||!!source),...(source?{sourceMachine:source.machine,sourceDataset:sourceNames.get(source)}:{}),...(canUse&&local?.state!=='READY'&&(transfer?.error||local?.error)?{error:transfer?.error||local?.error}:{})};
     })}))};
 }

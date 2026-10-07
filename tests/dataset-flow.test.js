@@ -84,3 +84,15 @@ test('cache budget uses plan bytes and its returned watermarks, rejects missing/
   assert.match(cachePreviewHTML('sample-node',plan),/当前不需要释放/);assert.doesNotMatch(cachePreviewHTML('sample-node',plan),/没有可释放的缓存/);
   assert.equal(cacheAdminHTML(false),'');
 });
+
+test('warehouse READY means a retained original, not a prepared SSD cache or a guessed source route',()=>{
+  const catalog={machine:'training-node',machines:[{machine:'training-node',state:'ok'}]},v={version:hash,state:'NOT_LOCAL',canPrepare:true,sourceMachine:'warehouse-node',
+    locations:[{machine:'warehouse-node',dataset:'original-data',state:'REGISTERED',warehouseReady:true}]};
+  assert.equal(databaseSummary(v).saved,true);assert.equal(hasDatabaseOriginal(v),true);
+  assert.equal(cacheFact(v,catalog.machine,catalog,'NOT_LOCAL').kind,'recoverable');
+  assert.deepEqual(datasetFlowRoute(v,catalog),{source:'warehouse-node',target:catalog.machine,bytes:null});
+  assert.ok(!datasetLifecycle(v,catalog).some(row=>row.label==='缓存就绪'||row.label==='可用于训练'));
+  assert.equal(hasDatabaseOriginal({...v,locations:[{...v.locations[0],warehouseReady:false}]}),false);
+  const mixed={...v,locations:[...v.locations,{machine:'other-warehouse',dataset:'original-data',warehouseReady:true}]};
+  assert.equal(databaseSummary(mixed).kind,'unknown');
+});

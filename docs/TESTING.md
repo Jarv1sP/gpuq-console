@@ -61,6 +61,15 @@ Mac 对该一项保留明确 skip；不接触生产路径、服务、GPU 或用�
 
 数据集回归另覆盖固定版本、身份/机器授权、准备不预留显卡、只选择同机全部 READY 的副本、失败重试与断点继续、租约清理的保守边界、挂载缺失拒绝写系统盘、旧节点环境/管理员终端兼容升级。数据页浏览器测试使用假的执行桥，不触发真实训练；验证准备、失败、重试、READY 后填入训练，以及移动端和在线手册入口。
 
+同机机械原件／固态缓存投影用真实双 root 节点契约的离线夹具验证：只采用服务端
+`logicalDataset` 持久绑定与完整相同 ACL 消除重复缓存行，不猜名称前缀；仓库原件
+READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进入 runner 和准备
+保活，公开命令及挂载名仍是逻辑数据集。错误 hash、路径、额外字段、缺失绑定、撤权
+及原件准备失败均不回退 HDD 训练或另选来源。跨机复制仍使用原件逻辑引用，普通
+上传不因此新增盘位／root 选择。`warehouse-logical-cache-ui-smoke.mjs` 在独立 loopback
+门户、1440/390 原生浏览器验证一条逻辑记录、原件不冒充缓存就绪、自动准备入口、固定准备调用及原命令；
+不连接生产、不搬运数据、不运行 GPU，不替代实际 SSD/HDD 发布与校验。
+
 `dataset-deletion-continue-running.test.js` 使用独立 SQLite、真实挂起的 locations 回包及 loopback HTTP 登录，验证继续前持久 RUNNING/清旧 error、同编号查询不重放、重复继续零派发、持久化失败零启动和 worker 等待后的认证重核。真实 logout 在回包等待期间仍阻止全部写入；保持登录直到 DELETED 后再退出不改变原结果。假桥不连接节点，也不放宽认证或删除证明。
 
 `dataset-empty-registration-api.test.js` 与 `dataset-empty-registration.test.py` 专测管理员正常注销个人 0 版本登记：完整清单与节点强证明、原 worker/回执、默认 tier 与上传历史保留、丢回执沿原编号查询，以及新版本/owner/依赖变化、软硬链接、未知上传预留、成员/旧能力/单版本/伪造字段的零派发。Python 夹具使用真实缓存和后台 worker，只替换 systemd 启动与活动探测，不连接节点或调用 GPU；既有 unregister、last-copy 与 delete-retry 仍需回归，不能把空登记分支用作任意版本的最后副本例外。

@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {advanceDataPreparation,DATA_PREPARING,releaseDataPreparation} from '../dataset-preparation.mjs';
 import {usage,publicJob} from '../execution.mjs';
+import {DatabaseSync} from 'node:sqlite';
+import {installDatasetReplication} from '../dataset-replication.mjs';
 
 const ref={dataset:'sample',version:'a'.repeat(64)};
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
@@ -228,4 +230,23 @@ test('nonterminal or unknown submission never invokes prepare cancellation',asyn
   }
   assert.equal(f.calls.filter(call=>call.operation==='storage.lease.cancel').length,0);
   assert.equal(f.jobs[0].dataPreparationHold.state,'HELD');
+});
+
+test('warehouse physical cache is used by the durable hold and runner while public identity stays logical',async t=>{
+  const f=managed(fixture()),db=new DatabaseSync(':memory:');t.after(()=>db.close());f.service.db=db;
+  const physical={dataset:'private-cache',version:ref.version,mountAs:ref.dataset},bridge=f.service.bridge;
+  f.service.bridge=async(machine,operation,args)=>operation==='datasets.status'?{...ref,state:'READY',warehouseReady:true,warehouseCanPrepare:true,storageReference:{dataset:physical.dataset,version:physical.version}}:bridge(machine,operation,args);
+  installDatasetReplication(f.service);await advanceDataPreparation(f.service,f.jobs[0],usage);
+  const job=f.jobs[0];assert.equal(job.state,'SUBMITTING');assert.deepEqual(job.datasets,[ref]);assert.deepEqual(job.spec.datasets,[physical]);
+  assert.deepEqual(job.dataPreparationHold.spec.datasets,[physical]);
+  assert.deepEqual(f.calls.find(call=>call.operation==='storage.lease.prepare').args.job.datasets,[physical]);
+  assert.equal(job.dataPreparationHold.state,'HELD');assert.doesNotMatch(JSON.stringify(publicJob(job)),/private-cache|storageReference/);
+  job.state='CANCELED';await releaseDataPreparation(f.service,job);
+  assert.deepEqual(f.calls.find(call=>call.operation==='storage.lease.cancel').args.job.datasets,[physical]);
+});
+test('missing warehouse binding cannot promote a preparation or reserve GPUs',async t=>{
+  const f=managed(fixture()),db=new DatabaseSync(':memory:');t.after(()=>db.close());f.service.db=db;
+  f.service.bridge=async()=>({...ref,state:'READY',warehouseReady:true});installDatasetReplication(f.service);
+  await assert.rejects(advanceDataPreparation(f.service,f.jobs[0],usage),e=>e.code==='WAREHOUSE_REFERENCE_INVALID');
+  assert.equal(f.jobs[0].state,DATA_PREPARING);assert.equal(usage(f.jobs,f.user.id),0);assert.equal(f.jobs[0].dataPreparationHold,undefined);
 });
