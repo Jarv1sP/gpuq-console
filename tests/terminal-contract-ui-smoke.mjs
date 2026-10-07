@@ -72,6 +72,7 @@ export async function terminalContractSmoke(){
         }finally{value.pending--;if(heldExchange?.id===value.id&&heldExchange.release)heldExchange.completed=true;}
       }
       if(operation==='terminal.detach'){const value=writer(node,args);value.detached=true;value.leaseExpiresAt=0;return {detached:true,id:value.id};}
+      if(operation==='terminal.status'){const value=owned(node,args);assert.equal(args.writerToken,undefined);assert.equal(args.clientId,undefined);return {protocol:'terminal-session-status-v1',id:value.id,state:value.ended?'STOPPED':'ALIVE',evidence:{confirmed:true},canCloseStopped:value.ended&&value.leaseExpiresAt<=Date.now()};}
       if(operation==='terminal.close'){const value=writer(node,args);if(closeUnconfirmed){closeUnconfirmed=false;return {};}sessions.delete(value.id);return {closed:true};}
       fail('Unexpected synthetic operation: '+operation);
     };
@@ -161,10 +162,27 @@ export async function terminalContractSmoke(){
     await choose(memberPage,'container-lab');const container=await open(memberPage);assert.match(await memberPage.locator('#terminal-session-note').textContent(),/^容器终端 · 无 GPU$/);
     await layouts(memberPage,'member-container');await memberPage.locator('#terminal-disconnect').click();
     const containerRequest=requests.find(row=>row.body.operation==='terminal.open'&&row.body.args.key===container);assert.equal(containerRequest.body.args.project,'container-lab');assert.ok(!('hostAdmin'in containerRequest.body.args));
+    const beforeRefresh=requests.length;await memberPage.reload();await choose(memberPage,'container-lab');
+    await waitFor(()=>requests.slice(beforeRefresh).some(row=>row.body.operation==='terminal.status'&&row.body.args.id===container),'refresh checks the retained original session');
+    await memberPage.waitForFunction(id=>globalThis.__terminalStates.at(-1)?.sessions.some(row=>row.id===id&&row.connectionState==='detached'),container);
+    const restored=await memberPage.evaluate(id=>globalThis.__terminalStates.at(-1)?.sessions.find(row=>row.id===id),container);
+    assert.equal(restored.id,container);assert.equal(restored.machine,machine);assert.equal(restored.project,'container-lab');assert.equal(restored.detached,true);
+    assert.ok(!('writerToken'in restored)&&!('clientId'in restored));
+    assert.equal(requests.slice(beforeRefresh).some(row=>['terminal.open','terminal.exchange','terminal.close'].includes(row.body.operation)),false,'refresh only reads status; never attaches, inputs or ends');
+    assert.equal(await memberPage.locator('#project-terminal-stop').isHidden(),false,'the retained development session still has the project end entry');
+    memberPage.once('dialog',async dialog=>{assert.equal(dialog.type(),'prompt');assert.equal(dialog.defaultValue(),container);await dialog.dismiss();});
+    await memberPage.locator('#terminal-reconnect').click();
+    await memberPage.screenshot({path:join(shots,'member-restored-1440.png'),fullPage:true});
     const duplicateCount=requests.filter(row=>row.body.operation==='terminal.open').length;await memberPage.locator('#terminal-open').click();await memberPage.waitForFunction(()=>document.querySelector('#toast')?.textContent.includes('此项目已有开发终端'));
     assert.equal(requests.filter(row=>row.body.operation==='terminal.open').length,duplicateCount+1);assert.ok(sessions.has(container));await reconnect(memberPage,container);
     closeUnconfirmed=true;memberPage.once('dialog',dialog=>dialog.accept());await memberPage.locator('#terminal-stop').click();await memberPage.locator('#terminal-connection-note').filter({hasText:'结束结果未确认'}).waitFor();assert.ok(sessions.has(container));await stop(memberPage);
     const adminPage=await pageFor('admin');await choose(adminPage,'container-lab');const adminContainer=await open(adminPage);await layouts(adminPage,'admin-container');
+    await adminPage.locator('#terminal-disconnect').click();const adminBefore=requests.length;await adminPage.reload();await choose(adminPage,'container-lab');
+    await waitFor(()=>requests.slice(adminBefore).some(row=>row.body.operation==='terminal.status'&&row.body.args.id===adminContainer),'administrator refresh also checks the original project context');
+    await adminPage.waitForFunction(id=>globalThis.__terminalStates.at(-1)?.sessions.some(row=>row.id===id&&row.connectionState==='detached'),adminContainer);
+    assert.equal(await adminPage.evaluate(id=>globalThis.__terminalStates.at(-1).sessions.some(row=>row.id===id&&!row.hostAdmin),adminContainer),true);
+    assert.equal(requests.slice(adminBefore).some(row=>['terminal.open','terminal.exchange','terminal.close'].includes(row.body.operation)),false);
+    await adminPage.screenshot({path:join(shots,'admin-restored-1440.png'),fullPage:true});await reconnect(adminPage,adminContainer);
     const adminRequest=requests.find(row=>row.body.operation==='terminal.open'&&row.body.args.key===adminContainer);assert.ok(!('hostAdmin'in adminRequest.body.args),'administrator container root stays separate from hostAdmin');await stop(adminPage);
     const peerPage=await pageFor('terminal-peer');await choose(peerPage,'python-lab');
     const cross=await peerPage.evaluate(async({machine,id})=>{const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'terminal.open',args:{machine,id,project:'python-lab',clientId:crypto.randomUUID(),key:crypto.randomUUID(),mode:'reconnect'}})});return {status:response.status,body:await response.json()};},{machine,id:first});assert.equal(cross.status,403);assert.match(cross.body.error,/不属于当前账号/);
@@ -178,7 +196,7 @@ export async function terminalContractSmoke(){
     const closes=calls.filter(row=>row.operation==='terminal.close');assert.ok(closes.every(row=>[second,container,adminContainer].includes(row.args.id)||row.args.id!==first));
     assert.equal(closes.some(row=>row.args.id===first),false,'exit, network errors, takeover and room changes do not close the old PTY');
     assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
-    console.log(JSON.stringify({status:'passed',suite:'terminal-contract',shots,checks:['independent PTYs','explicit takeover cost','unknown input stops until reconnect','429 read-only 1s/2s backoff','expired writer fenced','exit code with explicit new action','container project without hostAdmin','duplicate container rejected','closed:true confirmation','cross-account and zero-grant rejection','writerToken memory only','member/admin 1440/390']}));
+    console.log(JSON.stringify({status:'passed',suite:'terminal-contract',shots,checks:['independent PTYs','explicit takeover cost','unknown input stops until reconnect','429 read-only 1s/2s backoff','expired writer fenced','exit code with explicit new action','container project without hostAdmin','refresh preserves original ID and end entry; status only until explicit reconnect','duplicate container rejected','closed:true confirmation','cross-account and zero-grant rejection','writerToken memory only','member/admin 1440/390']}));
   }finally{
     heldExchange?.release?.();
     await browser?.close();if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}
