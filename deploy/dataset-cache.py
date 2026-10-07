@@ -380,8 +380,36 @@ def _rename_new(source, destination):
         os.fsync(source_fd)
 
 
-def _modes(path, readonly):
+def _linux_syncfs():
+    """Resolve bulk durability before changing modes; absence keeps fsync."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        fn = ctypes.CDLL(None, use_errno=True).syncfs
+    except (AttributeError, OSError):
+        return None
+    fn.argtypes = [ctypes.c_int]
+    fn.restype = ctypes.c_int
+
+    def flush(fd):
+        ctypes.set_errno(0)
+        if fn(fd):
+            code = ctypes.get_errno() or errno.EIO
+            # An available syscall reporting an error is NOT a durability
+            # proof. Keep staging unpublished, rather than retrying as success.
+            raise OSError(code, os.strerror(code))
+    return flush
+
+
+def _modes(path, readonly, *, bulk_durability=False):
+    # Only immutable publication opts in. Recovery and eviction retain their
+    # original per-file/directory fsync behavior on every platform.
+    syncfs = _linux_syncfs() if bulk_durability else None
+    device = None
+
     def visit(fd):
+        if syncfs is not None and os.fstat(fd).st_dev != device:
+            raise CacheError("bulk durability cannot cross filesystems")
         for name in os.listdir(fd):
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
@@ -393,15 +421,24 @@ def _modes(path, readonly):
             else:
                 child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
                 try:
-                    _regular(child)
+                    info = _regular(child)
+                    if syncfs is not None and info.st_dev != device:
+                        raise CacheError("bulk durability cannot cross filesystems")
                     os.fchmod(child, 0o444 if readonly else 0o600)
-                    os.fsync(child)
+                    if syncfs is None:
+                        os.fsync(child)
                 finally:
                     os.close(child)
         os.fchmod(fd, 0o555 if readonly else 0o700)
-        os.fsync(fd)
+        if syncfs is None:
+            os.fsync(fd)
     with _directory(path) as fd:
+        device = os.fstat(fd).st_dev
         visit(fd)
+        if syncfs is not None:
+            # The same no-follow root descriptor covers the verified tree.
+            # Publish still fsyncs final metadata and both rename parents.
+            syncfs(fd)
 
 
 def _storage_mount(mount_point, cache_root):
@@ -1885,7 +1922,7 @@ class DatasetCache:
         try:
             # Hashing and chmod/fsync hold only the version lock. Other versions
             # and lightweight status remain available throughout a long copy.
-            _modes(stage, True)
+            _modes(stage, True, bulk_durability=True)
             with self._locked():
                 if _guard is not None:
                     _guard()
