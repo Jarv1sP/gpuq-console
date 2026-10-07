@@ -238,7 +238,7 @@ try{
   assert.equal(calls.filter(call=>call.operation==='terminal.open').at(-1).args.hostAdmin,false,'admin default terminal remains private');
   await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
   await action('projects.status',()=>adminPage.locator('[name=workspace-project]').selectOption('admin-project'),adminPage);await idle(adminPage);
-  await adminPage.locator('#workspace-files summary').click();
+  await adminPage.locator('#workspace-files>summary').click();
   await adminPage.locator('[name=files]').setInputFiles({name:'resume.py',mimeType:'text/plain',buffer:resumeFile});
   const adminUploadStart=calls.length;await action('files.put',()=>adminPage.locator('#workspace-upload').click(),adminPage);await idle(adminPage);
   const adminPuts=calls.slice(adminUploadStart).filter(row=>row.operation==='files.put');assert.equal(adminPuts[0].args.offset,0);assert.notEqual(adminPuts[0].args.uploadId,originalUpload);assert.equal(adminPuts[0].args.userId,'builtin-admin','another actor never resumes member bytes');

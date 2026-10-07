@@ -201,6 +201,10 @@ try{
   await adminPage.evaluate(()=>document.querySelector('#switch-account').click());await adminPage.locator('#login-dialog').waitFor({state:'visible'});assert.equal(await adminPage.locator('[data-cache-pin-slot],.dataset-cache-admin').count(),0);
   await login(adminPage,member.username);await load(adminPage);assert.equal(await adminPage.locator('.dataset-cache-admin,[data-cache-retention]').count(),0,'the next account inherits no retention controls');
   await adminPage.evaluate(()=>document.querySelector('#switch-account').click());await adminPage.locator('#login-dialog').waitFor({state:'visible'});await login(adminPage,'admin');await storage(adminPage);await adminLocal.locator('summary').click();await adminLocal.locator('[data-cache-retention=unpin]').waitFor();assert.equal(pins.size,2);assert.ok(pins.has('pre-existing'));assert.ok(calls.some(row=>row.operation==='datasets.storage.status'&&row.args.pinId===calls.filter(row=>row.operation==='datasets.storage.pin').at(-1).args.pinId),'same account restores only after exact server proof');
+  // This account owns the fixture metadata but has zero machine/GPU grant.
+  // The public view no longer displays unrelated private metadata; retaining
+  // an own record still must not supply a content or execution permission.
+  fixtureOwners.push(zero.id);
   const zeroPage=await pageFor('zero');assert.equal(await zeroPage.locator('.dataset-cache-admin,[data-cache-retention],[data-dataset-more-slot]').count(),0);assert.equal(await zeroPage.locator('#datasets-refresh').isEnabled(),true);
   const zeroCalls=calls.length;await load(zeroPage);
   assert.equal(await zeroPage.locator('[data-v3-select]').count(),4,'Zero quota can browse the complete metadata library');

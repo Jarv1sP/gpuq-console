@@ -155,13 +155,21 @@ try{
   await page.evaluate(()=>{const select=document.querySelector('[name=dataset-machine]');select.value='node-b';select.dispatchEvent(new Event('change',{bubbles:true}));releasePublish();});await page.waitForTimeout(1700);
   assert.equal(await page.evaluate(count=>calls.slice(count).some(call=>call.operation==='datasets.workspace.status'),beforeMachine),false);
   assert.match(await page.locator('#data-workspace-status').textContent(),/已切换服务器/);assert.equal(await page.locator('[name=dataset-machine]').inputValue(),'node-b');
+  assert.equal(await page.locator('[data-v3-select]').count(),0,'Bob cannot see Alice private rows after the current public-view filter');
   // A failed space reading is explicit but cannot erase a confirmed catalog.
   await page.locator('[data-dataset-add-close]').click();
+  // Capacity visibility is tested with the actual dataset owner, not by
+  // reopening another account private row. No content grant is transferred.
+  await page.evaluate(()=>{store.principal={userId:'alice',username:'alice',role:'member'};store.authGeneration++;store.listeners.forEach(listener=>listener());render();});
+  await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+  // This isolated component fixture has no global server picker; use the
+  // same synthetic context-change event as the late-machine test above.
+  await page.evaluate(()=>{const select=document.querySelector('[name=dataset-machine]');select.value='node-b';select.dispatchEvent(new Event('change',{bubbles:true}));});
   await page.evaluate(()=>{capacityFail=true;});await page.locator('#datasets-refresh').click();
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
   assert.match(await page.locator('#datasets-capacity').textContent(),/容量待更新/);
   assert.equal(await page.locator('[data-v3-select]').count(),1);
-  assert.equal(await page.locator('[data-use-dataset]').isDisabled(),true,'Bob may discover Alice\'s metadata, not train with her data');
+  assert.equal(await page.locator('[data-use-dataset]').isDisabled(),true,'Owner metadata on another node does not prove a local training copy');
   // Revoking a different machine invalidates the entire aggregate, even when
   // the selected machine is unchanged and an old directory reply arrives late.
   await page.evaluate(()=>{gateCatalog=true;});await page.locator('#datasets-refresh').click();
