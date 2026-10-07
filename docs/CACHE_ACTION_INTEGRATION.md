@@ -1,29 +1,21 @@
 # 手动缓存中央文件集成清单
 
-本分支不修改其他 agent 正在编辑的中央文件。集成者需逐项应用并运行完整测试，再做分阶段配套发布；当前文件是源码交接，不是生产已实施证明。
+中央集成已在源码中接入；本页列出完整依赖与验收边界，供后续发布核对。源码集成不代表生产已实施，仍需完成测试并分阶段配套发布。
 
 ## Portal
 
 1. `portal-service.mjs` 导入 `installDatasetCacheActions`（`./dataset-cache-actions.mjs`），在已有 dataset replication/storage archive 初始化之后调用 `installDatasetCacheActions(this)`。
-2. 在 `call(token,operation,args)` 的 datasetRead/default enqueue 之前增加独立路由：
+2. `invoke(token,operation,args)` 的公共路由仅接受以下五个缓存 literal，并纳入既有四个并发的 `datasetRead` 准入；不进入长时间全局 mutation queue：
 
 ```js
-if (typeof operation === 'string' && operation.startsWith('datasets.cache.')) {
-  const principal = this.principal(token);
-  const check = () => {
-    const current = this.principal(token);
-    if (current.userId !== principal.userId || current.username !== principal.username || current.role !== principal.role)
-      throw Object.assign(Error('登录身份已改变。'), {status:403});
-  };
-  return this.datasetCacheActionsCall(principal, operation, structuredClone(args), check)
-    .then(result => {check(); return {result, principal:{...principal}};});
-}
+['datasets.cache.capabilities', 'datasets.cache.prepare',
+ 'datasets.cache.release', 'datasets.cache.status', 'datasets.cache.cancel']
 ```
 
-模块内部限制最多四个缓存 mutation 在途，同 key 合并；只读请求应纳入已有 dataset 读取限流，不能跟长时间全局 mutation queue 排队。它不需要新的 execution.mjs 泛化透传，也不要把整段 `datasets.cache.*` 转发节点。
+`datasetRead` 在准入和返回时重新核实会话/权限，在操作之前检查维护状态，并将原 check 回调交给 `datasetCacheActionsCall`。模块内部最多四个缓存 mutation 在途，同 key 合并；所有桥等待结束后再次鉴权。它不需要新的 execution.mjs 泛化透传，也不把整段 `datasets.cache.*` 转发节点。
 
 3. `deploy/Dockerfile` 最终 stage 把 `dataset-cache-actions.mjs` 加入现有数据模块 COPY。
-4. `maintenance.mjs`：cache capabilities/status/cancel 使用同已有数据只读/取消维护准入；新 prepare/release 仍由 `assertMaintenanceAllowed` 拒绝。不要让取消依赖门户主页完整刷新。
+4. `maintenance.mjs`：公共 `datasets.cache.capabilities/status/cancel` 及对应私有 `storage.cache-action.capabilities/status/cancel` 使用已有数据只读/取消维护准入；两侧新 prepare/release 仍拒绝。不要让取消依赖门户主页完整刷新。准备 worker 被多位成员或训练共用，`prepareCancel:false`；只有独立 release worker 可以明确取消。
 
 ## 节点私有桥
 

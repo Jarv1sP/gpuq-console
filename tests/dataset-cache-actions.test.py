@@ -142,6 +142,50 @@ class CacheActionsTests(unittest.TestCase):
         caps=adapter.capabilities(OWNER,'sample',self.version)
         self.assertTrue(caps['prepare'])
         self.assertFalse(caps['release'])
+    def test_shared_owner_prepare_binds_actual_worker_and_observes_without_raw_id_acl_bypass(self):
+        version=self.hot.register_source(ADMIN,'shared','approved',['owner','other'])['version']
+        worker={'id':'b'*64,'state':'PREPARING'}
+        calls=[]
+        def dataset_op(operation,args):
+            calls.append((operation,dict(args)))
+            self.assertFalse(args['hostAdmin'])
+            if 'operationId' in args:
+                # The existing public operationId endpoint remains owner-only.
+                raise PermissionError('shared worker belongs to another owner')
+            self.assertEqual((args['dataset'],args['version']),('shared',version))
+            current=self.hot.status(D.Principal(args['userId']),args['dataset'],args['version'])
+            return {**current,'state':worker['state'],'operationId':worker['id']}
+        executor=SimpleNamespace(dataset_cache=lambda:(D,self.hot),storage_node=lambda:SimpleNamespace(tier=self.tier),
+                                 ROOT=self.root,HERE=ROOT/'deploy',storage_warehouse=lambda:None,dataset_op=dataset_op)
+        adapter=C.from_executor(executor)
+        key=str(uuid.uuid4())
+        started=adapter.start(OTHER,'prepare','shared',version,key)
+        self.assertEqual(started['state'],'RUNNING')
+        self.assertEqual(adapter._read(OTHER,key)['nativeId'],worker['id'])
+        self.assertEqual(adapter.status(OTHER,key)['state'],'RUNNING')
+        # Restart observes the same durable identity and never dispatches work.
+        restarted=C.from_executor(executor)
+        self.assertEqual(restarted.status(OTHER,key)['state'],'RUNNING')
+        self.assertEqual(restarted.cancel(OTHER,key)['errorCode'],'CACHE_SHARED_WORKER')
+        self.assertFalse(any('operationId' in args for _,args in calls))
+        self.assertEqual(sum(op=='datasets.prepare' for op,_ in calls),1)
+        # A later worker cannot silently replace this original action binding.
+        worker['id']='c'*64
+        self.assertEqual(restarted.status(OTHER,key)['state'],'UNKNOWN')
+        self.assertEqual(restarted._read(OTHER,key)['nativeId'],'b'*64)
+        self.assertEqual(sum(op=='datasets.prepare' for op,_ in calls),1)
+        # READY remains a current authorized cache fact, not a worker history.
+        worker['state']='READY'
+        self.assertEqual(restarted.status(OTHER,key)['state'],'READY')
+        D._write_json(self.hot._paths('shared')['.registry']/'dataset.json',dict(schema=D.SCHEMA,owners=['owner']))
+        self.assertEqual(restarted.status(OTHER,key)['state'],'UNKNOWN')
+    def test_prepare_rejects_untrusted_native_identity_and_request_override(self):
+        self.node.prepare=lambda *args:dict(operationId='not-a-worker',state='PREPARING')
+        out=self.start('prepare')
+        self.assertEqual(out['state'],'UNKNOWN')
+        self.assertEqual(self.node._read(OWNER,out['key'])['nativeId'],'a'*64)
+        with self.assertRaises(ValueError):
+            self.node.dispatch(OWNER,'prepare',dict(dataset='sample',version=self.version,key=str(uuid.uuid4()),nativeId='b'*64))
 
 
 if __name__=='__main__':unittest.main()

@@ -35,6 +35,14 @@ export function installDatasetCacheActions(service){
   const save=row=>{
     if(service.closing)fail('服务正在关闭，请稍后查询原操作。',503,'CACHE_SERVICE_CLOSING');
     const previous=load(row.operationId);
+    // A status request can finish after cancel has already committed its
+    // confirmed receipt. Non-READY terminal receipts belong to this original
+    // action and must never be overwritten by that older observation. READY
+    // remains mutable because it describes a cache location checked afresh.
+    if(previous&&terminal.has(previous.state)&&previous.state!=='READY'){
+      for(const key of Object.keys(row))delete row[key];
+      return Object.assign(row,previous);
+    }
     if(previous?.cancelRequested){row.cancelRequested=true;if(!terminal.has(row.state)&&row.state!=='UNKNOWN')row.state='CANCELING';}
     row.updatedAt=Date.now();row.canCancel=row.action==='release'&&!terminal.has(row.state);
     service.db.prepare('INSERT INTO dataset_cache_actions(id,owner,client_key,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')

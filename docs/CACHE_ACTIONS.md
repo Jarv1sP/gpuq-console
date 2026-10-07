@@ -34,7 +34,7 @@
 
 ## 实现与部署边界
 
-`dataset-cache-actions.mjs` 仅持久化操作身份/control 绑定。本机准备委托已有 dataset worker；跨机准备委托已有 `dataset-replication.mjs` 与 `transfers.mjs`，状态/取消沿原 transfer ID。没有第二套复制队列、VPS 字节通路或自动重试控制器。
+`dataset-cache-actions.mjs` 仅持久化操作身份/control 绑定。本机准备委托已有 dataset worker；跨机准备委托已有 `dataset-replication.mjs` 与 `transfers.mjs`，状态沿原 transfer ID 查询，但不能停止其共享消费者。没有第二套复制队列、VPS 字节通路或自动重试控制器。
 
 `deploy/dataset-cache-actions.py` 是私有节点适配器。释放必须拥有完整有效 tier recovery receipt；原件 authority guard 从源校验到目标最后检查持续持有。节点在目标 version/global 锁内再次核验 ACL、receipt、READY、pins、leases 和 staging；仅 `ready_only=True` 隔离缓存。清理在源/global 锁外进行。已进入 RELEASING/CLEANING 后被停止或报错保持 UNKNOWN，不声称数据恢复，也不覆盖原件。
 
@@ -45,10 +45,11 @@
 ## 验收
 
 ```sh
-node --test tests/dataset-cache-actions.test.js
+node --test tests/dataset-cache-actions.test.js tests/dataset-cache-actions-http.test.js
 python3 tests/dataset-cache-actions.test.py
+python3 tests/dataset-cache-actions-bridge.test.py
 ```
 
-离线测试覆盖普通成员、零额度、跨账号、旧协议、审计失败、严格字段/完整版本、原 UUID、丢 ACK/重启、原 transfer 取消、原件/pin/lease/staging/authority 保护、最终竞争检查、cleanup UNKNOWN、历史 READY 漂移。
+测试覆盖普通成员、零额度、跨账号、旧协议、审计失败、严格字段/完整版本、原 UUID、丢 ACK/重启、跨 owner 共享 worker 的固定身份、共享准备取消零派发、原件/pin/lease/staging/authority 保护、最终竞争检查、cleanup UNKNOWN、历史 READY 漂移。真实 Portal HTTP 还验收 CSRF、在途撤权、维护期只读/取消、四个并发读取准入，以及迟到 status/dispatch ACK 不覆盖已确认终态；私有桥和 executor 只派发五个精确 literal。
 
 上线后另在获授权空闲节点验收：机械原件→缓存→独立 SHA256 回读→取得训练租约时拒绝释放→释放租约→释放缓存→机械原件继续 READY→原 key 幂等/新 prepare 从原件恢复。不得用模块加载或健康页替代此链路。

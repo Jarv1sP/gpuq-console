@@ -333,6 +333,7 @@ INTERNAL_STORAGE+=('projects.archive','projects.unarchive','projects.retire.plan
 INTERNAL_STORAGE+=('files.upload.list','files.upload.cancel','projects.local-import.begin','projects.local-import.status','projects.local-import.cancel')
 INTERNAL_STORAGE+=('tasks.display.get','tasks.display.set')
 INTERNAL_STORAGE+=('storage.upload.locate',)
+INTERNAL_STORAGE+=tuple('storage.cache-action.'+action for action in ('capabilities','prepare','release','status','cancel'))
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.request.settimeout(35)

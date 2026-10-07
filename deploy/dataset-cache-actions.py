@@ -144,8 +144,18 @@ class CacheActionNode:
             try:
                 if action == "prepare":
                     value = self.prepare(actor, dataset, version)
-                    if value.get("operationId") not in (None, row["nativeId"]):
-                        raise ValueError("cache prepare worker identity changed")
+                    if value.get("dataset") not in (None, dataset) or value.get("version") not in (None, version):
+                        raise ValueError("cache prepare reference changed")
+                    native_id = value.get("operationId")
+                    if native_id is not None:
+                        # The trusted prepare adapter may join an existing
+                        # worker started by another authorized owner. Persist
+                        # its actual identity, not this owner's candidate SHA.
+                        # Public requests never supply this internal field.
+                        self.D._identifier(native_id, self.D.HASH_RE)
+                        row["nativeId"] = native_id
+                    elif value.get("state") != "READY":
+                        raise ValueError("cache prepare worker identity missing")
                     row["state"] = "READY" if value.get("state") == "READY" else "RUNNING"
                 else:
                     self.launch(key)
@@ -196,10 +206,6 @@ class CacheActionNode:
                 row["errorCode"] = "CACHE_SHARED_WORKER"
                 self._write(row)
                 return {**self._view(row), "canCancel": False}
-            if row["action"] == "prepare":
-                current = self.status(actor, key)
-                if current["state"] == "READY":
-                    return current
             row["cancelRequested"] = True
             self._write(row)
             try:
@@ -322,6 +328,12 @@ def from_executor(executor):
         current = executor.dataset_op("datasets.status", dict(userId=actor.user_id, hostAdmin=False, dataset=dataset, version=version))
         if current.get("state") == "READY":
             return {**current, "operationId": native_id}
+        # Exact dataset/version status already authenticates this member and
+        # validates the trusted current-prepare pointer. It can observe a
+        # shared owner's worker without loosening raw operationId ownership.
+        # Never adopt a later worker or rewrite this action's fixed identity.
+        if current.get("operationId") == native_id:
+            return current
         return executor.dataset_op("datasets.status", dict(userId=actor.user_id, hostAdmin=False, operationId=native_id))
 
     def unit(key):
