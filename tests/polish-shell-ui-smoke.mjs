@@ -213,6 +213,11 @@ try {
           else if (operation === 'datasets.catalog') result = {machine: args.machine, machines: inventory.map(row => ({machine: row.id, state: 'ok'})), datasets: []};
           else if (operation === 'datasets.capacity') result = {machine: args.machine, available: false};
           else if (operation === 'transfers.capabilities') result = {enabled: false};
+          else if (operation === 'transfers.list') {
+            assert.deepEqual(args, args.limit === undefined ? {cursor: 0} : {cursor: 0, limit: 50},
+              'the empty fixture permits only initial owner-scoped reads, not identity overrides or pagination');
+            result = {transfers: [], nextCursor: null};
+          }
           else if (operation === 'notifications.list') result = {items: []};
           else if (operation === 'logout') result = {loggedOut: true};
           else throw Error('Unexpected geometry fixture API: ' + operation);
