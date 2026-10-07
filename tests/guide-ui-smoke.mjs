@@ -201,16 +201,17 @@ try{
     if(index===3){
       const direct=guide.locator('.guide-explanation').filter({hasText:'网页选择目录后'});
       await direct.locator('summary').click();
-      assert.match(await direct.innerText(),/路线显示实际机械仓库的直传入口，路径中没有门户中转/);
+      assert.match(await direct.innerText(),/路线显示实际仓库的直传入口，路径中没有门户中转/);
       assert.match(await direct.innerText(),/实际入库位置与训练目标可以不同/);
       assert.match(await direct.innerText(),/如果只提供中转或无法确认路线，先停止/);
       assert.match(await direct.innerText(),/--via direct/);
       const workspace=guide.locator('.guide-explanation').filter({hasText:'已有文件或外接硬盘中的大数据'});
       await workspace.locator('summary').click();
-      assert.match(await workspace.innerText(),/联系管理员从原位置核对、整理并入机械仓库/);
-      assert.match(await workspace.innerText(),/不要在训练固态另建长期原件/);
+      assert.match(await workspace.innerText(),/联系管理员从原位置核对、整理并入仓库/);
+      assert.match(await workspace.innerText(),/不要把训练缓存当作长期数据仓库/);
       assert.match(await workspace.innerText(),/压缩包不会自动解压/);
       const dataText=await guide.locator('.guide-prose').textContent();
+      assert.doesNotMatch(dataText,/机械|固态|原件|\b(?:SSD|HDD)\b/);
       assert.match(dataText,/gpuctl data upload \.\/my-data --name my-data --via direct/);
       assert.match(dataText,/gpuctl transfer upload \.\/my-data --name my-data --via direct/);
       assert.doesNotMatch(dataText,/云盘|云端副本|分享链接|链接导入|gpuctl data (?:cloud|import|put)|--via relay/);
