@@ -379,6 +379,19 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
     module,cache=dataset_cache();actor=dataset_actor(module,args)
     if operation=='datasets.capacity':
         result=cache.capacity(actor)
+        # Read-only role/volume facts. A warehouse volume is never inferred
+        # from the training-cache capacity, machine name or archive journal.
+        # Older Portal versions ignore this additive projection.
+        result['storageOverview']={'protocol':'dataset-storage-node-v1',
+            'cache':{'volume':dict(result),'budgetBytes':cache.budget_bytes},'warehouse':None}
+        if CONFIG.get('storageWarehouse') is not None:
+            try:
+                warehouse=storage_warehouse()
+                result['storageOverview']['warehouse']={'state':'READY','volume':warehouse.cold.capacity(actor)}
+            except (OSError,ValueError,RuntimeError):
+                # Do not leak mount paths/configuration through errors, and do
+                # not substitute SSD or the root disk for unavailable HDD.
+                result['storageOverview']['warehouse']={'state':'UNAVAILABLE','volume':None}
         if dataset_delete_capability()==1:result['datasetDelete']=1
         return result
     folder=ROOT/'dataset-ops';folder.mkdir(mode=0o700,exist_ok=True)
