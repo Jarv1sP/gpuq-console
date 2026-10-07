@@ -336,6 +336,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.dataset-upload-journey` / `.dataset-route-heading` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-upload.js](../dist/dataset-upload.js)、[upload-routes.js](../dist/upload-routes.js) | 三段上传、直传/Tail备用/显式中转，不造数据库阶段 | 未确认通道明示；失败不自动换中转 |
 | `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 在服务器上整理/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回；记录内区块、折叠后的后续区块统一使用12px间距令牌，关闭详情不保留margin/padding；详情与未确认操作编号的标题保持48px触控高度，文字居中 |
 | 个人文件下载 / 空登记 | [data-workspace.js](../dist/data-workspace.js)、[datasets.css](../dist/datasets.css) | 普通文件可下载；展开空登记后读取 includeEmpty，和文件列表分开显示 | workspace.get 按固定个人路径、精确偏移读取；可用时直接流式保存，否则最多缓存 100 MiB；账号/服务器切换停止旧读写；空登记不推断文件丢失，不提供删除操作 |
+| 后台归档纳管 | [archive-enrollment-ui.js](../dist/archive-enrollment-ui.js)、[archive-enrollment.css](../dist/archive-enrollment.css) | 明确选择所属账号、物理数据集完整版本；缺原件时复制必须显式勾选 | 仅管理员；原请求 UUID 和全部字段按账号持久化，丢回执只提供明确的同请求重试，不自动重发或伪装只读查询；受理阶段不冒认备份完成 |
 | `.dataset-version-caption` / `.dataset-disclosure-label` | [cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 数据集版本与云端详情共用折叠标记 | summary使用flex中线；统一▸/▾，切换不旋转，减少动态时保持静止 |
 | `.publication-trajectory` / `#publication-actions` | [execution-ui.js](../dist/execution-ui.js)、[workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 扫描/复制/校验/写入版本及原请求查询 | 无字段省略，回执不明不制造成功 |
 
