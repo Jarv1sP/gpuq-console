@@ -78,8 +78,9 @@ class DatasetCopyReview(unittest.TestCase):
     def test_revocation_during_readonly_conversion_never_publishes_and_remains_resumable(self):
         modes = D._modes
 
-        def revoke(path, readonly):
-            modes(path, readonly)
+        def revoke(path, readonly, *, bulk_durability=False):
+            self.assertEqual(bulk_durability, readonly)
+            modes(path, readonly, bulk_durability=bulk_durability)
             if readonly:
                 self.cache.set_owners(ADMIN, "sample", [OTHER.user_id])
 
