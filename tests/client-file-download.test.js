@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,writeFile,rm,lstat,symlink} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,rm,lstat,symlink,open} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
@@ -83,4 +83,19 @@ test('local edits while a read is pending are caught before appending',async t=>
  const f=await fixture(t);f.beforeRead=async args=>{if(args.offset===2)await writeFile(f.destination,'xx');};
  await assert.rejects(downloadFile(f.call,f.options),/Local download file changed/);
  assert.equal((await readFile(f.destination)).toString(),'xx');
+});
+
+test('an external edit during the final disk write cannot produce success or clear the receipt',async t=>{
+ const f=await fixture(t),probe=await open(join(f.dir,'probe'),'w'),prototype=Object.getPrototypeOf(probe),original=prototype.write;
+ await probe.close();
+ prototype.write=async function(...args){
+  const result=await original.apply(this,args);
+  if(args[3]===2&&args[0].toString()==='cd')await writeFile(f.destination,'ZZcd');
+  return result;
+ };
+ try{
+  await assert.rejects(downloadFile(f.call,f.options),/Local download checksum changed/);
+  assert.equal((await readFile(f.destination)).toString(),'ZZcd');
+  assert.equal(JSON.parse(await readFile(f.destination+'.gpuctl-download.json','utf8')).offset,4);
+ }finally{prototype.write=original;}
 });

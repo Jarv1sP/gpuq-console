@@ -74,11 +74,24 @@ export async function downloadFile(call,{machine,context={},path,destination,ori
         if(!result.bytesWritten)fail('Local download write made no progress');
         written+=result.bytesWritten;
       }
-      digest.update(bytes);offset+=bytes.length;await file.sync();localStamp=stamp(await file.stat({bigint:true}));
+      digest.update(bytes);offset+=bytes.length;await file.sync();
+      const writtenInfo=await file.stat({bigint:true});
+      if(!safe(writtenInfo))fail('Unsafe local download file; partial preserved');
+      localStamp=stamp(writtenInfo);
       if(fingerprint){
         receiptStamp=await checkpoint(receiptPath,{protocol:2,identity,fingerprint,size,offset,sha256:digest.copy().digest('hex'),localStamp},receiptStamp);
       }
       if(value.eof){
+        // Confirm bytes on disk, including a concurrent edit during a write.
+        // A stat taken after our write alone cannot distinguish that edit.
+        const verified=createHash('sha256'),buffer=Buffer.alloc(CHUNK);
+        for(let position=0;position<offset;){
+          const {bytesRead}=await file.read(buffer,0,Math.min(CHUNK,offset-position),position);
+          if(!bytesRead)fail('Local download file is truncated; partial preserved');
+          verified.update(buffer.subarray(0,bytesRead));position+=bytesRead;
+        }
+        if(verified.digest('hex')!==digest.copy().digest('hex')||!same(stamp(await file.stat({bigint:true})),localStamp)
+          ||!same(stamp(await lstat(target,{bigint:true})),localStamp))fail('Local download checksum changed; file and receipt preserved');
         if(receiptStamp){
           if(!same(stamp(await lstat(receiptPath,{bigint:true})),receiptStamp))fail('Download receipt changed; file preserved');
           await unlink(receiptPath);
