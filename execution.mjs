@@ -395,10 +395,14 @@ export async function executionCall(service,principal,operation,args){
     catch(error){if(operation==='datasets.status'&&!byOperation&&service.resolveDataset)return (await service.resolveDataset(user.id,machine,reference)).status;throw error;}
     if(operation==='datasets.prepare')service.audit(principal.username,operation,args.machine,args.dataset+'@'+args.version);
     if(operation==='datasets.list'){
-      const aliases=service.datasetAliases?.(user.id,machine),archives=machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(user.id):null;
+      const aliases=service.datasetAliases?.(user.id,machine),archives=service.archiveAliases?.(user.id,machine);
       return datasetListView(result,service.store.users,{includeEmpty:includeEmpty===true,
         ...(service.datasetLabelView?{labelView:dataset=>service.datasetLabelView(user.id,dataset)}:{}),
         logicalName:item=>{
+          // A privileged list may include other owners. Its personal aliases
+          // cannot rename their records; legacy member lists are owner-scoped.
+          const own=Array.isArray(item.ownerIds)?item.ownerIds.includes(user.id):item.ownerIds==null&&principal.role!=='admin';
+          if(!own)return item.dataset;
           const names=new Set(item.versions.filter(v=>/^[a-f0-9]{64}$/.test(v?.version)).map(v=>aliases?.get(item.dataset+'@'+v.version)||archives?.get(item.dataset+'@'+v.version)||item.dataset));
           return names.size===1?[...names][0]:item.dataset;
         }});
