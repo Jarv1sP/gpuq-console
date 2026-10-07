@@ -1,6 +1,8 @@
 import {openMembers} from './admin-members-workflows.mjs';
 import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {assertToastClear} from './toast-geometry-assertions.mjs';
+import {waitForFiniteUIAnimations} from './animation-settle.mjs';
+import {checkAnimationSettling} from './animation-settle-ui-check.mjs';
 // Actual Portal/SQLite/cookies/CSP/assets in Chromium. Node observations and
 // terminal output are synthetic; no shell, GPU, SSH or production mutation.
 import assert from 'node:assert/strict';
@@ -35,6 +37,11 @@ try{
     if(operation==='projects.status')return structuredClone(project);
     if(operation==='datasets.list')return {datasets:[]};
     if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
+    if(['datasets.storage.status','datasets.storage.plan'].includes(operation)){
+      assert.equal(args.hostAdmin,true);assert.equal(args.userId,admin.principal.userId);
+      assert.deepEqual(Object.keys(args).sort(),['hostAdmin','userId']);
+      return {enabled:false,...(operation==='datasets.storage.plan'?{dryRun:true,candidates:[]}:{} )};
+    }
     if(operation==='logs')return {text:'epoch 12/40 loss=0.438 val_acc=0.716\ncheckpoint saved\nTraining continues on the synthetic node.'};
     if(operation==='diagnostics')return {jobId:args.job.id,state:'COMPLETE',schedulerState:'FAILED',attempts:[],captures:[],historyAvailable:true,allocationHistory:[]};
     if(operation==='files.list')return {entries:[{name:'metrics.json',type:'file',size:32}]};
@@ -56,6 +63,7 @@ try{
   const rows=[running,job('augmentation','STARTING'),job('ablation-dropout','PENDING'),job('data-preparation','PREPARING_DATA',1),job('previous-experiment','RUNNING',2,{cancelRequested:true}),job('failed-checkpoint','FAILED',1,{error:'训练进程退出；请查看持久诊断。',latestAttempt:{id:'fixture-attempt',finishedAt:Date.now()/1000-60,exitCode:1,failureReason:'checkpoint path unavailable'}})];
   service.store.jobs.push(...rows,{...job('FORBIDDEN-PEER-TRAINING','RUNNING'),userId:peer.id,username:peer.username});service.save();
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
+  await checkAnimationSettling(browser);
   async function pageFor(width,reduced=false){
     const context=await browser.newContext({viewport:{width,height:width<760?844:1080},reducedMotion:reduced?'reduce':'no-preference'});const page=await context.newPage();
     page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error'&&!message.text().includes('401'))errors.push(message.text());});
@@ -201,7 +209,7 @@ try{
       await target.waitForFunction(route=>document.querySelector(route.startsWith('admin/')?'#page-admin':'#page-'+route)?.hidden===false,route);
       for(const width of [1440,1024,390,320]){
         await target.setViewportSize({width,height:width<760?844:1080});
-        await target.evaluate(async()=>{await document.fonts.ready;await Promise.allSettled(document.getAnimations().filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
+        await waitForFiniteUIAnimations(target);
         await refreshVisible(target);
         try{toastChecks.push({role,route,width,...await assertToastClear(target)});}catch(error){await target.screenshot({path:join(shots,'toast-failed-'+role+'-'+route.replace('/','-')+'-'+width+'.png'),animations:'disabled'});error.message=role+' '+route+' '+width+': '+error.message;throw error;}
       }
