@@ -90,5 +90,6 @@ test('storage CLI errors do not retry writes or request cleanup and text output 
   assert.deepEqual(f.calls.filter(c=>c.operation!=='state').map(c=>c.operation),['datasets.storage.pin']);
   f.fail(null);const plain=await f.cli(['data','storage','status'],false);
   assert.equal(plain.code,0,plain.stderr);assert.match(plain.stdout,/enabled/);
-  const help=await f.cli(['--help'],false);assert.match(help.stdout,/data storage status/);assert.match(help.stdout,/data storage plan/);
+  const help=await f.cli(['help','admin'],false);assert.match(help.stdout,/data storage status/);assert.match(help.stdout,/data storage plan/);
+  const daily=await f.cli(['--help'],false);assert.doesNotMatch(daily.stdout,/data storage (?:plan|pin|unpin)/);
 });

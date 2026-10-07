@@ -172,7 +172,10 @@ test('unified dataset guide distinguishes catalog, capacity and preparation from
   assert.match(guide, /`\/data2\/ID` 只读路径读取/);
   assert.match(guide, /上传统一进入机械仓库，不需要选择存储盘/);
   assert.match(guide, /相同数据集 ID 和完整版本才合并显示/);
-  assert.match(guide, /容量栏显示所选服务器训练缓存的空间，不是机械仓库总容量或个人额度/);
+  assert.match(guide, /机械仓库保存长期原件，服务器训练缓存保存本次训练需要的本地副本/);
+  assert.match(guide, /不能相加当作个人额度/);
+  assert.match(guide, /不能据此猜机械仓库的大小/);
+  assert.match(guide, /缺少容量或查询失败应显示未确认/);
   assert.match(guide, /`PREPARING_DATA` 表示正在准备所选机器的本地数据，暂不占 GPU 额度/);
   assert.match(guide, /全部就绪后重新核验项目、授权和额度，才进入显卡队列/);
   assert.match(guide, /没有可用来源或权限不足时拒绝提交，不会偷偷换机器/);
