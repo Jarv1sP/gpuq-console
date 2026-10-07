@@ -63,7 +63,7 @@ export async function inspectGeometry(page, specification = {}) {
     const controls = [...new Set(roots.flatMap(root => select(selectors, root)))];
     const inView = node => {const value = rect(node); return value.bottom > 0 && value.top < innerHeight;};
     const isInlineLink = node => node.matches('.guide-prose a');
-    const isRow = node => node.matches(spec.largeTargets || '.guide-card,.maintenance-row,.guide-pagination a');
+    const isRow = node => node.matches('.v4-warehouse-card,.v4-training-card') || node.matches(spec.largeTargets || '.guide-card,.maintenance-row,.guide-pagination a');
     for (const node of controls) {
       if (isInlineLink(node)) continue;
       counts.controls++;

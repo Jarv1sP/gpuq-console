@@ -267,8 +267,15 @@ export function overviewDatasetCatalog(overview,machine,legacy=null){
     datasets:overview.datasets.map(item=>{
       const old=legacy?.datasets?.find(row=>row.dataset===item.dataset);
       return {dataset:item.dataset,name:old?.name,labelScope:old?.labelScope,displayNameRevision:old?.displayNameRevision,
-        versions:item.versions.map(v=>{const local=v.caches.find(row=>row.machine===machine);return {version:v.version,ownerLabel:v.ownerLabel,canUse:v.canUse,bytes:v.contentBytes,files:v.fileCount,
-          state:local?.state||'UNKNOWN',canPrepare:local?.canPrepare===true,locations:v.caches.map(row=>({...row}))};})};
+        versions:item.versions.map(v=>{
+          const local=v.caches.find(row=>row.machine===machine),oldVersion=old?.versions?.find(row=>row.version===v.version);
+          // The overview lists existing locations, not an absent row for
+          // every node. Only a complete catalog observation proves absence;
+          // a capacity reading alone cannot turn UNKNOWN into NOT_LOCAL.
+          const absent=legacy?.machines?.some(row=>row.machine===machine&&row.state==='ok')&&oldVersion&&Array.isArray(oldVersion.locations)&&
+            !oldVersion.locations.some(row=>row.machine===machine);
+          return {version:v.version,ownerLabel:v.ownerLabel,canUse:v.canUse,bytes:v.contentBytes,files:v.fileCount,
+          state:local?.state||(absent?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,locations:v.caches.map(row=>({...row}))};})};
     })};
   const result=aggregateDatasetCatalog(catalog);
   for(const item of result.datasets){

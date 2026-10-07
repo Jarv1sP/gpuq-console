@@ -67,6 +67,18 @@ test('v4 incomplete overview usage cannot show zero while its readable catalog p
  model.datasets[0].versions[0].servers[0].state='NOT_LOCAL';
  assert.equal(displayStorageCapacity(adaptStorageOverview(raw),model).caches[0].readyContentBytes,0,'a released or absent catalog location cannot restore bytes');
 });
+test('an overview with only existing cache locations preserves independently confirmed catalog absence without inventing preparation permission',()=>{
+ const raw=snapshot();raw.caches.push({...structuredClone(raw.caches[0]),machine:'server-b'});
+ const legacy={machine:null,machines:[{machine:'server-a',state:'ok'},{machine:'server-b',state:'ok'}],datasets:[{dataset:'samples',versions:[{version,canUse:true,locations:[{machine:'server-a',dataset:'physical-samples',state:'READY',canUse:true}]}]}]};
+ const overview=adaptStorageOverview(raw),model=overviewDatasetCatalog(overview,'server-b',legacy),v=model.datasets[0].versions[0];
+ assert.equal(v.selected.state,'NOT_LOCAL');assert.equal(v.selected.canPrepare,false);assert.equal(v.servers.find(row=>row.machine==='server-a').state,'READY');
+ assert.equal(overviewDatasetCatalog(overview,'server-b').datasets[0].versions[0].selected.state,'UNKNOWN','capacity alone does not prove absence');
+ legacy.machines[1].state='unavailable';assert.equal(overviewDatasetCatalog(overview,'server-b',legacy).datasets[0].versions[0].selected.state,'UNKNOWN');
+ legacy.machines[1].state='ok';legacy.datasets[0].versions[0].locations.push({machine:'server-b',state:'READY',canUse:true});
+ assert.equal(overviewDatasetCatalog(overview,'server-b',legacy).datasets[0].versions[0].selected.state,'UNKNOWN','contradictory old READY cannot be treated as current absence');
+ raw.datasets[0].versions[0].caches.push({machine:'server-b',state:'UNKNOWN'});
+ assert.equal(overviewDatasetCatalog(adaptStorageOverview(raw),'server-b',legacy).datasets[0].versions[0].selected.state,'UNKNOWN','explicit overview UNKNOWN always wins');
+});
 test('v4 makes one card per observed warehouse with unique logical versions, not one aggregate or one card per cache',()=>{
  const model=legacyModel(),v=model.datasets[0].versions[0];
  v.warehouse={originalConfirmed:true,machine:'server-b',records:[{machine:'server-a',storage:{version,archiveMachine:'server-b',phase:'ARCHIVED',originalRetained:true}}]};

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile,mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {chromium} from 'playwright';
+import {inspectGeometry} from './layout-geometry.mjs';
 import {MACHINES} from '../dist/machines.js';
 const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):MACHINES;
 const output=process.env.UI_SCREENSHOTS||'/tmp/stargate-capacity-ui';await mkdir(output,{recursive:true});
@@ -53,6 +54,14 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  assert.equal(await page.locator('.v3-partial').textContent(),'部分');
  await page.evaluate(async()=>{reply=snapshot;await view.loadOverview();});
  assert.equal(await page.locator('[data-v3-select]').count(),role==='admin'?2:1);assert.equal(await page.locator('#page-title .v3-count').textContent(),(role==='admin'?2:1)+' 个');
+ const cardRules={roots:['.v4-warehouses','.v4-training']};
+ assert((await inspectGeometry(page,cardRules)).pass,'large clickable cards pass the shared default geometry rules');
+ if(width===1440){
+  const card=await page.locator('.v4-warehouse-card').first().elementHandle(),original=await card.getAttribute('class'),style=await card.getAttribute('style');
+  try{await card.evaluate(node=>{node.classList.remove('v4-warehouse-card');node.style.height='124px';});const ordinary=await inspectGeometry(page,cardRules);assert(ordinary.failures.some(row=>row.rule==='control-step'),'a plain 124px button remains rejected');}
+  finally{await card.evaluate((node,{original,style})=>{node.className=original;if(style===null)node.removeAttribute('style');else node.setAttribute('style',style);},{original,style});await card.dispose();}
+  assert((await inspectGeometry(page,cardRules)).pass,'the restored large card passes without flattening it');
+ }
  await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').click();
  assert.equal(await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"] .v4-dataset-count').textContent(),(await page.locator('[data-v3-select]').count())+' 个数据集','overview warehouse card and its filtered rows agree even when the legacy catalog has no matching warehouse location');
  await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').click();
