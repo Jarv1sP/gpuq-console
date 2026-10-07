@@ -148,9 +148,10 @@ export function installDatasetIngress(service,input){
         if(existing.length===1){
           const prior=existing[0];
           if(prior.machine!==row.requestedMachine)fail('旧上传存在于另一台服务器；请使用原来的服务器继续。');
-          if(row.specificationSha256&&hash(prior.specification)!==row.specificationSha256)
+          const priorSpec=specification(prior.specification);
+          if(row.specificationSha256&&hash(priorSpec)!==row.specificationSha256)
             fail('旧上传的固定清单与本次上传不一致。');
-          row.specification=prior.specification;row.specificationSha256=hash(prior.specification);
+          row.specification=priorSpec;row.specificationSha256=hash(priorSpec);
           row.storageMachine=prior.machine;row.warehouse=false;
         }else{
           if(action!=='begin')fail('上传不存在；恢复已有仓库上传需要原平台的位置记录。',404);

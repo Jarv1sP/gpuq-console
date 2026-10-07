@@ -142,6 +142,23 @@ test('placement-aware clients bind actual direct writer while retaining training
   assert.throws(()=>uploadStorageMachine({...reply,legacyPlacement:true},hot),/unconfirmed/);
 });
 
+test('an unresolved admission cannot be created after its policy is disabled or changed',async t=>{
+  const f=fixture(t),id=randomUUID();
+  f.before=(machine,operation)=>{if(machine===other&&operation==='storage.upload.locate')throw Error('Node unavailable');};
+  await assert.rejects(f.begin(id),/unavailable/);f.before=undefined;
+  installDatasetIngress(f.service,undefined);
+  await assert.rejects(f.begin(id),/策略已改变/);assert.equal(f.sessions.size,0);
+});
+
+test('cancellation and ticket revocation stay on the durable writer rather than the training selector',async t=>{
+  const f=fixture(t),id=randomUUID();await f.begin(id);
+  await f.call('direct-revoke',{uploadId:id});assert.equal(f.calls.at(-1).machine,cold);
+  const discarded=await f.call('discard',{uploadId:id});assert.equal(discarded.storageMachine,cold);
+  assert.equal(discarded.state,'DISCARDED');assert.equal(f.service.datasetIngressMachineVisible(f.user.id,cold),false);
+  f.calls.length=0;await f.call('status',{uploadId:id});
+  assert.deepEqual(f.calls.map(call=>call.machine),[cold]);
+});
+
 test('READY warehouse is an exact usable copy source without granting compute; preparation selects that source',async t=>{
   const f=fixture(t),id=randomUUID();await f.begin(id);const ready=await f.call('commit',{uploadId:id});
   const bridge=f.service.bridge;f.service.store.users=[f.user];
