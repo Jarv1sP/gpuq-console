@@ -94,7 +94,7 @@ try{
   await page.waitForFunction(()=>{const toast=document.querySelector('#toast');return !toast||(!toast.classList.contains('visible')&&Number(getComputedStyle(toast).opacity)===0);});
   for(const width of [1440,1024,390,320]){
     await page.setViewportSize({width,height:width<760?844:1000});await settle(page);
-    await page.locator('[data-console-refresh]').click();await settle(page);const toast=await assertToastClear(page);
+    await page.locator('#refresh-state').click();await settle(page);const toast=await assertToastClear(page);
     const result=await inspectGeometry(page,{roots:['#admin-content'],controls:'.button,input:not([type=checkbox]),select,summary',containment:'.button,input,select,.server-id,.host-command-result',buttonRows:[{parent:'.host-diagnostic-presets'},{parent:'.host-command-actions'}],helpContexts:['.host-diagnostics-heading .copy-caption']});
     geometry.push({width,toast,...result});assert.deepEqual(result.failures,[],JSON.stringify({width,...result}));assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
     await page.evaluate(()=>{document.activeElement?.blur();scrollTo(0,0);});await settle(page);
