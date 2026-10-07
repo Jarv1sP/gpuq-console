@@ -174,11 +174,11 @@ export function adaptStorageOverview(raw){
 // overview owns its warehouse proof; keep legacy labels/revisions separately.
 export function overviewDatasetCatalog(overview,machine,legacy=null){
   const machines=[...new Set(overview.caches.map(row=>row.machine).concat(overview.datasets.flatMap(item=>item.versions.flatMap(v=>v.originals.map(row=>row.machine).filter(Boolean)))))];
-  const catalog={machine:machine||null,checkedAt:overview.checkedAt,partial:overview.partial,machines:machines.map(id=>({machine:id,state:['READY','ok'].includes(overview.caches.find(row=>row.machine===id)?.state)?'ok':'unavailable'})),
+  const catalog={machine:machine||null,checkedAt:overview.checkedAt,partial:overview.partial,machines:machines.map(id=>({machine:id,state:overview.caches.find(row=>row.machine===id)?.usageComplete===true||['READY','ok'].includes(overview.caches.find(row=>row.machine===id)?.state)?'ok':'unavailable'})),
     datasets:overview.datasets.map(item=>{
       const old=legacy?.datasets?.find(row=>row.dataset===item.dataset);
       return {dataset:item.dataset,name:old?.name,labelScope:old?.labelScope,displayNameRevision:old?.displayNameRevision,
-        versions:item.versions.map(v=>{const locations=[...v.caches,...(v.personalOriginals||[])],local=locations.find(row=>row.machine===machine),node=overview.caches.find(row=>row.machine===machine),known=node?.state==='READY'&&node.usageComplete===true;return {version:v.version,ownerLabel:v.ownerLabel,
+        versions:item.versions.map(v=>{const locations=[...v.caches,...(v.personalOriginals||[])].map(row=>({...row,canUse:row.canUse===true||v.canUse===true&&v.originals.some(original=>original.machine===row.machine&&original.canUse===true)})),local=locations.find(row=>row.machine===machine),node=overview.caches.find(row=>row.machine===machine),known=node?.usageComplete===true;return {version:v.version,ownerLabel:v.ownerLabel,
           canUse:v.canUse===true,bytes:v.contentBytes,files:v.fileCount,
           state:local?.state||(known?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,locations:locations.map(row=>({...row}))};})};
     })};

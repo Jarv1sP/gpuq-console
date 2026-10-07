@@ -38,6 +38,8 @@ test('known empty target stays NOT_LOCAL and explicit original readability survi
  let model=overviewDatasetCatalog(adaptStorageOverview(raw),machine);assert.equal(model.datasets[0].versions[0].selected.state,'NOT_LOCAL');
  assert.equal(model.datasets[0].versions[0].canUse,true,'only explicit per-location reading evidence supplies readability');
  assert.equal(model.datasets[0].versions[0].warehouse.originalConfirmed,true);
+ raw.caches[0].state='UNKNOWN';
+ model=overviewDatasetCatalog(adaptStorageOverview(raw),machine);assert.equal(model.datasets[0].versions[0].selected.state,'NOT_LOCAL','capacity unknown is independent of a complete directory observation');
  raw.caches[0].usageComplete=false;raw.datasets[0].versions[0].canUse=false;raw.datasets[0].versions[0].originals[0].canUse=false;
  model=overviewDatasetCatalog(adaptStorageOverview(raw),machine);assert.equal(model.datasets[0].versions[0].selected.state,'UNKNOWN');
  assert.equal(model.datasets[0].versions[0].canUse,false,'confirmed backup alone never supplies file permission');
