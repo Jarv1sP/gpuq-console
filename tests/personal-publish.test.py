@@ -86,6 +86,21 @@ class Publish(unittest.TestCase):
         listing=self.n.process('datasets.list',{'userId':self.user,'hostAdmin':False})
         self.assertEqual(next(r for r in listing['datasets'] if r['dataset']==dataset)['storageTier'],'hdd')
 
+    def test_hdd_unused_project_retirement_keeps_same_volume_and_original_receipt(self):
+        ops=self.n.projects();ops.store.create(self.user,'empty-project')
+        args={'userId':self.user,'project':'empty-project'}
+        path=ops.store._project(self.user,'empty-project')[0]
+        (path/'dev/code/keep.txt').write_bytes(b'preserved bytes')
+        lifecycle=ops.lifecycle();plan=lifecycle.plan(args)
+        self.assertEqual(plan['state'],'ELIGIBLE')
+        request={**args,'key':str(uuid.uuid4()),'revision':plan['lifecycle']['revision'],'manifestSha256':plan['manifestSha256']}
+        result=lifecycle.retire(request);self.assertEqual(result['state'],'RETIRED')
+        target=path.parent/'.trash'/request['key']
+        self.assertFalse(path.exists());self.assertEqual((target/'dev/code/keep.txt').read_bytes(),b'preserved bytes')
+        self.assertEqual(target.stat().st_dev,Path(self.storage.roots['hdd']).stat().st_dev)
+        self.assertEqual(lifecycle.retire(request)['state'],'RETIRED')
+        with self.assertRaises(ValueError):ops.store.create(self.user,'empty-project')
+
     def test_hdd_training_lease_mount_and_release_use_same_root(self):
         result=self.publish();dataset,version=result['dataset'],result['version']
         job={'id':str(uuid.uuid4()),'userId':self.user,'datasets':[{'dataset':dataset,'version':version}]}
@@ -117,6 +132,23 @@ class Publish(unittest.TestCase):
         listing=self.n.process('datasets.list',{'userId':'demo-user-9','hostAdmin':False})
         self.assertFalse(any(r['dataset']==dataset for r in listing['datasets']))
         self.assertNotEqual(self.storage.data_path(self.user,'hdd'),self.storage.data_path('demo-user-9','hdd',create=True))
+
+
+    def test_explicit_personal_tiers_do_not_override_legacy_cache_only_policy(self):
+        self.n.CONFIG['storageTier']={'enabled':True,'budgetBytes':1024**3}
+        result=self.publish();self.assertEqual(result['state'],'READY')
+        ssd=self.storage.data_path(self.user,'ssd',create=True)/'ssd-samples';ssd.mkdir(mode=0o700)
+        (ssd/'sample.bin').write_bytes(b'explicit SSD choice')
+        publisher=self.p.publication(self.n,self.user,'ssd');key=str(uuid.uuid4())
+        publisher.publish({'userId':self.user,'key':key,'name':'ssd-samples','path':'ssd-samples'})
+        self.assertEqual(publisher.worker(self.user,key),0)
+        result=publisher.status(self.user,key);self.assertEqual(result['state'],'READY')
+        _,cache=self.n.dataset_cache_for(result['dataset']);self.assertEqual(cache.personalTier,'ssd')
+        self.assertIn(Path(self.storage.roots['ssd']),cache.root.parents)
+        definition=importlib.util.spec_from_file_location('legacy_workspace_policy',self.code/'data-workspace.py')
+        module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
+        with self.assertRaisesRegex(PermissionError,'HDD warehouse'):
+            module.DataWorkspaces(self.n).publish({'userId':self.user,'key':str(uuid.uuid4()),'name':'not-hdd','path':'samples'})
 
 
 if __name__=='__main__':unittest.main()

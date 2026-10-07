@@ -1055,7 +1055,7 @@ class ProjectStore:
         destination = kind/key
         identity = {'schema': 1, 'owner': self._identity(user), 'project': slug,
                     'release': version, 'workspaceMode': mode, 'workspaceKey': key}
-        with self._file_lock(kind/('.lock-'+key)):
+        with self._file_lock(kind/('.lock-'+key),blocking=True):
             if destination.exists() or destination.is_symlink():
                 private_dir(destination)
                 if read_json(destination/'identity.json') != identity:

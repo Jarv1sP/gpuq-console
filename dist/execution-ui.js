@@ -451,8 +451,9 @@ export function executionUI(store,refresh,toast){
     // ROOT controls belong to the independently mounted maintenance section.
     for(const id of ['terminal-open','terminal-reconnect'])query('#'+id).disabled=!available||locked||publishing;
     const release=query('[name=release]');release.disabled=!project||locked||!readyReleases(info).length;
-    const automatic=automaticTraining(),target=query('[name=training-target]');target.disabled=!available||locked;
-    const personal=info?.storageLayout==='personal-storage-v1',workspaceMode=query('[name=workspace-mode]');
+    const target=query('[name=training-target]'),personal=info?.storageLayout==='personal-storage-v1';target.disabled=!available||locked;
+    if(personal&&target.value==='auto')target.value='current';
+    const automatic=automaticTraining(),workspaceMode=query('[name=workspace-mode]');
     query('#personal-workspace-field').hidden=!personal;workspaceMode.disabled=!personal||locked||automatic;
     query('#workspace-storage-note').textContent=personal?'工作区和结果默认在机械盘。目录自行组织；选择共享时，同项目同版本的任务可互相写入。':'项目训练使用固定代码与环境版本，/workspace 只读，结果写入 /outputs。';
     target.querySelector('[value=auto]').disabled=info?.environmentMode!=='oci'||info?.storageLayout==='personal-storage-v1';
@@ -719,7 +720,7 @@ export function executionUI(store,refresh,toast){
     if(name==='workspace-project')selectProject(event.target.value);
     if(name==='release'){query('#release-full').textContent=event.target.value;query('#release-full').title=event.target.value;submitKey=crypto.randomUUID();updateControls();}
     if(name==='priority'){submitKey=crypto.randomUUID();updateControls();}
-    if(['training-target','training-candidates','gpu-placement'].includes(name)){submitSelection.invalidate();parsedTarget=null;submitKey=crypto.randomUUID();updateControls();}
+    if(['training-target','training-candidates','gpu-placement','workspace-mode'].includes(name)){submitSelection.invalidate();parsedTarget=null;submitKey=crypto.randomUUID();updateControls();}
     if(['custom-policy','queue-rank','yield-policy','restart-policy','checkpointable','request-mode','elastic','auto-expand'].includes(name)){submitKey=crypto.randomUUID();updateControls();}
     if(name==='file-area'){query('[name=file-path]').value='.';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('#workspace-result').textContent='已切换文件区域。';updateControls();}
     if(name==='file-run')query('[name=file-run-id]').value=event.target.value;

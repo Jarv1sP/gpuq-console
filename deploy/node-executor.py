@@ -309,7 +309,7 @@ def dataset_source_cache(dataset=None,version=None):
         if dataset is None or (warehouse.cold._paths(dataset)['.registry']/'dataset.json').exists():
             dataset_mount_check(warehouse.config)
             return warehouse.d,warehouse.cold
-    return dataset_cache()
+    return dataset_cache_for(dataset)
 
 
 def dataset_rebuild_guard_for(executor,actor,dataset,version):
@@ -1712,7 +1712,7 @@ def process(operation,args):
         if operation=='projects.storage.copy':return copies.begin(args)
         if set(args)!={'userId','key'}:raise ValueError('Invalid personal copy fields')
         if not isinstance(args['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',args['userId']):raise ValueError('Invalid identity')
-        methods={'projects.storage.copy.status':copies.status,'projects.storage.copy.cancel':copies.cancel,
+        methods={'projects.storage.copy.status':lambda user,key:copies.status(user,key,observe=True),'projects.storage.copy.cancel':copies.cancel,
                  'projects.storage.copy.resume':copies.resume}
         if operation not in methods:raise ValueError('Unknown personal copy operation')
         return methods[operation](args['userId'],args['key'])

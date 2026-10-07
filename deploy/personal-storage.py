@@ -91,7 +91,7 @@ class PersonalStorage:
              f'reserveBytes={reserve}, requestedBytes={needed}.')
 
     def runtime_ready(self):
-        for name in ('node-executor.py','project-store.py','personal-oci.py','sandbox-runner.py'):
+        for name in ('node-executor.py','project-store.py','personal-oci.py','sandbox-runner.py','sandbox-runner-common-p0.py'):
             path=HERE/name
             fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
             try:
@@ -244,7 +244,7 @@ class PersonalCopies:
         need(value.get('userId')==user and value.get('key')==key,'Copy ownership or identity changed')
         return folder,value
 
-    def status(self,user,key):
+    def status(self,user,key,*,observe=False):
         folder,request=self.read(user,key)
         try:result=self.s.read_json(folder/'status.json')
         except FileNotFoundError:result={'state':'UNKNOWN','phase':'UNCONFIRMED'}
@@ -252,6 +252,8 @@ class PersonalCopies:
              'Copy status is invalid; preserve the original UUID')
         if result.get('state')=='QUEUED' and (folder/'launch.json').exists() and self.s.read_json(folder/'launch.json').get('unconfirmed') is True:
             result={**result,'state':'UNKNOWN','phase':'LAUNCH_UNCONFIRMED'}
+        if observe and result.get('state') in ('QUEUED','RUNNING','VERIFYING','COMMITTING') and self.stopped(user,key):
+            result={**result,'state':'UNKNOWN','phase':'STOP_UNCONFIRMED'}
         return {'protocol':'personal-copy-v1','key':key,'sourceTier':request['sourceTier'],
                 'targetTier':request['targetTier'],'sourcePath':request['sourcePath'],
                 'targetPath':request['targetPath'],'cancelRequested':(folder/'cancel.json').exists(),**result}
@@ -282,7 +284,7 @@ class PersonalCopies:
             need(re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}',key),'Invalid copy history entry')
         recent=sorted(names,key=lambda key:(parent/key).stat(follow_symlinks=False).st_mtime,reverse=True)[:256]
         for key in recent:
-            if (parent/key/'request.json').exists():rows.append(self.status(user,key))
+            if (parent/key/'request.json').exists():rows.append(self.status(user,key,observe=True))
         return {'protocol':'personal-copies-v1','copies':rows,'truncated':len(names)>256}
 
     def begin(self,args):

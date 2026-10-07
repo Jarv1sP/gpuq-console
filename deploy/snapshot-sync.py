@@ -87,10 +87,6 @@ def observation(ops, args):
 
 
 class SnapshotSync:
-    def dataset_cache(self,args):
-        resolver=getattr(self.n,'dataset_cache_for',None)
-        return resolver(args['dataset']) if callable(resolver) else self.n.dataset_cache()
-
     def __init__(self, executor):
         self.n = executor
         self.ops = executor.projects()
@@ -105,7 +101,9 @@ class SnapshotSync:
 
     def dataset_cache(self,args):
         factory=getattr(self.n,'dataset_source_cache',None)
-        return factory(args.get('dataset'),args.get('version')) if factory else self.n.dataset_cache()
+        if callable(factory):return factory(args.get('dataset'),args.get('version'))
+        resolver=getattr(self.n,'dataset_cache_for',None)
+        return resolver(args.get('dataset')) if callable(resolver) else self.n.dataset_cache()
 
     def acquire_transfer_lease(self, args, transfer_id):
         """Internal control path; callers journal identity BEFORE acquiring."""

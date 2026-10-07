@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {executionCall} from '../execution.mjs';
 import {normalizeJobSubmission,createSubmittedJob} from '../job-submission.mjs';
+import {defaultDatasetDisplayName} from '../dist/dataset-display-name.js';
+import {datasetListView} from '../dataset-catalog.mjs';
 
 function fixture(){
  const user={id:'demo-user-1',username:'member',enabled:true,limits:{'gpu-1':1},role:'member'},calls=[],audits=[];
@@ -49,4 +51,18 @@ test('workspace mode is an immutable opt-in and omission preserves old digest/sp
  assert.equal(createSubmittedJob(shared,user,false).spec.workspaceMode,'shared');
  for(const workspaceMode of [true,'auto','',{},[]])assert.throws(()=>normalizeJobSubmission({...args,workspaceMode},principal));
  assert.throws(()=>normalizeJobSubmission({machine:'gpu-1',cards:1,argv:['x'],key:randomUUID(),workspaceMode:'shared'},principal));
+});
+test('copy/publication responses whitelist display fields, never physical roots or owner envelopes',async()=>{
+ const f=fixture(),key=randomUUID();
+ f.service.bridge=async(machine,op)=>op.endsWith('.copies')?{protocol:'personal-copies-v1',copies:[{protocol:'personal-copy-v1',key,state:'UNKNOWN',hostPath:'/private',userId:'foreign'}],hostPath:'/private'}:op.includes('publish')?{operationId:key,state:'READY',dataset:'h-0123456789abcdef-test',version:'a'.repeat(64),hostPath:'/private'}:{protocol:'personal-copy-v1',key,state:'UNKNOWN',hostPath:'/private'};
+ assert.deepEqual(await f.call('copy.status',{machine:'gpu-1',key}),{protocol:'personal-copy-v1',key,state:'UNKNOWN'});
+ assert.deepEqual((await f.call('copies',{machine:'gpu-1'})).copies,[{protocol:'personal-copy-v1',key,state:'UNKNOWN'}]);
+ assert.equal(Object.hasOwn(await f.call('publish.status',{machine:'gpu-1',tier:'hdd',key}),'hostPath'),false);
+});
+test('HDD/SSD personal display names and verified tier preserve immutable physical IDs',()=>{
+ for(const prefix of ['h','s']){const id=prefix+'-0123456789abcdef-user-data';assert.equal(defaultDatasetDisplayName(id),'user-data');assert.equal(id,prefix+'-0123456789abcdef-user-data');}
+ const version={version:'a'.repeat(64),state:'READY',storageTier:'hdd'};
+ const row=datasetListView({datasets:[{dataset:'h-0123456789abcdef-data',storageTier:'hdd',versions:[version]}]},[]).datasets[0];
+ assert.equal(row.storageTier,'hdd');assert.equal(row.versions[0].storageTier,'hdd');
+ assert.equal(Object.hasOwn(datasetListView({datasets:[{dataset:'old',versions:[{...version,storageTier:'guessed'}]}]},[]).datasets[0].versions[0],'storageTier'),false);
 });

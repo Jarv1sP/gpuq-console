@@ -108,5 +108,21 @@ class Copies(fixture.PersonalStorageTests):
         with self.assertRaises(ValueError):self.copies.resume(self.user,self.args['key'])
         self.assertEqual(len(self.launches),1)
 
+    def test_stopped_copy_without_completion_receipt_is_unknown_not_succeeded(self):
+        self.copies.begin(self.args)
+        self.assertEqual(self.copies.status(self.user,self.args['key'],observe=True)['state'],'UNKNOWN')
+        with self.assertRaises(ValueError):self.copies.resume(self.user,self.args['key'])
+        self.assertEqual(self.launches,[self.args['key']])
+
+    def test_lost_systemd_reply_does_not_overwrite_completed_worker_receipt(self):
+        self.copies.begin(self.args)
+        self.copies.launch=__import__('types').MethodType(self.module.PersonalCopies.launch,self.copies)
+        def lost(*args,**kwargs):
+            self.assertEqual(self.copies.worker(self.user,self.args['key']),0)
+            raise self.module.subprocess.TimeoutExpired('systemd',5)
+        with patch.object(self.module.subprocess,'run',side_effect=lost):
+            self.assertEqual(self.copies.launch(self.user,self.args['key'])['state'],'SUCCEEDED')
+        self.assertEqual((self.target/'model.bin').read_bytes(),self.bytes)
+
 
 if __name__=='__main__':unittest.main()

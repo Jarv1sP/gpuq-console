@@ -175,9 +175,17 @@ class ProjectLifecycle:
             value = self.store.lifecycle(user, project)
             folder = self.store.lifecycle_folder(user, project)
             receipt = folder / (project + '.json')
-            trash = self.s.private_dir(folder / '.trash', create=True)
-            target = trash / args['key']
             original = self.store.path / self.store._identity(user, project) / project
+            personal=value.get('storageLayout')=='personal-storage-v1'
+            if value['state'] not in ('RETIRING','RETIRED'):
+                original,meta=self.store._project(user,project)
+                personal=meta.get('storageLayout')=='personal-storage-v1'
+            elif personal:
+                original=self.store.personal_storage().project_base()/self.store._identity(user,project)/project
+            # Retire on the source volume; never rename HDD bytes into the
+            # legacy SSD control directory or migrate them on EXDEV.
+            trash = self.s.private_dir((original.parent if personal else folder)/'.trash', create=True)
+            target = trash / args['key']
             if value['state'] in ('RETIRING', 'RETIRED'):
                 if value.get('retirementId') != args['key'] or value.get('manifestSha256') != args['manifestSha256'] or value.get('sourceRevision') != args['revision']:
                     raise ValueError('Project is fenced by another exact retirement request')
@@ -199,6 +207,7 @@ class ProjectLifecycle:
                 if not helper.atomic_import_available(): raise ValueError('Atomic no-replace retirement is unavailable on this node')
                 value.update(state='RETIRING', revision=value['revision'] + 1, sourceRevision=args['revision'], retirementId=args['key'],
                              manifestSha256=plan['manifestSha256'], rootIdentity=plan['rootIdentity'], entries=plan['entries'], bytes=plan['bytes'], updatedAt=time.time())
+                if personal:value['storageLayout']='personal-storage-v1'
                 self.s.atomic_json(receipt, value)  # Permanent fence precedes the move.
                 with self.s.directory(original.parent) as source_fd, self.s.directory(trash) as target_fd:
                     helper.rename_new(source_fd, project, target_fd, args['key'])

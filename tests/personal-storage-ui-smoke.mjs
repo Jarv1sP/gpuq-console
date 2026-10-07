@@ -49,7 +49,8 @@ try{
     await page.locator('[name=workspace-project]').selectOption('hdd-project');
     await page.waitForFunction(()=>!document.querySelector('[name=workspace-project]').disabled&&document.querySelector('#personal-workspace-field')?.hidden===false);
     await openSubmit(page);assert.equal(await page.locator('[name=workspace-mode]').inputValue(),'isolated');
-    assert.equal(await page.locator('[name=training-target] option[value=auto]').isDisabled(),true);
+    assert.equal(await page.locator('[name=training-target] option[value=auto]').evaluate(node=>node.disabled),true);
+    assert.equal(await page.locator('[name=training-target]').inputValue(),'current');
     assert.match(await page.locator('#workspace-mode-note').textContent(),/data-hdd.*data-ssd.*机械盘/);
     await page.locator('[name=workspace-mode]').selectOption('shared');await page.locator('[name=command]').fill('python train.py --output /workspace/my-folder');
     for(const width of [1440,390,320]){
@@ -67,7 +68,7 @@ try{
     await service.reconcile();assert.equal(job.state,'PENDING');assert.equal(job.actualCards,0);assert.equal(job.nodeJobId,undefined);assert.match(job.queueReason,/尚未申请 GPU/);
     await closeSubmit(page);await page.locator('[name=workspace-project]').selectOption('legacy-project');
     await page.waitForFunction(()=>!document.querySelector('[name=workspace-project]').disabled&&document.querySelector('#personal-workspace-field')?.hidden===true);
-    await openSubmit(page);assert.equal(await page.locator('[name=workspace-mode]').isDisabled(),true);assert.equal(await page.locator('[name=training-target] option[value=auto]').isDisabled(),false);await closeSubmit(page);await context.close();
+    await openSubmit(page);assert.equal(await page.locator('[name=workspace-mode]').isDisabled(),true);assert.equal(await page.locator('[name=training-target] option[value=auto]').evaluate(node=>node.disabled),false);await closeSubmit(page);await context.close();
   }
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
   assert.ok(calls.filter(c=>c.operation==='sync').every(c=>c.args.job.workspaceMode==='shared'));
