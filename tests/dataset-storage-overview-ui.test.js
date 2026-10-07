@@ -38,7 +38,7 @@ const legacyModel=()=>aggregateDatasetCatalog({machine:'server-a',checkedAt:at,p
   version,state:'READY',canUse:true,bytes:200,files:2,ownerLabel:'所属用户：alice',locations:[
    {machine:'server-a',dataset:'physical-a',state:'READY',canUse:true},{machine:'server-b',dataset:'physical-b',state:'READY',canUse:true}]}]}]});
 const oldCapacity={machine:'server-a',available:true,filesystemBytes:1000,availableBytes:300,reserveBytes:50,usableBytes:250};
-test('upload target adapter (contract pending finalization) requires explicit available true and a nonempty targetMachine',()=>{
+test('upload policy target requires explicit available true and a nonempty targetMachine',()=>{
  for(const raw of [null,{}, {available:true},{available:true,targetMachine:null},{available:true,targetMachine:''},
   {available:true,targetMachine:' '},{available:true,targetMachine:1},{available:false,targetMachine:'new-warehouse'},
   {available:1,targetMachine:'new-warehouse'},{available:true,machine:'new-warehouse'},{available:true,storageMachine:'new-warehouse'}])assert.equal(adaptUploadTarget(raw),null);

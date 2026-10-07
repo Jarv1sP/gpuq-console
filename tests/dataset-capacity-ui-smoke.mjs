@@ -62,7 +62,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
   finally{await card.evaluate((node,{original,style})=>{node.className=original;if(style===null)node.removeAttribute('style');else node.setAttribute('style',style);},{original,style});await card.dispose();}
   assert((await inspectGeometry(page,cardRules)).pass,'the restored large card passes without flattening it');
  }
- // Contract pending backend finalization: a new upload warehouse can have
+ // An explicit policy target can name a new upload warehouse that has
  // no registered versions yet. No capacity or migration success is implied.
  await page.evaluate(target=>{store.data.datasetUploadAdmission={protocol:1,available:true,targetMachine:target};view.render();},machines[0].id);
  const uploadTarget=page.locator('[data-v4-warehouse="'+machines[0].id+'"]');

@@ -218,7 +218,7 @@ export function datasetWarehouseMachines(version){
   return [...new Set(nodes)].filter(machine=>identifier.test(machine||''));
 }
 
-// Contract pending backend finalization: availability alone names no target.
+// The policy target proves no node health, capacity or write permission.
 export function adaptUploadTarget(admission){
   const target=admission?.targetMachine;
   return admission?.available===true&&typeof target==='string'&&target.trim()?target:null;
