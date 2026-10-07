@@ -98,6 +98,10 @@ try{
     });
     await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
     await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();
+    assert.equal(await page.locator('#cloud-files').isHidden(),true,'Public rooms do not advertise the experimental cloud entry for either role');
+    // Enable the retained component only in this local geometry harness;
+    // public entries and the original capability/operation checks stay intact.
+    await page.locator('#cloud-files').evaluate(node=>{node.hidden=false;});
     const initialList=mode==='loading'?null:page.waitForResponse(response=>response.url().endsWith('/api/call')&&response.request().postDataJSON()?.operation==='cloud.files.list');
     await page.locator('#cloud-files>summary').click();
     if(mode==='loading')await page.waitForFunction(()=>document.querySelector('#cloud-files-refresh').disabled);
