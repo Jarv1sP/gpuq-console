@@ -36,9 +36,16 @@ test('data organization guidance favors reusable collections without changing im
   assert.equal((section.match(/^- /gm) || []).length, 3);
   assert.match(section, /完整、可复用的集合/);
   assert.match(section, /同一集合更新时保留名称，用新的内容版本区分/);
+  assert.match(section, /在该集合的整理工作区修改，再发布同一逻辑数据集的新固定版本/);
+  assert.match(section, /已经 `READY` 的固定版本不可原地修改/);
+  assert.match(section, /旧版本及其跨机副本保持原身份/);
+  assert.match(section, /平台固定技术 UUID／内部 hash/);
+  assert.match(section, /不能通过物理重命名内部目录或 hash 来整理名称/);
   assert.match(section, /显示名称应说明内容和用途/);
   assert.match(section, /不要只用纯数字、随机字符/);
   assert.match(section, /不要故意登记没有独立复用用途的零散临时小数据集/);
+  assert.match(section, /包括临时实验或 smoke 数据/);
+  assert.match(section, /协助操作的 AI 也须遵守上述项目复用、命名和版本约定/);
   assert.match(section, /主体或分片尽量合并，训练程序按需选取子集/);
   assert.match(section, /预训练权重、tokenizer 和模型配置放个人项目/);
   for (const path of ['weights/', 'models/', 'tokenizers/', '/outputs']) assert.ok(section.includes('`' + path + '`'));
@@ -212,6 +219,10 @@ test('new projects use OCI without a mode choice and distinguish container from 
 });
 
 test('personal container guidance separates creation, no-GPU development, ending and a pinned training version',()=>{
+  assert.match(guide,/给项目／容器起能说明研究内容和用途的名字/);
+  assert.match(guide,/同一个逻辑项目复用一个个人项目和容器，不为每次实验新建小容器/);
+  assert.match(guide,/不同实验用项目内的目录、配置、代码版本和发布版本（release）区分/);
+  assert.match(guide,/每次训练（run）的结果各自写入 `\/outputs`/);
   const section=guide.split('### 个人容器\n')[1]?.split('\n### ')[0];
   assert.ok(section,'personal containers have their own concise section');
   assert.match(section,/「新建项目」.*都创建个人容器/);assert.match(section,/容器内 root 不是服务器 root，开发阶段无 GPU/);
@@ -248,6 +259,7 @@ test('single warehouse intake separates complete warehouse data from prepared tr
   assert.match(guide,/仓库所在机器也须完成准备，不能把仓库数据可用当作训练缓存已就绪/);
   assert.match(guide,/具体存储介质由平台按节点实际能力管理/);
   assert.match(guide,/日常只需使用个人工作区和完整数据仓库/);
+  assert.match(guide,/三个板块分别是个人项目／容器.*集中数据仓库.*算力排队/);
   assert.match(guide,/不需要自己选择磁盘或宿主目录/);
   assert.doesNotMatch(guide,/机械|固态|原件|\b(?:SSD|HDD)\b/,'the member guide uses warehouse/cache terms, not storage media or original-copy jargon');
   assert.match(guide,/### 仓库与训练缓存/);
