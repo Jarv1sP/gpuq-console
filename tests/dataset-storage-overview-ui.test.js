@@ -61,6 +61,19 @@ test('v4 uses only explicitly identified warehouse volumes, and unknown snapshot
  assert.equal(warehouseStorageCards(overview,model,new Map([['server-a',capacity]]))[0].totalBytes,null,'a past successful timestamp is not a current capacity');
  assert.equal(displayStorageCapacity(overview,model,new Map([['server-a',oldCapacity]])).caches[0].volume.totalBytes,null,'old cached reads cannot fill a failed collected snapshot');
 });
+test('v4 warehouse counts use the same visible locations as filtering, with volume counts preferred when supplied',()=>{
+ const raw=snapshot();raw.warehouse.volumes[0].machine='server-b';raw.datasets[0].versions[0].originals[0].machine='server-b';
+ const overview=adaptStorageOverview(raw),model=overviewDatasetCatalog(overview,null),legacy=legacyModel();
+ // A cache-only legacy observation has no warehouse metadata. It may supply
+ // known bytes, but must not erase the overview's warehouse membership/count.
+ assert.deepEqual(datasetWarehouseMachines(model.datasets[0].versions[0]),['server-b']);
+ let [card]=warehouseStorageCards(overview,model,new Map(),legacy);
+ assert.equal(card.datasetCount,model.datasets.filter(item=>item.versions.some(v=>datasetWarehouseMachines(v).includes(card.machine))).length);
+ assert.equal(card.datasetCount,1);
+ raw.warehouse.volumes[0].datasetCount=7;
+ [card]=warehouseStorageCards(adaptStorageOverview(raw),model);assert.equal(card.datasetCount,7);
+ for(const value of [null,-1,'7']){raw.warehouse.volumes[0].datasetCount=value;assert.equal(warehouseStorageCards(adaptStorageOverview(raw),model)[0].datasetCount,1);}
+});
 test('the existing catalog and public capacity shape render all three components without overview or an invented budget',()=>{
  const model=legacyModel(),result=displayStorageCapacity(null,model,new Map([['server-a',oldCapacity]]));
  assert.equal(result.warehouse.contentBytes,200,'one version is not counted twice for two copies');assert.equal(result.warehouse.totalBytes,null);

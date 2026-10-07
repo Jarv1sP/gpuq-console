@@ -158,11 +158,13 @@ try{
   const writesBefore=calls.filter(call=>!['state','transfers.list','projects.list','datasets.overview','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan'].includes(call.operation)).length;
   await page.locator('[data-v4-warehouse="'+machines[0].id+'"]').click();
   assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),['imagenet-sub']);
+  assert.equal(await page.locator('[data-v4-warehouse="'+machines[0].id+'"] .v4-dataset-count').textContent(),(await page.locator('[data-v3-select]').count())+' 个数据集','warehouse card count equals the filtered logical dataset rows, not the number of versions');
   assert.equal(await page.locator('[data-v4-warehouse="'+machines[0].id+'"]').getAttribute('aria-pressed'),'true');
   assert.equal(await page.locator('[data-v4-clear=warehouse]').count(),1);
   await page.locator('[data-v4-clear=warehouse]').click();assert.equal(await page.locator('[data-v3-select]').count(),5);
   await page.locator('[data-v4-warehouse="'+machines[3].id+'"]').click();
   assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),['campus-seg','med-ct-2025']);
+  assert.equal(await page.locator('[data-v4-warehouse="'+machines[3].id+'"] .v4-dataset-count').textContent(),(await page.locator('[data-v3-select]').count())+' 个数据集','second warehouse card count equals its filtered rows');
   await page.locator('[data-v4-warehouse="'+machines[3].id+'"]').click();assert.equal(await page.locator('[data-v3-select]').count(),5);
   assert.equal(calls.filter(call=>!['state','transfers.list','projects.list','datasets.overview','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan'].includes(call.operation)).length,writesBefore,'warehouse selection never caches, releases or trains');
   assert.deepEqual(await page.locator('.v3-cols>span').allTextContents(),['','名称','所属','大小','仓库','已缓存到']);

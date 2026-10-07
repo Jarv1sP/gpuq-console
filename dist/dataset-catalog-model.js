@@ -136,9 +136,9 @@ export function adaptStorageOverview(raw){
   const volumes=new Map();let unidentified=false;
   for(const row of raw.warehouse.volumes){
     if(!identifier.test(row?.machine||'')||!text(row?.volume?.id)){unidentified=true;continue;}
-    const value={machine:row.machine,volume:volume(row.volume),contentBytes:number(row.originalContentBytes),warnings:list(row.warnings)},key=JSON.stringify([value.machine,value.volume.id]);
+    const value={machine:row.machine,volume:volume(row.volume),contentBytes:number(row.originalContentBytes),datasetCount:number(row.datasetCount),warnings:list(row.warnings)},key=JSON.stringify([value.machine,value.volume.id]);
     if(volumes.has(key)&&JSON.stringify(volumes.get(key))!==JSON.stringify(value)){
-      const previous=volumes.get(key);previous.contentBytes=null;
+      const previous=volumes.get(key);previous.contentBytes=null;previous.datasetCount=null;
       for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])previous.volume[field]=null;
       previous.warnings.push(...value.warnings);
     }else volumes.set(key,value);
@@ -216,13 +216,15 @@ export function datasetWarehouseMachines(version){
   return [...new Set(nodes)].filter(machine=>identifier.test(machine||''));
 }
 
-export function warehouseStorageCards(overview,model,capacities=new Map()){
+export function warehouseStorageCards(overview,model,capacities=new Map(),contentCatalog=model){
+  const content=new Map(list(contentCatalog?.datasets).flatMap(item=>item.versions.map(version=>
+    [JSON.stringify([item.dataset,version.version]),number(version.bytes)])));
   const groups=new Map(),group=machine=>{
     if(!groups.has(machine))groups.set(machine,{machine,versions:new Map(),datasets:new Set(),volumes:[]});
     return groups.get(machine);
   };
   for(const item of list(model?.datasets))for(const version of item.versions)for(const machine of datasetWarehouseMachines(version)){
-    const row=group(machine);row.datasets.add(item.dataset);row.versions.set(JSON.stringify([item.dataset,version.version]),number(version.bytes));
+    const row=group(machine),key=JSON.stringify([item.dataset,version.version]);row.datasets.add(item.dataset);row.versions.set(key,number(version.bytes)??content.get(key)??null);
   }
   for(const row of list(overview?.warehouse.volumes))group(row.machine).volumes.push(row);
   // Only the explicit warehouse-role projection can supply its physical
@@ -249,7 +251,7 @@ export function warehouseStorageCards(overview,model,capacities=new Map()){
     const checkedAt=volumes[0]?.volume.checkedAt??raw?.volume?.checkedAt??overview?.checkedAt??model?.checkedAt??null;
     const collectedAt=volumes[0]?.volume.collectedAt??raw?.volume?.collectedAt??null;
     return {machine:row.machine,...totals,contentBytes,known:valid&&contentBytes!==null,collectedAt,
-      datasetCount:model?row.datasets.size:null,checkedAt,
+      datasetCount:sum(volumes.map(v=>v.datasetCount))??(model?row.datasets.size:null),checkedAt,
       warning:volumes.some(v=>list(v.warnings).some(w=>['WAREHOUSE_USAGE_HIGH','WAREHOUSE_FREE_SPACE_LOW'].includes(w?.code)))||
         valid&&(totals.usedBytes/totals.totalBytes>=.9||totals.reserveBytes!==null&&totals.availableBytes<=totals.reserveBytes)};
   });

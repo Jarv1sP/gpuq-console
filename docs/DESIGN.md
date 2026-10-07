@@ -733,4 +733,5 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 历史 shared／isolated 及缺少模式字段的共享项目在选择项和环境标签中显示「旧环境（兼容）」，终端、文件、固定版本发布和训练权限保持原样。开发草稿与固定发布版本分开说明，训练不写回草稿；文件区域标签右侧的「项目材料说明」保留权重、tokenizer 与开发 HOME 的边界，不新增动效或接口。
 
 数据集 v4 的仓库卡片按目录仓库位置去重汇总完整版本大小；整盘容量只取 `warehouse.volumes[].volume` 或 `datasets.capacity.storageOverview.warehouse.volume` 的明确仓库角色，不能用缓存卷冒充。零与未知分开；每个仓库独立地层条、可用数字和预警，不新增上传配额。仓库与训练机筛选可组合，训练机筛选只收录 READY 副本，所有数量按可读集合。新版总览仓库实心标记只认 `originals[].warehouseReady===true`，其他来源不代替证明；`collectedAt` 只在悬停提示中显示采集时间，带历史采集时间的空读数不能被旧容量填充。
+仓库卡片数量优先采用明确卷的 `datasetCount`，缺失时按主列表同一可读集合、同一仓库位置去重统计数据集；旧缓存目录可补充大小，不能覆盖仓库位置或制造零计数。
 目录预览挂在①仓库中，仅在 `filePreviewAvailable===true` 时尝试本人固定版本的 `datasets.files.list`；每个数据集的 available:false/403 仍隐藏，不能把全局可用当作读取授权。复用 [dataset-files-preview.js](../dist/dataset-files-preview.js)，仅目录元数据；详情重绘保留现有组件，切换房间、账号、数据集或版本取消旧请求。

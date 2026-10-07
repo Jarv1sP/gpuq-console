@@ -121,7 +121,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function capacityOverview(){
   const warehouse=section.querySelector('#warehouse-capacity'),detail=section.querySelector('#warehouse-machine-capacity');
   const facts=capacityDisplay(),target=filter||machine()||facts.caches[0]?.machine;
-  if(warehouse){const cards=warehouseStorageCards(overview,capacityCatalog||model,capacities);html(warehouse,cards.map(row=>warehouseCardHTML(row,warehouseFilter===row.machine)).join('')||'<div class="v4-warehouse-empty">未知</div>');}
+  if(warehouse){const cards=warehouseStorageCards(overview,model,capacities,capacityCatalog||model);html(warehouse,cards.map(row=>warehouseCardHTML(row,warehouseFilter===row.machine)).join('')||'<div class="v4-warehouse-empty">未知</div>');}
   if(detail)html(detail,storageCapacityDetailHTML(facts.caches.find(row=>row.machine===target)));
  }
  function filters(){

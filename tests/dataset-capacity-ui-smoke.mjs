@@ -53,6 +53,9 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  assert.equal(await page.locator('.v3-partial').textContent(),'部分');
  await page.evaluate(async()=>{reply=snapshot;await view.loadOverview();});
  assert.equal(await page.locator('[data-v3-select]').count(),role==='admin'?2:1);assert.equal(await page.locator('#page-title .v3-count').textContent(),(role==='admin'?2:1)+' 个');
+ await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').click();
+ assert.equal(await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"] .v4-dataset-count').textContent(),(await page.locator('[data-v3-select]').count())+' 个数据集','overview warehouse card and its filtered rows agree even when the legacy catalog has no matching warehouse location');
+ await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').click();
  await page.locator('[data-v3-filter="'+machines[0].id+'"]').click();
  const geometry=async()=>{
   await page.evaluate(()=>document.fonts.ready);
