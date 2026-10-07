@@ -66,20 +66,22 @@ try{
   // Exact existing public catalog/capacity shapes, with overview unsupported.
   // The capacity design must be visible before any new node protocol exists.
   assert.equal(await page.locator('[data-v4-warehouse] .capacity-strata').count(),2,'two observed warehouse nodes get distinct cards');
-  assert.equal(await page.locator('.v3-server-chip .capacity-cache-rail').count(),machines.length);
-  assert.equal(await page.locator('#warehouse-machine-capacity .capacity-disk>span').count(),20);
+  assert.equal(await page.locator('.v4-training-card .v4-training-bar').count(),machines.length);
+  assert.equal(await page.locator('#warehouse-machine-capacity,.v3-rail,.v3-all').count(),0,'one card per training node replaces both the horizontal chip rail and selected cache/disk details');
+  assert.equal(await page.locator('.v4-training-key').count(),1);assert(!await page.locator('.v4-training').textContent().then(text=>text.includes('容器')),'unknown project bytes never manufacture a container segment or legend');
   const legacyCatalog=catalog(machines[0].id,role),warehouses=legacyCatalog.datasets.flatMap(row=>row.versions).filter(v=>v.locations.some(row=>row.storage?.phase==='ARCHIVED'&&row.storage.originalRetained===true));
   const {transferBytes}=await import('../dist/data-route.js');
   for(const id of [machines[0].id,machines[3].id]){const total=warehouses.filter(v=>v.locations.some(row=>row.storage?.archiveMachine===id)).reduce((n,v)=>n+v.bytes,0);assert.equal(await page.locator('[data-v4-warehouse="'+id+'"] .capacity-value-data b').textContent(),transferBytes(total));}
   assert.deepEqual(await page.locator('[data-v4-warehouse] .v4-free b').allTextContents(),['未知','未知'],'a cache filesystem cannot establish either warehouse volume');
-  assert.equal(await page.locator('#warehouse-machine-capacity .capacity-metric').first().locator('.capacity-big small').textContent(),'/ 未知','a cache filesystem cannot establish a cache budget');
-  assert((await page.locator('#warehouse-machine-capacity .capacity-disk').getAttribute('aria-label')).includes(transferBytes(620*1024**3)));
+  assert.equal(await page.locator('.v4-budget').count(),0,'a cache filesystem cannot establish a cache budget');
+  assert((await page.locator('.v4-training-bar').first().getAttribute('aria-label')).includes('可用 '+transferBytes(380*1024**3)));
+  assert.equal(await page.locator('.v4-data-value').first().textContent(),transferBytes(262*1024**3),'all READY versions, not just the selected version, contribute to the existing-catalog cache total');
   assert.equal(await page.locator('[data-v3-cache-action]').count(),0,'display fallback cannot grant new cache actions');
   async function shot(stage){
    await page.evaluate(async()=>{await document.fonts.ready;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
    const geometry=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,dialogs:[...document.querySelectorAll('dialog[open]')].map(dialog=>({width:dialog.clientWidth,scroll:dialog.scrollWidth}))}));
    assert(geometry.scroll<=width+1,'document overflow '+JSON.stringify(geometry));for(const dialog of geometry.dialogs)assert(dialog.scroll<=dialog.width+1,'dialog overflow '+JSON.stringify(geometry));
-   const hints=await inspectGeometry(page,{...datasetHelpGeometry,roots:[stage==='main'?'#page-datasets':'#dataset-add-dialog'],largeTargets:'.v3-row,.v3-upload-choices>.button,.v4-warehouse-card'});assert(hints.pass,JSON.stringify(hints.failures));
+   const hints=await inspectGeometry(page,{...datasetHelpGeometry,roots:[stage==='main'?'#page-datasets':'#dataset-add-dialog'],largeTargets:'.v3-row,.v3-upload-choices>.button,.v4-warehouse-card,.v4-training-card'});assert(hints.pass,JSON.stringify(hints.failures));
    const file=role+'-'+stage+'-'+width+'.png';await page.screenshot({path:join(output,file),fullPage:stage==='main'});results.push({role,width,stage,file,geometry});
   }
   await shot('main');
@@ -123,7 +125,7 @@ try{
    assert.equal(await page.locator('#warehouse-page-actions [data-v3-upload]').isVisible(),true,'an active task cannot hide the dataset upload action on phones');
    assert.deepEqual(await page.locator('#warehouse-search').evaluate(node=>({height:node.getBoundingClientRect().height,font:getComputedStyle(node).fontSize})),{height:40,font:'14px'});
    const actions=await page.locator('#warehouse-page-actions>.button').evaluateAll(nodes=>nodes.map(node=>{const r=node.getBoundingClientRect();return r.y+r.height/2;}));assert(Math.max(...actions)-Math.min(...actions)<=1);
-   if(width===390){const rail=await page.locator('.v3-rail').boundingBox(),chip=await page.locator('.v3-server-chip').nth(3).boundingBox();assert(chip.x<rail.x+rail.width&&chip.x+chip.width>rail.x+rail.width,'third server exposes the horizontal-scroll continuation');}
+   if(width===390){const cards=await page.locator('.v4-training-card').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().toJSON()));assert.equal(cards.length,machines.length);assert(cards.every(r=>r.x>=0&&r.x+r.width<=width+1&&r.height>=80),'every phone training card is fully inside the page');assert.equal(new Set(cards.map(r=>r.y)).size,machines.length,'phone cards stack instead of clipping a horizontal chip');}
    assert.equal(await page.locator('.help-links').isVisible(),false);
    await page.addStyleTag({content:'.sb #page-datasets #warehouse-search{height:48px!important;min-height:48px!important}'}).then(async style=>{const result=await inspectGeometry(page,{...datasetHelpGeometry,roots:['#page-datasets']});assert(result.failures.some(row=>row.rule==='compact-search'),'the old 48px phone search fails the exact new contract');await style.evaluate(node=>node.remove());});
   }
@@ -153,8 +155,8 @@ try{
   assert.equal(await secondRow.evaluate(row=>document.activeElement===row),true,'a delayed drawer close event must not steal focus from a newer dataset selection');
   await secondRow.press('Home');assert.equal(await firstRow.getAttribute('aria-selected'),'true');
   assert.equal(calls.length,keyboardCalls,'arrow selection does not cache data or submit training');
-  await page.locator('[data-v3-filter]').nth(1).click();assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),['imagenet-sub'],'the training-machine filter includes only confirmed READY caches, not PREPARING');
-  await page.locator('[data-v3-filter=""]').click();assert.equal(await page.locator('[data-v3-select]').count(),5);
+  await page.locator('[data-v3-filter="'+machines[0].id+'"]').click();assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),['imagenet-sub'],'the training-machine filter includes only confirmed READY caches, not PREPARING');
+  await page.locator('[data-v4-clear=all]').click();assert.equal(await page.locator('[data-v3-select]').count(),5);
   const writesBefore=calls.filter(call=>!['state','transfers.list','projects.list','datasets.overview','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan'].includes(call.operation)).length;
   await page.locator('[data-v4-warehouse="'+machines[0].id+'"]').click();
   assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),['imagenet-sub']);
@@ -172,7 +174,7 @@ try{
   assert.equal(await page.locator('[data-v3-select] .v3-flag').filter({hasText:'待确认'}).count(),0,'uncertainty stays in symbols and tooltips, not a row text tag');
   if(width<760){await page.locator('[data-v3-select="campus-seg"]').click();assert(await page.locator('[data-v3-back]').isVisible());assert.equal(await page.locator('.v3-inspector h2>span').textContent(),'校园场景分割');await page.locator('[data-v3-back]').click();assert(await page.locator('.v3-list').isVisible());}
   if(fullScan&&width===1440){
-   const spec={...datasetHelpGeometry,roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],largeTargets:'.v3-row,.v3-upload-choices>.button,.v4-warehouse-card',numericCells:['.v3-size'],scrollPanels:['.v3-inspector-overflow .v3-detail-scroll','#dataset-add-dialog[open]'],bottomReserve:[{content:'#main-content',controls:'#room-nav,#mobile-control,#control-strip'}]};
+   const spec={...datasetHelpGeometry,roots:['#page-datasets:not(:has(#dataset-add-dialog[open]))','#dataset-add-dialog[open]'],largeTargets:'.v3-row,.v3-upload-choices>.button,.v4-warehouse-card,.v4-training-card',numericCells:['.v3-size'],scrollPanels:['.v3-inspector-overflow .v3-detail-scroll','#dataset-add-dialog[open]'],bottomReserve:[{content:'#main-content',controls:'#room-nav,#mobile-control,#control-strip'}]};
    const scan=async label=>{const measured=await scanGeometry(page,spec,{zoom});scans.push({role,label,zoom,count:measured.length});await writeFile(join(output,'geometry-'+role+'-'+label+'-'+zoom+'.json'),JSON.stringify({role,label,zoom,results:measured},null,2));assert.equal(await page.evaluate(()=>devicePixelRatio),zoom);assert(measured.every(row=>row.pass),JSON.stringify({role,label,zoom,failures:measured.filter(row=>!row.pass).slice(0,2)}));console.log('GEOMETRY',role,label,zoom,measured.length,'PASS');};
    const reload=async()=>{await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);};
    // The same twenty role/state profiles as the prior matrix suite, now

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adaptOriginal,adaptStorageOverview,overviewDatasetCatalog,readableDatasetCatalog,aggregateDatasetCatalog,displayStorageCapacity,warehouseStorageCards,datasetWarehouseMachines} from '../dist/dataset-catalog-model.js';
-import {warehouseCapacityHTML,storageCapacityDetailHTML,cacheCapacityRatio} from '../dist/dataset-flow.js';
+import {adaptOriginal,adaptUploadTarget,adaptStorageOverview,overviewDatasetCatalog,readableDatasetCatalog,aggregateDatasetCatalog,displayStorageCapacity,warehouseStorageCards,datasetWarehouseMachines} from '../dist/dataset-catalog-model.js';
+import {warehouseCapacityHTML,warehouseCardHTML,storageCapacityDetailHTML,cacheCapacityRatio,trainingCapacitySegments,trainingCardHTML,trainingLegendHTML} from '../dist/dataset-flow.js';
 const version='a'.repeat(64),at='2026-10-08T01:23:00Z';
 const volume=(extra={})=>({id:'volume-a',state:'READY',checkedAt:at,totalBytes:1000,usedBytes:700,availableBytes:300,reserveBytes:50,usableBytes:250,...extra});
 const snapshot=()=>({protocol:'dataset-storage-overview-v1',checkedAt:at,partial:false,filePreviewAvailable:false,
@@ -38,6 +38,85 @@ const legacyModel=()=>aggregateDatasetCatalog({machine:'server-a',checkedAt:at,p
   version,state:'READY',canUse:true,bytes:200,files:2,ownerLabel:'所属用户：alice',locations:[
    {machine:'server-a',dataset:'physical-a',state:'READY',canUse:true},{machine:'server-b',dataset:'physical-b',state:'READY',canUse:true}]}]}]});
 const oldCapacity={machine:'server-a',available:true,filesystemBytes:1000,availableBytes:300,reserveBytes:50,usableBytes:250};
+test('upload policy target requires explicit available true and a nonempty targetMachine',()=>{
+ for(const raw of [null,{}, {available:true},{available:true,targetMachine:null},{available:true,targetMachine:''},
+  {available:true,targetMachine:' '},{available:true,targetMachine:1},{available:false,targetMachine:'new-warehouse'},
+  {available:1,targetMachine:'new-warehouse'},{available:true,machine:'new-warehouse'},{available:true,storageMachine:'new-warehouse'}])assert.equal(adaptUploadTarget(raw),null);
+ assert.equal(adaptUploadTarget({available:true,targetMachine:'new-warehouse'}),'new-warehouse');
+});
+test('an explicit upload target adds a zero-count warehouse without inventing migration, volume or warehouse proof',()=>{
+ const model=legacyModel();model.datasets[0].versions[0].warehouse={machine:'server-a',originalConfirmed:true,records:[]};
+ const admission={available:true,targetMachine:'new-warehouse'},cards=warehouseStorageCards(null,model,new Map(),model,admission);
+ assert.equal(cards.length,2);const target=cards.find(row=>row.machine==='new-warehouse');assert.equal(target.uploadTarget,true);assert.equal(target.datasetCount,0);
+ for(const key of ['totalBytes','usedBytes','availableBytes','contentBytes'])assert.equal(target[key],null);
+ assert.equal(target.known,false);assert.match(warehouseCardHTML(target),/v4-upload-target[^>]*>↑/);assert.match(warehouseCardHTML(target),/0 个数据集/);
+ assert.equal(cards.find(row=>row.machine==='server-a').datasetCount,1);assert.equal(model.datasets[0].versions[0].warehouse.machine,'server-a');
+ assert.equal(warehouseStorageCards(null,model,new Map(),model,{available:false,targetMachine:'new-warehouse'}).length,1);
+ assert.equal(warehouseStorageCards(null,model,new Map(),model,{available:true}).length,1);
+ const existing=warehouseStorageCards(null,model,new Map(),model,{available:true,targetMachine:'server-a'});assert.equal(existing.length,1);assert.equal(existing[0].uploadTarget,true);
+});
+test('v4 training segments use real independent quantities and clamp the disk bar without altering reported bytes',()=>{
+ const raw=snapshot();Object.assign(raw.caches[0],{projectBytes:100,projectUsageComplete:false,projectCollectedAt:at});
+ const cache=adaptStorageOverview(raw).caches[0],parts=trainingCapacitySegments(cache),html=trainingCardHTML(cache);
+ assert.equal(cache.projectBytes,100);assert.equal(cache.projectUsageComplete,false);assert.equal(cache.projectCollectedAt,at);
+ assert.deepEqual(parts.widths,{project:10,data:20,other:40,free:30});assert.equal(parts.other,400);assert.equal(parts.budgetPercent,40);
+ assert.match(html,/v4-project-value[^>]*title="部分统计 · 采集于/);assert.match(html,/100 B\+/);assert.match(html,/缓存预算 400 B/);assert.match(trainingLegendHTML([cache]),/容器/);
+ for(const data of [0,200,900,Number.MAX_SAFE_INTEGER])for(const project of [null,0,100,900,Number.MAX_SAFE_INTEGER]){
+  const p=trainingCapacitySegments({...cache,readyContentBytes:data,projectBytes:project});
+  assert(Object.values(p.widths).every(value=>value>=0&&value<=100));assert(Object.values(p.widths).reduce((n,v)=>n+v,0)<=100+1e-9);assert.equal(p.data,data);assert.equal(p.project,project);
+ }
+});
+test('v4 omits unknown container quantities and preserves independent collection timestamps and null disk readings',()=>{
+ for(const value of [null,undefined,-1,'100',NaN]){
+  const raw=snapshot();raw.caches[0].projectBytes=value;raw.caches[0].volume.collectedAt=at;
+  const cache=adaptStorageOverview(raw).caches[0],parts=trainingCapacitySegments(cache);
+  assert.equal(cache.projectBytes,null);assert.equal(parts.other,500);assert.doesNotMatch(trainingCardHTML(cache)+trainingLegendHTML([cache]),/容器|v4-project-value/);
+  assert.match(trainingCardHTML(cache),/采集于/);
+  for(const field of ['totalBytes','usedBytes','availableBytes'])cache.volume[field]=null;
+  assert.equal(trainingCapacitySegments(cache).known,false);assert.equal(trainingCapacitySegments(cache).widths,null);assert.match(trainingCardHTML(cache),/未知/);
+ }
+ const raw=snapshot();raw.caches[0].projectBytes=0;assert.match(trainingCardHTML(adaptStorageOverview(raw).caches[0]),/v4-project-value/,'real zero remains a known container quantity');
+});
+test('v4 incomplete overview usage cannot show zero while its readable catalog proves READY cache bytes',()=>{
+ const raw=snapshot();raw.caches[0].readyContentBytes=0;raw.caches[0].usageComplete=false;
+ const model=legacyModel(),facts=displayStorageCapacity(adaptStorageOverview(raw),model);
+ assert.equal(facts.caches[0].readyContentBytes,200);assert.equal(facts.caches[0].usageComplete,false);assert.match(trainingCardHTML(facts.caches[0]),/200 B\+/);
+ model.datasets[0].versions[0].servers[0].state='NOT_LOCAL';
+ assert.equal(displayStorageCapacity(adaptStorageOverview(raw),model).caches[0].readyContentBytes,0,'a released or absent catalog location cannot restore bytes');
+});
+test('an overview with only existing cache locations preserves independently confirmed catalog absence without inventing preparation permission',()=>{
+ const raw=snapshot();raw.caches.push({...structuredClone(raw.caches[0]),machine:'server-b'});
+ const legacy={machine:null,machines:[{machine:'server-a',state:'ok'},{machine:'server-b',state:'ok'}],datasets:[{dataset:'samples',versions:[{version,canUse:true,locations:[{machine:'server-a',dataset:'physical-samples',state:'READY',canUse:true}]}]}]};
+ const overview=adaptStorageOverview(raw),model=overviewDatasetCatalog(overview,'server-b',legacy),v=model.datasets[0].versions[0];
+ assert.equal(v.selected.state,'NOT_LOCAL');assert.equal(v.selected.canPrepare,false);assert.equal(v.servers.find(row=>row.machine==='server-a').state,'READY');
+ assert.equal(overviewDatasetCatalog(overview,'server-b').datasets[0].versions[0].selected.state,'UNKNOWN','capacity alone does not prove absence');
+ legacy.machines[1].state='unavailable';assert.equal(overviewDatasetCatalog(overview,'server-b',legacy).datasets[0].versions[0].selected.state,'UNKNOWN');
+ legacy.machines[1].state='ok';legacy.datasets[0].versions[0].locations.push({machine:'server-b',state:'READY',canUse:true});
+ assert.equal(overviewDatasetCatalog(overview,'server-b',legacy).datasets[0].versions[0].selected.state,'UNKNOWN','contradictory old READY cannot be treated as current absence');
+ raw.datasets[0].versions[0].caches.push({machine:'server-b',state:'UNKNOWN'});
+ assert.equal(overviewDatasetCatalog(adaptStorageOverview(raw),'server-b',legacy).datasets[0].versions[0].selected.state,'UNKNOWN','explicit overview UNKNOWN always wins');
+ legacy.datasets[0].versions[0].locations.pop();raw.datasets[0].versions[0].caches.pop();raw.caches[1].state='UNKNOWN';raw.caches[1].usageComplete=false;
+ const independent=overviewDatasetCatalog(adaptStorageOverview(raw),'server-b',legacy).datasets[0].versions[0];
+ assert.equal(independent.selected.state,'NOT_LOCAL');assert.equal(independent.servers.find(row=>row.machine==='server-b').directoryState,'ok','a failed volume reading cannot erase a complete catalog read');
+ assert.equal(independent.selected.canPrepare,false,'directory evidence grants no preparation capability');
+});
+test('overview retains only explicit same-target preparation receipts with a current readable source',()=>{
+ const raw=snapshot();raw.caches.push({...structuredClone(raw.caches[0]),machine:'server-b'});
+ const legacy={machine:'server-b',machines:[{machine:'server-a',state:'ok'},{machine:'server-b',state:'ok'}],datasets:[{dataset:'samples',versions:[{
+  version,canUse:true,canPrepare:true,state:'NOT_LOCAL',sourceMachine:'server-a',sourceDataset:'physical-samples',
+  locations:[{machine:'server-a',dataset:'physical-samples',state:'READY',canUse:true}]}]}]};
+ const selected=(data=raw,catalog=legacy)=>overviewDatasetCatalog(adaptStorageOverview(data),'server-b',catalog).datasets[0].versions[0].selected;
+ assert.equal(selected().state,'NOT_LOCAL');assert.equal(selected().canPrepare,true);assert.equal(selected().sourceMachine,'server-a');assert.equal(selected().sourceDataset,'physical-samples');
+ for(const change of [c=>c.machine=null,c=>c.machine='server-a',c=>c.datasets[0].versions[0].version='b'.repeat(64),
+  c=>c.datasets[0].versions[0].canPrepare=false,c=>c.datasets[0].versions[0].canUse=false,
+  c=>c.datasets[0].versions[0].sourceDataset='wrong-reference',c=>c.machines[0].state='unavailable']){
+  const copy=structuredClone(legacy);change(copy);assert.equal(selected(raw,copy).canPrepare,false);assert.equal(selected(raw,copy).sourceMachine,null);
+ }
+ for(const change of [r=>r.datasets[0].versions[0].canUse=false,r=>r.datasets[0].versions[0].caches[0].canUse=false,
+  r=>r.datasets[0].versions[0].caches[0].state='UNKNOWN',r=>r.datasets[0].versions[0].caches.push({machine:'server-b',state:'UNKNOWN',canUse:true})]){
+  const copy=structuredClone(raw);change(copy);assert.equal(selected(copy).canPrepare,false);assert.equal(selected(copy).sourceMachine,null);
+ }
+});
 test('v4 makes one card per observed warehouse with unique logical versions, not one aggregate or one card per cache',()=>{
  const model=legacyModel(),v=model.datasets[0].versions[0];
  v.warehouse={originalConfirmed:true,machine:'server-b',records:[{machine:'server-a',storage:{version,archiveMachine:'server-b',phase:'ARCHIVED',originalRetained:true}}]};

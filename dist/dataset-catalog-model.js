@@ -153,6 +153,7 @@ export function adaptStorageOverview(raw){
   const known=totalBytes!==null&&totalBytes>0&&usedBytes!==null&&usedBytes<=totalBytes&&availableBytes!==null&&usedBytes+availableBytes<=totalBytes&&contentBytes!==null;
   const caches=raw.caches.filter(row=>identifier.test(row?.machine||'')).map(row=>({machine:row.machine,state:text(row.state),volume:volume(row.volume),
     readyContentBytes:number(row.readyContentBytes),readyVersionCount:number(row.readyVersionCount),budgetBytes:number(row.budgetBytes),reserveBytes:number(row.reserveBytes),usageComplete:row.usageComplete===true,
+    projectBytes:number(row.projectBytes),projectUsageComplete:typeof row.projectUsageComplete==='boolean'?row.projectUsageComplete:null,projectCollectedAt:copy(row.projectCollectedAt),
     shared:!!text(row.volume?.id)&&volumes.has(JSON.stringify([row.machine,row.volume.id]))}));
   return {protocol:raw.protocol,checkedAt:copy(raw.checkedAt),partial:raw.partial===true,filePreviewAvailable:raw.filePreviewAvailable===true,
     warehouse:{volumes:rows,totalBytes,usedBytes,availableBytes,contentBytes,reserveBytes,known,
@@ -186,13 +187,14 @@ export function displayStorageCapacity(overview,model,capacities=new Map(),machi
     const values=ready.map(v=>number(v.bytes)),complete=directory&&model?.capacityUsageComplete!==false&&values.every(value=>value!==null)&&
       !versions.some(v=>v.servers.some(row=>row.machine===machine&&row.state==='UNKNOWN'));
     const subtotal=ready.length&&values.every(value=>value===null)?null:sum(values.filter(value=>value!==null));
-    const fallback={machine,state:volume.state,volume,readyContentBytes:directory?subtotal:null,
+    const fallback={machine,state:volume.state,volume,readyContentBytes:directory?subtotal:null,projectBytes:null,projectUsageComplete:null,projectCollectedAt:null,
       readyVersionCount:directory?ready.length:null,budgetBytes:null,reserveBytes:volume.reserveBytes,
       usageComplete:complete,shared:false};
     const actual=overview?.caches.find(row=>row.machine===machine);
     if(!actual)return fallback;
     const result={...actual,volume:{...actual.volume}};
     if(actual.readyContentBytes===null){result.readyContentBytes=fallback.readyContentBytes;result.usageComplete=fallback.usageComplete;}
+    else if(actual.usageComplete===false&&fallback.readyContentBytes!==null&&fallback.readyContentBytes>actual.readyContentBytes)result.readyContentBytes=fallback.readyContentBytes;
     if(actual.readyVersionCount===null)result.readyVersionCount=fallback.readyVersionCount;
     for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])if(result.volume[field]===null&&!actual.volume.collectedAt)result.volume[field]=volume[field];
     return result;
@@ -216,13 +218,21 @@ export function datasetWarehouseMachines(version){
   return [...new Set(nodes)].filter(machine=>identifier.test(machine||''));
 }
 
-export function warehouseStorageCards(overview,model,capacities=new Map(),contentCatalog=model){
+// The policy target proves no node health, capacity or write permission.
+export function adaptUploadTarget(admission){
+  const target=admission?.targetMachine;
+  return admission?.available===true&&typeof target==='string'&&target.trim()?target:null;
+}
+
+export function warehouseStorageCards(overview,model,capacities=new Map(),contentCatalog=model,admission=null){
   const content=new Map(list(contentCatalog?.datasets).flatMap(item=>item.versions.map(version=>
     [JSON.stringify([item.dataset,version.version]),number(version.bytes)])));
   const groups=new Map(),group=machine=>{
     if(!groups.has(machine))groups.set(machine,{machine,versions:new Map(),datasets:new Set(),volumes:[]});
     return groups.get(machine);
   };
+  const uploadTarget=adaptUploadTarget(admission);
+  if(uploadTarget)group(uploadTarget);
   for(const item of list(model?.datasets))for(const version of item.versions)for(const machine of datasetWarehouseMachines(version)){
     const row=group(machine),key=JSON.stringify([item.dataset,version.version]);row.datasets.add(item.dataset);row.versions.set(key,number(version.bytes)??content.get(key)??null);
   }
@@ -250,7 +260,7 @@ export function warehouseStorageCards(overview,model,capacities=new Map(),conten
     const contentBytes=actual??fallback;
     const checkedAt=volumes[0]?.volume.checkedAt??raw?.volume?.checkedAt??overview?.checkedAt??model?.checkedAt??null;
     const collectedAt=volumes[0]?.volume.collectedAt??raw?.volume?.collectedAt??null;
-    return {machine:row.machine,...totals,contentBytes,known:valid&&contentBytes!==null,collectedAt,
+    return {machine:row.machine,uploadTarget:row.machine===uploadTarget,...totals,contentBytes,known:valid&&contentBytes!==null,collectedAt,
       datasetCount:sum(volumes.map(v=>v.datasetCount))??(model?row.datasets.size:null),checkedAt,
       warning:volumes.some(v=>list(v.warnings).some(w=>['WAREHOUSE_USAGE_HIGH','WAREHOUSE_FREE_SPACE_LOW'].includes(w?.code)))||
         valid&&(totals.usedBytes/totals.totalBytes>=.9||totals.reserveBytes!==null&&totals.availableBytes<=totals.reserveBytes)};
@@ -261,12 +271,38 @@ export function warehouseStorageCards(overview,model,capacities=new Map(),conten
 // overview owns its warehouse proof; keep legacy labels/revisions separately.
 export function overviewDatasetCatalog(overview,machine,legacy=null){
   const machines=[...new Set(overview.caches.map(row=>row.machine).concat(overview.datasets.flatMap(item=>item.versions.flatMap(v=>v.originals.map(row=>row.machine).filter(Boolean)))))];
-  const catalog={machine:machine||null,checkedAt:overview.checkedAt,partial:overview.partial,machines:machines.map(id=>({machine:id,state:['READY','ok'].includes(overview.caches.find(row=>row.machine===id)?.state)?'ok':'unavailable'})),
+  const catalog={machine:machine||null,checkedAt:overview.checkedAt,partial:overview.partial,machines:machines.map(id=>{
+    const directory=legacy?.machines?.find(row=>row.machine===id),cache=overview.caches.find(row=>row.machine===id);
+    // A failed disk measurement does not erase a successful directory read.
+    // Without that independent read, require complete node usage evidence.
+    return {machine:id,state:directory?directory.state==='ok'?'ok':'unavailable':
+      ['READY','ok'].includes(cache?.state)&&cache.usageComplete===true?'ok':'unavailable'};
+  }),
     datasets:overview.datasets.map(item=>{
       const old=legacy?.datasets?.find(row=>row.dataset===item.dataset);
       return {dataset:item.dataset,name:old?.name,labelScope:old?.labelScope,displayNameRevision:old?.displayNameRevision,
-        versions:item.versions.map(v=>{const local=v.caches.find(row=>row.machine===machine);return {version:v.version,ownerLabel:v.ownerLabel,canUse:v.canUse,bytes:v.contentBytes,files:v.fileCount,
-          state:local?.state||'UNKNOWN',canPrepare:local?.canPrepare===true,locations:v.caches.map(row=>({...row}))};})};
+        versions:item.versions.map(v=>{
+          const local=v.caches.find(row=>row.machine===machine),oldVersion=old?.versions?.find(row=>row.version===v.version);
+          // The overview lists existing locations, not an absent row for
+          // every node. Only a complete catalog observation proves absence;
+          // a capacity reading alone cannot turn UNKNOWN into NOT_LOCAL.
+          const absent=legacy?.machines?.some(row=>row.machine===machine&&row.state==='ok')&&oldVersion&&Array.isArray(oldVersion.locations)&&
+            !oldVersion.locations.some(row=>row.machine===machine);
+          const selectedState=local?.state||(absent?'NOT_LOCAL':'UNKNOWN');
+          // Capacity observations omit selected-target action receipts. Retain
+          // an explicit catalog receipt only for this target/full version and
+          // a still-readable, currently READY source or local location.
+          const receipt=legacy?.machine===machine&&oldVersion?.canUse===true&&v.canUse===true&&
+            legacy.machines?.some(row=>row.machine===machine&&row.state==='ok')&&oldVersion.canPrepare===true&&
+            ['REGISTERED','STAGING','PREPARING','FAILED','NOT_LOCAL'].includes(selectedState);
+          const source=receipt&&v.caches.find(row=>row.machine===oldVersion.sourceMachine&&row.machine!==machine&&
+            row.state==='READY'&&row.canUse===true&&legacy.machines?.some(node=>node.machine===row.machine&&node.state==='ok')&&
+            (!oldVersion.sourceDataset||row.dataset===oldVersion.sourceDataset));
+          const localReceipt=receipt&&local?.canUse===true&&oldVersion.locations?.some(row=>
+            row.machine===machine&&row.dataset===local.dataset&&row.state===selectedState&&row.canUse===true);
+          return {version:v.version,ownerLabel:v.ownerLabel,canUse:v.canUse,bytes:v.contentBytes,files:v.fileCount,
+          state:selectedState,canPrepare:local?.canPrepare===true||!!source||!!localReceipt,
+          ...(source?{sourceMachine:source.machine,sourceDataset:oldVersion.sourceDataset}:{}),locations:v.caches.map(row=>({...row}))};})};
     })};
   const result=aggregateDatasetCatalog(catalog);
   for(const item of result.datasets){

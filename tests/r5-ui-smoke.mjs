@@ -184,7 +184,8 @@ try{
   const inspector=desktop.locator('#warehouse-inspector'),sourceRow=inspector.locator('.v3-server').filter({has:desktop.locator('.v3-server-text>b[title="'+sourceMachine+'"]')}),targetRow=inspector.locator('.v3-server.cur');
   await sourceRow.hover();assert.equal(prepared.length,0,'inspecting the true READY source is read-only');
   assert.equal(await sourceRow.locator('.v3-server-text>b').getAttribute('title'),sourceMachine);
-  assert.equal(await sourceRow.locator('.v3-server-text>span').textContent(),'已缓存');
+  assert.equal(await sourceRow.locator('.v3-server-text>span').textContent(),'','confirmed state is represented by its symbol, not repeated explanation text');
+  assert.equal(await sourceRow.locator('.v3-g.ready[role=img]').count(),1);assert.equal(await sourceRow.locator('.v3-g').getAttribute('aria-label'),'已缓存');assert.equal(await sourceRow.locator('.v3-g').getAttribute('title'),'已缓存');
   assert.equal(await sourceRow.locator('[data-v3-cache]').count(),0,'a READY source has no redundant cache operation');
   assert.equal(await targetRow.locator('.v3-server-text>b').getAttribute('title'),targetMachine);
   assert.equal(await targetRow.locator('[data-v3-cache]').isEnabled(),true,'a real permitted source unlocks preparation at the selected destination');
@@ -251,7 +252,7 @@ try{
       assert.equal(await panel.locator('.v3-server.cur').count(),1);
       if(dataset==='tiny-local')assert.equal(await panel.locator('.v3-server.cur [data-v3-cache]').count(),0,'local READY hides redundant preparation');
       else assert.equal(await panel.locator('[data-v3-cache="'+targetMachine+'"]').isEnabled(),true);
-      const facts=await panel.locator('.v3-server').evaluateAll(nodes=>nodes.map(node=>{const name=node.querySelector('.v3-server-text'),glyph=node.querySelector('.v3-g'),r=name.getBoundingClientRect(),g=glyph.getBoundingClientRect(),text=node.querySelector('.v3-server-text>span');return {centred:Math.abs(r.y+r.height/2-g.y-g.height/2)<=1,stateHeight:text.getBoundingClientRect().height,line:parseFloat(getComputedStyle(text).lineHeight),nowrap:getComputedStyle(text).whiteSpace==='nowrap'};}));assert.ok(facts.every(row=>row.centred&&row.nowrap&&row.stateHeight<=row.line+1),'server facts remain aligned and readable');
+      const facts=await panel.locator('.v3-server').evaluateAll(nodes=>nodes.map(node=>{const name=node.querySelector('.v3-server-text'),glyph=node.querySelector('.v3-g'),r=name.getBoundingClientRect(),g=glyph.getBoundingClientRect(),text=node.querySelector('.v3-server-text>span');return {centred:Math.abs(r.y+r.height/2-g.y-g.height/2)<=1,caption:text.textContent.trim(),stateHeight:text.getBoundingClientRect().height,line:parseFloat(getComputedStyle(text).lineHeight),nowrap:getComputedStyle(text).whiteSpace==='nowrap'};}));assert.ok(facts.every(row=>row.centred&&(row.caption?row.nowrap&&Number.isFinite(row.line)&&row.stateHeight<=row.line+1:row.stateHeight===0)),'server facts remain aligned and readable: '+JSON.stringify({role,width,dataset,facts}));
       assert.ok(await panel.evaluate(node=>node.scrollWidth<=node.clientWidth+1),'detail has no horizontal overflow');
       if(width<760){for(const action of await panel.locator('button:visible').all())assert.ok(await action.evaluate(node=>node.getBoundingClientRect().height>=44),'mobile detail actions retain distinct 44px targets');}
     }
