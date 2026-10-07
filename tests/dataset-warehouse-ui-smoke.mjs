@@ -35,6 +35,10 @@ try{
     const {operation,args={}}=route.request().postDataJSON();calls.push({role,width,operation,args});
     if(operation==='state')return json(route,null);
     if(operation==='projects.list')return json(route,{projects:[]});
+    if(operation==='transfers.list'){
+      assert.deepEqual(args,{cursor:0,limit:50},'global reminders only read owner-filtered transfer metadata');
+      return json(route,{transfers:[],nextCursor:null});
+    }
     if(operation==='datasets.catalog'){
       if(scene==='loading'){await new Promise(resolve=>pendingReads.push(resolve));}
       if(scene==='error')return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false,error:'目录查询暂时不可用',principal,state})});
@@ -150,7 +154,10 @@ try{
   }
   await context.close();
  }
- const onlyReads=new Set(['state','projects.list','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan']);assert(calls.every(row=>onlyReads.has(row.operation)),'no upload begin/ticket or other API writes');
+ const transferReads=calls.filter(row=>row.operation.startsWith('transfers.'));
+ for(const role of ['member','admin'])for(const width of [1440,1024,390,320])assert(transferReads.some(row=>row.role===role&&row.width===width),'first-login reminders read transfer metadata for '+role+' at '+width);
+ assert(transferReads.every(row=>row.operation==='transfers.list'),'transfer reminders only list records; no create, resume, cancel or other transfer writes');
+ const onlyReads=new Set(['state','projects.list','transfers.list','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan']);assert(calls.every(row=>onlyReads.has(row.operation)),'no upload begin/ticket or other API writes');
  assert(!calls.some(row=>row.operation.startsWith('datasets.storage.')||row.operation.startsWith('cloud.auth.')),"visiting an admin's main view sends no privileged data/storage RPC");
  assert.deepEqual(errors,[]);if(fullScan)assert.equal(scans.reduce((sum,row)=>sum+row.count,0),10620,'Every original role/state/zoom/width/height profile is measured');await writeFile(join(output,'shots.json'),JSON.stringify({checkedAt,results,errors,calls,scans},null,2));console.log('PASS '+results.length+' native v3 screenshots: member/admin × main/upload-1/upload-2 ×1440/390/320; shared help geometry; no overflow/script errors; anonymous route probe, no upload begin/ticket/write; search, filters, phone detail/back and Esc focus.');
 }finally{await browser.close();}
