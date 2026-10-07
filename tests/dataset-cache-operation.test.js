@@ -89,3 +89,13 @@ test('blocked capability can be rechecked without a write; canceled host ignores
  complete({...scope,key:'00000000-0000-4000-8000-000000000001',operationId,state:'READY',phase:'READY',canCancel:false});await pending;
  assert.equal(g.api.snapshot().visible,false);assert.equal(g.timer,null);
 });
+test('release is not complete until a matching RELEASED receipt, never a prepare READY',async()=>{
+ const f=fixture({action:'release'});f.reply=()=>f.receipt({state:'RELEASING',phase:'RELEASING'});await f.api.start();
+ assert.equal(f.api.snapshot().state,'RELEASING');f.reply=()=>f.receipt({state:'READY',phase:'READY'});await f.api.query();assert.equal(f.api.snapshot().state,'UNKNOWN');
+ f.reply=()=>f.receipt({state:'RELEASED',phase:'RELEASED',canCancel:false});await f.api.query();assert.equal(f.api.snapshot().state,'RELEASED');assert.equal(f.api.snapshot().confirmed,true);assert.equal(f.timer,null);
+});
+test('only confirmed failure permits explicit new key, preserving both operation records',async()=>{
+ const f=fixture();f.reply=()=>f.receipt({state:'FAILED',phase:'STOPPED',canCancel:false,error:'server failure'});await f.api.start();const key=f.api.snapshot().request.key;
+ assert.equal(f.api.snapshot().canStart,true);await f.api.start();assert.notEqual(f.api.snapshot().request.key,key);assert.equal(f.requests.filter(row=>row.operation==='datasets.cache.prepare').length,2);
+ const rows=JSON.parse(f.values.get(cacheOperationStorageKey('alice')));assert.equal(rows.length,2);assert.equal(rows[0].request.key,key);
+});

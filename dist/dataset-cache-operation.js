@@ -117,7 +117,7 @@ export function mountCacheOperation(host,options){
   const missing=value.request&&!value.operationId?'<form data-cache-id-form><label>原操作编号<input name="operationId" placeholder="粘贴原 UUID" required aria-label="原操作编号"></label><button class="button" type="submit">查询原操作</button></form>':'';
   const label=value.busy?'正在确认':value.request?labels[value.state]||'未知':value.allowed?'等待操作':'暂不能执行';
   root.innerHTML='<header><h4>'+esc(action==='prepare'?'准备缓存':'释放缓存')+'</h4>'+serverIdHTML(machine)+(explain?copyHelp('缓存操作','回执丢失后只查原编号；没有编号时，请管理员查服务器操作记录。'):'')+'</header><div class="cache-operation-facts"><code title="'+esc(dataset)+'">'+esc(dataset)+'</code><code title="'+esc(version)+'">'+esc(version.slice(0,12))+'</code></div><div class="cache-operation-reading"><span class="cache-operation-state" role="status" data-state="'+esc(value.state)+'" aria-label="'+esc(label)+'" title="'+esc(label+(value.phase?' · '+value.phase:''))+'"><span class="cache-operation-mark" aria-hidden="true"></span>'+(value.state==='UNKNOWN'?'未知':'')+'</span>'+
-   (value.phase&&!finished.has(value.state)?'<span class="cache-operation-phase" title="'+esc(value.phase)+'">'+esc(phases[value.phase]||value.phase)+'</span>':'')+(value.progress?'<span class="cache-operation-progress">'+esc(bytes(value.progress.bytes)+' / '+bytes(value.progress.totalBytes))+'</span>':'')+'</div>'+
+   (value.phase&&!finished.has(value.state)?'<span class="cache-operation-phase" title="'+esc(value.phase)+'">'+esc(phases[value.phase]||value.phase)+'</span>':'')+(value.progress&&!finished.has(value.state)?'<span class="cache-operation-progress">'+esc(bytes(value.progress.bytes)+' / '+bytes(value.progress.totalBytes))+'</span>':'')+'</div>'+
    (value.error||!value.allowed&&value.reason?'<p class="cache-operation-error" role="alert" title="'+esc(value.error||value.reason)+'">'+esc(value.error||value.reason)+'</p>':'')+reference+missing+
    '<footer>'+(value.canStart?'<button class="button '+(action==='release'?'danger':'primary')+'" type="button" data-cache-start>'+esc(startLabel||(value.request?'重新发起':action==='prepare'?'准备缓存':'释放缓存'))+'</button>':'')+
    (!value.allowed?'<button class="button" type="button" data-cache-check '+(value.busy?'disabled':'')+'>重新检查</button>':'')+
@@ -151,6 +151,10 @@ export function mountCacheTransfer(host,{store,source,targets,dataset,version,si
  root.innerHTML='<div class="cache-transfer-heading"><button class="button" type="button" data-cache-transfer-open>转移到…</button>'+copyHelp('转移缓存','先准备目标副本，再单独确认释放来源；不会自动删除。')+'</div><div data-cache-transfer-body hidden><label>目标服务器<select aria-label="目标服务器">'+choices.map(value=>'<option value="'+esc(value.machine)+'">'+esc(value.machine)+'</option>').join('')+'</select></label><div data-cache-transfer-target></div><div data-cache-transfer-source></div></div>';host.append(root);
  let prepared=null,released=null,checked=null;
  const live=()=>!lifetime.signal.aborted&&binding===JSON.stringify([store.principal?.userId,store.authGeneration])&&!signal?.aborted;
+ function sourceReason(slot,text){
+  slot.replaceChildren();const reason=document.createElement('p');reason.className='cache-operation-error';reason.textContent=text;reason.title=text;slot.append(reason);
+  const check=document.createElement('button');check.type='button';check.className='button';check.textContent='重新检查';check.addEventListener('click',()=>{checked=null;void sourceCapability(prepared.snapshot());},{signal:lifetime.signal});slot.append(check);
+ }
  async function sourceCapability(receipt){
   if(!live()||document.hidden||root.checkVisibility?.({checkVisibilityCSS:true})===false||!receipt.confirmed||receipt.state!=='READY'||receipt.request?.machine!==root.querySelector('select').value||checked===receipt.operationId)return;
   checked=receipt.operationId;
@@ -159,8 +163,8 @@ export function mountCacheTransfer(host,{store,source,targets,dataset,version,si
    const capabilities=await store.call('datasets.cache.capabilities',{machine:source,dataset,version},{signal:lifetime.signal});
    if(!live()||prepared?.snapshot().operationId!==receipt.operationId)return;
    if(canCacheAction(capabilities,'release'))released=mountCacheOperation(slot,{store,action:'release',machine:source,dataset,version,capabilities,signal:lifetime.signal,startLabel:'释放原服务器缓存',explain:false,onChange});
-   else{slot.replaceChildren();const reason=document.createElement('p');reason.className='cache-operation-error';reason.textContent=adaptCacheCapability(capabilities,'release').reason||'原服务器缓存暂不能释放。';reason.title=reason.textContent;slot.append(reason);const check=document.createElement('button');check.type='button';check.className='button';check.textContent='重新检查';check.addEventListener('click',()=>{checked=null;void sourceCapability(prepared.snapshot());},{signal:lifetime.signal});slot.append(check);}
-  }catch(cause){if(live()){slot.textContent=cause.message;}}
+   else sourceReason(slot,adaptCacheCapability(capabilities,'release').reason||'未知');
+  }catch(cause){if(live())sourceReason(slot,cause.message);}
  }
  function select(){
   prepared?.destroy();released?.destroy();checked=null;

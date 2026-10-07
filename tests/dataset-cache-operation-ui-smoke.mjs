@@ -64,6 +64,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  assert.equal(await page.locator('[data-state=RUNNING]').count(),1);assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0,'phase READY alone is not completion');
  await page.evaluate(()=>{const row=operations.values().next().value;row.state='READY';row.canCancel=false;});await page.clock.runFor(1501);
  await page.waitForFunction(()=>document.querySelector('[data-cache-transfer-source] [data-cache-start]'));
+ assert.equal(await page.locator('[data-cache-transfer-target] .cache-operation-progress').count(),0,'terminal receipt does not retain an old progress fraction');
  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').textContent(),'释放原服务器缓存');
  assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.cache.release').length),0,'READY never automatically releases source');
  await page.locator('[data-cache-transfer-source] [data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RELEASING]'));
@@ -74,6 +75,10 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  await page.evaluate(()=>{clean();capabilities.set([...capabilities.keys()][0],{allowed:false,reason:'读取租约尚未结束 · 迁移保护'});mount({allowed:false,reason:'读取租约尚未结束 · 迁移保护'},'release');});
  assert.equal(await page.locator('[data-cache-start]').count(),0);assert.equal(await page.locator('[role=alert]').textContent(),'读取租约尚未结束 · 迁移保护');assert.equal(await page.locator('[role=alert]').getAttribute('title'),'读取租约尚未结束 · 迁移保护');
  await page.screenshot({path:join(output,'blocked-'+role+'-'+width+'.png'),fullPage:true,animations:'disabled'});
+ await page.evaluate(()=>capabilities.set([...capabilities.keys()][0],{allowed:true,action:'release'}));await page.locator('[data-cache-check]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-start]'));
+ await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RELEASING]'));assert.equal(await page.locator('[data-state=RELEASED]').count(),0);
+ await page.evaluate(()=>{const row=[...operations.values()].findLast(row=>row.action==='release');row.state='RELEASED';row.phase='RELEASED';row.canCancel=false;});await page.locator('[data-cache-query]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RELEASED]'));
+ assert.equal(await page.locator('[data-cache-start],[data-cache-cancel]').count(),0,'confirmed release is terminal');
  if(width===1440){
   await page.evaluate(()=>{clean();lose=true;mount();});await page.locator('[data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-id-form]'));
   const before=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.cache.prepare').length);
