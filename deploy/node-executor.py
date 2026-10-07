@@ -30,6 +30,10 @@ HOST_COMMAND_CAPABILITY='host-command-v1'
 DATASET_DELETE_CAPABILITY='dataset-delete-v1'
 TASK_DISPLAY_CAPABILITY='console-task-display-v1'
 TASK_DISPLAY_EDIT_CAPABILITY='console-task-display-edit-v1'
+UPLOAD_INGRESS_OPERATIONS=('storage.upload.admit','storage.upload.locate',
+    'datasets.upload.begin','datasets.upload.manifest','datasets.upload.seal','datasets.upload.status',
+    'datasets.upload.chunk','datasets.upload.commit','datasets.upload.discard','datasets.upload.pause',
+    'datasets.upload.routes','datasets.upload.direct-ticket','datasets.upload.direct-revoke')
 DIAGNOSTICS=None
 PLATFORM_ROOT_GUARD=None
 WORKSPACE_STORAGE=None
@@ -45,6 +49,12 @@ def platform_root_check():
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         PLATFORM_ROOT_GUARD=module
     return PLATFORM_ROOT_GUARD.check(ROOT)
+
+def require_upload_ingress_operation(operation):
+    # A distinct fixed key may force only this mode in an immutable runtime
+    # directory. Neither the client JSON nor shared old config enables it.
+    if operation not in UPLOAD_INGRESS_OPERATIONS:
+        raise ValueError('Invalid dedicated dataset upload ingress operation')
 
 def workspace_storage_check(needed=0, *, target_fd=None, admission=False):
     """Only configured nodes gain new-start admission; controls stay available."""
@@ -1681,10 +1691,10 @@ def process(operation,args):
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
         return module.SnapshotSync(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())).process(operation,args)
     if operation.startswith('projects.copy.'):return project_copies().process(operation,args)
-    if operation=='storage.upload.locate':
+    if operation in ('storage.upload.locate','storage.upload.admit'):
         spec=importlib.util.spec_from_file_location('gpuq_dataset_ingress',HERE/'dataset-ingress-node.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        return module.locate(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
+        return getattr(module,operation.rsplit('.',1)[1])(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)
@@ -1916,6 +1926,7 @@ def write_rpc_line(value):
 
 if __name__=='__main__':
     os.umask(0o077)
+    upload_ingress_only=len(sys.argv)==2 and sys.argv[1]=='--dataset-upload-ingress-rpc'
     platform_root_check()
     if len(sys.argv)==3 and sys.argv[1]=='--storage-archive-worker':sys.exit(storage_archive().worker(sys.argv[2]))
     if len(sys.argv)==4 and sys.argv[1]=='--dataset-delete-worker':sys.exit(dataset_retirement_worker(sys.argv[2],sys.argv[3]))
@@ -1947,10 +1958,12 @@ if __name__=='__main__':
         try:header=json.loads(first)
         except (ValueError,UnicodeDecodeError):header=None
         if isinstance(header,dict) and header.get('protocol')==TERMINAL_STREAM_PROTOCOL:
+            if upload_ingress_only:raise ValueError('Terminal streams are not allowed by the upload ingress key')
             if len(first)>TERMINAL_FRAME_BYTES or not first.endswith(b'\n'):raise ValueError('Invalid terminal stream handshake')
             serve_terminal_stream(header,reader,write_rpc_line);sys.exit(0)
         raw=reader.rest(first,1600000)
         data=json.loads(raw)
+        if upload_ingress_only:require_upload_ingress_operation(data['operation'])
         result=process(data['operation'],data['args'])
         print(json.dumps({'ok':True,'result':result}))
     except Exception as e:print(json.dumps({'ok':False,'error':str(e)[:400]}))

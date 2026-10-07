@@ -24,7 +24,7 @@ async function open(fixture,role='member'){
     const originalFetch=window.fetch;window.fetch=(url,options)=>{if(String(url).includes('/v1/uploads/'))fetchOptions.push({url:String(url),credentials:options.credentials,method:options.method,redirect:options.redirect});return originalFetch(url,options);};
     window.store={production:true,principal:{userId:role,role},authGeneration:0,
       users:['member','admin','another-member'].map(id=>({id,role:id==='admin'?'admin':'member',enabled:true,limits:Object.fromEntries(machines.map(machine=>[machine.id,machine.cards])),total:machines.reduce((sum,machine)=>sum+machine.cards,0)})),usage(){return 0;},
-      data:{machines},listeners:[],onAuthChange(listener){this.listeners.push(listener);},async call(operation,args){const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,args})});const value=await response.json();if(!response.ok)throw Object.assign(Error(value.error),{status:response.status});return value.result;}};
+      data:{machines,datasetUploadAdmission:{protocol:1,available:true}},listeners:[],onAuthChange(listener){this.listeners.push(listener);},async call(operation,args){const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,args})});const value=await response.json();if(!response.ok)throw Object.assign(Error(value.error),{status:response.status});return value.result;}};
     window.renderDatasets=datasetsUI(store,text=>toasts.push(text));renderDatasets();
   },{machines,role});
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
@@ -98,10 +98,10 @@ try{
     const fixture=await directBrowserFixture(machines);fixture.config.mode='unavailable';const {page,context}=await open(fixture);
     try{
       await page.evaluate(async machine=>{
-        const {uploadBrowserDataset,scanBrowserDirectory}=await import('/dataset-upload.js');const file=new File(['x'],'sample');const scan=await scanBrowserDirectory([file]);scan.totalBytes=256*1024**2+1;
-        try{await uploadBrowserDataset({call:store.call.bind(store),userId:'member',machine,name:'large',scan});window.largeError='accepted';}catch(error){window.largeError=error.message;}
+        const {uploadBrowserDataset,scanBrowserDirectory}=await import('/dataset-upload.js'),{datasetUploadKeyStore}=await import('/datasets-ui.js');const file=new File(['x'],'sample');const scan=await scanBrowserDirectory([file]);scan.totalBytes=256*1024**2+1;
+        try{await uploadBrowserDataset({call:store.call.bind(store),userId:'member',machine,name:'large',scan,keyStore:datasetUploadKeyStore(localStorage),admission:store.data.datasetUploadAdmission});window.largeError='accepted';}catch(error){window.largeError=error.message;}
       },machines[0].id);
-      assert.match(await page.evaluate(()=>largeError),/超过 256 MiB/);assert.equal(fixture.raw.length,0);assert.equal(fixture.calls.filter(row=>row.operation.startsWith('datasets.upload.')&&row.operation!=='datasets.upload.routes').length,1);assert.deepEqual(fixture.failures,[]);completed.push('large endpoint denial');
+      assert.match(await page.evaluate(()=>largeError),/超过 256 MiB/);assert.equal(fixture.raw.length,0);assert.deepEqual(fixture.calls.filter(row=>row.operation.startsWith('datasets.upload.')&&row.operation!=='datasets.upload.routes').map(row=>row.operation),['datasets.upload.admission.create','datasets.upload.begin']);assert.deepEqual(fixture.failures,[]);completed.push('large endpoint denial');
     }finally{await context.close();await fixture.close();}
   }
   {

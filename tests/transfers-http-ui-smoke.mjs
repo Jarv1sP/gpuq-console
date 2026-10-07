@@ -52,8 +52,10 @@ try{
   }}));
   // Observe the authenticated Portal call, not a flag that a later request could
   // retroactively apply to unrelated capacity reads. Never retain the token.
-  const invoke=service.invoke.bind(service);
-  service.invoke=(token,operation,...args)=>requestContext.run({operation,userId:service.principal(token).userId},()=>invoke(token,operation,...args));
+  for(const method of ['invoke','datasetRead']){
+    const original=service[method].bind(service);
+    service[method]=(token,operation,...args)=>requestContext.run({operation,userId:service.principal(token).userId},()=>original(token,operation,...args));
+  }
   await new Promise(r=>server.listen(port,'127.0.0.1',r));
   const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'transfer-member',password})).result;await service.invoke(admin.token,'policy.full',{userId:member.id,policyVersion:0});const login=await service.login(member.username,password),session=join(dir,'session.json');await writeFile(session,JSON.stringify({url:origin,token:login.token,principal:login.principal,machine:'gpu-1'}));
   const cliFile=join(dir,'gpuctl.mjs');await writeFile(cliFile,await (await fetch(origin+'/gpuctl.mjs')).text());
@@ -103,7 +105,10 @@ try{
   await mobileFit(390);assert.deepEqual(errors,[]);
   assert.ok(calls.some(call=>call.op==='datasets.list'),'catalog exercises the fixed metadata discovery operation');
   assert.ok(calls.some(call=>call.op==='datasets.capacity'&&call.args.userId==='builtin-admin'&&call.request?.operation==='datasets.overview'),'browser really requests the overview service capacity read');
-  for(const call of calls)assertBridgeIdentity(call,member.id);
+  for(const call of calls){
+    assert.equal(call.request?.userId,member.id,`${call.op} originates from the authenticated member request`);
+    assertBridgeIdentity(call,member.id);
+  }
   const overview={operation:'datasets.overview',userId:member.id},capacity={op:'datasets.capacity',args:{userId:'builtin-admin',hostAdmin:true},request:overview};
   assertBridgeIdentity(capacity,member.id);
   for(const denied of [

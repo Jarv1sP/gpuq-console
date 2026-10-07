@@ -228,6 +228,12 @@ ID/revision 核对。维护状态仍保持；物理原件、副本、租约与 p
 
 门户控制面顺序：
 
+启用机械仓库策略后的新版客户端，新上传必须 allocation-first：只有本地没有旧 UUID／handle 时，先持久保存固定 intent UUID，调用 `datasets.upload.admission.create {machine,key,name,manifestBytes,manifestSha256,totalBytes,entries}`。门户在同一事务内持久绑定 owner、intent、随机服务器 `uploadId`、原 `requestedMachine`、固定 HDD `storageMachine`、authority 和完整 specification；回包 `protocol:"dataset-upload-admission-v1"`、原 `key`、`uploadId`、`requestedMachine/storageMachine/storageTier:"hdd"`、`specification`、`state:"ISSUED"|"BOUND"`。客户端保存回包后，以下 begin 的 `key` 使用该服务器 `uploadId`，`machine` 仍是原训练选择。分配丢 ACK 只调用 `datasets.upload.admission.status {machine,key}` 查询原映射（零节点 RPC），不存在或未知就停止，不换 key；`BOUND` 表示固定派发意图，不是节点成功证明。此路径不扫描无关旧节点；节点私有准入仅接受受信桥的完整固定 tuple，拒绝 legacy 会话和身份变更，未知能力或失败不回退旧 begin。
+
+已有本地 UUID／handle 不自动 allocation 或重绑，仍按原 begin/status、全节点定位及原位置恢复；超时或离线不是 ABSENT，全节点确认 ABSENT 后也拒绝用旧裸 key 新建。策略启用时，新 `transfers.create kind=upload`／`transfer upload` 关闭，已持久传输仍按原 key/编号恢复。`state.datasetUploadAdmission {protocol:1,available}` 只说明门户策略/API，不能代替节点准入、容量、挂载或直传可达证明。
+
+仅管理员受保护入库配置 `allowDuringMaintenance:true` 可在维护期间放行当前服务端 admission 绑定的固定 HDD 上传；仍逐次复核 owner、机器权限、authority、spec 和节点容量，不接受客户端传该开关。此例外不修改 operational maintenance revision/global 状态，不放行训练、终端、项目、SSD／legacy 新建、通用传输或缓存准备，不能宣称全平台恢复。
+
 1. `datasets.upload.begin`：`machine`、`name`、UUID `key`、`manifestBytes`、`manifestSha256`、`totalBytes`、`entries`；仅用户明确同意大文件中转时增加 `allowRelay: true`。
 2. 从 `result` 保存 `uploadId`、`state`、`manifestOffset`、`chunkBytes` 和 `uploadTransport`。后者包含 `protocol`、`directAvailable`、`reason`、`relayLimitBytes`、`relayAllowed`。能力存在不代表当前电脑一定能连到节点。
 3. 可直传时调用 `datasets.upload.direct-ticket`，参数为 `machine`、`uploadId`；使用它返回的授权入口。
@@ -275,6 +281,10 @@ ID/revision 核对。维护状态仍保持；物理原件、副本、租约与 p
 目录发现兼容尚未提供 `datasetDelete:1` 的节点，不要求部署新删除协议。删除能力仍须全节点确认且账号已有机器授权；零额度成员的目录返回 `datasetDelete:0`。新节点的 `deletionPermissions.memberAllowed` 只采用本人受限列表对同机、同数据集、同完整版本返回的许可，不继承内部发现身份的权限；证明失败只关闭删除许可，不把已确认的目录元数据隐藏。
 
 ## 已被新版替代的旧归档原件（管理员）
+
+切换可信配置的默认仓库机器，不会迁移或重标旧归档。相同受信 `authority` 下，原记录的完整 `policyKey`、已知源机器与固定引用匹配时，历史来源仍可展示并按数据归属读取；`archiveMachine` 始终是该记录自身的来源。别名按来源机器隔离，不会给其他账号的同名数据套用当前用户的标签。节点当前状态和恢复证明仍须独立核实，历史 `ARCHIVED` 不证明新仓库已有完整原件。
+
+新登记、复制认证和后台派发仅使用当前策略。旧待处理记录不会因改默认机器而自动重派、重试或改写，未知旧 lane 仍保留。显式退役仍绑定原 journal 身份、正常注销回执和原来源机器；旧版与替代版必须在同一 authority 源上认证，跨来源替代在任何节点调用之前拒绝。它不是跨仓库迁移协议，不能用新仓库的 grant 绕过旧原件保护。
 
 `datasets.archive.retire-authority` 是当前管理员的显式维护操作，不是普通删除或解除固定按钮。参数：
 

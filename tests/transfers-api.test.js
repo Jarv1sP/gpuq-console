@@ -153,6 +153,21 @@ test('client upload uses existing verified chunks and cancel preserves partial w
   const last=f.calls.at(-1);assert.equal(last.op,'datasets.upload.chunk');assert.equal(last.args.uploadId,row.uploadId);assert.equal(last.args.hostAdmin,false);
   await f.call('transfers.cancel',{id:row.id});await assert.rejects(f.call('transfers.io',{id:row.id,action:'chunk',path:'train.bin',offset:1,data:'YQ=='}));assert.equal(f.calls.some(c=>c.op==='datasets.upload.discard'),false);assert.equal((await f.call('transfers.status',{id:row.id})).state,'CANCELED');
 });
+test('warehouse admission fences new legacy uploads but preserves exact existing transfers',async t=>{
+  const f=await fixture(t),args={key:randomUUID(),kind:'upload',machine:MACHINES[0].id,name:'existing',manifest:{manifestBytes:100,manifestSha256:hash,totalBytes:30,entries:2}};
+  const old=await f.call('transfers.create',args);
+  f.service.datasetIngressPolicy=Object.freeze({enabled:true,machine:MACHINES[3].id,authority:'hdd'});
+  const count=f.calls.length,rows=f.service.db.prepare('SELECT count(*) AS n FROM transfers').get().n;
+  await assert.rejects(f.call('transfers.create',{...args,key:randomUUID(),name:'fresh'}),e=>e.status===409&&/数据仓库上传入口/.test(e.message));
+  assert.equal(f.calls.length,count,'rejected fresh upload performs zero node RPC');
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM transfers').get().n,rows,'rejection leaves no transfer intent');
+  const resumed=await f.call('transfers.create',args);
+  assert.equal(resumed.id,old.id);assert.equal(resumed.uploadId,old.uploadId);assert.equal(resumed.machine,args.machine);
+  await f.call('transfers.io',{id:old.id,action:'chunk',path:'train.bin',offset:0,data:'YQ=='});
+  assert.equal(f.calls.at(-1).machine,args.machine);assert.equal(f.calls.at(-1).args.uploadId,old.uploadId);
+  await assert.rejects(f.call('transfers.create',{...args,name:'changed'}),e=>e.status===409);
+  const copied=await f.call('transfers.create',copy());assert.equal(copied.state,'RUNNING','LAN copy remains available');
+});
 test('upload relay consent is explicit, type checked, owner scoped and unavailable to other transfer kinds',async t=>{
   const f=await fixture(t),base={kind:'upload',machine:MACHINES[0].id,name:'large',manifest:{manifestBytes:100,manifestSha256:hash,totalBytes:300*1024**2,entries:2}};
   for(const allowRelay of [undefined,false,true]){

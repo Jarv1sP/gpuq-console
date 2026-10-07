@@ -6,18 +6,24 @@ import {mkdtemp,writeFile,readFile,mkdir,rm,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {createHash,randomBytes} from 'node:crypto';
+import {createHash,randomBytes,randomUUID} from 'node:crypto';
+import {scanLocalDataset,snapshotKey} from '../client-data-upload.mjs';
 const hash=data=>createHash('sha256').update(data).digest('hex'),chunk=1024*1024;
 async function fixture(t){
-  const dir=await mkdtemp(join(tmpdir(),'gpuq-data-cli-')),session=join(dir,'session.json'),data=join(dir,'data'),calls=[],uploads=new Map();await mkdir(data);let failAfterChunk=false,onBegin=null;
-  const state={demo:false,gpuqConnected:true,machines:[{id:'gpu-1'},{id:'gpu-2'}],users:[],jobs:[]};
-  const result=u=>({uploadId:u.id,name:u.name,state:u.state,...(u.resumeState?{resumeState:u.resumeState}:{}),manifestOffset:u.manifest.length,manifestBytes:u.spec.manifestBytes,totalBytes:u.spec.totalBytes,entries:u.spec.entries,chunkBytes:chunk,...(u.state==='READY'?{dataset:'u-1b171bf4b4b08285-'+u.name,version:hash(u.manifest)}:{})});
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-data-cli-')),session=join(dir,'session.json'),data=join(dir,'data'),calls=[],uploads=new Map(),admissions=new Map();await mkdir(data);let failAfterChunk=false,onBegin=null;
+  const state={demo:false,gpuqConnected:true,machines:[{id:'gpu-1'},{id:'gpu-2'}],users:[],jobs:[],datasetUploadAdmission:{protocol:1,available:true}};
+  const result=u=>({uploadId:u.id,name:u.name,state:u.state,...(u.admitted?{placementProtocol:1,requestedMachine:'gpu-1',storageMachine:'gpu-2',storageTier:'hdd',legacyPlacement:false}:{}),...(u.resumeState?{resumeState:u.resumeState}:{}),manifestOffset:u.manifest.length,manifestBytes:u.spec.manifestBytes,totalBytes:u.spec.totalBytes,entries:u.spec.entries,chunkBytes:chunk,...(u.state==='READY'?{dataset:'u-1b171bf4b4b08285-'+u.name,version:hash(u.manifest)}:{})});
   const server=createServer(async(req,res)=>{try{
     let raw='';for await(const part of req)raw+=part;const {operation,args={}}=JSON.parse(raw);calls.push({operation,args});res.setHeader('Content-Type','application/json');assert.ok(Buffer.byteLength(raw)<=1500000);
     if(operation==='state'){res.end(JSON.stringify({state}));return;}
+    if(operation==='datasets.upload.admission.create'||operation==='datasets.upload.admission.status'){
+      let receipt=admissions.get(args.key);
+      if(operation.endsWith('.create')){const specification=Object.fromEntries(['name','manifestBytes','manifestSha256','totalBytes','entries'].map(key=>[key,args[key]]));if(!receipt){receipt={protocol:'dataset-upload-admission-v1',key:args.key,uploadId:randomUUID(),requestedMachine:args.machine,storageMachine:'gpu-2',storageTier:'hdd',specification,state:'ISSUED'};admissions.set(args.key,receipt);}assert.deepEqual(receipt.specification,specification);}
+      assert.ok(receipt,'Original admission must exist');res.end(JSON.stringify({result:receipt}));return;
+    }
     const action=operation.split('.').at(-1);let u;
     if(action==='begin'){
-      u=uploads.get(args.key);if(!u){u={id:hash(args.key),name:args.name,state:'RECEIVING_MANIFEST',spec:args,manifest:Buffer.alloc(0),files:new Map()};uploads.set(args.key,u);}await onBegin?.(u);res.end(JSON.stringify({result:result(u)}));return;
+      u=uploads.get(args.key);if(!u){u={id:args.key,admitted:[...admissions.values()].some(row=>row.uploadId===args.key),name:args.name,state:'RECEIVING_MANIFEST',spec:args,manifest:Buffer.alloc(0),files:new Map()};uploads.set(args.key,u);}await onBegin?.(u);res.end(JSON.stringify({result:result(u)}));return;
     }
     u=[...uploads.values()].find(v=>v.id===args.uploadId);assert.ok(u,'upload handle must already exist');let output;
     if(action==='manifest'){assert.equal(args.offset,u.manifest.length);const bytes=Buffer.from(args.data,'base64');assert.ok(bytes.length<=chunk);u.manifest=Buffer.concat([u.manifest,bytes]);output={...result(u),offset:u.manifest.length};}
@@ -53,7 +59,11 @@ test('CLI detects local content changes between hashing and upload and does not 
   const result=await f.cli(['data','upload',f.data,'--name','mine']);assert.equal(result.code,1);assert.match(result.stderr,/changed/);assert.equal(f.calls.some(c=>c.operation==='datasets.upload.commit'),false);
 });
 test('discarded uploads can restart with a persisted fresh key and normal READY data cannot be discarded',async t=>{
-  const f=await fixture(t);await writeFile(join(f.data,'data.bin'),'payload');f.failChunk();const args=['data','upload',f.data,'--name','mine'];await f.cli(args);
+  const f=await fixture(t);await writeFile(join(f.data,'data.bin'),'payload');
+  // This compatibility case explicitly starts with the original legacy key;
+  // admitted uploads never rotate their server-issued UUID after discard.
+  const scan=await scanLocalDataset(f.data,()=>{}),key=snapshotKey(['demo-user-1','gpu-1','mine',scan.manifestSha256]),saved=JSON.parse(await readFile(f.session,'utf8'));saved.datasetUploadKeys={[key]:key};await writeFile(f.session,JSON.stringify(saved),{mode:0o600});
+  f.failChunk();const args=['data','upload',f.data,'--name','mine'];await f.cli(args);
   const old=[...f.uploads.values()][0];assert.equal((await f.cli(['data','upload-discard',old.id])).result.state,'DISCARDED');
   const restarted=await f.cli(args);assert.equal(restarted.code,0,restarted.stderr);assert.equal(f.uploads.size,2);const cache=JSON.parse(await readFile(f.session,'utf8'));assert.equal(Object.keys(cache.datasetUploadKeys).length,1);
   const repeated=await f.cli(args);assert.equal(repeated.code,0,repeated.stderr);assert.equal(f.uploads.size,2);
@@ -63,5 +73,5 @@ test('CLI reseals a complete retained manifest after backend reports that recons
   const f=await fixture(t);await writeFile(join(f.data,'data.bin'),'payload');const args=['data','upload',f.data,'--name','mine'];assert.equal((await f.cli(args)).code,0);
   const u=[...f.uploads.values()][0];u.state='FAILED';u.resumeState='RECEIVING_MANIFEST';u.files.clear();const before=f.calls.length;
   const result=await f.cli(args);assert.equal(result.code,0,result.stderr);assert.equal(result.result.state,'READY');const actions=f.calls.slice(before).filter(c=>c.operation!=='state').map(c=>c.operation.split('.').at(-1));
-  assert.deepEqual(actions,['begin','seal','status','chunk','commit']);assert.equal(f.uploads.size,1);
+  assert.deepEqual(actions,['status','begin','seal','status','chunk','commit']);assert.equal(f.uploads.size,1);
 });

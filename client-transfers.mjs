@@ -11,7 +11,7 @@ export function transferText(row){const result=row.result||{},bytes=result.bytes
 export async function uploadTransfer(call,{machine,name,userId,directory,progress=()=>{},key,via='auto'}){
   const scan=await scanLocalDataset(directory,progress);let handle;
   const adapter=transferUploadCall(async(op,args)=>(await call(op,args)).result,row=>{handle=row;progress('HANDLE',{transferId:row.id});});
-  try{return {...await uploadDatasetSnapshot(async(op,args)=>({result:await adapter(op,args)}),{machine,name,userId,scan,progress,via,keyStore:{get:()=>key,set:async()=>fail('Canceled upload cannot be silently replaced')}}),transferId:handle.id};}
+  try{return {...await uploadDatasetSnapshot(async(op,args)=>({result:await adapter(op,args)}),{machine,name,userId,scan,progress,via,legacyTransfer:true,keyStore:{get:()=>key,set:async()=>fail('Canceled upload cannot be silently replaced')}}),transferId:handle.id};}
   catch(error){throw Error(error.message+(handle?'\n传输：'+handle.id+'；gpuctl transfer status '+handle.id:''));}
 }
 async function exists(path){try{return await lstat(path);}catch(e){if(e.code==='ENOENT')return null;throw e;}}

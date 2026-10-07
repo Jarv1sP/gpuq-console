@@ -52,7 +52,7 @@ test('real local snapshot uses negotiated file blocks and resumes an unaligned o
         sizes.push(args.bytes.length);offset+=args.bytes.length;return {offset,complete:offset===content.length};
       }};
     };
-    const ready=await uploadDatasetSnapshot(call,{machine:'node',name:'sample',userId:'u',scan,keyStore:{get(){},set(){}},progress(){},directFactory});
+    const ready=await uploadDatasetSnapshot(call,{machine:'node',name:'sample',userId:'u',scan,keyStore:{get:()=>id,set(){}},progress(){},directFactory});
     assert.equal(ready.route.kind,'campus-direct');assert.equal(offset,content.length);
     assert.equal(sizes[0],DATA_CHUNK);assert.equal(reads[0],DATA_CHUNK);assert.ok(reads.slice(1).every(n=>n===(cap??DATA_CHUNK)));
     assert.equal(sizes.length,cap?2:17);assert.equal(calls.some(c=>'bytes' in c.args||'data' in c.args),false);
