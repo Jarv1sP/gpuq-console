@@ -152,7 +152,7 @@ export function adaptStorageOverview(raw){
     return !unidentified&&values.length&&values.every(value=>value!==null)&&Number.isSafeInteger(total)?total:null;
   };
   const totalBytes=sum('totalBytes'),usedBytes=sum('usedBytes'),availableBytes=sum('availableBytes'),contentBytes=sum('contentBytes'),reserveBytes=sum('reserveBytes');
-  const known=totalBytes!==null&&totalBytes>0&&usedBytes!==null&&usedBytes<=totalBytes&&availableBytes!==null&&usedBytes+availableBytes<=totalBytes&&contentBytes!==null&&contentBytes<=usedBytes;
+  const known=totalBytes!==null&&totalBytes>0&&usedBytes!==null&&usedBytes<=totalBytes&&availableBytes!==null&&usedBytes+availableBytes<=totalBytes&&contentBytes!==null;
   const caches=raw.caches.filter(row=>identifier.test(row?.machine||'')).map(row=>({machine:row.machine,state:text(row.state),volume:volume(row.volume),
     readyContentBytes:number(row.readyContentBytes),readyVersionCount:number(row.readyVersionCount),budgetBytes:number(row.budgetBytes),reserveBytes:number(row.reserveBytes),usageComplete:row.usageComplete===true,
     shared:!!text(row.volume?.id)&&volumes.has(JSON.stringify([row.machine,row.volume.id]))}));
@@ -162,6 +162,49 @@ export function adaptStorageOverview(raw){
     caches,datasets:raw.datasets.filter(item=>identifier.test(item?.dataset||'')).map(item=>({dataset:item.dataset,displayName:text(item.displayName),
       versions:list(item.versions).filter(row=>hash.test(row?.version||'')).map(row=>({version:row.version,ownerLabel:text(row.ownerLabel),contentBytes:number(row.contentBytes),fileCount:number(row.fileCount),canUse:row.canUse===true,
         originals:list(row.originals).map(adaptOriginal),caches:list(row.caches).filter(cache=>identifier.test(cache?.machine||'')).map(cache=>({machine:cache.machine,dataset:identifier.test(cache.dataset||'')?cache.dataset:null,state:state(cache.state),canUse:cache.canUse===true,canPrepare:cache.canPrepare===true,ownerLabel:text(cache.ownerLabel)}))}))}))};
+}
+
+// Display facts from the existing, readable catalog and public capacity route.
+// This fallback never creates an overview protocol, warehouse proof or action
+// capability. A cache filesystem is not a warehouse volume or a cache budget.
+export function displayStorageCapacity(overview,model,capacities=new Map(),machines=[]){
+  const versions=list(model?.datasets).flatMap(item=>item.versions);
+  const sum=values=>{
+    if(values.some(value=>number(value)===null))return null;
+    const total=values.reduce((result,value)=>result+value,0);
+    return number(total);
+  };
+  const contentBytes=model?sum(versions.map(row=>row.bytes)):null;
+  const emptyVolume=()=>({id:null,state:'UNKNOWN',checkedAt:null,totalBytes:null,usedBytes:null,
+    availableBytes:null,reserveBytes:null,usableBytes:null,readOnly:null,guarded:false});
+  const nodes=[...new Set(list(machines).map(row=>row.id).concat(list(model?.machines).map(row=>row.machine),list(overview?.caches).map(row=>row.machine)))].filter(id=>identifier.test(id||''));
+  const caches=nodes.map(machine=>{
+    const capacity=capacities.get(machine),total=number(capacity?.filesystemBytes),available=number(capacity?.availableBytes);
+    const volume=capacity?.available===true&&total!==null&&available!==null&&available<=total?
+      {...emptyVolume(),state:'READY',totalBytes:total,usedBytes:total-available,availableBytes:available,
+        reserveBytes:number(capacity.reserveBytes),usableBytes:number(capacity.usableBytes),guarded:capacity.guarded===true}:emptyVolume();
+    const directory=list(model?.machines).find(row=>row.machine===machine)?.state==='ok';
+    const ready=versions.filter(v=>v.servers.some(row=>row.machine===machine&&row.observed&&row.state==='READY'));
+    const values=ready.map(v=>number(v.bytes)),complete=directory&&model?.capacityUsageComplete!==false&&values.every(value=>value!==null)&&
+      !versions.some(v=>v.servers.some(row=>row.machine===machine&&row.state==='UNKNOWN'));
+    const subtotal=ready.length&&values.every(value=>value===null)?null:sum(values.filter(value=>value!==null));
+    const fallback={machine,state:volume.state,volume,readyContentBytes:directory?subtotal:null,
+      readyVersionCount:directory?ready.length:null,budgetBytes:null,reserveBytes:volume.reserveBytes,
+      usageComplete:complete,shared:false};
+    const actual=overview?.caches.find(row=>row.machine===machine);
+    if(!actual)return fallback;
+    const result={...actual,volume:{...actual.volume}};
+    if(actual.readyContentBytes===null){result.readyContentBytes=fallback.readyContentBytes;result.usageComplete=fallback.usageComplete;}
+    if(actual.readyVersionCount===null)result.readyVersionCount=fallback.readyVersionCount;
+    for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])if(result.volume[field]===null)result.volume[field]=volume[field];
+    return result;
+  });
+  const warehouse=overview?{...overview.warehouse}:{volumes:[],totalBytes:null,usedBytes:null,availableBytes:null,
+    contentBytes:null,reserveBytes:null,known:false,warning:false};
+  if(warehouse.contentBytes===null)warehouse.contentBytes=contentBytes;
+  warehouse.known=warehouse.totalBytes>0&&warehouse.usedBytes!==null&&warehouse.usedBytes<=warehouse.totalBytes&&
+    warehouse.availableBytes!==null&&warehouse.usedBytes+warehouse.availableBytes<=warehouse.totalBytes&&warehouse.contentBytes!==null;
+  return {warehouse,caches,checkedAt:overview?.checkedAt??model?.checkedAt??null,partial:overview?.partial===true||model?.partial===true};
 }
 
 // Overview and legacy catalog are observations, not action permissions. The
