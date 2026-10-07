@@ -1,14 +1,15 @@
 // Real Portal/CSP, actual canonical backend projection, and browser-local API
 // replies. No production login, node operation or native metadata mutation.
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,mkdir,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,mkdir,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import net from 'node:net';
 import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {visibleGPUQStatus} from '../gpuq-status.mjs';
-import {MACHINES} from '../dist/machines.js';
+import {MACHINES as EXAMPLE_MACHINES} from '../dist/machines.js';
+const MACHINES=process.env.UI_INVENTORY?JSON.parse(await readFile(process.env.UI_INVENTORY,'utf8')):EXAMPLE_MACHINES;
 import {guardedRoute} from './browser-route-guard.mjs';
 import {inspectOperationalGeometry} from './operational-geometry.mjs';
 import {selectResource,closeResource} from './resources-workflows.mjs';
@@ -33,7 +34,7 @@ try{
     const context=await browser.newContext({viewport:{width:1440,height:900},reducedMotion:'reduce'}),page=await context.newPage(),actor=principals[role];let logged=false,mode='fresh';
     currentPage=page;currentRole=role;console.log(JSON.stringify({scene:role,step:'login'}));
     function state(){
-      const data=structuredClone(service.state(actor));data.executionEnabled=true;data.jobs=[];data.execution={priorityCapabilities:Object.fromEntries(MACHINES.map(m=>[m.id,true]))};
+      const data=structuredClone(service.state(actor));data.machines=structuredClone(MACHINES);if(process.env.UI_INVENTORY)for(const u of data.users)u.limits=Object.fromEntries(MACHINES.map(m=>[m.id,m.cards]));data.executionEnabled=true;data.jobs=[];data.execution={priorityCapabilities:Object.fromEntries(MACHINES.map(m=>[m.id,true]))};
       const checkedAt=new Date().toISOString(),hosts=MACHINES.map(m=>({id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,model:m.model,memoryTotalMiB:24576,memoryUsedMiB:index===0?1200:0,utilization:10,processesAvailable:true,processes:index===0&&m.id===MACHINES[0].id?[{pid:42,memoryUsedMiB:1200,scheduling:{jobId:nativeId,priority:2}}]:[]})),gpuq:{connected:true,jobs:m.id===MACHINES[0].id?[{id:nativeId,name:'legacy-wrapper',owner:nativeOwner,state:'RUNNING',priority:2,gpu_count:1,assigned_gpu_indices:[0],display_metadata:{name,description,submitter:{name:'不可推断的平台账号',username:'admin'}}}]:[]}}));
       if(mode==='duplicate')hosts[0].gpuq.jobs.push(structuredClone(hosts[0].gpuq.jobs[0]));
       if(mode==='disconnected')hosts[0].gpuq.connected=false;
@@ -76,6 +77,7 @@ try{
         assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
         const geometry=await inspectOperationalGeometry(page,{roots:[room==='resources'?(width<760?'#resource-sheet':'#page-resources'):'#page-admin'],controls:'button,input,select,summary',largeTargets:'.resource-portrait .resource-select,.resource-tower',nativeHelpRows:['.resource-hardware-caption>span']});
         assert.deepEqual(geometry.failures,[],JSON.stringify({role,room,width,geometry}));checks.push({role,room,width,geometry});
+        if(width>=760)await root.locator('.resource-detail').scrollIntoViewIfNeeded();
         console.log(JSON.stringify({scene:role,room,width,status:'PASS'}));
         await page.screenshot({path:join(output,role+'-'+room.replace('/','-')+'-'+width+'.png'),animations:'disabled'});
         if(room==='resources')await closeResource(page);
