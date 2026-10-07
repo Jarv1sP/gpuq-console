@@ -83,12 +83,17 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(templates.get(root)===value&&(root.hasChildNodes()||value===''))return;
   const preview=root.querySelector('#warehouse-files-preview');
   const keepPreview=preview&&filesPreviewContext===JSON.stringify([account(),selected,selectedVersion])&&overview?.filePreviewAvailable===true;
+  const training=root.querySelector(':scope>.v3-train');
   const scroll=root.querySelector('.v3-detail-scroll'),position=scroll?.scrollTop||0;
   const folds=[...root.querySelectorAll('details[open]')].map(node=>node.id||node.className);
   const active=root.contains(document.activeElement)?document.activeElement:null;
   const focus=active?.id?'#'+CSS.escape(active.id):active?.hasAttribute('data-v3-version')?'[data-v3-version]':active?.hasAttribute('data-v4-warehouse')?'[data-v4-warehouse="'+CSS.escape(active.dataset.v4Warehouse)+'"]':active?.hasAttribute('data-v4-clear')?'[data-v4-clear="'+CSS.escape(active.dataset.v4Clear)+'"]':active?.hasAttribute('data-v3-filter')?'[data-v3-filter="'+CSS.escape(active.dataset.v3Filter)+'"]':active?.hasAttribute('data-v3-select')?'[data-v3-select="'+CSS.escape(active.dataset.v3Select)+'"]':active?.hasAttribute('data-use-dataset')?'[data-use-dataset="'+CSS.escape(active.dataset.useDataset)+'"]':null;
   templates.set(root,value);root.innerHTML=value;
   if(keepPreview)root.querySelector('#warehouse-files-preview')?.replaceWith(preview);
+  // Cache/capacity replies may update the scrolling area during a resize.
+  // Keep the unchanged fixed-version action and its keyboard focus mounted.
+  const nextTraining=root.querySelector(':scope>.v3-train');
+  if(training&&nextTraining&&training.outerHTML===nextTraining.outerHTML)nextTraining.replaceWith(training);
   for(const node of root.querySelectorAll('[data-v3-percent]')){const percent=Number(node.dataset.v3Percent);if(Number.isFinite(percent)&&percent>=0&&percent<=100)node.style.width=percent+'%';}
   applyCapacityGeometry(root);
   for(const fold of root.querySelectorAll('details'))if(folds.includes(fold.id||fold.className))fold.open=true;
