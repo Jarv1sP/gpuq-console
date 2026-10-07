@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const guide = readFileSync(new URL('../docs/USER_GUIDE.md', import.meta.url), 'utf8');
+const datasetManual = readFileSync(new URL('../docs/DATASETS.md', import.meta.url), 'utf8');
 const chapters = [
   ['首次使用', 'start'],
   ['项目开发', 'development'],
@@ -27,6 +28,44 @@ test('guide explains authorization labels and keeps personal model inputs separa
   assert.match(guide,/不登记为数据集/);assert.match(guide,/不要覆盖输入权重/);
   assert.match(guide,/不用每次从电脑重新上传/);assert.match(guide,/服务器内部复制快照/);
   assert.match(guide,/新训练产生的 checkpoint 和其他输出仍写每个任务独立的 `\/outputs`/);
+});
+
+test('data organization guidance favors reusable collections without changing immutable identity', () => {
+  const section = guide.split('### 数据整理约定\n')[1]?.split('\n### ')[0]?.split('网页只有一个')[0];
+  assert.ok(section, 'The data chapter contains a concise organization section');
+  assert.equal((section.match(/^- /gm) || []).length, 3);
+  assert.match(section, /完整、可复用的集合/);
+  assert.match(section, /同一集合更新时保留名称，用新的内容版本区分/);
+  assert.match(section, /显示名称应说明内容和用途/);
+  assert.match(section, /不要只用纯数字、随机字符/);
+  assert.match(section, /不要故意登记没有独立复用用途的零散临时小数据集/);
+  assert.match(section, /主体或分片尽量合并，训练程序按需选取子集/);
+  assert.match(section, /预训练权重、tokenizer 和模型配置放个人项目/);
+  for (const path of ['weights/', 'models/', 'tokenizers/', '/outputs']) assert.ok(section.includes('`' + path + '`'));
+  assert.match(section, /不登记为数据集/);
+  assert.match(section, /内部数据集 ID 或完整 64 位版本哈希/);
+  assert.match(section, /内部 ID 和已发布版本保持不可变/);
+  assert.match(section, /个人显示名，不做全局重命名/);
+  assert.match(guide, /gpuctl data label DATASET_ID --display-name/);
+  assert.match(guide, /训练的 `--data` 仍使用原 `DATASET_ID@VERSION`/);
+});
+
+test('dataset reference repeats organization rules and preserves existing name and permission contracts', () => {
+  const section = datasetManual.split('## 数据整理约定\n')[1]?.split('\n## ')[0];
+  assert.ok(section, 'The dataset reference contains the same organization rules');
+  assert.equal((section.match(/^- /gm) || []).length, 3);
+  assert.match(section, /完整、可复用的集合/);
+  assert.match(section, /同一集合更新时保留名称，用新的内容版本区分/);
+  assert.match(section, /显示名称说明内容和用途，不只用纯数字、随机字符/);
+  assert.match(section, /不要故意登记没有独立复用用途的零散临时小数据集/);
+  assert.match(section, /预训练权重、tokenizer 和模型配置放个人项目/);
+  assert.match(section, /新训练产物写 `\/outputs`，不登记为数据集/);
+  assert.match(section, /不改变上传名称的接口规则/);
+  assert.match(section, /内部数据集 ID 和完整 64 位版本哈希保持不可变/);
+  assert.match(section, /不做全局重命名，也不改变读取授权/);
+  assert.match(section, /训练继续使用原始 `NAME@VERSION`/);
+  assert.match(datasetManual, /名称使用 1–40 位字母、数字、下划线或连字符/);
+  assert.match(datasetManual, /数据集与来源编号使用 1–64 位 ASCII 字母、数字、下划线或连字符/);
 });
 
 test('user guide has the seven stable chapters used by the website', () => {
