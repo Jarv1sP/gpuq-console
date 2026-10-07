@@ -72,6 +72,18 @@ test('revision zero with no personal label is valid, fabricated or cloned snapsh
   await assert.rejects(f.client.set({...target,revision:0},'猜测版本'),{code:'LABEL_READ_REQUIRED'});
   const result=await f.client.set(label,'首个名称');assert.equal(result.status,'SAVED');assert.equal(f.calls[1].args.revision,0);
 });
+test('generated default names accept the exact new and legacy replies but never arbitrary names',async()=>{
+  const dataset='u-0123456789abcdef-ZJU-MoCap';
+  for(const name of ['ZJU-MoCap',dataset]){
+    const f=fixture(()=>response({dataset,name,displayName:null,revision:0}));
+    const label=await f.client.get({machine:target.machine,dataset});
+    assert.equal(label.name,'ZJU-MoCap');assert.equal(label.dataset,dataset);assert.equal(label.revision,0);
+  }
+  const wrong=fixture(()=>response({dataset,name:'Another user name',displayName:null,revision:0}));
+  await assert.rejects(wrong.client.get({machine:target.machine,dataset}),{code:'LABEL_UNCONFIRMED'});
+  const personal=fixture(()=>response({dataset,name:dataset,displayName:dataset,revision:1}));
+  assert.equal((await personal.client.get({machine:target.machine,dataset})).name,dataset,'Explicit personal names are not decoded');
+});
 
 test('account change during GET drops the reply; switching back with a new generation cannot reuse old snapshots',async()=>{
   const wait=deferred(),f=fixture(()=>wait.promise),pending=f.client.get(target);

@@ -1,5 +1,6 @@
 // No DOM, persistence, new endpoint, automatic rename or guessed revision.
 // identity() supplies {userId, role, authGeneration} from the current store.
+import {defaultDatasetDisplayName} from './dataset-display-name.js';
 const id=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const fail=(message,code='LABEL_UNCONFIRMED')=>Object.assign(Error(message),{code});
 export function normalizeDatasetDisplayName(value){
@@ -37,8 +38,12 @@ export function datasetLabelClient({call,identity}){
       value.scope!=='personal'||value.ownerId!==owner||!Number.isSafeInteger(value.revision)||value.revision<0||
       value.revision>=Number.MAX_SAFE_INTEGER||!(value.displayName===null||typeof value.displayName==='string'))
       throw fail('显示名返回身份或版本未确认，请重新读取。');
-    const name=value.displayName===null?value.dataset:normalizeDatasetDisplayName(value.displayName);
-    if(name!==value.name||value.displayName!==null&&name!==value.displayName)throw fail('显示名返回内容未确认，请重新读取。');
+    const name=value.displayName===null?defaultDatasetDisplayName(value.dataset):normalizeDatasetDisplayName(value.displayName);
+    // Older portals returned the raw ID for an unset label. Accept exactly
+    // that old default, not an arbitrary name or another account's label.
+    const legacyDefault=value.displayName===null&&value.name===value.dataset;
+    if(name!==value.name&&!legacyDefault||
+      value.displayName!==null&&name!==value.displayName)throw fail('显示名返回内容未确认，请重新读取。');
     return Object.freeze({machine:args.machine,dataset:value.dataset,ownerId:owner,scope:'personal',
       displayName:value.displayName,name,revision:value.revision});
   }
