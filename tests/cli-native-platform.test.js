@@ -68,7 +68,7 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
       else if (operation === 'files.get') {
         const data = codeFiles.get(args.path);
         assert.ok(data, 'Download only the fake uploaded code');
-        result = { data: data.subarray(args.offset).toString('base64'), eof: true };
+        result = { path:args.path,size:data.length,offset:args.offset,data: data.subarray(args.offset).toString('base64'), eof: true };
       } else if (operation === 'datasets.upload.begin') result = { uploadId: 'offline-upload', state: 'RECEIVING_MANIFEST', manifestOffset: 0 };
       else if (operation === 'datasets.upload.manifest') {
         assert.equal(args.offset, manifestBytes.length);
