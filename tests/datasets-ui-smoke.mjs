@@ -393,3 +393,4 @@ await import('./dataset-capacity-ui-smoke.mjs');
 // Strict new cache capability and receipt integration in the actual warehouse.
 await import('./dataset-warehouse-cache-ui-smoke.mjs');
 await import('./dataset-cache-operation-ui-smoke.mjs');
+await import('./dataset-files-preview-ui-smoke.mjs');
