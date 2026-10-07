@@ -8,7 +8,7 @@ import {uploadRouteHTML} from '../dist/datasets-ui.js';
 test('routes require an explicit known transport, never infer a campus path',()=>{
   for(const value of [undefined,null,{},'10.11.1.2',{url:'https://192.168.1.2'},'copy'])assert.equal(routePresentation(value).kind,'unknown');
   assert.equal(routePresentation({kind:'campus-direct'}).label,'校内直传');
-  assert.equal(routePresentation('vps-relay').label,'VPS 中转');
+  assert.equal(routePresentation('vps-relay').label,'平台中转');
   assert.equal(routePresentation({kind:'cloud-pull'}).label,'服务器直下');
   assert.equal(routePresentation('node-lan').label,'实验室内网');
   assert.equal(routePresentation('tail-upload').label,'Tail 备用上传');
@@ -33,7 +33,7 @@ test('transfer card shows real route metadata and never invents zero or progress
   assert.match(known,/实验室内网/);assert.match(known,/<progress max="2048" value="1024"/);assert.match(known,/传输中/);
   assert.doesNotMatch(transferCard({...row,result:{bytes:3000,totalBytes:2048}}),/<progress/);
   assert.match(transferCard({...row,lastConfirmedRoute:'campus-direct'}),/最近确认 · 校内直传/);
-  assert.match(transferCard({...row,lastConfirmedRoute:'vps-relay',route:'campus-direct'}),/最近确认 · VPS 中转/);
+  assert.match(transferCard({...row,lastConfirmedRoute:'vps-relay',route:'campus-direct'}),/最近确认 · 平台中转/);
 });
 test('transfer cards escape identifiers, status and errors and preserve resume affordance',()=>{
   const html=transferCard({id:'" onclick="bad',name:'<script>',machine:'x',kind:'copy',state:'FAILED',error:'<unsafe>'});

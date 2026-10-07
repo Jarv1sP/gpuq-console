@@ -227,6 +227,11 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   dialog.querySelector('#dataset-upload-start').textContent='开始上传';
   const body=document.createElement('div');body.className='v3-upload-opening';body.innerHTML='<div class="v3-drop" id="v3-drop"><div><span class="v3-tray" aria-hidden="true"><i></i></span><h3>拖入文件夹或文件</h3><div class="file-actions"><button class="button primary" type="button" data-v3-folder>选择文件夹</button><button class="button" type="button" data-v3-files>选择文件</button></div></div></div><div class="v3-other-sources"><button class="button v3-outline" type="button" data-v3-source="link">从链接下载</button><button class="button v3-outline" type="button" data-v3-source="aliyun">阿里云盘导入</button><button class="button v3-outline" type="button" data-v3-source="workspace">在服务器上整理</button></div><input id="v3-file-picker" type="file" multiple hidden>';
   dialog.querySelector('.dataset-sheet-context').before(body);
+  // Public rooms keep the same entries for every role. Experimental cloud
+  // components remain in code and cloud administration stays in #admin.
+  body.querySelector('[data-v3-source="aliyun"]').hidden=true;
+  const cloudOption=section.querySelector('[name=cloud-source] option[value="aliyun"]');if(cloudOption){cloudOption.hidden=true;cloudOption.disabled=true;}
+  const cloudCopies=section.querySelector('#cloud-files');if(cloudCopies)cloudCopies.hidden=true;
   const touch=matchMedia('(pointer:coarse),(max-width:759px)').matches;
   if(touch)body.querySelector('h3').textContent='选择文件';
   const ios=/iPad|iPhone|iPod/.test(navigator.userAgent)||/Macintosh/.test(navigator.userAgent)&&navigator.maxTouchPoints>1;

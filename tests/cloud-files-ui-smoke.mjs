@@ -85,7 +85,15 @@ try{
     await page.locator('#datasets-refresh').click();await page.locator('[data-v3-select]').first().waitFor();
     await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
     assert.deepEqual(await page.locator('.v3-server-chip:not(.v3-all)').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Filter)),machines.map(m=>m.id));assert.equal(await page.locator('.dataset-matrix').count(),0);
-    const openCloud=async()=>{await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();if(!await page.locator('#cloud-files').evaluate(el=>el.open))await page.locator('#cloud-files > summary').click();};
+    const openCloud=async()=>{
+      await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();
+      assert.equal(await page.locator('#cloud-files').isHidden(),true,'Public rooms do not advertise the experimental cloud entry');
+      // Keep every existing cloud-operation assertion in a deliberate component
+      // harness. This exposes retained code only inside the synthetic test;
+      // it does not restore a public room entry or change node permissions.
+      await page.locator('#cloud-files').evaluate(el=>{el.hidden=false;});
+      if(!await page.locator('#cloud-files').evaluate(el=>el.open))await page.locator('#cloud-files > summary').click();
+    };
     const idle=()=>page.waitForFunction(()=>!document.querySelector('#cloud-files-refresh').disabled);
     const refresh=async()=>{await page.locator('#cloud-files-refresh').click();await idle();};
     const initialRead=page.waitForRequest(request=>request.url()===origin+'/api/call'&&request.postDataJSON().operation==='cloud.files.list');

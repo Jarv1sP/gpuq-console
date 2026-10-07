@@ -318,7 +318,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.mc-attention-item` / `.mc-attention-actions` | [attention-state.js](../dist/attention-state.js)、[control-ui.js](../dist/control-ui.js)、[shell.css](../dist/shell.css) | 原对象失败/部分成功/未确认，不靠已读清除未知 | 回具体对象，只有已确认失败可按规则确认 |
 | `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
-| `#workspace-upload` / `#workspace-result` | [execution-ui.js](../dist/execution-ui.js) | 项目代码上传默认仅显示上传；节点确认恢复协议后，按原编号和确认偏移续传 | 旧节点沿用普通上传，失败说明不支持续传；未知能力不降级写入；回执丢失先查原编号；已完成不重传，待收口只发空final；冲突/旧记录/未知不另开；切换账号、项目或离开停止；旧个人工作区不重试 |
+| `#workspace-upload` / `#workspace-result` | [execution-ui.js](../dist/execution-ui.js) | 项目代码上传默认仅显示上传；节点确认恢复协议后，按原编号和确认偏移续传 | 旧节点沿用普通上传，失败说明不支持续传；未知能力不降级写入；回执丢失先查原编号；已完成不重传，待收口只发空final；冲突/旧记录/未知不另开；切换账号、项目或离开停止；旧个人工作区不重试；传输区别仅放在文件标题旁的单个ⓘ |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；开发ID按账号、服务器、项目恢复到原入口 | 刷新只读核验原ID，不自动连接或接管；未知仍保留，明确结束才移除；ROOT/数据终端不存入项目记录；writerToken仅内存 |
 | `#project-disk-quota` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 打开时查询当前账号在开发服务器的容量与文件数，独立于显卡额度 | 不传项目或他人身份；未启用和待确认不造零值，未知不保留旧读数；关闭、离开或换上下文取消请求，完整服务器名保留在title；手机展开按钮至少44px，保留原生键盘切换与焦点 |
 | `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
@@ -333,8 +333,8 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.dataset-remove-blocked` / `.dataset-remove-action-word` | [dataset-remove-ui.js](../dist/dataset-remove-ui.js)、[dataset-remove.css](../dist/dataset-remove.css) | 已证实未派发的拒绝与禁用原因 | 墨色原文，“按机器删除”不从词中间折行；只有能力确认为1时才提彻底删除；只有已知拒绝可“知道了”移除 |
 | `#dataset-add-dialog` / `.dataset-field-label` / `.dataset-directory-control` | [datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 三来源添加数据，中文选择文件夹/合计 | 标签关联，来源说明在标题右侧ⓘ；弹窗内部真实滚动 |
 | `.help-links.copy-caption` / `.dataset-storage` | [index.html](../dist/index.html)、[app.js](../dist/app.js)、[datasets-ui.js](../dist/datasets-ui.js)、[datasets.css](../dist/datasets.css) | 数据集主体及可见页尾提示均跟随真实标签 | 页尾「首次使用」在桌面和平板显示，手机断点保持整块隐藏；右侧共享SVG提示保留原说明和指南链接，与标签同中线，不单独占行 |
-| `.dataset-upload-journey` / `.dataset-route-heading` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-upload.js](../dist/dataset-upload.js)、[upload-routes.js](../dist/upload-routes.js) | 三段上传、直传/Tail备用/显式中转，不造数据库阶段 | 未确认通道明示；失败不自动换中转 |
-| `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 在服务器上整理/云端副本，不宣称电脑直接进云盘 | enabled=false说明，VERIFIED前不可取回；记录内区块、折叠后的后续区块统一使用12px间距令牌，关闭详情不保留margin/padding；详情与未确认操作编号的标题保持48px触控高度，文字居中 |
+| `.dataset-upload-journey` / `.dataset-route-heading` | [dataset-flow.js](../dist/dataset-flow.js)、[dataset-upload.js](../dist/dataset-upload.js)、[upload-routes.js](../dist/upload-routes.js) | 三段上传、直传/Tail备用/显式中转，不造数据库阶段；云盘试验入口仅保留后台与组件代码 | 未确认通道明示；失败不自动换中转 |
+| `.data-workspace-browser` / `#cloud-files-form` / `.cloud-file-details` | [data-workspace.js](../dist/data-workspace.js)、[cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 在服务器上整理；公开房间隐藏云端副本入口，组件代码与后台连接保留 | enabled=false说明，VERIFIED前不可取回；记录内区块、折叠后的后续区块统一使用12px间距令牌，关闭详情不保留margin/padding；详情与未确认操作编号的标题保持48px触控高度，文字居中 |
 | 个人文件下载 / 空登记 | [data-workspace.js](../dist/data-workspace.js)、[datasets.css](../dist/datasets.css) | 普通文件可下载；展开空登记后读取 includeEmpty，和文件列表分开显示 | workspace.get 按固定个人路径、精确偏移读取；可用时直接流式保存，否则最多缓存 100 MiB；账号/服务器切换停止旧读写；空登记不推断文件丢失，不提供删除操作 |
 | 后台归档纳管 | [archive-enrollment-ui.js](../dist/archive-enrollment-ui.js)、[archive-enrollment.css](../dist/archive-enrollment.css) | 明确选择所属账号、物理数据集完整版本；缺原件时复制必须显式勾选 | 仅管理员；原请求 UUID 和全部字段按账号持久化，丢回执只提供明确的同请求重试，不自动重发或伪装只读查询；受理阶段不冒认备份完成 |
 | `.dataset-version-caption` / `.dataset-disclosure-label` | [cloud-files-ui.js](../dist/cloud-files-ui.js)、[datasets.css](../dist/datasets.css) | 数据集版本与云端详情共用折叠标记 | summary使用flex中线；统一▸/▾，切换不旋转，减少动态时保持静止 |
@@ -715,3 +715,5 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 ## 跨房间的需处理计数
 
 总控条、手机胶囊和总控面板共享同账号的已确认记录及已读规则。登录后总控读取轻量本人 `transfers.list`（每页50条，有界分页），不用先进入数据房间；不会读 catalog、节点或写数据。部分结果合并已知记录，只有完整目录可移除缺失项；失败不清空原提醒，部分列表不冒充完整传输总数。换账号取消旧查询并清空本账号以外的缓存，较晚查询不覆盖新的页面记录。UNKNOWN/PARTIAL/UNCONFIRMED不随时间或已读清除，近期失败仍按24小时和本地已读计算，历史失败保留。
+
+成员的 SM 比例输入只在当前节点明确提供 `console-hami-sm-v1` 及配套放置、共享、HAMi 能力时出现；未知或过期时隐藏，不据此降级已有草稿或放开提交。普通文件和个人数据空间经平台中转，数据集直传只说明本次实际确认的路线，传输区别收在一个ⓘ中。
