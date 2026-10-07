@@ -2,6 +2,8 @@
 
 面向前端开发者，汇总现有终端、数据上传和云文件接口。这里定义的是兼容契约，不表示每台节点已启用所有能力；部署代码、入口可达和业务验收是三件不同的事。详细说明见 [独立终端](TERMINAL_SESSIONS.md)、[校内直传](DIRECT_UPLOAD.md) 和 [私人云文件](CLOUD_FILES.md)。
 
+目录上传还可启用独立的[机械仓库入库契约](DATASET_INGRESS.md)：`machine` 保留训练选择，placement-aware 回包明确给出 `requestedMachine/storageMachine/storageTier`。直传探测按真实 `storageMachine` 校验；会话 routes 请求须带原 `uploadId`，不要按当前策略重新选仓库。此能力默认关闭，工作区文件与旧导入不随它迁移。
+
 ## 通用调用
 
 使用已有的已认证 `POST /api/call`：

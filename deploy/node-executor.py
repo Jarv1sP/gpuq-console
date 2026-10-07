@@ -1519,6 +1519,10 @@ def process(operation,args):
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
         return module.SnapshotSync(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())).process(operation,args)
     if operation.startswith('projects.copy.'):return project_copies().process(operation,args)
+    if operation=='storage.upload.locate':
+        spec=importlib.util.spec_from_file_location('gpuq_dataset_ingress',HERE/'dataset-ingress-node.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.locate(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation.startswith('projects.'):return projects().process(operation,args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)

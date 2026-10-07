@@ -62,6 +62,21 @@ async function fixture({size=CHUNK_BYTES+13,directAvailable=true,chunkBytes=CHUN
   const options={call,scan,userId:'member',machine:'node-a',name:'mine',pollMs:0,fetch:send,now:()=>clock,onRoute:route=>routes.push(route),onProgress:value=>progress.push(value),keyStore:{getHandle:key=>handles.get(key),setHandle:(key,value)=>handles.set(key,value)}};
   return {options,portal,raw,routes,probes,progress,content,stored,transport,handles,advance:()=>{clock+=295;},loseChunk:()=>{loseChunk=true;},revoke:()=>{revoke=true;},failDirect:()=>{failDirect=true;},loseCommit:()=>{loseCommit=true;},mismatch:()=>{mismatch=true;}};
 }
+test('HDD-first browser keeps training selector while validating the physical warehouse node',async()=>{
+  const f=await fixture({fixedRoutes:true}),original=f.options.call,calls=[];
+  const placement={placementProtocol:1,requestedMachine:'training-node',storageMachine:'node-a',storageTier:'hdd',legacyPlacement:false};
+  f.options.machine='training-node';
+  f.options.call=async(operation,args)=>{
+    assert.equal(args.machine,'training-node');calls.push({operation,args});
+    const request={...args,machine:'node-a'};if(operation==='datasets.upload.routes')delete request.uploadId;
+    return {...await original(operation,request),...placement};
+  };
+  const result=await uploadBrowserDataset(f.options);
+  assert.equal(result.state,'READY');assert.equal(result.storageMachine,'node-a');assert.equal(result.requestedMachine,'training-node');
+  assert.deepEqual(f.routes,[{kind:'tail-upload',machine:'node-a',requestedMachine:'training-node',storageTier:'hdd'}]);
+  assert(calls.find(call=>call.operation==='datasets.upload.routes').args.uploadId);
+});
+
 test('browser chooses a fixed alternate anonymously before ticketing and retains it on renewal',async()=>{
   const f=await fixture({fixedRoutes:true});f.revoke();
   const result=await uploadBrowserDataset(f.options);

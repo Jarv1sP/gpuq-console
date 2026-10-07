@@ -1,5 +1,5 @@
 // Incremental SHA256 and the bounded HTTPS dataset upload protocol. No remote dependencies.
-import {selectUploadRoute,assertUploadRouteGrant} from './upload-routes.js';
+import {selectUploadRoute,assertUploadRouteGrant,uploadStorageMachine} from './upload-routes.js';
 export const CHUNK_BYTES=1024*1024,MAX_MANIFEST_BYTES=64*1024*1024,MAX_ENTRIES=500000,LARGE_RELAY_BYTES=256*1024**2;
 export const MAX_DIRECT_CHUNK_BYTES=16*CHUNK_BYTES;
 export function adaptiveUploadChunk(current,elapsedMs,maximum){
@@ -162,12 +162,13 @@ export async function uploadBrowserDataset({call,userId,machine,name,scan,signal
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw Error('名称需为 1–40 位字母、数字、下划线或连字符。');
   if(!['auto','direct','relay'].includes(via))throw Error('请选择有效的上传通道。');
   if(via==='relay'&&scan.totalBytes>LARGE_RELAY_BYTES&&allowRelay!==true)throw uploadError('超过 256 MiB，请先确认经门户中转。','RELAY_CONSENT',{canRelay:true});
-  let uploadId,state,direct,route,transport;
-  const control=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&!['begin','routes'].includes(action)?{uploadId}:{}),...args});alive(signal);return result;};
-  const report=(current,extra={})=>{if(!current||typeof current.state!=='string')throw uploadError('上传状态未确认。');state=current;onProgress({...current,...(current.state==='READY'?{state:'PUBLISHING',confirmationPending:true}:{}),...extra});};
+  let uploadId,state,direct,route,transport,storageMachine;
+  const control=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'&&(action!=='routes'||state?.placementProtocol===1)?{uploadId}:{}),...args});alive(signal);return result;};
+  const report=(current,extra={})=>{if(!current||typeof current.state!=='string')throw uploadError('上传状态未确认。');storageMachine=uploadStorageMachine(current,machine,storageMachine);state=current;onProgress({...current,...(current.state==='READY'?{state:'PUBLISHING',confirmationPending:true}:{}),...extra});};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){alive(signal);await pause(pollMs);report(await control('status'));}if(state.state==='FAILED')throw uploadError(state.error||'服务端校验失败。','FAILED');if(state.state==='DISCARDED')throw uploadError('这次上传已取消。','DISCARDED');};
   const ready=async()=>{
     const last=await control('status');alive(signal);
+    uploadStorageMachine(last,machine,storageMachine);
     const result=confirmedDatasetUpload(last,{uploadId,totalBytes:scan.totalBytes,entries:scan.entries});
     state=result;onProgress({...result,...(route?{route}: {})});return {...result,...(route?{route}: {})};
   };
@@ -204,9 +205,9 @@ export async function uploadBrowserDataset({call,userId,machine,name,scan,signal
         throw uploadError('已配置的上传服务不可用，未自动改走 VPS。','DIRECT');
       if(via!=='relay'&&transport?.directAvailable===true){
         if(transport.protocol!==PROTOCOL)throw uploadError('直传协议未确认。','DIRECT');
-        const selected=transport.routeSelection===true?await selectUploadRoute(await control('routes'),machine,candidate=>probeBrowserUploadRoute(candidate,{fetch,signal}),{signal}):undefined;
+        const selected=transport.routeSelection===true?await selectUploadRoute(await control('routes'),storageMachine,candidate=>probeBrowserUploadRoute(candidate,{fetch,signal}),{signal}):undefined;
         const grant=await control('direct-ticket',selected?{routeId:selected.id}:{});
-        if(grant?.available===true){direct=await browserDatasetTransport({control,uploadId,signal,grant,route:selected,fetch,now});route={kind:selected?.kind||'campus-direct',machine};}
+        if(grant?.available===true){direct=await browserDatasetTransport({control,uploadId,signal,grant,route:selected,fetch,now});route={kind:selected?.kind||'campus-direct',machine:storageMachine,...(state.placementProtocol===1?{requestedMachine:machine,storageTier:state.storageTier}:{})};}
         else throw uploadError('直传授权未确认，未自动改走 VPS。','DIRECT');
       }else if(via!=='relay'&&transport&&transport.directAvailable!==false)throw uploadError('上传通道未确认。','DIRECT');
       if(!direct){
@@ -214,7 +215,7 @@ export async function uploadBrowserDataset({call,userId,machine,name,scan,signal
         const limit=Number.isSafeInteger(transport?.relayLimitBytes)&&transport.relayLimitBytes>0?Math.min(LARGE_RELAY_BYTES,transport.relayLimitBytes):LARGE_RELAY_BYTES;
         if(scan.totalBytes>limit&&allowRelay!==true&&via!=='relay')throw uploadError('没有直传入口；超过 256 MiB，请明确同意经门户中转。','RELAY_CONSENT',{canRelay:true});
         if(transport&&scan.totalBytes>limit&&transport.relayAllowed!==true)throw uploadError('门户尚未确认大文件中转授权。','RELAY_CONSENT',{canRelay:true});
-        route={kind:'vps-relay',machine};
+        route={kind:'vps-relay',machine:storageMachine,...(state.placementProtocol===1?{requestedMachine:machine,storageTier:state.storageTier}:{})};
       }
       alive(signal);onRoute(route);
       if(direct&&(state.state==='RECEIVING_MANIFEST'||state.state==='FAILED'&&state.resumeState==='RECEIVING_MANIFEST'))report({...state,...await direct.request('status')});

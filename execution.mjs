@@ -282,12 +282,12 @@ export async function executionCall(service,principal,operation,args){
   }
   if(operation.startsWith('datasets.upload.')){
     authorizedMachine(args.machine);
-    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries','allowRelay'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId'],routes:[],'direct-ticket':['uploadId','routeId'],'direct-revoke':['uploadId']};
+    const fields={begin:['name','key','manifestBytes','manifestSha256','totalBytes','entries','allowRelay'],manifest:['uploadId','offset','data'],seal:['uploadId'],status:['uploadId','path'],chunk:['uploadId','path','offset','data'],commit:['uploadId'],discard:['uploadId'],routes:service.datasetUploadIngress?['uploadId']:[],'direct-ticket':['uploadId','routeId'],'direct-revoke':['uploadId']};
     const action=operation.slice('datasets.upload.'.length),allowed=fields[action];
     if(!allowed||Object.keys(args).some(k=>k!=='machine'&&!allowed.includes(k)))fail('个人数据集上传参数无效。');
     const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
     const id=action==='begin'?args.key:args.uploadId;
-    if(action!=='routes'&&(typeof id!=='string'||!uuid.test(id)))fail('上传编号必须为完整 UUID。');
+    if((action!=='routes'||args.uploadId!==undefined)&&(typeof id!=='string'||!uuid.test(id)))fail('上传编号必须为完整 UUID。');
     if(args.routeId!==undefined&&(typeof args.routeId!=='string'||!/^[a-z][a-z0-9-]{0,31}$/.test(args.routeId)))fail('上传通道编号无效。');
     if(action==='begin'){
       if(args.allowRelay!==undefined&&typeof args.allowRelay!=='boolean')fail('中转确认必须是明确的布尔值。');
@@ -307,6 +307,10 @@ export async function executionCall(service,principal,operation,args){
     // Every upload is personal, including uploads made by administrators. No
     // client-provided role, source mapping or filesystem path crosses the bridge.
     if(['begin','seal','commit','discard','direct-ticket','direct-revoke'].includes(action))service.audit(principal.username,operation,machine,id);
+    if(service.datasetUploadIngress)return service.datasetUploadIngress(principal,action,args);
+    // The public routes uploadId is a Portal placement selector. Legacy node
+    // route metadata has no session field and must keep its old wire contract.
+    if(action==='routes')delete request.uploadId;
     return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
   }
   if(operation==='datasets.archive.enroll'){

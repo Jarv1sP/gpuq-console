@@ -19,11 +19,12 @@ import {installDatasetLabels,datasetLabelCall} from './dataset-labels.mjs';
 import {installProjectCatalog} from './project-catalog.mjs';
 import {installDatasetDeletion} from './dataset-deletion.mjs';
 import {installTaskDisplay,taskDisplayCall} from './task-display.mjs';
+import {installDatasetIngress} from './dataset-ingress.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
 export class PortalService extends DemoService{
-  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig,storageArchiveConfig,ociCohortMachines=[]){
+  static async open(path,bootstrapPath,statusPath,bridge,notificationConfig,storageArchiveConfig,ociCohortMachines=[],datasetIngressConfig){
     await mkdir(dirname(path),{recursive:true,mode:0o700});
     const service=new PortalService();service.production=true;service.tail=Promise.resolve();service.pending=0;
     service.terminalLanes=new Map();service.terminalPending=0;
@@ -63,6 +64,7 @@ export class PortalService extends DemoService{
     maintainTaskNotes(service);
     installTransfers(service);
     installStorageArchive(service,storageArchiveConfig);
+    installDatasetIngress(service,datasetIngressConfig);
     installDatasetDeletion(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }

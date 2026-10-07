@@ -34,6 +34,21 @@ function snapshot(files){
 }
 function options(scan,progress=[]){return {machine:'gpu-4',name:'integration',userId:'demo-user-1',scan,progress:(state,value)=>progress.push({state,value}),keyStore:{get:()=>undefined,set:async()=>{}}};}
 
+test('HDD-first client keeps training selection but pins real raw bytes to warehouse TLS node',{timeout:20000},async t=>{
+  const f=await fixture(t),scan=snapshot({'warehouse.bin':Buffer.alloc(1048576+41,29)}),calls=[];
+  const placement={placementProtocol:1,requestedMachine:'gpu-1',storageMachine:'gpu-4',storageTier:'hdd',legacyPlacement:false};
+  const call=async(operation,args)=>{
+    assert.equal(args.machine,'gpu-1','control scope remains the authorized training node');calls.push({operation,args});
+    const action=operation.slice('datasets.upload.'.length),{uploadId,...rest}=args;
+    return {result:{...await f.control(action,action==='routes'?rest:args),...placement}};
+  };
+  const result=await uploadDatasetSnapshot(call,{...options(scan),machine:'gpu-1'});
+  assert.equal(result.state,'READY');assert.equal(result.machine,'gpu-1');assert.equal(result.storageMachine,'gpu-4');
+  assert.equal(result.lastConfirmedRoute,'campus-direct');assert.equal(result.route.kind,'campus-direct');
+  assert(calls.find(call=>call.operation==='datasets.upload.routes').args.uploadId);
+  assert.equal(calls.some(call=>call.operation.endsWith('.manifest')||call.operation.endsWith('.chunk')),false);
+});
+
 test('real Node pinned client uploads raw bytes to real Python HTTPS endpoint, publishes SHA-verified version',{timeout:20000},async t=>{
   const f=await fixture(t),scan=snapshot({'训练.bin':Buffer.alloc(1048576+17,73),empty:Buffer.alloc(0)}),calls=[],progress=[];
   const call=async(operation,args)=>{const action=operation.slice('datasets.upload.'.length);calls.push(action);return {result:await f.control(action,args)};};

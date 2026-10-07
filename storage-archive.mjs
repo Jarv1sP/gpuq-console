@@ -72,9 +72,9 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     // This is an idempotency identity, never the secret authority token.
     return `${value.slice(0,8)}-${value.slice(8,12)}-5${value.slice(13,16)}-a${value.slice(17,20)}-${value.slice(20,32)}`;
   };
-  const enabledUser=(owner,machine)=>{
+  const enabledUser=(owner,machine,ref)=>{
     const user=service.store.get(owner);
-    if(!user?.enabled||!user.limits?.[machine])fail('Archive owner or ingest-machine permission changed');
+    if(!user?.enabled||(!user.limits?.[machine]&&!service.datasetIngressSourceAllowed?.(owner,machine,ref)))fail('Archive owner or ingest-machine permission changed');
     return user;
   };
   const fence=(row,snapshot)=>{
@@ -85,7 +85,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(service.closing||!policy.enabled)fail('Archive service is unavailable');
     service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:row.machine,from:policy.machine});
     if(!currentPolicy(row))fail('Archive policy changed; existing intent requires administrator review');
-    const user=enabledUser(row.owner,row.machine);
+    const user=enabledUser(row.owner,row.machine,{dataset:row.dataset,version:row.version});
     if(snapshot!==undefined&&JSON.stringify(user)!==snapshot)fail('Archive owner policy changed during operation');
     return JSON.stringify(user);
   };
@@ -114,7 +114,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
 
   function enqueueEvent(machine,event){
     if(!policy.enabled||!MACHINES.some(m=>m.id===machine)||!event||event.state!=='READY'||!UUID.test(event.id)||!USER.test(event.userId)||!isRef(event))fail('Invalid immutable archive event');
-    enabledUser(event.userId,machine);
+    enabledUser(event.userId,machine,{dataset:event.dataset,version:event.version});
     // A re-registration of the same content is a new immutable event. Keep
     // the older receipt for recovery; never silently reuse its target identity.
     const id=key(event.userId,machine,event.dataset,event.version,event.id),old=load(id);
