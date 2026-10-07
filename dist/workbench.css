@@ -14,6 +14,10 @@
 .sb .wb-telemetry-note{font:11px var(--mono);color:var(--ink-3);display:block;margin-top:8px}
 .sb .execution-workspace{margin-top:0;border:0;padding:0}.sb .wb-layout{display:grid;grid-template-columns:minmax(0,9fr) minmax(240px,3fr);gap:36px;align-items:start}
 .sb .wb-jobs,.sb .wb-rail{min-width:0}.sb #my-job-table{margin:8px 0 24px}.sb .wb-rail{position:sticky;top:136px;max-height:calc(100dvh - 230px);overflow:auto;scrollbar-width:thin}
+.sb #project-disk-quota>summary{font-size:13px;line-height:1.6;color:var(--ink-2)}.sb #disk-quota-state{font:11px var(--mono);color:var(--ink-3)}
+.sb .disk-quota-head{display:flex;align-items:center;gap:8px;margin:12px 0}.sb .disk-quota-head>.server-id{min-width:0;flex:1;font-size:11px}.sb .disk-quota-head .ui-info{margin:0}.sb .disk-quota-head .button{min-height:32px;font-size:12px}
+.sb .disk-quota-volumes{list-style:none;padding:0;margin:0;display:grid;gap:16px}.sb .disk-quota-volumes strong{display:block;font-size:12px;font-weight:400}.sb .disk-quota-volumes dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;margin:8px 0;font-size:12px}.sb .disk-quota-volumes dt{color:var(--ink-3)}.sb .disk-quota-volumes dd{margin:0;text-align:right;font:12px/1.6 var(--mono);overflow-wrap:anywhere}.sb .disk-quota-volumes progress{display:block;width:100%;height:2px;accent-color:var(--ink-2)}.sb #disk-quota-result{font-size:12px;line-height:1.7;overflow-wrap:anywhere}.sb .disk-quota-status{margin:8px 0}
+@media(max-width:759px){.sb .disk-quota-head .button{min-height:44px}.sb .disk-quota-volumes dl,.sb #disk-quota-result{font-size:13px}}
 .sb .wb-rail :is(.workspace-context,.personal-terminal,.execution-panel,.host-maintenance){background:none;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:0 0 24px;margin:0 0 24px;box-shadow:none}
 .sb .wb-rail h2,.sb .wb-rail h3{font-size:15px;font-weight:500;color:var(--ink)}.sb .wb-rail .eyebrow{font:11px var(--mono);margin-bottom:8px;color:var(--ink-3)}
 .sb .wb-rail .workspace-context-heading{align-items:flex-start;gap:8px}.sb .wb-rail .workspace-context-heading .button{font-size:11px;min-height:32px;padding:0 4px}
