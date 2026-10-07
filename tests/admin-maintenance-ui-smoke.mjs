@@ -35,7 +35,10 @@ try{
     if(operation==='host.status'){assert.equal(args.hostAdmin,true);const result=commands.get(args.id);assert(result,'status must use a saved, original command handle');return result;}
     if(operation==='host.cancel'){assert.equal(args.hostAdmin,true);const result=commands.get(args.id);assert(result);result.state='CANCELED';result.cancelRequested=true;return result;}
     if(operation==='terminal.open')return {id:args.key,mode:'new',clientId:args.clientId,writerToken:randomUUID(),attachmentUntil:new Date(Date.now()+30000).toISOString(),hostAdmin:true};
-    if(operation==='terminal.exchange')return {offset:args.offset+1,data:Buffer.from(forbidden?'FORBIDDEN: peer uid is not allowed; run native GPUQ as its service account':'').toString('base64'),exited:false};
+    if(operation==='terminal.exchange'){
+      const data=Buffer.from(forbidden&&args.offset===0?'FORBIDDEN: peer uid is not allowed; run native GPUQ as its service account':'');
+      return {offset:args.offset+data.length,data:data.toString('base64'),exited:false};
+    }
     if(operation==='terminal.detach'||operation==='terminal.close')return {closed:true};
     throw Error('Unexpected maintenance fixture operation '+operation);
   }}));
