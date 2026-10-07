@@ -160,22 +160,24 @@ try{
     const logged=await layout.context().request.post(origin+'/api/login',{headers:{Origin:origin},data:{username:'admin',password,client:'browser'}});assert.equal(logged.status(),200);
     const user={id:'layout-'+role,username:'layout-'+role,name:'排版验收',role,enabled:true,approvedAt:new Date().toISOString(),policyVersion:0,total:8,limits:Object.fromEntries(layoutMachines.map(node=>[node.id,node.cards]))},principal={userId:user.id,username:user.username,role};
     const state={machines:layoutMachines,users:[user],jobs:[],executionEnabled:true,operationalMaintenance:{version:1,revision:0,global:null,machines:{}},gpuq:{stale:false,checkedAt:new Date().toISOString(),hosts:[]}};
-    const layoutProject=ready('container-layout');let layoutRequest=null;
+    const layoutProject=ready('container-layout');let layoutRequest=null;const layoutCalls=[];
     await layout.route('**/*',guardedRoute(async route=>{
       const request=route.request(),url=new URL(request.url());if(url.origin!==origin){await route.fallback();return;}
       if(url.pathname==='/machines.js'){await route.fulfill({contentType:'text/javascript',body:'export const MACHINES='+JSON.stringify(layoutMachines)+';'});return;}
-      if(!url.pathname.startsWith('/api/')){await route.fallback();return;}const {operation,args}=request.postDataJSON();let result=null;
-      if(operation==='state'){}else if(['datasets.catalog','datasets.capacity'].includes(operation)){
-        assert.ok(layoutMachines.some(node=>node.id===args.machine),'layout catalog only reads an authorized synthetic machine');
-        result=operation==='datasets.catalog'?{machine:args.machine,machines:[{machine:args.machine,state:'ok'}],datasets:[]}:{machine:args.machine,available:false};
-      }else if(operation==='projects.list')result={environmentModes:['shared','isolated','oci'],projects:[layoutProject]};else if(operation==='projects.status')result=layoutProject;else if(operation==='projects.publish'){layoutRequest=args;layoutProject.state='UNKNOWN';layoutProject.publication={id:args.key,state:'UNKNOWN'};result=layoutProject;}else throw Error('Unexpected layout operation '+operation);
+      if(!url.pathname.startsWith('/api/')){await route.fallback();return;}const {operation,args}=request.postDataJSON();layoutCalls.push({operation,args});let result=null;
+      if(operation==='state'){}else if(operation==='projects.list')result={environmentModes:['shared','isolated','oci'],projects:[layoutProject]};else if(operation==='projects.status')result=layoutProject;else if(operation==='projects.publish'){layoutRequest=args;layoutProject.state='UNKNOWN';layoutProject.publication={id:args.key,state:'UNKNOWN'};result=layoutProject;}else throw Error('Unexpected layout operation '+operation);
       await route.fulfill({contentType:'application/json',body:JSON.stringify({result,state,principal})});
     }));
     await layout.goto(origin);await layout.locator('[name=workspace-machine]').waitFor();await layout.evaluate(()=>document.fonts.ready);
     for(const node of layoutMachines){
       await action('projects.list',()=>layout.locator('#projects-refresh').click(),layout);await idle(layout);await layout.locator('[name=workspace-machine]').selectOption(node.id);await idle(layout);
+      assert.equal(await layout.evaluate(()=>document.body.dataset.room),'work');
+      assert.equal(await layout.locator('#page-datasets').evaluate(section=>section.hidden),true);
+      assert.deepEqual(layoutCalls.filter(call=>call.operation.startsWith('datasets.')),[],'Personal projects do not read the hidden dataset room');
       const selected=await layout.locator('[name=workspace-project] option').evaluateAll((options,id)=>options.find(option=>option.dataset.project==='container-layout'&&option.dataset.machine===id)?.value,node.id);assert.ok(selected,'the exact source project is present');
       await action('projects.status',()=>layout.locator('[name=workspace-project]').selectOption(selected),layout);await idle(layout);
+      await layout.waitForFunction(id=>document.querySelector('[name=dataset-machine]')?.value===id,node.id,{timeout:10000});
+      assert.deepEqual(layoutCalls.filter(call=>call.operation.startsWith('datasets.')),[],'Selecting the actual source container still does not load the hidden dataset room');
       await layout.locator('#project-create').evaluate(element=>element.open=true);await layout.locator('[name=new-project]').fill('new-container');await layout.locator('[name=environment-choice][value=oci]').check();
       await layout.locator('#project-create').scrollIntoViewIfNeeded();await layout.screenshot({path:join(shots,`personal-${role}-${width}-${node.id}-create.png`),fullPage:true});
       assert.ok(await layout.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),role+' '+width+' '+node.id+' does not overflow');
@@ -185,7 +187,8 @@ try{
     await action('projects.publish',()=>layout.locator('#project-publish').click(),layout);await idle(layout);assert.ok(layoutRequest.key);assert.equal(await layout.locator('#project-status').textContent(),'发布结果未确认');
     await layout.locator('#project-status').scrollIntoViewIfNeeded();await layout.screenshot({path:join(shots,`personal-${role}-${width}-unknown.png`)});
     layoutProject.state='READY';layoutProject.publication={id:layoutRequest.key,state:'READY',release:oldRelease};await action('projects.status',()=>layout.locator('#publication-query').click(),layout);await idle(layout);
-    assert.deepEqual(await layout.evaluate(()=>publicationAnimations),[width===320?150:480]);assert.deepEqual(await layout.evaluate(()=>publicationCSP),[]);await layout.close();
+    assert.deepEqual(await layout.evaluate(()=>publicationAnimations),[width===320?150:480]);assert.deepEqual(await layout.evaluate(()=>publicationCSP),[]);
+    assert.deepEqual(layoutCalls.filter(call=>call.operation.startsWith('datasets.')),[],'Project creation and publication never need a dataset directory');await layout.close();
   }
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
 

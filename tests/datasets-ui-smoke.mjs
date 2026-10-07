@@ -16,7 +16,7 @@ const dir = await mkdtemp(join(tmpdir(), 'gpuq-datasets-browser-'));
 const screenshots = process.env.UI_SCREENSHOTS || '/tmp/gpuq-datasets-ui';
 const password = 'Local-Dataset-UI-Only-Password-2026!';
 const version = 'a'.repeat(64), ref = {dataset: 'sample', version};
-const calls = [], errors = [], blocked = [], httpErrors = [], authenticated = new WeakSet(), phases = new Map([['gpu-1', 'REGISTERED']]);
+const calls = [], requests = [], errors = [], blocked = [], httpErrors = [], authenticated = new WeakSet(), phases = new Map([['gpu-1', 'REGISTERED']]);
 const fixtureOwners=['builtin-admin'];
 let moreLocalVersions=false, holdLookup=false, releaseLookup=null,heldDelivery=null,heldRequest=null;
 let server, browser, service, waitingList = null, listGate = null;
@@ -75,6 +75,7 @@ try {
   const admin = await browser.newPage({viewport: {width: 1440, height: 1000}});
   const member = await browser.newPage({viewport: {width: 1440, height: 1000}});
   for (const page of [admin, member]) {
+    page.on('request',request=>{if(request.url()===origin+'/api/call')requests.push({page,...request.postDataJSON()});});
     page.on('pageerror', error => {errors.push(error.message);console.error('Dataset browser error:',error.message);});
     page.on('console', message => {if (message.type() === 'error') errors.push(message.text());});
     page.on('response', response => {
@@ -94,7 +95,18 @@ try {
     await page.locator('#login-form [type=submit]').click();
     await page.locator('#login-dialog').waitFor({state: 'hidden'});
     authenticated.add(page);
-    await page.locator('[data-nav=datasets]').click();
+    await page.locator('[data-nav=work]').click();
+    for(const machine of ['gpu-2','gpu-1']){
+      await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
+      await page.locator('[name=workspace-machine]').selectOption(machine);
+      await page.waitForFunction(machine=>document.querySelector('[name=dataset-machine]')?.value===machine&&!document.querySelector('[name=workspace-machine]').disabled,machine,{timeout:10000});
+      assert.equal(await page.evaluate(()=>document.body.dataset.room),'work');
+      assert.equal(await page.locator('#page-datasets').evaluate(section=>section.hidden),true);
+      assert.deepEqual(requests.filter(request=>request.page===page&&request.operation.startsWith('datasets.')),[],'Changing workbench context does not read a hidden dataset directory or capacity');
+    }
+    await Promise.all([page.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation==='datasets.catalog'&&response.request().postDataJSON()?.args.machine==='gpu-1'),page.locator('[data-nav=datasets]').click()]);
+    await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+    assert.ok(requests.some(request=>request.page===page&&request.operation==='datasets.catalog'&&request.args.machine==='gpu-1'),'Entering the dataset room performs its deferred read for the current server');
   }
   async function refresh(page) {
     if(!await page.locator('#datasets-refresh').isVisible()&&await page.locator('[data-v3-back]').isVisible())await page.locator('[data-v3-back]').click();
