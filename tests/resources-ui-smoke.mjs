@@ -260,7 +260,7 @@ try{
   assert.equal(await page.locator('[data-resource-root]').count(),0,'ordinary admin compute has no ROOT action');
   for(const privateValue of [privateProgram,privateOwner,'private-native-job'])assert.ok(!(await page.locator('.resource-process-table').textContent()).includes(privateValue),'ordinary admin compute hides '+privateValue);
   await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content .resource-process-table').waitFor({state:'attached'});
-  await page.locator('#admin-content [data-resource-detail$=processes] summary').click();await page.locator('#admin-content .resource-process-table').waitFor({state:'visible'});
+  await page.locator('#admin-content [data-resource-detail$=processes] > summary').click();await page.locator('#admin-content .resource-process-table').waitFor({state:'visible'});
   assert.equal(await page.locator('[data-resource-root]').count(),0,'ROOT is owned by the maintenance section');
   for(const visible of [privateProgram,privateOwner,'private-native-job'])assert.ok((await page.locator('#admin-content .resource-process-table').textContent()).includes(visible),visible);
   assert.deepEqual(await page.locator('#admin-content .resource-process-table th').allTextContents(),['GPU','PID','任务 / 提交者 / 描述','程序','系统用户','显存 MiB','优先级']);
@@ -273,8 +273,10 @@ try{
   // resize events or fast-forward its animation.
   assert.equal(await page.locator('[data-resource-root]').count(),0);
   await page.locator('#admin-content').evaluate(async region=>{await Promise.all(region.getAnimations({subtree:true}).filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
-  await openMaintenance(page);await page.locator('#host-maintenance summary').click();assert.ok((await page.locator('#terminal-root-open').boundingBox()).height>=44,'Phone administrator actions retain a 44px target in maintenance');
   await capture('resources-detail-admin-390');
+  await openMaintenance(page);await page.locator('#host-maintenance summary').click();assert.ok((await page.locator('#terminal-root-open').boundingBox()).height>=44,'Phone administrator actions retain a 44px target in maintenance');
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'The maintenance ROOT panel must not widen the phone viewport');
+  await page.screenshot({path:join(screenshots,'resources-root-admin-390-full.png'),fullPage:true,animations:'disabled'});
   violations.push(...await page.evaluate(()=>resourceCSP));
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(violations,[]);
   checks.push('exact physical slots','selected server only','member/admin process columns','confirmed own-task fills','stale/partial/invalid/unauthorized states','sample-gated motion and reduced fallback','Mission Control selection','terminal context cancel/accept','320px and 390px tap targets, info-tip bounds and refresh focus','phone push, Escape and reserved live pill','PR5 maintenance overlay, monitoring, mobile detail and recovery','identity reset','ROOT entry makes no execution call','Portal CSP and self-hosted assets');
