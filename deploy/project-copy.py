@@ -73,14 +73,18 @@ class ProjectCopies(t.TransferJobs):
             # port and TLS certificate pin; no network request or ticket here.
             ProjectPeer(peer,{}).close();sources.append(machine)
         if 'from' in args:p.need(args['from'] in sources,'No trusted LAN project source is configured')
+        personal=False
         try:
             status=self.store.status(args['userId'],args['project'])
             p.need(status.get('environmentMode')=='oci','Existing target project is not OCI; use a different project name')
+            personal=status.get('storageLayout')=='personal-storage-v1'
         except Exception as error:
             if getattr(error,'code',None)!='not_found':raise
         result={'protocol':'portable-project-v1','enabled':True,'project':args['project'],
                 'environmentMode':'oci','architecture':{'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine(),platform.machine()),
                 'sources':sources,'releaseReady':False}
+        if personal:
+            result['storageLayout']='personal-storage-v1'
         if 'release' in args:
             # A read-only compatibility probe has no operation ID. Only the
             # immutable release needs validation; prepare/start bind an ID.

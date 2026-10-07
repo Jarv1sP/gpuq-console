@@ -87,6 +87,10 @@ def observation(ops, args):
 
 
 class SnapshotSync:
+    def dataset_cache(self,args):
+        resolver=getattr(self.n,'dataset_cache_for',None)
+        return resolver(args['dataset']) if callable(resolver) else self.n.dataset_cache()
+
     def __init__(self, executor):
         self.n = executor
         self.ops = executor.projects()

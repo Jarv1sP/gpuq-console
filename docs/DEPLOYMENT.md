@@ -300,6 +300,22 @@ npm test
 
 不要将该工具的纯本地测试等同于真实 EDQUOT、容器隔离或四节点上线。政策与 kernel 限制变更不具备跨卷事务；维护栅栏和保留失败 intent 是部分失败时的边界。宿主 root 和已有原生 SSH 管理权限仍属于可信运维，不受这些平台入口约束。
 
+## 可选个人 HDD/SSD 根（单独批准、默认关闭）
+
+本项涉及节点存储运行时，不属于「仅更新 Portal 前端」授权。先备份节点配置、核对当前任务与完整 runtime 清单，只对有实际本地 HDD/SSD 的节点灰度；不重格式化、迁移、清空、改挂载或重启 GPUQ。
+
+只读检查专用根，实际路径与非 root 服务 UID 来自自己的清单：
+
+```sh
+sudo python3 deploy/configure-personal-storage.py --hdd-root /HDD_MOUNT/gpuq-personal --ssd-root /SSD_MOUNT/gpuq-personal --service-uid SERVICE_UID
+```
+
+返回 `personalStorage:{enabled:false,hdd:{root,mountPoint,filesystemUuid,rootInode,reserveBytes},ssd:{...}}`。两块盘均须验证介质、独立挂载、UUID，专用根须原本就是服务 UID 所有且0700；缺失时仅显式 `--initialize` 创建新的空专用根，不改已有属主、文件或配置。原保留阈值不会自动降低。核对两卷后，把片段手工合入原 node-config，再单独启用 enabled；未知状态保持关闭。
+
+启用内核配额时，root 控制的 quota policy 另需 `personalStorageRoots:{hdd:专用根,ssd:专用根}`，并为账号在相应物理卷配置有限 byte/inode 额度。broker 只接受同一账号的 projects-v2/hash 或 personal-data/hash 精确根，继承到发布及复制 staging；不允许用户请求任意路径或放宽额度。旧政策不改，缺配套时拒绝，不以关闭配额绕过。
+
+先在独立新账号／项目验收两类入口、HDD 写入与容量、独立/共享工作区、完整发布后 CUDA、同机复制 SHA256/续传/取消、下载和保存让位恢复；检查旧项目、旧输出和旧队列不变。现有忙任务不搬迁；即使所有离线测试通过，也不等于真实 HDD 吞吐、rootless quota 与全部节点已验收。
+
 ## 10. 常见阻塞
 
 - 终端打不开：`bwrap --help` 是否支持 bind-fd、用户命名空间策略、slirp4netns、服务用户 linger、基础 Python 路径。

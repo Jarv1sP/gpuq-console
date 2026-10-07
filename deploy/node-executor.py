@@ -29,6 +29,7 @@ ADMIN_COMMAND=None
 HOST_COMMAND_CAPABILITY='host-command-v1'
 DATASET_DELETE_CAPABILITY='dataset-delete-v1'
 TASK_DISPLAY_CAPABILITY='console-task-display-v1'
+PERSONAL_STORAGE_PROTOCOL=1
 TASK_DISPLAY_EDIT_CAPABILITY='console-task-display-edit-v1'
 DIAGNOSTICS=None
 PLATFORM_ROOT_GUARD=None
@@ -61,6 +62,13 @@ def workspace_storage_check(needed=0, *, target_fd=None, admission=False):
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         WORKSPACE_STORAGE=module
     WORKSPACE_STORAGE.require_workspace_space(ROOT,WORKSPACE_STORAGE.workspace_reserve_bytes(CONFIG),needed,target_fd=target_fd)
+
+def project_storage_admission(args):
+    if args.get('project') and isinstance(CONFIG.get('personalStorage'),dict):
+        store=projects().store
+        if store.project_is_personal(args['userId'],args['project']):
+            storage=store.personal_storage();storage.require('hdd');storage.require('ssd',65536);return
+    workspace_storage_check(admission=True)
 
 def job_diagnostics(job,data):
     global DIAGNOSTICS
@@ -162,7 +170,11 @@ def dataset_mount_check(config):
         cursor/=part
         if not stat.S_ISDIR(cursor.lstat().st_mode):raise ValueError('Dataset storage ancestors must be real directories')
 
-def dataset_cache():
+def dataset_cache(dataset=None):
+    if dataset is not None and isinstance(CONFIG.get('personalStorage'),dict) and re.fullmatch(r'[hs]-[a-f0-9]{16}-[A-Za-z0-9][A-Za-z0-9_-]{0,39}',dataset):
+        module,legacy=dataset_cache()
+        if os.path.lexists(legacy._paths(dataset)['.registry']):return module,legacy
+        return personal_dataset_reference(dataset)
     global DATASET_MODULE
     config=CONFIG.get('datasets')
     if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays'}:raise ValueError('Dataset storage is not configured')
@@ -198,6 +210,66 @@ def dataset_cache():
             if owner is not None:return storage_quota(owner,path)
         cache.quota_guard=quota_guard
     return DATASET_MODULE,cache
+
+def personal_dataset_cache(user,tier,create=False):
+    if tier not in ('hdd','ssd'):raise ValueError('Unknown personal data tier')
+    definition=importlib.util.spec_from_file_location('gpuq_personal_dataset_storage',HERE/'personal-storage.py')
+    personal=importlib.util.module_from_spec(definition);definition.loader.exec_module(personal)
+    storage=personal.PersonalStorage(CONFIG)
+    path=storage.data_path(user,tier,create=create).parent/'published'
+    if not create:
+        with storage.s.directory(path):pass
+    else:
+        storage.require(tier);storage.s.private_dir(path,create=True)
+    module,_=dataset_cache()
+    cache=module.DatasetCache(path,sources={},reserve_bytes=storage.policy[tier]['reserveBytes'],
+                              mount_point=storage.policy[tier]['mountPoint'])
+    cache.personalTier=tier
+    return module,cache
+
+def dataset_cache_for(dataset):
+    return dataset_cache(dataset) if isinstance(CONFIG.get('personalStorage'),dict) else dataset_cache()
+
+def personal_dataset_reference(dataset):
+    tier='hdd' if dataset.startswith('h-') else 'ssd'
+    definition=importlib.util.spec_from_file_location('gpuq_personal_dataset_reference',HERE/'personal-storage.py')
+    personal=importlib.util.module_from_spec(definition);definition.loader.exec_module(personal)
+    storage=personal.PersonalStorage(CONFIG);storage.check(tier)
+    parent=storage.roots[tier]/'personal-data'
+    with storage.s.directory(parent) as fd:names=os.listdir(fd)
+    if len(names)>10000:raise ValueError('Personal storage owner inventory exceeds its limit')
+    matches=[]
+    for name in names:
+        if not re.fullmatch('[a-f0-9]{64}',name) or not name.startswith(dataset[2:18]):continue
+        identity=storage.s.read_json(parent/name/'owner.json')
+        user=identity.get('userId')
+        if identity!={'schema':1,'userId':user,'owner':storage.owner(user)} or identity['owner']!=name:
+            raise ValueError('Personal dataset owner identity changed')
+        matches.append(user)
+    if len(matches)!=1:raise ValueError('Personal dataset owner is missing or ambiguous')
+    return personal_dataset_cache(matches[0],tier)
+
+def personal_dataset_listing(actor):
+    if not isinstance(CONFIG.get('personalStorage'),dict):return []
+    definition=importlib.util.spec_from_file_location('gpuq_personal_dataset_listing',HERE/'personal-storage.py')
+    personal=importlib.util.module_from_spec(definition);definition.loader.exec_module(personal)
+    storage=personal.PersonalStorage(CONFIG);rows=[]
+    for tier in ('hdd','ssd'):
+        storage.check(tier);parent=storage.roots[tier]/'personal-data'
+        if not parent.exists():continue
+        with storage.s.directory(parent) as fd:names=os.listdir(fd)
+        if len(names)>10000:raise ValueError('Personal owner inventory is too large')
+        for name in sorted(names):
+            if not re.fullmatch('[a-f0-9]{64}',name):raise ValueError('Personal owner directory is invalid')
+            identity=storage.s.read_json(parent/name/'owner.json');user=identity.get('userId')
+            if identity!={'schema':1,'userId':user,'owner':storage.owner(user)} or identity['owner']!=name:raise ValueError('Personal data owner identity changed')
+            if not (parent/name/'published').exists():continue
+            _,cache=personal_dataset_cache(user,tier)
+            listing=cache.list_datasets(actor)
+            for row in listing['datasets']:
+                row={**row,'storageTier':tier,'versions':[{**v,'storageTier':tier} for v in row['versions']]}
+                rows.append(row)
+    return rows
 
 
 def dataset_cache_admission(needed_bytes=0, *, _exclude=()):
@@ -376,7 +448,7 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
     if _expected_owners is not None and (_expected_registration is None or _expected_owners!=[args.get('userId')]):raise ValueError('Invalid private unregister ownership identity')
     definitions={'datasets.capacity':set(),'datasets.list':set(),'datasets.status':{'dataset','version','operationId'},'datasets.prepare':{'dataset','version'},'datasets.register':{'dataset','sourceId','owners','protocol'},'datasets.unregister':{'dataset','version','protocol','portalProvedOtherCopy'}}
     if operation not in definitions or not isinstance(args,dict) or set(args)-definitions[operation]-{'userId','hostAdmin'}:raise ValueError('Invalid dataset operation fields')
-    module,cache=dataset_cache();actor=dataset_actor(module,args)
+    module,cache=dataset_cache_for(args.get('dataset'));actor=dataset_actor(module,args)
     if operation=='datasets.capacity':
         result=cache.capacity(actor)
         if dataset_delete_capability()==1:result['datasetDelete']=1
@@ -414,6 +486,10 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                     if pending:value.update(dataset_background_status(folder,*pending,cache,actor))
                     value.pop('dataset',None)
             listing['datasets'].extend(originals['datasets'])
+        extra=personal_dataset_listing(actor)
+        existing={r['dataset'] for r in listing['datasets']}
+        if any(r['dataset'] in existing for r in extra) or len({r['dataset'] for r in extra})!=len(extra):raise ValueError('Dataset appears in conflicting storage roots')
+        listing['datasets'].extend(extra)
         return listing
     if operation=='datasets.status' and 'operationId' in args:
         key=args['operationId']
@@ -422,6 +498,7 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         if hashlib.sha256(json.dumps(spec,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Dataset worker identity mismatch')
         if spec.get('op') in ('unregister','unregister-v1') and spec.get('hostAdmin') is not actor.is_admin:raise ValueError('Administrator authorization changed')
         if not actor.is_admin and spec['userId']!=actor.user_id:raise ValueError('Dataset operation is not owned by this user')
+        _,cache=dataset_cache_for(spec['dataset'])
         return dataset_background_status(folder,key,spec,cache,actor)
     dataset=args.get('dataset')
     if not isinstance(dataset,str) or not DATASET_ID.fullmatch(dataset):raise ValueError('Invalid dataset ID')
@@ -507,7 +584,7 @@ def dataset_worker(key):
     folder=ROOT/'dataset-ops';task=json.loads((folder/(key+'.json')).read_text())
     if hashlib.sha256(json.dumps(task,sort_keys=True).encode()).hexdigest()!=key:raise ValueError('Background dataset request was modified')
     try:
-        module,cache=dataset_cache();actor=dataset_actor(module,task)
+        module,cache=dataset_cache_for(task['dataset']);actor=dataset_actor(module,task)
         if task.get('warehouse') is True and task['op'] in ('unregister','unregister-v1'):
             warehouse=storage_warehouse()
             if warehouse is None:raise ValueError('Fixed warehouse registration is unavailable')
@@ -581,9 +658,11 @@ def _acquire_datasets(job):
         if prepared is not None:return prepared
     module,cache=dataset_cache();actor=module.Principal(job['userId'],False)
     for ref in refs:
+        _,cache=dataset_cache_for(ref['dataset'])
         if cache.status(actor,ref['dataset'],ref['version'])['state']!='READY':raise DatasetNotReady('Dataset is not READY; prepare it before reserving GPUs')
     leases=[]
     for ref in refs:
+        _,cache=dataset_cache_for(ref['dataset'])
         try:lease=cache.acquire_lease(actor,ref['dataset'],ref['version'],job['id'])
         except module.CacheError:
             # Eviction can win between the status check and lease acquisition.
@@ -608,6 +687,7 @@ def reject_unsubmitted_datasets(job,receipt):
     else:atomic_json(receipt,identity)
     module,cache=dataset_cache();actor=module.Principal('scheduler',True)
     for ref in dataset_refs(job):
+        _,cache=dataset_cache_for(ref['dataset'])
         with cache._locked():
             cache._record(actor,ref['dataset'],ref['version'])
             # Recover leases created before an interrupted receipt write too;
@@ -738,7 +818,12 @@ def _dataset_open_mounts(job,leases=None):
         for ref,lease in zip(dataset_refs(job),leases):
             if lease.get('readOnly') is not True:raise ValueError('Dataset lease is not read-only')
             with module._directory(Path(lease['path'])) as descriptor:fd=os.dup(descriptor)
-            opened.append((fd,'/data2/'+ref.get('mountAs',lease['dataset'])))
+            alias=ref.get('mountAs',lease['dataset'])
+            opened.append((fd,'/data2/'+alias))
+            if job.get('project') and isinstance(CONFIG.get('personalStorage'),dict) and projects().store.project_is_personal(job['userId'],job['project']):
+                _,cache=dataset_cache_for(ref['dataset'])
+                tier=getattr(cache,'personalTier','ssd')
+                opened.append((os.dup(fd),'/data-'+tier+'/'+alias))
         return opened
     except BaseException:
         for fd,_ in opened:os.close(fd)
@@ -823,13 +908,16 @@ def release_datasets(job,data=None,never_dispatched=False,expected_native=None):
     # occur as soon as the final lease is gone, before this receipt is unlinked.
     if finalized is None and os.path.lexists(filename):
         module,cache=dataset_cache();leases=json.loads(filename.read_text());actor=module.Principal('scheduler',True)
-        for lease in leases:cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
+        for lease in leases:
+            _,cache=dataset_cache_for(lease['dataset'])
+            cache.release_lease(actor,lease['dataset'],lease['version'],lease['leaseId'])
     # Older attempts can lose the receipt after acquiring a lease (or before
     # the durable handoff journal existed). The immutable job and confirmed
     # stopped scheduler/cgroup proof above are the authority, not a TTL or the
     # receipt's absence. Recover only this owner's exact job/reference holds.
     module,cache=dataset_cache();actor=module.Principal('scheduler',True)
     for ref in dataset_refs(job):
+        _,cache=dataset_cache_for(ref['dataset'])
         with cache._locked():
             retained=[lease for lease in cache._leases(ref['dataset'],ref['version'])
                       if lease['jobId']==job['id'] and lease['owner']==job['userId']]
@@ -928,7 +1016,8 @@ def file_op(operation,args,root=None):
 
 def validate_job(job,readonly=False):
     required={'id','userId','username','cards','argv','name','minVramGiB'}
-    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly','scheduling','elastic','placement'}:raise ValueError('Invalid job specification')
+    if not isinstance(job,dict) or not required<=set(job) or set(job)-required-{'datasets','project','release','priority','preemptIdleOnly','scheduling','elastic','placement','workspaceMode'}:raise ValueError('Invalid job specification')
+    if 'workspaceMode' in job and (job['workspaceMode'] not in ('isolated','shared') or not job.get('project')):raise ValueError('Invalid workspace mode')
     if not UUID.fullmatch(job['id']):raise ValueError('Invalid job ID')
     if readonly:
         if not isinstance(job['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',job['userId']):raise ValueError('Invalid identity')
@@ -1148,7 +1237,7 @@ def terminal_op(operation,args):
         receipt=terminal_metadata(receipt_path) if receipt_path.exists() else None
         if opening:
             if mode=='new' and not (folder/(jid+'.json')).exists():
-                if args.get('hostAdmin') is not True:workspace_storage_check(admission=True)
+                if args.get('hostAdmin') is not True:project_storage_admission(args)
                 oci_properties=terminal_oci_properties(args)
                 unit='amax-term-'+jid
                 spec={'userId':args['userId'],'username':args['username'],'cards':0,'argv':['/bin/bash','--noprofile','--norc','-i'],'hostAdmin':args.get('hostAdmin') is True}
@@ -1600,6 +1689,33 @@ def storage_collect():
 
 def process(operation,args):
     platform_root_check()
+    if operation.startswith('projects.storage.'):
+        definition=importlib.util.spec_from_file_location('gpuq_personal_storage_rpc',HERE/'personal-storage.py')
+        module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
+        if operation in ('projects.storage.publish','projects.storage.publish.status'):
+            fields={'userId','tier'}|({'key','name','path'} if operation=='projects.storage.publish' else {'key'})
+            if set(args)!=fields:raise ValueError('Invalid personal publication fields')
+            workspace(args['userId'])
+            ops=module.publication(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args['userId'],args['tier'],readonly=operation.endswith('.status'))
+            if operation=='projects.storage.publish':return ops.publish({k:v for k,v in args.items() if k!='tier'})
+            return ops.status(args['userId'],args['key'])
+        if operation=='projects.storage.info':
+            if set(args)!={'userId'}:raise ValueError('Invalid personal storage info fields')
+            if not isinstance(args['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',args['userId']):raise ValueError('Invalid identity')
+            if not module.configured(CONFIG):return {'protocol':module.PROTOCOL,'available':False,'reason':'NOT_CONFIGURED'}
+            return module.PersonalStorage(CONFIG).status()
+        copies=module.PersonalCopies(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()))
+        if operation=='projects.storage.copies':
+            if set(args)!={'userId'}:raise ValueError('Invalid copy list fields')
+            if not isinstance(args['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',args['userId']):raise ValueError('Invalid identity')
+            return copies.list(args['userId'])
+        if operation=='projects.storage.copy':return copies.begin(args)
+        if set(args)!={'userId','key'}:raise ValueError('Invalid personal copy fields')
+        if not isinstance(args['userId'],str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)',args['userId']):raise ValueError('Invalid identity')
+        methods={'projects.storage.copy.status':copies.status,'projects.storage.copy.cancel':copies.cancel,
+                 'projects.storage.copy.resume':copies.resume}
+        if operation not in methods:raise ValueError('Unknown personal copy operation')
+        return methods[operation](args['userId'],args['key'])
     if operation in ('tasks.display.get','tasks.display.set'):
         definition=importlib.util.spec_from_file_location('gpuq_console_task_display_edit',HERE/'task-display.py')
         module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
@@ -1630,6 +1746,11 @@ def process(operation,args):
         data=gpu('show',row[0]) if row else {'job':{'state':'NOT_SUBMITTED'},'attempts':[]}
         observation={'nativeObservation':job_observation(job,data,expected_node_id)} if expected_node_id is not None else {}
         if operation=='diagnostics':return {**job_diagnostics(job,data),**observation}
+        if not row and isinstance(CONFIG.get('personalStorage'),dict) and (ROOT/'jobs'/(job['id']+'.workspace.json')).exists():
+            definition=importlib.util.spec_from_file_location('gpuq_workspace_watch',HERE/'personal-storage.py')
+            helper=importlib.util.module_from_spec(definition);definition.loader.exec_module(helper)
+            pending=helper.WorkspacePreparation(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())).result(job)
+            if pending:return {**pending,**observation}
         state=data.get('job',data);attempts=data.get('attempts',[])
         assigned=attempts[0].get('gpu_indices',[]) if attempts and state.get('state') not in ('SUCCEEDED','FAILED','CANCELED','LOST') else []
         if row and state.get('state') in ('SUCCEEDED','FAILED','CANCELED') and not scheduler_terminal_confirmed(data):
@@ -1727,7 +1848,7 @@ def process(operation,args):
                 release_datasets(job,never_dispatched=True)
                 return {'state':'CANCELED'}
             if operation=='logs':return job_log_result(job,{'job':{'state':'NOT_SUBMITTED'},'attempts':[]},'任务尚未提交到 GPUQ。')
-            workspace_storage_check(admission=True)
+            project_storage_admission(job)
             if policy['kind']!='legacy':priority_capability()
             if policy['preempt_opt_in_only'] and 'preempt-opt-in-only-v1' not in gpu('status').get('daemon',{}).get('capabilities',[]):raise ValueError('Requester opt-in scope capability unavailable')
             if policy['kind']=='explicit' and not SCHEDULING.ready(CONFIG,HERE):raise ValueError('Training control channel is not ready; no submission attempted')
@@ -1738,8 +1859,14 @@ def process(operation,args):
                 if not SCHEDULING.allocation_ready(CONFIG,HERE,2) or 'gpu-placement-v1' not in caps or placement['shared'] and 'gpu-sharing-v1' not in caps:raise ValueError('GPU placement/sharing channel is not ready; no submission attempted')
                 if placement.get('hami') and not SCHEDULING.hami_ready(CONFIG,HERE,placement['smPercent']):raise ValueError('HAMi runtime is not ready; no submission attempted')
             if job.get('project'):
-                projects().store.release(job['userId'],job['project'],job['release'])
-                projects().store.run_paths(job['userId'],job['project'],job['release'],jid)
+                store=projects().store
+                store.release(job['userId'],job['project'],job['release'])
+                if isinstance(CONFIG.get('personalStorage'),dict) and store.project_is_personal(job['userId'],job['project']):
+                    definition=importlib.util.spec_from_file_location('gpuq_workspace_prepare',HERE/'personal-storage.py')
+                    helper=importlib.util.module_from_spec(definition);definition.loader.exec_module(helper)
+                    pending=helper.WorkspacePreparation(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())).ensure(job)
+                    if pending:return pending
+                else:store.run_paths(job['userId'],job['project'],job['release'],jid)
             if dataset_refs(job):
                 try:acquire_datasets(job)
                 except DatasetNotReady:
@@ -1884,6 +2011,18 @@ def write_rpc_line(value):
 if __name__=='__main__':
     os.umask(0o077)
     platform_root_check()
+    if len(sys.argv)==3 and sys.argv[1]=='--personal-workspace-worker':
+        definition=importlib.util.spec_from_file_location('gpuq_workspace_worker',HERE/'personal-storage.py')
+        helper=importlib.util.module_from_spec(definition);definition.loader.exec_module(helper)
+        sys.exit(helper.WorkspacePreparation(sys.modules[__name__]).worker(sys.argv[2]))
+    if len(sys.argv)==4 and sys.argv[1]=='--personal-copy-worker':
+        definition=importlib.util.spec_from_file_location('gpuq_personal_storage_worker',HERE/'personal-storage.py')
+        module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
+        sys.exit(module.PersonalCopies(sys.modules[__name__]).worker(sys.argv[2],sys.argv[3]))
+    if len(sys.argv)==5 and sys.argv[1]=='--personal-publish-worker':
+        definition=importlib.util.spec_from_file_location('gpuq_personal_publish_worker',HERE/'personal-storage.py')
+        module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
+        sys.exit(module.publication(sys.modules[__name__],sys.argv[2],sys.argv[3]).worker(sys.argv[2],sys.argv[4]))
     if len(sys.argv)==3 and sys.argv[1]=='--storage-archive-worker':sys.exit(storage_archive().worker(sys.argv[2]))
     if len(sys.argv)==4 and sys.argv[1]=='--dataset-delete-worker':sys.exit(dataset_retirement_worker(sys.argv[2],sys.argv[3]))
     if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':

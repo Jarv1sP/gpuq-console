@@ -1,5 +1,26 @@
 # 后端接口交接
 
+## 可选个人机械盘布局
+
+节点显式配置并核验完整运行时后，**新项目**的 status/verify 可返回 `storageLayout:"personal-storage-v1"`、`workspaceModes:["isolated","shared"]`。旧项目无此字段，不根据目录名字或管理员角色猜测支持。新布局用机械盘保存项目、发布版本及可写工作副本，`/data-hdd`、`/data-ssd` 只对应个人草稿；已有发布版本保持只读。只读历史结果查询不要求当前基础环境或开启新写入。
+
+`jobs.submit` 可带 `workspaceMode:"isolated"|"shared"`，必须有固定项目版本，明确提供时纳入提交 digest 和不可变 spec；省略保持旧请求 digest。新项目默认 isolated，shared 固定同账号同项目同 release，不能保证独立结果，用户自己避开文件覆盖。本版手选同机；新模式与 AUTO 不混用，旧项目 AUTO 不变。
+
+普通成员与管理员均只操作自己的个人存储，接口沿用现有登录与机器授权，不接收 owner、hostAdmin、角色或宿主绝对路径：
+
+| 操作 | 参数（均含 machine） |
+| --- | --- |
+| `projects.storage.info` | 无；返回确认的逻辑入口和容量，不返回根路径或 UUID |
+| `projects.storage.copy` | UUID key、sourceTier/targetTier=hdd/ssd、sourcePath/targetPath=相对目录 |
+| `projects.storage.copies` | 无；本人的原复制编号与结果 |
+| `projects.storage.copy.status/cancel/resume` | 原 UUID key |
+| `projects.storage.publish` | tier、原 UUID key、个人相对 path、有效 name |
+| `projects.storage.publish.status` | tier、原 UUID key |
+
+复制是不占 GPU 的同机后台作业，来源不删除、目标不覆盖，原 SHA256 清单及私人断点用于显式 FAILED+STOPPED 恢复；UNKNOWN 不重放。发布复用原个人工作区发布和固定版本读取保护，原草稿保留，生成 h-/s- 名称空间。维护允许 info/list/status/cancel，不允许新增复制、续跑或发布。
+
+公开元数据不能证明生产启用；部署须包含 personal-storage、storage-layout、两种 runner 对应正确档位、项目/数据 helpers、固定执行桥、Portal/CLI。旧队列 spec/数据库不迁移，旧路径继续兼容；根挂载缺失或字段不匹配拒绝，不能回落到系统盘。
+
 ## 显卡故障与部分采集
 
 `gpuq.health:"degraded"` 可附固定诊断 `healthIssue:{kind:"managed-gpu-missing",indices:[1]}` 或 `{kind:"scheduler-degraded"}`。只有明确的调度器受管 GPU 缺失错误映射为前者；卡号有界且去重，不转发原始错误、UUID、路径或命令。已授权成员与管理员均可看到固定诊断，未授权、过期和失联状态不沿用旧故障结论。配套节点 `deploy/node-probe.py` 位于采集 SSH 强制命令，不属于数据存储 helper 更新；未部署时仅显示通用调度异常。

@@ -68,7 +68,8 @@ function server(machine,directory,locations,observations,selectedMachine){
       observations.every(row=>row.canPrepare===true):location?.canPrepare===true),
     removalPending:rows.some(row=>row.removalPending===true),
     removalGraceEligible:!conflict&&location?.removalGraceEligible===true,
-    error:location?text(location.error):null,storage:location?copy(location.storage):null};
+    error:location?text(location.error):null,storage:location?copy(location.storage):null,
+    ...(!conflict&&['hdd','ssd'].includes(location?.storageTier)?{storageTier:location.storageTier}:{})};
 }
 
 export function aggregateDatasetCatalog(catalog){

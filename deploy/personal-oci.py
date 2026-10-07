@@ -34,6 +34,7 @@ REGISTRY_DROPINS = Path('/etc/containers/registries.conf.d')
 RUNTIME = Path('/run/user')
 BASE_SEEDS = Path('/etc/gpuq-console/base-seeds')
 STDERR_LIMIT = 64 * 1024
+PERSONAL_STORAGE_PROTOCOL = 1
 ENGINE_RAW = (b'[containers]\nenv_host = false\nhttp_proxy = false\nvolumes = []\ndevices = []\n'
               b'[engine]\nremote = false\ncdi_spec_dirs = ["/etc/gpuq-console/cdi"]\n')
 ANONYMOUS_AUTH_RAW = b'{"auths":{}}\n'
@@ -745,7 +746,7 @@ class PersonalOCI:
                 '--log-driver=none', '--pids-limit=-1', '--shm-size=8g', '--workdir=/workspace',
                 '--label', 'io.gpuq.owner='+self.owner, '--label', 'io.gpuq.project='+spec['project'],
                 '--env=HOME=/home/gpuq', '--env=XDG_CACHE_HOME=/home/gpuq/.cache',
-                '--env=GPUQ_OUTPUT_DIR=/outputs', '--env=GPUQ_PROJECT='+spec['project'],
+                '--env=GPUQ_OUTPUT_DIR='+('/workspace' if project.get('storageLayout')=='personal-storage-v1' and not terminal else '/outputs'), '--env=GPUQ_PROJECT='+spec['project'],
                 '--env=GPUQ_PROJECT_ENV_MODE=oci', '--env=GPUQ_OFFLINE_ASSETS=/workspace/offline',
                 '--env=GPUQ_CONSOLE_JOB_ID='+spec.get('id', ''), '--env=NCCL_CUMEM_HOST_ENABLE=0',
                 '--env=LANG=C.UTF-8', '--env=PYTHONUNBUFFERED=1',
@@ -903,12 +904,13 @@ class PersonalOCI:
 
 
 def run_project(config, spec, project, terminal, uuids, workfd, project_fds,
-                dataset_fds, datafd=None, runtimefd=None, resourcefd=None, cgroupfd=None, *, stderr_sink=None):
+                dataset_fds, datafd=None, runtimefd=None, resourcefd=None, cgroupfd=None, *, stderr_sink=None, personal_fds=()):
     """Both existing scheduler profiles enter here after allocation/limits."""
     owner = PersonalOCI(config, spec['userId'])
     owner.stderr_sink = stderr_sink
-    mounts = [(workfd, '/workspace', not terminal), (project_fds['home'], '/home/gpuq', False),
+    mounts = [(workfd, '/workspace', project.get('readonly',not terminal)), (project_fds['home'], '/home/gpuq', False),
               (project_fds['output'], '/outputs', False)]
+    mounts += [(fd, target, False) for fd, target in personal_fds]
     mounts += [(fd, target, True) for fd, target in dataset_fds]
     if datafd is not None:
         need(terminal, 'Mutable data workspace is only for development')

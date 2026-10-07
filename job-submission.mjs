@@ -8,7 +8,7 @@ import {taskDescription,displayName} from './dist/task-metadata.js';
 const FIELDS=new Set([
   'machine','cards','minVramGiB','argv','name','description','key',
   'datasets','project','release','priority','scheduling','elastic','placement',
-  'prepareData','machineSelection',
+  'prepareData','machineSelection','workspaceMode',
 ]);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 
@@ -50,6 +50,8 @@ export function normalizeJobSubmission(args,principal){
     machineSelection={mode:'auto',...(candidates?{candidates:[...candidates].sort()}: {})};
   }else if(!Object.hasOwn(args,'machine')||typeof args.machine!=='string'||!MACHINES.some(m=>m.id===args.machine))fail('请选择有效的服务器，或使用 auto 自动选机。');
   const datasets=datasetReferences(args.datasets),project=projectReference(args,{release:true});
+  if(args.workspaceMode!==undefined&&(!['isolated','shared'].includes(args.workspaceMode)||!project.project))fail('工作区模式需选择已发布项目，只能是 isolated 或 shared。');
+  if(machineSelection&&args.workspaceMode!==undefined)fail('机械盘自由工作区当前仅支持手选同机；不会自动复制私人目录或降级。');
   if(machineSelection&&!project.project)fail('自动选机需要已发布的个人容器项目和固定版本；旧工作区请手选服务器。');
   if(typeof args.key!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(args.key))fail('需提供 UUID 提交键，重试必须复用。');
   if(!Array.isArray(args.argv)||!args.argv.length||args.argv.length>128||args.argv.some(a=>typeof a!=='string'||a.includes('\0'))||JSON.stringify(args.argv).length>12000)fail('训练命令无效或过长。');
@@ -66,6 +68,7 @@ export function normalizeJobSubmission(args,principal){
   const request={machine:machineSelection?'auto':args.machine,cards:args.cards,minVramGiB,argv:[...args.argv],name,description,key:args.key,
     datasets,project,priority,priorityProvided:args.priority!==undefined,explicit,prepareData:args.prepareData===true||!!machineSelection,
     ...(machineSelection?{machineSelection}:{}),
+    ...(args.workspaceMode!==undefined?{workspaceMode:args.workspaceMode}:{}),
     ...(placement?{placement}:{}),
     ...(allocation?{elastic:allocation.elastic,allowedGpuCounts:allocation.allowed}:{})};
   // This positional representation is a persisted compatibility contract, not
@@ -79,13 +82,14 @@ export function normalizeJobSubmission(args,principal){
   if(placement)identity.push({placement});
   if(description)identity.push({description});
   if(machineSelection)identity.push({machineSelection});
+  if(args.workspaceMode!==undefined)identity.push({workspaceMode:args.workspaceMode});
   request.digest=createHash('sha256').update(JSON.stringify(identity)).digest('hex');
   return request;
 }
 
 export function createSubmittedJob(request,user,prioritySupported,{id=randomUUID(),now=new Date().toISOString()}={}){
   const {machine,cards,minVramGiB,name,key,digest,project,datasets,priority,explicit}=request;
-  const context={...project,...(datasets.length?{datasets:structuredClone(datasets)}:{}),...(request.elastic?{elastic:structuredClone(request.elastic)}:{}),...(request.placement?{placement:structuredClone(request.placement)}:{})};
+  const context={...project,...(datasets.length?{datasets:structuredClone(datasets)}:{}),...(request.elastic?{elastic:structuredClone(request.elastic)}:{}),...(request.placement?{placement:structuredClone(request.placement)}:{}),...(request.workspaceMode!==undefined?{workspaceMode:request.workspaceMode}:{})};
   const policy=explicit?{scheduling:structuredClone(explicit)}:prioritySupported?{priority,preemptIdleOnly:true}:{};
   const spec={id,userId:user.id,username:user.username,cards,argv:[...request.argv],name,minVramGiB,...context,...policy};
   // Human-facing metadata belongs to the portal record, not the immutable

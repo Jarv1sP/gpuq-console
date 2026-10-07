@@ -79,6 +79,7 @@ export function trainingProject(project,release){
 }
 export function trainingTarget(mode,machine,project,candidates,machines){
   if(mode==='current')return {machine};
+  if(project?.storageLayout==='personal-storage-v1')throw Error('机械盘自由工作区当前仅支持手选本机；私人目录不会自动迁移。');
   if(mode!=='auto'||project?.environmentMode!=='oci')throw Error('自动选机需要已发布的个人容器项目；当前工作区请使用当前服务器。');
   const ids=String(candidates||'').trim().split(/[\s,，]+/).filter(Boolean);
   if(new Set(ids).size!==ids.length||ids.some(id=>!machines.some(m=>m.id===id)))throw Error('候选服务器需填写已授权的完整名称，不要重复。');
@@ -451,7 +452,10 @@ export function executionUI(store,refresh,toast){
     for(const id of ['terminal-open','terminal-reconnect'])query('#'+id).disabled=!available||locked||publishing;
     const release=query('[name=release]');release.disabled=!project||locked||!readyReleases(info).length;
     const automatic=automaticTraining(),target=query('[name=training-target]');target.disabled=!available||locked;
-    target.querySelector('[value=auto]').disabled=info?.environmentMode!=='oci';
+    const personal=info?.storageLayout==='personal-storage-v1',workspaceMode=query('[name=workspace-mode]');
+    query('#personal-workspace-field').hidden=!personal;workspaceMode.disabled=!personal||locked||automatic;
+    query('#workspace-storage-note').textContent=personal?'工作区和结果默认在机械盘。目录自行组织；选择共享时，同项目同版本的任务可互相写入。':'项目训练使用固定代码与环境版本，/workspace 只读，结果写入 /outputs。';
+    target.querySelector('[value=auto]').disabled=info?.environmentMode!=='oci'||info?.storageLayout==='personal-storage-v1';
     query('[name=training-candidates]').disabled=!automatic||locked;query('#training-candidates-field').hidden=!automatic;
     query('#training-target-note').textContent=automatic?'从授权兼容服务器中优先选空闲卡；先准备固定项目版本和数据，再排队。开发终端不搬迁，任务选定后不自动改派。':'在当前服务器自动分配显卡；不搬运项目或切换服务器。';
     const capacity=automatic?Math.max(1,...(store.data?.machines||[]).filter(m=>trainingHosts().some(h=>h.id===m.id)).map(m=>m.cards||1)):(store.data?.machines||[]).find(m=>m.id===machine)?.cards||1;
@@ -486,7 +490,7 @@ export function executionUI(store,refresh,toast){
     query('#workspace-upload').textContent=project&&uploadRecovery?.scope===uploadScope()&&uploadRecovery.supported?'上传 / 续传':'上传';
     query('#workspace-upload').disabled=!available||locked||output||publishing;query('[name=files]').disabled=!available||locked||output||publishing;
     query('[name=file-area]').disabled=!project||locked;query('.output-run-fields').hidden=!output;query('#project-release-field').hidden=!project;query('#project-detail').hidden=!project;
-    query('#workspace-mode-note').textContent=info?.environmentMode==='oci'?'代码与容器环境一起保存为训练版本；训练只使用选定版本。':project?'代码在 /workspace，环境在 /opt/project-env；训练读取只读版本，输出写入 /outputs。':'终端、文件和训练共用个人 /workspace，新实验可单独创建项目。';
+    query('#workspace-mode-note').textContent=personal?'个人数据在 /data-hdd、/data-ssd；训练工作副本和结果默认在机械盘 /workspace，目录自行组织。':info?.environmentMode==='oci'?'代码与容器环境一起保存为训练版本；训练只使用选定版本。':project?'代码在 /workspace，环境在 /opt/project-env；训练读取只读版本，输出写入 /outputs。':'终端、文件和训练共用个人 /workspace，新实验可单独创建项目。';
     query('#terminal-mode-note').textContent=info?.environmentMode==='oci'?'可在容器内安装系统软件；开发终端没有 GPU；容器内 root 不是服务器 root。':project?'编辑代码、安装项目 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。':'管理个人文件和 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。';
     if(maintenanceFor(store.data?.operationalMaintenance,machine)){
       for(const selector of ['#project-publish','#terminal-open','#terminal-reconnect','#train-form [type=submit]','#workspace-upload','[name=files]'])query(selector).disabled=true;
@@ -699,8 +703,9 @@ export function executionUI(store,refresh,toast){
       const priority=customOn?'normal':trainingPriority(form.get('priority'),managementAllowed());if(!customOn&&priority!=='normal'&&!priorityAvailable())throw Error('尚未确认这台服务器支持优先级控制，请刷新核对或明确选择普通优先级。');
       const placement=placementFromForm(form,Number(form.get('cards')),elastic,scheduling,priority);
       const selection=trainingTarget(form.get('training-target'),target.machine,currentProject(),form.get('training-candidates'),store.data?.machines||[]);
+      const workspaceMode=currentProject()?.storageLayout==='personal-storage-v1'&&selection.machine!=='auto'?form.get('workspace-mode'):null;
       if(selection.machine==='auto'&&placement)throw Error('跨服务器选机请使用自动分卡；固定卡号或共享请使用当前服务器。');
-      await submitRequest({...selection,cards:Number(form.get('cards')),minVramGiB:Number(form.get('memory')),name:form.get('name')||'train',...(store.data?.taskMetadata?.version===1?{description:taskDescription(form.get('task-description')||'')}:{}),...(scheduling?{scheduling}:priorityAvailable()?{priority}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),argv:['/bin/bash','-c',String(form.get('command'))],key:submitKey,...trainingProject(project?currentProject():null,form.get('release')),...(datasets.length?{datasets,prepareData:true}:{})});
+      await submitRequest({...selection,cards:Number(form.get('cards')),minVramGiB:Number(form.get('memory')),name:form.get('name')||'train',...(store.data?.taskMetadata?.version===1?{description:taskDescription(form.get('task-description')||'')}:{}),...(scheduling?{scheduling}:priorityAvailable()?{priority}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...(workspaceMode?{workspaceMode}:{}),argv:['/bin/bash','-c',String(form.get('command'))],key:submitKey,...trainingProject(project?currentProject():null,form.get('release')),...(datasets.length?{datasets,prepareData:true}:{})});
     });
   });
   document.addEventListener('change',event=>{
@@ -808,8 +813,9 @@ export function executionUI(store,refresh,toast){
         <label>任务描述 ${infoHTML('同一服务器获授权的成员可以看到描述。请勿填写口令或令牌。','描述可见范围')}<textarea name="task-description" rows="3" maxlength="2000" placeholder="例如：验证新数据集上的 baseline，预计运行约两小时。不要填写密码或令牌。"></textarea></label>
         <div class="priority-choice"><label>任务优先级<select name="priority" aria-describedby="priority-note">${priorityOptions()}</select></label><p id="priority-note" class="priority-note"></p></div>
         <label id="project-release-field">项目训练版本<select name="release"></select><code id="release-full" class="release-hash"></code><small>刷新保留已选版本；本次发布确认后选择新版本。</small></label>
+        <label id="personal-workspace-field" hidden>工作区<select name="workspace-mode"><option value="isolated">任务独立（默认）</option><option value="shared">同项目同版本共享</option></select></label>
         <label>训练命令<textarea name="command" rows="3" required spellcheck="false">python train.py</textarea></label>
-        <p class="muted">项目训练使用固定代码与环境版本，/workspace 只读，结果写入 /outputs；个人工作区的 Python 在 /opt/conda。已提交任务不会自动换机。</p>
+        <p id="workspace-storage-note" class="muted">项目训练使用固定代码与环境版本，/workspace 只读，结果写入 /outputs。已提交任务不会自动换机。</p>
         <label>数据集版本（可选）<textarea name="datasets" rows="2" spellcheck="false" placeholder="从左侧「数据集」选择；多个版本用空格分隔"></textarea></label>
         <p class="muted">只挂载你获授权且本机就绪的数据，路径 /data2/数据集名称。准备数据不占 GPU。</p><div class="training-advanced">${schedulingFields()}${elasticFields()}${placementFields()}</div><button type="submit" class="button primary">提交训练</button>
       </form></details>

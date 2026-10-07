@@ -115,7 +115,7 @@ def root_json(path):
 def validate_policy(value):
     required = {'schema', 'serviceUid', 'platformRoot', 'datasetsRoot', 'volumes', 'owners'}
     need(isinstance(value, dict) and required <= set(value)
-         and not (set(value) - required - {'controlRoot', 'database', 'logRoot'})
+         and not (set(value) - required - {'controlRoot', 'database', 'logRoot', 'personalStorageRoots'})
          and (not {'controlRoot', 'logRoot'}.intersection(value) or 'database' in value)
          and type(value['schema']) is int and value['schema'] == 1 and type(value['serviceUid']) is int and value['serviceUid'] > 0,
          'Invalid quota policy schema')
@@ -123,6 +123,15 @@ def validate_policy(value):
         path = Path(value[key])
         need(path.is_absolute() and str(path) == value[key] and '..' not in path.parts and len(path.parts) > 2,
              'Invalid quota storage root')
+    if 'personalStorageRoots' in value:
+        roots=value['personalStorageRoots']
+        need(isinstance(roots,dict) and set(roots)=={'hdd','ssd'},'Invalid personal storage quota roots')
+        for root in roots.values():
+            path=Path(root)
+            need(path.is_absolute() and str(path)==root and '..' not in path.parts and len(path.parts)>2,
+                 'Invalid personal storage quota root')
+        a,b=map(Path,roots.values())
+        need(a!=b and a not in b.parents and b not in a.parents,'Personal quota roots overlap')
     need(isinstance(value['volumes'], dict) and 1 <= len(value['volumes']) <= 8, 'Invalid quota volumes')
     uuids = set()
     for name, volume in value['volumes'].items():
@@ -165,6 +174,8 @@ def allowed_path(policy, user, path):
     digest = hashlib.sha256(user.encode()).hexdigest()
     prefixes = [root/'users'/digest[:32], root/'projects-v2'/digest,
                 root/'oci'/digest, data/'.workspaces'/digest, data/'.uploads'/digest]
+    for personal in policy.get('personalStorageRoots',{}).values():
+        prefixes.extend([Path(personal)/'projects-v2'/digest,Path(personal)/'personal-data'/digest])
     # The project upload bucket is derived from the same existing identity key.
     if path.parent == root/'project-ops' and path.name.endswith('.uploads'):
         name = path.name[:-8]

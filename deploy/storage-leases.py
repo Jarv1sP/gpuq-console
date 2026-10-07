@@ -32,6 +32,10 @@ STATES = {'ACQUIRING', 'HELD', 'HANDED_OFF', 'CANCELING', 'CANCELED', 'COMPLETIN
 
 
 class StorageLeases:
+    def _cache(self,ref):
+        resolver=getattr(self.n,'dataset_cache_for',None)
+        return resolver(ref['dataset']) if callable(resolver) else self.n.dataset_cache()
+
     def __init__(self, executor):
         self.n = executor
         self.d, _ = executor.dataset_cache()  # Current mount guard, not a cached path.
@@ -193,6 +197,7 @@ class StorageLeases:
             module, cache = self.n.dataset_cache()
             actor = module.Principal(binding['userId'], False)
             for index, ref in enumerate(binding['references']):
+                _,cache=self._cache(ref)
                 if index < len(record['leases']):
                     self._require(cache, binding, ref, record['leases'][index], binding['id'])
                 lease = cache.acquire_lease(actor, ref['dataset'], ref['version'], binding['id'])
@@ -235,6 +240,7 @@ class StorageLeases:
             raise ValueError('Preparation hold is not ready for handoff')
         _, cache = self.n.dataset_cache()
         for ref, lease in zip(binding['references'], record['leases']):
+            _,cache=self._cache(ref)
             self._require(cache, binding, ref, lease, lease_job_id or binding['id'], ready=True)
         destination = self.n.ROOT / 'jobs' / (binding['id'] + '.datasets.json')
         self.d._mkdir(destination.parent)
@@ -348,6 +354,7 @@ class StorageLeases:
                         raise ValueError('Existing scheduler receipt is not a retired generation')
                     _, cache = self.n.dataset_cache()
                     for ref in binding['references']:
+                        _,cache=self._cache(ref)
                         with cache._locked():
                             if any(value['owner'] == binding['userId'] and value['jobId'] == binding['id']
                                    for value in cache._leases(ref['dataset'], ref['version'])):
@@ -367,6 +374,7 @@ class StorageLeases:
             actor = module.Principal(binding['userId'], False)
             lease_job_id = self._retry_lease_id(retry_binding)
             for index, ref in enumerate(binding['references']):
+                _,cache=self._cache(ref)
                 if index < len(record['leases']):
                     self._require(cache, binding, ref, record['leases'][index], lease_job_id)
                 lease = cache.acquire_lease(actor, ref['dataset'], ref['version'], lease_job_id)
@@ -382,11 +390,11 @@ class StorageLeases:
 
     def _download_cache(self, ref):
         resolve = getattr(self.n, 'dataset_source_cache', None)
-        return resolve(ref['dataset'], ref['version']) if resolve is not None else self.n.dataset_cache()
+        return resolve(ref['dataset'], ref['version']) if resolve is not None else self._cache(ref)
 
     def _release_matching(self, binding, refs, job_id, *, _download_source=False):
         for ref in refs:
-            module, cache = self._download_cache(ref) if _download_source else self.n.dataset_cache()
+            module, cache = self._download_cache(ref) if _download_source else self._cache(ref)
             with cache._locked():
                 matches = [lease for lease in cache._leases(ref['dataset'], ref['version'])
                            if lease['owner'] == binding['userId'] and lease['jobId'] == job_id]

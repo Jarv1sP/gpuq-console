@@ -257,11 +257,13 @@ export function datasetListView(result,users,{includeEmpty=false,labelView,logic
   if(!Array.isArray(result?.datasets))fail('数据集目录暂时无法确认。',502);
   return {datasets:warehouseProjection(result).datasets.filter(item=>ID.test(item?.dataset)&&Array.isArray(item.versions)).map(item=>({
     dataset:item.dataset,ownerLabel:ownerView(item,users).label,
+    ...(['hdd','ssd'].includes(item.storageTier)?{storageTier:item.storageTier}:{}),
     ...(labelView?labelView(logicalName?.(item)||item.dataset):{}),
     versions:item.versions.filter(value=>HASH.test(value?.version)).map(value=>{
       const clean={version:value.version,state:STATES.has(value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true};
       try{warehouseCacheReference({...value,dataset:item.dataset},{dataset:item.dataset,version:value.version});}
       catch{clean.state='UNKNOWN';clean.canPrepare=false;}
+      if(['hdd','ssd'].includes(value.storageTier))clean.storageTier=value.storageTier;
       for(const field of ['bytes','files'])if(Number.isSafeInteger(value[field])&&value[field]>=0)clean[field]=value[field];
       if(HASH.test(value.operationId))clean.operationId=value.operationId;
       if(value.recoveryConfigured===true)clean.recoveryConfigured=true;
@@ -385,6 +387,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
       try{cache=warehouseCacheReference({...value,dataset:item.dataset},ref);}catch{invalidBinding=true;}
       const location={machine:listing.machine,dataset:cache?.dataset||item.dataset,ownerLabel:ownership.label,state:invalidBinding?'UNKNOWN':STATES.has(value.state)?value.state:'UNKNOWN',canUse,canPrepare:!invalidBinding&&canUse&&hasMachine(listing.machine)&&value.canPrepare===true,
         ...(typeof value.warehouseReady==='boolean'?{warehouseReady:!invalidBinding&&value.warehouseReady}:{}),
+        ...(['hdd','ssd'].includes(value.storageTier)?{storageTier:value.storageTier}:{}),
         ...(pending?{removalPending:true,...(!pending.operation_id&&pending.registration_identity?{removalGraceEligible:true}:{})}:{}),
         deletionPermissions:{memberAllowed,reason:memberAllowed?null:'这份数据只能由管理员删除'},
         ...(storage?{storage}:{}),

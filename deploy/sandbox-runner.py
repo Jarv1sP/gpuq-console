@@ -5,6 +5,7 @@ from pathlib import Path
 HERE=Path(__file__).resolve().parent
 TRAINING_CONTROL_PROTOCOL=1
 GPU_ALLOCATION_PROTOCOL=2
+PERSONAL_STORAGE_PROTOCOL=1
 
 def sandbox_information(descriptor,timeout=12,maximum=4096):
     """--info-fd is a stream: bubblewrap writes JSON fields separately."""
@@ -109,9 +110,15 @@ def project_runtime(spec,root,cfg,jid,terminal):
     store=store_module.ProjectStore(root,cfg['conda'],reserve_bytes=store_module.workspace_reserve_bytes(cfg),config=cfg)
     if terminal:
         paths=store.dev_paths(spec['userId'],spec['project'])
-        return {**paths,'output':paths['scratch'],'readonly':False,'environmentMode':store.environment_mode(spec['userId'],spec['project'])}
+        return {**paths,'output':paths['scratch'],'readonly':False,'environmentMode':store.environment_mode(spec['userId'],spec['project']),
+                **({'storageLayout':'personal-storage-v1'} if isinstance(cfg.get('personalStorage'),dict) and store.project_is_personal(spec['userId'],spec['project']) else {})}
     release=store.release(spec['userId'],spec['project'],spec['release'])
-    return {**release,**store.run_paths(spec['userId'],spec['project'],spec['release'],jid),'readonly':True,'environmentMode':release['meta'].get('environmentMode','shared')}
+    paths=store.run_paths(spec['userId'],spec['project'],spec['release'],jid,**({'workspace_mode':spec['workspaceMode']} if 'workspaceMode' in spec else {}))
+    return {**release,**paths,'readonly':paths.get('readonly',True),'environmentMode':release['meta'].get('environmentMode','shared')}
+
+def personal_data_mounts(project,cfg,user):
+    if not project or project.get('storageLayout')!='personal-storage-v1':return []
+    return local_module('gpuq_personal_paths','personal-storage.py').PersonalStorage(cfg).open_data(user)
 
 def project_path(mode,resources=False):
     if mode not in ('shared','isolated'):raise ValueError('Invalid project environment mode')
@@ -146,9 +153,14 @@ os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
 '''
     return ['/usr/bin/python3','-c',bootstrap,mode,*command]
 
-def workspace_admission(cfg,root):
+def workspace_admission(cfg,root,spec=None):
     # Recheck when a queued job actually starts, before untrusted execution.
     # Host-root terminals do not use this sandbox runner. No periodic policing.
+    if spec and spec.get('project') and isinstance(cfg.get('personalStorage'),dict):
+        module=local_module('gpuq_storage_admission','project-store.py')
+        store=module.ProjectStore(root,cfg['conda'],reserve_bytes=module.workspace_reserve_bytes(cfg),config=cfg)
+        if store.project_is_personal(spec['userId'],spec['project']):
+            storage=store.personal_storage();storage.require('hdd');storage.require('ssd',65536);return
     if 'workspaceReserveBytes' not in cfg:return
     module=local_module('gpuq_workspace_storage','project-store.py')
     module.require_workspace_space(root,module.workspace_reserve_bytes(cfg))
@@ -175,7 +187,7 @@ def run_job(capture,*,resource_module):
     if not terminal:capture.bind(root,spec,unit,group,env,indices,uuids)
     runtimefd=capture.runtimefd
     capture.phase='WORKSPACE_ADMISSION'
-    workspace_admission(cfg,root)
+    workspace_admission(cfg,root,**({'spec':spec} if isinstance(cfg.get('personalStorage'),dict) else {}))
     capture.phase='GPU_ALLOCATION'
     if terminal:indices=[];uuids=[]
     else:runtime_spec=local_module('gpuq_allocation','scheduling-policy.py').allocated_spec(spec,indices,uuids,cfg,os.environ)
@@ -205,14 +217,15 @@ def run_job(capture,*,resource_module):
     workfd=os.open(workspace,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     project_fds={name:os.open(project[name],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW) for name in ('env','home','output')} if project else {}
     dataset_fds=[] if terminal else open_dataset_mounts(spec)
+    personal_fds=personal_data_mounts(project,cfg,spec['userId'])
     datafd,datalock=open_data_workspace(spec,jid,terminal)
     if project and project['environmentMode']=='oci':
         capture.phase='OCI_EXECUTION'
         try:
-            code=local_module('gpuq_personal_oci','personal-oci.py').run_project(cfg,oci_runtime_spec(spec,jid,terminal),project,terminal,uuids,workfd,project_fds,dataset_fds,datafd,runtimefd,resourcefd,cgroupfd,stderr_sink=None if terminal else capture.stderr)
+            code=local_module('gpuq_personal_oci','personal-oci.py').run_project(cfg,oci_runtime_spec(spec,jid,terminal),project,terminal,uuids,workfd,project_fds,dataset_fds,datafd,runtimefd,resourcefd,cgroupfd,stderr_sink=None if terminal else capture.stderr,**({'personal_fds':personal_fds} if personal_fds else {}))
             return code
         finally:
-            for fd in [workfd,cgroupfd,resourcefd,*project_fds.values(),*(fd for fd,_ in dataset_fds),*([datafd] if datafd is not None else []),*([datalock] if datalock is not None else [])]:os.close(fd)
+            for fd in [workfd,cgroupfd,resourcefd,*project_fds.values(),*(fd for fd,_ in dataset_fds),*(fd for fd,_ in personal_fds),*getattr(personal_fds,'locks',()),*([datafd] if datafd is not None else []),*([datalock] if datalock is not None else [])]:os.close(fd)
     capture.phase='SANDBOX_PREPARATION'
     info_r,info_w=os.pipe();block_r,block_w=os.pipe()
     args=['/usr/bin/bwrap','--unshare-all',*([] if terminal else ['--new-session']),'--die-with-parent','--cap-drop','ALL','--hostname','gpuq-job',
@@ -233,6 +246,7 @@ def run_job(capture,*,resource_module):
            '--ro-bind',str(HERE/'gpuq-ray'),'/opt/gpuq/bin/gpuq-ray',
            '--ro-bind',str(HERE/'gpuq-network'),'/opt/gpuq/bin/gpuq-network']
     if runtimefd is not None:args+=['--bind-fd',str(runtimefd),'/run/gpuq/runtime']
+    for descriptor,target in personal_fds:args+=['--bind-fd',str(descriptor),target]
     if dataset_fds:
         args+=['--dir','/data2']
         for descriptor,target in dataset_fds:args+=['--ro-bind-fd',str(descriptor),target]
@@ -257,7 +271,7 @@ def run_job(capture,*,resource_module):
         for key,value in {'PATH':project_path(project['environmentMode']),'HOME':'/home/gpuq',
                           'VIRTUAL_ENV':'/opt/project-env','PYTHONNOUSERSITE':'1','PYTHONDONTWRITEBYTECODE':'1',
                           'PIP_REQUIRE_VIRTUALENV':'true','GPUQ_PROJECT':spec['project'],
-                          'GPUQ_PROJECT_RELEASE':spec.get('release','development'),'GPUQ_OUTPUT_DIR':'/outputs',
+                          'GPUQ_PROJECT_RELEASE':spec.get('release','development'),'GPUQ_OUTPUT_DIR':'/workspace' if project.get('storageLayout')=='personal-storage-v1' and not terminal else '/outputs',
                           'XDG_CACHE_HOME':'/home/gpuq/.cache','GPUQ_PROJECT_ENV_MODE':project['environmentMode'],
                           'GPUQ_OFFLINE_ASSETS':'/workspace/offline'}.items():args+=['--setenv',key,value]
         args+=['--unsetenv','PYTHONUSERBASE']
@@ -291,10 +305,14 @@ def run_job(capture,*,resource_module):
         command=project_bootstrap(command,project['environmentMode'])
     control_args,control_fds=([],[]) if terminal or not cfg.get('controlRoot') else local_module('gpuq_training_control','training-control.py').prepare(cfg,spec,workspace,project,os.environ)
     args+=control_args+['--ro-bind',gatefile.name,'/run/.ready','--ro-bind-data',str(hosts),'/etc/hosts','--ro-bind-data',str(passwd),'/etc/passwd','--ro-bind-data',str(resolv),'/etc/resolv.conf','--','/usr/bin/python3','-c',gate,*command]
-    try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,cgroupfd,resourcefd,*control_fds,*(() if runtimefd is None else (runtimefd,)),*(() if datafd is None else (datafd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds)))
+    try:process=subprocess.Popen(args,pass_fds=(info_w,block_r,workfd,resolv,passwd,hosts,cgroupfd,resourcefd,*control_fds,*(() if runtimefd is None else (runtimefd,)),*(() if datafd is None else (datafd,)),*project_fds.values(),*(fd for fd,_ in dataset_fds),*(fd for fd,_ in personal_fds)))
+    except BaseException:
+        for descriptor in getattr(personal_fds,'locks',()):os.close(descriptor)
+        raise
     finally:
         for descriptor in control_fds:os.close(descriptor)
         for descriptor,_ in dataset_fds:os.close(descriptor)
+        for descriptor,_ in personal_fds:os.close(descriptor)
         if datafd is not None:os.close(datafd)
         for descriptor in project_fds.values():os.close(descriptor)
         os.close(cgroupfd);os.close(resourcefd)
@@ -313,6 +331,7 @@ def run_job(capture,*,resource_module):
         return code
     finally:
         if process.poll() is None:process.kill();process.wait()
+        for descriptor in getattr(personal_fds,'locks',()):os.close(descriptor)
         gatefile.close()
         if network and network.poll() is None:network.terminate();network.wait(timeout=5)
         if datalock is not None:os.close(datalock)

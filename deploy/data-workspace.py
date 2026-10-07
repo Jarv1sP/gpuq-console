@@ -20,10 +20,15 @@ NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,39}\Z')
 
 
 class DataWorkspaces:
-    def __init__(self, executor):
+    def __init__(self, executor, *, storage_provider=None, dataset_prefix='w', tier=None):
         self.n = executor
+        self.storage_provider = storage_provider
+        self.dataset_prefix = dataset_prefix
+        self.tier = tier
 
     def storage(self, user):
+        if self.storage_provider is not None:
+            return self.storage_provider(user)
         self.n.workspace(user)
         module, cache = self.n.dataset_cache()  # revalidate the actual data mount
         root = cache.root/'.workspaces'
@@ -74,6 +79,11 @@ class DataWorkspaces:
     def unit(user, key):
         # Request UUIDs are user-chosen, not a cross-account namespace.
         return 'gpuq-workspace-'+hashlib.sha256((user+'\0'+key).encode()).hexdigest()[:32]
+
+    def worker_command(self,user,key):
+        if self.tier is not None:
+            return ['--personal-publish-worker',user,self.tier,key]
+        return ['--data-workspace-worker',user,key]
 
     def unit_stopped(self, unit):
         result = subprocess.run(['/usr/bin/systemctl', '--user', 'show', unit,
@@ -228,13 +238,13 @@ class DataWorkspaces:
                 '--unit='+self.unit(user, key), '--property=KillMode=control-group',
                 '--property=UMask=0077', '--property=CPUQuota=100%', '--property=MemoryMax=2G',
                 '--property=IOWeight=10', '--property=RuntimeMaxSec=86400', '--property=TimeoutStopSec=20',
-                '/usr/bin/python3', str(self.n.HERE/'node-executor.py'), '--data-workspace-worker', user, key], timeout=8)
+                '/usr/bin/python3', str(self.n.HERE/'node-executor.py'), *self.worker_command(user,key)], timeout=8)
             return self.public(task)
         finally:
             os.close(lock)
 
     def worker(self, user, key):
-        module, _ = self.n.dataset_cache()
+        module, _, _ = self.storage(user)
         with module.wait_for_locks():
             return self._worker(user, key)
 
@@ -262,7 +272,7 @@ class DataWorkspaces:
                 raise ValueError('Dataset exceeds the configured publication size limit')
             # Do not mutate a direct-upload registration (u- namespace): its
             # transfer binds the registry identity including sourceId=None.
-            dataset = 'w-'+hashlib.sha256(user.encode()).hexdigest()[:16]+'-'+task['name']
+            dataset = self.dataset_prefix+'-'+hashlib.sha256(user.encode()).hexdigest()[:16]+'-'+task['name']
             actor = module.Principal(user, False)
             internal = module.Principal(user, True)
             # Internal-only source: no arbitrary client path, no configuration
@@ -277,7 +287,7 @@ class DataWorkspaces:
                 registered = cache._register(internal, dataset, manifest, [user], source_id,
                                              _origin='workspace', _receipt=key)
             archive = None
-            if self.n.CONFIG.get('storageArchive', {}).get('enabled') is True:
+            if self.tier is None and self.n.CONFIG.get('storageArchive', {}).get('enabled') is True:
                 archive = self.n.storage_archive()
                 intent = archive.outbox_begin({'opId': key, 'userId': user,
                     'reference': {'dataset': dataset, 'version': registered['version']}, 'origin': 'workspace'})

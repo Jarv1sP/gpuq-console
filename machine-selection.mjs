@@ -37,6 +37,7 @@ export async function selectMachine(service,user,request,priorityCapable,usage){
     try{const probe=await service.projectCopyProbe(user.id,m.id,request.project);return readyProbe(probe,request.project)?{machine:m.id,probe}:null;}catch{return null;}
   }))).filter(Boolean);check();
   if(!sources.length)fail('未找到可迁移的 READY 个人容器项目版本；请先发布项目。');
+  if(sources.some(s=>s.probe.storageLayout==='personal-storage-v1'))fail('机械盘自由工作区当前仅支持手选本机，私人数据与工作区不会自动迁移。');
   const source=sources[0];
   if(sources.some(s=>s.probe.architecture!==source.probe.architecture||s.probe.image!==source.probe.image))fail('同一项目版本的镜像或架构信息不一致；请管理员核对，未提交训练。');
   const choices=(await Promise.all(eligible.map(async m=>{

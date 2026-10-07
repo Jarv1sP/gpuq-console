@@ -131,6 +131,12 @@ gpuctl data status NAME@VERSION  Inspect preparation state
 gpuctl data storage status [NAME@VERSION]  Administrator: capacity and protection state
 gpuctl project quota --machine SERVER  Your real kernel byte/inode usage, when enabled
 gpuctl data storage plan         Administrator: preview cache policy; never deletes
+gpuctl storage info              Personal HDD/SSD paths and capacity
+gpuctl storage copy SRC DEST --from hdd --to ssd  Explicit same-node directory copy
+gpuctl storage copy-status|copy-cancel|copy-resume UUID  Keep the original copy ID
+gpuctl storage copies            Find your original copy IDs after disconnect
+gpuctl storage publish PATH --tier hdd --name NAME  Publish your processed data
+gpuctl storage publish-status UUID --tier hdd       Query the original publication
 gpuctl data storage pin NAME@VERSION LABEL  Protect a manual job's dataset copy
 gpuctl data storage unpin NAME@VERSION LABEL  Release that manual pin after its job stops
 gpuctl run -g 2 --data NAME@VERSION -- python train.py --data /data2/NAME
@@ -213,7 +219,7 @@ const CLI_OPTIONS=new Map([
   ['via','value'],
   ...['sha256','file-id','password-code','source-url'].map(key=>[key,'value']),
   ...['overwrite','json','password-stdin','credentials-stdin','help','full','root','legacy','detach','takeover','general','checkpointable','auto-expand','dry-run','share','hami','ack-unknown','sync','data-workspace'].map(key=>[key,'flag']),
-  ['sync-dir','value'],['candidates','value'],['owner-id','value'],
+  ['sync-dir','value'],['candidates','value'],['owner-id','value'],['workspace-mode','value'],['tier','value'],
   ...['url','session-file','total','cards','as','role','name','description','display-name','min-vram','key','project','release','job','priority','cwd','timeout','reconnect','env-mode','rank','yield','restart-policy','mode','min-cards','global-batch','micro-batch','interval','from','to','ref','target-project','gpu','vram-mib','sm-percent','reason','script-file','revision','preview-token','parent','cursor','limit','members','primary','manifest-sha256'].map(key=>[key,'value']),
   ['machine','machines'],['data','datasets'],
 ]);
@@ -378,10 +384,13 @@ async function main(){
   if(options.sync&&['release','legacy','root','as','job'].some(key=>Object.hasOwn(options,key)))fail('run --sync requires a personal project; cannot combine with --release/--legacy/--root/--as/--job');
   const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',projectCopy=positionals[0]==='project'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
   const datasetLabel=positionals[0]==='data'&&positionals[1]==='label';
+  const personalCopy=positionals[0]==='storage'&&positionals[1]==='copy';
   const projectLifecycle=positionals[0]==='project'&&['label','group','archive','unarchive','retire'].includes(positionals[1]);
-  if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy&&!projectCopy)fail('--from/--to are for sync, project copy or transfer copy; ref/target-project/dry-run are only for sync');
+  if(['ref','target-project','dry-run'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'||['from','to'].some(key=>Object.hasOwn(options,key))&&positionals[0]!=='sync'&&!transferCopy&&!projectCopy&&!personalCopy)fail('--from/--to are for sync, project copy, transfer copy or personal storage copy; ref/target-project/dry-run are only for sync');
   if(options.candidates!==undefined&&positionals[0]!=='run')fail('--candidates is only for run --machine auto');
   if(options.general&&positionals[0]!=='note')fail('--general is only valid for note');
+  if(options.tier!==undefined&&positionals[0]!=='storage')fail('--tier is only for personal storage publish/status');
+  if(options['workspace-mode']!==undefined&&(positionals[0]!=='run'||!['isolated','shared'].includes(options['workspace-mode'])))fail('--workspace-mode is only for run: isolated|shared');
   if(options.interval!==undefined&&positionals[0]!=='watch'&&!transferWatch)fail('--interval is only valid for watch');
   if(positionals[0]==='watch'){
     if(positionals.length!==2||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file','interval'].includes(k)))fail('Usage: watch JOB [--interval 1..60] [--json]');
@@ -846,6 +855,24 @@ async function main(){
       if(extra.length||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(dataset)||!/^[a-f0-9]{64}$/.test(version||'')||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.key||''))fail('Use NAME@FULL_VERSION_HASH and a persistent UUID --key');
       if(machine==='auto'||options.machines.length!==1||!state.machines.some(m=>m.id===machine))fail('Select one explicit hot machine for enrollment');
       result=(await call('datasets.archive.enroll',{machine,dataset,version,ownerId:options['owner-id'],key:options.key})).result;
+    }else if(command==='storage'){
+      const action=positionals[1],machine=defaultMachine();
+      const actions={info:'projects.storage.info',copy:'projects.storage.copy','copy-status':'projects.storage.copy.status',
+        'copy-cancel':'projects.storage.copy.cancel','copy-resume':'projects.storage.copy.resume',publish:'projects.storage.publish','publish-status':'projects.storage.publish.status',copies:'projects.storage.copies'};
+      if(!Object.hasOwn(actions,action)||training.length||options.datasets.length||options.machines.length>1||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json',...(action==='copy'?['from','to','key']:action==='publish'?['tier','name','key']:action==='publish-status'?['tier']:[])].includes(k)))fail('Usage: storage info | storage copy SOURCE TARGET --from hdd --to ssd | storage copy-status|copy-cancel|copy-resume UUID | storage publish PATH --tier hdd --name NAME | storage publish-status UUID --tier hdd');
+      if(positionals.length!==(['info','copies'].includes(action)?2:action==='copy'?4:3))fail('Invalid personal storage command arguments');
+      let request={machine};
+      if(action==='copy'){
+        const key=options.key||randomUUID();process.stderr.write(`Copy key: ${key}\n`);
+        request={machine,key,sourceTier:options.from,targetTier:options.to,sourcePath:positionals[2],targetPath:positionals[3]};
+      }else if(action==='publish'){
+        const key=options.key||randomUUID();process.stderr.write(`Publication key: ${key}\n`);
+        request={machine,key,tier:options.tier||'hdd',name:options.name,path:positionals[2]};
+      }else if(action==='publish-status')request={machine,key:positionals[2],tier:options.tier||'hdd'};
+      else if(!['info','copies'].includes(action))request.key=positionals[2];
+      result=(await call(actions[action],request)).result;
+      if(result.state==='UNKNOWN')process.exitCode=3;
+      else if(result.state==='FAILED')process.exitCode=1;
     }else if(command==='data'&&positionals[1]==='storage'){
       if(session.principal.role!=='admin')fail('Storage management requires an administrator account');
       if(training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json'].includes(k)))fail('Storage commands accept only one --machine SERVER and --json');
@@ -911,7 +938,7 @@ async function main(){
         }
         process.stderr.write(`Project: ${context.project} · release: ${context.release}\n`);
       }
-      result=(await call('jobs.submit',{machine:positionals[1],...(automatic?{machineSelection:{mode:'auto',...(candidates?{candidates}:{})}}:{}),cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{})})).result;
+      result=(await call('jobs.submit',{machine:positionals[1],...(automatic?{machineSelection:{mode:'auto',...(candidates?{candidates}:{})}}:{}),cards,minVramGiB:Number(options['min-vram']||0),name:options.name||'train',...(options.description!==undefined?{description:taskDescription(options.description)}:{}),argv:training,key,...(options.priority?{priority:options.priority}:{}),...(scheduling?{scheduling}:{}),...(elastic?{elastic}:{}),...(placement?{placement}:{}),...(options['workspace-mode']!==undefined?{workspaceMode:options['workspace-mode']}:{}),...context,...(datasets.length?{datasets,prepareData:true}:{})})).result;
     }else if(command==='jobs'&&positionals.length===1)result=state.jobs;
     else if(command==='priority'&&positionals.length===3){
       if(!['idle','normal','high','P0','P1','P2','P3','P4'].includes(positionals[2]))fail('Queue rank must be P0..P4 (or idle, normal, high); yielding/restart stay unchanged');
@@ -1006,6 +1033,13 @@ async function main(){
     if(!result.uploads?.length)console.log('没有未完成的项目上传。');return;
   }
   if(command==='project'&&positionals[1]==='upload-cancel'){console.log(`${result.state} · ${result.uploadId}\n仅处理未提交的临时上传；不会删除项目代码或已发布版本。`);return;}
+  if(result?.protocol==='personal-storage-v1'){
+    if(!result.available){console.log('个人机械盘／固态布局尚未启用。旧工作区不变。');return;}
+    console.log('工作区 /workspace：机械盘；目录自行组织。独立／共享工作区可选。');
+    for(const tier of ['hdd','ssd']){const v=result.volumes[tier];console.log(`${v.mountPath}：可用 ${(v.availableBytes/1024**3).toFixed(1)} GiB；预留 ${(v.reserveBytes/1024**3).toFixed(1)} GiB`);}return;
+  }
+  if(result?.protocol==='personal-copy-v1'){console.log(`传输 ${result.key} · ${result.state}\n/data-${result.sourceTier}/${result.sourcePath} → /data-${result.targetTier}/${result.targetPath}\n${result.bytes??0} / ${result.totalBytes??'待确认'} bytes；查询：gpuctl storage copy-status ${result.key}`);return;}
+  if(result?.protocol==='personal-copies-v1'){for(const row of result.copies)console.log(`${row.key}  ${row.state}  ${row.sourceTier}/${row.sourcePath} → ${row.targetTier}/${row.targetPath}`);if(!result.copies.length)console.log('暂无个人数据复制记录。');return;}
   if(command==='data'&&positionals[1]==='put'){console.log(`已上传 ${result.bytes} 字节 → ${result.machine}:${result.path}\n未自动解压或发布。进入个人数据终端：gpuctl data shell`);return;}
   if(command==='data'&&['publish','workspace-status'].includes(positionals[1])){console.log(`${result.state} · ${result.machine}${result.error?'\n'+result.error:''}${result.operationId?'\n查看：gpuctl data workspace-status '+result.operationId+' --machine '+result.machine:''}${result.state==='READY'?'\n数据集：'+result.dataset+'@'+result.version+'\n训练只读路径：/data2/'+result.dataset:''}`);return;}
   if(command==='data'&&positionals[1]==='upload'){console.log(`数据集已就绪：${result.machine}\n${result.dataset}@${result.version}\n训练只读路径：/data2/${result.dataset}\n可在 run 中使用 --data ${result.dataset}@${result.version}`);return;}

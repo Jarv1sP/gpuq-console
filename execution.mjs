@@ -7,6 +7,7 @@ import {maintainTaskNotes} from './community.mjs';
 import {projectCall,projectReference,validateProjectFile,UUID} from './projects.mjs';
 import {yieldCapable} from './dist/scheduling-policy.js';
 import {normalizeJobSubmission,createSubmittedJob,datasetReferences,personalCardQuotaExempt} from './job-submission.mjs';
+import {personalStorageCall} from './personal-storage.mjs';
 import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 import {datasetCatalogCall,datasetListView,createDatasetRemovalGuard} from './dataset-catalog.mjs';
@@ -208,6 +209,7 @@ export async function executionCall(service,principal,operation,args){
   if(['datasets.delete','datasets.delete.status','datasets.delete.restore','datasets.delete.continue','datasets.delete.cancel','datasets.delete.registration.discard'].includes(operation))return service.datasetDeletionCall(principal,operation,args);
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
+  if(operation.startsWith('projects.storage.'))return personalStorageCall(service,principal,user,operation,args,authorizedMachine);
   if(operation.startsWith('datasets.storage.')){
     if(principal.role!=='admin')fail('存储管理仅管理员可用。',403);
     authorizedMachine(args.machine);
@@ -451,6 +453,7 @@ export async function executionCall(service,principal,operation,args){
       try{prepared=await service.bridge(request.machine,'projects.verify',{...project,userId:user.id});}
       catch{rejectSubmission('所选服务器的项目版本不可用或基础环境已改变；请先完成项目发布。未占用 GPU。',409);}
       if(prepared?.state!=='READY'||prepared.project!==project.project||prepared.release!==project.release)rejectSubmission('项目版本尚未准备完成，未占用 GPU。',409);
+      if(request.workspaceMode!==undefined&&prepared.storageLayout!=='personal-storage-v1')rejectSubmission('所选项目未确认机械盘自由工作区；未提交，不会改写旧布局。',503);
     }
     if(request.cards>user.limits[request.machine])rejectSubmission('任务卡数超出所选机器的用卡额度；不会自动切换服务器。',409);
     await service.refreshGPUQ();

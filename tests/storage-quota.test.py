@@ -96,6 +96,18 @@ class QuotaTests(unittest.TestCase):
         for path in ('/etc', '/srv/gpuq', '/srv/gpuq/users/'+'f'*32, '/srv/gpuq/oci/'+digest+'/../x'):
             with self.subTest(path=path), self.assertRaises(ValueError): q.allowed_path(p, USER, path)
 
+    def test_explicit_personal_storage_roots_keep_exact_owner_and_existing_policy(self):
+        p=policy();p['personalStorageRoots']={'hdd':'/data-hdd/private','ssd':'/data-ssd/private'}
+        q.validate_policy(p);digest=hashlib.sha256(USER.encode()).hexdigest()
+        for root in p['personalStorageRoots'].values():
+            for scope in ('projects-v2','personal-data'):
+                self.assertEqual(q.allowed_path(p,USER,root+'/'+scope+'/'+digest),'owner-root')
+                for wrong in (root,root+'/'+scope+'/'+('f'*64),root+'/'+scope+'/'+digest+'/child'):
+                    with self.subTest(wrong=wrong),self.assertRaises(ValueError):q.allowed_path(p,USER,wrong)
+        for roots in ({'hdd':'/','ssd':'/data-ssd/private'},{'hdd':'/data/a','ssd':'/data/a'},
+                      {'hdd':'/data/a','ssd':'/data/a/sub'},{'hdd':'/data/a'}):
+            with self.subTest(roots=roots),self.assertRaises(ValueError):q.validate_policy({**p,'personalStorageRoots':roots})
+
     def test_symlink_ancestor_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()

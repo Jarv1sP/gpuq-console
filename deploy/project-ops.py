@@ -251,7 +251,9 @@ class ProjectOperations:
         if operation == 'projects.verify':
             self.store.admit(*identity)
             release = self.store.release(*identity, args['release'])
-            return {'project':args['project'],'release':args['release'],'state':'READY'}
+            return {'project':args['project'],'release':args['release'],'state':'READY',
+                    **({'storageLayout':'personal-storage-v1','workspaceModes':['isolated','shared']}
+                       if self.store.project_is_personal(*identity) else {})}
         with self.guard(args):
             if operation == 'projects.create': return self.store.create(*identity, environment_mode=args.get('environmentMode'))
             if operation != 'projects.publish': raise ValueError('Unknown project operation')

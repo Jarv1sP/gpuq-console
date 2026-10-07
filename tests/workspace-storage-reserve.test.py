@@ -246,7 +246,9 @@ class Integration(unittest.TestCase):
                 # Read-only original invocation binding precedes diagnostics;
                 # reserve admission still precedes allocation and limit writes.
                 source = (DEPLOY / name).read_text()
-                self.assertLess(source.index('    workspace_admission(cfg,root)'), source.index("    else:runtime_spec="))
+                self.assertLess(source.index('    workspace_admission(cfg,root,'), source.index("    else:runtime_spec="))
+                self.assertIn("**({'spec':spec} if isinstance(cfg.get('personalStorage'),dict) else {})",source)
+                self.assertIn("storage.require('hdd');storage.require('ssd',65536)",source)
 
     def test_real_runner_main_rejects_before_gpu_probe_budget_mutation_or_payload(self):
         for name in ('sandbox-runner.py', 'sandbox-runner-common-p0.py'):

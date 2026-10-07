@@ -33,6 +33,7 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _ROOT_GUARD = None
 DEFAULT_WORKSPACE_RESERVE = 10 * 1024**3
+PERSONAL_STORAGE_PROTOCOL = 1
 
 
 def project_lifetime(function):
@@ -198,6 +199,7 @@ class ProjectStore:
         self.max_entries, self.max_bytes = max_entries, max_bytes
         self.max_projects, self.max_releases = max_projects, max_releases
         self._lifetime_state = threading.local()
+        self._personal = None
         if any(type(number) is not int or number < 0 for number in (reserve_bytes, max_entries, max_bytes, max_projects, max_releases)):
             fail('invalid_input', 'Project limits must be nonnegative integers')
         with directory(self.root) as fd:
@@ -235,6 +237,25 @@ class ProjectStore:
         spec.loader.exec_module(module)
         module.ensure(self.config, user, path)
 
+    def personal_storage(self):
+        if self._personal is None:
+            spec = importlib.util.spec_from_file_location('gpuq_personal_storage', Path(__file__).with_name('personal-storage.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self._personal = module.PersonalStorage(self.config)
+        return self._personal
+
+    def project_is_personal(self, user, slug):
+        return self._project(user, slug)[1].get('storageLayout') == 'personal-storage-v1'
+
+    def _project_space(self, path, needed=0):
+        if isinstance(self.config.get('personalStorage'), dict):
+            storage = self.personal_storage()
+            if storage.roots['hdd'] in Path(path).parents:
+                storage.require('hdd', needed)
+                return
+        self._space(needed)
+
     def _oci(self, user):
         spec = importlib.util.spec_from_file_location('gpuq_project_oci', Path(__file__).with_name('personal-oci.py'))
         module = importlib.util.module_from_spec(spec)
@@ -248,8 +269,14 @@ class ProjectStore:
         if lifecycle['state'] in ('RETIRING', 'RETIRED'):
             fail('project_retired', 'Project retirement is fenced; inspect the original operation, never reuse this project ID')
         path = self.path / owner / slug
+        personal = False
+        if not path.exists() and not path.is_symlink() and isinstance(self.config.get('personalStorage'), dict):
+            storage = self.personal_storage()
+            base = storage.project_base()
+            path = base / owner / slug
+            personal = True
         try:
-            private_dir(self.path / owner)
+            private_dir(path.parent)
             private_dir(path)
             meta = read_json(path / 'project.json')
         except FileNotFoundError:
@@ -258,6 +285,8 @@ class ProjectStore:
             fail('unsafe_path', 'Project ownership metadata does not match')
         if meta.get('environmentMode', 'shared') not in ('shared', 'isolated', 'oci'):
             fail('unsafe_path', 'Invalid project environment mode')
+        if personal != (meta.get('storageLayout') == 'personal-storage-v1'):
+            fail('unsafe_path', 'Project storage identity changed')
         return path, meta
 
     def lifecycle_folder(self, user, slug):
@@ -345,9 +374,25 @@ class ProjectStore:
         if environment_mode == 'oci':
             self._oci(user).verify_host()
         owner = self._identity(user, slug)
-        parent = private_dir(self.path / owner, create=True)
-        self._quota(user, parent)
-        with self._file_lock(parent / '.create.lock'):
+        control = private_dir(self.path / owner, create=True)
+        self._quota(user, control)
+        with self._file_lock(control / '.create.lock'):
+            parent = control
+            personal = isinstance(self.config.get('personalStorage'), dict) and self.config['personalStorage'].get('enabled') is True
+            if (control / slug).exists() or (control / slug).is_symlink():
+                personal = False
+            elif isinstance(self.config.get('personalStorage'), dict):
+                storage = self.personal_storage()
+                try:
+                    existing_parent = storage.project_base() / owner
+                    existing_personal = (existing_parent / slug).exists() or (existing_parent / slug).is_symlink()
+                except FileNotFoundError:
+                    existing_personal = False
+                if personal or existing_personal:
+                    personal = True
+                    parent = private_dir(storage.project_base(create=not existing_personal) / owner,
+                                         create=not existing_personal)
+                    self._quota(user, parent)
             project = parent / slug
             if project.exists() or project.is_symlink():
                 _, existing = self._project(user, slug)
@@ -365,6 +410,7 @@ class ProjectStore:
                     private_dir(stage / 'dev' / name, create=True)
                 atomic_json(stage / 'project.json', {'schema': 2, 'owner': owner,
                             'project': slug, 'environmentMode': environment_mode or 'shared',
+                            **({'storageLayout': 'personal-storage-v1'} if personal else {}),
                             'createdAt': int(time.time())})
                 os.rename(stage, project)
                 with directory(parent) as fd:
@@ -381,7 +427,19 @@ class ProjectStore:
         if not path.exists() and not path.is_symlink():
             return []
         private_dir(path)
-        return [self.status(user, name) for name in sorted(os.listdir(path)) if SLUG.fullmatch(name)]
+        names = {name for name in os.listdir(path) if SLUG.fullmatch(name)}
+        if isinstance(self.config.get('personalStorage'), dict):
+            try:
+                alternative = self.personal_storage().project_base() / owner
+            except FileNotFoundError:
+                alternative = None
+            if alternative is not None and (alternative.exists() or alternative.is_symlink()):
+                private_dir(alternative)
+                other = {name for name in os.listdir(alternative) if SLUG.fullmatch(name)}
+                if names.intersection(other):
+                    fail('project_conflict', 'Project exists on both legacy and personal storage; no root was guessed')
+                names.update(other)
+        return [self.status(user, name) for name in sorted(names)]
 
     @project_lifetime
     def status(self, user, slug):
@@ -411,7 +469,9 @@ class ProjectStore:
         return {'project': slug, 'state': state, 'createdAt': project['createdAt'],
                 'releases': releases, 'latestReadyRelease': latest,
                 'environmentMode': project.get('environmentMode', 'shared'),
-                'offlineAssetsPath': '/workspace/offline'}
+                'offlineAssetsPath': '/workspace/offline',
+                **({'storageLayout': 'personal-storage-v1', 'workspaceTier': 'hdd',
+                    'workspaceModes': ['isolated', 'shared']} if project.get('storageLayout') == 'personal-storage-v1' else {})}
 
     @project_lifetime
     def dev_paths(self, user, slug):
@@ -644,7 +704,7 @@ class ProjectStore:
                         if budget['bytes'] > self.max_bytes:
                             fail('limit_exceeded', 'Snapshot byte limit exceeded')
                         if target:
-                            self._space(info.st_size)
+                            self._project_space(destination, info.st_size)
                         file = os.open(name, FILE_FLAGS, dir_fd=fd)
                         out = None
                         try:
@@ -803,7 +863,7 @@ class ProjectStore:
             stage.mkdir(mode=0o700)
             try:
                 report('scanning', force=True)
-                self._space()
+                self._project_space(path)
                 oci = self._oci(user).publish(slug) if environment_mode == 'oci' else None
                 base = {'kind': 'oci', 'image': oci['image']} if oci else self.base_fingerprint()
                 dev = self.dev_paths(user, slug)
@@ -959,13 +1019,18 @@ class ProjectStore:
         return {'code': target / 'code', 'env': target / 'env', 'meta': meta}
 
     @project_lifetime
-    def run_paths(self, user, slug, version, jobid):
+    def run_paths(self, user, slug, version, jobid, workspace_mode=None):
         if not isinstance(jobid, str) or not JOB_ID.fullmatch(jobid):
             fail('invalid_input', 'Invalid project job ID')
-        self.release(user, slug, version)
+        release = self.release(user, slug, version)
         path, project = self._project(user, slug)
         self._quota(user, path.parent)
-        claim = {'owner': project['owner'], 'project': slug, 'release': version, 'jobId': jobid}
+        personal = project.get('storageLayout') == 'personal-storage-v1'
+        if workspace_mode is not None and (not personal or workspace_mode not in ('isolated', 'shared')):
+            fail('invalid_input', 'Workspace mode requires a confirmed personal-storage project')
+        mode = workspace_mode or 'isolated'
+        claim = {'owner': project['owner'], 'project': slug, 'release': version, 'jobId': jobid,
+                 **({'workspaceMode': mode} if personal else {})}
         claims = private_dir(self.path / '.run-claims')
         with self._file_lock(claims / '.lock'):
             claim_file = claims / (jobid + '.json')
@@ -976,8 +1041,45 @@ class ProjectStore:
                 atomic_json(claim_file, claim)
             runs = private_dir(path / 'runs')
             run = private_dir(runs / jobid, create=True)
-            result = {name: private_dir(run / name, create=True) for name in ('home', 'output')}
-        return result
+            if not personal:
+                return {name: private_dir(run / name, create=True) for name in ('home', 'output')}
+        # Large working-copy preparation never holds the global claim lock.
+        return self._personal_run(user, slug, version, jobid, path, release, mode)
+
+    def _personal_run(self, user, slug, version, jobid, project, release, mode):
+        storage = self.personal_storage()
+        storage.require('hdd')
+        parent = private_dir(project/'workspaces', create=True)
+        key = jobid if mode == 'isolated' else version
+        kind = private_dir(parent/mode, create=True)
+        destination = kind/key
+        identity = {'schema': 1, 'owner': self._identity(user), 'project': slug,
+                    'release': version, 'workspaceMode': mode, 'workspaceKey': key}
+        with self._file_lock(kind/('.lock-'+key)):
+            if destination.exists() or destination.is_symlink():
+                private_dir(destination)
+                if read_json(destination/'identity.json') != identity:
+                    fail('job_conflict', 'Personal workspace identity changed; no files overwritten')
+            else:
+                stage = private_dir(kind/('.preparing-'+uuid.uuid4().hex), create=True)
+                try:
+                    target = private_dir(stage/'workspace', create=True)
+                    budget = {'entries': 0, 'bytes': 0}
+                    observed, _ = self._walk(release['code'], 'code', target, budget)
+                    if observed != release['meta']['content']['code']:
+                        fail('changed', 'Released code changed during working-copy preparation')
+                    for entry in observed:
+                        if entry['type'] == 'file':
+                            (target/entry['path']).chmod(0o700 if entry['executable'] else 0o600)
+                    private_dir(stage/'home', create=True)
+                    atomic_json(stage/'identity.json', identity)
+                    os.rename(stage, destination)
+                    with directory(kind) as fd: os.fsync(fd)
+                finally:
+                    if stage.exists(): self._remove_stage(stage)
+            return {'code': private_dir(destination/'workspace'), 'home': private_dir(destination/'home'),
+                    'output': private_dir(destination/'workspace'), 'readonly': False,
+                    'storageLayout': 'personal-storage-v1', 'workspaceMode': mode}
 
     @project_lifetime
     def existing_run_paths(self, user, slug, version, jobid):
@@ -993,10 +1095,25 @@ class ProjectStore:
         claims = private_dir(self.path / '.run-claims')
         expected = {'owner': project['owner'], 'project': slug, 'release': version, 'jobId': jobid}
         try:
-            if read_json(claims / (jobid + '.json')) != expected:
+            claim = read_json(claims / (jobid + '.json'))
+            personal = project.get('storageLayout') == 'personal-storage-v1'
+            if personal:
+                mode = claim.get('workspaceMode')
+                if mode not in ('isolated', 'shared'):
+                    fail('unsafe_path', 'Personal workspace mode is missing')
+                expected['workspaceMode'] = mode
+            if claim != expected:
                 fail('job_conflict', 'Job ID belongs to another user, project, or release')
             runs = private_dir(path / 'runs')
             run = private_dir(runs / jobid)
+            if personal:
+                key = jobid if mode == 'isolated' else version
+                target = private_dir(path/'workspaces'/mode/key)
+                identity = {'schema': 1, 'owner': self._identity(user), 'project': slug,
+                            'release': version, 'workspaceMode': mode, 'workspaceKey': key}
+                if read_json(target/'identity.json') != identity:
+                    fail('job_conflict', 'Personal workspace identity changed')
+                return {'home': private_dir(target/'home'), 'output': private_dir(target/'workspace')}
             return {name: private_dir(run / name) for name in ('home', 'output')}
         except FileNotFoundError:
             fail('not_found', 'Existing project run not found')

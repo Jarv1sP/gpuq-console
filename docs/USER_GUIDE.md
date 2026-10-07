@@ -103,7 +103,15 @@ exit
 
 ### 工作区与依赖
 
-个人容器的最短流程：
+管理员启用个人机械盘布局后，新项目提供 `/data-hdd`、`/data-ssd` 和机械盘上的 `/workspace`，目录自己组织。旧项目和旧任务不迁移，用 `gpuctl storage info` 核对；下面的旧目录说明继续适用于原项目。
+
+新布局默认任务独立，可用 `run --workspace-mode shared` 明确共享同项目同版本的工作区；共享任务可能互相覆盖，自己选择输出目录。原发布快照保留，工作副本可写，续跑不重置 checkpoint。
+
+复制个人数据用 `gpuctl storage copy 来源目录 新目标目录 --from hdd --to ssd`，反向交换两种盘即可；目标父目录先创建。命令派发前打印原 UUID，断线后用 `storage copies` 找回，再用 `storage copy-status UUID` 查询、`copy-cancel UUID` 取消，或仅在已确认停止的 FAILED 后 `copy-resume UUID`。不覆盖、不移动，UNKNOWN 不重发。
+
+在自己的数据区完成处理、结束占用它的终端和任务后，用 `gpuctl storage publish 相对目录 --tier hdd --name 名称` 发布，`storage publish-status UUID --tier hdd` 查询。使用返回的完整 ID 和版本作为 `--data`，挂载版本只读；草稿仍可修改。机械盘发布不会强制复制到 SSD。
+
+个人容器的最短流程如下；已有项目不会自动改成容器：
 
 ```sh local
 gpuctl project create my-container
@@ -177,7 +185,7 @@ gpuctl jobs
 
 ### 自动选择训练服务器
 
-个人容器项目发布后，可以让平台在你有权限的机器中选择。当前开发服务器和项目保持不变，只给运行命令增加 `--machine auto`：
+原布局的个人容器项目发布后，可以让平台在你有权限的机器中选择。可选的个人机械盘自由工作区暂仅支持手选本机，不自动搬运私人目录。原布局只给运行命令增加 `--machine auto`：
 
 ```sh local
 gpuctl run --machine auto -g 2 --min-vram 24 -- python train.py --output /outputs
