@@ -254,7 +254,7 @@ try {
             if (scene.room === 'shell' && ['loading', 'error'].includes(scene.state)) {
               await page.locator('#refresh-state').click(); await page.locator('#sync-label').filter({hasText: scene.state === 'loading' ? '同步' : '失败'}).waitFor();}
             if (scene.maintained) {
-              await page.locator('#maintenance-experience').waitFor();
+              await page.locator('#operational-maintenance .maintenance-banner').waitFor();
               if (scene.role === 'admin') await openMaintenance(page);
               if (scene.view === 'start') await page.locator('[data-maintenance-start="all"]').click();
               if (scene.view === 'checks') await page.locator('[data-maintenance-check]').first().click();
