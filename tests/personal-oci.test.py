@@ -216,7 +216,7 @@ class OCITests(unittest.TestCase):
                 path = manager.folder/'tmp'
                 path.rmdir()
                 if kind == 'symlink': path.symlink_to(Path(root))
-                elif kind == 'unsafe-mode': path.mkdir(mode=0o755)
+                elif kind == 'unsafe-mode': path.mkdir(mode=0o755);path.chmod(0o755)
                 with patch.object(o.subprocess,'run') as engine, self.assertRaises((ValueError,OSError)):
                     manager.run('commit', '--pause=false', 'owned-container')
                 engine.assert_not_called()
@@ -302,7 +302,13 @@ class OCITests(unittest.TestCase):
             before=manager.registry_dropin_state(path,os.geteuid())
             (base/'unrelated').mkdir()
             self.assertEqual(manager.registry_dropin_state(path,os.geteuid()),before)
-            override=path/'override.conf';override.write_text('configuration');override.unlink()
+            override=path/'override.conf';override.write_text('configuration')
+            with self.assertRaisesRegex(ValueError,'administrator review'):manager.registry_dropin_state(path,os.geteuid())
+            override.unlink()
+            # Some filesystems coalesce rapid changes into the same timestamp.
+            # Exercise an observable directory change without a flaky sleep.
+            advanced=before[1][-2]+1_000_000_000;os.utime(path,ns=(advanced,advanced))
+            self.assertNotEqual(path.stat().st_mtime_ns,before[1][-2])
             self.assertNotEqual(manager.registry_dropin_state(path,os.geteuid()),before)
 
     def test_prepare_stderr_survives_post_execution_integrity_error_and_timeout(self):
