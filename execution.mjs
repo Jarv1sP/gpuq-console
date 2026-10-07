@@ -321,6 +321,10 @@ export async function executionCall(service,principal,operation,args){
     if(!service.retireStorageArchive)fail('长期归档尚未配置。',409);
     return service.retireStorageArchive(principal,args);
   }
+  if(operation==='datasets.archive.cancel-intent'){
+    if(!service.cancelStorageArchiveIntent)fail('长期归档尚未配置。',409);
+    return service.cancelStorageArchiveIntent(principal,args);
+  }
   if(operation==='datasets.archive.retire-authority'){
     if(!service.retireStorageAuthority)fail('长期归档尚未配置。',409);
     return service.retireStorageAuthority(principal,args);

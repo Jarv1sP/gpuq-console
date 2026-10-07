@@ -11,6 +11,15 @@ global batch 的单进程参考在 FP64 容差 1e-12 内一致。另测三 rank 
 
 ## 每个 PR 的离线自动测试
 
+`storage-archive-intent-cancel.test.js` 用独立 SQLite 验证原 ID/完整 JSON 字节 CAS、
+当前管理员、BLOCKED 严格准入、未知/已派发/持久 lane/传输保护拒绝、审计失败和撤权
+回滚、丢回执重启、旧 worker 与延迟 copy 准入零派发。正常删除图仍要求四节点真实
+计划和隔离，不把控制面取消当作数据删除；真实 loopback HTTP 另核对登录、维护保留
+和同编号恢复，不连接生产。首轮三个失败是夹具把已 BLOCKED 的静默跳过误当异常、
+遗漏中文撤权报错和误认为不存在副本可省略隔离；改为显式旧 QUEUED worker、确切
+撤权契约和四节点完整隔离断言，没有放宽运行时保护。另一个 HTTP 启动失败来自
+新工作树尚未安装 qrcode 依赖，完成规定依赖和客户端构建后通过。
+
 ```sh
 npm ci --ignore-scripts
 npm test

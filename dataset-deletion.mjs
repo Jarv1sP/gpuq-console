@@ -76,6 +76,7 @@ function parseNewRegistration(value,step){
   return structuredClone(value);
 }
 function externalRetirementAction(archive){
+  if(archive.retirement?.mode==='undispatched-intent-cancel-v1')return '归档请求已取消（数据未删除）';
   if(archive.failureStage==='authority-retired')return '外部替代退役';
   // The external lifecycle retains the fixed admission metadata. This is
   // only a log label, never authorization, an absence proof or data isolation.

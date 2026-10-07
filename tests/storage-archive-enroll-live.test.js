@@ -136,6 +136,33 @@ test('same-origin fixture discards a deliberately reset peer without replaying r
   t.diagnostic(JSON.stringify({resetPeers,requestsBefore:before,requestsAfter:f.requests.length,additionalRequests:2,loginRequests:logins}));
 });
 
+test('authenticated HTTP cancels only an exact undispatched BLOCKED intent, preserves maintenance and survives a lost response',async t=>{
+  const f=await fixture(t),archive=installStorageArchive(f.service,{enabled:true,machine:cold,authority:'hdd'},{startTimer:false});
+  const row=archive.enqueueEvent(hot,{id:randomUUID(),userId:f.owner.id,dataset,version,state:'READY'});
+  row.phase='BLOCKED';row.failures=1;
+  const raw=JSON.stringify(row);f.service.db.prepare('UPDATE storage_archives SET data=? WHERE id=?').run(raw,row.id);
+  const args={archiveId:row.id,revision:createHash('sha256').update(raw).digest('hex')};
+  assert.equal((await f.call(f.member.token,'datasets.archive.cancel-intent',args)).http,403);
+  assert.equal((await f.call(f.admin.token,'datasets.archive.cancel-intent',{...args,ownerId:f.owner.id})).http,400);
+  assert.equal((await f.call(f.admin.token,'datasets.archive.cancel-intent',{...args,revision:'f'.repeat(64)})).http,409);
+  const maintenance=await f.call(f.admin.token,'maintenance.set',{scope:'all',enabled:true,reason:'fixture storage repair',revision:0});
+  assert.equal(maintenance.http,200);const before=f.service.operationalMaintenance(f.admin.principal),calls=f.calls.length;
+  const done=await f.call(f.admin.token,'datasets.archive.cancel-intent',args);
+  assert.equal(done.http,200);assert.deepEqual(done.body.result,{archiveId:row.id,state:'CANCELED',controlOnly:true,dataDeleted:false});
+  assert.equal(f.calls.length,calls,'pure control operation has no native RPC');
+  assert.deepEqual(f.service.operationalMaintenance(f.admin.principal),before);
+  // The client loses/ignores the successful response; a new process resolves
+  // the SAME original ID/revision from SQLite, never replays any node action.
+  await f.restart();
+  const repeated=await f.call(f.admin.token,'datasets.archive.cancel-intent',args);
+  assert.equal(repeated.http,200);assert.deepEqual(repeated.body.result,done.body.result);
+  assert.equal(f.calls.length,calls);assert.deepEqual(f.service.operationalMaintenance(f.admin.principal),before);
+  const retired=JSON.parse(f.service.db.prepare('SELECT data FROM storage_archives WHERE id=?').get(row.id).data);
+  assert.equal(retired.eventId,row.eventId);assert.equal(retired.copyKey,row.copyKey);assert.equal(retired.transferId,null);
+  assert.equal(retired.eventAcknowledged,false,'node outbox is not forged ACKed or physically removed');
+  assert.equal(retired.retirement.controlOnly,true);assert.equal(retired.retirement.dataDeleted,false);
+});
+
 test('authenticated HTTP authority retirement is admin-only, restart-safe and does not expose native proofs',async t=>{
   const f=await fixture(t),archive=installStorageArchive(f.service,{enabled:true,machine:cold,authority:'hdd'},{startTimer:false});
   for(const [name,hash] of [['old-ref','a'.repeat(64)],['new-union','b'.repeat(64)]]){
