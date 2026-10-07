@@ -265,7 +265,7 @@ class PersonalCopies:
         self.s.atomic_json(folder/'status.json',{'state':'QUEUED','phase':'WAITING','updatedAt':time.time()})
         self.s.atomic_json(folder/'launch.json',{'unconfirmed':False})
         command=['/usr/bin/systemd-run','--user','--quiet','--collect','--unit='+self.unit(user,key),
-                 '--property=Type=exec','--property=MemoryMax=512M','--property=TasksMax=16',
+                 '--property=Type=exec','--property=MemoryMax=2G','--property=TasksMax=16',
                  '--property=CPUQuota=100%','--property=IOWeight=10','--property=KillMode=control-group',
                  '/usr/bin/python3',str(self.n.HERE/'node-executor.py'),'--personal-copy-worker',user,key]
         try:subprocess.run(command,env=self.n.ENV,capture_output=True,check=True,timeout=5)

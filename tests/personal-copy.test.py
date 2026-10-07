@@ -118,6 +118,7 @@ class Copies(fixture.PersonalStorageTests):
         self.copies.begin(self.args)
         self.copies.launch=__import__('types').MethodType(self.module.PersonalCopies.launch,self.copies)
         def lost(*args,**kwargs):
+            self.assertIn('--property=MemoryMax=2G',args[0],'bounded worker must fit both verification manifests')
             self.assertEqual(self.copies.worker(self.user,self.args['key']),0)
             raise self.module.subprocess.TimeoutExpired('systemd',5)
         with patch.object(self.module.subprocess,'run',side_effect=lost):

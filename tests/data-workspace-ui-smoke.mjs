@@ -174,7 +174,7 @@ try{
   // the selected machine is unchanged and an old directory reply arrives late.
   await page.evaluate(()=>{gateCatalog=true;});await page.locator('#datasets-refresh').click();
   await page.waitForFunction(()=>typeof releaseCatalog==='function');
-  await page.evaluate(()=>{store.users.find(row=>row.id==='bob').limits={'node-b':1};render();releaseCatalog();});await page.waitForTimeout(100);
+  await page.evaluate(()=>{store.users.find(row=>row.id===store.principal.userId).limits={'node-b':1};render();releaseCatalog();});await page.waitForTimeout(100);
   assert.equal(await page.locator('[data-v3-select]').count(),0);assert.match(await page.locator('#datasets-status').textContent(),/授权已更新/);
   // The new contract refreshes after permission changes. Release that fresh
   // authorized read, then independently hold the next old-login observation.
