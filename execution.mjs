@@ -11,6 +11,7 @@ import {snapshotSyncCall} from './snapshot-sync.mjs';
 import {elasticCapable,placementCapable} from './dist/gpu-allocation.js';
 import {datasetCatalogCall,datasetListView,createDatasetRemovalGuard} from './dataset-catalog.mjs';
 import {datasetStorageOverviewCall} from './dataset-storage-overview.mjs';
+import {datasetFilesCall} from './dataset-files.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 import {selectMachine} from './machine-selection.mjs';
@@ -209,6 +210,7 @@ export async function executionCall(service,principal,operation,args){
   if(['datasets.delete','datasets.delete.status','datasets.delete.restore','datasets.delete.continue','datasets.delete.cancel','datasets.delete.registration.discard'].includes(operation))return service.datasetDeletionCall(principal,operation,args);
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   if(operation==='datasets.overview')return datasetStorageOverviewCall(service,principal,args);
+  if(operation==='datasets.files.list')return datasetFilesCall(service,principal,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   if(operation.startsWith('datasets.storage.')){
     if(principal.role!=='admin')fail('存储管理仅管理员可用。',403);

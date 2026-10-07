@@ -37,7 +37,7 @@ test('warehouse originals are distinguished from local cache readiness, with phy
   assert.equal(value.caches.find(row=>row.machine===cold).budgetBytes,400);
   const version=value.datasets[0].versions[0];
   assert.equal(version.contentBytes,42);assert.equal(version.fileCount,2);assert.equal(version.ownerLabel,'所属用户：alice');
-  assert.deepEqual(version.originals,[{machine:cold,dataset:'sample',state:'READY',canUse:true}]);
+  assert.deepEqual(version.originals,[{machine:cold,dataset:'sample',state:'READY',warehouseReady:true,canUse:true}]);
   assert.equal(version.caches.find(row=>row.machine===cold).state,'NOT_LOCAL');
   assert.equal(version.caches.find(row=>row.machine===cold).canUse,false);
   assert.match(value.checkedAt,/Z$/);assert.match(value.physicalVolumes[0].id,new RegExp('^'+hot+':'));
@@ -131,4 +131,52 @@ test('overview never refreshes removal exclusions, even for administrators',asyn
   f.service.db={prepare:()=>assert.fail('overview must not mutate cleanup bookkeeping')};
   const value=await f.call({}, {...principal,role:'admin'});
   assert.equal(value.protocol,'dataset-storage-overview-v1');
+});
+
+test('all-account real project usage is independent from cache logical sizes and never invented for legacy nodes',async()=>{
+  const measured=capacity();Object.assign(measured.storageOverview.cache,{projectBytes:8192,projectUsageComplete:true,projectCollectedAt:'2026-01-01T01:00:00Z'});
+  const f=fixture({capacities:{[hot]:measured,[cold]:snapshot('e')},records:{[hot]:[record('sample',[{version:hash,state:'READY',bytes:42,files:1}])]}});
+  const value=await f.call(),actual=value.caches.find(row=>row.machine===hot);
+  assert.equal(actual.projectBytes,8192);assert.equal(actual.projectUsageComplete,true);assert.equal(actual.projectCollectedAt,'2026-01-01T01:00:00Z');
+  assert.equal(actual.readyContentBytes,42);assert.equal(actual.volume.usedBytes,300);
+  const old=value.caches.find(row=>row.machine===cold);
+  assert.equal(old.projectBytes,null);assert.equal(old.projectUsageComplete,false);assert.equal(old.projectCollectedAt,null);
+  assert.equal(actual.volume.collectedAt,'2026-01-01T00:00:00Z');
+  assert.doesNotMatch(JSON.stringify(value),/projects-v2|oci\/|userId|ownerIds|demo-user/);
+});
+
+test('last-success time survives unsuccessful observations without retaining stale capacity or project byte values',async()=>{
+  const measured=capacity();Object.assign(measured.storageOverview.cache,{projectBytes:0,projectUsageComplete:true,projectCollectedAt:'2026-01-01T01:00:00Z'});
+  const f=fixture({capacities:{[hot]:measured}}),bridge=f.service.bridge;
+  assert.equal((await f.call()).caches.find(row=>row.machine===hot).projectBytes,0);
+  f.service.bridge=(machine,op,request)=>machine===hot&&op==='datasets.capacity'?Promise.reject(Error('offline')):bridge(machine,op,request);
+  const row=(await f.call()).caches.find(row=>row.machine===hot);
+  assert.equal(row.volume.totalBytes,null);assert.equal(row.volume.checkedAt,null);assert.equal(row.volume.collectedAt,'2026-01-01T00:00:00Z');
+  assert.equal(row.projectBytes,null);assert.equal(row.projectUsageComplete,false);assert.equal(row.projectCollectedAt,'2026-01-01T01:00:00Z');
+  f.service.bridge=bridge;Object.assign(measured.storageOverview.cache,{projectBytes:99,projectUsageComplete:false,projectCollectedAt:'2026-01-01T01:00:00Z'});
+  const failed=(await f.call()).caches.find(row=>row.machine===hot);
+  assert.equal(failed.projectBytes,null);assert.equal(failed.projectUsageComplete,false);assert.equal(failed.projectCollectedAt,'2026-01-01T01:00:00Z');
+});
+
+test('malformed or unbounded project measurements are unknown, not zero; current original proof is explicit',async()=>{
+  for(const fields of [{projectBytes:-1,projectUsageComplete:true},{projectBytes:Number.MAX_SAFE_INTEGER+1,projectUsageComplete:true},{projectBytes:0,projectUsageComplete:1},{projectBytes:0,projectUsageComplete:true,projectCollectedAt:'not-time'}]){
+    const measured=capacity();Object.assign(measured.storageOverview.cache,{projectCollectedAt:'2026-01-01T01:00:00Z',...fields});
+    const f=fixture({capacities:{[hot]:measured},records:{[cold]:[record('sample',[{version:hash,state:'REGISTERED',warehouseReady:false,bytes:42,files:1}])]}});
+    const value=await f.call(),row=value.caches.find(row=>row.machine===hot);
+    assert.equal(row.projectBytes,null);assert.equal(row.projectUsageComplete,false);
+    assert.equal(value.datasets[0].versions[0].originals[0].warehouseReady,false);
+    assert.equal(value.datasets[0].versions[0].originals[0].canUse,false);
+  }
+});
+
+test('directory preview capability requires a real protocol node and an actor-authorized confirmed fixed source, not content-preview access',async()=>{
+  const capable={...capacity(),datasetFileList:1},records={[hot]:[record('sample',[{version:hash,state:'READY',bytes:42,files:1}])]};
+  const f=fixture({capacities:{[hot]:capable},records});
+  const available=await f.call();assert.equal(available.filePreviewAvailable,true);assert.equal(available.fileContentPreviewAvailable,false);
+  records[hot][0].ownerIds=['demo-user-2'];assert.equal((await f.call()).filePreviewAvailable,false);
+  records[hot][0].ownerIds=['demo-user-1'];records[hot][0].versions[0].state='REGISTERED';
+  assert.equal((await f.call()).filePreviewAvailable,false);
+  records[hot][0].versions[0].warehouseReady=true;assert.equal((await f.call()).filePreviewAvailable,true);
+  capable.datasetFileList='1';assert.equal((await f.call()).filePreviewAvailable,false);
+  capable.datasetFileList=1;Object.assign(capable.storageOverview.cache.volume,{availableBytes:-1});assert.equal((await f.call()).filePreviewAvailable,false);
 });

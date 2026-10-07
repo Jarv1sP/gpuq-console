@@ -11,6 +11,20 @@ global batch 的单进程参考在 FP64 容差 1e-12 内一致。另测三 rank 
 
 ## 每个 PR 的离线自动测试
 
+`dataset-files.test.js`、`dataset-files-http.test.js`、`dataset-files.test.py` 和
+`dataset-files-bridge.test.py` 验证固定版本目录页：member 内容 ACL 与管理员元数据可见性
+分离、零额度／仓库源授权、旧节点明确 unavailable、200 项／64 KiB 上限、原源分页、
+撤权／丢回执／malformed response、no-follow 单链接和整页版本锁、不创建持久下载租约。
+独立 `--dataset-files-rpc` 只接受三个 literal metadata RPC，上传／终端／写操作拒绝。
+总览新增的项目实际字节、last-success 时间与动态目录能力有正反投影测试；旧节点不假 0。
+`storage-project-observation.test.py` 单独验证有界真实采样、inode 去重、挂载／根身份变化、
+缓存与未知。所有文件、配置、锁和服务夹具仅在一次性本地目录，不访问生产。
+
+开发首轮 Node 的真实 Python 桥夹具误用了 macOS `/var` symlink 临时根；按既有 no-follow
+边界设 `TMPDIR=/private/tmp` 并使用真实 Python 3.12 后重跑，无保护放宽。Portal image
+静态 COPY 验证还要求新增源码先加入 Git index，不能把未跟踪文件视为镜像来源。全
+浏览器旧主线首轮停在 cloud-files 夹具，整合已有主线夹具修正后另验；不据此改运行时权限。
+
 `storage-archive-intent-cancel.test.js` 用独立 SQLite 验证原 ID/完整 JSON 字节 CAS、
 当前管理员、BLOCKED 严格准入、未知/已派发/持久 lane/传输保护拒绝、审计失败和撤权
 回滚、丢回执重启、旧 worker 与延迟 copy 准入零派发。正常删除图仍要求四节点真实
