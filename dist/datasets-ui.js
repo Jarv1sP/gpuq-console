@@ -231,7 +231,9 @@ export function datasetsUI(store,toast){
   });
   store.onAuthChange?.(()=>{catalog=null;warehouse.reset();cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;lastScan=null;uploadRoute=null;uploadState=null;canRelay=false;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
   async function load(){
+    if(section.hidden){initialCatalog=true;return;}
     if(busy||uploadBusy||discardBusy||!store.principal)return;
+    initialCatalog=false;
     const selected=section.querySelector('[name=dataset-machine]')?.value,machine=machineAllowed(selected)?selected:null;
     busy=true;const token=++generation,expected=account(),button=section.querySelector('#datasets-refresh'),select=section.querySelector('[name=dataset-machine]');button.disabled=true;select.disabled=true;
     const valid=()=>token===generation&&current(expected)&&(section.querySelector('[name=dataset-machine]')?.value||null)===machine&&(machine===null||machineAllowed(machine));
@@ -244,6 +246,8 @@ export function datasetsUI(store,toast){
   }
   section.addEventListener('change',e=>{
     if(e.target.name==='dataset-machine'){
+      generation++;busy=false;catalog=null;warehouse.catalogUnavailable();initialCatalog=true;
+      section.querySelector('#dataset-catalog').replaceChildren();
       workspace.reset();document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));active=null;lastScan=null;canRelay=false;showUploadRoute(null);relayChoice(true);phase();
       section.querySelector('#data-workspace-files-list').replaceChildren();section.querySelector('#data-workspace-status').textContent='已切换服务器';section.querySelector('#dataset-upload-status').textContent='选择一个目录。';controls();load();
     }
