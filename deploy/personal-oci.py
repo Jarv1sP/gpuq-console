@@ -257,7 +257,16 @@ class PersonalOCI:
                     missing = path.relative_to(parent).parts[0]
                     try: os.stat(missing, dir_fd=fd, follow_symlinks=False)
                     except FileNotFoundError:
-                        return ('absent', str(parent), self.s.stamp(info), missing)
+                        # Absence is about this lookup path, not every entry in
+                        # its nearest existing ancestor (possibly all of /etc).
+                        # Sibling writes change size/nlink/mtime/ctime without
+                        # changing registry configuration. Keep the anchor's
+                        # identity and trust boundary, and recheck the missing
+                        # component after the engine operation. Existing empty
+                        # drop-ins still retain their full mutation stamp above.
+                        anchor = (info.st_dev, info.st_ino, info.st_mode,
+                                  info.st_uid, info.st_gid)
+                        return ('absent', str(parent), anchor, missing)
                     raise ValueError('OCI registry drop-in path changed during inspection')
             except FileNotFoundError:
                 need(parent != Path('/'), 'OCI registry drop-in ancestor is missing')
