@@ -20,7 +20,7 @@ export function cacheCapacityRatio(cache){
 }
 export const cacheCapacityAmount=cache=>capacityAmount(cache?.readyContentBytes)+
   (Number.isSafeInteger(cache?.readyContentBytes)&&cache.readyContentBytes>=0&&cache.usageComplete===false?'+':'');
-export const cacheCapacityTitle=cache=>[cache?.usageComplete===false?'部分统计':'',cache?.volume.collectedAt?capacityCollectedTitle(cache.volume.collectedAt):capacityCheckedTitle(cache?.volume.checkedAt)].filter(Boolean).join(' · ');
+export const cacheCapacityTitle=cache=>[cache?.usageComplete===false?'部分统计':'',cache?.volume?.collectedAt?capacityCollectedTitle(cache.volume.collectedAt):capacityCheckedTitle(cache?.volume?.checkedAt)].filter(Boolean).join(' · ');
 export function cacheCapacityRailHTML(cache,large=false){
   const ratio=cacheCapacityRatio(cache),percent=ratio===null?null:Math.round(ratio*100);
   return `<span class="capacity-cache-rail ${large?'large':''} ${ratio===null?'unknown':ratio>=.8?'hot':''}" title="${esc(cacheCapacityTitle(cache))}" role="img" aria-label="缓存 ${cacheCapacityAmount(cache)} / ${capacityAmount(cache?.budgetBytes)}">${percent===null?'':`<i data-v3-percent="${Math.min(100,percent)}"></i>`}<b class="capacity-watermark low" aria-hidden="true"></b><b class="capacity-watermark high" aria-hidden="true"></b></span>`;
@@ -33,6 +33,30 @@ export function warehouseCapacityHTML(warehouse,checkedAt){
 export function warehouseCardHTML(w,selected=false){
   const pct=value=>Math.min(100,Math.max(0,value/w.totalBytes*100)),other=w.known?Math.max(0,w.usedBytes-w.contentBytes):null;
   return `<button type="button" class="capacity-warehouse v4-warehouse-card ${w.known?'':'unknown'} ${w.warning?'low':''}" data-v4-warehouse="${esc(w.machine)}" aria-pressed="${selected}" title="${esc(w.machine+' · '+(w.collectedAt?capacityCollectedTitle(w.collectedAt):capacityCheckedTitle(w.checkedAt)))}"><span class="v4-card-head"><b class="v4-warehouse-name" title="${esc(w.machine)}">${esc(w.machine)}</b><span class="v4-dataset-count num">${w.datasetCount===null?'未知':w.datasetCount+' 个数据集'}</span><span class="v4-free num"><b>${capacityAmount(w.availableBytes)}</b> 可用</span></span><span class="capacity-strata" role="img" aria-label="数据集 ${capacityAmount(w.contentBytes)}，其他 ${capacityAmount(other)}，可用 ${capacityAmount(w.availableBytes)}">${w.known?`<i class="capacity-data" data-v3-percent="${pct(w.contentBytes)}"></i><i class="capacity-other" data-capacity-left="${pct(w.contentBytes)}" data-v3-percent="${Math.min(100-pct(w.contentBytes),pct(other))}"></i>${w.reserveBytes===null?'':`<i class="capacity-reserve" data-capacity-left="${pct(w.totalBytes-w.reserveBytes)}"></i>`}`:''}</span><span class="capacity-values"><span class="capacity-value-data">数据集 <b class="num">${capacityAmount(w.contentBytes)}</b></span><span class="capacity-value-other">其他 <b class="num">${capacityAmount(other)}</b></span><span class="capacity-value-free">共 <b class="num">${capacityAmount(w.totalBytes)}</b></span></span>${w.warning?'<span class="capacity-warning">仓库空间不足</span>':''}</button>`;
+}
+// Independent logical quantities remain visible even when disk readings are
+// unavailable. A segment never claims more space than the observed disk.
+export function trainingCapacitySegments(cache){
+  const byte=value=>Number.isSafeInteger(value)&&value>=0?value:null;
+  const disk=cache?.volume||{},total=byte(disk.totalBytes),used=byte(disk.usedBytes),free=byte(disk.availableBytes),
+    data=byte(cache?.readyContentBytes),project=byte(cache?.projectBytes);
+  const known=total>0&&used!==null&&free!==null&&used<=total&&used+free<=total;
+  const other=known&&data!==null?Math.max(0,used-data-(project??0)):null;
+  const projectWidth=known?Math.min(project??0,used)/total*100:0;
+  const dataWidth=known?Math.min(data??0,Math.max(0,used-(project??0)))/total*100:0;
+  return {known,data,project,other,free,budget:byte(cache?.budgetBytes),
+    widths:known?{project:projectWidth,data:dataWidth,other:Math.max(0,used/total*100-projectWidth-dataWidth),free:free/total*100}:null,
+    budgetPercent:known&&byte(cache?.budgetBytes)!==null?Math.min(100,cache.budgetBytes/total*100):null};
+}
+export function trainingCardHTML(cache,selected=false,current=false){
+  const s=trainingCapacitySegments(cache),disk=cache?.volume||{},machine=cache?.machine||'',
+    projectAmount=capacityAmount(s.project)+(s.project!==null&&cache.projectUsageComplete===false?'+':''),
+    projectTitle=[cache?.projectUsageComplete===false?'部分统计':'',capacityCollectedTitle(cache?.projectCollectedAt)].filter(Boolean).join(' · '),
+    dataAmount=cacheCapacityAmount(cache),label=[s.project===null?null:'容器 '+projectAmount,'数据集 '+dataAmount,'其他 '+capacityAmount(s.other),'可用 '+capacityAmount(s.free)].filter(Boolean).join('，');
+  return `<button type="button" class="v3-server-chip v4-training-card" data-v3-filter="${esc(machine)}" aria-pressed="${selected}" title="${esc(machine+' · '+(disk.collectedAt?capacityCollectedTitle(disk.collectedAt):capacityCheckedTitle(disk.checkedAt)))}"><span class="v3-server-name"><span title="${esc(machine)}">${current?'<i class="v3-here" aria-label="所选服务器"></i>':''}${esc(machine)}</span><small class="num"><b>${capacityAmount(s.free)}</b> 可用</small></span><span class="v4-training-bar ${s.known?'':'unknown'}" role="img" aria-label="${esc(label)}">${s.widths?`${s.project===null?'':`<i class="v4-project" data-v3-percent="${s.widths.project}"></i>`}<i class="v4-data" data-v3-percent="${s.widths.data}"></i><i class="v4-other" data-v3-percent="${s.widths.other}"></i><i class="v4-available" data-v3-percent="${s.widths.free}"></i>`:''}${s.budgetPercent===null?'':`<i class="v4-budget" data-capacity-left="${s.budgetPercent}" title="缓存预算 ${capacityAmount(s.budget)}" aria-label="缓存预算 ${capacityAmount(s.budget)}"></i>`}</span><span class="v4-training-values num">${s.project===null?'':`<span class="v4-project-value" title="${esc(projectTitle)}"><i class="v4-project"></i>${projectAmount}</span>`}<span class="v4-data-value" title="${esc(cacheCapacityTitle(cache))}"><i class="v4-data"></i>${dataAmount}</span>${cache?.shared?'<span class="capacity-shared">与仓库同盘</span>':''}</span></button>`;
+}
+export function trainingLegendHTML(caches){
+  return `<span class="v4-training-key">${caches.some(row=>Number.isSafeInteger(row?.projectBytes)&&row.projectBytes>=0)?'<span><i class="v4-project"></i>容器</span>':''}<span><i class="v4-data"></i>数据集</span><span><i class="v4-other"></i>其他</span></span>`;
 }
 export function storageCapacityDetailHTML(cache){
   if(!cache)return '';

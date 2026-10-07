@@ -43,7 +43,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  assert.equal(await page.locator('.capacity-warehouse').count(),1,'Capacity components are visible using existing confirmed reads');
  assert.equal(await page.locator('.capacity-value-data b').textContent(),'142.00 GiB');
  assert.equal(await page.locator('.v4-free b').textContent(),'未知');
- assert.equal(await page.locator('#warehouse-machine-capacity .capacity-disk>span').count(),20);
+ assert.equal(await page.locator('.v4-training-card').count(),machines.length);assert.equal(await page.locator('#warehouse-machine-capacity,.v3-rail,.capacity-detail').count(),0);
  assert.equal(await page.locator('[data-v3-cache-action]').count(),0);
  await page.evaluate(async()=>{document.body.dataset.room='work';await view.loadOverview();document.body.dataset.room='datasets';});
  assert.deepEqual(await page.evaluate(()=>calls),[],'No overview read outside the dataset room');
@@ -60,8 +60,8 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  const geometry=async()=>{
   await page.evaluate(()=>document.fonts.ready);
   const value=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,bar:document.querySelector('.capacity-strata').getBoundingClientRect().height,
-   cache:document.querySelector('#warehouse-machine-capacity .capacity-cache-rail').getBoundingClientRect().height,cells:document.querySelectorAll('#warehouse-machine-capacity .capacity-disk>span').length}));
-  assert(value.scroll<=width+1,JSON.stringify(value));assert.equal(value.bar,16);assert.equal(value.cache,6);assert.equal(value.cells,20);
+   cache:document.querySelector('.v4-training-bar').getBoundingClientRect().height,cards:document.querySelectorAll('.v4-training-card').length}));
+  assert(value.scroll<=width+1,JSON.stringify(value));assert.equal(value.bar,16);assert.equal(value.cache,8);assert.equal(value.cards,machines.length);
   const copy=await page.locator('#page-datasets').innerText();assert.doesNotMatch(copy,/原件|软件预算|所在磁盘|承载卷|只预警|检查于|最后成功/);
   assert.equal(await page.locator('.capacity-warehouse p,.capacity-detail p').count(),0,'No explanatory paragraphs');
  };
@@ -80,9 +80,25 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
   await geometry();
   if(scene==='unknown'){assert.equal(await page.locator('.capacity-warehouse.unknown').count(),1);assert.equal(await page.locator('.capacity-proof.confirmed').count(),0);assert(await page.locator('.capacity-warehouse').getAttribute('title'));}
   if(scene==='warning'){assert.equal(await page.locator('.capacity-warning').textContent(),'仓库空间不足');assert.equal(await page.locator('[data-v3-upload]').first().isEnabled(),true,'Warning does not ban an upload');}
-  if(scene==='shared')assert.equal(await page.locator('#warehouse-machine-capacity .capacity-shared').textContent(),'与仓库同盘');
+  if(scene==='shared')assert.equal(await page.locator('[data-v3-filter="'+machines.at(-1).id+'"] .capacity-shared').textContent(),'与仓库同盘');
   await page.evaluate(()=>document.activeElement?.blur());await page.screenshot({path:join(output,role+'-'+scene+'-'+width+'.png'),fullPage:true});
  }
+ await page.evaluate(()=>{const value=structuredClone(snapshot);Object.assign(value.caches[0],{projectBytes:100*1024**3,projectUsageComplete:false,projectCollectedAt:'2026-10-08T01:23:00Z'});value.caches[0].volume.collectedAt='2026-10-08T02:34:00Z';view.storageOverview(value);});
+ const firstCard=page.locator('[data-v3-filter="'+machines[0].id+'"]');
+ assert.equal(await firstCard.locator('.v4-project-value').textContent(),'100.00 GiB+');
+ assert((await firstCard.locator('.v4-project-value').getAttribute('title')).includes('部分统计 · 采集于'));
+ assert((await firstCard.getAttribute('title')).includes('采集于'));
+ assert.equal(await page.locator('.v4-training-key').filter({hasText:'容器'}).count(),1,'the legend appears once, only when at least one numeric container quantity exists');
+ assert.equal(await page.locator('.v4-training-card .v4-project-value').count(),1,'unknown project quantities on other nodes stay absent');
+ const segments=await firstCard.locator('.v4-training-bar').evaluate(node=>({width:node.clientWidth,parts:[...node.querySelectorAll(':scope>i:not(.v4-budget)')].map(row=>row.getBoundingClientRect().width)}));
+ assert(segments.parts.every(value=>value>=0)&&segments.parts.reduce((a,b)=>a+b,0)<=segments.width+1,'inconsistent logical amounts cannot overflow the real disk bar');
+ await page.evaluate(()=>{const value=structuredClone(snapshot);value.caches[0].readyContentBytes=0;value.caches[0].usageComplete=false;view.storageOverview(value);});
+ assert.equal(await firstCard.locator('.v4-data-value').textContent(),(role==='admin'?'284.00':'142.00')+' GiB+','an incomplete zero is supplemented only by this account\'s current readable READY catalog versions');
+ assert(!await page.locator('.v4-training').textContent().then(text=>text.includes('容器')));
+ await page.evaluate(()=>{const value=structuredClone(snapshot);Object.assign(value.caches[0].volume,{totalBytes:null,usedBytes:null,availableBytes:null,collectedAt:'2026-10-08T01:23:00Z'});view.storageOverview(value);});
+ assert.equal(await firstCard.locator('.v3-server-name small b').textContent(),'未知','past collection time does not revive an old physical reading');
+ assert.equal(await firstCard.locator('.v4-training-bar.unknown').count(),1);
+ await page.evaluate(()=>view.storageOverview(snapshot));
  await page.locator('[data-v4-clear=all]').click();
  await page.evaluate(()=>{filesMode='ok';view.storageOverview({...snapshot,filePreviewAvailable:true});});
  if(width<760){assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.files.list').length),0,'a hidden phone detail must not read files');await page.locator('[data-v3-select=sample-data]').click();}
@@ -112,7 +128,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  }
  await page.evaluate(async()=>{waitReply=new Promise(resolve=>window.releaseOverview=resolve);window.pending=view.loadOverview();store.principal={userId:'new-reader',username:'新成员',role:'member'};store.authGeneration++;view.reset();releaseOverview(snapshot);await pending;});
  assert.equal(await page.locator('#warehouse-capacity').textContent(),'未知','A retired account reply cannot restore warehouse locations, capacity or datasets');assert.equal(await page.locator('[data-v4-warehouse]').count(),0);
- assert.equal(await page.locator('#warehouse-machine-capacity .capacity-big').first().textContent(),'未知/ 未知');
+ assert.deepEqual(await page.locator('.v4-data-value').allTextContents(),machines.map(()=>'未知'));assert.equal(await page.locator('.v4-project-value').count(),0);
  assert.equal(await page.locator('[data-v3-select]').count(),0);
  assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.overview'&&Object.keys(row.args).length===0||row.operation==='datasets.files.list'&&['sample-data','foreign-private'].includes(row.args.dataset)&&row.args.version===version&&Object.keys(row.args).sort().join()==='dataset,version'||row.operation==='datasets.cache.capabilities'&&['sample-data','legacy-data'].includes(row.args.dataset)&&row.args.version===version&&machines.some(machine=>machine.id===row.args.machine)&&Object.keys(row.args).sort().join()==='dataset,machine,version'));assert.deepEqual(errors,[]);await page.close();
 }console.log('CAPACITY UI PASS: simulated member/admin 1440/1024/390/320; normal/unknown/warning/shared, no explanation copy, legacy fallback, account fence, readonly room gating.');}finally{await browser.close();}

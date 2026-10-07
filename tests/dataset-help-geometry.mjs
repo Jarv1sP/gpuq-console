@@ -5,7 +5,7 @@ import {inspectGeometry} from './layout-geometry.mjs';
 export const datasetHelpGeometry = {
   roots: ['#cloud-files'],
   compactSearch: '#warehouse-search',
-  largeTargets: '.v3-row,.v3-upload-choices>.button,.v4-warehouse-card',
+  largeTargets: '.v3-row,.v3-upload-choices>.button,.v4-warehouse-card,.v4-training-card',
   clippedScrollPanels: ['.v3-inspector-overflow .v3-detail-scroll'],
   labelledHelp: [{buttons: '#page-datasets:not([hidden]) [data-copy-help],#page-datasets:not([hidden]) details.ui-info>summary,body[data-room=datasets] .help-links [data-copy-help],body[data-room=datasets] .help-links>details.ui-info>summary',
     rows: '.copy-caption,.dataset-field-label,.dataset-help-heading,.dataset-upload-heading,.dataset-route-heading,.dataset-book>div,.dataset-title-label,.dataset-cache-admin>header,.dataset-details-cell,.dataset-storage',

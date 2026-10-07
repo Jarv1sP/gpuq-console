@@ -153,6 +153,7 @@ export function adaptStorageOverview(raw){
   const known=totalBytes!==null&&totalBytes>0&&usedBytes!==null&&usedBytes<=totalBytes&&availableBytes!==null&&usedBytes+availableBytes<=totalBytes&&contentBytes!==null;
   const caches=raw.caches.filter(row=>identifier.test(row?.machine||'')).map(row=>({machine:row.machine,state:text(row.state),volume:volume(row.volume),
     readyContentBytes:number(row.readyContentBytes),readyVersionCount:number(row.readyVersionCount),budgetBytes:number(row.budgetBytes),reserveBytes:number(row.reserveBytes),usageComplete:row.usageComplete===true,
+    projectBytes:number(row.projectBytes),projectUsageComplete:typeof row.projectUsageComplete==='boolean'?row.projectUsageComplete:null,projectCollectedAt:copy(row.projectCollectedAt),
     shared:!!text(row.volume?.id)&&volumes.has(JSON.stringify([row.machine,row.volume.id]))}));
   return {protocol:raw.protocol,checkedAt:copy(raw.checkedAt),partial:raw.partial===true,filePreviewAvailable:raw.filePreviewAvailable===true,
     warehouse:{volumes:rows,totalBytes,usedBytes,availableBytes,contentBytes,reserveBytes,known,
@@ -186,13 +187,14 @@ export function displayStorageCapacity(overview,model,capacities=new Map(),machi
     const values=ready.map(v=>number(v.bytes)),complete=directory&&model?.capacityUsageComplete!==false&&values.every(value=>value!==null)&&
       !versions.some(v=>v.servers.some(row=>row.machine===machine&&row.state==='UNKNOWN'));
     const subtotal=ready.length&&values.every(value=>value===null)?null:sum(values.filter(value=>value!==null));
-    const fallback={machine,state:volume.state,volume,readyContentBytes:directory?subtotal:null,
+    const fallback={machine,state:volume.state,volume,readyContentBytes:directory?subtotal:null,projectBytes:null,projectUsageComplete:null,projectCollectedAt:null,
       readyVersionCount:directory?ready.length:null,budgetBytes:null,reserveBytes:volume.reserveBytes,
       usageComplete:complete,shared:false};
     const actual=overview?.caches.find(row=>row.machine===machine);
     if(!actual)return fallback;
     const result={...actual,volume:{...actual.volume}};
     if(actual.readyContentBytes===null){result.readyContentBytes=fallback.readyContentBytes;result.usageComplete=fallback.usageComplete;}
+    else if(actual.usageComplete===false&&fallback.readyContentBytes!==null&&fallback.readyContentBytes>actual.readyContentBytes)result.readyContentBytes=fallback.readyContentBytes;
     if(actual.readyVersionCount===null)result.readyVersionCount=fallback.readyVersionCount;
     for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])if(result.volume[field]===null&&!actual.volume.collectedAt)result.volume[field]=volume[field];
     return result;
