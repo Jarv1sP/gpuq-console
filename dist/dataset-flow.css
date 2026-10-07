@@ -177,3 +177,50 @@
   #page-datasets .dataset-matrix-heading [data-machine],#page-datasets .dataset-location,#page-datasets .dataset-actions-cell{transition:none}
 }
 #page-datasets #datasets-add>summary[aria-disabled=true]{opacity:.5;cursor:not-allowed}
+/* Warehouse strata, cache watermarks and disk cells share tokens, not units. */
+.capacity-warehouse{padding:12px 18px 16px;border-bottom:1px solid var(--line)}
+.capacity-head{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:var(--ink-3)}
+.capacity-head>span:first-child{display:none}
+.capacity-head>span:last-child{margin-left:auto}
+.capacity-strata{position:relative;height:14px;margin:10px 0;border:1px solid var(--line);border-radius:3px;overflow:hidden;background:repeating-linear-gradient(90deg,var(--line) 0 1px,transparent 1px 8px),var(--bg-2)}
+.capacity-strata>i{position:absolute;top:0;bottom:0;left:0}
+.capacity-data{background:var(--ink)}
+.capacity-other{background:repeating-linear-gradient(135deg,var(--ink-3) 0 2px,transparent 2px 5px)}
+.capacity-strata>.capacity-reserve{width:0;border-left:1.5px dashed #E8B04B}
+.capacity-warehouse.unknown .capacity-strata{background:repeating-linear-gradient(135deg,var(--line) 0 4px,transparent 4px 9px),var(--bg-1)}
+.capacity-values{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--ink-2)}
+.capacity-values>span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.capacity-values b{color:var(--ink);font-weight:500}
+.capacity-values>span::before{content:'';width:9px;height:9px;border:1px solid var(--line-2);border-radius:2px;flex:none}
+.capacity-value-data::before{background:var(--ink)}
+.capacity-value-other::before{background:repeating-linear-gradient(135deg,var(--ink-3) 0 2px,transparent 2px 4px)}
+.capacity-values .hot b,.capacity-warning{color:#E8B04B}
+.capacity-warning{margin-top:12px;padding:8px 12px;background:rgb(232 176 75 / .1);border-radius:8px;font-size:13px}
+.capacity-cache-rail{position:relative;display:block;height:3px;background:var(--line);border-radius:2px;margin:4px 0}
+.capacity-cache-rail>i{position:absolute;inset:0 auto 0 0;background:var(--ink-2);border-radius:2px}
+.capacity-cache-rail.hot>i{background:#E8B04B}
+.capacity-cache-rail.unknown{background:repeating-linear-gradient(90deg,var(--line) 0 4px,transparent 4px 7px)}
+.capacity-watermark{position:absolute;top:-3px;height:9px;width:1px;background:var(--ink-3)}
+.capacity-watermark.low{left:70%}.capacity-watermark.high{left:80%}
+.capacity-cache-rail.large{height:6px;margin:12px 0 4px}
+.capacity-cache-rail.large .capacity-watermark{top:-4px;height:14px}
+.capacity-cache-rail.large>i{background:var(--ink)}
+.capacity-cache-rail.large.hot>i{background:#E8B04B}
+.capacity-detail{margin:0 0 16px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 28px;padding:16px 18px;border:1px solid var(--line);border-radius:10px;background:var(--bg-1)}
+.capacity-metric{min-width:0}
+.capacity-label{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--ink-3);margin-bottom:8px}
+.capacity-big{font:600 26px/1.25 var(--display);font-variant-numeric:tabular-nums;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
+.capacity-big small{font:12px var(--mono);color:var(--ink-3)}
+.capacity-disk{display:grid;grid-template-columns:repeat(20,minmax(0,1fr));gap:3px;margin:12px 0 4px}
+.capacity-disk>span{height:12px;min-width:0;border-radius:2px;border:1px solid var(--line-2)}
+.capacity-disk>.cache{background:var(--ink);border-color:var(--ink)}
+.capacity-disk>.used{background:var(--ink-2);border-color:var(--ink-2)}
+.capacity-disk>.reserve{border-color:#E8B04B;border-style:dashed}
+.capacity-disk>.unknown{border-style:dashed}
+.capacity-shared{font-size:11px;border:1px solid var(--line-2);border-radius:999px;padding:2px 8px;white-space:nowrap}
+.capacity-proof{display:inline-block;width:10px;height:10px;border:1px solid var(--ink-3);border-radius:2px;flex:none}
+.capacity-proof.confirmed{border-color:var(--ink);background:var(--ink)}
+.capacity-proof-row{display:flex;align-items:center;gap:10px;min-height:32px}
+.capacity-proof-row code{font:12px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;padding:0}
+.storage-server-card .capacity-detail{grid-template-columns:minmax(0,1fr);padding:0;border:0;background:none;margin:16px 0}
+@media(max-width:759px){.capacity-detail{grid-template-columns:minmax(0,1fr);gap:22px}.capacity-warehouse{padding-inline:0}.capacity-values{gap:6px 12px}}

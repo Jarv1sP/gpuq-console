@@ -73,7 +73,7 @@ try{
         if(!logged){await reply({error:'请登录'},401);return;}
         let result;
         if(operation==='state'){await reply({state:state(),principal:actor});return;}
-        if(['projects.list','datasets.list','datasets.catalog','notifications.list','transfers.list'].includes(operation))result={projects:[],datasets:[],items:[],machines:MACHINES.map(row=>({machine:row.id,state:'ok'}))};
+        if(operation==='datasets.overview'){assert.deepEqual(args,{});result={protocol:0};}else if(['projects.list','datasets.list','datasets.catalog','notifications.list','transfers.list'].includes(operation))result={projects:[],datasets:[],items:[],machines:MACHINES.map(row=>({machine:row.id,state:'ok'}))};
         else if(operation==='maintenance.status')result=state().operationalMaintenance;
         else if(['datasets.capacity','transfers.capabilities'].includes(operation))result={available:false,enabled:false};
         else if(operation==='datasets.storage.status'){assert.equal(actor.role,'admin','management request requires a confirmed admin');result={available:false};}

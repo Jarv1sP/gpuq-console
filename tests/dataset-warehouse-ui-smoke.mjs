@@ -40,6 +40,7 @@ try{
       return json(route,{transfers:[],nextCursor:null});
     }
     if(operation==='projects.list')return json(route,{projects:[]});
+    if(operation==='datasets.overview'){assert.deepEqual(args,{});return json(route,{protocol:0});}
     if(operation==='datasets.catalog'){
       if(scene==='loading'){await new Promise(resolve=>pendingReads.push(resolve));}
       if(scene==='error')return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false,error:'目录查询暂时不可用',principal,state})});
@@ -121,7 +122,7 @@ try{
   if(hddIngress){
    const text=await page.locator('#dataset-add-dialog').textContent();
    assert(text.includes(uploadMachine),'the physical HDD destination is visible, not the selected training node');
-   assert(text.includes('机械仓库入库'),'the selected SSD capacity is not advertised as HDD upload space');
+   assert(text.includes('仓库'),'the upload capacity labels the actual warehouse destination');assert.doesNotMatch(text,/机械|固态|原件/);
   }
   await page.keyboard.press('Escape');await page.locator('#dataset-add-dialog').waitFor({state:'hidden'});
   assert(await page.locator('[data-v3-upload]').evaluate(node=>document.activeElement===node),'closing returns focus to upload');
@@ -160,7 +161,7 @@ try{
   }
   await context.close();
  }
- const onlyReads=new Set(['state','transfers.list','projects.list','datasets.catalog','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan']);assert(calls.every(row=>onlyReads.has(row.operation)),'no upload begin/ticket or other API writes');
+ const onlyReads=new Set(['state','transfers.list','projects.list','datasets.catalog','datasets.overview','datasets.capacity','datasets.upload.routes','cloud.info','datasets.storage.status','datasets.storage.plan']);assert(calls.every(row=>onlyReads.has(row.operation)),'no upload begin/ticket or other API writes');
  assert(!calls.some(row=>row.operation.startsWith('datasets.storage.')||row.operation.startsWith('cloud.auth.')),"visiting an admin's main view sends no privileged data/storage RPC");
  assert.deepEqual(errors,[]);if(fullScan)assert.equal(scans.reduce((sum,row)=>sum+row.count,0),10620,'Every original role/state/zoom/width/height profile is measured');await writeFile(join(output,'shots.json'),JSON.stringify({checkedAt,results,errors,calls,scans},null,2));console.log('PASS '+results.length+' native v3 screenshots: member/admin × main/upload-1/upload-2 ×1440/390/320; shared help geometry; no overflow/script errors; anonymous route probe, no upload begin/ticket/write; search, filters, phone detail/back and Esc focus.');
 }finally{await browser.close();}
