@@ -307,6 +307,7 @@ class DirectUploads:
                 *config.get('alternates', [])]
 
     def issue(self, user, upload, route_id='primary'):
+        self.u.require_public_ingress()
         config = self.configuration()
         route = next((row for row in self.routes(config) if row['id'] == route_id), None)
         if route is None:
