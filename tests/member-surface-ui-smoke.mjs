@@ -42,6 +42,9 @@ try{
   verified=true;await snapshot();await refreshVisible(page);await page.waitForFunction(()=>!document.querySelector('[name=sm-percent]').closest('label').hidden);assert.equal(await page.locator('[name=sm-percent]').isVisible(),true,'Explicit complete node capability retains the verified control');
   verified=false;await snapshot();await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('[name=sm-percent]').closest('label').hidden);await closeSubmit(page);
   await page.locator('[data-nav=datasets]').click();await page.locator('[data-v3-upload]').first().click();
+  // The upload button opens <details>; its queued toggle opens the dialog.
+  // Check retained/hidden sources only after that native UI transition ends.
+  await page.locator('#dataset-add-dialog').waitFor({state:'visible'});
   assert.equal(await page.locator('[data-v3-source=aliyun]').isVisible(),false);
   assert.deepEqual(await page.locator('[name=cloud-source] option[value=aliyun]').evaluate(node=>({hidden:node.hidden,disabled:node.disabled})),{hidden:true,disabled:true},'The native source option is hidden and unavailable');
   assert.equal(await page.locator('#cloud-files').isHidden(),true);
