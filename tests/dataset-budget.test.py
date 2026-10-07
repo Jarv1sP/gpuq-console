@@ -25,6 +25,7 @@ F = load('budget_cache_fixture', 'dataset-cache.test.py')
 U = load('budget_upload_fixture', 'dataset-upload.test.py')
 N = load('budget_node_fixture', 'node-datasets.test.py')
 T = load('budget_tier_fixture', 'dataset-tier.test.py')
+E = load('budget_empty_fixture', 'dataset-empty-registration.test.py')
 D = F.D
 
 
@@ -53,6 +54,9 @@ class CacheAdmission(unittest.TestCase):
         self.assertFalse(self.stage(version).exists())
         self.assertEqual(self.registration('sample', version), before)
         self.assertEqual(self.cache.status(F.OWNER, 'sample', version)['state'], 'REGISTERED')
+        with self.assertRaisesRegex(D.CacheError, 'exceeds cache budget'):
+            self.cache.prepare_transfer(F.ADMIN, 'sample', version)
+        self.assertFalse(self.stage(version).exists())
 
     def test_ready_copy_counts_and_existing_ready_use_needs_no_new_budget(self):
         version = self.register()
@@ -92,6 +96,23 @@ class CacheAdmission(unittest.TestCase):
         with self.assertRaisesRegex(D.CacheError, 'cache budget reached'):
             self.cache.plan(F.OWNER, 'sample', version)
         self.assertFalse(self.stage(version).exists())
+
+    def test_legacy_reservations_fall_back_to_physical_bytes_and_new_budget_is_strict(self):
+        path = self.root / '.upload-reservations' / ('a' * 64 + '.json')
+        for value in ({'bytes': 100}, {'bytes': 100, 'inodes': 4}):
+            D._write_json(path, value)
+            self.assertEqual(self.cache._upload_reserved()[0], 100)
+            self.assertEqual(self.cache._budget_usage(), 100)
+        D._write_json(path, {'bytes': 100, 'inodes': 4, 'budgetBytes': 150})
+        self.assertEqual(self.cache._upload_reserved(), (100, 4))
+        self.assertEqual(self.cache._budget_usage(), 150)
+        for budget in (-1, True, 2**63, '100'):
+            D._write_json(path, {'bytes': 100, 'inodes': 4, 'budgetBytes': budget})
+            with self.assertRaisesRegex(D.CacheError, 'corrupt upload reservation'):
+                self.cache._upload_reserved()
+        D._write_json(path, {'bytes': 100, 'budgetBytes': 150})
+        with self.assertRaisesRegex(D.CacheError, 'corrupt upload reservation'):
+            self.cache._budget_usage()
 
     def test_parallel_preparations_cannot_both_spend_one_copy_budget(self):
         version = self.register()
@@ -165,6 +186,105 @@ class UploadAdmission(unittest.TestCase):
     admit = U.PersonalUploads.admit
     seal = U.PersonalUploads.seal
     fill = U.PersonalUploads.fill
+
+    def finish_seal(self, state, raw):
+        upload = state['uploadId']
+        self.call('manifest', uploadId=upload, offset=0, data=base64.b64encode(raw).decode())
+        self.call('seal', uploadId=upload)
+        self.assertEqual(self.u.worker(self.user, upload, 'seal'), 0)
+        return self.call('status', uploadId=upload)
+
+    def test_exact_admitted_budget_seals_resumes_and_publishes_without_double_count(self):
+        state, args, raw, files = self.admit()
+        upload = state['uploadId']
+        reserve = self.u.load(self.user, upload)['reserveBytes']
+        self.call('discard', uploadId=upload)
+        self.assertEqual(self.u.worker(self.user, upload, 'discard'), 0)
+        self.cache.budget_bytes = reserve
+        state, args, raw, files = self.admit()
+        upload = state['uploadId']
+        state = self.finish_seal(state, raw)
+        self.assertEqual(state['state'], 'UPLOADING')
+        session = self.u.load(self.user, upload)
+        record = self.cache.export_manifest(U.D.Principal(self.user), session['dataset'], session['version'])
+        footprint = self.cache._footprint(record['manifest'])
+        reservation = U.D._read_json(self.u.reservation(self.user, upload))
+        self.assertEqual(reservation['bytes'], reserve-session['totalBytes'])
+        self.assertEqual(reservation['inodes'], session['entries']+16)
+        self.assertEqual(reservation['budgetBytes'], reserve-footprint)
+        with self.cache._locked():
+            self.assertEqual(self.cache._budget_usage(), reserve)
+            self.cache._budget()
+        self.assertEqual(self.call('begin', **args)['state'], 'UPLOADING')
+        self.fill(upload, files)
+        self.call('commit', uploadId=upload)
+        self.assertEqual(self.u.worker(self.user, upload, 'commit'), 0)
+        with self.cache._locked():
+            self.assertEqual(self.cache._budget_usage(), footprint)
+        self.assertEqual(self.call('status', uploadId=upload)['state'], 'READY')
+
+    def test_two_concurrent_seals_spend_only_their_durable_admitted_reservations(self):
+        rows = [self.admit(name=name) for name in ('first', 'second')]
+        reserve = sum(self.u.load(self.user, row[0]['uploadId'])['reserveBytes'] for row in rows)
+        self.cache.budget_bytes = reserve
+        for state, _, raw, _ in rows:
+            self.call('manifest', uploadId=state['uploadId'], offset=0, data=base64.b64encode(raw).decode())
+            self.call('seal', uploadId=state['uploadId'])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda row: self.u.worker(self.user, row[0]['uploadId'], 'seal'), rows))
+        self.assertEqual(results, [0, 0])
+        with self.cache._locked():
+            self.assertEqual(self.cache._budget_usage(), reserve)
+        for state, args, _, _ in rows:
+            self.assertEqual(self.call('begin', **args)['uploadId'], state['uploadId'])
+        with self.assertRaisesRegex(U.D.CacheError, 'cache budget reached'):
+            self.admit(name='third')
+
+    def test_legacy_pending_reservation_is_migrated_without_changing_physical_preallocation(self):
+        state, args, raw, _ = self.admit()
+        upload = state['uploadId']
+        session = self.u.load(self.user, upload)
+        path = self.u.reservation(self.user, upload)
+        legacy = {k: v for k, v in self.u.reservation_value(session).items() if k != 'budgetBytes'}
+        U.D._write_json(path, legacy)
+        self.cache.budget_bytes = session['reserveBytes']
+        self.assertEqual(self.call('begin', **args)['uploadId'], upload)
+        migrated = U.D._read_json(path)
+        self.assertEqual({k: v for k, v in migrated.items() if k != 'budgetBytes'}, legacy)
+        self.assertEqual(migrated['budgetBytes'], session['reserveBytes'])
+        self.assertEqual(self.finish_seal(state, raw)['state'], 'UPLOADING')
+
+    def test_interrupted_conversion_without_stage_retains_full_logical_commitment(self):
+        state, _, _, _ = self.admit()
+        upload = state['uploadId']
+        session = self.u.load(self.user, upload)
+        pending = self.u.reservation_value(session, sealed=True, budget_sealed=False)
+        U.D._write_json(self.u.reservation(self.user, upload), pending)
+        self.cache.budget_bytes = session['reserveBytes']
+        with self.cache._locked():
+            self.assertEqual(self.cache._budget_usage(), session['reserveBytes'])
+            self.u.ensure_reservation(session)
+        self.assertEqual(U.D._read_json(self.u.reservation(self.user, upload)), self.u.reservation_value(session))
+
+    def test_interrupted_conversion_after_stage_creation_overcounts_then_resumes_exactly(self):
+        state, _, raw, _ = self.admit()
+        upload = state['uploadId']
+        reserve = self.u.load(self.user, upload)['reserveBytes']
+        self.cache.budget_bytes = reserve
+        self.call('manifest', uploadId=upload, offset=0, data=base64.b64encode(raw).decode())
+        self.call('seal', uploadId=upload)
+        original = self.cache._plan
+        def interrupted(*args, **kwargs):
+            original(*args, **kwargs)
+            raise KeyboardInterrupt('killed before logical reservation handoff')
+        with patch.object(self.cache, '_plan', side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            self.u.worker(self.user, upload, 'seal')
+        with self.cache._locked():
+            self.assertGreater(self.cache._budget_usage(), reserve)
+        self.assertEqual(self.u.worker(self.user, upload, 'seal'), 0)
+        with self.cache._locked():
+            self.assertEqual(self.cache._budget_usage(), reserve)
+        self.assertEqual(self.call('status', uploadId=upload)['state'], 'UPLOADING')
 
     def test_large_upload_rejects_before_private_session_or_payload_and_never_deletes_existing_session(self):
         original, _, _, _ = self.admit(name='retained')
@@ -272,6 +392,40 @@ class NodeAdmission(unittest.TestCase):
         with patch.object(self.node, 'dataset_cache_admission') as admission:
             self.assertEqual(self.node.dataset_worker(task['operationId']), 0)
         admission.assert_called_once_with(0, _exclude=(('example', self.version),))
+
+
+class EmptyReservationBudget(unittest.TestCase):
+    setUp = E.EmptyRegistrationTests.setUp
+    tearDown = E.EmptyRegistrationTests.tearDown
+    request = E.EmptyRegistrationTests.request
+    reserved_session = E.EmptyRegistrationTests.reserved_session
+    assert_kept = E.EmptyRegistrationTests.assert_kept
+
+    def test_new_unrelated_records_match_exact_resource_formula_and_are_not_modified(self):
+        rows = [self.reserved_session(name='unsealed'), self.reserved_session(name='sealed', sealed=True),
+                self.reserved_session(name='converting', sealed=True)]
+        for index, (path, session, reservation, value) in enumerate(rows):
+            footprint = session['totalBytes']+4096*session['entries']+8192
+            value['budgetBytes'] = session['reserveBytes']-(footprint if index == 1 else 0)
+            self.module._write_json(reservation, value)
+        before = [row[2].read_bytes() for row in rows]
+        result = self.request()
+        self.assertEqual(self.node.dataset_worker(result['operationId']), 0)
+        self.assertEqual([row[2].read_bytes() for row in rows], before)
+
+    def test_new_record_cannot_relax_target_or_unknown_reservation_protection(self):
+        _, session, reservation, value = self.reserved_session()
+        for budget in (-1, True, 1, 2**63):
+            self.module._write_json(reservation, {**value, 'budgetBytes': budget})
+            with self.assertRaisesRegex(ValueError, 'budget'):
+                self.request()
+            self.assert_kept()
+        self.module._write_json(reservation, {**value, 'budgetBytes': session['reserveBytes']})
+        path, session, target_reservation, value = self.reserved_session(self.user.user_id, 'discarded', state='DISCARDED')
+        self.module._write_json(target_reservation, {**value, 'budgetBytes': session['reserveBytes']})
+        with self.assertRaisesRegex(ValueError, 'reservation prevents'):
+            self.request()
+        self.assert_kept()
 
 
 class TierAdmission(unittest.TestCase):
