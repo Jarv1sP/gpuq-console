@@ -18,6 +18,8 @@ import {pageForRoute,hashForPage} from './navigation.js';
 import {createAdminUI,adminHashForRoute,adminSectionForRoute,hasAdminSections,onAdminSectionsChange,registerAdminSection} from './admin-ui.js';
 import {registerDatasetStorageAdmin} from './admin-data-storage.js';
 import {membersAdminUI,membersRoute} from './admin-members-ui.js';
+import {maintenanceAdminUI} from './admin-maintenance-ui.js';
+import {toastPosition} from './toast-ui.js';
 registerDatasetStorageAdmin(registerAdminSection);
 const store=await DemoClient.create(),$=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -56,7 +58,8 @@ const pending=u=>u.enabled&&u.role!=='admin'&&!u.approvedAt&&u.total===0;
 const pendingUsers=()=>store.users.filter(pending);
 const label=u=>!u.enabled?'已暂停':u.role==='admin'?'管理员':pending(u)?'待处理':u.total?'已授权':'零额度';
 const dirty=()=>members?.active()&&draft&&store.users.some(u=>u.id===selected)&&(JSON.stringify(draft.limits)!==JSON.stringify(store.get(selected).limits)||draft.total!==store.get(selected).total);
-function toast(message){clearTimeout(toastTimer);const target=$('#toast'),shown=target.classList.contains('visible');target.textContent=message;target.classList.add('visible');if(!shown)target.animate(reducedMotion()?[{opacity:0},{opacity:1}]:[{opacity:0,transform:'translateY(10px)'},{opacity:1,transform:'none'}],{duration:reducedMotion()?150:220,easing:'cubic-bezier(.4,0,.2,1)'});toastTimer=setTimeout(()=>target.classList.remove('visible'),3500);}
+const placeToast=toastPosition($('#toast'));
+function toast(message){clearTimeout(toastTimer);const target=$('#toast'),shown=target.classList.contains('visible');target.textContent=message;target.classList.add('visible');placeToast();if(!shown)target.animate([{opacity:0},{opacity:1}],{duration:reducedMotion()?150:220,easing:'cubic-bezier(.4,0,.2,1)'});toastTimer=setTimeout(()=>target.classList.remove('visible'),3500);}
 function report(error){toast(error.message);if(error.status===401){store.principal=null;store.data=null;MACHINES.length=0;capacity=0;draft=null;render();openLogin();}}
 function confirm(title,message,action){const stamp=members.capture();if(!members.current(stamp))return;$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;confirmAction=()=>members.current(stamp)?action():undefined;$('#confirm-dialog').showModal();fadeDialog($('#confirm-dialog'));}
 function openLogin(){$('#login-form').reset();$('#login-error').textContent='';if(!$('#login-dialog').open)$('#login-dialog').showModal();}
@@ -212,6 +215,7 @@ function syncAuthGuide(){
 const authGuideObserver=new MutationObserver(syncAuthGuide);
 for(const dialog of [$('#login-dialog'),$('#register-dialog')])authGuideObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
 members=membersAdminUI(store,{getPage:()=>page,render:renderMembers,unmount:()=>{selected=null;draft=null;inviteCode=null;confirmAction=null;}});
+maintenanceAdminUI(store,renderMaintenanceExperience,{getPage:()=>page,toast,refresh:()=>render(true)});
 installAuthentication();
 if(store.principal)defaultPage();render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
 onAdminSectionsChange(()=>render(true));

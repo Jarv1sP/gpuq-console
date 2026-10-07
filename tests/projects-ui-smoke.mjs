@@ -1,4 +1,5 @@
 import {terminalContractSmoke} from './terminal-contract-ui-smoke.mjs';
+import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 // Loopback-only browser acceptance: disposable portal DB and fake project,
 // terminal, file and GPUQ operations. No real credentials, shell, SSH or GPUs.
@@ -199,62 +200,58 @@ try{
   await capture('projects-mobile-environment.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px environment creation form must not overflow');
 
-  async function clickTerminal(page,id){
-    if(id.startsWith('terminal-root-')){
-      const selected=await page.locator('[name=workspace-machine]').inputValue();
-      await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('#admin-content #host-maintenance').waitFor({state:'visible'});
-      await page.locator('[data-admin-machine]').selectOption(selected);
-      if(!await page.locator('#host-maintenance').evaluate(el=>el.open))await page.locator('#host-maintenance summary').click();
-    }else{await page.evaluate(()=>location.hash='#work');await page.locator('#page-work').waitFor({state:'visible'});}
-    await page.locator('#'+id).click();
-  }
   const adminPage=await browser.newPage({viewport:{width:1440,height:1000}});await configure(adminPage);await login(adminPage,'admin');await setMachine(machine,adminPage);
-  assert.equal(await adminPage.locator('#host-maintenance').isVisible(),false,'main admin workbench has no root controls');
-  await adminPage.evaluate(()=>location.hash='#admin/tasks');await adminPage.locator('#admin-content #host-maintenance').waitFor({state:'visible'});
-  assert.equal(await adminPage.locator('#host-maintenance').isVisible(),true);
-  assert.equal(await adminPage.locator('#host-maintenance').evaluate(el=>el.open),false,'maintenance starts collapsed');
-  await action('terminal.open',()=>clickTerminal(adminPage,'terminal-open'),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  assert.equal(await adminPage.locator('#host-maintenance').isVisible(),false,'primary workspace never exposes ROOT maintenance');
+  async function rootEntry(){await openMaintenance(adminPage);if(!await adminPage.locator('#host-maintenance').evaluate(el=>el.open))await adminPage.locator('#host-maintenance summary').click();await adminPage.locator('[data-maintenance-root-machine]').selectOption(machine);}
+  async function workEntry(){await adminPage.evaluate(()=>location.hash='#work');await adminPage.locator('#page-work').waitFor({state:'visible'});await idle(adminPage);}
+  await action('terminal.open',()=>adminPage.locator('#terminal-open').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
   assert.equal(calls.filter(call=>call.operation==='terminal.open').at(-1).args.hostAdmin,false,'admin default terminal remains private');
   await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
   await action('projects.status',()=>adminPage.locator('[name=workspace-project]').selectOption('admin-project'),adminPage);await idle(adminPage);
+  await openMaintenance(adminPage);assert.equal(await adminPage.locator('#host-maintenance').isVisible(),true);assert.equal(await adminPage.locator('#host-maintenance').evaluate(el=>el.open),false,'backend maintenance starts collapsed');await rootEntry();
   const beforeRoot=calls.filter(call=>call.operation==='terminal.open').length;
-  adminPage.once('dialog',dialog=>dialog.dismiss());await clickTerminal(adminPage,'terminal-root-open');
+  adminPage.once('dialog',dialog=>dialog.dismiss());await adminPage.locator('#terminal-root-open').click();
   assert.equal(calls.filter(call=>call.operation==='terminal.open').length,beforeRoot,'canceling ROOT confirmation sends no API request');
-  adminPage.once('dialog',dialog=>dialog.accept());await action('terminal.open',()=>clickTerminal(adminPage,'terminal-root-open'),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  adminPage.once('dialog',dialog=>dialog.accept());await action('terminal.open',()=>adminPage.locator('#terminal-root-open').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
   const rootSession=calls.filter(call=>call.operation==='terminal.open').at(-1);assert.equal(rootSession.args.hostAdmin,true);assert.equal(rootSession.args.project,undefined);
   assert.equal(await adminPage.locator('[name=workspace-project]').inputValue(),'admin-project','host maintenance does not change the personal project');
   assert.match(await adminPage.locator('#terminal-session-note').textContent(),/宿主机 ROOT.*绕过 GPU 配额/);
   assert.doesNotMatch(await adminPage.locator('#terminal-session-note').textContent(),/不分配 GPU/);
   const rootId=[...terminals].find(([,value])=>value.hostAdmin)[0];
   await action('terminal.detach',()=>adminPage.locator('#terminal-disconnect').click(),adminPage);
-  adminPage.once('dialog',dialog=>dialog.accept(rootId));await clickTerminal(adminPage,'terminal-reconnect');
+  await workEntry();
+  adminPage.once('dialog',dialog=>dialog.accept(rootId));await adminPage.locator('#terminal-reconnect').click();
   await adminPage.waitForFunction(()=>document.querySelector('#toast')?.textContent.includes('终端类型'));
   assert.equal(calls.filter(call=>call.operation==='terminal.open').length,beforeRoot+1,'development reconnect cannot silently attach known ROOT session');
+  await rootEntry();
   adminPage.once('dialog',dialog=>{adminPage.once('dialog',next=>next.accept(rootId));return dialog.accept();});
-  await action('terminal.open',()=>clickTerminal(adminPage,'terminal-root-reconnect'),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  await action('terminal.open',()=>adminPage.locator('#terminal-root-reconnect').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
   await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
+  await workEntry();
   await setMachine(other,adminPage);
-  await action('terminal.open',()=>clickTerminal(adminPage,'terminal-open'),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  await action('terminal.open',()=>adminPage.locator('#terminal-open').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
   assert.equal(calls.filter(call=>call.operation==='terminal.open').at(-1).args.hostAdmin,false,'changing machine after ROOT never promotes the next development session');
   await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
   await setMachine(machine,adminPage);await action('projects.status',()=>adminPage.locator('[name=workspace-project]').selectOption('admin-project'),adminPage);await idle(adminPage);
   await capture('projects-admin-project.png',adminPage);
-  await adminPage.setViewportSize({width:390,height:844});await capture('projects-admin-maintenance-mobile.png',adminPage);
-  assert.ok(await adminPage.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px dual terminal entries must not overflow');
+  await adminPage.setViewportSize({width:390,height:844});await capture('projects-admin-personal-mobile.png',adminPage);
+  assert.ok(await adminPage.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px personal terminal entry must not overflow');
+  await rootEntry();await capture('projects-admin-maintenance-mobile.png',adminPage);assert.ok(await adminPage.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px backend ROOT entries must not overflow');await workEntry();
   await adminPage.locator('[name=workspace-project]').selectOption('');await idle(adminPage);
+  await rootEntry();
   terminalGate=new Promise(resolve=>{releaseTerminalGate=resolve;});
-  adminPage.once('dialog',dialog=>dialog.accept());await clickTerminal(adminPage,'terminal-root-open');
+  adminPage.once('dialog',dialog=>dialog.accept());await adminPage.locator('#terminal-root-open').click();
   for(let wait=0;wait<100&&![...terminals.values()].some(value=>value.hostAdmin);wait++)await new Promise(resolve=>setTimeout(resolve,10));
   assert.ok([...terminals.values()].some(value=>value.hostAdmin),'delayed ROOT request reached the fake node');
   const staleRootId=[...terminals].find(([,value])=>value.hostAdmin)[0];
-  await adminPage.evaluate(()=>location.hash='#work');await adminPage.locator('#page-work').waitFor({state:'visible'});
-  const changedMachine=responseFor(adminPage,'projects.list');await adminPage.locator('[name=workspace-machine]').selectOption(other);
+  const changedMachine=responseFor(adminPage,'projects.list');await workEntry();await adminPage.locator('[name=workspace-machine]').selectOption(other);
   const lateDetached=responseFor(adminPage,'terminal.detach');releaseTerminalGate();await Promise.all([lateDetached,changedMachine]);await idle(adminPage);
   assert.equal(await adminPage.locator('.terminal-dialog').isVisible(),false,'late ROOT open cannot attach after the workspace changed');
   assert.equal(terminals.has(staleRootId),true,'changing workspace detaches but does not destroy the old ROOT session');
   await setMachine(machine,adminPage);
+  await rootEntry();
   adminPage.once('dialog',dialog=>{adminPage.once('dialog',next=>next.accept(staleRootId));return dialog.accept();});
-  await action('terminal.open',()=>clickTerminal(adminPage,'terminal-root-reconnect'),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
+  await action('terminal.open',()=>adminPage.locator('#terminal-root-reconnect').click(),adminPage);await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
   await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
   // Two independent buttons can be clicked before either open response arrives.
   // Verify both orders through actual browser events and delayed HTTP responses.
@@ -270,13 +267,15 @@ try{
     };
     await adminPage.route(origin+'/api/call',holdResponse);
     const firstButton=firstRoot?'terminal-root-open':'terminal-open',secondButton=firstRoot?'terminal-open':'terminal-root-open';
+    if(firstRoot)await rootEntry();else await workEntry();
     if(firstRoot)adminPage.once('dialog',dialog=>dialog.accept());
-    await clickTerminal(adminPage,firstButton);
+    await adminPage.locator('#'+firstButton).click();
     for(let wait=0;wait<100&&terminals.size===0;wait++)await new Promise(resolve=>setTimeout(resolve,10));
     assert.equal(terminals.size,1,'first request is held at the fake node before starting the second');
     const delayedId=[...terminals.keys()][0];
+    if(firstRoot)await workEntry();else await rootEntry();
     if(!firstRoot)adminPage.once('dialog',dialog=>dialog.accept());
-    await action('terminal.open',()=>clickTerminal(adminPage,secondButton),adminPage);
+    await action('terminal.open',()=>adminPage.locator('#'+secondButton).click(),adminPage);
     await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
     const title=await adminPage.locator('#terminal-title').textContent();assert.match(title,firstRoot?/个人开发/:/ROOT 运维/);
     const released=responseFor(adminPage,'terminal.detach');releaseTerminalGate();await released;
@@ -285,9 +284,10 @@ try{
     assert.equal(calls.filter(call=>call.operation==='terminal.detach').at(-1).args.id,delayedId);
     assert.equal(terminals.has(delayedId),true,'superseded terminal remains reconnectable after its writer is released');
     await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
+    if(firstRoot)await rootEntry();else await workEntry();
     if(firstRoot)adminPage.once('dialog',dialog=>{adminPage.once('dialog',next=>next.accept(delayedId));return dialog.accept();});
     else adminPage.once('dialog',dialog=>dialog.accept(delayedId));
-    await action('terminal.open',()=>clickTerminal(adminPage,firstRoot?'terminal-root-reconnect':'terminal-reconnect'),adminPage);
+    await action('terminal.open',()=>adminPage.locator(firstRoot?'#terminal-root-reconnect':'#terminal-reconnect').click(),adminPage);
     await adminPage.locator('.terminal-dialog').waitFor({state:'visible'});
     await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
     assert.equal(terminals.size,0);

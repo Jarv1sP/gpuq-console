@@ -10,6 +10,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {seedLegacy, password} from './maintenance-fixture.mjs';
+import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {guardedRoute} from './browser-route-guard.mjs';
 import {inspectGeometry, scanGeometry, layoutZooms, layoutWidths, layoutHeights} from './layout-geometry.mjs';
 
@@ -55,7 +56,7 @@ const authSpec = id => ({
   scrollPanels: ['#' + id],
 });
 const maintenanceSpec = {
-  ...shellSpec, roots: [...shellSpec.roots, '#maintenance-experience', '#operational-maintenance'],
+  ...shellSpec, roots: [...shellSpec.roots, '#maintenance-experience', '#operational-maintenance', '#admin-content'],
   controls: 'button,input:not([type=checkbox]),select,summary,a[href],.maintenance-select',
   leftEdges: [...shellSpec.leftEdges, ['.maintenance-console-heading', '.maintenance-console-rows', '.maintenance-recovery-bar'],
     ['.maintenance-hero .maintenance-eyebrow', '.maintenance-hero h2', '.maintenance-hero .maintenance-reason', '.maintenance-since']],
@@ -66,6 +67,15 @@ const maintenanceSpec = {
   repeatedPadding: ['.maintenance-server-row'],
   tableColumns: [{rows: '.maintenance-server-row', cells: ':scope > *'}],
   popovers: [...shellSpec.popovers, '.maintenance-info.is-open > .maintenance-info-body'],
+};
+const maintenanceSettingsSpec = {
+  roots: ['#maintenance-settings-dialog'],
+  controls: 'button,input,select',
+  leftEdges: [['#maintenance-settings-dialog .modal-head', '#maintenance-settings-dialog form']],
+  helpRows: ['#maintenance-settings-dialog .copy-caption', '#maintenance-settings-dialog .field-caption'],
+  helpContexts: ['#maintenance-settings-dialog [data-copy-help]'],
+  buttonRows: [{parent: '#maintenance-settings-dialog form>div:not(.maintenance-reason-field)'}],
+  scrollPanels: ['#maintenance-settings-dialog'],
 };
 const guideSpec = {
   roots: ['body'],
@@ -239,10 +249,17 @@ try {
               await page.locator('#refresh-state').click(); await page.locator('#sync-label').filter({hasText: scene.state === 'loading' ? '同步' : '失败'}).waitFor();}
             if (scene.maintained) {
               await page.locator('#maintenance-experience').waitFor();
+              if (scene.role === 'admin') await openMaintenance(page);
               if (scene.view === 'start') await page.locator('[data-maintenance-start="all"]').click();
               if (scene.view === 'checks') await page.locator('[data-maintenance-check]').first().click();
               if (scene.view === 'recovery') {await page.locator('[data-recovery-select]').first().check(); await page.locator('[data-maintenance-stage]').click();}
-              if (scene.view === 'settings') await page.locator('.maintenance-settings > summary').click();
+              if (scene.view === 'settings') {
+                // Retain every original background rule before the native
+                // modal makes that background unavailable for interaction.
+                const background = await scanGeometry(page, scene.spec, {zoom, widths: full ? layoutWidths : [320, 390, 1440], heights: full ? layoutHeights : [900]});
+                results.push({room: scene.room, scene: scene.name + '-before-open', zoom, measurements: background});
+                await page.locator('[data-maintenance-settings]').click();
+              }
             }
           } else if (scene.name.startsWith('register')) {
             await page.locator('#open-register').click(); await page.locator('#register-dialog').waitFor();
@@ -280,7 +297,7 @@ try {
           await page.evaluate(() => {for (const animation of document.getAnimations()) if (Number.isFinite(animation.effect?.getComputedTiming().endTime)) animation.finish();});
           await page.screenshot({path: join(directory, scene.name + '-' + width + '.png'), fullPage: scene.room === 'guide'});
         }
-        const measurements = await scanGeometry(page, scene.spec, {zoom, widths: full ? layoutWidths : [320, 390, 1440], heights: full ? layoutHeights : [900]});
+        const measurements = await scanGeometry(page, scene.view === 'settings' ? maintenanceSettingsSpec : scene.spec, {zoom, widths: full ? layoutWidths : [320, 390, 1440], heights: full ? layoutHeights : [900]});
         results.push({room: scene.room, scene: scene.name, zoom, measurements});
         await writeFile(reportPath, JSON.stringify({partial: true, before, full, scenes: results}, null, 2));
         console.log(scene.room + '/' + scene.name + ' zoom=' + zoom + ': ' + measurements.filter(row => row.pass).length + '/' + measurements.length);
