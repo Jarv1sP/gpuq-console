@@ -346,3 +346,5 @@ await import('./project-directory-ui-smoke.mjs');
 await import("./submission-errors-ui-smoke.mjs");
 // Personal disk quota shares the selected development project context.
 await import('./project-quota-ui-smoke.mjs');
+// Recovery is exposed only after an actual compatible node response.
+await import('./project-upload-capability-ui-smoke.mjs');

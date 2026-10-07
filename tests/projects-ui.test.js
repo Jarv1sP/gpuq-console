@@ -7,6 +7,31 @@ import {maintenanceBlocks} from '../dist/maintenance-state.js';
 
 const release='a'.repeat(64),future='b'.repeat(64);
 const absentUpload={inspect:async args=>({protocol:2,state:'ABSENT',path:args.path})};
+test('project upload exposes recovery only after the node confirms the exact recovery protocol',async()=>{
+  const puts=[],support=[],context={machine:'node-a',project:'vision',area:'code',path:'train.py'},id='a1234567-1234-4234-8234-123456789abc';
+  await uploadProjectFile(new Blob(['abc']),context,async args=>{puts.push(args);return {complete:true,size:3,sha256:args.sha256};},undefined,{
+    inspect:async args=>({...args,protocol:2,state:'UPLOADING',uploadId:id,receivedBytes:2,resumable:true}),onRecoverySupport:value=>support.push(value)
+  });
+  assert.deepEqual(support,[true]);assert.equal(puts.length,1);assert.equal(puts[0].uploadId,id);assert.equal(puts[0].offset,2);assert.equal(Buffer.from(puts[0].data,'base64').toString(),'c');
+});
+test('unsupported recovery keeps ordinary project upload and never retries a lost write',async()=>{
+  for(const failure of [Object.assign(Error('Unknown operation'),{status:502}),Object.assign(Error('not found'),{status:404}),Object.assign(Error('not supported'),{code:'UNSUPPORTED'})]){
+    const context={machine:'node-a',project:'vision',area:'code',path:'train.py'},puts=[],support=[];let reads=0;
+    const options={inspect:async()=>{reads++;throw failure;},onRecoverySupport:value=>support.push(value)};
+    await uploadProjectFile(new Blob(['abc']),context,async args=>{puts.push(args);return {complete:true,size:3,sha256:args.sha256};},undefined,options);
+    assert.deepEqual(support,[false]);assert.equal(reads,1);assert.equal(puts.length,1);assert.equal(puts[0].offset,0);assert.equal(puts[0].final,true);assert.equal(Object.hasOwn(puts[0],'truncate'),false);
+    reads=0;puts.length=0;support.length=0;
+    await assert.rejects(uploadProjectFile(new Blob(['abc']),context,async args=>{puts.push(args);throw new TypeError('reply lost');},undefined,options),/这台服务器暂不支持续传，请重新上传/);
+    assert.deepEqual(support,[false]);assert.equal(reads,1);assert.equal(puts.length,1,'An unsupported node never replays the write or pretends to resume');
+  }
+});
+test('recovery refusal and unavailable status do not downgrade authorization or uncertain uploads',async()=>{
+  for(const failure of [Object.assign(Error('Unknown operation'),{status:403}),Object.assign(Error('not found'),{status:401}),new TypeError('connection reset'),Object.assign(Error('timeout'),{code:'REQUEST_TIMEOUT'})]){
+    let writes=0;const support=[];
+    await assert.rejects(uploadProjectFile(new Blob(['abc']),{machine:'node-a',project:'vision',area:'code',path:'x'},async()=>writes++,undefined,{inspect:async()=>{throw failure;},onRecoverySupport:value=>support.push(value)}));
+    assert.equal(writes,0);assert.deepEqual(support,[],'Unknown availability is not an unsupported-node fallback');
+  }
+});
 test('automatic training selection is distinct from fixed development context and requires OCI',()=>{
   const machines=[{id:'gpu-1'},{id:'gpu-2'}],project={project:'vision',environmentMode:'oci'};
   assert.deepEqual(trainingTarget('current','gpu-1',null,'',machines),{machine:'gpu-1'});
