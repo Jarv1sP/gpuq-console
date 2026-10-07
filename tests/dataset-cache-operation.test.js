@@ -6,7 +6,7 @@ const scope={action:'prepare',machine:'node-b',dataset:'sample',version:'a'.repe
 function fixture(options={}){
  const values=new Map(),requests=[],store={production:true,principal:{userId:'alice',enabled:true},authGeneration:0};
  let sequence=0,timer=null;
- const f={values,requests,store,cap:{protocol:1,prepare:true,release:true},reply:null,failSave:false,active:true};
+ const f={values,requests,store,cap:{protocol:1,prepare:true,release:true,prepareCancel:false,releaseCancel:true},reply:null,failSave:false,active:true};
  const storage={getItem:key=>values.get(key)||null,setItem:(key,value)=>{if(f.failSave)throw Error('storage unavailable');values.set(key,value);}};
  f.receipt=(overrides={})=>({...scope,...options,key:f.api.snapshot().request.key,operationId,state:'RUNNING',phase:'COPYING',canCancel:true,...overrides});
  store.call=async(operation,args)=>{
@@ -14,7 +14,7 @@ function fixture(options={}){
   if(operation==='datasets.cache.capabilities')return typeof f.cap==='function'?f.cap():f.cap;
   return typeof f.reply==='function'?f.reply(operation,args):f.reply||f.receipt();
  };
- f.mount=()=>createCacheOperation({...scope,...options,store,storage,capabilities:{protocol:1,prepare:true,release:true},active:()=>f.active,newKey:()=>'00000000-0000-4000-8000-'+String(++sequence).padStart(12,'0'),schedule:(fn,delay)=>{timer={fn,delay};return timer;},clear:value=>{if(value===timer)timer=null;}});
+ f.mount=()=>createCacheOperation({...scope,...options,store,storage,capabilities:{protocol:1,prepare:true,release:true,prepareCancel:false,releaseCancel:true},active:()=>f.active,newKey:()=>'00000000-0000-4000-8000-'+String(++sequence).padStart(12,'0'),schedule:(fn,delay)=>{timer={fn,delay};return timer;},clear:value=>{if(value===timer)timer=null;}});
  f.api=f.mount();Object.defineProperty(f,'timer',{get:()=>timer});return f;
 }
 test('published protocol 1 requires an explicit boolean for the requested action',()=>{
@@ -23,6 +23,12 @@ test('published protocol 1 requires an explicit boolean for the requested action
  assert.equal(canCacheAction({protocol:1,prepare:true,release:false},'release'),false);
  assert.equal(canCacheAction({protocol:1,prepare:true},'cancel'),false);
  assert.equal(canCacheAction({protocol:1,prepare:true,release:true},'prepare'),true);
+ assert.equal(canCacheAction({protocol:1,prepare:true,release:true}),false);
+ for(const action of ['prepare','release']){
+  for(const protocol of [undefined,0,'1',2])assert.equal(canCacheAction({protocol,[action]:true,allowed:true,actions:[action]},action),false);
+  for(const value of [undefined,false,1,'true'])assert.equal(canCacheAction({protocol:1,[action]:value,allowed:true,actions:[action]},action),false);
+  assert.equal(canCacheAction({protocol:1,[action]:true,allowed:false,actions:[]},action),true);
+ }
 });
 test('BLOCKED is a confirmed terminal receipt; retry is explicit and rechecks action permission',async()=>{
  const f=fixture();f.cap={protocol:1,prepare:true,release:false};
@@ -88,8 +94,32 @@ test('cancel uses original ID and remains in progress until authoritative termin
  f.reply=()=>f.receipt({state:'CANCELED',phase:'STOPPED',canCancel:false});await f.api.query();assert.equal(f.api.snapshot().state,'CANCELED');assert.equal(f.timer,null);
 });
 test('prepare never offers cancellation of a shared worker, even with an inconsistent receipt',async()=>{
- const f=fixture();await f.api.start();assert.equal(f.api.snapshot().canCancel,false);await f.api.cancel();
+ const f=fixture();f.cap.prepareCancel=true;await f.api.start();assert.equal(f.api.snapshot().canCancel,false);await f.api.cancel();
  assert.equal(f.requests.filter(row=>row.operation==='datasets.cache.cancel').length,0);f.api.destroy();
+});
+test('release cancellation requires both protocol capability and the matching receipt',async()=>{
+ for(const releaseCancel of [undefined,false,1,'true']){
+  const f=fixture({action:'release'});f.cap.releaseCancel=releaseCancel;await f.api.start();
+  assert.equal(f.api.snapshot().confirmed,true);assert.equal(f.api.snapshot().canCancel,false);await f.api.cancel();
+  assert.equal(f.requests.filter(row=>row.operation==='datasets.cache.cancel').length,0);f.api.destroy();
+ }
+ const f=fixture({action:'release'});await f.api.start();assert.equal(f.api.snapshot().canCancel,true);
+ f.reply=()=>f.receipt({canCancel:false});await f.api.query();assert.equal(f.api.snapshot().canCancel,false);await f.api.cancel();
+ assert.equal(f.requests.filter(row=>row.operation==='datasets.cache.cancel').length,0);
+ f.reply=()=>f.receipt({canCancel:true});await f.api.query();f.cap={protocol:0,release:true,releaseCancel:true};await f.api.check();
+ assert.equal(f.api.snapshot().canCancel,false);await f.api.cancel();assert.equal(f.requests.filter(row=>row.operation==='datasets.cache.cancel').length,0);f.api.destroy();
+});
+test('published receipt states are exact; receipt-only and unobserved location are forwarded without invented counters',async()=>{
+ for(const state of ['DISPATCHING','RUNNING','READY','RELEASED','BLOCKED','FAILED','CANCELING','CANCELED','UNKNOWN']){
+  const f=fixture({action:state==='RELEASED'?'release':'prepare'});f.reply=()=>f.receipt({state,phase:state,canCancel:false});await f.api.start();
+  assert.equal(f.api.snapshot().confirmed,true);assert.equal(f.api.snapshot().state,state);assert.equal(f.api.snapshot().progress,null);f.api.destroy();
+ }
+ for(const flags of [{receiptOnly:true},{locationState:'NOT_OBSERVED'},{receiptOnly:true,locationState:'NOT_OBSERVED'}]){
+  const f=fixture();f.reply=()=>f.receipt({state:'READY',phase:'READY',canCancel:false,...flags});await f.api.start();
+  assert.equal(f.api.snapshot().receiptOnly,flags.receiptOnly===true);assert.equal(f.api.snapshot().locationState,flags.locationState||null);assert.equal(f.api.snapshot().progress,null);f.api.destroy();
+ }
+ const f=fixture();f.reply=()=>f.receipt({state:'RELEASING',phase:'RELEASING'});await f.api.start();
+ assert.equal(f.api.snapshot().state,'UNKNOWN');assert.equal(f.api.snapshot().confirmed,false);f.api.destroy();
 });
 test('concurrent same-target views reuse pending intent; UNKNOWN never enables retry',async()=>{
  const f=fixture(),other=f.mount();await Promise.all([f.api.start(),other.start()]);assert.equal(f.requests.filter(r=>r.operation==='datasets.cache.prepare').length,1);
@@ -108,8 +138,8 @@ test('blocked capability can be rechecked without a write; canceled host ignores
  assert.equal(g.api.snapshot().visible,false);assert.equal(g.timer,null);
 });
 test('release is not complete until a matching RELEASED receipt, never a prepare READY',async()=>{
- const f=fixture({action:'release'});f.reply=()=>f.receipt({state:'RELEASING',phase:'RELEASING'});await f.api.start();
- assert.equal(f.api.snapshot().state,'RELEASING');f.reply=()=>f.receipt({state:'READY',phase:'READY'});await f.api.query();assert.equal(f.api.snapshot().state,'UNKNOWN');
+ const f=fixture({action:'release'});f.reply=()=>f.receipt({state:'RUNNING',phase:'RELEASING'});await f.api.start();
+ assert.equal(f.api.snapshot().state,'RUNNING');f.reply=()=>f.receipt({state:'READY',phase:'READY'});await f.api.query();assert.equal(f.api.snapshot().state,'UNKNOWN');
  f.reply=()=>f.receipt({state:'RELEASED',phase:'RELEASED',canCancel:false});await f.api.query();assert.equal(f.api.snapshot().state,'RELEASED');assert.equal(f.api.snapshot().confirmed,true);assert.equal(f.timer,null);
 });
 test('only confirmed failure permits explicit new key, preserving both operation records',async()=>{
