@@ -43,7 +43,8 @@ test('terminal exchange bypasses a slow data request and returns only compact au
     await exchange;
     assert.deepEqual(terminal,{result:output,principal:{userId:'member',username:'alice',role:'member'}});
     assert.equal(Object.hasOwn(terminal,'state'),false);
-    assert.equal(f.service.pending,1,'the existing data request still owns the durable queue');
+    assert.equal(f.service.pending,0,'file reads must not occupy the durable mutation queue');
+    assert.equal(f.service.remoteReadPending,1,'the blocked file read retains bounded read capacity');
   }finally{slow.resolve({files:[]});await Promise.allSettled([data,exchange]);await f.close();}
 });
 

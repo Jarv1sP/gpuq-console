@@ -842,8 +842,19 @@ def file_op(operation,args,root=None):
                 while view:view=view[os.write(f,view):]
                 os.fsync(f)
                 return {'path':path,'size':os.fstat(f).st_size}
+            def identity(info):
+                return (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns,info.st_uid,info.st_gid,info.st_mode,info.st_nlink)
+            fingerprint=hashlib.sha256(json.dumps([args['userId'],args.get('project'),args.get('runId'),path,identity(st)]).encode()).hexdigest()
+            expected=args.get('fingerprint')
+            if expected is not None and (not isinstance(expected,str) or not re.fullmatch(r'[a-f0-9]{64}',expected)):
+                raise ValueError('Invalid download file identity')
+            if expected is not None and expected!=fingerprint:
+                raise ValueError('Download source changed; preserve the partial file and choose a new destination')
+            if offset>st.st_size:raise ValueError('Download offset exceeds file size')
             os.lseek(f,offset,0);data=os.read(f,1024*1024)
-            return {'path':path,'size':st.st_size,'offset':offset,'data':base64.b64encode(data).decode(),'eof':offset+len(data)>=st.st_size}
+            if identity(os.fstat(f))!=identity(st) or identity(os.stat(parts[-1],dir_fd=fd,follow_symlinks=False))!=identity(st):
+                raise ValueError('Download source changed while reading; no chunk accepted')
+            return {'protocol':2,'fingerprint':fingerprint,'path':path,'size':st.st_size,'offset':offset,'data':base64.b64encode(data).decode(),'eof':offset+len(data)>=st.st_size}
         finally:os.close(f)
     finally:os.close(fd)
 

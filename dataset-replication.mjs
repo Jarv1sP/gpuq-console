@@ -101,7 +101,10 @@ export function installDatasetReplication(service){
     if(row&&value&&['FAILED','PAUSED'].includes(value.state)&&retry){
       await service.transferCall(who,'transfers.resume',{id:value.id});check(owner,target,policy);return view(row);
     }
-    const catalog=await datasetCatalogCall(service,who,'datasets.catalog',{machine:target});
+    // Capability discovery validates the real account role. The personal
+    // content projection and subsequent transfer still use owner-only access;
+    // pretending an administrator is a member breaks that identity check.
+    const catalog=await datasetCatalogCall(service,{...who,role:user.role||'member'},'datasets.catalog',{machine:target});
     check(owner,target,policy);
     const selected=catalog.datasets.find(item=>item.dataset===ref.dataset)?.versions.find(item=>item.version===ref.version);
     // Catalog visibility is metadata only, including another owner's READY

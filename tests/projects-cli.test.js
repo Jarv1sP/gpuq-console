@@ -25,7 +25,7 @@ async function fixture(t){
       const result=operation==='projects.list'?{projects:[{project:'alpha',state:'READY',releases,latestReadyRelease:latest}]}:
         operation.startsWith('projects.')?{project:args.project,state:'READY',releases,latestReadyRelease:latest,environmentMode:args.environmentMode||'shared'}:
         operation==='files.list'?{entries:[]}:
-        operation==='files.get'?{data:Buffer.from('checkpoint').toString('base64'),eof:true}:
+        operation==='files.get'?{path:args.path,size:10,offset:args.offset,data:Buffer.from('checkpoint').toString('base64'),eof:true}:
         operation==='files.upload.status'?{protocol:2,state:'ABSENT',complete:false,path:args.path,receivedBytes:0}:
         operation==='files.put'&&args.project?{complete:args.final,size:args.offset+Buffer.from(args.data,'base64').length,...(args.final?{sha256:args.sha256}:{})}:
         operation==='jobs.submit'?{id:JOB,state:'QUEUED',machine:args.machine,cards:args.cards}:{};

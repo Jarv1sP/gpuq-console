@@ -43,6 +43,38 @@ test('approved direct transfer is preparable but not falsely local READY',async 
   assert.equal((await f.service.prepareDataset(f.user.id,target,ref)).state,'PREPARING');
   assert.equal(f.records.size,1);assert.ok(f.calls.filter(c=>c.operation==='datasets.status').every(c=>c.args.hostAdmin===false));
 });
+
+test('administrator preparation keeps the real capability identity and personal transfer authority',async t=>{
+  const f=fixture(t),bridge=f.service.bridge,seen=[];
+  f.service.bridge=async(...args)=>{
+    const value=await bridge(...args);
+    return args[1]==='datasets.list'?{...value,datasetDelete:1}:value;
+  };
+  f.service.datasetDeleteCapabilities=async who=>{
+    assert.equal(who.userId,f.user.id);
+    assert.equal(who.username,f.user.username);
+    assert.equal(who.role,f.user.role,'capability identity must match the authenticated account');
+    seen.push(who);return {datasetDelete:1};
+  };
+  assert.equal((await f.service.prepareDataset(f.user.id,target,ref)).state,'PREPARING');
+  assert.equal(seen.length,1);
+  assert.ok(f.calls.filter(call=>call.operation==='transfers.create').every(call=>call.who.role==='member'));
+  assert.ok(f.calls.filter(call=>call.operation==='datasets.status').every(call=>call.args.hostAdmin===false));
+});
+
+test('administrator catalog identity never makes another owner private input usable',async t=>{
+  const f=fixture(t),bridge=f.service.bridge;
+  f.service.bridge=async(...args)=>{
+    const value=await bridge(...args);
+    if(args[1]!=='datasets.list')return value;
+    return {...value,datasetDelete:1,datasets:value.datasets.map(row=>({...row,ownerIds:['demo-user-2']}))};
+  };
+  f.service.datasetDeleteCapabilities=async who=>{
+    assert.equal(who.role,'admin');return {datasetDelete:1};
+  };
+  await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),error=>error.status===403);
+  assert.equal(f.records.size,0);
+});
 test('success receipt alone is insufficient; real READY maps the stable training name',async t=>{
   const f=fixture(t);await f.service.prepareDataset(f.user.id,target,ref);f.finish();
   assert.notEqual((await f.service.resolveDataset(f.user.id,target,ref)).status.state,'READY');

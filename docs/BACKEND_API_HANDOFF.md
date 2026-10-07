@@ -181,6 +181,12 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 
 ## 项目文件上传的确认与恢复
 
+`files.get` 和 `files.list` 为有界远端读取：使用既有全局 4 / 单节点 2 的读取准入，35 秒截止，调用前后重新核验会话及权限；截止后保留在途容量直到桥调用实际结束，不加入串行写队列。客户端只对读取执行有界重试，不重放写入。
+
+新版 `files.get` 接受可选的 64 位小写十六进制 `fingerprint`，返回 `protocol:2,path,size,offset,data,eof,fingerprint`。指纹固定原账号、项目/任务、相对路径及源 stat 身份；每块读取前后核验，变化或请求指纹不符即拒绝。旧返回字段仍保留。CLI 的私人本地回执绑定精确来源和已落盘前缀，已有无回执文件拒绝采用；旧节点下载可用但不可自动恢复。节点 executor、门户和 CLI 配套发布才具备完整恢复契约。
+
+项目锁竞争最多等待两秒取得原锁，超时返回可识别 busy；不重试操作体，也不改变 service-owned、单链接、私人权限或 no-follow 条件。`datasets.prepare` 内部目录鉴权使用数据库当前角色，个人数据传输仍使用 owner-only member 身份，管理员不因此获得其他账号材料。
+
 `files.upload.status {machine,project,area:"code",path,totalSize,sha256,uploadId?}` 仅查询当前账号的精确项目文件；首次可省略 `uploadId`，发现同路径、同大小、同完整 SHA 的现存上传。返回 `protocol:2` 及 `ABSENT / UPLOADING / COMPLETE / CONFLICT`；已知上传含原 `uploadId`、`receivedBytes`。`UPLOADING` 还必须有 `resumable:true` 才能续传。维护期间仍可查状态，不能借它写文件、发布或提交任务。
 
 项目 `files.put` 的固定身份由账号、项目、路径、总长度、SHA256、uploadId 共同绑定。中间块重复发送同 offset/bytes 不会追加；最终提交保留完成回执，查询和原最终块恢复会核验目标内容及身份。已提交的目标被他人编辑或替换会拒绝恢复，不回滚或覆盖新内容。rename 已完成但最终回执尚未写入时，保留的 COMMITTING 意图用于核验结果，此时状态为 `COMPLETE,completionPending:true`；客户端须保持原 ID，在 `offset=totalSize` 发送空的 final 块收尾后才可发布，查询本身不写入。不能仅凭项目旧 READY 版本推断这次上传成功。

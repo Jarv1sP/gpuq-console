@@ -19,11 +19,13 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 PROJECT = re.compile(r'^[a-z][a-z0-9_-]{0,47}$')
 HASH = re.compile(r'^[a-f0-9]{64}$')
 UUID = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
+PROJECT_LOCK_WAIT_SECONDS = 2.0
 
 
 class ProjectOperations:
@@ -52,8 +54,21 @@ class ProjectOperations:
     def guard(self, args, *, lifecycle=True):
         from contextlib import nullcontext
         with self.store.lifetime(*self.identity(args)) if lifecycle else nullcontext():
-            with open(self.folder/(self.key(args)+'.lock'), 'a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd = os.open(self.folder/(self.key(args)+'.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            with os.fdopen(fd, 'a') as lock:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                    raise ValueError('Unsafe project operation lock')
+                deadline = time.monotonic() + PROJECT_LOCK_WAIT_SECONDS
+                while True:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise ValueError('Project operation is busy; query or resume the original upload after it finishes') from None
+                        time.sleep(min(0.05, remaining))
                 yield
 
     def receipt_path(self, args):
