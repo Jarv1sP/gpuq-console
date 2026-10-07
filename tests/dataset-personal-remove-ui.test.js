@@ -48,3 +48,48 @@ test('the personal journal does not overwrite another tab unresolved reference',
  const f=fixture();const foreign={...target,id:'another-tab',dataset:'other-personal',state:'UNKNOWN',operationId:null};f.values.set(personalRemovalStorageKey('personal-member'),JSON.stringify([foreign]));
  await f.api.submit(target);const rows=JSON.parse(f.values.get(personalRemovalStorageKey('personal-member')));assert.equal(rows.filter(row=>row.id==='another-tab').length,1);assert.equal(rows.length,2);f.api.stop();
 });
+test('two already-open personal controllers cannot redispatch a lost receipt for the same physical target',async()=>{
+ const f=fixture(),second=createDatasetRemovals(f.options);second.sync(true);f.respond(Error('receipt lost'));
+ const row=await f.api.submit(target);assert.equal(row.state,'UNKNOWN');
+ await assert.rejects(second.submit(target),/尚未确认/);
+ assert.equal(second.rows.find(item=>item.id===row.id).state,'UNKNOWN');assert.equal(second.blocked(target),true);
+ assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,1);assert.equal(f.timers.size,0);
+ assert.equal(JSON.parse(f.values.get(personalRemovalStorageKey('personal-member'))).length,1);
+ second.stop();f.api.stop();
+});
+test('a second personal controller also blocks a first request while its receipt is still pending',async()=>{
+ const f=fixture();let release;f.options.call=async(operation,args)=>{f.calls.push({operation,args});return new Promise(resolve=>release=resolve);};
+ const first=createDatasetRemovals(f.options),second=createDatasetRemovals(f.options);first.sync(true);second.sync(true);
+ const pending=first.submit(target);assert.equal(first.rows[0].state,'SUBMITTING');await assert.rejects(second.submit(target),/尚未确认/);assert.equal(f.calls.length,1);
+ release({operationId,dataset:target.dataset,version,state:'UNREGISTERED',unregistered:true});await pending;assert.equal(first.rows[0].state,'UNREGISTERED');
+ first.stop();second.stop();f.api.stop();
+});
+test('another controller may delete a distinct target without overwriting a later original receipt',async()=>{
+ for(const different of [{dataset:'other-personal'},{version:'c'.repeat(64)},{machine:MACHINES[1].id}]){
+  const f=fixture(),second=createDatasetRemovals(f.options);second.sync(true);f.respond(Error('receipt lost'));
+  const first=await f.api.submit(target),other={...target,...different},otherOperationId='d'.repeat(64);
+  f.respond({operationId:otherOperationId,dataset:other.dataset,version:other.version,state:'FAILED'});
+  const next=await second.submit(other);assert.equal(next.state,'FAILED');assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);
+  f.respond({operationId,dataset:target.dataset,version,state:'UNREGISTERED',unregistered:true});await f.api.query(first.id,operationId);
+  f.respond({operationId:otherOperationId,dataset:other.dataset,version:other.version,state:'FAILED'});await second.query(next.id);
+  const saved=JSON.parse(f.values.get(personalRemovalStorageKey('personal-member'))),original=saved.find(item=>item.id===first.id);
+  assert.equal(original.state,'UNREGISTERED');assert.equal(original.operationId,operationId);assert.equal(original.unregistered,true);
+  assert.equal(saved.find(item=>item.id===next.id).operationId,otherOperationId);assert.equal(saved.length,2);
+  assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);second.stop();f.api.stop();
+ }
+});
+test('personal abandon and dismiss remove only their journal row and it stays removed after another controller writes or reloads',async()=>{
+ for(const action of ['abandon','dismiss']){
+  const f=fixture(),second=createDatasetRemovals(f.options);second.sync(true);
+  const error=Error(action==='abandon'?'receipt lost':'last copy refused');if(action==='dismiss'){error.status=409;error.code='LAST_COPY_UNPROVEN';}f.respond(error);
+  const first=await f.api.submit(target),other={...target,dataset:'other-personal'},otherOperationId='d'.repeat(64);
+  f.respond({operationId:otherOperationId,dataset:other.dataset,version,state:'UNREGISTERED',unregistered:true});const next=await second.submit(other);
+  const key=personalRemovalStorageKey('personal-member'),originalOther=JSON.parse(f.values.get(key)).find(row=>row.id===next.id),dispatches=f.calls.length;
+  f.api[action](first.id);f.api.sync(true);assert.equal(f.api.rows.some(row=>row.id===first.id),false);assert.equal(f.calls.length,dispatches,'local record dismissal never calls the server');
+  assert.deepEqual(JSON.parse(f.values.get(key)),[originalOther],'the other tab authoritative receipt is not rewritten as UNKNOWN');
+  assert.equal(second.rows.some(row=>row.id===first.id),true,'the second controller still has an older snapshot');await second.query(next.id);
+  const recovered=createDatasetRemovals(f.options);recovered.sync(true);assert.equal(recovered.rows.some(row=>row.id===first.id),false);assert.equal(recovered.rows.length,1);
+  assert.equal(JSON.parse(f.values.get(key)).find(row=>row.id===next.id).operationId,otherOperationId);assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);
+  recovered.stop();second.stop();f.api.stop();
+ }
+});

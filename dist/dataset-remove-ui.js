@@ -39,9 +39,18 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
   const busy=new Set();
   const journalKey=personal?personalRemovalStorageKey:removalStorageKey;
   const identity=who=>who?.userId&&(who.role==='admin'||personal&&who.role==='member')?JSON.stringify([who.userId,who.role,session()]):null;
-  const save=context=>{try{
+  const recover=row=>{
+    try{
+      removalTarget(row);
+      if((personal&&!hash.test(row.version))||typeof row.id!=='string'||row.operationId&&!hash.test(row.operationId)||!['SUBMITTING','UNREGISTERING','UNKNOWN','FAILED','BLOCKED','UNREGISTERED'].includes(row.state))return null;
+      return {...row,state:personal||row.state==='SUBMITTING'?'UNKNOWN':row.state,nextAt:now()+2000,attempt:0,resumeCheck:!personal&&!!row.operationId&&row.state==='UNKNOWN'};
+    }catch{return null;}
+  };
+  const save=(context,changedRow,removedId)=>{try{
     let rows=context.rows;
-    if(personal){const previous=JSON.parse(storage?.getItem(journalKey(context.id))||'[]');if(!Array.isArray(previous))throw Error('invalid journal');const merged=new Map(previous.map(row=>[row.id,row]));for(const row of rows)merged.set(row.id,row);rows=[...merged.values()];}
+    // Persist only this operation's change so another tab's newer receipt is
+    // not replaced by an older row absorbed into this controller's snapshot.
+    if(personal){const previous=JSON.parse(storage?.getItem(journalKey(context.id))||'[]');if(!Array.isArray(previous))throw Error('invalid journal');const merged=new Map(previous.map(row=>[row.id,row]));if(removedId!==undefined)merged.delete(removedId);else for(const row of changedRow?[changedRow]:rows)merged.set(row.id,row);rows=[...merged.values()];}
     storage?.setItem(journalKey(context.id),JSON.stringify(rows));context.saved=!!storage;
   }catch{context.saved=false;}};
   function stop(){if(timer!==null)clearTimer(timer);timer=null;}
@@ -50,15 +59,19 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
     if(signature!==owner?.signature){
       stop();generation++;busy.clear();owner=null;
       if(signature){let rows=[];try{rows=JSON.parse(storage?.getItem(journalKey(who.userId))||'[]');}catch{}
-        owner={id:who.userId,signature,saved:!!storage,rows:Array.isArray(rows)?rows.filter(row=>{
-          try{removalTarget(row);return (!personal||hash.test(row.version))&&typeof row.id==='string'&&(!row.operationId||hash.test(row.operationId))&&['SUBMITTING','UNREGISTERING','UNKNOWN','FAILED','BLOCKED','UNREGISTERED'].includes(row.state);}catch{return false;}
-        }).map(row=>({...row,state:personal||row.state==='SUBMITTING'?'UNKNOWN':row.state,nextAt:now()+2000,attempt:0,resumeCheck:!personal&&!!row.operationId&&row.state==='UNKNOWN'})):[]};
+        owner={id:who.userId,signature,saved:!!storage,rows:Array.isArray(rows)?rows.map(recover).filter(Boolean):[]};
       }
+    }
+    if(personal&&owner){
+      // Another already-open tab may have persisted an uncertain dispatch.
+      // Absorb new references before checking overlap, without replacing this
+      // controller's in-flight or freshly verified records with saved state.
+      try{const rows=JSON.parse(storage?.getItem(journalKey(owner.id))||'[]');if(Array.isArray(rows)){const known=new Set(owner.rows.map(row=>row.id));for(const saved of rows){const row=recover(saved);if(row&&!known.has(row.id)){owner.rows.push(row);known.add(row.id);}}}}catch{}
     }
     if(!visible)stop();else arm();return owner?.rows||[];
   }
   function active(context,stamp){return owner===context&&generation===stamp&&identity(principal())===context.signature;}
-  function notify(context){save(context);if(owner===context)changed();arm();}
+  function notify(context,row,removedId){save(context,row,removedId);if(owner===context)changed();arm();}
   function arm(){
     stop();if(!visible||!owner||identity(principal())!==owner.signature)return;
     const rows=owner.rows.filter(row=>(row.state==='UNREGISTERING'||row.resumeCheck)&&row.operationId&&!busy.has(row));if(!rows.length)return;
@@ -84,30 +97,30 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
     if(!machines().some(machine=>machine.id===target.machine))throw Error('这台服务器未授权。');
     if(context.rows.some(row=>unresolved(row)&&overlaps(row,target)))throw Error('这次删除尚未确认，请先查询原操作。');
     const row={...target,id:crypto.randomUUID(),operationId:null,state:'SUBMITTING',startedAt:now(),attempt:0,error:''};
-    context.rows.push(row);busy.add(row);notify(context);
+    context.rows.push(row);busy.add(row);notify(context,row);
     if(personal&&!context.saved){context.rows.pop();busy.delete(row);changed();throw Error('无法保存删除记录，暂不发送。请允许此网站保存本地记录后重试。');}
     try{accept(context,row,await call('datasets.unregister',{machine:target.machine,dataset:target.dataset,...(target.version?{version:target.version}:{})}));}
     // The portal can wrap a bridge timeout as HTTP 400. An HTTP error does not
     // prove the node rejected cleanup; only the local pre-dispatch gate does.
     catch(error){if(!row.discarded){row.state=['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING'].includes(error.code)&&error.status===409?'BLOCKED':error.code==='MAINTENANCE_ACTIVE'?'FAILED':'UNKNOWN';row.error=error.message;row.blockReason=row.state==='BLOCKED'?error.code:null;}}
-    finally{busy.delete(row);save(context);if(active(context,stamp)&&!row.discarded){changed();if(row.state==='UNREGISTERED')completed({...row});arm();}}
+    finally{busy.delete(row);save(context,row);if(active(context,stamp)&&!row.discarded){changed();if(row.state==='UNREGISTERED')completed({...row});arm();}}
     return {...row};
   }
   async function query(id,originalId){
     sync();const context=owner,row=context?.rows.find(row=>row.id===id),stamp=generation;if(!row||busy.has(row))return;
-    if(originalId!==undefined){if(!hash.test(originalId)||row.operationId&&row.operationId!==originalId)throw Error('请填写 64 位原操作编号。');row.operationId=originalId;save(context);}
+    if(originalId!==undefined){if(!hash.test(originalId)||row.operationId&&row.operationId!==originalId)throw Error('请填写 64 位原操作编号。');row.operationId=originalId;save(context,row);}
     if(!row.operationId)throw Error('请先在服务器操作记录里找到原编号。');
     row.resumeCheck=false;
-    if(!machines().some(machine=>machine.id===row.machine)){row.state='UNKNOWN';row.error='服务器授权已改变，请先确认权限。';notify(context);return;}
+    if(!machines().some(machine=>machine.id===row.machine)){row.state='UNKNOWN';row.error='服务器授权已改变，请先确认权限。';notify(context,row);return;}
     busy.add(row);if(active(context,stamp))changed();
     const wasComplete=row.state==='UNREGISTERED';
     try{accept(context,row,await call('datasets.status',{machine:row.machine,operationId:row.operationId}));}
     catch(error){row.state='UNKNOWN';row.error=error.message;}
-    finally{busy.delete(row);save(context);if(active(context,stamp)&&!row.discarded){changed();if(!wasComplete&&row.state==='UNREGISTERED')completed({...row});arm();}}
+    finally{busy.delete(row);save(context,row);if(active(context,stamp)&&!row.discarded){changed();if(!wasComplete&&row.state==='UNREGISTERED')completed({...row});arm();}}
     return {...row};
   }
-  function abandon(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='UNKNOWN'||busy.has(row))throw Error('这条记录现在不能放弃。');row.discarded=true;owner.rows.splice(owner.rows.indexOf(row),1);notify(owner);}
-  function dismiss(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='BLOCKED'||busy.has(row))throw Error('只有已确认未派发的记录可以移除。');owner.rows.splice(owner.rows.indexOf(row),1);notify(owner);}
+  function abandon(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='UNKNOWN'||busy.has(row))throw Error('这条记录现在不能放弃。');row.discarded=true;owner.rows.splice(owner.rows.indexOf(row),1);notify(owner,null,id);}
+  function dismiss(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='BLOCKED'||busy.has(row))throw Error('只有已确认未派发的记录可以移除。');owner.rows.splice(owner.rows.indexOf(row),1);notify(owner,null,id);}
   return {sync,submit,query,abandon,dismiss,stop,get rows(){return owner?.rows||[];},get saved(){return owner?.saved??true;},isBusy:id=>busy.has(owner?.rows.find(row=>row.id===id)),blocked:value=>owner?.rows.some(row=>unresolved(row)&&overlaps(row,value))||false};
 }
 
