@@ -1,4 +1,4 @@
-import {aggregateDatasetCatalog,datasetOwnerName} from './dataset-catalog-model.js';
+import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName} from './dataset-catalog-model.js';
 import {datasetLabelClient,normalizeDatasetDisplayName} from './dataset-label-client.js';
 import {createUploadMeter} from './dataset-upload-metrics.js';
 import {maintenanceFor} from './maintenance-state.js';
@@ -106,7 +106,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(root.getBoundingClientRect().height/scale>available){root.classList.add('v3-inspector-overflow');root.style.maxHeight=available+'px';}
  }
  function render(){header();rail();rows();inspector();uploadUI();}
- function catalog(value){model=aggregateDatasetCatalog(value);cacheWatch.catalog(model.datasets.flatMap(item=>item.versions.flatMap(v=>v.servers.map(row=>({machine:row.machine,dataset:item.dataset,version:v.version,physicalDataset:row.dataset,state:row.state,canUse:v.canUse,totalBytes:v.bytes})))));if(!model.datasets.some(item=>item.dataset===selected)){selected=model.datasets[0]?.dataset||null;selectedVersion=null;}render();}
+ function catalog(value){const principal={...store.principal,username:store.principal?.username||store.users?.find(row=>row.id===store.principal?.userId)?.username};model=readableDatasetCatalog(aggregateDatasetCatalog(value),principal);cacheWatch.catalog(model.datasets.flatMap(item=>item.versions.flatMap(v=>v.servers.map(row=>({machine:row.machine,dataset:item.dataset,version:v.version,physicalDataset:row.dataset,state:row.state,canUse:v.canUse,totalBytes:v.bytes})))));if(!model.datasets.some(item=>item.dataset===selected)){selected=model.datasets[0]?.dataset||null;selectedVersion=null;}render();}
  function catalogUnavailable(){model=null;selected=null;selectedVersion=null;rows();inspector();}
  function capacity(value,id){capacities.set(id,value);rail();uploadCapacity();}
  async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacities.set(row.id,null);rail();}});}}
@@ -277,6 +277,8 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(button.hasAttribute('data-v3-files')){section.querySelector('#v3-file-picker').click();return;}
   if(button.hasAttribute('data-v3-source')){const source=button.dataset.v3Source;section.querySelector('#dataset-add-dialog').classList.add('v3-other');section.querySelector('[data-dataset-source="'+(source==='aliyun'?'link':source)+'"]').click();if(source==='aliyun'){const select=section.querySelector('[name=cloud-source]');select.value='aliyun';select.dispatchEvent(new Event('change',{bubbles:true}));}return;}
   if(button.hasAttribute('data-v3-cache')){
+   const visibleVersion=model?.datasets.find(row=>row.dataset===button.dataset.dataset)?.versions.find(row=>row.version===button.dataset.version);
+   if(!visibleVersion||visibleVersion.canUse!==true)return;
    const expected=account(),token=epoch,target=button.dataset.v3Cache,ref={machine:target,dataset:button.dataset.dataset,version:button.dataset.version};let watch;
    button.disabled=true;
    try{
