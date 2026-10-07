@@ -52,7 +52,7 @@ const workSpec={...roomSpec,roots:['#page-work','#control-strip'],
     {parent:'#workspace-files',children:':scope>.file-location-grid,:scope>.output-run-fields,:scope>.file-actions,:scope>pre'},
     fieldGaps('#workspace-files label')],
   baselines:[{parent:'.wb-job-heading',children:'.st,.wb-job-name',wrap:true}],
-  textContainment:['.project-environment-segments label>span','.cs-count-link>.st',
+  textContainment:['.project-environment-choice>span','.cs-count-link>.st',
     '.wb-progress-number','.wb-progress-meta>span','.wb-metrics strong','#self-summary>div'],
   repeatedPadding:['.wb-job-compact'],repeatedGaps:['.terminal-controls'],
 };
@@ -133,7 +133,7 @@ const scenes=[
     {role,room:'fullscreen',state:'normal',output:true,name:role+'-fullscreen-output',spec:outputSpec},
     {role,room:'work',state:'normal',files:true,name:role+'-work-files',spec:workSpec},
     {role,room:'project',state:'normal',name:role+'-project',spec:workSpec},
-    ...[['project-environment','#project-create .project-environment-choice'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
+    ...[['project-environment','#project-create .project-environment-choice>span'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
       spec:{...workSpec,focusedTargets:[selector]}})),
     {role,room:'project',state:'normal',headingHelp:true,help:'.workspace-context-heading .field-caption>.ui-info>summary',name:role+'-project-summary-help',
       spec:{...workSpec,focusedTargets:['.workspace-context-heading .field-caption>.ui-info>summary'],
@@ -417,7 +417,18 @@ try{
             }
           }
         }
-        if(scene.room==='project'){await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('container-layout');await page.locator('[name=environment-choice][value=oci]').check();}
+        if(scene.room==='project'){
+          await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('container-layout');
+          const mode=page.locator('#project-create-form [name=environment-mode]'),description=page.locator('#project-create .project-environment-choice>span');
+          assert.equal(await mode.count(),1,'new projects retain one fixed environment field');
+          assert.equal(await mode.inputValue(),'oci','new projects use the confirmed personal-container mode');
+          assert.equal(await mode.evaluate(node=>node.hidden&&node.getAttribute('aria-hidden')==='true'&&node.tabIndex===-1),true,'the fixed mode is not an interactive environment choice');
+          assert.equal(await mode.isHidden(),true,'the fixed mode remains hidden in the real browser');
+          assert.equal(await page.locator('#project-create-form [name=environment-choice]').count(),0,'obsolete environment choices are absent');
+          assert.equal(await description.count(),1,'the personal-container explanation is retained');
+          assert.equal(await description.textContent(),'个人容器','the visible environment explanation matches the fixed mode');
+          assert.equal(await description.isVisible(),true,'members and administrators can see the personal-container explanation');
+        }
         if(scene.files)await page.locator('#workspace-files>summary').click();
         if(scene.room==='terminal'){await page.locator('#terminal-open').click();await page.locator('.terminal-dialog').waitFor({state:'visible'});if(scene.state==='error')await page.locator('#terminal-connection-note').filter({hasText:'未确认'}).waitFor();if(scene.state==='ended')await page.locator('#terminal-connection-note').filter({hasText:'终端已结束'}).waitFor();}
         if(scene.help)await page.locator(scene.help).click();
