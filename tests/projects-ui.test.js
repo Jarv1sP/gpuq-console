@@ -83,7 +83,7 @@ test('zero-byte project upload still finalizes; retry keeps the original upload 
 });
 test('project upload rejects output writes, oversized files and inconsistent length before any chunk',async()=>{
   let sent=0;const send=async()=>sent++,context={machine:'gpu-1',project:'vision',area:'code',path:'x'};
-  await assert.rejects(uploadProjectFile(new Blob(['x']),{...context,area:'output'},send),/代码草稿/);
+  await assert.rejects(uploadProjectFile(new Blob(['x']),{...context,area:'output'},send),/开发草稿/);
   await assert.rejects(uploadProjectFile({size:100*1024*1024+1},context,send),/100 MiB/);
   await assert.rejects(uploadProjectFile({size:1,arrayBuffer:async()=>new ArrayBuffer(0)},context,send),/长度/);
   assert.equal(sent,0);

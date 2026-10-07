@@ -131,9 +131,9 @@ const scenes=[
     {role,room:'control',state:'normal',natural:true,name:role+'-control-training-form',spec:controlSpec},
     {role,room:'fullscreen',state:'normal',notes:true,name:role+'-fullscreen-notes',spec:notesSpec},
     {role,room:'fullscreen',state:'normal',output:true,name:role+'-fullscreen-output',spec:outputSpec},
-    {role,room:'work',state:'normal',files:true,name:role+'-work-files',spec:workSpec},
+    {role,room:'work',state:'normal',files:true,name:role+'-work-files',spec:{...workSpec,focusedTargets:['#workspace-files .file-location-grid']}},
     {role,room:'project',state:'normal',name:role+'-project',spec:workSpec},
-    ...[['project-environment','#project-create .project-environment-choice>span'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
+    ...[['project-environment','#project-create .project-environment-choice>legend>span'],['project-action','#project-create-form [type=submit]']].map(([name,selector])=>({role,room:'project',state:'normal',name:role+'-'+name,
       spec:{...workSpec,focusedTargets:[selector]}})),
     {role,room:'project',state:'normal',headingHelp:true,help:'.workspace-context-heading .field-caption>.ui-info>summary',name:role+'-project-summary-help',
       spec:{...workSpec,focusedTargets:['.workspace-context-heading .field-caption>.ui-info>summary'],
@@ -419,7 +419,7 @@ try{
         }
         if(scene.room==='project'){
           await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('container-layout');
-          const mode=page.locator('#project-create-form [name=environment-mode]'),description=page.locator('#project-create .project-environment-choice>span');
+          const mode=page.locator('#project-create-form [name=environment-mode]'),description=page.locator('#project-create .project-environment-choice>legend>span');
           assert.equal(await mode.count(),1,'new projects retain one fixed environment field');
           assert.equal(await mode.inputValue(),'oci','new projects use the confirmed personal-container mode');
           assert.equal(await mode.evaluate(node=>node.hidden&&node.getAttribute('aria-hidden')==='true'&&node.tabIndex===-1),true,'the fixed mode is not an interactive environment choice');

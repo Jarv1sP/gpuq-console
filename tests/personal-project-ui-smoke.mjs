@@ -16,7 +16,7 @@ const directory=await mkdtemp(join(tmpdir(),'personal-project-browser-')),shots=
 const password='Personal-Project-Local-Only-2026!',machine=MACHINES[0].id,oldRelease='a'.repeat(64),release='b'.repeat(64);
 const projects=new Map(),sessions=new Map(),calls=[],requests=[],errors=[],outside=[],csp=[],animations=[];
 const identity=(node,user,project)=>JSON.stringify([node,user,project]),copy=value=>structuredClone(value);
-let server,service,browser,createMode=null,createError='',unconfirmedClose=false;
+let server,service,browser,createMode=null,createError='',unconfirmedClose=false,environmentModes=['shared','isolated','oci'];
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
 const ready=(project,environmentMode='oci')=>({project,environmentMode,state:'READY',releases:[{release:oldRelease,state:'READY'}],latestReadyRelease:oldRelease});
@@ -26,7 +26,7 @@ try{
   await writeFile(statusPath,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(node=>({id:node.id,reachable:true,checkedAt:new Date().toISOString(),gpus:Array.from({length:node.cards},(_,index)=>({index,model:node.model,memoryTotalMiB:32768,memoryUsedMiB:0,processesAvailable:true,processes:[]})),gpuq:{connected:true,health:'ok',observeOnly:false,schedulableIndices:[0],jobs:[]}}))}));
   const bridge=async(node,operation,args)=>{
     calls.push({node,operation,args:copy(args)});const key=identity(node,args.userId,args.project),project=projects.get(key);
-    if(operation==='projects.list')return {environmentModes:['shared','isolated','oci'],projects:[...projects].filter(([entry])=>{const [m,u]=JSON.parse(entry);return m===node&&u===args.userId;}).map(([,value])=>copy(value))};
+    if(operation==='projects.list')return {...(environmentModes?{environmentModes}:{}),projects:[...projects].filter(([entry])=>{const [m,u]=JSON.parse(entry);return m===node&&u===args.userId;}).map(([,value])=>copy(value))};
     if(operation==='projects.create'){
       if(createError)throw Error(createError);
       const result={project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null,...(createMode==='missing'?{}:{environmentMode:createMode||args.environmentMode})};projects.set(key,result);return copy(result);
@@ -71,7 +71,7 @@ try{
   async function login(target,username){await target.goto(origin);await target.locator('#login-form [name=username]').fill(username);await target.locator('#login-form [name=password]').fill(password);await target.locator('#login-form [type=submit]').click();await target.locator('#login-dialog').waitFor({state:'hidden'});await target.locator('[data-nav=work]').click();}
   async function chooseMachine(target=page){await action('projects.list',()=>target.locator('[name=workspace-machine]').selectOption(machine),target);await idle(target);}
   async function create(name,expected=200){
-    await page.locator('#project-create').evaluate(element=>element.open=true);await page.locator('[name=new-project]').fill(name);assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
+    await page.locator('#project-create').evaluate(element=>element.open=true);await page.locator('[name=new-project]').fill(name);assert.equal(await page.locator('[name=environment-choice]').count(),0);assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
     const response=await responseForAfter('projects.create',()=>page.locator('#project-create-form [type=submit]').click());assert.equal(response.status(),expected,await response.text());await idle();
   }
   async function responseForAfter(operation,fn){const waiting=responseFor(page,operation);await fn();return waiting;}
@@ -81,22 +81,35 @@ try{
   async function makeReady(project,version=release){project.state='READY';project.publication={id:project.publication.id,state:'READY',release:version};if(!project.releases.some(item=>item.release===version))project.releases.push({release:version,state:'READY'});project.latestReadyRelease=version;delete project.error;delete project.errorDetails;}
 
   await login(page,'personal-member');await chooseMachine();await page.locator('#project-create>summary').click();
-  assert.equal(await page.locator('[name=environment-choice]').count(),0);
-  assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
+  assert.equal(await page.locator('[name=environment-choice]').count(),0,'2026-10-08 handoff: new projects have no legacy environment picker');assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
   for(const name of ['Bad','1bad','bad.name','a'.repeat(49)]){await page.locator('[name=new-project]').evaluate((input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));},name);assert.equal(await page.locator('#project-create-form [type=submit]').isDisabled(),true);assert.equal(await page.locator('#project-name-error').isVisible(),true);}
   assert.equal(calls.some(row=>row.operation==='projects.create'),false);
   await create('container-experiment');const project=projects.get(identity(machine,member.id,'container-experiment'));
   assert.equal(project.environmentMode,'oci');assert.equal(await page.locator('#project-environment').textContent(),'个人容器');
   assert.match(await page.locator('[name=workspace-project] option:checked').textContent(),/container-experiment · 个人容器/);
-  await page.locator('#project-create').evaluate(element=>element.open=true);
-  assert.match(await page.locator('#environment-mode-note').textContent(),/每个新项目使用个人容器.*开发终端没有 GPU.*不是服务器 root/);
+  await page.locator('#project-create').evaluate(element=>element.open=true);assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
+  assert.equal(await page.locator('#environment-mode-note').textContent(),'可在容器内安装系统软件；开发终端没有 GPU；容器内 root 不是服务器 root。');
   createMode='shared';await create('mode-mismatch',503);assert.match(await page.locator('#project-create-error').textContent(),/未确认个人容器项目/);assert.equal(await page.locator('[name=workspace-project]').inputValue(),project.project);
-  createMode='missing';await create('unconfirmed-mode',503);assert.match(await page.locator('#project-create-error').textContent(),/未确认个人容器项目/);assert.equal(await page.locator('[name=workspace-project]').inputValue(),project.project);
-  projects.set(identity(machine,member.id,'legacy-shared'),ready('legacy-shared','shared'));await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
-  await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('legacy-shared'));await idle();
-  assert.equal(await page.locator('#project-environment').textContent(),'共享');
+  createMode='missing';await create('unconfirmed-container',503);assert.match(await page.locator('#project-create-error').textContent(),/未确认个人容器项目/);assert.equal(await page.locator('[name=workspace-project]').inputValue(),project.project,'missing mode cannot confirm new OCI or downgrade it');
+  const legacyShared=ready('legacy-shared');delete legacyShared.environmentMode;projects.set(identity(machine,member.id,'legacy-shared'),legacyShared);projects.set(identity(machine,member.id,'legacy-isolated'),ready('legacy-isolated','isolated'));
+  await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
+  for(const [name,label] of [['legacy-isolated','隔离'],['legacy-shared','共享']]){
+    await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption(name));await idle();
+    assert.equal(await page.locator('#project-environment').textContent(),label+' · 旧环境（兼容）');assert.match(await page.locator('[name=workspace-project] option:checked').textContent(),/旧环境（兼容）/);
+    for(const button of ['project-publish','terminal-open','workspace-upload'])assert.equal(await page.locator('#'+button).isEnabled(),true,name+' keeps its existing workflow');
+    assert.equal(await page.locator('[name=training-target]').inputValue(),'current');assert.equal(await page.locator('[name=release]').inputValue(),oldRelease);
+  }
+  // The Portal advertises only OCI. Both legacy-only and omitted node modes
+  // become an empty capability list; neither confirms container availability.
+  for(const modes of [['shared','isolated'],null]){
+    environmentModes=modes;await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();await page.locator('#project-create').evaluate(element=>element.open=true);await page.locator('[name=new-project]').fill('unsupported-container');
+    assert.equal(await page.locator('#project-create-form [type=submit]').isDisabled(),true);assert.equal(await page.locator('#project-create-availability').isVisible(),true);assert.equal(await page.locator('#project-create-availability').textContent(),'个人容器状态未知');
+    const before=calls.filter(row=>row.operation==='projects.create').length;await page.locator('#project-create-form').evaluate(form=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));await idle();assert.equal(calls.filter(row=>row.operation==='projects.create').length,before,'no capability means no node create, including a synthetic submit');assert.equal(await page.locator('#project-publish').isEnabled(),true,'old projects remain usable without OCI capability');
+  }
+  environmentModes=['shared','isolated','oci'];await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
+  assert.equal(await page.locator('#project-materials-note').textContent(),'权重、tokenizer 放在项目里；发布不携带开发 HOME');
   createMode=null;createError='这台服务器未为此账号启用个人容器。';
-  const rejected=await responseForAfter('projects.create',async()=>{await page.locator('#project-create').evaluate(element=>element.open=true);await page.locator('[name=new-project]').fill('denied-container');await page.locator('#project-create-form [type=submit]').click();});
+  const rejected=await responseForAfter('projects.create',async()=>{await page.locator('#project-create').evaluate(element=>element.open=true);await page.locator('[name=new-project]').fill('denied-container');assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');await page.locator('#project-create-form [type=submit]').click();});
   assert.ok(rejected.status()>=400);await idle();assert.equal(await page.locator('#project-create-error').textContent(),createError);createError='';
   await page.locator('#project-create').evaluate(element=>element.open=false);await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption(project.project));await idle();
   Object.assign(project,ready(project.project));await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption(project.project));await idle();
@@ -145,7 +158,7 @@ try{
   await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});await login(page,'admin');await idle();
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'');assert.equal(await page.locator('#publication-actions').isVisible(),false);assert.ok((await pendingRecords()).some(item=>item.value.key===memberKey));
   const adminPublishCount=publishes().length;await chooseMachine();await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('admin-project'));await idle();assert.equal(publishes().length,adminPublishCount);
-  assert.equal(await page.locator('#project-environment').textContent(),'共享');
+  assert.equal(await page.locator('#project-environment').textContent(),'共享 · 旧环境（兼容）');
   const zeroPage=await browser.newPage({viewport:{width:320,height:844}});await configure(zeroPage);await login(zeroPage,'no-access');
   assert.equal(await zeroPage.locator('[name=workspace-machine] option').count(),1);assert.equal(await zeroPage.locator('#project-create-form [type=submit]').isDisabled(),true);assert.equal(await zeroPage.locator('#project-publish').isDisabled(),true);
   const countBeforeForgery=calls.length;const forbidden=await zeroPage.evaluate(async machine=>{const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'projects.create',args:{machine,project:'forged',environmentMode:'oci'}})});return response.status;},machine);
@@ -181,8 +194,11 @@ try{
       await action('projects.status',()=>layout.locator('[name=workspace-project]').selectOption(selected),layout);await idle(layout);
       await layout.waitForFunction(id=>document.querySelector('[name=dataset-machine]')?.value===id,node.id,{timeout:10000});
       assert.deepEqual(layoutCalls.filter(call=>call.operation.startsWith('datasets.')),[],'Selecting the actual source container still does not load the hidden dataset room');
-      await layout.locator('#project-create').evaluate(element=>element.open=true);await layout.locator('[name=new-project]').fill('new-container');assert.equal(await layout.locator('[name=environment-mode]').inputValue(),'oci');assert.equal(await layout.locator('[name=environment-choice]').count(),0);
-      await layout.locator('#project-create').scrollIntoViewIfNeeded();await layout.screenshot({path:join(shots,`personal-${role}-${width}-${node.id}-create.png`),fullPage:true});
+      await layout.locator('#project-create').evaluate(element=>element.open=true);await layout.locator('[name=new-project]').fill('new-container');assert.equal(await layout.locator('[name=environment-choice]').count(),0);assert.equal(await layout.locator('[name=environment-mode]').inputValue(),'oci');
+      await layout.locator('#project-create-form').evaluate(form=>{document.activeElement?.blur();form.scrollIntoView({block:'center',behavior:'instant'});});
+      await layout.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      assert.equal(await layout.locator('#project-create-form [type=submit]').evaluate(button=>{const box=button.getBoundingClientRect(),hit=document.elementFromPoint(box.left+box.width/2,box.top+box.height/2);return button===hit||button.contains(hit);}),true,'creation remains reachable above fixed navigation');
+      await layout.screenshot({path:join(shots,`personal-${role}-${width}-${node.id}-create.png`)});
       assert.ok(await layout.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),role+' '+width+' '+node.id+' does not overflow');
       assert.equal(await layout.locator('[name=workspace-machine]').getAttribute('title'),node.id);
       await layout.locator('#project-create').evaluate(element=>element.open=false);
