@@ -310,14 +310,66 @@ class DataWorkspaceTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
         self.assertEqual(out,[1]);receipt=self.w.receipt(self.user,task['operationId'])
         self.assertEqual(receipt['state'],'FAILED');self.assertIn('busy',receipt['error'])
+        public=self.call('status',operationId=task['operationId'])
+        self.assertEqual(public['phase'],'REGISTERING')
+        self.assertEqual(public['failureKind'],'CACHE_BUSY')
+        self.assertEqual(public['lockWait'],{'scope':'CACHE','limit':'TOTAL_BUDGET','timeoutSeconds':.05})
+        self.assertNotIn('dataset',public);self.assertNotIn('version',public)
         self.assertEqual(self.cache.list_datasets(self.module.Principal(self.user))['datasets'],[])
+
+    def test_failed_copy_keeps_fixed_version_and_partial_bytes_for_explicit_republication(self):
+        self.fill();source=self.owner/'data/sample/train.txt'
+        source.write_bytes(b'a'*(1024*1024)+b'b'*32)
+        original=source.read_bytes();task=self.publish();calls=[]
+        real_put=self.module.DatasetCache._put_chunk_data
+        def put(cache,*args,**kwargs):
+            calls.append(args[2])
+            if len(calls)==2:
+                raise self.module.CacheBusy('dataset cache is busy; retry later without assuming READY',
+                    lock_wait={'scope':'CACHE','limit':'SINGLE_WAIT','timeoutSeconds':30})
+            return real_put(cache,*args,**kwargs)
+        with patch.object(self.module.DatasetCache,'_put_chunk_data',new=put):
+            self.assertEqual(self.w.worker(self.user,task['operationId']),1)
+        failed=self.call('status',operationId=task['operationId'])
+        self.assertEqual(failed['state'],'FAILED');self.assertEqual(failed['phase'],'MATERIALIZING')
+        self.assertEqual(failed['failureKind'],'CACHE_BUSY')
+        self.assertEqual(failed['bytes'],len(original));self.assertEqual(failed['files'],1)
+        self.assertEqual(failed['lockWait']['limit'],'SINGLE_WAIT')
+        stage=self.cache._paths(failed['dataset'],failed['version'])['.staging']/'data/train.txt'
+        self.assertEqual(stage.read_bytes(),original[:1024*1024])
+        self.assertNotIn(str(self.base),json.dumps(failed))
+        starts=len(self.starts)
+        same=self.call('publish',path='sample',name='sample',key=task['operationId'])
+        self.assertEqual(same,failed);self.assertEqual(len(self.starts),starts)
+        with self.assertRaises(FileNotFoundError):
+            self.call('status',user='demo-user-2',operationId=task['operationId'])
+        retry=self.publish()
+        self.assertEqual(self.w.worker(self.user,retry['operationId']),0)
+        ready=self.call('status',operationId=retry['operationId'])
+        self.assertEqual(ready['phase'],'COMPLETED');self.assertEqual(ready['state'],'READY')
+        self.assertEqual((ready['dataset'],ready['version']),(failed['dataset'],failed['version']))
+        self.assertEqual(self.call('status',operationId=task['operationId']),failed)
+        self.assertEqual(source.read_bytes(),original)
 
     def test_publication_real_scan_error_is_not_retried(self):
         self.fill();task=self.publish()
         with patch.object(self.module,'_scan',side_effect=self.module.CacheError('corrupt source')) as scan:
             self.assertEqual(self.w.worker(self.user,task['operationId']),1)
         self.assertEqual(scan.call_count,1)
-        self.assertEqual(self.w.receipt(self.user,task['operationId'])['state'],'FAILED')
+        failure=self.call('status',operationId=task['operationId'])
+        self.assertEqual(failure['state'],'FAILED');self.assertEqual(failure['phase'],'SCANNING')
+        self.assertNotIn('failureKind',failure);self.assertNotIn('lockWait',failure)
+
+    def test_old_cache_busy_exception_without_wait_details_still_persists_failure(self):
+        self.fill();task=self.publish();error=self.module.CacheBusy('legacy cache busy')
+        del error.lock_wait
+        with patch.object(self.module.DatasetCache,'materialize',side_effect=error) as materialize:
+            self.assertEqual(self.w.worker(self.user,task['operationId']),1)
+        self.assertEqual(materialize.call_count,1)
+        failed=self.call('status',operationId=task['operationId'])
+        self.assertEqual(failed['state'],'FAILED');self.assertEqual(failed['failureKind'],'CACHE_BUSY')
+        self.assertEqual(failed['phase'],'MATERIALIZING');self.assertIn('version',failed)
+        self.assertNotIn('lockWait',failed)
 
     def test_systemd_and_cgroup_stop_confirmation_is_fail_closed(self):
         self.stopped.stop()

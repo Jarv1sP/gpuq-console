@@ -85,6 +85,10 @@ class CacheMetadataIncomplete(CacheError):
 class CacheBusy(CacheError):
     """Another operation holds a lock; callers may retry without assuming readiness."""
 
+    def __init__(self, message, *, lock_wait=None):
+        super().__init__(message)
+        self.lock_wait = lock_wait
+
 
 _LOCK_WAIT = contextvars.ContextVar("dataset_lock_wait", default=None)
 
@@ -825,6 +829,7 @@ class DatasetCache:
             try:
                 _regular(fd)
                 policy = _LOCK_WAIT.get()
+                remaining = policy["remaining"] if policy else None
                 timeout = min(policy["timeout"], policy["remaining"]) if policy else self.lock_timeout
                 deadline = time.monotonic() + timeout
                 pause = 0.025
@@ -836,7 +841,10 @@ class DatasetCache:
                         break
                     except BlockingIOError:
                         if time.monotonic() >= deadline:
-                            raise CacheBusy("dataset cache is busy; retry later without assuming READY")
+                            raise CacheBusy("dataset cache is busy; retry later without assuming READY", lock_wait={
+                                "scope": "CACHE" if name == ".lock" else "VERSION",
+                                "limit": "TOTAL_BUDGET" if remaining is not None and remaining <= policy["timeout"] else "SINGLE_WAIT",
+                                "timeoutSeconds": timeout})
                         started = time.monotonic()
                         try:
                             # This fd has NOT acquired the requested lock. Do

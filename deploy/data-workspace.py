@@ -158,7 +158,7 @@ class DataWorkspaces:
             raise
 
     def public(self, task):
-        return {key: task[key] for key in ('operationId', 'state', 'path', 'name', 'dataset', 'version', 'files', 'bytes', 'error') if key in task}
+        return {key: task[key] for key in ('operationId', 'state', 'path', 'name', 'dataset', 'version', 'files', 'bytes', 'error', 'phase', 'failureKind', 'lockWait') if key in task}
 
     def status(self, user, key=None):
         task = self.receipt(user, key) if key else self.pending(user)
@@ -250,9 +250,15 @@ class DataWorkspaces:
             self.no_terminals(user)
             lock = self.lifetime(user, exclusive=True)
         module, cache, owner = self.storage(user)
+        def checkpoint(phase, **facts):
+            nonlocal task
+            task = {**task, **facts, 'phase': phase}
+            module._write_json(owner/'operations'/(key+'.json'), task)
+
         try:
             if self.n.CONFIG.get('storageTier',{}).get('enabled') is True:
                 raise PermissionError('Dataset originals must be published in the HDD warehouse, not a training cache')
+            checkpoint('SCANNING')
             source = owner/'data'/task['path']
             self.relative(task['path'])
             manifest = module._scan(source)  # FD traversal rejects links/special files
@@ -270,19 +276,23 @@ class DataWorkspaces:
             # are republished explicitly from the personal workspace.
             source_id = 'workspace-'+hashlib.sha256((user+'\0'+dataset).encode()).hexdigest()[:40]
             cache.sources[source_id] = source
+            checkpoint('REGISTERING', files=len(manifest['files']), bytes=total)
             # Bind source and creation provenance in the same metadata commit.
             # An existing historical registration is never upgraded to personal
             # merely because its name/owner matches this workspace.
             with cache._new_registration(internal,dataset,manifest,[user],source_id,origin='workspace',receipt=key,explicit=True),cache._locked():
                 registered = cache._register(internal, dataset, manifest, [user], source_id,
                                              _origin='workspace', _receipt=key)
+            checkpoint('REGISTERED', **registered)
             archive = None
             if self.n.CONFIG.get('storageArchive', {}).get('enabled') is True:
+                checkpoint('ARCHIVE_INTENT')
                 archive = self.n.storage_archive()
                 intent = archive.outbox_begin({'opId': key, 'userId': user,
                     'reference': {'dataset': dataset, 'version': registered['version']}, 'origin': 'workspace'})
+            checkpoint('MATERIALIZING')
             result = cache.materialize(actor, dataset, registered['version'])
-            receipt = {**task, **registered, 'state': result['state'], 'completedAt': time.time()}
+            receipt = {**task, **registered, 'state': result['state'], 'phase': 'COMPLETED', 'completedAt': time.time()}
             if archive is not None and result['state'] == 'READY':
                 # The durable intent also recovers a crash between publication
                 # and this acknowledgement. The writable draft is not a cache.
@@ -295,6 +305,10 @@ class DataWorkspaces:
                     pass
         except Exception as error:
             receipt = {**task, 'state': 'FAILED', 'error': self.n.dataset_error(error), 'completedAt': time.time()}
+            if isinstance(error, module.CacheBusy):
+                receipt['failureKind'] = 'CACHE_BUSY'
+                if getattr(error, 'lock_wait', None) is not None:
+                    receipt['lockWait'] = error.lock_wait
         finally:
             # Result is durable before writers are allowed back in. If saving
             # it fails, PUBLISHING remains a fail-closed recovery fence.
