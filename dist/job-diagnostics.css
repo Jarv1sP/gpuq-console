@@ -13,3 +13,10 @@
 .diagnostic-log summary{cursor:pointer;font:12px/1.7 ui-monospace,monospace;overflow-wrap:anywhere}
 .job-log-dialog h3{margin:18px 0 8px}.job-log-dialog .modal-head{flex-wrap:wrap}.job-log-dialog .button{white-space:normal}
 @media(max-width:600px){.diagnostic-metrics{grid-template-columns:minmax(0,1fr)}.diagnostic-tools .button{flex:1;min-width:110px}.job-log-dialog{padding:20px}}
+
+.job-recovery{position:relative;border-bottom:1px solid var(--line,#dbe2ec);padding-bottom:24px;margin-bottom:24px;overflow-wrap:anywhere}
+.job-recovery .field-caption{display:flex;align-items:center;gap:12px}.job-recovery h3{margin:0}
+.job-recovery-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+.job-recovery-help{position:static}.job-recovery-help summary{position:relative;cursor:pointer;list-style:none}.job-recovery-help summary::before{content:'';position:absolute;inset:-15px}
+.job-recovery-help p{position:absolute;top:28px;left:0;z-index:2;box-sizing:border-box;width:min(300px,100%);padding:16px;background:var(--bg-3,#fff);border:1px solid var(--line,#dbe2ec);font-size:12px}
+@media(max-width:600px){.job-recovery-actions .button{min-height:44px}}
