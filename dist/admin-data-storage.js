@@ -4,7 +4,9 @@ import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 import {datasetInfoHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML,hasDatabaseOriginal} from './dataset-flow.js';
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
-import {validUsername} from './model.js';
+// The preview model imports the private inventory. Keep this validator pure;
+// its username contract is checked against model.js by the storage tests.
+const validUsername=value=>typeof value==='string'&&/^[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}$/u.test(value);
 
 const id=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,hash=/^[a-f0-9]{64}$/;
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

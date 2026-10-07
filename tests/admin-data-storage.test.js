@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {adminDatasetCatalog,adminStorageSummary,adminStorageUsers,adminWarehouseMachines,mountAdminDataStorage,registerDatasetStorageAdmin} from '../dist/admin-data-storage.js';
+import {validUsername} from '../dist/model.js';
 const machines=[{id:'node-a'},{id:'node-b'}],version='a'.repeat(64),other='b'.repeat(64);
 const listing=(machine,dataset='samples',ownerLabel='所属用户：alice',state='READY',bytes=10)=>({machine,state:'ok',datasets:[{dataset,ownerLabel,versions:[{version,state,bytes,files:2,canPrepare:false}]}]});
 
@@ -46,6 +47,13 @@ test('user statistics count known shared owners without inventing the unknown ac
   const result=adminStorageUsers(catalog);
   assert.deepEqual(new Set(result.rows.map(row=>row.name)),new Set(['陈宇轩','alice']));
   assert(result.rows.every(row=>row.datasets===1&&row.bytes===10));assert.equal(result.excluded,0);
+});
+test('storage owner validation follows the account contract without importing the preview model into the login graph',()=>{
+  for(const name of ['alice','lab_user-1','陈宇轩','未知','中文账户123','a'.repeat(24),'a','0user','Alice','alice.admin','alice@example.com','a'.repeat(25),'alice smith','<img src=x>','未知（授权信息未完整返回）']){
+    const result=adminStorageUsers({datasets:[{dataset:'samples',versions:[{bytes:10,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：'+name}]}]}]});
+    assert.equal(result.rows.length,validUsername(name)?1:0,name);
+    assert.equal(result.excluded,validUsername(name)?0:1,name);
+  }
 });
 test('warehouse marker requires retained ARCHIVED proof bound to the complete immutable version',()=>{
   const storage={dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:'node-b'},v={version,locations:[{machine:'node-a',dataset:'samples',storage}]};
