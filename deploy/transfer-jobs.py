@@ -691,7 +691,7 @@ class TransferJobs:
         archive._require(source=True)
         if (archive.policy != policy or archive.machine != value['targetMachine']
                 or archive.store is None or archive.store.machine != archive.machine
-                or archive.store.cache.root != self.n.dataset_cache()[1].root):
+                or archive.store.cache.root != getattr(self.n,'dataset_source_cache',self.n.dataset_cache)()[1].root):
             raise ValueError('Managed archive authority binding changed')
         return dict(value)
 
