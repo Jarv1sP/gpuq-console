@@ -49,7 +49,7 @@ export async function projectCall(service,principal,user,operation,args,authoriz
   if(operation==='projects.create'&&(result?.project!==args.project||result.environmentMode!=='oci'))fail('服务器未确认个人容器项目；请查询原项目，不会回退或新建替代环境。',503);
   if(operation==='projects.quota')return quotaStatus(result,user.id);
   if(['projects.create','projects.publish','projects.local-import.begin','projects.local-import.cancel','projects.archive','projects.unarchive','projects.retire'].includes(operation))service.audit(principal.username,operation,args.machine,args.project);
-  if(operation==='projects.list')return {...result,projects:(result.projects||[]).map(row=>service.projectPresentation(user.id,args.machine,row))};
+  if(operation==='projects.list')return {...result,environmentModes:Array.isArray(result.environmentModes)&&result.environmentModes.includes('oci')?['oci']:[],projects:(result.projects||[]).map(row=>service.projectPresentation(user.id,args.machine,row))};
   return ['projects.status','projects.create'].includes(operation)?service.projectPresentation(user.id,args.machine,result):result;
 }
 export function quotaStatus(value,owner){

@@ -160,6 +160,20 @@ test('project operations bind authenticated owner and explicit node without rese
   await assert.rejects(f.call('projects.verify',{project:'my-project',release}));
  }finally{await f.close();}
 });
+test('personal project list advertises only confirmed OCI without rewriting legacy project records',async()=>{
+ const f=await fixture();try{
+  const original=f.service.bridge,legacy={project:'my-project',state:'DRAFT',environmentMode:'isolated',releases:[],latestReadyRelease:null};
+  let modes=['shared','isolated','oci'];
+  f.service.bridge=async(machine,operation,args)=>operation==='projects.list'?{projects:[legacy],environmentModes:modes,unchangedField:'legacy-compatible'}:original(machine,operation,args);
+  const result=(await f.call('projects.list')).result;
+  assert.deepEqual(result.environmentModes,['oci']);assert.equal(result.unchangedField,'legacy-compatible');
+  assert.equal(result.projects[0].project,legacy.project);assert.equal(result.projects[0].environmentMode,'isolated');assert.equal(result.projects[0].state,'DRAFT');assert.deepEqual(legacy,{project:'my-project',state:'DRAFT',environmentMode:'isolated',releases:[],latestReadyRelease:null});
+  for(const unconfirmed of [undefined,null,'oci',[],['shared','isolated'],['OCI']]){modes=unconfirmed;assert.deepEqual((await f.call('projects.list')).result.environmentModes,[]);}
+  const created=(await f.call('projects.create',{project:'personal-default'})).result;
+  assert.equal(created.environmentMode,'oci');assert.deepEqual(f.calls.at(-1).args,{project:'personal-default',environmentMode:'oci',userId:f.member.id});
+  assert.equal(f.service.store.jobs.length,0);
+ }finally{await f.close();}
+});
 test('kernel quota status is owner-bound, read-only and available during maintenance',async()=>{
  const f=await fixture();try{
   const revision=f.service.operationalMaintenance(f.admin.principal).revision;
