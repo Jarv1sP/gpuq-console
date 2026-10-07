@@ -24,6 +24,35 @@ class Files(unittest.TestCase):
         self.call('put','code/test.py',data=base64.b64encode(b'world').decode(),offset=5)
         r=self.call('get','code/test.py');self.assertEqual(base64.b64decode(r['data']),b'helloworld');self.assertTrue(r['eof'])
         with self.assertRaises(ValueError):self.call('put','code/test.py',data='',offset=2)
+    def test_download_identity_is_stable_and_replacement_or_edits_reject_resume(self):
+        (self.root/'result').write_bytes(b'original')
+        first=self.call('get','result')
+        self.assertEqual(first['protocol'],2)
+        self.assertEqual(self.call('get','result',fingerprint=first['fingerprint'])['fingerprint'],first['fingerprint'])
+        (self.root/'result').write_bytes(b'modified')
+        with self.assertRaisesRegex(ValueError,'source changed'):
+            self.call('get','result',offset=2,fingerprint=first['fingerprint'])
+        second=self.call('get','result')
+        replacement=self.root/'replacement';replacement.write_bytes(b'modified');replacement.replace(self.root/'result')
+        with self.assertRaisesRegex(ValueError,'source changed'):
+            self.call('get','result',fingerprint=second['fingerprint'])
+    def test_download_change_during_read_never_returns_a_chunk(self):
+        (self.root/'result').write_bytes(b'original')
+        original=self.node.os.read
+        def changed(fd,size):
+            data=original(fd,size)
+            (self.root/'result').write_bytes(b'modified')
+            return data
+        with patch.object(self.node.os,'read',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'source changed while reading'):
+                self.call('get','result')
+    def test_download_invalid_identity_and_past_eof_reject(self):
+        (self.root/'result').write_bytes(b'original')
+        for value in ['bad',False,'../path']:
+            with self.assertRaisesRegex(ValueError,'Invalid download file identity'):
+                self.call('get','result',fingerprint=value)
+        with self.assertRaisesRegex(ValueError,'offset exceeds'):
+            self.call('get','result',offset=9)
     def test_chinese_identity_for_job(self):
         job={'id':'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','userId':'demo-user-1','username':'测试同学','cards':1,'argv':['true'],'name':'check','minVramGiB':0}
         self.node.validate_job(job)

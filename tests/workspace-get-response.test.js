@@ -40,7 +40,7 @@ test('one MiB personal reads omit the dashboard but retain exact result and trus
   assert.equal(stateCalls,0);assert.equal(f.service.store.jobs.length,0);f.service.state=buildState;
 });
 
-test('every sibling read and mutation keeps its full state response',async t=>{
+test('workspace siblings retain full state while file reads return compact authenticated results',async t=>{
   const f=await fixture(t),buildState=f.service.state;let stateCalls=0;
   f.service.state=function(principal){stateCalls++;return buildState.call(this,principal);};
   f.respond(async()=>({path:'incoming/sample.bin',size:1,entries:[]}));
@@ -50,9 +50,11 @@ test('every sibling read and mutation keeps its full state response',async t=>{
     ['files.get',{path:'sample.bin',offset:0}]
   ]){
     const out=await f.service.invoke(f.user.token,operation,{machine:'gpu-1',...args});
-    assert.ok(out.state);assert.equal(out.principal.userId,f.member.id);
+    if(operation==='files.get')assert.deepEqual(Object.keys(out).sort(),['principal','result']);
+    else assert.ok(out.state);
+    assert.equal(out.principal.userId,f.member.id);
   }
-  assert.equal(stateCalls,3);
+  assert.equal(stateCalls,2);
 });
 
 test('the slim reply does not bypass authentication, machine grants, path or actor validation',async t=>{

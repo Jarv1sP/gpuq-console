@@ -60,6 +60,12 @@ test('host status retries bridge maintenance with the same handle, never execute
  assert.equal((await apiPost(url,'call',body,f.options)).result.state,'RUNNING');
  assert.equal(f.calls.length,2);assert.ok(f.calls.every(call=>JSON.stringify(JSON.parse(call[1].body))===JSON.stringify(body)));
 });
+test('file read gateway retries retain account request, offset and file fingerprint',async()=>{
+ const body={operation:'files.get',args:{machine:'node-a',project:'paper',area:'output',runId:'11111111-1111-4111-8111-111111111111',path:'result.bin',offset:1048576,fingerprint:'a'.repeat(64)}};
+ const f=fixture([new Response('',{status:503}),new Response('{"result":{"eof":true}}')]);
+ assert.equal((await apiPost(url,'call',body,f.options)).result.eof,true);
+ assert.equal(f.calls.length,2);assert.ok(f.calls.every(call=>JSON.stringify(JSON.parse(call[1].body))===JSON.stringify(body)));
+});
 test('malformed successful JSON and 404 are reported accurately without leaking HTML',async()=>{
  for(const status of [200,404]){
   const f=fixture([new Response('<html>private-token-do-not-print</html>',{status})]);

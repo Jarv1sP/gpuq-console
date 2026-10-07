@@ -139,3 +139,5 @@ Linux 专用 test 实际 renameat2 no-replace。生产绝不用测试 fallback�
 正式网页另核对服务器/项目选择和 390px 布局；全体用户角色、启用状态和额度的指纹前后一致。测试作业 SUCCEEDED，未取消其他任务或使用忙碌节点显卡。旧工作区、幂等记录和取消协议兼容通过回归；本轮没有重新开展项目运行中取消、双卡 NCCL、节点重启或大型数据压力实测。
 
 上述证明当前 GPUQ 后端上的同机项目工作流，不包括 Slurm/Pyxis/Enroot、硬磁盘配额、自动跨机项目/环境分发、结果自动归档或独立内容备份。私人验收日志、账号与主机清单不进入公开仓库。
+
+上传和结果下载故障：`project-operation-lock.test.py` 使用真实 flock 竞争验证短等待、超时原片段保留、非竞争 IO 错误与不安全锁拒绝，并固定 machine-only quota 路由。`dataset-replication.test.js` 验证管理员当前角色与个人 owner-only 目录。`remote-read-lanes.test.js` 验证文件读取越过写入积压及在途撤权；`client-http.test.js` 固定读取重试的 offset/fingerprint。`node-files.test.py` 验证逐块源指纹、读取期间变化与非法偏移；`client-file-download.test.js` 验证断线恢复、来源/账号/项目错配、本地编辑、软链接、旧节点和失败保留。不访问生产节点，不声明已完成真实大文件性能或迁移验收。
