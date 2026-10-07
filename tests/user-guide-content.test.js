@@ -242,7 +242,11 @@ test('single warehouse intake keeps original data off training SSD and separates
   assert.match(guide,/先确认内容、解压大小和剩余空间，再登记完整数据集/);
   assert.match(guide,/不会自动解压/);
   assert.match(guide,/不要在训练固态另建长期原件/);
-  assert.match(guide,/即使训练也在仓库所在机器上，仍须准备独立的固态副本/);
+  assert.match(guide,/仓库所在机器也须完成准备，不能把原件可用当作训练缓存已就绪/);
+  assert.match(guide,/具体存储介质由平台按节点实际能力管理/);
+  assert.match(guide,/日常只需使用个人工作区和完整数据仓库/);
+  assert.match(guide,/不需要自己选择磁盘或宿主目录/);
+  assert.doesNotMatch(guide,/仍须准备独立的固态副本|所选训练机器的固态缓存也须/);
   assert.match(guide,/原件与恢复凭证均核实、没有活动读取或未知保护时才允许按容量水位回收/);
   assert.match(guide,/回收不删除机械原件、项目代码、权重或训练结果/);
   assert.match(guide,/仓库只有一份原件，不是独立备份/);
@@ -261,7 +265,7 @@ test('troubleshooting separates confirmed misunderstandings from unavailable fea
   assert.match(section, /保留原任务编号和 `Submission key`，不要另建一份训练/);
   assert.match(section, /节点配置的安全预留；这不是个人容量额度用完/);
   assert.match(section, /上传 `READY` 不等于可以立即训练/);
-  assert.match(section, /机械仓库原件完成；所选训练机器的固态缓存也须准备到 `READY`/);
+  assert.match(section, /机械仓库原件完成；所选机器的本地训练缓存也须准备到 `READY`/);
   assert.match(section, /两者都不等于独立备份/);
   assert.match(section, /已经永久取消的归档要由管理员核查/);
   assert.match(section, /要另开独立会话，选「新建终端」或运行 `gpuctl ssh`/);
