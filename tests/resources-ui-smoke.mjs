@@ -141,6 +141,12 @@ try{
   assert.match(await resourceDetail(page,'gpu-1').textContent(),/已采集 7 \/ 8 张/);
   assert.match(await resourceDetail(page,'gpu-1').textContent(),/GPU 7 不可用/);
   assert.match(await resourceCard(page,'gpu-1').textContent(),/调度异常/);
+  assert.equal((await resourceCard(page,'gpu-1').locator('.resource-portrait-meta').textContent()).match(/调度异常/g).length,1,'Degraded state is shown once');
+  await selectResource(page,'gpu-1');
+  const partialWarning=resourceDetail(page,'gpu-1').locator(':scope > .monitor-warning');
+  assert.equal(await partialWarning.isVisible(),true,'Partial inventory/fault diagnosis must be visually available, not only DOM text');
+  assert.equal(await partialWarning.evaluate(element=>{const bounds=element.getBoundingClientRect();return document.elementFromPoint(bounds.left+10,bounds.top+10)===element;}),true,'Opening card detail exposes the fault diagnosis above fixed controls');
+  await page.screenshot({path:join(screenshots,'resources-partial-detail-1440.png'),animations:'disabled'});
   await capture('resources-partial-1440');
   const partialHeight=await page.evaluate(()=>document.documentElement.scrollHeight);
   assert.ok(partialHeight<=2200,'Partial inventory must stay within the desktop height budget: '+partialHeight);

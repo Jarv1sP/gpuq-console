@@ -82,6 +82,7 @@ test('partial GPU inventory keeps measured cards without inventing missing capac
  assert.equal((html.match(/resource-tower-bar unknown/g)||[]).length,1);
  assert.match(html,/resource-tower-bar used/);assert.match(html,/resource-tower-bar free/);
  assert.match(html,/已采集 2 \/ 3 张/);assert.match(html,/GPU 1 不可用/);assert.match(html,/调度异常/);
+ assert.doesNotMatch(html,/调度异常 · 调度异常/);
  assert.doesNotMatch(html,/训练连接正常|可立即启动/);
  const stale=resourceCards({...options,snapshot:{...data,stale:true}});
  assert.equal((stale.match(/resource-tower-bar unknown/g)||[]).length,3);
