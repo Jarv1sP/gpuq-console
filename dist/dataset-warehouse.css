@@ -3,6 +3,7 @@ body[data-room=datasets] #page-title{font-size:30px;display:flex;align-items:bas
 body[data-room=datasets] .page-heading{padding-bottom:22px}
 body[data-room=datasets] .page-heading [data-shell-action=control]{display:none}
 body[data-room=datasets] .v3-count{font:13px var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-3)}
+body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 .v3-head-actions{display:inline-flex;align-items:center;gap:8px}
 .v3-head-actions .button{min-height:40px}
 #page-datasets :is(.warehouse-v3,.v3-upload){--v3-fetch:#6CB4FF;--v3-warn:#E8B04B;--v3-run:#3DD68C;--v3-bad:#FF6B6B;min-width:0}
@@ -12,6 +13,9 @@ body[data-room=datasets] .v3-count{font:13px var(--mono);font-variant-numeric:ta
 #page-datasets .v3-server-name{font:500 13px var(--mono);display:flex;align-items:center;justify-content:space-between;gap:10px}
 #page-datasets .v3-server-name>span{max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #page-datasets .v3-server-name small{font-size:11px;color:var(--ink-3)}
+#page-datasets .v3-server-name>span{min-width:0;flex:1}
+#page-datasets .v3-server-name small{flex:none;white-space:nowrap}
+#page-datasets .v3-server-chip .capacity-cache-rail{margin:0}
 #page-datasets .v3-cap{height:3px;border-radius:2px;background:var(--line);overflow:hidden}
 #page-datasets .v3-cap i{display:block;height:100%;background:var(--ink-2)}
 #page-datasets .v3-cap.hot i{background:var(--v3-warn)}

@@ -213,6 +213,7 @@
 .capacity-big small{font:12px var(--mono);color:var(--ink-3)}
 .capacity-disk{display:grid;grid-template-columns:repeat(20,minmax(0,1fr));gap:3px;margin:12px 0 4px}
 .capacity-disk>span{height:12px;min-width:0;border-radius:2px;border:1px solid var(--line-2)}
+.capacity-disk-available{font:12px var(--mono);color:var(--ink-3)}
 .capacity-disk>.cache{background:var(--ink);border-color:var(--ink)}
 .capacity-disk>.used{background:var(--ink-2);border-color:var(--ink-2)}
 .capacity-disk>.reserve{border-color:#E8B04B;border-style:dashed}

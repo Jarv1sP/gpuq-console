@@ -324,7 +324,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；开发ID按账号、服务器、项目恢复到原入口 | 刷新只读核验原ID，不自动连接或接管；未知仍保留，明确结束才移除；ROOT/数据终端不存入项目记录；writerToken仅内存 |
 | `#project-disk-quota` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 打开时查询当前账号在开发服务器的容量与文件数，独立于显卡额度 | 不传项目或他人身份；未启用和待确认不造零值，未知不保留旧读数；关闭、离开或换上下文取消请求，完整服务器名保留在title；手机展开按钮至少44px，保留原生键盘切换与焦点 |
 | `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
-| `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；容量条只取已确认 capacity | filesystemBytes/availableBytes 计算实际数据盘已用比例；读不到不画 0%；长 ID 提示完整值；手机内部横向滚动 |
+| `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；缓存条用就绪副本大小与真实预算 | 预算未知时保留细条与已知副本大小；磁盘单独使用 capacity 的 filesystemBytes/availableBytes；长 ID 提示完整值；手机内部横向滚动 |
 | `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
 | 服务器缓存状态 | [dataset-cache-watch.js](../dist/dataset-cache-watch.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 缓存后自动只读查询至 READY/FAILED；有真实字节计数才显示进度，否则显示“取回中” | 固定目标、完整版本及原编号；失去回执不重发 prepare；离开房间/隐藏页面暂停，账号或服务器切换丢弃旧响应；READY 刷新目录；目录确认 READY/FAILED 时移除旧查询覆盖，迟到回复不能覆盖较新的终态 |
 | `.v3-upload` / `.v3-drop` / `.v3-route` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 先拖放/选择文件，再显示文件摘要、名称、上传服务器及一条探测路线 | 匿名 capabilities 不带票据；门户提供路线无效时显示待确认；保留原链接、云盘、服务器整理流程；原生 dialog 在可见父节点下 |
@@ -457,9 +457,9 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 后端全节点元数据目录保持不变；主界面成员只列出 `canUse === true` 或属于本人的版本，管理员列出全部。本人所属按门户生成的完整所属用户名精确匹配，跨机所属不同则核对位置标签；不按名字前缀、显示名或机器名猜归属。页头数量、版本数、搜索、服务器筛选和详情都使用该可见集合。后台统计与存储运维继续使用完整目录。版本与位置的 `canUse` 仍独立控制读取、准备和训练；本人可见性及管理员目录可见性不会改写权限，`READY` 也不单独解锁操作。手工插入隐藏版本的缓存按钮不会触发请求。
 
-`datasets.overview {}` 的实际 `dataset-storage-overview-v1` 响应才启用容量组件；未知操作、404、其他协议或账号/房间已变化的回执保持旧页，不显示模拟容量。仓库用14px分层横条，三段为「数据集 / 其他 / 可用」，只显示真实数字；空间不足仅显示「仓库空间不足」，不改变上传准入。缓存用3px（详情6px）细条与70%/80%水位，按登记缓存量与预算计算；磁盘用20格表示物理已用与可用，二者不混加。同节点同卷去重，跨节点不去重；精确匹配才显示「与仓库同盘」。未知为「未知」，检查时间仅进title提示。
+容量组件常驻。真实 `datasets.overview {}` 优先；未知操作、404、空数据或未知字段使用现有只读 catalog/capacity 的已确认量：可见目录按数据集＋完整版本去重合计，各机缓存仅合计当前 READY 副本，磁盘单独使用 filesystemBytes/availableBytes。缺失的仓库盘容量和缓存预算仍为未知，不把缓存磁盘冒充仓库盘或预算；任何显示兜底都不产生新协议、仓库证明或动作权限。仓库用14px分层横条，三段为「数据集 / 其他 / 可用」；空间不足仅显示「仓库空间不足」，不改变上传准入。缓存用3px（详情6px）细条与70%/80%水位，按登记缓存量与预算计算；磁盘用20格与已用、总量、可用数字，二者不混加。同节点同卷去重，跨节点不去重；精确匹配才显示「与仓库同盘」。未知为「未知」，检查时间仅进title提示。
 
-详情先「仓库」后「缓存」。仓库状态用实心/空心标记，`adaptOriginal`仅接受明确证明字段，不由READY、机器名或路径推断；证明字段仍待后端定稿，原始状态保存在悬停提示。不开放未提供的文件预览。主界面、服务器详情与后台卡片复用同一容量形状，不增加解释段落；没有完整缓存量时不显示用量百分比。原显示名CAS、缓存观察与训练权限入口保持独立。
+详情先「仓库」后「缓存」。仓库状态用实心/空心标记，`adaptOriginal`仅接受明确证明字段，不由READY、机器名或路径推断；证明字段仍待后端定稿，原始状态保存在悬停提示。不开放未提供的文件预览。主界面、服务器详情与后台卡片复用同一容量形状，不增加解释段落；不完整但已知的缓存统计在数值后加「+」，title 提示「部分统计」，partial 响应在标题旁显示「部分」。原显示名CAS、缓存观察与训练权限入口保持独立。
 
 仓库名称主行优先采用本人设置的显示名；未设置时，仅对节点生成的 `u-/w-`＋16位小写十六进制＋1–40位原名称格式显示末尾名称。完整 ID 仍在次行、详情及复制命令保留，同名数据不合并；所属字段仍仅采用后端 ownerLabel，不从隔离编号猜用户。兼容旧门户的原 ID 默认名称，不修改节点或新增视觉令牌。
 
