@@ -296,6 +296,77 @@ class OCITests(unittest.TestCase):
             present = manager.registry_dropin_state(path, os.geteuid())
             self.assertEqual(present[0], 'empty'); self.assertNotEqual(absent, present)
 
+    def test_absent_dropin_ignores_unrelated_ancestor_entries_and_timestamps(self):
+        for relative in ('registries.conf.d', 'containers/registries.conf.d',
+                         'config/containers/registries.conf.d'):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as root:
+                manager = self.manager(); base = Path(root).resolve()
+                path = base/relative
+                before = manager.registry_dropin_state(path, os.geteuid())
+                original = base.stat()
+                sibling = base/'unrelated-cache'; sibling.mkdir(mode=0o700)
+                (base/'unrelated.conf').write_text('not a registry configuration')
+                advanced = original.st_mtime_ns + 1_000_000_000
+                os.utime(base, ns=(advanced, advanced))
+                self.assertFalse(path.exists())
+                self.assertEqual(manager.registry_dropin_state(path, os.geteuid()), before)
+                sibling.rmdir(); (base/'unrelated.conf').unlink()
+                self.assertEqual(manager.registry_dropin_state(path, os.geteuid()), before)
+
+    def test_absent_dropin_detects_lookup_anchor_replacement_or_permission_change(self):
+        for change in ('replacement', 'permissions', 'unsafe-permissions'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as root:
+                manager = self.manager(); base = Path(root).resolve()/'anchor'
+                base.mkdir(mode=0o700); path = base/'containers/registries.conf.d'
+                before = manager.registry_dropin_state(path, os.geteuid())
+                if change == 'replacement':
+                    base.rename(base.with_name('original-anchor')); base.mkdir(mode=0o700)
+                else:
+                    base.chmod(0o750 if change == 'permissions' else 0o777)
+                if change == 'unsafe-permissions':
+                    with self.assertRaisesRegex(ValueError, 'unsafe'):
+                        manager.registry_dropin_state(path, os.geteuid())
+                else:
+                    self.assertNotEqual(manager.registry_dropin_state(path, os.geteuid()), before)
+
+    def test_absent_dropin_detects_new_components_and_rejects_files_or_links(self):
+        for change in ('ancestor', 'empty', 'nonempty', 'file', 'symlink'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as root:
+                manager = self.manager(); base = Path(root).resolve()
+                parent = base/'containers'; path = parent/'registries.conf.d'
+                before = manager.registry_dropin_state(path, os.geteuid())
+                if change == 'file': parent.write_text('not a directory')
+                elif change == 'symlink': parent.symlink_to(base, target_is_directory=True)
+                else:
+                    parent.mkdir(mode=0o700)
+                    if change != 'ancestor': path.mkdir(mode=0o700)
+                    if change == 'nonempty': (path/'override.conf').write_text('configuration')
+                if change in ('file', 'symlink', 'nonempty'):
+                    with self.assertRaises((ValueError, OSError)):
+                        manager.registry_dropin_state(path, os.geteuid())
+                else:
+                    self.assertNotEqual(manager.registry_dropin_state(path, os.geteuid()), before)
+
+    def test_registry_auth_keeps_engine_result_after_unrelated_system_ancestor_write(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.anonymous_manager(root)
+            base = Path(root).resolve()/'operator-config'; base.mkdir(mode=0o700)
+            dropin = base/'containers/registries.conf.d'
+            # Only represent the temporary operator directory's root ownership;
+            # exercise the real before/after checks, not a constant safe result.
+            manager.registry_dropin_state = lambda path, uid: o.PersonalOCI.registry_dropin_state(
+                manager, path, os.geteuid() if path == dropin else uid)
+            def engine(*args, **kwargs):
+                (base/'unrelated-host-config').mkdir(mode=0o700)
+                original = base.stat().st_mtime_ns
+                os.utime(base, ns=(original + 1_000_000_000, original + 1_000_000_000))
+                return SimpleNamespace(returncode=0, stdout='verified engine result', stderr='')
+            with patch.object(o, 'REGISTRY_DROPINS', dropin), \
+                 patch.object(o.subprocess, 'run', side_effect=engine) as invoked:
+                self.assertEqual(manager.run('image', 'inspect'), 'verified engine result')
+                invoked.assert_called_once()
+            self.assertFalse(dropin.exists())
+
     def test_existing_empty_dropin_ignores_sibling_changes_but_not_added_then_removed_override(self):
         with tempfile.TemporaryDirectory() as root:
             manager=self.manager();base=Path(root).resolve();path=base/'registries.conf.d';path.mkdir(mode=0o700)
