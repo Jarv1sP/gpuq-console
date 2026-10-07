@@ -319,6 +319,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
 | `#workspace-upload` / `#workspace-result` | [execution-ui.js](../dist/execution-ui.js) | 项目代码上传先核验完整文件，再按原编号和节点确认偏移续传 | 回执丢失先查原编号；已完成不重传，待收口只发空final；冲突/旧记录/未知不另开；切换账号、项目或离开停止；旧个人工作区不重试 |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；开发ID按账号、服务器、项目恢复到原入口 | 刷新只读核验原ID，不自动连接或接管；未知仍保留，明确结束才移除；ROOT/数据终端不存入项目记录；writerToken仅内存 |
+| `#project-disk-quota` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 打开时查询当前账号在开发服务器的容量与文件数，独立于显卡额度 | 不传项目或他人身份；未启用和待确认不造零值，未知不保留旧读数；关闭、离开或换上下文取消请求，完整服务器名保留在title |
 | `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
 | `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；容量条只取已确认 capacity | filesystemBytes/availableBytes 计算实际数据盘已用比例；读不到不画 0%；长 ID 提示完整值；手机内部横向滚动 |
 | `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
@@ -437,6 +438,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | 删除数据集 | 管理员目标/版本或整库范围，服务端实时证明还有完整副本 | 唯一副本或本机未决禁用；409显示原文；SUBMITTING刷新为未确认，查原operationId，不自动再删；放弃查询不清门户持久排除；缺编号只在明确不存在或worker硬上限加1小时之后的新读取仍READY且登记身份不变时解除 |
 
 彻底删除对话框独立于数据集布局：名称确认、48px 危险按钮、实际步骤和恢复期限；不显示推算百分比。目录 `datasetDelete === 1` 才能显示入口；主界面所有人还需当前版本至少一个位置的 `deletionPermissions.memberAllowed === true`，后台管理员不受该字段限制。403 与 BLOCKED 原因保留服务器原文。按账号保存原 UUID key 后才派发，刷新和丢回执只查询原 key；UNKNOWN 仅显示重新查询。有任务编号时直接显示等宽短编号并可复制完整值，没有编号则不渲染。步骤按已证实的原件、缓存或未知角色显示，不以 complete 推断原件。继续、取消和恢复仅出现在后台；普通视图在删除完成后显示「如需恢复，请联系管理员（保留至…）」，只有 BLOCKED、UNKNOWN、WAITING_CONTINUE 提示「需要管理员处理」。恢复核对原操作、服务器、物理名称与版本，再查询原任务。
+
+主界面同一删除确认框提供「仅移除一台服务器上的缓存」。仅 `datasetDelete === 1`、READY 且该位置 `memberAllowed === true` 才显示，管理员在主界面也遵守相同个人规则。独立 [dataset-personal-remove-ui.js](../dist/dataset-personal-remove-ui.js) 重新读取目录，核对物理登记名并如实列出保留副本；最后副本或未决目标禁用。个人64位节点回执日志按账号保存，与后台记录分开；无法保存不派发，刷新后待确认只查询原编号，缺编号联系管理员提供，不计算或重放删除。节点的v1权限、原件保护和最后副本核验是最终依据，不承诺原件必然保留。
 
 目录别名用于训练，缓存保留/删除使用location真实本地名称。账号/机器/项目/版本切换停止旧轮询并抛弃旧回复；缓存策略只在展开/明确刷新查询，隐藏房间停止storage RPC。
 
