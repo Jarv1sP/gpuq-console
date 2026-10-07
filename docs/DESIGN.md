@@ -306,6 +306,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `#project-location` / `[name=workspace-project]` | [execution-ui.js](../dist/execution-ui.js)、[shell-ui.js](../dist/shell-ui.js)、[workbench.css](../dist/workbench.css) | 本人授权位置的「我的项目」；个人容器无需先选顶栏机器，开发源和顶栏焦点独立 | 同名项目以源机器区分；终端/文件/发布保留原源，创建按实际environmentModes，原请求取消与迟到回执守卫保留；开发位置单行省略并以title保留完整ID，标题列可收缩，刷新按钮不出视口；未知不当空目录 |
 | `#context-machine` | [shell-ui.js](../dist/shell-ui.js)、[workbench-ui.js](../dist/workbench-ui.js) | 个人容器未选服务器时完整显示「训练：自动选择」；手动切换训练位置时显示开发位置并提示完整ID，焦点仍可选 | 四字训练提示不截断；仅确认OCI时替换提示，未知/共享/隔离保留服务器选择；不改提交位置、开发源或ROOT目标 |
 | `#job-mission` / `.r5-mission` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 任务全屏，肖像只画实际分配的卡 | Esc/关闭/返回任务，保留取消日志输出 |
+| `.job-project-preparation` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 焦点/紧凑任务卡、详情和全屏显示现有项目复制阶段及实际目标；自动选机有明确标签 | 开发来源和原操作ID进ⓘ；准备阶段是请求卡数、未占显卡，不画分配肖像；未知回执不当就绪，不新增请求 |
 | `.resource-chassis` / `.resource-towers` / `.resource-tower` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 真实物理卡位，液位仅表示显存比例 | 手机全部卡位可见，利用率另列，未知斜线 |
 | `.resource-portrait-utils` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 卡位使用率，按真实卡数生成；窄容器自动换列 | 两位等宽序号与百分比分开8px，序号用次级颜色；不把序号拼成读数 |
 | `.ro-v` / `.ro-m` / `.resource-id-label` | [starbase.css](../dist/starbase.css)、[resources-ui.js](../dist/resources-ui.js) | 遥测与巨型服务器 ID，不混淆额度/显存/利用率 | 数值单位分开，保留更新时间和失联事实 |

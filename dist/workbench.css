@@ -89,6 +89,8 @@
 .wb-submit-rail .ui-info-content,.wb-scroll .ui-info-content{left:auto;right:0}
 .wb-focal .subline{display:flex;align-items:center;gap:8px;color:var(--ink-2);font:12px var(--sans);margin:8px 0 0}
 .wb-job-name{overflow-wrap:anywhere}
+.job-project-preparation{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0;font:12px var(--mono);color:var(--ink-2)}
+.job-project-preparation>.server-id{min-width:0;max-width:100%}
 /* The labelled disclosure has a decorative SVG, independent of font glyphs. */
 .ui-info>summary{display:inline-flex!important;align-items:center;justify-content:center;list-style:none}
 .ui-info>summary svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.25;stroke-linecap:round;color:var(--ink-2)}
