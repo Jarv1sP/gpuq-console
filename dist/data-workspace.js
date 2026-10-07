@@ -35,8 +35,27 @@ export function workspaceEntriesHTML(result){
   const parent=result?.path||'.';
   return (result?.entries||[]).map(entry=>{
     const path=parent==='.'?entry.name:parent+'/'+entry.name;
-    return `<li><span>${entry.type==='directory'?'目录':'文件'}</span><code>${esc(entry.name)}</code><small>${entry.type==='directory'?'':esc(bytesLabel(entry.size))}</small>${entry.type==='directory'?`<button class="button" type="button" data-workspace-path="${esc(path)}">打开</button>`:''}</li>`;
+    return `<li><span>${entry.type==='directory'?'目录':entry.type==='file'?'文件':'不可下载'}</span><code title="${esc(entry.name)}">${esc(entry.name)}</code><small>${entry.type==='directory'?'':esc(bytesLabel(entry.size))}</small>${entry.type==='directory'?`<button class="button" type="button" data-workspace-path="${esc(path)}">打开</button>`:entry.type==='file'?`<button class="button" type="button" data-workspace-download="${esc(path)}">下载</button>`:''}</li>`;
   }).join('')||'<li class="data-workspace-empty">此目录为空。可上传文件，或在数据终端里创建目录。</li>';
+}
+export const WORKSPACE_DOWNLOAD_MEMORY_BYTES=100*1024**2;
+export async function downloadWorkspaceFile({machine,path,call,write,signal,onProgress=()=>{},limitBytes=Infinity}){
+  workspacePath(path);let offset=0,size=null;
+  const check=()=>{if(signal?.aborted)throw Error('下载已停止。');};
+  do{
+    check();const result=await call('datasets.workspace.get',{machine,path,offset});check();
+    if(result?.path!==path||result.offset!==offset||!Number.isSafeInteger(result.size)||result.size<0||size!==null&&result.size!==size||typeof result.eof!=='boolean')throw Error('文件读取结果不一致，请刷新后重新下载。');
+    size=result.size;if(size>limitBytes)throw Error('此浏览器只能下载 100 MiB 以内的文件；大文件请换用支持直接保存文件的桌面浏览器。');
+    if(typeof result.data!=='string'||result.data.length>Math.ceil(CHUNK_BYTES/3)*4||result.data.length%4||! /^[A-Za-z0-9+/]*={0,2}$/.test(result.data))throw Error('文件片段无效，下载已停止。');
+    const bytes=Uint8Array.from(atob(result.data),char=>char.charCodeAt(0));
+    if(bytes.length!==Math.min(CHUNK_BYTES,size-offset)||result.eof!==(offset+bytes.length===size))throw Error('文件片段不完整，下载已停止。');
+    check();await write(bytes);check();offset+=bytes.length;onProgress({bytes:offset,totalBytes:size});
+    if(result.eof)return {path,bytes:offset};
+  }while(true);
+}
+export function workspaceRegistrationsHTML(result){
+  if(!Array.isArray(result?.datasets))throw Error('空登记暂未确认，请重新查询。');
+  return result.datasets.filter(row=>typeof row.dataset==='string'&&Array.isArray(row.versions)&&row.versions.length===0).map(row=>`<li><code title="${esc(row.dataset)}">${esc(row.name||row.dataset)}</code><span>没有登记版本</span></li>`).join('')||'<li>没有空登记。</li>';
 }
 export function publicationText(status){
   if(status.state==='READY')return `已发布：${status.dataset}@${status.version}。可在数据集目录选择用于训练。`;
@@ -61,7 +80,7 @@ export function dataWorkspaceHTML(){
       <progress id="data-workspace-progress" hidden aria-label="个人数据上传进度"></progress>
     </form>
     <div class="data-workspace-terminal"><div><h4>手动整理</h4><p class="muted">终端中的 <code>/data2</code> 就是这里。用 <code>tar</code>、<code>unzip</code> 等命令处理文件。</p></div><div class="file-actions"><button class="button" id="terminal-data-open" type="button">新建数据终端</button><button class="button quiet" id="terminal-data-reconnect" type="button">重连</button></div></div>
-    <details class="data-workspace-browser"><summary>查看文件与发布进度</summary><div class="data-workspace-browse-controls"><label class="field">目录<input name="data-workspace-browse-path" value="." aria-label="查看数据空间目录"></label><button class="button" id="data-workspace-refresh" type="button">刷新</button></div><ul id="data-workspace-files-list"></ul></details>
+    <details class="data-workspace-browser"><summary>查看文件与发布进度</summary><div class="data-workspace-browse-controls"><label class="field">目录<input name="data-workspace-browse-path" value="." aria-label="查看数据空间目录"></label><button class="button" id="data-workspace-refresh" type="button">刷新</button></div><ul id="data-workspace-files-list"></ul><details id="data-workspace-registrations"><summary>空登记</summary><button class="button" id="data-workspace-registrations-refresh" type="button">重新查询</button><ul id="data-workspace-registrations-list" aria-live="polite"></ul></details></details>
     <form id="data-workspace-publish-form"><h4>发布为训练数据集</h4><p class="muted">先结束此机器上的所有数据终端，再发布整理好的子目录。发布会复制并校验文件，训练使用只读版本；原目录保留。</p><div class="data-workspace-fields"><label class="field">整理好的子目录<input name="data-workspace-publish-path" placeholder="my-data" required><small>例如 /data2/my-data，填写 my-data。</small></label><label class="field">数据集名称<input name="data-workspace-name" placeholder="my-data" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" required></label></div><div class="file-actions"><button class="button primary" id="data-workspace-publish" type="submit">校验并发布</button></div></form>
     ${cloudFilesHTML()}
     <p id="data-workspace-status" role="status">上传只保存文件；数据整理完成后再发布。</p>
@@ -88,7 +107,7 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
     const stop=element('#data-workspace-cancel');if(stop){stop.hidden=!controller;stop.disabled=!controller;}
     cloud.controls(working||external);
   }
-  function reset(){epoch++;controller?.abort();controller=null;working=false;cloud.reset();relayChoice(true);onBusyChange();}
+  function reset(){epoch++;controller?.abort();controller=null;working=false;element('#data-workspace-files-list')?.replaceChildren();element('#data-workspace-registrations-list')?.replaceChildren();cloud.reset();relayChoice(true);onBusyChange();}
   async function run(action){
     if(working||!store.production||!store.principal||!machine())return;
     const expected=context();working=true;onBusyChange();controls();
@@ -99,13 +118,19 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
     catch(error){if(valid(expected)){element('#data-workspace-status').textContent=error.message;toast(error.message);}}
     finally{if(valid(expected)){working=false;controller=null;onBusyChange();controls();}}
   }
-  async function refresh({call,report,machine}){
+  async function refresh({call,report,machine,check}){
     const path=workspacePath(element('[name=data-workspace-browse-path]').value.trim(),{root:true});
     const listing=await call('datasets.workspace.list',{machine,path});element('#data-workspace-files-list').innerHTML=workspaceEntriesHTML(listing);
     const status=await call('datasets.workspace.status',{machine});
     if(status.operationId||status.state!=='EDITABLE')report(publicationText(status));
     else report('个人目录已刷新。这里的文件可编辑，已发布的数据集不会随之改变。');
     if(status.state==='READY')await refreshCatalog();
+    if(element('#data-workspace-registrations').open)await registrations({call,machine,check});
+  }
+  async function registrations({call,machine,check}){
+    const root=element('#data-workspace-registrations-list');root.textContent='查询中';
+    try{root.innerHTML=workspaceRegistrationsHTML(await call('datasets.list',{machine,includeEmpty:true}));}
+    catch(error){check();root.textContent='空登记暂未确认';throw error;}
   }
   section.addEventListener('submit',event=>{
     if(!['data-workspace-upload-form','data-workspace-publish-form'].includes(event.target.id))return;event.preventDefault();
@@ -134,9 +159,28 @@ export function dataWorkspaceUI(store,section,toast,{onBusyChange=()=>{},refresh
   section.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
     if(button.id==='data-workspace-cancel'){controller?.abort();return;}
+    if(button.hasAttribute('data-workspace-download'))return run(async({call,report,machine,check})=>{
+      const path=workspacePath(button.dataset.workspaceDownload);controller=new AbortController();controls();let writer=null;const chunks=[];
+      try{
+        if(typeof window.showSaveFilePicker==='function'){
+          const handle=await window.showSaveFilePicker({suggestedName:path.split('/').pop()});check();if(controller.signal.aborted)return;
+          writer=await handle.createWritable();check();
+        }
+        report('正在下载 '+path);
+        const result=await downloadWorkspaceFile({machine,path,call,signal:controller.signal,limitBytes:writer?Infinity:WORKSPACE_DOWNLOAD_MEMORY_BYTES,
+          write:bytes=>writer?writer.write(bytes):chunks.push(bytes),onProgress:value=>{check();report('正在下载 '+path+' · '+bytesLabel(value.bytes)+' / '+bytesLabel(value.totalBytes));}});
+        check();if(writer){await writer.close();writer=null;check();}else{
+          const url=URL.createObjectURL(new Blob(chunks)),link=document.createElement('a');link.href=url;link.download=path.split('/').pop();link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+        }
+        report('已下载 '+path+' · '+bytesLabel(result.bytes));
+      }catch(error){if(error.name==='AbortError'){check();report('已取消下载。');return;}throw error;}
+      finally{if(writer)await writer.abort().catch(()=>{});}
+    });
     if(button.dataset.workspacePath){element('[name=data-workspace-browse-path]').value=button.dataset.workspacePath;return run(refresh);}
     if(button.id==='data-workspace-refresh')return run(refresh);
+    if(button.id==='data-workspace-registrations-refresh')return run(registrations);
   });
+  section.addEventListener('toggle',event=>{if(event.target.id==='data-workspace-registrations'&&event.target.open)void run(registrations);},true);
   section.addEventListener('change',event=>{if(event.target.name==='data-workspace-files')relayChoice(true);});
   return {get busy(){return working;},controls,reset};
 }

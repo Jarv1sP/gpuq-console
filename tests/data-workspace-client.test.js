@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {uploadWorkspaceFiles,workspacePath,workspaceEntriesHTML,dataWorkspaceHTML,publicationText} from '../dist/data-workspace.js';
+import {uploadWorkspaceFiles,downloadWorkspaceFile,WORKSPACE_DOWNLOAD_MEMORY_BYTES,workspaceRegistrationsHTML,workspacePath,workspaceEntriesHTML,dataWorkspaceHTML,publicationText} from '../dist/data-workspace.js';
 import {terminalContext,terminalLaunchContext} from '../dist/terminal-ui.js';
 const file=(name,size)=>{const blob=new Blob([new Uint8Array(size)]);Object.defineProperty(blob,'name',{value:name});return blob;};
 
@@ -71,4 +71,43 @@ test('raw browser files require explicit relay consent above the shared 256 MiB 
   await assert.rejects(uploadWorkspaceFiles({machine:'node-a',files:[selected(256*1024**2)],call}),/read-started/);
   await assert.rejects(uploadWorkspaceFiles({machine:'node-a',files:[selected(256*1024**2+1)],allowRelay:true,call}),/read-started/);
   assert.match(dataWorkspaceHTML(),/个人数据上传通道/);assert.match(dataWorkspaceHTML(),/data-workspace-relay-consent/);
+});
+const downloadReply=(args,size=1024**2+3)=>({path:args.path,offset:args.offset,size,eof:args.offset+1024**2>=size,data:Buffer.alloc(Math.max(0,Math.min(1024**2,size-args.offset)),7).toString('base64')});
+test('personal download streams exact bounded chunks using only workspace.get, including empty files',async()=>{
+  for(const size of [0,1,1024**2+3]){
+    const calls=[],writes=[],progress=[];
+    const result=await downloadWorkspaceFile({machine:'node-a',path:'incoming/a.bin',call:async(operation,args)=>{calls.push({operation,args});return downloadReply(args,size);},write:bytes=>writes.push(bytes),onProgress:value=>progress.push(value)});
+    assert.deepEqual(result,{path:'incoming/a.bin',bytes:size});assert.equal(writes.reduce((sum,row)=>sum+row.length,0),size);
+    assert.deepEqual(calls.map(row=>row.args.offset),size>1024**2?[0,1024**2]:[0]);assert(calls.every(row=>row.operation==='datasets.workspace.get'&&row.args.machine==='node-a'&&row.args.path==='incoming/a.bin'));
+    assert.deepEqual(progress.at(-1),{bytes:size,totalBytes:size});assert(writes.every(row=>row.length<=1024**2));
+  }
+});
+test('personal download rejects wrong paths, offsets, sizes, eof and malformed chunks before writing',async()=>{
+  for(const patch of [{path:'other'}, {offset:1},{size:-1},{size:'1'},{eof:true},{eof:'false'},{data:'?'},{data:'A==='},{data:'AA=='},{data:Buffer.alloc(1024**2+1).toString('base64')}]){
+    let reads=0,writes=0;
+    await assert.rejects(downloadWorkspaceFile({machine:'node-a',path:'a',call:async(_,args)=>{reads++;return {...downloadReply(args),...patch};},write:()=>writes++}));
+    assert.equal(reads,1);assert.equal(writes,0);
+  }
+  let writes=0,reads=0;
+  await assert.rejects(downloadWorkspaceFile({machine:'node-a',path:'a',call:async(_,args)=>{reads++;return downloadReply(args,args.offset?1024**2+4:1024**2+3);},write:()=>writes++}),/不一致/);
+  assert.equal(reads,2);assert.equal(writes,1,'a resized file cannot append an unverified second chunk');
+});
+test('unsupported streaming bounds memory before collecting a large file, and errors are never retried',async()=>{
+  let reads=0,writes=0;
+  await assert.rejects(downloadWorkspaceFile({machine:'node-a',path:'a',limitBytes:WORKSPACE_DOWNLOAD_MEMORY_BYTES,call:async(_,args)=>{reads++;return downloadReply(args,WORKSPACE_DOWNLOAD_MEMORY_BYTES+1);},write:()=>writes++}),/100 MiB/);
+  assert.equal(reads,1);assert.equal(writes,0);
+  await assert.rejects(downloadWorkspaceFile({machine:'node-a',path:'a',call:async()=>{reads++;throw Object.assign(Error('server denied'),{status:403});},write:()=>writes++}),/server denied/);
+  assert.equal(reads,2);assert.equal(writes,0);
+});
+test('abort after a read or a saved chunk suppresses further chunks and success progress',async()=>{
+  for(const point of ['read','write']){
+    const controller=new AbortController();let reads=0,writes=0,progress=0;
+    await assert.rejects(downloadWorkspaceFile({machine:'node-a',path:'a',signal:controller.signal,call:async(_,args)=>{reads++;if(point==='read')controller.abort();return downloadReply(args);},write:()=>{writes++;if(point==='write')controller.abort();},onProgress:()=>progress++}),/停止/);
+    assert.equal(reads,1);assert.equal(writes,point==='read'?0:1);assert.equal(progress,0);
+  }
+});
+test('empty registrations need a confirmed list, render no version operations, and escape labels',()=>{
+  const html=workspaceRegistrationsHTML({datasets:[{dataset:'empty-id',name:'<unsafe>',versions:[]},{dataset:'ready-id',versions:[{version:'a'.repeat(64)}]},{dataset:'unknown-id'}]});
+  assert.match(html,/&lt;unsafe&gt;.*没有登记版本/);assert.doesNotMatch(html,/ready-id|unknown-id|<unsafe>|button/);assert.equal(workspaceRegistrationsHTML({datasets:[]} ),'<li>没有空登记。</li>');assert.throws(()=>workspaceRegistrationsHTML({}),/暂未确认/);
+  assert.doesNotMatch(workspaceEntriesHTML({entries:[{name:'socket',type:'unsupported',size:0}]}),/data-workspace-download/);
 });

@@ -139,6 +139,12 @@
 #page-datasets #data-workspace-files-list li>span{font-size:12px;color:var(--d-muted);flex:none}
 #page-datasets #data-workspace-files-list code{flex:1;min-width:0;font-size:12px}
 #page-datasets #data-workspace-files-list small{font-size:12px}
+#page-datasets #data-workspace-files-list .button{min-height:44px;flex:none}
+#page-datasets #data-workspace-files-list code{overflow-wrap:anywhere}
+#page-datasets #data-workspace-registrations>summary{cursor:pointer;min-height:44px;padding:12px 0}
+#page-datasets #data-workspace-registrations-list{list-style:none;padding:0;margin:12px 0}
+#page-datasets #data-workspace-registrations-list li{display:flex;flex-wrap:wrap;gap:12px;align-items:center;min-height:44px;border-top:1px solid var(--d-line)}
+#page-datasets #data-workspace-registrations-list code{min-width:0;overflow-wrap:anywhere;flex:1}
 #page-datasets #data-workspace-publish-form>.muted{margin-top:8px}
 #page-datasets .data-workspace-footnote{margin-top:12px;font-size:12px}
 #page-datasets .cloud-import #cloud-import-form>.field{margin-top:20px}
