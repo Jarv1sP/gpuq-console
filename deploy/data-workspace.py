@@ -258,9 +258,9 @@ class DataWorkspaces:
         try:
             if self.n.CONFIG.get('storageTier',{}).get('enabled') is True:
                 raise PermissionError('Dataset originals must be published in the HDD warehouse, not a training cache')
-            checkpoint('SCANNING')
             source = owner/'data'/task['path']
             self.relative(task['path'])
+            checkpoint('SCANNING')
             manifest = module._scan(source)  # FD traversal rejects links/special files
             total = sum(entry['size'] for entry in manifest['files'])
             limit = self.n.CONFIG.get('datasets', {}).get('uploads', {}).get('maxUploadBytes', 1024**4)
