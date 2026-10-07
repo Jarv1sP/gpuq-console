@@ -84,6 +84,14 @@ try {
         authenticated: authenticated.has(page)});
     });
     await page.context().route('**/*', guardedRoute(async route => {
+      if (route.request().url() === origin + '/api/call' && route.request().method() === 'POST') {
+        const {operation, args} = route.request().postDataJSON();
+        if (operation === 'datasets.overview') {
+          assert.ok(authenticated.has(page), 'Overview is read only after login');
+          assert.deepEqual(args, {}, 'Overview accepts no simulated privilege or target');
+          return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({result: {protocol: 0}})});
+        }
+      }
       if (new URL(route.request().url()).origin === origin){await route.continue();return;}
       blocked.push(route.request().url());await route.abort('blockedbyclient');
     }));
@@ -378,3 +386,6 @@ try {
 // Keep all existing protocol and authorization assertions above. The extended
 // local fixture exercises database/cache facts, admin retention and layout.
 await import('./dataset-flow-browser-fixture.mjs');
+
+// Exercise the actual overview renderer in addition to legacy protocol fallback.
+await import('./dataset-capacity-ui-smoke.mjs');

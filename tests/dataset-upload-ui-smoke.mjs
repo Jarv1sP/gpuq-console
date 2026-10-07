@@ -74,6 +74,7 @@ try {
         check(!('hostAdmin' in args || 'owners' in args || 'sourceId' in args), 'Privileged browser upload fields');
         if (operation === 'datasets.capacity') return {machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3};
         if (operation === 'datasets.upload.routes')return {available:true,protocol:'dataset-upload-v1',machine:args.machine,revision:'a'.repeat(64),certificateSha256:'b'.repeat(64),routes:[{id:'primary',kind:'campus-direct',endpoint:location.origin}]};
+        if (operation === 'datasets.overview') {if(Object.keys(args).length)throw Error('Unexpected overview args');return {protocol:0};}
         if (operation === 'datasets.catalog') return {machine:args.machine,
           machines:this.data.machines.map(row=>({machine:row.id,state:'ok'})),datasets: [...uploads.values()]
           .filter(upload => upload.user === user && upload.state === 'READY')

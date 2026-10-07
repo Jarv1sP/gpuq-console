@@ -27,6 +27,7 @@ try{
       if(operation==='datasets.upload.routes')return {available:false,protocol:'dataset-upload-v1',machine:args.machine};
       if(operation==='cloud.info')return {capabilityVerified:false,configurationEnabled:true};
       if(operation==='datasets.capacity'){if(capacityFail)throw Error('test capacity unavailable');return {machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3};}
+      if(operation==='datasets.overview'){if(Object.keys(args).length)throw Error('overview accepts no args');return {protocol:0};}
       if(operation==='datasets.catalog'){
         // Alice's published metadata remains discoverable after an account
         // switch; discovery never transfers Alice's content permission.
@@ -125,7 +126,8 @@ try{
   await page.locator('[data-workspace-path="prepared"]').click();await page.waitForFunction(()=>calls.some(call=>call.operation==='datasets.workspace.list'&&call.args.path==='prepared'));
   await page.locator('[name=data-workspace-publish-path]').fill('prepared');await page.locator('[name=data-workspace-name]').fill('training');await page.locator('#data-workspace-publish').click();
   await page.locator('[data-v3-select=personal-test]').waitFor();
-  assert.match(await page.locator('#warehouse-inspector').textContent(),/已缓存/);
+  assert.equal(await page.locator('#warehouse-inspector .v3-server').filter({has:page.locator('b[title="node-a"]')}).locator('.v3-g.ready').count(),1,'The confirmed server cache uses the filled status symbol');
+  assert.doesNotMatch(await page.locator('#warehouse-inspector').textContent(),/已缓存/,'No redundant cache explanation accompanies the symbol');
   assert.match(await page.locator('#data-workspace-status').textContent(),/已发布/);
   assert.ok(await page.locator('[data-use-dataset]').isEnabled());
   await page.screenshot({path:screenshots+'/data-workspace-desktop.png',fullPage:true});
@@ -158,8 +160,8 @@ try{
   await page.evaluate(()=>{capacityFail=true;});await page.locator('#datasets-refresh').click();
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
   assert.match(await page.locator('#datasets-capacity').textContent(),/容量待更新/);
-  assert.equal(await page.locator('[data-v3-select]').count(),1);
-  assert.equal(await page.locator('[data-use-dataset]').isDisabled(),true,'Bob may discover Alice\'s metadata, not train with her data');
+  assert.equal(await page.locator('[data-v3-select]').count(),0,'The main list hides Alice’s unreadable version from Bob');
+  assert.equal(await page.locator('[data-use-dataset]').count(),0,'No training entry exists for the hidden version');
   // Revoking a different machine invalidates the entire aggregate, even when
   // the selected machine is unchanged and an old directory reply arrives late.
   await page.evaluate(()=>{gateCatalog=true;});await page.locator('#datasets-refresh').click();

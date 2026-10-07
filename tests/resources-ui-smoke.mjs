@@ -69,6 +69,7 @@ try{
       else if(operation==='projects.list')result={projects:[{project:'vision-baseline',state:'READY',latestReadyRelease:release,releases:[{release,state:'READY'}]}]};
       else if(operation==='projects.status')result={project:'vision-baseline',state:'READY',latestReadyRelease:release,releases:[{release,state:'READY'}]};
       else if(operation==='datasets.list')result={datasets:[]};
+      else if(operation==='datasets.overview'){assert.deepEqual(args,{});result={protocol:0};}
       else if(operation==='datasets.catalog')result={machine:args.machine,machines:[{machine:args.machine,state:'ok'}],datasets:[]};
       else if(operation==='datasets.capacity')result={machine:args.machine,available:false};
       else if(operation==='community.info')result={enabled:true,capabilities:[]};

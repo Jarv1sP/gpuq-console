@@ -28,6 +28,7 @@ try{
         const {operation,args}=route.request().postDataJSON();calls.push({operation,args:structuredClone(args)});
         if(operation==='state')return reply(route,null);
         if(operation==='projects.list')return reply(route,{projects:[]});
+        if(operation==='datasets.overview'){assert.deepEqual(args,{});return reply(route,{protocol:0});}
         if(operation==='datasets.catalog')return reply(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[]});
         if(operation==='datasets.list')return reply(route,{datasets:[]});
         if(operation==='datasets.storage.status'){assert.equal(role,'admin');return reply(route,{enabled:false});}

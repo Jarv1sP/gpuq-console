@@ -35,6 +35,7 @@ try{
     const {operation,args={}}=route.request().postDataJSON();calls.push({operation,args:structuredClone(args),userId});
     if(operation==='state')return reply(route,null);
     if(operation==='projects.list')return reply(route,{projects:[]});
+    if(operation==='datasets.overview'){assert.deepEqual(args,{});return reply(route,{protocol:0});}
     if(operation==='datasets.catalog')return reply(route,catalog(args.machine));
     if(operation==='datasets.list'){
      assert.equal(principal.role,'admin');assert.deepEqual(Object.keys(args).sort(),['includeEmpty','machine']);assert.equal(args.includeEmpty,true);
