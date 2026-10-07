@@ -283,14 +283,15 @@ export function executionUI(store,refresh,toast){
     updatePreflight();
   }
   async function submitRequest(args){
-    const owner=receiptActor();submitReceipt={actor:owner,args:structuredClone(args),status:'pending'};renderReceipt();
+    const owner=receiptActor(),previouslyUnknown=submitReceipt?.actor===owner&&submitReceipt.status==='unknown'&&submitReceipt.args.key===args.key;submitReceipt={actor:owner,args:structuredClone(args),status:'pending'};renderReceipt();
     try{
       const job=await call('jobs.submit',args);if(owner!==receiptActor())return;
       if(!trainingReceiptMatches(job,args,store.principal.userId,store.data?.machines||[]))throw Error('提交回执尚未确认，请刷新核对。');
       submitReceipt={actor:owner,args:structuredClone(args),status:'confirmed',job};acceptedDraft=true;submitKey=crypto.randomUUID();refresh();renderReceipt();toast('已提交。');
     }catch(error){
       if(owner!==receiptActor())return;
-      submitReceipt={actor:owner,args:structuredClone(args),status:error.code==='MAINTENANCE_ACTIVE'||[400,401,403,409,422,429].includes(error.status)?'rejected':'unknown',maintenance:error.code==='MAINTENANCE_ACTIVE',error:error.message};renderReceipt();throw error;
+      // A refused retry cannot disprove acceptance of an earlier lost reply.
+      submitReceipt={actor:owner,args:structuredClone(args),status:!previouslyUnknown&&(['MAINTENANCE_ACTIVE','SUBMISSION_REJECTED'].includes(error.code)||[400,401,403,409,422,429].includes(error.status))?'rejected':'unknown',maintenance:error.code==='MAINTENANCE_ACTIVE',error:error.message};renderReceipt();throw error;
     }
   }
   function updatePreflight(){
@@ -307,7 +308,7 @@ export function executionUI(store,refresh,toast){
     let maintenance=query('#submit-maintenance');if(!maintenance){maintenance=document.createElement('div');maintenance.id='submit-maintenance';query('#train-form .sheet-scroll').prepend(maintenance);}
     maintenance.hidden=!entry;
     if(entry){const alternatives=(store.data?.machines||[]).filter(item=>user?.limits?.[item.id]>0&&!maintenanceFor(store.data?.operationalMaintenance,item.id));maintenance.innerHTML=`<p><span class="maintenance-pause" aria-hidden="true"></span> ${escape(store.data.operationalMaintenance.global?'全平台':machine)}维护中 · 自 ${escape(maintenanceTime(entry.since))}</p><p>${escape(entry.reason)}</p>${maintenanceInfoHTML("换机后请检查代码、环境和数据。不会自动提交。","换机说明")}${alternatives.length?`<label>改用其他服务器<select id="submit-maintenance-machine" aria-label="选择其他服务器">${alternatives.map(item=>`<option value="${escape(item.id)}">${escape(item.id)}</option>`).join('')}</select></label><button type="button" class="button" id="submit-maintenance-switch">改用其他服务器</button>`:'<p>没有其他可用服务器。</p>'}`;}
-    query('#submit-summary').textContent=entry?'维护中，暂停提交':submitReceipt?.actor===receiptActor()&&['pending','unknown'].includes(submitReceipt.status)?(submitReceipt.status==='pending'?'正在提交':'提交结果待确认'):acceptedDraft&&submitReceipt?.job?'已提交 · '+submitReceipt.job.machine+' · '+submitReceipt.job.id.slice(0,8):automatic?'自动选机 · 准备就绪后排队':query('[name=datasets]').value.trim()?'数据就绪后排队':'提交到 '+machine;
+    query('#submit-summary').textContent=submitReceipt?.actor===receiptActor()&&submitReceipt.status==='rejected'?'未提交':entry?'维护中，暂停提交':submitReceipt?.actor===receiptActor()&&['pending','unknown'].includes(submitReceipt.status)?(submitReceipt.status==='pending'?'正在提交':'提交结果待确认'):acceptedDraft&&submitReceipt?.job?'已提交 · '+submitReceipt.job.machine+' · '+submitReceipt.job.id.slice(0,8):automatic?'自动选机 · 准备就绪后排队':query('[name=datasets]').value.trim()?'数据就绪后排队':'提交到 '+machine;
     const prefill=query('#submit-prefill');prefill.hidden=!parsedTarget;if(parsedTarget)prefill.innerHTML=`<span>已预填 · ${escape(parsedTarget.machine)} / ${escape(parsedTarget.project||'个人工作区')}</span>${infoHTML('识别只预填配置，不会提交训练。目标改变后，需明确改用当前目标。','预填说明')}<button type="button" class="button quiet" id="clear-training-prefill">改用当前目标</button>`;
     const quote=value=>"'"+String(value).replaceAll("'","'\\''")+"'",get=name=>query(`[name=${name}]`).value;
     const args=['gpuctl run',...(automatic?['--machine auto']:[quote(machine||'SERVER')]),'-g',get('cards'),'--min-vram',get('memory'),'--name',quote(get('name'))];

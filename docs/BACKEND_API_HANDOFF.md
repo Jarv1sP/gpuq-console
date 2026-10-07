@@ -24,6 +24,8 @@
 
 已通过原生 GPUQ 身份围栏 `set-display` 修改的同账号标签不会被常规 reconcile 改回提交时名字。节点返回 `displaySync.state:"PRESERVED"` 和允许的标签，门户保存其显示缓存，让任务列表与队列一致；原 `job.name`、不可变 spec、提交 key/digest、优先级、资源和结果路径均不改变。原回填接口需配套采集和任务显示 helper；它本身不提供显式编辑或项目整理。新版显式编辑另按下方「已有任务显示名与描述编辑」的能力与 CAS 约定启用；项目归组和退役仍是独立接口。
 
+提交被明确拒绝时，`MAINTENANCE_ACTIVE`（包括维护期 HTTP 503）和持久化前的 `SUBMISSION_REJECTED` 随 JSON 错误回包返回；网页显示「未提交」及原因，不提供原样重试恢复。非 JSON 502/503/504 只表示服务暂时不可用，不能证明提交失败；丢回执、未知 5xx 仍沿原 key 核对，不自动重发。
+
 ## 项目展示与生命周期
 
 所有操作绑定登录账号，不接受 owner/userId/宿主路径。内部 `project`、release、run 与

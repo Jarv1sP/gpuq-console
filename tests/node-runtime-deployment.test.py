@@ -3,6 +3,7 @@
 All node/config/DB/unit files are temporary. Only external mount/systemd/CPU
 preflights are mocked; file planning, backup and copying execute unchanged.
 """
+import ast
 import contextlib
 from contextlib import closing
 import importlib.util
@@ -91,6 +92,22 @@ class RuntimeDeployment(unittest.TestCase):
             self.assertEqual((self.dest/target).read_bytes(),(self.source/original).read_bytes(),target)
             self.assertEqual(stat.S_IMODE((self.dest/target).stat().st_mode),0o700,target)
         self.assertEqual(json.loads(self.path.read_text())['runtimeProfileMarker'],'keep-exactly')
+
+    def test_ray_profile_marker_is_the_actual_trusted_resource_argument(self):
+        payload=(self.source/'sandbox-runner.py').read_bytes()
+        self.assertEqual(self.projects.runner_profile(payload),'ray-p0')
+        functions=self.projects.functions(payload)
+        call=next(node for node in ast.walk(functions['main']) if isinstance(node,ast.Call)
+                  and isinstance(node.func,ast.Name) and node.func.id=='run_job')
+        value=next(item.value for item in call.keywords if item.arg=='resource_module')
+        self.assertIsInstance(value,ast.Constant);self.assertEqual(value.value,'job-resources.py')
+        implementation=functions['run_job']
+        self.assertIn('resource_module',[arg.arg for arg in implementation.args.kwonlyargs])
+        self.assertTrue(any(isinstance(node,ast.Call) and isinstance(node.func,ast.Name)
+                            and node.func.id=='local_module' and len(node.args)==2
+                            and isinstance(node.args[1],ast.Name) and node.args[1].id=='resource_module'
+                            for node in ast.walk(implementation)))
+        self.projects_apply('ray-p0');self.assert_complete('ray-p0')
 
     def test_dataset_upgrade_installs_real_bootstrap_and_all_helpers_common_profile(self):
         out=self.dataset_apply();self.assertEqual(out['runtimeProfile'],'common-p0');self.assert_complete('common-p0')

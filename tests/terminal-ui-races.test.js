@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {terminalUI,endProjectTerminals,terminalRequestContext,terminalExitMessage,terminalStoppedMessage} from '../dist/terminal-ui.js';
+import {terminalUI,endProjectTerminals,terminalRequestContext,terminalExitMessage,terminalStoppedMessage,projectTerminalStorage} from '../dist/terminal-ui.js';
+import {maintenanceBlocks} from '../dist/maintenance-state.js';
 
 // Exercise the real event handlers with independently delayed API responses.
 // No network, real terminal, credentials, or node is used.
-function fixture(){
-  const globals=['document','window','CustomEvent','Terminal','FitAddon','setTimeout','clearTimeout'];
+function fixture({storage,principal={userId:'admin',role:'admin'},data,statusReceipt,status}={}){
+  const globals=['document','window','CustomEvent','Terminal','FitAddon','setTimeout','clearTimeout','localStorage'];
   const previous=new Map(globals.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]));
-  const listeners=new Map(),calls=[],opens=[],toasts=[],terms=[],timers=new Map(),events=[],confirmations=[];let dialog,authListener,now=0,timerId=0;
+  const listeners=new Map(),windowListeners=new Map(),calls=[],opens=[],toasts=[],terms=[],timers=new Map(),events=[],confirmations=[];let dialog,authListener,now=0,timerId=0;
   const originalNow=Date.now;Date.now=()=>now;
   const settle=async()=>{for(let index=0;index<10;index++)await Promise.resolve();};
   class Element{
@@ -24,7 +25,8 @@ function fixture(){
   ]);
   globalThis.document={querySelector:name=>elements.get(name),createElement:()=>dialog=new Element(),body:{append(){}},addEventListener:(name,fn)=>listeners.set(name,fn),dispatchEvent:event=>{events.push(event);return listeners.get(event.type)?.(event);}};
   globalThis.CustomEvent=class{constructor(type,args){this.type=type;this.detail=args.detail;}};
-  globalThis.window={confirm:message=>{confirmations.push(message);return true;},prompt:()=>'',addEventListener(){}};
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,writable:true,value:storage});
+  globalThis.window={confirm:message=>{confirmations.push(message);return true;},prompt:()=>'',addEventListener:(name,fn)=>windowListeners.set(name,fn)};
   globalThis.Terminal=class{
     constructor(){this.cols=80;this.rows=24;this.writes=[];this.lines=[];terms.push(this);}
     loadAddon(){}open(){}onData(handler){this.input=handler;}focus(){}dispose(){this.disposed=true;}
@@ -33,7 +35,7 @@ function fixture(){
   globalThis.FitAddon={FitAddon:class{fit(){}}};
   globalThis.setTimeout=(handler,delay=0)=>{const id=++timerId;timers.set(id,{handler,at:now+delay});return id;};
   globalThis.clearTimeout=id=>timers.delete(id);
-  const store={principal:{userId:'admin',role:'admin'},authGeneration:0,onAuthChange(fn){authListener=fn;},async call(operation,args,lifecycle={}){
+  const store={principal,data,statusReceipt,status,authGeneration:0,onAuthChange(fn){authListener=fn;},async call(operation,args,lifecycle={}){
     calls.push({operation,args,at:now});
     if(operation==='terminal.open'){
       const result=await new Promise((resolve,reject)=>opens.push({args,resolve,reject}));
@@ -41,7 +43,7 @@ function fixture(){
     }
     if(operation==='terminal.detach'&&store.failDetach)throw Error('fixture detach unavailable');
     if(operation==='terminal.close'&&store.failClose)throw Error('fixture close unavailable');
-    if(operation==='terminal.status')return store.statusReceipt||{protocol:'terminal-session-status-v1',id:args.id,state:'UNKNOWN',evidence:{confirmed:false}};
+    if(operation==='terminal.status')return store.status?store.status(args,lifecycle):store.statusReceipt||{protocol:'terminal-session-status-v1',id:args.id,state:'UNKNOWN',evidence:{confirmed:false}};
     if(operation==='terminal.close')return store.closeReceipt||{closed:true};
     if(operation==='terminal.detach')return {detached:true};
     if(operation==='projects.list'){
@@ -56,6 +58,7 @@ function fixture(){
   context();
   return {store,calls,opens,toasts,context,terms,events,confirmations,elements,
     dataContext:()=>listeners.get('gpuq-data-workspace-context')(),
+    leave:()=>listeners.get('gpuq-route-leaving')(),pagehide:()=>windowListeners.get('pagehide')(),
     setPrompt:value=>{globalThis.window.prompt=()=>value;},
     setConfirm:value=>{globalThis.window.confirm=message=>{confirmations.push(message);return value;};},
     click:id=>listeners.get('click')({target:new Element(id)}),
@@ -496,4 +499,99 @@ test('unknown or wrong original status never claims stopped and cannot invent a 
    assert.equal(terminalStoppedMessage(status,'retained'),null);
   }finally{f.restore();}
  }
+});
+
+function memoryStorage(){
+ const values=new Map();return {get length(){return values.size;},key:index=>[...values.keys()][index],getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};
+}
+const retainedId='a1234567-1234-4234-8234-123456789abc',peerId='b1234567-1234-4234-8234-123456789abc';
+const retainedContext={userId:'admin',machine:'node-a',project:'experiment'};
+const recoveryData={machines:[{id:'node-a'}]};
+test('persistent project identities are scoped by actor, machine and project and never contain credentials',()=>{
+ const storage=memoryStorage(),saved=projectTerminalStorage(storage);
+ saved.remember({...retainedContext,id:retainedId,writerToken:'private-writer',clientId:'private-client',authGeneration:7,output:'private-output'});
+ saved.remember({...retainedContext,id:peerId});
+ saved.remember({...retainedContext,machine:'node-b',project:'other',id:retainedId});
+ saved.remember({...retainedContext,userId:'peer',id:peerId});
+ saved.remember({...retainedContext,id:peerId,hostAdmin:true});saved.remember({...retainedContext,id:peerId,dataWorkspace:true});
+ assert.deepEqual(saved.list('admin'),[{...retainedContext,id:retainedId},{...retainedContext,id:peerId},{...retainedContext,machine:'node-b',project:'other',id:retainedId}]);
+ assert.deepEqual(saved.list('peer'),[{...retainedContext,userId:'peer',id:peerId}]);assert.deepEqual(saved.list('zero'),[]);
+ const text=Array.from({length:storage.length},(_,index)=>storage.getItem(storage.key(index))).join('');
+ for(const secret of ['writerToken','clientId','authGeneration','output','private-'])assert.equal(text.includes(secret),false);
+ saved.forget({...retainedContext,id:retainedId});assert.ok(saved.list('admin').some(row=>row.id===retainedId&&row.machine==='node-b'));
+ assert.ok(saved.list('peer').some(row=>row.id===peerId),'closing never erases another account or source');
+});
+test('invalid or disabled storage does not fabricate sessions or break the in-memory terminal',async()=>{
+ const storage=memoryStorage(),saved=projectTerminalStorage(storage);
+ saved.remember({...retainedContext,id:'invalid'});assert.equal(storage.length,0);
+ saved.remember({...retainedContext,id:retainedId});storage.setItem(storage.key(0),'{broken');assert.deepEqual(saved.list('admin'),[]);
+ const blocked={get length(){throw Error('disabled');},setItem(){throw Error('full');}};
+ assert.deepEqual(projectTerminalStorage(blocked).list('admin'),[]);assert.equal(projectTerminalStorage(blocked).remember({...retainedContext,id:retainedId}),false);
+ const f=fixture({storage:blocked});try{await attach(f,retainedId);assert.equal(f.visible(),true);assert.ok(f.toasts.some(text=>text.includes('复制后再刷新')));}finally{f.restore();}
+});
+test('refresh restores the original development ID and only probes status until explicit reconnect or end',async()=>{
+ const storage=memoryStorage();let f=fixture({storage});
+ try{await attach(f,retainedId);await f.click('terminal-disconnect');}finally{f.restore();}
+ f=fixture({storage,data:recoveryData,statusReceipt:{protocol:'terminal-session-status-v1',id:retainedId,state:'ALIVE',evidence:{confirmed:true}}});
+ try{
+  await f.settle();assert.deepEqual(f.calls.map(row=>row.operation),['terminal.status']);
+  assert.deepEqual(f.calls[0].args,{machine:'node-a',project:'experiment',id:retainedId});
+  assert.equal(f.events.at(-1).detail.sessions[0].connectionState,'detached');assert.equal(f.visible(),false);
+  let defaultId;window.prompt=(message,value)=>{defaultId=value;return value;};
+  const pending=f.click('terminal-reconnect');await f.settle();assert.equal(defaultId,retainedId);
+  assert.equal(f.opens[0].args.mode,'reconnect');assert.equal(f.opens[0].args.id,retainedId);assert.ok(!('writerToken'in f.opens[0].args));
+  f.resolve(0,retainedId);await pending;assert.equal(f.visible(),true);
+  await f.click('terminal-stop');assert.deepEqual(projectTerminalStorage(storage).list('admin'),[]);
+  assert.equal(f.calls.filter(row=>row.operation==='terminal.close').length,1);
+ }finally{f.restore();}
+});
+test('confirmed stopped recovery uses the existing metadata-only close; unknown or wrong receipts retain the ID',async()=>{
+ for(const receipt of [
+  {protocol:'terminal-session-status-v1',id:retainedId,state:'STOPPED',evidence:{confirmed:true}},
+  {protocol:'terminal-session-status-v1',id:retainedId,state:'UNKNOWN',evidence:{confirmed:false}},
+  {protocol:'terminal-session-status-v1',id:peerId,state:'STOPPED',evidence:{confirmed:true}}
+ ]){
+  const storage=memoryStorage();projectTerminalStorage(storage).remember({...retainedContext,id:retainedId});
+  const f=fixture({storage,data:recoveryData,statusReceipt:receipt});try{
+   await f.settle();const confirmed=receipt.id===retainedId&&receipt.state==='STOPPED';
+   assert.equal(f.events.at(-1).detail.sessions[0].connectionState,confirmed?'ended':'unknown');
+   assert.equal(projectTerminalStorage(storage).list('admin')[0].id,retainedId);
+   assert.equal(f.calls.some(row=>row.operation==='terminal.open'||row.operation==='terminal.close'),false);
+   if(confirmed){
+    f.store.closeReceipt={protocol:'terminal-session-status-v1',id:retainedId,closed:false,state:'STOPPED',metadataOnly:true};
+    await assert.rejects(endProjectTerminals({machine:'node-a',project:'experiment'}),/未确认/);
+    assert.equal(projectTerminalStorage(storage).list('admin').length,1);
+    f.store.closeReceipt={...f.store.closeReceipt,closed:true};assert.equal(await endProjectTerminals({machine:'node-a',project:'experiment'}),true);
+    assert.deepEqual(projectTerminalStorage(storage).list('admin'),[]);
+    assert.ok(f.calls.filter(row=>row.operation==='terminal.close').every(row=>!('writerToken'in row.args)&&!('clientId'in row.args)));
+   }
+  }finally{f.restore();}
+ }
+});
+test('account changes and missing machine grants never probe or reveal another actor ID',async()=>{
+ const storage=memoryStorage();projectTerminalStorage(storage).remember({...retainedContext,id:retainedId});
+ const peer=fixture({storage,principal:{userId:'peer',role:'member'},data:recoveryData});try{await peer.settle();assert.deepEqual(peer.events.at(-1).detail.sessions,[]);assert.deepEqual(peer.calls,[]);}finally{peer.restore();}
+ const zero=fixture({storage,data:{machines:[]}});try{await zero.settle();assert.deepEqual(zero.calls,[]);assert.equal(projectTerminalStorage(storage).list('admin')[0].id,retainedId);}finally{zero.restore();}
+});
+test('recovery status is aborted on project changes, logout, room leave and pagehide; stale STOPPED cannot win',async()=>{
+ for(const action of ['project','logout','leave','pagehide']){
+  const storage=memoryStorage();projectTerminalStorage(storage).remember({...retainedContext,id:retainedId});
+  let respond,signal;const f=fixture({storage,data:recoveryData,status:(_args,options)=>{signal=options.signal;return new Promise(resolve=>{respond=resolve;});}});try{
+   await f.settle();
+   assert.ok(signal,'restored ID is checked without attachment');
+   if(action==='project'){f.elements.get('[name=workspace-project]').value='other';f.context();}
+   else if(action==='logout'){f.store.authGeneration++;await f.authChanged();f.store.principal=null;}
+   else f[action]();
+   assert.equal(signal.aborted,true);
+   respond({protocol:'terminal-session-status-v1',id:retainedId,state:'STOPPED',evidence:{confirmed:true}});await f.settle();
+   const own=f.events.filter(row=>row.type==='gpuq-terminal-state').at(-1).detail.sessions.find(row=>row.id===retainedId);
+   assert.notEqual(own?.connectionState,'ended');assert.equal(projectTerminalStorage(storage).list('admin')[0].id,retainedId);
+   assert.equal(f.calls.some(row=>row.operation==='terminal.close'),false);
+  }finally{f.restore();}
+ }
+});
+test('maintenance permits original-session status only, without enabling terminal creation',()=>{
+ const data={operationalMaintenance:{version:1,global:{reason:'repair'},machines:{}}},principal={role:'member'};
+ assert.equal(maintenanceBlocks('terminal.status',{machine:'node-a',project:'experiment',id:retainedId},data,principal),null);
+ assert.ok(maintenanceBlocks('terminal.open',{machine:'node-a',project:'experiment'},data,principal));
 });

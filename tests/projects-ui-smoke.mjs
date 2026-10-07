@@ -307,3 +307,6 @@ await terminalContractSmoke();
 await import('./personal-project-ui-smoke.mjs');
 // Exercise the independent personal-project entry in this existing CI job.
 await import('./project-directory-ui-smoke.mjs');
+
+// Shared transport and explicit refusal must retain lost-reply recovery.
+await import("./submission-errors-ui-smoke.mjs");

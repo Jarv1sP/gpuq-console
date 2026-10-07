@@ -1,8 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adminDatasetCatalog,mountAdminDataStorage,registerDatasetStorageAdmin} from '../dist/admin-data-storage.js';
+import {adminDatasetCatalog,adminStorageSummary,mountAdminDataStorage,registerDatasetStorageAdmin} from '../dist/admin-data-storage.js';
 const machines=[{id:'node-a'},{id:'node-b'}],version='a'.repeat(64),other='b'.repeat(64);
 const listing=(machine,dataset='samples',ownerLabel='所属用户：alice',state='READY',bytes=10)=>({machine,state:'ok',datasets:[{dataset,ownerLabel,versions:[{version,state,bytes,files:2,canPrepare:false}]}]});
+
+test('storage summary uses explicit budget thresholds and candidate sizes, never invents unknown totals',()=>{
+  const plan={enabled:true,usageBytes:90,budgetBytes:100,lowWater:.61,highWater:.83,candidates:[{bytes:10},{bytes:20}]};
+  assert.deepEqual(adminStorageSummary({enabled:true},plan),{budget:{kind:'high',ratio:.9,usageBytes:90,budgetBytes:100,lowWater:.61,highWater:.83},count:2,bytes:30});
+  assert.equal(adminStorageSummary(null,plan).budget.kind,'unknown');
+  assert.equal(adminStorageSummary({enabled:false},{enabled:false,candidates:[]}).budget.kind,'disabled');
+  assert.deepEqual(adminStorageSummary(null,null),{budget:{kind:'unknown'},count:null,bytes:null});
+  assert.equal(adminStorageSummary({enabled:true},{...plan,candidates:[{bytes:10},{}]}).bytes,null);
+  assert.equal(adminStorageSummary({enabled:true},{...plan,candidates:[{bytes:Number.MAX_SAFE_INTEGER},{bytes:1}]}).bytes,null);
+});
 
 test('administrator catalog retains physical registrations, complete hashes and actual owner labels',()=>{
   const a=listing('node-a'),b=listing('node-b','samples','共享授权用户：alice、bob');

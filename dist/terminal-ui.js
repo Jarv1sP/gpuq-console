@@ -50,6 +50,36 @@ export function terminalLaunchContext({machine,project,role,entry='development'}
   return terminalContext({machine,project,hostAdmin:false});
 }
 
+// Persist only development identities, never attachment credentials or output.
+export function projectTerminalStorage(storage){
+  const prefix='gpuq.project-terminals.v1:',uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const valid=value=>typeof value?.userId==='string'&&!!value.userId&&typeof value.machine==='string'&&!!value.machine&&value.machine!=='auto'&&typeof value.project==='string'&&/^[a-z][a-z0-9_-]{0,47}$/.test(value.project)&&!value.hostAdmin&&!value.dataWorkspace;
+  const key=value=>prefix+encodeURIComponent(JSON.stringify([value.userId,value.machine,value.project]));
+  function ids(name){try{const value=JSON.parse(storage?.getItem(name)||'null');return value?.protocol===1&&Array.isArray(value.ids)?[...new Set(value.ids.filter(id=>typeof id==='string'&&uuid.test(id)))]:[];}catch{return [];}}
+  return {
+    list(userId){
+      const records=[];if(typeof userId!=='string'||!userId)return records;
+      try{for(let index=0;index<storage?.length;index++){
+        const name=storage.key(index);if(!name?.startsWith(prefix))continue;
+        let scope;try{scope=JSON.parse(decodeURIComponent(name.slice(prefix.length)));}catch{continue;}
+        if(!Array.isArray(scope)||scope.length!==3||scope[0]!==userId)continue;
+        const value={userId:scope[0],machine:scope[1],project:scope[2]};
+        if(valid(value))for(const id of ids(name))records.push({...value,id});
+      }}catch{ /* Storage can be disabled; the in-memory directory still works. */ }
+      return records;
+    },
+    remember(value){
+      if(!valid(value)||!uuid.test(value.id))return;
+      try{const name=key(value),saved=ids(name);if(!saved.includes(value.id))storage?.setItem(name,JSON.stringify({protocol:1,ids:[...saved,value.id]}));}catch{return false;}
+      return !!storage;
+    },
+    forget(value){
+      if(!valid(value))return;
+      try{const name=key(value),saved=ids(name).filter(id=>id!==value.id);if(saved.length)storage?.setItem(name,JSON.stringify({protocol:1,ids:saved}));else storage?.removeItem(name);}catch{ /* A confirmed close is not undone by local storage failure. */ }
+    }
+  };
+}
+
 export function terminalUI(store,toast){
   // xterm needs a response-specific CSP nonce for its dynamic sizing styles.
   const nonce=document.querySelector('meta[name="gpuq-style-nonce"]')?.content;
@@ -72,11 +102,38 @@ export function terminalUI(store,toast){
   // The sole attached connection owns its token; detach erases it even if its
   // response is lost. Temporary stale/close connections release theirs too.
   const sessions=new Map(),projectModes=new Map();
+  let savedStorage;try{savedStorage=globalThis.localStorage;}catch{ /* Private storage may be disabled. */ }
+  const savedSessions=projectTerminalStorage(savedStorage);
+  let restoredActor='',recoveryController=null,storageWarning=false;
   const paused=target=>!!target&&!target.hostAdmin&&!!maintenanceFor(store.data?.operationalMaintenance,target.machine);
   const identity=value=>JSON.stringify([value.userId,value.machine,value.project||'',value.hostAdmin===true,value.dataWorkspace===true]);
   const args=value=>({...terminalRequestContext(value),id:value.id,clientId:value.clientId,writerToken:value.writerToken});
-  function remember(value){const {writerToken,writeUntil,authGeneration,...record}=value;sessions.set(value.id,{...record});}
-  function announce(){document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[...sessions.values()].filter(value=>value.userId===store.principal?.userId).map(value=>({...value}))}}));}
+  function remember(value){
+    const {writerToken,writeUntil,authGeneration,...record}=value;sessions.set(value.id,{...record});
+    if(savedSessions.remember(record)===false&&!storageWarning){storageWarning=true;toast('无法保存会话 ID，请复制后再刷新。');}
+  }
+  function forget(record){savedSessions.forget(record);sessions.delete(record.id);}
+  function restoreDirectory(){
+    const userId=store.principal?.userId,stamp=JSON.stringify([userId,store.authGeneration]);
+    if(!userId||store.authPending||restoredActor===stamp)return;restoredActor=stamp;
+    for(const record of savedSessions.list(userId))if(!sessions.has(record.id))sessions.set(record.id,{...record,hostAdmin:false,detached:true,connectionState:'unknown',recovered:true});
+  }
+  function announce(){restoreDirectory();document.dispatchEvent(new CustomEvent('gpuq-terminal-state',{detail:{sessions:[...sessions.values()].filter(value=>value.userId===store.principal?.userId).map(value=>({...value}))}}));}
+  function cancelRecovery(){recoveryController?.abort();recoveryController=null;}
+  async function verifyRecovered(machine,project){
+    const userId=store.principal?.userId,auth=store.authGeneration,workspace=workspaceGeneration;
+    if(!userId||store.authPending||!project||!store.data?.machines?.some(node=>node.id===machine))return;
+    const records=[...sessions.values()].filter(record=>record.recovered&&record.userId===userId&&record.machine===machine&&record.project===project);
+    if(!records.length)return;
+    const controller=new AbortController();recoveryController=controller;
+    const current=()=>!controller.signal.aborted&&userId===store.principal?.userId&&auth===store.authGeneration&&workspace===workspaceGeneration;
+    try{for(const record of records){
+      let result;try{result=await store.call('terminal.status',{...terminalRequestContext(record),id:record.id},{signal:controller.signal});}catch{if(!current())return;}
+      if(!current())return;if(sessions.get(record.id)!==record)continue;
+      const confirmed=result?.protocol==='terminal-session-status-v1'&&result.id===record.id&&result.evidence?.confirmed===true;
+      remember({...record,connectionState:confirmed&&result.state==='STOPPED'?'ended':confirmed&&result.state==='ALIVE'?'detached':'unknown'});announce();
+    }}finally{if(recoveryController===controller)recoveryController=null;}
+  }
   function connectionNote(text='',{query=false,reconnect=false,ended=false}={}){
     const note=document.querySelector('#terminal-connection-note');
     if(note){note.textContent=text;note.hidden=!text;note.className='st '+(ended?'st-cancel':'st-unknown');}
@@ -112,6 +169,7 @@ export function terminalUI(store,toast){
     else if(previous)delete previous.writerToken;
   }
   store.onAuthChange?.(async call=>{
+    cancelRecovery();restoredActor='';
     const previous=session,request=previous?.writerToken?args(previous):null;currentActor=null;projectModes.clear();detach(false);announce();
     term?.dispose();term=null;document.querySelector('#terminal-screen')?.replaceChildren();
     for(const id of ['terminal-title','terminal-session-note','terminal-maintenance-note','terminal-connection-note']){const node=document.querySelector('#'+id);if(node)node.textContent='';}
@@ -154,7 +212,7 @@ export function terminalUI(store,toast){
       signal?.throwIfAborted();
       if(userId!==store.principal?.userId||auth!==store.authGeneration)throw Error('登录账号已改变，未确认旧终端结果。');
       if(result?.closed!==true||result.id!==record.id||result.state!=='STOPPED'||result.metadataOnly!==true)throw Error('结束结果未确认，请查询原会话。');
-      sessions.delete(record.id);if(session?.id===record.id)await detach(false);announce();
+      forget(record);if(session?.id===record.id)await detach(false);announce();
   }
   async function closeSession(record,{signal,allowTakeover=true}={}){
     signal?.throwIfAborted();
@@ -195,7 +253,7 @@ export function terminalUI(store,toast){
       signal?.throwIfAborted();
       if(result?.closed!==true){if(attached)stopInput(target,'结束结果未确认，请重新查询。',{expired:false});throw Error('结束结果未确认，请重新查询。');}
       confirmed=true;
-      delete target.writerToken;sessions.delete(record.id);
+      delete target.writerToken;forget(record);
       if(session?.id===record.id)await detach(false);announce();
     }catch(error){
       if(attached)stopInput(target,'结束结果未确认，请重新查询。');
@@ -274,8 +332,10 @@ export function terminalUI(store,toast){
   }
   document.addEventListener('gpuq-workspace-context',event=>{
     const {userId,machine,project}=event.detail,next=JSON.stringify([userId,machine,project||'']);
-    if(currentActor!==userId||currentWorkspace!==next){currentActor=userId;currentWorkspace=next;workspaceGeneration++;detach();announce();}
+    if(currentActor!==userId||currentWorkspace!==next){cancelRecovery();currentActor=userId;currentWorkspace=next;workspaceGeneration++;detach();announce();verifyRecovered(machine,project);}
   });
+  document.addEventListener('gpuq-route-leaving',cancelRecovery);
+  window.addEventListener('pagehide',cancelRecovery);
   document.addEventListener('gpuq-data-workspace-context',()=>{openingGeneration++;if(session?.dataWorkspace)detach();});
   function revealMotion(){const reduce=typeof matchMedia==='function'?matchMedia('(prefers-reduced-motion:reduce)').matches:true;dialog.animate?.(reduce?[{opacity:0},{opacity:1}]:[{clipPath:'inset(100% 0 0 0)'},{clipPath:'inset(0)'}],{duration:reduce?150:320,easing:'cubic-bezier(.2,0,0,1)'});}
   async function openTerminal(button,knownTarget=null){
@@ -372,4 +432,5 @@ export function terminalUI(store,toast){
     }
   });
   window.addEventListener('resize',()=>{if(dialog?.open)fit?.fit();});
+  announce();
 }

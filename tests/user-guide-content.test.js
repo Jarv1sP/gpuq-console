@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const guide = readFileSync(new URL('../docs/USER_GUIDE.md', import.meta.url), 'utf8');
+const datasetManual = readFileSync(new URL('../docs/DATASETS.md', import.meta.url), 'utf8');
 const chapters = [
   ['首次使用', 'start'],
   ['项目开发', 'development'],
@@ -27,6 +28,44 @@ test('guide explains authorization labels and keeps personal model inputs separa
   assert.match(guide,/不登记为数据集/);assert.match(guide,/不要覆盖输入权重/);
   assert.match(guide,/不用每次从电脑重新上传/);assert.match(guide,/服务器内部复制快照/);
   assert.match(guide,/新训练产生的 checkpoint 和其他输出仍写每个任务独立的 `\/outputs`/);
+});
+
+test('data organization guidance favors reusable collections without changing immutable identity', () => {
+  const section = guide.split('### 数据整理约定\n')[1]?.split('\n### ')[0]?.split('网页只有一个')[0];
+  assert.ok(section, 'The data chapter contains a concise organization section');
+  assert.equal((section.match(/^- /gm) || []).length, 3);
+  assert.match(section, /完整、可复用的集合/);
+  assert.match(section, /同一集合更新时保留名称，用新的内容版本区分/);
+  assert.match(section, /显示名称应说明内容和用途/);
+  assert.match(section, /不要只用纯数字、随机字符/);
+  assert.match(section, /不要故意登记没有独立复用用途的零散临时小数据集/);
+  assert.match(section, /主体或分片尽量合并，训练程序按需选取子集/);
+  assert.match(section, /预训练权重、tokenizer 和模型配置放个人项目/);
+  for (const path of ['weights/', 'models/', 'tokenizers/', '/outputs']) assert.ok(section.includes('`' + path + '`'));
+  assert.match(section, /不登记为数据集/);
+  assert.match(section, /内部数据集 ID 或完整 64 位版本哈希/);
+  assert.match(section, /内部 ID 和已发布版本保持不可变/);
+  assert.match(section, /个人显示名，不做全局重命名/);
+  assert.match(guide, /gpuctl data label DATASET_ID --display-name/);
+  assert.match(guide, /训练的 `--data` 仍使用原 `DATASET_ID@VERSION`/);
+});
+
+test('dataset reference repeats organization rules and preserves existing name and permission contracts', () => {
+  const section = datasetManual.split('## 数据整理约定\n')[1]?.split('\n## ')[0];
+  assert.ok(section, 'The dataset reference contains the same organization rules');
+  assert.equal((section.match(/^- /gm) || []).length, 3);
+  assert.match(section, /完整、可复用的集合/);
+  assert.match(section, /同一集合更新时保留名称，用新的内容版本区分/);
+  assert.match(section, /显示名称说明内容和用途，不只用纯数字、随机字符/);
+  assert.match(section, /不要故意登记没有独立复用用途的零散临时小数据集/);
+  assert.match(section, /预训练权重、tokenizer 和模型配置放个人项目/);
+  assert.match(section, /新训练产物写 `\/outputs`，不登记为数据集/);
+  assert.match(section, /不改变上传名称的接口规则/);
+  assert.match(section, /内部数据集 ID 和完整 64 位版本哈希保持不可变/);
+  assert.match(section, /不做全局重命名，也不改变读取授权/);
+  assert.match(section, /训练继续使用原始 `NAME@VERSION`/);
+  assert.match(datasetManual, /名称使用 1–40 位字母、数字、下划线或连字符/);
+  assert.match(datasetManual, /数据集与来源编号使用 1–64 位 ASCII 字母、数字、下划线或连字符/);
 });
 
 test('user guide has the seven stable chapters used by the website', () => {
@@ -184,6 +223,10 @@ test('guide explains quotas, interruption and failure evidence without promising
   assert.match(guide, /不自动重跑/);
   assert.match(guide, /不保证每个 worker 都健康/);
   assert.match(guide, /gpuctl diagnostics JOB_ID --json/);
+  assert.match(guide, /本次尝试的退出码是 `latestAttempt.exitCode`/);
+  assert.match(guide, /`latestAttempt.startedAt` \/ `latestAttempt.finishedAt`（Unix 秒）/);
+  assert.match(guide, /`workerStartedAt` \/ `workerFinishedAt` 使用 ISO 日期时间/);
+  assert.match(guide, /缺值表示未确认，不猜成退出码 0 或时间 0/);
   assert.match(guide, /不会自动备份/);
   assert.match(guide, /不要粘贴密码、令牌、私钥/);
 });
@@ -195,4 +238,38 @@ test('personal data terminal manual extraction separates mutable drafts from imm
   assert.match(guide,/不会自动解压/);
   assert.match(guide,/独立只读副本/);
   assert.match(guide,/尚无独立磁盘硬配额/);
+});
+
+test('troubleshooting separates confirmed misunderstandings from unavailable features', () => {
+  const section = guide.split('## 常见问题 {#troubleshooting}\n')[1];
+  assert.ok(section);
+  assert.match(section, /失败记录会保留，不代表必须重跑/);
+  assert.match(section, /gpuctl completion JOB_ID --json/);
+  assert.match(section, /只有 `completed:true` 且任务、项目、发布版本都符合预期/);
+  assert.match(section, /节点能力未确认.*503/);
+  assert.match(section, /不等于训练程序已经运行并失败/);
+  assert.match(section, /保留原任务编号和 `Submission key`，不要另建一份训练/);
+  assert.match(section, /节点配置的安全预留；这不是个人容量额度用完/);
+  assert.match(section, /数据 `READY` 不等于已备份/);
+  assert.match(section, /旧数据不会自动补归档/);
+  assert.match(section, /已经永久取消的归档要由管理员核查/);
+  assert.match(section, /要另开独立会话，选「新建终端」或运行 `gpuctl ssh`/);
+  assert.match(section, /同一个人容器项目仍只保留一个开发终端/);
+  assert.match(section, /发布代码和环境前，相关终端须确认 `STOPPED`/);
+  assert.match(section, /gpuctl terminal status SESSION_ID/);
+  assert.match(section, /`UNKNOWN` 不能当成已结束/);
+  assert.doesNotMatch(section, /确认已结束才新建/);
+  assert.match(section, /个人容器内 root 只管理自己的容器/);
+  assert.match(section, /`--hami` 可用不代表 `--sm-percent 50` 已开通/);
+  assert.match(section, /代码、环境和结果仍留在原实例/);
+  assert.match(section, /旧环境不会因分组或归档自动变成个人容器/);
+});
+
+test('project manual agrees with the guide on verified upload resumption', () => {
+  const projects = readFileSync(new URL('../docs/PROJECTS.md', import.meta.url), 'utf8');
+  assert.match(projects, /先核对原上传 ID、路径、文件大小与 SHA-256/);
+  assert.match(projects, /从服务器已确认的字节继续/);
+  assert.match(projects, /旧记录缺少恢复证明或提交结果未确认时停止/);
+  assert.match(projects, /不自动替换未完成上传/);
+  assert.doesNotMatch(projects, /失败重跑 `push` 会重新传该文件|同路径重传替换未完成上传/);
 });
