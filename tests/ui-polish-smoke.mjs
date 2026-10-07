@@ -188,6 +188,7 @@ if(!baseline){
   await import('./polish-operational-ui-smoke.mjs');
   await import('./admin-ui-smoke.mjs');
   await import('./admin-members-ui-smoke.mjs');
+  await import('./admin-create-user-ui-smoke.mjs');
 }
 
 await import('./admin-gpu-tasks-ui-smoke.mjs');

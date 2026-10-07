@@ -152,6 +152,7 @@ function renderEditor(){
     </div>`;updateDirty();
 }
 function updateDirty(){
+  members?.updateCreate();
   const state=$('#save-state');if(state)state.textContent=dirty()?'未保存':'已保存';
   const draftNote=$('.member-draft-note');if(draftNote)draftNote.hidden=!dirty();
   const summary=$('#policy-summary');if(!summary||!draft)return;
@@ -214,7 +215,7 @@ function syncAuthGuide(){
 }
 const authGuideObserver=new MutationObserver(syncAuthGuide);
 for(const dialog of [$('#login-dialog'),$('#register-dialog')])authGuideObserver.observe(dialog,{attributes:true,attributeFilter:['open']});
-members=membersAdminUI(store,{getPage:()=>page,render:renderMembers,unmount:()=>{selected=null;draft=null;inviteCode=null;confirmAction=null;}});
+members=membersAdminUI(store,{getPage:()=>page,render:renderMembers,canCreate:()=>!dirty(),onCreated:user=>{selected=user.id;draft=null;filter='all';render(true);},toast,unmount:()=>{selected=null;draft=null;inviteCode=null;confirmAction=null;}});
 maintenanceAdminUI(store,renderMaintenanceExperience,{getPage:()=>page,toast,refresh:()=>render(true)});
 installAuthentication();
 if(store.principal)defaultPage();render();if(store.principal)shell.syncStatus('ready',Date.now());else openLogin();
