@@ -27,6 +27,20 @@ test('Git imports pin a full commit and bounded chunks without accepting environ
   for(const extra of [{environmentMode:'shared'},{argv:['rm']},{source:{kind:'git',commit:'HEAD'}},{source:{kind:'git',commit:'b'.repeat(40),machine:'gpu-1'}}])await assert.rejects(snapshotSyncCall(f.service,principal,user,'projects.sync.begin',{...args,...extra},f.auth));
   await assert.rejects(snapshotSyncCall(f.service,principal,user,'projects.sync.chunk',{machine:'gpu-2',project:'new-project',key:args.key,path:'file',offset:0,data:'%%%invalid%%%'},f.auth));
 });
+test('code-only sync uses the same OCI cohort admission and preserves both pre/post dispatch authorization fences',async()=>{
+ const args={machine:'gpu-2',project:'new-project',key:randomUUID(),manifestBytes:100,manifestSha256:hash,totalBytes:30,entries:2,source:{kind:'git',commit:'b'.repeat(40)}};
+ const f=fixture(),admissions=[];f.service.ociProjectAdmission=async(...call)=>admissions.push(call);
+ await snapshotSyncCall(f.service,principal,user,'projects.sync.begin',args,f.auth);
+ assert.deepEqual(admissions,[['gpu-2',user.id,'new-project',{creatingOCI:true}]]);
+ assert.equal(f.calls.at(-1).args.environmentMode,undefined,'OCI mode is node-controlled, never a client override');
+ f.calls.length=0;f.service.ociProjectAdmission=async()=>{throw Object.assign(Error('Cohort not confirmed'),{status:503});};
+ await assert.rejects(snapshotSyncCall(f.service,principal,user,'projects.sync.begin',args,f.auth),e=>e.status===503);assert.equal(f.calls.length,0);
+ const g=fixture();let current={...user};g.service.store={get:()=>current};g.service.ociProjectAdmission=async()=>{current={...user,enabled:false};};
+ await assert.rejects(snapshotSyncCall(g.service,principal,user,'projects.sync.begin',args,g.auth),e=>e.status===403);assert.equal(g.calls.length,0);
+ const h=fixture();current={...user};h.service.store={get:()=>current};const bridge=h.service.bridge;
+ h.service.bridge=async(...call)=>{const result=await bridge(...call);current={...user,enabled:false};return result;};
+ await assert.rejects(snapshotSyncCall(h.service,principal,user,'projects.sync.begin',args,h.auth),e=>e.status===403);assert.equal(h.calls.length,1);
+});
 test('container and unified node manifest include the required sync runtime imports',async()=>{
   const docker=await readFile(new URL('../deploy/Dockerfile',import.meta.url),'utf8'),manifest=JSON.parse(await readFile(new URL('../deploy/node-runtime.json',import.meta.url),'utf8'));assert.match(docker,/COPY[^\n]*snapshot-sync\.mjs/);assert.ok(manifest.dependencies.includes('snapshot-sync.py'));assert.ok(manifest.dependencies.includes('data-workspace.py'));
 });

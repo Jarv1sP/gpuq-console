@@ -7,7 +7,7 @@ import {endProjectTerminals} from '../dist/terminal-ui.js';
 const key='b69e7f69-18e8-4496-864e-e612195a2e93',other='086d123e-834b-43da-aa24-c33566d1b3f4',release='a'.repeat(64);
 const intent={machine:'fixture-server-long-id',project:'experiment-a',key,startedAt:1000};
 function memory(){const values=new Map();return {getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key),key:index=>[...values.keys()][index],get length(){return values.size;}};}
-test('all environment choices confirm the requested project and retain the shared legacy default',()=>{
+test('confirmation helper strictly checks OCI and retains historical venv interpretation',()=>{
   for(const environmentMode of ['shared','isolated','oci']){
     const result={project:intent.project,environmentMode};assert.equal(confirmProjectCreation(result,{project:intent.project,environmentMode}),result);
     for(const actual of ['shared','isolated','oci',null,'container'])if(actual!==environmentMode)assert.throws(()=>confirmProjectCreation({...result,environmentMode:actual},{project:intent.project,environmentMode}),/未确认/);

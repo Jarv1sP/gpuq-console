@@ -99,7 +99,7 @@ try{
   await assertPrompt('服务器','请选择服务器','');
   // Return to no topbar selection and create on the node which actually admitted OCI.
   await page.locator('[name=workspace-machine]').selectOption('');await page.locator('[name=workspace-project]').selectOption('');await idle();
-  await page.locator('#project-create>summary').click();await page.locator('[name=environment-choice][value=oci]').check();await page.locator('[name=new-project]').fill('new-container');
+  await page.locator('#project-create>summary').click();assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');assert.equal(await page.locator('[name=environment-choice]').count(),0);await page.locator('[name=new-project]').fill('new-container');
   await page.setViewportSize({width:390,height:1080});await page.locator('#project-create').scrollIntoViewIfNeeded();await page.screenshot({path:join(shots,'member-create-no-server-390.png'),fullPage:true});
   await action('projects.create',()=>page.locator('#project-create-form [type=submit]').click());
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'');
@@ -115,7 +115,7 @@ try{
   await login('admin');await idle();await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('admin-container'));assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'');assert.equal(await page.locator('[name=workspace-project] option[data-project=same-name]').count(),0,'member catalog does not survive an account switch');await capture('admin');
   csp.push(...await page.evaluate(()=>globalThis.directoryCSP||[]));
   await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});
-  const before=calls.length;await login('directory-zero');await page.locator('#project-create').waitFor();assert.equal(await page.locator('#project-create-form [type=submit]').isDisabled(),true);assert.equal(await page.locator('[name=environment-choice][value=oci]').isVisible(),false);assert.equal(calls.length,before,'zero authorization sends no node calls');
+  const before=calls.length;await login('directory-zero');await page.locator('#project-create').waitFor();assert.equal(await page.locator('#project-create-form [type=submit]').isDisabled(),true);assert.equal(await page.locator('[name=environment-choice]').count(),0);assert.equal(calls.length,before,'zero authorization sends no node calls');
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);assert.deepEqual(csp,[]);assert.deepEqual(http,[]);
   console.log(JSON.stringify({status:'PASS',checks:['global own directory with exact duplicate-name identity','create without topbar using confirmed node OCI capability','focus changes retain development source','terminal source and confirmed end flow','lost publish reply pins the same key and source','AUTO training without a topbar machine','account switch and zero authorization','member/admin 1440/1024/390/320 no horizontal overflow, scripts, CSP or external requests'],shots}));
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(root,{recursive:true,force:true});}

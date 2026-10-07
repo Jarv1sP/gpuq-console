@@ -36,13 +36,16 @@ test('actual account grant/revoke events and first project access sync only serv
     assert.equal(f.service.store.jobs.length,0);
   }finally{await f.close();}
 });
-test('shared/isolated projects and readonly listings remain usable when membership sync fails',async()=>{
+test('historical shared/isolated access remains compatible but cannot create a new venv during failed membership sync',async()=>{
   const f=await fixture();try{
     f.fail(true);await f.service.invoke(f.admin.token,'policy.save',{userId:f.member.id,policyVersion:0,total:1,limits:{'gpu-1':1}});await settled();
     const count=f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').length;
     for(const environmentMode of ['shared','isolated']){
       f.mode(environmentMode);
-      for(const operation of ['projects.list','projects.status','projects.create','projects.publish'])await f.service.invoke(f.login.token,operation,{machine:'gpu-1',...(operation==='projects.list'?{}:{project:'sample'}),...(operation==='projects.create'?{environmentMode}:{})});
+      for(const operation of ['projects.list','projects.status','projects.publish'])await f.service.invoke(f.login.token,operation,{machine:'gpu-1',...(operation==='projects.list'?{}:{project:'sample'})});
+      const before=f.calls.length;
+      await assert.rejects(f.service.invoke(f.login.token,'projects.create',{machine:'gpu-1',project:'sample',environmentMode}),e=>e.status===400);
+      assert.equal(f.calls.length,before);
       await f.service.invoke(f.login.token,'terminal.open',{machine:'gpu-1',project:'sample',clientId:randomUUID(),key:randomUUID(),mode:'new'});
     }
     assert.equal(f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').length,count);
@@ -76,10 +79,25 @@ test('failed event does not roll back durable grant, but first OCI request fails
     f.fail(true);await f.service.invoke(f.admin.token,'policy.save',{userId:f.member.id,policyVersion:0,total:1,limits:{'gpu-1':1}});
     assert.equal(f.service.store.get(f.member.id).limits['gpu-1'],1);
     const count=f.calls.filter(x=>x.operation==='projects.create').length;
-    await assert.rejects(f.service.invoke(f.login.token,'projects.create',{machine:'gpu-1',project:'sample',environmentMode:'oci'}));
+    await assert.rejects(f.service.invoke(f.login.token,'projects.create',{machine:'gpu-1',project:'sample'}));
     assert.equal(f.calls.filter(x=>x.operation==='projects.create').length,count);
     const spec={machine:'gpu-1',project:'sample',clientId:randomUUID(),key:randomUUID(),mode:'new'};
     await assert.rejects(f.service.invoke(f.login.token,'terminal.open',spec));
     assert.equal(f.calls.filter(x=>x.operation==='terminal.open').length,0);
   }finally{await f.close();}
+});
+test('actual code sync begin uses the same server-derived OCI cohort and fails closed without target writes',async()=>{
+  const f=await fixture();try{
+    const args={machine:'gpu-1',project:'synced',key:randomUUID(),manifestBytes:100,manifestSha256:'a'.repeat(64),totalBytes:10,entries:1,source:{kind:'git',commit:'b'.repeat(40)}};
+    await f.service.invoke(f.admin.token,'policy.save',{userId:f.member.id,policyVersion:0,total:1,limits:{'gpu-1':1}});await settled();
+    await f.service.invoke(f.login.token,'projects.sync.begin',args);
+    assert.equal(f.calls.at(-1).operation,'projects.sync.begin');assert.equal(f.calls.at(-1).args.userId,f.member.id);
+    assert.deepEqual(f.calls.filter(x=>x.operation==='projects.oci-cohort.sync').at(-1).args.owners,['builtin-admin',f.member.id]);
+  }finally{await f.close();}
+  const unavailable=await fixture();try{
+    unavailable.fail(true);await unavailable.service.invoke(unavailable.admin.token,'policy.save',{userId:unavailable.member.id,policyVersion:0,total:1,limits:{'gpu-1':1}});await settled();
+    const args={machine:'gpu-1',project:'other',key:randomUUID(),manifestBytes:100,manifestSha256:'a'.repeat(64),totalBytes:10,entries:1,source:{kind:'git',commit:'b'.repeat(40)}};
+    await assert.rejects(unavailable.service.invoke(unavailable.login.token,'projects.sync.begin',args));
+    assert.equal(unavailable.calls.filter(x=>x.operation==='projects.sync.begin').length,0);
+  }finally{await unavailable.close();}
 });

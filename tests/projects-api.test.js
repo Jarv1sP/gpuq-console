@@ -13,7 +13,7 @@ async function fixture(){
  await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
  await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:32768})),gpuq:{connected:true,observeOnly:false,schedulableIndices:[0],jobs:[]}}))}));
  const calls=[];let ready=true;
- const bridge=async(machine,operation,args)=>{calls.push({machine,operation,args});if(operation==='projects.quota')return {enabled:false,enforcement:null,owner:args.userId,volumes:null};if(operation==='projects.verify')return {project:args.project,release:args.release,state:ready?'READY':'DRAFT'};if(operation.startsWith('projects.'))return {project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null};if(operation==='sync')return {state:'RUNNING',nodeJobId:'node-'+args.job.id};return {entries:[]};};
+ const bridge=async(machine,operation,args)=>{calls.push({machine,operation,args});if(operation==='projects.quota')return {enabled:false,enforcement:null,owner:args.userId,volumes:null};if(operation==='projects.verify')return {project:args.project,release:args.release,state:ready?'READY':'DRAFT'};if(operation.startsWith('projects.'))return {project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null,...(operation==='projects.create'?{environmentMode:args.environmentMode}:{})};if(operation==='sync')return {state:'RUNNING',nodeJobId:'node-'+args.job.id};return {entries:[]};};
  const service=await PortalService.open(join(dir,'db'),bootstrap,status,bridge);clearInterval(service.executionTimer);
  const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'alice',password})).result;
  await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:2,limits:{'gpu-1':2}});
@@ -203,16 +203,30 @@ test('publication key is publish-only and cannot supply another owner or host pr
   await assert.rejects(f.call('projects.publish',{machine:'gpu-2',project:'my-project',key}),e=>e.status===403);
  }finally{await f.close();}
 });
-test('environment mode is create-only, explicit and bound to the authenticated account',async()=>{
+test('new projects default to OCI and reject legacy modes before dispatch for members and admins',async()=>{
  const f=await fixture();try{
-  for(const environmentMode of ['shared','isolated','oci']){
-   await f.call('projects.create',{project:'clean-env',environmentMode});
-   assert.equal(f.calls.at(-1).args.environmentMode,environmentMode);assert.equal(f.calls.at(-1).args.userId,f.member.id);
+  for(const options of [{},{environmentMode:'oci'}]){
+   await f.call('projects.create',{project:'clean-env',...options});
+   assert.equal(f.calls.at(-1).args.environmentMode,'oci');assert.equal(f.calls.at(-1).args.userId,f.member.id);
   }
-  for(const environmentMode of [null,true,{},['isolated'],'inherit',''])await assert.rejects(f.call('projects.create',{project:'clean-env',environmentMode}));
+  const count=f.calls.length;
+  for(const token of [f.user.token,f.admin.token])for(const environmentMode of ['shared','isolated',null,true,{},['oci'],'inherit',''])await assert.rejects(f.call('projects.create',{project:'clean-env',environmentMode},token),e=>e.status===400);
+  assert.equal(f.calls.length,count,'legacy clients and manual args cannot bypass OCI creation');
   for(const op of ['projects.status','projects.list','projects.publish'])await assert.rejects(f.call(op,{project:'clean-env',environmentMode:'isolated'}));
   await assert.rejects(f.call('projects.create',{project:'clean-env',environmentMode:'isolated',userId:'builtin-admin'}));
   await assert.rejects(f.call('projects.create',{machine:'gpu-2',project:'clean-env',environmentMode:'isolated'}),e=>e.status===403);
+ }finally{await f.close();}
+});
+test('OCI creation requires an exact confirmed project receipt and preserves permission race checks',async()=>{
+ const f=await fixture();try{
+  const bridge=f.service.bridge;
+  for(const receipt of [undefined,{}, {project:'clean-env'},{project:'clean-env',environmentMode:'shared'},{project:'another',environmentMode:'oci'}]){
+   f.service.bridge=async()=>receipt;
+   await assert.rejects(f.call('projects.create',{project:'clean-env'}),e=>e.status===503);
+  }
+  f.service.bridge=async(...args)=>{const value=await bridge(...args);f.service.store.setEnabled(f.member.id,false);return value;};
+  await assert.rejects(f.call('projects.create',{project:'clean-env'}),e=>e.status===403);
+  assert.equal(f.service.store.jobs.length,0);
  }finally{await f.close();}
 });
 test('project terminal forbids host-root combination and retains context on all operations',async()=>{

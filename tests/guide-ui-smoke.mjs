@@ -182,7 +182,7 @@ try{
       assert.match(await explanation.innerText(),/容器内 root 不是服务器 root，开发阶段无 GPU/);
       assert.match(await explanation.innerText(),/发布前先结束所有开发终端/);
       assert.match(await explanation.innerText(),/先选好要训练的版本.*训练固定该镜像版本/);
-      const containerCommand=explanation.locator('p>code').filter({hasText:'gpuctl project create system-project --env-mode oci'});
+      const containerCommand=explanation.locator('p>code').filter({hasText:'gpuctl project create system-project'});
       assert.equal(await containerCommand.evaluate(node=>getComputedStyle(node).whiteSpace),'nowrap','desktop inline command stays on one line');
       assert.equal(await containerCommand.evaluate(node=>{const range=document.createRange();range.selectNodeContents(node);return range.getClientRects().length;}),1);
       await noPageOverflow(guide,'desktop personal container');

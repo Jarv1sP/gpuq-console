@@ -79,7 +79,7 @@ python -m pip check
 exit
 ```
 
-代码在 `/workspace`，私人环境在 `/opt/project-env`。默认继承基础 Python 包；需要空环境时新建 `gpuctl project create clean-project --env-mode isolated`。项目名以小写字母开头，可含数字、下划线和连字符，最长 48 字符。
+新项目统一使用个人容器，不需要选择环境模式。代码在 `/workspace`，依赖安装在自己的容器中，不继承宿主基础 Conda。项目名以小写字母开头，可含数字、下划线和连字符，最长 48 字符。未开通容器的节点会明确拒绝，不回退共享环境；已有项目和历史结果不会自动转换或删除。
 
 ### 整理已有项目
 
@@ -93,7 +93,7 @@ exit
 
 网页从「我的项目」进入个人容器，或直接「新建项目」，不用先选顶栏服务器；页面显示实际开发位置。切换顶栏服务器不会搬迁当前容器、文件或开发终端。共享/隔离环境和固定卡号仍须选择具体服务器。
 
-在网页「新建项目」选择「个人容器」，或在管理员已启用的节点使用 `gpuctl project create system-project --env-mode oci`。没开通的服务器会直接拒绝，不影响你已有的项目。页面上没有「个人容器」选项，说明尚未确认你有可用的个人容器位置；可刷新项目重试。
+网页直接「新建项目」，命令行使用 `gpuctl project create system-project`，两者都创建个人容器。没开通的服务器会直接拒绝，不影响已有资料；创建按钮不可用时，先刷新项目，仍未确认就联系管理员。
 
 - 用项目的「新建开发终端」进入；容器内 root 不是服务器 root，开发阶段无 GPU，可以在自己的容器安装 apt 等系统包。同一项目只保留一个开发终端，再次进入应明确重连。
 - 发布前先结束所有开发终端；「断开」会保留终端，不能用于发布。只有本次发布已确认，才显示训练版本已生成；结果未确认时先重新查询，不另发新的发布请求。
@@ -104,7 +104,7 @@ exit
 个人容器的最短流程如下；已有项目不会自动改成容器：
 
 ```sh local
-gpuctl project create my-container --env-mode oci
+gpuctl project create my-container
 gpuctl shell
 ```
 
@@ -609,7 +609,7 @@ gpuctl sync code --from SOURCE --to TARGET --project my-project --release FULL_H
 gpuctl sync data DATASET_ID@VERSION --from SOURCE --to TARGET --name my-data --dry-run
 ```
 
-将 `SOURCE/TARGET` 换成获授权机器 ID，去掉 `--dry-run` 才传输。Git 仓库须干净并支持 `check-attr --source`，只导出固定提交；已有节点代码只复制固定 release。目标须是新项目，重复同一命令可续传，不覆盖旧项目、不删除目标其他内容。
+将 `SOURCE/TARGET` 换成获授权机器 ID，去掉 `--dry-run` 才传输。Git 仓库须干净并支持 `check-attr --source`，只导出固定提交；已有节点代码只复制固定 release。目标须是新项目，并自动采用本人获准的个人容器，不回退共享或隔离 venv。重复同一命令可续传，不覆盖旧项目、不删除目标其他内容。
 
 代码显示 `CODE_READY` 还不能训练：在目标 `use`、`project use`、`ssh` 准备依赖，退出后 `project publish/status`，等 `READY`，使用目标的完整 `--release`。同步不迁移 Conda/venv、草稿或结果。数据使用返回的目标完整 `名称@版本`，内容版本必须一致；这不是自动多机调度，也不是 TB 级高速直传。
 
