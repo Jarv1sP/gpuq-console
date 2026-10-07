@@ -21,12 +21,18 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  await page.goto(origin);await page.evaluate(async({role,machines,version})=>{
   const {warehouseWorkspaceHTML,datasetWarehouseView}=await import('/dataset-warehouse-view.js'),section=document.querySelector('#page-datasets');
   section.innerHTML=warehouseWorkspaceHTML();for(const row of machines)section.querySelector('[name=dataset-machine]').add(new Option(row.id,row.id));
-  window.calls=[];window.operations=new Map();window.capMode='normal';window.sequence=0;window.refreshes=0;window.lose=false;
+  window.calls=[];window.operations=new Map();window.capMode='normal';window.sequence=0;window.refreshes=0;window.lose=false;window.permitted=new Set(machines.map(row=>row.id));
   const source=machines[0].id,dataset='sample',callbacks=new Set();
   window.snapshot={protocol:'dataset-storage-overview-v1',warehouse:{state:'UNKNOWN',volumes:[]},caches:machines.map(row=>({machine:row.id,state:'READY',volume:{}})),
    datasets:[{dataset,versions:[{version,canUse:true,ownerLabel:'所属用户：alice',contentBytes:4096,fileCount:2,originals:[{machine:machines.at(-1).id,state:'READY'}],caches:machines.map((row,index)=>({machine:row.id,dataset:'physical-'+index,state:index===0?'READY':'NOT_LOCAL',canUse:index===0,canPrepare:index!==0}))}]}]};
   window.store={production:true,principal:{userId:'alice',username:'alice',role,enabled:true},authGeneration:0,data:{machines},onAuthChange:fn=>{callbacks.add(fn);return()=>callbacks.delete(fn);},async call(operation,args){
    calls.push({operation,args:structuredClone(args),actor:store.principal.userId});
+   if(operation==='datasets.catalog')return {machine:args.machine,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[{dataset,versions:[{version,canUse:true,canPrepare:true,state:'NOT_LOCAL',bytes:4096,locations:snapshot.datasets[0].versions[0].caches}]}]};
+   if(operation==='datasets.prepare'){
+    if(Object.keys(args).sort().join()!=='dataset,machine,version'||args.dataset!==dataset||args.version!==version||!permitted.has(args.machine))throw Error('Unexpected legacy cache target');
+    const location=snapshot.datasets[0].versions[0].caches.find(row=>row.machine===args.machine);location.state='READY';location.canUse=true;
+    return {dataset,version,state:'READY'};
+   }
    if(operation==='datasets.cache.capabilities'){
     if(args.dataset!==dataset||args.version!==version||!machines.some(row=>row.id===args.machine)||Object.keys(args).sort().join()!=='dataset,machine,version')throw Error('Unexpected capability target');
     if(capMode==='delayed')return new Promise(resolve=>window.releaseCapability=resolve);
@@ -47,7 +53,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
    }else throw Error('Unexpected operation '+operation);
    return structuredClone(row);
   }};
-  window.view=datasetWarehouseView(store,section,()=>{},{refresh(){refreshes++;view.storageOverview(snapshot);},removeUI:{canOpenFullDelete:()=>false},machineAllowed:()=>true,authorizedMachines:()=>machines,access:value=>({selectable:value.canUse&&value.state==='READY',canRetry:false})});
+  window.view=datasetWarehouseView(store,section,()=>{},{refresh(){refreshes++;view.storageOverview(snapshot);},removeUI:{canOpenFullDelete:()=>false},machineAllowed:machine=>permitted.has(machine),authorizedMachines:()=>machines,access:(value,context,{machineAuthorized})=>({selectable:value.canUse&&value.state==='READY',canRetry:false,prepare:machineAuthorized&&value.canUse===true&&value.canPrepare===true})});
   view.catalog({machine:source,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[]});view.storageOverview(snapshot);
  },{role,machines,version});
  await page.waitForFunction(n=>calls.length===n,machines.length);await page.locator('[data-v3-select=sample]').click();
@@ -55,7 +61,9 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  assert.equal(await page.locator('[data-v3-cache-action=prepare]').count(),1);assert.equal(await button('release').count(),1);assert.equal(await button('transfer').count(),1);
  assert.equal(await page.locator('.v3-cache-reason').textContent(),'读取租约尚未结束');
  assert.equal(await page.locator('[data-v3-cache-action][data-machine="'+machines[2].id+'"]').count(),0,'Protocol 0 has no new action');
- assert.equal(await page.locator('[data-v3-cache]').count(),0,'A denied new contract is not bypassed through the old prepare flow');
+ assert.equal(await page.locator('[data-v3-cache]').count(),machines.length-2,'Mixed protocols keep legacy prepare on each machine without new prepare capability');
+ for(const machine of machines.slice(2)){const legacy=page.locator('[data-v3-cache="'+machine.id+'"]');assert.equal(await legacy.count(),1);assert.equal(await legacy.isEnabled(),true);assert.equal(await legacy.textContent(),'缓存');}
+ assert.equal(await page.locator('[data-v3-cache="'+target+'"]').count(),0,'A protocol1 prepare row uses the new action exclusively');
  assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.cache.capabilities'));
  await button('transfer').click();assert.equal(await page.locator('#warehouse-cache-action select option').count(),1);
  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0);
@@ -96,8 +104,24 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
   await page.waitForFunction(mode=>mode==='404'?document.querySelector('[data-v3-cache]'):document.querySelector('[data-v3-cache-action]')===null,mode);
   await page.clock.runFor(100);
   assert.equal(await page.locator('[data-v3-cache-action]').count(),0);
-  if(mode==='denied'){assert.equal(await page.locator('[data-v3-cache]').count(),0);assert.equal(await page.locator('.v3-cache-reason').first().textContent(),'读取授权已撤销');}
+  assert.equal(await page.locator('[data-v3-cache]').count(),machines.length-1,'Overview stays online while every non-READY old machine retains its cache entry');
+  assert.equal(await page.locator('[data-v3-cache="'+source+'"]').count(),0,'READY has no legacy prepare entry');
+  for(const machine of machines.slice(1)){const legacy=page.locator('[data-v3-cache="'+machine.id+'"]');assert.equal(await legacy.isEnabled(),true);assert.equal(await legacy.textContent(),'缓存');}
+  if(mode==='old')await page.screenshot({path:join(output,'protocol0-'+role+'-'+width+'.png')});
+  if(mode==='denied')assert.equal(await page.locator('.v3-cache-reason').first().textContent(),'读取授权已撤销');
  }
+ const oldTarget=machines[2].id,legacy=page.locator('[data-v3-cache="'+oldTarget+'"]');
+ await page.evaluate(machine=>{capMode='old';snapshot.datasets[0].versions[0].caches.find(row=>row.machine===machine).state='FAILED';view.storageOverview(snapshot);},oldTarget);
+ assert.equal(await legacy.textContent(),'重试');assert(await legacy.evaluate(node=>node.classList.contains('quiet')));assert.equal(await legacy.isEnabled(),true);
+ await page.evaluate(machine=>{snapshot.datasets[0].versions[0].caches.find(row=>row.machine===machine).state='UNKNOWN';view.storageOverview(snapshot);},oldTarget);assert.equal(await legacy.isDisabled(),true);
+ await page.evaluate(machine=>{snapshot.datasets[0].versions[0].caches.find(row=>row.machine===machine).state='PREPARING';view.storageOverview(snapshot);},oldTarget);assert.equal(await legacy.count(),0);
+ await page.evaluate(machine=>{snapshot.datasets[0].versions[0].caches.find(row=>row.machine===machine).state='NOT_LOCAL';permitted.delete(machine);view.storageOverview(snapshot);},oldTarget);assert.equal(await legacy.isDisabled(),true);
+ const beforeLegacy=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.prepare').length);await legacy.evaluate(node=>node.click());assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.prepare').length),beforeLegacy,'Unauthorized old target never dispatches');
+ await page.evaluate(machine=>{permitted.add(machine);view.storageOverview(snapshot);},oldTarget);assert.equal(await legacy.isEnabled(),true);await legacy.click();
+ await page.waitForFunction(machine=>calls.some(row=>row.operation==='datasets.prepare'&&row.args.machine===machine),oldTarget);
+ assert.deepEqual(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.prepare').at(-1).args),{machine:oldTarget,dataset:'sample',version});
+ assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.prepare').length),beforeLegacy+1);assert.equal(await page.evaluate(()=>calls.filter(row=>/unregister|evict/.test(row.operation)).length),0);
+ assert.equal(await page.evaluate(()=>calls.filter(row=>/datasets.cache.(prepare|release)$/.test(row.operation)).length),2,'Legacy preparation does not add a new cache prepare/release operation');
  await page.evaluate(()=>{capMode='delayed';view.storageOverview(snapshot);});await page.waitForFunction(()=>typeof releaseCapability==='function');
  await page.evaluate(()=>{store.principal={userId:'bob',username:'bob',role:'member'};store.authGeneration++;view.reset();view.catalog({machine:null,machines:store.data.machines.map(row=>({machine:row.id,state:'ok'})),datasets:[]});releaseCapability({protocol:1,prepare:true,release:true});});
  await page.clock.runFor(5000);assert.equal(await page.locator('[data-v3-cache-action]').count(),0);assert.equal(await page.locator('#warehouse-cache-action').isVisible(),false);
