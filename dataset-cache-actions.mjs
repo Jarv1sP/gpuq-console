@@ -114,6 +114,7 @@ export function installDatasetCacheActions(service){
     const caps=await capabilities(who,{machine:args.machine,...ref},check);
     if(caps.protocol!==1||caps[action]!==true)fail('该缓存动作尚不可用：'+(caps.reason||'CACHE_NODE_PROTOCOL_UNAVAILABLE'),409,caps.reason||'CACHE_ACTION_UNAVAILABLE');
     check();authorize(who,args.machine);
+    service.assertMaintenanceAllowed?.('datasets.cache.'+action,args,who);
     service.assertDatasetNotDeleting?.(args.machine,ref);
     const fixed=physical(who,args.machine,ref);reference(fixed);
     // Audit and immutable operation identity are committed before dispatch.
@@ -133,6 +134,8 @@ export function installDatasetCacheActions(service){
         if(selected.sourceMachine&&selected.sourceMachine!==args.machine)row.transport='replica';
       }
     }
+    check();authorize(who,args.machine);
+    service.assertMaintenanceAllowed?.('datasets.cache.'+action,args,who);
     save(row);
     try{
       if(row.transport==='node'){

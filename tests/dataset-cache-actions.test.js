@@ -128,3 +128,10 @@ test('durably bound physical cache status is accepted only with exact logical mo
   f.service.resolveDataset=async()=>({status:{dataset:'wc-guessed',version:ref.version,state:'READY'},reference:{dataset:'wc-guessed',version:ref.version,mountAs:'other'}});
   assert.equal((await f.call('status',{operationId:out.operationId})).state,'UNKNOWN');
 });
+test('maintenance entered during read admission prevents cache mutation dispatch',async t=>{
+  const f=fixture(t);let maintenance=false;
+  f.service.assertMaintenanceAllowed=()=>{if(maintenance)throw Object.assign(Error('maintenance'),{status:409});};
+  f.onBridge=(machine,operation)=>{if(operation==='storage.cache-action.capabilities')maintenance=true;};
+  await assert.rejects(f.start(),/maintenance/);
+  assert.equal(f.native.size,0);assert.equal(f.transfers.size,0);
+});
