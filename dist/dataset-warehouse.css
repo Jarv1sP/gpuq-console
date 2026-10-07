@@ -211,7 +211,7 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v4-training{margin-bottom:24px}
 #page-datasets .v4-training{--v4-project:#7FA7FF}
 #page-datasets .v4-training-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:10px}
-#page-datasets .v3-server-chip.v4-training-card{min-width:0;width:auto;max-width:none;border-radius:12px;padding:12px 14px;gap:10px}
+#page-datasets .v3-server-chip.v4-training-card{min-width:0;width:auto;max-width:none;grid-template-columns:minmax(0,1fr);border-radius:12px;padding:12px 14px;gap:10px}
 #page-datasets .v4-training-card .v3-server-name{gap:8px;align-items:baseline}
 #page-datasets .v4-training-card .v3-server-name small{font:12px var(--sans)}
 #page-datasets .v4-training-card .v3-server-name small b{font-weight:500;color:var(--ink-2)}
