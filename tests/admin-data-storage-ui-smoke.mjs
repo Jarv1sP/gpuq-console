@@ -12,7 +12,7 @@ const origin='https://offline-admin-storage.test',version='a'.repeat(64),out=joi
 const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):MACHINES;
 const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
 const geometry={roots:['.admin-data-storage'],numericCells:['.dataset-volume,.storage-user-table .num'],largeTargets:'.storage-server-select',containment:'input,select,button,h3,.server-id',
-  labelledHelp:[{buttons:'.admin-data-storage [data-copy-help]',rows:'.storage-policy>header,.storage-retention>header,.storage-users>header,.storage-delete-tasks>header,#cloud-admin>summary',labels:':scope>h3,:scope>h4,:scope>span:not(.copy-help)'}],
+  labelledHelp:[{buttons:'.admin-data-storage [data-copy-help]',rows:'.storage-policy>header,.storage-retention>header,.storage-users>header,.storage-delete-tasks>header,.storage-archive-enrollment>header,#cloud-admin>summary',labels:':scope>h3,:scope>h4,:scope>span:not(.copy-help)'}],
   disclosureRows:['.dataset-version-details>summary'],repeatedPadding:['.admin-storage-row']};
 const records=[];
 try{

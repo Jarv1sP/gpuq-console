@@ -129,3 +129,4 @@ await import('./dataset-full-delete-tasks-ui-smoke.mjs');
 await import('./dataset-personal-remove-ui-smoke.mjs');
 await import('./dataset-cache-watch-ui-smoke.mjs');
 await import('./data-workspace-download-ui-smoke.mjs');
+await import('./archive-enrollment-ui-smoke.mjs');

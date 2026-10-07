@@ -4,6 +4,7 @@ import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 import {datasetInfoHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML,hasDatabaseOriginal} from './dataset-flow.js';
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
+import {mountArchiveEnrollment} from './archive-enrollment-ui.js';
 // The preview model imports the private inventory. Keep this validator pure;
 // its username contract is checked against model.js by the storage tests.
 const validUsername=value=>typeof value==='string'&&/^[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}$/u.test(value);
@@ -88,7 +89,7 @@ export function adminWarehouseMachines(catalog){
 export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   const lifecycle=new AbortController();signal?.addEventListener('abort',()=>destroy(),{once:true});
   el.dataset.adminStorage='';el.classList.add('admin-data-storage');
-  let catalog=null,epoch=0,busy=false,disposed=false,cloud=null,cache=null,removals=null,fitting=null,fullTasks=null;
+  let catalog=null,epoch=0,busy=false,disposed=false,cloud=null,cache=null,removals=null,fitting=null,fullTasks=null,enrollment=null;
   const telemetry=new Map(),pinStatus=new Map();
   const machines=()=>store.data?.machines||[];
   const actor=()=>JSON.stringify([store?.principal?.userId,store?.principal?.role,store?.authGeneration]);
@@ -97,6 +98,9 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   if(!document.querySelector('link[data-admin-storage-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin-data-storage.css';link.dataset.adminStorageStyle='';document.head.append(link);}
   el.innerHTML=`<header class="admin-storage-controls"><h3>服务器存储</h3><button class="button" type="button" data-storage-refresh>刷新状态</button></header><select name="dataset-machine" aria-label="管理服务器" hidden></select><p data-storage-status role="status"></p><div class="storage-fleet" aria-label="服务器存储总览"></div><section class="storage-operations"><header class="storage-operations-head"><h3 data-storage-machine></h3><span>存储运维</span></header><div class="storage-policy"><header><h4>缓存策略</h4>${datasetInfoHTML('按已登记缓存估算，含元数据；不是磁盘实际占用。预览不会立即删除数据，已确认的原件不参与释放。','缓存预算说明')}</header><div data-storage-policy></div></div><div class="storage-release" data-storage-preview></div><section class="storage-retention"><header><h4>固定保留</h4>${datasetInfoHTML('数量来自服务器；只解除当前账号创建的原保留，其他账号的保留不会被修改。','固定保留')}</header><div data-storage-retention></div></section><section class="storage-local"><header><h4>本机缓存</h4></header><div data-dataset-catalog id="admin-dataset-catalog"></div></section></section><section class="storage-users"><header><h3>按用户统计</h3>${datasetInfoHTML("只汇总已就绪缓存的已知大小；含各服务器副本。共享副本分别计入明确授权的用户，未知归属和大小不计入。","统计口径")}</header><div data-storage-users></div></section><section class="storage-delete-tasks"><header><h3>删除任务</h3>${datasetInfoHTML("仅显示当前浏览器为本账号保存的原请求；查看任务后按原编号查询，可继续、取消或恢复。","删除任务范围")}</header><p data-storage-delete-capability></p><div data-storage-delete-tasks></div><p data-storage-delete-empty>本浏览器没有保存的删除任务</p></section><section class="admin-storage-cloud">${cloudImportHTML(true)}</section>`;
   const select=el.querySelector('[name=dataset-machine]');
+  const enrollHost=document.createElement('section');el.querySelector('.storage-operations').append(enrollHost);
+  enrollment=mountArchiveEnrollment(enrollHost,{store,machine:()=>select.value,active:allowed,signal:lifecycle.signal,refresh:()=>load(false),toast});
+  if(!document.querySelector('link[data-archive-enrollment-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/archive-enrollment.css';link.dataset.archiveEnrollmentStyle='';document.head.append(link);}
   for(const machine of machines()){const option=new Option(machine.id,machine.id);option.title=machine.id;select.add(option);}
   const connection=el.querySelector('.admin-storage-cloud .cloud-import');
   for(const child of connection.children)if(child.id!=='cloud-admin')child.hidden=true;
@@ -162,7 +166,7 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
     el.querySelector('[data-storage-retention]').innerHTML=localVersions(machine).map(({item,v,local})=>`<details class="dataset-version-details storage-pin-row"><summary><span title="${esc(item.dataset)}">${esc(item.dataset)}</span><code title="${esc(v.version)}">${v.version.slice(0,12)}</code></summary><div class="storage-pin-owner">${esc(local.ownerLabel)}</div><div data-cache-pin-slot data-machine="${esc(machine)}" data-dataset="${esc(local.dataset)}" data-version="${esc(v.version)}"></div></details>`).join('')||'<p>没有已登记的保留对象</p>';
     const root=el.querySelector('[data-dataset-catalog]');
     root.innerHTML=localVersions(machine).map(({item,v,local})=>`<article class="dataset-card admin-storage-row v3-server"><div class="admin-storage-identity"><h3><code title="${esc(item.dataset)}">${esc(item.dataset)}</code></h3><code title="${esc(v.version)}">${v.version.slice(0,12)}</code></div><div class="dataset-volume num">${amount(v.bytes)}<small>${v.files===null?'文件数未知':v.files.toLocaleString('zh-CN')+' 个文件'}</small></div><div class="admin-storage-actions"><span>${states[local.state]||states.UNKNOWN}</span><span data-dataset-more-slot data-machine="${esc(machine)}" data-dataset="${esc(item.dataset)}" data-local-dataset="${esc(local.dataset)}" data-version="${esc(v.version)}" data-dataset-state="${esc(local.state)}"></span>${removals.canOpenFullDelete?.(item.dataset,v.version)===true?`<button class="button quiet" type="button" data-admin-full-delete="${esc(item.dataset)}" data-version="${esc(v.version)}">彻底删除…</button>`:''}</div></article>`).join('')||`<div class="empty">${catalog?.partial?'缓存状态待确认':'这台服务器没有已登记缓存'}</div>`;
-    cache.render();cloud.controls();renderCards();renderUsers();renderTasks();
+    cache.render();cloud.controls();enrollment.sync();renderCards();renderUsers();renderTasks();
   }
   function renderUsers(){
     if(!allowed())return;
