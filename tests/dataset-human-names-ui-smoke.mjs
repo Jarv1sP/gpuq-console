@@ -28,6 +28,10 @@ try{
   const bridge=async(host,operation,args)=>{
     calls.push({host,operation,args:structuredClone(args)});
     if(operation==='projects.list')return {projects:[]};
+    if(operation==='storage.cache-action.capabilities'){
+      assert.equal(args.hostAdmin,false);assert.deepEqual(Object.keys(args).sort(),['dataset','hostAdmin','userId','version']);
+      return {protocol:0,prepare:false,release:false};
+    }
     if(operation==='transfers.capabilities')return {enabled:false,protocol:'lan-transfer-v1',sources:[]};
     if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
     if(operation==='datasets.list')return {datasets:host===machine?[upload,workspace].map(dataset=>({dataset,
@@ -107,7 +111,7 @@ try{
     await page.close();
   }
   assert.equal(service.store.jobs.length,0,'Browsing and label edits submit no GPU task');
-  assert.ok(calls.every(row=>['projects.list','transfers.capabilities','datasets.capacity','datasets.list'].includes(row.operation)),'Nodes receive reads only');
+  assert.ok(calls.every(row=>['projects.list','transfers.capabilities','datasets.capacity','datasets.list','storage.cache-action.capabilities'].includes(row.operation)),'Nodes receive exact reads only, including the new per-version capability probe, never mutations');
   assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);
   console.log('DATASET HUMAN NAMES UI PASS: '+scenes+' native 1440/390/320 role scenarios; readable defaults, exact copied IDs/commands, independent names, unchanged owner/use gates, keyboard and geometry.');
 }finally{
