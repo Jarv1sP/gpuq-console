@@ -11,6 +11,7 @@ import {MACHINES} from '../dist/machines.js';
 import {guardedRoute} from './browser-route-guard.mjs';
 import {inspectGeometry} from './layout-geometry.mjs';
 import {openMaintenance} from './admin-maintenance-workflows.mjs';
+import {assertToastClear} from './toast-geometry-assertions.mjs';
 
 const temporary=await mkdtemp(join(tmpdir(),'admin-maintenance-')),output=join(process.env.UI_SCREENSHOTS||'/tmp/stargate-admin-maintenance','admin-maintenance');
 const password='Local-Maintenance-Admin-2026!',calls=[],errors=[],outside=[],geometry=[],commands=new Map(),status=join(temporary,'status.json');
@@ -63,6 +64,16 @@ try{
   assert.equal(await page.locator('#maintenance-member-title').innerText(),'维护中');
   await openMaintenance(page);assert.equal(await page.locator('[data-maintenance-server]').count(),MACHINES.length);
   assert.equal(await page.locator('.maintenance-banner').count(),1,'the primary readonly banner is not duplicated inside admin settings');
+  assert.equal(await page.locator('#admin-content .maintenance-banner').count(),0);assert.equal(await page.locator('#operational-maintenance .maintenance-banner').count(),1);
+  assert.equal(await page.locator('#admin-content .maintenance-settings summary').count(),0,'no empty standalone settings frame');
+  assert.equal(await page.locator('.maintenance-title-row [data-maintenance-settings]').count(),1);
+  for(const width of [1440,1024,390,320]){
+    await page.setViewportSize({width,height:width<760?844:1000});await page.locator('[data-maintenance-settings]').click();await settle(page);
+    const settings=await inspectGeometry(page,{roots:['#maintenance-settings-dialog'],controls:'.button,input,select',helpRows:['.copy-caption','.field-caption'],scrollPanels:['#maintenance-settings-dialog']});assert.deepEqual(settings.failures,[],JSON.stringify({width,...settings}));
+    if(width===390)await page.screenshot({path:join(output,'maintenance-settings-390.png'),animations:'disabled'});
+    await page.locator('[data-maintenance-settings-close]').click();
+  }
+  await page.setViewportSize({width:1440,height:1000});
   assert.equal(await page.locator('#admin-content #host-maintenance').count(),1);
   const target=MACHINES[0].id;await page.locator('[data-maintenance-host="'+target+'"]').click();
   assert.equal(await page.locator('[data-host-machine]').inputValue(),target);
@@ -83,8 +94,9 @@ try{
   await page.waitForFunction(()=>{const toast=document.querySelector('#toast');return !toast||(!toast.classList.contains('visible')&&Number(getComputedStyle(toast).opacity)===0);});
   for(const width of [1440,1024,390,320]){
     await page.setViewportSize({width,height:width<760?844:1000});await settle(page);
+    await page.locator('[data-console-refresh]').click();await settle(page);const toast=await assertToastClear(page);
     const result=await inspectGeometry(page,{roots:['#admin-content'],controls:'.button,input:not([type=checkbox]),select,summary',containment:'.button,input,select,.server-id,.host-command-result',buttonRows:[{parent:'.host-diagnostic-presets'},{parent:'.host-command-actions'}],helpContexts:['.host-diagnostics-heading .copy-caption']});
-    geometry.push({width,...result});assert.deepEqual(result.failures,[],JSON.stringify({width,...result}));assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+    geometry.push({width,toast,...result});assert.deepEqual(result.failures,[],JSON.stringify({width,...result}));assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
     await page.evaluate(()=>{document.activeElement?.blur();scrollTo(0,0);});await settle(page);
     assert.equal(await page.locator('.skip-link').evaluate(el=>el.getBoundingClientRect().bottom<=0),true,'skip link is hidden without keyboard focus');
     await page.screenshot({path:join(output,'maintenance-admin-'+width+'.png'),fullPage:true,animations:'disabled'});

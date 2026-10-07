@@ -244,7 +244,7 @@ try {
               if (scene.view === 'start') await page.locator('[data-maintenance-start="all"]').click();
               if (scene.view === 'checks') await page.locator('[data-maintenance-check]').first().click();
               if (scene.view === 'recovery') {await page.locator('[data-recovery-select]').first().check(); await page.locator('[data-maintenance-stage]').click();}
-              if (scene.view === 'settings') await page.locator('.maintenance-settings > summary').click();
+              if (scene.view === 'settings') await page.locator('[data-maintenance-settings]').click();
             }
           } else if (scene.name.startsWith('register')) {
             await page.locator('#open-register').click(); await page.locator('#register-dialog').waitFor();

@@ -82,6 +82,11 @@
 .maintenance-title-row{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
 .maintenance-title-row h2{font-size:clamp(24px,4cqw,40px);min-width:0;margin-block:14px}
 .maintenance-title-row>.button{flex:none}
+.maintenance-heading-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sb #maintenance-settings-dialog{container:maintenance-settings/inline-size;width:min(720px,calc(100vw - 2*var(--gutter)));max-height:calc(100dvh - 32px);margin:auto;padding:24px;overflow:auto}
+.sb #maintenance-settings-dialog .modal-head{align-items:center;gap:12px;margin-bottom:20px}
+.sb #maintenance-settings-dialog .modal-head h2{font-size:24px;line-height:1.3;margin:0;word-break:keep-all}
+.sb #maintenance-settings-dialog .modal-head>.button{flex:none}
 .maintenance-server-row{grid-template-columns:repeat(4,minmax(0,1fr));gap:clamp(12px,2cqw,24px)}
 .maintenance-server-row>*{min-width:0}
 .maintenance-server-actions{grid-column:auto;gap:8px;align-content:start}
@@ -91,12 +96,10 @@
 .maintenance-recovery-bar>div{flex-wrap:wrap;justify-content:flex-end;min-width:0}
 .maintenance-recovery-bar .button{white-space:normal}
 .maintenance-recovery-bar p{min-width:0;overflow-wrap:anywhere}
-.sb .maintenance-settings>summary{display:flex;align-items:center;gap:8px;min-height:40px}
-.sb .maintenance-settings>summary>.maintenance-info{margin-left:auto}
 .sb .maintenance-settings form{grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr))}
 .sb .maintenance-settings form>.maintenance-reason-field{grid-column:auto}
 .sb .maintenance-settings form :is(input,select){height:40px;min-height:40px}
-.sb .maintenance-settings form>div:not(.maintenance-reason-field){gap:8px}
+.sb .maintenance-settings form>div:not(.maintenance-reason-field){grid-column:1/-1;gap:8px;flex-wrap:wrap}
 #maintenance-context small{font-size:11px}
 .sb #maintenance-console-dialog{container:maintenance-sheet/inline-size;max-width:min(720px,calc(100vw - 2*var(--gutter)));width:100%;overflow:auto}
 .sb #maintenance-console-dialog .modal-head{align-items:center;gap:12px}
@@ -123,7 +126,7 @@
 }
 @media(max-width:759px){
  .sb .maintenance-info>[data-maintenance-info]{width:44px;height:44px;min-height:44px;line-height:44px}
- .sb .maintenance-server-actions .button,.sb .maintenance-settings form :is(input,select),.sb #maintenance-console-dialog form :is(input:not([type=checkbox]),select){height:44px;min-height:44px}
+ .sb .maintenance-server-actions .button,.sb .maintenance-heading-actions .button,.sb #maintenance-settings-dialog .button,.sb .maintenance-settings form :is(input,select),.sb #maintenance-console-dialog form :is(input:not([type=checkbox]),select){height:44px;min-height:44px}
  .sb .maintenance-settings>summary,.maintenance-select,.maintenance-permissions a,.sb #maintenance-console-dialog :is(summary,.maintenance-ack){min-height:44px}
  .sb .maintenance-check-status{font-size:11px}
 }

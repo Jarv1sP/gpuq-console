@@ -92,7 +92,7 @@ try{
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'mobile archive must not overflow');
     await page.screenshot({path:join(screenshots,'history-'+username+'-390.png'),fullPage:true});
     if(username==='admin'){
-      await openMaintenance(page);assert.equal(await page.locator('#admin-content .maintenance-settings').count(),1);await page.locator('.maintenance-settings summary').click();
+      await openMaintenance(page);assert.equal(await page.locator('#admin-content .maintenance-settings').count(),1);await page.locator('[data-maintenance-settings]').click();
       await publicReasonHint(page.locator('.maintenance-settings form'));
       await page.locator('.maintenance-settings [name=reason]').fill('明确维修');await page.locator('.maintenance-settings [type=submit]').click();
       await page.waitForFunction(()=>document.querySelector('.maintenance-banner')?.textContent.includes('明确维修'));
@@ -103,6 +103,7 @@ try{
       await page.locator('[data-maintenance-refresh]').click();await page.waitForFunction(()=>document.querySelector('.maintenance-settings form')?.dataset.revision==='3');
       await page.locator('[data-maintenance-resume]').click();await page.waitForFunction(()=>!document.querySelector('.maintenance-banner')?.textContent.includes('全平台：'));
       assert.equal(service.maintenanceFor('gpu-2'),null);assert.ok(service.maintenanceFor('gpu-1'));
+      await page.locator('[data-maintenance-settings-close]').click();
     }
     await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});await page.setViewportSize({width:1440,height:1000});
   }

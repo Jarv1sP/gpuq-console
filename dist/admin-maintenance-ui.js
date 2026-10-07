@@ -28,6 +28,7 @@ export function maintenanceAdminUI(store,experience,{getPage,toast,refresh}){
         sessionPanel.querySelector('[data-maintenance-root-sessions]').replaceChildren(...own.map(row=>{const button=document.createElement('button');button.className='button quiet';button.type='button';button.innerHTML=serverIdHTML(row.machine)+'<span></span>';button.lastElementChild.textContent=sessionStatus(row)+' · '+row.id.slice(0,8);button.title=row.id;button.onclick=()=>{if(active(ctx))document.dispatchEvent(new CustomEvent('gpuq-terminal-reveal',{detail:{id:row.id,userId:ctx.principal.userId}}));};return button;}));
       }
       rootPanel.addEventListener('click',event=>{const button=event.target.closest('#terminal-root-open,#terminal-root-reconnect');if(!button||button.disabled||!active(ctx))return;event.stopPropagation();document.dispatchEvent(new CustomEvent('gpuq-maintenance-root',{detail:{userId:ctx.principal.userId,machine:rootPanel.querySelector('select').value,mode:button.id.endsWith('reconnect')?'reconnect':'new'}}));},{signal:ctx.signal});
+      el.addEventListener('click',event=>{if(event.target.closest('[data-maintenance-settings]')&&active(ctx))settings.querySelector('dialog')?.showModal();},{signal:ctx.signal});
       document.addEventListener('gpuq-maintenance-host',event=>{if(!active(ctx)||event.detail?.userId!==ctx.principal.userId)return;diagnostics.select(event.detail.machine);document.querySelector('#admin-host-diagnostics')?.scrollIntoView({block:'start',behavior:'instant'});},{signal:ctx.signal});
       document.addEventListener('gpuq-terminal-state',event=>{if(active(ctx)){sessions=event.detail?.sessions||[];render();}},{signal:ctx.signal});
       ctx.subscribe(render);document.dispatchEvent(new Event('gpuq-terminal-state-request'));
@@ -35,7 +36,7 @@ export function maintenanceAdminUI(store,experience,{getPage,toast,refresh}){
     unmount(){
       const previous=context;context=null;diagnostics.unmount();experience.unmountAdmin();
       const rootPanel=document.querySelector('#host-maintenance');if(rootPanel){rootPanel.hidden=true;rootPanel.open=false;parking.append(rootPanel);}
-      settings?.replaceChildren();settings=null;sessions=[];
+      settings?.querySelector('dialog')?.close();settings?.replaceChildren();settings=null;sessions=[];
       if(previous)document.dispatchEvent(new CustomEvent('gpuq-maintenance-retire',{detail:{userId:previous.principal.userId}}));
     },
   });
