@@ -30,6 +30,8 @@ try{
         if(operation==='projects.list')return reply(route,{projects:[]});
         if(operation==='datasets.catalog')return reply(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[]});
         if(operation==='datasets.list')return reply(route,{datasets:[]});
+        if(operation==='datasets.storage.status'){assert.equal(role,'admin');return reply(route,{enabled:false});}
+        if(operation==='datasets.storage.plan'){assert.equal(role,'admin');return reply(route,{enabled:false,dryRun:true,candidates:[]});}
         if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
         if(operation==='datasets.upload.routes')return reply(route,{machine:args.machine,available:false,protocol:'dataset-upload-v1'});
         if(operation==='cloud.info')return denyInfo?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'后台状态暂时无法查询。'})}):reply(route,info);

@@ -41,6 +41,8 @@ try{
      const datasets=catalog(args.machine).datasets.map(item=>({dataset:item.dataset==='scans'?localDataset:item.dataset,ownerLabel:'所属用户：'+userId,versions:item.versions.filter(version=>version.locations.some(location=>location.machine===args.machine)).map(version=>({version:version.version,state:'READY',bytes:version.bytes,files:version.files,canPrepare:false}))})).filter(item=>item.versions.length);
      return reply(route,{datasets});
     }
+    if(operation==='datasets.storage.status'){assert.equal(principal.role,'admin');assert.deepEqual(Object.keys(args),['machine']);return reply(route,{enabled:false});}
+    if(operation==='datasets.storage.plan'){assert.equal(principal.role,'admin');assert.deepEqual(Object.keys(args),['machine']);return reply(route,{enabled:false,dryRun:true,candidates:[],usageBytes:0});}
     if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});
     if(operation==='datasets.unregister'){
      assert.equal(principal.role,'admin');assert.equal(args.dataset,localDataset);assert.deepEqual(Object.keys(args).sort(),args.version?['dataset','machine','version']:['dataset','machine']);

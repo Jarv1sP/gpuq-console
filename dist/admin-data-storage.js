@@ -1,7 +1,7 @@
 import {datasetRemoveUI} from './dataset-remove-ui.js';
-import {cacheAdminHTML,datasetCacheAdminUI} from './dataset-cache-admin.js';
+import {datasetCacheAdminUI} from './dataset-cache-admin.js';
 import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
-import {datasetInfoHTML} from './dataset-flow.js';
+import {datasetInfoHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML,hasDatabaseOriginal} from './dataset-flow.js';
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
 
@@ -52,62 +52,119 @@ export function registerDatasetStorageAdmin(registerAdminSection){
     mount(el,ctx){mounted=mountAdminDataStorage(el,ctx);},unmount(){mounted?.destroy();mounted=null;}});
 }
 
+export function adminStorageSummary(status,plan){
+  const budget=cacheBudget(status,plan),candidates=Array.isArray(plan?.candidates)?plan.candidates:null;
+  const sizes=candidates?.map(row=>row.bytes),bytes=sizes?.every(value=>Number.isSafeInteger(value)&&value>=0)?sizes.reduce((a,b)=>a+b,0):null;
+  return {budget,count:candidates?.length??null,bytes:Number.isSafeInteger(bytes)?bytes:null};
+}
+
+
 export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   const lifecycle=new AbortController();signal?.addEventListener('abort',()=>destroy(),{once:true});
   el.dataset.adminStorage='';el.classList.add('admin-data-storage');
-  let catalog=null,epoch=0,busy=false,ownerFilter='',disposed=false,cloud=null,cache=null,removals=null;
+  let catalog=null,epoch=0,busy=false,disposed=false,cloud=null,cache=null,removals=null,fitting=null;
+  const telemetry=new Map(),pinStatus=new Map();
+  const machines=()=>store.data?.machines||[];
   const actor=()=>JSON.stringify([store?.principal?.userId,store?.principal?.role,store?.authGeneration]);
   const allowed=()=>!disposed&&!signal?.aborted&&el.isConnected&&!el.hidden&&store?.principal?.role==='admin'&&document.body.dataset.room==='admin';
   if(signal?.aborted||store?.principal?.role!=='admin'){el.textContent='需要管理员权限';return {destroy};}
   if(!document.querySelector('link[data-admin-storage-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin-data-storage.css';link.dataset.adminStorageStyle='';document.head.append(link);}
-  el.innerHTML=`<header class="admin-storage-controls"><label class="field"><span>服务器</span><select name="dataset-machine" aria-label="管理服务器"></select></label><label class="field"><span>所属用户</span><select data-storage-owner aria-label="按所属用户筛选"><option value="">全部</option></select></label><button class="button" type="button" data-storage-refresh>刷新目录</button></header><p data-storage-status role="status"></p><div data-dataset-catalog id="admin-dataset-catalog"></div>${cacheAdminHTML(true)}<section class="admin-storage-cloud">${cloudImportHTML(true)}</section>`;
+  el.innerHTML=`<header class="admin-storage-controls"><h3>服务器存储</h3><button class="button" type="button" data-storage-refresh>刷新状态</button></header><select name="dataset-machine" aria-label="管理服务器" hidden></select><p data-storage-status role="status"></p><div class="storage-fleet" aria-label="服务器存储总览"></div><section class="storage-operations"><header class="storage-operations-head"><h3 data-storage-machine></h3><span>存储运维</span></header><div class="storage-policy"><header><h4>缓存策略</h4>${datasetInfoHTML('按已登记缓存估算，含元数据；不是磁盘实际占用。预览不会立即删除数据，已确认的原件不参与释放。','缓存预算说明')}</header><div data-storage-policy></div></div><div class="storage-release" data-storage-preview></div><section class="storage-retention"><header><h4>固定保留</h4>${datasetInfoHTML('数量来自服务器；只解除当前账号创建的原保留，其他账号的保留不会被修改。','固定保留')}</header><div data-storage-retention></div></section><section class="storage-local"><header><h4>本机缓存</h4></header><div data-dataset-catalog id="admin-dataset-catalog"></div></section></section><section class="admin-storage-cloud">${cloudImportHTML(true)}</section>`;
   const select=el.querySelector('[name=dataset-machine]');
-  for(const machine of store.data?.machines||[]){const option=new Option(machine.id,machine.id);option.title=machine.id;select.add(option);}
-  // Only connection administration moves here; the import workflow stays in
-  // the user's upload drawer. Its existing controller retains QR semantics.
+  for(const machine of machines()){const option=new Option(machine.id,machine.id);option.title=machine.id;select.add(option);}
   const connection=el.querySelector('.admin-storage-cloud .cloud-import');
   for(const child of connection.children)if(child.id!=='cloud-admin')child.hidden=true;
-  const summary=connection.querySelector('#cloud-admin>summary'),caption=document.createElement('span');caption.textContent='云盘连接';summary.firstChild.replaceWith(caption);
-  cloud=cloudImportUI(store,el,toast);cache=datasetCacheAdminUI(store,el,toast,{room:'admin'});
-  removals=datasetRemoveUI(store,el,toast,{reload:load,catalog:()=>catalog,readCatalog:read,management:true});
+  const caption=document.createElement('span');caption.textContent='云盘连接';connection.querySelector('#cloud-admin>summary').firstChild.replaceWith(caption);
+  cloud=cloudImportUI(store,el,toast);
+  cache=datasetCacheAdminUI(store,el,toast,{room:'admin',onStatus(target,status){
+    if(!allowed())return;
+    pinStatus.set(JSON.stringify([target.machine,target.dataset,target.version]),status);renderCards();
+  }});
+  removals=datasetRemoveUI(store,el,toast,{reload:()=>load(false),catalog:()=>catalog,readCatalog:read,management:true});
+  fitting=new ResizeObserver(fitNames);fitting.observe(el);
+  function fitNames(){
+    if(!allowed())return;
+    for(const label of el.querySelectorAll('.storage-machine-id')){
+      label.style.fontSize='48px';
+      const width=label.parentElement.clientWidth;
+      if(label.scrollWidth>width)label.style.fontSize=Math.max(14,48*width/label.scrollWidth-.5)+'px';
+    }
+  }
+  document.fonts.ready.then(fitNames);
   async function read(machine){
     if(!allowed()||!store.production)throw Error('需要管理员权限');
-    const expected=actor(),token=epoch,machines=(store.data?.machines||[]).map(row=>({...row})),listings=[];
-    // The portal allows at most four concurrent directory reads. Three here
-    // leave a slot for a read already in progress elsewhere in the shell.
-    for(let i=0;i<machines.length;i+=3){
-      const rows=await Promise.all(machines.slice(i,i+3).map(async row=>{try{const value=await store.call('datasets.list',{machine:row.id,includeEmpty:true},{signal:lifecycle.signal});return {machine:row.id,state:'ok',datasets:value?.datasets};}catch{return {machine:row.id,state:'unavailable'};}}));
+    const expected=actor(),token=epoch,hosts=machines().map(row=>({...row})),listings=[];
+    // Bounded reads leave one portal directory slot for another view.
+    for(let i=0;i<hosts.length;i+=3){
+      const rows=await Promise.all(hosts.slice(i,i+3).map(async row=>{try{const value=await store.call('datasets.list',{machine:row.id,includeEmpty:true},{signal:lifecycle.signal});return {machine:row.id,state:'ok',datasets:value?.datasets};}catch{return {machine:row.id,state:'unavailable'};}}));
       if(!allowed()||expected!==actor()||token!==epoch)throw Error('账号或页面已改变');listings.push(...rows);
     }
     let personal=null;try{personal=await store.call('datasets.catalog',{machine},{signal:lifecycle.signal});}catch{}
     if(!allowed()||expected!==actor()||token!==epoch)throw Error('账号或页面已改变');
-    return adminDatasetCatalog(machine,machines,listings,personal);
+    return adminDatasetCatalog(machine,hosts,listings,personal);
+  }
+  function localVersions(machine){
+    return (catalog?.datasets||[]).flatMap(item=>item.versions.flatMap(v=>{
+      const local=v.locations.find(row=>row.machine===machine);
+      return local?[{item,v,local}]:[];
+    }));
+  }
+  function retained(machine){
+    if(!catalog||catalog.machines.find(row=>row.machine===machine)?.state!=='ok')return null;
+    const rows=localVersions(machine),counts=rows.map(({local,v})=>{
+      const result=pinStatus.get(JSON.stringify([machine,local.dataset,v.version])),value=result?.version;
+      return value?.dataset===local.dataset&&value.version===v.version&&Number.isSafeInteger(value.pinCount)&&value.pinCount>=0?value.pinCount:null;
+    });
+    return counts.every(value=>value!==null)&&Number.isSafeInteger(counts.reduce((a,b)=>a+b,0))?counts.reduce((a,b)=>a+b,0):null;
+  }
+  function renderCards(){
+    if(!allowed())return;
+    el.querySelector('.storage-fleet').innerHTML=machines().map((host,index)=>{
+      const row=telemetry.get(host.id),summary=adminStorageSummary(row?.status,row?.plan),pins=retained(host.id);
+      const warehouse=(catalog?.datasets||[]).some(item=>item.versions.some(v=>v.locations.some(location=>hasDatabaseOriginal({...v,locations:[location]})&&location.storage.archiveMachine===host.id)));
+      return `<article class="storage-server-card" data-selected="${host.id===select.value}"><button class="storage-server-select" type="button" data-storage-select="${esc(host.id)}" aria-pressed="${host.id===select.value}" title="${esc(host.id)}"><span class="storage-machine-id">${esc(host.id)}</span><span class="storage-server-context">${warehouse?'仓库 · ':''}服务器缓存</span></button>${cacheGaugeHTML(host.id,row?.status,row?.plan,index)}<div class="storage-server-facts"><span>${summary.count===null?'释放预览待确认':summary.count?'待释放 '+summary.count+' 项 · '+amount(summary.bytes):'待释放 0 项'}</span><span>${pins===null?'保留状态待确认':'固定保留 '+pins+' 项'}</span></div></article>`;
+    }).join('');
+    fitNames();
   }
   function render(){
     if(!allowed())return;
-    const machine=select.value,rows=(catalog?.datasets||[]),owners=[...new Set(rows.flatMap(row=>row.registrations.map(value=>value.ownerLabel)))].sort();
-    const filter=el.querySelector('[data-storage-owner]');filter.replaceChildren(new Option('全部',''));
-    for(const owner of owners)filter.add(new Option(owner,owner));filter.value=owners.includes(ownerFilter)?ownerFilter:'';ownerFilter=filter.value;
-    const root=el.querySelector('[data-dataset-catalog]');root.innerHTML=rows.filter(item=>!ownerFilter||item.registrations.some(row=>row.ownerLabel===ownerFilter)).map(item=>{
-      const versions=item.versions.filter(v=>v.locations.some(row=>row.machine===machine));
-      if(!versions.length){const empty=item.registrations.find(row=>row.machine===machine);return empty?`<article class="admin-storage-empty"><h3>${esc(item.dataset)}</h3><span>${esc(empty.ownerLabel)}</span><span>尚未登记版本</span></article>`:'';}
-      return versions.map(v=>{const local=v.locations.find(row=>row.machine===machine),state=states[local.state]||states.UNKNOWN;
-        return `<article class="dataset-card admin-storage-row"><div class="admin-storage-identity"><h3><code title="${esc(item.dataset)}">${esc(item.dataset)}</code></h3><span title="${esc(local.ownerLabel)}">${esc(local.ownerLabel)}</span><code title="${esc(v.version)}">${esc(v.version.slice(0,12))}</code></div><div class="admin-storage-locations">${v.locations.map(row=>`<span class="st ${row.state==='READY'?'st-stop':row.state==='PREPARING'?'st-prep':row.state==='FAILED'?'st-err':'st-unk'}" title="${esc(row.machine+' · '+(states[row.state]||states.UNKNOWN))}"><span class="g" aria-hidden="true"></span>${serverIdHTML(row.machine)}</span>`).join('')}</div><div class="dataset-volume num">${amount(v.bytes)}<small>${v.files===null?'文件数未知':v.files.toLocaleString('zh-CN')+' 个文件'}</small></div><div class="admin-storage-actions"><span>${state}</span><span data-dataset-more-slot data-machine="${esc(machine)}" data-dataset="${esc(item.dataset)}" data-local-dataset="${esc(local.dataset)}" data-version="${esc(v.version)}" data-dataset-state="${esc(local.state)}"></span></div><details class="dataset-version-details"><summary><span>固定保留</span>${datasetInfoHTML('只解除当前账号创建的保留；其他账号的保留不会被修改。','固定保留')}</summary><div data-cache-pin-slot data-machine="${esc(machine)}" data-dataset="${esc(local.dataset)}" data-version="${esc(v.version)}"></div></details>${removals.canOpenFullDelete?.(item.dataset,v.version)===true?`<button class="button quiet" type="button" data-admin-full-delete="${esc(item.dataset)}" data-version="${esc(v.version)}">彻底删除…</button>`:''}</article>`;
-      }).join('');
-    }).join('')||`<div class="empty">${catalog?.partial?'部分目录待确认':ownerFilter?'没有匹配的数据集':'这台服务器还没有数据集'}</div>`;
-    cache.render();cloud.controls();
+    const machine=select.value,row=telemetry.get(machine),budget=cacheBudget(row?.status,row?.plan),known=['known','high'].includes(budget.kind);
+    const name=el.querySelector('[data-storage-machine]');name.textContent=machine;name.title=machine;
+    el.querySelector('[data-storage-policy]').innerHTML=`<span>${budget.kind==='disabled'?'自动释放未开启':known?'自动释放已开启':'策略状态待确认'}</span>${known?`<span class="num">低水位 ${Math.round(budget.lowWater*100)}% · 高水位 ${Math.round(budget.highWater*100)}%</span>`:''}`;
+    el.querySelector('[data-storage-preview]').innerHTML=cachePreviewHTML(machine,row?.plan)||'<h4>释放预览</h4><p>未提供释放候选</p>';
+    el.querySelector('[data-storage-retention]').innerHTML=localVersions(machine).map(({item,v,local})=>`<details class="dataset-version-details storage-pin-row"><summary><span title="${esc(item.dataset)}">${esc(item.dataset)}</span><code title="${esc(v.version)}">${v.version.slice(0,12)}</code></summary><div class="storage-pin-owner">${esc(local.ownerLabel)}</div><div data-cache-pin-slot data-machine="${esc(machine)}" data-dataset="${esc(local.dataset)}" data-version="${esc(v.version)}"></div></details>`).join('')||'<p>没有已登记的保留对象</p>';
+    const root=el.querySelector('[data-dataset-catalog]');
+    root.innerHTML=localVersions(machine).map(({item,v,local})=>`<article class="dataset-card admin-storage-row v3-server"><div class="admin-storage-identity"><h3><code title="${esc(item.dataset)}">${esc(item.dataset)}</code></h3><code title="${esc(v.version)}">${v.version.slice(0,12)}</code></div><div class="dataset-volume num">${amount(v.bytes)}<small>${v.files===null?'文件数未知':v.files.toLocaleString('zh-CN')+' 个文件'}</small></div><div class="admin-storage-actions"><span>${states[local.state]||states.UNKNOWN}</span><span data-dataset-more-slot data-machine="${esc(machine)}" data-dataset="${esc(item.dataset)}" data-local-dataset="${esc(local.dataset)}" data-version="${esc(v.version)}" data-dataset-state="${esc(local.state)}"></span>${removals.canOpenFullDelete?.(item.dataset,v.version)===true?`<button class="button quiet" type="button" data-admin-full-delete="${esc(item.dataset)}" data-version="${esc(v.version)}">彻底删除…</button>`:''}</div></article>`).join('')||`<div class="empty">${catalog?.partial?'缓存状态待确认':'这台服务器没有已登记缓存'}</div>`;
+    cache.render();cloud.controls();renderCards();
   }
-  async function load(){
+  async function load(refreshTelemetry=true){
     if(busy||!allowed()||!store.production||!select.value)return;
     busy=true;const expected=actor(),token=++epoch,machine=select.value,status=el.querySelector('[data-storage-status]');
-    el.querySelector('[data-storage-refresh]').disabled=true;select.disabled=true;status.textContent='读取目录…';
-    try{const value=await read(machine);if(!allowed()||expected!==actor()||token!==epoch)return;catalog=value;render();status.textContent=value.partial?'部分目录待确认':'';}
-    catch(error){if(allowed()&&expected===actor()&&token===epoch){catalog=null;el.querySelector('[data-dataset-catalog]').replaceChildren();status.textContent=error.message;}}
-    finally{if(allowed()&&expected===actor()&&token===epoch){busy=false;select.disabled=false;el.querySelector('[data-storage-refresh]').disabled=false;}}
+    const current=()=>allowed()&&expected===actor()&&token===epoch;
+    el.querySelector('[data-storage-refresh]').disabled=true;select.disabled=true;status.textContent='查询中…';
+    try{
+      if(refreshTelemetry){
+        pinStatus.clear();cache.reset();
+        const hosts=machines().map(row=>row.id);
+        for(let i=0;i<hosts.length;i+=3){
+          const results=await Promise.all(hosts.slice(i,i+3).map(async host=>{
+            const values=await Promise.allSettled([store.call('datasets.storage.status',{machine:host},{signal:lifecycle.signal}),store.call('datasets.storage.plan',{machine:host},{signal:lifecycle.signal})]);
+            return {machine:host,status:values[0].status==='fulfilled'?values[0].value:null,plan:values[1].status==='fulfilled'?values[1].value:null};
+          }));
+          if(!current())return;for(const value of results)telemetry.set(value.machine,value);renderCards();
+        }
+      }
+      const value=await read(machine);if(!current())return;catalog=value;render();status.textContent=value.partial?'部分服务器状态待确认':'';
+    }catch(error){if(current()){catalog=null;el.querySelector('[data-dataset-catalog]').replaceChildren();status.textContent=error.message;}}
+    finally{if(current()){busy=false;select.disabled=false;el.querySelector('[data-storage-refresh]').disabled=false;}}
   }
-  el.addEventListener('change',event=>{if(event.target===select){cache.reset();cloud.reset();catalog=null;load();}if(event.target.hasAttribute('data-storage-owner')){ownerFilter=event.target.value;render();}},{signal:lifecycle.signal});
-  el.addEventListener('click',event=>{const button=event.target.closest('button');if(!button||button.disabled)return;if(button.hasAttribute('data-storage-refresh'))load();if(button.hasAttribute('data-admin-full-delete')&&removals.canOpenFullDelete?.(button.dataset.adminFullDelete,button.dataset.version)===true)removals.openFullDelete(button.dataset.adminFullDelete,button.dataset.version);},{signal:lifecycle.signal});
-  function destroy(){if(disposed)return;disposed=true;epoch++;lifecycle.abort();removals?.sync(false);cache?.reset();cloud?.reset();el.querySelectorAll('dialog[open]').forEach(node=>node.close());el.replaceChildren();}
-  // No administration happens until the privileged section is mounted.
+  el.addEventListener('change',event=>{if(event.target===select){cache.reset();catalog=null;load(false);}},{signal:lifecycle.signal});
+  el.addEventListener('click',event=>{
+    const button=event.target.closest('button');if(!button||button.disabled||!allowed())return;
+    if(button.hasAttribute('data-storage-refresh'))load();
+    if(button.hasAttribute('data-storage-select')&&!busy&&machines().some(row=>row.id===button.dataset.storageSelect)&&select.value!==button.dataset.storageSelect){select.value=button.dataset.storageSelect;cache.reset();load(false);}
+    if(button.hasAttribute('data-admin-full-delete')&&removals.canOpenFullDelete?.(button.dataset.adminFullDelete,button.dataset.version)===true)removals.openFullDelete(button.dataset.adminFullDelete,button.dataset.version);
+  },{signal:lifecycle.signal});
+  function destroy(){if(disposed)return;disposed=true;epoch++;lifecycle.abort();fitting?.disconnect();removals?.sync(false);cache?.reset();cloud?.reset();el.querySelectorAll('dialog[open]').forEach(node=>node.close());el.replaceChildren();}
   queueMicrotask(load);return {destroy,refresh:load};
 }
