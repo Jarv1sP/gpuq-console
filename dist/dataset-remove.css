@@ -83,3 +83,12 @@
 .sb .full-delete-reference>div{align-items:center}
 .sb .full-delete-reference dd{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .sb .full-delete-reference code{font:12px/1.6 var(--mono);white-space:nowrap}
+.sb .full-delete-tasks{min-width:0;color:var(--ink)}
+.sb .full-delete-task-controls,.sb .full-delete-task-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.sb .full-delete-task-controls{color:var(--ink-2);font:13px var(--sans);margin-bottom:12px}
+.sb .full-delete-task{min-width:0;border-top:1px solid var(--line);padding:20px 0}
+.sb .full-delete-task-heading strong{min-width:0;overflow-wrap:anywhere}
+.sb .full-delete-task-version{display:block;color:var(--ink-2);font:12px var(--mono);margin:8px 0 16px}
+.sb .full-delete-task-actions{display:flex;flex-wrap:wrap;gap:12px}
+.sb .full-delete-tasks .button{white-space:nowrap;min-height:40px}
+@media(max-width:759px){.sb .full-delete-tasks .button{min-height:44px}.sb .full-delete-task-actions>.button{flex:1 1 120px}}

@@ -211,6 +211,6 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog,readCatalog,
   document.addEventListener('gpuq-maintenance-state',update);
   store.onAuthChange?.(()=>{dialog?.close();localReferences.clear();api.sync(false);update();});
   const fullDelete=datasetFullDeleteUI(store,{reload,catalog,management:management!==false});
-  Object.assign(api,{canOpenFullDelete:fullDelete.canOpenFullDelete,openFullDelete:fullDelete.openFullDelete,fullDelete});
+  Object.assign(api,{canOpenFullDelete:fullDelete.canOpenFullDelete,openFullDelete:fullDelete.openFullDelete,mountFullDeleteTasks:fullDelete.mountTasks,fullDelete});
   update();return api;
 }

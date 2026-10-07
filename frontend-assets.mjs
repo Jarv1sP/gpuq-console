@@ -5,7 +5,7 @@ export const STARBASE_ASSETS = Object.fromEntries([
   'shell-ui.js', 'control-ui.js', 'attention-state.js', 'workbench-ui.js', 'motion-ui.js', 'copy-help-ui.js', 'auth-ui.js', 'navigation.js', 'toast-ui.js',
   'favicon.svg', 'favicon.ico', 'mask-icon.svg',
   'dataset-remove-ui.js', 'dataset-remove.css',
-  'dataset-full-delete-ui.js', 'dataset-full-delete-state.js',
+  'dataset-full-delete-ui.js', 'dataset-full-delete-state.js', 'dataset-full-delete-tasks.js',
   'upload-routes.js',
   'task-display-ui.js',
   'dataset-catalog-model.js', 'dataset-label-client.js', 'dataset-warehouse-view.js', 'dataset-warehouse.css', 'dataset-upload-metrics.js',
