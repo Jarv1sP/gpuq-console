@@ -1383,7 +1383,7 @@ class DatasetCache:
                         # deduplicate bind aliases without exposing host paths.
                         volumeDeviceId=hashlib.sha256(str(os.fstat(fd).st_dev).encode()).hexdigest(),
                         checkedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                        readOnly=bool(info.f_flag & getattr(os, 'ST_RDONLY', 1)),
+                        readOnly=bool(info.f_flag & getattr(os, 'ST_RDONLY', 1)) if hasattr(info, 'f_flag') else None,
                         totalInodes=info.f_files if inodes_known else None,
                         availableInodes=info.f_favail if inodes_known else None,
                         inodeUsageKnown=inodes_known, guarded=self.mount is not None,
