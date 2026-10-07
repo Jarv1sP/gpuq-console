@@ -23,10 +23,11 @@ export class DemoClient{
   track(promise){this.inflight.add(promise);promise.then(()=>this.inflight.delete(promise),()=>this.inflight.delete(promise));return promise;}
   invoke(operation,args,token,options={}){return this.remote?this.transport('call',{operation,args},token,options):this.service.invoke(token,operation,args);}
   onAuthChange(listener){this.authListeners.add(listener);return()=>this.authListeners.delete(listener);}
+  maintenanceObservation(unknown){if(this.maintenanceStatusUnknown===unknown)return;this.maintenanceStatusUnknown=unknown;globalThis.document?.dispatchEvent(new Event('gpuq-maintenance-observation'));}
   changeAuth(action){
     const generation=++this.authGeneration,token=this.token;
     if(!this.authPending){this.sessionToken=token;for(const listener of this.authListeners)this.track(Promise.resolve().then(()=>listener((operation,args)=>this.invoke(operation,args,token))).catch(()=>{}));}
-    this.authPending++;this.token=null;this.principal=null;this.data=null;
+    this.authPending++;this.token=null;this.principal=null;this.data=null;this.maintenanceStatusUnknown=false;
     // Only identity changes are queued. Drain old requests (including bounded
     // terminal cleanup) before a new cookie can be installed or cleared.
     const pending=this.authTail.catch(()=>{}).then(async()=>{await Promise.allSettled([...this.inflight]);return action(generation);});
@@ -46,13 +47,14 @@ export class DemoClient{
     assertMaintenanceOperation(operation,args,this.data,this.principal);
     const generation=this.authGeneration,token=this.token;
     return this.track((async()=>{
-      let data;try{data=await this.invoke(operation,args,token,{signal:options.signal});}catch(error){if(generation!==this.authGeneration)throw this.stale(operation==='terminal.open'?'登录状态已改变，终端创建结果未确认；请原账号重新连接检查，服务端仍按期限回收。':undefined);throw error;}
+      let data;try{data=await this.invoke(operation,args,token,{signal:options.signal});}catch(error){if(generation!==this.authGeneration)throw this.stale(operation==='terminal.open'?'登录状态已改变，终端创建结果未确认；请原账号重新连接检查，服务端仍按期限回收。':undefined);if(['state','maintenance.status'].includes(operation))this.maintenanceObservation(true);throw error;}
       if(generation!==this.authGeneration){
         if(options.onStale)try{await options.onStale(data.result,(operation,args)=>this.invoke(operation,args,token));}catch{throw this.stale('登录状态已改变；旧终端关闭未确认，请原账号重新登录后结束该终端，服务端仍按期限回收。');}
         throw this.stale();
       }
       options.signal?.throwIfAborted();
       if(data.state)this.data=data.state;if(data.principal)this.principal=data.principal;
+      if(data.state?.operationalMaintenance!==undefined||operation==='maintenance.status')this.maintenanceObservation((operation==='maintenance.status'?data.result:this.data.operationalMaintenance)?.version!==1);
       // Register resources synchronously inside the generation fence, before
       // callers resume and an identity transition can start.
       options.accept?.(data.result);return data.result;

@@ -320,7 +320,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.empty` / `.form-error` / `.publication-unknown` | [styles.css](../dist/styles.css)、[workbench.css](../dist/workbench.css) | 空目录/已知错误/未确认分别表达 | 查询重试保留；未知不自动消失 |
 | `.toast` | [starbase.css](../dist/starbase.css)、[shell.css](../dist/shell.css)、[toast-ui.js](../dist/toast-ui.js) | 总控层上方的角落短反馈，不是唯一持久错误证据 | 布局变化时避开可见交互控件，需处理留在对象/总控 |
 | `.mc-attention-item` / `.mc-attention-actions` | [attention-state.js](../dist/attention-state.js)、[control-ui.js](../dist/control-ui.js)、[shell.css](../dist/shell.css) | 原对象失败/部分成功/未确认，不靠已读清除未知 | 回具体对象，只有已确认失败可按规则确认 |
-| `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
+| `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全局或当前服务器的一条只读通知；后台列出全部节点 | 范围、原因及受限动作；读取失败显示未确认；主界面无开关，原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
 | `#workspace-upload` / `#workspace-result` | [execution-ui.js](../dist/execution-ui.js) | 项目代码上传默认仅显示上传；节点确认恢复协议后，按原编号和确认偏移续传 | 旧节点沿用普通上传，失败说明不支持续传；未知能力不降级写入；回执丢失先查原编号；已完成不重传，待收口只发空final；冲突/旧记录/未知不另开；切换账号、项目或离开停止；旧个人工作区不重试；传输区别仅放在文件标题旁的单个ⓘ |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；开发ID按账号、服务器、项目恢复到原入口 | 刷新只读核验原ID，不自动连接或接管；未知仍保留，明确结束才移除；ROOT/数据终端不存入项目记录；writerToken仅内存 |
@@ -467,7 +467,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 全平台维护原因公开显示在登录页，输入旁保留提醒；单台原因只在登录后显示。账号、协作、指南、维护控制不被执行类维护拦截；管理员ROOT、host操作、只读、取消/断开/结束按现有规则放行。维护开关不会自动停止已有任务或节点。
 
-主界面只显示相同的只读维护事实，后台不重复横幅。后台 `maintenance/order40` 挂载维护开关、原逐台控制台、分阶段恢复、ROOT 与只读诊断；维护设置从控制台标题行打开，卸载先关闭设置、停止查询和退休回调，再把 ROOT 控件停放到隐藏 inert 容器。个人终端仍留在工作台；离开维护只断开 ROOT 写连接，不结束节点会话。ROOT 直接查询原生调度 RPC 的 `FORBIDDEN: peer uid is not allowed` 显示身份提示，不把工作的 ROOT 终端标为失败。
+成员和管理员的主界面只显示全局或当前所选服务器的只读维护通知，其他机器的维护不产生通知；不再替换工作台标题或隐藏遥测，读取失败显示“维护状态未确认”，通知不含恢复按钮。门户维护独立于节点调度，提交区依据现有新鲜快照的 connected、observeOnly 和 health 显示“训练暂未开放”，有可调度候选即恢复原提交行为，不绑定服务器名称。后台不重复横幅。后台 `maintenance/order40` 挂载维护开关、原逐台控制台、分阶段恢复、ROOT 与只读诊断；维护设置从控制台标题行打开，卸载先关闭设置、停止查询和退休回调，再把 ROOT 控件停放到隐藏 inert 容器。个人终端仍留在工作台；离开维护只断开 ROOT 写连接，不结束节点会话。ROOT 直接查询原生调度 RPC 的 `FORBIDDEN: peer uid is not allowed` 显示身份提示，不把工作的 ROOT 终端标为失败。
 
 主机诊断只有固定的 `nvidia-smi` 和 `df -h /data2`，确认框显示服务器与完整原文；任意命令仍由 ROOT 终端执行。新鲜且可达的节点必须明确报告 `hostCommand.version:1/available:true` 才能操作。节点将请求 key 绑定为 id，前端派发前按管理员账号和服务器持久化该编号；回执未确认、刷新或重新进入时只查原编号，绝不自动重发。显示纯文本输出，支持复制、停止与本浏览器最近操作；原 UUID 查询保留在次级折叠项内。
 

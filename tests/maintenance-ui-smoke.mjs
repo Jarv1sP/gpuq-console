@@ -101,7 +101,7 @@ try{
       await page.locator('[data-maintenance-resume]').click();await page.locator('[data-maintenance-error]').filter({hasText:'刷新'}).waitFor();
       assert.ok(service.maintenanceFor('gpu-2'),'stale form must not clear newer decision');
       await page.locator('[data-maintenance-refresh]').click();await page.waitForFunction(()=>document.querySelector('.maintenance-settings form')?.dataset.revision==='3');
-      await page.locator('[data-maintenance-resume]').click();await page.waitForFunction(()=>!document.querySelector('.maintenance-banner')?.textContent.includes('全平台：'));
+      await page.locator('[data-maintenance-resume]').click();await page.waitForFunction(()=>!document.querySelector('.maintenance-banner')?.textContent.includes('全平台维护中'));
       assert.equal(service.maintenanceFor('gpu-2'),null);assert.ok(service.maintenanceFor('gpu-1'));
       await page.locator('[data-maintenance-settings-close]').click();
     }
@@ -124,8 +124,8 @@ try{
   async function logout(){await accountMenu(page);await page.locator('#switch-account').click();await page.locator('#login-dialog').waitFor({state:'visible'});}
   async function shot(name,width=1440){await page.setViewportSize({width,height:width===390?844:1000});await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth+1);await page.screenshot({path:join(shots,name+'.png'),fullPage:width>=760});}
   await fresh();await set('all',true,'<img src=x onerror=window.XSS=1> 全平台存储诊断');await workLogin(member.username);
-  await page.locator('#maintenance-member-title').waitFor();assert.equal(await page.locator('#maintenance-experience img').count(),0);assert.equal(await page.evaluate(()=>window.XSS),undefined);
-  assert.match(await page.locator('#maintenance-experience').innerText(),/维护中|运行任务继续/);assert.match(await page.locator('#my-job-table').innerText(),/维护期间暂不派发/);
+  await page.locator('#operational-maintenance .maintenance-banner').waitFor();assert.equal(await page.locator('#maintenance-experience img').count(),0);assert.equal(await page.evaluate(()=>window.XSS),undefined);
+  assert.match(await page.locator('#operational-maintenance').innerText(),/全平台维护中/);assert.equal(await page.locator('#maintenance-experience').isHidden(),true,'Public maintenance uses one readonly notice');assert.match(await page.locator('#my-job-table').innerText(),/维护期间暂不派发/);
   assert.equal(await page.locator('[data-maintenance-root]').count(),0);
   await page.locator('[name=workspace-machine]').selectOption('gpu-1');await page.waitForFunction(()=>document.querySelector('#terminal-open')?.disabled);
   await page.locator('#open-submit').click();await page.locator('#work-submit').waitFor({state:'visible'});assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);assert.equal(await page.locator('#submit-maintenance-switch').count(),0);
@@ -134,9 +134,9 @@ try{
   await shot('member-global-desktop');await shot('member-global-mobile',390);
   await page.locator('[data-nav=datasets]').click();await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);assert.equal(await page.locator('#datasets-status').textContent(),'','confirmed empty catalog does not invent an update timestamp');await page.locator('#warehouse-page-actions [data-v3-upload]').click();await page.locator('#dataset-add-dialog').waitFor({state:'visible'});assert.equal(await page.locator('#dataset-upload-start').isDisabled(),true);assert.equal(await page.locator('#datasets-refresh').isDisabled(),false);await page.locator('[data-v3-source=workspace]').click();assert.equal(await page.locator('#terminal-data-open').isDisabled(),true);assert.equal(await page.locator('#data-workspace-publish').isDisabled(),true);assert.equal(await page.locator('#data-workspace-refresh').isDisabled(),false);await shot('member-data-write-paused-desktop');await shot('member-data-write-paused-mobile',390);await page.locator('[data-dataset-add-close]').click();await shot('member-datasets-desktop');await shot('member-datasets-mobile',390);
   await page.locator('#warehouse-page-actions a[href="#datasets/transfers"]').click();await page.locator('#transfer-copy summary').click();assert.equal(await page.locator('#transfer-copy-form [type=submit]').isDisabled(),true);assert.equal(await page.locator('#transfer-refresh').isDisabled(),false);await shot('member-transfers-desktop');await shot('member-transfers-mobile',390);await page.locator('[data-nav=work]').click();
-  const guide=page.waitForEvent('popup');await page.locator('#maintenance-experience a[href="/guide"]').click();const guidePage=await guide;await guidePage.waitForLoadState();assert.match(await guidePage.title(),/GPUQ|指南/);await guidePage.close();
+  const guide=page.waitForEvent('popup');await page.locator('.guide-link:visible').first().click();const guidePage=await guide;await guidePage.waitForLoadState();assert.match(await guidePage.title(),/GPUQ|指南/);await guidePage.close();
   const forbidden=await page.evaluate(async()=>{const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:'jobs.submit',args:{machine:'gpu-1'}})});return response.status;});assert.equal(forbidden,503);
-  await set('all',false);await refreshVisible(page);await page.waitForFunction(()=>document.querySelector('#maintenance-experience')?.hidden);
+  await set('all',false);await refreshVisible(page);await page.waitForFunction(()=>!document.querySelector('#operational-maintenance')?.textContent.includes('全平台维护中'));
   await page.locator('[data-nav=resources]').click();await page.locator('[data-resource-machine="gpu-1"] .maintenance-lock-band').waitFor();assert.equal(await page.locator('[data-resource-machine="gpu-2"] .maintenance-lock-band').count(),0);
   await shot('member-server-desktop');await shot('member-server-mobile',390);
   await page.locator('[data-nav=work]').click();await page.locator('#open-submit').click();await page.locator('#submit-maintenance-switch').waitFor();assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
@@ -165,3 +165,5 @@ try{
   await logout();assert.equal(service.store.get(member.id).total,savedQuota,'logout never saves an authorization draft');assert.equal(await page.locator('#maintenance-experience [data-maintenance-root]').count(),0);assert.equal(await page.locator('#maintenance-console-dialog').textContent(),'');assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.ok(calls.every(call=>['projects.list','datasets.list','datasets.capacity','datasets.upload.routes','transfers.capabilities','terminal.open','terminal.exchange','terminal.detach','terminal.close','host.status'].includes(call.operation)),JSON.stringify([...new Set(calls.map(call=>call.operation))]));
   console.log('Maintenance browser passed: retired archive/CAS, escaped member global page, scoped lock bands and preflight choice, readable personal terminal with input blocked, guide/logout reachable, administrator ROOT/host status, staged call order and partial conflict stop, desktop/mobile layout.');
 }finally{await browser?.close();if(server){server.closeAllConnections();await new Promise(r=>server.close(r));}else service?.close();await rm(dir,{recursive:true,force:true});}
+
+await import('./maintenance-entry-ui-smoke.mjs');
