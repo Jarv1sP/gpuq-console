@@ -43,7 +43,16 @@ try{
     assert.equal(await page.locator('[name=workspace-machine]').inputValue(),'','Personal project does not require topbar selection');assert.equal(calls.filter(row=>row.operation==='projects.quota').length,before,'Collapsed quota performs no background reads');
     await page.locator('#project-disk-quota>summary').click();await page.waitForFunction(()=>document.querySelector('#disk-quota-state').textContent.includes('已启用'));
     assert.equal(await page.locator('#disk-quota-machine').getAttribute('title'),source);assert.match(await page.locator('#disk-quota-result').textContent(),/512 MiB \/ 1 GiB/);assert.match(await page.locator('#disk-quota-result').textContent(),/20 \/ 10,000/);
-    for(const width of [1440,390,320]){await page.setViewportSize({width,height:width<760?844:1080});await page.evaluate(()=>document.fonts.ready);assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.locator('#project-disk-quota').evaluate(node=>node.scrollIntoView({block:'center'}));assert.ok(await page.locator('.disk-quota-volumes').evaluate(node=>{const r=node.getBoundingClientRect();return r.top>=96&&r.bottom<innerHeight-156;}),'Quota readings are visible above fixed controls');if(width!==320)await page.screenshot({path:join(shots,role+'-enabled-'+width+'.png'),animations:'disabled'});}
+    for(const width of [1440,390,320]){
+      await page.setViewportSize({width,height:width<760?844:1080});await page.evaluate(()=>document.fonts.ready);assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.locator('#project-disk-quota').evaluate(node=>node.scrollIntoView({block:'center'}));assert.ok(await page.locator('.disk-quota-volumes').evaluate(node=>{const r=node.getBoundingClientRect();return r.top>=96&&r.bottom<innerHeight-156;}),'Quota readings are visible above fixed controls');
+      if(width<760){
+        const summary=page.locator('#project-disk-quota>summary'),box=await summary.boundingBox();
+        assert.ok(box&&box.height>=44,'Personal disk quota disclosure keeps its 44px phone touch target: '+JSON.stringify({role,width,box}));
+        await summary.focus();await summary.press('Enter');await page.waitForFunction(()=>!document.querySelector('#project-disk-quota').open);assert.equal(await summary.evaluate(node=>document.activeElement===node),true,'Closing quota by keyboard preserves focus');
+        await summary.press('Enter');await page.waitForFunction(()=>document.querySelector('#disk-quota-state').textContent.includes('已启用'));assert.equal(await summary.evaluate(node=>document.activeElement===node),true,'Reopening quota by keyboard preserves focus');
+      }
+      if(width!==320)await page.screenshot({path:join(shots,role+'-enabled-'+width+'.png'),animations:'disabled'});
+    }
     mode='disabled';await page.locator('#disk-quota-refresh').click();await page.waitForFunction(()=>document.querySelector('#disk-quota-state').textContent.includes('未启用'));assert.equal(await page.locator('#disk-quota-result').textContent(),'未启用');assert.equal(await page.locator('#disk-quota-result progress').count(),0);
     await page.locator('#project-disk-quota .ui-info>summary').click();assert.match(await page.locator('#project-disk-quota .ui-info-content').textContent(),/未启用不代表零用量或无限容量/);await page.locator('#project-disk-quota .ui-info>summary').click();
     mode='unknown';await page.locator('#disk-quota-refresh').click();await page.waitForFunction(()=>document.querySelector('#disk-quota-state').textContent.includes('待确认'));assert.equal(await page.locator('#disk-quota-result progress').count(),0);assert.match(await page.locator('#disk-quota-result').textContent(),/未确认/);
@@ -54,5 +63,5 @@ try{
     await service.invoke(admin.token,'maintenance.set',{scope:'all',enabled:false,revision:service.operationalMaintenance(admin.principal).revision});await context.close();
   }
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);assert.ok(calls.every(row=>['projects.list','projects.status','files.list','projects.quota'].includes(row.operation)),'Quota view performs only readonly calls');
-  console.log('PERSONAL DISK QUOTA PASS: member/admin, fixed development machine, lazy reads, actual counters, disabled != zero, unknown != zero, aborted late receipt, readable during maintenance, 1440/390/320, no writes or outside calls.');
+  console.log('PERSONAL DISK QUOTA PASS: member/admin, fixed development machine, lazy reads, actual counters, disabled != zero, unknown != zero, aborted late receipt, readable during maintenance, 1440/390/320, 44px phone disclosure and keyboard focus, no writes or outside calls.');
 }finally{releaseQuota?.();await browser?.close();if(server?.listening)await new Promise(r=>server.close(r));if(service&&!service.closing){clearInterval(service.executionTimer);await service.close();}await rm(root,{recursive:true,force:true});}
