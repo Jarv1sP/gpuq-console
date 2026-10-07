@@ -128,7 +128,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  }
  function capacityOverview(){
   const warehouse=section.querySelector('#warehouse-capacity');
-  if(warehouse){const cards=warehouseStorageCards(overview,model,capacities,capacityCatalog||model);html(warehouse,cards.map(row=>warehouseCardHTML(row,warehouseFilter===row.machine)).join('')||'<div class="v4-warehouse-empty">未知</div>');}
+  if(warehouse){const cards=warehouseStorageCards(overview,model,capacities,capacityCatalog||model,store.data?.datasetUploadAdmission);html(warehouse,cards.map(row=>warehouseCardHTML(row,warehouseFilter===row.machine)).join('')||'<div class="v4-warehouse-empty">未知</div>');}
  }
  function filters(){
   const root=section.querySelector('#warehouse-list-filters');if(!root)return;

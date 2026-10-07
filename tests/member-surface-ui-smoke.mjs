@@ -48,8 +48,8 @@ try{
   assert.equal(await page.locator('[data-v3-source=aliyun]').isVisible(),false);
   assert.deepEqual(await page.locator('[name=cloud-source] option[value=aliyun]').evaluate(node=>({hidden:node.hidden,disabled:node.disabled})),{hidden:true,disabled:true},'The native source option is hidden and unavailable');
   assert.equal(await page.locator('#cloud-files').isHidden(),true);
-  assert.equal(await page.locator('[data-dataset-source=link]').isVisible(),true);assert.equal(await page.locator('[data-dataset-source=workspace]').isVisible(),true,'Useful HTTPS and personal-workspace paths are retained in the existing source drawers');
-  for(const source of ['link','workspace'])assert.equal(await page.locator('[data-dataset-source='+source+']').count(),1,'each retained source has a single concrete entry');
+  assert.equal(await page.locator('[data-v3-source=link]').isVisible(),true);assert.equal(await page.locator('[data-v3-source=workspace]').isVisible(),true,'Useful HTTPS and personal-workspace paths are retained in the existing source drawers');
+  for(const source of ['link','workspace'])assert.equal(await page.locator('[data-v3-source='+source+']').count(),1,'each retained source has a single concrete entry');
   for(const width of [1440,390]){await page.setViewportSize({width,height:width===390?844:1080});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:join(shots,'sources-'+width+'.png'),animations:'disabled'});}
   assert.ok(calls.every(row=>!/^cloud\.(?:auth|files)|^cloud\.inspect$|^jobs\.submit$|^files\.put$/.test(row.operation)),'Browsing hidden entries issues no cloud operations or writes');assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
   console.log('MEMBER SURFACE PASS: simulated facts, one collapsed transmission hint, verified-only SM, hidden cloud experiments, retained HTTPS/workspace routes, 1440/390, no writes or outside requests.');

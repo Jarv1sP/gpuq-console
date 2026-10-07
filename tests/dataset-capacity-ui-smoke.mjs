@@ -62,6 +62,18 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
   finally{await card.evaluate((node,{original,style})=>{node.className=original;if(style===null)node.removeAttribute('style');else node.setAttribute('style',style);},{original,style});await card.dispose();}
   assert((await inspectGeometry(page,cardRules)).pass,'the restored large card passes without flattening it');
  }
+ // Contract pending backend finalization: a new upload warehouse can have
+ // no registered versions yet. No capacity or migration success is implied.
+ await page.evaluate(target=>{store.data.datasetUploadAdmission={protocol:1,available:true,targetMachine:target};view.render();},machines[0].id);
+ const uploadTarget=page.locator('[data-v4-warehouse="'+machines[0].id+'"]');
+ assert.equal(await page.locator('.v4-warehouse-card').count(),2);assert.equal(await uploadTarget.locator('.v4-dataset-count').textContent(),'0 个数据集');
+ assert.equal(await uploadTarget.locator('.v4-upload-target[aria-label="上传目标"]').textContent(),'↑');assert.equal(await page.locator('.v4-upload-target').count(),1);
+ assert.match(await uploadTarget.locator('.v4-free').textContent(),/未知/);assert.equal(await uploadTarget.locator('.capacity-data').count(),0);
+ await uploadTarget.click();assert.equal(await page.locator('[data-v3-select]').count(),0,'upload placement never fabricates migrated versions');await uploadTarget.click();
+ assert.equal(await page.locator('[data-v3-select]').count(),role==='admin'?2:1);assert((await inspectGeometry(page,cardRules)).pass);
+ if([1440,390].includes(width))await page.screenshot({path:join(output,role+'-upload-target-'+width+'.png'),fullPage:true});
+ await page.evaluate(()=>{store.data.datasetUploadAdmission.available=false;view.render();});assert.equal(await page.locator('.v4-warehouse-card').count(),1);assert.equal(await page.locator('.v4-upload-target').count(),0);
+ await page.evaluate(()=>{store.data.datasetUploadAdmission={protocol:1,available:true};view.render();});assert.equal(await page.locator('.v4-warehouse-card').count(),1);
  await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').click();
  assert.equal(await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"] .v4-dataset-count').textContent(),(await page.locator('[data-v3-select]').count())+' 个数据集','overview warehouse card and its filtered rows agree even when the legacy catalog has no matching warehouse location');
  await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').click();

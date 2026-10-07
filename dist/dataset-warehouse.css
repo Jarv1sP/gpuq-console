@@ -199,6 +199,7 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v4-warehouse-card[aria-pressed=true]{border-color:var(--ink);background:var(--bg-2)}
 #page-datasets .v4-card-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px 12px;min-width:0}
 #page-datasets .v4-warehouse-name{font:600 20px var(--display);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#page-datasets .v4-upload-target{flex:none;font:500 16px var(--sans);color:var(--ink-2)}
 #page-datasets .v4-dataset-count{font:12px var(--mono);color:var(--ink-3)}
 #page-datasets .v4-free{margin-left:auto;white-space:nowrap;font:12px var(--sans);color:var(--ink-2)}
 #page-datasets .v4-free b{font:600 20px var(--display);font-variant-numeric:tabular-nums;color:var(--ink)}

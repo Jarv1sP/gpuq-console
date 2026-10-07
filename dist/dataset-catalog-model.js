@@ -218,13 +218,21 @@ export function datasetWarehouseMachines(version){
   return [...new Set(nodes)].filter(machine=>identifier.test(machine||''));
 }
 
-export function warehouseStorageCards(overview,model,capacities=new Map(),contentCatalog=model){
+// Contract pending backend finalization: availability alone names no target.
+export function adaptUploadTarget(admission){
+  const target=admission?.targetMachine;
+  return admission?.available===true&&typeof target==='string'&&target.trim()?target:null;
+}
+
+export function warehouseStorageCards(overview,model,capacities=new Map(),contentCatalog=model,admission=null){
   const content=new Map(list(contentCatalog?.datasets).flatMap(item=>item.versions.map(version=>
     [JSON.stringify([item.dataset,version.version]),number(version.bytes)])));
   const groups=new Map(),group=machine=>{
     if(!groups.has(machine))groups.set(machine,{machine,versions:new Map(),datasets:new Set(),volumes:[]});
     return groups.get(machine);
   };
+  const uploadTarget=adaptUploadTarget(admission);
+  if(uploadTarget)group(uploadTarget);
   for(const item of list(model?.datasets))for(const version of item.versions)for(const machine of datasetWarehouseMachines(version)){
     const row=group(machine),key=JSON.stringify([item.dataset,version.version]);row.datasets.add(item.dataset);row.versions.set(key,number(version.bytes)??content.get(key)??null);
   }
@@ -252,7 +260,7 @@ export function warehouseStorageCards(overview,model,capacities=new Map(),conten
     const contentBytes=actual??fallback;
     const checkedAt=volumes[0]?.volume.checkedAt??raw?.volume?.checkedAt??overview?.checkedAt??model?.checkedAt??null;
     const collectedAt=volumes[0]?.volume.collectedAt??raw?.volume?.collectedAt??null;
-    return {machine:row.machine,...totals,contentBytes,known:valid&&contentBytes!==null,collectedAt,
+    return {machine:row.machine,uploadTarget:row.machine===uploadTarget,...totals,contentBytes,known:valid&&contentBytes!==null,collectedAt,
       datasetCount:sum(volumes.map(v=>v.datasetCount))??(model?row.datasets.size:null),checkedAt,
       warning:volumes.some(v=>list(v.warnings).some(w=>['WAREHOUSE_USAGE_HIGH','WAREHOUSE_FREE_SPACE_LOW'].includes(w?.code)))||
         valid&&(totals.usedBytes/totals.totalBytes>=.9||totals.reserveBytes!==null&&totals.availableBytes<=totals.reserveBytes)};

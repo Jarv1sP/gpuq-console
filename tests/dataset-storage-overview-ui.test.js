@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adaptOriginal,adaptStorageOverview,overviewDatasetCatalog,readableDatasetCatalog,aggregateDatasetCatalog,displayStorageCapacity,warehouseStorageCards,datasetWarehouseMachines} from '../dist/dataset-catalog-model.js';
-import {warehouseCapacityHTML,storageCapacityDetailHTML,cacheCapacityRatio,trainingCapacitySegments,trainingCardHTML,trainingLegendHTML} from '../dist/dataset-flow.js';
+import {adaptOriginal,adaptUploadTarget,adaptStorageOverview,overviewDatasetCatalog,readableDatasetCatalog,aggregateDatasetCatalog,displayStorageCapacity,warehouseStorageCards,datasetWarehouseMachines} from '../dist/dataset-catalog-model.js';
+import {warehouseCapacityHTML,warehouseCardHTML,storageCapacityDetailHTML,cacheCapacityRatio,trainingCapacitySegments,trainingCardHTML,trainingLegendHTML} from '../dist/dataset-flow.js';
 const version='a'.repeat(64),at='2026-10-08T01:23:00Z';
 const volume=(extra={})=>({id:'volume-a',state:'READY',checkedAt:at,totalBytes:1000,usedBytes:700,availableBytes:300,reserveBytes:50,usableBytes:250,...extra});
 const snapshot=()=>({protocol:'dataset-storage-overview-v1',checkedAt:at,partial:false,filePreviewAvailable:false,
@@ -38,6 +38,23 @@ const legacyModel=()=>aggregateDatasetCatalog({machine:'server-a',checkedAt:at,p
   version,state:'READY',canUse:true,bytes:200,files:2,ownerLabel:'所属用户：alice',locations:[
    {machine:'server-a',dataset:'physical-a',state:'READY',canUse:true},{machine:'server-b',dataset:'physical-b',state:'READY',canUse:true}]}]}]});
 const oldCapacity={machine:'server-a',available:true,filesystemBytes:1000,availableBytes:300,reserveBytes:50,usableBytes:250};
+test('upload target adapter (contract pending finalization) requires explicit available true and a nonempty targetMachine',()=>{
+ for(const raw of [null,{}, {available:true},{available:true,targetMachine:null},{available:true,targetMachine:''},
+  {available:true,targetMachine:' '},{available:true,targetMachine:1},{available:false,targetMachine:'new-warehouse'},
+  {available:1,targetMachine:'new-warehouse'},{available:true,machine:'new-warehouse'},{available:true,storageMachine:'new-warehouse'}])assert.equal(adaptUploadTarget(raw),null);
+ assert.equal(adaptUploadTarget({available:true,targetMachine:'new-warehouse'}),'new-warehouse');
+});
+test('an explicit upload target adds a zero-count warehouse without inventing migration, volume or warehouse proof',()=>{
+ const model=legacyModel();model.datasets[0].versions[0].warehouse={machine:'server-a',originalConfirmed:true,records:[]};
+ const admission={available:true,targetMachine:'new-warehouse'},cards=warehouseStorageCards(null,model,new Map(),model,admission);
+ assert.equal(cards.length,2);const target=cards.find(row=>row.machine==='new-warehouse');assert.equal(target.uploadTarget,true);assert.equal(target.datasetCount,0);
+ for(const key of ['totalBytes','usedBytes','availableBytes','contentBytes'])assert.equal(target[key],null);
+ assert.equal(target.known,false);assert.match(warehouseCardHTML(target),/v4-upload-target[^>]*>↑/);assert.match(warehouseCardHTML(target),/0 个数据集/);
+ assert.equal(cards.find(row=>row.machine==='server-a').datasetCount,1);assert.equal(model.datasets[0].versions[0].warehouse.machine,'server-a');
+ assert.equal(warehouseStorageCards(null,model,new Map(),model,{available:false,targetMachine:'new-warehouse'}).length,1);
+ assert.equal(warehouseStorageCards(null,model,new Map(),model,{available:true}).length,1);
+ const existing=warehouseStorageCards(null,model,new Map(),model,{available:true,targetMachine:'server-a'});assert.equal(existing.length,1);assert.equal(existing[0].uploadTarget,true);
+});
 test('v4 training segments use real independent quantities and clamp the disk bar without altering reported bytes',()=>{
  const raw=snapshot();Object.assign(raw.caches[0],{projectBytes:100,projectUsageComplete:false,projectCollectedAt:at});
  const cache=adaptStorageOverview(raw).caches[0],parts=trainingCapacitySegments(cache),html=trainingCardHTML(cache);
