@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {validProject,readyReleases,trainingProject,trainingTarget,trainingReceiptMatches,datasetReferences,uploadProjectFile,taskTable} from '../dist/execution-ui.js';
 import {terminalContext,terminalLaunchContext} from '../dist/terminal-ui.js';
+import {maintenanceBlocks} from '../dist/maintenance-state.js';
 
 const release='a'.repeat(64),future='b'.repeat(64);
+const absentUpload={inspect:async args=>({protocol:2,state:'ABSENT',path:args.path})};
 test('automatic training selection is distinct from fixed development context and requires OCI',()=>{
   const machines=[{id:'gpu-1'},{id:'gpu-2'}],project={project:'vision',environmentMode:'oci'};
   assert.deepEqual(trainingTarget('current','gpu-1',null,'',machines),{machine:'gpu-1'});
@@ -40,18 +42,18 @@ test('dataset references survive project-mode training and reject incomplete or 
 });
 test('project upload chunks share a UUID, exact full-file SHA, length and final fence without truncate',async()=>{
   const bytes=Buffer.alloc(1048576+7,42),file=new Blob([bytes]),calls=[],progress=[];
-  await uploadProjectFile(file,{machine:'gpu-1',project:'vision',area:'code',path:'train.py'},async args=>{calls.push(args);return {complete:args.final,size:args.totalSize,sha256:args.sha256};},(offset,total)=>progress.push([offset,total]));
+  await uploadProjectFile(file,{machine:'gpu-1',project:'vision',area:'code',path:'train.py'},async args=>{calls.push(args);return {complete:args.final,size:args.offset+Buffer.from(args.data,'base64').length,sha256:args.sha256};},(offset,total)=>progress.push([offset,total]),absentUpload);
   assert.equal(calls.length,2);assert.match(calls[0].uploadId,/^[a-f0-9-]{36}$/);
   assert.equal(calls[0].uploadId,calls[1].uploadId);assert.equal(calls[0].sha256,createHash('sha256').update(bytes).digest('hex'));
   assert.ok(calls.every(call=>call.totalSize===bytes.length&&call.sha256===calls[0].sha256&&call.project==='vision'&&call.area==='code'&&!Object.hasOwn(call,'truncate')));
   assert.deepEqual(calls.map(call=>[call.offset,call.final]),[[0,false],[1048576,true]]);
   assert.deepEqual(Buffer.concat(calls.map(call=>Buffer.from(call.data,'base64'))),bytes);assert.deepEqual(progress.at(-1),[bytes.length,bytes.length]);
 });
-test('zero-byte project upload still finalizes; a failed retry uses a fresh upload identity',async()=>{
+test('zero-byte project upload still finalizes; retry keeps the original upload identity after status confirmation',async()=>{
   const context={machine:'gpu-1',project:'vision',area:'code',path:'empty.txt'},calls=[];
-  await assert.rejects(uploadProjectFile(new Blob([]),context,async args=>{calls.push(args);throw Error('mock interrupted');}),/interrupted/);
-  await uploadProjectFile(new Blob([]),context,async args=>{calls.push(args);return {complete:true,size:0,sha256:args.sha256};});
-  assert.equal(calls.length,2);assert.notEqual(calls[0].uploadId,calls[1].uploadId);
+  await assert.rejects(uploadProjectFile(new Blob([]),context,async args=>{calls.push(args);throw Error('mock interrupted');},undefined,absentUpload),/interrupted/);
+  await uploadProjectFile(new Blob([]),context,async args=>{calls.push(args);return {complete:true,size:0,sha256:args.sha256};},undefined,{inspect:async()=>({...calls[0],protocol:2,state:'UPLOADING',receivedBytes:0,resumable:true})});
+  assert.equal(calls.length,2);assert.equal(calls[0].uploadId,calls[1].uploadId);
   assert.ok(calls.every(call=>call.final&&call.totalSize===0&&call.offset===0&&call.data===''));
 });
 test('project upload rejects output writes, oversized files and inconsistent length before any chunk',async()=>{
@@ -65,9 +67,51 @@ test('project upload cannot report success without an exact final verified recei
   const file=new Blob(['abc']),context={machine:'gpu-1',project:'vision',area:'code',path:'file.txt'},sha256=createHash('sha256').update('abc').digest('hex');
   const valid={complete:true,size:3,sha256};
   for(const receipt of [undefined,null,{}, {...valid,complete:false},{...valid,complete:'true'},{...valid,size:2},{...valid,size:'3'},{...valid,sha256:'f'.repeat(64)}]){
-    const progress=[];await assert.rejects(uploadProjectFile(file,context,async()=>receipt,value=>progress.push(value)),/尚未确认完整文件/);
+    const progress=[];await assert.rejects(uploadProjectFile(file,context,async()=>receipt,value=>progress.push(value),absentUpload),/尚未确认完整文件/);
     assert.deepEqual(progress,[],'a rejected final receipt must not announce completed bytes');
   }
+});
+test('project upload resumes from node-confirmed bytes and never resends the accepted prefix',async()=>{
+ const bytes=Buffer.alloc(1048576+7,42),file=new Blob([bytes]),context={machine:'node-a',project:'vision',area:'code',path:'train.py'},id='a1234567-1234-4234-8234-123456789abc',puts=[],queries=[];
+ const result=await uploadProjectFile(file,context,async args=>{puts.push(args);return {path:args.path,complete:true,size:args.totalSize,sha256:args.sha256};},undefined,{inspect:async args=>{queries.push(args);return {...args,uploadId:id,protocol:2,state:'UPLOADING',receivedBytes:1048576,resumable:true};}});
+ assert.equal(result.uploadId,id);assert.equal(puts.length,1);assert.equal(puts[0].uploadId,id);assert.equal(puts[0].offset,1048576);assert.equal(Buffer.from(puts[0].data,'base64').length,7);
+ assert.equal(queries.length,1);assert.equal(queries[0].sha256,createHash('sha256').update(bytes).digest('hex'));assert.equal(queries[0].uploadId,undefined,'initial discovery binds exact content, never invents a different ID');
+});
+test('lost chunk reply first observes the same ID and resumes only the acknowledged offset',async()=>{
+ const file=new Blob([Buffer.alloc(1048576+7,42)]),context={machine:'node-a',project:'vision',area:'code',path:'train.py'},puts=[],queries=[];
+ let original;
+ await uploadProjectFile(file,context,async args=>{puts.push(args);original=args;if(puts.length===1)throw new TypeError('connection reset');return {complete:true,size:args.totalSize,sha256:args.sha256};},undefined,{inspect:async args=>{queries.push(args);return original?{...args,protocol:2,state:'UPLOADING',receivedBytes:1048576,resumable:true}:{protocol:2,state:'ABSENT',path:args.path};}});
+ assert.deepEqual(puts.map(args=>args.offset),[0,1048576]);assert.equal(queries[1].uploadId,puts[0].uploadId);assert.equal(puts[1].uploadId,puts[0].uploadId);assert.equal(queries.length,2);
+});
+test('complete uploads are read-only; a pending completion sends only the original empty final block',async()=>{
+ for(const completionPending of [false,true]){
+  const file=new Blob(['abc']),context={machine:'node-a',project:'vision',area:'code',path:'x'},id='a1234567-1234-4234-8234-123456789abc',puts=[];
+  await uploadProjectFile(file,context,async args=>{puts.push(args);return {complete:true,size:3,sha256:args.sha256};},undefined,{inspect:async args=>({...args,uploadId:id,protocol:2,state:'COMPLETE',complete:true,size:3,receivedBytes:3,completionPending})});
+  assert.equal(puts.length,completionPending?1:0);if(completionPending){assert.equal(puts[0].uploadId,id);assert.equal(puts[0].offset,3);assert.equal(puts[0].data,'');assert.equal(puts[0].final,true);}
+ }
+});
+test('unknown, changed, legacy and wrong upload identities never start or reset any upload',async()=>{
+ const file=new Blob(['abc']),context={machine:'node-a',project:'vision',area:'code',path:'x'};
+ for(const patch of [{protocol:1},{state:'UNKNOWN'},{state:'CONFLICT'},{path:'other'},{sha256:'f'.repeat(64)},{uploadId:'invalid'},{receivedBytes:-1},{receivedBytes:4},{resumable:false,legacy:true},{project:'other'},{machine:'node-b'}]){
+  let puts=0;await assert.rejects(uploadProjectFile(file,context,async()=>puts++,undefined,{inspect:async args=>({...args,protocol:2,state:'UPLOADING',uploadId:'a1234567-1234-4234-8234-123456789abc',receivedBytes:1,resumable:true,...patch})}),/未确认|已变化|不能安全续传/);assert.equal(puts,0);
+ }
+});
+test('uncertain recovery cannot roll offset back, swap ID or silently restart an absent upload',async()=>{
+ for(const patch of [{state:'ABSENT'},{uploadId:'b1234567-1234-4234-8234-123456789abc'},{receivedBytes:0},{receivedBytes:4}]){
+  const file=new Blob(['abc']),context={machine:'node-a',project:'vision',area:'code',path:'x'},id='a1234567-1234-4234-8234-123456789abc';let reads=0,puts=0;
+  await assert.rejects(uploadProjectFile(file,context,async()=>{puts++;throw new TypeError('reply lost');},undefined,{inspect:async args=>({...args,protocol:2,state:'UPLOADING',uploadId:id,receivedBytes:1,resumable:true,...(++reads>1?patch:{})})}),/未确认/);
+  assert.equal(puts,1);assert.equal(reads,2);
+ }
+});
+test('status denial and context cancellation send no writes, and unknown recovery remains bounded',async()=>{
+ const context={machine:'node-a',project:'vision',area:'code',path:'x'},file=new Blob(['abc']);let writes=0;
+ await assert.rejects(uploadProjectFile(file,context,async()=>writes++,undefined,{inspect:async()=>{throw Object.assign(Error('not authorized'),{status:403});}}),/not authorized/);assert.equal(writes,0);
+ const controller=new AbortController();await assert.rejects(uploadProjectFile(file,context,async()=>writes++,undefined,{signal:controller.signal,inspect:async args=>{controller.abort();return {protocol:2,state:'ABSENT',path:args.path};}}),error=>error.name==='AbortError');assert.equal(writes,0);
+ let original,queries=0;await assert.rejects(uploadProjectFile(file,context,async args=>{writes++;original=args;throw new TypeError('reply lost');},undefined,{inspect:async args=>{queries++;return original?{...args,protocol:2,state:'UPLOADING',resumable:true,receivedBytes:0}:{protocol:2,state:'ABSENT',path:args.path};}}),/reply lost/);assert.equal(writes,4);assert.equal(queries,4);
+});
+test('maintenance allows upload progress inspection without enabling a resumed write',()=>{
+ const data={operationalMaintenance:{version:1,global:{reason:'repair'},machines:{}}},principal={role:'member'},context={machine:'node-a',project:'vision',area:'code',path:'x'};
+ assert.equal(maintenanceBlocks('files.upload.status',context,data,principal),null);assert.ok(maintenanceBlocks('files.put',context,data,principal));
 });
 test('terminal identity carries the selected project but never combines it with host root',()=>{
   assert.deepEqual(terminalContext({machine:'gpu-1',project:'vision'}),{machine:'gpu-1',project:'vision',hostAdmin:false});
