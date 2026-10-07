@@ -168,3 +168,6 @@ try{
   await writeFile(join(output,'geometry.json'),JSON.stringify(geometry,null,2));
   console.log(JSON.stringify({status:'passed',measurements:geometry.length,checks:['main member-equivalent controls','privileged mount','all owner/server/state filters','unknown and ended history','private process columns','root explicit refusal','high-priority draft retained','four widths','CSP']}));
 }finally{await browser?.close();clearInterval(service?.executionTimer);clearInterval(service?.transferTimer);if(server)await new Promise(resolve=>server.close(resolve));await rm(temporary,{recursive:true,force:true});}
+
+// Canonical native metadata stays readonly in this same registered task room.
+await import("./native-task-owner-ui-smoke.mjs");
