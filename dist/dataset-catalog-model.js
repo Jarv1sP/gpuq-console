@@ -8,6 +8,20 @@ export function datasetOwnerName(label){
   return !name||name==='所属未知'?'未知':name;
 }
 
+// This is a main-view filter, not a grant. Backend reads/actions retain their
+// own checks; the full model is still available to the storage admin console.
+export function readableDatasetCatalog(model,principal){
+  const username=typeof principal?.username==='string'?principal.username:null;
+  const owns=label=>username&&typeof label==='string'&&/^(?:所属用户|共享授权用户)\s*[:：]/.test(label)&&
+    datasetOwnerName(label).split('、').some(name=>name.trim()===username);
+  return {...model,datasets:(model?.datasets||[]).flatMap(item=>{
+    if(!principal?.userId)return [];
+    const versions=principal.role==='admin'?item.versions:item.versions.filter(version=>
+      version.canUse===true||owns(version.ownerLabel)||version.servers?.some(row=>owns(row.ownerLabel)));
+    return versions.length?[{...item,versions}]:[];
+  })};
+}
+
 const identifier=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const hash=/^[a-f0-9]{64}$/;
 const states=new Set(['READY','REGISTERED','STAGING','PREPARING','FAILED','NOT_LOCAL','UNKNOWN']);

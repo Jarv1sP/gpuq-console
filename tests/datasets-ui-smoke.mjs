@@ -167,20 +167,23 @@ try {
 
   await login(member,'dataset-browser-user');await refresh(member);
   assert.deepEqual(await member.locator('[name=dataset-machine] option').evaluateAll(options=>options.map(option=>option.value)),['gpu-1','gpu-2']);
-  assert.equal(await member.locator('[data-v3-select]').count(),3);
-  assert.match(await member.locator('#dataset-catalog').textContent(),/admin-private/);
+  assert.equal(await member.locator('[data-v3-select]').count(),2);
+  assert.equal(await row(member,'admin-private').count(),0,'A private foreign dataset is omitted from the main list');
+  assert.equal(await member.locator('#page-title .v3-count').textContent(),'2 个','The heading counts only the visible datasets');
   assert.ok(calls.some(call=>call.operation==='datasets.list'&&call.args.userId==='builtin-admin'&&call.args.hostAdmin===true));
   assert.equal(await member.locator('.v3-server-chip:not(.v3-all)').count(),MACHINES.length,'Metadata includes every inventory node while the execution selector stays quota-bound');
-  await selectDataset(member,'admin-private');
-  assert.match(await row(member,'admin-private').innerText(),/仅浏览/);
-  const foreign=detail(member);
-  assert.equal(await foreign.locator('[data-use-dataset]').isDisabled(),true);
-  assert.equal(await foreign.locator('[data-v3-cache]:enabled,[data-remove-more],[data-remove-confirm],.v3-edit:enabled').count(),0);
-  assert.doesNotMatch(await foreign.innerText(),/可用于训练/);
   const beforeTamper=calls.length;
-  await foreign.locator('[data-use-dataset]').evaluate(button=>{button.disabled=false;button.click();button.disabled=true;});
+  await member.evaluate(version=>{
+    const root=document.querySelector('#page-datasets');
+    for(const action of ['data-use-dataset','data-v3-cache']){
+      const button=document.createElement('button');button.type='button';button.dataset.version=version;
+      if(action==='data-use-dataset')button.setAttribute(action,'admin-private');
+      else{button.setAttribute(action,'gpu-1');button.dataset.dataset='admin-private';}
+      root.append(button);button.click();button.remove();
+    }
+  },'b'.repeat(64));
   assert.equal(await member.locator('#work-submit').isVisible(),false,'Delegated action rechecks authorization even if disabled DOM is removed');
-  assert.equal(calls.length,beforeTamper,'Metadata-only click never reaches node or submission APIs');
+  assert.equal(calls.length,beforeTamper,'An injected hidden version cannot request a catalog, prepare data or submit training');
   await selectDataset(member,'sample');
   assert.equal(await row(member,'sample').locator('.v3-owner').textContent(),'admin、dataset-browser-user');
   assert.equal(await row(member,'sample').locator('.v3-owner').getAttribute('title'),'所属 admin、dataset-browser-user');
