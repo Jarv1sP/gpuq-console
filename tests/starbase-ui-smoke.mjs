@@ -1,6 +1,7 @@
 import {openMembers} from './admin-members-workflows.mjs';
 import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {assertToastClear} from './toast-geometry-assertions.mjs';
+import {settleFiniteAnimations} from './animation-settle.mjs';
 // Actual Portal/SQLite/cookies/CSP/assets in Chromium. Node observations and
 // terminal output are synthetic; no shell, GPU, SSH or production mutation.
 import assert from 'node:assert/strict';
@@ -14,6 +15,9 @@ import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {accountMenu,closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 import {guardedRoute} from './browser-route-guard.mjs';
+
+// Keep the wait's real-browser positive/negative cases in the existing CI entry.
+await import('./animation-settle-browser.mjs');
 
 const temp=await mkdtemp(join(tmpdir(),'starbase-shell-browser-'));
 const shots=process.env.UI_SCREENSHOTS||'/tmp/starbase-ui-smoke';
@@ -35,6 +39,10 @@ try{
     if(operation==='projects.status')return structuredClone(project);
     if(operation==='datasets.list')return {datasets:[]};
     if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3,guarded:true};
+    if(['datasets.storage.status','datasets.storage.plan'].includes(operation)){
+      assert.deepEqual(args,{userId:'builtin-admin',hostAdmin:true},'only the authenticated administrator may reach the storage overview bridge');
+      return operation==='datasets.storage.status'?{enabled:false,scope:'datasets-only',automaticCollectionExposed:false}:{enabled:false,dryRun:true,candidates:[],reservedBytes:0};
+    }
     if(operation==='logs')return {text:'epoch 12/40 loss=0.438 val_acc=0.716\ncheckpoint saved\nTraining continues on the synthetic node.'};
     if(operation==='diagnostics')return {jobId:args.job.id,state:'COMPLETE',schedulerState:'FAILED',attempts:[],captures:[],historyAvailable:true,allocationHistory:[]};
     if(operation==='files.list')return {entries:[{name:'metrics.json',type:'file',size:32}]};
@@ -201,13 +209,16 @@ try{
       await target.waitForFunction(route=>document.querySelector(route.startsWith('admin/')?'#page-admin':'#page-'+route)?.hidden===false,route);
       for(const width of [1440,1024,390,320]){
         await target.setViewportSize({width,height:width<760?844:1080});
-        await target.evaluate(async()=>{await document.fonts.ready;await Promise.allSettled(document.getAnimations().filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
+        await settleFiniteAnimations(target);
         await refreshVisible(target);
         try{toastChecks.push({role,route,width,...await assertToastClear(target)});}catch(error){await target.screenshot({path:join(shots,'toast-failed-'+role+'-'+route.replace('/','-')+'-'+width+'.png'),animations:'disabled'});error.message=role+' '+route+' '+width+': '+error.message;throw error;}
       }
     }
   }
   await writeFile(join(shots,'toast-checks.json'),JSON.stringify(toastChecks,null,2));assert.equal(toastChecks.length,48,'shared feedback covers every main room and admin section at all four widths');
+  const storageReads=calls.filter(row=>row.operation.startsWith('datasets.storage.'));
+  assert.equal(storageReads.length,MACHINES.length*2,'the administrator overview reads status and dry-run plan once for each server');
+  for(const machine of MACHINES)assert.deepEqual(storageReads.filter(row=>row.machine===machine.id).map(row=>row.operation).sort(),['datasets.storage.plan','datasets.storage.status'],'overview performs both read-only operations without pin, unpin or collection');
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);assert.ok(assets.every(asset=>asset.status<400));for(const font of ['Archivo','Geist','GeistMono'])assert.ok(assets.some(asset=>asset.path.includes(font)&&asset.path.endsWith('.woff2')));
   assert.ok(calls.every(row=>!['projects.publish','terminal.host-command','files.put','cancel'].includes(row.operation)),'acceptance uses read-only/synthetic node operations');
   console.log(JSON.stringify({status:'passed',checks:['real Portal/CSP/cookies/assets/fonts','owner-only control and drawers','persistent control/context/room scroll','command keyboard and tab navigation','submit and three second-level panels','latest cross-server submission, manual draft and cancellation supersede old replies','logs/diagnostics/output/notes','terminal collapse preserves session across rooms','maintenance admin/member hook preservation','390px tabs/live pill/full-screen control','reduced motion and no outside requests'],screenshots:shots}));

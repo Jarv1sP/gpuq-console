@@ -13,7 +13,7 @@ const status=(state,label)=>`<span class="st ${shape(state)}"><span class="g" ar
 
 // The data-room owns the entry and catalog. This module owns only its dialog,
 // original-key journal and status/action lifecycle; it does not add page layout.
-export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storage,management=true}={}){
+export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storage,management=true,personalRemoval=null}={}){
   if(storage===undefined)try{storage=globalThis.localStorage;}catch{}
   let dialog=null,target=null,view='confirm',action=null,opener=null,account=null,notice='',dialogScope=null;
   const listeners=new Set(),lists=new Set();
@@ -49,6 +49,7 @@ export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storag
       const button=event.target.closest('button');if(!button||button.disabled)return;
       if(button.hasAttribute('data-full-delete-close')){dialog.close();return;}
       if(!current())return;
+      if(button.hasAttribute('data-full-delete-personal')){const selected={...target};dialog.close();await personalRemoval?.open(selected.dataset,selected.version);return;}
       if(button.dataset.fullDeleteCopy){
         try{await navigator.clipboard.writeText(button.dataset.fullDeleteCopy);button.textContent='已复制';}
         catch{notice='未能复制，请手动复制：'+button.dataset.fullDeleteCopy;render();}return;
@@ -70,6 +71,7 @@ export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storag
       // Status reads for another saved task must not erase a name being typed.
       if(body.querySelector('[name=full-delete-name]')&&!notice)return;
       body.innerHTML=`<form>${facts()}<p class="full-delete-warning">删除此版本的原件和缓存，7 天内可由管理员恢复。</p><p class="full-delete-notice">其他名称下的副本不受影响</p><label class="full-delete-name"><span class="copy-caption"><span>输入数据集名称</span>${copyHelp('彻底删除范围','所有服务器上此名称的选中版本都会删除，不删除其他版本或其他名称的副本。服务器会再次核对权限、使用情况和完整副本。')}</span><input name="full-delete-name" autocomplete="off" spellcheck="false" required aria-label="输入数据集名称" placeholder="${esc(target.dataset)}"></label>${errorHTML()}<footer class="modal-actions"><button class="button" type="button" data-full-delete-close>保留数据</button><button class="button danger" type="submit" data-full-delete-submit disabled>彻底删除</button></footer></form>`;
+      if(personalRemoval?.canOpen(target.dataset,target.version)){const choice=document.createElement('button');choice.type='button';choice.className='button quiet full-delete-personal-choice';choice.dataset.fullDeletePersonal='';choice.textContent='仅移除服务器缓存…';body.querySelector('form').append(choice);}
       return;
     }
     if(!row){view='confirm';render();return;}
