@@ -5,7 +5,7 @@
 .sb .cache-operation-reading{display:flex;align-items:center;flex-wrap:wrap;gap:12px;font-size:13px;margin:12px 0}
 .sb .cache-operation-mark{width:10px;height:10px;border:1px solid var(--ink-2);display:inline-block}
 .sb .cache-operation-state:is([data-state=READY],[data-state=RELEASED]) .cache-operation-mark{border-color:var(--run);background:var(--run)}
-.sb .cache-operation-state:is([data-state=RUNNING],[data-state=PREPARING],[data-state=RELEASING]) .cache-operation-mark{border-color:var(--prep)}
+.sb .cache-operation-state:is([data-state=DISPATCHING],[data-state=RUNNING]) .cache-operation-mark{border-color:var(--prep)}
 .sb .cache-operation-state:is([data-state=FAILED],[data-state=BLOCKED]) .cache-operation-mark{border-color:var(--err);transform:rotate(45deg)}
 .sb .cache-operation .server-id{min-width:0;max-width:60%}
 .sb .cache-operation-facts{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}

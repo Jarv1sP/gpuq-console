@@ -64,7 +64,13 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.cache.release').length),0);
  await page.evaluate(()=>{const row=operations.values().next().value;row.phase='READY';});await page.locator('[data-cache-query]').click();
  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0,'Phase READY does not complete preparation');
- await page.evaluate(()=>{const row=operations.values().next().value;row.state='READY';row.canCancel=false;});await page.locator('[data-cache-query]').click();
+ for(const flags of [{receiptOnly:true,locationState:null},{receiptOnly:false,locationState:'NOT_OBSERVED'}]){
+  const before=await page.evaluate(()=>refreshes);
+  await page.evaluate(flags=>Object.assign(operations.values().next().value,{state:'READY',canCancel:false},flags),flags);await page.locator('[data-cache-query]').click();
+  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0,'receipt-only location never enables source release');assert.equal(await page.locator('[data-state=READY]').count(),0);
+  assert((await page.evaluate(()=>refreshes))>before,'each unobserved location refreshes the real overview');
+ }
+ await page.evaluate(()=>Object.assign(operations.values().next().value,{state:'READY',canCancel:false,receiptOnly:false,locationState:null}));await page.locator('[data-cache-query]').click();
  await page.locator('[data-cache-transfer-source] [data-cache-start]').waitFor();
  assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.cache.release').length),0,'Confirmed READY only offers separate release');
  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').textContent(),'释放原服务器缓存');
@@ -79,8 +85,11 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  const writes=await page.evaluate(()=>calls.filter(row=>/datasets.cache.(prepare|release)$/.test(row.operation)));
  assert.equal(writes.length,2);assert.equal(writes[0].args.machine,target);assert.equal(writes[1].args.machine,source);assert.notEqual(writes[0].args.key,writes[1].args.key);
  assert(writes.every(row=>row.args.dataset==='sample'&&row.args.version===version),'Use logical dataset and full version, never physical alias');
+ const beforeRelease=await page.evaluate(()=>refreshes);
  await page.evaluate(()=>{const row=[...operations.values()].find(row=>row.action==='release');row.state='RELEASED';row.phase='RELEASED';row.canCancel=false;row.receiptOnly=true;row.locationState='NOT_OBSERVED';});
  await page.locator('[data-cache-transfer-source] [data-cache-query]').click();await page.locator('[data-state=RELEASED]').waitFor();
+ assert((await page.evaluate(()=>refreshes))>beforeRelease);assert.equal(await page.locator('[data-state=RELEASED]').textContent(),'释放已确认');assert.equal(await page.locator('.cache-operation-progress').count(),0);
+ await page.screenshot({path:join(output,'released-'+role+'-'+width+'.png')});
  await page.locator('[data-v3-cache-close]').click();assert.equal(await page.locator('.v3-server').filter({has:page.locator('.v3-server-text>b[title="'+source+'"]')}).locator('.v3-g.ready').count(),1,'Historical RELEASED does not overwrite a fresh READY catalog location');
  for(const mode of ['old','denied','404']){
   await page.evaluate(mode=>{capMode=mode;view.storageOverview(snapshot);},mode);
