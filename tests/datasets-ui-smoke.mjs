@@ -386,3 +386,6 @@ try {
 // Keep all existing protocol and authorization assertions above. The extended
 // local fixture exercises database/cache facts, admin retention and layout.
 await import('./dataset-flow-browser-fixture.mjs');
+
+// Exercise the actual overview renderer in addition to legacy protocol fallback.
+await import('./dataset-capacity-ui-smoke.mjs');

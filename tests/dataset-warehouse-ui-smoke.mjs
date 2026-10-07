@@ -116,7 +116,9 @@ try{
   await page.locator('[data-v3-upload]').first().click();await page.locator('#dataset-add-dialog[open]').waitFor();await shot('upload-1');
   assert.equal(await page.locator('.v3-drop h3').textContent(),width<760?'选择文件':'拖入文件夹或文件');
   assert.equal(await page.locator('.v3-other-sources>.button').count(),3);
-  for(const source of await page.locator('.v3-other-sources>.button').all())assert(await source.evaluate(node=>getComputedStyle(node).borderTopStyle==='solid'&&node.getBoundingClientRect().height>=44));
+  assert.equal(await page.locator('.v3-other-sources>[data-v3-source=aliyun]').isHidden(),true,'Experimental cloud entry stays hidden in the public room');
+  assert.deepEqual(await page.locator('.v3-other-sources>.button:visible').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Source)),['link','workspace']);
+  for(const source of await page.locator('.v3-other-sources>.button:visible').all())assert(await source.evaluate(node=>getComputedStyle(node).borderTopStyle==='solid'&&node.getBoundingClientRect().height>=44));
   await page.locator('#v3-file-picker').setInputFiles([{name:'training-images.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(4*1024**2,1)},{name:'training-labels.json',mimeType:'application/json',buffer:Buffer.from('{"labels":[1,2,3]}')}]);
   await page.waitForFunction(()=>document.querySelector('#v3-upload-route')?.classList.contains('ok'));await shot('upload-2');
   if(hddIngress){
