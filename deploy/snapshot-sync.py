@@ -73,7 +73,9 @@ def observation(ops, args):
     session = s.read_json(ops.folder / (ops.key(args) + '.sync.json'), limit=16384)
     user,project=ops.identity(args)
     required={'userId','project','key','session','state','manifestBytes','manifestSha256','manifestOffset','totalBytes','entries','source'}
-    if (not isinstance(session,dict) or set(session)!=required or session.get('userId')!=user or session.get('project')!=project
+    if (not isinstance(session,dict) or set(session) not in (required, required|{'environmentMode'})
+            or 'environmentMode' in session and session['environmentMode']!='oci'
+            or session.get('userId')!=user or session.get('project')!=project
             or any(not isinstance(session.get(k),str) or not UUID.fullmatch(session[k]) for k in ('key','session'))
             or session.get('state') not in ('RECEIVING_MANIFEST','COPYING','CODE_READY')
             or not isinstance(session.get('manifestSha256'),str) or not HASH.fullmatch(session['manifestSha256'])
@@ -509,17 +511,21 @@ class SnapshotSync:
             if any(session.get(k)!=args[k] for k in ('manifestBytes','manifestSha256','totalBytes','entries','source')): raise ValueError('Same sync key cannot change the snapshot')
             if session['state']=='RECEIVING_MANIFEST':
                 # Recover a crash after the durable fence but before the atomic
-                # new-project rename. Existing projects are never overwritten.
-                self.ops.store.create(user,project,environment_mode='isolated')
+                # OCI rename. Old receipts may finish an existing draft, but
+                # must never recreate a removed legacy venv environment.
+                if session.get('environmentMode')=='oci':
+                    self.ops.store.create(user,project,environment_mode='oci')
+                elif not any(item['project']==project for item in self.ops.store.list(user)):
+                    raise ValueError('Legacy sync target is missing; inspect or cancel the original sync, never recreate its environment')
             return self.summary(session)
         if any(item['project']==project for item in self.ops.store.list(user)): raise ValueError('Sync needs a new project name; existing projects are never overwritten')
         self.ops.store._space(args['totalBytes'])
         folder=self.root/str(uuid.uuid4());folder.mkdir(mode=0o700)
-        session={**args,'session':folder.name,'state':'RECEIVING_MANIFEST','manifestOffset':0}
+        session={**args,'session':folder.name,'state':'RECEIVING_MANIFEST','manifestOffset':0,'environmentMode':'oci'}
         # Persist the fence before making the draft visible. A failed receipt
         # cannot leave an ordinary editable orphan; retry repairs an absent draft.
         self.n.atomic_json(receipt,session)
-        self.ops.store.create(user,project,environment_mode='isolated')
+        self.ops.store.create(user,project,environment_mode='oci')
         return self.summary(session)
 
     def copy_status(self,args,folder,path):

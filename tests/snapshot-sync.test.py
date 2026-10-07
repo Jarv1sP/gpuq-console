@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 import uuid
 from storage_test_helpers import local_data_mounts
 from dataset_retention_helpers import protected_executor_original
@@ -35,6 +36,9 @@ class SnapshotSyncTests(unittest.TestCase):
             (base/'node-config.json').write_text(json.dumps({'root':str(base/'state'),'conda':str(conda),'datasets':{'root':str(base/'datasets'),'mountPoint':str(base),'sources':{'fixture':str(source)},'reserveBytes':0}}))
             spec=importlib.util.spec_from_file_location('snapshot_node_'+str(i),base/'node-executor.py');node=importlib.util.module_from_spec(spec);sys.modules[spec.name]=node;spec.loader.exec_module(node)
             guard=patch.object(node,'dataset_mount_check');guard.start();self.patches.append(guard);node.workspace(USER);node.projects().store.reserve_bytes=0;self.nodes.append(node)
+            node.projects().store._oci=lambda user:SimpleNamespace(verify_host=lambda:None,
+                publish=lambda slug:{'schema':1,'owner':hashlib.sha256(user.encode()).hexdigest(),'project':slug,'image':'sha256:'+'d'*64},
+                verify_image=lambda *args:None)
         mount=local_data_mounts(*(self.root/str(i) for i in range(2)));mount.start();self.addCleanup(mount.stop)
         for i,node in enumerate(self.nodes):
             protected_executor_original(node, self.root/str(i)/'retention-original')
@@ -64,10 +68,9 @@ class SnapshotSyncTests(unittest.TestCase):
         self.assertEqual(self.call('finish')['state'],'CODE_READY');self.assertEqual(self.call('finish')['state'],'CODE_READY')
         paths=n.projects().store.dev_paths(USER,'imported');self.assertEqual((paths['code']/'sub/train.py').read_bytes(),self.data);self.assertTrue((paths['code']/'sub/train.py').stat().st_mode&0o111)
         self.assertEqual(list(paths['env'].iterdir()),[],'No environment migration');n.projects().writable(args)
-        # CODE_READY is not a runnable release: the owner prepares a target-local
-        # environment before the existing explicit publish operation.
-        (paths['env']/'bin').mkdir();(paths['env']/'bin/python').write_text('target venv')
-        (paths['env']/'pyvenv.cfg').write_text('home = /opt/conda/bin\ninclude-system-site-packages = false\n')
+        self.assertEqual(n.process('projects.status',args)['environmentMode'],'oci')
+        # CODE_READY remains draft-only; publishing pins the OCI environment
+        # and code without migrating a source venv.
         with patch.object(n,'run',return_value=''),patch.object(n.projects(),'active',return_value=False):
             publishing=n.process('projects.publish',args)
             self.assertEqual(publishing['state'],'PUBLISHING')
@@ -76,7 +79,8 @@ class SnapshotSyncTests(unittest.TestCase):
         self.assertEqual(published['state'],'READY')
         fixed=n.projects().store.release(USER,'imported',published['latestReadyRelease'])
         self.assertEqual((fixed['code']/'sub/train.py').read_bytes(),self.data)
-        self.assertEqual((fixed['env']/'bin/python').read_text(),'target venv')
+        self.assertEqual(fixed['meta']['environmentMode'],'oci')
+        self.assertNotIn('env',fixed['meta']['content'])
     def test_old_project_and_changed_key_cannot_be_overwritten(self):
         self.nodes[1].process('projects.create',{'userId':USER,'project':'imported'})
         with self.assertRaisesRegex(ValueError,'new project'):self.nodes[1].process('projects.sync.begin',self.begin)
@@ -89,6 +93,7 @@ class SnapshotSyncTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError,'receipt unavailable'):node.process('projects.sync.begin',self.begin)
         self.assertEqual(node.projects().store.list(USER),[])
         self.assertEqual(node.process('projects.sync.begin',self.begin)['state'],'RECEIVING_MANIFEST')
+        self.assertEqual(node.projects().store.environment_mode(USER,'imported'),'oci')
         self.assertEqual(node.process('projects.status',{'userId':USER,'project':'imported'})['state'],'SYNCING')
     def test_begin_retries_after_durable_fence_before_new_project_creation(self):
         node=self.nodes[1];store=node.projects().store
@@ -100,6 +105,27 @@ class SnapshotSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'incomplete'):node.projects().writable(self.begin)
         self.seal();self.call('chunk',path='sub/train.py',offset=0,data=base64.b64encode(self.data).decode())
         self.assertEqual(self.call('finish')['state'],'CODE_READY')
+    def test_legacy_receipt_resumes_existing_draft_without_recreating_environment(self):
+        node=self.nodes[1];store=node.projects().store
+        node.process('projects.sync.begin',self.begin)
+        receipt=node.projects().folder/(node.projects().key(self.begin)+'.sync.json')
+        session=json.loads(receipt.read_text());session.pop('environmentMode');node.atomic_json(receipt,session)
+        project=store.path/hashlib.sha256(USER.encode()).hexdigest()/'imported'/'project.json'
+        metadata=json.loads(project.read_text());metadata['environmentMode']='isolated';node.atomic_json(project,metadata)
+        with patch.object(store,'create',side_effect=AssertionError('Legacy environment must not be recreated')):
+            self.assertEqual(node.process('projects.sync.begin',self.begin)['state'],'RECEIVING_MANIFEST')
+            self.seal();self.call('chunk',path='sub/train.py',offset=0,data=base64.b64encode(self.data).decode())
+            self.assertEqual(self.call('finish')['state'],'CODE_READY')
+        self.assertEqual(store.environment_mode(USER,'imported'),'isolated')
+    def test_legacy_missing_target_cannot_be_recreated_by_begin(self):
+        node=self.nodes[1];store=node.projects().store
+        with patch.object(store,'create',side_effect=OSError('interrupted create')):
+            with self.assertRaises(OSError):node.process('projects.sync.begin',self.begin)
+        receipt=node.projects().folder/(node.projects().key(self.begin)+'.sync.json')
+        session=json.loads(receipt.read_text());session.pop('environmentMode');node.atomic_json(receipt,session)
+        with patch.object(store,'create',side_effect=AssertionError('No replacement environment')):
+            with self.assertRaisesRegex(ValueError,'Legacy sync target is missing'):node.process('projects.sync.begin',self.begin)
+        self.assertEqual(store.list(USER),[])
     def test_invalid_manifest_and_retry_cannot_replace_completed_file(self):
         self.seal();payload=base64.b64encode(self.data).decode();self.call('chunk',path='sub/train.py',offset=0,data=payload)
         self.assertTrue(self.call('chunk',path='sub/train.py',offset=0,data=payload)['complete'])
