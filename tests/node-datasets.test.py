@@ -29,7 +29,7 @@ class NodeDatasets(unittest.TestCase):
         self.data_mount = local_data_mounts(self.base)
         self.data_mount.start()
         self.addCleanup(self.data_mount.stop)
-        for name in ('platform-root-guard.py','node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'dataset-upload.py', 'sandbox-runner.py', 'storage-quota.py'):
+        for name in ('platform-root-guard.py','node-executor.py', 'scheduling-policy.py', 'dataset-cache.py', 'dataset-upload.py', 'dataset-files.py', 'storage-observation.py', 'sandbox-runner.py', 'storage-quota.py'):
             shutil.copy2(DEPLOY / name, self.base / name)
         self.source = self.base / 'source'
         self.source.mkdir()

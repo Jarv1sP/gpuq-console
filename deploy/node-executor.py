@@ -394,6 +394,10 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
         # Older Portal versions ignore this additive projection.
         result['storageOverview']={'protocol':'dataset-storage-node-v1',
             'cache':{'volume':dict(result),'budgetBytes':cache.budget_bytes},'warehouse':None}
+        spec=importlib.util.spec_from_file_location('gpuq_storage_observation',HERE/'storage-observation.py')
+        observer=importlib.util.module_from_spec(spec);spec.loader.exec_module(observer)
+        result['storageOverview']['cache'].update(observer.project_usage(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())))
+        result['datasetFileList']=1
         if CONFIG.get('storageWarehouse') is not None:
             try:
                 warehouse=storage_warehouse()
@@ -1696,6 +1700,10 @@ def process(operation,args):
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         return getattr(module,operation.rsplit('.',1)[1])(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation.startswith('projects.'):return projects().process(operation,args)
+    if operation=='datasets.files.list':
+        spec=importlib.util.spec_from_file_location('gpuq_dataset_files',HERE/'dataset-files.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.listing(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation.startswith('datasets.upload.'):return dataset_uploads().process(operation,args)
     if operation.startswith('datasets.workspace.'):return data_workspaces().process(operation,args)
     if operation.startswith('datasets.import.'):return data_imports().process(operation,args)
@@ -1924,6 +1932,20 @@ def write_rpc_line(value):
     if len(raw)>1048576:raise ValueError('Terminal response too large')
     sys.stdout.buffer.write(raw);sys.stdout.buffer.flush()
 
+DATASET_FILES_RPC_OPERATIONS=('datasets.list','datasets.capacity','datasets.files.list')
+
+def dataset_files_rpc(data):
+    """Separate immutable forced path: metadata and owner-bound directory only.
+
+    Not an upgrade to an upload key or the pinned general-purpose executor.
+    The bridge chooses this trusted path; callers cannot request another RPC.
+    """
+    if (not isinstance(data,dict) or set(data)!={'operation','args'}
+            or data['operation'] not in DATASET_FILES_RPC_OPERATIONS
+            or not isinstance(data['args'],dict)):
+        raise ValueError('Invalid dataset metadata RPC')
+    return process(data['operation'],data['args'])
+
 if __name__=='__main__':
     os.umask(0o077)
     upload_ingress_only=len(sys.argv)==2 and sys.argv[1]=='--dataset-upload-ingress-rpc'
@@ -1953,17 +1975,20 @@ if __name__=='__main__':
     if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--project-local-import-worker':sys.exit(projects().local_imports().worker(*sys.argv[2:]))
     try:
+        files_rpc_mode=len(sys.argv)==2 and sys.argv[1]=='--dataset-files-rpc'
         reader=BoundedRPCInput(sys.stdin.fileno())
         first=reader.line(1600000,time.monotonic()+27)
         try:header=json.loads(first)
         except (ValueError,UnicodeDecodeError):header=None
         if isinstance(header,dict) and header.get('protocol')==TERMINAL_STREAM_PROTOCOL:
             if upload_ingress_only:raise ValueError('Terminal streams are not allowed by the upload ingress key')
+            if files_rpc_mode:raise ValueError('Terminal streams are not allowed by the dataset metadata key')
             if len(first)>TERMINAL_FRAME_BYTES or not first.endswith(b'\n'):raise ValueError('Invalid terminal stream handshake')
             serve_terminal_stream(header,reader,write_rpc_line);sys.exit(0)
         raw=reader.rest(first,1600000)
         data=json.loads(raw)
         if upload_ingress_only:require_upload_ingress_operation(data['operation'])
-        result=process(data['operation'],data['args'])
+        if files_rpc_mode:result=dataset_files_rpc(data)
+        else:result=process(data['operation'],data['args'])
         print(json.dumps({'ok':True,'result':result}))
     except Exception as e:print(json.dumps({'ok':False,'error':str(e)[:400]}))

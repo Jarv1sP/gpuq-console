@@ -310,6 +310,9 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
       if(value.inodeUsageKnown===true&&(!Number.isSafeInteger(value[key])||value[key]<0))fail('数据盘 inode 容量暂时无法确认。',502);
       result[key]=value.inodeUsageKnown===true?value[key]:null;
     }
+    const time=value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value)&&Number.isFinite(Date.parse(value))?value:null;
+    result.checkedAt=time(value.checkedAt);
+    result.collectedAt=time(value.collectedAt)??result.checkedAt;
     return {...result,inodeUsageKnown:value.inodeUsageKnown===true,guarded:value.guarded===true,
       ...(value.datasetDelete===1&&service.datasetDeleteCapabilities?await service.datasetDeleteCapabilities(principal):{datasetDelete:0})};
   }
