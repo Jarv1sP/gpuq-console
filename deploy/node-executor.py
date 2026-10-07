@@ -1886,7 +1886,7 @@ if __name__=='__main__':
     if len(sys.argv)==2 and sys.argv[1]=='--direct-upload-daemon':
         spec=importlib.util.spec_from_file_location('gpuq_direct_upload',HERE/'direct-upload.py')
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        module.serve(sys.modules[__name__],dataset_uploads());sys.exit(0)
+        module.serve(dataset_ingress_view(),dataset_uploads());sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))
