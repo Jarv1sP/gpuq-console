@@ -168,7 +168,11 @@ try{
  assert.match(await resourceDetail(admin,'gpu-1').textContent(),/状态未知/);
  await saveSnapshot();await refreshPage(admin);await gpu0.waitFor();
  await openMembers(admin);assert.equal(await admin.locator('#add-user').count(),0);
- await admin.locator('.management-toolbar [data-action=invites]').click();await admin.locator('[data-action=rotate-invite]').click();await capture(admin,'members-invite-confirm-1440.png');await admin.locator('#confirm-action').click();const code=await admin.locator('#current-invite').inputValue();assert.ok(code.startsWith('GPUQ-U-'));
+ await admin.locator('.management-toolbar [data-action=invites]').click();
+ const rotateInvite=admin.locator('#invites-dialog [data-action=rotate-invite].primary:visible');
+ await rotateInvite.waitFor({state:'visible'});assert.equal(await rotateInvite.count(),1);
+ assert.equal(await admin.locator('#invites-dialog .invite-actions .primary:visible').count(),1,'the invitation panel has one explicit generate/rotate operation');
+ assert.equal(await rotateInvite.isEnabled(),true);await rotateInvite.click();await capture(admin,'members-invite-confirm-1440.png');await admin.locator('#confirm-action').click();const code=await admin.locator('#current-invite').inputValue();assert.ok(code.startsWith('GPUQ-U-'));
  await capture(admin,'members-invites-1440.png');await admin.setViewportSize({width:390,height:844});await capture(admin,'members-invites-390.png');await admin.setViewportSize({width:1440,height:1050});
  await admin.locator('[data-close=invites-dialog]').click();await admin.reload();await admin.locator('.management-toolbar [data-action=invites]').click();assert.equal(await admin.locator('#current-invite').inputValue(),code);await admin.locator('[data-close=invites-dialog]').click();
  await verifyAuthentication(member,origin,capture);
@@ -193,7 +197,8 @@ try{
  // Verify automatic registration discovery, without pressing refresh.
  await admin.locator('[data-user]').filter({hasText:'验收同学'}).waitFor({timeout:22000});await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('[data-machine=gpu-1]').check();await admin.locator('[data-quota=gpu-1]').fill('2');await admin.locator('[data-quota=total]').fill('2');
  await admin.evaluate(()=>scrollTo(0,0));assert.equal(await admin.locator('#page-users [data-action=save-policy].primary:visible').count(),1);
- assert.equal(await admin.locator('#page-users .primary:visible').count(),2);
+ assert.equal(await admin.locator('#editor .editor-save .primary:visible').count(),1,'the quota editor has exactly one save/approve primary operation');
+ assert.equal(await admin.locator('#editor [data-action=save-policy]').isEnabled(),true,'the valid quota draft is ready for approval');
  assert.equal(await admin.locator('#page-users [data-member-create].primary:visible').count(),1);assert.equal(await admin.locator('[data-member-create]').isDisabled(),true,'new accounts cannot discard an unsaved quota draft');
  const approval=await admin.locator('[data-action=save-policy]').boundingBox(),strip=await admin.locator('#control-strip').boundingBox();assert.ok(approval.y>=0&&approval.y+approval.height<strip.y,'approval is visible before scrolling to the per-server fields');
  assert.equal(await admin.locator('[data-permission-meter=gpu-1] .is-on').count(),2);

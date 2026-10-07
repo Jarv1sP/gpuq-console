@@ -45,6 +45,33 @@ test('personal readable names persist without changing dataset identifiers, file
   assert.deepEqual(f.records(machine),before);assert.ok(f.calls.every(c=>['datasets.list','transfers.capabilities'].includes(c.operation)));
   await f.restart();assert.equal((await f.call('datasets.label.get',{machine,dataset})).name,changed.name);
 });
+test('generated IDs default to original names without changing ownership, access or personal label scope',async t=>{
+  const f=await fixture(t),upload='u-0123456789abcdef-ZJU-MoCap',workspace='w-fedcba9876543210-4ddress';
+  const before={datasets:[upload,workspace].map(dataset=>({dataset,ownerIds:f.users.map(user=>user.id),
+    versions:[{version,state:'READY',bytes:1024,files:1}]}))};
+  f.service.bridge=async(host,operation,args)=>{f.calls.push({host,operation,args});
+    if(operation==='datasets.list')return structuredClone(before);
+    if(operation==='transfers.capabilities')return {enabled:false,protocol:'lan-transfer-v1',sources:[]};
+    throw Error('Unexpected node write '+operation);
+  };
+  const initial=await f.call('datasets.label.get',{machine,dataset:upload});
+  assert.equal(initial.name,'ZJU-MoCap');assert.equal(initial.displayName,null);assert.equal(initial.revision,0);
+  assert.equal(initial.dataset,upload);assert.equal(initial.ownerId,f.users[0].id);
+  for(const operation of ['datasets.list','datasets.catalog']){
+    const result=await f.call(operation,{machine});
+    const u=result.datasets.find(row=>row.dataset===upload),w=result.datasets.find(row=>row.dataset===workspace);
+    assert.equal(u.name,'ZJU-MoCap');assert.equal(w.name,'4ddress');
+    assert.equal(u.versions[0].version,version);
+    assert.equal(operation==='datasets.list'?u.ownerLabel:u.versions[0].ownerLabel,'共享授权用户：alice、bob');
+    assert.equal(u.displayNameRevision,0);
+  }
+  await f.call('datasets.label.set',{machine,dataset:upload,displayName:'人体动作',revision:0});
+  assert.equal((await f.call('datasets.label.get',{machine,dataset:upload})).name,'人体动作');
+  assert.equal((await f.call('datasets.label.get',{machine,dataset:upload},'bob')).name,'ZJU-MoCap');
+  assert.deepEqual(before.datasets.map(row=>row.dataset),[upload,workspace]);
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM dataset_labels').get().n,1,'Defaults create no metadata rows');
+  assert.ok(f.calls.every(c=>['datasets.list','transfers.capabilities'].includes(c.operation)),'No node mutation or renamed paths');
+});
 test('shared readers choose independent personal names; member cannot edit another account',async t=>{
   const f=await fixture(t);
   await f.call('datasets.label.set',{machine,dataset,displayName:'Alice 的名称',revision:0});

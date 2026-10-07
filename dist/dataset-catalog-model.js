@@ -1,6 +1,7 @@
 // Data only: consume the portal's permission-filtered catalog. Do not guess
 // ownership, a latest version, cache release, capacity or training admission.
 import {databaseSummary} from './dataset-flow.js';
+import {defaultDatasetDisplayName} from './dataset-display-name.js';
 export function datasetOwnerName(label){
   if(typeof label!=='string')return '未知';
   const name=label.trim().replace(/^(?:所属用户|共享授权用户)\s*[:：]\s*/, '').trim();
@@ -87,7 +88,7 @@ export function aggregateDatasetCatalog(catalog){
       const names=group.items.map(row=>row.labelScope==='personal'?text(row.name):null);
       const revisions=group.items.map(row=>number(row.displayNameRevision));
       const name=same(names),revision=same(revisions),labelKnown=!!name&&revision!==null;
-      return {dataset,displayName:labelKnown?name:dataset,
+      return {dataset,displayName:labelKnown&&!(revision===0&&name===dataset)?name:defaultDatasetDisplayName(dataset),
         displayNameRevision:labelKnown?revision:null,labelScope:labelKnown?'personal':null,
         versions:[...group.versions].map(([version,observations])=>{
           const locations=observations.flatMap(row=>row.locations),servers=[...machines].map(([machine,directory])=>

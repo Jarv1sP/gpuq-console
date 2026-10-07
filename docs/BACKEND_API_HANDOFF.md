@@ -197,6 +197,8 @@ CLI `gpuctl push-status LOCAL [REMOTE] --project PROJECT --machine MACHINE --jso
 
 个人显示名使用 `datasets.label.get {machine,dataset}` 读取，`datasets.label.set {machine,dataset,displayName,revision}` 修改。名称为 1–80 个可见字符，允许中文，拒绝控制字符；`revision` 必须沿用最近查询值，409 冲突后请用户刷新决定，不自动覆盖。响应有规范逻辑 `dataset`、原 `name`、可空的 `displayName`、`revision`、`ownerId` 和 `scope:"personal"`。管理员代管时可显式增加 `ownerId`，普通成员不能指定他人。该名称仅作用于这位用户的显示视图，不重命名节点登记、版本或训练挂载路径，也不改变共享数据权限。
 
+未设置个人显示名时，`name` 对严格节点生成格式 `^[uw]-[a-f0-9]{16}-([A-Za-z0-9][A-Za-z0-9_-]{0,39})$` 返回末尾的原上传／发布名称；其他 ID 原样返回。`dataset`、owner、revision 及 `displayName:null` 不变，不新建 label 行。网页兼容旧门户的原 ID 默认回包，但不会用前缀建立授权、逻辑别名或合并同名数据。
+
 门户控制面顺序：
 
 1. `datasets.upload.begin`：`machine`、`name`、UUID `key`、`manifestBytes`、`manifestSha256`、`totalBytes`、`entries`；仅用户明确同意大文件中转时增加 `allowRelay: true`。
