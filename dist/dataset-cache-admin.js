@@ -10,7 +10,7 @@ export {cacheRetentionSession} from './manual-pin-state.js';
 export function cacheAdminHTML(admin){
   return admin?`<section class="dataset-cache-admin"><header><h3>缓存容量</h3>${cacheBudgetInfo()}</header><details id="dataset-cache-admin"><summary class="button">查看缓存策略</summary><div class="dataset-cache-toolbar"><button class="button" type="button" data-cache-refresh>刷新缓存策略</button><span data-cache-policy-status role="status">展开后查询服务器</span></div><div class="dataset-cache-gauges"></div><div class="dataset-cache-previews"></div></details></section>`:'';
 }
-export function datasetCacheAdminUI(store,section,toast,{room=section.dataset.adminStorage!==undefined?'admin':'datasets'}={}){
+export function datasetCacheAdminUI(store,section,toast,{room=section.dataset.adminStorage!==undefined?'admin':'datasets',onStatus=()=>{}}={}){
   let identity='',generation=0,policyBusy=false,policyLoaded=false;const queried=new Set();
   const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   const admin=()=>store.principal?.role==='admin';
@@ -22,6 +22,7 @@ export function datasetCacheAdminUI(store,section,toast,{room=section.dataset.ad
   function renderSlot(slot,message=''){
     if(!admin()){slot.replaceChildren();return;}
     const item=target(slot),value=retention.state(item),n=count(value.status,item),known=n!==null,record=value.record;
+    onStatus(item,value.status);
     const ready=known&&value.status.version.state==='READY'&&value.status.version.manualPinProtocol===1,readBlocked=value.busy||!allowed(item),blocked=readBlocked||!!value.error||!!maintenanceFor(store.data?.operationalMaintenance,item.machine);
     const uncertain=record?.phase==='uncertain',proof=value.status?.version.manualPin;
     const retryKnown=uncertain&&proof?.pinId===record.pinId&&proof.owner===store.principal.userId&&typeof proof.present==='boolean';

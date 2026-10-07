@@ -11,8 +11,8 @@ import {inspectGeometry} from './layout-geometry.mjs';
 const origin='https://offline-admin-storage.test',version='a'.repeat(64),out=join(process.env.UI_SCREENSHOTS||'/tmp/stargate-admin-storage','admin-storage');
 const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):MACHINES;
 const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
-const geometry={roots:['.admin-data-storage'],numericCells:['.dataset-volume'],containment:'input,select,button,h3,.server-id',
-  labelledHelp:[{buttons:'.admin-data-storage [data-copy-help]',rows:'.dataset-version-details>summary,.dataset-cache-admin>header,#cloud-admin>summary',labels:':scope>h3,:scope>span:not(.copy-help)'}],
+const geometry={roots:['.admin-data-storage'],numericCells:['.dataset-volume'],largeTargets:'.storage-server-select',containment:'input,select,button,h3,.server-id',
+  labelledHelp:[{buttons:'.admin-data-storage [data-copy-help]',rows:'.storage-policy>header,.storage-retention>header,#cloud-admin>summary',labels:':scope>h3,:scope>h4,:scope>span:not(.copy-help)'}],
   disclosureRows:['.dataset-version-details>summary'],repeatedPadding:['.admin-storage-row']};
 const records=[];
 try{
@@ -53,24 +53,23 @@ try{
       await page.screenshot({path:join(out,'denied-'+width+'.png')});await context.close();continue;
     }
     await page.locator('.admin-storage-row').first().waitFor();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);
-    assert.equal(await page.locator('.admin-storage-row').count(),2);assert.equal(await page.locator('.admin-storage-empty').count(),1);
-    assert(!calls.some(row=>row.operation.startsWith('datasets.storage.')),'closed policy and retention disclosures send no RPC');
+    assert.equal(await page.locator('.admin-storage-row').count(),2);assert.equal(await page.locator('.storage-server-card').count(),machines.length);assert.equal(await page.locator('.admin-storage-locations,[data-storage-owner]').count(),0,'operations does not repeat the browsing directory');
+    assert.equal(calls.filter(row=>row.operation==='datasets.storage.status'&&!row.args.dataset).length,machines.length);assert.equal(calls.filter(row=>row.operation==='datasets.storage.plan').length,machines.length);assert(!calls.some(row=>row.operation==='datasets.storage.status'&&row.args.dataset),'closed retention sends no version query');assert(!calls.some(row=>row.operation.endsWith('.pin')||row.operation.endsWith('.unpin')),'overview is read-only');
     assert(!calls.some(row=>row.operation.startsWith('cloud.')),'closed cloud connection sends no RPC');
     assert.equal(await page.locator('[data-admin-full-delete]').count(),0,'capability zero has no delete entry');
     assert.deepEqual(await page.locator('[name=dataset-machine] option').evaluateAll(nodes=>nodes.map(node=>node.value)),machines.map(row=>row.id));
     const report=await inspectGeometry(page,geometry);assert(report.pass,JSON.stringify(report.failures));records.push({role,width,report});
     await page.screenshot({path:join(out,'directory-'+width+'.png'),fullPage:true});
-    await page.locator('[data-storage-owner]').selectOption({label:'共享授权用户：alice、bob'});assert.equal(await page.locator('.admin-storage-row').count(),1);
-    await page.locator('[data-storage-owner]').selectOption('');
-    const detail=page.locator('.admin-storage-row').filter({hasText:'samples'}).locator('.dataset-version-details');await detail.locator('summary').click();
+    await page.locator('[data-storage-select]').nth(1).click();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);assert.equal(await page.locator('[data-storage-machine]').textContent(),machines[1].id);assert(!calls.some(row=>row.operation==='datasets.storage.status'&&row.args.dataset));assert.equal(calls.filter(row=>row.operation==='datasets.storage.plan').length,machines.length,'server selection reuses explicit overview without polling');await page.locator('[data-storage-select]').first().click();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);
+    const detail=page.locator('.storage-pin-row').filter({hasText:'samples'});await detail.locator('summary').click();
     await page.waitForFunction(()=>document.querySelector('[data-cache-retention=pin]')&&!document.querySelector('[data-cache-retention=pin]').disabled);
     const slot=detail.locator('[data-cache-pin-slot]');assert.match(await slot.textContent(),/已固定保留 1 处/);
-    assert.deepEqual(calls.find(row=>row.operation==='datasets.storage.status').args,{machine:machines[0].id,dataset:'samples',version});
+    assert.deepEqual(calls.find(row=>row.operation==='datasets.storage.status'&&row.args.dataset).args,{machine:machines[0].id,dataset:'samples',version});
     await slot.locator('[data-cache-retention=pin]').click();await slot.locator('[data-cache-retention=unpin]').waitFor();
     const pin=calls.find(row=>row.operation==='datasets.storage.pin');assert.match(pin.args.pinId,/^manual-/);assert.equal(pins.size,2);
     page.on('dialog',dialog=>dialog.accept());await slot.locator('[data-cache-retention=unpin]').click();await slot.locator('[data-cache-retention=pin]').waitFor();
     assert.equal(calls.find(row=>row.operation==='datasets.storage.unpin').args.pinId,pin.args.pinId);assert(pins.has('foreign-pin'));assert.equal(pins.size,1);
-    await page.locator('#dataset-cache-admin>summary').click();await page.locator('.dataset-cache-gauge').first().waitFor();
+    await page.locator('.dataset-cache-gauge').first().waitFor();
     assert.equal(await page.locator('.dataset-cache-number').first().textContent(),'90%900.00 GiB / 1000.00 GiB','budget percentage uses only explicit plan bytes');
     assert.match(await page.locator('.dataset-cache-preview').first().textContent(),/超过高水位时将释放（预览，不会立即删除）/);
     const writes=calls.filter(row=>row.operation.endsWith('.pin')||row.operation.endsWith('.unpin')).length;
@@ -79,8 +78,8 @@ try{
     const policyReport=await inspectGeometry(page,geometry);assert(policyReport.pass,JSON.stringify(policyReport.failures));records.push({role,width,policyReport});
     await page.screenshot({path:join(out,'policy-'+width+'.png'),fullPage:true});
     if(width===1440){
-      await page.locator('.admin-storage-row').filter({hasText:'samples'}).locator('.dataset-version-details>summary').click();
-      const ownSlot=page.locator('.admin-storage-row').filter({hasText:'samples'}).locator('[data-cache-pin-slot]');
+      await page.locator('.storage-pin-row').filter({hasText:'samples'}).locator('summary').click();
+      const ownSlot=page.locator('.storage-pin-row').filter({hasText:'samples'}).locator('[data-cache-pin-slot]');
       await ownSlot.locator('[data-cache-retention=pin]').waitFor();losePin=true;
       await ownSlot.locator('[data-cache-retention=pin]').click();await page.waitForFunction(()=>document.querySelector('[data-cache-pin-slot]').textContent.includes('结果未确认'));
       const uncertain=calls.filter(row=>row.operation==='datasets.storage.pin').at(-1);
@@ -93,5 +92,5 @@ try{
     const before=calls.length;await page.evaluate(()=>storageModule.destroy());await page.waitForTimeout(100);assert.equal(calls.length,before,'unmount stops reads and polling');assert.equal(await page.locator('#storage-fixture>*').count(),0);
     assert.deepEqual(errors,[]);await context.close();
   }
-  await writeFile(join(out,'geometry.json'),JSON.stringify(records,null,2));console.log('ADMIN STORAGE MODULE PASS: explicit all-owner directory; member zero-RPC denial; policy budget truth; original-owner pin/unpin and lost-reply reconciliation; no automatic writes; teardown;1440/390/320. Registry integration is checked separately through #admin.');
+  await writeFile(join(out,'geometry.json'),JSON.stringify(records,null,2));console.log('ADMIN STORAGE MODULE PASS: per-server operations; no duplicate directory; actual budgets and release candidates; member zero-RPC denial; policy budget truth; original-owner pin/unpin and lost-reply reconciliation; no automatic writes; teardown;1440/390/320. Registry integration is checked separately through #admin.');
 }finally{await browser.close();}
