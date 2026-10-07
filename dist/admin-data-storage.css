@@ -5,10 +5,10 @@
 .sb .admin-data-storage h3{font:500 20px var(--display)}
 .sb .admin-data-storage h4{font:500 15px var(--sans)}
 .sb .admin-data-storage [data-storage-status]:not(:empty){margin:0 0 16px;color:var(--ink-2);font-size:13px}
-.sb .admin-data-storage :is(button,select,input){font:13px var(--sans);background:var(--bg-1);color:var(--ink);border:1px solid var(--line);border-radius:4px}
+.sb .admin-data-storage :is(button,select,input):not(.copy-help-button){font:13px var(--sans);background:var(--bg-1);color:var(--ink);border:1px solid var(--line);border-radius:4px}
 .sb .admin-data-storage .button{height:32px;min-height:32px;padding:0 12px;display:inline-flex;align-items:center;justify-content:center;gap:6px}
-.sb .admin-data-storage button:hover{border-color:var(--ink-3)}
-.sb .admin-data-storage button:focus-visible{outline:2px solid var(--ink);outline-offset:4px}
+.sb .admin-data-storage button:not(.copy-help-button):hover{border-color:var(--ink-3)}
+.sb .admin-data-storage button:not(.copy-help-button):focus-visible{outline:2px solid var(--ink);outline-offset:4px}
 .sb .storage-fleet{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:24px}
 .sb .storage-server-card{min-width:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--bg-1)}
 .sb .storage-server-card[data-selected=true]{border-color:var(--ink-2)}
@@ -85,4 +85,23 @@
  .sb .admin-storage-row{grid-template-columns:minmax(0,1fr) 88px;gap:12px}
  .sb .admin-storage-actions{grid-column:1/-1;justify-content:start}
  .sb .admin-storage-cloud #cloud-admin{padding:0 16px}
+}
+
+.sb .storage-server-context{display:flex;align-items:center;gap:8px}
+.sb .storage-warehouse-badge{padding:2px 6px;border:1px solid var(--line);border-radius:3px;color:var(--ink-2);font:11px var(--sans)}
+.sb .storage-users,.sb .storage-delete-tasks{margin-top:24px;border:1px solid var(--line);background:var(--bg-1);border-radius:8px;padding:24px;min-width:0}
+.sb .storage-users>header,.sb .storage-delete-tasks>header{display:flex;align-items:center;gap:8px;margin-bottom:16px}
+.sb .storage-users p,.sb .storage-delete-tasks p{font-size:13px;color:var(--ink-2)}
+.sb .storage-delete-tasks [data-storage-delete-tasks]:not([hidden])+[data-storage-delete-empty]{display:none}
+.sb .storage-user-table>[role=row]{display:grid;grid-template-columns:minmax(0,1fr) 100px minmax(120px,.7fr);align-items:center;gap:16px;padding:12px 0;border-top:1px solid var(--line);font-size:13px}
+.sb .storage-user-table>[role=row]>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .storage-user-table>[role=row]>span:not(:first-child){text-align:right}
+.sb .storage-user-table .num{font:13px var(--mono);font-variant-numeric:tabular-nums}
+.sb .admin-storage-cloud #cloud-admin>.file-actions{display:flex;flex-wrap:wrap;gap:12px;padding:12px 0}
+.sb .admin-storage-cloud #cloud-admin .button{height:48px;min-height:48px}
+.sb .admin-storage-cloud #cloud-auth-status{padding:0 0 16px;font-size:13px;color:var(--ink-2)}
+@media(max-width:759px){
+ .sb .storage-users,.sb .storage-delete-tasks{padding:16px}
+ .sb .storage-user-table>[role=row]{grid-template-columns:minmax(0,1fr) 48px 96px;gap:8px;font-size:12px}
+ .sb .storage-user-table .num{font-size:12px}
 }

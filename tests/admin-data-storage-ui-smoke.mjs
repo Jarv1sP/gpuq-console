@@ -11,14 +11,14 @@ import {inspectGeometry} from './layout-geometry.mjs';
 const origin='https://offline-admin-storage.test',version='a'.repeat(64),out=join(process.env.UI_SCREENSHOTS||'/tmp/stargate-admin-storage','admin-storage');
 const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):MACHINES;
 const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
-const geometry={roots:['.admin-data-storage'],numericCells:['.dataset-volume'],largeTargets:'.storage-server-select',containment:'input,select,button,h3,.server-id',
-  labelledHelp:[{buttons:'.admin-data-storage [data-copy-help]',rows:'.storage-policy>header,.storage-retention>header,#cloud-admin>summary',labels:':scope>h3,:scope>h4,:scope>span:not(.copy-help)'}],
+const geometry={roots:['.admin-data-storage'],numericCells:['.dataset-volume,.storage-user-table .num'],largeTargets:'.storage-server-select',containment:'input,select,button,h3,.server-id',
+  labelledHelp:[{buttons:'.admin-data-storage [data-copy-help]',rows:'.storage-policy>header,.storage-retention>header,.storage-users>header,.storage-delete-tasks>header,#cloud-admin>summary',labels:':scope>h3,:scope>h4,:scope>span:not(.copy-help)'}],
   disclosureRows:['.dataset-version-details>summary'],repeatedPadding:['.admin-storage-row']};
 const records=[];
 try{
   await mkdir(out,{recursive:true});
   for(const role of ['member','admin'])for(const width of [1440,1024,390,320]){
-    const context=await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'}),page=await context.newPage(),calls=[],errors=[],pins=new Set(['foreign-pin']);let losePin=false,denyPinStatus=false;
+    const context=await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'}),page=await context.newPage(),calls=[],errors=[],pins=new Set(['foreign-pin']);let losePin=false,denyPinStatus=false,cloudDisabled=true,lostReconnect=false;
     page.on('pageerror',error=>errors.push(error.message));
     await context.route('**/*',async route=>{
       const url=new URL(route.request().url());assert.equal(url.origin,origin,'no external request');
@@ -28,7 +28,7 @@ try{
         assert.equal(role,'admin','member sends zero privileged API requests');
         const reply=value=>route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
         if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：alice',versions:[{version,state:'READY',bytes:7*1024**3,files:120}]},{dataset:'shared-data',ownerLabel:'共享授权用户：alice、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
-        if(operation==='datasets.catalog')return reply({machine:args.machine,datasetDelete:0,partial:false,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[]});
+        if(operation==='datasets.catalog')return reply({machine:args.machine,datasetDelete:0,partial:false,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[{dataset:'samples',versions:[{version,locations:[{machine:machines[0].id,dataset:'samples',storage:{dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:machines.at(-1).id}}]}]}]});
         if(operation==='datasets.storage.status'){
           if(denyPinStatus&&args.pinId)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'原保留状态待确认'})});
           return reply({enabled:true,...(args.dataset?{version:{dataset:args.dataset,version:args.version,state:'READY',pinCount:pins.size,manualPinProtocol:1,...(args.pinId?{manualPin:{pinId:args.pinId,owner:'fixture-admin',present:pins.has(args.pinId)}}:{})}}:{})});
@@ -36,7 +36,8 @@ try{
         if(operation==='datasets.storage.plan')return reply({enabled:true,dryRun:true,usageBytes:900*1024**3,budgetBytes:1000*1024**3,highWater:.83,lowWater:.61,candidates:[{dataset:'shared-data',version,bytes:2*1024**3,lastUsedAt:1700000000}],protectedUnknown:[],unavailableAuthorities:[]});
         if(operation==='datasets.storage.pin'){pins.add(args.pinId);if(losePin){denyPinStatus=true;return route.abort('failed');}return reply({pinned:true,pinId:args.pinId});}
         if(operation==='datasets.storage.unpin')return reply({unpinned:pins.delete(args.pinId)});
-        if(operation==='cloud.info')return reply({capabilityVerified:false,configurationEnabled:true,managedExternally:true});
+        if(operation==='cloud.info')return reply({backend:'clouddrive',capabilityVerified:true,configurationEnabled:true,managedExternally:true,disabled:cloudDisabled,aliyunConnected:!cloudDisabled});
+        if(operation==='cloud.auth.reconnect'){assert.deepEqual(args,{});cloudDisabled=false;if(lostReconnect){lostReconnect=false;return route.abort('failed');}return reply({reconnected:true,backend:'clouddrive',managedExternally:true});}
         throw Error('unexpected admin fixture operation '+operation);
       }
       assert(Object.hasOwn(STARBASE_ASSETS,url.pathname)||['/styles.css','/workspace.css','/job-progress.js','/cloud-import-ui.js','/cloud-files-ui.js','/data-workspace.js','/data-route.js','/dataset-upload.js'].includes(url.pathname),'registered local asset '+url.pathname);
@@ -55,9 +56,14 @@ try{
     await page.locator('.admin-storage-row').first().waitFor();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);
     assert.equal(await page.locator('.admin-storage-row').count(),2);assert.equal(await page.locator('.storage-server-card').count(),machines.length);assert.equal(await page.locator('.admin-storage-locations,[data-storage-owner]').count(),0,'operations does not repeat the browsing directory');
     assert.equal(calls.filter(row=>row.operation==='datasets.storage.status'&&!row.args.dataset).length,machines.length);assert.equal(calls.filter(row=>row.operation==='datasets.storage.plan').length,machines.length);assert(!calls.some(row=>row.operation==='datasets.storage.status'&&row.args.dataset),'closed retention sends no version query');assert(!calls.some(row=>row.operation.endsWith('.pin')||row.operation.endsWith('.unpin')),'overview is read-only');
-    assert(!calls.some(row=>row.operation.startsWith('cloud.')),'closed cloud connection sends no RPC');
+    assert.equal(calls.filter(row=>row.operation==='cloud.info').length,1,'open connection shows only an initial read');assert(!calls.some(row=>row.operation.startsWith('cloud.auth.')),'mount never mutates a connection');
+    assert.equal(await page.locator('#cloud-auth-disconnect').isHidden(),true,'disabled CloudDrive offers only reconnect and query');
+    assert.equal(await page.locator('.storage-warehouse-badge').count(),1);assert.equal(await page.locator('.storage-server-card').filter({has:page.locator('.storage-warehouse-badge')}).count(),1);
     assert.equal(await page.locator('[data-admin-full-delete]').count(),0,'capability zero has no delete entry');
     assert.deepEqual(await page.locator('[name=dataset-machine] option').evaluateAll(nodes=>nodes.map(node=>node.value)),machines.map(row=>row.id));
+    assert.equal(await page.locator('.storage-server-card').last().locator('.storage-warehouse-badge').textContent(),'仓库');
+    assert.equal(await page.locator('.storage-user-table [role=row]').count(),3);assert.match(await page.locator('[data-storage-users]').textContent(),/alice.*2.*36.00 GiB.*bob.*1.*8.00 GiB/);assert.equal(await page.locator('[data-storage-delete-capability]').textContent(),'节点未启用彻底删除');
+    const help=await page.locator('[data-copy-help]').evaluateAll(nodes=>nodes.map(node=>({border:getComputedStyle(node).borderTopWidth,radius:getComputedStyle(node).borderRadius})));assert(help.every(row=>row.border==='0px'&&row.radius==='50%'),'all help buttons retain the shared borderless circle');
     const report=await inspectGeometry(page,geometry);assert(report.pass,JSON.stringify(report.failures));records.push({role,width,report});
     await page.screenshot({path:join(out,'directory-'+width+'.png'),fullPage:true});
     await page.locator('[data-storage-select]').nth(1).click();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);assert.equal(await page.locator('[data-storage-machine]').textContent(),machines[1].id);assert(!calls.some(row=>row.operation==='datasets.storage.status'&&row.args.dataset));assert.equal(calls.filter(row=>row.operation==='datasets.storage.plan').length,machines.length,'server selection reuses explicit overview without polling');await page.locator('[data-storage-select]').first().click();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);
@@ -89,6 +95,7 @@ try{
       assert.equal(calls.filter(row=>row.operation==='datasets.storage.status').at(-1).args.pinId,uncertain.args.pinId);
       assert(pins.has('foreign-pin'));
     }
+    if(width===1440){await page.evaluate(()=>{store.data.users=[{id:store.principal.userId,enabled:true,limits:{}}];store.data.operationalMaintenance={version:1,global:{reason:'local maintenance'},machines:{}};});await page.locator('#cloud-auth-reconnect').click();await page.getByText('云盘已连接。',{exact:true}).waitFor();assert.equal(calls.filter(row=>row.operation==='cloud.auth.reconnect').length,1,'admin global connection is independent of server quota/maintenance');assert.equal(await page.locator('#cloud-auth-disconnect').isVisible(),true,'disconnect is available only after a confirmed connection');lostReconnect=true;await page.locator('#cloud-auth-reconnect').click();await page.getByText('重新连接结果待确认，请重新查询。',{exact:true}).waitFor();assert.equal(calls.filter(row=>row.operation==='cloud.auth.reconnect').length,2);await page.locator('#cloud-auth-info').click();await page.getByText('云盘已连接。',{exact:true}).waitFor();assert.equal(calls.filter(row=>row.operation==='cloud.auth.reconnect').length,2,'lost receipt causes only an explicit status read, never replay');const count=calls.length;await page.evaluate(()=>{store.principal={userId:'other-member',role:'member'};store.authGeneration++;document.querySelector('#cloud-auth-reconnect').disabled=false;document.querySelector('#cloud-auth-reconnect').click();});await page.waitForTimeout(50);assert.equal(calls.length,count,'role revocation prevents reconnect even after DOM tampering');}
     const before=calls.length;await page.evaluate(()=>storageModule.destroy());await page.waitForTimeout(100);assert.equal(calls.length,before,'unmount stops reads and polling');assert.equal(await page.locator('#storage-fixture>*').count(),0);
     assert.deepEqual(errors,[]);await context.close();
   }

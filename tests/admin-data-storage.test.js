@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adminDatasetCatalog,adminStorageSummary,mountAdminDataStorage,registerDatasetStorageAdmin} from '../dist/admin-data-storage.js';
+import {adminDatasetCatalog,adminStorageSummary,adminStorageUsers,adminWarehouseMachines,mountAdminDataStorage,registerDatasetStorageAdmin} from '../dist/admin-data-storage.js';
 const machines=[{id:'node-a'},{id:'node-b'}],version='a'.repeat(64),other='b'.repeat(64);
 const listing=(machine,dataset='samples',ownerLabel='所属用户：alice',state='READY',bytes=10)=>({machine,state:'ok',datasets:[{dataset,ownerLabel,versions:[{version,state,bytes,files:2,canPrepare:false}]}]});
 
@@ -12,6 +12,23 @@ test('storage summary uses explicit budget thresholds and candidate sizes, never
   assert.deepEqual(adminStorageSummary(null,null),{budget:{kind:'unknown'},count:null,bytes:null});
   assert.equal(adminStorageSummary({enabled:true},{...plan,candidates:[{bytes:10},{}]}).bytes,null);
   assert.equal(adminStorageSummary({enabled:true},{...plan,candidates:[{bytes:Number.MAX_SAFE_INTEGER},{bytes:1}]}).bytes,null);
+});
+
+test('user statistics sum known physical ready caches, share only explicit names and exclude unknown facts',()=>{
+  const catalog={partial:true,datasets:[{dataset:'samples',versions:[{bytes:10,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：alice'},{state:'READY',bytes:10,ownerLabel:'共享授权用户：alice、bob'},{state:'PREPARING',ownerLabel:'所属用户：alice'},{state:'READY',bytes:10,ownerLabel:'所属用户：未知'}]},{bytes:null,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：bob'}]}]},{dataset:'second',versions:[{bytes:30,locations:[{state:'READY',bytes:30,ownerLabel:'所属用户：bob'}]}]}]};
+  const original=structuredClone(catalog);
+  assert.deepEqual(adminStorageUsers(catalog),{rows:[{name:'bob',datasets:2,bytes:40},{name:'alice',datasets:1,bytes:20}],excluded:2,partial:true});
+  assert.deepEqual(catalog,original);
+  assert.equal(adminStorageUsers({datasets:[{dataset:'unsafe',versions:[{bytes:10,locations:[{state:'READY',bytes:10,ownerLabel:'所属用户：<img src=x>'}]}]}]}).rows.length,0);
+});
+test('warehouse marker requires retained ARCHIVED proof bound to the complete immutable version',()=>{
+  const storage={dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:'node-b'},v={version,locations:[{machine:'node-a',dataset:'samples',storage}]};
+  const catalog={datasets:[{dataset:'samples',versions:[v]}]};
+  assert.deepEqual([...adminWarehouseMachines(catalog)],['node-b']);
+  for(const change of [{phase:'COPYING'},{originalRetained:false},{archiveMachine:''},{version:other},{dataset:undefined}]){
+    assert.equal(adminWarehouseMachines({datasets:[{versions:[{...v,locations:[{storage:{...storage,...change}}]}]}]}).size,0);
+  }
+  assert.equal(adminWarehouseMachines(null).size,0);
 });
 
 test('administrator catalog retains physical registrations, complete hashes and actual owner labels',()=>{
