@@ -27,7 +27,7 @@ export function createCacheOperation({store,action,machine,dataset,version,capab
  let row=null,busy=false,paused=false,timer=null,closed=false,errors=0,notice='',cap=capabilities,journalError=false;
  const live=()=>!closed&&!signal?.aborted&&store.production===true&&!!account&&store.principal?.enabled!==false&&JSON.stringify([store.principal?.userId,store.authGeneration])===binding;
  const capability=()=>adaptCacheCapability(cap,action);
- const available=()=>typeof cap?.allowed==='boolean';
+ const available=()=>capability().allowed||!!capability().reason;
  function journal(){const value=JSON.parse(storage.getItem(cacheOperationStorageKey(account))||'[]');if(!Array.isArray(value))throw Error('原请求记录无法读取。');return value;}
  function restore(value){return value?{request:Object.freeze({...value.request}),operationId:uuid.test(value.operationId||'')?value.operationId:null,state:'UNKNOWN',phase:null,progress:null,error:null,canCancel:false,confirmed:false}:null;}
  function save(){

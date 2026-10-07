@@ -59,7 +59,7 @@ test('blocked release displays exact server reason and never calls unregister, e
 });
 test('old operation or missing capability fails closed before any write',async()=>{
  const f=fixture();f.cap=()=>{throw Object.assign(Error('unknown operation'),{status:404});};await f.api.start();assert.equal(f.api.snapshot().visible,false);assert.equal(f.values.size,0);
- const g=fixture();g.cap={protocol:'simulated-contract'};await g.api.start();assert.equal(g.requests.length,1);assert.equal(g.values.size,0);
+ const g=fixture();g.cap={protocol:'simulated-contract'};await g.api.start();assert.equal(g.api.snapshot().visible,false);assert.equal(g.requests.length,1);assert.equal(g.values.size,0);
 });
 test('failed persistence is zero dispatch; account change and abort ignore delayed responses',async()=>{
  const f=fixture();f.failSave=true;await f.api.start();assert.equal(f.requests.filter(r=>r.operation==='datasets.cache.prepare').length,0);
