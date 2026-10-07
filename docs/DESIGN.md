@@ -622,7 +622,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | [oci-cohort.test.js](../tests/oci-cohort.test.js) | default OFF makes no node call and does not create bookkeeping |
 | [operational-maintenance.test.js](../tests/operational-maintenance.test.js) | operational state is independent, persistent, explicitly restored and revision fenced |
 | [persistent-login-http.test.js](../tests/persistent-login-http.test.js) | HTTP fixture does not reuse a deliberately retired keep-alive socket or replay authentication |
-| [personal-project-ui.test.js](../tests/personal-project-ui.test.js) | all environment choices confirm the requested project and retain the shared legacy default |
+| [personal-project-ui.test.js](../tests/personal-project-ui.test.js) | confirmation helper strictly checks OCI and retains historical venv interpretation; new-project UI offers OCI only |
 | [portal-image.test.js](../tests/portal-image.test.js) | every transitive local Portal module exists at its runtime COPY path |
 | [portal.test.js](../tests/portal.test.js) | VPS accounts, policies and hashed login sessions survive restart, no default demo logins or raw tokens |
 | [priority-api.test.js](../tests/priority-api.test.js) | rank edits preserve yield and restart and expose intermediate P1/P3 |

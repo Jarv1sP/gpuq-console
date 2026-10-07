@@ -18,7 +18,7 @@ const folder=await mkdtemp(join(tmpdir(),'gpuq-project-ui-'));
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-projects-ui';
 const password='Project-Browser-Fixture-Only-2026!',release='a'.repeat(64),nextRelease='b'.repeat(64),datasetVersion='c'.repeat(64);
 const [machine,other]=MACHINES.map(item=>item.id),calls=[],pageErrors=[],httpErrors=[],blocked=[],projects=new Map(),terminals=new Map(),uploads=new Map(),uploadIdentities=new Map();
-let server,service,browser,badReceiptOnce=false,dropUploadReplyOnce=false,terminalGate,releaseTerminalGate;
+let server,service,browser,badReceiptOnce=false,dropUploadReplyOnce=false,terminalGate,releaseTerminalGate,ociAvailable=false;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port,key=(node,user,project)=>JSON.stringify([node,user,project]);
 const copy=value=>structuredClone(value);
@@ -32,7 +32,7 @@ try{
   const bridge=async(node,operation,args)=>{
     calls.push({machine:node,operation,args:copy(args),at:Date.now()});
     const identity=key(node,args.userId,args.project),project=projects.get(identity);
-    if(operation==='projects.list')return {projects:[...projects].filter(([entry])=>{const [m,u]=JSON.parse(entry);return m===node&&u===args.userId;}).map(([,value])=>copy(value))};
+    if(operation==='projects.list')return {environmentModes:ociAvailable?['oci']:[],projects:[...projects].filter(([entry])=>{const [m,u]=JSON.parse(entry);return m===node&&u===args.userId;}).map(([,value])=>copy(value))};
     if(operation==='projects.create'){assert.ok(!project);const value={project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null,environmentMode:args.environmentMode||'shared'};projects.set(identity,value);return copy(value);}
     if(operation==='projects.status'){assert.ok(project);return copy(project);}
     if(operation==='projects.publish'){
@@ -104,16 +104,20 @@ try{
   assert.equal(await page.locator('#host-maintenance').isVisible(),false);
   assert.equal(await page.locator('[name=terminal-host]').count(),0,'no sticky ROOT mode switch exists');
   await setMachine(machine);
+  assert.equal(await page.locator('#project-create-form [type=submit]').isDisabled(),true,'unknown OCI capability never falls back to a shared project');
+  assert.equal(calls.filter(call=>call.operation==='projects.create').length,0);
+  ociAvailable=true;await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
   for(const name of ['machine','terminal-machine','file-machine'])assert.equal(await page.locator(`[name=${name}]`).inputValue(),machine);
   await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('vision-demo');
-  assert.equal(await page.locator('[name=environment-mode]').inputValue(),'shared');
-  await page.locator('[name=environment-choice][value=isolated]').check();
+  assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
+  assert.equal(await page.locator('[name=environment-choice]').count(),0,'new projects offer no shared/isolated mode choice');
+  assert.equal(await page.locator('[name=environment-mode] option').count(),1);
   await action('projects.create',()=>page.locator('#project-create-form [type=submit]').click());await idle();
-  assert.equal(calls.filter(call=>call.operation==='projects.create').at(-1).args.environmentMode,'isolated');
-  assert.match(await page.locator('#project-status-detail').textContent(),/隔离（不继承基础包）/);
+  assert.equal(calls.filter(call=>call.operation==='projects.create').at(-1).args.environmentMode,'oci');
+  assert.match(await page.locator('#project-status-detail').textContent(),/个人容器/);
   assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
-  assert.match(await page.locator('#workspace-mode-note').textContent(),/\/opt\/project-env/);
+  assert.match(await page.locator('#workspace-mode-note').textContent(),/代码与容器环境一起保存为训练版本/);
   await page.locator('#workspace-files summary').click();
   const file=Buffer.alloc(1048576+11,65);await page.locator('[name=files]').setInputFiles({name:'train.py',mimeType:'text/plain',buffer:file});
   await page.locator('#workspace-upload').click();await page.waitForFunction(()=>document.querySelector('#workspace-result').textContent.includes('已上传 1 个文件'));await idle();
@@ -154,6 +158,7 @@ try{
   for(const call of calls.filter(call=>call.operation.startsWith('terminal.'))){assert.equal(call.machine,machine);assert.equal(call.args.project,'vision-demo');assert.equal(call.args.hostAdmin,false);}
 
   await page.locator('#train-form').evaluate(form=>{form.closest('details').open=true;});
+  await page.locator('[name=training-target]').selectOption('current');
   await page.locator('[name=command]').fill('python train.py --output /outputs/result.json');await page.locator('[name=name]').fill('project-smoke');
   await closeSubmit(page);await action('projects.publish',()=>page.locator('#project-publish').click());await idle();
   assert.match(await page.locator('#project-status').textContent(),/正在生成训练版本/);assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
@@ -206,6 +211,7 @@ try{
   await page.setViewportSize({width:390,height:844});await capture('projects-mobile-output.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px workbench must not overflow');
 
+  await page.locator('[name=workspace-project]').selectOption('');await idle();
   await setMachine(other);assert.equal(await page.locator('[name=workspace-project]').inputValue(),'');
   assert.equal(await page.locator('[name=file-path]').inputValue(),'.');assert.equal(await page.locator('[name=file-run-id]').inputValue(),'');assert.equal(await page.locator('[name=file-area]').inputValue(),'code');
   for(const name of ['machine','terminal-machine','file-machine'])assert.equal(await page.locator(`[name=${name}]`).inputValue(),other);
@@ -219,7 +225,8 @@ try{
   await capture('projects-mobile-ready.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px selected-project layout must not overflow');
   await page.locator('#project-create>summary').click();
-  await page.locator('[name=environment-choice][value=isolated]').check();
+  assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
+  assert.equal(await page.locator('[name=environment-choice]').count(),0);
   await capture('projects-mobile-environment.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px environment creation form must not overflow');
 
@@ -325,7 +332,7 @@ try{
   assert.deepEqual(httpErrors,[],'Public login and authenticated project flows must have zero HTTP errors');
   assert.equal(service.store.jobs.length,2);assert.equal(terminals.size,0);
   assert.ok(calls.filter(call=>call.operation==='projects.status').length<12,'publication polling stays bounded');
-  console.log(JSON.stringify({status:'passed',checks:['explicit shared machine/project','create and draft','explicit isolated environment','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','delayed ROOT/development opens cannot replace newest intent','390px environment form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
+  console.log(JSON.stringify({status:'passed',checks:['explicit development machine/project','unknown OCI capability denies creation','default personal OCI without mode choices','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','delayed ROOT/development opens cannot replace newest intent','390px container form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
 }finally{releaseTerminalGate?.();await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(folder,{recursive:true,force:true});}
 
 // Keep the terminal contract browser suite in the existing CI project entry.

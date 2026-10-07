@@ -86,7 +86,7 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 {"operation":"projects.create","args":{"machine":"SERVER_ID","project":"experiment-a","environmentMode":"oci"}}
 ```
 
-`project` 须匹配 `^[a-z][a-z0-9_-]{0,47}$`。`environmentMode` 只用于创建，取 `shared`、`isolated` 或 `oci`；省略时沿用共享模式。同名项目不能改换模式，失败时不自动降级或创建替代项目。创建成功须确认 `result.environmentMode === "oci"`，不能把 HTTP 200 当作容器模式已确认。
+`project` 须匹配 `^[a-z][a-z0-9_-]{0,47}$`。新项目固定为个人 OCI；`environmentMode` 可省略或兼容显式 `"oci"`，shared/isolated 在门户派发前拒绝，不能通过旧客户端绕过。既有项目与历史版本仍可查询，不自动转换或重建环境；管理员 ROOT 入口独立不变。同名项目不能改换模式，失败时不自动降级或创建替代项目。创建成功须确认准确 `result.project` 与 `result.environmentMode === "oci"`，不能把 HTTP 200 当作容器模式已确认。
 
 | 操作 | `args` | 成功的 `result` |
 | --- | --- | --- |

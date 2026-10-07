@@ -186,13 +186,14 @@ test('collaboration uses posts and chat while root requests stay retired', () =>
   assert.match(guide, /现有共享\/隔离 Python 环境继续可用，但不能通过 `sudo apt` 修改宿主机/);
 });
 
-test('optional OCI guide requires node enablement and distinguishes container from host root',()=>{
-  assert.match(guide,/管理员已启用的节点/);
-  assert.match(guide,/gpuctl project create system-project --env-mode oci/);
+test('new projects use OCI without a mode choice and distinguish container from host root',()=>{
+  assert.match(guide,/新项目统一使用个人容器，不需要选择环境模式/);
+  assert.match(guide,/gpuctl project create system-project`/);
+  assert.doesNotMatch(guide,/gpuctl project create [^\n`]+--env-mode/);
   assert.match(guide,/容器内 root 不是服务器 root，开发阶段无 GPU/);
   assert.doesNotMatch(guide,/宿主机 root/);
-  assert.match(guide,/没开通的服务器会直接拒绝，不影响你已有的项目/);
-  assert.match(guide,/页面上没有「个人容器」选项，说明尚未确认你有可用的个人容器位置；可刷新项目重试/);
+  assert.match(guide,/没开通的服务器会直接拒绝，不影响已有资料/);
+  assert.match(guide,/创建按钮不可用时，先刷新项目，仍未确认就联系管理员/);
   assert.match(guide,/网页从「我的项目」进入个人容器.*不用先选顶栏服务器/);
   assert.match(guide,/切换顶栏服务器不会搬迁当前容器、文件或开发终端/);
   assert.match(guide,/训练固定该镜像版本并只见调度分配的 GPU/);
