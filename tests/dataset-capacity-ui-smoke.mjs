@@ -1,0 +1,81 @@
+// All overview replies are explicitly simulated. No production sessions or writes.
+import assert from 'node:assert/strict';
+import {readFile,mkdir} from 'node:fs/promises';
+import {join} from 'node:path';
+import {chromium} from 'playwright';
+import {MACHINES} from '../dist/machines.js';
+const machines=process.env.UI_INVENTORY_FIXTURE?JSON.parse(await readFile(process.env.UI_INVENTORY_FIXTURE,'utf8')):MACHINES;
+const output=process.env.UI_SCREENSHOTS||'/tmp/stargate-capacity-ui';await mkdir(output,{recursive:true});
+const origin='https://simulated-capacity.test',root=new URL('../dist/',import.meta.url),version='a'.repeat(64),GiB=1024**3;
+const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH});
+try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320]){
+ const page=await browser.newPage({viewport:{width,height:1000},reducedMotion:'reduce'}),errors=[];
+ page.on('pageerror',error=>errors.push(error.message));
+ await page.route('**/*',async route=>{
+  const url=new URL(route.request().url());assert.equal(url.origin,origin);
+  if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/fonts.css"><link rel="stylesheet" href="/starbase.css"><link rel="stylesheet" href="/shell.css"><link rel="stylesheet" href="/datasets.css"><link rel="stylesheet" href="/dataset-flow.css"><link rel="stylesheet" href="/dataset-warehouse.css"><link rel="stylesheet" href="/admin-data-storage.css"><body class="sb" data-room="datasets" style="min-height:100vh;background:var(--bg)"><main id="main-content"><p>模拟数据 · 只读界面验证</p><div class="page-heading"><h1 id="page-title">数据集</h1><div class="heading-actions"></div></div><section id="page-datasets"></section><section class="admin-data-storage" id="admin-capacity-fixture"></section></main>'});
+  if(url.pathname==='/favicon.ico')return route.fulfill({status:204});assert(!url.pathname.includes('..'));
+  return route.fulfill({body:await readFile(new URL('.'+url.pathname,root)),contentType:url.pathname.endsWith('.js')?'text/javascript':url.pathname.endsWith('.css')?'text/css':'font/woff2'});
+ });
+ await page.goto(origin);await page.evaluate(async({role,machines,version,GiB})=>{
+  const {warehouseWorkspaceHTML,datasetWarehouseView}=await import('/dataset-warehouse-view.js');
+  const root=document.querySelector('#page-datasets');root.innerHTML=warehouseWorkspaceHTML();
+  for(const machine of machines)root.querySelector('[name=dataset-machine]').add(new Option(machine.id,machine.id));
+  window.calls=[];window.reply=null;window.waitReply=null;
+  window.store={production:true,principal:{userId:'reader',username:'示例成员',role},authGeneration:0,data:{machines},onAuthChange(){},async call(operation,args){calls.push({operation,args});assertOperation(operation);if(waitReply)return await waitReply;return reply;}};
+  function assertOperation(operation){if(operation!=='datasets.overview')throw Error('Unexpected simulated read/write '+operation);}
+  const first=machines[0].id,at='2026-10-08T01:23:00Z';
+  const volume=(id,used,available,total=1000*GiB)=>({id,state:'READY',checkedAt:at,totalBytes:total,usedBytes:used*GiB,availableBytes:available*GiB,reserveBytes:50*GiB,usableBytes:(available-50)*GiB});
+  const item=(dataset,ownerLabel,canUse)=>({dataset,displayName:dataset==='sample-data'?'校园场景数据':dataset,versions:[{version,ownerLabel,canUse,contentBytes:142*GiB,fileCount:48320,originals:[{machine:machines.at(-1).id,dataset,confirmed:true,state:'READY'}],caches:machines.map((row,index)=>({machine:row.id,dataset,state:index===0?'READY':'NOT_LOCAL',canUse,canPrepare:true}))}]});
+  window.snapshot={protocol:'dataset-storage-overview-v1',checkedAt:at,partial:false,filePreviewAvailable:false,
+   warehouse:{state:'READY',volumes:[{machine:machines.at(-1).id,volume:volume('warehouse-volume',700,300,1000*GiB),originalContentBytes:600*GiB,warnings:[]}]},
+   caches:machines.map((row,index)=>({machine:row.id,state:'READY',volume:volume('cache-volume-'+index,700,300),readyContentBytes:[620,900,310,200][index]*GiB,budgetBytes:1000*GiB,readyVersionCount:3,usageComplete:true})),
+   datasets:[item('sample-data','所属用户：示例成员',true),item('foreign-private','所属用户：其他成员',false)]};
+  const legacy={machine:first,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[{dataset:'legacy-data',versions:[{version,canUse:true,state:'READY',ownerLabel:'所属用户：示例成员',locations:[{machine:first,dataset:'legacy-data',state:'READY',canUse:true}]}]}]};
+  window.view=datasetWarehouseView(store,root,()=>{},{refresh(){},removeUI:{canOpenFullDelete:()=>false},machineAllowed:()=>true,authorizedMachines:()=>machines,access:v=>({selectable:v.canUse===true&&v.state==='READY',browseOnly:v.canUse!==true,canRetry:false})});
+  view.catalog(legacy);window.legacy=legacy;
+ },{role,machines,version,GiB});
+ assert.equal(await page.locator('.capacity-warehouse').count(),0,'No new capacity before a real protocol response');
+ await page.evaluate(async()=>{document.body.dataset.room='work';await view.loadOverview();document.body.dataset.room='datasets';});
+ assert.deepEqual(await page.evaluate(()=>calls),[],'No overview read outside the dataset room');
+ await page.evaluate(async()=>{reply={protocol:0};await view.loadOverview();});assert.equal(await page.locator('.capacity-warehouse').count(),0);assert.equal(await page.locator('[data-v3-select=legacy-data]').count(),1);
+ await page.evaluate(async()=>{reply=snapshot;await view.loadOverview();});
+ assert.equal(await page.locator('[data-v3-select]').count(),role==='admin'?2:1);assert.equal(await page.locator('#page-title .v3-count').textContent(),(role==='admin'?2:1)+' 个');
+ await page.locator('[data-v3-filter="'+machines[0].id+'"]').click();
+ const geometry=async()=>{
+  await page.evaluate(()=>document.fonts.ready);
+  const value=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,bar:document.querySelector('.capacity-strata').getBoundingClientRect().height,
+   cache:document.querySelector('#warehouse-machine-capacity .capacity-cache-rail').getBoundingClientRect().height,cells:document.querySelectorAll('#warehouse-machine-capacity .capacity-disk>span').length}));
+  assert(value.scroll<=width+1,JSON.stringify(value));assert.equal(value.bar,14);assert.equal(value.cache,6);assert.equal(value.cells,20);
+  const copy=await page.locator('#page-datasets').innerText();assert.doesNotMatch(copy,/原件|软件预算|所在磁盘|承载卷|只预警|检查于|最后成功/);
+  assert.equal(await page.locator('.capacity-warehouse p,.capacity-detail p').count(),0,'No explanatory paragraphs');
+ };
+ await geometry();assert.equal(await page.locator('.capacity-proof.confirmed').count(),1);
+ assert.equal(await page.locator('[data-v3-upload]').first().isEnabled(),true);
+ await page.evaluate(()=>document.activeElement?.blur());await page.screenshot({path:join(output,role+'-normal-'+width+'.png'),fullPage:true});
+ for(const scene of ['unknown','warning','shared']){
+  await page.evaluate(scene=>{
+   const value=structuredClone(snapshot);
+   if(scene==='unknown'){value.warehouse.volumes[0].volume.totalBytes=null;value.caches[0].readyContentBytes=null;value.caches[0].usageComplete=false;value.datasets[0].versions[0].originals[0].confirmed=false;}
+   if(scene==='warning'){value.warehouse.warnings=[{code:'WAREHOUSE_FREE_SPACE_LOW'}];value.warehouse.volumes[0].volume.availableBytes=20*1024**3;value.warehouse.volumes[0].volume.usedBytes=980*1024**3;}
+   if(scene==='shared'){value.caches.at(-1).volume=structuredClone(value.warehouse.volumes[0].volume);}
+   view.storageOverview(value);
+  },scene);
+  if(scene==='shared')await page.locator('[data-v3-filter="'+machines.at(-1).id+'"]').click();
+  await geometry();
+  if(scene==='unknown'){assert.equal(await page.locator('.capacity-warehouse.unknown').count(),1);assert.equal(await page.locator('.capacity-proof.confirmed').count(),0);assert(await page.locator('.capacity-warehouse').getAttribute('title'));}
+  if(scene==='warning'){assert.equal(await page.locator('.capacity-warning').textContent(),'仓库空间不足');assert.equal(await page.locator('[data-v3-upload]').first().isEnabled(),true,'Warning does not ban an upload');}
+  if(scene==='shared')assert.equal(await page.locator('#warehouse-machine-capacity .capacity-shared').textContent(),'与仓库同盘');
+  await page.evaluate(()=>document.activeElement?.blur());await page.screenshot({path:join(output,role+'-'+scene+'-'+width+'.png'),fullPage:true});
+ }
+ if(role==='admin'){
+  await page.evaluate(async()=>{const {storageCapacityDetailHTML,applyCapacityGeometry}=await import('/dataset-flow.js');const {adaptStorageOverview}=await import('/dataset-catalog-model.js');
+   const root=document.querySelector('#admin-capacity-fixture');root.innerHTML='<h2>模拟后台容量组件</h2><div class="storage-fleet">'+adaptStorageOverview(snapshot).caches.map(row=>'<article class="storage-server-card"><h3>'+row.machine+'</h3>'+storageCapacityDetailHTML(row)+'</article>').join('')+'</div>';applyCapacityGeometry(root);});
+  assert.equal(await page.locator('#admin-capacity-fixture .capacity-disk').count(),machines.length);
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  await page.screenshot({path:join(output,'admin-cards-'+width+'.png'),fullPage:true});
+ }
+ await page.evaluate(async()=>{waitReply=new Promise(resolve=>window.releaseOverview=resolve);window.pending=view.loadOverview();store.principal={userId:'new-reader',username:'新成员',role:'member'};store.authGeneration++;view.reset();releaseOverview(snapshot);await pending;});
+ assert.equal(await page.locator('.capacity-warehouse').count(),0,'A retired account reply cannot restore capacity or datasets');
+ assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.overview'&&Object.keys(row.args).length===0));assert.deepEqual(errors,[]);await page.close();
+}console.log('CAPACITY UI PASS: simulated member/admin 1440/1024/390/320; normal/unknown/warning/shared, no explanation copy, legacy fallback, account fence, readonly room gating.');}finally{await browser.close();}

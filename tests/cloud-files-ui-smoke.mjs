@@ -33,6 +33,7 @@ try{
         const {operation,args}=route.request().postDataJSON();calls.push({operation,args:structuredClone(args)});
         if(operation==='state')return reply(route,null);
         if(operation==='projects.list')return reply(route,{projects:[]});
+        if(operation==='datasets.overview'){assert.deepEqual(args,{});return reply(route,{protocol:0});}
         if(operation==='datasets.catalog')return reply(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[{dataset:'local-sample',name:'样例数据',versions:[{version:release,state:'READY',bytes:7*1024**3,files:12,canPrepare:false,canUse:true,ownerLabel:'所属用户：'+userId,locations:machines.map(m=>({machine:m.id,state:'READY',canUse:true,ownerLabel:'所属用户：'+userId}))}]}]});
         if(operation==='datasets.upload.routes')return reply(route,{available:false,protocol:'dataset-upload-v1',machine:args.machine});
     if(operation==='datasets.capacity')return reply(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});

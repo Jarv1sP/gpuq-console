@@ -116,6 +116,18 @@ class Publish(unittest.TestCase):
         cache.release_lease(actor,dataset,version,leases[0]['leaseId'])
         self.assertFalse(cache._leases(dataset,version))
 
+    def test_personal_originals_never_offer_managed_cache_release(self):
+        result=self.publish();ref={'dataset':result['dataset'],'version':result['version']}
+        args={**ref,'userId':self.user,'hostAdmin':False}
+        cap=self.n.process('storage.cache-action.capabilities',args)
+        self.assertEqual(cap['protocol'],0);self.assertFalse(cap['release']);self.assertFalse(cap['prepare'])
+        for action in ['prepare','release']:
+            with self.assertRaisesRegex(ValueError,'Personal immutable originals'):
+                self.n.process('storage.cache-action.'+action,{**args,'key':str(uuid.uuid4())})
+        with self.assertRaises(PermissionError):self.n.process('storage.cache-action.capabilities',{**args,'userId':'demo-user-9'})
+        with self.assertRaises(ValueError):self.n.process('storage.cache-action.capabilities',{**args,'force':True})
+        _,cache=self.n.dataset_cache_for(ref['dataset']);self.assertEqual(cache.status(self.n.DATASET_MODULE.Principal(self.user,False),**ref)['state'],'READY')
+
     def test_live_raw_writer_prevents_publication_and_pending_publication_prevents_new_writer(self):
         lock=self.storage.data_lifetime(self.user,'hdd')
         try:

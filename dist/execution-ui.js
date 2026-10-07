@@ -6,7 +6,7 @@ import {elasticCapable,placementCapable} from './gpu-allocation.js';
 import {elasticFields,elasticFromForm,allocationSummary,placementFields,placementFromForm,placementSummary} from './gpu-allocation-ui.js';
 import {taskDescription} from './task-metadata.js';
 import {installTaskLabelEditor,taskLabelEditorHTML} from './task-display-ui.js';
-import {createProjectManagement,projectSelectHTML} from './project-management-ui.js';
+import {createProjectManagement,projectSelectHTML,legacyProjectEnvironment} from './project-management-ui.js';
 import {workbenchCards,jobOverviewHTML,endedJob,stateHTML,stateClass,trainingReadout,quotaLedgerHTML,personalQuotaReadout,boundarySweep,taskMissionUI,infoHTML,discloseInfo,jobCancelConfirmation,projectEnvironmentLabel,confirmProjectCreation,projectPublicationStorage,projectPublicationOutcome,projectPublicationDelay,projectPublicationProgressHTML,confirmPublicationMotion,createProjectActivity} from './workbench-ui.js';
 import {endProjectTerminals} from './terminal-ui.js';
 export {endProjectTerminals} from './terminal-ui.js';
@@ -54,7 +54,7 @@ export function projectCreationMachine(mode,focus,source,directory,machines){
   return [source,focus,...allowed].find(id=>allowed.includes(id))||'';
 }
 export function projectStatusText(info,hasTerminal=false){
-  const labels={DRAFT:'代码草稿',SYNCING:'正在同步代码',READY:'已有就绪版本',PUBLISHING:'正在生成训练版本',FAILED:'生成训练版本失败',UNKNOWN:'发布结果未确认'};
+  const labels={DRAFT:'开发草稿',SYNCING:'正在更新开发草稿',READY:'已有发布版本',PUBLISHING:'正在生成训练版本',FAILED:'生成训练版本失败',UNKNOWN:'发布结果未确认'};
   const parts=[labels[info?.state]||'项目状态未确认'];
   if(info)parts.push(info.environmentMode==='oci'?'环境：个人容器（容器内 root，不是服务器 root）':info.environmentMode==='isolated'?'环境：隔离（不继承基础包）':info.environmentMode==='shared'?'环境：共享基础包':'环境：共享基础包（旧默认）');
   if(info?.error)parts.push(String(info.error));
@@ -130,7 +130,7 @@ export function projectDiskQuotaHTML(value,owner){
 export async function uploadProjectFile(file,context,send,progress=()=>{},{inspect,signal,current=()=>true,onRecoverySupport=()=>{}}={}){
   const check=()=>{signal?.throwIfAborted();if(!current())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');};
   check();
-  if(!validProject(context.project)||context.area!=='code')throw Error('项目只能上传到代码草稿。');
+  if(!validProject(context.project)||context.area!=='code')throw Error('项目只能上传到开发草稿。');
   if(!Number.isSafeInteger(file.size)||file.size<0||file.size>100*1024*1024)throw Error('网页单文件上限 100 MiB；大文件请用 CLI。');
   const contents=await file.arrayBuffer();check();if(contents.byteLength!==file.size)throw Error('文件读取长度不一致，请重新选择。');
   const sha256=[...new Uint8Array(await crypto.subtle.digest('SHA-256',contents))].map(value=>value.toString(16).padStart(2,'0')).join('');
@@ -282,9 +282,11 @@ export function executionUI(store,refresh,toast){
   }
   function renderEnvironmentChoice(){
     const choice=query('[name=environment-mode]');if(!choice)return;
-    const oci=projectMachines().some(item=>directory.get(item.id)?.environmentModes?.includes('oci'));
     choice.value='oci';
-    query('#environment-mode-note').textContent=oci?'每个新项目使用个人容器，可安装系统软件；开发终端没有 GPU，容器内 root 不是服务器 root。':'个人容器尚未获准或能力未确认。请刷新项目或联系管理员；不会改用共享环境。';
+    const machines=projectMachines(),known=machines.length>0&&machines.every(item=>directory.get(item.id)?.environmentModes?.length>0);
+    const availability=query('#project-create-availability');availability.hidden=!!creationMachine();
+    availability.textContent=!machines.length?'暂无服务器授权':directoryLoading?'正在确认…':directoryError||!known?'个人容器状态未知':'个人容器未开通';
+    query('#environment-mode-note').textContent='可在容器内安装系统软件；开发终端没有 GPU；容器内 root 不是服务器 root。';
   }
   function notifyContext(){document.dispatchEvent(new CustomEvent('gpuq-workspace-context',{detail:{userId:actor,...context()}}));}
   const reduced=()=>matchMedia('(prefers-reduced-motion:reduce)').matches;
@@ -342,6 +344,7 @@ export function executionUI(store,refresh,toast){
     const terminalHelp=query('#terminal-mode-note')?.closest('.ui-info');if(terminalHelp)query('.terminal-heading').append(terminalHelp);
     discloseInfo(query('#environment-mode-note'),'运行环境说明');
     const fieldHelp=(note,control)=>{const help=note?.closest('.ui-info');if(help&&control)control.before(help);};
+    const materials=document.createElement('p');materials.id='project-materials-note';materials.textContent='权重、tokenizer 放在项目里；发布不携带开发 HOME';query('#workspace-files').append(materials);discloseInfo(materials,'项目材料说明');fieldHelp(materials,query('[name=file-area]'));
     fieldHelp(query('#training-target-note'),train.querySelector('[name=training-target]'));
     fieldHelp(query('#priority-note'),train.querySelector('[name=priority]'));
     for(const [id,name] of [['custom-policy-note','custom-policy'],['elastic-note','elastic'],['placement-note','gpu-placement']])fieldHelp(query('#'+id),train.querySelector('[name='+name+']'));
@@ -491,7 +494,7 @@ export function executionUI(store,refresh,toast){
     query('#workspace-upload').textContent=project&&uploadRecovery?.scope===uploadScope()&&uploadRecovery.supported?'上传 / 续传':'上传';
     query('#workspace-upload').disabled=!available||locked||output||publishing;query('[name=files]').disabled=!available||locked||output||publishing;
     query('[name=file-area]').disabled=!project||locked;query('.output-run-fields').hidden=!output;query('#project-release-field').hidden=!project;query('#project-detail').hidden=!project;
-    query('#workspace-mode-note').textContent=personal?'个人数据在 /data-hdd、/data-ssd；训练工作副本和结果默认在机械盘 /workspace，目录自行组织。':info?.environmentMode==='oci'?'代码与容器环境一起保存为训练版本；训练只使用选定版本。':project?'代码在 /workspace，环境在 /opt/project-env；训练读取只读版本，输出写入 /outputs。':'终端、文件和训练共用个人 /workspace，新实验可单独创建项目。';
+    query('#workspace-mode-note').textContent=personal?'个人数据在 /data-hdd、/data-ssd；训练工作副本和结果默认在机械盘 /workspace，目录自行组织。':info?.environmentMode==='oci'?'开发草稿发布后成为固定版本；训练只读选定发布版本，不会写回草稿。':project?'开发草稿在 /workspace，环境在 /opt/project-env；训练读取固定发布版本，结果写入 /outputs。':'终端、文件和训练共用个人 /workspace，新实验可单独创建项目。';
     query('#terminal-mode-note').textContent=info?.environmentMode==='oci'?'可在容器内安装系统软件；开发终端没有 GPU；容器内 root 不是服务器 root。':project?'编辑代码、安装项目 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。':'管理个人文件和 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。';
     if(maintenanceFor(store.data?.operationalMaintenance,machine)){
       for(const selector of ['#project-publish','#terminal-open','#terminal-reconnect','#train-form [type=submit]','#workspace-upload','[name=files]'])query(selector).disabled=true;
@@ -513,10 +516,10 @@ export function executionUI(store,refresh,toast){
     release.value=missingPrevious||releases.some(item=>item.release===previous)?previous:releases.some(item=>item.release===info?.latestReadyRelease)?info.latestReadyRelease:(releases[0]?.release||'');
     if(publicationSelection&&releases.some(item=>item.release===publicationSelection)){release.value=publicationSelection;publicationSelection=null;}
     query('#release-full').textContent=release.value||'发布成功后才可提交项目训练。';query('#release-full').title=release.value;
-    const environment=query('#project-environment');environment.hidden=!info;environment.textContent=info?projectEnvironmentLabel(info.environmentMode):'';
+    const environment=query('#project-environment');environment.hidden=!info;environment.textContent=info?projectEnvironmentLabel(info.environmentMode)+(legacyProjectEnvironment(info.environmentMode)?' · 旧环境（兼容）':''):'';
     if(catalogError)status(catalogError,true);
-    else if(project){const phase=info?.progress;const fact=({DRAFT:'代码草稿',READY:'训练版本就绪',PUBLISHING:'正在生成训练版本',FAILED:'生成训练版本失败'})[info?.state]||'项目待更新';const detail=projectStatusText(info,hasTerminal());status(info?.error?fact+' · '+info.error:fact+(phase&&Number.isSafeInteger(phase.completedEntries)?' · '+phase.completedEntries+(Number.isSafeInteger(phase.totalEntries)?' / '+phase.totalEntries:'')+' 项':''),info?.state==='FAILED');query('#project-status-detail').textContent=detail;}
-    else {status(directoryLoading?'正在读取我的项目…':directoryError?'部分项目待确认':focusMachine?'个人工作区':entries.length?'选择我的项目':projectMachines().length?projectCreationMachine('oci','','',directory,projectMachines())?'选择项目，或新建个人容器':'个人容器待确认':'尚未获得服务器授权');query('#project-status-detail').textContent='个人容器的开发位置保持不变；训练可自动选机。共享环境和个人工作区使用明确选择的服务器。'+(directoryError?' '+directoryError:'');}
+    else if(project){const phase=info?.progress;const fact=({DRAFT:'开发草稿',READY:'发布版本就绪',PUBLISHING:'正在生成训练版本',FAILED:'生成训练版本失败'})[info?.state]||'项目待更新';const detail=projectStatusText(info,hasTerminal());status(info?.error?fact+' · '+info.error:fact+(phase&&Number.isSafeInteger(phase.completedEntries)?' · '+phase.completedEntries+(Number.isSafeInteger(phase.totalEntries)?' / '+phase.totalEntries:'')+' 项':''),info?.state==='FAILED');query('#project-status-detail').textContent=detail;}
+    else {status(directoryLoading?'正在读取我的项目…':directoryError?'部分项目待确认':focusMachine?'个人工作区':entries.length?'选择我的项目':projectMachines().length?creationMachine()?'选择项目，或新建个人容器':'个人容器尚不可用':'尚未获得服务器授权');query('#project-status-detail').textContent='个人容器的开发位置保持不变；训练可自动选机。旧环境和个人工作区使用明确选择的服务器。'+(directoryError?' '+directoryError:'');}
     const publicationActions=query('#publication-actions'),progress=query('#publication-progress');publicationActions.hidden=true;progress.replaceChildren();query('#project-status').classList.remove('publication-unknown','publication-ready');
     if(publicationIntent){
       const result=publicationResult||{state:'UNKNOWN'},word=result.state==='READY'?'训练版本已生成 · '+result.release.slice(0,8):result.state==='FAILED'?'生成训练版本失败'+(result.error?' · '+result.error:''):result.state==='PUBLISHING'?'正在生成训练版本':result.state==='REQUESTING'?'正在确认发布':'发布结果未确认';
@@ -534,7 +537,7 @@ export function executionUI(store,refresh,toast){
     select.innerHTML='<option value="">选择任务，或输入任务 ID</option>'+jobs.map(job=>`<option value="${escape(job.id)}">${escape(job.name)} · ${escape(job.id.slice(0,8))} · ${escape(job.state)}</option>`).join('');
     if(jobs.some(job=>job.id===previous))select.value=previous;
   }
-  function clearFileContext(){query('[name=file-path]').value='.';query('[name=file-area]').value='code';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('[name=files]').value='';query('#workspace-result').textContent='仅操作当前服务器、当前工作区。代码上传失败后，可重新上传同一路径；未完成的上传会阻止发布。';}
+  function clearFileContext(){query('[name=file-path]').value='.';query('[name=file-area]').value='code';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('[name=files]').value='';query('#workspace-result').textContent='选择目录或文件。';}
   function syncMachineFields(){for(const name of ['workspace-machine','machine','terminal-machine','file-machine']){const field=query(`[name=${name}]`),selected=name==='workspace-machine'?focusMachine:machine;field.value=selected;field.title=selected;}const selected=(store.data?.machines||[]).find(item=>item.id===machine);query('[name=cards]').max=String(selected?.cards||1);}
   async function selectMachine(value,{keepContainer=false}={}){
     if(value===focusMachine&&(!project||machine===value))return;
@@ -676,7 +679,7 @@ export function executionUI(store,refresh,toast){
         }
         else{let offset=0;do{const bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());if(token!==currentToken())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');await call('files.put',{...target,path,offset,truncate:offset===0,data:base64(bytes)});offset+=bytes.length;progress(offset);}while(offset<file.size);}}
       if(token!==currentToken())return;
-      query('#workspace-result').textContent=`已上传 ${files.length} 个文件${project?'到项目代码草稿；生成训练版本后才能用于训练。':'。'}`;renderProject();toast('文件上传完成。');
+      query('#workspace-result').textContent=`已上传 ${files.length} 个文件${project?'到项目开发草稿；生成训练版本后才能用于训练。':'。'}`;renderProject();toast('文件上传完成。');
     },true);
     if(button.id==='workspace-download')guarded(button,async()=>{
       const target=fileContext(),path=query('[name=file-path]').value;if(!path||path==='.')throw Error('请填入要下载的文件相对路径。');let offset=0;const chunks=[];
@@ -687,7 +690,7 @@ export function executionUI(store,refresh,toast){
   });
   document.addEventListener('submit',event=>{
     if(event.target.id==='project-create-form'){event.preventDefault();const slug=query('[name=new-project]').value;guarded(event.target.querySelector('[type=submit]'),async()=>{
-      const selected=creationMachine(),token=currentToken();if(!selected)throw Error('个人容器尚未获准或能力未确认，请刷新项目或联系管理员。');if(!validProject(slug))throw Error('项目名需小写字母开头，使用字母、数字、下划线或短横线，最多 48 位。');
+      const selected=creationMachine(),token=currentToken();if(!selected)throw Error('尚无已确认支持个人容器的开发位置，不能创建。');if(!validProject(slug))throw Error('项目名需小写字母开头，使用字母、数字、下划线或短横线，最多 48 位。');
       const environmentMode='oci';
       query('#project-create-error').hidden=true;
       let result;try{result=await projectCall('projects.create',{machine:selected,project:slug,environmentMode});if(token!==currentToken())return;confirmProjectCreation(result,{project:slug,environmentMode});}catch(error){if(token===currentToken()){query('#project-create-error').hidden=false;query('#project-create-error').textContent=error.message;}throw error;}
@@ -803,9 +806,9 @@ export function executionUI(store,refresh,toast){
       diagnostics.reset();
       submitDialog?.close();submitDialog?.remove();settingsDialog?.close();settingsDialog?.remove();submitDialog=null;settingsDialog=null;settingsSource=null;jobHTML='';lastJobs.clear();liveJobs.clear();focusedJob=null;historyState='';deepLinkHandled=false;
       submitReceipt=null;parsedTarget=null;acceptedDraft=false;managementSubmit=false;actor=store.principal.userId;machine='';focusMachine='';project='';catalog=[];directory.clear();directoryOwner='';directoryError='';catalogError='';epoch++;stopPolling();machineIdentity='';submitKey=crypto.randomUUID();operationBusy=false;projectBusy=false;
-      section.innerHTML=`<section class="workspace-context" aria-labelledby="workspace-context-title"><div class="workspace-context-heading"><div><div class="eyebrow">WORKSPACE</div><h2 id="workspace-context-title">选择服务器与项目</h2><span id="project-environment" class="project-environment" hidden></span></div><button class="button" id="projects-refresh">刷新项目</button></div><div class="workspace-context-grid"><label>服务器<select name="workspace-machine" aria-describedby="workspace-mode-note"></select></label><label>项目<select name="workspace-project"><option value="">个人工作区</option></select></label></div><p id="workspace-mode-note" class="muted"></p><p id="project-status" class="workspace-status" role="status" aria-live="polite"></p><details id="project-create"><summary>新建项目</summary><form id="project-create-form"><label>项目名称<input name="new-project" pattern="[a-z][a-z0-9_-]{0,47}" maxlength="48" required placeholder="例如 vision-baseline" aria-describedby="project-name-error" spellcheck="false" autocomplete="off"><span id="project-name-error" class="form-error project-name-error" hidden></span></label><fieldset class="project-environment-choice"><legend>运行环境</legend><span>个人容器</span><select name="environment-mode" hidden aria-hidden="true" tabindex="-1"><option value="oci">个人容器</option></select></fieldset><button type="submit" class="button">创建项目</button><p id="project-create-error" class="form-error" role="alert" hidden></p></form><p id="environment-mode-note" class="muted"></p></details><div id="project-detail" class="project-actions"><button class="button primary" id="project-publish">生成训练版本</button><p id="project-terminal-block" class="project-terminal-block" hidden>先结束开发终端（断开不算）</p><button class="button danger" id="project-terminal-stop" hidden>结束终端</button><span class="muted">先完成上传并结束开发终端，再保存代码与环境版本。</span><div id="publication-progress" class="publication-progress"></div><div id="publication-actions" class="publication-actions" hidden><button type="button" class="button quiet" id="publication-query">重新查询</button><button type="button" class="button quiet" id="publication-retry">用同一请求重试</button></div></div></section>
+      section.innerHTML=`<section class="workspace-context" aria-labelledby="workspace-context-title"><div class="workspace-context-heading"><div><div class="eyebrow">WORKSPACE</div><h2 id="workspace-context-title">选择服务器与项目</h2><span id="project-environment" class="project-environment" hidden></span></div><button class="button" id="projects-refresh">刷新项目</button></div><div class="workspace-context-grid"><label>服务器<select name="workspace-machine" aria-describedby="workspace-mode-note"></select></label><label>项目<select name="workspace-project"><option value="">个人工作区</option></select></label></div><p id="workspace-mode-note" class="muted"></p><p id="project-status" class="workspace-status" role="status" aria-live="polite"></p><details id="project-create"><summary>新建项目</summary><form id="project-create-form"><label>项目名称<input name="new-project" pattern="[a-z][a-z0-9_-]{0,47}" maxlength="48" required placeholder="例如 vision-baseline" aria-describedby="project-name-error" spellcheck="false" autocomplete="off"><span id="project-name-error" class="form-error project-name-error" hidden></span></label><fieldset class="project-environment-choice"><legend>个人容器</legend><select name="environment-mode" hidden aria-hidden="true" tabindex="-1"><option value="oci">个人容器</option></select></fieldset><p id="project-create-availability" class="project-create-availability" role="status" hidden></p><button type="submit" class="button">创建项目</button><p id="project-create-error" class="form-error" role="alert" hidden></p></form><p id="environment-mode-note" class="muted"></p></details><div id="project-detail" class="project-actions"><button class="button primary" id="project-publish">生成训练版本</button><p id="project-terminal-block" class="project-terminal-block" hidden>先结束开发终端（断开不算）</p><button class="button danger" id="project-terminal-stop" hidden>结束终端</button><span class="muted">先完成上传并结束开发终端，再保存代码与环境版本。</span><div id="publication-progress" class="publication-progress"></div><div id="publication-actions" class="publication-actions" hidden><button type="button" class="button quiet" id="publication-query">重新查询</button><button type="button" class="button quiet" id="publication-retry">用同一请求重试</button></div></div></section>
       <section class="personal-terminal" aria-labelledby="personal-terminal-title"><div class="terminal-heading"><h3 id="personal-terminal-title">个人开发终端</h3><span class="terminal-scope">日常开发 · 不占 GPU</span></div><p id="terminal-mode-note" class="muted"></p><div class="terminal-controls"><select name="terminal-machine" hidden aria-label="终端服务器"></select><button id="terminal-open" class="button primary">新建开发终端</button><button id="terminal-reconnect" class="button">重连开发会话</button></div></section>
-      <details class="execution-panel" id="workspace-files"><summary>代码与任务输出 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">代码草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传</button></div><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
+      <details class="execution-panel" id="workspace-files"><summary>项目材料与训练结果 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">开发草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传</button></div><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
       <details class="execution-panel"><summary>提交训练</summary><form id="train-form">
         <select name="machine" hidden aria-label="训练服务器"></select>
         <label>训练位置<select name="training-target"><option value="current">当前服务器 · 自动分卡</option><option value="auto">自动选择空闲服务器</option></select></label>

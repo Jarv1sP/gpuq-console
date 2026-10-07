@@ -77,6 +77,7 @@ try{
   await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:2,limits:{[machine]:1,[other]:1}});
   projects.set(key(other,member.id,'other-project'),{project:'other-project',state:'READY',releases:[{release:nextRelease,state:'READY'}],latestReadyRelease:nextRelease});
   projects.set(key(machine,'builtin-admin','admin-project'),{project:'admin-project',state:'DRAFT',releases:[],latestReadyRelease:null});
+  projects.set(key(machine,member.id,'vision-demo'),{project:'vision-demo',environmentMode:'isolated',state:'DRAFT',releases:[],latestReadyRelease:null});
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1100}});
   async function configure(target){
@@ -108,16 +109,21 @@ try{
   assert.equal(calls.filter(call=>call.operation==='projects.create').length,0);
   ociAvailable=true;await action('projects.list',()=>page.locator('#projects-refresh').click());await idle();
   for(const name of ['machine','terminal-machine','file-machine'])assert.equal(await page.locator(`[name=${name}]`).inputValue(),machine);
-  await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('vision-demo');
+  await page.locator('#project-create>summary').click();await page.locator('[name=new-project]').fill('personal-demo');
   assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
-  assert.equal(await page.locator('[name=environment-choice]').count(),0,'new projects offer no shared/isolated mode choice');
+  assert.equal(await page.locator('[name=environment-choice]').count(),0,'new projects offer only personal containers');
   assert.equal(await page.locator('[name=environment-mode] option').count(),1);
   await action('projects.create',()=>page.locator('#project-create-form [type=submit]').click());await idle();
   assert.equal(calls.filter(call=>call.operation==='projects.create').at(-1).args.environmentMode,'oci');
+  assert.equal(await page.locator('[name=workspace-project]').inputValue(),'personal-demo');
   assert.match(await page.locator('#project-status-detail').textContent(),/个人容器/);
+  assert.match(await page.locator('#workspace-mode-note').textContent(),/开发草稿.*发布版本.*不会写回草稿/);
+  await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('vision-demo'));await idle();
+  assert.match(await page.locator('#project-status-detail').textContent(),/隔离（不继承基础包）/);
   assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
+  assert.match(await page.locator('#project-environment').textContent(),/旧环境（兼容）/);
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
-  assert.match(await page.locator('#workspace-mode-note').textContent(),/代码与容器环境一起保存为训练版本/);
+  assert.match(await page.locator('#workspace-mode-note').textContent(),/\/opt\/project-env/);
   await page.locator('#workspace-files>summary').click();
   const file=Buffer.alloc(1048576+11,65);await page.locator('[name=files]').setInputFiles({name:'train.py',mimeType:'text/plain',buffer:file});
   await page.locator('#workspace-upload').click();await page.waitForFunction(()=>document.querySelector('#workspace-result').textContent.includes('已上传 1 个文件'));await idle();
@@ -225,8 +231,7 @@ try{
   await capture('projects-mobile-ready.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px selected-project layout must not overflow');
   await page.locator('#project-create>summary').click();
-  assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');
-  assert.equal(await page.locator('[name=environment-choice]').count(),0);
+  assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');assert.equal(await page.locator('[name=environment-choice]').count(),0);
   await capture('projects-mobile-environment.png');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'390px environment creation form must not overflow');
 

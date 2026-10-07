@@ -264,6 +264,7 @@ export function datasetListView(result,users,{includeEmpty=false,labelView,logic
       try{warehouseCacheReference({...value,dataset:item.dataset},{dataset:item.dataset,version:value.version});}
       catch{clean.state='UNKNOWN';clean.canPrepare=false;}
       if(['hdd','ssd'].includes(value.storageTier))clean.storageTier=value.storageTier;
+      if(value.storageRole==='personal-original')clean.storageRole=value.storageRole;
       for(const field of ['bytes','files'])if(Number.isSafeInteger(value[field])&&value[field]>=0)clean[field]=value[field];
       if(HASH.test(value.operationId))clean.operationId=value.operationId;
       if(value.recoveryConfigured===true)clean.recoveryConfigured=true;
@@ -285,7 +286,7 @@ function combinedOwnerLabel(locations,owners){
 
 // Discovery is metadata-only. The elevated principal is confined to list;
 // capabilities, source selection and all mutations keep the member's own ACL.
-export async function datasetCatalogCall(service,principal,operation,args){
+export async function datasetCatalogCall(service,principal,operation,args,{refreshRemovalExclusions=true}={}){
   if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>k!=='machine'))fail('数据集目录参数无效。');
   let user;
   try{user=service.store.get(principal?.userId);}catch{fail('账号不存在或已停用。',403);}
@@ -318,7 +319,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
   if(operation!=='datasets.catalog')fail('未知目录操作。');
   // An explicit administrator refresh may retire a proven terminal or absent
   // exclusion. It never dispatches cleanup or invents an operation identity.
-  if(principal.role==='admin'&&service.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_removal_exclusions'").get()){
+  if(refreshRemovalExclusions&&principal.role==='admin'&&service.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_removal_exclusions'").get()){
     try{await createDatasetRemovalGuard(service,principal).refreshExclusions();}
     catch(error){if(error.code!=='LAST_COPY_UNPROVEN')throw error;}
   }
@@ -386,8 +387,12 @@ export async function datasetCatalogCall(service,principal,operation,args){
       let cache,invalidBinding=false;
       try{cache=warehouseCacheReference({...value,dataset:item.dataset},ref);}catch{invalidBinding=true;}
       const location={machine:listing.machine,dataset:cache?.dataset||item.dataset,ownerLabel:ownership.label,state:invalidBinding?'UNKNOWN':STATES.has(value.state)?value.state:'UNKNOWN',canUse,canPrepare:!invalidBinding&&canUse&&hasMachine(listing.machine)&&value.canPrepare===true,
+        ...(Number.isSafeInteger(value.bytes)&&value.bytes>=0?{contentBytes:value.bytes}:{}),
+        ...(Number.isSafeInteger(value.files)&&value.files>=0?{fileCount:value.files}:{}),
         ...(typeof value.warehouseReady==='boolean'?{warehouseReady:!invalidBinding&&value.warehouseReady}:{}),
         ...(['hdd','ssd'].includes(value.storageTier)?{storageTier:value.storageTier}:{}),
+        ...(value.storageRole==='personal-original'?{storageRole:value.storageRole}:{}),
+        ...(typeof value.warehouseReady==='boolean'?{originalDataset:item.dataset}:{}),
         ...(pending?{removalPending:true,...(!pending.operation_id&&pending.registration_identity?{removalGraceEligible:true}:{})}:{}),
         deletionPermissions:{memberAllowed,reason:memberAllowed?null:'这份数据只能由管理员删除'},
         ...(storage?{storage}:{}),

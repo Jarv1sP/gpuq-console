@@ -28,6 +28,7 @@ try{
         assert.equal(role,'admin','member sends zero privileged API requests');
         const reply=value=>route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
         if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：陈宇轩',versions:[{version,state:'READY',bytes:7*1024**3,files:120}]},{dataset:'shared-data',ownerLabel:'共享授权用户：陈宇轩、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
+        if(operation==='datasets.overview'){assert.deepEqual(args,{});return reply({protocol:0});}
         if(operation==='datasets.catalog')return reply({machine:args.machine,datasetDelete:0,partial:false,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[{dataset:'samples',versions:[{version,locations:[{machine:machines[0].id,dataset:'samples',storage:{dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:machines.at(-1).id}}]}]}]});
         if(operation==='datasets.storage.status'){
           if(denyPinStatus&&args.pinId)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'原保留状态待确认'})});

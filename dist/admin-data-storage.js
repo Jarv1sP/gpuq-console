@@ -1,7 +1,8 @@
 import {datasetRemoveUI} from './dataset-remove-ui.js';
 import {datasetCacheAdminUI} from './dataset-cache-admin.js';
 import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
-import {datasetInfoHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML,hasDatabaseOriginal} from './dataset-flow.js';
+import {datasetInfoHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML,hasDatabaseOriginal,storageCapacityDetailHTML,applyCapacityGeometry} from './dataset-flow.js';
+import {adaptStorageOverview} from './dataset-catalog-model.js';
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
 import {mountArchiveEnrollment} from './archive-enrollment-ui.js';
@@ -89,14 +90,14 @@ export function adminWarehouseMachines(catalog){
 export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   const lifecycle=new AbortController();signal?.addEventListener('abort',()=>destroy(),{once:true});
   el.dataset.adminStorage='';el.classList.add('admin-data-storage');
-  let catalog=null,epoch=0,busy=false,disposed=false,cloud=null,cache=null,removals=null,fitting=null,fullTasks=null,enrollment=null;
+  let catalog=null,overview=null,epoch=0,busy=false,disposed=false,cloud=null,cache=null,removals=null,fitting=null,fullTasks=null,enrollment=null;
   const telemetry=new Map(),pinStatus=new Map();
   const machines=()=>store.data?.machines||[];
   const actor=()=>JSON.stringify([store?.principal?.userId,store?.principal?.role,store?.authGeneration]);
   const allowed=()=>!disposed&&!signal?.aborted&&el.isConnected&&!el.hidden&&store?.principal?.role==='admin'&&document.body.dataset.room==='admin';
   if(signal?.aborted||store?.principal?.role!=='admin'){el.textContent='需要管理员权限';return {destroy};}
   if(!document.querySelector('link[data-admin-storage-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin-data-storage.css';link.dataset.adminStorageStyle='';document.head.append(link);}
-  el.innerHTML=`<header class="admin-storage-controls"><h3>服务器存储</h3><button class="button" type="button" data-storage-refresh>刷新状态</button></header><select name="dataset-machine" aria-label="管理服务器" hidden></select><p data-storage-status role="status"></p><div class="storage-fleet" aria-label="服务器存储总览"></div><section class="storage-operations"><header class="storage-operations-head"><h3 data-storage-machine></h3><span>存储运维</span></header><div class="storage-policy"><header><h4>缓存策略</h4>${datasetInfoHTML('按已登记缓存估算，含元数据；不是磁盘实际占用。预览不会立即删除数据，已确认的原件不参与释放。','缓存预算说明')}</header><div data-storage-policy></div></div><div class="storage-release" data-storage-preview></div><section class="storage-retention"><header><h4>固定保留</h4>${datasetInfoHTML('数量来自服务器；只解除当前账号创建的原保留，其他账号的保留不会被修改。','固定保留')}</header><div data-storage-retention></div></section><section class="storage-local"><header><h4>本机缓存</h4></header><div data-dataset-catalog id="admin-dataset-catalog"></div></section></section><section class="storage-users"><header><h3>按用户统计</h3>${datasetInfoHTML("只汇总已就绪缓存的已知大小；含各服务器副本。共享副本分别计入明确授权的用户，未知归属和大小不计入。","统计口径")}</header><div data-storage-users></div></section><section class="storage-delete-tasks"><header><h3>删除任务</h3>${datasetInfoHTML("仅显示当前浏览器为本账号保存的原请求；查看任务后按原编号查询，可继续、取消或恢复。","删除任务范围")}</header><p data-storage-delete-capability></p><div data-storage-delete-tasks></div><p data-storage-delete-empty>本浏览器没有保存的删除任务</p></section><section class="admin-storage-cloud">${cloudImportHTML(true)}</section>`;
+  el.innerHTML=`<header class="admin-storage-controls"><h3>服务器存储</h3><button class="button" type="button" data-storage-refresh>刷新状态</button></header><select name="dataset-machine" aria-label="管理服务器" hidden></select><p data-storage-status role="status"></p><div class="storage-fleet" aria-label="服务器存储总览"></div><section class="storage-operations"><header class="storage-operations-head"><h3 data-storage-machine></h3><span>存储运维</span></header><div class="storage-policy"><header><h4>缓存策略</h4>${datasetInfoHTML('按已登记缓存估算，含元数据；不是磁盘实际占用。预览不会立即删除数据，已确认的仓库数据不参与释放。','缓存预算说明')}</header><div data-storage-policy></div></div><div class="storage-release" data-storage-preview></div><section class="storage-retention"><header><h4>固定保留</h4>${datasetInfoHTML('数量来自服务器；只解除当前账号创建的原保留，其他账号的保留不会被修改。','固定保留')}</header><div data-storage-retention></div></section><section class="storage-local"><header><h4>本机缓存</h4></header><div data-dataset-catalog id="admin-dataset-catalog"></div></section></section><section class="storage-users"><header><h3>按用户统计</h3>${datasetInfoHTML("只汇总已就绪缓存的已知大小；含各服务器副本。共享副本分别计入明确授权的用户，未知归属和大小不计入。","统计口径")}</header><div data-storage-users></div></section><section class="storage-delete-tasks"><header><h3>删除任务</h3>${datasetInfoHTML("仅显示当前浏览器为本账号保存的原请求；查看任务后按原编号查询，可继续、取消或恢复。","删除任务范围")}</header><p data-storage-delete-capability></p><div data-storage-delete-tasks></div><p data-storage-delete-empty>本浏览器没有保存的删除任务</p></section><section class="admin-storage-cloud">${cloudImportHTML(true)}</section>`;
   const select=el.querySelector('[name=dataset-machine]');
   const enrollHost=document.createElement('section');el.querySelector('.storage-operations').append(enrollHost);
   enrollment=mountArchiveEnrollment(enrollHost,{store,machine:()=>select.value,active:allowed,signal:lifecycle.signal,refresh:()=>load(false),toast});
@@ -152,10 +153,10 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
     if(!allowed())return;
     el.querySelector('.storage-fleet').innerHTML=machines().map((host,index)=>{
       const row=telemetry.get(host.id),summary=adminStorageSummary(row?.status,row?.plan),pins=retained(host.id);
-      const warehouse=adminWarehouseMachines(catalog).has(host.id);
-      return `<article class="storage-server-card" data-selected="${host.id===select.value}"><button class="storage-server-select" type="button" data-storage-select="${esc(host.id)}" aria-pressed="${host.id===select.value}" title="${esc(host.id)}"><span class="storage-machine-id">${esc(host.id)}</span><span class="storage-server-context">服务器缓存${warehouse?'<span class="storage-warehouse-badge">仓库</span>':''}</span></button>${cacheGaugeHTML(host.id,row?.status,row?.plan,index)}<div class="storage-server-facts"><span>${summary.count===null?'释放预览待确认':summary.count?'待释放 '+summary.count+' 项 · '+amount(summary.bytes):'待释放 0 项'}</span><span>${pins===null?'保留状态待确认':'固定保留 '+pins+' 项'}</span></div></article>`;
+      const warehouse=adminWarehouseMachines(catalog).has(host.id)||overview?.warehouse.volumes.some(value=>value.machine===host.id);
+      return `<article class="storage-server-card" data-selected="${host.id===select.value}"><button class="storage-server-select" type="button" data-storage-select="${esc(host.id)}" aria-pressed="${host.id===select.value}" title="${esc(host.id)}"><span class="storage-machine-id">${esc(host.id)}</span><span class="storage-server-context">服务器缓存${warehouse?'<span class="storage-warehouse-badge">仓库</span>':''}</span></button>${overview?storageCapacityDetailHTML(overview.caches.find(value=>value.machine===host.id)):cacheGaugeHTML(host.id,row?.status,row?.plan,index)}<div class="storage-server-facts"><span>${summary.count===null?'释放预览待确认':summary.count?'待释放 '+summary.count+' 项 · '+amount(summary.bytes):'待释放 0 项'}</span><span>${pins===null?'保留状态待确认':'固定保留 '+pins+' 项'}</span></div></article>`;
     }).join('');
-    fitNames();
+    applyCapacityGeometry(el);fitNames();
   }
   function render(){
     if(!allowed())return;
@@ -182,6 +183,7 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
     if(busy||!allowed()||!store.production||!select.value)return;
     busy=true;const expected=actor(),token=++epoch,machine=select.value,status=el.querySelector('[data-storage-status]');
     const current=()=>allowed()&&expected===actor()&&token===epoch;
+    if(refreshTelemetry)store.call('datasets.overview',{},{signal:lifecycle.signal}).then(value=>{if(current()){overview=adaptStorageOverview(value);renderCards();}}).catch(()=>{if(current()){overview=null;renderCards();}});
     el.querySelector('[data-storage-refresh]').disabled=true;select.disabled=true;status.textContent='查询中…';
     try{
       if(refreshTelemetry){

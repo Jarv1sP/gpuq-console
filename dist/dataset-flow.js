@@ -6,6 +6,45 @@ import {copyHelp} from './copy-help-ui.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Use the shared vector help button and viewport-clamped top-layer popover.
 export const datasetInfoHTML=(text,label='说明')=>copyHelp(label,text).replace('class="copy-help"','class="copy-help ui-info"').replace('class="copy-help-popup"','class="copy-help-popup ui-info-content"').replace('<strong>','<b class="dataset-help-label">').replace('</strong>','</b>');
+
+const capacityAmount=value=>Number.isSafeInteger(value)&&value>=0?transferBytes(value):'未知';
+export const capacityCheckedTitle=value=>{
+  if(value===null||value===undefined)return '';
+  const date=new Date(typeof value==='number'&&value<1e12?value*1000:value);
+  return Number.isFinite(date.getTime())?'检查于 '+date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
+};
+export function cacheCapacityRatio(cache){
+  return cache?.usageComplete===true&&Number.isSafeInteger(cache.readyContentBytes)&&cache.readyContentBytes>=0&&
+    Number.isSafeInteger(cache.budgetBytes)&&cache.budgetBytes>0?cache.readyContentBytes/cache.budgetBytes:null;
+}
+export function cacheCapacityRailHTML(cache,large=false){
+  const ratio=cacheCapacityRatio(cache),percent=ratio===null?null:Math.round(ratio*100);
+  return `<span class="capacity-cache-rail ${large?'large':''} ${ratio===null?'unknown':ratio>=.8?'hot':''}" role="img" aria-label="缓存 ${percent===null?'未知':percent+'%'}">${percent===null?'':`<i data-v3-percent="${Math.min(100,percent)}"></i>`}<b class="capacity-watermark low" aria-hidden="true"></b><b class="capacity-watermark high" aria-hidden="true"></b></span>`;
+}
+export function warehouseCapacityHTML(warehouse,checkedAt){
+  if(!warehouse)return '';
+  const w=warehouse,pct=value=>value/w.totalBytes*100;
+  return `<div class="capacity-warehouse ${w.known?'':'unknown'}" title="${esc(capacityCheckedTitle(checkedAt))}"><div class="capacity-head"><span>仓库</span><span class="num">${w.totalBytes===null?'未知':'共 '+capacityAmount(w.totalBytes)}</span></div><div class="capacity-strata" role="img" aria-label="数据集 ${capacityAmount(w.contentBytes)}，其他 ${capacityAmount(w.known?w.usedBytes-w.contentBytes:null)}，可用 ${capacityAmount(w.availableBytes)}">${w.known?`<i class="capacity-data" data-v3-percent="${pct(w.contentBytes)}"></i><i class="capacity-other" data-capacity-left="${pct(w.contentBytes)}" data-v3-percent="${pct(w.usedBytes-w.contentBytes)}"></i>${w.reserveBytes===null?'':`<i class="capacity-reserve" data-capacity-left="${Math.max(0,pct(w.totalBytes-w.reserveBytes))}"></i>`}`:''}</div><div class="capacity-values"><span class="capacity-value-data">数据集 <b class="num">${capacityAmount(w.contentBytes)}</b></span><span class="capacity-value-other">其他 <b class="num">${capacityAmount(w.known?w.usedBytes-w.contentBytes:null)}</b></span><span class="capacity-value-free ${w.warning?'hot':''}">可用 <b class="num">${capacityAmount(w.availableBytes)}</b></span></div>${w.warning?'<div class="capacity-warning" role="status">仓库空间不足</div>':''}</div>`;
+}
+export function storageCapacityDetailHTML(cache){
+  if(!cache)return '';
+  const disk=cache.volume,valid=disk.totalBytes>0&&disk.usedBytes!==null&&disk.availableBytes!==null&&disk.usedBytes+disk.availableBytes<=disk.totalBytes;
+  // Cells classify only proven quantities. Registered content is not a
+  // filesystem usage measurement, and incomplete usage stays unknown.
+  const cacheKnown=cache.usageComplete&&cache.readyContentBytes!==null&&cache.readyContentBytes<=disk.usedBytes;
+  const cells=Array.from({length:20},(_,index)=>{
+    const midpoint=(index+.5)/20*disk.totalBytes;
+    return !valid?'unknown':cacheKnown&&midpoint<cache.readyContentBytes?'cache':midpoint<disk.usedBytes?'used':disk.reserveBytes!==null&&midpoint>=disk.totalBytes-disk.reserveBytes?'reserve':'free';
+  });
+  return `<div class="capacity-detail" title="${esc(capacityCheckedTitle(disk.checkedAt))}"><div class="capacity-metric"><div class="capacity-label">缓存</div><div class="capacity-big num">${capacityAmount(cache.usageComplete?cache.readyContentBytes:null)}<small>/ ${capacityAmount(cache.budgetBytes)}</small></div>${cacheCapacityRailHTML(cache,true)}</div><div class="capacity-metric"><div class="capacity-label"><span>磁盘</span>${cache.shared?'<span class="capacity-shared">与仓库同盘</span>':''}</div><div class="capacity-big num">${capacityAmount(disk.availableBytes)}<small>可用 / ${capacityAmount(disk.totalBytes)}</small></div><div class="capacity-disk" role="img" aria-label="磁盘已用 ${capacityAmount(disk.usedBytes)}，可用 ${capacityAmount(disk.availableBytes)}">${cells.map(value=>`<span class="${value}" aria-hidden="true"></span>`).join('')}</div></div></div>`;
+}
+export function applyCapacityGeometry(root){
+  for(const element of root.querySelectorAll('[data-v3-percent],[data-capacity-left]')){
+    const width=Number(element.dataset.v3Percent),left=Number(element.dataset.capacityLeft);
+    if(element.hasAttribute('data-v3-percent')&&Number.isFinite(width)&&width>=0&&width<=100)element.style.width=width+'%';
+    if(element.hasAttribute('data-capacity-left')&&Number.isFinite(left)&&left>=0&&left<=100)element.style.left=left+'%';
+  }
+}
 export function discloseDatasetInfo(element,label){
   if(!element||element.closest('.ui-info'))return;
   const template=document.createElement('template');template.innerHTML=datasetInfoHTML('',label);
@@ -13,7 +52,7 @@ export function discloseDatasetInfo(element,label){
   // Preserve the original note and its aria-describedby ID.
   help.querySelector('.copy-help-popup>span').replaceWith(element);element.hidden=false;
 }
-const phases={QUEUED:'等待存入',COPYING:'存入中',PROVISIONING:'校验中',CERTIFYING:'检查恢复能力',ARCHIVED:'原件已保存',FAILED:'存入仓库失败',BLOCKED:'待确认'};
+const phases={QUEUED:'等待存入',COPYING:'存入中',PROVISIONING:'校验中',CERTIFYING:'检查恢复能力',ARCHIVED:'已存入仓库',FAILED:'存入仓库失败',BLOCKED:'待确认'};
 const order=['QUEUED','COPYING','PROVISIONING','CERTIFYING','ARCHIVED'];
 const amount=value=>Number.isFinite(value)&&value>=0?transferBytes(value):null;
 const storageRows=version=>(version?.locations||[]).flatMap(row=>row.storage&&typeof row.storage==='object'?[row]:row.warehouseReady===true&&typeof row.machine==='string'&&row.machine?[{...row,storage:{dataset:row.dataset,version:version.version,phase:'WAREHOUSE_READY',archiveMachine:row.machine,originalRetained:true}}]:[]);
@@ -63,7 +102,7 @@ export function datasetLifecycle(version,catalog,{upload,trainingAllowed}={}){
   if((version.locations||[]).some(row=>row.state==='READY'))stages.push({label:'缓存就绪',state:'complete'});
   if(ground.kind!=='none'){
     stages.push({label:'存入仓库',state:ground.saved?'complete':ground.kind==='pending'?'current':'unknown'});
-    stages.push({label:'原件已保存',state:ground.saved?'complete':'pending'});
+    stages.push({label:'仓库',state:ground.saved?'complete':'pending'});
   }
   if(localState==='PREPARING')stages.push({label:'取回到 '+catalog.machine,state:'current'});
   if(localState==='FAILED')stages.push({label:'取回失败',state:'failed'});
@@ -117,4 +156,4 @@ export function cachePreviewHTML(machine,plan){
   const time=value=>{const date=new Date(value*1000);return Number.isFinite(value)&&value>0&&Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{hour12:false}):'未提供';};
   return `<section class="dataset-cache-preview"><h4>${serverIdHTML(machine)} <span>超过高水位时将释放（预览，不会立即删除）</span></h4>${plan.candidates.length?`<div class="dataset-cache-preview-table" role="table" aria-label="缓存释放预览"><div class="dataset-cache-preview-row" role="row"><span role="columnheader">数据集 · 版本</span><span role="columnheader">大小</span><span role="columnheader">最近使用</span></div>${plan.candidates.map(row=>`<div class="dataset-cache-preview-row" role="row"><span role="cell"><code>${esc(row.dataset)}</code><small>${esc(String(row.version||'').slice(0,12))}</small></span><span role="cell">${esc(amount(row.bytes)||'未提供')}</span><span role="cell">${esc(time(row.lastUsedAt))}</span></div>`).join('')}</div>`:'<p>当前不需要释放</p>'}</section>`;
 }
-export const cacheBudgetInfo=()=>datasetInfoHTML('按已登记缓存估算，含元数据；不是磁盘实际占用。预览不会立即删除数据，已确认的原件不参与释放。','缓存预算说明');
+export const cacheBudgetInfo=()=>datasetInfoHTML('按已登记缓存估算，含元数据；不是磁盘实际占用。预览不会立即删除数据，已确认的仓库数据不参与释放。','缓存说明');

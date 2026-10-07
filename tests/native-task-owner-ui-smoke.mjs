@@ -50,7 +50,7 @@ try{
       if(url.pathname==='/api/call'){
         const {operation,args}=route.request().postDataJSON();calls.push({role,operation,args});if(!logged)return reply({error:'请登录'},401);
         if(operation==='state')return reply({principal:actor,state:state()});
-        let result;if(['projects.list','datasets.list','datasets.catalog','notifications.list','transfers.list'].includes(operation))result={environmentModes:['shared','isolated','oci'],projects:[],datasets:[],items:[],machines:MACHINES.map(m=>({machine:m.id,state:'ok'}))};
+        let result;if(operation==='datasets.overview'){assert.deepEqual(args,{});result={protocol:0};}else if(['projects.list','datasets.list','datasets.catalog','notifications.list','transfers.list'].includes(operation))result={environmentModes:['shared','isolated','oci'],projects:[],datasets:[],items:[],machines:MACHINES.map(m=>({machine:m.id,state:'ok'}))};
         else if(operation==='maintenance.status')result=state().operationalMaintenance;
         else if(['datasets.capacity','transfers.capabilities','datasets.storage.status'].includes(operation))result={available:false,enabled:false};
         else throw Error('Unexpected readonly native-owner fixture operation '+operation);

@@ -52,7 +52,7 @@ try{
       await page.waitForFunction(()=>document.querySelector('[data-upload-phase=verify]').hasAttribute('aria-current'));
       assert.equal(await page.locator('[data-upload-phase][aria-current]').getAttribute('data-upload-phase'),'verify');assert.doesNotMatch(await page.locator('#dataset-upload-status').textContent(),/可用于训练/);
       fixture.config.holdPublish=false;await page.waitForFunction(()=>document.querySelector('#dataset-upload-status').dataset.state==='READY');
-      assert.equal(['datasets.upload.status','datasets.capacity','datasets.catalog','datasets.label.get','datasets.label.set'].includes(fixture.calls.at(-1).operation),true);
+      assert.equal(['datasets.upload.status','datasets.capacity','datasets.catalog','datasets.overview','datasets.label.get','datasets.label.set'].includes(fixture.calls.at(-1).operation),true);
       assert.match(await page.locator('#dataset-upload-status').textContent(),/可用于训练/);assert.equal(await page.locator('#v3-upload-state [data-use-dataset]').isEnabled(),true);
       assert.ok(fixture.preflights.some(row=>row.headers.includes('authorization')&&row.headers.includes('content-type')),JSON.stringify(fixture.preflights));
       assert.ok(await page.evaluate(()=>fetchOptions.length>0&&fetchOptions.every(row=>row.credentials==='omit'&&row.redirect==='error')));

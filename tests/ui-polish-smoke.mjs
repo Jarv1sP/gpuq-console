@@ -41,6 +41,7 @@ try{
     if(operation==='projects.list')result={projects:[{project:'vision-lab',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]}]};
     else if(operation==='projects.status')result={project:'vision-lab',state:'READY',environmentMode:'shared',latestReadyRelease:release,releases:[{release,state:'READY'}]};
     else if(operation==='datasets.list')result={datasets:[]};
+    else if(operation==='datasets.overview')result={protocol:0};
     else if(operation==='datasets.catalog')result={machine,machines:MACHINES.map(item=>({machine:item.id,state:'ok'})),datasets:[{dataset:'vision-train',versions:[{version:release,state:'READY',files:18420,bytes:12*1024**3,canPrepare:false,locations:[{machine,state:'READY'}]}]},{dataset:'vision-validation',versions:[{version:'b'.repeat(64),state:'PREPARING',files:2048,bytes:2*1024**3,canPrepare:true,sourceMachine:MACHINES[1].id,locations:[{machine,state:'PREPARING'},{machine:MACHINES[1].id,state:'READY'}]}]}]};
     else if(operation==='datasets.capacity')result={machine,available:true,filesystemBytes:4*1024**4,availableBytes:2*1024**4,reserveBytes:20*1024**3,usableBytes:2*1024**4-20*1024**3,guarded:true};
     else assert.equal(operation,'state','Visual review cannot mutate data');

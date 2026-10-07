@@ -61,6 +61,7 @@ test('portal downloads installable one-file artifact and installed symlink execu
   const syntax=spawnSync(process.execPath,['--input-type=module','--check'],{input:source,encoding:'utf8'});assert.equal(syntax.status,0,syntax.stderr);
   const client=join(root,'gpuctl.mjs'),link=join(root,'gpuctl');await writeFile(client,source,{mode:0o700});await symlink(client,link);
   const help=spawnSync(process.execPath,[link,'--help'],{encoding:'utf8'});assert.equal(help.status,0,help.stderr);assert.match(help.stdout,/jobs \/ logs JOB \/ cancel JOB/);assert.match(help.stdout,/data upload LOCAL_DIR/);
-  assert.match(help.stdout,/data shell/);assert.match(help.stdout,/data put ARCHIVE/);assert.match(help.stdout,/data workspace-status/);
+  assert.match(help.stdout,/data prepare NAME@VERSION/);assert.match(help.stdout,/--via direct/);
+  assert.doesNotMatch(help.stdout,/data shell|data put ARCHIVE|data workspace-status|--via relay/);
   const installer=await(await fetch(origin+'/install.sh')).text();assert.match(installer,/node --input-type=module --check/);assert.match(installer,/gpuctl\.mjs/);assert.doesNotMatch(installer,/__GPUQ_PUBLIC_ORIGIN__/);
 });

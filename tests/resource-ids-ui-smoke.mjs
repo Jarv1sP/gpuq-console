@@ -55,6 +55,7 @@ try{
     if(operation==='state'){}
     else if(operation==='projects.list')result={projects:[]};
     else if(operation==='datasets.list')result={datasets:[]};
+    else if(operation==='datasets.overview'){assert.deepEqual(args,{});result={protocol:0};}
     else if(operation==='datasets.catalog')result={machine:args.machine,machines:machines.map(machine=>({machine:machine.id,state:'ok'})),datasets:[]};
     else if(operation==='datasets.capacity')result={machine:args.machine,available:false};
     else if(operation==='community.info')result={enabled:true,capabilities:[]};
@@ -124,7 +125,7 @@ try{
   for(const animation of animations){assert.equal(animation.options.duration,320);assert.ok(!animation.text.includes('→'),'Only the ID travels, without the side-card arrow');if(animation.tag==='SPAN'){const scale=animation.frames.at(-1).transform.match(/scale\(([^,]+),([^)]+)\)/);assert.ok(scale);assert.equal(Number(scale[1]),Number(scale[2]),'Text shares uniform scaling even when the final ID is ellipsized');assert.ok(parseFloat(animation.fontSize)>=20&&parseFloat(animation.fontSize)<=160,'The ghost retains the approved fitted source typography (20–160px)');}}
   const fontReadiness=await checkDelayedResourceFonts(page,origin);
   csp.push(...await page.evaluate(()=>idCSP));assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(csp,[]);
-  assert.ok(calls.every(call=>['state','projects.list','datasets.list','datasets.catalog','datasets.capacity','community.info','community.posts.list'].includes(call.operation)));
+  assert.ok(calls.every(call=>['state','projects.list','datasets.list','datasets.catalog','datasets.overview','datasets.capacity','community.info','community.posts.list'].includes(call.operation)));
   await writeFile(join(screenshots,'checks.json'),JSON.stringify({checks,animations,errors,external,csp,fontReadiness,privateManifest:!!process.env.PR2_ID_MANIFEST},null,2));
   console.log(JSON.stringify({status:'passed',names:machines.length,views:checks.length,screenshots,errors,external,csp,fontReadiness}));
 }finally{await browser?.close();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(directory,{recursive:true,force:true});}

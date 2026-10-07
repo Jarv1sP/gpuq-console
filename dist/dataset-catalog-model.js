@@ -69,7 +69,8 @@ function server(machine,directory,locations,observations,selectedMachine){
     removalPending:rows.some(row=>row.removalPending===true),
     removalGraceEligible:!conflict&&location?.removalGraceEligible===true,
     error:location?text(location.error):null,storage:location?copy(location.storage):null,
-    ...(!conflict&&['hdd','ssd'].includes(location?.storageTier)?{storageTier:location.storageTier}:{})};
+    ...(!conflict&&['hdd','ssd'].includes(location?.storageTier)?{storageTier:location.storageTier}:{}),
+    ...(!conflict&&location?.storageRole==='personal-original'?{storageRole:location.storageRole}:{})};
 }
 
 export function aggregateDatasetCatalog(catalog){
@@ -114,8 +115,77 @@ export function aggregateDatasetCatalog(catalog){
             canUse:observations.every(row=>row.canUse===true),
             ownerLabel:same(observations.map(row=>text(row.ownerLabel))),servers,
             selected:{machine:catalog.machine??null,state:selected.state,canPrepare:selected.canPrepare,canUse:selected.canUse===true,
+              ...(selected.storageRole==='personal-original'?{storageRole:selected.storageRole}:{}),
+              ...(['hdd','ssd'].includes(selected.storageTier)?{storageTier:selected.storageTier}:{}),
               sourceMachine,sourceDataset:sourceMachine?same(observations.map(row=>text(row.sourceDataset))):null,
               error:same(observations.map(row=>text(row.error)))},warehouse:warehouse(version,locations)};
         })};
     })};
+}
+
+// Contract pending finalization: a READY state alone is not warehouse proof.
+// Keep this boundary small so a finalized proof field can be adopted here.
+export function adaptOriginal(raw){
+  const proof=raw?.proof;
+  return {machine:identifier.test(raw?.machine||'')?raw.machine:null,
+    dataset:identifier.test(raw?.dataset||'')?raw.dataset:null,
+    state:text(raw?.state),confirmed:raw?.confirmed===true||
+      !!proof&&typeof proof==='object'&&!Array.isArray(proof)&&Object.keys(proof).length>0};
+}
+
+export function adaptStorageOverview(raw){
+  if(raw?.protocol!=='dataset-storage-overview-v1'||!Array.isArray(raw.warehouse?.volumes)||
+    !Array.isArray(raw.caches)||!Array.isArray(raw.datasets))return null;
+  const volume=value=>({id:text(value?.id),state:text(value?.state),checkedAt:copy(value?.checkedAt),
+    ...Object.fromEntries(['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'].map(key=>[key,number(value?.[key])])),
+    readOnly:value?.readOnly===true,guarded:value?.guarded===true});
+  const volumes=new Map();let unidentified=false;
+  for(const row of raw.warehouse.volumes){
+    if(!identifier.test(row?.machine||'')||!text(row?.volume?.id)){unidentified=true;continue;}
+    const value={machine:row.machine,volume:volume(row.volume),contentBytes:number(row.originalContentBytes),warnings:list(row.warnings)},key=JSON.stringify([value.machine,value.volume.id]);
+    if(volumes.has(key)&&JSON.stringify(volumes.get(key))!==JSON.stringify(value)){
+      const previous=volumes.get(key);previous.contentBytes=null;
+      for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])previous.volume[field]=null;
+      previous.warnings.push(...value.warnings);
+    }else volumes.set(key,value);
+  }
+  const rows=[...volumes.values()],sum=field=>{
+    if(raw.warehouse.state!=='READY')return null;
+    const values=rows.map(row=>field==='contentBytes'?row.contentBytes:row.volume[field]);
+    const total=values.reduce((result,value)=>result+(value??0),0);
+    return !unidentified&&values.length&&values.every(value=>value!==null)&&Number.isSafeInteger(total)?total:null;
+  };
+  const totalBytes=sum('totalBytes'),usedBytes=sum('usedBytes'),availableBytes=sum('availableBytes'),contentBytes=sum('contentBytes'),reserveBytes=sum('reserveBytes');
+  const known=totalBytes!==null&&totalBytes>0&&usedBytes!==null&&usedBytes<=totalBytes&&availableBytes!==null&&usedBytes+availableBytes<=totalBytes&&contentBytes!==null&&contentBytes<=usedBytes;
+  const caches=raw.caches.filter(row=>identifier.test(row?.machine||'')).map(row=>({machine:row.machine,state:text(row.state),volume:volume(row.volume),
+    readyContentBytes:number(row.readyContentBytes),readyVersionCount:number(row.readyVersionCount),budgetBytes:number(row.budgetBytes),reserveBytes:number(row.reserveBytes),usageComplete:row.usageComplete===true,
+    shared:!!text(row.volume?.id)&&volumes.has(JSON.stringify([row.machine,row.volume.id]))}));
+  return {protocol:raw.protocol,checkedAt:copy(raw.checkedAt),partial:raw.partial===true,filePreviewAvailable:raw.filePreviewAvailable===true,
+    warehouse:{volumes:rows,totalBytes,usedBytes,availableBytes,contentBytes,reserveBytes,known,
+      warning:list(raw.warehouse.warnings).concat(rows.flatMap(row=>row.warnings)).some(row=>['WAREHOUSE_USAGE_HIGH','WAREHOUSE_FREE_SPACE_LOW'].includes(row?.code))||availableBytes!==null&&reserveBytes!==null&&availableBytes<=reserveBytes},
+    caches,datasets:raw.datasets.filter(item=>identifier.test(item?.dataset||'')).map(item=>({dataset:item.dataset,displayName:text(item.displayName),
+      versions:list(item.versions).filter(row=>hash.test(row?.version||'')).map(row=>({version:row.version,ownerLabel:text(row.ownerLabel),contentBytes:number(row.contentBytes),fileCount:number(row.fileCount),canUse:row.canUse===true,
+        originals:list(row.originals).map(adaptOriginal),caches:list(row.caches).filter(cache=>identifier.test(cache?.machine||'')).map(cache=>({machine:cache.machine,dataset:identifier.test(cache.dataset||'')?cache.dataset:null,state:state(cache.state),canUse:cache.canUse===true,canPrepare:cache.canPrepare===true,ownerLabel:text(cache.ownerLabel)})),
+        ...(Array.isArray(row.personalOriginals)?{personalOriginals:row.personalOriginals.filter(location=>identifier.test(location?.machine||'')&&identifier.test(location.dataset||'')&&location.storageRole==='personal-original'&&['hdd','ssd'].includes(location.storageTier)).map(location=>({machine:location.machine,dataset:location.dataset,state:state(location.state),canUse:location.canUse===true,canPrepare:false,storageRole:'personal-original',storageTier:location.storageTier}))}:{})}))}))};
+}
+
+// Overview and legacy catalog are observations, not action permissions. The
+// overview owns its warehouse proof; keep legacy labels/revisions separately.
+export function overviewDatasetCatalog(overview,machine,legacy=null){
+  const machines=[...new Set(overview.caches.map(row=>row.machine).concat(overview.datasets.flatMap(item=>item.versions.flatMap(v=>v.originals.map(row=>row.machine).filter(Boolean)))))];
+  const catalog={machine:machine||null,checkedAt:overview.checkedAt,partial:overview.partial,machines:machines.map(id=>({machine:id,state:['READY','ok'].includes(overview.caches.find(row=>row.machine===id)?.state)?'ok':'unavailable'})),
+    datasets:overview.datasets.map(item=>{
+      const old=legacy?.datasets?.find(row=>row.dataset===item.dataset);
+      return {dataset:item.dataset,name:old?.name,labelScope:old?.labelScope,displayNameRevision:old?.displayNameRevision,
+        versions:item.versions.map(v=>{const locations=[...v.caches,...(v.personalOriginals||[])],local=locations.find(row=>row.machine===machine);return {version:v.version,ownerLabel:v.ownerLabel,canUse:v.canUse,bytes:v.contentBytes,files:v.fileCount,
+          state:local?.state||'UNKNOWN',canPrepare:local?.canPrepare===true,locations:locations.map(row=>({...row}))};})};
+    })};
+  const result=aggregateDatasetCatalog(catalog);
+  for(const item of result.datasets){
+    const observation=overview.datasets.find(row=>row.dataset===item.dataset);if(observation.displayName)item.displayName=observation.displayName;
+    for(const v of item.versions){const originals=observation.versions.find(row=>row.version===v.version).originals,nodes=[...new Set(originals.map(row=>row.machine).filter(Boolean))];
+      v.warehouse={state:originals.some(row=>row.confirmed)?'saved':originals.length?'unknown':'unrecorded',originalConfirmed:originals.some(row=>row.confirmed),machine:nodes.length===1?nodes[0]:null,originals,records:[]};
+    }
+  }
+  return result;
 }

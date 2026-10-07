@@ -44,6 +44,7 @@ try{
     const {operation,args={}}=route.request().postDataJSON();
     if(operation==='state')return json(route,null);
     if(operation==='projects.list')return json(route,{projects:[]});
+    if(operation==='datasets.overview'){assert.deepEqual(args,{});return json(route,{protocol:0});}
     if(operation==='datasets.catalog')return json(route,{machine:args.machine,checkedAt,machines:machines.map(m=>({machine:m.id,state:'ok'})),datasets:[{dataset:'local-fixture',name:'本地布局数据',versions:[{version,state:'READY',bytes:7*1024**3,files:12,canPrepare:false,locations:machines.map(m=>({machine:m.id,state:'READY'}))}]}]});
     if(operation==='datasets.upload.routes')return json(route,{available:false,protocol:'dataset-upload-v1',machine:args.machine});
     if(operation==='datasets.capacity')return json(route,{machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,usableBytes:502*1024**3,reserveBytes:10*1024**3});

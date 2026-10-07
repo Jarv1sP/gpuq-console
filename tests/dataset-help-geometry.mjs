@@ -39,6 +39,9 @@ export async function checkDatasetBodyHelpRegressions(page) {
 }
 
 export async function checkDatasetHelpRegressions(page) {
+  // The workspace heading is in the upload drawer. Experimental cloud files
+  // can be hidden for members; inspect the complete visible drawer instead.
+  const specification = {...datasetHelpGeometry, roots: ['#dataset-add-dialog[open]']};
   const help = page.locator('[data-dataset-help-source=workspace]');
   assert.equal(await help.count(), 1);
   const button = help.locator('[data-copy-help]');
@@ -46,26 +49,26 @@ export async function checkDatasetHelpRegressions(page) {
   try {
     // Recreate the old action-group placement with no associated label.
     await help.evaluate(node => document.querySelector('#data-workspace-upload-form>.file-actions').append(node));
-    const orphan = await inspectGeometry(page, datasetHelpGeometry);
+    const orphan = await inspectGeometry(page, specification);
     assert(orphan.failures.some(row => row.rule === 'orphan-help'), 'an action-group or footer help is rejected');
   } finally {
     await help.evaluate(node => document.querySelector('.dataset-sheet-head>.copy-caption').append(node));
   }
   try {
     await button.evaluate(node => node.style.transform = 'translateY(12px)');
-    const displaced = await inspectGeometry(page, datasetHelpGeometry);
+    const displaced = await inspectGeometry(page, specification);
     assert(displaced.failures.some(row => row.rule === 'labelled-help-position'), 'a help on a different horizontal centre is rejected');
   } finally {
     await button.evaluate((node, style) => style === null ? node.removeAttribute('style') : node.setAttribute('style', style), originalStyle);
   }
   try {
     await button.evaluate(node => node.style.transform = 'translateX(-120px)');
-    const left = await inspectGeometry(page, datasetHelpGeometry);
+    const left = await inspectGeometry(page, specification);
     assert(left.failures.some(row => row.rule === 'labelled-help-position'), 'a help left of its caption is rejected');
   } finally {
     await button.evaluate((node, style) => style === null ? node.removeAttribute('style') : node.setAttribute('style', style), originalStyle);
   }
-  const restored = await inspectGeometry(page, datasetHelpGeometry);
+  const restored = await inspectGeometry(page, specification);
   assert(restored.pass, JSON.stringify(restored.failures));
 }
 
