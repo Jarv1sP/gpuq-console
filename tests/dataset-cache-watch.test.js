@@ -43,3 +43,16 @@ test('catalog does not infer a new request; fresh state replaces historical READ
  const f=fixture();f.watch.catalog([{...ref,state:'PREPARING',canUse:true}]);assert.equal(f.timer,undefined);assert.equal(f.watch.get(ref),undefined);
  f.watch.begin(ref);f.reply({...ref,state:'READY'});await f.watch.poll();f.watch.catalog([{...ref,state:'REGISTERED',canUse:true}]);assert.equal(f.watch.get(ref),undefined);
 });
+test('confirmed catalog failure replaces pending cache state and stops its polling',()=>{
+ const f=fixture(),row=f.watch.begin(ref,{dispatching:true});f.watch.settled(row,{...ref,state:'PREPARING',operationId});assert(f.timer);
+ f.watch.catalog([{...ref,state:'FAILED',canUse:true,error:'copy failed'}]);
+ assert.equal(f.watch.get(ref),undefined);assert.equal(f.timer,null);assert.equal(f.requests.length,0);assert.equal(f.ready,0);
+ const retry=f.watch.begin(ref,{dispatching:true});assert(retry);assert.notEqual(retry,row,'Only an explicit retry starts another watch');
+});
+test('late status reply cannot replace a newer confirmed catalog failure',async()=>{
+ const f=fixture(),row=f.watch.begin(ref);f.watch.settled(row,{...ref,state:'PREPARING',operationId});
+ let release;f.reply(()=>new Promise(resolve=>release=resolve));const pending=f.watch.poll();
+ f.watch.catalog([{...ref,state:'FAILED',canUse:true}]);release({...ref,state:'PREPARING',operationId});await pending;
+ assert.equal(f.watch.get(ref),undefined);assert.equal(f.timer,null);assert.equal(f.ready,0);
+ assert.deepEqual(f.requests.map(request=>request.operation),['datasets.status']);
+});

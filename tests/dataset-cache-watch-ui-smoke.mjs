@@ -49,5 +49,13 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
   const failed=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.status').length);await page.clock.runFor(5000);assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.status').length),failed);
   await page.evaluate(()=>{view.reset();window.state='REGISTERED';window.allow=true;view.catalog(catalog(store.data.machines[0].id));window.allow=false;});const writes=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.prepare').length);await page.locator('[data-v3-cache="'+target+'"]').click();assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.prepare').length),writes,'fresh permission denial is zero dispatch');
  }
+ await page.evaluate(()=>{view.reset();window.allow=true;window.state='REGISTERED';window.status='PREPARING';window.lose=false;window.progress=false;view.catalog(catalog(store.data.machines[0].id));});
+ if(width<760)await page.locator('[data-v3-select]').click();
+ await page.locator('[data-v3-cache="'+target+'"]').click();assert.match(await row.textContent(),/取回中/);
+ await page.evaluate(()=>{window.state='FAILED';view.catalog(catalog(store.data.machines[0].id));});
+ assert.match(await row.textContent(),/取回失败/,'A confirmed failed directory replaces the pending watch immediately');
+ assert.equal(await row.locator('[data-v3-cache]').textContent(),'重试');assert.equal(await row.locator('[data-v3-cache]').isEnabled(),true);
+ const catalogFailureReads=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.status').length),catalogFailureWrites=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.prepare').length);
+ await page.clock.runFor(5000);assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.status').length),catalogFailureReads,'Confirmed catalog failure stops status polling');assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.prepare').length),catalogFailureWrites,'A catalog failure never retries preparation automatically');
  assert.deepEqual(errors,[]);await page.close();
 }console.log('CACHE WATCH UI PASS: member/admin 1440/390/320; fixed original reads, real progress, READY/FAILED stop, lost reply no replay, room and fresh permission guard.');}finally{await browser.close();}

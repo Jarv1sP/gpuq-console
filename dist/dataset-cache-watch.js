@@ -48,7 +48,7 @@ export function datasetCacheWatch({call,identity,active,allowed,onChange=()=>{},
  function catalog(rows){
   if(identity()!==owner){reset();return;}
   for(const ref of rows){const row=entries.get(key(ref));
-   if(row&&!row.dispatching&&(ref.state==='READY'||row.state==='READY'))entries.delete(key(ref));
+   if(row&&!row.dispatching&&(terminal(ref.state)||row.state==='READY'))entries.delete(key(ref));
    else if(row?.paused&&ref.state==='PREPARING'&&ref.canUse&&allowed(ref.machine))row.paused=false;
   }sync();
  }
