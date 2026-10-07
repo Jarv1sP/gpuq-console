@@ -99,3 +99,7 @@ test('only confirmed failure permits explicit new key, preserving both operation
  assert.equal(f.api.snapshot().canStart,true);await f.api.start();assert.notEqual(f.api.snapshot().request.key,key);assert.equal(f.requests.filter(row=>row.operation==='datasets.cache.prepare').length,2);
  const rows=JSON.parse(f.values.get(cacheOperationStorageKey('alice')));assert.equal(rows.length,2);assert.equal(rows[0].request.key,key);
 });
+test('missing inventory or dataset cannot become a string-coerced target or initiate a request',()=>{
+ const f=fixture();for(const change of [{machine:undefined},{dataset:undefined},{machine:1},{dataset:null},{version:undefined}])assert.throws(()=>createCacheOperation({...scope,...change,store:f.store,capabilities:{allowed:true}}));
+ assert.equal(f.requests.length,0);
+});

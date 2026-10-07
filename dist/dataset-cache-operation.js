@@ -15,7 +15,7 @@ export function adaptCacheCapability(raw,action=raw?.action){
 export const canCacheAction=(capabilities,action)=>adaptCacheCapability(capabilities,action).allowed;
 export const cacheOperationStorageKey=account=>'stargate.cache-operations.v1:'+encodeURIComponent(account);
 function target(value){
- if(!value||!actions.includes(value.action)||!id.test(value.machine)||!id.test(value.dataset)||!hash.test(value.version))throw Error('请选择服务器和固定版本。');
+ if(!value||!actions.includes(value.action)||typeof value.machine!=='string'||typeof value.dataset!=='string'||typeof value.version!=='string'||!id.test(value.machine)||!id.test(value.dataset)||!hash.test(value.version))throw Error('请选择服务器和固定版本。');
  return {action:value.action,machine:value.machine,dataset:value.dataset,version:value.version};
 }
 export function cacheOperationReceipt(request,value,operationId){
@@ -107,6 +107,7 @@ export function createCacheOperation({store,action,machine,dataset,version,capab
 const bytes=value=>{const units=['B','KiB','MiB','GiB','TiB'];let index=0;while(value>=1024&&index<4){value/=1024;index++;}return value.toFixed(index?1:0)+' '+units[index];};
 function style(){if(!document.querySelector('link[data-cache-operation-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/dataset-cache-operation.css';link.dataset.cacheOperationStyle='';document.head.append(link);}}
 export function mountCacheOperation(host,options){
+ try{target(options);}catch{return {start:async()=>false,query:async()=>false,cancel:async()=>false,check:async()=>false,snapshot:()=>({visible:false}),sync(){},destroy(){}};}
  const {store,action,machine,dataset,version,signal,onChange=()=>{},startLabel,explain=true}=options,lifetime=new AbortController();
  let root=null,api;
  const active=()=>host.isConnected&&!document.hidden&&host.checkVisibility?.({checkVisibilityCSS:true})!==false&&options.active?.()!==false;
@@ -144,7 +145,7 @@ export function mountCacheOperation(host,options){
  return {start:api.start,query:api.query,cancel:api.cancel,check:api.check,snapshot:api.snapshot,sync,destroy};
 }
 export function mountCacheTransfer(host,{store,source,targets,dataset,version,signal,onChange=()=>{}}){
- const choices=(targets||[]).filter(value=>value.machine!==source&&id.test(value.machine)&&canCacheAction(value.capabilities,'prepare'));
+ const choices=(targets||[]).filter(value=>typeof value.machine==='string'&&value.machine!==source&&id.test(value.machine)&&canCacheAction(value.capabilities,'prepare'));
  if(!choices.length||signal?.aborted||!store.principal?.userId||store.principal.enabled===false||store.production!==true)return {destroy(){},sync(){}};
  target({action:'release',machine:source,dataset,version});style();
  const lifetime=new AbortController(),binding=JSON.stringify([store.principal.userId,store.authGeneration]),root=document.createElement('section');root.className='cache-transfer';
