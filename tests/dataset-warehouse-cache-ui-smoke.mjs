@@ -14,7 +14,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  page.on('pageerror',error=>errors.push(error.message));page.on('dialog',dialog=>dialog.accept());await page.clock.install();
  await page.route('**/*',async route=>{
   const url=new URL(route.request().url());assert.equal(url.origin,origin,'No external requests');
-  if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'+['styles','fonts','starbase','shell','datasets','dataset-flow','dataset-warehouse','copy-help'].map(name=>'<link rel="stylesheet" href="/'+name+'.css">').join('')+'<body class="sb" data-room="datasets"><main id="main-content"><h1 id="page-title">数据集</h1><p>模拟数据</p><section id="page-datasets"></section></main>'});
+  if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'+['styles','fonts','starbase','shell','datasets','dataset-flow','dataset-warehouse','copy-help'].map(name=>'<link rel="stylesheet" href="/'+name+'.css">').join('')+'<body class="sb" data-room="datasets" style="min-height:100vh;background:var(--bg)"><main id="main-content"><h1 id="page-title">数据集</h1><p>模拟数据</p><section id="page-datasets"></section></main>'});
   if(url.pathname==='/favicon.ico')return route.fulfill({status:204});assert(!url.pathname.includes('..'));
   return route.fulfill({body:await readFile(new URL('.'+url.pathname,root)),contentType:url.pathname.endsWith('.js')?'text/javascript':url.pathname.endsWith('.css')?'text/css':'font/woff2'});
  });
