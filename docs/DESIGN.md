@@ -317,7 +317,9 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.mc-attention-item` / `.mc-attention-actions` | [attention-state.js](../dist/attention-state.js)、[control-ui.js](../dist/control-ui.js)、[shell.css](../dist/shell.css) | 原对象失败/部分成功/未确认，不靠已读清除未知 | 回具体对象，只有已确认失败可按规则确认 |
 | `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
+| `#workspace-upload` / `#workspace-result` | [execution-ui.js](../dist/execution-ui.js) | 项目代码上传先核验完整文件，再按原编号和节点确认偏移续传 | 回执丢失先查原编号；已完成不重传，待收口只发空final；冲突/旧记录/未知不另开；切换账号、项目或离开停止；旧个人工作区不重试 |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；开发ID按账号、服务器、项目恢复到原入口 | 刷新只读核验原ID，不自动连接或接管；未知仍保留，明确结束才移除；ROOT/数据终端不存入项目记录；writerToken仅内存 |
+| `#project-disk-quota` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 打开时查询当前账号在开发服务器的容量与文件数，独立于显卡额度 | 不传项目或他人身份；未启用和待确认不造零值，未知不保留旧读数；关闭、离开或换上下文取消请求，完整服务器名保留在title |
 | `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
 | `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；容量条只取已确认 capacity | filesystemBytes/availableBytes 计算实际数据盘已用比例；读不到不画 0%；长 ID 提示完整值；手机内部横向滚动 |
 | `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
@@ -436,6 +438,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 | 删除数据集 | 管理员目标/版本或整库范围，服务端实时证明还有完整副本 | 唯一副本或本机未决禁用；409显示原文；SUBMITTING刷新为未确认，查原operationId，不自动再删；放弃查询不清门户持久排除；缺编号只在明确不存在或worker硬上限加1小时之后的新读取仍READY且登记身份不变时解除 |
 
 彻底删除对话框独立于数据集布局：名称确认、48px 危险按钮、实际步骤和恢复期限；不显示推算百分比。目录 `datasetDelete === 1` 才能显示入口；主界面所有人还需当前版本至少一个位置的 `deletionPermissions.memberAllowed === true`，后台管理员不受该字段限制。403 与 BLOCKED 原因保留服务器原文。按账号保存原 UUID key 后才派发，刷新和丢回执只查询原 key；UNKNOWN 仅显示重新查询。有任务编号时直接显示等宽短编号并可复制完整值，没有编号则不渲染。步骤按已证实的原件、缓存或未知角色显示，不以 complete 推断原件。继续、取消和恢复仅出现在后台；普通视图在删除完成后显示「如需恢复，请联系管理员（保留至…）」，只有 BLOCKED、UNKNOWN、WAITING_CONTINUE 提示「需要管理员处理」。恢复核对原操作、服务器、物理名称与版本，再查询原任务。
+
+主界面同一删除确认框提供「仅移除一台服务器上的缓存」。仅 `datasetDelete === 1`、READY 且该位置 `memberAllowed === true` 才显示，管理员在主界面也遵守相同个人规则。独立 [dataset-personal-remove-ui.js](../dist/dataset-personal-remove-ui.js) 重新读取目录，核对物理登记名并如实列出保留副本；最后副本或未决目标禁用。个人64位节点回执日志按账号保存，与后台记录分开；无法保存不派发，刷新后待确认只查询原编号，缺编号联系管理员提供，不计算或重放删除。节点的v1权限、原件保护和最后副本核验是最终依据，不承诺原件必然保留。
 
 目录别名用于训练，缓存保留/删除使用location真实本地名称。账号/机器/项目/版本切换停止旧轮询并抛弃旧回复；缓存策略只在展开/明确刷新查询，隐藏房间停止storage RPC。
 
@@ -686,6 +690,8 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 「新建账号」只在后台成员区挂载，沿用成员弹窗和 44px 手机控件。它调用现有 `users.create`，固定普通成员、初始零额度；已有额度草稿须先保存或撤销。发出请求前按当前管理员保存用户名，密码只在本次请求内存中使用；回执未知时只查询账号目录，不自动重发，离开区块或切换账号后旧回包不能打开或修改当前界面。
 
+存储运维台通过 `removals.mountFullDeleteTasks(host,{signal,active})` 挂载本浏览器当前账号保存的彻底删除记录，返回 `{refresh,render,destroy}`；宿主决定布局。刷新只查询原 key，继续/取消/恢复复用原编号与已有确认对话框，UNKNOWN 没有写操作。挂载仅限真实管理员后台；退出、取消生命周期或切换账号立即停轮询并关闭所属对话框。现有后端没有全站删除任务目录，组件不声称覆盖其他浏览器或账号。
+
 ### 已有任务的显示标签
 
 [task-display-ui.js](../dist/task-display-ui.js) 只在现有任务详情附加原生 `details` 编辑器；管理员可编辑已关联的平台任务，成员只能编辑本人关联任务；未关联的原生记录只读。默认收起，先明确读取原编号与显示版本，再保存名称和描述。加载禁重复输入，未知能力不显示可保存表单，冲突或丢回执清除当前编辑版本并要求读取同一任务，不自动重发。账号切换或组件卸载后丢弃旧响应；文本插入使用既有转义和 textContent，不编辑 submitter、命令或调度。输入与按钮为 48px，手机 summary 至少 44px，沿用现有令牌和焦点，包含 1440/390/320 的键盘与共享几何检查，不新增路由、抽屉或动画。
@@ -695,3 +701,13 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 ## 提交拒绝与服务暂不可用
 
 共享客户端对非 JSON 502/503/504 显示「服务暂时不可用，稍后重试」，保留 HTTP 状态，不展示网关 HTML 或解析错误。提交只有明确的准入拒绝（`SUBMISSION_REJECTED`、`MAINTENANCE_ACTIVE` 或既有拒绝状态）显示「未提交」及原因，抽屉与工作台一致；草稿保留且无待确认恢复按钮。网关错误、丢回执或持久化结果不明仍显示「提交结果待确认」，仅用户显式按原 key 核对或重试。原回执已丢失时，后续重试被拒绝也不能证明第一次没有提交，仍保留原请求核对入口。
+
+## 历史终态的服务器观察与数据租约
+
+任务详情对本人或管理员已获授权的历史终态提供只读 `jobs.watch` 观察，明确分开原历史状态和服务器上的重试。用户点击「核验完成」才查询 `jobs.completion`；仅有效 `completed:true/state:SUCCEEDED` 回执显示已核验完成。运行中、失联或缺少证据保持待确认，不改写任务、取消标记或额度。
+
+「释放数据租约」只在同任务已确认终止的观察下可用，先确认再发送固定 `{jobId}` 的 `jobs.reconcile-resources`，不自动重发；未知回执先查完成核验。回执绑定账号和任务，关抽屉/换任务/换账号后旧查询失效；成员不显示他人的恢复操作。
+
+## 跨房间的需处理计数
+
+总控条、手机胶囊和总控面板共享同账号的已确认记录及已读规则。登录后总控读取轻量本人 `transfers.list`（每页50条，有界分页），不用先进入数据房间；不会读 catalog、节点或写数据。部分结果合并已知记录，只有完整目录可移除缺失项；失败不清空原提醒，部分列表不冒充完整传输总数。换账号取消旧查询并清空本账号以外的缓存，较晚查询不覆盖新的页面记录。UNKNOWN/PARTIAL/UNCONFIRMED不随时间或已读清除，近期失败仍按24小时和本地已读计算，历史失败保留。
