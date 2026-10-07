@@ -3,6 +3,7 @@ import {copyHelp} from './copy-help-ui.js';
 import {fadeDialog} from './motion-ui.js';
 import {maintenanceFor} from './maintenance-state.js';
 import {datasetFullDeleteUI} from './dataset-full-delete-ui.js';
+import {personalDatasetRemovalUI} from './dataset-personal-remove-ui.js';
 
 const hash=/^[a-f0-9]{64}$/,datasetID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -10,6 +11,7 @@ const removalText=value=>esc(value).replaceAll('按机器删除','<span class="d
 const unresolved=row=>['SUBMITTING','UNREGISTERING','UNKNOWN'].includes(row.state);
 const overlaps=(row,target)=>row.machine===target.machine&&row.dataset===target.dataset&&(!row.version||!target.version||row.version===target.version);
 export const removalStorageKey=userId=>'stargate.dataset-removals.v1:'+encodeURIComponent(userId);
+export const personalRemovalStorageKey=userId=>'stargate.personal-dataset-removals.v1:'+encodeURIComponent(userId);
 export function removalTarget(value){
   if(!value||typeof value.machine!=='string'||!value.machine||typeof value.dataset!=='string'||!datasetID.test(value.dataset)||value.version!=null&&(typeof value.version!=='string'||!hash.test(value.version)))throw Error('删除目标无效。');
   return {machine:value.machine,dataset:value.dataset,version:value.version??null,...(typeof value.catalogDataset==='string'&&datasetID.test(value.catalogDataset)?{catalogDataset:value.catalogDataset}:{})};
@@ -32,27 +34,33 @@ export function removalPreservation(target,versions,machines,{partial=false}={})
 
 // Intent is persisted before dispatch. The node owns operationId; a missing
 // receipt cannot be reconstructed from the target or treated as safe to retry.
-export function createDatasetRemovals({principal,machines,call,storage,changed=()=>{},completed=()=>{},now=Date.now,setTimer=setTimeout,clearTimer=clearTimeout}){
+export function createDatasetRemovals({principal,machines,call,storage,changed=()=>{},completed=()=>{},now=Date.now,setTimer=setTimeout,clearTimer=clearTimeout,personal=false,canRemove=()=>false,session=()=>0}){
   let owner=null,visible=false,timer=null,generation=0;
   const busy=new Set();
-  const save=context=>{try{storage?.setItem(removalStorageKey(context.id),JSON.stringify(context.rows));context.saved=!!storage;}catch{context.saved=false;}};
+  const journalKey=personal?personalRemovalStorageKey:removalStorageKey;
+  const identity=who=>who?.userId&&(who.role==='admin'||personal&&who.role==='member')?JSON.stringify([who.userId,who.role,session()]):null;
+  const save=context=>{try{
+    let rows=context.rows;
+    if(personal){const previous=JSON.parse(storage?.getItem(journalKey(context.id))||'[]');if(!Array.isArray(previous))throw Error('invalid journal');const merged=new Map(previous.map(row=>[row.id,row]));for(const row of rows)merged.set(row.id,row);rows=[...merged.values()];}
+    storage?.setItem(journalKey(context.id),JSON.stringify(rows));context.saved=!!storage;
+  }catch{context.saved=false;}};
   function stop(){if(timer!==null)clearTimer(timer);timer=null;}
   function sync(show=visible){
-    visible=show;const who=principal(),id=who?.role==='admin'?who.userId:null;
-    if(id!==owner?.id){
+    visible=show;const who=principal(),signature=identity(who);
+    if(signature!==owner?.signature){
       stop();generation++;busy.clear();owner=null;
-      if(id){let rows=[];try{rows=JSON.parse(storage?.getItem(removalStorageKey(id))||'[]');}catch{}
-        owner={id,saved:!!storage,rows:Array.isArray(rows)?rows.filter(row=>{
-          try{removalTarget(row);return typeof row.id==='string'&&(!row.operationId||hash.test(row.operationId))&&['SUBMITTING','UNREGISTERING','UNKNOWN','FAILED','BLOCKED','UNREGISTERED'].includes(row.state);}catch{return false;}
-        }).map(row=>({...row,state:row.state==='SUBMITTING'?'UNKNOWN':row.state,nextAt:now()+2000,attempt:0,resumeCheck:!!row.operationId&&row.state==='UNKNOWN'})):[]};
+      if(signature){let rows=[];try{rows=JSON.parse(storage?.getItem(journalKey(who.userId))||'[]');}catch{}
+        owner={id:who.userId,signature,saved:!!storage,rows:Array.isArray(rows)?rows.filter(row=>{
+          try{removalTarget(row);return (!personal||hash.test(row.version))&&typeof row.id==='string'&&(!row.operationId||hash.test(row.operationId))&&['SUBMITTING','UNREGISTERING','UNKNOWN','FAILED','BLOCKED','UNREGISTERED'].includes(row.state);}catch{return false;}
+        }).map(row=>({...row,state:personal||row.state==='SUBMITTING'?'UNKNOWN':row.state,nextAt:now()+2000,attempt:0,resumeCheck:!personal&&!!row.operationId&&row.state==='UNKNOWN'})):[]};
       }
     }
     if(!visible)stop();else arm();return owner?.rows||[];
   }
-  function active(context,stamp){return owner===context&&generation===stamp&&principal()?.role==='admin'&&principal()?.userId===context.id;}
+  function active(context,stamp){return owner===context&&generation===stamp&&identity(principal())===context.signature;}
   function notify(context){save(context);if(owner===context)changed();arm();}
   function arm(){
-    stop();if(!visible||!owner||principal()?.role!=='admin')return;
+    stop();if(!visible||!owner||identity(principal())!==owner.signature)return;
     const rows=owner.rows.filter(row=>(row.state==='UNREGISTERING'||row.resumeCheck)&&row.operationId&&!busy.has(row));if(!rows.length)return;
     const delay=Math.max(0,Math.min(...rows.map(row=>row.nextAt))-now());
     timer=setTimer(()=>{timer=null;const due=owner?.rows.filter(row=>(row.state==='UNREGISTERING'||row.resumeCheck)&&row.nextAt<=now())||[];for(const row of due)query(row.id);},delay);
@@ -60,7 +68,8 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
   function accept(context,row,result){
     if(row.discarded)return;
     const matching=result&&hash.test(result.operationId)&&(!row.operationId||result.operationId===row.operationId)&&
-      (result.dataset===undefined||result.dataset===row.dataset)&&(result.version===undefined||result.version===row.version);
+      (result.dataset===undefined||result.dataset===row.dataset)&&(result.version===undefined||result.version===row.version)&&
+      (!personal||result.dataset===row.dataset&&result.version===row.version);
     if(!matching){row.state='UNKNOWN';row.error='删除回执未能核对，请查询原操作编号。';return;}
     row.operationId=result.operationId;row.error=result.error||'';
     if(result.state==='UNREGISTERED'&&typeof result.unregistered==='boolean'){
@@ -70,11 +79,13 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
     }else row.state=result.state==='FAILED'?'FAILED':'UNKNOWN';
   }
   async function submit(value){
-    sync();if(!owner)throw Error('只有管理员可以删除数据集。');const target=removalTarget(value),context=owner,stamp=generation;
+    sync();if(!owner)throw Error(personal?'请先登录并确认删除权限。':'只有管理员可以删除数据集。');const target=removalTarget(value),context=owner,stamp=generation;
+    if(personal&&(!target.version||!canRemove(principal(),target)))throw Error('这份数据当前不能按机器删除。');
     if(!machines().some(machine=>machine.id===target.machine))throw Error('这台服务器未授权。');
     if(context.rows.some(row=>unresolved(row)&&overlaps(row,target)))throw Error('这次删除尚未确认，请先查询原操作。');
     const row={...target,id:crypto.randomUUID(),operationId:null,state:'SUBMITTING',startedAt:now(),attempt:0,error:''};
     context.rows.push(row);busy.add(row);notify(context);
+    if(personal&&!context.saved){context.rows.pop();busy.delete(row);changed();throw Error('无法保存删除记录，暂不发送。请允许此网站保存本地记录后重试。');}
     try{accept(context,row,await call('datasets.unregister',{machine:target.machine,dataset:target.dataset,...(target.version?{version:target.version}:{})}));}
     // The portal can wrap a bridge timeout as HTTP 400. An HTTP error does not
     // prove the node rejected cleanup; only the local pre-dispatch gate does.
@@ -210,7 +221,8 @@ export function datasetRemoveUI(store,section,toast,{reload,catalog,readCatalog,
   document.addEventListener('visibilitychange',()=>{api.sync(!document.hidden&&!section.hidden&&inRoom());});
   document.addEventListener('gpuq-maintenance-state',update);
   store.onAuthChange?.(()=>{dialog?.close();localReferences.clear();api.sync(false);update();});
-  const fullDelete=datasetFullDeleteUI(store,{reload,catalog,management:management!==false});
-  Object.assign(api,{canOpenFullDelete:fullDelete.canOpenFullDelete,openFullDelete:fullDelete.openFullDelete,fullDelete});
+  const personal=management===false?personalDatasetRemovalUI(store,section,toast,{catalog,reload,createRemovals:createDatasetRemovals,preservation:removalPreservation}):null;
+  const fullDelete=datasetFullDeleteUI(store,{reload,catalog,management:management!==false,personalRemoval:personal});
+  Object.assign(api,{canOpenFullDelete:fullDelete.canOpenFullDelete,openFullDelete:fullDelete.openFullDelete,mountFullDeleteTasks:fullDelete.mountTasks,fullDelete});
   update();return api;
 }

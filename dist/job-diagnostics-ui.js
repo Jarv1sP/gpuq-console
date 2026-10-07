@@ -21,14 +21,66 @@ export function diagnosticsHTML(bundle){
     <h3>Worker / Ray 日志尾部</h3><p class="muted">最多 32 个白名单文件，每个最多 64 KiB；只呈现有限尾部，不保证覆盖所有错误。</p>${logs.map(item=>`<details class="diagnostic-log"><summary>${esc(item.source)}${item.truncated?' · 已截断':''}</summary><pre>${esc(item.text)}</pre></details>`).join('')||'<p class="muted">暂无受管理 worker 日志；旧任务或自定义临时目录可能没有留存。</p>'}`;
 }
 
+const terminalStates=new Set(['SUCCEEDED','FAILED','CANCELED']);
+const confirmedObservation=value=>value?.protocol==='native-observation-v1'&&value.readOnly===true&&value.status==='CONFIRMED';
+export const completionMatchesJob=(value,job)=>value?.protocol==='job-completion-v1'&&value.readOnly===true&&value.jobId===job.id&&value.userId===job.userId&&value.machine===job.machine&&value.nodeJobId===(job.nodeJobId||null)&&typeof value.completed==='boolean'&&['SUCCEEDED','UNCONFIRMED'].includes(value.state)&&(!value.completed||value.state==='SUCCEEDED'&&!!value.completedAttempt?.id);
+const observedStates={PENDING:'排队中',STARTING:'启动中',RUNNING:'运行中',PREEMPTING:'让位中',SUCCEEDED:'成功',FAILED:'失败',CANCELED:'已取消',LOST:'失联'};
+export function nativeObservationHTML(observation){
+  if(!confirmedObservation(observation))return '<p data-native-observation>服务器上的状态待确认</p>';
+  const attempt=observation.latestAttempt;
+  return `<p data-native-observation><strong>${observation.retryDetected?'已观察到服务器重试':'服务器当前观察'} · ${esc(observedStates[observation.state]||'待确认')}</strong></p><dl class="job-overview-grid"><div><dt>观察时间</dt><dd>${esc(timestamp(observation.observedAt))}</dd></div><div><dt>最近一次运行</dt><dd>${attempt?.ordinal?'第 '+esc(attempt.ordinal)+' 次':'尚未开始'}${attempt?.id?` · <code>${esc(attempt.id)}</code>`:''}</dd></div></dl>`;
+}
+export function completionHTML(value){
+  if(!value)return '';
+  const completed=value.protocol==='job-completion-v1'&&value.completed===true&&value.state==='SUCCEEDED';
+  return `<p data-job-completion><strong>${completed?'已核验完成':'完成待确认'}</strong>${completed?` · 第 ${esc(value.completedAttempt?.ordinal??'未知')} 次运行 · ${esc(timestamp(value.observedAt))}`:''}</p>`;
+}
+
 export function createJobDiagnostics(store,getDialog,toast,options={}){
   let generation=0,diagnosticsRequest=0,jobId=null,bundle=null,bundleIdentity=null,displayIdentity=null,view='logs',installed=false,readingLogs=false,loadedLogs=false;
-  const principal=()=>store.principal?`${store.principal.userId}:${store.principal.role}`:null;
+  const principal=()=>store.principal?`${store.principal.userId}:${store.principal.role}:${store.authGeneration}`:null;
   const element=selector=>getDialog()?.querySelector(selector);
+  let recoveryRequest=0,recoveryController=null,observation=null,completion=null,resourcesReleased=false,recoveryBusy=false,recoveryError='';
+  const recoveryJob=()=>options.drawer?(store.jobs||[]).find(job=>job.id===jobId&&terminalStates.has(job.state)&&job.source!=='native'&&(job.userId===store.principal?.userId||store.principal?.role==='admin')):null;
+  function clearRecovery(){recoveryRequest++;recoveryController?.abort();recoveryController=null;observation=null;completion=null;resourcesReleased=false;recoveryBusy=false;recoveryError='';}
+  function renderRecovery(){
+    const root=element('#job-recovery'),job=recoveryJob();if(!root||!job)return;
+    const releasable=job.nodeJobId&&confirmedObservation(observation)&&terminalStates.has(observation.state);
+    root.innerHTML=`<div class="field-caption"><h3>服务器上的观察</h3><details class="job-recovery-help"><summary aria-label="观察与历史说明"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M12 11v6M12 7v1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></summary><p>只显示查询时的观察。不会改写历史、重新提交或改变额度。释放数据租约会核对同一任务和所有进程；运行中或未知时拒绝。</p></details></div>${nativeObservationHTML(observation)}${completionHTML(completion)}${resourcesReleased?'<p data-resources-released>数据租约已释放</p>':''}${recoveryError?`<p class="form-error" role="alert">${esc(recoveryError)}</p>`:''}<div class="job-recovery-actions"><button class="button quiet" type="button" data-job-observe ${recoveryBusy?'disabled':''}>刷新观察</button><button class="button quiet" type="button" data-job-completion-check ${recoveryBusy?'disabled':''}>核验完成</button><button class="button quiet" type="button" data-job-release-resources ${recoveryBusy||!releasable?'disabled':''}>释放数据租约</button></div>`;
+  }
+  async function readRecovery(operation){
+    const job=recoveryJob(),identity=principal(),context=generation;if(!job||recoveryBusy)return;
+    if(operation==='jobs.reconcile-resources'){
+      if(!job.nodeJobId||!confirmedObservation(observation)||!terminalStates.has(observation.state))return;
+      if(!confirm('确认释放此任务的数据租约？服务器会先核对最近一次运行和所有进程均已结束；不会取消、重跑训练或改变历史记录。'))return;
+      if(principal()!==identity||generation!==context||recoveryJob()!==job)return;
+    }
+    const request=++recoveryRequest,controller=new AbortController();recoveryController=controller;recoveryBusy=true;recoveryError='';
+    if(operation==='jobs.watch'){observation=null;completion=null;resourcesReleased=false;}
+    if(operation==='jobs.completion')completion=null;
+    if(operation==='jobs.reconcile-resources')resourcesReleased=false;
+    renderRecovery();
+    const current=()=>request===recoveryRequest&&generation===context&&principal()===identity&&jobId===job.id&&getDialog()?.open&&!!recoveryJob();
+    try{
+      const result=await store.call(operation,{jobId:job.id},{signal:controller.signal});if(!current())return;
+      if(operation==='jobs.watch'){
+        if(result?.id!==job.id||result.userId!==job.userId||result.machine!==job.machine||result.state!==job.state)throw Error('服务器观察身份待确认，请重新查询。');
+        observation=result.nativeObservation||null;
+      }else if(operation==='jobs.completion'){
+        if(!completionMatchesJob(result,job))throw Error('完成核验回执待确认，请重新查询。');
+        completion=result;observation=result.nativeObservation||null;
+      }else{
+        if(result?.protocol!=='job-resource-reconciliation-v1'||result.jobId!==job.id||result.resourcesReleased!==true)throw Error('数据租约释放待确认；请先核验完成，不要重新提交。');
+        resourcesReleased=true;
+        if(completionMatchesJob(result.completion,job)){completion=result.completion;observation=completion.nativeObservation||null;}
+      }
+    }catch(error){if(current()&&error.name!=='AbortError')recoveryError=operation==='jobs.reconcile-resources'?'释放结果待确认：'+error.message+' 请先核验完成。':error.message;}
+    finally{if(current()){recoveryBusy=false;recoveryController=null;renderRecovery();}}
+  }
   function markViewed(){
     if(getDialog()?.open&&displayIdentity===principal()&&['overview','logs','diagnostics'].includes(view))document.dispatchEvent(new CustomEvent('gpuq-attention-viewed',{detail:{userId:store.principal?.userId,kind:'job',id:jobId}}));
   }
-  function reset(){generation++;diagnosticsRequest++;if(options.drawer)document.dispatchEvent(new Event('gpuq-job-drawer-close'));jobId=null;bundle=null;bundleIdentity=null;displayIdentity=null;view='logs';const dialog=getDialog();if(dialog){dialog.close();element('#job-main-log').textContent='';element('#job-diagnostic-view').innerHTML='';element('#job-view-status').textContent='';element('#job-diagnostic-download').disabled=true;if(options.drawer){for(const key of ['overview','output','notes'])element('#job-'+key+'-view').replaceChildren();element('#job-log-title').textContent='训练详情';}}}
+  function reset(){clearRecovery();generation++;diagnosticsRequest++;if(options.drawer)document.dispatchEvent(new Event('gpuq-job-drawer-close'));jobId=null;bundle=null;bundleIdentity=null;displayIdentity=null;view='logs';const dialog=getDialog();if(dialog){dialog.close();element('#job-main-log').textContent='';element('#job-diagnostic-view').innerHTML='';element('#job-view-status').textContent='';element('#job-diagnostic-download').disabled=true;if(options.drawer){for(const key of ['overview','output','notes'])element('#job-'+key+'-view').replaceChildren();element('#job-log-title').textContent='训练详情';}}}
   function switchView(next){
     view=next;options.onView?.(next);element('#job-main-log').hidden=next!=='logs';element('#job-diagnostic-view').hidden=next!=='diagnostics';element('#job-log-view').setAttribute('aria-pressed',String(next==='logs'));element('#job-diagnostic-open').setAttribute('aria-pressed',String(next==='diagnostics'));
     if(options.drawer){for(const key of ['overview','output','notes'])element('#job-'+key+'-view').hidden=next!==key;for(const button of getDialog().querySelectorAll('[data-job-tab]')){const selected=button.dataset.jobTab===next;button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;}if(next==='output')options.output?.(jobId,element('#job-output-view'));if(next==='notes')options.notes?.(jobId,element('#job-notes-view'));}
@@ -65,7 +117,7 @@ export function createJobDiagnostics(store,getDialog,toast,options={}){
       const content=document.createElement('div');content.className='sheet-scroll';for(const key of ['overview','output','notes']){const panel=document.createElement('section');panel.id='job-'+key+'-view';panel.hidden=true;panel.setAttribute('role','tabpanel');content.append(panel);}content.append(pre,body);dialog.append(content);
       const footer=document.createElement('div');footer.className='sheet-footer glass';footer.append(element('#job-view-status'),element('#job-diagnostic-download'));dialog.append(footer);
       tools.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const buttons=[...tools.querySelectorAll('[data-job-tab]')],index=buttons.indexOf(document.activeElement);const target=buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length];target.focus();target.click();});
-      dialog.addEventListener('click',event=>{const id=event.target.closest('[data-copy-job]')?.dataset.copyJob;if(id)navigator.clipboard.writeText(id).then(()=>toast('完整任务 ID 已复制。'),()=>toast('复制失败；请手动复制完整 ID。'));});
+      dialog.addEventListener('click',event=>{const action=event.target.closest('[data-job-observe],[data-job-completion-check],[data-job-release-resources]');if(action&&!action.disabled){readRecovery(action.hasAttribute('data-job-observe')?'jobs.watch':action.hasAttribute('data-job-completion-check')?'jobs.completion':'jobs.reconcile-resources');return;}const id=event.target.closest('[data-copy-job]')?.dataset.copyJob;if(id)navigator.clipboard.writeText(id).then(()=>toast('完整任务 ID 已复制。'),()=>toast('复制失败；请手动复制完整 ID。'));});
       if(options.dismiss)dialog.addEventListener('cancel',event=>{event.preventDefault();options.dismiss(dialog);});
     }
     element('#job-log-view').addEventListener('click',()=>{switchView('logs');loadMainLog();});
@@ -74,15 +126,16 @@ export function createJobDiagnostics(store,getDialog,toast,options={}){
       if(!bundle||bundle.jobId!==jobId||principal()!==bundleIdentity)return;
       const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:'application/json'})),link=document.createElement('a');link.href=url;link.download='gpuq-diagnostics-'+jobId+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     });
-    dialog.addEventListener('close',()=>{if(dialog.open)return;generation++;diagnosticsRequest++;bundle=null;bundleIdentity=null;displayIdentity=null;jobId=null;pre.textContent='';body.innerHTML='';element('#job-diagnostic-download').disabled=true;if(options.drawer){document.dispatchEvent(new Event('gpuq-job-drawer-close'));const url=new URL(location.href);url.searchParams.delete('job');history.replaceState(null,'',url);}});
+    dialog.addEventListener('close',()=>{if(dialog.open)return;clearRecovery();generation++;diagnosticsRequest++;bundle=null;bundleIdentity=null;displayIdentity=null;jobId=null;pre.textContent='';body.innerHTML='';element('#job-diagnostic-download').disabled=true;if(options.drawer){document.dispatchEvent(new Event('gpuq-job-drawer-close'));for(const key of ['overview','output','notes'])element('#job-'+key+'-view').replaceChildren();const url=new URL(location.href);url.searchParams.delete('job');history.replaceState(null,'',url);}});
   }
   async function openLogs(id,next='logs',origin=null){
-    install();readingLogs=false;loadedLogs=false;const identity=principal(),request=++generation;diagnosticsRequest++;displayIdentity=identity;jobId=id;bundle=null;bundleIdentity=null;element('#job-diagnostic-download').disabled=true;element('#job-diagnostic-view').innerHTML='';
+    install();clearRecovery();readingLogs=false;loadedLogs=false;const identity=principal(),request=++generation;diagnosticsRequest++;displayIdentity=identity;jobId=id;bundle=null;bundleIdentity=null;element('#job-diagnostic-download').disabled=true;element('#job-diagnostic-view').innerHTML='';
     const job=options.drawer?(store.jobs||[]).find(item=>item.id===id):null;
-    if(options.drawer){if(!job)throw Error('任务暂未出现在当前账号的状态中，请刷新核对。');element('#job-log-title').innerHTML=options.header?.(job)||esc(job.name||'训练详情');element('#job-overview-view').innerHTML=options.overview?.(job)||'';const url=new URL(location.href);url.searchParams.set('job',id);history.replaceState(null,'',url);}
+    if(options.drawer){if(!job)throw Error('任务暂未出现在当前账号的状态中，请刷新核对。');element('#job-log-title').innerHTML=options.header?.(job)||esc(job.name||'训练详情');element('#job-overview-view').innerHTML=options.overview?.(job)||'';if(recoveryJob()){const recovery=document.createElement('section');recovery.id='job-recovery';recovery.className='job-recovery';element('#job-overview-view').prepend(recovery);observation=job.nativeObservation||null;renderRecovery();}const url=new URL(location.href);url.searchParams.set('job',id);history.replaceState(null,'',url);}
     switchView(options.drawer?next:'logs');element('#job-main-log').textContent='正在读取主日志…';element('#job-view-status').textContent='诊断包中可查看 worker 错误、资源事件和历史分配。';
     const dialog=getDialog();if(!dialog.open)dialog.showModal();
     markViewed();
+    if(recoveryJob())readRecovery('jobs.watch');
     if(options.drawer){if(options.reveal)options.reveal(dialog,job,origin);else {const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;dialog.animate(reduce?[{opacity:0},{opacity:1}]:[{transform:'translateX(100%)'},{transform:'none'}],{duration:reduce?150:320,easing:'cubic-bezier(.4,0,.2,1)'});}if(next==='diagnostics')loadDiagnostics();}
     if(!options.drawer||['logs','overview'].includes(next))await loadMainLog();
   }

@@ -40,3 +40,6 @@ try{
   assert.equal(await page.locator('#job-diagnostic-view').innerText(),'');
   console.log('Diagnostic browser smoke: desktop/mobile, exact GPU leases with schema9 fallback, attempt history, escaped worker logs, JSON download, account-reset cleanup passed');
 }finally{await browser.close();}
+
+// Terminal history remains immutable during explicit observation and lease recovery.
+await import("./job-recovery-ui-smoke.mjs");

@@ -1,6 +1,7 @@
 import {terminalContractSmoke} from './terminal-contract-ui-smoke.mjs';
 import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
+import {guardedRoute} from './browser-route-guard.mjs';
 // Loopback-only browser acceptance: disposable portal DB and fake project,
 // terminal, file and GPUQ operations. No real credentials, shell, SSH or GPUs.
 import assert from 'node:assert/strict';
@@ -16,8 +17,8 @@ import {MACHINES} from '../dist/machines.js';
 const folder=await mkdtemp(join(tmpdir(),'gpuq-project-ui-'));
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-projects-ui';
 const password='Project-Browser-Fixture-Only-2026!',release='a'.repeat(64),nextRelease='b'.repeat(64),datasetVersion='c'.repeat(64);
-const [machine,other]=MACHINES.map(item=>item.id),calls=[],pageErrors=[],httpErrors=[],blocked=[],projects=new Map(),terminals=new Map(),uploads=new Map();
-let server,service,browser,badReceiptOnce=false,terminalGate,releaseTerminalGate;
+const [machine,other]=MACHINES.map(item=>item.id),calls=[],pageErrors=[],httpErrors=[],blocked=[],projects=new Map(),terminals=new Map(),uploads=new Map(),uploadIdentities=new Map();
+let server,service,browser,badReceiptOnce=false,dropUploadReplyOnce=false,terminalGate,releaseTerminalGate;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port,key=(node,user,project)=>JSON.stringify([node,user,project]);
 const copy=value=>structuredClone(value);
@@ -47,8 +48,14 @@ try{
     }
     if(operation==='terminal.close'){const session=terminals.get(args.id);assert.ok(session);assert.equal(args.project,session.project);assert.equal(node,session.machine);terminals.delete(args.id);return {closed:true};}
     if(operation==='terminal.detach'){const session=terminals.get(args.id);assert.ok(session);assert.equal(args.writerToken,session.writerToken);return {detached:true};}
+    if(operation==='files.upload.status'){
+      const record=[...uploadIdentities.values()].find(value=>value.machine===node&&value.userId===args.userId&&value.project===args.project&&value.path===args.path&&value.totalSize===args.totalSize&&value.sha256===args.sha256&&(!args.uploadId||args.uploadId===value.uploadId));
+      if(!record)return {protocol:2,state:'ABSENT',path:args.path};
+      return {protocol:2,state:record.complete?'COMPLETE':'UPLOADING',path:record.path,uploadId:record.uploadId,totalSize:record.totalSize,sha256:record.sha256,receivedBytes:(uploads.get(record.uploadId)||[]).reduce((size,part)=>size+part.length,0),resumable:true,...(record.complete?{complete:true,size:record.totalSize,completionPending:false}:{})};
+    }
     if(operation==='files.put'){
       if(args.project){assert.equal(args.area,'code');assert.equal(Object.hasOwn(args,'truncate'),false);assert.match(args.uploadId,/^[a-f0-9-]{36}$/);
+        uploadIdentities.set(args.uploadId,{...copy(args),machine:node,complete:args.final});
         const parts=uploads.get(args.uploadId)||[];assert.equal(args.offset,parts.reduce((n,part)=>n+part.length,0));parts.push(Buffer.from(args.data,'base64'));uploads.set(args.uploadId,parts);
         if(args.final){const data=Buffer.concat(parts);assert.equal(data.length,args.totalSize);assert.equal(createHash('sha256').update(data).digest('hex'),args.sha256);}}
       else{assert.equal(args.truncate,args.offset===0);assert.equal(args.area,undefined);assert.equal(args.uploadId,undefined);}
@@ -75,7 +82,9 @@ try{
   async function configure(target){
     target.on('pageerror',error=>pageErrors.push(error.message));
     target.on('response',response=>{if(response.status()>=400)httpErrors.push({status:response.status(),operation:response.request().postDataJSON()?.operation});});
-    await target.context().route('**/*',route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol))return route.continue();blocked.push(url.href);return route.abort();});
+    await target.context().route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(url.origin!==origin&&!['data:','blob:'].includes(url.protocol)){blocked.push(url.href);await route.abort();return;}
+      if(url.pathname==='/api/call'&&dropUploadReplyOnce&&route.request().postDataJSON()?.operation==='files.put'){dropUploadReplyOnce=false;await route.fetch();await route.abort('connectionreset');return;}
+      await route.continue();}));
   }
   await configure(page);
   async function login(target,username){await target.goto(origin);await target.locator('#login-form [name=username]').fill(username);await target.locator('#login-form [name=password]').fill(password);await target.locator('#login-form [type=submit]').click();await target.locator('#login-dialog').waitFor({state:'hidden'});}
@@ -113,10 +122,23 @@ try{
   await action('files.put',()=>page.locator('#workspace-upload').click());await idle();
   assert.match(await page.locator('#project-status').textContent(),/尚未确认完整文件/);
   const failedUpload=calls.filter(call=>call.operation==='files.put').at(-1).args.uploadId;
-  await action('files.put',()=>page.locator('#workspace-upload').click());await idle();
-  assert.notEqual(calls.filter(call=>call.operation==='files.put').at(-1).args.uploadId,failedUpload);
+  const putCount=calls.filter(call=>call.operation==='files.put').length;
+  await action('files.upload.status',()=>page.locator('#workspace-upload').click());await idle();
+  assert.equal(calls.filter(call=>call.operation==='files.put').length,putCount,'verified completion after a lost receipt must not reupload');
+  assert.equal(calls.filter(call=>call.operation==='files.upload.status').at(-1).args.sha256,uploadIdentities.get(failedUpload).sha256);
+  assert.equal(calls.filter(call=>call.operation==='files.put').at(-1).args.uploadId,failedUpload);
   assert.match(await page.locator('#workspace-result').textContent(),/已上传 1 个文件/);
   assert.doesNotMatch(await page.locator('#project-status').textContent(),/尚未确认完整文件/);
+  const originalUpload=randomUUID(),resumeFile=Buffer.alloc(1048576+13,66),resumeHash=createHash('sha256').update(resumeFile).digest('hex');
+  uploadIdentities.set(originalUpload,{machine,userId:member.id,project:'vision-demo',path:'resume.py',totalSize:resumeFile.length,sha256:resumeHash,uploadId:originalUpload,complete:false});uploads.set(originalUpload,[resumeFile.subarray(0,1048576)]);
+  await page.locator('[name=files]').setInputFiles({name:'resume.py',mimeType:'text/plain',buffer:resumeFile});
+  const resumeStart=calls.length;await action('files.put',()=>page.locator('#workspace-upload').click());await idle();
+  const resumedPuts=calls.slice(resumeStart).filter(row=>row.operation==='files.put');assert.equal(resumedPuts.length,1);assert.equal(resumedPuts[0].args.uploadId,originalUpload);assert.equal(resumedPuts[0].args.offset,1048576);assert.equal(Buffer.from(resumedPuts[0].args.data,'base64').length,13);
+  const lostStart=calls.length;dropUploadReplyOnce=true;await page.locator('[name=files]').setInputFiles({name:'interrupted.py',mimeType:'text/plain',buffer:resumeFile});
+  await page.locator('#workspace-upload').click();await page.waitForFunction(()=>!document.querySelector('#workspace-upload').disabled&&document.querySelector('#workspace-result').textContent.includes('已上传 1 个文件'));await idle();
+  const lostPuts=calls.slice(lostStart).filter(row=>row.operation==='files.put'),recoveryRead=calls.slice(lostStart).filter(row=>row.operation==='files.upload.status').at(-1);
+  assert.deepEqual(lostPuts.map(row=>row.args.offset),[0,1048576]);assert.equal(lostPuts[0].args.uploadId,lostPuts[1].args.uploadId);assert.equal(recoveryRead.args.uploadId,lostPuts[0].args.uploadId);
+  await capture('project-upload-resume-member-1440.png');
   await action('files.list',()=>page.locator('#workspace-list').click());assert.match(await page.locator('#workspace-result').textContent(),/train.py/);
 
   await action('terminal.open',()=>page.locator('#terminal-open').click());await page.locator('.terminal-dialog').waitFor({state:'visible'});
@@ -209,6 +231,11 @@ try{
   assert.equal(calls.filter(call=>call.operation==='terminal.open').at(-1).args.hostAdmin,false,'admin default terminal remains private');
   await action('terminal.close',()=>adminPage.locator('#terminal-stop').click(),adminPage);
   await action('projects.status',()=>adminPage.locator('[name=workspace-project]').selectOption('admin-project'),adminPage);await idle(adminPage);
+  await adminPage.locator('#workspace-files summary').click();
+  await adminPage.locator('[name=files]').setInputFiles({name:'resume.py',mimeType:'text/plain',buffer:resumeFile});
+  const adminUploadStart=calls.length;await action('files.put',()=>adminPage.locator('#workspace-upload').click(),adminPage);await idle(adminPage);
+  const adminPuts=calls.slice(adminUploadStart).filter(row=>row.operation==='files.put');assert.equal(adminPuts[0].args.offset,0);assert.notEqual(adminPuts[0].args.uploadId,originalUpload);assert.equal(adminPuts[0].args.userId,'builtin-admin','another actor never resumes member bytes');
+  await capture('project-upload-resume-admin-1440.png',adminPage);
   await openMaintenance(adminPage);assert.equal(await adminPage.locator('#host-maintenance').isVisible(),true);assert.equal(await adminPage.locator('#host-maintenance').evaluate(el=>el.open),false,'backend maintenance starts collapsed');await rootEntry();
   const beforeRoot=calls.filter(call=>call.operation==='terminal.open').length;
   adminPage.once('dialog',dialog=>dialog.dismiss());await adminPage.locator('#terminal-root-open').click();
@@ -310,3 +337,5 @@ await import('./project-directory-ui-smoke.mjs');
 
 // Shared transport and explicit refusal must retain lost-reply recovery.
 await import("./submission-errors-ui-smoke.mjs");
+// Personal disk quota shares the selected development project context.
+await import('./project-quota-ui-smoke.mjs');
