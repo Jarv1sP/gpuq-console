@@ -70,6 +70,17 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 门户、1440/390 原生浏览器验证一条逻辑记录、原件不冒充缓存就绪、自动准备入口、固定准备调用及原命令；
 不连接生产、不搬运数据、不运行 GPU，不替代实际 SSD/HDD 发布与校验。
 
+成员指南收敛为个人容器开发、机械仓库入库和 `data prepare` 准备训练缓存。
+内容测试明确核对上传位置与训练目标可不同、仓库不可达不改存 SSD、上传 READY
+不冒充训练缓存 READY，以及模型和结果继续属于个人项目；不再推荐旧环境模式、
+个人数据终端发布或手工跨机长期复制。指南浏览器夹具保留全部七章导航、精确复制、
+键盘、无脚本、320/390/1440 布局和对比度检查，只改对应新流程的严格文字契约。
+首次定向运行因独立工作树尚未构建 standalone client 而有一个启动失败；按规定
+构建客户端后重跑全部 29 条指南测试通过，不修改运行时或放宽权限检查。
+全量 Node 首轮未传入标准 Python3.12/TMPDIR，7 个真实节点夹具因 macOS `/var`
+软链接路径被 no-follow 拒绝；原结果保留，以规定运行时和 `/private/tmp` 重跑全量，
+得到 1671 pass、2 个既有 skip、0 fail；没有修改节点代码、文件保护或断言来适配错误环境。
+
 `dataset-deletion-continue-running.test.js` 使用独立 SQLite、真实挂起的 locations 回包及 loopback HTTP 登录，验证继续前持久 RUNNING/清旧 error、同编号查询不重放、重复继续零派发、持久化失败零启动和 worker 等待后的认证重核。真实 logout 在回包等待期间仍阻止全部写入；保持登录直到 DELETED 后再退出不改变原结果。假桥不连接节点，也不放宽认证或删除证明。
 
 `dataset-empty-registration-api.test.js` 与 `dataset-empty-registration.test.py` 专测管理员正常注销个人 0 版本登记：完整清单与节点强证明、原 worker/回执、默认 tier 与上传历史保留、丢回执沿原编号查询，以及新版本/owner/依赖变化、软硬链接、未知上传预留、成员/旧能力/单版本/伪造字段的零派发。Python 夹具使用真实缓存和后台 worker，只替换 systemd 启动与活动探测，不连接节点或调用 GPU；既有 unregister、last-copy 与 delete-retry 仍需回归，不能把空登记分支用作任意版本的最后副本例外。
