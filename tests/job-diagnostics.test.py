@@ -179,7 +179,8 @@ class Diagnostics(unittest.TestCase):
                  patch.object(R,'finish_job_capture') as finish:
                 self.assertEqual(R.main(),value);self.assertEqual(finish.call_args.args[-1],value)
         self.start();error=ValueError('OCI registry drop-in directories changed during operation')
-        def execute(capture):
+        def execute(capture,*,resource_module):
+            self.assertEqual(resource_module,'job-resources.py')
             capture.root,capture.spec,capture.module,capture.identifier=self.root,self.spec,D,CAPTURE
             capture.phase='OCI_EXECUTION';raise error
         with patch.object(R,'run_job',side_effect=execute),self.assertRaises(ValueError) as caught:R.main()
@@ -190,7 +191,8 @@ class Diagnostics(unittest.TestCase):
     def test_capture_failure_never_changes_payload_return_or_original_exception(self):
         error=RuntimeError('private command --password hidden')
         for code in (0,125):
-            def execute(capture):
+            def execute(capture,*,resource_module):
+                self.assertEqual(resource_module,'job-resources.py')
                 capture.module=SimpleNamespace(finish_capture=lambda *a,**kw:(_ for _ in ()).throw(OSError('unavailable')))
                 return code
             with patch.object(R,'run_job',side_effect=execute):self.assertEqual(R.main(),code)

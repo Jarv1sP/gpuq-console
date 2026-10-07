@@ -78,7 +78,7 @@ class JobCapture:
 def main():
     capture=JobCapture()
     try:
-        code=run_job(capture)
+        code=run_job(capture,resource_module='job-resources.py')
     except Exception as error:
         capture.finish(125,error)
         raise
@@ -158,7 +158,7 @@ def oci_runtime_spec(spec,jid,terminal):
     # is the trusted identity, not any optional ID supplied by the client.
     return {**spec,'id':jid} if terminal else spec
 
-def run_job(capture):
+def run_job(capture,*,resource_module):
     jid=sys.argv[1]
     if not re.fullmatch(r'[a-f0-9-]{36}',jid):raise ValueError('Invalid job ID')
     cfg=json.loads((HERE/'node-config.json').read_text());root=Path(cfg['root'])
@@ -186,7 +186,7 @@ def run_job(capture):
         if len(sizes)!=len(indices) or any(size<spec.get('minVramGiB',0)*1024-512 for size in sizes):raise ValueError('Allocated GPU memory does not meet request')
     # Apply limits BEFORE any untrusted code runs, inside the original GPUQ unit.
     capture.phase='RESOURCE_BUDGET'
-    resources=local_module('gpuq_job_resources','job-resources.py')
+    resources=local_module('gpuq_job_resources',resource_module)
     requested=resources.requested_limits(spec if terminal else runtime_spec,terminal)
     subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={requested["memory"]}',f'CPUQuota={requested["cpu"]*100}%','TasksMax=2048'],env=env,check=True)
     if not terminal and 'storageQuota' in cfg:local_module('gpuq_storage_quota','storage-quota.py').ensure_attempt(cfg,spec,os.environ)
