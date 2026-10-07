@@ -60,6 +60,8 @@ try{
     const id=randomUUID(),data={owner:{id:member.id,name:member.name},name,kind:'copy',machine:MACHINES[0].id,from:MACHINES[1].id,error:state==='FAILED'?'复制被中断 <img src=x onerror=bad>':null};
     insert.run(id,member.id,randomUUID(),'local-fixture',state,old,time,JSON.stringify(data));dataRows.set(name,id);
   }
+  // A full first page of ended records must not hide the older actionable row.
+  for(let i=0;i<51;i++){const id=randomUUID();insert.run(id,member.id,randomUUID(),'local-fixture','SUCCEEDED',old+1000,old+1000,JSON.stringify({owner:{id:member.id,name:member.name},name:'已结束传输 '+i,kind:'copy',machine:MACHINES[0].id}));}
   for(const [state,time] of [['UNKNOWN',old],['PARTIAL',now-60000],['UNCONFIRMED',old],['FAILED',now-60000]]){
     const id=randomUUID(),data={owner:{id:uncertainData.id,name:uncertainData.name},name:'数据待确认 '+state,kind:'copy',machine:MACHINES[0].id,from:MACHINES[1].id};
     insert.run(id,uncertainData.id,randomUUID(),'local-fixture',state,old,time,JSON.stringify(data));uncertainRows.push({id,state});
@@ -85,7 +87,7 @@ try{
   async function login(page,user,hash='#resources'){
     await page.goto(origin+'/'+hash);await page.locator('#login-form [name=username]').fill(user.username);await page.locator('#login-form [name=password]').fill(password);
     await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.evaluate(()=>document.fonts.ready);
-    if([member.id,uncertainData.id].includes(user.id)){await page.evaluate(()=>{location.hash='datasets/transfers';});await page.locator('#transfer-list [data-transfer-id]').first().waitFor();await page.waitForFunction(()=>document.querySelector('#control-strip').textContent.includes('后台数据'));await page.locator('[data-nav=resources]').click();}
+    if([member.id,uncertainData.id].includes(user.id)){await page.waitForFunction(()=>document.querySelector('#control-strip').textContent.includes('后台数据'));assert.equal(await page.locator('#transfer-list [data-transfer-id]').count(),0,'attention is available before entering the data room');}
     await page.locator('#page-resources').waitFor({state:'visible'});
   }
   async function count(page,expected){
@@ -120,6 +122,16 @@ try{
       return Math.abs((label.top+label.bottom-help.top-help.bottom)/2)<=1&&help.left>=label.right&&group.scrollWidth<=group.clientWidth+1;
     }),'command label and help remain centered on the same row');
     await page.screenshot({path:join(shots,`attention-${role}-panel-${width}.png`),animations:'disabled'});
+    await close(page);
+    // Partial pages and a failed refresh cannot erase the cached reminders.
+    await page.evaluate(userId=>document.dispatchEvent(new CustomEvent('gpuq-data-activities',{detail:{userId,items:[],complete:false}})),user.id);await count(page,expected);
+    for(const room of ['work','resources','datasets','community','me']){
+      await page.evaluate(room=>location.hash='#'+room,room);await page.waitForFunction(room=>document.body.dataset.room===room,room);await count(page,expected);
+      if(width<760&&room!=='work')assert.match(await page.locator('#live-pill').innerText(),new RegExp('需处理 '+expected));
+      await open(page);assert.equal(await page.locator('#control-attention .mc-attention-item').count(),expected);assert.equal(await page.locator('#control-attention-title').innerText(),'需要处理 · '+expected);await close(page);
+    }
+    await page.evaluate(()=>location.hash='#resources');await page.waitForFunction(()=>document.body.dataset.room==='resources');await open(page);
+
   }
   const desktop=pages.get('member-1440'),recent=jobs.get(member.id).recent;
   await desktop.locator(`[data-control-ack="job:${recent[0].id}"]`).click();await count(desktop,4);
@@ -172,7 +184,9 @@ try{
   await close(uncertain);await uncertain.reload();await uncertain.locator('#login-dialog').waitFor({state:'hidden'});await uncertain.locator('#transfer-list [data-transfer-id]').first().waitFor();await count(uncertain,3);await open(uncertain);await geometry(uncertain);
   assert.equal(await uncertain.locator('[data-control-ack]').count(),0);
   await writeFile(join(shots,'attention-unconfirmed-data-checks.json'),JSON.stringify({status:'passed',states:['UNKNOWN','PARTIAL','UNCONFIRMED'],remainingAfterAcknowledgeAndDetailsAndReload:3,readMarkers:1,onlyFailedAcknowledged:true},null,2));
-  assert.ok(requests.every(operation=>['state','projects.list','transfers.list','jobs.logs','jobs.diagnostics','logout'].includes(operation)),'acknowledgment and history navigation never write server state');
+  const readOperations=['state','projects.list','transfers.list','datasets.list','datasets.catalog','datasets.capacity','datasets.upload.routes','transfers.capabilities','community.info','community.posts.list','community.chat.list','jobs.logs','jobs.diagnostics','jobs.watch','logout'];
+  const unexpectedOperations=[...new Set(requests.filter(operation=>!readOperations.includes(operation)))];
+  assert.deepEqual(unexpectedOperations,[],'acknowledgment and history navigation never write server state');
   assert.deepEqual(service.store.jobs,unchangedJobs);assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
   await writeFile(join(shots,'attention-checks.json'),JSON.stringify({status:'passed',historicalFailures:211,failedHistoryPerAccount:215,memberAttention:5,adminAttention:4,widths:[1440,390,320],checks:['shared desktop/pill/panel rules','24h/missing time exclusion','acknowledge one/all','opening diagnostics/logs/details marks read','data timestamps and detail navigation','UNKNOWN stays; approvals move to backend','history link and actual FAILED filter','reload and account isolation','storage read/write fallback','zero capsule hidden','99+ display','unchanged server task records','no page/card overflow, script/CSP errors or external requests'],shots},null,2));
   console.log('ATTENTION PASS: 211 historical failures excluded; account-scoped reads/one/all/views/history/storage fallback/99+/zero; member/admin 1440/390/320.');

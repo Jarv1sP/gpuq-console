@@ -109,17 +109,66 @@ export function createSubmitSelectionGuard(){
   };
 }
 function base64(bytes){let value='';for(let i=0;i<bytes.length;i+=8192)value+=String.fromCharCode(...bytes.subarray(i,i+8192));return btoa(value);}
-export async function uploadProjectFile(file,context,send,progress=()=>{}){
+export function projectDiskQuotaHTML(value,owner){
+  const unknown=()=>{throw Error('磁盘用量待确认，请稍后刷新。');};
+  if(!owner||!value||value.owner!==owner||typeof value.enabled!=='boolean')unknown();
+  if(!value.enabled){
+    if(value.enforcement!==null||value.volumes!==null||value.reason!==undefined&&value.reason!=='OWNER_NOT_ACTIVATED')unknown();
+    return '<p class="disk-quota-status">未启用</p>';
+  }
+  if(value.enforcement!=='kernel-project-quota'||!Number.isSafeInteger(value.projectId)||value.projectId<10000||value.projectId>=2**31||!Array.isArray(value.volumes)||!value.volumes.length||value.volumes.length>8)unknown();
+  const seen=new Set(),count=new Intl.NumberFormat('zh-CN'),bytes=n=>{const units=['B','KiB','MiB','GiB','TiB','PiB'];let index=0;while(n>=1024&&index<units.length-1){n/=1024;index++;}return count.format(Number(n.toFixed(index?1:0)))+' '+units[index];};
+  const rows=value.volumes.map(row=>{
+    if(!row||typeof row.volume!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(row.volume)||seen.has(row.volume))unknown();
+    for(const key of ['bytes','inodes','usedBytes','usedInodes','remainingBytes','remainingInodes'])if(!Number.isSafeInteger(row[key])||row[key]<0)unknown();
+    if(!row.bytes||!row.inodes||row.remainingBytes!==Math.max(0,row.bytes-row.usedBytes)||row.remainingInodes!==Math.max(0,row.inodes-row.usedInodes))unknown();seen.add(row.volume);
+    return `<li><strong class="mono server-id" title="${escape(row.volume)}">${escape(row.volume)}</strong><dl><dt>容量</dt><dd>${bytes(row.usedBytes)} / ${bytes(row.bytes)}</dd><dt>文件与目录</dt><dd>${count.format(row.usedInodes)} / ${count.format(row.inodes)}</dd></dl><progress value="${Math.min(row.usedBytes,row.bytes)}" max="${row.bytes}" aria-label="${escape(row.volume)} 已用容量"></progress></li>`;
+  });
+  return '<ul class="disk-quota-volumes">'+rows.join('')+'</ul>';
+}
+export async function uploadProjectFile(file,context,send,progress=()=>{},{inspect,signal,current=()=>true}={}){
+  const check=()=>{signal?.throwIfAborted();if(!current())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');};
+  check();
   if(!validProject(context.project)||context.area!=='code')throw Error('项目只能上传到代码草稿。');
   if(!Number.isSafeInteger(file.size)||file.size<0||file.size>100*1024*1024)throw Error('网页单文件上限 100 MiB；大文件请用 CLI。');
-  const contents=await file.arrayBuffer();if(contents.byteLength!==file.size)throw Error('文件读取长度不一致，请重新选择。');
+  const contents=await file.arrayBuffer();check();if(contents.byteLength!==file.size)throw Error('文件读取长度不一致，请重新选择。');
   const sha256=[...new Uint8Array(await crypto.subtle.digest('SHA-256',contents))].map(value=>value.toString(16).padStart(2,'0')).join('');
-  const uploadId=crypto.randomUUID();let offset=0;
+  check();if(typeof inspect!=='function')throw Error('上传状态无法核实，请用 CLI 检查原上传。');
+  const identity={...context,totalSize:file.size,sha256};let uploadId,offset=0,recoveries=0,resumed=false;
+  const unconfirmed=()=>Error('上传结果未确认'+(uploadId?' · '+uploadId:'')+'；重新选择同一文件后点上传，将核对原进度。');
+  async function observe(){
+    check();const result=await inspect({...identity,...(uploadId?{uploadId}:{})});check();
+    if(result?.protocol!==2||!['ABSENT','UPLOADING','COMPLETE','CONFLICT'].includes(result.state)||result.path!==context.path)throw unconfirmed();
+    if(['UPLOADING','COMPLETE'].includes(result.state)){
+      if(typeof result.uploadId!=='string'||!uuidPattern.test(result.uploadId)||uploadId&&result.uploadId!==uploadId||result.sha256!==sha256||result.totalSize!==file.size||!Number.isSafeInteger(result.receivedBytes)||result.receivedBytes<0||result.receivedBytes>file.size||result.project!==undefined&&result.project!==context.project||result.machine!==undefined&&result.machine!==context.machine)throw unconfirmed();
+      if(result.state==='COMPLETE'&&(result.complete!==true||result.size!==file.size||result.receivedBytes!==file.size)||result.completionPending!==undefined&&typeof result.completionPending!=='boolean')throw unconfirmed();
+    }
+    if(result.state==='CONFLICT')throw Error('上传目标已变化，保留原上传；请核对后再继续。');
+    if(result.state==='UPLOADING'&&result.resumable!==true)throw Error('这份旧上传不能安全续传，已保留；请管理员核对。');
+    return result;
+  }
+  function advance(result){
+    uploadId=result.uploadId;offset=result.state==='COMPLETE'?file.size:result.receivedBytes;resumed=true;
+    if(result.state==='COMPLETE'&&result.completionPending!==true){progress(offset,file.size,{resumed,uploadId});return true;}
+    if(offset)progress(offset,file.size,{resumed,uploadId});return false;
+  }
+  const initial=await observe();
+  if(initial.state==='ABSENT')uploadId=crypto.randomUUID();else if(advance(initial))return {uploadId,complete:true};
   do{const bytes=new Uint8Array(contents,offset,Math.min(1048576,file.size-offset)),final=offset+bytes.length===file.size;
-    const receipt=await send({...context,uploadId,totalSize:file.size,sha256,offset,data:base64(bytes),final});
-    if(final&&(receipt?.complete!==true||receipt.size!==file.size||receipt.sha256!==sha256))throw Error('服务器尚未确认完整文件及校验和；请重新上传此文件，确认成功后再生成训练版本。');
-    offset+=bytes.length;progress(offset,file.size);
+    check();let receipt;
+    try{receipt=await send({...identity,uploadId,offset,data:base64(bytes),final});check();}
+    catch(error){
+      check();const ambiguous=error.code!=='MAINTENANCE_ACTIVE'&&(error.code==='REQUEST_TIMEOUT'||error instanceof TypeError||[502,503,504].includes(error.status)||/reply lost|connection reset|请求超时/i.test(error.message));
+      if(!ambiguous||recoveries++>=3)throw error;
+      const observed=await observe();
+      if(observed.state==='ABSENT'||observed.state==='UPLOADING'&&(observed.receivedBytes<offset||observed.receivedBytes>offset+bytes.length))throw unconfirmed();
+      if(advance(observed))return {uploadId,complete:true};continue;
+    }
+    if(final&&(receipt?.complete!==true||receipt.completionPending===true||receipt.size!==file.size||receipt.sha256!==sha256))throw Error('服务器尚未确认完整文件及校验和 · '+uploadId+'；重新选择同一文件后继续核对。');
+    if(!final&&(receipt?.complete!==false||receipt.size!==offset+bytes.length)||receipt?.path!==undefined&&receipt.path!==context.path||receipt?.uploadId!==undefined&&receipt.uploadId!==uploadId)throw unconfirmed();
+    offset+=bytes.length;progress(offset,file.size,{resumed,uploadId});
   }while(offset<file.size);
+  return {uploadId,complete:true};
 }
 
 export function executionUI(store,refresh,toast){
@@ -132,6 +181,7 @@ export function executionUI(store,refresh,toast){
   let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,historyState='',jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
   let submitReceipt=null,parsedTarget=null,acceptedDraft=false,managementSubmit=false;
   let projectManagement=null;
+  let quotaKey='',quotaState='idle',quotaResult=null,quotaError='',quotaController;
   const managementAllowed=()=>managementSubmit&&store.principal?.role==='admin';
   function submissionMode(management){
     const priority=query('[name=priority]'),rank=query('[name=queue-rank]');if(!priority||!rank)return false;
@@ -171,6 +221,7 @@ export function executionUI(store,refresh,toast){
   const status=(text,error=false)=>{const element=query('#project-status');if(element){element.textContent=text;element.classList.toggle('form-error',error);}};
   const stopPolling=()=>{clearTimeout(pollTimer);pollTimer=null;};
   function cancelProjectActivity(){
+    cancelDiskQuota();
     projectPaused=true;stopPolling();projectActivity.cancel();explicitProjectReads.clear();projectBusy=false;recoveredActor=null;
     if(directoryLoading){directoryOwner='';directoryLoading=false;}
     if(projectOperation){operationBusy=false;projectOperation=false;}
@@ -178,6 +229,30 @@ export function executionUI(store,refresh,toast){
     if(section&&actor)updateControls();
   }
   function activateProjectActivity(){flushClosedProjectDialogs();if(!pageActive||!isVisible())return false;projectPaused=false;recoveredActor=actor;return true;}
+  function cancelDiskQuota(){quotaController?.abort();quotaController=null;if(quotaState==='loading')quotaState='idle';}
+  function renderDiskQuota(){
+    const panel=query('#project-disk-quota');if(!panel)return;
+    query('#disk-quota-state').textContent=({idle:'',loading:' · 查询中',ready:' · 已启用',disabled:' · 未启用',unknown:' · 待确认'})[quotaState];
+    const place=query('#disk-quota-machine');place.textContent=machine||'选择项目后查看';place.title=machine;
+    query('#disk-quota-refresh').disabled=!enabled()||quotaState==='loading';
+    const result=query('#disk-quota-result');
+    if(quotaResult!==null)result.innerHTML=quotaResult;
+    else{result.textContent=quotaState==='unknown'?quotaError||'磁盘用量待确认，请稍后刷新。':quotaState==='loading'?'正在查询…':machine?'点击刷新查看个人磁盘用量。':'先选择个人容器项目或服务器。';}
+  }
+  function syncDiskQuota(){
+    const key=currentToken();if(key!==quotaKey){cancelDiskQuota();quotaKey=key;quotaState='idle';quotaResult=null;quotaError='';}
+    renderDiskQuota();if(query('#project-disk-quota')?.open&&projectActive()&&enabled()&&quotaState==='idle')void loadDiskQuota();
+  }
+  async function loadDiskQuota(){
+    if(!enabled()||!activateProjectActivity()||quotaState==='loading')return;
+    cancelDiskQuota();const token=currentToken(),controller=new AbortController(),target=machine,owner=actor;quotaController=controller;quotaKey=token;quotaState='loading';quotaResult=null;quotaError='';renderDiskQuota();
+    const current=()=>!controller.signal.aborted&&token===currentToken()&&query('#project-disk-quota')?.open&&projectActive();
+    try{
+      const value=await projectActivity.run(signal=>store.call('projects.quota',{machine:target},{signal:AbortSignal.any([signal,controller.signal])}));
+      if(!current())return;quotaResult=projectDiskQuotaHTML(value,owner);quotaState=value.enabled?'ready':'disabled';
+    }catch(error){if(!current()||error.name==='AbortError')return;quotaState='unknown';quotaResult=null;quotaError=error.message||'磁盘用量待确认，请稍后刷新。';}
+    finally{if(current()){quotaController=null;renderDiskQuota();}}
+  }
   function restorePublication(){publicationIntent=project?publicationCache.read(actor,machine,project):null;publicationResult=null;publicationError='';publicationSelection=null;publicationFlash=null;pollCount=0;}
   function observePublication(info){
     if(!publicationIntent)return;
@@ -270,7 +345,9 @@ export function executionUI(store,refresh,toast){
     const taskHelp=explanation.closest('.ui-info');kicker.querySelector('span').append(taskHelp);
     const contextHeading=query('#workspace-context-title'),contextCaption=document.createElement('div');contextCaption.className='field-caption';contextHeading.before(contextCaption);contextCaption.append(contextHeading,contextInfo);
     renderEnvironmentChoice();
-
+    const disk=document.createElement('details');disk.id='project-disk-quota';disk.className='execution-panel';
+    disk.innerHTML='<summary>磁盘配额<span id="disk-quota-state"></span></summary><div class="disk-quota-head"><span id="disk-quota-machine" class="server-id mono"></span>'+infoHTML('当前账号在这台服务器上的项目、文件和数据用量。未启用不代表零用量或无限容量，与显卡额度分开。','磁盘配额说明')+'<button id="disk-quota-refresh" class="button quiet" type="button">刷新</button></div><div id="disk-quota-result" role="status" aria-live="polite"></div>';
+    query('#workspace-files').before(disk);disk.addEventListener('toggle',()=>{if(disk.open){activateProjectActivity();syncDiskQuota();}else cancelDiskQuota();});query('#disk-quota-refresh').addEventListener('click',()=>void loadDiskQuota());
   }
   const receiptActor=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   function renderReceipt(){
@@ -434,7 +511,7 @@ export function executionUI(store,refresh,toast){
       if(result.state==='PUBLISHING')progress.innerHTML=projectPublicationProgressHTML(info?.progress);
       query('#project-status-detail').textContent=projectStatusText(result.state==='FAILED'?{...info,state:'FAILED',error:result.error,errorDetails:result.errorDetails}:info,hasTerminal())+(publicationError?' · '+publicationError:'');
     }
-    renderRuns();updateControls();updatePreflight();armPolling();document.dispatchEvent(new Event('gpuq-workspace-rendered'));
+    renderRuns();updateControls();updatePreflight();armPolling();syncDiskQuota();document.dispatchEvent(new Event('gpuq-workspace-rendered'));
     if(publicationFlash){publicationFlash=null;confirmPublicationMotion(query('#project-status'));}
   }
   function renderRuns(){
@@ -575,12 +652,13 @@ export function executionUI(store,refresh,toast){
     if(button.id==='publication-retry')guarded(button,()=>publishProject(true),true);
     if(button.id==='workspace-list')guarded(button,listFiles);
     if(button.id==='workspace-upload')guarded(button,async()=>{
-      const target=fileContext(),dir=query('[name=file-path]').value||'.',files=[...query('[name=files]').files];if(target.area==='output')throw Error('任务输出只支持查看和下载。');if(!files.length)throw Error('先选择文件。');
-      for(const file of files){const path=dir==='.'?file.name:dir+'/'+file.name,progress=offset=>{query('#workspace-result').textContent=`正在上传 ${file.name}：${offset} / ${file.size} B`;};
-        if(target.project)await uploadProjectFile(file,{...target,path},args=>call('files.put',args),progress);
-        else{let offset=0;do{const bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());await call('files.put',{...target,path,offset,truncate:offset===0,data:base64(bytes)});offset+=bytes.length;progress(offset);}while(offset<file.size);}}
+      const target=fileContext(),token=currentToken(),dir=query('[name=file-path]').value||'.',files=[...query('[name=files]').files];if(target.area==='output')throw Error('任务输出只支持查看和下载。');if(!files.length)throw Error('先选择文件。');
+      for(const file of files){const path=dir==='.'?file.name:dir+'/'+file.name,progress=(offset,total,info)=>{if(token===currentToken())query('#workspace-result').textContent=`${info?.resumed?'接着上传':'正在上传'} ${file.name}：${offset} / ${total??file.size} B`;};
+        if(target.project)await projectActivity.run(signal=>uploadProjectFile(file,{...target,path},args=>store.call('files.put',args,{signal}),progress,{inspect:args=>store.call('files.upload.status',args,{signal}),signal,current:()=>token===currentToken()}));
+        else{let offset=0;do{const bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());if(token!==currentToken())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');await call('files.put',{...target,path,offset,truncate:offset===0,data:base64(bytes)});offset+=bytes.length;progress(offset);}while(offset<file.size);}}
+      if(token!==currentToken())return;
       query('#workspace-result').textContent=`已上传 ${files.length} 个文件${project?'到项目代码草稿；生成训练版本后才能用于训练。':'。'}`;renderProject();toast('文件上传完成。');
-    });
+    },true);
     if(button.id==='workspace-download')guarded(button,async()=>{
       const target=fileContext(),path=query('[name=file-path]').value;if(!path||path==='.')throw Error('请填入要下载的文件相对路径。');let offset=0;const chunks=[];
       while(true){const result=await call('files.get',{...target,path,offset}),bytes=Uint8Array.from(atob(result.data),char=>char.charCodeAt(0));chunks.push(bytes);offset+=bytes.length;if(offset>100*1024*1024)throw Error('超过 100 MiB，请用 CLI 下载大文件。');if(result.eof)break;if(!bytes.length)throw Error('下载没有继续返回数据，请重试。');}
@@ -709,7 +787,7 @@ export function executionUI(store,refresh,toast){
       submitReceipt=null;parsedTarget=null;acceptedDraft=false;managementSubmit=false;actor=store.principal.userId;machine='';focusMachine='';project='';catalog=[];directory.clear();directoryOwner='';directoryError='';environmentExplicit=false;catalogError='';epoch++;stopPolling();machineIdentity='';submitKey=crypto.randomUUID();operationBusy=false;projectBusy=false;
       section.innerHTML=`<section class="workspace-context" aria-labelledby="workspace-context-title"><div class="workspace-context-heading"><div><div class="eyebrow">WORKSPACE</div><h2 id="workspace-context-title">选择服务器与项目</h2><span id="project-environment" class="project-environment" hidden></span></div><button class="button" id="projects-refresh">刷新项目</button></div><div class="workspace-context-grid"><label>服务器<select name="workspace-machine" aria-describedby="workspace-mode-note"></select></label><label>项目<select name="workspace-project"><option value="">个人工作区</option></select></label></div><p id="workspace-mode-note" class="muted"></p><p id="project-status" class="workspace-status" role="status" aria-live="polite"></p><details id="project-create"><summary>新建项目</summary><form id="project-create-form"><label>项目名称<input name="new-project" pattern="[a-z][a-z0-9_-]{0,47}" maxlength="48" required placeholder="例如 vision-baseline" aria-describedby="project-name-error" spellcheck="false" autocomplete="off"><span id="project-name-error" class="form-error project-name-error" hidden></span></label><fieldset class="project-environment-choice"><legend>运行环境</legend><div class="project-environment-segments"><label><input type="radio" name="environment-choice" value="shared" checked><span>共享（默认）</span></label><label><input type="radio" name="environment-choice" value="isolated"><span>隔离</span></label><label><input type="radio" name="environment-choice" value="oci"><span>个人容器</span></label></div><select name="environment-mode" hidden aria-hidden="true" tabindex="-1"><option value="shared">共享</option><option value="isolated">隔离</option><option value="oci">个人容器</option></select></fieldset><button type="submit" class="button">创建项目</button><p id="project-create-error" class="form-error" role="alert" hidden></p></form><p id="environment-mode-note" class="muted"></p></details><div id="project-detail" class="project-actions"><button class="button primary" id="project-publish">生成训练版本</button><p id="project-terminal-block" class="project-terminal-block" hidden>先结束开发终端（断开不算）</p><button class="button danger" id="project-terminal-stop" hidden>结束终端</button><span class="muted">先完成上传并结束开发终端，再保存代码与环境版本。</span><div id="publication-progress" class="publication-progress"></div><div id="publication-actions" class="publication-actions" hidden><button type="button" class="button quiet" id="publication-query">重新查询</button><button type="button" class="button quiet" id="publication-retry">用同一请求重试</button></div></div></section>
       <section class="personal-terminal" aria-labelledby="personal-terminal-title"><div class="terminal-heading"><h3 id="personal-terminal-title">个人开发终端</h3><span class="terminal-scope">日常开发 · 不占 GPU</span></div><p id="terminal-mode-note" class="muted"></p><div class="terminal-controls"><select name="terminal-machine" hidden aria-label="终端服务器"></select><button id="terminal-open" class="button primary">新建开发终端</button><button id="terminal-reconnect" class="button">重连开发会话</button></div></section>
-      <details class="execution-panel" id="workspace-files"><summary>代码与任务输出 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">代码草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传到代码草稿</button></div><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
+      <details class="execution-panel" id="workspace-files"><summary>代码与任务输出 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">代码草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传 / 续传</button></div><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
       <details class="execution-panel"><summary>提交训练</summary><form id="train-form">
         <select name="machine" hidden aria-label="训练服务器"></select>
         <label>训练位置<select name="training-target"><option value="current">当前服务器 · 自动分卡</option><option value="auto">自动选择空闲服务器</option></select></label>
