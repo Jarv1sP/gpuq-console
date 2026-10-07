@@ -327,6 +327,7 @@ export function executionUI(store,refresh,toast){
     const table=query('#my-job-table'),kicker=section.querySelector('.section-kicker'),explanation=kicker.nextElementSibling;explanation.className='wb-job-explanation muted';jobs.append(table,kicker,explanation);rail.append(...section.children);layout.append(jobs,rail);section.append(layout);
     const receipt=document.createElement('section');receipt.id='submission-receipt';receipt.className='wb-receipt';receipt.setAttribute('aria-live','polite');receipt.hidden=true;jobs.prepend(receipt);
     const projectHelp=document.createElement('p');projectHelp.id='project-status-detail';query('#project-status').after(projectHelp);discloseInfo(projectHelp,'项目状态详情');
+    const fileRoute=document.createElement('span');fileRoute.id='workspace-upload-route';fileRoute.innerHTML=infoHTML('普通文件和个人数据空间经过平台中转；大文件数据集使用已确认的校内直传。','文件传输路线');query('#workspace-files>summary').append(fileRoute);
     const prefill=document.createElement('div');prefill.id='submit-prefill';prefill.className='submit-prefill';prefill.hidden=true;scroll.prepend(prefill);
     for(const [id,label] of [['workspace-mode-note','代码与环境说明'],['terminal-mode-note','开发终端说明'],['training-target-note','训练位置说明'],['priority-note','优先级说明'],['custom-policy-note','排队与让位说明'],['elastic-note','弹性显卡说明'],['placement-note','共享显卡说明']])discloseInfo(query('#'+id),label);
     for(const text of section.querySelectorAll('.wb-rail p.muted,.wb-rail .project-actions>span'))discloseInfo(text,'工作区说明');
@@ -470,6 +471,7 @@ export function executionUI(store,refresh,toast){
     for(const name of ['vram-mib','hami'])query(`[name=${name}]`).disabled=!available||locked||!shared;
     query('[name=sm-percent]').disabled=!available||locked||!shared||!hami.checked;
     const chosenHost=store.data?.gpuq?.hosts?.find(h=>h.id===machine);
+    query('[name=sm-percent]').closest('label').hidden=!!store.data?.gpuq?.stale||!placementCapable(chosenHost,{shared:true,hami:true,smPercent:50});
     const placementReady=placementMode.value==='any'||!automatic&&!store.data?.gpuq?.stale&&placementCapable(chosenHost,{shared,hami:shared&&hami.checked,smPercent:shared&&hami.checked?Number(query('[name=sm-percent]').value):100});
     query('#placement-note').textContent=placementReady?'先在资源页观察逐卡显存和进程，再选择同卡共享。共享只需提交者同意；预算用于判断能否启动，普通共享没有硬显存限制。HAMi 只限制本任务，不限制同卡外部进程。':'服务器未确认所选固定/共享或 HAMi 功能，暂不能提交。';
     if(automatic&&placementMode.value!=='any')query('#placement-note').textContent='跨服务器选机请用自动分卡；固定编号或同卡共享请先选择当前服务器。';

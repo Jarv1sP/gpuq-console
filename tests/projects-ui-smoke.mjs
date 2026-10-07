@@ -348,3 +348,5 @@ await import("./submission-errors-ui-smoke.mjs");
 await import('./project-quota-ui-smoke.mjs');
 // Recovery is exposed only after an actual compatible node response.
 await import('./project-upload-capability-ui-smoke.mjs');
+// Public entries and wording reflect only verified production capabilities.
+await import('./member-surface-ui-smoke.mjs');
