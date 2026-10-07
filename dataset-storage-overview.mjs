@@ -93,7 +93,7 @@ export async function datasetStorageOverviewCall(service,principal,args){
       const cacheKey=location.dataset+'@'+version.version;
       if(cached&&state==='READY'&&!cached.versions.has(cacheKey)){cached.sizes.push(size);cached.versions.add(cacheKey);}
     }
-    return {version:version.version,ownerLabel:version.ownerLabel,contentBytes,fileCount,canUse:version.canUse===true,originals:originalLocations,caches:cacheLocations,
+    return {version:version.version,ownerLabel:version.ownerLabel,contentBytes,fileCount,canUse:version.locations.some(location=>location.canUse===true),originals:originalLocations,caches:cacheLocations,
       ...(personalOriginals.length?{personalOriginals}:{})};
   })}));
   const warehouses=nodes.filter(node=>node.warehouse).map(node=>{

@@ -179,7 +179,7 @@ export function overviewDatasetCatalog(overview,machine,legacy=null){
       const old=legacy?.datasets?.find(row=>row.dataset===item.dataset);
       return {dataset:item.dataset,name:old?.name,labelScope:old?.labelScope,displayNameRevision:old?.displayNameRevision,
         versions:item.versions.map(v=>{const locations=[...v.caches,...(v.personalOriginals||[])],local=locations.find(row=>row.machine===machine),node=overview.caches.find(row=>row.machine===machine),known=node?.state==='READY'&&node.usageComplete===true;return {version:v.version,ownerLabel:v.ownerLabel,
-          canUse:v.canUse===true||locations.some(row=>row.canUse===true)||v.originals.some(row=>row.canUse===true),bytes:v.contentBytes,files:v.fileCount,
+          canUse:v.canUse===true,bytes:v.contentBytes,files:v.fileCount,
           state:local?.state||(known?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,locations:locations.map(row=>({...row}))};})};
     })};
   const result=aggregateDatasetCatalog(catalog);
