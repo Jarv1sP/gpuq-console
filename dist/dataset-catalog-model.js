@@ -263,7 +263,13 @@ export function warehouseStorageCards(overview,model,capacities=new Map(),conten
 // overview owns its warehouse proof; keep legacy labels/revisions separately.
 export function overviewDatasetCatalog(overview,machine,legacy=null){
   const machines=[...new Set(overview.caches.map(row=>row.machine).concat(overview.datasets.flatMap(item=>item.versions.flatMap(v=>v.originals.map(row=>row.machine).filter(Boolean)))))];
-  const catalog={machine:machine||null,checkedAt:overview.checkedAt,partial:overview.partial,machines:machines.map(id=>({machine:id,state:['READY','ok'].includes(overview.caches.find(row=>row.machine===id)?.state)?'ok':'unavailable'})),
+  const catalog={machine:machine||null,checkedAt:overview.checkedAt,partial:overview.partial,machines:machines.map(id=>{
+    const directory=legacy?.machines?.find(row=>row.machine===id),cache=overview.caches.find(row=>row.machine===id);
+    // A failed disk measurement does not erase a successful directory read.
+    // Without that independent read, require complete node usage evidence.
+    return {machine:id,state:directory?directory.state==='ok'?'ok':'unavailable':
+      ['READY','ok'].includes(cache?.state)&&cache.usageComplete===true?'ok':'unavailable'};
+  }),
     datasets:overview.datasets.map(item=>{
       const old=legacy?.datasets?.find(row=>row.dataset===item.dataset);
       return {dataset:item.dataset,name:old?.name,labelScope:old?.labelScope,displayNameRevision:old?.displayNameRevision,
@@ -274,8 +280,21 @@ export function overviewDatasetCatalog(overview,machine,legacy=null){
           // a capacity reading alone cannot turn UNKNOWN into NOT_LOCAL.
           const absent=legacy?.machines?.some(row=>row.machine===machine&&row.state==='ok')&&oldVersion&&Array.isArray(oldVersion.locations)&&
             !oldVersion.locations.some(row=>row.machine===machine);
+          const selectedState=local?.state||(absent?'NOT_LOCAL':'UNKNOWN');
+          // Capacity observations omit selected-target action receipts. Retain
+          // an explicit catalog receipt only for this target/full version and
+          // a still-readable, currently READY source or local location.
+          const receipt=legacy?.machine===machine&&oldVersion?.canUse===true&&v.canUse===true&&
+            legacy.machines?.some(row=>row.machine===machine&&row.state==='ok')&&oldVersion.canPrepare===true&&
+            ['REGISTERED','STAGING','PREPARING','FAILED','NOT_LOCAL'].includes(selectedState);
+          const source=receipt&&v.caches.find(row=>row.machine===oldVersion.sourceMachine&&row.machine!==machine&&
+            row.state==='READY'&&row.canUse===true&&legacy.machines?.some(node=>node.machine===row.machine&&node.state==='ok')&&
+            (!oldVersion.sourceDataset||row.dataset===oldVersion.sourceDataset));
+          const localReceipt=receipt&&local?.canUse===true&&oldVersion.locations?.some(row=>
+            row.machine===machine&&row.dataset===local.dataset&&row.state===selectedState&&row.canUse===true);
           return {version:v.version,ownerLabel:v.ownerLabel,canUse:v.canUse,bytes:v.contentBytes,files:v.fileCount,
-          state:local?.state||(absent?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,locations:v.caches.map(row=>({...row}))};})};
+          state:selectedState,canPrepare:local?.canPrepare===true||!!source||!!localReceipt,
+          ...(source?{sourceMachine:source.machine,sourceDataset:oldVersion.sourceDataset}:{}),locations:v.caches.map(row=>({...row}))};})};
     })};
   const result=aggregateDatasetCatalog(catalog);
   for(const item of result.datasets){

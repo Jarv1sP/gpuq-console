@@ -78,6 +78,27 @@ test('an overview with only existing cache locations preserves independently con
  assert.equal(overviewDatasetCatalog(overview,'server-b',legacy).datasets[0].versions[0].selected.state,'UNKNOWN','contradictory old READY cannot be treated as current absence');
  raw.datasets[0].versions[0].caches.push({machine:'server-b',state:'UNKNOWN'});
  assert.equal(overviewDatasetCatalog(adaptStorageOverview(raw),'server-b',legacy).datasets[0].versions[0].selected.state,'UNKNOWN','explicit overview UNKNOWN always wins');
+ legacy.datasets[0].versions[0].locations.pop();raw.datasets[0].versions[0].caches.pop();raw.caches[1].state='UNKNOWN';raw.caches[1].usageComplete=false;
+ const independent=overviewDatasetCatalog(adaptStorageOverview(raw),'server-b',legacy).datasets[0].versions[0];
+ assert.equal(independent.selected.state,'NOT_LOCAL');assert.equal(independent.servers.find(row=>row.machine==='server-b').directoryState,'ok','a failed volume reading cannot erase a complete catalog read');
+ assert.equal(independent.selected.canPrepare,false,'directory evidence grants no preparation capability');
+});
+test('overview retains only explicit same-target preparation receipts with a current readable source',()=>{
+ const raw=snapshot();raw.caches.push({...structuredClone(raw.caches[0]),machine:'server-b'});
+ const legacy={machine:'server-b',machines:[{machine:'server-a',state:'ok'},{machine:'server-b',state:'ok'}],datasets:[{dataset:'samples',versions:[{
+  version,canUse:true,canPrepare:true,state:'NOT_LOCAL',sourceMachine:'server-a',sourceDataset:'physical-samples',
+  locations:[{machine:'server-a',dataset:'physical-samples',state:'READY',canUse:true}]}]}]};
+ const selected=(data=raw,catalog=legacy)=>overviewDatasetCatalog(adaptStorageOverview(data),'server-b',catalog).datasets[0].versions[0].selected;
+ assert.equal(selected().state,'NOT_LOCAL');assert.equal(selected().canPrepare,true);assert.equal(selected().sourceMachine,'server-a');assert.equal(selected().sourceDataset,'physical-samples');
+ for(const change of [c=>c.machine=null,c=>c.machine='server-a',c=>c.datasets[0].versions[0].version='b'.repeat(64),
+  c=>c.datasets[0].versions[0].canPrepare=false,c=>c.datasets[0].versions[0].canUse=false,
+  c=>c.datasets[0].versions[0].sourceDataset='wrong-reference',c=>c.machines[0].state='unavailable']){
+  const copy=structuredClone(legacy);change(copy);assert.equal(selected(raw,copy).canPrepare,false);assert.equal(selected(raw,copy).sourceMachine,null);
+ }
+ for(const change of [r=>r.datasets[0].versions[0].canUse=false,r=>r.datasets[0].versions[0].caches[0].canUse=false,
+  r=>r.datasets[0].versions[0].caches[0].state='UNKNOWN',r=>r.datasets[0].versions[0].caches.push({machine:'server-b',state:'UNKNOWN',canUse:true})]){
+  const copy=structuredClone(raw);change(copy);assert.equal(selected(copy).canPrepare,false);assert.equal(selected(copy).sourceMachine,null);
+ }
 });
 test('v4 makes one card per observed warehouse with unique logical versions, not one aggregate or one card per cache',()=>{
  const model=legacyModel(),v=model.datasets[0].versions[0];
