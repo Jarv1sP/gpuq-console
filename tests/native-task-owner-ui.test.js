@@ -7,10 +7,11 @@ import {visibleGPUQStatus,readGPUQStatus} from '../gpuq-status.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {resourceCards} from '../dist/resources-ui.js';
 import {taskIdentityHTML,taskTable,canEditPriority} from '../dist/execution-ui.js';
+import {taskLabelEditorHTML} from '../dist/task-display-ui.js';
 
 const machine=MACHINES[0],owner='native-fixture-owner',name='原生训练 <img src=x onerror=alert(1)>';
 const description='第一阶段\n<script>仅作文字</script>';
-function host(){return {id:machine.id,reachable:true,gpus:Array.from({length:machine.cards},(_,index)=>({index,memoryTotalMiB:24576,memoryUsedMiB:index===0?1200:0,utilization:0,processesAvailable:true,processes:index===0?[{pid:42,memoryUsedMiB:1200,scheduling:{jobId:'Jnative-fixture',priority:2}}]:[]})),gpuq:{connected:true,jobs:[{id:'Jnative-fixture',name:'legacy-wrapper',owner,state:'RUNNING',priority:2,gpu_count:1,assigned_gpu_indices:[0],display_metadata:{name,description,submitter:{name:'不能认作管理员',username:'portal-admin-fixture'}}}]}};}
+function host(){return {id:machine.id,reachable:true,gpus:Array.from({length:machine.cards},(_,index)=>({index,memoryTotalMiB:24576,memoryUsedMiB:index===0?1200:0,utilization:0,processesAvailable:true,processes:index===0?[{pid:42,memoryUsedMiB:1200,scheduling:{jobId:'J0123456789ab',priority:2}}]:[]})),gpuq:{connected:true,jobs:[{id:'J0123456789ab',name:'legacy-wrapper',owner,state:'RUNNING',priority:2,gpu_count:1,assigned_gpu_indices:[0],display_metadata:{name,description,submitter:{name:'不能认作管理员',username:'portal-admin-fixture'}}}]}};}
 function project(raw,role='admin',jobs=[]){return visibleGPUQStatus({checkedAt:new Date().toISOString(),stale:false,hosts:[raw]},{role,userId:'viewer'},{[machine.id]:1},{jobs,users:[{id:'account',username:'portal-admin-fixture',name:'不能认作管理员'}]});}
 function render(snapshot,admin=true){return resourceCards({machines:[machine],limits:{[machine.id]:1},snapshot,production:true,admin,management:false,userId:'viewer',jobs:[]});}
 
@@ -21,6 +22,8 @@ test('canonical native metadata stays readonly and labels the OS owner in comput
   for(const text of ['原生用户 '+owner,'原生训练 &lt;img','&lt;script&gt;仅作文字&lt;/script&gt;'])assert.ok(html.includes(text),text);
   assert.ok(html.includes('原生训练 &lt;img src=x onerror=alert(1)&gt; · 原生用户 '+owner),'the actual GPU hover title includes name and native owner');
   assert.match(identity,/原生用户 native-fixture-owner/);
+  assert.equal(taskLabelEditorHTML({...task,machine:machine.id},{role:'admin'}),'','unlinked records never offer the external label editor');
+  assert.ok(taskLabelEditorHTML({...task,source:'portal',machine:machine.id},{role:'admin'}).includes('data-task-label-editor'),'the approved linked-task editor remains available');
   assert.doesNotMatch(html,/<img|<script>|portal-admin-fixture|不能认作管理员|data-job-cancel|data-job-logs|data-job-priority/);
   const attempted={...task,canSetPriority:true,state:'QUEUED',priority:'normal',userId:'viewer',project:'forged-project'};
   assert.equal(canEditPriority(attempted,true),false);
@@ -39,7 +42,7 @@ test('members stay masked; disconnected, duplicate and ambiguous native IDs neve
     const raw=host();mutate(raw);const snapshot=project(raw),html=render(snapshot);
     assert.ok(!html.includes('原生训练'));assert.ok(!html.includes('第一阶段'));assert.doesNotMatch(html,/data-job-cancel|data-job-logs/);
   }
-  const ambiguous=[{id:'portal-a',nodeJobId:'Jnative-fixture',machine:machine.id,state:'RUNNING',name:'平台A'},{id:'portal-b',nodeJobId:'Jnative-fixture',machine:machine.id,state:'RUNNING',name:'平台B'}];
+  const ambiguous=[{id:'portal-a',nodeJobId:'J0123456789ab',machine:machine.id,state:'RUNNING',name:'平台A'},{id:'portal-b',nodeJobId:'J0123456789ab',machine:machine.id,state:'RUNNING',name:'平台B'}];
   const html=render(project(host(),'admin',ambiguous));assert.ok(!html.includes('原生训练'));assert.ok(!html.includes('第一阶段'));
 });
 
