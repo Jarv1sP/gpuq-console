@@ -18,7 +18,7 @@ export {datasetReferences} from './job-submission.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
 export const PRIORITIES=new Set(['idle','normal','high']);
-const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
+const fail=(message,status=400,code)=>{throw Object.assign(Error(message),{status,...(code?{code}:{})});};
 export const priorityCapable=host=>host?.reachable===true&&host.gpuq?.connected===true&&Array.isArray(host.gpuq.capabilities)&&host.gpuq.capabilities.includes('priority-policy-v1')&&host.gpuq.capabilities.includes('preempt-idle-only-v1');
 export const priorityRankCapable=host=>priorityCapable(host)&&host.gpuq.capabilities.includes('priority-rank-v1');
 const RANKS={idle:0,normal:2,high:4,P0:0,P1:1,P2:2,P3:3,P4:4};
@@ -200,7 +200,7 @@ export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataP
   restartPolicy:['never','on-preempt'].includes(schedulerPolicy?.restart_policy)?schedulerPolicy.restart_policy:null,
   dispatchMode:['queue','preempt-now','preempt-save'].includes(schedulerPolicy?.dispatch_mode)?schedulerPolicy.dispatch_mode:null};}
 export async function executionCall(service,principal,operation,args){
-  if(!service.bridge)fail('节点执行桥尚未配置，未启动训练。',503);
+  if(!service.bridge)fail('节点执行桥尚未配置，未启动训练。',503,operation==='jobs.submit'?'SUBMISSION_REJECTED':undefined);
   const user=service.store.get(principal.userId);
   const jobView=job=>publicJob(job,service.store.users);
   if(!user.enabled)fail('账号已暂停。',403);
@@ -424,36 +424,41 @@ export async function executionCall(service,principal,operation,args){
     return service.bridge(args.machine,operation,{...args,userId:user.id,username:user.username,hostAdmin:args.hostAdmin===true});
   }
   if(operation==='jobs.submit'){
+    // Only explicit admission refusals before persistence prove no submission.
+    const rejectSubmission=(message,status)=>fail(message,status,'SUBMISSION_REJECTED');
     const request=normalizeJobSubmission(args,principal);
     const {datasets,project,explicit,digest,minVramGiB:min}=request;
     const previous=service.store.jobs.find(j=>j.userId===user.id&&j.key===request.key);
-    if(previous){if(previous.digest!==digest)fail('同一提交键不能用于不同任务。',409);return jobView(previous);}
-    if(service.store.jobs.length>=5000)fail('任务历史达到归档上限，请联系管理员归档后提交。',503);
-    if(request.cards>user.total)fail('任务卡数超出跨机器用卡总额度。',409);
-    if(request.machineSelection)Object.assign(request,await selectMachine(service,user,request,priorityCapable,usage));
+    if(previous){if(previous.digest!==digest)rejectSubmission('同一提交键不能用于不同任务。',409);return jobView(previous);}
+    if(service.store.jobs.length>=5000)rejectSubmission('任务历史达到归档上限，请联系管理员归档后提交。',503);
+    if(request.cards>user.total)rejectSubmission('任务卡数超出跨机器用卡总额度。',409);
+    if(request.machineSelection){
+      try{Object.assign(request,await selectMachine(service,user,request,priorityCapable,usage));}
+      catch(error){error.code='SUBMISSION_REJECTED';throw error;}
+    }
     authorizedMachine(request.machine);
     if(project.project&&!request.machineSelection){
       await service.ociProjectAdmission?.(request.machine,user.id,project.project);
       let prepared;
       try{prepared=await service.bridge(request.machine,'projects.verify',{...project,userId:user.id});}
-      catch{fail('所选服务器的项目版本不可用或基础环境已改变；请先完成项目发布。未占用 GPU。',409);}
-      if(prepared?.state!=='READY'||prepared.project!==project.project||prepared.release!==project.release)fail('项目版本尚未准备完成，未占用 GPU。',409);
+      catch{rejectSubmission('所选服务器的项目版本不可用或基础环境已改变；请先完成项目发布。未占用 GPU。',409);}
+      if(prepared?.state!=='READY'||prepared.project!==project.project||prepared.release!==project.release)rejectSubmission('项目版本尚未准备完成，未占用 GPU。',409);
     }
-    if(request.cards>user.limits[request.machine])fail('任务卡数超出所选机器的用卡额度；不会自动切换服务器。',409);
+    if(request.cards>user.limits[request.machine])rejectSubmission('任务卡数超出所选机器的用卡额度；不会自动切换服务器。',409);
     await service.refreshGPUQ();
-    if(!service.gpuq||service.gpuq.stale)fail('机器状态已过期，暂不接受新任务。',503);
+    if(!service.gpuq||service.gpuq.stale)rejectSubmission('机器状态已过期，暂不接受新任务。',503);
     const host=service.gpuq.hosts.find(h=>h.id===request.machine);
-    if(request.elastic&&!elasticCapable(host))fail('节点未确认弹性分配和训练控制通道，未提交任务。',503);
+    if(request.elastic&&!elasticCapable(host))rejectSubmission('节点未确认弹性分配和训练控制通道，未提交任务。',503);
     if(request.placement){
-      if(!placementCapable(host,request.placement))fail('节点尚未确认指定显卡/共享或 HAMi 能力，未提交任务。',503);
+      if(!placementCapable(host,request.placement))rejectSubmission('节点尚未确认指定显卡/共享或 HAMi 能力，未提交任务。',503);
       const selected=request.placement.gpuIndices.map(index=>host.gpus.find(g=>g.index===index));
-      if(selected.some(g=>!g||g.memoryTotalMiB<min*1024-512)||request.placement.shared&&selected[0].memoryTotalMiB<request.placement.vramMiB)fail('指定显卡不存在或不满足显存要求。',409);
+      if(selected.some(g=>!g||g.memoryTotalMiB<min*1024-512)||request.placement.shared&&selected[0].memoryTotalMiB<request.placement.vramMiB)rejectSubmission('指定显卡不存在或不满足显存要求。',409);
     }
-    if(!host?.reachable||!host.gpuq.connected||host.gpuq.observeOnly||host.gpus.filter(g=>g.memoryTotalMiB>=min*1024-512).length<request.cards)fail('所选机器当前无法执行，或不满足卡数/显存条件；不会自动切换服务器。',409);
+    if(!host?.reachable||!host.gpuq.connected||host.gpuq.observeOnly||host.gpus.filter(g=>g.memoryTotalMiB>=min*1024-512).length<request.cards)rejectSubmission('所选机器当前无法执行，或不满足卡数/显存条件；不会自动切换服务器。',409);
     const prioritySupported=priorityCapable(host);
-    if(explicit&&(!prioritySupported||!yieldCapable(host)))fail('节点未接通独立让位与 checkpoint 控制通道；未提交任务。',503);
-    if(explicit?.mode&&explicit.mode!=='queue'&&!host.gpuq.capabilities.includes('preempt-opt-in-only-v1'))fail('节点尚未接通请求模式的主动让位范围限制。',503);
-    if(request.priorityProvided&&!prioritySupported)fail('所选机器尚未确认安全优先级功能，未提交任务；请刷新或联系管理员升级。',503);
+    if(explicit&&(!prioritySupported||!yieldCapable(host)))rejectSubmission('节点未接通独立让位与 checkpoint 控制通道；未提交任务。',503);
+    if(explicit?.mode&&explicit.mode!=='queue'&&!host.gpuq.capabilities.includes('preempt-opt-in-only-v1'))rejectSubmission('节点尚未接通请求模式的主动让位范围限制。',503);
+    if(request.priorityProvided&&!prioritySupported)rejectSubmission('所选机器尚未确认安全优先级功能，未提交任务；请刷新或联系管理员升级。',503);
     let needsPreparation=!!request.machineSelection,resolvedReferences=[];
     if(datasets.length){
       // Personal training uses the same owner-only Principal as node lease
@@ -473,25 +478,25 @@ export async function executionCall(service,principal,operation,args){
         catch(error){if(!request.prepareData||error?.status===403||error?.message==='dataset owner authorization required')throw error;return {...ref,state:'UNKNOWN'};}
       }));}
       catch(error){
-        if(error?.status===403||error?.message==='dataset owner authorization required')fail('当前账号没有数据集读取授权；管理员个人训练也必须列入数据集 owners。未占用 GPU。',403);
-        fail('无法确认所选机器的数据授权或准备状态，未占用 GPU。请稍后重试或查看数据集状态。',503);
+        if(error?.status===403||error?.message==='dataset owner authorization required')rejectSubmission('当前账号没有数据集读取授权；管理员个人训练也必须列入数据集 owners。未占用 GPU。',403);
+        rejectSubmission('无法确认所选机器的数据授权或准备状态，未占用 GPU。请稍后重试或查看数据集状态。',503);
       }
       if(!states.every(s=>s.state==='READY')){
-        if(!request.prepareData)fail('所选机器没有完整的本地数据副本。先用 gpuctl data prepare 数据集@版本 准备数据；此时未占用 GPU，不会自动切换服务器。',409);
+        if(!request.prepareData)rejectSubmission('所选机器没有完整的本地数据副本。先用 gpuctl data prepare 数据集@版本 准备数据；此时未占用 GPU，不会自动切换服务器。',409);
         const catalog=await datasetCatalogCall(service,{...principal,userId:user.id},'datasets.catalog',{machine:request.machine});
         const catalogVersions=datasets.map(ref=>catalog.datasets?.find(d=>d.dataset===ref.dataset)?.versions?.find(v=>v.version===ref.version));
         if(catalogVersions.some((value,index)=>states[index].state!=='READY'&&value&&value.canUse!==true))
-          fail('当前账号没有数据集读取授权；目录可见不代表可以训练读取。未占用 GPU。',403);
-        if(!datasets.every((ref,index)=>states[index].state==='READY'||catalogVersions[index]?.canUse===true&&(catalogVersions[index].canPrepare===true||catalogVersions[index].state==='PREPARING')))fail('部分数据没有可用来源；请先在数据集页面完成导入。未占用 GPU。',409);
-        if(service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)fail('最多保留 10 个数据准备中的训练，请先等待或取消。',429);
+          rejectSubmission('当前账号没有数据集读取授权；目录可见不代表可以训练读取。未占用 GPU。',403);
+        if(!datasets.every((ref,index)=>states[index].state==='READY'||catalogVersions[index]?.canUse===true&&(catalogVersions[index].canPrepare===true||catalogVersions[index].state==='PREPARING')))rejectSubmission('部分数据没有可用来源；请先在数据集页面完成导入。未占用 GPU。',409);
+        if(service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)rejectSubmission('最多保留 10 个数据准备中的训练，请先等待或取消。',429);
         needsPreparation=true;
       }
     }
-    if(needsPreparation&&service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)fail('最多保留 10 个准备中的训练，请先等待或取消。',429);
-    if(request.machineSelection&&(JSON.stringify(service.store.get(user.id))!==JSON.stringify(user)||service.maintenanceFor?.(request.machine)))fail('账号授权或机器维护状态已改变；未提交训练。',409);
+    if(needsPreparation&&service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)rejectSubmission('最多保留 10 个准备中的训练，请先等待或取消。',429);
+    if(request.machineSelection&&(JSON.stringify(service.store.get(user.id))!==JSON.stringify(user)||service.maintenanceFor?.(request.machine)))rejectSubmission('账号授权或机器维护状态已改变；未提交训练。',409);
     if(!needsPreparation&&!personalCardQuotaExempt(user,request)){
-      if(usage(service.store.jobs,user.id)+request.cards>user.total)fail('超出跨机器用卡总额度（排队、运行和待核对任务均计入）。',409);
-      if(usage(service.store.jobs,user.id,request.machine)+request.cards>user.limits[request.machine])fail('超出所选机器的用卡额度（排队、运行和待核对任务均计入）；不会自动切换服务器。',409);
+      if(usage(service.store.jobs,user.id)+request.cards>user.total)rejectSubmission('超出跨机器用卡总额度（排队、运行和待核对任务均计入）。',409);
+      if(usage(service.store.jobs,user.id,request.machine)+request.cards>user.limits[request.machine])rejectSubmission('超出所选机器的用卡额度（排队、运行和待核对任务均计入）；不会自动切换服务器。',409);
     }
     const job=createSubmittedJob(request,user,prioritySupported),{id}=job;
     if(!needsPreparation&&datasets.length&&resolvedReferences.length===datasets.length)job.spec.datasets=datasets.map(ref=>resolvedReferences.find(value=>(value.mountAs||value.dataset)===ref.dataset));
