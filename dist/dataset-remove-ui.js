@@ -46,11 +46,11 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
       return {...row,state:personal||row.state==='SUBMITTING'?'UNKNOWN':row.state,nextAt:now()+2000,attempt:0,resumeCheck:!personal&&!!row.operationId&&row.state==='UNKNOWN'};
     }catch{return null;}
   };
-  const save=(context,changedRow)=>{try{
+  const save=(context,changedRow,removedId)=>{try{
     let rows=context.rows;
     // Persist only this operation's change so another tab's newer receipt is
     // not replaced by an older row absorbed into this controller's snapshot.
-    if(personal){const previous=JSON.parse(storage?.getItem(journalKey(context.id))||'[]');if(!Array.isArray(previous))throw Error('invalid journal');const merged=new Map(previous.map(row=>[row.id,row]));for(const row of changedRow?[changedRow]:rows)merged.set(row.id,row);rows=[...merged.values()];}
+    if(personal){const previous=JSON.parse(storage?.getItem(journalKey(context.id))||'[]');if(!Array.isArray(previous))throw Error('invalid journal');const merged=new Map(previous.map(row=>[row.id,row]));if(removedId!==undefined)merged.delete(removedId);else for(const row of changedRow?[changedRow]:rows)merged.set(row.id,row);rows=[...merged.values()];}
     storage?.setItem(journalKey(context.id),JSON.stringify(rows));context.saved=!!storage;
   }catch{context.saved=false;}};
   function stop(){if(timer!==null)clearTimer(timer);timer=null;}
@@ -71,7 +71,7 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
     if(!visible)stop();else arm();return owner?.rows||[];
   }
   function active(context,stamp){return owner===context&&generation===stamp&&identity(principal())===context.signature;}
-  function notify(context,row){save(context,row);if(owner===context)changed();arm();}
+  function notify(context,row,removedId){save(context,row,removedId);if(owner===context)changed();arm();}
   function arm(){
     stop();if(!visible||!owner||identity(principal())!==owner.signature)return;
     const rows=owner.rows.filter(row=>(row.state==='UNREGISTERING'||row.resumeCheck)&&row.operationId&&!busy.has(row));if(!rows.length)return;
@@ -119,8 +119,8 @@ export function createDatasetRemovals({principal,machines,call,storage,changed=(
     finally{busy.delete(row);save(context,row);if(active(context,stamp)&&!row.discarded){changed();if(!wasComplete&&row.state==='UNREGISTERED')completed({...row});arm();}}
     return {...row};
   }
-  function abandon(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='UNKNOWN'||busy.has(row))throw Error('这条记录现在不能放弃。');row.discarded=true;owner.rows.splice(owner.rows.indexOf(row),1);notify(owner);}
-  function dismiss(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='BLOCKED'||busy.has(row))throw Error('只有已确认未派发的记录可以移除。');owner.rows.splice(owner.rows.indexOf(row),1);notify(owner);}
+  function abandon(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='UNKNOWN'||busy.has(row))throw Error('这条记录现在不能放弃。');row.discarded=true;owner.rows.splice(owner.rows.indexOf(row),1);notify(owner,null,id);}
+  function dismiss(id){sync();const row=owner?.rows.find(row=>row.id===id);if(!row||row.state!=='BLOCKED'||busy.has(row))throw Error('只有已确认未派发的记录可以移除。');owner.rows.splice(owner.rows.indexOf(row),1);notify(owner,null,id);}
   return {sync,submit,query,abandon,dismiss,stop,get rows(){return owner?.rows||[];},get saved(){return owner?.saved??true;},isBusy:id=>busy.has(owner?.rows.find(row=>row.id===id)),blocked:value=>owner?.rows.some(row=>unresolved(row)&&overlaps(row,value))||false};
 }
 

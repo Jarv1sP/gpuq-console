@@ -78,3 +78,18 @@ test('another controller may delete a distinct target without overwriting a late
   assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);second.stop();f.api.stop();
  }
 });
+test('personal abandon and dismiss remove only their journal row and it stays removed after another controller writes or reloads',async()=>{
+ for(const action of ['abandon','dismiss']){
+  const f=fixture(),second=createDatasetRemovals(f.options);second.sync(true);
+  const error=Error(action==='abandon'?'receipt lost':'last copy refused');if(action==='dismiss'){error.status=409;error.code='LAST_COPY_UNPROVEN';}f.respond(error);
+  const first=await f.api.submit(target),other={...target,dataset:'other-personal'},otherOperationId='d'.repeat(64);
+  f.respond({operationId:otherOperationId,dataset:other.dataset,version,state:'UNREGISTERED',unregistered:true});const next=await second.submit(other);
+  const key=personalRemovalStorageKey('personal-member'),originalOther=JSON.parse(f.values.get(key)).find(row=>row.id===next.id),dispatches=f.calls.length;
+  f.api[action](first.id);f.api.sync(true);assert.equal(f.api.rows.some(row=>row.id===first.id),false);assert.equal(f.calls.length,dispatches,'local record dismissal never calls the server');
+  assert.deepEqual(JSON.parse(f.values.get(key)),[originalOther],'the other tab authoritative receipt is not rewritten as UNKNOWN');
+  assert.equal(second.rows.some(row=>row.id===first.id),true,'the second controller still has an older snapshot');await second.query(next.id);
+  const recovered=createDatasetRemovals(f.options);recovered.sync(true);assert.equal(recovered.rows.some(row=>row.id===first.id),false);assert.equal(recovered.rows.length,1);
+  assert.equal(JSON.parse(f.values.get(key)).find(row=>row.id===next.id).operationId,otherOperationId);assert.equal(f.calls.filter(call=>call.operation==='datasets.unregister').length,2);
+  recovered.stop();second.stop();f.api.stop();
+ }
+});
