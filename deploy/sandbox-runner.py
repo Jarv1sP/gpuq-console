@@ -331,8 +331,8 @@ def run_job(capture,*,resource_module):
         return code
     finally:
         if process.poll() is None:process.kill();process.wait()
-        for descriptor in getattr(personal_fds,'locks',()):os.close(descriptor)
         gatefile.close()
+        for descriptor in getattr(personal_fds,'locks',()):os.close(descriptor)
         if network and network.poll() is None:network.terminate();network.wait(timeout=5)
         if datalock is not None:os.close(datalock)
 

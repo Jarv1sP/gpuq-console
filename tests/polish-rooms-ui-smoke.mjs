@@ -97,6 +97,7 @@ try{
     });
     await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
     await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();
+    await (await import('./experimental-cloud-harness.mjs')).experimentalCloudHarness(page);
     const initialList=mode==='loading'?null:page.waitForResponse(response=>response.url().endsWith('/api/call')&&response.request().postDataJSON()?.operation==='cloud.files.list');
     await page.locator('#cloud-files>summary').click();
     if(mode==='loading')await page.waitForFunction(()=>document.querySelector('#cloud-files-refresh').disabled);

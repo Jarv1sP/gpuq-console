@@ -11,6 +11,10 @@ global batch 的单进程参考在 FP64 容差 1e-12 内一致。另测三 rank 
 
 ## 每个 PR 的离线自动测试
 
+双盘个人布局新增 `personal-storage*.test.*`、`personal-copy.test.py`、`personal-publish.test.py`、`personal-node-preparation.test.py`、`personal-runner-mounts.test.py`、`personal-workspace-preparation.test.py` 与 `personal-storage-ui-smoke.mjs`。临时真文件／FD／SQLite 和本地 HTTP 测试，只有挂载表、GPUQ、systemd 和节点观察是夹具；不是生产 HDD、容器引擎或 CUDA 灰度验收。
+
+主分支公共页面已收敛为可读取／本人数据，实验云入口保持隐藏。旧云组件的操作、异常和几何测试使用显式 `experimentalCloudHarness` 变体，并先断言公共入口隐藏；不宣称普通页面已开放云功能。样例目录提供明确 `canUse`／ownerLabel；零授权场景断言无他人私人行。文件折叠器用直属 summary 定位，不将新增帮助 summary 当作重复主控件。
+
 `storage-archive-intent-cancel.test.js` 用独立 SQLite 验证原 ID/完整 JSON 字节 CAS、
 当前管理员、BLOCKED 严格准入、未知/已派发/持久 lane/传输保护拒绝、审计失败和撤权
 回滚、丢回执重启、旧 worker 与延迟 copy 准入零派发。正常删除图仍要求四节点真实

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {mkdir,readFile} from 'node:fs/promises';
 import {chromium} from 'playwright';
 import {STARBASE_ASSETS} from '../frontend-assets.mjs';
+import {experimentalCloudHarness} from './experimental-cloud-harness.mjs';
 const origin='https://offline-data-workspace.test',screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-data-workspace-ui';
 const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
 try{
@@ -86,6 +87,7 @@ try{
   assert.equal(await page.evaluate(()=>calls.some(call=>call.operation.includes('publish'))),false);
   assert.equal(await page.locator('#terminal-data-open').isEnabled(),true);
   const cloudEntry=page.locator('.data-workspace-browser > summary').filter({hasText:'云端副本'});
+  await experimentalCloudHarness(page);
   await cloudEntry.click();await page.locator('#cloud-files-refresh').click();
   await page.waitForFunction(()=>document.querySelector('#cloud-files-list').textContent.includes('还没有云文件'));
   await page.locator('[name=cloud-files-path]').fill('incoming/training.zip');await page.locator('#cloud-files-form [type=submit]').click();

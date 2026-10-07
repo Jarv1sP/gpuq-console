@@ -118,7 +118,7 @@ try{
   assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
   assert.match(await page.locator('#workspace-mode-note').textContent(),/代码与容器环境一起保存为训练版本/);
-  await page.locator('#workspace-files summary').click();
+  await page.locator('#workspace-files>summary').click();
   const file=Buffer.alloc(1048576+11,65);await page.locator('[name=files]').setInputFiles({name:'train.py',mimeType:'text/plain',buffer:file});
   await page.locator('#workspace-upload').click();await page.waitForFunction(()=>document.querySelector('#workspace-result').textContent.includes('已上传 1 个文件'));await idle();
   const puts=calls.filter(call=>call.operation==='files.put');assert.equal(puts.length,2);assert.equal(puts[0].args.uploadId,puts[1].args.uploadId);assert.deepEqual(puts.map(call=>call.args.final),[false,true]);

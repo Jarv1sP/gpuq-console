@@ -58,6 +58,18 @@ try{
     await page.locator('#login-form [type=submit]').click();
     await page.locator('#login-dialog').waitFor({state:'hidden'});
     await page.locator('[data-nav=datasets]').click();
+    if(username==='browse-only'){
+      await page.locator('#datasets-refresh').click();await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+      for(const width of [1440,390,320]){
+        await page.setViewportSize({width,height:width===1440?1000:844});
+        assert.equal(await page.locator('[data-v3-select]').count(),0,'zero-grant member cannot see another account private dataset rows');
+        assert.equal(await page.locator('#warehouse-inspector [data-use-dataset]').count(),0);
+        const geometry=await inspectGeometry(page,{roots:['#page-datasets'],controls:'.v3-row,.v3-copy,.v3-back,.v3-edit',largeTargets:'.v3-row'});
+        assert.deepEqual(geometry.failures,[],username+' '+width+' empty geometry');
+        await page.screenshot({path:join(screenshots,username+'-'+width+'.png'),fullPage:true,animations:'disabled'});scenes++;
+      }
+      await page.close();continue;
+    }
     const first=page.locator('[data-v3-select="'+upload+'"]');
     await first.waitFor({state:'visible'});
     assert.equal(await page.locator('[data-v3-select]').count(),2,'Equal display names retain distinct immutable datasets');
