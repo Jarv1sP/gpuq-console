@@ -33,7 +33,7 @@ class Publish(unittest.TestCase):
             root=mount/'personal';root.mkdir(mode=0o700)
             volumes[tier]={'root':str(root),'mountPoint':str(mount),'filesystemUuid':str(uuid.UUID(int=i+1)),
                            'rootInode':root.stat().st_ino,'reserveBytes':0}
-        config={'root':str(self.control),'conda':str(self.conda),'personalStorage':{'enabled':True,**volumes},
+        config={'root':str(self.control),'conda':str(self.conda),'workspaceReserveBytes':0,'personalStorage':{'enabled':True,**volumes},
                 'datasets':{'root':str(self.base/'legacy'),'mountPoint':str(self.base),'reserveBytes':0,'sources':{}}}
         (self.code/'node-config.json').write_text(json.dumps(config))
         table=local_data_mounts(*mounts);table.start();self.addCleanup(table.stop)

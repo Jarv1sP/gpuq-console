@@ -311,6 +311,7 @@ sudo python3 deploy/configure-personal-storage.py --hdd-root /HDD_MOUNT/gpuq-per
 ```
 
 返回 `personalStorage:{enabled:false,hdd:{root,mountPoint,filesystemUuid,rootInode,reserveBytes},ssd:{...}}`。两块盘均须验证介质、独立挂载、UUID，专用根须原本就是服务 UID 所有且0700；缺失时仅显式 `--initialize` 创建新的空专用根，不改已有属主、文件或配置。原保留阈值不会自动降低。核对两卷后，把片段手工合入原 node-config，再单独启用 enabled；未知状态保持关闭。
+若个人入口与原平台根共用物理卷，实际保留量至少为原 `workspaceReserveBytes`；不能通过新别名降低控制盘安全线。容量查询与私人发布采用同一实际阈值。
 
 启用内核配额时，root 控制的 quota policy 另需 `personalStorageRoots:{hdd:专用根,ssd:专用根}`，并为账号在相应物理卷配置有限 byte/inode 额度。broker 只接受同一账号的 projects-v2/hash 或 personal-data/hash 精确根，继承到发布及复制 staging；不允许用户请求任意路径或放宽额度。旧政策不改，缺配套时拒绝，不以关闭配额绕过。
 

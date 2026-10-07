@@ -26,7 +26,7 @@ class PersonalStorageTests(unittest.TestCase):
         (self.base/'bin/python').write_bytes(b'synthetic approved interpreter; never execute')
         (self.base/'conda-meta').mkdir()
         (self.base/'lib').mkdir()
-        self.config = {'root':str(self.control),'conda':str(self.base)}
+        self.config = {'root':str(self.control),'conda':str(self.base),'workspaceReserveBytes':0}
         self.store = s.ProjectStore(self.control,self.base,reserve_bytes=0,config=self.config)
         self.user = 'storage-test-user'; self.legacy = 'legacy'
         self.store.create(self.user,self.legacy)
@@ -149,6 +149,13 @@ class PersonalStorageTests(unittest.TestCase):
             # An incomplete active helper cohort never enables the profile.
             (runtime/'sandbox-runner.py').write_text('PERSONAL_STORAGE_PROTOCOL=0\n')
             self.assertFalse(storage.runtime_ready());self.assertFalse(storage.status()['available'])
+
+    def test_shared_control_volume_reserve_cannot_be_lowered_by_new_alias(self):
+        storage=self.store.personal_storage();self.config['workspaceReserveBytes']=100
+        self.config['personalStorage']['ssd']['reserveBytes']=1
+        self.assertEqual(storage.reserve('ssd'),100)
+        with patch.object(os,'fstatvfs',return_value=type('Space',(),{'f_bavail':99,'f_frsize':1})()):
+            with self.assertRaisesRegex(ValueError,'reserveBytes=100'):storage.require('ssd')
 
     def test_mount_root_identity_and_unsafe_links_fail_closed(self):
         storage=self.store.personal_storage()

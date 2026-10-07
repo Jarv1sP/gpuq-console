@@ -222,7 +222,7 @@ def personal_dataset_cache(user,tier,create=False):
     else:
         storage.require(tier);storage.s.private_dir(path,create=True)
     module,_=dataset_cache()
-    cache=module.DatasetCache(path,sources={},reserve_bytes=storage.policy[tier]['reserveBytes'],
+    cache=module.DatasetCache(path,sources={},reserve_bytes=storage.reserve(tier),
                               mount_point=storage.policy[tier]['mountPoint'])
     cache.personalTier=tier
     return module,cache

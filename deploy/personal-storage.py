@@ -85,10 +85,19 @@ class PersonalStorage:
         with self.s.directory(self.roots[tier]) as fd:
             value = os.fstatvfs(fd)
             available = value.f_bavail * value.f_frsize
-        reserve = self.policy[tier]['reserveBytes']
+        reserve = self.reserve(tier)
         need(available >= reserve + needed,
              f'Personal {tier} space reserve reached: availableBytes={available}, '
              f'reserveBytes={reserve}, requestedBytes={needed}.')
+
+    def reserve(self,tier):
+        reserve=self.policy[tier]['reserveBytes']
+        # A new alias on the platform disk must never bypass its established
+        # control/workspace floor. Separate HDD volumes keep their own policy.
+        with self.s.directory(self.roots[tier]) as data, self.s.directory(self.config['root']) as control:
+            if os.fstat(data).st_dev==os.fstat(control).st_dev:
+                reserve=max(reserve,self.s.workspace_reserve_bytes(self.config))
+        return reserve
 
     def runtime_ready(self):
         # The installer maps the selected profile to sandbox-runner.py. The
@@ -182,7 +191,7 @@ class PersonalStorage:
             with self.s.directory(root) as fd:
                 value = os.fstatvfs(fd)
             available = value.f_bavail * value.f_frsize
-            reserve = self.policy[tier]['reserveBytes']
+            reserve = self.reserve(tier)
             volumes[tier] = {'availableBytes': available, 'filesystemBytes': value.f_blocks*value.f_frsize,
                             'reserveBytes': reserve, 'usableBytes': max(0, available-reserve),
                             'mountPath': '/data-'+tier}
