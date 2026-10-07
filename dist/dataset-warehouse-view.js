@@ -6,6 +6,7 @@ import {transferBytes} from './data-route.js';
 import {selectUploadRoute,validateUploadRoutes,uploadStorageMachine} from './upload-routes.js';
 import {probeBrowserUploadRoute} from './dataset-upload.js';
 import {datasetInfoHTML as info} from './dataset-flow.js';
+import {datasetCacheWatch} from './dataset-cache-watch.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const amount=value=>Number.isSafeInteger(value)&&value>=0?transferBytes(value):'—';
 const glyph=value=>`<span class="v3-g ${value==='READY'?'ready':value==='PREPARING'?'fetch':value==='FAILED'?'fail':value==='UNKNOWN'?'unknown':'none'}" aria-hidden="true"></span>`;
@@ -29,6 +30,10 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  const labels=datasetLabelClient({call:(operation,args)=>store.call(operation,args),identity});
  const current=(expected,token)=>account()===expected&&epoch===token;
  const authorized=machineAllowed;
+ const cacheWatch=datasetCacheWatch({call:(operation,args)=>store.call(operation,args),identity:account,
+  active:()=>store.production&&!!store.principal&&!section.hidden&&document.body.dataset.room==='datasets'&&!document.hidden,
+  allowed:authorized,onChange:()=>{rows();inspector();},onReady:refresh});
+ const cacheRow=(dataset,v,row)=>{const watch=cacheWatch.get({machine:row.machine,dataset,version:v.version});return watch?{...row,state:watch.state,error:watch.error,progress:watch.progress}:row;};
  const versionAccess=(v,target=machine())=>access({state:v.selected.state,canUse:v.canUse,canPrepare:v.selected.canPrepare,sourceMachine:v.selected.sourceMachine,locations:v.servers},{machine:target},{machineAuthorized:authorized(target)});
  const personalDelete=(dataset,version)=>removeUI?.canOpenFullDelete?.(dataset,version)===true&&model?.datasets.find(row=>row.dataset===dataset)?.versions.find(row=>row.version===version)?.servers.some(row=>row.deletionPermissions?.memberAllowed===true)===true;
  function allowsTraining(dataset,version){
@@ -37,7 +42,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(v)return versionAccess(v).selectable;
   return upload?.state==='READY'&&upload.machine===machine()&&upload.dataset===dataset&&upload.version===version;
  }
- function reset(){epoch++;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();}
+ function reset(){epoch++;cacheWatch.reset();routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();}
  function html(root,value){
   // A refresh clears the list while reading. An identical reply must restore
   // that DOM; the cached template alone does not prove it is still mounted.
@@ -69,7 +74,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const pending=upload&&!['READY','DISCARDED'].includes(upload.state),progress=meter.value,pct=progress?.percent;
   const flag=upload?.state==='PAUSED'?'已暂停':upload?.state==='UNKNOWN'?'待确认':upload?.state==='FAILED'?'上传失败':upload?.state==='UPLOADING'&&pct!==null&&pct!==undefined?'上传中 '+pct+'%':upload?.state==='PUBLISHING'?'校验中':'上传中';
   const pendingRow=pending?`<button class="v3-row v3-upload-row" type="button" role="option" aria-selected="false" data-v3-upload>${strata('unrecorded')}<span class="v3-name"><b>${esc(uploadDisplay||'上传数据')}</b><span class="v3-id">${esc(upload.dataset||upload.uploadId||'读取文件中')}</span></span><span class="v3-owner">我</span><span class="v3-versions">—</span><span class="v3-size num">${amount(progress?.totalBytes??selectedFiles.reduce((n,file)=>n+file.size,0))}</span><span class="v3-where"><span class="v3-flag fetch">${esc(flag)}</span></span>${upload.state==='UPLOADING'&&pct!==null&&pct!==undefined?`<span class="v3-row-progress" data-v3-percent="${pct}" aria-hidden="true"></span>`:''}</button>`:'';
-  html(root,pendingRow+items.map(item=>{const v=chosen(item);if(!v)return '';const caches=v.servers.filter(row=>row.observed&&['READY','PREPARING','FAILED','UNKNOWN'].includes(row.state));
+  html(root,pendingRow+items.map(item=>{const v=chosen(item);if(!v)return '';const caches=v.servers.map(row=>cacheRow(item.dataset,v,row)).filter(row=>(row.observed||cacheWatch.get({machine:row.machine,dataset:item.dataset,version:v.version}))&&['READY','PREPARING','FAILED','UNKNOWN'].includes(row.state));
    const flags=(versionAccess(v).browseOnly?'<span class="v3-flag warn">仅浏览</span>':'')+(v.warehouse.state==='unrecorded'?'<span class="v3-flag warn">未存入仓库</span>':v.warehouse.state==='unknown'?'<span class="v3-flag warn">待确认</span>':v.warehouse.state==='failed'?'<span class="v3-flag bad">存入失败</span>':'');
    return `<button class="v3-row" type="button" role="option" aria-selected="${selected===item.dataset}" data-v3-select="${esc(item.dataset)}">${strata(v.warehouse.state)}<span class="v3-name"><b title="${esc(item.displayName)}">${esc(item.displayName)}</b><span class="v3-id" title="${esc(item.dataset)}">${esc(item.dataset)}</span></span><span class="v3-owner" title="所属 ${esc(datasetOwnerName(v.ownerLabel))}">${esc(datasetOwnerName(v.ownerLabel))}</span><span class="v3-versions num">${item.versions.length}</span><span class="v3-size num">${esc(amount(v.bytes))}</span><span class="v3-where">${caches.map(row=>`<span class="v3-pip" title="${esc(row.machine+' · '+words[row.state])}">${glyph(row.state)}<span class="v3-pip-id">${esc(short(row.machine))}</span></span>`).join('')}${flags}</span></button>`;
   }).join('')||(model?`<div class="v3-empty">${model.partial?'目录待确认':search?'没有匹配的数据集':filter?'这台服务器上还没有缓存':'仓库里还没有数据集'}${!search&&!filter&&!model.partial?'<button type="button" class="button primary" data-v3-upload>＋ 上传数据</button>':''}</div>`:''));
@@ -81,10 +86,11 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const versions=item.versions.length>1?`<select class="v3-version" data-v3-version aria-label="版本">${item.versions.map(row=>`<option value="${esc(row.version)}" title="${esc(row.version)}" ${row===v?'selected':''}>${esc(row.version.slice(0,12))}</option>`).join('')}</select><button type="button" class="v3-copy" data-v3-copy="${esc(v.version)}" aria-label="复制完整版本">复制</button>`:`<button type="button" class="v3-copy" data-v3-copy="${esc(v.version)}" title="${esc(v.version)}" aria-label="复制完整版本">${esc(v.version.slice(0,12))} · 复制</button>`;
   const canTrain=allowsTraining(item.dataset,v.version);
   html(root,`<div class="v3-detail-scroll"><button class="button quiet v3-back" type="button" data-v3-back>‹ 数据集</button><section><h2><span title="${esc(item.displayName)}">${esc(item.displayName)}</span><button type="button" class="v3-edit" data-v3-label="${esc(item.dataset)}" aria-label="修改显示名" ${v.canUse&&authorized(machine())?'':'disabled'}>✎</button></h2><div class="v3-idline"><code title="${esc(item.dataset)}">${esc(item.dataset)}</code><button type="button" class="v3-copy" data-v3-copy="${esc(item.dataset)}">复制</button></div><div class="v3-meta"><span>所属 ${esc(datasetOwnerName(v.ownerLabel))}</span><span class="num">${esc(amount(v.bytes))}</span>${v.files===null?'':`<span class="num">${v.files.toLocaleString('zh-CN')} 个文件</span>`}<span>${item.versions.length} 个版本</span></div></section><section><div class="v3-lab">仓库${versions}</div><div class="v3-store">${strata(w.state)}<span>${storeWords[w.state]}</span>${w.machine?`<code title="${esc(w.machine)}">${esc(w.machine)}</code>`:''}</div>${w.records.filter(row=>versionAccess(v).canRetry&&row.machine===machine()&&row.storage.version===v.version&&['FAILED','BLOCKED'].includes(row.storage.phase)).map(row=>`<button class="button" type="button" data-retry-archive="${esc(row.storage.dataset)}" data-version="${esc(v.version)}">重试</button>`).join('')}</section><section><div class="v3-lab copy-caption"><span>服务器缓存</span>${v.selected.error?info(v.selected.error,'缓存结果'):""}</div>${v.servers.map(row=>{
-   const source=v.warehouse.originalConfirmed||v.servers.some(server=>server.machine!==row.machine&&server.state==='READY'&&server.canUse);
+   row=cacheRow(item.dataset,v,row);const source=v.warehouse.originalConfirmed||v.servers.some(server=>server.machine!==row.machine&&server.state==='READY'&&server.canUse);
    const mayCache=v.canUse&&!lastControls.busy&&authorized(row.machine)&&!maintenanceFor(store.data?.operationalMaintenance,row.machine)&&!['READY','PREPARING','UNKNOWN'].includes(row.state)&&row.directoryState==='ok'&&(row.canUse&&row.canPrepare||source);
    const cacheAction=['READY','PREPARING'].includes(row.state)?'':`<button class="button ${row.state==='FAILED'?'quiet':'v3-outline'} v3-small" type="button" data-v3-cache="${esc(row.machine)}" data-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${mayCache?'':'disabled'}>${row.state==='FAILED'?'重试':'缓存'}</button>`;
-   return `<article data-cache-context="${esc(machine())}" class="v3-server dataset-card ${row.machine===machine()?'cur':''}">${glyph(row.state)}<span class="v3-server-text"><b title="${esc(row.machine)}">${esc(row.machine)}</b><span>${row.state==='NOT_LOCAL'||row.state==='REGISTERED'?'':words[row.state]}</span></span>${cacheAction}</article>`;
+   const status=(row.state==='NOT_LOCAL'||row.state==='REGISTERED'?'':words[row.state])+(row.progress?' · '+amount(row.progress.bytes)+' / '+amount(row.progress.totalBytes):'');
+   return `<article data-cache-context="${esc(machine())}" class="v3-server dataset-card ${row.machine===machine()?'cur':''}">${glyph(row.state)}<span class="v3-server-text"><b title="${esc(row.machine)}">${esc(row.machine)}</b><span title="${esc(status)}" ${cacheWatch.get({machine:row.machine,dataset:item.dataset,version:v.version})?'role="status"':''}>${esc(status)}${row.error?info(row.error,'缓存结果'):''}</span></span>${cacheAction}</article>`;
   }).join('')}</section>${personalDelete(item.dataset,v.version)?'<div class="v3-delete-row"><button class="button quiet v3-delete" type="button" data-v3-delete>删除数据集…</button></div>':''}</div><footer class="v3-train"><button class="button primary" type="button" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${canTrain?'':'disabled'}>用于训练</button><div class="v3-code"><code title="${esc('--data '+item.dataset+'@'+v.version)}">--data ${esc(item.dataset)}@${esc(v.version)}</code><button type="button" class="v3-copy" data-v3-copy="${esc('--data '+item.dataset+'@'+v.version)}">复制</button></div><div class="v3-code"><span>容器内</span><code>/data2/${esc(item.dataset)}</code><span class="v3-lock">只读</span></div></footer>`);
   section.querySelector('.warehouse-v3').classList.toggle('v3-phone-detail',phoneDetail);requestAnimationFrame(fitInspector);
  }
@@ -100,7 +106,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(root.getBoundingClientRect().height/scale>available){root.classList.add('v3-inspector-overflow');root.style.maxHeight=available+'px';}
  }
  function render(){header();rail();rows();inspector();uploadUI();}
- function catalog(value){model=aggregateDatasetCatalog(value);if(!model.datasets.some(item=>item.dataset===selected)){selected=model.datasets[0]?.dataset||null;selectedVersion=null;}render();}
+ function catalog(value){model=aggregateDatasetCatalog(value);cacheWatch.catalog(model.datasets.flatMap(item=>item.versions.flatMap(v=>v.servers.map(row=>({machine:row.machine,dataset:item.dataset,version:v.version,physicalDataset:row.dataset,state:row.state,canUse:v.canUse,totalBytes:v.bytes})))));if(!model.datasets.some(item=>item.dataset===selected)){selected=model.datasets[0]?.dataset||null;selectedVersion=null;}render();}
  function catalogUnavailable(){model=null;selected=null;selectedVersion=null;rows();inspector();}
  function capacity(value,id){capacities.set(id,value);rail();uploadCapacity();}
  async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacities.set(row.id,null);rail();}});}}
@@ -243,7 +249,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   uploadCapacity();uploadRoute();uploadUI();
  }
  function assignFiles(files){if(uploadBusy||upload&& !['READY','DISCARDED'].includes(upload.state))return;const transfer=new DataTransfer();files.forEach(file=>transfer.items.add(file));const input=section.querySelector('[name=dataset-directory]');input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));}
- section.addEventListener('change',event=>{if(event.target.name==='dataset-directory')selection();if(event.target.id==='v3-file-picker')assignFiles([...event.target.files]);if(event.target.hasAttribute('data-v3-version')){selectedVersion=event.target.value;inspector();}if(event.target.name==='dataset-machine'){epoch++;upload=null;uploadBusy=false;uploadLocked=false;phoneDetail=false;meter.reset();labels.reset();model=null;selected=null;selectedVersion=null;section.querySelector('.v3-label-dialog')?.close();routeEpoch++;if(section.querySelector('#dataset-add-dialog')?.open)probe();render();}});
+ section.addEventListener('change',event=>{if(event.target.name==='dataset-directory')selection();if(event.target.id==='v3-file-picker')assignFiles([...event.target.files]);if(event.target.hasAttribute('data-v3-version')){selectedVersion=event.target.value;inspector();}if(event.target.name==='dataset-machine'){epoch++;cacheWatch.reset();upload=null;uploadBusy=false;uploadLocked=false;phoneDetail=false;meter.reset();labels.reset();model=null;selected=null;selectedVersion=null;section.querySelector('.v3-label-dialog')?.close();routeEpoch++;if(section.querySelector('#dataset-add-dialog')?.open)probe();render();}});
  section.addEventListener('input',event=>{if(event.target.id==='warehouse-search'){search=event.target.value.trim().toLowerCase();rows();}});
  section.addEventListener('keydown',event=>{
   const row=event.target.closest('[data-v3-select]');if(!row||!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;
@@ -270,9 +276,22 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(button.hasAttribute('data-v3-folder')||button.hasAttribute('data-v3-reselect')){section.querySelector('[name=dataset-directory]').click();return;}
   if(button.hasAttribute('data-v3-files')){section.querySelector('#v3-file-picker').click();return;}
   if(button.hasAttribute('data-v3-source')){const source=button.dataset.v3Source;section.querySelector('#dataset-add-dialog').classList.add('v3-other');section.querySelector('[data-dataset-source="'+(source==='aliyun'?'link':source)+'"]').click();if(source==='aliyun'){const select=section.querySelector('[name=cloud-source]');select.value='aliyun';select.dispatchEvent(new Event('change',{bubbles:true}));}return;}
-  if(button.hasAttribute('data-v3-cache')){const expected=account(),token=epoch,target=button.dataset.v3Cache;button.disabled=true;try{const value=await store.call('datasets.catalog',{machine:target});if(!current(expected,token)||!button.isConnected)return;const v=value.datasets?.find(row=>row.dataset===button.dataset.dataset)?.versions?.find(row=>row.version===button.dataset.version);if(!v||!access(v,value,{machineAuthorized:authorized(target)}).prepare)throw Error('缓存条件待确认，请刷新。');await store.call('datasets.prepare',{machine:target,dataset:button.dataset.dataset,version:button.dataset.version});if(current(expected,token))await refresh();}catch(error){if(current(expected,token))toast(error.message);}finally{if(button.isConnected)button.disabled=!!maintenanceFor(store.data?.operationalMaintenance,target);}return;}
+  if(button.hasAttribute('data-v3-cache')){
+   const expected=account(),token=epoch,target=button.dataset.v3Cache,ref={machine:target,dataset:button.dataset.dataset,version:button.dataset.version};let watch;
+   button.disabled=true;
+   try{
+    const value=await store.call('datasets.catalog',{machine:target});if(!current(expected,token)||!button.isConnected)return;
+    const v=value.datasets?.find(row=>row.dataset===ref.dataset)?.versions?.find(row=>row.version===ref.version);
+    if(!v||!access(v,value,{machineAuthorized:authorized(target)}).prepare)throw Error('缓存条件待确认，请刷新。');
+    watch=cacheWatch.begin({...ref,totalBytes:v.bytes,physicalDataset:v.locations?.find(row=>row.machine===target)?.dataset},{dispatching:true});if(!watch)return;
+    const result=await store.call('datasets.prepare',ref);if(current(expected,token))cacheWatch.settled(watch,result);
+   }catch(error){if(current(expected,token)){if(watch)cacheWatch.settled(watch,null,error);toast(error.message);}}
+   finally{if(button.isConnected)button.disabled=!!maintenanceFor(store.data?.operationalMaintenance,target);}
+   return;
+  }
  });
- new MutationObserver(()=>{header();if(document.body.dataset.room!=='datasets'){section.querySelector('#dataset-add-dialog')?.close();}}).observe(document.body,{attributes:true,attributeFilter:['data-room']});
+ new MutationObserver(()=>{header();cacheWatch.sync();if(document.body.dataset.room!=='datasets'){section.querySelector('#dataset-add-dialog')?.close();}}).observe(document.body,{attributes:true,attributeFilter:['data-room']});
+ document.addEventListener('visibilitychange',()=>cacheWatch.sync());
  new MutationObserver(()=>requestAnimationFrame(fitInspector)).observe(document.body,{attributes:true,attributeFilter:['style']});
  document.fonts?.ready.then(()=>requestAnimationFrame(fitInspector));
  store.onAuthChange?.(reset);
