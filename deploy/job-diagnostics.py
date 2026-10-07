@@ -44,6 +44,9 @@ UNIT = re.compile(r'gpuq-[a-zA-Z0-9_-]+\.service')
 LOG = re.compile(r'(?:worker[^/]*\.(?:out|err)|python-core-worker[^/]*\.log|(?:raylet|gcs_server|runtime_env_agent|dashboard_agent|agent)[^/]*\.(?:log|out|err))(?:\.[0-9]+)?')
 COUNTERS = ('memory.current', 'memory.peak', 'memory.events', 'pids.current', 'pids.peak', 'pids.events', 'cpu.stat', 'cgroup.events')
 FINAL = {'COMPLETE', 'PARTIAL', 'UNAVAILABLE'}
+RUNNER_PHASES = {'IDENTITY','WORKSPACE_ADMISSION','GPU_ALLOCATION','RESOURCE_BUDGET',
+                 'PROJECT_PREPARATION','OCI_EXECUTION','SANDBOX_PREPARATION',
+                 'SANDBOX_NETWORK','PAYLOAD_EXECUTION','OCI_PREPARATION','OCI_ENGINE'}
 ERROR_PATTERN = re.compile(r'Traceback|\b[A-Za-z_]*(?:Error|Exception)\b|\bSIG(?:ABRT|SEGV|KILL|BUS)\b|CUDA out of memory|pthread_create|Resource temporarily unavailable|\bFATAL\b', re.I)
 
 
@@ -113,6 +116,7 @@ def _write(path, data):
     try:
         with os.fdopen(fd, 'wb') as out: out.write(raw); out.flush(); os.fsync(out.fileno())
         os.rename(name, Path(path).name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
     finally:
         try: os.unlink(name, dir_fd=parent)
         except FileNotFoundError: pass
@@ -264,8 +268,11 @@ def start_capture(root, spec, unit, control_group, env, indices, uuids):
         quota = importlib.util.module_from_spec(quota_spec); quota_spec.loader.exec_module(quota)
         quota.ensure(config, spec['userId'], runtime)
     identity = {**_identity(spec), 'captureId': capture, 'unit': unit, 'controlGroup': control_group, 'cgroupDevice': group_stat.st_dev, 'cgroupInode': group_stat.st_ino, 'createdAt': time.time()}
+    attempt = re.fullmatch(r'gpuq-a([a-f0-9]{32})\.service',unit)
+    if attempt: identity['nativeAttemptId']='A'+attempt[1]
     _write(folder / 'identity.json', identity)
     report = {'schema': 1, 'jobId': spec['id'], 'captureId': capture, 'state': 'STARTING', 'createdAt': identity['createdAt'], 'retentionDays': _policy(root), 'gpuAllocation': {'indices': indices, 'uuids': uuids, 'observedAt': identity['createdAt']}, 'logs': [], 'scope': {'managedRuntime': '/run/gpuq/runtime/ray', 'externalTmpCaptured': False, 'note': 'Only managed Ray runtime is captured. RAY_TMPDIR or ray.init(_temp_dir=...) overrides outside it are not captured; no /tmp discovery.', 'redaction': 'Best effort; review before sharing. No argv or environment captured.', 'bundleLimitBytes': BUNDLE_LIMIT}}
+    if attempt: report['nativeAttemptId']=identity['nativeAttemptId']
     _resources(report, initial); _write(folder / 'report.json', report)
     command = ['/usr/bin/systemd-run', '--user', '--quiet', '--collect', '--unit=gpuq-diag-' + spec['id'][:8] + '-' + capture, '--property=Type=exec', '--property=MemoryMax=128M', '--property=CPUQuota=10%', '--property=TasksMax=16', '--property=IOWeight=10', '--property=KillMode=control-group', '--property=RuntimeMaxSec=2592000', '--property=UMask=0077', '--property=StandardOutput=null', '--property=StandardError=null', '/usr/bin/python3', str(HERE / 'job-diagnostics.py'), '--observe', spec['id'], capture]
     try: subprocess.run(command, env=env, capture_output=True, check=True, timeout=5)
@@ -275,18 +282,82 @@ def start_capture(root, spec, unit, control_group, env, indices, uuids):
     return {'runtimePath': str(runtime), 'captureId': capture, 'available': True}
 
 
-def finish_capture(root, spec, capture_id, exit_code):
+def runner_stderr(root, spec, capture_id, raw, *, phase='OCI_ENGINE', truncated=False):
+    """A bounded private engine tail, never a payload completion verdict."""
+    if phase not in RUNNER_PHASES or type(truncated) is not bool or not isinstance(raw,(str,bytes)):
+        raise ValueError('Invalid runner stderr evidence')
+    if isinstance(raw,str): raw=raw.encode('utf-8',errors='replace')
+    truncated=truncated or len(raw)>FILE_LIMIT
+    text=redact(raw[-FILE_LIMIT:].decode('utf-8',errors='replace'))
+    text=re.sub(r'(?i)(--?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|password|passwd|secret|authorization)\s+)(?:"[^"\n]*"|\'[^\'\n]*\'|[^\s]+)',r'\1[REDACTED]',text)
+    # Engine errors may contain host paths or echoed command options. Do not
+    # preserve host paths in the separately downloadable diagnostic package.
+    text=re.sub(r'(?<![\w:])/(?:[^\s\"\'<>]+)', '[PATH]', text)
+    text=text.encode()[-FILE_LIMIT:].decode('utf-8',errors='ignore')
+    if len(json.dumps(text).encode())>FILE_LIMIT:
+        text=text.encode()[-(FILE_LIMIT-2)//6:].decode('utf-8',errors='ignore');truncated=True
+    folder=_folder(root,spec,capture_id)
+    _write(folder/'runner-stderr.json',{'phase':phase,'text':text,'truncated':truncated,
+                                       'observedAt':time.time(),'evidenceOnly':True})
+
+
+def _runner_error(error, phase):
+    result={'phase':phase,'errorClass':type(error).__name__[:80],
+            'message':'Runner exception; inspect the bounded stderr and original main log'}
+    # Never stringify CalledProcessError/TimeoutExpired: their representation
+    # can contain the complete command, argv or other private values.
+    if isinstance(error,ValueError):
+        message=str(error)
+        if message=='OCI registry drop-in directories changed during operation':
+            result.update(reason='OCI_REGISTRY_INTEGRITY_CHANGED',message=message)
+        space=re.fullmatch(r'Personal workspace free-space reserve reached: availableBytes=([0-9]+), reserveBytes=([0-9]+), requestedBytes=([0-9]+)\.',message)
+        if space:
+            result.update(reason='WORKSPACE_RESERVE',message='Personal workspace free-space reserve reached',
+                          **dict(zip(('availableBytes','reserveBytes','requestedBytes'),map(int,space.groups()))))
+    return result
+
+
+def finish_capture(root, spec, capture_id, exit_code, *, phase=None, error=None):
     if type(exit_code) is not int: raise ValueError('Invalid runner exit code')
+    if phase is not None and phase not in RUNNER_PHASES:raise ValueError('Invalid runner phase')
     folder = _folder(root, spec, capture_id)
     identity = _read(folder / 'identity.json')
-    fd = _dir(_group_path(identity['controlGroup'], identity['unit']))
+    if any(identity.get(k)!=v for k,v in _identity(spec).items()) or identity.get('captureId')!=capture_id:
+        raise ValueError('Diagnostic invocation identity mismatch')
+    counters={};resource_error=None
     try:
-        info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) != (identity['cgroupDevice'], identity['cgroupInode']): raise ValueError('Diagnostic cgroup was replaced')
-        counters = _sample(fd)
-    finally: os.close(fd)
+        fd = _dir(_group_path(identity['controlGroup'], identity['unit']))
+    except OSError:
+        resource_error='Final resource sampling unavailable'
+    else:
+        try:
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) != (identity['cgroupDevice'], identity['cgroupInode']): raise ValueError('Diagnostic cgroup was replaced')
+            try:
+                counters = _sample(fd)
+                if not counters:resource_error='Final resource sampling unavailable'
+            except (OSError,ValueError):resource_error='Final resource sampling unavailable'
+        finally: os.close(fd)
     # Observer remains sole report writer; this durable receipt avoids races.
-    _write(folder / 'runner-exit.json', {'exitCode': exit_code, 'observedAt': time.time(), 'resources': counters})
+    receipt={'exitCode':exit_code,'observedAt':time.time(),'resources':counters}
+    if identity.get('nativeAttemptId'):receipt['nativeAttemptId']=identity['nativeAttemptId']
+    if phase is not None:receipt['phase']=phase
+    if error is not None:receipt['error']=_runner_error(error,phase)
+    if resource_error is not None:receipt['resourceCaptureError']=resource_error
+    _write(folder / 'runner-exit.json',receipt)
+
+
+def _runner_records(report, folder):
+    """Read the private receipt even if the observer/cgroup ended first."""
+    try:
+        receipt=_read(folder/'runner-exit.json',65536)
+        report['runnerExit']={k:receipt[k] for k in ('exitCode','observedAt')}
+        for key in ('phase','error','resourceCaptureError','nativeAttemptId'):
+            if key in receipt:report['runnerExit'][key]=receipt[key]
+    except FileNotFoundError:receipt=None
+    try:report['runnerStderr']=_read(folder/'runner-stderr.json',2*FILE_LIMIT)
+    except FileNotFoundError:pass
+    return receipt
 
 
 def _observer_slot(base):
@@ -316,11 +387,8 @@ def observe(root, spec, capture, env, sleep=time.sleep):
             platform_root_check(root)
             now = time.time(); current = _sample(groupfd); _resources(report, current)
             ended = not current or current.get('cgroup.events', {}).get('populated') == 0
-            try:
-                receipt = _read(folder / 'runner-exit.json', 65536)
-                report['runnerExit'] = {k: receipt[k] for k in ('exitCode', 'observedAt')}
-                _resources(report, receipt['resources']); ended = True
-            except FileNotFoundError: pass
+            receipt=_runner_records(report,folder)
+            if receipt is not None:_resources(report,receipt['resources']);ended=True
             if now >= next_logs or ended or now >= deadline: _logs(report, folder); next_logs = now + 10
             if ended or now >= deadline:
                 report.update(state='COMPLETE' if 'runnerExit' in report else 'PARTIAL', finalizedAt=now)
@@ -338,6 +406,7 @@ def observe(root, spec, capture, env, sleep=time.sleep):
         # A missing bind is not a diagnostic failure to persist on the fallback
         # filesystem. Recheck before the best-effort error report as well.
         platform_root_check(root)
+        _runner_records(report,folder)
         _logs(report, folder); report.update(state='PARTIAL', error='Diagnostic cgroup or capture became unavailable', finalizedAt=time.time()); _write(folder / 'report.json', report)
     finally:
         if groupfd is not None: os.close(groupfd)
@@ -408,6 +477,7 @@ def bundle(root, spec, scheduler):
         report = latest
         if report['state'] in ('STARTING', 'CAPTURING') and time.time() - report.get('updatedAt', 0) > 30:
             report = {**report, 'state': 'PARTIAL', 'error': 'Observer heartbeat is stale; completion is unconfirmed'}
+        _runner_records(report,_folder(root,spec,report['captureId']))
         result.update(state=report['state'], captures=[report], workerErrorEvidence=report.get('workerErrorEvidence', False))
     result['note'] = 'Worker log errors are evidence, not scheduler exit status. Missing counters are unknown, never zero.'
     # Include escaped JSON size (outer bridge uses ensure_ascii=True) in cap.
@@ -422,6 +492,9 @@ def summary(package):
     capture = (package.get('captures') or [{}])[0]
     counters = capture.get('resources', {}).get('counters', {})
     memory, pids = counters.get('memory.events', {}), counters.get('pids.events', {})
+    if capture.get('runnerExit',{}).get('resourceCaptureError'):
+        # Earlier samples remain valid observations, not a confirmed final 0.
+        memory={};pids={}
     excerpts = []
     for log in capture.get('logs', []):
         matching = [line.strip() for line in log.get('text', '').splitlines() if ERROR_PATTERN.search(line)]
@@ -435,6 +508,11 @@ def summary(package):
     lines.extend(excerpts)
     lines.append('完整诊断与历史 GPU 分配：gpuctl diagnostics ' + package['jobId'] + ' --json；网页日志窗口选择「诊断包 / 历史分配」。')
     if package.get('state') in ('UNAVAILABLE', 'PARTIAL'): lines.append('采集缺失或不完整；旧任务 / 自定义临时目录的 worker 日志可能未保留。')
+    if capture.get('runnerExit'):
+        result=capture['runnerExit'];lines.append('Runner 退出码：'+str(result['exitCode'])+'；阶段：'+str(result.get('phase','未记录')))
+        if result.get('error'):lines.append('Runner 错误：'+str(result['error'].get('message','未记录')))
+    if capture.get('runnerStderr',{}).get('text'):
+        lines.append('OCI stderr 线索（不是完成证明）：'+capture['runnerStderr']['text'][-1000:])
     return '\n\n' + '\n'.join(lines) + '\n'
 
 

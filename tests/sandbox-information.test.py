@@ -83,7 +83,7 @@ class SandboxInformation(unittest.TestCase):
         for runner in RUNNERS:
             tree=ast.parse(Path(runner.__file__).read_text())
             functions.append(ast.dump(next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='sandbox_information'),include_attributes=False))
-            main=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='main')
+            main=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name==('run_job' if hasattr(runner,'JobCapture') else 'main'))
             cleanup=next(node.finalbody for node in reversed(main.body) if isinstance(node,ast.Try))
             self.assertIn('process.kill()',ast.unparse(cleanup[0]))
             self.assertEqual(ast.unparse(cleanup[1]),'gatefile.close()')
