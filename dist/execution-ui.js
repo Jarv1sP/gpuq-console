@@ -109,6 +109,23 @@ export function createSubmitSelectionGuard(){
   };
 }
 function base64(bytes){let value='';for(let i=0;i<bytes.length;i+=8192)value+=String.fromCharCode(...bytes.subarray(i,i+8192));return btoa(value);}
+export function projectDiskQuotaHTML(value,owner){
+  const unknown=()=>{throw Error('磁盘用量待确认，请稍后刷新。');};
+  if(!owner||!value||value.owner!==owner||typeof value.enabled!=='boolean')unknown();
+  if(!value.enabled){
+    if(value.enforcement!==null||value.volumes!==null||value.reason!==undefined&&value.reason!=='OWNER_NOT_ACTIVATED')unknown();
+    return '<p class="disk-quota-status">未启用</p>';
+  }
+  if(value.enforcement!=='kernel-project-quota'||!Number.isSafeInteger(value.projectId)||value.projectId<10000||value.projectId>=2**31||!Array.isArray(value.volumes)||!value.volumes.length||value.volumes.length>8)unknown();
+  const seen=new Set(),count=new Intl.NumberFormat('zh-CN'),bytes=n=>{const units=['B','KiB','MiB','GiB','TiB','PiB'];let index=0;while(n>=1024&&index<units.length-1){n/=1024;index++;}return count.format(Number(n.toFixed(index?1:0)))+' '+units[index];};
+  const rows=value.volumes.map(row=>{
+    if(!row||typeof row.volume!=='string'||!/^[a-z][a-z0-9_-]{0,47}$/.test(row.volume)||seen.has(row.volume))unknown();
+    for(const key of ['bytes','inodes','usedBytes','usedInodes','remainingBytes','remainingInodes'])if(!Number.isSafeInteger(row[key])||row[key]<0)unknown();
+    if(!row.bytes||!row.inodes||row.remainingBytes!==Math.max(0,row.bytes-row.usedBytes)||row.remainingInodes!==Math.max(0,row.inodes-row.usedInodes))unknown();seen.add(row.volume);
+    return `<li><strong class="mono server-id" title="${escape(row.volume)}">${escape(row.volume)}</strong><dl><dt>容量</dt><dd>${bytes(row.usedBytes)} / ${bytes(row.bytes)}</dd><dt>文件与目录</dt><dd>${count.format(row.usedInodes)} / ${count.format(row.inodes)}</dd></dl><progress value="${Math.min(row.usedBytes,row.bytes)}" max="${row.bytes}" aria-label="${escape(row.volume)} 已用容量"></progress></li>`;
+  });
+  return '<ul class="disk-quota-volumes">'+rows.join('')+'</ul>';
+}
 export async function uploadProjectFile(file,context,send,progress=()=>{},{inspect,signal,current=()=>true}={}){
   const check=()=>{signal?.throwIfAborted();if(!current())throw new DOMException('项目或账号已改变，上传已暂停。','AbortError');};
   check();
@@ -164,6 +181,7 @@ export function executionUI(store,refresh,toast){
   let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,historyState='',jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
   let submitReceipt=null,parsedTarget=null,acceptedDraft=false,managementSubmit=false;
   let projectManagement=null;
+  let quotaKey='',quotaState='idle',quotaResult=null,quotaError='',quotaController;
   const managementAllowed=()=>managementSubmit&&store.principal?.role==='admin';
   function submissionMode(management){
     const priority=query('[name=priority]'),rank=query('[name=queue-rank]');if(!priority||!rank)return false;
@@ -203,6 +221,7 @@ export function executionUI(store,refresh,toast){
   const status=(text,error=false)=>{const element=query('#project-status');if(element){element.textContent=text;element.classList.toggle('form-error',error);}};
   const stopPolling=()=>{clearTimeout(pollTimer);pollTimer=null;};
   function cancelProjectActivity(){
+    cancelDiskQuota();
     projectPaused=true;stopPolling();projectActivity.cancel();explicitProjectReads.clear();projectBusy=false;recoveredActor=null;
     if(directoryLoading){directoryOwner='';directoryLoading=false;}
     if(projectOperation){operationBusy=false;projectOperation=false;}
@@ -210,6 +229,30 @@ export function executionUI(store,refresh,toast){
     if(section&&actor)updateControls();
   }
   function activateProjectActivity(){flushClosedProjectDialogs();if(!pageActive||!isVisible())return false;projectPaused=false;recoveredActor=actor;return true;}
+  function cancelDiskQuota(){quotaController?.abort();quotaController=null;if(quotaState==='loading')quotaState='idle';}
+  function renderDiskQuota(){
+    const panel=query('#project-disk-quota');if(!panel)return;
+    query('#disk-quota-state').textContent=({idle:'',loading:' · 查询中',ready:' · 已启用',disabled:' · 未启用',unknown:' · 待确认'})[quotaState];
+    const place=query('#disk-quota-machine');place.textContent=machine||'选择项目后查看';place.title=machine;
+    query('#disk-quota-refresh').disabled=!enabled()||quotaState==='loading';
+    const result=query('#disk-quota-result');
+    if(quotaResult!==null)result.innerHTML=quotaResult;
+    else{result.textContent=quotaState==='unknown'?quotaError||'磁盘用量待确认，请稍后刷新。':quotaState==='loading'?'正在查询…':machine?'点击刷新查看个人磁盘用量。':'先选择个人容器项目或服务器。';}
+  }
+  function syncDiskQuota(){
+    const key=currentToken();if(key!==quotaKey){cancelDiskQuota();quotaKey=key;quotaState='idle';quotaResult=null;quotaError='';}
+    renderDiskQuota();if(query('#project-disk-quota')?.open&&projectActive()&&enabled()&&quotaState==='idle')void loadDiskQuota();
+  }
+  async function loadDiskQuota(){
+    if(!enabled()||!activateProjectActivity()||quotaState==='loading')return;
+    cancelDiskQuota();const token=currentToken(),controller=new AbortController(),target=machine,owner=actor;quotaController=controller;quotaKey=token;quotaState='loading';quotaResult=null;quotaError='';renderDiskQuota();
+    const current=()=>!controller.signal.aborted&&token===currentToken()&&query('#project-disk-quota')?.open&&projectActive();
+    try{
+      const value=await projectActivity.run(signal=>store.call('projects.quota',{machine:target},{signal:AbortSignal.any([signal,controller.signal])}));
+      if(!current())return;quotaResult=projectDiskQuotaHTML(value,owner);quotaState=value.enabled?'ready':'disabled';
+    }catch(error){if(!current()||error.name==='AbortError')return;quotaState='unknown';quotaResult=null;quotaError=error.message||'磁盘用量待确认，请稍后刷新。';}
+    finally{if(current()){quotaController=null;renderDiskQuota();}}
+  }
   function restorePublication(){publicationIntent=project?publicationCache.read(actor,machine,project):null;publicationResult=null;publicationError='';publicationSelection=null;publicationFlash=null;pollCount=0;}
   function observePublication(info){
     if(!publicationIntent)return;
@@ -302,7 +345,9 @@ export function executionUI(store,refresh,toast){
     const taskHelp=explanation.closest('.ui-info');kicker.querySelector('span').append(taskHelp);
     const contextHeading=query('#workspace-context-title'),contextCaption=document.createElement('div');contextCaption.className='field-caption';contextHeading.before(contextCaption);contextCaption.append(contextHeading,contextInfo);
     renderEnvironmentChoice();
-
+    const disk=document.createElement('details');disk.id='project-disk-quota';disk.className='execution-panel';
+    disk.innerHTML='<summary>磁盘配额<span id="disk-quota-state"></span></summary><div class="disk-quota-head"><span id="disk-quota-machine" class="server-id mono"></span>'+infoHTML('当前账号在这台服务器上的项目、文件和数据用量。未启用不代表零用量或无限容量，与显卡额度分开。','磁盘配额说明')+'<button id="disk-quota-refresh" class="button quiet" type="button">刷新</button></div><div id="disk-quota-result" role="status" aria-live="polite"></div>';
+    query('#workspace-files').before(disk);disk.addEventListener('toggle',()=>{if(disk.open){activateProjectActivity();syncDiskQuota();}else cancelDiskQuota();});query('#disk-quota-refresh').addEventListener('click',()=>void loadDiskQuota());
   }
   const receiptActor=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   function renderReceipt(){
@@ -466,7 +511,7 @@ export function executionUI(store,refresh,toast){
       if(result.state==='PUBLISHING')progress.innerHTML=projectPublicationProgressHTML(info?.progress);
       query('#project-status-detail').textContent=projectStatusText(result.state==='FAILED'?{...info,state:'FAILED',error:result.error,errorDetails:result.errorDetails}:info,hasTerminal())+(publicationError?' · '+publicationError:'');
     }
-    renderRuns();updateControls();updatePreflight();armPolling();document.dispatchEvent(new Event('gpuq-workspace-rendered'));
+    renderRuns();updateControls();updatePreflight();armPolling();syncDiskQuota();document.dispatchEvent(new Event('gpuq-workspace-rendered'));
     if(publicationFlash){publicationFlash=null;confirmPublicationMotion(query('#project-status'));}
   }
   function renderRuns(){

@@ -337,3 +337,5 @@ await import('./project-directory-ui-smoke.mjs');
 
 // Shared transport and explicit refusal must retain lost-reply recovery.
 await import("./submission-errors-ui-smoke.mjs");
+// Personal disk quota shares the selected development project context.
+await import('./project-quota-ui-smoke.mjs');
