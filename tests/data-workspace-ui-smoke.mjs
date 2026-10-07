@@ -86,6 +86,11 @@ try{
   assert.deepEqual(await page.evaluate(()=>calls.filter(call=>call.operation==='datasets.workspace.put').map(call=>call.args.offset)),[0,1024**2,2*1024**2]);
   assert.equal(await page.evaluate(()=>calls.some(call=>call.operation.includes('publish'))),false);
   assert.equal(await page.locator('#terminal-data-open').isEnabled(),true);
+  assert.equal(await page.locator('#cloud-files').isHidden(),true,'The public workspace keeps experimental cloud files hidden');
+  assert.equal(await page.evaluate(()=>calls.some(call=>call.operation.startsWith('cloud.files.'))),false,'Opening the public workspace does not probe experimental cloud files');
+  // Exercise the preserved component with an explicit local fixture enable,
+  // as in cloud-files-ui-smoke; this does not expose its production entry.
+  await page.locator('#cloud-files').evaluate(node=>{node.hidden=false;});
   const cloudEntry=page.locator('.data-workspace-browser > summary').filter({hasText:'云端副本'});
   await cloudEntry.click();await page.locator('#cloud-files-refresh').click();
   await page.waitForFunction(()=>document.querySelector('#cloud-files-list').textContent.includes('还没有云文件'));

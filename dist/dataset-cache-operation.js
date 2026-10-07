@@ -2,15 +2,17 @@
 import {serverIdHTML} from './workbench-ui.js';
 import {copyHelp} from './copy-help-ui.js';
 const id=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,hash=/^[a-f0-9]{64}$/,uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
-const actions=['prepare','release'],finished=new Set(['READY','RELEASED','FAILED','CANCELED','CANCELLED']);
-const labels={UNKNOWN:'未知',QUEUED:'等待处理',RUNNING:'进行中',PREPARING:'取回中',RELEASING:'释放中',CANCELING:'正在取消',CANCELLING:'正在取消',CANCELED:'已取消',CANCELLED:'已取消',FAILED:'操作失败',BLOCKED:'暂不能执行',READY:'已缓存',RELEASED:'已释放缓存'};
-const phases={QUEUED:'等待',PREPARING:'准备',COPYING:'复制',VERIFYING:'校验',CHECKING:'核对',RELEASING:'释放',STOPPING:'停止',CANCELING:'停止',CANCELLING:'停止'};
+const actions=['prepare','release'],finished=new Set(['READY','RELEASED','FAILED','BLOCKED','CANCELED','CANCELLED']);
+const labels={UNKNOWN:'未知',QUEUED:'等待处理',DISPATCHING:'正在派发',RUNNING:'进行中',PREPARING:'取回中',RELEASING:'释放中',CANCELING:'正在取消',CANCELLING:'正在取消',CANCELED:'已取消',CANCELLED:'已取消',FAILED:'操作失败',BLOCKED:'暂不能执行',READY:'已缓存',RELEASED:'已释放缓存'};
+const phases={QUEUED:'等待',DISPATCHING:'派发',RUNNING:'进行中',PREPARING:'准备',COPYING:'复制',VERIFYING:'校验',CHECKING:'核对',RELEASING:'释放',STOPPING:'停止',CANCELING:'停止',CANCELLING:'停止'};
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const integer=value=>Number.isSafeInteger(value)&&value>=0;
 const same=(a,b)=>['action','machine','dataset','version'].every(field=>a[field]===b[field]);
-// Contract pending: only an explicit boolean permission is accepted. Protocol alone is not permission.
+// The published protocol names each action explicitly. Neither a protocol
+// alone nor the earlier provisional allowance is sufficient permission.
 export function adaptCacheCapability(raw,action=raw?.action){
- return {allowed:raw?.allowed===true&&(!action||actions.includes(action))&&(!raw.action||raw.action===action),reason:typeof raw?.reason==='string'?raw.reason:null,protocol:typeof raw?.protocol==='string'||Number.isSafeInteger(raw?.protocol)?raw.protocol:null};
+ const allowed=raw?.protocol===1&&actions.includes(action)&&raw[action]===true;
+ return {allowed,reason:typeof raw?.reason==='string'?raw.reason:null,protocol:typeof raw?.protocol==='string'||Number.isSafeInteger(raw?.protocol)?raw.protocol:null};
 }
 export const canCacheAction=(capabilities,action)=>adaptCacheCapability(capabilities,action).allowed;
 export const cacheOperationStorageKey=account=>'stargate.cache-operations.v1:'+encodeURIComponent(account);
@@ -40,8 +42,8 @@ export function createCacheOperation({store,action,machine,dataset,version,capab
  try{row=restore(recent());}catch{journalError=true;notice='原请求记录无法读取，暂不能发起操作。';}
  function snapshot(){
   if(!live())return {visible:false};
-  return {visible:available(),allowed:capability().allowed,reason:capability().reason,busy,request:row?.request,operationId:row?.operationId,state:row?.state||'IDLE',phase:row?.phase,progress:row?.progress,error:notice||row?.error,confirmed:row?.confirmed===true,canCancel:!!row?.confirmed&&row.canCancel===true&&!finished.has(row.state)&&!busy,
-   canStart:!journalError&&!busy&&capability().allowed&&(!row||row.confirmed&&['FAILED','CANCELED','CANCELLED'].includes(row.state))};
+  return {visible:available(),allowed:capability().allowed,reason:capability().reason,busy,request:row?.request,operationId:row?.operationId,state:row?.state||'IDLE',phase:row?.phase,progress:row?.progress,error:notice||row?.error,confirmed:row?.confirmed===true,canCancel:action==='release'&&!!row?.confirmed&&row.canCancel===true&&!finished.has(row.state)&&!busy,
+   canStart:!journalError&&!busy&&capability().allowed&&(!row||row.confirmed&&['FAILED','BLOCKED','CANCELED','CANCELLED'].includes(row.state))};
  }
  function sync(){
   if(timer!==null){clear(timer);timer=null;}
@@ -129,10 +131,10 @@ export function mountCacheOperation(host,options){
  api=createCacheOperation({...options,active,signal:lifetime.signal,changed:render});
  host.addEventListener('click',event=>{
   const button=event.target.closest('button');if(!root?.contains(button)||button.disabled)return;
-  if(button.hasAttribute('data-cache-start')&&(action!=='release'||window.confirm('释放 '+machine+' 上 '+dataset+' @ '+version.slice(0,12)+' 的缓存？服务器会检查读取租约和仓库保留条件。')))void api.start();
+  if(button.hasAttribute('data-cache-start')&&(action!=='release'||window.confirm('释放 '+machine+' 上 '+dataset+' @ '+version.slice(0,12)+' 的缓存？')))void api.start();
   if(button.hasAttribute('data-cache-query'))void api.query();
   if(button.hasAttribute('data-cache-check'))void api.check();
-  if(button.hasAttribute('data-cache-cancel')&&window.confirm('请求取消这次缓存操作？只有服务器确认后才算停止。'))void api.cancel();
+  if(button.hasAttribute('data-cache-cancel')&&window.confirm('取消这次缓存操作？'))void api.cancel();
   if(button.hasAttribute('data-cache-copy'))void navigator.clipboard.writeText(api.snapshot().operationId).then(()=>{button.textContent='已复制';}).catch(()=>{button.textContent='复制失败';});
  },{signal:lifetime.signal});
  host.addEventListener('submit',event=>{if(!root?.contains(event.target)||!event.target.matches('[data-cache-id-form]'))return;event.preventDefault();void api.query(event.target.elements.operationId.value.trim()).catch(cause=>{root.querySelector('[role=status]').textContent=cause.message;});},{signal:lifetime.signal});
@@ -172,7 +174,7 @@ export function mountCacheTransfer(host,{store,source,targets,dataset,version,si
   const choice=choices.find(value=>value.machine===root.querySelector('select').value);
   root.querySelector('[data-cache-transfer-source]').replaceChildren();
   prepared=mountCacheOperation(root.querySelector('[data-cache-transfer-target]'),{store,action:'prepare',machine:choice.machine,dataset,version,capabilities:choice.capabilities,signal:lifetime.signal,explain:false,onChange:value=>{
-   if(!live())return;root.querySelector('select').disabled=!!value.request&&!(value.confirmed&&['FAILED','CANCELED','CANCELLED'].includes(value.state));onChange(value);void sourceCapability(value);
+   if(!live())return;root.querySelector('select').disabled=!!value.request&&!(value.confirmed&&['FAILED','BLOCKED','CANCELED','CANCELLED'].includes(value.state));onChange(value);void sourceCapability(value);
   }});
  }
  root.querySelector('[data-cache-transfer-open]').addEventListener('click',()=>{root.querySelector('[data-cache-transfer-body]').hidden=false;if(!prepared)select();root.querySelector('select').focus();},{signal:lifetime.signal});

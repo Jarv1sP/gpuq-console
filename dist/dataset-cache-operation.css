@@ -18,6 +18,7 @@
 .sb .cache-operation-id code{font:12px var(--mono)}
 .sb .cache-operation footer{display:flex;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:8px;margin:16px 0 0;padding:0}
 .sb .cache-operation .button,.sb .cache-transfer .button,.sb .cache-operation input,.sb .cache-transfer select{min-height:48px}
+.sb #page-datasets :is(.cache-operation,.cache-transfer) .button,.sb #page-datasets .cache-operation input,.sb #page-datasets .cache-transfer select{min-height:48px}
 .sb .cache-operation form{display:grid;gap:12px;margin-top:16px}
 .sb .cache-operation label,.sb .cache-transfer label{display:grid;gap:8px;font-size:13px;min-width:0}
 .sb .cache-operation input,.sb .cache-transfer select{width:100%;min-width:0;max-width:100%;background:var(--bg-1);color:var(--ink);border:1px solid var(--line-2);padding:12px}
