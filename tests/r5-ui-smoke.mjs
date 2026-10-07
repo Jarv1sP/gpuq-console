@@ -276,3 +276,4 @@ try{
   releaseInventory?.();releaseCatalog?.();if(browser)await Promise.all(browser.contexts().map(closeRoutedContext));await browser?.close();if(server?.listening)await new Promise(resolve=>server.close(resolve));if(service&&!service.closing){clearInterval(service.executionTimer);await service.close();}await rm(temp,{recursive:true,force:true});
 }
 await runR5FixtureRegression(shots);
+await import('./project-preparation-ui-smoke.mjs');

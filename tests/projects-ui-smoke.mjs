@@ -165,6 +165,7 @@ try{
 
   // Dataset entry keeps the same project when its explicitly chosen node is the same.
   await closeSubmit(page);await page.locator('[data-nav=datasets]').click();
+  await page.locator('[data-use-dataset=sample]').waitFor({state:'visible'});
   await action('datasets.catalog',()=>page.locator('#datasets-refresh').click());
   await page.locator('[data-use-dataset=sample]').click();
   assert.equal(await page.locator('[name=workspace-machine]').inputValue(),machine);assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
