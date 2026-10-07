@@ -450,11 +450,16 @@ def _data2_mount():
 
 class DatasetCache:
     def __init__(self, root="/data2/datasets", *, sources=None, reserve_bytes=DEFAULT_RESERVE,
-                 lock_timeout=2.0, mount_point=None):
+                 lock_timeout=2.0, mount_point=None, budget_bytes=None):
         self.root = _absolute(root)
         if str(self.root) in BROAD or type(reserve_bytes) is not int or reserve_bytes < 0:
             raise CacheError("unsafe cache root or reserve")
         self.reserve_bytes = reserve_bytes
+        if budget_bytes is not None and (type(budget_bytes) is not int or not 0 < budget_bytes <= 2**63 - 1):
+            raise CacheError("invalid trusted dataset cache budget")
+        # Trusted node policy only. It limits registered dataset copies, not
+        # personal projects, environments, outputs, or the filesystem itself.
+        self.budget_bytes = budget_bytes
         if not isinstance(lock_timeout, (int, float)) or isinstance(lock_timeout, bool) or not 0 <= lock_timeout <= 60:
             raise CacheError("invalid dataset lock timeout")
         self.lock_timeout = lock_timeout
@@ -955,6 +960,65 @@ class DatasetCache:
         if getattr(info, 'f_files', 0) > 0 and info.f_favail < 1024 + needed_inodes + self._upload_reserved()[1]:
             raise CacheError("insufficient free inodes including upload reservations")
 
+    @staticmethod
+    def _footprint(manifest):
+        """Conservative admission footprint, never promised reclaimed bytes."""
+        return (sum(entry["size"] for entry in manifest["files"])
+                + 4096 * (len(manifest["files"]) + len(manifest["directories"])) + 8192)
+
+    def _budget(self, needed=0, *, except_stage=None, reservation_credit=0):
+        """Caller owns the cache lock; account READY, whole staging and uploads.
+
+        A staging reservation counts its complete immutable dataset footprint,
+        not just remaining bytes: data already written must not become free
+        budget for another transfer. Corrupt/orphaned lifecycle metadata fails
+        closed. This is invoked only at admission/resume, never per file chunk.
+        No authority check, recursive payload scan or deletion occurs here.
+        """
+        if self.budget_bytes is None:
+            return
+        if type(needed) is not int or not 0 <= needed <= 2**63 - 1:
+            raise CacheError("invalid upcoming dataset cache reservation")
+        if type(reservation_credit) is not int or not 0 <= reservation_credit <= needed:
+            raise CacheError("invalid dataset cache reservation conversion")
+        if needed > self.budget_bytes:
+            raise CacheError(f"dataset exceeds cache budget: requestedBytes={needed}, "
+                             f"budgetBytes={self.budget_bytes}; keep the original in the data warehouse")
+        usage = self._budget_usage(except_stage=except_stage)
+        if usage + needed - reservation_credit > self.budget_bytes:
+            raise CacheError(f"dataset cache budget reached: usedOrReservedBytes={usage}, "
+                             f"requestedBytes={needed}, budgetBytes={self.budget_bytes}; "
+                             "active or unverified copies are retained")
+
+    def _budget_usage(self, *, except_stage=None):
+        """Trusted whole-copy commitments, caller holds the cache lock."""
+        actor = Principal("builtin-admin", True)
+        usage = self._upload_reserved(budget=True)[0]
+        for section in ("ready", ".staging"):
+            with _directory(self.root / section) as parent:
+                datasets = os.listdir(parent)
+            for dataset in datasets:
+                _identifier(dataset)
+                with _directory(self.root / section / dataset) as parent:
+                    versions = os.listdir(parent)
+                for version in versions:
+                    _identifier(version, HASH_RE)
+                    paths = self._paths(dataset, version)
+                    if section == ".staging" and paths[section] == except_stage:
+                        continue
+                    record = self._record(actor, dataset, version)
+                    if section == "ready":
+                        if not self._ready(paths, record["manifest"], version):
+                            raise CacheError("unknown published cache state; admission forbidden")
+                        if self._version_entry_exists(paths[".staging"]):
+                            raise CacheError("READY with staging has unknown lifecycle; admission forbidden")
+                    else:
+                        transfer = self._transfer(paths[section])
+                        if transfer["totalBytes"] != sum(entry["size"] for entry in record["manifest"]["files"]):
+                            raise CacheError("staging cache reservation differs from immutable manifest")
+                    usage += self._footprint(record["manifest"])
+        return usage
+
     def _provenance(self, dataset, version, *, _read_only=False):
         """Private version provenance, bound to this exact registration.
 
@@ -1281,7 +1345,8 @@ class DatasetCache:
                         totalInodes=info.f_files if inodes_known else None,
                         availableInodes=info.f_favail if inodes_known else None,
                         inodeUsageKnown=inodes_known, guarded=self.mount is not None,
-                        scope="filesystem", activeReservationsIncluded=False)
+                        scope="filesystem", activeReservationsIncluded=False,
+                        datasetBudgetBytes=self.budget_bytes)
 
     def list_datasets(self, actor):
         """Authorized catalog and bounded ACL owner IDs, never source IDs/paths."""
@@ -1515,7 +1580,7 @@ class DatasetCache:
             raise CacheError("invalid transfer token")
         return value
 
-    def _upload_reserved(self):
+    def _upload_reserved(self, *, budget=False):
         total = inodes = 0
         # Member uploads reserve future payload before their large manifest is
         # sealed. Public-source materialization must see those reservations too.
@@ -1527,10 +1592,13 @@ class DatasetCache:
             if not re.fullmatch(r"[a-f0-9]{64}\.json", name):
                 raise CacheError("corrupt upload reservation directory")
             value = _read_json(self.root / ".upload-reservations" / name)
-            if (not isinstance(value, dict) or set(value) not in ({"bytes"}, {"bytes", "inodes"})
+            if (not isinstance(value, dict) or set(value) not in ({"bytes"}, {"bytes", "inodes"}, {"bytes", "inodes", "budgetBytes"})
                     or any(type(number) is not int or not 0 <= number <= 2**63-1 for number in value.values())):
                 raise CacheError("corrupt upload reservation")
-            total += value["bytes"]
+            # bytes/inodes retain the physical future-write reservation. New
+            # uploads separately track logical commitments across staging;
+            # legacy records remain conservatively charged by physical bytes.
+            total += value.get("budgetBytes", value["bytes"]) if budget else value["bytes"]
             inodes += value.get('inodes', 0)
         return total, inodes
 
@@ -1609,7 +1677,7 @@ class DatasetCache:
             result.append(dict(**entry, offset=size, prefixSha256=digest, complete=entry["path"] in found and size == entry["size"]))
         return result
 
-    def _plan(self, actor, dataset, version, *, record=None, index=None):
+    def _plan(self, actor, dataset, version, *, record=None, index=None, reservation_credit=0):
         record = self._record(actor, dataset, version) if record is None else record
         paths = self._paths(dataset, version)
         manifest = record["manifest"]
@@ -1617,6 +1685,13 @@ class DatasetCache:
             return dict(dataset=dataset, version=version, state="READY", files=[], remainingBytes=0)
         stage = paths[".staging"]
         total = sum(f["size"] for f in manifest["files"])
+        # Check before creating a stage or rewriting its accounting. Excluding
+        # this exact stage and adding its full footprint makes resume idempotent
+        # while still counting every concurrent prepared copy and upload.
+        # Only the trusted uploader converts its already-held complete logical
+        # reservation while owning this same global lock. It lowers the durable
+        # upload commitment only after the whole stage has been created.
+        self._budget(self._footprint(manifest), except_stage=stage, reservation_credit=reservation_credit)
         try:
             transfer = self._transfer(stage)
         except FileNotFoundError:
@@ -2366,9 +2441,13 @@ class DatasetCache:
                     value = read(self.root / '.upload-reservations' / key)
                     full = {'bytes': session['reserveBytes'], 'inodes': session['entries']+16}
                     sealed = {'bytes': session['reserveBytes']-session['totalBytes'], 'inodes': session['entries']+16}
-                    if (not isinstance(value, dict) or set(value) != {'bytes', 'inodes'}
+                    footprint = session['totalBytes'] + 4096 * session['entries'] + 8192
+                    variants = (full, sealed, {**full, 'budgetBytes': session['reserveBytes']},
+                                {**sealed, 'budgetBytes': session['reserveBytes']},
+                                {**sealed, 'budgetBytes': session['reserveBytes']-footprint})
+                    if (not isinstance(value, dict) or set(value) not in ({'bytes', 'inodes'}, {'bytes', 'inodes', 'budgetBytes'})
                             or any(type(v) is not int or not 0 <= v <= 2**63-1 for v in value.values())
-                            or value not in (full, sealed)):
+                            or value not in variants):
                         raise CacheError('unconfirmed upload reservation budget')
                     if target == dataset:
                         raise CacheError('upload reservation prevents empty registration removal')

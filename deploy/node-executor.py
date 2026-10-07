@@ -169,7 +169,21 @@ def dataset_cache():
     if DATASET_MODULE is None:
         module=importlib.util.spec_from_file_location('gpuq_dataset_cache',HERE/'dataset-cache.py')
         DATASET_MODULE=importlib.util.module_from_spec(module);sys.modules[module.name]=DATASET_MODULE;module.loader.exec_module(DATASET_MODULE)
-    cache=DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=config.get('reserveBytes',10*1024**3),mount_point=config.get('mountPoint','/data2'))
+    policy=CONFIG.get('storageTier',{'enabled':False})
+    if (not isinstance(policy,dict) or set(policy)-{'enabled','budgetBytes','highWater','lowWater'}
+            or type(policy.get('enabled',False)) is not bool):raise ValueError('Invalid trusted dataset cache policy')
+    budget=policy.get('budgetBytes') if policy.get('enabled',False) else None
+    if policy.get('enabled',False) and (type(budget) is not int or not 0<budget<=2**63-1):raise ValueError('Enabled cache policy requires a positive dataset budget')
+    reserve=config.get('reserveBytes',10*1024**3)
+    cache=DATASET_MODULE.DatasetCache(config.get('root','/data2/datasets'),sources=config.get('sources',{}),reserve_bytes=reserve,mount_point=config.get('mountPoint','/data2'),budget_bytes=budget)
+    if 'workspaceReserveBytes' in CONFIG:
+        shared_reserve=CONFIG['workspaceReserveBytes']
+        if type(shared_reserve) is not int or not 0<=shared_reserve<=2**63-1:raise ValueError('Invalid workspace free-space reserve')
+        # Bind aliases share one volume; its workspace reserve cannot be
+        # bypassed by a smaller dataset-specific reserve. Separate HDD storage
+        # keeps its own reserve, never adds SSD and HDD capacity together.
+        with DATASET_MODULE._directory(ROOT) as workspace:
+            if os.fstat(workspace).st_dev==cache._root_identity[0]:cache.reserve_bytes=max(reserve,shared_reserve)
     # Lazy to avoid the storage-node constructor calling dataset_cache again.
     # Only configured, sealed authorities can prove a cache is replaceable.
     cache.rebuild_guard=dataset_rebuild_guard
@@ -183,6 +197,22 @@ def dataset_cache():
             if owner is not None:return storage_quota(owner,path)
         cache.quota_guard=quota_guard
     return DATASET_MODULE,cache
+
+
+def dataset_cache_admission(needed_bytes=0, *, _exclude=()):
+    """Private detached-worker preflight; not a public collection endpoint.
+
+    Reclaim at most sixteen authenticated idle copies before a new preparation.
+    The following cache admission still rechecks its live budget/free space
+    under the cache lock. Never collect while holding that lock or lease locks.
+    A dataset larger than the trusted SSD budget is rejected before any GC.
+    """
+    module,cache=dataset_cache()
+    if type(needed_bytes) is not int or not 0<=needed_bytes<=2**63-1:raise ValueError('Invalid cache preparation footprint')
+    if cache.budget_bytes is None:return {'enabled':False,'state':'DISABLED'}
+    if needed_bytes>cache.budget_bytes:
+        raise ValueError(f'Dataset exceeds cache budget: requestedBytes={needed_bytes}, budgetBytes={cache.budget_bytes}; keep the original in the data warehouse')
+    return storage_node().tier.collect(module.Principal('builtin-admin',True),dry_run=False,needed_bytes=needed_bytes,max_versions=16,_exclude=_exclude)
 
 
 def dataset_rebuild_guard(actor,dataset,version):
@@ -426,6 +456,16 @@ def dataset_worker(key):
                     raise ValueError('Explicit v1 registration worker protocol is unavailable')
                 out=cache.register_source(actor,task['dataset'],task['sourceId'],task['owners']);out['state']='REGISTERED'
             elif task['op']=='prepare':
+                record,identity=cache._record_snapshot(actor,task['dataset'],task['version'])
+                with cache._locked():
+                    cache._check_snapshot(actor,task['dataset'],task['version'],identity)
+                    paths=cache._paths(task['dataset'],task['version'])
+                    ready=cache._ready(paths,record['manifest'],task['version'])
+                    staged=cache._version_entry_exists(paths['.staging'])
+                if not ready:
+                    dataset_cache_admission(0 if staged else cache._footprint(record['manifest']),
+                                            _exclude=((task['dataset'],task['version']),))
+                del record
                 with cache._locked():
                     cache._dataset(actor,task['dataset'])
                     cached=cache._tier(task['dataset'],task['version'])['role']=='cache'

@@ -61,6 +61,28 @@ class Transfers(unittest.TestCase):
         for p in self.patches:p.stop()
         self.fixture.tearDown()
     def control(self):return {'id':self.key,'userId':USER}
+    def test_ssd_budget_rejects_oversize_lan_copy_before_target_upload_or_gc(self):
+        self.target.CONFIG['storageTier']={'enabled':True,'budgetBytes':1}
+        self.dst.start(self.args)
+        source_bytes=(self.source.HERE/'source/sample.txt').read_bytes()
+        with patch.object(self.target,'storage_node',side_effect=AssertionError('oversize never collects')), \
+                patch.object(self.dst,'upload',side_effect=AssertionError('no target upload admitted')):
+            self.assertEqual(self.dst.worker(self.key,1),1)
+        result=self.dst.status(self.control())
+        self.assertEqual(result['state'],'FAILED');self.assertIn('exceeds cache budget',result['error'])
+        uploads=self.target.dataset_uploads()
+        self.assertFalse(uploads.folder(USER,self.key).exists())
+        self.assertEqual(source_bytes,(self.source.HERE/'source/sample.txt').read_bytes())
+        self.assertEqual(self.src.load(self.key,'.source-lease.json')['state'],'HELD')
+    def test_lan_worker_preflight_excludes_only_its_exact_validated_target(self):
+        self.dst.start(self.args)
+        with patch.object(self.target,'dataset_cache_admission',return_value={'evicted':[]}) as admission:
+            self.assertEqual(self.dst.worker(self.key,1),0)
+        call=admission.call_args
+        info=self.args['source']
+        self.assertEqual(call.args,(info['totalBytes']+info['manifestBytes']*4+info['entries']*8192+65536,))
+        expected='u-'+hashlib.sha256(USER.encode()).hexdigest()[:16]+'-copied'
+        self.assertEqual(call.kwargs,{'_exclude':((expected,self.version),)})
     def test_snapshot_adapter_reused_only_inside_one_read(self):
         original=self.src.snapshots;instances=[];checks=[]
         def snapshots():
