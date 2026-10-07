@@ -115,6 +115,8 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 .sb #shell-context{top:var(--topbar-height);padding-inline:var(--edge);gap:clamp(8px,1vw,16px)}
 .sb #shell-context>label{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px}
 .sb #shell-context select{height:40px;min-height:40px;max-width:100%;width:100%}
+.sb #shell-context>label:has(#context-machine[data-training-context]){grid-template-columns:auto 80px;flex:0 0 auto}
+.sb #shell-context:has(#context-machine[data-training-context]) #context-project{width:auto;justify-self:stretch;padding-right:16px}
 .sb #shell-context #context-note{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sb #main-content{padding-inline:var(--gutter)}
 .sb #operational-maintenance{top:calc(var(--topbar-height) + 52px)}
@@ -180,6 +182,7 @@ html{background:#0A0B0D}.sb>.shell{margin:0;width:100%;padding:0;background:var(
 
 /* Keep confirmed counts readable when the desktop strip has less room. */
 .sb .toast{min-width:min(240px,calc(100vw - 32px));max-width:min(420px,calc(100vw - 32px));white-space:normal;overflow-wrap:anywhere}
+.sb #toast{position:fixed;inset:auto 16px 110px auto;margin:0;width:max-content;min-width:0;pointer-events:none}
 .sb .cstrip{container-type:inline-size;container-name:operational-strip}
 .sb .cs-focal{min-width:0}
 .sb .cs-focal .cs-progress{min-width:0}

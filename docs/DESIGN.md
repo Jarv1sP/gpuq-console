@@ -304,6 +304,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.train-grid` / `.field-caption` / `.note-field` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 同一行的训练参数共享subgrid标签与输入轨道；提交/设置/项目/任务留言字段块用24px、标签到控件用12px | 标签折行仍保持控件上沿对齐；ⓘ保留32/44px点击区域，用负margin保持标签行高度；留言复用原提交契约 |
 | `.wb-publish-control` / `.workspace-context-heading .field-caption` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 创建项目与生成训练版本占满同一列；发布说明并入分组标题右侧现有ⓘ | 保留原说明、操作ID与发布确认；按钮两侧对齐，说明不占操作宽度 |
 | `#project-location` / `[name=workspace-project]` | [execution-ui.js](../dist/execution-ui.js)、[shell-ui.js](../dist/shell-ui.js)、[workbench.css](../dist/workbench.css) | 本人授权位置的「我的项目」；个人容器无需先选顶栏机器，开发源和顶栏焦点独立 | 同名项目以源机器区分；终端/文件/发布保留原源，创建按实际environmentModes，原请求取消与迟到回执守卫保留；开发位置单行省略并以title保留完整ID，标题列可收缩，刷新按钮不出视口；未知不当空目录 |
+| `#context-machine` | [shell-ui.js](../dist/shell-ui.js)、[workbench-ui.js](../dist/workbench-ui.js) | 个人容器未选服务器时完整显示「训练：自动选择」；手动切换训练位置时显示开发位置并提示完整ID，焦点仍可选 | 四字训练提示不截断；仅确认OCI时替换提示，未知/共享/隔离保留服务器选择；不改提交位置、开发源或ROOT目标 |
 | `#job-mission` / `.r5-mission` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 任务全屏，肖像只画实际分配的卡 | Esc/关闭/返回任务，保留取消日志输出 |
 | `.resource-chassis` / `.resource-towers` / `.resource-tower` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 真实物理卡位，液位仅表示显存比例 | 手机全部卡位可见，利用率另列，未知斜线 |
 | `.resource-portrait-utils` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 卡位使用率，按真实卡数生成；窄容器自动换列 | 两位等宽序号与百分比分开8px，序号用次级颜色；不把序号拼成读数 |
@@ -311,7 +312,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.server-id` / `.server-id-head` / `.server-id-tail` | [workbench-ui.js](../dist/workbench-ui.js)、[shell.css](../dist/shell.css)、[workbench.css](../dist/workbench.css) | 来自清单的 ID，紧凑处省略，部分控件保留尾段 | title完整值，复制/详情不截断 |
 | `.hero-frame` | [starbase.css](../dist/starbase.css) | 主视觉四角细框，不给每行加框 | 装饰不抢读屏与点击 |
 | `.empty` / `.form-error` / `.publication-unknown` | [styles.css](../dist/styles.css)、[workbench.css](../dist/workbench.css) | 空目录/已知错误/未确认分别表达 | 查询重试保留；未知不自动消失 |
-| `.toast` | [starbase.css](../dist/starbase.css)、[shell.css](../dist/shell.css) | 短反馈，不是唯一持久错误证据 | 可换行，需处理留在对象/总控 |
+| `.toast` | [starbase.css](../dist/starbase.css)、[shell.css](../dist/shell.css)、[toast-ui.js](../dist/toast-ui.js) | 总控层上方的角落短反馈，不是唯一持久错误证据 | 布局变化时避开可见交互控件，需处理留在对象/总控 |
 | `.mc-attention-item` / `.mc-attention-actions` | [attention-state.js](../dist/attention-state.js)、[control-ui.js](../dist/control-ui.js)、[shell.css](../dist/shell.css) | 原对象失败/部分成功/未确认，不靠已读清除未知 | 回具体对象，只有已确认失败可按规则确认 |
 | `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
@@ -356,7 +357,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | 后台成员与额度 | [admin-members-ui.js](../dist/admin-members-ui.js)、[app.js](../dist/app.js)、[members.css](../dist/members.css) | admin-members / ui / polish-shell |
 | 登录、注册、账号 | [auth-ui.js](../dist/auth-ui.js)、[client.js](../dist/client.js)、[members.css](../dist/members.css)、[shell.css](../dist/shell.css) | client-auth / persistent-login / polish-shell |
 | 指南 | [guide.mjs](../guide.mjs)、[USER_GUIDE.md](USER_GUIDE.md)、[guide.css](../dist/guide.css) | guide / user-guide-content |
-| 维护 | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-state.js](../dist/maintenance-state.js)、[maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-experience.css](../dist/maintenance-experience.css) | maintenance / maintenance-background-freeze |
+| 只读维护与后台维护 | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-state.js](../dist/maintenance-state.js)、[maintenance-experience.js](../dist/maintenance-experience.js)、[admin-maintenance-ui.js](../dist/admin-maintenance-ui.js)、[host-diagnostics-ui.js](../dist/host-diagnostics-ui.js)、[maintenance-experience.css](../dist/maintenance-experience.css) | maintenance / admin-maintenance / host-diagnostics / terminal-ui-races |
 
 ### 管理后台区块注册
 
@@ -446,6 +447,10 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 数据仓库允许启用的登录成员浏览全节点元数据，零机器额度仍可浏览。版本与位置的 `canUse` 表示本人使用授权；`READY` 只证明副本状态，不能单独解锁准备或训练。未授权版本简短标为“仅浏览”，不把生命周期画成“可用于训练”；容量、上传、训练和管理员操作仍分别鉴权，不因目录扩大而增加权限或暴露私有路径。
 
 全平台维护原因公开显示在登录页，输入旁保留提醒；单台原因只在登录后显示。账号、协作、指南、维护控制不被执行类维护拦截；管理员ROOT、host操作、只读、取消/断开/结束按现有规则放行。维护开关不会自动停止已有任务或节点。
+
+主界面只显示相同的只读维护事实，后台不重复横幅。后台 `maintenance/order40` 挂载维护开关、原逐台控制台、分阶段恢复、ROOT 与只读诊断；维护设置从控制台标题行打开，卸载先关闭设置、停止查询和退休回调，再把 ROOT 控件停放到隐藏 inert 容器。个人终端仍留在工作台；离开维护只断开 ROOT 写连接，不结束节点会话。ROOT 直接查询原生调度 RPC 的 `FORBIDDEN: peer uid is not allowed` 显示身份提示，不把工作的 ROOT 终端标为失败。
+
+主机诊断只有固定的 `nvidia-smi` 和 `df -h /data2`，确认框显示服务器与完整原文；任意命令仍由 ROOT 终端执行。新鲜且可达的节点必须明确报告 `hostCommand.version:1/available:true` 才能操作。节点将请求 key 绑定为 id，前端派发前按管理员账号和服务器持久化该编号；回执未确认、刷新或重新进入时只查原编号，绝不自动重发。显示纯文本输出，支持复制、停止与本浏览器最近操作；原 UUID 查询保留在次级折叠项内。
 
 上传路线只三段：你的电脑→所选服务器缓存→可用于训练；通道另标直传/Tail备用/中转。它不证明数据库原件已经保存，不把存入数据库追加为已完成阶段。
 
@@ -678,4 +683,6 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 ### 已有任务的显示标签
 
-[task-display-ui.js](../dist/task-display-ui.js) 只在现有任务详情附加原生 `details` 编辑器；管理员队列可管理原生任务，成员只能编辑本人关联任务。默认收起，先明确读取原编号与显示版本，再保存名称和描述。加载禁重复输入，未知能力不显示可保存表单，冲突或丢回执清除当前编辑版本并要求读取同一任务，不自动重发。账号切换或组件卸载后丢弃旧响应；文本插入使用既有转义和 textContent，不编辑 submitter、命令或调度。输入与按钮为 48px，手机 summary 至少 44px，沿用现有令牌和焦点，包含 1440/390/320 的键盘与共享几何检查，不新增路由、抽屉或动画。
+[task-display-ui.js](../dist/task-display-ui.js) 只在现有任务详情附加原生 `details` 编辑器；管理员可编辑已关联的平台任务，成员只能编辑本人关联任务；未关联的原生记录只读。默认收起，先明确读取原编号与显示版本，再保存名称和描述。加载禁重复输入，未知能力不显示可保存表单，冲突或丢回执清除当前编辑版本并要求读取同一任务，不自动重发。账号切换或组件卸载后丢弃旧响应；文本插入使用既有转义和 textContent，不编辑 submitter、命令或调度。输入与按钮为 48px，手机 summary 至少 44px，沿用现有令牌和焦点，包含 1440/390/320 的键盘与共享几何检查，不新增路由、抽屉或动画。
+
+原生任务只使用后端规范目录的 `source:'native'`、`name`、`description`、`submitter.username`：这里的 username 是原生 owner，不是标签中自报的平台账号。依照 STARGATE 功能与接口手册 2026-10-07，新鲜、已连接、唯一任务 ID 的合法有界标签可供管理员阅读；成员、重复或模糊关联、失联和过期的脱敏由同一后端目录完成。后台任务区块的只读队列/进程及算力显卡提示写「名称 · 原生用户 owner」，不查用户表、不从标签推断身份，也不提供优先级、日志、取消等任务操作；缺少规范 owner 时维持原未知展示。

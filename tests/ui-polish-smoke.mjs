@@ -191,3 +191,4 @@ if(!baseline){
 }
 
 await import('./admin-gpu-tasks-ui-smoke.mjs');
+if(!baseline)await import('./admin-maintenance-ui-smoke.mjs');

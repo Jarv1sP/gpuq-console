@@ -51,6 +51,12 @@ try{
   async function action(operation,fn){const pending=response(operation);await fn();const value=await pending;assert.equal(value.status(),200,await value.text());await idle();}
   async function idle(){await page.waitForFunction(()=>document.querySelector('[name=workspace-project]')&&!document.querySelector('[name=workspace-project]').disabled);}
   async function login(username){await page.goto(origin);await page.locator('#login-form [name=username]').fill(username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=work]').click();}
+  async function assertPrompt(label,empty,title){
+    await page.waitForFunction(value=>document.querySelector('#context-machine option[value=""]')?.textContent===value,empty);
+    assert.equal(await page.locator('#context-machine').evaluate(select=>[...select.closest('label').childNodes].find(node=>node.nodeType===Node.TEXT_NODE)?.textContent.trim()),label);
+    assert.equal(await page.locator('#context-machine').getAttribute('title'),title);
+    if(label==='训练')assert.equal(await page.locator('#context-machine').evaluate(select=>{const text=select.closest('.server-select').querySelector('.server-id-head');return text.scrollWidth<=text.clientWidth+1;}),true,'the complete training prompt is readable without an ellipsis');
+  }
   async function capture(role){
     for(const width of [1440,1024,390,320]){await page.setViewportSize({width,height:1080});await page.evaluate(()=>document.fonts.ready);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'all original content remains within the viewport');await page.screenshot({path:join(shots,role+'-'+width+'.png'),fullPage:true});}
   }
@@ -65,12 +71,32 @@ try{
   assert.equal(await page.locator('[name=training-target]').inputValue(),'auto');
   assert.equal(await page.locator('#page-title').textContent(),'same-name','encoded selector identities are never shown as a title');
   assert.equal(calls.filter(call=>call.operation==='projects.status').at(-1).machine,source);
+  await assertPrompt('训练','自动选择','自动选择兼容服务器');
+  assert.match(await page.locator('#context-machine').getAttribute('aria-label'),/开发位置保持不变/);
+  for(const width of [1440,1024,390,320]){
+    await page.setViewportSize({width,height:1080});await assertPrompt('训练','自动选择','自动选择兼容服务器');
+    assert.equal(await page.locator('#context-project').inputValue(),await page.locator('[name=workspace-project]').inputValue());
+    assert.equal(await page.locator('#context-project option:checked').getAttribute('data-machine'),source);
+    const projectGeometry=await page.locator('#context-project').evaluate(select=>{const style=getComputedStyle(select),canvas=document.createElement('canvas'),measure=canvas.getContext('2d');measure.font=[style.fontStyle,style.fontWeight,style.fontSize,style.fontFamily].join(' ');return {width:innerWidth,usable:select.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight),needed:measure.measureText(select.selectedOptions[0].dataset.project).width};});
+    assert.ok(projectGeometry.usable>=projectGeometry.needed,'the short selected project name remains readable beside the training prompt: '+JSON.stringify(projectGeometry));
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:join(shots,`member-auto-training-${width}.png`),fullPage:true});
+  }await page.setViewportSize({width:1440,height:1080});
+  await openSubmit(page);await page.locator('[name=training-target]').selectOption('current');await assertPrompt('训练','开发位置',source);
+  assert.equal(await page.locator('[name=terminal-machine]').inputValue(),source);
+  await page.locator('[name=training-target]').selectOption('auto');await assertPrompt('训练','自动选择','自动选择兼容服务器');await closeSubmit(page);
   await page.screenshot({path:join(shots,'member-no-server-1440.png'),fullPage:true});
   await page.locator('[name=workspace-machine]').selectOption(other);await idle();
   assert.equal(await page.locator('[name=terminal-machine]').inputValue(),source,'focus changes never move the developer terminal');
   assert.equal(await page.locator('[name=workspace-project] option:checked').getAttribute('data-machine'),source);
+  await assertPrompt('服务器','可选服务器',other);
   assert.match(await page.locator('#project-location').textContent(),new RegExp(source));
   await capture('member');
+  const sharedValue=await page.locator('[name=workspace-project] option[data-project=same-name]').evaluateAll((options,machine)=>options.find(option=>option.dataset.machine===machine).value,other);
+  await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption(sharedValue));
+  await assertPrompt('服务器','请选择服务器',other);
+  assert.equal(await page.locator('[name=training-target]').inputValue(),'current','shared projects keep their explicit-server training contract');
+  await page.locator('[name=workspace-machine]').selectOption('');await idle();
+  await assertPrompt('服务器','请选择服务器','');
   // Return to no topbar selection and create on the node which actually admitted OCI.
   await page.locator('[name=workspace-machine]').selectOption('');await page.locator('[name=workspace-project]').selectOption('');await idle();
   await page.locator('#project-create>summary').click();await page.locator('[name=environment-choice][value=oci]').check();await page.locator('[name=new-project]').fill('new-container');

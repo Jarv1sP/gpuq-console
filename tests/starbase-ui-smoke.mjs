@@ -1,4 +1,6 @@
 import {openMembers} from './admin-members-workflows.mjs';
+import {openMaintenance} from './admin-maintenance-workflows.mjs';
+import {assertToastClear} from './toast-geometry-assertions.mjs';
 // Actual Portal/SQLite/cookies/CSP/assets in Chromium. Node observations and
 // terminal output are synthetic; no shell, GPU, SSH or production mutation.
 import assert from 'node:assert/strict';
@@ -187,10 +189,25 @@ try{
   assert.match(await adminPage.locator('.admin-task-approvals').innerText(),/待审批/);await adminPage.locator('.admin-task-approvals a').click();
   await adminPage.locator('#user-list').filter({hasText:'李明'}).waitFor();await capture(adminPage,'approvals-admin-1440');await adminPage.locator('[data-nav=work]').click();
   await openMembers(adminPage);await adminPage.locator('#user-list [data-user]').filter({hasText:'李明'}).waitFor();assert.equal(await adminPage.locator('#user-list [data-user]').filter({hasText:'李明'}).count(),1);await capture(adminPage,'members-admin-1440');await adminPage.locator('[data-nav=work]').click();
-  await service.invoke(admin.token,'maintenance.set',{scope:'all',enabled:true,revision:0,reason:'本地验收维护横幅：暂停新任务，运行中任务继续。'});await refreshVisible(adminPage);await adminPage.locator('.maintenance-banner').waitFor();assert.equal(await adminPage.locator('.maintenance-settings').count(),1);await capture(adminPage,'maintenance-admin-1440');await adminPage.locator('.maintenance-settings summary').click();await capture(adminPage,'maintenance-settings-admin-1440');
-  await refreshVisible(phone);assert.equal(await phone.locator('.maintenance-settings').count(),0);await phone.locator('[data-nav=work]').click();await capture(phone,'maintenance-member-390');
+  await service.invoke(admin.token,'maintenance.set',{scope:'all',enabled:true,revision:0,reason:'本地验收维护横幅：暂停新任务，运行中任务继续。'});await refreshVisible(adminPage);await adminPage.locator('.maintenance-banner').waitFor();assert.equal(await adminPage.locator('.maintenance-settings').count(),0,'primary maintenance is readonly for administrators');await capture(adminPage,'maintenance-admin-primary-1440');await openMaintenance(adminPage);assert.equal(await adminPage.locator('#admin-content .maintenance-settings').count(),1);await capture(adminPage,'maintenance-admin-1440');await adminPage.locator('[data-maintenance-settings]').click();await capture(adminPage,'maintenance-settings-admin-1440');await adminPage.locator('[data-maintenance-settings-close]').click();
+  await phone.bringToFront();await refreshVisible(phone);assert.equal(await phone.locator('.maintenance-settings').count(),0);await phone.locator('[data-nav=work]').click();await capture(phone,'maintenance-member-390');
   await adminPage.setViewportSize({width:390,height:844});await noOverflow(adminPage);await capture(adminPage,'maintenance-admin-390');await adminPage.keyboard.press('Control+k');await capture(adminPage,'control-admin-390',true);await adminPage.keyboard.press('Escape');await adminPage.locator('[data-nav=me]').click();await capture(adminPage,'me-admin-390');await adminPage.setViewportSize({width:1440,height:1080});await capture(adminPage,'me-admin-1440');
   const reduced=await pageFor(390,true);await login(reduced,member.username);await reduced.locator('[data-nav=me]').click();assert.ok(await reduced.evaluate(()=>document.getAnimations().every(animation=>animation.effect.getKeyframes().every(frame=>!frame.transform||frame.transform==='none'))),'reduced motion never slides');await reduced.keyboard.press('Control+k');await reduced.locator('#mission-control').waitFor({state:'visible'});await capture(reduced,'control-reduced-motion-390',true);
+  const toastChecks=[];
+  for(const [role,target] of [['member',phone],['admin',adminPage]]){
+    await target.bringToFront();
+    for(const route of ['work','resources','datasets','community',...(role==='admin'?['admin/tasks','admin/storage','admin/members','admin/maintenance']:[])]){
+      await target.evaluate(route=>location.hash='#'+route,route);
+      await target.waitForFunction(route=>document.querySelector(route.startsWith('admin/')?'#page-admin':'#page-'+route)?.hidden===false,route);
+      for(const width of [1440,1024,390,320]){
+        await target.setViewportSize({width,height:width<760?844:1080});
+        await target.evaluate(async()=>{await document.fonts.ready;await Promise.allSettled(document.getAnimations().filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
+        await refreshVisible(target);
+        try{toastChecks.push({role,route,width,...await assertToastClear(target)});}catch(error){await target.screenshot({path:join(shots,'toast-failed-'+role+'-'+route.replace('/','-')+'-'+width+'.png'),animations:'disabled'});error.message=role+' '+route+' '+width+': '+error.message;throw error;}
+      }
+    }
+  }
+  await writeFile(join(shots,'toast-checks.json'),JSON.stringify(toastChecks,null,2));assert.equal(toastChecks.length,48,'shared feedback covers every main room and admin section at all four widths');
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);assert.ok(assets.every(asset=>asset.status<400));for(const font of ['Archivo','Geist','GeistMono'])assert.ok(assets.some(asset=>asset.path.includes(font)&&asset.path.endsWith('.woff2')));
   assert.ok(calls.every(row=>!['projects.publish','terminal.host-command','files.put','cancel'].includes(row.operation)),'acceptance uses read-only/synthetic node operations');
   console.log(JSON.stringify({status:'passed',checks:['real Portal/CSP/cookies/assets/fonts','owner-only control and drawers','persistent control/context/room scroll','command keyboard and tab navigation','submit and three second-level panels','latest cross-server submission, manual draft and cancellation supersede old replies','logs/diagnostics/output/notes','terminal collapse preserves session across rooms','maintenance admin/member hook preservation','390px tabs/live pill/full-screen control','reduced motion and no outside requests'],screenshots:shots}));

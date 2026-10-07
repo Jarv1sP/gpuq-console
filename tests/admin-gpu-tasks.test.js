@@ -24,7 +24,7 @@ test('admin access remains distinct from management presentation',()=>{
   const machine={id:'long-inventory-machine',cards:1,model:'MODEL',memory:'32 GiB'},snapshot={stale:false,hosts:[{id:machine.id,reachable:true,gpus:[{index:0,memoryUsedMiB:1,memoryTotalMiB:32768,processesAvailable:true,processes:[{pid:1,name:'PRIVATE-PROGRAM',owner:'PRIVATE-USER'}]}],gpuq:{connected:true}}]};
   const input={machines:[machine],snapshot,admin:true,production:true,userId:'owner'};
   const main=resourceCards({...input,management:false});assert.match(main,/不限个人额度/);assert.doesNotMatch(main,/data-resource-root|PRIVATE-PROGRAM|PRIVATE-USER/);assert.doesNotMatch(main,/未授权查看/);
-  const admin=resourceCards({...input,management:true,idPrefix:'admin-'});assert.match(admin,/data-resource-root/);assert.match(admin,/PRIVATE-PROGRAM/);assert.match(admin,/PRIVATE-USER/);assert.match(admin,/id="admin-resource-identity"/);
+  const admin=resourceCards({...input,management:true,idPrefix:'admin-'});assert.doesNotMatch(admin,/data-resource-root/,'ROOT belongs to maintenance, not the task renderer');assert.match(admin,/PRIVATE-PROGRAM/);assert.match(admin,/PRIVATE-USER/);assert.match(admin,/id="admin-resource-identity"/);
 });
 test('main control excludes root and pending approval views while preserving immutable approvals',()=>{
   const store={principal:{userId:'owner',role:'admin'},users:[{id:'owner',role:'admin',enabled:true},{id:'pending',role:'member',enabled:true,total:0}],jobs:[],data:{machines:[]}};

@@ -5,7 +5,7 @@ const hash=/^[a-f0-9]{64}$/;
 export function projectSelectHTML(catalog,selected='',includeArchived=false,environmentLabel=()=> ''){
   const groups=new Map();
   for(const item of catalog){if(item.lifecycle?.state==='ARCHIVED'&&!includeArchived&&(item.selectionValue??item.project)!==selected)continue;const key=item.logicalProjectId||'';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item);}
-  const option=item=>`<option value="${escape(item.selectionValue??item.project)}" title="${escape(item.project)}"${item.machine?` data-project="${escape(item.project)}" data-machine="${escape(item.machine)}"`:''}>${escape(item.displayName||item.project)}${environmentLabel(item.environmentMode)?' · '+escape(environmentLabel(item.environmentMode)):''}${item.machine?' · '+escape(item.machine):''}${item.pending?' · 待确认':''}${item.lifecycle?.state==='ARCHIVED'?' · 已归档':''}</option>`;
+  const option=item=>`<option value="${escape(item.selectionValue??item.project)}" title="${escape(item.project)}" data-environment-mode="${escape(item.environmentMode===undefined?'shared':item.environmentMode)}"${item.machine?` data-project="${escape(item.project)}" data-machine="${escape(item.machine)}"`:''}>${escape(item.displayName||item.project)}${environmentLabel(item.environmentMode)?' · '+escape(environmentLabel(item.environmentMode)):''}${item.machine?' · '+escape(item.machine):''}${item.pending?' · 待确认':''}${item.lifecycle?.state==='ARCHIVED'?' · 已归档':''}</option>`;
   return '<option value="">个人工作区</option>'+[...groups].map(([id,items])=>id?`<optgroup label="${escape(items[0].logicalProjectName||'项目组')}">${items.map(option).join('')}</optgroup>`:items.map(option).join('')).join('');
 }
 export function createProjectManagement({getContext,call,run,refresh,select}){

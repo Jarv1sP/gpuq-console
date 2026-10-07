@@ -2,7 +2,7 @@
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const nativeId=/^J[a-f0-9]{12}$/,revision=/^[a-f0-9]{64}$/;
 export function taskLabelEditorHTML(job,principal){
-  if(!job||!nativeId.test(job.nodeJobId||'')||!(principal?.role==='admin'||principal?.userId===job.userId))return '';
+  if(!job||job.source==='native'||!nativeId.test(job.nodeJobId||'')||!(principal?.role==='admin'||principal?.userId===job.userId))return '';
   return `<details class="task-label-editor" data-task-label-editor data-machine="${esc(job.machine)}" data-node-job="${esc(job.nodeJobId)}"><summary>显示名称与描述</summary><p>只改显示信息，原命令、资源和训练状态不变。</p><button class="button quiet" type="button" data-task-label-read>读取当前标签</button><form data-task-label-form hidden><label>名称<input name="task-label-name" maxlength="64" required></label><label>描述<textarea name="task-label-description" maxlength="2000" rows="3"></textarea></label><button class="button" type="submit">保存标签</button></form><p role="status" aria-live="polite" data-task-label-status></p></details>`;
 }
 export function installTaskLabelEditor(store,{toast=()=>{},refresh=()=>store.refresh?.()}={}){

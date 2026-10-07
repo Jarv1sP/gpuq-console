@@ -15,11 +15,12 @@ function fixture(){
     setAttribute(){}addEventListener(){}close(){this.open=false;}showModal(){this.open=true;}replaceChildren(){}closest(){return this;}
   }
   const elements=new Map([
+    ['#page-admin:not([hidden]) #admin-maintenance-console',new Element('admin-maintenance-console')],
     ['[name=terminal-machine]',Object.assign(new Element(),{value:'node-a'})],
     ['[name=dataset-machine]',Object.assign(new Element(),{value:'node-b'})],
     ['[name=workspace-project]',Object.assign(new Element(),{value:'experiment'})],
     ['[name=workspace-machine]',Object.assign(new Element(),{value:'node-a'})],
-    ...['terminal-title','terminal-session-note','terminal-screen','terminal-connection-note','terminal-maintenance-note','terminal-interrupt','terminal-query','terminal-retry','terminal-new'].map(id=>['#'+id,new Element(id)])
+    ...['terminal-title','terminal-session-note','terminal-screen','terminal-connection-note','terminal-maintenance-note','terminal-root-identity-note','terminal-interrupt','terminal-query','terminal-retry','terminal-new'].map(id=>['#'+id,new Element(id)])
   ]);
   globalThis.document={querySelector:name=>elements.get(name),createElement:()=>dialog=new Element(),body:{append(){}},addEventListener:(name,fn)=>listeners.set(name,fn),dispatchEvent:event=>{events.push(event);return listeners.get(event.type)?.(event);}};
   globalThis.CustomEvent=class{constructor(type,args){this.type=type;this.detail=args.detail;}};
@@ -100,6 +101,16 @@ for(const [first,second,label]of [
 async function attach(f,id='development',entry='terminal-open'){
   const opened=f.click(entry);await f.settle();f.resolve(f.opens.length-1,id);await opened;await f.settle();
 }
+test('leaving maintenance while ROOT open is pending releases its writer without killing the node session',async()=>{
+  const f=fixture();try{
+    const opening=f.click('terminal-root-open');await f.settle();assert.equal(f.opens.length,1);
+    f.elements.delete('#page-admin:not([hidden]) #admin-maintenance-console');
+    f.resolve(0,'retired-root');await opening;
+    assert.equal(f.visible(),false);
+    assert.deepEqual(f.calls.filter(call=>call.operation==='terminal.detach').map(call=>call.args.id),['retired-root']);
+    assert.equal(f.calls.some(call=>call.operation==='terminal.close'),false);
+  }finally{f.restore();}
+});
 const inputOf=call=>Buffer.from(call.args.input,'base64').toString();
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 

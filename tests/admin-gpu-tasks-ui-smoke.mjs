@@ -151,8 +151,10 @@ try{
         assert.equal(new Set(fallback.names.map(name=>name.text)).size,fallback.names.length);
         await assertResourceNames(page,'#admin-content');
         const before=requests.filter(row=>row.operation.startsWith('terminal.')).length;
-        await page.locator('[data-resource-root]').click();page.once('dialog',dialog=>dialog.dismiss());await page.locator('#terminal-root-open').click();
+        assert.equal(await page.locator('[data-resource-root],#admin-content #host-maintenance').count(),0,'tasks no longer owns ROOT maintenance');
+        await page.evaluate(()=>location.hash='#admin/maintenance');await page.locator('#admin-content #host-maintenance').waitFor();await page.locator('#host-maintenance summary').click();page.once('dialog',dialog=>dialog.dismiss());await page.locator('#terminal-root-open').click();
         assert.equal(requests.filter(row=>row.operation.startsWith('terminal.')).length,before,'root refusal sends no request');
+        await page.evaluate(()=>location.hash='#admin/tasks');await page.locator('[data-admin-submit]').waitFor();
         await page.locator('[data-admin-submit]').click();await page.locator('#work-submit[open]').waitFor();
         assert.equal(await page.locator('[name=priority] option[value=high]').count(),1);assert.equal(await page.locator('[name=queue-rank] option[value=P4]').count(),1);
         await page.locator('[name=priority]').selectOption('high');await page.locator('#close-submit').click();await page.locator('#work-submit').waitFor({state:'hidden'});
@@ -168,3 +170,6 @@ try{
   await writeFile(join(output,'geometry.json'),JSON.stringify(geometry,null,2));
   console.log(JSON.stringify({status:'passed',measurements:geometry.length,checks:['main member-equivalent controls','privileged mount','all owner/server/state filters','unknown and ended history','private process columns','root explicit refusal','high-priority draft retained','four widths','CSP']}));
 }finally{await browser?.close();clearInterval(service?.executionTimer);clearInterval(service?.transferTimer);if(server)await new Promise(resolve=>server.close(resolve));await rm(temporary,{recursive:true,force:true});}
+
+// Canonical native metadata stays readonly in this same registered task room.
+await import("./native-task-owner-ui-smoke.mjs");
