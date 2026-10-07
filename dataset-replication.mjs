@@ -114,7 +114,8 @@ export function installDatasetReplication(service){
       return service.bridge(target,'datasets.prepare',{userId:owner,hostAdmin:false,...ref});
     }
     if(!service.transferCall)fail('服务器间传输尚未启用。',503);
-    if(!authority(owner,target).limits[selected.sourceMachine]&&!service.archiveSourceAllowed?.(owner,selected.sourceMachine,{dataset:selected.sourceDataset||ref.dataset,version:ref.version}))fail('源机器未授权。',403);
+    const sourceRef={dataset:selected.sourceDataset||ref.dataset,version:ref.version};
+    if(!authority(owner,target).limits[selected.sourceMachine]&&!service.archiveSourceAllowed?.(owner,selected.sourceMachine,sourceRef)&&!service.datasetIngressSourceAllowed?.(owner,selected.sourceMachine,sourceRef))fail('源机器未授权。',403);
     // Lost create replies reuse the durable UUID. Only an explicit retry of a
     // confirmed canceled/evicted copy receives a new transfer identity.
     if(!row||value?.state==='CANCELED'||value?.state==='SUCCEEDED'){

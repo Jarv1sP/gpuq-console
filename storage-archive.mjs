@@ -72,9 +72,9 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     // This is an idempotency identity, never the secret authority token.
     return `${value.slice(0,8)}-${value.slice(8,12)}-5${value.slice(13,16)}-a${value.slice(17,20)}-${value.slice(20,32)}`;
   };
-  const enabledUser=(owner,machine)=>{
+  const enabledUser=(owner,machine,ref)=>{
     const user=service.store.get(owner);
-    if(!user?.enabled||!user.limits?.[machine])fail('Archive owner or ingest-machine permission changed');
+    if(!user?.enabled||(!user.limits?.[machine]&&!service.datasetIngressSourceAllowed?.(owner,machine,ref)))fail('Archive owner or ingest-machine permission changed');
     return user;
   };
   const fence=(row,snapshot)=>{
@@ -85,7 +85,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(service.closing||!policy.enabled)fail('Archive service is unavailable');
     service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:row.machine,from:policy.machine});
     if(!currentPolicy(row))fail('Archive policy changed; existing intent requires administrator review');
-    const user=enabledUser(row.owner,row.machine);
+    const user=enabledUser(row.owner,row.machine,{dataset:row.dataset,version:row.version});
     if(snapshot!==undefined&&JSON.stringify(user)!==snapshot)fail('Archive owner policy changed during operation');
     return JSON.stringify(user);
   };
@@ -114,7 +114,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
 
   function enqueueEvent(machine,event){
     if(!policy.enabled||!MACHINES.some(m=>m.id===machine)||!event||event.state!=='READY'||!UUID.test(event.id)||!USER.test(event.userId)||!isRef(event))fail('Invalid immutable archive event');
-    enabledUser(event.userId,machine);
+    enabledUser(event.userId,machine,{dataset:event.dataset,version:event.version});
     // A re-registration of the same content is a new immutable event. Keep
     // the older receipt for recovery; never silently reuse its target identity.
     const id=key(event.userId,machine,event.dataset,event.version,event.id),old=load(id);
@@ -364,7 +364,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   // The background lane alone consumes this flag after rechecking permission.
   service.retryStorageArchive=(owner,machine,ref)=>{
     if(!policy.enabled||!isRef(ref))fail('Invalid archive retry reference');
-    enabledUser(owner,machine);
+    enabledUser(owner,machine,ref);
     const row=rows().findLast(value=>value.owner===owner&&value.machine===machine&&(value.dataset===ref.dataset||value.logicalDataset===ref.dataset)&&value.version===ref.version);
     if(!row)fail('Archive intent is unavailable');
     if(isRetired(row))fail('已注销的旧归档意图不能重试；重新登记必须使用新的发布事件。');
@@ -480,7 +480,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
           row.failures=(row.failures||0)+1;
           row.nextCheckAt=clock()+Math.min(300000,15000*2**Math.min(row.failures,5));
           row.error='归档状态暂未确认；保留本机数据，稍后自动核对。';
-          try{enabledUser(row.owner,row.machine);}catch{row.phase='BLOCKED';row.error='账号或机器授权已改变；原件保持受保护，等待管理员核对。';}
+          try{enabledUser(row.owner,row.machine,{dataset:row.dataset,version:row.version});}catch{row.phase='BLOCKED';row.error='账号或机器授权已改变；原件保持受保护，等待管理员核对。';}
           save(row);
         }
       }

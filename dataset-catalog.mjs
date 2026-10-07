@@ -285,7 +285,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
       // identity's permission hint into this member's catalog projection.
       const legacy=new Set(),memberDeletes=new Set();
       const needsProof=result.datasets.some(item=>(item?.ownerIds==null||result.datasetDelete===1&&ownerIds(item)?.includes(user.id))&&typeof item?.dataset==='string'&&ID.test(item.dataset)&&Array.isArray(item.versions)&&item.versions.some(value=>
-        typeof value?.version==='string'&&HASH.test(value.version)&&(hasMachine(m.id)||service.archiveSourceAllowed?.(user.id,m.id,{dataset:item.dataset,version:value.version})===true)));
+        typeof value?.version==='string'&&HASH.test(value.version)&&(hasMachine(m.id)||service.archiveSourceAllowed?.(user.id,m.id,{dataset:item.dataset,version:value.version})===true||service.datasetIngressSourceAllowed?.(user.id,m.id,{dataset:item.dataset,version:value.version})===true)));
       if(needsProof){
         try{
           const personal=await service.bridge(m.id,'datasets.list',owner);
@@ -317,7 +317,7 @@ export async function datasetCatalogCall(service,principal,operation,args){
       if(typeof value?.version!=='string'||!HASH.test(value.version))continue;
       const ids=ownerIds(item),ref={dataset:item.dataset,version:value.version};
       const own=ids?ids.includes(user.id):item.ownerIds==null&&listing.legacy?.has(item.dataset+'@'+value.version)===true;
-      const canUse=own&&(hasMachine(listing.machine)||service.archiveSourceAllowed?.(user.id,listing.machine,ref)===true);
+      const canUse=own&&(hasMachine(listing.machine)||service.archiveSourceAllowed?.(user.id,listing.machine,ref)===true||service.datasetIngressSourceAllowed?.(user.id,listing.machine,ref)===true);
       // Never apply this viewer's historical aliases to somebody else's new
       // registration. Unknown ownership needs the same precise member proof.
       const alias=own?(aliasesFor(listing.machine)?.get(item.dataset+'@'+value.version)||(listing.machine===service.storageArchivePolicy?.machine?service.archiveAliases?.(user.id)?.get(item.dataset+'@'+value.version):null)):null;
