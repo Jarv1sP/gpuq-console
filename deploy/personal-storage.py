@@ -91,7 +91,9 @@ class PersonalStorage:
              f'reserveBytes={reserve}, requestedBytes={needed}.')
 
     def runtime_ready(self):
-        for name in ('node-executor.py','project-store.py','personal-oci.py','sandbox-runner.py','sandbox-runner-common-p0.py'):
+        # The installer maps the selected profile to sandbox-runner.py. The
+        # unused alternate profile is not a dependency of that installation.
+        for name in ('node-executor.py','project-store.py','personal-oci.py','sandbox-runner.py'):
             path=HERE/name
             fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
             try:
@@ -355,7 +357,7 @@ class PersonalCopies:
         holds=[]
         def report(state,phase,**extra):
             self.s.atomic_json(folder/'status.json',{'state':state,'phase':phase,'updatedAt':time.time(),**extra})
-        def canceled():
+        def canceled(*args):
             if (folder/'cancel.json').exists():raise InterruptedError('Copy canceled; partial files retained')
         try:
             canceled();self.storage.require(request['targetTier'])
@@ -367,7 +369,9 @@ class PersonalCopies:
             payload=payload_folder/'payload'
             copier=self.n.projects().store
             old_entries,old_bytes=copier.max_entries,copier.max_bytes
+            old_chunk,old_entry=getattr(copier,'_publication_chunk',None),getattr(copier,'_publication_entry',None)
             copier.max_entries,copier.max_bytes=500000,1024**4
+            copier._publication_chunk=copier._publication_entry=canceled
             try:
                 report('RUNNING','SCANNING')
                 records,stamps=copier._walk(source,'code')
@@ -439,7 +443,9 @@ class PersonalCopies:
                         importer.rename_new(src,payload.name,dst,target.name)
                         os.fsync(dst);os.fsync(src)
                     report('SUCCEEDED','COPIED',bytes=done,totalBytes=total);return 0
-            finally:copier.max_entries,copier.max_bytes=old_entries,old_bytes
+            finally:
+                copier.max_entries,copier.max_bytes=old_entries,old_bytes
+                copier._publication_chunk,copier._publication_entry=old_chunk,old_entry
         except InterruptedError:
             report('CANCELED','STOPPED');return 1
         except Exception as error:

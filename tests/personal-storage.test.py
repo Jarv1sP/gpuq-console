@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -138,6 +139,16 @@ class PersonalStorageTests(unittest.TestCase):
         finally:
             for fd,_ in fds:os.close(fd)
             for fd in fds.locks:os.close(fd)
+
+    def test_capability_requires_complete_selected_runtime_not_unused_profile(self):
+        storage=self.store.personal_storage();runtime=self.root/'selected-runtime';runtime.mkdir(mode=0o700)
+        for name in ['node-executor.py','project-store.py','personal-oci.py','sandbox-runner.py']:
+            shutil.copy2(HERE/name,runtime/name)
+        with patch.dict(storage.runtime_ready.__func__.__globals__,{'HERE':runtime}):
+            self.assertTrue(storage.runtime_ready());self.assertTrue(storage.status()['available'])
+            # An incomplete active helper cohort never enables the profile.
+            (runtime/'sandbox-runner.py').write_text('PERSONAL_STORAGE_PROTOCOL=0\n')
+            self.assertFalse(storage.runtime_ready());self.assertFalse(storage.status()['available'])
 
     def test_mount_root_identity_and_unsafe_links_fail_closed(self):
         storage=self.store.personal_storage()

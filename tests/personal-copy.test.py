@@ -124,5 +124,15 @@ class Copies(fixture.PersonalStorageTests):
             self.assertEqual(self.copies.launch(self.user,self.args['key'])['state'],'SUCCEEDED')
         self.assertEqual((self.target/'model.bin').read_bytes(),self.bytes)
 
+    def test_cancel_interrupts_initial_hash_scan_before_copy_commit(self):
+        self.copies.begin(self.args);walk=self.store._walk;folder,_=self.copies.read(self.user,self.args['key'])
+        def scanning(*args,**kwargs):
+            self.copies.s.atomic_json(folder/'cancel.json',{'userId':self.user,'key':self.args['key']})
+            return walk(*args,**kwargs)
+        with patch.object(self.store,'_walk',side_effect=scanning):
+            self.assertEqual(self.copies.worker(self.user,self.args['key']),1)
+        self.assertEqual(self.copies.status(self.user,self.args['key'])['state'],'CANCELED')
+        self.assertFalse(self.target.exists());self.assertEqual((self.source/'model.bin').read_bytes(),self.bytes)
+
 
 if __name__=='__main__':unittest.main()
