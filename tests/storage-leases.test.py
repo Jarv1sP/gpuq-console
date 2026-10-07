@@ -515,7 +515,7 @@ class StorageLeaseTests(unittest.TestCase):
             tier = self.cache._tier('shared', self.version)
             tier['role'] = 'cache'
             self.cache._write_tier('shared', self.version, tier)
-        self.node.CONFIG['storageTier'] = {'enabled': True}
+        self.node.CONFIG['storageTier'] = {'enabled': True, 'budgetBytes': 1024**3}
         flat = {'userId': F.USER, 'dataset': 'shared', 'version': self.version}
         sync = self.s._snapshots()
         with self.assertRaisesRegex(ValueError, '受保护原件'): sync.export('datasets.snapshot.info', flat)

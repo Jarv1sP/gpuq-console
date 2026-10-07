@@ -84,6 +84,7 @@ class DatasetUploads:
         try:
             value = self.d._read_json(path)
         except FileNotFoundError:
+            self.cache._budget(session['reserveBytes'])
             self.cache._free(self.cache._reserved()+session['reserveBytes'], needed_inodes=session['entries']+16)
             self.d._write_json(path, self.reservation_value(session))
         else:
@@ -385,6 +386,7 @@ class DatasetUploads:
                 raise ValueError('Personal dataset storage quota reached (including metadata allowance)')
             if sum(s['entries'] for s in retained)+args['entries'] > self.limits['maxUserEntries']:
                 raise ValueError('Personal dataset entry quota reached')
+            self.cache._budget(reserve)
             self.cache._free(self.cache._reserved()+reserve, needed_inodes=args['entries']+16)
             self.folder(user, upload, create=True)
             session = dict(schema=1, userId=user, uploadId=upload, **specification,

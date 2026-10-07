@@ -450,11 +450,16 @@ def _data2_mount():
 
 class DatasetCache:
     def __init__(self, root="/data2/datasets", *, sources=None, reserve_bytes=DEFAULT_RESERVE,
-                 lock_timeout=2.0, mount_point=None):
+                 lock_timeout=2.0, mount_point=None, budget_bytes=None):
         self.root = _absolute(root)
         if str(self.root) in BROAD or type(reserve_bytes) is not int or reserve_bytes < 0:
             raise CacheError("unsafe cache root or reserve")
         self.reserve_bytes = reserve_bytes
+        if budget_bytes is not None and (type(budget_bytes) is not int or not 0 < budget_bytes <= 2**63 - 1):
+            raise CacheError("invalid trusted dataset cache budget")
+        # Trusted node policy only. It limits registered dataset copies, not
+        # personal projects, environments, outputs, or the filesystem itself.
+        self.budget_bytes = budget_bytes
         if not isinstance(lock_timeout, (int, float)) or isinstance(lock_timeout, bool) or not 0 <= lock_timeout <= 60:
             raise CacheError("invalid dataset lock timeout")
         self.lock_timeout = lock_timeout
@@ -955,6 +960,63 @@ class DatasetCache:
         if getattr(info, 'f_files', 0) > 0 and info.f_favail < 1024 + needed_inodes + self._upload_reserved()[1]:
             raise CacheError("insufficient free inodes including upload reservations")
 
+    @staticmethod
+    def _footprint(manifest):
+        """Conservative admission footprint, never promised reclaimed bytes."""
+        return (sum(entry["size"] for entry in manifest["files"])
+                + 4096 * (len(manifest["files"]) + len(manifest["directories"])) + 8192)
+
+    def _budget(self, needed=0, *, except_stage=None):
+        """Caller owns the cache lock; account READY, whole staging and uploads.
+
+        A staging reservation counts its complete immutable dataset footprint,
+        not just remaining bytes: data already written must not become free
+        budget for another transfer. Corrupt/orphaned lifecycle metadata fails
+        closed. This is invoked only at admission/resume, never per file chunk.
+        No authority check, recursive payload scan or deletion occurs here.
+        """
+        if self.budget_bytes is None:
+            return
+        if type(needed) is not int or not 0 <= needed <= 2**63 - 1:
+            raise CacheError("invalid upcoming dataset cache reservation")
+        if needed > self.budget_bytes:
+            raise CacheError(f"dataset exceeds cache budget: requestedBytes={needed}, "
+                             f"budgetBytes={self.budget_bytes}; keep the original in the data warehouse")
+        usage = self._budget_usage(except_stage=except_stage)
+        if usage + needed > self.budget_bytes:
+            raise CacheError(f"dataset cache budget reached: usedOrReservedBytes={usage}, "
+                             f"requestedBytes={needed}, budgetBytes={self.budget_bytes}; "
+                             "active or unverified copies are retained")
+
+    def _budget_usage(self, *, except_stage=None):
+        """Trusted whole-copy commitments, caller holds the cache lock."""
+        actor = Principal("builtin-admin", True)
+        usage = self._upload_reserved()[0]
+        for section in ("ready", ".staging"):
+            with _directory(self.root / section) as parent:
+                datasets = os.listdir(parent)
+            for dataset in datasets:
+                _identifier(dataset)
+                with _directory(self.root / section / dataset) as parent:
+                    versions = os.listdir(parent)
+                for version in versions:
+                    _identifier(version, HASH_RE)
+                    paths = self._paths(dataset, version)
+                    if section == ".staging" and paths[section] == except_stage:
+                        continue
+                    record = self._record(actor, dataset, version)
+                    if section == "ready":
+                        if not self._ready(paths, record["manifest"], version):
+                            raise CacheError("unknown published cache state; admission forbidden")
+                        if self._version_entry_exists(paths[".staging"]):
+                            raise CacheError("READY with staging has unknown lifecycle; admission forbidden")
+                    else:
+                        transfer = self._transfer(paths[section])
+                        if transfer["totalBytes"] != sum(entry["size"] for entry in record["manifest"]["files"]):
+                            raise CacheError("staging cache reservation differs from immutable manifest")
+                    usage += self._footprint(record["manifest"])
+        return usage
+
     def _provenance(self, dataset, version, *, _read_only=False):
         """Private version provenance, bound to this exact registration.
 
@@ -1281,7 +1343,8 @@ class DatasetCache:
                         totalInodes=info.f_files if inodes_known else None,
                         availableInodes=info.f_favail if inodes_known else None,
                         inodeUsageKnown=inodes_known, guarded=self.mount is not None,
-                        scope="filesystem", activeReservationsIncluded=False)
+                        scope="filesystem", activeReservationsIncluded=False,
+                        datasetBudgetBytes=self.budget_bytes)
 
     def list_datasets(self, actor):
         """Authorized catalog and bounded ACL owner IDs, never source IDs/paths."""
@@ -1617,6 +1680,10 @@ class DatasetCache:
             return dict(dataset=dataset, version=version, state="READY", files=[], remainingBytes=0)
         stage = paths[".staging"]
         total = sum(f["size"] for f in manifest["files"])
+        # Check before creating a stage or rewriting its accounting. Excluding
+        # this exact stage and adding its full footprint makes resume idempotent
+        # while still counting every concurrent prepared copy and upload.
+        self._budget(self._footprint(manifest), except_stage=stage)
         try:
             transfer = self._transfer(stage)
         except FileNotFoundError:
