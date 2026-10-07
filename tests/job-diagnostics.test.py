@@ -14,6 +14,8 @@ from unittest.mock import patch
 DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
 loader = importlib.util.spec_from_file_location('diagnostic_test', DEPLOY / 'job-diagnostics.py')
 D = importlib.util.module_from_spec(loader); loader.loader.exec_module(D)
+runner_loader = importlib.util.spec_from_file_location('diagnostic_runner_test', DEPLOY/'sandbox-runner.py')
+R = importlib.util.module_from_spec(runner_loader); runner_loader.loader.exec_module(R)
 JID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 CAPTURE = 'b' * 32
 UNIT = 'gpuq-test.service'
@@ -150,6 +152,115 @@ class Diagnostics(unittest.TestCase):
         self.assertNotIn('unitExit', capture)
         self.assertEqual(capture['resources']['counters']['memory.events']['oom_kill'], 1); self.assertEqual(capture['resources']['counters']['pids.events']['max'], 2)
         self.assertEqual(out['attempts'][0]['gpu_uuids'], ['GPU-abc']); self.assertNotIn('log_path', out['attempts'][0]); self.assertNotIn('unit_token', out['attempts'][0])
+
+    def test_capacity_admission_exception_is_bound_before_execution_and_finalized_125(self):
+        self.start()
+        config = self.root/'node-config.json'; config.write_text(json.dumps({'root':str(self.root)}))
+        (self.root/'jobs').mkdir();(self.root/'jobs'/(JID+'.json')).write_text(json.dumps(self.spec))
+        original_read=Path.read_text
+        def read(path,*a,**kw):
+            return '0::/some/'+UNIT+'\n' if path==Path('/proc/self/cgroup') else original_read(path,*a,**kw)
+        error=ValueError('Personal workspace free-space reserve reached: availableBytes=12, reserveBytes=20, requestedBytes=0.')
+        with patch.object(R,'HERE',self.root),patch.object(R.sys,'argv',['runner',JID]), \
+             patch.object(R,'local_module',return_value=SimpleNamespace(check=lambda _:None)), \
+             patch.object(Path,'read_text',read),patch.object(R,'start_job_capture',return_value=(D,CAPTURE,None)), \
+             patch.object(R,'workspace_admission',side_effect=error),patch.object(R.subprocess,'check_output') as gpu:
+            with self.assertRaises(ValueError) as caught:R.main()
+        self.assertIs(caught.exception,error);gpu.assert_not_called()
+        receipt=D._read(self.folder/'runner-exit.json')
+        self.assertEqual(receipt['exitCode'],125);self.assertEqual(receipt['phase'],'WORKSPACE_ADMISSION')
+        self.assertEqual(receipt['error']['reason'],'WORKSPACE_RESERVE');self.assertEqual(receipt['error']['availableBytes'],12)
+        D.observe(self.root,self.spec,CAPTURE,{})
+        self.assertEqual(self.bundle('FAILED')['captures'][0]['runnerExit']['exitCode'],125)
+
+    def test_normal_payload_exit_and_post_oci_guard_exception_keep_exact_exit(self):
+        for value in (0,42,125,137):
+            with self.subTest(value=value),patch.object(R,'run_job',return_value=value), \
+                 patch.object(R,'finish_job_capture') as finish:
+                self.assertEqual(R.main(),value);self.assertEqual(finish.call_args.args[-1],value)
+        self.start();error=ValueError('OCI registry drop-in directories changed during operation')
+        def execute(capture):
+            capture.root,capture.spec,capture.module,capture.identifier=self.root,self.spec,D,CAPTURE
+            capture.phase='OCI_EXECUTION';raise error
+        with patch.object(R,'run_job',side_effect=execute),self.assertRaises(ValueError) as caught:R.main()
+        self.assertIs(caught.exception,error)
+        receipt=D._read(self.folder/'runner-exit.json');self.assertEqual(receipt['exitCode'],125)
+        self.assertEqual(receipt['error']['reason'],'OCI_REGISTRY_INTEGRITY_CHANGED')
+
+    def test_capture_failure_never_changes_payload_return_or_original_exception(self):
+        error=RuntimeError('private command --password hidden')
+        for code in (0,125):
+            def execute(capture):
+                capture.module=SimpleNamespace(finish_capture=lambda *a,**kw:(_ for _ in ()).throw(OSError('unavailable')))
+                return code
+            with patch.object(R,'run_job',side_effect=execute):self.assertEqual(R.main(),code)
+        with patch.object(R,'run_job',side_effect=error),self.assertRaises(RuntimeError) as caught:R.main()
+        self.assertIs(caught.exception,error)
+
+    def test_sampling_unknown_keeps_receipt_without_inventing_zero_or_foreign_identity(self):
+        self.start()
+        with patch.object(D,'_sample',side_effect=OSError('unavailable')):D.finish_capture(self.root,self.spec,CAPTURE,125)
+        receipt=D._read(self.folder/'runner-exit.json');self.assertEqual(receipt['resources'],{})
+        self.assertIn('resourceCaptureError',receipt)
+        with patch.object(D,'_sample',return_value={}):D.finish_capture(self.root,self.spec,CAPTURE,42)
+        self.assertIn('resourceCaptureError',D._read(self.folder/'runner-exit.json'))
+        for foreign in ({**self.spec,'userId':'demo-user-2'},{**self.spec,'argv':['foreign']}):
+            with self.assertRaisesRegex(ValueError,'identity mismatch'):D.finish_capture(self.root,foreign,CAPTURE,0)
+
+    def test_final_sampling_unknown_does_not_label_initial_zero_as_final(self):
+        (self.group/'memory.events').write_text('oom 0\noom_kill 0\n');(self.group/'pids.events').write_text('max 0\n')
+        self.start()
+        with patch.object(D,'_sample',return_value={}):D.finish_capture(self.root,self.spec,CAPTURE,125)
+        package=self.bundle('FAILED');summary=D.summary(package)
+        self.assertIn('OOM=未知 / OOM kill=未知 / PID 拒绝=未知',summary)
+        self.assertEqual(package['captures'][0]['resources']['counters']['memory.events']['oom'],0)
+        self.assertNotIn('OOM=0',summary)
+
+    def test_stopped_observer_or_gone_cgroup_still_exposes_original_receipt(self):
+        self.run.side_effect=OSError('observer unavailable');self.start()
+        D.finish_capture(self.root,self.spec,CAPTURE,125,phase='OCI_EXECUTION',error=ValueError('OCI registry drop-in directories changed during operation'))
+        package=self.bundle('FAILED');self.assertEqual(package['state'],'UNAVAILABLE')
+        self.assertEqual(package['captures'][0]['runnerExit']['exitCode'],125)
+        original_dir=D._dir
+        def directory(path,*a,**kw):
+            if Path(path)==self.group:raise FileNotFoundError('gone')
+            return original_dir(path,*a,**kw)
+        with patch.object(D,'_dir',side_effect=directory):D.observe(self.root,self.spec,CAPTURE,{})
+        package=self.bundle('FAILED');self.assertEqual(package['state'],'PARTIAL')
+        self.assertEqual(package['captures'][0]['runnerExit']['error']['reason'],'OCI_REGISTRY_INTEGRITY_CHANGED')
+
+    def test_native_attempt_id_is_only_from_verified_unit_not_user_log(self):
+        unit='gpuq-a'+'1'*32+'.service';group='/some/'+unit
+        with patch.object(D,'_show',return_value={**self.shown,'Id':unit,'ControlGroup':group}):
+            D.start_capture(self.root,self.spec,unit,group,{},['2'],['GPU-abc'])
+        self.folder=self.root/'diagnostics'/JID/CAPTURE
+        D.finish_capture(self.root,self.spec,CAPTURE,125)
+        package=self.bundle('FAILED');self.assertEqual(package['captures'][0]['nativeAttemptId'],'A'+'1'*32)
+        self.assertEqual(package['captures'][0]['runnerExit']['nativeAttemptId'],'A'+'1'*32)
+
+    def test_bounded_stderr_is_private_redacted_evidence_not_completion(self):
+        self.start()
+        secret='token=credential Bearer ABC.DEF --password "two secret words" /home/other-owner/private/file'
+        D.runner_stderr(self.root,self.spec,CAPTURE,'x'*100000+'\n'+secret+'\n'+('\\\t"中'*30000))
+        saved=self.folder/'runner-stderr.json';self.assertLessEqual(saved.stat().st_size,2*D.FILE_LIMIT)
+        self.assertEqual(saved.stat().st_mode&0o777,0o600)
+        D.runner_stderr(self.root,self.spec,CAPTURE,secret)
+        stderr=D._read(saved)
+        for value in ('credential','ABC.DEF','two secret words','/home/other-owner'):self.assertNotIn(value,stderr['text'])
+        self.assertTrue(stderr['evidenceOnly'])
+        D.finish_capture(self.root,self.spec,CAPTURE,125,phase='OCI_EXECUTION',error=__import__('subprocess').CalledProcessError(1,['command','--token','private-value']))
+        D.observe(self.root,self.spec,CAPTURE,{})
+        package=self.bundle('FAILED');encoded=json.dumps(package)
+        self.assertNotIn('private-value',encoded);self.assertEqual(package['schedulerState'],'FAILED')
+        self.assertEqual(package['captures'][0]['runnerExit']['exitCode'],125)
+        self.assertIn('不是完成证明',D.summary(package))
+        with self.assertRaisesRegex(ValueError,'identity mismatch'):D.runner_stderr(self.root,{**self.spec,'userId':'demo-user-2'},CAPTURE,b'foreign')
+
+    def test_stderr_target_symlink_never_overwrites_another_file(self):
+        self.start();outside=self.root/'other';outside.write_text('unchanged')
+        (self.folder/'runner-stderr.json').symlink_to(outside)
+        D.runner_stderr(self.root,self.spec,CAPTURE,b'evidence')
+        self.assertEqual(outside.read_text(),'unchanged');self.assertFalse((self.folder/'runner-stderr.json').is_symlink())
 
     def test_older_runner_receipt_does_not_decrease_newer_event_counts(self):
         self.start(); D.finish_capture(self.root, self.spec, CAPTURE, 137)

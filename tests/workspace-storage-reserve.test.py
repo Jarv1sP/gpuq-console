@@ -1,5 +1,6 @@
 """Workspace admission policy: disposable local fixtures, no service/GPU/SSH."""
 import base64
+import contextlib
 import importlib.util
 import json
 import os
@@ -242,28 +243,34 @@ class Integration(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, 'reserve'):
                             runner.workspace_admission({'workspaceReserveBytes': 1}, root)
                         runner.workspace_admission({'workspaceReserveBytes': 0}, root)
-                # The real main places the admission before GPU/cgroup/setup.
+                # Read-only original invocation binding precedes diagnostics;
+                # reserve admission still precedes allocation and limit writes.
                 source = (DEPLOY / name).read_text()
-                self.assertLess(source.index('    workspace_admission(cfg,root)'), source.index("    indices=os.environ"))
+                self.assertLess(source.index('    workspace_admission(cfg,root)'), source.index("    else:runtime_spec="))
 
-    def test_real_runner_main_rejects_before_gpu_probe_cgroup_or_payload(self):
+    def test_real_runner_main_rejects_before_gpu_probe_budget_mutation_or_payload(self):
         for name in ('sandbox-runner.py', 'sandbox-runner-common-p0.py'):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary).resolve();jid = str(uuid.uuid4())
-                (root / 'jobs').mkdir();(root / 'jobs' / (jid + '.json')).write_text('{}')
+                (root / 'jobs').mkdir();(root / 'jobs' / (jid + '.json')).write_text(json.dumps({'id':jid}))
                 (root / 'node-config.json').write_text(json.dumps({'root':str(root), 'workspaceReserveBytes':1}))
                 runner = load(DEPLOY / name);runner.HERE = root
                 def module(_name, filename):
                     if filename == 'platform-root-guard.py':return SimpleNamespace(check=lambda _: None)
                     if filename == 'project-store.py':return store
                     self.fail('Runner proceeded past disk admission: ' + filename)
-                with patch.object(runner, 'local_module', side_effect=module), \
+                with contextlib.ExitStack() as identity:
+                    if hasattr(runner,'JobCapture'):
+                        read=Path.read_text
+                        identity.enter_context(patch.object(Path,'read_text',lambda path,*a,**kw:'0::/some/gpuq-test.service\n' if path==Path('/proc/self/cgroup') else read(path,*a,**kw)))
+                        identity.enter_context(patch.object(runner,'start_job_capture',return_value=(None,None,None)))
+                    with patch.object(runner, 'local_module', side_effect=module), \
                         patch.object(runner.sys, 'argv', [str(DEPLOY / name), jid]), \
                         patch.object(os, 'fstatvfs', return_value=free(0)), \
                         patch.object(runner.subprocess, 'run') as run, \
                         patch.object(runner.subprocess, 'check_output') as output:
-                    with self.assertRaisesRegex(ValueError, 'reserve'):runner.main()
-                    run.assert_not_called();output.assert_not_called()
+                        with self.assertRaisesRegex(ValueError, 'reserve'):runner.main()
+                        run.assert_not_called();output.assert_not_called()
 
 
 if __name__ == '__main__':unittest.main()

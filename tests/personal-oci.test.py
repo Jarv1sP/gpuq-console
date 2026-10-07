@@ -4,6 +4,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import tomllib
@@ -293,6 +295,53 @@ class OCITests(unittest.TestCase):
             (base/'containers').mkdir(mode=0o700); path.mkdir(mode=0o700)
             present = manager.registry_dropin_state(path, os.geteuid())
             self.assertEqual(present[0], 'empty'); self.assertNotEqual(absent, present)
+
+    def test_existing_empty_dropin_ignores_sibling_changes_but_not_added_then_removed_override(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager=self.manager();base=Path(root).resolve();path=base/'registries.conf.d';path.mkdir(mode=0o700)
+            before=manager.registry_dropin_state(path,os.geteuid())
+            (base/'unrelated').mkdir()
+            self.assertEqual(manager.registry_dropin_state(path,os.geteuid()),before)
+            override=path/'override.conf';override.write_text('configuration');override.unlink()
+            self.assertNotEqual(manager.registry_dropin_state(path,os.geteuid()),before)
+
+    def test_prepare_stderr_survives_post_execution_integrity_error_and_timeout(self):
+        manager=self.manager();captured=[];manager.stderr_sink=lambda raw,**kw:captured.append((raw,kw))
+        @contextlib.contextmanager
+        def registry():
+            yield {},1
+            raise ValueError('OCI registry drop-in directories changed during operation')
+        manager.registry_auth=registry
+        manager.s.private_dir=lambda path:path
+        with patch.object(o.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='ok',stderr='engine evidence')), \
+             self.assertRaisesRegex(ValueError,'changed during operation'):manager.run('image','inspect')
+        self.assertEqual(captured[-1][0],b'engine evidence')
+        error=subprocess.TimeoutExpired(['private-command'],1,stderr=b'evidence')
+        with patch.object(o.subprocess,'run',side_effect=error),self.assertRaises(subprocess.TimeoutExpired) as caught:manager.run('version')
+        self.assertIs(caught.exception,error);self.assertEqual(captured[-1][0],b'evidence')
+
+    def test_streaming_stderr_is_bounded_and_does_not_change_exit_or_main_log(self):
+        manager=self.manager();captured=[];manager.stderr_sink=lambda raw,**kw:captured.append((raw,kw))
+        command=[sys.executable,'-c','import os,sys;os.write(2,b"x"*200000+b"END");sys.exit(42)']
+        forwarded=[]
+        with patch.object(o.os,'write',side_effect=lambda fd,raw:(forwarded.append((fd,raw)),len(raw))[1]):
+            code=manager.call(command,env={'PATH':'/usr/bin:/bin'},pass_fds=())
+        self.assertEqual(code,42);self.assertEqual(sum(len(raw) for _,raw in forwarded),200003)
+        self.assertTrue(all(fd==2 for fd,_ in forwarded));self.assertEqual(len(captured[-1][0]),o.STDERR_LIMIT)
+        self.assertTrue(captured[-1][0].endswith(b'END'));self.assertTrue(captured[-1][1]['truncated'])
+        manager.stderr_sink=lambda *a,**kw:(_ for _ in ()).throw(OSError('capture unavailable'))
+        with patch.object(o.os,'write',side_effect=lambda fd,raw:len(raw)):
+            self.assertEqual(manager.call([sys.executable,'-c','import os,sys;os.write(2,b"stderr");sys.exit(125)'],env={},pass_fds=()),125)
+
+    def test_streaming_exception_keeps_original_exact_engine_child_cleanup(self):
+        manager=self.manager();manager.stderr_sink=Mock()
+        for error in (OSError('pipe read unavailable'),KeyboardInterrupt()):
+            process=SimpleNamespace(stderr=Mock(),poll=Mock(return_value=None),kill=Mock(),wait=Mock(return_value=-9))
+            with self.subTest(error=type(error).__name__),patch.object(o.subprocess,'Popen',return_value=process), \
+                 patch.object(o.select,'select',side_effect=error),self.assertRaises(type(error)) as caught:
+                manager.call(['fixed-engine'],env={},pass_fds=())
+            self.assertIs(caught.exception,error);process.kill.assert_called_once_with();process.wait.assert_called_once_with()
+            process.stderr.close.assert_called_once_with()
 
     def test_external_system_dropin_is_checked_before_engine_invocation(self):
         with tempfile.TemporaryDirectory() as root:

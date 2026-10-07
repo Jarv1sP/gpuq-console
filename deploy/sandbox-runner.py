@@ -48,14 +48,45 @@ def start_job_capture(root,spec,unit,group,env,indices,uuids):
             if cursor.is_symlink():raise ValueError('Symlink in diagnostic runtime path')
         descriptor=os.open(expected,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         return module,identifier,descriptor
-    except Exception as error:
-        print('GPUQ diagnostics unavailable:',str(error),file=sys.stderr)
+    except Exception:
+        print('GPUQ diagnostics unavailable; original job execution is unchanged',file=sys.stderr)
         return None,None,None
 
-def finish_job_capture(module,root,spec,identifier,exit_code):
+def finish_job_capture(module,root,spec,identifier,exit_code,*,phase=None,error=None):
     if module is None:return
-    try:module.finish_capture(root,spec,identifier,exit_code)
-    except Exception as error:print('GPUQ diagnostic finalization unavailable:',str(error),file=sys.stderr)
+    try:module.finish_capture(root,spec,identifier,exit_code,phase=phase,error=error)
+    except Exception:print('GPUQ diagnostic finalization unavailable; original exit is unchanged',file=sys.stderr)
+
+class JobCapture:
+    """One trusted invocation; never bind a replacement identity after failure."""
+    def __init__(self):
+        self.module=self.root=self.spec=self.identifier=self.runtimefd=None
+        self.phase='IDENTITY'
+
+    def bind(self,root,spec,unit,group,env,indices,uuids):
+        self.root,self.spec=root,spec
+        self.module,self.identifier,self.runtimefd=start_job_capture(root,spec,unit,group,env,indices,uuids)
+
+    def stderr(self,raw,*,phase='OCI_ENGINE',truncated=False):
+        if self.module is None:return
+        try:self.module.runner_stderr(self.root,self.spec,self.identifier,raw,phase=phase,truncated=truncated)
+        except Exception:print('GPUQ runner stderr capture unavailable',file=sys.stderr)
+
+    def finish(self,code,error=None):
+        finish_job_capture(self.module,self.root,self.spec,self.identifier,code,phase=self.phase,error=error)
+
+def main():
+    capture=JobCapture()
+    try:
+        code=run_job(capture)
+    except Exception as error:
+        capture.finish(125,error)
+        raise
+    else:
+        capture.finish(code)
+        return code
+    finally:
+        if capture.runtimefd is not None:os.close(capture.runtimefd)
 
 def open_dataset_mounts(spec):
     if not spec.get('datasets'):return []
@@ -127,16 +158,25 @@ def oci_runtime_spec(spec,jid,terminal):
     # is the trusted identity, not any optional ID supplied by the client.
     return {**spec,'id':jid} if terminal else spec
 
-def main():
+def run_job(capture):
     jid=sys.argv[1]
     if not re.fullmatch(r'[a-f0-9-]{36}',jid):raise ValueError('Invalid job ID')
     cfg=json.loads((HERE/'node-config.json').read_text());root=Path(cfg['root'])
     local_module('gpuq_platform_root_guard','platform-root-guard.py').check(root)
     terminal=len(sys.argv)>2 and sys.argv[2]=='terminal'
     spec=json.loads((root/('terminals' if terminal else 'jobs')/f'{jid}.json').read_text())
-    workspace_admission(cfg,root)
+    if not terminal and spec.get('id')!=jid:raise ValueError('Job identity mismatch')
     indices=os.environ.get('GPUQ_ASSIGNED_GPU_INDICES','').split(',')
     uuids=os.environ.get('GPUQ_ASSIGNED_GPU_UUIDS','').split(',')
+    group=next(line.split(':',2)[2].strip() for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
+    unit=group.rsplit('/',1)[-1]
+    if not unit.startswith('amax-term-' if terminal else 'gpuq-') or not unit.endswith('.service'):raise ValueError('Not running inside an authorized job unit')
+    env={'PATH':'/usr/bin:/bin','HOME':str(Path.home()),'XDG_RUNTIME_DIR':f'/run/user/{os.getuid()}','DBUS_SESSION_BUS_ADDRESS':f'unix:path=/run/user/{os.getuid()}/bus'}
+    if not terminal:capture.bind(root,spec,unit,group,env,indices,uuids)
+    runtimefd=capture.runtimefd
+    capture.phase='WORKSPACE_ADMISSION'
+    workspace_admission(cfg,root)
+    capture.phase='GPU_ALLOCATION'
     if terminal:indices=[];uuids=[]
     else:runtime_spec=local_module('gpuq_allocation','scheduling-policy.py').allocated_spec(spec,indices,uuids,cfg,os.environ)
     if not terminal:
@@ -145,10 +185,7 @@ def main():
         sizes=[int(line.strip()) for line in memory.splitlines()]
         if len(sizes)!=len(indices) or any(size<spec.get('minVramGiB',0)*1024-512 for size in sizes):raise ValueError('Allocated GPU memory does not meet request')
     # Apply limits BEFORE any untrusted code runs, inside the original GPUQ unit.
-    group=next(line.split(':',2)[2].strip() for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
-    unit=group.rsplit('/',1)[-1]
-    if not unit.startswith('amax-term-' if terminal else 'gpuq-') or not unit.endswith('.service'):raise ValueError('Not running inside an authorized job unit')
-    env={'PATH':'/usr/bin:/bin','HOME':str(Path.home()),'XDG_RUNTIME_DIR':f'/run/user/{os.getuid()}','DBUS_SESSION_BUS_ADDRESS':f'unix:path=/run/user/{os.getuid()}/bus'}
+    capture.phase='RESOURCE_BUDGET'
     resources=local_module('gpuq_job_resources','job-resources.py')
     requested=resources.requested_limits(spec if terminal else runtime_spec,terminal)
     subprocess.run(['/usr/bin/systemctl','--user','set-property','--runtime',unit,f'MemoryMax={requested["memory"]}',f'CPUQuota={requested["cpu"]*100}%','TasksMax=2048'],env=env,check=True)
@@ -158,7 +195,7 @@ def main():
     budget=resources.read_budget({**(spec if terminal else runtime_spec),'id':jid},group,uuids,terminal)
     cgroupfd=os.open(resources.cgroup_path(group),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     resourcefd=os.memfd_create('gpuq-resources');os.write(resourcefd,json.dumps(budget,sort_keys=True).encode());os.lseek(resourcefd,0,0)
-    capture_module,capture_id,runtimefd=(None,None,None) if terminal else start_job_capture(root,spec,unit,group,env,indices,uuids)
+    capture.phase='PROJECT_PREPARATION'
     workspace=root/'users'/hashlib.sha256(spec['userId'].encode()).hexdigest()[:32]
     workspace.mkdir(parents=True,exist_ok=True,mode=0o700)
     if 'storageQuota' in cfg:local_module('gpuq_storage_quota','storage-quota.py').ensure(cfg,spec['userId'],workspace)
@@ -170,12 +207,13 @@ def main():
     dataset_fds=[] if terminal else open_dataset_mounts(spec)
     datafd,datalock=open_data_workspace(spec,jid,terminal)
     if project and project['environmentMode']=='oci':
+        capture.phase='OCI_EXECUTION'
         try:
-            code=local_module('gpuq_personal_oci','personal-oci.py').run_project(cfg,oci_runtime_spec(spec,jid,terminal),project,terminal,uuids,workfd,project_fds,dataset_fds,datafd,runtimefd,resourcefd,cgroupfd)
-            finish_job_capture(capture_module,root,spec,capture_id,code)
+            code=local_module('gpuq_personal_oci','personal-oci.py').run_project(cfg,oci_runtime_spec(spec,jid,terminal),project,terminal,uuids,workfd,project_fds,dataset_fds,datafd,runtimefd,resourcefd,cgroupfd,stderr_sink=None if terminal else capture.stderr)
             return code
         finally:
-            for fd in [workfd,cgroupfd,resourcefd,*project_fds.values(),*(fd for fd,_ in dataset_fds),*([datafd] if datafd is not None else []),*([runtimefd] if runtimefd is not None else []),*([datalock] if datalock is not None else [])]:os.close(fd)
+            for fd in [workfd,cgroupfd,resourcefd,*project_fds.values(),*(fd for fd,_ in dataset_fds),*([datafd] if datafd is not None else []),*([datalock] if datalock is not None else [])]:os.close(fd)
+    capture.phase='SANDBOX_PREPARATION'
     info_r,info_w=os.pipe();block_r,block_w=os.pipe()
     args=['/usr/bin/bwrap','--unshare-all',*([] if terminal else ['--new-session']),'--die-with-parent','--cap-drop','ALL','--hostname','gpuq-job',
           '--info-fd',str(info_w),'--block-fd',str(block_r),'--ro-bind','/usr','/usr','--symlink','usr/bin','/bin','--symlink','usr/sbin','/sbin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',
@@ -260,18 +298,18 @@ def main():
         if datafd is not None:os.close(datafd)
         for descriptor in project_fds.values():os.close(descriptor)
         os.close(cgroupfd);os.close(resourcefd)
-        if runtimefd is not None:os.close(runtimefd)
     os.close(info_w);os.close(block_r);os.close(workfd);os.close(resolv);os.close(passwd);os.close(hosts)
     network=None
     try:
+        capture.phase='SANDBOX_NETWORK'
         information=sandbox_information(info_r)
         ready_r,ready_w=os.pipe()
         network=subprocess.Popen([cfg.get('slirp','/usr/bin/slirp4netns'),'--configure','--disable-host-loopback','--enable-seccomp','--ready-fd',str(ready_w),str(information['child-pid']),'tap0'],pass_fds=(ready_w,),env={**env,'LD_LIBRARY_PATH':str(HERE/'netlib')},stdout=subprocess.DEVNULL)
         os.close(ready_w)
         if not select.select([ready_r],[],[],12)[0] or os.read(ready_r,1)!=b'1':raise RuntimeError('Sandbox networking unavailable')
         os.close(ready_r);os.pwrite(ready,b'1',0);os.write(block_w,b'1');os.close(block_w)
+        capture.phase='PAYLOAD_EXECUTION'
         code=process.wait()
-        finish_job_capture(capture_module,root,spec,capture_id,code)
         return code
     finally:
         if process.poll() is None:process.kill();process.wait()

@@ -1,4 +1,5 @@
 """Kernel UUID/device-minor identity, using private files and fake device stats."""
+import contextlib
 import importlib.util
 import json
 import os
@@ -129,7 +130,7 @@ class GPUDevices(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.paths([UUIDS[0]])
 
-    def test_both_runners_resolve_uuid_before_smi_or_cgroup_or_child_start(self):
+    def test_both_runners_resolve_uuid_before_smi_or_budget_mutation_or_child_start(self):
         for filename in ('sandbox-runner.py', 'sandbox-runner-common-p0.py'):
             with self.subTest(filename=filename):
                 runner = load('device_runner_' + filename.replace('-', '_'), filename)
@@ -139,15 +140,20 @@ class GPUDevices(unittest.TestCase):
                 resolve = Mock(side_effect=ValueError('missing device UUID'))
                 guard = SimpleNamespace(check=Mock())
                 modules = {'platform-root-guard.py': guard, 'scheduling-policy.py': P, 'gpu-devices.py': SimpleNamespace(device_paths=resolve)}
-                with patch.object(runner, 'HERE', self.root), patch.object(runner, 'local_module', side_effect=lambda name, file: modules[file]), \
+                with contextlib.ExitStack() as identity:
+                    if hasattr(runner,'JobCapture'):
+                        read=Path.read_text
+                        identity.enter_context(patch.object(Path,'read_text',lambda path,*a,**kw:'0::/some/gpuq-test.service\n' if path==Path('/proc/self/cgroup') else read(path,*a,**kw)))
+                        identity.enter_context(patch.object(runner,'start_job_capture',return_value=(None,None,None)))
+                    with patch.object(runner, 'HERE', self.root), patch.object(runner, 'local_module', side_effect=lambda name, file: modules[file]), \
                         patch.object(runner.sys, 'argv', ['sandbox-runner.py', JID]), \
                         patch.dict(runner.os.environ, {'GPUQ_ASSIGNED_GPU_INDICES': '2', 'GPUQ_ASSIGNED_GPU_UUIDS': UUIDS[2]}), \
                         patch.object(runner.subprocess, 'check_output') as smi, patch.object(runner.subprocess, 'run') as run, patch.object(runner.subprocess, 'Popen') as spawn:
-                    with self.assertRaisesRegex(ValueError, 'missing device UUID'):
-                        runner.main()
-                    resolve.assert_called_once_with([UUIDS[2]])
-                    guard.check.assert_called_once_with(self.root)
-                    smi.assert_not_called(); run.assert_not_called(); spawn.assert_not_called()
+                        with self.assertRaisesRegex(ValueError, 'missing device UUID'):
+                            runner.main()
+                        resolve.assert_called_once_with([UUIDS[2]])
+                        guard.check.assert_called_once_with(self.root)
+                        smi.assert_not_called(); run.assert_not_called(); spawn.assert_not_called()
 
 
 if __name__ == '__main__':

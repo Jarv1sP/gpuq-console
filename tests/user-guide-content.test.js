@@ -184,6 +184,10 @@ test('guide explains quotas, interruption and failure evidence without promising
   assert.match(guide, /不自动重跑/);
   assert.match(guide, /不保证每个 worker 都健康/);
   assert.match(guide, /gpuctl diagnostics JOB_ID --json/);
+  assert.match(guide, /本次尝试的退出码是 `latestAttempt.exitCode`/);
+  assert.match(guide, /`latestAttempt.startedAt` \/ `latestAttempt.finishedAt`（Unix 秒）/);
+  assert.match(guide, /`workerStartedAt` \/ `workerFinishedAt` 使用 ISO 日期时间/);
+  assert.match(guide, /缺值表示未确认，不猜成退出码 0 或时间 0/);
   assert.match(guide, /不会自动备份/);
   assert.match(guide, /不要粘贴密码、令牌、私钥/);
 });
@@ -195,4 +199,38 @@ test('personal data terminal manual extraction separates mutable drafts from imm
   assert.match(guide,/不会自动解压/);
   assert.match(guide,/独立只读副本/);
   assert.match(guide,/尚无独立磁盘硬配额/);
+});
+
+test('troubleshooting separates confirmed misunderstandings from unavailable features', () => {
+  const section = guide.split('## 常见问题 {#troubleshooting}\n')[1];
+  assert.ok(section);
+  assert.match(section, /失败记录会保留，不代表必须重跑/);
+  assert.match(section, /gpuctl completion JOB_ID --json/);
+  assert.match(section, /只有 `completed:true` 且任务、项目、发布版本都符合预期/);
+  assert.match(section, /节点能力未确认.*503/);
+  assert.match(section, /不等于训练程序已经运行并失败/);
+  assert.match(section, /保留原任务编号和 `Submission key`，不要另建一份训练/);
+  assert.match(section, /节点配置的安全预留；这不是个人容量额度用完/);
+  assert.match(section, /数据 `READY` 不等于已备份/);
+  assert.match(section, /旧数据不会自动补归档/);
+  assert.match(section, /已经永久取消的归档要由管理员核查/);
+  assert.match(section, /要另开独立会话，选「新建终端」或运行 `gpuctl ssh`/);
+  assert.match(section, /同一个人容器项目仍只保留一个开发终端/);
+  assert.match(section, /发布代码和环境前，相关终端须确认 `STOPPED`/);
+  assert.match(section, /gpuctl terminal status SESSION_ID/);
+  assert.match(section, /`UNKNOWN` 不能当成已结束/);
+  assert.doesNotMatch(section, /确认已结束才新建/);
+  assert.match(section, /个人容器内 root 只管理自己的容器/);
+  assert.match(section, /`--hami` 可用不代表 `--sm-percent 50` 已开通/);
+  assert.match(section, /代码、环境和结果仍留在原实例/);
+  assert.match(section, /旧环境不会因分组或归档自动变成个人容器/);
+});
+
+test('project manual agrees with the guide on verified upload resumption', () => {
+  const projects = readFileSync(new URL('../docs/PROJECTS.md', import.meta.url), 'utf8');
+  assert.match(projects, /先核对原上传 ID、路径、文件大小与 SHA-256/);
+  assert.match(projects, /从服务器已确认的字节继续/);
+  assert.match(projects, /旧记录缺少恢复证明或提交结果未确认时停止/);
+  assert.match(projects, /不自动替换未完成上传/);
+  assert.doesNotMatch(projects, /失败重跑 `push` 会重新传该文件|同路径重传替换未完成上传/);
 });
