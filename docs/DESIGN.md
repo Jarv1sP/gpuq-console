@@ -1,5 +1,7 @@
 # STARGATE 界面设计与代码参考
 
+缓存操作预接由 [dataset-cache-operation.js](../dist/dataset-cache-operation.js) 独立挂载，样式为 [dataset-cache-operation.css](../dist/dataset-cache-operation.css)。能力适配暂仅接受明确的布尔允许值，契约待定稿；未提供新接口时不挂载入口，也不改变旧缓存流程。key 与原操作编号按账号保存，丢回执只查询原编号；没有编号时等待用户补入原编号，不猜编号或重发。状态、阶段、配对字节和取消权限来自匹配服务器、版本、key 与动作的回执。转移先准备目标副本，确认 READY 后重新检查源端释放能力，另行确认释放；不自动释放、不使用旧 unregister/evict 绕过保护。控件采用 48px、高度自然撑开、服务器名提供完整提示；测试页显式标为模拟，预接不表示生产接口已开放。
+
 本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `34d07a1`，并同步仓库列表、直传、数据集提示、折叠控件与间距的维护；已包含导航合并、数据库与缓存、管理员删除与最后副本保护、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
 
 ## 1. 原则
