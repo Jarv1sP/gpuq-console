@@ -192,7 +192,9 @@ try{
  await checkGuide(member,'/guide');assert.equal(await member.locator('a[href="/guide/admin"]:visible').count(),0);
  // Verify automatic registration discovery, without pressing refresh.
  await admin.locator('[data-user]').filter({hasText:'验收同学'}).waitFor({timeout:22000});await admin.locator('[data-user]').filter({hasText:'验收同学'}).click();await admin.locator('[data-machine=gpu-1]').check();await admin.locator('[data-quota=gpu-1]').fill('2');await admin.locator('[data-quota=total]').fill('2');
- await admin.evaluate(()=>scrollTo(0,0));assert.equal(await admin.locator('#page-users .primary:visible').count(),1);
+ await admin.evaluate(()=>scrollTo(0,0));assert.equal(await admin.locator('#page-users [data-action=save-policy].primary:visible').count(),1);
+ assert.equal(await admin.locator('#page-users .primary:visible').count(),2);
+ assert.equal(await admin.locator('#page-users [data-member-create].primary:visible').count(),1);assert.equal(await admin.locator('[data-member-create]').isDisabled(),true,'new accounts cannot discard an unsaved quota draft');
  const approval=await admin.locator('[data-action=save-policy]').boundingBox(),strip=await admin.locator('#control-strip').boundingBox();assert.ok(approval.y>=0&&approval.y+approval.height<strip.y,'approval is visible before scrolling to the per-server fields');
  assert.equal(await admin.locator('[data-permission-meter=gpu-1] .is-on').count(),2);
  await admin.locator('[data-quota=total]').fill('');assert.match(await admin.locator('#policy-summary').textContent(),/待校正/);assert.equal(await admin.locator('[data-permission-meter=gpu-1] .is-on').count(),2,'an invalid total does not erase the confirmed per-server draft');await admin.locator('[data-quota=total]').fill('2');

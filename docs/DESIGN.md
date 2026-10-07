@@ -306,6 +306,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `#project-location` / `[name=workspace-project]` | [execution-ui.js](../dist/execution-ui.js)、[shell-ui.js](../dist/shell-ui.js)、[workbench.css](../dist/workbench.css) | 本人授权位置的「我的项目」；个人容器无需先选顶栏机器，开发源和顶栏焦点独立 | 同名项目以源机器区分；终端/文件/发布保留原源，创建按实际environmentModes，原请求取消与迟到回执守卫保留；开发位置单行省略并以title保留完整ID，标题列可收缩，刷新按钮不出视口；未知不当空目录 |
 | `#context-machine` | [shell-ui.js](../dist/shell-ui.js)、[workbench-ui.js](../dist/workbench-ui.js) | 个人容器未选服务器时完整显示「训练：自动选择」；手动切换训练位置时显示开发位置并提示完整ID，焦点仍可选 | 四字训练提示不截断；仅确认OCI时替换提示，未知/共享/隔离保留服务器选择；不改提交位置、开发源或ROOT目标 |
 | `#job-mission` / `.r5-mission` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 任务全屏，肖像只画实际分配的卡 | Esc/关闭/返回任务，保留取消日志输出 |
+| `.job-project-preparation` | [workbench-ui.js](../dist/workbench-ui.js)、[workbench.css](../dist/workbench.css) | 焦点/紧凑任务卡、详情和全屏显示现有项目复制阶段及实际目标；自动选机有明确标签 | 开发来源和原操作ID进ⓘ；准备阶段是请求卡数、未占显卡，不画分配肖像；未知回执不当就绪，不新增请求 |
 | `.resource-chassis` / `.resource-towers` / `.resource-tower` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 真实物理卡位，液位仅表示显存比例 | 手机全部卡位可见，利用率另列，未知斜线 |
 | `.resource-portrait-utils` | [resources-ui.js](../dist/resources-ui.js)、[resources.css](../dist/resources.css) | 卡位使用率，按真实卡数生成；窄容器自动换列 | 两位等宽序号与百分比分开8px，序号用次级颜色；不把序号拼成读数 |
 | `.ro-v` / `.ro-m` / `.resource-id-label` | [starbase.css](../dist/starbase.css)、[resources-ui.js](../dist/resources-ui.js) | 遥测与巨型服务器 ID，不混淆额度/显存/利用率 | 数值单位分开，保留更新时间和失联事实 |
@@ -316,7 +317,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `.mc-attention-item` / `.mc-attention-actions` | [attention-state.js](../dist/attention-state.js)、[control-ui.js](../dist/control-ui.js)、[shell.css](../dist/shell.css) | 原对象失败/部分成功/未确认，不靠已读清除未知 | 回具体对象，只有已确认失败可按规则确认 |
 | `.maintenance-banner` / `#maintenance-experience` / `.maintenance-server-row` | [maintenance-ui.js](../dist/maintenance-ui.js)、[maintenance-experience.js](../dist/maintenance-experience.js) | 全平台维护、单台事实、每台控制行 | 原因原文转义；账号/指南/退出不阻挡 |
 | `.maintenance-console-dialog` / `.maintenance-recovery-bar` | [maintenance-experience.js](../dist/maintenance-experience.js)、[maintenance-state.js](../dist/maintenance-state.js) | ROOT、主机、恢复前检查、分阶段恢复 | CAS冲突停止，部分完成逐项列出 |
-| `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；原会话停止后明确新建 | 失联不重放；只读原ID状态确认；未知不当结束；writerToken仅内存 |
+| `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；开发ID按账号、服务器、项目恢复到原入口 | 刷新只读核验原ID，不自动连接或接管；未知仍保留，明确结束才移除；ROOT/数据终端不存入项目记录；writerToken仅内存 |
 | `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 一个逻辑数据集一行，右侧按身份、存放位置、训练用法排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
 | `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；容量条只取已确认 capacity | filesystemBytes/availableBytes 计算实际数据盘已用比例；读不到不画 0%；长 ID 提示完整值；手机内部横向滚动 |
 | `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
@@ -440,7 +441,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 详情按内容自然撑高，以 CSS sticky 顶部偏移和运行时总控占用计算最大空间；仅超出时让中段滚动、训练底栏固定，四台服务器在 1440×900 和 1024×768 均完整显示。「所属」只显示名字，原 ownerLabel 保留不变。上传连接失败只提供原路线重试与重新探测，不推荐其他来源；其他来源仍在初始选择里。
 
-主界面的管理员和普通成员使用相同仓库组件；只显示个人授权操作，不出现缓存策略、固定保留或云盘连接。独立 [admin-data-storage.js](../dist/admin-data-storage.js) 注册 storage/order20，只有管理后台确认角色并挂载时才读取全所属目录；离开或撤权先 abort 再清理。按机器删除读取新鲜全节点物理登记，固定保留仍绑定原 pinId，容量策略只在展开或显式刷新时读；全局目录可见性不授予任何管理权限。
+主界面的管理员和普通成员使用相同仓库组件；只显示个人授权操作，不出现缓存策略、固定保留或云盘连接。独立 [admin-data-storage.js](../dist/admin-data-storage.js) 注册 storage/order20，只有管理后台确认角色并挂载时才读取全所属目录；离开或撤权先 abort 再清理。按机器删除读取新鲜全节点物理登记，固定保留仍绑定原 pinId，存储运维以每台服务器预算卡片为入口，挂载和显式刷新各读一次 status/plan，不轮询；选中机器下方保留释放预览、本人保留与 M2 本机缓存移除，后台不重复仓库浏览目录。水位来自响应，未开启不画刻度；缺保留清单、所有者或仓库用量不编造，版本 pinCount 不证明 pin 归属。全局目录可见性不授予任何管理权限。
 
 仓库目录只在打开数据集房间时加载；工作台切换服务器只同步隐藏房间的目标、清除旧目录并失效旧回复，下一次进入房间才读取当前目标的目录与容量。提交抽屉需要数据选项时仍独立按需查询。上传初始页的其他来源保留云盘导入；打开电脑上传不查询云盘连接能力。云盘扫码和断开授权仍在后台，按钮高度至少44px。
 
@@ -681,8 +682,14 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 成员与额度区块不再包含全体训练表；全体用户任务只在 `#admin/tasks` 的真实挂载中出现一次，切换区块时卸载，不在成员区或隐藏停放区保留副本。
 
+「新建账号」只在后台成员区挂载，沿用成员弹窗和 44px 手机控件。它调用现有 `users.create`，固定普通成员、初始零额度；已有额度草稿须先保存或撤销。发出请求前按当前管理员保存用户名，密码只在本次请求内存中使用；回执未知时只查询账号目录，不自动重发，离开区块或切换账号后旧回包不能打开或修改当前界面。
+
 ### 已有任务的显示标签
 
 [task-display-ui.js](../dist/task-display-ui.js) 只在现有任务详情附加原生 `details` 编辑器；管理员可编辑已关联的平台任务，成员只能编辑本人关联任务；未关联的原生记录只读。默认收起，先明确读取原编号与显示版本，再保存名称和描述。加载禁重复输入，未知能力不显示可保存表单，冲突或丢回执清除当前编辑版本并要求读取同一任务，不自动重发。账号切换或组件卸载后丢弃旧响应；文本插入使用既有转义和 textContent，不编辑 submitter、命令或调度。输入与按钮为 48px，手机 summary 至少 44px，沿用现有令牌和焦点，包含 1440/390/320 的键盘与共享几何检查，不新增路由、抽屉或动画。
 
 原生任务只使用后端规范目录的 `source:'native'`、`name`、`description`、`submitter.username`：这里的 username 是原生 owner，不是标签中自报的平台账号。依照 STARGATE 功能与接口手册 2026-10-07，新鲜、已连接、唯一任务 ID 的合法有界标签可供管理员阅读；成员、重复或模糊关联、失联和过期的脱敏由同一后端目录完成。后台任务区块的只读队列/进程及算力显卡提示写「名称 · 原生用户 owner」，不查用户表、不从标签推断身份，也不提供优先级、日志、取消等任务操作；缺少规范 owner 时维持原未知展示。
+
+## 提交拒绝与服务暂不可用
+
+共享客户端对非 JSON 502/503/504 显示「服务暂时不可用，稍后重试」，保留 HTTP 状态，不展示网关 HTML 或解析错误。提交只有明确的准入拒绝（`SUBMISSION_REJECTED`、`MAINTENANCE_ACTIVE` 或既有拒绝状态）显示「未提交」及原因，抽屉与工作台一致；草稿保留且无待确认恢复按钮。网关错误、丢回执或持久化结果不明仍显示「提交结果待确认」，仅用户显式按原 key 核对或重试。原回执已丢失时，后续重试被拒绝也不能证明第一次没有提交，仍保留原请求核对入口。
