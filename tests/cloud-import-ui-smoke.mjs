@@ -125,3 +125,4 @@ await import('./cloud-files-ui-smoke.mjs');
 await import('./cloud-import-capability-ui-smoke.mjs');
 await import('./dataset-remove-ui-smoke.mjs');
 await import('./dataset-full-delete-ui-smoke.mjs');
+await import('./dataset-full-delete-tasks-ui-smoke.mjs');

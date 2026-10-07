@@ -2,6 +2,7 @@ import {createDatasetFullDeletion,fullDeleteActions,fullDeleteTarget,fullDeleteS
 import {serverIdHTML} from './workbench-ui.js';
 import {copyHelp} from './copy-help-ui.js';
 import {fadeDialog} from './motion-ui.js';
+import {mountFullDeleteTasks} from './dataset-full-delete-tasks.js';
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={SUBMITTING:'正在提交',PLANNED:'正在核对副本',RUNNING:'正在删除',REMOVING_CACHES:'正在删除缓存',RETIRING_ORIGINAL:'正在删除原件',DELETED:'已删除',BLOCKED:'暂不能删除',FAILED:'删除未完成',UNKNOWN:'删除结果待确认',WAITING_CONTINUE:'等待管理员继续',CANCELING:'正在取消并恢复',CANCELED:'已取消删除'};
@@ -14,16 +15,22 @@ const status=(state,label)=>`<span class="st ${shape(state)}"><span class="g" ar
 // original-key journal and status/action lifecycle; it does not add page layout.
 export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storage,management=true}={}){
   if(storage===undefined)try{storage=globalThis.localStorage;}catch{}
-  let dialog=null,target=null,view='confirm',action=null,opener=null,account=null,notice='';
-  const api=createDatasetFullDeletion({principal:()=>store.principal,session:()=>store.authGeneration,catalog,management,call:(...args)=>store.call(...args),storage,changed:render,completed:()=>{if(dialog?.open&&!document.hidden&&current())reload();}});
-  function ensureDialog(){
-    if(dialog?.isConnected)return;
+  let dialog=null,target=null,view='confirm',action=null,opener=null,account=null,notice='',dialogScope=null;
+  const listeners=new Set(),lists=new Set();
+  const notify=()=>{render();for(const listener of listeners)listener();};
+  const visible=()=>!document.hidden&&(!!dialog?.open&&current()||[...lists].some(allowed=>allowed()));
+  const sync=()=>api.sync(visible());
+  const api=createDatasetFullDeletion({principal:()=>store.principal,session:()=>store.authGeneration,catalog,management,call:(...args)=>store.call(...args),storage,changed:notify,completed:()=>{if(visible())reload();}});
+  function ensureStyle(){
     if(!document.querySelector('link[data-dataset-remove-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/dataset-remove.css';link.dataset.datasetRemoveStyle='';document.head.append(link);}
+  }
+  function ensureDialog(){
+    if(dialog?.isConnected)return;ensureStyle();
     const suffix=dialogSerial++?'-'+dialogSerial:'';
     dialog=document.createElement('dialog');dialog.className='modal dataset-full-delete-dialog';dialog.id='dataset-full-delete-dialog'+suffix;dialog.setAttribute('aria-labelledby','dataset-full-delete-title'+suffix);
     dialog.innerHTML=`<header class="modal-head"><h2 id="dataset-full-delete-title${suffix}">彻底删除数据集</h2><button class="button quiet" type="button" data-full-delete-close aria-label="关闭彻底删除对话框">关闭</button></header><div data-full-delete-content></div>`;
     document.body.append(dialog);
-    dialog.addEventListener('close',()=>{api.sync(false);target=null;action=null;notice='';if(opener?.isConnected&&!opener.disabled)opener.focus();});
+    dialog.addEventListener('close',()=>{if(dialog.open)return;target=null;action=null;notice='';dialogScope=null;sync();if(opener?.isConnected&&!opener.disabled)opener.focus();});
     dialog.addEventListener('input',event=>{if(event.target.name==='full-delete-name'){const button=dialog.querySelector('[data-full-delete-submit]');if(button)button.disabled=event.target.value!==target?.dataset;}});
     dialog.addEventListener('submit',async event=>{
       event.preventDefault();if(!current())return;
@@ -52,7 +59,7 @@ export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storag
       if(button.dataset.fullDeleteAction&&row){view='action';action=button.dataset.fullDeleteAction;notice='';render();}
     });
   }
-  function current(){return target&&account===JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);}
+  function current(){return target&&(!dialogScope||dialogScope())&&account===JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);}
   function facts(){return `<dl class="full-delete-facts"><div><dt>数据集</dt><dd><code>${esc(target.dataset)}</code></dd></div><div><dt>版本</dt><dd><code title="${esc(target.version)}">${esc(target.version.slice(0,12))}</code></dd></div></dl>`;}
   function errorHTML(){return notice?`<p class="form-error" role="alert">${esc(notice)}</p>`:'';}
   function render(){
@@ -81,18 +88,30 @@ export function datasetFullDeleteUI(store,{catalog=()=>null,reload=()=>{},storag
     const reference=row.operationId?`<dl class="full-delete-facts full-delete-reference"><div><dt>请求编号</dt><dd><code title="${esc(row.operationId)}">${esc(row.operationId.slice(0,8)+'…'+row.operationId.slice(-4))}</code><button class="button quiet" type="button" data-full-delete-copy="${esc(row.operationId)}" aria-label="复制完整请求编号">复制</button></dd></div></dl>`:'';
     body.innerHTML=`${facts()}<div class="full-delete-status copy-caption" role="status">${status(row.state,row.pendingAction==='restore'?'正在恢复':row.pendingAction==='continue'?'正在请求继续':row.pendingAction==='cancel'?'正在请求取消':null)}${row.state==='UNKNOWN'?copyHelp('删除结果待确认','请求结果未确认，只会按原请求编号查询。请勿创建新编号或重复删除。'):''}</div>${row.error?`<p class="form-error" role="alert">${esc(row.error)}</p>`:''}${errorHTML()}${needsAdmin?'<p class="full-delete-notice">需要管理员处理</p>':''}${row.state==='WAITING_CONTINUE'&&row.task?.canContinue!==true?'<p class="full-delete-notice">服务器仍在处理原步骤，请先重新查询。</p>':''}${retained}${stepHTML?`<ol class="full-delete-steps" aria-label="删除步骤">${stepHTML}</ol>`:''}${reference}<footer class="modal-actions"><button class="button" type="button" data-full-delete-query ${busy?'disabled':''}>${busy?'正在查询…':'重新查询'}</button>${actions.map(item=>`<button class="button ${item==='continue'?'danger':'quiet'}" type="button" data-full-delete-action="${item}" ${busy?'disabled':''}>${{continue:'继续删除',cancel:'取消删除',restore:'恢复数据'}[item]}</button>`).join('')}</footer>`;
   }
-  function present(dataset,version,recordOnly=false){
+  function present(dataset,version,recordOnly=false,scope=null){
     fullDeleteTarget(dataset,version);
     const record=api.find(dataset,version);
     if(recordOnly?!record:!api.canOpen(dataset,version))return false;
     if(dialog?.open)dialog.close();
-    opener=document.activeElement;account=JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);target={dataset,version};view=record?'task':'confirm';action=null;notice='';
+    opener=document.activeElement;account=JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);target={dataset,version};dialogScope=scope;view=record?'task':'confirm';action=null;notice='';
     ensureDialog();dialog.querySelector('[data-full-delete-content]').replaceChildren();dialog.showModal();api.sync(true);render();fadeDialog(dialog);
     if(view==='confirm')dialog.querySelector('[name=full-delete-name]')?.focus();return true;
   }
-  store.onAuthChange?.(()=>{dialog?.close();api.sync(false);});
-  document.addEventListener('visibilitychange',()=>api.sync(!!dialog?.open&&!document.hidden));
+  store.onAuthChange?.(()=>{dialog?.close();api.sync(false);notify();});
+  document.addEventListener('visibilitychange',sync);
+  const openRecord=(key,scope=null)=>{if(scope&&!scope())return false;const row=api.sync().find(item=>item.key===key);return row?present(row.dataset,row.version,true,scope):false;};
+  const actions=row=>catalog()?.datasetDelete===1?fullDeleteActions(row,store.principal,management):[];
   return {canOpenFullDelete:(dataset,version)=>api.canOpen(dataset,version),openFullDelete:(dataset,version)=>present(dataset,version),
-    openFullDeleteRecord:key=>{const row=api.sync().find(item=>item.key===key);return row?present(row.dataset,row.version,true):false;},
+    openFullDeleteRecord:openRecord,
+    mountTasks(host,options){
+      if(!management)return {refresh:()=>{},render:()=>{},destroy:()=>{}};
+      ensureStyle();return mountFullDeleteTasks(host,{store,records:()=>{sync();return api.rows;},actions,status:row=>status(row.state),isBusy:api.isBusy,query:api.query,openRecord,
+        openAction(key,intent,scope){const row=api.sync().find(value=>value.key===key);if(!row||!actions(row).includes(intent)||!openRecord(key,scope))return false;view='action';action=intent;render();return true;},
+        subscribe(listener){listeners.add(listener);return ()=>listeners.delete(listener);},
+        syncVisibility(allowed){lists.add(allowed);sync();return ()=>{lists.delete(allowed);sync();};},
+        updateVisibility:sync,
+        closeScope(scope){if(dialogScope===scope)dialog?.close();},
+      },options);
+    },
     get records(){api.sync();return api.rows;}};
 }
