@@ -68,6 +68,16 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(session['version'],D._version(manifest));self.assertNotEqual(session['version'],self.spec['manifestSha256'])
                 self.assertEqual((self.cache._paths(session['dataset'],session['version'])['ready']/'data/训练/data.txt').read_bytes(),b'abc')
                 self.assertFalse(self.u.archive.file(session).exists());self.assertEqual(self.u.admit(self.args)['state'],'READY')
+    def test_archive_capacity_uses_read_only_pre_admission_specification(self):
+        raw=self.begin(tar_bytes([('data',b'abc',tarfile.REGTYPE)]))
+        reader=U.DatasetUploads.__new__(U.DatasetUploads);reader.n,reader.d,reader.cache=self.node,D,self.cache
+        reader.limits=U.upload_limits(self.node.CONFIG)
+        before=sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*'))
+        result=reader.capacity('hdd',self.spec)
+        self.assertEqual(result['specificationSha256'],self.args['specificationSha256'])
+        self.assertEqual(result['requiredBytes'],self.u.load(self.user,self.upload)['reserveBytes'])
+        self.assertEqual(before,sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*')))
+
     def test_confirmed_offsets_duplicate_ack_and_same_uuid_only(self):
         raw=self.begin(tar_bytes([('data',b'abc',tarfile.REGTYPE)]));half=len(raw)//2
         result=self.chunk(raw[:half]);self.assertEqual(result['offset'],half)
