@@ -80,6 +80,26 @@ test('same device bind aliases are deduplicated; content usage never masquerades
   assert.equal(value.datasets[0].versions[0].originals[0].dataset,'sample');
 });
 
+test('single-root authority and workspace share one physical snapshot without inventing original readiness',async()=>{
+  const shared=snapshot('d'),f=fixture({records:{[cold]:[record('sample',[{version:hash,state:'READY',bytes:42,files:2}])]},
+    capacities:{[cold]:capacity(shared,{state:'READY',volume:{...shared}},null)}});
+  const value=await f.call(),local=value.caches.find(row=>row.machine===cold),warehouse=value.warehouse.volumes[0];
+  assert.equal(value.physicalVolumes.filter(row=>row.machine===cold).length,1);
+  assert.equal(local.volume.id,warehouse.volume.id);assert.equal(local.volume.totalBytes,1000);
+  assert.equal(warehouse.volume.totalBytes,1000);assert.equal(local.budgetBytes,null);
+  assert.equal(value.datasets[0].versions[0].originals.length,0);
+  assert.equal(warehouse.originalContentBytes,0);
+  assert.ok(warehouse.warnings.some(row=>row.code==='CACHE_WAREHOUSE_SHARED_VOLUME'));
+});
+
+test('distinct guarded warehouse and work volumes remain separate physical devices',async()=>{
+  const f=fixture({capacities:{[cold]:capacity(snapshot('d'),{state:'READY',volume:snapshot('e')})}});
+  const value=await f.call();
+  assert.equal(value.physicalVolumes.filter(row=>row.machine===cold).length,2);
+  assert.notEqual(value.caches.find(row=>row.machine===cold).volume.id,value.warehouse.volumes[0].volume.id);
+  assert.ok(value.warehouse.warnings.every(row=>row.code!=='CACHE_WAREHOUSE_SHARED_VOLUME'));
+});
+
 test('warehouse warning watermarks are observations only and do not reject reads or emit personal capacity caps',async()=>{
   const full=snapshot('e',{usedBytes:950,availableBytes:0,usableBytes:0,readOnly:true}),f=fixture({capacities:{[cold]:capacity(snapshot('d'),{state:'READY',volume:full})}});
   const value=await f.call();

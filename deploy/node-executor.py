@@ -444,6 +444,20 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                 # Do not leak mount paths/configuration through errors, and do
                 # not substitute SSD or the root disk for unavailable HDD.
                 result['storageOverview']['warehouse']={'state':'UNAVAILABLE','volume':None}
+        elif isinstance(CONFIG.get('storageAuthority'),dict) and CONFIG['storageAuthority'].get('enabled') is True:
+            # A protected single-root authority shares its real volume with
+            # the training/workspace role. Reuse this exact guarded snapshot;
+            # no second stat, authority journal creation or dataset scan.
+            archive=CONFIG.get('storageArchive',{})
+            tier=CONFIG.get('storageTier',{'enabled':False})
+            local=(CONFIG['storageAuthority']=={'enabled':True}
+                and isinstance(archive,dict) and set(archive)=={'enabled','machine','authority'}
+                and archive.get('enabled') is True and archive.get('machine')==CONFIG.get('machine')
+                and isinstance(CONFIG.get('machine'),str) and DATASET_ID.fullmatch(CONFIG['machine'])
+                and isinstance(archive.get('authority'),str) and DATASET_ID.fullmatch(archive['authority'])
+                and tier.get('enabled',False) is False)
+            result['storageOverview']['warehouse']={'state':'READY' if local else 'UNAVAILABLE',
+                'volume':dict(result['storageOverview']['cache']['volume']) if local else None}
         if dataset_delete_capability()==1:result['datasetDelete']=1
         return result
     folder=ROOT/'dataset-ops';folder.mkdir(mode=0o700,exist_ok=True)
