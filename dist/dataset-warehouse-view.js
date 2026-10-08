@@ -30,7 +30,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  let overview=null,legacyCatalog=null,capacityCatalog=null,overviewRequest=0,overviewAbort=null;
  const cacheCapabilities=new Map();let capabilityScope=null,capabilityRequest=0,capabilityAbort=null,capabilityBusy=false,capabilityUnavailable=false,actionUI=null,actionLifetime=null,actionContext=null;
  let filesPreviewUI=null,filesPreviewAbort=null,filesPreviewContext=null,filesPreviewHost=null;
- const meter=createUploadMeter(),templates=new WeakMap(),renderBindings=new WeakMap();
+ const meter=createUploadMeter(),templates=new WeakMap(),renderBindings=new WeakMap(),renderContexts=new WeakMap();
  const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
  const machine=()=>section.querySelector('[name=dataset-machine]')?.value;
  const identity=()=>({userId:store.principal?.userId,role:store.principal?.role,authGeneration:store.authGeneration});
@@ -86,7 +86,6 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const binding=account();
   if(templates.get(root)===value&&renderBindings.get(root)===binding&&(root.hasChildNodes()||value===''))return;
   const previousAction=renderBindings.get(root)===binding?root.querySelector('.v3-train [data-use-dataset]'):null;
-  const previousLabel=renderBindings.get(root)===binding?root.querySelector('[data-v3-label]'):null;
   const training=renderBindings.get(root)===binding?root.querySelector(':scope>.v3-train'):null;
   const preview=root.querySelector('#warehouse-files-preview');
   const keepPreview=preview&&filesPreviewContext===JSON.stringify([account(),selected,selectedVersion])&&overview?.filePreviewAvailable===true;
@@ -94,20 +93,34 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const folds=[...root.querySelectorAll('details[open]')].map(node=>node.id||node.className);
   const active=root.contains(document.activeElement)?document.activeElement:null;
   const focus=active?.id?'#'+CSS.escape(active.id):active?.hasAttribute('data-v3-version')?'[data-v3-version]':active?.hasAttribute('data-v4-warehouse')?'[data-v4-warehouse="'+CSS.escape(active.dataset.v4Warehouse)+'"]':active?.hasAttribute('data-v4-clear')?'[data-v4-clear="'+CSS.escape(active.dataset.v4Clear)+'"]':active?.hasAttribute('data-v3-filter')?'[data-v3-filter="'+CSS.escape(active.dataset.v3Filter)+'"]':active?.hasAttribute('data-v3-select')?'[data-v3-select="'+CSS.escape(active.dataset.v3Select)+'"]':active?.hasAttribute('data-use-dataset')?'[data-use-dataset="'+CSS.escape(active.dataset.useDataset)+'"]':null;
-  templates.set(root,value);renderBindings.set(root,binding);root.innerHTML=value;
-  const nextLabel=root.querySelector('[data-v3-label]');
-  // Keep the same dataset's edit control through refreshes, just like training.
-  // Its live attributes still follow the current permission check.
-  if(previousLabel&&nextLabel&&previousLabel.dataset.v3Label===nextLabel.dataset.v3Label){
-   for(const attr of [...previousLabel.attributes])if(!nextLabel.hasAttribute(attr.name))previousLabel.removeAttribute(attr.name);
-   for(const attr of nextLabel.attributes)previousLabel.setAttribute(attr.name,attr.value);
-   previousLabel.textContent=nextLabel.textContent;nextLabel.replaceWith(previousLabel);
-  }
-  if(keepPreview)root.querySelector('#warehouse-files-preview')?.replaceWith(preview);
+  const context=JSON.stringify([selected,selectedVersion,machine()]);
+  const preserve=root.id==='warehouse-inspector'&&renderBindings.get(root)===binding&&renderContexts.get(root)===context;
+  templates.set(root,value);renderBindings.set(root,binding);renderContexts.set(root,context);
+  if(preserve){
+   const template=document.createElement('template');template.innerHTML=value;
+   const keys=['id','data-v3-label','data-v3-copy','data-v3-cache','data-v3-cache-action','data-machine','data-dataset','data-version','data-use-dataset'];
+   const key=node=>node.nodeType===1?JSON.stringify(keys.map(name=>node.getAttribute(name))):'';
+   const patch=(parent,source)=>{
+    const children=[...source.childNodes];
+    for(const [index,next] of children.entries()){
+     const old=parent.childNodes[index];
+     if(!old){parent.append(next);continue;}
+     if(old.nodeType!==next.nodeType||old.nodeName!==next.nodeName||key(old)!==key(next)){old.replaceWith(next);continue;}
+     if(old.nodeType!==1){if(old.nodeValue!==next.nodeValue)old.nodeValue=next.nodeValue;continue;}
+     if(keepPreview&&old===preview)continue;
+     for(const attr of [...old.attributes])if(!next.hasAttribute(attr.name))old.removeAttribute(attr.name);
+     for(const attr of next.attributes)if(old.getAttribute(attr.name)!==attr.value)old.setAttribute(attr.name,attr.value);
+     patch(old,next);
+    }
+    while(parent.childNodes.length>children.length)parent.lastChild.remove();
+   };
+   patch(root,template.content);
+  }else root.innerHTML=value;
+  if(keepPreview&&root.querySelector('#warehouse-files-preview')!==preview)root.querySelector('#warehouse-files-preview')?.replaceWith(preview);
   const nextTraining=root.querySelector(':scope>.v3-train');
   const nextAction=root.querySelector('.v3-train [data-use-dataset]');
-  if(training&&nextTraining&&training.outerHTML===nextTraining.outerHTML)nextTraining.replaceWith(training);
-  else if(previousAction&&nextAction&&previousAction.dataset.useDataset===nextAction.dataset.useDataset&&previousAction.dataset.version===nextAction.dataset.version){
+  if(training&&nextTraining&&training!==nextTraining&&training.outerHTML===nextTraining.outerHTML)nextTraining.replaceWith(training);
+  else if(previousAction&&nextAction&&previousAction!==nextAction&&previousAction.dataset.useDataset===nextAction.dataset.useDataset&&previousAction.dataset.version===nextAction.dataset.version){
    for(const attr of [...previousAction.attributes])if(!nextAction.hasAttribute(attr.name))previousAction.removeAttribute(attr.name);
    for(const attr of nextAction.attributes)previousAction.setAttribute(attr.name,attr.value);
    previousAction.textContent=nextAction.textContent;nextAction.replaceWith(previousAction);
