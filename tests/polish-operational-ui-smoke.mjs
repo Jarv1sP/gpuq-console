@@ -343,7 +343,9 @@ try{
           }else if(operation==='terminal.detach')result={detached:true};
           else if(operation==='jobs.logs')result={text:'Local training log.'};
           else if(operation==='jobs.completion'){
+            assert.deepEqual(Object.keys(args),['jobId']);
             const current=state.jobs.find(job=>job.id===args.jobId);assert.ok(current);
+            assert.equal(current.userId,principal.userId,'Completion reads stay bound to the fixture owner and exact job');
             result={protocol:'job-completion-v1',readOnly:true,jobId:current.id,machine:current.machine,
               userId:current.userId,nodeJobId:current.nodeJobId||null,project:current.project,release:current.release,
               completed:false,state:'UNCONFIRMED',reason:'NATIVE_OBSERVATION_UNAVAILABLE'};
