@@ -1,10 +1,11 @@
 // Owner-bound log/diagnostic viewer. Log evidence never rewrites task state.
+import {formatTimestamp} from './time-format.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const statusNames={STARTING:'正在启动采集',CAPTURING:'采集中',COMPLETE:'本轮快照已保存',PARTIAL:'部分可用',UNAVAILABLE:'没有可用采集'};
 const shown=value=>value===null||value===undefined?'未知':String(value);
-const timestamp=value=>{if(value===null||value===undefined||value==='')return '未记录';const date=new Date(typeof value==='number'?value*1000:value);return Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{hour12:false}):'未记录';};
+const timestamp=value=>formatTimestamp(value);
 const bytes=value=>Number.isFinite(value)?(value/1024**3).toFixed(2)+' GiB':'未知';
-const leaseTime=value=>typeof value==='number'&&Number.isFinite(value)&&Number.isFinite(new Date(value*1000).getTime())?new Date(value*1000).toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3,hour12:false}):'未记录';
+const leaseTime=value=>formatTimestamp(typeof value==='number'?value:null,{format:{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3,hour12:false}});
 export function allocationHistoryHTML(bundle){
   if(bundle.historyAvailable!==true||!Array.isArray(bundle.allocationHistory))return '<p class="muted diagnostic-lease-unavailable">旧任务未记录精确租约时间，或节点尚未提供这项记录。</p>';
   const rows=bundle.allocationHistory.slice(0,256);
