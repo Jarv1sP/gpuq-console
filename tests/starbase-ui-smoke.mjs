@@ -15,6 +15,7 @@ import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {accountMenu,closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {collectTrainingCapabilityConsole} from './training-capability-console.mjs';
 
 // Keep the wait's real-browser positive/negative cases in the existing CI entry.
 await import('./animation-settle-browser.mjs');
@@ -22,7 +23,7 @@ await import('./animation-settle-browser.mjs');
 const temp=await mkdtemp(join(tmpdir(),'starbase-shell-browser-'));
 const shots=process.env.UI_SCREENSHOTS||'/tmp/starbase-ui-smoke';
 const password='Starbase-Local-Fixture-Only-2026!',release='a'.repeat(64);
-const errors=[],outside=[],assets=[],calls=[],sessions=new Map();
+const errors=[],outside=[],assets=[],calls=[],sessions=new Map(),consoleChecks=[];
 let server,service,browser,releaseCatalog;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port;
@@ -66,7 +67,8 @@ try{
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   async function pageFor(width,reduced=false){
     const context=await browser.newContext({viewport:{width,height:width<760?844:1080},reducedMotion:reduced?'reduce':'no-preference'});const page=await context.newPage();
-    page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error'&&!message.text().includes('401'))errors.push(message.text());});
+    page.on('pageerror',error=>errors.push(error.message));
+    consoleChecks.push(collectTrainingCapabilityConsole(page,origin,text=>{if(!text.includes('401'))errors.push(text);}));
     page.on('response',response=>{if(response.url().startsWith(origin)&&!new URL(response.url()).pathname.startsWith('/api/'))assets.push({path:new URL(response.url()).pathname,status:response.status()});});
     await context.route('**/*',route=>{const url=new URL(route.request().url());if(url.origin===origin||['data:','blob:'].includes(url.protocol))return route.continue();outside.push(url.href);return route.abort();});
     return page;
@@ -219,6 +221,7 @@ try{
   const storageReads=calls.filter(row=>row.operation.startsWith('datasets.storage.'));
   assert.equal(storageReads.length,MACHINES.length*2,'the administrator overview reads status and dry-run plan once for each server');
   for(const machine of MACHINES)assert.deepEqual(storageReads.filter(row=>row.machine===machine.id).map(row=>row.operation).sort(),['datasets.storage.plan','datasets.storage.status'],'overview performs both read-only operations without pin, unpin or collection');
+  await Promise.all(consoleChecks.map(verify=>verify()));
   assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);assert.ok(assets.every(asset=>asset.status<400));for(const font of ['Archivo','Geist','GeistMono'])assert.ok(assets.some(asset=>asset.path.includes(font)&&asset.path.endsWith('.woff2')));
   assert.ok(calls.every(row=>!['projects.publish','terminal.host-command','files.put','cancel'].includes(row.operation)),'acceptance uses read-only/synthetic node operations');
   console.log(JSON.stringify({status:'passed',checks:['real Portal/CSP/cookies/assets/fonts','owner-only control and drawers','persistent control/context/room scroll','command keyboard and tab navigation','submit and three second-level panels','latest cross-server submission, manual draft and cancellation supersede old replies','logs/diagnostics/output/notes','terminal collapse preserves session across rooms','maintenance admin/member hook preservation','390px tabs/live pill/full-screen control','reduced motion and no outside requests'],screenshots:shots}));
