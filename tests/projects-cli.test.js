@@ -161,6 +161,39 @@ test('auto run pins the development release but sends opt-in target selection wi
   }
 });
 
+test('training data read mode preserves default cache wire and adds only the explicit warehouse field',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  const base=['run','gpu-1','--project','alpha','--release',RELEASE,'--key',JOB,'--data','samples@'+OLDER];
+  let cached;
+  for(const mode of [undefined,'cache','warehouse']){
+    const value=await f.cli([...base,...(mode?['--data-read',mode]:[]),'--','python','train.py']);
+    assert.equal(value.code,0,value.stderr);const args=f.calls.at(-1).args;
+    assert.equal(f.calls.at(-1).operation,'jobs.submit');
+    if(mode===undefined)cached=structuredClone(args);
+    else assert.deepEqual(args,mode==='cache'?cached:{...cached,datasetReadMode:'warehouse'});
+  }
+  const auto=await f.cli(['run','--machine','auto','--candidates','2','--project','alpha','--release',RELEASE,'--key',JOB,'--data','samples@'+OLDER,'--data-read','warehouse','--','true']);
+  assert.equal(auto.code,0,auto.stderr);assert.equal(f.calls.at(-1).args.datasetReadMode,'warehouse');
+  assert.deepEqual(f.calls.at(-1).args.machineSelection,{mode:'auto',candidates:['gpu-2']});
+  assert.deepEqual(f.calls.at(-2),{operation:'projects.status',args:{machine:'gpu-1',project:'alpha'}});
+  assert.equal(JSON.parse(await readFile(f.session,'utf8')).machine,'gpu-1');
+});
+
+test('unsupported warehouse inputs never submit and training argv after -- remains literal',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  for(const args of [
+    ['run','gpu-1','--data-read','local','--','true'],
+    ['run','gpu-1','--data-read','warehouse','--','true'],
+    ['run','gpu-1','--legacy','--data','samples@'+OLDER,'--data-read','warehouse','--','true'],
+    ['data','list','--data-read','warehouse'],
+    ['run','gpu-1','--data','samples@short','--data-read','warehouse','--','true'],
+  ]){const result=await f.cli(args);assert.equal(result.code,1,result.stderr);}
+  assert.equal(f.calls.some(row=>row.operation==='jobs.submit'),false);
+  const result=await f.cli(['run','gpu-1','--key',JOB,'--','python','train.py','--data-read','warehouse']);
+  assert.equal(result.code,0,result.stderr);assert.deepEqual(f.calls.at(-1).args.argv,['python','train.py','--data-read','warehouse']);
+  assert.equal(Object.hasOwn(f.calls.at(-1).args,'datasetReadMode'),false);
+});
+
 test('immutable OCI project copy uses source/target and fixed key; status/cancel remain owner-scoped handles',async t=>{
   const f=await fixture(t);
   f.custom.set('projects.replicate',args=>({id:args.key,...args,state:'PREPARING',developmentChanged:false}));

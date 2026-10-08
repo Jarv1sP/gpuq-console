@@ -14,6 +14,9 @@ test('default help exposes one personal-project and warehouse-first workflow',()
   assert.match(text,/确认对应版本 READY/);assert.match(text,/当前服务回包/);
   assert.doesNotMatch(text,/--env-mode|--legacy|--via relay|data (?:cloud|import|put|shell|publish|unregister)|--hami|--sm-percent|Slurm|SSH 密钥|VS Code Remote/);
   assert.match(text,/用户不需要 Tail 或节点密钥/);
+  assert.match(text,/gpuctl run --machine auto/);assert.match(text,/--data-read warehouse/);
+  assert.match(text,/默认 cache/);assert.match(text,/指定机器空间不足会拒绝/);
+  assert.match(text,/gpuctl completion JOB --json.*及时下载结果/);
   assert.ok(text.split('\n').length<65,'Daily discovery stays short');
 });
 
@@ -41,4 +44,8 @@ test('guide uses deployment evidence instead of promising merged protocol suppor
   assert.match(guide,/能力缺失或无法连接时暂停，不转 VPS\/Tail/);
   assert.match(guide,/超过 100 MiB 只提示/);assert.match(guide,/CLI 下载超过 100 GiB 也只警告/);
   assert.doesNotMatch(guide,/project create my-container/,'Avoid a second competing first-use walkthrough');
+  assert.match(guide,/网页复制的自动选机命令先用 `gpuctl use` 对齐开发服务器/);
+  assert.match(guide,/选择直读时，复制的命令也包含 `--data-read warehouse`/);
+  assert.match(guide,/网页核实本人任务成功后显示「拉取结果」/);
+  assert.match(guide,/调试可以在现有项目的 `debug-data\/` 放少量人工样本/);
 });

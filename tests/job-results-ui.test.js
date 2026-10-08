@@ -8,7 +8,7 @@ function fixture(reply=()=>completion()){
  return {ui,store,calls,listeners};
 }
 test('only own completed fixed task evidence enables pull; old, missing and mismatched protocols do not',async t=>{
- const f=fixture();t.after(()=>f.ui.destroy());assert.equal(f.ui.allowed(job),false);assert.match(f.ui.markup(job),/ hidden/);assert.equal(await f.ui.check(job),true);assert.equal(f.ui.allowed(job),true);assert.match(f.ui.markup(job),/拉取结果/);assert.deepEqual(f.calls[0].args,{jobId:job.id});assert.equal(f.calls[0].op,'jobs.completion');
+ const f=fixture();t.after(()=>f.ui.destroy());assert.equal(f.ui.allowed(job),false);assert.match(f.ui.markup(job),/ hidden/);assert.doesNotMatch(f.ui.markup(job),/及时将结果/);assert.equal(await f.ui.check(job),true);assert.equal(f.ui.allowed(job),true);assert.match(f.ui.markup(job),/拉取结果/);assert.match(f.ui.markup(job),/title="请及时将结果下载到自己的电脑；平台不会自动备份或删除。"/);assert.deepEqual(f.calls[0].args,{jobId:job.id});assert.equal(f.calls[0].op,'jobs.completion');
  for(const patch of [{completed:false,state:'UNCONFIRMED'},{protocol:'legacy'},{readOnly:false},{jobId:'other'},{userId:'other'},{machine:'other'},{nodeJobId:'other'},{project:'other'},{release:'b'.repeat(64)},{completedAttempt:null},{state:'FAILED'}])assert.equal(successfulResult(completion(patch),job),false,JSON.stringify(patch));
  for(const patch of [{state:'RUNNING'},{source:'native'},{userId:'bob'},{cancelRequested:true},{project:undefined},{id:'short'}])assert.equal(ownResultJob(f.store,{...job,...patch}),false);
  f.store.principal.role='admin';assert.equal(ownResultJob(f.store,{...job,userId:'bob'}),false,'admin does not read other owners outputs');

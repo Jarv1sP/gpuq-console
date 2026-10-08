@@ -40,6 +40,7 @@ try{
   await page.route('**/*',guardedRoute(async route=>{if(![origin,campus.endpoint].includes(new URL(route.request().url()).origin)){outside.push(route.request().url());return route.abort();}return route.fallback();}));
   await page.goto(origin);await page.locator('#login-form [name=username]').fill(role==='admin'?'admin':'result-owner');await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});
   await page.waitForFunction(id=>document.querySelector('[data-job-pull="'+id+'"]'),job.id);assert.equal(await page.locator('[data-job-pull]').count(),1);assert.equal(await page.locator('[data-job-pull="'+jobs[1-index].id+'"]').count(),0,'admin and member do not get another owner pull entry');
+  assert.equal(await page.locator('[data-job-pull]').getAttribute('title'),'请及时将结果下载到自己的电脑；平台不会自动备份或删除。','the existing completion proof gates the result reminder too');
   for(const width of [1440,390]){
    await page.setViewportSize({width,height:1000});await page.screenshot({path:join(shots,'card-'+role+'-'+width+'.png')});
    await page.locator('[data-job-mission="'+job.id+'"]').click();await page.locator('#job-mission [data-job-pull]').waitFor();await settle(page,'#job-mission');assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:join(shots,'mission-'+role+'-'+width+'.png')});await page.locator('[data-mission-close]').click();
