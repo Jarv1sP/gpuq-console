@@ -17,6 +17,8 @@ const screenshots = process.env.UI_SCREENSHOTS || '/tmp/gpuq-datasets-ui';
 const password = 'Local-Dataset-UI-Only-Password-2026!';
 const version = 'a'.repeat(64), ref = {dataset: 'sample', version};
 const calls = [], requests = [], errors = [], blocked = [], httpErrors = [], authenticated = new WeakSet(), phases = new Map([['gpu-1', 'REGISTERED']]);
+const unsupportedTrainingResponses = [], trainingResponseChecks = [], trainingConsoleErrors = [];
+let legacyTrainingCapabilities = false;
 const fixtureOwners=['builtin-admin'];
 let moreLocalVersions=false, holdLookup=false, releaseLookup=null,heldDelivery=null,heldRequest=null;
 let server, browser, service, waitingList = null, listGate = null;
@@ -65,6 +67,8 @@ try {
   clearInterval(service.executionTimer);
   await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
   const adminLogin = await service.login('admin', password);
+  try {await service.invoke(adminLogin.token, 'datasets.training.capabilities', {machine: MACHINES[0].id, ...ref});}
+  catch (error) {legacyTrainingCapabilities = error.status === 400 && error.message === '未知执行操作。';}
   const user = (await service.invoke(adminLogin.token, 'users.create', {username: 'dataset-browser-user', password})).result;
   fixtureOwners.push(user.id);
   await service.invoke(adminLogin.token, 'policy.save', {userId: user.id,
@@ -77,11 +81,26 @@ try {
   for (const page of [admin, member]) {
     page.on('request',request=>{if(request.url()===origin+'/api/call')requests.push({page,...request.postDataJSON()});});
     page.on('pageerror', error => {errors.push(error.message);console.error('Dataset browser error:',error.message);});
-    page.on('console', message => {if (message.type() === 'error') errors.push(message.text());});
+    page.on('console', message => {
+      if (message.type() !== 'error') return;
+      if (legacyTrainingCapabilities && message.location().url === origin + '/api/call' &&
+          message.text() === 'Failed to load resource: the server responded with a status of 400 (Bad Request)') trainingConsoleErrors.push({page, text: message.text()});
+      else errors.push(message.text());
+    });
     page.on('response', response => {
-      if (response.status() >= 400) httpErrors.push({status: response.status(),
+      if (response.status() < 400) return;
+      const failure = {status: response.status(),
         path: new URL(response.url()).pathname, operation: response.request().postDataJSON()?.operation,
-        authenticated: authenticated.has(page)});
+        authenticated: authenticated.has(page)};
+      // Only the actual legacy Portal's exact unknown-operation reply is
+      // expected; ordinary 400s, every other op and supported backends stay strict.
+      if (legacyTrainingCapabilities && failure.status === 400 && failure.path === '/api/call' &&
+          failure.operation === 'datasets.training.capabilities' && failure.authenticated) {
+        trainingResponseChecks.push(response.json().then(body => {
+          if (body.error === '未知执行操作。') unsupportedTrainingResponses.push({page, ...failure});
+          else httpErrors.push(failure);
+        }, () => httpErrors.push(failure)));
+      } else httpErrors.push(failure);
     });
     await page.context().route('**/*', guardedRoute(async route => {
       if (route.request().url() === origin + '/api/call' && route.request().method() === 'POST') {
@@ -284,6 +303,8 @@ try {
   assert.equal(await member.locator('#train-form [name=machine]').inputValue(), 'gpu-1');
   assert.equal(await member.locator('#train-form [name=datasets]').inputValue(), 'sample@' + version);
   assert.equal(await member.locator('#train-form').evaluate(form => form.closest('details').open), true);
+  await member.waitForFunction(() => document.querySelector('.training-read-mode').getAttribute('aria-busy') === 'false');
+  if (legacyTrainingCapabilities) assert.equal(await member.locator('.training-read-mode').isHidden(), true);
   await member.locator('#train-form [name=command]').fill('python train.py --dataset /data2/sample');
   await member.locator('#train-form [name=task-description]').fill('核对固定数据版本后的训练');
   await capture(member, 'datasets-mobile-training-form.png');
@@ -302,8 +323,15 @@ try {
   assert.deepEqual(service.store.jobs[0].spec.argv, ['/bin/bash', '-c', 'python train.py --dataset /data2/sample']);
   while (service.reconciling) await new Promise(resolve => setTimeout(resolve, 5));
   assert.deepEqual(calls.find(call => call.operation === 'sync').args.job.datasets, [ref]);
-  // Public login no longer probes authenticated state. Require zero HTTP
-  // and console errors, without the former pre-login 401 exception.
+  // Public login no longer probes authenticated state. All other HTTP and
+  // console errors remain forbidden, including a pre-login 401.
+  await Promise.all(trainingResponseChecks);
+  for (const page of [admin, member]) {
+    const expected = unsupportedTrainingResponses.filter(item => item.page === page).length;
+    assert.ok(expected <= 1, 'Unknown training capability is probed at most once per login session');
+    assert.ok(trainingConsoleErrors.filter(item => item.page === page).length <= expected, 'Each expected native 400 console entry must have an exact verified unsupported-operation response');
+  }
+  if (legacyTrainingCapabilities) assert.equal(unsupportedTrainingResponses.filter(item => item.page === member).length, 1, 'The legacy capability is actually probed once');
   assert.deepEqual(httpErrors, [], 'Unexpected HTTP errors');
   assert.deepEqual(errors, [], 'Unexpected browser errors');
   assert.deepEqual(blocked, [], 'Unexpected external requests');
@@ -374,7 +402,15 @@ try {
   releaseLookup();await closedReply;await member.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
   assert.ok((await heldRequest.response())===null,'native close cancels the pending lookup');assert.ok(heldRequest.failure());
   assert.equal(await member.locator('#work-submit').isVisible(),false,'A late lookup must not reopen a generically closed submit sheet');
-  console.log('DATASETS UI PASS: full metadata catalogs with explicit owner-use gates; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; zero HTTP or browser errors and no external requests.');
+  await Promise.all(trainingResponseChecks);
+  for (const page of [admin, member]) assert.ok(trainingConsoleErrors.filter(item => item.page === page).length <= unsupportedTrainingResponses.filter(item => item.page === page).length, 'No unrelated console resource failure is allowed');
+  if (legacyTrainingCapabilities) {
+    for (const page of [admin, member]) assert.ok(requests.filter(item => item.page === page && item.operation === 'datasets.training.capabilities').length <= 1, 'Changing version/node or reopening submission never repeats an unavailable capability read');
+    assert.equal(await member.locator('.training-read-mode').isHidden(), true);
+  }
+  assert.deepEqual(httpErrors, [], 'Unexpected HTTP errors after repeated submission choices');
+  assert.deepEqual(errors, [], 'Unexpected browser errors after repeated submission choices');
+  console.log('DATASETS UI PASS: full metadata catalogs with explicit owner-use gates; capacity is not personal quota; collapsed three-source import with draft preservation, keyboard tabs and no implicit actions; authorized machine choices; remote READY never unlocks current-machine training; no stale catalog on machine switch; registered → prepare → failed → retry → ready; exact immutable ref and jobspec; 390px layout; legacy training capability probes at most once, zero unexpected HTTP or browser errors and no external requests.');
   console.log(`Screenshots: ${screenshots}`);
 } finally {
   holdLookup=false;releaseLookup?.();

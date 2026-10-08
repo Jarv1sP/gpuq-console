@@ -6,6 +6,62 @@ import {maintenanceBlocks} from '../dist/maintenance-state.js';
 import {createDatasetReadChoice,trainingStorageMessage,trainingSelectionHTML} from '../dist/training-storage-ui.js';
 const context={identity:'member:1',machine:'fixture-node-long-8',datasets:[{dataset:'sample',version:'a'.repeat(64)}]};
 const capability=(ref=context.datasets[0],patch={})=>({protocol:1,machine:context.machine,...ref,warehouse:{available:true,reason:null},...patch});
+const unknownOperation=(status=400,message='未知执行操作。')=>Object.assign(Error(message),{status});
+const clientFixture=invoke=>{const client=new DemoClient();client.service={invoke,login:async username=>({token:username,principal:{userId:username},state:{}})};return client;};
+test('unknown 400/404 capabilities are probed once even for concurrent versions and reopened forms',async()=>{
+  for(const status of [400,404])for(const message of ['未知执行操作。','未知操作。','Unknown operation datasets.training.capabilities']){
+    let calls=0;const client=clientFixture(async()=>{calls++;throw unknownOperation(status,message);});
+    const choice=createDatasetReadChoice({call:(...args)=>client.call(...args)});
+    await choice.sync({...context,datasets:[...context.datasets,{dataset:'second',version:'b'.repeat(64)}]});
+    assert.equal(calls,1);assert.equal(choice.state().available,false);assert.equal(choice.state().loading,false);assert.deepEqual(choice.args(context),{});
+    choice.reset();await choice.sync(context);await choice.sync({...context,machine:'another-node'});
+    assert.equal(calls,1,'closing, reopening and changing machine preserve the session-level unsupported record');
+    assert.throws(()=>choice.choose('warehouse'),/尚未确认/);
+  }
+});
+test('ordinary errors and other operations never enter the unavailable-capability cache',async()=>{
+  for(const failure of [unknownOperation(400,'参数无效。'),unknownOperation(404,'找不到数据集。'),unknownOperation(401),unknownOperation(403),unknownOperation(429),unknownOperation(500),unknownOperation(503),unknownOperation(504)]){
+    let calls=0;const client=clientFixture(async()=>{calls++;throw failure;});
+    for(let attempt=0;attempt<2;attempt++)await assert.rejects(client.call('datasets.training.capabilities',context.datasets[0]),error=>error===failure);
+    assert.equal(calls,2,'errors without a 400/404 unknown-operation reply must remain retryable');
+  }
+  let calls=0;const client=clientFixture(async()=>{calls++;throw unknownOperation();});
+  for(let attempt=0;attempt<2;attempt++)await assert.rejects(client.call('datasets.list',{}),/未知执行操作/);
+  assert.equal(calls,2,'no other operation is cached');
+});
+test('successful and protocol-0 replies keep querying the exact machine/version',async()=>{
+  for(const protocol of [0,1]){
+    const calls=[],client=clientFixture(async(_,op,args)=>{calls.push({op,args});return {result:capability(args,{protocol})};});
+    for(const ref of [context.datasets[0],{dataset:'second',version:'b'.repeat(64)}])assert.equal((await client.call('datasets.training.capabilities',{machine:context.machine,...ref})).protocol,protocol);
+    assert.equal(calls.length,2);assert.deepEqual(calls.map(item=>item.args.version),['a'.repeat(64),'b'.repeat(64)]);
+  }
+});
+test('changing account or refreshing the page allows a fresh capability probe',async()=>{
+  let calls=0;const invoke=async()=>{calls++;throw unknownOperation();},client=clientFixture(invoke);
+  await assert.rejects(client.call('datasets.training.capabilities',{}),/未知执行操作/);
+  await assert.rejects(client.call('datasets.training.capabilities',{}),/未知执行操作/);assert.equal(calls,1);
+  await client.login('another-account','fixture');await assert.rejects(client.call('datasets.training.capabilities',{}),/未知执行操作/);assert.equal(calls,2);
+  const refreshed=clientFixture(invoke);await assert.rejects(refreshed.call('datasets.training.capabilities',{}),/未知执行操作/);assert.equal(calls,3);
+});
+test('an old unknown reply and queued versions cannot disable a new account or leak an old request',async()=>{
+  let rejectOld;const calls=[],client=clientFixture(async(token,op,args)=>{
+    calls.push({token,op,args});if(calls.length===1)return new Promise((_,reject)=>{rejectOld=reject;});return {result:capability()};
+  });
+  client.token='old-account';
+  const old=assert.rejects(client.call('datasets.training.capabilities',{dataset:'first'}),error=>error.code==='STALE_SESSION');
+  const queued=assert.rejects(client.call('datasets.training.capabilities',{dataset:'queued'}),error=>error.code==='STALE_SESSION');
+  await new Promise(resolve=>setImmediate(resolve));const login=client.login('new-account','fixture');rejectOld(unknownOperation());
+  await Promise.all([old,queued,login]);assert.equal(calls.length,1);
+  assert.equal((await client.call('datasets.training.capabilities',{dataset:'new'})).protocol,1);
+  assert.equal(calls.length,2);assert.equal(calls[1].token,'new-account');assert.equal(calls.some(item=>item.args.dataset==='queued'),false);
+});
+test('a cancelled queued capability read never reaches the transport',async()=>{
+  let release;const calls=[],client=clientFixture(async(_,op,args)=>{calls.push(args);if(calls.length===1)return new Promise(resolve=>{release=resolve;});return {result:capability()};});
+  const first=client.call('datasets.training.capabilities',{dataset:'first'}),controller=new AbortController();
+  const queued=assert.rejects(client.call('datasets.training.capabilities',{dataset:'cancelled'},{signal:controller.signal}),error=>error.name==='AbortError');
+  await new Promise(resolve=>setImmediate(resolve));controller.abort();release({result:capability()});await first;await queued;
+  assert.deepEqual(calls,[{dataset:'first'}]);assert.equal(client.inflight.size,0);
+});
 test('warehouse reads require exact protocol, machine and every fixed dataset; cache keeps legacy keys',async()=>{
   for(const patch of [{},{protocol:0},{protocol:2},{protocol:'1'},{machine:'another-node'},{dataset:'another-set'},{version:'b'.repeat(64)},{warehouse:{available:'true'}},{warehouse:{available:false,reason:'节点未就绪'}}]){
     const calls=[],choice=createDatasetReadChoice({call:async(op,args)=>{calls.push({op,args});return capability(undefined,patch);}});

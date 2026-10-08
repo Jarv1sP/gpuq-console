@@ -1,6 +1,6 @@
 import {assertMaintenanceOperation} from './maintenance-state.js';
 export class DemoClient{
-  constructor(){this.authGeneration=0;this.authPending=0;this.authTail=Promise.resolve();this.inflight=new Set();this.authListeners=new Set();this.sessionToken=null;this.requestTimeoutMs=45000;}
+  constructor(){this.authGeneration=0;this.authPending=0;this.authTail=Promise.resolve();this.inflight=new Set();this.authListeners=new Set();this.sessionToken=null;this.requestTimeoutMs=45000;this.trainingCapabilities={unavailable:null,tail:Promise.resolve()};}
   static async create(){const client=new DemoClient();client.remote=globalThis.GPUQ_LOCAL_API===true;client.production=globalThis.GPUQ_PRODUCTION===true;if(!client.remote){const {DemoService,DEMO_ADMIN}=await import('./service.js');client.service=await DemoService.create();await client.login(DEMO_ADMIN.username,DEMO_ADMIN.password);}else if(client.production&&globalThis.GPUQ_HAS_SESSION!==false){try{await client.refresh();}catch(e){if(e.status!==401)throw e;}}return client;}
   stale(message='登录状态已改变，已忽略旧请求。'){const error=Error(message);error.code='STALE_SESSION';return error;}
   async transport(path,body,token=null,{signal}={}){
@@ -22,10 +22,29 @@ export class DemoClient{
   }
   track(promise){this.inflight.add(promise);promise.then(()=>this.inflight.delete(promise),()=>this.inflight.delete(promise));return promise;}
   invoke(operation,args,token,options={}){return this.remote?this.transport('call',{operation,args},token,options):this.service.invoke(token,operation,args);}
+  invokeTrainingCapabilities(args,token,options,generation){
+    const capability=this.trainingCapabilities;
+    // Serialize this optional read so multiple selected versions cannot all
+    // probe an old Portal before the first unknown-operation reply arrives.
+    const request=capability.tail.then(async()=>{
+      if(generation!==this.authGeneration)throw this.stale();
+      options.signal?.throwIfAborted();
+      if(capability.unavailable)throw capability.unavailable;
+      try{return await this.invoke('datasets.training.capabilities',args,token,options);}
+      catch(error){
+        if(generation===this.authGeneration&&[400,404].includes(error?.status)&&
+          /^(?:未知(?:执行)?操作[。.]?|unknown operation(?:[.: ].*)?)$/i.test(error?.message||''))capability.unavailable=error;
+        throw error;
+      }
+    });
+    capability.tail=request.catch(()=>{});
+    return request;
+  }
   onAuthChange(listener){this.authListeners.add(listener);return()=>this.authListeners.delete(listener);}
   maintenanceObservation(unknown){if(this.maintenanceStatusUnknown===unknown)return;this.maintenanceStatusUnknown=unknown;globalThis.document?.dispatchEvent(new Event('gpuq-maintenance-observation'));}
   changeAuth(action){
     const generation=++this.authGeneration,token=this.token;
+    this.trainingCapabilities={unavailable:null,tail:Promise.resolve()};
     if(!this.authPending){this.sessionToken=token;for(const listener of this.authListeners)this.track(Promise.resolve().then(()=>listener((operation,args)=>this.invoke(operation,args,token))).catch(()=>{}));}
     this.authPending++;this.token=null;this.principal=null;this.data=null;this.maintenanceStatusUnknown=false;
     // Only identity changes are queued. Drain old requests (including bounded
@@ -47,7 +66,7 @@ export class DemoClient{
     assertMaintenanceOperation(operation,args,this.data,this.principal);
     const generation=this.authGeneration,token=this.token;
     return this.track((async()=>{
-      let data;try{data=await this.invoke(operation,args,token,{signal:options.signal});}catch(error){if(generation!==this.authGeneration)throw this.stale(operation==='terminal.open'?'登录状态已改变，终端创建结果未确认；请原账号重新连接检查，服务端仍按期限回收。':undefined);if(['state','maintenance.status'].includes(operation))this.maintenanceObservation(true);throw error;}
+      let data;try{data=await (operation==='datasets.training.capabilities'?this.invokeTrainingCapabilities(args,token,{signal:options.signal},generation):this.invoke(operation,args,token,{signal:options.signal}));}catch(error){if(generation!==this.authGeneration)throw this.stale(operation==='terminal.open'?'登录状态已改变，终端创建结果未确认；请原账号重新连接检查，服务端仍按期限回收。':undefined);if(['state','maintenance.status'].includes(operation))this.maintenanceObservation(true);throw error;}
       if(generation!==this.authGeneration){
         if(options.onStale)try{await options.onStale(data.result,(operation,args)=>this.invoke(operation,args,token));}catch{throw this.stale('登录状态已改变；旧终端关闭未确认，请原账号重新登录后结束该终端，服务端仍按期限回收。');}
         throw this.stale();
