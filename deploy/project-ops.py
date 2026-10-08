@@ -13,6 +13,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -193,6 +194,131 @@ class ProjectOperations:
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         return module.observation(self,args)
 
+    def development_terminals(self, args):
+        """Discover original owned IDs, without probing or changing a session.
+
+        Attachment metadata is not a process/stop proof. Call terminal.status
+        explicitly for each ID before deciding whether any action is safe.
+        Reads stay anchored to service-owned no-follow directory descriptors;
+        a changing snapshot never becomes a complete (or empty) directory.
+        """
+        user, project = args.get('userId'), args.get('project')
+        if (not isinstance(user, str) or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]+)', user)
+                or not isinstance(project, str) or not PROJECT.fullmatch(project)):
+            raise ValueError('Invalid project terminal discovery identity')
+        result = {'protocol':1, 'state':'UNCONFIRMED', 'complete':False, 'sessions':[]}
+        store_module = sys.modules[type(self.store).__module__]
+        prefix = hashlib.sha256((user+'private:project:'+project).encode()).hexdigest()[:20]
+        stamps = {}
+
+        def stamp(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+        def private_directory(info, *, root=False):
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & (0o022 if root else 0o077)
+                    or root and (info.st_dev,info.st_ino) != self.store.root_identity):
+                raise ValueError('Project terminal directory is unconfirmed')
+
+        def read(fd, name, maximum, *, secret=False, missing=False):
+            try:
+                handle = os.open(name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=fd)
+            except FileNotFoundError:
+                if not missing: raise
+                stamps[name] = None
+                return None
+            try:
+                info = os.fstat(handle)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or info.st_nlink != 1 or info.st_size > maximum
+                        or info.st_mode & (0o077 if secret else 0o022)):
+                    raise ValueError('Project terminal metadata is unconfirmed')
+                before = stamp(info)
+                data = os.read(handle, maximum+1)
+                if (len(data) != info.st_size or stamp(os.fstat(handle)) != before
+                        or stamp(os.stat(name, dir_fd=fd, follow_symlinks=False)) != before):
+                    raise ValueError('Project terminal metadata changed')
+                stamps[name] = before
+                return data
+            finally:
+                os.close(handle)
+
+        def names(fd):
+            found, count = [], 0
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > 20000: raise ValueError('Project terminal history exceeds bounded discovery')
+                    if entry.name == prefix+'.current' or entry.name.startswith(prefix+'.') and entry.name.endswith('.current'):
+                        found.append(entry.name)
+                        if len(found) > 256: raise ValueError('Project terminal sessions exceed bounded discovery')
+            return sorted(found)
+
+        try:
+            store_module.check_platform_root(self.n.ROOT)
+            with store_module.directory(self.n.ROOT) as root_fd:
+                root_before = stamp(os.fstat(root_fd)); private_directory(os.fstat(root_fd), root=True)
+                try:
+                    fd = os.open('terminals', os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=root_fd)
+                except FileNotFoundError:
+                    if stamp(os.fstat(root_fd)) != root_before: return result
+                    # Reopen the path: an old descriptor alone cannot prove its
+                    # directory still belongs to the configured platform root.
+                    with store_module.directory(self.n.ROOT) as current:
+                        if stamp(os.fstat(current)) != root_before: return result
+                    return {**result, 'state':'CONFIRMED', 'complete':True}
+                try:
+                    before = stamp(os.fstat(fd)); private_directory(os.fstat(fd))
+                    paths = names(fd); complete = True; sessions = {}
+                    for name in paths:
+                        try:
+                            legacy = name == prefix+'.current'
+                            suffix = None if legacy else name[len(prefix)+1:-8]
+                            if suffix is not None and not UUID.fullmatch(suffix): raise ValueError('Invalid terminal pointer')
+                            jid = read(fd, name, 36).decode('ascii')
+                            if not UUID.fullmatch(jid) or suffix is not None and suffix != jid: raise ValueError('Terminal pointer identity differs')
+                            spec = json.loads(read(fd, jid+'.json', 16384))
+                            if (not isinstance(spec, dict) or spec.get('userId') != user or spec.get('project') != project
+                                    or type(spec.get('hostAdmin', False)) is not bool or spec.get('hostAdmin', False)
+                                    or type(spec.get('dataWorkspace', False)) is not bool or spec.get('dataWorkspace', False)):
+                                raise ValueError('Terminal does not belong to this project context')
+                            raw = read(fd, jid+'.session.json', 16384, secret=True, missing=True)
+                            receipt = json.loads(raw) if raw is not None else None
+                            if receipt is not None:
+                                lease = receipt.get('leaseExpiresAt') if isinstance(receipt, dict) else None
+                                if (not isinstance(receipt, dict) or receipt.get('schema') != 2
+                                        or receipt.get('state') not in ('OPEN','DETACHED','CLOSED')
+                                        or not isinstance(lease, (int,float)) or isinstance(lease, bool)
+                                        or not 0 <= lease <= 2**53-1 or not math.isfinite(lease)):
+                                    raise ValueError('Terminal attachment metadata is unconfirmed')
+                            row = {'id':jid, 'state':'UNCONFIRMED', 'requiresStatus':True,
+                                   'attachmentState':receipt['state'] if receipt else 'UNKNOWN',
+                                   'writerLeaseExpired':receipt['leaseExpiresAt'] <= time.time() if receipt else None,
+                                   'legacy':legacy}
+                            if jid in sessions: row['legacy'] = sessions[jid]['legacy'] or legacy
+                            sessions[jid] = row
+                        except (OSError, ValueError, UnicodeError, RecursionError):
+                            complete = False
+                    if names(fd) != paths or stamp(os.fstat(fd)) != before: return result
+                    for name, identity in stamps.items():
+                        try: current = stamp(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                        except FileNotFoundError: current = None
+                        if current != identity: return result
+                    if (stamp(os.stat('terminals', dir_fd=root_fd, follow_symlinks=False)) != before
+                            or stamp(os.fstat(root_fd)) != root_before): return result
+                    with store_module.directory(self.n.ROOT) as current:
+                        if stamp(os.fstat(current)) != root_before: return result
+                    with store_module.directory(self.n.ROOT/'terminals') as current:
+                        if stamp(os.fstat(current)) != before: return result
+                    store_module.check_platform_root(self.n.ROOT)
+                    return {**result, 'complete':complete, 'state':'CONFIRMED' if complete else 'UNCONFIRMED',
+                            'sessions':sorted(sessions.values(), key=lambda row:row['id'])}
+                finally:
+                    os.close(fd)
+        except (OSError, ValueError):
+            return result
+
     def status(self, args):
         result = self.store.status(*self.identity(args))
         result['lifecycle'] = self.lifecycle().view(*self.identity(args))
@@ -239,6 +365,7 @@ class ProjectOperations:
         # pending/unknown outcome or the exact-ID recovery entry point.
         if local is not None and local['state'] not in ('IMPORTED','FAILED','CANCELED'):
             result.update(state=local['state'],error='Local draft import is pending; use its original operation ID')
+        result['developmentTerminals'] = self.development_terminals(args)
         return result
 
     def lifecycle(self):
@@ -340,7 +467,10 @@ class ProjectOperations:
                 jid = pointer.read_text()
                 if not UUID.fullmatch(jid): raise ValueError('Invalid project terminal pointer')
                 if self.n.terminal_alive(self.n.ROOT/'terminals', jid):
-                    raise ValueError('Close the project development terminal before publishing')
+                    discovered = self.development_terminals(args)
+                    owned = any(row['id'] == jid for row in discovered['sessions'])
+                    suffix = ('; inspect original session '+jid+' with terminal status in this project context') if owned else '; query project status to discover original owned sessions'
+                    raise ValueError('Close the project development terminal before publishing'+suffix)
                 self.n.stop_terminal(jid)
                 if not self.terminal_stopped(jid):
                     raise ValueError('Cannot confirm development terminal termination; publication blocked')
