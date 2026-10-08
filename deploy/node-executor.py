@@ -258,6 +258,30 @@ def storage_warehouse():
     return STORAGE_WAREHOUSE
 
 
+def dataset_upload_location_cache():
+    """Private locate only: validate existing storage, never initialize it."""
+    global DATASET_MODULE
+    config=CONFIG.get('datasets')
+    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays'}:
+        raise ValueError('Dataset storage is not configured')
+    if CONFIG.get('storageWarehouse') is not None:
+        spec=importlib.util.spec_from_file_location('gpuq_location_warehouse_policy',HERE/'storage-warehouse.py')
+        helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+        config=helper.policy(SimpleNamespace(CONFIG=CONFIG))
+    dataset_mount_check(config)
+    if DATASET_MODULE is None:
+        spec=importlib.util.spec_from_file_location('gpuq_dataset_cache',HERE/'dataset-cache.py')
+        DATASET_MODULE=importlib.util.module_from_spec(spec);sys.modules[spec.name]=DATASET_MODULE;spec.loader.exec_module(DATASET_MODULE)
+    cache=DATASET_MODULE.DatasetCache.__new__(DATASET_MODULE.DatasetCache)
+    cache.root=DATASET_MODULE._absolute(config.get('root','/data2/datasets'))
+    cache.mount_point=DATASET_MODULE._absolute(config.get('mountPoint','/data2'))
+    cache.mount=cache._current_mount()
+    with DATASET_MODULE._directory(cache.root) as root:
+        info=os.fstat(root);cache._root_identity=info.st_dev,info.st_ino
+    return DATASET_MODULE,cache
+
+
+
 def dataset_source_cache(dataset=None,version=None):
     warehouse=storage_warehouse()
     if warehouse is not None:

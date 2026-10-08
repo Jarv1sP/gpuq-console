@@ -44,6 +44,7 @@ class ServerAdmission(unittest.TestCase):
             'storageArchive': {'enabled': True, 'machine': 'warehouse-node', 'authority': 'hdd'},
             'storageAuthority': {'enabled': True}}, dataset_cache=lambda: (D, self.cache),
             workspace=workspace, HERE=DEPLOY, ENV={}, run=lambda *a, **k: None)
+        self.node.dataset_upload_location_cache=lambda:(D,self.cache)
         self.u = U.DatasetUploads(self.node)
         self.node.dataset_uploads = lambda: self.u
         active = patch.object(self.u, 'active', return_value=True)
