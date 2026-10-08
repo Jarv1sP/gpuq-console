@@ -322,7 +322,7 @@ test('project files over the former 4 GiB cap warn and recover an exact verified
   f.custom.set('files.upload.status',args=>({protocol:2,state:'COMPLETE',complete:true,
     path:args.path,totalSize:args.totalSize,sha256:args.sha256,uploadId:JOB,
     size:args.totalSize,receivedBytes:args.totalSize,completionPending:false}));
-  const result=await f.cli(['push',source]);assert.equal(result.code,0,result.stderr);assert.match(result.stderr,/over 4 GiB.*upload is allowed/);
+  const result=await f.cli(['push',source]);assert.equal(result.code,0,result.stderr);assert.match(result.stderr,/超过 4 GiB.*仍允许上传/);
   const query=f.calls.find(c=>c.operation==='files.upload.status');
   assert.equal(query.args.totalSize,4*1024**3+1);assert.match(query.args.sha256,/^[a-f0-9]{64}$/);
   assert.equal(f.calls.some(c=>c.operation==='files.put'),false);

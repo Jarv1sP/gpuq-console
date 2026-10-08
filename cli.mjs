@@ -88,7 +88,7 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
     }
     if(!st.isFile())fail('Only regular files/directories can be uploaded');
     if(!Number.isSafeInteger(st.size)||st.size<0)fail('File byte count cannot be represented exactly');
-    if(context.project&&st.size>4*1024**3)console.error('Large project file (over 4 GiB): check free space and allow time for hashing; upload is allowed.');
+    if(context.project&&st.size>4*1024**3)console.error('项目文件超过 4 GiB，仍允许上传；请确认磁盘空间，并等待完整校验。');
     const file=await open(local,'r');let offset=0;
     try{
       const initial=await file.stat();if(!initial.isFile()||!stable(st,initial))fail('Local file changed before upload');
