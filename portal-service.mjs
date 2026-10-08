@@ -425,7 +425,7 @@ export class PortalService extends DemoService{
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},
       // Protocol availability is a Portal policy fact, not a node/mount or
       // free-space admission proof. The private HDD RPC still verifies those.
-      datasetUploadAdmission:datasetUploadAdmissionView(this.datasetIngressPolicy),
+      datasetUploadAdmission:datasetUploadAdmissionView(this.datasetIngressPolicy,this.datasetArchiveCapability),
       ...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
   close(){this.closing=true;for(const admission of this.loginAdmissions?.values()||[])if(admission.issued)this.revokeSession(admission.issued);this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);clearInterval(this.projectCopyTimer);this.db.close();}

@@ -141,3 +141,11 @@ transfer 的来源不重选。没有原仓证明时不推测其 authority；新�
 
 `datasets.catalog` 仍是目录元数据。READY 入库位置可以显示“本人可用”，但没有该机
 训练授权时 `canPrepare` 仍为 false；准备另一台训练机器走现有固定版本复制流程。
+
+## 按节点能力开启压缩包上传
+
+Portal 只把真实节点 `datasets.upload.routes` 声明的 `archive:{protocol:1,formats:["zip","tar","tar.gz"],maxBytes:number|null}` 放进 `datasetUploadAdmission`。旧节点未声明时保留目录上传。`.tgz` 是 `tar.gz` 的文件名别名。支持的节点可用 `gpuctl data upload FILE.tar.gz --name NAME`；网页同样只选择一个压缩包。
+
+新准入沿用原操作和 owner/intent/服务器绑定，规格额外包含 `archive:{protocol:1,fileName,format,bytes,sha256}`。`entries` 必须为 1，`totalBytes` 是压缩包大小，原传输清单只包含该压缩包。准入逐次核对真实仓库能力，压缩包只签发校园直连票据，不接收 Portal 中转字节。丢回执仍查询原意图和 UUID，不重新分配。
+
+节点发布回包保留原传输规格，同时以 `phase` 给出 `UPLOADING / EXTRACTING / VERIFYING / READY / FAILED`；只有 `READY` 返回已校验的解压内容 `dataset@version`，可另带 `expandedBytes/expandedEntries`。Portal/CLI 改动本身不会打开旧节点的压缩包入口，需要安全解压节点模块配对安装并明确启用后才能开启。

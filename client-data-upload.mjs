@@ -4,7 +4,7 @@ import {basename,join,resolve} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {createDirectDatasetTransport,probeDirectUploadRoute,RELAY_LIMIT_BYTES} from './client-direct-upload.mjs';
 import {selectUploadRoute,uploadStorageMachine} from './dist/upload-routes.js';
-import {allocateDatasetUpload,saveDatasetUploadIntent,confirmDatasetUploadInitialization} from './dist/dataset-upload.js';
+import {allocateDatasetUpload,saveDatasetUploadIntent,confirmDatasetUploadInitialization,archiveUploadCapability,archiveUploadSpecification} from './dist/dataset-upload.js';
 export const DATA_CHUNK=1024*1024;
 const DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
 const fail=message=>{throw Error(message);};
@@ -55,7 +55,46 @@ export async function scanLocalDataset(root,progress,{lstat=fsLstat,open=fsOpen,
   return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files,totalBytes,entries:files.length+directories.length,openEntry,verify};
 }
 
-export async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore,filesystem,admission,via='auto'}){if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,admission,via});}
+export async function scanLocalArchive(filename,capability,progress=()=>{},{lstat=fsLstat,open=fsOpen,platform=process.platform}={}){
+  const cap=archiveUploadCapability(capability),path=dataPath(basename(resolve(filename)));
+  const lower=path.toLowerCase(),format=cap?.formats.find(value=>lower.endsWith('.'+value)||value==='tar.gz'&&lower.endsWith('.tgz'));
+  if(!format)fail('服务器尚未开通此压缩包格式');
+  const info=await lstat(filename,{bigint:true}),size=Number(info.size);
+  if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1n)fail('请选择单个普通压缩包文件');
+  if(!Number.isSafeInteger(size)||size<1||cap.maxBytes!==null&&size>cap.maxBytes)fail('压缩包过大或为空');
+  const same=(a,b,options={})=>sameDatasetFile(a,b,{...options,platform});
+  const file=await open(filename,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW||0)|(fsConstants.O_NONBLOCK||0));let handleInfo,sha256;
+  try{
+    handleInfo=await file.stat({bigint:true});if(!handleInfo.isFile()||!same(info,handleInfo,{pathToHandle:true}))fail('压缩包在读取前已改变');
+    const hash=createHash('sha256'),buffer=Buffer.alloc(DATA_CHUNK);let offset=0;
+    while(offset<size){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,size-offset),offset);if(!bytesRead)fail('压缩包读取不完整');hash.update(buffer.subarray(0,bytesRead));offset+=bytesRead;progress('HASHING',{bytes:offset,totalBytes:size});}
+    if(!same(handleInfo,await file.stat({bigint:true}))||!same(info,await lstat(filename,{bigint:true})))fail('压缩包在读取中已改变');
+    sha256=hash.digest('hex');
+  }finally{await file.close();}
+  const archive={protocol:1,fileName:path,format,bytes:size,sha256};
+  if(!archiveUploadSpecification(archive,size,1))fail('压缩包规格无效');
+  const entry={path,size,sha256},manifest=Buffer.from(JSON.stringify({schema:1,directories:[],files:[entry]}));
+  const verify=async()=>{if(!same(info,await lstat(filename,{bigint:true})))fail('压缩包已改变，未请求发布');};
+  return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files:[entry],totalBytes:size,entries:1,archive,verify,
+    openEntry:async()=>{
+      await verify();const handle=await open(filename,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW||0)|(fsConstants.O_NONBLOCK||0));
+      if(!same(handleInfo,await handle.stat({bigint:true}))){await handle.close();fail('压缩包已改变');}
+      return {read:async(offset,chunkBytes=DATA_CHUNK)=>{if(![DATA_CHUNK,16*DATA_CHUNK].includes(chunkBytes))fail('Invalid dataset file chunk size');const buffer=Buffer.alloc(Math.min(chunkBytes,size-offset));const {bytesRead}=await handle.read(buffer,0,buffer.length,offset);if(!bytesRead&&offset<size)fail('压缩包读取不完整');return buffer.subarray(0,bytesRead);},
+        verify:async()=>{await verify();if(!same(handleInfo,await handle.stat({bigint:true})))fail('压缩包已改变');},close:()=>handle.close()};
+    }};
+}
+export async function uploadLocalDataset(call,{machine,name,userId,directory,progress=()=>{},keyStore,filesystem,admission,via='auto'}){
+  const info=await (filesystem?.lstat||fsLstat)(directory,{bigint:true});
+  if(!info.isFile()){
+    if(archiveUploadCapability(admission?.archive))fail('这台仓库只接受压缩包');
+    if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');
+    return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,admission,via});
+  }
+  if(via==='relay')fail('压缩包只走校内直连');
+  const response=await call('datasets.upload.routes',{machine}),capability=archiveUploadCapability(response.result?.archive);
+  const scan=await scanLocalArchive(directory,capability,progress,filesystem);
+  return uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,admission:{...admission,archive:capability},via:'direct'});
+}
 export function snapshotKey(identity){const h=createHash('sha256').update(JSON.stringify(identity)).digest('hex');return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;}
 export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,admission,legacyTransfer=false,via='auto',directFactory=createDirectDatasetTransport,probeRoute=probeDirectUploadRoute}){
   if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');
@@ -67,18 +106,18 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
     if(args.bytes!==undefined){const {bytes,...other}=args;return control(action,{...other,data:bytes.toString('base64')});}
     return control(action,args);
   };
-  const report=value=>{if(uploadIntent&&(value?.uploadId!==uploadIntent.uploadId||value.placementProtocol!==1||value.requestedMachine!==machine||value.storageMachine!==uploadIntent.storageMachine||value.storageTier!=='hdd'||value.legacyPlacement!==false||['name','manifestBytes','totalBytes','entries'].some(field=>value[field]!==uploadIntent.specification[field])))throw Object.assign(Error('Upload session does not match the saved warehouse admission'),{code:'MISMATCH'});confirmDatasetUploadInitialization(value,uploadIntent,machine);storageMachine=uploadStorageMachine(value,machine,storageMachine);state=value;progress(value.state,value);};
+  const report=value=>{if(uploadIntent&&(value?.uploadId!==uploadIntent.uploadId||value.placementProtocol!==1||value.requestedMachine!==machine||value.storageMachine!==uploadIntent.storageMachine||value.storageTier!=='hdd'||value.legacyPlacement!==false||['name','manifestBytes','totalBytes','entries'].some(field=>value[field]!==uploadIntent.specification[field])))throw Object.assign(Error('Upload session does not match the saved warehouse admission'),{code:'MISMATCH'});confirmDatasetUploadInitialization(value,uploadIntent,machine);storageMachine=uploadStorageMachine(value,machine,storageMachine);state=value;progress(scan.archive?(value.phase||value.state):value.state,value);};
   const ready=()=>{if(state.state!=='READY'||!state.dataset||!/^[a-f0-9]{64}$/.test(state.version||''))fail('Server did not confirm a complete verified dataset');return {...state,machine,...(route?{route:{kind:route}}:{})};};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){await new Promise(resolve=>setTimeout(resolve,1500));report(await request('status'));}if(state.state==='FAILED')fail(state.error||'Dataset verification failed; repeat the same upload after fixing the cause');if(state.state==='DISCARDED')fail('Upload was discarded');};
   try{
   const persistedKey=keyStore?.get?.(key),stored=keyStore?.getHandle?.(key),savedIntent=await keyStore?.getIntent?.(key);
   if(persistedKey!==undefined&&persistedKey!==null&&(typeof persistedKey!=='string'||!persistedKey))fail('Saved legacy upload key is invalid');
   if(stored&&(typeof stored.uploadId!=='string'||!stored.uploadId||stored.machine!==machine||stored.name!==name||stored.manifestSha256!==scan.manifestSha256||stored.userId!==undefined&&stored.userId!==userId))fail('Saved upload handle belongs to another account, target or manifest');
-  const begin={name,key:persistedKey||key,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(via==='relay'?{allowRelay:true}:{})};
+  const begin={name,key:persistedKey||key,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(scan.archive?{archive:scan.archive}:{}),...(via==='relay'?{allowRelay:true}:{})};
   const legacy=!savedIntent&&(legacyTransfer===true||typeof persistedKey==='string'&&!!persistedKey||stored?.uploadId&&stored.admissionProtocol!==1);
   if(!legacy){
     if(stored?.admissionProtocol===1&&!savedIntent)fail('Original admission intent is missing; no new upload was allocated');
-    uploadIntent=await allocateDatasetUpload({call:async(op,args)=>(await call(op,args)).result,keyStore,baseKey:key,userId,machine,specification:{name,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries},capability:admission});
+    uploadIntent=await allocateDatasetUpload({call:async(op,args)=>(await call(op,args)).result,keyStore,baseKey:key,userId,machine,specification:{name,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(scan.archive?{archive:scan.archive}:{})},capability:admission});
     begin.key=uploadIntent.uploadId;storageMachine=uploadIntent.storageMachine;uploadId=begin.key;
     if(stored&&stored.uploadId!==begin.key)fail('Saved handle differs from the issued upload UUID');
     if(uploadIntent.beginAttempted){uploadId=begin.key;report(await request('status'));}
@@ -98,12 +137,15 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
       if(via!=='relay'&&advertised?.routeSelection===true&&advertised.directAvailable!==true&&!['not-configured','disabled'].includes(advertised.reason))
         fail('Configured upload listener is unavailable; no automatic VPS fallback was attempted');
       if(via!=='relay'&&advertised?.protocol==='dataset-upload-v1'&&advertised.directAvailable===true){
-        const selected=advertised.routeSelection===true?await selectUploadRoute(await control('routes'),storageMachine,probeRoute):undefined;
+        const advertisedRoutes=advertised.routeSelection===true?await control('routes'):null;
+        const archiveRoutes=scan.archive&&advertisedRoutes?{...advertisedRoutes,routes:advertisedRoutes.routes.filter(route=>route.kind==='campus-direct')}:advertisedRoutes;
+        const selected=archiveRoutes?await selectUploadRoute(archiveRoutes,storageMachine,probeRoute):undefined;
         const ticketArgs=selected?{routeId:selected.id}:{};
         const first=await control('direct-ticket',ticketArgs);
         if(first?.available===true){let initial=true;direct=await directFactory(async()=>{if(initial){initial=false;return first;}return control('direct-ticket',ticketArgs);},{uploadId,route:selected});route=selected?.kind||'campus-direct';}
         else fail('Direct upload authorization is unconfirmed; no relay fallback was attempted');
       }
+      if(scan.archive&&(!direct||route!=='campus-direct'))fail('校内直连暂不可用；保留原上传编号');
       if(!direct){
         if(via==='direct')fail('Direct upload is unavailable on this server; use a verified campus connection or cloud import');
         const limit=Number.isSafeInteger(advertised?.relayLimitBytes)&&advertised.relayLimitBytes>0?Math.min(RELAY_LIMIT_BYTES,advertised.relayLimitBytes):RELAY_LIMIT_BYTES;
