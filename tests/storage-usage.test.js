@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {storageUsageCall,STORAGE_USAGE_TIMEOUT_MS} from '../storage-usage.mjs';
+import {storageUsageCall,STORAGE_USAGE_TIMEOUT_MS,STORAGE_USAGE_TTL_MS} from '../storage-usage.mjs';
 import {MACHINES} from '../dist/model.js';
 
 const digest=id=>createHash('sha256').update(id).digest('hex');
@@ -116,6 +116,45 @@ test('concurrent refreshes reuse the same bounded node observations but never re
   const f=fixture();const [mine,all]=await Promise.all([f.call(),f.call('storage.usage.users',admin)]);
   assert.equal(f.calls.length,MACHINES.length);assert.equal(mine.machines[0].projectBytes,8192);assert.equal(all.users[2].machines[0].projectBytes,16384);
   await f.call();assert.equal(f.calls.length,MACHINES.length);
+});
+
+test('incomplete refreshes cache unknown for 300 seconds without refreshing the old successful timestamp',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:Date.now()});
+  const f=fixture(),collectedAt='2000-01-01T00:00:00Z';
+  f.service.bridge=async(machine,operation,args)=>{
+    f.calls.push({machine,operation,args});
+    const value=sample({complete:false,owners:[],projects:[]});
+    value.storageOverview.cache.projectCollectedAt=collectedAt;return value;
+  };
+  for(let count=0;count<2;count++){
+    const result=await f.call();
+    for(const row of result.machines){
+      assert.equal(row.available,true);assert.equal(row.complete,false);
+      assert.equal(row.projectBytes,null);assert.equal(row.collectedAt,collectedAt);
+      assert.deepEqual(row.projects,[]);
+    }
+  }
+  assert.equal(f.calls.length,MACHINES.length);
+  t.mock.timers.tick(STORAGE_USAGE_TTL_MS-1);
+  await f.call();assert.equal(f.calls.length,MACHINES.length);
+  t.mock.timers.tick(2);
+  const refreshed=await f.call();assert.equal(f.calls.length,2*MACHINES.length);
+  assert.ok(refreshed.machines.every(row=>row.projectBytes===null&&row.collectedAt===collectedAt));
+});
+
+test('complete observations still expire by their original collection time, not the later Portal read',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:Date.now()});
+  const f=fixture(),collectedAt=new Date(Date.now()-STORAGE_USAGE_TTL_MS+1000).toISOString();
+  f.service.bridge=async(machine,operation,args)=>{
+    f.calls.push({machine,operation,args});const value=sample();
+    if(f.calls.length<=MACHINES.length)value.storageOverview.cache.projectCollectedAt=collectedAt;
+    return value;
+  };
+  assert.ok((await f.call()).machines.every(row=>row.projectBytes===8192&&row.collectedAt===collectedAt));
+  t.mock.timers.tick(999);await f.call();assert.equal(f.calls.length,MACHINES.length);
+  t.mock.timers.tick(2);
+  const refreshed=await f.call();assert.equal(f.calls.length,2*MACHINES.length);
+  assert.ok(refreshed.machines.every(row=>row.projectBytes===8192&&row.collectedAt!==collectedAt));
 });
 
 test('account revocation while a capacity read is pending rejects the entire response',async()=>{
