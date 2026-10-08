@@ -87,14 +87,14 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  // no registered versions yet. No capacity or migration success is implied.
  await page.evaluate(target=>{store.data.datasetUploadAdmission={protocol:1,available:true,targetMachine:target};view.render();},machines[0].id);
  const uploadTarget=page.locator('[data-v4-warehouse="'+machines[0].id+'"]');
- assert.equal(await page.locator('.v4-warehouse-card').count(),2);assert.equal(await uploadTarget.locator('.v4-dataset-count').textContent(),'0 个数据集');
+ assert.equal(await page.locator('.v4-warehouse-card').count(),2);assert.equal(await uploadTarget.locator('.v4-dataset-count').textContent(),'1 个数据集','the independently confirmed warehouse keeps its last successful count');
  assert.equal(await uploadTarget.locator('.v4-upload-target[aria-label="上传目标"]').textContent(),'↑');assert.equal(await page.locator('.v4-upload-target').count(),1);
  assert.match(await uploadTarget.locator('.v4-free').textContent(),/未知/);assert.equal(await uploadTarget.locator('.capacity-data').count(),0);
  await uploadTarget.click();assert.equal(await page.locator('[data-v3-select]').count(),0,'upload placement never fabricates migrated versions');await uploadTarget.click();
  assert.equal(await page.locator('[data-v3-select]').count(),role==='admin'?2:1);assert((await inspectGeometry(page,cardRules)).pass);
  if([1440,390].includes(width))await page.screenshot({path:join(output,role+'-upload-target-'+width+'.png'),fullPage:true});
- await page.evaluate(()=>{store.data.datasetUploadAdmission.available=false;view.render();});assert.equal(await page.locator('.v4-warehouse-card').count(),1);assert.equal(await page.locator('.v4-upload-target').count(),0);
- await page.evaluate(()=>{store.data.datasetUploadAdmission={protocol:1,available:true};view.render();});assert.equal(await page.locator('.v4-warehouse-card').count(),1);
+ await page.evaluate(()=>{store.data.datasetUploadAdmission.available=false;view.render();});assert.equal(await page.locator('.v4-warehouse-card').count(),2);assert.equal(await page.locator('.v4-upload-target').count(),0);
+ await page.evaluate(()=>{store.data.datasetUploadAdmission={protocol:1,available:true};view.render();});assert.equal(await page.locator('.v4-warehouse-card').count(),2);
  await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').click();
  assert.equal(await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"] .v4-dataset-count').textContent(),(await page.locator('[data-v3-select]').count())+' 个数据集','overview warehouse card and its filtered rows agree even when the legacy catalog has no matching warehouse location');
  await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').click();
@@ -120,7 +120,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
   },scene);
   if(scene==='shared')await page.locator('[data-v3-filter="'+machines.at(-1).id+'"]').click();
   await geometry();
-  if(scene==='unknown'){assert.equal(await page.locator('.capacity-warehouse.unknown').count(),1);assert.equal(await page.locator('.capacity-proof.confirmed').count(),0);assert(await page.locator('.capacity-warehouse').getAttribute('title'));}
+  if(scene==='unknown'){assert.equal(await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"].storage-reading-stale').count(),1,'failed physical readings retain the last successful volume and are visibly stale');assert.equal(await page.locator('.capacity-proof.confirmed').count(),0);assert(await page.locator('[data-v4-warehouse="'+machines.at(-1).id+'"]').getAttribute('title'));}
   if(scene==='warning'){assert.equal(await page.locator('.capacity-warning').textContent(),'仓库空间不足');assert.equal(await page.locator('[data-v3-upload]').first().isEnabled(),true,'Warning does not ban an upload');}
   if(scene==='shared')assert.equal(await page.locator('[data-v3-filter="'+machines.at(-1).id+'"] .capacity-shared').textContent(),'与仓库同盘');
   await page.evaluate(()=>document.activeElement?.blur());await page.screenshot({path:join(output,role+'-'+scene+'-'+width+'.png'),fullPage:true});
@@ -139,8 +139,8 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  assert(!await page.locator('.v4-training').textContent().then(text=>text.includes('0 B+')));
  assert(!await page.locator('.v4-training').textContent().then(text=>text.includes('容器')));
  await page.evaluate(()=>{const value=structuredClone(snapshot);Object.assign(value.caches[0].volume,{totalBytes:null,usedBytes:null,availableBytes:null,collectedAt:'2026-10-08T01:23:00Z'});view.storageOverview(value);});
- assert.equal(await firstCard.locator('.v3-server-name small b').textContent(),'未知','past collection time does not revive an old physical reading');
- assert.equal(await firstCard.locator('.v4-training-bar.unknown').count(),1);
+ assert.equal(await firstCard.locator('.v3-server-name small b').textContent(),'300.00 GiB','a failed reading retains the last successful reading within ten minutes');assert.equal(await firstCard.evaluate(node=>node.classList.contains('storage-reading-stale')),true);assert((await firstCard.getAttribute('title')).includes('采集于'));
+ assert.equal(await firstCard.locator('.v4-training-bar.unknown').count(),0,'the last successful physical disk still draws its real geometry');
  await page.evaluate(()=>view.storageOverview(snapshot));
  await page.locator('[data-v4-clear=all]').click();
  await page.evaluate(()=>{filesMode='ok';view.storageOverview({...snapshot,filePreviewAvailable:true});});
@@ -170,10 +170,12 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
   await page.screenshot({path:join(output,'admin-cards-'+width+'.png'),fullPage:true});
  }
  await page.evaluate(async()=>{waitReply=new Promise(resolve=>window.releaseOverview=resolve);window.pending=view.loadOverview();store.principal={userId:'new-reader',username:'新成员',role:'member'};store.authGeneration++;view.reset();releaseOverview(snapshot);await pending;});
- assert.equal(await page.locator('#warehouse-capacity').textContent(),'未知','A retired account reply cannot restore warehouse locations, capacity or datasets');assert.equal(await page.locator('[data-v4-warehouse]').count(),0);
- assert.deepEqual(await page.locator('.v4-data-value').allTextContents(),machines.map(()=>'未知'));assert.equal(await page.locator('.v4-project-value').count(),0);
+ assert.equal(await page.locator('#warehouse-capacity .storage-reading-skeleton').count(),1,'A retired account reply cannot restore warehouse locations, capacity or datasets');assert.equal(await page.locator('[data-v4-warehouse]').count(),0);
+ assert.equal(await page.locator('.v4-data-value .storage-reading-skeleton').count(),machines.length);assert.equal(await page.locator('.v4-project-value').count(),0);
  assert.equal(await page.locator('[data-v3-select]').count(),0);
  assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.overview'&&Object.keys(row.args).length===0||row.operation==='datasets.files.list'&&['sample-data','foreign-private'].includes(row.args.dataset)&&row.args.version===version&&Object.keys(row.args).sort().join()==='dataset,version'||row.operation==='datasets.cache.capabilities'&&['sample-data','legacy-data'].includes(row.args.dataset)&&row.args.version===version&&machines.some(machine=>machine.id===row.args.machine)&&Object.keys(row.args).sort().join()==='dataset,machine,version'));assert.deepEqual(errors,[]);await page.close();
 }console.log('CAPACITY UI PASS: simulated member/admin 1440/1024/390/320; normal/unknown/warning/shared, no explanation copy, legacy fallback, account fence, readonly room gating.');}finally{await browser.close();}
 
 await import('./warehouse-redraw-focus-ui-smoke.mjs');
+
+await import('./storage-reading-stability-ui-smoke.mjs');

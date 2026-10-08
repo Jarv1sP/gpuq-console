@@ -36,3 +36,6 @@
  .sb .storage-member-table :is(td,th){padding:8px 12px}
  .sb .storage-member-table .num{font-size:12px}
 }
+
+.storage-member-table tr.storage-reading-stale,.storage-member-grid>div.storage-reading-stale{opacity:.6}
+.storage-members-loading{padding:24px}.storage-members-loading .storage-reading-skeleton{width:100%;height:24px}
