@@ -148,8 +148,10 @@ try{
       assert.equal(await page.locator('.storage-warehouse-badge').count(),0,'list must not prove warehouse READY when catalog is unavailable');
       assert.equal(await page.locator('.storage-warehouse-pending').count(),machines.length);
       await page.locator('[data-storage-view=members]').click();
-      assert.equal(await chen.locator('[data-member-size=warehouse]').textContent(),'待确认');
-      assert.equal(await bob.locator('[data-member-size=warehouse]').textContent(),'待确认');
+      assert.equal(await chen.locator('[data-member-size=warehouse]').textContent(),'7.00 GiB','failed catalog retains the last confirmed member warehouse reading');
+      assert.equal(await bob.locator('[data-member-size=warehouse]').textContent(),'0 B','a confirmed zero remains distinct from an unknown reading');
+      assert.equal(await chen.evaluate(node=>node.classList.contains('storage-reading-stale')),true,'retained nonzero reading is visibly stale');
+      assert.equal(await bob.evaluate(node=>node.classList.contains('storage-reading-stale')),true,'retained zero reading is visibly stale');
       await page.screenshot({path:join(out,'warehouse-unconfirmed-'+width+'.png'),fullPage:true});
       await page.locator('[data-storage-view=servers]').click();
     }

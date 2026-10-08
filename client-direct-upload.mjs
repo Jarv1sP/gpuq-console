@@ -2,6 +2,7 @@ import {Agent,request as httpsRequest} from 'node:https';
 import {connect as tlsConnect} from 'node:tls';
 import {createHash,timingSafeEqual} from 'node:crypto';
 import {assertUploadRouteGrant,uploadProbeFailureCode} from './dist/upload-routes.js';
+import {validCampusTicketTime} from './dist/campus-ticket-time.js';
 
 export const RELAY_LIMIT_BYTES=256*1024*1024;
 const PROTOCOL='dataset-upload-v1',CHUNK=1024*1024,MAX_FILE_CHUNK=16*1024*1024,RESPONSE_LIMIT=2*1024*1024;
@@ -23,7 +24,7 @@ export function validateDirectGrant(value,now=Date.now()/1000){
   let endpoint;try{endpoint=new URL(value.endpoint);}catch{denied('Invalid direct upload endpoint');}
   if(endpoint.protocol!=='https:'||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||endpoint.pathname!=='/'||endpoint.origin!==value.endpoint)
     denied('Direct upload requires an HTTPS origin without credentials or redirects');
-  if(!/^[a-f0-9]{64}$/.test(value.certificateSha256||'')||!Number.isSafeInteger(value.expiresAt)||value.expiresAt<=now||value.expiresAt>now+601||value.chunkBytes!==CHUNK||typeof value.ticket!=='string'||!/^[A-Za-z0-9_.-]{20,4096}$/.test(value.ticket))
+  if(!/^[a-f0-9]{64}$/.test(value.certificateSha256||'')||!validCampusTicketTime(value,now)||value.chunkBytes!==CHUNK||typeof value.ticket!=='string'||!/^[A-Za-z0-9_.-]{20,4096}$/.test(value.ticket))
     denied('Invalid or expired direct upload grant');
   if(value.maxChunkBytes!==undefined&&![CHUNK,MAX_FILE_CHUNK].includes(value.maxChunkBytes))denied('Invalid direct file chunk limit');
   return {...value,endpoint:endpoint.origin};

@@ -156,7 +156,7 @@ test('mismatched final manifest counts never emit READY',async()=>{
 });
 test('malformed, redirected or changed direct grants never expose the bearer to another endpoint',async()=>{
   const good={available:true,protocol:'dataset-upload-v1',endpoint,certificateSha256:'a'.repeat(64),ticket:'fixture-only-ticket-test',expiresAt:1300,chunkBytes:CHUNK_BYTES};
-  for(const patch of [{endpoint:'http://node.test'},{endpoint:'https://node.test/path'},{endpoint:'https://user:pass@node.test'},{protocol:'other'},{ticket:'bad\r\nCookie: steal'},{expiresAt:999},{chunkBytes:CHUNK_BYTES+1}])assert.throws(()=>validateBrowserUploadGrant({...good,...patch},1000));
+  for(const patch of [{endpoint:'http://node.test'},{endpoint:'https://node.test/path'},{endpoint:'https://user:pass@node.test'},{protocol:'other'},{ticket:'bad\r\nCookie: steal'},{expiresAt:880},{chunkBytes:CHUNK_BYTES+1}])assert.throws(()=>validateBrowserUploadGrant({...good,...patch},1000));
   const f=await fixture();const call=f.options.call;let tickets=0;
   f.options.call=async(...args)=>{const result=await call(...args);if(args[0].endsWith('.direct-ticket')&&++tickets===2)return {...result,endpoint:'https://other.test'};return result;};
   const send=f.options.fetch;f.options.fetch=async(...args)=>{const result=await send(...args);f.advance();return result;};
