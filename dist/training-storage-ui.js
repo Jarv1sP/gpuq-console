@@ -19,12 +19,14 @@ export function trainingStorageMessage(error){
 export function trainingSelectionHTML(job){
   const summary=job?.selectionSummary;
   if(summary?.protocol!==1||!job.machine||summary.selectedMachine!==job.machine)return '';
-  const lines=Array.isArray(summary.storageExcluded)?summary.storageExcluded.flatMap(item=>{
+  const reason=summary.reason==='storage-fit-and-resource-rank'&&summary.storageVerified===true?'按存储容量、显卡和排队情况选择。':'';
+  const excluded=Array.isArray(summary.storageExcluded)?summary.storageExcluded.flatMap(item=>{
     const reason={'storage-insufficient':'空间不足','storage-unverified':'空间未核实'}[item?.reason];
     return typeof item?.machine==='string'&&reason?[`${item.machine} ${reason}`]:[];
   }):[];
-  const help=lines.length?infoHTML(lines.join('\n'),'未选择的服务器').replace('<summary ',`<summary class="training-storage-info" title="${escape(lines.join('\n'))}" `):'';
-  return `<div class="training-selection"><span class="training-selection-machine">自动选择 <span class="server-id" title="${escape(job.machine)}">${escape(job.machine)}</span></span>${help}</div>`;
+  const lines=[...(reason?[reason]:[]),...excluded];
+  const help=lines.length?infoHTML(lines.join('\n'),reason?'自动选择原因':'未选择的服务器').replace('<summary ',`<summary class="training-storage-info" title="${escape(lines.join('\n'))}" `):'';
+  return `<div class="training-selection"><span class="training-selection-machine">已分配到 <span class="server-id" title="${escape(job.machine)}">${escape(job.machine)}</span></span>${help}</div>`;
 }
 export function createDatasetReadChoice({call,changed=()=>{}}){
   let generation=0,controller=null,pending=null,key='',state={available:false,reason:'',mode:'cache',loading:false};
