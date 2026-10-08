@@ -263,6 +263,8 @@ try{
       const facts=await panel.locator('.v3-server').evaluateAll(nodes=>nodes.map(node=>{const name=node.querySelector('.v3-server-text'),glyph=node.querySelector('.v3-g'),r=name.getBoundingClientRect(),g=glyph.getBoundingClientRect(),text=node.querySelector('.v3-server-text>span');return {centred:Math.abs(r.y+r.height/2-g.y-g.height/2)<=1,caption:text.textContent.trim(),stateHeight:text.getBoundingClientRect().height,line:parseFloat(getComputedStyle(text).lineHeight),nowrap:getComputedStyle(text).whiteSpace==='nowrap'};}));assert.ok(facts.every(row=>row.centred&&(row.caption?row.nowrap&&Number.isFinite(row.line)&&row.stateHeight<=row.line+1:row.stateHeight===0)),'server facts remain aligned and readable: '+JSON.stringify({role,width,dataset,facts}));
       assert.ok(await panel.evaluate(node=>node.scrollWidth<=node.clientWidth+1),'detail has no horizontal overflow');
       if(width<760){for(const action of await panel.locator('button:visible').all())assert.ok(await action.evaluate(node=>node.getBoundingClientRect().height>=44),'mobile detail actions retain distinct 44px targets');}
+      const targets=await panel.locator('button:visible,select:visible,summary:visible,a[href]:visible').evaluateAll(nodes=>nodes.map(node=>({name:node.textContent.trim()||node.getAttribute('aria-label'),width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})));
+      assert.ok(targets.length>0&&targets.every(node=>node.width>=44&&node.height>=44),'all default and mobile detail targets are at least 44px: '+JSON.stringify({role,width,dataset,targets}));
     }
     await datasetDetail(page,'scans');
     if(width===390){

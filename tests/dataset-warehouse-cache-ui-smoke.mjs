@@ -65,6 +65,10 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  for(const machine of machines.slice(2)){const legacy=page.locator('[data-v3-cache="'+machine.id+'"]');assert.equal(await legacy.count(),1);assert.equal(await legacy.isEnabled(),true);assert.equal(await legacy.textContent(),'缓存');}
  assert.equal(await page.locator('[data-v3-cache="'+target+'"]').count(),0,'A protocol1 prepare row uses the new action exclusively');
  assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.cache.capabilities'));
+ const targets=await page.locator('#warehouse-inspector button:visible').evaluateAll(nodes=>nodes.map(node=>({name:node.textContent.trim(),width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})));
+ assert(targets.some(row=>row.name==='转移到…')&&targets.some(row=>row.name==='释放缓存')&&targets.some(row=>row.name==='缓存')&&targets.some(row=>row.name==='复制'),'new and legacy detail operations remain visible');
+ assert(targets.every(node=>node.width>=44&&node.height>=44),'cache, transfer, release and copy retain default/mobile 44px targets: '+JSON.stringify({width,targets}));
+ await page.screenshot({path:join(output,'touch-'+role+'-'+width+'.png'),fullPage:true});
  await button('transfer').click();assert.equal(await page.locator('#warehouse-cache-action select option').count(),1);
  assert.equal(await page.locator('[data-cache-transfer-source] [data-cache-start]').count(),0);
  await page.locator('[data-cache-transfer-target] [data-cache-start]').click();await page.waitForFunction(()=>document.querySelector('[data-state=RUNNING]'));
