@@ -233,6 +233,10 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v4-training-values{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;font-size:12px;color:var(--ink-2);min-width:0}
 #page-datasets .v4-training-values>span{display:inline-flex;align-items:center;gap:5px;min-width:0}
 #page-datasets .v4-training-values i,#page-datasets .v4-training-key i{display:inline-block;width:7px;height:7px;border-radius:2px;flex:none}
+#page-datasets :is(.v4-training-card,.v4-warehouse-card).v4-maintenance-card{min-height:98px;align-content:center;gap:12px}
+#page-datasets .v4-maintenance-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 13px var(--mono)}
+#page-datasets .v4-maintenance-state{display:inline-flex;align-items:center;gap:8px;font:12px var(--sans);color:var(--ink-2)}
+#page-datasets .v4-maintenance-state::before{content:'';width:8px;height:10px;border-inline:2px solid currentColor;box-sizing:border-box}
 #page-datasets .v4-training-key{display:inline-flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:11px}
 #page-datasets .v4-training-key>span{display:inline-flex;align-items:center;gap:5px}
 #page-datasets .v4-training-key .v4-other{border:1px solid var(--line-2)}

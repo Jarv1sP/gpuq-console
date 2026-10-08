@@ -179,7 +179,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function rail(){
   const root=section.querySelector('#warehouse-server-rail');if(!root)return;
   const rows=model?.machines||(store.data?.machines||[]).map(row=>({machine:row.id})),facts=capacityDisplay();
-  html(root,rows.map(row=>trainingCardHTML(history().project('training',row.machine,facts.caches.find(value=>value.machine===row.machine)||{machine:row.machine},TRAINING_READING_FIELDS),filter===row.machine,row.machine===machine())).join(''));
+  html(root,rows.map(row=>trainingCardHTML({...history().project('training',row.machine,facts.caches.find(value=>value.machine===row.machine)||{machine:row.machine},TRAINING_READING_FIELDS),maintenance:maintenanceFor(store.data?.operationalMaintenance,row.machine)},filter===row.machine,row.machine===machine())).join(''));
   const key=section.querySelector('#warehouse-training-key');if(key)html(key,trainingLegendHTML(facts.caches));capacityOverview();
  }
  function capacityDisplay(){
@@ -194,7 +194,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
    const cards=warehouseStorageCards(overview,model,capacities,capacityCatalog||model,store.data?.datasetUploadAdmission),memory=history();
    for(const machine of memory.warehouses())if(!cards.some(row=>row.machine===machine))cards.push({machine});
    const display=cards.map(card=>{const row=memory.project('warehouse',card.machine,card,WAREHOUSE_READING_FIELDS);row.known=row.totalBytes>0&&row.usedBytes!==null&&row.availableBytes!==null&&row.contentBytes!==null&&row.usedBytes+row.availableBytes<=row.totalBytes;return row;});
-   html(warehouse,display.map(row=>warehouseCardHTML(row,warehouseFilter===row.machine)).join('')||(memory.loading('warehouse')?'<div class="v4-warehouse-empty" aria-label="读取中"><span class="storage-reading-skeleton"></span></div>':'<div class="v4-warehouse-empty">未知</div>'));
+   html(warehouse,display.map(row=>warehouseCardHTML({...row,maintenance:maintenanceFor(store.data?.operationalMaintenance,row.machine)},warehouseFilter===row.machine)).join('')||(memory.loading('warehouse')?'<div class="v4-warehouse-empty" aria-label="读取中"><span class="storage-reading-skeleton"></span></div>':'<div class="v4-warehouse-empty">未知</div>'));
   }
  }
  function filters(){
