@@ -192,7 +192,7 @@ try{
   const inspector=desktop.locator('#warehouse-inspector'),sourceRow=inspector.locator('.v3-server').filter({has:desktop.locator('.v3-server-text>b[title="'+sourceMachine+'"]')}),targetRow=inspector.locator('.v3-server.cur');
   await sourceRow.hover();assert.equal(prepared.length,0,'inspecting the true READY source is read-only');
   assert.equal(await sourceRow.locator('.v3-server-text>b').getAttribute('title'),sourceMachine);
-  assert.equal(await sourceRow.locator('.v3-server-text>span').textContent(),'已缓存','confirmed cache state retains the exact label added by the local-cache access fix');
+  assert.equal(await sourceRow.locator('.v3-server-text>span').textContent(),'','confirmed state is represented by its symbol, not repeated explanation text');
   assert.equal(await sourceRow.locator('.v3-g.ready[role=img]').count(),1);assert.equal(await sourceRow.locator('.v3-g').getAttribute('aria-label'),'已缓存');assert.equal(await sourceRow.locator('.v3-g').getAttribute('title'),'已缓存');
   assert.equal(await sourceRow.locator('[data-v3-cache]').count(),0,'a READY source has no redundant cache operation');
   assert.equal(await targetRow.locator('.v3-server-text>b').getAttribute('title'),targetMachine);
