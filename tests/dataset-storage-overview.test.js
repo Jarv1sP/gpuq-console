@@ -143,8 +143,9 @@ test('catalog and capacity reads start in one window without waiting for an offl
   };
   const pending=f.call();
   try{
-    // All first-stage reads are dispatched synchronously; no sleeps or timing
-    // thresholds can hide a reintroduced sequential dependency.
+    // Flush the deadline wrapper's dispatch microtasks while the catalog gate
+    // remains closed; no elapsed threshold can hide a sequential dependency.
+    await new Promise(setImmediate);
     assert.equal(f.calls.filter(row=>row.operation==='datasets.capacity').length,MACHINES.length);
     assert.equal(f.calls.filter(row=>row.operation==='datasets.list').length,0);
   }finally{releaseCatalog();}
@@ -163,6 +164,7 @@ test('revocation while a concurrent catalog is pending cannot expose already-col
     return bridge(machine,operation,args);
   };
   const pending=f.call();
+  await new Promise(setImmediate);
   assert.equal(f.calls.filter(row=>row.operation==='datasets.capacity').length,MACHINES.length);
   f.user.enabled=false;releaseCatalog();
   await assert.rejects(pending,error=>error.status===403);
