@@ -115,6 +115,19 @@ function admittedUploadIdentity(value,intent,machine){
   if(intent&&['name','manifestBytes','totalBytes','entries'].some(key=>value[key]!==intent.specification[key]))throw uploadError('上传结果与本地清单不符。','MISMATCH');
 }
 
+// Only a fixed-HDD, authenticated location result may confirm that an issued
+// UUID has not yet reached node initialization. A timeout, HTTP 400/404 or an
+// incomplete session is never absence and cannot authorize another begin.
+export function confirmDatasetUploadInitialization(value,intent,machine){
+  if(value?.state!=='NOT_INITIALIZED')return;
+  if(!intent||intent.beginAttempted!==true||value.initializationProtocol!==1||value.nodePresent!==false||
+    value.admissionProtocol!==1||value.admissionKey!==intent.key||
+    value.userId!==intent.userId||value.manifestOffset!==0||
+    specificationKeys.some(key=>value[key]!==intent.specification[key]))
+    throw uploadError('原上传尚未初始化的证据未确认；未重新初始化。','MISMATCH');
+  admittedUploadIdentity(value,intent,machine);
+}
+
 // Browser TLS/CORS remain mandatory; the portal certificate pin is identity
 // metadata, not an instruction to bypass the browser's certificate checks.
 export function validateBrowserUploadGrant(value,now=Date.now()/1000){
@@ -226,7 +239,7 @@ export async function uploadBrowserDataset({call,admissionCall=call,admission,us
   if(via==='relay'&&scan.totalBytes>LARGE_RELAY_BYTES&&allowRelay!==true)throw uploadError('超过 256 MiB，请先确认经门户中转。','RELAY_CONSENT',{canRelay:true});
   let uploadId,state,direct,route,transport,storageMachine,uploadIntent;
   const control=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'&&(action!=='routes'||state?.placementProtocol===1)?{uploadId}:{}),...args});alive(signal);return result;};
-  const report=(current,extra={})=>{if(!current||typeof current.state!=='string')throw uploadError('上传状态未确认。');admittedUploadIdentity(current,uploadIntent,machine);storageMachine=uploadStorageMachine(current,machine,storageMachine);state=current;onProgress({...current,...(current.state==='READY'?{state:'PUBLISHING',confirmationPending:true}:{}),...extra});};
+  const report=(current,extra={})=>{if(!current||typeof current.state!=='string')throw uploadError('上传状态未确认。');admittedUploadIdentity(current,uploadIntent,machine);confirmDatasetUploadInitialization(current,uploadIntent,machine);storageMachine=uploadStorageMachine(current,machine,storageMachine);state=current;onProgress({...current,...(current.state==='READY'?{state:'PUBLISHING',confirmationPending:true}:{}),...extra});};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){alive(signal);await pause(pollMs);report(await control('status'));}if(state.state==='FAILED')throw uploadError(state.error||'服务端校验失败。','FAILED');if(state.state==='DISCARDED')throw uploadError('这次上传已取消。','DISCARDED');};
   const ready=async()=>{
     const last=await control('status');alive(signal);

@@ -4,7 +4,7 @@ import {basename,join,resolve} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {createDirectDatasetTransport,probeDirectUploadRoute,RELAY_LIMIT_BYTES} from './client-direct-upload.mjs';
 import {selectUploadRoute,uploadStorageMachine} from './dist/upload-routes.js';
-import {allocateDatasetUpload,saveDatasetUploadIntent} from './dist/dataset-upload.js';
+import {allocateDatasetUpload,saveDatasetUploadIntent,confirmDatasetUploadInitialization} from './dist/dataset-upload.js';
 export const DATA_CHUNK=1024*1024;
 const DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
 const fail=message=>{throw Error(message);};
@@ -67,9 +67,10 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
     if(args.bytes!==undefined){const {bytes,...other}=args;return control(action,{...other,data:bytes.toString('base64')});}
     return control(action,args);
   };
-  const report=value=>{if(uploadIntent&&(value?.uploadId!==uploadIntent.uploadId||value.placementProtocol!==1||value.requestedMachine!==machine||value.storageMachine!==uploadIntent.storageMachine||value.storageTier!=='hdd'||value.legacyPlacement!==false||['name','manifestBytes','totalBytes','entries'].some(field=>value[field]!==uploadIntent.specification[field])))throw Object.assign(Error('Upload session does not match the saved warehouse admission'),{code:'MISMATCH'});storageMachine=uploadStorageMachine(value,machine,storageMachine);state=value;progress(value.state,value);};
+  const report=value=>{if(uploadIntent&&(value?.uploadId!==uploadIntent.uploadId||value.placementProtocol!==1||value.requestedMachine!==machine||value.storageMachine!==uploadIntent.storageMachine||value.storageTier!=='hdd'||value.legacyPlacement!==false||['name','manifestBytes','totalBytes','entries'].some(field=>value[field]!==uploadIntent.specification[field])))throw Object.assign(Error('Upload session does not match the saved warehouse admission'),{code:'MISMATCH'});confirmDatasetUploadInitialization(value,uploadIntent,machine);storageMachine=uploadStorageMachine(value,machine,storageMachine);state=value;progress(value.state,value);};
   const ready=()=>{if(state.state!=='READY'||!state.dataset||!/^[a-f0-9]{64}$/.test(state.version||''))fail('Server did not confirm a complete verified dataset');return {...state,machine,...(route?{route:{kind:route}}:{})};};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){await new Promise(resolve=>setTimeout(resolve,1500));report(await request('status'));}if(state.state==='FAILED')fail(state.error||'Dataset verification failed; repeat the same upload after fixing the cause');if(state.state==='DISCARDED')fail('Upload was discarded');};
+  try{
   const persistedKey=keyStore?.get?.(key),stored=keyStore?.getHandle?.(key),savedIntent=await keyStore?.getIntent?.(key);
   if(persistedKey!==undefined&&persistedKey!==null&&(typeof persistedKey!=='string'||!persistedKey))fail('Saved legacy upload key is invalid');
   if(stored&&(typeof stored.uploadId!=='string'||!stored.uploadId||stored.machine!==machine||stored.name!==name||stored.manifestSha256!==scan.manifestSha256||stored.userId!==undefined&&stored.userId!==userId))fail('Saved upload handle belongs to another account, target or manifest');
@@ -78,7 +79,7 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
   if(!legacy){
     if(stored?.admissionProtocol===1&&!savedIntent)fail('Original admission intent is missing; no new upload was allocated');
     uploadIntent=await allocateDatasetUpload({call:async(op,args)=>(await call(op,args)).result,keyStore,baseKey:key,userId,machine,specification:{name,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries},capability:admission});
-    begin.key=uploadIntent.uploadId;storageMachine=uploadIntent.storageMachine;
+    begin.key=uploadIntent.uploadId;storageMachine=uploadIntent.storageMachine;uploadId=begin.key;
     if(stored&&stored.uploadId!==begin.key)fail('Saved handle differs from the issued upload UUID');
     if(uploadIntent.beginAttempted){uploadId=begin.key;report(await request('status'));}
     else uploadIntent=await saveDatasetUploadIntent(keyStore,key,{...uploadIntent,beginAttempted:true});
@@ -90,7 +91,6 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
   if(state.state==='DISCARDED'){if(uploadIntent)fail('Upload was discarded; its issued UUID will not be silently replaced');begin.key=randomUUID();await keyStore.set(key,begin.key);report(await request('begin',begin));}
   uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)fail('Server did not return an upload identifier');progress('HANDLE',{uploadId,machine,...(state.placementProtocol===1?{requestedMachine:machine,storageMachine,storageTier:state.storageTier}:{})});
   await keyStore?.setHandle?.(key,{uploadId,machine,name,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(uploadIntent?{admissionProtocol:1,userId}:{})});
-  try{
     if(!['READY','PUBLISHING'].includes(state.state)){
       const advertised=state.uploadTransport;
       if(via!=='relay'&&advertised?.directAvailable===true&&advertised.protocol!=='dataset-upload-v1')
@@ -148,7 +148,7 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
     // A directory edit or any previously uploaded file change invalidates this local snapshot.
     await scan.verify();
     report(await request('commit'));await waitFor();return ready();
-  }catch(error){fail(`${error.message}\nUpload: ${uploadId} on ${machine}. Repeat the same data upload command to resume; check with gpuctl data upload-status ${uploadId} --machine ${machine}. Do not assume an interrupted request canceled server verification.`);}finally{direct?.close();}
+  }catch(error){if(!uploadId)throw error;const cause=Object.assign(Error(`${error.message}\nUpload: ${uploadId} on ${machine}. Repeat the same data upload command to resume; check with gpuctl data upload-status ${uploadId} --machine ${machine}. Do not assume an interrupted request canceled server verification.`),{uploadId,machine});if(error.status!==undefined)cause.status=error.status;if(error.code!==undefined)cause.code=error.code;throw cause;}finally{direct?.close();}
 }
 
 export function workspaceDataPath(path,{directory=false}={}){

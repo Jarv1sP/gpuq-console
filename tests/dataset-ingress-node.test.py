@@ -1,5 +1,7 @@
 """Fixed owner/key lookup never creates an upload, workspace or false absence."""
 import hashlib
+import fcntl
+import ast
 import importlib.util
 import json
 import os
@@ -30,11 +32,13 @@ class Lookup(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.cache = D.DatasetCache(Path(self.temp.name).resolve()/'cache', reserve_bytes=0)
+        with self.cache._locked():pass  # Existing admission lock; discovery never creates it.
         mount=local_data_mounts(Path(self.temp.name).resolve());mount.start();self.addCleanup(mount.stop)
         self.user = 'demo-user-1'
         self.upload = str(uuid.uuid4())
         self.node = SimpleNamespace(CONFIG={'machine': 'gpu-4', 'storageArchive': {
             'enabled': True, 'machine': 'gpu-4', 'authority': 'hdd'}, 'storageAuthority': {'enabled': True}},
+            dataset_upload_location_cache=lambda:(D,self.cache),
             dataset_cache=lambda: (D, self.cache), workspace=lambda _: self.fail('lookup called workspace'),
             dataset_mount_check=lambda _:None,ROOT=Path(self.temp.name).resolve())
         self.node.CONFIG['datasets']={'root':str(self.cache.root),'mountPoint':str(self.node.ROOT),'reserveBytes':0}
@@ -203,6 +207,166 @@ class Lookup(unittest.TestCase):
                 self.node.CONFIG['workspaceReserveBytes']=value
                 with self.subTest(split=split,value=value),self.assertRaisesRegex(ValueError,'workspace free-space reserve'):
                     I.locate(self.node,self.capacity_args())
+
+
+class InitializationLookup(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.cache = D.DatasetCache(Path(self.temp.name).resolve()/'cache', reserve_bytes=0)
+        with self.cache._locked():pass  # Required existing admission lock, not a locate write.
+        self.user = 'demo-user-1'
+        self.upload = str(uuid.uuid4())
+        self.node = SimpleNamespace(CONFIG={'machine': 'gpu-4', 'storageArchive': {
+            'enabled': True, 'machine': 'gpu-4', 'authority': 'hdd'}, 'storageAuthority': {'enabled': True}},
+            dataset_upload_location_cache=lambda:(D,self.cache),
+            dataset_cache=lambda:self.fail('lookup called initializing cache factory'),
+            dataset_source_cache=lambda:self.fail('lookup called initializing warehouse factory'),
+            workspace=lambda _: self.fail('lookup called workspace'))
+        self.args = {'userId': self.user, 'uploadId': self.upload}
+        self.folder = self.cache.root/'.uploads'/hashlib.sha256(self.user.encode()).hexdigest()/self.upload
+
+    def seed(self, **changes):
+        D._mkdir(self.cache.root/'.uploads');D._mkdir(self.folder.parent);D._mkdir(self.folder)
+        value = {'schema': 1, **self.args, 'name': 'real-data', 'manifestBytes': 100,
+                 'manifestSha256': 'a'*64, 'totalBytes': 12, 'entries': 2, **changes}
+        D._write_json(self.folder/'session.json', value)
+
+    def test_unknown_is_pure_read_and_authority_is_fixed(self):
+        result = I.locate(self.node, self.args)
+        self.assertFalse(result['present']);self.assertTrue(result['authority']['enabled'])
+        self.assertEqual({key:result[key] for key in ('state','initializationProtocol','nodePresent','userId')},
+                         dict(state='NOT_INITIALIZED',initializationProtocol=1,nodePresent=False,userId=self.user))
+        self.assertFalse((self.cache.root/'.uploads').exists())
+        self.node.CONFIG['storageTier'] = {'enabled': True}
+        other = I.locate(self.node, self.args)
+        self.assertFalse(other['authority']['enabled']);self.assertNotIn('state',other)
+
+    def test_missing_required_parent_lock_or_root_never_means_uninitialized(self):
+        for name in ('.upload-reservations','.lock'):
+            path=self.cache.root/name;backup=self.cache.root/(name+'-backup');path.rename(backup)
+            try:
+                with self.subTest(name=name),self.assertRaises(FileNotFoundError):I.locate(self.node,self.args)
+                self.assertFalse(path.exists(),'read must not recreate required metadata')
+            finally:backup.rename(path)
+        root=self.cache.root;backup=root.with_name('moved');root.rename(backup)
+        try:
+            with self.assertRaises(FileNotFoundError):I.locate(self.node,self.args)
+            self.assertFalse(root.exists())
+        finally:backup.rename(root)
+
+    def test_orphan_session_folder_marker_or_reservation_is_unknown(self):
+        D._mkdir(self.cache.root/'.uploads');D._mkdir(self.folder.parent);D._mkdir(self.folder)
+        with self.assertRaisesRegex(ValueError,'absence is unconfirmed'):I.locate(self.node,self.args)
+        D._write_json(self.folder/'chunk.json',{'offset':0})
+        with self.assertRaisesRegex(ValueError,'absence is unconfirmed'):I.locate(self.node,self.args)
+        (self.folder/'chunk.json').unlink();self.folder.rmdir()
+        key=hashlib.sha256(json.dumps([self.user,self.upload],separators=(',',':')).encode()).hexdigest()
+        for name in ('.upload-admissions','.upload-reservations'):
+            parent=self.cache.root/name;D._mkdir(parent);path=parent/(key+'.json');D._write_json(path,None)
+            try:
+                with self.subTest(name=name),self.assertRaisesRegex(ValueError,'absence is unconfirmed'):I.locate(self.node,self.args)
+            finally:path.unlink()
+
+    def test_busy_lock_and_io_errors_are_not_absence(self):
+        lock=os.open(self.cache.root/'.lock',os.O_RDWR)
+        try:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):I.locate(self.node,self.args)
+        finally:os.close(lock)
+        self.seed()
+        for error in (FileNotFoundError('session disappeared'),PermissionError('denied'),OSError('I/O failed')):
+            with patch.object(D,'_read_json',side_effect=error):
+                with self.subTest(error=type(error).__name__),self.assertRaises(type(error)):I.locate(self.node,self.args)
+
+    def test_optional_parent_symlinks_and_replaced_root_fail_closed(self):
+        for name in ('.uploads','.upload-admissions'):
+            path=self.cache.root/name;path.symlink_to(self.cache.root/'missing')
+            try:
+                with self.subTest(name=name),self.assertRaises(OSError):I.locate(self.node,self.args)
+            finally:path.unlink()
+        original=self.cache._root_identity;self.cache._root_identity=(0,0)
+        try:
+            with self.assertRaisesRegex(ValueError,'root identity'):I.locate(self.node,self.args)
+        finally:self.cache._root_identity=original
+
+    def test_lock_replacement_during_read_invalidates_absence_proof(self):
+        original=I._session_exists
+        def replaced(*args):
+            value=original(*args)
+            (self.cache.root/'.lock').rename(self.cache.root/'.old-lock')
+            D._write_json(self.cache.root/'.lock',{})
+            return value
+        with patch.object(I,'_session_exists',side_effect=replaced):
+            with self.assertRaisesRegex(ValueError,'lock identity changed'):I.locate(self.node,self.args)
+
+    def test_unsafe_directory_lock_and_corrupt_session_are_never_absent(self):
+        D._mkdir(self.cache.root/'.uploads')
+        path=self.cache.root/'.uploads';path.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(ValueError,'directory identity is unsafe'):I.locate(self.node,self.args)
+        finally:path.chmod(0o700)
+        lock=self.cache.root/'.lock';lock.rename(self.cache.root/'.old-lock');lock.symlink_to(self.cache.root/'missing')
+        try:
+            with self.assertRaises(OSError):I.locate(self.node,self.args)
+        finally:lock.unlink();(self.cache.root/'.old-lock').rename(lock)
+        self.seed()
+        with self.folder.joinpath('session.json').open('wb') as stream:stream.write(b'{invalid')
+        with self.assertRaises(D.CacheError):I.locate(self.node,self.args)
+
+    def test_absence_is_owner_scoped_and_read_has_no_filesystem_changes(self):
+        before={str(path.relative_to(self.cache.root)):path.stat().st_ino for path in self.cache.root.rglob('*')}
+        self.assertEqual(I.locate(self.node,self.args)['userId'],self.user)
+        self.assertEqual({str(path.relative_to(self.cache.root)):path.stat().st_ino for path in self.cache.root.rglob('*')},before)
+        self.seed()
+        self.assertEqual(I.locate(self.node,{**self.args,'userId':'demo-user-2'})['state'],'NOT_INITIALIZED')
+
+    def test_real_executor_location_factory_never_constructs_cache_or_warehouse(self):
+        tree=ast.parse((DEPLOY/'node-executor.py').read_text())
+        function=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='dataset_upload_location_cache')
+        hot=Path(self.temp.name).resolve()/'untouched-hot'
+        for warehouse in (False,True):
+            config={**self.node.CONFIG,'datasets':dict(root=str(self.cache.root),mountPoint=str(self.cache.root.parent))}
+            if warehouse:
+                config.update(storageTier={'enabled':True,'budgetBytes':1024},
+                              datasets=dict(root=str(hot),mountPoint=str(hot.parent)),
+                              storageWarehouse=dict(enabled=True,root=str(self.cache.root),
+                                                    mountPoint=str(self.cache.root.parent),reserveBytes=0))
+            checked=[]
+            namespace=dict(CONFIG=config,DATASET_MODULE=D,HERE=DEPLOY,importlib=importlib,os=os,
+                           SimpleNamespace=SimpleNamespace,dataset_mount_check=lambda value:checked.append(value))
+            exec(compile(ast.Module(body=[function],type_ignores=[]),'<real readonly location factory>','exec'),namespace)
+            before={str(path):path.stat().st_ino for path in self.cache.root.rglob('*')}
+            with patch.object(D.DatasetCache,'__init__',side_effect=AssertionError('constructor called')),\
+                 patch.object(D,'_mkdir',side_effect=AssertionError('mkdir called')),\
+                 patch.object(D.DatasetCache,'_current_mount',return_value=None):
+                module,cache=namespace['dataset_upload_location_cache']()
+                self.assertIs(module,D);self.assertEqual(cache.root,self.cache.root)
+                self.assertEqual(cache._root_identity,self.cache._root_identity)
+                self.assertEqual(checked[0]['root'],str(self.cache.root))
+                self.node.dataset_upload_location_cache=lambda:(module,cache)
+                self.assertEqual(I.locate(self.node,self.args)['state'],'NOT_INITIALIZED')
+            self.assertEqual({str(path):path.stat().st_ino for path in self.cache.root.rglob('*')},before)
+            self.assertFalse(hot.exists(),'cold location must not initialize the hot cache')
+
+    def test_existing_identity_returns_only_fixed_spec_without_credentials(self):
+        self.seed(transferToken='secret-do-not-return')
+        result = I.locate(self.node, self.args)
+        self.assertTrue(result['present'])
+        self.assertEqual(set(result['specification']), {'name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries'})
+        self.assertNotIn('secret', str(result));self.assertNotIn('transferToken', str(result))
+
+    def test_corrupt_cross_owner_and_transfer_sessions_never_mean_absent(self):
+        for change in ({'userId': 'demo-user-2'}, {'entries': True}, {'archiveAdmission': {'schema': 1}}, {'manifestBytes': 0}):
+            self.seed(**change)
+            with self.assertRaises(ValueError):I.locate(self.node, self.args)
+
+    def test_symlink_is_not_an_absence_and_input_is_not_a_path_or_role(self):
+        self.seed();(self.folder/'session.json').unlink()
+        (self.folder/'session.json').symlink_to(self.cache.root/'missing')
+        with self.assertRaises(OSError):I.locate(self.node, self.args)
+        for changes in ({'userId': '../../other'}, {'uploadId': '../x'}, {'hostAdmin': True}):
+            with self.assertRaises(ValueError):I.locate(self.node, {**self.args, **changes})
 
 
 if __name__ == '__main__':unittest.main()

@@ -57,6 +57,22 @@ function fixture(browser){
 
 for(const browser of [false,true]){
   const client=browser?'browser':'CLI core';
+  test(`${client}: exact absence resumes only the issued UUID; malformed proofs and HTTP errors send no begin`,async()=>{
+    const absent=f=>({...f.result(),...f.spec,state:'NOT_INITIALIZED',initializationProtocol:1,nodePresent:false,userId,manifestOffset:0,admissionProtocol:1,admissionKey:f.base});
+    const original=f=>({protocol:1,userId,machine,key:f.base,specification:f.spec,uploadId:issued,storageMachine:'warehouse',storageTier:'hdd',beginAttempted:true});
+    const f=fixture(browser);f.intents.set(f.base,original(f));let first=true;
+    const call=async(op,args)=>{if(first){first=false;assert.equal(op,'datasets.upload.status');f.calls.push({operation:op,args});return absent(f);}return f.directCall(op,args);};
+    assert.equal((await f.run({call})).state,'READY');assert.deepEqual(f.calls.slice(0,2).map(row=>row.operation),['datasets.upload.status','datasets.upload.begin']);assert.equal(f.calls[1].args.key,issued);
+    assert.equal(f.calls.some(row=>row.operation.includes('.admission.')),false);
+    for(const patch of [{initializationProtocol:undefined},{nodePresent:undefined},{nodePresent:true},{admissionProtocol:undefined},{admissionProtocol:2},{admissionKey:legacyId},{userId:'other'},{manifestOffset:1},{manifestSha256:'b'.repeat(64)},{uploadId:legacyId},{storageMachine:'other'},{requestedMachine:'other'},{storageTier:'existing'},{legacyPlacement:true}]){
+      const x=fixture(browser);x.intents.set(x.base,original(x));const deny=async(op,args)=>{x.calls.push({operation:op,args});assert.equal(op,'datasets.upload.status');return {...absent(x),...patch};};
+      await assert.rejects(x.run({call:deny}),error=>error.code==='MISMATCH');assert.equal(x.calls.length,1);
+    }
+    for(const status of [400,404,503]){
+      const x=fixture(browser);x.intents.set(x.base,original(x));const deny=async(op,args)=>{x.calls.push({operation:op,args});throw Object.assign(Error('No such file or directory'),{status});};
+      await assert.rejects(x.run({call:deny}),error=>error.uploadId===issued);assert.equal(x.calls.length,1);
+    }
+  });
   test(`${client}: persist intent and server UUID before begin, complete upload, restart only original status`,async()=>{
     const f=fixture(browser);assert.equal((await f.run()).state,'READY');
     assert.equal(f.calls[0].operation,'datasets.upload.admission.create');assert.equal(f.calls[1].operation,'datasets.upload.begin');

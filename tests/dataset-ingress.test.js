@@ -22,7 +22,11 @@ function fixture(t,{enabled=true}={}){
     calls.push({machine,operation,args});await f.before?.(machine,operation,args);
     const id=args.uploadId||args.key,key=machine+'/'+args.userId+'/'+id;
     if(operation==='storage.upload.locate')return {protocol:'dataset-upload-location-v1',machine,userId:args.userId,uploadId:args.uploadId,
-      authority:{enabled:machine===cold,machine,authority:'hdd'},present:sessions.has(key),...(sessions.has(key)?{specification:sessions.get(key).spec}:{})};
+      uploadAdmissionProtocol:1,initializationProtocol:1,nodePresent:sessions.has(key),
+      authority:{enabled:machine===cold,machine,authority:'hdd'},present:sessions.has(key),
+      ...(sessions.has(key)?{specification:sessions.get(key).spec,
+        ...(sessions.get(key).marker?{admissionProtocol:1,admissionKey:sessions.get(key).marker.intentKey,
+          requestedMachine:sessions.get(key).marker.requestedMachine,storageMachine:machine,admissionAuthority:'hdd'}:{})}:{state:'NOT_INITIALIZED'})};
     if(operation==='datasets.upload.routes')return {available:true,protocol:'dataset-upload-v1',machine,revision:'b'.repeat(64),certificateSha256:'c'.repeat(64),routes:[{id:'primary',kind:'campus-direct',endpoint:'https://warehouse.example'}]};
     if(operation==='datasets.upload.begin'){
       if(!sessions.has(key))sessions.set(key,{spec:structuredClone(spec),state:'RECEIVING_MANIFEST'});
@@ -33,6 +37,7 @@ function fixture(t,{enabled=true}={}){
       assert.deepEqual(args.specification,spec);assert.equal(args.specificationSha256,createHash('sha256').update(JSON.stringify(spec)).digest('hex'));
       const row=JSON.parse(db.prepare('SELECT data FROM dataset_upload_placements WHERE owner=? AND upload_id=?').get(args.userId,id).data);assert.equal(row.phase,'BOUND');assert.equal(row.admissionKey,args.intentKey);
       if(!sessions.has(key))sessions.set(key,{spec:structuredClone(args.specification),state:'RECEIVING_MANIFEST'});
+      sessions.get(key).marker=structuredClone(args);
       return {uploadId:id,...spec,state:sessions.get(key).state,manifestOffset:0,chunkBytes:1024*1024,admissionProtocol:1,admissionKey:args.intentKey,machine,authority:'hdd',uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true,routeSelection:true}};
     }
     if(operation==='datasets.upload.chunk')return {offset:args.offset+Buffer.from(args.data,'base64').length};
@@ -186,7 +191,7 @@ test('cancellation and ticket revocation stay on the durable writer rather than 
   const discarded=await f.call('discard',{uploadId:id});assert.equal(discarded.storageMachine,cold);
   assert.equal(discarded.state,'DISCARDED');assert.equal(f.service.datasetIngressMachineVisible(f.user.id,cold),false);
   f.calls.length=0;await f.call('status',{uploadId:id});
-  assert.deepEqual(f.calls.map(call=>call.machine),[cold]);
+  assert.deepEqual(f.calls.map(call=>call.machine),[cold,cold]);assert.deepEqual(f.calls.map(call=>call.operation),['storage.upload.locate','datasets.upload.status']);
 });
 
 test('READY warehouse is an exact usable copy source without granting compute; preparation selects that source',async t=>{
