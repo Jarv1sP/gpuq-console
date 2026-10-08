@@ -37,6 +37,8 @@ test('guide uses deployment evidence instead of promising merged protocol suppor
   assert.match(guide,/指南描述操作方法，不是功能开通清单/);
   assert.match(guide,/文件读取回包确认 `protocol:2`/);
   assert.match(guide,/不能仅凭客户端已更新或源码已合并判断可用/);
-  assert.match(guide,/旧节点仍可下载到新文件，但不能接着写原片段/);
+  assert.match(guide,/节点必须确认用途受限的校园 HTTPS 文件票据/);
+  assert.match(guide,/能力缺失或无法连接时暂停，不转 VPS\/Tail/);
+  assert.match(guide,/超过 100 MiB 只提示/);assert.match(guide,/CLI 下载超过 100 GiB 也只警告/);
   assert.doesNotMatch(guide,/project create my-container/,'Avoid a second competing first-use walkthrough');
 });

@@ -1,10 +1,10 @@
 import {lstat as fsLstat,open as fsOpen,readdir as fsReaddir} from 'node:fs/promises';
 import {constants as fsConstants} from 'node:fs';
 import {basename,join,resolve} from 'node:path';
-import {createHash,randomUUID} from 'node:crypto';
+import {createHash} from 'node:crypto';
 import {createDirectDatasetTransport,probeDirectUploadRoute,RELAY_LIMIT_BYTES} from './client-direct-upload.mjs';
-import {selectUploadRoute,uploadStorageMachine} from './dist/upload-routes.js';
-import {allocateDatasetUpload,saveDatasetUploadIntent} from './dist/dataset-upload.js';
+import {selectUploadRoute,uploadStorageMachine,validateUploadRoutes} from './dist/upload-routes.js';
+import {allocateDatasetUpload,saveDatasetUploadIntent,confirmDatasetUploadInitialization} from './dist/dataset-upload.js';
 export const DATA_CHUNK=1024*1024;
 const DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
 const fail=message=>{throw Error(message);};
@@ -55,62 +55,80 @@ export async function scanLocalDataset(root,progress,{lstat=fsLstat,open=fsOpen,
   return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files,totalBytes,entries:files.length+directories.length,openEntry,verify};
 }
 
-export async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore,filesystem,admission,via='auto'}){if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,admission,via});}
+export async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore,filesystem,admission,via='auto'}){if(!['auto','direct','campus'].includes(via))fail('File transfers require campus direct transport; VPS relay is disabled');return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,admission,via});}
 export function snapshotKey(identity){const h=createHash('sha256').update(JSON.stringify(identity)).digest('hex');return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;}
 export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,admission,legacyTransfer=false,via='auto',directFactory=createDirectDatasetTransport,probeRoute=probeDirectUploadRoute}){
-  if(!['auto','direct','relay'].includes(via))fail('Upload route must be auto, direct or relay');
+  if(!['auto','direct','campus'].includes(via))fail('File transfers require campus direct transport; VPS relay is disabled');
   const key=snapshotKey([userId,machine,name,scan.manifestSha256]);
-  let uploadId,state,direct,route,storageMachine,uploadIntent;
+  let uploadId,state,direct,route,storageMachine,uploadIntent,announced;
+  const announce=()=>{if(announced===uploadId)return;progress('HANDLE',{uploadId,machine,...(uploadIntent?{requestedMachine:machine,storageMachine,storageTier:'hdd'}:{})});announced=uploadId;};
   const control=async(action,args={})=>(await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'&&(action!=='routes'||state?.placementProtocol===1)?{uploadId}:{}),...args})).result;
   const request=async(action,args={})=>{
     if(direct&&(action==='manifest'||action==='chunk'||action==='status'&&args.path!==undefined))return direct.request(action,args);
-    if(args.bytes!==undefined){const {bytes,...other}=args;return control(action,{...other,data:bytes.toString('base64')});}
+    if(args.bytes!==undefined)fail('Campus direct transport is unconfirmed; no file bytes were sent through the portal');
     return control(action,args);
   };
-  const report=value=>{if(uploadIntent&&(value?.uploadId!==uploadIntent.uploadId||value.placementProtocol!==1||value.requestedMachine!==machine||value.storageMachine!==uploadIntent.storageMachine||value.storageTier!=='hdd'||value.legacyPlacement!==false||['name','manifestBytes','totalBytes','entries'].some(field=>value[field]!==uploadIntent.specification[field])))throw Object.assign(Error('Upload session does not match the saved warehouse admission'),{code:'MISMATCH'});storageMachine=uploadStorageMachine(value,machine,storageMachine);state=value;progress(value.state,value);};
+  const report=value=>{if(uploadIntent&&(value?.uploadId!==uploadIntent.uploadId||value.placementProtocol!==1||value.requestedMachine!==machine||value.storageMachine!==uploadIntent.storageMachine||value.storageTier!=='hdd'||value.legacyPlacement!==false||['name','manifestBytes','totalBytes','entries'].some(field=>value[field]!==uploadIntent.specification[field])))throw Object.assign(Error('Upload session does not match the saved warehouse admission'),{code:'MISMATCH'});confirmDatasetUploadInitialization(value,uploadIntent,machine);storageMachine=uploadStorageMachine(value,machine,storageMachine);state=value;progress(value.state,value);};
   const ready=()=>{if(state.state!=='READY'||!state.dataset||!/^[a-f0-9]{64}$/.test(state.version||''))fail('Server did not confirm a complete verified dataset');return {...state,machine,...(route?{route:{kind:route}}:{})};};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){await new Promise(resolve=>setTimeout(resolve,1500));report(await request('status'));}if(state.state==='FAILED')fail(state.error||'Dataset verification failed; repeat the same upload after fixing the cause');if(state.state==='DISCARDED')fail('Upload was discarded');};
+  try{
   const persistedKey=keyStore?.get?.(key),stored=keyStore?.getHandle?.(key),savedIntent=await keyStore?.getIntent?.(key);
   if(persistedKey!==undefined&&persistedKey!==null&&(typeof persistedKey!=='string'||!persistedKey))fail('Saved legacy upload key is invalid');
   if(stored&&(typeof stored.uploadId!=='string'||!stored.uploadId||stored.machine!==machine||stored.name!==name||stored.manifestSha256!==scan.manifestSha256||stored.userId!==undefined&&stored.userId!==userId))fail('Saved upload handle belongs to another account, target or manifest');
-  const begin={name,key:persistedKey||key,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(via==='relay'?{allowRelay:true}:{})};
+  const begin={name,key:persistedKey||key,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries};
   const legacy=!savedIntent&&(legacyTransfer===true||typeof persistedKey==='string'&&!!persistedKey||stored?.uploadId&&stored.admissionProtocol!==1);
   if(!legacy){
     if(stored?.admissionProtocol===1&&!savedIntent)fail('Original admission intent is missing; no new upload was allocated');
     uploadIntent=await allocateDatasetUpload({call:async(op,args)=>(await call(op,args)).result,keyStore,baseKey:key,userId,machine,specification:{name,manifestBytes:scan.manifest.length,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries},capability:admission});
     begin.key=uploadIntent.uploadId;storageMachine=uploadIntent.storageMachine;
     if(stored&&stored.uploadId!==begin.key)fail('Saved handle differs from the issued upload UUID');
+    // The server-issued UUID is already durable. Expose it before the first
+    // node query, which may fail before any upload directory was initialized.
+    uploadId=begin.key;announce();
     if(uploadIntent.beginAttempted){uploadId=begin.key;report(await request('status'));}
     else uploadIntent=await saveDatasetUploadIntent(keyStore,key,{...uploadIntent,beginAttempted:true});
-  }else if(stored?.uploadId){uploadId=stored.uploadId;report(await request('status'));}
+  }else{
+    if(persistedKey&&stored?.uploadId&&persistedKey!==stored.uploadId)fail('Saved legacy upload key and handle disagree; no upload was restarted');
+    uploadId=stored?.uploadId||begin.key;begin.key=uploadId;announce();
+    if(stored?.uploadId)report(await request('status'));
+  }
+  if(state?.state==='DISCARDED')fail('Upload was discarded; its original UUID will not be silently replaced');
   if(!uploadIntent||!state||!['READY','PUBLISHING'].includes(state.state)){
     try{report(await request('begin',begin));}
     catch(error){if([400,401,403,404,409,422,429].includes(error.status)||['MAINTENANCE_ACTIVE','MISMATCH'].includes(error.code))throw error;uploadId=begin.key;report(await request('status'));if(state.uploadId!==uploadId)fail('Server did not confirm the original begin UUID');if(state.state!=='READY')fail('Upload initialization receipt was lost; repeat the original command to inspect the same UUID before resuming');}
   }
-  if(state.state==='DISCARDED'){if(uploadIntent)fail('Upload was discarded; its issued UUID will not be silently replaced');begin.key=randomUUID();await keyStore.set(key,begin.key);report(await request('begin',begin));}
-  uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)fail('Server did not return an upload identifier');progress('HANDLE',{uploadId,machine,...(state.placementProtocol===1?{requestedMachine:machine,storageMachine,storageTier:state.storageTier}:{})});
+  if(state.state==='DISCARDED')fail('Upload was discarded; its original UUID will not be silently replaced');
+  uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)fail('Server did not return an upload identifier');announce();
   await keyStore?.setHandle?.(key,{uploadId,machine,name,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(uploadIntent?{admissionProtocol:1,userId}:{})});
-  try{
     if(!['READY','PUBLISHING'].includes(state.state)){
       const advertised=state.uploadTransport;
+      if(via==='campus'&&(advertised?.routeSelection!==true||advertised?.directAvailable!==true))
+        fail('Campus-only upload requires confirmed route-selection capability; no Tail route, ticket or file bytes were sent');
       if(via!=='relay'&&advertised?.directAvailable===true&&advertised.protocol!=='dataset-upload-v1')
         fail('Direct upload protocol is unconfirmed; no automatic VPS fallback was attempted');
       if(via!=='relay'&&advertised?.routeSelection===true&&advertised.directAvailable!==true&&!['not-configured','disabled'].includes(advertised.reason))
         fail('Configured upload listener is unavailable; no automatic VPS fallback was attempted');
       if(via!=='relay'&&advertised?.protocol==='dataset-upload-v1'&&advertised.directAvailable===true){
-        const selected=advertised.routeSelection===true?await selectUploadRoute(await control('routes'),storageMachine,probeRoute):undefined;
+        let routes;
+        if(advertised.routeSelection===true){
+          routes=await control('routes');
+          if(via==='campus'){
+            // Validate the whole authenticated descriptor before filtering;
+            // an invalid fallback must not turn into an accepted primary.
+            validateUploadRoutes(routes,storageMachine);
+            routes={...routes,routes:routes.routes.filter(candidate=>candidate.kind==='campus-direct')};
+          }
+        }
+        const selected=routes?await selectUploadRoute(routes,storageMachine,probeRoute):undefined;
         const ticketArgs=selected?{routeId:selected.id}:{};
         const first=await control('direct-ticket',ticketArgs);
-        if(first?.available===true){let initial=true;direct=await directFactory(async()=>{if(initial){initial=false;return first;}return control('direct-ticket',ticketArgs);},{uploadId,route:selected});route=selected?.kind||'campus-direct';}
+        if(first?.available===true&&first.kind==='campus-direct'){let initial=true;direct=await directFactory(async()=>{if(initial){initial=false;return first;}const next=await control('direct-ticket',ticketArgs);if(next?.kind!=='campus-direct')fail('Campus upload authorization changed; no data was redirected');return next;},{uploadId,route:selected});route='campus-direct';}
         else fail('Direct upload authorization is unconfirmed; no relay fallback was attempted');
       }
       if(!direct){
-        if(via==='direct')fail('Direct upload is unavailable on this server; use a verified campus connection or cloud import');
-        const limit=Number.isSafeInteger(advertised?.relayLimitBytes)&&advertised.relayLimitBytes>0?Math.min(RELAY_LIMIT_BYTES,advertised.relayLimitBytes):RELAY_LIMIT_BYTES;
-        if(scan.totalBytes>limit&&via!=='relay')fail('This upload exceeds the 256 MiB portal-relay limit. Use campus direct upload or cloud import. To explicitly use VPS bandwidth, repeat with --via relay');
-        route='vps-relay';
+        fail('Campus direct upload is unavailable; the original upload ID and partial bytes were preserved. VPS relay is disabled');
       }
-      progress('ROUTE',{kind:route,explicit:via==='relay',relayLimitBytes:RELAY_LIMIT_BYTES,...(state.placementProtocol===1?{requestedMachine:machine,storageMachine,storageTier:state.storageTier}:{})});
+      progress('ROUTE',{kind:route,...(state.placementProtocol===1?{requestedMachine:machine,storageMachine,storageTier:state.storageTier}:{})});
     }
     if(state.state==='FAILED'&&state.resumeState==='SEALING')report(await request('seal'));
     if(state.state==='FAILED'&&state.resumeState==='PUBLISHING')report(await request('commit'));
@@ -148,7 +166,10 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
     // A directory edit or any previously uploaded file change invalidates this local snapshot.
     await scan.verify();
     report(await request('commit'));await waitFor();return ready();
-  }catch(error){fail(`${error.message}\nUpload: ${uploadId} on ${machine}. Repeat the same data upload command to resume; check with gpuctl data upload-status ${uploadId} --machine ${machine}. Do not assume an interrupted request canceled server verification.`);}finally{direct?.close();}
+  }catch(error){
+    if(!uploadId)throw error;
+    throw Object.assign(Error(`${error.message}\nUpload: ${uploadId} on ${machine}. Repeat the same data upload command to resume; check with gpuctl data upload-status ${uploadId} --machine ${machine}. Do not assume an interrupted request canceled server verification.`),{code:error.code,status:error.status,uploadId,machine});
+  }finally{direct?.close();}
 }
 
 export function workspaceDataPath(path,{directory=false}={}){
@@ -157,29 +178,7 @@ export function workspaceDataPath(path,{directory=false}={}){
   return path;
 }
 export async function putWorkspaceData(call,machine,local,path,overwrite,{lstat=fsLstat,open=fsOpen,platform=process.platform,via='auto'}={}){
-  if(!['auto','relay'].includes(via))fail('data put currently uses VPS relay; use data upload for direct directory uploads');
-  const sameFile=(a,b,options={})=>sameDatasetFile(a,b,{...options,platform});
   workspaceDataPath(path);
-  const before=await lstat(local,{bigint:true});
-  if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n||before.size>100n*1024n**3n)fail('data put requires one regular unlinked file, at most 100 GiB');
-  if(before.size>BigInt(RELAY_LIMIT_BYTES)&&via!=='relay')fail('This file exceeds 256 MiB and data put uses VPS relay. Prefer cloud import, or explicitly repeat with --via relay');
-  process.stderr.write('传输路径：VPS 中转（个人数据空间单文件上传）\n');
-  const file=await open(local,fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW||0));let offset=0,last=0;
-  try{
-    const initial=await file.stat({bigint:true});
-    if(!sameFile(before,initial,{pathToHandle:true}))fail('Local file changed before upload');
-    const size=Number(initial.size),buffer=Buffer.alloc(DATA_CHUNK);
-    do{
-      const {bytesRead}=await file.read(buffer,0,Math.min(DATA_CHUNK,size-offset),offset);
-      if(!bytesRead&&offset<size)fail('Local file changed during upload');
-      if(!sameFile(initial,await file.stat({bigint:true}))||!sameFile(before,await lstat(local,{bigint:true})))fail('Local file changed during upload; partial remote file remains, not published');
-      const result=(await call('datasets.workspace.put',{machine,path,offset,data:buffer.subarray(0,bytesRead).toString('base64'),...(offset===0?{truncate:overwrite===true}:{})})).result;
-      if(result?.size!==offset+bytesRead)fail('Upload result is unconfirmed; inspect the remote file before using --overwrite to restart');
-      offset+=bytesRead;
-      if(Date.now()-last>1000||offset===size){last=Date.now();process.stderr.write(`${path} · ${offset} / ${size} bytes\n`);}
-    }while(offset<size);
-    if(!sameFile(initial,await file.stat({bigint:true}))||!sameFile(before,await lstat(local,{bigint:true})))fail('Local file changed during upload; remote file was not published');
-    return {machine,path:'/data2/'+path,bytes:offset,extracted:false,published:false};
-  }finally{await file.close();}
+  fail('data put has no verified campus data plane yet; VPS relay and Tail upload are disabled. Use data upload for a dataset directory; no file was opened or sent');
 }
 export function createLocalDatasetTools(filesystem={}){return {sameDatasetFile:(a,b,options={})=>sameDatasetFile(a,b,{...options,platform:filesystem.platform||process.platform}),scanLocalDataset:(root,progress)=>scanLocalDataset(root,progress,filesystem),uploadLocalDataset:(call,options)=>uploadLocalDataset(call,{...options,filesystem}),putWorkspaceData:(call,machine,local,path,overwrite)=>putWorkspaceData(call,machine,local,path,overwrite,filesystem)};}

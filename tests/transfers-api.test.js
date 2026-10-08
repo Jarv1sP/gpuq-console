@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm,readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
 import {transferCall} from '../transfers.mjs';
@@ -149,8 +149,9 @@ test('owner and BOTH machine permissions, immutable references and typed operati
 });
 test('client upload uses existing verified chunks and cancel preserves partial without discard/restart',async t=>{
   const f=await fixture(t),args={key:randomUUID(),kind:'upload',machine:MACHINES[0].id,name:'mine',manifest:{manifestBytes:100,manifestSha256:hash,totalBytes:30,entries:2}};
-  const row=await f.call('transfers.create',args);assert.equal(row.state,'WAITING_CLIENT');assert.ok(row.uploadId);await f.call('transfers.io',{id:row.id,action:'chunk',path:'train.bin',offset:0,data:'YQ=='});
-  const last=f.calls.at(-1);assert.equal(last.op,'datasets.upload.chunk');assert.equal(last.args.uploadId,row.uploadId);assert.equal(last.args.hostAdmin,false);
+  const row=await f.call('transfers.create',args);assert.equal(row.state,'WAITING_CLIENT');assert.ok(row.uploadId);
+  const before=f.calls.length;await assert.rejects(f.call('transfers.io',{id:row.id,action:'chunk',path:'train.bin',offset:0,data:'YQ=='}),e=>e.status===409&&e.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,before);assert.equal((await f.call('transfers.status',{id:row.id})).uploadId,row.uploadId);
   await f.call('transfers.cancel',{id:row.id});await assert.rejects(f.call('transfers.io',{id:row.id,action:'chunk',path:'train.bin',offset:1,data:'YQ=='}));assert.equal(f.calls.some(c=>c.op==='datasets.upload.discard'),false);assert.equal((await f.call('transfers.status',{id:row.id})).state,'CANCELED');
 });
 test('warehouse admission fences new legacy uploads but preserves exact existing transfers',async t=>{
@@ -163,46 +164,66 @@ test('warehouse admission fences new legacy uploads but preserves exact existing
   assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM transfers').get().n,rows,'rejection leaves no transfer intent');
   const resumed=await f.call('transfers.create',args);
   assert.equal(resumed.id,old.id);assert.equal(resumed.uploadId,old.uploadId);assert.equal(resumed.machine,args.machine);
-  await f.call('transfers.io',{id:old.id,action:'chunk',path:'train.bin',offset:0,data:'YQ=='});
-  assert.equal(f.calls.at(-1).machine,args.machine);assert.equal(f.calls.at(-1).args.uploadId,old.uploadId);
+  const rpcCount=f.calls.length;await assert.rejects(f.call('transfers.io',{id:old.id,action:'chunk',path:'train.bin',offset:0,data:'YQ=='}),e=>e.status===409&&e.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,rpcCount);assert.equal((await f.call('transfers.status',{id:old.id})).uploadId,old.uploadId);
   await assert.rejects(f.call('transfers.create',{...args,name:'changed'}),e=>e.status===409);
   const copied=await f.call('transfers.create',copy());assert.equal(copied.state,'RUNNING','LAN copy remains available');
 });
-test('upload relay consent is explicit, type checked, owner scoped and unavailable to other transfer kinds',async t=>{
+test('upload relay consent is rejected before journaling, old identifiers and other transfer kinds stay fixed',async t=>{
   const f=await fixture(t),base={kind:'upload',machine:MACHINES[0].id,name:'large',manifest:{manifestBytes:100,manifestSha256:hash,totalBytes:300*1024**2,entries:2}};
-  for(const allowRelay of [undefined,false,true]){
+  for(const allowRelay of [undefined,false]){
     await f.call('transfers.create',{...base,key:randomUUID(),...(allowRelay===undefined?{}:{allowRelay})});
     assert.equal(f.calls.at(-1).args.allowRelay,allowRelay===true?true:undefined);
   }
   for(const allowRelay of [1,'true',null])await assert.rejects(f.call('transfers.create',{...base,key:randomUUID(),allowRelay}));
+  const rows=f.service.db.prepare('SELECT count(*) AS n FROM transfers').get().n,rpcs=f.calls.length;
+  await assert.rejects(f.call('transfers.create',{...base,key:randomUUID(),allowRelay:true}),e=>e.status===409&&e.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.service.db.prepare('SELECT count(*) AS n FROM transfers').get().n,rows);assert.equal(f.calls.length,rpcs);
   await assert.rejects(f.call('transfers.create',{...copy(),allowRelay:true}));
   await assert.rejects(f.call('transfers.create',{key:randomUUID(),kind:'download',machine:MACHINES[0].id,dataset:'shared',version:hash,allowRelay:false}));
   const retry={...base,key:randomUUID()},first=await f.call('transfers.create',retry);
-  const consent=await f.call('transfers.create',{...retry,allowRelay:true});
-  assert.equal(consent.id,first.id);assert.equal(consent.uploadId,first.uploadId);assert.equal(f.calls.at(-1).args.allowRelay,true);
+  await assert.rejects(f.call('transfers.create',{...retry,allowRelay:true}),e=>e.status===409&&e.code==='CAMPUS_DATA_PLANE_REQUIRED');
   const automatic=await f.call('transfers.create',retry);
-  assert.equal(automatic.id,first.id);assert.equal(automatic.uploadId,first.uploadId);assert.equal(automatic.allowRelay,true);
+  assert.equal(automatic.id,first.id);assert.equal(automatic.uploadId,first.uploadId);assert.equal(automatic.allowRelay,undefined);
   assert.equal((await f.call('transfers.create',{...retry,allowRelay:false})).id,first.id);
   await assert.rejects(f.call('transfers.create',{...retry,manifest:{...retry.manifest,totalBytes:retry.manifest.totalBytes+1}}));
   await assert.rejects(f.call('transfers.create',{...retry,allowRelay:true,name:'changed'}));
 });
+test('persisted relay consent keeps its original digest and UUID but cannot authorize any new relay',async t=>{
+  const f=await fixture(t),args={key:randomUUID(),kind:'upload',machine:MACHINES[0].id,name:'historical',manifest:{manifestBytes:100,manifestSha256:hash,totalBytes:30,entries:2}},first=await f.call('transfers.create',args);
+  const row=f.service.db.prepare('SELECT * FROM transfers WHERE id=?').get(first.id),data=JSON.parse(row.data);
+  const oldPayload={kind:args.kind,machine:args.machine,allowRelay:true,manifest:args.manifest,name:args.name};
+  const oldDigest=createHash('sha256').update(JSON.stringify(oldPayload)).digest('hex');
+  f.service.db.prepare('UPDATE transfers SET digest=?,data=? WHERE id=?').run(oldDigest,JSON.stringify({...data,allowRelay:true}),first.id);
+  await f.restart();const before=f.calls.length,resumed=await f.call('transfers.create',args);
+  assert.equal(resumed.id,first.id);assert.equal(resumed.uploadId,first.uploadId);
+  assert.equal(f.calls.length,before+1);assert.equal(f.calls.at(-1).op,'datasets.upload.begin');
+  assert.equal(f.calls.at(-1).args.key,args.key);assert.equal(Object.hasOwn(f.calls.at(-1).args,'allowRelay'),false);
+  const retained=f.service.db.prepare('SELECT digest,data FROM transfers WHERE id=?').get(first.id);
+  assert.equal(retained.digest,oldDigest);assert.equal(JSON.parse(retained.data).allowRelay,true);
+  const count=f.calls.length;
+  await assert.rejects(f.call('transfers.io',{id:first.id,action:'manifest',offset:0,data:''}),e=>e.status===409&&e.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  await assert.rejects(f.call('transfers.create',{...args,allowRelay:true}),e=>e.status===409&&e.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,count);assert.equal((await f.call('transfers.create',{...args,allowRelay:false})).uploadId,first.uploadId);
+  await assert.rejects(f.call('transfers.create',{...args,name:'different'}),e=>e.status===409);
+});
 test('direct upload tickets are fresh on resume, returned only to owner and never persisted in transfer progress',async t=>{
-  const f=await fixture(t),bridge=f.service.bridge,transport={protocol:'dataset-upload-v1',directAvailable:true,reason:'ready',relayLimitBytes:268435456,relayAllowed:false};
+  const f=await fixture(t),bridge=f.service.bridge,transport={protocol:'dataset-upload-v1',directAvailable:true,reason:'ready',relayLimitBytes:0,relayAllowed:false,campusOnly:true};
   let begins=0;const ticketRoutes=[];
   f.service.bridge=async(machine,operation,args)=>{
     if(operation==='datasets.upload.begin'){begins++;return {...await bridge(machine,operation,args),uploadTransport:transport};}
-    if(operation==='datasets.upload.direct-ticket'){ticketRoutes.push(args.routeId);return {available:true,protocol:'dataset-upload-v1',endpoint:'https://example.test:18444',certificateSha256:hash,ticket:'PRIVATE-TICKET',expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:1048576};}
+    if(operation==='datasets.upload.direct-ticket'){ticketRoutes.push(args.routeId);return {available:true,kind:args.routeId==='tail'?'tail-upload':'campus-direct',machine,protocol:'dataset-upload-v1',endpoint:'https://example.test:18444',certificateSha256:hash,ticket:'PRIVATE-TICKET',expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:1048576};}
     if(operation==='datasets.upload.direct-revoke')return {uploadId:args.uploadId,revoked:true};
     return bridge(machine,operation,args);
   };
   const args={key:randomUUID(),kind:'upload',machine:MACHINES[0].id,name:'direct',manifest:{manifestBytes:100,manifestSha256:hash,totalBytes:30,entries:2}},row=await f.call('transfers.create',args);
   assert.deepEqual(row.result.uploadTransport,transport);
-  await f.call('transfers.io',{id:row.id,action:'chunk',path:'x',offset:0,data:'YQ=='});
+  await assert.rejects(f.call('transfers.io',{id:row.id,action:'chunk',path:'x',offset:0,data:'YQ=='}),e=>e.status===409&&e.code==='CAMPUS_DATA_PLANE_REQUIRED');
   await f.call('transfers.status',{id:row.id});
   const resumed=await f.call('transfers.create',args);
   assert.equal(resumed.id,row.id);assert.equal(begins,2);assert.deepEqual(resumed.result.uploadTransport,transport);
   const ticket=await f.call('transfers.io',{id:row.id,action:'direct-ticket'});assert.equal(ticket.ticket,'PRIVATE-TICKET');
-  await f.call('transfers.io',{id:row.id,action:'direct-ticket',routeId:'tail'});
+  await assert.rejects(f.call('transfers.io',{id:row.id,action:'direct-ticket',routeId:'tail'}),e=>e.status===502);
   assert.deepEqual(ticketRoutes,[undefined,'tail']);
   await assert.rejects(f.call('transfers.io',{id:row.id,action:'status',routeId:'tail'}));
   assert.equal(JSON.stringify(f.service.db.prepare('SELECT * FROM transfers').all()).includes('PRIVATE-TICKET'),false);

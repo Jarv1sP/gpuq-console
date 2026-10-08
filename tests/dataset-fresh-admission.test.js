@@ -2,13 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {createHash,randomUUID} from 'node:crypto';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync,writeFileSync} from 'node:fs';
+import {createServer} from 'node:net';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {executionCall} from '../execution.mjs';
 import {installDatasetIngress} from '../dataset-ingress.mjs';
 import {installMaintenance} from '../maintenance.mjs';
 import {PortalService} from '../portal-service.mjs';
+import {createPortalServer} from '../portal-server.mjs';
 
 const hot='gpu-1',cold='gpu-4',offline='gpu-2';
 const spec={name:'fresh-data',manifestBytes:100,manifestSha256:'a'.repeat(64),totalBytes:12,entries:2};
@@ -37,8 +39,11 @@ function fixture(t,{persistent=false}={}){
       await f.before?.(machine,operation,args);
       const id=args.uploadId||args.key,key=machine+'/'+args.userId+'/'+id;
       if(operation==='storage.upload.locate')return {protocol:'dataset-upload-location-v1',machine,userId:args.userId,uploadId:id,
-        authority:{enabled:machine===cold,machine,authority:'hdd'},present:sessions.has(key),
-        ...(sessions.has(key)?{specification:sessions.get(key).spec}:{})};
+        uploadAdmissionProtocol:1,authority:{enabled:machine===cold,machine,authority:'hdd'},present:sessions.has(key),
+        ...(sessions.has(key)?{specification:sessions.get(key).spec,...(sessions.get(key).marker?{
+          initializationProtocol:1,nodePresent:true,admissionProtocol:1,admissionKey:sessions.get(key).marker.intentKey,
+          requestedMachine:hot,storageMachine:cold,admissionAuthority:'hdd'}:{})}:
+          machine===cold?{state:'NOT_INITIALIZED',initializationProtocol:1,nodePresent:false}:{})};
       if(operation==='storage.upload.admit'){
         const marker={...args};delete marker.allowRelay;
         const prior=sessions.get(key);
@@ -134,7 +139,8 @@ test('lost node admission ACK survives restart and policy disable with the same 
   assert.equal((await f.begin(issued.uploadId)).uploadId,issued.uploadId);
   await f.call('status',{uploadId:issued.uploadId});await f.call('discard',{uploadId:issued.uploadId});
   assert.equal(f.sessions.size,1);assert.equal(f.mappings().length,1);
-  assert(f.calls.every(row=>row.machine===cold));assert.equal(f.calls.some(row=>row.operation==='storage.upload.locate'||row.operation==='datasets.upload.begin'),false);
+  assert(f.calls.every(row=>row.machine===cold));assert.equal(f.calls.some(row=>row.operation==='datasets.upload.begin'),false);
+  assert.equal(f.calls.filter(row=>row.operation==='storage.upload.locate').length,1,'status separately confirms the exact node admission');
 });
 
 test('changed policy or authority before first dispatch leaves ISSUED intent untouched and performs zero RPC',async t=>{
@@ -243,11 +249,13 @@ test('protected maintenance opt-in admits only the owner-bound modern HDD upload
   };
   const issued=await f.create();assert.equal(f.calls.length,0);
   assert.equal((await f.begin(issued.uploadId)).uploadId,issued.uploadId);
-  await f.call('manifest',{uploadId:issued.uploadId,offset:0,data:'AA=='});
+  const beforeBytes=f.calls.length;
+  await assert.rejects(f.call('manifest',{uploadId:issued.uploadId,offset:0,data:'AA=='}),error=>error.status===409&&error.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  await assert.rejects(f.call('chunk',{uploadId:issued.uploadId,path:'sample',offset:0,data:'AA=='}),error=>error.status===409&&error.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,beforeBytes,'Protected maintenance does not authorize control-plane file bytes');
   await f.call('seal',{uploadId:issued.uploadId});
-  await f.call('chunk',{uploadId:issued.uploadId,path:'sample',offset:0,data:'AA=='});
   assert.equal((await f.call('commit',{uploadId:issued.uploadId})).state,'READY');
-  assert.deepEqual(checked,['storage.upload.admit','datasets.upload.manifest','datasets.upload.seal','datasets.upload.chunk','datasets.upload.commit']);
+  assert.deepEqual(checked,['storage.upload.admit','datasets.upload.seal','datasets.upload.commit']);
   const count=f.calls.length;
   for(const operation of ['jobs.submit','terminal.open','projects.create','transfers.create']){
     assert.throws(()=>f.service.assertMaintenanceAllowed(operation,{machine:hot,key:issued.uploadId},f.principal),error=>error.status===503&&error.code==='MAINTENANCE_ACTIVE');
@@ -300,4 +308,279 @@ test('pure intent recovery remains available while all eight node control slots 
     await assert.rejects(f.create(),error=>error.status===429);
   }finally{for(const release of releases)release();}
   await Promise.all(pending);assert.equal(f.sessions.size,8);
+});
+
+test('ISSUED and lost first dispatch return exact node NOT_INITIALIZED proof without writing or reissuing',async t=>{
+  for(const attempted of [false,true]){
+    const f=fixture(t,{persistent:true}),issued=await f.create();
+    if(attempted){
+      f.before=()=>{throw Object.assign(Error('First dispatch never reached node'),{status:503});};
+      await assert.rejects(f.begin(issued.uploadId),error=>error.status===503);
+      f.before=undefined;f.reopen();
+    }
+    const before=f.rows(),mappings=f.mappings();f.calls.length=0;
+    const result=await f.call('status',{uploadId:issued.uploadId});
+    assert.deepEqual(result,{...spec,uploadId:issued.uploadId,userId:f.user.id,state:'NOT_INITIALIZED',
+      initializationProtocol:1,nodePresent:false,manifestOffset:0,admissionProtocol:1,admissionKey:issued.key,
+      placementProtocol:1,requestedMachine:hot,storageMachine:cold,storageTier:'hdd',legacyPlacement:false});
+    assert.deepEqual(f.calls,[{machine:cold,operation:'storage.upload.locate',args:{userId:f.user.id,uploadId:issued.uploadId}}]);
+    assert.deepEqual(f.rows(),before);assert.deepEqual(f.mappings(),mappings);assert.equal(f.sessions.size,0);
+    assert.equal((await f.begin(issued.uploadId)).uploadId,issued.uploadId);
+    assert.equal(f.sessions.size,1);assert.deepEqual(f.mappings(),mappings);
+    assert.equal((await f.call('status',{uploadId:issued.uploadId})).nodePresent,true);
+    assert.equal(f.calls.filter(row=>row.operation==='storage.upload.admit').length,1);
+    assert.equal(f.calls.some(row=>row.operation==='datasets.upload.begin'),false);
+  }
+});
+
+for(const change of ['disabled-before','authority-before','disabled-during','archive-during']){
+  test('BOUND absence rejects '+(change.endsWith('before')?'persisted restart policy: ':'in-process policy fault injection: ')+change,async t=>{
+    const f=fixture(t,{persistent:change.endsWith('before')}),issued=await f.create();
+    f.before=()=>{throw Object.assign(Error('First dispatch never reached node'),{status:503});};
+    await assert.rejects(f.begin(issued.uploadId),error=>error.status===503);
+    f.before=undefined;f.calls.length=0;
+    const mutate=()=>{
+      if(change==='authority-before'){
+        f.service.storageArchivePolicy={...policy,authority:'different'};
+        f.ingress=installDatasetIngress(f.service,{...policy,authority:'different'});
+      }else if(change==='archive-during')f.service.storageArchivePolicy={...policy,authority:'different'};
+      else f.ingress=installDatasetIngress(f.service,undefined);
+    };
+    if(change==='disabled-before')f.reopen(undefined);
+    else if(change==='authority-before'){
+      f.service.storageArchivePolicy={...policy,authority:'different'};
+      f.reopen({...policy,authority:'different'});
+    }
+    else f.before=(_machine,operation)=>{if(operation==='storage.upload.locate')mutate();};
+    const rows=f.rows(),mappings=f.mappings();
+    await assert.rejects(f.call('status',{uploadId:issued.uploadId}),error=>error.status===409);
+    assert.equal(f.sessions.size,0);assert.deepEqual(f.rows(),rows);assert.deepEqual(f.mappings(),mappings);
+    assert(f.calls.every(row=>row.machine===cold&&row.operation==='storage.upload.locate'));
+  });
+}
+
+for(const change of ['stale-role','journal']){
+  test('absence proof rejects private binding fault injection: '+change,async t=>{
+    const f=fixture(t),issued=await f.create(),rows=f.rows(),mappings=f.mappings();
+    if(change==='stale-role')f.user.role='admin';
+    else f.before=(_machine,operation)=>{
+      if(operation==='storage.upload.locate'){
+        const row=f.ingress.load(f.user.id,issued.uploadId);
+        row.specification={...spec,entries:3};row.specificationSha256=digest(row.specification);
+        f.service.db.prepare('UPDATE dataset_upload_placements SET data=? WHERE owner=? AND upload_id=?')
+          .run(JSON.stringify(row),f.user.id,issued.uploadId);
+      }
+    };
+    await assert.rejects(f.call('status',{uploadId:issued.uploadId}),error=>error.status===(change==='stale-role'?403:502));
+    assert.equal(f.sessions.size,0);assert.deepEqual(f.mappings(),mappings);
+    if(change==='stale-role'){assert.equal(f.calls.length,0);assert.deepEqual(f.rows(),rows);}
+    else assert.deepEqual(f.calls.map(row=>row.operation),['storage.upload.locate']);
+  });
+}
+
+test('missing capability, malformed proof or changed authority is never NOT_INITIALIZED',async t=>{
+  for(const changes of [{uploadAdmissionProtocol:undefined},{uploadAdmissionProtocol:0},{initializationProtocol:undefined},
+    {initializationProtocol:true},{nodePresent:undefined},{nodePresent:true},{state:'ABSENT'},
+    {userId:'demo-user-2'},{uploadId:randomUUID()},{machine:hot},{protocol:'old-location'},
+    {authority:{enabled:false,machine:cold,authority:'hdd'}},{authority:{enabled:true,machine:hot,authority:'hdd'}},
+    {authority:{enabled:true,machine:cold,authority:'other'}}]){
+    const f=fixture(t),issued=await f.create(),before=f.rows(),bridge=f.service.bridge;
+    f.service.bridge=async(...args)=>({...await bridge(...args),...changes});
+    await assert.rejects(f.call('status',{uploadId:issued.uploadId}),error=>error.status===502);
+    assert.equal(f.calls.length,1);assert.equal(f.calls[0].operation,'storage.upload.locate');
+    assert.equal(f.sessions.size,0);assert.deepEqual(f.rows(),before);assert.equal(f.mappings().length,1);
+  }
+});
+
+test('location and subsequent status 400/404/503/ENOENT errors remain errors with the original UUID',async t=>{
+  for(const operation of ['storage.upload.locate','datasets.upload.status']){
+    for(const failure of [400,404,503,'ENOENT']){
+      const f=fixture(t),issued=await f.create();await f.begin(issued.uploadId);const before=f.rows();f.calls.length=0;
+      const error=Object.assign(Error('Unconfirmed node response'),typeof failure==='number'?{status:failure}:{code:failure});
+      f.before=(_machine,op)=>{if(op===operation)throw error;};
+      await assert.rejects(f.call('status',{uploadId:issued.uploadId}),value=>value===error);
+      assert(f.calls.every(row=>row.machine===cold&&row.args.uploadId===issued.uploadId));
+      assert.deepEqual(f.rows(),before);assert.equal(f.mappings().length,1);assert.equal(f.sessions.size,1);
+      assert.equal(f.calls.some(row=>row.operation==='storage.upload.admit'||row.operation==='datasets.upload.begin'),false);
+    }
+  }
+});
+
+test('a present legacy, mismatched admission or mismatched ordinary status cannot impersonate initialized upload',async t=>{
+  for(const changes of [{admissionProtocol:undefined},{admissionProtocol:0},{admissionKey:randomUUID()},
+    {requestedMachine:offline},{storageMachine:hot},{admissionAuthority:'other'},
+    {specification:{...spec,manifestSha256:'f'.repeat(64)}},{specification:{...spec,entries:true}}]){
+    const f=fixture(t),issued=await f.create();await f.begin(issued.uploadId);f.calls.length=0;const bridge=f.service.bridge;
+    f.service.bridge=async(...args)=>({...await bridge(...args),...changes});
+    await assert.rejects(f.call('status',{uploadId:issued.uploadId}),error=>error.status===502);
+    assert.deepEqual(f.calls.map(row=>row.operation),['storage.upload.locate']);assert.equal(f.sessions.size,1);
+  }
+  for(const changes of [{uploadId:randomUUID()},{name:'other'},{manifestBytes:99},{totalBytes:0},{entries:1},{state:'NOT_INITIALIZED'}]){
+    const f=fixture(t),issued=await f.create();await f.begin(issued.uploadId);f.calls.length=0;
+    f.after=(_machine,operation,_args,result)=>{if(operation==='datasets.upload.status')Object.assign(result,changes);};
+    await assert.rejects(f.call('status',{uploadId:issued.uploadId}),error=>error.status===502);
+    assert.deepEqual(f.calls.map(row=>row.operation),['storage.upload.locate','datasets.upload.status']);
+  }
+});
+
+test('initialization proof rechecks owner authorization, original selection and maintenance without allowing begin',async t=>{
+  const f=fixture(t),issued=await f.create(),before=f.rows();
+  f.before=()=>{f.user.limits={};};
+  await assert.rejects(f.call('status',{uploadId:issued.uploadId}),error=>error.status===403);
+  assert.deepEqual(f.rows(),before);assert.equal(f.sessions.size,0);
+  f.before=undefined;f.user.limits={[hot]:1};installMaintenance(f.service);
+  f.service.db.prepare('UPDATE operational_maintenance SET data=? WHERE id=1').run(JSON.stringify({version:1,revision:51,
+    global:{reason:'fixture maintenance',since:'2026-10-08T00:00:00Z'},machines:{}}));
+  const maintenance=f.service.db.prepare('SELECT data FROM operational_maintenance WHERE id=1').get().data;
+  assert.equal((await f.call('status',{uploadId:issued.uploadId})).state,'NOT_INITIALIZED');
+  await assert.rejects(f.begin(issued.uploadId),error=>error.code==='MAINTENANCE_ACTIVE');
+  assert.equal(f.service.db.prepare('SELECT data FROM operational_maintenance WHERE id=1').get().data,maintenance);
+  const second={userId:f.second.id,username:f.second.username,role:'member'},count=f.calls.length;
+  f.before=()=>{throw Error('Unrelated old node is offline; no fresh proof');};
+  await assert.rejects(f.call('status',{uploadId:issued.uploadId},second),/offline/);
+  assert.equal(f.calls.slice(count).some(row=>row.operation!=='storage.upload.locate'),false);
+  assert.equal(f.sessions.size,0);assert.deepEqual(f.rows(),before);
+});
+
+test('previous READY proof is not replaced by NOT_INITIALIZED when node control metadata disappears',async t=>{
+  const f=fixture(t),issued=await f.create();await f.begin(issued.uploadId);
+  await f.call('commit',{uploadId:issued.uploadId});const before=f.rows();
+  f.sessions.clear();f.calls.length=0;
+  await assert.rejects(f.call('status',{uploadId:issued.uploadId}),error=>error.status===502);
+  assert.deepEqual(f.rows(),before);assert.equal(f.mappings().length,1);
+  assert.deepEqual(f.calls.map(row=>row.operation),['storage.upload.locate']);
+});
+
+async function restartedHttpFixture(t){
+  const directory=mkdtempSync(join(tmpdir(),'stargate-initialization-restart-')),password='Initialization-Local-Fixture-2026!';
+  const bootstrap=join(directory,'bootstrap.json'),archive=join(directory,'archive.json'),ingress=join(directory,'ingress.json');
+  writeFileSync(bootstrap,JSON.stringify({username:'admin',password}),{mode:0o600});
+  const reserve=createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));
+  const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
+  const origin='http://127.0.0.1:'+port,f={calls:[]};
+  const post=async(path,body,token)=>{
+    const response=await fetch(origin+path,{method:'POST',headers:{'Content-Type':'application/json',
+      ...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(body)});
+    return {status:response.status,data:await response.json()};
+  };
+  f.stop=async()=>{if(f.server){const server=f.server;f.server=null;server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}};
+  t.after(async()=>{try{await f.stop();}finally{rmSync(directory,{recursive:true,force:true});}});
+  f.start=async(nextPolicy=policy)=>{
+    writeFileSync(archive,JSON.stringify(nextPolicy.enabled?nextPolicy:policy),{mode:0o600});
+    writeFileSync(ingress,JSON.stringify(nextPolicy),{mode:0o600});
+    const {server,service}=await createPortalServer({database:join(directory,'portal.sqlite'),bootstrap,origin,secure:false,
+      storageArchiveConfigPath:archive,datasetIngressConfigPath:ingress,bridge:async(machine,operation,args)=>{
+        f.calls.push({machine,operation,args:structuredClone(args)});assert.equal(machine,cold);
+        if(operation==='storage.upload.admit')throw Object.assign(Error('First dispatch never reached node'),{status:503});
+        assert.equal(operation,'storage.upload.locate');await f.locateHook?.();
+        return {protocol:'dataset-upload-location-v1',uploadAdmissionProtocol:1,machine,userId:args.userId,uploadId:args.uploadId,
+          authority:{enabled:true,machine,authority:'hdd'},present:false,state:'NOT_INITIALIZED',initializationProtocol:1,nodePresent:false};
+      }});
+    f.server=server;f.service=service;
+    for(const key of ['executionTimer','transferTimer','maintenanceTimer','storageArchiveTimer','projectCopyTimer','notificationTimer'])clearInterval(service[key]);
+    await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
+    const admin=await post('/api/login',{username:'admin',password});assert.equal(admin.status,200);f.admin=admin.data;
+  };
+  f.call=(operation,args,token=f.member.token)=>post('/api/call',{operation,args},token);
+  f.login=async()=>{const member=await post('/api/login',{username:'restart-member',password});assert.equal(member.status,200);f.member=member.data;};
+  await f.start();
+  assert.equal((await f.call('users.create',{username:'restart-member',password},f.admin.token)).status,200);
+  await f.login();
+  assert.equal((await f.call('policy.save',{userId:f.member.principal.userId,policyVersion:0,total:1,limits:{[hot]:1}},f.admin.token)).status,200);
+  return f;
+}
+
+for(const nextPolicy of [{enabled:false},{...policy,authority:'different'}]){
+  test('normal HTTP persisted BOUND rejects absence after trusted configuration restart: '+JSON.stringify(nextPolicy),async t=>{
+    const f=await restartedHttpFixture(t);
+    const issued=(await f.call('datasets.upload.admission.create',{machine:hot,key:randomUUID(),...spec})).data.result;
+    assert(issued);const args={machine:hot,uploadId:issued.uploadId};
+    assert.equal((await f.call('datasets.upload.begin',{machine:hot,key:issued.uploadId,...spec})).status,503);
+    const before=f.service.db.prepare('SELECT * FROM dataset_upload_placements').all();
+    const mappings=f.service.db.prepare('SELECT * FROM dataset_upload_admissions').all();
+    assert.equal(JSON.parse(before[0].data).phase,'BOUND');
+    assert.equal((await f.call('datasets.upload.status',args)).data.result.state,'NOT_INITIALIZED');
+    await f.stop();await f.start(nextPolicy);await f.login();f.calls.length=0;
+    const result=await f.call('datasets.upload.status',args);
+    if(process.env.DATASET_INITIALIZATION_REVIEW==='1')t.diagnostic(JSON.stringify({case:nextPolicy.enabled?'authority-restart':'disabled-restart',
+      principal:f.member.principal,configuredPolicy:f.service.datasetIngressPolicy,originalIssued:issued,firstBeginStatus:503,
+      locateCalls:f.calls,response:{status:result.status,result:result.data.result,error:result.data.error}}));
+    assert.equal(result.status,409);assert.equal(result.data.result,undefined);assert.doesNotMatch(JSON.stringify(result.data),/NOT_INITIALIZED/);
+    assert.deepEqual(f.calls,[{machine:cold,operation:'storage.upload.locate',args:{userId:f.member.principal.userId,uploadId:issued.uploadId}}]);
+    assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_upload_placements').all(),before);
+    assert.deepEqual(f.service.db.prepare('SELECT * FROM dataset_upload_admissions').all(),mappings);
+  });
+}
+
+test('normal service grant and role mutations serialize with HTTP status and reject subsequent stale access',async t=>{
+  const f=await restartedHttpFixture(t);
+  const issued=(await f.call('datasets.upload.admission.create',{machine:hot,key:randomUUID(),...spec})).data.result;
+  const args={machine:hot,uploadId:issued.uploadId},owner=f.member.principal.userId;
+  for(const [operation,mutation] of [['policy.save',{userId:owner,policyVersion:1,total:0,limits:{}}],['users.role',{userId:owner,role:'admin'}]]){
+    let enter,release;const entered=new Promise(resolve=>enter=resolve),released=new Promise(resolve=>release=resolve);
+    f.locateHook=()=>{enter();return released;};
+    const reading=f.call('datasets.upload.status',args);await entered;
+    const changing=f.service.invoke(f.admin.token,operation,mutation);
+    assert.equal(f.service.pending,2);assert.equal(f.service.store.get(owner).role,'member');assert.equal(f.service.store.get(owner).limits[hot],1);
+    release();assert.equal((await reading).data.result.state,'NOT_INITIALIZED');await changing;f.locateHook=undefined;
+    const count=f.calls.length,result=await f.call('datasets.upload.status',args);
+    assert.ok([401,403].includes(result.status));assert.equal(result.data.result,undefined);assert.equal(f.calls.length,count);
+    if(operation==='policy.save')assert.equal((await f.call('policy.save',{userId:owner,policyVersion:2,total:1,limits:{[hot]:1}},f.admin.token)).status,200);
+  }
+});
+
+test('real authenticated HTTP projects exact missing-node proof, never an error, foreign principal or maintenance write',async t=>{
+  const directory=mkdtempSync(join(tmpdir(),'stargate-initialization-http-')),password='Initialization-Local-Fixture-2026!';
+  let running;
+  t.after(async()=>{
+    try{if(running){running.closeAllConnections();await new Promise(resolve=>running.close(resolve));}}
+    finally{rmSync(directory,{recursive:true,force:true});}
+  });
+  const bootstrap=join(directory,'bootstrap.json'),archive=join(directory,'archive.json'),ingress=join(directory,'ingress.json');
+  for(const [path,value] of [[bootstrap,{username:'admin',password}],[archive,policy],[ingress,policy]])
+    writeFileSync(path,JSON.stringify(value),{mode:0o600});
+  const reserve=createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));
+  const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
+  const origin='http://127.0.0.1:'+port,calls=[];let failure;
+  const {server,service}=await createPortalServer({database:join(directory,'portal.sqlite'),bootstrap,origin,secure:false,
+    storageArchiveConfigPath:archive,datasetIngressConfigPath:ingress,bridge:async(machine,operation,args)=>{
+      calls.push({machine,operation,args});assert.equal(machine,cold);assert.equal(operation,'storage.upload.locate');
+      if(failure)throw failure;
+      return {protocol:'dataset-upload-location-v1',uploadAdmissionProtocol:1,machine,userId:args.userId,uploadId:args.uploadId,
+        authority:{enabled:true,machine,authority:'hdd'},present:false,state:'NOT_INITIALIZED',initializationProtocol:1,nodePresent:false};
+    }});
+  running=server;
+  for(const key of ['executionTimer','transferTimer','maintenanceTimer','storageArchiveTimer','projectCopyTimer','notificationTimer'])clearInterval(service[key]);
+  await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
+  const post=async(path,body,token)=>{
+    const response=await fetch(origin+path,{method:'POST',headers:{'Content-Type':'application/json',
+      ...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(body)});
+    return {status:response.status,data:await response.json()};
+  };
+  const admin=(await post('/api/login',{username:'admin',password})).data;
+  const call=(operation,args,token=admin.token)=>post('/api/call',{operation,args},token);
+  assert.equal((await call('users.create',{username:'initialization-member',password})).status,200);
+  const member=(await post('/api/login',{username:'initialization-member',password})).data;
+  assert.equal((await call('policy.save',{userId:member.principal.userId,policyVersion:0,total:1,limits:{[hot]:1}})).status,200);
+  const issued=(await call('datasets.upload.admission.create',{machine:hot,key:randomUUID(),...spec},member.token)).data.result;
+  assert(issued);assert.equal(calls.length,0);
+  const args={machine:hot,uploadId:issued.uploadId},before=service.db.prepare('SELECT * FROM dataset_upload_placements').all();
+  assert.equal((await call('datasets.upload.status',args,'0'.repeat(64))).status,401);assert.equal(calls.length,0);
+  assert.equal((await call('datasets.upload.status',{...args,userId:'builtin-admin'},member.token)).status,400);assert.equal(calls.length,0);
+  const maintenance=await call('maintenance.set',{scope:'all',revision:0,enabled:true,reason:'local proof-only test'});
+  assert.equal(maintenance.status,200);const raw=service.db.prepare('SELECT data FROM operational_maintenance WHERE id=1').get().data;
+  const response=await call('datasets.upload.status',args,member.token);
+  assert.equal(response.status,200);assert.deepEqual(response.data.result,{...spec,uploadId:issued.uploadId,
+    userId:member.principal.userId,state:'NOT_INITIALIZED',initializationProtocol:1,nodePresent:false,manifestOffset:0,
+    admissionProtocol:1,admissionKey:issued.key,placementProtocol:1,requestedMachine:hot,storageMachine:cold,storageTier:'hdd',legacyPlacement:false});
+  assert.deepEqual(calls,[{machine:cold,operation:'storage.upload.locate',args:{userId:member.principal.userId,uploadId:issued.uploadId}}]);
+  for(const status of [400,404,503]){
+    failure=Object.assign(Error('Node response remains unconfirmed'),{status});
+    const result=await call('datasets.upload.status',args,member.token);
+    assert.equal(result.status,status);assert.equal(result.data.result,undefined);assert.doesNotMatch(JSON.stringify(result.data),/NOT_INITIALIZED/);
+  }
+  const count=calls.length;
+  assert.equal((await call('datasets.upload.begin',{machine:hot,key:issued.uploadId,...spec},member.token)).status,503);
+  assert.equal(calls.length,count);assert.deepEqual(service.db.prepare('SELECT * FROM dataset_upload_placements').all(),before);
+  assert.equal(service.db.prepare('SELECT data FROM operational_maintenance WHERE id=1').get().data,raw);
 });

@@ -71,7 +71,7 @@ test('route errors distinguish transport, wrong node and revision without respon
   for(const [observed,code] of [[{...capability,machine:'secret-node'},'NODE_MISMATCH'],[{...capability,revision:'c'.repeat(64)},'REVISION_MISMATCH'],
     [{...capability,listenerReady:false},'LISTENER_NOT_READY'],[{...capability,protocol:'private-protocol'},'PROTOCOL_MISMATCH']]){
     await assert.rejects(selectUploadRoute(descriptor,'node-a',async()=>observed),error=>{
-      assert.deepEqual(error.routeFailures,descriptor.routes.map(route=>({routeId:route.id,code})));
+      assert.deepEqual(error.routeFailures,[{routeId:'primary',code}]);
       assert.match(error.message,/no ticket issued/);assert.doesNotMatch(error.message,/secret-node|private-protocol|https:|a{64}|c{64}/);return true;
     });
   }
@@ -79,11 +79,11 @@ test('route errors distinguish transport, wrong node and revision without respon
   await assert.rejects(selectUploadRoute(descriptor,'node-a',async route=>{
     calls.push(route.id);throw Object.assign(Error('Bearer do-not-print'),{uploadProbeCode:route.id==='primary'?'CONNECTION_REFUSED':'TIMEOUT'});
   }),error=>{
-    assert.deepEqual(error.routeFailures,[{routeId:'primary',code:'CONNECTION_REFUSED'},{routeId:'tail',code:'TIMEOUT'}]);
-    assert.match(error.message,/primary: connection refused/);assert.match(error.message,/tail: timed out/);
+    assert.deepEqual(error.routeFailures,[{routeId:'primary',code:'CONNECTION_REFUSED'}]);
+    assert.match(error.message,/primary: connection refused/);assert.doesNotMatch(error.message,/tail:/);
     assert.doesNotMatch(error.message,/Bearer|do-not-print|https:/);return true;
   });
-  assert.deepEqual(calls,['primary','tail']);
+  assert.deepEqual(calls,['primary']);
   await assert.rejects(selectUploadRoute(descriptor,'node-a',async()=>{throw {uploadProbeCode:'constructor',message:'secret'};}),
     error=>error.routeFailures.every(row=>row.code==='PROBE_FAILED')&&!error.message.includes('secret'));
   const controller=new AbortController(),reason=Error('explicit cancellation');controller.abort(reason);
@@ -102,4 +102,52 @@ test('classified route failure still sends no ticket or file bytes and preserves
     }}),error=>error.message.includes('connection refused')&&error.message.includes(uploadId)&&!error.message.includes('private diagnostic'));
   assert.deepEqual(calls,['datasets.upload.begin','datasets.upload.routes','datasets.upload.begin','datasets.upload.routes']);
   assert.equal(keys[0],keys[1]);assert.equal(opens,0);
+});
+
+test('campus-only mode never probes Tail or issues tickets after campus failure, including original-ID retry',async()=>{
+  const calls=[],probes=[],keys=[];
+  const scan={manifest:Buffer.from('fixture'),manifestSha256:'c'.repeat(64),totalBytes:1,entries:1,files:[],openEntry:()=>assert.fail('No file may be opened')};
+  const call=async(operation,args)=>{calls.push(operation);if(operation==='datasets.upload.begin'){keys.push(args.key);return {result:{uploadId,state:'RECEIVING_MANIFEST',manifestOffset:0,
+    uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true,routeSelection:true}}};}
+    assert.equal(operation,'datasets.upload.routes');return {result:descriptor};};
+  for(let retry=0;retry<2;retry++)await assert.rejects(uploadDatasetSnapshot(call,{machine:'node-a',name:'fixture',userId:'fixture-owner',scan,via:'campus',
+    keyStore:{get:()=>uploadId,set:()=>assert.fail('Keep original UUID')},progress:()=>{},probeRoute:async route=>{
+      probes.push(route.id);throw Object.assign(Error('private socket and token'),{uploadProbeCode:'CONNECTION_REFUSED'});
+    }}),error=>error.message.includes('primary: connection refused')&&error.message.includes(uploadId)&&!error.message.includes('private socket'));
+  assert.deepEqual(probes,['primary','primary']);assert.deepEqual(keys,[uploadId,uploadId]);
+  assert.deepEqual(calls,['datasets.upload.begin','datasets.upload.routes','datasets.upload.begin','datasets.upload.routes']);
+});
+
+test('campus-only success validates the complete descriptor and pins tickets to primary',async()=>{
+  for(const invalid of [false,true]){
+    const calls=[],probes=[];let closed=0;
+    const scan={manifest:Buffer.from('fixture'),manifestSha256:'c'.repeat(64),totalBytes:0,entries:0,files:[],verify:async()=>{}};
+    const call=async(operation,args)=>{calls.push({operation,args});const action=operation.split('.').at(-1);
+      if(action==='begin')return {result:{uploadId,state:'RECEIVING_MANIFEST',manifestOffset:0,uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true,routeSelection:true}}};
+      if(action==='routes')return {result:invalid?{...descriptor,routes:[descriptor.routes[0],{...descriptor.routes[1],endpoint:'http://unchecked.example'}]}:descriptor};
+      if(action==='direct-ticket'){assert.equal(args.routeId,'primary');return {result:{available:true,kind:'campus-direct'}};}
+      if(action==='seal')return {result:{uploadId,state:'UPLOADING'}};
+      if(action==='commit')return {result:{uploadId,state:'READY',dataset:'fixture',version:'c'.repeat(64)}};
+      assert.fail('No relay payload');};
+    const options={machine:'node-a',name:'fixture',userId:'fixture-owner',scan,via:'campus',keyStore:{get:()=>uploadId},progress:()=>{},
+      probeRoute:async route=>{probes.push(route.id);return capability;},
+      directFactory:async(get,{route,uploadId:id})=>{assert.equal(route.id,'primary');assert.equal(id,uploadId);await get();await get();return {
+        request:async(action,args)=>{assert.equal(action,'manifest');return {offset:args.bytes.length};},close(){closed++;}};}};
+    if(invalid){await assert.rejects(uploadDatasetSnapshot(call,options),/invalid or unavailable/);assert.deepEqual(probes,[]);assert.equal(calls.length,2);}
+    else {const result=await uploadDatasetSnapshot(call,options);assert.equal(result.route.kind,'campus-direct');assert.deepEqual(probes,['primary']);
+      assert.equal(calls.filter(c=>c.operation.endsWith('direct-ticket')).length,2);assert.equal(closed,1);}
+  }
+});
+
+test('campus-only rejects old or unavailable capability without tickets or payload, and READY recovery needs no route',async()=>{
+  for(const transport of [undefined,{protocol:'dataset-upload-v1',directAvailable:true},{protocol:'dataset-upload-v1',directAvailable:false,routeSelection:true}]){
+    const calls=[];
+    await assert.rejects(uploadDatasetSnapshot(async(operation)=>{calls.push(operation);return {result:{uploadId,state:'RECEIVING_MANIFEST',uploadTransport:transport}};},
+      {machine:'node-a',name:'fixture',userId:'fixture-owner',scan:{manifestSha256:'c'.repeat(64),manifest:Buffer.from('fixture'),totalBytes:0,entries:0},via:'campus',
+       keyStore:{get:()=>uploadId},progress:()=>{}}),/Campus-only upload requires confirmed/);
+    assert.deepEqual(calls,['datasets.upload.begin']);
+  }
+  const calls=[];const result=await uploadDatasetSnapshot(async(operation)=>{calls.push(operation);return {result:{uploadId,state:'READY',dataset:'fixture',version:'c'.repeat(64)}};},
+    {machine:'node-a',name:'fixture',userId:'fixture-owner',scan:{manifestSha256:'c'.repeat(64),manifest:Buffer.from('fixture'),totalBytes:0,entries:0},via:'campus',keyStore:{get:()=>uploadId},progress:()=>{}});
+  assert.equal(result.state,'READY');assert.deepEqual(calls,['datasets.upload.begin']);
 });

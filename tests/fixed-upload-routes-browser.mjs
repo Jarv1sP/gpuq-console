@@ -38,16 +38,20 @@ try{
   const run=()=>page.evaluate(async({primary,alternate,revision})=>{
     const {selectUploadRoute}=await import('/upload-routes.js');const {probeBrowserUploadRoute}=await import('/dataset-upload.js');
     const descriptor={available:true,protocol:'dataset-upload-v1',machine:'node-a',revision,certificateSha256:'b'.repeat(64),routes:[
-      {id:'primary',kind:'campus-direct',endpoint:primary},{id:'tail',kind:'tail-upload',endpoint:alternate}]};
-    try{return {id:(await selectUploadRoute(descriptor,'node-a',route=>probeBrowserUploadRoute(route))).id};}
-    catch(error){return {error:error.message};}
+      {id:'primary',kind:'campus-direct',endpoint:primary},
+      {id:'tail',kind:'tail-upload',endpoint:'https://tail.invalid:18444'},
+      {id:'campus-alt',kind:'campus-direct',endpoint:alternate}]};
+    const probes=[];
+    try{return {id:(await selectUploadRoute(descriptor,'node-a',route=>{probes.push(route.id);return probeBrowserUploadRoute(route);})).id,probes};}
+    catch(error){return {error:error.message,probes};}
   },{primary,alternate,revision});
-  await page.goto(origin);assert.match((await run()).error,/no ticket issued/);
+  await page.goto(origin);const denied=await run();assert.match(denied.error,/no ticket issued/);
+  assert.deepEqual(denied.probes,['primary','campus-alt']);
   assert.ok(observed.every(row=>row.url==='/capabilities'));
-  const before=observed.length;allowAlternate=true;await page.reload();assert.deepEqual(await run(),{id:'tail'});
+  const before=observed.length;allowAlternate=true;await page.reload();assert.deepEqual(await run(),{id:'campus-alt',probes:['primary','campus-alt']});
   assert.ok(observed.length>before);assert.ok(observed.every(row=>row.cookie===undefined&&row.authorization===undefined&&row.origin===origin));
   assert.deepEqual(errors,[]);await context.close();
-  console.log('PASS real Chromium: exact CSP denies unlisted alternate, permits listed origin; anonymous cross-origin probes omit cookies and bearer; machine/revision select fixed tail route.');
+  console.log('PASS real Chromium: exact CSP denies unlisted alternate, permits listed origin; anonymous cross-origin probes omit cookies and bearer; machine/revision select fixed campus route without Tail.');
 }finally{
   await browser?.close();for(const server of [portal,node])if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
   await rm(dir,{recursive:true,force:true});

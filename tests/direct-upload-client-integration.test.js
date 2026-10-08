@@ -62,9 +62,9 @@ test('real Node pinned client uploads raw bytes to real Python HTTPS endpoint, p
 test('real anonymous probe selects fixed alternate before issuing a ticket; no payload crosses control bridge',{timeout:20000},async t=>{
   const f=await fixture(t,true),calls=[],scan=snapshot({sample:Buffer.alloc(1048593,42)});
   const result=await uploadDatasetSnapshot(async(op,args)=>{calls.push({op,args});return {result:await f.control(op.slice('datasets.upload.'.length),args)};},options(scan));
-  assert.equal(result.state,'READY');assert.equal(result.lastConfirmedRoute,'tail-upload');assert.equal(result.route.kind,'tail-upload');
+  assert.equal(result.state,'READY');assert.equal(result.lastConfirmedRoute,'campus-direct');assert.equal(result.route.kind,'campus-direct');
   const actions=calls.map(x=>x.op.split('.').at(-1));assert.ok(actions.indexOf('routes')<actions.indexOf('direct-ticket'));
-  assert.equal(calls.find(x=>x.op.endsWith('.direct-ticket')).args.routeId,'tail');
+  assert.equal(calls.find(x=>x.op.endsWith('.direct-ticket')).args.routeId,'campus-alt');
   assert.equal(calls.some(x=>x.args.bytes!==undefined||x.args.data!==undefined),false);
 });
 

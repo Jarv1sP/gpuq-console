@@ -37,23 +37,21 @@ async function fixture(t){
   return {dir,calls,files,cli,lose:()=>{loseReply=true;},publication:value=>{publication=value;}};
 }
 
-test('data put chunks one file into personal data without extraction, publication or selected project context',async t=>{
+test('data put rejects every file size before personal-data relay or selected-project I/O',async t=>{
   const f=await fixture(t),source=join(f.dir,'images.zip'),content=randomBytes(chunk+37);await fs.writeFile(source,content);
-  const response=await f.cli(['data','put',source,'incoming/images.zip']);assert.equal(response.code,0,response.stderr);
-  assert.deepEqual(response.result,{machine:'gpu-1',path:'/data2/incoming/images.zip',bytes:content.length,extracted:false,published:false});
-  assert.deepEqual(f.files.get('incoming/images.zip'),content);
-  const puts=f.calls.filter(c=>c.operation!=='state');assert.deepEqual(puts.map(c=>c.operation),['datasets.workspace.put','datasets.workspace.put']);
-  assert.equal(puts[0].args.truncate,false);assert.equal(Object.hasOwn(puts[1].args,'truncate'),false);assert.deepEqual(puts.map(c=>c.args.offset),[0,chunk]);
-  const zero=join(f.dir,'empty.zip');await fs.writeFile(zero,'');assert.equal((await f.cli(['data','put',zero])).code,0);assert.equal(f.files.get('empty.zip').length,0);
+  const response=await f.cli(['data','put',source,'incoming/images.zip']);assert.equal(response.code,1);assert.match(response.stderr,/no verified campus data plane/);
+  assert.equal(f.files.size,0);assert.deepEqual(f.calls.filter(c=>c.operation!=='state'),[]);
+  const zero=join(f.dir,'empty.zip');await fs.writeFile(zero,'');assert.equal((await f.cli(['data','put',zero])).code,1);assert.equal(f.files.size,0);
+  assert.deepEqual(f.calls.filter(c=>c.operation!=='state'),[]);
 });
 
-test('data put requires explicit overwrite and never retries an ambiguous write',async t=>{
+test('overwrite and explicit relay cannot authorize data put or alter an existing file',async t=>{
   const f=await fixture(t),source=join(f.dir,'data.zip');await fs.writeFile(source,'new');f.files.set('data.zip',Buffer.from('old'));
-  const denied=await f.cli(['data','put',source]);assert.equal(denied.code,1);assert.match(denied.stderr,/already exists/);assert.equal(f.files.get('data.zip').toString(),'old');
-  assert.equal((await f.cli(['data','put',source,'--overwrite'])).code,0);assert.equal(f.files.get('data.zip').toString(),'new');
-  const before=f.calls.length;f.lose();const lost=await f.cli(['data','put',source,'lost.zip']);assert.equal(lost.code,1);assert.match(lost.stderr,/response lost/);
-  assert.deepEqual(f.calls.slice(before).filter(c=>c.operation!=='state').map(c=>c.operation),['datasets.workspace.put']);
-  assert.equal(f.files.get('lost.zip').toString(),'new');
+  for(const flags of [[],['--overwrite'],['--via','relay'],['--overwrite','--via','relay']]){
+    const before=f.calls.length,response=await f.cli(['data','put',source,...flags]);assert.equal(response.code,1);assert.match(response.stderr,/VPS relay and Tail upload are disabled/);
+    assert.deepEqual(f.calls.slice(before).filter(c=>c.operation!=='state'),[]);assert.equal(f.files.get('data.zip').toString(),'old');
+  }
+  assert.equal(f.files.size,1);
 });
 
 test('data workspace CLI preserves relative paths and publication handles, rejects privilege and project options',async t=>{
@@ -72,13 +70,11 @@ test('data workspace CLI preserves relative paths and publication handles, rejec
   assert.equal((await f.cli(['data','workspace-status','bad'])).code,1);
 });
 
-test('data put supports old Windows path/handle device pairing but rejects subsequent identity changes and oversized files',async t=>{
-  const dir=await fs.mkdtemp(join(tmpdir(),'gpuq-workspace-stat-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));const path=join(dir,'image.zip');await fs.writeFile(path,'payload');
-  const copy=(info,changes)=>Object.assign(Object.create(Object.getPrototypeOf(info)),info,changes);
-  const client=(overrides={})=>createLocalDatasetTools({platform:'win32',lstat:async(...args)=>copy(await fs.lstat(...args),{dev:0n}),open:fs.open,...overrides});
-  const calls=[],call=async(operation,args)=>{calls.push({operation,args});return {result:{size:args.offset+Buffer.from(args.data,'base64').length}};};
-  assert.equal((await client().putWorkspaceData(call,'gpu-1',path,'image.zip',false)).bytes,7);assert.equal(calls.length,1);
-  let reads=0;calls.length=0;
-  await assert.rejects(client({lstat:async(...args)=>copy(await fs.lstat(...args),{dev:reads++?1n:0n})}).putWorkspaceData(call,'gpu-1',path,'image.zip',false),/changed during upload/);assert.equal(calls.length,0);
-  await assert.rejects(client({lstat:async(...args)=>copy(await fs.lstat(...args),{dev:0n,size:100n*1024n**3n+1n})}).putWorkspaceData(call,'gpu-1',path,'image.zip',false),/100 GiB/);assert.equal(calls.length,0);
+test('data put never examines source files on Windows or POSIX while its campus path is unavailable',async()=>{
+  for(const platform of ['win32','darwin','linux']){
+    let reads=0,opened=0,called=0;
+    const client=createLocalDatasetTools({platform,lstat:async()=>{reads++;throw Error('must not stat');},open:async()=>{opened++;throw Error('must not open');}});
+    await assert.rejects(client.putWorkspaceData(async()=>{called++;},'gpu-1','not-opened.zip','image.zip',false),/no verified campus data plane/);
+    assert.equal(reads,0);assert.equal(opened,0);assert.equal(called,0);
+  }
 });

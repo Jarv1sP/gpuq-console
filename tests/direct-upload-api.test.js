@@ -28,15 +28,16 @@ test('direct ticket and revoke use authenticated personal identity and existing 
   f.user.enabled=false;
   await assert.rejects(f.call('direct-ticket',{machine:'gpu-1',uploadId}),/暂停/);
 });
-test('relay override is only an explicit boolean on authenticated begin',async()=>{
+test('relay consent cannot authorize bytes and preserves authenticated begin for campus upload',async()=>{
   const f=fixture();
   const args={machine:'gpu-1',key:uploadId,name:'sample',manifestBytes:200,manifestSha256:'a'.repeat(64),totalBytes:300*1024**2,entries:1};
-  for(const allowRelay of [undefined,false,true]){
+  for(const allowRelay of [undefined,false]){
     await f.call('begin',{...args,...(allowRelay===undefined?{}:{allowRelay})});
     assert.equal(f.calls.at(-1)[2].allowRelay,allowRelay);
   }
   for(const allowRelay of ['true',1,null])await assert.rejects(f.call('begin',{...args,allowRelay}));
-  assert.equal(f.calls.length,3);
+  await assert.rejects(f.call('begin',{...args,allowRelay:true}),e=>e.status===409&&e.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,2);
 });
 test('route discovery is authorized read-only metadata; tickets accept an ID, never an endpoint',async()=>{
   const f=fixture();

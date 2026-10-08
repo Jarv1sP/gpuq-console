@@ -11,6 +11,7 @@ import {uploadDatasetSnapshot,snapshotKey} from '../client-data-upload.mjs';
 import {uploadBrowserDataset,uploadKey} from '../dist/dataset-upload.js';
 import {datasetUploadCalls,datasetUploadKeyStore} from '../dist/datasets-ui.js';
 import {saveDatasetUploadSession} from '../cli.mjs';
+import {campusBrowserFixture,campusCoreFixture,campusTLSFixture} from './campus-upload-fixture.mjs';
 
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const issued='11111111-1111-4111-8111-111111111111',legacyId='22222222-2222-4222-8222-222222222222';
@@ -51,12 +52,40 @@ function fixture(browser){
     throw Error('Unexpected operation '+operation);
   };
   const options={machine,name,userId,scan,keyStore:store,admission:capability};
-  const run=(extra={})=>browser?uploadBrowserDataset({...options,call:directCall,pollMs:0,...extra}):uploadDatasetSnapshot(async(op,args)=>({result:await (extra.call||directCall)(op,args)}),{...options,progress:()=>{},...extra});
+  const run=(extra={})=>{
+    const store=extra.call||directCall,adapter=campusBrowserFixture(store,{machine});
+    return browser?uploadBrowserDataset({...options,pollMs:0,...extra,...adapter}):uploadDatasetSnapshot(async(op,args)=>({result:await adapter.call(op,args)}),{...options,progress:()=>{},directFactory:campusCoreFixture(store,{machine}),...extra});
+  };
   return {browser,base,scan,spec,store,intents,handles,keys,calls,events,receipt,result,directCall,run,setState:v=>{state=v;},loseAdmission:()=>{loseAdmission=true;},loseBegin:()=>{loseBegin=true;},unknownAdmission:()=>{unconfirmedAdmission=true;}};
 }
 
 for(const browser of [false,true]){
   const client=browser?'browser':'CLI core';
+  test(`${client}: failed first status keeps the durable issued UUID and sends no repeated write`,async()=>{
+    const f=fixture(browser),observed=[];
+    f.intents.set(f.base,{protocol:1,userId,machine,key:f.base,specification:f.spec,uploadId:issued,storageMachine:'warehouse',storageTier:'hdd',beginAttempted:true});
+    const call=async(op,args)=>{f.calls.push({operation:op,args});observed.push('query');assert.equal(op,'datasets.upload.status');throw Object.assign(Error('node temporarily unavailable'),{status:503,code:'NODE_CONNECT_FAILED'});};
+    await assert.rejects(f.run({call,progress:(phase,value)=>{if(phase==='HANDLE'){observed.push('handle');assert.equal(value.uploadId,issued);}}}),error=>{
+      assert.equal(error.uploadId,issued);assert.equal(error.code,'NODE_CONNECT_FAILED');
+      if(!browser){assert.match(error.message,new RegExp(issued));assert.deepEqual(observed,['handle','query']);}return true;
+    });assert.equal(f.calls.length,1);assert.equal(f.intents.get(f.base).uploadId,issued);
+  });
+  test(`${client}: exact absence resumes only the issued UUID; malformed proofs and HTTP errors send no begin`,async()=>{
+    const absent=f=>({...f.result(),...f.spec,state:'NOT_INITIALIZED',initializationProtocol:1,nodePresent:false,userId,manifestOffset:0,admissionProtocol:1,admissionKey:f.base});
+    const original=f=>({protocol:1,userId,machine,key:f.base,specification:f.spec,uploadId:issued,storageMachine:'warehouse',storageTier:'hdd',beginAttempted:true});
+    const f=fixture(browser);f.intents.set(f.base,original(f));let first=true;
+    const call=async(op,args)=>{if(first){first=false;assert.equal(op,'datasets.upload.status');f.calls.push({operation:op,args});return absent(f);}return f.directCall(op,args);};
+    assert.equal((await f.run({call})).state,'READY');assert.deepEqual(f.calls.slice(0,2).map(row=>row.operation),['datasets.upload.status','datasets.upload.begin']);assert.equal(f.calls[1].args.key,issued);
+    assert.equal(f.calls.some(row=>row.operation.includes('.admission.')),false);
+    for(const patch of [{initializationProtocol:undefined},{nodePresent:undefined},{nodePresent:true},{admissionProtocol:undefined},{admissionProtocol:2},{admissionKey:legacyId},{userId:'other'},{manifestOffset:1},{manifestSha256:'b'.repeat(64)},{uploadId:legacyId},{storageMachine:'other'},{requestedMachine:'other'},{storageTier:'existing'},{legacyPlacement:true}]){
+      const x=fixture(browser);x.intents.set(x.base,original(x));const deny=async(op,args)=>{x.calls.push({operation:op,args});assert.equal(op,'datasets.upload.status');return {...absent(x),...patch};};
+      await assert.rejects(x.run({call:deny}),error=>error.code==='MISMATCH');assert.equal(x.calls.length,1);
+    }
+    for(const status of [400,404,503]){
+      const x=fixture(browser);x.intents.set(x.base,original(x));const deny=async(op,args)=>{x.calls.push({operation:op,args});throw Object.assign(Error('No such file or directory'),{status});};
+      await assert.rejects(x.run({call:deny}),error=>error.uploadId===issued);assert.equal(x.calls.length,1);
+    }
+  });
   test(`${client}: persist intent and server UUID before begin, complete upload, restart only original status`,async()=>{
     const f=fixture(browser);assert.equal((await f.run()).state,'READY');
     assert.equal(f.calls[0].operation,'datasets.upload.admission.create');assert.equal(f.calls[1].operation,'datasets.upload.begin');
@@ -135,6 +164,32 @@ for(const browser of [false,true]){
   test(`${client}: issued discarded upload is terminal and does not rotate UUID`,async()=>{
     const f=fixture(browser);f.setState('DISCARDED');await assert.rejects(f.run(),/取消|discarded/);
     assert.equal(f.calls.filter(row=>row.operation==='datasets.upload.admission.create').length,1);assert.equal(f.calls.filter(row=>row.operation==='datasets.upload.begin').length,1);assert.equal(f.intents.get(f.base).uploadId,issued);
+    const before=f.calls.length;await assert.rejects(f.run(),/取消|discarded/);
+    assert.deepEqual(f.calls.slice(before).map(row=>row.operation),['datasets.upload.status']);assert.equal(f.intents.get(f.base).uploadId,issued);
+  });
+  test(`${client}: every discarded legacy key or handle stops with the same UUID and no second begin`,async()=>{
+    for(const handle of [false,true]){
+      const f=fixture(browser);f.keys.set(f.base,legacyId);f.setState('DISCARDED');let writes=0;
+      f.store.set=()=>{writes++;throw Error('must not replace original key');};
+      if(handle)f.handles.set(f.base,{uploadId:legacyId,machine,name,userId,manifestSha256:f.scan.manifestSha256,totalBytes:0,entries:0});
+      await assert.rejects(f.run({admission:undefined}),error=>/取消|discarded/.test(error.message)&&error.uploadId===legacyId);
+      assert.equal(writes,0);assert.equal(f.keys.get(f.base),legacyId);assert.equal(f.intents.size,0);
+      assert.deepEqual(f.calls.map(row=>row.operation),[handle?'datasets.upload.status':'datasets.upload.begin']);
+      assert.equal(f.calls[0].args[handle?'uploadId':'key'],legacyId);
+    }
+  });
+  test(`${client}: a legacy handle without a separate key pins begin to that original UUID; conflicting identities refuse every RPC`,async()=>{
+    const f=fixture(browser);f.handles.set(f.base,{uploadId:legacyId,machine,name,userId,manifestSha256:f.scan.manifestSha256,totalBytes:0,entries:0});
+    const call=async(operation,args)=>{
+      f.calls.push({operation,args});
+      assert.equal(args[operation.endsWith('.begin')?'key':'uploadId'],legacyId);
+      assert.equal(operation==='datasets.upload.status'||operation==='datasets.upload.begin',true);
+      return {...f.result(legacyId),...(operation.endsWith('.begin')||f.calls.length>2?{state:'READY',dataset:'u-test-mine',version:hash(rawManifest)}:{})};
+    };
+    assert.equal((await f.run({call,admission:undefined})).uploadId,legacyId);
+    assert.deepEqual(f.calls.slice(0,2).map(row=>row.operation),['datasets.upload.status','datasets.upload.begin']);assert.equal(f.intents.size,0);
+    const conflicting=fixture(browser);conflicting.keys.set(conflicting.base,issued);conflicting.handles.set(conflicting.base,{uploadId:legacyId,machine,name,userId,manifestSha256:conflicting.scan.manifestSha256,totalBytes:0,entries:0});
+    await assert.rejects(conflicting.run({admission:undefined}),/不一致|disagree/);assert.equal(conflicting.calls.length,0);assert.equal(conflicting.intents.size,0);
   });
 }
 
@@ -162,7 +217,7 @@ test('CLI session persistence is atomic, synced and refuses unsafe cache links',
 
 test('standalone CLI uses real durable intent and issued UUID, then resumes lost begin ACK with only original status',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'dataset-admission-cli-')),session=join(dir,'session.json'),data=join(dir,'data');await mkdir(data);let intentKey,spec,state='RECEIVING_MANIFEST',offset=0,loseBegin=true;const calls=[];
-  const server=createServer(async(req,res)=>{try{
+  const tls=await campusTLSFixture(async(req,res)=>{try{
     let raw='';for await(const part of req)raw+=part;const {operation,args={}}=JSON.parse(raw);calls.push({operation,args});res.setHeader('Content-Type','application/json');
     if(operation==='state'){res.end(JSON.stringify({state:{demo:false,gpuqConnected:true,machines:[{id:machine}],datasetUploadAdmission:capability}}));return;}
     const saved=JSON.parse(await readFile(session,'utf8'));
@@ -175,11 +230,16 @@ test('standalone CLI uses real durable intent and issued UUID, then resumes lost
     if(action==='begin'){assert.equal(args.key,issued);assert.equal(saved.datasetUploadIntents[intentKey].uploadId,issued);assert.equal(saved.datasetUploadIntents[intentKey].beginAttempted,true);if(loseBegin){loseBegin=false;req.socket.destroy();return;}result=common();}
     else {assert.equal(args.uploadId,issued);if(action==='status')result=common();else if(action==='manifest'){offset+=Buffer.from(args.data,'base64').length;result={offset};}else if(action==='seal'){state='UPLOADING';result=common();}else if(action==='commit'){state='READY';result=common();}else throw Error(operation);}
     res.end(JSON.stringify({result}));
-  }catch(error){res.statusCode=400;res.end(JSON.stringify({error:error.message}));}});
+  }catch(error){res.statusCode=400;res.end(JSON.stringify({error:error.message}));}},{machine});
+  const server=createServer(tls.control);
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const url=`http://127.0.0.1:${server.address().port}`;await writeFile(session,JSON.stringify({url,token:'test-only',principal:{userId},machine}),{mode:0o600});
-  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});});
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await tls.close();assert.equal(tls.counters.portalFileRequests,0);await rm(dir,{recursive:true,force:true});});
   const cli=()=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[fileURLToPath(new URL('../cli.mjs',import.meta.url)),'--url',url,'--session-file',session,'--json','data','upload',data,'--name',name]);let stdout='',stderr='';child.stdout.on('data',v=>stdout+=v);child.stderr.on('data',v=>stderr+=v);child.on('error',reject);child.on('close',code=>resolve({code,stdout,stderr}));});
   const first=await cli();assert.equal(first.code,1,first.stderr);assert.match(first.stderr,/initialization receipt was lost/);
+  assert.ok(first.stderr.indexOf(`Upload: ${issued} · ${machine}`)<first.stderr.indexOf('initialization receipt was lost'));
+  assert.equal(first.stderr.split('\n').filter(line=>line===`Upload: ${issued} · ${machine}`).length,1);
+  assert.match(JSON.parse(first.stderr.trim().split('\n').at(-1)).error,new RegExp(issued));
+  assert.doesNotMatch(first.stderr,/test-only/);
   assert.deepEqual(calls.slice(1,4).map(row=>row.operation),['datasets.upload.admission.create','datasets.upload.begin','datasets.upload.status']);
   const before=calls.length,second=await cli();assert.equal(second.code,0,second.stderr);assert.equal(JSON.parse(second.stdout).data.uploadId,issued);assert.deepEqual(calls.slice(before,before+3).map(row=>row.operation),['state','datasets.upload.status','datasets.upload.begin']);
   const completed=calls.length,third=await cli();assert.equal(third.code,0,third.stderr);assert.deepEqual(calls.slice(completed).map(row=>row.operation),['state','datasets.upload.status']);

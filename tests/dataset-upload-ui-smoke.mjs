@@ -40,7 +40,7 @@ try {
       <details hidden><form id="train-form"><select name="machine"><option>gpu-1</option><option>gpu-2</option></select>
       <input name="datasets"><input name="command"></form></details></main></body></html>`});
     const names = new Set(['/member-storage-model.js','/member-storage-ui.js','/dataset-catalog-model.js','/dataset-label-client.js','/dataset-warehouse-view.js','/dataset-files-preview.js','/dataset-upload-metrics.js','/dataset-warehouse.css','/dataset-flow.js','/dataset-cache-admin.js','/manual-pin-state.js','/maintenance-state.js','/copy-help-ui.js','/copy-help.css','/datasets-ui.js','/dataset-remove-ui.js','/dataset-full-delete-ui.js','/dataset-full-delete-state.js','/dataset-remove.css','/workbench-ui.js','/job-progress.js','/motion-ui.js', '/data-route.js', '/dataset-upload.js', '/upload-routes.js', '/data-workspace.js', '/cloud-files-ui.js', '/transfer-upload.js','/cloud-import-ui.js', '/styles.css', '/workspace.css', '/datasets.css']);
-    if(url.pathname==='/capabilities')return route.fulfill({contentType:'application/json',body:JSON.stringify({protocol:'dataset-upload-v1',machine:'gpu-1',revision:'a'.repeat(64),listenerReady:false})});
+    if(url.pathname==='/capabilities')return route.fulfill({contentType:'application/json',body:JSON.stringify({protocol:'dataset-upload-v1',machine:'gpu-1',revision:'a'.repeat(64),listenerReady:await page.evaluate(()=>gates.listener)})});
     if (names.has(url.pathname)||Object.hasOwn(STARBASE_ASSETS,url.pathname)) return route.fulfill({
       contentType: url.pathname.endsWith('.js') ? 'text/javascript' : url.pathname.endsWith('.woff2')?'font/woff2':'text/css',
       body: await readFile(new URL('../dist' + url.pathname, import.meta.url))});
@@ -56,7 +56,7 @@ try {
     const concat = (first, second) => {const out = new Uint8Array(first.length + second.length); out.set(first); out.set(second, first.length); return out;};
     const check = (condition, message) => {if (!condition) throw Error(message);};
     window.calls = []; window.toasts = []; window.uploads = new Map();window.names=new Map();window.admissions=new Map();
-    window.gates = {chunk: true, begin: false, publish: true};
+    window.gates = {chunk: true, begin: false, publish: true, listener: false};
     const describe = upload => ({uploadId: upload.id, name: upload.name, state: upload.state,placementProtocol:1,requestedMachine:upload.spec.machine,storageMachine:'gpu-1',storageTier:'hdd',legacyPlacement:false,
       manifestOffset: upload.manifest.length, manifestBytes: upload.spec.manifestBytes,
       totalBytes: upload.spec.totalBytes, entries: upload.spec.entries,
@@ -66,9 +66,13 @@ try {
       usage() {return 0;},
       data: {machines: [{id: 'gpu-1'}, {id: 'gpu-2'}],datasetUploadAdmission:{protocol:1,available:true}},
       listeners:[],onAuthChange(listener) {this.listeners.push(listener);},
-      async call(operation, args) {
+      async call(operation,args){
+        check(!['datasets.upload.manifest','datasets.upload.chunk'].includes(operation),'File bytes never use Portal control');
+        return this.request(operation,args,'control');
+      },
+      async request(operation, args, channel) {
         const user = this.principal.userId;
-        calls.push({operation, args: structuredClone(args), user});
+        calls.push({operation, args: structuredClone(args), user, channel});
         if(operation==='cloud.info')return {capabilityVerified:false,configurationEnabled:true};
         if(operation==='datasets.catalog'&&args.machine===null){
           check(Object.keys(args).length===1,'No identity override on a read-only catalog');
@@ -106,10 +110,11 @@ try {
               state: 'RECEIVING_MANIFEST', files: new Map()}; uploads.set(key, upload);
           }
           if (gates.begin) await new Promise(resolve => {window.releaseBegin = resolve;});
-          return describe(upload);
+          return {...describe(upload),uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true}};
         }
         upload = [...uploads.values()].find(item => item.id === args.uploadId && item.user === user);
         check(upload, 'Upload must belong to the current caller');
+        if(action==='direct-ticket')return {available:true,kind:'campus-direct',protocol:'dataset-upload-v1',endpoint:location.origin,ticket:'fixture-campus-ticket',expiresAt:Math.floor(Date.now()/1000)+300,certificateSha256:'b'.repeat(64),chunkBytes:1024**2};
         if (action === 'manifest') {
           const bytes = decode(args.data); check(bytes.length <= 1024 ** 2, 'Unbounded manifest chunk');
           check(args.offset === upload.manifest.length, 'Unexpected manifest offset');
@@ -150,6 +155,17 @@ try {
         }
         throw Error('Unexpected operation ' + operation);
       }};
+    const originalFetch=window.fetch;
+    window.fetch=async(url,options)=>{
+      const target=new URL(url,location.href);
+      if(target.origin!==location.origin||!target.pathname.startsWith('/v1/uploads/'))return originalFetch(url,options);
+      check(options.credentials==='omit'&&options.redirect==='error','Direct request must omit browser credentials and redirects');
+      check(options.headers.Authorization==='Bearer fixture-campus-ticket','Direct request has exact scoped ticket');
+      const [,,,uploadId,action]=target.pathname.split('/');
+      const args={machine:'gpu-1',uploadId,...(target.searchParams.has('path')?{path:target.searchParams.get('path')}:{}),...(action!=='status'?{offset:Number(target.searchParams.get('offset')),data:''}:{})};
+      if(action!=='status'){let binary='';for(const byte of options.body)binary+=String.fromCharCode(byte);args.data=btoa(binary);}
+      return Response.json({ok:true,result:await store.request('datasets.upload.'+action,args,'campus-direct')});
+    };
     window.renderDatasets = datasetsUI(store, value => toasts.push(value)); renderDatasets();
   });
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
@@ -246,13 +262,21 @@ try {
   await page.locator('[name=dataset-relay-consent]').check();
   await page.evaluate(()=>{toasts.length=0;});
   await page.locator('[name=dataset-directory]').evaluate(input=>{
-    // Restore real bytes before scanning; keep the explicit checkbox choice
-    // so the fixture can verify consent is included in the actual begin call.
+    // Restore real bytes; an old checked consent cannot authorize VPS bytes.
     delete input.files[0].size;
   });
   await page.locator('#v3-relay-options [data-v3-explicit-relay]').click();
+  await page.waitForFunction(()=>/VPS 中转已停用/.test(document.querySelector('#dataset-upload-status').textContent));
+  assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation.startsWith('datasets.upload.')&&row.operation!=='datasets.upload.routes').length),beforeLarge,'Even checked legacy consent creates no admission, begin, ticket or bytes');
+  await page.evaluate(()=>{gates.listener=true;toasts.length=0;});
+  await page.locator('[data-v3-probe]').first().click();
+  await page.waitForFunction(()=>document.querySelector('#v3-upload-route').classList.contains('ok'));
+  await page.locator('[name=dataset-via]').evaluate(node=>{node.value='direct';node.dispatchEvent(new Event('change',{bubbles:true}));});
+  await page.locator('[name=dataset-directory]').setInputFiles(dataDirectory);
+  await page.waitForFunction(()=>document.querySelector('#v3-upload-route').classList.contains('ok'));
+  await page.locator('#dataset-upload-start').click();
   await page.waitForFunction(() => typeof window.releaseChunk === 'function');
-  assert.equal(await page.evaluate(()=>calls.find(c=>c.operation==='datasets.upload.begin').args.allowRelay),true);
+  assert.equal(await page.evaluate(()=>calls.find(c=>c.operation==='datasets.upload.begin').args.allowRelay),undefined);
   assert.equal(await page.locator('[data-upload-phase][aria-current]').getAttribute('data-upload-phase'),'transfer');
   assert.equal(await page.locator('[name=dataset-machine]').isDisabled(), true);
   await page.evaluate(() => {
@@ -284,7 +308,7 @@ try {
   await page.screenshot({path: join(screenshots, 'upload-long-status-mobile.png'), fullPage: true});
   await page.locator('#dataset-upload-status').evaluate((node, text) => {node.textContent = text;}, pausedStatus);
   const resumeAt = await page.evaluate(() => calls.length);
-  await page.locator('#v3-relay-options [data-v3-explicit-relay]').click();
+  await page.locator('[data-v3-resume]').click();
   await page.waitForFunction(() => calls.some(call => call.operation === 'datasets.upload.commit'));
   assert.equal(await page.evaluate(() => uploads.size), 1);
   assert.equal(await page.evaluate(at => calls.slice(at).find(call => call.operation === 'datasets.upload.chunk').args.offset, resumeAt), 1024 ** 2);
@@ -312,8 +336,8 @@ try {
   await page.locator('[data-v3-again]').click();
   await page.locator('[name=dataset-directory]').setInputFiles(dataDirectory);
   await page.locator('#v3-upload-display').fill('late-old-data');
-  await page.waitForFunction(()=>document.querySelector('#dataset-add-dialog').dataset.v3UploadState==='error');
-  await page.locator('#v3-upload-state [data-v3-explicit-relay]').click();
+  await page.waitForFunction(()=>document.querySelector('#v3-upload-route').classList.contains('ok'));
+  await page.locator('#dataset-upload-start').click();
   await page.waitForFunction(() => typeof window.releaseBegin === 'function');
   const beforeSwitch = await page.evaluate(() => calls.filter(row=>row.operation.startsWith('datasets.upload.')&&row.operation!=='datasets.upload.routes').length);
   await page.evaluate(() => {
@@ -329,6 +353,7 @@ try {
   assert.doesNotMatch(await page.locator('#page-datasets').textContent(), /late-old-data|browser-data@/);
   assert.equal(await page.evaluate(() => toasts.length), 1);
   assert.equal(await page.locator('#v3-upload-state [data-use-dataset]').count(),0,'Old READY cannot be inherited by the new account');
+  assert.equal(await page.evaluate(()=>calls.some(row=>row.channel==='control'&&['datasets.upload.manifest','datasets.upload.chunk'].includes(row.operation))),false,'All bytes stay off the control plane');
   assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
   console.log('DATASET UPLOAD UI PASS: browser hashes and uploads exact bounded bytes; resource refresh preserves file selection/progress; pause after durable write resumes at confirmed offset; empty files survive; server verification precedes READY; bounded desktop card, separated actions, 390px stacked fields and long-status wrapping; late old-account response cannot send more data or update the new UI; no external requests or browser errors.');
   console.log(`Screenshots: ${screenshots}`);

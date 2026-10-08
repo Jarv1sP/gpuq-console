@@ -8,6 +8,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {standaloneClient} from '../client-bundle.mjs';
+import {campusTLSFixture} from './campus-upload-fixture.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex'),run=promisify(execFile),chunk=1024**2;
 async function fixture(t){
   const root=await mkdtemp(join(tmpdir(),'gpuq-sync-cli-')),repo=join(root,'repo 工作区'),session=join(root,'session'),client=join(root,'gpuctl.mjs'),calls=[],files=new Map();await mkdir(repo);await writeFile(client,await standaloneClient());
@@ -18,7 +19,7 @@ async function fixture(t){
   const payload=Buffer.alloc(chunk+13,123),dataManifest=Buffer.from(JSON.stringify({schema:1,directories:[],files:[{path:'samples.bin',size:payload.length,sha256:hash(payload)}]})),version=hash(dataManifest);
   const published=Buffer.from('published code'),codeManifest=Buffer.from(JSON.stringify({schema:1,directories:[],files:[{path:'train.py',size:published.length,sha256:hash(published),executable:false}]}));
   let target=null,manifest=Buffer.alloc(0),parsed=null,drop=false,upload=null;
-  const server=createServer(async(req,res)=>{let raw='';for await(const bytes of req)raw+=bytes;const {operation,args={}}=JSON.parse(raw);calls.push({operation,args});res.setHeader('Content-Type','application/json');let result;
+  const tls=await campusTLSFixture(async(req,res)=>{let raw='';for await(const bytes of req)raw+=bytes;const {operation,args={}}=JSON.parse(raw);calls.push({operation,args});res.setHeader('Content-Type','application/json');let result;
     try{
       if(operation==='state'){res.end(JSON.stringify({state:{demo:false,gpuqConnected:true,machines:[{id:'gpu-1'},{id:'gpu-2'}],users:[],jobs:[]}}));return;}
       if(operation==='projects.list')result={projects:target?[{project:'copy'}]:[]};
@@ -35,7 +36,7 @@ async function fixture(t){
       else if(operation==='projects.sync.status'){assert.equal(args.key,target.key);result={...target};if(args.path){const entry=parsed.files.find(e=>e.path===args.path),bytes=files.get(args.path);result.file={...entry,offset:bytes?.length||0,complete:!!bytes&&bytes.length===entry.size};}}
       else if(operation==='projects.sync.chunk'){const before=files.get(args.path)||Buffer.alloc(0),bytes=Buffer.from(args.data,'base64');assert.equal(args.offset,before.length);files.set(args.path,Buffer.concat([before,bytes]));if(drop){drop=false;throw Error('Reply lost after durable write');}result={offset:before.length+bytes.length,complete:files.get(args.path).length===parsed.files.find(e=>e.path===args.path).size};}
       else if(operation==='projects.sync.finish'){for(const entry of parsed.files)assert.equal(hash(files.get(entry.path)),entry.sha256);target.state='CODE_READY';result=target;}
-      else if(operation==='datasets.upload.begin'){upload??={uploadId:'test-upload',state:'RECEIVING_MANIFEST',manifestOffset:0};result=upload;}
+      else if(operation==='datasets.upload.begin'){upload??={uploadId:'44444444-4444-4444-8444-444444444444',state:'RECEIVING_MANIFEST',manifestOffset:0};result=upload;}
       else if(operation==='datasets.upload.manifest'){upload.manifestOffset+=Buffer.from(args.data,'base64').length;result={offset:upload.manifestOffset};}
       else if(operation==='datasets.upload.seal'){upload.state='UPLOADING';result=upload;}
       else if(operation==='datasets.upload.status'){result={...upload};if(args.path){const bytes=files.get(args.path);result.file={...JSON.parse(dataManifest).files[0],offset:bytes?.length||0,complete:bytes?.length===payload.length};}}
@@ -44,9 +45,9 @@ async function fixture(t){
       else throw Error('Unexpected operation: '+operation);
       res.end(JSON.stringify({result}));
     }catch(error){res.statusCode=400;res.end(JSON.stringify({error:error.message}));}
-  });await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const url='http://127.0.0.1:'+server.address().port;await writeFile(session,JSON.stringify({url,token:'fixture-only',principal:{userId:'demo-user-1',username:'alice',role:'member'}}));
+  },{machine:'gpu-2'});const server=createServer(tls.control);await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const url='http://127.0.0.1:'+server.address().port;await writeFile(session,JSON.stringify({url,token:'fixture-only',principal:{userId:'demo-user-1',username:'alice',role:'member'}}));
   const cli=args=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[client,'--url',url,'--session-file',session,'--json',...args]);let stdout='',stderr='';child.stdout.on('data',s=>stdout+=s);child.stderr.on('data',s=>stderr+=s);child.on('error',reject);child.on('close',code=>resolve({code,stderr,data:stdout?JSON.parse(stdout).data:null}));});
-  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await rm(root,{recursive:true,force:true});});return {repo,cli,calls,files,version,drop:()=>drop=true};
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await tls.close();assert.equal(tls.counters.portalFileRequests,0);await rm(root,{recursive:true,force:true});});return {repo,cli,calls,files,version,drop:()=>drop=true};
 }
 test('Git preview leaves target unchanged; clean commit copies code into a fenced new draft and resumes a lost reply',async t=>{
   const f=await fixture(t),args=['sync','git',f.repo,'--to','gpu-2','--project','copy','--ref','HEAD'];const preview=await f.cli([...args,'--dry-run']);assert.equal(preview.code,0,preview.stderr);assert.equal(preview.data.changes,false);assert.equal(f.calls.some(c=>c.operation==='projects.sync.begin'),false);

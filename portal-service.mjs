@@ -8,6 +8,7 @@ import {installExecution,executionCall,publicJob,usage,priorityCapable,priorityR
 import {MACHINES,validUsername} from './dist/model.js';
 import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 import {installMaintenanceState,installMaintenance,maintenanceCall} from './maintenance.mjs';
+import {installPersonalFileCampus,personalFileTicket} from './personal-file-campus.mjs';
 import {installJobNotifications} from './job-notifications.mjs';
 import {installTransfers,transferCall} from './transfers.mjs';
 import {installCloudImports,cloudImportCall} from './cloud-import.mjs';
@@ -69,6 +70,7 @@ export class PortalService extends DemoService{
     installDatasetIngress(service,datasetIngressConfig);
     installDatasetDeletion(service);
     installDatasetCacheActions(service);
+    installPersonalFileCampus(service);
     service.dummy=await credential(crypto.randomUUID(),600000);return service;
   }
   export(){return {schema:1,users:this.store.users,jobs:this.store.jobs,sequence:this.store.sequence,credentials:[...this.credentials].map(([name,r])=>[name,{salt:Buffer.from(r.salt).toString('base64'),hash:Buffer.from(r.hash).toString('base64'),iterations:r.iterations||210000}])};}
@@ -316,6 +318,7 @@ export class PortalService extends DemoService{
       });
     }
     if(operation==='tasks.display.get'||operation==='tasks.display.set')return taskDisplayCall(this,token,operation,args).then(result=>({result,principal:this.principal(token)}));
+    if(operation==='files.direct-ticket')return personalFileTicket(this,token,args);
     if(['host.status','files.upload.status','files.get','files.list'].includes(operation))return this.remoteRead(token,operation,args);
     if(operation==='projects.replicate'||operation==='projects.replication.status'||operation==='projects.replication.cancel'||operation==='projects.replication.retry'){
       const principal=this.principal(token);

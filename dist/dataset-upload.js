@@ -48,7 +48,6 @@ export async function scanBrowserDirectory(selection,{signal,onProgress=()=>{}}=
   const files=[];for(const path of [...paths.keys()].sort()){alive(signal);const file=paths.get(path),sha256=await hashBlob(file,{signal,onProgress:bytes=>onProgress({state:'HASHING',bytes:hashed+bytes,totalBytes,path})});files.push({path,size:file.size,sha256});hashed+=file.size;onProgress({state:'HASHING',bytes:hashed,totalBytes,path});}
   const manifest=manifestBlob([...dirs].sort(),files),manifestSha256=await hashBlob(manifest,{signal});return {files,paths,manifest,manifestSha256,totalBytes,entries:files.length+dirs.size};
 }
-function base64(data){let value='';for(let i=0;i<data.length;i+=8192)value+=String.fromCharCode(...data.subarray(i,i+8192));return btoa(value);}
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const PROTOCOL='dataset-upload-v1';
 export function uploadError(message,code='UNCONFIRMED',extra={}){return Object.assign(Error(message),{code,...extra});}
@@ -97,6 +96,19 @@ function admittedUploadIdentity(value,intent,machine){
   if(intent&&(value?.uploadId!==intent.uploadId||value.placementProtocol!==1||value.requestedMachine!==machine||value.storageMachine!==intent.storageMachine||value.storageTier!=='hdd'||value.legacyPlacement!==false))
     throw uploadError('上传会话与已保存的机械仓库准入不符。','MISMATCH');
   if(intent&&['name','manifestBytes','totalBytes','entries'].some(key=>value[key]!==intent.specification[key]))throw uploadError('上传结果与本地清单不符。','MISMATCH');
+}
+
+// Only a fixed-HDD, authenticated location result may confirm that an issued
+// UUID has not yet reached node initialization. A timeout, HTTP 400/404 or an
+// incomplete session is never absence and cannot authorize another begin.
+export function confirmDatasetUploadInitialization(value,intent,machine){
+  if(value?.state!=='NOT_INITIALIZED')return;
+  if(!intent||intent.beginAttempted!==true||value.initializationProtocol!==1||value.nodePresent!==false||
+    value.admissionProtocol!==1||value.admissionKey!==intent.key||
+    value.userId!==intent.userId||value.manifestOffset!==0||
+    specificationKeys.some(key=>value[key]!==intent.specification[key]))
+    throw uploadError('原上传尚未初始化的证据未确认；未重新初始化。','MISMATCH');
+  admittedUploadIdentity(value,intent,machine);
 }
 
 // Browser TLS/CORS remain mandatory; the portal certificate pin is identity
@@ -206,11 +218,10 @@ export function confirmedDatasetUpload(value,{uploadId,totalBytes,entries}){
 }
 export async function uploadBrowserDataset({call,admissionCall=call,admission,userId,machine,name,scan,signal,onProgress=()=>{},onRoute=()=>{},pollMs=1500,keyStore,allowRelay=false,via='auto',resume,fetch,now,chunkClock=()=>performance.now()}){
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw Error('名称需为 1–40 位字母、数字、下划线或连字符。');
-  if(!['auto','direct','relay'].includes(via))throw Error('请选择有效的上传通道。');
-  if(via==='relay'&&scan.totalBytes>LARGE_RELAY_BYTES&&allowRelay!==true)throw uploadError('超过 256 MiB，请先确认经门户中转。','RELAY_CONSENT',{canRelay:true});
+  if(!['auto','direct'].includes(via))throw uploadError('文件传输只走校内直连；VPS 中转已停用。','CAMPUS_REQUIRED');
   let uploadId,state,direct,route,transport,storageMachine,uploadIntent;
   const control=async(action,args={})=>{alive(signal);const result=await call('datasets.upload.'+action,{machine,...(uploadId&&action!=='begin'&&(action!=='routes'||state?.placementProtocol===1)?{uploadId}:{}),...args});alive(signal);return result;};
-  const report=(current,extra={})=>{if(!current||typeof current.state!=='string')throw uploadError('上传状态未确认。');admittedUploadIdentity(current,uploadIntent,machine);storageMachine=uploadStorageMachine(current,machine,storageMachine);state=current;onProgress({...current,...(current.state==='READY'?{state:'PUBLISHING',confirmationPending:true}:{}),...extra});};
+  const report=(current,extra={})=>{if(!current||typeof current.state!=='string')throw uploadError('上传状态未确认。');admittedUploadIdentity(current,uploadIntent,machine);confirmDatasetUploadInitialization(current,uploadIntent,machine);storageMachine=uploadStorageMachine(current,machine,storageMachine);state=current;onProgress({...current,...(current.state==='READY'?{state:'PUBLISHING',confirmationPending:true}:{}),...extra});};
   const waitFor=async()=>{while(['SEALING','PUBLISHING'].includes(state.state)){alive(signal);await pause(pollMs);report(await control('status'));}if(state.state==='FAILED')throw uploadError(state.error||'服务端校验失败。','FAILED');if(state.state==='DISCARDED')throw uploadError('这次上传已取消。','DISCARDED');};
   const ready=async()=>{
     const last=await control('status');alive(signal);
@@ -218,7 +229,7 @@ export async function uploadBrowserDataset({call,admissionCall=call,admission,us
     const result=confirmedDatasetUpload(last,{uploadId,totalBytes:scan.totalBytes,entries:scan.entries});
     state=result;onProgress({...result,...(route?{route}: {})});return {...result,...(route?{route}: {})};
   };
-  const baseKey=uploadKey(userId,machine,name,scan.manifestSha256),persistedKey=keyStore?.get?.(baseKey),begin={name,key:persistedKey||baseKey,manifestBytes:scan.manifest.size,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(allowRelay===true||via==='relay'?{allowRelay:true}:{})};
+  const baseKey=uploadKey(userId,machine,name,scan.manifestSha256),persistedKey=keyStore?.get?.(baseKey),begin={name,key:persistedKey||baseKey,manifestBytes:scan.manifest.size,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries};
   const stored=resume||keyStore?.getHandle?.(baseKey);
   try{
     const savedIntent=await keyStore?.getIntent?.(baseKey);alive(signal);
@@ -229,8 +240,12 @@ export async function uploadBrowserDataset({call,admissionCall=call,admission,us
       if(stored?.admissionProtocol===1&&!savedIntent)throw uploadError('原上传准入意图缺失；未重新分配编号。','MISMATCH');
       uploadIntent=await allocateDatasetUpload({call:admissionCall,keyStore,baseKey,userId,machine,specification:Object.fromEntries(specificationKeys.map(key=>[key,begin[key]])),capability:admission,check:()=>alive(signal)});
       begin.key=uploadIntent.uploadId;storageMachine=uploadIntent.storageMachine;
+      uploadId=begin.key;
       if(uploadIntent.beginAttempted){uploadId=begin.key;report(await control('status'));if(state.state==='READY')return await ready();}
       else uploadIntent=await saveDatasetUploadIntent(keyStore,baseKey,{...uploadIntent,beginAttempted:true},()=>alive(signal));
+    }else{
+      if(persistedKey&&stored?.uploadId&&persistedKey!==stored.uploadId)throw uploadError('保存的旧上传键与句柄不一致；未重新开始。','MISMATCH');
+      uploadId=stored?.uploadId||begin.key;begin.key=uploadId;
     }
     if(stored?.uploadId&&stored.machine===machine&&stored.name===name&&stored.manifestSha256===scan.manifestSha256){
       if(uploadIntent&&stored.uploadId!==uploadIntent.uploadId)throw uploadError('保存的上传句柄与准入编号不符。','MISMATCH');
@@ -238,6 +253,7 @@ export async function uploadBrowserDataset({call,admissionCall=call,admission,us
       if(state?.state==='READY')return await ready();
       // The read above precedes any repeated control intent, including consent.
     }
+    if(state?.state==='DISCARDED')throw uploadError('这次上传已取消；原上传编号不会自动替换。','DISCARDED');
     try{if(!uploadIntent||!state||!['READY','PUBLISHING'].includes(state.state))report(await control('begin',begin));}
     catch(error){
       alive(signal);if([400,401,403,404,409,422,429].includes(error.status)||['MAINTENANCE_ACTIVE','MISMATCH'].includes(error.code))throw error;
@@ -250,11 +266,7 @@ export async function uploadBrowserDataset({call,admissionCall=call,admission,us
       if(state.state==='READY')return await ready();
       throw uploadError('上传初始化未确认，请重新查询。');
     }
-    if(state.state==='DISCARDED'){
-      if(uploadIntent)throw uploadError('这次上传已取消；原准入编号不会自动替换。','DISCARDED');
-      if(!keyStore)throw Error('这次上传已取消；请使用能保存续传信息的客户端重新开始。');
-      begin.key=crypto.randomUUID();await keyStore.set(baseKey,begin.key);report(await control('begin',begin));
-    }
+    if(state.state==='DISCARDED')throw uploadError('这次上传已取消；原上传编号不会自动替换。','DISCARDED');
     uploadId=state.uploadId;if(typeof uploadId!=='string'||!uploadId)throw uploadError('上传编号未确认。');
     const handle={uploadId,machine,name,manifestSha256:scan.manifestSha256,totalBytes:scan.totalBytes,entries:scan.entries,...(uploadIntent?{admissionProtocol:1,userId}:{})};
     await keyStore?.setHandle?.(baseKey,handle);
@@ -266,22 +278,18 @@ export async function uploadBrowserDataset({call,admissionCall=call,admission,us
         if(transport.protocol!==PROTOCOL)throw uploadError('直传协议未确认。','DIRECT');
         const selected=transport.routeSelection===true?await selectUploadRoute(await control('routes'),storageMachine,candidate=>probeBrowserUploadRoute(candidate,{fetch,signal}),{signal}):undefined;
         const grant=await control('direct-ticket',selected?{routeId:selected.id}:{});
-        if(grant?.available===true){direct=await browserDatasetTransport({control,uploadId,signal,grant,route:selected,fetch,now});route={kind:selected?.kind||'campus-direct',machine:storageMachine,...(state.placementProtocol===1?{requestedMachine:machine,storageTier:state.storageTier}:{})};}
+        if(grant?.available===true&&grant.kind==='campus-direct'){direct=await browserDatasetTransport({control:async(action,args)=>{const result=await control(action,args);if(action==='direct-ticket'&&result?.kind!=='campus-direct')throw uploadError('校内上传授权已变化，未改走其他通道。','DIRECT_AUTH');return result;},uploadId,signal,grant,route:selected,fetch,now});route={kind:'campus-direct',machine:storageMachine,...(state.placementProtocol===1?{requestedMachine:machine,storageTier:state.storageTier}:{})};}
         else throw uploadError('直传授权未确认，未自动改走 VPS。','DIRECT');
       }else if(via!=='relay'&&transport&&transport.directAvailable!==false)throw uploadError('上传通道未确认。','DIRECT');
       if(!direct){
-        if(via==='direct')throw uploadError('这台服务器未提供直传入口。','DIRECT_UNAVAILABLE');
-        const limit=Number.isSafeInteger(transport?.relayLimitBytes)&&transport.relayLimitBytes>0?Math.min(LARGE_RELAY_BYTES,transport.relayLimitBytes):LARGE_RELAY_BYTES;
-        if(scan.totalBytes>limit&&allowRelay!==true&&via!=='relay')throw uploadError('没有直传入口；超过 256 MiB，请明确同意经门户中转。','RELAY_CONSENT',{canRelay:true});
-        if(transport&&scan.totalBytes>limit&&transport.relayAllowed!==true)throw uploadError('门户尚未确认大文件中转授权。','RELAY_CONSENT',{canRelay:true});
-        route={kind:'vps-relay',machine:storageMachine,...(state.placementProtocol===1?{requestedMachine:machine,storageTier:state.storageTier}:{})};
+        throw uploadError('校内直连暂不可用；原上传编号和断点已保留，文件不会经 VPS 中转。','CAMPUS_REQUIRED');
       }
       alive(signal);onRoute(route);
       if(direct&&(state.state==='RECEIVING_MANIFEST'||state.state==='FAILED'&&state.resumeState==='RECEIVING_MANIFEST'))report({...state,...await direct.request('status')});
     }
     async function request(action,args={}){
       if(direct&&(action==='manifest'||action==='chunk'||action==='status'&&args.path!==undefined))return direct.request(action,args);
-      if(args.bytes!==undefined){const {bytes,...rest}=args;return control(action,{...rest,data:base64(bytes)});}
+      if(args.bytes!==undefined)throw uploadError('校内直连尚未确认，未通过门户发送文件。','CAMPUS_REQUIRED');
       return control(action,args);
     }
     async function intent(action){
@@ -331,7 +339,7 @@ export async function uploadBrowserDataset({call,admissionCall=call,admission,us
     report(await intent('commit'));await waitFor();return await ready();
   }catch(error){
     alive(signal);
-    error.uploadId=uploadId;error.route=route;error.canRelay=error.canRelay===true||via==='auto'&&['DIRECT','DIRECT_AUTH'].includes(error.code);
+    error.uploadId=uploadId;error.route=route;error.canRelay=false;
     throw error;
   }
 }

@@ -91,7 +91,7 @@ export async function directBrowserFixture(machines){
         upload=uploads.get(args.uploadId);if(!upload||upload.owner!==owner)return reply(res,403,{error:'不能读取其他账号的上传'});
         if(action==='direct-ticket'){
           const ticket='fixture-only-'+randomUUID();tickets.set('Bearer '+ticket,{owner,uploadId:upload.id});ticketCount++;
-          return reply(res,200,{result:{available:true,protocol:'dataset-upload-v1',endpoint:nodeOrigin,ticket,expiresAt:Math.floor(Date.now()/1000)+300,certificateSha256,chunkBytes:CHUNK}});
+          return reply(res,200,{result:{available:true,kind:'campus-direct',protocol:'dataset-upload-v1',endpoint:nodeOrigin,ticket,expiresAt:Math.floor(Date.now()/1000)+300,certificateSha256,chunkBytes:CHUNK}});
         }
         if(action==='status')return reply(res,200,{result:status(upload,args.path)});
         if(action==='seal'){
@@ -105,8 +105,7 @@ export async function directBrowserFixture(machines){
           if(config.mode==='commit-drop'){res.writeHead(200,{'Content-Type':'application/json','Content-Length':'128'});res.write('{"result":');res.flushHeaders();setImmediate(()=>res.destroy());return;}return reply(res,200,{result:describe(upload)});
         }
         if(action==='manifest'||action==='chunk'){
-          if(upload.spec.totalBytes>LIMIT&&upload.spec.allowRelay!==true)return reply(res,403,{error:'需要明确中转同意'});
-          return reply(res,200,{result:write(upload,action,args,Buffer.from(args.data,'base64'))});
+          return reply(res,403,{error:'文件只走校内直连'});
         }
         throw Error('Unexpected portal operation '+operation);
       }

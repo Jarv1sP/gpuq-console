@@ -46,7 +46,6 @@ test('workspace siblings retain full state while file reads return compact authe
   f.respond(async()=>({path:'incoming/sample.bin',size:1,entries:[]}));
   for(const [operation,args] of [
     ['datasets.workspace.list',{path:'.'}],
-    ['datasets.workspace.put',{path:'incoming/sample.bin',offset:0,data:'Kg==',truncate:false}],
     ['files.get',{path:'sample.bin',offset:0}]
   ]){
     const out=await f.service.invoke(f.user.token,operation,{machine:'gpu-1',...args});
@@ -54,7 +53,10 @@ test('workspace siblings retain full state while file reads return compact authe
     else assert.ok(out.state);
     assert.equal(out.principal.userId,f.member.id);
   }
-  assert.equal(stateCalls,2);
+  assert.equal(stateCalls,1);
+  const before=f.calls.length;
+  await assert.rejects(f.service.invoke(f.user.token,'datasets.workspace.put',{machine:'gpu-1',path:'incoming/sample.bin',offset:0,data:'Kg==',truncate:false}),error=>error.status===409&&error.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,before);assert.equal(stateCalls,1);
 });
 
 test('the slim reply does not bypass authentication, machine grants, path or actor validation',async t=>{

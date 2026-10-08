@@ -140,12 +140,13 @@ test('terminal instructions correctly separate new sessions, detach and explicit
 
 test('ordinary-user datasets document campus direct upload without relay recommendations', () => {
   assert.match(guide, /普通成员可以上传个人数据/);
-  for (const command of ['gpuctl data upload ./my-data --name my-data --via direct', 'gpuctl data upload-status UPLOAD_ID', 'gpuctl data upload-discard UPLOAD_ID', 'gpuctl data prepare DATASET_ID@VERSION', 'gpuctl data status DATASET_ID@VERSION']) {
+  for (const command of ['gpuctl data upload ./my-data --name my-data --via campus', 'gpuctl data upload-status UPLOAD_ID', 'gpuctl data upload-discard UPLOAD_ID', 'gpuctl data prepare DATASET_ID@VERSION', 'gpuctl data status DATASET_ID@VERSION']) {
     assert.ok(guide.includes(command), `Missing data command: ${command}`);
   }
   assert.match(guide, /先连接能访问上传节点的校园网络/);
-  assert.match(guide, /`--via direct` 只允许直传/);
-  assert.match(guide, /不经过 VPS 文件中转/);
+  assert.match(guide, /`--via campus` 只探测已批准的校内直传入口/);
+  assert.match(guide, /不探测 Tail 备用入口，也不发送文件到 VPS/);
+  assert.match(guide, /`--via direct` 和网页自动直传也只选校内入口，不会转 Tail/);
   assert.match(guide, /客户端会显示实际传输路径/);
   assert.match(guide, /确认路线显示实际仓库的直传入口，路径中没有门户中转/);
   assert.match(guide, /实际入库位置与训练目标可以不同/);
