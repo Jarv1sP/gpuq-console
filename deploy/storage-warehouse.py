@@ -103,14 +103,68 @@ class Warehouse:
             result['storageReference']={'dataset':physical,'version':version}
         return result
 
+    def _catalog_status_snapshot(self, actor, dataset, version, snapshot):
+        """Trusted same-call display overlay, never strict status/admission."""
+        cold_snapshot,hot_snapshots,hot_rows=snapshot
+        source=self.cold._catalog_status_snapshot(actor,dataset,version,cold_snapshot)
+        physical=self.cache_name(dataset)
+        current={'state':'REGISTERED'}
+        binding=None
+        try:
+            binding=self.binding(physical,version)
+            if binding['source']!=dataset:raise ValueError('Local cache source differs')
+            row=hot_rows.get((physical,version))
+            if row is None:
+                with self.hot._catalog_read(actor,physical):
+                    self.hot._record_identity(physical,version,_read_only=True)
+                raise self.d.CacheError('catalog metadata changed; retry the operation')
+            if row.get('errorCode')=='CACHE_METADATA_INCOMPLETE':
+                raise self.d.CacheMetadataIncomplete('dataset storage metadata is incomplete; administrator verification required')
+            current=self.hot._catalog_status_snapshot(actor,physical,version,hot_snapshots[(physical,version)])
+            with self.hot._catalog_read(actor,physical):
+                if current['state']=='READY' and self.hot._tier(physical,version)['role']!='cache':
+                    current={**current,'state':'REGISTERED'}
+        except FileNotFoundError:pass
+        result={**source,**current,'dataset':dataset,'version':version,
+            'warehouseReady':source['state']=='READY','canPrepare':source['state']=='READY',
+            'warehouseCanPrepare':source['state']=='READY'}
+        if source['state']!='READY':result['state']=source['state']
+        if source['state']=='READY' and current['state']=='READY':
+            result['storageReference']={'dataset':physical,'version':version}
+        # A binding/READY/retirement change while crossing roots cannot become
+        # a trusted physical reference or a historical READY projection.
+        if source['state']=='READY' and self.cold._catalog_status_snapshot(actor,dataset,version,cold_snapshot)!=source:
+            raise self.d.CacheError('catalog metadata changed; retry the operation')
+        if binding is not None and current['state']=='READY':
+            if self.binding(physical,version)!=binding:
+                raise self.d.CacheError('Fixed local cache binding changed')
+            if self.hot._catalog_status_snapshot(actor,physical,version,hot_snapshots[(physical,version)])!=current:
+                raise self.d.CacheError('catalog metadata changed; retry the operation')
+            with self.hot._catalog_read(actor,physical):
+                if self.hot._tier(physical,version)['role']!='cache':
+                    raise self.d.CacheError('catalog metadata changed; retry the operation')
+        return result
+
     def list(self, actor):
-        listing=self.cold.list_datasets(actor)
+        return self._list_datasets_snapshot(actor)[0]
+
+    def _list_datasets_snapshot(self, actor):
+        listing,sources=self.cold._list_datasets_snapshot(actor)
+        cold_catalog=self.d._json_bytes(listing)
+        hot_listing,hot_snapshots=self.hot._list_datasets_snapshot(actor)
+        hot_rows={(item['dataset'],value['version']):value
+                  for item in hot_listing['datasets'] for value in item['versions']}
+        snapshots={}
         for item in listing['datasets']:
             for value in item['versions']:
                 # Display UNKNOWN has no status/admission snapshot. Repeating
                 # strict status would fail the whole catalog for this one row.
                 if value.get('errorCode')!='CACHE_METADATA_INCOMPLETE':
-                    try:value.update(self.status(actor,item['dataset'],value['version']))
+                    try:
+                        dataset,version=item['dataset'],value['version']
+                        snapshot=(sources[(dataset,version)],hot_snapshots,hot_rows)
+                        value.update(self._catalog_status_snapshot(actor,dataset,version,snapshot))
+                        snapshots[(dataset,version)]=snapshot
                     except self.d.CacheMetadataIncomplete:
                         value.update(self.d.DatasetCache._catalog_incomplete(value))
                 if value.get('errorCode')=='CACHE_METADATA_INCOMPLETE':
@@ -121,7 +175,14 @@ class Warehouse:
                     continue
                 value.pop('dataset',None)
                 value['deletionPermissions']=self.cold.deletion_permissions(actor,item['dataset'],value['version'])
-        return listing
+        # Revalidate the entire bounded metadata inventory, UNKNOWN included,
+        # after crossing roots and permission hints. Warm summaries do not read
+        # payload or reparse manifests; a changed catalog rejects the exchange.
+        if self.d._json_bytes(self.cold._list_datasets_snapshot(actor)[0])!=cold_catalog:
+            raise self.d.CacheError('catalog metadata changed; retry the operation')
+        if self.hot._list_datasets_snapshot(actor)[0]!=hot_listing:
+            raise self.d.CacheError('catalog metadata changed; retry the operation')
+        return listing,snapshots
 
     def prepare(self, actor, dataset, version):
         record,source_identity=self.cold._record_snapshot(actor,dataset,version)

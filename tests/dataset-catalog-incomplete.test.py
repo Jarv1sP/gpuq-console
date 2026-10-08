@@ -56,12 +56,12 @@ class IncompleteCatalog(unittest.TestCase):
   p=self.paths['.registry'].parent/(self.version+'.json');p.write_text('{}');self.remove_parent('ready')
   with self.assertRaises(D.CacheError):self.cache.list_datasets(OWNER)
  def test_acl_revocation_during_unknown_validation_rejects(self):
-  self.remove_parent('ready');old=self.cache._record_snapshot
+  self.remove_parent('ready');old=self.cache._catalog_record_snapshot
   def revoke(*a,**k):
    r=old(*a,**k)
    if a[1]=='incomplete':D._write_json(self.paths['.registry'].parent/'dataset.json',{'schema':1,'owners':['other']})
    return r
-  with patch.object(self.cache,'_record_snapshot',side_effect=revoke):
+  with patch.object(self.cache,'_catalog_record_snapshot',side_effect=revoke):
    with self.assertRaises((PermissionError,D.CacheError)):self.cache.list_datasets(OWNER)
  def test_parent_disappears_after_summary_stays_unknown(self):
   old=self.cache._catalog_version
