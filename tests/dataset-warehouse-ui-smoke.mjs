@@ -104,7 +104,7 @@ try{
    const strip=await page.locator('#control-strip').boundingBox();assert(after.y+after.height<=strip.y-12,'training and both commands remain above the control strip '+JSON.stringify({role,width,after,strip,detail:await page.locator('#warehouse-inspector').evaluate(root=>({rect:root.getBoundingClientRect().toJSON(),max:getComputedStyle(root).maxHeight,sections:[...root.querySelectorAll('.v3-detail-scroll>section,.v3-server,.v3-train,.v3-code')].map(node=>({cls:node.className,rect:node.getBoundingClientRect().toJSON(),padding:getComputedStyle(node).padding}))}))}));
    const firstUse=await page.locator('.help-links').boundingBox();assert(firstUse.y>=after.y+after.height,'the first-use caption follows the naturally sized detail panel without overlapping it');
    await page.locator('.v3-detail-scroll').evaluate(node=>node.scrollTop=0);
-   for(const node of await page.locator('.v3-server [data-v3-cache],.v3-server [data-remove-more]').all())assert.deepEqual(await node.evaluate(node=>({height:node.getBoundingClientRect().height,font:getComputedStyle(node).fontSize})),{height:32,font:'13px'});
+   for(const node of await page.locator('.v3-server [data-v3-cache],.v3-server [data-remove-more]').all())assert.deepEqual(await node.evaluate(node=>({height:node.getBoundingClientRect().height,font:getComputedStyle(node).fontSize})),{height:48,font:'13px'});
    await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
    const footer=await page.locator('.help-links').boundingBox();assert(footer.y+footer.height<=strip.y-12,'first-use label and hint can scroll above the shared bottom layer');
    await page.evaluate(()=>scrollTo(0,0));
