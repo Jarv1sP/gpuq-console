@@ -59,8 +59,8 @@ test('matching hashes under different physical names do not join warehouse or ca
   const value=catalog();value.datasets.push({dataset:'alias',versions:[{version,bytes:10,locations:[location('node-a',undefined,{dataset:'alias'})]}]});
   const row=member(value);assert.equal(row.warehouseBytes,20);assert.equal(row.warehouseDatasets,2);assert.equal(row.cacheBytes,20);assert.equal(row.cacheDatasets,2);
 });
-test('admin catalog retains only real boolean warehouse facts from understood node states',()=>{
-  const build=(state,warehouseReady)=>adminDatasetCatalog('node-a',[{id:'node-a'}],[{machine:'node-a',state:'ok',datasets:[{dataset:'samples',ownerLabel:'所属用户：alice',versions:[{version,state,bytes:10,warehouseReady}]}]}]);
+test('admin catalog accepts warehouse facts only from the exact modern catalog observation',()=>{
+  const build=(state,warehouseReady)=>adminDatasetCatalog('node-a',[{id:'node-a'}],[{machine:'node-a',state:'ok',datasets:[{dataset:'samples',ownerLabel:'所属用户：alice',versions:[{version,state,bytes:10,warehouseReady:false}]}]}],catalog([location('node-a',undefined,{state,warehouseReady})]));
   for(const value of [true,false])assert.equal(build('READY',value).datasets[0].versions[0].locations[0].warehouseReady,value);
   assert.equal(build('FUTURE',true).datasets[0].versions[0].locations[0].warehouseReady,undefined);assert.equal(build('READY','true').datasets[0].versions[0].locations[0].warehouseReady,undefined);
 });
@@ -86,4 +86,28 @@ test('users protocol fills actual container bytes by exact account identity; old
  assert.match(memberStorageHTML(model,new Set(['alice'])),/容器 42 B · 缓存 10 B/);
  usage.users[0].machines.push({machine:'node-b',available:false,complete:false,projectBytes:null,projects:[]});model=storageMemberRows(catalog(),usage,users);assert.equal(model.rows[0].containerBytes,null);assert.equal(model.rows[0].machines[0].containerBytes,42);assert.equal(model.rows[0].machines[1].containerBytes,null);
  model=storageMemberRows(null,usage,users);assert.equal(model.available,true);assert.equal(model.rows[0].cacheBytes,null);assert.equal(model.rows[0].machines[0].containerBytes,42,'project readings render independently of catalog');
+});
+
+
+test('modern warehouse proof and sizes survive a damaged or missing physical list',()=>{
+  const physical={machine:'node-a',state:'ok',datasets:[{dataset:'samples',ownerLabel:'所属用户：alice',versions:[{version,state:'UNKNOWN',warehouseReady:false,bytes:999}]}]};
+  const fresh=catalog([location('node-a',undefined,{state:'REGISTERED',contentBytes:10})]);
+  const value=adminDatasetCatalog('node-a',[{id:'node-a'}],[physical],fresh),row=member(value);
+  assert.equal(row.warehouseBytes,10);assert.equal(row.warehouseDatasets,1);assert.equal(row.machines[0].warehouseBytes,10);assert.equal(row.machines[0].warehouseDatasets,1);
+  assert.equal(row.cacheBytes,null);assert.equal(value.datasets[0].versions[0].locations[0].state,'UNKNOWN');
+  assert.match(memberStorageHTML(storageMemberRows(value),new Set(['alice'])),/仓库 1 个数据集 · 10 B/);
+  const absent=adminDatasetCatalog('node-a',[{id:'node-a'}],[{machine:'node-a',state:'ok',datasets:[]}],fresh);
+  assert.equal(member(absent).warehouseBytes,10);assert.equal(member(absent).warehouseDatasets,1);
+  const unavailable=adminDatasetCatalog('node-a',[{id:'node-a'}],[physical]);
+  assert.equal(member(unavailable).warehouseBytes,null);assert.equal(member(unavailable).warehouseDatasets,null);
+  assert.match(memberStorageHTML(storageMemberRows(unavailable)),/data-member-size="warehouse"[^>]*>待确认/);
+});
+
+test('a warehouse fact cannot transfer to another physical name, machine or full version',()=>{
+  const physical={machine:'node-a',state:'ok',datasets:[{dataset:'samples',ownerLabel:'所属用户：alice',versions:[{version,state:'READY',warehouseReady:true,bytes:10}]}]};
+  for(const fresh of [catalog([location('node-b')]),catalog([location('node-a',undefined,{dataset:'different'})]),catalog(undefined,{datasets:[{dataset:'samples',versions:[{version:other,bytes:10,locations:[location()]}]}]})]){
+    const value=adminDatasetCatalog('node-a',[{id:'node-a'},{id:'node-b'}],[physical],fresh);
+    assert.equal(value.datasets[0].versions[0].locations[0].warehouseReady,undefined);
+    assert.equal(member(value).warehouseBytes,null);assert.equal(member(value).warehouseDatasets,null);
+  }
 });
