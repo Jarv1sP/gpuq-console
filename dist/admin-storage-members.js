@@ -60,7 +60,7 @@ export function storageMemberRows(catalog){
 function bar(row){
   const parts=[['warehouse',row.warehouseBytes],['project',row.containerBytes],['cache',row.cacheBytes]],sum=parts.reduce((value,[,bytes])=>value+(bytes??0),0);
   const label=`仓库 ${amount(row.warehouseBytes)} · 容器 ${amount(row.containerBytes)} · 缓存 ${amount(row.cacheBytes)}`;
-  return `<span class="storage-member-bar" role="img" aria-label="${esc(label)}" title="${esc(label)}">${parts.map(([type,bytes])=>`<i class="${type}${bytes===null?' unknown':''}" ${bytes===null?'':`style="flex-grow:${sum?bytes/sum:0}"`}></i>`).join('')}</span>`;
+  return `<span class="storage-member-bar" role="img" aria-label="${esc(label)}" title="${esc(label)}">${parts.filter(([,bytes])=>bytes!==null&&bytes>0).map(([type,bytes])=>`<i class="${type}" style="flex-grow:${bytes/sum}"></i>`).join('')}</span>`;
 }
 export function memberStorageHTML(model,expanded=new Set()){
   if(!model.available)return '<p>未知</p>';

@@ -22,8 +22,6 @@
 .sb .storage-member-bar>i{min-width:0;flex-basis:0;background:var(--ink)}
 .sb .storage-member-bar>.warehouse{background:var(--ink-3)}
 .sb .storage-member-bar>.project{background:#7fa7ff}
-.sb .storage-member-bar>.unknown{flex:0 0 4px;background:transparent;border:1px solid var(--ink-3)}
-.sb .storage-member-bar>.project.unknown{border-color:#7fa7ff}
 .sb .storage-member-table tr.storage-member-detail{display:block;background:var(--bg)}
 .sb .storage-member-detail>td{display:block;padding:14px 16px}
 .sb .storage-member-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr));gap:10px}

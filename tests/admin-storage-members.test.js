@@ -67,7 +67,12 @@ test('admin catalog retains only real boolean warehouse facts from understood no
 test('member markup retains all size columns, unknown markers, cache dataset count and actual server ids',()=>{
   const html=memberStorageHTML(storageMemberRows(catalog()),new Set(['alice']));
   assert.match(html,/data-member-size="warehouse"[^>]*>10 B/);assert.match(html,/data-member-size="container"[^>]*>—/);assert.match(html,/data-member-size="cache"[^>]*title="1 个数据集">10 B/);
-  assert.match(html,/project unknown/);assert.match(html,/容器 — · 缓存 10 B/);assert.match(html,/server-id/);assert.match(html,/1 个数据集 · 10 B/);assert.doesNotMatch(html,/%|原件|软件预算/);
+  assert.doesNotMatch(html,/<i class="project|<i class="[^"]*unknown/);assert.match(html,/容器 — · 缓存 10 B/);assert.match(html,/server-id/);assert.match(html,/1 个数据集 · 10 B/);assert.doesNotMatch(html,/%|原件|软件预算/);
+});
+test('unknown or zero bar components have no segment or separator, and only real quantities contribute',()=>{
+  const value=catalog([location('node-a',undefined,{warehouseReady:false})]);let html=memberStorageHTML(storageMemberRows(value));
+  assert.equal((html.match(/<i class=/g)||[]).length,1);assert.match(html,/<i class="cache" style="flex-grow:1"/);assert.doesNotMatch(html,/<i class="warehouse|<i class="project|unknown/);
+  value.datasets[0].versions[0].bytes=null;html=memberStorageHTML(storageMemberRows(value));assert.doesNotMatch(html,/<i class=/);assert.match(html,/容器 — · 缓存 —/);
 });
 test('member principal and changed admin identity cannot render or access privileged aggregation',()=>{
   const host={innerHTML:'',replaceChildren(){this.innerHTML='';},addEventListener(){}},store={principal:{userId:'member',role:'member'},authGeneration:0};let reads=0;

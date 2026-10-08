@@ -72,6 +72,8 @@ try{
     assert.equal(await bob.locator('[data-member-size=cache]').textContent(),'8.00 GiB');assert.equal(await bob.locator('[data-member-size=cache]').getAttribute('title'),'1 个数据集');
     assert.equal(await chen.locator('[data-member-size=warehouse]').textContent(),'7.00 GiB');assert.equal(await bob.locator('[data-member-size=warehouse]').textContent(),'0 B');
     assert.deepEqual(await page.locator('[data-member-size=container]').allTextContents(),['—','—']);
+    assert.equal(await page.locator('.storage-member-bar>.project,.storage-member-bar>.unknown').count(),0,'unknown container has zero segment width and no separator');
+    assert.deepEqual(await bob.locator('.storage-member-bar>i').evaluateAll(nodes=>nodes.map(node=>node.className)),['cache'],'zero warehouse and unknown container leave only the actual cache segment');
     await chen.locator('button').click();assert.equal(await chen.locator('button').getAttribute('aria-expanded'),'true');
     assert.match(await page.locator('.storage-member-detail').textContent(),/容器 — · 缓存 9.00 GiB/);assert.match(await page.locator('.storage-member-detail').textContent(),/仓库1 个数据集 · 7.00 GiB/);
     assert.deepEqual(await page.locator('.storage-member-detail .server-id').evaluateAll(nodes=>nodes.map(node=>node.title)),machines.map(row=>row.id).sort());
