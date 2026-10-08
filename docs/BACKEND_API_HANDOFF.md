@@ -262,6 +262,10 @@ ID/revision 核对。维护状态仍保持；物理原件、副本、租约与 p
 
 已有本地 UUID／handle 不自动 allocation 或重绑，仍按原 begin/status、全节点定位及原位置恢复；超时或离线不是 ABSENT，全节点确认 ABSENT 后也拒绝用旧裸 key 新建。策略启用时，新 `transfers.create kind=upload`／`transfer upload` 关闭，已持久传输仍按原 key/编号恢复。`state.datasetUploadAdmission {protocol:1,available}` 只说明门户策略/API，不能代替节点准入、容量、挂载或直传可达证明。
 
+管理员可在独立 ingress 策略配置 `warehouses`，新 admission 按完整清单实际空间需求选择首个合格仓库，再原子固定 UUID、仓库及 authority；不新增用户选盘参数。容量告警本身不拒绝上传，实际不足、不可写或未知拒绝。`datasetUploadAdmission.targetMachine` 只是默认仓库预览；确定的写入位置始终使用 admission 的 `storageMachine`，续传、取消、签票都不能重新选择。新池上传 READY 事件与原 intent 匹配后在所属仓库核验，缓存认证沿固定 transfer 来源；旧 outbox、归档策略、journal 和 pins 不重写。配置及兼容边界见 [DATASET_INGRESS.md](DATASET_INGRESS.md)。
+
+准入恢复的窄例外：`admission.status` 在授权有效、原映射不存在且无同 intent 在途检查时，返回 `404` 与 `code:"DATASET_ADMISSION_ABSENT"`。只有下一次用户明确发起相同规格上传时，客户端才可沿原 key 再调一次 create；初次失败只核对状态，保留容量/不可达原因。普通网关 404、超时、未知和已有 UUID 不自动重派。停用入口池不撤销 BOUND/ARCHIVED 的持久来源身份与历史别名。
+
 仅管理员受保护入库配置 `allowDuringMaintenance:true` 可在维护期间放行当前服务端 admission 绑定的固定 HDD 上传；仍逐次复核 owner、机器权限、authority、spec 和节点容量，不接受客户端传该开关。此例外不修改 operational maintenance revision/global 状态，不放行训练、终端、项目、SSD／legacy 新建、通用传输或缓存准备，不能宣称全平台恢复。
 
 1. `datasets.upload.begin`：`machine`、`name`、UUID `key`、`manifestBytes`、`manifestSha256`、`totalBytes`、`entries`；仅用户明确同意大文件中转时增加 `allowRelay: true`。

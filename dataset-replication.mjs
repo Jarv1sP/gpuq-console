@@ -67,7 +67,7 @@ export function installDatasetReplication(service){
         if(result.state==='READY'){
           // Certification is asynchronous; until it succeeds this complete
           // replica remains protected and usable, never an evictable guess.
-          try{service.enqueueArchiveReplica?.(owner,target,ref,request);}catch{}
+          try{service.enqueueArchiveReplica?.(owner,target,ref,request,{machine:row.source,dataset:row.sourceDataset});}catch{}
           return {status:{...result,dataset:ref.dataset},reference:mapped};
         }
         return {status:{...result,dataset:ref.dataset},reference:null};
@@ -134,12 +134,25 @@ export function installDatasetReplication(service){
       return localPrepare(ref);
     }
     if(!service.transferCall)fail('服务器间传输尚未启用。',503);
-    const sourceRef={dataset:selected.sourceDataset||ref.dataset,version:ref.version};
-    if(!authority(owner,target).limits[selected.sourceMachine]&&!service.archiveSourceAllowed?.(owner,selected.sourceMachine,sourceRef)&&!service.datasetIngressSourceAllowed?.(owner,selected.sourceMachine,sourceRef))fail('源机器未授权。',403);
+    const fresh=!row||value?.state==='CANCELED'||value?.state==='SUCCEEDED';
+    const selectedRef={dataset:selected.sourceDataset||ref.dataset,version:ref.version};
+    // A new prepare prefers the certified original, not a second cache hop.
+    // This is a control-plane journal lookup, never a peer-supplied root or a
+    // new copy protocol. Existing UUIDs keep their original physical source.
+    const original=fresh?service.archiveOriginalForCopy?.(owner,selected.sourceMachine,selectedRef):null;
+    const sourceMachine=fresh?(original?.machine||selected.sourceMachine):row.source;
+    const sourceRef={dataset:fresh?(original?.dataset||selectedRef.dataset):row.sourceDataset,version:ref.version};
+    if(!authority(owner,target).limits[sourceMachine]&&!service.archiveSourceAllowed?.(owner,sourceMachine,sourceRef)&&!service.datasetIngressSourceAllowed?.(owner,sourceMachine,sourceRef))fail('源机器未授权。',403);
+    if(fresh&&original?.machine===target){
+      // Normally the earlier warehouseReady branch handles this. Do not
+      // manufacture a same-node transfer when an old logical alias differs.
+      if(sourceRef.dataset!==ref.dataset)fail('已确认原件在目标仓库，请按仓库中的固定数据版本准备；未建立缓存中转。');
+      return localPrepare(sourceRef);
+    }
     // Lost create replies reuse the durable UUID. Only an explicit retry of a
     // confirmed canceled/evicted copy receives a new transfer identity.
-    if(!row||value?.state==='CANCELED'||value?.state==='SUCCEEDED'){
-      row={id:key(owner,target,ref),owner,target,...ref,source:selected.sourceMachine,sourceDataset:selected.sourceDataset||ref.dataset,key:randomUUID(),transferId:null,...(trainingJobId?{trainingJobId}:{})};save(row);
+    if(fresh){
+      row={id:key(owner,target,ref),owner,target,...ref,source:sourceMachine,sourceDataset:sourceRef.dataset,key:randomUUID(),transferId:null,...(trainingJobId?{trainingJobId}:{})};save(row);
     }
     const args={key:row.key,kind:'copy',machine:target,from:row.source,dataset:row.sourceDataset,version:row.version,name:'replica-'+row.id.slice(0,24)};
     if(trainingJobId&&!service.trainingTransferCall)fail('新训练准备协议尚未启用；不会回退旧 worker。',503);

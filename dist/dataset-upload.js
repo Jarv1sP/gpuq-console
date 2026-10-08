@@ -68,10 +68,14 @@ export async function saveDatasetUploadIntent(keyStore,baseKey,value,check=()=>{
 }
 export async function allocateDatasetUpload({call,keyStore,baseKey,userId,machine,specification,capability,check=()=>{}}){
   check();let intent=await keyStore?.getIntent?.(baseKey);check();
+  const explicitResume=intent!==undefined&&intent!==null;
+  let creationFailure;
+  const confirmedAbsent=(error,cause)=>cause&&error.status===404&&error.code==='DATASET_ADMISSION_ABSENT'?
+    uploadError(`${cause.message}。原意图尚未准入；恢复后再次发起同一上传即可重试。`,'DATASET_ADMISSION_ABSENT',{status:404}):error;
   if(intent!==undefined&&intent!==null){
     if(intent.protocol!==1||intent.userId!==userId||intent.machine!==machine||!uuid.test(intent.key||'')||!sameSpecification(intent.specification,specification)||
       intent.uploadId!==undefined&&(!uuid.test(intent.uploadId)||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(intent.storageMachine||'')||intent.storageTier!=='hdd')||
-      intent.beginAttempted!==undefined&&typeof intent.beginAttempted!=='boolean')throw uploadError('保存的上传意图与账号、目标或完整清单不符。','MISMATCH');
+      intent.beginAttempted!==undefined&&(typeof intent.beginAttempted!=='boolean'||!intent.uploadId))throw uploadError('保存的上传意图与账号、目标或完整清单不符。','MISMATCH');
     if(intent.uploadId)return intent;
   }else{
     if(capability?.protocol!==1||capability.available!==true)throw uploadError('机械仓库上传准入未启用或能力未确认；未开始上传。','ADMISSION_UNAVAILABLE');
@@ -80,12 +84,24 @@ export async function allocateDatasetUpload({call,keyStore,baseKey,userId,machin
     // node upload UUID is allocated by the server, never derived from content.
     intent={protocol:1,userId,machine,key:baseKey,specification:{...specification}};
     await saveDatasetUploadIntent(keyStore,baseKey,intent,check);
-    try{const receipt=await call('datasets.upload.admission.create',{machine,key:intent.key,...specification});check();return await accept(receipt);}
-    catch(error){check();if(error.code==='PERSISTENCE'||error.code==='MISMATCH')throw error;}
+    try{return await create();}
+    catch(error){check();if(error.code==='PERSISTENCE'||error.code==='MISMATCH')throw error;creationFailure=error;}
   }
-  // A saved but unacknowledged create is never replayed, including after a
-  // crash before dispatch. Absence/timeout cannot authorize a second intent.
-  const receipt=await call('datasets.upload.admission.status',{machine,key:intent.key});check();return accept(receipt);
+  // Unknown/timeout and a generic gateway 404 never authorize a write. A
+  // subsequent explicit upload may retry the SAME intent only after the
+  // authenticated control plane proves it absent, with no in-flight create.
+  try{const receipt=await call('datasets.upload.admission.status',{machine,key:intent.key});check();return accept(receipt);}
+  catch(error){
+    check();
+    if(!explicitResume||error.status!==404||error.code!=='DATASET_ADMISSION_ABSENT')throw confirmedAbsent(error,creationFailure);
+    try{return await create();}
+    catch(cause){
+      check();if(cause.code==='PERSISTENCE'||cause.code==='MISMATCH')throw cause;
+      try{const receipt=await call('datasets.upload.admission.status',{machine,key:intent.key});check();return accept(receipt);}
+      catch(error){check();throw confirmedAbsent(error,cause);}
+    }
+  }
+  async function create(){const receipt=await call('datasets.upload.admission.create',{machine,key:intent.key,...specification});check();return accept(receipt);}
   async function accept(receipt){
     if(receipt?.protocol!==admissionProtocol||receipt.key!==intent.key||!uuid.test(receipt.uploadId||'')||receipt.requestedMachine!==machine||
       !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(receipt.storageMachine||'')||receipt.storageTier!=='hdd'||!['ISSUED','BOUND'].includes(receipt.state)||

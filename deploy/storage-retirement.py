@@ -48,6 +48,47 @@ class AuthorityRetirement:
             raise ValueError('Retirement metadata history requires offline reconciliation')
         return names
 
+    def certifications(self):
+        """Private metadata only, under the shared cache admission lock.
+
+        The default and scoped adapters use the same cache lock inode. A
+        removed configuration does not erase a historical grant dependency.
+        Never silently skip corrupt or half-created operation journals.
+        """
+        roots=[self.n.ROOT/'storage-archive']
+        namespaces=self.n.ROOT/'storage-archive-sources'
+        for name in self.files(namespaces):
+            self.D._identifier(name,self.D.HASH_RE)
+            roots.append(namespaces/name)
+        count=0
+        for root in roots:
+            for name in self.files(root/'operations'):
+                self.J.identifier(name);count+=1
+                if count>50000:raise ValueError('Certification history requires offline reconciliation')
+                row=self.s._load(root/'operations'/name/'journal.json')
+                if (not isinstance(row,dict) or row.get('schema')!=1
+                        or row.get('kind') not in ('provision','certify')
+                        or not isinstance(row.get('request'),dict) or row['request'].get('opId')!=name):
+                    raise ValueError('Unknown or corrupt certification history prevents retirement')
+                if row['kind']=='certify':
+                    grant=row['request'].get('grant')
+                    if not isinstance(grant,dict):raise ValueError('Unknown certification grant prevents retirement')
+                    binding=row.get('binding');source=(binding or {}).get('policy') if isinstance(binding,dict) else None
+                    if (not isinstance(binding,dict) or set(binding)!={'policy','machine','rootIdentity'}
+                            or binding['machine']!=self.s.machine or not isinstance(source,dict)
+                            or set(source)!={'enabled','machine','authority'} or source.get('enabled') is not True
+                            or row.get('state') not in ('PENDING','READY')
+                            or set(row['request'])!={'opId','userId','target','grant'}):
+                        raise ValueError('Unknown certification binding prevents retirement')
+                    self.A._machine(source['machine']);self.D._identifier(source['authority'])
+                    self.D._identifier(row.get('digest'),self.D.HASH_RE)
+                    self.A._validate_grant(grant,source['machine'],self.s.machine)
+                    target=self.ref(row['request']['target'])
+                    if (grant['version']!=target['version'] or grant['receipt']['owners']!=[row['request']['userId']]
+                            or root.parent==namespaces and root.name!=self.A._sha(source)):
+                        raise ValueError('Certification reference or source namespace changed')
+                    yield root,name,grant
+
     def quiescent(self, ref, *, skip_unregister=None):
         """Only exact matching metadata; no processes are stopped or polled away."""
         jobs = self.J.TransferJobs(self.n)
@@ -118,10 +159,9 @@ class AuthorityRetirement:
             grant = self.A._validate_grant(row['request']['grant'],self.s.policy['machine'],self.s.machine)
             if grant['id'] != grant_id or grant['receipt']['owners'] != [user]:
                 raise ValueError('Certification grant identity differs')
-            for name in self.files(self.s.root/'operations'):
-                other = self.s._load(self.s._op_path(self.J.identifier(name)))
-                if other and other.get('request',{}).get('grant',{}).get('id') == grant_id:
-                    if name != certify or self.s.worker_state(name) != 'STOPPED':
+            for root,name,other_grant in self.certifications():
+                if other_grant['id'] == grant_id:
+                    if root != self.s.root or name != certify or self.s.worker_state(name) != 'STOPPED':
                         raise ValueError('Another or unknown certification depends on this authority')
             binding = self.A._sha(args); remote = self.s.remote
             with remote.scope(grant['dataset'],grant['version']):

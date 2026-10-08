@@ -42,7 +42,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     if(service.closing)fail('Archive service is closing');
     // Copy only our defined journal fields. A grant/token/source ticket cannot
     // accidentally enter durable state through a spread of a remote response.
-    const allowed=['id','kind','owner','machine','dataset','version','eventId','sourceMachine','sourceDataset','logicalDataset','phase','copyKey','transferId','grantId','certifyId','createdAt','updatedAt','nextCheckAt','failures','error','receiptSha256','eventAcknowledged','policyKey','retryRequested','transferState','failureStage','enrollment','retirement','retirementIntent'];
+    const allowed=['id','kind','owner','machine','dataset','version','eventId','sourceMachine','sourceDataset','logicalDataset','phase','copyKey','transferId','grantId','certifyId','createdAt','updatedAt','nextCheckAt','failures','error','receiptSha256','eventAcknowledged','policyKey','retryRequested','transferState','failureStage','enrollment','retirement','retirementIntent','ingressBinding'];
     if(Object.keys(row).some(k=>!allowed.includes(k))||!safePhase.has(row.phase))fail('Invalid archive journal');
     row.updatedAt=clock();
     service.db.prepare('INSERT INTO storage_archives(id,owner,machine,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(row.id,row.owner,row.machine,JSON.stringify(row));
@@ -60,17 +60,22 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     }catch(error){service.db.exec('ROLLBACK');throw error;}
   };
   const releaseLane=row=>service.db.prepare('DELETE FROM storage_archive_lane WHERE singleton=1 AND archive_id=?').run(row.id);
-  const currentPolicy=row=>row.policyKey===policyKey&&row.sourceMachine===policy.machine;
+  const boundIngress=row=>Boolean(row?.ingressBinding&&row.policyKey===row.ingressBinding.policyKey&&
+    row.sourceMachine===row.ingressBinding.machine&&service.datasetIngressArchiveBindingValid?.(
+      row.owner,row.ingressBinding,{dataset:row.sourceDataset,version:row.version}));
+  const currentPolicy=row=>row?.ingressBinding!==undefined?boundIngress(row):row.policyKey===policyKey&&row.sourceMachine===policy.machine;
+  const sourcePolicy=row=>row.ingressBinding?{enabled:true,machine:row.sourceMachine,authority:row.ingressBinding.authority}:policy;
+  const sourceContext=row=>row.ingressBinding?{sourcePolicy:sourcePolicy(row)}:{};
   // A machine cutover changes dispatch, not a certified record's authority.
   // Only canonical journals under this same trusted authority are readable;
   // changing authority or disabling the policy never imports old records.
   const trustedHistory=row=>policy.enabled&&row&&HASH.test(row.id||'')&&USER.test(row.owner||'')&&isRef(row)&&
     ['ingest','enrollment','replica'].includes(row.kind)&&MACHINES.some(m=>m.id===row.machine)&&
     MACHINES.some(m=>m.id===row.sourceMachine)&&
-    row.policyKey===key({enabled:true,machine:row.sourceMachine,authority:policy.authority});
+    (row.ingressBinding!==undefined?boundIngress(row):row.policyKey===key({enabled:true,machine:row.sourceMachine,authority:policy.authority}));
   const archiveIdentity=row=>row&&key(row.id,row.kind,row.owner,row.machine,row.dataset,row.version,row.eventId,
     row.sourceMachine,row.sourceDataset,row.logicalDataset,row.policyKey,row.copyKey,row.transferId,row.grantId,row.certifyId,row.receiptSha256,
-    row.phase,row.eventAcknowledged);
+    row.phase,row.eventAcknowledged,...(row.ingressBinding?[row.ingressBinding]:[]));
   const isCopyIntent=row=>['ingest','enrollment'].includes(row?.kind);
   const isRetired=row=>['retired','authority-retired'].includes(row?.failureStage);
   const availableArchive=row=>trustedHistory(row)&&ID.test(row.sourceDataset||'')&&row.phase==='ARCHIVED'&&!row.retirementIntent&&!isRetired(row)
@@ -101,7 +106,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     const current=load(row.id);
     if(retiring.has(row.id)||current?.retirementIntent||isRetired(current))fail('Archive retirement fences this old intent');
     if(service.closing||!policy.enabled)fail('Archive service is unavailable');
-    service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:row.machine,from:policy.machine});
+    service.assertMaintenanceAllowed?.('storage.archive.advance',{machine:row.machine,from:row.sourceMachine});
     if(!currentPolicy(row))fail('Archive policy changed; existing intent requires administrator review');
     const user=enabledUser(row.owner,row.machine,{dataset:row.dataset,version:row.version});
     if(snapshot!==undefined&&JSON.stringify(user)!==snapshot)fail('Archive owner policy changed during operation');
@@ -122,17 +127,24 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
 
   service.archiveState=(owner,machine,ref)=>publicRow(rows().findLast(row=>row.owner===owner&&row.machine===machine&&(row.dataset===ref.dataset||row.logicalDataset===ref.dataset)&&row.version===ref.version));
   service.archiveSourceAllowed=(owner,machine,ref)=>isRef(ref)&&rows().some(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine&&row.sourceDataset===ref.dataset&&row.version===ref.version);
+  service.archiveOriginalForCopy=(owner,machine,ref)=>{
+    if(!isRef(ref))return null;
+    const origins=new Map(rows().filter(row=>availableArchive(row)&&row.owner===owner&&row.version===ref.version&&
+      (row.machine===machine&&row.dataset===ref.dataset||row.sourceMachine===machine&&row.sourceDataset===ref.dataset))
+      .map(row=>{const value={machine:row.sourceMachine,dataset:row.sourceDataset,version:row.version};return [key(value),value];}));
+    if(origins.size>1)fail('固定数据副本对应多个仓库来源，请管理员核对；未选择其他来源。');
+    return origins.values().next().value||null;
+  };
   service.archiveMachineVisible=(owner,machine)=>rows().some(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine);
   service.archiveAliases=(owner,machine=policy.machine)=>new Map(rows().filter(row=>availableArchive(row)&&row.owner===owner&&row.sourceMachine===machine).map(row=>[row.sourceDataset+'@'+row.version,row.logicalDataset||row.dataset]));
   service.archiveIntentAllowed=(owner,args)=>{
-    if(!policy.enabled||args.kind!=='copy'||args.machine!==policy.machine||args.from===args.machine||!UUID.test(args.key||'')||!isRef(args))return false;
+    if(!policy.enabled||args.kind!=='copy'||args.from===args.machine||!UUID.test(args.key||'')||!isRef(args))return false;
     const row=rows().find(row=>row.owner===owner&&row.machine===args.from&&row.dataset===args.dataset&&row.version===args.version&&row.copyKey===args.key);
-    return isCopyIntent(row)&&!row.retirementIntent&&row.failureStage!=='retired'&&!retiring.has(row.id)&&currentPolicy(row)&&row.owner===owner&&row.copyKey===args.key&&args.name==='archive-'+key(owner,args.from,args.dataset).slice(0,24);
+    return isCopyIntent(row)&&args.machine===row.sourceMachine&&!row.retirementIntent&&row.failureStage!=='retired'&&!retiring.has(row.id)&&currentPolicy(row)&&row.owner===owner&&row.copyKey===args.key&&args.name==='archive-'+key(owner,args.from,args.dataset).slice(0,24);
   };
 
   function enqueueEvent(machine,event){
     if(!policy.enabled||!MACHINES.some(m=>m.id===machine)||!event||event.state!=='READY'||!UUID.test(event.id)||!USER.test(event.userId)||!isRef(event))fail('Invalid immutable archive event');
-    enabledUser(event.userId,machine,{dataset:event.dataset,version:event.version});
     // A re-registration of the same content is a new immutable event. Keep
     // the older receipt for recovery; never silently reuse its target identity.
     const id=key(event.userId,machine,event.dataset,event.version,event.id),old=load(id);
@@ -140,29 +152,38 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       if(old.kind!=='ingest')fail('Archive intent identity conflict');
       return old;
     }
+    const ingressBinding=service.datasetIngressArchiveEventBinding?.(machine,event);
+    enabledUser(event.userId,machine,{dataset:event.dataset,version:event.version});
     if(rows().length>=10000)fail('Archive history limit reached');
+    const source=ingressBinding?{machine:ingressBinding.machine,authority:ingressBinding.authority}:policy;
     const archived=rows().findLast(row=>availableCurrentArchive(row)&&row.owner===event.userId&&row.machine===machine&&row.dataset===event.dataset&&row.version===event.version);
-    const sourceDataset=machine===policy.machine?event.dataset:archived?.sourceDataset||null;
+    const sourceDataset=machine===source.machine?event.dataset:archived?.sourceDataset||null;
     const now=clock(),row={id,kind:'ingest',owner:event.userId,machine,dataset:event.dataset,version:event.version,eventId:event.id,
-      logicalDataset:event.dataset,sourceMachine:policy.machine,sourceDataset,
+      logicalDataset:event.dataset,sourceMachine:source.machine,sourceDataset,
       phase:sourceDataset?'PROVISIONING':'QUEUED',copyKey:randomUUID(),transferId:null,grantId:null,certifyId:randomUUID(),
-      createdAt:now,updatedAt:now,nextCheckAt:now,failures:0,eventAcknowledged:false,policyKey};
+      createdAt:now,updatedAt:now,nextCheckAt:now,failures:0,eventAcknowledged:false,
+      policyKey:ingressBinding?.policyKey||policyKey,...(ingressBinding?{ingressBinding}: {})};
     if(sourceDataset)row.grantId=grantIdentity(row);
     save(row);return row;
   }
 
-  service.enqueueArchiveReplica=(owner,machine,logicalRef,physicalRef)=>{
+  service.enqueueArchiveReplica=(owner,machine,logicalRef,physicalRef,fixedSource)=>{
     if(!policy.enabled)return null;
     if(!isRef(logicalRef)||!isRef(physicalRef)||logicalRef.version!==physicalRef.version)fail('Invalid fixed archive replica');
     enabledUser(owner,machine);
-    const source=rows().findLast(row=>availableCurrentArchive(row)&&row.owner===owner&&(row.logicalDataset||row.dataset)===logicalRef.dataset&&row.version===logicalRef.version);
+    if(fixedSource!==undefined&&(!fixedSource||Object.keys(fixedSource).sort().join(',')!=='dataset,machine'||
+      !MACHINES.some(m=>m.id===fixedSource.machine)||!ID.test(fixedSource.dataset)))fail('Invalid fixed replica source');
+    const source=rows().findLast(row=>availableCurrentArchive(row)&&row.owner===owner&&(row.logicalDataset||row.dataset)===logicalRef.dataset&&row.version===logicalRef.version&&
+      (!fixedSource||row.sourceMachine===fixedSource.machine&&row.sourceDataset===fixedSource.dataset||
+        row.machine===fixedSource.machine&&row.dataset===fixedSource.dataset));
     if(!source)return null;
     const id=key(owner,machine,physicalRef.dataset,physicalRef.version),old=load(id);
     if(old)return publicRow(old);
     if(rows().length>=10000)fail('Archive history limit reached');
     const now=clock(),row={id,kind:'replica',owner,machine,...physicalRef,logicalDataset:logicalRef.dataset,
       sourceMachine:source.sourceMachine,sourceDataset:source.sourceDataset,phase:'PROVISIONING',
-      copyKey:randomUUID(),transferId:null,grantId:null,certifyId:randomUUID(),createdAt:now,updatedAt:now,nextCheckAt:now,failures:0,eventAcknowledged:true,policyKey};
+      copyKey:randomUUID(),transferId:null,grantId:null,certifyId:randomUUID(),createdAt:now,updatedAt:now,nextCheckAt:now,failures:0,eventAcknowledged:true,
+      policyKey:source.policyKey,...(source.ingressBinding?{ingressBinding:structuredClone(source.ingressBinding)}:{})};
     row.grantId=grantIdentity(row);
     save(row);return publicRow(row);
   };
@@ -318,7 +339,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       check();old.retirementIntent={mode:'authority-retire-v1',binding,key:args.key,replacementId:replacement.id,recoveryId:args.recoveryId,state:'FENCING'};save(old);
       const proof=await service.bridge(old.machine,'storage.archive.retire',{
         mode:'authority-target-v1',opId:args.key,userId:old.owner,target:{dataset:old.dataset,version:old.version},
-        grantId:old.grantId,certifyId:old.certifyId,recoveryId:args.recoveryId,receiptSha256:old.receiptSha256});
+        grantId:old.grantId,certifyId:old.certifyId,recoveryId:args.recoveryId,receiptSha256:old.receiptSha256,...sourceContext(old)});
       check();
       if(!proof||proof.protocol!==1||proof.state!=='REVOKED'||proof.opId!==args.key||proof.userId!==old.owner||proof.grantId!==old.grantId||
         proof.sourceMachine!==old.sourceMachine||proof.targetMachine!==old.machine||proof.source?.dataset!==old.sourceDataset||proof.source?.version!==old.version||
@@ -498,7 +519,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   }
 
   async function advance(row){
-    if(service.maintenanceFor?.(row.machine)||service.maintenanceFor?.(policy.machine))return;
+    if(service.maintenanceFor?.(row.machine)||service.maintenanceFor?.(row.sourceMachine))return;
     if(row.nextCheckAt>clock())return;
     if(row.phase==='FAILED'||row.phase==='BLOCKED'||row.nextCheckAt>clock())return;
     const snapshot=fence(row);
@@ -516,7 +537,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
       // always resolve the same transfer, never a second destination/name.
       row.phase='COPYING';save(row);
       const result=await service.archiveTransferCall({userId:row.owner,username:service.store.get(row.owner).username,role:'member'},
-        {key:row.copyKey,kind:'copy',from:row.machine,machine:policy.machine,dataset:row.dataset,version:row.version,name:'archive-'+key(row.owner,row.machine,row.dataset).slice(0,24)},
+        {key:row.copyKey,kind:'copy',from:row.machine,machine:row.sourceMachine,dataset:row.dataset,version:row.version,name:'archive-'+key(row.owner,row.machine,row.dataset).slice(0,24)},
         {resume:row.retryRequested===true});
       fence(row,snapshot);
       if(!UUID.test(result?.id))fail('Archive transfer identity mismatch');
@@ -534,26 +555,26 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
     }
     if(row.kind==='enrollment'&&!row.enrollment.sourceRegistration){
       const source={dataset:row.sourceDataset,version:row.version};
-      const proof=enrollmentProof(await call(row,snapshot,policy.machine,'storage.archive.enrollment-check',{
-        userId:row.owner,...source}),policy.machine,row.owner,source);
+      const proof=enrollmentProof(await call(row,snapshot,row.sourceMachine,'storage.archive.enrollment-check',{
+        userId:row.owner,...source}),row.sourceMachine,row.owner,source);
       if(proof.manifestBytes!==row.enrollment.manifestBytes)fail('Copied archive manifest does not match enrollment');
       row.enrollment.sourceRegistration=proof.registration;save(row);
     }
-    if(row.machine===policy.machine){
-      const result=await call(row,snapshot,policy.machine,'storage.archive.original',{userId:row.owner,dataset:row.dataset,version:row.version});
+    if(row.machine===row.sourceMachine){
+      const result=await call(row,snapshot,row.sourceMachine,'storage.archive.original',{userId:row.owner,dataset:row.dataset,version:row.version});
       if(result?.protected!==true||result.dataset!==row.dataset||result.version!==row.version)fail('Archive original is not protected');
       row.phase='ARCHIVED';delete row.error;save(row);await acknowledge(row,snapshot);releaseLane(row);return;
     }
     const request={opId:row.grantId,userId:row.owner,source:{dataset:row.sourceDataset,version:row.version},targetMachine:row.machine,
       ...(row.enrollment?{expectedRegistration:row.enrollment.sourceRegistration}:{}),...(row.retryRequested?{retry:true}:{})};
-    const provision=await call(row,snapshot,policy.machine,'storage.archive.provision',request);
+    const provision=await call(row,snapshot,row.sourceMachine,'storage.archive.provision',request);
     if(provision?.opId!==row.grantId)fail('Archive provision identity mismatch');
     if(provision.state==='FAILED'){row.phase='FAILED';row.failureStage='provision';row.retryRequested=false;row.error='长期原件校验未完成，本机副本不会被清理。';save(row);releaseLane(row);return;}
     if(provision.state!=='READY'){row.phase='PROVISIONING';save(row);return;}
-    if(!provision.grant||provision.grant.id!==row.grantId||provision.grant.sourceMachine!==policy.machine||provision.grant.targetMachine!==row.machine||provision.grant.dataset!==row.sourceDataset||provision.grant.version!==row.version||JSON.stringify(provision.grant.receipt?.owners)!==JSON.stringify([row.owner]))fail('Archive grant does not match the fixed owner/reference');
+    if(!provision.grant||provision.grant.id!==row.grantId||provision.grant.sourceMachine!==row.sourceMachine||provision.grant.targetMachine!==row.machine||provision.grant.dataset!==row.sourceDataset||provision.grant.version!==row.version||JSON.stringify(provision.grant.receipt?.owners)!==JSON.stringify([row.owner]))fail('Archive grant does not match the fixed owner/reference');
     row.phase='CERTIFYING';save(row);
     const certified=await call(row,snapshot,row.machine,'storage.archive.certify',{opId:row.certifyId,userId:row.owner,target:{dataset:row.dataset,version:row.version},grant:provision.grant,
-      ...(row.enrollment?{expectedRegistration:row.enrollment.targetRegistration}:{}),...(row.retryRequested?{retry:true}:{})});
+      ...(row.enrollment?{expectedRegistration:row.enrollment.targetRegistration}:{}),...(row.retryRequested?{retry:true}:{}),...sourceContext(row)});
     if(certified?.opId===row.certifyId&&certified.state==='FAILED'){row.phase='FAILED';row.failureStage='certify';row.retryRequested=false;row.error='缓存认证未完成；本机副本仍受保护，请检查后重试。';save(row);releaseLane(row);return;}
     if(certified?.opId!==row.certifyId||certified.state!=='READY'||certified.dataset!==row.dataset||certified.version!==row.version||certified.role!=='cache'||!HASH.test(certified.receiptSha256||''))fail('Archive cache certification not confirmed');
     row.receiptSha256=certified.receiptSha256;row.phase='ARCHIVED';row.failures=0;row.retryRequested=false;delete row.error;save(row);
@@ -562,7 +583,7 @@ export function installStorageArchive(service,input,{clock=Date.now,startTimer=t
   }
 
   service.reconcileStorageArchive=async()=>{
-    if(reconciling||service.closing||!policy.enabled||!service.bridge||service.maintenanceFor?.(policy.machine))return;
+    if(reconciling||service.closing||!policy.enabled||!service.bridge)return;
     reconciling=true;
     try{
       // Only post-enable publish intents are enumerated. No scan of old users,

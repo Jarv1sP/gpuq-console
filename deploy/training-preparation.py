@@ -104,8 +104,8 @@ def admission(node, binding, physical=None):
         request['datasetFootprints'][i].update(physical)
         def existing_upload(ref, expected):
             if ref!=physical:return False
-            prep=binding['preparation'];spec=node.transfers().load(prep['id'])
-            uploads=node.dataset_uploads()
+            prep=binding['preparation'];transfers=node.transfers();spec=transfers.load(prep['id'])
+            uploads=transfers.target_uploads(spec)
             try:session=uploads.load(binding['job']['userId'],prep['id'])
             except FileNotFoundError:return False
             if (session['name']!=spec['name'] or session.get('archiveAdmission') is not None

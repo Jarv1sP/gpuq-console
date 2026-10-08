@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import hmac
 import http.client
+import importlib.util
 import ipaddress
 import json
 import os
@@ -612,13 +613,21 @@ class TransferJobs:
                 raise ValueError('Transfer ID was canceled before dispatch; it cannot start')
             try:
                 spec = self.load(key)
+            except FileNotFoundError:
+                spec = None
+            if spec is not None:
+                if 'targetStorage' in spec:
+                    payload['targetStorage']=spec['targetStorage']
+                    self.target_uploads(spec)
                 if spec['digest'] != digest(payload):
                     raise ValueError('Transfer ID cannot change source or target')
-            except FileNotFoundError:
+            else:
                 if len(list(self.root.glob('*.json'))) >= 40000:
                     raise ValueError('Transfer history is full')
                 # One service-user admission guard; no unbounded background fanout.
                 with self.lock('00000000-0000-0000-0000-000000000000', '.admission.lock'):
+                    target_storage=self.new_target_storage(payload)
+                    if target_storage is not None:payload['targetStorage']=target_storage
                     spec = {**payload, 'id': key, 'digest': digest(payload), 'attempt': 1, 'createdAt': time.time()}
                     self.admit(spec)
                     self.launch(spec, training=True) if training else self.launch(spec)
@@ -652,6 +661,7 @@ class TransferJobs:
     def resume(self, args, *, training=False):
         with self.lock(args['id']):
             spec = self.owned(args)
+            if 'targetStorage' in spec:self.target_uploads(spec)
             if 'archiveLane' in spec:
                 self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
             if self.path(spec['id'], '.source-release.json').exists():
@@ -668,12 +678,77 @@ class TransferJobs:
                         or not isinstance(source.get('token'),str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}',source['token'])):
                     raise ValueError('Resume may renew only the SAME immutable source ticket')
                 spec['source']=source
-                spec['digest']=digest({k:spec[k] for k in ('userId','sourceMachine','source','name','reference','timeoutSec','archiveLane') if k in spec})
+                spec['digest']=digest({k:spec[k] for k in ('userId','sourceMachine','source','name','reference','timeoutSec','archiveLane','targetStorage') if k in spec})
             with self.lock('00000000-0000-0000-0000-000000000000', '.admission.lock'):
                 self.admit(spec)
                 spec['attempt'] += 1
                 self.launch(spec, training=True) if training else self.launch(spec)
             return self.status(args)
+
+    def new_target_storage(self, spec):
+        """Only new authenticated fixed-version copies gain a hot-root bind."""
+        if 'archiveLane' in spec or self.n.CONFIG.get('storageWarehouse',{}).get('enabled') is not True:
+            return None
+        ref=spec.get('reference',{});source=spec.get('sourceMachine')
+        authorities=self.n.CONFIG.get('storageAuthorities',{})
+        configured=isinstance(authorities,dict) and any(
+            isinstance(name,str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',name)
+            and value=={'machine':source} for name,value in authorities.items())
+        if (source==self.n.CONFIG.get('machine') or ref.get('kind')!='datasets'
+                or not HASH.fullmatch(str(ref.get('version',''))) or not configured):
+            raise PermissionError('New warehouse/cache transfers require a configured authoritative warehouse source')
+        PeerClient(self.n.CONFIG.get('transferPeers',{}).get(source),{}).close()
+        warehouse=self.n.storage_warehouse()
+        if warehouse is None:
+            raise ValueError('Configured warehouse/cache storage is unavailable')
+        self.n.dataset_mount_check(self.n.CONFIG['datasets'])
+        module,cache=self.n.dataset_cache()
+        if (cache.root!=warehouse.hot.root
+                or cache._root_identity!=warehouse.hot._root_identity or cache.mount!=warehouse.hot.mount
+                or cache.root==warehouse.cold.root):
+            raise ValueError('Training target must be the configured separate cache')
+        if cache.mount is not None and cache._current_mount()!=cache.mount:
+            raise ValueError('Training target mount changed')
+        with module._directory(cache.root) as fd:
+            stat=os.fstat(fd)
+            if (stat.st_dev,stat.st_ino)!=cache._root_identity:
+                raise ValueError('Training target root changed')
+        return dict(protocol='dataset-training-cache-v1',machine=self.n.CONFIG['machine'],
+                    root=str(cache.root),rootIdentity=list(cache._root_identity),
+                    mount=list(cache.mount) if cache.mount is not None else None)
+
+    def target_uploads(self, spec):
+        if 'targetStorage' not in spec:
+            return self.n.dataset_uploads()  # Never upgrade or rebind old journals.
+        if (self.load(spec['id'])!=spec or spec.get('digest')!=digest({k:spec[k] for k in
+                ('userId','sourceMachine','source','name','reference','timeoutSec','archiveLane','targetStorage') if k in spec})):
+            raise ValueError('Fixed training transfer target changed; no root fallback')
+        bound=spec['targetStorage'];config=self.n.CONFIG['datasets']
+        if (not isinstance(bound,dict) or set(bound)!={'protocol','machine','root','rootIdentity','mount'}
+                or bound['protocol']!='dataset-training-cache-v1' or bound['machine']!=self.n.CONFIG.get('machine')
+                or bound['root']!=config.get('root','/data2/datasets')):
+            raise ValueError('Fixed training transfer target changed; no root fallback')
+        # Check the original directory BEFORE factories that initialize cache
+        # metadata. A missing/remounted root must never be recreated/rebound.
+        module=getattr(self,'_root_guard_module',None)
+        if module is None:
+            definition=importlib.util.spec_from_file_location('gpuq_transfer_root_guard',self.n.HERE/'dataset-cache.py')
+            module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
+            self._root_guard_module=module  # Cache code, never filesystem state.
+        with module._directory(bound['root']) as fd:
+            info=os.fstat(fd)
+            if bound['rootIdentity']!=[info.st_dev,info.st_ino]:
+                raise ValueError('Training target root changed')
+        self.n.dataset_mount_check(config)
+        if (bound['mount'] is not None and list(module._storage_mount(config.get('mountPoint','/data2'),bound['root']))!=bound['mount']):
+            raise ValueError('Training target mount changed')
+        if bound!=self.new_target_storage(spec):
+            raise ValueError('Fixed training transfer target changed; no root fallback')
+        uploads=self.n.dataset_training_uploads()
+        if (str(uploads.cache.root)!=spec['targetStorage']['root']
+                or list(uploads.cache._root_identity)!=spec['targetStorage']['rootIdentity']):
+            raise ValueError('Training upload adapter root differs from its durable binding')
+        return uploads
 
     def archive_lane(self, value, source_machine):
         # Only the authenticated internal bridge supplies this binding. Check
@@ -700,13 +775,13 @@ class TransferJobs:
             # Query and cleanup remain usable after owner cancellation. They
             # never need permission to admit warehouse bytes into a cache.
             return self._upload_bound(spec, action, **fields)
-        with self.n.dataset_uploads()._peer_cache_preparation(spec):
+        with self.target_uploads(spec)._peer_cache_preparation(spec):
             return self._upload_bound(spec, action, **fields)
 
     def _upload_bound(self, spec, action, **fields):
         if action == 'begin' and 'archiveLane' in spec:
             self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
-            return self.n.dataset_uploads().begin(spec['userId'], fields, _archive_transfer=spec['id'])
+            return self.target_uploads(spec).begin(spec['userId'], fields, _archive_transfer=spec['id'])
         if action in ('manifest', 'chunk'):
             # These bytes were read by this node from a certificate-pinned LAN
             # peer, not relayed through the Portal. The public upload RPC keeps
@@ -720,7 +795,7 @@ class TransferJobs:
                 raise InterruptedError('Canceled by owner')
             if 'archiveLane' in spec:
                 self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
-            uploads = self.n.dataset_uploads()
+            uploads = self.target_uploads(spec)
             session = uploads.load(spec['userId'], fields['uploadId'])
             if (session.get('name') != spec['name'] or any(
                     session.get(k) != spec['source'][k]
@@ -730,11 +805,11 @@ class TransferJobs:
             return getattr(uploads, action+'_bytes')(
                 spec['userId'], fields, offset, data, transport='lan-peer')
         if action in ('seal', 'commit'):
-            return self.n.dataset_uploads().start(spec['userId'], fields, action,
+            return self.target_uploads(spec).start(spec['userId'], fields, action,
                 inline_unit=self.unit(spec['id'], spec['attempt']))
         if action == 'begin':
-            return self.n.dataset_uploads().begin(spec['userId'], fields)
-        return self.n.dataset_uploads().process('datasets.upload.'+action, {'userId': spec['userId'], **fields})
+            return self.target_uploads(spec).begin(spec['userId'], fields)
+        return self.target_uploads(spec).process('datasets.upload.'+action, {'userId': spec['userId'], **fields})
 
     def worker(self, key, attempt, *, require_training=False):
         with self.lock(key, '.worker.lock'):
@@ -799,7 +874,7 @@ class TransferJobs:
                 # Admission never reclaims caches. Existing sessions retain
                 # their whole durable reservation; do
                 # not count the same admitted transfer twice on resume.
-                uploads=self.n.dataset_uploads()
+                uploads=self.target_uploads(spec)
                 try:prior=uploads.load(spec['userId'],key)
                 except FileNotFoundError:
                     needed=info['totalBytes']+info['manifestBytes']*4+info['entries']*8192+65536

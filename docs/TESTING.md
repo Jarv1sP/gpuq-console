@@ -147,6 +147,19 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 
 `tests/project-import-bridge.test.py` 隔离加载完整的实际执行桥，通过真实 Handler 和固定 SSH 命令构造验证上述五个新操作、旧上传/发布兼容、未知机器/邻近操作零派发、原 owner 与操作编号不变、节点拒绝原样返回及超时不重放。仅替换 inventory 和最终 SSH transport，不连接生产或读取凭据。
 
+## 固定仓库池回归
+
+`dataset-warehouse-pool.test.js` 使用隔离 SQLite 和合成节点容量，验证完整清单开销与 inode、
+非阻断低容量告警、真实不足/未知/身份错配零准入、当前权限、丢回执和重启不换仓、
+移除仓库后的 ISSUED/BOUND 区别、READY outbox 原 intent 对应、固定来源认证，以及
+旧 policy/journal 不被池配置重新解释。它不代表实际磁盘、跨机网络或正式直传已启用。
+`dataset-replication.test.js` 另验证首次准备根据已认证实际副本解析原仓库，旧 UUID 不
+重选源；原件证明缺失或冲突不猜测其他仓库，也不增加复制协议。
+`transfers-dual-root.test.py` 在临时独立目录使用真实证书 pin 的本机 TLS 复制，覆盖手动
+和训练准备落入缓存、旧 journal 续传仍入原根、根 inode／挂载变化拒绝、缺根不重建
+或改写 journal、非 authority 来源和客户端自报目标根在新派发前拒绝。它不操作真实
+节点、服务或 GPU，不代表生产盘速与跨机网络验收。
+
 ## 项目生命周期额外回归
 
 `python3 tests/gpuq-native-release-gate.test.py` 用真实临时 SQLite 与有界本地文件验证固定 root 门禁：关闭状态两次物理扫描、原 unit/租约核验、全部 mutation RPC（含 observe/sync/fleet）及动作入口零派发、已有 pending action 不领取、DB/心跳不变、非法／过期／软硬链接／inode 变化保持关闭，显式移除后重新两次观察。文件夹具仅将临时 stat 的所有者表示为 root，不写 `/run`、不操作服务或 GPU；不能当作正式发布器或真实滚动升级通过。合同见 [NATIVE_RELEASE_GATE.md](NATIVE_RELEASE_GATE.md)。
