@@ -70,6 +70,10 @@ try {
         const user = this.principal.userId;
         calls.push({operation, args: structuredClone(args), user});
         if(operation==='cloud.info')return {capabilityVerified:false,configurationEnabled:true};
+        if(operation==='datasets.catalog'&&args.machine===null){
+          check(Object.keys(args).length===1,'No identity override on a read-only catalog');
+          return {machine:null,machines:[],datasets:[]};
+        }
         check(['gpu-1','gpu-2'].includes(args.machine), 'Read belongs to a known machine');
         check(!('hostAdmin' in args || 'owners' in args || 'sourceId' in args), 'Privileged browser upload fields');
         if (operation === 'datasets.capacity') return {machine:args.machine,available:true,filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:10*1024**3,usableBytes:502*1024**3};
@@ -150,6 +154,34 @@ try {
   });
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
   await page.locator('[data-v3-upload]').first().click();
+  // The policy supplies a physical destination, not a replacement for the
+  // authorized requestedMachine or a new upload permission.
+  const requested=page.locator('[name=dataset-machine]');
+  for(const admission of [undefined,{available:true},{available:true,targetMachine:null},{available:true,targetMachine:''},{available:true,targetMachine:' '},{available:false,targetMachine:'gpu-1'}]){
+    await page.evaluate(admission=>{store.data.datasetUploadAdmission=admission;renderDatasets();},admission);
+    assert.equal(await page.locator('#v3-upload-target').count(),0);
+    assert.equal(await requested.evaluate(node=>node.closest('.server-select').hidden),false);
+    assert.deepEqual(await requested.locator('option').evaluateAll(nodes=>nodes.map(node=>node.value)),['gpu-1','gpu-2']);
+  }
+  await page.evaluate(()=>{store.data.datasetUploadAdmission={protocol:1,available:true,targetMachine:'gpu-2'};renderDatasets();});
+  const fixed=page.locator('#v3-upload-target');
+  assert.equal(await fixed.isDisabled(),true);assert.equal(await fixed.inputValue(),'gpu-2');
+  assert.deepEqual(await fixed.locator('option').evaluateAll(nodes=>nodes.map(node=>node.value)),['gpu-2']);
+  assert.equal(await fixed.getAttribute('title'),'gpu-2');
+  assert.equal(await requested.inputValue(),'gpu-1','Display target cannot rewrite the authorized training selection');
+  assert.equal(await requested.evaluate(node=>node.closest('.server-select').hidden),true);
+  await page.evaluate(()=>{store.users.find(user=>user.id===store.principal.userId).limits={'gpu-1':0,'gpu-2':0};renderDatasets();});
+  await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+  assert.equal(await fixed.inputValue(),'gpu-2');assert.equal(await fixed.isDisabled(),true);
+  assert.equal(await page.locator('#dataset-upload-start').isDisabled(),true,'A policy target supplies no upload permission');
+  assert.equal(await requested.inputValue(),'','No authorized requestedMachine can be invented');
+  await page.evaluate(()=>{store.users.find(user=>user.id===store.principal.userId).limits={'gpu-1':1,'gpu-2':1};renderDatasets();});
+  await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+  await page.keyboard.press('Escape');await page.locator('#dataset-add-dialog').waitFor({state:'hidden'});
+  await page.locator('[data-v3-upload]').first().click();
+  await page.evaluate(()=>{store.data.datasetUploadAdmission={protocol:1,available:true,targetMachine:'gpu-1'};renderDatasets();});
+  assert.equal(await fixed.inputValue(),'gpu-1');assert.equal(await fixed.isDisabled(),true);
+  assert.equal(await page.evaluate(()=>calls.some(row=>row.operation.startsWith('datasets.upload.')&&row.operation!=='datasets.upload.routes')),false,'Rendering a fixed target sends no upload writes');
   async function assertUploadLayout(mobile = false) {
     await page.evaluate(()=>document.fonts.ready);
     const result=await inspectGeometry(page,{...datasetHelpGeometry,roots:['#dataset-add-dialog'],scrollPanels:['#dataset-add-dialog']});
