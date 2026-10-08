@@ -190,7 +190,7 @@ export function executionUI(store,refresh,toast){
   let focusMachine='',directory=new Map(),directoryOwner='',directoryLoading=false,directoryError='';
   let epoch=0,pollTimer=null,pollCount=0,terminalSessions=[],machineIdentity='';
   let publicationIntent=null,publicationResult=null,publicationError='',publicationSelection=null,publicationFlash=null,recoveredActor=null;
-  const projectActivity=createProjectActivity(),explicitProjectReads=new Set(),closedProjectDialogs=new WeakSet();let projectPaused=false,pageActive=true,projectOperation=false,projectDialogObserver;
+  const projectActivity=createProjectActivity(),explicitProjectReads=new Set(),closedProjectDialogs=new WeakSet();let directoryRead=null,projectPaused=false,pageActive=true,projectOperation=false,projectDialogObserver;
   const publicationCache=projectPublicationStorage({getItem:key=>localStorage.getItem(key),setItem:(key,value)=>localStorage.setItem(key,value),removeItem:key=>localStorage.removeItem(key),key:index=>localStorage.key(index),get length(){return localStorage.length;}});
   let submitDialog,settingsDialog,settingsSource=null,outputPlace=null,focusedJob=null,historyState='',jobHTML='',lastJobs=new Map(),liveJobs=new Set(),deepLinkHandled=false,notes=null,notesJob=null,notesGeneration=0;
   let submitReceipt=null,parsedTarget=null,acceptedDraft=false,managementSubmit=false;
@@ -578,7 +578,7 @@ export function executionUI(store,refresh,toast){
   function ensureDirectory(){
     const owner=JSON.stringify([receiptActor(),projectMachines().map(item=>item.id)]);
     if(!executionActive()||!projectMachines().length||!isVisible()||!pageActive||directoryOwner===owner||projectBusy||operationBusy)return;
-    directoryOwner=owner;projectPaused=false;void loadDirectory();
+    directoryOwner=owner;projectPaused=false;directoryRead=loadDirectory();
   }
   async function loadDirectory(){
     if(!projectReadable()||!executionActive()||projectBusy||operationBusy)return;
@@ -834,7 +834,7 @@ export function executionUI(store,refresh,toast){
     await selectProject(saved.project);
   }
 
-  return ()=>{
+  const render=()=>{
     if(!section){section=document.createElement('section');section.id='execution-workspace';section.className='execution-workspace';document.querySelector('#execution-host').append(section);log=document.createElement('dialog');log.className='job-log-dialog';log.setAttribute('aria-labelledby','job-log-title');log.innerHTML='<div class="modal-head"><h2 id="job-log-title">训练日志 · 最近 200 行</h2><button class="button" id="close-job-log">关闭</button></div><pre></pre>';document.body.append(log);diagnostics.install();}
     diagnostics.sync();mission.sync();renderReceipt();section.hidden=!store.principal;if(section.hidden){diagnostics.reset();submitDialog?.close();settingsDialog?.close();submitReceipt=null;parsedTarget=null;acceptedDraft=false;actor=null;machine='';project='';catalog=[];catalogError='';epoch++;stopPolling();section.innerHTML='';notifyContext();return;}
     if(actor!==store.principal.userId){
@@ -854,7 +854,7 @@ export function executionUI(store,refresh,toast){
         <label id="project-release-field">项目训练版本<select name="release"></select><code id="release-full" class="release-hash"></code><small>刷新保留已选版本；本次发布确认后选择新版本。</small></label>
         <label>训练命令<textarea name="command" rows="3" required spellcheck="false">python train.py</textarea></label>
         <p class="muted">项目训练使用固定代码与环境版本，/workspace 只读，结果写入 /outputs；个人工作区的 Python 在 /opt/conda。已提交任务不会自动换机。</p>
-        <label id="training-data-field">数据集版本（可选）<textarea name="datasets" rows="2" spellcheck="false" placeholder="从左侧「数据集」选择；多个版本用空格分隔"></textarea></label>
+        <label id="training-data-field">数据集版本（可选）<textarea name="datasets" rows="2" spellcheck="false" placeholder="从左侧「存储」选择；多个版本用空格分隔"></textarea></label>
         <p class="muted">只挂载你获授权且本机就绪的数据，路径 /data2/数据集名称。准备数据不占 GPU。</p><div class="training-advanced">${schedulingFields()}${elasticFields()}${placementFields()}</div><button type="submit" class="button primary">提交训练</button>
       </form></details>
       <div class="section-kicker"><span>我的训练任务</span><span id="my-job-count"></span></div><p class="muted">排队、运行及待核对任务均占用个人额度；取消确认后释放。</p><div id="my-job-table"></div>`;
@@ -868,6 +868,18 @@ export function executionUI(store,refresh,toast){
     const jobs=ownJobs();renderJobs(jobs);query('#my-job-count').textContent=jobs.filter(job=>!terminal.has(job.state)).length+' 项进行中';renderProject();
     if(!deepLinkHandled){deepLinkHandled=true;const id=new URL(location.href).searchParams.get('job');if(id&&store.jobs.some(job=>job.id===id))diagnostics.openLogs(id,'overview');}
   };
+  render.openProject=async detail=>{
+    const binding=receiptActor(),token=currentToken(),matches=()=>detail.userId===store.principal?.userId&&detail.authGeneration===store.authGeneration&&binding===receiptActor();
+    if(!matches()||!validProject(detail.project)||!projectMachines().some(row=>row.id===detail.machine))return;
+    if(directoryRead)await directoryRead;
+    if(!matches()||token!==currentToken()||!pageActive||!isVisible())return;
+    if(projectBusy||operationBusy){toast('当前项目正在处理中，请稍后。');return;}
+    if(detail.machine!==machine&&terminalSessions.some(row=>row.userId===actor&&!row.detached)&&!window.confirm('切换服务器会断开当前终端；会话保留，可重连。继续？'))return;
+    const entries=directoryEntries(),entry=entries.find(row=>row.machine===detail.machine&&row.info.project===detail.project&&row.info.environmentMode==='oci');
+    if(!entry){toast('项目暂不可用，请刷新。');return;}
+    await selectProject(projectDirectoryValue(entry,entries,machine));
+  };
+  return render;
 }
 
 export function canEditPriority(job,admin=false){return job.source!=='native'&&admin&&job.canSetPriority===true&&['PENDING','QUEUED'].includes(job.state)&&!job.cancelRequested&&['idle','P1','normal','P3','high'].includes(job.priority);}

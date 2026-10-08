@@ -23,3 +23,8 @@ test('legacy member management links stay in the admin frame, outside the primar
   assert.equal(pageForRoute('#users'),'admin');assert.equal(hashForPage('users'),'#admin/members');
   assert.equal(pageForRoute('#admin/members'),'admin');assert.equal(roomOrder.includes('users'),false);
 });
+
+test('storage aliases retain the canonical dataset and transfer routes',()=>{
+  assert.equal(pageForRoute('#storage'),'datasets');assert.equal(hashForPage(pageForRoute('#storage')),'#datasets');
+  assert.equal(pageForRoute('#storage/transfers'),'transfers');
+});

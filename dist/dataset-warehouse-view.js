@@ -10,6 +10,7 @@ import {datasetInfoHTML as info,warehouseCardHTML,trainingCardHTML,trainingLegen
 import {datasetCacheWatch} from './dataset-cache-watch.js';
 import {mountCacheOperation,mountCacheTransfer,canCacheAction} from './dataset-cache-operation.js';
 import {mountFilesPreview} from './dataset-files-preview.js';
+import {mountMemberStorage} from './member-storage-ui.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const amount=value=>Number.isSafeInteger(value)&&value>=0?transferBytes(value):'—';
 const glyph=value=>`<span class="v3-g ${value==='READY'?'ready':value==='PREPARING'?'fetch':value==='FAILED'?'fail':value==='UNKNOWN'?'unknown':'none'}" role="img" aria-label="${esc(words[value]||'待确认')}" title="${esc(words[value]||'待确认')}"></span>`;
@@ -19,10 +20,11 @@ const words={READY:'已缓存',PREPARING:'取回中',FAILED:'取回失败',UNKNO
 const chosen=item=>item.versions.find(row=>row.selected.state==='READY')||item.versions[0];
 
 export function warehouseWorkspaceHTML(){
- return `<div class="warehouse-v3"><section class="v4-warehouses" aria-label="仓库容量"><h2 class="v4-section-title">仓库</h2><div id="warehouse-capacity" class="v4-warehouse-grid"></div></section><section class="v4-training" aria-label="训练机容量"><h2 class="v4-section-title">训练机 <span id="warehouse-training-key"></span></h2><div id="warehouse-server-rail" class="v4-training-grid" role="group" aria-label="按已缓存到的服务器筛选"></div></section><div class="v3-split"><section class="v3-list" aria-label="仓库数据集"><header class="v3-list-head"><div id="warehouse-list-filters" class="v4-list-filters"></div><input id="warehouse-search" class="v3-search" type="search" placeholder="搜索名称或 ID" aria-label="搜索数据集"><button id="datasets-refresh" class="button quiet v3-refresh" type="button" aria-label="刷新仓库">↻</button></header><div class="v3-cols" aria-hidden="true"><span></span><span>名称</span><span>所属</span><span>大小</span><span>仓库</span><span>已缓存到</span></div><p id="datasets-status" role="status"></p><div id="dataset-catalog" role="listbox" aria-label="数据集"></div></section><aside id="warehouse-inspector" class="v3-inspector" aria-label="数据集详情"></aside></div><div class="v3-legacy-context" hidden><div class="terminal-controls datasets-controls"><label><span>上传到</span><select name="dataset-machine"></select></label></div><div id="datasets-capacity" hidden></div><div id="datasets-quota" hidden></div><div id="datasets-database" hidden></div></div></div>`;
+ return `<div class="warehouse-v3"><section class="v4-warehouses" aria-label="仓库容量"><h2 class="v4-section-title">仓库</h2><div id="warehouse-capacity" class="v4-warehouse-grid"></div></section><section class="v4-training" aria-label="训练机容量"><h2 class="v4-section-title">训练机 <span id="warehouse-training-key"></span></h2><div id="warehouse-server-rail" class="v4-training-grid" role="group" aria-label="按已缓存到的服务器筛选"></div></section><div class="storage-view-tabs" role="tablist" aria-label="存储视图"><button type="button" role="tab" id="storage-warehouse-tab" data-storage-view="warehouse" aria-selected="true" aria-controls="storage-warehouse-panel">仓库数据集</button><button type="button" role="tab" id="storage-mine-tab" data-storage-view="mine" aria-selected="false" aria-controls="member-storage" tabindex="-1">我的空间</button></div><section id="member-storage" class="storage-mine" role="tabpanel" aria-labelledby="storage-mine-tab" hidden></section><div class="v3-split" id="storage-warehouse-panel" role="tabpanel" aria-labelledby="storage-warehouse-tab"><section class="v3-list" aria-label="仓库数据集"><header class="v3-list-head"><div id="warehouse-list-filters" class="v4-list-filters"></div><input id="warehouse-search" class="v3-search" type="search" placeholder="搜索名称或 ID" aria-label="搜索数据集"><button id="datasets-refresh" class="button quiet v3-refresh" type="button" aria-label="刷新仓库">↻</button></header><div class="v3-cols" aria-hidden="true"><span></span><span>名称</span><span>所属</span><span>大小</span><span>仓库</span><span>已缓存到</span></div><p id="datasets-status" role="status"></p><div id="dataset-catalog" role="listbox" aria-label="数据集"></div></section><aside id="warehouse-inspector" class="v3-inspector" aria-label="数据集详情"></aside></div><div class="v3-legacy-context" hidden><div class="terminal-controls datasets-controls"><label><span>上传到</span><select name="dataset-machine"></select></label></div><div id="datasets-capacity" hidden></div><div id="datasets-quota" hidden></div><div id="datasets-database" hidden></div></div></div>`;
 }
 
 export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machineAllowed,authorizedMachines,access}){
+ let memberSpace=null;
  let model=null,selected=null,selectedVersion=null,filter=null,warehouseFilter=null,search='',capacities=new Map(),epoch=0,routeEpoch=0,route=null,routeAbort=null,selectedFiles=[],uploadName='',phoneDetail=false,installedObserver=null;
  let upload=null,uploadBusy=false,uploadLocked=false,uploadDisplay='',lastControls={};
  let overview=null,legacyCatalog=null,capacityCatalog=null,overviewRequest=0,overviewAbort=null;
@@ -47,11 +49,11 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(v)return versionAccess(v).selectable;
   return upload?.state==='READY'&&upload.machine===machine()&&upload.dataset===dataset&&upload.version===version;
  }
- function reset(){epoch++;cacheWatch.reset();retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overviewAbort=null;overview=null;legacyCatalog=null;capacityCatalog=null;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;filter=null;warehouseFilter=null;search='';capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();const searchInput=section.querySelector('#warehouse-search');if(searchInput)searchInput.value='';rail();rows();inspector();header();}
+ function reset(){epoch++;cacheWatch.reset();retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overviewAbort=null;overview=null;legacyCatalog=null;capacityCatalog=null;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;filter=null;warehouseFilter=null;search='';capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();const searchInput=section.querySelector('#warehouse-search');if(searchInput)searchInput.value='';memberSpace?.reset();rail();rows();inspector();header();}
  function closeCacheAction(){actionLifetime?.abort();actionUI?.destroy();actionUI=null;actionLifetime=null;actionContext=null;section.querySelector('#warehouse-cache-action')?.close();}
  function retireCacheActions(close=true){capabilityRequest++;capabilityAbort?.abort();capabilityAbort=null;capabilityScope=null;capabilityBusy=false;capabilityUnavailable=false;cacheCapabilities.clear();if(close)closeCacheAction();}
  async function readCacheCapabilities(){
-  if(!overview||!store.production||!store.principal||section.hidden||document.body.dataset.room!=='datasets'||capabilityBusy||capabilityUnavailable)return;
+  if(memberSpace?.active||!overview||!store.production||!store.principal||section.hidden||document.body.dataset.room!=='datasets'||capabilityBusy||capabilityUnavailable)return;
   const v=model?.datasets.find(item=>item.dataset===selected)?.versions.find(row=>row.version===selectedVersion);
   if(!v?.canUse)return;
   const expected=account(),token=epoch,scope=JSON.stringify([expected,selected,selectedVersion]),dataset=selected,version=selectedVersion;
@@ -111,7 +113,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function closeFilesPreview(){filesPreviewAbort?.abort();filesPreviewUI?.destroy();filesPreviewUI=null;filesPreviewAbort=null;filesPreviewContext=null;filesPreviewHost=null;}
  function syncFilesPreview(){
   const host=section.querySelector('#warehouse-files-preview'),scope=JSON.stringify([account(),selected,selectedVersion]);
-  if(overview?.filePreviewAvailable!==true||!host||!store.principal||section.hidden||document.body.dataset.room!=='datasets'||matchMedia('(max-width:759px)').matches&&!phoneDetail){closeFilesPreview();return;}
+  if(memberSpace?.active||overview?.filePreviewAvailable!==true||!host||!store.principal||section.hidden||document.body.dataset.room!=='datasets'||matchMedia('(max-width:759px)').matches&&!phoneDetail){closeFilesPreview();return;}
   if(filesPreviewHost===host&&filesPreviewContext===scope)return;
   closeFilesPreview();filesPreviewContext=scope;filesPreviewHost=host;filesPreviewAbort=new AbortController();
   filesPreviewUI=mountFilesPreview(host,{store,dataset:selected,version:selectedVersion,signal:filesPreviewAbort.signal});
@@ -187,7 +189,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const top=parseFloat(getComputedStyle(root).top)||0,available=Math.max(240,Math.floor(innerHeight/scale-top-reserve));
   if(root.getBoundingClientRect().height/scale>available){root.classList.add('v3-inspector-overflow');root.style.maxHeight=available+'px';}
  }
- function render(){header();rail();rows();inspector();uploadUI();}
+ function render(){header();rail();rows();inspector();uploadUI();memberSpace?.render();}
  function catalog(value){legacyCatalog=value;applyCatalog();}
  function applyCatalog(){
   if(!legacyCatalog&&!overview)return;
@@ -209,7 +211,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   try{const value=await store.call('datasets.overview',{},{signal:controller.signal});if(current(expected,token)&&request===overviewRequest&&!section.hidden&&document.body.dataset.room==='datasets')storageOverview(value);}
   catch{if(current(expected,token)&&request===overviewRequest){overview=null;capacityOverview();if(legacyCatalog)applyCatalog();}}
  }
- function catalogUnavailable(){retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();}
+ function catalogUnavailable(){retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();memberSpace?.render();}
  function capacity(value,id){capacities.set(id,value);rail();uploadCapacity();}
  async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacities.set(row.id,null);rail();}});}}
  function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=adaptUploadTarget(store.data?.datasetUploadAdmission)!==null||route?.storageTier==='hdd'?'仓库':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
@@ -337,6 +339,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   dialog.querySelector('form').addEventListener('submit',async event=>{event.preventDefault();if(!snapshot||button.disabled||!valid())return;button.disabled=true;try{const result=await labels.set(snapshot,input.value);if(!valid())return;if(result.status==='CONFLICT'){snapshot=result.label;status.textContent=result.label?'名称已被修改，请确认最新名称后再保存。':'最新名称未确认，请关闭后重新读取。';if(result.label)input.value=result.label.name;button.disabled=!snapshot;return;}dialog.close();await refresh();}catch(error){if(valid()){status.textContent=error.message;snapshot=null;}}});
  }
  function install(){
+  installMemberSpace();
   epoch++;installedObserver?.disconnect();header();rail();
   const dialog=section.querySelector('#dataset-add-dialog');if(!dialog)return;
   section.append(dialog);
@@ -426,5 +429,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  store.onAuthChange?.(reset);
  globalThis.addEventListener('resize',()=>{syncFilesPreview();requestAnimationFrame(fitInspector);});
  globalThis.addEventListener('scroll',()=>requestAnimationFrame(fitInspector),{passive:true});
+ function installMemberSpace(){const host=section.querySelector('#member-storage');if(!host||memberSpace?.host===host)return;memberSpace?.destroy();memberSpace=mountMemberStorage(section,{store,catalog:()=>model,machines:authorizedMachines,refresh,onViewChanged:view=>{if(view==='mine'){phoneDetail=false;section.querySelector('.warehouse-v3').classList.remove('v3-phone-detail');retireCacheActions();closeFilesPreview();}else inspector();}});}
+ installMemberSpace();
  return {install,catalog,catalogUnavailable,capacity,storageOverview,loadOverview,render,reset,capacitiesForOthers,prepareUpload,uploading,uploadProgress,actualRoute,uploadFailure,completed,uploadControls,allowsTraining};
 }

@@ -97,6 +97,9 @@ try{
   assert.equal(await page.locator('[name=training-target]').inputValue(),'current','shared projects keep their explicit-server training contract');
   await page.locator('[name=workspace-machine]').selectOption('');await idle();
   await assertPrompt('服务器','请选择服务器','');
+  // The storage shortcut chooses an existing owner project without creating or submitting.
+  await action('projects.status',()=>page.evaluate(({machine,userId})=>document.dispatchEvent(new CustomEvent('gpuq-open-project',{detail:{machine,project:'same-name',userId,authGeneration:1}})),{machine:source,userId:member.id}));
+  assert.equal(calls.filter(call=>['projects.create','projects.publish','jobs.submit'].includes(call.operation)).length,0);
   // Return to no topbar selection and create on the node which actually admitted OCI.
   await page.locator('[name=workspace-machine]').selectOption('');await page.locator('[name=workspace-project]').selectOption('');await idle();
   await page.locator('#project-create>summary').click();assert.equal(await page.locator('[name=environment-mode]').inputValue(),'oci');assert.equal(await page.locator('[name=environment-choice]').count(),0);await page.locator('[name=new-project]').fill('new-container');
