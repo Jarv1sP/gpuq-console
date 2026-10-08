@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {routePresentation,transferBytes,uploadPhase,LARGE_RELAY_BYTES} from '../dist/data-route.js';
 import {transferCard,transferGroups} from '../dist/transfers-ui.js';
-import {uploadRouteHTML} from '../dist/datasets-ui.js';
+import {uploadRouteHTML,campusDatasetCall} from '../dist/datasets-ui.js';
 
 test('routes require an explicit known transport, never infer a campus path',()=>{
   for(const value of [undefined,null,{},'10.11.1.2',{url:'https://192.168.1.2'},'copy'])assert.equal(routePresentation(value).kind,'unknown');
@@ -14,7 +14,8 @@ test('routes require an explicit known transport, never infer a campus path',()=
   assert.equal(routePresentation('tail-upload').label,'Tail 备用上传');
   assert.match(routePresentation('tail-upload').note,/中继可能影响速度/);
   const tail=uploadRouteHTML({kind:'tail-upload'},'node-a');
-  assert.match(tail,/Tail 备用上传/);assert.doesNotMatch(tail,/经门户中转|不经.*VPS|千兆/);
+  assert.match(tail,/仅校内网络可上传/);assert.doesNotMatch(tail,/Tail|中转|node-a/);
+  assert.match(uploadRouteHTML({kind:'campus-direct'},'node-a'),/校园网直连.*node-a/);
   const first=routePresentation('campus-direct');first.path.push('wrong');assert.equal(routePresentation('campus-direct').path.length,3);
 });
 test('transfer sizes distinguish unknown, zero and actual binary units',()=>{
@@ -41,11 +42,35 @@ test('transfer cards escape identifiers, status and errors and preserve resume a
   assert.match(html,/需要处理/);assert.match(html,/未完成文件保留/);
   assert.doesNotMatch(transferCard({id:'ok',kind:'copy',state:'CANCELED'}),/data-transfer-action="resume"|data-transfer-action="cancel"/);
 });
-test('browser relay requires a real consent checkbox before hashing large selections',async()=>{
+test('the drawer has no relay consent or alternate route selector',async()=>{
   const source=await readFile(new URL('../dist/datasets-ui.js',import.meta.url),'utf8');
-  assert.match(source,/total<=LARGE_RELAY_BYTES/);assert.match(source,/dataset-relay-consent/);
-  assert.ok(source.indexOf('>LARGE_RELAY_BYTES')<source.indexOf('const scan=await scanBrowserDirectory'));
-  assert.match(source,/当前网页上传通道/);assert.match(source,/此确认不会开启直传/);
+  assert.doesNotMatch(source,/dataset-relay-consent|value="relay"|value="automatic"|Tail/);
+  assert.match(source,/const via='direct',allowRelay=false/);
+  assert.match(source,/已暂停 · 校内网络恢复后继续/);
+});
+test('campus policy filters only validated routes and never relays browser bytes',async()=>{
+  const descriptor={available:true,protocol:'dataset-upload-v1',machine:'node-a',revision:'a'.repeat(64),certificateSha256:'b'.repeat(64),routes:[{id:'primary',kind:'campus-direct',endpoint:'https://campus.invalid'},{id:'backup',kind:'tail-upload',endpoint:'https://backup.invalid'}]};
+  const calls=[];const call=campusDatasetCall(async(operation,args)=>{calls.push({operation,args});return descriptor;});
+  const value=await call('datasets.upload.routes',{machine:'node-a'});
+  assert.deepEqual(value.routes,[descriptor.routes[0]]);assert.equal(descriptor.routes.length,2);
+  for(const operation of ['datasets.workspace.put','datasets.workspace.get','datasets.upload.manifest','datasets.upload.chunk'])await assert.rejects(call(operation,{}),{code:'CAMPUS_REQUIRED'});
+  for(const action of ['manifest','chunk'])await assert.rejects(call('transfers.io',{action}),{code:'CAMPUS_REQUIRED'});
+  assert.equal(calls.length,1,'Portal byte operations are rejected before reaching the API');
+  await assert.rejects(campusDatasetCall(async()=>({...descriptor,routes:[...descriptor.routes,{id:'bad',kind:'tail-upload',endpoint:'http://bad.invalid'}]}))('datasets.upload.routes',{machine:'node-a'}));
+  const denied=campusDatasetCall(async()=>({available:true,kind:'tail-upload'}));
+  await assert.rejects(denied('datasets.upload.direct-ticket',{}),{code:'CAMPUS_REQUIRED'});
+  await assert.rejects(denied('transfers.io',{action:'direct-ticket'}),{code:'CAMPUS_REQUIRED'});
+  const grant={available:true,kind:'campus-direct'};assert.equal(await campusDatasetCall(async()=>grant)('datasets.upload.direct-ticket',{}),grant);
+});
+test('legacy campus tickets require the current account’s approved campus endpoint and certificate',async()=>{
+  const routes={available:true,protocol:'dataset-upload-v1',machine:'node-a',revision:'a'.repeat(64),certificateSha256:'b'.repeat(64),routes:[{id:'primary',kind:'campus-direct',endpoint:'https://campus.invalid'}]};
+  let account='one',ticket={available:true,endpoint:'https://campus.invalid',certificateSha256:'b'.repeat(64)};
+  const call=campusDatasetCall(async operation=>operation.endsWith('.routes')?routes:ticket,()=>account);
+  await assert.rejects(call('datasets.upload.direct-ticket',{}),{code:'CAMPUS_REQUIRED'});
+  await call('datasets.upload.routes',{machine:'node-a'});assert.equal(await call('datasets.upload.direct-ticket',{}),ticket);
+  ticket={...ticket,endpoint:'https://other.invalid'};await assert.rejects(call('datasets.upload.direct-ticket',{}),{code:'CAMPUS_REQUIRED'});
+  ticket={...ticket,endpoint:'https://campus.invalid',certificateSha256:'c'.repeat(64)};await assert.rejects(call('datasets.upload.direct-ticket',{}),{code:'CAMPUS_REQUIRED'});
+  ticket={...ticket,certificateSha256:'b'.repeat(64)};account='two';await assert.rejects(call('datasets.upload.direct-ticket',{}),{code:'CAMPUS_REQUIRED'});
 });
 test('the presentation helper is registered in both real and demo static routers',async()=>{
   for(const file of ['portal-server.mjs','server.mjs'])assert.match(await readFile(new URL('../'+file,import.meta.url),'utf8'),/\['\/data-route\.js'\]='data-route\.js'/);
