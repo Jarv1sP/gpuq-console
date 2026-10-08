@@ -34,7 +34,14 @@ function info(value){
 function load(service,id){const row=service.db.prepare('SELECT * FROM transfers WHERE id=?').get(validId(id));if(!row)fail('传输不存在。',404);return {...row,data:JSON.parse(row.data)};}
 function targetCall(service,row,operation,args){
   const binding=row.data.trainingPreparation;
-  if(!binding)return service.bridge(row.data.machine,operation,args);
+  if(!binding){
+    // A damaged/missing transfer projection is not proof this was legacy.
+    // The independently durable original job intent must also be absent.
+    if(Object.hasOwn(row.data,'trainingPreparation')||service.store.jobs.some(job=>job.trainingPreparations?.some(value=>
+      value.preparation?.kind==='transfer'&&value.preparation.id===row.id)))
+      fail('原训练准备回执缺失；不会把标记过的任务降回旧 worker。',409);
+    return service.bridge(row.data.machine,operation,args);
+  }
   if(binding.job.userId!==row.owner_id||binding.preparation.id!==row.id||binding.preparation.targetMachine!==row.data.machine||
      binding.preparation.sourceMachine!==row.data.from||binding.preparation.kind!=='transfer'||
      binding.preparation.reference.dataset!==row.data.reference.dataset||binding.preparation.reference.version!==row.data.reference.version)
