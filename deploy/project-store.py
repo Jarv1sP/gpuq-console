@@ -263,6 +263,8 @@ class ProjectStore:
             fail('unsafe_path', 'Project ownership metadata does not match')
         if meta.get('environmentMode', 'shared') not in ('shared', 'isolated', 'oci'):
             fail('unsafe_path', 'Invalid project environment mode')
+        if 'projectUUID' in meta and (not isinstance(meta['projectUUID'], str) or not JOB_ID.fullmatch(meta['projectUUID'])):
+            fail('unsafe_path', 'Invalid persistent project UUID')
         return path, meta
 
     def lifecycle_folder(self, user, slug):
@@ -314,6 +316,19 @@ class ProjectStore:
 
     def environment_mode(self, user, slug):
         return self._project(user, slug)[1].get('environmentMode', 'shared')
+
+    @project_lifetime
+    def project_uuid(self, user, slug, *, create=False):
+        """Read identity without mutation; migrate only at explicit publication."""
+        path, meta = self._project(user, slug)
+        if meta.get('projectUUID') is not None or not create:
+            return meta.get('projectUUID')
+        with self._file_lock(path / '.identity.lock'):
+            path, meta = self._project(user, slug)
+            if meta.get('projectUUID') is None:
+                meta = {**meta, 'projectUUID': str(uuid.uuid4())}
+                atomic_json(path / 'project.json', meta)
+            return meta['projectUUID']
 
     @project_lifetime
     def generation(self, user, slug):
@@ -386,7 +401,7 @@ class ProjectStore:
                     private_dir(stage / 'dev' / name, create=True)
                 atomic_json(stage / 'project.json', {'schema': 2, 'owner': owner,
                             'project': slug, 'environmentMode': environment_mode or 'shared',
-                            'createdAt': int(time.time())})
+                            'createdAt': int(time.time()), 'projectUUID': str(uuid.uuid4())})
                 os.rename(stage, project)
                 with directory(parent) as fd:
                     os.fsync(fd)

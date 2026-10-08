@@ -69,7 +69,10 @@ class PublicationReceiptTests(unittest.TestCase):
         original = self.n.atomic_json
         with patch.object(self.n,'atomic_json',side_effect=lambda p,v: (_ for _ in ()).throw(OSError('receipt')) if v.get('state')=='READY' else original(p,v)):
             self.assertEqual(self.worker(operation),0)
-        newer = {**self.args,'state':'PUBLISHING','progress':{'phase':'scanning'}}
+        newer = {**self.args,'state':'PUBLISHING','progress':{'phase':'scanning'},
+                 'publicationId':str(uuid.uuid4()),
+                 'projectUUID':self.ops.store.project_uuid(*self.ops.identity(self.args)),
+                 'projectGeneration':self.ops.store.generation(*self.ops.identity(self.args))}
         @contextmanager
         def new_intent(args):
             original(self.ops.receipt_path(args),newer)
@@ -212,7 +215,12 @@ class PublicationReceiptTests(unittest.TestCase):
         for start in (None,created,created+1):
             value['progress']={'startedAt':start}
             self.n.atomic_json(self.ops.receipt_path(self.args),value)
-            self.assertEqual(self.status()['state'],'FAILED','Unknown legacy incarnation is not discarded')
+            before=self.ops.receipt_path(self.args).read_bytes()
+            status=self.status()
+            self.assertEqual(status['state'],'UNKNOWN','Unbound legacy evidence is retained, not attributed as this project\'s failure')
+            self.assertEqual(status['publication']['state'],'UNKNOWN')
+            self.assertNotEqual(status.get('error'),value['error'])
+            self.assertEqual(self.ops.receipt_path(self.args).read_bytes(),before)
         with patch.object(self.ops.store,'status',side_effect=AssertionError('Unknown start cannot prove an older project')):
             self.assertTrue(self.ops.belongs_to_project(self.args,{**value,'progress':{}}))
 

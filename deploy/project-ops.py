@@ -116,10 +116,17 @@ class ProjectOperations:
 
     def belongs_to_project(self, args, receipt):
         generation = receipt.get('projectGeneration')
+        project_uuid = receipt.get('projectUUID')
+        if project_uuid is not None:
+            if not isinstance(project_uuid, str) or not UUID.fullmatch(project_uuid):
+                raise ValueError('Invalid publication project UUID')
+            if generation is None:
+                raise ValueError('Publication project generation is missing')
         if generation is not None:
             if not isinstance(generation, str) or not HASH.fullmatch(generation):
                 raise ValueError('Invalid publication project generation')
-            return generation == self.store.generation(*self.identity(args))
+            return (generation == self.store.generation(*self.identity(args)) and
+                    (project_uuid is None or project_uuid == self.store.project_uuid(*self.identity(args))))
         # Legacy receipts have no incarnation ID. Only discard a display when
         # its recorded start provably predates the current project; unknown
         # legacy intent remains fenced rather than guessed to be obsolete.
@@ -131,7 +138,16 @@ class ProjectOperations:
 
     def pending(self, args):
         receipt = self.receipt(args)
-        return receipt if not receipt or self.belongs_to_project(args, receipt) else {}
+        if not receipt or not self.belongs_to_project(args, receipt):
+            return {}
+        if receipt.get('projectGeneration') is None:
+            # Keep ambiguous legacy evidence on disk and fence writes, but do
+            # not attribute its failure or committed release to this project.
+            pending = {name:value for name,value in receipt.items()
+                       if name not in ('error','errorDetails','progress','release','committedRelease')}
+            return {**pending,'state':'UNKNOWN','projectIdentityUnconfirmed':True,
+                    'error':'Project publication identity is unconfirmed; inspect the original receipt before retrying'}
+        return receipt
 
     def terminal_stopped(self, jid):
         unit='amax-term-'+jid+'.service'
@@ -161,6 +177,8 @@ class ProjectOperations:
             if session.get('state')!='CODE_READY' and canceled is None:
                 raise ValueError('Code synchronization is incomplete; repeat the original sync or cancel its exact UUID before editing, opening a terminal or publishing')
         pending = self.pending(args)
+        if pending.get('projectIdentityUnconfirmed'):
+            raise ValueError('Project publication identity is unconfirmed; inspect the original receipt before editing or publishing')
         if pending.get('state') == 'PUBLISHING' and self.active(args):
             raise ValueError('Project publication is running; wait before editing or uploading')
         if publication_lock: self.store.fail_if_publishing(*self.identity(args))
@@ -333,6 +351,7 @@ class ProjectOperations:
             self.store.status(*identity)
             task = {'userId':identity[0],'project':identity[1],'state':'PUBLISHING',
                     'publicationId':args.get('key',str(uuid.uuid4())),
+                    'projectUUID':self.store.project_uuid(*identity,create=True),
                     'projectGeneration':self.store.generation(*identity),
                     'requestedAt':int(time.time())}
             if original: self.preserve_receipt(args,original)
@@ -380,14 +399,15 @@ class ProjectOperations:
     def write_publication_receipt(self, args, value):
         """CAS under the worker's operation guard, including late callbacks."""
         current = self.receipt(args)
-        fields = ('userId','project','publicationId','projectGeneration')
+        fields = ('userId','project','publicationId','projectUUID','projectGeneration')
         if (any(current.get(name) != args.get(name) for name in fields)
-                or current.get('state') != 'PUBLISHING'):
+                or current.get('state') != 'PUBLISHING'
+                or not self.belongs_to_project(args,current)):
             raise ValueError('Publication receipt no longer belongs to this worker; it was not overwritten')
         self.n.atomic_json(self.receipt_path(args),value)
 
     def publication_worker(self, args):
-        args = {name:args[name] for name in ('userId','project','publicationId','projectGeneration','requestedAt') if name in args}
+        args = {name:args[name] for name in ('userId','project','publicationId','projectUUID','projectGeneration','requestedAt') if name in args}
         args.setdefault('projectGeneration', self.store.generation(*self.identity(args)))
         last_progress, committed = {}, {}
         def progress(value):
