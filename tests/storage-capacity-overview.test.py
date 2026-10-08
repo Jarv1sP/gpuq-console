@@ -55,6 +55,56 @@ class StorageCapacityOverview(unittest.TestCase):
             value = self.node._dataset_op('datasets.capacity', {'userId': 'builtin-admin', 'hostAdmin': True})
         self.assertIsNone(value['storageOverview']['warehouse'])
 
+    def local_authority(self):
+        self.node.CONFIG.update(machine='single-root-node',storageAuthority={'enabled':True},
+            storageArchive={'enabled':True,'machine':'single-root-node','authority':'local-original'},
+            storageTier={'enabled':False})
+
+    def test_single_root_authority_reuses_one_guarded_snapshot_without_constructing_journals(self):
+        self.local_authority()
+        with patch.object(self.node, 'storage_authority', side_effect=AssertionError('authority journal write forbidden')), \
+                patch.object(self.node, 'storage_warehouse', side_effect=AssertionError('dual-root constructor forbidden')):
+            value=self.node._dataset_op('datasets.capacity',{'userId':'builtin-admin','hostAdmin':True})
+        overview=value['storageOverview']
+        self.assertEqual(overview['warehouse']['state'],'READY')
+        self.assertEqual(overview['warehouse']['volume'],overview['cache']['volume'])
+        self.assertIsNot(overview['warehouse']['volume'],overview['cache']['volume'])
+        self.assertEqual(overview['warehouse']['volume']['volumeDeviceId'],value['volumeDeviceId'])
+        self.assertIsNone(overview['cache']['budgetBytes'])
+        self.assertNotIn('storageOverview',overview['warehouse']['volume'])
+
+    def test_disabled_authority_does_not_infer_warehouse_from_valid_local_archive(self):
+        self.local_authority()
+        self.node.CONFIG['storageAuthority']={'enabled':False}
+        value=self.node._dataset_op('datasets.capacity',{'userId':'builtin-admin','hostAdmin':True})
+        self.assertIsNone(value['storageOverview']['warehouse'])
+
+    def test_disabled_tier_keeps_its_configuration_without_exposing_a_cache_budget(self):
+        self.local_authority()
+        self.node.CONFIG['storageTier']={'enabled':False,'budgetBytes':400,'highWater':0.9,'lowWater':0.8}
+        value=self.node._dataset_op('datasets.capacity',{'userId':'builtin-admin','hostAdmin':True})
+        self.assertEqual(value['storageOverview']['warehouse']['state'],'READY')
+        self.assertIsNone(value['storageOverview']['cache']['budgetBytes'])
+
+    def test_inconsistent_single_root_authority_is_unavailable_not_a_guessed_warehouse(self):
+        for field,value in [('storageArchive',{'enabled':True,'machine':'other-node','authority':'local-original'}),
+                            ('storageArchive',{'enabled':False}),
+                            ('storageArchive',{'enabled':True,'machine':'single-root-node','authority':'/private/secret'}),
+                            ('storageTier',{'enabled':True,'budgetBytes':400}),
+                            ('storageAuthority',{'enabled':True,'extra':True})]:
+            with self.subTest(field=field,value=value):
+                self.local_authority();self.node.CONFIG[field]=value
+                result=self.node._dataset_op('datasets.capacity',{'userId':'builtin-admin','hostAdmin':True})
+                self.assertEqual(result['storageOverview']['warehouse'],{'state':'UNAVAILABLE','volume':None})
+                self.assertGreater(result['storageOverview']['cache']['volume']['filesystemBytes'],0)
+                self.assertNotIn('/private/secret',str(result))
+
+    def test_single_root_authority_unmounted_volume_does_not_fall_back_to_system_disk(self):
+        self.local_authority()
+        with patch.object(self.node,'dataset_mount_check',side_effect=ValueError('unmounted original')):
+            with self.assertRaisesRegex(ValueError,'unmounted original'):
+                self.node._dataset_op('datasets.capacity',{'userId':'builtin-admin','hostAdmin':True})
+
     def test_unavailable_warehouse_never_falls_back_to_cache_or_leaks_path(self):
         self.node.CONFIG['storageWarehouse'] = {'enabled': True}
         with patch.object(self.node, 'storage_warehouse', side_effect=ValueError('secret /dev/sda mount unavailable')):

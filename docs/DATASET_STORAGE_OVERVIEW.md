@@ -113,6 +113,7 @@
 ## 配套与验收
 
 - 配套节点 `datasets.capacity` 增加 `storageOverview.protocol:"dataset-storage-node-v1"`，含独立 `cache.volume/budgetBytes/projectBytes/projectUsageComplete/projectCollectedAt` 与实际配置的 `warehouse.volume`。卷容量读取常数时间；项目用量仅有界缓存采样，不扫描 dataset payload 或完整清单，不创建第二登记表。
+- 已明确启用的单根权威仓库（本机固定归档源、`storageAuthority.enabled:true`、未启用缓存分层且没有双根 `storageWarehouse`）复用同一次受管卷快照。仓库与工作层显示相同 `volume.id`，`physicalVolumes` 只计一次，并保留 `CACHE_WAREHOUSE_SHARED_VOLUME` 提醒；没有专用缓存预算时为 null。关闭 authority 不推断仓库，配置矛盾或容量未知不冒称可用。容量角色不证明任何固定版本 `warehouseReady`，也不启用上传或仓库直读。
 - 门户新文件 `dataset-storage-overview.mjs`、读取路由、维护期只读 allow-list 和运行镜像 COPY 必须一起安装。
 - 修改节点执行器会改变其 SHA；正在迁移的环境须由维护负责人先协调固定 SHA／root pin，再部署，不能绕过迁移围栏。
 - 测试：`node --test tests/dataset-storage-overview.test.js tests/dataset-catalog-visibility.test.js tests/dataset-storage-overview-http.test.js`；Python 3.12：`TMPDIR=/private/tmp python3.12 tests/storage-capacity-overview.test.py`。生产验收另看真实节点的完整协议、物理卷和容量快照；本地 fixture 不证明上线。
