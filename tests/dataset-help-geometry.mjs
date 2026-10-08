@@ -39,20 +39,22 @@ export async function checkDatasetBodyHelpRegressions(page) {
 }
 
 export async function checkDatasetHelpRegressions(page) {
-  // The workspace heading is in the upload drawer. Experimental cloud files
-  // can be hidden for members; inspect the complete visible drawer instead.
+  // Campus-only workspace retains publishing help beside its heading. The
+  // obsolete relay form is hidden; exercise an active action group instead.
   const specification = {...datasetHelpGeometry, roots: ['#dataset-add-dialog[open]']};
-  const help = page.locator('[data-dataset-help-source=workspace]');
+  const popup = await page.locator('#data-workspace-publish-form>h4 [data-copy-help]').getAttribute('aria-controls');
+  // Bind to the existing popup identity so moving the help cannot lose it.
+  const help = page.locator('.copy-help').filter({has: page.locator('[data-copy-help][aria-controls="'+popup+'"]')});
   assert.equal(await help.count(), 1);
   const button = help.locator('[data-copy-help]');
   const originalStyle = await button.getAttribute('style');
   try {
     // Recreate the old action-group placement with no associated label.
-    await help.evaluate(node => document.querySelector('#data-workspace-upload-form>.file-actions').append(node));
+    await help.evaluate(node => document.querySelector('#data-workspace-publish-form>.file-actions').append(node));
     const orphan = await inspectGeometry(page, specification);
     assert(orphan.failures.some(row => row.rule === 'orphan-help'), 'an action-group or footer help is rejected');
   } finally {
-    await help.evaluate(node => document.querySelector('.dataset-sheet-head>.copy-caption').append(node));
+    await help.evaluate(node => document.querySelector('#data-workspace-publish-form>h4').append(node));
   }
   try {
     await button.evaluate(node => node.style.transform = 'translateY(12px)');

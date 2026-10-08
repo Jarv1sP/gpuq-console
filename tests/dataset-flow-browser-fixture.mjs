@@ -125,10 +125,15 @@ try{
     await sourceSheet(memberPage,source);
     for(const width of [1440,1024,390,320]){await check(memberPage,'sheet-'+source,width);await capture(memberPage,'sheet-'+source+'-'+width);}
   }
-  assert.equal(await memberPage.locator('.dataset-sheet-head .data-workspace-footnote').textContent(),'上传前请确认磁盘容量；停止上传会保留已收到的文件片段。');
+  assert.equal(await memberPage.locator('.data-workspace-footnote,[data-dataset-help-source=workspace]').count(),0,'campus-only workspace has no obsolete relay upload explanation');
+  assert.equal(await memberPage.locator('#data-workspace-upload-form').isVisible(),false,'workspace cannot expose portal relay upload');
+  assert.equal(await memberPage.locator('[data-workspace-download]:visible').count(),0,'workspace cannot expose portal relay download');
+  assert.equal(await memberPage.locator('#terminal-data-open').isVisible(),true,'manual organization remains available');
+  assert.equal(await memberPage.locator('#data-workspace-publish').isVisible(),true,'publishing remains available');
+  assert.equal(await memberPage.locator('#data-workspace-publish-form>h4 .copy-help-popup>p').textContent(),'先结束此机器上的所有数据终端，再发布整理好的子目录。发布会复制并校验文件，训练使用只读版本；原目录保留。');
   assert.equal(await memberPage.locator('.data-workspace-card>.ui-info,.data-workspace-card>.data-workspace-footnote,.dataset-upload-notes').count(),0);
   await checkDatasetHelpRegressions(memberPage);
-  const helpButton=memberPage.locator('[data-dataset-help-source=workspace] [data-copy-help]'),helpCalls=calls.length;
+  const helpButton=memberPage.locator('#data-workspace-publish-form>h4 [data-copy-help]'),helpCalls=calls.length;
   await helpButton.click();assert.equal(await memberPage.locator('#'+await helpButton.getAttribute('aria-controls')).isVisible(),true);
   assert.equal(calls.length,helpCalls,'opening the preserved explanation sends no node request');
   await memberPage.keyboard.press('Escape');assert.equal(await memberPage.locator('#dataset-add-dialog').getAttribute('open'),'');
@@ -192,7 +197,12 @@ try{
       await page.locator('#refresh-state').click();await page.waitForFunction(()=>!document.querySelector('#refresh-state').disabled);
       for(const width of [1440,1024,390,320]){await check(page,role+'-'+state,width);await capture(page,role+'-'+state+'-'+width);}
       if(state==='unknown'){assert.equal(await page.locator('[data-v3-cache]:enabled,[data-use-dataset]:enabled').count(),0,'unknown observations grant no action');assert.doesNotMatch(await page.locator('#dataset-catalog').innerText(),/待确认/);const unknown=page.locator('#dataset-catalog .v3-g.unknown[role=img][aria-label=待确认][title=待确认]');assert.ok(await unknown.count()>0,'unknown cache locations retain an accessible unconfirmed symbol');}
-      if(state==='error')assert.equal(await page.locator('[data-v3-select]').count(),0,'failed refresh clears stale catalog actions');
+      if(state==='error'){
+        assert.equal(await page.locator('#dataset-catalog.storage-reading-stale [data-v3-select]').count(),4,'failed refresh retains the last readable list');
+        assert.equal(await page.locator('#dataset-catalog button:enabled').count(),0,'retained readings grant no catalog actions');
+        assert.equal(await page.locator('#dataset-catalog').getAttribute('title'),'','legacy catalog without a sampling timestamp cannot invent one');
+        assert.equal(await page.locator('#warehouse-inspector [data-v3-cache],#warehouse-inspector [data-use-dataset],#warehouse-inspector .v3-train').count(),0,'failed refresh clears training and cache details');
+      }
     }
     if(state==='loading'){releaseGate();gate=null;for(const {page} of views)await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);}
     if(state==='maintenance')await service.invoke(admin.token,'maintenance.set',{scope:target,enabled:false,revision:service.operationalMaintenance(admin.principal).revision});
