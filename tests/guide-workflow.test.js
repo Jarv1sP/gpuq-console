@@ -71,3 +71,21 @@ test('guide covers merged workflow changes while keeping completion, permissions
   assert.doesNotMatch(source,/gpuctl (?:transfer copy|sync data|data shell|data publish)\b/);
   assert.doesNotMatch(source,/没有后台 URL 下载按钮|不提供后台 URL 下载队列/);
 });
+
+test('CLI-first path binds login, fixed releases and original upload recovery',()=>{
+  const chapters=parseGuide(source);
+  const login=blocks.flatMap(block=>block.split('\n')).find(line=>line.startsWith('gpuctl login '));
+  const parsedLogin=parseCLIOptions(words(login).slice(1));
+  assert.deepEqual(parsedLogin.positionals,['login','USERNAME']);
+  assert.equal(parsedLogin.options.url,'https://gpu.example.com');
+  assert.match(chapters.get('start'),/Windows 与 WSL 分别安装、分别登录/);
+  const firstRun=chapters.get('training').match(/^gpuctl run .+$/m)?.[0];
+  assert.equal(parseCLIOptions(words(firstRun).slice(1)).options.release,'FULL_HASH');
+  const data=chapters.get('data');
+  assert.match(data,/现役 CLI 接收本机目录；压缩包先在本机解压/);
+  assert.ok(data.indexOf('Expand-Archive')<data.indexOf('gpuctl data upload ./my-data'));
+  assert.match(data,/gpuctl data upload-status UPLOAD_ID --machine MACHINE_ID/);
+  assert.match(data,/同一目录、原机器选择和名称，重复原命令可续传/);
+  assert.doesNotMatch(data,/gpuctl data upload [^\n]*\.(?:zip|tar|tgz)(?:\s|$)/);
+  assert.match(chapters.get('results'),/gpuctl completion JOB_ID --json[\s\S]*gpuctl use MACHINE_ID\ngpuctl project use my-project\ngpuctl files --job JOB_ID/);
+});
