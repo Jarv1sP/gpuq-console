@@ -53,6 +53,11 @@
 
 ### 前端兼容契约
 
+认证状态的 `datasetUploadAdmission` 包含
+`{protocol:1,available:boolean,targetMachine:string|null}`。`targetMachine` 是当前受信策略
+固定的新上传仓库，不是用户所选训练机；策略关闭或目标未确认时为 null。
+它只用于显示上传位置，不证明节点在线、容量充足或账号可写；实际准入仍逐次核验。
+
 `begin/status/seal/commit/discard/direct-ticket/direct-revoke` 的 placement-aware 回包
 含 `placementProtocol:1,requestedMachine,storageMachine,storageTier,legacyPlacement`。
 `storageTier` 为 `hdd` 或 `existing`；后者表示沿用启用策略之前的会话，不推断其介质。
