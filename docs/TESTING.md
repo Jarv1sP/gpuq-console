@@ -167,6 +167,11 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 同时保留。双根训练复制使用真实本机 TLS、显式模拟的校园物理路由，核对每次读取
 仍检查校园路线，旧 worker 不能消费新训练侧车或改写到仓库；不代表真实校园连通性。
 
+`training-preparation-bridge.test.py` 隔离加载真实执行桥 Handler，验证两个精确私有
+准备 RPC 原封转发、原固定 SSH 约束、旧只读／手动复制兼容、未知操作与机器零
+派发、节点拒绝原样返回和超时不重放。仅替换 inventory 与最终 SSH transport，
+不连接生产；该测试不证明私有部署桥已经升级。
+
 ## 项目生命周期额外回归
 
 `python3 tests/gpuq-native-release-gate.test.py` 用真实临时 SQLite 与有界本地文件验证固定 root 门禁：关闭状态两次物理扫描、原 unit/租约核验、全部 mutation RPC（含 observe/sync/fleet）及动作入口零派发、已有 pending action 不领取、DB/心跳不变、非法／过期／软硬链接／inode 变化保持关闭，显式移除后重新两次观察。文件夹具仅将临时 stat 的所有者表示为 root，不写 `/run`、不操作服务或 GPU；不能当作正式发布器或真实滚动升级通过。合同见 [NATIVE_RELEASE_GATE.md](NATIVE_RELEASE_GATE.md)。
