@@ -1,4 +1,5 @@
 import {createJobDiagnostics} from './job-diagnostics-ui.js';
+import {createJobResultAccess,resultFilesHTML,resultPullCommand} from './job-results-ui.js';
 import {jobProgressHTML,jobNotificationHTML} from './job-progress-ui.js';
 import {yieldCapable} from './scheduling-policy.js';
 import {schedulingFields,schedulingFromForm,schedulingSummary} from './scheduling-ui.js';
@@ -197,6 +198,8 @@ export function executionUI(store,refresh,toast){
   let quotaKey='',quotaState='idle',quotaResult=null,quotaError='',quotaController;
   let uploadRecovery=null;
   let datasetReadChoice=null;
+  let fileReadController=null,fileReadTurn=0,resultFilePath=null;
+  const resultAccess=createJobResultAccess({store,changed:()=>{resultAccess.paint();}});
   const uploadScope=()=>JSON.stringify([store.authGeneration,store.principal?.userId,actor,machine,project]);
   const managementAllowed=()=>managementSubmit&&store.principal?.role==='admin';
   function submissionMode(management){
@@ -206,11 +209,11 @@ export function executionUI(store,refresh,toast){
     const selected=rank.value;rank.replaceChildren(...[0,1,2,...(management?[3,4]:[])].map(n=>new Option('P'+n,'P'+n,false,'P'+n===selected)));
     updateControls();return true;
   }
-  const mission=taskMissionUI(store,{toast,onOpen:id=>{focusedJob=id;renderJobs(ownJobs());document.dispatchEvent(new CustomEvent('gpuq-focused-job',{detail:{id}}));document.dispatchEvent(new CustomEvent('gpuq-attention-viewed',{detail:{userId:store.principal?.userId,kind:'job',id}}));}});
+  const mission=taskMissionUI(store,{toast,resultAction:job=>resultAccess.markup(job),onOpen:id=>{focusedJob=id;renderJobs(ownJobs());document.dispatchEvent(new CustomEvent('gpuq-focused-job',{detail:{id}}));document.dispatchEvent(new CustomEvent('gpuq-attention-viewed',{detail:{userId:store.principal?.userId,kind:'job',id}}));}});
   installTaskLabelEditor(store,{toast,refresh});
   const jobHeading=id=>[...document.querySelectorAll('[data-workbench-job]')].find(row=>row.dataset.workbenchJob===id)?.querySelector('.wb-job-heading');
-  const overviewWithLabels=(job,options)=>jobOverviewHTML(job,options)+taskLabelEditorHTML(job,store.principal);
-  const diagnostics=createJobDiagnostics(store,()=>log,toast,{drawer:true,header:job=>`<span class="sheet-object">${stateHTML(job,false)}<span>${escape(job.name||'训练详情')}</span></span>`,reveal:(dialog,job,origin)=>{sharedObject(origin||jobHeading(job.id),dialog.querySelector('.sheet-object'));revealSheet(dialog,{drilldown:true});},dismiss:dialog=>dismissSheet(dialog,{drilldown:true,target:jobHeading(focusedJob)}),overview:job=>overviewWithLabels(job,{owned:job.userId===store.principal?.userId,schedulingHTML:allocationSummary(job)+placementSummary(job)+`<span>排队优先级：${escape(priorityRankLabel(job))}</span>`+schedulingSummary(job)+`<span>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</span><span>状态：${escape(job.schedulerState||'未提供')}</span><span>更新于 ${escape(sampleTime(job.schedulerCheckedAt))}</span>`}),output:showOutput,notes:showNotes,onView:next=>{if(next!=='notes')notes?.sync(false,true);}});
+  const overviewWithLabels=(job,options)=>resultAccess.markup(job)+jobOverviewHTML(job,options)+taskLabelEditorHTML(job,store.principal);
+  const diagnostics=createJobDiagnostics(store,()=>log,toast,{drawer:true,header:job=>`<span class="sheet-object">${stateHTML(job,false)}<span>${escape(job.name||'训练详情')}</span></span>`,reveal:(dialog,job,origin)=>{sharedObject(origin||jobHeading(job.id),dialog.querySelector('.sheet-object'));revealSheet(dialog,{drilldown:true});},dismiss:dialog=>dismissSheet(dialog,{drilldown:true,target:jobHeading(focusedJob)}),overview:job=>overviewWithLabels(job,{owned:job.userId===store.principal?.userId,schedulingHTML:allocationSummary(job)+placementSummary(job)+`<span>排队优先级：${escape(priorityRankLabel(job))}</span>`+schedulingSummary(job)+`<span>${escape(schedulingContractLabel(job.schedulerPolicy??{yield_policy:job.yieldPolicy,restart_policy:job.restartPolicy}))}</span><span>状态：${escape(job.schedulerState||'未提供')}</span><span>更新于 ${escape(sampleTime(job.schedulerCheckedAt))}</span>`}),output:showOutput,notes:showNotes,onCompletion:(value,job)=>resultAccess.accept(job,value),onView:next=>{if(next!=='notes')notes?.sync(false,true);}});
   const call=(operation,args)=>store.call(operation,args),query=selector=>section?.querySelector(selector)||submitDialog?.querySelector(selector)||settingsDialog?.querySelector(selector)||log?.querySelector(selector)||document.querySelector('#shell-context')?.querySelector(selector);
   const context=()=>({machine,...(project?{project}:{})}),currentProject=()=>catalog.find(item=>item.project===project);
   const projectMachines=()=>{const user=store.users.find(item=>item.id===actor);return user?.enabled===true?(store.data?.machines||[]).filter(item=>user.limits?.[item.id]>0):[];};
@@ -426,9 +429,9 @@ export function executionUI(store,refresh,toast){
   }
   function renderJobs(jobs){
     const table=query('#my-job-table'),detailKey=item=>item.className+'|'+(item.closest('[data-workbench-job]')?.dataset.workbenchJob||'')+'|'+(item.querySelector('summary')?.getAttribute('aria-label')||item.querySelector('summary>span')?.textContent||item.querySelector('summary')?.textContent||''),details=new Map([...table.querySelectorAll('details')].map(item=>[detailKey(item),item.open])),scrolls=new Map([...table.querySelectorAll('.wb-scroll-list')].map(item=>[item.getAttribute('aria-label'),item.scrollTop])),active=document.activeElement,focus=table.contains(active)?{id:active.closest('[data-workbench-job]')?.dataset.workbenchJob,hook:[...active.attributes].find(attr=>attr.name.startsWith('data-'))?.name}:null;
-    const actions=job=>`${heldDuringMaintenance(job,store.data?.operationalMaintenance)?'<span class="maintenance-held"><span class="maintenance-pause" aria-hidden="true"></span>维护期间暂不派发</span>':''}${jobNotificationHTML(job,actor)}<button class="button quiet" data-job-logs="${escape(job.id)}">日志</button><button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="diagnostics">诊断</button>${job.project?`<button class="button quiet" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="notes">留言</button><button class="button danger" data-job-cancel="${escape(job.id)}" ${endedJob(job)||job.cancelRequested?'disabled':''}>取消</button>`;
+    const actions=job=>`${heldDuringMaintenance(job,store.data?.operationalMaintenance)?'<span class="maintenance-held"><span class="maintenance-pause" aria-hidden="true"></span>维护期间暂不派发</span>':''}${jobNotificationHTML(job,actor)}${resultAccess.markup(job)}<button class="button quiet" data-job-logs="${escape(job.id)}">日志</button><button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="diagnostics">诊断</button>${job.project?`<button class="button quiet" data-job-output="${escape(job.id)}">输出</button>`:''}<button class="button quiet" data-job-detail="${escape(job.id)}" data-job-view="notes">留言</button><button class="button danger" data-job-cancel="${escape(job.id)}" ${endedJob(job)||job.cancelRequested?'disabled':''}>取消</button>`;
     const drafts=new Map([...table.querySelectorAll('[data-job-priority]')].map(input=>[input.dataset.jobPriority,{value:input.value,original:input.dataset.originalPriority}]));
-    const html=workbenchCards(jobs,{actions,focusId:focusedJob,historyState,maintenance:store.data?.operationalMaintenance,ledger:quotaLedgerHTML(store,machine)});if(html===jobHTML)return;jobHTML=html;table.innerHTML=html;
+    const html=workbenchCards(jobs,{actions,focusId:focusedJob,historyState,maintenance:store.data?.operationalMaintenance,ledger:quotaLedgerHTML(store,machine)});if(html===jobHTML){resultAccess.sync(jobs);return;}jobHTML=html;table.innerHTML=html;resultAccess.sync(jobs);
     for(const detail of table.querySelectorAll('details'))if(details.has(detailKey(detail)))detail.open=details.get(detailKey(detail));
     for(const list of table.querySelectorAll('.wb-scroll-list'))if(scrolls.has(list.getAttribute('aria-label')))list.scrollTop=scrolls.get(list.getAttribute('aria-label'));
     for(const input of table.querySelectorAll('[data-job-priority]')){const draft=drafts.get(input.dataset.jobPriority);if(draft&&draft.value!==draft.original){input.value=draft.value;input.dataset.originalPriority=draft.original;}}
@@ -454,7 +457,7 @@ export function executionUI(store,refresh,toast){
       notes=createTaskNotesUI(container,store,toast,{prefix:'drawer-',jobId:id});container.querySelector('#drawer-task-note-lifetime').value='task';notes.sync(true,true);
     }catch(error){if(generation===notesGeneration&&owner===actor)container.textContent='留言暂不可用：'+error.message;}
   }
-  document.addEventListener('gpuq-job-drawer-close',()=>{notesGeneration++;notes?.reset();notes=null;notesJob=null;const files=query('#workspace-files');if(outputPlace&&files){outputPlace.after(files);outputPlace.remove();outputPlace=null;}});
+  document.addEventListener('gpuq-job-drawer-close',()=>{stopFileRead();notesGeneration++;notes?.reset();notes=null;notesJob=null;const files=query('#workspace-files');if(outputPlace&&files){outputPlace.after(files);outputPlace.remove();outputPlace=null;}});
   function assertContext(){if(!enabled())throw Error('先在工作台顶部选择一台已授权服务器。');if(project&&!currentProject())throw Error('项目状态尚未读取，请刷新后再试。');return context();}
   function updateControls(){
     if(!section||!actor)return;
@@ -503,9 +506,12 @@ export function executionUI(store,refresh,toast){
     query('#train-form [type=submit]').disabled=!available||locked||acceptedDraft||automatic&&info?.environmentMode!=='oci'||!!parsedTarget&&(machine!==parsedTarget.machine||project!==parsedTarget.project)||!placementReady||(elasticOn&&!elasticReady)||(customOn?!customAvailable():priority.value!=='normal'&&!priorityAvailable())||(!!project&&(!!catalogError||!readyReleases(info).some(item=>item.release===release.value)));
     if(trainingUnavailable(store.data?.gpuq,trainingHosts()))query('#train-form [type=submit]').disabled=true;
     const output=project&&query('[name=file-area]').value==='output';
+    const resultCopy=query('#workspace-pull-command');resultCopy.hidden=!output||!resultJob();resultCopy.disabled=!resultFilePath||query('[name=file-path]').value!==resultFilePath||locked||!available;
+    if(!output)query('#workspace-output-files').hidden=true;
     for(const id of ['workspace-list','workspace-download'])query('#'+id).disabled=!available||locked;
     query('#workspace-upload').textContent=project&&uploadRecovery?.scope===uploadScope()&&uploadRecovery.supported?'上传 / 续传':'上传';
     query('#workspace-upload').disabled=!available||locked||output||publishing;query('[name=files]').disabled=!available||locked||output||publishing;
+    query('#workspace-upload').hidden=!!(output&&resultJob());query('[name=files]').hidden=!!(output&&resultJob());
     query('[name=file-area]').disabled=!project||locked;query('.output-run-fields').hidden=!output;query('#project-release-field').hidden=!project;query('#project-detail').hidden=!project;
     query('#workspace-mode-note').textContent=info?.environmentMode==='oci'?'开发草稿发布后成为固定版本；训练只读选定发布版本，不会写回草稿。':project?'开发草稿在 /workspace，环境在 /opt/project-env；训练读取固定发布版本，结果写入 /outputs。':'终端、文件和训练共用个人 /workspace，新实验可单独创建项目。';
     query('#terminal-mode-note').textContent=info?.environmentMode==='oci'?'可在容器内安装系统软件；开发终端没有 GPU；容器内 root 不是服务器 root。':project?'编辑代码、安装项目 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。':'管理个人文件和 Python 包；不分配 GPU。系统目录只读，不提供宿主 sudo。';
@@ -550,7 +556,7 @@ export function executionUI(store,refresh,toast){
     select.innerHTML='<option value="">选择任务，或输入任务 ID</option>'+jobs.map(job=>`<option value="${escape(job.id)}">${escape(job.name)} · ${escape(job.id.slice(0,8))} · ${escape(job.state)}</option>`).join('');
     if(jobs.some(job=>job.id===previous))select.value=previous;
   }
-  function clearFileContext(){query('[name=file-path]').value='.';query('[name=file-area]').value='code';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('[name=files]').value='';query('#workspace-result').textContent='选择目录或文件。';}
+  function clearFileContext(){stopFileRead();query('[name=file-path]').value='.';query('[name=file-area]').value='code';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('[name=files]').value='';query('#workspace-result').textContent='选择目录或文件。';}
   function syncMachineFields(){for(const name of ['workspace-machine','machine','terminal-machine','file-machine']){const field=query(`[name=${name}]`),selected=name==='workspace-machine'?focusMachine:machine;field.value=selected;field.title=selected;}const selected=(store.data?.machines||[]).find(item=>item.id===machine);query('[name=cards]').max=String(selected?.cards||1);}
   async function selectMachine(value,{keepContainer=false}={}){
     if(value===focusMachine&&(!project||machine===value))return;
@@ -646,7 +652,15 @@ export function executionUI(store,refresh,toast){
     guarded(button,async()=>{const target=assertContext(),token=currentToken();if(await projectActivity.run(signal=>endProjectTerminals(target,{signal}))!==true||token!==currentToken())return;await readProjectStatus(target,token);if(token===currentToken())renderProject();},true);
   },{capture:true});
   function fileContext(){const target=assertContext();if(!project)return target;const area=query('[name=file-area]').value;if(area==='code')return {...target,area};const runId=query('[name=file-run-id]').value.trim();if(!uuidPattern.test(runId))throw Error('请选择本项目任务，或输入完整任务 ID。');return {...target,area:'output',runId};}
-  async function listFiles(){const target=fileContext(),path=query('[name=file-path]').value||'.';const result=await call('files.list',{...target,path});query('#workspace-result').textContent=result.entries.map(file=>`${file.type==='directory'?'[目录]':'[文件]'} ${file.name}  ${file.type==='file'?file.size+' B':''}`).join('\n')||'目录为空';}
+  function resultJob(){const id=query('[name=file-run-id]')?.value,job=ownJobs().find(row=>row.id===id&&row.machine===machine&&row.project===project);return resultAccess.allowed(job)?job:null;}
+  function stopFileRead(){fileReadTurn++;fileReadController?.abort();fileReadController=null;resultFilePath=null;const tree=query('#workspace-output-files');if(tree){tree.hidden=true;tree.replaceChildren();}const copy=query('#workspace-pull-command');if(copy)copy.hidden=true;const result=query('#workspace-result');if(result)result.hidden=false;}
+  async function listFiles(){
+    stopFileRead();const target=fileContext(),path=query('[name=file-path]').value||'.',token=currentToken(),turn=fileReadTurn,controller=new AbortController();fileReadController=controller;
+    const result=await store.call('files.list',{...target,path},{signal:controller.signal});
+    if(controller.signal.aborted||turn!==fileReadTurn||token!==currentToken()||target.area==='output'&&query('[name=file-run-id]').value!==target.runId)return;
+    if(target.area==='output'&&resultJob()){query('#workspace-output-files').innerHTML=resultFilesHTML(result.entries,path);query('#workspace-output-files').hidden=false;query('#workspace-result').textContent='';query('#workspace-result').hidden=true;query('#workspace-pull-command').hidden=false;query('#workspace-pull-command').disabled=true;}
+    else query('#workspace-result').textContent=result.entries.map(file=>`${file.type==='directory'?'[目录]':'[文件]'} ${file.name}  ${file.type==='file'?file.size+' B':''}`).join('\n')||'目录为空';
+  }
   document.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
     if(button.dataset.jobFocus){focusedJob=button.dataset.jobFocus;renderJobs(ownJobs());document.dispatchEvent(new CustomEvent('gpuq-focused-job',{detail:{id:focusedJob}}));return;}
@@ -694,11 +708,20 @@ export function executionUI(store,refresh,toast){
       if(token!==currentToken())return;
       query('#workspace-result').textContent=`已上传 ${files.length} 个文件${project?'到项目开发草稿；生成训练版本后才能用于训练。':'。'}`;renderProject();toast('文件上传完成。');
     },true);
+    if(button.dataset.resultPath){
+      if(!resultJob())return;
+      query('[name=file-path]').value=button.dataset.resultPath;
+      if(button.dataset.resultType==='directory')guarded(button,listFiles);
+      else{resultFilePath=button.dataset.resultPath;query('#workspace-pull-command').disabled=false;query('#workspace-pull-command').title=resultPullCommand(resultJob(),resultFilePath);}
+      return;
+    }
+    if(button.id==='workspace-pull-command'){const job=resultJob();if(!job||!resultFilePath||query('[name=file-path]').value!==resultFilePath)return;navigator.clipboard.writeText(resultPullCommand(job,resultFilePath)).then(()=>toast('CLI 命令已复制。'),()=>toast('复制失败。'));return;}
     if(button.id==='workspace-download')guarded(button,async()=>{
       const target=fileContext(),path=query('[name=file-path]').value;if(!path||path==='.')throw Error('请填入要下载的文件相对路径。');let offset=0;const chunks=[];
       while(true){const result=await call('files.get',{...target,path,offset}),bytes=Uint8Array.from(atob(result.data),char=>char.charCodeAt(0));chunks.push(bytes);offset+=bytes.length;if(offset>100*1024*1024)throw Error('超过 100 MiB，请用 CLI 下载大文件。');if(result.eof)break;if(!bytes.length)throw Error('下载没有继续返回数据，请重试。');}
       const url=URL.createObjectURL(new Blob(chunks)),anchor=document.createElement('a');anchor.href=url;anchor.download=path.split('/').pop();anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     });
+    if(button.dataset.jobPull)guarded(button,async()=>{const job=ownJobs().find(row=>row.id===button.dataset.jobPull);if(!job||!await resultAccess.check(job,true))throw Error('任务完成状态未确认，请核验完成后再试。');if(store.principal?.userId!==job.userId)return;await diagnostics.openLogs(job.id,'output');});
     if(button.dataset.jobOutput)guarded(button,()=>diagnostics.openLogs(button.dataset.jobOutput,'output'));
   });
   document.addEventListener('submit',event=>{
@@ -737,11 +760,11 @@ export function executionUI(store,refresh,toast){
     if(name==='priority'){submitKey=crypto.randomUUID();updateControls();}
     if(['training-target','training-candidates','gpu-placement'].includes(name)){submitSelection.invalidate();parsedTarget=null;submitKey=crypto.randomUUID();updateControls();}
     if(['custom-policy','queue-rank','yield-policy','restart-policy','checkpointable','request-mode','elastic','auto-expand'].includes(name)){submitKey=crypto.randomUUID();updateControls();}
-    if(name==='file-area'){query('[name=file-path]').value='.';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('#workspace-result').textContent='已切换文件区域。';updateControls();}
-    if(name==='file-run')query('[name=file-run-id]').value=event.target.value;
+    if(name==='file-area'){stopFileRead();query('[name=file-path]').value='.';query('[name=file-run-id]').value='';query('[name=file-run]').value='';query('#workspace-result').textContent='已切换文件区域。';updateControls();}
+    if(name==='file-run'){stopFileRead();query('[name=file-run-id]').value=event.target.value;updateControls();}
     updatePreflight();
   });
-  document.addEventListener('input',event=>{if(event.target.name==='new-project'){query('#project-create-error').hidden=true;updateControls();return;}if(!event.target.closest('#train-form,#work-submit-panel'))return;submitSelection.invalidate();acceptedDraft=false;submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(['sm-percent','training-candidates'].includes(event.target.name))updateControls();updatePreflight();});
+  document.addEventListener('input',event=>{if(['file-path','file-run-id'].includes(event.target.name)){stopFileRead();updateControls();return;}if(event.target.name==='new-project'){query('#project-create-error').hidden=true;updateControls();return;}if(!event.target.closest('#train-form,#work-submit-panel'))return;submitSelection.invalidate();acceptedDraft=false;submitKey=crypto.randomUUID();const selected=query('[name=machine]').value;if(selected!==machine)selectMachine(selected);if(['sm-percent','training-candidates'].includes(event.target.name))updateControls();updatePreflight();});
   document.addEventListener('gpuq-open-submit',async event=>{
     if(!submitDialog||!actor)return;
     flushClosedProjectDialogs();
@@ -775,7 +798,7 @@ export function executionUI(store,refresh,toast){
     if(!event.target.matches('#my-job-table [data-job-history-filter]'))return;
     historyState=event.target.value==='FAILED'?'FAILED':'';renderJobs(ownJobs());query('#my-job-table .wb-ended')?.setAttribute('open','');
   });
-  store.onAuthChange?.(()=>{datasetReadChoice?.reset();cancelProjectActivity();directory.clear();directoryOwner='';submitReceipt=null;parsedTarget=null;acceptedDraft=false;publicationIntent=null;publicationResult=null;publicationError='';publicationSelection=null;publicationFlash=null;recoveredActor=null;query('#submission-receipt')?.replaceChildren();});
+  store.onAuthChange?.(()=>{datasetReadChoice?.reset();stopFileRead();cancelProjectActivity();directory.clear();directoryOwner='';submitReceipt=null;parsedTarget=null;acceptedDraft=false;publicationIntent=null;publicationResult=null;publicationError='';publicationSelection=null;publicationFlash=null;recoveredActor=null;query('#submission-receipt')?.replaceChildren();});
   document.addEventListener('gpuq-terminal-state',event=>{terminalSessions=event.detail.sessions||[];if(section&&actor)renderProject();});
   const workRoom=document.querySelector('[data-page=work]');
   let wasVisible=isVisible();
@@ -820,7 +843,7 @@ export function executionUI(store,refresh,toast){
       submitReceipt=null;parsedTarget=null;acceptedDraft=false;managementSubmit=false;actor=store.principal.userId;machine='';focusMachine='';project='';catalog=[];directory.clear();directoryOwner='';directoryError='';catalogError='';epoch++;stopPolling();machineIdentity='';submitKey=crypto.randomUUID();operationBusy=false;projectBusy=false;
       section.innerHTML=`<section class="workspace-context" aria-labelledby="workspace-context-title"><div class="workspace-context-heading"><div><div class="eyebrow">WORKSPACE</div><h2 id="workspace-context-title">选择服务器与项目</h2><span id="project-environment" class="project-environment" hidden></span></div><button class="button" id="projects-refresh">刷新项目</button></div><div class="workspace-context-grid"><label>服务器<select name="workspace-machine" aria-describedby="workspace-mode-note"></select></label><label>项目<select name="workspace-project"><option value="">个人工作区</option></select></label></div><p id="workspace-mode-note" class="muted"></p><p id="project-status" class="workspace-status" role="status" aria-live="polite"></p><details id="project-create"><summary>新建项目</summary><form id="project-create-form"><label>项目名称<input name="new-project" pattern="[a-z][a-z0-9_-]{0,47}" maxlength="48" required placeholder="例如 vision-baseline" aria-describedby="project-name-error" spellcheck="false" autocomplete="off"><span id="project-name-error" class="form-error project-name-error" hidden></span></label><fieldset class="project-environment-choice"><legend>个人容器</legend><select name="environment-mode" hidden aria-hidden="true" tabindex="-1"><option value="oci">个人容器</option></select></fieldset><p id="project-create-availability" class="project-create-availability" role="status" hidden></p><button type="submit" class="button">创建项目</button><p id="project-create-error" class="form-error" role="alert" hidden></p></form><p id="environment-mode-note" class="muted"></p></details><div id="project-detail" class="project-actions"><button class="button primary" id="project-publish">生成训练版本</button><p id="project-terminal-block" class="project-terminal-block" hidden>先结束开发终端（断开不算）</p><button class="button danger" id="project-terminal-stop" hidden>结束终端</button><span class="muted">先完成上传并结束开发终端，再保存代码与环境版本。</span><div id="publication-progress" class="publication-progress"></div><div id="publication-actions" class="publication-actions" hidden><button type="button" class="button quiet" id="publication-query">重新查询</button><button type="button" class="button quiet" id="publication-retry">用同一请求重试</button></div></div></section>
       <section class="personal-terminal" aria-labelledby="personal-terminal-title"><div class="terminal-heading"><h3 id="personal-terminal-title">个人开发终端</h3><span class="terminal-scope">日常开发 · 不占 GPU</span></div><p id="terminal-mode-note" class="muted"></p><div class="terminal-controls"><select name="terminal-machine" hidden aria-label="终端服务器"></select><button id="terminal-open" class="button primary">新建开发终端</button><button id="terminal-reconnect" class="button">重连开发会话</button></div></section>
-      <details class="execution-panel" id="workspace-files"><summary>项目材料与训练结果 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">开发草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传</button></div><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
+      <details class="execution-panel" id="workspace-files"><summary>项目材料与训练结果 · 上传 / 下载</summary><select name="file-machine" hidden aria-label="文件服务器"></select><div class="file-location-grid"><label>文件区域<select name="file-area"><option value="code">开发草稿</option><option value="output">任务输出（只读下载）</option></select></label><label>目录或文件的相对路径<input name="file-path" value="." spellcheck="false"></label></div><div class="output-run-fields"><label>本项目任务<select name="file-run"></select></label><label>完整任务 ID<input name="file-run-id" spellcheck="false" placeholder="选择上面的任务或输入完整 UUID"></label></div><div class="file-actions"><button class="button" id="workspace-list">列目录</button><button class="button" id="workspace-download">下载文件</button><input type="file" name="files" multiple aria-label="选择上传文件"><button class="button" id="workspace-upload">上传</button></div><div id="workspace-output-files" class="job-result-files" hidden></div><button class="button quiet" id="workspace-pull-command" type="button" hidden disabled>复制 CLI 命令</button><pre id="workspace-result" class="file-result" aria-live="polite">选择目录或文件。</pre></details>
       <details class="execution-panel"><summary>提交训练</summary><form id="train-form">
         <select name="machine" hidden aria-label="训练服务器"></select>
         <label>训练位置<select name="training-target"><option value="current">当前服务器 · 自动分卡</option><option value="auto">自动选择空闲服务器</option></select></label>

@@ -57,7 +57,7 @@ export function createJobDiagnostics(store,getDialog,toast,options={}){
     }
     const request=++recoveryRequest,controller=new AbortController();recoveryController=controller;recoveryBusy=true;recoveryError='';
     if(operation==='jobs.watch'){observation=null;completion=null;resourcesReleased=false;}
-    if(operation==='jobs.completion')completion=null;
+    if(operation==='jobs.completion'){completion=null;options.onCompletion?.(null,job);}
     if(operation==='jobs.reconcile-resources')resourcesReleased=false;
     renderRecovery();
     const current=()=>request===recoveryRequest&&generation===context&&principal()===identity&&jobId===job.id&&getDialog()?.open&&!!recoveryJob();
@@ -68,11 +68,11 @@ export function createJobDiagnostics(store,getDialog,toast,options={}){
         observation=result.nativeObservation||null;
       }else if(operation==='jobs.completion'){
         if(!completionMatchesJob(result,job))throw Error('完成核验回执待确认，请重新查询。');
-        completion=result;observation=result.nativeObservation||null;
+        completion=result;observation=result.nativeObservation||null;options.onCompletion?.(completion,job);
       }else{
         if(result?.protocol!=='job-resource-reconciliation-v1'||result.jobId!==job.id||result.resourcesReleased!==true)throw Error('数据租约释放待确认；请先核验完成，不要重新提交。');
         resourcesReleased=true;
-        if(completionMatchesJob(result.completion,job)){completion=result.completion;observation=completion.nativeObservation||null;}
+        if(completionMatchesJob(result.completion,job)){completion=result.completion;observation=completion.nativeObservation||null;options.onCompletion?.(completion,job);}
       }
     }catch(error){if(current()&&error.name!=='AbortError')recoveryError=operation==='jobs.reconcile-resources'?'释放结果待确认：'+error.message+' 请先核验完成。':error.message;}
     finally{if(current()){recoveryBusy=false;recoveryController=null;renderRecovery();}}
