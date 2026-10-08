@@ -42,13 +42,14 @@ files['/cloud-import-ui.js']='cloud-import-ui.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
 files['/maintenance-ui.js']='maintenance-ui.js';files['/maintenance.css']='maintenance.css';
 files['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';
-export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge,notificationConfigPath,storageArchiveConfigPath,datasetIngressConfigPath,ociCohortMachines=[],directUploadOrigins=process.env.GPUQ_DIRECT_UPLOAD_ORIGINS||'[]'}){
+export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,displayBridgeSocket,displayBridge,bridge,notificationConfigPath,storageArchiveConfigPath,datasetIngressConfigPath,ociCohortMachines=[],directUploadOrigins=process.env.GPUQ_DIRECT_UPLOAD_ORIGINS||'[]'}){
   const uploadConnect=directUploadConnectSources(directUploadOrigins);
   await standaloneClient();
   const url=new URL(origin);const config=await loadTelegramNotifications(notificationConfigPath);
   const storage=await loadStorageArchivePolicy(storageArchiveConfigPath);
   const ingress=await loadDatasetIngressPolicy(datasetIngressConfigPath);
   const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined),config,storage,ociCohortMachines,ingress);const rate=new Map();
+  service.displayBridge=displayBridge||(displayBridgeSocket?bridgeClient(displayBridgeSocket):undefined);
   const server=http.createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Content-Security-Policy':`default-src 'self'; script-src 'self'; style-src 'self' 'nonce-${styleNonce}'; img-src 'self' data:; connect-src 'self'${uploadConnect?' '+uploadConnect:''}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`};
@@ -145,7 +146,7 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   process.umask(0o077);
-  const {server}=await createPortalServer({database:process.env.DATABASE_PATH||'/data/portal.sqlite',bootstrap:process.env.BOOTSTRAP_FILE,origin:process.env.PUBLIC_ORIGIN,statusPath:process.env.GPUQ_STATUS_PATH,bridgeSocket:process.env.EXECUTOR_SOCKET,notificationConfigPath:process.env.GPUQ_NOTIFICATIONS_CONFIG,storageArchiveConfigPath:process.env.GPUQ_STORAGE_ARCHIVE_CONFIG,datasetIngressConfigPath:process.env.GPUQ_DATASET_INGRESS_CONFIG,ociCohortMachines:process.env.GPUQ_OCI_AUTO_COHORT_MACHINES?process.env.GPUQ_OCI_AUTO_COHORT_MACHINES.split(','):[],secure:true});
+  const {server}=await createPortalServer({database:process.env.DATABASE_PATH||'/data/portal.sqlite',bootstrap:process.env.BOOTSTRAP_FILE,origin:process.env.PUBLIC_ORIGIN,statusPath:process.env.GPUQ_STATUS_PATH,bridgeSocket:process.env.EXECUTOR_SOCKET,displayBridgeSocket:process.env.EXECUTOR_DISPLAY_SOCKET,notificationConfigPath:process.env.GPUQ_NOTIFICATIONS_CONFIG,storageArchiveConfigPath:process.env.GPUQ_STORAGE_ARCHIVE_CONFIG,datasetIngressConfigPath:process.env.GPUQ_DATASET_INGRESS_CONFIG,ociCohortMachines:process.env.GPUQ_OCI_AUTO_COHORT_MACHINES?process.env.GPUQ_OCI_AUTO_COHORT_MACHINES.split(','):[],secure:true});
   server.listen(Number(process.env.PORT||8080),process.env.LISTEN_HOST||'0.0.0.0',()=>console.log('GPUQ portal ready.'));
   for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>server.close(()=>process.exit(0)));
 }
