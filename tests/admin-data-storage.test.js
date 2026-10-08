@@ -136,3 +136,13 @@ test('non-admin mounting is denied before any directory, policy, pin or cloud re
   const mounted=mountAdminDataStorage(el,{store:{principal:{userId:'member-a',role:'member'},call(){calls++;}}});
   assert.equal(el.textContent,'需要管理员权限');assert.equal(calls,0);mounted.destroy();assert.equal(calls,0);
 });
+
+
+test('warehouse badge reads modern catalog, never damaged or unconfirmed list projection',()=>{
+  const physical=listing('node-a',undefined,undefined,'UNKNOWN',999);physical.datasets[0].versions[0].warehouseReady=false;
+  const fresh={datasets:[{dataset:'samples',versions:[{version,bytes:10,locations:[{machine:'node-a',dataset:'samples',state:'REGISTERED',warehouseReady:true,contentBytes:10,ownerLabel:'所属用户：alice'}]}]}]};
+  assert.deepEqual([...adminWarehouseMachines(adminDatasetCatalog('node-a',machines,[physical],fresh))],['node-a']);
+  physical.datasets[0].versions[0].warehouseReady=true;
+  assert.equal(adminWarehouseMachines(adminDatasetCatalog('node-a',machines,[physical])).size,0);
+  assert.equal(adminWarehouseMachines(adminDatasetCatalog('node-a',machines,[],fresh)).has('node-a'),true);
+});
