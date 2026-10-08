@@ -2,7 +2,7 @@ import {datasetRemoveUI} from './dataset-remove-ui.js';
 import {datasetCacheAdminUI} from './dataset-cache-admin.js';
 import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 import {datasetInfoHTML,cacheBudget,cacheGaugeHTML,cachePreviewHTML,hasDatabaseOriginal,storageCapacityDetailHTML,applyCapacityGeometry} from './dataset-flow.js';
-import {adaptStorageOverview} from './dataset-catalog-model.js';
+import {adaptStorageOverview,readStorageOverview} from './dataset-catalog-model.js';
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
 import {mountArchiveEnrollment} from './archive-enrollment-ui.js';
@@ -192,7 +192,7 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
     if(busy||!allowed()||!store.production||!select.value)return;
     busy=true;const expected=actor(),token=++epoch,machine=select.value,status=el.querySelector('[data-storage-status]');
     const current=()=>allowed()&&expected===actor()&&token===epoch;
-    if(refreshTelemetry)store.call('datasets.overview',{},{signal:lifecycle.signal}).then(value=>{if(current()){overview=adaptStorageOverview(value);renderCards();}}).catch(()=>{if(current()){overview=null;renderCards();}});
+    if(refreshTelemetry)readStorageOverview(store,{signal:lifecycle.signal}).then(value=>{if(current()){overview=adaptStorageOverview(value);renderCards();}}).catch(()=>{if(current()){overview=null;renderCards();}});
     el.querySelector('[data-storage-refresh]').disabled=true;select.disabled=true;status.textContent='查询中…';
     try{
       if(refreshTelemetry){
@@ -213,7 +213,7 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   el.addEventListener('change',event=>{if(event.target===select){cache.reset();catalog=null;load(false);}},{signal:lifecycle.signal});
   el.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled||!allowed())return;
-    if(button.hasAttribute('data-storage-view')){const showingMembers=button.dataset.storageView==='members';servers.hidden=showingMembers;membersPanel.hidden=!showingMembers;el.querySelector('.admin-storage-controls>h3').textContent=showingMembers?'成员存储':'服务器存储';for(const tab of tabs.querySelectorAll('[role=tab]')){tab.setAttribute('aria-selected',String(tab===button));tab.tabIndex=tab===button?0:-1;}members.sync();return;}
+    if(button.hasAttribute('data-storage-view')){const showingMembers=button.dataset.storageView==='members';servers.hidden=showingMembers;membersPanel.hidden=!showingMembers;el.querySelector('.admin-storage-controls>h3').textContent=showingMembers?'成员存储':'服务器存储';for(const tab of tabs.querySelectorAll('[role=tab]')){tab.setAttribute('aria-selected',String(tab===button));tab.tabIndex=tab===button?0:-1;}members.sync();if(showingMembers)void members.load();return;}
     if(button.hasAttribute('data-storage-refresh'))load();
     if(button.hasAttribute('data-storage-select')&&!busy&&machines().some(row=>row.id===button.dataset.storageSelect)&&select.value!==button.dataset.storageSelect){select.value=button.dataset.storageSelect;cache.reset();load(false);}
     if(button.hasAttribute('data-admin-full-delete')&&removals.canOpenFullDelete?.(button.dataset.adminFullDelete,button.dataset.version)===true)removals.openFullDelete(button.dataset.adminFullDelete,button.dataset.version);

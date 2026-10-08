@@ -30,6 +30,16 @@ const list=value=>Array.isArray(value)?value:[];
 const text=value=>typeof value==='string'&&value?value:null;
 const number=value=>Number.isSafeInteger(value)&&value>=0?value:null;
 const copy=value=>value===undefined?null:structuredClone(value);
+export const STORAGE_OVERVIEW_TIMEOUT_MS=8000;
+export async function readStorageOverview(store,{signal}={}){
+  const controller=new AbortController(),abort=()=>controller.abort(signal?.reason);
+  if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
+  let timer;
+  try{return await Promise.race([
+    store.call('datasets.overview',{},{signal:controller.signal}),
+    new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error('存储总览超时'));},STORAGE_OVERVIEW_TIMEOUT_MS);})
+  ]);}finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
+}
 const same=values=>values.every(value=>value===values[0])?values[0]:null;
 const knownNumber=(rows,key)=>{
   const values=rows.map(row=>number(row[key])).filter(value=>value!==null);
@@ -192,6 +202,7 @@ export function displayStorageCapacity(overview,model,capacities=new Map(),machi
     const capacity=capacities.get(machine),total=number(capacity?.filesystemBytes),available=number(capacity?.availableBytes);
     const volume=capacity?.available===true&&total!==null&&available!==null&&available<=total?
       {...emptyVolume(),state:'READY',totalBytes:total,usedBytes:total-available,availableBytes:available,
+        checkedAt:copy(capacity.checkedAt),collectedAt:copy(capacity.collectedAt),
         reserveBytes:number(capacity.reserveBytes),usableBytes:number(capacity.usableBytes),guarded:capacity.guarded===true}:emptyVolume();
     const directory=list(model?.machines).find(row=>row.machine===machine)?.state==='ok';
     const ready=versions.filter(v=>v.servers.some(row=>row.machine===machine&&row.observed&&row.state==='READY'));
@@ -207,7 +218,9 @@ export function displayStorageCapacity(overview,model,capacities=new Map(),machi
     if(actual.readyContentBytes===null){result.readyContentBytes=fallback.readyContentBytes;result.usageComplete=fallback.usageComplete;}
     else if(actual.usageComplete===false&&fallback.readyContentBytes!==null&&fallback.readyContentBytes>actual.readyContentBytes)result.readyContentBytes=fallback.readyContentBytes;
     if(actual.readyVersionCount===null)result.readyVersionCount=fallback.readyVersionCount;
-    for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])if(result.volume[field]===null&&!actual.volume.collectedAt)result.volume[field]=volume[field];
+    const newer=Number.isFinite(Date.parse(volume.collectedAt))&&Date.parse(volume.collectedAt)>Date.parse(actual.volume.collectedAt);
+    for(const field of ['totalBytes','usedBytes','availableBytes','reserveBytes','usableBytes'])if(result.volume[field]===null&&(!actual.volume.collectedAt||newer))result.volume[field]=volume[field];
+    if(newer&&result.volume.totalBytes!==null){result.volume.collectedAt=volume.collectedAt;result.volume.checkedAt=volume.checkedAt;}
     return result;
   });
   const warehouse=overview?{...overview.warehouse}:{volumes:[],totalBytes:null,usedBytes:null,availableBytes:null,

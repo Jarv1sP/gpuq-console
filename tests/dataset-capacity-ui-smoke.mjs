@@ -46,8 +46,29 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  assert.equal(await page.locator('.v4-free b').textContent(),'未知');
  assert.equal(await page.locator('.v4-training-card').count(),machines.length);assert.equal(await page.locator('#warehouse-machine-capacity,.v3-rail,.capacity-detail').count(),0);
  assert.equal(await page.locator('[data-v3-cache-action]').count(),0);
+ if(role==='member'&&width===1440){
+  await page.evaluate(({machines,GiB})=>{
+   for(const {id} of machines){const volume={filesystemBytes:1000*GiB,availableBytes:300*GiB,reserveBytes:50*GiB,usableBytes:250*GiB,checkedAt:'2026-10-08T06:00:00Z',collectedAt:'2026-10-08T06:00:00Z'};
+    view.capacity({machine:id,available:true,...volume,inodeUsageKnown:false,totalInodes:null,availableInodes:null,guarded:true,datasetDelete:0},id);
+   }
+   waitReply=new Promise(resolve=>window.overviewRelease=resolve);window.overviewPending=view.loadOverview();
+  },{machines,GiB});
+  assert.equal(await page.locator('[data-v3-select=legacy-data]').count(),1,'catalog renders while overview is suspended');
+  assert.equal(await page.locator('.capacity-value-data b').textContent(),'142.00 GiB');
+  assert.equal(await page.locator('.v4-training-card').first().locator('.v3-server-name small b').textContent(),'300.00 GiB','per-node capacity renders before overview');
+  assert.deepEqual(await page.locator('.v4-training-card .v3-server-name small b').allTextContents(),machines.map(()=>'300.00 GiB'));
+  assert.equal(await page.locator('.v4-free b').textContent(),'未知','public capacity measures cache disk, not an unobserved warehouse');
+  await page.screenshot({path:join(output,'member-progressive-pending-1440.png'),fullPage:true});
+  await page.evaluate(()=>overviewPending);
+  assert.equal(await page.locator('[data-v3-select=legacy-data]').count(),1,'eight-second timeout retains catalog');
+  assert.equal(await page.locator('.v4-training-card').first().locator('.v3-server-name small b').textContent(),'300.00 GiB');
+  await page.evaluate(()=>{overviewRelease(snapshot);waitReply=null;});
+  assert.equal(await page.locator('[data-v3-select=sample-data]').count(),0,'a late reply after timeout cannot replace fallback observations');
+  await page.evaluate(({first,GiB})=>view.capacity({machine:first,available:true,filesystemBytes:1000*GiB,availableBytes:300*GiB,reserveBytes:50*GiB,usableBytes:250*GiB},first),{first:machines[0].id,GiB});
+ }
+ const callsBeforeLeaving=await page.evaluate(()=>calls);
  await page.evaluate(async()=>{document.body.dataset.room='work';await view.loadOverview();document.body.dataset.room='datasets';});
- assert.deepEqual(await page.evaluate(()=>calls),[],'No overview read outside the dataset room');
+ assert.deepEqual(await page.evaluate(()=>calls),callsBeforeLeaving,'No overview read outside the dataset room');
  await page.evaluate(async()=>{reply={protocol:0};await view.loadOverview();});assert.equal(await page.locator('.capacity-warehouse').count(),1);assert.equal(await page.locator('[data-v3-select=legacy-data]').count(),1);
  await page.evaluate(async()=>{reply={...snapshot,partial:true,datasets:[],warehouse:{state:'UNKNOWN',volumes:[]}};await view.loadOverview();});
  assert.equal(await page.locator('[data-v3-select=legacy-data]').count(),1,'An empty incomplete overview cannot erase a confirmed existing catalog');
@@ -114,7 +135,8 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  const segments=await firstCard.locator('.v4-training-bar').evaluate(node=>({width:node.clientWidth,parts:[...node.querySelectorAll(':scope>i:not(.v4-budget)')].map(row=>row.getBoundingClientRect().width)}));
  assert(segments.parts.every(value=>value>=0)&&segments.parts.reduce((a,b)=>a+b,0)<=segments.width+1,'inconsistent logical amounts cannot overflow the real disk bar');
  await page.evaluate(()=>{const value=structuredClone(snapshot);value.caches[0].readyContentBytes=0;value.caches[0].usageComplete=false;view.storageOverview(value);});
- assert.equal(await firstCard.locator('.v4-data-value').textContent(),(role==='admin'?'284.00':'142.00')+' GiB+','an incomplete zero is supplemented only by this account\'s current readable READY catalog versions');
+ assert.equal(await firstCard.locator('.v4-data-value').textContent(),'≥ '+(role==='admin'?'284.00':'142.00')+' GiB','an incomplete zero is supplemented only by this account\'s current readable READY catalog versions');
+ assert(!await page.locator('.v4-training').textContent().then(text=>text.includes('0 B+')));
  assert(!await page.locator('.v4-training').textContent().then(text=>text.includes('容器')));
  await page.evaluate(()=>{const value=structuredClone(snapshot);Object.assign(value.caches[0].volume,{totalBytes:null,usedBytes:null,availableBytes:null,collectedAt:'2026-10-08T01:23:00Z'});view.storageOverview(value);});
  assert.equal(await firstCard.locator('.v3-server-name small b').textContent(),'未知','past collection time does not revive an old physical reading');

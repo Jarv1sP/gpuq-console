@@ -1,4 +1,4 @@
-import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName,adaptStorageOverview,overviewDatasetCatalog,displayStorageCapacity,datasetWarehouseMachines,warehouseStorageCards,adaptUploadTarget,hasReadableLocalOriginal} from './dataset-catalog-model.js';
+import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName,adaptStorageOverview,readStorageOverview,overviewDatasetCatalog,displayStorageCapacity,datasetWarehouseMachines,warehouseStorageCards,adaptUploadTarget,hasReadableLocalOriginal} from './dataset-catalog-model.js';
 import {serverSelectLabel} from './workbench-ui.js';
 import {datasetLabelClient,normalizeDatasetDisplayName} from './dataset-label-client.js';
 import {createUploadMeter} from './dataset-upload-metrics.js';
@@ -228,7 +228,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  async function loadOverview(){
   if(!store.production||!store.principal||section.hidden||document.body.dataset.room!=='datasets')return;
   const expected=account(),token=epoch,request=++overviewRequest;overviewAbort?.abort();const controller=new AbortController();overviewAbort=controller;
-  try{const value=await store.call('datasets.overview',{},{signal:controller.signal});if(current(expected,token)&&request===overviewRequest&&!section.hidden&&document.body.dataset.room==='datasets')storageOverview(value);}
+  try{const value=await readStorageOverview(store,{signal:controller.signal});if(current(expected,token)&&request===overviewRequest&&!section.hidden&&document.body.dataset.room==='datasets')storageOverview(value);}
   catch{if(current(expected,token)&&request===overviewRequest){overview=null;capacityOverview();if(legacyCatalog)applyCatalog();}}
  }
  function catalogUnavailable(){retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();memberSpace?.render();}

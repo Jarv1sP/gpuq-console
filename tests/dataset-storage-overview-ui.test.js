@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adaptOriginal,adaptUploadTarget,adaptStorageOverview,overviewDatasetCatalog,readableDatasetCatalog,aggregateDatasetCatalog,displayStorageCapacity,warehouseStorageCards,datasetWarehouseMachines} from '../dist/dataset-catalog-model.js';
+import {adaptOriginal,adaptUploadTarget,adaptStorageOverview,readStorageOverview,STORAGE_OVERVIEW_TIMEOUT_MS,overviewDatasetCatalog,readableDatasetCatalog,aggregateDatasetCatalog,displayStorageCapacity,warehouseStorageCards,datasetWarehouseMachines} from '../dist/dataset-catalog-model.js';
 import {warehouseCapacityHTML,warehouseCardHTML,storageCapacityDetailHTML,cacheCapacityRatio,trainingCapacitySegments,trainingCardHTML,trainingLegendHTML} from '../dist/dataset-flow.js';
 const version='a'.repeat(64),at='2026-10-08T01:23:00Z';
 const volume=(extra={})=>({id:'volume-a',state:'READY',checkedAt:at,totalBytes:1000,usedBytes:700,availableBytes:300,reserveBytes:50,usableBytes:250,...extra});
@@ -19,12 +19,13 @@ test('warehouse, registered cache and physical disk use independent quantities',
  assert.doesNotMatch(html,/原件|软件预算|所在磁盘|承载卷|只预警|<p|<script/);
  assert.match(html,/title="检查于/);assert.equal((html.match(/class="(?:cache|used|free|reserve)"/g)||[]).length,20);
 });
-test('null and invalid quantities stay unknown; incomplete confirmed quantities keep a plus and real zero stays zero',()=>{
+test('null and invalid quantities stay unknown; incomplete quantities show a lower bound and confirmed zero stays zero',()=>{
  const raw=snapshot();raw.warehouse.volumes[0].volume.totalBytes=null;raw.caches[0].readyContentBytes=0;raw.caches[0].usageComplete=false;
  const result=adaptStorageOverview(raw);assert.equal(result.warehouse.totalBytes,null);assert.equal(result.warehouse.known,false);assert.equal(cacheCapacityRatio(result.caches[0]),0);
- assert.match(warehouseCapacityHTML(result.warehouse,at),/未知/);assert.doesNotMatch(storageCapacityDetailHTML(result.caches[0]),/>未知/,'a known partial zero is 0+, not unknown');
- assert.match(storageCapacityDetailHTML(result.caches[0]),/0 B\+<small>/);assert.match(storageCapacityDetailHTML(result.caches[0]),/title="部分统计/);
+ assert.match(warehouseCapacityHTML(result.warehouse,at),/未知/);assert.doesNotMatch(storageCapacityDetailHTML(result.caches[0]),/>未知/,'a known partial zero is a lower bound, not unknown');
+ assert.match(storageCapacityDetailHTML(result.caches[0]),/≥ 0 B<small>/);assert.doesNotMatch(storageCapacityDetailHTML(result.caches[0]),/0 B\+/);assert.match(storageCapacityDetailHTML(result.caches[0]),/title="部分统计/);
  raw.caches[0].usageComplete=true;assert.equal(cacheCapacityRatio(adaptStorageOverview(raw).caches[0]),0);
+ assert.match(storageCapacityDetailHTML(adaptStorageOverview(raw).caches[0]),/>0 B<small>/);assert.doesNotMatch(storageCapacityDetailHTML(adaptStorageOverview(raw).caches[0]),/≥/);
  for(const value of [-1,'300',NaN]){raw.caches[0].readyContentBytes=value;assert.equal(adaptStorageOverview(raw).caches[0].readyContentBytes,null);}
 });
 test('warehouse other content never becomes negative when logical content exceeds physical usage',()=>{
@@ -38,6 +39,24 @@ const legacyModel=()=>aggregateDatasetCatalog({machine:'server-a',checkedAt:at,p
   version,state:'READY',canUse:true,bytes:200,files:2,ownerLabel:'所属用户：alice',locations:[
    {machine:'server-a',dataset:'physical-a',state:'READY',canUse:true},{machine:'server-b',dataset:'physical-b',state:'READY',canUse:true}]}]}]});
 const oldCapacity={machine:'server-a',available:true,filesystemBytes:1000,availableBytes:300,reserveBytes:50,usableBytes:250};
+test('overview has an eight-second deadline even when a read ignores abort; late data cannot replace the fallback',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let signal,resolve;
+ const store={call(op,args,options){assert.equal(op,'datasets.overview');assert.deepEqual(args,{});signal=options.signal;return new Promise(done=>{resolve=done;});}};
+ const pending=readStorageOverview(store),failure=assert.rejects(pending,/存储总览超时/);
+ t.mock.timers.tick(STORAGE_OVERVIEW_TIMEOUT_MS-1);assert.equal(signal.aborted,false);
+ t.mock.timers.tick(1);await failure;assert.equal(signal.aborted,true);
+ resolve(snapshot());await failure;
+ assert.deepEqual(await readStorageOverview({call:async()=>snapshot()}),snapshot(),'a later successful refresh still upgrades readings');
+});
+test('public per-node capacity supplies real disk measurements and observation time before overview',()=>{
+ const capacity={machine:'server-a',available:true,filesystemBytes:1000,availableBytes:300,reserveBytes:50,usableBytes:250,checkedAt:at,collectedAt:at,guarded:true};
+ const result=displayStorageCapacity(null,legacyModel(),new Map([['server-a',capacity]]));
+ assert.equal(result.caches[0].volume.totalBytes,1000);assert.equal(result.caches[0].volume.usedBytes,700);assert.equal(result.caches[0].volume.availableBytes,300);
+ assert.equal(result.caches[0].readyContentBytes,200);assert.equal(result.caches[0].budgetBytes,null);assert.equal(result.caches[0].projectBytes,null);assert.equal(result.caches[0].volume.collectedAt,at);
+ assert.equal(result.warehouse.totalBytes,null,'a training disk still cannot stand in for an unknown warehouse');
+ capacity.available=false;
+ const failed=displayStorageCapacity(null,legacyModel(),new Map([['server-a',capacity]]));assert.equal(failed.caches[0].volume.totalBytes,null);assert.equal(failed.caches[0].projectBytes,null);
+});
 test('upload policy target requires explicit available true and a nonempty targetMachine',()=>{
  for(const raw of [null,{}, {available:true},{available:true,targetMachine:null},{available:true,targetMachine:''},
   {available:true,targetMachine:' '},{available:true,targetMachine:1},{available:false,targetMachine:'new-warehouse'},
@@ -80,7 +99,7 @@ test('v4 omits unknown container quantities and preserves independent collection
 test('v4 incomplete overview usage cannot show zero while its readable catalog proves READY cache bytes',()=>{
  const raw=snapshot();raw.caches[0].readyContentBytes=0;raw.caches[0].usageComplete=false;
  const model=legacyModel(),facts=displayStorageCapacity(adaptStorageOverview(raw),model);
- assert.equal(facts.caches[0].readyContentBytes,200);assert.equal(facts.caches[0].usageComplete,false);assert.match(trainingCardHTML(facts.caches[0]),/200 B\+/);
+ assert.equal(facts.caches[0].readyContentBytes,200);assert.equal(facts.caches[0].usageComplete,false);assert.match(trainingCardHTML(facts.caches[0]),/≥ 200 B/);
  model.datasets[0].versions[0].servers[0].state='NOT_LOCAL';
  assert.equal(displayStorageCapacity(adaptStorageOverview(raw),model).caches[0].readyContentBytes,0,'a released or absent catalog location cannot restore bytes');
 });
@@ -139,6 +158,9 @@ test('v4 uses only explicitly identified warehouse volumes, and unknown snapshot
  const overview=adaptStorageOverview(raw);
  assert.equal(warehouseStorageCards(overview,model,new Map([['server-a',capacity]]))[0].totalBytes,null,'a past successful timestamp is not a current capacity');
  assert.equal(displayStorageCapacity(overview,model,new Map([['server-a',oldCapacity]])).caches[0].volume.totalBytes,null,'old cached reads cannot fill a failed collected snapshot');
+ const fresh={...oldCapacity,collectedAt:'2026-10-08T02:00:00Z',checkedAt:'2026-10-08T02:00:00Z'};
+ const refreshed=displayStorageCapacity(overview,model,new Map([['server-a',fresh]])).caches[0].volume;
+ assert.equal(refreshed.totalBytes,1000);assert.equal(refreshed.availableBytes,300);assert.equal(refreshed.collectedAt,fresh.collectedAt,'a genuinely newer independent capacity read replaces an older failed observation');
 });
 test('v4 warehouse counts use the same visible locations as filtering, with volume counts preferred when supplied',()=>{
  const raw=snapshot();raw.warehouse.volumes[0].machine='server-b';raw.datasets[0].versions[0].originals[0].machine='server-b';
@@ -181,7 +203,7 @@ test('missing catalog, invalid capacity and failed nodes do not turn into zero c
  model.machines[0].state='ok';model.datasets[0].versions[0].bytes=null;
  assert.equal(displayStorageCapacity(null,model).caches[0].readyContentBytes,null,'a READY copy with no size is unknown, not a zero-size copy');
  model.datasets[0].versions[0].bytes=200;model.capacityUsageComplete=false;
- assert.match(storageCapacityDetailHTML(displayStorageCapacity(null,model).caches[0]),/200 B\+/,'filtered metadata supplies a lower bound, not complete fleet usage');
+ assert.match(storageCapacityDetailHTML(displayStorageCapacity(null,model).caches[0]),/≥ 200 B/,'filtered metadata supplies a lower bound, not complete fleet usage');
 });
 test('a partial new overview fills only missing display facts and cannot mint a protocol or overwrite known values',()=>{
  const raw=snapshot();raw.partial=true;raw.warehouse.state='UNKNOWN';raw.warehouse.volumes=[];

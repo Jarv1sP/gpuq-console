@@ -1,22 +1,22 @@
-import {memberStorageGroups} from './member-storage-model.js';
+import {memberStorageGroups,adaptStorageUsage} from './member-storage-model.js';
 import {transferBytes} from './data-route.js';
 import {canCacheAction,mountCacheOperation} from './dataset-cache-operation.js';
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const amount=value=>value===null?'—':transferBytes(value);
 export function mountMemberStorage(section,{store,catalog,machines,refresh,onViewChanged=()=>{}}){
  const host=section.querySelector('#member-storage'),warehouse=section.querySelector('.v3-split'),tabs=section.querySelector('.storage-view-tabs');
- let view='warehouse',projects=new Map(),caps=new Map(),reading=new Set(),controller=null,request=0,busy=false,partial=false,groups=[],dialog=null,operation=null,operationLifetime=null,template='';
+ let view='warehouse',projects=new Map(),usage=new Map(),usageTotals=new Map(),caps=new Map(),reading=new Set(),controller=null,request=0,busy=false,partial=false,groups=[],dialog=null,operation=null,operationLifetime=null,template='';
  const identity=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
  const active=()=>view==='mine'&&store.production&&!!store.principal&&!section.hidden&&!document.hidden&&document.body.dataset.room==='datasets';
  const keyOf=row=>JSON.stringify([row.machine,row.dataset,row.version]);
  const observer=new IntersectionObserver(entries=>{for(const entry of entries)if(entry.isIntersecting){const row=groups.flatMap(group=>group.items).find(row=>row.kind==='cache'&&row.key===entry.target.dataset.storageCache);if(row)void capability(row);}});
  function close(){operationLifetime?.abort();operation?.destroy();operation=null;operationLifetime=null;dialog?.close();}
  function stop(){request++;controller?.abort();controller=null;busy=false;reading.clear();observer.disconnect();close();}
- function reset(){stop();projects.clear();caps.clear();partial=false;groups=[];template='';view='warehouse';syncView();render();}
+ function reset(){stop();projects.clear();usage.clear();usageTotals.clear();caps.clear();partial=false;groups=[];template='';view='warehouse';syncView();render();}
  function syncView(){warehouse.hidden=view==='mine';host.hidden=view!=='mine';for(const tab of tabs.querySelectorAll('[data-storage-view]')){const selected=tab.dataset.storageView===view;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;}onViewChanged(view);}
  function render(){
   if(!host?.isConnected)return;
-  groups=memberStorageGroups({principal:store.principal,machines:machines(),catalog:catalog(),projects});
+  groups=memberStorageGroups({principal:store.principal,machines:machines(),catalog:catalog(),projects,usage,usageTotals});
   const value=(busy?'<p class="storage-mine-status" role="status">读取中</p>':partial?'<p class="storage-mine-status" role="status">部分项目待确认 <button type="button" class="button quiet" data-storage-retry>重试</button></p>':'')+
    (groups.length?'<div class="storage-mine-key"><span><i class="project"></i>容器</span><span><i></i>数据集缓存</span></div>':'')+groups.map(group=>`<article class="storage-mine-machine" data-storage-machine="${esc(group.machine)}"><header><code title="${esc(group.machine)}">${esc(group.machine)}</code><span class="storage-mine-total"><b class="num">${esc(amount(group.totalBytes))}</b> 我的占用</span></header>${group.totalBytes!==null?`<div class="storage-mine-bar" aria-label="我的占用 ${esc(amount(group.totalBytes))}"><i class="project" style="width:${group.totalBytes?group.projectBytes/group.totalBytes*100:0}%"></i><i style="width:${group.totalBytes?group.cacheBytes/group.totalBytes*100:0}%"></i></div>`:''}<div class="storage-mine-rows">${group.items.map(row=>`<div class="storage-mine-row" ${row.kind==='cache'?`data-storage-cache="${esc(row.key)}"`:''}><i class="${row.kind==='project'?'project':''}" aria-hidden="true"></i><span class="storage-mine-name"><b title="${esc(row.name)}">${esc(row.name)}</b><small title="${esc(row.kind==='project'?row.project:row.version)}">${row.kind==='project'?'个人容器':esc(row.version.slice(0,12))}</small></span><span class="storage-mine-size num">${esc(amount(row.bytes))}</span><span class="storage-mine-action">${row.kind==='project'?`<button class="button quiet" type="button" data-storage-project="${esc(row.project)}" data-machine="${esc(row.machine)}" ${busy||!group.projectsConfirmed?'disabled':''}>打开</button>`:canCacheAction(caps.get(row.key),'release')?`<button class="button quiet" type="button" data-storage-release="${esc(row.key)}">释放</button>`:''}</span></div>`).join('')}</div></article>`).join('')+(!groups.length&&!busy&&!partial?'<p class="storage-mine-empty">暂无内容</p>':'');
   if(value!==template){const focused=host.contains(document.activeElement)?document.activeElement:null,project=focused?.dataset.storageProject,machine=focused?.dataset.machine,release=focused?.dataset.storageRelease;template=value;host.innerHTML=value;const next=project?[...host.querySelectorAll('[data-storage-project]')].find(node=>node.dataset.storageProject===project&&node.dataset.machine===machine):release?[...host.querySelectorAll('[data-storage-release]')].find(node=>node.dataset.storageRelease===release):null;next?.focus({preventScroll:true});}
@@ -25,6 +25,8 @@ export function mountMemberStorage(section,{store,catalog,machines,refresh,onVie
  async function load(){
   if(!active())return;stop();controller=new AbortController();const signal=controller.signal,expected=identity(),token=request;busy=true;partial=false;caps.clear();render();
   const valid=()=>!signal.aborted&&expected===identity()&&token===request&&active();
+  usage.clear();usageTotals.clear();
+  store.call('storage.usage.mine',{},{signal}).then(raw=>{if(!valid())return;const value=adaptStorageUsage(raw);usage=value.usage;usageTotals=value.totals;render();}).catch(()=>{});
   for(const row of machines()){
    try{const result=await store.call('projects.list',{machine:row.id},{signal});if(!valid())return;if(!Array.isArray(result?.projects))throw Error('项目列表待确认');projects.set(row.id,{confirmed:true,projects:result.projects});}
    catch{if(!valid())return;partial=true;projects.set(row.id,{confirmed:false,projects:projects.get(row.id)?.projects||[]});}
