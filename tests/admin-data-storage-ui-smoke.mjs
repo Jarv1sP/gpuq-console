@@ -18,7 +18,7 @@ const records=[];
 try{
   await mkdir(out,{recursive:true});
   for(const role of ['member','admin'])for(const width of [1440,1024,390,320]){
-    const context=await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'}),page=await context.newPage(),calls=[],errors=[],pins=new Set(['foreign-pin']);let losePin=false,denyPinStatus=false,cloudDisabled=true,lostReconnect=false;
+    const context=await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'}),page=await context.newPage(),calls=[],errors=[],pins=new Set(['foreign-pin']);let losePin=false,denyPinStatus=false,cloudDisabled=true,lostReconnect=false,measuredUsage=false;
     page.on('pageerror',error=>errors.push(error.message));
     await context.route('**/*',async route=>{
       const url=new URL(route.request().url());assert.equal(url.origin,origin,'no external request');
@@ -29,6 +29,7 @@ try{
         const reply=value=>route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
         if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：陈宇轩',versions:[{version,state:'READY',bytes:7*1024**3,files:120,warehouseReady:args.machine===machines.at(-1).id}]},{dataset:'shared-data',ownerLabel:'共享授权用户：陈宇轩、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50,warehouseReady:false}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
         if(operation==='datasets.overview'){assert.deepEqual(args,{});return reply({protocol:0});}
+        if(operation==='storage.usage.users'){assert.deepEqual(args,{});return reply({protocol:1,users:measuredUsage?[{userId:'chen-id',label:'陈宇轩',machines:machines.map(row=>({machine:row.id,available:true,collectedAt:'2026-10-08T06:00:00Z',complete:true,projectBytes:3*1024**3,projects:[{project:'train',name:'train',bytes:3*1024**3}]}))}]:[]});}
         if(operation==='datasets.catalog')return reply({machine:args.machine,datasetDelete:0,partial:false,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[{dataset:'samples',versions:[{version,locations:[{machine:machines[0].id,dataset:'samples',storage:{dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:machines.at(-1).id}}]}]}]});
         if(operation==='datasets.storage.status'){
           if(denyPinStatus&&args.pinId)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'原保留状态待确认'})});
@@ -77,17 +78,23 @@ try{
     await chen.locator('button').click();assert.equal(await chen.locator('button').getAttribute('aria-expanded'),'true');
     assert.match(await page.locator('.storage-member-detail').textContent(),/容器 — · 缓存 9.00 GiB/);assert.match(await page.locator('.storage-member-detail').textContent(),/仓库1 个数据集 · 7.00 GiB/);
     assert.deepEqual(await page.locator('.storage-member-detail .server-id').evaluateAll(nodes=>nodes.map(node=>node.title)),machines.map(row=>row.id).sort());
-    assert.equal(calls.length,memberReads,'member tab and row expansion only read the current trusted directory');
+    assert.deepEqual(calls.slice(memberReads),[{operation:'storage.usage.users',args:{}}],'member tab adds only the authenticated read; expansion never writes');
     const memberReport=await inspectGeometry(page,geometry);assert(memberReport.pass,JSON.stringify(memberReport.failures));records.push({role,width,memberReport});
     assert.equal(await chen.locator('[data-member-size=cache]').isVisible(),true,'phone keeps actual cache size');assert.equal(await chen.locator('[data-member-size=container]').isVisible(),true,'phone keeps the unknown container value');
     assert(await chen.locator('button').evaluate(node=>node.getBoundingClientRect().height>=44));
     assert.equal(await chen.locator('button').evaluate(node=>getComputedStyle(node).borderTopWidth),'0px','rows keep a single clean table boundary');
     await page.screenshot({path:join(out,'members-expanded-'+width+'.png'),fullPage:true});
     await chen.locator('button').click();assert.equal(await page.locator('.storage-member-detail').count(),0);await page.locator('[data-storage-view=servers]').click();assert.equal(await page.locator('.storage-operations').isVisible(),true);
-    await page.locator('[data-storage-view=servers]').focus();await page.keyboard.press('ArrowRight');assert.equal(await page.locator('[data-storage-view=members]').getAttribute('aria-selected'),'true');await page.keyboard.press('Home');assert.equal(await page.locator('[data-storage-view=servers]').getAttribute('aria-selected'),'true');assert.equal(calls.length,memberReads,'keyboard tab switches remain read-only');
+    await page.locator('[data-storage-view=servers]').focus();await page.keyboard.press('ArrowRight');assert.equal(await page.locator('[data-storage-view=members]').getAttribute('aria-selected'),'true');await page.keyboard.press('Home');assert.equal(await page.locator('[data-storage-view=servers]').getAttribute('aria-selected'),'true');assert.deepEqual(calls.slice(memberReads),[{operation:'storage.usage.users',args:{}},{operation:'storage.usage.users',args:{}}],'keyboard tab switches remain limited to authenticated read-only usage');
     const help=await page.locator('[data-copy-help]').evaluateAll(nodes=>nodes.map(node=>({border:getComputedStyle(node).borderTopWidth,radius:getComputedStyle(node).borderRadius})));assert(help.every(row=>row.border==='0px'&&row.radius==='50%'),'all help buttons retain the shared borderless circle');
     const report=await inspectGeometry(page,geometry);assert(report.pass,JSON.stringify(report.failures));records.push({role,width,report});
     await page.screenshot({path:join(out,'directory-'+width+'.png'),fullPage:true});
+    measuredUsage=true;await page.evaluate(()=>store.users=[{id:'chen-id',username:'陈宇轩',name:'陈宇轩'}]);
+    await page.locator('[data-storage-view=members]').click();await page.waitForFunction(()=>document.querySelector('[data-storage-member-row="陈宇轩"] [data-member-size=container]')?.textContent==='12.00 GiB');
+    assert.equal(await page.locator('[data-storage-member-row]').count(),2,'exact account identity merges usage without duplicating the member');
+    await chen.locator('button').click();assert.match(await page.locator('.storage-member-detail').textContent(),/容器 3.00 GiB · 缓存 9.00 GiB/);
+    assert.equal(await bob.locator('[data-member-size=container]').textContent(),'—','missing user observations still stay unknown');
+    await page.screenshot({path:join(out,'members-measured-'+width+'.png'),fullPage:true});await page.locator('[data-storage-view=servers]').click();
     await page.locator('[data-storage-select]').nth(1).click();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);assert.equal(await page.locator('[data-storage-machine]').textContent(),machines[1].id);assert(!calls.some(row=>row.operation==='datasets.storage.status'&&row.args.dataset));assert.equal(calls.filter(row=>row.operation==='datasets.storage.plan').length,machines.length,'server selection reuses explicit overview without polling');await page.locator('[data-storage-select]').first().click();await page.waitForFunction(()=>!document.querySelector('[data-storage-refresh]').disabled);
     const detail=page.locator('.storage-pin-row').filter({hasText:'samples'});await detail.locator('summary').click();
     await page.waitForFunction(()=>document.querySelector('[data-cache-retention=pin]')&&!document.querySelector('[data-cache-retention=pin]').disabled);

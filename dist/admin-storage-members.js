@@ -1,13 +1,14 @@
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
 import {hasDatabaseOriginal} from './dataset-flow.js';
+import {adaptStorageUsage} from './member-storage-model.js';
 const hash=/^[a-f0-9]{64}$/,id=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const username=/^[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}$/u;
 const unknown='\u0000unknown',number=value=>Number.isSafeInteger(value)&&value>=0;
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const amount=value=>number(value)?transferBytes(value):'—';
 
-// Contract pending: no inferred project size, owner, protocol or API request.
+// Finalized protocol: use actual allocated bytes, never shared-layer estimates.
 export function adaptProjectUsage(raw){return typeof raw?.bytes==='number'&&number(raw.bytes)?raw.bytes:null;}
 function owners(label){
   if(typeof label!=='string'||!/^(所属用户：|共享授权用户：)/.test(label))return [unknown];
@@ -19,15 +20,16 @@ function fact(map,key,bytes){
   if(!map.has(key))map.set(key,value);else if(map.get(key)!==value)map.set(key,null);
 }
 function total(map){const values=[...map.values()],sum=values.reduce((value,row)=>value+(row??0),0);return values.every(number)&&number(sum)?sum:null;}
-export function storageMemberRows(catalog){
-  if(!Array.isArray(catalog?.datasets))return {rows:[],available:false,partial:true};
-  const rows=new Map(),partial=catalog.partial===true;
+export function storageMemberRows(catalog,usage=null,users=[]){
+  const hasCatalog=Array.isArray(catalog?.datasets),hasUsage=usage?.protocol===1&&Array.isArray(usage.users);
+  if(!hasCatalog&&!hasUsage)return {rows:[],available:false,partial:true};
+  const rows=new Map(),partial=!hasCatalog||catalog.partial===true;
   const rowFor=name=>{
     if(!rows.has(name))rows.set(name,{key:name===unknown?'@unknown':name,name:name===unknown?'所属未知':name,warehouse:new Map(),cache:new Map(),warehouseNames:new Set(),cacheNames:new Set(),warehouseUnknown:false,cacheUnknown:false,machines:new Map()});
     return rows.get(name);
   };
   const machineFor=(row,machine)=>{if(!row.machines.has(machine))row.machines.set(machine,{machine,warehouse:new Map(),cache:new Map(),warehouseNames:new Set(),warehouseUnknown:false,cacheUnknown:false});return row.machines.get(machine);};
-  for(const item of catalog.datasets){
+  for(const item of catalog?.datasets||[]){
     if(!id.test(item?.dataset)||!Array.isArray(item.versions))continue;
     for(const registration of item.registrations||[])for(const owner of owners(registration.ownerLabel))rowFor(owner);
     for(const version of item.versions){
@@ -51,11 +53,26 @@ export function storageMemberRows(catalog){
       }
     }
   }
-  return {available:true,partial,rows:[...rows.values()].map(row=>({key:row.key,name:row.name,
+  const result={available:true,partial,rows:[...rows.values()].map(row=>({key:row.key,name:row.name,
     warehouseBytes:partial||row.warehouseUnknown?null:total(row.warehouse),warehouseDatasets:partial||row.warehouseUnknown?null:row.warehouseNames.size,containerBytes:null,
     cacheBytes:partial||row.cacheUnknown?null:total(row.cache),cacheDatasets:row.cacheNames.size,
     machines:[...row.machines.values()].sort((a,b)=>a.machine.localeCompare(b.machine)).map(machine=>({machine:machine.machine,containerBytes:null,cacheBytes:machine.cacheUnknown?null:total(machine.cache),warehouseBytes:machine.warehouseUnknown?null:total(machine.warehouse),warehouseDatasets:machine.warehouseUnknown?null:machine.warehouseNames.size}))
   })).sort((a,b)=>a.key==='@unknown'?1:b.key==='@unknown'?-1:(b.cacheBytes??-1)-(a.cacheBytes??-1)||a.name.localeCompare(b.name))};
+  for(const user of hasUsage?usage.users:[]){
+    if(typeof user?.userId!=='string'||!Array.isArray(user.machines))continue;
+    const account=users.find(row=>row.id===user.userId),value=adaptStorageUsage({protocol:1,machines:user.machines});
+    let row=account?.username?result.rows.find(row=>row.key===account.username):null;
+    if(!row){row={key:'@user:'+user.userId,name:user.label||account?.name||account?.username||user.userId,warehouseBytes:hasCatalog&&!partial?0:null,warehouseDatasets:hasCatalog&&!partial?0:null,cacheBytes:hasCatalog&&!partial?0:null,cacheDatasets:0,containerBytes:null,machines:[]};result.rows.push(row);}
+    const totals=user.machines.map(machine=>value.totals.get(machine.machine));
+    row.containerBytes=totals.length&&totals.every(number)&&number(totals.reduce((n,bytes)=>n+bytes,0))?totals.reduce((n,bytes)=>n+bytes,0):null;
+    for(const machine of user.machines){
+      if(!id.test(machine?.machine||''))continue;
+      let target=row.machines.find(value=>value.machine===machine.machine);
+      if(!target){target={machine:machine.machine,warehouseBytes:hasCatalog&&!partial?0:null,warehouseDatasets:hasCatalog&&!partial?0:null,cacheBytes:hasCatalog&&!partial?0:null,containerBytes:null};row.machines.push(target);}
+      target.containerBytes=value.totals.get(machine.machine)??null;
+    }
+  }
+  return result;
 }
 function bar(row){
   const parts=[['warehouse',row.warehouseBytes],['project',row.containerBytes],['cache',row.cacheBytes]],sum=parts.reduce((value,[,bytes])=>value+(bytes??0),0);
@@ -68,15 +85,16 @@ export function memberStorageHTML(model,expanded=new Set()){
   const counts=value=>value===null?'—':value;
   return `<table class="storage-member-table storage-user-table" role="table" aria-label="成员存储"><thead><tr role="row"><th scope="col">成员</th><th scope="col" class="num">仓库</th><th scope="col" class="num storage-member-hide">容器</th><th scope="col" class="num storage-member-hide">缓存</th><th scope="col" class="storage-member-hide"><span class="sr-only">占用比例</span></th></tr></thead><tbody>${model.rows.map((row,index)=>{
     const open=expanded.has(row.key),detail='storage-member-detail-'+index;
-    return `<tr role="row" data-storage-member-row="${esc(row.key)}" class="${open?'open':''}"><td><button type="button" data-storage-member="${esc(row.key)}" aria-expanded="${open}" aria-controls="${detail}" title="${esc(row.name)}"><span class="storage-member-avatar" aria-hidden="true">${esc([...row.name][0])}</span><span>${esc(row.name)}</span></button></td><td class="num" data-member-size="warehouse" data-label="仓库">${amount(row.warehouseBytes)}</td><td class="num" data-member-size="container" data-label="容器">—</td><td class="num" data-member-size="cache" data-label="缓存" title="${row.cacheDatasets} 个数据集">${amount(row.cacheBytes)}</td><td class="storage-member-ratio">${bar(row)}</td></tr>${open?`<tr class="storage-member-detail" id="${detail}" role="row"><td colspan="5"><div class="storage-member-grid">${row.machines.map(machine=>`<div><b>${serverIdHTML(machine.machine)}</b><span>容器 — · 缓存 ${amount(machine.cacheBytes)}</span>${machine.warehouseDatasets||machine.warehouseDatasets===null?`<span>仓库 ${counts(machine.warehouseDatasets)} 个数据集 · ${amount(machine.warehouseBytes)}</span>`:''}</div>`).join('')}<div><b>仓库</b><span>${counts(row.warehouseDatasets)} 个数据集 · ${amount(row.warehouseBytes)}</span></div></div></td></tr>`:''}`;
+    return `<tr role="row" data-storage-member-row="${esc(row.key)}" class="${open?'open':''}"><td><button type="button" data-storage-member="${esc(row.key)}" aria-expanded="${open}" aria-controls="${detail}" title="${esc(row.name)}"><span class="storage-member-avatar" aria-hidden="true">${esc([...row.name][0])}</span><span>${esc(row.name)}</span></button></td><td class="num" data-member-size="warehouse" data-label="仓库">${amount(row.warehouseBytes)}</td><td class="num" data-member-size="container" data-label="容器">${amount(row.containerBytes)}</td><td class="num" data-member-size="cache" data-label="缓存" title="${row.cacheDatasets} 个数据集">${amount(row.cacheBytes)}</td><td class="storage-member-ratio">${bar(row)}</td></tr>${open?`<tr class="storage-member-detail" id="${detail}" role="row"><td colspan="5"><div class="storage-member-grid">${row.machines.map(machine=>`<div><b>${serverIdHTML(machine.machine)}</b><span>容器 ${amount(machine.containerBytes)} · 缓存 ${amount(machine.cacheBytes)}</span>${machine.warehouseDatasets||machine.warehouseDatasets===null?`<span>仓库 ${counts(machine.warehouseDatasets)} 个数据集 · ${amount(machine.warehouseBytes)}</span>`:''}</div>`).join('')}<div><b>仓库</b><span>${counts(row.warehouseDatasets)} 个数据集 · ${amount(row.warehouseBytes)}</span></div></div></td></tr>`:''}`;
   }).join('')}</tbody></table>`;
 }
 export function mountAdminStorageMembers(host,{store,catalog,signal}={}){
-  const identity=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]),owner=identity(),expanded=new Set();let html='',disposed=false;
+  const identity=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]),owner=identity(),expanded=new Set();let html='',disposed=false,usage=null;
   const allowed=()=>!disposed&&!signal?.aborted&&store.principal?.role==='admin'&&owner===identity();
-  function sync(){if(!allowed()){host.replaceChildren();return;}const model=storageMemberRows(catalog());const next=memberStorageHTML(model,expanded);if(html!==next){html=next;host.innerHTML=next;}}
+  function sync(){if(!allowed()){host.replaceChildren();return;}const model=storageMemberRows(catalog(),usage,store.users||[]);const next=memberStorageHTML(model,expanded);if(html!==next){html=next;host.innerHTML=next;}}
+  async function load(){if(!allowed()||!store.production)return;try{const result=await store.call('storage.usage.users',{},{signal});if(allowed()){usage=result;sync();}}catch{}}
   host.addEventListener('click',event=>{const row=event.target.closest('[data-storage-member-row]');if(!row||!host.contains(row)||!allowed())return;const key=row.dataset.storageMemberRow,focused=host.contains(document.activeElement)&&document.activeElement.hasAttribute('data-storage-member');expanded.has(key)?expanded.delete(key):expanded.add(key);sync();if(focused)[...host.querySelectorAll('[data-storage-member]')].find(node=>node.dataset.storageMember===key)?.focus();},{signal});
   const unsubscribe=store.onAuthChange?.(()=>{expanded.clear();html='';host.replaceChildren();});
   function destroy(){if(disposed)return;disposed=true;unsubscribe?.();host.replaceChildren();}
-  signal?.addEventListener('abort',destroy,{once:true});sync();return {sync,destroy};
+  signal?.addEventListener('abort',destroy,{once:true});sync();return {sync,load,destroy};
 }

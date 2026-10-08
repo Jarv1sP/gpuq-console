@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {adaptProjectUsage,memberStorageGroups} from '../dist/member-storage-model.js';
+import {adaptProjectUsage,adaptStorageUsage,memberStorageGroups} from '../dist/member-storage-model.js';
 const principal={userId:'me',username:'me',role:'member'},machines=[{id:'node-a'},{id:'node-b'}],version='a'.repeat(64);
 const dataset=(dataset,canUse,ownerLabel,states=['READY','READY'])=>({dataset,displayName:dataset,versions:[{version,bytes:20,canUse,ownerLabel,servers:states.map((state,i)=>({machine:machines[i].id,state,observed:true}))}]});
 const catalog={partial:false,datasets:[dataset('own',false,'所属用户：me'),dataset('grant',true,'所属用户：other',['READY','PREPARING']),dataset('private',false,'所属用户：other')]};
@@ -32,4 +32,14 @@ test('duplicate catalog locations are counted once and unknown cache sizes never
  const value=structuredClone(catalog);value.datasets[0].versions[0].servers.push({...value.datasets[0].versions[0].servers[0]});
  assert.equal(run({catalog:value})[0].totalBytes,40);value.datasets[0].versions[0].bytes=null;assert.equal(run({catalog:value})[0].totalBytes,null);
  value.datasets[0].versions[0].bytes=0;assert.equal(run({catalog:value})[0].totalBytes,20);
+});
+test('mine protocol exposes exact project bytes and account totals; partial/old nodes do not invent zero',()=>{
+ const raw={protocol:1,machines:[{machine:'node-a',available:true,collectedAt:'2026-10-08T06:00:00Z',complete:true,projectBytes:70,projects:[{project:'train',bytes:60}]},{machine:'node-b',available:false,collectedAt:null,complete:false,projectBytes:null,projects:[]}]};
+ const value=adaptStorageUsage(raw),listing=new Map(projects);listing.set('node-a',{confirmed:true,projects:[{project:'train',environmentMode:'oci'}]});
+ assert.equal(value.usage.get(JSON.stringify(['node-a','train'])).bytes,60);assert.equal(value.totals.get('node-a'),70);assert.equal(value.totals.has('node-b'),false);
+ const group=run({projects:listing,usage:value.usage,usageTotals:value.totals})[0];assert.equal(group.projectBytes,70);assert.equal(group.totalBytes,110,'account directory blocks come from the API total, not summed project estimates');
+ raw.machines[0].complete=false;raw.machines[0].projectBytes=null;let partial=adaptStorageUsage(raw);assert.equal(partial.usage.get(JSON.stringify(['node-a','train'])).bytes,60);assert.equal(partial.totals.get('node-a'),null);
+ assert.equal(run({projects:listing,usage:partial.usage,usageTotals:partial.totals})[0].totalBytes,null);
+ raw.machines[0].projects[0].bytes=null;assert.equal(adaptStorageUsage(raw).usage.get(JSON.stringify(['node-a','train'])).bytes,null);
+ assert.equal(adaptStorageUsage({...raw,protocol:2}).usage.size,0);
 });

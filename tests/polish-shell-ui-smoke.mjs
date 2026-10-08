@@ -12,6 +12,7 @@ import {MACHINES} from '../dist/machines.js';
 import {seedLegacy, password} from './maintenance-fixture.mjs';
 import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {layoutReadOperations,layoutReadReply} from './layout-read-fixtures.mjs';
 import {inspectGeometry, scanGeometry, layoutZooms, layoutWidths, layoutHeights} from './layout-geometry.mjs';
 
 const full = process.argv.includes('--full-scan');
@@ -221,6 +222,7 @@ try {
           }
           else if (operation === 'notifications.list') result = {items: []};
           else if (operation === 'logout') result = {loggedOut: true};
+          else if (layoutReadOperations.has(operation)) result = layoutReadReply(operation,args,{principal,state});
           else throw Error('Unexpected geometry fixture API: ' + operation);
           await json(route, {result, state}); return;
         }
