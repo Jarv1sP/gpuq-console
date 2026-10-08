@@ -137,6 +137,8 @@ ProjectOps 只认可绑定完整原收据摘要及快照 inode 的证明；单�
 
 只读内部 `datasets.training.status` 与 `storage.training.plan` 仅走正常训练执行桥，不扩展元数据或上传 forced key。客户端不提交 `projectFootprint`、`datasetFootprints`、物理路径、authority、容量计划或 hostAdmin；前端仍仅提交原固定项目和数据声明。
 
+自动选机的固定项目准备还使用私有 `storage.training.project.prepare`，数据准备使用 `storage.training.prepare`；执行桥必须同时精确放行这两个操作，不能用通配符，也不能加入公开 API 或文件上传专用桥。门户、桥与节点须配套发布：项目两端保存原作业／复制编号及同一不可变运行时，取消走原两端；校园物理路线、容量和版本检查失败均不回退旧复制。新增 `.training.json` 侧车存在时，旧 worker 与普通复制 RPC 必须拒绝，回滚前先确认所有相应准备已结束；不靠删侧车恢复。
+
 缺失缓存的准备也必须配套新的私有 `storage.training.prepare` 执行路径：Portal 在原作业／传输记录中先保存完整 spec、容量请求和原准备编号，节点按同一固定账号、版本、源／目标及不可变运行时执行。旧记录不自动升级；丢回执只查原操作，取消仍须证明原 worker 停止，UNKNOWN 保留原保护。分离运行时和执行桥的完整配套未确认前不能开放新训练准备，不能回退旧 worker、自动回收缓存或生成第二条传输。该内部上下文不接受客户端选择，也不投影到公开作业／传输响应。
 
 前端预检使用认证只读 `datasets.training.capabilities {machine,dataset,version}`，只能传这三个固定字段。返回 `{protocol:1,machine,dataset,version,warehouse:{available,reason}}`；`reason` 为 `null`、`maintenance`、`offline`、`protocol-unavailable`、`unverified`、`forbidden`、`machine-not-warehouse` 或 `not-ready`。这不是容量预留或训练授权，提交时仍重核全部条件；维护或旧／未知节点不开放仓库直读。查询走有界独立数据读取 lane，不等待全局写队列，前后重新验证登录与授权，不泄露物理源。

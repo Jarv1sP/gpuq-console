@@ -30,6 +30,56 @@ const list=value=>Array.isArray(value)?value:[];
 const text=value=>typeof value==='string'&&value?value:null;
 const number=value=>Number.isSafeInteger(value)&&value>=0?value:null;
 const copy=value=>value===undefined?null:structuredClone(value);
+export const STORAGE_READING_MAX_AGE_MS=10*60*1000;
+// Display-only memory: it never contains ACLs, READY locations or capabilities.
+export function createStorageDisplayHistory({now=Date.now}={}){
+  let scope=null;const kinds=new Map(),warehouses=new Set();
+  const group=kind=>{if(!kinds.has(kind))kinds.set(kind,new Map());return kinds.get(kind);};
+  const entry=(kind,key)=>{const rows=group(kind);if(!rows.has(key))rows.set(key,{fields:new Map(),pending:true,completed:false,failed:false,meta:{}});return rows.get(key);};
+  const get=(value,path)=>path.split('.').reduce((value,key)=>value?.[key],value);
+  const put=(value,path,next)=>{const keys=path.split('.'),last=keys.pop();let target=value;for(const key of keys)target=target[key]??={};target[last]=next;};
+  return {
+    use(identity){if(identity!==scope){scope=identity;kinds.clear();warehouses.clear();}return this;},
+    confirmWarehouse(machine){if(identifier.test(machine||''))warehouses.add(machine);},
+    warehouses(){return [...warehouses];},
+    forget(kind){kinds.delete(kind);},
+    begin(kind,keys=[]){entry(kind,'@status').pending=true;for(const key of keys)entry(kind,key).pending=true;},
+    fail(kind,key){for(const row of key===undefined?group(kind).values():[entry(kind,key)]){row.pending=false;row.completed=true;row.failed=true;for(const field of row.fields.values())field.failed=true;}entry(kind,'@status').pending=false;entry(kind,'@status').completed=true;},
+    observe(kind,key,value,fields,collectedAt=null){
+      const row=entry(kind,key);row.pending=false;row.completed=true;row.failed=false;row.meta=copy(value);entry(kind,'@status').pending=false;entry(kind,'@status').completed=true;
+      for(const path of fields){
+        const measured=number(get(value,path)),previous=row.fields.get(path);
+        if(measured===null){if(previous)previous.failed=true;continue;}
+        const signature=JSON.stringify([measured,collectedAt]);
+        row.fields.set(path,{value:measured,collectedAt,at:previous?.signature===signature&&collectedAt!==null?previous.at:now(),signature,failed:false,context:row.meta});
+      }
+    },
+    keys(kind){return [...group(kind).keys()].filter(key=>key!=='@status');},
+    project(kind,key,current,fields){
+      const row=entry(kind,key),value=copy(current??row.meta),used=[];let stale=false;
+      for(const path of fields){
+        const record=row.fields.get(path),recent=record&&now()-record.at<STORAGE_READING_MAX_AGE_MS;
+        put(value,path,recent?record.value:!record&&!row.failed?number(get(current,path)):null);
+        if(recent){used.push(record);stale ||= row.failed||record.failed;
+          if(path.startsWith('volume.'))value.volume.collectedAt=record.context.volume?.collectedAt??record.collectedAt;
+          if(path==='readyContentBytes')value.usageComplete=record.context.usageComplete;
+        }
+      }
+      const times=used.map(row=>row.collectedAt).filter(value=>typeof value==='string'&&Number.isFinite(Date.parse(value)));
+      value.collectedAt=times.length?times.reduce((a,b)=>Date.parse(a)<Date.parse(b)?a:b):null;
+      value.stale=stale;value.loading=!row.completed&&!used.length&&row.pending&&fields.every(path=>number(get(value,path))===null);return value;
+    },
+    loading(kind){const row=entry(kind,'@status');return row.pending&&!row.completed;},
+    nextExpiry(){const deadlines=[...kinds.values()].flatMap(rows=>[...rows.values()].flatMap(row=>[...row.fields.values()].map(value=>value.at+STORAGE_READING_MAX_AGE_MS))).filter(time=>time>now());return deadlines.length?Math.min(...deadlines)-now():null;}
+  };
+}
+const displayHistories=new WeakMap();
+export function storageDisplayHistory(store){
+  if(!displayHistories.has(store))displayHistories.set(store,createStorageDisplayHistory());
+  return displayHistories.get(store).use(JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]));
+}
+export const WAREHOUSE_READING_FIELDS=['totalBytes','usedBytes','availableBytes','reserveBytes','contentBytes','datasetCount'];
+export const TRAINING_READING_FIELDS=['volume.totalBytes','volume.usedBytes','volume.availableBytes','volume.reserveBytes','volume.usableBytes','readyContentBytes','readyVersionCount','budgetBytes'];
 export const STORAGE_OVERVIEW_TIMEOUT_MS=8000;
 export async function readStorageOverview(store,{signal}={}){
   const controller=new AbortController(),abort=()=>controller.abort(signal?.reason);

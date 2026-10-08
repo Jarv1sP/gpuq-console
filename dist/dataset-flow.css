@@ -225,3 +225,11 @@
 .capacity-proof-row code{font:12px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;padding:0}
 .storage-server-card .capacity-detail{grid-template-columns:minmax(0,1fr);padding:0;border:0;background:none;margin:16px 0}
 @media(max-width:759px){.capacity-detail{grid-template-columns:minmax(0,1fr);gap:22px}.capacity-warehouse{padding-inline:0}.capacity-values{gap:6px 12px}}
+
+/* Last successful display readings retain their original collection time. */
+.v4-warehouse-card.storage-reading-stale,.v4-training-card.storage-reading-stale{opacity:.6}
+.storage-reading-skeleton{display:inline-block;width:5.5em;max-width:100%;height:.75em;border-radius:3px;background:var(--border);vertical-align:middle}
+.storage-reading-loading .capacity-strata,.storage-reading-loading .v4-training-bar{background:var(--border)}
+
+#dataset-catalog.storage-reading-stale{opacity:.6}
+#dataset-catalog.storage-reading-stale button:disabled{opacity:1}

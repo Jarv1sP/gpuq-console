@@ -1,5 +1,5 @@
 import {warehouseWorkspaceHTML,datasetWarehouseView} from './dataset-warehouse-view.js';
-import {hasReadableLocalOriginal} from './dataset-catalog-model.js';
+import {hasReadableLocalOriginal,adaptUploadTarget} from './dataset-catalog-model.js';
 import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 import {scanBrowserDirectory,uploadBrowserDataset,confirmedDatasetUpload,uploadKey} from './dataset-upload.js';
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
@@ -8,11 +8,98 @@ import {cloudImportHTML,cloudImportUI} from './cloud-import-ui.js';
 import {datasetRemoveUI} from './dataset-remove-ui.js';
 import {serverIdHTML,serverSelectLabel} from './workbench-ui.js';
 import {reducedMotion} from './motion-ui.js';
-import {LARGE_RELAY_BYTES,transferBytes,uploadPhase} from './data-route.js';
+import {transferBytes,uploadPhase} from './data-route.js';
+import {validateUploadRoutes,uploadStorageMachine} from './upload-routes.js';
 import {cacheFact,cacheProgress,cacheIconHTML,databaseGroundHTML,databaseSummary,datasetFlowRoute,datasetFlowDetailHTML,uploadJourneyHTML,datasetInfoHTML as infoHTML,discloseDatasetInfo as discloseInfo} from './dataset-flow.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels={READY:'已缓存',REGISTERED:'未缓存',STAGING:'未完成，可续传',PREPARING:'取回中',FAILED:'取回失败',NOT_LOCAL:'所选服务器未缓存',UNKNOWN:'缓存状态待确认'};
 const bytesLabel=value=>Number.isFinite(value)&&value>=0?transferBytes(value):'未知';
+// 契约待定稿：only the explicitly advertised archive protocol opens this UI.
+export function adaptArchiveUpload(admission){
+  const archive=admission?.archive;
+  if(archive?.protocol!==1||!Array.isArray(archive.formats)||!archive.formats.length)return null;
+  const formats=[...new Set(archive.formats.filter(value=>typeof value==='string').map(value=>value.replace(/^\./,'').toLowerCase()).filter(value=>['zip','tar','tar.gz','tgz'].includes(value)))];
+  if(!formats.length)return null;
+  return {formats,maxBytes:Number.isSafeInteger(archive.maxBytes)&&archive.maxBytes>=0?archive.maxBytes:null};
+}
+// 契约待定稿：percent is derived from existing transport progress, not inferred
+// from a phase. Unknown backend phases and reasons stay verbatim.
+export function archiveUploadStatus(receipt,{percent=null}={}){
+  const reasons={ARCHIVE_FORMAT_UNSUPPORTED:'压缩包格式不支持',ARCHIVE_UNSAFE_PATH:'压缩包包含不安全路径',ARCHIVE_TOO_LARGE:'压缩包过大',ARCHIVE_CORRUPT:'压缩包损坏',CAMPUS_ROUTE_UNAVAILABLE:'已暂停 · 校内网络恢复后继续'};
+  const paused=receipt?.reasonCode==='CAMPUS_ROUTE_UNAVAILABLE';
+  if(paused)return {text:reasons[receipt.reasonCode],paused:true};
+  const phase=receipt?.phase;
+  const phases={UPLOADING:'上传中'+(Number.isFinite(percent)&&percent>=0&&percent<=100?' '+Math.floor(percent)+'%':''),EXTRACTING:'解压中',VERIFYING:'校验中',READY:'已入库'};
+  const text=phase==='FAILED'?(Object.hasOwn(reasons,receipt.reasonCode)?reasons[receipt.reasonCode]:receipt.reason||receipt.reasonCode||'FAILED'):
+    (Object.hasOwn(phases,phase)?phases[phase]:phase||'未知');
+  return {text:String(text),paused:false};
+}
+export function archiveUploadSelection(files,capability){
+  const values=Array.from(files||[]);
+  if(!capability||values.length!==1)throw Error('请选择一个压缩包');
+  const file=values[0];
+  if(file.webkitRelativePath)throw Error('请选择压缩包，不接受文件夹');
+  const format=[...capability.formats].sort((a,b)=>b.length-a.length).find(value=>file.name?.toLowerCase().endsWith('.'+value));
+  if(!format)throw Error('请选择支持的压缩包');
+  if(!Number.isSafeInteger(file.size)||file.size<0||capability.maxBytes!==null&&file.size>capability.maxBytes)throw Error('压缩包过大');
+  const name=file.name.slice(0,-format.length-1);
+  if(!name.trim())throw Error('压缩包名称不能为空');
+  return {file,name,bytes:file.size};
+}
+
+// UI-only preconnection. The production uploader has an unpublished hotfix;
+// never publish an archive as an ordinary file through the legacy pipeline.
+export function mountArchiveUploadUI(section,{store,legacyActive=()=>false}={}){
+  const events=new AbortController();let dialog=null,root=null,observer=null,context='',selection=null,input=null,inputAttributes=null,caption=null,captionText='',previousPicked=false;
+  const capability=()=>store.production&&store.principal?adaptArchiveUpload(store.data?.datasetUploadAdmission):null;
+  const machine=()=>adaptUploadTarget(store.data?.datasetUploadAdmission)||'';
+  function reset(){
+    observer?.disconnect();observer=null;
+    if(input&&inputAttributes){for(const [name,value] of inputAttributes)value===null?input.removeAttribute(name):input.setAttribute(name,value);input.value='';}
+    if(caption)caption.textContent=captionText;
+    if(dialog){delete dialog.dataset.archiveUpload;if(!previousPicked)dialog.classList.remove('v3-picked');}
+    root?.remove();dialog=null;root=null;context='';selection=null;input=null;inputAttributes=null;caption=null;captionText='';
+  }
+  function sync(){
+    const cap=capability(),next=section.querySelector('#dataset-add-dialog');
+    if(!cap||!next){if(root)reset();return;}
+    if(!root&&legacyActive())return;
+    const key=JSON.stringify([store.principal.userId,store.authGeneration,machine(),cap]);
+    if(dialog!==next){reset();dialog=next;previousPicked=dialog.classList.contains('v3-picked');
+      input=section.querySelector('[name=dataset-directory]');if(!input){dialog=null;return;}
+      inputAttributes=['webkitdirectory','multiple','accept','aria-label'].map(name=>[name,input.getAttribute(name)]);
+      input.removeAttribute('webkitdirectory');input.removeAttribute('multiple');input.setAttribute('aria-label','选择压缩包');
+      caption=dialog.querySelector('[data-dataset-source=directory] span');captionText=caption?.textContent||'';if(caption)caption.textContent='电脑上传';
+      root=document.createElement('section');root.className='dataset-archive-intake';
+      root.innerHTML='<div class="v3-drop" data-archive-drop><div><span class="v3-tray" aria-hidden="true"><i></i></span><h3>拖入压缩包</h3><div class="file-actions"><button class="button primary" type="button" data-archive-pick>选择压缩包</button></div></div></div><div class="v3-file" data-archive-selection hidden><div><b data-archive-filename></b><span class="num" data-archive-size></span></div><button class="button quiet" type="button" data-archive-pick>更换</button></div><label class="field v3-display-field" data-archive-name hidden>名称<input name="dataset-archive-name" maxlength="160" autocomplete="off"></label><div class="v3-route" data-archive-route></div><p data-archive-status role="status">上传暂不可用</p><div class="file-actions" data-archive-actions><button class="button primary" type="button" data-archive-start disabled>开始上传</button></div>';
+      section.querySelector('#dataset-upload-form').prepend(root);
+      observer=new MutationObserver(sync);observer.observe(dialog,{childList:true,subtree:true,attributes:true,attributeFilter:['class','disabled','hidden','open']});
+    }
+    if(key!==context){context=key;selection=null;section.querySelector('[name=dataset-directory]').value='';root.querySelector('[data-archive-status]').textContent='上传暂不可用';}
+    dialog.dataset.archiveUpload='';if(!dialog.classList.contains('v3-picked'))dialog.classList.add('v3-picked');
+    const accept=cap.formats.map(value=>'.'+value).join(',');if(input.accept!==accept)input.accept=accept;
+    const file=root.querySelector('[data-archive-selection]'),name=root.querySelector('[data-archive-name]'),drop=root.querySelector('[data-archive-drop]');
+    if(file.hidden!==!selection)file.hidden=!selection;if(name.hidden!==!selection)name.hidden=!selection;if(drop.hidden!==!!selection)drop.hidden=!!selection;
+    const route=root.querySelector('[data-archive-route]'),target=machine();
+    if(route.dataset.target!==target){route.dataset.target=target;route.setAttribute('aria-label','你的电脑 · 校内直连 · '+(target||'待确认'));route.innerHTML=`<span class="v3-route-end"><i></i>你的电脑</span><span class="v3-route-seg"></span><span class="v3-route-via">校内直连</span><span class="v3-route-seg"></span><span class="v3-route-end"><i></i>${target?serverIdHTML(target):'待确认'}</span>`;}
+    const disabled=input.disabled||!store.principal;
+    for(const node of root.querySelectorAll('button:not([data-archive-start]),input'))if(node.disabled!==disabled)node.disabled=disabled;
+    const start=section.querySelector('#dataset-upload-start');if(start&&!start.disabled)start.disabled=true;
+  }
+  function choose(files){
+    const input=section.querySelector('[name=dataset-directory]');if(!root||input?.disabled)return;
+    try{selection=archiveUploadSelection(files,capability());const transfer=new DataTransfer();transfer.items.add(selection.file);input.files=transfer.files;root.querySelector('[data-archive-filename]').textContent=selection.file.name;root.querySelector('[data-archive-filename]').title=selection.file.name;root.querySelector('[data-archive-size]').textContent=transferBytes(selection.bytes);root.querySelector('[name=dataset-archive-name]').value=selection.name;section.querySelector('#v3-upload-display').value=selection.name;root.querySelector('[data-archive-status]').textContent='上传暂不可用';}
+    catch(error){selection=null;input.value='';root.querySelector('[data-archive-status]').textContent=error.message;}
+    sync();
+  }
+  section.addEventListener('click',event=>{if(!root||!event.target.closest('[data-archive-pick]'))return;event.preventDefault();event.stopImmediatePropagation();const input=section.querySelector('[name=dataset-directory]');if(!input.disabled)input.click();},{capture:true,signal:events.signal});
+  section.addEventListener('change',event=>{if(root&&event.target.name==='dataset-directory'){event.stopImmediatePropagation();choose(event.target.files);}},{capture:true,signal:events.signal});
+  section.addEventListener('input',event=>{if(root&&event.target.name==='dataset-archive-name')section.querySelector('#v3-upload-display').value=event.target.value;},{signal:events.signal});
+  section.addEventListener('dragover',event=>{if(root&&event.target.closest('[data-archive-drop]')){event.preventDefault();event.stopImmediatePropagation();}},{capture:true,signal:events.signal});
+  section.addEventListener('drop',event=>{if(!root||!event.target.closest('[data-archive-drop]'))return;event.preventDefault();event.stopImmediatePropagation();const items=[...(event.dataTransfer?.items||[])];if(items.some(item=>item.webkitGetAsEntry?.()?.isDirectory)){selection=null;input.value='';root.querySelector('[data-archive-status]').textContent='请选择压缩包，不接受文件夹';sync();return;}choose(event.dataTransfer?.files);},{capture:true,signal:events.signal});
+  section.addEventListener('submit',event=>{if(root&&event.target.id==='dataset-upload-form'){event.preventDefault();event.stopImmediatePropagation();root.querySelector('[data-archive-status]').textContent='上传暂不可用';}},{capture:true,signal:events.signal});
+  return {sync,reset,destroy(){events.abort();reset();}};
+}
 export function datasetUploadKeyStore(storage){
   const read=(prefix,key,json=false)=>{let value;try{value=storage.getItem(prefix+key);}catch{throw Error('浏览器无法读取续传信息；未开始上传。');}if(value===null)return null;if(!json)return value;try{return JSON.parse(value);}catch{throw Error('浏览器保存的续传信息损坏；未重新分配编号。');}};
   const write=(prefix,key,value,json=false)=>{const raw=json?JSON.stringify(value):value;try{storage.setItem(prefix+key,raw);if(storage.getItem(prefix+key)!==raw)throw Error('Unconfirmed storage write');}catch{throw Error('浏览器无法保存续传信息，请允许本站本地存储；未开始上传。');}};
@@ -22,6 +109,30 @@ export function datasetUploadCalls(directCall,keyStore,baseKey,transfers){
   const intent=keyStore.getIntent(baseKey),handle=keyStore.getHandle(baseKey);
   const legacy=!intent&&(!!keyStore.get(baseKey)||handle?.uploadId&&handle.admissionProtocol!==1);
   return {call:legacy&&transfers?.version===1?transferUploadCall(directCall):directCall,admissionCall:directCall};
+}
+// Keep the drawer campus-only without changing the deployed transport modules.
+// Validate the complete node descriptor before excluding alternate routes.
+export function campusDatasetCall(call,account=()=>null){
+  let identity=account(),campusRoutes=[];
+  return async(operation,args)=>{
+    const expected=account();if(expected!==identity){identity=expected;campusRoutes=[];}
+    const action=operation==='transfers.io'?args?.action:null;
+    if(['datasets.workspace.put','datasets.workspace.get','datasets.upload.manifest','datasets.upload.chunk'].includes(operation)||['manifest','chunk'].includes(action))
+      throw Object.assign(Error('仅校内网络可上传'),{code:'CAMPUS_REQUIRED'});
+    const result=await call(operation,args);
+    if(expected!==account())throw Error('账号已改变；旧操作已停止。');
+    if(operation==='datasets.upload.routes'){
+      validateUploadRoutes(result,uploadStorageMachine(result,args.machine));
+      const routes=result.routes.filter(route=>route.kind==='campus-direct');
+      campusRoutes=routes.map(route=>({...route,certificateSha256:result.certificateSha256}));
+      return {...result,routes};
+    }
+    // Older valid campus tickets omit kind. Bind them to the authenticated
+    // campus endpoint and certificate, rather than inventing a route kind.
+    if((operation==='datasets.upload.direct-ticket'||action==='direct-ticket')&&result?.kind!=='campus-direct'&&!(result?.kind===undefined&&campusRoutes.some(route=>route.endpoint===result?.endpoint&&route.certificateSha256===result?.certificateSha256)))
+      throw Object.assign(Error('仅校内网络可上传'),{code:'CAMPUS_REQUIRED'});
+    return result;
+  };
 }
 export function archiveStatus(storage,expectedVersion=null,canRetry=true){
   if(!storage)return '';
@@ -110,21 +221,58 @@ export function datasetRows(catalog,options={}){
 }
 export function uploadRouteHTML(route,machine,state){
   machine=route?.machine||machine;
-  const direct=route?.kind==='campus-direct',tail=route?.kind==='tail-upload',relay=route?.kind==='vps-relay',known=direct||tail||relay;
-  return `<div class="dataset-route-heading"><span class="st ${known?'st-prep':'st-unk'}"><span class="g" aria-hidden="true"></span>${direct?'直传到':tail?'Tail 备用上传':relay?'经门户中转':'通道未确认'}${(direct||tail)&&machine?' '+serverIdHTML(machine):''}</span><span class="dataset-route-path"><span>你的电脑</span>${relay?'<i aria-hidden="true">→</i><span>门户</span>':tail?'<i aria-hidden="true">→</i><span>专用 Tail 入口</span>':''}${known?'<i aria-hidden="true">→</i>'+serverIdHTML(machine||'所选服务器'):''}</span>${infoHTML(known?direct?'文件直接发送到已授权的服务器，门户只处理确认。':tail?'只改变本次上传入口，不改变默认路由。Tail 中继可能影响速度。':'文件经过门户发送到所选服务器。':'扫描目录后确认上传通道；发送文件前会显示实际路线。','实际上传路线')}</div>${uploadJourneyHTML(route,machine,state)}`;
+  if(route?.kind!=='campus-direct')return '<div class="dataset-route-heading"><span class="st st-unk">仅校内网络可上传</span></div>';
+  return `<div class="dataset-route-heading"><span class="st st-prep"><span class="g" aria-hidden="true"></span>校园网直连${machine?' '+serverIdHTML(machine):''}</span><span class="dataset-route-path"><span>你的电脑</span><i aria-hidden="true">→</i>${serverIdHTML(machine||'所选服务器')}</span></div>${uploadJourneyHTML(route,machine,state)}`;
 }
 export function datasetsUI(store,toast){
-  const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,queryBusy=false,controller=null,active=null,machineIds='',uploadRoute=null,uploadState=null,lastScan=null,canRelay=false,catalog=null;
+  const section=document.querySelector('#page-datasets');let identity='',generation=0,busy=false,uploadBusy=false,discardBusy=false,queryBusy=false,controller=null,active=null,machineIds='',uploadRoute=null,uploadState=null,lastScan=null,campusPaused=false,catalog=null;
   let initialCatalog=true;
   const actionPlaces=new WeakMap();
   const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
   const current=expected=>expected===account();
   const machineAllowed=machine=>datasetAuthorizedMachines(store).some(row=>row.id===machine);
   const human=transferBytes;
-  const workspace=dataWorkspaceUI(store,section,toast,{onBusyChange:controls,refreshCatalog:load});
+  const campusCall=campusDatasetCall(store.call.bind(store),account);
+  const campusStore=new Proxy(store,{get(target,key){if(key==='call')return campusCall;const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}});
+  const workspace=dataWorkspaceUI(campusStore,section,toast,{onBusyChange:controls,refreshCatalog:load});
   const cloud=cloudImportUI(store,section,toast);
   const removeUI=datasetRemoveUI(store,section,toast,{reload:load,catalog:()=>catalog,management:false});
-  const warehouse=datasetWarehouseView(store,section,toast,{refresh:load,removeUI,machineAllowed,authorizedMachines:()=>datasetAuthorizedMachines(store),access:datasetAccess});
+  const warehouse=datasetWarehouseView(campusStore,section,toast,{refresh:load,removeUI,machineAllowed,authorizedMachines:()=>datasetAuthorizedMachines(store),access:datasetAccess});
+  // The existing drawer rebuilds its route/error actions asynchronously. Apply
+  // the same policy after each repaint; disconnect while editing to avoid loops.
+  const campusObserver=new MutationObserver(campusControls);
+  function campusControls(){
+    campusObserver.disconnect();
+    try{
+      for(const node of section.querySelectorAll('#v3-relay-options,#dataset-relay-warning,[data-v3-explicit-relay]'))node.remove();
+      for(const node of section.querySelectorAll('#data-workspace-upload-form,[data-workspace-download],.data-workspace-steps>li:first-child,.data-workspace-card>p.muted,.data-workspace-footnote'))node.hidden=true;
+      const workspaceStatus=section.querySelector('#data-workspace-status');
+      if(workspaceStatus?.textContent==='上传只保存文件；数据整理完成后再发布。')workspaceStatus.textContent='';
+      const via=section.querySelector('[name=dataset-via]');if(via)via.value='direct';
+      const route=section.querySelector('#v3-upload-route'),dialog=section.querySelector('#dataset-add-dialog'),root=section.querySelector('#v3-upload-state');
+      const connected=route?.classList.contains('ok')===true;
+      const enabled=store.production&&store.principal&&machineAllowed(section.querySelector('[name=dataset-machine]')?.value);
+      const blocked=!enabled||busy||uploadBusy||discardBusy||queryBusy||workspace.busy||!!maintenanceFor(store.data?.operationalMaintenance,section.querySelector('[name=dataset-machine]')?.value);
+      if(dialog?.dataset.v3UploadState==='error'&&root){
+        if(campusPaused||!active?.uploadId&&!connected){
+          const message=campusPaused?'已暂停 · 校内网络恢复后继续':'仅校内网络可上传';
+          const content=`<div class="v3-error"><h3 role="status">${message}</h3><div class="file-actions"><button class="button primary" type="button" data-v3-probe>重新探测</button>${campusPaused&&active?.uploadId?'<button class="button primary" type="button" data-v3-resume>继续上传</button>':''}</div></div>`;
+          if(root.querySelector('[role=status]')?.textContent!==message||root.querySelectorAll('[data-v3-resume]').length!==Number(campusPaused&&!!active?.uploadId))root.innerHTML=content;
+        }else root.querySelector('.v3-upload-choices')?.remove();
+      }
+      if(route&&!connected&&dialog?.dataset.v3UploadState==='error')route.hidden=true;
+      if(campusPaused&&dialog?.dataset.v3UploadState==='error'){
+        const status=section.querySelector('#dataset-upload-status');if(status)status.textContent='已暂停 · 校内网络恢复后继续';
+        const start=section.querySelector('#dataset-upload-start');if(start)start.hidden=true;
+      }
+      const retry=section.querySelector('#dataset-upload-retry-direct');if(retry)retry.hidden=true;
+      for(const button of section.querySelectorAll('#dataset-upload-start,[data-v3-resume],#dataset-upload-retry-direct'))if(blocked||!connected)button.disabled=true;
+      for(const button of section.querySelectorAll('[data-v3-resume]'))button.disabled=blocked||!connected;
+    }finally{campusObserver.observe(section,{childList:true,subtree:true,attributes:true,attributeFilter:['class','hidden','disabled']});}
+  }
+  section.addEventListener('submit',event=>{if(event.target.id==='data-workspace-upload-form'){event.preventDefault();event.stopImmediatePropagation();}},true);
+  section.addEventListener('click',event=>{if(event.target.closest('[data-workspace-download],[data-v3-explicit-relay]')){event.preventDefault();event.stopImmediatePropagation();}},true);
+  const archive=mountArchiveUploadUI(section,{store,legacyActive:()=>uploadBusy||active&&!['READY','DISCARDED'].includes(active.state)});
   new MutationObserver(()=>{
     if(document.body.dataset.room!=='datasets')section.querySelector('#dataset-add-dialog')?.close();
   }).observe(document.body,{attributes:true,attributeFilter:['data-room']});
@@ -206,13 +354,6 @@ export function datasetsUI(store,toast){
     const node=section.querySelector('#dataset-upload-route'),machine=section.querySelector('[name=dataset-machine]')?.value;
     if(node)node.innerHTML=uploadRouteHTML(route,machine,uploadState);
   }
-  function relayChoice(reset=false){
-    const files=Array.from(section.querySelector('[name=dataset-directory]')?.files||[]),total=files.reduce((n,f)=>n+f.size,0),warning=section.querySelector('#dataset-relay-warning'),check=section.querySelector('[name=dataset-relay-consent]');
-    if(!warning||!check)return;
-    warning.hidden=total<=LARGE_RELAY_BYTES||section.querySelector('[name=dataset-via]')?.value==='direct';
-    if(reset)check.checked=false;
-    section.querySelector('#dataset-relay-size').textContent=human(total);
-  }
   function source(next){
     if(!['directory','link','workspace'].includes(next))return;
     section.querySelector('#dataset-add-dialog')?.classList.toggle('v3-other',next!=='directory');
@@ -222,19 +363,21 @@ export function datasetsUI(store,toast){
   }
   function controls(){
     serverSelectLabel(section.querySelector('[name=dataset-machine]'));
-    restoreMaintenanceControls(section);relayChoice();
+    restoreMaintenanceControls(section);
     const browsing=store.production&&!!store.principal,enabled=browsing&&machineAllowed(section.querySelector('[name=dataset-machine]')?.value),blocked=busy||uploadBusy||discardBusy||queryBusy||workspace.busy;
     const refresh=section.querySelector('#datasets-refresh'),select=section.querySelector('[name=dataset-machine]'),add=section.querySelector('#datasets-add>summary');
     if(refresh)refresh.disabled=!browsing||blocked;if(select)select.disabled=!enabled||blocked;
     if(add){add.setAttribute('aria-disabled',String(!enabled));add.title=enabled?'':'暂无服务器使用授权，仅可浏览目录';}
-    for(const selector of ['#dataset-upload-start','[name=dataset-name]','[name=dataset-directory]','[name=dataset-relay-consent]','[name=dataset-via]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||uploadBusy||discardBusy||queryBusy||workspace.busy||active?.state==='DISCARDING';}
+    for(const selector of ['#dataset-upload-start','[name=dataset-name]','[name=dataset-directory]','[name=dataset-via]']){const node=section.querySelector(selector);if(node)node.disabled=!enabled||uploadBusy||discardBusy||queryBusy||workspace.busy||active?.state==='DISCARDING';}
     for(const node of section.querySelectorAll('[data-dataset-source],#dataset-organize-next'))node.disabled=!enabled||uploadBusy||discardBusy||queryBusy||workspace.busy;
     const pause=section.querySelector('#dataset-upload-pause'),discard=section.querySelector('#dataset-upload-discard');if(pause)pause.hidden=!uploadBusy;if(discard)discard.hidden=uploadBusy||!active?.uploadId||['READY','DISCARDED'].includes(active.state);
-    for(const id of ['dataset-upload-query','dataset-upload-retry-direct','dataset-upload-relay']){const node=section.querySelector('#'+id);if(node){node.disabled=!enabled||blocked;node.hidden=id==='dataset-upload-query'?!active?.uploadId||active.state==='READY':id==='dataset-upload-relay'?!canRelay:!active?.directFailed;}}
+    for(const id of ['dataset-upload-query','dataset-upload-retry-direct']){const node=section.querySelector('#'+id);if(node){node.disabled=!enabled||blocked;node.hidden=id==='dataset-upload-query'?!active?.uploadId||active.state==='READY':!active?.directFailed;}}
     workspace.controls();
     cloud.controls();
-    disableMaintenanceControls(section,'#dataset-upload-start,#dataset-upload-discard,#dataset-upload-retry-direct,#dataset-upload-relay,[data-prepare-dataset],[data-retry-archive]',maintenanceFor(store.data?.operationalMaintenance,section.querySelector('[name=dataset-machine]')?.value));
+    disableMaintenanceControls(section,'#dataset-upload-start,#dataset-upload-discard,#dataset-upload-retry-direct,[data-prepare-dataset],[data-retry-archive]',maintenanceFor(store.data?.operationalMaintenance,section.querySelector('[name=dataset-machine]')?.value));
     warehouse.uploadControls({busy,uploadBusy,workspaceBusy:workspace.busy,discardBusy,queryBusy});
+    campusControls();
+    archive.sync();
   }
   document.addEventListener('gpuq-maintenance-state',()=>{if(section.children.length)controls();});
   document.addEventListener('gpuq-workspace-context',event=>{
@@ -242,7 +385,7 @@ export function datasetsUI(store,toast){
     const select=section.querySelector('[name=dataset-machine]'),machine=event.detail.machine;
     if(select&&machine!==select.value&&machineAllowed(machine)){select.value=machine;select.dispatchEvent(new Event('change',{bubbles:true}));}
   });
-  store.onAuthChange?.(()=>{catalog=null;warehouse.reset();cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;lastScan=null;uploadRoute=null;uploadState=null;canRelay=false;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
+  store.onAuthChange?.(()=>{archive.reset();catalog=null;warehouse.reset();cloud.reset();workspace.reset();controller?.abort();controller=null;uploadBusy=false;discardBusy=false;queryBusy=false;active=null;lastScan=null;uploadRoute=null;uploadState=null;campusPaused=false;busy=false;generation++;identity='';machineIds='';section.replaceChildren();});
   async function load(){
     if(section.hidden){initialCatalog=true;return;}
     if(busy||uploadBusy||discardBusy||!store.principal)return;
@@ -251,33 +394,33 @@ export function datasetsUI(store,toast){
     busy=true;const token=++generation,expected=account(),button=section.querySelector('#datasets-refresh'),select=section.querySelector('[name=dataset-machine]');button.disabled=true;select.disabled=true;
     const valid=()=>token===generation&&current(expected)&&(section.querySelector('[name=dataset-machine]')?.value||null)===machine&&(machine===null||machineAllowed(machine));
     const status=section.querySelector('#datasets-status'),capacity=section.querySelector('#datasets-capacity');catalog=null;capacity.hidden=!machine;status.textContent=status.dataset.reason==='policy-change'?'授权已更新，读取目录…':'加载中…';capacity.innerHTML=datasetCapacityHTML(null,machine);databaseLedger(null);section.querySelector('#dataset-catalog').replaceChildren();
-    warehouse.render();warehouse.capacitiesForOthers();warehouse.loadOverview();
+    warehouse.beginRead();warehouse.render();warehouse.capacitiesForOthers();warehouse.loadOverview();
     try{await Promise.all([
-      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;if(result.machine!==machine)throw Error('返回目录与所选服务器不符，请刷新。');catalog=result;warehouse.catalog(catalog);status.textContent=result.partial?'部分目录待确认':'';delete status.dataset.reason;}).catch(error=>{if(valid()){catalog=null;warehouse.catalogUnavailable();section.querySelector('#dataset-catalog').replaceChildren();status.textContent='目录未能确认：'+error.message;}}),
+      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;if(result.machine!==machine)throw Error('返回目录与所选服务器不符，请刷新。');catalog=result;warehouse.catalog(catalog);status.textContent=result.partial?'部分目录待确认':'';delete status.dataset.reason;}).catch(error=>{if(valid()){catalog=null;warehouse.catalogUnavailable();status.textContent='目录未能确认：'+error.message;}}),
       ...(machine?[store.call('datasets.capacity',{machine}).then(result=>{if(valid()){capacity.innerHTML=datasetCapacityHTML(result,machine);warehouse.capacity(result,machine);}}).catch(()=>{if(valid()){capacity.innerHTML=datasetCapacityHTML(null,machine);warehouse.capacity(null,machine);}})]:[])
     ]);}
     finally{if(token===generation){busy=false;controls();}}
   }
   section.addEventListener('change',e=>{
     if(e.target.name==='dataset-machine'){
-      generation++;busy=false;catalog=null;warehouse.catalogUnavailable();initialCatalog=true;
+      generation++;busy=false;catalog=null;warehouse.catalogUnavailable({retainList:false});initialCatalog=true;
       section.querySelector('#dataset-catalog').replaceChildren();
-      workspace.reset();document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));active=null;lastScan=null;canRelay=false;showUploadRoute(null);relayChoice(true);phase();
+      workspace.reset();document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));active=null;lastScan=null;campusPaused=false;showUploadRoute(null);phase();
       section.querySelector('#data-workspace-files-list').replaceChildren();section.querySelector('#data-workspace-status').textContent='已切换服务器';section.querySelector('#dataset-upload-status').textContent='选择一个目录。';controls();load();
     }
     if(e.target.name==='dataset-directory'){
-      active=null;lastScan=null;canRelay=false;showUploadRoute(null);relayChoice(true);phase();
+      active=null;lastScan=null;campusPaused=false;showUploadRoute(null);phase();
       const files=Array.from(section.querySelector('[name=dataset-directory]').files||[]),status=section.querySelector('#dataset-upload-status');
       section.querySelector('#dataset-directory-selection').textContent=files.length?`已选 ${files.length.toLocaleString('zh-CN')} 个文件 · 共 ${human(files.reduce((n,f)=>n+f.size,0))}`:'尚未选择';
       status.textContent=files.length?`已选择 ${files.length.toLocaleString('en-US')} 个文件 · ${human(files.reduce((n,f)=>n+f.size,0))}`:'请选择目录。';controls();
     }
-    if(e.target.name==='dataset-via'){relayChoice(true);showUploadRoute(e.target.value==='relay'?{kind:'vps-relay'}:null);}
   });
-  section.addEventListener('input',e=>{if(e.target.name==='dataset-name'){active=null;lastScan=null;canRelay=false;showUploadRoute(null);phase();controls();}});
+  section.addEventListener('input',e=>{if(e.target.name==='dataset-name'){active=null;lastScan=null;campusPaused=false;showUploadRoute(null);phase();controls();}});
   section.addEventListener('submit',async e=>{
     if(e.target.id!=='dataset-upload-form')return;e.preventDefault();if(uploadBusy||discardBusy||queryBusy||workspace.busy||!store.production||!store.principal)return;
     const form=e.target,machine=section.querySelector('[name=dataset-machine]').value,files=form.elements['dataset-directory'].files,expected=account(),userId=store.principal.userId;
     if(!machineAllowed(machine)){toast('暂无服务器使用授权，仅可浏览目录。');return;}
+    form.elements['dataset-via'].value='direct';
     uploadBusy=true;controls();
     try{await warehouse.prepareUpload();if(!current(expected)||machine!==section.querySelector('[name=dataset-machine]').value)return;}
     catch(error){if(current(expected))toast(error.message);return;}
@@ -286,11 +429,8 @@ export function datasetsUI(store,toast){
     const name=form.elements['dataset-name'].value.trim();
     if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name)){toast('名称需为 1–40 位字母、数字、下划线或连字符。');return;}
     if(!files?.length){toast('请先选择包含文件的目录。');return;}
-    const via=form.elements['dataset-via'].value==='automatic'?'auto':form.elements['dataset-via'].value,allowRelay=form.elements['dataset-relay-consent'].checked===true;
-    if(via==='relay'&&Array.from(files).reduce((n,f)=>n+f.size,0)>LARGE_RELAY_BYTES&&!allowRelay){
-      toast('请先确认大文件经门户中转。');form.elements['dataset-relay-consent'].focus();return;
-    }
-    controller=new AbortController();const signal=controller.signal;uploadBusy=true;canRelay=false;warehouse.uploading(true);controls();
+    const via='direct',allowRelay=false;
+    controller=new AbortController();const signal=controller.signal;uploadBusy=true;campusPaused=false;warehouse.uploading(true);controls();
     const status=section.querySelector('#dataset-upload-status'),progress=section.querySelector('#dataset-upload-progress');progress.hidden=false;progress.removeAttribute('value');
     const check=()=>{if(!current(expected)||signal.aborted)throw Error('上传已暂停；选择同一目录可继续。');};
     const report=value=>{check();if(value.uploadId)active={...value,machine,name,manifestSha256:lastScan?.manifestSha256,totalBytes:lastScan?.totalBytes,entries:lastScan?.entries};warehouse.uploadProgress(value);phase(value.state);const labels={HASHING:'计算文件校验值',RECEIVING_MANIFEST:'上传目录清单',SEALING:'校验目录清单',UPLOADING:'上传文件',PUBLISHING:'服务器完整校验',READY:'可用于训练',FAILED:'上传失败',UNKNOWN:'未确认'};status.dataset.state=value.state;status.textContent=`${labels[value.state]||'未确认'}${value.path?' · '+value.path:''}${value.bytes!==undefined?' · '+human(value.bytes)+' / '+human(value.totalBytes):''}`;if(value.bytes!==undefined&&value.totalBytes>0){progress.max=value.totalBytes;progress.value=value.bytes;}else progress.removeAttribute('value');};
@@ -298,14 +438,20 @@ export function datasetsUI(store,toast){
       status.textContent=machine+' · 正在读取目录…';
       const scan=await scanBrowserDirectory(files,{signal,onProgress:report});check();lastScan=scan;
       const keyStore=datasetUploadKeyStore(localStorage),baseKey=uploadKey(userId,machine,name,scan.manifestSha256);
-      const directCall=async(operation,args)=>{check();const result=await store.call(operation,args);check();return result;};
+      const directCall=async(operation,args)=>{check();const result=await campusCall(operation,args);check();return result;};
       // Only remembered legacy uploads use their original managed-transfer
       // protocol. Modern dataset admission and every subsequent control call
       // go directly to the authenticated dataset API, never transfers.io.
       const calls=datasetUploadCalls(directCall,keyStore,baseKey,store.data?.transfers);
       const result=await uploadBrowserDataset({userId,machine,name,scan,signal,onProgress:report,keyStore,...calls,admission:store.data?.datasetUploadAdmission,allowRelay,via,onRoute:route=>{check();showUploadRoute(route);warehouse.actualRoute(route);}});check();
       active={...result,machine};phase('READY');status.dataset.state='READY';status.textContent=`已缓存 · 可用于训练 · ${result.dataset}@${result.version.slice(0,12)}`;progress.value=progress.max=1;await warehouse.completed(result);check();toast('数据集上传并校验完成，可以用于训练。');
-    }catch(error){if(current(expected)){status.dataset.state=signal.aborted?'PAUSED':'UNKNOWN';phase(status.dataset.state);status.textContent=error.message;warehouse.uploadFailure(error,{paused:signal.aborted});if(error.uploadId)active={...active,uploadId:error.uploadId,machine,name,manifestSha256:lastScan?.manifestSha256,totalBytes:lastScan?.totalBytes,entries:lastScan?.entries,state:'UNKNOWN',directFailed:error.code?.startsWith('DIRECT')===true};canRelay=error.canRelay===true;}}
+    }catch(error){if(current(expected)){
+      if(error.uploadId)active={...active,uploadId:error.uploadId,machine,name,manifestSha256:lastScan?.manifestSha256,totalBytes:lastScan?.totalBytes,entries:lastScan?.entries};
+      campusPaused=!!active?.uploadId&&(signal.aborted||error.code==='DIRECT'&&/连接/.test(error.message)||error.code==='DIRECT_UNAVAILABLE'||error.code==='CAMPUS_REQUIRED'||Array.isArray(error.routeFailures));
+      const state=campusPaused?'PAUSED':'UNKNOWN';if(active)active={...active,state,directFailed:campusPaused};
+      status.dataset.state=state;phase(state);status.textContent=campusPaused?'已暂停 · 校内网络恢复后继续':error.message;
+      warehouse.uploadFailure(error,{paused:campusPaused});
+    }}
     finally{if(current(expected)){uploadBusy=false;controller=null;warehouse.uploading(false);controls();if(active?.state==='READY')await load();}}
   });
   section.addEventListener('click',async e=>{
@@ -324,17 +470,12 @@ export function datasetsUI(store,toast){
         const result=await store.call('datasets.upload.status',{machine:target.machine,uploadId:target.uploadId});if(!current(expected))return;
         const status=section.querySelector('#dataset-upload-status');
         if(result.state==='READY'){
-          confirmedDatasetUpload(result,target);active={...target,...result};phase('READY');await warehouse.completed(result);status.dataset.state='READY';status.textContent=`可用于训练 · ${result.dataset}@${result.version.slice(0,12)}`;canRelay=false;toast('数据集上传并校验完成，可以用于训练。');
-        }else{active={...target,state:result.state};warehouse.uploadProgress(active);phase(result.state);status.dataset.state=result.state;status.textContent=({PUBLISHING:'服务器完整校验中',SEALING:'校验目录清单中',UPLOADING:'上传未完成，可继续',RECEIVING_MANIFEST:'清单未传完，可继续',FAILED:'上传失败',DISCARDED:'上传已取消'}[result.state]||'未确认')+(result.error?' · '+result.error:'');}
-      }catch(error){if(current(expected)){active={...target,state:'UNKNOWN'};warehouse.uploadFailure(error,active);phase('UNKNOWN');section.querySelector('#dataset-upload-status').dataset.state='UNKNOWN';section.querySelector('#dataset-upload-status').textContent=error.message;}}
+          confirmedDatasetUpload(result,target);campusPaused=false;active={...target,...result};phase('READY');await warehouse.completed(result);status.dataset.state='READY';status.textContent=`可用于训练 · ${result.dataset}@${result.version.slice(0,12)}`;toast('数据集上传并校验完成，可以用于训练。');
+        }else{if(!['UPLOADING','RECEIVING_MANIFEST'].includes(result.state))campusPaused=false;active={...target,state:result.state};warehouse.uploadProgress(active);phase(result.state);status.dataset.state=result.state;status.textContent=({PUBLISHING:'服务器完整校验中',SEALING:'校验目录清单中',UPLOADING:'上传未完成，可继续',RECEIVING_MANIFEST:'清单未传完，可继续',FAILED:'上传失败',DISCARDED:'上传已取消'}[result.state]||'未确认')+(result.error?' · '+result.error:'');}
+      }catch(error){if(current(expected)){campusPaused=false;active={...target,state:'UNKNOWN'};warehouse.uploadFailure(error,active);phase('UNKNOWN');section.querySelector('#dataset-upload-status').dataset.state='UNKNOWN';section.querySelector('#dataset-upload-status').textContent=error.message;}}
       finally{if(current(expected)){queryBusy=false;controls();if(active?.state==='READY')await load();}}return;
     }
     if(b.id==='dataset-upload-retry-direct'){section.querySelector('[name=dataset-via]').value='direct';section.querySelector('#dataset-upload-form').requestSubmit();return;}
-    if(b.id==='dataset-upload-relay'){
-      const form=section.querySelector('#dataset-upload-form');form.elements['dataset-via'].value='relay';showUploadRoute({kind:'vps-relay'});relayChoice();
-      if(Array.from(form.elements['dataset-directory'].files||[]).reduce((n,f)=>n+f.size,0)>LARGE_RELAY_BYTES&&!form.elements['dataset-relay-consent'].checked){form.elements['dataset-relay-consent'].focus();return;}
-      form.requestSubmit();return;
-    }
     if(b.id==='dataset-upload-pause'){controller?.abort();return;}
     if(b.id==='dataset-upload-discard'){
       if(!active?.uploadId||uploadBusy||discardBusy)return;const expected=account(),target={...active};discardBusy=true;b.disabled=true;controls();
@@ -379,13 +520,13 @@ export function datasetsUI(store,toast){
         <form id="dataset-upload-form" aria-labelledby="dataset-upload-heading">
           <div class="dataset-upload-heading"><h3 id="dataset-upload-heading">上传一个数据集</h3><p class="muted">选择已整理好的目录。传输与校验完成后，即可用于训练。</p></div>
           <aside id="dataset-upload-route" class="dataset-route" aria-label="当前网页上传通道">${uploadRouteHTML(null)}</aside>
-          <div class="field dataset-route-choice"><div class="dataset-field-label"><label for="dataset-via-input">上传通道</label>${infoHTML('自动优先使用已授权直传；直传连接失败不会自动中转。大于 256 MiB 的中转需要额外确认。','上传通道说明')}</div><select id="dataset-via-input" name="dataset-via"><option value="automatic">自动 · 优先直传</option><option value="direct">只用直传</option><option value="relay">经门户中转</option></select></div>
+          <input type="hidden" name="dataset-via" value="direct">
           <div class="dataset-upload-fields">
             <div class="field"><div class="dataset-field-label"><label for="dataset-name-input">数据集名称</label></div><input id="dataset-name-input" name="dataset-name" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,39}" placeholder="my-data" aria-describedby="dataset-name-help" required><small id="dataset-name-help">1–40 位字母、数字、下划线或连字符。</small></div>
             <div class="field"><div class="dataset-field-label"><label for="dataset-directory-input">电脑目录</label></div><div class="dataset-directory-control"><input id="dataset-directory-input" type="file" name="dataset-directory" webkitdirectory multiple aria-label="选择文件夹" aria-describedby="dataset-directory-help dataset-directory-selection"><label id="dataset-directory-picker" class="button" for="dataset-directory-input">选择文件夹</label><span id="dataset-directory-selection" aria-live="polite">尚未选择</span></div><small id="dataset-directory-help">选择整个目录；网页上传不包含空目录。</small></div>
           </div>
-          <div id="dataset-relay-warning" class="dataset-relay-warning" hidden><label><input type="checkbox" name="dataset-relay-consent"><span>我确认经门户中转上传这 <strong id="dataset-relay-size"></strong> 数据</span></label>${infoHTML('中转带宽由所有用户共享，速度可能较慢。此确认不会开启直传，也不会在直传失败后自动切换。','大文件中转说明')}</div>
-          <div class="file-actions dataset-upload-actions"><button class="button primary" type="submit" id="dataset-upload-start">上传 / 继续</button><button class="button" type="button" id="dataset-upload-pause" hidden>暂停传输</button><button class="button quiet" type="button" id="dataset-upload-query" hidden>重新查询</button><button class="button quiet" type="button" id="dataset-upload-retry-direct" hidden>重试直传</button><button class="button quiet" type="button" id="dataset-upload-relay" hidden>同意经门户中转</button><button class="button" type="button" id="dataset-upload-discard" hidden>取消未完成上传</button></div>
+          <div id="dataset-relay-warning" hidden></div>
+          <div class="file-actions dataset-upload-actions"><button class="button primary" type="submit" id="dataset-upload-start">上传 / 继续</button><button class="button" type="button" id="dataset-upload-pause" hidden>暂停传输</button><button class="button quiet" type="button" id="dataset-upload-query" hidden>重新查询</button><button class="button quiet" type="button" id="dataset-upload-retry-direct" hidden>重试直传</button><button class="button" type="button" id="dataset-upload-discard" hidden>取消未完成上传</button></div>
           <div class="dataset-upload-feedback"><ol class="dataset-upload-phases" aria-label="上传阶段"><li data-upload-phase="scan" data-status="pending">扫描</li><li data-upload-phase="transfer" data-status="pending">传输</li><li data-upload-phase="verify" data-status="pending">校验</li><li data-upload-phase="ready" data-status="pending">就绪</li></ol><progress id="dataset-upload-progress" aria-label="数据集上传进度" hidden></progress><p id="dataset-upload-status" role="status">选择一个目录。</p></div>
           <div class="dataset-upload-notes"><p class="muted">关闭页面会暂停传输；重新选择同一目录可继续。已开始的服务器校验不受影响。</p></div>
         </form></div>
@@ -393,6 +534,8 @@ export function datasetsUI(store,toast){
         <div id="dataset-panel-workspace" data-dataset-panel="workspace" role="tabpanel" aria-labelledby="dataset-source-workspace" hidden>${dataWorkspaceHTML()}</div></dialog></details>`;
       installAddSheet();
       warehouse.install();
+      for(const note of section.querySelectorAll('.data-workspace-card>p.muted,.data-workspace-footnote'))note.remove();
+      campusControls();
       for(const note of section.querySelectorAll('.dataset-upload-heading p,.dataset-upload-notes p,.dataset-route>p,.field>small,.data-workspace-card>p.muted,.data-workspace-terminal p.muted,#data-workspace-publish-form>p.muted,.data-workspace-footnote,.datasets-next,.cloud-import>p.muted'))discloseInfo(note,'数据操作说明');
       for(const field of section.querySelectorAll('.field')){
         const help=field.querySelector(':scope>.ui-info');if(!help)continue;
@@ -421,8 +564,7 @@ export function datasetsUI(store,toast){
         for(const node of [...row.childNodes])if(node!==help)caption.append(node);
         row.classList.add('dataset-help-heading');row.prepend(caption);
       }
-      const relay=section.querySelector('#dataset-relay-warning'),relayHelp=relay.querySelector(':scope>.ui-info'),relayLabel=relay.querySelector(':scope>label');
-      const relayRow=document.createElement('div');relayRow.className='copy-caption';relayLabel.before(relayRow);relayRow.append(relayLabel,relayHelp);
+      campusControls();
     }
     if(ids!==machineIds){
       const select=section.querySelector('[name=dataset-machine]'),selected=select.value,changed=machineIds!=='';
@@ -435,6 +577,6 @@ export function datasetsUI(store,toast){
       section.querySelector('#datasets-capacity').hidden=!machines.length;
       machineIds=ids;
     }
-    if(!uploadRoute)showUploadRoute();quota();controls();warehouse.render();if(initialCatalog&&!section.hidden&&store.production&&store.principal){initialCatalog=false;queueMicrotask(load);}
+    if(!uploadRoute)showUploadRoute();quota();controls();warehouse.render();archive.sync();if(initialCatalog&&!section.hidden&&store.production&&store.principal){initialCatalog=false;queueMicrotask(load);}
   };
 }

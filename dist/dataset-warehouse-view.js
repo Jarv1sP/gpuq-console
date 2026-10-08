@@ -1,4 +1,4 @@
-import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName,adaptStorageOverview,readStorageOverview,overviewDatasetCatalog,displayStorageCapacity,datasetWarehouseMachines,warehouseStorageCards,adaptUploadTarget,hasReadableLocalOriginal} from './dataset-catalog-model.js';
+import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName,adaptStorageOverview,readStorageOverview,overviewDatasetCatalog,displayStorageCapacity,datasetWarehouseMachines,warehouseStorageCards,adaptUploadTarget,hasReadableLocalOriginal,storageDisplayHistory,WAREHOUSE_READING_FIELDS,TRAINING_READING_FIELDS} from './dataset-catalog-model.js';
 import {serverSelectLabel} from './workbench-ui.js';
 import {datasetLabelClient,normalizeDatasetDisplayName} from './dataset-label-client.js';
 import {createUploadMeter} from './dataset-upload-metrics.js';
@@ -6,7 +6,7 @@ import {maintenanceFor} from './maintenance-state.js';
 import {transferBytes} from './data-route.js';
 import {selectUploadRoute,validateUploadRoutes,uploadStorageMachine} from './upload-routes.js';
 import {probeBrowserUploadRoute} from './dataset-upload.js';
-import {datasetInfoHTML as info,warehouseCardHTML,trainingCardHTML,trainingLegendHTML,applyCapacityGeometry} from './dataset-flow.js';
+import {datasetInfoHTML as info,warehouseCardHTML,trainingCardHTML,trainingLegendHTML,applyCapacityGeometry,capacityCollectedTitle} from './dataset-flow.js';
 import {datasetCacheWatch} from './dataset-cache-watch.js';
 import {mountCacheOperation,mountCacheTransfer,canCacheAction} from './dataset-cache-operation.js';
 import {mountFilesPreview} from './dataset-files-preview.js';
@@ -28,6 +28,36 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  let model=null,selected=null,selectedVersion=null,filter=null,warehouseFilter=null,search='',capacities=new Map(),epoch=0,routeEpoch=0,route=null,routeAbort=null,selectedFiles=[],uploadName='',phoneDetail=false,installedObserver=null;
  let upload=null,uploadBusy=false,uploadLocked=false,uploadDisplay='',lastControls={};
  let overview=null,legacyCatalog=null,capacityCatalog=null,overviewRequest=0,overviewAbort=null;
+ let expiryTimer=null,listFailed=false;
+ const history=()=>storageDisplayHistory(store);
+ const physicalFields=TRAINING_READING_FIELDS.filter(path=>path.startsWith('volume.'));
+ function scheduleExpiry(){clearTimeout(expiryTimer);const delay=history().nextExpiry();if(delay!==null&&!section.hidden&&document.body.dataset.room==='datasets'){expiryTimer=setTimeout(()=>{rail();rows();scheduleExpiry();},delay+1);expiryTimer?.unref?.();}}
+ function rememberList(){const root=section.querySelector('#dataset-catalog');if(model&&root)history().observe('catalog-list','last',{markup:root.innerHTML,sample:1},['sample'],model.collectedAt??model.checkedAt??null);scheduleExpiry();}
+ function beginRead(){history().begin('warehouse');history().begin('training',(store.data?.machines||[]).map(row=>row.id));}
+ function remember(source,id){
+  const memory=history(),facts=source==='capacity'?displayStorageCapacity(null,model,capacities,store.data?.machines||[]):capacityDisplay(),cards=warehouseStorageCards(source==='capacity'?null:overview,model,capacities,capacityCatalog||model);
+  if(source==='catalog')for(const item of model?.datasets||[])for(const version of item.versions){
+   const w=version.warehouse;
+   for(const row of w?.originals||[])if(row.confirmed===true)memory.confirmWarehouse(row.machine);
+   if(w?.originalConfirmed)memory.confirmWarehouse(w.machine);
+   for(const row of w?.locations||[])memory.confirmWarehouse(row.machine);
+  }
+  if(source==='overview')for(const row of overview?.warehouse.volumes||[])memory.confirmWarehouse(row.machine);
+  if(source==='capacity'&&capacities.get(id)?.storageOverview?.protocol==='dataset-storage-node-v1'&&capacities.get(id).storageOverview.warehouse)memory.confirmWarehouse(id);
+  for(const card of cards){
+   if(source==='capacity'&&card.machine!==id)continue;
+   if(source==='overview'&&!overview?.warehouse.volumes.some(row=>row.machine===card.machine))continue;
+   if(source==='capacity'&&!capacities.get(id)?.storageOverview?.warehouse)continue;
+   memory.observe('warehouse',card.machine,card,source==='catalog'?['contentBytes','datasetCount']:source==='capacity'?WAREHOUSE_READING_FIELDS.filter(field=>!['contentBytes','datasetCount'].includes(field)):WAREHOUSE_READING_FIELDS,card.collectedAt??model?.checkedAt??null);
+  }
+  for(const cache of facts.caches){
+   if(source==='capacity'&&(cache.machine!==id||capacities.get(id)?.available!==true))continue;
+   if(source==='overview'&&!overview?.caches.some(row=>row.machine===cache.machine))continue;
+   const fields=source==='catalog'?['readyContentBytes','readyVersionCount']:source==='capacity'?physicalFields:TRAINING_READING_FIELDS;
+   memory.observe('training',cache.machine,cache,fields,source==='catalog'?model?.checkedAt??null:cache.volume?.collectedAt??null);
+  }
+  scheduleExpiry();
+ }
  const cacheCapabilities=new Map();let capabilityScope=null,capabilityRequest=0,capabilityAbort=null,capabilityBusy=false,capabilityUnavailable=false,actionUI=null,actionLifetime=null,actionContext=null;
  let filesPreviewUI=null,filesPreviewAbort=null,filesPreviewContext=null,filesPreviewHost=null;
  const meter=createUploadMeter(),templates=new WeakMap(),renderBindings=new WeakMap(),renderContexts=new WeakMap();
@@ -49,7 +79,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   if(v)return versionAccess(v).selectable;
   return upload?.state==='READY'&&upload.machine===machine()&&upload.dataset===dataset&&upload.version===version;
  }
- function reset(){epoch++;cacheWatch.reset();retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overviewAbort=null;overview=null;legacyCatalog=null;capacityCatalog=null;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;filter=null;warehouseFilter=null;search='';capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();const searchInput=section.querySelector('#warehouse-search');if(searchInput)searchInput.value='';memberSpace?.reset();rail();rows();inspector();header();}
+ function reset(){clearTimeout(expiryTimer);history().forget('catalog-list');listFailed=false;epoch++;cacheWatch.reset();retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overviewAbort=null;overview=null;legacyCatalog=null;capacityCatalog=null;routeEpoch++;routeAbort?.abort();routeAbort=null;route=null;model=null;selected=null;selectedVersion=null;filter=null;warehouseFilter=null;search='';capacities.clear();labels.reset();selectedFiles=[];uploadName='';uploadDisplay='';upload=null;uploadBusy=false;uploadLocked=false;meter.reset();phoneDetail=false;section.querySelector('.v3-label-dialog')?.close();const searchInput=section.querySelector('#warehouse-search');if(searchInput)searchInput.value='';memberSpace?.reset();rail();rows();inspector();header();}
  function closeCacheAction(){actionLifetime?.abort();actionUI?.destroy();actionUI=null;actionLifetime=null;actionContext=null;section.querySelector('#warehouse-cache-action')?.close();}
  function retireCacheActions(close=true){capabilityRequest++;capabilityAbort?.abort();capabilityAbort=null;capabilityScope=null;capabilityBusy=false;capabilityUnavailable=false;cacheCapabilities.clear();if(close)closeCacheAction();}
  async function readCacheCapabilities(){
@@ -149,7 +179,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function rail(){
   const root=section.querySelector('#warehouse-server-rail');if(!root)return;
   const rows=model?.machines||(store.data?.machines||[]).map(row=>({machine:row.id})),facts=capacityDisplay();
-  html(root,rows.map(row=>trainingCardHTML(facts.caches.find(value=>value.machine===row.machine)||{machine:row.machine},filter===row.machine,row.machine===machine())).join(''));
+  html(root,rows.map(row=>trainingCardHTML(history().project('training',row.machine,facts.caches.find(value=>value.machine===row.machine)||{machine:row.machine},TRAINING_READING_FIELDS),filter===row.machine,row.machine===machine())).join(''));
   const key=section.querySelector('#warehouse-training-key');if(key)html(key,trainingLegendHTML(facts.caches));capacityOverview();
  }
  function capacityDisplay(){
@@ -160,7 +190,12 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  }
  function capacityOverview(){
   const warehouse=section.querySelector('#warehouse-capacity');
-  if(warehouse){const cards=warehouseStorageCards(overview,model,capacities,capacityCatalog||model,store.data?.datasetUploadAdmission);html(warehouse,cards.map(row=>warehouseCardHTML(row,warehouseFilter===row.machine)).join('')||'<div class="v4-warehouse-empty">未知</div>');}
+  if(warehouse){
+   const cards=warehouseStorageCards(overview,model,capacities,capacityCatalog||model,store.data?.datasetUploadAdmission),memory=history();
+   for(const machine of memory.warehouses())if(!cards.some(row=>row.machine===machine))cards.push({machine});
+   const display=cards.map(card=>{const row=memory.project('warehouse',card.machine,card,WAREHOUSE_READING_FIELDS);row.known=row.totalBytes>0&&row.usedBytes!==null&&row.availableBytes!==null&&row.contentBytes!==null&&row.usedBytes+row.availableBytes<=row.totalBytes;return row;});
+   html(warehouse,display.map(row=>warehouseCardHTML(row,warehouseFilter===row.machine)).join('')||(memory.loading('warehouse')?'<div class="v4-warehouse-empty" aria-label="读取中"><span class="storage-reading-skeleton"></span></div>':'<div class="v4-warehouse-empty">未知</div>'));
+  }
  }
  function filters(){
   const root=section.querySelector('#warehouse-list-filters');if(!root)return;
@@ -168,7 +203,15 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  }
  function visible(){return (model?.datasets||[]).filter(item=>(!warehouseFilter||item.versions.some(v=>datasetWarehouseMachines(v).includes(warehouseFilter)))&&(!filter||item.versions.some(v=>v.servers.some(row=>row.machine===filter&&row.observed&&cacheRow(item.dataset,v,row).state==='READY')))&&(!search||(item.displayName+' '+item.dataset).toLowerCase().includes(search)));}
  function rows(){
-  const root=section.querySelector('#dataset-catalog');if(!root)return;filters();const items=visible();
+  const root=section.querySelector('#dataset-catalog');if(!root)return;filters();
+  if(listFailed&&!model){
+   const previous=history().project('catalog-list','last',null,['sample']),retained=previous.sample===1;
+   root.classList.toggle('storage-reading-stale',retained);root.title=retained?capacityCollectedTitle(previous.collectedAt):'';
+   html(root,retained?previous.markup:'<div class="v3-empty">未知</div>');
+   for(const button of root.querySelectorAll('button'))button.disabled=true;
+   templates.delete(root);return;
+  }
+  root.classList.remove('storage-reading-stale');root.removeAttribute('title');const items=visible();
   if(model&&!items.some(item=>item.dataset===selected)){selected=items[0]?.dataset||null;selectedVersion=null;inspector();}
   const pending=upload&&!['READY','DISCARDED'].includes(upload.state),progress=meter.value,pct=progress?.percent;
   const flag=upload?.state==='PAUSED'?'已暂停':upload?.state==='UNKNOWN'?'待确认':upload?.state==='FAILED'?'上传失败':upload?.state==='UPLOADING'&&pct!==null&&pct!==undefined?'上传中 '+pct+'%':upload?.state==='PUBLISHING'?'校验中':'上传中';
@@ -210,9 +253,9 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   root.classList.toggle('v3-inspector-page-scroll',matchMedia('(max-width:759px)').matches||root.getBoundingClientRect().height/scale>available);
  }
  function render(){header();rail();rows();inspector();uploadUI();memberSpace?.render();}
- function catalog(value){legacyCatalog=value;applyCatalog();}
+ function catalog(value){legacyCatalog=value;applyCatalog();remember('catalog');rememberList();rail();}
  function applyCatalog(){
-  if(!legacyCatalog&&!overview)return;
+  if(!legacyCatalog&&!overview)return;listFailed=false;
   const principal={...store.principal,username:store.principal?.username||store.users?.find(row=>row.id===store.principal?.userId)?.username};
   const rawLegacy=legacyCatalog?aggregateDatasetCatalog(legacyCatalog):null,legacy=rawLegacy?readableDatasetCatalog(rawLegacy,principal):null;
   model=overview&&(overview.datasets.length||!legacy?.datasets.length)?readableDatasetCatalog(overviewDatasetCatalog(overview,machine(),legacyCatalog),principal):legacy;
@@ -224,16 +267,25 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   cacheWatch.catalog(model.datasets.flatMap(item=>item.versions.flatMap(v=>v.servers.map(row=>({machine:row.machine,dataset:item.dataset,version:v.version,physicalDataset:row.dataset,state:row.state,canUse:v.canUse,totalBytes:v.bytes})))));
   if(!model.datasets.some(item=>item.dataset===selected)){selected=model.datasets[0]?.dataset||null;selectedVersion=null;}render();
  }
- function storageOverview(value){overview=adaptStorageOverview(value);retireCacheActions(false);capacityOverview();if(overview||legacyCatalog)applyCatalog();}
+ function storageOverview(value){overview=adaptStorageOverview(value);history().fail('warehouse');history().fail('training');
+  if(overview)for(const row of value.warehouse?.volumes||[])history().confirmWarehouse(row.machine);
+  retireCacheActions(false);if(overview||legacyCatalog)applyCatalog();if(overview){remember('overview');rememberList();}rail();scheduleExpiry();}
  async function loadOverview(){
   if(!store.production||!store.principal||section.hidden||document.body.dataset.room!=='datasets')return;
-  const expected=account(),token=epoch,request=++overviewRequest;overviewAbort?.abort();const controller=new AbortController();overviewAbort=controller;
+  history().begin('warehouse');history().begin('training');const expected=account(),token=epoch,request=++overviewRequest;overviewAbort?.abort();const controller=new AbortController();overviewAbort=controller;
   try{const value=await readStorageOverview(store,{signal:controller.signal});if(current(expected,token)&&request===overviewRequest&&!section.hidden&&document.body.dataset.room==='datasets')storageOverview(value);}
-  catch{if(current(expected,token)&&request===overviewRequest){overview=null;capacityOverview();if(legacyCatalog)applyCatalog();}}
+  catch{if(current(expected,token)&&request===overviewRequest){overview=null;if(legacyCatalog)applyCatalog();history().fail('warehouse');history().fail('training');rail();scheduleExpiry();}}
  }
- function catalogUnavailable(){retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();memberSpace?.render();}
- function capacity(value,id){capacities.set(id,value);rail();uploadCapacity();}
- async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacities.set(row.id,null);rail();}});}}
+ function catalogUnavailable({retainList=true}={}){listFailed=retainList;history().fail('catalog-list');history().fail('warehouse');history().fail('training');scheduleExpiry();retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();memberSpace?.render();}
+ function capacity(value,id){
+  const wasWarehouse=capacities.get(id)?.storageOverview?.warehouse;capacities.set(id,value);
+  const warehouseRole=value?.storageOverview?.protocol==='dataset-storage-node-v1'&&value.storageOverview.warehouse;
+  if(value?.available===true||warehouseRole)remember('capacity',id);
+  if(value?.available!==true)history().fail('training',id);
+  if(wasWarehouse&&!warehouseRole)history().fail('warehouse',id);
+  rail();scheduleExpiry();uploadCapacity();
+ }
+ async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacity(null,row.id);}});}}
  function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=adaptUploadTarget(store.data?.datasetUploadAdmission)!==null||route?.storageTier==='hdd'?'仓库':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
  function uploadRoute(){const node=section.querySelector('#v3-upload-route');if(!node)return;const kind=route?.kind;
   node.className='v3-route '+(kind==='campus-direct'?'ok':kind==='tail-upload'?'alt':kind==='unreachable'?'cut':'');
@@ -397,7 +449,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  section.addEventListener('change',event=>{if(event.target.name==='dataset-directory')selection();if(event.target.id==='v3-file-picker')assignFiles([...event.target.files]);if(event.target.hasAttribute('data-v3-version')){selectedVersion=event.target.value;inspector();}if(event.target.name==='dataset-machine'){epoch++;cacheWatch.reset();upload=null;uploadBusy=false;uploadLocked=false;phoneDetail=false;meter.reset();labels.reset();model=null;selected=null;selectedVersion=null;section.querySelector('.v3-label-dialog')?.close();routeEpoch++;if(section.querySelector('#dataset-add-dialog')?.open)probe();render();}});
  section.addEventListener('input',event=>{if(event.target.id==='warehouse-search'){search=event.target.value.trim().toLowerCase();rows();}});
  section.addEventListener('keydown',event=>{
-  const row=event.target.closest('[data-v3-select]');if(!row||!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;
+  const row=event.target.closest('[data-v3-select]');if(!model||!row||!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;
   const items=[...section.querySelectorAll('[data-v3-select]')],index=items.indexOf(row);
   const next=event.key==='Home'?0:event.key==='End'?items.length-1:Math.max(0,Math.min(items.length-1,index+(event.key==='ArrowDown'?1:-1)));
   if(!items[next])return;event.preventDefault();selected=items[next].dataset.v3Select;selectedVersion=null;rows();inspector();
@@ -451,5 +503,5 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  globalThis.addEventListener('scroll',()=>requestAnimationFrame(fitInspector),{passive:true});
  function installMemberSpace(){const host=section.querySelector('#member-storage');if(!host||memberSpace?.host===host)return;memberSpace?.destroy();memberSpace=mountMemberStorage(section,{store,catalog:()=>model,machines:authorizedMachines,refresh,onViewChanged:view=>{if(view==='mine'){phoneDetail=false;section.querySelector('.warehouse-v3').classList.remove('v3-phone-detail');retireCacheActions();closeFilesPreview();}else inspector();}});}
  installMemberSpace();
- return {install,catalog,catalogUnavailable,capacity,storageOverview,loadOverview,render,reset,capacitiesForOthers,prepareUpload,uploading,uploadProgress,actualRoute,uploadFailure,completed,uploadControls,allowsTraining};
+ return {beginRead,install,catalog,catalogUnavailable,capacity,storageOverview,loadOverview,render,reset,capacitiesForOthers,prepareUpload,uploading,uploadProgress,actualRoute,uploadFailure,completed,uploadControls,allowsTraining};
 }

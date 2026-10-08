@@ -148,6 +148,13 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-route.cut .v3-route-seg{background:none;border-top:2px dashed #FF6B6B}#page-datasets .v3-route.cut .v3-route-via{color:#FF6B6B;border-color:#FF6B6B}
 #page-datasets .v3-upload .dataset-upload-actions{justify-content:flex-end;margin-top:32px;padding-top:16px;border-top:1px solid var(--line)}
 #page-datasets .v3-upload .dataset-upload-actions .button{font-size:13px;min-height:40px}
+#page-datasets .v3-upload[data-archive-upload]:not(.v3-other) :is(.v3-upload-opening,#v3-upload-file,.v3-display-field:not([data-archive-name]),#v3-upload-route,#v3-upload-state,#v3-relay-options,.dataset-upload-actions,.dataset-sheet-context){display:none!important}
+#page-datasets .dataset-archive-intake{min-width:0}
+#page-datasets .dataset-archive-intake .v3-drop{margin-top:0}
+#page-datasets .v3-upload .dataset-archive-intake :is(button,input){height:48px;min-height:48px}
+#page-datasets .dataset-archive-intake [data-archive-status]{font:13px var(--sans);margin:16px 0 0;overflow-wrap:anywhere}
+#page-datasets .dataset-archive-intake .server-id{max-width:120px}
+#page-datasets .dataset-archive-intake [data-archive-actions]{justify-content:flex-end;margin-top:20px}
 #page-datasets .v3-label-dialog{width:min(440px,calc(100vw - 32px));max-width:calc(100vw - 32px);background:var(--bg-1);color:var(--ink);border:1px solid var(--line-2);padding:24px;border-radius:10px}
 @container(max-width:1100px){#page-datasets .v3-split{grid-template-columns:minmax(0,1fr) 340px;gap:16px}#page-datasets .v3-cols,#page-datasets .v3-row{grid-template-columns:12px minmax(0,1fr) 52px 70px 64px minmax(80px,.8fr);gap:8px;padding-inline:12px}}
 @container(max-width:759px){

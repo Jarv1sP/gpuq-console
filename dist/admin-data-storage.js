@@ -209,7 +209,7 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
         }
       }
       const value=await read(machine);if(!current())return;catalog=value;render();status.textContent=value.partial?'部分服务器状态待确认':'';
-    }catch(error){if(current()){catalog=null;el.querySelector('[data-dataset-catalog]').replaceChildren();status.textContent=error.message;}}
+    }catch(error){if(current()){catalog=null;el.querySelector('[data-dataset-catalog]').replaceChildren();members.sync();status.textContent=error.message;}}
     finally{if(current()){busy=false;select.disabled=false;el.querySelector('[data-storage-refresh]').disabled=false;}}
   }
   el.addEventListener('change',event=>{if(event.target===select){cache.reset();catalog=null;load(false);}},{signal:lifecycle.signal});
