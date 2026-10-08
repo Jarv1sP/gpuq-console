@@ -429,5 +429,9 @@ await import('./dataset-capacity-ui-smoke.mjs');
 
 // Strict new cache capability and receipt integration in the actual warehouse.
 await import('./dataset-warehouse-cache-ui-smoke.mjs');
+
+// A readable same-node warehouse original permits logical cache preparation,
+// without advertising a READY cache before its actual node receipt.
+await import('./warehouse-logical-cache-ui-smoke.mjs');
 await import('./dataset-cache-operation-ui-smoke.mjs');
 await import('./dataset-files-preview-ui-smoke.mjs');
