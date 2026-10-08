@@ -77,7 +77,7 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-meta{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;color:var(--ink-2);font-size:12px}
 #page-datasets .v3-meta .num{font:12px var(--mono);font-variant-numeric:tabular-nums}
 #page-datasets .v3-lab{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--ink-3);margin:0 0 10px}
-#page-datasets .v3-version{height:32px!important;min-height:32px!important;max-width:180px;font:12px var(--mono);padding:0 8px!important}
+#page-datasets .v3-version{height:48px!important;min-height:48px!important;max-width:180px;font:12px var(--mono);padding:0 8px!important}
 #page-datasets .v3-store{display:flex;align-items:center;gap:10px;font-size:13px;min-width:0}
 #page-datasets .v3-store code{margin-left:auto;color:var(--ink-3);font:11px var(--mono);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;padding:0}
 .sb #page-datasets .v3-server.dataset-card{display:grid;grid-template-columns:12px minmax(0,1fr) auto;align-items:center;gap:10px;min-height:44px;margin:0;padding:4px 0;background:none;border:0;border-bottom:1px dashed var(--line);border-radius:0}
@@ -89,6 +89,8 @@ body[data-room=datasets] .v3-partial{font:12px var(--sans);align-self:center}
 #page-datasets .v3-small,.sb #page-datasets #warehouse-inspector .v3-server [data-remove-more]{height:32px;min-height:32px;font-size:13px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center}
 #page-datasets .v3-outline{background:none;border:1px solid var(--line-2);border-radius:7px;color:var(--ink)}
 #page-datasets .v3-train>.button{width:100%;justify-content:center;min-height:40px;font-size:14px}
+/* Keep every inspector action touchable at all widths, including nested trees. */
+.sb #page-datasets #warehouse-inspector.v3-inspector :is(button,.button,select,summary,a[href]){min-height:48px;min-width:48px;height:auto}
 #page-datasets .v3-code{display:flex;align-items:center;gap:10px;margin-top:10px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:4px 10px;min-width:0}
 #page-datasets .v3-code code{flex:1;min-width:0;color:var(--ink);font:12px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;padding:0}
 #page-datasets .v3-code>span{color:var(--ink-3);font-size:12px;flex:none}
