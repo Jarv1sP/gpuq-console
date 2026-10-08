@@ -31,6 +31,8 @@ class Warehouse:
         self.n=executor;self.config=policy(executor)
         if self.config is None:raise ValueError('Local warehouse is not enabled')
         executor.dataset_mount_check(self.config)
+        if 'archiveUpload' in executor.CONFIG.get('datasets',{}):
+            self.config['archiveUpload']=executor.CONFIG['datasets']['archiveUpload']
         self.d,self.hot=executor.dataset_cache()
         self.cold=self.d.DatasetCache(self.config['root'],sources={},reserve_bytes=self.config['reserveBytes'],
                                      mount_point=self.config['mountPoint'])

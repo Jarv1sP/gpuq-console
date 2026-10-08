@@ -178,7 +178,7 @@ def dataset_mount_check(config):
 def dataset_cache():
     global DATASET_MODULE
     config=CONFIG.get('datasets')
-    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays'}:raise ValueError('Dataset storage is not configured')
+    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays','archiveUpload'}:raise ValueError('Dataset storage is not configured')
     dataset_mount_check(config)
     if DATASET_MODULE is None:
         module=importlib.util.spec_from_file_location('gpuq_dataset_cache',HERE/'dataset-cache.py')
@@ -262,7 +262,7 @@ def dataset_upload_location_cache():
     """Private locate only: validate existing storage, never initialize it."""
     global DATASET_MODULE
     config=CONFIG.get('datasets')
-    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays'}:
+    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays','archiveUpload'}:
         raise ValueError('Dataset storage is not configured')
     if CONFIG.get('storageWarehouse') is not None:
         spec=importlib.util.spec_from_file_location('gpuq_location_warehouse_policy',HERE/'storage-warehouse.py')

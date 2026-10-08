@@ -15,7 +15,7 @@ def _capacity_cache(executor):
     definition=importlib.util.spec_from_file_location('gpuq_ingress_capacity_cache',Path(__file__).with_name('dataset-cache.py'))
     module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
     config=executor.CONFIG.get('datasets')
-    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays'}:
+    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays','archiveUpload'}:
         raise ValueError('Dataset storage is not configured')
     tier=executor.CONFIG.get('storageTier',{'enabled':False})
     if (not isinstance(tier,dict) or set(tier)-{'enabled','budgetBytes','highWater','lowWater'}
@@ -246,10 +246,9 @@ def _located_session(executor, args, module, cache, result, *, proof=True):
         raise ValueError('Existing private upload identity is invalid or belongs to a transfer')
     # Reuse the pure receipt check, not the upload constructor: location must
     # never create a workspace, upload control directory or reservation.
-    _, reader = _reader(executor, module, cache)
+    uploads, reader = _reader(executor, module, cache)
     reader._check_admission(session)
-    result.update(present=True, specification={key: session[key] for key in
-        ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')})
+    result.update(present=True, specification=uploads.upload_specification(session))
     if proof and session.get('serverAdmission') is not None:
         bound = session['serverAdmission']
         result.update(initializationProtocol=1, nodePresent=True, admissionProtocol=1,
