@@ -5,6 +5,8 @@ RUN npm ci --ignore-scripts
 COPY *.mjs ./
 COPY dist ./dist
 COPY scripts/build-client.mjs ./scripts/
+COPY scripts/build-campus-native.mjs scripts/campus-go-toolchain.mjs ./scripts/
+COPY native/campus-http ./native/campus-http
 RUN npm run build:client
 RUN npm prune --omit=dev --ignore-scripts
 

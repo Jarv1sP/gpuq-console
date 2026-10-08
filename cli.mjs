@@ -154,7 +154,7 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
       }while(!confirmed);
       if(context.project&&!stable(initial,await file.stat()))fail('Local file changed during upload; verify and upload again before project publish');
       if(verifyTree){observed.push({local,st:initial});files.push({path,size:identity.totalSize,sha256:identity.sha256});}
-    }finally{transport?.close();await file.close();}count++;
+    }finally{try{await transport?.close();}finally{await file.close();}}count++;
   }
   await upload(local,remote);
   if(inspectOnly)return {machine,project:context.project,readOnly:true,files:statuses,skipped};

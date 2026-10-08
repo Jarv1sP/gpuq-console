@@ -5,6 +5,8 @@ import {createHash} from 'node:crypto';
 import {createDirectDatasetTransport,probeDirectUploadRoute,RELAY_LIMIT_BYTES} from './client-direct-upload.mjs';
 import {selectUploadRoute,uploadStorageMachine,validateUploadRoutes} from './dist/upload-routes.js';
 import {allocateDatasetUpload,saveDatasetUploadIntent,confirmDatasetUploadInitialization} from './dist/dataset-upload.js';
+import {createCampusNativeDatasetTransport,probeCampusNativeUploadRoute} from './client-campus-native-dataset.mjs';
+import {createCampusNativeAgent} from './client-campus-native.mjs';
 export const DATA_CHUNK=1024*1024;
 const DATA_MANIFEST_LIMIT=64*1024*1024,DATA_ENTRY_LIMIT=500000;
 const fail=message=>{throw Error(message);};
@@ -55,9 +57,13 @@ export async function scanLocalDataset(root,progress,{lstat=fsLstat,open=fsOpen,
   return {manifest,manifestSha256:createHash('sha256').update(manifest).digest('hex'),files,totalBytes,entries:files.length+directories.length,openEntry,verify};
 }
 
-export async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore,filesystem,admission,via='auto'}){if(!['auto','direct','campus'].includes(via))fail('File transfers require campus direct transport; VPS relay is disabled');return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,admission,via});}
+export async function uploadLocalDataset(call,{machine,name,userId,directory,progress,keyStore,filesystem,admission,via='auto',directFactory,probeRoute,platform=process.platform,nativeOptions}){if(!['auto','direct','campus'].includes(via))fail('File transfers require campus direct transport; VPS relay is disabled');return uploadDatasetSnapshot(call,{machine,name,userId,scan:await scanLocalDataset(directory,progress,filesystem),progress,keyStore,admission,via,directFactory,probeRoute,platform,nativeOptions});}
+export function campusDatasetTransportDefaults({platform=process.platform,nativeOptions={}}={}){
+  return platform==='linux'?{directFactory:(get,options)=>createCampusNativeDatasetTransport(get,{...options,agentFactory:pin=>createCampusNativeAgent(pin,nativeOptions)}),probeRoute:route=>probeCampusNativeUploadRoute(route,nativeOptions)}:{directFactory:createDirectDatasetTransport,probeRoute:probeDirectUploadRoute};
+}
 export function snapshotKey(identity){const h=createHash('sha256').update(JSON.stringify(identity)).digest('hex');return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-8${h.slice(17,20)}-${h.slice(20,32)}`;}
-export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,admission,legacyTransfer=false,via='auto',directFactory=createDirectDatasetTransport,probeRoute=probeDirectUploadRoute}){
+export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progress,keyStore,admission,legacyTransfer=false,via='auto',directFactory,probeRoute,platform=process.platform,nativeOptions={}}){
+  const defaults=campusDatasetTransportDefaults({platform,nativeOptions});directFactory??=defaults.directFactory;probeRoute??=defaults.probeRoute;
   if(!['auto','direct','campus'].includes(via))fail('File transfers require campus direct transport; VPS relay is disabled');
   const key=snapshotKey([userId,machine,name,scan.manifestSha256]);
   let uploadId,state,direct,route,storageMachine,uploadIntent,announced;
@@ -169,7 +175,7 @@ export async function uploadDatasetSnapshot(call,{machine,name,userId,scan,progr
   }catch(error){
     if(!uploadId)throw error;
     throw Object.assign(Error(`${error.message}\nUpload: ${uploadId} on ${machine}. Repeat the same data upload command to resume; check with gpuctl data upload-status ${uploadId} --machine ${machine}. Do not assume an interrupted request canceled server verification.`),{code:error.code,status:error.status,uploadId,machine});
-  }finally{direct?.close();}
+  }finally{await direct?.close();}
 }
 
 export function workspaceDataPath(path,{directory=false}={}){

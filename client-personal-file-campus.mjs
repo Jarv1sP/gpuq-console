@@ -1,6 +1,7 @@
 import {request as httpsRequest} from 'node:https';
 import {pinnedUploadAgent} from './client-direct-upload.mjs';
 import {downloadFile} from './client-file-download.mjs';
+import {campusNativeTransportOptions} from './client-campus-native.mjs';
 
 const PROTOCOL='personal-file-campus-v1',CHUNK=1024**2;
 const HASH=/^[a-f0-9]{64}$/,UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -60,7 +61,12 @@ export function personalFileRequest(grant,agent,action,args,{request=httpsReques
   });
 }
 
-export async function createPersonalFileTransport(call,{machine,context,path,action,identity={},agentFactory=pinnedUploadAgent,send=personalFileRequest,now=()=>Date.now()/1000}){
+export async function createPersonalFileTransport(call,{machine,context,path,action,identity={},agentFactory,send,platform=process.platform,nativeOptions={},now=()=>Date.now()/1000}){
+  const defaults=platform==='linux'?campusNativeTransportOptions(nativeOptions):{agentFactory:pinnedUploadAgent,send:personalFileRequest};
+  // Supplying a custom Agent keeps its existing request contract; callers can
+  // still inject either or both hooks for isolated tests or an explicit client.
+  send??=agentFactory?personalFileRequest:defaults.send;
+  agentFactory??=defaults.agentFactory;
   const request={machine,...context,path,action,...identity};
   let grant=personalFileGrant((await call('files.direct-ticket',request)).result,path,action,now()),closed=false;
   const fixed={endpoint:grant.endpoint,pin:grant.certificateSha256,revision:grant.revision,machine:grant.machine,fingerprint:grant.file?.fingerprint};
@@ -78,7 +84,7 @@ export async function createPersonalFileTransport(call,{machine,context,path,act
       }
       return send(grant,agent,action,args);
     },
-    close(){closed=true;agent.destroy();}
+    async close(){closed=true;await agent.destroy();}
   };
 }
 
@@ -88,9 +94,11 @@ export async function downloadCampusFile(call,options){
   try{
     return await downloadFile(async(operation,args)=>{
       if(operation!=='files.get')fail('Invalid campus download operation');
-      transport??=await createPersonalFileTransport(call,{machine:options.machine,context:options.context,path:options.path,
+      transport??=await (options.transportFactory||createPersonalFileTransport)(call,{machine:options.machine,context:options.context,path:options.path,
+        ...(options.platform?{platform:options.platform}:{}),...(options.nativeOptions?{nativeOptions:options.nativeOptions}:{}),
+        ...(options.agentFactory?{agentFactory:options.agentFactory}:{}),...(options.send?{send:options.send}:{}),
         action:'get',identity:args.fingerprint?{fingerprint:args.fingerprint}:{}});
       return {result:await transport.request({offset:args.offset})};
     },options);
-  }finally{transport?.close();}
+  }finally{await transport?.close();}
 }
