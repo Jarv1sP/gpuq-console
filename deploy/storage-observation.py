@@ -48,6 +48,11 @@ class ProjectBreakdown:
     def add(self, info, path, parent=None):
         if len(path) < 2:
             return
+        if path[:2] == ('projects-v2', '.run-claims'):
+            # ProjectStore's fixed, private control directory is not an owner.
+            # The walk still validates/scans it and counts its physical blocks
+            # in the existing all-account total, never in an owner's project.
+            return
         owner = path[1]
         if not OWNER.fullmatch(owner) or path[0] != 'users' and len(owner) != 64:
             self.complete = False
@@ -258,6 +263,10 @@ def sample(root_fd, *, root_path, maximum=MAX_ENTRIES, seconds=MAX_SECONDS, brea
                 info = entry.stat(follow_symlinks=False)
                 if info.st_dev != before.st_dev:
                     raise ValueError('Project sample crosses a mount')
+                if path == ('projects-v2',) and entry.name == '.run-claims' and (
+                        not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                        or stat.S_IMODE(info.st_mode) != 0o700):
+                    raise ValueError('Unsafe project run-claim directory')
                 if stat.S_ISLNK(info.st_mode):
                     pass  # Do not traverse or count an external link's target.
                 elif stat.S_ISDIR(info.st_mode):
