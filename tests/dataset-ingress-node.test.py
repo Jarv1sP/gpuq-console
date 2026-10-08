@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
+from storage_test_helpers import local_data_mounts
 
 DEPLOY = Path(__file__).resolve().parents[1]/'deploy'
 
@@ -29,11 +30,14 @@ class Lookup(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.cache = D.DatasetCache(Path(self.temp.name).resolve()/'cache', reserve_bytes=0)
+        mount=local_data_mounts(Path(self.temp.name).resolve());mount.start();self.addCleanup(mount.stop)
         self.user = 'demo-user-1'
         self.upload = str(uuid.uuid4())
         self.node = SimpleNamespace(CONFIG={'machine': 'gpu-4', 'storageArchive': {
             'enabled': True, 'machine': 'gpu-4', 'authority': 'hdd'}, 'storageAuthority': {'enabled': True}},
-            dataset_cache=lambda: (D, self.cache), workspace=lambda _: self.fail('lookup called workspace'))
+            dataset_cache=lambda: (D, self.cache), workspace=lambda _: self.fail('lookup called workspace'),
+            dataset_mount_check=lambda _:None,ROOT=Path(self.temp.name).resolve())
+        self.node.CONFIG['datasets']={'root':str(self.cache.root),'mountPoint':str(self.node.ROOT),'reserveBytes':0}
         self.args = {'userId': self.user, 'uploadId': self.upload}
         self.folder = self.cache.root/'.uploads'/hashlib.sha256(self.user.encode()).hexdigest()/self.upload
 
@@ -78,7 +82,7 @@ class Lookup(unittest.TestCase):
                                f_favail=10000, f_flag=0, **changes)
 
     def test_capacity_is_exact_admission_footprint_and_has_no_writes(self):
-        args=self.capacity_args();self.cache.reserve_bytes=8192
+        args=self.capacity_args();self.node.CONFIG['datasets']['reserveBytes']=8192
         D._write_json(self.cache.root/'.upload-reservations'/('b'*64+'.json'),{'bytes':1234,'inodes':99})
         before={str(p.relative_to(self.cache.root)) for p in self.cache.root.rglob('*')}
         with patch.object(os,'fstatvfs',return_value=self.disk()):
@@ -116,14 +120,89 @@ class Lookup(unittest.TestCase):
         D._write_json(self.cache.root/'.upload-admissions'/(key+'.json'),{})
         with self.assertRaisesRegex(ValueError,'incomplete'):I.locate(self.node,args)
 
-    def test_capacity_uses_guarded_warehouse_view_not_training_cache_policy(self):
-        self.node.CONFIG['storageTier']={'enabled':True}
+    def test_capacity_rejects_incomplete_split_policy_and_same_media(self):
+        self.node.CONFIG['storageTier']={'enabled':True,'budgetBytes':2**30}
         self.node.CONFIG['storageWarehouse']={'enabled':True}
-        self.node.dataset_ingress_view=lambda:SimpleNamespace(CONFIG={**self.node.CONFIG,'storageTier':{'enabled':False}})
+        with self.assertRaises(ValueError):I.locate(self.node,self.capacity_args())
+        cold=D.DatasetCache(self.node.ROOT/'warehouse',reserve_bytes=0)
+        self.node.CONFIG['storageWarehouse'].update(root=str(cold.root),mountPoint=str(self.node.ROOT),reserveBytes=0)
+        with self.assertRaisesRegex(ValueError,'distinct fixed roots and media'):I.locate(self.node,self.capacity_args())
+
+    def test_capacity_split_root_reads_only_hdd_reservations_and_its_reserve(self):
+        volume=self.node.ROOT/'cold-volume';volume.mkdir()
+        cold=D.DatasetCache(volume/'warehouse',reserve_bytes=4096)
+        self.node.CONFIG['storageTier']={'enabled':True,'budgetBytes':2**30}
+        self.node.CONFIG['workspaceReserveBytes']=1000000
+        self.node.CONFIG['storageWarehouse']={'enabled':True,'root':str(cold.root),
+            'mountPoint':str(volume),'reserveBytes':4096}
+        D._write_json(cold.root/'.upload-reservations'/('b'*64+'.json'),{'bytes':1234,'inodes':7})
+        D._write_json(self.cache.root/'.upload-reservations'/('c'*64+'.json'),{'bytes':99999,'inodes':77})
+        # Disposable roots use real directories/FDs with only separate disk
+        # identity simulated; production still checks the actual mount table.
+        inodes={p.stat().st_ino for p in [volume,cold.root,*cold.root.iterdir()]}
+        fstat,stat=os.fstat,Path.stat
+        def distinct(value):
+            if value.st_ino not in inodes:return value
+            fields=list(value);fields[2]+=4096
+            return os.stat_result(fields)
+        before={str(p.relative_to(self.node.ROOT)) for p in self.node.ROOT.rglob('*')}
+        with patch.object(os,'fstat',side_effect=lambda fd:distinct(fstat(fd))), \
+                patch.object(Path,'stat',new=lambda p,*a,**k:distinct(stat(p,*a,**k))), \
+                local_data_mounts(self.node.ROOT,volume),patch.object(os,'fstatvfs',return_value=self.disk()):
+            result=I.locate(self.node,self.capacity_args())
+        self.assertTrue(result['authority']['enabled'])
+        self.assertEqual(result['capacity']['availableBytes'],4096*10000-4096-1234)
+        self.assertEqual(result['capacity']['availableInodes'],10000-1024-7)
+        self.assertEqual(before,{str(p.relative_to(self.node.ROOT)) for p in self.node.ROOT.rglob('*')})
+
+    def test_capacity_never_calls_a_creating_factory_and_missing_metadata_is_not_recreated(self):
+        def forbidden():self.fail('capacity invoked a creating factory')
+        self.node.dataset_source_cache=forbidden;self.node.dataset_cache=forbidden
+        self.node.dataset_ingress_view=forbidden;self.node.storage_warehouse=forbidden
         with patch.object(os,'fstatvfs',return_value=self.disk()):
             self.assertTrue(I.locate(self.node,self.capacity_args())['capacity']['writable'])
-        self.node.dataset_ingress_view=lambda:self.node
-        with self.assertRaises(PermissionError):I.locate(self.node,self.capacity_args())
+        missing=self.cache.root/'.staging';missing.rmdir()
+        with self.assertRaises(FileNotFoundError):I.locate(self.node,self.capacity_args())
+        self.assertFalse(missing.exists())
+        offline=self.cache.root.with_name('offline');self.cache.root.rename(offline)
+        with self.assertRaises(FileNotFoundError):I.locate(self.node,self.capacity_args())
+        self.assertFalse(self.cache.root.exists())
+
+    def test_capacity_preserves_shared_workspace_safety_reserve_and_mount_guard(self):
+        self.node.CONFIG['datasets']['reserveBytes']=8192
+        self.node.CONFIG['workspaceReserveBytes']=16384
+        with patch.object(os,'fstatvfs',return_value=self.disk()):
+            capacity=I.locate(self.node,self.capacity_args())['capacity']
+        self.assertEqual(capacity['availableBytes'],4096*10000-16384)
+        with patch.object(self.node,'dataset_mount_check',side_effect=ValueError('fixed mount unavailable')):
+            with self.assertRaisesRegex(ValueError,'fixed mount unavailable'):I.locate(self.node,self.capacity_args())
+        with local_data_mounts():
+            with self.assertRaises(ValueError):I.locate(self.node,self.capacity_args())
+
+    def test_capacity_rejects_symlink_root_and_writable_by_others_metadata_without_repair(self):
+        root=self.cache.root;offline=root.with_name('offline');root.rename(offline);root.symlink_to(offline)
+        with self.assertRaises(OSError):I.locate(self.node,self.capacity_args())
+        root.unlink();offline.rename(root)
+        metadata=root/'.upload-reservations';metadata.chmod(0o777)
+        with self.assertRaisesRegex(ValueError,'unsafe'):I.locate(self.node,self.capacity_args())
+        self.assertEqual(metadata.stat().st_mode&0o777,0o777)
+
+    def test_capacity_rejects_unsafe_sources_like_the_existing_cache_constructor(self):
+        for source in ('/etc','/home/user',str(self.node.ROOT/'.ssh'),
+                       str(self.cache.root),str(self.cache.root/'nested'),str(self.node.ROOT)):
+            self.node.CONFIG['datasets']['sources']={'source':source}
+            with self.subTest(source=source),self.assertRaisesRegex(ValueError,'source directory'):
+                I.locate(self.node,self.capacity_args())
+        self.node.CONFIG['datasets']['sources']={'../source':str(self.node.ROOT/'good-source')}
+        with self.assertRaises(ValueError):I.locate(self.node,self.capacity_args())
+
+    def test_capacity_rejects_invalid_workspace_reserve_in_single_and_split_policy(self):
+        for split in (False,True):
+            if split:self.node.CONFIG['storageWarehouse']={'enabled':True}
+            for value in (True,None,-1,2**63):
+                self.node.CONFIG['workspaceReserveBytes']=value
+                with self.subTest(split=split,value=value),self.assertRaisesRegex(ValueError,'workspace free-space reserve'):
+                    I.locate(self.node,self.capacity_args())
 
 
 if __name__ == '__main__':unittest.main()

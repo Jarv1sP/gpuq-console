@@ -2,8 +2,75 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
+from types import SimpleNamespace
+
+
+def _capacity_cache(executor):
+    """Inspect an initialized, fixed HDD root without any creating factory."""
+    definition=importlib.util.spec_from_file_location('gpuq_ingress_capacity_cache',Path(__file__).with_name('dataset-cache.py'))
+    module=importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
+    config=executor.CONFIG.get('datasets')
+    if not isinstance(config,dict) or set(config)-{'root','mountPoint','sources','reserveBytes','uploads','retireRetentionDays'}:
+        raise ValueError('Dataset storage is not configured')
+    tier=executor.CONFIG.get('storageTier',{'enabled':False})
+    if (not isinstance(tier,dict) or set(tier)-{'enabled','budgetBytes','highWater','lowWater'}
+            or type(tier.get('enabled',False)) is not bool
+            or tier.get('enabled',False) and (type(tier.get('budgetBytes')) is not int or not 0<tier['budgetBytes']<=2**63-1)):
+        raise ValueError('Invalid trusted dataset cache policy')
+    workspace_reserve=executor.CONFIG.get('workspaceReserveBytes')
+    if ('workspaceReserveBytes' in executor.CONFIG and
+            (type(workspace_reserve) is not int or not 0<=workspace_reserve<=2**63-1)):
+        raise ValueError('Invalid workspace free-space reserve')
+
+    def existing(value):
+        executor.dataset_mount_check(value)
+        cache=module.DatasetCache.__new__(module.DatasetCache)
+        cache.root=module._absolute(value.get('root','/data2/datasets'))
+        cache.reserve_bytes=value.get('reserveBytes',10*1024**3)
+        if (str(cache.root) in module.BROAD or str(cache.root)!=value.get('root','/data2/datasets')
+                or type(cache.reserve_bytes) is not int or cache.reserve_bytes<0):
+            raise ValueError('Unsafe capacity root or reserve')
+        for key,source in dict(value.get('sources') or {}).items():
+            module._identifier(key)
+            path=module._absolute(source)
+            if (str(path) in module.BROAD or path.parent in (Path('/home'),Path('/Users'))
+                    or any(part in module.FORBIDDEN for part in path.parts)
+                    or any(path==Path(parent) or Path(parent) in path.parents for parent in module.SYSTEM)
+                    or path==cache.root or path in cache.root.parents or cache.root in path.parents):
+                raise ValueError('Unsafe approved source directory')
+        cache.mount_point=module._absolute(value.get('mountPoint','/data2'))
+        cache.mount=cache._current_mount()
+        # These are the existing constructor's metadata directories. Missing
+        # or unsafe initialization is unknown capacity, not permission to mkdir.
+        for name in ('','.registry','.staging','ready','.leases','.trash','.locks',
+                     '.upload-reservations','.tiers','.provenance','.retirements','.reopens'):
+            with module._directory(cache.root/name) as fd:
+                info=os.fstat(fd)
+                if (info.st_uid!=os.geteuid() or info.st_mode&0o022 or info.st_dev!=cache.mount[2]):
+                    raise ValueError('Capacity metadata is unsafe or on another volume')
+                if not name:cache._root_identity=(info.st_dev,info.st_ino)
+        return cache
+
+    view=executor
+    if executor.CONFIG.get('storageWarehouse') is not None:
+        definition=importlib.util.spec_from_file_location('gpuq_ingress_warehouse_policy',Path(__file__).with_name('storage-warehouse.py'))
+        warehouse=importlib.util.module_from_spec(definition);definition.loader.exec_module(warehouse)
+        cold_config=warehouse.policy(executor)
+        hot,cold=existing(config),existing(cold_config)
+        if (cold.root==hot.root or cold.root in hot.root.parents or hot.root in cold.root.parents
+                or cold._root_identity==hot._root_identity or cold.mount[2]==hot.mount[2]):
+            raise ValueError('Warehouse and training cache must be distinct fixed roots and media')
+        cache=cold
+        view=SimpleNamespace(CONFIG={**executor.CONFIG,'datasets':cold_config,'storageTier':{'enabled':False}})
+    else:
+        cache=existing(config)
+        if 'workspaceReserveBytes' in executor.CONFIG:
+            with module._directory(executor.ROOT) as fd:
+                if os.fstat(fd).st_dev==cache._root_identity[0]:cache.reserve_bytes=max(cache.reserve_bytes,workspace_reserve)
+    return module,cache,view
 
 
 def _reader(executor, module, cache):
@@ -23,8 +90,11 @@ def locate(executor, args):
             or not isinstance(args['uploadId'], str)
             or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', args['uploadId'])):
         raise ValueError('Invalid private upload location fields')
-    factory=getattr(executor,'dataset_source_cache',executor.dataset_cache)
-    module, cache = factory()  # Existing fixed warehouse mount/root guard.
+    if 'specification' in args:
+        module,cache,view=_capacity_cache(executor)
+    else:
+        factory=getattr(executor,'dataset_source_cache',executor.dataset_cache)
+        module, cache = factory()  # Preserve legacy two-field lookup behavior.
     machine = executor.CONFIG['machine']
     archive = executor.CONFIG.get('storageArchive', {})
     authority = executor.CONFIG.get('storageAuthority', {})
@@ -48,7 +118,6 @@ def locate(executor, args):
             if 'specification' in args:
                 # On split HDD/cache nodes the trusted ingress view carries the
                 # HDD policy. Never infer write permission from a public field.
-                view = getattr(executor, 'dataset_ingress_view', lambda: executor)()
                 uploads, reader = _reader(view, module, cache)
                 reader.limits = uploads.upload_limits(view.CONFIG)
                 result['capacity'] = reader.capacity(args['authority'], args['specification'])
