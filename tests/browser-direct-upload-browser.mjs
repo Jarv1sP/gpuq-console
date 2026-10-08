@@ -97,8 +97,11 @@ try{
             const next=fixture.raw.slice(after);assert.equal(next.find(row=>row.action==='chunk'&&row.path==='训练/samples.bin').offset,1024**2);assert.ok(next.every(row=>row.uploadId===uploadId));assert.equal(fixture.uploads.size,1);
           }
           if(mode==='network'){
-            fixture.config.mode='success';const old=fixture.calls.length;await page.locator('#v3-relay-options>summary').click();await page.locator('#v3-relay-options [data-v3-explicit-relay]').click();await page.waitForFunction(()=>document.querySelector('#dataset-upload-status').dataset.state==='READY');
-            assert.match(await page.locator('#v3-upload-route').textContent(),/平台中转/);assert.ok(fixture.calls.slice(old).some(row=>row.operation.endsWith('.manifest')));assert.equal(fixture.calls.filter(row=>row.operation.endsWith('.begin')).at(-1).args.allowRelay,true);
+            fixture.config.mode='success';const old=fixture.calls.length,rawBefore=fixture.raw.length,uploadId=[...fixture.uploads.keys()][0];await page.locator('#v3-relay-options>summary').click();await page.locator('#v3-relay-options [data-v3-explicit-relay]').click();await page.waitForFunction(()=>/VPS 中转已停用/.test(document.querySelector('#dataset-upload-status').textContent));
+            assert.equal(fixture.calls.length,old,'A retained relay button never allocates or sends a control mutation');assert.equal(fixture.raw.length,rawBefore);assert.equal(fixture.uploads.size,1);assert.equal([...fixture.uploads.keys()][0],uploadId);
+            assert.equal(await page.locator('[data-upload-phase=ready][aria-current]').count(),0);
+            await page.locator('#v3-upload-state [data-v3-probe]').last().click();await page.waitForFunction(()=>document.querySelector('#v3-upload-route').classList.contains('ok'));await page.locator('[data-v3-resume]').click();await page.waitForFunction(()=>document.querySelector('#dataset-upload-status').dataset.state==='READY');
+            assert.ok(fixture.raw.slice(rawBefore).every(row=>row.uploadId===uploadId));assert.equal(fixture.calls.some(row=>row.operation.endsWith('.manifest')||row.operation.endsWith('.chunk')),false);assert.equal(fixture.uploads.size,1);
           }
         }
       }
@@ -112,9 +115,9 @@ try{
     try{
       await page.evaluate(async machine=>{
         const {uploadBrowserDataset,scanBrowserDirectory}=await import('/dataset-upload.js'),{datasetUploadKeyStore}=await import('/datasets-ui.js');const file=new File(['x'],'sample');const scan=await scanBrowserDirectory([file]);scan.totalBytes=256*1024**2+1;
-        try{await uploadBrowserDataset({call:store.call.bind(store),userId:'member',machine,name:'large',scan,keyStore:datasetUploadKeyStore(localStorage),admission:store.data.datasetUploadAdmission});window.largeError='accepted';}catch(error){window.largeError=error.message;}
+        try{await uploadBrowserDataset({call:store.call.bind(store),userId:'member',machine,name:'large',scan,keyStore:datasetUploadKeyStore(localStorage),admission:store.data.datasetUploadAdmission});window.largeError={message:'accepted'};}catch(error){window.largeError={message:error.message,code:error.code,uploadId:error.uploadId,canRelay:error.canRelay};}
       },machines[0].id);
-      assert.match(await page.evaluate(()=>largeError),/超过 256 MiB/);assert.equal(fixture.raw.length,0);assert.deepEqual(fixture.calls.filter(row=>row.operation.startsWith('datasets.upload.')&&row.operation!=='datasets.upload.routes').map(row=>row.operation),['datasets.upload.admission.create','datasets.upload.begin']);assert.deepEqual(fixture.failures,[]);completed.push('large endpoint denial');
+      const error=await page.evaluate(()=>largeError);assert.equal(error.code,'CAMPUS_REQUIRED');assert.equal(error.canRelay,false);assert.equal(error.uploadId,[...fixture.uploads.keys()][0]);assert.match(error.message,/原上传编号和断点已保留/);assert.equal(fixture.raw.length,0);assert.deepEqual(fixture.calls.filter(row=>row.operation.startsWith('datasets.upload.')&&row.operation!=='datasets.upload.routes').map(row=>row.operation),['datasets.upload.admission.create','datasets.upload.begin']);assert.deepEqual(fixture.failures,[]);completed.push('large endpoint denial');
     }finally{await context.close();await fixture.close();}
   }
   {
@@ -130,6 +133,6 @@ try{
     }finally{await context.close();await fixture.close();}
   }
   assert.deepEqual(scriptErrors,[]);assert.deepEqual(unexpected,[]);
-  console.log('BROWSER DIRECT UPLOAD UI PASS: '+completed.join('; ')+'. Actual raw HTTPS/CORS, credentials omit, no node cookie, verified SHA256, explicit relay only, same upload offsets.');
+  console.log('BROWSER DIRECT UPLOAD UI PASS: '+completed.join('; ')+'. Actual raw HTTPS/CORS, credentials omit, no node cookie, verified SHA256, relay refused, same upload offsets.');
   console.log('Screenshots: '+shots);
 }finally{await browser.close();await rm(selection,{recursive:true,force:true});}
