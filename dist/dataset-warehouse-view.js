@@ -173,7 +173,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
    const legacyCacheAction=['READY','PREPARING'].includes(row.state)?'':`<button class="button ${row.state==='FAILED'?'quiet':'v3-outline'} v3-small" type="button" data-v3-cache="${esc(row.machine)}" data-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${mayCache?'':'disabled'}>${row.state==='FAILED'?'重试':'缓存'}</button>`;
    const prepareAction=newActions&&canCacheAction(cap?.raw,'prepare')?enabled&&!['READY','PREPARING'].includes(row.state)?`<button class="button v3-outline v3-small" type="button" data-v3-cache-action="prepare" data-machine="${esc(row.machine)}">缓存</button>`:'':legacyCacheAction;
    const cacheAction=newActions?`<span class="v3-server-actions">${prepareAction}${enabled&&row.state==='READY'&&transferTargets?`<button class="button quiet v3-small" type="button" data-v3-cache-action="transfer" data-machine="${esc(row.machine)}">转移到…</button>`:''}${enabled&&canCacheAction(cap?.raw,'release')?`<button class="button quiet v3-small" type="button" data-v3-cache-action="release" data-machine="${esc(row.machine)}">释放缓存</button>`:''}</span>`:prepareAction;
-   const status=(['NOT_LOCAL','REGISTERED','UNKNOWN'].includes(row.state)?'':words[row.state])+(row.progress?' · '+amount(row.progress.bytes)+' / '+amount(row.progress.totalBytes):'');
+   const status=(['NOT_LOCAL','REGISTERED','READY','UNKNOWN'].includes(row.state)?'':words[row.state])+(row.progress?' · '+amount(row.progress.bytes)+' / '+amount(row.progress.totalBytes):'');
    return `<article data-cache-context="${esc(machine())}" class="v3-server dataset-card ${row.machine===machine()?'cur':''}">${glyph(row.state)}<span class="v3-server-text"><b title="${esc(row.machine)}">${esc(row.machine)}</b><span title="${esc(status)}" ${cacheWatch.get({machine:row.machine,dataset:item.dataset,version:v.version})?'role="status"':''}>${esc(status)}${row.error?info(row.error,'缓存结果'):''}</span></span>${cacheAction}${newActions&&(cap?.reason||cap?.raw?.reason)?`<p class="v3-cache-reason" title="${esc(cap.reason||cap.raw.reason)}">${esc(cap.reason||cap.raw.reason)}</p>`:''}</article>`;
   }).join('')}</section>${personalDelete(item.dataset,v.version)?'<div class="v3-delete-row"><button class="button quiet v3-delete" type="button" data-v3-delete>删除数据集…</button></div>':''}</div><footer class="v3-train"><div class="v3-lab v4-step"><b>3</b>训练</div><button class="button primary" type="button" data-use-dataset="${esc(item.dataset)}" data-version="${esc(v.version)}" ${canTrain?'':'disabled'}>用于训练</button><div class="v3-code"><code title="${esc('--data '+item.dataset+'@'+v.version)}">--data ${esc(item.dataset)}@${esc(v.version)}</code><button type="button" class="v3-copy" data-v3-copy="${esc('--data '+item.dataset+'@'+v.version)}">复制</button></div><div class="v3-code"><span>容器内</span><code>/data2/${esc(item.dataset)}</code><span class="v3-lock">只读</span></div></footer>`);
   section.querySelector('.warehouse-v3').classList.toggle('v3-phone-detail',phoneDetail);syncFilesPreview();requestAnimationFrame(fitInspector);queueMicrotask(readCacheCapabilities);
@@ -183,11 +183,9 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const scale=root.getBoundingClientRect().width/root.offsetWidth||1;
   const reserve=parseFloat(getComputedStyle(document.body).getPropertyValue('--bottom-reserve'))||0;
   root.classList.remove('v3-inspector-overflow');root.style.maxHeight='';
-  if(matchMedia('(max-width:759px)').matches)return;
-  // A sticky panel can move up as the page scrolls. Budget from its CSS
-  // sticky offset, not its initial document position or the following footer.
-  const top=parseFloat(getComputedStyle(root).top)||0,available=Math.max(240,Math.floor(innerHeight/scale-top-reserve));
-  if(root.getBoundingClientRect().height/scale>available){root.classList.add('v3-inspector-overflow');root.style.maxHeight=available+'px';}
+  // Tall details travel with the page, keeping every cache row and action.
+  const available=Math.max(240,Math.floor(innerHeight/scale-24-reserve));
+  root.classList.toggle('v3-inspector-page-scroll',matchMedia('(max-width:759px)').matches||root.getBoundingClientRect().height/scale>available);
  }
  function render(){header();rail();rows();inspector();uploadUI();memberSpace?.render();}
  function catalog(value){legacyCatalog=value;applyCatalog();}
