@@ -11,11 +11,12 @@ const RELEASE='a'.repeat(64),OLDER='b'.repeat(64),JOB='11111111-2222-4333-8444-5
 const principal={userId:'demo-user-1',username:'tester',role:'member'};
 const terminalOpen=args=>({id:args.id||args.key,clientId:args.clientId,mode:args.mode,hostAdmin:args.hostAdmin,writerToken:randomUUID(),leaseExpiresAt:Date.now()/1000+30});
 async function fixture(t){
-  const dir=await mkdtemp(join(tmpdir(),'gpuq-projects-cli-')),session=join(dir,'session.json'),calls=[];
+  const dir=await mkdtemp(join(tmpdir(),'gpuq-projects-cli-')),session=join(dir,'session.json'),calls=[],requests=[];
   let releases=[{release:RELEASE,state:'READY'},{release:OLDER,state:'READY'}],latest=RELEASE;
   const custom=new Map();
   const state={demo:false,gpuqConnected:true,machines:[{id:'gpu-1'},{id:'gpu-2'}],users:[],jobs:[]};
   const server=createServer(async(req,res)=>{
+    requests.push(req.url);
     try{
       let raw='';for await(const data of req)raw+=data;
       const body=JSON.parse(raw);res.setHeader('Content-Type','application/json');
@@ -42,8 +43,34 @@ async function fixture(t){
     child.on('close',code=>resolve({code,data:human?null:stdout?JSON.parse(stdout).data:null,stderr,stdout}));child.stdin.end(input);
   });
   t.after(async()=>{await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});});
-  return {dir,session,calls,cli,save,custom,setReleases:(value,head)=>{releases=value;latest=head;}};
+  return {dir,session,calls,requests,cli,save,custom,setReleases:(value,head)=>{releases=value;latest=head;}};
 }
+test('non-training --machine auto fails locally without requests or changing the original session',async t=>{
+  const f=await fixture(t),before=await readFile(f.session,'utf8');
+  const message='开发容器需要指定服务器；自动选择只用于提交训练（gpuctl run --machine auto）';
+  for(const args of [['project','create','alpha'],['project','use','alpha'],['project','status','alpha'],['ssh'],['push','.'],['pull','result.txt','local.txt'],['data','shell'],['exec','--','true'],['queue']]){
+    const flag=args[0]==='exec'?['exec','--machine','auto','--','true']:[...args,'--machine','auto'];
+    const value=await f.cli(flag);assert.notEqual(value.code,0);assert.ok(value.stderr.includes(message),value.stderr);
+    assert.deepEqual(f.calls,[],'no state, authorization, terminal or write request may be sent');
+    assert.deepEqual(f.requests,[],'not even login or another HTTP endpoint may be requested');
+    assert.equal(await readFile(f.session,'utf8'),before,'original session, projects and handles stay intact');
+  }
+  const alias=await f.cli(['project','create','alpha','--on','auto'], '',null,true);
+  assert.notEqual(alias.code,0);assert.ok(alias.stderr.includes(message));assert.deepEqual(f.calls,[]);
+  assert.deepEqual(f.requests,[]);
+});
+
+test('run --machine auto retains the existing AUTO submission contract',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  const value=await f.cli(['run','--machine','auto','-g','1','--','python','train.py']);
+  assert.equal(value.code,0,value.stderr);
+  const submit=f.calls.find(call=>call.operation==='jobs.submit');assert.ok(submit);
+  assert.equal(submit.args.machine,'auto');assert.deepEqual(submit.args.machineSelection,{mode:'auto'});
+  assert.equal(submit.args.project,'alpha');assert.equal(submit.args.release,RELEASE);
+  assert.match(submit.args.key,/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
+  assert.equal(f.calls.some(call=>['projects.create','terminal.open','files.put'].includes(call.operation)),false);
+});
+
 test('project lifecycle CLI exposes CAS labels, grouping and original-key soft retirement without mutable path guesses',async t=>{
  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
  f.custom.set('projects.label.get',args=>({...args,displayName:args.project,revision:3}));

@@ -220,6 +220,7 @@ async function main(){
     console.log(cliHelp(positionals[1]));return;
   }
   if(options.help||!positionals.length){console.log(cliHelp());return;}
+  if(positionals[0]!=='run'&&options.machines.includes('auto'))fail('开发容器需要指定服务器；自动选择只用于提交训练（gpuctl run --machine auto）');
   if(options.sync&&positionals[0]!=='run'||options['sync-dir']!==undefined&&!options.sync)fail('--sync is only for run; --sync-dir requires run --sync');
   if(options.sync&&['release','legacy','root','as','job'].some(key=>Object.hasOwn(options,key)))fail('run --sync requires a personal project; cannot combine with --release/--legacy/--root/--as/--job');
   const transferCopy=positionals[0]==='transfer'&&positionals[1]==='copy',projectCopy=positionals[0]==='project'&&positionals[1]==='copy',transferWatch=positionals[0]==='transfer'&&positionals[1]==='watch',transferList=positionals[0]==='transfer'&&positionals[1]==='list';
