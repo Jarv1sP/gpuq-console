@@ -313,6 +313,28 @@ export async function datasetCatalogCall(service,principal,operation,args,{refre
     const time=value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value)&&Number.isFinite(Date.parse(value))?value:null;
     result.checkedAt=time(value.checkedAt);
     result.collectedAt=time(value.collectedAt)??result.checkedAt;
+    if(value.storageOverview?.protocol==='dataset-storage-node-v1'){
+      const byte=value=>Number.isSafeInteger(value)&&value>=0?value:null;
+      const volume=value=>{
+        if(!value||typeof value!=='object'||Array.isArray(value))return null;
+        const bytes=Object.fromEntries(['filesystemBytes','usedBytes','availableBytes','reserveBytes','usableBytes'].map(key=>[key,byte(value[key])]));
+        if(Object.values(bytes).some(value=>value===null)||bytes.usedBytes+bytes.availableBytes>bytes.filesystemBytes||
+          bytes.usableBytes!==Math.max(0,bytes.availableBytes-bytes.reserveBytes))return null;
+        return {...bytes,volumeDeviceId:typeof value.volumeDeviceId==='string'&&HASH.test(value.volumeDeviceId)?value.volumeDeviceId:null,
+          checkedAt:time(value.checkedAt),collectedAt:time(value.collectedAt)??time(value.checkedAt),
+          readOnly:typeof value.readOnly==='boolean'?value.readOnly:null,guarded:value.guarded===true};
+      };
+      const facts=value.storageOverview,cache=facts.cache,warehouse=facts.warehouse;
+      const cacheVolume=volume(cache?.volume),warehouseVolume=warehouse?.state==='READY'?volume(warehouse.volume):null;
+      const projectCollectedAt=time(cache?.projectCollectedAt),projectBytes=byte(cache?.projectBytes);
+      const projectUsageComplete=cache?.projectUsageComplete===true&&projectBytes!==null&&projectCollectedAt!==null;
+      // Explicit display projection: never copy private owner/project splits,
+      // paths, grants or upload credentials from the raw node observation.
+      result.storageOverview={protocol:facts.protocol,cache:{volume:cacheVolume,budgetBytes:byte(cache?.budgetBytes),
+        projectBytes:projectUsageComplete?projectBytes:null,projectUsageComplete,projectCollectedAt},
+        warehouse:warehouse===null?null:{state:warehouseVolume?'READY':'UNAVAILABLE',volume:warehouseVolume}};
+      if(cacheVolume&&value.datasetFileList===1)result.datasetFileList=1;
+    }
     return {...result,inodeUsageKnown:value.inodeUsageKnown===true,guarded:value.guarded===true,
       ...(value.datasetDelete===1&&service.datasetDeleteCapabilities?await service.datasetDeleteCapabilities(principal):{datasetDelete:0})};
   }
