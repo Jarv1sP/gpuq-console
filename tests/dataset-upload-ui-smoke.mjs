@@ -11,6 +11,7 @@ import {chromium} from 'playwright';
 import {STARBASE_ASSETS} from '../frontend-assets.mjs';
 import {inspectGeometry} from './layout-geometry.mjs';
 import {datasetHelpGeometry} from './dataset-help-geometry.mjs';
+import {testArchiveUpload} from './dataset-archive-upload-ui-smoke.mjs';
 
 const origin = 'https://offline-dataset-upload.test';
 const screenshots = process.env.UI_SCREENSHOTS || '/tmp/gpuq-dataset-upload-ui';
@@ -330,6 +331,7 @@ try {
   assert.equal(await page.evaluate(() => toasts.length), 1);
   assert.equal(await page.locator('#v3-upload-state [data-use-dataset]').count(),0,'Old READY cannot be inherited by the new account');
   assert.equal(await page.evaluate(()=>calls.some(row=>row.transport==='portal'&&['datasets.upload.manifest','datasets.upload.chunk','datasets.workspace.put','datasets.workspace.get'].includes(row.operation))),false);
+  await testArchiveUpload(page,screenshots);
   assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
   console.log('DATASET UPLOAD UI PASS: browser hashes and uploads exact bounded bytes; resource refresh preserves file selection/progress; pause after durable write resumes at confirmed offset; empty files survive; server verification precedes READY; bounded desktop card, separated actions, 390px stacked fields and long-status wrapping; late old-account response cannot send more data or update the new UI; no external requests or browser errors.');
   console.log(`Screenshots: ${screenshots}`);
