@@ -9,6 +9,7 @@ import {spawn} from 'node:child_process';
 import {createPortalServer} from '../portal-server.mjs';
 import {datasetReferences,usage} from '../execution.mjs';
 import {MACHINES} from '../dist/model.js';
+import {trainingPlan,trainingSource} from './training-storage-fixture.mjs';
 
 const password='Dataset-Only-Test-Password-2026!';
 const version='a'.repeat(64),otherVersion='b'.repeat(64);
@@ -25,12 +26,14 @@ async function fixture(){
   const calls=[],states=new Map(),deniedOwners=new Set();let failure=null,syncResult=null,syncFailure=null,listing=null;
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args:structuredClone(args)});
+    if(operation==='storage.training.plan')return trainingPlan(machine,args);
     if(operation.startsWith('datasets.')){
       if(failure)throw failure;
       if(!args.hostAdmin&&deniedOwners.has(args.userId))throw Error('dataset owner authorization required');
       if(operation==='datasets.list')return listing||{datasets:[{dataset:'sample',versions:[{version,state:states.get(machine+':sample')??'READY',canPrepare:true}]}]};
       const state=states.get(machine+':'+args.dataset)??'READY';
       if(state instanceof Error)throw state;
+      if(operation==='datasets.training.status')return trainingSource(machine,args,{state});
       return {dataset:args.dataset,version:args.version,state,remainingBytes:state==='READY'?0:64};
     }
     if(operation.startsWith('terminal.'))return {id:args.id||args.key,writerToken:randomUUID(),offset:0,data:'',exited:false};
@@ -405,7 +408,12 @@ test('manual selection uses only that READY replica even when another machine ha
     assert.equal(result.data.result.machine,'gpu-2');assert.deepEqual(result.data.result.datasets,[reference]);
     assert.deepEqual(f.service.store.jobs[0].spec.datasets,[reference]);
     await f.settle();
-    assert.deepEqual(f.calls.filter(c=>c.operation==='datasets.status').map(c=>c.machine),['gpu-2']);
+    // Submission readiness, capacity admission, and first-dispatch capacity
+    // recheck all stay pinned to the same explicitly selected server.
+    assert.deepEqual(f.calls.filter(c=>c.operation==='datasets.status').map(c=>c.machine),['gpu-2','gpu-2','gpu-2']);
+    assert.equal(f.calls.filter(c=>c.operation==='storage.training.plan').length,2);
+    assert.ok(f.calls.filter(c=>['datasets.training.status','storage.training.plan'].includes(c.operation))
+      .every(c=>c.machine==='gpu-2'&&c.args.userId===f.member.id&&c.args.hostAdmin===false));
     assert.deepEqual(f.calls.find(c=>c.operation==='sync').args.job.datasets,[reference]);
     assert.equal(usage(f.service.store.jobs,f.member.id),1);
   }finally{await f.close();}

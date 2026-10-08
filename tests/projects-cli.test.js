@@ -390,3 +390,39 @@ test('invalid slugs, releases and UUIDs fail before any API work',async t=>{
   assert.equal(f.calls.length,0);
   assert.equal((await f.cli(['project','create','bad/name'])).code,1);assert.equal(f.calls.some(c=>c.operation==='projects.create'),false);
 });
+
+
+test('fixed warehouse run preserves the original key, machine, release and literal argv while cache retains legacy fields',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  const dataset='sample@'+OLDER,argv=['python','train.py','--data-read','literal'];
+  for(const mode of ['warehouse','cache',undefined]){
+    const result=await f.cli(['run','--machine','1','--key',JOB,'--data',dataset,...(mode?['--data-read',mode]:[]),'--',...argv]);
+    assert.equal(result.code,0,result.stderr);
+    const submission=f.calls.at(-1);assert.equal(submission.operation,'jobs.submit');
+    assert.equal(submission.args.key,JOB);assert.equal(submission.args.machine,'gpu-1');
+    assert.equal(submission.args.project,'alpha');assert.equal(submission.args.release,RELEASE);
+    assert.deepEqual(submission.args.datasets,[{dataset:'sample',version:OLDER}]);assert.deepEqual(submission.args.argv,argv);
+    assert.equal(Object.hasOwn(submission.args,'datasetReadMode'),mode==='warehouse');
+    if(mode==='warehouse')assert.equal(submission.args.datasetReadMode,'warehouse');
+    assert.equal(Object.hasOwn(submission.args,'userId'),false);assert.equal(Object.hasOwn(submission.args,'hostAdmin'),false);
+  }
+});
+
+test('warehouse CLI failures preserve the original submission identity and never retry, prepare, publish or retarget',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  const mutationCount=()=>f.calls.filter(row=>['jobs.submit','projects.publish','projects.create','datasets.prepare','transfers.create'].includes(row.operation)).length;
+  for(const command of [
+    ['run','--data-read','elsewhere','--','true'],['jobs','--data-read','warehouse'],
+    ['run','--data-read','warehouse','--','true'],
+    ['run','--data-read','warehouse','--legacy','--data','sample@'+OLDER,'--','true'],
+  ]){const before=mutationCount();assert.equal((await f.cli(command)).code,1);assert.equal(mutationCount(),before);}
+  f.custom.set('jobs.submit',()=>{throw Error('original exchange outcome unconfirmed');});
+  const before=f.calls.length,sessionBefore=await readFile(f.session,'utf8');
+  const failed=await f.cli(['run','--machine','1','--data-read','warehouse','--key',JOB,'--data','sample@'+OLDER,'--','true']);
+  assert.equal(failed.code,1);assert.match(failed.stderr,new RegExp('Submission key: '+JOB));
+  const submissions=f.calls.slice(before).filter(row=>row.operation==='jobs.submit');assert.equal(submissions.length,1);
+  assert.equal(submissions[0].args.key,JOB);assert.equal(submissions[0].args.machine,'gpu-1');assert.equal(submissions[0].args.project,'alpha');
+  assert.equal(submissions[0].args.release,RELEASE);assert.equal(submissions[0].args.datasetReadMode,'warehouse');
+  assert.equal(f.calls.slice(before).some(row=>['projects.publish','projects.create','datasets.prepare','transfers.create'].includes(row.operation)),false);
+  assert.equal(await readFile(f.session,'utf8'),sessionBefore);
+});
