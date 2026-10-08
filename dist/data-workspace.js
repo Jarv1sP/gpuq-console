@@ -58,12 +58,15 @@ export function workspaceRegistrationsHTML(result){
   return result.datasets.filter(row=>typeof row.dataset==='string'&&Array.isArray(row.versions)&&row.versions.length===0).map(row=>`<li><code title="${esc(row.dataset)}">${esc(row.name||row.dataset)}</code><span>没有登记版本</span></li>`).join('')||'<li>没有空登记。</li>';
 }
 export function publicationText(status){
+  const phases={SCANNING:'扫描文件',REGISTERING:'登记数据集',REGISTERED:'登记完成',ARCHIVE_INTENT:'保存到仓库',MATERIALIZING:'复制与校验',COMPLETED:'完成'};
+  const phase=typeof status.phase==='string'&&status.phase?phases[status.phase]||status.phase:'';
   if(status.state==='READY')return `已发布：${status.dataset}@${status.version}。可在数据集目录选择用于训练。`;
-  if(status.state==='FAILED')return '发布失败：'+(status.error||'请检查目录后重试。');
+  if(status.state==='FAILED')return `发布失败${phase?' · '+phase:''}：`+(status.error||'请检查目录后重试。');
   if(status.state==='UNKNOWN')return '发布结果尚未确认，数据空间暂不可编辑。请联系管理员检查后台发布进程；不要重复发布。';
   if(status.state==='NOT_READY')return '这次发布的服务器缓存已不再就绪。原始数据仍保留，可从个人整理目录重新发布子目录。';
   if(status.state==='UNREGISTERED')return '这次发布的数据集登记已删除。原始数据仍保留，可从个人整理目录重新发布子目录。';
   if(status.state==='UNAVAILABLE')return '当前账号已无权使用这次发布的数据集。请联系管理员确认授权；原始个人目录不受影响。';
+  if(status.state==='PUBLISHING'&&phase)return '发布中 · '+phase;
   return '服务器正在扫描、复制并校验文件；可离开页面，后台会继续。';
 }
 export function dataWorkspaceHTML(){
