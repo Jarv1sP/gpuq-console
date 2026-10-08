@@ -291,7 +291,7 @@ class QuotaTests(unittest.TestCase):
                     q.broker({'operation':'training-status','userId':USER,**extra},policy())
 
     def test_training_kernel_counters_bind_the_actual_no_follow_device_without_write(self):
-        with tempfile.TemporaryDirectory(dir='/private/tmp') as temp:
+        with tempfile.TemporaryDirectory(dir='/private/tmp' if Path('/private/tmp').is_dir() else None) as temp:
             volume=Path(temp);p=policy();p['volumes']['data']['mountPoint']=str(volume)
             actual={'bytes':1048576,'inodes':100,'usedBytes':12288,'usedInodes':7}
             original=os.stat;device=volume.stat().st_dev

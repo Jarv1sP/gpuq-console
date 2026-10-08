@@ -18,7 +18,7 @@ USER, PROJECT, IMAGE = 'demo-user-3', 'vision', 'sha256:'+'a'*64
 
 class ImageInodes(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir='/private/tmp')
+        self.temp = tempfile.TemporaryDirectory(dir='/private/tmp' if Path('/private/tmp').is_dir() else None)
         self.root = Path(self.temp.name)
         self.addCleanup(self.temp.cleanup)
         self.manager = o.PersonalOCI.__new__(o.PersonalOCI)

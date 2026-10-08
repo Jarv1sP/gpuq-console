@@ -27,7 +27,7 @@ OWNER = 'demo-user-1'
 
 class TrainingStorage(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir='/private/tmp')
+        self.temp = tempfile.TemporaryDirectory(dir='/private/tmp' if Path('/private/tmp').is_dir() else None)
         self.base = Path(self.temp.name)
         self.addCleanup(self.cleanup)
         self.root = self.base/'workspace'
