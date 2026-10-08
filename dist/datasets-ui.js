@@ -1,4 +1,5 @@
 import {warehouseWorkspaceHTML,datasetWarehouseView} from './dataset-warehouse-view.js';
+import {hasReadableLocalOriginal} from './dataset-catalog-model.js';
 import {maintenanceFor,restoreMaintenanceControls,disableMaintenanceControls} from './maintenance-state.js';
 import {scanBrowserDirectory,uploadBrowserDataset,confirmedDatasetUpload,uploadKey} from './dataset-upload.js';
 import {dataWorkspaceHTML,dataWorkspaceUI} from './data-workspace.js';
@@ -65,9 +66,10 @@ export function datasetAccess(version,catalog,{machineAuthorized=true}={}){
   const localAllowed=target&&local?.canUse===true&&version.canUse===true;
   const ready=localAllowed&&state==='READY'&&local.state==='READY';
   const remote=typeof version.sourceMachine==='string'&&version.sourceMachine!==catalog.machine&&version.locations?.some(row=>row.machine===version.sourceMachine&&row.state==='READY'&&row.canUse===true);
-  const canPrepare=target&&version.canUse===true&&version.canPrepare===true&&(localAllowed||remote===true);
+  const original=target&&hasReadableLocalOriginal(version,catalog.machine);
+  const canPrepare=target&&version.canUse===true&&version.canPrepare===true&&(localAllowed||remote===true||original);
   const prepare=canPrepare&&['REGISTERED','STAGING','FAILED','NOT_LOCAL'].includes(state);
-  const selectable=ready||localAllowed&&state==='PREPARING'||canPrepare&&(['REGISTERED','STAGING','PREPARING'].includes(state)||state==='NOT_LOCAL'&&remote);
+  const selectable=ready||localAllowed&&state==='PREPARING'||canPrepare&&(['REGISTERED','STAGING','PREPARING'].includes(state)||state==='NOT_LOCAL'&&(remote||original));
   const browseOnly=version.canUse!==true||!target||!localAllowed&&!canPrepare&&version.locations?.some(row=>row.machine===catalog.machine&&row.canUse!==true);
   return {state,ready,prepare,selectable,browseOnly,canPrepare,canRetry:localAllowed};
 }

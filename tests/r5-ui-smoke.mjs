@@ -278,6 +278,8 @@ try{
         const target=await action.evaluate(node=>({text:node.textContent.trim(),height:node.getBoundingClientRect().height}));
         assert.ok(target.height>=44,'mobile detail actions retain distinct 44px targets: '+JSON.stringify({role,width,dataset,...target}));
       }}
+      const targets=await panel.locator('button:visible,select:visible,summary:visible,a[href]:visible').evaluateAll(nodes=>nodes.map(node=>({name:node.textContent.trim()||node.getAttribute('aria-label'),width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})));
+      assert.ok(targets.length>0&&targets.every(node=>node.width>=44&&node.height>=44),'all default and mobile detail targets are at least 44px: '+JSON.stringify({role,width,dataset,targets}));
     }
     await datasetDetail(page,'scans');
     if(width===390){

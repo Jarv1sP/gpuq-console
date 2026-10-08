@@ -23,8 +23,131 @@ MAX_ENTRIES = 100000
 MAX_SECONDS = 0.5
 ROOTS = ('projects-v2', 'oci', 'users')
 MAX_BYTES = 2**53-1
+MAX_OBSERVATION_BYTES = 1024**2
+MAX_GROUPS = 4096
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-UNKNOWN = dict(projectBytes=None, projectUsageComplete=False, projectCollectedAt=None)
+EMPTY_BREAKDOWN = dict(protocol=1, complete=False, owners=[], projects=[])
+UNKNOWN = dict(projectBytes=None, projectUsageComplete=False, projectCollectedAt=None,
+               projectUsage=EMPTY_BREAKDOWN)
+OWNER = re.compile(r'(?:[a-f0-9]{64}|[a-f0-9]{32})\Z')
+PROJECT = re.compile(r'[a-z0-9][a-z0-9_-]{0,47}\Z')
+
+
+class ProjectBreakdown:
+    """Attribute the existing walk, never scan a second time or split OCI layers.
+
+    Owners are the node's fixed SHA-256 directory identities, not usernames.
+    Common owner-directory blocks count only in the owner total. Files outside
+    a proven project (OCI graph/home included) make that owner's total unknown.
+    Hardlinks in two projects/owners make both allocations unknown, not halves.
+    """
+    def __init__(self):
+        self.inodes, self.projects, self.owners = {}, {}, set()
+        self.unknown_owners, self.complete = set(), True
+
+    def add(self, info, path, parent=None):
+        if len(path) < 2:
+            return
+        owner = path[1]
+        if not OWNER.fullmatch(owner) or path[0] != 'users' and len(owner) != 64:
+            self.complete = False
+            return
+        self.owners.add(owner)
+        if len(self.owners) > MAX_GROUPS:
+            raise ValueError('Project owner bound reached')
+        project = None
+        if path[0] == 'projects-v2' and len(path) >= 3 and PROJECT.fullmatch(path[2]):
+            project = (owner, path[2])
+            self.projects.setdefault(project, dict(valid=False, mode=None))
+            if len(self.projects) > MAX_GROUPS:
+                raise ValueError('Project breakdown bound reached')
+            if len(path) == 4 and path[3] == 'project.json':
+                # The file is already an entry in this walk. Read only bounded
+                # metadata through its no-follow parent descriptor.
+                fd = os.open(path[3], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                try:
+                    if (not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 16384
+                            or stamp(os.fstat(fd)) != stamp(info)):
+                        raise ValueError('Unsafe project ownership metadata')
+                    raw = os.read(fd, 16385)
+                    if len(raw) != info.st_size or stamp(os.fstat(fd)) != stamp(info):
+                        raise ValueError('Project ownership metadata changed')
+                    meta = json.loads(raw)
+                    if (not isinstance(meta, dict) or meta.get('schema') != 2
+                            or meta.get('owner') != owner or meta.get('project') != path[2]
+                            or meta.get('environmentMode', 'shared') not in ('shared', 'isolated', 'oci')):
+                        raise ValueError('Unproven project owner')
+                    self.projects[project] = dict(valid=True, mode=meta.get('environmentMode', 'shared'))
+                except (OSError, ValueError):
+                    self.unknown_owners.add(owner)
+                finally:
+                    os.close(fd)
+        elif stat.S_ISREG(info.st_mode) and info.st_blocks:
+            self.unknown_owners.add(owner)
+        key = (info.st_dev, info.st_ino)
+        entry = self.inodes.setdefault(key, dict(bytes=info.st_blocks*512, owners=set(), projects=set()))
+        entry['owners'].add(owner)
+        if project is not None:
+            entry['projects'].add(project)
+
+    def result(self):
+        # Legacy users/<32 hex> and projects-v2/<64 hex> are one identity only
+        # when the observed full identities prove a unique prefix match.
+        full = {owner for owner in self.owners if len(owner) == 64}
+        prefixes = {}
+        for owner in full:
+            prefixes.setdefault(owner[:32], []).append(owner)
+        aliases = {}
+        for owner in self.owners:
+            matches = prefixes.get(owner, []) if len(owner) == 32 else [owner]
+            aliases[owner] = matches[0] if len(matches) == 1 else owner
+        totals = {aliases[owner]: 0 for owner in self.owners}
+        unknown = {aliases[owner] for owner in self.unknown_owners}
+        sizes = {key: 0 for key in self.projects}
+        uncertain = {key for key, meta in self.projects.items() if not meta['valid'] or meta['mode'] == 'oci'}
+        for entry in self.inodes.values():
+            owners = {aliases[owner] for owner in entry['owners']}
+            if len(owners) != 1:
+                unknown.update(owners)
+                uncertain.update(entry['projects'])
+                continue
+            totals[next(iter(owners))] += entry['bytes']
+            if len(entry['projects']) == 1:
+                sizes[next(iter(entry['projects']))] += entry['bytes']
+            elif entry['projects']:
+                uncertain.update(entry['projects'])
+        unknown.update(aliases[owner] for owner, project in uncertain)
+        projects = [dict(owner=owner, project=project, name=project,
+                         bytes=None if (owner, project) in uncertain else sizes[(owner, project)])
+                    for owner, project in sorted(self.projects) if self.projects[(owner, project)]['valid']]
+        return dict(protocol=1, complete=self.complete,
+                    owners=[dict(owner=owner, complete=owner not in unknown,
+                                 projectBytes=None if owner in unknown else total)
+                            for owner, total in sorted(totals.items())], projects=projects)
+
+
+def valid_breakdown(value):
+    if (not isinstance(value, dict) or set(value) != {'protocol', 'complete', 'owners', 'projects'}
+            or type(value['protocol']) is not int or value['protocol'] != 1
+            or type(value['complete']) is not bool
+            or not isinstance(value['owners'], list) or len(value['owners']) > MAX_GROUPS
+            or not isinstance(value['projects'], list) or len(value['projects']) > MAX_GROUPS):
+        return False
+    for row in value['owners']:
+        if (not isinstance(row, dict) or set(row) != {'owner', 'complete', 'projectBytes'}
+                or not isinstance(row['owner'], str) or not OWNER.fullmatch(row['owner'])
+                or type(row['complete']) is not bool
+                or row['projectBytes'] is not None and (type(row['projectBytes']) is not int or not 0 <= row['projectBytes'] <= MAX_BYTES)
+                or row['complete'] != (row['projectBytes'] is not None)):
+            return False
+    for row in value['projects']:
+        if (not isinstance(row, dict) or set(row) != {'owner', 'project', 'name', 'bytes'}
+                or not isinstance(row['owner'], str) or not re.fullmatch('[a-f0-9]{64}', row['owner'])
+                or not isinstance(row['project'], str) or not PROJECT.fullmatch(row['project'])
+                or row['name'] != row['project']
+                or row['bytes'] is not None and (type(row['bytes']) is not int or not 0 <= row['bytes'] <= MAX_BYTES)):
+            return False
+    return True
 
 
 def stamp(info):
@@ -94,12 +217,13 @@ def mount_signature(root):
     return tuple(sorted(selected))
 
 
-def sample(root_fd, *, root_path, maximum=MAX_ENTRIES, seconds=MAX_SECONDS):
+def sample(root_fd, *, root_path, maximum=MAX_ENTRIES, seconds=MAX_SECONDS, breakdown=False):
     deadline = time.monotonic() + seconds
     before = os.fstat(root_fd)
     mounts = mount_signature(root_path)
     seen, directories, roots = set(), [], {}
     count, total = 0, 0
+    detail = ProjectBreakdown() if breakdown else None
 
     def check_bound():
         if count > maximum or time.monotonic() >= deadline:
@@ -121,7 +245,7 @@ def sample(root_fd, *, root_path, maximum=MAX_ENTRIES, seconds=MAX_SECONDS):
         return True
 
     def visit(fd, path):
-        nonlocal count
+        nonlocal count, detail
         check_bound()
         if len(path) > 128:
             raise ValueError('Project depth bound reached')
@@ -149,6 +273,13 @@ def sample(root_fd, *, root_path, maximum=MAX_ENTRIES, seconds=MAX_SECONDS):
                     add(info)
                 else:
                     raise ValueError('Unexpected project entry type')
+                if detail is not None and not stat.S_ISLNK(info.st_mode):
+                    try:
+                        detail.add(info, path+(entry.name,), fd)
+                    except (OSError, ValueError):
+                        # A breakdown-specific bound or unavailable ownership
+                        # proof must not change the existing all-account total.
+                        detail = None
                 # Duplicate inodes and symlinks still receive a change check.
                 if stamp(os.stat(entry.name, dir_fd=fd, follow_symlinks=False)) != stamp(info):
                     raise ValueError('Project entry changed')
@@ -204,7 +335,11 @@ def sample(root_fd, *, root_path, maximum=MAX_ENTRIES, seconds=MAX_SECONDS):
     if mount_signature(root_path) != mounts:
         raise ValueError('Project mounts changed')
     check_bound()
-    return total
+    if not breakdown:
+        return total
+    projection = detail.result() if detail is not None else EMPTY_BREAKDOWN
+    check_bound()
+    return dict(total=total, projectUsage=projection)
 
 
 def reap(pid):
@@ -235,23 +370,38 @@ def bounded_sample(root, path):
     if pid == 0:
         os.close(reader)
         try:
-            result = sample(root, root_path=path, seconds=max(0, deadline-time.monotonic()))
-            os.write(writer, json.dumps({'total': result}).encode())
+            result = sample(root, root_path=path, seconds=max(0, deadline-time.monotonic()), breakdown=True)
+            raw = json.dumps(result, separators=(',', ':')).encode()
+            if len(raw) > MAX_OBSERVATION_BYTES:
+                raw = json.dumps(dict(total=result['total'], projectUsage=EMPTY_BREAKDOWN)).encode()
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(writer, view):]
         except BaseException:
             pass
         finally:
             os._exit(0)
     os.close(writer)
     try:
-        ready, _, _ = select.select([reader], [], [], max(0, deadline-time.monotonic()))
-        if not ready:
-            raise ValueError('Project sample timed out')
-        raw = os.read(reader, 128)
+        parts, size = [], 0
+        while True:
+            ready, _, _ = select.select([reader], [], [], max(0, deadline-time.monotonic()))
+            if not ready:
+                raise ValueError('Project sample timed out')
+            part = os.read(reader, 65536)
+            if not part:
+                break
+            parts.append(part)
+            size += len(part)
+            if size > MAX_OBSERVATION_BYTES:
+                raise ValueError('Project observation response bound reached')
+        raw = b''.join(parts)
         value = json.loads(raw)
-        if (set(value) != {'total'} or type(value['total']) is not int
-                or not 0 <= value['total'] <= MAX_BYTES or time.monotonic() >= deadline):
+        if (set(value) != {'total', 'projectUsage'} or type(value['total']) is not int
+                or not 0 <= value['total'] <= MAX_BYTES or not valid_breakdown(value['projectUsage'])
+                or time.monotonic() >= deadline):
             raise ValueError('Incomplete project sample')
-        return value['total']
+        return value
     finally:
         os.close(reader)
         try:
@@ -265,7 +415,7 @@ def private_file(fd, device):
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
             or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_dev != device or info.st_size > 4096):
+            or info.st_dev != device or info.st_size > MAX_OBSERVATION_BYTES+4096):
         raise ValueError('Unsafe observation cache file')
     return info
 
@@ -277,8 +427,8 @@ def read_prior(folder, binding, device):
         return None
     try:
         first = private_file(fd, device)
-        raw = os.read(fd, 4097)
-        if (len(raw) != first.st_size or len(raw) > 4096 or stamp(os.fstat(fd)) != stamp(first)
+        raw = os.read(fd, MAX_OBSERVATION_BYTES+4097)
+        if (len(raw) != first.st_size or len(raw) > MAX_OBSERVATION_BYTES+4096 or stamp(os.fstat(fd)) != stamp(first)
                 or stamp(os.stat('projects.json', dir_fd=folder, follow_symlinks=False)) != stamp(first)):
             raise ValueError('Observation cache changed')
         prior = json.loads(raw)
@@ -288,9 +438,14 @@ def read_prior(folder, binding, device):
             or type(prior['protocol']) is not int or prior['protocol'] != 1 or prior['binding'] != binding
             or type(prior['attemptedAt']) not in (int, float) or not 0 < prior['attemptedAt'] <= time.time()
             or not math.isfinite(prior['attemptedAt'])
-            or not isinstance(prior['value'], dict) or set(prior['value']) != set(UNKNOWN)):
+            or not isinstance(prior['value'], dict)
+            or set(prior['value']) not in (set(UNKNOWN), set(UNKNOWN)-{'projectUsage'})):
         raise ValueError('Invalid observation cache proof')
     value = prior['value']
+    if 'projectUsage' not in value:
+        value['projectUsage'] = EMPTY_BREAKDOWN
+    if not valid_breakdown(value['projectUsage']):
+        raise ValueError('Invalid cached project breakdown')
     if (type(value['projectUsageComplete']) is not bool
             or value['projectBytes'] is not None and (type(value['projectBytes']) is not int or not 0 <= value['projectBytes'] <= MAX_BYTES)
             or value['projectUsageComplete'] != (value['projectBytes'] is not None)):
@@ -376,12 +531,13 @@ def project_usage(node):
                     mount_binding = None
                     try:
                         mount_binding = hashlib.sha256(repr(mount_signature(node.ROOT)).encode()).hexdigest()
-                        total = bounded_sample(with_fd, node.ROOT)
+                        measurement = bounded_sample(with_fd, node.ROOT)
                         check_current(node, with_fd, folder, info, safety)
                         if hashlib.sha256(repr(mount_signature(node.ROOT)).encode()).hexdigest() != mount_binding:
                             raise ValueError('Project mounts changed during observation')
-                        value = dict(projectBytes=total, projectUsageComplete=True,
-                                     projectCollectedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+                        value = dict(projectBytes=measurement['total'], projectUsageComplete=True,
+                                     projectCollectedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                                     projectUsage=measurement['projectUsage'])
                     except (OSError, ValueError, RuntimeError):
                         pass
                     check_current(node, with_fd, folder, info, safety)

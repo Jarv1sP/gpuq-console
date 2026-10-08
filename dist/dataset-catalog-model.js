@@ -110,7 +110,7 @@ export function aggregateDatasetCatalog(catalog){
             server(machine,directory,locations,observations,catalog.machine));
           const selected=servers.find(row=>row.machine===catalog.machine)||{machine:null,state:'UNKNOWN',canPrepare:false};
           const sourceMachine=same(observations.map(row=>text(row.sourceMachine)));
-          return {version,bytes:knownNumber(observations,'bytes'),files:knownNumber(observations,'files'),
+          return {dataset,version,bytes:knownNumber(observations,'bytes'),files:knownNumber(observations,'files'),
             canUse:observations.every(row=>row.canUse===true),
             ownerLabel:same(observations.map(row=>text(row.ownerLabel))),servers,
             selected:{machine:catalog.machine??null,state:selected.state,canPrepare:selected.canPrepare,canUse:selected.canUse===true,
@@ -124,7 +124,18 @@ export function aggregateDatasetCatalog(catalog){
 export function adaptOriginal(raw){
   return {machine:identifier.test(raw?.machine||'')?raw.machine:null,
     dataset:identifier.test(raw?.dataset||'')?raw.dataset:null,
-    state:text(raw?.state),confirmed:raw?.warehouseReady===true};
+    state:text(raw?.state),confirmed:raw?.warehouseReady===true,
+    warehouseReady:raw?.warehouseReady===true,canUse:raw?.canUse===true};
+}
+
+// Originals belong to this exact logical dataset/full version. Physical
+// presence alone is not a reading grant, and never proves a READY cache.
+export function hasReadableLocalOriginal(version,machine){
+  if(!identifier.test(version?.dataset||'')||!hash.test(version?.version||'')||
+    !identifier.test(machine||'')||version.canUse!==true)return false;
+  const rows=list(version.originals??version.warehouse?.originals).filter(row=>
+    row.machine===machine&&row.dataset===version.dataset);
+  return rows.length>0&&rows.every(row=>row.state==='READY'&&row.warehouseReady===true&&row.canUse===true);
 }
 
 export function adaptStorageOverview(raw){

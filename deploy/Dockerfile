@@ -22,6 +22,7 @@ COPY --chown=root:root dataset-catalog.mjs dataset-storage-overview.mjs dataset-
 COPY --chown=root:root project-replication.mjs machine-selection.mjs ./
 COPY --chown=root:root training-datasets.mjs training-storage.mjs ./
 COPY --chown=root:root dataset-labels.mjs ./
+COPY --chown=root:root storage-usage.mjs ./
 COPY --chown=root:root task-display.mjs ./
 COPY --chown=root:root docs/USER_GUIDE.md ./docs/
 COPY --chown=root:root deploy/install-client.sh deploy/install-client.ps1 ./deploy/
