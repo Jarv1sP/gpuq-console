@@ -69,7 +69,12 @@ try{
   }
   await page.locator('[data-v3-cache="'+machine+'"]').click();
   await page.locator('[data-v3-cache="'+machine+'"]').waitFor({state:'hidden'});
-  await page.waitForFunction(()=>document.querySelector('.v3-server.cur .v3-server-text').textContent.includes('已缓存'));
+  const readyGlyph=page.locator('.v3-server.cur .v3-g.ready');
+  await readyGlyph.waitFor({state:'visible'});
+  assert.equal(await readyGlyph.getAttribute('title'),'已缓存');
+  assert.equal(await readyGlyph.getAttribute('aria-label'),'已缓存');
+  assert.notEqual(await readyGlyph.evaluate(node=>getComputedStyle(node).backgroundColor),'rgba(0, 0, 0, 0)','READY uses a solid symbol');
+  assert.equal(await page.locator('.v3-server.cur .v3-server-text>span').textContent(),'','READY does not repeat its symbol as status text');
   assert.equal(await page.locator('[data-use-dataset="'+dataset+'"]').isEnabled(),true);
   assert.equal(await page.locator('[data-v3-select]').count(),1);assert.equal(await page.locator('[data-v3-cache="'+machine+'"]').count(),0);
   assert.equal(service.store.jobs.length,0);assert.equal(calls.filter(row=>row.operation==='datasets.prepare').length,1);
