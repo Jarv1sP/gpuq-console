@@ -5,7 +5,7 @@ import {adaptiveUploadChunk,MAX_DIRECT_CHUNK_BYTES as BIG,CHUNK_BYTES as SMALL,s
 
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const uploadId='12345678-1234-4234-8234-123456789012',endpoint='https://upload.example.test';
-const grant=maximum=>({available:true,protocol:'dataset-upload-v1',endpoint,certificateSha256:'a'.repeat(64),ticket:'fixture-only-upload-ticket',expiresAt:1300,chunkBytes:SMALL,...(maximum===undefined?{}:{maxChunkBytes:maximum})});
+const grant=maximum=>({available:true,kind:'campus-direct',protocol:'dataset-upload-v1',endpoint,certificateSha256:'a'.repeat(64),ticket:'fixture-only-upload-ticket',expiresAt:1300,chunkBytes:SMALL,...(maximum===undefined?{}:{maxChunkBytes:maximum})});
 
 test('adaptive policy has exact ACK thresholds and accepts only 1/16 MiB authorization',()=>{
   assert.equal(adaptiveUploadChunk(SMALL,499,BIG),BIG);

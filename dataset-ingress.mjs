@@ -98,7 +98,8 @@ export function installDatasetIngress(service,input){
   const lanes=new Map();let pending=0;
   const fence=(principal,row,operation='datasets.upload.begin')=>{
     const user=service.store.get(principal.userId);
-    if(service.closing||!user?.enabled||user.username!==principal.username||!user.limits?.[row.requestedMachine])
+    if(service.closing||!user?.enabled||user.username!==principal.username||
+      (user.role||'member')!==principal.role||!user.limits?.[row.requestedMachine])
       fail('账号或所选训练服务器的授权已改变。',403);
     const maintenanceArgs={key:operation==='datasets.upload.admission.create'?row.admissionKey:row.uploadId,uploadId:row.uploadId};
     service.assertMaintenanceAllowed?.(operation,{...maintenanceArgs,machine:row.requestedMachine},principal);
@@ -331,6 +332,46 @@ export function installDatasetIngress(service,input){
       }
       fence(principal,row,'datasets.upload.'+action);
       if(row.admissionProtocol===1){
+        if(action==='status'){
+          const journalSnapshot=hash(row),policySnapshot=hash([service.datasetIngressPolicy,service.storageArchivePolicy]);
+          if(row.phase==='ISSUED')currentPolicy(row);
+          const located=await locate(principal,row,row.storageMachine,'datasets.upload.status');
+          if(located.uploadAdmissionProtocol!==1||located.initializationProtocol!==1||
+            located.nodePresent!==located.present)fail('仓库上传初始化状态未获权威确认；未改换编号或位置。',502);
+          if(!located.present){
+            // Missing may authorize an explicit same-ID begin. Unlike reads
+            // of an existing upload, this needs the original intake policy
+            // and immutable journal to remain current across the node read.
+            currentPolicy(row);
+            if(hash([service.datasetIngressPolicy,service.storageArchivePolicy])!==policySnapshot)
+              fail('入库策略已改变；未授予重新初始化，请核对原上传。');
+            const current=load(owner,id);
+            if(!current||hash(current)!==journalSnapshot)
+              fail('上传准入记录已改变；未授予重新初始化，请核对原上传。',502);
+            if(row.ready||located.state!=='NOT_INITIALIZED'||located.authority?.enabled!==true||
+              located.authority.machine!==row.storageMachine||located.authority.authority!==row.authority)
+              fail('仓库未初始化证明与固定上传权威不匹配；未改换编号或位置。',502);
+            // BOUND is only the durable dispatch attempt. This exact node
+            // proof, not an HTTP/ENOENT error or Portal row, permits same-ID
+            // recovery. No admission allocation or node write occurs here.
+            return {...row.specification,uploadId:row.uploadId,userId:owner,state:'NOT_INITIALIZED',
+              initializationProtocol:1,nodePresent:false,manifestOffset:0,
+              admissionProtocol:1,admissionKey:row.admissionKey,...placement(row)};
+          }
+          if(row.phase!=='BOUND'||located.admissionProtocol!==1||located.admissionKey!==row.admissionKey||
+            located.requestedMachine!==row.requestedMachine||located.storageMachine!==row.storageMachine||
+            located.admissionAuthority!==row.authority||!validSpecification(located.specification)||
+            hash(specification(located.specification))!==row.specificationSha256)
+            fail('仓库已初始化回执与固定上传准入不匹配；未改换编号或位置。',502);
+          const {machine,...request}=args;
+          const result=await call(principal,row,row.storageMachine,'datasets.upload.status',
+            {...request,userId:owner,hostAdmin:false});
+          if(!result||result.uploadId!==row.uploadId||!UPLOAD_STATES.has(result.state)||
+            ['name','manifestBytes','totalBytes','entries'].some(key=>result[key]!==row.specification[key]))
+            fail('仓库上传状态与固定上传准入不匹配；未改换编号或位置。',502);
+          return remember(row,{...result,initializationProtocol:1,nodePresent:true,userId:owner,
+            admissionProtocol:1,admissionKey:row.admissionKey});
+        }
         if(row.phase==='ISSUED'){
           if(action!=='begin')fail('此上传尚未向仓库准入；请按原意图核对并继续。');
           currentPolicy(row);

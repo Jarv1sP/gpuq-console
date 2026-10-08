@@ -8,6 +8,8 @@ import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {randomUUID,createHash} from 'node:crypto';
 import {parseCLIOptions,synchronizeProjectRun} from '../cli.mjs';
+import {journalTransport} from './project-journal-transport-fixture.mjs';
+import {mockCampusFiles} from './personal-file-campus-mock.mjs';
 
 const OLD='a'.repeat(64),FRESH='b'.repeat(64),key='11111111-2222-4333-8444-555555555555';
 async function fixture(t,{states=['PUBLISHING','READY'],before={}}={}){
@@ -30,7 +32,7 @@ async function fixture(t,{states=['PUBLISHING','READY'],before={}}={}){
     if(operation==='projects.status')return {result:started?status(states[Math.min(index++,states.length-1)]):{...status('READY'),...before}};
     throw Error('Unexpected operation');
   };
-  const options={machine:'gpu-1',project:'alpha',directory,key,pollMs:1,timeoutMs:1000,progress:()=>{}};
+  const options={machine:'gpu-1',project:'alpha',directory,key,pollMs:1,timeoutMs:1000,progress:()=>{},transportFactory:journalTransport};
   return {directory,calls,call,options};
 }
 
@@ -114,10 +116,12 @@ test('real CLI loopback: Unicode/space cwd, literal argv, own READY and one subm
   const f=await fixture(t),directory=join(f.directory,'研究 project & space');await mkdir(directory);await writeFile(join(directory,'train.py'),'new');
   const session=join(f.directory,'session.json'),calls=[],principal={userId:'member-test',role:'member',username:'测试'};
   let publication=null,failed=false,lostSubmit=false;const uploaded=new Map();
+  const campus=await mockCampusFiles(t,async(operation,args)=>{assert.equal(operation,'files.put');calls.push({operation,args});uploaded.set(args.path,{path:args.path,size:args.totalSize,sha256:args.sha256});return {complete:args.final,size:args.totalSize,sha256:args.sha256};});
   const server=createServer(async(req,res)=>{
     let raw='';for await(const chunk of req)raw+=chunk;const {operation,args={}}=JSON.parse(raw);calls.push({operation,args});
     res.setHeader('Content-Type','application/json');assert.equal(req.headers.authorization,'Bearer fixture-only');
     if(operation==='state')return res.end(JSON.stringify({state:{demo:false,gpuqConnected:true,machines:[{id:'gpu-1'}],users:[],jobs:[]}}));
+    if(operation==='files.direct-ticket')return res.end(JSON.stringify({result:await campus.ticket(args)}));
     let result;
     if(operation==='files.upload.status')result={protocol:2,state:'ABSENT',complete:false,path:args.path,receivedBytes:0};
     else if(operation==='files.put'){uploaded.set(args.path,{path:args.path,size:args.totalSize,sha256:args.sha256});result={complete:args.final,size:args.totalSize,sha256:args.sha256};}

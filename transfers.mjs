@@ -1,4 +1,5 @@
 import {randomUUID,createHash} from 'node:crypto';
+import {requireCampusUpload} from './campus-upload-policy.mjs';
 import {MACHINES} from './dist/model.js';
 import {executionCall} from './execution.mjs';
 import {snapshotSyncCall} from './snapshot-sync.mjs';
@@ -252,7 +253,8 @@ async function dispatch(service,principal,row){
     // Managed transfers own their pre-existing machine/digest. They are not a
     // new standalone data-upload admission and may never be silently moved.
     const local=Object.assign(Object.create(service),{datasetUploadIngress:undefined});
-    const result=await executionCall(local,principal,'datasets.upload.begin',{machine:data.machine,key:row.client_key,name:data.name,...data.manifest,...(data.allowRelay===true?{allowRelay:true}:{})});
+    // Retain historical relay consent in its immutable row, never use it for byte transport.
+    const result=await executionCall(local,principal,'datasets.upload.begin',{machine:data.machine,key:row.client_key,name:data.name,...data.manifest});
     row.data.uploadId=validId(result.uploadId);row.data.result=result;
     return save(service,row,result.state==='READY'?'SUCCEEDED':'WAITING_CLIENT',principal.username,'transfers.upload-start');
   }
@@ -372,7 +374,7 @@ async function transferOperation(service,principal,operation,args){
     if(args.kind==='upload'){
       if(args.from!==undefined||args.dataset!==undefined||args.version!==undefined||args.timeoutSec!==undefined)fail('上传只接受本机固定清单。');
       if(args.allowRelay!==undefined&&typeof args.allowRelay!=='boolean')fail('中转确认必须是明确的布尔值。');
-      if(args.allowRelay===true)payload.allowRelay=true;
+      requireCampusUpload('begin',args);
       const manifest=args.manifest;info({state:'READY',...manifest});fields(manifest,['manifestBytes','manifestSha256','totalBytes','entries']);payload.manifest=manifest;
     }else{
       if(args.allowRelay!==undefined||args.manifest!==undefined||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.dataset||'')||!hash.test(args.version||''))fail('需固定完整数据集版本。');payload.reference={kind:'datasets',dataset:args.dataset,version:args.version};
@@ -405,10 +407,6 @@ async function transferOperation(service,principal,operation,args){
         const priorPayload={kind:payload.kind,machine:payload.machine,...(row.data.allowRelay===true?{allowRelay:true}:{}),manifest:payload.manifest,name:payload.name};
         if(args.kind!=='upload'||previous.digest!==digest(priorPayload))
           fail('同一重试键不能修改传输内容。',409);
-        if(payload.allowRelay===true&&row.data.allowRelay!==true&&!done.has(row.state)&&!row.data.cancelRequested){
-          row.data.allowRelay=true;
-          transaction(service,()=>{service.db.prepare('UPDATE transfers SET digest=?,data=?,updated_at=? WHERE id=?').run(digest(payload),JSON.stringify(row.data),Date.now(),row.id);service.audit(principal.username,'transfers.relay-consent',row.id,'explicit');});
-        }
       }
       // Idempotent create never re-enters control RPCs for a canceled row;
       // status/reconcile own any outstanding source cleanup.

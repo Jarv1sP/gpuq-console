@@ -8,13 +8,14 @@ import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {fileURLToPath} from 'node:url';
 import {uploadCodeFiles} from '../cli.mjs';
+import {journalTransport} from './project-journal-transport-fixture.mjs';
 
 async function fixture(t,bytes=Buffer.alloc(1024*1024+7,65)){
  const dir=await mkdtemp(join(tmpdir(),'project-recovery-')),local=join(dir,'bundle');await writeFile(local,bytes);
  t.after(()=>rm(dir,{recursive:true,force:true}));
  const calls=[],sleeps=[],path='bundle.tar',sha256=createHash('sha256').update(bytes).digest('hex');
  const run=call=>uploadCodeFiles(async(op,args)=>{calls.push({op,args});return {result:await call(op,args)};},
-  {machine:'gpu-1',context:{project:'alpha',area:'code'},local,remote:path,progress:()=>{},recoverySleep:async ms=>sleeps.push(ms)});
+  {machine:'gpu-1',context:{project:'alpha',area:'code'},local,remote:path,progress:()=>{},recoverySleep:async ms=>sleeps.push(ms),transportFactory:journalTransport});
  return {run,calls,sleeps,path,sha256,totalSize:bytes.length,local,dir};
 }
 const absent=path=>({protocol:2,state:'ABSENT',complete:false,path,receivedBytes:0});
@@ -87,10 +88,10 @@ test('recovery is bounded and a source mutation or authorization error is never 
  assert.equal(h.calls.filter(v=>v.op==='files.put').length,1);
 });
 
-test('legacy non-project uploads retain zero automatic replay',async t=>{
+test('legacy non-project uploads are refused before any Portal call or local byte read',async t=>{
  const f=await fixture(t);let calls=0;
- await assert.rejects(uploadCodeFiles(async()=>{calls++;throw Object.assign(Error('reset'),{status:502});},{machine:'gpu-1',context:{},local:f.local,remote:f.path,progress:()=>{},recoverySleep:()=>{throw Error('must not sleep');}}),/reset/);
- assert.equal(calls,1);
+ await assert.rejects(uploadCodeFiles(async()=>{calls++;throw Object.assign(Error('reset'),{status:502});},{machine:'gpu-1',context:{},local:f.local,remote:f.path,progress:()=>{},recoverySleep:()=>{throw Error('must not sleep');}}),/Campus push requires/);
+ assert.equal(calls,0);
 });
 
 test('CLI to real temporary native project recovers rename-without-receipt and unblocks publication',async t=>{

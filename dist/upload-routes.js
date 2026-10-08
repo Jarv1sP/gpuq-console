@@ -42,7 +42,9 @@ export function validateUploadRoutes(value,machine){
   return routes;
 }
 export async function selectUploadRoute(value,machine,probe,{signal}={}){
-  const routes=validateUploadRoutes(value,machine),routeFailures=[];
+  // Validate legacy descriptors completely, but never probe their Tail routes.
+  // Ordinary members only need a reachable campus HTTPS entry.
+  const routes=validateUploadRoutes(value,machine).filter(route=>route.kind==='campus-direct'),routeFailures=[];
   for(const route of routes){
     if(signal?.aborted)throw signal.reason||Error('Upload canceled');
     try{

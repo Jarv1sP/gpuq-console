@@ -15,13 +15,14 @@ import net from 'node:net';
 import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
+import {mockCampusFiles} from './personal-file-campus-mock.mjs';
 import {projectFootprint,trainingPlan,trainingSource} from './training-storage-fixture.mjs';
 
 const folder=await mkdtemp(join(tmpdir(),'gpuq-project-ui-'));
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-projects-ui';
 const password='Project-Browser-Fixture-Only-2026!',release='a'.repeat(64),nextRelease='b'.repeat(64),datasetVersion='c'.repeat(64);
 const [machine,other]=MACHINES.map(item=>item.id),calls=[],pageErrors=[],httpErrors=[],blocked=[],projects=new Map(),terminals=new Map(),uploads=new Map(),uploadIdentities=new Map();
-let server,service,browser,badReceiptOnce=false,dropUploadReplyOnce=false,terminalGate,releaseTerminalGate,ociAvailable=false;
+const cleanup=[];let campus;let server,service,browser,badReceiptOnce=false,terminalGate,releaseTerminalGate,ociAvailable=false;
 const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));
 const origin='http://127.0.0.1:'+port,key=(node,user,project)=>JSON.stringify([node,user,project]);
 const copy=value=>structuredClone(value);
@@ -59,6 +60,7 @@ try{
     }
     if(operation==='terminal.close'){const session=terminals.get(args.id);assert.ok(session);assert.equal(args.project,session.project);assert.equal(node,session.machine);terminals.delete(args.id);return {closed:true};}
     if(operation==='terminal.detach'){const session=terminals.get(args.id);assert.ok(session);assert.equal(args.writerToken,session.writerToken);return {detached:true};}
+    if(operation==='files.direct.prepare')return campus.ticket(args);
     if(operation==='files.upload.status'){
       const record=[...uploadIdentities.values()].find(value=>value.machine===node&&value.userId===args.userId&&value.project===args.project&&value.path===args.path&&value.totalSize===args.totalSize&&value.sha256===args.sha256&&(!args.uploadId||args.uploadId===value.uploadId));
       if(!record)return {protocol:2,state:'ABSENT',path:args.path};
@@ -74,7 +76,7 @@ try{
       return args.project?{path:args.path,complete:args.final,size:args.final?args.totalSize:args.offset+Buffer.from(args.data,'base64').length,...(args.final?{sha256:args.sha256}:{})}:{written:Buffer.from(args.data,'base64').length};
     }
     if(operation==='files.list')return {entries:[{type:'file',name:args.area==='output'?'metrics.json':'train.py',size:32}]};
-    if(operation==='files.get')return {data:Buffer.from('{"loss":0.1}\n').toString('base64'),eof:true};
+    if(operation==='files.get'){const data=Buffer.from('{"loss":0.1}\n');return {protocol:2,path:args.path,size:data.length,offset:args.offset,data:data.subarray(args.offset).toString('base64'),eof:true};}
     if(operation==='datasets.list')return {datasets:[{dataset:'sample',versions:[{version:datasetVersion,state:'READY',bytes:16,files:1}]}]};
     if(operation==='datasets.capacity')return {filesystemBytes:1024**4,availableBytes:512*1024**3,reserveBytes:20*1024**3,usableBytes:492*1024**3,totalInodes:100000,availableInodes:50000,inodeUsageKnown:true,guarded:true};
     if(operation==='datasets.status')return {dataset:args.dataset,version:args.version,state:'READY'};
@@ -82,26 +84,27 @@ try{
     if(operation==='logs')return {text:'mock project completed'};
     throw Error('Unexpected mock operation '+operation);
   };
-  ({server,service}=await createPortalServer({database:join(folder,'portal.sqlite'),bootstrap,origin,secure:false,statusPath,bridge}));
+  campus=await mockCampusFiles({after:callback=>cleanup.push(callback)},(operation,args)=>bridge(args.machine,operation,args),{allowedOrigins:[origin]});
+  ({server,service}=await createPortalServer({database:join(folder,'portal.sqlite'),bootstrap,origin,secure:false,statusPath,bridge,directUploadOrigins:[campus.endpoint]}));
   clearInterval(service.executionTimer);await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'project-user',password})).result;
   await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:2,limits:{[machine]:1,[other]:1}});
   projects.set(key(other,member.id,'other-project'),{project:'other-project',state:'READY',releases:[{release:nextRelease,state:'READY'}],latestReadyRelease:nextRelease});
   projects.set(key(machine,'builtin-admin','admin-project'),{project:'admin-project',state:'DRAFT',releases:[],latestReadyRelease:null});
   projects.set(key(machine,member.id,'vision-demo'),{project:'vision-demo',environmentMode:'oci',state:'DRAFT',releases:[],latestReadyRelease:null});
-  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
+  browser=await chromium.launch({headless:true,args:['--ignore-certificate-errors-spki-list='+campus.spki],...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1100}});
   async function configure(target){
+    await target.addInitScript(({endpoint})=>{window.showSaveFilePicker=undefined;const original=window.fetch;window.fetch=async(...args)=>{const response=await original(...args),url=new URL(args[0],location.href);if(window.__dropCampusReceipt&&url.origin===endpoint&&url.pathname.endsWith('/put')&&args[1]?.method==='POST'){window.__dropCampusReceipt=false;await response.clone().json();throw new TypeError('reply lost after durable campus response');}return response;};},{endpoint:campus.endpoint});
     target.on('pageerror',error=>pageErrors.push(error.message));
-    target.on('response',response=>{if(response.status()>=400)httpErrors.push({status:response.status(),operation:response.request().postDataJSON()?.operation});});
-    await target.context().route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(url.origin!==origin&&!['data:','blob:'].includes(url.protocol)){blocked.push(url.href);await route.abort();return;}
+    target.on('response',response=>{if(response.status()>=400)httpErrors.push({status:response.status(),operation:new URL(response.url()).origin===origin?response.request().postDataJSON()?.operation:'campus-file'});});
+    await target.context().route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(![origin,campus.endpoint].includes(url.origin)&&!['data:','blob:'].includes(url.protocol)){blocked.push(url.href);await route.abort();return;}
       if(url.pathname==='/api/call'&&route.request().postDataJSON()?.operation==='datasets.training.capabilities')return route.fulfill({json:{result:{...route.request().postDataJSON().args,protocol:0}}});
-      if(url.pathname==='/api/call'&&dropUploadReplyOnce&&route.request().postDataJSON()?.operation==='files.put'){dropUploadReplyOnce=false;await route.fetch();await route.abort('connectionreset');return;}
       await route.continue();}));
   }
   await configure(page);
   async function login(target,username){await target.goto(origin);await target.locator('#login-form [name=username]').fill(username);await target.locator('#login-form [name=password]').fill(password);await target.locator('#login-form [type=submit]').click();await target.locator('#login-dialog').waitFor({state:'hidden'});}
-  const responseFor=(target,operation)=>target.waitForResponse(response=>response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation===operation);
+  const responseFor=(target,operation)=>target.waitForResponse(response=>['files.put','files.get'].includes(operation)?new URL(response.url()).origin===campus.endpoint&&new URL(response.url()).pathname.endsWith(operation==='files.put'?'/put':'/get')&&response.request().method()!=='OPTIONS':response.url()===origin+'/api/call'&&response.request().postDataJSON()?.operation===operation);
   async function action(operation,fn,target=page){if(operation==='terminal.close')target.once('dialog',dialog=>{assert.equal(dialog.type(),'confirm');assert.match(dialog.message(),/结束.*终端/);return dialog.accept();});const waiting=responseFor(target,operation);await fn();const response=await waiting;assert.equal(response.status(),200,await response.text());return response;}
   async function idle(target=page){await target.waitForFunction(()=>!document.querySelector('[name=workspace-machine]')?.disabled);}
   async function capture(name,target=page){await target.waitForFunction(()=>{const toast=document.querySelector('#toast');return !toast||(!toast.classList.contains('visible')&&Number(getComputedStyle(toast).opacity)===0);});await target.evaluate(()=>scrollTo(0,0));await target.screenshot({path:join(screenshots,name),fullPage:true});}
@@ -156,7 +159,7 @@ try{
   await page.locator('[name=files]').setInputFiles({name:'resume.py',mimeType:'text/plain',buffer:resumeFile});
   const resumeStart=calls.length;await action('files.put',()=>page.locator('#workspace-upload').click());await idle();
   const resumedPuts=calls.slice(resumeStart).filter(row=>row.operation==='files.put');assert.equal(resumedPuts.length,1);assert.equal(resumedPuts[0].args.uploadId,originalUpload);assert.equal(resumedPuts[0].args.offset,1048576);assert.equal(Buffer.from(resumedPuts[0].args.data,'base64').length,13);
-  const lostStart=calls.length;dropUploadReplyOnce=true;await page.locator('[name=files]').setInputFiles({name:'interrupted.py',mimeType:'text/plain',buffer:resumeFile});
+  const lostStart=calls.length;await page.evaluate(()=>window.__dropCampusReceipt=true);await page.locator('[name=files]').setInputFiles({name:'interrupted.py',mimeType:'text/plain',buffer:resumeFile});
   await page.locator('#workspace-upload').click();await page.waitForFunction(()=>!document.querySelector('#workspace-upload').disabled&&document.querySelector('#workspace-result').textContent.includes('已上传 1 个文件'));await idle();
   const lostPuts=calls.slice(lostStart).filter(row=>row.operation==='files.put'),recoveryRead=calls.slice(lostStart).filter(row=>row.operation==='files.upload.status').at(-1);
   assert.deepEqual(lostPuts.map(row=>row.args.offset),[0,1048576]);assert.equal(lostPuts[0].args.uploadId,lostPuts[1].args.uploadId);assert.equal(recoveryRead.args.uploadId,lostPuts[0].args.uploadId);
@@ -234,8 +237,7 @@ try{
   assert.equal(await page.locator('[name=file-path]').inputValue(),'.');assert.equal(await page.locator('[name=file-run-id]').inputValue(),'');assert.equal(await page.locator('[name=file-area]').inputValue(),'code');
   for(const name of ['machine','terminal-machine','file-machine'])assert.equal(await page.locator(`[name=${name}]`).inputValue(),other);
   await page.locator('[name=files]').setInputFiles({name:'legacy.py',mimeType:'text/plain',buffer:Buffer.from('legacy test')});
-  await action('files.put',()=>page.locator('#workspace-upload').click());await idle();
-  const legacy=calls.filter(call=>call.operation==='files.put').at(-1);assert.equal(legacy.machine,other);assert.equal(legacy.args.project,undefined);assert.equal(legacy.args.truncate,true);
+  const legacyCalls=calls.length;await page.locator('#workspace-upload').click();await idle();await page.waitForFunction(()=>document.querySelector('#project-status').textContent.includes('须先选择个人项目'));assert.match(await page.locator('#project-status').textContent(),/须先选择个人项目/);assert.equal(calls.slice(legacyCalls).some(row=>['files.put','files.direct.prepare'].includes(row.operation)),false,'legacy upload refuses before bytes or ticket');
   await openSubmit(page);await page.locator('[name=datasets]').fill('');await page.locator('[name=command]').fill('python legacy.py');
   const legacySubmission=await action('jobs.submit',()=>page.locator('#train-form [type=submit]').click());await idle();
   const legacyJob=(await legacySubmission.json()).result;assert.equal(legacyJob.machine,other);assert.equal(legacyJob.project,undefined);assert.equal(legacyJob.release,undefined);
@@ -349,8 +351,8 @@ try{
   assert.deepEqual(httpErrors,[],'Public login and authenticated project flows must have zero HTTP errors');
   assert.equal(service.store.jobs.length,2);assert.equal(terminals.size,0);
   assert.ok(calls.filter(call=>call.operation==='projects.status').length<12,'publication polling stays bounded');
-  console.log(JSON.stringify({status:'passed',checks:['explicit development machine/project','unknown OCI capability denies creation','default personal OCI without mode choices','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file compatibility','context clears run/path','admin root separation','delayed ROOT/development opens cannot replace newest intent','390px container form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
-}finally{releaseTerminalGate?.();await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(folder,{recursive:true,force:true});}
+  console.log(JSON.stringify({status:'passed',checks:['explicit development machine/project','unknown OCI capability denies creation','default personal OCI without mode choices','plain-text publication progress/errors','verified chunk upload','project terminal open/exchange/reconnect/close','publish without live dev terminal','fixed READY release and preserved draft','dataset entry','project submit','own output list/download','legacy file bytes refuse relay; legacy training retained','context clears run/path','admin root separation','delayed ROOT/development opens cannot replace newest intent','390px container form without overflow'],screenshots,calls:calls.length,jobs:service.store.jobs.length}));
+}finally{releaseTerminalGate?.();await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));for(const callback of cleanup)await callback();await rm(folder,{recursive:true,force:true});}
 
 // Keep the terminal contract browser suite in the existing CI project entry.
 await terminalContractSmoke();

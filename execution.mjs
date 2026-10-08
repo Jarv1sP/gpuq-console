@@ -17,6 +17,7 @@ import {installDatasetReplication} from './dataset-replication.mjs';
 import {selectMachine} from './machine-selection.mjs';
 import {resolveTrainingDataset,trainingDatasetCapabilities} from './training-datasets.mjs';
 import {trainingStoragePlan} from './training-storage.mjs';
+import {requireCampusUpload,rejectWorkspaceRelay,campusUploadReply} from './campus-upload-policy.mjs';
 import {terminalNativeObservation,unavailableObservation,portalTerminalSnapshot,jobCompletion} from './job-observation.mjs';
 export {datasetReferences} from './job-submission.mjs';
 
@@ -230,6 +231,10 @@ export async function executionCall(service,principal,operation,args){
   if(operation==='datasets.files.list')return datasetFilesCall(service,principal,args);
   if(operation==='datasets.training.capabilities')return trainingDatasetCapabilities(service,principal,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
+  if(['files.put','files.get'].includes(operation)){
+    authorizedMachine(args.machine);
+    fail('普通文件正文只允许校园直连；请升级客户端并查询原上传编号，不会经 VPS 中转。',410,'CAMPUS_FILE_REQUIRED');
+  }
   if(operation.startsWith('datasets.storage.')){
     if(principal.role!=='admin')fail('存储管理仅管理员可用。',403);
     authorizedMachine(args.machine);
@@ -298,6 +303,7 @@ export async function executionCall(service,principal,operation,args){
     }
     if(action==='publish'&&(!uuid.test(args.key||'')||typeof args.name!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(args.name)))fail('发布需提供连接键和有效的数据集名称。');
     if(action==='status'&&args.operationId!==undefined&&!uuid.test(args.operationId))fail('发布操作编号无效。');
+    if(action==='put')rejectWorkspaceRelay();
     const {machine,...request}=args;
     if(action==='publish')service.audit(principal.username,operation,machine,args.name);
     return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
@@ -325,16 +331,20 @@ export async function executionCall(service,principal,operation,args){
       const data=Buffer.from(args.data,'base64');
       if(data.length>1024*1024||data.toString('base64')!==args.data)fail('上传分块最多 1 MiB，且需使用规范 Base64。');
     }
+    requireCampusUpload(action,args);
     const {machine,...request}=args;
     if(action.startsWith('admission.')&&!service.datasetUploadIngress)fail('机械仓库新上传准入尚未安装。',503);
     // Every upload is personal, including uploads made by administrators. No
     // client-provided role, source mapping or filesystem path crosses the bridge.
     if(['begin','admission.create','seal','commit','discard','direct-ticket','direct-revoke'].includes(action))service.audit(principal.username,operation,machine,id);
-    if(service.datasetUploadIngress)return service.datasetUploadIngress(principal,action,args);
+    if(service.datasetUploadIngress){
+      const value=await service.datasetUploadIngress(principal,action,args);
+      return campusUploadReply(action,value,value?.storageMachine||machine);
+    }
     // The public routes uploadId is a Portal placement selector. Legacy node
     // route metadata has no session field and must keep its old wire contract.
     if(action==='routes')delete request.uploadId;
-    return service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false});
+    return campusUploadReply(action,await service.bridge(machine,operation,{...request,userId:user.id,hostAdmin:false}),machine);
   }
   if(operation==='datasets.archive.enroll'){
     if(!service.enrollStorageArchive)fail('长期归档尚未配置。',409);
@@ -528,7 +538,10 @@ export async function executionCall(service,principal,operation,args){
         const catalogVersions=datasets.map(ref=>catalog.datasets?.find(d=>d.dataset===ref.dataset)?.versions?.find(v=>v.version===ref.version));
         if(catalogVersions.some((value,index)=>states[index].state!=='READY'&&value&&value.canUse!==true))
           rejectSubmission('当前账号没有数据集读取授权；目录可见不代表可以训练读取。未占用 GPU。',403);
-        if(!datasets.every((ref,index)=>states[index].state==='READY'||catalogVersions[index]?.canUse===true&&(catalogVersions[index].canPrepare===true||catalogVersions[index].state==='PREPARING')))rejectSubmission('部分数据没有可用来源；请先在数据集页面完成导入。未占用 GPU。',409);
+        const preparable=index=>states[index].state==='READY'||catalogVersions[index]?.canUse===true&&(catalogVersions[index].canPrepare===true||catalogVersions[index].state==='PREPARING');
+        // Unknown owner-bound reads cannot prove that the source is missing.
+        if(states.some((state,index)=>state.state==='UNKNOWN'&&!preparable(index)))rejectSubmission('部分数据的来源查询尚未确认，请稍后查询原数据状态再提交。未占用 GPU。',503);
+        if(!datasets.every((ref,index)=>preparable(index)))rejectSubmission('部分数据没有可用来源；请先在数据集页面完成导入。未占用 GPU。',409);
         if(service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)rejectSubmission('最多保留 10 个数据准备中的训练，请先等待或取消。',429);
         needsPreparation=true;
       }

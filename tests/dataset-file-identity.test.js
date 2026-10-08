@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {createLocalDatasetTools,scanLocalDataset} from '../client-data-upload.mjs';
+import {campusTLSFixture} from './campus-upload-fixture.mjs';
 
 // Exercise the shared local reader used by upload and Git sync. Only filesystem
 // views/platform are injected; transport and identity checks execute unchanged.
@@ -31,12 +32,13 @@ async function fixture(t){
   const filename=join(directory,'images','00001.jpg');await fs.writeFile(filename,'temporary image bytes');
   await fs.writeFile(join(directory,'empty'),'');await fs.mkdir(join(directory,'empty-directory'));
   const calls=[],uploaded=new Map();let manifest=Buffer.alloc(0),parsed;
-  const state={uploadId:'test-upload',state:'RECEIVING_MANIFEST',manifestOffset:0};
+  const state={uploadId:'33333333-3333-4333-8333-333333333333',state:'RECEIVING_MANIFEST',manifestOffset:0};
   const hooks={};
   const call=async(operation,args)=>{
     const action=operation.split('.').at(-1);calls.push(action);
     await hooks[action]?.(args);
-    if(action==='begin')return {result:{...state}};
+    if(action==='begin')return {result:{...state,uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true}}};
+    if(action==='direct-ticket')return {result:tls.grant()};
     if(action==='manifest'){
       assert.equal(args.offset,manifest.length);manifest=Buffer.concat([manifest,Buffer.from(args.data,'base64')]);
       return {result:{offset:manifest.length}};
@@ -54,6 +56,8 @@ async function fixture(t){
     }
     throw Error('Unexpected mock operation '+operation);
   };
+  const tls=await campusTLSFixture(async(req,res)=>{try{let raw='';for await(const bytes of req)raw+=bytes;const {operation,args}=JSON.parse(raw);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(await call(operation,args)));}catch(error){res.statusCode=400;res.end(JSON.stringify({error:error.message}));}},{machine:'test-machine'});
+  t.after(async()=>{await tls.close();assert.equal(tls.counters.portalFileRequests,0);});
   const upload=api=>api.uploadLocalDataset(call,{machine:'test-machine',name:'sample',userId:'test-only',directory,progress(){},keyStore:{get:()=>state.uploadId}});
   return {directory,filename,calls,hooks,upload};
 }

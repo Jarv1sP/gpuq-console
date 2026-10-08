@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash,randomBytes} from 'node:crypto';
 import {SHA256,hashBlob,uploadKey,datasetPath,manifestBlob,scanBrowserDirectory,uploadBrowserDataset as uploadBrowserDatasetProtocol,CHUNK_BYTES,LARGE_RELAY_BYTES} from '../dist/dataset-upload.js';
+import {campusBrowserFixture} from './campus-upload-fixture.mjs';
 // These fixtures exercise the retained protocol with a remembered original
 // key. Fresh server-issued admission has its own full client contract suite.
-const uploadBrowserDataset=options=>uploadBrowserDatasetProtocol({...options,keyStore:{...options.keyStore,get:key=>options.keyStore?.get?.(key)||key}});
+const uploadBrowserDataset=options=>uploadBrowserDatasetProtocol({...options,...campusBrowserFixture(options.call),keyStore:{...options.keyStore,get:key=>options.keyStore?.get?.(key)||key}});
 const digest=data=>createHash('sha256').update(data).digest('hex');
 test('incremental browser SHA256 matches native hash at padding boundaries and random chunk boundaries',async()=>{
   for(const length of [0,1,3,55,56,63,64,65,127,128,129,1000000]){
@@ -72,12 +73,12 @@ test('large manifests cross the HTTP chunk boundary without a 4096 entry ceiling
   const call=async(operation,args)=>{if(operation.endsWith('.begin')){assert.equal(args.entries,5000);return {uploadId:'large',state:'RECEIVING_MANIFEST',manifestOffset:0};}if(operation.endsWith('.manifest')){const next=Buffer.from(args.data,'base64');assert.ok(next.length<=CHUNK_BYTES);assert.equal(args.offset,bytes.length);bytes=Buffer.concat([bytes,next]);chunks++;return {offset:bytes.length};}if(operation.endsWith('.seal')||operation.endsWith('.status'))return {uploadId:'large',state:'READY',dataset:'u-user-large',version:digest(bytes),totalBytes:scan.totalBytes,entries:scan.entries};throw Error(operation);};
   assert.equal((await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'large',scan})).state,'READY');assert.ok(chunks>1);assert.equal(digest(bytes),scan.manifestSha256);assert.equal(JSON.parse(bytes).files.length,5000);
 });
-test('discard restart persists its replacement key before creating the next upload and reuses it',async()=>{
-  const scan=await scanBrowserDirectory([selectedFile('a','content')]),keys=new Map(),base=uploadKey('one','gpu-1','mine',scan.manifestSha256),seen=[];
-  const keyStore={get:key=>keys.get(key),set:(key,value)=>keys.set(key,value)};
-  const call=async(operation,args)=>{if(operation.endsWith('.status')){assert.equal(args.uploadId,'new');return {state:'READY',uploadId:'new',dataset:'u-user-mine',version:'b'.repeat(64),totalBytes:scan.totalBytes,entries:scan.entries};}assert.ok(operation.endsWith('.begin'));seen.push(args.key);if(args.key===base)return {state:'DISCARDED',uploadId:'old'};assert.equal(keys.get(base),args.key);assert.equal('uploadId' in args,false);return {state:'READY',uploadId:'new',dataset:'u-user-mine',version:'b'.repeat(64),totalBytes:scan.totalBytes,entries:scan.entries};};
-  const first=await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'mine',scan,keyStore});assert.equal(first.uploadId,'new');assert.notEqual(keys.get(base),base);
-  await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'mine',scan,keyStore});assert.deepEqual(seen,[base,keys.get(base),keys.get(base)]);
+test('discard restart retains its original legacy key and never creates another upload',async()=>{
+  const scan=await scanBrowserDirectory([selectedFile('a','content')]),keys=new Map(),base=uploadKey('one','gpu-1','mine',scan.manifestSha256),seen=[];keys.set(base,base);
+  const keyStore={get:key=>keys.get(key),set:()=>{throw Error('must not replace original UUID');}};
+  const call=async(operation,args)=>{assert.ok(operation.endsWith('.begin'));seen.push(args.key);assert.equal(args.key,base);return {state:'DISCARDED',uploadId:base};};
+  for(let attempt=0;attempt<2;attempt++)await assert.rejects(uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'mine',scan,keyStore}),error=>error.code==='DISCARDED'&&error.uploadId===base);
+  assert.equal(keys.get(base),base);assert.deepEqual(seen,[base,base]);
 });
 test('failed sealing with an already complete manifest retries seal before uploading any files',async()=>{
   const scan=await scanBrowserDirectory([selectedFile('a','content')]),actions=[];let stored;
@@ -93,13 +94,13 @@ test('failed sealing with an already complete manifest retries seal before uploa
   assert.equal((await uploadBrowserDataset({call,userId:'one',machine:'gpu-1',name:'mine',scan,pollMs:0})).state,'READY');
   assert.deepEqual(actions,['begin','seal','status','chunk','commit','status']);
 });
-test('browser relay limit blocks oversized begin without consent and forwards true only',async()=>{
+test('browser rejects explicit relay for every size and consent before allocating an upload',async()=>{
   const scanned=await scanBrowserDirectory([selectedFile('a','content')]),calls=[];
   let totals;const call=async(operation,args)=>{calls.push({operation,args});if(operation.endsWith('.begin'))totals={totalBytes:args.totalBytes,entries:args.entries};return {state:'READY',uploadId:'fixture',dataset:'u-user-mine',version:'a'.repeat(64),...totals};};
   const base={call,userId:'one',machine:'gpu-1',name:'mine',via:'relay'},large={...scanned,totalBytes:LARGE_RELAY_BYTES+1};
-  for(const allowRelay of [undefined,false,'true',1])await assert.rejects(uploadBrowserDataset({...base,scan:large,allowRelay}),/256 MiB/);
+  for(const scan of [scanned,large])for(const allowRelay of [undefined,false,'true',1,true])await assert.rejects(uploadBrowserDataset({...base,scan,allowRelay}),error=>error.code==='CAMPUS_REQUIRED');
   assert.equal(calls.length,0,'Refusal must happen before creating a transfer');
-  await uploadBrowserDataset({...base,scan:large,allowRelay:true});assert.equal(calls.find(c=>c.operation.endsWith('.begin')).args.allowRelay,true);
-  await uploadBrowserDataset({...base,via:'auto',scan:{...scanned,totalBytes:LARGE_RELAY_BYTES}});assert.equal('allowRelay' in calls.findLast(c=>c.operation.endsWith('.begin')).args,false,'Exactly 256 MiB stays within the small relay allowance');
+  await uploadBrowserDataset({...base,via:'auto',scan:large,allowRelay:true});assert.equal('allowRelay' in calls.find(c=>c.operation.endsWith('.begin')).args,false);
+  await uploadBrowserDataset({...base,via:'auto',scan:{...scanned,totalBytes:LARGE_RELAY_BYTES}});assert.equal('allowRelay' in calls.findLast(c=>c.operation.endsWith('.begin')).args,false);
   await uploadBrowserDataset({...base,via:'auto',scan:scanned,allowRelay:false});assert.equal('allowRelay' in calls.findLast(c=>c.operation.endsWith('.begin')).args,false);
 });

@@ -5,6 +5,8 @@ RUN npm ci --ignore-scripts
 COPY *.mjs ./
 COPY dist ./dist
 COPY scripts/build-client.mjs ./scripts/
+COPY scripts/build-campus-native.mjs scripts/campus-go-toolchain.mjs ./scripts/
+COPY native/campus-http ./native/campus-http
 RUN npm run build:client
 RUN npm prune --omit=dev --ignore-scripts
 
@@ -21,6 +23,7 @@ COPY --chown=root:root proto/clouddrive-pilot.proto ./proto/
 COPY --chown=root:root dataset-catalog.mjs dataset-storage-overview.mjs dataset-files.mjs dataset-cache-actions.mjs dataset-preparation.mjs dataset-replication.mjs dataset-deletion.mjs storage-archive.mjs dataset-ingress.mjs ./
 COPY --chown=root:root project-replication.mjs machine-selection.mjs ./
 COPY --chown=root:root training-datasets.mjs training-storage.mjs training-preparation.mjs ./
+COPY --chown=root:root personal-file-campus.mjs campus-upload-policy.mjs ./
 COPY --chown=root:root dataset-labels.mjs ./
 COPY --chown=root:root storage-usage.mjs ./
 COPY --chown=root:root task-display.mjs ./

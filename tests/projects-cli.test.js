@@ -6,20 +6,30 @@ import {mkdtemp,writeFile,readFile,mkdir,rm,stat,open} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
+import {mockCampusFiles} from './personal-file-campus-mock.mjs';
 
 const RELEASE='a'.repeat(64),OLDER='b'.repeat(64),JOB='11111111-2222-4333-8444-555555555555';
 const principal={userId:'demo-user-1',username:'tester',role:'member'};
+const terminalReceipt=args=>({id:args.id||args.key,hostAdmin:args.hostAdmin,clientId:args.clientId,
+  mode:args.mode,writerToken:randomUUID(),leaseExpiresAt:Date.now()/1000+30});
 async function fixture(t){
   const dir=await mkdtemp(join(tmpdir(),'gpuq-projects-cli-')),session=join(dir,'session.json'),calls=[];
   let releases=[{release:RELEASE,state:'READY'},{release:OLDER,state:'READY'}],latest=RELEASE;
   const custom=new Map();
   const state={demo:false,gpuqConnected:true,machines:[{id:'gpu-1'},{id:'gpu-2'}],users:[],jobs:[]};
+  const campus=await mockCampusFiles(t,async(operation,args)=>{
+    calls.push({operation,args});
+    if(custom.has(operation))return custom.get(operation)(args);
+    return operation==='files.get'?{path:args.path,size:10,offset:args.offset,data:Buffer.from('checkpoint').subarray(args.offset).toString('base64'),eof:true}:
+      {complete:args.final,size:args.offset+Buffer.from(args.data,'base64').length,...(args.final?{sha256:args.sha256}:{})};
+  });
   const server=createServer(async(req,res)=>{
     try{
       let raw='';for await(const data of req)raw+=data;
       const body=JSON.parse(raw);res.setHeader('Content-Type','application/json');
       if(req.url==='/api/login'){res.end(JSON.stringify({token:'new-test-token',principal,state}));return;}
       const {operation,args={}}=body;calls.push({operation,args});
+      if(operation==='files.direct-ticket'){res.end(JSON.stringify({result:await campus.ticket(args)}));return;}
       if(operation==='state'){res.end(JSON.stringify({state}));return;}
       if(custom.has(operation)){const value=await custom.get(operation)(args);res.end(JSON.stringify({result:value}));return;}
       const result=operation==='projects.list'?{projects:[{project:'alpha',state:'READY',releases,latestReadyRelease:latest}]}:
@@ -43,6 +53,15 @@ async function fixture(t){
   t.after(async()=>{await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});});
   return {dir,session,calls,cli,save,custom,setReleases:(value,head)=>{releases=value;latest=head;}};
 }
+test('project status preserves original owned session discovery and never attaches, closes or substitutes a new session',async t=>{
+ const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+ const id=randomUUID(),view={protocol:1,state:'UNCONFIRMED',complete:false,sessions:[{id,state:'UNCONFIRMED',requiresStatus:true,attachmentState:'CLOSED',writerLeaseExpired:true,legacy:false}]};
+ f.custom.set('projects.status',args=>({project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null,developmentTerminals:view}));
+ const before=f.calls.length,value=await f.cli(['project','status']);assert.equal(value.code,0,value.stderr);
+ assert.deepEqual(value.data.developmentTerminals,view);assert.equal(value.data.state,'DRAFT');
+ assert.deepEqual(f.calls.slice(before).filter(row=>row.operation!=='state'),[{operation:'projects.status',args:{machine:'gpu-1',project:'alpha'}}]);
+ assert.equal(f.calls.some(row=>row.operation.startsWith('terminal.')||row.operation==='projects.publish'||row.operation==='projects.create'),false);
+});
 test('project lifecycle CLI exposes CAS labels, grouping and original-key soft retirement without mutable path guesses',async t=>{
  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
  f.custom.set('projects.label.get',args=>({...args,displayName:args.project,revision:3}));
@@ -142,6 +161,39 @@ test('auto run pins the development release but sends opt-in target selection wi
   }
 });
 
+test('training data read mode preserves default cache wire and adds only the explicit warehouse field',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  const base=['run','gpu-1','--project','alpha','--release',RELEASE,'--key',JOB,'--data','samples@'+OLDER];
+  let cached;
+  for(const mode of [undefined,'cache','warehouse']){
+    const value=await f.cli([...base,...(mode?['--data-read',mode]:[]),'--','python','train.py']);
+    assert.equal(value.code,0,value.stderr);const args=f.calls.at(-1).args;
+    assert.equal(f.calls.at(-1).operation,'jobs.submit');
+    if(mode===undefined)cached=structuredClone(args);
+    else assert.deepEqual(args,mode==='cache'?cached:{...cached,datasetReadMode:'warehouse'});
+  }
+  const auto=await f.cli(['run','--machine','auto','--candidates','2','--project','alpha','--release',RELEASE,'--key',JOB,'--data','samples@'+OLDER,'--data-read','warehouse','--','true']);
+  assert.equal(auto.code,0,auto.stderr);assert.equal(f.calls.at(-1).args.datasetReadMode,'warehouse');
+  assert.deepEqual(f.calls.at(-1).args.machineSelection,{mode:'auto',candidates:['gpu-2']});
+  assert.deepEqual(f.calls.at(-2),{operation:'projects.status',args:{machine:'gpu-1',project:'alpha'}});
+  assert.equal(JSON.parse(await readFile(f.session,'utf8')).machine,'gpu-1');
+});
+
+test('unsupported warehouse inputs never submit and training argv after -- remains literal',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  for(const args of [
+    ['run','gpu-1','--data-read','local','--','true'],
+    ['run','gpu-1','--data-read','warehouse','--','true'],
+    ['run','gpu-1','--legacy','--data','samples@'+OLDER,'--data-read','warehouse','--','true'],
+    ['data','list','--data-read','warehouse'],
+    ['run','gpu-1','--data','samples@short','--data-read','warehouse','--','true'],
+  ]){const result=await f.cli(args);assert.equal(result.code,1,result.stderr);}
+  assert.equal(f.calls.some(row=>row.operation==='jobs.submit'),false);
+  const result=await f.cli(['run','gpu-1','--key',JOB,'--','python','train.py','--data-read','warehouse']);
+  assert.equal(result.code,0,result.stderr);assert.deepEqual(f.calls.at(-1).args.argv,['python','train.py','--data-read','warehouse']);
+  assert.equal(Object.hasOwn(f.calls.at(-1).args,'datasetReadMode'),false);
+});
+
 test('immutable OCI project copy uses source/target and fixed key; status/cancel remain owner-scoped handles',async t=>{
   const f=await fixture(t);
   f.custom.set('projects.replicate',args=>({id:args.key,...args,state:'PREPARING',developmentChanged:false}));
@@ -198,7 +250,7 @@ test('terminal open/exchange/close preserve selected project and use top-level r
   const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
   const preload=join(f.dir,'fake-tty.mjs');
   await writeFile(preload,'Object.defineProperty(process.stdin,"isTTY",{value:true});process.stdin.setRawMode=()=>process.stdin;');
-  f.custom.set('terminal.open',()=>({id:JOB,writerToken:randomUUID()}));
+  f.custom.set('terminal.open',terminalReceipt);
   f.custom.set('terminal.exchange',()=>({offset:0,data:'',exited:true}));
   f.custom.set('terminal.close',()=>({closed:true}));
   const result=await f.cli(['ssh'],'',preload);assert.equal(result.code,0,result.stderr);
@@ -211,7 +263,7 @@ test('terminal open/exchange/close preserve selected project and use top-level r
 test('same login CLI invocations create separate clients and reconnect/takeover is explicit',async t=>{
   const f=await fixture(t),preload=join(f.dir,'isolated-tty.mjs');
   await writeFile(preload,'Object.defineProperty(process.stdin,"isTTY",{value:true});process.stdin.setRawMode=()=>process.stdin;');
-  f.custom.set('terminal.open',args=>({id:args.id||randomUUID(),writerToken:randomUUID()}));
+  f.custom.set('terminal.open',terminalReceipt);
   f.custom.set('terminal.exchange',()=>({offset:0,data:'',exited:true}));
   f.custom.set('terminal.close',()=>({closed:true}));
   for(let n=0;n<2;n++)assert.equal((await f.cli(['ssh'],'',preload)).code,0);
@@ -227,7 +279,7 @@ test('same login CLI invocations create separate clients and reconnect/takeover 
 test('Ctrl+] releases the writer lease instead of closing the retained PTY',async t=>{
   const f=await fixture(t),preload=join(f.dir,'detach-tty.mjs');
   await writeFile(preload,'Object.defineProperty(process.stdin,"isTTY",{value:true});process.stdin.setRawMode=value=>{if(value)setTimeout(()=>process.stdin.emit("data",Buffer.from([29])),30);return process.stdin;};');
-  f.custom.set('terminal.open',()=>({id:JOB,writerToken:randomUUID()}));
+  f.custom.set('terminal.open',terminalReceipt);
   f.custom.set('terminal.exchange',()=>({offset:0,data:'',exited:false}));
   f.custom.set('terminal.detach',()=>({detached:true}));
   const result=await f.cli(['ssh'],'',preload);assert.equal(result.code,0,result.stderr);
@@ -340,16 +392,17 @@ test('files/pull target only selected project outputs and reject output writes',
   assert.equal((await f.cli(['files','checkpoints','--job',JOB])).code,0);
   assert.deepEqual(f.calls.at(-1).args,{machine:'gpu-1',path:'checkpoints',project:'alpha',area:'output',runId:JOB});
   const output=join(f.dir,'model.pt');assert.equal((await f.cli(['pull','--job',JOB,'model.pt',output])).code,0);
-  assert.deepEqual(f.calls.at(-1).args,{machine:'gpu-1',path:'model.pt',offset:0,project:'alpha',area:'output',runId:JOB});
+  const {fingerprint,...downloadArgs}=f.calls.at(-1).args;assert.match(fingerprint,/^[a-f0-9]{64}$/);
+  assert.deepEqual(downloadArgs,{machine:'gpu-1',path:'model.pt',offset:0,project:'alpha',area:'output',runId:JOB});
   assert.equal(await readFile(output,'utf8'),'checkpoint');
   assert.equal((await f.cli(['push',output,'--job',JOB])).code,1);
   assert.equal((await f.cli(['files','--legacy','--job',JOB])).code,1);
 });
 
-test('legacy uploads retain truncate format; explicit files machine remains compatible',async t=>{
+test('legacy uploads refuse byte relay; explicit metadata listing remains compatible',async t=>{
   const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
-  const source=join(f.dir,'file');await writeFile(source,'legacy');assert.equal((await f.cli(['push',source,'--legacy'])).code,0);
-  assert.deepEqual(f.calls.at(-1).args,{machine:'gpu-1',path:'file',offset:0,truncate:true,data:Buffer.from('legacy').toString('base64')});
+  const source=join(f.dir,'file');await writeFile(source,'legacy');const rejected=await f.cli(['push',source,'--legacy']);assert.equal(rejected.code,1);
+  assert.match(rejected.stderr,/校园|campus/i);assert.equal(f.calls.some(call=>['files.put','files.direct-ticket'].includes(call.operation)),false);
   assert.equal((await f.cli(['files','gpu-2','subdir'])).code,0);assert.deepEqual(f.calls.at(-1).args,{machine:'gpu-2',path:'subdir'});
 });
 
@@ -369,4 +422,40 @@ test('invalid slugs, releases and UUIDs fail before any API work',async t=>{
   }
   assert.equal(f.calls.length,0);
   assert.equal((await f.cli(['project','create','bad/name'])).code,1);assert.equal(f.calls.some(c=>c.operation==='projects.create'),false);
+});
+
+
+test('fixed warehouse run preserves the original key, machine, release and literal argv while cache retains legacy fields',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  const dataset='sample@'+OLDER,argv=['python','train.py','--data-read','literal'];
+  for(const mode of ['warehouse','cache',undefined]){
+    const result=await f.cli(['run','--machine','1','--key',JOB,'--data',dataset,...(mode?['--data-read',mode]:[]),'--',...argv]);
+    assert.equal(result.code,0,result.stderr);
+    const submission=f.calls.at(-1);assert.equal(submission.operation,'jobs.submit');
+    assert.equal(submission.args.key,JOB);assert.equal(submission.args.machine,'gpu-1');
+    assert.equal(submission.args.project,'alpha');assert.equal(submission.args.release,RELEASE);
+    assert.deepEqual(submission.args.datasets,[{dataset:'sample',version:OLDER}]);assert.deepEqual(submission.args.argv,argv);
+    assert.equal(Object.hasOwn(submission.args,'datasetReadMode'),mode==='warehouse');
+    if(mode==='warehouse')assert.equal(submission.args.datasetReadMode,'warehouse');
+    assert.equal(Object.hasOwn(submission.args,'userId'),false);assert.equal(Object.hasOwn(submission.args,'hostAdmin'),false);
+  }
+});
+
+test('warehouse CLI failures preserve the original submission identity and never retry, prepare, publish or retarget',async t=>{
+  const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
+  const mutationCount=()=>f.calls.filter(row=>['jobs.submit','projects.publish','projects.create','datasets.prepare','transfers.create'].includes(row.operation)).length;
+  for(const command of [
+    ['run','--data-read','elsewhere','--','true'],['jobs','--data-read','warehouse'],
+    ['run','--data-read','warehouse','--','true'],
+    ['run','--data-read','warehouse','--legacy','--data','sample@'+OLDER,'--','true'],
+  ]){const before=mutationCount();assert.equal((await f.cli(command)).code,1);assert.equal(mutationCount(),before);}
+  f.custom.set('jobs.submit',()=>{throw Error('original exchange outcome unconfirmed');});
+  const before=f.calls.length,sessionBefore=await readFile(f.session,'utf8');
+  const failed=await f.cli(['run','--machine','1','--data-read','warehouse','--key',JOB,'--data','sample@'+OLDER,'--','true']);
+  assert.equal(failed.code,1);assert.match(failed.stderr,new RegExp('Submission key: '+JOB));
+  const submissions=f.calls.slice(before).filter(row=>row.operation==='jobs.submit');assert.equal(submissions.length,1);
+  assert.equal(submissions[0].args.key,JOB);assert.equal(submissions[0].args.machine,'gpu-1');assert.equal(submissions[0].args.project,'alpha');
+  assert.equal(submissions[0].args.release,RELEASE);assert.equal(submissions[0].args.datasetReadMode,'warehouse');
+  assert.equal(f.calls.slice(before).some(row=>['projects.publish','projects.create','datasets.prepare','transfers.create'].includes(row.operation)),false);
+  assert.equal(await readFile(f.session,'utf8'),sessionBefore);
 });

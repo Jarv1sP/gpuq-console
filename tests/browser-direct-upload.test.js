@@ -8,14 +8,15 @@ const id='12345678-1234-4234-8234-123456789012',endpoint='https://upload.example
 function file(path,bytes){const blob=new Blob([bytes]);Object.defineProperties(blob,{name:{value:path},webkitRelativePath:{value:'selected/'+path}});return blob;}
 async function fixture({size=CHUNK_BYTES+13,directAvailable=true,chunkBytes=CHUNK_BYTES,fixedRoutes=false}={}){
   const content=Buffer.alloc(size,7),scan=await scanBrowserDirectory([file('训练/样本.bin',content),file('empty','')]),portal=[],raw=[],routes=[],progress=[],handles=new Map();
-  let clock=1000,state='RECEIVING_MANIFEST',manifest=Buffer.alloc(0),published=false,ticketNumber=0,loseChunk=false,revoke=false,failDirect=false,loseCommit=false,mismatch=false;
+  let clock=1000,state='RECEIVING_MANIFEST',manifest=Buffer.alloc(0),published=false,ticketNumber=0,loseChunk=false,revoke=false,failDirect=false,loseCommit=false,mismatch=false,grantKind='campus-direct';
   const stored=new Map(),transport={protocol:'dataset-upload-v1',directAvailable,relayLimitBytes:LARGE_RELAY_BYTES,relayAllowed:false,...(fixedRoutes?{routeSelection:true}:{})};
-  const alternate='https://tail.example.test',revision='c'.repeat(64),probes=[];
+  const alternate='https://campus-alt.example.test',revision='c'.repeat(64),probes=[];
   const descriptor={available:true,protocol:'dataset-upload-v1',machine:'node-a',revision,certificateSha256:'a'.repeat(64),routes:[
-    {id:'primary',kind:'campus-direct',endpoint},{id:'tail',kind:'tail-upload',endpoint:alternate}]};
+    {id:'primary',kind:'campus-direct',endpoint},{id:'tail',kind:'tail-upload',endpoint:'https://tail.example.test'},
+    {id:'campus-alt',kind:'campus-direct',endpoint:alternate}]};
   const describe=()=>({uploadId:id,state,name:'mine',manifestOffset:manifest.length,totalBytes:scan.totalBytes,entries:scan.entries,chunkBytes,...(published?{dataset:'u-test-mine',version:digest(manifest)}:{})});
-  const grant=(routeId='primary')=>({available:true,protocol:'dataset-upload-v1',endpoint:routeId==='tail'?alternate:endpoint,ticket:'fixture-only-ticket-'+(++ticketNumber),expiresAt:clock+300,certificateSha256:'a'.repeat(64),chunkBytes,
-    ...(fixedRoutes?{routeId,machine:'node-a',revision,kind:routeId==='tail'?'tail-upload':'campus-direct'}:{})});
+  const grant=(routeId='primary')=>({available:true,kind:grantKind,protocol:'dataset-upload-v1',endpoint:routeId==='campus-alt'?alternate:endpoint,ticket:'fixture-only-ticket-'+(++ticketNumber),expiresAt:clock+300,certificateSha256:'a'.repeat(64),chunkBytes,
+    ...(fixedRoutes?{routeId,machine:'node-a',revision}:{})});
   const call=async(operation,args)=>{
     portal.push({operation,args:structuredClone(args)});assert.equal(args.machine,'node-a');
     assert.equal('userId' in args||'hostAdmin' in args,false);
@@ -62,8 +63,20 @@ async function fixture({size=CHUNK_BYTES+13,directAvailable=true,chunkBytes=CHUN
   // Original persisted legacy intent: this suite isolates ticket/transport
   // recovery. Fresh allocation is covered by the admission client suite.
   const options={call,scan,userId:'member',machine:'node-a',name:'mine',pollMs:0,fetch:send,now:()=>clock,onRoute:route=>routes.push(route),onProgress:value=>progress.push(value),keyStore:{get:()=>id,getHandle:key=>handles.get(key),setHandle:(key,value)=>handles.set(key,value)}};
-  return {options,portal,raw,routes,probes,progress,content,stored,transport,handles,advance:()=>{clock+=295;},loseChunk:()=>{loseChunk=true;},revoke:()=>{revoke=true;},failDirect:()=>{failDirect=true;},loseCommit:()=>{loseCommit=true;},mismatch:()=>{mismatch=true;}};
+  return {options,portal,raw,routes,probes,progress,content,stored,transport,handles,setGrantKind:value=>{grantKind=value;},advance:()=>{clock+=295;},loseChunk:()=>{loseChunk=true;},revoke:()=>{revoke=true;},failDirect:()=>{failDirect=true;},loseCommit:()=>{loseCommit=true;},mismatch:()=>{mismatch=true;}};
 }
+test('legacy single endpoints need explicit campus identity before any bearer or bytes; renewal cannot change kind',async()=>{
+  for(const kind of [undefined,'tail-upload','vps-relay']){
+    const f=await fixture();f.setGrantKind(kind);
+    await assert.rejects(uploadBrowserDataset(f.options),error=>error.code==='DIRECT'&&error.canRelay===false&&error.uploadId===id);
+    assert.equal(f.raw.length,0);assert.deepEqual(f.portal.map(row=>row.operation),['datasets.upload.begin','datasets.upload.direct-ticket']);
+  }
+  const f=await fixture({size:2*CHUNK_BYTES+13});let changed=false;
+  f.options.onProgress=value=>{if(value.bytes>0&&!changed){changed=true;f.advance();f.setGrantKind('tail-upload');}};
+  await assert.rejects(uploadBrowserDataset(f.options),error=>error.code==='DIRECT_AUTH'&&error.canRelay===false&&error.uploadId===id);
+  assert.equal(f.stored.get('训练/样本.bin').length,CHUNK_BYTES);assert.equal(f.portal.some(row=>row.args.data!==undefined),false);
+  assert.equal(f.raw.filter(row=>row.action==='chunk'&&row.path==='训练/样本.bin').length,1);
+});
 test('HDD-first browser keeps training selector while validating the physical warehouse node',async()=>{
   const f=await fixture({fixedRoutes:true}),original=f.options.call,calls=[];
   const placement={placementProtocol:1,requestedMachine:'training-node',storageMachine:'node-a',storageTier:'hdd',legacyPlacement:false};
@@ -75,17 +88,17 @@ test('HDD-first browser keeps training selector while validating the physical wa
   };
   const result=await uploadBrowserDataset(f.options);
   assert.equal(result.state,'READY');assert.equal(result.storageMachine,'node-a');assert.equal(result.requestedMachine,'training-node');
-  assert.deepEqual(f.routes,[{kind:'tail-upload',machine:'node-a',requestedMachine:'training-node',storageTier:'hdd'}]);
+  assert.deepEqual(f.routes,[{kind:'campus-direct',machine:'node-a',requestedMachine:'training-node',storageTier:'hdd'}]);
   assert(calls.find(call=>call.operation==='datasets.upload.routes').args.uploadId);
 });
 
 test('browser chooses a fixed alternate anonymously before ticketing and retains it on renewal',async()=>{
   const f=await fixture({fixedRoutes:true});f.revoke();
   const result=await uploadBrowserDataset(f.options);
-  assert.equal(result.state,'READY');assert.equal(result.route.kind,'tail-upload');
-  assert.deepEqual(f.probes,[endpoint,'https://tail.example.test']);
+  assert.equal(result.state,'READY');assert.equal(result.route.kind,'campus-direct');
+  assert.deepEqual(f.probes,[endpoint,'https://campus-alt.example.test']);
   const tickets=f.portal.filter(x=>x.operation.endsWith('.direct-ticket'));
-  assert.equal(tickets.length,2);assert.ok(tickets.every(x=>x.args.routeId==='tail'));
+  assert.equal(tickets.length,2);assert.ok(tickets.every(x=>x.args.routeId==='campus-alt'));
   assert.equal(f.portal.some(x=>x.args.data||x.args.bytes),false);
 });
 test('browser failed approved probes never issue a ticket or silently use relay',async()=>{
@@ -131,14 +144,14 @@ test('revoked grants query node status before retrying an explicitly rejected wr
   assert.equal(f.raw[first+2].offset,0);assert.equal(f.portal.filter(row=>row.operation.endsWith('.direct-ticket')).length,2);
 });
 test('a failed direct path never sends relay bytes, even with a preexisting relay consent',async()=>{
-  const f=await fixture();f.failDirect();await assert.rejects(uploadBrowserDataset({...f.options,allowRelay:true}),error=>error.code==='DIRECT'&&error.canRelay);
+  const f=await fixture();f.failDirect();await assert.rejects(uploadBrowserDataset({...f.options,allowRelay:true}),error=>error.code==='DIRECT'&&error.canRelay===false);
   assert.equal(f.portal.some(row=>row.operation.endsWith('.manifest')||row.operation.endsWith('.chunk')),false);assert.equal(f.progress.some(row=>row.state==='READY'),false);
-  const direct=await fixture({directAvailable:false});await assert.rejects(uploadBrowserDataset({...direct.options,via:'direct',allowRelay:true}),/未提供直传入口/);
+  const direct=await fixture({directAvailable:false});await assert.rejects(uploadBrowserDataset({...direct.options,via:'direct',allowRelay:true}),error=>error.code==='CAMPUS_REQUIRED'&&error.canRelay===false&&error.uploadId===id);
   assert.equal(direct.raw.length,0);assert.equal(direct.portal.length,1);
 });
 test('auto can authorize a large direct upload; a missing endpoint rejects it before any bytes',async()=>{
   const f=await fixture({directAvailable:false});f.options.scan={...f.options.scan,totalBytes:LARGE_RELAY_BYTES+1};
-  await assert.rejects(uploadBrowserDataset(f.options),error=>error.code==='RELAY_CONSENT'&&error.canRelay);
+  await assert.rejects(uploadBrowserDataset(f.options),error=>error.code==='CAMPUS_REQUIRED'&&error.canRelay===false&&error.uploadId===id);
   assert.equal(f.portal.length,1);assert.equal(f.raw.length,0);
   const direct=await fixture();direct.options.scan.totalBytes=LARGE_RELAY_BYTES+1;
   const result=await uploadBrowserDataset(direct.options);assert.equal(result.state,'READY');assert.equal(direct.portal[0].args.allowRelay,undefined);

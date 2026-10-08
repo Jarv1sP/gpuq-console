@@ -40,21 +40,19 @@ test('one MiB personal reads omit the dashboard but retain exact result and trus
   assert.equal(stateCalls,0);assert.equal(f.service.store.jobs.length,0);f.service.state=buildState;
 });
 
-test('workspace siblings retain full state while file reads return compact authenticated results',async t=>{
+test('workspace siblings retain full state while ordinary file bodies refuse without dispatch',async t=>{
   const f=await fixture(t),buildState=f.service.state;let stateCalls=0;
   f.service.state=function(principal){stateCalls++;return buildState.call(this,principal);};
   f.respond(async()=>({path:'incoming/sample.bin',size:1,entries:[]}));
-  for(const [operation,args] of [
-    ['datasets.workspace.list',{path:'.'}],
-    ['datasets.workspace.put',{path:'incoming/sample.bin',offset:0,data:'Kg==',truncate:false}],
-    ['files.get',{path:'sample.bin',offset:0}]
-  ]){
-    const out=await f.service.invoke(f.user.token,operation,{machine:'gpu-1',...args});
-    if(operation==='files.get')assert.deepEqual(Object.keys(out).sort(),['principal','result']);
-    else assert.ok(out.state);
-    assert.equal(out.principal.userId,f.member.id);
-  }
-  assert.equal(stateCalls,2);
+  const out=await f.service.invoke(f.user.token,'datasets.workspace.list',{machine:'gpu-1',path:'.'});
+  assert.ok(out.state);assert.equal(out.principal.userId,f.member.id);
+  const beforeFile=f.calls.length;
+  await assert.rejects(f.service.invoke(f.user.token,'files.get',{machine:'gpu-1',path:'sample.bin',offset:0}),error=>error.status===410&&error.code==='CAMPUS_FILE_REQUIRED');
+  assert.equal(f.calls.length,beforeFile);
+  assert.equal(stateCalls,1);
+  const before=f.calls.length;
+  await assert.rejects(f.service.invoke(f.user.token,'datasets.workspace.put',{machine:'gpu-1',path:'incoming/sample.bin',offset:0,data:'Kg==',truncate:false}),error=>error.status===409&&error.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,before);assert.equal(stateCalls,1);
 });
 
 test('the slim reply does not bypass authentication, machine grants, path or actor validation',async t=>{

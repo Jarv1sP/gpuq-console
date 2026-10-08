@@ -8,7 +8,7 @@ import {scanLocalDataset,uploadDatasetSnapshot,DATA_CHUNK} from '../client-data-
 import {createDirectDatasetTransport,directUploadRequest,validateDirectGrant} from '../client-direct-upload.mjs';
 
 const BIG=16*DATA_CHUNK,id='12345678-1234-4234-8234-123456789012';
-const grant=extra=>({available:true,protocol:'dataset-upload-v1',endpoint:'https://node.example',certificateSha256:'a'.repeat(64),ticket:'fixture-bearer-'.repeat(3),expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:DATA_CHUNK,...extra});
+const grant=extra=>({available:true,kind:'campus-direct',protocol:'dataset-upload-v1',endpoint:'https://node.example',certificateSha256:'a'.repeat(64),ticket:'fixture-bearer-'.repeat(3),expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:DATA_CHUNK,...extra});
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 
 test('large direct-file capability is optional and strictly bounded',async()=>{

@@ -10,14 +10,15 @@ import {STARBASE_ASSETS} from '../frontend-assets.mjs';
 
 const descriptor={available:true,protocol:'dataset-upload-v1',machine:'node-a',revision:'a'.repeat(64),certificateSha256:'b'.repeat(64),routes:[
   {id:'primary',kind:'campus-direct',endpoint:'https://campus.example:18441'},
-  {id:'tail',kind:'tail-upload',endpoint:'https://tail-upload.example:18441'}]};
+  {id:'tail',kind:'tail-upload',endpoint:'https://tail-upload.example:18441'},
+  {id:'campus-alt',kind:'campus-direct',endpoint:'https://campus-alt.example:18441'}]};
 const capabilities={protocol:descriptor.protocol,machine:descriptor.machine,revision:descriptor.revision,listenerReady:true};
-const route=validateUploadRoutes(descriptor,'node-a')[1];
+const route=validateUploadRoutes(descriptor,'node-a')[2];
 const grant={...route,available:true,routeId:route.id,expiresAt:1300,chunkBytes:1048576,ticket:'private-fixture-ticket-value'};
 test('only complete fixed HTTPS descriptors are probed; identity and revision both required',async()=>{
   const calls=[];
-  assert.equal((await selectUploadRoute(descriptor,'node-a',async r=>{calls.push(r.id);return r.id==='primary'?{...capabilities,machine:'wrong'}:capabilities;})).id,'tail');
-  assert.deepEqual(calls,['primary','tail']);
+  assert.equal((await selectUploadRoute(descriptor,'node-a',async r=>{calls.push(r.id);return r.id==='primary'?{...capabilities,machine:'wrong'}:capabilities;})).id,'campus-alt');
+  assert.deepEqual(calls,['primary','campus-alt']);
   await assert.rejects(selectUploadRoute(descriptor,'node-a',async()=>({...capabilities,revision:'c'.repeat(64)})),/no ticket issued/);
   const invalid=[{...descriptor,machine:'node-b'},{...descriptor,routes:[]},{...descriptor,routes:[...descriptor.routes,...descriptor.routes]},
     {...descriptor,routes:[{...descriptor.routes[0],endpoint:'https://user:pass@evil'}]},
@@ -56,7 +57,7 @@ test('selected route binding survives renewals on both clients; changed identity
   const browser=await browserDatasetTransport({route,grant,uploadId:'fixture',now:()=>now,control:async(action,args)=>{
     controls.push({action,args});return action==='status'?{uploadId:'fixture',state:'UPLOADING'}:{...grant,routeId:'primary',expiresAt:now+300};},fetch:async()=>{throw Error('must not send');}});
   now=1295;await assert.rejects(browser.request('status'),/destination changed/);
-  assert.deepEqual(controls[1],{action:'direct-ticket',args:{routeId:'tail'}});
+  assert.deepEqual(controls[1],{action:'direct-ticket',args:{routeId:'campus-alt'}});
 });
 test('read-only route discovery bypasses transfer mutation; both static servers ship the shared validator',async()=>{
   const seen=[];const adapter=transferUploadCall(async(op,args)=>{seen.push([op,args]);return descriptor;});

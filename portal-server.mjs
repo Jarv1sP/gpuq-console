@@ -42,13 +42,18 @@ files['/cloud-import-ui.js']='cloud-import-ui.js';
 files['/community-ui.js']='community-ui.js';files['/community.css']='community.css';
 files['/maintenance-ui.js']='maintenance-ui.js';files['/maintenance.css']='maintenance.css';
 files['/task-notes-ui.js']='task-notes-ui.js';files['/submission-keys.js']='submission-keys.js';
-export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,bridge,notificationConfigPath,storageArchiveConfigPath,datasetIngressConfigPath,ociCohortMachines=[],directUploadOrigins=process.env.GPUQ_DIRECT_UPLOAD_ORIGINS||'[]'}){
+export async function createPortalServer({database,bootstrap,origin,secure=true,statusPath,bridgeSocket,personalFileBridgeSocket,bridge,notificationConfigPath,storageArchiveConfigPath,datasetIngressConfigPath,ociCohortMachines=[],directUploadOrigins=process.env.GPUQ_DIRECT_UPLOAD_ORIGINS||'[]'}){
   const uploadConnect=directUploadConnectSources(directUploadOrigins);
   await standaloneClient();
   const url=new URL(origin);const config=await loadTelegramNotifications(notificationConfigPath);
   const storage=await loadStorageArchivePolicy(storageArchiveConfigPath);
   const ingress=await loadDatasetIngressPolicy(datasetIngressConfigPath);
-  const service=await PortalService.open(database,bootstrap,statusPath,bridge||(bridgeSocket?bridgeClient(bridgeSocket):undefined),config,storage,ociCohortMachines,ingress);const rate=new Map();
+  const executor=bridgeSocket?bridgeClient(bridgeSocket):undefined;
+  const fileExecutor=personalFileBridgeSocket?bridgeClient(personalFileBridgeSocket):undefined;
+  const routedBridge=bridge||(executor&&((machine,operation,args)=>['files.direct.prepare','projects.status','projects.list'].includes(operation)
+    ?fileExecutor?fileExecutor(machine,operation,args):Promise.reject(Object.assign(Error('校园元数据执行桥尚未配对；原操作未重派。'),{status:503,code:'CAMPUS_FILE_REQUIRED'}))
+    :executor(machine,operation,args)));
+  const service=await PortalService.open(database,bootstrap,statusPath,routedBridge,config,storage,ociCohortMachines,ingress);const rate=new Map();
   const server=http.createServer(async(req,res)=>{
     const styleNonce=randomBytes(18).toString('base64');
     const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Content-Security-Policy':`default-src 'self'; script-src 'self'; style-src 'self' 'nonce-${styleNonce}'; img-src 'self' data:; connect-src 'self'${uploadConnect?' '+uploadConnect:''}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`};
@@ -67,14 +72,15 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
         if(!req.headers['content-type']?.startsWith('application/json'))return json(415,{error:'JSON required'});
         // Only our private reverse proxy can reach this server; it overwrites this header.
         const ip=req.headers['x-real-ip']||req.socket.remoteAddress;
-        const kind=path==='/api/register'?'register':path==='/api/login'?'login':'api';
-        const key=`${ip}:${kind}`;const limit=kind==='register'?5:kind==='login'?20:1200;
+        const kind=path==='/api/register'?'register':path==='/api/login'?'login':path==='/api/files/direct-check'?'file-control':'api';
+        const key=`${ip}:${kind}`;const limit=kind==='register'?5:kind==='login'?20:kind==='file-control'?24000:1200;
         if(rate.size>5000)for(const [k,v] of rate)if(v.until<Date.now())rate.delete(k);
         let bucket=rate.get(key);if(!bucket||bucket.until<Date.now()){bucket={count:0,until:Date.now()+60000};rate.set(key,bucket);}
         if(++bucket.count>limit)return json(429,{error:'请求过多，请稍后重试。'},{'Retry-After':'60'});
-        let raw='';for await(const part of req){raw+=part;if(Buffer.byteLength(raw)>1500000)return json(413,{error:'Request too large'});}
+        let raw='';for await(const part of req){raw+=part;if(Buffer.byteLength(raw)>(kind==='file-control'?8192:1500000))return json(413,{error:'Request too large'});}
         let data;try{data=JSON.parse(raw);}catch{return json(400,{error:'Invalid JSON'});}
         if(!data||typeof data!=='object'||Array.isArray(data))return json(400,{error:'Invalid JSON object'});
+        if(path==='/api/files/direct-check')return json(200,service.checkPersonalFileTicket(data));
         if(path==='/api/register'){
           let global=rate.get('register:global');if(!global||global.until<Date.now()){global={count:0,until:Date.now()+60000};rate.set('register:global',global);}
           if(++global.count>30)return json(429,{error:'注册繁忙，请稍后重试。'},{'Retry-After':'60'});
@@ -137,7 +143,7 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
       if(inventoryRequest&&(e.status===401||e.status===403)){res.writeHead(401,{...headers,'Content-Length':'0'});return res.end();}
       // Authentication failure may belong to an older request from another
       // tab. Do not expire its shared cookie; only explicit logout clears it.
-      if(e.status===401)return json(401,{error:e.message});json(e.status||400,{error:e.message?.includes('SQLITE')?'保存失败，请联系管理员。':e.message,...(['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING','MAINTENANCE_ACTIVE','SUBMISSION_REJECTED'].includes(e.code)||e.status===404&&e.code==='DATASET_ADMISSION_ABSENT'?{code:e.code}:{}),...trainingStorageErrorBody(e)});
+      if(e.status===401)return json(401,{error:e.message});json(e.status||400,{error:e.message?.includes('SQLITE')?'保存失败，请联系管理员。':e.message,...(['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING','MAINTENANCE_ACTIVE','SUBMISSION_REJECTED','CAMPUS_DATA_PLANE_REQUIRED','CAMPUS_FILE_REQUIRED'].includes(e.code)||e.status===404&&e.code==='DATASET_ADMISSION_ABSENT'?{code:e.code}:{}),...trainingStorageErrorBody(e)});
     }
   });
   server.headersTimeout=10000;server.requestTimeout=45000;server.keepAliveTimeout=5000;server.maxConnections=64;
@@ -145,7 +151,7 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   process.umask(0o077);
-  const {server}=await createPortalServer({database:process.env.DATABASE_PATH||'/data/portal.sqlite',bootstrap:process.env.BOOTSTRAP_FILE,origin:process.env.PUBLIC_ORIGIN,statusPath:process.env.GPUQ_STATUS_PATH,bridgeSocket:process.env.EXECUTOR_SOCKET,notificationConfigPath:process.env.GPUQ_NOTIFICATIONS_CONFIG,storageArchiveConfigPath:process.env.GPUQ_STORAGE_ARCHIVE_CONFIG,datasetIngressConfigPath:process.env.GPUQ_DATASET_INGRESS_CONFIG,ociCohortMachines:process.env.GPUQ_OCI_AUTO_COHORT_MACHINES?process.env.GPUQ_OCI_AUTO_COHORT_MACHINES.split(','):[],secure:true});
+  const {server}=await createPortalServer({database:process.env.DATABASE_PATH||'/data/portal.sqlite',bootstrap:process.env.BOOTSTRAP_FILE,origin:process.env.PUBLIC_ORIGIN,statusPath:process.env.GPUQ_STATUS_PATH,bridgeSocket:process.env.EXECUTOR_SOCKET,personalFileBridgeSocket:process.env.GPUQ_PERSONAL_FILE_SOCKET,notificationConfigPath:process.env.GPUQ_NOTIFICATIONS_CONFIG,storageArchiveConfigPath:process.env.GPUQ_STORAGE_ARCHIVE_CONFIG,datasetIngressConfigPath:process.env.GPUQ_DATASET_INGRESS_CONFIG,ociCohortMachines:process.env.GPUQ_OCI_AUTO_COHORT_MACHINES?process.env.GPUQ_OCI_AUTO_COHORT_MACHINES.split(','):[],secure:true});
   server.listen(Number(process.env.PORT||8080),process.env.LISTEN_HOST||'0.0.0.0',()=>console.log('GPUQ portal ready.'));
   for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>server.close(()=>process.exit(0)));
 }

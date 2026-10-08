@@ -7,9 +7,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
+import {campusTLSFixture} from './campus-upload-fixture.mjs';
+import {mockCampusFiles} from './personal-file-campus-mock.mjs';
 
 // No real portal, credentials, jobs or persistent installation is used here.
-test('native client works with a loopback mock API and Unicode Windows-style workflows', async () => {
+test('native client works with a loopback mock API and Unicode Windows-style workflows', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'gpuq-native-offline-'));
   const cliFile = fileURLToPath(new URL('../cli.mjs', import.meta.url));
   const requests = [];
@@ -20,6 +22,20 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
   const codeFiles = new Map();
   const codeUploads = new Map();
   const dataFiles = new Map();
+  const campus=await mockCampusFiles(t,async(operation,args)=>{
+    requests.push({path:'/campus',operation,args});
+    if(operation==='files.get'){
+      const data=codeFiles.get(args.path);assert.ok(data);return {path:args.path,size:data.length,offset:args.offset,data:data.subarray(args.offset,args.offset+1048576).toString('base64'),eof:args.offset+1048576>=data.length};
+    }
+    assert.equal(operation,'files.put');
+    const key=JSON.stringify([args.project,args.path]),record=codeUploads.get(key);
+    if(record){assert.equal(record.uploadId,args.uploadId);assert.equal(record.totalSize,args.totalSize);assert.equal(record.sha256,args.sha256);}
+    const previous=args.offset?codeFiles.get(args.path)||Buffer.alloc(0):Buffer.alloc(0);assert.equal(previous.length,args.offset);
+    const data=Buffer.concat([previous,Buffer.from(args.data,'base64')]);codeFiles.set(args.path,data);
+    const result={complete:args.final===true,size:data.length,sha256:createHash('sha256').update(data).digest('hex')};
+    if(args.final){assert.equal(data.length,args.totalSize);assert.equal(result.sha256,args.sha256);}
+    codeUploads.set(key,{uploadId:args.uploadId,totalSize:args.totalSize,sha256:args.sha256,size:data.length,receivedBytes:data.length,complete:args.final===true});return result;
+  });
   let manifestBytes = Buffer.alloc(0), manifest, admission, uploadState, badReceipt;
   const uploadReceipt = () => ({
     uploadId: admission.uploadId, name: admission.specification.name, state: uploadState,
@@ -29,7 +45,7 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
     storageTier: 'hdd', legacyPlacement: false,
     ...(uploadState === 'READY' ? { dataset: 'u-offline-sample', version: 'b'.repeat(64) } : {}),
   });
-  const server = createServer(async (req, res) => {
+  const tls = await campusTLSFixture(async (req, res) => {
     try {
       let raw = '';
       for await (const part of req) raw += part;
@@ -43,7 +59,7 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
         return;
       }
       assert.equal(req.url, '/api/call');
-      assert.equal(req.headers.authorization, 'Bearer ' + 'a'.repeat(64));
+      assert.equal(req.headers.authorization, req.campusDirect?'Bearer fixture-campus-ticket-only':'Bearer ' + 'a'.repeat(64));
       const { operation, args = {} } = body;
       assert.ok(!operation.startsWith('jobs.'), 'Native file and dataset workflows never call jobs');
       if (operation.startsWith('datasets.upload.')) {
@@ -66,25 +82,12 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
           if (args.uploadId) assert.equal(record.uploadId,args.uploadId);
           result = { protocol: 2, ...record, path: args.path, state: record.complete ? 'COMPLETE' : 'UPLOADING', resumable: true, completionPending: false };
         }
-      } else if (operation === 'files.put') {
-        const key = JSON.stringify([args.project,args.path]),record = codeUploads.get(key);
-        if (args.project && record) {
-          assert.equal(record.uploadId,args.uploadId);assert.equal(record.totalSize,args.totalSize);assert.equal(record.sha256,args.sha256);
-        }
-        const previous = args.offset ? codeFiles.get(args.path) || Buffer.alloc(0) : Buffer.alloc(0);
-        assert.equal(previous.length, args.offset);
-        const data = Buffer.concat([previous, Buffer.from(args.data, 'base64')]);
-        codeFiles.set(args.path, data);
-        result = { complete: args.final === true, size: data.length, sha256: createHash('sha256').update(data).digest('hex'), executable: args.executable };
-        if (args.project) {
-          if (args.final) { assert.equal(data.length,args.totalSize);assert.equal(result.sha256,args.sha256); }
-          codeUploads.set(key,{uploadId:args.uploadId,totalSize:args.totalSize,sha256:args.sha256,size:data.length,receivedBytes:data.length,complete:args.final===true});
-        }
+      } else if (operation === 'files.direct-ticket') result=await campus.ticket(args);
+      else if (operation === 'files.put') {
+        assert.fail('No project file byte request may use /api/call');
       } else if (operation === 'files.list') result = { entries: [...codeFiles].map(([name, data]) => ({ name, type: 'file', size: data.length })) };
       else if (operation === 'files.get') {
-        const data = codeFiles.get(args.path);
-        assert.ok(data, 'Download only the fake uploaded code');
-        result = { path:args.path,size:data.length,offset:args.offset,data: data.subarray(args.offset).toString('base64'), eof: true };
+        assert.fail('No project file byte request may use /api/call');
       } else if (operation === 'datasets.upload.admission.create') {
         assert.deepEqual(Object.keys(args).sort(), ['machine', 'key', ...specificationFields].sort());
         assert.match(args.key, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-8[a-f0-9]{3}-[a-f0-9]{12}$/);
@@ -147,7 +150,8 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
       else throw new Error(`Unexpected API operation: ${operation}`);
       res.end(JSON.stringify({ result }));
     } catch (error) { res.statusCode = 400; res.end(JSON.stringify({ error: error.message })); }
-  });
+  },{machine:'offline-node'});
+  const server = createServer(tls.control);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const sessionFile = join(dir, '个人 session', 'cache.json');
@@ -217,9 +221,11 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
     await ok(['logout']);
     assert.equal(requests.filter(request => request.operation?.startsWith('jobs.')).length, 0, 'Exactly zero jobs calls');
     assert.ok(requests.every(request => !request.operation?.startsWith('jobs.')), 'No task submission or execution');
+    assert.equal(requests.some(request=>request.path==='/api/call'&&['files.put','files.get'].includes(request.operation)),false);
   } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
+    await tls.close();assert.equal(tls.counters.portalFileRequests,0);
     await rm(dir, { recursive: true, force: true });
   }
 });

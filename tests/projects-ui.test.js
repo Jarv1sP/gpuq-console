@@ -81,11 +81,11 @@ test('zero-byte project upload still finalizes; retry keeps the original upload 
   assert.equal(calls.length,2);assert.equal(calls[0].uploadId,calls[1].uploadId);
   assert.ok(calls.every(call=>call.final&&call.totalSize===0&&call.offset===0&&call.data===''));
 });
-test('project upload rejects output writes, oversized files and inconsistent length before any chunk',async()=>{
+test('project upload rejects output writes, unsafe sizes and inconsistent slice length before any chunk',async()=>{
   let sent=0;const send=async()=>sent++,context={machine:'gpu-1',project:'vision',area:'code',path:'x'};
   await assert.rejects(uploadProjectFile(new Blob(['x']),{...context,area:'output'},send),/开发草稿/);
-  await assert.rejects(uploadProjectFile({size:100*1024*1024+1},context,send),/100 MiB/);
-  await assert.rejects(uploadProjectFile({size:1,arrayBuffer:async()=>new ArrayBuffer(0)},context,send),/长度/);
+  await assert.rejects(uploadProjectFile({size:Number.MAX_SAFE_INTEGER+1,slice:()=>new Blob([])},context,send),/长度/);
+  await assert.rejects(uploadProjectFile({size:1,slice:()=>new Blob([])},context,send),/读取不完整/);
   assert.equal(sent,0);
 });
 test('project upload cannot report success without an exact final verified receipt',async()=>{
@@ -161,4 +161,20 @@ test('project job table preserves full identity and escapes dynamic fields inclu
   const html=taskTable([{id:'job" onmouseover="bad',name:'<img src=x>',username:'<owner>',machine:'gpu-1',cards:1,assignedIndices:['<bad>'],state:'SUCCEEDED',project:'<project>',release,error:'<error>'}]);
   assert.doesNotMatch(html,/<img|<owner>|<project>|<bad>|<error>|data-job-output="job" onmouseover=/);
   assert.match(html,/data-job-output=/);assert.ok(html.includes(release));assert.match(html,/取消<\/button>/);
+});
+
+
+test('browser project upload warns but permits >100MiB with bounded slices and original identity',async()=>{
+ const size=100*1024**2+3,reads=[],puts=[],warnings=[],intent={},context={machine:'gpu-1',project:'vision',area:'code',path:'large.bin'};
+ const file={size,arrayBuffer(){throw Error('unbounded read');},slice(start,end){end=Math.min(end,size);reads.push(end-start);assert(end-start<=1024**2);return new Blob([new Uint8Array(end-start)]);}};
+ const result=await uploadProjectFile(file,context,async args=>{puts.push({id:args.uploadId,offset:args.offset,size:Buffer.from(args.data,'base64').length});return {complete:args.final,size:args.offset+Buffer.from(args.data,'base64').length,sha256:args.sha256};},undefined,{...absentUpload,requireRecovery:true,intent,onWarning:value=>warnings.push(value)});
+ assert.equal(result.complete,true);assert.deepEqual(warnings,[size]);assert(puts.every(row=>row.id===intent.uploadId&&row.size<=1024**2));assert.equal(puts.at(-1).offset+puts.at(-1).size,size);assert.equal(reads.length,202);
+});
+test('strict campus UI keeps original UUID after unavailable ticket and refuses different local content',async()=>{
+ const intent={},context={machine:'gpu-1',project:'vision',area:'code',path:'x'};let sent=0;
+ const options={...absentUpload,requireRecovery:true,intent};
+ await assert.rejects(uploadProjectFile(new Blob(['abc']),context,async()=>{sent++;throw Error('campus unavailable');},undefined,options));const id=intent.uploadId;assert.match(id,/^[a-f0-9-]{36}$/);
+ await uploadProjectFile(new Blob(['abc']),context,async args=>{assert.equal(args.uploadId,id);sent++;return {complete:true,size:3,sha256:args.sha256};},undefined,options);
+ await assert.rejects(uploadProjectFile(new Blob(['abd']),context,async()=>sent++,undefined,options),/身份已改变/);assert.equal(sent,2);
+ let calls=0;await assert.rejects(uploadProjectFile(new Blob(['a']),context,async()=>calls++,undefined,{requireRecovery:true,inspect:async()=>{throw Object.assign(Error('not found'),{status:404});}}),/未发送文件/);assert.equal(calls,0);
 });

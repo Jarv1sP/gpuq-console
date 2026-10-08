@@ -243,7 +243,12 @@ test('personal upload API is member-accessible and always derives an unprivilege
     await f.grant();const key=randomUUID();
     const requests={begin:{name:'my-data',key,manifestBytes:99,manifestSha256:version,totalBytes:64,entries:1},manifest:{uploadId:key,offset:0,data:Buffer.from('{}').toString('base64')},seal:{uploadId:key},status:{uploadId:key,path:'a/b.txt'},chunk:{uploadId:key,path:'a/b.txt',offset:0,data:Buffer.alloc(1024*1024).toString('base64')},commit:{uploadId:key},discard:{uploadId:key}};
     for(const [action,args] of Object.entries(requests)){
+      const count=f.calls.length;
       const response=await f.post('datasets.upload.'+action,{machine:'gpu-1',...args});
+      if(['manifest','chunk'].includes(action)){
+        assert.equal(response.status,409);assert.equal(response.data.code,'CAMPUS_DATA_PLANE_REQUIRED');
+        assert.equal(f.calls.length,count,'legacy file relay must not reach any node');continue;
+      }
       assert.equal(response.status,200,JSON.stringify(response.data));
       assert.deepEqual(f.calls.at(-1),{machine:'gpu-1',operation:'datasets.upload.'+action,args:{...args,userId:f.member.id,hostAdmin:false}});
     }
@@ -285,7 +290,12 @@ test('personal data workspace is member-accessible and administrator calls remai
   const f=await fixture();try{
     await f.grant();const key=randomUUID(),requests={list:{path:'.'},get:{path:'incoming/a.zip',offset:0},put:{path:'incoming/a.zip',offset:0,data:'YQ==',truncate:false},publish:{path:'prepared',name:'mine',key},status:{operationId:key}};
     for(const [action,args] of Object.entries(requests)){
-      const response=await f.post('datasets.workspace.'+action,{machine:'gpu-1',...args});assert.equal(response.status,200,JSON.stringify(response.data));
+      const count=f.calls.length,response=await f.post('datasets.workspace.'+action,{machine:'gpu-1',...args});
+      if(action==='put'){
+        assert.equal(response.status,409);assert.equal(response.data.code,'CAMPUS_DATA_PLANE_REQUIRED');
+        assert.equal(f.calls.length,count,'workspace has no direct adapter, so it must not relay');continue;
+      }
+      assert.equal(response.status,200,JSON.stringify(response.data));
       assert.deepEqual(f.calls.at(-1),{machine:'gpu-1',operation:'datasets.workspace.'+action,args:{...args,userId:f.member.id,hostAdmin:false}});
     }
     assert.equal((await f.post('datasets.workspace.list',{machine:'gpu-1'},f.admin.token)).status,200);assert.equal(f.calls.at(-1).args.userId,'builtin-admin');assert.equal(f.calls.at(-1).args.hostAdmin,false);
@@ -310,7 +320,8 @@ test('personal data workspace rejects owner, role, host paths, malformed chunks 
     assert.equal((await f.post('datasets.workspace.publish',{machine:'gpu-1',path:'prepared',name:'../mine',key})).status,400);
     assert.equal((await f.post('datasets.workspace.status',{machine:'gpu-1',operationId:'bad'})).status,400);
     assert.equal(f.calls.length,0);
-    assert.equal((await f.post('datasets.workspace.put',{...base,offset:100*1024**3-1})).status,200);
+    assert.equal((await f.post('datasets.workspace.put',{...base,offset:100*1024**3-1})).status,409);
+    assert.equal(f.calls.length,0);
     await f.grant(0,{});const before=f.calls.length;
     for(const [action,args] of Object.entries(requests))assert.equal((await f.post('datasets.workspace.'+action,{machine:'gpu-1',...args})).status,403);
     assert.equal(f.calls.length,before);
@@ -429,6 +440,118 @@ test('readiness transport failures are unavailable, not falsely reported as miss
     assert.equal(f.service.store.jobs.length,0);assert.equal(f.calls.some(c=>c.operation==='sync'),false);
     const status=await f.post('datasets.status',{machine:'gpu-1',...reference});
     assert.notEqual(status.status,200);assert.equal(status.data.result,undefined);
+  }finally{await f.close();}
+});
+
+test('opt-in preparation preserves unknown source reads instead of declaring an unavailable catalog empty',async()=>{
+  for(const status of [undefined,504]){
+    const f=await fixture();try{
+      await f.grant();const key=randomUUID();
+      f.fail(Object.assign(Error('private node query failed'),{status}));
+      const result=await f.submit({key,prepareData:true});
+      assert.equal(result.status,503,JSON.stringify(result.data));
+      assert.equal(result.data.code,'SUBMISSION_REJECTED');
+      assert.doesNotMatch(result.data.error,/请先.*导入|private/);
+      await f.settle();assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+      assert.equal(f.calls.some(c=>['datasets.prepare','transfers.create','sync'].includes(c.operation)),false);
+      assert.equal(f.service.db.prepare("SELECT count(*) AS n FROM audit WHERE operation='jobs.submit' AND outcome='reserved'").get().n,0);
+      // Once a normal read confirms READY, the original key is still free.
+      f.fail(null);const ready=await f.post('datasets.status',{machine:'gpu-1',...reference});
+      assert.equal(ready.data.result.state,'READY');
+      const recovered=await f.submit({key,prepareData:true});assert.equal(recovered.status,200,JSON.stringify(recovered.data));
+      assert.equal(f.service.store.jobs.length,1);assert.equal(f.service.store.jobs[0].key,key);
+    }finally{await f.close();}
+  }
+});
+
+test('unconfirmed local reads retain a verified owner-bound remote preparation source',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample',Object.assign(Error('query timeout'),{status:504}));
+    const bridge=f.service.bridge;
+    f.service.bridge=async(machine,operation,args)=>operation==='datasets.list'?{
+      datasets:machine==='gpu-2'?[{dataset:'sample',ownerIds:[f.member.id],versions:[{version,state:'READY',canPrepare:true}]}]:[],
+    }:bridge(machine,operation,args);
+    f.service.transferCall=async(_who,operation)=>{
+      assert.equal(operation,'transfers.capabilities');return {enabled:true,sources:['gpu-2']};
+    };
+    const result=await f.submit({prepareData:true});assert.equal(result.status,200,JSON.stringify(result.data));
+    assert.equal(result.data.result.state,'PREPARING_DATA');
+    assert.equal(f.service.store.jobs.length,1);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+    await f.settle();assert.equal(f.calls.some(c=>c.operation==='sync'),false);
+  }finally{await f.close();}
+});
+
+test('partial metadata with canUse true cannot turn an unknown local read into confirmed missing data',async()=>{
+  const f=await fixture();try{
+    await f.grant();const bridge=f.service.bridge;
+    f.service.bridge=async(machine,operation,args)=>{
+      if(machine==='gpu-1'&&['datasets.status','datasets.list'].includes(operation))throw Object.assign(Error('query timeout'),{status:504});
+      if(operation==='datasets.list')return {datasets:machine==='gpu-2'?[{
+        dataset:'sample',ownerIds:[f.member.id],versions:[{version,state:'READY',canPrepare:true}],
+      }]:[]};
+      return bridge(machine,operation,args);
+    };
+    const catalog=await f.post('datasets.catalog',{machine:'gpu-1'});
+    const selected=catalog.data.result.datasets.find(d=>d.dataset==='sample').versions[0];
+    assert.equal(catalog.data.result.partial,true);assert.equal(selected.state,'UNKNOWN');
+    assert.equal(selected.canUse,true);assert.equal(selected.canPrepare,false);
+    const result=await f.submit({prepareData:true});assert.equal(result.status,503,JSON.stringify(result.data));
+    assert.doesNotMatch(result.data.error,/请先.*导入/);
+    await f.settle();assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+    assert.equal(f.calls.some(c=>['datasets.prepare','transfers.create','sync'].includes(c.operation)),false);
+  }finally{await f.close();}
+});
+
+test('an unknown physical-replica receipt is unavailable until every logical input has a verified source',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.list({datasets:[]});
+    const second={dataset:'second',version:otherVersion};
+    f.service.resolveDataset=async(_owner,_machine,ref)=>ref.dataset===reference.dataset?
+      {status:{...ref,state:'UNKNOWN'},reference:null}:{status:{...ref,state:'READY'},reference:ref};
+    const result=await f.submit({prepareData:true,datasets:[reference,second]});
+    assert.equal(result.status,503,JSON.stringify(result.data));assert.doesNotMatch(result.data.error,/请先.*导入/);
+    await f.settle();assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+    assert.equal(f.calls.some(c=>['datasets.prepare','transfers.create','sync','storage.training.plan'].includes(c.operation)),false);
+  }finally{await f.close();}
+});
+
+test('confirmed non-READY without any preparation source still refuses 409 with zero reservation',async()=>{
+  const f=await fixture();try{
+    await f.grant();f.states.set('gpu-1:sample','REGISTERED');f.list({datasets:[]});
+    const result=await f.submit({prepareData:true});assert.equal(result.status,409,JSON.stringify(result.data));
+    assert.match(result.data.error,/没有可用来源/);
+    await f.settle();assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+    assert.equal(f.calls.some(c=>['datasets.prepare','transfers.create','sync'].includes(c.operation)),false);
+  }finally{await f.close();}
+});
+
+test('opt-in preparation preserves explicit owner denial before catalog or GPU admission',async()=>{
+  for(const denial of [Object.assign(Error('denied'),{status:403}),Error('dataset owner authorization required')]){
+    const f=await fixture();try{
+      await f.grant();f.fail(denial);
+      const result=await f.submit({prepareData:true});assert.equal(result.status,403,JSON.stringify(result.data));
+      await f.settle();assert.equal(f.service.store.jobs.length,0);assert.equal(usage(f.service.store.jobs,f.member.id),0);
+      assert.equal(f.calls.some(c=>['datasets.list','datasets.prepare','transfers.create','sync'].includes(c.operation)),false);
+    }finally{await f.close();}
+  }
+});
+
+test('confirmed logical warehouse READY binds the exact physical cache for submission and first dispatch',async()=>{
+  const f=await fixture();try{
+    await f.grant();const physical='private-cache',bridge=f.service.bridge;
+    f.service.bridge=async(machine,operation,args)=>{
+      if(operation==='datasets.status')return {...reference,state:'READY',remainingBytes:0,warehouseReady:true,
+        warehouseCanPrepare:true,canPrepare:true,storageReference:{dataset:physical,version}};
+      if(operation==='datasets.list')assert.fail('confirmed local READY does not need source discovery');
+      return bridge(machine,operation,args);
+    };
+    const result=await f.submit({prepareData:true});assert.equal(result.status,200,JSON.stringify(result.data));
+    assert.deepEqual(result.data.result.datasets,[reference]);
+    assert.deepEqual(f.service.store.jobs[0].spec.datasets,[{dataset:physical,version,mountAs:reference.dataset}]);
+    await f.settle();
+    assert.deepEqual(f.calls.find(c=>c.operation==='sync').args.job.datasets,[{dataset:physical,version,mountAs:reference.dataset}]);
+    assert.ok(f.calls.filter(c=>c.operation==='datasets.training.status').every(c=>c.args.dataset===physical&&c.args.version===version&&c.args.hostAdmin===false&&c.args.userId===f.member.id));
+    assert.equal(f.calls.some(c=>['datasets.prepare','transfers.create'].includes(c.operation)),false);
   }finally{await f.close();}
 });
 

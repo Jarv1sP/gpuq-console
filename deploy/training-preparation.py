@@ -129,6 +129,139 @@ def admission(node, binding, physical=None):
     return result
 
 
+def project_validate(node, args):
+    if not isinstance(args,dict) or set(args)!={'job','planRequest','preparation','operation','args'}:
+        raise ValueError('Invalid private project preparation envelope')
+    job,request,prep,call=(args[key] for key in ('job','planRequest','preparation','args'))
+    node.validate_job(job,readonly=True)
+    load(node,'training-storage').validate(request)
+    if (not isinstance(prep,dict) or set(prep)!={'protocol','id','kind','sourceMachine','targetMachine','reference'}
+            or type(prep['protocol']) is not int or prep['protocol']!=1 or prep['kind']!='project'
+            or not isinstance(prep['id'],str) or not UUID.fullmatch(prep['id'])
+            or any(not isinstance(prep[key],str) or not ID.fullmatch(prep[key]) for key in ('sourceMachine','targetMachine'))
+            or prep['sourceMachine']==prep['targetMachine']
+            or node.CONFIG.get('machine') not in (prep['sourceMachine'],prep['targetMachine'])
+            or not isinstance(prep['reference'],dict) or set(prep['reference'])!={'project','release'}
+            or any(prep['reference'][key]!=job.get(key) or request.get(key)!=job.get(key) for key in ('project','release'))
+            or request['userId']!=job['userId'] or request['hostAdmin'] is not False
+            or request['datasetReadMode']!=node.dataset_read_mode(job)
+            or request['projectFootprint']['sourceMachine']!=prep['sourceMachine']
+            or not isinstance(call,dict) or call.get('id')!=prep['id'] or call.get('userId')!=job['userId']):
+        raise ValueError('Project preparation fixed job/source/target changed')
+    operation=args['operation'];machine=node.CONFIG['machine'];fields={'id','userId'}
+    if operation=='projects.copy.prepare':
+        fields|={'project','release','targetMachine'}
+        if machine!=prep['sourceMachine'] or call.get('targetMachine')!=prep['targetMachine']:
+            raise ValueError('Project export target changed')
+    elif operation=='projects.copy.start':
+        fields|={'project','release','sourceMachine','source'}
+        if machine!=prep['targetMachine'] or call.get('sourceMachine')!=prep['sourceMachine']:
+            raise ValueError('Project import source changed')
+    elif operation=='projects.copy.revoke':
+        if machine!=prep['sourceMachine']:raise ValueError('Only the original source can be fenced')
+    elif operation not in ('projects.copy.status','projects.copy.cancel','projects.copy.release'):
+        raise ValueError('Unsupported private project preparation operation')
+    if set(call)!=fields or any(call.get(key)!=job[key] for key in ('project','release') if key in fields):
+        raise ValueError('Project preparation operation identity changed')
+    return {'protocol':1,'job':copy.deepcopy(job),'planRequest':copy.deepcopy(request),
+            'preparation':copy.deepcopy(prep),'runtime':str(node.HERE.resolve())}
+
+
+def project_worker_binding(node,copies,key):
+    value=read(copies.path(key,'.training.json'))
+    checked=project_validate(node,{'job':value.get('job'),'planRequest':value.get('planRequest'),
+        'preparation':value.get('preparation'),'operation':'projects.copy.status',
+        'args':{'id':key,'userId':value.get('job',{}).get('userId')}})
+    if value!=checked:raise ValueError('Project preparation runtime/binding changed')
+    spec=copies.load(key);prep=checked['preparation']
+    role='export' if node.CONFIG['machine']==prep['sourceMachine'] else 'import'
+    if (spec['id']!=key or spec['userId']!=checked['job']['userId'] or spec['role']!=role
+            or any(spec[key]!=prep['reference'][key] for key in ('project','release'))
+            or spec.get('targetMachine' if role=='export' else 'sourceMachine')!=prep['targetMachine' if role=='export' else 'sourceMachine']):
+        raise ValueError('Project preparation original journal changed')
+    payload={key:value for key,value in spec.items() if key not in ('id','digest','attempt','createdAt')}
+    fields={'userId','project','release','role'}|({'targetMachine'} if role=='export' else {'sourceMachine','source'})
+    if set(payload)!=fields or spec['digest']!=copies.t_digest(payload):raise ValueError('Project copy immutable digest changed')
+    return checked
+
+
+def project_admission(node,copies,binding,spec=None):
+    prep=binding['preparation'];request=binding['planRequest'];machine=node.CONFIG['machine']
+    peer=prep['targetMachine'] if machine==prep['sourceMachine'] else prep['sourceMachine']
+    client=load(node,'transfer-jobs').PeerClient(node.CONFIG.get('transferPeers',{}).get(peer),{})
+    try:client.campus_route()
+    finally:client.close()
+    jobs=node.ROOT/'jobs'
+    if os.path.lexists(jobs/(binding['job']['id']+'.canceled')):raise ValueError('Training job is canceled')
+    def own_copy(current):
+        if spec is None or current!=spec:return False
+        return project_worker_binding(node,copies,prep['id'])==binding
+    helper=load(node,'training-storage')
+    if machine==prep['sourceMachine']:
+        result=copies.probe({'userId':binding['job']['userId'],**prep['reference']})
+        footprint=request['projectFootprint']
+        if (result.get('releaseReady') is not True or any(result.get(key)!=footprint[key]
+                for key in ('image','architecture','codeBytes','codeEntries','imageUnpackedBytes','imageEntries'))):
+            raise ValueError('Project fixed source footprint changed')
+        # Local export spends the same project device as owner files and may
+        # share it with cache reservations. Derive the exact private peak here,
+        # then reuse the ordinary volume/inode/quota snapshot; never raw free
+        # bytes that would silently ignore in-flight reservations.
+        required=footprint['codeBytes']+footprint['codeEntries']*4096+footprint['imageUnpackedBytes']*11//10+16*1024**2+65536
+        source_request={**copy.deepcopy(request),'datasets':[],'datasetFootprints':[],'datasetReadMode':'cache'}
+        result=helper.plan(node,source_request,_existing_project_copy=own_copy if spec is not None else None,
+                           _project_extra=(required,footprint['codeEntries']+32))
+    else:
+        result=helper.plan(node,copy.deepcopy(request),_existing_project_copy=own_copy if spec is not None else None)
+    if result.get('fits') is not True or result.get('noReclaim') is not True:
+        raise ValueError('Project training capacity changed; nothing reclaimed')
+
+
+def project_missing_guard(copies,binding):
+    prep=binding['preparation']
+    # Missing metadata alone does not prove that an original one-shot worker
+    # never existed. Check before minting a receipt as well as after a crash.
+    if (any(os.path.lexists(copies.path(prep['id'],suffix)) for suffix in
+            ('.grant.json','.worker.lock','.result.json','.progress.json','.cleanup.json'))
+            or any(copies.root.glob(prep['id']+'.started-*'))
+            or copies.activity(copies.unit(prep['id'],1)) is not False):
+        raise ValueError('Missing project journal has unconfirmed original worker history')
+    owner=copies.store._identity(binding['job']['userId'],prep['reference']['project'])
+    root=copies.store.path/owner
+    paths=(root/'.portable-imports'/prep['id'],
+           root/'.portable-exports'/prep['reference']['project']/('.stage-'+prep['id']))
+    if any(os.path.lexists(path) for path in paths):
+        raise ValueError('Missing project journal has unconfirmed transport staging')
+
+
+def project_dispatch(node,args):
+    binding=project_validate(node,args);prep=binding['preparation'];operation=args['operation'];copies=node.project_copies()
+    jobs=node.ROOT/'jobs';jobs.mkdir(mode=0o700,exist_ok=True)
+    with lock(jobs/(binding['job']['id']+'.lock')),copies.lock(prep['id'],'.training.lock'):
+        sidecar=copies.path(prep['id'],'.training.json')
+        try:prior=read(sidecar)
+        except FileNotFoundError:
+            if (any(os.path.lexists(copies.path(prep['id'],suffix)) for suffix in
+                    ('.json','.cancel','.revoked','.grant.json','.lock','.ticket.lock','.worker.lock','.result.json','.progress.json','.cleanup.json'))
+                    or any(copies.root.glob(prep['id']+'.started-*'))):
+                raise ValueError('Legacy project copy cannot acquire training admission')
+            if operation not in ('projects.copy.prepare','projects.copy.start','projects.copy.cancel','projects.copy.revoke'):
+                raise ValueError('Missing original training project receipt')
+            project_missing_guard(copies,binding)
+            if operation in ('projects.copy.prepare','projects.copy.start'):project_admission(node,copies,binding)
+            node.atomic_json(sidecar,binding)
+        else:
+            if prior!=binding:raise ValueError('Project preparation immutable context changed')
+        try:spec=copies.load(prep['id'])
+        except FileNotFoundError:
+            spec=None
+            project_missing_guard(copies,binding)
+        if operation in ('projects.copy.prepare','projects.copy.start'):
+            if spec is None:project_admission(node,copies,binding)
+            else:project_worker_binding(node,copies,prep['id'])
+        return copies.process(operation,args['args'],training=True)
+
+
 def read(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:

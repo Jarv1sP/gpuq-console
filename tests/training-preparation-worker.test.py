@@ -28,6 +28,11 @@ class TrainingTransfer(unittest.TestCase):
         self.addCleanup(self.f.tearDown)
         self.addCleanup(self.f.fixture.doCleanups)
         self.node,self.jobs=self.f.target,self.f.dst
+        # The real pinned local TLS fixture is not a campus interface. Keep its
+        # route as explicit fake kernel metadata; campus rejection/route-change
+        # tests exercise the real verifier separately, never production peers.
+        self.route_patch=patch.object(F.T.PeerClient,'campus_route',return_value={'device':'fixture-physical','source':'127.0.0.1','gateway':None})
+        self.route_patch.start();self.addCleanup(self.route_patch.stop)
         self.node.transfers=lambda:self.jobs
         for name in ('training-preparation.py','training-storage.py'):
             shutil.copy2(DEPLOY/name,self.node.HERE/name)
@@ -86,6 +91,12 @@ class TrainingTransfer(unittest.TestCase):
                 patch.object(self.jobs,'upload',side_effect=AssertionError('no target payload'))):
             self.assertEqual(self.jobs.worker(self.f.key,1,require_training=True),1)
         self.assertIn('Missing training receipt',self.jobs.status(self.f.control())['error'])
+
+    def test_marked_sidecar_cannot_use_legacy_worker_entry(self):
+        self.call('transfers.start',self.f.args)
+        with patch.object(F.T.PeerClient,'call',side_effect=AssertionError('no source RPC')):
+            self.assertEqual(self.jobs.worker(self.f.key,1),1)
+        self.assertIn('cannot use a legacy worker',self.jobs.status(self.f.control())['error'])
 
     def test_mismatch_owner_reference_runtime_and_legacy_journal_rejected(self):
         for mutate in (lambda a:a['args'].update(userId='demo-user-2'),lambda a:a['preparation'].update(targetMachine='gpu-3'),

@@ -23,8 +23,11 @@ gpuctl project publish
 gpuctl project status
 gpuctl run -g 1 -- python train.py --output /outputs
 gpuctl run --sync -g 1 -- python train.py  上传、发布并固定本次版本
+gpuctl run --machine auto -g 1 -- python train.py --output /outputs
+AUTO 检查显卡与缓存空间；指定机器空间不足会拒绝，不偷偷换机。
 gpuctl jobs / logs JOB / cancel JOB
 gpuctl watch JOB
+gpuctl completion JOB --json  核实完成后及时下载结果到自己的电脑
 gpuctl diagnostics JOB --json
 gpuctl files --job JOB_ID
 gpuctl pull --job JOB_ID model.pt ./model.pt
@@ -37,6 +40,7 @@ gpuctl data prepare NAME@VERSION
 gpuctl data status OPERATION_ID
 gpuctl data status NAME@VERSION
 gpuctl run -g 1 --data NAME@VERSION -- python train.py --data /data2/NAME --output /outputs
+加 --data-read warehouse 可在支持且持有就绪数据的仓库节点直读；默认 cache。
 
 代码、个人权重和结果属于项目；数据集只放完整训练/评测样本。
 直传入口须由平台明确提供且实际可达；失败不自动改走 VPS。

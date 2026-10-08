@@ -99,3 +99,17 @@ test('an external edit during the final disk write cannot produce success or cle
   assert.equal(JSON.parse(await readFile(f.destination+'.gpuctl-download.json','utf8')).offset,4);
  }finally{prototype.write=original;}
 });
+
+
+test('>100GiB safe file metadata and private resume receipt are allowed with warning and bounded bytes',async t=>{
+ const f=await fixture(t),size=100*1024**3+1,warnings=[],before=Buffer.from('ab');let count=0;
+ const call=async(operation,args)=>{count++;if(count===2||count===3)throw Error('stop after bounded prefix');return {result:{protocol:2,fingerprint,path:args.path,size,offset:args.offset,data:before.toString('base64'),eof:false}};};
+ await assert.rejects(downloadFile(call,{...f.options,onWarning:value=>warnings.push(value)}),/stop after/);assert.deepEqual(warnings,[size]);assert.deepEqual(await readFile(f.destination),before);
+ const receipt=JSON.parse(await readFile(f.destination+'.gpuctl-download.json','utf8'));assert.equal(receipt.size,size);assert.equal(receipt.offset,2);
+ await assert.rejects(downloadFile(call,{...f.options,onWarning:()=>{}}),/stop after/);assert.equal(count,3,'large private receipt passed validation and requested only its saved prefix offset');assert.deepEqual(await readFile(f.destination),before);
+});
+test('total safe integer and raw chunk boundaries stay strict after removal of the total-byte cap',async t=>{
+ for(const override of [{size:Number.MAX_SAFE_INTEGER+1},{size:-1},{size:Infinity},{size:1024**2+2,data:Buffer.alloc(1024**2+2).toString('base64'),eof:true}]){
+  const f=await fixture(t);f.override=override;await assert.rejects(downloadFile(f.call,f.options),/Invalid|size/);await assert.rejects(lstat(f.destination),error=>error.code==='ENOENT');
+ }
+});

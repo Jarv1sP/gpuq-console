@@ -12,7 +12,7 @@ import {uploadDatasetSnapshot,putWorkspaceData} from '../client-data-upload.mjs'
 
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const id='12345678-1234-4234-8234-123456789012';
-const grant=(extra={})=>({available:true,protocol:'dataset-upload-v1',endpoint:'https://192.168.77.100:18444',certificateSha256:'a'.repeat(64),ticket:'test-only-bearer-'.repeat(3),expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:1048576,...extra});
+const grant=(extra={})=>({available:true,kind:'campus-direct',protocol:'dataset-upload-v1',endpoint:'https://192.168.77.100:18444',certificateSha256:'a'.repeat(64),ticket:'test-only-bearer-'.repeat(3),expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:1048576,...extra});
 
 test('direct grants require a bounded, pinned HTTPS origin and short expiration',()=>{
   assert.equal(validateDirectGrant(grant()).protocol,'dataset-upload-v1');
@@ -44,20 +44,21 @@ function snapshot(size=1){const content=Buffer.from('x'),manifest=Buffer.from(JS
 // Transport fixtures resume an original persisted legacy upload key.
 const keyStore={get:()=>id,set:async()=>{}};
 
-test('large workspace files require relay consent before opening or sending bytes',async()=>{
-  let opened=false,called=false;
-  const filesystem={lstat:async()=>({isFile:()=>true,isSymbolicLink:()=>false,nlink:1n,size:BigInt(RELAY_LIMIT_BYTES)+1n}),open:async()=>{opened=true;throw Error('opening permitted');}};
-  const call=async()=>{called=true;};
-  await assert.rejects(putWorkspaceData(call,'node','archive.zip','archive.zip',false,filesystem),/--via relay/);
-  assert.equal(opened,false);assert.equal(called,false);
-  await assert.rejects(putWorkspaceData(call,'node','archive.zip','archive.zip',false,{...filesystem,via:'relay'}),/opening permitted/);
-  assert.equal(opened,true);assert.equal(called,false);
+test('workspace files have no relay escape hatch before a verified campus data plane exists',async()=>{
+  for(const via of ['auto','direct','campus','relay','tail']){
+    let examined=false,opened=false,called=false;
+    const filesystem={lstat:async()=>{examined=true;throw Error('must not stat');},open:async()=>{opened=true;throw Error('must not open');},via};
+    await assert.rejects(putWorkspaceData(async()=>{called=true;},'node','archive.zip','archive.zip',false,filesystem),/no verified campus data plane/);
+    assert.equal(examined,false);assert.equal(opened,false);assert.equal(called,false);
+  }
 });
 
-test('large legacy-server uploads require explicit relay consent before any file bytes',async()=>{
-  const calls=[];const call=async(op,args)=>{calls.push({op,args});return {result:{uploadId:id,state:'RECEIVING_MANIFEST',manifestOffset:0}};};
-  await assert.rejects(uploadDatasetSnapshot(call,{machine:'node',name:'data',userId:'u',scan:snapshot(RELAY_LIMIT_BYTES+1),keyStore,progress:()=>{}}),/--via relay/);
-  assert.deepEqual(calls.map(x=>x.op),['datasets.upload.begin']);
+test('every legacy upload size refuses missing campus ingress and retains its original UUID',async()=>{
+  for(const size of [0,1,RELAY_LIMIT_BYTES,RELAY_LIMIT_BYTES+1])for(const uploadTransport of [undefined,{directAvailable:false,reason:'not-configured'},{directAvailable:false,reason:'disabled'}]){
+    const calls=[];const call=async(op,args)=>{calls.push({op,args});return {result:{uploadId:id,state:'RECEIVING_MANIFEST',manifestOffset:0,uploadTransport}};};
+    await assert.rejects(uploadDatasetSnapshot(call,{machine:'node',name:'data',userId:'u',scan:snapshot(size),keyStore,progress:()=>{}}),error=>error.uploadId===id&&/VPS relay is disabled/.test(error.message));
+    assert.deepEqual(calls.map(x=>x.op),['datasets.upload.begin']);assert.equal(calls.some(x=>x.args.data||x.args.bytes||x.args.allowRelay),false);
+  }
 });
 
 test('direct upload sends raw file/manifest bytes only to the node, control stays on portal',async()=>{
@@ -90,11 +91,21 @@ test('failed route discovery/probes and a configured unavailable listener never 
   }
 });
 
-test('explicit relay selection is announced and transmitted in authenticated begin',async()=>{
+test('explicit relay selection refuses even a tiny upload before any control request',async()=>{
   const scan=snapshot(),routes=[],calls=[];
   const call=async(op,args)=>{calls.push({op,args});const a=op.split('.').at(-1);return {result:a==='begin'?{uploadId:id,state:'RECEIVING_MANIFEST',manifestOffset:0}:a==='manifest'?{offset:scan.manifest.length}:a==='seal'?{state:'UPLOADING'}:a==='status'?{file:{...scan.files[0],offset:0,complete:false}}:a==='chunk'?{offset:1,complete:true}:{state:'READY',dataset:'data',version:'c'.repeat(64)}};};
-  const result=await uploadDatasetSnapshot(call,{machine:'node',name:'data',userId:'u',scan,keyStore,via:'relay',progress:(phase,value)=>{if(phase==='ROUTE')routes.push(value);}});
-  assert.equal(calls[0].args.allowRelay,true);assert.equal(calls.some(x=>x.op.endsWith('direct-ticket')),false);assert.equal(result.route.kind,'vps-relay');assert.equal(routes[0].explicit,true);
+  await assert.rejects(uploadDatasetSnapshot(call,{machine:'node',name:'data',userId:'u',scan,keyStore,via:'relay',progress:(phase,value)=>{if(phase==='ROUTE')routes.push(value);}}),/VPS relay is disabled/);
+  assert.equal(calls.length,0);assert.equal(routes.length,0);
+});
+
+test('old single-endpoint grants cannot label a Tail or unknown route as campus direct',async()=>{
+  for(const kind of [undefined,'tail-upload','vps-relay']){
+    const calls=[];let opened=0;
+    const call=async(op,args)=>{calls.push({op,args});return {result:op.endsWith('.begin')?{uploadId:id,state:'RECEIVING_MANIFEST',manifestOffset:0,uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true}}:grant({kind})};};
+    await assert.rejects(uploadDatasetSnapshot(call,{machine:'node',name:'data',userId:'u',scan:snapshot(),keyStore,progress:()=>{},directFactory:async()=>{opened++;throw Error('must not open');}}),error=>error.uploadId===id&&/authorization is unconfirmed/.test(error.message));
+    assert.equal(opened,0);assert.deepEqual(calls.map(row=>row.op),['datasets.upload.begin','datasets.upload.direct-ticket']);
+    assert.equal(calls.some(row=>row.args.data!==undefined||row.args.bytes!==undefined),false);
+  }
 });
 
 test('real pinned TLS rejects mismatched nodes before sending any HTTP bearer',async t=>{

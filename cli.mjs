@@ -18,12 +18,15 @@ import {progressText,jobTimingText} from './dist/job-progress.js';
 import {elasticAllocation,allocationLabel,gpuPlacement} from './dist/gpu-allocation.js';
 import {displayName,taskDescription} from './dist/task-metadata.js';
 import {apiPost} from './client-http.mjs';
-import {downloadFile} from './client-file-download.mjs';
+import {createPersonalFileTransport,downloadCampusFile} from './client-personal-file-campus.mjs';
 
 // Member metadata is untrusted even after submission validators improve: old
 // stored records and older servers can still contain C1/ANSI or bidi controls.
 const maintenanceVisible=(value,multiline=false)=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>multiline&&c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
 const maintenanceJSON=value=>JSON.stringify(value).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>c.split('').map(unit=>'\\u'+unit.charCodeAt(0).toString(16).padStart(4,'0')).join(''));
+const terminalErrorMetadata=error=>({
+  ...(Number.isInteger(error.status)&&error.status>=100&&error.status<=599?{status:error.status}:{}),
+  ...(typeof error.code==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)?{code:error.code}:{})});
 const terminalMetadata=(value,key='')=>typeof value==='string'?maintenanceVisible(value,['description','body'].includes(key)):
   Array.isArray(value)?value.map(item=>terminalMetadata(item,key)):
   value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([name,item])=>[maintenanceVisible(name),terminalMetadata(item,name)])):value;
@@ -73,7 +76,8 @@ export function parseCLIOptions(argv){
   }
   return {options,positionals,training:[]};
 }
-export async function uploadCodeFiles(call,{machine,context,local,remote,verifyTree=false,inspectOnly=false,progress=message=>process.stderr.write(message),recoverySleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}){
+export async function uploadCodeFiles(call,{machine,context,local,remote,verifyTree=false,inspectOnly=false,progress=message=>process.stderr.write(message),recoverySleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),transportFactory=createPersonalFileTransport}){
+  if(!context.project)fail('Campus push requires a selected personal project; legacy VPS file relay is unavailable');
   let count=0,skipped=0;const observed=[],files=[],statuses=[];
   if(inspectOnly&&!context.project)fail('push-status requires a selected personal project');
   const excluded=name=>['.git','.ssh','.aws','.azure','.venv','venv','node_modules','__pycache__','id_rsa','id_ed25519','.env'].includes(name)||(name.startsWith('.env.')&&name!=='.env.example');
@@ -89,7 +93,7 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
     if(!st.isFile())fail('Only regular files/directories can be uploaded');
     if(!Number.isSafeInteger(st.size)||st.size<0)fail('File byte count cannot be represented exactly');
     if(context.project&&st.size>4*1024**3)console.error('项目文件超过 4 GiB，仍允许上传；请确认磁盘空间，并等待完整校验。');
-    const file=await open(local,'r');let offset=0;
+    const file=await open(local,'r');let offset=0,transport;
     try{
       const initial=await file.stat();if(!initial.isFile()||!stable(st,initial))fail('Local file changed before upload');
       let identity={},confirmed=false,recoveries=0;
@@ -117,13 +121,14 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
         else identity.uploadId=randomUUID();
         if(offset)progress(`项目文件 ${maintenanceVisible(path)}：已确认 ${offset}/${initial.size} 字节${confirmed?'（完整校验）':'，续传原上传'}\n`);
       }
+      if(!confirmed)transport=await transportFactory(call,{machine,context,path,action:'put',identity});
       if(!confirmed)do{
         const buffer=Buffer.alloc(1024*1024);const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,Math.max(0,initial.size-offset)),offset);
         if(!bytesRead&&offset<initial.size)fail('Local file changed during upload');
         const final=offset+bytesRead===initial.size;
         if(context.project&&final&&!stable(initial,await file.stat()))fail('Local file changed during upload; no final publish was sent');
         let response;
-        try{response=(await call('files.put',{machine,path,offset,...context,...(context.project?{...identity,final}:{truncate:offset===0}),data:buffer.subarray(0,bytesRead).toString('base64')})).result;}
+        try{response=await transport.request({offset,final,bytes:buffer.subarray(0,bytesRead)});}
         catch(error){
           // Only this fixed, checksum-bound project protocol can recover an
           // uncertain write. Legacy uploads and other mutations never replay.
@@ -149,7 +154,7 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
       }while(!confirmed);
       if(context.project&&!stable(initial,await file.stat()))fail('Local file changed during upload; verify and upload again before project publish');
       if(verifyTree){observed.push({local,st:initial});files.push({path,size:identity.totalSize,sha256:identity.sha256});}
-    }finally{await file.close();}count++;
+    }finally{try{await transport?.close();}finally{await file.close();}}count++;
   }
   await upload(local,remote);
   if(inspectOnly)return {machine,project:context.project,readOnly:true,files:statuses,skipped};
@@ -163,14 +168,14 @@ export async function uploadCodeFiles(call,{machine,context,local,remote,verifyT
   return {uploaded:count,machine,...(context.project?{project:context.project,skipped}:{}),...(verifyTree?{files}:{})};
 }
 
-export async function synchronizeProjectRun(call,{machine,project,directory=process.cwd(),key=randomUUID(),timeoutMs=7200000,pollMs=1000,progress=message=>process.stderr.write(message)}){
+export async function synchronizeProjectRun(call,{machine,project,directory=process.cwd(),key=randomUUID(),timeoutMs=7200000,pollMs=1000,progress=message=>process.stderr.write(message),transportFactory=createPersonalFileTransport}){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
   const request=async(operation,args={})=>(await call(operation,{machine,project,...args},controller.signal)).result;
   try{
     const before=await request('projects.status');
     if(before?.publicationProtocol!==1)fail('Node does not support confirmed run --sync publications; upgrade it first. No code was uploaded.');
     if(!['READY','DRAFT','FAILED'].includes(before.state))fail('Project is busy or its publication outcome is unknown; inspect project status before syncing');
-    const uploaded=await uploadCodeFiles((op,args)=>call(op,args,controller.signal),{machine,context:{project,area:'code'},local:directory,remote:'.',verifyTree:true,progress});
+    const uploaded=await uploadCodeFiles((op,args)=>call(op,args,controller.signal),{machine,context:{project,area:'code'},local:directory,remote:'.',verifyTree:true,progress,transportFactory});
     progress(`Publication key: ${key}\n同步不会删除服务器多余文件；等待本次发布 READY。\n`);
     let result=await request('projects.publish',{key});
     while(true){
@@ -232,7 +237,7 @@ async function main(){
   }
   if(positionals[0]==='notify'&&(positionals.length!==3||!['on','off','status'].includes(positionals[2])||training.length||options.machines.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','json','url','session-file'].includes(k))))fail('Usage: notify JOB on|off|status');
   if(options.overwrite&&!(positionals[0]==='data'&&positionals[1]==='put'))fail('--overwrite is only valid for data put');
-  if(options.via!==undefined&&(!((['data','transfer'].includes(positionals[0])&&positionals[1]==='upload')||(positionals[0]==='data'&&positionals[1]==='put'&&options.via!=='direct'))||!['auto','direct','relay'].includes(options.via)))fail('--via auto|direct|relay is for directory uploads; data put accepts only auto or relay');
+  if(options.via!==undefined&&(!((['data','transfer'].includes(positionals[0])&&positionals[1]==='upload')||(positionals[0]==='data'&&positionals[1]==='put'&&options.via!=='direct'))||!['auto','direct','relay',...(positionals[0]==='data'&&positionals[1]==='upload'?['campus']:[])].includes(options.via)))fail('--via auto|direct|relay is for directory uploads; campus is for data upload only; data put accepts only auto or relay');
   if(options.priority&&!['idle','normal','high'].includes(options.priority))fail('Priority must be idle, normal or high');
   if(options.priority&&positionals[0]!=='run')fail('--priority is only valid for run; use gpuctl priority JOB idle|normal|high');
   if(options.cwd!==undefined&&!['exec','maintenance'].includes(positionals[0])||options.timeout!==undefined&&!['exec','maintenance'].includes(positionals[0])&&!transferCopy||options.detach&&positionals[0]!=='exec'&&!transferCopy)fail('--cwd is for exec/maintenance; timeout also supports transfer copy; detach is for exec or transfer copy');
@@ -557,20 +562,40 @@ async function main(){
     }else if(command==='shell'&&positionals.length===2){
       if(!process.stdin.isTTY)fail('交互终端需要 TTY；非交互任务使用 gpuctl run');
       const machine=positionals[1],hostAdmin=options.root===true;
+      if(!state.machines.some(m=>m.id===machine))fail('这台机器未授权或不存在');
       if(hostAdmin&&(options.project||options.job))fail('Host root terminal does not accept --project or --job');
       if(options.takeover&&!options.reconnect)fail('--takeover requires --reconnect SESSION');
       if(options.reconnect&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.reconnect))fail('Reconnect requires a complete terminal UUID');
       const context=dataTerminal?{dataWorkspace:true}:hostAdmin?{}:projectArgs(machine);
-      const clientId=randomUUID();
-      const opened=(await call('terminal.open',{machine,key:randomUUID(),clientId,mode:options.reconnect?'reconnect':'new',...(options.reconnect?{id:options.reconnect,takeover:options.takeover===true}:{}),hostAdmin,...context})).result;
-      if(!opened.writerToken)fail('Server terminal protocol is too old; upgrade the node before attaching. No input was sent.');
+      const key=randomUUID(),clientId=randomUUID(),id=options.reconnect||key,openMode=options.reconnect?'reconnect':'new';
+      const scope=dataTerminal?['--data-workspace']:hostAdmin?['--root']:context.project?['--project',context.project]:['--legacy'];
+      const commandText=parts=>parts.map(value=>/^[A-Za-z0-9_.:-]+$/.test(value)?value:"'"+value.replaceAll("'","'\\''")+"'").join(' ');
+      const statusCommand=commandText(['gpuctl','terminal','status',id,'--machine',machine,...scope]);
+      const reconnectCommand=commandText(['gpuctl',...(dataTerminal?['data','shell']:['ssh']),'--machine',machine,
+        ...(dataTerminal?[]:scope),'--reconnect',id]);
+      const terminal={id,machine,project:context.project||null,dataWorkspace:dataTerminal,hostAdmin,mode:openMode,state:'UNKNOWN',statusCommand};
+      const unconfirmed=error=>Object.assign(Error(`${error.message}\n终端状态未确认，未重开或重放输入。只读查询原会话：${statusCommand}`),{terminal,status:error.status,code:error.code});
+      // Print the original identity before any request; never cache writer
+      // credentials or rely on a successful response to recover this handle.
+      await new Promise((resolve,reject)=>process.stderr.write('Terminal: '+maintenanceJSON(terminal)+'\n',error=>error?reject(error):resolve()));
+      let opened;
+      try{
+        opened=(await call('terminal.open',{machine,key,clientId,mode:openMode,...(options.reconnect?{id,takeover:options.takeover===true}:{}),hostAdmin,...context})).result;
+        const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+        if(opened?.id!==id||opened.clientId!==clientId||opened.mode!==openMode||opened.hostAdmin!==hostAdmin||
+          !uuid.test(opened.writerToken||'')||!Number.isFinite(opened.leaseExpiresAt)||opened.leaseExpiresAt<=0||opened.leaseExpiresAt>=253402300800||
+          opened.machine!==undefined&&opened.machine!==machine||opened.project!==undefined&&opened.project!==context.project||
+          opened.dataWorkspace!==undefined&&opened.dataWorkspace!==dataTerminal)
+          fail('终端身份或单写租约未获确认，未发送输入；请核对原会话和匹配节点协议。');
+      }catch(error){throw unconfirmed(error);}
       let input=Buffer.alloc(0),offset=0,done=false,closed=false,delay=250,lastSize='';
       const sessionArgs={machine,id:opened.id,clientId,writerToken:opened.writerToken,hostAdmin,...context};
       process.stderr.write(`\r\n${machine} · ${dataTerminal?'个人数据 /data2':hostAdmin?'ROOT 宿主机':context.project?'项目 '+context.project:'个人工作区'} · ${opened.id}（Ctrl+] 仅断开；exit 结束此会话）\r\n`);
       process.stdin.setRawMode(true);process.stdin.resume();
       const listener=chunk=>{if(chunk.includes(29)){done=true;return;}input=Buffer.concat([input,chunk]);if(input.length>262144)process.stdin.pause();};process.stdin.on('data',listener);
       try{while(!done){const sent=input.subarray(0,8192);input=input.subarray(sent.length);if(input.length<131072)process.stdin.resume();const size={cols:process.stdout.columns||110,rows:process.stdout.rows||32},sizeKey=JSON.stringify(size);const response=(await call('terminal.exchange',{...sessionArgs,offset,input:sent.toString('base64'),...(sizeKey===lastSize?{}:{cols:size.cols,rows:size.rows})})).result;lastSize=sizeKey;offset=response.offset;if(response.data)process.stdout.write(Buffer.from(response.data,'base64'));if(response.exited){await call('terminal.close',sessionArgs);closed=true;break;}await new Promise(r=>setTimeout(r,delay));}}
-      finally{process.stdin.off('data',listener);process.stdin.setRawMode(false);process.stdin.pause();if(!closed)try{await call('terminal.detach',sessionArgs);}catch{process.stderr.write('\r\n写入权释放未确认；等待 30 秒或明确接管后再重连。\r\n');}process.stderr.write(`\r\n${closed?'此终端已结束。':`已断开，终端继续运行。重连：gpuctl ${dataTerminal?'data shell --machine '+machine:'ssh '+machine+(hostAdmin?' --root':context.project?' --project '+context.project:'')} --reconnect ${opened.id}`}\r\n`);}return;
+      catch(error){throw unconfirmed(error);}
+      finally{process.stdin.off('data',listener);process.stdin.setRawMode(false);process.stdin.pause();if(!closed)try{await call('terminal.detach',sessionArgs);}catch{process.stderr.write('\r\n写入权释放未确认；等待 30 秒或明确接管后再重连。\r\n');}process.stderr.write(`\r\n${closed?'此终端已结束。':`已断开。只读查询：${statusCommand}\r\n重连：${reconnectCommand}`}\r\n`);}return;
     }else if(command==='invites'&&positionals[1]==='list'&&positionals.length===2)result=(await call('invites.list')).result;
     else if(command==='invites'&&['rotate','disable'].includes(positionals[1])&&['admin','member'].includes(positionals[2])&&positionals.length===3)result=(await call(`invites.${positionals[1]}`,{role:positionals[2]})).result;
     else if(command==='users'&&positionals.length===1)result=state.users;
@@ -630,7 +655,7 @@ async function main(){
         if(result.state==='FAILED')process.exitCode=1;else if(result.state==='UNKNOWN')process.exitCode=3;
       }
     }else if(command==='data'&&positionals[1]==='upload'){
-      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','name','via'].includes(k)))fail('Usage: data upload LOCAL_DIR --name NAME [--machine SERVER] [--via auto|direct|relay]');
+      if(positionals.length!==3||training.length||options.datasets.length||Object.keys(options).some(k=>!['machines','datasets','url','session-file','json','name','via'].includes(k)))fail('Usage: data upload LOCAL_DIR --name NAME [--machine SERVER] [--via auto|direct|campus]');
       if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(options.name||''))fail('Dataset name must be 1–40 ASCII letters, digits, _ or -, beginning with a letter or digit');
       const machine=defaultMachine();if(machine==='auto'||!state.machines.some(m=>m.id===machine))fail('Select an authorized server explicitly');
       let last=0,phase='';const progress=(next,value)=>{if(next==='HANDLE'){process.stderr.write(`Upload: ${value.uploadId} · ${value.machine}\n`);return;}if(next==='ROUTE'){process.stderr.write(value.kind==='campus-direct'?'传输路径：直连上传节点（文件不经平台中转）\n':value.kind==='tail-upload'?'传输路径：Tail 备用上传（不改变默认路由；中继可能影响速度）\n':`传输路径：VPS 中转${value.explicit?'（已明确选择）':'（小文件通道）'}\n`);return;}const now=Date.now();if(next!==phase||now-last>1000){phase=next;last=now;process.stderr.write(`${next}${value.bytes!==undefined?' · '+value.bytes+(value.totalBytes!==undefined?' / '+value.totalBytes:'')+' bytes':''}${value.path?' · '+value.path:''}\n`);}};
@@ -801,7 +826,7 @@ async function main(){
       result=await uploadCodeFiles(call,{machine,context,local:positionals[2],remote:positionals[3]||basename(positionals[2]),inspectOnly:command==='upload-status'});
     }else if(command==='download'&&positionals.length===4){
       const context=fileArgs(positionals[1]);
-      result=await downloadFile(call,{machine:positionals[1],context,path:positionals[2],destination:positionals[3],origin:base.origin,userId:session.principal.userId});
+      result=await downloadCampusFile(call,{machine:positionals[1],context,path:positionals[2],destination:positionals[3],origin:base.origin,userId:session.principal.userId});
     }else if(command==='grant'&&positionals.length===2){
       const userId=find(positionals[1]),policyVersion=state.users.find(u=>u.id===userId).policyVersion;
       if(options.full){result=(await call('policy.full',{userId,policyVersion})).result;}
@@ -905,5 +930,5 @@ async function main(){
   console.log(JSON.stringify(result,null,2));
 }
 if(process.argv[1]&&fileURLToPath(import.meta.url)===realpathSync(process.argv[1])){
-  main().catch(error=>{console.error(wantsJSON?maintenanceJSON({ok:false,error:error.message}):`Error: ${maintenanceVisible(error.message)}`);process.exitCode=1;});
+  main().catch(error=>{console.error(wantsJSON?maintenanceJSON({ok:false,error:error.message,...(error.terminal?{terminal:error.terminal,...terminalErrorMetadata(error)}:{})}):`Error: ${maintenanceVisible(error.message)}`);process.exitCode=1;});
 }

@@ -33,6 +33,11 @@ test('real CLI bundle has only Node builtin external imports and retains origin 
   const result=await buildClient({outfile:join(folder,'gpuctl.mjs')}),imports=Object.values(result.metafile.outputs)[0].imports;
   assert.ok(imports.length>0);assert.ok(imports.every(item=>item.external&&item.path.startsWith('node:')));
   assert.ok(result.metafile.inputs['cli.mjs']);
+  assert.ok(result.metafile.inputs['client-campus-native.mjs']);assert.ok(result.metafile.inputs['client-campus-native-dataset.mjs']);
+  const artifacts=JSON.parse(await readFile(new URL('../build/campus-native/embedded-artifacts.private.json',import.meta.url),'utf8'));
+  const compiled=await readFile(join(folder,'gpuctl.mjs'),'utf8');
+  for(const arch of ['linux-x64','linux-arm64'])assert.ok(compiled.includes(artifacts.artifacts[arch].sha256),'one-file client embeds '+arch);
+  assert.doesNotMatch(compiled,/campus-go-toolchain|go\.dev\/dl\/go/);
   const source=await standaloneClient('https://gpu.example.com');assert.doesNotMatch(source,/__GPUQ_PUBLIC_ORIGIN__|sourceMappingURL/);
   const syntax=spawnSync(process.execPath,['--input-type=module','--check'],{input:source,encoding:'utf8'});assert.equal(syntax.status,0,syntax.stderr);
   // Substitution serializes the whole string, even if a future caller passes
@@ -45,7 +50,9 @@ test('runtime artifact reader needs neither source CLI modules nor installed esb
   const root=await mkdtemp(join(tmpdir(),'gpuq-client-runtime-'));t.after(()=>rm(root,{recursive:true,force:true}));await mkdir(join(root,'build'));
   await copyFile(new URL('../client-bundle.mjs',import.meta.url),join(root,'client-bundle.mjs'));
   await copyFile(new URL('../build/gpuctl.mjs',import.meta.url),join(root,'build/gpuctl.mjs'));
-  const output=spawnSync(process.execPath,['--input-type=module','-e',"import {standaloneClient} from './client-bundle.mjs'; process.stdout.write(await standaloneClient('https://runtime.example'));"],{cwd:root,encoding:'utf8'});
+  // Both verified Linux executables travel inside the one-file client. Capture
+  // its bounded full source rather than spawnSync's default 1 MiB pipe limit.
+  const output=spawnSync(process.execPath,['--input-type=module','-e',"import {standaloneClient} from './client-bundle.mjs'; process.stdout.write(await standaloneClient('https://runtime.example'));"],{cwd:root,encoding:'utf8',maxBuffer:40*1024**2});
   assert.equal(output.status,0,output.stderr);assert.match(output.stdout,/https:\/\/runtime\.example/);assert.doesNotMatch(output.stdout,/__GPUQ_PUBLIC_ORIGIN__/);
 });
 

@@ -21,8 +21,14 @@ function fixture(t,{enabled=true}={}){
   const service={db,store:{get:id=>id===user.id?structuredClone(user):null},audit:()=>{},storageArchivePolicy:{enabled:true,machine:cold,authority:'hdd'},bridge:async(machine,operation,args)=>{
     calls.push({machine,operation,args});await f.before?.(machine,operation,args);
     const id=args.uploadId||args.key,key=machine+'/'+args.userId+'/'+id;
-    if(operation==='storage.upload.locate')return {protocol:'dataset-upload-location-v1',machine,userId:args.userId,uploadId:args.uploadId,
-      authority:{enabled:machine===cold,machine,authority:'hdd'},present:sessions.has(key),...(sessions.has(key)?{specification:sessions.get(key).spec}:{})};
+    if(operation==='storage.upload.locate'){
+      const session=sessions.get(key);
+      return {protocol:'dataset-upload-location-v1',machine,userId:args.userId,uploadId:args.uploadId,uploadAdmissionProtocol:1,
+        authority:{enabled:machine===cold,machine,authority:'hdd'},present:Boolean(session),
+        ...(session?{specification:session.spec,...(session.admissionKey?{initializationProtocol:1,nodePresent:true,
+          admissionProtocol:1,admissionKey:session.admissionKey,requestedMachine:hot,storageMachine:cold,admissionAuthority:'hdd'}:{})}:
+          machine===cold?{state:'NOT_INITIALIZED',initializationProtocol:1,nodePresent:false}:{})};
+    }
     if(operation==='datasets.upload.routes')return {available:true,protocol:'dataset-upload-v1',machine,revision:'b'.repeat(64),certificateSha256:'c'.repeat(64),routes:[{id:'primary',kind:'campus-direct',endpoint:'https://warehouse.example'}]};
     if(operation==='datasets.upload.begin'){
       if(!sessions.has(key))sessions.set(key,{spec:structuredClone(spec),state:'RECEIVING_MANIFEST'});
@@ -32,11 +38,11 @@ function fixture(t,{enabled=true}={}){
       assert.equal(machine,cold);assert.equal(args.protocol,'dataset-upload-admission-v1');assert.equal(args.requestedMachine,hot);assert.equal(args.storageMachine,cold);assert.equal(args.authority,'hdd');
       assert.deepEqual(args.specification,spec);assert.equal(args.specificationSha256,createHash('sha256').update(JSON.stringify(spec)).digest('hex'));
       const row=JSON.parse(db.prepare('SELECT data FROM dataset_upload_placements WHERE owner=? AND upload_id=?').get(args.userId,id).data);assert.equal(row.phase,'BOUND');assert.equal(row.admissionKey,args.intentKey);
-      if(!sessions.has(key))sessions.set(key,{spec:structuredClone(args.specification),state:'RECEIVING_MANIFEST'});
+      if(!sessions.has(key))sessions.set(key,{spec:structuredClone(args.specification),state:'RECEIVING_MANIFEST',admissionKey:args.intentKey});
       return {uploadId:id,...spec,state:sessions.get(key).state,manifestOffset:0,chunkBytes:1024*1024,admissionProtocol:1,admissionKey:args.intentKey,machine,authority:'hdd',uploadTransport:{protocol:'dataset-upload-v1',directAvailable:true,routeSelection:true}};
     }
     if(operation==='datasets.upload.chunk')return {offset:args.offset+Buffer.from(args.data,'base64').length};
-    if(operation==='datasets.upload.direct-ticket')return {available:true,machine,uploadId:args.uploadId};
+    if(operation==='datasets.upload.direct-ticket')return {available:true,kind:'campus-direct',machine,uploadId:args.uploadId};
     const session=sessions.get(key);if(!session)throw Error('Unknown fixture upload');
     if(operation==='datasets.upload.commit')session.state='READY';
     if(operation==='datasets.upload.discard')session.state='DISCARDED';
@@ -57,7 +63,9 @@ test('new standard upload writes directly to fixed HDD and never admits the sele
   assert.equal(f.calls.filter(call=>call.operation==='storage.upload.admit').length,1);
   assert.equal(f.calls.find(call=>call.operation==='storage.upload.admit').machine,cold);
   assert.equal(f.calls.some(call=>call.operation==='datasets.upload.begin'||call.operation==='storage.upload.locate'),false);
-  await f.call('chunk',{uploadId:id,path:'data.bin',offset:0,data:Buffer.from('hello').toString('base64')});
+  const beforeBytes=f.calls.length;
+  await assert.rejects(f.call('chunk',{uploadId:id,path:'data.bin',offset:0,data:Buffer.from('hello').toString('base64')}),error=>error.status===409&&error.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,beforeBytes,'Control-plane chunk refusal must reach no node');
   const routes=await f.call('routes',{uploadId:id});assert.equal(routes.machine,cold);
   assert.equal('uploadId' in f.calls.at(-1).args,false,'node route wire contract is unchanged');
   await f.call('direct-ticket',{uploadId:id});assert.equal(f.calls.at(-1).machine,cold);
@@ -84,8 +92,10 @@ test('old SSD session remains on its exact original node; unknown lookup never m
   const f=fixture(t),id=randomUUID();
   f.sessions.set(hot+'/'+f.user.id+'/'+id,{spec,state:'UPLOADING'});
   const old=await f.begin(id);assert.equal(old.storageMachine,hot);assert.equal(old.storageTier,'existing');
-  await f.call('chunk',{uploadId:id,path:'data.bin',offset:0,data:'AA=='});
-  assert.equal(f.calls.at(-1).machine,hot);assert.equal(f.sessions.size,1);
+  const beforeBytes=f.calls.length;
+  await assert.rejects(f.call('chunk',{uploadId:id,path:'data.bin',offset:0,data:'AA=='}),error=>error.status===409&&error.code==='CAMPUS_DATA_PLANE_REQUIRED');
+  assert.equal(f.calls.length,beforeBytes,'Legacy location cannot authorize VPS relay');
+  await f.call('direct-ticket',{uploadId:id});assert.equal(f.calls.at(-1).machine,hot);assert.equal(f.sessions.size,1);
   const fresh=randomUUID();f.before=(machine,operation)=>{if(machine===other&&operation==='storage.upload.locate')throw Error('Node timeout');};
   await assert.rejects(f.begin(fresh),/Node timeout/);
   assert.equal(f.ingress.load(f.user.id,fresh).phase,'LOCATING');
@@ -186,7 +196,7 @@ test('cancellation and ticket revocation stay on the durable writer rather than 
   const discarded=await f.call('discard',{uploadId:id});assert.equal(discarded.storageMachine,cold);
   assert.equal(discarded.state,'DISCARDED');assert.equal(f.service.datasetIngressMachineVisible(f.user.id,cold),false);
   f.calls.length=0;await f.call('status',{uploadId:id});
-  assert.deepEqual(f.calls.map(call=>call.machine),[cold]);
+  assert.deepEqual(f.calls.map(call=>[call.machine,call.operation]),[[cold,'storage.upload.locate'],[cold,'datasets.upload.status']]);
 });
 
 test('READY warehouse is an exact usable copy source without granting compute; preparation selects that source',async t=>{
