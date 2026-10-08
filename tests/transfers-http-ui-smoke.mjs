@@ -99,7 +99,7 @@ try{
   // The legacy managed-transfer workflow above remains independent. The real
   // trusted installers now expose modern admission for the browser dataset API.
   installStorageArchive(service,warehousePolicy,{startTimer:false});installDatasetIngress(service,warehousePolicy);
-  assert.deepEqual((await service.invoke(login.token,'state',{})).state.datasetUploadAdmission,{protocol:1,available:true});
+  assert.deepEqual((await service.invoke(login.token,'state',{})).state.datasetUploadAdmission,{protocol:1,available:true,targetMachine:warehousePolicy.machine});
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});const page=await browser.newPage({viewport:{width:1440,height:1000}});page.on('pageerror',e=>errors.push(e.message));
   const openTransfers=async()=>{const entry=page.locator('#warehouse-page-actions a[href="#datasets/transfers"]');assert.equal(await entry.textContent(),'传输记录');await entry.click();await page.locator('#page-transfers').waitFor({state:'visible'});assert.equal(await page.evaluate(()=>location.hash),'#datasets/transfers');};
   await page.goto(origin);await page.locator('#login-form [name=username]').fill(member.username);await page.locator('#login-form [name=password]').fill(password);await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});await page.locator('[data-nav=datasets]').click();await openTransfers();await page.locator('#transfer-copy > summary').click();await page.locator('#transfer-copy-form').waitFor();

@@ -19,7 +19,7 @@ import {installDatasetLabels,datasetLabelCall} from './dataset-labels.mjs';
 import {installProjectCatalog} from './project-catalog.mjs';
 import {installDatasetDeletion} from './dataset-deletion.mjs';
 import {installTaskDisplay,taskDisplayCall} from './task-display.mjs';
-import {installDatasetIngress} from './dataset-ingress.mjs';
+import {installDatasetIngress,datasetUploadAdmissionView} from './dataset-ingress.mjs';
 import {installDatasetCacheActions} from './dataset-cache-actions.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
@@ -409,7 +409,7 @@ export class PortalService extends DemoService{
       execution:{priorityCapabilities:capabilities},gpuq,transfers:{version:1},
       // Protocol availability is a Portal policy fact, not a node/mount or
       // free-space admission proof. The private HDD RPC still verifies those.
-      datasetUploadAdmission:{protocol:1,available:this.datasetIngressPolicy?.enabled===true},
+      datasetUploadAdmission:datasetUploadAdmissionView(this.datasetIngressPolicy),
       ...(principal.role==='admin'?{invitations:this.invitations()}:{})};
   }
   close(){this.closing=true;for(const admission of this.loginAdmissions?.values()||[])if(admission.issued)this.revokeSession(admission.issued);this.cloudProvider?.clear();clearInterval(this.executionTimer);clearInterval(this.notificationTimer);clearInterval(this.maintenanceTimer);clearInterval(this.transferTimer);clearInterval(this.storageArchiveTimer);clearInterval(this.projectCopyTimer);this.db.close();}

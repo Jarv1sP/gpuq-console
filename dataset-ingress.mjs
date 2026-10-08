@@ -34,6 +34,13 @@ export function datasetIngressPolicy(input){
     ...(input.allowDuringMaintenance!==undefined?{allowDuringMaintenance:input.allowDuringMaintenance}:{})};
 }
 
+// Public display metadata only; neither node health nor an upload permission.
+// Keep authority IDs and private ingress configuration on the server.
+export function datasetUploadAdmissionView(policy){
+  const available=policy?.enabled===true;
+  return {protocol:1,available,targetMachine:available&&known(policy.machine)?policy.machine:null};
+}
+
 export async function loadDatasetIngressPolicy(path){
   if(!path)return {enabled:false};
   const raw=await readFile(path,'utf8');
