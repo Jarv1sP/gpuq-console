@@ -153,3 +153,5 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  assert.equal(await page.locator('[data-v3-select]').count(),0);
  assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.overview'&&Object.keys(row.args).length===0||row.operation==='datasets.files.list'&&['sample-data','foreign-private'].includes(row.args.dataset)&&row.args.version===version&&Object.keys(row.args).sort().join()==='dataset,version'||row.operation==='datasets.cache.capabilities'&&['sample-data','legacy-data'].includes(row.args.dataset)&&row.args.version===version&&machines.some(machine=>machine.id===row.args.machine)&&Object.keys(row.args).sort().join()==='dataset,machine,version'));assert.deepEqual(errors,[]);await page.close();
 }console.log('CAPACITY UI PASS: simulated member/admin 1440/1024/390/320; normal/unknown/warning/shared, no explanation copy, legacy fallback, account fence, readonly room gating.');}finally{await browser.close();}
+
+await import('./warehouse-redraw-focus-ui-smoke.mjs');

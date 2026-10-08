@@ -28,7 +28,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  let overview=null,legacyCatalog=null,capacityCatalog=null,overviewRequest=0,overviewAbort=null;
  const cacheCapabilities=new Map();let capabilityScope=null,capabilityRequest=0,capabilityAbort=null,capabilityBusy=false,capabilityUnavailable=false,actionUI=null,actionLifetime=null,actionContext=null;
  let filesPreviewUI=null,filesPreviewAbort=null,filesPreviewContext=null,filesPreviewHost=null;
- const meter=createUploadMeter(),templates=new WeakMap();
+ const meter=createUploadMeter(),templates=new WeakMap(),renderBindings=new WeakMap();
  const account=()=>JSON.stringify([store.principal?.userId,store.principal?.role,store.authGeneration]);
  const machine=()=>section.querySelector('[name=dataset-machine]')?.value;
  const identity=()=>({userId:store.principal?.userId,role:store.principal?.role,authGeneration:store.authGeneration});
@@ -81,25 +81,32 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function html(root,value){
   // A refresh clears the list while reading. An identical reply must restore
   // that DOM; the cached template alone does not prove it is still mounted.
-  if(templates.get(root)===value&&(root.hasChildNodes()||value===''))return;
+  const binding=account();
+  if(templates.get(root)===value&&renderBindings.get(root)===binding&&(root.hasChildNodes()||value===''))return;
+  const previousAction=renderBindings.get(root)===binding?root.querySelector('.v3-train [data-use-dataset]'):null;
+  const training=renderBindings.get(root)===binding?root.querySelector(':scope>.v3-train'):null;
   const preview=root.querySelector('#warehouse-files-preview');
   const keepPreview=preview&&filesPreviewContext===JSON.stringify([account(),selected,selectedVersion])&&overview?.filePreviewAvailable===true;
-  const training=root.querySelector(':scope>.v3-train');
   const scroll=root.querySelector('.v3-detail-scroll'),position=scroll?.scrollTop||0;
   const folds=[...root.querySelectorAll('details[open]')].map(node=>node.id||node.className);
   const active=root.contains(document.activeElement)?document.activeElement:null;
   const focus=active?.id?'#'+CSS.escape(active.id):active?.hasAttribute('data-v3-version')?'[data-v3-version]':active?.hasAttribute('data-v4-warehouse')?'[data-v4-warehouse="'+CSS.escape(active.dataset.v4Warehouse)+'"]':active?.hasAttribute('data-v4-clear')?'[data-v4-clear="'+CSS.escape(active.dataset.v4Clear)+'"]':active?.hasAttribute('data-v3-filter')?'[data-v3-filter="'+CSS.escape(active.dataset.v3Filter)+'"]':active?.hasAttribute('data-v3-select')?'[data-v3-select="'+CSS.escape(active.dataset.v3Select)+'"]':active?.hasAttribute('data-use-dataset')?'[data-use-dataset="'+CSS.escape(active.dataset.useDataset)+'"]':null;
-  templates.set(root,value);root.innerHTML=value;
+  templates.set(root,value);renderBindings.set(root,binding);root.innerHTML=value;
   if(keepPreview)root.querySelector('#warehouse-files-preview')?.replaceWith(preview);
-  // Cache/capacity replies may update the scrolling area during a resize.
-  // Keep the unchanged fixed-version action and its keyboard focus mounted.
   const nextTraining=root.querySelector(':scope>.v3-train');
+  const nextAction=root.querySelector('.v3-train [data-use-dataset]');
   if(training&&nextTraining&&training.outerHTML===nextTraining.outerHTML)nextTraining.replaceWith(training);
+  else if(previousAction&&nextAction&&previousAction.dataset.useDataset===nextAction.dataset.useDataset&&previousAction.dataset.version===nextAction.dataset.version){
+   for(const attr of [...previousAction.attributes])if(!nextAction.hasAttribute(attr.name))previousAction.removeAttribute(attr.name);
+   for(const attr of nextAction.attributes)previousAction.setAttribute(attr.name,attr.value);
+   previousAction.textContent=nextAction.textContent;nextAction.replaceWith(previousAction);
+  }
   for(const node of root.querySelectorAll('[data-v3-percent]')){const percent=Number(node.dataset.v3Percent);if(Number.isFinite(percent)&&percent>=0&&percent<=100)node.style.width=percent+'%';}
   applyCapacityGeometry(root);
   for(const fold of root.querySelectorAll('details'))if(folds.includes(fold.id||fold.className))fold.open=true;
   const next=root.querySelector('.v3-detail-scroll');if(next)next.scrollTop=position;
-  if(focus)root.querySelector(focus)?.focus({preventScroll:true});
+  if(active?.isConnected&&root.contains(active))active.focus({preventScroll:true});
+  else if(focus)root.querySelector(focus)?.focus({preventScroll:true});
  }
  function closeFilesPreview(){filesPreviewAbort?.abort();filesPreviewUI?.destroy();filesPreviewUI=null;filesPreviewAbort=null;filesPreviewContext=null;filesPreviewHost=null;}
  function syncFilesPreview(){
