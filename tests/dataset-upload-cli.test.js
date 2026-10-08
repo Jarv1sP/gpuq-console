@@ -39,13 +39,23 @@ async function fixture(t){
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const url=`http://127.0.0.1:${server.address().port}`;
   await writeFile(session,JSON.stringify({url,token:'test-only',principal:{userId:'demo-user-1',username:'tester',role:'member'},machine:'gpu-1'}),{mode:0o600});
   const cli=args=>new Promise((resolve,reject)=>{const p=spawn(process.execPath,[...campusFixtureArgs,fileURLToPath(new URL('../cli.mjs',import.meta.url)),'--url',url,'--session-file',session,'--json',...args]);let stdout='',stderr='';p.stdout.on('data',s=>stdout+=s);p.stderr.on('data',s=>stderr+=s);p.on('error',reject);p.on('close',code=>resolve({code,stdout,stderr,result:stdout?JSON.parse(stdout).data:null}));});
-  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await tls.close();assert.equal(tls.counters.portalFileRequests,0);await rm(dir,{recursive:true,force:true});});return {dir,data,session,calls,uploads,cli,failChunk:()=>{failAfterChunk=true;},onBegin:fn=>{onBegin=fn;}};
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await tls.close();assert.equal(tls.counters.portalFileRequests,0);await rm(dir,{recursive:true,force:true});});return {dir,data,session,calls,uploads,admissions,counters:tls.counters,cli,failChunk:()=>{failAfterChunk=true;},onBegin:fn=>{onBegin=fn;}};
 }
 test('standalone CLI uploads a directory with empty files/directories and resumes a lost chunk response',async t=>{
   const f=await fixture(t),contents=randomBytes(chunk*2+31);await writeFile(join(f.data,'samples.bin'),contents);await writeFile(join(f.data,'zero'),'');await mkdir(join(f.data,'empty'));f.failChunk();
-  const args=['data','upload',f.data,'--name','mine'],first=await f.cli(args);assert.equal(first.code,1);assert.match(first.stderr,/Direct upload request rejected \(HTTP 400\)/);assert.equal(f.uploads.size,1);const u=[...f.uploads.values()][0];assert.equal(u.files.get('samples.bin').length,chunk);
+  const args=['data','upload',f.data,'--name','mine'],first=await f.cli(args);assert.equal(first.code,1);
+  const failure=JSON.parse(first.stderr.trim().split(/\r?\n/).at(-1));assert.equal(failure.ok,false);
+  assert.match(failure.error,process.platform==='linux'?/^Campus physical transport stopped \(FIXTURE_HTTPS_REJECTED\); keep the original operation identity; no VPS or Tail fallback/:/^Direct upload request rejected \(HTTP 400\)/);
+  assert.equal(f.uploads.size,1);const u=[...f.uploads.values()][0];assert.equal(u.files.get('samples.bin').length,chunk);
+  assert.match(failure.error,new RegExp('Upload: '+u.id+' on gpu-1'));assert.match(failure.error,/Repeat the same data upload command to resume/);
+  assert.equal(f.calls.filter(call=>call.operation==='datasets.upload.chunk').length,1,'lost ACK does not automatically replay the durable chunk');
+  assert.equal(f.calls.some(call=>call.operation==='datasets.upload.commit'),false);assert.equal(f.counters.portalFileRequests,0);
+  const journal=JSON.parse(await readFile(f.session,'utf8')),issued=[...f.admissions.values()][0];
+  assert.equal(issued.uploadId,u.id);assert.equal(Object.values(journal.datasetUploadIntents)[0].uploadId,u.id,'original admission survives the failed process');
   const before=f.calls.length,second=await f.cli(args);assert.equal(second.code,0,second.stderr);assert.equal(second.result.state,'READY');assert.equal(f.uploads.size,1);assert.deepEqual(u.files.get('samples.bin'),contents);assert.ok(u.parsed.directories.includes('empty'));
   const follow=f.calls.slice(before);assert.equal(follow.find(c=>c.operation==='datasets.upload.chunk').args.offset,chunk);assert.equal(follow.some(c=>c.operation==='datasets.upload.manifest'),false);
+  assert.equal(f.admissions.size,1);assert.equal(follow.some(call=>call.operation==='datasets.upload.admission.create'),false,'resume never rotates the durable intent or UUID');
+  assert.ok(follow.filter(call=>call.args.uploadId!==undefined).every(call=>call.args.uploadId===u.id));assert.equal(f.counters.portalFileRequests,0);
   assert.equal(f.calls.some(c=>'hostAdmin' in c.args||'owners' in c.args||'sourceId' in c.args),false);
   const again=await f.cli(args);assert.equal(again.code,0,again.stderr);assert.equal(again.result.version,second.result.version);
 });

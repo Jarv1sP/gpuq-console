@@ -58,7 +58,7 @@ async function clientFixture(t){
 
 for(const mode of ['json-error','html-error','drop']){
   test('actual CLI prints original new UUID before '+mode+' and queries it without another open',async t=>{
-    const f=await clientFixture(t);f.mode=mode;const before=await readFile(f.cache,'utf8');
+    const f=await clientFixture(t);f.mode=mode;const before=JSON.parse(await readFile(f.cache,'utf8'));
     const value=await f.run(['ssh']);assert.equal(value.code,1);
     if(process.env.TERMINAL_HANDLE_REVIEW==='1')t.diagnostic(JSON.stringify({case:mode,openRequest:f.calls.find(call=>call.operation==='terminal.open').args,
       visibleBeforeRequest:f.visibleBeforeRequest,exitCode:value.code,stderr:value.stderr}));
@@ -68,11 +68,25 @@ for(const mode of ['json-error','html-error','drop']){
       statusCommand:'gpuctl terminal status '+open.key+' --machine '+machine+' --project alpha'});
     assert.deepEqual(failure.terminal,identity);assert.match(failure.error,/状态未确认/);assert.match(failure.error,new RegExp(open.key));
     if(mode!=='drop')assert.equal(failure.status,503);assert.equal('writerToken' in failure,false);
-    assert.deepEqual(f.calls.map(call=>call.operation),['state','terminal.open']);assert.equal(await readFile(f.cache,'utf8'),before);
+    assert.deepEqual(f.calls.map(call=>call.operation),['state','terminal.open']);
+    const persisted=JSON.parse(await readFile(f.cache,'utf8'));
+    assert.deepEqual(persisted,{...before,terminalSessions:{[identity.id]:{...identity,userId:before.principal.userId}}},'persist only the original owner/scope recovery handle; preserve every existing session field');
+    assert.equal('writerToken' in persisted.terminalSessions[identity.id],false);
     const status=await f.run(['terminal','status',identity.id,'--machine',identity.machine,'--project',identity.project],{tty:false});
     assert.equal(status.code,0,status.stderr);assert.equal(JSON.parse(status.stdout).data.id,open.key);
     assert.equal(f.calls.filter(call=>call.operation==='terminal.open').length,1);
     assert.equal(f.calls.some(call=>['terminal.exchange','terminal.close','terminal.detach'].includes(call.operation)),false);
+    // Another CLI process reuses the saved original identity, even if the
+    // selected project changed meanwhile. It never starts a second session.
+    await writeFile(f.cache,JSON.stringify({...persisted,projectsByMachine:{[machine]:'changed-project'}}),{mode:0o600});
+    f.mode='success';const reconnect=await f.run(['ssh','--machine',machine,'--project','alpha','--reconnect',identity.id]);
+    assert.equal(reconnect.code,0,reconnect.stderr);assert.equal(handle(reconnect).id,identity.id);
+    const resumed=f.calls.filter(call=>call.operation==='terminal.open').at(-1).args;
+    assert.equal(resumed.id,identity.id);assert.equal(resumed.mode,'reconnect');assert.notEqual(resumed.key,identity.id);
+    assert.equal(resumed.project,'alpha');assert.equal(f.sessions.size,1);
+    const recovered=JSON.parse(await readFile(f.cache,'utf8'));
+    assert.deepEqual(Object.keys(recovered.terminalSessions),[identity.id]);assert.equal(recovered.terminalSessions[identity.id].userId,before.principal.userId);
+    assert.equal('writerToken' in recovered.terminalSessions[identity.id],false);
   });
 }
 
@@ -132,10 +146,30 @@ test('wrong ID, client, mode, root, scope or writer receipt is UNKNOWN with zero
   assert.equal(reconnect.code,1);assert.equal(errorJSON(reconnect).terminal.id,original);
 });
 
-test('finite fractional lease timestamps are metadata, never compared with the client wall clock',async t=>{
+test('only future finite fractional lease timestamps authorize exchange',async t=>{
   const f=await clientFixture(t);f.mode='success';
-  for(const leaseExpiresAt of [1.25,253402300799.999]){
+  for(const leaseExpiresAt of [Date.now()/1000+30.125,253402300799.999]){
+    f.calls.length=0;
     f.change=value=>({...value,leaseExpiresAt});const result=await f.run(['ssh']);assert.equal(result.code,0,result.stderr);
+    assert.deepEqual(f.calls.map(call=>call.operation),['state','terminal.open','terminal.exchange','terminal.close']);
+  }
+  for(const expired of [1.25,Date.now()/1000-1,Date.now()/1000]){
+    f.calls.length=0;f.change=value=>({...value,leaseExpiresAt:expired});const result=await f.run(['ssh']);
+    assert.equal(result.code,1);assert.equal(errorJSON(result).terminal.state,'UNKNOWN');
+    assert.equal(errorJSON(result).terminal.id,handle(result).id);
+    assert.deepEqual(f.calls.map(call=>call.operation),['state','terminal.open'],'expired lease never allows input or automatic cleanup');
+  }
+});
+
+test('persisted terminal recovery rejects another owner or scope before a new open',async t=>{
+  const f=await clientFixture(t),opened=await f.run(['ssh']),identity=handle(opened),saved=JSON.parse(await readFile(f.cache,'utf8'));
+  for(const change of [{userId:'another-member'},{project:'another-project'},{machine:'gpu-2'},{hostAdmin:true},{dataWorkspace:true}]){
+    const altered={...saved,terminalSessions:{[identity.id]:{...saved.terminalSessions[identity.id],...change}}};
+    await writeFile(f.cache,JSON.stringify(altered),{mode:0o600});f.calls.length=0;
+    const result=await f.run(['ssh','--reconnect',identity.id]);
+    assert.equal(result.code,1);assert.equal(errorJSON(result).terminal.id,identity.id);assert.match(errorJSON(result).error,/账号或范围不匹配/);
+    assert.deepEqual(f.calls.map(call=>call.operation),['state'],'scope mismatch cannot reach terminal.open');
+    assert.deepEqual(JSON.parse(await readFile(f.cache,'utf8')),altered,'a rejected reconnect does not overwrite the original journal');
   }
 });
 
