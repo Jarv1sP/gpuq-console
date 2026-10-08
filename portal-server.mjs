@@ -49,8 +49,8 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
   const ingress=await loadDatasetIngressPolicy(datasetIngressConfigPath);
   const executor=bridgeSocket?bridgeClient(bridgeSocket):undefined;
   const fileExecutor=personalFileBridgeSocket?bridgeClient(personalFileBridgeSocket):undefined;
-  const routedBridge=bridge||(executor&&((machine,operation,args)=>operation==='files.direct.prepare'
-    ?fileExecutor?fileExecutor(machine,operation,args):Promise.reject(Object.assign(Error('校园文件执行桥尚未配对；原文件操作未重派。'),{status:503,code:'CAMPUS_FILE_REQUIRED'}))
+  const routedBridge=bridge||(executor&&((machine,operation,args)=>['files.direct.prepare','projects.status','projects.list'].includes(operation)
+    ?fileExecutor?fileExecutor(machine,operation,args):Promise.reject(Object.assign(Error('校园元数据执行桥尚未配对；原操作未重派。'),{status:503,code:'CAMPUS_FILE_REQUIRED'}))
     :executor(machine,operation,args)));
   const service=await PortalService.open(database,bootstrap,statusPath,routedBridge,config,storage,ociCohortMachines,ingress);const rate=new Map();
   const server=http.createServer(async(req,res)=>{
