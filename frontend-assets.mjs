@@ -13,6 +13,7 @@ export const STARBASE_ASSETS = Object.fromEntries([
   'archive-enrollment-ui.js', 'archive-enrollment.css',
   'dataset-cache-operation.js', 'dataset-cache-operation.css',
   'dataset-files-preview.js', 'dataset-files-preview.css',
+  'job-results-ui.js',
   'dataset-flow.js', 'dataset-cache-admin.js', 'manual-pin-state.js', 'dataset-flow.css',
   'maintenance-state.js', 'maintenance-experience.js', 'maintenance-experience.css',
   'admin-ui.js', 'admin.css', 'admin-members-ui.js', 'admin-create-user-ui.js', 'admin-gpu-tasks.js', 'admin-gpu-tasks.css', 'admin-maintenance-ui.js', 'host-diagnostics-ui.js',

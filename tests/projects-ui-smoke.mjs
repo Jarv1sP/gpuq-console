@@ -1,4 +1,6 @@
 import {terminalContractSmoke} from './terminal-contract-ui-smoke.mjs';
+// Reuse the same output area; strict fixed-task result acceptance is isolated.
+import './job-results-ui-smoke.mjs';
 import {openMaintenance} from './admin-maintenance-workflows.mjs';
 import {closeSubmit,openSubmit,refreshVisible} from './starbase-workflows.mjs';
 import {guardedRoute} from './browser-route-guard.mjs';
