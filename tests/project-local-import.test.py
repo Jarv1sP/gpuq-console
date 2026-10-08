@@ -129,7 +129,9 @@ class LocalImportTests(base.ProjectSecurity):
             self.imports.worker_active=lambda args:active
             for publication_state,committed in [('PUBLISHING',False),('FAILED',False),('UNKNOWN',False),('UNKNOWN',True),('FAILED',True)]:
                 with self.subTest(import_state=expected,publication_state=publication_state,committed=committed):
-                    pending={'state':publication_state,'publicationId':publication_id,'error':'old publication error'}
+                    pending={**self.args,'state':publication_state,'publicationId':publication_id,'error':'old publication error',
+                             'projectUUID':self.ops.store.project_uuid(*self.ops.identity(self.args)),
+                             'projectGeneration':self.ops.store.generation(*self.ops.identity(self.args))}
                     if committed:pending['committedRelease']=ready
                     self.node.atomic_json(self.ops.receipt_path(self.args),pending)
                     with patch.object(self.ops.store,'status',return_value=dict(catalog)),patch.object(self.ops,'active',return_value=True):
