@@ -61,7 +61,8 @@ test('guide covers merged workflow changes while keeping completion, permissions
   assert.doesNotMatch(source,/gpuctl maintenance (?:request|approve|withdraw)/);
   assert.match(chapters.get('data'),/已经开始的服务器校验会继续/);assert.match(chapters.get('data'),/没有整份已发布数据集的一键下载入口/);
   assert.doesNotMatch(chapters.get('data'),/云盘|云端副本|分享链接|链接导入|data (?:cloud|import)/);
-  assert.match(chapters.get('data'),/gpuctl data upload \.\/my-data --name my-data --via direct/);
+  assert.match(chapters.get('data'),/gpuctl data upload \.\/my-data --name my-data --via campus/);
+  assert.match(chapters.get('data'),/不探测 Tail 备用入口，也不发送文件到 VPS/);
   assert.match(chapters.get('data'),/gpuctl transfer upload \.\/my-data --name my-data --via direct/);
   assert.match(chapters.get('data'),/入口不可达时停止，不改走中转/);
   for(const token of ['transfer upload','transfer download','transfer cancel','WAITING_CLIENT'])assert.ok(chapters.get('data').includes(token),token);
