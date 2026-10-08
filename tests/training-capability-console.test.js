@@ -10,8 +10,8 @@ function fixture() {
   page.mainFrame = () => frame;
   const verify = collectTrainingCapabilityConsole(page, origin, text => errors.push(text));
   const consoleError = (text = native400, url = api) => page.emit('console', {type: () => 'error', text: () => text, location: () => ({url})});
-  function request(operation = 'datasets.training.capabilities', url = api, method = 'POST') {
-    const value = {url: () => url, method: () => method, postDataJSON: () => ({operation})};page.emit('request', value);return value;
+  function request(operation = 'datasets.training.capabilities', url = api, method = 'POST', navigation = false, sourceFrame = frame) {
+    const value = {url: () => url, method: () => method, postDataJSON: () => ({operation}), isNavigationRequest: () => navigation, frame: () => sourceFrame};page.emit('request', value);return value;
   }
   function reply(value = request(), status = 400, body = {error: '未知执行操作。'}, read = async () => body) {
     page.emit('response', {request: () => value, url: value.url, status: () => status, json: read});
@@ -58,10 +58,17 @@ test('a duplicate probe, duplicate reply or duplicate native message fails', asy
 test('login and page refresh reset the count, but an old account reply cannot explain a new account message', async () => {
   for (const refresh of [false, true]) {
     const f = fixture();f.reply();f.consoleError();
-    if (refresh) f.page.emit('framenavigated', f.frame);else f.request(undefined, origin + '/api/login');
+    if (refresh) f.request(undefined, origin, 'GET', true);else f.request(undefined, origin + '/api/login');
     f.reply();f.consoleError();await f.verify();assert.deepEqual(f.errors, []);
   }
   const f = fixture(), old = f.request();f.request(undefined, origin + '/api/login');f.reply(old);f.consoleError();await f.verify();assert.deepEqual(f.errors, [native400]);
+});
+test('room hash changes and iframe navigation do not reset the once-per-session allowance', async () => {
+  for (const iframe of [false, true]) {
+    const f = fixture();f.reply();f.consoleError();
+    if (iframe) f.request(undefined, origin + '/child', 'GET', true, {});else f.page.emit('framenavigated', f.frame);
+    f.reply();f.consoleError();await assert.rejects(f.verify(), /at most once/);
+  }
 });
 test('verification awaits the network body before allowing a native message', async () => {
   const f = fixture();let release, done = false;

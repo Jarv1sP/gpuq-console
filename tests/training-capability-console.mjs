@@ -6,8 +6,10 @@ export function collectTrainingCapabilityConsole(page, origin, unexpected) {
   const api = origin + '/api/call', requests = [], metadata = new WeakMap();
   const failures = [], candidates = [], pending = [];
   let session = 0;
-  page.on('framenavigated', frame => {if (frame === page.mainFrame()) session++;});
   page.on('request', request => {
+    // Hash/room navigation stays in the same login session. Only a new main
+    // document or a login request resets the per-session allowance.
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {session++;return;}
     if (request.method() !== 'POST') return;
     if (request.url() === origin + '/api/login') {session++;return;}
     if (request.url() !== api) return;
