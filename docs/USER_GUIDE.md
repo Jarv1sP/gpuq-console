@@ -73,7 +73,7 @@ gpuctl push .
 gpuctl ssh
 ```
 
-终端请求前会打印原 UUID 和状态查询命令，请保留。创建或重连报错、503 或结果未确认时，先运行打印的 `gpuctl terminal status ...`；不要另开终端。需要继续时用 `gpuctl ssh --reconnect 原UUID`，并保持原机器和项目；`Ctrl+]` 只断开，`exit` 才结束。
+终端请求前会打印原 UUID 和状态查询命令，并在本地登录缓存中保存账号与范围，不保存写入凭据。创建或重连报错、503 或结果未确认时，先运行打印的 `gpuctl terminal status ...`；不要另开终端。需要继续时用 `gpuctl ssh --reconnect 原UUID`，并保持原机器和项目；`Ctrl+]` 只断开，`exit` 才结束。
 
 项目文件上传中断时，保留原文件和远端文件名，重复同一条 `gpuctl push` 会先核对上传身份并从已确认的字节继续；不会自动发布或提交训练。只检查、不继续传输可用 `gpuctl push-status 本机文件 远端文件名 --json`。`COMPLETE` 表示该文件已完整校验；若同时有 `completionPending:true`，再运行原 `push` 完成回执收尾，不会重传内容。项目中某个旧版本 `READY` 不代表本次上传完成。
 

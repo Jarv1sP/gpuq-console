@@ -5,6 +5,9 @@ const TRANSIENT=new Set([502,503,504]);
 // Cover a short single-instance rollout without a tight polling loop. Queries
 // remain bounded; a mutation is never replayed by this generic transport.
 const READ_RETRY_DELAYS=[500,1000,2000,4000,8000,16000,16000];
+const PROJECT_LOCK_READS=new Set(['projects.status','files.upload.status']);
+const PROJECT_LOCK_RETRY_DELAYS=[100,200,400,800,500];
+const projectLockBusy=value=>typeof value==='string'&&/\[Errno 11\] Resource temporarily unavailable/.test(value);
 const safe=value=>String(value).replace(/[\p{Cc}\p{Cf}]/gu,' ').slice(0,600);
 const error=(message,status)=>Object.assign(Error(message),{status});
 
@@ -16,12 +19,13 @@ export async function apiPost(base,path,body,{token,signal,fetchImpl=fetch,sleep
 })}={}){
   const target=new URL(`/api/${path}`,base),operation=path==='call'?body?.operation:path;
   const read=path==='call'&&READS.has(operation);
+  const payload=JSON.stringify(body);let lockRetries=0;
   const deadline=AbortSignal.timeout(read?65000:40000),combined=signal?AbortSignal.any([signal,deadline]):deadline;
   for(let attempt=0;;attempt++){
     let response,data,decoded=false;
     try{
       response=await fetchImpl(target,{method:'POST',redirect:'error',signal:combined,
-        headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify(body)});
+        headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:payload});
       // Gateways may return an empty or HTML error page. Do not display that
       // untrusted body or misdiagnose every JSON parse failure as a demo URL.
       try{data=await response.json();decoded=!!data&&typeof data==='object'&&!Array.isArray(data);}
@@ -31,6 +35,10 @@ export async function apiPost(base,path,body,{token,signal,fetchImpl=fetch,sleep
       throw error(`${safe(operation)}：${combined.aborted?'请求已取消或超时':'网络连接中断'}。${read?'稍后重试查询。':'操作结果尚未确认，请先查询状态；不要更换提交键重复提交。'}`);
     }
     if(read&&TRANSIENT.has(response.status)&&attempt<READ_RETRY_DELAYS.length&&!combined.aborted){await sleep(READ_RETRY_DELAYS[attempt],combined);continue;}
+    // Old nodes flatten flock EAGAIN into HTTP 400. Only observe the original
+    // project/upload identity again; file writes and publication never replay.
+    if(read&&PROJECT_LOCK_READS.has(operation)&&response.status===400&&decoded&&projectLockBusy(data.error)
+      &&lockRetries<PROJECT_LOCK_RETRY_DELAYS.length&&!combined.aborted){await sleep(PROJECT_LOCK_RETRY_DELAYS[lockRetries++],combined);continue;}
     if(!response.ok){
       const detail=decoded&&typeof data.error==='string'?safe(data.error):TRANSIENT.has(response.status)?'服务暂时不可用或正在更新':response.status===404?'API 路径不存在，请检查服务地址':'服务返回了非 JSON 错误响应';
       const failure=error(`${safe(operation)}：HTTP ${response.status} — ${detail}${!read&&TRANSIENT.has(response.status)?'；操作结果尚未确认，请先查询状态，不要更换提交键重复提交。':''}`,response.status);

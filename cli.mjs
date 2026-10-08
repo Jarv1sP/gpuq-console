@@ -296,7 +296,7 @@ async function main(){
     mode={demo:login.state.demo,gpuqConnected:login.state.gpuqConnected===true};
     await mkdir(dirname(sessionFile),{recursive:true,mode:0o700});
     const previous=session?.principal?.userId===login.principal.userId?session:null;
-    await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(previous?.machine?{machine:previous.machine}:{}),...(previous?.projectsByMachine?{projectsByMachine:previous.projectsByMachine}:{}),...(previous?.datasetUploadKeys?{datasetUploadKeys:previous.datasetUploadKeys}:{}),...(previous?.datasetUploadIntents?{datasetUploadIntents:previous.datasetUploadIntents}:{}),...(previous?.datasetUploadHandles?{datasetUploadHandles:previous.datasetUploadHandles}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
+    await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(previous?.machine?{machine:previous.machine}:{}),...(previous?.projectsByMachine?{projectsByMachine:previous.projectsByMachine}:{}),...(previous?.datasetUploadKeys?{datasetUploadKeys:previous.datasetUploadKeys}:{}),...(previous?.datasetUploadIntents?{datasetUploadIntents:previous.datasetUploadIntents}:{}),...(previous?.datasetUploadHandles?{datasetUploadHandles:previous.datasetUploadHandles}:{}),...(previous?.terminalSessions?{terminalSessions:previous.terminalSessions}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
     result={loggedIn:true,principal:login.principal};
   }else{
     if(!session)fail('请先登录：gpuctl login');
@@ -580,10 +580,18 @@ async function main(){
       await new Promise((resolve,reject)=>process.stderr.write('Terminal: '+maintenanceJSON(terminal)+'\n',error=>error?reject(error):resolve()));
       let opened;
       try{
+        const latest=JSON.parse(await readFile(sessionFile,'utf8'));
+        if(latest.url!==base.origin||latest.token!==session.token||latest.principal?.userId!==session.principal?.userId)
+          fail('登录缓存已改变，未打开终端；请核对当前账号。');
+        const saved=latest.terminalSessions?.[id];
+        if(saved&&(saved.userId!==session.principal.userId||['machine','project','hostAdmin','dataWorkspace'].some(name=>saved[name]!==terminal[name])))
+          fail('原终端记录的账号或范围不匹配，未打开终端；请使用原服务器和项目查询。');
+        const next={...latest,terminalSessions:{...latest.terminalSessions,[id]:{...terminal,userId:session.principal.userId}}};
+        await saveDatasetUploadSession(sessionFile,next);session=next;
         opened=(await call('terminal.open',{machine,key,clientId,mode:openMode,...(options.reconnect?{id,takeover:options.takeover===true}:{}),hostAdmin,...context})).result;
         const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
         if(opened?.id!==id||opened.clientId!==clientId||opened.mode!==openMode||opened.hostAdmin!==hostAdmin||
-          !uuid.test(opened.writerToken||'')||!Number.isFinite(opened.leaseExpiresAt)||opened.leaseExpiresAt<=0||opened.leaseExpiresAt>=253402300800||
+          !uuid.test(opened.writerToken||'')||!Number.isFinite(opened.leaseExpiresAt)||opened.leaseExpiresAt<=Date.now()/1000||opened.leaseExpiresAt>=253402300800||
           opened.machine!==undefined&&opened.machine!==machine||opened.project!==undefined&&opened.project!==context.project||
           opened.dataWorkspace!==undefined&&opened.dataWorkspace!==dataTerminal)
           fail('终端身份或单写租约未获确认，未发送输入；请核对原会话和匹配节点协议。');
