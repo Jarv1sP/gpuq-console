@@ -1,6 +1,7 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {MACHINES} from './dist/model.js';
+import {archiveUploadCapability,archiveUploadSpecification} from './dist/dataset-upload.js';
 
 // Independent from storageArchivePolicy: adding upload admission must never
 // change the policy hash or reinterpret an existing archive/transfer journal.
@@ -11,9 +12,9 @@ const USER=/^(builtin-admin|demo-user-[0-9]{1,18})$/;
 const SPEC=['name','manifestBytes','manifestSha256','totalBytes','entries'];
 const known=machine=>MACHINES.some(value=>value.id===machine);
 const fail=(message,status=409)=>{throw Object.assign(Error(message),{status});};
-const specification=args=>Object.fromEntries(SPEC.map(key=>[key,args[key]]));
+const specification=args=>({...Object.fromEntries(SPEC.map(key=>[key,args[key]])),...(args.archive?{archive:args.archive}:{})});
 const validSpecification=value=>value&&typeof value==='object'&&!Array.isArray(value)&&
-  Object.keys(value).length===SPEC.length&&SPEC.every(key=>Object.hasOwn(value,key))&&
+  Object.keys(value).length===SPEC.length+Number(!!value.archive)&&(!value.archive||archiveUploadSpecification(value.archive,value.totalBytes,value.entries))&&SPEC.every(key=>Object.hasOwn(value,key))&&
   typeof value.name==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(value.name)&&
   Number.isSafeInteger(value.manifestBytes)&&value.manifestBytes>=1&&value.manifestBytes<=64*1024*1024&&
   typeof value.manifestSha256==='string'&&HASH.test(value.manifestSha256)&&
@@ -52,9 +53,9 @@ export function datasetIngressPolicy(input){
 
 // Public display metadata only; neither node health nor an upload permission.
 // Keep authority IDs and private ingress configuration on the server.
-export function datasetUploadAdmissionView(policy){
+export function datasetUploadAdmissionView(policy,archive){
   const available=policy?.enabled===true;
-  return {protocol:1,available,targetMachine:available&&known(policy.machine)?policy.machine:null};
+  return {protocol:1,available,targetMachine:available&&known(policy.machine)?policy.machine:null,...(available&&archiveUploadCapability(archive)?{archive:archiveUploadCapability(archive)}:{})};
 }
 
 export async function loadDatasetIngressPolicy(path){
@@ -69,6 +70,7 @@ export function installDatasetIngress(service,input){
   if(policy.enabled&&(!service.storageArchivePolicy?.enabled||service.storageArchivePolicy.machine!==policy.machine||
     service.storageArchivePolicy.authority!==policy.authority))fail('Dataset ingress requires the existing fixed HDD authority');
   service.datasetIngressPolicy=Object.freeze(policy);
+  service.datasetArchiveCapability=null;
   service.db.exec('CREATE TABLE IF NOT EXISTS dataset_upload_placements (owner TEXT NOT NULL, upload_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(owner,upload_id))');
   service.db.exec("CREATE INDEX IF NOT EXISTS dataset_upload_ready_source ON dataset_upload_placements(owner,json_extract(data,'$.storageMachine'),json_extract(data,'$.ready.dataset'),json_extract(data,'$.ready.version'))");
   service.db.exec('CREATE TABLE IF NOT EXISTS dataset_upload_admissions (owner TEXT NOT NULL, intent_key TEXT NOT NULL, upload_id TEXT NOT NULL UNIQUE, PRIMARY KEY(owner,intent_key))');
@@ -116,8 +118,7 @@ export function installDatasetIngress(service,input){
     const result=await call(principal,row,machine,'storage.upload.locate',{userId:row.owner,uploadId:row.uploadId},publicOperation);
     if(!result||result.protocol!=='dataset-upload-location-v1'||result.machine!==machine||result.userId!==row.owner||
       result.uploadId!==row.uploadId||typeof result.present!=='boolean'||
-      result.present&&(!result.specification||SPEC.some(key=>result.specification[key]===undefined)||
-        Object.keys(result.specification).length!==SPEC.length))fail('旧上传位置未能确认；未创建其他副本。',502);
+      result.present&&!validSpecification(result.specification))fail('旧上传位置未能确认；未创建其他副本。',502);
     return result;
   };
   const placement=row=>({placementProtocol:1,requestedMachine:row.requestedMachine,storageMachine:row.storageMachine,
@@ -275,6 +276,14 @@ export function installDatasetIngress(service,input){
       if(!validSpecification(spec))fail('上传准入清单无效。',400);
       const identity={owner,uploadId:randomUUID(),requestedMachine:args.machine,admissionKey:key};
       const selected=policy.warehouses?await selectWarehouse(principal,identity,spec):policy;
+      if(spec.archive){
+        const route=await call(principal,identity,selected.machine,'datasets.upload.routes',{userId:owner,hostAdmin:false},operation);
+        const capability=archiveUploadCapability(route?.archive);
+        if(!capability||!capability.formats.includes(spec.archive.format))throw Object.assign(Error('服务器尚未开通此压缩包格式。'),{status:409,code:'ARCHIVE_FORMAT_UNSUPPORTED'});
+        if(capability.maxBytes!==null&&spec.archive.bytes>capability.maxBytes)throw Object.assign(Error('压缩包过大。'),{status:413,code:'ARCHIVE_TOO_LARGE'});
+        if(!route.routes?.some(value=>value.kind==='campus-direct'))throw Object.assign(Error('校内直连暂不可用。'),{status:503,code:'CAMPUS_ROUTE_UNAVAILABLE'});
+      }
+
       const row={protocol:1,...identity,
         candidateMachine:selected.machine,storageMachine:selected.machine,authority:selected.authority,
         phase:'ISSUED',warehouse:true,createdAt:Date.now(),admissionProtocol:1,admissionKey:key,
@@ -306,6 +315,7 @@ export function installDatasetIngress(service,input){
       const target=policy.enabled?policy.machine:args.machine;
       const row={owner,requestedMachine:args.machine,storageMachine:target};
       const value=await call(principal,row,target,'datasets.upload.routes',{userId:owner,hostAdmin:false});
+      service.datasetArchiveCapability=policy.enabled?archiveUploadCapability(value?.archive):null;
       return {...value,requestedMachine:args.machine,storageMachine:target,storageTier:policy.enabled?'hdd':'existing',
         ...(policy.enabled?{placementProtocol:1,legacyPlacement:false}:{})};
     }
@@ -319,6 +329,7 @@ export function installDatasetIngress(service,input){
       if(!row&&!policy.enabled)return service.bridge(args.machine,'datasets.upload.'+action,
         {...Object.fromEntries(Object.entries(args).filter(([key])=>key!=='machine'&&(action!=='routes'||key!=='uploadId'))),userId:owner,hostAdmin:false});
       if(row&&row.requestedMachine!==args.machine)fail('此上传已绑定原先选择的服务器；请使用原服务器继续。');
+      if(row?.specification?.archive&&['manifest','chunk'].includes(action))throw Object.assign(Error('压缩包只走校内直连。'),{status:403,code:'CAMPUS_ROUTE_UNAVAILABLE'});
       if(action==='begin'&&row?.specificationSha256&&row.specificationSha256!==hash(specification(args)))
         fail('此上传编号已绑定另一份清单。');
       if(!row){
@@ -330,6 +341,12 @@ export function installDatasetIngress(service,input){
         if(action==='begin')save(row); // Intent is durable before any admission.
       }
       fence(principal,row,'datasets.upload.'+action);
+      if(row.specification?.archive&&action==='direct-ticket'){
+        const routes=await call(principal,row,row.storageMachine,'datasets.upload.routes',{userId:owner,hostAdmin:false});
+        const route=routes.routes?.find(route=>route.id===args.routeId&&route.kind==='campus-direct');
+        if(!route)throw Object.assign(Error('压缩包只走校内直连。'),{status:403,code:'CAMPUS_ROUTE_UNAVAILABLE'});
+      }
+
       if(row.admissionProtocol===1){
         if(action==='status'){
           const journalSnapshot=hash(row),policySnapshot=hash([service.datasetIngressPolicy,service.storageArchivePolicy]);

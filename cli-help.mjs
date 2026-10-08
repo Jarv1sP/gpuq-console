@@ -30,7 +30,7 @@ gpuctl files --job JOB_ID
 gpuctl pull --job JOB_ID model.pt ./model.pt
 
 4. 完整数据先入仓库，再准备训练缓存
-gpuctl data upload LOCAL_DIR --name NAME --via direct
+gpuctl data upload FILE.tar.gz --name NAME --via direct
 gpuctl data upload-status UPLOAD_ID
 gpuctl data list
 gpuctl data prepare NAME@VERSION

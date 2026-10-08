@@ -2,14 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {adaptArchiveUpload,archiveUploadSelection,archiveUploadStatus} from '../dist/datasets-ui.js';
 
-// 契约待定稿：these cases encode only the archive draft, not node availability.
+// Protocol metadata still does not prove a campus route or publication.
 test('archive mode requires protocol 1 and explicitly supported formats',()=>{
   for(const admission of [null,{}, {archive:{}},{archive:{protocol:0,formats:['zip']}},{archive:{protocol:'1',formats:['zip']}},{archive:{protocol:1,formats:[]}},{archive:{protocol:1,formats:'zip'}},{archive:{protocol:1,formats:['exe',true]}}])assert.equal(adaptArchiveUpload(admission),null);
-  const admission={archive:{protocol:1,formats:['.ZIP','tar.gz','tgz','zip','unsupported'],maxBytes:42}};
+  const admission={archive:{protocol:1,formats:['zip','tar.gz','zip'],maxBytes:42}};
   assert.deepEqual(adaptArchiveUpload(admission),{formats:['zip','tar.gz','tgz'],maxBytes:42});
-  assert.equal(admission.archive.formats.length,5,'The admission is never mutated');
-  for(const maxBytes of [null,undefined,NaN,-1,'42',Infinity])assert.equal(adaptArchiveUpload({archive:{protocol:1,formats:['tar'],maxBytes}}).maxBytes,null);
+  assert.equal(admission.archive.formats.length,3,'The admission is never mutated');
+  for(const maxBytes of [undefined,NaN,-1,'42',Infinity])assert.equal(adaptArchiveUpload({archive:{protocol:1,formats:['tar'],maxBytes}}),null,'Malformed limits never mean unlimited');
+  assert.equal(adaptArchiveUpload({archive:{protocol:1,formats:['tar'],maxBytes:null}}).maxBytes,null);
   assert.equal(adaptArchiveUpload({archive:{protocol:1,formats:['zip'],maxBytes:0}}).maxBytes,0);
+  assert.equal(adaptArchiveUpload({archive:{protocol:1,formats:['zip','unsupported'],maxBytes:42}}),null);
+
 });
 
 test('one advertised archive becomes one file with its complete extension removed',()=>{
@@ -22,7 +25,7 @@ test('one advertised archive becomes one file with its complete extension remove
   for(const files of [[],[file,file]])assert.throws(()=>archiveUploadSelection(files,cap),/一个压缩包/);
   assert.throws(()=>archiveUploadSelection([{...file,webkitRelativePath:'folder/data.zip'}],cap),/不接受文件夹/);
   for(const name of ['data.txt','data.zip.exe','data.gz'])assert.throws(()=>archiveUploadSelection([{...file,name}],cap),/支持的压缩包/);
-  assert.throws(()=>archiveUploadSelection([{...file,name:'data.tgz'}],{formats:['tar.gz'],maxBytes:null}),/支持的压缩包/);
+  assert.equal(archiveUploadSelection([{...file,name:'data.tgz'}],{formats:['tar.gz'],maxBytes:null}).name,'data','tgz is the advertised tar.gz format');
   for(const size of [101,-1,NaN,Infinity])assert.throws(()=>archiveUploadSelection([{...file,size}],cap),/过大/);
   assert.throws(()=>archiveUploadSelection([{...file,name:'.zip'}],cap),/名称不能为空/);
   assert.throws(()=>archiveUploadSelection([file],null),/一个压缩包/);
