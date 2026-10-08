@@ -56,12 +56,22 @@ def policy(value):
 
 class StorageArchive:
     @classmethod
-    def from_executor(cls, executor):
-        return cls(executor)
+    def from_executor(cls, executor, *, source_policy=None):
+        return cls(executor, source_policy=source_policy)
 
-    def __init__(self, executor):
+    def __init__(self, executor, *, source_policy=None):
         self.n = executor
-        self.policy = policy(executor.CONFIG.get('storageArchive'))
+        self.scoped_source = source_policy is not None
+        self.policy = policy(source_policy if self.scoped_source else executor.CONFIG.get('storageArchive'))
+        if self.scoped_source:
+            # Only a configured remote authority can select a new namespace.
+            # Default source publishing/worker journals are never reinterpreted.
+            if (self.policy.get('enabled') is not True
+                    or self.policy['machine'] == executor.CONFIG.get('machine')
+                    or executor.CONFIG.get('storageAuthorities', {}).get(self.policy['authority']) != {'machine': self.policy['machine']}):
+                raise ValueError('Source policy requires an explicitly configured remote authority')
+            peer = executor.CONFIG.get('transferPeers', {}).get(self.policy['machine'])
+            J.PeerClient(peer, {}).close()
         self.enabled = self.policy['enabled']
         # Default-off construction must not initialize a cache or private tree.
         if not self.enabled:
@@ -69,7 +79,10 @@ class StorageArchive:
         self.machine = A._machine(executor.CONFIG.get('machine'))
         self.d, self.cache = executor.dataset_cache()
         self.admin = self.d.Principal('builtin-admin', True)
-        self.root = A._private_root(executor.ROOT/'storage-archive')
+        root = executor.ROOT/'storage-archive'
+        if self.scoped_source:
+            root = executor.ROOT/'storage-archive-sources'/A._sha(self.policy)
+        self.root = A._private_root(root)
         for name in ('operations', 'events', 'references', 'control'):
             A._private_root(self.root/name)
         for name in ('lane', 'outbox', 'enrollment-checks'):

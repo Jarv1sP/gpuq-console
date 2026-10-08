@@ -16,6 +16,7 @@ DATASET_ID=re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 DATASET_VERSION=re.compile(r'^[a-f0-9]{64}$')
 DATASET_MODULE=None
 DATASET_UPLOADS=None
+TRAINING_DATASET_UPLOADS=None
 DATA_WORKSPACES=None
 DATA_IMPORTS=None
 CLOUD_FILES=None
@@ -286,6 +287,20 @@ def dataset_uploads():
     # Revalidate the current data mount even for compact upload status requests.
     dataset_mount_check(DATASET_UPLOADS.n.CONFIG['datasets'])
     return DATASET_UPLOADS
+
+
+def dataset_training_uploads():
+    """Private fixed-cache adapter; public uploads always keep HDD ingress."""
+    global TRAINING_DATASET_UPLOADS
+    warehouse=storage_warehouse()
+    if warehouse is None:
+        raise ValueError('A separate warehouse/cache is not configured')
+    dataset_mount_check(CONFIG['datasets'])
+    if TRAINING_DATASET_UPLOADS is None:
+        spec=importlib.util.spec_from_file_location('gpuq_training_dataset_upload',HERE/'dataset-upload.py')
+        module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        TRAINING_DATASET_UPLOADS=module.DatasetUploads(warehouse.cache_view)
+    return TRAINING_DATASET_UPLOADS
 
 def data_workspaces():
     global DATA_WORKSPACES
@@ -1600,11 +1615,16 @@ def dataset_retirement_worker(key,action):
         return 1
 
 
-def storage_archive():
+def storage_archive(source_policy=None):
     global STORAGE_ARCHIVE
-    if STORAGE_ARCHIVE is None:
+    if STORAGE_ARCHIVE is None or source_policy is not None:
         spec=importlib.util.spec_from_file_location('gpuq_storage_archive',HERE/'storage-archive.py')
         module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+        if source_policy is not None:
+            # Certification concerns the training cache, not the local HDD
+            # ingress view on machines with separate cache/warehouse roots.
+            executor=sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals())
+            return module.StorageArchive.from_executor(executor,source_policy=source_policy)
         STORAGE_ARCHIVE=module.StorageArchive.from_executor(dataset_ingress_view())
     return STORAGE_ARCHIVE
 
@@ -1687,6 +1707,13 @@ def storage_archive_operation(operation,args):
              'storage.archive.original':'original','storage.archive.provision':'provision',
              'storage.archive.certify':'certify'}
     if operation not in methods:raise ValueError('Unknown internal archive operation')
+    if isinstance(args,dict) and 'sourcePolicy' in args:
+        if (operation!='storage.archive.certify' and not (
+                operation=='storage.archive.retire' and args.get('mode')=='authority-target-v1')):
+            raise ValueError('Source policy is only valid for target certification or retirement')
+        if args['sourcePolicy'] is None:raise ValueError('Invalid source policy')
+        request={key:value for key,value in args.items() if key!='sourcePolicy'}
+        return getattr(storage_archive(args['sourcePolicy']),methods[operation])(request)
     return getattr(storage_archive(),methods[operation])(args)
 
 

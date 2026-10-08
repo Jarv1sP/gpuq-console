@@ -6,8 +6,18 @@ from pathlib import Path
 import re
 
 
+def _reader(executor, module, cache):
+    spec = importlib.util.spec_from_file_location('gpuq_ingress_upload_receipt', Path(__file__).with_name('dataset-upload.py'))
+    uploads = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(uploads)
+    reader = uploads.DatasetUploads.__new__(uploads.DatasetUploads)
+    reader.n, reader.d, reader.cache = executor, module, cache
+    return uploads, reader
+
+
 def locate(executor, args):
-    if (not isinstance(args, dict) or set(args) != {'userId', 'uploadId'}
+    if (not isinstance(args, dict) or set(args) not in (
+            {'userId', 'uploadId'}, {'userId', 'uploadId', 'specification', 'authority'})
             or not isinstance(args['userId'], str)
             or not re.fullmatch(r'(builtin-admin|demo-user-[0-9]{1,18})', args['userId'])
             or not isinstance(args['uploadId'], str)
@@ -35,6 +45,13 @@ def locate(executor, args):
         try:
             module._read_json(marker)
         except FileNotFoundError:
+            if 'specification' in args:
+                # On split HDD/cache nodes the trusted ingress view carries the
+                # HDD policy. Never infer write permission from a public field.
+                view = getattr(executor, 'dataset_ingress_view', lambda: executor)()
+                uploads, reader = _reader(view, module, cache)
+                reader.limits = uploads.upload_limits(view.CONFIG)
+                result['capacity'] = reader.capacity(args['authority'], args['specification'])
             return result
         raise ValueError('Private upload admission is incomplete; absence is unconfirmed')
     if (not isinstance(session, dict) or session.get('schema') != 1
@@ -50,11 +67,7 @@ def locate(executor, args):
         raise ValueError('Existing private upload identity is invalid or belongs to a transfer')
     # Reuse the pure receipt check, not the upload constructor: location must
     # never create a workspace, upload control directory or reservation.
-    spec = importlib.util.spec_from_file_location('gpuq_ingress_upload_receipt', Path(__file__).with_name('dataset-upload.py'))
-    uploads = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(uploads)
-    reader = uploads.DatasetUploads.__new__(uploads.DatasetUploads)
-    reader.n, reader.d, reader.cache = executor, module, cache
+    _, reader = _reader(executor, module, cache)
     reader._check_admission(session)
     result.update(present=True, specification={key: session[key] for key in
         ('name', 'manifestBytes', 'manifestSha256', 'totalBytes', 'entries')})

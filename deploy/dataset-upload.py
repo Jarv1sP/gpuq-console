@@ -37,16 +37,20 @@ DIRECT_FILE_CHUNK_BYTES = 16 * 1024 * 1024
 _CACHE_PREPARATION = ContextVar('dataset_upload_cache_preparation', default=None)
 
 
+def upload_limits(config):
+    configured = config.get('datasets', {}).get('uploads', {})
+    if (not isinstance(configured, dict) or set(configured)-set(DEFAULTS)
+            or any(type(v) is not int or not (0 if k == 'maxUserBytes' else 1) <= v <= 2**63-1
+                   for k, v in configured.items())):
+        raise ValueError('Invalid personal dataset upload limits')
+    return {**DEFAULTS, **configured}
+
+
 class DatasetUploads:
     def __init__(self, executor):
         self.n = executor
         self.d, self.cache = executor.dataset_cache()
-        configured = executor.CONFIG['datasets'].get('uploads', {})
-        if (not isinstance(configured, dict) or set(configured)-set(DEFAULTS)
-                or any(type(v) is not int or not (0 if k == 'maxUserBytes' else 1) <= v <= 2**63-1
-                       for k, v in configured.items())):
-            raise ValueError('Invalid personal dataset upload limits')
-        self.limits = {**DEFAULTS, **configured}
+        self.limits = upload_limits(executor.CONFIG)
         self.root = self.cache.root/'.uploads'
         self.d._mkdir(self.root)
         self.d._mkdir(self.root/'bindings')
@@ -79,20 +83,30 @@ class DatasetUploads:
         if not self.cache_only():
             yield
             return
-        policy = self.n.CONFIG.get('storageArchive', {})
         jobs = self.n.transfers()
         def validate():
             ref, source = spec.get('reference'), spec.get('source')
-            if (policy.get('enabled') is not True or spec.get('sourceMachine') != policy.get('machine')
-                    or policy.get('machine') == self.n.CONFIG.get('machine') or 'archiveLane' in spec
+            machine = spec.get('sourceMachine')
+            policy = self.n.CONFIG.get('storageArchive', {})
+            authorities = self.n.CONFIG.get('storageAuthorities', {})
+            configured = (policy.get('enabled') is True and machine == policy.get('machine')
+                          or isinstance(authorities, dict) and any(
+                              isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', name)
+                              and value == {'machine': machine} for name, value in authorities.items()))
+            # The durable target binding is an additional root guard, never
+            # a replacement for the configured authoritative-source check.
+            if 'targetStorage' in spec:
+                configured = configured and jobs.target_uploads(spec) is self
+            if (not configured or machine == self.n.CONFIG.get('machine') or 'archiveLane' in spec
                     or not isinstance(ref, dict) or set(ref) != {'kind', 'dataset', 'version'}
                     or ref.get('kind') != 'datasets' or not HASH.fullmatch(str(ref.get('version', '')))
                     or not isinstance(source, dict) or source.get('state') != 'READY'
                     or source.get('id') != spec.get('id') or not UUID.fullmatch(str(spec.get('id', '')))
                     or jobs.load(spec['id']) != spec or jobs.path(spec['id'], '.cancel').exists()
-                    or spec['sourceMachine'] not in self.n.CONFIG.get('transferPeers', {})):
+                    or not isinstance(self.n.CONFIG.get('transferPeers', {}).get(machine), dict)):
                 raise PermissionError('Training cache requires its durable fixed-version HDD warehouse transfer')
             payload = {k: spec[k] for k in ('userId', 'sourceMachine', 'source', 'name', 'reference', 'timeoutSec')}
+            if 'targetStorage' in spec:payload['targetStorage']=spec['targetStorage']
             if spec.get('digest') != hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest():
                 raise ValueError('Training cache transfer identity changed')
         validate()
@@ -130,6 +144,57 @@ class DatasetUploads:
     def admission_path(self, user, upload):
         return self.cache.root/'.upload-admissions'/(self.key(user, upload)+'.json')
 
+    def _specification(self, spec):
+        if (not isinstance(spec, dict) or set(spec) != set(SPECIFICATION_FIELDS)
+                or not isinstance(spec.get('name'), str) or not NAME.fullmatch(spec['name'])
+                or not isinstance(spec.get('manifestSha256'), str) or not HASH.fullmatch(spec['manifestSha256'])
+                or any(type(spec.get(k)) is not int or not 0 <= spec[k] <= maximum
+                       or k == 'manifestBytes' and spec[k] == 0 for k, maximum in (
+                           ('manifestBytes', self.d.MAX_JSON_BYTES),
+                           ('totalBytes', self.limits['maxUploadBytes']), ('entries', self.d.MAX_ENTRIES)))):
+            raise ValueError('Invalid complete server upload specification')
+        spec = {k: spec[k] for k in SPECIFICATION_FIELDS}
+        digest = hashlib.sha256(json.dumps(spec, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        reserve = spec['totalBytes']+spec['manifestBytes']*4+spec['entries']*8192+65536
+        if reserve > 2**63-1:
+            raise ValueError('Upload reservation exceeds supported size')
+        return spec, digest, reserve
+
+    def capacity(self, authority, specification):
+        """Read-only admission snapshot; never reserves, scans payloads or runs GC."""
+        policy = self.n.CONFIG.get('storageArchive', {})
+        machine = self.n.CONFIG.get('machine')
+        if (policy.get('enabled') is not True or policy.get('machine') != machine
+                or self.n.CONFIG.get('storageAuthority', {}).get('enabled') is not True
+                or self.cache_only() or authority != policy.get('authority')
+                or not isinstance(authority, str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', authority)):
+            raise PermissionError('Upload capacity requires this fixed HDD authority')
+        spec, digest, required = self._specification(specification)
+        # The constructor/factory has already selected the protected HDD root.
+        # Recheck the live mount and inode without creating even a lock file.
+        if self.cache.mount is not None and self.cache._current_mount() != self.cache.mount:
+            raise ValueError('Upload capacity warehouse mount changed')
+        with self.d._directory(self.cache.root) as fd:
+            identity = os.fstat(fd)
+            if (identity.st_dev, identity.st_ino) != self.cache._root_identity:
+                raise ValueError('Upload capacity warehouse root changed')
+            info = os.fstatvfs(fd)
+            if (getattr(info, 'f_flag', 0) & getattr(os, 'ST_RDONLY', 1)
+                    or not os.access(self.cache.root, os.W_OK | os.X_OK)):
+                raise PermissionError('Upload capacity warehouse is not writable')
+            if (info.f_frsize <= 0 or info.f_bavail < 0 or info.f_files <= 0 or info.f_favail < 0):
+                raise ValueError('Upload capacity is unknown')
+            available = max(0, info.f_bavail*info.f_frsize-self.cache.reserve_bytes-self.cache._reserved())
+            # Match begin()/DatasetCache._free exactly. Staging bytes are
+            # charged by _reserved(); inode admission charges upload promises.
+            inodes = max(0, info.f_favail-1024-self.cache._upload_reserved()[1])
+        if available < required or inodes < spec['entries']+16:
+            raise ValueError('Insufficient upload capacity including existing reservations and safety reserve')
+        return dict(protocol='dataset-upload-capacity-v1', machine=machine, authority=authority,
+                    specificationSha256=digest, requiredBytes=required, availableBytes=available,
+                    requiredInodes=spec['entries']+16, availableInodes=inodes, writable=True)
+
     def _admission_binding(self, args):
         required = {'userId', 'hostAdmin', 'protocol', 'intentKey', 'uploadId',
                     'requestedMachine', 'storageMachine', 'authority',
@@ -150,22 +215,9 @@ class DatasetUploads:
                 or self.cache_only() or args['storageMachine'] != self.n.CONFIG.get('machine')
                 or args['authority'] != policy.get('authority')):
             raise PermissionError('Server upload admission requires this fixed HDD authority')
-        spec = args['specification']
-        if (not isinstance(spec, dict) or set(spec) != set(SPECIFICATION_FIELDS)
-                or not isinstance(spec.get('name'), str) or not NAME.fullmatch(spec['name'])
-                or not isinstance(spec.get('manifestSha256'), str) or not HASH.fullmatch(spec['manifestSha256'])
-                or any(type(spec.get(k)) is not int or not 0 <= spec[k] <= maximum
-                       or k == 'manifestBytes' and spec[k] == 0 for k, maximum in (
-                           ('manifestBytes', self.d.MAX_JSON_BYTES),
-                           ('totalBytes', self.limits['maxUploadBytes']), ('entries', self.d.MAX_ENTRIES)))):
-            raise ValueError('Invalid complete server upload specification')
-        spec = {k: spec[k] for k in SPECIFICATION_FIELDS}
-        digest = hashlib.sha256(json.dumps(spec, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        spec, digest, reserve = self._specification(args['specification'])
         if args['specificationSha256'] != digest:
             raise ValueError('Server upload specification digest changed')
-        reserve = spec['totalBytes']+spec['manifestBytes']*4+spec['entries']*8192+65536
-        if reserve > 2**63-1:
-            raise ValueError('Upload reservation exceeds supported size')
         return dict(schema=1, protocol=ADMISSION_PROTOCOL, userId=args['userId'],
                     intentKey=args['intentKey'], uploadId=args['uploadId'],
                     requestedMachine=args['requestedMachine'], storageMachine=args['storageMachine'],

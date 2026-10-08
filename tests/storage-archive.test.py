@@ -425,6 +425,59 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(target.certify({**request,'retry':True})['state'],'READY')
         with self.assertRaises(ValueError): target.certify({**request,'grant':{**grant,'token':'z'*43}})
 
+    def test_explicit_source_certification_uses_separate_durable_namespace(self):
+        grant=self.provision();legacy=self.tls_target()
+        request=dict(opId=str(uuid.uuid4()),userId=USER,target=dict(dataset='replica',version=self.version),grant=grant)
+        # An old in-flight operation with the same UUID is not reinterpreted.
+        with patch.object(legacy.tier,'verify_authority',side_effect=ConnectionError('old retry')):
+            with self.assertRaises(ConnectionError):legacy.certify(request)
+        before={str(path.relative_to(legacy.root)):path.read_bytes() for path in legacy.root.rglob('*') if path.is_file()}
+        self.target_node.CONFIG['storageArchive']={'enabled':True,'machine':'other-node','authority':'other-hdd'}
+        scoped=M.StorageArchive.from_executor(self.target_node,source_policy=dict(POLICY))
+        self.assertNotEqual(scoped.root,legacy.root)
+        self.assertEqual(scoped.root.parent.name,'storage-archive-sources')
+        with patch.object(scoped.tier,'verify_authority',side_effect=ConnectionError('new retry')):
+            with self.assertRaises(ConnectionError):scoped.certify(request)
+        recovered=M.StorageArchive.from_executor(self.target_node,source_policy=dict(POLICY))
+        result=recovered.certify({**request,'retry':True})
+        self.assertEqual(result['state'],'READY')
+        self.assertEqual(recovered.certify(request),result)
+        self.assertEqual(before,{str(path.relative_to(legacy.root)):path.read_bytes() for path in legacy.root.rglob('*') if path.is_file()})
+        self.assertEqual(self.source.provision(self.request)['grant'],grant)
+        with self.assertRaises(ValueError):recovered.provision(self.request)
+        self.assertEqual(self.hot._tier('replica',self.version)['recovery']['proof'],recovered.remote._proof(grant))
+
+    def test_explicit_source_requires_exact_configuration_and_adapter(self):
+        self.tls_target()
+        for source in ({'enabled':False}, {**POLICY,'machine':'hot-node'},
+                       {**POLICY,'authority':'not-configured'}, {**POLICY,'machine':'not-configured'},
+                       {**POLICY,'extra':True}):
+            with self.subTest(source=source),self.assertRaises(ValueError):
+                M.StorageArchive.from_executor(self.target_node,source_policy=source)
+        self.assertFalse((self.target_node.ROOT/'storage-archive-sources').exists())
+        old=dict(self.target_node.CONFIG['transferPeers']['cold-node'])
+        self.target_node.CONFIG['transferPeers']['cold-node']['certificateSha256']='a'*64
+        with self.assertRaisesRegex(ValueError,'adapter'):
+            M.StorageArchive.from_executor(self.target_node,source_policy=POLICY)
+        self.target_node.CONFIG['transferPeers']['cold-node']=old
+        self.target_node.CONFIG['storageAuthorities']['hdd']['unknown']=True
+        with self.assertRaises(ValueError):M.StorageArchive.from_executor(self.target_node,source_policy=POLICY)
+
+    def test_default_and_scoped_namespaces_share_the_actual_admission_lock(self):
+        legacy=self.tls_target()
+        scoped=M.StorageArchive.from_executor(self.target_node,source_policy=dict(POLICY))
+        attempted,entered=threading.Event(),threading.Event()
+        def enter():
+            attempted.set()
+            with scoped._lock('admission'):entered.set()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with legacy._lock('admission'):
+                future=pool.submit(enter)
+                self.assertTrue(attempted.wait(2))
+                self.assertFalse(entered.wait(.05))
+            future.result(timeout=2)
+        self.assertTrue(entered.is_set())
+
     def test_worker_rejects_changed_peer_policy_before_seal(self):
         self.source.provision(self.request)
         self.node.CONFIG['transferPeers']['hot-node']['certificateSha256']='a'*64

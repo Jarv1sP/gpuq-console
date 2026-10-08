@@ -44,6 +44,34 @@ test('approved direct transfer is preparable but not falsely local READY',async 
   assert.equal(f.records.size,1);assert.ok(f.calls.filter(c=>c.operation==='datasets.status').every(c=>c.args.hostAdmin===false));
 });
 
+test('new prepare fixes a certified cache source to its original warehouse without a new byte protocol',async t=>{
+  const f=fixture(t),warehouse=MACHINES[3].id,original='u-warehouse-data';
+  f.service.archiveOriginalForCopy=(owner,machine,physical)=>{
+    assert.equal(owner,f.user.id);assert.equal(machine,source);assert.deepEqual(physical,ref);
+    return {machine:warehouse,dataset:original,version:ref.version};
+  };
+  f.service.archiveSourceAllowed=(owner,machine,physical)=>owner===f.user.id&&machine===warehouse&&physical.dataset===original&&physical.version===ref.version;
+  await f.service.prepareDataset(f.user.id,target,ref);
+  const create=f.calls.find(call=>call.operation==='transfers.create');
+  assert.equal(create.args.from,warehouse);assert.equal(create.args.dataset,original);
+  assert.equal(create.args.version,ref.version);assert.equal('sourcePolicy' in create.args,false);
+  assert.equal(f.row().source,warehouse);assert.equal(f.row().sourceDataset,original);
+  f.result().state='FAILED';
+  f.service.archiveOriginalForCopy=()=>{throw Error('An existing UUID must not reselect its source');};
+  await f.service.prepareDataset(f.user.id,target,ref);
+  assert.equal(f.calls.filter(call=>call.operation==='transfers.create').length,1);
+  assert.equal(f.row().source,warehouse);assert.equal(f.records.size,1);
+});
+
+test('missing or ambiguous original proof never silently selects an arbitrary warehouse',async t=>{
+  const f=fixture(t);f.service.archiveOriginalForCopy=()=>{throw Error('Ambiguous certified origin');};
+  await assert.rejects(f.service.prepareDataset(f.user.id,target,ref),/Ambiguous/);
+  assert.equal(f.records.size,0);
+  f.service.archiveOriginalForCopy=()=>null;
+  await f.service.prepareDataset(f.user.id,target,ref);
+  assert.equal(f.calls.find(call=>call.operation==='transfers.create').args.from,source);
+});
+
 test('administrator preparation keeps the real capability identity and personal transfer authority',async t=>{
   const f=fixture(t),bridge=f.service.bridge,seen=[];
   f.service.bridge=async(...args)=>{
