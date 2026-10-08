@@ -37,9 +37,15 @@ function targetCall(service,row,operation,args){
   if(!binding){
     // A damaged/missing transfer projection is not proof this was legacy.
     // The independently durable original job intent must also be absent.
-    if(Object.hasOwn(row.data,'trainingPreparation')||service.store.jobs.some(job=>job.trainingPreparations?.some(value=>
+    const jobs=service.store.jobs;
+    if(Object.hasOwn(row.data,'trainingPreparation')||Array.isArray(jobs)&&jobs.some(job=>job.trainingPreparations?.some(value=>
       value.preparation?.kind==='transfer'&&value.preparation.id===row.id)))
       fail('原训练准备回执缺失；不会把标记过的任务降回旧 worker。',409);
+    // Legacy standalone transfer/archive services have no durable training
+    // enqueue/store. A real training-capable service losing its registry is
+    // unknown, not evidence that an original marked transfer was legacy.
+    if(!Array.isArray(jobs)&&!(jobs===undefined&&typeof service.enqueue!=='function'))
+      fail('训练任务登记不可用；不会猜测原传输属于旧 worker。',409);
     return service.bridge(row.data.machine,operation,args);
   }
   if(binding.job.userId!==row.owner_id||binding.preparation.id!==row.id||binding.preparation.targetMachine!==row.data.machine||

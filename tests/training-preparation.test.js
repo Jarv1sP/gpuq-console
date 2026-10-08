@@ -121,3 +121,16 @@ test('lost or null transfer context cannot downgrade a durable marked intent to 
     assert.equal(f.calls.length,0,'missing context must never send a legacy target request');
   }
 });
+test('lost training context and unavailable job registry cannot be guessed legacy',async t=>{
+  for(const registry of ['missing','null']){
+    const f=fixture(t);
+    const value=await f.service.trainingTransferCall(f.principal,f.copy,{jobId:f.job.id,logicalReference:ref});
+    const row=f.service.db.prepare('SELECT data FROM transfers WHERE id=?').get(value.id),data=JSON.parse(row.data);
+    delete data.trainingPreparation;
+    f.service.db.prepare('UPDATE transfers SET data=? WHERE id=?').run(JSON.stringify(data),value.id);
+    if(registry==='missing')delete f.service.store.jobs;else f.service.store.jobs=null;
+    f.calls.length=0;
+    assert.equal((await f.service.transferCall(f.principal,'transfers.status',{id:value.id})).state,'UNKNOWN');
+    assert.equal(f.calls.length,0,'unavailable registry cannot authorize a legacy target request');
+  }
+});
