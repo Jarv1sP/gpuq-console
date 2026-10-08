@@ -160,6 +160,13 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 或改写 journal、非 authority 来源和客户端自报目标根在新派发前拒绝。它不操作真实
 节点、服务或 GPU，不代表生产盘速与跨机网络验收。
 
+训练项目准备与仓库池组合发布时，还须一起运行
+`training-project-preparation.test.js`、`training-project-preparation-node.test.py`、
+`training-preparation-worker.test.py` 与 `transfers-dual-root.test.py`：固定项目的私有
+准备／取消和原 UUID 不能退回普通复制，数据集的 `targetStorage` 摘要与根身份绑定
+同时保留。双根训练复制使用真实本机 TLS、显式模拟的校园物理路由，核对每次读取
+仍检查校园路线，旧 worker 不能消费新训练侧车或改写到仓库；不代表真实校园连通性。
+
 ## 项目生命周期额外回归
 
 `python3 tests/gpuq-native-release-gate.test.py` 用真实临时 SQLite 与有界本地文件验证固定 root 门禁：关闭状态两次物理扫描、原 unit/租约核验、全部 mutation RPC（含 observe/sync/fleet）及动作入口零派发、已有 pending action 不领取、DB/心跳不变、非法／过期／软硬链接／inode 变化保持关闭，显式移除后重新两次观察。文件夹具仅将临时 stat 的所有者表示为 root，不写 `/run`、不操作服务或 GPU；不能当作正式发布器或真实滚动升级通过。合同见 [NATIVE_RELEASE_GATE.md](NATIVE_RELEASE_GATE.md)。

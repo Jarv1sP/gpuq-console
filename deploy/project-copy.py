@@ -37,6 +37,7 @@ class ProjectPeer(t.PeerClient):
             self.connection.request('POST','/project-snapshot',body=payload,
                 headers={'Content-Type':'application/json','Authorization':'Bearer '+self.ticket['token']})
             response=self.connection.getresponse();raw=response.read(1500001)
+            self.verify_campus(response=True)
             p.need(len(raw)<=1500000,'Portable peer response is too large')
             value=json.loads(raw)
             p.need(response.status==200 and value.get('ok') is True,'Portable source unavailable')
@@ -45,12 +46,17 @@ class ProjectPeer(t.PeerClient):
 
 
 class ProjectCopies(t.TransferJobs):
+    t_digest=staticmethod(t.digest)
     def __init__(self,node):
         self.n=node
         self.store=node.projects().store
         self.portable=p.PortableProjects(self.store)
         self.root=node.ROOT/'project-copies'
         self.portable.s.private_dir(self.root,create=True)
+
+    def training_helper(self):
+        spec=importlib.util.spec_from_file_location('gpuq_training_project_worker',self.n.HERE/'training-preparation.py')
+        helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper);return helper
 
     @staticmethod
     def unit(key,attempt):return 'gpuq-project-copy-'+t.identifier(key)+'-'+str(attempt)+'.service'
@@ -100,17 +106,18 @@ class ProjectCopies(t.TransferJobs):
                 result['imageEntries']=None
         return result
 
-    def launch(self,spec):
+    def launch(self,spec,*,training=False):
         self.n.atomic_json(self.path(spec['id']),spec)
         try:
             self.n.run(['/usr/bin/systemd-run','--user','--collect','--unit='+self.unit(spec['id'],spec['attempt']),
                 '--property=Type=exec','--property=KillMode=control-group','--property=UMask=0077',
                 '--property=CPUQuota=200%','--property=MemoryMax=2G','--property=TasksMax=128',
                 '--property=RuntimeMaxSec=86400','--property=TimeoutStopSec=10',
-                '/usr/bin/python3',str(self.n.HERE/'node-executor.py'),'--project-copy-worker',spec['id'],str(spec['attempt'])],timeout=8)
+                '/usr/bin/python3',str(self.n.HERE/'node-executor.py'),
+                '--training-project-copy-worker' if training else '--project-copy-worker',spec['id'],str(spec['attempt'])],timeout=8)
         except (OSError,ValueError,subprocess.SubprocessError):pass
 
-    def start_spec(self,args,payload):
+    def start_spec(self,args,payload,*,training=False):
         self.identity(args);key=args['id']
         with self.store.lifetime(args['userId'],args['project']),self.lock(key):
             p.need(self.store.lifecycle(args['userId'],args['project'])['state'] not in ('RETIRING','RETIRED'),
@@ -138,15 +145,15 @@ class ProjectCopies(t.TransferJobs):
                     spec={**payload,'id':key,'digest':t.digest(payload),'attempt':1,'createdAt':time.time()}
                     retained.append({'id':key,'userId':args['userId']})
                     self.n.atomic_json(self.path('00000000-0000-0000-0000-000000000000','.slots.json'),{'slots':retained})
-                    self.launch(spec)
+                    self.launch(spec,training=training)
             return self.status({'id':key,'userId':args['userId']})
 
-    def prepare(self,args):
+    def prepare(self,args,*,training=False):
         p.need(set(args)=={'id','userId','project','release','targetMachine'},'Invalid project export fields')
         self.identity(args)
         target=args['targetMachine']
         p.need(isinstance(target,str) and t.MACHINE.fullmatch(target) and target!=self.machine(),'Select a different exact target node')
-        result=self.start_spec(args,{**{k:args[k] for k in ('userId','project','release','targetMachine')},'role':'export'})
+        result=self.start_spec(args,{**{k:args[k] for k in ('userId','project','release','targetMachine')},'role':'export'},training=training)
         if result['state']!='READY':return result
         with self.lock(args['id'],'.ticket.lock'):
             p.need(not any(self.path(args['id'],suffix).exists() for suffix in ('.cancel','.revoked')),
@@ -160,7 +167,7 @@ class ProjectCopies(t.TransferJobs):
             p.need(not grant.get('revoked') and grant['expiresAt']>time.time(),'Source project grant expired or revoked; inspect original copy')
             return {**result,'source':{'id':args['id'],'token':grant['token'],**grant['info']}}
 
-    def start(self,args):
+    def start(self,args,*,training=False):
         p.need(set(args)=={'id','userId','project','release','sourceMachine','source'},'Invalid project copy fields')
         self.identity(args)
         source=args['source'];machine=args['sourceMachine']
@@ -174,7 +181,7 @@ class ProjectCopies(t.TransferJobs):
              and type(source['totalBytes']) is int and 0<=source['totalBytes']<=self.store.MAX_BYTES
              and type(source['entries']) is int and 0<=source['entries']<=self.store.max_entries+7,'Invalid immutable project source grant')
         ProjectPeer(self.n.CONFIG.get('transferPeers',{}).get(machine),source).close()
-        return self.start_spec(args,{**{k:args[k] for k in ('userId','project','release','sourceMachine','source')},'role':'import'})
+        return self.start_spec(args,{**{k:args[k] for k in ('userId','project','release','sourceMachine','source')},'role':'import'},training=training)
 
     def status(self,args):
         p.need(set(args)=={'id','userId'},'Invalid copy status fields')
@@ -327,7 +334,7 @@ class ProjectCopies(t.TransferJobs):
             return self.portable.read(grant['userId'],grant['project'],grant['release'],request.get('action'),
                 **{k:request[k] for k in ('path','offset') if k in request})
 
-    def worker(self,key,attempt):
+    def worker(self,key,attempt,*,require_training=False):
         key=t.identifier(key)
         with self.lock(key,'.worker.lock'):
             spec=self.load(key);result={'state':'FAILED','attempt':attempt}
@@ -335,11 +342,17 @@ class ProjectCopies(t.TransferJobs):
             self.n.atomic_json(self.path(key,'.started-'+str(attempt)),{'attempt':attempt})
             try:
                 if any(self.path(key,suffix).exists() for suffix in ('.cancel','.revoked')):raise InterruptedError()
+                if require_training:
+                    helper=self.training_helper()
+                    binding=helper.project_worker_binding(self.n,self,key)
+                    helper.project_admission(self.n,self,binding,spec)
+                elif os.path.lexists(self.path(key,'.training.json')):
+                    raise ValueError('Training project copy cannot use a legacy worker')
                 if spec['role']=='export':
                     self.portable.export(spec['userId'],spec['project'],spec['release'],operation=key)
                     result['state']='READY'
                 else:
-                    self.receive(spec);result['state']='SUCCEEDED'
+                    self.receive(spec,training=require_training);result['state']='SUCCEEDED'
             except InterruptedError:result.update(state='CANCELED',error='Copy canceled; development files unchanged')
             except Exception as error:result.update(state='FAILED',error=str(error)[:240])
             if spec['role']=='import':
@@ -348,8 +361,9 @@ class ProjectCopies(t.TransferJobs):
             self.n.atomic_json(self.path(key,'.result.json'),result)
             return 0 if result['state'] in ('READY','SUCCEEDED') else 1
 
-    def receive(self,spec):
+    def receive(self,spec,*,training=False):
         client=ProjectPeer(self.n.CONFIG['transferPeers'][spec['sourceMachine']],spec['source'])
+        client.campus_only=training
         key,user,project,release=(spec[k] for k in ('id','userId','project','release'))
         def read(action,**fields):
             for retry in range(4):
@@ -403,10 +417,12 @@ class ProjectCopies(t.TransferJobs):
             self.n.atomic_json(self.path(key,'.progress.json'),{'bytes':total})
         finally:client.close()
 
-    def process(self,operation,args):
+    def process(self,operation,args,*,training=False):
+        if not training and operation!='projects.copy.probe' and os.path.lexists(self.path(args.get('id'),'.training.json')):
+            raise ValueError('Training project copy requires its original private context')
         action=operation.removeprefix('projects.copy.')
-        if action=='prepare':return self.prepare(args)
-        if action=='start':return self.start(args)
+        if action=='prepare':return self.prepare(args,training=training)
+        if action=='start':return self.start(args,training=training)
         if action=='status':return self.status(args)
         if action=='cancel':return self.cancel(args)
         if action=='revoke':return self.revoke(args)

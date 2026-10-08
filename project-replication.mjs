@@ -2,12 +2,28 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {MACHINES} from './dist/model.js';
 import {projectReference,UUID} from './projects.mjs';
+import {assertTrainingProjectPreparation,bindTrainingProjectPreparation,trainingProjectPreparationCall} from './training-preparation.mjs';
 const terminal=new Set(['SUCCEEDED','FAILED','CANCELED']);
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const lanes=new WeakMap();
 const preparations=new WeakMap();
-const view=row=>{const {sourceTicket,...data}=row.data;return {id:row.id,state:row.state,...data};};
+const view=row=>{const {sourceTicket,trainingPreparation,...data}=row.data;return {id:row.id,state:row.state,...data};};
+function targetCall(service,row,machine,operation,args){
+  if(row.data.trainingPreparation){
+    const value=row.data.trainingPreparation,prep=value.preparation;
+    if(prep?.id!==row.id||prep.kind!=='project'||row.owner_id!==value.job?.userId||
+       row.data.from!==prep.sourceMachine||row.data.machine!==prep.targetMachine||
+       row.data.project!==prep.reference?.project||row.data.release!==prep.reference.release)fail('训练项目复制固定身份不符。',409);
+    return trainingProjectPreparationCall(service,value,machine,operation,args);
+  }
+  const jobs=service.store.jobs;
+  if(Object.hasOwn(row.data,'trainingPreparation')||Array.isArray(jobs)&&
+     jobs.some(job=>job.trainingPreparations?.some(value=>value.preparation?.kind==='project'&&value.preparation.id===row.id))||
+     !Array.isArray(jobs)&&!(jobs===undefined&&typeof service.enqueue!=='function'))
+    fail('训练项目复制持久上下文未确认；不会使用旧入口。',409);
+  return service.bridge(machine,operation,args);
+}
 function read(service,id){const row=service.db.prepare('SELECT * FROM project_copies WHERE id=?').get(id);if(!row)fail('项目复制不存在。',404);return {...row,data:JSON.parse(row.data)};}
 function save(service,row,state,change={}){
   const current=read(service,row.id),data={...row.data,...change,cancelRequested:current.data.cancelRequested||change.cancelRequested||false};
@@ -47,23 +63,23 @@ async function advance(service,id){return lane(service,id,async()=>{
       // target. This operation retains transport packages and never kills a
       // worker; final cleanup still requires both sides definitely stopped.
       try{
-        const fenced=await service.bridge(data.from,'projects.copy.revoke',control);
+        const fenced=await targetCall(service,row,data.from,'projects.copy.revoke',control);
         if(fenced?.id===id&&fenced.sourceRevoked===true&&fenced.fenced===true)
           row=save(service,row,row.state,{sourceRevoked:true});
       }catch{} // Still try to stop the target if the source itself is offline.
     }
     if(data.cancelRequested){
-      const stopped=await service.bridge(data.machine,'projects.copy.cancel',control);
+      const stopped=await targetCall(service,row,data.machine,'projects.copy.cancel',control);
       if(stopped?.id!==id||!['CANCELED','SUCCEEDED'].includes(stopped.state)||!row.data.sourceRevoked)return view(save(service,row,'CANCELING'));
-      const source=await service.bridge(data.from,'projects.copy.cancel',control);
+      const source=await targetCall(service,row,data.from,'projects.copy.cancel',control);
       if(source?.id!==id||!['READY','CANCELED','FAILED'].includes(source.state))return view(save(service,row,'CANCELING'));
       return view(save(service,row,stopped.state==='SUCCEEDED'?'SUCCEEDED':'CANCELED',{
         sourceRevoked:true,cleanupComplete:stopped.cleaned===true&&source.cleaned===true,error:null}));
     }
     if(terminal.has(row.state)){
-      const target=await service.bridge(data.machine,'projects.copy.cancel',control);
+      const target=await targetCall(service,row,data.machine,'projects.copy.cancel',control);
       if(target?.id!==id||!['SUCCEEDED','CANCELED','FAILED'].includes(target.state)||!row.data.sourceRevoked)return view(row);
-      const source=await service.bridge(data.from,'projects.copy.cancel',control);
+      const source=await targetCall(service,row,data.from,'projects.copy.cancel',control);
       if(source?.id===id&&['READY','CANCELED','FAILED'].includes(source.state))row=save(service,row,row.state,{
         sourceRevoked:true,cleanupComplete:source.cleaned===true&&target.cleaned===true});
       return view(row);
@@ -73,7 +89,7 @@ async function advance(service,id){return lane(service,id,async()=>{
       await service.ociProjectAdmission?.(data.from,row.owner_id,data.project);
       authorized(service,row.owner_id,data);
       if(maintained()||read(service,id).data.cancelRequested)return view(read(service,id));
-      const result=await service.bridge(data.from,'projects.copy.prepare',{...control,project:data.project,release:data.release,targetMachine:data.machine});
+      const result=await targetCall(service,row,data.from,'projects.copy.prepare',{...control,project:data.project,release:data.release,targetMachine:data.machine});
       assertCopyResult(row,result);
       if(result.state==='FAILED'||result.state==='CANCELED')return view(save(service,row,result.state,{error:result.error||'项目导出未完成。'}));
       if(result.state!=='READY')return view(save(service,row,'PREPARING',{sourceState:result.state,error:result.state==='UNKNOWN'?'导出回执未确认；不会重复启动。':null}));
@@ -87,7 +103,7 @@ async function advance(service,id){return lane(service,id,async()=>{
     await service.ociProjectAdmission?.(data.machine,row.owner_id,data.project,{creatingOCI:true});
     authorized(service,row.owner_id,row.data);
     if(maintained()||read(service,id).data.cancelRequested)return view(read(service,id));
-    const result=await service.bridge(data.machine,'projects.copy.start',{...control,project:data.project,release:data.release,
+    const result=await targetCall(service,row,data.machine,'projects.copy.start',{...control,project:data.project,release:data.release,
       sourceMachine:data.from,source:row.data.sourceTicket});
     assertCopyResult(row,result);
     row=save(service,row,result.state==='READY'?'SUCCEEDED':result.state,
@@ -116,13 +132,39 @@ export function installProjectReplication(service){
        reference.release&&(result.release!==reference.release||!result.releaseReady))fail('项目便携能力未确认。',503);
     return result;
   };
-  const prepareProject=async(owner,machine,reference)=>{
+  const prepareProject=async(owner,machine,reference,options={})=>{
     const {from,project,release}=reference;authorized(service,owner,{from,machine});
     try{
       const result=await service.bridge(machine,'projects.verify',{userId:owner,project,release});
       if(result?.state==='READY'&&result.project===project&&result.release===release)return {...result,machine};
     }catch{}
     if(from===machine)fail('所选源节点的固定项目版本不可用。',409);
+    if(options.trainingJobId){
+      // Only the internal job preparation caller supplies this option. Public
+      // replication schemas remain unchanged and cannot upgrade old copies.
+      const value=await bindTrainingProjectPreparation(service,options.trainingJobId,{sourceMachine:from,project,release});
+      if(value.job.userId!==owner||value.preparation.targetMachine!==machine)fail('项目准备账号或目标不符。',409);
+      let found=service.db.prepare('SELECT * FROM project_copies WHERE id=?').get(value.preparation.id);
+      if(!found){
+        const source=await service.projectCopyProbe(owner,from,{project,release});
+        const target=await service.projectCopyProbe(owner,machine,{project,from});
+        if(source.architecture!==target.architecture)fail('源与目标 CPU 架构不兼容。',409);
+        await service.enqueue(()=>{
+          assertTrainingProjectPreparation(service,value);authorized(service,owner,{from,machine});
+          if(service.maintenanceFor?.(from)||service.maintenanceFor?.(machine))fail('项目准备机器正在维护。',409);
+          const existing=service.db.prepare('SELECT * FROM project_copies WHERE id=?').get(value.preparation.id);
+          if(existing){found=existing;return;}
+          const data={from,machine,project,release,cancelRequested:false,trainingPreparation:value},now=Date.now();
+          service.db.prepare('INSERT INTO project_copies VALUES(?,?,?,?,?,?,?,?)').run(value.preparation.id,owner,value.preparation.id,hash({from,machine,project,release}),
+            'PREPARING',JSON.stringify(data),now,now);
+          found=service.db.prepare('SELECT * FROM project_copies WHERE id=?').get(value.preparation.id);
+        });
+      }
+      const data=JSON.parse(found.data);
+      if(found.owner_id!==owner||JSON.stringify(data.trainingPreparation)!==JSON.stringify(value))fail('项目复制原编号上下文不符。',409);
+      const result=await advance(service,found.id);
+      return {project,release,machine,state:result.state==='SUCCEEDED'?'READY':terminal.has(result.state)?'FAILED':'PREPARING',operationId:result.id,error:result.error};
+    }
     let found;
     for(const row of service.db.prepare('SELECT * FROM project_copies WHERE owner_id=? ORDER BY created_at DESC LIMIT 1000').all(owner)){
       const data=JSON.parse(row.data);
@@ -133,13 +175,32 @@ export function installProjectReplication(service){
     return {project,release,machine,state:result.state==='SUCCEEDED'?'READY':terminal.has(result.state)?'FAILED':'PREPARING',operationId:result.id,
       error:terminal.has(result.state)&&result.state!=='SUCCEEDED'?`${result.error||'项目复制未完成。'} 排查后运行 gpuctl project copy-retry ${result.id}；状态未知时不要新建复制。`:result.error};
   };
-  service.prepareProject=(owner,machine,reference)=>{
+  service.prepareProject=(owner,machine,reference,options)=>{
     let pending=preparations.get(service);if(!pending){pending=new Map();preparations.set(service,pending);}
-    const key=JSON.stringify([owner,machine,reference.from,reference.project,reference.release]);
+    const key=JSON.stringify([owner,machine,reference.from,reference.project,reference.release,options?.trainingJobId||null]);
     if(pending.has(key))return pending.get(key);
     if(pending.size>=8)return Promise.reject(Object.assign(Error('项目准备繁忙，请稍后刷新。'),{status:429}));
-    const operation=Promise.resolve().then(()=>prepareProject(owner,machine,reference)).finally(()=>pending.delete(key));
+    const operation=Promise.resolve().then(()=>prepareProject(owner,machine,reference,options)).finally(()=>pending.delete(key));
     pending.set(key,operation);return operation;
+  };
+  service.cancelTrainingProjectCopy=async value=>{
+    assertTrainingProjectPreparation(service,value,{cleanup:true});
+    const row=service.db.prepare('SELECT * FROM project_copies WHERE id=?').get(value.preparation.id);
+    if(row){
+      const current=read(service,row.id);
+      if(JSON.stringify(current.data.trainingPreparation)!==JSON.stringify(value))fail('项目准备原上下文丢失。',409);
+      if(!terminal.has(current.state))save(service,current,'CANCELING',{cancelRequested:true});
+      return advance(service,row.id);
+    }
+    // A saved job intent can outlive a crash before its original copy-row
+    // insert. Fence BOTH exact nodes/UUID, never mint a replacement operation.
+    const control={id:value.preparation.id,userId:value.job.userId};
+    const source=await trainingProjectPreparationCall(service,value,value.preparation.sourceMachine,'projects.copy.revoke',control);
+    const target=await trainingProjectPreparationCall(service,value,value.preparation.targetMachine,'projects.copy.cancel',control);
+    const stopped=await trainingProjectPreparationCall(service,value,value.preparation.sourceMachine,'projects.copy.cancel',control);
+    if(source.fenced!==true||source.sourceRevoked!==true||target.state!=='CANCELED'||target.cleaned!==true||stopped.state!=='CANCELED'||stopped.cleaned!==true)
+      fail('项目准备的原 worker 停止尚未确认。',409);
+    return {id:value.preparation.id,state:'CANCELED',cleanupComplete:true};
   };
   service.reconcileProjectCopies=async()=>{
     const rows=service.db.prepare("SELECT id FROM project_copies WHERE state NOT IN ('SUCCEEDED','FAILED','CANCELED') OR COALESCE(json_extract(data,'$.cleanupComplete'),0)=0 ORDER BY updated_at LIMIT 8").all();
@@ -185,6 +246,8 @@ export async function projectReplicationCall(service,principal,operation,args,re
     Object.keys(args).sort().join(',')!==(retry?'id,key':'id')||!UUID.test(args.id||'')||retry&&!UUID.test(args.key||''))fail('项目复制操作无效。');
   let row=read(service,args.id);if(row.owner_id!==principal.userId)fail('项目复制不存在或属于其他账号。',404);
   if(retry){
+    if(Object.hasOwn(row.data,'trainingPreparation')||service.store.jobs?.some(job=>job.trainingPreparations?.some(value=>value.preparation?.kind==='project'&&value.preparation.id===row.id)))
+      fail('训练准备副本由原作业管理；先结束原作业再明确提交，不会从普通复制入口改派。',409);
     authorized(service,principal.userId,row.data);
     if(!['FAILED','CANCELED'].includes(row.state))fail('仅明确失败或取消的复制可重试；运行中或 UNKNOWN 请先查询原操作。',409);
     if(args.key===row.client_key)fail('显式重试需要新的重试键；其响应不明时必须复用该键。',409);
