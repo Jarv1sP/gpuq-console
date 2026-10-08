@@ -391,3 +391,44 @@ DELETED 只覆盖当前逻辑版本及固定授权依赖；其他名称下的副
 专门的父目录缺失错误；损坏登记、权限撤销、unsafe link 和 I/O 错误保持原拒绝。
 `status/prepare/lease/unregister` 与一般目录存在检查不使用这个展示降级，
 缺父目录仍拒绝，不能把 UNKNOWN 当作安全不存在或准备／删除授权。
+
+## 个人与按成员的项目空间（只读，节点需配套更新）
+
+`storage.usage.mine {}` 只返回当前会话账号；`storage.usage.users {}` 仅管理员可调用。
+两项均可在维护期间读取，不接受 machine、userId、hostAdmin、path 或其他额外参数。
+没有新增数据库表、schema、写入操作或磁盘额度限制。
+
+```js
+// storage.usage.mine
+{protocol:1, checkedAt:"UTC ISO8601", machines:[{
+  machine:"清单 ID", available:true, collectedAt:"UTC ISO8601 或 null",
+  complete:true, projectBytes:8192, projects:[{project:"项目 ID", name:"项目名称", bytes:4096}]
+}]}
+// storage.usage.users（含已停用账号的现有数据；label 为账号显示名）
+{protocol:1, checkedAt:"UTC ISO8601", users:[{
+  userId:"账号 ID", label:"显示名", machines:[/* 同上 */]
+}]}
+```
+
+旧节点没有拆分协议、未配置执行桥或读取失败时，该机器为
+`{machine,available:false,reason,collectedAt:null,complete:false,projectBytes:null,projects:[]}`。
+节点支持协议但采样不完整时为 `available:true,complete:false,projectBytes:null`；
+个别项目无法确定时其 bytes 为 null。只有完整采样证实该账号不存在项目时才返回 0。
+checkedAt 是门户查询时间；collectedAt 是独立的项目采集时间，不用磁盘容量时间代替。
+
+节点只追加 `datasets.capacity.storageOverview.cache.projectUsage`：
+`{protocol:1,complete,owners:[{owner,complete,projectBytes}],projects:[{owner,project,name,bytes}]}`。
+owner 是节点固定目录的 SHA-256 身份（旧 users 目录为 32 位前缀），不是可见用户名；
+Portal 从会话账号计算身份，严格筛选后才返回。现有 projectBytes、projectUsageComplete、
+projectCollectedAt 等字段与总量口径保留；现有成员 capacity 和 overview 不透出拆分身份。
+
+拆分与原总量使用同一次 0.5 秒／100000 项有界采样和 300 秒私有观测缓存。
+计入项目草稿、发布、HOME、环境、结果等受管目录的实际分配块，按设备与 inode 去重；
+账号目录公共块计入账号合计，不重复算进每个项目。跨项目硬链接、OCI 共享层、
+未能关联到项目的旧用户文件不分摊，相关账号合计或项目返回 null／false。
+固定项目目录里的有效 project.json 证明所属；name 当前为该项目 ID。
+读取不修改项目、上传、租约或配额，仅沿用现有采样器的私有观测缓存。
+
+Portal 只调用现有字面量 `datasets.capacity`，并行、有 5 秒读取上限，缓存最多 300 秒；
+超时不会反复创建未结束的节点读取。节点未安装这一增量时 Portal 返回 available:false。
+本 PR 不部署节点，需后端在下一次 5090 独立运行时安装时一起带上 storage-observation.py。

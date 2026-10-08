@@ -1,6 +1,7 @@
 """Bounded local project observation; no devices, RPC, GPUs or business writes."""
 import copy
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -86,7 +87,143 @@ class ProjectObservation(unittest.TestCase):
 
     def assert_unknown(self, value, collected=None):
         self.assertEqual(value, dict(projectBytes=None, projectUsageComplete=False,
-                                     projectCollectedAt=collected))
+                                     projectCollectedAt=collected,
+                                     projectUsage=dict(protocol=1, complete=False, owners=[], projects=[])))
+
+    def project(self, user='demo-user-1', project='first', mode='isolated'):
+        owner = hashlib.sha256(user.encode()).hexdigest()
+        path = self.root/'projects-v2'/owner/project
+        self.file(str(path.relative_to(self.root)/'project.json'), json.dumps(
+            dict(schema=2, owner=owner, project=project, environmentMode=mode)).encode())
+        return owner, path
+
+    def allocated(self, path):
+        seen, total = set(), 0
+        for entry in [path, *path.rglob('*')]:
+            info = entry.lstat()
+            key = (info.st_dev, info.st_ino)
+            if not stat.S_ISLNK(info.st_mode) and key not in seen:
+                total += info.st_blocks*512
+                seen.add(key)
+        return total
+
+    def test_breakdown_uses_same_scan_for_proven_owner_project_and_all_account_total(self):
+        owner, first = self.project()
+        other, second = self.project('demo-user-2', 'second')
+        for project in (first, second):
+            for directory in ('dev/code', 'dev/env', 'dev/home', 'releases/v1', 'runs/job'):
+                self.file(str(project.relative_to(self.root)/directory/'file'), b'x'*4096)
+        value = self.success()
+        usage = value['projectUsage']
+        self.assertTrue(usage['complete'])
+        rows = {row['owner']: row for row in usage['owners']}
+        self.assertEqual(rows[owner], dict(owner=owner, complete=True, projectBytes=self.allocated(first.parent)))
+        self.assertEqual(rows[other], dict(owner=other, complete=True, projectBytes=self.allocated(second.parent)))
+        projects = {row['project']: row for row in usage['projects']}
+        self.assertEqual(projects['first'], dict(owner=owner, project='first', name='first', bytes=self.allocated(first)))
+        self.assertEqual(projects['second']['bytes'], self.allocated(second))
+
+    def test_breakdown_sparse_files_and_same_project_hardlinks_are_device_inode_deduplicated(self):
+        owner, path = self.project()
+        file = self.file(str(path.relative_to(self.root)/'dev/code/file'), b'x'*8192)
+        os.link(file, path/'release-copy')
+        sparse = path/'sparse'
+        with sparse.open('wb') as out:
+            out.seek(10*1024**2)
+            out.write(b'x')
+        row = self.success()['projectUsage']['projects'][0]
+        self.assertEqual(row['bytes'], self.allocated(path))
+        self.assertLess(row['bytes'], sparse.stat().st_size)
+
+    def test_cross_project_and_cross_owner_shared_inodes_are_unknown_not_split(self):
+        owner, first = self.project()
+        _, second = self.project(project='second')
+        other, third = self.project('demo-user-2', 'third')
+        file = self.file(str(first.relative_to(self.root)/'shared'), b'x'*8192)
+        os.link(file, second/'shared')
+        os.link(file, third/'shared')
+        usage = self.success()['projectUsage']
+        self.assertTrue(all(row['bytes'] is None for row in usage['projects']))
+        self.assertTrue(all(not row['complete'] and row['projectBytes'] is None for row in usage['owners']))
+
+    def test_shared_oci_graph_is_not_apportioned_and_does_not_change_existing_total(self):
+        owner, first = self.project(mode='oci')
+        _, second = self.project(project='second', mode='oci')
+        self.file('oci/'+owner+'/graph/overlay/layer/data', b'x'*16384)
+        self.file('oci/'+owner+'/home/config', b'owner engine config')
+        value = self.success()
+        self.assertTrue(value['projectUsageComplete'])
+        self.assertTrue(all(row['bytes'] is None for row in value['projectUsage']['projects']))
+        self.assertEqual(value['projectUsage']['owners'][0]['projectBytes'], None)
+        self.assertFalse(value['projectUsage']['owners'][0]['complete'])
+
+    def test_unproven_project_metadata_is_unknown_and_never_emits_an_unproven_name(self):
+        owner, path = self.project()
+        (path/'project.json').write_text(json.dumps(dict(schema=2, owner='b'*64, project='first')))
+        usage = self.success()['projectUsage']
+        self.assertEqual(usage['projects'], [])
+        self.assertEqual(usage['owners'][0], dict(owner=owner, complete=False, projectBytes=None))
+
+    def test_unknown_owner_paths_refuse_complete_breakdown_but_preserve_existing_total(self):
+        self.file('projects-v2/unproven-user/first/code')
+        value = self.success()
+        self.assertFalse(value['projectUsage']['complete'])
+        self.assertEqual(value['projectUsage']['owners'], [])
+
+    def test_legacy_user_prefix_is_merged_only_by_unique_full_identity_and_remains_unattributed(self):
+        owner, path = self.project()
+        file = self.file(str(path.relative_to(self.root)/'dev/code/file'))
+        legacy = self.file('users/'+owner[:32]+'/job/file')
+        legacy.unlink()
+        os.link(file, legacy)
+        usage = self.success()['projectUsage']
+        self.assertEqual([row['owner'] for row in usage['owners']], [owner])
+        self.assertFalse(usage['owners'][0]['complete'])
+        self.assertEqual(usage['owners'][0]['projectBytes'], None)
+
+    def test_breakdown_limit_truncation_is_unknown_not_a_partial_owner_zero(self):
+        self.project()
+        real = observer.sample
+        def small(fd, **kwargs):
+            return real(fd, maximum=1, **kwargs)
+        with patch.object(observer, 'sample', side_effect=small):
+            value = observer.project_usage(self.node)
+        self.assert_unknown(value)
+        self.assertFalse(value['projectUsage']['complete'])
+
+    def test_breakdown_only_group_bound_preserves_the_existing_all_account_total(self):
+        self.project()
+        self.project('demo-user-2', 'second')
+        with patch.object(observer, 'MAX_GROUPS', 1):
+            value = self.success()
+        self.assertFalse(value['projectUsage']['complete'])
+        self.assertEqual(value['projectUsage']['owners'], [])
+
+    def test_breakdown_cache_reuses_full_projection_without_a_second_scan(self):
+        self.project()
+        value = self.success()
+        with patch.object(observer, 'bounded_sample', side_effect=AssertionError('cached no scan')):
+            self.assertEqual(observer.project_usage(self.node), value)
+
+    def test_old_cache_retains_existing_fields_and_returns_unknown_breakdown_until_ttl(self):
+        value = self.success()
+        proof = self.proof()
+        del proof['value']['projectUsage']
+        self.write_proof(proof)
+        with patch.object(observer, 'bounded_sample', side_effect=AssertionError('old fresh cache no scan')):
+            actual = observer.project_usage(self.node)
+        for key in ('projectBytes', 'projectUsageComplete', 'projectCollectedAt'):
+            self.assertEqual(actual[key], value[key])
+        self.assertEqual(actual['projectUsage'], observer.EMPTY_BREAKDOWN)
+
+    def test_invalid_cached_breakdown_fails_closed_before_scanning(self):
+        self.project()
+        self.success()
+        proof = self.proof()
+        proof['value']['projectUsage']['owners'][0]['projectBytes'] = True
+        self.write_proof(proof)
+        with patch.object(observer, 'bounded_sample', side_effect=AssertionError('invalid cache no scan')):
+            self.assert_unknown(observer.project_usage(self.node))
 
     def test_all_accounts_allocated_blocks_sparse_and_hardlink_dedup(self):
         source = self.file('projects-v2/alice/p/code/train.py', b'x'*8192)

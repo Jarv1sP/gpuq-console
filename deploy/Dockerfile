@@ -21,6 +21,7 @@ COPY --chown=root:root proto/clouddrive-pilot.proto ./proto/
 COPY --chown=root:root dataset-catalog.mjs dataset-storage-overview.mjs dataset-files.mjs dataset-cache-actions.mjs dataset-preparation.mjs dataset-replication.mjs dataset-deletion.mjs storage-archive.mjs dataset-ingress.mjs ./
 COPY --chown=root:root project-replication.mjs machine-selection.mjs ./
 COPY --chown=root:root dataset-labels.mjs ./
+COPY --chown=root:root storage-usage.mjs ./
 COPY --chown=root:root task-display.mjs ./
 COPY --chown=root:root docs/USER_GUIDE.md ./docs/
 COPY --chown=root:root deploy/install-client.sh deploy/install-client.ps1 ./deploy/

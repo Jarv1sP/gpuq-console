@@ -21,6 +21,7 @@ import {installDatasetDeletion} from './dataset-deletion.mjs';
 import {installTaskDisplay,taskDisplayCall} from './task-display.mjs';
 import {installDatasetIngress,datasetUploadAdmissionView} from './dataset-ingress.mjs';
 import {installDatasetCacheActions} from './dataset-cache-actions.mjs';
+import {storageUsageCall} from './storage-usage.mjs';
 
 // One process owns this database. Serial transactions keep account changes atomic.
 // Reservations are durable before the separate restricted executor dispatches GPUQ.
@@ -336,6 +337,21 @@ export class PortalService extends DemoService{
       const principal=this.principal(token);
       const check=()=>{const current=this.principal(token);if(current.userId!==principal.userId||current.username!==principal.username||current.role!==principal.role)throw Object.assign(Error('登录身份已改变。'),{status:403});};
       return this.datasetDeletionCall(principal,operation,structuredClone(args),check).then(result=>{check();return {result,principal:{...principal}};});
+    }
+    if(['storage.usage.mine','storage.usage.users'].includes(operation)){
+      const principal=this.principal(token),policy=JSON.stringify(this.store.get(principal.userId));
+      const check=()=>{
+        const current=this.principal(token);
+        if(this.closing||current.userId!==principal.userId||current.role!==principal.role||current.username!==principal.username
+          ||JSON.stringify(this.store.get(current.userId))!==policy)
+          throw Object.assign(Error('账号授权已改变，请刷新后重试。'),{status:403});
+        return current;
+      };
+      this.assertMaintenanceAllowed?.(operation,args,principal);
+      if(this.datasetReadPending>=4)throw Object.assign(Error('空间统计正在读取，请稍后刷新。'),{status:429});
+      this.datasetReadPending++;
+      return storageUsageCall(this,principal,operation,args).then(result=>({result,principal:check()}))
+        .finally(()=>this.datasetReadPending--);
     }
     if(['datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.list','datasets.status','datasets.prepare',
       'datasets.cache.capabilities','datasets.cache.prepare','datasets.cache.release','datasets.cache.status','datasets.cache.cancel'].includes(operation))return this.datasetRead(token,operation,args);
