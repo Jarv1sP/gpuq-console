@@ -198,3 +198,5 @@ try{
  assert(!calls.some(row=>row.operation.startsWith('datasets.storage.')||row.operation.startsWith('cloud.auth.')),"visiting an admin's main view sends no privileged data/storage RPC");
  assert.deepEqual(errors,[]);if(fullScan)assert.equal(scans.reduce((sum,row)=>sum+row.count,0),10620,'Every original role/state/zoom/width/height profile is measured');await writeFile(join(output,'shots.json'),JSON.stringify({checkedAt,results,errors,calls,scans},null,2));console.log('PASS '+results.length+' native v3 screenshots: member/admin × main/upload-1/upload-2 ×1440/390/320; shared help geometry; no overflow/script errors; anonymous route probe, no upload begin/ticket/write; search, filters, phone detail/back and Esc focus.');
 }finally{await browser.close();}
+
+await import("./member-storage-ui-smoke.mjs");

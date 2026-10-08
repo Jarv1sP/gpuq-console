@@ -78,7 +78,7 @@ function render(preserve=false){
   $('#edit-profile').hidden=!logged||store.production&&store.data?.taskMetadata?.version!==1;
   if(!logged)$('#profile-dialog').close();
   $('#switch-account').textContent=logged?'退出登录':'登录';$('#refresh-state').disabled=!logged;
-  const titles={me:['我的','账号、额度与个人工作区。'],transfers:['数据集','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['数据集',''],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。'],admin:['管理后台','']};
+  const titles={me:['我的','账号、额度与个人工作区。'],transfers:['存储','后台传输与断点续传；不占用 GPU。'],work:['我的工作台','准备代码与环境，提交训练，跟进每一次实验。'],resources:['算力总览',''],datasets:['存储',''],community:['协作区','查看通知、反馈问题，和大家协调使用安排。'],maintenance:['历史运维记录','维护申请已停用，此处仅保留历史脚本和结果。'],users:['成员与授权','审批新成员，设置服务器权限和用卡额度。'],admin:['管理后台','']};
   const concisePage=['community','users','maintenance','admin'].includes(page);
   $('#page-title').textContent=titles[page][0];$('#page-description').textContent=concisePage?'':titles[page][1];$('#page-description').hidden=concisePage||!titles[page][1];$('.help-links').hidden=concisePage;$('#breadcrumb').textContent=titles[page][0];
   if(!concisePage&&titles[page][1])discloseInfo($('#page-description'),'页面说明');
@@ -222,5 +222,6 @@ if(store.principal)defaultPage();render();if(store.principal)shell.syncStatus('r
 onAdminSectionsChange(()=>render(true));
 const poll=setInterval(()=>{if(!document.hidden)refresh();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+document.addEventListener('gpuq-open-project',async event=>{const detail=event.detail||{};if(detail.userId!==store.principal?.userId||detail.authGeneration!==store.authGeneration)return;try{await choosePage('work');await renderExecution.openProject(detail);}catch(error){toast(error.message);}});
 addEventListener('hashchange',()=>choosePage(location.hash));
 addEventListener('pagehide',()=>clearInterval(poll),{once:true});
