@@ -86,6 +86,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const binding=account();
   if(templates.get(root)===value&&renderBindings.get(root)===binding&&(root.hasChildNodes()||value===''))return;
   const previousAction=renderBindings.get(root)===binding?root.querySelector('.v3-train [data-use-dataset]'):null;
+  const previousLabel=renderBindings.get(root)===binding?root.querySelector('[data-v3-label]'):null;
   const training=renderBindings.get(root)===binding?root.querySelector(':scope>.v3-train'):null;
   const preview=root.querySelector('#warehouse-files-preview');
   const keepPreview=preview&&filesPreviewContext===JSON.stringify([account(),selected,selectedVersion])&&overview?.filePreviewAvailable===true;
@@ -94,6 +95,14 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const active=root.contains(document.activeElement)?document.activeElement:null;
   const focus=active?.id?'#'+CSS.escape(active.id):active?.hasAttribute('data-v3-version')?'[data-v3-version]':active?.hasAttribute('data-v4-warehouse')?'[data-v4-warehouse="'+CSS.escape(active.dataset.v4Warehouse)+'"]':active?.hasAttribute('data-v4-clear')?'[data-v4-clear="'+CSS.escape(active.dataset.v4Clear)+'"]':active?.hasAttribute('data-v3-filter')?'[data-v3-filter="'+CSS.escape(active.dataset.v3Filter)+'"]':active?.hasAttribute('data-v3-select')?'[data-v3-select="'+CSS.escape(active.dataset.v3Select)+'"]':active?.hasAttribute('data-use-dataset')?'[data-use-dataset="'+CSS.escape(active.dataset.useDataset)+'"]':null;
   templates.set(root,value);renderBindings.set(root,binding);root.innerHTML=value;
+  const nextLabel=root.querySelector('[data-v3-label]');
+  // Keep the same dataset's edit control through refreshes, just like training.
+  // Its live attributes still follow the current permission check.
+  if(previousLabel&&nextLabel&&previousLabel.dataset.v3Label===nextLabel.dataset.v3Label){
+   for(const attr of [...previousLabel.attributes])if(!nextLabel.hasAttribute(attr.name))previousLabel.removeAttribute(attr.name);
+   for(const attr of nextLabel.attributes)previousLabel.setAttribute(attr.name,attr.value);
+   previousLabel.textContent=nextLabel.textContent;nextLabel.replaceWith(previousLabel);
+  }
   if(keepPreview)root.querySelector('#warehouse-files-preview')?.replaceWith(preview);
   const nextTraining=root.querySelector(':scope>.v3-train');
   const nextAction=root.querySelector('.v3-train [data-use-dataset]');
