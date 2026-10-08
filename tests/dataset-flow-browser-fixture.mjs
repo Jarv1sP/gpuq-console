@@ -125,10 +125,11 @@ try{
     await sourceSheet(memberPage,source);
     for(const width of [1440,1024,390,320]){await check(memberPage,'sheet-'+source,width);await capture(memberPage,'sheet-'+source+'-'+width);}
   }
-  assert.equal(await memberPage.locator('.dataset-sheet-head .data-workspace-footnote').textContent(),'上传前请确认磁盘容量；停止上传会保留已收到的文件片段。');
+  assert.equal(await memberPage.locator('.data-workspace-footnote').count(),0,'retired workspace upload explanation is not advertised');
+  assert.match(await memberPage.locator('.data-workspace-terminal h4>.copy-help').textContent(),/终端中的\s*\/data2.*tar.*unzip/);
   assert.equal(await memberPage.locator('.data-workspace-card>.ui-info,.data-workspace-card>.data-workspace-footnote,.dataset-upload-notes').count(),0);
   await checkDatasetHelpRegressions(memberPage);
-  const helpButton=memberPage.locator('[data-dataset-help-source=workspace] [data-copy-help]'),helpCalls=calls.length;
+  const helpButton=memberPage.locator('.data-workspace-terminal h4>.copy-help [data-copy-help]'),helpCalls=calls.length;
   await helpButton.click();assert.equal(await memberPage.locator('#'+await helpButton.getAttribute('aria-controls')).isVisible(),true);
   assert.equal(calls.length,helpCalls,'opening the preserved explanation sends no node request');
   await memberPage.keyboard.press('Escape');assert.equal(await memberPage.locator('#dataset-add-dialog').getAttribute('open'),'');
@@ -192,7 +193,12 @@ try{
       await page.locator('#refresh-state').click();await page.waitForFunction(()=>!document.querySelector('#refresh-state').disabled);
       for(const width of [1440,1024,390,320]){await check(page,role+'-'+state,width);await capture(page,role+'-'+state+'-'+width);}
       if(state==='unknown'){assert.equal(await page.locator('[data-v3-cache]:enabled,[data-use-dataset]:enabled').count(),0,'unknown observations grant no action');assert.doesNotMatch(await page.locator('#dataset-catalog').innerText(),/待确认/);const unknown=page.locator('#dataset-catalog .v3-g.unknown[role=img][aria-label=待确认][title=待确认]');assert.ok(await unknown.count()>0,'unknown cache locations retain an accessible unconfirmed symbol');}
-      if(state==='error')assert.equal(await page.locator('[data-v3-select]').count(),0,'failed refresh clears stale catalog actions');
+      if(state==='error'){
+        assert.equal(await page.locator('[data-v3-select]:enabled').count(),0,'retained old rows never grant an action');
+        assert.equal(await page.locator('[data-v3-cache]:enabled,[data-use-dataset]:enabled').count(),0);
+        assert.equal(await page.locator('#warehouse-inspector .v3-train').count(),0,'failed refresh clears old detail and training actions');
+        assert.equal(await page.locator('#dataset-catalog.storage-reading-stale').count(),1,'last successful directory is visibly stale');
+      }
     }
     if(state==='loading'){releaseGate();gate=null;for(const {page} of views)await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);}
     if(state==='maintenance')await service.invoke(admin.token,'maintenance.set',{scope:target,enabled:false,revision:service.operationalMaintenance(admin.principal).revision});

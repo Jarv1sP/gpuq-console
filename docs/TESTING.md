@@ -172,6 +172,11 @@ READY 与 SSD READY 分离，固定 `storageReference` 仅在服务端解析进�
 派发、节点拒绝原样返回和超时不重放。仅替换 inventory 与最终 SSH transport，
 不连接生产；该测试不证明私有部署桥已经升级。
 
+合并后的数据页浏览器夹具遵循校内直传及最后成功读数契约：废弃的个人数据
+上传脚注不能重新出现，原帮助几何负例改查仍存在的服务器整理说明；目录读取
+失败允许保留明确标旧的行，但所有旧按钮必须禁用、旧详情和训练入口必须清空。
+不通过恢复旧中转入口、删除新展示能力或降低几何／权限断言解决主线夹具漂移。
+
 ## 项目生命周期额外回归
 
 `python3 tests/gpuq-native-release-gate.test.py` 用真实临时 SQLite 与有界本地文件验证固定 root 门禁：关闭状态两次物理扫描、原 unit/租约核验、全部 mutation RPC（含 observe/sync/fleet）及动作入口零派发、已有 pending action 不领取、DB/心跳不变、非法／过期／软硬链接／inode 变化保持关闭，显式移除后重新两次观察。文件夹具仅将临时 stat 的所有者表示为 root，不写 `/run`、不操作服务或 GPU；不能当作正式发布器或真实滚动升级通过。合同见 [NATIVE_RELEASE_GATE.md](NATIVE_RELEASE_GATE.md)。

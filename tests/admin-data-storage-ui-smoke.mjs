@@ -148,8 +148,10 @@ try{
       assert.equal(await page.locator('.storage-warehouse-badge').count(),0,'list must not prove warehouse READY when catalog is unavailable');
       assert.equal(await page.locator('.storage-warehouse-pending').count(),machines.length);
       await page.locator('[data-storage-view=members]').click();
-      assert.equal(await chen.locator('[data-member-size=warehouse]').textContent(),'待确认');
-      assert.equal(await bob.locator('[data-member-size=warehouse]').textContent(),'待确认');
+      assert.equal(await chen.locator('[data-member-size=warehouse]').textContent(),'7.00 GiB','failed catalog retains the last confirmed display sample, not a new observation');
+      assert.equal(await bob.locator('[data-member-size=warehouse]').textContent(),'0 B');
+      assert.equal(await page.locator('[data-storage-member-row].storage-reading-stale').count(),2);
+      assert((await chen.getAttribute('title')).includes('采集于'),'the stale sample retains its collection-time label');
       await page.screenshot({path:join(out,'warehouse-unconfirmed-'+width+'.png'),fullPage:true});
       await page.locator('[data-storage-view=servers]').click();
     }
