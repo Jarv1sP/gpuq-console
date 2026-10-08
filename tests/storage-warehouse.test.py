@@ -51,6 +51,7 @@ class WarehouseTests(unittest.TestCase):
         self.node.storage_authority=lambda:self.store;self.w.view.storage_authority=self.node.storage_authority
         self.node.storage_node=lambda:self.storage;self.w.cache_view.storage_node=self.node.storage_node
         self.node.dataset_source_cache=lambda dataset=None,version=None:(D,self.w.cold) if dataset in (None,'tiny') else (D,self.hot)
+        self.node.dataset_upload_location_cache=lambda:(D,self.w.cold)
         self.node.projects=lambda:SimpleNamespace()
         self.node.atomic_json=D._write_json
         self.node.storage_archive=lambda:None
