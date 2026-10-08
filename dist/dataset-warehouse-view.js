@@ -120,7 +120,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  }
  function header(){
   const root=document.querySelector('#page-title');if(document.body.dataset.room!=='datasets'||section.hidden){document.querySelector('#warehouse-page-actions')?.remove();return;}
-  if(root){root.querySelector('.v3-count')?.remove();root.querySelector('.v3-partial')?.remove();if(model){const count=document.createElement('span');count.className='v3-count';count.textContent=model.datasets.length+' 个';root.append(count);}if(overview?.partial===true||model?.partial===true){const marker=document.createElement('span');marker.className='v3-partial v3-flag warn';marker.textContent='部分';root.append(marker);}}
+  if(root){root.querySelector('.v3-count')?.remove();root.querySelector('.v3-partial')?.remove();if(overview?.partial===true||model?.partial===true){const marker=document.createElement('span');marker.className='v3-partial v3-flag warn';marker.textContent='部分';root.append(marker);}}
   const host=document.querySelector('.page-heading .heading-actions');if(host&&!host.querySelector('#warehouse-page-actions')){const actions=document.createElement('span');actions.id='warehouse-page-actions';actions.className='v3-head-actions';actions.innerHTML='<a class="button quiet" href="#datasets/transfers">传输记录</a><button class="button primary" type="button" data-v3-upload>＋ 上传数据</button>';host.prepend(actions);}
   const upload=document.querySelector('#warehouse-page-actions [data-v3-upload]');if(upload){upload.disabled=!store.production||!store.principal||!authorizedMachines().length;upload.title=upload.disabled?'暂无服务器使用授权，仅可浏览目录':'';}
  }

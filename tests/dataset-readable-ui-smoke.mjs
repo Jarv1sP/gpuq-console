@@ -28,13 +28,13 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  },role);
  const expected=role==='admin'?['own-data','granted-data','foreign-private']:['own-data','granted-data'];
  assert.deepEqual(await page.locator('[data-v3-select]').evaluateAll(nodes=>nodes.map(node=>node.dataset.v3Select)),expected);
- assert.equal(await page.locator('#page-title .v3-count').textContent(),expected.length+' 个');
+ assert.equal(await page.locator('#page-title .v3-count').count(),0,'storage heading does not count datasets');
  await page.locator('[data-v3-select=own-data]').click();assert.equal(await page.locator('[data-use-dataset]').isDisabled(),true,'Own visibility never supplies a reading or training grant');
  if(width<760)await page.locator('[data-v3-back]').click();
  await page.locator('[data-v3-select=granted-data]').click();assert.equal(await page.locator('[data-use-dataset]').isEnabled(),true);
  if(role==='member'){
   if(width<760)await page.locator('[data-v3-back]').click();
-  await page.locator('#warehouse-search').fill('foreign-private');assert.equal(await page.locator('[data-v3-select]').count(),0);assert.equal(await page.locator('#page-title .v3-count').textContent(),'2 个');await page.locator('#warehouse-search').fill('');
+  await page.locator('#warehouse-search').fill('foreign-private');assert.equal(await page.locator('[data-v3-select]').count(),0);assert.equal(await page.locator('#page-title .v3-count').count(),0,'search cannot add a misleading dataset count to the storage heading');await page.locator('#warehouse-search').fill('');
   await page.evaluate(()=>{const button=document.createElement('button');button.dataset.v3Cache='server-a';button.dataset.dataset='foreign-private';button.dataset.version='a'.repeat(64);document.querySelector('#page-datasets').append(button);button.click();button.remove();});
  }
  assert.deepEqual(await page.evaluate(()=>calls),[],'Metadata filtering and injected hidden cache buttons cause zero RPC');

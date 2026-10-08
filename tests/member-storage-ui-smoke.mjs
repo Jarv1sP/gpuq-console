@@ -34,6 +34,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
   window.catalog={machine:first,partial:false,machines:machines.map(machine=>({machine:machine.id,state:'ok'})),datasets:[row('my-images',false,'所属用户：fixture-me',3*1024**3,[first,machines[1].id]),row('granted-audio',true,'所属用户：fixture-other',1024**3,[machines[1].id]),row('not-mine',false,'所属用户：fixture-other',2*1024**3,[first]) ]};
   window.view=datasetWarehouseView(store,section,()=>{},{refresh:()=>refreshes++,removeUI:{canOpenFullDelete:()=>false},machineAllowed:id=>store.data.machines.some(machine=>machine.id===id),authorizedMachines:()=>store.data.machines,access:()=>({selectable:false,browseOnly:true,canRetry:false})});view.catalog(catalog);
  },{role,machines});
+ assert.equal(await page.locator('#page-title').textContent(),'存储','storage heading has no dataset count');
  assert.equal(await page.locator('[data-storage-view=warehouse]').getAttribute('aria-selected'),'true');assert.equal(await page.locator('#member-storage').isVisible(),false);
  assert.deepEqual(await page.evaluate(()=>calls),[],'default warehouse does not preload personal projects or cache capabilities');
  const cards=await page.locator('.v4-warehouse-card,.v4-training-card').count();assert(cards>0);
