@@ -24,6 +24,9 @@ import {downloadFile} from './client-file-download.mjs';
 // stored records and older servers can still contain C1/ANSI or bidi controls.
 const maintenanceVisible=(value,multiline=false)=>String(value??'').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>multiline&&c==='\n'?c:'\\u{'+c.codePointAt(0).toString(16).padStart(4,'0')+'}');
 const maintenanceJSON=value=>JSON.stringify(value).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,c=>c.split('').map(unit=>'\\u'+unit.charCodeAt(0).toString(16).padStart(4,'0')).join(''));
+const terminalErrorMetadata=error=>({
+  ...(Number.isInteger(error.status)&&error.status>=100&&error.status<=599?{status:error.status}:{}),
+  ...(typeof error.code==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)?{code:error.code}:{})});
 const terminalMetadata=(value,key='')=>typeof value==='string'?maintenanceVisible(value,['description','body'].includes(key)):
   Array.isArray(value)?value.map(item=>terminalMetadata(item,key)):
   value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([name,item])=>[maintenanceVisible(name),terminalMetadata(item,name)])):value;
@@ -291,7 +294,7 @@ async function main(){
     mode={demo:login.state.demo,gpuqConnected:login.state.gpuqConnected===true};
     await mkdir(dirname(sessionFile),{recursive:true,mode:0o700});
     const previous=session?.principal?.userId===login.principal.userId?session:null;
-    await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(previous?.machine?{machine:previous.machine}:{}),...(previous?.projectsByMachine?{projectsByMachine:previous.projectsByMachine}:{}),...(previous?.datasetUploadKeys?{datasetUploadKeys:previous.datasetUploadKeys}:{}),...(previous?.datasetUploadIntents?{datasetUploadIntents:previous.datasetUploadIntents}:{}),...(previous?.datasetUploadHandles?{datasetUploadHandles:previous.datasetUploadHandles}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
+    await writeFile(sessionFile,JSON.stringify({url:base.origin,token:login.token,principal:login.principal,...(previous?.machine?{machine:previous.machine}:{}),...(previous?.projectsByMachine?{projectsByMachine:previous.projectsByMachine}:{}),...(previous?.datasetUploadKeys?{datasetUploadKeys:previous.datasetUploadKeys}:{}),...(previous?.datasetUploadIntents?{datasetUploadIntents:previous.datasetUploadIntents}:{}),...(previous?.datasetUploadHandles?{datasetUploadHandles:previous.datasetUploadHandles}:{}),...(previous?.terminalSessions?{terminalSessions:previous.terminalSessions}:{})}),{mode:0o600});await chmod(sessionFile,0o600);
     result={loggedIn:true,principal:login.principal};
   }else{
     if(!session)fail('请先登录：gpuctl login');
@@ -557,20 +560,48 @@ async function main(){
     }else if(command==='shell'&&positionals.length===2){
       if(!process.stdin.isTTY)fail('交互终端需要 TTY；非交互任务使用 gpuctl run');
       const machine=positionals[1],hostAdmin=options.root===true;
+      if(!state.machines.some(m=>m.id===machine))fail('这台机器未授权或不存在');
       if(hostAdmin&&(options.project||options.job))fail('Host root terminal does not accept --project or --job');
       if(options.takeover&&!options.reconnect)fail('--takeover requires --reconnect SESSION');
       if(options.reconnect&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(options.reconnect))fail('Reconnect requires a complete terminal UUID');
       const context=dataTerminal?{dataWorkspace:true}:hostAdmin?{}:projectArgs(machine);
-      const clientId=randomUUID();
-      const opened=(await call('terminal.open',{machine,key:randomUUID(),clientId,mode:options.reconnect?'reconnect':'new',...(options.reconnect?{id:options.reconnect,takeover:options.takeover===true}:{}),hostAdmin,...context})).result;
-      if(!opened.writerToken)fail('Server terminal protocol is too old; upgrade the node before attaching. No input was sent.');
+      const key=randomUUID(),clientId=randomUUID(),id=options.reconnect||key,openMode=options.reconnect?'reconnect':'new';
+      const scope=dataTerminal?['--data-workspace']:hostAdmin?['--root']:context.project?['--project',context.project]:['--legacy'];
+      const commandText=parts=>parts.map(value=>/^[A-Za-z0-9_.:-]+$/.test(value)?value:"'"+value.replaceAll("'","'\\''")+"'").join(' ');
+      const statusCommand=commandText(['gpuctl','terminal','status',id,'--machine',machine,...scope]);
+      const reconnectCommand=commandText(['gpuctl',...(dataTerminal?['data','shell']:['ssh']),'--machine',machine,
+        ...(dataTerminal?[]:scope),'--reconnect',id]);
+      const terminal={id,machine,project:context.project||null,dataWorkspace:dataTerminal,hostAdmin,mode:openMode,state:'UNKNOWN',statusCommand};
+      const unconfirmed=error=>Object.assign(Error(`${error.message}\n终端状态未确认，未重开或重放输入。只读查询原会话：${statusCommand}`),{terminal,status:error.status,code:error.code});
+      // Print and durably save the original identity before dispatch. Writer
+      // credentials remain only in this connection's memory.
+      await new Promise((resolve,reject)=>process.stderr.write('Terminal: '+maintenanceJSON(terminal)+'\n',error=>error?reject(error):resolve()));
+      let opened;
+      try{
+        const latest=JSON.parse(await readFile(sessionFile,'utf8'));
+        if(latest.url!==base.origin||latest.token!==session.token||latest.principal?.userId!==session.principal?.userId)
+          fail('登录缓存已改变，未打开终端；请核对当前账号。');
+        const saved=latest.terminalSessions?.[id];
+        if(saved&&(saved.userId!==session.principal.userId||['machine','project','hostAdmin','dataWorkspace'].some(name=>saved[name]!==terminal[name])))
+          fail('原终端记录的账号或范围不匹配，未打开终端；请使用原服务器和项目查询。');
+        const next={...latest,terminalSessions:{...latest.terminalSessions,[id]:{...terminal,userId:session.principal.userId}}};
+        await saveDatasetUploadSession(sessionFile,next);session=next;
+        opened=(await call('terminal.open',{machine,key,clientId,mode:openMode,...(options.reconnect?{id,takeover:options.takeover===true}:{}),hostAdmin,...context})).result;
+        const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+        if(opened?.id!==id||opened.clientId!==clientId||opened.mode!==openMode||opened.hostAdmin!==hostAdmin||
+          !uuid.test(opened.writerToken||'')||!Number.isFinite(opened.leaseExpiresAt)||opened.leaseExpiresAt<=Date.now()/1000||opened.leaseExpiresAt>=253402300800||
+          opened.machine!==undefined&&opened.machine!==machine||opened.project!==undefined&&opened.project!==context.project||
+          opened.dataWorkspace!==undefined&&opened.dataWorkspace!==dataTerminal)
+          fail('终端身份或单写租约未获确认，未发送输入；请核对原会话和匹配节点协议。');
+      }catch(error){throw unconfirmed(error);}
       let input=Buffer.alloc(0),offset=0,done=false,closed=false,delay=250,lastSize='';
       const sessionArgs={machine,id:opened.id,clientId,writerToken:opened.writerToken,hostAdmin,...context};
       process.stderr.write(`\r\n${machine} · ${dataTerminal?'个人数据 /data2':hostAdmin?'ROOT 宿主机':context.project?'项目 '+context.project:'个人工作区'} · ${opened.id}（Ctrl+] 仅断开；exit 结束此会话）\r\n`);
       process.stdin.setRawMode(true);process.stdin.resume();
       const listener=chunk=>{if(chunk.includes(29)){done=true;return;}input=Buffer.concat([input,chunk]);if(input.length>262144)process.stdin.pause();};process.stdin.on('data',listener);
       try{while(!done){const sent=input.subarray(0,8192);input=input.subarray(sent.length);if(input.length<131072)process.stdin.resume();const size={cols:process.stdout.columns||110,rows:process.stdout.rows||32},sizeKey=JSON.stringify(size);const response=(await call('terminal.exchange',{...sessionArgs,offset,input:sent.toString('base64'),...(sizeKey===lastSize?{}:{cols:size.cols,rows:size.rows})})).result;lastSize=sizeKey;offset=response.offset;if(response.data)process.stdout.write(Buffer.from(response.data,'base64'));if(response.exited){await call('terminal.close',sessionArgs);closed=true;break;}await new Promise(r=>setTimeout(r,delay));}}
-      finally{process.stdin.off('data',listener);process.stdin.setRawMode(false);process.stdin.pause();if(!closed)try{await call('terminal.detach',sessionArgs);}catch{process.stderr.write('\r\n写入权释放未确认；等待 30 秒或明确接管后再重连。\r\n');}process.stderr.write(`\r\n${closed?'此终端已结束。':`已断开，终端继续运行。重连：gpuctl ${dataTerminal?'data shell --machine '+machine:'ssh '+machine+(hostAdmin?' --root':context.project?' --project '+context.project:'')} --reconnect ${opened.id}`}\r\n`);}return;
+      catch(error){throw unconfirmed(error);}
+      finally{process.stdin.off('data',listener);process.stdin.setRawMode(false);process.stdin.pause();if(!closed)try{await call('terminal.detach',sessionArgs);}catch{process.stderr.write('\r\n写入权释放未确认；等待 30 秒或明确接管后再重连。\r\n');}process.stderr.write(`\r\n${closed?'此终端已结束。':`已断开。只读查询：${statusCommand}\r\n重连：${reconnectCommand}`}\r\n`);}return;
     }else if(command==='invites'&&positionals[1]==='list'&&positionals.length===2)result=(await call('invites.list')).result;
     else if(command==='invites'&&['rotate','disable'].includes(positionals[1])&&['admin','member'].includes(positionals[2])&&positionals.length===3)result=(await call(`invites.${positionals[1]}`,{role:positionals[2]})).result;
     else if(command==='users'&&positionals.length===1)result=state.users;
@@ -905,5 +936,5 @@ async function main(){
   console.log(JSON.stringify(result,null,2));
 }
 if(process.argv[1]&&fileURLToPath(import.meta.url)===realpathSync(process.argv[1])){
-  main().catch(error=>{console.error(wantsJSON?maintenanceJSON({ok:false,error:error.message}):`Error: ${maintenanceVisible(error.message)}`);process.exitCode=1;});
+  main().catch(error=>{console.error(wantsJSON?maintenanceJSON({ok:false,error:error.message,...(error.terminal?{terminal:error.terminal,...terminalErrorMetadata(error)}:{})}):`Error: ${maintenanceVisible(error.message)}`);process.exitCode=1;});
 }
