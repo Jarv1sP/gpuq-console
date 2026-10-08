@@ -85,9 +85,15 @@ export async function resolveTrainingDataset(service,owner,machine,ref,readMode)
     if(service.maintenanceFor?.(machine))fail('所选服务器正在维护；未读取仓库。',503,'MAINTENANCE_ACTIVE');
   };
   check();
-  const status=await service.bridge(machine,'datasets.training.status',{
+  let status;
+  try{status=await service.bridge(machine,'datasets.training.status',{
     userId:owner,hostAdmin:false,...ref,datasetReadMode:'warehouse',
-  });
+  });}
+  catch(error){
+    check();
+    if(error?.status===403)fail('仓库原件未授权；未改用缓存或其他机器。',403,'DATASET_TRAINING_FORBIDDEN');
+    fail('仓库原件读取结果尚未确认；未改用缓存或其他机器。');
+  }
   check();
   if(!status||status.protocol!=='dataset-training-source-v1'||status.datasetWarehouseRead!==1||
     status.machine!==machine||status.dataset!==ref.dataset||status.version!==ref.version||

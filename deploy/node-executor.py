@@ -1842,6 +1842,11 @@ def process(operation,args):
     with project_store.lifetime(job['userId'],job['project']) if project_store else nullcontext(), open(ROOT/'jobs'/f'{jid}.lock','a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         spec=ROOT/'jobs'/f'{jid}.json'
+        if operation=='cancel' and dataset_read_mode(job)=='warehouse':
+            # Before creating this identity, distinguish a genuinely first
+            # cancel from an existing/missing-journal hold. Never infer empty
+            # holds from a receipt's absence after the identity was persisted.
+            dataset_training_sources().cancel_unseen(job)
         if spec.exists():
             if json.loads(spec.read_text())!=job:raise ValueError('Job identity mismatch')
         else:

@@ -1,11 +1,13 @@
 """Fixed HDD training lifecycle; disposable roots only, no devices or daemons."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, nullcontext
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -253,6 +255,109 @@ class TrainingSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source journal is missing'):
             self.leases.cancel_prepare(self.job)
         self.assertEqual(len(self.cold_leases()), 1)
+
+    def test_first_personal_warehouse_cancel_creates_empty_fence_and_is_idempotent(self):
+        job = {**self.job, 'project': 'personal', 'release': 'b' * 64}
+        store = SimpleNamespace(lifetime=lambda *args: nullcontext(), admit=lambda *args: None)
+        with patch.object(self.n, 'projects', return_value=SimpleNamespace(store=store)), \
+                patch.object(self.n, 'gpu', side_effect=AssertionError('Canceled fresh job cannot reach GPUQ')):
+            self.assertEqual(self.n.process('cancel', {'job': job}), {'state': 'CANCELED'})
+            self.assertEqual(self.n.process('cancel', {'job': job}), {'state': 'CANCELED'})
+            self.assertEqual(self.n.process('sync', {'job': job}), {'state': 'CANCELED'})
+        record = self.d._read_json(self.journal())
+        self.assertEqual(record['state'], 'RELEASED')
+        self.assertEqual(record['leases'], [])
+        self.assertEqual(record['sourceSnapshots'], [])
+        self.assertEqual(record['binding']['datasetReadMode'], 'warehouse')
+        self.assertEqual(self.cold_leases(), [])
+        self.assertEqual(self.hot._leases(**self.ref), [])
+
+    def test_lost_first_cancel_reply_before_spec_write_recovers_original_empty_fence(self):
+        save = self.leases._save
+        def lost(path, record):
+            save(path, record)
+            raise OSError('lost first cancel reply')
+        with patch.object(self.leases, '_save', side_effect=lost):
+            with self.assertRaisesRegex(OSError, 'lost first cancel reply'):
+                self.n.process('cancel', {'job': self.job})
+        self.assertFalse((self.n.ROOT / 'jobs' / (self.job['id'] + '.json')).exists())
+        self.assertEqual(self.d._read_json(self.journal())['state'], 'CANCELED')
+        with patch.object(self.n, 'gpu', side_effect=AssertionError('Cancel retry cannot submit')):
+            with self.assertRaisesRegex(ValueError, 'finalized'):
+                self.n.process('storage.lease.prepare', {'job': self.job})
+            with self.assertRaisesRegex(ValueError, 'not ready for handoff'):
+                self.n.process('sync', {'job': self.job})
+            self.assertEqual(self.n.process('cancel', {'job': self.job}), {'state': 'CANCELED'})
+            self.assertEqual(self.n.process('cancel', {'job': self.job}), {'state': 'CANCELED'})
+        self.assertEqual(self.cold_leases(), [])
+
+    def test_existing_spec_or_receipt_without_journal_still_refuses_cancellation(self):
+        for suffix, value in (('.json', self.job), ('.datasets.json', [])):
+            path = self.n.ROOT / 'jobs' / (self.job['id'] + suffix)
+            with self.subTest(path=path.name):
+                path.write_text(json.dumps(value))
+                with patch.object(self.n, 'gpu', side_effect=AssertionError('Unknown hold cannot submit')):
+                    with self.assertRaisesRegex(ValueError, 'durable source journal'):
+                        self.n.process('cancel', {'job': self.job})
+                self.assertFalse(self.journal().exists())
+                for suffix in ('.json', '.datasets.json', '.canceled'):
+                    (self.n.ROOT / 'jobs' / (self.job['id'] + suffix)).unlink(missing_ok=True)
+
+    def test_unseen_cancellation_rejects_every_prior_node_evidence_including_native_row(self):
+        for suffix in ('.dataset-dispatch-attempted', '.dataset-not-submitted.json', '.canceled'):
+            path = self.n.ROOT / 'jobs' / (self.job['id'] + suffix)
+            path.touch()
+            self.assertFalse(self.sources.cancel_unseen(self.job))
+            self.assertFalse(self.journal().exists())
+            path.unlink()
+        folder = self.journal().parent
+        folder.mkdir()
+        for name in (None, '.lock', 'record.json.tmp', 'retry-1.json'):
+            path = folder / name if name else None
+            if path: path.touch()
+            self.assertFalse(self.sources.cancel_unseen(self.job))
+            self.assertFalse(self.journal().exists())
+            if path: path.unlink()
+        folder.rmdir()
+        with closing(sqlite3.connect(self.n.CONFIG['database'])) as db:
+            db.execute('INSERT INTO jobs VALUES (?, ?)', ('J0123456789ab', self.job['id']))
+            db.commit()
+        self.assertFalse(self.sources.cancel_unseen(self.job))
+        self.assertFalse(self.journal().exists())
+
+    def test_unknown_native_database_never_becomes_an_empty_cancellation(self):
+        self.n.CONFIG['database'] = str(self.f.base / 'unavailable-native.sqlite')
+        with self.assertRaises(sqlite3.OperationalError):
+            self.n.process('cancel', {'job': self.job})
+        self.assertFalse(self.journal().exists())
+        self.assertFalse((self.n.ROOT / 'jobs' / (self.job['id'] + '.json')).exists())
+
+    def test_failed_empty_intent_write_keeps_partial_journal_unknown(self):
+        with patch.object(self.leases, '_save', side_effect=OSError('intent write failed')):
+            with self.assertRaisesRegex(OSError, 'intent write failed'):
+                self.n.process('cancel', {'job': self.job})
+        self.assertTrue(self.journal().parent.exists())
+        self.assertFalse(self.journal().exists())
+        with self.assertRaisesRegex(ValueError, 'durable source journal'):
+            self.n.process('cancel', {'job': self.job})
+        self.assertEqual(self.cold_leases(), [])
+
+    def test_lost_preparation_journal_keeps_real_cold_lease_on_cancel(self):
+        self.leases.prepare(self.job)
+        self.journal().unlink()
+        with patch.object(self.n, 'gpu', side_effect=AssertionError('Unknown hold cannot submit')):
+            with self.assertRaisesRegex(ValueError, 'durable source journal'):
+                self.n.process('cancel', {'job': self.job})
+        self.assertEqual(len(self.cold_leases()), 1)
+        self.assertFalse(self.journal().exists())
+
+    def test_prepared_warehouse_cancel_releases_only_original_hold_and_remains_idempotent(self):
+        self.leases.prepare(self.job)
+        with patch.object(self.n, 'gpu', side_effect=AssertionError('Prepared cancel cannot submit')):
+            self.assertEqual(self.n.process('cancel', {'job': self.job}), {'state': 'CANCELED'})
+            self.assertEqual(self.n.process('cancel', {'job': self.job}), {'state': 'CANCELED'})
+        self.assertEqual(self.cold_leases(), [])
+        self.assertEqual(self.hot._leases(**self.ref), [])
 
     def test_legacy_cache_cancel_before_preparation_preserves_empty_permanent_fence(self):
         self.assertTrue(self.leases.cancel_prepare(self.f.job)['released'])

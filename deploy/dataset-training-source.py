@@ -4,9 +4,11 @@ Legacy jobs keep their exact cache binding. Explicit warehouse jobs bind the
 configured local protected authority, not a remote grant or a media/name guess.
 All consumers share the same durable source identity and ordinary version lease.
 """
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import os
+import sqlite3
+import time
 
 
 PROTOCOL = 'dataset-training-source-v1'
@@ -73,6 +75,36 @@ class TrainingSources:
         if binding.get('source') != source:
             raise ValueError('Durable warehouse source root or authority changed')
         return module, cache
+
+    def cancel_unseen(self, job):
+        """Job flock + validated private cancel only, BEFORE first spec write.
+
+        A missing journal for an existing identity remains unknown. Only a
+        wholly unseen node identity can establish a new, empty permanent fence;
+        no receipt absence or caller-provided never-dispatched flag proves it.
+        The ordinary cancel path subsequently persists its spec and finalizes
+        this journal. A crash before that still prevents same-ID preparation.
+        """
+        if read_mode(job) != 'warehouse':
+            raise ValueError('Unseen cancellation requires warehouse mode')
+        key = job['id']
+        paths = [self.n.ROOT / 'jobs' / (key + suffix) for suffix in
+                 ('.json', '.dataset-dispatch-attempted', '.datasets.json',
+                  '.dataset-not-submitted.json', '.canceled')]
+        paths.append(self.n.ROOT / 'storage-leases' / 'training' / key)
+        if any(os.path.lexists(path) for path in paths):
+            return False
+        with closing(sqlite3.connect(f'file:{self.n.CONFIG["database"]}?mode=ro', uri=True)) as db:
+            if db.execute('SELECT id FROM jobs WHERE submit_key=?', (key,)).fetchone():
+                return False
+        leases = self.n.storage_leases()
+        binding = leases._training(job)
+        with leases._lock('training', key) as path:
+            if os.path.lexists(path):
+                raise ValueError('Unseen warehouse cancellation journal changed')
+            leases._save(path, {'schema': 1, 'binding': binding, 'state': 'CANCELED',
+                                'leases': [], 'sourceSnapshots': [], 'createdAt': time.time()})
+        return True
 
     @contextmanager
     def guard(self, binding, ref, expected=None, *, require_ready=True):
