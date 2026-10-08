@@ -2066,7 +2066,7 @@ if __name__=='__main__':
     if len(sys.argv)==5 and sys.argv[1]=='--cloud-files-worker':sys.exit(cloud_files().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-recover':
         print(json.dumps(data_workspaces().recover(*sys.argv[2:])));sys.exit(0)
-    if len(sys.argv)==3 and sys.argv[1]=='--project-worker':sys.exit(projects().worker(sys.argv[2]))
+    if len(sys.argv) in (3,5) and sys.argv[1]=='--project-worker':sys.exit(projects().worker(*sys.argv[2:]))
     if len(sys.argv)==5 and sys.argv[1]=='--project-local-import-worker':sys.exit(projects().local_imports().worker(*sys.argv[2:]))
     try:
         files_rpc_mode=len(sys.argv)==2 and sys.argv[1]=='--dataset-files-rpc'
