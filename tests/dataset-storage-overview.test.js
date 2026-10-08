@@ -133,6 +133,43 @@ test('overview never refreshes removal exclusions, even for administrators',asyn
   assert.equal(value.protocol,'dataset-storage-overview-v1');
 });
 
+test('catalog and capacity reads start in one window without waiting for an offline catalog',async()=>{
+  const f=fixture(),bridge=f.service.bridge;
+  let releaseCatalog;
+  const gate=new Promise(resolve=>{releaseCatalog=resolve;});
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='datasets.list')await gate;
+    return bridge(machine,operation,args);
+  };
+  const pending=f.call();
+  try{
+    // Flush the deadline wrapper's dispatch microtasks while the catalog gate
+    // remains closed; no elapsed threshold can hide a sequential dependency.
+    await new Promise(setImmediate);
+    assert.equal(f.calls.filter(row=>row.operation==='datasets.capacity').length,MACHINES.length);
+    assert.equal(f.calls.filter(row=>row.operation==='datasets.list').length,0);
+  }finally{releaseCatalog();}
+  const value=await pending;
+  assert.equal(value.protocol,'dataset-storage-overview-v1');
+  assert.equal(value.partial,false);
+  assert.equal(f.calls.length,MACHINES.length*2);
+});
+
+test('revocation while a concurrent catalog is pending cannot expose already-collected capacity',async()=>{
+  const f=fixture(),bridge=f.service.bridge;
+  let releaseCatalog;
+  const gate=new Promise(resolve=>{releaseCatalog=resolve;});
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='datasets.list')await gate;
+    return bridge(machine,operation,args);
+  };
+  const pending=f.call();
+  await new Promise(setImmediate);
+  assert.equal(f.calls.filter(row=>row.operation==='datasets.capacity').length,MACHINES.length);
+  f.user.enabled=false;releaseCatalog();
+  await assert.rejects(pending,error=>error.status===403);
+});
+
 test('all-account real project usage is independent from cache logical sizes and never invented for legacy nodes',async()=>{
   const measured=capacity();Object.assign(measured.storageOverview.cache,{projectBytes:8192,projectUsageComplete:true,projectCollectedAt:'2026-01-01T01:00:00Z'});
   const f=fixture({capacities:{[hot]:measured,[cold]:snapshot('e')},records:{[hot]:[record('sample',[{version:hash,state:'READY',bytes:42,files:1}])]}});

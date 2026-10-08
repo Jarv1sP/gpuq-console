@@ -117,7 +117,10 @@ export async function datasetStorageOverviewCall(service,principal,args){
     let current;try{current=service.store.get(principal.userId);}catch{}
     if(service.closing||current?.enabled!==true||JSON.stringify(current)!==policy)fail('账号授权已改变，请刷新后重试。',403);
   };
-  // Catalog's existing metadata-only service read preserves exact member ACLs.
+  // Independent fixed metadata reads share one elapsed window. Waiting for
+  // every catalog before starting capacities doubles an offline node's bridge
+  // deadline and makes a healthy warehouse disappear behind client timeouts.
+  // Neither branch grants access; both revalidate the actor before projection.
   const [catalog,nodes]=await Promise.all([
     datasetCatalogCall(catalogWithinDeadline(service),principal,'datasets.catalog',{},{refreshRemovalExclusions:false}),
     Promise.all(MACHINES.map(({id})=>readCapacity(service,id)))

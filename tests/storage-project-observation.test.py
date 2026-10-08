@@ -123,14 +123,80 @@ class ProjectObservation(unittest.TestCase):
         self.assertEqual(projects['first'], dict(owner=owner, project='first', name='first', bytes=self.allocated(first)))
         self.assertEqual(projects['second']['bytes'], self.allocated(second))
 
+    def test_real_project_store_run_claims_are_system_blocks_not_an_unknown_owner(self):
+        source = importlib.util.spec_from_file_location('project_store_observation_fixture', HERE/'project-store.py')
+        store = importlib.util.module_from_spec(source)
+        source.loader.exec_module(store)
+        base = self.base/'approved-base'
+        base.mkdir(mode=0o700)
+        with patch.object(store, 'check_platform_root'):
+            store.ProjectStore(self.root, base)
+        claims = self.root/'projects-v2'/'.run-claims'
+        self.assertTrue(claims.is_dir())
+        self.assertEqual(stat.S_IMODE(claims.stat().st_mode), 0o700)
+        owner, project = self.project()
+        self.file('projects-v2/.run-claims/11111111-1111-4111-8111-111111111111.json', json.dumps(
+            dict(owner=owner, project='first', release='a'*64,
+                 jobId='11111111-1111-4111-8111-111111111111')).encode())
+        value = self.success()
+        self.assertEqual(value['projectBytes'], self.allocated(self.root/'projects-v2'))
+        self.assertEqual(value['projectUsage'], dict(protocol=1, complete=True,
+            owners=[dict(owner=owner, complete=True, projectBytes=self.allocated(project.parent))],
+            projects=[dict(owner=owner, project='first', name='first', bytes=self.allocated(project))]))
+
+    def test_run_claims_still_count_toward_entry_and_time_bounds(self):
+        (self.root/'projects-v2').mkdir(mode=0o700)
+        claims = self.root/'projects-v2'/'.run-claims'
+        claims.mkdir(mode=0o700)
+        for number in range(3):
+            self.file('projects-v2/.run-claims/'+str(number)+'.json')
+        with self.assertRaisesRegex(ValueError, 'bound'):
+            self.scan(maximum=3, breakdown=True)
+        with self.assertRaisesRegex(ValueError, 'bound'):
+            self.scan(seconds=0, breakdown=True)
+
+    def test_run_claims_symlink_is_rejected_without_following_the_target(self):
+        self.project()
+        outside = self.base/'outside-claims'
+        outside.mkdir(mode=0o700)
+        (outside/'file').write_bytes(b'untouched external claim')
+        (self.root/'projects-v2'/'.run-claims').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'Unsafe project run-claim directory'):
+            self.scan(breakdown=True)
+        self.assertEqual((outside/'file').read_bytes(), b'untouched external claim')
+
+    def test_run_claims_must_be_the_private_service_owned_directory(self):
+        self.project()
+        claims = self.root/'projects-v2'/'.run-claims'
+        claims.write_bytes(b'not a directory')
+        with self.assertRaisesRegex(ValueError, 'Unsafe project run-claim directory'):
+            self.scan(breakdown=True)
+        claims.unlink()
+        claims.mkdir(mode=0o755)
+        with self.assertRaisesRegex(ValueError, 'Unsafe project run-claim directory'):
+            self.scan(breakdown=True)
+        claims.chmod(0o700)
+        with patch.object(observer.os, 'geteuid', return_value=os.geteuid()+1):
+            with self.assertRaisesRegex(ValueError, 'Unsafe project run-claim directory'):
+                self.scan(breakdown=True)
+
+    def test_other_hidden_project_root_directories_remain_unproven(self):
+        self.project()
+        self.file('projects-v2/.not-run-claims/unknown.json')
+        value = self.success()
+        self.assertFalse(value['projectUsage']['complete'])
+
     def test_breakdown_sparse_files_and_same_project_hardlinks_are_device_inode_deduplicated(self):
         owner, path = self.project()
         file = self.file(str(path.relative_to(self.root)/'dev/code/file'), b'x'*8192)
         os.link(file, path/'release-copy')
         sparse = path/'sparse'
         with sparse.open('wb') as out:
-            out.seek(10*1024**2)
             out.write(b'x')
+            # truncate preserves a real hole on both APFS and Linux; seeking
+            # before a write can instead allocate the entire gap on APFS.
+            out.truncate(256*1024**2)
+        self.assertLess(sparse.stat().st_blocks*512, sparse.stat().st_size)
         row = self.success()['projectUsage']['projects'][0]
         self.assertEqual(row['bytes'], self.allocated(path))
         self.assertLess(row['bytes'], sparse.stat().st_size)

@@ -59,7 +59,9 @@ function readNode(service,machine){
     work.then(value=>nodeView(machine,value)).catch(()=>unavailable(machine,'节点状态不可用')),deadline
   ]).then(value=>{
     record.value=value;
-    record.expires=Math.min(Date.now()+STORAGE_USAGE_TTL_MS,value.available&&value.collectedAt!==null
+    // An incomplete refresh can retain an older last-success timestamp. Cache
+    // that unknown result by this read's TTL, without making the old sample fresh.
+    record.expires=Math.min(Date.now()+STORAGE_USAGE_TTL_MS,value.available&&value.complete&&value.collectedAt!==null
       ?Date.parse(value.collectedAt)+STORAGE_USAGE_TTL_MS:Infinity);
     return value;
   }).finally(()=>{clearTimeout(timer);});

@@ -52,7 +52,8 @@ test('authenticated HTTP overview routes compact metadata for zero-quota member,
 
 test('overview remains readable in maintenance and bypasses mutation queue; concurrent lane budget still applies',async t=>{
   const f=await fixture(t);
-  await f.call('maintenance.set',{scope:'global',enabled:true,reason:'local read-only fixture'});
+  assert.equal((await f.call('maintenance.set',{scope:'all',revision:0,enabled:true,reason:'local read-only fixture'})).status,200);
+  assert.equal(f.service.maintenanceFor(MACHINES[0].id).reason,'local read-only fixture');
   let release;const original=f.service.tail;f.service.tail=new Promise(resolve=>release=resolve);
   try{
     const response=await Promise.race([f.call('datasets.overview',{},f.member.token),new Promise((_,reject)=>setTimeout(()=>reject(Error('read blocked by mutation tail')),1000))]);
