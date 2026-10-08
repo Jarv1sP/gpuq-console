@@ -1,5 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {datasetCatalogCall,warehouseCacheReference} from './dataset-catalog.mjs';
+import {prepareTrainingDataset} from './training-preparation.mjs';
 
 // Logical names over the durable transfer service: no second copy worker,
 // retry controller or byte path through the portal.
@@ -77,17 +78,18 @@ export function installDatasetReplication(service){
     if(status?.dataset!==ref.dataset||status.version!==ref.version)fail('本机数据版本回执不符。',502);
     return {status,reference:null};
   };
-  async function prepare(owner,target,ref,{retry=true}={}){
+  async function prepare(owner,target,ref,{retry=true,trainingJobId}={}){
     if(!ID.test(ref.dataset)||!HASH.test(ref.version))fail('数据集版本无效。',400);
     service.assertDatasetNotDeleting?.(target,ref);
     const user=authority(owner,target),policy=JSON.stringify(user),who=principal(user);
+    const localPrepare=physical=>trainingJobId?prepareTrainingDataset(service,trainingJobId,ref,physical):service.bridge(target,'datasets.prepare',{userId:owner,hostAdmin:false,...physical});
     let resolved;
     try{resolved=await service.resolveDataset(owner,target,ref);}catch(error){if(error.status===403||error.code==='WAREHOUSE_REFERENCE_INVALID')throw error;}
     check(owner,target,policy);
     if(resolved?.status.state==='READY')return resolved.status;
     if(resolved?.status.warehouseReady===true){
       if(resolved.status.warehouseCanPrepare!==true&&resolved.status.state!=='PREPARING')fail('仓库原件尚不能准备为本机训练缓存。');
-      const result=await service.bridge(target,'datasets.prepare',{userId:owner,hostAdmin:false,...ref});
+      const result=await localPrepare(ref);
       check(owner,target,policy);
       if(result?.dataset!==ref.dataset||result.version!==ref.version)fail('仓库缓存准备回执不符。',502);
       if(result.state==='READY'){
@@ -100,12 +102,14 @@ export function installDatasetReplication(service){
       // authority receipt. Do not reselect another source or create a second
       // logical replica merely because the historical transfer succeeded.
       const physical=service.datasetPhysicalReference(owner,target,ref);
-      const result=await service.bridge(target,'datasets.prepare',{userId:owner,hostAdmin:false,...physical});
+      const result=await localPrepare(physical);
       check(owner,target,policy);
       if(result?.dataset!==physical.dataset||result.version!==physical.version)fail('缓存恢复回执不符。',502);
       return {...result,dataset:ref.dataset};
     }
     let row=load(owner,target,ref),value=receipt(row);
+    if(trainingJobId&&row&&value?.state!=='SUCCEEDED'&&row.trainingJobId!==trainingJobId)
+      fail('已有准备任务必须保留原运行时；不会把旧传输升级为新训练准入。');
     if(row&&value&&stopped.has(value.state)&&!retry)return view(row);
     if(row&&value&&!stopped.has(value.state)&&value.state!=='SUCCEEDED'){
       await service.transferCall(who,'transfers.status',{id:value.id});check(owner,target,policy);
@@ -127,7 +131,7 @@ export function installDatasetReplication(service){
     if(!selected.sourceMachine){
       if(!selected.canPrepare&&selected.state!=='PREPARING')fail('目标机器没有可用的数据来源。');
       if(row)fail('跨机传输未就绪；请检查原传输记录。');
-      return service.bridge(target,'datasets.prepare',{userId:owner,hostAdmin:false,...ref});
+      return localPrepare(ref);
     }
     if(!service.transferCall)fail('服务器间传输尚未启用。',503);
     const sourceRef={dataset:selected.sourceDataset||ref.dataset,version:ref.version};
@@ -135,15 +139,17 @@ export function installDatasetReplication(service){
     // Lost create replies reuse the durable UUID. Only an explicit retry of a
     // confirmed canceled/evicted copy receives a new transfer identity.
     if(!row||value?.state==='CANCELED'||value?.state==='SUCCEEDED'){
-      row={id:key(owner,target,ref),owner,target,...ref,source:selected.sourceMachine,sourceDataset:selected.sourceDataset||ref.dataset,key:randomUUID(),transferId:null};save(row);
+      row={id:key(owner,target,ref),owner,target,...ref,source:selected.sourceMachine,sourceDataset:selected.sourceDataset||ref.dataset,key:randomUUID(),transferId:null,...(trainingJobId?{trainingJobId}:{})};save(row);
     }
-    const result=await service.transferCall(who,'transfers.create',{key:row.key,kind:'copy',machine:target,from:row.source,dataset:row.sourceDataset,version:row.version,name:'replica-'+row.id.slice(0,24)});
+    const args={key:row.key,kind:'copy',machine:target,from:row.source,dataset:row.sourceDataset,version:row.version,name:'replica-'+row.id.slice(0,24)};
+    if(trainingJobId&&!service.trainingTransferCall)fail('新训练准备协议尚未启用；不会回退旧 worker。',503);
+    const result=trainingJobId?await service.trainingTransferCall(who,args,{jobId:trainingJobId,logicalReference:ref}):await service.transferCall(who,'transfers.create',args);
     // Preserve a receipt even after revocation so recovery cannot lose a job.
     row.transferId=result.id;save(row);check(owner,target,policy);
     return (await service.resolveDataset(owner,target,ref)).status;
   }
   service.prepareDataset=(owner,target,ref,options)=>{
-    const id=key(owner,target,ref);if(pending.has(id))return pending.get(id);
+    const id=key(owner,target,ref)+':'+(options?.trainingJobId||'legacy');if(pending.has(id))return pending.get(id);
     const task=prepare(owner,target,ref,options).finally(()=>{if(pending.get(id)===task)pending.delete(id);});pending.set(id,task);return task;
   };
 }

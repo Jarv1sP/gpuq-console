@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """GPUQ-owned job process. Mount only assigned devices and one user's workspace."""
 import hashlib,importlib.util,json,os,re,select,subprocess,sys,time,tempfile
+sys.dont_write_bytecode=True  # Native retries retain the immutable cohort, not a bytecode side tree.
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
 TRAINING_CONTROL_PROTOCOL=1
