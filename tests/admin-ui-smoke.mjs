@@ -8,6 +8,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {layoutReadOperations,layoutReadReply} from './layout-read-fixtures.mjs';
 import {layoutWidths,layoutHeights,layoutZooms} from './layout-geometry.mjs';
 import {inspectOperationalGeometry,scanOperationalGeometry} from './operational-geometry.mjs';
 
@@ -77,6 +78,7 @@ try{
         else if(operation==='maintenance.status')result=state().operationalMaintenance;
         else if(['datasets.capacity','transfers.capabilities'].includes(operation))result={available:false,enabled:false};
         else if(operation==='datasets.storage.status'){assert.equal(actor.role,'admin','management request requires a confirmed admin');result={available:false};}
+        else if(layoutReadOperations.has(operation))result=layoutReadReply(operation,args,{principal:actor,state:state()});
         else throw Error('Unexpected admin fixture API: '+operation);
         await reply({result,state:state(),principal:actor});return;
       }

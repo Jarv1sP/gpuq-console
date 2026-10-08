@@ -10,6 +10,7 @@ import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
 import {guardedRoute} from './browser-route-guard.mjs';
+import {layoutReadOperations,layoutReadReply} from './layout-read-fixtures.mjs';
 import {layoutZooms,layoutWidths,layoutHeights} from './layout-geometry.mjs';
 import {inspectOperationalGeometry,scanOperationalGeometry,revealOperationalTarget} from './operational-geometry.mjs';
 
@@ -111,6 +112,8 @@ const outputSpec={...dialogSpec('.job-log-dialog','.job-log-dialog .sheet-scroll
 };
 const scenes=[
   ...['member','admin'].flatMap(role=>[
+    ...['confirmed','unconfirmed'].map(completion=>({role,room:'work',state:'normal',completion,
+      name:role+'-work-result-'+completion,spec:workSpec})),
     ...['work','compute','control'].flatMap(room=>['normal','empty','loading','error','unknown','maintenance'].map(state=>({role,room,state,name:role+'-'+room+'-'+state,
       spec:room==='work'?workSpec:room==='compute'?computeSpec:controlSpec}))),
     ...['work','control'].map(room=>({role,room,state:'counts',name:role+'-'+room+'-all-counts',spec:room==='work'?workSpec:controlSpec})),
@@ -314,8 +317,16 @@ try{
       if(scene.output)for(const [index,row] of state.jobs.entries()){row.id='00000000-0000-4000-8000-'+String(index+1).padStart(12,'0');row.spec.id=row.id;}
       if(scene.state==='counts')state.jobs.push(job('fixture-start','STARTING'),job('fixture-data','PREPARING_DATA'),
         {...job('fixture-cancel','RUNNING'),cancelRequested:true},job('fixture-unknown','UNKNOWN'));
+      const resultId='10000000-0000-4000-8000-000000000001';
+      if(scene.completion){
+        const completed=job(resultId,'SUCCEEDED'),now=Math.floor(Date.now()/1000);
+        completed.nodeJobId='J0123456789ab';completed.spec={...completed.spec,userId:principal.userId,machine,project,release};
+        completed.latestAttempt={id:'A'+'b'.repeat(32),ordinal:1,state:'EXITED_SUCCESS',exitCode:0,failureReason:null,startedAt:now-900,finishedAt:now-300};
+        state.jobs.push(completed);
+      }
       state.operationalMaintenance={version:1,revision:1,global:scene.state==='maintenance'?{reason:'存储检查；已有训练继续运行',since:checkedAt}:null,machines:{}};
       let logged=false,terminalCalls=0;const gates=[];
+      let completionReceived;const completionRead=new Promise(resolve=>completionReceived=resolve);
       page.on('pageerror',error=>errors.push({scene:scene.name,message:error.message}));
       await page.addInitScript(()=>{globalThis.operationalCSP=[];document.addEventListener('securitypolicyviolation',event=>operationalCSP.push(event.violatedDirective));});
       const reply=(route,result,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(result)});
@@ -342,12 +353,12 @@ try{
             result={offset:12,data:terminalCalls===1?Buffer.from('Local xterm.\r\n').toString('base64'):'',exited:scene.state==='ended',exitCode:scene.state==='ended'?17:null};
           }else if(operation==='terminal.detach')result={detached:true};
           else if(operation==='jobs.logs')result={text:'Local training log.'};
-          else if(operation==='jobs.completion'){assert.deepEqual(Object.keys(args),['jobId']);assert.ok(state.jobs.some(row=>row.id===args.jobId&&row.userId===principal.userId),'Completion reads stay bound to the fixture owner and exact job');result={protocol:0};}
+          else if(layoutReadOperations.has(operation))result=layoutReadReply(operation,args,{principal,state,completion:scene.completion});
           else if(operation==='community.info')result={enabled:true,capabilities:['task-notes-v1']};
           else if(operation==='community.notes.list')result={notes:[],nextCursor:null};
           else if(operation==='files.list')result={entries:[]};
           else throw Error('Unexpected layout fixture API: '+operation);
-          await reply(route,{result,state});return;
+          await reply(route,{result,state});if(operation==='jobs.completion'&&args.jobId===resultId)completionReceived(result);return;
         }
         await route.continue();
       }));
@@ -356,6 +367,12 @@ try{
         await page.locator('#login-form [type=submit]').click();await page.locator('#login-dialog').waitFor({state:'hidden'});
         await page.locator('[name=workspace-machine]').selectOption(machine);await page.waitForFunction(()=>!document.querySelector('[name=workspace-machine]').disabled);
         if(scene.state!=='empty'){await page.locator('[name=workspace-project]').selectOption(project);await page.waitForFunction(()=>!document.querySelector('[name=workspace-project]').disabled);}
+        if(scene.completion){
+          const receipt=await completionRead;assert.equal(receipt.protocol,'job-completion-v1');assert.equal(receipt.jobId,resultId);assert.equal(receipt.userId,principal.userId);
+          const pull=page.locator('[data-job-pull="'+resultId+'"]');
+          if(scene.completion==='confirmed'){assert.equal(receipt.completed,true);assert.equal(receipt.state,'SUCCEEDED');await pull.waitFor({state:'attached'});await page.locator('.wb-ended>summary').click();await pull.waitFor({state:'visible'});}
+          else{assert.equal(receipt.completed,false);assert.equal(receipt.state,'UNCONFIRMED');await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));assert.equal(await pull.count(),0,'unconfirmed native completion cannot expose pull');}
+        }
         if(scene.state==='loading')await page.locator('#refresh-state').click();
         if(scene.room==='compute'){
           await page.locator('[data-nav=resources]').click();await page.locator('.resource-fleet').waitFor();

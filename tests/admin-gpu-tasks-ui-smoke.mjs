@@ -9,6 +9,7 @@ import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES as EXAMPLE_MACHINES} from '../dist/machines.js';
 const MACHINES=process.env.UI_INVENTORY?JSON.parse(await readFile(process.env.UI_INVENTORY,'utf8')):EXAMPLE_MACHINES;
 import {guardedRoute} from './browser-route-guard.mjs';
+import {layoutReadOperations,layoutReadReply} from './layout-read-fixtures.mjs';
 import {layoutWidths,layoutHeights,layoutZooms} from './layout-geometry.mjs';
 import {inspectOperationalGeometry,scanOperationalGeometry} from './operational-geometry.mjs';
 import {assertResourceNames} from './resource-name-assertions.mjs';
@@ -77,6 +78,7 @@ try{
         else if(operation==='maintenance.status')result=state().operationalMaintenance;
         else if(['datasets.capacity','transfers.capabilities'].includes(operation))result={available:false,enabled:false};
         else if(operation==='datasets.storage.status'){assert.equal(actor.role,'admin','management request requires a confirmed admin');result={available:false};}
+        else if(layoutReadOperations.has(operation))result=layoutReadReply(operation,args,{principal:actor,state:state()});
         else throw Error('Unexpected admin fixture API: '+operation);
         await reply({result,state:state(),principal:actor});return;
       }
