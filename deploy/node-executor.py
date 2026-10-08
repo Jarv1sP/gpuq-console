@@ -428,8 +428,16 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                     version.update(canPrepare=True,recoveryConfigured=True)
                 pending=dataset_current_prepare(folder,item['dataset'],version['version'])
                 if pending:
-                    current=dataset_background_status(folder,*pending,cache,actor,
-                        catalog_snapshot=snapshots[(item['dataset'],version['version'])])
+                    try:
+                        current=dataset_background_status(folder,*pending,cache,actor,
+                            catalog_snapshot=snapshots[(item['dataset'],version['version'])])
+                    except module.CacheMetadataIncomplete:
+                        # A required parent may disappear after the display
+                        # snapshot. Strict status/admission remains unchanged.
+                        version.update(cache._catalog_incomplete(version))
+                        version['deletionPermissions']={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'}
+                        version.pop('recoveryConfigured',None)
+                        continue
                     version.update({k:v for k,v in current.items() if k in ('state','operationId','error')})
         if dataset_delete_capability()==1:listing['datasetDelete']=1
         warehouse=storage_warehouse()
@@ -442,8 +450,16 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
             originals=warehouse.list(actor)
             for item in originals['datasets']:
                 for value in item['versions']:
+                    if value.get('errorCode')=='CACHE_METADATA_INCOMPLETE':continue
                     pending=dataset_current_prepare(folder,item['dataset'],value['version'])
-                    if pending:value.update(dataset_background_status(folder,*pending,cache,actor))
+                    if pending:
+                        try:value.update(dataset_background_status(folder,*pending,cache,actor))
+                        except module.CacheMetadataIncomplete:
+                            value.update(cache._catalog_incomplete(value))
+                            value.update(warehouseReady=False,warehouseCanPrepare=False,
+                                deletionPermissions={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'})
+                            value.pop('storageReference',None)
+                            value.pop('recoveryConfigured',None)
                     value.pop('dataset',None)
             listing['datasets'].extend(originals['datasets'])
         return listing

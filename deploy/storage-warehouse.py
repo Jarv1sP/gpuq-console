@@ -107,7 +107,18 @@ class Warehouse:
         listing=self.cold.list_datasets(actor)
         for item in listing['datasets']:
             for value in item['versions']:
-                value.update(self.status(actor,item['dataset'],value['version']))
+                # Display UNKNOWN has no status/admission snapshot. Repeating
+                # strict status would fail the whole catalog for this one row.
+                if value.get('errorCode')!='CACHE_METADATA_INCOMPLETE':
+                    try:value.update(self.status(actor,item['dataset'],value['version']))
+                    except self.d.CacheMetadataIncomplete:
+                        value.update(self.d.DatasetCache._catalog_incomplete(value))
+                if value.get('errorCode')=='CACHE_METADATA_INCOMPLETE':
+                    value.update(warehouseReady=False,warehouseCanPrepare=False,
+                        deletionPermissions={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'})
+                    value.pop('storageReference',None)
+                    value.pop('recoveryConfigured',None)
+                    continue
                 value.pop('dataset',None)
                 value['deletionPermissions']=self.cold.deletion_permissions(actor,item['dataset'],value['version'])
         return listing

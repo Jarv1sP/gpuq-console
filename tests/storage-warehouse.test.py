@@ -74,6 +74,102 @@ class WarehouseTests(unittest.TestCase):
         self.assertNotIn('storageReference',result)
         self.assertEqual(self.hot.list_datasets(OWNER)['datasets'],[])
 
+    def assert_catalog_unknown(self):
+        result=self.w.list(OWNER)
+        row=next(item for item in result['datasets'] if item['dataset']=='tiny')['versions'][0]
+        self.assertEqual(row['state'],'UNKNOWN')
+        self.assertEqual(row['errorCode'],'CACHE_METADATA_INCOMPLETE')
+        self.assertFalse(row['canPrepare']);self.assertFalse(row['warehouseReady'])
+        self.assertFalse(row['warehouseCanPrepare']);self.assertTrue(row['deletionBlocked'])
+        self.assertEqual(row['deletionPermissions'],{'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'})
+        self.assertNotIn('storageReference',row)
+        self.assertEqual((row['bytes'],row['files']),(len(b'warehouse original'),1))
+        self.assertNotIn(str(self.root),json.dumps(result))
+        return result
+
+    def test_cold_unknown_skips_strict_status_and_permissions_without_repair(self):
+        healthy=self.w.cold.register_manifest(ADMIN,'healthy',{'schema':1,'directories':[],'files':[]},[OWNER.user_id])['version']
+        self.w.list(OWNER)  # Exercise the existing warm display-summary path.
+        parent=self.w.cold._paths('tiny',self.version)['ready'].parent
+        preserved=self.root/'preserved-cold-ready';parent.rename(preserved)
+        registry=self.w.cold._paths('tiny',self.version)['.registry'].parent/(self.version+'.json')
+        before=registry.read_bytes()
+        old_status=self.w.status;old_permissions=self.w.cold.deletion_permissions
+        def status(actor,dataset,version):
+            if dataset=='tiny':raise AssertionError('UNKNOWN cannot enter strict status')
+            return old_status(actor,dataset,version)
+        def permissions(actor,dataset,version):
+            if dataset=='tiny':raise AssertionError('UNKNOWN cannot gain deletion permission')
+            return old_permissions(actor,dataset,version)
+        with patch.object(self.w,'status',side_effect=status),patch.object(self.w.cold,'deletion_permissions',side_effect=permissions):
+            result=self.assert_catalog_unknown()
+        row=next(item for item in result['datasets'] if item['dataset']=='healthy')['versions'][0]
+        self.assertEqual((row['version'],row['state']),(healthy,'REGISTERED'))
+        self.assertFalse(parent.exists());self.assertEqual(registry.read_bytes(),before)
+        self.assertEqual((preserved/self.version/'data'/'sample').read_bytes(),b'warehouse original')
+        with self.assertRaises(D.CacheMetadataIncomplete):self.w.status(OWNER,'tiny',self.version)
+        with self.assertRaises(D.CacheMetadataIncomplete):self.w.prepare(OWNER,'tiny',self.version)
+        self.assertFalse(parent.exists())
+
+    def test_fixed_hot_binding_missing_ready_parent_is_display_unknown_only(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        physical=W.Warehouse.cache_name('tiny')
+        parent=self.hot._paths(physical,self.version)['ready'].parent
+        preserved=self.root/'preserved-hot-ready';parent.rename(preserved)
+        binding=self.w.bindings/(physical+'-'+self.version+'.json');before=binding.read_bytes()
+        with patch.object(self.w.cold,'deletion_permissions',side_effect=AssertionError('UNKNOWN cannot gain deletion permission')):
+            self.assert_catalog_unknown()
+        self.assertFalse(parent.exists());self.assertEqual(binding.read_bytes(),before)
+        self.assertTrue(self.w.cold._paths('tiny',self.version)['ready'].exists())
+        self.assertEqual((preserved/self.version/'data'/'sample').read_bytes(),b'warehouse original')
+        with self.assertRaises(D.CacheMetadataIncomplete):self.w.status(OWNER,'tiny',self.version)
+        with self.assertRaises(D.CacheMetadataIncomplete):self.hot.plan(OWNER,physical,self.version)
+        self.assertFalse(parent.exists())
+        self.assertEqual(self.w.list(D.Principal('demo-user-4')),{'datasets':[]})
+        with self.assertRaises(PermissionError):self.w.status(D.Principal('demo-user-4'),'tiny',self.version)
+
+    def test_fixed_hot_binding_missing_staging_parent_is_display_unknown_only(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        physical=W.Warehouse.cache_name('tiny');self.hot.evict(ADMIN,physical,self.version)
+        parent=self.hot._paths(physical,self.version)['.staging'].parent
+        parent.rename(self.root/'preserved-hot-staging')
+        self.assert_catalog_unknown()
+        self.assertFalse(parent.exists())
+        with self.assertRaises(D.CacheMetadataIncomplete):self.w.status(OWNER,'tiny',self.version)
+        self.assertTrue(self.w.cold._paths('tiny',self.version)['ready'].exists())
+
+    def test_corrupt_cold_registration_is_not_display_unknown(self):
+        parent=self.w.cold._paths('tiny',self.version)['ready'].parent
+        parent.rename(self.root/'preserved-cold-ready')
+        registry=self.w.cold._paths('tiny',self.version)['.registry'].parent/(self.version+'.json')
+        registry.write_text('{}')
+        with self.assertRaisesRegex(D.CacheError,'corrupt version registration'):self.w.list(OWNER)
+        self.assertFalse(parent.exists())
+
+    def test_corrupt_hot_registration_is_not_display_unknown(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        physical=W.Warehouse.cache_name('tiny')
+        parent=self.hot._paths(physical,self.version)['ready'].parent
+        parent.rename(self.root/'preserved-hot-ready')
+        registry=self.hot._paths(physical,self.version)['.registry'].parent/(self.version+'.json')
+        registry.write_text('{}')
+        with self.assertRaisesRegex(D.CacheError,'corrupt version registration'):self.w.list(OWNER)
+        self.assertFalse(parent.exists())
+
+    def test_corrupt_binding_is_not_display_unknown(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        physical=W.Warehouse.cache_name('tiny')
+        D._write_json(self.w.bindings/(physical+'-'+self.version+'.json'),{})
+        with self.assertRaisesRegex(ValueError,'binding changed'):self.w.list(OWNER)
+
+    def test_unsafe_hot_parent_link_is_not_display_unknown(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        parent=self.hot._paths(W.Warehouse.cache_name('tiny'),self.version)['ready'].parent
+        preserved=self.root/'preserved-hot-ready';parent.rename(preserved)
+        parent.symlink_to(preserved,target_is_directory=True)
+        with self.assertRaises((D.CacheError,OSError)):self.w.list(OWNER)
+        self.assertTrue(parent.is_symlink())
+
     def test_upload_factory_writes_only_fixed_hdd(self):
         uploads=U.DatasetUploads(self.w.view)
         self.assertEqual(uploads.cache.root,self.w.cold.root)
