@@ -57,10 +57,13 @@ export async function datasetStorageOverviewCall(service,principal,args){
     let current;try{current=service.store.get(principal.userId);}catch{}
     if(service.closing||current?.enabled!==true||JSON.stringify(current)!==policy)fail('账号授权已改变，请刷新后重试。',403);
   };
-  // Catalog's existing metadata-only service read preserves exact member ACLs.
-  const catalog=await datasetCatalogCall(service,principal,'datasets.catalog',{},{refreshRemovalExclusions:false});
-  checkPolicy();
-  const nodes=await Promise.all(MACHINES.map(async({id:machine})=>{
+  // Independent fixed metadata reads share one elapsed window. Waiting for
+  // every catalog before starting capacities doubles an offline node's bridge
+  // deadline and makes a healthy warehouse disappear behind client timeouts.
+  // Neither branch grants access; both revalidate the actor before projection.
+  const [catalog,nodes]=await Promise.all([
+    datasetCatalogCall(service,principal,'datasets.catalog',{},{refreshRemovalExclusions:false}),
+    Promise.all(MACHINES.map(async({id:machine})=>{
     try{
       // Confinement to a fixed, literal capacity read, never a file operation.
       const value=await service.bridge(machine,'datasets.capacity',{userId:'builtin-admin',hostAdmin:true});
@@ -81,7 +84,8 @@ export async function datasetStorageOverviewCall(service,principal,args){
         fileListCapability:value?.datasetFileList===1&&volume.state==='READY'};
     }catch{return {machine,state:'UNAVAILABLE',volume:{...volumeView(machine,null),collectedAt:lastCollected(service,machine+':cache',null)},budgetBytes:null,
       projectBytes:null,projectUsageComplete:false,projectCollectedAt:lastCollected(service,machine+':projects',null),warehouse:null,warehouseKnown:false};}
-  }));
+    }))
+  ]);
   checkPolicy();
   const usage=new Map(nodes.map(node=>[node.machine,{sizes:[],versions:new Set(),complete:catalog.machines.find(row=>row.machine===node.machine)?.state==='ok'}]));
   const originals=new Map(nodes.filter(node=>node.warehouse).map(node=>[node.machine,{sizes:[],datasets:new Set(),versions:new Set(),complete:catalog.machines.find(row=>row.machine===node.machine)?.state==='ok'}]));
