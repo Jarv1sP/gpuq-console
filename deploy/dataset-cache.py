@@ -1619,6 +1619,62 @@ class DatasetCache:
                     errorCode='CACHE_METADATA_INCOMPLETE',
                     error='数据缓存元数据不完整；请管理员核验。')
 
+    def _catalog_incomplete_binding(self, dataset, version):
+        """Exact missing-parent display boundary, never a READY/absence proof."""
+        def stamp(info):
+            return [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                    info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        paths = self._paths(dataset, version)
+        filename = paths['.registry'].parent / (version + '.json')
+        with _directory(filename.parent) as parent:
+            folder = stamp(os.fstat(parent))
+            fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:record = stamp(_regular(fd))
+            finally:os.close(fd)
+        parents, missing = [], False
+        for path in (paths['ready'].parent, paths['.staging'].parent):
+            components, boundary = path.relative_to(self.root).parts, []
+            with _directory(self.root) as root:
+                fd = os.dup(root)
+                try:
+                    for component in components:
+                        try:
+                            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                        except FileNotFoundError:
+                            boundary.append(dict(component=component, parent=stamp(os.fstat(fd)), missing=True))
+                            missing = True
+                            break
+                        os.close(fd); fd = child
+                        boundary.append(dict(component=component, identity=stamp(os.fstat(fd))))
+                finally:os.close(fd)
+            parents.append(boundary)
+        if not missing:
+            raise CacheError('incomplete catalog parents changed; retry the operation')
+        return dict(root=list(self._root_identity), dataset=dataset, version=version,
+                    folder=folder, record=record, ready=None, metadataIncomplete=True,
+                    parents=parents, fence=self._retirement_fence(dataset, version))
+
+    def _catalog_incomplete_version(self, actor, dataset, version):
+        # The existing bounded private summary is reusable only for counts.
+        # No sourceId, canPrepare, worker identity or READY evidence is cached.
+        try:self._catalog_directory()
+        except (OSError, CacheError):pass  # Disposable cache failure remains a miss.
+        with self._catalog_read(actor, dataset):
+            binding = self._catalog_incomplete_binding(dataset, version)
+            summary = self._catalog_summary(binding)
+            cached = summary is not None
+            if summary is None:
+                record, identity = self._catalog_record_snapshot(actor, dataset, version)
+                summary = dict(bytes=sum(f['size'] for f in record['manifest']['files']),
+                               files=len(record['manifest']['files']), ready=False, sourceId=None)
+            else:
+                identity = self._record_identity(dataset, version, _read_only=True)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+            if self._catalog_incomplete_binding(dataset, version) != binding:
+                raise CacheError('incomplete catalog metadata changed; retry the operation')
+            if not cached:self._catalog_summary(binding, summary)
+        return summary, identity, binding
+
     def _list_datasets_snapshot(self, actor):
         """Private per-request identities for a detached-worker status overlay.
 
@@ -1657,11 +1713,10 @@ class DatasetCache:
                     # Only this typed parent absence becomes a display row.
                     # Validate the exact registration and live ACL again; do
                     # not catch corrupt metadata, I/O errors or unsafe links.
-                    record, identity = self._catalog_record_snapshot(actor, dataset, version)
+                    summary, identity, binding = self._catalog_incomplete_version(actor, dataset, version)
                     row = self._catalog_incomplete(dict(version=version,
-                        bytes=sum(f['size'] for f in record['manifest']['files']),
-                        files=len(record['manifest']['files'])))
-                    versions.append((row, identity, None, None))
+                        bytes=summary['bytes'], files=summary['files']))
+                    versions.append((row, identity, None, binding))
                     continue
                 # Summation and parsing scale with the manifest; they must not
                 # delay unrelated publication/lease admission under global lock.
@@ -1681,9 +1736,11 @@ class DatasetCache:
                     version = row['version']
                     self._check_snapshot(actor, dataset, version, identity, _read_only=True)
                     paths = self._paths(dataset, version)
-                    if binding is None:
+                    if binding is None or binding.get('metadataIncomplete') is True:
                         # UNKNOWN rows intentionally have no trusted snapshot
                         # for worker/admission overlays. No parents are made.
+                        if binding is not None and self._catalog_incomplete_binding(dataset, version) != binding:
+                            raise CacheError('incomplete catalog metadata changed; retry the operation')
                         rows.append(row)
                         continue
                     try:
@@ -1724,6 +1781,10 @@ class DatasetCache:
                 for row, identity, ready_identity, binding in versions:
                     version = row['version']
                     self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+                    if binding is not None and binding.get('metadataIncomplete') is True:
+                        if self._catalog_incomplete_binding(dataset, version) != binding:
+                            raise CacheError('incomplete catalog metadata changed; retry the operation')
+                        continue
                     if binding is not None and (dataset, version) in fences:
                         try:
                             self._check_ready_snapshot(self._paths(dataset, version), ready_identity)
