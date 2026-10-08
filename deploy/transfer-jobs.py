@@ -63,11 +63,41 @@ class PeerClient:
         if ip.version != 4 or not (ip.is_private or ip.is_loopback) or ip.is_unspecified or ip.is_multicast:
             raise ValueError('Use an explicit LAN IPv4 peer')
         self.config, self.ticket, self.connection = config, ticket, None
+        self.campus_only = False  # Set only by a verified private training worker.
+        self.campus_binding = None
+
+    def campus_route(self):
+        """Fixed peer metadata only. No discovery, tunnel or relay fallback."""
+        address=ipaddress.ip_address(self.config['address'])
+        if address.version!=4 or not address.is_private or address.is_loopback:
+            raise ValueError('Training data requires a campus physical IPv4 peer')
+        tool=next((name for name in ('/usr/sbin/ip','/usr/bin/ip','/sbin/ip','/bin/ip') if Path(name).is_file()),None)
+        if tool is None:raise ValueError('Campus data route cannot be verified')
+        result=subprocess.run([tool,'-j','route','get',str(address)],capture_output=True,text=True,timeout=2)
+        if result.returncode or len(result.stdout)>16384:raise ValueError('Campus data route cannot be verified')
+        rows=json.loads(result.stdout)
+        if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict):raise ValueError('Campus data route cannot be verified')
+        route=rows[0];device=route.get('dev');source=route.get('prefsrc') or route.get('src')
+        if (not isinstance(device,str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,32}',device)
+                or device.lower().startswith(('tailscale','tun','tap','wg','lo'))
+                or not (Path('/sys/class/net')/device/'device').exists()):
+            raise ValueError('Training data route is not a campus physical interface')
+        ip=ipaddress.ip_address(source)
+        if ip.version!=4 or not ip.is_private or ip.is_loopback:raise ValueError('Campus data source cannot be verified')
+        return {'device':device,'source':str(ip),'gateway':route.get('gateway')}
 
     def close(self):
         if self.connection:
             self.connection.close()
         self.connection = None
+        self.campus_binding = None
+
+    def verify_campus(self,*,response=False):
+        if self.campus_only and (self.campus_binding is None or self.campus_route()!=self.campus_binding
+                or self.connection is None or not response and (self.connection.sock is None
+                    or self.connection.sock.getsockname()[0]!=self.campus_binding['source'])):
+            self.close()
+            raise ValueError('Campus data route changed before file transfer')
 
     def connect(self, timeout=25):
         if not self.connection or self.connection.sock is None:
@@ -76,15 +106,25 @@ class PeerClient:
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE  # Explicit DER pin is the trust anchor.
             context.minimum_version = ssl.TLSVersion.TLSv1_2
-            connection = http.client.HTTPSConnection(self.config['address'], self.config['port'], timeout=timeout, context=context)
+            route=self.campus_route() if self.campus_only else None
+            options={'source_address':(route['source'],0)} if route is not None else {}
+            connection = http.client.HTTPSConnection(self.config['address'], self.config['port'], timeout=timeout, context=context,**options)
             try:
                 connection.connect()
                 if not hmac.compare_digest(hashlib.sha256(connection.sock.getpeercert(binary_form=True)).hexdigest(), self.config['certificateSha256']):
                     raise ValueError('LAN peer certificate differs from configured pin')
+                if route is not None and (self.campus_route()!=route or connection.sock.getsockname()[0]!=route['source']):
+                    raise ValueError('Campus data route changed before file transfer')
             except Exception:
                 connection.close()
                 raise
             self.connection = connection
+            self.campus_binding = route
+        else:
+            # A persistent TCP connection can be rerouted too. Check every
+            # bounded read, not merely a handshake/reconnect, before any token
+            # or payload request and again before accepting its response.
+            self.verify_campus()
 
     def ready(self):
         """Bounded, ticket-free probe, only to an explicitly pinned LAN peer."""
@@ -107,6 +147,10 @@ class PeerClient:
                 headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+self.ticket['token']})
             response = self.connection.getresponse()
             raw = response.read(1500001)
+            # A valid HTTP Connection:close response has already detached its
+            # socket. The send-side source was checked before the request; the
+            # completed response still must have the identical campus route.
+            self.verify_campus(response=True)
             if len(raw) > 1500000:
                 raise ValueError('Peer response is too large')
             value = json.loads(raw)
@@ -819,6 +863,7 @@ class TransferJobs:
                 return 1
             self.n.atomic_json(self.path(key, '.started-'+str(attempt)), {'attempt': attempt})
             client = PeerClient(self.n.CONFIG['transferPeers'][spec['sourceMachine']], spec['source'])
+            client.campus_only = require_training
             started, retries, transferred, last_progress = time.monotonic(), 0, 0, 0
             result = {'state': 'FAILED', 'attempt': attempt}
             def check():
@@ -849,6 +894,8 @@ class TransferJobs:
                     self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
                 check()
                 training = None
+                if not require_training and os.path.lexists(self.path(key,'.training.json')):
+                    raise ValueError('Training transfer cannot use a legacy worker')
                 if require_training or os.path.lexists(self.path(key, '.training.json')):
                     utility = __import__('importlib.util', fromlist=['util'])
                     definition = utility.spec_from_file_location('gpuq_training_preparation', self.n.HERE/'training-preparation.py')

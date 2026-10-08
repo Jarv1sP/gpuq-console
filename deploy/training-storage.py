@@ -181,7 +181,7 @@ def _copy_json(folder, name):
         os.close(fd)
 
 
-def _project_copies_idle(executor, s):
+def _project_copies_idle(executor, s, existing=None):
     """Original journals only. Unmeasured live/unknown copies fail closed.
 
     Final payload bytes already belong to statvfs. A terminal receipt alone
@@ -236,6 +236,11 @@ def _project_copies_idle(executor, s):
                 {'sourceMachine', 'source'} if spec['role'] == 'import' else {'targetMachine'})
             need(set(payload) == fields and spec.get('digest') == module.t.digest(payload),
                  'Project copy commitment changed')
+            # The private SAME-runtime worker may recheck its own full peak
+            # footprint while its original journal is live. No public field
+            # can select this exception; every other live/unknown copy blocks.
+            if existing is not None and existing(spec):
+                continue
             try:
                 result = _copy_json(folder, key+'.result.json')
                 started = _copy_json(folder, key+'.started-'+str(spec['attempt']))
@@ -303,7 +308,7 @@ def _workspace_dataset_commitments(executor, s, workspace):
         return cache._reserved(), cache._reserved_inodes(), cache.reserve_bytes
 
 
-def plan(executor, args, *, _existing_upload=None):
+def plan(executor, args, *, _existing_upload=None, _existing_project_copy=None, _project_extra=None):
     validate(args)
     machine = executor.CONFIG.get('machine')
     need(isinstance(machine, str) and ID.fullmatch(machine), 'Unknown training machine')
@@ -311,6 +316,9 @@ def plan(executor, args, *, _existing_upload=None):
     guard = s.check_platform_root(executor.ROOT)
     need(isinstance(guard, dict) and guard.get('guarded') is True, 'Training workspace root is not guarded')
     project_bytes, project_inodes = _project_need(executor, args)
+    if _project_extra is not None:
+        need(isinstance(_project_extra,tuple) and len(_project_extra)==2, 'Invalid private project export footprint')
+        project_bytes=total(project_bytes,_project_extra[0]);project_inodes=total(project_inodes,_project_extra[1])
     reserve = s.workspace_reserve_bytes(executor.CONFIG)
     cache_budget = {'enabled': False, 'budgetBytes': None, 'usedOrReservedBytes': 0, 'requiredBytes': 0}
     with s.directory(executor.ROOT) as workspace:
@@ -421,7 +429,7 @@ def plan(executor, args, *, _existing_upload=None):
             identity = os.fstat(current)
             need((identity.st_dev, identity.st_ino) == (workspace_identity.st_dev, workspace_identity.st_ino),
                  'Training workspace root identity changed')
-    _project_copies_idle(executor, s)
+    _project_copies_idle(executor, s, _existing_project_copy)
     quota = _quota(executor, args['userId'], volumes)
     fits = all(_fits(volume) for volume in volumes)
     if cache_budget['enabled']:

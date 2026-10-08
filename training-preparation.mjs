@@ -55,9 +55,58 @@ export async function prepareTrainingDataset(service,jobId,logicalReference,refe
   return trainingPreparationCall(service,value,'datasets.prepare',{userId:job.userId,hostAdmin:false,...reference});
 }
 
+export function assertTrainingProjectPreparation(service,value,{cleanup=false}={}){
+  const job=service.store.jobs?.find(row=>row.id===value?.job?.id),prep=value?.preparation;
+  if(!job||!job.trainingStoragePlan||job.userId!==value.job.userId||job.machine!==prep?.targetMachine||
+     prep.kind!=='project'||prep.protocol!==1||!UUID.test(prep.id||'')||
+     prep.reference?.project!==job.project||prep.reference.release!==job.release||
+     prep.sourceMachine!==job.projectPreparation?.from||
+     !job.trainingPreparations?.some(row=>same(row,value))||
+     value.job.project!==job.project||value.job.release!==job.release||
+     value.planRequest?.userId!==job.userId||value.planRequest.hostAdmin!==false||
+     value.planRequest.project!==job.project||value.planRequest.release!==job.release||
+     value.planRequest.datasetReadMode!==(value.job.datasetReadMode||'cache')||
+     value.planRequest.projectFootprint?.sourceMachine!==prep.sourceMachine)fail();
+  if(!cleanup&&(job.cancelRequested||job.state!=='PREPARING_DATA'||!same(job.spec,value.job)||
+     !same(job.trainingStorageRequest,value.planRequest)||job.trainingStoragePlan.noReclaim!==true||
+     job.trainingStoragePlan.fits!==true||job.trainingStoragePlan.owner!==job.userId||
+     job.trainingStoragePlan.machine!==job.machine||job.trainingStoragePlan.requestSHA256!==trainingStorageDigest(value.planRequest)))fail();
+  return job;
+}
+
+export async function bindTrainingProjectPreparation(service,jobId,{sourceMachine,project,release}){
+  return service.enqueue(()=>{
+    const job=service.store.jobs?.find(row=>row.id===jobId),request=job?.trainingStorageRequest,plan=job?.trainingStoragePlan;
+    if(!job||!request||!plan||plan.noReclaim!==true||plan.fits!==true||plan.owner!==job.userId||plan.machine!==job.machine||
+       plan.requestSHA256!==trainingStorageDigest(request)||job.cancelRequested||job.state!=='PREPARING_DATA'||
+       job.spec?.id!==job.id||job.spec.userId!==job.userId||project!==job.project||release!==job.release||
+       job.spec.project!==project||job.spec.release!==release||sourceMachine!==job.projectPreparation?.from||
+       sourceMachine===job.machine||request.projectFootprint?.sourceMachine!==sourceMachine)fail();
+    const old=job.trainingPreparations?.find(row=>row.preparation.kind==='project');
+    if(old){assertTrainingProjectPreparation(service,old);return structuredClone(old);}
+    const value={job:structuredClone(job.spec),planRequest:structuredClone(request),
+      preparation:{protocol:1,id:randomUUID(),kind:'project',sourceMachine,targetMachine:job.machine,reference:{project,release}}};
+    const before=job.trainingPreparations;
+    try{job.trainingPreparations=[...(before||[]),value];service.save();}catch(error){if(before===undefined)delete job.trainingPreparations;else job.trainingPreparations=before;throw error;}
+    return structuredClone(value);
+  });
+}
+
+export async function trainingProjectPreparationCall(service,value,machine,operation,args){
+  const cleanup=['projects.copy.cancel','projects.copy.revoke','projects.copy.release','projects.copy.status'].includes(operation);
+  assertTrainingProjectPreparation(service,value,{cleanup});
+  if(![value.preparation.sourceMachine,value.preparation.targetMachine].includes(machine))fail();
+  const result=await service.bridge(machine,'storage.training.project.prepare',{...structuredClone(value),operation,args});
+  assertTrainingProjectPreparation(service,value,{cleanup});return result;
+}
+
 export async function cancelTrainingPreparations(service,job){
   for(const value of job.trainingPreparations||[]){
-    if(value.preparation.kind==='transfer'){
+    if(value.preparation.kind==='project'){
+      if(!service.cancelTrainingProjectCopy)fail();
+      const result=await service.cancelTrainingProjectCopy(value);
+      if(!['SUCCEEDED','CANCELED'].includes(result.state)||result.cleanupComplete!==true)throw Error('准备项目的原 worker 停止尚未确认。');
+    }else if(value.preparation.kind==='transfer'){
       if(!service.transferCall)fail();
       const user=service.store.get(job.userId);
       const result=service.transferSnapshot?.(job.userId,value.preparation.id)?

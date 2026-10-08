@@ -55,7 +55,8 @@ async function observe(service,id,usage){
   }
   if(job.projectPreparation){
     if(!service.prepareProject)throw Error('项目复制服务暂不可用；保留已选择的服务器，未申请 GPU。');
-    const result=await service.prepareProject(job.userId,job.machine,{from:job.projectPreparation.from,project:job.project,release:job.release});
+    const result=await service.prepareProject(job.userId,job.machine,{from:job.projectPreparation.from,project:job.project,release:job.release},
+      job.trainingStoragePlan?{trainingJobId:job.id}:undefined);
     if(result?.project!==job.project||result.release!==job.release||result.machine!==job.machine||!['READY','PREPARING','FAILED'].includes(result.state))throw Error('项目准备结果与固定版本或服务器不符；未申请 GPU。');
     projectState={...job.projectPreparation,state:result.state,...(result.operationId?{operationId:result.operationId}:{})};
     projectReady=result.state==='READY';
