@@ -6,7 +6,7 @@ import {mkdtemp,writeFile,readFile,mkdir,rm,stat,open} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
-import {mockCampusFiles} from './personal-file-campus-mock.mjs';
+import {mockCampusFiles,campusFixtureArgs} from './personal-file-campus-mock.mjs';
 
 const RELEASE='a'.repeat(64),OLDER='b'.repeat(64),JOB='11111111-2222-4333-8444-555555555555';
 const principal={userId:'demo-user-1',username:'tester',role:'member'};
@@ -46,7 +46,7 @@ async function fixture(t){
   const save=extra=>writeFile(session,JSON.stringify({url,token:'test-only',principal,machine:'gpu-1',...extra}),{mode:0o600});
   await save({});
   const cli=(args,input='',preload=null,human=false)=>new Promise((resolve,reject)=>{
-    const child=spawn(process.execPath,[...(preload?['--import',preload]:[]),new URL('../cli.mjs',import.meta.url).pathname,'--url',url,'--session-file',session,...(human?[]:['--json']),...args]);
+    const child=spawn(process.execPath,[...campusFixtureArgs,...(preload?['--import',preload]:[]),new URL('../cli.mjs',import.meta.url).pathname,'--url',url,'--session-file',session,...(human?[]:['--json']),...args]);
     let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);child.on('error',reject);
     child.on('close',code=>resolve({code,data:human?null:stdout?JSON.parse(stdout).data:null,stderr,stdout}));child.stdin.end(input);
   });

@@ -9,7 +9,7 @@ import {spawn} from 'node:child_process';
 import {randomUUID,createHash} from 'node:crypto';
 import {parseCLIOptions,synchronizeProjectRun} from '../cli.mjs';
 import {journalTransport} from './project-journal-transport-fixture.mjs';
-import {mockCampusFiles} from './personal-file-campus-mock.mjs';
+import {mockCampusFiles,campusFixtureArgs} from './personal-file-campus-mock.mjs';
 
 const OLD='a'.repeat(64),FRESH='b'.repeat(64),key='11111111-2222-4333-8444-555555555555';
 async function fixture(t,{states=['PUBLISHING','READY'],before={}}={}){
@@ -139,7 +139,7 @@ test('real CLI loopback: Unicode/space cwd, literal argv, own READY and one subm
   await writeFile(session,JSON.stringify({url,token:'fixture-only',principal,machine:'gpu-1',projectsByMachine:{'gpu-1':'alpha'}}),{mode:0o600});
   t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));});
   const cli=args=>new Promise((resolve,reject)=>{
-    const child=spawn(process.execPath,[fileURLToPath(new URL('../cli.mjs',import.meta.url)),'--url',url,'--session-file',session,'--json',...args],{cwd:directory,windowsHide:true});
+    const child=spawn(process.execPath,[...campusFixtureArgs,fileURLToPath(new URL('../cli.mjs',import.meta.url)),'--url',url,'--session-file',session,'--json',...args],{cwd:directory,windowsHide:true});
     let stdout='',stderr='';child.stdout.on('data',c=>stdout+=c);child.stderr.on('data',c=>stderr+=c);child.on('error',reject);child.on('close',code=>resolve({code,stdout,stderr}));
   });
   let result=await cli(['run','--sync','--key',key,'--','python','train.py','--name','hello & world']);assert.equal(result.code,0,result.stderr);

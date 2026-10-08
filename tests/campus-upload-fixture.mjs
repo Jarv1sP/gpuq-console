@@ -4,6 +4,8 @@
 import {createServer as createHTTPS} from 'node:https';
 import {createHash,generateKeyPairSync,randomBytes,sign,X509Certificate} from 'node:crypto';
 import {Readable} from 'node:stream';
+import './campus-native-fixture-preload.mjs';
+export const campusFixtureArgs=['--import',new URL('./campus-native-fixture-preload.mjs',import.meta.url).href];
 const endpoint='https://campus.example.test',ticket='fixture-campus-ticket-only';
 const transport={protocol:'dataset-upload-v1',directAvailable:true};
 // Disposable RSA certificate, generated with Node's bundled crypto on every
@@ -51,7 +53,7 @@ export async function campusTLSFixture(handler,{machine='gpu-1'}={}){
     }catch{if(!res.writableEnded){res.statusCode=400;res.end('{"ok":false}');}}
   });
   await new Promise(resolve=>direct.listen(0,'127.0.0.1',resolve));origin=`https://127.0.0.1:${direct.address().port}`;
-  const grant=()=>({available:true,protocol:'dataset-upload-v1',endpoint:origin,ticket,expiresAt:Math.floor(Date.now()/1000)+300,certificateSha256:pin,chunkBytes:1048576,kind:'campus-direct'});
+  const grant=()=>({available:true,protocol:'dataset-upload-v1',endpoint:origin,ticket,expiresAt:Math.floor(Date.now()/1000)+300,certificateSha256:pin,chunkBytes:1048576,kind:'campus-direct',routeId:'primary',revision:'c'.repeat(64),machine});
   const control=async(req,res)=>{
     const parts=[];for await(const bytes of req)parts.push(bytes);const value=JSON.parse(Buffer.concat(parts));
     res.setHeader('Content-Type','application/json');

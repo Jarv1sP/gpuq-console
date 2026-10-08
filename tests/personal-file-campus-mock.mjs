@@ -4,6 +4,7 @@ import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash,randomUUID,X509Certificate} from 'node:crypto';
+export {campusFixtureArgs} from './campus-upload-fixture.mjs';
 
 // Existing CLI fixtures retain their synthetic journal/job responses, but the
 // byte leg now really uses a distinct local HTTPS server instead of /api/call.

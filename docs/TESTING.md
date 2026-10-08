@@ -11,6 +11,19 @@ global batch 的单进程参考在 FP64 容差 1e-12 内一致。另测三 rank 
 
 ## 每个 PR 的离线自动测试
 
+CLI 集成测试的校园端点是独立的本机 HTTPS 服务，不是实际校园路线。
+`campus-native-fixture-preload.mjs` 仅由这些测试显式传入子进程，在正式客户端
+已经完成原生文件提取和完整性校验后替换该隔离子进程的物理网络端。真实帧、
+证书 pin、原上传编号、字节 SHA、失回执和停止后不重放仍须通过；不修改生产
+客户端、环境变量开关或原生 helper 的网络保护。该夹具本身另测真实子进程、
+HTTPS 字节和失败后零重放。Linux 物理接口、系统 CA、路由变化和原生 HTTP
+解析仍由 `native/campus-http` 的 Go 测试及 `client-campus-native.test.js`
+分别验证，不把 loopback 夹具当作真实校园吞吐验收。
+
+Windows 构建使用官方固定版本 Go ZIP，核对完整归档 SHA、解压后的 `go.exe`
+版本与已缓存二进制 SHA；POSIX mode/uid 检查只适用于有该权限模型的系统。
+Windows 真实打包与运行由既有 Windows CI 完成，不以 Mac 上的路径夹具替代。
+
 训练存储准入由 `training-storage.test.js/.py`、`personal-oci-inodes.test.py`、
 `training-storage-dispatch.test.js` 与 AUTO 回归覆盖真实 byte/inode、展开镜像、
 同卷去重、预留／在途占用、旧／未知能力、固定目标及准备／派发前重新验证。

@@ -8,7 +8,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {standaloneClient} from '../client-bundle.mjs';
-import {campusTLSFixture} from './campus-upload-fixture.mjs';
+import {campusTLSFixture,campusFixtureArgs} from './campus-upload-fixture.mjs';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex'),run=promisify(execFile),chunk=1024**2;
 async function fixture(t){
   const root=await mkdtemp(join(tmpdir(),'gpuq-sync-cli-')),repo=join(root,'repo 工作区'),session=join(root,'session'),client=join(root,'gpuctl.mjs'),calls=[],files=new Map();await mkdir(repo);await writeFile(client,await standaloneClient());
@@ -46,7 +46,7 @@ async function fixture(t){
       res.end(JSON.stringify({result}));
     }catch(error){res.statusCode=400;res.end(JSON.stringify({error:error.message}));}
   },{machine:'gpu-2'});const server=createServer(tls.control);await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const url='http://127.0.0.1:'+server.address().port;await writeFile(session,JSON.stringify({url,token:'fixture-only',principal:{userId:'demo-user-1',username:'alice',role:'member'}}));
-  const cli=args=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[client,'--url',url,'--session-file',session,'--json',...args]);let stdout='',stderr='';child.stdout.on('data',s=>stdout+=s);child.stderr.on('data',s=>stderr+=s);child.on('error',reject);child.on('close',code=>resolve({code,stderr,data:stdout?JSON.parse(stdout).data:null}));});
+  const cli=args=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[...campusFixtureArgs,client,'--url',url,'--session-file',session,'--json',...args]);let stdout='',stderr='';child.stdout.on('data',s=>stdout+=s);child.stderr.on('data',s=>stderr+=s);child.on('error',reject);child.on('close',code=>resolve({code,stderr,data:stdout?JSON.parse(stdout).data:null}));});
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));await tls.close();assert.equal(tls.counters.portalFileRequests,0);await rm(root,{recursive:true,force:true});});return {repo,cli,calls,files,version,drop:()=>drop=true};
 }
 test('Git preview leaves target unchanged; clean commit copies code into a fenced new draft and resumes a lost reply',async t=>{

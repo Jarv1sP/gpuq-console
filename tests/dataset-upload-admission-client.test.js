@@ -11,7 +11,7 @@ import {uploadDatasetSnapshot,snapshotKey} from '../client-data-upload.mjs';
 import {uploadBrowserDataset,uploadKey} from '../dist/dataset-upload.js';
 import {datasetUploadCalls,datasetUploadKeyStore} from '../dist/datasets-ui.js';
 import {saveDatasetUploadSession} from '../cli.mjs';
-import {campusBrowserFixture,campusCoreFixture,campusTLSFixture} from './campus-upload-fixture.mjs';
+import {campusBrowserFixture,campusCoreFixture,campusTLSFixture,campusFixtureArgs} from './campus-upload-fixture.mjs';
 
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const issued='11111111-1111-4111-8111-111111111111',legacyId='22222222-2222-4222-8222-222222222222';
@@ -275,7 +275,7 @@ test('standalone CLI uses real durable intent and issued UUID, then resumes lost
   const server=createServer(tls.control);
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const url=`http://127.0.0.1:${server.address().port}`;await writeFile(session,JSON.stringify({url,token:'test-only',principal:{userId},machine}),{mode:0o600});
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));await tls.close();assert.equal(tls.counters.portalFileRequests,0);await rm(dir,{recursive:true,force:true});});
-  const cli=()=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[fileURLToPath(new URL('../cli.mjs',import.meta.url)),'--url',url,'--session-file',session,'--json','data','upload',data,'--name',name]);let stdout='',stderr='';child.stdout.on('data',v=>stdout+=v);child.stderr.on('data',v=>stderr+=v);child.on('error',reject);child.on('close',code=>resolve({code,stdout,stderr}));});
+  const cli=()=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,[...campusFixtureArgs,fileURLToPath(new URL('../cli.mjs',import.meta.url)),'--url',url,'--session-file',session,'--json','data','upload',data,'--name',name]);let stdout='',stderr='';child.stdout.on('data',v=>stdout+=v);child.stderr.on('data',v=>stderr+=v);child.on('error',reject);child.on('close',code=>resolve({code,stdout,stderr}));});
   const first=await cli();assert.equal(first.code,1,first.stderr);assert.match(first.stderr,/initialization receipt was lost/);
   assert.ok(first.stderr.indexOf(`Upload: ${issued} · ${machine}`)<first.stderr.indexOf('initialization receipt was lost'));
   assert.equal(first.stderr.split('\n').filter(line=>line===`Upload: ${issued} · ${machine}`).length,1);

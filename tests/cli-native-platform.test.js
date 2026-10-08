@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import {campusTLSFixture} from './campus-upload-fixture.mjs';
+import {campusTLSFixture,campusFixtureArgs} from './campus-upload-fixture.mjs';
 import {mockCampusFiles} from './personal-file-campus-mock.mjs';
 
 // No real portal, credentials, jobs or persistent installation is used here.
@@ -156,7 +156,7 @@ test('native client works with a loopback mock API and Unicode Windows-style wor
   const origin = `http://127.0.0.1:${server.address().port}`;
   const sessionFile = join(dir, '个人 session', 'cache.json');
   const cli = (args, stdin = '') => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliFile, ...args, '--url', origin, '--session-file', sessionFile, '--json'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(process.execPath, [...campusFixtureArgs,cliFile, ...args, '--url', origin, '--session-file', sessionFile, '--json'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '', stderr = '';
     const timer = setTimeout(() => child.kill(), 15000);
     child.stdout.on('data', part => { stdout += part; });
