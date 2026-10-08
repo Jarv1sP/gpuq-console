@@ -24,7 +24,7 @@ async function open(fixture,role='member'){
     const originalFetch=window.fetch;window.fetch=(url,options)=>{if(String(url).includes('/v1/uploads/'))fetchOptions.push({url:String(url),credentials:options.credentials,method:options.method,redirect:options.redirect});return originalFetch(url,options);};
     window.store={production:true,principal:{userId:role,role},authGeneration:0,
       users:['member','admin','another-member'].map(id=>({id,role:id==='admin'?'admin':'member',enabled:true,limits:Object.fromEntries(machines.map(machine=>[machine.id,machine.cards])),total:machines.reduce((sum,machine)=>sum+machine.cards,0)})),usage(){return 0;},
-      data:{machines,datasetUploadAdmission:{protocol:1,available:true}},listeners:[],onAuthChange(listener){this.listeners.push(listener);},async call(operation,args){const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,args})});const value=await response.json();if(!response.ok)throw Object.assign(Error(value.error),{status:response.status});return value.result;}};
+      data:{machines,datasetUploadAdmission:{protocol:1,available:true,targetMachine:machines[0].id}},listeners:[],onAuthChange(listener){this.listeners.push(listener);},async call(operation,args){const response=await fetch('/api/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,args})});const value=await response.json();if(!response.ok)throw Object.assign(Error(value.error),{status:response.status});return value.result;}};
     window.renderDatasets=datasetsUI(store,text=>toasts.push(text));renderDatasets();
   },{machines,role});
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
@@ -36,6 +36,19 @@ try{
   for(const role of ['member','admin']){
     const fixture=await directBrowserFixture(machines);fixture.config.holdChunk=true;fixture.config.holdPublish=true;const {page,context}=await open(fixture,role);
     try{
+      const target=page.locator('#v3-upload-target');
+      assert.equal(await target.isDisabled(),true);assert.equal(await target.inputValue(),machines[0].id);
+      assert.deepEqual(await target.locator('option').evaluateAll(nodes=>nodes.map(node=>node.value)),[machines[0].id]);
+      assert.equal(await target.getAttribute('title'),machines[0].id);
+      assert.equal(await page.locator('#datasets-capacity').isHidden(),true);
+      assert.equal(await page.locator('#v3-upload-capacity').textContent(),'仓库');
+      assert.equal(await page.locator('[name=dataset-machine]').isHidden(),true);
+      for(const width of [1440,390,320]){
+        await page.setViewportSize({width,height:1000});await page.evaluate(()=>document.fonts.ready);
+        assert.equal(await target.isVisible(),true);
+        assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),width,'Fixed destination does not overflow the viewport');
+        await page.screenshot({path:join(shots,`${role}-fixed-target-${width}.png`),fullPage:true});
+      }
       assert.match(await page.locator('#v3-upload-route').textContent(),/校园网直连/);assert.equal(fixture.raw.length,0);assert(fixture.probes.length>0,'Preflight is anonymous and has sent zero upload bytes');
       await page.locator('#dataset-upload-start').click();await waitUntil(()=>fixture.held);
       assert.match(await page.locator('#v3-upload-route').textContent(),new RegExp('校园网直连.*'+machines[0].id));

@@ -1,4 +1,5 @@
-import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName,adaptStorageOverview,overviewDatasetCatalog,displayStorageCapacity,datasetWarehouseMachines,warehouseStorageCards} from './dataset-catalog-model.js';
+import {aggregateDatasetCatalog,readableDatasetCatalog,datasetOwnerName,adaptStorageOverview,overviewDatasetCatalog,displayStorageCapacity,datasetWarehouseMachines,warehouseStorageCards,adaptUploadTarget} from './dataset-catalog-model.js';
+import {serverSelectLabel} from './workbench-ui.js';
 import {datasetLabelClient,normalizeDatasetDisplayName} from './dataset-label-client.js';
 import {createUploadMeter} from './dataset-upload-metrics.js';
 import {maintenanceFor} from './maintenance-state.js';
@@ -204,7 +205,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function catalogUnavailable(){retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();}
  function capacity(value,id){capacities.set(id,value);rail();uploadCapacity();}
  async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacities.set(row.id,null);rail();}});}}
- function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=route?.storageTier==='hdd'?'仓库':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
+ function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=adaptUploadTarget(store.data?.datasetUploadAdmission)!==null||route?.storageTier==='hdd'?'仓库':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
  function uploadRoute(){const node=section.querySelector('#v3-upload-route');if(!node)return;const kind=route?.kind;
   node.className='v3-route '+(kind==='campus-direct'?'ok':kind==='tail-upload'?'alt':kind==='unreachable'?'cut':'');
   const caption=kind==='campus-direct'?'校园网直连':kind==='tail-upload'?'备用线路':['relay-choice','vps-relay'].includes(kind)?'平台中转':kind==='unreachable'?'没连上校园网':kind==='unconfirmed'?'路线待确认':'探测中';
@@ -223,6 +224,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   uploadRoute();uploadCapacity();uploadUI();uploadControls(lastControls);
  }
  function uploadControls(value=lastControls){
+  uploadTarget();
   const catalogBusyChanged=!!lastControls.busy!==!!value.busy;
   lastControls=value;
   if(catalogBusyChanged&&model)inspector();
@@ -235,6 +237,20 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   for(const node of section.querySelectorAll('#v3-upload-display,[data-v3-reselect],[data-v3-folder],[data-v3-files],[data-v3-source]'))node.disabled=blocked||!!live;
   for(const node of section.querySelectorAll('[data-v3-probe],[data-v3-explicit-relay],[data-v3-resume]'))node.disabled=blocked||!!maintenance||node.hasAttribute('data-v3-resume')&&!['campus-direct','tail-upload'].includes(route?.kind);
   const again=section.querySelector('[data-v3-again]');if(again)again.disabled=blocked;
+ }
+ function uploadTarget(){
+  const requested=section.querySelector('[name=dataset-machine]');if(!requested)return;
+  serverSelectLabel(requested);const wrapper=requested.closest('.server-select');
+  const target=adaptUploadTarget(store.data?.datasetUploadAdmission);let fixed=section.querySelector('#v3-upload-target');
+  wrapper.hidden=target!==null;
+  const capacity=section.querySelector('#datasets-capacity');if(capacity)capacity.hidden=target!==null||!authorized(machine());
+  uploadCapacity();
+  if(target===null){fixed?.closest('.server-select')?.remove();return;}
+  // The fixed physical destination is display metadata. Keep the original
+  // authorized requestedMachine and durable upload handle for admission/resume.
+  if(!fixed){fixed=document.createElement('select');fixed.id='v3-upload-target';fixed.setAttribute('aria-label','上传到');wrapper.after(fixed);}
+  if(fixed.value!==target)fixed.replaceChildren(new Option(target,target));
+  fixed.disabled=true;serverSelectLabel(fixed);
  }
  function uploadUI(){
   const dialog=section.querySelector('#dataset-add-dialog'),root=section.querySelector('#v3-upload-state');if(!root)return;
