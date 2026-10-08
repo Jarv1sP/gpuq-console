@@ -1,6 +1,6 @@
 // Real browser/HTTP/SQLite admission; node/copy/GPU are isolated fixtures.
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,writeFile,rm,mkdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:net';
@@ -69,6 +69,27 @@ try{
   await page.waitForFunction(target=>document.querySelector('#submission-receipt').textContent.includes(target)&&document.querySelector('#submission-receipt').textContent.includes('已提交'),target);
   const job=service.store.jobs[0];assert.equal(job.machine,target);assert.equal(job.state,'PREPARING_DATA');assert.equal(job.project,'vision');assert.equal(job.release,release);
   assert.equal(job.selectionSummary.storageVerified,true);assert.equal(job.selectionSummary.selectedMachine,target);
+  assert.equal(await page.locator('[name=training-target] option[value=auto]').textContent(),'自动选择');
+  const selection=page.locator('#submit-receipt-actions .training-selection');
+  assert.match(await selection.textContent(),new RegExp('已分配到\\s*'+target));
+  assert.equal(await selection.locator('summary[aria-label="自动选择原因"]').count(),1);
+  assert.match(await selection.locator('summary').getAttribute('title'),/按存储容量、显卡和排队情况选择/);
+  if(process.env.UI_SCREENSHOTS){
+    await mkdir(process.env.UI_SCREENSHOTS,{recursive:true});
+    for(const width of [1440,390]){
+      await page.setViewportSize({width,height:1000});
+      await page.screenshot({path:join(process.env.UI_SCREENSHOTS,'auto-allocation-'+width+'.png'),fullPage:true});
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+      await selection.locator('summary').click();
+      await page.waitForFunction(()=>{
+        const node=document.querySelector('#submit-receipt-actions .ui-info[open] .ui-info-content'),r=node?.getBoundingClientRect();
+        return r&&r.width>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;
+      });
+      assert.match(await selection.locator('.ui-info-content').textContent(),/按存储容量、显卡和排队情况选择/);
+      await page.screenshot({path:join(process.env.UI_SCREENSHOTS,'auto-allocation-reason-'+width+'.png'),fullPage:true});
+      await selection.locator('summary').click();
+    }
+  }
   assert.ok(calls.some(c=>c.operation==='storage.training.plan'&&c.machine===target),'AUTO admission checks trusted target storage before accepting');
   assert.equal(usage(service.store.jobs,member.id),0);assert.equal(copied,0);
   assert.equal(requests.filter(r=>r.operation==='jobs.submit').length,1);

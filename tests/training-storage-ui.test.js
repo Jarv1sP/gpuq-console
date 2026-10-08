@@ -115,8 +115,8 @@ test('maintenance permits only the storage capability read, never a warehouse su
     assert.ok(maintenanceBlocks('jobs.submit',{machine:context.machine,datasetReadMode:'warehouse'},data,{role}));
   }
 });
-test('AUTO summary requires the confirmed selected machine, escapes IDs and explains only defined exclusions',()=>{
-  const job={machine:'fixture-node-8',selectionSummary:{protocol:1,selectedMachine:'fixture-node-8',storageExcluded:[{machine:'fixture-node-6',reason:'storage-insufficient'},{machine:'<img src=x>',reason:'storage-unverified'},{machine:'ignored',reason:'unknown'}]}};
-  const html=trainingSelectionHTML(job);assert.match(html,/自动选择/);assert.match(html,/fixture-node-6 空间不足/);assert.match(html,/&lt;img src=x&gt; 空间未核实/);assert.doesNotMatch(html,/<img|ignored/);
+test('AUTO summary requires the confirmed selected machine, escapes IDs and explains only defined reasons and exclusions',()=>{
+  const job={machine:'fixture-node-8',selectionSummary:{protocol:1,selectedMachine:'fixture-node-8',reason:'storage-fit-and-resource-rank',storageVerified:true,storageExcluded:[{machine:'fixture-node-6',reason:'storage-insufficient'},{machine:'<img src=x>',reason:'storage-unverified'},{machine:'ignored',reason:'unknown'}]}};
+  const html=trainingSelectionHTML(job);assert.match(html,/已分配到/);assert.match(html,/aria-label="自动选择原因"/);assert.match(html,/按存储容量、显卡和排队情况选择/);assert.match(html,/fixture-node-6 空间不足/);assert.match(html,/&lt;img src=x&gt; 空间未核实/);assert.doesNotMatch(html,/<img|ignored|已预留/);
   for(const patch of [null,{}, {...job.selectionSummary,protocol:0},{...job.selectionSummary,selectedMachine:'other'}])assert.equal(trainingSelectionHTML({...job,selectionSummary:patch}),'');
 });
