@@ -205,7 +205,7 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
  function catalogUnavailable(){retireCacheActions();closeFilesPreview();overviewRequest++;overviewAbort?.abort();overview=null;legacyCatalog=null;capacityCatalog=null;model=null;selected=null;selectedVersion=null;rail();rows();inspector();}
  function capacity(value,id){capacities.set(id,value);rail();uploadCapacity();}
  async function capacitiesForOthers(){const expected=account(),token=epoch;for(const row of authorizedMachines()){if(row.id===machine()||capacities.has(row.id))continue;store.call('datasets.capacity',{machine:row.id}).then(value=>{if(current(expected,token))capacity(value,row.id);}).catch(()=>{if(current(expected,token)){capacities.set(row.id,null);rail();}});}}
- function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=route?.storageTier==='hdd'?'仓库':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
+ function uploadCapacity(){const node=section.querySelector('#v3-upload-capacity'),value=capacities.get(machine());if(node)node.textContent=adaptUploadTarget(store.data?.datasetUploadAdmission)!==null||route?.storageTier==='hdd'?'仓库':value?.available===true&&Number.isSafeInteger(value.usableBytes)&&value.usableBytes>=0?'可用 '+amount(value.usableBytes):'';}
  function uploadRoute(){const node=section.querySelector('#v3-upload-route');if(!node)return;const kind=route?.kind;
   node.className='v3-route '+(kind==='campus-direct'?'ok':kind==='tail-upload'?'alt':kind==='unreachable'?'cut':'');
   const caption=kind==='campus-direct'?'校园网直连':kind==='tail-upload'?'备用线路':['relay-choice','vps-relay'].includes(kind)?'平台中转':kind==='unreachable'?'没连上校园网':kind==='unconfirmed'?'路线待确认':'探测中';
@@ -243,6 +243,8 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   serverSelectLabel(requested);const wrapper=requested.closest('.server-select');
   const target=adaptUploadTarget(store.data?.datasetUploadAdmission);let fixed=section.querySelector('#v3-upload-target');
   wrapper.hidden=target!==null;
+  const capacity=section.querySelector('#datasets-capacity');if(capacity)capacity.hidden=target!==null||!authorized(machine());
+  uploadCapacity();
   if(target===null){fixed?.closest('.server-select')?.remove();return;}
   // The fixed physical destination is display metadata. Keep the original
   // authorized requestedMachine and durable upload handle for admission/resume.

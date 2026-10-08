@@ -40,6 +40,8 @@ try{
       assert.equal(await target.isDisabled(),true);assert.equal(await target.inputValue(),machines[0].id);
       assert.deepEqual(await target.locator('option').evaluateAll(nodes=>nodes.map(node=>node.value)),[machines[0].id]);
       assert.equal(await target.getAttribute('title'),machines[0].id);
+      assert.equal(await page.locator('#datasets-capacity').isHidden(),true);
+      assert.equal(await page.locator('#v3-upload-capacity').textContent(),'仓库');
       assert.equal(await page.locator('[name=dataset-machine]').isHidden(),true);
       for(const width of [1440,390,320]){
         await page.setViewportSize({width,height:1000});await page.evaluate(()=>document.fonts.ready);

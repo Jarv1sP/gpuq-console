@@ -168,6 +168,8 @@ try {
   assert.equal(await fixed.isDisabled(),true);assert.equal(await fixed.inputValue(),'gpu-2');
   assert.deepEqual(await fixed.locator('option').evaluateAll(nodes=>nodes.map(node=>node.value)),['gpu-2']);
   assert.equal(await fixed.getAttribute('title'),'gpu-2');
+  assert.equal(await page.locator('#datasets-capacity').isHidden(),true,'The original training cache capacity is not a warehouse measurement');
+  assert.equal(await page.locator('#v3-upload-capacity').textContent(),'仓库');
   assert.equal(await requested.inputValue(),'gpu-1','Display target cannot rewrite the authorized training selection');
   assert.equal(await requested.evaluate(node=>node.closest('.server-select').hidden),true);
   await page.evaluate(()=>{store.users.find(user=>user.id===store.principal.userId).limits={'gpu-1':0,'gpu-2':0};renderDatasets();});
