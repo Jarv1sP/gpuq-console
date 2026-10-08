@@ -1,4 +1,4 @@
-// Offline Chromium acceptance for personal /data2 upload, publication and fences.
+// Offline Chromium acceptance for server-only /data2 organization, publication and fences.
 // Every HTTP request is fulfilled from this repository or memory.
 import assert from 'node:assert/strict';
 import {mkdir,readFile} from 'node:fs/promises';
@@ -69,22 +69,30 @@ try{
     window.render=datasetsUI(store,value=>toasts.push(value));render();
   });
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+  for(const role of ['admin','member']){
+    await page.evaluate(role=>{store.principal.role=role;store.users.find(row=>row.id==='alice').role=role;store.authGeneration++;store.listeners.forEach(listener=>listener());render();},role);
+    await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
+    await page.locator('[data-v3-upload]').first().click();await page.locator('[data-v3-source=workspace]').click();
+    assert.equal(await page.locator('#data-workspace-upload-form').isHidden(),true);
+    assert.equal(await page.locator('#data-workspace-publish-form').isVisible(),true);
+    assert.equal(await page.locator('#terminal-data-open').isEnabled(),true);
+    const before=await page.evaluate(()=>calls.length);
+    await page.locator('#data-workspace-upload-form').evaluate(form=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+    assert.equal(await page.evaluate(()=>calls.length),before);
+    for(const width of [1440,390]){await page.setViewportSize({width,height:1000});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:screenshots+`/${role}-server-only-${width}.png`,fullPage:true});}
+    await page.locator('[data-dataset-add-close]').click();
+  }
+  await page.setViewportSize({width:1280,height:900});
   await page.locator('[data-v3-upload]').first().click();
   await page.locator('[data-v3-source=workspace]').click();
   const files=page.locator('[name=data-workspace-files]');
-  await files.setInputFiles([{name:'training.zip',mimeType:'application/zip',buffer:Buffer.alloc(2*1024**2+3,7)}]);
-  const callsBeforeLarge=await page.evaluate(()=>calls.length);
-  await files.evaluate(input=>{Object.defineProperty(input.files[0],'size',{value:256*1024**2+1,configurable:true});input.dispatchEvent(new Event('change',{bubbles:true}));});
-  assert.equal(await page.locator('#data-workspace-relay-warning').isVisible(),true);
-  await page.locator('#data-workspace-upload').click();
-  await page.waitForFunction(()=>document.querySelector('#data-workspace-status').textContent.includes('确认 VPS 中转'));
-  assert.equal(await page.evaluate(()=>calls.length),callsBeforeLarge,'Oversized raw upload must not silently relay before confirmation');
-  await files.evaluate(input=>{delete input.files[0].size;input.dispatchEvent(new Event('change',{bubbles:true}));});
+  assert.equal(await page.locator('#data-workspace-upload-form').isHidden(),true);
+  assert.equal(await page.locator('#data-workspace-upload').isHidden(),true);
   assert.equal(await page.locator('#data-workspace-relay-warning').isHidden(),true);
-  await page.locator('#data-workspace-upload').click();
-  await page.waitForFunction(()=>document.querySelector('#data-workspace-status').textContent.includes('已上传 1 个文件'));
-  assert.deepEqual(await page.evaluate(()=>calls.filter(call=>call.operation==='datasets.workspace.put').map(call=>call.args.offset)),[0,1024**2,2*1024**2]);
-  assert.equal(await page.evaluate(()=>calls.some(call=>call.operation.includes('publish'))),false);
+  const beforeHidden=await page.evaluate(()=>calls.length);
+  await page.locator('#data-workspace-upload-form').evaluate(form=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  assert.equal(await page.evaluate(()=>calls.length),beforeHidden,'A synthetic submit cannot send hidden computer files through Portal');
+  assert.equal(await page.evaluate(()=>calls.some(row=>row.operation==='datasets.workspace.put'||row.operation==='datasets.workspace.get')),false);
   assert.equal(await page.locator('#terminal-data-open').isEnabled(),true);
   assert.equal(await page.locator('#cloud-files').isHidden(),true,'The public workspace keeps experimental cloud files hidden');
   assert.equal(await page.evaluate(()=>calls.some(call=>call.operation.startsWith('cloud.files.'))),false,'Opening the public workspace does not probe experimental cloud files');
@@ -128,6 +136,8 @@ try{
   await page.locator('.data-workspace-browser > summary').filter({hasText:'查看文件与发布进度'}).click();await page.locator('#data-workspace-refresh').click();
   await page.waitForFunction(()=>document.querySelector('#data-workspace-files-list').textContent.includes('<unsafe>.zip'));
   assert.equal(await page.locator('#data-workspace-files-list unsafe').count(),0);
+  assert.equal(await page.locator('[data-workspace-download]').isHidden(),true);
+  const beforeGet=await page.evaluate(()=>calls.length);await page.locator('[data-workspace-download]').evaluate(node=>node.click());assert.equal(await page.evaluate(()=>calls.length),beforeGet,'Hidden downloads cannot relay file bytes');
   await page.locator('[data-workspace-path="prepared"]').click();await page.waitForFunction(()=>calls.some(call=>call.operation==='datasets.workspace.list'&&call.args.path==='prepared'));
   await page.locator('[name=data-workspace-publish-path]').fill('prepared');await page.locator('[name=data-workspace-name]').fill('training');await page.locator('#data-workspace-publish').click();
   await page.locator('[data-v3-select=personal-test]').waitFor();
@@ -138,17 +148,16 @@ try{
   await page.screenshot({path:screenshots+'/data-workspace-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'workspace page must fit 390px');
-  assert.equal(await page.locator('#dataset-panel-workspace .data-workspace-fields').first().evaluate(node=>getComputedStyle(node).gridTemplateColumns.split(' ').length),1);
+  assert.equal(await page.locator('#data-workspace-publish-form .data-workspace-fields').first().evaluate(node=>getComputedStyle(node).gridTemplateColumns.split(' ').length),1);
   await page.screenshot({path:screenshots+'/data-workspace-mobile.png',fullPage:true});
   await page.locator('#dataset-source-workspace').scrollIntoViewIfNeeded();
   await page.screenshot({path:screenshots+'/data-workspace-mobile-viewport.png',fullPage:false});
-  // An account switch after a durable upload reply must neither send more data
-  // under the next account nor repopulate the next account's controls.
-  await files.setInputFiles([{name:'late.zip',mimeType:'application/zip',buffer:Buffer.alloc(2*1024**2,5)}]);
-  await page.evaluate(()=>{gatePut=true;});await page.locator('#data-workspace-upload').click();await page.waitForFunction(()=>typeof releasePut==='function');
-  const before=await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.workspace.put').length);
-  await page.evaluate(()=>{store.principal={userId:'bob',role:'member'};store.authGeneration++;store.listeners.forEach(listener=>listener());render();releasePut();});await page.waitForTimeout(100);
-  assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='datasets.workspace.put').length),before,'Late old-account reply causes no further file blocks');assert.doesNotMatch(await page.locator('#data-workspace-status').textContent(),/late.zip/);
+  // A pending server-only publication may not paint or poll under the next account.
+  await page.evaluate(()=>{gatePublish=true;});
+  await page.locator('[name=data-workspace-publish-path]').fill('prepared');await page.locator('[name=data-workspace-name]').fill('late-old');await page.locator('#data-workspace-publish').click();await page.waitForFunction(()=>typeof releasePublish==='function');
+  const before=await page.evaluate(()=>calls.length);
+  await page.evaluate(()=>{store.principal={userId:'bob',role:'member'};store.authGeneration++;store.listeners.forEach(listener=>listener());render();releasePublish();});await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(count=>calls.slice(count).some(row=>row.operation==='datasets.workspace.status'),before),false,'Late old-account publication causes no status polling under the next account');assert.doesNotMatch(await page.locator('#data-workspace-status').textContent(),/late-old/);
   assert.equal(await page.locator('[name=data-workspace-files]').evaluate(node=>node.files.length),0);
   await page.waitForFunction(()=>!document.querySelector('#datasets-refresh').disabled);
   await page.locator('[data-v3-upload]').first().click();
@@ -183,5 +192,5 @@ try{
   await page.evaluate(()=>{store.principal={userId:'carol',role:'member'};store.authGeneration++;store.listeners.forEach(listener=>listener());render();releaseCatalog();});await page.waitForTimeout(100);
   assert.equal(await page.locator('[data-v3-select]').count(),0);assert.doesNotMatch(await page.locator('#datasets-capacity').textContent(),/512\.00/);
   assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
-  console.log('PERSONAL DATA UI PASS: raw bounded upload; no automatic extraction/publication; cloud identity pause retained, explicit fresh-key reverify and separate new download; file-list escaping; publication then READY catalog; 390px layout; late account reply stops chunks; late machine reply stops polling; unknown capacity keeps catalog; revoked remote-machine permission invalidates aggregate; old login cannot repaint catalog. Offline mock nodes only. Screenshots: '+screenshots);
+  console.log('PERSONAL DATA UI PASS: hidden computer upload/download dispatch zero byte calls; server-only listing and publication retained; cloud identity pause retained, explicit fresh-key reverify and separate new download; file-list escaping; publication then READY catalog; 390px layout; late account reply stops publication polling; late machine reply stops polling; unknown capacity keeps catalog; revoked remote-machine permission invalidates aggregate; old login cannot repaint catalog. Offline mock nodes only. Screenshots: '+screenshots);
 }finally{await browser.close();}

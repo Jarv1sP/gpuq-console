@@ -73,23 +73,23 @@ try{
       assert.deepEqual(fixture.failures,[]);completed.push(role+' direct, verify and responsive layout');
     }finally{await context.close();await fixture.close();}
   }
-  for(const mode of ['drop','expire','network','bad-ack','commit-drop','mismatch','deny']){
-    const fixture=await directBrowserFixture(machines);fixture.config.mode=mode;fixture.config.mismatch=mode==='mismatch';fixture.config.deny=mode==='deny';const {page,context}=await open(fixture);
+  for(const [mode,role] of ['drop','expire','network','bad-ack','commit-drop','mismatch','deny'].flatMap(mode=>(['network','deny'].includes(mode)?['member','admin']:['member']).map(role=>[mode,role]))){
+    const fixture=await directBrowserFixture(machines);fixture.config.mode=mode;fixture.config.mismatch=mode==='mismatch';fixture.config.deny=mode==='deny';const {page,context}=await open(fixture,role);
     try{
-      if(mode==='deny'){assert.equal(await page.locator('#dataset-upload-start').isDisabled(),true);assert.equal(fixture.raw.length,0);assert.equal(fixture.calls.some(row=>row.operation==='datasets.upload.begin'||row.operation==='datasets.upload.direct-ticket'),false);assert.match(await page.locator('#v3-upload-state').textContent(),/未授权/);assert.deepEqual(fixture.failures,[]);completed.push('deny before upload intent');continue;}
+      if(mode==='deny'){assert.equal(await page.locator('#dataset-upload-start').isDisabled(),true);assert.equal(fixture.raw.length,0);assert.equal(fixture.calls.some(row=>row.operation==='datasets.upload.begin'||row.operation==='datasets.upload.direct-ticket'),false);assert.match(await page.locator('#v3-upload-state').textContent(),/仅校内网络可上传/);assert.deepEqual(fixture.failures,[]);completed.push('deny before upload intent');continue;}
       await page.locator('#dataset-upload-start').click();
       if(['expire','commit-drop'].includes(mode)){
         await page.waitForFunction(()=>document.querySelector('#dataset-upload-status').dataset.state==='READY');
         if(mode==='expire')assert.equal(fixture.tickets,2);
         if(mode==='commit-drop'){const commit=fixture.calls.findIndex(row=>row.operation.endsWith('.commit'));assert.equal(fixture.calls[commit+1].operation,'datasets.upload.status');assert.equal(fixture.calls.filter(row=>row.operation.endsWith('.commit')).length,1);}
       }else{
-        await page.waitForFunction(()=>{const probe=document.querySelector('[data-v3-probe]');return !!probe&&!probe.disabled&&document.querySelector('#dataset-upload-status').dataset.state==='UNKNOWN';});
+        await page.waitForFunction(()=>{const probe=document.querySelector('[data-v3-probe]');return !!probe&&!probe.disabled&&['UNKNOWN','PAUSED'].includes(document.querySelector('#dataset-upload-status').dataset.state);});
         assert.equal(await page.locator('[data-upload-phase=ready][aria-current]').count(),0);
         if(mode==='deny'){assert.equal(fixture.raw.length,0);assert.match(await page.locator('#dataset-upload-status').textContent(),/未授权/);}
         else{
           assert.equal(await page.locator('#dataset-upload-query').isVisible(),true);
           if(mode==='mismatch')assert.match(await page.locator('#dataset-upload-status').textContent(),/上传结果与本地清单不符/);
-          else{assert.equal(fixture.calls.some(row=>row.operation.endsWith('.manifest')||row.operation.endsWith('.chunk')),false);assert.equal(await page.locator('#v3-relay-options>summary').isVisible(),true,'Relay is a separate explicit choice, never automatically used');}
+          else{assert.equal(fixture.calls.some(row=>row.operation.endsWith('.manifest')||row.operation.endsWith('.chunk')),false);assert.equal(await page.locator('#v3-relay-options,[data-v3-explicit-relay],[name=dataset-relay-consent]').count(),0,'No alternate route or relay consent remains');}
           if(mode==='drop'){
             const after=fixture.raw.length,uploadId=fixture.raw.at(-1).uploadId;
             await page.locator('#dataset-upload-query').click();assert.equal(fixture.raw.length,after,'Query is read-only');
@@ -97,8 +97,8 @@ try{
             const next=fixture.raw.slice(after);assert.equal(next.find(row=>row.action==='chunk'&&row.path==='训练/samples.bin').offset,1024**2);assert.ok(next.every(row=>row.uploadId===uploadId));assert.equal(fixture.uploads.size,1);
           }
           if(mode==='network'){
-            fixture.config.mode='success';const old=fixture.calls.length;await page.locator('#v3-relay-options>summary').click();await page.locator('#v3-relay-options [data-v3-explicit-relay]').click();await page.waitForFunction(()=>document.querySelector('#dataset-upload-status').dataset.state==='READY');
-            assert.match(await page.locator('#v3-upload-route').textContent(),/平台中转/);assert.ok(fixture.calls.slice(old).some(row=>row.operation.endsWith('.manifest')));assert.equal(fixture.calls.filter(row=>row.operation.endsWith('.begin')).at(-1).args.allowRelay,true);
+            assert.match(await page.locator('#v3-upload-state').textContent(),/已暂停 · 校内网络恢复后继续/);for(const width of [1440,390]){await page.setViewportSize({width,height:1000});await page.screenshot({path:join(shots,`${role}-campus-paused-${width}.png`),fullPage:true});}fixture.config.mode='success';const old=fixture.calls.length;await page.locator('#v3-upload-state [data-v3-probe]').click();await page.waitForFunction(()=>document.querySelector('#v3-upload-route').classList.contains('ok'));await page.locator('[data-v3-resume]').click();await page.waitForFunction(()=>document.querySelector('#dataset-upload-status').dataset.state==='READY');
+            assert.match(await page.locator('#v3-upload-route').textContent(),/校园网直连/);assert.equal(fixture.calls.slice(old).some(row=>row.operation.endsWith('.manifest')||row.operation.endsWith('.chunk')),false);assert.equal(Object.hasOwn(fixture.calls.filter(row=>row.operation.endsWith('.begin')).at(-1).args,'allowRelay'),false);
           }
         }
       }
@@ -130,6 +130,6 @@ try{
     }finally{await context.close();await fixture.close();}
   }
   assert.deepEqual(scriptErrors,[]);assert.deepEqual(unexpected,[]);
-  console.log('BROWSER DIRECT UPLOAD UI PASS: '+completed.join('; ')+'. Actual raw HTTPS/CORS, credentials omit, no node cookie, verified SHA256, explicit relay only, same upload offsets.');
+  console.log('BROWSER DIRECT UPLOAD UI PASS: '+completed.join('; ')+'. Actual raw HTTPS/CORS, credentials omit, no node cookie, verified SHA256, campus-only resume, no Portal byte relay, same upload offsets.');
   console.log('Screenshots: '+shots);
 }finally{await browser.close();await rm(selection,{recursive:true,force:true});}
