@@ -110,13 +110,20 @@ class PortableProjectTests(unittest.TestCase):
             else: file.write_bytes(b'x'*file.stat().st_size)
             with self.subTest(kind=kind), self.assertRaises((ValueError,OSError)): self.b.import_bundle(USER,PROJECT,self.release,folder,manifest)
 
-    def test_manifest_traversal_duplicate_parent_and_oversize_rejected(self):
+    def test_manifest_paths_and_exact_numeric_bounds_stay_strict_without_size_quota(self):
         folder,manifest = self.stage()
         cases=[]
         for path in ('../outside','/etc/passwd','release/env/evil','release/code/../evil','release/code/missing/file'):
             bad=copy.deepcopy(manifest); bad['files'][0]['path']=path; cases.append(bad)
         bad=copy.deepcopy(manifest); bad['files'].append(bad['files'][0]); cases.append(bad)
-        bad=copy.deepcopy(manifest); bad['files'][0]['size']=200*1024**3; cases.append(bad)
+        large=copy.deepcopy(manifest); large['files'][0]['size']=200*1024**3
+        self.assertEqual(self.b.validate_manifest(large,USER,PROJECT,self.release),sum(f['size'] for f in large['files']))
+        self.assertFalse(self.target.size_warnings(sum(f['size'] for f in large['files']))[0]['blocking'])
+        for size in (True,-1,2**53,1.5):
+            bad=copy.deepcopy(manifest); bad['files'][0]['size']=size; cases.append(bad)
+        total_overflow=copy.deepcopy(manifest)
+        total_overflow['files'][0]['size']=2**53-1
+        cases.append(total_overflow)
         for bad in cases:
             with self.assertRaises(ValueError): self.b.validate_manifest(bad,USER,PROJECT,self.release)
 

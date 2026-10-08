@@ -56,7 +56,22 @@ class SnapshotSyncTests(unittest.TestCase):
     def seal(self):
         self.nodes[1].process('projects.sync.begin',self.begin)
         self.call('manifest',offset=0,data=base64.b64encode(self.raw).decode());return self.call('seal')
+    def test_manifest_accepts_weight_over_old_single_file_cap_without_creating_payload(self):
+        size=4*1024**3+1
+        self.manifest['files'][0]['size']=size
+        self.raw=json.dumps(self.manifest).encode()
+        self.begin.update(manifestBytes=len(self.raw),manifestSha256=hashlib.sha256(self.raw).hexdigest(),totalBytes=size)
+        self.nodes[1].projects().store.warning_bytes=1
+        with patch.object(self.nodes[1].projects().store,'_space',return_value=None):
+            receipt=self.seal()
+        self.assertEqual(receipt['state'],'COPYING')
+        self.assertEqual(receipt['warnings'],[{'code':'LARGE_PROJECT','bytes':size,'warningBytes':1,'blocking':False}])
+        status=self.call('status',path='sub/train.py')['file']
+        self.assertEqual((status['size'],status['offset'],status['complete']),(size,0,False))
+        self.assertFalse((self.nodes[1].projects().store.dev_paths(USER,'imported')['code']/'sub/train.py').exists())
+
     def test_partial_code_resume_fence_and_executable_completion(self):
+        self.nodes[1].projects().store.warning_bytes=1
         self.seal();self.call('chunk',path='sub/train.py',offset=0,data=base64.b64encode(self.data[:4]).decode())
         self.assertEqual(self.call('status',path='sub/train.py')['file']['offset'],4)
         n=self.nodes[1];args={'userId':USER,'project':'imported'}
@@ -65,7 +80,9 @@ class SnapshotSyncTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'incomplete'):n.process(op,args)
         self.assertEqual(n.process('projects.sync.begin',self.begin)['state'],'COPYING')
         self.call('chunk',path='sub/train.py',offset=4,data=base64.b64encode(self.data[4:]).decode())
-        self.assertEqual(self.call('finish')['state'],'CODE_READY');self.assertEqual(self.call('finish')['state'],'CODE_READY')
+        complete=self.call('finish')
+        self.assertEqual(complete['state'],'CODE_READY');self.assertEqual(self.call('finish')['state'],'CODE_READY')
+        self.assertEqual(complete['warnings'],[{'code':'LARGE_PROJECT','bytes':len(self.data),'warningBytes':1,'blocking':False}])
         paths=n.projects().store.dev_paths(USER,'imported');self.assertEqual((paths['code']/'sub/train.py').read_bytes(),self.data);self.assertTrue((paths['code']/'sub/train.py').stat().st_mode&0o111)
         self.assertEqual(list(paths['env'].iterdir()),[],'No environment migration');n.projects().writable(args)
         self.assertEqual(n.process('projects.status',args)['environmentMode'],'oci')

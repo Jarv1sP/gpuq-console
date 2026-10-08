@@ -361,16 +361,31 @@ class ProjectStoreTests(unittest.TestCase):
         (metadata / 'METADATA').write_text('Name: pkg\nVersion: 1\n')
         self.assert_error('base_changed', self.store.release, self.user, self.slug, first['release'])
 
-    def test_limits_entries_bytes_and_free_space(self):
+    def test_entry_limits_and_free_space_stay_strict_above_byte_warning(self):
         self.store.max_entries = 1
         self.assert_error('limit_exceeded', self.publish)
         self.store.max_entries = 200000
-        self.store.max_bytes = 1
-        self.assert_error('limit_exceeded', self.publish)
-        self.store.max_bytes = 50 * 1024**3
+        self.store.warning_bytes = 1
+        published = self.publish()
+        self.assertEqual(published['state'], 'READY')
+        self.assertGreater(published['bytes'], 1)
+        self.assertEqual(published['warnings'], [{'code':'LARGE_PROJECT',
+            'bytes':published['bytes'], 'warningBytes':1, 'blocking':False}])
+        self.assertEqual(self.store.release(self.user,self.slug,published['release'])['meta']['bytes'],published['bytes'])
+        self.assertEqual(self.store.status(self.user,self.slug)['warnings'],published['warnings'])
+        self.assertEqual(self.store.status(self.user,self.slug)['releases'][0]['warnings'],published['warnings'])
+        self.store.warning_bytes = 50 * 1024**3
         self.store.reserve_bytes = 100
         with patch.object(module.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=99, f_frsize=1)):
             self.assert_error('insufficient_space', self.publish)
+
+    def test_warning_boundary_and_protocol_integer_are_distinct(self):
+        self.assertEqual(self.store.size_warnings(self.store.warning_bytes), [])
+        self.assertFalse(self.store.size_warnings(self.store.warning_bytes+1)[0]['blocking'])
+        self.assertEqual(self.store.size_warnings(4*1024**3,file=True), [])
+        self.assertEqual(self.store.size_warnings(4*1024**3+1,file=True)[0]['code'], 'LARGE_FILE')
+        for bad in (True,-1,2**53,1.5):
+            self.assert_error('invalid_input', self.store.size_warnings, bad)
 
     def test_per_user_project_count(self):
         self.store.max_projects = 1

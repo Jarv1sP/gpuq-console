@@ -138,6 +138,7 @@ class ProjectOperations:
         if sync.exists() or sync.is_symlink():
             session,canceled=self.synchronization(args)
             result['codeSync']={k:session[k] for k in ('state','source','manifestSha256')}
+            result['codeSync']['warnings']=self.store.size_warnings(session['totalBytes'])
             if canceled is not None:result['codeSync'].update(state='CANCELED',key=session['key'],snapshotId=session['session'],preservesBytes=True)
             elif session['state']!='CODE_READY':result.update(state='SYNCING',error='Code sync incomplete; resume or cancel its original UUID')
         pending = self.pending(args)
@@ -343,14 +344,16 @@ class ProjectOperations:
             with self.guard(args), self.store.locked(user, project):
                 if operation=='files.upload.list':return self.upload_list(args,root)
                 if operation=='files.upload.cancel':return self.upload_cancel(args,root)
-                return self.upload_status(args, root)
+                return {**self.upload_status(args, root),
+                        'warnings':self.store.size_warnings(args['totalSize'],file=True)}
         if operation != 'files.put':
             with self.store.lifetime(user,project):
                 return self.n.file_op(operation,args,root=root)
         with self.guard(args):
             self.writable(args)
             with self.store.locked(user, project):
-                return self.upload(args, root)
+                return {**self.upload(args, root),
+                        'warnings':self.store.size_warnings(args['totalSize'],file=True)}
 
     def upload_identity(self, args, *, required=True):
         path, upload = args.get('path'), args.get('uploadId')
@@ -361,8 +364,8 @@ class ProjectOperations:
         if (required or upload is not None) and (not isinstance(upload,str) or not UUID.fullmatch(upload)):
             raise ValueError('Invalid upload ID')
         total, digest = args.get('totalSize'), args.get('sha256')
-        if type(total)!=int or not 0<=total<=4*1024**3:
-            raise ValueError('Code upload size invalid (maximum 4 GiB)')
+        if type(total)!=int or not 0<=total<=self.store.MAX_BYTES:
+            raise ValueError('Code upload byte count is not an exact protocol integer')
         if not isinstance(digest,str) or not HASH.fullmatch(digest): raise ValueError('Invalid upload checksum')
         return {'path':path,'uploadId':upload,'totalSize':total,'sha256':digest}
 
@@ -627,7 +630,7 @@ class ProjectOperations:
         path, upload, total, digest=(record[k] for k in ('path','uploadId','totalSize','sha256'))
         offset=args.get('offset');parts=path.split('/')
         if type(offset)!=int or not 0<=offset<=total:
-            raise ValueError('Code upload size/offset invalid (maximum 4 GiB per file; datasets use /data2)')
+            raise ValueError('Code upload offset is outside this exact file')
         if not isinstance(digest,str) or not HASH.fullmatch(digest) or type(args.get('final')) is not bool:
             raise ValueError('Upload requires checksum and final marker')
         data = base64.b64decode(args.get('data',''),validate=True)

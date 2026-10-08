@@ -15,6 +15,18 @@ base=importlib.util.module_from_spec(spec);spec.loader.exec_module(base)
 
 
 class UploadRecovery(base.ProjectSecurity):
+    def test_file_larger_than_old_cap_uses_original_identity_and_warns(self):
+        r=self.request(totalSize=4*1024**3+1)
+        self.put(r,b'a',0)
+        value=self.status(r)
+        self.assertEqual((value['state'],value['receivedBytes'],value['uploadId']),('UPLOADING',1,r['uploadId']))
+        self.assertEqual(value['warnings'],[{'code':'LARGE_FILE','bytes':r['totalSize'],
+            'warningBytes':4*1024**3,'blocking':False}])
+        before={p.name:p.read_bytes() for p in self.ops.transfer_dir(self.args).iterdir() if p.is_file()}
+        for invalid in (True,-1,2**53,1.5):
+            with self.assertRaises(ValueError):self.put({**r,'totalSize':invalid},b'a',0)
+        self.assertEqual(before,{p.name:p.read_bytes() for p in self.ops.transfer_dir(self.args).iterdir() if p.is_file()})
+
     def request(self, data=b'abcd', **extra):
         return {**self.args,'path':'train.py','uploadId':str(uuid.uuid4()),'totalSize':len(data),
                 'sha256':hashlib.sha256(data).hexdigest(),**extra}

@@ -924,7 +924,7 @@ def file_op(operation,args,root=None):
             return {'entries':out}
         if not parts:raise ValueError('File path required')
         offset=args.get('offset',0)
-        if type(offset)!=int or not 0<=offset<=100*1024**3:raise ValueError('Invalid offset')
+        if type(offset)!=int or not 0<=offset<=2**53-1:raise ValueError('Invalid offset')
         f=os.open(parts[-1],(os.O_RDWR|os.O_CREAT if operation=='files.put' else os.O_RDONLY)|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=fd)
         try:
             st=os.fstat(f)
@@ -936,7 +936,7 @@ def file_op(operation,args,root=None):
                     if offset!=0:raise ValueError('Invalid truncate offset')
                     os.ftruncate(f,0);st=os.fstat(f)
                 if offset!=st.st_size:raise ValueError('Upload offset mismatch; restart this file')
-                if st.st_size+len(data)>100*1024**3:raise ValueError('File too large')
+                if st.st_size+len(data)>2**53-1:raise ValueError('File byte count is not exact')
                 os.lseek(f,offset,0)
                 view=memoryview(data)
                 while view:view=view[os.write(f,view):]

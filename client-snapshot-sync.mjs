@@ -40,7 +40,7 @@ export async function gitSnapshot(directory,ref='HEAD',progress=()=>{}){
   for(const line of tree){
     const match=/^(100644|100755) blob ([a-f0-9]+) +([0-9]+)\t(.+)$/.exec(line);
     if(!match)fail('Git snapshot does not support symlinks or submodules; sync ordinary data separately');
-    const path=dataPath(match[4]),size=Number(match[3]);if(!Number.isSafeInteger(size)||size>4*1024**3)fail('Git code files must be at most 4 GiB');
+    const path=dataPath(match[4]),size=Number(match[3]);if(!Number.isSafeInteger(size)||size<0)fail('Git file byte counts must be exact nonnegative integers');
     entries.push({path,oid:match[2],size,executable:match[1]==='100755'});
     const parts=path.split('/');for(let i=1;i<parts.length;i++)directories.add(parts.slice(0,i).join('/'));
     if(entries.length+directories.size>500000)fail('Git snapshot exceeds 500,000 entries');

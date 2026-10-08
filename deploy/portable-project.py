@@ -17,7 +17,7 @@ import uuid
 
 CHUNK = 1024**2
 MAX_MANIFEST = 64*CHUNK
-MAX_IMAGE = 100*1024**3
+MAX_IMAGE = 2**53-1  # exact JSON byte counts, not a fixed image quota
 
 
 def load_store():
@@ -131,12 +131,12 @@ class PortableProjects:
             need(isinstance(item, dict) and set(item) == {'path','size','sha256'}, 'Invalid portable file entry')
             path = safe_path(item['path'])
             need(path not in seen and (path in required or path.startswith('release/code/'))
-                 and type(item['size']) is int and 0 <= item['size'] <= (MAX_IMAGE if path == 'image.oci.tar' else self.store.max_bytes)
+                 and type(item['size']) is int and 0 <= item['size'] <= self.store.MAX_BYTES
                  and isinstance(item['sha256'], str) and self.s.VERSION.fullmatch(item['sha256']), 'Invalid portable file identity')
             need(str(PurePosixPath(path).parent) in directory_set, 'Portable file parent is not declared')
             seen.add(path); total += item['size']
-        need(required <= seen and total <= MAX_IMAGE+self.store.max_bytes+2*MAX_MANIFEST,
-             'Portable bundle is incomplete or too large')
+        need(required <= seen and total <= self.store.MAX_BYTES,
+             'Portable bundle is incomplete or its byte count is not exact')
         for path in directories:
             need(str(PurePosixPath(path).parent) in directory_set, 'Portable directory parent is not declared')
         return total

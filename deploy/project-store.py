@@ -186,8 +186,13 @@ def atomic_json(path, value):
 
 
 class ProjectStore:
+    # JSON clients must represent byte counts exactly. This is a numeric
+    # protocol bound, not a project/container storage quota.
+    MAX_BYTES = 2**53 - 1
+    FILE_WARNING_BYTES = 4 * 1024**3
+
     def __init__(self, root, base_path, reserve_bytes=10 * 1024**3, *,
-                 max_entries=200000, max_bytes=50 * 1024**3,
+                 max_entries=200000, warning_bytes=50 * 1024**3,
                  max_projects=64, max_releases=64, config=None):
         self.root = absolute(root)
         self.config = config or {'root': str(self.root)}
@@ -195,10 +200,10 @@ class ProjectStore:
         self.base = absolute(base_path)
         self.path = self.root / 'projects-v2'
         self.reserve_bytes = reserve_bytes
-        self.max_entries, self.max_bytes = max_entries, max_bytes
+        self.max_entries, self.warning_bytes = max_entries, warning_bytes
         self.max_projects, self.max_releases = max_projects, max_releases
         self._lifetime_state = threading.local()
-        if any(type(number) is not int or number < 0 for number in (reserve_bytes, max_entries, max_bytes, max_projects, max_releases)):
+        if any(type(number) is not int or number < 0 for number in (reserve_bytes, max_entries, warning_bytes, max_projects, max_releases)):
             fail('invalid_input', 'Project limits must be nonnegative integers')
         with directory(self.root) as fd:
             info = os.fstat(fd)
@@ -394,7 +399,8 @@ class ProjectStore:
                 if summary['owner'] != project['owner'] or summary['project'] != slug:
                     fail('unsafe_path', 'Release summary belongs to another project')
                 releases.append({'release': name, 'state': 'READY', 'createdAt': summary['createdAt'],
-                                 'bytes': summary['bytes'], 'entries': summary['entries']})
+                                 'bytes': summary['bytes'], 'entries': summary['entries'],
+                                 'warnings': self.size_warnings(summary['bytes'])})
         releases.sort(key=lambda item: (item['createdAt'], item['release']))
         state = 'READY' if releases else 'DRAFT'
         try:
@@ -410,6 +416,7 @@ class ProjectStore:
             fail('unsafe_path', 'Latest release does not refer to a READY snapshot')
         return {'project': slug, 'state': state, 'createdAt': project['createdAt'],
                 'releases': releases, 'latestReadyRelease': latest,
+                'warnings': next((item['warnings'] for item in releases if item['release']==latest), []),
                 'environmentMode': project.get('environmentMode', 'shared'),
                 'offlineAssetsPath': '/workspace/offline'}
 
@@ -579,8 +586,9 @@ class ProjectStore:
                         self._publication_location(section, rel, info)
                         totals['entries'] += 1
                         if stat.S_ISREG(info.st_mode): totals['bytes'] += info.st_size
-                        if totals['entries'] > self.max_entries or totals['bytes'] > self.max_bytes:
-                            fail('limit_exceeded', 'Snapshot exceeds its entry or byte limit')
+                        if totals['entries'] > self.max_entries:
+                            fail('limit_exceeded', 'Snapshot exceeds its entry limit')
+                        self.size_warnings(totals['bytes'])
                         report('scanning', totals['entries'], totals['bytes'])
                         if stat.S_ISDIR(info.st_mode):
                             child = os.open(name, DIR_FLAGS, dir_fd=fd)
@@ -641,8 +649,7 @@ class ProjectStore:
                     elif stat.S_ISREG(info.st_mode):
                         self._check_tree_stat(info, root_dev)
                         budget['bytes'] += info.st_size
-                        if budget['bytes'] > self.max_bytes:
-                            fail('limit_exceeded', 'Snapshot byte limit exceeded')
+                        self.size_warnings(budget['bytes'])
                         if target:
                             self._space(info.st_size)
                         file = os.open(name, FILE_FLAGS, dir_fd=fd)
@@ -869,7 +876,8 @@ class ProjectStore:
                 return {'project': slug, 'release': version, 'state': 'READY',
                         'environmentMode': environment_mode, 'offlineAssetsPath': '/workspace/offline',
                         'baseFingerprint': {key: value for key, value in meta['base'].items() if key != 'basePath'}, 'bytes': meta['bytes'],
-                        'entries': meta['entries'], 'createdAt': meta['createdAt']}
+                        'entries': meta['entries'], 'createdAt': meta['createdAt'],
+                        'warnings': self.size_warnings(meta['bytes'])}
             except (ProjectError, OSError) as error:
                 context = dict(self._publication_context)
                 if isinstance(error, OSError): context['errno'] = error.errno
@@ -881,7 +889,7 @@ class ProjectStore:
                     'base_changed':'Rebuild and publish the project environment against the current approved base.',
                     'environment_not_ready':'Open the project terminal to initialize its environment before publishing.',
                     'environment_conflict':'Keep this project venv in its original mode; create a new project to change modes. Do not overwrite an existing environment.',
-                    'limit_exceeded':'Remove build caches or move datasets/models to the dataset channel, then retry.'}
+                    'limit_exceeded':'Remove unnecessary entries or shorten paths; project weights stay in the project. Dataset inputs use the dataset channel.'}
                 remedy = remedies.get(code, 'Check the reported project-relative file owner and permissions; remove external writes/set-ID bits or replace unsupported links with an independent regular copy inside this project. Do not recursively chmod system or other user paths.')
                 context['remediation'] = remedy
                 context['reason'] = message
@@ -891,6 +899,14 @@ class ProjectStore:
                 if stage.exists():
                     self._remove_stage(stage)
                 (path / '.publishing.json').unlink(missing_ok=True)
+
+    def size_warnings(self, size, *, file=False):
+        if type(size) is not int or not 0 <= size <= self.MAX_BYTES:
+            fail('invalid_input', 'Byte count cannot be represented exactly by the transfer protocol')
+        threshold = self.FILE_WARNING_BYTES if file else self.warning_bytes
+        return ([{'code': 'LARGE_FILE' if file else 'LARGE_PROJECT',
+                  'bytes': size, 'warningBytes': threshold, 'blocking': False}]
+                if size > threshold else [])
 
     @staticmethod
     def _remove_stage(path):

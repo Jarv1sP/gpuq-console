@@ -316,10 +316,15 @@ test('empty project files finalize correctly; mutation during upload rejects wit
   assert.equal(f.calls.filter(c=>c.operation==='files.put').some(c=>c.args.final),false);
 });
 
-test('oversized project files are rejected before hashing or transfer',async t=>{
+test('project files over the former 4 GiB cap warn and recover an exact verified upload',async t=>{
   const f=await fixture(t);await f.save({projectsByMachine:{'gpu-1':'alpha'}});
   const source=join(f.dir,'dataset.bin'),fd=await open(source,'w');await fd.truncate(4*1024**3+1);await fd.close();
-  const result=await f.cli(['push',source]);assert.equal(result.code,1);assert.match(result.stderr,/4 GiB/);
+  f.custom.set('files.upload.status',args=>({protocol:2,state:'COMPLETE',complete:true,
+    path:args.path,totalSize:args.totalSize,sha256:args.sha256,uploadId:JOB,
+    size:args.totalSize,receivedBytes:args.totalSize,completionPending:false}));
+  const result=await f.cli(['push',source]);assert.equal(result.code,0,result.stderr);assert.match(result.stderr,/over 4 GiB.*upload is allowed/);
+  const query=f.calls.find(c=>c.operation==='files.upload.status');
+  assert.equal(query.args.totalSize,4*1024**3+1);assert.match(query.args.sha256,/^[a-f0-9]{64}$/);
   assert.equal(f.calls.some(c=>c.operation==='files.put'),false);
 });
 
