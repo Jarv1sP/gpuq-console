@@ -356,7 +356,7 @@ export class PortalService extends DemoService{
       return storageUsageCall(this,principal,operation,args).then(result=>({result,principal:check()}))
         .finally(()=>this.datasetReadPending--);
     }
-    if(['datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.list','datasets.status','datasets.prepare',
+    if(['datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.training.capabilities','datasets.list','datasets.status','datasets.prepare',
       'datasets.cache.capabilities','datasets.cache.prepare','datasets.cache.release','datasets.cache.status','datasets.cache.cancel'].includes(operation))return this.datasetRead(token,operation,args);
     if(typeof operation==='string'&&operation.startsWith('transfers.')){
       const principal=this.principal(token);
