@@ -4,7 +4,7 @@ import {mkdtemp,mkdir,writeFile,rm,readdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {campusGoToolchain,CAMPUS_GO_VERSION,CAMPUS_GO_ARCHIVES} from '../scripts/campus-go-toolchain.mjs';
+import {campusGoToolchain,CAMPUS_GO_VERSION,CAMPUS_GO_ARCHIVES,sameToolFileIdentity} from '../scripts/campus-go-toolchain.mjs';
 
 test('campus build pins exact version and official hashes for both Linux targets',async()=>{
   assert.equal(CAMPUS_GO_VERSION,'go1.27.1');
@@ -32,6 +32,15 @@ test('Windows ZIP SHA is checked before extraction or executing go.exe',async t=
   const root=await mkdtemp(join(tmpdir(),'campus-go-windows-sha-'));t.after(()=>rm(root,{recursive:true,force:true}));const versions=[];let extracts=0;
   await assert.rejects(campusGoToolchain({go:null,root,platform:'win32',arch:'x64',readVersion:async path=>{versions.push(path);return null;},extractArchive:async()=>{extracts++;},fetchArchive:async url=>{assert.equal(url,'https://go.dev/dl/go1.27.1.windows-amd64.zip');return new Response('wrong archive');}}),/Official Go archive SHA mismatch/);
   assert.deepEqual(versions,['go']);assert.equal(extracts,0);assert.deepEqual(await readdir(join(root,'build/toolchains')),[]);
+});
+test('Windows path-to-handle device compatibility retains full-width file identity',()=>{
+  const stat={dev:123n,ino:23362423068501911n,mode:0o100666n,size:42n,mtimeNs:1234n,ctimeNs:5678n,nlink:1n};
+  for(const dev of [0n,(17n<<32n)|123n]){
+    assert.equal(sameToolFileIdentity({...stat,dev},stat,'win32'),true);
+    assert.equal(sameToolFileIdentity({...stat,dev},stat,'linux'),false);
+  }
+  assert.equal(sameToolFileIdentity({...stat,dev:124n},stat,'win32'),false);
+  for(const key of ['ino','mode','size','mtimeNs','ctimeNs','nlink'])assert.equal(sameToolFileIdentity({...stat,dev:0n},{...stat,[key]:stat[key]+1n},'win32'),false,key);
 });
 test('wrong official archive SHA rejects before extraction or execution and removes own folder',async t=>{
   const root=await mkdtemp(join(tmpdir(),'campus-go-sha-'));t.after(()=>rm(root,{recursive:true,force:true}));const versions=[];let extracts=0;

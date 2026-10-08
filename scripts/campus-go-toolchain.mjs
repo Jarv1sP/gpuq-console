@@ -17,11 +17,15 @@ export const CAMPUS_GO_ARCHIVES={
 };
 const version=program=>new Promise(resolve=>{const p=spawn(program,['version'],{env:{...process.env,GOTOOLCHAIN:'local'}});let output='';p.stdout.on('data',b=>output+=b);p.stderr.resume();p.once('error',()=>resolve(null));p.once('exit',code=>resolve(code===0?output.trim().split(/\s+/)[2]:null));});
 const run=(program,args)=>new Promise((yes,no)=>{const p=spawn(program,args,{stdio:'inherit'});p.once('error',no);p.once('exit',code=>code===0?yes():no(Error('Verified Go archive extraction failed')));});
+export function sameToolFileIdentity(path,handle,platform=process.platform){
+  const device=path.dev===handle.dev||platform==='win32'&&(path.dev===0n||BigInt.asUintN(32,path.dev)===BigInt.asUintN(32,handle.dev));
+  return device&&['ino','mode','size','mtimeNs','ctimeNs','nlink'].every(key=>path[key]===handle[key]);
+}
 async function ordinaryBytes(path,maximum){
-  const before=await lstat(path);
+  const before=await lstat(path,{bigint:true});
   if(!before.isFile()||before.isSymbolicLink())throw Error('Unsafe Go cache file');
   const fd=await open(path,constants.O_RDONLY|(process.platform==='win32'?0:constants.O_NOFOLLOW|constants.O_NONBLOCK));
-  try{const info=await fd.stat();if(!info.isFile()||info.dev!==before.dev||info.ino!==before.ino||info.nlink!==1||info.size>maximum||process.getuid&&((info.mode&0o022)||![0,process.getuid()].includes(info.uid)))throw Error('Unsafe Go cache file');return await fd.readFile();}finally{await fd.close();}
+  try{const info=await fd.stat({bigint:true});if(!info.isFile()||!sameToolFileIdentity(before,info)||info.nlink!==1n||info.size>BigInt(maximum)||process.getuid&&((info.mode&0o022n)||![0n,BigInt(process.getuid())].includes(info.uid)))throw Error('Unsafe Go cache file');return await fd.readFile();}finally{await fd.close();}
 }
 const binaryPath=(root,platform)=>join(root,'go','bin',platform==='win32'?'go.exe':'go');
 async function verifiedCached(target,item,platform){
