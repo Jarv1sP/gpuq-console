@@ -168,6 +168,8 @@ class ConnectionReuse(unittest.TestCase):
         self.runtime.chmod(0o770)
         with self.assertRaisesRegex(ValueError,'Unsafe SSH runtime directory'):self.call()
         self.runtime.chmod(0o700);(self.runtime/'ssh-mux').mkdir(mode=0o750)
+        (self.runtime/'ssh-mux').chmod(0o750)
+        self.assertEqual((self.runtime/'ssh-mux').stat().st_mode&0o777,0o750)
         with self.assertRaisesRegex(ValueError,'Unsafe SSH control directory'):self.call()
         self.assertFalse(self.fake.started)
     def test_host_option_injection_or_nonliteral_address_rejected(self):

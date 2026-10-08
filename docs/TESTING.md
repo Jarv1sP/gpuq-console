@@ -11,6 +11,17 @@ global batch 的单进程参考在 FP64 容差 1e-12 内一致。另测三 rank 
 
 ## 每个 PR 的离线自动测试
 
+训练存储准入由 `training-storage.test.js/.py`、`personal-oci-inodes.test.py`、
+`training-storage-dispatch.test.js` 与 AUTO 回归覆盖真实 byte/inode、展开镜像、
+同卷去重、预留／在途占用、旧／未知能力、固定目标及准备／派发前重新验证。
+`training-dataset-capabilities.test.js`、`training-datasets.test.js` 和
+`dataset-training-source.test.py` 分别验证公开只读投影、固定本机仓库版本和持久
+source-mode租约；无缓存或其他机器回退。`training-storage-http.test.js` 用隔离
+SQLite及真实loopback HTTP核对独立读取lane、维护、鉴权、409/503安全数字投影和
+拒绝时零任务／零准备／零GPU派发；这是离线契约，不冒充生产节点或八卡训练验收。
+旧目录HTTP夹具的维护请求须使用真实 `scope:"all",revision:0` 并检查200，不能因
+忽略错误的 `scope:"global"` 请求而虚称验证了维护期间读取。
+
 `dataset-files.test.js`、`dataset-files-http.test.js`、`dataset-files.test.py` 和
 `dataset-files-bridge.test.py` 验证固定版本目录页：member 内容 ACL 与管理员元数据可见性
 分离、零额度／仓库源授权、旧节点明确 unavailable、200 项／64 KiB 上限、原源分页、

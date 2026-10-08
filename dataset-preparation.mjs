@@ -1,6 +1,8 @@
 // Durable data staging precedes scheduler submission. No GPU lease is held
 // during this phase, and a portal restart resumes observation, not a new job.
 import {personalCardQuotaExempt} from './job-submission.mjs';
+import {resolveTrainingDataset} from './training-datasets.mjs';
+import {trainingStoragePlan} from './training-storage.mjs';
 export const DATA_PREPARING='PREPARING_DATA';
 const terminal=new Set(['CANCELED','FAILED','SUCCEEDED']);
 const inFlight=new WeakMap();
@@ -41,6 +43,14 @@ async function observe(service,id,usage){
   const {job}=snapshot,identity={userId:job.userId,hostAdmin:false},states=[],references=[];
   let failure=null;
   let projectReady=true,projectState;
+  if(job.trainingStoragePlan){
+    const user=service.store.get(job.userId);
+    await trainingStoragePlan(service,user,job.machine,{
+      project:job.project?{project:job.project,release:job.release}:{},
+      datasets:job.datasets||[],datasetReadMode:job.datasetReadMode,
+    },{from:job.projectPreparation?.from});
+    if(!await service.enqueue(()=>!!current(service,id,snapshot)))return;
+  }
   if(job.projectPreparation){
     if(!service.prepareProject)throw Error('项目复制服务暂不可用；保留已选择的服务器，未申请 GPU。');
     const result=await service.prepareProject(job.userId,job.machine,{from:job.projectPreparation.from,project:job.project,release:job.release});
@@ -55,6 +65,14 @@ async function observe(service,id,usage){
   for(const ref of failure||!projectReady?[]:job.datasets||[]){
     if(!await service.enqueue(()=>!!current(service,id,snapshot)))return;
     let status,reference;
+    if(job.datasetReadMode==='warehouse'){
+      const resolved=await resolveTrainingDataset(service,job.userId,job.machine,ref,'warehouse');
+      status=resolved.status;reference=resolved.reference;
+      states.push({...ref,state:status.state});
+      if(status.state!=='READY'||!reference){failure='本机仓库原件已不可读取：'+ref.dataset+'；未改用缓存或申请 GPU。';break;}
+      references.push(reference);
+      continue;
+    }
     const transfer=service.datasetReplicaState?.(job.userId,job.machine,ref);
     try{
       if(service.resolveDataset){const resolved=await service.resolveDataset(job.userId,job.machine,ref);status=resolved.status;reference=resolved.reference;}
@@ -85,7 +103,7 @@ async function observe(service,id,usage){
       if(project?.state!=='READY'||project.project!==job.project||project.release!==job.release)failure='项目版本不可用；未启动训练。';
     }
     if(!failure)await service.refreshGPUQ();
-    if(!failure&&service.storageArchivePolicy?.enabled){
+    if(!failure&&(service.storageArchivePolicy?.enabled||job.datasetReadMode==='warehouse')){
       const leaseSpec={...job.spec,datasets:references};
       const held=await service.enqueue(()=>{
         const live=current(service,id,snapshot);if(!live)return false;

@@ -89,7 +89,15 @@ class ProjectCopies(t.TransferJobs):
             source=self.store.release(args['userId'],args['project'],args['release'])
             p.need(source['meta'].get('environmentMode')=='oci','Cross-node environments require a published OCI project')
             image=engine.portable_image(args['project'],source['meta']['oci'])
-            result.update(releaseReady=True,release=args['release'],image=image['image'],architecture=image['architecture'])
+            result.update(releaseReady=True,release=args['release'],image=image['image'],architecture=image['architecture'],
+                          codeBytes=source['meta']['bytes'],codeEntries=source['meta']['entries'],
+                          imageUnpackedBytes=image['unpackedBytes'])
+            sampler=getattr(engine,'portable_image_entries',None)
+            try:result['imageEntries']=sampler(args['project'],source['meta']['oci']) if callable(sampler) else None
+            except Exception:
+                # Additive admission evidence cannot change the old copy
+                # protocol. New storage plans reject unknown inode evidence.
+                result['imageEntries']=None
         return result
 
     def launch(self,spec):

@@ -7,13 +7,36 @@ import {randomUUID} from 'node:crypto';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
 import {quotaStatus} from '../projects.mjs';
-const release='a'.repeat(64),password='Project-Test-Long-Password-2026';
+import {projectFootprint,trainingPlan} from './training-storage-fixture.mjs';
+const release='a'.repeat(64),image='sha256:'+'b'.repeat(64),password='Project-Test-Long-Password-2026';
 async function fixture(){
  const dir=await mkdtemp(join(tmpdir(),'gpuq-project-api-')),bootstrap=join(dir,'bootstrap'),status=join(dir,'status');
  await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
  await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:32768})),gpuq:{connected:true,observeOnly:false,schedulableIndices:[0],jobs:[]}}))}));
  const calls=[];let ready=true;
- const bridge=async(machine,operation,args)=>{calls.push({machine,operation,args});if(operation==='projects.quota')return {enabled:false,enforcement:null,owner:args.userId,volumes:null};if(operation==='projects.verify')return {project:args.project,release:args.release,state:ready?'READY':'DRAFT'};if(operation.startsWith('projects.'))return {project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null,...(operation==='projects.create'?{environmentMode:args.environmentMode}:{})};if(operation==='sync')return {state:'RUNNING',nodeJobId:'node-'+args.job.id};return {entries:[]};};
+ const bridge=async(machine,operation,args)=>{
+  calls.push({machine,operation,args});
+  if(operation==='projects.quota')return {enabled:false,enforcement:null,owner:args.userId,volumes:null};
+  if(operation==='projects.verify')return {project:args.project,release:args.release,state:ready?'READY':'DRAFT'};
+  if(operation==='projects.copy.probe'){
+   assert.deepEqual(Object.keys(args).sort(),['project','release','userId']);
+   assert.equal(service.store.get(args.userId).enabled,true);assert.ok(service.store.get(args.userId).limits[machine]>0);
+   assert.equal(args.project,'my-project');assert.equal(args.release,release);
+   return {protocol:'portable-project-v1',enabled:true,environmentMode:'oci',architecture:'amd64',
+    project:args.project,release:args.release,releaseReady:ready,image,sources:[],...projectFootprint};
+  }
+  if(operation==='storage.training.plan'){
+   assert.deepEqual(Object.keys(args).sort(),['datasetFootprints','datasetReadMode','datasets','hostAdmin','project','projectFootprint','release','userId']);
+   assert.equal(service.store.get(args.userId).enabled,true);assert.ok(service.store.get(args.userId).limits[machine]>0);
+   assert.equal(args.hostAdmin,false);assert.equal(args.project,'my-project');assert.equal(args.release,release);
+   assert.equal(args.datasetReadMode,'cache');assert.deepEqual(args.datasets,[]);assert.deepEqual(args.datasetFootprints,[]);
+   assert.deepEqual(args.projectFootprint,{sourceMachine:machine,image,architecture:'amd64',...projectFootprint});
+   return trainingPlan(machine,args);
+  }
+  if(operation.startsWith('projects.'))return {project:args.project,state:'DRAFT',releases:[],latestReadyRelease:null,...(operation==='projects.create'?{environmentMode:args.environmentMode}:{})};
+  if(operation==='sync')return {state:'RUNNING',nodeJobId:'node-'+args.job.id};
+  return {entries:[]};
+ };
  const service=await PortalService.open(join(dir,'db'),bootstrap,status,bridge);clearInterval(service.executionTimer);
  const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'alice',password})).result;
  await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:2,limits:{'gpu-1':2}});
@@ -202,6 +225,9 @@ test('project jobs pin one release and verify it before quota reservation',async
   f.ready(false);await assert.rejects(f.call('jobs.submit',args),e=>e.status===409);assert.equal(f.service.store.jobs.length,0);
   f.ready(true);const result=(await f.call('jobs.submit',args)).result;await f.settle();
   assert.equal(result.project,'my-project');assert.equal(result.release,release);assert.equal(f.calls.find(c=>c.operation==='sync').args.job.release,release);
+  const admission=f.calls.filter(c=>c.operation==='storage.training.plan');assert.equal(admission.length,2,'fresh submission and first dispatch each verify capacity');
+  assert.ok(admission.every(c=>c.machine==='gpu-1'&&c.args.userId===f.member.id&&c.args.release===release));
+  assert.equal(Object.hasOwn(result,'trainingStoragePlan'),false);assert.equal(Object.hasOwn(f.calls.find(c=>c.operation==='sync').args.job,'trainingStoragePlan'),false);
   assert.equal((await f.call('jobs.submit',args)).result.id,result.id);
   await assert.rejects(f.call('jobs.submit',{...args,release:'b'.repeat(64)}),e=>e.status===409);
   for(const bad of [{project:undefined},{release:undefined},{project:'../bad'},{release:'latest'}])await assert.rejects(f.call('jobs.submit',{...args,key:randomUUID(),...bad}));

@@ -12,6 +12,7 @@ import {loadStorageArchivePolicy} from './storage-archive.mjs';
 import {loadDatasetIngressPolicy} from './dataset-ingress.mjs';
 import {STARBASE_ASSETS} from './frontend-assets.mjs';
 import {directUploadConnectSources} from './direct-upload-policy.mjs';
+import {trainingStorageErrorBody} from './training-storage.mjs';
 
 const files={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/workspace.css':'workspace.css','/app.js':'app.js','/model.js':'model.js','/machines.js':'machines.js','/client.js':'client.js','/execution-ui.js':'execution-ui.js','/terminal-ui.js':'terminal-ui.js','/resources-ui.js':'resources-ui.js','/xterm.js':'vendor/xterm.js','/xterm.css':'vendor/xterm.css','/addon-fit.js':'vendor/addon-fit.js'};
 files['/job-progress.js']='job-progress.js';files['/job-progress-ui.js']='job-progress-ui.js';
@@ -136,7 +137,7 @@ export async function createPortalServer({database,bootstrap,origin,secure=true,
       if(inventoryRequest&&(e.status===401||e.status===403)){res.writeHead(401,{...headers,'Content-Length':'0'});return res.end();}
       // Authentication failure may belong to an older request from another
       // tab. Do not expire its shared cookie; only explicit logout clears it.
-      if(e.status===401)return json(401,{error:e.message});json(e.status||400,{error:e.message?.includes('SQLITE')?'保存失败，请联系管理员。':e.message,...(['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING','MAINTENANCE_ACTIVE','SUBMISSION_REJECTED'].includes(e.code)?{code:e.code}:{})});
+      if(e.status===401)return json(401,{error:e.message});json(e.status||400,{error:e.message?.includes('SQLITE')?'保存失败，请联系管理员。':e.message,...(['LAST_COPY_UNPROVEN','DATASET_REMOVAL_PENDING','MAINTENANCE_ACTIVE','SUBMISSION_REJECTED'].includes(e.code)?{code:e.code}:{}),...trainingStorageErrorBody(e)});
     }
   });
   server.headersTimeout=10000;server.requestTimeout=45000;server.keepAliveTimeout=5000;server.maxConnections=64;

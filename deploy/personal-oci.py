@@ -631,6 +631,126 @@ class PersonalOCI:
         return {'schema':1, 'image':image_id, 'os':'linux', 'architecture':architecture,
                 'diffIds':layers, 'unpackedBytes':image['Size']}
 
+    def portable_image_entries(self, slug, receipt, *, max_entries=200000, timeout=2.0):
+        """Bounded inode upper bound for a fixed image, never an image mount.
+
+        Overlay layer entries are counted separately (including whiteouts and
+        hard links), not merged/deduplicated. Symlinks in image content are
+        counted, never followed. Only Podman's one fixed overlay/l alias is
+        resolved, and only to a literal sibling layer's diff directory.
+        """
+        need(type(max_entries) is int and 1 <= max_entries <= 200000
+             and type(timeout) in (int, float) and 0 < timeout <= 2,
+             'Invalid image inode sampling bounds')
+        self.verify_host()
+        image_id = self.verify_image(slug, receipt)
+        graph = self.folder/'graph'
+        need(self.folder == self.root/'oci'/self.owner and ':' not in str(graph),
+             'Image graph ownership changed')
+
+        def inspect():
+            value = json.loads(self.run('image', 'inspect', image_id, timeout=8))
+            need(isinstance(value, list) and len(value) == 1
+                 and immutable_image_id(value[0].get('Id')) == image_id,
+                 'Immutable image changed during inode sampling')
+            image = value[0]
+            layers = image.get('RootFS', {}).get('Layers')
+            driver = image.get('GraphDriver')
+            need(isinstance(layers, list) and 1 <= len(layers) <= 256
+                 and all(isinstance(layer, str) and IMAGE.fullmatch(layer) for layer in layers)
+                 and isinstance(driver, dict) and driver.get('Name') == 'overlay'
+                 and isinstance(driver.get('Data'), dict), 'Unknown immutable image layers')
+            return layers, driver['Data']
+
+        before = inspect()
+        data = before[1]
+        upper, lower = data.get('UpperDir'), data.get('LowerDir', '')
+        need(isinstance(upper, str) and upper and isinstance(lower, str),
+             'Unknown immutable image layer paths')
+        raw_paths = [upper]+(lower.split(':') if lower else [])
+        need(len(raw_paths) == len(before[0]), 'Immutable image layer count differs')
+        paths, aliases = [], []
+        for raw in raw_paths:
+            path = self.s.absolute(raw)
+            direct = re.fullmatch(r'([a-f0-9]{64})/diff', str(path.relative_to(graph/'overlay'))) if path.is_relative_to(graph/'overlay') else None
+            if direct:
+                paths.append(path)
+                continue
+            need(path.parent == graph/'overlay/l' and re.fullmatch(r'[A-Za-z0-9]{1,64}', path.name),
+                 'Image layer escaped its fixed owner graph')
+            with self.s.directory(path.parent) as fd:
+                info = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+                need(stat.S_ISLNK(info.st_mode), 'Unknown overlay layer alias')
+                target = os.readlink(path.name, dir_fd=fd)
+                match = re.fullmatch(r'\.\./([a-f0-9]{64})/diff', target)
+                need(match is not None, 'Overlay alias escaped its fixed owner graph')
+                aliases.append((path, self.s.stamp(info), target))
+                paths.append(graph/'overlay'/match[1]/'diff')
+        deadline = time.monotonic()+timeout
+        entries, directories = 0, []
+        with self.s.directory(graph) as graphfd:
+            graph_info = os.fstat(graphfd)
+            need(graph_info.st_uid == os.geteuid() and not graph_info.st_mode & 0o022,
+                 'Image graph is not private')
+
+            def bound():
+                need(entries <= max_entries and time.monotonic() <= deadline,
+                     'Image inode sampling incomplete or exceeds its bound')
+
+            def walk(path, fd, depth):
+                nonlocal entries
+                bound()
+                need(depth <= 128, 'Image inode sampling exceeds depth bound')
+                info = os.fstat(fd)
+                need(info.st_dev == graph_info.st_dev, 'Image layer crossed an unapproved mount')
+                identity = self.s.stamp(info)
+                directories.append((path, identity))
+                entries += 1
+                bound()
+                with os.scandir(fd) as children:
+                    for child in children:
+                        bound()
+                        current = os.stat(child.name, dir_fd=fd, follow_symlinks=False)
+                        need(current.st_dev == graph_info.st_dev, 'Image content crossed an unapproved mount')
+                        if stat.S_ISDIR(current.st_mode):
+                            childfd = os.open(child.name, self.s.DIR_FLAGS, dir_fd=fd)
+                            try:
+                                need(self.s.stamp(os.fstat(childfd)) == self.s.stamp(current),
+                                     'Image layer directory changed')
+                                walk(path/child.name, childfd, depth+1)
+                            finally:
+                                os.close(childfd)
+                        else:
+                            entries += 1
+                            bound()
+                need(self.s.stamp(os.fstat(fd)) == identity, 'Image layer changed during inode sampling')
+
+            for path in paths:
+                with self.s.directory(path) as fd:
+                    walk(path, fd, 0)
+            # Re-open every observed directory after the complete multi-layer
+            # walk. A change in an early layer cannot hide behind a later one.
+            for path, identity in directories:
+                bound()
+                with self.s.directory(path) as fd:
+                    need(self.s.stamp(os.fstat(fd)) == identity, 'Image layer changed during inode sampling')
+            for path, identity, target in aliases:
+                bound()
+                with self.s.directory(path.parent) as fd:
+                    need(self.s.stamp(os.stat(path.name, dir_fd=fd, follow_symlinks=False)) == identity
+                         and os.readlink(path.name, dir_fd=fd) == target,
+                         'Immutable image layer alias changed')
+            with self.s.directory(graph) as current:
+                info = os.fstat(current)
+                need((info.st_dev, info.st_ino, info.st_uid, info.st_mode) ==
+                     (graph_info.st_dev, graph_info.st_ino, graph_info.st_uid, graph_info.st_mode),
+                     'Image graph identity changed')
+        need(inspect() == before and self.verify_image(slug, receipt) == image_id,
+             'Immutable image changed during inode sampling')
+        # Conservatively cover engine layer/image index/link/work metadata.
+        # No deduplication or bytes-to-inodes inference contributes free space.
+        return entries+16*len(before[0])+1024
+
     @contextlib.contextmanager
     def portable_archive(self, archive, maximum, checksum=None):
         with self.s.directory(archive.parent) as parent:

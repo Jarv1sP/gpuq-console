@@ -7,6 +7,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {PortalService} from '../portal-service.mjs';
 import {MACHINES} from '../dist/model.js';
 import {usage} from '../execution.mjs';
+import {trainingSource,trainingPlan} from './training-storage-fixture.mjs';
 
 const password='Manual-Machine-Local-Fixture-2026!';
 const [selected,other,ungranted]=MACHINES.map(machine=>machine.id);
@@ -36,7 +37,14 @@ async function fixture(){
       if(state instanceof Error)throw state;
       return {dataset:args.dataset,version:args.version,state};
     }
+    if(operation==='datasets.training.status'){
+      const state=datasetStates.get(machine+':'+args.dataset)??'READY';
+      if(state instanceof Error)throw state;
+      return trainingSource(machine,args,{state,bytes:8,files:1,directories:0});
+    }
+    if(operation==='storage.training.plan')return trainingPlan(machine,args);
     if(operation==='logs')return {text:'local historical log'};
+    assert.equal(operation,'sync','manual fixture rejects unknown node operations');
     return {state:'PENDING',nodeJobId:'local-'+args.job.id,assignedIndices:[]};
   };
   let service=await PortalService.open(database,bootstrap,statusPath,bridge);
@@ -169,8 +177,19 @@ test('all dataset references are checked only on the chosen node with owner iden
     const result=(await f.submit({datasets:[reference,secondReference]})).result;
     assert.equal(result.machine,selected);await f.settle();
     const checks=f.calls.filter(call=>call.operation==='datasets.status');
-    assert.equal(checks.length,2);assert.ok(f.calls.every(call=>call.machine===selected));
-    assert.deepEqual(checks.map(call=>call.args),[reference,secondReference].map(ref=>({...ref,userId:f.member.id,hostAdmin:false})));
+    // Initial readiness, submission capacity and first-dispatch capacity each
+    // recheck the exact selected-node identity; no alternate READY is borrowed.
+    assert.equal(checks.length,6);assert.ok(f.calls.every(call=>call.machine===selected));
+    assert.deepEqual(checks.map(call=>call.args),Array.from({length:3},()=>[reference,secondReference]
+      .map(ref=>({...ref,userId:f.member.id,hostAdmin:false}))).flat());
+    const footprints=f.calls.filter(call=>call.operation==='datasets.training.status');
+    assert.deepEqual(footprints.map(call=>call.args),Array.from({length:2},()=>[reference,secondReference]
+      .map(ref=>({userId:f.member.id,hostAdmin:false,...ref,datasetReadMode:'cache'}))).flat());
+    const plans=f.calls.filter(call=>call.operation==='storage.training.plan');
+    assert.equal(plans.length,2);
+    for(const plan of plans)assert.deepEqual(plan.args,{userId:f.member.id,hostAdmin:false,
+      datasets:[reference,secondReference],datasetReadMode:'cache',projectFootprint:null,
+      datasetFootprints:[reference,secondReference].map(ref=>({...ref,bytes:8,files:1,directories:0,manifestBytes:100}))});
     assert.deepEqual(f.calls.find(call=>call.operation==='sync').args.job.datasets,[reference,secondReference]);
   }finally{await f.close();}
 });

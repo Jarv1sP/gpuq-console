@@ -14,7 +14,7 @@ const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});}
 const READ_OR_STOP=new Set([
   'jobs.logs','jobs.watch','jobs.diagnostics','jobs.completion','jobs.reconcile-resources','jobs.cancel','logs','watch','diagnostics','cancel','tasks.display.get',
   'files.list','files.get','files.upload.status','files.upload.list','files.upload.cancel','projects.list','projects.quota','projects.status','projects.verify','projects.local-import.status','projects.local-import.cancel','host.status',
-  'datasets.list','datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.status',
+  'datasets.list','datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.training.capabilities','datasets.status',
   'datasets.cache.capabilities','datasets.cache.status','datasets.cache.cancel',
   'storage.cache-action.capabilities','storage.cache-action.status','storage.cache-action.cancel',
   'datasets.archive.cancel-intent',

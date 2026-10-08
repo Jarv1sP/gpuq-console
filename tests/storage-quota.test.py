@@ -260,5 +260,48 @@ class QuotaTests(unittest.TestCase):
             if alter=='path':bad['path']='/srv/data'
             with self.subTest(alter=alter),patch.object(q.subprocess,'run',return_value=Mock(returncode=0,stdout=json.dumps(bad))),self.assertRaises(ValueError):q.status({'storageQuota':{'enabled':True}},USER)
 
+    def test_training_status_is_distinct_read_only_and_old_status_shape_is_unchanged(self):
+        old={'enabled':True,'enforcement':'kernel-project-quota','owner':USER,'projectId':10003,
+             'volumes':[{'volume':'data','bytes':1048576,'inodes':100,'usedBytes':12288,'usedInodes':7,
+                         'remainingBytes':1036288,'remainingInodes':93}]}
+        new=copy.deepcopy(old);new['volumes'][0]['volumeDeviceId']='a'*64
+        with patch.object(q.subprocess,'run',return_value=Mock(returncode=0,stdout=json.dumps(new))) as proc:
+            self.assertEqual(q.training_status({'storageQuota':{'enabled':True}},USER),new)
+            self.assertEqual(json.loads(proc.call_args.kwargs['input']),{'operation':'training-status','userId':USER})
+            proc.assert_called_once()
+        # A legacy broker is unknown, never retried as the less precise status.
+        with patch.object(q.subprocess,'run',return_value=Mock(returncode=0,stdout=json.dumps(old))) as proc:
+            with self.assertRaisesRegex(ValueError,'counters'):q.training_status({'storageQuota':{'enabled':True}},USER)
+            proc.assert_called_once()
+        with patch.object(q.subprocess,'run',return_value=Mock(returncode=0,stdout=json.dumps(old))) as proc:
+            self.assertEqual(q.status({'storageQuota':{'enabled':True}},USER),old)
+            self.assertEqual(json.loads(proc.call_args.kwargs['input']),{'operation':'status','userId':USER})
+
+    def test_training_status_identity_unknown_and_injected_request_fields_reject(self):
+        value={'enabled':True,'enforcement':'kernel-project-quota','owner':USER,'projectId':10003,
+               'volumes':[{'volume':'data','volumeDeviceId':'a'*64,'bytes':1048576,'inodes':100,'usedBytes':12288,
+                           'usedInodes':7,'remainingBytes':1036288,'remainingInodes':93}]}
+        for identity in (None,'/dev/private','a'*63,False):
+            bad=copy.deepcopy(value);bad['volumes'][0]['volumeDeviceId']=identity
+            with self.subTest(identity=identity),patch.object(q.subprocess,'run',return_value=Mock(returncode=0,stdout=json.dumps(bad))),self.assertRaises(ValueError):
+                q.training_status({'storageQuota':{'enabled':True}},USER)
+        with patch.object(q.os,'geteuid',return_value=0):
+            for extra in ({'path':'/etc'},{'projectId':10004},{'bytes':0},{'hostAdmin':True}):
+                with self.assertRaisesRegex(ValueError,'status request'):
+                    q.broker({'operation':'training-status','userId':USER,**extra},policy())
+
+    def test_training_kernel_counters_bind_the_actual_no_follow_device_without_write(self):
+        with tempfile.TemporaryDirectory(dir='/private/tmp') as temp:
+            volume=Path(temp);p=policy();p['volumes']['data']['mountPoint']=str(volume)
+            actual={'bytes':1048576,'inodes':100,'usedBytes':12288,'usedInodes':7}
+            original=os.stat;device=volume.stat().st_dev
+            def stat(path,*args,**kwargs):
+                return Mock(st_rdev=device) if path=='/dev/fixture' else original(path,*args,**kwargs)
+            with patch.object(q,'check_guard',return_value={'guarded':True}),patch.object(q,'volume_for',return_value=('data','/dev/fixture')),patch.object(q,'quotactl',return_value=actual) as read,patch.object(q.os,'stat',side_effect=stat),patch.object(q,'admit_target',side_effect=AssertionError('no writes')):
+                result=q.kernel_status(p,USER,training=True)
+            read.assert_called_once_with('/dev/fixture',10003)
+            self.assertEqual(result['volumes'][0]['volumeDeviceId'],hashlib.sha256(str(device).encode()).hexdigest())
+            self.assertEqual(result['volumes'][0]['usedBytes'],actual['usedBytes'])
+
 
 if __name__ == '__main__': unittest.main()

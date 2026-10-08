@@ -10,13 +10,14 @@ import {PortalService} from '../portal-service.mjs';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {projectFootprint,trainingPlan,trainingSource} from './training-storage-fixture.mjs';
 
 const ids=MACHINES.map(m=>m.id),release='a'.repeat(64),image='sha256:'+'b'.repeat(64);
 const selectMachine=(...args)=>selectMachineWithUsage(...args,usage);
 const base=()=>({machine:'auto',project:'vision',release,cards:1,argv:['python','train.py'],key:randomUUID()});
 function fixture(){
   const user={id:'u',username:'alice',role:'member',enabled:true,total:8,limits:Object.fromEntries(ids.map(id=>[id,8])),policyVersion:1};
-  const probes=[],calls=[],saved=[],maintained=new Set(),local=new Set([ids[0]]),incompatible=new Set();
+  const probes=[],calls=[],storageCalls=[],saved=[],maintained=new Set(),local=new Set([ids[0]]),incompatible=new Set();
   const service={store:{jobs:[],users:[user],get:()=>structuredClone(user)},db:{exec(){}},audit(){},save(){saved.push(structuredClone(this.store.jobs));},
     enqueue:async f=>f(),reconcile:async()=>{},refreshGPUQ:async()=>{},maintenanceFor:id=>maintained.has(id),
     gpuq:{stale:false,hosts:MACHINES.map(m=>({id:m.id,reachable:true,gpus:Array.from({length:m.cards},(_,index)=>({index,memoryTotalMiB:24576})),gpuq:{connected:true,health:'ok',observeOnly:false,schedulableIndices:[],capabilities:[],jobs:[]}}))},
@@ -24,11 +25,17 @@ function fixture(){
       assert.equal(owner,user.id);probes.push({machine,ref});
       if(ref.release&&!local.has(machine))throw Error('release absent');
       return {protocol:'portable-project-v1',enabled:true,environmentMode:'oci',architecture:incompatible.has(machine)?'arm64':'amd64',project:ref.project,
-        releaseReady:!!ref.release,...(ref.release?{release:ref.release,image}:{}),sources:ids.filter(id=>id!==machine)};
+        releaseReady:!!ref.release,...(ref.release?{release:ref.release,image,...projectFootprint}:{}),sources:ids.filter(id=>id!==machine)};
     },
     prepareProject:async(owner,machine,ref)=>{calls.push({operation:'prepareProject',machine,ref});assert.ok(service.store.jobs.some(j=>j.machine===machine&&j.state===DATA_PREPARING),'target must persist before copy');return {...ref,machine,state:'READY'};},
-    bridge:async(machine,operation,args)=>{calls.push({machine,operation,args});if(operation==='projects.verify')return {project:args.project,release:args.release,state:'READY'};throw Error('unexpected '+operation);}};
-  return {service,user,probes,calls,saved,maintained,local,incompatible};
+    bridge:async(machine,operation,args)=>{
+      if(['storage.training.plan','datasets.training.status'].includes(operation)){
+        storageCalls.push({machine,operation,args});assert.equal(args.userId,user.id);assert.equal(args.hostAdmin,false);
+        return operation==='storage.training.plan'?trainingPlan(machine,args):trainingSource(machine,args);
+      }
+      calls.push({machine,operation,args});if(operation==='projects.verify')return {project:args.project,release:args.release,state:'READY'};throw Error('unexpected '+operation);
+    }};
+  return {service,user,probes,calls,storageCalls,saved,maintained,local,incompatible};
 }
 const principal=f=>({userId:f.user.id,username:f.user.username,role:f.user.role});
 const normalized=(more={})=>normalizeJobSubmission({...base(),...more},{role:'member'});
@@ -53,6 +60,8 @@ test('local READY project wins; selection performs no prepare or GPU writes',asy
   const result=await selectMachine(f.service,f.user,normalized(),priorityCapable);
   assert.equal(result.machine,ids[2]);assert.equal(result.projectPreparation.from,ids[2]);assert.equal(result.projectPreparation.state,'READY');
   assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
+  assert.equal(f.storageCalls.filter(c=>c.operation==='storage.training.plan').length,ids.length);
+  assert.ok(f.storageCalls.every(c=>c.args.hostAdmin===false),'capacity proof retains the member identity');
 });
 
 test('AUTO excludes visible foreign READY data and ranks only authorized dataset locations',async()=>{
@@ -70,8 +79,9 @@ test('AUTO excludes visible foreign READY data and ranks only authorized dataset
 });
 
 test('AUTO retains complete authenticated identity when the shared catalog checks new-node deletion capabilities',async()=>{
-  const f=fixture(),ref={dataset:'personal-data',version:'c'.repeat(64)},checked=[];
+  const f=fixture(),ref={dataset:'personal-data',version:'c'.repeat(64)},checked=[],bridge=f.service.bridge;
   f.service.bridge=async(machine,operation,args)=>{
+    if(operation!=='datasets.list')return bridge(machine,operation,args);
     assert.equal(operation,'datasets.list');
     assert.equal(args.userId,args.hostAdmin?'builtin-admin':f.user.id);
     return {datasetDelete:1,datasets:[{dataset:ref.dataset,ownerIds:[f.user.id],versions:[{version:ref.version,state:'READY',deletionPermissions:{memberAllowed:!args.hostAdmin}}]}]};
@@ -89,6 +99,9 @@ test('AUTO prefers a genuinely free pool over a busy local project, without disp
   f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0,1];
   const result=await selectMachine(f.service,f.user,normalized(),priorityCapable);
   assert.equal(result.machine,ids[1]);assert.equal(result.projectPreparation.from,ids[0]);assert.equal(result.projectPreparation.state,'WAITING');
+  assert.equal(result.selectionSummary.protocol,1);assert.equal(result.selectionSummary.selectedMachine,ids[1]);
+  assert.equal(result.selectionSummary.reason,'storage-fit-and-resource-rank');assert.equal(result.selectionSummary.gpuPoolAvailable,true);
+  assert.equal(result.selectionSummary.storageVerified,true);
   assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
   // Reported free indices cannot manufacture a nonexistent/low-VRAM GPU.
   f.service.gpuq.hosts[1].gpuq.schedulableIndices=[99,99];
@@ -146,6 +159,8 @@ test('admin exemption retains global history and per-user preparation bounds wit
 test('unobserved preparing targets reduce advisory free capacity; recorded targets never drift',async()=>{
   const f=fixture();for(const h of f.service.gpuq.hosts.slice(0,2))h.gpuq.schedulableIndices=[0];
   const first=await executionCall(f.service,principal(f),'jobs.submit',base());assert.equal(first.machine,ids[0]);
+  assert.equal(first.selectionSummary.selectedMachine,ids[0]);assert.equal(first.selectionSummary.storageVerified,true);
+  assert.equal(Object.hasOwn(f.service.store.jobs[0].spec,'selectionSummary'),false,'display ranking must not alter the immutable native spec');
   const second=await executionCall(f.service,principal(f),'jobs.submit',base());assert.equal(second.machine,ids[1]);
   assert.equal(f.service.store.jobs.length,2);assert.equal(usage(f.service.store.jobs,f.user.id),0);
   assert.equal(f.calls.length,0);assert.equal(first.machine,f.service.store.jobs[0].machine);
@@ -192,8 +207,9 @@ test('AUTO excludes connected degraded/unknown nodes without treating an empty f
 });
 
 test('dataset locality wins before advisory queue length; missing or unauthorized versions exclude the target',async()=>{
-  const f=fixture(),ref={dataset:'data',version:'c'.repeat(64)};
+  const f=fixture(),ref={dataset:'data',version:'c'.repeat(64)},bridge=f.service.bridge;
   f.service.bridge=async(machine,operation,args)=>{
+    if(operation!=='datasets.list')return bridge(machine,operation,args);
     // Discovery uses one fixed metadata-only service identity; the catalog
     // derives usability from the requesting member's exact owner ACL below.
     assert.equal(operation,'datasets.list');assert.equal(args.userId,'builtin-admin');assert.equal(args.hostAdmin,true);
@@ -203,6 +219,46 @@ test('dataset locality wins before advisory queue length; missing or unauthorize
   const request=normalized({datasets:[ref],machineSelection:{mode:'auto',candidates:[ids[0],ids[1]]}});
   const result=await selectMachine(f.service,f.user,request,priorityCapable);assert.equal(result.machine,ids[1]);assert.equal(result.projectPreparation.from,ids[0]);
   f.service.bridge=async()=>({datasets:[]});await assert.rejects(selectMachine(f.service,f.user,request,priorityCapable),/数据来源/);
+});
+
+test('AUTO excludes an otherwise free GPU target with insufficient project volume',async()=>{
+  const f=fixture(),bridge=f.service.bridge;
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0,1];
+  f.service.bridge=async(machine,operation,args)=>operation==='storage.training.plan'&&machine===ids[1]?trainingPlan(machine,args,{availableBytes:0}):bridge(machine,operation,args);
+  const result=await selectMachine(f.service,f.user,normalized(),priorityCapable);
+  assert.equal(result.machine,ids[0]);assert.equal(result.trainingStoragePlan.fits,true);
+  assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
+});
+
+test('AUTO refuses all unknown/full volume candidates instead of preparing or moving to root disk',async()=>{
+  for(const response of ['unknown','full']){
+    const f=fixture(),bridge=f.service.bridge;
+    f.service.bridge=async(machine,operation,args)=>operation==='storage.training.plan'?
+      response==='full'?trainingPlan(machine,args,{availableBytes:0}):{protocol:'dataset-storage-node-v1',usableBytes:2**40}:bridge(machine,operation,args);
+    await assert.rejects(selectMachine(f.service,f.user,normalized(),priorityCapable),/已确认足够/);
+    assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);assert.equal(f.service.store.jobs.length,0);
+  }
+});
+
+test('AUTO does not guess a missing READY source OCI image footprint',async()=>{
+  const f=fixture(),probe=f.service.projectCopyProbe;
+  f.service.projectCopyProbe=async(...args)=>({...await probe(...args),imageUnpackedBytes:undefined});
+  await assert.rejects(selectMachine(f.service,f.user,normalized(),priorityCapable),/容量/);
+  assert.equal(f.storageCalls.length,0);assert.equal(f.calls.length,0);
+});
+
+test('AUTO warehouse mode requires actual local source capability even when cache catalog is READY',async()=>{
+  const f=fixture(),bridge=f.service.bridge,ref={dataset:'warehouse-data',version:'c'.repeat(64)};
+  f.service.gpuq.hosts[1].gpuq.schedulableIndices=[0];
+  f.service.bridge=async(machine,operation,args)=>{
+    if(operation==='datasets.training.status'&&args.datasetReadMode==='warehouse'){
+      const value=trainingSource(machine,args);return machine===ids[2]?value:{...value,datasetWarehouseRead:0,warehouseReady:false,state:'NOT_READY',reference:undefined};
+    }
+    if(operation==='datasets.list')throw Error('warehouse selection must not consult cache catalog');
+    return bridge(machine,operation,args);
+  };
+  const result=await selectMachine(f.service,f.user,normalized({datasets:[ref],datasetReadMode:'warehouse'}),priorityCapable);
+  assert.equal(result.machine,ids[2]);assert.equal(f.calls.length,0);assert.equal(f.saved.length,0);
 });
 
 test('save failure cannot trigger copy and terminal project failure never allocates GPU',async()=>{
@@ -263,7 +319,7 @@ test('real SQLite portal persists AUTO identity across reopen and serial concurr
   const password='Local-Test-Only-Auto-Placement-2026';
   await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   const f=fixture();await writeFile(status,JSON.stringify({version:1,checkedAt:new Date().toISOString(),hosts:f.service.gpuq.hosts}));
-  let service=await PortalService.open(database,bootstrap,status,async()=>{throw Error('No native dispatch expected');});
+  let service=await PortalService.open(database,bootstrap,status,f.service.bridge);
   const configure=()=>{clearInterval(service.executionTimer);service.reconcile=async()=>{};service.projectCopyProbe=f.service.projectCopyProbe;service.prepareProject=f.service.prepareProject;};
   configure();t.after(async()=>{service.close();await rm(dir,{recursive:true,force:true});});
   const admin=await service.login('admin',password),member=(await service.invoke(admin.token,'users.create',{username:'alice',password})).result;
@@ -273,7 +329,8 @@ test('real SQLite portal persists AUTO identity across reopen and serial concurr
   const request={...base(),machineSelection:{mode:'auto',candidates:[ids[1]]}};
   const replies=await Promise.all([service.invoke(token,'jobs.submit',request),service.invoke(token,'jobs.submit',request)]);
   assert.equal(replies[0].result.id,replies[1].result.id);assert.equal(service.store.jobs.length,1);assert.equal(usage(service.store.jobs,member.id),0);
-  service.close();service=await PortalService.open(database,undefined,status,async()=>{throw Error('No native dispatch expected');});configure();
+  service.close();service=await PortalService.open(database,undefined,status,f.service.bridge);configure();
   const next=await service.login('alice',password),retried=(await service.invoke(next.token,'jobs.submit',request)).result;
   assert.equal(retried.id,replies[0].result.id);assert.equal(retried.machine,ids[1]);assert.equal(retried.state,DATA_PREPARING);assert.equal(f.calls.length,0);
+  assert.ok(f.storageCalls.length>0);assert.ok(f.storageCalls.every(call=>['storage.training.plan','datasets.training.status'].includes(call.operation)));
 });
