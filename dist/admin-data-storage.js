@@ -6,6 +6,7 @@ import {adaptStorageOverview} from './dataset-catalog-model.js';
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
 import {mountArchiveEnrollment} from './archive-enrollment-ui.js';
+import {mountAdminStorageMembers} from './admin-storage-members.js';
 // The preview model imports the private inventory. Keep this validator pure;
 // its username contract is checked against model.js by the storage tests.
 const validUsername=value=>typeof value==='string'&&/^[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}$/u.test(value);
@@ -36,6 +37,7 @@ export function adminDatasetCatalog(machine,machines,listings,personal=null){
         v.quantities.push(value);
         v.locations.push({machine:host.id,dataset:item.dataset,ownerLabel:typeof item.ownerLabel==='string'?item.ownerLabel:'所属用户：未知（授权信息未完整返回）',state:Object.hasOwn(states,value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,bytes:Number.isSafeInteger(value.bytes)&&value.bytes>=0?value.bytes:null,
           ...(value.deletionPermissions?{deletionPermissions:structuredClone(value.deletionPermissions)}:{}),
+          ...(typeof value.warehouseReady==='boolean'&&Object.hasOwn(states,value.state)?{warehouseReady:value.warehouseReady}:{}),
           ...(proof?.storage?{storage:structuredClone(proof.storage)}:{}),...(proof?.removalPending===true?{removalPending:true}:{}),...(proof?.removalGraceEligible===true?{removalGraceEligible:true}:{}),
           ...(typeof value.error==='string'?{error:value.error}:{})});
       }
@@ -82,7 +84,7 @@ export function adminStorageUsers(catalog){
 export function adminWarehouseMachines(catalog){
   const hosts=new Set();
   for(const item of catalog?.datasets||[])for(const version of item.versions||[])for(const location of version.locations||[])
-    if(hasDatabaseOriginal({...version,locations:[location]}))hosts.add(location.storage.archiveMachine);
+    if(hasDatabaseOriginal({...version,locations:[location]}))hosts.add(location.storage?.archiveMachine||location.machine);
   return hosts;
 }
 
@@ -90,7 +92,7 @@ export function adminWarehouseMachines(catalog){
 export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   const lifecycle=new AbortController();signal?.addEventListener('abort',()=>destroy(),{once:true});
   el.dataset.adminStorage='';el.classList.add('admin-data-storage');
-  let catalog=null,overview=null,epoch=0,busy=false,disposed=false,cloud=null,cache=null,removals=null,fitting=null,fullTasks=null,enrollment=null;
+  let catalog=null,overview=null,epoch=0,busy=false,disposed=false,cloud=null,cache=null,removals=null,fitting=null,fullTasks=null,enrollment=null,members=null;
   const telemetry=new Map(),pinStatus=new Map();
   const machines=()=>store.data?.machines||[];
   const actor=()=>JSON.stringify([store?.principal?.userId,store?.principal?.role,store?.authGeneration]);
@@ -99,6 +101,14 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   if(!document.querySelector('link[data-admin-storage-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin-data-storage.css';link.dataset.adminStorageStyle='';document.head.append(link);}
   el.innerHTML=`<header class="admin-storage-controls"><h3>服务器存储</h3><button class="button" type="button" data-storage-refresh>刷新状态</button></header><select name="dataset-machine" aria-label="管理服务器" hidden></select><p data-storage-status role="status"></p><div class="storage-fleet" aria-label="服务器存储总览"></div><section class="storage-operations"><header class="storage-operations-head"><h3 data-storage-machine></h3><span>存储运维</span></header><div class="storage-policy"><header><h4>缓存策略</h4>${datasetInfoHTML('按已登记缓存估算，含元数据；不是磁盘实际占用。预览不会立即删除数据，已确认的仓库数据不参与释放。','缓存预算说明')}</header><div data-storage-policy></div></div><div class="storage-release" data-storage-preview></div><section class="storage-retention"><header><h4>固定保留</h4>${datasetInfoHTML('数量来自服务器；只解除当前账号创建的原保留，其他账号的保留不会被修改。','固定保留')}</header><div data-storage-retention></div></section><section class="storage-local"><header><h4>本机缓存</h4></header><div data-dataset-catalog id="admin-dataset-catalog"></div></section></section><section class="storage-users"><header><h3>按用户统计</h3>${datasetInfoHTML("只汇总已就绪缓存的已知大小；含各服务器副本。共享副本分别计入明确授权的用户，未知归属和大小不计入。","统计口径")}</header><div data-storage-users></div></section><section class="storage-delete-tasks"><header><h3>删除任务</h3>${datasetInfoHTML("仅显示当前浏览器为本账号保存的原请求；查看任务后按原编号查询，可继续、取消或恢复。","删除任务范围")}</header><p data-storage-delete-capability></p><div data-storage-delete-tasks></div><p data-storage-delete-empty>本浏览器没有保存的删除任务</p></section><section class="admin-storage-cloud">${cloudImportHTML(true)}</section>`;
   const select=el.querySelector('[name=dataset-machine]');
+  const viewID='storage-view-'+crypto.randomUUID(),tabs=document.createElement('div');tabs.className='storage-view-tabs';tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label','存储统计方式');
+  tabs.innerHTML=`<button type="button" class="button" role="tab" id="${viewID}-server-tab" aria-controls="${viewID}-servers" aria-selected="true" tabindex="0" data-storage-view="servers">服务器</button><button type="button" class="button" role="tab" id="${viewID}-members-tab" aria-controls="${viewID}-members" aria-selected="false" tabindex="-1" data-storage-view="members">按成员</button>`;el.querySelector('.admin-storage-controls').after(tabs);
+  const servers=document.createElement('div');servers.id=viewID+'-servers';servers.setAttribute('role','tabpanel');servers.setAttribute('aria-labelledby',viewID+'-server-tab');el.querySelector('.storage-fleet').before(servers);
+  for(const panel of el.querySelectorAll('.storage-fleet,.storage-operations,.storage-delete-tasks,.admin-storage-cloud'))servers.append(panel);
+  const membersPanel=el.querySelector('.storage-users');membersPanel.classList.add('storage-members-view');membersPanel.id=viewID+'-members';membersPanel.setAttribute('role','tabpanel');membersPanel.setAttribute('aria-labelledby',viewID+'-members-tab');membersPanel.hidden=true;
+  membersPanel.querySelector('header').innerHTML='<h3 class="sr-only">成员存储</h3><span class="storage-member-key"><i class="warehouse"></i>仓库</span><span class="storage-member-key"><i class="project"></i>容器</span><span class="storage-member-key"><i></i>缓存</span>';
+  const membersHost=el.querySelector('[data-storage-users]');membersHost.classList.add('storage-members-panel');members=mountAdminStorageMembers(membersHost,{store,catalog:()=>catalog,signal:lifecycle.signal});
+  if(!document.querySelector('link[data-storage-members-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin-storage-members.css';link.dataset.storageMembersStyle='';document.head.append(link);}
   const enrollHost=document.createElement('section');el.querySelector('.storage-operations').append(enrollHost);
   enrollment=mountArchiveEnrollment(enrollHost,{store,machine:()=>select.value,active:allowed,signal:lifecycle.signal,refresh:()=>load(false),toast});
   if(!document.querySelector('link[data-archive-enrollment-style]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/archive-enrollment.css';link.dataset.archiveEnrollmentStyle='';document.head.append(link);}
@@ -171,8 +181,7 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   }
   function renderUsers(){
     if(!allowed())return;
-    const result=adminStorageUsers(catalog);
-    el.querySelector('[data-storage-users]').innerHTML=result.rows.length?`<div class="storage-user-table" role="table" aria-label="用户缓存统计"><div role="row"><span role="columnheader">用户</span><span role="columnheader">数据集</span><span role="columnheader">已登记缓存</span></div>${result.rows.map(row=>`<div role="row"><span role="cell" title="${esc(row.name)}">${esc(row.name)}</span><span role="cell" class="num">${row.datasets}</span><span role="cell" class="num">${amount(row.bytes)}</span></div>`).join('')}</div>`:'<p>暂无已确认用量</p>';
+    members.sync();
   }
   function renderTasks(){
     if(!allowed())return;
@@ -204,10 +213,12 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
   el.addEventListener('change',event=>{if(event.target===select){cache.reset();catalog=null;load(false);}},{signal:lifecycle.signal});
   el.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled||!allowed())return;
+    if(button.hasAttribute('data-storage-view')){const showingMembers=button.dataset.storageView==='members';servers.hidden=showingMembers;membersPanel.hidden=!showingMembers;el.querySelector('.admin-storage-controls>h3').textContent=showingMembers?'成员存储':'服务器存储';for(const tab of tabs.querySelectorAll('[role=tab]')){tab.setAttribute('aria-selected',String(tab===button));tab.tabIndex=tab===button?0:-1;}members.sync();return;}
     if(button.hasAttribute('data-storage-refresh'))load();
     if(button.hasAttribute('data-storage-select')&&!busy&&machines().some(row=>row.id===button.dataset.storageSelect)&&select.value!==button.dataset.storageSelect){select.value=button.dataset.storageSelect;cache.reset();load(false);}
     if(button.hasAttribute('data-admin-full-delete')&&removals.canOpenFullDelete?.(button.dataset.adminFullDelete,button.dataset.version)===true)removals.openFullDelete(button.dataset.adminFullDelete,button.dataset.version);
   },{signal:lifecycle.signal});
-  function destroy(){if(disposed)return;disposed=true;epoch++;lifecycle.abort();fullTasks?.destroy();fitting?.disconnect();removals?.sync(false);cache?.reset();cloud?.reset();el.querySelectorAll('dialog[open]').forEach(node=>node.close());el.replaceChildren();}
+  tabs.addEventListener('keydown',event=>{const current=event.target.closest('[role=tab]');if(!current||!allowed()||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const options=[...tabs.querySelectorAll('[role=tab]')],index=options.indexOf(current),next=event.key==='Home'?0:event.key==='End'?options.length-1:(index+(event.key==='ArrowRight'?1:-1)+options.length)%options.length;options[next].focus();options[next].click();},{signal:lifecycle.signal});
+  function destroy(){if(disposed)return;disposed=true;epoch++;lifecycle.abort();members?.destroy();fullTasks?.destroy();fitting?.disconnect();removals?.sync(false);cache?.reset();cloud?.reset();el.querySelectorAll('dialog[open]').forEach(node=>node.close());el.replaceChildren();}
   queueMicrotask(load);return {destroy,refresh:load};
 }
