@@ -61,6 +61,21 @@ class ProjectCopyTests(unittest.TestCase):
         args={**self.control(key),'project':PROJECT,'release':self.release,'sourceMachine':'gpu-1','source':ticket}
         self.dst.start(args);return args
 
+    def test_fixed_ready_probe_includes_real_code_and_image_storage_footprint(self):
+        value=self.src.probe({'userId':USER,'project':PROJECT,'release':self.release})
+        fixed=self.fixture.source.release(USER,PROJECT,self.release)
+        image=self.fixture.source._oci(USER).portable_image(PROJECT,fixed['meta']['oci'])
+        self.assertTrue(value['releaseReady'])
+        self.assertEqual(value['codeBytes'],fixed['meta']['bytes'])
+        self.assertEqual(value['codeEntries'],fixed['meta']['entries'])
+        self.assertEqual(value['imageUnpackedBytes'],image['unpackedBytes'])
+        self.assertEqual(value['image'],image['image'])
+        self.assertIsNone(value['imageEntries'])  # legacy fixture has no additive inode sampler
+        target=self.dst.probe({'userId':USER,'project':PROJECT,'from':'gpu-1'})
+        self.assertFalse(target['releaseReady'])
+        for field in ('codeBytes','codeEntries','imageUnpackedBytes'):
+            self.assertNotIn(field,target)
+
     def test_real_pinned_tls_copy_is_immutable_and_reclaims_transport_packages(self):
         args=self.start();before=len(self.calls)
         self.dst.start(args);self.assertEqual(len(self.calls),before)

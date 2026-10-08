@@ -385,6 +385,31 @@ test('new immutable event archives through existing transfer without cold GPU pe
   assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,{dataset:'not-enrolled',version:ref.version}),false);
   const durable=JSON.stringify(f.archive.rows());assert.equal(durable.includes('private-grant-token'),false);assert.equal(durable.includes('x'.repeat(43)),false);
 });
+test('standalone archive without training registry retains original transfer and source grant through restart',async t=>{
+  const f=fixture(t);assert.equal(Object.hasOwn(f.service.store,'jobs'),false);
+  await f.service.reconcileStorageArchive();
+  const intent=structuredClone(f.archive.rows()[0]);assert.equal(intent.phase,'COPYING');
+  const original=f.db.prepare('SELECT id,digest,data FROM transfers').get(),data=JSON.parse(original.data);
+  assert.equal(data.managedArchive,1);assert.equal(Object.hasOwn(data,'trainingPreparation'),false);
+  assert.equal(data.owner.id,f.user.id);assert.equal(data.sourceTicket.id,original.id);
+  assert.deepEqual(data.reference,{kind:'datasets',...ref});
+  f.install();await f.service.reconcileStorageArchive();f.finish();await f.service.reconcileStorageArchive();
+  const finished=f.archive.rows()[0],current=f.db.prepare('SELECT id,digest,data FROM transfers').get();
+  assert.equal(finished.phase,'ARCHIVED');assert.equal(finished.copyKey,intent.copyKey);
+  assert.equal(current.id,original.id);assert.equal(current.digest,original.digest);
+  assert.equal(f.calls.find(c=>c.op==='storage.archive.provision').args.opId,finished.grantId);
+  f.install();await f.service.reconcileStorageArchive();
+  assert.equal(f.archive.rows()[0].grantId,finished.grantId);
+  assert.equal(f.calls.filter(c=>c.op==='storage.archive.provision').length,1);
+  assert.equal(f.calls.filter(c=>c.op==='transfers.start').length,1);
+  assert.equal(f.calls.filter(c=>c.op==='transfers.source.prepare').length,1);
+  assert.equal(f.calls.some(c=>c.op==='storage.training.prepare'),false);
+  assert.equal(f.service.archiveSourceAllowed(f.user.id,cold,{dataset:'cold-copy',version:ref.version}),true);
+  const unavailable=fixture(t);unavailable.service.store.jobs=null;
+  await unavailable.service.reconcileStorageArchive();
+  assert.equal(unavailable.calls.some(c=>c.op==='transfers.start'),false,'present invalid registry is not legacy proof');
+  assert.notEqual(unavailable.archive.rows()[0].phase,'ARCHIVED');
+});
 test('fixed archive authority is rechecked after awaiting source preparation',async t=>{
   const f=fixture(t);
   f.onCall=(_,op)=>{if(op==='transfers.source.prepare')f.service.storageArchivePolicy={enabled:true,machine:cold,authority:'changed'};};

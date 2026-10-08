@@ -343,10 +343,14 @@ class NodeAdmission(unittest.TestCase):
                 self.assertEqual(cache.budget_bytes, budget)
                 self.assertEqual(cache.reserve_bytes, 200 * 1024**3)
                 collector = Mock(return_value={'evicted': []})
-                with patch.object(self.node, 'storage_node', return_value=SimpleNamespace(tier=SimpleNamespace(collect=collector))):
-                    self.node.dataset_cache_admission(123, _exclude=(('example', self.version),))
-                collector.assert_called_once_with(self.module.Principal('builtin-admin', True), dry_run=False,
-                                                 needed_bytes=123, max_versions=16, _exclude=(('example', self.version),))
+                # Give the real pinned-FD free-space guard an explicit fixture
+                # larger than every configured reserve, not the Mac host disk.
+                volume = SimpleNamespace(f_bavail=2**50, f_frsize=1, f_files=2**40, f_favail=2**40)
+                with patch.object(self.module.os, 'fstatvfs', return_value=volume), patch.object(
+                        self.node, 'storage_node', return_value=SimpleNamespace(tier=SimpleNamespace(collect=collector))):
+                    result = self.node.dataset_cache_admission(123, _exclude=(('example', self.version),))
+                self.assertEqual(result, {'enabled': True, 'state': 'CHECKED', 'reclaimedBytes': 0})
+                collector.assert_not_called()
         self.node.CONFIG.update(machine='amax-3090', storageTier={'enabled': False})
         with patch.object(self.node, 'storage_node', side_effect=AssertionError('never collect HDD original')):
             self.assertEqual(self.node.dataset_cache_admission(10 * 1024**4)['state'], 'DISABLED')

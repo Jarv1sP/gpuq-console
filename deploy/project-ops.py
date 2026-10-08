@@ -79,9 +79,59 @@ class ProjectOperations:
                                'gpuq-project-'+self.key(args)[:32]], env=self.n.ENV,
                               timeout=4, stdout=subprocess.DEVNULL).returncode == 0
 
-    def pending(self, args):
+    def receipt(self, args):
         path = self.receipt_path(args)
         return json.loads(path.read_text()) if path.exists() else {}
+
+    def historical_receipt_path(self, args, publication_id):
+        if not isinstance(publication_id,str) or not UUID.fullmatch(publication_id):
+            raise ValueError('Invalid publication identity')
+        return self.folder/(self.key(args)+'.publication-'+publication_id+'.json')
+
+    def historical_receipt(self, args, publication_id):
+        module=sys.modules[type(self.store).__module__]
+        try: receipt=module.read_json(self.historical_receipt_path(args,publication_id))
+        except FileNotFoundError: return None
+        user,project=self.identity(args)
+        if (not isinstance(receipt,dict) or receipt.get('publicationId') != publication_id
+                or receipt.get('userId') != user or receipt.get('project') != project):
+            raise ValueError('Historical publication identity mismatch')
+        return receipt
+
+    def preserve_receipt(self, args, receipt):
+        publication_id=receipt.get('publicationId')
+        if publication_id is None: return  # Historical unkeyed intent.
+        previous=self.historical_receipt(args,publication_id)
+        if previous is not None:
+            if previous != receipt: raise ValueError('Historical publication receipt changed')
+            return
+        raw=self.receipt_path(args).read_bytes()
+        if json.loads(raw) != receipt: raise ValueError('Publication receipt changed before preservation')
+        fd=os.open(self.historical_receipt_path(args,publication_id),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(raw);stream.flush();os.fsync(stream.fileno())
+        module=sys.modules[type(self.store).__module__]
+        with module.directory(self.folder) as parent:
+            os.fsync(parent)  # Make the retained UUID durable before replacing current intent.
+
+    def belongs_to_project(self, args, receipt):
+        generation = receipt.get('projectGeneration')
+        if generation is not None:
+            if not isinstance(generation, str) or not HASH.fullmatch(generation):
+                raise ValueError('Invalid publication project generation')
+            return generation == self.store.generation(*self.identity(args))
+        # Legacy receipts have no incarnation ID. Only discard a display when
+        # its recorded start provably predates the current project; unknown
+        # legacy intent remains fenced rather than guessed to be obsolete.
+        started = receipt.get('requestedAt', receipt.get('progress', {}).get('startedAt'))
+        if type(started) not in (int, float):
+            return True
+        created = self.store.status(*self.identity(args))['createdAt']
+        return not started < created
+
+    def pending(self, args):
+        receipt = self.receipt(args)
+        return receipt if not receipt or self.belongs_to_project(args, receipt) else {}
 
     def terminal_stopped(self, jid):
         unit='amax-term-'+jid+'.service'
@@ -257,8 +307,14 @@ class ProjectOperations:
             if operation == 'projects.create': return self.store.create(*identity, environment_mode=args.get('environmentMode'))
             if operation != 'projects.publish': raise ValueError('Unknown project operation')
             pending = self.pending(args)
+            original = self.receipt(args)
+            if ('key' in args and original.get('publicationId') == args['key']
+                    and original and not pending):
+                raise ValueError('Original publication belongs to an earlier project; it was not replayed')
             if 'key' in args and pending.get('publicationId') == args['key']:
                 return self.status(args)  # Lost reply: never start a second worker.
+            if 'key' in args and self.historical_receipt(args,args['key']) is not None:
+                raise ValueError('Original publication is no longer current; inspect its original receipt or release; it was not replayed')
             self.writable(args)
             # A clean exit may leave a pointer. Confirm the entire unit is
             # stopped before copying; an unavailable socket is not enough.
@@ -276,7 +332,10 @@ class ProjectOperations:
                 raise ValueError('Unfinished project upload; retry that file or discard pending uploads')
             self.store.status(*identity)
             task = {'userId':identity[0],'project':identity[1],'state':'PUBLISHING',
-                    'publicationId':args.get('key',str(uuid.uuid4()))}
+                    'publicationId':args.get('key',str(uuid.uuid4())),
+                    'projectGeneration':self.store.generation(*identity),
+                    'requestedAt':int(time.time())}
+            if original: self.preserve_receipt(args,original)
             self.n.atomic_json(self.receipt_path(args), task)
             try:
                 self.n.run(['/usr/bin/systemd-run','--user','--collect',
@@ -285,18 +344,51 @@ class ProjectOperations:
                             '--property=CPUQuota=100%','--property=MemoryMax=1G',
                             '--property=IOWeight=10','--property=RuntimeMaxSec=7200',
                             '/usr/bin/python3',str(self.n.HERE/'node-executor.py'),
-                            '--project-worker',self.key(args)], timeout=8)
+                            '--project-worker',self.key(args),task['publicationId'],
+                            task['projectGeneration']], timeout=8)
             except Exception:
                 self.n.atomic_json(self.receipt_path(args), {**task,'state':'FAILED','error':'Unable to start publication worker'})
                 raise
             return {**self.store.status(*identity),'state':'PUBLISHING','operationId':self.key(args),
                     'publicationProtocol':1,'publication':{'id':task['publicationId'],'state':'PUBLISHING'}}
 
-    def worker(self, key):
+    def worker(self, key, publication_id=None, project_generation=None):
         if not HASH.fullmatch(key): raise ValueError('Invalid project worker key')
         args = json.loads((self.folder/(key+'.json')).read_text())
         if self.key(args) != key: raise ValueError('Project worker identity mismatch')
-        args = {name:args[name] for name in ('userId','project','publicationId') if name in args}
+        if (not isinstance(publication_id,str) or not UUID.fullmatch(publication_id)
+                or not isinstance(project_generation,str) or not HASH.fullmatch(project_generation)
+                or args.get('publicationId') != publication_id
+                or args.get('projectGeneration') != project_generation):
+            raise ValueError('Publication worker identity is unconfirmed or no longer matches its original intent; it did not run')
+        if args.get('state') != 'PUBLISHING':
+            raise ValueError('Publication worker intent is no longer pending; it did not run')
+        # The receipt read above is only an initial identity check. A new
+        # publication can replace it while this worker waits for its lock.
+        # Hold the operation guard through publication so that an unconfirmed
+        # native unit cannot admit another intent between validation and copy.
+        with self.guard(args):
+            current = self.receipt(args)
+            if (self.key(current) != key or current.get('publicationId') != publication_id
+                    or current.get('projectGeneration') != project_generation
+                    or current.get('state') != 'PUBLISHING'):
+                raise ValueError('Publication worker no longer matches its original intent; it did not run')
+            if not self.belongs_to_project(current, current):
+                raise ValueError('Publication belongs to an earlier project; worker did not run')
+            return self.publication_worker(current)
+
+    def write_publication_receipt(self, args, value):
+        """CAS under the worker's operation guard, including late callbacks."""
+        current = self.receipt(args)
+        fields = ('userId','project','publicationId','projectGeneration')
+        if (any(current.get(name) != args.get(name) for name in fields)
+                or current.get('state') != 'PUBLISHING'):
+            raise ValueError('Publication receipt no longer belongs to this worker; it was not overwritten')
+        self.n.atomic_json(self.receipt_path(args),value)
+
+    def publication_worker(self, args):
+        args = {name:args[name] for name in ('userId','project','publicationId','projectGeneration','requestedAt') if name in args}
+        args.setdefault('projectGeneration', self.store.generation(*self.identity(args)))
         last_progress, committed = {}, {}
         def progress(value):
             last_progress.update(value)
@@ -306,13 +398,13 @@ class ProjectOperations:
                 if (isinstance(release,str) and HASH.fullmatch(release) and
                         any(item['release'] == release for item in status['releases'])):
                     committed.update(project=args['project'],release=release,state='READY')
-            self.n.atomic_json(self.receipt_path(args), {**args,'state':'PUBLISHING','progress':value,
+            self.write_publication_receipt(args, {**args,'state':'PUBLISHING','progress':value,
                 **({'committedRelease':committed['release']} if committed else {})})
         try:
             out = self.store.publish(*self.identity(args), progress=progress)
         except Exception as error:
             if not committed:
-                self.n.atomic_json(self.receipt_path(args), {**args,'state':'FAILED',
+                self.write_publication_receipt(args, {**args,'state':'FAILED',
                     'error':str(error)[:500] if isinstance(error,ValueError) else 'Publication failed; inspect node logs',
                     'errorDetails':getattr(error,'details',{}),'progress':last_progress})
                 return 1
@@ -320,7 +412,7 @@ class ProjectOperations:
             print('GPUQ project publication committed; post-commit cleanup needs inspection',file=sys.stderr)
             out = committed
         try:
-            self.n.atomic_json(self.receipt_path(args), {**args,**out,'state':'READY',
+            self.write_publication_receipt(args, {**args,**out,'state':'READY',
                 'committedRelease':out['release'],'progress':last_progress})
         except Exception:
             print('GPUQ project publication committed; final receipt unavailable, query project status',file=sys.stderr)

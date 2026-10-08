@@ -367,9 +367,9 @@ def charge_attempt(fd, project_id, uid):
 def broker(request, policy=None):
     need(os.geteuid() == 0, 'Quota broker requires host administrator installation')
     policy = validate_policy(root_json(POLICY) if policy is None else policy)
-    if isinstance(request, dict) and request.get('operation') == 'status':
+    if isinstance(request, dict) and request.get('operation') in ('status', 'training-status'):
         need(set(request) == {'operation', 'userId'}, 'Invalid quota status request')
-        return kernel_status(policy, request['userId'])
+        return kernel_status(policy, request['userId'], training=request['operation'] == 'training-status')
     need(isinstance(request, dict) and set(request) <= {'userId', 'path', 'project'}
          and {'userId', 'path'} <= set(request), 'Invalid quota request')
     user, path = request['userId'], Path(request['path'])
@@ -450,7 +450,7 @@ def ensure(config, user, path, *, project=None):
     return value
 
 
-def kernel_status(policy, user):
+def kernel_status(policy, user, *, training=False):
     """Read the owner's actual kernel counters; no tree admission or mutation."""
     row = quota_owner(policy, user)
     observed = check_guard(policy)
@@ -465,9 +465,15 @@ def kernel_status(policy, user):
              and all(type(v) is int and v >= 0 for v in actual.values())
              and all(actual[k] == expected[k] for k in ('bytes', 'inodes')),
              'Kernel hard quota does not match administrator policy')
-        volumes.append({'volume': key, **actual,
-                        'remainingBytes': max(0, actual['bytes']-actual['usedBytes']),
-                        'remainingInodes': max(0, actual['inodes']-actual['usedInodes'])})
+        result = {'volume': key, **actual,
+                  'remainingBytes': max(0, actual['bytes']-actual['usedBytes']),
+                  'remainingInodes': max(0, actual['inodes']-actual['usedInodes'])}
+        if training:
+            with directory(policy['volumes'][key]['mountPoint']) as fd:
+                identity = os.fstat(fd)
+                need(identity.st_dev == os.stat(device).st_rdev, 'Quota volume device identity changed')
+                result['volumeDeviceId'] = hashlib.sha256(str(identity.st_dev).encode()).hexdigest()
+        volumes.append(result)
     return {'enabled': True, 'enforcement': 'kernel-project-quota', 'owner': user,
             'projectId': row['projectId'], 'volumes': volumes}
 
@@ -483,7 +489,7 @@ def check_guard(policy):
     return guard.check(policy['platformRoot'], purpose='check-only')
 
 
-def status(config, user):
+def status(config, user, *, _training=False):
     """Authenticated read-only status; disabled/unknown is never zero usage."""
     need(isinstance(user, str) and OWNER.fullmatch(user), 'Invalid authenticated quota owner')
     if not enabled(config, user):
@@ -492,7 +498,7 @@ def status(config, user):
             value['reason'] = 'OWNER_NOT_ACTIVATED'
         return value
     result = subprocess.run(['/usr/bin/sudo', '-n', BROKER],
-                            input=json.dumps({'operation': 'status', 'userId': user}),
+                            input=json.dumps({'operation': 'training-status' if _training else 'status', 'userId': user}),
                             env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'},
                             text=True, capture_output=True, timeout=10)
     need(result.returncode == 0 and len(result.stdout) < 65536,
@@ -506,15 +512,24 @@ def status(config, user):
          'Invalid hard quota status response')
     seen = set()
     for row in value['volumes']:
-        need(isinstance(row, dict) and set(row) == {'volume','bytes','inodes','usedBytes','usedInodes','remainingBytes','remainingInodes'}
+        fields = {'volume','bytes','inodes','usedBytes','usedInodes','remainingBytes','remainingInodes'}
+        if _training:
+            fields.add('volumeDeviceId')
+        need(isinstance(row, dict) and set(row) == fields
              and isinstance(row['volume'], str) and SLUG.fullmatch(row['volume']) and row['volume'] not in seen
-             and all(type(row[k]) is int and 0 <= row[k] < 2**64 for k in row if k != 'volume')
+             and (not _training or isinstance(row.get('volumeDeviceId'), str) and HEX.fullmatch(row['volumeDeviceId']))
+             and all(type(row[k]) is int and 0 <= row[k] < 2**64 for k in row if k not in ('volume','volumeDeviceId'))
              and row['bytes'] > 0 and row['inodes'] > 0
              and row['remainingBytes'] == max(0,row['bytes']-row['usedBytes'])
              and row['remainingInodes'] == max(0,row['inodes']-row['usedInodes']),
              'Invalid hard quota kernel counters')
         seen.add(row['volume'])
     return value
+
+
+def training_status(config, user):
+    """Distinct read-only request; an old broker fails closed without fallback."""
+    return status(config, user, _training=True)
 
 
 def ensure_attempt(config, spec, environment):

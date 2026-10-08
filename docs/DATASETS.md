@@ -6,6 +6,10 @@
 [目录契约](DATASET_FILES.md)。只有本人内容 ACL 与真实节点能力均确认才能读；未知节点
 返回 unavailable 而非空树。页读取持整页版本锁但不建立持久下载租约，不提供文件正文。
 
+个人工作区的旧发布接口 `data workspace-status OPERATION_ID` 返回该次发布的阶段 `SCANNING / REGISTERING / REGISTERED / ARCHIVE_INTENT / MATERIALIZING / COMPLETED`。登记成功后即保留完整数据集与版本编号，后续失败不会丢失它们。锁等待失败另有 `failureKind:CACHE_BUSY` 和 `lockWait`：`scope` 区分全缓存锁与单版本锁，`limit` 区分单次等待上限和累计争用预算，`timeoutSeconds` 是这次取锁允许等待的时长；它们不证明谁持锁、磁盘已满或数据 READY。旧回执没有这些字段时阶段仍未知。
+
+查询原编号或重复同一发布 key 不会重启 FAILED worker。确认 FAILED 后，旧接口仍开放的部署可显式以相同目录、相同名称、新发布 key 重新发布；源内容未变时沿用同一内容版本，并核验已有片段后继续。保留原失败回执与源文件；不通过换名称绕过争用或容量保护。已切换集中机械仓库的部署使用新的仓库发布入口，不能借旧接口绕过存储策略。上述诊断须更新节点 `data-workspace.py` 与 `dataset-cache.py` 后才可用。
+
 ## 数据整理约定
 
 把同一来源、同一用途的样本整理成完整、可复用的集合。同一集合更新时保留名称，用新的内容版本区分，不为每次实验另建一份数据集。

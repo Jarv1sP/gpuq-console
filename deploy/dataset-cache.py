@@ -85,6 +85,10 @@ class CacheMetadataIncomplete(CacheError):
 class CacheBusy(CacheError):
     """Another operation holds a lock; callers may retry without assuming readiness."""
 
+    def __init__(self, message, *, lock_wait=None):
+        super().__init__(message)
+        self.lock_wait = lock_wait
+
 
 _LOCK_WAIT = contextvars.ContextVar("dataset_lock_wait", default=None)
 
@@ -825,6 +829,7 @@ class DatasetCache:
             try:
                 _regular(fd)
                 policy = _LOCK_WAIT.get()
+                remaining = policy["remaining"] if policy else None
                 timeout = min(policy["timeout"], policy["remaining"]) if policy else self.lock_timeout
                 deadline = time.monotonic() + timeout
                 pause = 0.025
@@ -836,7 +841,10 @@ class DatasetCache:
                         break
                     except BlockingIOError:
                         if time.monotonic() >= deadline:
-                            raise CacheBusy("dataset cache is busy; retry later without assuming READY")
+                            raise CacheBusy("dataset cache is busy; retry later without assuming READY", lock_wait={
+                                "scope": "CACHE" if name == ".lock" else "VERSION",
+                                "limit": "TOTAL_BUDGET" if remaining is not None and remaining <= policy["timeout"] else "SINGLE_WAIT",
+                                "timeoutSeconds": timeout})
                         started = time.monotonic()
                         try:
                             # This fd has NOT acquired the requested lock. Do
@@ -1690,6 +1698,31 @@ class DatasetCache:
                 stage = self._paths(dataset, version)[".staging"]
                 if stage != except_stage:
                     total += self._transfer(stage)["remainingBytes"]
+        return total
+
+    def _reserved_inodes(self):
+        """Caller holds the cache lock; conservative immutable staging demand.
+
+        Created staging entries may be counted again, deliberately retaining an
+        upper bound without scanning mutable payload trees. Upload reservations
+        are counted once, and no caller may spend predicted reclaimed inodes.
+        """
+        total = self._upload_reserved()[1]
+        actor = Principal("builtin-admin", True)
+        with _directory(self.root / ".staging") as fd:
+            datasets = os.listdir(fd)
+        for dataset in datasets:
+            _identifier(dataset)
+            with _directory(self.root / ".staging" / dataset) as fd:
+                versions = os.listdir(fd)
+            for version in versions:
+                _identifier(version, HASH_RE)
+                record = self._record(actor, dataset, version)
+                transfer = self._transfer(self._paths(dataset, version)[".staging"])
+                manifest = record["manifest"]
+                if transfer["totalBytes"] != sum(item["size"] for item in manifest["files"]):
+                    raise CacheError("staging inode reservation differs from immutable manifest")
+                total += len(manifest["files"]) + len(manifest["directories"]) + 16
         return total
 
     def _ready(self, paths, manifest, version, *, _canonical=False):

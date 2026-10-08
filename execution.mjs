@@ -15,6 +15,8 @@ import {datasetFilesCall} from './dataset-files.mjs';
 import {DATA_PREPARING,advanceDataPreparation,releaseDataPreparation} from './dataset-preparation.mjs';
 import {installDatasetReplication} from './dataset-replication.mjs';
 import {selectMachine} from './machine-selection.mjs';
+import {resolveTrainingDataset,trainingDatasetCapabilities} from './training-datasets.mjs';
+import {trainingStoragePlan} from './training-storage.mjs';
 import {terminalNativeObservation,unavailableObservation,portalTerminalSnapshot,jobCompletion} from './job-observation.mjs';
 export {datasetReferences} from './job-submission.mjs';
 
@@ -61,9 +63,21 @@ function persistSchedulerResult(service,job,result){
     Object.assign(job,before);throw error;
   }
 }
-function firstDispatch(service,job){
+async function firstDispatch(service,job){
   // Only new records with this durable marker are known never to have reached
   // a node. Legacy/attempted/unknown jobs must keep their existing sync path.
+  let storagePlan,storageSnapshot;
+  if(job.trainingStoragePlan){
+    const user=service.store.get(job.userId);
+    storageSnapshot=JSON.stringify({digest:job.digest,spec:job.spec,policyRevision:job.policyRevision||0});
+    // Capacity I/O must not hold the global mutation queue. Recheck the fixed
+    // target immediately before its first attempt, then fence the observation
+    // against cancellation, identity changes and expiry in the serialized turn.
+    storagePlan=await trainingStoragePlan(service,user,job.machine,{
+      project:job.project?{project:job.project,release:job.release}:{},
+      datasets:job.datasets||[],datasetReadMode:job.datasetReadMode,
+    });
+  }
   return service.enqueue(()=>{
     const current=service.store.jobs.find(j=>j.id===job.id);
     if(!current||service.closing||current.state!=='SUBMITTING'||current.cancelRequested||service.maintenanceFor?.(current.machine))return null;
@@ -74,6 +88,9 @@ function firstDispatch(service,job){
       throw Error('首次派发前管理员角色已改变；P3/P4 任务未启动，请取消后重新提交。');
     if(!personalCardQuotaExempt(user)&&(usage(service.store.jobs,user.id)>user.total||usage(service.store.jobs,user.id,current.machine)>user.limits[current.machine]))
       throw Error('首次派发等待个人可用卡数额度；未启动训练，请等待已有任务释放或取消多余任务。');
+    if(storagePlan&&(JSON.stringify({digest:current.digest,spec:current.spec,policyRevision:current.policyRevision||0})!==storageSnapshot||
+       Date.now()-Date.parse(storagePlan.checkedAt)>30000))throw Error('首次派发前容量核验已过期或任务已改变；未启动训练。');
+    if(storagePlan)current.trainingStoragePlan=storagePlan;
     current.dispatchPending=false;
     try{service.save();}catch(error){current.dispatchPending=true;throw error;}
     // Begin the attempt in the same serialized turn as admission, but return a
@@ -197,7 +214,7 @@ export function installExecution(service,bridge){
   if(bridge){service.executionTimer=setInterval(()=>service.reconcile().catch(()=>{}),15000);service.executionTimer.unref();}
 }
 export function usage(jobs,userId,machine){return jobs.filter(j=>j.userId===userId&&!TERMINAL.has(j.state)&&j.state!==DATA_PREPARING&&(!machine||j.machine===machine)).reduce((sum,j)=>sum+j.cards,0);}
-export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,dispatchPending,nativeTaskDisplay:displayCache,...safe}=job;return {...safe,...jobTiming(job),...taskIdentity(job,users),command:spec.argv,
+export function publicJob(job,users=[]){const {spec,digest,schedulerPolicy,dataPreparationHold,dispatchPending,trainingStoragePlan:privateStoragePlan,trainingStorageRequest:privateStorageRequest,trainingPreparations:privatePreparations,nativeTaskDisplay:displayCache,...safe}=job;return {...safe,...jobTiming(job),...taskIdentity(job,users),command:spec.argv,
   yieldPolicy:['legacy','never','now','save'].includes(schedulerPolicy?.yield_policy)?schedulerPolicy.yield_policy:null,
   restartPolicy:['never','on-preempt'].includes(schedulerPolicy?.restart_policy)?schedulerPolicy.restart_policy:null,
   dispatchMode:['queue','preempt-now','preempt-save'].includes(schedulerPolicy?.dispatch_mode)?schedulerPolicy.dispatch_mode:null};}
@@ -211,6 +228,7 @@ export async function executionCall(service,principal,operation,args){
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   if(operation==='datasets.overview')return datasetStorageOverviewCall(service,principal,args);
   if(operation==='datasets.files.list')return datasetFilesCall(service,principal,args);
+  if(operation==='datasets.training.capabilities')return trainingDatasetCapabilities(service,principal,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
   if(operation.startsWith('datasets.storage.')){
     if(principal.role!=='admin')fail('存储管理仅管理员可用。',403);
@@ -483,6 +501,11 @@ export async function executionCall(service,principal,operation,args){
       // visibility and another node's READY copy cannot bypass this preflight.
       let states;
       try{states=await Promise.all(datasets.map(async ref=>{
+        if(request.datasetReadMode==='warehouse'){
+          const resolved=await resolveTrainingDataset(service,user.id,request.machine,ref,'warehouse');
+          if(resolved.reference)resolvedReferences.push(resolved.reference);
+          return resolved.status;
+        }
         if(service.resolveDataset){
           try{
             const resolved=await service.resolveDataset(user.id,request.machine,ref);
@@ -499,6 +522,7 @@ export async function executionCall(service,principal,operation,args){
         rejectSubmission('无法确认所选机器的数据授权或准备状态，未占用 GPU。请稍后重试或查看数据集状态。',503);
       }
       if(!states.every(s=>s.state==='READY')){
+        if(request.datasetReadMode==='warehouse')rejectSubmission('所选服务器没有这个固定版本的可读仓库原件；未复制到缓存、切换服务器或占用 GPU。',409);
         if(!request.prepareData)rejectSubmission('所选机器没有完整的本地数据副本。先用 gpuctl data prepare 数据集@版本 准备数据；此时未占用 GPU，不会自动切换服务器。',409);
         const catalog=await datasetCatalogCall(service,{...principal,userId:user.id},'datasets.catalog',{machine:request.machine});
         const catalogVersions=datasets.map(ref=>catalog.datasets?.find(d=>d.dataset===ref.dataset)?.versions?.find(v=>v.version===ref.version));
@@ -511,11 +535,18 @@ export async function executionCall(service,principal,operation,args){
     }
     if(needsPreparation&&service.store.jobs.filter(j=>j.userId===user.id&&j.state===DATA_PREPARING).length>=10)rejectSubmission('最多保留 10 个准备中的训练，请先等待或取消。',429);
     if(request.machineSelection&&(JSON.stringify(service.store.get(user.id))!==JSON.stringify(user)||service.maintenanceFor?.(request.machine)))rejectSubmission('账号授权或机器维护状态已改变；未提交训练。',409);
+    let storagePlan;
+    if(project.project||datasets.length){
+      try{storagePlan=await trainingStoragePlan(service,user,request.machine,request,{from:request.projectPreparation?.from});}
+      catch(error){error.code='SUBMISSION_REJECTED';throw error;}
+      if(JSON.stringify(service.store.get(user.id))!==JSON.stringify(user)||service.maintenanceFor?.(request.machine))rejectSubmission('容量核对期间账号授权或机器维护状态已改变；未提交训练。',409);
+    }
     if(!needsPreparation&&!personalCardQuotaExempt(user,request)){
       if(usage(service.store.jobs,user.id)+request.cards>user.total)rejectSubmission('超出跨机器用卡总额度（排队、运行和待核对任务均计入）。',409);
       if(usage(service.store.jobs,user.id,request.machine)+request.cards>user.limits[request.machine])rejectSubmission('超出所选机器的用卡额度（排队、运行和待核对任务均计入）；不会自动切换服务器。',409);
     }
     const job=createSubmittedJob(request,user,prioritySupported),{id}=job;
+    if(storagePlan)job.trainingStoragePlan=storagePlan;
     if(!needsPreparation&&datasets.length&&resolvedReferences.length===datasets.length)job.spec.datasets=datasets.map(ref=>resolvedReferences.find(value=>(value.mountAs||value.dataset)===ref.dataset));
     if(needsPreparation){job.state=DATA_PREPARING;job.queueReason='等待准备项目和本机数据；尚未申请 GPU。';job.dataPreparation={datasets:datasets.map(ref=>({...ref,state:'WAITING'}))};}
     service.db.exec('BEGIN IMMEDIATE');
