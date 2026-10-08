@@ -35,6 +35,7 @@ files['/datasets-ui.js']='datasets-ui.js';
 files['/data-route.js']='data-route.js';
 files['/datasets.css']='datasets.css';
 files['/dataset-upload.js']='dataset-upload.js';
+files['/campus-ticket-time.js']='campus-ticket-time.js';
 files['/data-workspace.js']='data-workspace.js';
 files['/cloud-files-ui.js']='cloud-files-ui.js';
 files['/transfers-ui.js']='transfers-ui.js';files['/transfer-upload.js']='transfer-upload.js';

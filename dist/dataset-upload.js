@@ -1,5 +1,6 @@
 // Incremental SHA256 and the bounded HTTPS dataset upload protocol. No remote dependencies.
 import {selectUploadRoute,assertUploadRouteGrant,uploadStorageMachine} from './upload-routes.js';
+import {validCampusTicketTime} from './campus-ticket-time.js';
 export const CHUNK_BYTES=1024*1024,MAX_MANIFEST_BYTES=64*1024*1024,MAX_ENTRIES=500000,LARGE_RELAY_BYTES=256*1024**2;
 export const MAX_DIRECT_CHUNK_BYTES=16*CHUNK_BYTES;
 export function adaptiveUploadChunk(current,elapsedMs,maximum){
@@ -134,7 +135,7 @@ export function validateBrowserUploadGrant(value,now=Date.now()/1000){
   let endpoint;try{endpoint=new URL(value?.endpoint);}catch{throw uploadError('直传入口未确认。','DIRECT');}
   if(value.available!==true||value.protocol!==PROTOCOL||endpoint.protocol!=='https:'||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||endpoint.pathname!=='/'||endpoint.origin!==value.endpoint||
     !/^[a-f0-9]{64}$/.test(value.certificateSha256||'')||typeof value.ticket!=='string'||!/^[A-Za-z0-9_.-]{20,4096}$/.test(value.ticket)||
-    !Number.isSafeInteger(value.expiresAt)||value.expiresAt<=now||value.expiresAt>now+601||!Number.isSafeInteger(value.chunkBytes)||value.chunkBytes<1||value.chunkBytes>CHUNK_BYTES||
+    !validCampusTicketTime(value,now)||!Number.isSafeInteger(value.chunkBytes)||value.chunkBytes<1||value.chunkBytes>CHUNK_BYTES||
     value.maxChunkBytes!==undefined&&![CHUNK_BYTES,MAX_DIRECT_CHUNK_BYTES].includes(value.maxChunkBytes))
     throw uploadError('直传授权未确认。','DIRECT');
   return value;
