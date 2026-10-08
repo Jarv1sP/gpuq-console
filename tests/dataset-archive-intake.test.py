@@ -94,6 +94,10 @@ class ArchiveTests(unittest.TestCase):
             self.node.CONFIG['datasets']['archiveUpload']={'enabled':True,**limits}
             raw=self.begin(tar_bytes(entries));self.chunk(raw);self.assertEqual(self.commit(),1)
             self.assertEqual(self.u.load(self.user,self.upload)['reasonCode'],'ARCHIVE_TOO_LARGE')
+    def test_inspection_metadata_is_bounded_before_building_a_large_manifest(self):
+        path=self.root/'metadata.tar';path.write_bytes(tar_bytes([('long/'+'x'*80,b'abc',tarfile.REGTYPE)]))
+        with self.assertRaises(A.ArchiveError) as rejected: A.inspect_archive(path,'tar',100,20,max_metadata=128)
+        self.assertEqual(rejected.exception.reasonCode,'ARCHIVE_TOO_LARGE')
     def test_empty_and_unbounded_zip_compression_are_refused(self):
         output=io.BytesIO()
         with zipfile.ZipFile(output,'w',zipfile.ZIP_BZIP2) as archive: archive.writestr('data',b'abc')

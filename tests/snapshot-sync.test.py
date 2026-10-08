@@ -29,7 +29,7 @@ class SnapshotSyncTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name).resolve();self.nodes=[];self.patches=[]
         for i in range(2):
             base=self.root/str(i);base.mkdir()
-            for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py','project-ops.py','project-store.py','project-lifecycle.py','snapshot-sync.py','dataset-cache.py','dataset-upload.py'):
+            for name in ('platform-root-guard.py','node-executor.py','scheduling-policy.py','project-ops.py','project-store.py','project-lifecycle.py','snapshot-sync.py','dataset-cache.py','dataset-upload.py','dataset-archive-intake.py'):
                 shutil.copy2(DEPLOY/name,base/name)
             conda=base/'conda';(conda/'bin').mkdir(parents=True);(conda/'bin/python').write_text('fixture python');(conda/'conda-meta').mkdir();(conda/'lib').mkdir();(conda/'conda-meta/python-3.10.json').write_text(json.dumps({'name':'python','version':'3.10'}))
             source=base/'source';source.mkdir();(source/'sample.txt').write_text('data sample')

@@ -181,8 +181,15 @@ def zip_entries(raw,size,max_bytes,max_entries,visit):
                     if stream.read(1): fail('ARCHIVE_CORRUPT','ZIP大小不符')
 
 
-def inspect_archive(path,format,max_bytes,max_entries,output=None):
-    directories=set();files={};explicit=set();total=0;handles=[]
+def inspect_archive(path,format,max_bytes,max_entries,output=None,max_metadata=32*1024**2):
+    directories=set();files={};explicit=set();total=0;handles=[];metadata=32
+    def charge(name, allowance):
+        nonlocal metadata
+        metadata+=2*len(name.encode('utf-8'))+allowance
+        if metadata>max_metadata: fail('ARCHIVE_TOO_LARGE','解压清单过大')
+    def add_directory(name):
+        if name not in directories:
+            charge(name,8);directories.add(name)
     def visit(name,directory,size):
         nonlocal total
         if name in explicit or name in files or not directory and name in directories:
@@ -192,9 +199,10 @@ def inspect_archive(path,format,max_bytes,max_entries,output=None):
         for i in range(1,len(bits)):
             parent='/'.join(bits[:i])
             if parent in files: fail('ARCHIVE_UNSAFE_PATH','压缩包路径冲突')
-            directories.add(parent)
-        if directory: directories.add(name)
-        else: total+=size;files[name]={'path':name,'size':size}
+            add_directory(parent)
+        if directory: add_directory(name)
+        else:
+            charge(name,160);total+=size;files[name]={'path':name,'size':size}
         if total>max_bytes or len(directories)+len(files)>max_entries: fail('ARCHIVE_TOO_LARGE','解压后的大小或文件数超出上限')
         if output is None or directory: return None
         target=output/name;target.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
@@ -311,7 +319,7 @@ class ArchiveIntake:
         if size!=session['archive']['bytes'] or digest!=session['archive']['sha256']: fail('ARCHIVE_CORRUPT','压缩包长度或校验值不符')
         session['archivePhase']='EXTRACTING';session.pop('reasonCode',None);u.save(session)
         max_bytes,max_entries=self.limits()
-        planned,total=inspect_archive(self.file(session),session['archive']['format'],max_bytes,max_entries)
+        planned,total=inspect_archive(self.file(session),session['archive']['format'],max_bytes,max_entries,max_metadata=u.d.MAX_JSON_BYTES)
         work=self.work(session)
         if work.exists(): shutil.rmtree(work)
         count=len(planned['directories'])+len(planned['files']);metadata=len(u.d._json_bytes(planned))+count*80
@@ -338,7 +346,7 @@ class ArchiveIntake:
             u.d._write_json(self.reservation(session),{'bytes':reserve,'budgetBytes':reserve,'inodes':count+16})
             session.update(expandedReserveBytes=reserve,expandedEntries=count);u.save(session)
         work.mkdir(mode=0o700)
-        manifest,actual=inspect_archive(self.file(session),session['archive']['format'],max_bytes,max_entries,work)
+        manifest,actual=inspect_archive(self.file(session),session['archive']['format'],max_bytes,max_entries,work,max_metadata=u.d.MAX_JSON_BYTES)
         if actual!=total or manifest['directories']!=planned['directories'] or [{k:f[k] for k in ('path','size')} for f in manifest['files']]!=planned['files']: fail('ARCHIVE_CORRUPT','压缩包解压清单不一致')
         manifest=u.d._manifest(manifest)
         with u.cache._locked(): u.d._write_json(self.reservation(session),{'bytes':reserve-total,'budgetBytes':reserve,'inodes':16})
