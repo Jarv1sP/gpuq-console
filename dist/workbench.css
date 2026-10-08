@@ -274,6 +274,16 @@
 .sb #workspace-files [type=file]{height:40px;min-height:40px;padding:0 8px;line-height:38px}
 .sb #workspace-files [type=file]::file-selector-button{height:32px;margin:0 8px 0 0;padding:0 8px;font:inherit;vertical-align:middle}
 .sb :is(#train-form,#work-submit-panel,#project-create-form,#workspace-files,.job-notes) [hidden],.sb #control-training-preview[hidden]{display:none!important}
+.sb #training-data-field>.field-caption{flex-wrap:wrap}
+.sb .training-read-mode{display:inline-flex;gap:4px;margin-inline-start:auto;padding:3px;border:1px solid var(--line-2);border-radius:8px;max-width:100%}
+.sb .training-read-mode .button{min-height:40px;padding:6px 10px;white-space:nowrap}
+.sb .training-read-mode .button[aria-pressed=true]{background:var(--seg-on);color:var(--ink)}
+.sb .training-selection{display:flex;align-items:center;gap:8px;min-width:0;margin:6px 0;flex-wrap:wrap}
+.sb .training-selection-machine{display:inline-flex;align-items:center;gap:8px;min-width:0}
+.sb .training-selection .server-id{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .training-selection>.ui-info{flex:none;margin:calc((1lh - 32px)/2) 0}
+.sb .training-selection .ui-info-content{white-space:pre-line}
+@media(max-width:759px){.sb .training-read-mode .button{min-height:44px;font-size:16px}.sb .training-selection>.ui-info{margin:calc((1lh - 44px)/2) 0}}
 @media(max-width:759px){
  .sb :is(#train-form>.sheet-scroll,#work-submit-panel>.sheet-scroll,#project-create-form,.job-notes form,.mc-natural,#workspace-files){--field-help-size:44px}
  .sb :is(#train-form,#work-submit-panel,#project-create-form,.job-notes,#workspace-files) label,.sb #project-create-form>.project-environment-choice>legend,.sb .mc-natural-version,.sb .mc-natural-fields dt{font-size:16px}

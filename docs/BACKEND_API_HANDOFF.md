@@ -38,6 +38,14 @@
 
 ## 项目展示与生命周期
 
+### 训练存储（2026-10-08 定稿，前端预接；不表示节点已上线）
+
+`datasets.training.capabilities {machine,dataset,version}` 返回 `{protocol:1,machine,dataset,version,warehouse:{available,reason}}`。仅确证受信本机 READY 固定版本可用时提供仓库直读；旧协议、未知或拒绝不开放。`jobs.submit.datasetReadMode:"warehouse"` 不复制缓存或回退；默认缓存省略该参数，保持旧提交键兼容。AUTO 未确定机器时不借用开发源的能力。
+
+HTTP 409/503 的 `SUBMISSION_REJECTED` 可附 `storage:{protocol:1,reasonCode,requiredBytes,availableBytes,volumes}`。只有 `TRAINING_STORAGE_INSUFFICIENT` 和两个可信顶层字节数才显示需要／可用；数字为 null、`TRAINING_STORAGE_UNKNOWN`、多卷／文件数／预算冲突保留原错误。明确拒绝不换机、不自动重试；更早的丢回执仍按原 key 核对。
+
+AUTO 成功回执的 `machine` 是固定最终目标；`selectionSummary:{protocol:1,selectedMachine,storageExcluded:[{machine,reason}]}` 说明提交时采样。仅新协议显示「自动选择」；`storage-insufficient`／`storage-unverified` 分别为「空间不足」／「空间未核实」，放在ⓘ提示，不承诺未来资源或重新改派。
+
 所有操作绑定登录账号，不接受 owner/userId/宿主路径。内部 `project`、release、run 与
 结果目录不改名；`displayName` 为纯文本，默认原 ID，写入有 revision CAS。
 

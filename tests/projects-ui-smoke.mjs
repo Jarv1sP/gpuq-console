@@ -84,6 +84,7 @@ try{
     target.on('pageerror',error=>pageErrors.push(error.message));
     target.on('response',response=>{if(response.status()>=400)httpErrors.push({status:response.status(),operation:response.request().postDataJSON()?.operation});});
     await target.context().route('**/*',guardedRoute(async route=>{const url=new URL(route.request().url());if(url.origin!==origin&&!['data:','blob:'].includes(url.protocol)){blocked.push(url.href);await route.abort();return;}
+      if(url.pathname==='/api/call'&&route.request().postDataJSON()?.operation==='datasets.training.capabilities')return route.fulfill({json:{result:{...route.request().postDataJSON().args,protocol:0}}});
       if(url.pathname==='/api/call'&&dropUploadReplyOnce&&route.request().postDataJSON()?.operation==='files.put'){dropUploadReplyOnce=false;await route.fetch();await route.abort('connectionreset');return;}
       await route.continue();}));
   }
@@ -355,3 +356,5 @@ await import('./project-quota-ui-smoke.mjs');
 await import('./project-upload-capability-ui-smoke.mjs');
 // Public entries and wording reflect only verified production capabilities.
 await import('./member-surface-ui-smoke.mjs');
+// Training-storage protocols are still only fixtures; public legacy flows stay unchanged.
+await import('./training-storage-ui-smoke.mjs');
