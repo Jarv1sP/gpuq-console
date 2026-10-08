@@ -306,16 +306,16 @@ export function datasetsUI(store,toast){
     busy=true;const token=++generation,expected=account(),button=section.querySelector('#datasets-refresh'),select=section.querySelector('[name=dataset-machine]');button.disabled=true;select.disabled=true;
     const valid=()=>token===generation&&current(expected)&&(section.querySelector('[name=dataset-machine]')?.value||null)===machine&&(machine===null||machineAllowed(machine));
     const status=section.querySelector('#datasets-status'),capacity=section.querySelector('#datasets-capacity');catalog=null;capacity.hidden=!machine;status.textContent=status.dataset.reason==='policy-change'?'授权已更新，读取目录…':'加载中…';capacity.innerHTML=datasetCapacityHTML(null,machine);databaseLedger(null);section.querySelector('#dataset-catalog').replaceChildren();
-    warehouse.render();warehouse.capacitiesForOthers();warehouse.loadOverview();
+    warehouse.beginRead();warehouse.render();warehouse.capacitiesForOthers();warehouse.loadOverview();
     try{await Promise.all([
-      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;if(result.machine!==machine)throw Error('返回目录与所选服务器不符，请刷新。');catalog=result;warehouse.catalog(catalog);status.textContent=result.partial?'部分目录待确认':'';delete status.dataset.reason;}).catch(error=>{if(valid()){catalog=null;warehouse.catalogUnavailable();section.querySelector('#dataset-catalog').replaceChildren();status.textContent='目录未能确认：'+error.message;}}),
+      store.call('datasets.catalog',{machine}).then(result=>{if(!valid())return;if(result.machine!==machine)throw Error('返回目录与所选服务器不符，请刷新。');catalog=result;warehouse.catalog(catalog);status.textContent=result.partial?'部分目录待确认':'';delete status.dataset.reason;}).catch(error=>{if(valid()){catalog=null;warehouse.catalogUnavailable();status.textContent='目录未能确认：'+error.message;}}),
       ...(machine?[store.call('datasets.capacity',{machine}).then(result=>{if(valid()){capacity.innerHTML=datasetCapacityHTML(result,machine);warehouse.capacity(result,machine);}}).catch(()=>{if(valid()){capacity.innerHTML=datasetCapacityHTML(null,machine);warehouse.capacity(null,machine);}})]:[])
     ]);}
     finally{if(token===generation){busy=false;controls();}}
   }
   section.addEventListener('change',e=>{
     if(e.target.name==='dataset-machine'){
-      generation++;busy=false;catalog=null;warehouse.catalogUnavailable();initialCatalog=true;
+      generation++;busy=false;catalog=null;warehouse.catalogUnavailable({retainList:false});initialCatalog=true;
       section.querySelector('#dataset-catalog').replaceChildren();
       workspace.reset();document.dispatchEvent(new CustomEvent('gpuq-data-workspace-context'));active=null;lastScan=null;campusPaused=false;showUploadRoute(null);phase();
       section.querySelector('#data-workspace-files-list').replaceChildren();section.querySelector('#data-workspace-status').textContent='已切换服务器';section.querySelector('#dataset-upload-status').textContent='选择一个目录。';controls();load();
