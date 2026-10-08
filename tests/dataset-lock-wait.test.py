@@ -42,9 +42,18 @@ class LockWaitTests(unittest.TestCase):
     def test_total_budget_bounds_a_contended_lock(self):
         with ThreadPoolExecutor() as pool, self.cache._locked():
             start = time.monotonic()
-            with self.assertRaises(D.CacheBusy):
+            with self.assertRaises(D.CacheBusy) as caught:
                 pool.submit(self.acquire, timeout=1, total=0.06).result(2)
             self.assertLess(time.monotonic()-start, 0.5)
+            self.assertEqual(caught.exception.lock_wait, {'scope':'CACHE', 'limit':'TOTAL_BUDGET', 'timeoutSeconds':0.06})
+
+    def test_single_wait_limit_and_version_scope_do_not_expose_lock_path(self):
+        name='.locks/private-dataset.'+'a'*64+'.lock'
+        with self.cache._lock_file(name):
+            with D.wait_for_locks(timeout=.01,total=1), self.assertRaises(D.CacheBusy) as caught:
+                with self.cache._lock_file(name):self.fail('contended lock body ran')
+        self.assertEqual(caught.exception.lock_wait, {'scope':'VERSION', 'limit':'SINGLE_WAIT', 'timeoutSeconds':.01})
+        self.assertNotIn('private-dataset', str(caught.exception))
 
     def test_nested_helpers_share_cumulative_budget_instead_of_resetting(self):
         clock = [0.0]

@@ -215,6 +215,8 @@ AUTO 成功回执的 `machine` 是已持久保存的最终目标，另附 `selec
 
 项目锁竞争最多等待两秒取得原锁，超时返回可识别 busy；不重试操作体，也不改变 service-owned、单链接、私人权限或 no-follow 条件。`datasets.prepare` 内部目录鉴权使用数据库当前角色，个人数据传输仍使用 owner-only member 身份，管理员不因此获得其他账号材料。
 
+`datasets.workspace.status` 的个人发布回执可含 `phase`（`SCANNING/REGISTERING/REGISTERED/ARCHIVE_INTENT/MATERIALIZING/COMPLETED`）。已确认登记的 `dataset/version/files/bytes` 在后续失败中保持；登记前不推断版本已存在。取锁失败可含 `failureKind:CACHE_BUSY` 与 `lockWait:{scope:CACHE|VERSION,limit:SINGLE_WAIT|TOTAL_BUDGET,timeoutSeconds:number}`，只解释已耗尽的等待边界，不返回锁路径或持锁者。旧回执无字段仍按未知；只读查询和重复原 key 不重新派发。明确 FAILED 后的受支持显式发布使用新 key、原目录和原名称，未变内容复用相同版本与已校验片段；集中仓库的旧发布禁用策略保持。
+
 `files.upload.status {machine,project,area:"code",path,totalSize,sha256,uploadId?}` 仅查询当前账号的精确项目文件；首次可省略 `uploadId`，发现同路径、同大小、同完整 SHA 的现存上传。返回 `protocol:2` 及 `ABSENT / UPLOADING / COMPLETE / CONFLICT`；已知上传含原 `uploadId`、`receivedBytes`。`UPLOADING` 还必须有 `resumable:true` 才能续传。维护期间仍可查状态，不能借它写文件、发布或提交任务。
 
 项目 `files.put` 的固定身份由账号、项目、路径、总长度、SHA256、uploadId 共同绑定。中间块重复发送同 offset/bytes 不会追加；最终提交保留完成回执，查询和原最终块恢复会核验目标内容及身份。已提交的目标被他人编辑或替换会拒绝恢复，不回滚或覆盖新内容。rename 已完成但最终回执尚未写入时，保留的 COMMITTING 意图用于核验结果，此时状态为 `COMPLETE,completionPending:true`；客户端须保持原 ID，在 `offset=totalSize` 发送空的 final 块收尾后才可发布，查询本身不写入。不能仅凭项目旧 READY 版本推断这次上传成功。
