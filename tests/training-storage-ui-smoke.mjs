@@ -71,7 +71,7 @@ try{
     }
     submission='success';await page.locator('[name=training-target]').selectOption('auto');assert.equal(await controls.isHidden(),true,'AUTO does not borrow development-machine direct-read capability');
     await page.locator('[name=name]').fill('automatic');await submit();await confirmed();assert.equal(Object.hasOwn(submissions.at(-1),'datasetReadMode'),false);assert.equal(submissions.at(-1).machine,'auto');
-    assert.match(await page.locator('#submit-receipt-actions .training-selection').textContent(),new RegExp('自动选择.*'+other));assert.equal(await page.locator('#submit-receipt-actions .training-selection .server-id').textContent(),other);assert.equal(await page.locator('#submit-receipt-actions .training-storage-info').getAttribute('title'),machine+' 空间不足\n'+other+' 空间未核实');
+    assert.equal(await page.locator('#submit-receipt-actions .training-selection-machine').textContent(),'已分配到 '+other);assert.equal(await page.locator('#submit-receipt-actions .training-selection .server-id').textContent(),other);assert.equal(await page.locator('#submit-receipt-actions .training-storage-info').getAttribute('title'),machine+' 空间不足\n'+other+' 空间未核实');
     for(const width of [1440,390]){await page.setViewportSize({width,height:width===390?844:1100});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:join(shots,role+'-auto-receipt-'+width+'.png')});}
     assert.equal(localCalls.some(body=>['datasets.prepare','projects.create','projects.publish','files.put','terminal.open'].includes(body.operation)),false,'capability reads never prepare data, create projects or start terminals');
     await context.close();
