@@ -73,3 +73,16 @@ test('HTTP overview rejects unauthenticated, injected and cross-origin browser c
   assert.equal(f.calls.length,0);
   assert.equal((await f.post('/api/call',body,null,{Cookie:cookie,Origin:f.origin})).status,200);
 });
+
+test('HTTP overview responds within five seconds when a node catalog and capacity both hang',async t=>{
+  const f=await fixture(t),bridge=f.service.bridge,offline=MACHINES.at(-1).id;
+  f.service.bridge=(machine,operation,args)=>machine===offline?new Promise(()=>{}):bridge(machine,operation,args);
+  const started=performance.now(),response=await f.call('datasets.overview',{},f.member.token);
+  const elapsed=performance.now()-started;
+  assert.equal(response.status,200);assert.ok(elapsed<5000,`overview took ${elapsed}ms`);
+  const value=response.data.result;
+  assert.equal(value.partial,true);
+  assert.equal(value.caches.find(row=>row.machine===offline).state,'UNKNOWN');
+  assert.equal(value.caches.find(row=>row.machine===offline).reason,'timeout');
+  assert.ok(value.caches.filter(row=>row.machine!==offline).every(row=>row.state==='READY'&&row.volume.totalBytes===1000));
+});
