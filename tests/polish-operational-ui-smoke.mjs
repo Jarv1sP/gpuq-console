@@ -342,6 +342,12 @@ try{
             result={offset:12,data:terminalCalls===1?Buffer.from('Local xterm.\r\n').toString('base64'):'',exited:scene.state==='ended',exitCode:scene.state==='ended'?17:null};
           }else if(operation==='terminal.detach')result={detached:true};
           else if(operation==='jobs.logs')result={text:'Local training log.'};
+          else if(operation==='jobs.completion'){
+            const current=state.jobs.find(job=>job.id===args.jobId);assert.ok(current);
+            result={protocol:'job-completion-v1',readOnly:true,jobId:current.id,machine:current.machine,
+              userId:current.userId,nodeJobId:current.nodeJobId||null,project:current.project,release:current.release,
+              completed:false,state:'UNCONFIRMED',reason:'NATIVE_OBSERVATION_UNAVAILABLE'};
+          }
           else if(operation==='community.info')result={enabled:true,capabilities:['task-notes-v1']};
           else if(operation==='community.notes.list')result={notes:[],nextCursor:null};
           else if(operation==='files.list')result={entries:[]};

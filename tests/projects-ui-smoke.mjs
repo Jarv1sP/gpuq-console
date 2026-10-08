@@ -15,6 +15,7 @@ import net from 'node:net';
 import {chromium} from 'playwright';
 import {createPortalServer} from '../portal-server.mjs';
 import {MACHINES} from '../dist/machines.js';
+import {projectFootprint,trainingPlan,trainingSource} from './training-storage-fixture.mjs';
 
 const folder=await mkdtemp(join(tmpdir(),'gpuq-project-ui-'));
 const screenshots=process.env.UI_SCREENSHOTS||'/tmp/gpuq-projects-ui';
@@ -43,6 +44,14 @@ try{
       project.state='PUBLISHING';project.progress={phase:'copying',completedEntries:12,completedBytes:512,totalEntries:20,totalBytes:1024};return copy(project);
     }
     if(operation==='projects.verify'){assert.ok(project?.releases.some(item=>item.release===args.release&&item.state==='READY'));return {project:args.project,release:args.release,state:'READY'};}
+    if(operation==='projects.copy.probe'){
+      assert.equal(project?.environmentMode,'oci');
+      assert.ok(project.releases.some(item=>item.release===args.release&&item.state==='READY'));
+      return {protocol:'portable-project-v1',enabled:true,environmentMode:'oci',architecture:'amd64',
+        project:args.project,release:args.release,image:'sha256:'+'d'.repeat(64),releaseReady:true,sources:[node],...projectFootprint};
+    }
+    if(operation==='storage.training.plan'){assert.equal(args.hostAdmin,false);return trainingPlan(node,args);}
+    if(operation==='datasets.training.status'){assert.equal(args.hostAdmin,false);return trainingSource(node,args,{bytes:16,files:1,directories:0});}
     if(operation==='terminal.open'){const id=args.mode==='reconnect'?args.id:randomUUID(),writerToken=randomUUID();if(args.hostAdmin){assert.equal(args.userId,'builtin-admin');assert.equal(args.project,undefined);}if(args.mode==='reconnect')assert.ok(terminals.has(id));terminals.set(id,{...copy(args),machine:node,writerToken});if(terminalGate){const gate=terminalGate;terminalGate=null;await gate;}return {id,writerToken};}
     if(operation==='terminal.exchange'){
       const session=terminals.get(args.id);assert.ok(session);assert.equal(args.project,session.project);assert.equal(args.hostAdmin,session.hostAdmin);assert.equal(node,session.machine);assert.equal(args.writerToken,session.writerToken);
@@ -79,7 +88,7 @@ try{
   await service.invoke(admin.token,'policy.save',{userId:member.id,policyVersion:0,total:2,limits:{[machine]:1,[other]:1}});
   projects.set(key(other,member.id,'other-project'),{project:'other-project',state:'READY',releases:[{release:nextRelease,state:'READY'}],latestReadyRelease:nextRelease});
   projects.set(key(machine,'builtin-admin','admin-project'),{project:'admin-project',state:'DRAFT',releases:[],latestReadyRelease:null});
-  projects.set(key(machine,member.id,'vision-demo'),{project:'vision-demo',environmentMode:'isolated',state:'DRAFT',releases:[],latestReadyRelease:null});
+  projects.set(key(machine,member.id,'vision-demo'),{project:'vision-demo',environmentMode:'oci',state:'DRAFT',releases:[],latestReadyRelease:null});
   browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1100}});
   async function configure(target){
@@ -122,11 +131,11 @@ try{
   assert.match(await page.locator('#project-status-detail').textContent(),/个人容器/);
   assert.match(await page.locator('#workspace-mode-note').textContent(),/开发草稿.*发布版本.*不会写回草稿/);
   await action('projects.status',()=>page.locator('[name=workspace-project]').selectOption('vision-demo'));await idle();
-  assert.match(await page.locator('#project-status-detail').textContent(),/隔离（不继承基础包）/);
+  assert.match(await page.locator('#project-status-detail').textContent(),/个人容器（容器内 root，不是服务器 root）/);
   assert.equal(await page.locator('[name=workspace-project]').inputValue(),'vision-demo');
-  assert.match(await page.locator('#project-environment').textContent(),/旧环境（兼容）/);
+  assert.match(await page.locator('#project-environment').textContent(),/个人容器/);
   assert.equal(await page.locator('#train-form [type=submit]').isDisabled(),true);
-  assert.match(await page.locator('#workspace-mode-note').textContent(),/\/opt\/project-env/);
+  assert.match(await page.locator('#workspace-mode-note').textContent(),/开发草稿.*发布版本.*不会写回草稿/);
   await page.locator('#workspace-files>summary').click();
   const file=Buffer.alloc(1048576+11,65);await page.locator('[name=files]').setInputFiles({name:'train.py',mimeType:'text/plain',buffer:file});
   await page.locator('#workspace-upload').click();await page.waitForFunction(()=>document.querySelector('#workspace-result').textContent.includes('已上传 1 个文件'));await idle();
