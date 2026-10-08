@@ -6,7 +6,7 @@ import {adaptStorageOverview,readStorageOverview} from './dataset-catalog-model.
 import {serverIdHTML} from './workbench-ui.js';
 import {transferBytes} from './data-route.js';
 import {mountArchiveEnrollment} from './archive-enrollment-ui.js';
-import {mountAdminStorageMembers} from './admin-storage-members.js';
+import {mountAdminStorageMembers,warehouseCatalog} from './admin-storage-members.js';
 // The preview model imports the private inventory. Keep this validator pure;
 // its username contract is checked against model.js by the storage tests.
 const validUsername=value=>typeof value==='string'&&/^[a-z\u3400-\u9fff][a-z0-9_\u3400-\u9fff-]{1,23}$/u.test(value);
@@ -33,18 +33,18 @@ export function adminDatasetCatalog(machine,machines,listings,personal=null){
       for(const value of item.versions){
         if(!hash.test(value?.version))throw TypeError('Invalid immutable version');
         if(!group.versions.has(value.version))group.versions.set(value.version,{version:value.version,locations:[],quantities:[]});
-        const v=group.versions.get(value.version),proof=personal?.datasets?.flatMap(row=>row.versions||[]).filter(row=>row.version===value.version).flatMap(row=>row.locations||[]).find(row=>row.machine===host.id&&row.dataset===item.dataset);
+        const v=group.versions.get(value.version),proof=personal?.datasets?.flatMap(row=>row.versions||[]).filter(row=>row.version===value.version).flatMap(row=>row.locations||[]).find(row=>row.machine===host.id&&(row.dataset===item.dataset||row.originalDataset===item.dataset));
         v.quantities.push(value);
         v.locations.push({machine:host.id,dataset:item.dataset,ownerLabel:typeof item.ownerLabel==='string'?item.ownerLabel:'所属用户：未知（授权信息未完整返回）',state:Object.hasOwn(states,value.state)?value.state:'UNKNOWN',canPrepare:value.canPrepare===true,bytes:Number.isSafeInteger(value.bytes)&&value.bytes>=0?value.bytes:null,
           ...(value.deletionPermissions?{deletionPermissions:structuredClone(value.deletionPermissions)}:{}),
-          ...(typeof value.warehouseReady==='boolean'&&Object.hasOwn(states,value.state)?{warehouseReady:value.warehouseReady}:{}),
+          ...(typeof proof?.warehouseReady==='boolean'&&Object.hasOwn(states,proof.state)?{warehouseReady:proof.warehouseReady}:{}),
           ...(proof?.storage?{storage:structuredClone(proof.storage)}:{}),...(proof?.removalPending===true?{removalPending:true}:{}),...(proof?.removalGraceEligible===true?{removalGraceEligible:true}:{}),
           ...(typeof value.error==='string'?{error:value.error}:{})});
       }
     }
   }
   const quantity=(rows,key)=>{const values=rows.map(row=>row[key]).filter(value=>Number.isSafeInteger(value)&&value>=0);return values.length&&values.every(value=>value===values[0])?values[0]:null;};
-  return {machine,machines:nodes,partial:nodes.some(row=>row.state!=='ok'),datasetDelete:personal?.datasetDelete===1?1:0,datasetDeleteKnown:personal?.datasetDelete===1||personal?.datasetDelete===0,
+  return {machine,machines:nodes,partial:nodes.some(row=>row.state!=='ok'),warehouseCatalog:personal,datasetDelete:personal?.datasetDelete===1?1:0,datasetDeleteKnown:personal?.datasetDelete===1||personal?.datasetDelete===0,
     datasets:[...groups.values()].map(group=>({dataset:group.dataset,registrations:group.registrations,versions:[...group.versions.values()].map(v=>{
       const local=v.locations.find(row=>row.machine===machine),known=nodes.find(row=>row.machine===machine)?.state==='ok';
       return {version:v.version,bytes:quantity(v.quantities,'bytes'),files:quantity(v.quantities,'files'),locations:v.locations,state:local?.state||(known?'NOT_LOCAL':'UNKNOWN'),canPrepare:local?.canPrepare===true,ownerLabel:local?.ownerLabel||v.locations[0]?.ownerLabel||'所属用户：未知（授权信息未完整返回）'};
@@ -83,7 +83,7 @@ export function adminStorageUsers(catalog){
 
 export function adminWarehouseMachines(catalog){
   const hosts=new Set();
-  for(const item of catalog?.datasets||[])for(const version of item.versions||[])for(const location of version.locations||[])
+  for(const item of warehouseCatalog(catalog)?.datasets||[])for(const version of item.versions||[])for(const location of version.locations||[])
     if(hasDatabaseOriginal({...version,locations:[location]}))hosts.add(location.storage?.archiveMachine||location.machine);
   return hosts;
 }
@@ -163,8 +163,10 @@ export function mountAdminDataStorage(el,{store,toast=()=>{},signal}={}){
     if(!allowed())return;
     el.querySelector('.storage-fleet').innerHTML=machines().map((host,index)=>{
       const row=telemetry.get(host.id),summary=adminStorageSummary(row?.status,row?.plan),pins=retained(host.id);
-      const warehouse=adminWarehouseMachines(catalog).has(host.id)||overview?.warehouse.volumes.some(value=>value.machine===host.id);
-      return `<article class="storage-server-card" data-selected="${host.id===select.value}"><button class="storage-server-select" type="button" data-storage-select="${esc(host.id)}" aria-pressed="${host.id===select.value}" title="${esc(host.id)}"><span class="storage-machine-id">${esc(host.id)}</span><span class="storage-server-context">服务器缓存${warehouse?'<span class="storage-warehouse-badge">仓库</span>':''}</span></button>${overview?storageCapacityDetailHTML(overview.caches.find(value=>value.machine===host.id)):cacheGaugeHTML(host.id,row?.status,row?.plan,index)}<div class="storage-server-facts"><span>${summary.count===null?'释放预览待确认':summary.count?'待释放 '+summary.count+' 项 · '+amount(summary.bytes):'待释放 0 项'}</span><span>${pins===null?'保留状态待确认':'固定保留 '+pins+' 项'}</span></div></article>`;
+      const warehouse=adminWarehouseMachines(catalog).has(host.id)||overview?.datasets.some(item=>item.versions.some(v=>v.originals.some(value=>value.machine===host.id&&value.state==='READY'&&value.warehouseReady===true)));
+      const facts=warehouseCatalog(catalog)?.datasets?.flatMap(item=>item.versions||[]).flatMap(v=>(v.locations||[]).map(value=>({version:v.version,...value}))).filter(value=>value.machine===host.id);
+      const pending=!warehouse&&(!facts?.length||facts.some(value=>typeof value.warehouseReady!=='boolean'&&!hasDatabaseOriginal({version:value.version,locations:[value]})));
+      return `<article class="storage-server-card" data-selected="${host.id===select.value}"><button class="storage-server-select" type="button" data-storage-select="${esc(host.id)}" aria-pressed="${host.id===select.value}" title="${esc(host.id)}"><span class="storage-machine-id">${esc(host.id)}</span><span class="storage-server-context">服务器缓存${warehouse?'<span class="storage-warehouse-badge">仓库</span>':pending?'<span class="storage-warehouse-pending">仓库待确认</span>':''}</span></button>${overview?storageCapacityDetailHTML(overview.caches.find(value=>value.machine===host.id)):cacheGaugeHTML(host.id,row?.status,row?.plan,index)}<div class="storage-server-facts"><span>${summary.count===null?'释放预览待确认':summary.count?'待释放 '+summary.count+' 项 · '+amount(summary.bytes):'待释放 0 项'}</span><span>${pins===null?'保留状态待确认':'固定保留 '+pins+' 项'}</span></div></article>`;
     }).join('');
     applyCapacityGeometry(el);fitNames();
   }
