@@ -4,6 +4,8 @@
 
 同一账号、数据集、版本和服务器的详情刷新就地更新DOM，保留重命名按钮、服务器行和键盘焦点；权限属性随新读取更新。动作身份改变会替换对应控件，切换账号、数据集或版本重建详情，目录预览继续保留独立组件状态。
 
+仓库详情中段不设内部滚动或最大高度。短视口下详情随页面整体滚动，四台服务器、训练按钮和命令自然排在同一面板里；缓存行不叠加垂直padding，按钮仍为48px。
+
 后台「数据与存储」的「按成员」复用全节点只读登记，独立模块 [admin-storage-members.js](../dist/admin-storage-members.js) 汇总可信所属的固定版本与READY缓存副本，并保留「所属未知」。仓库只信明确warehouseReady或已有完整归档证明，版本去重；缓存按机器、登记名、完整版本去重。缺失/矛盾大小和不完整读取保持「—」。容器暂为「—」，不猜storage.usage.users字段或分摊共享OCI层；薄适配器只接受明确的数字bytes。点行展开各机统计，长服务器ID使用server-id；手机每行展示三个带标签的数量与比例条。统计只读，服务器运维、固定保留、删除任务、归档纳管和云盘连接保持。
 
 成员比例条只绘制有真实正数字节数的部分。未知或0不生成色段、最小宽度或分隔标记，数值仍如实显示「—」或0。
@@ -343,7 +345,7 @@ Carbon 用于工作空间，Porcelain 用于阅读；`.sb` 与 `.sb.light` 定�
 | `#workspace-upload` / `#workspace-result` | [execution-ui.js](../dist/execution-ui.js) | 项目代码上传默认仅显示上传；节点确认恢复协议后，按原编号和确认偏移续传 | 旧节点沿用普通上传，失败说明不支持续传；未知能力不降级写入；回执丢失先查原编号；已完成不重传，待收口只发空final；冲突/旧记录/未知不另开；切换账号、项目或离开停止；旧个人工作区不重试；传输区别仅放在文件标题旁的单个ⓘ |
 | `.terminal-dialog` / `.terminal-recovery` | [terminal-ui.js](../dist/terminal-ui.js)、[terminal.css](../dist/terminal.css) | 连接、断开、结束、接管/恢复是不同动作；开发ID按账号、服务器、项目恢复到原入口 | 刷新只读核验原ID，不自动连接或接管；未知仍保留，明确结束才移除；ROOT/数据终端不存入项目记录；writerToken仅内存 |
 | `#project-disk-quota` | [execution-ui.js](../dist/execution-ui.js)、[workbench.css](../dist/workbench.css) | 打开时查询当前账号在开发服务器的容量与文件数，独立于显卡额度 | 不传项目或他人身份；未启用和待确认不造零值，未知不保留旧读数；关闭、离开或换上下文取消请求，完整服务器名保留在title；手机展开按钮至少44px，保留原生键盘切换与焦点 |
-| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 仓库容量按真实仓库机器单独成卡置顶，点击卡片筛选并可再次取消；一个逻辑数据集一行，列为名称/所属/大小/仓库/已缓存到；右侧按①仓库、②缓存、③训练排列；详情自然撑高，超出视口和底部预留空间时才内部滚动，训练按钮和两条命令留在底栏；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
+| `.warehouse-v3` / `.v3-row` / `.v3-inspector` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-catalog-model.js](../dist/dataset-catalog-model.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 仓库容量按真实仓库机器单独成卡置顶，点击卡片筛选并可再次取消；一个逻辑数据集一行，列为名称/所属/大小/仓库/已缓存到；右侧按①仓库、②缓存、③训练排列；详情自然撑高，放不下时随页面滚动，不在面板内裁切缓存行和训练操作；手机点击进入详情 | 完整版本与实体缓存 ID 不合并猜测；搜索名称或 ID；所属保留完整提示；数量右对齐等宽数字 |
 | `.v3-rail` / `.v3-server-chip` | [dataset-warehouse-view.js](../dist/dataset-warehouse-view.js)、[dataset-warehouse.css](../dist/dataset-warehouse.css) | 按缓存服务器筛选；缓存条用就绪副本大小与真实预算 | 预算未知时保留细条与已知副本大小；磁盘单独使用 capacity 的 filesystemBytes/availableBytes；长 ID 提示完整值；手机内部横向滚动 |
 | `.v3-label-dialog` | [dataset-label-client.js](../dist/dataset-label-client.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 仅修改本人视图的显示名，不修改训练 ID | fresh GET 回执携带 revision；409 重读后等待明确确认；失联不自动重写；账号代次隔离 |
 | 服务器缓存状态 | [dataset-cache-watch.js](../dist/dataset-cache-watch.js)、[dataset-warehouse-view.js](../dist/dataset-warehouse-view.js) | 缓存后自动只读查询至 READY/FAILED；READY只显示实心符号，名称放入符号的aria-label与title；有真实字节计数才显示进度，否则显示“取回中” | 固定目标、完整版本及原编号；同一数据集、版本和目标机器的仓库 READY、warehouseReady 与 canUse 证明仅开放已授权的准备缓存路径，缓存 READY 仍须缓存本身的证明；失去回执不重发 prepare；离开房间/隐藏页面暂停，账号或服务器切换丢弃旧响应；READY 刷新目录；目录确认 READY/FAILED 时移除旧查询覆盖，迟到回复不能覆盖较新的终态 |
@@ -469,7 +471,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 目录别名用于训练，缓存保留/删除使用location真实本地名称。账号/机器/项目/版本切换停止旧轮询并抛弃旧回复；缓存策略只在展开/明确刷新查询，隐藏房间停止storage RPC。
 
-详情按内容自然撑高，以 CSS sticky 顶部偏移和运行时总控占用计算最大空间；仅超出时让中段滚动、训练底栏固定，四台服务器在 1440×900 和 1024×768 均完整显示。「所属」只显示名字，原 ownerLabel 保留不变。上传连接失败只提供原路线重试与重新探测，不推荐其他来源；其他来源仍在初始选择里。
+详情按内容自然撑高，中段不截断。面板超过视口和总控预留空间时随页面整体滚动，四台服务器在 1440×900 和 1024×768 均完整显示；缓存行不叠加垂直padding，操作保持48px。「所属」只显示名字，原 ownerLabel 保留不变。上传连接失败只提供原路线重试与重新探测，不推荐其他来源；其他来源仍在初始选择里。
 
 主界面的管理员和普通成员使用相同仓库组件；只显示个人授权操作，不出现缓存策略、固定保留或云盘连接。独立 [admin-data-storage.js](../dist/admin-data-storage.js) 注册 storage/order20，只有管理后台确认角色并挂载时才读取全所属目录；离开或撤权先 abort 再清理。按机器删除读取新鲜全节点物理登记，固定保留仍绑定原 pinId，存储运维以每台服务器预算卡片为入口，挂载和显式刷新各读一次 status/plan，不轮询；选中机器下方保留释放预览、本人保留与 M2 本机缓存移除，后台不重复仓库浏览目录。水位来自响应，未开启不画刻度；缺保留清单、所有者或仓库用量不编造，版本 pinCount 不证明 pin 归属。全局目录可见性不授予任何管理权限。 按用户统计只汇总明确归属、已就绪且各位置与版本大小一致的缓存，含各服务器副本，共享副本分别计入已知授权用户；账号名遵循现有中文及小写字母规则，纯统计验证不得静态导入带清单的演示模型，相关契约与登录清单边界由测试约束。删除任务挂载原模块，只显示当前浏览器本账号保存的原编号，查看、继续、取消和恢复沿用确认与权限协议；缺能力和明确关闭分别显示待确认与未启用。云盘仅管理员可重新启用已配置且验收的 CloudDrive，丢回执显示待确认，先重新查询，不自动重发。仅确认已连接且未停用时显示断开授权，停用后只提供重新连接与查询。后台不覆盖 copy-help 按钮的共享边框与圆角；仓库标记只取 ARCHIVED、原件保留、完整版本匹配的实际 archiveMachine，当前接口没有仓库用量，不显示虚构读数。
 
@@ -499,7 +501,7 @@ prefers-reduced-motion移除位移、液位变化与循环，必要反馈用150m
 
 759px为主要手机房间/抽屉边界。底栏是工作台、算力总览、数据集、协作区、我的，传输没有独立标签。成员/维护由我的或总控承接。总控胶囊与主操作同行，工作台不重复胶囊；内容为底栏、胶囊、安全区和真实控制层预留空间。
 
-触控目标至少44px，字形可以小，不能缩按钮规避目标。仓库搜索是用户明确指定的40px/14px例外；手机服务器操作仍至少44px，桌面缓存/重试统一32px/13px。minmax(0,1fr)、min-width:0、有边界的换行/省略处理ID、用户名、数据集名、版本与命令。弹窗真实内部滚动，返回恢复焦点与原房间位置，不隐藏DOM冒充适配。
+触控目标至少44px，字形可以小，不能缩按钮规避目标。仓库搜索是用户明确指定的40px/14px例外；详情操作默认和手机均为48px，缓存/重试保留13px字号。minmax(0,1fr)、min-width:0、有边界的换行/省略处理ID、用户名、数据集名、版本与命令。弹窗真实内部滚动，返回恢复焦点与原房间位置，不隐藏DOM冒充适配。
 
 工作台展开项目、文件或主机运维表单时，右栏随页面滚动，避免高于可用视口的吸顶表单把操作停在总控条后面。共享toast宽度受`100vw - 32px`约束，长错误换行并保留全文；缩放后213–256 CSS像素也须可读。训练进度、指标与额度用流式网格，百分比按容器宽度缩放，不以隐藏状态或降低字级避开检查。
 

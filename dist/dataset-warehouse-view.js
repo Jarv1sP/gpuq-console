@@ -205,11 +205,9 @@ export function datasetWarehouseView(store,section,toast,{refresh,removeUI,machi
   const scale=root.getBoundingClientRect().width/root.offsetWidth||1;
   const reserve=parseFloat(getComputedStyle(document.body).getPropertyValue('--bottom-reserve'))||0;
   root.classList.remove('v3-inspector-overflow');root.style.maxHeight='';
-  if(matchMedia('(max-width:759px)').matches)return;
-  // A sticky panel can move up as the page scrolls. Budget from its CSS
-  // sticky offset, not its initial document position or the following footer.
-  const top=parseFloat(getComputedStyle(root).top)||0,available=Math.max(240,Math.floor(innerHeight/scale-top-reserve));
-  if(root.getBoundingClientRect().height/scale>available){root.classList.add('v3-inspector-overflow');root.style.maxHeight=available+'px';}
+  // Tall details travel with the page, keeping every cache row and action.
+  const available=Math.max(240,Math.floor(innerHeight/scale-24-reserve));
+  root.classList.toggle('v3-inspector-page-scroll',matchMedia('(max-width:759px)').matches||root.getBoundingClientRect().height/scale>available);
  }
  function render(){header();rail();rows();inspector();uploadUI();memberSpace?.render();}
  function catalog(value){legacyCatalog=value;applyCatalog();}
