@@ -129,8 +129,11 @@ class ProjectObservation(unittest.TestCase):
         os.link(file, path/'release-copy')
         sparse = path/'sparse'
         with sparse.open('wb') as out:
-            out.seek(10*1024**2)
             out.write(b'x')
+            # Seeking before a write can allocate the gap on APFS. Explicit
+            # truncate constructs a real sparse fixture without giant I/O.
+            out.truncate(256*1024**2)
+        self.assertLess(sparse.stat().st_blocks*512, sparse.stat().st_size)
         row = self.success()['projectUsage']['projects'][0]
         self.assertEqual(row['bytes'], self.allocated(path))
         self.assertLess(row['bytes'], sparse.stat().st_size)
