@@ -362,15 +362,17 @@ def dataset_error(error):
 def dataset_background_active(key):
     return subprocess.run(['/usr/bin/systemctl','--user','is-active','--quiet','gpuq-data-'+key[:32]],env=ENV,timeout=4).returncode==0
 
-def dataset_background_status(folder,key,spec,cache,actor,*,catalog_snapshot=None):
+def dataset_background_status(folder,key,spec,cache,actor,*,catalog_snapshot=None,warehouse_catalog_snapshot=None):
     # READY is a current cache fact, never a historical worker receipt: a
     # completed transfer may since have been evicted or its mount removed.
     current={}
     if spec['op']=='prepare' and spec.get('warehouse') is True:
-        current=storage_warehouse().status(actor,spec['dataset'],spec['version'])
+        warehouse=storage_warehouse()
+        current=(warehouse.status(actor,spec['dataset'],spec['version']) if warehouse_catalog_snapshot is None
+                 else warehouse._catalog_status_snapshot(actor,spec['dataset'],spec['version'],warehouse_catalog_snapshot))
     elif spec['op']=='prepare':
         current=(cache.status(actor,spec['dataset'],spec['version']) if catalog_snapshot is None
-                 else cache._status_catalog_snapshot(actor,spec['dataset'],spec['version'],catalog_snapshot))
+                 else cache._catalog_status_snapshot(actor,spec['dataset'],spec['version'],catalog_snapshot))
     if current.get('state')=='READY':return {**current,'operationId':key}
     if spec['op']=='prepare' and spec.get('warehouse') is not True and dataset_recovery_configured(cache,actor,spec['dataset'],spec['version']):current['recoveryConfigured']=True
     result=folder/(key+'.result.json')
@@ -483,13 +485,14 @@ def _dataset_op(operation,args,*,_request_id=None,_expected_registration=None,_e
                     try:binding=warehouse.binding(item['dataset'],value['version'])
                     except FileNotFoundError:continue
                     value['logicalDataset']=binding['source']
-            originals=warehouse.list(actor)
+            originals,warehouse_snapshots=warehouse._list_datasets_snapshot(actor)
             for item in originals['datasets']:
                 for value in item['versions']:
                     if value.get('errorCode')=='CACHE_METADATA_INCOMPLETE':continue
                     pending=dataset_current_prepare(folder,item['dataset'],value['version'])
                     if pending:
-                        try:value.update(dataset_background_status(folder,*pending,cache,actor))
+                        try:value.update(dataset_background_status(folder,*pending,cache,actor,
+                            warehouse_catalog_snapshot=warehouse_snapshots[(item['dataset'],value['version'])]))
                         except module.CacheMetadataIncomplete:
                             value.update(cache._catalog_incomplete(value))
                             value.update(warehouseReady=False,warehouseCanPrepare=False,

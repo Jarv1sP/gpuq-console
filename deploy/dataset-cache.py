@@ -1137,39 +1137,45 @@ class DatasetCache:
 
     def deletion_permissions(self, actor, dataset, version):
         """Safe permission projection; never expose private proof or paths."""
-        with self._locked():
+        with self._catalog_read(actor, dataset):
             self._actor(actor)
             owners = self._dataset(actor, dataset)["owners"]
             identity = self._record_identity(dataset, version, _read_only=True)
             fence = self._retirement_fence(dataset, version)
+            original_fence = fence
             if fence is not None and fence['state'] != 'RESTORED':
                 if fence['state'] == 'RELEASED':
                     fence = None
                 else:
                     return dict(allowed=False, memberAllowed=False, reason='DELETION_ACTIVE')
             path = self.root / '.provenance' / dataset / (version + '.json')
-            try:
-                with _directory(path.parent) as parent:
-                    fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
-                    try: proof_identity = _stamp(_regular(fd))
-                    finally: os.close(fd)
-            except FileNotFoundError:
-                proof_identity = None
+            def proof_stamp():
+                try:
+                    with _directory(path.parent) as parent:
+                        fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
+                        try:return _stamp(_regular(fd))
+                        finally:os.close(fd)
+                except FileNotFoundError:return None
+            proof_identity = proof_stamp()
             key = (dataset, version, actor.user_id, actor.is_admin, tuple(owners), identity, proof_identity)
             cache = getattr(self, '_deletion_permission_cache', None)
             if cache is None:
                 cache = self._deletion_permission_cache = {}
             if key in cache:
-                return dict(cache[key])
-            proof = self._provenance(dataset, version, _read_only=True)
-            personal = (owners == [actor.user_id] and proof is not None
-                        and proof["owners"] == owners
-                        and proof["origin"] in {"upload", "workspace", "replica"})
-            result = dict(allowed=actor.is_admin or personal, memberAllowed=personal,
-                          reason=None if actor.is_admin or personal else "ADMIN_ONLY")
-            if len(cache) >= 1024:
-                cache.pop(next(iter(cache)))
-            cache[key] = result
+                result = dict(cache[key])
+            else:
+                proof = self._provenance(dataset, version, _read_only=True)
+                personal = (owners == [actor.user_id] and proof is not None
+                            and proof["owners"] == owners
+                            and proof["origin"] in {"upload", "workspace", "replica"})
+                result = dict(allowed=actor.is_admin or personal, memberAllowed=personal,
+                              reason=None if actor.is_admin or personal else "ADMIN_ONLY")
+                if len(cache) >= 1024:
+                    cache.pop(next(iter(cache)))
+                cache[key] = result
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+            if proof_stamp() != proof_identity or self._retirement_fence(dataset, version) != original_fence:
+                raise CacheError('catalog permission metadata changed; retry the operation')
             return dict(result)
 
     def _delete_actor_locked(self, actor, dataset, version):
@@ -1449,6 +1455,85 @@ class DatasetCache:
                 raise CacheError('unsafe derived catalog directory')
         return path
 
+    @contextlib.contextmanager
+    def _catalog_read(self, actor=None, dataset=None):
+        """Display metadata only: never wait behind a payload durability lock.
+
+        Atomic service-owned records and immutable READY identities are checked
+        before/after each read. This scope cannot authorize a mutation or lease;
+        those callers retain their existing global/version locks and validation.
+        """
+        def root():
+            if self.mount is not None and self._current_mount() != self.mount:
+                raise CacheError('data mount identity changed; reopen cache after administrator verification')
+            with _directory(self.root) as fd:
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) != self._root_identity:
+                    raise CacheError('cache directory identity changed; reopen after administrator verification')
+        def owner():
+            self._dataset(actor, dataset)
+            return self._catalog_owner_stamp(dataset)
+        root()
+        ownership = owner() if actor is not None else None
+        yield
+        if actor is not None and owner() != ownership:
+            raise CacheError('catalog authorization metadata changed; retry the operation')
+        root()
+
+    def _catalog_owner_stamp(self, dataset):
+        path = self._paths(dataset)['.registry'] / 'dataset.json'
+        with _directory(path.parent) as parent:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:return _stamp(_regular(fd))
+            finally:os.close(fd)
+
+    def _catalog_record_snapshot(self, actor, dataset, version):
+        """Full display validation without the unrelated global write lock."""
+        with self._catalog_read(actor, dataset):
+            identity = self._record_identity(dataset, version, _read_only=True)
+            record = self._record(actor, dataset, version, _read_only=True)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+        return record, identity
+
+    @contextlib.contextmanager
+    def _catalog_version_locked(self, actor, dataset, version):
+        """Read-only metadata pages retain the real exclusive version lock.
+
+        Full registration validation and live ACL/root/retirement checks remain;
+        only the unrelated payload writer's global lock is not acquired. No
+        mutation, public status or lease may use this display-only scope.
+        """
+        _identifier(dataset); _identifier(version, HASH_RE)
+        record, identity = self._catalog_record_snapshot(actor, dataset, version)
+        with self._lock_file('.locks/' + dataset + '.' + version + '.lock'):
+            with self._catalog_read(actor, dataset):
+                self._check_snapshot(actor, dataset, version, identity)
+                yield record, identity
+                self._check_snapshot(actor, dataset, version, identity)
+
+    def _catalog_status_snapshot(self, actor, dataset, version, snapshot):
+        """Display overlay only; strict status/lease never call this method."""
+        identity, ready_identity, ready, remaining = snapshot
+        paths = self._paths(dataset, version)
+        with self._catalog_read(actor, dataset):
+            binding = self._catalog_binding(dataset, version)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+            self._check_ready_snapshot(paths, ready_identity)
+            state, remaining = ('READY', 0) if ready else ('REGISTERED', remaining)
+            if not ready and self._version_entry_exists(paths['.staging']):
+                state = 'STAGING'
+                remaining = self._transfer(paths['.staging'])['remainingBytes']
+            fence = self._retirement_fence(dataset, version)
+            result = dict(dataset=dataset, version=version, state=state, remainingBytes=remaining)
+            if fence is not None and fence['state'] != 'RESTORED':
+                result.update(state='UNKNOWN', deletionBlocked=True,
+                              error='数据删除已锁定此版本，请查询删除任务。')
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+            self._check_ready_snapshot(paths, ready_identity)
+            if self._catalog_binding(dataset, version) != binding or self._retirement_fence(dataset, version) != fence:
+                raise CacheError('catalog metadata changed; retry the operation')
+            return result
+
     def _catalog_summary(self, binding, value=None):
         """Bounded service-private, disposable display cache; failure is a miss.
 
@@ -1462,12 +1547,17 @@ class DatasetCache:
             path = directory / name
             if value is not None:
                 with _directory(directory) as parent:
+                    # Serialize this disposable cache's writers, not dataset
+                    # writers. A reader can use the previous atomic summary;
+                    # another summary writer is simply a cache-store miss.
+                    try:fcntl.flock(parent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:return None
                     names = os.listdir(parent)
                     if any(not re.fullmatch(r'[a-f0-9]{64}\.json', item) for item in names):
                         return None
                     if name not in names and len(names) >= CATALOG_SUMMARY_ROWS:
                         return None
-                _write_json(path, dict(schema=SCHEMA, binding=binding, summary=value))
+                    _write_json(path, dict(schema=SCHEMA, binding=binding, summary=value))
                 return None
             with _directory(directory) as parent:
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
@@ -1500,7 +1590,7 @@ class DatasetCache:
             return None
 
     def _catalog_version(self, actor, dataset, version):
-        with self._locked():
+        with self._catalog_read(actor, dataset):
             self._dataset(actor, dataset)
             binding = self._catalog_binding(dataset, version)
             summary = self._catalog_summary(binding)
@@ -1510,11 +1600,11 @@ class DatasetCache:
                 if self._catalog_binding(dataset, version) != binding:
                     raise CacheError('catalog metadata changed; retry the operation')
                 return summary, identity, ready_identity, binding
-        record, identity = self._record_snapshot(actor, dataset, version, _read_only=True)
+        record, identity = self._catalog_record_snapshot(actor, dataset, version)
         ready, ready_identity = self._ready_snapshot(self._paths(dataset, version), record['manifest'], version)
         summary = dict(bytes=sum(f['size'] for f in record['manifest']['files']),
                        files=len(record['manifest']['files']), ready=ready, sourceId=record['sourceId'])
-        with self._locked():
+        with self._catalog_read(actor, dataset):
             self._check_snapshot(actor, dataset, version, identity, _read_only=True)
             self._check_ready_snapshot(self._paths(dataset, version), ready_identity)
             if self._catalog_binding(dataset, version) != binding:
@@ -1529,6 +1619,62 @@ class DatasetCache:
                     errorCode='CACHE_METADATA_INCOMPLETE',
                     error='数据缓存元数据不完整；请管理员核验。')
 
+    def _catalog_incomplete_binding(self, dataset, version):
+        """Exact missing-parent display boundary, never a READY/absence proof."""
+        def stamp(info):
+            return [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                    info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        paths = self._paths(dataset, version)
+        filename = paths['.registry'].parent / (version + '.json')
+        with _directory(filename.parent) as parent:
+            folder = stamp(os.fstat(parent))
+            fd = os.open(filename.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:record = stamp(_regular(fd))
+            finally:os.close(fd)
+        parents, missing = [], False
+        for path in (paths['ready'].parent, paths['.staging'].parent):
+            components, boundary = path.relative_to(self.root).parts, []
+            with _directory(self.root) as root:
+                fd = os.dup(root)
+                try:
+                    for component in components:
+                        try:
+                            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                        except FileNotFoundError:
+                            boundary.append(dict(component=component, parent=stamp(os.fstat(fd)), missing=True))
+                            missing = True
+                            break
+                        os.close(fd); fd = child
+                        boundary.append(dict(component=component, identity=stamp(os.fstat(fd))))
+                finally:os.close(fd)
+            parents.append(boundary)
+        if not missing:
+            raise CacheError('incomplete catalog parents changed; retry the operation')
+        return dict(root=list(self._root_identity), dataset=dataset, version=version,
+                    folder=folder, record=record, ready=None, metadataIncomplete=True,
+                    parents=parents, fence=self._retirement_fence(dataset, version))
+
+    def _catalog_incomplete_version(self, actor, dataset, version):
+        # The existing bounded private summary is reusable only for counts.
+        # No sourceId, canPrepare, worker identity or READY evidence is cached.
+        try:self._catalog_directory()
+        except (OSError, CacheError):pass  # Disposable cache failure remains a miss.
+        with self._catalog_read(actor, dataset):
+            binding = self._catalog_incomplete_binding(dataset, version)
+            summary = self._catalog_summary(binding)
+            cached = summary is not None
+            if summary is None:
+                record, identity = self._catalog_record_snapshot(actor, dataset, version)
+                summary = dict(bytes=sum(f['size'] for f in record['manifest']['files']),
+                               files=len(record['manifest']['files']), ready=False, sourceId=None)
+            else:
+                identity = self._record_identity(dataset, version, _read_only=True)
+            self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+            if self._catalog_incomplete_binding(dataset, version) != binding:
+                raise CacheError('incomplete catalog metadata changed; retry the operation')
+            if not cached:self._catalog_summary(binding, summary)
+        return summary, identity, binding
+
     def _list_datasets_snapshot(self, actor):
         """Private per-request identities for a detached-worker status overlay.
 
@@ -1538,17 +1684,21 @@ class DatasetCache:
         """
         self._actor(actor)
         snapshots = []
-        with self._locked():
+        folders, access, ownership, fences = {}, {}, {}, {}
+        with self._catalog_read():
             with _directory(self.root / ".registry") as fd:
+                registry = _stamp(os.fstat(fd))
                 datasets = sorted(os.listdir(fd))
         for dataset in datasets:
-            with self._locked():
+            with self._catalog_read():
                 try:
-                    self._dataset(actor, dataset)
+                    access[dataset] = tuple(self._dataset(actor, dataset)['owners'])
                 except PermissionError:
                     continue
+                ownership[dataset] = self._catalog_owner_stamp(dataset)
                 folder = self._paths(dataset)[".registry"]
                 with _directory(folder) as fd:
+                    folders[dataset] = _stamp(os.fstat(fd))
                     names = sorted(os.listdir(fd))
             versions = []
             for name in names:
@@ -1563,11 +1713,10 @@ class DatasetCache:
                     # Only this typed parent absence becomes a display row.
                     # Validate the exact registration and live ACL again; do
                     # not catch corrupt metadata, I/O errors or unsafe links.
-                    record, identity = self._record_snapshot(actor, dataset, version, _read_only=True)
+                    summary, identity, binding = self._catalog_incomplete_version(actor, dataset, version)
                     row = self._catalog_incomplete(dict(version=version,
-                        bytes=sum(f['size'] for f in record['manifest']['files']),
-                        files=len(record['manifest']['files'])))
-                    versions.append((row, identity, None, None))
+                        bytes=summary['bytes'], files=summary['files']))
+                    versions.append((row, identity, None, binding))
                     continue
                 # Summation and parsing scale with the manifest; they must not
                 # delay unrelated publication/lease admission under global lock.
@@ -1577,7 +1726,7 @@ class DatasetCache:
                 versions.append((row, identity, ready_identity, binding))
             snapshots.append((dataset, versions))
         result, current = [], {}
-        with self._locked():
+        with self._catalog_read():
             for dataset, versions in snapshots:
                 # Recheck every ACL before any catalog leaves the service. ACL
                 # revocation or metadata replacement during parsing is rejected.
@@ -1587,9 +1736,11 @@ class DatasetCache:
                     version = row['version']
                     self._check_snapshot(actor, dataset, version, identity, _read_only=True)
                     paths = self._paths(dataset, version)
-                    if binding is None:
+                    if binding is None or binding.get('metadataIncomplete') is True:
                         # UNKNOWN rows intentionally have no trusted snapshot
                         # for worker/admission overlays. No parents are made.
+                        if binding is not None and self._catalog_incomplete_binding(dataset, version) != binding:
+                            raise CacheError('incomplete catalog metadata changed; retry the operation')
                         rows.append(row)
                         continue
                     try:
@@ -1605,6 +1756,7 @@ class DatasetCache:
                     if staging:
                         row['state'] = "STAGING"
                     fence = self._retirement_fence(dataset, version)
+                    fences[(dataset, version)] = fence
                     if fence is not None and fence['state'] != 'RESTORED':
                         row.update(state='UNKNOWN', canPrepare=False, deletionBlocked=True,
                                    error='数据删除已锁定此版本，请查询删除任务。')
@@ -1614,6 +1766,38 @@ class DatasetCache:
                 # list that could be mistaken for the complete authorization.
                 result.append(dict(dataset=dataset, versions=rows,
                                    ownerIds=owners if len(owners) <= 64 else None))
+            # An unlocked directory enumeration is never an absence proof if
+            # registrations/ACLs changed during the read. Recheck all returned
+            # dataset folders and the top-level inventory.
+            for dataset, expected in folders.items():
+                with _directory(self._paths(dataset)['.registry']) as fd:
+                    if _stamp(os.fstat(fd)) != expected:
+                        raise CacheError('catalog registration inventory changed; retry the operation')
+            for dataset, versions in snapshots:
+                if tuple(self._dataset(actor, dataset)['owners']) != access[dataset]:
+                    raise CacheError('catalog authorization metadata changed; retry the operation')
+                if self._catalog_owner_stamp(dataset) != ownership[dataset]:
+                    raise CacheError('catalog authorization metadata changed; retry the operation')
+                for row, identity, ready_identity, binding in versions:
+                    version = row['version']
+                    self._check_snapshot(actor, dataset, version, identity, _read_only=True)
+                    if binding is not None and binding.get('metadataIncomplete') is True:
+                        if self._catalog_incomplete_binding(dataset, version) != binding:
+                            raise CacheError('incomplete catalog metadata changed; retry the operation')
+                        continue
+                    if binding is not None and (dataset, version) in fences:
+                        try:
+                            self._check_ready_snapshot(self._paths(dataset, version), ready_identity)
+                            if self._catalog_binding(dataset, version) != binding:
+                                raise CacheError('catalog metadata changed; retry the operation')
+                        except CacheMetadataIncomplete:
+                            row.update(self._catalog_incomplete(row))
+                            current.pop((dataset, version), None)
+                        if self._retirement_fence(dataset, version) != fences[(dataset, version)]:
+                            raise CacheError('catalog deletion metadata changed; retry the operation')
+            with _directory(self.root / '.registry') as fd:
+                if _stamp(os.fstat(fd)) != registry:
+                    raise CacheError('catalog registration inventory changed; retry the operation')
         return {"datasets": result}, current
 
     def status(self, actor, dataset, version):

@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import time
 import unittest
+import uuid
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('files_dataset_fixture', Path(__file__).with_name('node-datasets.test.py'))
@@ -150,6 +151,76 @@ class DatasetFiles(unittest.TestCase):
                     self.cache.set_owners(self.fixture.admin, 'example', ['demo-user-2'])
                 yield fd
         with patch.object(self.module, '_directory', revoked), self.assertRaises((ValueError, PermissionError)):
+            self.call()
+
+    def test_unrelated_real_global_writer_does_not_block_fixed_ready_page(self):
+        self.fixture.ready()
+        before = sorted(str(path) for path in (self.cache.root/'.leases').rglob('*'))
+        with self.cache._locked(), patch.object(self.module.DatasetCache, '_locked',
+                side_effect=AssertionError('directory metadata must not enter the payload writer lock')):
+            value = self.call()
+        self.assertTrue(value['available'])
+        self.assertEqual(value['entries'][0]['name'], 'train.txt')
+        self.assertEqual(sorted(str(path) for path in (self.cache.root/'.leases').rglob('*')), before)
+
+    def test_actual_same_version_writer_lock_still_rejects_directory_page(self):
+        self.fixture.ready(); self.cache.lock_timeout = .01
+        name = '.locks/example.'+self.version+'.lock'
+        with patch.object(self.node, 'dataset_source_cache', return_value=(self.module, self.cache)):
+            with self.cache._lock_file(name), self.assertRaises(self.module.CacheBusy) as error:
+                self.call()
+        self.assertEqual(error.exception.lock_wait['scope'], 'VERSION')
+
+    def retirement_fence(self):
+        folder = self.cache.root/'.retirements'/'example'; self.module._mkdir(folder)
+        self.module._write_json(folder/(self.version+'.json'), dict(schema=1,
+            protocol='dataset-version-fence-v1', rootIdentity=list(self.cache._root_identity),
+            dataset='example', version=self.version, operationId=str(uuid.uuid4()),
+            actor=self.fixture.user.user_id, admin=False, snapshotSha256='a'*64,
+            generation='b'*64, state='FENCED', createdAt=0, restoredRegistration=None))
+
+    def test_fenced_ready_version_is_not_a_directory_read_capability(self):
+        self.fixture.ready(); self.retirement_fence()
+        with self.assertRaises(self.module.CacheError): self.call()
+
+    def test_registration_ready_or_fence_change_while_page_is_open_discards_result(self):
+        self.fixture.ready(); paths = self.cache._paths('example', self.version)
+        data = paths['ready']/'data'; original = self.module._directory
+        changed = False
+        @contextmanager
+        def replaced(path):
+            nonlocal changed
+            with original(path) as fd:
+                if Path(path) == data and not changed:
+                    changed = True
+                    registration = paths['.registry'].parent/(self.version+'.json')
+                    self.module._write_json(registration, self.module._read_json(registration))
+                yield fd
+        with patch.object(self.module, '_directory', replaced), self.assertRaises(self.module.CacheError):
+            self.call()
+        changed = False
+        @contextmanager
+        def ready_replaced(path):
+            nonlocal changed
+            with original(path) as fd:
+                if Path(path) == data and not changed:
+                    changed = True
+                    os.chmod(paths['ready'], 0o700)
+                    ready = paths['ready']/'READY.json'
+                    self.module._write_json(ready, self.module._read_json(ready))
+                    os.chmod(ready, 0o444); os.chmod(paths['ready'], 0o555)
+                yield fd
+        with patch.object(self.module, '_directory', ready_replaced), self.assertRaises(self.module.CacheError):
+            self.call()
+        changed = False
+        @contextmanager
+        def fenced(path):
+            nonlocal changed
+            with original(path) as fd:
+                if Path(path) == data and not changed:
+                    changed = True; self.retirement_fence()
+                yield fd
+        with patch.object(self.module, '_directory', fenced), self.assertRaises(self.module.CacheError):
             self.call()
 
     def test_separate_forced_path_has_only_fixed_metadata_reads_and_no_terminal_or_upload_fallback(self):
