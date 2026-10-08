@@ -324,3 +324,22 @@ test('project outputs require same authenticated owner, machine, project and job
   await assert.rejects(f.call('files.put',{project:'my-project',truncate:true}));
  }finally{await f.close();}
 });
+
+
+test('project status/list preserve original terminal discovery only for the authenticated owner without terminal actions',async()=>{
+ const f=await fixture();try{
+  const sessions={protocol:1,state:'CONFIRMED',complete:true,sessions:[{id:'11111111-1111-4111-8111-111111111111',state:'UNCONFIRMED',requiresStatus:true,attachmentState:'DETACHED',writerLeaseExpired:true,legacy:false}]};
+  f.service.bridge=async(machine,operation,args)=>{
+   f.calls.push({machine,operation,args});assert.ok(['projects.status','projects.list'].includes(operation));assert.equal(args.userId,f.member.id);
+   const project={project:'vision',state:'DRAFT',releases:[],latestReadyRelease:null,developmentTerminals:sessions};
+   return operation==='projects.list'?{projects:[project]}:project;
+  };
+  const status=(await f.call('projects.status',{project:'vision'})).result;
+  const list=(await f.call('projects.list')).result;
+  assert.deepEqual(status.developmentTerminals,sessions);assert.deepEqual(list.projects[0].developmentTerminals,sessions);
+  assert.deepEqual(f.calls.map(row=>row.operation),['projects.status','projects.list']);
+  assert.deepEqual(f.calls[0].args,{userId:f.member.id,project:'vision'});assert.deepEqual(f.calls[1].args,{userId:f.member.id});
+  for(const extra of [{userId:'builtin-admin'},{hostAdmin:true},{machine:'gpu-2'},{project:'../other'}])await assert.rejects(f.call('projects.status',{project:'vision',...extra}));
+  assert.equal(f.calls.length,2);assert.equal(f.service.store.jobs.length,0);
+ }finally{await f.close();}
+});

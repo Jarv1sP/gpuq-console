@@ -68,3 +68,9 @@ TERMINAL_STREAM_HOSTS = ('gpu-1', 'gpu-2')
 重新生成或替换整份执行桥时，必须备份并保留已验收的开关列表，核对各 ID 属于当前部署清单且节点支持匹配的 `terminal-exchange-stream-v1` 入口，再审查生成文件差异。不要直接用模板的空列表覆盖生产配置，也不要对未升级或未验收的节点开启。空列表仍可使用原 RPC 传输，但不会保留已部署的交互加速；单纯重启服务不会把模板配置自动合并到已有文件。
 
 升级后，用自己的新旧会话分别检查输入、回显、断开和结束；已有 PTY 无须重建。通道轮换不重发已发送的输入，连接或输入结果不确定时不自动重试命令。
+
+## 查找本人项目的原终端编号
+
+`gpuctl --json project status PROJECT_ID --machine MACHINE_ID` 返回 `developmentTerminals`，`project list` 的每个项目也保留该字段。它只读取本人该项目的原会话指针，不附着、输入、续租、结束或创建终端。`sessions[].id` 是原 UUID；`complete:false` 表示发现不完整，不能当作没有终端。
+
+附着记录里的 `OPEN / DETACHED / CLOSED` 不证明进程是否结束；每个发现结果都标为 `UNCONFIRMED`、`requiresStatus:true`，须再用同一 UUID 和范围查询 `terminal status`。未知、损坏或读取中变化的记录不会证明可以发布，原发布保护保留。需要节点运行时与现有认证元数据处理器配套，不向受限执行桥增加操作别名。
