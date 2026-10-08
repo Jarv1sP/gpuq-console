@@ -38,7 +38,7 @@ try{
     assert.equal(await page.evaluate(()=>location.hash),'#datasets/transfers');
     assert.equal(await page.locator('#room-nav [aria-current=page]').getAttribute('data-nav'),'datasets');
     assert.equal(await page.locator('body').getAttribute('data-room'),'datasets');
-    assert.equal(await page.locator('#page-title').textContent(),'数据集');
+    assert.equal(await page.locator('#page-title').textContent(),'存储');
     assert.equal(await page.locator('#page-transfers .data-room-tabs [aria-current=page]').textContent(),'传输与导入');
     assert.equal(await page.locator('#page-datasets').isVisible(),false);
   };
@@ -55,6 +55,10 @@ try{
   await memberPage.locator('#page-datasets').waitFor({state:'visible'});
   assert.equal(await memberPage.locator('.room-transition-layer').count(),0,'dataset tabs do not animate a second room');
   assert.equal(await memberPage.locator('.desktop-route-slide').count(),0);
+  assert.equal(await memberPage.locator('[data-nav=datasets]').textContent(),'存储');
+  await memberPage.evaluate(()=>location.hash='#storage');await memberPage.waitForFunction(()=>location.hash==='#datasets');
+  assert.equal(await memberPage.locator('#page-title').textContent().then(text=>text.startsWith('存储')),true);
+  assert.equal(await memberPage.locator('[data-storage-view=warehouse]').getAttribute('aria-selected'),'true');
   const records=memberPage.locator('#warehouse-page-actions a[href="#datasets/transfers"]');assert.equal(await records.textContent(),'传输记录');assert.equal(await memberPage.locator('#page-datasets .data-room-tabs').count(),0,'one warehouse has no duplicate dataset tabs');await records.click();await assertTransfer(memberPage);
   // Existing control-strip/notification callers keep their `transfers` target.
   await memberPage.locator('[data-nav=work]').click();

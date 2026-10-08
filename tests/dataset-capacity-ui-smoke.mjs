@@ -53,7 +53,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,1024,390,320])
  assert.equal(await page.locator('[data-v3-select=legacy-data]').count(),1,'An empty incomplete overview cannot erase a confirmed existing catalog');
  assert.equal(await page.locator('.v3-partial').textContent(),'部分');
  await page.evaluate(async()=>{reply=snapshot;await view.loadOverview();});
- assert.equal(await page.locator('[data-v3-select]').count(),role==='admin'?2:1);assert.equal(await page.locator('#page-title .v3-count').textContent(),(role==='admin'?2:1)+' 个');
+ assert.equal(await page.locator('[data-v3-select]').count(),role==='admin'?2:1);assert.equal(await page.locator('#page-title .v3-count').count(),0,'storage heading has no dataset count');
  const cardRules={roots:['.v4-warehouses','.v4-training']};
  assert((await inspectGeometry(page,cardRules)).pass,'large clickable cards pass the shared default geometry rules');
  if(width===1440){

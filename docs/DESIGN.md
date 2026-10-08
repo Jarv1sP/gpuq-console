@@ -1,5 +1,9 @@
 # STARGATE 界面设计与代码参考
 
+后台「数据与存储」的「按成员」复用全节点只读登记，独立模块 [admin-storage-members.js](../dist/admin-storage-members.js) 汇总可信所属的固定版本与READY缓存副本，并保留「所属未知」。仓库只信明确warehouseReady或已有完整归档证明，版本去重；缓存按机器、登记名、完整版本去重。缺失/矛盾大小和不完整读取保持「—」。容器暂为「—」，不猜storage.usage.users字段或分摊共享OCI层；薄适配器只接受明确的数字bytes。点行展开各机统计，长服务器ID使用server-id；手机每行展示三个带标签的数量与比例条。统计只读，服务器运维、固定保留、删除任务、归档纳管和云盘连接保持。
+
+成员比例条只绘制有真实正数字节数的部分。未知或0不生成色段、最小宽度或分隔标记，数值仍如实显示「—」或0。
+
 任务观察、完成、诊断租约、调度采样和轨迹/全屏共用 [time-format.js](../dist/time-format.js)：缺失、非正数、NaN、越界及无法解析的时间显示「—」，不补当前时间；有效秒数与ISO时间保留浏览器时区和原显示精度。此函数只控制文字显示，不参与任务状态、完成证明或持续时间计算。
 
 旧 Portal 对 `datasets.training.capabilities` 明确返回「未知操作」的 HTTP 400/404 时，当前登录会话只探测一次，切换机器、版本或重开抽屉不再请求，读取切换继续隐藏；刷新或切换账号才重新探测。记录仅在客户端内存，普通参数、权限或服务错误不记为接口不可用；并发版本查询串行探测，旧账号的晚回包不影响新账号。
@@ -11,6 +15,8 @@
 仓库内容预览由 [dataset-files-preview.js](../dist/dataset-files-preview.js) 的 `mountFilesPreview(host,{store,dataset,version,signal})` 独立挂载，样式为 [dataset-files-preview.css](../dist/dataset-files-preview.css)。只读取 `datasets.files.list` 的完整固定版本：首层自动展开，子目录按需读取，每个目录独立保存后端分页游标。仅显示图标、名字与文件大小；目录不显示大小，空或未知权限不冒充有内容。旧节点、403、404与未知操作隐藏整个组件，网络或不完整响应显示「无法读取 / 重试」。卸载、AbortSignal、账号变化及同一宿主重新挂载取消旧请求并清除目录；元数据浏览不提供下载或写操作。文件名用纯文本与完整提示，嵌套缩进封顶，目录和分页按钮至少44px，不新增解释文字。此预接组件须由仓库详情调用，不表示开发候选后端已部署。
 
 缓存操作预接由 [dataset-cache-operation.js](../dist/dataset-cache-operation.js) 独立挂载，样式为 [dataset-cache-operation.css](../dist/dataset-cache-operation.css)。仓库详情按需读取真实缓存能力：只有 protocol=1 且 prepare/release 对应字段严格为 true 才挂载新入口；protocol=0、拒绝或缺字段不提供新动作，不以旧接口绕过。每台机器仅在 prepare 明确允许时使用新准备接口，否则保留旧缓存按钮及 datasets.prepare 的原鉴权、FAILED样式和禁用条件；overview 在线不证明节点已支持新准备协议。转移和释放只走新协议。key 与原操作编号按账号保存，丢回执只查询原编号；没有编号时等待用户补入原编号，不猜编号或重发。状态、阶段、配对字节和取消权限来自匹配服务器、版本、key 与动作的回执。转移先准备目标副本，确认 READY 且位置已观测后重新检查源端释放能力，另行确认释放；不自动释放、不使用旧 unregister/evict 绕过保护。请求只携带逻辑数据集ID、完整版本、真实目标与原key；BLOCKED是原操作终态，新操作必须另点并重新核对能力。准备worker共享，不显示取消；只有 protocol=1、releaseCancel===true 且本次匹配回执 canCancel===true 的独立释放提供取消。状态枚举遵循定稿；无真实计数只显示阶段。RELEASED显示「释放已确认」，BLOCKED显示后端错误原文；receiptOnly===true 或 locationState==='NOT_OBSERVED' 仅说明原操作回执，触发刷新目录/overview，不据此推断当前缓存位置或开放来源释放。控件采用 48px、高度自然撑开、服务器名提供完整提示；测试页显式标为模拟，预接不表示生产接口已开放。
+
+成员主导航与标题使用「存储」，保留 #datasets 和 #transfers，新增 #storage 别名。v4 容量卡片下的「仓库数据集 / 我的空间」保持同一房间，不触发跨房间动画。个人视图由 [member-storage-model.js](../dist/member-storage-model.js) 聚合本人 OCI 项目与本人拥有或获授权的 READY 缓存；[member-storage-ui.js](../dist/member-storage-ui.js) 只在进入该页签时逐台读取本人 projects.list。项目占用在 storage.usage.mine 契约定稿前显示「—」，适配函数只接受有效的数字 bytes；任一条目或统计未确认时不显示合计和比例条。释放须重新核对严格协议能力，并复用现有缓存操作确认、原 key 与回执恢复。容器「打开」只选择工作台的原项目，不创建或启动任务。行末始终保留操作位置；蓝色代表容器、白色代表缓存，数字右对齐，长机器名省略并保留完整提示。
 
 本页记录现有实现，供小维护、设计调整与编码代理使用。代码提取基线为 `34d07a1`，并同步仓库列表、直传、数据集提示、折叠控件与间距的维护；已包含导航合并、数据库与缓存、管理员删除与最后副本保护、持久保留确认与数量右对齐。历史 `starbase` 文件名和常量保留，品牌仍为 STARGATE。图形、许可与免责声明见 [BRAND.md](BRAND.md)，接口语义以 [BACKEND_API_HANDOFF.md](BACKEND_API_HANDOFF.md) 为准。
 

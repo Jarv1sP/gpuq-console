@@ -205,7 +205,8 @@ try {
   assert.deepEqual(await member.locator('[name=dataset-machine] option').evaluateAll(options=>options.map(option=>option.value)),['gpu-1','gpu-2']);
   assert.equal(await member.locator('[data-v3-select]').count(),2);
   assert.equal(await row(member,'admin-private').count(),0,'A private foreign dataset is omitted from the main list');
-  assert.equal(await member.locator('#page-title .v3-count').textContent(),'2 个','The heading counts only the visible datasets');
+  assert.equal(await member.locator('[data-v3-select]').count(),2,'Only visible datasets contribute to the warehouse list');
+  assert.equal(await member.locator('#page-title .v3-count').count(),0,'The storage heading has no dataset count');
   assert.ok(calls.some(call=>call.operation==='datasets.list'&&call.args.userId==='builtin-admin'&&call.args.hostAdmin===true));
   assert.equal(await member.locator('.v3-server-chip:not(.v3-all)').count(),MACHINES.length,'Metadata includes every inventory node while the execution selector stays quota-bound');
   const beforeTamper=calls.length;

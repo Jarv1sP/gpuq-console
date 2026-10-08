@@ -22,12 +22,12 @@ try{
     page.on('pageerror',error=>errors.push(error.message));
     await context.route('**/*',async route=>{
       const url=new URL(route.request().url());assert.equal(url.origin,origin,'no external request');
-      if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/fonts.css"><link rel="stylesheet" href="/starbase.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/dataset-flow.css"><link rel="stylesheet" href="/copy-help.css"><body class="sb" data-room="admin"><main id="main-content"><h1>数据与存储</h1><section id="storage-fixture"></section></main></html>`});
+      if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/fonts.css"><link rel="stylesheet" href="/starbase.css"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/dataset-flow.css"><link rel="stylesheet" href="/copy-help.css"><body class="sb" data-room="admin" style="min-height:100vh;background:var(--bg)"><main id="main-content"><h1>数据与存储</h1><section id="storage-fixture"></section></main></html>`});
       if(url.pathname==='/api/fixture'){
         const {operation,args={}}=route.request().postDataJSON();calls.push({operation,args});
         assert.equal(role,'admin','member sends zero privileged API requests');
         const reply=value=>route.fulfill({contentType:'application/json',body:JSON.stringify(value)});
-        if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：陈宇轩',versions:[{version,state:'READY',bytes:7*1024**3,files:120}]},{dataset:'shared-data',ownerLabel:'共享授权用户：陈宇轩、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
+        if(operation==='datasets.list')return reply({datasets:[{dataset:'samples',ownerLabel:'所属用户：陈宇轩',versions:[{version,state:'READY',bytes:7*1024**3,files:120,warehouseReady:args.machine===machines.at(-1).id}]},{dataset:'shared-data',ownerLabel:'共享授权用户：陈宇轩、bob',versions:[{version,state:'READY',bytes:2*1024**3,files:50,warehouseReady:false}]},{dataset:'empty-work',ownerLabel:'所属用户：bob',versions:[]}]});
         if(operation==='datasets.overview'){assert.deepEqual(args,{});return reply({protocol:0});}
         if(operation==='datasets.catalog')return reply({machine:args.machine,datasetDelete:0,partial:false,machines:machines.map(row=>({machine:row.id,state:'ok'})),datasets:[{dataset:'samples',versions:[{version,locations:[{machine:machines[0].id,dataset:'samples',storage:{dataset:'samples',version,phase:'ARCHIVED',originalRetained:true,archiveMachine:machines.at(-1).id}}]}]}]});
         if(operation==='datasets.storage.status'){
@@ -63,7 +63,28 @@ try{
     assert.equal(await page.locator('[data-admin-full-delete]').count(),0,'capability zero has no delete entry');
     assert.deepEqual(await page.locator('[name=dataset-machine] option').evaluateAll(nodes=>nodes.map(node=>node.value)),machines.map(row=>row.id));
     assert.equal(await page.locator('.storage-server-card').last().locator('.storage-warehouse-badge').textContent(),'仓库');
-    assert.equal(await page.locator('.storage-user-table [role=row]').count(),3);assert.match(await page.locator('[data-storage-users]').textContent(),/陈宇轩.*2.*36.00 GiB.*bob.*1.*8.00 GiB/);assert.equal(await page.locator('[data-storage-delete-capability]').textContent(),'节点未启用彻底删除');
+    assert.equal(await page.locator('.storage-user-table [role=row]').count(),3);assert.equal(await page.locator('[data-storage-delete-capability]').textContent(),'节点未启用彻底删除');
+    const memberReads=calls.length;await page.locator('[data-storage-view=members]').click();
+    assert.equal(await page.locator('.admin-storage-controls>h3').textContent(),'成员存储');assert.equal(await page.locator('[data-storage-view=members]').getAttribute('aria-selected'),'true');
+    assert.equal(await page.locator('.storage-operations').isHidden(),true);assert.equal(await page.locator('[data-storage-member-row]').count(),2);
+    const chen=page.locator('[data-storage-member-row="陈宇轩"]'),bob=page.locator('[data-storage-member-row="bob"]');
+    assert.equal(await chen.locator('[data-member-size=cache]').textContent(),'36.00 GiB');assert.equal(await chen.locator('[data-member-size=cache]').getAttribute('title'),'2 个数据集');
+    assert.equal(await bob.locator('[data-member-size=cache]').textContent(),'8.00 GiB');assert.equal(await bob.locator('[data-member-size=cache]').getAttribute('title'),'1 个数据集');
+    assert.equal(await chen.locator('[data-member-size=warehouse]').textContent(),'7.00 GiB');assert.equal(await bob.locator('[data-member-size=warehouse]').textContent(),'0 B');
+    assert.deepEqual(await page.locator('[data-member-size=container]').allTextContents(),['—','—']);
+    assert.equal(await page.locator('.storage-member-bar>.project,.storage-member-bar>.unknown').count(),0,'unknown container has zero segment width and no separator');
+    assert.deepEqual(await bob.locator('.storage-member-bar>i').evaluateAll(nodes=>nodes.map(node=>node.className)),['cache'],'zero warehouse and unknown container leave only the actual cache segment');
+    await chen.locator('button').click();assert.equal(await chen.locator('button').getAttribute('aria-expanded'),'true');
+    assert.match(await page.locator('.storage-member-detail').textContent(),/容器 — · 缓存 9.00 GiB/);assert.match(await page.locator('.storage-member-detail').textContent(),/仓库1 个数据集 · 7.00 GiB/);
+    assert.deepEqual(await page.locator('.storage-member-detail .server-id').evaluateAll(nodes=>nodes.map(node=>node.title)),machines.map(row=>row.id).sort());
+    assert.equal(calls.length,memberReads,'member tab and row expansion only read the current trusted directory');
+    const memberReport=await inspectGeometry(page,geometry);assert(memberReport.pass,JSON.stringify(memberReport.failures));records.push({role,width,memberReport});
+    assert.equal(await chen.locator('[data-member-size=cache]').isVisible(),true,'phone keeps actual cache size');assert.equal(await chen.locator('[data-member-size=container]').isVisible(),true,'phone keeps the unknown container value');
+    assert(await chen.locator('button').evaluate(node=>node.getBoundingClientRect().height>=44));
+    assert.equal(await chen.locator('button').evaluate(node=>getComputedStyle(node).borderTopWidth),'0px','rows keep a single clean table boundary');
+    await page.screenshot({path:join(out,'members-expanded-'+width+'.png'),fullPage:true});
+    await chen.locator('button').click();assert.equal(await page.locator('.storage-member-detail').count(),0);await page.locator('[data-storage-view=servers]').click();assert.equal(await page.locator('.storage-operations').isVisible(),true);
+    await page.locator('[data-storage-view=servers]').focus();await page.keyboard.press('ArrowRight');assert.equal(await page.locator('[data-storage-view=members]').getAttribute('aria-selected'),'true');await page.keyboard.press('Home');assert.equal(await page.locator('[data-storage-view=servers]').getAttribute('aria-selected'),'true');assert.equal(calls.length,memberReads,'keyboard tab switches remain read-only');
     const help=await page.locator('[data-copy-help]').evaluateAll(nodes=>nodes.map(node=>({border:getComputedStyle(node).borderTopWidth,radius:getComputedStyle(node).borderRadius})));assert(help.every(row=>row.border==='0px'&&row.radius==='50%'),'all help buttons retain the shared borderless circle');
     const report=await inspectGeometry(page,geometry);assert(report.pass,JSON.stringify(report.failures));records.push({role,width,report});
     await page.screenshot({path:join(out,'directory-'+width+'.png'),fullPage:true});
