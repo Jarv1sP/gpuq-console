@@ -274,6 +274,7 @@ export function installDatasetIngress(service,input){
       if(!policy.enabled)fail('机械仓库新上传准入尚未启用。',503);
       const spec=specification(args);
       if(!validSpecification(spec))fail('上传准入清单无效。',400);
+      if(archiveUploadCapability(service.datasetArchiveCapability)&&!spec.archive)throw Object.assign(Error('仓库只接受单个压缩包。'),{status:409,code:'ARCHIVE_FORMAT_UNSUPPORTED'});
       const identity={owner,uploadId:randomUUID(),requestedMachine:args.machine,admissionKey:key};
       const selected=policy.warehouses?await selectWarehouse(principal,identity,spec):policy;
       if(spec.archive){

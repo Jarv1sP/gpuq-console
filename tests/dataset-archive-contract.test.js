@@ -72,3 +72,12 @@ test('CLI archive snapshot bounds reads, rejects links and detects changes befor
  await symlink(file,join(root,'link.tar'));await assert.rejects(scanLocalArchive(join(root,'link.tar'),cap),/普通压缩包/);
  await writeFile(file,'changed');await assert.rejects(scan.verify(),/已改变/);await assert.rejects(scanLocalArchive(file,null),/尚未开通/);
 });
+
+test('declared archive mode refuses a new directory admission but keeps an older intent resumable',async t=>{
+ const f=fixture(t),key=randomUUID(),{archive,...directory}=spec;
+ const original=await f.call('admission.create',{key,...directory});
+ await f.call('routes');
+ await assert.rejects(f.call('admission.create',{key:randomUUID(),...directory}),error=>error.code==='ARCHIVE_FORMAT_UNSUPPORTED');
+ const resumed=await f.call('admission.create',{key,...directory});assert.equal(resumed.uploadId,original.uploadId);
+ assert.equal(f.db.prepare('SELECT count(*) AS n FROM dataset_upload_placements').get().n,1);
+});
