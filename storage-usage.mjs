@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {MACHINES} from './dist/model.js';
 
 export const STORAGE_USAGE_TTL_MS=300000;
-export const STORAGE_USAGE_TIMEOUT_MS=5000;
+export const STORAGE_USAGE_TIMEOUT_MS=4000;
 const observations=new WeakMap();
 const MAX_GROUPS=4096,OWNER=/^(?:[a-f0-9]{64}|[a-f0-9]{32})$/,PROJECT=/^[a-z0-9][a-z0-9_-]{0,47}$/;
 const fail=(message,status)=>{throw Object.assign(Error(message),{status});};

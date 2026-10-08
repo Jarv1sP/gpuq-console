@@ -14,6 +14,8 @@
 
 响应为 `{result,principal}`，不附完整仪表盘 `state`，走已有的独立数据读取通道，不进入调度／账号写队列。最多 4 个并发数据读取请求；超过返回 429。不自动轮询，页面打开或用户刷新时查询即可。
 
+目录与容量并行读取，每台容量读取最多等待 4 秒，目录读取共享同一个 4 秒窗口。超时或报错的机器返回 `state:"UNKNOWN",reason:"timeout"`，顶层 `partial:true`，其余机器照常返回。成功容量快照在门户缓存 60 秒，命中时保留原 `collectedAt` 和节点 `checkedAt`；顶层 `checkedAt` 只是本次门户查询时间。缓存过期后读取失败，不返回旧字节。
+
 本接口不授予文件下载、终端、复制或删除权限。`filePreviewAvailable` 仅在本账号有已确认 READY 固定源、且该源节点新鲜容量事实支持 `datasetFileList:1` 时为 true；目录入口仍须逐数据集调用[固定版本目录预览](DATASET_FILES.md)并重新鉴权。旧／未知节点为 false，不拿目录元数据可见性替代文件读取权。`fileContentPreviewAvailable:false` 明确本次尚无正文预览 API。既有上传、准备、租约、复制、释放和删除保留原围栏。
 
 ## 响应字段
@@ -44,7 +46,7 @@
 
 每个 `caches[]` 为 `{machine,state,volume,readyContentBytes,readyVersionCount,budgetBytes,reserveBytes,usageComplete,projectBytes,projectUsageComplete,projectCollectedAt}`：
 
-- `state` 为 `READY/UNKNOWN/UNAVAILABLE`，表示容量读取状态，不代表 GPU 或作业状态。
+- `state` 为 `READY/UNKNOWN`，表示容量读取状态，不代表 GPU 或作业状态。超时或报错附 `reason:"timeout"`，未知数值仍为 null。
 - `readyContentBytes` 是该机器已 READY 的登记副本的**逻辑文件大小**；不是整个固态的用量，也不是分配块数、在途预留量或硬盘实占。缺少大小或目录不可读时为 `null`。
 - `budgetBytes` 是既有数据缓存预算；未配置或不能确认时为 `null`。不是个人容量上限，不是整块固态容量。
 - `reserveBytes` 是该卷既有安全预留；不要与仓库容量相加，也不要作为个人限额。
