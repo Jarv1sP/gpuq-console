@@ -67,15 +67,15 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  assert((await page.evaluate(()=>calls)).every(row=>row.operation==='datasets.cache.capabilities'));
  const editRefresh=await page.evaluate(async()=>{
   const edit=document.querySelector('[data-v3-label]'),size=node=>({connected:node.isConnected,width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height});
-  edit.focus();const before=size(edit),insertions=[];
-  const observer=new MutationObserver(()=>{const current=document.querySelector('[data-v3-label]');insertions.push({...size(current),same:current===edit});});observer.observe(document.querySelector('#warehouse-inspector'),{childList:true,subtree:true});
-  const refreshes=[];for(let n=0;n<3;n++){snapshot.datasets[0].versions[0].fileCount++;view.storageOverview(snapshot);refreshes.push({...size(edit),same:edit===document.querySelector('[data-v3-label]'),focused:document.activeElement===edit});}
+  edit.focus();const before=size(edit),insertions=[],serverNodes=[...document.querySelectorAll('.v3-server')];
+  const observer=new MutationObserver(()=>{const current=document.querySelector('[data-v3-label]');insertions.push({...size(current),same:current===edit});});observer.observe(document.querySelector('#warehouse-inspector'),{childList:true,subtree:true,attributes:true,characterData:true});
+  const refreshes=[];for(let n=0;n<3;n++){snapshot.datasets[0].versions[0].fileCount++;view.storageOverview(snapshot);refreshes.push({...size(edit),same:edit===document.querySelector('[data-v3-label]'),focused:document.activeElement===edit,rows:serverNodes.every((node,index)=>node.isConnected&&node===document.querySelectorAll('.v3-server')[index]&&node.getBoundingClientRect().height>=44)});}
   const source=snapshot.caches[0].machine;permitted.delete(source);view.storageOverview(snapshot);const disabled=edit.disabled;permitted.add(source);view.storageOverview(snapshot);const enabled=!edit.disabled;
   await Promise.resolve();observer.disconnect();const nextAccount=store.authGeneration;store.authGeneration++;view.storageOverview(snapshot);const accountReplaced=edit!==document.querySelector('[data-v3-label]');store.authGeneration=nextAccount;view.storageOverview(snapshot);
   return {before,refreshes,insertions,disabled,enabled,accountReplaced};
  });
  assert(editRefresh.before.connected&&editRefresh.before.width>=44&&editRefresh.before.height>=44,'edit control starts with a 44px target');
- assert(editRefresh.refreshes.every(row=>row.connected&&row.same&&row.focused&&row.width>=44&&row.height>=44),'refresh keeps the current edit button and keyboard focus: '+JSON.stringify(editRefresh));
+ assert(editRefresh.refreshes.every(row=>row.connected&&row.same&&row.focused&&row.rows&&row.width>=44&&row.height>=44),'refresh keeps the current edit button, server rows and keyboard focus: '+JSON.stringify(editRefresh));
  assert(editRefresh.insertions.length>0&&editRefresh.insertions.every(row=>row.connected&&row.same&&row.width>=44&&row.height>=44),'edit control has dimensions from insertion; no zero-height replacement');
  assert(editRefresh.disabled&&editRefresh.enabled&&editRefresh.accountReplaced,'live permission changes apply and another account cannot inherit the edit control');
  const targets=await page.locator('#warehouse-inspector button:visible').evaluateAll(nodes=>nodes.map(node=>({name:node.textContent.trim(),width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height})));
