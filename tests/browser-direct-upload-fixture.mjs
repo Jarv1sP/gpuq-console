@@ -15,7 +15,7 @@ export async function directBrowserFixture(machines){
   const calls=[],raw=[],probes=[],preflights=[],failures=[],uploads=new Map(),tickets=new Map(),names=new Map(),admissions=new Map();
   const config={mode:'success',holdChunk:false,holdPublish:false,deny:false,mismatch:false};
   let nodeOrigin,origin,releaseChunk,heldChunk=false,expired=false,dropped=false,ticketCount=0;
-  const describe=upload=>({uploadId:upload.id,name:upload.name,state:upload.state,placementProtocol:1,requestedMachine:upload.spec.machine,storageMachine:machines[0].id,storageTier:'hdd',legacyPlacement:false,manifestOffset:upload.manifest.length,manifestBytes:upload.spec.manifestBytes,totalBytes:upload.spec.totalBytes,entries:upload.spec.entries,chunkBytes:CHUNK,
+  const describe=upload=>({uploadId:upload.id,name:upload.name,state:upload.state,placementProtocol:1,requestedMachine:upload.requestedMachine??upload.spec.machine,storageMachine:machines[0].id,storageTier:'hdd',legacyPlacement:false,manifestOffset:upload.manifest.length,manifestBytes:upload.spec.manifestBytes,totalBytes:upload.spec.totalBytes,entries:upload.spec.entries,chunkBytes:CHUNK,
     ...(upload.dataset?{dataset:upload.dataset,version:upload.version}:{})});
   const status=(upload,path)=>{
     if(upload.state==='PUBLISHING'&&!config.holdPublish)upload.state='READY';
@@ -35,8 +35,9 @@ export async function directBrowserFixture(machines){
   const reply=(res,statusCode,body)=>{res.writeHead(statusCode,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(body));};
   const node=createServer(tls,async(req,res)=>{
     try{
-      res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');
-      assert.equal(req.headers.origin,origin,'Only the fixture portal may reach the node');
+      const allowedOrigin=config.portalOrigin??origin;
+      res.setHeader('Access-Control-Allow-Origin',allowedOrigin);res.setHeader('Vary','Origin');
+      assert.equal(req.headers.origin,allowedOrigin,'Only the fixture portal may reach the node');
       assert.equal(req.headers.cookie,undefined,'Portal cookies must never reach the node');
       if(req.method==='OPTIONS'){
         preflights.push({method:req.headers['access-control-request-method'],headers:req.headers['access-control-request-headers']});
@@ -121,6 +122,8 @@ export async function directBrowserFixture(machines){
   for(const server of [node,portal])server.on('tlsClientError',()=>{});
   await new Promise(resolve=>node.listen(0,'127.0.0.1',resolve));nodeOrigin='https://127.0.0.1:'+node.address().port;
   await new Promise(resolve=>portal.listen(0,'127.0.0.1',resolve));origin='https://127.0.0.1:'+portal.address().port;
-  return {origin,nodeOrigin,calls,raw,probes,preflights,failures,uploads,config,get tickets(){return ticketCount;},get held(){return typeof releaseChunk==='function';},release(){releaseChunk?.();releaseChunk=null;},
+  return {origin,nodeOrigin,certificateSha256,calls,raw,probes,preflights,failures,uploads,config,
+    authorize(owner,uploadId){assert.equal(uploads.get(uploadId)?.owner,owner);const ticket='fixture-only-'+randomUUID();tickets.set('Bearer '+ticket,{owner,uploadId});ticketCount++;return ticket;},
+    get tickets(){return ticketCount;},get held(){return typeof releaseChunk==='function';},release(){releaseChunk?.();releaseChunk=null;},
     async close(){releaseChunk?.();for(const server of [portal,node]){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}await rm(directory,{recursive:true,force:true});}};
 }
