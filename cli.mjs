@@ -575,8 +575,8 @@ async function main(){
         ...(dataTerminal?[]:scope),'--reconnect',id]);
       const terminal={id,machine,project:context.project||null,dataWorkspace:dataTerminal,hostAdmin,mode:openMode,state:'UNKNOWN',statusCommand};
       const unconfirmed=error=>Object.assign(Error(`${error.message}\n终端状态未确认，未重开或重放输入。只读查询原会话：${statusCommand}`),{terminal,status:error.status,code:error.code});
-      // Print the original identity before any request; never cache writer
-      // credentials or rely on a successful response to recover this handle.
+      // Print and durably save the original identity before dispatch. Writer
+      // credentials remain only in this connection's memory.
       await new Promise((resolve,reject)=>process.stderr.write('Terminal: '+maintenanceJSON(terminal)+'\n',error=>error?reject(error):resolve()));
       let opened;
       try{

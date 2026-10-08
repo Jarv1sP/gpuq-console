@@ -23,6 +23,24 @@ export {datasetReferences} from './job-submission.mjs';
 
 export const TERMINAL=new Set(['SUCCEEDED','FAILED','CANCELED']);
 export const PRIORITIES=new Set(['idle','normal','high']);
+const DISPLAY_OPERATIONS=new Set(['datasets.overview','datasets.catalog','datasets.capacity','datasets.list','datasets.files.list','files.list','storage.usage.mine','storage.usage.users']);
+const DISPLAY_NODE_OPERATIONS=new Set(['datasets.list','datasets.capacity','datasets.files.list','files.list']);
+const displayServices=new WeakMap();
+export function displayReadService(service,operation){
+  if(!DISPLAY_OPERATIONS.has(operation)||typeof service.displayBridge!=='function')return service;
+  let record=displayServices.get(service);
+  if(!record||record.displayBridge!==service.displayBridge){
+    const view=Object.create(service),displayBridge=service.displayBridge;
+    view.bridge=(machine,nodeOperation,args)=>DISPLAY_NODE_OPERATIONS.has(nodeOperation)
+      ?displayBridge.call(service,machine,nodeOperation,args)
+      :service.bridge(machine,nodeOperation,args);
+    record={view,displayBridge};displayServices.set(service,record);
+  }
+  // Reuse the view so bounded observation caches retain their normal TTL.
+  // Only an explicit display request selects it; mutation dependency reads
+  // remain on the authoritative executor even when their node op is a list.
+  return record.view;
+}
 const fail=(message,status=400,code)=>{throw Object.assign(Error(message),{status,...(code?{code}:{})});};
 export const priorityCapable=host=>host?.reachable===true&&host.gpuq?.connected===true&&Array.isArray(host.gpuq.capabilities)&&host.gpuq.capabilities.includes('priority-policy-v1')&&host.gpuq.capabilities.includes('preempt-idle-only-v1');
 export const priorityRankCapable=host=>priorityCapable(host)&&host.gpuq.capabilities.includes('priority-rank-v1');
@@ -225,6 +243,7 @@ export async function executionCall(service,principal,operation,args){
   const jobView=job=>publicJob(job,service.store.users);
   if(!user.enabled)fail('账号已暂停。',403);
   service.assertMaintenanceAllowed?.(operation,args,principal);
+  service=displayReadService(service,operation);
   if(['datasets.delete','datasets.delete.status','datasets.delete.restore','datasets.delete.continue','datasets.delete.cancel','datasets.delete.registration.discard'].includes(operation))return service.datasetDeletionCall(principal,operation,args);
   if(['datasets.catalog','datasets.capacity'].includes(operation))return datasetCatalogCall(service,principal,operation,args);
   if(operation==='datasets.overview')return datasetStorageOverviewCall(service,principal,args);

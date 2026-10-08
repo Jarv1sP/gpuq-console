@@ -4,7 +4,7 @@ import {dirname} from 'node:path';
 import {createHash,randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {DemoService,credential} from './dist/service.js';
 import {readGPUQStatus,visibleGPUQStatus} from './gpuq-status.mjs';
-import {installExecution,executionCall,publicJob,usage,priorityCapable,priorityRankCapable} from './execution.mjs';
+import {installExecution,executionCall,displayReadService,publicJob,usage,priorityCapable,priorityRankCapable} from './execution.mjs';
 import {MACHINES,validUsername} from './dist/model.js';
 import {installCommunity,communityCall,maintainTaskNotes} from './community.mjs';
 import {installMaintenanceState,installMaintenance,maintenanceCall} from './maintenance.mjs';
@@ -353,7 +353,7 @@ export class PortalService extends DemoService{
       this.assertMaintenanceAllowed?.(operation,args,principal);
       if(this.datasetReadPending>=4)throw Object.assign(Error('空间统计正在读取，请稍后刷新。'),{status:429});
       this.datasetReadPending++;
-      return storageUsageCall(this,principal,operation,args).then(result=>({result,principal:check()}))
+      return storageUsageCall(displayReadService(this,operation),principal,operation,args).then(result=>({result,principal:check()}))
         .finally(()=>this.datasetReadPending--);
     }
     if(['datasets.catalog','datasets.capacity','datasets.overview','datasets.files.list','datasets.training.capabilities','datasets.list','datasets.status','datasets.prepare',

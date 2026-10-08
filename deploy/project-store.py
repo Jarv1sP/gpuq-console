@@ -33,6 +33,7 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _ROOT_GUARD = None
 DEFAULT_WORKSPACE_RESERVE = 10 * 1024**3
+PROJECT_LOCK_WAIT_SECONDS = 2.0
 
 
 def project_lifetime(function):
@@ -63,6 +64,20 @@ class ProjectError(ValueError):
 
 def fail(code, message):
     raise ProjectError(code, message)
+
+
+def wait_project_lock(fd, mode, message):
+    """Wait only to acquire the same checked descriptor, never replay a body."""
+    deadline = time.monotonic() + PROJECT_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fail('project_busy', message)
+            time.sleep(min(0.05, remaining))
 
 
 def canonical(value):
@@ -263,6 +278,8 @@ class ProjectStore:
             fail('unsafe_path', 'Project ownership metadata does not match')
         if meta.get('environmentMode', 'shared') not in ('shared', 'isolated', 'oci'):
             fail('unsafe_path', 'Invalid project environment mode')
+        if 'projectUUID' in meta and (not isinstance(meta['projectUUID'], str) or not JOB_ID.fullmatch(meta['projectUUID'])):
+            fail('unsafe_path', 'Invalid persistent project UUID')
         return path, meta
 
     def lifecycle_folder(self, user, slug):
@@ -302,10 +319,8 @@ class ProjectStore:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid() or info.st_mode & 0o077:
                 fail('unsafe_path', 'Unsafe project lifecycle lock')
-            try:
-                fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-            except BlockingIOError:
-                fail('project_busy', 'Project has an active reader or lifecycle operation; retry after it finishes')
+            wait_project_lock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+                              'Project has an active reader or lifecycle operation; retry after it finishes')
             self._lifetime_state.held = {**held, key: exclusive}
             yield
         finally:
@@ -314,6 +329,19 @@ class ProjectStore:
 
     def environment_mode(self, user, slug):
         return self._project(user, slug)[1].get('environmentMode', 'shared')
+
+    @project_lifetime
+    def project_uuid(self, user, slug, *, create=False):
+        """Read identity without mutation; migrate only at explicit publication."""
+        path, meta = self._project(user, slug)
+        if meta.get('projectUUID') is not None or not create:
+            return meta.get('projectUUID')
+        with self._file_lock(path / '.identity.lock'):
+            path, meta = self._project(user, slug)
+            if meta.get('projectUUID') is None:
+                meta = {**meta, 'projectUUID': str(uuid.uuid4())}
+                atomic_json(path / 'project.json', meta)
+            return meta['projectUUID']
 
     @project_lifetime
     def generation(self, user, slug):
@@ -338,10 +366,11 @@ class ProjectStore:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid() or info.st_mode & 0o077:
                 fail('unsafe_path', 'Unsafe project lock')
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-            except BlockingIOError:
-                fail('project_busy', 'Project is being published or changed; retry after it finishes')
+            if blocking:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            else:
+                wait_project_lock(fd, fcntl.LOCK_EX,
+                                  'Project is being published or changed; retry after it finishes')
             yield
         finally:
             os.close(fd)
@@ -386,7 +415,7 @@ class ProjectStore:
                     private_dir(stage / 'dev' / name, create=True)
                 atomic_json(stage / 'project.json', {'schema': 2, 'owner': owner,
                             'project': slug, 'environmentMode': environment_mode or 'shared',
-                            'createdAt': int(time.time())})
+                            'createdAt': int(time.time()), 'projectUUID': str(uuid.uuid4())})
                 os.rename(stage, project)
                 with directory(parent) as fd:
                     os.fsync(fd)

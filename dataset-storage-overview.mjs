@@ -126,7 +126,10 @@ export async function datasetStorageOverviewCall(service,principal,args){
     Promise.all(MACHINES.map(({id})=>readCapacity(service,id)))
   ]);
   checkPolicy();
-  const usage=new Map(nodes.map(node=>[node.machine,{sizes:[],versions:new Set(),complete:catalog.machines.find(row=>row.machine===node.machine)?.state==='ok'}]));
+  const usage=new Map(nodes.map(node=>{
+    const readable=catalog.machines.find(row=>row.machine===node.machine)?.state==='ok';
+    return [node.machine,{sizes:[],versions:new Set(),readable,complete:readable}];
+  }));
   const originals=new Map(nodes.filter(node=>node.warehouse).map(node=>[node.machine,{sizes:[],datasets:new Set(),versions:new Set(),complete:catalog.machines.find(row=>row.machine===node.machine)?.state==='ok'}]));
   const datasets=catalog.datasets.map(item=>({dataset:item.dataset,...(typeof item.displayName==='string'?{displayName:item.displayName}:{}),versions:item.versions.map(version=>{
     const contentBytes=consistent(version.locations,'contentBytes'),fileCount=consistent(version.locations,'fileCount');
@@ -156,7 +159,9 @@ export async function datasetStorageOverviewCall(service,principal,args){
   });
   const caches=nodes.map(node=>{
     const counts=usage.get(node.machine),complete=counts.complete&&counts.sizes.every(value=>value!==null);
-    return {machine:node.machine,state:node.state,...(node.reason?{reason:node.reason}:{}),volume:node.volume,readyContentBytes:complete?sum(counts.sizes):null,
+    const known=counts.sizes.filter(value=>value!==null);
+    const readyContentBytes=counts.readable&&(counts.sizes.length===0||known.length>0)?sum(known):null;
+    return {machine:node.machine,state:node.state,...(node.reason?{reason:node.reason}:{}),volume:node.volume,readyContentBytes,
       readyVersionCount:counts.complete?counts.versions.size:null,budgetBytes:node.budgetBytes,reserveBytes:node.volume.reserveBytes,usageComplete:complete,
       projectBytes:node.projectBytes,projectUsageComplete:node.projectUsageComplete,projectCollectedAt:node.projectCollectedAt};
   });
