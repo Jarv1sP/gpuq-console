@@ -213,6 +213,10 @@ export async function executionCall(service,principal,operation,args){
   if(operation==='datasets.overview')return datasetStorageOverviewCall(service,principal,args);
   if(operation==='datasets.files.list')return datasetFilesCall(service,principal,args);
   const authorizedMachine=machine=>{if(!MACHINES.some(m=>m.id===machine)||!user.limits[machine])fail('这台机器未授权。',403);};
+  if(['files.put','files.get'].includes(operation)){
+    authorizedMachine(args.machine);
+    fail('普通文件正文只允许校园直连；请升级客户端并查询原上传编号，不会经 VPS 中转。',410,'CAMPUS_FILE_REQUIRED');
+  }
   if(operation.startsWith('datasets.storage.')){
     if(principal.role!=='admin')fail('存储管理仅管理员可用。',403);
     authorizedMachine(args.machine);

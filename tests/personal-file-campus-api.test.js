@@ -14,8 +14,6 @@ async function fixture(t){
   const calls=[];let proof;
   const bridge=async(machine,operation,args)=>{
     calls.push({machine,operation,args});if(proof)await proof();
-    // Staged Portal keeps existing relay until the separately paired HTTPS node is released.
-    if(['files.put','files.get'].includes(operation)){assert.equal(Object.hasOwn(args,'hostAdmin'),false);assert.equal(typeof args.userId,'string');return operation==='files.get'?{data:'eA==',eof:true}:{written:1};}
     assert.equal(operation,'files.direct.prepare');assert.equal(Object.hasOwn(args,'data')||Object.hasOwn(args,'bytes'),false);
     return {available:true,protocol:'personal-file-campus-v1',machine,kind:'campus-direct',routeId:'primary',endpoint:'https://campus.example.edu:18444',certificateSha256:'b'.repeat(64),revision:'c'.repeat(64),grantId:randomUUID(),expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:1048576,ticket:'test-capability-'+randomUUID(),file:{path:args.path,protocol:2,fingerprint:'d'.repeat(64),size:4}};
   };
@@ -27,10 +25,10 @@ async function fixture(t){
   return {service,admin,member,login,calls,proof:callback=>{proof=callback;},ticket:async args=>(await service.invoke(login.token,'files.direct-ticket',{...context,...args})).result};
 }
 
-test('personal campus ticket uses authenticated owner while staged old relay remains available until node pairing',async t=>{
+test('personal campus ticket uses authenticated owner and old file relay refuses before any byte dispatch',async t=>{
   const f=await fixture(t),grant=await f.ticket();
   assert.equal(f.calls.at(-1).args.userId,f.member.id);assert.deepEqual(f.service.checkPersonalFileTicket({ticket:grant.ticket}),{allowed:true,protocol:'personal-file-campus-v1'});
-  for(const operation of ['files.put','files.get']){const args={machine:context.machine,project:context.project,area:'code',path:context.path,offset:0,...(operation==='files.put'?{data:'eA==',uploadId:context.uploadId,totalSize:4,sha256:context.sha256,final:false}:{})};const result=await f.service.invoke(f.login.token,operation,args);assert.ok(result.result);assert.equal(f.calls.at(-1).operation,operation);assert.equal(f.calls.at(-1).args.userId,f.member.id);}
+  for(const operation of ['files.put','files.get']){const args={machine:context.machine,project:context.project,area:'code',path:context.path,offset:0,...(operation==='files.put'?{data:'eA==',uploadId:context.uploadId,totalSize:4,sha256:context.sha256,final:false}:{})};const before=f.calls.length;await assert.rejects(f.service.invoke(f.login.token,operation,args),error=>error.status===410&&error.code==='CAMPUS_FILE_REQUIRED');assert.equal(f.calls.length,before);}
   const before=f.calls.length;
   for(const change of [{hostAdmin:true},{userId:'builtin-admin'},{machine:'gpu-2'},{project:undefined},{routeId:'tail'},{endpoint:'https://other.example'},{path:'../escape'},{totalSize:true},{area:'output',runId:randomUUID()}])await assert.rejects(f.ticket(change));
   assert.equal(f.calls.length,before);
@@ -67,7 +65,7 @@ test('actual Portal HTTP control callback accepts only a current capability and 
   const dir=await mkdtemp(join(tmpdir(),'campus-file-http-')),bootstrap=join(dir,'bootstrap');await writeFile(bootstrap,JSON.stringify({username:'admin',password}));
   const reserve=net.createServer();await new Promise(resolve=>reserve.listen(0,'127.0.0.1',resolve));const port=reserve.address().port;await new Promise(resolve=>reserve.close(resolve));const origin='http://127.0.0.1:'+port;
   const calls=[],descriptor={available:true,protocol:'personal-file-campus-v1',machine:'gpu-1',kind:'campus-direct',routeId:'primary',endpoint:'https://campus.example.edu:18444',certificateSha256:'b'.repeat(64),revision:'c'.repeat(64),grantId:randomUUID(),expiresAt:Math.floor(Date.now()/1000)+300,chunkBytes:1048576,ticket:'test-capability-'+randomUUID(),file:{}};
-  const {server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,bridge:async(machine,operation,args)=>{calls.push({machine,operation,args});if(['files.put','files.get'].includes(operation))return operation==='files.get'?{data:'eA==',eof:true}:{written:1};assert.equal(operation,'files.direct.prepare');assert.equal(Object.hasOwn(args,'data'),false);return descriptor;}});
+  const {server,service}=await createPortalServer({database:join(dir,'db'),bootstrap,origin,secure:false,bridge:async(machine,operation,args)=>{calls.push({machine,operation,args});assert.equal(operation,'files.direct.prepare');assert.equal(Object.hasOwn(args,'data'),false);return descriptor;}});
   clearInterval(service.executionTimer);service.store.users[0].limits={'gpu-1':1};await new Promise(resolve=>server.listen(port,'127.0.0.1',resolve));
   t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(dir,{recursive:true,force:true});});
   const post=async(path,body,token)=>{const response=await fetch(origin+path,{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(body)});return {status:response.status,data:await response.json()};};
@@ -76,6 +74,6 @@ test('actual Portal HTTP control callback accepts only a current capability and 
   const check=await post('/api/files/direct-check',{ticket:descriptor.ticket});assert.deepEqual(check,{status:200,data:{allowed:true,protocol:'personal-file-campus-v1'}});
   assert.equal((await post('/api/files/direct-check',{ticket:descriptor.ticket,data:'forbidden'})).status,403);
   const before=calls.length;assert.equal((await post('/api/files/direct-check',{ticket:descriptor.ticket,padding:'x'.repeat(8192)})).status,413);assert.equal(calls.length,before);
-  for(const operation of ['files.put','files.get']){const args={machine:context.machine,project:context.project,area:'code',path:context.path,offset:0,...(operation==='files.put'?{data:'eA==',uploadId:context.uploadId,totalSize:4,sha256:context.sha256,final:false}:{})};assert.equal((await post('/api/call',{operation,args},token)).status,200);}
-  assert.equal(calls.length,3);await post('/api/call',{operation:'logout',args:{}},token);assert.equal((await post('/api/files/direct-check',{ticket:descriptor.ticket})).status,403);
+  for(const operation of ['files.put','files.get']){const args={machine:context.machine,project:context.project,area:'code',path:context.path,offset:0,...(operation==='files.put'?{data:'eA==',uploadId:context.uploadId,totalSize:4,sha256:context.sha256,final:false}:{})};const refused=await post('/api/call',{operation,args},token);assert.equal(refused.status,410);assert.equal(refused.data.code,'CAMPUS_FILE_REQUIRED');assert.equal((await post('/api/call',{operation,args})).status,401);}
+  assert.equal(calls.length,1);await post('/api/call',{operation:'logout',args:{}},token);assert.equal((await post('/api/files/direct-check',{ticket:descriptor.ticket})).status,403);
 });

@@ -33,32 +33,32 @@ test('host/upload status bypass a stalled global mutation tail, without dashboar
   assert.equal(service.pending,1);assert.deepEqual(calls.map(x=>x.operation),['host.status','files.upload.status']);
  }finally{blocked.resolve();await write;}
 });
-test('file reads bypass a stalled write tail and retain the exact download fingerprint',async t=>{
- const calls=[],{service,token}=await fixture(t,async(machine,operation,request)=>{calls.push({machine,operation,request});return {data:'YQ=='};});
+test('old file bodies refuse immediately across a stalled write tail, while metadata reads still bypass it',async t=>{
+ const calls=[],{service,token}=await fixture(t,async(machine,operation,request)=>{calls.push({machine,operation,request});return {entries:[]};});
  const blocked=deferred(),write=service.enqueue(()=>blocked.promise);await Promise.resolve();
  try{
-  const fingerprint='a'.repeat(64),result=await service.invoke(token,'files.get',{machine:'gpu-1',project:'paper',path:'result.bin',offset:2,fingerprint});
-  await service.invoke(token,'files.list',{machine:'gpu-2',project:'paper',path:'.'});
-  assert.equal(result.result.data,'YQ==');assert.equal(Object.hasOwn(result,'state'),false);
-  assert.equal(service.pending,1);assert.deepEqual(calls.map(value=>value.operation),['files.get','files.list']);
-  assert.equal(calls[0].request.fingerprint,fingerprint);assert.equal(calls[0].request.offset,2);
+  await assert.rejects(service.invoke(token,'files.get',{machine:'gpu-1',project:'paper',path:'result.bin',offset:2,fingerprint:'a'.repeat(64)}),e=>e.status===410&&e.code==='CAMPUS_FILE_REQUIRED');
+  const result=await service.invoke(token,'files.list',{machine:'gpu-2',project:'paper',path:'.'});
+  assert.deepEqual(result.result,{entries:[]});assert.equal(Object.hasOwn(result,'state'),false);
+  assert.equal(service.pending,1);assert.deepEqual(calls.map(value=>value.operation),['files.list']);
  }finally{blocked.resolve();await write;}
 });
-for(const change of ['disabled','machine','logout'])test('file content is not disclosed after '+change+' during read',async t=>{
+for(const change of ['disabled','machine','logout'])test('file metadata is not disclosed after '+change+' during read',async t=>{
  const blocked=deferred(),{service,token,user}=await fixture(t,()=>blocked.promise,{role:'member'});
- const read=service.invoke(token,'files.get',{machine:'gpu-1',project:'paper',path:'result.bin',offset:0});await Promise.resolve();
+ const read=service.invoke(token,'files.list',{machine:'gpu-1',project:'paper',path:'.'});await Promise.resolve();
  if(change==='disabled')user.enabled=false;
  if(change==='machine')user.limits['gpu-1']=0;
  if(change==='logout')service.revokeSession(token);
- blocked.resolve({data:'private'});
+ blocked.resolve({entries:['private']});
  await assert.rejects(read,error=>[401,403].includes(error.status));assert.equal(service.remoteReadPending,0);
 });
-test('file mutations stay serialized and are sent once after the mutation tail drains',async t=>{
+test('old file mutation remains serialized and refuses with zero dispatch after the mutation tail drains',async t=>{
  const calls=[],{service,token}=await fixture(t,async(machine,operation)=>{calls.push(operation);return {size:1,complete:true};});
  const blocked=deferred(),write=service.enqueue(()=>blocked.promise);await Promise.resolve();
  const upload=service.invoke(token,'files.put',{machine:'gpu-1',path:'x.py',data:'YQ==',offset:0,truncate:true});
+ const refused=assert.rejects(upload,e=>e.status===410&&e.code==='CAMPUS_FILE_REQUIRED');
  await Promise.resolve();assert.deepEqual(calls,[]);assert.equal(service.pending,2);
- blocked.resolve();await write;await upload;assert.deepEqual(calls,['files.put']);
+ blocked.resolve();await write;await refused;assert.deepEqual(calls,[]);
 });
 test('read admission is bounded per node and globally; it does not create another wait queue',async t=>{
  const blocked=deferred(),{service,token}=await fixture(t,()=>blocked.promise);
