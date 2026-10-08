@@ -119,22 +119,30 @@ class Warehouse:
                     self.hot._record_identity(physical,version,_read_only=True)
                 raise self.d.CacheError('catalog metadata changed; retry the operation')
             if row.get('errorCode')=='CACHE_METADATA_INCOMPLETE':
-                raise self.d.CacheMetadataIncomplete('dataset storage metadata is incomplete; administrator verification required')
-            current=self.hot._catalog_status_snapshot(actor,physical,version,hot_snapshots[(physical,version)])
-            with self.hot._catalog_read(actor,physical):
-                if current['state']=='READY' and self.hot._tier(physical,version)['role']!='cache':
-                    current={**current,'state':'REGISTERED'}
+                # A display-only broken cache cannot erase an independently
+                # confirmed HDD original, nor become an SSD READY/reference.
+                with self.hot._catalog_read(actor,physical):
+                    self.hot._record_identity(physical,version,_read_only=True)
+                current={**row,'state':'UNKNOWN','canPrepare':False}
+            else:
+                current=self.hot._catalog_status_snapshot(actor,physical,version,hot_snapshots[(physical,version)])
+                with self.hot._catalog_read(actor,physical):
+                    if current['state']=='READY' and self.hot._tier(physical,version)['role']!='cache':
+                        current={**current,'state':'REGISTERED'}
         except FileNotFoundError:pass
         result={**source,**current,'dataset':dataset,'version':version,
             'warehouseReady':source['state']=='READY','canPrepare':source['state']=='READY',
             'warehouseCanPrepare':source['state']=='READY'}
-        if source['state']!='READY':result['state']=source['state']
+        if current.get('errorCode')=='CACHE_METADATA_INCOMPLETE':result['canPrepare']=False
+        elif source['state']!='READY':result['state']=source['state']
         if source['state']=='READY' and current['state']=='READY':
             result['storageReference']={'dataset':physical,'version':version}
         # A binding/READY/retirement change while crossing roots cannot become
         # a trusted physical reference or a historical READY projection.
         if source['state']=='READY' and self.cold._catalog_status_snapshot(actor,dataset,version,cold_snapshot)!=source:
             raise self.d.CacheError('catalog metadata changed; retry the operation')
+        if binding is not None and self.binding(physical,version)!=binding:
+            raise self.d.CacheError('Fixed local cache binding changed')
         if binding is not None and current['state']=='READY':
             if self.binding(physical,version)!=binding:
                 raise self.d.CacheError('Fixed local cache binding changed')
@@ -168,10 +176,13 @@ class Warehouse:
                     except self.d.CacheMetadataIncomplete:
                         value.update(self.d.DatasetCache._catalog_incomplete(value))
                 if value.get('errorCode')=='CACHE_METADATA_INCOMPLETE':
-                    value.update(warehouseReady=False,warehouseCanPrepare=False,
-                        deletionPermissions={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'})
+                    if (item['dataset'],value['version']) not in snapshots:
+                        value.update(warehouseReady=False,warehouseCanPrepare=False)
+                    value['canPrepare']=False
+                    value['deletionPermissions']={'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'}
                     value.pop('storageReference',None)
                     value.pop('recoveryConfigured',None)
+                    value.pop('dataset',None)
                     continue
                 value.pop('dataset',None)
                 value['deletionPermissions']=self.cold.deletion_permissions(actor,item['dataset'],value['version'])

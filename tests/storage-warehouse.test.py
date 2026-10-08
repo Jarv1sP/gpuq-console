@@ -130,13 +130,13 @@ class WarehouseTests(unittest.TestCase):
             with self.assertRaises((PermissionError,D.CacheError)):self.w.list(OWNER)
         self.assertTrue(changed);self.assertFalse(parent.exists())
 
-    def assert_catalog_unknown(self):
+    def assert_catalog_unknown(self, warehouse_ready=False):
         result=self.w.list(OWNER)
         row=next(item for item in result['datasets'] if item['dataset']=='tiny')['versions'][0]
         self.assertEqual(row['state'],'UNKNOWN')
         self.assertEqual(row['errorCode'],'CACHE_METADATA_INCOMPLETE')
-        self.assertFalse(row['canPrepare']);self.assertFalse(row['warehouseReady'])
-        self.assertFalse(row['warehouseCanPrepare']);self.assertTrue(row['deletionBlocked'])
+        self.assertFalse(row['canPrepare']);self.assertIs(row['warehouseReady'],warehouse_ready)
+        self.assertIs(row['warehouseCanPrepare'],warehouse_ready);self.assertTrue(row['deletionBlocked'])
         self.assertEqual(row['deletionPermissions'],{'allowed':False,'memberAllowed':False,'reason':'CACHE_METADATA_INCOMPLETE'})
         self.assertNotIn('storageReference',row)
         self.assertEqual((row['bytes'],row['files']),(len(b'warehouse original'),1))
@@ -174,7 +174,7 @@ class WarehouseTests(unittest.TestCase):
         preserved=self.root/'preserved-hot-ready';parent.rename(preserved)
         binding=self.w.bindings/(physical+'-'+self.version+'.json');before=binding.read_bytes()
         with patch.object(self.w.cold,'deletion_permissions',side_effect=AssertionError('UNKNOWN cannot gain deletion permission')):
-            self.assert_catalog_unknown()
+            self.assert_catalog_unknown(warehouse_ready=True)
         self.assertFalse(parent.exists());self.assertEqual(binding.read_bytes(),before)
         self.assertTrue(self.w.cold._paths('tiny',self.version)['ready'].exists())
         self.assertEqual((preserved/self.version/'data'/'sample').read_bytes(),b'warehouse original')
@@ -189,10 +189,66 @@ class WarehouseTests(unittest.TestCase):
         physical=W.Warehouse.cache_name('tiny');self.hot.evict(ADMIN,physical,self.version)
         parent=self.hot._paths(physical,self.version)['.staging'].parent
         parent.rename(self.root/'preserved-hot-staging')
-        self.assert_catalog_unknown()
+        self.assert_catalog_unknown(warehouse_ready=True)
         self.assertFalse(parent.exists())
         with self.assertRaises(D.CacheMetadataIncomplete):self.w.status(OWNER,'tiny',self.version)
         self.assertTrue(self.w.cold._paths('tiny',self.version)['ready'].exists())
+
+    def broken_hot(self):
+        self.w.prepare(OWNER,'tiny',self.version)
+        physical=W.Warehouse.cache_name('tiny')
+        self.hot._paths(physical,self.version)['ready'].parent.rename(self.root/'preserved-broken-hot')
+        return physical
+
+    def test_broken_hot_preserves_cold_proof_across_warm_processes_without_parse(self):
+        self.broken_hot();expected=self.assert_catalog_unknown(warehouse_ready=True)
+        self.w.hot=D.DatasetCache(self.hot.root,reserve_bytes=0)
+        self.w.cold=D.DatasetCache(self.w.cold.root,reserve_bytes=0)
+        with self.hot._locked(),self.w.cold._locked(),patch.object(D,'_manifest_bytes',side_effect=AssertionError('warm parsed manifest')):
+            self.assertEqual(self.assert_catalog_unknown(warehouse_ready=True),expected)
+
+    def test_broken_hot_does_not_upgrade_unready_cold(self):
+        self.broken_hot();ready=self.w.cold._paths('tiny',self.version)['ready']
+        # Darwin also requires write access to the moved directory itself.
+        # Change only this disposable fixture, not the production READY guard.
+        os.chmod(ready.parent,0o700);os.chmod(ready,0o700)
+        ready.rename(self.root/'preserved-unready-cold')
+        self.assert_catalog_unknown()
+
+    def test_broken_hot_cold_acl_revoked_during_display_rejects(self):
+        self.broken_hot();original=self.hot._record_identity
+        def revoke(*args,**kwargs):
+            result=original(*args,**kwargs)
+            D._write_json(self.w.cold._paths('tiny')['.registry']/'dataset.json',{'schema':1,'owners':['demo-user-4']})
+            return result
+        with patch.object(self.hot,'_record_identity',side_effect=revoke),self.assertRaises((PermissionError,D.CacheError)):
+            self.w.list(OWNER)
+
+    def test_broken_hot_cold_ready_changed_during_display_rejects(self):
+        self.broken_hot();original=self.hot._record_identity;changed=False
+        ready=self.w.cold._paths('tiny',self.version)['ready']
+        os.chmod(ready.parent,0o700);os.chmod(ready,0o700)
+        def move(*args,**kwargs):
+            nonlocal changed
+            result=original(*args,**kwargs)
+            if not changed:
+                changed=True;self.w.cold._paths('tiny',self.version)['ready'].rename(self.root/'preserved-cold-changed')
+            return result
+        with patch.object(self.hot,'_record_identity',side_effect=move),self.assertRaises(D.CacheError):self.w.list(OWNER)
+
+    def test_broken_hot_cold_retirement_fence_rejects(self):
+        self.broken_hot();original=self.hot._record_identity;changed=False
+        def fence(*args,**kwargs):
+            nonlocal changed
+            result=original(*args,**kwargs)
+            if not changed:
+                changed=True;folder=self.w.cold.root/'.retirements'/'tiny';D._mkdir(folder)
+                D._write_json(folder/(self.version+'.json'),dict(schema=1,protocol='dataset-version-fence-v1',
+                    rootIdentity=list(self.w.cold._root_identity),dataset='tiny',version=self.version,
+                    operationId=str(uuid.uuid4()),actor=OWNER.user_id,admin=False,snapshotSha256='a'*64,
+                    generation='b'*64,state='FENCED',createdAt=0,restoredRegistration=None))
+            return result
+        with patch.object(self.hot,'_record_identity',side_effect=fence),self.assertRaises(D.CacheError):self.w.list(OWNER)
 
     def test_corrupt_cold_registration_is_not_display_unknown(self):
         parent=self.w.cold._paths('tiny',self.version)['ready'].parent
