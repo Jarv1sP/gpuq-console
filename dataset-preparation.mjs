@@ -3,6 +3,7 @@
 import {personalCardQuotaExempt} from './job-submission.mjs';
 import {resolveTrainingDataset} from './training-datasets.mjs';
 import {trainingStoragePlan} from './training-storage.mjs';
+import {cancelTrainingPreparations,prepareTrainingDataset} from './training-preparation.mjs';
 export const DATA_PREPARING='PREPARING_DATA';
 const terminal=new Set(['CANCELED','FAILED','SUCCEEDED']);
 const inFlight=new WeakMap();
@@ -43,12 +44,13 @@ async function observe(service,id,usage){
   const {job}=snapshot,identity={userId:job.userId,hostAdmin:false},states=[],references=[];
   let failure=null;
   let projectReady=true,projectState;
+  let admission;
   if(job.trainingStoragePlan){
     const user=service.store.get(job.userId);
-    await trainingStoragePlan(service,user,job.machine,{
+    admission=await trainingStoragePlan(service,user,job.machine,{
       project:job.project?{project:job.project,release:job.release}:{},
       datasets:job.datasets||[],datasetReadMode:job.datasetReadMode,
-    },{from:job.projectPreparation?.from});
+    },{from:job.projectPreparation?.from,captureRequest:true});
     if(!await service.enqueue(()=>!!current(service,id,snapshot)))return;
   }
   if(job.projectPreparation){
@@ -62,9 +64,16 @@ async function observe(service,id,usage){
   }
   // Remote operations intentionally stay OUTSIDE the global mutation queue.
   // A slow manifest/SSH response cannot block cancellation or terminal opens.
+  if(admission&&projectReady&&!failure&&job.datasetReadMode!=='warehouse'&&job.datasets?.length){
+    if(!await service.enqueue(()=>{
+      const live=current(service,id,snapshot);if(!live)return false;
+      persist(service,live.job,()=>{live.job.trainingStoragePlan=admission.plan;live.job.trainingStorageRequest=admission.request;});return true;
+    }))return;
+  }
   for(const ref of failure||!projectReady?[]:job.datasets||[]){
     if(!await service.enqueue(()=>!!current(service,id,snapshot)))return;
     let status,reference;
+    const options={retry:false,...(job.trainingStoragePlan?{trainingJobId:job.id}:{})};
     if(job.datasetReadMode==='warehouse'){
       const resolved=await resolveTrainingDataset(service,job.userId,job.machine,ref,'warehouse');
       status=resolved.status;reference=resolved.reference;
@@ -78,12 +87,13 @@ async function observe(service,id,usage){
       if(service.resolveDataset){const resolved=await service.resolveDataset(job.userId,job.machine,ref);status=resolved.status;reference=resolved.reference;}
       else{status=await service.bridge(job.machine,'datasets.status',{...identity,...ref});reference=ref;}
     }
-    catch(error){if(!service.prepareDataset)throw error;status=transfer||await service.prepareDataset(job.userId,job.machine,ref,{retry:false});}
-    if(status.state!=='READY'&&transfer)status=transfer.state==='FAILED'?transfer:await service.prepareDataset(job.userId,job.machine,ref,{retry:false});
+    catch(error){if(!service.prepareDataset)throw error;status=transfer||await service.prepareDataset(job.userId,job.machine,ref,options);}
+    if(status.state!=='READY'&&transfer)status=transfer.state==='FAILED'?transfer:await service.prepareDataset(job.userId,job.machine,ref,options);
     if(status?.dataset!==ref.dataset||status?.version!==ref.version)throw Error('数据准备状态与请求版本不符，未启动训练。');
     if(!['READY','PREPARING','FAILED'].includes(status.state)){
       if(!await service.enqueue(()=>!!current(service,id,snapshot)))return;
-      status=service.prepareDataset?await service.prepareDataset(job.userId,job.machine,ref,{retry:false}):await service.bridge(job.machine,'datasets.prepare',{...identity,...ref});
+      status=service.prepareDataset?await service.prepareDataset(job.userId,job.machine,ref,options):job.trainingStoragePlan?
+        await prepareTrainingDataset(service,job.id,ref,ref):await service.bridge(job.machine,'datasets.prepare',{...identity,...ref});
       if(status?.dataset!==ref.dataset||status?.version!==ref.version)throw Error('数据准备结果与请求版本不符，未启动训练。');
     }
     states.push({dataset:ref.dataset,version:ref.version,state:status.state,
@@ -150,6 +160,7 @@ async function observe(service,id,usage){
 // permanent cancellation fence; a timeout is never proof of no reader.
 export async function releaseDataPreparation(service,job){
   const held=job.dataPreparationHold;
+  if(!service.closing&&terminal.has(job.state)&&job.trainingPreparations?.length)await cancelTrainingPreparations(service,job);
   if(service.closing||!terminal.has(job.state)||!held||held.state==='RELEASED')return;
   const result=await service.bridge(job.machine,'storage.lease.cancel',{job:held.spec});
   if(result?.state!=='CANCELED'||result.jobId!==job.id||result.released!==true)throw Error('准备数据的保活释放尚未确认。');

@@ -2,6 +2,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import {MACHINES} from './dist/model.js';
 import {executionCall} from './execution.mjs';
 import {snapshotSyncCall} from './snapshot-sync.mjs';
+import {assertTrainingPreparation,bindTrainingPreparation,trainingPreparationCall} from './training-preparation.mjs';
 
 const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,hash=/^[a-f0-9]{64}$/;
 const done=new Set(['SUCCEEDED','CANCELED']),states=new Set(['RUNNING','RETRYING','VERIFYING','CANCELING','UNKNOWN','SUCCEEDED','FAILED','PAUSED','CANCELED']);
@@ -16,6 +17,7 @@ const archiveAdmission=Symbol('trusted archive admission');
 // Older orchestrated copies used an ordinary upload admission. They may resume
 // that SAME stopped transfer, but cannot acquire the newer archive lane.
 const legacyArchiveAdmission=Symbol('trusted legacy archive resume');
+const trainingAdmission=Symbol('trusted durable training preparation');
 function laneState(service){let state=lanes.get(service);if(!state){state={pending:0,users:new Map(),rows:new Map()};lanes.set(service,state);}return state;}
 async function inLane(service,owner,key,run){
   const state=laneState(service),lane=state.rows.get(key)||{tail:Promise.resolve(),pending:0},count=state.users.get(owner)||0;
@@ -30,8 +32,17 @@ function info(value){
   return Object.fromEntries(['state','manifestBytes','manifestSha256','totalBytes','entries'].map(k=>[k,value[k]]));
 }
 function load(service,id){const row=service.db.prepare('SELECT * FROM transfers WHERE id=?').get(validId(id));if(!row)fail('传输不存在。',404);return {...row,data:JSON.parse(row.data)};}
+function targetCall(service,row,operation,args){
+  const binding=row.data.trainingPreparation;
+  if(!binding)return service.bridge(row.data.machine,operation,args);
+  if(binding.job.userId!==row.owner_id||binding.preparation.id!==row.id||binding.preparation.targetMachine!==row.data.machine||
+     binding.preparation.sourceMachine!==row.data.from||binding.preparation.kind!=='transfer'||
+     binding.preparation.reference.dataset!==row.data.reference.dataset||binding.preparation.reference.version!==row.data.reference.version)
+    fail('新训练准备的原传输身份不符；不会回退旧 worker。',409);
+  return trainingPreparationCall(service,binding,operation,args);
+}
 function view(row){
-  const {sourceTicket,sourceRelease,...safe}=row.data;
+  const {sourceTicket,sourceRelease,trainingPreparation,...safe}=row.data;
   return {id:row.id,state:row.state,createdAt:row.created_at,updatedAt:row.updated_at,...safe,
     ...(sourceRelease?{sourceRelease:{state:sourceRelease.state,...(sourceRelease.state==='PENDING'?{message:sourceTicket?'源租约收尾尚未确认；保护继续保留，后台会重试。':'源授权回执缺失；保护继续保留，需管理员核对。'}:{})}}:{})};
 }
@@ -149,7 +160,7 @@ async function releaseSource(service,row,actor='transfer-reconcile'){
       if(row.state!=='CANCELED'||row.data.cancelRequested!==true)throw Error('Source preparation was not confirmed');
       let proof=row.data.sourceRelease.unpreparedConfirmation;
       if(!proof){
-        proof=unpreparedConfirmation(row,await service.bridge(row.data.machine,'transfers.confirm-unprepared-cancel',{
+        proof=unpreparedConfirmation(row,await targetCall(service,row,'transfers.confirm-unprepared-cancel',{
           id:row.id,userId:row.owner_id,sourceMachine:row.data.from,reference:row.data.reference}));
         row.data.sourceRelease.unpreparedConfirmation=proof;
         row=save(service,row,row.state,actor,'transfers.unprepared-cancel-confirmed');
@@ -161,7 +172,7 @@ async function releaseSource(service,row,actor='transfer-reconcile'){
     }
     let confirmation=row.data.sourceRelease.confirmation;
     if(!confirmation){
-      const value=await service.bridge(row.data.machine,'transfers.confirm-source-release',{
+      const value=await targetCall(service,row,'transfers.confirm-source-release',{
         id:row.id,userId:row.owner_id,sourceMachine:row.data.from,reference:row.data.reference,
         manifestSha256:row.data.sourceTicket.manifestSha256});
       confirmation=releaseConfirmation(row,value);
@@ -187,7 +198,7 @@ async function sync(service,row,actor='transfer-reconcile'){
       // Reconcile the ORIGINAL cancellation, not a new execution. An early
       // CANCELING/UNKNOWN receipt must eventually become confirmed terminal.
       if(data.kind==='copy'){
-        const result=await service.bridge(data.machine,'transfers.cancel',{id:row.id,userId:row.owner_id});
+        const result=await targetCall(service,row,'transfers.cancel',{id:row.id,userId:row.owner_id});
         if(result.id!==row.id||!states.has(result.state))throw Error('Cancel receipt mismatch');
         data.result=result;state=['CANCELED','SUCCEEDED'].includes(result.state)?result.state:result.state==='UNKNOWN'?'UNKNOWN':'CANCELING';
       }else if(data.kind==='upload'){
@@ -195,7 +206,7 @@ async function sync(service,row,actor='transfer-reconcile'){
         data.result=result;state=result.state==='READY'?'SUCCEEDED':'CANCELED';
       }else state='CANCELED';
     }else if(data.kind==='copy'){
-      const result=await service.bridge(data.machine,'transfers.status',{id:row.id,userId:row.owner_id});
+      const result=await targetCall(service,row,'transfers.status',{id:row.id,userId:row.owner_id});
       if(result.id!==row.id||!states.has(result.state))throw Error('Node receipt mismatch');
       data.result=result;state=result.state;
     }else if(data.kind==='upload'&&data.uploadId){
@@ -220,7 +231,7 @@ async function dispatch(service,principal,row){
       row=save(service,row,'DISPATCHING',principal.username,'transfers.source-prepared');
     }
     if(lane)archiveLane(service,data); // Recheck after source preparation I/O.
-    const result=await service.bridge(data.machine,'transfers.start',{id:row.id,userId:user.id,sourceMachine:data.from,source:data.sourceTicket,reference:data.reference,name:data.name,timeoutSec:data.timeoutSec,...(lane?{archiveLane:lane}:{})});
+    const result=await targetCall(service,row,'transfers.start',{id:row.id,userId:user.id,sourceMachine:data.from,source:data.sourceTicket,reference:data.reference,name:data.name,timeoutSec:data.timeoutSec,...(lane?{archiveLane:lane}:{})});
     if(result.id!==row.id||!states.has(result.state))fail('节点传输回执不匹配。',502);
     row.data.result=result;return releaseSource(service,save(service,row,result.state,principal.username,'transfers.dispatched'),principal.username);
   }
@@ -242,6 +253,7 @@ async function dispatch(service,principal,row){
   return save(service,row,'WAITING_CLIENT',principal.username,'transfers.download-ready');
 }
 export function installTransfers(service){
+  service.trainingTransferCall=(principal,args,binding)=>transferCall(service,principal,'transfers.create',args,()=>{}, {[trainingAdmission]:binding});
   service.db.exec(`CREATE TABLE IF NOT EXISTS transfers(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,owner_id TEXT NOT NULL,client_key TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,data TEXT NOT NULL,UNIQUE(owner_id,client_key));CREATE INDEX IF NOT EXISTS transfers_state ON transfers(state,updated_at);`);
   service.transfersReconciling=false;
   service.transferCall=(principal,operation,args)=>transferCall(service,principal,operation,args);
@@ -315,6 +327,7 @@ export async function transferCall(service,principal,operation,args,assertCurren
     const context=Object.create(service);
     context[archiveAdmission]=admission===archiveAdmission||!!admission?.[legacyArchiveAdmission];
     context[legacyArchiveAdmission]=admission?.[legacyArchiveAdmission];
+    context[trainingAdmission]=admission?.[trainingAdmission];
     context.bridge=async(...request)=>{current();try{return await service.bridge(...request);}finally{current();}};
     check();try{return await transferOperation(context,principal,operation,args);}finally{check();}
   });
@@ -386,6 +399,13 @@ async function transferOperation(service,principal,operation,args){
       }
       // Idempotent create never re-enters control RPCs for a canceled row;
       // status/reconcile own any outstanding source cleanup.
+      if(service[trainingAdmission]){
+        if(row.data.trainingPreparation?.job.id!==service[trainingAdmission].jobId)fail('旧传输不能取得新训练准入。',409);
+        assertTrainingPreparation(service,row.data.trainingPreparation);
+        // Even the same create key observes its original target after a lost
+        // ACK; it does not replay source preparation or worker start.
+        return view(await sync(service,row,principal.username));
+      }
       if(done.has(row.state)||row.data.cancelRequested)return view(row);
     }
     else{
@@ -396,7 +416,20 @@ async function transferOperation(service,principal,operation,args){
         fail('新数据集请使用数据仓库上传入口（gpuctl data upload）；旧传输仍可按原编号继续。',409);
       if(service.db.prepare('SELECT COUNT(*) n FROM transfers').get().n>=10000)fail('传输历史已达上限，请联系管理员归档。',429);
       if(service.db.prepare("SELECT COUNT(*) n FROM transfers WHERE owner_id=? AND state NOT IN ('SUCCEEDED','CANCELED','PAUSED','FAILED')").get(user.id).n>=20)fail('请先处理现有传输任务。',429);
-      const id=randomUUID(),now=Date.now();transaction(service,()=>{service.db.prepare('INSERT INTO transfers(id,owner_id,client_key,digest,state,created_at,updated_at,data) VALUES(?,?,?,?,?,?,?,?)').run(id,user.id,args.key,digest(payload),'DISPATCHING',now,now,JSON.stringify({...payload,owner:{id:user.id,username:user.username,name:user.name},...(payload.kind==='copy'?{sourceRelease:{protocol:1,state:'UNCONFIRMED'}}:{}),...(payload.kind==='download'&&service.storageArchivePolicy?.enabled?{downloadProtection:{protocol:1,state:'UNCONFIRMED'}}:{})}));service.audit(principal.username,operation,id,'DISPATCHING');});row=load(service,id);
+      const admission=service[trainingAdmission];
+      const existingIntent=admission&&service.store.jobs.find(job=>job.id===admission.jobId)?.trainingPreparations?.find(value=>
+        value.preparation.kind==='transfer'&&JSON.stringify(value.preparation.logicalReference)===JSON.stringify(admission.logicalReference));
+      const id=existingIntent?.preparation.id||randomUUID(),now=Date.now();let trainingPreparation;
+      if(service[trainingAdmission]){
+        if(payload.kind!=='copy'||payload.managedArchive!==undefined)fail('新训练准入只允许固定缓存准备。',409);
+        const binding=service[trainingAdmission];
+        const job=service.store.jobs.find(row=>row.id===binding.jobId);
+        if(job?.userId!==user.id||job.machine!==payload.machine)fail('训练准备账号或目标不符。',403);
+        trainingPreparation=await bindTrainingPreparation(service,binding.jobId,{id,kind:'transfer',sourceMachine:payload.from,
+          logicalReference:binding.logicalReference,reference:{dataset:payload.reference.dataset,version:payload.reference.version}});
+        if(trainingPreparation.preparation.id!==id)fail('准备意图已存在；不会生成第二传输。',409);
+      }
+      transaction(service,()=>{service.db.prepare('INSERT INTO transfers(id,owner_id,client_key,digest,state,created_at,updated_at,data) VALUES(?,?,?,?,?,?,?,?)').run(id,user.id,args.key,digest(payload),'DISPATCHING',now,now,JSON.stringify({...payload,owner:{id:user.id,username:user.username,name:user.name},...(trainingPreparation?{trainingPreparation}:{}),...(payload.kind==='copy'?{sourceRelease:{protocol:1,state:'UNCONFIRMED'}}:{}),...(payload.kind==='download'&&service.storageArchivePolicy?.enabled?{downloadProtection:{protocol:1,state:'UNCONFIRMED'}}:{})}));service.audit(principal.username,operation,id,'DISPATCHING');});row=load(service,id);
     }
     try{return view(await dispatch(service,principal,row));}catch(error){
       if(error.transferFence)throw error;
@@ -416,7 +449,7 @@ async function transferOperation(service,principal,operation,args){
     row.data.cancelRequested=true;
     let current=save(service,row,'CANCELING',principal.username,operation);
     if(row.data.kind==='copy'){
-      try{const result=await service.bridge(row.data.machine,'transfers.cancel',{id:row.id,userId:user.id});if(result.id!==row.id||!states.has(result.state))fail('取消回执不匹配。',502);current.data.result=result;return view(await releaseSource(service,save(service,current,result.state,principal.username,'transfers.cancel-result'),principal.username));}catch(error){if(error.transferFence)throw error;current.data.error='取消回执未确认；核对原传输，不会重启。';return view(save(service,current,'UNKNOWN',principal.username,'transfers.cancel-unknown'));}
+      try{const result=await targetCall(service,row,'transfers.cancel',{id:row.id,userId:user.id});if(result.id!==row.id||!states.has(result.state))fail('取消回执不匹配。',502);current.data.result=result;return view(await releaseSource(service,save(service,current,result.state,principal.username,'transfers.cancel-result'),principal.username));}catch(error){if(error.transferFence)throw error;current.data.error='取消回执未确认；核对原传输，不会重启。';return view(save(service,current,'UNKNOWN',principal.username,'transfers.cancel-unknown'));}
     }
     if(row.data.kind==='upload'){
       try{const result=await service.bridge(row.data.machine,'datasets.upload.pause',{uploadId:row.data.uploadId||row.client_key,userId:user.id,hostAdmin:false});if(result.state==='READY')return view(save(service,current,'SUCCEEDED',principal.username,'transfers.canceled-ready'));}catch(error){if(error.transferFence)throw error;current.data.error='上传后台校验是否已停尚未确认；重试取消。';return view(save(service,current,'UNKNOWN',principal.username,'transfers.cancel-unknown'));}
@@ -444,7 +477,7 @@ async function transferOperation(service,principal,operation,args){
       else archiveLane(service,row.data);
     }
     current.data.sourceTicket=source;const saved=save(service,current,'DISPATCHING',principal.username,'transfers.resume-intent');
-    try{const result=await service.bridge(row.data.machine,'transfers.resume',{id:row.id,userId:user.id,source});if(result.id!==row.id||!states.has(result.state))fail('恢复回执不匹配。',502);saved.data.result=result;return view(await releaseSource(service,save(service,saved,result.state,principal.username,operation),principal.username));}
+    try{const result=await targetCall(service,row,'transfers.resume',{id:row.id,userId:user.id,source});if(result.id!==row.id||!states.has(result.state))fail('恢复回执不匹配。',502);saved.data.result=result;return view(await releaseSource(service,save(service,saved,result.state,principal.username,operation),principal.username));}
     catch(error){if(error.transferFence)throw error;saved.data.error='恢复回执未确认；核对同一任务，不会重复启动。';return view(save(service,saved,'UNKNOWN',principal.username,'transfers.resume-unknown'));}
   }
   if(operation==='transfers.io'){

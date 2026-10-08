@@ -539,14 +539,14 @@ class TransferJobs:
             'error': result.get('error'), 'retries': result.get('retries',0),
             **{k: v for k, v in result.items() if k in ('dataset', 'version', 'uploadId')}}
 
-    def launch(self, spec):
+    def launch(self, spec, *, training=False):
         self.n.atomic_json(self.path(spec['id']), spec)  # Attempt marker precedes launch.
         try:
             self.n.run(['/usr/bin/systemd-run', '--user', '--collect', '--unit='+self.unit(spec['id'], spec['attempt']),
                 '--property=Type=exec', '--property=KillMode=control-group', '--property=UMask=0077',
                 '--property=CPUQuota=200%', '--property=MemoryMax=2G', '--property=TasksMax=128',
                 '--property=RuntimeMaxSec='+str(spec['timeoutSec']+10), '--property=TimeoutStopSec=5',
-                '/usr/bin/python3', str(self.n.HERE/'node-executor.py'), '--transfer-worker', spec['id'], str(spec['attempt'])], timeout=8)
+                '/usr/bin/python3', str(self.n.HERE/'node-executor.py'), '--training-transfer-worker' if training else '--transfer-worker', spec['id'], str(spec['attempt'])], timeout=8)
         except (OSError, ValueError, subprocess.SubprocessError):
             pass  # Ambiguous launch is inspected, never automatically launched twice.
 
@@ -582,7 +582,7 @@ class TransferJobs:
         if not existing:retained.append({k:spec[k] for k in ('id','userId','digest')})
         self.n.atomic_json(self.path(global_id,'.slots.json'),{'slots':retained})
 
-    def start(self, args):
+    def start(self, args, *, training=False):
         if set(args)-{'id', 'userId', 'username', 'sourceMachine', 'source', 'reference', 'name', 'timeoutSec', 'archiveLane'}:
             raise ValueError('Invalid LAN transfer fields')
         self.actor(args)
@@ -621,7 +621,7 @@ class TransferJobs:
                 with self.lock('00000000-0000-0000-0000-000000000000', '.admission.lock'):
                     spec = {**payload, 'id': key, 'digest': digest(payload), 'attempt': 1, 'createdAt': time.time()}
                     self.admit(spec)
-                    self.launch(spec)
+                    self.launch(spec, training=True) if training else self.launch(spec)
             return self.status({'id': key, 'userId': args['userId']})
 
     def cancel(self, args):
@@ -649,7 +649,7 @@ class TransferJobs:
                 pass
             return self.status(args)
 
-    def resume(self, args):
+    def resume(self, args, *, training=False):
         with self.lock(args['id']):
             spec = self.owned(args)
             if 'archiveLane' in spec:
@@ -672,7 +672,7 @@ class TransferJobs:
             with self.lock('00000000-0000-0000-0000-000000000000', '.admission.lock'):
                 self.admit(spec)
                 spec['attempt'] += 1
-                self.launch(spec)
+                self.launch(spec, training=True) if training else self.launch(spec)
             return self.status(args)
 
     def archive_lane(self, value, source_machine):
@@ -736,7 +736,7 @@ class TransferJobs:
             return self.n.dataset_uploads().begin(spec['userId'], fields)
         return self.n.dataset_uploads().process('datasets.upload.'+action, {'userId': spec['userId'], **fields})
 
-    def worker(self, key, attempt):
+    def worker(self, key, attempt, *, require_training=False):
         with self.lock(key, '.worker.lock'):
             spec = self.load(key)
             if (spec['attempt'] != attempt or self.path(key, '.started-'+str(attempt)).exists()
@@ -773,6 +773,13 @@ class TransferJobs:
                 if 'archiveLane' in spec:
                     self.archive_lane(spec['archiveLane'], spec['sourceMachine'])
                 check()
+                training = None
+                if require_training or os.path.lexists(self.path(key, '.training.json')):
+                    utility = __import__('importlib.util', fromlist=['util'])
+                    definition = utility.spec_from_file_location('gpuq_training_preparation', self.n.HERE/'training-preparation.py')
+                    helper = utility.module_from_spec(definition);definition.loader.exec_module(helper)
+                    training = helper.transfer_binding(self.n, key)
+                    if training is None:raise ValueError('Missing training receipt; no legacy worker fallback')
                 info = read('info')
                 if any(info[k] != spec['source'][k] for k in ('manifestBytes', 'manifestSha256', 'totalBytes', 'entries')):
                     raise ValueError('Source snapshot identity changed')
@@ -789,8 +796,8 @@ class TransferJobs:
                 if (sum(f['size'] for f in manifest['files']) != info['totalBytes']
                         or len(manifest['files'])+len(manifest['directories']) != info['entries']):
                     raise ValueError('Source manifest totals differ')
-                # Only the detached trusted LAN worker may trigger bounded GC.
-                # Existing sessions retain their whole durable reservation; do
+                # Admission never reclaims caches. Existing sessions retain
+                # their whole durable reservation; do
                 # not count the same admitted transfer twice on resume.
                 uploads=self.n.dataset_uploads()
                 try:prior=uploads.load(spec['userId'],key)
@@ -800,6 +807,16 @@ class TransferJobs:
                 else:needed=0
                 target='u-'+hashlib.sha256(spec['userId'].encode()).hexdigest()[:16]+'-'+spec['name']
                 version=self.n.dataset_cache()[0]._version(manifest)
+                if training is not None:
+                    matches = [item for item in training['planRequest']['datasetFootprints']
+                               if item['version']==spec['reference']['version'] and item['dataset'] in
+                               (training['preparation']['logicalReference']['dataset'], spec['reference']['dataset'])]
+                    if len(matches)!=1:raise ValueError('Ambiguous training source footprint')
+                    footprint=matches[0]
+                    if (footprint['bytes']!=info['totalBytes'] or footprint['manifestBytes']!=info['manifestBytes']
+                            or footprint['files']!=len(manifest['files']) or footprint['directories']!=len(manifest['directories'])):
+                        raise ValueError('Training fixed source footprint changed')
+                    helper.admission(self.n, training, {'dataset':target,'version':version})
                 if prior is None or prior['state']!='READY':
                     self.n.dataset_cache_admission(needed,_exclude=((target,version),))
                 state = self.upload(spec, 'begin', name=spec['name'], key=key, **{k: info[k] for k in ('manifestBytes', 'manifestSha256', 'totalBytes', 'entries')})
@@ -855,7 +872,7 @@ class TransferJobs:
                 self.n.atomic_json(self.path(key, '.result.json'), result)
             return 0 if result['state']=='SUCCEEDED' else 1
 
-    def process(self, operation, args):
+    def process(self, operation, args, *, training=False):
         action = operation.removeprefix('transfers.')
         if not isinstance(args, dict):raise ValueError('Invalid transfer fields')
         if action == 'capabilities':return self.capabilities(args)
@@ -869,9 +886,10 @@ class TransferJobs:
             self.actor(args);ticket=self.load(args['id'],'.ticket.json')
             if ticket['actor']['userId'] != args['userId']:raise ValueError('Source ticket belongs to another user')
             return self.read({k:v for k,v in args.items() if k not in ('userId','token')},args.get('token'))
-        if action == 'start':return self.start(args)
+        if action == 'start':return self.start(args, training=True) if training else self.start(args)
         if action in ('status','cancel','resume'):
             allowed={'id','userId'}|({'source'} if action=='resume' else set())
             if set(args)-allowed or not {'id','userId'}<=set(args):raise ValueError('Invalid transfer control fields')
+            if action=='resume' and training:return self.resume(args, training=True)
             return getattr(self, action)(args)
         raise ValueError('Unknown transfer operation')

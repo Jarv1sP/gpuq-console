@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Forced command. Fixed GPUQ wrapper; user commands only run inside the sandbox."""
 import base64, fcntl, hashlib, importlib.util, json, math, os, re, select, sqlite3, stat, subprocess, sys, socket, tempfile, time, uuid
+sys.dont_write_bytecode=True  # Immutable cohorts must retain their exact file manifest.
 from pathlib import Path
 from contextlib import closing
 from types import SimpleNamespace
@@ -1730,6 +1731,10 @@ def dataset_cache_action_operation(operation,args):
 
 def process(operation,args):
     platform_root_check()
+    if operation=='storage.training.prepare':
+        spec=importlib.util.spec_from_file_location('gpuq_training_preparation',HERE/'training-preparation.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.dispatch(sys.modules[__name__] if __name__ in sys.modules else SimpleNamespace(**globals()),args)
     if operation=='datasets.training.status':return dataset_training_sources().status(args)
     if operation=='storage.training.plan':
         spec=importlib.util.spec_from_file_location('gpuq_training_storage',HERE/'training-storage.py')
@@ -2049,6 +2054,7 @@ if __name__=='__main__':
     if len(sys.argv)==2 and sys.argv[1]=='--storage-collect':
         print(json.dumps(storage_collect()));sys.exit(0)
     if len(sys.argv)==4 and sys.argv[1]=='--transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3])))
+    if len(sys.argv)==4 and sys.argv[1]=='--training-transfer-worker':sys.exit(transfers().worker(sys.argv[2],int(sys.argv[3]),require_training=True))
     if len(sys.argv)==4 and sys.argv[1]=='--project-copy-worker':sys.exit(project_copies().worker(sys.argv[2],int(sys.argv[3])))
     if len(sys.argv)==2 and sys.argv[1]=='--transfer-peer-daemon':
         spec=importlib.util.spec_from_file_location('gpuq_transfer_peer',HERE/'transfer-peer.py')
@@ -2059,6 +2065,10 @@ if __name__=='__main__':
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         module.serve(dataset_ingress_view(),dataset_uploads());sys.exit(0)
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-worker':sys.exit(dataset_worker(sys.argv[2]))
+    if len(sys.argv)==3 and sys.argv[1]=='--training-dataset-worker':
+        spec=importlib.util.spec_from_file_location('gpuq_training_preparation',HERE/'training-preparation.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        sys.exit(module.dataset_worker(sys.modules[__name__],sys.argv[2]))
     if len(sys.argv)==3 and sys.argv[1]=='--dataset-cache-worker':sys.exit(dataset_cache_actions().release_worker(sys.argv[2]))
     if len(sys.argv)==5 and sys.argv[1]=='--dataset-upload-worker':sys.exit(dataset_uploads().worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=='--data-workspace-worker':sys.exit(data_workspaces().worker(*sys.argv[2:]))

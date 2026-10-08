@@ -112,7 +112,7 @@ export function validateTrainingStoragePlan(value,machine,args,{now=Date.now()}=
   return structuredClone(value);
 }
 
-export async function trainingStoragePlan(service,user,machine,request,{projectProbe,from,catalog}={}){
+export async function trainingStoragePlan(service,user,machine,request,{projectProbe,from,catalog,captureRequest=false}={}){
   if(!known(machine)||user?.enabled!==true||!user.limits?.[machine])fail('这台机器未授权。','TRAINING_STORAGE_FORBIDDEN',403);
   const policy=JSON.stringify(user),check=()=>{
     if(service.closing||JSON.stringify(service.store.get(user.id))!==policy)fail('账号授权已改变；未启动准备。','TRAINING_STORAGE_FORBIDDEN',403);
@@ -179,5 +179,6 @@ export async function trainingStoragePlan(service,user,machine,request,{projectP
   }
   const args={userId:user.id,hostAdmin:false,...project,datasets,datasetReadMode:mode,projectFootprint,datasetFootprints};
   const value=await read(()=>service.bridge(machine,'storage.training.plan',args),'目标项目／缓存卷容量或新准入协议尚未确认；未启动准备。');
-  check();return validateTrainingStoragePlan(value,machine,args);
+  check();const plan=validateTrainingStoragePlan(value,machine,args);
+  return captureRequest?{plan,request:structuredClone(args)}:plan;
 }

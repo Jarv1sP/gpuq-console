@@ -303,7 +303,7 @@ def _workspace_dataset_commitments(executor, s, workspace):
         return cache._reserved(), cache._reserved_inodes(), cache.reserve_bytes
 
 
-def plan(executor, args):
+def plan(executor, args, *, _existing_upload=None):
     validate(args)
     machine = executor.CONFIG.get('machine')
     need(isinstance(machine, str) and ID.fullmatch(machine), 'Unknown training machine')
@@ -383,6 +383,13 @@ def plan(executor, args):
                     if paths['.staging'].exists():
                         stage = cache._transfer(paths['.staging'])
                         need(record is not None and stage['totalBytes'] == expected['bytes'], 'Staging source changed')
+                        continue
+                    # Private detached-worker adapter only: an upload may have
+                    # its full atomic reservation before a manifest registry or
+                    # staging tree exists. The callback verifies that ORIGINAL
+                    # session + reservation under this same cache lock. Public
+                    # RPC fields cannot provide a credit or select this hook.
+                    if _existing_upload is not None and _existing_upload(physical, expected):
                         continue
                     if state and state.get('canPrepare') is True:
                         footprint = total(expected['bytes'], total(expected['files'], expected['directories'])*4096, 8192)
