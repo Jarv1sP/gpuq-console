@@ -80,3 +80,10 @@ test('member principal and changed admin identity cannot render or access privil
   store.principal={userId:'admin-a',role:'admin'};module=mountAdminStorageMembers(host,{store,catalog(){reads++;return catalog();}});assert.match(host.innerHTML,/alice/);assert.equal(reads,1);
   store.principal={userId:'admin-b',role:'admin'};store.authGeneration++;module.sync();assert.equal(host.innerHTML,'');assert.equal(reads,1);module.destroy();module.destroy();
 });
+test('users protocol fills actual container bytes by exact account identity; old or partial nodes stay unknown',()=>{
+ const users=[{id:'alice-id',username:'alice',name:'Alice'}],usage={protocol:1,users:[{userId:'alice-id',label:'Alice',machines:[{machine:'node-a',available:true,collectedAt:'2026-10-08T06:00:00Z',complete:true,projectBytes:42,projects:[{project:'train',bytes:40}]}]}]};
+ let model=storageMemberRows(catalog(),usage,users);assert.equal(model.rows.length,1);assert.equal(model.rows[0].containerBytes,42);assert.equal(model.rows[0].machines[0].containerBytes,42);
+ assert.match(memberStorageHTML(model,new Set(['alice'])),/容器 42 B · 缓存 10 B/);
+ usage.users[0].machines.push({machine:'node-b',available:false,complete:false,projectBytes:null,projects:[]});model=storageMemberRows(catalog(),usage,users);assert.equal(model.rows[0].containerBytes,null);assert.equal(model.rows[0].machines[0].containerBytes,42);assert.equal(model.rows[0].machines[1].containerBytes,null);
+ model=storageMemberRows(null,usage,users);assert.equal(model.available,true);assert.equal(model.rows[0].cacheBytes,null);assert.equal(model.rows[0].machines[0].containerBytes,42,'project readings render independently of catalog');
+});

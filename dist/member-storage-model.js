@@ -1,11 +1,20 @@
 import {readableDatasetCatalog} from './dataset-catalog-model.js';
 const bytes=value=>Number.isSafeInteger(value)&&value>=0?value:null;
 const sum=items=>items.some(value=>bytes(value)===null)?null:bytes(items.reduce((n,value)=>n+value,0));
-// storage.usage.mine is not wired until its response shape is finalized.
-// Shared OCI layers and logical catalog sizes are not project usage.
+// BACKEND_API_HANDOFF protocol 1: allocated bytes, never inferred OCI layers.
 export const adaptProjectUsage=raw=>bytes(raw?.bytes);
+export function adaptStorageUsage(raw){
+ const usage=new Map(),totals=new Map();
+ if(raw?.protocol!==1||!Array.isArray(raw.machines))return {usage,totals};
+ for(const row of raw.machines){
+  if(typeof row?.machine!=='string'||row.available!==true||!Array.isArray(row.projects))continue;
+  totals.set(row.machine,row.complete===true&&typeof row.collectedAt==='string'?bytes(row.projectBytes):null);
+  for(const project of row.projects)if(typeof project?.project==='string'&&/^[a-z0-9][a-z0-9_-]{0,47}$/.test(project.project))usage.set(JSON.stringify([row.machine,project.project]),{bytes:adaptProjectUsage(project)});
+ }
+ return {usage,totals};
+}
 
-export function memberStorageGroups({principal,machines=[],catalog,projects=new Map(),usage=new Map()}){
+export function memberStorageGroups({principal,machines=[],catalog,projects=new Map(),usage=new Map(),usageTotals=new Map()}){
  if(!principal?.userId)return [];
  const groups=new Map(machines.map(row=>[row.id,{machine:row.id,items:[],projectsConfirmed:projects.get(row.id)?.confirmed===true}]));
  for(const [machine,listing] of projects){
@@ -24,8 +33,8 @@ export function memberStorageGroups({principal,machines=[],catalog,projects=new 
   if(!group||row.state!=='READY'||row.observed!==true||seen.has(key))continue;
   seen.add(key);group.items.push({kind:'cache',key,machine:row.machine,dataset:item.dataset,version:version.version,name:item.displayName||item.dataset,bytes:bytes(version.bytes)});
  }
- return [...groups.values()].filter(group=>group.items.length).map(group=>({...group,
-  projectBytes:sum(group.items.filter(row=>row.kind==='project').map(row=>row.bytes)),
-  cacheBytes:sum(group.items.filter(row=>row.kind==='cache').map(row=>row.bytes)),
-  totalBytes:group.projectsConfirmed&&catalog&&catalog.partial!==true?sum(group.items.map(row=>row.bytes)):null}));
+ return [...groups.values()].filter(group=>group.items.length).map(group=>{
+  const projectBytes=usageTotals.has(group.machine)?usageTotals.get(group.machine):sum(group.items.filter(row=>row.kind==='project').map(row=>row.bytes)),cacheBytes=sum(group.items.filter(row=>row.kind==='cache').map(row=>row.bytes));
+  return {...group,projectBytes,cacheBytes,totalBytes:group.projectsConfirmed&&catalog&&catalog.partial!==true?sum([projectBytes,cacheBytes]):null};
+ });
 }

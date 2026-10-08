@@ -22,6 +22,10 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
   document.addEventListener('gpuq-open-project',event=>opened.push(event.detail));
   window.store={production:true,principal:{userId:'fixture-me',username:'fixture-me',role},authGeneration:0,data:{machines},onAuthChange:fn=>authListeners.push(fn),call:async(operation,args)=>{
    calls.push({operation,args,actor:store.principal?.userId});
+   if(operation==='storage.usage.mine'){
+    if(Object.keys(args).length)throw Error('Unexpected usage scope');
+    return window.usageReply||{protocol:1,machines:machines.map(row=>({machine:row.id,available:false,collectedAt:null,complete:false,projectBytes:null,projects:[]}))};
+   }
    if(operation==='projects.list'){
     if(window.deferProjects)await new Promise(resolve=>pendingProjects.push(resolve));
     return {projects:args.machine===first?[{project:'vision-train',displayName:'视觉训练',environmentMode:'oci'},{project:'old-shared',environmentMode:'shared'},{project:'other-owner',environmentMode:'oci',userId:'fixture-other'}]:[]};
@@ -46,6 +50,7 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  assert.equal(await page.locator('.storage-mine-total b').first().textContent(),'—');assert.equal(await page.locator('[data-storage-project]').locator('..').locator('..').locator('.storage-mine-size').textContent(),'—');
  assert.equal(await page.locator('.storage-mine-bar').count(),1,'a fully known cache-only node has a real total; unknown project usage has no bar');
  assert.equal(await page.locator('.storage-mine-bar').evaluate(node=>node.getBoundingClientRect().height),6);
+ assert.equal(await page.evaluate(()=>calls.filter(row=>row.operation==='storage.usage.mine').length),1,'one owner-scoped read accompanies personal project loading');
  assert.equal(await page.locator('.storage-mine-action').count(),await page.locator('.storage-mine-row').count(),'unavailable actions retain their fixed slot');
  assert.equal(await page.locator('[data-storage-release]').count(),1,'protocol 0 never exposes a release even with a true flag');
  for(const call of await page.evaluate(()=>calls.filter(row=>row.operation==='projects.list')))assert.deepEqual(Object.keys(call.args),['machine'],'projects.list is owner-scoped, without an identity override');
@@ -63,6 +68,12 @@ try{for(const role of ['member','admin'])for(const width of [1440,390,320]){
  await page.evaluate(()=>document.fonts.ready);await page.locator('#member-storage').scrollIntoViewIfNeeded();
  const geometry=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,slots:[...document.querySelectorAll('.storage-mine-action')].map(node=>node.getBoundingClientRect().width),amounts:[...document.querySelectorAll('.storage-mine-size')].map(node=>({align:getComputedStyle(node).textAlign,nums:getComputedStyle(node).fontVariantNumeric}))}));
  assert(geometry.scroll<=width,JSON.stringify(geometry));assert(geometry.slots.every(value=>value===48));assert(geometry.amounts.every(row=>row.align==='right'&&row.nums.includes('tabular-nums')));
+ await page.evaluate(machines=>{window.usageReply={protocol:1,checkedAt:'2026-10-08T06:00:00Z',machines:machines.map((row,index)=>({machine:row.id,available:true,collectedAt:'2026-10-08T06:00:00Z',complete:true,projectBytes:index===0?2*1024**3:0,projects:index===0?[{project:'vision-train',name:'视觉训练',bytes:2*1024**3}]:[]}))};},machines);
+ await page.locator('[data-storage-view=warehouse]').click();await page.locator('[data-storage-view=mine]').click();
+ await page.waitForFunction(()=>document.querySelector('.storage-mine-total b')?.textContent==='5.00 GiB');
+ assert.equal(await page.locator('[data-storage-project]').locator('..').locator('..').locator('.storage-mine-size').textContent(),'2.00 GiB');
+ assert.equal(await page.locator('.storage-mine-bar').count(),2,'confirmed node sampling removes both project and total placeholders');
+ for(const call of await page.evaluate(()=>calls.filter(row=>row.operation==='storage.usage.mine')))assert.deepEqual(call.args,{},'mine never sends an identity override');
  await page.screenshot({path:join(output,role+'-'+width+'.png'),fullPage:true});
  // Late replies from the previous account and zero authorization are fenced.
  await page.locator('[data-storage-view=warehouse]').click();await page.evaluate(()=>window.deferProjects=true);await page.locator('[data-storage-view=mine]').click();await page.waitForFunction(()=>pendingProjects.length===1);

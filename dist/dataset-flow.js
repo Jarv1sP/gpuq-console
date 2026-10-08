@@ -18,8 +18,7 @@ export function cacheCapacityRatio(cache){
   return Number.isSafeInteger(cache?.readyContentBytes)&&cache.readyContentBytes>=0&&
     Number.isSafeInteger(cache.budgetBytes)&&cache.budgetBytes>0?cache.readyContentBytes/cache.budgetBytes:null;
 }
-export const cacheCapacityAmount=cache=>capacityAmount(cache?.readyContentBytes)+
-  (Number.isSafeInteger(cache?.readyContentBytes)&&cache.readyContentBytes>=0&&cache.usageComplete===false?'+':'');
+export const cacheCapacityAmount=cache=>(Number.isSafeInteger(cache?.readyContentBytes)&&cache.readyContentBytes>=0&&cache.usageComplete===false?'≥ ':'')+capacityAmount(cache?.readyContentBytes);
 export const cacheCapacityTitle=cache=>[cache?.usageComplete===false?'部分统计':'',cache?.volume?.collectedAt?capacityCollectedTitle(cache.volume.collectedAt):capacityCheckedTitle(cache?.volume?.checkedAt)].filter(Boolean).join(' · ');
 export function cacheCapacityRailHTML(cache,large=false){
   const ratio=cacheCapacityRatio(cache),percent=ratio===null?null:Math.round(ratio*100);
